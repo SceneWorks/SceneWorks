@@ -1,0 +1,20 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://sceneworks.local/schemas/recipe.schema.json",
+  "title": "SceneWorks Recipe",
+  "type": "object",
+  "required": ["schemaVersion", "appVersion", "loras", "normalizedSettings", "rawAdapterSettings"],
+  "properties": {
+    "schemaVersion": { "type": "integer", "minimum": 1 },
+    "appVersion": { "type": "string" },
+    "id": { "type": ["string", "null"] },
+    "mode": { "type": ["string", "null"] },
+    "model": { "type": ["string", "null"] },
+    "prompt": { "type": ["string", "null"] },
+    "negativePrompt": { "type": ["string", "null"] },
+    "seed": { "type": ["integer", "null"] },
+    "loras": { "type": "array", "items": { "type": "object" } },
+    "normalizedSettings": { "type": "object" },
+    "rawAdapterSettings": { "type": "object" }
+  }
+}

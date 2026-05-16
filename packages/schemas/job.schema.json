@@ -1,0 +1,20 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://sceneworks.local/schemas/job.schema.json",
+  "title": "SceneWorks Job",
+  "type": "object",
+  "required": ["schemaVersion", "appVersion", "id", "type", "status", "progress", "createdAt", "updatedAt", "payload"],
+  "properties": {
+    "schemaVersion": { "type": "integer", "minimum": 1 },
+    "appVersion": { "type": "string" },
+    "id": { "type": "string", "pattern": "^job_[a-z0-9_]+$" },
+    "projectId": { "type": ["string", "null"] },
+    "type": { "type": "string" },
+    "status": { "enum": ["queued", "preparing", "downloading", "loading_model", "running", "saving", "completed", "failed", "canceled", "interrupted"] },
+    "progress": { "type": "number", "minimum": 0, "maximum": 1 },
+    "createdAt": { "type": "string", "format": "date-time" },
+    "updatedAt": { "type": "string", "format": "date-time" },
+    "error": { "type": ["string", "null"] },
+    "payload": { "type": "object" }
+  }
+}

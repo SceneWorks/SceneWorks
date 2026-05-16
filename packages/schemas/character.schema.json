@@ -1,0 +1,22 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://sceneworks.local/schemas/character.schema.json",
+  "title": "SceneWorks Character",
+  "type": "object",
+  "required": ["schemaVersion", "appVersion", "id", "projectId", "name", "type", "createdAt", "updatedAt"],
+  "properties": {
+    "schemaVersion": { "type": "integer", "minimum": 1 },
+    "appVersion": { "type": "string" },
+    "id": { "type": "string", "pattern": "^character_[a-z0-9_]+$" },
+    "projectId": { "type": "string", "pattern": "^project_[a-z0-9_]+$" },
+    "name": { "type": "string", "minLength": 1 },
+    "type": { "enum": ["person", "creature", "object"] },
+    "createdAt": { "type": "string", "format": "date-time" },
+    "updatedAt": { "type": "string", "format": "date-time" },
+    "referenceAssetIds": { "type": "array", "items": { "type": "string" } },
+    "approvedReferenceAssetIds": { "type": "array", "items": { "type": "string" } },
+    "lookIds": { "type": "array", "items": { "type": "string" } },
+    "loraIds": { "type": "array", "items": { "type": "string" } },
+    "notes": { "type": "string" }
+  }
+}

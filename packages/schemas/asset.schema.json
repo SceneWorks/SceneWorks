@@ -1,0 +1,59 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://sceneworks.local/schemas/asset.schema.json",
+  "title": "SceneWorks Asset Sidecar",
+  "type": "object",
+  "required": ["schemaVersion", "appVersion", "id", "projectId", "type", "displayName", "createdAt", "updatedAt", "file", "status", "lineage"],
+  "properties": {
+    "schemaVersion": { "type": "integer", "minimum": 1 },
+    "appVersion": { "type": "string" },
+    "id": { "type": "string", "pattern": "^asset_[a-z0-9_]+$" },
+    "projectId": { "type": "string", "pattern": "^project_[a-z0-9_]+$" },
+    "generationSetId": { "type": ["string", "null"], "pattern": "^genset_[a-z0-9_]+$" },
+    "type": { "enum": ["image", "video", "upload", "frame", "render", "character_reference"] },
+    "displayName": { "type": "string", "minLength": 1 },
+    "createdAt": { "type": "string", "format": "date-time" },
+    "updatedAt": { "type": "string", "format": "date-time" },
+    "file": { "$ref": "#/$defs/file" },
+    "status": { "$ref": "#/$defs/status" },
+    "notes": { "type": "string" },
+    "recipe": { "anyOf": [{ "$ref": "recipe.schema.json" }, { "type": "null" }] },
+    "lineage": { "$ref": "#/$defs/lineage" }
+  },
+  "$defs": {
+    "file": {
+      "type": "object",
+      "required": ["path", "mimeType", "sizeBytes"],
+      "properties": {
+        "path": { "type": "string" },
+        "mimeType": { "type": "string" },
+        "sizeBytes": { "type": "integer", "minimum": 0 },
+        "width": { "type": ["integer", "null"], "minimum": 1 },
+        "height": { "type": ["integer", "null"], "minimum": 1 },
+        "duration": { "type": ["number", "null"], "minimum": 0 },
+        "fps": { "type": ["number", "null"], "minimum": 0 }
+      }
+    },
+    "status": {
+      "type": "object",
+      "required": ["favorite", "rating", "rejected", "trashed"],
+      "properties": {
+        "favorite": { "type": "boolean" },
+        "rating": { "type": "integer", "minimum": 0, "maximum": 5 },
+        "rejected": { "type": "boolean" },
+        "trashed": { "type": "boolean" }
+      }
+    },
+    "lineage": {
+      "type": "object",
+      "required": ["parents"],
+      "properties": {
+        "parents": { "type": "array", "items": { "type": "string" } },
+        "sourceAssetId": { "type": ["string", "null"] },
+        "sourceTimestamp": { "type": ["number", "null"] },
+        "sourceTimelineId": { "type": ["string", "null"] },
+        "jobId": { "type": ["string", "null"] }
+      }
+    }
+  }
+}

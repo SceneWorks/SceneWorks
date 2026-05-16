@@ -9,10 +9,20 @@ const requiredPaths = [
   "apps/web/src/main.jsx",
   "apps/web/src/styles.css",
   "apps/api/sceneworks_api/main.py",
+  "apps/api/sceneworks_api/models.py",
+  "apps/api/sceneworks_api/persistence.py",
   "apps/api/sceneworks_api/projects.py",
+  "apps/api/sceneworks_api/assets.py",
   "apps/api/sceneworks_api/security.py",
   "apps/worker/scene_worker/runtime.py",
   "packages/schemas/project.schema.json",
+  "packages/schemas/asset.schema.json",
+  "packages/schemas/recipe.schema.json",
+  "packages/schemas/generation-set.schema.json",
+  "packages/schemas/job.schema.json",
+  "packages/schemas/character.schema.json",
+  "packages/schemas/timeline.schema.json",
+  "packages/schemas/timeline-item.schema.json",
   "config/manifests/builtin.models.jsonc",
   "config/manifests/builtin.loras.jsonc",
   "data/projects/.gitkeep",
@@ -44,6 +54,9 @@ for (const requiredPath of requiredPaths) {
 await assertContains("apps/web/src/main.jsx", "/api/v1/health");
 await assertContains("apps/api/sceneworks_api/main.py", "/api/v1/health");
 await assertContains("apps/api/sceneworks_api/main.py", "/api/v1/jobs/events");
+await assertContains("apps/api/sceneworks_api/assets.py", "/assets/import");
+await assertContains("apps/api/sceneworks_api/persistence.py", "project.db");
+await assertContains("packages/schemas/asset.schema.json", "generationSetId");
 await assertContains("docker-compose.yml", "NVIDIA_VISIBLE_DEVICES");
 await assertContains("README.md", "SCENEWORKS_ACCESS_TOKEN");
 

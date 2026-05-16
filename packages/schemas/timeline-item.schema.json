@@ -1,0 +1,21 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://sceneworks.local/schemas/timeline-item.schema.json",
+  "title": "SceneWorks Timeline Item",
+  "type": "object",
+  "required": ["schemaVersion", "id", "timelineId", "assetId", "track", "sourceIn", "timelineStart", "timelineEnd", "speed", "versionAssetIds"],
+  "properties": {
+    "schemaVersion": { "type": "integer", "minimum": 1 },
+    "id": { "type": "string", "pattern": "^timeline_item_[a-z0-9_]+$" },
+    "timelineId": { "type": "string", "pattern": "^timeline_[a-z0-9_]+$" },
+    "assetId": { "type": "string", "pattern": "^asset_[a-z0-9_]+$" },
+    "track": { "type": "string" },
+    "sourceIn": { "type": "number", "minimum": 0 },
+    "sourceOut": { "type": ["number", "null"], "minimum": 0 },
+    "timelineStart": { "type": "number", "minimum": 0 },
+    "timelineEnd": { "type": "number", "minimum": 0 },
+    "speed": { "type": "number", "exclusiveMinimum": 0 },
+    "activeVersionAssetId": { "type": ["string", "null"] },
+    "versionAssetIds": { "type": "array", "items": { "type": "string" } }
+  }
+}

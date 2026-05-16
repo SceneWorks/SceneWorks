@@ -8,7 +8,24 @@
     "schemaVersion": { "type": "integer", "minimum": 1 },
     "models": {
       "type": "array",
-      "items": { "type": "object" }
+      "items": {
+        "type": "object",
+        "required": ["id", "name", "family", "type", "adapter"],
+        "properties": {
+          "id": { "type": "string" },
+          "name": { "type": "string" },
+          "family": { "type": "string" },
+          "type": { "enum": ["image", "video", "utility"] },
+          "adapter": { "type": "string" },
+          "capabilities": { "type": "array", "items": { "type": "string" } },
+          "downloads": { "type": "array", "items": { "type": "object" } },
+          "paths": { "type": "object" },
+          "defaults": { "type": "object" },
+          "limits": { "type": "object" },
+          "loraCompatibility": { "type": "object" },
+          "ui": { "type": "object" }
+        }
+      }
     }
   }
 }

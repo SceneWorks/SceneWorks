@@ -2,6 +2,7 @@ from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 
+from .assets import router as assets_router
 from .projects import ensure_data_dirs, router as projects_router
 from .security import access_control_middleware
 from .settings import Settings, get_settings
@@ -67,6 +68,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         return StreamingResponse(stream(), media_type="text/event-stream")
 
     app.include_router(projects_router, prefix="/api/v1")
+    app.include_router(assets_router, prefix="/api/v1")
     return app
 
 

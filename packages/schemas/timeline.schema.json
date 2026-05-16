@@ -1,0 +1,19 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://sceneworks.local/schemas/timeline.schema.json",
+  "title": "SceneWorks Timeline",
+  "type": "object",
+  "required": ["schemaVersion", "appVersion", "id", "projectId", "name", "createdAt", "updatedAt", "aspectRatio", "fps", "items"],
+  "properties": {
+    "schemaVersion": { "type": "integer", "minimum": 1 },
+    "appVersion": { "type": "string" },
+    "id": { "type": "string", "pattern": "^timeline_[a-z0-9_]+$" },
+    "projectId": { "type": "string", "pattern": "^project_[a-z0-9_]+$" },
+    "name": { "type": "string", "minLength": 1 },
+    "createdAt": { "type": "string", "format": "date-time" },
+    "updatedAt": { "type": "string", "format": "date-time" },
+    "aspectRatio": { "enum": ["16:9", "9:16", "1:1", "source"] },
+    "fps": { "type": "integer", "minimum": 1 },
+    "items": { "type": "array", "items": { "$ref": "timeline-item.schema.json" } }
+  }
+}

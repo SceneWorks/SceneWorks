@@ -8,6 +8,7 @@
     "stack:up": "docker compose up --build",
     "stack:down": "docker compose down",
     "check": "node scripts/check-scaffold.mjs",
+    "check:api": "python scripts/check-api.py",
     "check:health": "node scripts/check-health.mjs"
   },
   "workspaces": [

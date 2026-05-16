@@ -8,7 +8,22 @@
     "schemaVersion": { "type": "integer", "minimum": 1 },
     "loras": {
       "type": "array",
-      "items": { "type": "object" }
+      "items": {
+        "type": "object",
+        "required": ["id", "name", "scope", "category", "compatibleFamilies", "path"],
+        "properties": {
+          "id": { "type": "string" },
+          "name": { "type": "string" },
+          "scope": { "enum": ["global", "project"] },
+          "category": { "enum": ["style", "enhance", "character", "motion", "clothing_object", "experimental"] },
+          "compatibleFamilies": { "type": "array", "items": { "type": "string" } },
+          "path": { "type": "string" },
+          "triggerWords": { "type": "array", "items": { "type": "string" } },
+          "defaultWeight": { "type": "number" },
+          "builtIn": { "type": "boolean" },
+          "ui": { "type": "object" }
+        }
+      }
     }
   }
 }

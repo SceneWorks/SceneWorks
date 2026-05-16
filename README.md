@@ -1,6 +1,6 @@
 # SceneWorks
 
-SceneWorks is a local Docker-based AI image and video generation studio. This repository currently contains the runtime skeleton for the first epic: a Vite/React web shell, FastAPI backend, placeholder Python worker, shared config/data folders, and Docker Compose wiring.
+SceneWorks is a local Docker-based AI image and video generation studio. This repository currently contains the runtime skeleton plus the project, asset, and persistence spine: a Vite/React Library shell, FastAPI backend, placeholder Python worker, shared config/data folders, SQLite project indexes, and portable JSON sidecars.
 
 ## Quick Start
 
@@ -17,7 +17,34 @@ Run the lightweight scaffold checks:
 
 ```powershell
 npm run check
+npm run check:api
 ```
+
+Build the web app:
+
+```powershell
+npm --workspace apps/web run build
+```
+
+## Projects And Assets
+
+Projects are inspectable `.sceneworks` folders under `data/projects` by default. Each project contains `project.json`, `project.db`, and portable asset folders:
+
+```text
+assets/images
+assets/videos
+assets/uploads
+assets/frames
+assets/renders
+characters
+loras
+recipes
+timelines
+trash
+cache
+```
+
+Imported images and videos are copied into the project. Each asset gets a sidecar JSON file next to the media file, while `project.db` indexes assets for fast listing, search, filtering, curation, trash, and future repair/reindex workflows.
 
 ## Local Access Control
 
@@ -49,7 +76,7 @@ apps/
   api/       FastAPI service and backend filesystem owner
   worker/    Placeholder worker package
 packages/
-  schemas/   Shared schema placeholders
+  schemas/   Shared JSON schema contracts
   shared/    Cross-app shared notes/helpers placeholder
 config/
   manifests/ Built-in and user model/LoRA manifests
