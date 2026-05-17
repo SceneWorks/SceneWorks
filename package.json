@@ -8,7 +8,12 @@
     "stack:up": "docker compose up --build",
     "stack:down": "docker compose down",
     "check": "node scripts/check-scaffold.mjs",
-    "check:health": "node scripts/check-health.mjs"
+    "check:health": "node scripts/check-health.mjs",
+    "rust:fmt": "cargo fmt --all -- --check",
+    "rust:lint": "cargo clippy --workspace --all-targets -- -D warnings",
+    "rust:test": "cargo test --workspace",
+    "rust:build": "cargo build --workspace",
+    "rust:check": "npm run rust:fmt && npm run rust:lint && npm run rust:test && npm run rust:build"
   },
   "engines": {
     "node": ">=20"

@@ -1,0 +1,12 @@
+[package]
+name = "sceneworks-rust-api"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish = false
+
+[dependencies]
+sceneworks-core = { path = "../../crates/sceneworks-core" }
+
+[lints]
+workspace = true

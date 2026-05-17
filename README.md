@@ -19,6 +19,27 @@ Run the lightweight scaffold checks:
 npm run check
 ```
 
+## Rust Backend Migration
+
+The Rust backend workspace is scaffolded for the migration spine, but it is not
+wired into the default Docker runtime yet. The existing FastAPI API, Python
+worker, and React app remain the default development stack.
+
+Install a Rust toolchain with `rustfmt` and `clippy`, then use:
+
+```powershell
+npm run rust:fmt
+npm run rust:lint
+npm run rust:test
+npm run rust:build
+```
+
+Or run the full Rust verification sequence:
+
+```powershell
+npm run rust:check
+```
+
 ## Local Access Control
 
 Local-only development is open by default. To require a simple pairing token for LAN or shared-machine use, copy `.env.example` to `.env` and set:
@@ -49,7 +70,10 @@ This is for privacy and control over local media, model downloads, and long-runn
 apps/
   web/       React + Vite app shell
   api/       FastAPI service and backend filesystem owner
+  rust-api/  Rust backend migration scaffold, not in the default runtime
   worker/    Placeholder worker package
+crates/
+  sceneworks-core/ Shared Rust contract/domain helpers
 packages/
   schemas/   Shared schema placeholders
   shared/    Cross-app Python helpers for JSON, project lookup, and project DB indexing

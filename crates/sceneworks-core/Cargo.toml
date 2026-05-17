@@ -1,0 +1,11 @@
+[package]
+name = "sceneworks-core"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish = false
+
+[dependencies]
+
+[lints]
+workspace = true

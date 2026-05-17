@@ -11,7 +11,13 @@ const requiredPaths = [
   "apps/api/sceneworks_api/main.py",
   "apps/api/sceneworks_api/projects.py",
   "apps/api/sceneworks_api/security.py",
+  "apps/rust-api/Cargo.toml",
+  "apps/rust-api/src/main.rs",
   "apps/worker/scene_worker/runtime.py",
+  "crates/sceneworks-core/Cargo.toml",
+  "crates/sceneworks-core/src/lib.rs",
+  "Cargo.toml",
+  "rust-toolchain.toml",
   "packages/schemas/project.schema.json",
   "config/manifests/builtin.models.jsonc",
   "config/manifests/builtin.loras.jsonc",
@@ -44,6 +50,8 @@ for (const requiredPath of requiredPaths) {
 await assertContains("apps/web/src/App.jsx", "/api/v1/health");
 await assertContains("apps/api/sceneworks_api/main.py", "/api/v1/health");
 await assertContains("apps/api/sceneworks_api/jobs.py", "/jobs/events");
+await assertContains("Cargo.toml", "apps/rust-api");
+await assertContains("crates/sceneworks-core/src/lib.rs", "/api/v1/health");
 await assertContains("docker-compose.yml", "NVIDIA_VISIBLE_DEVICES");
 await assertContains("README.md", "SCENEWORKS_ACCESS_TOKEN");
 
