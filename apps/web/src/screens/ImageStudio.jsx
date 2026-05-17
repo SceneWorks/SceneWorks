@@ -4,6 +4,7 @@ import { AssetCard } from "../components/assetPanels.jsx";
 export function ImageStudio({
   activeProject,
   assets,
+  characters,
   createImageJob,
   deleteAsset,
   purgeAsset,
@@ -27,6 +28,8 @@ export function ImageStudio({
   const [negativePrompt, setNegativePrompt] = useState("");
   const [resolution, setResolution] = useState("1024x1024");
   const [sourceAssetId, setSourceAssetId] = useState(selectedAsset?.id ?? "");
+  const [characterId, setCharacterId] = useState("");
+  const [characterLookId, setCharacterLookId] = useState("");
 
   useEffect(() => {
     if (!imageModels.some((item) => item.id === model)) {
@@ -41,7 +44,16 @@ export function ImageStudio({
   }, [mode, selectedAsset?.id]);
 
   useEffect(() => {
-    if (launchRequest?.view !== "Image" || launchRequest.assetId !== selectedAsset?.id) {
+    if (launchRequest?.view !== "Image") {
+      return;
+    }
+    if (launchRequest.characterId) {
+      setMode(launchRequest.mode ?? "character_image");
+      setCharacterId(launchRequest.characterId);
+      setCharacterLookId(launchRequest.lookId ?? "");
+      return;
+    }
+    if (launchRequest.assetId !== selectedAsset?.id) {
       return;
     }
     setMode(launchRequest.mode);
@@ -49,6 +61,13 @@ export function ImageStudio({
       setSourceAssetId(selectedAsset.id);
     }
   }, [launchRequest?.id, selectedAsset?.id]);
+
+  useEffect(() => {
+    if (characterId && !characters.some((character) => character.id === characterId)) {
+      setCharacterId("");
+      setCharacterLookId("");
+    }
+  }, [characters, characterId]);
 
   const availableModels = imageModels.filter((item) => {
     const caps = item.capabilities ?? [];
@@ -71,6 +90,8 @@ export function ImageStudio({
       width,
       height,
       stylePreset,
+      characterId: mode === "character_image" ? characterId || null : null,
+      characterLookId: mode === "character_image" ? characterLookId || null : null,
       sourceAssetId: mode === "edit_image" ? sourceAssetId || null : null,
       loras: [],
       advanced: { resolution },
@@ -114,6 +135,33 @@ export function ImageStudio({
                   ))}
               </select>
             </label>
+          ) : null}
+
+          {mode === "character_image" ? (
+            <div className="control-grid compact-controls">
+              <label>
+                Character
+                <select onChange={(event) => setCharacterId(event.target.value)} value={characterId}>
+                  <option value="">Select character</option>
+                  {characters.map((character) => (
+                    <option key={character.id} value={character.id}>
+                      {character.name}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <label>
+                Look
+                <select onChange={(event) => setCharacterLookId(event.target.value)} value={characterLookId}>
+                  <option value="">Default look</option>
+                  {(characters.find((character) => character.id === characterId)?.looks ?? []).map((look) => (
+                    <option key={look.id} value={look.id}>
+                      {look.name}
+                    </option>
+                  ))}
+                </select>
+              </label>
+            </div>
           ) : null}
 
           <label className="prompt-field">
@@ -184,7 +232,7 @@ export function ImageStudio({
             </div>
           ) : null}
 
-          <button className="primary-action" disabled={!activeProject || !prompt.trim()} type="submit">
+          <button className="primary-action" disabled={!activeProject || !prompt.trim() || (mode === "character_image" && !characterId)} type="submit">
             Generate
           </button>
         </section>

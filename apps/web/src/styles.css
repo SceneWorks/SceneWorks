@@ -210,6 +210,23 @@ button {
   padding: 8px 12px;
 }
 
+.inline-create {
+  display: grid;
+  grid-template-columns: minmax(180px, 1fr) minmax(120px, 180px) auto;
+  gap: 8px;
+  align-items: end;
+}
+
+.inline-create button,
+.look-composer button,
+.test-result > button {
+  min-height: 38px;
+  border: 1px solid #6ec6b8;
+  background: #183f3a;
+  color: #f3f0e8;
+  padding: 8px 12px;
+}
+
 .project-pill.active,
 .form-row button,
 .job-composer button {
@@ -454,7 +471,14 @@ button:disabled {
 
 .model-card,
 .lora-panel,
-.lora-row {
+.lora-row,
+.character-list,
+.character-editor,
+.character-section,
+.reference-card,
+.look-row,
+.lora-editor,
+.test-result {
   border: 1px solid #3c3a34;
   background: #23221f;
 }
@@ -518,6 +542,140 @@ button:disabled {
   justify-content: space-between;
   gap: 12px;
   padding: 10px 12px;
+}
+
+.character-layout {
+  display: grid;
+  grid-template-columns: minmax(220px, 300px) minmax(0, 1fr);
+  gap: 16px;
+  align-items: start;
+}
+
+.character-list {
+  display: grid;
+  gap: 8px;
+  padding: 10px;
+}
+
+.character-row {
+  display: grid;
+  gap: 4px;
+  border: 1px solid #3c3a34;
+  background: #191815;
+  color: #f3f0e8;
+  padding: 10px;
+  text-align: left;
+}
+
+.character-row.active {
+  border-color: #6ec6b8;
+  background: #183f3a;
+}
+
+.character-row span,
+.character-row small,
+.reference-card span,
+.look-row span,
+.look-row small,
+.lora-editor small,
+.lora-editor-head span {
+  color: #aaa397;
+}
+
+.character-detail,
+.character-editor,
+.character-section,
+.look-list,
+.lora-editor-list,
+.test-character-form {
+  display: grid;
+  gap: 14px;
+}
+
+.character-editor,
+.character-section,
+.reference-card,
+.look-row,
+.lora-editor,
+.test-result {
+  padding: 14px;
+}
+
+.character-reference-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
+  gap: 12px;
+}
+
+.reference-card {
+  display: grid;
+  gap: 10px;
+  align-content: start;
+}
+
+.reference-card.approved {
+  border-color: #6ec6b8;
+}
+
+.reference-media {
+  display: grid;
+  place-items: center;
+  min-height: 136px;
+  border: 0;
+  background: #0f0f0e;
+  padding: 0;
+  color: #aaa397;
+}
+
+.reference-media img,
+.reference-media video {
+  width: 100%;
+  aspect-ratio: 1;
+  object-fit: cover;
+}
+
+.look-composer {
+  display: grid;
+  grid-template-columns: minmax(160px, 1fr) minmax(180px, 1.25fr) auto;
+  gap: 8px;
+}
+
+.reference-checks {
+  grid-column: 1 / -1;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.look-row,
+.lora-editor-head {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.look-row {
+  align-items: center;
+}
+
+.look-row > div:first-child {
+  display: grid;
+  gap: 4px;
+}
+
+.lora-editor {
+  display: grid;
+  gap: 10px;
+}
+
+.test-character-panel {
+  align-content: start;
+}
+
+.test-result {
+  display: grid;
+  gap: 8px;
+  padding: 8px;
 }
 
 .preview-button {
@@ -1212,9 +1370,12 @@ button:disabled {
   .media-grid,
   .library-layout,
   .studio-layout,
+  .character-layout,
   .queue-header,
   .job-composer,
-  .job-composer.compact {
+  .job-composer.compact,
+  .inline-create,
+  .look-composer {
     grid-template-columns: 1fr;
   }
 
@@ -1240,7 +1401,8 @@ button:disabled {
   }
 
   .timeline-panel,
-  .export-strip {
+  .export-strip,
+  .reference-checks {
     grid-column: auto;
   }
 }

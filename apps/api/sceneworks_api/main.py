@@ -1,6 +1,7 @@
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from .assets import router as assets_router
+from .characters import router as characters_router
 from .events import EventHub, EventTicketStore
 from .image_generation import router as image_router
 from .jobs import router as jobs_router
@@ -74,6 +75,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     app.include_router(projects_router, prefix="/api/v1")
     app.include_router(assets_router, prefix="/api/v1")
+    app.include_router(characters_router, prefix="/api/v1")
     app.include_router(models_router, prefix="/api/v1")
     app.include_router(loras_router, prefix="/api/v1")
     app.include_router(timelines_router, prefix="/api/v1")

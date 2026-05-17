@@ -7,9 +7,9 @@ import { LibraryScreen } from "./screens/LibraryScreen.jsx";
 import { ModelManagerScreen } from "./screens/ModelManagerScreen.jsx";
 import { ImageStudio } from "./screens/ImageStudio.jsx";
 import { VideoStudio } from "./screens/VideoStudio.jsx";
+import { CharacterStudio } from "./screens/CharacterStudio.jsx";
 import { EditorScreen } from "./screens/EditorScreen.jsx";
 import { QueueScreen } from "./screens/QueueScreen.jsx";
-import { PlaceholderSurface } from "./screens/PlaceholderSurface.jsx";
 import { sortNewest, sortWorkers } from "./sorters.js";
 import { ensureItemVersionFields } from "./timeline.js";
 
@@ -27,6 +27,7 @@ export function App() {
   const [models, setModels] = useState([]);
   const [loras, setLoras] = useState([]);
   const [assets, setAssets] = useState([]);
+  const [characters, setCharacters] = useState([]);
   const [timelines, setTimelines] = useState([]);
   const [selectedTimelineId, setSelectedTimelineId] = useState(null);
   const [activeTimeline, setActiveTimeline] = useState(null);
@@ -117,12 +118,14 @@ export function App() {
   useEffect(() => {
     if (!activeProject || !authenticated) {
       setAssets([]);
+      setCharacters([]);
       setTimelines([]);
       setSelectedTimelineId(null);
       setActiveTimeline(null);
       return;
     }
     refreshAssets(activeProject.id);
+    refreshCharacters(activeProject.id);
     refreshTimelines(activeProject.id);
   }, [activeProject?.id, authenticated, token]);
 
@@ -252,6 +255,19 @@ export function App() {
       setAssets(items);
       const defaultAsset = items.find((asset) => !asset.status?.trashed && !asset.status?.rejected) ?? items[0] ?? null;
       setSelectedAssetId((current) => current ?? defaultAsset?.id ?? null);
+      setError("");
+    } catch (err) {
+      setError(err.message);
+    }
+  }
+
+  async function refreshCharacters(projectId = activeProject?.id) {
+    if (!projectId) {
+      return;
+    }
+    try {
+      const items = await apiFetch(`/api/v1/projects/${projectId}/characters`, token);
+      setCharacters(items);
       setError("");
     } catch (err) {
       setError(err.message);
@@ -421,6 +437,196 @@ export function App() {
     }
   }
 
+  async function createCharacter(payload) {
+    if (!activeProject) {
+      setError("Create or open a project first.");
+      return null;
+    }
+    try {
+      const created = await apiFetch(`/api/v1/projects/${activeProject.id}/characters`, token, {
+        method: "POST",
+        body: JSON.stringify(payload),
+      });
+      setCharacters((items) => [created, ...items.filter((item) => item.id !== created.id)]);
+      setError("");
+      return created;
+    } catch (err) {
+      setError(err.message);
+      return null;
+    }
+  }
+
+  async function updateCharacter(characterId, changes) {
+    try {
+      const updated = await apiFetch(`/api/v1/projects/${activeProject.id}/characters/${characterId}`, token, {
+        method: "PATCH",
+        body: JSON.stringify(changes),
+      });
+      setCharacters((items) => items.map((item) => (item.id === updated.id ? updated : item)));
+      setError("");
+      return updated;
+    } catch (err) {
+      setError(err.message);
+      return null;
+    }
+  }
+
+  async function archiveCharacter(characterId) {
+    try {
+      await apiFetch(`/api/v1/projects/${activeProject.id}/characters/${characterId}`, token, { method: "DELETE" });
+      setCharacters((items) => items.filter((item) => item.id !== characterId));
+      setError("");
+    } catch (err) {
+      setError(err.message);
+    }
+  }
+
+  async function addCharacterReference(characterId, payload) {
+    try {
+      const updated = await apiFetch(`/api/v1/projects/${activeProject.id}/characters/${characterId}/references`, token, {
+        method: "POST",
+        body: JSON.stringify(payload),
+      });
+      setCharacters((items) => items.map((item) => (item.id === updated.id ? updated : item)));
+      setError("");
+      return updated;
+    } catch (err) {
+      setError(err.message);
+      return null;
+    }
+  }
+
+  async function updateCharacterReference(characterId, assetId, changes) {
+    try {
+      const updated = await apiFetch(`/api/v1/projects/${activeProject.id}/characters/${characterId}/references/${assetId}`, token, {
+        method: "PATCH",
+        body: JSON.stringify(changes),
+      });
+      setCharacters((items) => items.map((item) => (item.id === updated.id ? updated : item)));
+      setError("");
+      return updated;
+    } catch (err) {
+      setError(err.message);
+      return null;
+    }
+  }
+
+  async function removeCharacterReference(characterId, assetId) {
+    try {
+      const updated = await apiFetch(`/api/v1/projects/${activeProject.id}/characters/${characterId}/references/${assetId}`, token, {
+        method: "DELETE",
+      });
+      setCharacters((items) => items.map((item) => (item.id === updated.id ? updated : item)));
+      setError("");
+      return updated;
+    } catch (err) {
+      setError(err.message);
+      return null;
+    }
+  }
+
+  async function createCharacterLook(characterId, payload) {
+    try {
+      const updated = await apiFetch(`/api/v1/projects/${activeProject.id}/characters/${characterId}/looks`, token, {
+        method: "POST",
+        body: JSON.stringify(payload),
+      });
+      setCharacters((items) => items.map((item) => (item.id === updated.id ? updated : item)));
+      setError("");
+      return updated;
+    } catch (err) {
+      setError(err.message);
+      return null;
+    }
+  }
+
+  async function updateCharacterLook(characterId, lookId, changes) {
+    try {
+      const updated = await apiFetch(`/api/v1/projects/${activeProject.id}/characters/${characterId}/looks/${lookId}`, token, {
+        method: "PATCH",
+        body: JSON.stringify(changes),
+      });
+      setCharacters((items) => items.map((item) => (item.id === updated.id ? updated : item)));
+      setError("");
+      return updated;
+    } catch (err) {
+      setError(err.message);
+      return null;
+    }
+  }
+
+  async function deleteCharacterLook(characterId, lookId) {
+    try {
+      const updated = await apiFetch(`/api/v1/projects/${activeProject.id}/characters/${characterId}/looks/${lookId}`, token, {
+        method: "DELETE",
+      });
+      setCharacters((items) => items.map((item) => (item.id === updated.id ? updated : item)));
+      setError("");
+      return updated;
+    } catch (err) {
+      setError(err.message);
+      return null;
+    }
+  }
+
+  async function attachCharacterLora(characterId, payload) {
+    try {
+      const updated = await apiFetch(`/api/v1/projects/${activeProject.id}/characters/${characterId}/loras`, token, {
+        method: "POST",
+        body: JSON.stringify(payload),
+      });
+      setCharacters((items) => items.map((item) => (item.id === updated.id ? updated : item)));
+      setError("");
+      return updated;
+    } catch (err) {
+      setError(err.message);
+      return null;
+    }
+  }
+
+  async function updateCharacterLora(characterId, linkId, changes) {
+    try {
+      const updated = await apiFetch(`/api/v1/projects/${activeProject.id}/characters/${characterId}/loras/${linkId}`, token, {
+        method: "PATCH",
+        body: JSON.stringify(changes),
+      });
+      setCharacters((items) => items.map((item) => (item.id === updated.id ? updated : item)));
+      setError("");
+      return updated;
+    } catch (err) {
+      setError(err.message);
+      return null;
+    }
+  }
+
+  async function detachCharacterLora(characterId, linkId) {
+    try {
+      const updated = await apiFetch(`/api/v1/projects/${activeProject.id}/characters/${characterId}/loras/${linkId}`, token, {
+        method: "DELETE",
+      });
+      setCharacters((items) => items.map((item) => (item.id === updated.id ? updated : item)));
+      setError("");
+      return updated;
+    } catch (err) {
+      setError(err.message);
+      return null;
+    }
+  }
+
+  async function createCharacterTestJob(characterId, payload) {
+    try {
+      await apiFetch(`/api/v1/projects/${activeProject.id}/characters/${characterId}/test-jobs`, token, {
+        method: "POST",
+        body: JSON.stringify({ ...payload, requestedGpu }),
+      });
+      setActiveView("Queue");
+      setError("");
+      refreshData();
+    } catch (err) {
+      setError(err.message);
+    }
+  }
+
   async function createVideoJob(payload, options = {}) {
     const { navigateToQueue = true } = options;
     if (!activeProject) {
@@ -468,6 +674,22 @@ export function App() {
     if (mode) {
       setStudioLaunch({ id: crypto.randomUUID(), view: "Video", assetId: asset.id, mode });
     }
+    setActiveView("Video");
+  }
+
+  function sendCharacterToImage(character, lookId = null) {
+    if (!character) {
+      return;
+    }
+    setStudioLaunch({ id: crypto.randomUUID(), view: "Image", characterId: character.id, lookId, mode: "character_image" });
+    setActiveView("Image");
+  }
+
+  function sendCharacterToVideo(character, lookId = null) {
+    if (!character) {
+      return;
+    }
+    setStudioLaunch({ id: crypto.randomUUID(), view: "Video", characterId: character.id, lookId, mode: "text_to_video" });
     setActiveView("Video");
   }
 
@@ -821,6 +1043,7 @@ export function App() {
           <ImageStudio
             activeProject={activeProject}
             assets={assets}
+            characters={characters}
             createImageJob={createImageJob}
             gpuOptions={gpuOptions}
             imageModels={imageModels}
@@ -840,6 +1063,7 @@ export function App() {
           <VideoStudio
             activeProject={activeProject}
             assets={assets}
+            characters={characters}
             createVideoJob={createVideoJob}
             deleteAsset={deleteAsset}
             purgeAsset={purgeAsset}
@@ -899,7 +1123,33 @@ export function App() {
         ) : null}
 
         {activeView === "Characters" ? (
-          <PlaceholderSurface activeView={activeView} assets={assets} createJob={createPlaceholderJob} />
+          <CharacterStudio
+            activeProject={activeProject}
+            addCharacterReference={addCharacterReference}
+            archiveCharacter={archiveCharacter}
+            assets={assets}
+            attachCharacterLora={attachCharacterLora}
+            characters={characters}
+            createCharacter={createCharacter}
+            createCharacterLook={createCharacterLook}
+            createCharacterTestJob={createCharacterTestJob}
+            deleteAsset={deleteAsset}
+            deleteCharacterLook={deleteCharacterLook}
+            detachCharacterLora={detachCharacterLora}
+            imageModels={imageModels}
+            latestAssets={latestImageAssets}
+            loras={loras}
+            onPreview={setPreviewAsset}
+            onSendImage={sendCharacterToImage}
+            onSendVideo={sendCharacterToVideo}
+            purgeAsset={purgeAsset}
+            removeCharacterReference={removeCharacterReference}
+            updateAssetStatus={updateAssetStatus}
+            updateCharacter={updateCharacter}
+            updateCharacterLook={updateCharacterLook}
+            updateCharacterLora={updateCharacterLora}
+            updateCharacterReference={updateCharacterReference}
+          />
         ) : null}
       </section>
 
