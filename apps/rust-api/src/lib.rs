@@ -19,9 +19,9 @@ use axum::{Json, Router};
 use futures_util::future::join_all;
 use parking_lot::Mutex;
 use sceneworks_core::contracts::{
-    ClaimRequest, ClaimResponse, DuplicateJobRequest, JobCreateRequest, JobSnapshot, JobType,
-    JsonObject, ProgressRequest, QueueSummary, WorkerHeartbeatRequest, WorkerRegisterRequest,
-    WorkerSnapshot,
+    ClaimRequest, ClaimResponse, ContractNumber, DuplicateJobRequest, JobCreateRequest,
+    JobSnapshot, JobType, JsonObject, ProgressRequest, QueueSummary, WorkerHeartbeatRequest,
+    WorkerRegisterRequest, WorkerSnapshot,
 };
 use sceneworks_core::jobs_store::{
     CreateJob, DuplicateJob, JobsStore, JobsStoreError, ProgressUpdate, RegisterWorker,
@@ -399,6 +399,22 @@ pub fn create_app(settings: Settings) -> Result<Router, JobsStoreError> {
             "/api/v1/projects/:project_id/timelines/:timeline_id/items/:item_id/frames",
             post(extract_timeline_frame),
         )
+        .route(
+            "/api/v1/projects/:project_id/person-tracks",
+            get(list_person_tracks),
+        )
+        .route(
+            "/api/v1/projects/:project_id/person-tracks/detections",
+            post(create_person_detection_job),
+        )
+        .route(
+            "/api/v1/projects/:project_id/person-tracks/jobs",
+            post(create_person_track_job),
+        )
+        .route(
+            "/api/v1/projects/:project_id/person-tracks/:track_id",
+            get(get_person_track),
+        )
         .route("/api/v1/image/jobs", post(create_image_job))
         .route("/api/v1/video/jobs", post(create_video_job))
         .route("/api/v1/models", get(list_models))
@@ -533,6 +549,28 @@ struct FrameExtractRequest {
     requested_gpu: String,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct PersonDetectionJobRequest {
+    source_asset_id: String,
+    #[serde(default)]
+    source_timestamp: Option<f64>,
+    #[serde(default = "default_requested_gpu")]
+    requested_gpu: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct PersonTrackJobRequest {
+    source_asset_id: String,
+    representative_frame_asset_id: String,
+    detection: JsonObject,
+    #[serde(default = "default_track_name")]
+    track_name: String,
+    #[serde(default = "default_requested_gpu")]
+    requested_gpu: String,
+}
+
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct ImageJobRequest {
@@ -584,7 +622,7 @@ struct VideoJobRequest {
     #[serde(default = "default_video_model")]
     model: String,
     #[serde(default = "default_video_duration")]
-    duration: f64,
+    duration: ContractNumber,
     #[serde(default = "default_video_fps")]
     fps: u32,
     #[serde(default = "default_video_width")]
@@ -1000,6 +1038,95 @@ async fn extract_timeline_frame(
         JobType::FrameExtract,
         Some(project_id),
         None,
+        job_payload,
+        payload.requested_gpu,
+    )
+    .await?;
+    Ok((StatusCode::CREATED, Json(job)))
+}
+
+async fn list_person_tracks(
+    State(state): State<AppState>,
+    Path(project_id): Path<String>,
+) -> Result<Json<Vec<Value>>, ApiError> {
+    Ok(Json(
+        project_call(state, move |store| store.list_person_tracks(&project_id)).await?,
+    ))
+}
+
+async fn get_person_track(
+    State(state): State<AppState>,
+    Path((project_id, track_id)): Path<(String, String)>,
+) -> Result<Json<Value>, ApiError> {
+    Ok(Json(
+        project_call(state, move |store| {
+            store.get_person_track(&project_id, &track_id)
+        })
+        .await?,
+    ))
+}
+
+async fn create_person_detection_job(
+    State(state): State<AppState>,
+    Path(project_id): Path<String>,
+    ApiJson(payload): ApiJson<PersonDetectionJobRequest>,
+) -> Result<(StatusCode, Json<JobSnapshot>), ApiError> {
+    validate_person_detection_job(&payload)?;
+    let project_name = project_call(state.clone(), {
+        let project_id = project_id.clone();
+        move |store| store.project_stem(&project_id)
+    })
+    .await?;
+    let mut job_payload = JsonObject::new();
+    job_payload.insert("projectId".to_owned(), Value::String(project_id.clone()));
+    job_payload.insert(
+        "sourceAssetId".to_owned(),
+        Value::String(payload.source_asset_id),
+    );
+    job_payload.insert(
+        "sourceTimestamp".to_owned(),
+        payload.source_timestamp.map_or(Value::Null, Value::from),
+    );
+    let job = create_generation_job(
+        state,
+        JobType::PersonDetect,
+        Some(project_id),
+        Some(project_name),
+        job_payload,
+        payload.requested_gpu,
+    )
+    .await?;
+    Ok((StatusCode::CREATED, Json(job)))
+}
+
+async fn create_person_track_job(
+    State(state): State<AppState>,
+    Path(project_id): Path<String>,
+    ApiJson(payload): ApiJson<PersonTrackJobRequest>,
+) -> Result<(StatusCode, Json<JobSnapshot>), ApiError> {
+    validate_person_track_job(&payload)?;
+    let project_name = project_call(state.clone(), {
+        let project_id = project_id.clone();
+        move |store| store.project_stem(&project_id)
+    })
+    .await?;
+    let mut job_payload = JsonObject::new();
+    job_payload.insert("projectId".to_owned(), Value::String(project_id.clone()));
+    job_payload.insert(
+        "sourceAssetId".to_owned(),
+        Value::String(payload.source_asset_id),
+    );
+    job_payload.insert(
+        "representativeFrameAssetId".to_owned(),
+        Value::String(payload.representative_frame_asset_id),
+    );
+    job_payload.insert("detection".to_owned(), Value::Object(payload.detection));
+    job_payload.insert("trackName".to_owned(), Value::String(payload.track_name));
+    let job = create_generation_job(
+        state,
+        JobType::PersonTrack,
+        Some(project_id),
+        Some(project_name),
         job_payload,
         payload.requested_gpu,
     )
@@ -2096,6 +2223,43 @@ fn validate_frame_extract(payload: &FrameExtractRequest) -> Result<(), ApiError>
     Ok(())
 }
 
+fn validate_person_detection_job(payload: &PersonDetectionJobRequest) -> Result<(), ApiError> {
+    if payload.source_asset_id.is_empty() {
+        return Err(ApiError::bad_request("Source clip is required"));
+    }
+    if payload
+        .source_timestamp
+        .is_some_and(|timestamp| !timestamp.is_finite() || timestamp < 0.0)
+    {
+        return Err(ApiError::bad_request(
+            "sourceTimestamp must be greater than or equal to 0",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_person_track_job(payload: &PersonTrackJobRequest) -> Result<(), ApiError> {
+    if payload.source_asset_id.is_empty() {
+        return Err(ApiError::bad_request("Source clip is required"));
+    }
+    if payload.representative_frame_asset_id.is_empty() {
+        return Err(ApiError::bad_request(
+            "Representative frame asset is required",
+        ));
+    }
+    if payload.track_name.is_empty() || payload.track_name.chars().count() > 120 {
+        return Err(ApiError::bad_request(
+            "trackName must be between 1 and 120 characters",
+        ));
+    }
+    if !payload.detection.contains_key("id") {
+        return Err(ApiError::bad_request(
+            "Selected detection metadata is required",
+        ));
+    }
+    Ok(())
+}
+
 fn validate_image_job(payload: &ImageJobRequest) -> Result<(), ApiError> {
     if payload.project_id.is_empty() {
         return Err(ApiError::bad_request("projectId is required"));
@@ -2144,7 +2308,11 @@ fn validate_video_job(payload: &VideoJobRequest) -> Result<(), ApiError> {
     {
         return Err(ApiError::bad_request("Unsupported video mode"));
     }
-    if !payload.duration.is_finite() || !(1.0..=30.0).contains(&payload.duration) {
+    let duration = payload
+        .duration
+        .as_f64()
+        .ok_or_else(|| ApiError::bad_request("duration must be a number between 1 and 30"))?;
+    if !duration.is_finite() || !(1.0..=30.0).contains(&duration) {
         return Err(ApiError::bad_request("duration must be between 1 and 30"));
     }
     if !(1..=60).contains(&payload.fps) {
@@ -2290,6 +2458,10 @@ fn default_requested_gpu() -> String {
     "auto".to_owned()
 }
 
+fn default_track_name() -> String {
+    "Selected person".to_owned()
+}
+
 fn default_image_mode() -> String {
     "text_to_image".to_owned()
 }
@@ -2318,8 +2490,8 @@ fn default_video_model() -> String {
     "ltx_2_3".to_owned()
 }
 
-fn default_video_duration() -> f64 {
-    6.0
+fn default_video_duration() -> ContractNumber {
+    ContractNumber::from(6)
 }
 
 fn default_video_fps() -> u32 {
@@ -2936,6 +3108,97 @@ mod tests {
         let (status, queue) = request(app, "GET", "/api/v1/queue", Value::Null).await;
         assert_eq!(status, StatusCode::OK);
         assert_eq!(queue["counts"]["queued"], 4);
+    }
+
+    #[tokio::test]
+    async fn person_tracking_routes_match_python_contracts() {
+        let temp_dir = tempfile::tempdir().expect("temp dir creates");
+        let app = create_app(test_settings(&temp_dir)).expect("app creates");
+        let (_, project) = request(
+            app.clone(),
+            "POST",
+            "/api/v1/projects",
+            json!({ "name": "Tracking Project" }),
+        )
+        .await;
+        let project_id = project["id"].as_str().expect("project id").to_owned();
+        let project_path = std::path::PathBuf::from(project["path"].as_str().unwrap());
+        std::fs::write(
+            project_path.join("person-tracks/track_1.sceneworks.person-track.json"),
+            serde_json::to_string_pretty(&json!({
+                "schemaVersion": 1,
+                "id": "track_1",
+                "projectId": project_id,
+                "name": "Hero",
+                "createdAt": "2026-05-17T00:00:00Z",
+                "sourceAssetId": "asset-video",
+                "representativeFrameAssetId": "asset-frame",
+                "frames": [],
+                "status": {}
+            }))
+            .expect("json"),
+        )
+        .expect("track sidecar writes");
+
+        let (status, tracks) = request(
+            app.clone(),
+            "GET",
+            &format!("/api/v1/projects/{project_id}/person-tracks"),
+            Value::Null,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(tracks[0]["id"], "track_1");
+        assert_eq!(
+            tracks[0]["path"],
+            "person-tracks/track_1.sceneworks.person-track.json"
+        );
+
+        let (status, track) = request(
+            app.clone(),
+            "GET",
+            &format!("/api/v1/projects/{project_id}/person-tracks/track_1"),
+            Value::Null,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(track["name"], "Hero");
+
+        let (status, detection_job) = request(
+            app.clone(),
+            "POST",
+            &format!("/api/v1/projects/{project_id}/person-tracks/detections"),
+            json!({ "sourceAssetId": "asset-video", "sourceTimestamp": 1.25 }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED);
+        assert_eq!(detection_job["type"], "person_detect");
+        assert_eq!(detection_job["payload"]["sourceTimestamp"], 1.25);
+        assert_eq!(detection_job["projectName"], "tracking-project");
+
+        let detection = json!({
+            "id": "person_1",
+            "box": { "x": 0.3, "y": 0.2, "width": 0.2, "height": 0.6 }
+        });
+        let (status, track_job) = request(
+            app.clone(),
+            "POST",
+            &format!("/api/v1/projects/{project_id}/person-tracks/jobs"),
+            json!({
+                "sourceAssetId": "asset-video",
+                "representativeFrameAssetId": "asset-frame",
+                "detection": detection,
+                "trackName": "Hero"
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED);
+        assert_eq!(track_job["type"], "person_track");
+        assert_eq!(track_job["payload"]["trackName"], "Hero");
+
+        let (status, queue) = request(app, "GET", "/api/v1/queue", Value::Null).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(queue["counts"]["queued"], 2);
     }
 
     #[tokio::test]

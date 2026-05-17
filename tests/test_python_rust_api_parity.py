@@ -455,6 +455,31 @@ def sidecar_payload(project_path: Path, asset_id: str) -> dict[str, Any]:
     raise AssertionError(f"Missing sidecar for {asset_id} under {project_path}")
 
 
+def write_person_track_sidecar(runtime: ParityRuntime) -> None:
+    assert runtime.project_id is not None
+    assert runtime.project_path is not None
+    track_dir = runtime.project_path / "person-tracks"
+    track_dir.mkdir(parents=True, exist_ok=True)
+    (track_dir / "track_fixture.sceneworks.person-track.json").write_text(
+        json.dumps(
+            {
+                "schemaVersion": 1,
+                "id": "track_fixture",
+                "projectId": runtime.project_id,
+                "name": "Hero",
+                "createdAt": "2026-05-17T00:00:00Z",
+                "sourceAssetId": "asset-video",
+                "representativeFrameAssetId": "asset-frame",
+                "frames": [],
+                "status": {},
+            },
+            indent=2,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+
 def create_projects(runtimes: list[ParityRuntime], python_runtime: ParityRuntime, rust_runtime: ParityRuntime) -> None:
     responses = [runtime.request("POST", "/api/v1/projects", json_payload={"name": "Parity Project"}) for runtime in runtimes]
     for runtime, response in zip(runtimes, responses):
@@ -656,6 +681,71 @@ def test_timeline_and_worker_job_creation_contracts(parity_runtimes):
         for runtime, created in zip(parity_runtimes, created_timelines)
     ]
     assert_response_parity("timeline export job response", python_runtime, rust_runtime, export_jobs[0], export_jobs[1], expected_status=201, snapshot=True)
+
+
+def test_person_tracking_and_replace_person_contracts(parity_runtimes):
+    python_runtime, rust_runtime = parity_runtimes
+    create_projects(parity_runtimes, python_runtime, rust_runtime)
+    for runtime in parity_runtimes:
+        write_person_track_sidecar(runtime)
+
+    listed_tracks = [
+        runtime.request("GET", f"/api/v1/projects/{runtime.project_id}/person-tracks")
+        for runtime in parity_runtimes
+    ]
+    assert_response_parity("person track list response", python_runtime, rust_runtime, listed_tracks[0], listed_tracks[1], expected_status=200)
+
+    track_details = [
+        runtime.request("GET", f"/api/v1/projects/{runtime.project_id}/person-tracks/track_fixture")
+        for runtime in parity_runtimes
+    ]
+    assert_response_parity("person track detail response", python_runtime, rust_runtime, track_details[0], track_details[1], expected_status=200)
+
+    detection_jobs = [
+        runtime.request(
+            "POST",
+            f"/api/v1/projects/{runtime.project_id}/person-tracks/detections",
+            json_payload={"sourceAssetId": "asset-video", "sourceTimestamp": 1.25},
+        )
+        for runtime in parity_runtimes
+    ]
+    assert_response_parity("person detection job response", python_runtime, rust_runtime, detection_jobs[0], detection_jobs[1], expected_status=201)
+
+    track_jobs = [
+        runtime.request(
+            "POST",
+            f"/api/v1/projects/{runtime.project_id}/person-tracks/jobs",
+            json_payload={
+                "sourceAssetId": "asset-video",
+                "representativeFrameAssetId": "asset-frame",
+                "detection": {
+                    "id": "person_1",
+                    "box": {"x": 0.3, "y": 0.2, "width": 0.2, "height": 0.6},
+                },
+                "trackName": "Hero",
+            },
+        )
+        for runtime in parity_runtimes
+    ]
+    assert_response_parity("person track job response", python_runtime, rust_runtime, track_jobs[0], track_jobs[1], expected_status=201)
+
+    replace_jobs = [
+        runtime.request(
+            "POST",
+            "/api/v1/video/jobs",
+            json_payload={
+                "projectId": runtime.project_id,
+                "projectName": "Parity Project",
+                "mode": "replace_person",
+                "prompt": "hero walks through rain",
+                "sourceClipAssetId": "asset-video",
+                "personTrackId": "track_fixture",
+                "characterId": "character_fixture",
+            },
+        )
+        for runtime in parity_runtimes
+    ]
+    assert_response_parity("replace person job response", python_runtime, rust_runtime, replace_jobs[0], replace_jobs[1], expected_status=201)
 
 
 def test_model_lora_and_image_job_contracts(parity_runtimes):

@@ -255,6 +255,15 @@ impl ProjectStore {
         read_project_summary(&project_path)
     }
 
+    pub fn project_stem(&self, project_id: &str) -> ProjectStoreResult<String> {
+        let project_path = self.find_project_path(project_id)?;
+        Ok(project_path
+            .file_stem()
+            .and_then(|value| value.to_str())
+            .unwrap_or_default()
+            .to_owned())
+    }
+
     pub fn reindex_project(&self, project_id: &str) -> ProjectStoreResult<ReindexResult> {
         let project_path = self.find_project_path(project_id)?;
         let counts = reindex_project_path(&project_path)?;
@@ -497,6 +506,58 @@ impl ProjectStore {
             }
         }
         Ok(assets)
+    }
+
+    pub fn list_person_tracks(&self, project_id: &str) -> ProjectStoreResult<Vec<Value>> {
+        let project_path = self.find_project_path(project_id)?;
+        let folder = project_path.join("person-tracks");
+        if !folder.exists() {
+            return Ok(Vec::new());
+        }
+
+        let mut tracks = Vec::new();
+        for entry in read_dir_paths(&folder)? {
+            if !entry
+                .file_name()
+                .and_then(|value| value.to_str())
+                .is_some_and(|name| name.ends_with(".sceneworks.person-track.json"))
+            {
+                continue;
+            }
+            if let Ok(track) = normalize_person_track(&project_path, &entry) {
+                tracks.push(track);
+            }
+        }
+        tracks.sort_by(|left, right| {
+            right
+                .get("createdAt")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .cmp(
+                    left.get("createdAt")
+                        .and_then(Value::as_str)
+                        .unwrap_or_default(),
+                )
+        });
+        Ok(tracks)
+    }
+
+    pub fn get_person_track(&self, project_id: &str, track_id: &str) -> ProjectStoreResult<Value> {
+        if !is_safe_track_id(track_id) {
+            return Err(ProjectStoreError::BadRequest(
+                "Invalid person track ID".to_owned(),
+            ));
+        }
+        let project_path = self.find_project_path(project_id)?;
+        let track_path = project_path
+            .join("person-tracks")
+            .join(format!("{track_id}.sceneworks.person-track.json"));
+        if !track_path.exists() {
+            return Err(ProjectStoreError::NotFound(
+                "Person track not found".to_owned(),
+            ));
+        }
+        normalize_person_track(&project_path, &track_path)
     }
 
     pub fn import_asset(&self, project_id: &str, upload: UploadAsset) -> ProjectStoreResult<Value> {
@@ -1719,6 +1780,15 @@ fn normalize_asset(
     Ok(asset)
 }
 
+fn normalize_person_track(project_path: &Path, track_path: &Path) -> ProjectStoreResult<Value> {
+    let mut track = read_json(track_path)?;
+    let track_rel = relative_string(project_path, track_path)?;
+    if let Some(object) = track.as_object_mut() {
+        object.insert("path".to_owned(), Value::String(track_rel));
+    }
+    Ok(track)
+}
+
 fn read_json(path: &Path) -> ProjectStoreResult<Value> {
     let payload = fs::read_to_string(path)?;
     Ok(serde_json::from_str(&payload)?)
@@ -1764,6 +1834,13 @@ fn is_safe_relative_path(relative_path: &str) -> bool {
         && Path::new(relative_path)
             .components()
             .all(|component| matches!(component, std::path::Component::Normal(_)))
+}
+
+fn is_safe_track_id(track_id: &str) -> bool {
+    !track_id.trim().is_empty()
+        && !track_id.contains('/')
+        && !track_id.contains('\\')
+        && !track_id.contains("..")
 }
 
 fn required_str<'a>(payload: &'a Value, key: &str) -> ProjectStoreResult<&'a str> {
@@ -2009,6 +2086,43 @@ mod tests {
         assert_eq!(counts.assets, 1);
         assert_eq!(counts.generation_sets, 1);
         assert_eq!(counts.timelines, 1);
+    }
+
+    #[test]
+    fn person_tracks_list_and_detail_match_python_sidecar_shape() {
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        let store = ProjectStore::new(temp_dir.path().join("data"), "test-version");
+        let project = store.create_project("Fixture").expect("project creates");
+        let project_path = std::path::PathBuf::from(&project.path);
+        std::fs::write(
+            project_path.join("person-tracks/track_1.sceneworks.person-track.json"),
+            serde_json::to_string_pretty(&json!({
+                "schemaVersion": 1,
+                "id": "track_1",
+                "projectId": project.id,
+                "name": "Hero",
+                "createdAt": "2026-05-17T00:00:00Z",
+                "sourceAssetId": "asset-video",
+                "representativeFrameAssetId": "asset-frame",
+                "frames": [],
+                "status": {}
+            }))
+            .expect("json"),
+        )
+        .expect("track sidecar writes");
+
+        let tracks = store.list_person_tracks(&project.id).expect("tracks list");
+        assert_eq!(tracks[0]["id"], "track_1");
+        assert_eq!(
+            tracks[0]["path"],
+            "person-tracks/track_1.sceneworks.person-track.json"
+        );
+
+        let track = store
+            .get_person_track(&project.id, "track_1")
+            .expect("track detail");
+        assert_eq!(track["name"], "Hero");
+        assert!(store.get_person_track(&project.id, "../track_1").is_err());
     }
 
     #[test]
