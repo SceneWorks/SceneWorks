@@ -11,6 +11,7 @@ class Settings:
         self.data_dir = Path(os.getenv("SCENEWORKS_DATA_DIR", "data")).resolve()
         self.config_dir = Path(os.getenv("SCENEWORKS_CONFIG_DIR", "config")).resolve()
         self.access_token = os.getenv("SCENEWORKS_ACCESS_TOKEN", "").strip()
+        self.worker_timeout_seconds = int(os.getenv("SCENEWORKS_WORKER_TIMEOUT_SECONDS", "90"))
         cors = os.getenv(
             "SCENEWORKS_CORS_ORIGINS",
             ",".join(
