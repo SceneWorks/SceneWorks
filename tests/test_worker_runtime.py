@@ -6,6 +6,7 @@ from scene_worker.image_adapters import MODEL_TARGETS, build_asset_sidecar, imag
 from scene_worker.runtime import (
     download_progress_payload,
     format_bytes,
+    child_environment,
     heartbeat,
     keep_job_alive,
     loaded_models_from_adapters,
@@ -68,6 +69,23 @@ def test_python_worker_can_advertise_legacy_ffmpeg_jobs(monkeypatch):
 
     assert "frame_extract" in capabilities
     assert "timeline_export" in capabilities
+
+
+def test_python_cpu_child_honors_explicit_utility_disable(monkeypatch):
+    monkeypatch.setenv("SCENEWORKS_UTILITY_JOBS", "0")
+
+    env = child_environment(SimpleNamespace(), worker_id="python-inference-worker-cpu", gpu_id="cpu")
+
+    assert env["CUDA_VISIBLE_DEVICES"] == ""
+    assert env["SCENEWORKS_UTILITY_JOBS"] == "0"
+
+
+def test_python_cpu_child_keeps_utility_default_when_not_explicit(monkeypatch):
+    monkeypatch.delenv("SCENEWORKS_UTILITY_JOBS", raising=False)
+
+    env = child_environment(SimpleNamespace(), worker_id="worker-cpu", gpu_id="cpu")
+
+    assert env["SCENEWORKS_UTILITY_JOBS"] == "1"
 
 
 def test_loaded_models_are_collected_from_adapter_cache():

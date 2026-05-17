@@ -1,14 +1,14 @@
 # SceneWorks Rust API
 
-This binary is the Rust backend migration target. Docker Compose can run it as
-the `api` service by setting the migration switch in the repository `.env`:
+This binary is the default SceneWorks backend API. Docker Compose runs it as the
+`api` service with these defaults:
 
 ```text
 SCENEWORKS_API_RUNTIME=rust
 SCENEWORKS_API_DOCKERFILE=docker/rust-api.Dockerfile
 ```
 
-The Python FastAPI service remains the default and rollback runtime:
+The Python FastAPI service remains the rollback runtime:
 
 ```text
 SCENEWORKS_API_RUNTIME=python
@@ -27,7 +27,7 @@ Compose checks `GET /api/v1/health` inside the container before starting
 dependent services. The health payload includes `runtime` so migration checks
 can confirm which implementation is serving traffic.
 
-After flipping `SCENEWORKS_API_DOCKERFILE`, rebuild the API image before
+After changing `SCENEWORKS_API_DOCKERFILE`, rebuild the API image before
 starting it:
 
 ```powershell

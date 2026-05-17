@@ -1,6 +1,6 @@
 # SceneWorks
 
-SceneWorks is a local Docker-based AI image and video generation studio. This repository currently contains a Vite/React web shell, FastAPI backend, Python inference worker, Rust utility worker, shared config/data folders, and Docker Compose wiring.
+SceneWorks is a local Docker-based AI image and video generation studio. This repository currently contains a Vite/React web shell, Rust API backend, Rust utility worker, Python Diffusers/PyTorch inference worker, shared config/data folders, and Docker Compose wiring.
 
 ## Quick Start
 
@@ -8,39 +8,41 @@ SceneWorks is a local Docker-based AI image and video generation studio. This re
 npm run dev
 ```
 
-This starts the local stack with Docker Compose:
+This starts the local stack with Docker Compose. By default, Compose now runs
+the Rust API and Rust utility worker as the backend runtime, plus the Python
+worker only for Diffusers/PyTorch image and video inference adapters:
 
 - Web: http://localhost:5173
 - API: http://localhost:8000/api/v1/health
 
-The default compose API runtime is Python. During the Rust migration, switch the
-same `api` service to the Rust API by setting these values in `.env` before
-rebuilding and starting the API:
+The selected API runtime is reported by `GET /api/v1/health` as `runtime`.
+Default Compose values are:
 
 ```text
 SCENEWORKS_API_RUNTIME=rust
 SCENEWORKS_API_DOCKERFILE=docker/rust-api.Dockerfile
+SCENEWORKS_PYTHON_UTILITY_JOBS=0
 ```
 
-```powershell
-docker compose build api
-docker compose up -d api
-```
-
-Rollback is intentionally just as explicit:
+Rollback to the Python API remains available by setting these values in `.env`
+before rebuilding and starting the stack:
 
 ```text
 SCENEWORKS_API_RUNTIME=python
 SCENEWORKS_API_DOCKERFILE=docker/api.Dockerfile
 ```
 
-Both API images keep the same compose service name, health URL, worker URL,
+```powershell
+docker compose build api
+docker compose up -d api web worker
+```
+
+Both API images keep the same Compose service name, health URL, worker URL,
 host port, and mounted storage contracts. The API listens on
 `SCENEWORKS_API_PORT` inside the container and is exposed on the same host port.
 `SCENEWORKS_WEB_PORT` controls the host port for the Vite web service. The web
 service receives `VITE_API_BASE_URL=http://localhost:${SCENEWORKS_API_PORT}`,
 and workers call `http://api:${SCENEWORKS_API_PORT}` on the compose network.
-The selected runtime is reported by `GET /api/v1/health` as `runtime`.
 
 API volume contracts are shared across Python and Rust:
 
@@ -48,12 +50,17 @@ API volume contracts are shared across Python and Rust:
 - `${SCENEWORKS_CONFIG_BIND:-./config}:/sceneworks/config:ro` read-only for manifests and app configuration.
 - `./data/cache/jobs.db` is the shared queue database for both runtimes, preserving existing compose queue history across migration flips and rollback.
 
-Both API runtimes expose `GET /api/v1/health`; compose checks it with `curl`
+Both API runtimes expose `GET /api/v1/health`; Compose checks it with `curl`
 inside the container so dependent services wait for the selected implementation.
-To exercise the Rust Docker path end to end, run:
+To exercise the default Rust Docker path end to end, run:
 
 ```powershell
 npm run check:docker:rust-api
+```
+To exercise the Python API rollback path, run:
+
+```powershell
+npm run check:docker:python-api
 ```
 
 Run the lightweight scaffold checks:
@@ -62,11 +69,12 @@ Run the lightweight scaffold checks:
 npm run check
 ```
 
-## Rust Backend Migration
+## Backend Runtime Split
 
-The Rust backend workspace is wired as an opt-in Docker runtime for the
-migration spine. The existing FastAPI API, Python worker, and React app remain
-the default development stack, and the Python API remains the rollback path.
+The Rust backend workspace is the default Docker runtime. The Rust API owns the
+HTTP surface and project/queue filesystem contracts, and the Rust worker owns
+CPU utility jobs for model downloads, LoRA imports, FFmpeg frame extraction, and
+timeline MP4 exports.
 
 Install a Rust toolchain with `rustfmt` and `clippy`, then use:
 
@@ -83,14 +91,11 @@ Or run the full Rust verification sequence:
 npm run rust:check
 ```
 
-To point host-mode workers at the Rust API during migration testing, start the
-Rust API binary on port 8000 and run the worker with
-`SCENEWORKS_API_URL=http://localhost:8000`. In Docker Compose, the API runtime
-switch above keeps `SCENEWORKS_API_URL` wired to the selected `api` service
-automatically.
-The compose `worker` service is the Python inference worker and the
-`rust-worker` service is the Rust utility worker; both use the selected API
-runtime through the same HTTP contract.
+To point host-mode workers at the API, start the Rust API binary on port 8000
+and run each worker with `SCENEWORKS_API_URL=http://localhost:8000`. In Docker
+Compose, workers are wired to the selected `api` service automatically. The
+Compose `worker` service is the Python inference worker and the `rust-worker`
+service is the Rust utility worker; both use the same HTTP contract.
 The `sceneworks-rust-worker` binary handles CPU utility jobs for model downloads,
 LoRA imports, FFmpeg frame extraction, and timeline MP4 exports. Set
 `SCENEWORKS_GPU_ID=auto` to let the Rust worker supervise one child per visible
@@ -102,12 +107,15 @@ up to 10 seconds for child workers by default; set
 Windows, Rust listens for Ctrl+C; Unix workers also handle SIGTERM.
 
 When running the stack outside Docker Compose, start `sceneworks-rust-worker`
-alongside the API if you want Rust-owned utility jobs to be claimed. Rust GPU
-children currently report device presence only; GPU generation adapters remain
-Python-owned during the migration, so CPU utility workers do not advertise
-GPU-only generation capabilities. As a temporary fallback, set
-`SCENEWORKS_LEGACY_MODEL_LORA_JOBS=1` or `SCENEWORKS_LEGACY_FFMPEG_JOBS=1`
-before starting the Python worker to let it claim those legacy utility jobs.
+alongside the API so Rust-owned utility jobs are claimed. GPU generation adapters
+remain Python-owned: the Python worker advertises image/video generation and
+person replacement capabilities on GPU children, backed by Diffusers/PyTorch.
+Compose sets `SCENEWORKS_PYTHON_UTILITY_JOBS=0`, so Python CPU utility jobs are
+off by default. As an explicitly documented fallback, set
+`SCENEWORKS_PYTHON_UTILITY_JOBS=1` to let the Python worker claim procedural
+person detection/tracking jobs, and set `SCENEWORKS_LEGACY_MODEL_LORA_JOBS=1` or
+`SCENEWORKS_LEGACY_FFMPEG_JOBS=1` only when temporarily rolling a specific Rust
+utility job family back to Python.
 Both Docker worker images install Debian Bookworm `ffmpeg`; host-mode workers
 use the `ffmpeg` found on `PATH`. Set `HF_TOKEN` when downloading from gated
 Hugging Face repositories.
@@ -148,10 +156,10 @@ For offline development or deterministic Rust API tests, set `SCENEWORKS_DISABLE
 ```text
 apps/
   web/       React + Vite app shell
-  api/       FastAPI service and default backend filesystem owner
-  rust-api/  Rust backend migration API, available through the Docker runtime switch
+  api/       FastAPI API rollback runtime
+  rust-api/  Default Rust backend API
   rust-worker/ Rust CPU utility worker for model downloads, LoRA imports, frame extraction, and timeline exports
-  worker/    Placeholder worker package
+  worker/    Python Diffusers/PyTorch inference worker and documented utility fallback
 crates/
   sceneworks-core/ Shared Rust contract/domain helpers
 packages/

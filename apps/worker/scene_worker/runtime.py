@@ -1097,9 +1097,10 @@ def child_environment(settings: WorkerSettings, *, worker_id: str, gpu_id: str) 
     env["SCENEWORKS_WORKER_CHILD"] = "1"
     env["SCENEWORKS_WORKER_ID"] = worker_id
     env["SCENEWORKS_GPU_ID"] = gpu_id
+    utility_jobs = os.getenv("SCENEWORKS_UTILITY_JOBS")
     if gpu_id == "cpu":
         env["CUDA_VISIBLE_DEVICES"] = ""
-        env["SCENEWORKS_UTILITY_JOBS"] = "1"
+        env["SCENEWORKS_UTILITY_JOBS"] = utility_jobs if utility_jobs is not None else "1"
     else:
         env["CUDA_VISIBLE_DEVICES"] = gpu_id
         env["SCENEWORKS_UTILITY_JOBS"] = "0"
