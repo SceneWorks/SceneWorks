@@ -27,6 +27,8 @@ class ImageJobRequest(BaseModel):
     height: int = Field(default=1024, ge=256, le=2048)
     stylePreset: str = "cinematic"
     loras: list[dict[str, Any]] = Field(default_factory=list)
+    characterId: str | None = None
+    characterLookId: str | None = None
     sourceAssetId: str | None = None
     requestedGpu: str = "auto"
     advanced: dict[str, Any] = Field(default_factory=dict)

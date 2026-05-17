@@ -142,6 +142,40 @@ def find_asset_record(project_path: Path, asset_id: str) -> dict[str, Any] | Non
     }
 
 
+def find_asset_records(project_path: Path, asset_ids: list[str]) -> dict[str, dict[str, Any]]:
+    unique_ids = list(dict.fromkeys(asset_ids))
+    if not unique_ids:
+        return {}
+    ensure_project_db_ready(project_path)
+    placeholders = ",".join("?" for _ in unique_ids)
+    with sqlite3.connect(project_path / "project.db") as connection:
+        rows = connection.execute(
+            f"""
+            select id, type, display_name, file_path, generation_set_id, created_at,
+                   favorite, rating, rejected, trashed, sidecar_path
+              from assets
+             where id in ({placeholders})
+            """,
+            unique_ids,
+        ).fetchall()
+    return {
+        row[0]: {
+            "id": row[0],
+            "type": row[1],
+            "displayName": row[2],
+            "filePath": row[3],
+            "generationSetId": row[4],
+            "createdAt": row[5],
+            "favorite": bool(row[6]),
+            "rating": row[7],
+            "rejected": bool(row[8]),
+            "trashed": bool(row[9]),
+            "sidecarPath": row[10],
+        }
+        for row in rows
+    }
+
+
 def find_asset_sidecar_path(project_path: Path, asset_id: str) -> Path | None:
     record = find_asset_record(project_path, asset_id)
     if record is not None:

@@ -28,6 +28,8 @@ class VideoJobRequest(BaseModel):
     quality: VideoQuality = "balanced"
     seed: int | None = None
     loras: list[dict[str, Any]] = Field(default_factory=list)
+    characterId: str | None = None
+    characterLookId: str | None = None
     sourceAssetId: str | None = None
     lastFrameAssetId: str | None = None
     sourceClipAssetId: str | None = None

@@ -5,6 +5,7 @@ import { AssetMedia } from "../components/assetMedia.jsx";
 export function VideoStudio({
   activeProject,
   assets,
+  characters,
   createVideoJob,
   deleteAsset,
   purgeAsset,
@@ -34,6 +35,8 @@ export function VideoStudio({
   const [sourceAssetId, setSourceAssetId] = useState(["image", "frame"].includes(selectedAsset?.type) ? selectedAsset.id : "");
   const [lastFrameAssetId, setLastFrameAssetId] = useState("");
   const [sourceClipAssetId, setSourceClipAssetId] = useState(selectedAsset?.type === "video" ? selectedAsset.id : "");
+  const [characterId, setCharacterId] = useState("");
+  const [characterLookId, setCharacterLookId] = useState("");
 
   useEffect(() => {
     if (!videoModels.some((item) => item.id === model)) {
@@ -51,7 +54,16 @@ export function VideoStudio({
   }, [selectedAsset?.id, selectedAsset?.type]);
 
   useEffect(() => {
-    if (launchRequest?.view !== "Video" || launchRequest.assetId !== selectedAsset?.id) {
+    if (launchRequest?.view !== "Video") {
+      return;
+    }
+    if (launchRequest.characterId) {
+      setMode(launchRequest.mode ?? "text_to_video");
+      setCharacterId(launchRequest.characterId);
+      setCharacterLookId(launchRequest.lookId ?? "");
+      return;
+    }
+    if (launchRequest.assetId !== selectedAsset?.id) {
       return;
     }
     setMode(launchRequest.mode);
@@ -62,6 +74,13 @@ export function VideoStudio({
       setSourceAssetId(selectedAsset.id);
     }
   }, [launchRequest?.id, selectedAsset?.id, selectedAsset?.type]);
+
+  useEffect(() => {
+    if (characterId && !characters.some((character) => character.id === characterId)) {
+      setCharacterId("");
+      setCharacterLookId("");
+    }
+  }, [characters, characterId]);
 
   useEffect(() => {
     if (!selectedModel) {
@@ -126,6 +145,8 @@ export function VideoStudio({
       height,
       quality,
       seed: seed === "" ? null : Number(seed),
+      characterId: characterId || null,
+      characterLookId: characterLookId || null,
       sourceAssetId: ["image_to_video", "first_last_frame"].includes(mode) ? sourceAssetId || null : null,
       lastFrameAssetId: mode === "first_last_frame" ? lastFrameAssetId || null : null,
       sourceClipAssetId: mode === "extend_clip" ? sourceClipAssetId || null : null,
@@ -196,6 +217,37 @@ export function VideoStudio({
 
           {mode === "replace_person" ? (
             <div className="empty-panel compact-panel">Replacement is staged as a placeholder mode.</div>
+          ) : null}
+
+          <div className="control-grid compact-controls">
+            <label>
+              Character
+              <select onChange={(event) => setCharacterId(event.target.value)} value={characterId}>
+                <option value="">No character</option>
+                {characters.map((character) => (
+                  <option key={character.id} value={character.id}>
+                    {character.name}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <label>
+              Look
+              <select onChange={(event) => setCharacterLookId(event.target.value)} value={characterLookId}>
+                <option value="">Default look</option>
+                {(characters.find((character) => character.id === characterId)?.looks ?? []).map((look) => (
+                  <option key={look.id} value={look.id}>
+                    {look.name}
+                  </option>
+                ))}
+              </select>
+            </label>
+          </div>
+          {characterId ? (
+            <div className="guidance-strip">
+              <strong>Recipe-only character</strong>
+              <span>Character and look are saved with the recipe; adapter-level reference and LoRA conditioning are not active yet.</span>
+            </div>
           ) : null}
 
           <label className="prompt-field">

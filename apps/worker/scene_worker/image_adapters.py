@@ -78,6 +78,8 @@ class ImageRequest:
     height: int
     style_preset: str
     loras: list[dict[str, Any]]
+    character_id: str | None
+    character_look_id: str | None
     source_asset_id: str | None
     advanced: dict[str, Any]
 
@@ -112,6 +114,8 @@ def image_request_from_job(job: dict[str, Any]) -> ImageRequest:
         height=safe_int(payload.get("height"), 1024, 256, 2048),
         style_preset=payload.get("stylePreset", "cinematic"),
         loras=payload.get("loras", []),
+        character_id=payload.get("characterId"),
+        character_look_id=payload.get("characterLookId"),
         source_asset_id=payload.get("sourceAssetId"),
         advanced=payload.get("advanced", {}),
     )
@@ -542,6 +546,10 @@ def build_asset_sidecar(
                 "height": request.height,
                 "count": request.count,
                 "family": model_target["family"],
+                "characterId": request.character_id,
+                "characterLookId": request.character_look_id,
+                "characterConditioningActive": False,
+                "characterConditioningNote": "Character metadata is recorded, but adapter-level character conditioning is not active in this build.",
             },
             "rawAdapterSettings": raw_settings,
         },
