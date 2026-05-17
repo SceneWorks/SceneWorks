@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 from scene_worker.image_adapters import MODEL_TARGETS, build_asset_sidecar, image_request_from_job, resolve_seed
 from scene_worker.runtime import (
     download_progress_payload,
@@ -7,6 +9,9 @@ from scene_worker.runtime import (
     heartbeat,
     keep_job_alive,
     loaded_models_from_adapters,
+    resolve_loaded_models,
+    run_placeholder_job,
+    run_video_job,
     worker_capabilities,
 )
 from scene_worker.video_adapters import VIDEO_MODEL_TARGETS, build_video_asset_sidecar, video_request_from_job
@@ -76,16 +81,18 @@ def test_heartbeat_loaded_models_are_not_sent_as_current_job():
     assert api.payload == {"status": "idle", "currentJobId": None, "loadedModels": ["model-a"]}
 
 
-def test_keepalive_heartbeat_reports_current_loaded_models(monkeypatch):
+def test_keepalive_heartbeat_reports_current_loaded_models_each_tick(monkeypatch):
     calls = []
+    models_by_tick = [["model-a"], ["model-b"]]
+    loaded_model_calls = []
 
-    class StopAfterOneHeartbeat:
+    class StopAfterTwoHeartbeats:
         def __init__(self):
             self.calls = 0
 
         def wait(self, _interval):
             self.calls += 1
-            return self.calls > 1
+            return self.calls > 2
 
     class Settings:
         worker_id = "worker-1"
@@ -104,18 +111,166 @@ def test_keepalive_heartbeat_reports_current_loaded_models(monkeypatch):
 
     monkeypatch.setattr("scene_worker.runtime.heartbeat", capture_heartbeat)
 
+    def loaded_models():
+        loaded_model_calls.append("tick")
+        return models_by_tick[len(loaded_model_calls) - 1]
+
+    keep_job_alive(
+        api=object(),
+        settings=Settings(),
+        job_id="job-1",
+        status="busy",
+        stop_event=StopAfterTwoHeartbeats(),
+        loaded_models=loaded_models,
+    )
+
+    assert [call["status"] for call in calls] == ["busy", "busy"]
+    assert [call["current_job_id"] for call in calls] == ["job-1", "job-1"]
+    assert [call["loaded_models"] for call in calls] == [["model-a"], ["model-b"]]
+    assert len(loaded_model_calls) == 2
+
+
+def test_keepalive_heartbeat_reports_empty_models_when_source_is_none(monkeypatch):
+    calls = []
+
+    class StopAfterOneHeartbeat:
+        def wait(self, _interval):
+            return bool(calls)
+
+    class Settings:
+        worker_id = "worker-1"
+        heartbeat_seconds = 1
+
+    def capture_heartbeat(_api, _settings, _status, _current_job_id=None, loaded_models=None):
+        calls.append(loaded_models)
+
+    monkeypatch.setattr("scene_worker.runtime.heartbeat", capture_heartbeat)
+
     keep_job_alive(
         api=object(),
         settings=Settings(),
         job_id="job-1",
         status="busy",
         stop_event=StopAfterOneHeartbeat(),
-        loaded_models=lambda: ["Tongyi-MAI/Z-Image-Turbo"],
+        loaded_models=None,
     )
 
-    assert calls[0]["status"] == "busy"
-    assert calls[0]["current_job_id"] == "job-1"
-    assert calls[0]["loaded_models"] == ["Tongyi-MAI/Z-Image-Turbo"]
+    assert calls == [[]]
+
+
+def test_loaded_model_resolution_failure_keeps_heartbeat_alive(monkeypatch):
+    events = []
+
+    def failing_loaded_models():
+        raise RuntimeError("cache is mid-load")
+
+    monkeypatch.setattr("scene_worker.runtime.emit", events.append)
+
+    assert resolve_loaded_models(failing_loaded_models, job_id="job-1") == []
+    assert events == [
+        {
+            "event": "loaded_models_failed",
+            "error": "cache is mid-load",
+            "jobId": "job-1",
+            "reportedAt": events[0]["reportedAt"],
+        }
+    ]
+
+
+def test_video_job_reports_dynamic_loaded_models_on_progress_and_keepalive(monkeypatch):
+    heartbeat_models = []
+    blocking_models = []
+
+    class Api:
+        def post(self, path, payload):
+            if path.endswith("/heartbeat"):
+                heartbeat_models.append(payload["loadedModels"])
+                return {}
+            if path.endswith("/progress"):
+                return {"status": payload["status"], "stage": payload["stage"]}
+            raise AssertionError(path)
+
+        def get(self, _path):
+            return {"cancelRequested": False}
+
+    class VideoAdapter:
+        def __init__(self):
+            self.models = []
+
+        def loaded_models(self):
+            return list(self.models)
+
+        def prepare(self, *, settings, job):
+            return {"job": job["id"]}
+
+        def ensure_models(self, _request):
+            self.models = ["video-model-loaded"]
+
+        def estimate_requirements(self, _request):
+            return {"previewFrames": 1}
+
+        def run(self, *, settings, job, request, progress, cancel_requested):
+            self.models = ["video-model-running"]
+            progress("running", "generating", 0.5, "Rendering.")
+            return {"assetId": "asset-video-1"}
+
+        def cancel(self, _job_id):
+            raise AssertionError("cancel should not be called")
+
+        def cleanup(self, _job_id):
+            raise AssertionError("cleanup should not be called")
+
+    def run_immediately(_api, _settings, _job_id, _status, callback, *, loaded_models):
+        blocking_models.append(loaded_models())
+        result = callback()
+        blocking_models.append(loaded_models())
+        return result
+
+    monkeypatch.setattr("scene_worker.runtime.ProceduralVideoAdapter", VideoAdapter)
+    monkeypatch.setattr("scene_worker.runtime.run_blocking_job_step", run_immediately)
+
+    run_video_job(
+        Api(),
+        SimpleNamespace(worker_id="worker-1"),
+        {"id": "job-1", "payload": {"projectId": "project-1", "prompt": "clip"}},
+    )
+
+    assert heartbeat_models == [
+        [],
+        [],
+        ["video-model-loaded"],
+        ["video-model-running"],
+        ["video-model-running"],
+    ]
+    assert blocking_models == [["video-model-loaded"], ["video-model-running"]]
+
+
+def test_worker_job_polling_propagates_cancel_requested(monkeypatch):
+    updates = []
+
+    class Api:
+        def post(self, path, payload):
+            if path.endswith("/heartbeat"):
+                return {}
+            if path.endswith("/progress"):
+                updates.append(payload)
+                return {"status": payload["status"], "stage": payload["stage"]}
+            raise AssertionError(path)
+
+        def get(self, _path):
+            return {"cancelRequested": bool(updates)}
+
+    monkeypatch.setattr("scene_worker.runtime.time.sleep", lambda _seconds: None)
+
+    run_placeholder_job(
+        Api(),
+        SimpleNamespace(worker_id="worker-1"),
+        {"id": "job-1", "payload": {}},
+    )
+
+    assert updates[-1]["status"] == "canceled"
+    assert updates[-1]["stage"] == "canceled"
+    assert updates[-1]["message"] == "Worker canceled the job before completion."
 
 
 def test_random_batch_seeds_are_used_per_image():

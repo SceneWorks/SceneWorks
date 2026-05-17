@@ -40,6 +40,10 @@ Or run the full Rust verification sequence:
 npm run rust:check
 ```
 
+To point the existing Python worker at the Rust API during migration testing,
+start the Rust binary on port 8000 and run the worker with
+`SCENEWORKS_API_URL=http://localhost:8000`.
+
 ## Local Access Control
 
 Local-only development is open by default. To require a simple pairing token for LAN or shared-machine use, copy `.env.example` to `.env` and set:

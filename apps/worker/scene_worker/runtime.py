@@ -22,7 +22,7 @@ from .timeline_exporter import run_timeline_export
 from .video_adapters import ProceduralVideoAdapter, run_frame_extract, run_person_detect, run_person_track
 
 
-LoadedModelsSource = list[str] | Callable[[], list[str]] | None
+LoadedModelsSource = Callable[[], list[str]] | None
 
 
 def now() -> str:
@@ -62,12 +62,17 @@ def worker_capabilities(gpu: dict) -> list[str]:
     return sorted(capabilities)
 
 
+def loaded_models_from_adapter(adapter: object, *, job_id: str | None = None) -> list[str]:
+    loaded_models = getattr(adapter, "loaded_models", None)
+    if not callable(loaded_models):
+        return []
+    return resolve_loaded_models(loaded_models, job_id=job_id)
+
+
 def loaded_models_from_adapters(adapters: dict[str, object]) -> list[str]:
     models: set[str] = set()
     for adapter in adapters.values():
-        loaded_models = getattr(adapter, "loaded_models", None)
-        if callable(loaded_models):
-            models.update(loaded_models())
+        models.update(loaded_models_from_adapter(adapter))
     return sorted(models)
 
 
@@ -96,12 +101,33 @@ def heartbeat(
     )
 
 
-def resolve_loaded_models(source: LoadedModelsSource) -> list[str]:
+def resolve_loaded_models(source: LoadedModelsSource, *, job_id: str | None = None) -> list[str]:
     if source is None:
         return []
-    if callable(source):
+    try:
         return source()
-    return source
+    except Exception as exc:
+        payload = {"event": "loaded_models_failed", "error": str(exc), "reportedAt": now()}
+        if job_id:
+            payload["jobId"] = job_id
+        emit(payload)
+        return []
+
+
+def heartbeat_with_loaded_models(
+    api: ApiClient,
+    settings: WorkerSettings,
+    status: str,
+    current_job_id: str,
+    loaded_models: LoadedModelsSource,
+) -> None:
+    heartbeat(
+        api,
+        settings,
+        status,
+        current_job_id,
+        loaded_models=resolve_loaded_models(loaded_models, job_id=current_job_id),
+    )
 
 
 def update_job(api: ApiClient, job_id: str, payload: dict[str, Any]) -> dict:
@@ -302,18 +328,12 @@ def keep_job_alive(
     job_id: str,
     status: str,
     stop_event: threading.Event,
-    loaded_models: LoadedModelsSource = None,
+    loaded_models: LoadedModelsSource,
 ) -> None:
     interval = max(5, min(settings.heartbeat_seconds, 30))
     while not stop_event.wait(interval):
         try:
-            heartbeat(
-                api,
-                settings,
-                status,
-                job_id,
-                loaded_models=resolve_loaded_models(loaded_models),
-            )
+            heartbeat_with_loaded_models(api, settings, status, job_id, loaded_models)
         except httpx.HTTPError as exc:
             emit({"event": "heartbeat_failed", "jobId": job_id, "error": str(exc), "reportedAt": now()})
 
@@ -324,7 +344,8 @@ def run_blocking_job_step(
     job_id: str,
     status: str,
     callback: Any,
-    loaded_models: LoadedModelsSource = None,
+    *,
+    loaded_models: LoadedModelsSource,
 ) -> Any:
     stop_event = threading.Event()
     thread = threading.Thread(
@@ -453,6 +474,7 @@ def run_lora_import_job(api: ApiClient, settings: WorkerSettings, job: dict) -> 
                 job_id,
                 "busy",
                 lambda: snapshot_huggingface_repo(repo, target_dir, payload.get("files") or []),
+                loaded_models=None,
             )
         elif source_path:
             source = Path(source_path).expanduser().resolve()
@@ -559,11 +581,10 @@ def run_image_job(api: ApiClient, settings: WorkerSettings, job: dict, image_ada
     adapter = create_image_adapter(job, image_adapters)
 
     def adapter_loaded_models() -> list[str]:
-        loaded_models = getattr(adapter, "loaded_models", None)
-        return loaded_models() if callable(loaded_models) else []
+        return loaded_models_from_adapter(adapter, job_id=job_id)
 
     def progress(status: str, stage: str, value: float, message: str) -> None:
-        heartbeat(api, settings, "busy", job_id, adapter_loaded_models())
+        heartbeat_with_loaded_models(api, settings, "busy", job_id, adapter_loaded_models)
         update_job(
             api,
             job_id,
@@ -633,8 +654,11 @@ def run_video_job(api: ApiClient, settings: WorkerSettings, job: dict) -> None:
     job_id = job["id"]
     adapter = ProceduralVideoAdapter()
 
+    def adapter_loaded_models() -> list[str]:
+        return loaded_models_from_adapter(adapter, job_id=job_id)
+
     def progress(status: str, stage: str, value: float, message: str) -> None:
-        heartbeat(api, settings, "busy", job_id)
+        heartbeat_with_loaded_models(api, settings, "busy", job_id, adapter_loaded_models)
         update_job(
             api,
             job_id,
@@ -670,6 +694,7 @@ def run_video_job(api: ApiClient, settings: WorkerSettings, job: dict) -> None:
                 progress=progress,
                 cancel_requested=lambda: job_cancel_requested(api, job_id),
             ),
+            loaded_models=adapter_loaded_models,
         )
         update_job(
             api,
@@ -708,7 +733,7 @@ def run_video_job(api: ApiClient, settings: WorkerSettings, job: dict) -> None:
             },
         )
     finally:
-        heartbeat(api, settings, "idle")
+        heartbeat(api, settings, "idle", loaded_models=adapter_loaded_models())
 
 
 def run_timeline_export_job(api: ApiClient, settings: WorkerSettings, job: dict) -> None:
@@ -740,6 +765,7 @@ def run_timeline_export_job(api: ApiClient, settings: WorkerSettings, job: dict)
                 progress=progress,
                 cancel_requested=lambda: job_cancel_requested(api, job_id),
             ),
+            loaded_models=None,
         )
         update_job(
             api,
@@ -808,6 +834,7 @@ def run_frame_extract_job(api: ApiClient, settings: WorkerSettings, job: dict) -
                 progress=progress,
                 cancel_requested=lambda: job_cancel_requested(api, job_id),
             ),
+            loaded_models=None,
         )
         update_job(
             api,
@@ -876,6 +903,7 @@ def run_person_detect_job(api: ApiClient, settings: WorkerSettings, job: dict) -
                 progress=progress,
                 cancel_requested=lambda: job_cancel_requested(api, job_id),
             ),
+            loaded_models=None,
         )
         update_job(
             api,
@@ -944,6 +972,7 @@ def run_person_track_job(api: ApiClient, settings: WorkerSettings, job: dict) ->
                 progress=progress,
                 cancel_requested=lambda: job_cancel_requested(api, job_id),
             ),
+            loaded_models=None,
         )
         update_job(
             api,
