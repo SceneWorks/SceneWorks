@@ -1,13 +1,14 @@
 {
   "name": "sceneworks",
   "private": true,
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Local AI image and video generation studio runtime skeleton.",
   "scripts": {
     "dev": "docker compose up --build",
     "stack:up": "docker compose up --build",
     "stack:down": "docker compose down",
     "check": "node scripts/check-scaffold.mjs",
+    "check:compose": "node scripts/check-compose-config.mjs",
     "check:health": "node scripts/check-health.mjs",
     "check:docker:rust-api": "node scripts/check-docker-api-runtime.mjs rust",
     "check:docker:python-api": "node scripts/check-docker-api-runtime.mjs python",

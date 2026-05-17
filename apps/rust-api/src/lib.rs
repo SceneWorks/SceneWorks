@@ -83,7 +83,7 @@ impl Settings {
             .unwrap_or_else(|| data_dir.join("cache").join("jobs.db"));
         Self {
             api_runtime: env_string("SCENEWORKS_API_RUNTIME", "rust"),
-            app_version: env_string("SCENEWORKS_APP_VERSION", "0.1.0"),
+            app_version: env_string("SCENEWORKS_APP_VERSION", "0.2.0"),
             host: env_string("SCENEWORKS_API_HOST", "0.0.0.0"),
             port: std::env::var("SCENEWORKS_API_PORT")
                 .ok()

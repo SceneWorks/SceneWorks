@@ -21,7 +21,7 @@ Default Compose values are:
 ```text
 SCENEWORKS_API_RUNTIME=rust
 SCENEWORKS_API_DOCKERFILE=docker/rust-api.Dockerfile
-SCENEWORKS_PYTHON_UTILITY_JOBS=0
+SCENEWORKS_PYTHON_UTILITY_JOBS=1
 ```
 
 Rollback to the Python API remains available by setting these values in `.env`
@@ -110,12 +110,16 @@ When running the stack outside Docker Compose, start `sceneworks-rust-worker`
 alongside the API so Rust-owned utility jobs are claimed. GPU generation adapters
 remain Python-owned: the Python worker advertises image/video generation and
 person replacement capabilities on GPU children, backed by Diffusers/PyTorch.
-Compose sets `SCENEWORKS_PYTHON_UTILITY_JOBS=0`, so Python CPU utility jobs are
-off by default. As an explicitly documented fallback, set
-`SCENEWORKS_PYTHON_UTILITY_JOBS=1` to let the Python worker claim procedural
-person detection/tracking jobs, and set `SCENEWORKS_LEGACY_MODEL_LORA_JOBS=1` or
-`SCENEWORKS_LEGACY_FFMPEG_JOBS=1` only when temporarily rolling a specific Rust
-utility job family back to Python.
+Compose sets `SCENEWORKS_PYTHON_UTILITY_JOBS=1` so procedural person detection
+and person tracking jobs continue to be claimed by the Python worker while Rust
+owns the model, LoRA, and FFmpeg utility families. Set
+`SCENEWORKS_LEGACY_MODEL_LORA_JOBS=1` only when temporarily rolling
+`model_download` or `lora_import` back to Python, and set
+`SCENEWORKS_LEGACY_FFMPEG_JOBS=1` only when rolling `frame_extract` or
+`timeline_export` back to Python.
+The Python worker ID changed from `worker-gpu-auto-0` to
+`python-inference-worker-0`; existing queue databases may retain the old worker
+row until the stale-worker sweep marks it offline.
 Both Docker worker images install Debian Bookworm `ffmpeg`; host-mode workers
 use the `ffmpeg` found on `PATH`. Set `HF_TOKEN` when downloading from gated
 Hugging Face repositories.

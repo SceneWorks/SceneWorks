@@ -1097,6 +1097,8 @@ def child_environment(settings: WorkerSettings, *, worker_id: str, gpu_id: str) 
     env["SCENEWORKS_WORKER_CHILD"] = "1"
     env["SCENEWORKS_WORKER_ID"] = worker_id
     env["SCENEWORKS_GPU_ID"] = gpu_id
+    # Compose exposes this as SCENEWORKS_PYTHON_UTILITY_JOBS, then maps it to
+    # the in-worker SCENEWORKS_UTILITY_JOBS flag for parent/child consistency.
     utility_jobs = os.getenv("SCENEWORKS_UTILITY_JOBS")
     if gpu_id == "cpu":
         env["CUDA_VISIBLE_DEVICES"] = ""
