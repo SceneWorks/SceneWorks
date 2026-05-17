@@ -10,9 +10,6 @@
     "check": "node scripts/check-scaffold.mjs",
     "check:health": "node scripts/check-health.mjs"
   },
-  "workspaces": [
-    "apps/web"
-  ],
   "engines": {
     "node": ">=20"
   }

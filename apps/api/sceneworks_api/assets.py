@@ -235,6 +235,7 @@ def update_asset_status(
     changes = payload.model_dump(exclude_none=True)
     status.update(changes)
     write_json(sidecar_path, asset)
+    index_asset_db(project_path, asset)
     return normalize_asset(project_id, project_path, sidecar_path)
 
 

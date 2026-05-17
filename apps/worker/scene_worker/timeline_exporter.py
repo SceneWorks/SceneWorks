@@ -334,8 +334,12 @@ def mux_with_crossfades(ffmpeg: str, segments: list[dict[str, Any]], tmp_path: P
 def run_ffmpeg(command: list[str]) -> None:
     result = subprocess.run(command, capture_output=True, text=True, check=False)
     if result.returncode != 0:
-        stderr = result.stderr.strip().splitlines()
-        raise RuntimeError(stderr[-1] if stderr else "FFmpeg command failed.")
+        stderr = result.stderr.strip()
+        if not stderr:
+            raise RuntimeError("FFmpeg command failed.")
+        lines = stderr.splitlines()[-10:]
+        message = "\n".join(lines)
+        raise RuntimeError(message[-2000:])
 
 
 def build_render_asset(

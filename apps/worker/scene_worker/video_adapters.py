@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 import hashlib
 import re
+import warnings
 from pathlib import Path
 from textwrap import wrap
 from typing import Any, Callable
@@ -15,6 +16,9 @@ from PIL import Image, ImageDraw, ImageEnhance, ImageFont
 from .image_adapters import find_project_path, index_project_db, write_json
 from .settings import WorkerSettings
 
+
+Image.MAX_IMAGE_PIXELS = 64_000_000
+warnings.simplefilter("error", Image.DecompressionBombWarning)
 
 ProgressCallback = Callable[[str, str, float, str], None]
 CancelCallback = Callable[[], bool]
@@ -319,7 +323,7 @@ def load_source_image(project_path: Path, asset_id: str | None, width: int, heig
             media_path = project_path / payload.get("file", {}).get("path", "")
             try:
                 image = Image.open(media_path).convert("RGB")
-            except OSError:
+            except (OSError, Image.DecompressionBombError, Image.DecompressionBombWarning):
                 return None
             image.thumbnail((width, height), Image.Resampling.LANCZOS)
             canvas = Image.new("RGB", (width, height), (18, 17, 15))

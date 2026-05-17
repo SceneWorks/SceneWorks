@@ -8,6 +8,7 @@ import json
 import os
 import re
 import sqlite3
+import warnings
 from pathlib import Path
 from textwrap import wrap
 from typing import Any, Callable
@@ -17,6 +18,9 @@ from PIL import Image, ImageDraw, ImageFont
 
 from .settings import WorkerSettings
 
+
+Image.MAX_IMAGE_PIXELS = 64_000_000
+warnings.simplefilter("error", Image.DecompressionBombWarning)
 
 ProgressCallback = Callable[[str, str, float, str], None]
 CancelCallback = Callable[[], bool]
@@ -36,6 +40,7 @@ MODEL_TARGETS = {
         "family": "z-image",
         "supportsEdit": True,
         "steps": 8,
+        # Uses Turbo weights via ZImageImg2ImgPipeline until the dedicated Edit checkpoint is released.
         "repo": "Tongyi-MAI/Z-Image-Turbo",
         "adapter": "z_image_diffusers",
     },
@@ -411,7 +416,10 @@ def load_source_image(settings: WorkerSettings, request: ImageRequest) -> Image.
         source_path = find_asset_media_path(find_project_path(settings, request.project_id), request.source_asset_id)
     if not source_path:
         raise RuntimeError("Image edit jobs require a source image asset.")
-    image = Image.open(source_path).convert("RGB")
+    try:
+        image = Image.open(source_path).convert("RGB")
+    except (OSError, Image.DecompressionBombError, Image.DecompressionBombWarning) as exc:
+        raise RuntimeError(f"Source image could not be loaded safely: {source_path}") from exc
     return image.resize((request.width, request.height))
 
 

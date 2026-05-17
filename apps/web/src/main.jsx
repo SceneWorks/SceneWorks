@@ -176,6 +176,7 @@ function App() {
   const [projectName, setProjectName] = useState("");
   const [jobs, setJobs] = useState([]);
   const [workers, setWorkers] = useState([]);
+  const [queueSummary, setQueueSummary] = useState(null);
   const [models, setModels] = useState([]);
   const [loras, setLoras] = useState([]);
   const [assets, setAssets] = useState([]);
@@ -210,6 +211,12 @@ function App() {
   const latestImageAssets = useMemo(() => latestAssets.filter((asset) => asset.type === "image"), [latestAssets]);
   const latestVideoAssets = useMemo(() => latestAssets.filter((asset) => asset.type === "video"), [latestAssets]);
   const queueCounts = useMemo(() => {
+    if (queueSummary?.counts) {
+      return {
+        ...queueSummary.counts,
+        active: queueSummary.activeJobs?.length ?? jobs.filter((job) => !terminalStatuses.has(job.status)).length,
+      };
+    }
     return jobs.reduce(
       (counts, job) => {
         counts[job.status] = (counts[job.status] ?? 0) + 1;
@@ -300,11 +307,20 @@ function App() {
       setWorkers((items) => [worker, ...items.filter((item) => item.id !== worker.id)].sort(sortWorkers));
     }
 
+    function handleQueueUpdated(event) {
+      const summary = JSON.parse(event.data);
+      setQueueSummary(summary);
+      if (Array.isArray(summary.workers)) {
+        setWorkers(summary.workers.sort(sortWorkers));
+      }
+    }
+
     function connect() {
       const source = new EventSource(eventUrl("/api/v1/jobs/events", token));
       events = source;
       source.addEventListener("job.updated", handleJobUpdated);
       source.addEventListener("worker.updated", handleWorkerUpdated);
+      source.addEventListener("queue.updated", handleQueueUpdated);
       source.onopen = () => {
         reconnectAttempt = 0;
       };
@@ -343,6 +359,7 @@ function App() {
       setActiveProject((current) => current ?? projectItems[0] ?? null);
       setJobs(jobItems.sort(sortNewest));
       setWorkers(workerItems.sort(sortWorkers));
+      setQueueSummary(null);
       setModels(modelItems);
       setLoras(loraItems);
       setError("");
@@ -2238,7 +2255,9 @@ function QueueScreen({
 
 function JobRow({ job, jobAction }) {
   const canCancel = !terminalStatuses.has(job.status);
-  const canRepeat = actionStatuses.has(job.status);
+  const maxAttempts = 5;
+  const attempts = job.attempts ?? 1;
+  const canRepeat = actionStatuses.has(job.status) && attempts < maxAttempts;
   return (
     <article className={`job-row ${job.status}`}>
       <div className="job-main">
@@ -2253,6 +2272,7 @@ function JobRow({ job, jobAction }) {
         <span>Stage {job.stage}</span>
         <span>Elapsed {formatSeconds(job.elapsedSeconds)}</span>
         <span>GPU {job.assignedGpu ?? job.requestedGpu}</span>
+        <span>Attempt {attempts}/{maxAttempts}</span>
       </div>
       <div className="progress-track" aria-label={`${percent(job.progress)} complete`}>
         <span style={{ width: percent(job.progress) }} />
@@ -2308,4 +2328,9 @@ function sortWorkers(a, b) {
   return `${a.gpuId}-${a.id}`.localeCompare(`${b.gpuId}-${b.id}`);
 }
 
-createRoot(document.getElementById("root")).render(<App />);
+const rootElement = typeof document === "undefined" ? null : document.getElementById("root");
+if (rootElement) {
+  createRoot(rootElement).render(<App />);
+}
+
+export { App, eventUrl };

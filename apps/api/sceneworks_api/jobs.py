@@ -1,21 +1,33 @@
 from __future__ import annotations
 
 import asyncio
-from typing import Any
+from typing import Any, Literal
 
 from fastapi import APIRouter, HTTPException, Query, Request
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
 from .events import encode_sse
-from .jobs_store import JOB_STATUSES, JobsStore
+from .jobs_store import JOB_STATUSES, MAX_JOB_ATTEMPTS, JobsStore
 
 
 router = APIRouter(tags=["jobs"])
 
+JobType = Literal[
+    "placeholder",
+    "image_generate",
+    "image_edit",
+    "video_generate",
+    "video_extend",
+    "video_bridge",
+    "timeline_export",
+    "model_download",
+    "lora_import",
+]
+
 
 class JobCreateRequest(BaseModel):
-    type: str = Field(default="placeholder", min_length=1, max_length=80)
+    type: JobType = "placeholder"
     projectId: str | None = None
     projectName: str | None = None
     payload: dict[str, Any] = Field(default_factory=dict)
@@ -163,6 +175,8 @@ def retry_job(job_id: str, request: Request) -> dict:
         job = get_store(request).retry_job(job_id)
     except KeyError:
         raise HTTPException(status_code=404, detail="Job not found") from None
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     publish(request, "job.updated", job)
     publish(request, "queue.updated", queue_summary(request))
     return job
@@ -195,6 +209,7 @@ def queue_summary(request: Request) -> dict:
         "counts": counts,
         "activeJobs": [job for job in jobs if job["status"] not in ("completed", "failed", "canceled", "interrupted")],
         "workers": workers,
+        "maxJobAttempts": MAX_JOB_ATTEMPTS,
     }
 
 
