@@ -123,7 +123,7 @@
         {
           "provider": "huggingface",
           "repo": "Lightricks/LTX-2.3",
-          "files": []
+          "files": ["ltx-2.3-22b-dev.safetensors"]
         }
       ],
       "paths": {
