@@ -27,6 +27,7 @@ const requiredPaths = [
   "data/cache/.gitkeep",
   "docker-compose.yml",
   "docker/api.Dockerfile",
+  "docker/rust-api.Dockerfile",
   "docker/web.Dockerfile",
   "docker/worker.Dockerfile",
 ];
@@ -53,6 +54,8 @@ await assertContains("apps/api/sceneworks_api/jobs.py", "/jobs/events");
 await assertContains("Cargo.toml", "apps/rust-api");
 await assertContains("crates/sceneworks-core/src/lib.rs", "/api/v1/health");
 await assertContains("docker-compose.yml", "NVIDIA_VISIBLE_DEVICES");
+await assertContains("docker-compose.yml", "SCENEWORKS_API_DOCKERFILE");
+await assertContains("docker/rust-api.Dockerfile", "sceneworks-rust-api");
 await assertContains("README.md", "SCENEWORKS_ACCESS_TOKEN");
 
 console.log("SceneWorks scaffold check passed.");

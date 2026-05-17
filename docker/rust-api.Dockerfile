@@ -7,14 +7,16 @@ COPY crates ./crates
 COPY apps/rust-api ./apps/rust-api
 COPY apps/rust-worker ./apps/rust-worker
 
-RUN cargo build -p sceneworks-rust-worker --release
+RUN cargo build -p sceneworks-rust-api --release
 
 FROM debian:bookworm-slim
 
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends ca-certificates ffmpeg \
+    && apt-get install -y --no-install-recommends ca-certificates curl \
     && rm -rf /var/lib/apt/lists/*
 
-COPY --from=builder /app/target/release/sceneworks-rust-worker /usr/local/bin/sceneworks-rust-worker
+COPY --from=builder /app/target/release/sceneworks-rust-api /usr/local/bin/sceneworks-rust-api
 
-CMD ["sceneworks-rust-worker"]
+EXPOSE 8000
+
+CMD ["sceneworks-rust-api"]

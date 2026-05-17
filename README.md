@@ -13,6 +13,37 @@ This starts the local stack with Docker Compose:
 - Web: http://localhost:5173
 - API: http://localhost:8000/api/v1/health
 
+The default compose API runtime is Python. During the Rust migration, switch the
+same `api` service to the Rust API by setting these values in `.env` before
+running `npm run dev` or `npm run stack:up`:
+
+```text
+SCENEWORKS_API_RUNTIME=rust
+SCENEWORKS_API_DOCKERFILE=docker/rust-api.Dockerfile
+```
+
+Rollback is intentionally just as explicit:
+
+```text
+SCENEWORKS_API_RUNTIME=python
+SCENEWORKS_API_DOCKERFILE=docker/api.Dockerfile
+```
+
+Both API images keep the same compose service name, health URL, worker URL,
+host port, and mounted storage contracts. The API listens on
+`SCENEWORKS_API_PORT` inside the container and is exposed on the same host port.
+The web service receives `VITE_API_BASE_URL=http://localhost:${SCENEWORKS_API_PORT}`,
+and workers call `http://api:${SCENEWORKS_API_PORT}` on the compose network.
+
+API volume contracts are shared across Python and Rust:
+
+- `./data:/sceneworks/data` read/write for projects, models, LoRAs, and cache-backed app data.
+- `./config:/sceneworks/config:ro` read-only for manifests and app configuration.
+- `api-runtime:/sceneworks/runtime` read/write for runtime SQLite state, including `/sceneworks/runtime/jobs.db`.
+
+Both API runtimes expose `GET /api/v1/health`; compose checks it with `curl`
+inside the container so dependent services wait for the selected implementation.
+
 Run the lightweight scaffold checks:
 
 ```powershell
@@ -21,9 +52,9 @@ npm run check
 
 ## Rust Backend Migration
 
-The Rust backend workspace is scaffolded for the migration spine, but it is not
-wired into the default Docker runtime yet. The existing FastAPI API, Python
-worker, and React app remain the default development stack.
+The Rust backend workspace is wired as an opt-in Docker runtime for the
+migration spine. The existing FastAPI API, Python worker, and React app remain
+the default development stack, and the Python API remains the rollback path.
 
 Install a Rust toolchain with `rustfmt` and `clippy`, then use:
 
@@ -40,8 +71,11 @@ Or run the full Rust verification sequence:
 npm run rust:check
 ```
 
-To point workers at the Rust API during migration testing, start the Rust API
-binary on port 8000 and run the worker with `SCENEWORKS_API_URL=http://localhost:8000`.
+To point host-mode workers at the Rust API during migration testing, start the
+Rust API binary on port 8000 and run the worker with
+`SCENEWORKS_API_URL=http://localhost:8000`. In Docker Compose, the API runtime
+switch above keeps `SCENEWORKS_API_URL` wired to the selected `api` service
+automatically.
 The `sceneworks-rust-worker` binary handles CPU utility jobs for model downloads,
 LoRA imports, FFmpeg frame extraction, and timeline MP4 exports. Set
 `SCENEWORKS_GPU_ID=auto` to let the Rust worker supervise one child per visible
@@ -94,8 +128,8 @@ For offline development or deterministic Rust API tests, set `SCENEWORKS_DISABLE
 ```text
 apps/
   web/       React + Vite app shell
-  api/       FastAPI service and backend filesystem owner
-  rust-api/  Rust backend migration scaffold, not in the default runtime
+  api/       FastAPI service and default backend filesystem owner
+  rust-api/  Rust backend migration API, available through the Docker runtime switch
   rust-worker/ Rust CPU utility worker for model downloads, LoRA imports, frame extraction, and timeline exports
   worker/    Placeholder worker package
 crates/
