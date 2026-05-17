@@ -42,15 +42,20 @@ class ApiClient:
         return response.json()
 
 
+def worker_capabilities(gpu: dict) -> list[str]:
+    gpu_capabilities = set(gpu["capabilities"])
+    capabilities = set(gpu["capabilities"]) | {"timeline_export", "model_download", "lora_import"}
+    if "cpu" not in gpu_capabilities and "gpu" in gpu_capabilities:
+        capabilities |= {"image_generate", "image_edit", "video_generate", "video_extend", "video_bridge"}
+    return sorted(capabilities)
+
+
 def register_worker(api: ApiClient, settings: WorkerSettings, gpu: dict) -> None:
     payload = {
         "workerId": settings.worker_id,
         "gpuId": gpu["id"],
         "gpuName": gpu["name"],
-        "capabilities": sorted(
-            set([*gpu["capabilities"], "image_generate", "image_edit", "video_generate", "video_extend", "video_bridge"])
-            | {"timeline_export", "model_download", "lora_import"}
-        ),
+        "capabilities": worker_capabilities(gpu),
         "loadedModels": [],
     }
     worker = api.post("/api/v1/workers/register", payload)
@@ -508,14 +513,27 @@ def main() -> None:
     settings = WorkerSettings()
     gpu = discover_gpu(settings.gpu_id)
     api = ApiClient(settings)
+    max_registration_attempts = 20
 
-    while True:
+    for attempt in range(1, max_registration_attempts + 1):
         try:
             register_worker(api, settings, gpu)
             break
         except httpx.HTTPError as exc:
-            emit({"event": "register_failed", "error": str(exc), "reportedAt": now()})
-            time.sleep(settings.poll_seconds)
+            delay = min(30, settings.poll_seconds * (2 ** (attempt - 1)))
+            emit(
+                {
+                    "event": "register_failed",
+                    "attempt": attempt,
+                    "maxAttempts": max_registration_attempts,
+                    "retryInSeconds": delay,
+                    "error": str(exc),
+                    "reportedAt": now(),
+                }
+            )
+            if attempt == max_registration_attempts:
+                raise RuntimeError(f"Worker registration failed after {max_registration_attempts} attempts.") from exc
+            time.sleep(delay)
 
     while True:
         try:

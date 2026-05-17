@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import re
+from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
@@ -68,20 +69,29 @@ def strip_jsonc_comments(value: str) -> str:
     return "".join(output)
 
 
-def load_manifest(path: Path) -> list[dict[str, Any]]:
+def manifest_mtime(path: Path) -> int:
+    try:
+        return path.stat().st_mtime_ns
+    except FileNotFoundError:
+        return 0
+
+
+@lru_cache(maxsize=16)
+def load_manifest_cached(path_text: str, mtime_ns: int, key: str) -> tuple[dict[str, Any], ...]:
+    path = Path(path_text)
     if not path.exists():
-        return []
+        return ()
     with path.open("r", encoding="utf-8") as handle:
         payload = json.loads(strip_jsonc_comments(handle.read()))
-    return payload.get("models", [])
+    return tuple(payload.get(key, []))
+
+
+def load_manifest(path: Path) -> list[dict[str, Any]]:
+    return [dict(item) for item in load_manifest_cached(str(path), manifest_mtime(path), "models")]
 
 
 def load_lora_manifest(path: Path) -> list[dict[str, Any]]:
-    if not path.exists():
-        return []
-    with path.open("r", encoding="utf-8") as handle:
-        payload = json.loads(strip_jsonc_comments(handle.read()))
-    return payload.get("loras", [])
+    return [dict(item) for item in load_manifest_cached(str(path), manifest_mtime(path), "loras")]
 
 
 def safe_download_dir(repo: str) -> str:

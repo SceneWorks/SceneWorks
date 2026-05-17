@@ -1,4 +1,5 @@
 from collections.abc import Awaitable, Callable
+from secrets import compare_digest
 
 from fastapi import Request, Response
 from fastapi.responses import JSONResponse
@@ -34,7 +35,9 @@ def is_authorized(request: Request, settings: Settings) -> bool:
     if not settings.access_token:
         return True
 
-    return token_from_request(request) == settings.access_token
+    request_token = token_from_request(request).encode("utf-8")
+    expected_token = settings.access_token.encode("utf-8")
+    return compare_digest(request_token, expected_token)
 
 
 async def access_control_middleware(

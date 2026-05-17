@@ -13,6 +13,7 @@ ACTIVE_STATUSES = ("preparing", "downloading", "loading_model", "running", "savi
 TERMINAL_STATUSES = ("completed", "failed", "canceled", "interrupted")
 JOB_STATUSES = ("queued", *ACTIVE_STATUSES, *TERMINAL_STATUSES)
 NON_GPU_JOB_TYPES = ("model_download", "lora_import")
+MAX_JOB_ATTEMPTS = 5
 
 
 def utc_now() -> str:
@@ -256,6 +257,8 @@ class JobsStore:
     def retry_job(self, job_id: str) -> dict:
         with self._lock, self.connect() as connection:
             job = self.get_job(job_id, connection=connection)
+        if job["attempts"] >= MAX_JOB_ATTEMPTS:
+            raise ValueError(f"Job retry limit reached after {MAX_JOB_ATTEMPTS} attempts.")
         return self.create_job(
             job_type=job["type"],
             project_id=job["projectId"],
@@ -406,6 +409,7 @@ class JobsStore:
         with self._lock, self.connect() as connection:
             worker = self.get_worker(worker_id, connection=connection)
             gpu_id = worker["gpuId"]
+            capabilities = set(worker["capabilities"])
             active_gpu_job = connection.execute(
                 f"""
                 select id from jobs
@@ -417,17 +421,18 @@ class JobsStore:
                 (gpu_id, *ACTIVE_STATUSES, *NON_GPU_JOB_TYPES),
             ).fetchone()
 
-            queued = connection.execute(
+            queued_rows = connection.execute(
                 f"""
                 select * from jobs
                  where status = 'queued'
                    and (type in ({','.join('?' for _ in NON_GPU_JOB_TYPES)}) or requested_gpu = 'auto' or requested_gpu = ?)
                    and (? = 0 or type in ({','.join('?' for _ in NON_GPU_JOB_TYPES)}))
                  order by created_at asc
-                 limit 1
+                 limit 50
                 """,
                 (*NON_GPU_JOB_TYPES, gpu_id, int(active_gpu_job is not None), *NON_GPU_JOB_TYPES),
-            ).fetchone()
+            ).fetchall()
+            queued = next((row for row in queued_rows if row["type"] in capabilities), None)
             if queued is None:
                 return None
             assigned_gpu = "cpu" if queued["type"] in NON_GPU_JOB_TYPES else gpu_id
