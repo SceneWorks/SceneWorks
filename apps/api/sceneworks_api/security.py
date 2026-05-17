@@ -11,14 +11,11 @@ PUBLIC_PATHS = {
     "/api/v1/health",
     "/api/v1/access",
     "/api/v1/auth/verify",
+    "/api/v1/jobs/events",
 }
 
 
 def token_from_request(request: Request) -> str:
-    query_token = request.query_params.get("token", "").strip()
-    if query_token:
-        return query_token
-
     header_token = request.headers.get("x-sceneworks-token", "").strip()
     if header_token:
         return header_token

@@ -10,4 +10,6 @@ Current routes:
 - `GET /api/v1/projects`
 - `POST /api/v1/projects`
 - `GET /api/v1/projects/{project_id}`
+- `POST /api/v1/projects/{project_id}/reindex`
+- `POST /api/v1/jobs/events/ticket`
 - `GET /api/v1/jobs/events`

@@ -13,6 +13,7 @@ COPY apps/worker/requirements.txt ./requirements.txt
 RUN pip install --no-cache-dir -r requirements.txt
 
 COPY apps/worker ./apps/worker
-ENV PYTHONPATH=/app/apps/worker
+COPY packages/shared ./packages/shared
+ENV PYTHONPATH=/app/apps/worker:/app/packages/shared
 
 CMD ["python", "-m", "scene_worker"]

@@ -48,6 +48,9 @@ describe("SceneWorks app shell", () => {
       if (path.endsWith("/access")) {
         return Promise.resolve(response({ authRequired: false }));
       }
+      if (path.endsWith("/jobs/events/ticket")) {
+        return Promise.resolve(response({ ticket: "stream-ticket" }));
+      }
       return Promise.resolve(response([]));
     });
   });
@@ -71,7 +74,7 @@ describe("SceneWorks app shell", () => {
     expect(container.textContent).toContain("Queue");
   });
 
-  it("adds the SSE token as a query parameter", () => {
-    expect(eventUrl("/api/v1/jobs/events", "secret-token")).toContain("token=secret-token");
+  it("adds the SSE ticket as a query parameter", () => {
+    expect(eventUrl("/api/v1/jobs/events", "stream-ticket")).toContain("ticket=stream-ticket");
   });
 });

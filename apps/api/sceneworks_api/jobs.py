@@ -112,8 +112,15 @@ def create_job(payload: JobCreateRequest, request: Request) -> dict:
     return job
 
 
+@router.post("/jobs/events/ticket")
+def create_event_ticket(request: Request) -> dict[str, Any]:
+    return request.app.state.event_ticket_store.issue()
+
+
 @router.get("/jobs/events")
-async def job_events(request: Request) -> StreamingResponse:
+async def job_events(request: Request, ticket: str = Query(default="")) -> StreamingResponse:
+    if request.app.state.settings.access_token:
+        request.app.state.event_ticket_store.consume(ticket)
     queue = await request.app.state.event_hub.subscribe()
 
     async def stream():

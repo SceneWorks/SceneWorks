@@ -2,9 +2,7 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from datetime import UTC, datetime
 import hashlib
-import re
 import warnings
 from pathlib import Path
 from textwrap import wrap
@@ -12,6 +10,8 @@ from typing import Any, Callable
 from uuid import uuid4
 
 from PIL import Image, ImageDraw, ImageEnhance, ImageFont
+
+from sceneworks_shared import find_asset_sidecar_path, read_json, safe_float, safe_int, slugify, utc_now
 
 from .image_adapters import find_project_path, index_project_db, write_json
 from .settings import WorkerSettings
@@ -153,7 +153,7 @@ class ProceduralVideoAdapter(VideoGenerationAdapter):
         seed = resolve_seed(request.seed, request.prompt)
         target = model_target(request.model)
         raw_settings = self.map_settings(request, target)
-        filename_base = f"{created_at[:10]}_{request.model}_{slugify(request.prompt)}"
+        filename_base = f"{created_at[:10]}_{request.model}_{slugify(request.prompt, fallback='video', max_length=42)}"
         media_rel = f"assets/videos/{filename_base}.webp"
         media_path = project_path / media_rel
         temp_path = media_path.with_suffix(".tmp.webp")
@@ -260,31 +260,6 @@ def model_target(model_id: str) -> dict[str, Any]:
     return VIDEO_MODEL_TARGETS.get(model_id, VIDEO_MODEL_TARGETS["ltx_2_3"])
 
 
-def utc_now() -> str:
-    return datetime.now(UTC).replace(microsecond=0).isoformat().replace("+00:00", "Z")
-
-
-def slugify(value: str) -> str:
-    slug = re.sub(r"[^a-zA-Z0-9]+", "-", value.strip()).strip("-").lower()
-    return (slug or "video")[:42]
-
-
-def safe_int(value: Any, default: int, minimum: int, maximum: int) -> int:
-    try:
-        parsed = int(value)
-    except (TypeError, ValueError):
-        return default
-    return max(minimum, min(maximum, parsed))
-
-
-def safe_float(value: Any, default: float, minimum: float, maximum: float) -> float:
-    try:
-        parsed = float(value)
-    except (TypeError, ValueError):
-        return default
-    return max(minimum, min(maximum, parsed))
-
-
 def normalized_dimensions(width: Any, height: Any) -> tuple[int, int]:
     parsed_width = safe_int(width, 768, 256, 1920)
     parsed_height = safe_int(height, 512, 256, 1920)
@@ -310,25 +285,19 @@ def preview_frame_count(request: VideoRequest) -> int:
 def load_source_image(project_path: Path, asset_id: str | None, width: int, height: int) -> Image.Image | None:
     if not asset_id:
         return None
-    for folder in ASSET_FOLDERS:
-        for sidecar_path in (project_path / folder).glob("*.sceneworks.json"):
-            try:
-                import json
-
-                payload = json.loads(sidecar_path.read_text(encoding="utf-8"))
-            except (OSError, ValueError):
-                continue
-            if payload.get("id") != asset_id:
-                continue
-            media_path = project_path / payload.get("file", {}).get("path", "")
-            try:
-                image = Image.open(media_path).convert("RGB")
-            except (OSError, Image.DecompressionBombError, Image.DecompressionBombWarning):
-                return None
-            image.thumbnail((width, height), Image.Resampling.LANCZOS)
-            canvas = Image.new("RGB", (width, height), (18, 17, 15))
-            canvas.paste(image, ((width - image.width) // 2, (height - image.height) // 2))
-            return canvas
+    sidecar_path = find_asset_sidecar_path(project_path, asset_id)
+    if sidecar_path is None:
+        return None
+    payload = read_json(sidecar_path)
+    media_path = project_path / payload.get("file", {}).get("path", "")
+    try:
+        image = Image.open(media_path).convert("RGB")
+    except (OSError, Image.DecompressionBombError, Image.DecompressionBombWarning):
+        return None
+    image.thumbnail((width, height), Image.Resampling.LANCZOS)
+    canvas = Image.new("RGB", (width, height), (18, 17, 15))
+    canvas.paste(image, ((width - image.width) // 2, (height - image.height) // 2))
+    return canvas
     return None
 
 
@@ -362,19 +331,18 @@ def render_preview_frames(
 
 
 def gradient_frame(width: int, height: int, digest: bytes) -> Image.Image:
-    base = (digest[0], digest[1], digest[2])
-    accent = (digest[10], digest[11], digest[12])
-    image = Image.new("RGB", (width, height), base)
-    pixels = image.load()
-    for y in range(height):
-        for x in range(width):
-            mix = (x / max(1, width - 1) * 0.58) + (y / max(1, height - 1) * 0.42)
-            wave = ((x * digest[3] + y * digest[4]) % 255) / 255
-            pixels[x, y] = tuple(
-                int(base[channel] * (1 - mix) + accent[channel] * mix * 0.88 + wave * 28)
-                for channel in range(3)
-            )
-    return image
+    import numpy as np
+
+    base = np.array([digest[0], digest[1], digest[2]], dtype=np.float32)
+    accent = np.array([digest[10], digest[11], digest[12]], dtype=np.float32)
+    x = np.linspace(0, 1, width, dtype=np.float32)[None, :]
+    y = np.linspace(0, 1, height, dtype=np.float32)[:, None]
+    mix = x * 0.58 + y * 0.42
+    xi = np.arange(width, dtype=np.uint32)[None, :]
+    yi = np.arange(height, dtype=np.uint32)[:, None]
+    wave = ((xi * digest[3] + yi * digest[4]) % 255).astype(np.float32) / 255
+    pixels = base * (1 - mix[..., None]) + accent * mix[..., None] * 0.88 + wave[..., None] * 28
+    return Image.fromarray(np.clip(pixels, 0, 255).astype(np.uint8), "RGB")
 
 
 def draw_motion(frame: Image.Image, digest: bytes, index: int, frame_count: int) -> None:

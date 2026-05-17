@@ -8,16 +8,13 @@ from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
+from sceneworks_shared import utc_now
 
 ACTIVE_STATUSES = ("preparing", "downloading", "loading_model", "running", "saving")
 TERMINAL_STATUSES = ("completed", "failed", "canceled", "interrupted")
 JOB_STATUSES = ("queued", *ACTIVE_STATUSES, *TERMINAL_STATUSES)
 NON_GPU_JOB_TYPES = ("model_download", "lora_import")
 MAX_JOB_ATTEMPTS = 5
-
-
-def utc_now() -> str:
-    return datetime.now(UTC).replace(microsecond=0).isoformat().replace("+00:00", "Z")
 
 
 def dumps(value: Any) -> str:

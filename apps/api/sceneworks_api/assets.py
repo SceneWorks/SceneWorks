@@ -13,7 +13,17 @@ from fastapi import APIRouter, File, HTTPException, Query, Request, UploadFile
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 
-from .projects import find_project_path, utc_now
+from sceneworks_shared import (
+    ensure_project_db_ready,
+    find_asset_sidecar_path,
+    index_asset,
+    purge_asset,
+    read_json,
+    utc_now,
+    write_json,
+)
+
+from .projects import find_project_path
 
 
 router = APIRouter(prefix="/projects/{project_id}", tags=["assets"])
@@ -28,17 +38,6 @@ class AssetStatusUpdate(BaseModel):
     rating: int | None = Field(default=None, ge=0, le=5)
     rejected: bool | None = None
     trashed: bool | None = None
-
-
-def read_json(path: Path) -> dict[str, Any]:
-    with path.open("r", encoding="utf-8") as handle:
-        return json.load(handle)
-
-
-def write_json(path: Path, payload: dict[str, Any]) -> None:
-    with path.open("w", encoding="utf-8") as handle:
-        json.dump(payload, handle, indent=2)
-        handle.write("\n")
 
 
 def safe_filename(value: str, fallback: str = "upload") -> str:
@@ -57,44 +56,7 @@ def media_type_for_mime(mime_type: str) -> str:
 
 
 def index_asset_db(project_path: Path, asset: dict[str, Any]) -> None:
-    db_path = project_path / "project.db"
-    with sqlite3.connect(db_path) as connection:
-        connection.execute(
-            """
-            create table if not exists assets (
-              id text primary key,
-              type text not null,
-              display_name text not null,
-              file_path text not null,
-              generation_set_id text,
-              created_at text not null,
-              favorite integer not null default 0,
-              rating integer not null default 0,
-              rejected integer not null default 0,
-              trashed integer not null default 0
-            )
-            """
-        )
-        connection.execute(
-            """
-            insert or replace into assets (
-              id, type, display_name, file_path, generation_set_id, created_at,
-              favorite, rating, rejected, trashed
-            ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            (
-                asset["id"],
-                asset["type"],
-                asset["displayName"],
-                asset["file"]["path"],
-                asset.get("generationSetId"),
-                asset["createdAt"],
-                int(asset["status"]["favorite"]),
-                int(asset["status"]["rating"]),
-                int(asset["status"]["rejected"]),
-                int(asset["status"]["trashed"]),
-            ),
-        )
+    index_asset(project_path, asset, (project_path / asset["file"]["path"]).with_suffix(".sceneworks.json"))
 
 
 def normalize_asset(project_id: str, project_path: Path, sidecar_path: Path) -> dict[str, Any]:
@@ -108,14 +70,9 @@ def normalize_asset(project_id: str, project_path: Path, sidecar_path: Path) -> 
 
 
 def find_asset_sidecar(project_path: Path, asset_id: str) -> Path:
-    for folder in MEDIA_FOLDERS:
-        for sidecar_path in (project_path / folder).glob(ASSET_SIDECAR_PATTERN):
-            try:
-                payload = read_json(sidecar_path)
-            except (OSError, json.JSONDecodeError):
-                continue
-            if payload.get("id") == asset_id:
-                return sidecar_path
+    sidecar_path = find_asset_sidecar_path(project_path, asset_id)
+    if sidecar_path is not None:
+        return sidecar_path
     raise HTTPException(status_code=404, detail="Asset not found")
 
 
@@ -128,20 +85,36 @@ def list_assets(
 ) -> list[dict[str, Any]]:
     project_path = find_project_path(request.app.state.settings, project_id)
     assets = []
-    for folder in MEDIA_FOLDERS:
-        for sidecar_path in (project_path / folder).glob(ASSET_SIDECAR_PATTERN):
+    ensure_project_db_ready(project_path)
+    with sqlite3.connect(project_path / "project.db") as connection:
+        rows = connection.execute(
+            """
+            select sidecar_path, file_path
+              from assets
+             where (? or rejected = 0)
+               and (? or trashed = 0)
+             order by created_at desc
+            """,
+            (int(includeRejected), int(includeTrashed)),
+        ).fetchall()
+
+    for sidecar_rel, file_rel in rows:
+        candidates = []
+        if sidecar_rel:
+            candidates.append(project_path / sidecar_rel)
+        if file_rel:
+            candidates.append((project_path / file_rel).with_suffix(".sceneworks.json"))
+        for sidecar_path in candidates:
+            if not sidecar_path.exists():
+                continue
             try:
                 asset = normalize_asset(project_id, project_path, sidecar_path)
             except (OSError, json.JSONDecodeError):
                 continue
-            status = asset.get("status", {})
-            if status.get("rejected") and not includeRejected:
-                continue
-            if status.get("trashed") and not includeTrashed:
-                continue
             assets.append(asset)
+            break
 
-    return sorted(assets, key=lambda item: item.get("createdAt", ""), reverse=True)
+    return assets
 
 
 @router.post("/assets", status_code=201)
@@ -245,11 +218,38 @@ def delete_asset(project_id: str, asset_id: str, request: Request) -> dict[str, 
     sidecar_path = find_asset_sidecar(project_path, asset_id)
     asset = read_json(sidecar_path)
     media_path = project_path / asset.get("file", {}).get("path", "")
+    status = asset.setdefault("status", {})
+    status["trashed"] = True
+
+    trash_dir = project_path / "trash" / asset_id
+    trash_dir.mkdir(parents=True, exist_ok=True)
+    if media_path.exists() and media_path.is_file():
+        trashed_media_path = trash_dir / media_path.name
+        shutil.move(str(media_path), trashed_media_path)
+        asset["file"]["path"] = str(trashed_media_path.relative_to(project_path)).replace("\\", "/")
+    trashed_sidecar_path = trash_dir / sidecar_path.name
+    write_json(trashed_sidecar_path, asset)
+    if sidecar_path != trashed_sidecar_path:
+        sidecar_path.unlink(missing_ok=True)
+    index_asset(project_path, asset, trashed_sidecar_path)
+    return {"id": asset_id, "status": "trashed"}
+
+
+@router.delete("/assets/{asset_id}/purge")
+def purge_deleted_asset(project_id: str, asset_id: str, request: Request) -> dict[str, str]:
+    project_path = find_project_path(request.app.state.settings, project_id)
+    sidecar_path = find_asset_sidecar(project_path, asset_id)
+    asset = read_json(sidecar_path)
+    media_path = project_path / asset.get("file", {}).get("path", "")
 
     if media_path.exists() and media_path.is_file():
         media_path.unlink()
-    sidecar_path.unlink()
-    return {"id": asset_id, "status": "deleted"}
+    sidecar_path.unlink(missing_ok=True)
+    parent = sidecar_path.parent
+    if parent.name == asset_id and parent.parent == project_path / "trash":
+        shutil.rmtree(parent, ignore_errors=True)
+    purge_asset(project_path, asset_id)
+    return {"id": asset_id, "status": "purged"}
 
 
 @router.get("/files/{relative_path:path}")

@@ -8,6 +8,7 @@ services:
       SCENEWORKS_API_PORT: ${SCENEWORKS_API_PORT:-8000}
       SCENEWORKS_DATA_DIR: /sceneworks/data
       SCENEWORKS_CONFIG_DIR: /sceneworks/config
+      SCENEWORKS_JOBS_DB_PATH: /sceneworks/runtime/jobs.db
       SCENEWORKS_ACCESS_TOKEN: ${SCENEWORKS_ACCESS_TOKEN:-}
       SCENEWORKS_CORS_ORIGINS: ${SCENEWORKS_CORS_ORIGINS:-http://localhost:5173,http://127.0.0.1:5173,http://localhost:5174,http://127.0.0.1:5174,http://localhost:5175,http://127.0.0.1:5175,http://localhost:5176,http://127.0.0.1:5176}
     ports:
@@ -15,6 +16,7 @@ services:
     volumes:
       - ./data:/sceneworks/data
       - ./config:/sceneworks/config:ro
+      - api-runtime:/sceneworks/runtime
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/v1/health', timeout=3).read()"]
       interval: 20s
@@ -68,3 +70,6 @@ services:
       timeout: 5s
       retries: 3
       start_period: 20s
+
+volumes:
+  api-runtime:
