@@ -42,8 +42,8 @@ npm run rust:check
 
 To point workers at the Rust API during migration testing, start the Rust API
 binary on port 8000 and run the worker with `SCENEWORKS_API_URL=http://localhost:8000`.
-The `sceneworks-rust-worker` binary handles CPU utility jobs for model downloads
-and LoRA imports.
+The `sceneworks-rust-worker` binary handles CPU utility jobs for model downloads,
+LoRA imports, FFmpeg frame extraction, and timeline MP4 exports.
 
 When running the stack outside Docker Compose, start `sceneworks-rust-worker`
 alongside the API if you want `model_download` and `lora_import` jobs to be

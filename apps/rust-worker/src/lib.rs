@@ -1,6 +1,7 @@
 use std::collections::BTreeMap;
 use std::fmt;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 use std::time::{Duration, Instant};
 
 use reqwest::header;
@@ -10,6 +11,7 @@ use sceneworks_core::contracts::{
     ProgressRequest, ProgressStage, WorkerCapability, WorkerHeartbeatRequest,
     WorkerRegisterRequest, WorkerSnapshot, WorkerStatus,
 };
+use sceneworks_core::project_store::{ProjectStore, ProjectStoreError};
 use serde::Deserialize;
 use serde_json::{json, Number, Value};
 use time::format_description::well_known::Rfc3339;
@@ -71,6 +73,7 @@ pub enum WorkerError {
     Http(reqwest::Error),
     Io(std::io::Error),
     Json(serde_json::Error),
+    ProjectStore(ProjectStoreError),
     Api { status: StatusCode, detail: String },
     InvalidPayload(String),
     Canceled(String),
@@ -82,6 +85,7 @@ impl fmt::Display for WorkerError {
             Self::Http(error) => write!(formatter, "{error}"),
             Self::Io(error) => write!(formatter, "{error}"),
             Self::Json(error) => write!(formatter, "{error}"),
+            Self::ProjectStore(error) => write!(formatter, "{error}"),
             Self::Api { status, detail } => write!(formatter, "API {status}: {detail}"),
             Self::InvalidPayload(detail) => formatter.write_str(detail),
             Self::Canceled(detail) => formatter.write_str(detail),
@@ -106,6 +110,12 @@ impl From<std::io::Error> for WorkerError {
 impl From<serde_json::Error> for WorkerError {
     fn from(value: serde_json::Error) -> Self {
         Self::Json(value)
+    }
+}
+
+impl From<ProjectStoreError> for WorkerError {
+    fn from(value: ProjectStoreError) -> Self {
+        Self::ProjectStore(value)
     }
 }
 
@@ -239,6 +249,8 @@ async fn register_worker(api: &ApiClient, settings: &Settings) -> WorkerResult<W
             gpu_name: Some("Rust CPU utility worker".to_owned()),
             capabilities: vec![
                 WorkerCapability::Cpu,
+                WorkerCapability::FrameExtract,
+                WorkerCapability::TimelineExport,
                 WorkerCapability::ModelDownload,
                 WorkerCapability::LoraImport,
             ],
@@ -280,6 +292,12 @@ async fn run_utility_job(
         JobType::LoraImport => run_lora_import_job(api, settings, http_client, &job)
             .await
             .map_err(|error| ("LoRA import failed.", error)),
+        JobType::FrameExtract => run_frame_extract_job(api, settings, &job)
+            .await
+            .map_err(|error| ("Frame extraction failed.", error)),
+        JobType::TimelineExport => run_timeline_export_job(api, settings, &job)
+            .await
+            .map_err(|error| ("Timeline export failed.", error)),
         _ => {
             let result = fail_job(
                 api,
@@ -528,6 +546,437 @@ async fn run_lora_import_job(
             ProgressStage::Completed,
             1.0,
             "LoRA import completed.",
+            None,
+            Some(result),
+            None,
+        ),
+    )
+    .await?;
+    Ok(())
+}
+
+#[derive(Debug, Clone)]
+struct TimelineExportRequest {
+    project_id: String,
+    timeline_id: String,
+    timeline_name: String,
+    timeline_path: String,
+    resolution: u32,
+    fps: u32,
+}
+
+async fn run_frame_extract_job(
+    api: &ApiClient,
+    settings: &Settings,
+    job: &JobSnapshot,
+) -> WorkerResult<()> {
+    heartbeat(api, settings, WorkerStatus::Busy, Some(&job.id)).await?;
+    update_job(
+        api,
+        &job.id,
+        progress_payload(
+            JobStatus::Preparing,
+            ProgressStage::Preparing,
+            0.08,
+            "Preparing frame extraction.",
+            None,
+            None,
+            None,
+        ),
+    )
+    .await?;
+    check_cancel(
+        api,
+        &job.id,
+        "Frame extraction canceled before reading media.",
+    )
+    .await?;
+
+    update_job(
+        api,
+        &job.id,
+        progress_payload(
+            JobStatus::Running,
+            ProgressStage::Extracting,
+            0.25,
+            "Extracting timeline frame.",
+            None,
+            None,
+            None,
+        ),
+    )
+    .await?;
+    let result = run_frame_extract(settings, job).await?;
+    update_job(
+        api,
+        &job.id,
+        progress_payload(
+            JobStatus::Completed,
+            ProgressStage::Completed,
+            1.0,
+            "Timeline frame saved as an asset.",
+            None,
+            Some(result),
+            None,
+        ),
+    )
+    .await?;
+    Ok(())
+}
+
+async fn run_frame_extract(settings: &Settings, job: &JobSnapshot) -> WorkerResult<JsonObject> {
+    let project_id = required_payload_string(&job.payload, "projectId")?;
+    let source_asset_id = required_payload_string(&job.payload, "sourceAssetId")?;
+    let timestamp = payload_f64(&job.payload, "sourceTimestamp", 0.0).clamp(0.0, 3600.0);
+    let store = ProjectStore::new(settings.data_dir.clone(), "worker");
+    let project = store.get_project(project_id)?;
+    let project_path = PathBuf::from(project.path);
+    let source_asset = store.get_asset(project_id, source_asset_id)?;
+    let source_media_rel = required_value_str(
+        source_asset.get("file").ok_or_else(|| {
+            WorkerError::InvalidPayload("Source asset file is missing.".to_owned())
+        })?,
+        "path",
+    )?;
+    let source_media_path = safe_project_path(&project_path, source_media_rel)?;
+    if !source_media_path.exists() {
+        return Err(WorkerError::InvalidPayload(format!(
+            "Source media not found: {}",
+            source_media_path.display()
+        )));
+    }
+
+    let frames_dir = project_path.join("assets").join("frames");
+    std::fs::create_dir_all(&frames_dir)?;
+    std::fs::create_dir_all(project_path.join("recipes"))?;
+    let asset_id = fresh_asset_id(&job.id);
+    let created_at = now_rfc3339();
+    let filename = format!(
+        "{}_frame_{}.png",
+        &created_at[..10],
+        asset_suffix(&asset_id)
+    );
+    let media_rel = format!("assets/frames/{filename}");
+    let media_path = project_path.join(&media_rel);
+    let temp_path = media_path.with_extension("tmp.png");
+
+    render_frame_png(
+        "ffmpeg",
+        &source_media_path,
+        &temp_path,
+        timestamp,
+        1920,
+        1080,
+    )?;
+    std::fs::rename(&temp_path, &media_path)?;
+
+    let timeline_id = job
+        .payload
+        .get("timelineId")
+        .cloned()
+        .unwrap_or(Value::Null);
+    let timeline_item_id = job
+        .payload
+        .get("timelineItemId")
+        .cloned()
+        .unwrap_or(Value::Null);
+    let playhead_seconds = job
+        .payload
+        .get("playheadSeconds")
+        .cloned()
+        .unwrap_or(Value::Null);
+    let intended_use = optional_payload_string(&job.payload, "intendedUse").unwrap_or("reuse");
+    let source_display_name = source_asset
+        .get("displayName")
+        .and_then(Value::as_str)
+        .unwrap_or("clip");
+    let source_rel = relative_path(&project_path, &source_media_path)?;
+    let asset = json!({
+        "schemaVersion": 1,
+        "id": asset_id.clone(),
+        "projectId": project_id,
+        "generationSetId": Value::Null,
+        "type": "frame",
+        "displayName": format!("Frame {timestamp:.2}s from {source_display_name}"),
+        "createdAt": created_at,
+        "file": {
+            "path": media_rel,
+            "mimeType": "image/png",
+            "width": 1920,
+            "height": 1080,
+            "duration": Value::Null,
+            "fps": Value::Null
+        },
+        "status": {
+            "favorite": false,
+            "rating": 0,
+            "rejected": false,
+            "trashed": false
+        },
+        "recipe": {
+            "mode": "frame_extract",
+            "model": "timeline-frame-extract",
+            "adapter": "ffmpeg-frame-extract",
+            "prompt": format!("Extract frame at {timestamp:.2}s"),
+            "negativePrompt": "",
+            "seed": 0,
+            "loras": [],
+            "stylePreset": "none",
+            "normalizedSettings": {
+                "timelineId": timeline_id,
+                "timelineItemId": timeline_item_id,
+                "playheadSeconds": playhead_seconds,
+                "sourceTimestamp": timestamp,
+                "intendedUse": intended_use
+            },
+            "rawAdapterSettings": { "sourcePath": source_rel }
+        },
+        "lineage": {
+            "parents": [source_asset_id],
+            "sourceAssetId": source_asset_id,
+            "sourceTimestamp": timestamp,
+            "timelineId": job.payload.get("timelineId").cloned().unwrap_or(Value::Null),
+            "timelineItemId": job.payload.get("timelineItemId").cloned().unwrap_or(Value::Null),
+            "intendedUse": intended_use,
+            "jobId": job.id
+        }
+    });
+    write_json_value(&media_path.with_extension("sceneworks.json"), &asset)?;
+    write_json_value(
+        &project_path
+            .join("recipes")
+            .join(format!("{asset_id}.recipe.json")),
+        &asset["recipe"],
+    )?;
+    store.reindex_project(project_id)?;
+
+    let mut result = JsonObject::new();
+    result.insert("assetIds".to_owned(), json!([asset_id]));
+    result.insert("assets".to_owned(), json!([asset]));
+    result.insert(
+        "sourceAssetId".to_owned(),
+        Value::String(source_asset_id.to_owned()),
+    );
+    result.insert("sourceTimestamp".to_owned(), json!(timestamp));
+    result.insert(
+        "timelineId".to_owned(),
+        job.payload
+            .get("timelineId")
+            .cloned()
+            .unwrap_or(Value::Null),
+    );
+    result.insert(
+        "timelineItemId".to_owned(),
+        job.payload
+            .get("timelineItemId")
+            .cloned()
+            .unwrap_or(Value::Null),
+    );
+    Ok(result)
+}
+
+async fn run_timeline_export_job(
+    api: &ApiClient,
+    settings: &Settings,
+    job: &JobSnapshot,
+) -> WorkerResult<()> {
+    heartbeat(api, settings, WorkerStatus::Busy, Some(&job.id)).await?;
+    update_job(
+        api,
+        &job.id,
+        progress_payload(
+            JobStatus::Preparing,
+            ProgressStage::Preparing,
+            0.06,
+            "Preparing timeline export.",
+            None,
+            None,
+            None,
+        ),
+    )
+    .await?;
+    check_cancel(api, &job.id, "Timeline export canceled before rendering.").await?;
+    let request = export_request_from_job(job)?;
+    let store = ProjectStore::new(settings.data_dir.clone(), "worker");
+    let project = store.get_project(&request.project_id)?;
+    let project_path = PathBuf::from(project.path);
+    let timeline_path = safe_project_path(&project_path, &request.timeline_path)?;
+    let timeline = read_json_value(&timeline_path)?;
+    let (width, height) = output_dimensions(
+        timeline
+            .get("aspectRatio")
+            .and_then(Value::as_str)
+            .unwrap_or("16:9"),
+        request.resolution,
+    );
+    let mut items = main_track_items(&timeline);
+    items.sort_by(|left, right| {
+        item_f64(left, "timelineStart", 0.0).total_cmp(&item_f64(right, "timelineStart", 0.0))
+    });
+    if items.is_empty() {
+        return Err(WorkerError::InvalidPayload(
+            "Timeline has no main video items to export.".to_owned(),
+        ));
+    }
+
+    let tmp_path = project_path
+        .join("cache")
+        .join(format!("sceneworks_export_{}", safe_download_dir(&job.id)));
+    if tmp_path.exists() {
+        std::fs::remove_dir_all(&tmp_path)?;
+    }
+    std::fs::create_dir_all(&tmp_path)?;
+
+    let mut segments = Vec::new();
+    let mut cursor = 0.0_f64;
+    let total = items.len().max(1);
+    let render_spec = RenderSpec {
+        width,
+        height,
+        fps: request.fps,
+    };
+    let render_result = async {
+        for (index, item) in items.iter().enumerate() {
+            check_cancel(api, &job.id, "Timeline export canceled by user.").await?;
+            let start = item_f64(item, "timelineStart", 0.0);
+            if start > cursor {
+                let gap_duration = start - cursor;
+                let gap_path = tmp_path.join(format!("segment_{:04}_gap.mp4", segments.len()));
+                render_black_segment("ffmpeg", &gap_path, gap_duration, render_spec)?;
+                segments.push(TimelineSegment {
+                    path: gap_path,
+                    duration: gap_duration,
+                    transition: None,
+                    transition_duration: 0.0,
+                });
+                cursor = start;
+            }
+
+            let asset_id = required_value_str(item, "assetId")?;
+            let asset = store.get_asset(&request.project_id, asset_id)?;
+            let display_name = item
+                .get("displayName")
+                .and_then(Value::as_str)
+                .unwrap_or("item");
+            let segment_path = tmp_path.join(format!(
+                "segment_{:04}_{}.mp4",
+                segments.len(),
+                slugify(display_name, "timeline-export", Some(48))
+            ));
+            let duration = render_item_segment(
+                "ffmpeg",
+                &project_path,
+                item,
+                &asset,
+                &segment_path,
+                render_spec,
+            )?;
+            let transition_in = item.get("transitionIn").unwrap_or(&Value::Null);
+            segments.push(TimelineSegment {
+                path: segment_path,
+                duration,
+                transition: transition_in
+                    .get("type")
+                    .and_then(Value::as_str)
+                    .map(str::to_owned),
+                transition_duration: value_f64(
+                    transition_in.get("duration").unwrap_or(&Value::Null),
+                    0.0,
+                ),
+            });
+            cursor = cursor.max(item_f64(item, "timelineEnd", start + duration));
+            update_job(
+                api,
+                &job.id,
+                progress_payload(
+                    JobStatus::Running,
+                    ProgressStage::Rendering,
+                    0.12 + (((index + 1) as f64 / total as f64) * 0.58),
+                    "Rendering timeline segments.",
+                    None,
+                    None,
+                    None,
+                ),
+            )
+            .await?;
+        }
+        WorkerResult::Ok(())
+    }
+    .await;
+
+    if let Err(error) = render_result {
+        let _ = std::fs::remove_dir_all(&tmp_path);
+        return Err(error);
+    }
+
+    let output_rel = format!(
+        "assets/renders/{}_{}_{}.mp4",
+        &now_rfc3339()[..10],
+        slugify(&request.timeline_name, "timeline-export", Some(48)),
+        asset_suffix(&job.id)
+    );
+    let output_path = project_path.join(&output_rel);
+    std::fs::create_dir_all(output_path.parent().ok_or_else(|| {
+        WorkerError::InvalidPayload("Render output has no parent directory.".to_owned())
+    })?)?;
+    update_job(
+        api,
+        &job.id,
+        progress_payload(
+            JobStatus::Saving,
+            ProgressStage::Muxing,
+            0.78,
+            "Muxing MP4 export.",
+            None,
+            None,
+            None,
+        ),
+    )
+    .await?;
+    let mux_result = mux_segments("ffmpeg", &segments, &tmp_path, &output_path);
+    let _ = std::fs::remove_dir_all(&tmp_path);
+    mux_result?;
+
+    let asset = build_render_asset(
+        &request,
+        &timeline,
+        &job.id,
+        &output_rel,
+        width,
+        height,
+        cursor,
+    );
+    write_json_value(&output_path.with_extension("sceneworks.json"), &asset)?;
+    std::fs::create_dir_all(project_path.join("recipes"))?;
+    let asset_id = required_value_str(&asset, "id")?.to_owned();
+    write_json_value(
+        &project_path
+            .join("recipes")
+            .join(format!("{asset_id}.recipe.json")),
+        &asset["recipe"],
+    )?;
+    store.reindex_project(&request.project_id)?;
+
+    let mut result = JsonObject::new();
+    result.insert("assetIds".to_owned(), json!([asset_id]));
+    result.insert("assets".to_owned(), json!([asset]));
+    result.insert(
+        "timelineId".to_owned(),
+        Value::String(request.timeline_id.clone()),
+    );
+    result.insert("renderPath".to_owned(), Value::String(output_rel));
+    result.insert(
+        "adapter".to_owned(),
+        Value::String("ffmpeg_timeline".to_owned()),
+    );
+    update_job(
+        api,
+        &job.id,
+        progress_payload(
+            JobStatus::Completed,
+            ProgressStage::Completed,
+            1.0,
+            "Timeline MP4 export saved.",
             None,
             Some(result),
             None,
@@ -1104,6 +1553,600 @@ fn now_rfc3339() -> String {
         .unwrap_or_else(|_| "1970-01-01T00:00:00Z".to_owned())
 }
 
+fn export_request_from_job(job: &JobSnapshot) -> WorkerResult<TimelineExportRequest> {
+    Ok(TimelineExportRequest {
+        project_id: required_payload_string(&job.payload, "projectId")?.to_owned(),
+        timeline_id: required_payload_string(&job.payload, "timelineId")?.to_owned(),
+        timeline_name: optional_payload_string(&job.payload, "timelineName")
+            .unwrap_or("Timeline")
+            .to_owned(),
+        timeline_path: required_payload_string(&job.payload, "timelinePath")?.to_owned(),
+        resolution: payload_u32(&job.payload, "resolution", 720).clamp(240, 2160),
+        fps: payload_u32(&job.payload, "fps", 30).clamp(1, 60),
+    })
+}
+
+fn render_frame_png(
+    ffmpeg: &str,
+    source_path: &Path,
+    output_path: &Path,
+    timestamp: f64,
+    width: u32,
+    height: u32,
+) -> WorkerResult<()> {
+    let filters = format!(
+        "scale={width}:{height}:force_original_aspect_ratio=decrease,pad={width}:{height}:(ow-iw)/2:(oh-ih)/2:color=0x12110f,format=rgb24"
+    );
+    run_ffmpeg(&[
+        ffmpeg,
+        "-y",
+        "-ss",
+        &format!("{:.3}", timestamp.max(0.0)),
+        "-i",
+        &source_path.display().to_string(),
+        "-frames:v",
+        "1",
+        "-vf",
+        &filters,
+        "-f",
+        "image2",
+        &output_path.display().to_string(),
+    ])?;
+    if !output_path.exists() {
+        return Err(WorkerError::InvalidPayload(format!(
+            "FFmpeg did not produce frame output: {}",
+            output_path.display()
+        )));
+    }
+    Ok(())
+}
+
+#[derive(Debug, Clone)]
+struct TimelineSegment {
+    path: PathBuf,
+    duration: f64,
+    transition: Option<String>,
+    transition_duration: f64,
+}
+
+fn main_track_items(timeline: &Value) -> Vec<Value> {
+    timeline
+        .get("tracks")
+        .and_then(Value::as_array)
+        .and_then(|tracks| {
+            tracks
+                .iter()
+                .find(|track| {
+                    track.get("id").and_then(Value::as_str) == Some("track_main")
+                        || track.get("kind").and_then(Value::as_str) == Some("video")
+                })
+                .and_then(|track| track.get("items").and_then(Value::as_array))
+        })
+        .cloned()
+        .unwrap_or_default()
+}
+
+fn output_dimensions(aspect_ratio: &str, resolution: u32) -> (u32, u32) {
+    let resolution = resolution.max(2);
+    let (width, height) = match aspect_ratio {
+        "9:16" => (resolution, ((resolution as f64) * 16.0 / 9.0).ceil() as u32),
+        "1:1" => (resolution, resolution),
+        _ => (((resolution as f64) * 16.0 / 9.0).ceil() as u32, resolution),
+    };
+    (even(width), even(height))
+}
+
+fn even(value: u32) -> u32 {
+    if value % 2 == 0 {
+        value
+    } else {
+        value + 1
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct RenderSpec {
+    width: u32,
+    height: u32,
+    fps: u32,
+}
+
+fn render_black_segment(
+    ffmpeg: &str,
+    output_path: &Path,
+    duration: f64,
+    spec: RenderSpec,
+) -> WorkerResult<()> {
+    run_ffmpeg(&[
+        ffmpeg,
+        "-y",
+        "-f",
+        "lavfi",
+        "-i",
+        &format!(
+            "color=c=black:s={}x{}:r={}",
+            spec.width, spec.height, spec.fps
+        ),
+        "-t",
+        &format!("{duration:.3}"),
+        "-pix_fmt",
+        "yuv420p",
+        &output_path.display().to_string(),
+    ])
+}
+
+fn render_item_segment(
+    ffmpeg: &str,
+    project_path: &Path,
+    item: &Value,
+    asset: &Value,
+    output_path: &Path,
+    spec: RenderSpec,
+) -> WorkerResult<f64> {
+    let file = asset
+        .get("file")
+        .ok_or_else(|| WorkerError::InvalidPayload("Timeline asset file is missing.".to_owned()))?;
+    let media_rel = required_value_str(file, "path")?;
+    let media_path = safe_project_path(project_path, media_rel)?;
+    if !media_path.exists() {
+        return Err(WorkerError::InvalidPayload(format!(
+            "Timeline source file is missing: {}",
+            media_path.display()
+        )));
+    }
+
+    let source_in = item_f64(item, "sourceIn", 0.0);
+    let source_out = item_f64(item, "sourceOut", item_f64(item, "timelineEnd", 4.0));
+    let timeline_duration =
+        item_f64(item, "timelineEnd", 4.0) - item_f64(item, "timelineStart", 0.0);
+    let source_duration = (source_out - source_in).max(0.1);
+    let speed = item_f64(item, "speed", 1.0).max(0.1);
+    let duration = if timeline_duration > 0.0 {
+        timeline_duration.max(0.1)
+    } else {
+        (source_duration / speed).max(0.1)
+    };
+    let mut vf = vec![
+        format!(
+            "scale={}:{}:force_original_aspect_ratio=decrease",
+            spec.width, spec.height
+        ),
+        format!(
+            "pad={}:{}:(ow-iw)/2:(oh-ih)/2:color=black",
+            spec.width, spec.height
+        ),
+        format!("fps={}", spec.fps),
+        "format=yuv420p".to_owned(),
+    ];
+    let transition_in = item.get("transitionIn").unwrap_or(&Value::Null);
+    let transition_out = item.get("transitionOut").unwrap_or(&Value::Null);
+    if transition_in.get("type").and_then(Value::as_str) == Some("fade_from_black") {
+        let fade_duration = duration.min(value_f64(
+            transition_in.get("duration").unwrap_or(&Value::Null),
+            0.5,
+        ));
+        vf.push(format!("fade=t=in:st=0:d={fade_duration:.3}"));
+    }
+    if transition_out.get("type").and_then(Value::as_str) == Some("fade_to_black") {
+        let fade_duration = duration.min(value_f64(
+            transition_out.get("duration").unwrap_or(&Value::Null),
+            0.5,
+        ));
+        vf.push(format!(
+            "fade=t=out:st={:.3}:d={fade_duration:.3}",
+            (duration - fade_duration).max(0.0)
+        ));
+    }
+
+    let media_type = asset.get("type").and_then(Value::as_str);
+    let mime_type = file
+        .get("mimeType")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    if media_type != Some("video")
+        && (media_type == Some("image") || mime_type.starts_with("image/"))
+    {
+        run_ffmpeg(&[
+            ffmpeg,
+            "-y",
+            "-loop",
+            "1",
+            "-i",
+            &media_path.display().to_string(),
+            "-t",
+            &format!("{duration:.3}"),
+            "-vf",
+            &vf.join(","),
+            "-an",
+            &output_path.display().to_string(),
+        ])?;
+        return Ok(duration);
+    }
+
+    let setpts = format!("setpts={:.6}*PTS", 1.0 / speed);
+    let filters = std::iter::once(setpts)
+        .chain(vf)
+        .collect::<Vec<_>>()
+        .join(",");
+    run_ffmpeg(&[
+        ffmpeg,
+        "-y",
+        "-ss",
+        &format!("{source_in:.3}"),
+        "-i",
+        &media_path.display().to_string(),
+        "-t",
+        &format!("{source_duration:.3}"),
+        "-vf",
+        &filters,
+        "-an",
+        &output_path.display().to_string(),
+    ])?;
+    Ok(duration)
+}
+
+fn mux_segments(
+    ffmpeg: &str,
+    segments: &[TimelineSegment],
+    tmp_path: &Path,
+    output_path: &Path,
+) -> WorkerResult<()> {
+    if segments
+        .iter()
+        .skip(1)
+        .any(|segment| segment.transition.as_deref() == Some("crossfade"))
+    {
+        return mux_with_crossfades(ffmpeg, segments, tmp_path, output_path);
+    }
+    let list_path = tmp_path.join("concat.txt");
+    std::fs::write(
+        &list_path,
+        concat_file_contents(segments.iter().map(|segment| &segment.path)),
+    )?;
+    run_ffmpeg(&[
+        ffmpeg,
+        "-y",
+        "-f",
+        "concat",
+        "-safe",
+        "0",
+        "-i",
+        &list_path.display().to_string(),
+        "-c",
+        "copy",
+        &output_path.display().to_string(),
+    ])
+}
+
+fn mux_with_crossfades(
+    ffmpeg: &str,
+    segments: &[TimelineSegment],
+    tmp_path: &Path,
+    output_path: &Path,
+) -> WorkerResult<()> {
+    let Some(first) = segments.first() else {
+        return Err(WorkerError::InvalidPayload(
+            "Timeline has no rendered segments to mux.".to_owned(),
+        ));
+    };
+    let mut current = first.path.clone();
+    let mut current_duration = first.duration;
+    for (index, segment) in segments.iter().enumerate().skip(1) {
+        let merged = tmp_path.join(format!("xfade_{index:04}.mp4"));
+        if segment.transition.as_deref() == Some("crossfade") {
+            let duration = segment.transition_duration.clamp(0.1, 1.5);
+            let offset = (current_duration - duration).max(0.0);
+            run_ffmpeg(&[
+                ffmpeg,
+                "-y",
+                "-i",
+                &current.display().to_string(),
+                "-i",
+                &segment.path.display().to_string(),
+                "-filter_complex",
+                &format!(
+                    "[0:v][1:v]xfade=transition=fade:duration={duration:.3}:offset={offset:.3},format=yuv420p[v]"
+                ),
+                "-map",
+                "[v]",
+                &merged.display().to_string(),
+            ])?;
+            current_duration += segment.duration - duration;
+        } else {
+            let list_path = tmp_path.join(format!("concat_{index:04}.txt"));
+            std::fs::write(
+                &list_path,
+                concat_file_contents([&current, &segment.path].into_iter()),
+            )?;
+            run_ffmpeg(&[
+                ffmpeg,
+                "-y",
+                "-f",
+                "concat",
+                "-safe",
+                "0",
+                "-i",
+                &list_path.display().to_string(),
+                "-c",
+                "copy",
+                &merged.display().to_string(),
+            ])?;
+            current_duration += segment.duration;
+        }
+        current = merged;
+    }
+    std::fs::rename(current, output_path)?;
+    Ok(())
+}
+
+fn concat_file_contents<'a>(paths: impl Iterator<Item = &'a PathBuf>) -> String {
+    paths
+        .map(|path| {
+            let path = path
+                .display()
+                .to_string()
+                .replace('\\', "/")
+                .replace('\'', "'\\''");
+            format!("file '{path}'\n")
+        })
+        .collect()
+}
+
+fn build_render_asset(
+    request: &TimelineExportRequest,
+    timeline: &Value,
+    job_id: &str,
+    media_rel: &str,
+    width: u32,
+    height: u32,
+    duration: f64,
+) -> Value {
+    let asset_id = fresh_asset_id(job_id);
+    let created_at = now_rfc3339();
+    let source_asset_ids = timeline
+        .get("tracks")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|track| track.get("items").and_then(Value::as_array))
+        .flatten()
+        .filter_map(|item| item.get("assetId").and_then(Value::as_str))
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+    let aspect_ratio = timeline
+        .get("aspectRatio")
+        .and_then(Value::as_str)
+        .unwrap_or("16:9");
+    json!({
+        "schemaVersion": 1,
+        "id": asset_id,
+        "projectId": request.project_id,
+        "generationSetId": Value::Null,
+        "type": "render",
+        "displayName": format!("{} export", request.timeline_name),
+        "createdAt": created_at,
+        "file": {
+            "path": media_rel,
+            "mimeType": "video/mp4",
+            "width": width,
+            "height": height,
+            "duration": (duration * 1000.0).round() / 1000.0,
+            "fps": request.fps
+        },
+        "status": {
+            "favorite": false,
+            "rating": 0,
+            "rejected": false,
+            "trashed": false
+        },
+        "recipe": {
+            "mode": "timeline_export",
+            "model": "ffmpeg",
+            "adapter": "ffmpeg_timeline",
+            "prompt": request.timeline_name,
+            "negativePrompt": "",
+            "seed": Value::Null,
+            "loras": [],
+            "normalizedSettings": {
+                "timelineId": request.timeline_id,
+                "resolution": request.resolution,
+                "width": width,
+                "height": height,
+                "fps": request.fps,
+                "aspectRatio": aspect_ratio
+            },
+            "rawAdapterSettings": {
+                "timelinePath": request.timeline_path,
+                "renderer": "ffmpeg segment concat"
+            }
+        },
+        "lineage": {
+            "parents": source_asset_ids,
+            "sourceAssetId": request.timeline_id,
+            "sourceTimestamp": Value::Null,
+            "jobId": job_id
+        }
+    })
+}
+
+fn run_ffmpeg(args: &[&str]) -> WorkerResult<()> {
+    let Some((program, arguments)) = args.split_first() else {
+        return Err(WorkerError::InvalidPayload(
+            "FFmpeg command is empty.".to_owned(),
+        ));
+    };
+    let output = Command::new(program)
+        .args(arguments)
+        .output()
+        .map_err(|error| {
+            WorkerError::InvalidPayload(format!(
+                "Failed to start FFmpeg. Ensure ffmpeg is installed and on PATH: {error}"
+            ))
+        })?;
+    if output.status.success() {
+        return Ok(());
+    }
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let bounded = bounded_tail(&stderr, 10, 2000);
+    if bounded.trim().is_empty() {
+        Err(WorkerError::InvalidPayload(
+            "FFmpeg command failed without stderr output.".to_owned(),
+        ))
+    } else {
+        Err(WorkerError::InvalidPayload(bounded))
+    }
+}
+
+fn bounded_tail(value: &str, max_lines: usize, max_chars: usize) -> String {
+    let mut lines = value.lines().rev().take(max_lines).collect::<Vec<_>>();
+    lines.reverse();
+    let mut output = lines.join("\n");
+    if output.len() > max_chars {
+        output = output[output.len() - max_chars..].to_owned();
+    }
+    output
+}
+
+fn read_json_value(path: &Path) -> WorkerResult<Value> {
+    Ok(serde_json::from_slice(&std::fs::read(path)?)?)
+}
+
+fn write_json_value(path: &Path, value: &Value) -> WorkerResult<()> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let mut output = serde_json::to_vec_pretty(value)?;
+    output.push(b'\n');
+    let tmp_path = path.with_extension(format!(
+        "{}.tmp",
+        path.extension()
+            .and_then(|extension| extension.to_str())
+            .unwrap_or("json")
+    ));
+    std::fs::write(&tmp_path, output)?;
+    std::fs::rename(tmp_path, path)?;
+    Ok(())
+}
+
+fn safe_project_path(project_path: &Path, relative: &str) -> WorkerResult<PathBuf> {
+    let mut path = project_path.to_path_buf();
+    for component in Path::new(relative).components() {
+        match component {
+            std::path::Component::Normal(value) => path.push(value),
+            _ => {
+                return Err(WorkerError::InvalidPayload(format!(
+                    "Unsafe project-relative path: {relative}"
+                )))
+            }
+        }
+    }
+    Ok(path)
+}
+
+fn relative_path(root: &Path, path: &Path) -> WorkerResult<String> {
+    Ok(path
+        .strip_prefix(root)
+        .map_err(|_| WorkerError::InvalidPayload("Path is outside project.".to_owned()))?
+        .to_string_lossy()
+        .replace('\\', "/"))
+}
+
+fn required_value_str<'a>(value: &'a Value, key: &str) -> WorkerResult<&'a str> {
+    value
+        .get(key)
+        .and_then(Value::as_str)
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(|| WorkerError::InvalidPayload(format!("Missing {key}")))
+}
+
+fn payload_u32(payload: &JsonObject, field: &str, default: u32) -> u32 {
+    payload
+        .get(field)
+        .and_then(|value| value.as_u64().or_else(|| value.as_str()?.parse().ok()))
+        .and_then(|value| u32::try_from(value).ok())
+        .unwrap_or(default)
+}
+
+fn payload_f64(payload: &JsonObject, field: &str, default: f64) -> f64 {
+    payload
+        .get(field)
+        .map_or(default, |value| value_f64(value, default))
+}
+
+fn item_f64(item: &Value, field: &str, default: f64) -> f64 {
+    item.get(field)
+        .map_or(default, |value| value_f64(value, default))
+}
+
+fn value_f64(value: &Value, default: f64) -> f64 {
+    value
+        .as_f64()
+        .or_else(|| value.as_str().and_then(|value| value.parse().ok()))
+        .filter(|value: &f64| value.is_finite())
+        .unwrap_or(default)
+}
+
+fn fresh_asset_id(job_id: &str) -> String {
+    let nanos = OffsetDateTime::now_utc().unix_timestamp_nanos();
+    format!(
+        "asset_{}_{}",
+        safe_asset_component(job_id),
+        nanos.unsigned_abs()
+    )
+}
+
+fn asset_suffix(value: &str) -> String {
+    let safe = safe_download_dir(value);
+    let chars = safe.chars().rev().take(8).collect::<Vec<_>>();
+    chars.into_iter().rev().collect::<String>()
+}
+
+fn safe_asset_component(value: &str) -> String {
+    let mut output = String::new();
+    let mut previous_underscore = false;
+    for character in value.chars() {
+        if character.is_ascii_alphanumeric() {
+            output.push(character.to_ascii_lowercase());
+            previous_underscore = false;
+        } else if !previous_underscore && !output.is_empty() {
+            output.push('_');
+            previous_underscore = true;
+        }
+    }
+    while output.ends_with('_') {
+        output.pop();
+    }
+    if output.is_empty() {
+        "job".to_owned()
+    } else {
+        output
+    }
+}
+
+fn slugify(value: &str, fallback: &str, max_length: Option<usize>) -> String {
+    let mut slug = String::new();
+    let mut previous_dash = false;
+    for character in value.trim().chars() {
+        if character.is_ascii_alphanumeric() {
+            slug.push(character.to_ascii_lowercase());
+            previous_dash = false;
+        } else if !previous_dash && !slug.is_empty() {
+            slug.push('-');
+            previous_dash = true;
+        }
+    }
+    while slug.ends_with('-') {
+        slug.pop();
+    }
+    if slug.is_empty() {
+        slug = fallback.to_owned();
+    }
+    if let Some(max_length) = max_length {
+        slug.truncate(max_length);
+    }
+    slug
+}
+
 async fn existing_download_bytes(path: &Path, expected_size: Option<u64>) -> WorkerResult<u64> {
     let Ok(metadata) = tokio::fs::metadata(path).await else {
         return Ok(0);
@@ -1164,8 +2207,8 @@ mod tests {
 
     use super::{
         allow_pattern_matches, copy_lora_source, download_progress_payload, now_rfc3339,
-        safe_download_dir, write_model_install_marker, HuggingFaceSnapshot, Settings,
-        INSTALL_MARKER,
+        safe_asset_component, safe_download_dir, write_model_install_marker, HuggingFaceSnapshot,
+        Settings, INSTALL_MARKER,
     };
 
     #[test]
@@ -1197,6 +2240,7 @@ mod tests {
         ));
         assert_eq!(safe_download_dir("owner/model name"), "owner__model__name");
         assert_eq!(safe_download_dir("///"), "download");
+        assert_eq!(safe_asset_component("job-ABC.123"), "job_abc_123");
     }
 
     #[tokio::test]

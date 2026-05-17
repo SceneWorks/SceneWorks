@@ -11,7 +11,7 @@ RUN cargo build -p sceneworks-rust-worker --release
 FROM debian:bookworm-slim
 
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends ca-certificates \
+    && apt-get install -y --no-install-recommends ca-certificates ffmpeg \
     && rm -rf /var/lib/apt/lists/*
 
 COPY --from=builder /app/target/release/sceneworks-rust-worker /usr/local/bin/sceneworks-rust-worker
