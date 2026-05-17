@@ -1,13 +1,10 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import UTC, datetime
 import hashlib
 import importlib
 import json
 import os
-import re
-import sqlite3
 import warnings
 from pathlib import Path
 from textwrap import wrap
@@ -15,6 +12,18 @@ from typing import Any, Callable
 from uuid import uuid4
 
 from PIL import Image, ImageDraw, ImageFont
+
+from sceneworks_shared import (
+    ProjectNotFound,
+    find_asset_sidecar_path,
+    find_project_path as shared_find_project_path,
+    index_asset,
+    read_json,
+    safe_int,
+    slugify,
+    utc_now,
+    write_json,
+)
 
 from .settings import WorkerSettings
 
@@ -72,23 +81,6 @@ class ImageRequest:
     advanced: dict[str, Any]
 
 
-def utc_now() -> str:
-    return datetime.now(UTC).replace(microsecond=0).isoformat().replace("+00:00", "Z")
-
-
-def slugify(value: str) -> str:
-    slug = re.sub(r"[^a-zA-Z0-9]+", "-", value.strip()).strip("-").lower()
-    return (slug or "image")[:42]
-
-
-def safe_int(value: Any, default: int, minimum: int, maximum: int) -> int:
-    try:
-        parsed = int(value)
-    except (TypeError, ValueError):
-        return default
-    return max(minimum, min(maximum, parsed))
-
-
 def load_registry(data_dir: Path) -> list[dict[str, Any]]:
     registry_path = data_dir / "recent-projects.json"
     if not registry_path.exists():
@@ -98,10 +90,10 @@ def load_registry(data_dir: Path) -> list[dict[str, Any]]:
 
 
 def find_project_path(settings: WorkerSettings, project_id: str) -> Path:
-    for project in load_registry(settings.data_dir):
-        if project.get("id") == project_id:
-            return Path(project["path"])
-    raise RuntimeError(f"Project not found: {project_id}")
+    try:
+        return shared_find_project_path(settings.data_dir / "recent-projects.json", project_id)
+    except ProjectNotFound as exc:
+        raise RuntimeError(str(exc)) from exc
 
 
 def image_request_from_job(job: dict[str, Any]) -> ImageRequest:
@@ -143,7 +135,7 @@ class ImageAssetWriter:
         created_at = utc_now()
         generation_set_id = f"genset_{uuid4().hex}"
         model_target = MODEL_TARGETS.get(request.model, MODEL_TARGETS["z_image_turbo"])
-        prompt_slug = slugify(request.prompt)
+        prompt_slug = slugify(request.prompt, fallback="image", max_length=42)
         date_slug = created_at[:10]
         assets = []
 
@@ -189,7 +181,7 @@ class ImageAssetWriter:
             )
             write_json(sidecar_path, asset)
             write_json(project_path / "recipes" / f"{asset_id}.recipe.json", asset["recipe"])
-            index_project_db(project_path, asset)
+            index_project_db(project_path, asset, sidecar_path)
             assets.append(asset)
             progress(
                 "saving",
@@ -214,6 +206,9 @@ class ZImageDiffusersAdapter:
         self._text_pipe: Any | None = None
         self._img2img_pipe: Any | None = None
         self._loaded_repo: str | None = None
+
+    def loaded_models(self) -> list[str]:
+        return [self._loaded_repo] if self._loaded_repo else []
 
     def generate(
         self,
@@ -269,6 +264,15 @@ class ZImageDiffusersAdapter:
         if cached_pipe is not None and self._loaded_repo == repo:
             return cached_pipe
 
+        if self._loaded_repo and self._loaded_repo != repo:
+            self._evict_pipelines(torch)
+        elif use_img2img and self._text_pipe is not None:
+            self._text_pipe = None
+            self._empty_cuda_cache(torch)
+        elif not use_img2img and self._img2img_pipe is not None:
+            self._img2img_pipe = None
+            self._empty_cuda_cache(torch)
+
         pipeline_name = "ZImageImg2ImgPipeline" if use_img2img else "ZImagePipeline"
         pipeline_class = getattr(diffusers, pipeline_name, None)
         if pipeline_class is None and use_img2img:
@@ -295,6 +299,16 @@ class ZImageDiffusersAdapter:
             self._text_pipe = pipe
         self._loaded_repo = repo
         return pipe
+
+    def _evict_pipelines(self, torch: Any) -> None:
+        self._text_pipe = None
+        self._img2img_pipe = None
+        self._loaded_repo = None
+        self._empty_cuda_cache(torch)
+
+    def _empty_cuda_cache(self, torch: Any) -> None:
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
 
     def _run_pipeline(self, settings: WorkerSettings, pipe: Any, request: ImageRequest, seed: int) -> Image.Image:
         torch = importlib.import_module("torch")
@@ -330,6 +344,9 @@ class ZImageDiffusersAdapter:
 
 class ProceduralImageAdapter:
     id = "procedural_preview"
+
+    def loaded_models(self) -> list[str]:
+        return []
 
     def generate(
         self,
@@ -372,15 +389,18 @@ class ProceduralImageAdapter:
         )
 
 
-def create_image_adapter(job: dict[str, Any]) -> ProceduralImageAdapter | ZImageDiffusersAdapter:
+def create_image_adapter(
+    job: dict[str, Any],
+    adapters: dict[str, object] | None = None,
+) -> ProceduralImageAdapter | ZImageDiffusersAdapter:
     payload = job.get("payload", {})
     requested = os.getenv("SCENEWORKS_IMAGE_ADAPTER", payload.get("adapter", "")).strip()
     if requested == "procedural_preview":
-        return ProceduralImageAdapter()
+        return adapters.get("procedural_preview") if adapters else ProceduralImageAdapter()
     model_target = MODEL_TARGETS.get(payload.get("model", "z_image_turbo"), {})
     if model_target.get("adapter") == ZImageDiffusersAdapter.id:
-        return ZImageDiffusersAdapter()
-    return ProceduralImageAdapter()
+        return adapters.get("z_image_diffusers") if adapters else ZImageDiffusersAdapter()
+    return adapters.get("procedural_preview") if adapters else ProceduralImageAdapter()
 
 
 def model_supports_edit(model_id: str) -> bool:
@@ -424,36 +444,32 @@ def load_source_image(settings: WorkerSettings, request: ImageRequest) -> Image.
 
 
 def find_asset_media_path(project_path: Path, asset_id: str) -> Path:
-    for sidecar_path in (project_path / "assets" / "images").glob("*.sceneworks.json"):
-        try:
-            with sidecar_path.open("r", encoding="utf-8") as handle:
-                asset = json.load(handle)
-        except (OSError, json.JSONDecodeError):
-            continue
-        if asset.get("id") == asset_id:
-            media_path = project_path / asset.get("file", {}).get("path", "")
-            if media_path.exists():
-                return media_path
-            raise RuntimeError(f"Source image file is missing for asset {asset_id}.")
+    sidecar_path = find_asset_sidecar_path(project_path, asset_id)
+    if sidecar_path is not None:
+        asset = read_json(sidecar_path)
+        media_path = project_path / asset.get("file", {}).get("path", "")
+        if media_path.exists():
+            return media_path
+        raise RuntimeError(f"Source image file is missing for asset {asset_id}.")
     raise RuntimeError(f"Source image asset not found: {asset_id}.")
 
 
 def render_preview_image(request: ImageRequest, model_target: dict[str, Any], seed: int, index: int) -> Image.Image:
+    import numpy as np
+
     width = min(request.width, 1280)
     height = min(request.height, 1280)
     digest = hashlib.sha256(f"{request.prompt}:{request.style_preset}:{seed}".encode("utf-8")).digest()
-    base = (digest[0], digest[1], digest[2])
-    accent = (digest[9], digest[10], digest[11])
-    image = Image.new("RGB", (width, height), base)
-    pixels = image.load()
-    for y in range(height):
-        for x in range(width):
-            mix = (x / max(1, width - 1) * 0.56) + (y / max(1, height - 1) * 0.44)
-            wave = ((x * digest[3] + y * digest[4] + seed) % 255) / 255
-            pixels[x, y] = tuple(
-                int(base[channel] * (1 - mix) + accent[channel] * mix * 0.85 + wave * 34)
-                for channel in range(3)
-            )
+    base = np.array([digest[0], digest[1], digest[2]], dtype=np.float32)
+    accent = np.array([digest[9], digest[10], digest[11]], dtype=np.float32)
+    x = np.linspace(0, 1, width, dtype=np.float32)[None, :]
+    y = np.linspace(0, 1, height, dtype=np.float32)[:, None]
+    mix = x * 0.56 + y * 0.44
+    xi = np.arange(width, dtype=np.uint32)[None, :]
+    yi = np.arange(height, dtype=np.uint32)[:, None]
+    wave = ((xi * digest[3] + yi * digest[4] + seed) % 255).astype(np.float32) / 255
+    pixels = base * (1 - mix[..., None]) + accent * mix[..., None] * 0.85 + wave[..., None] * 34
+    image = Image.fromarray(np.clip(pixels, 0, 255).astype(np.uint8), "RGB")
 
     draw = ImageDraw.Draw(image, "RGBA")
     draw.rectangle((0, height * 0.68, width, height), fill=(12, 12, 12, 168))
@@ -534,48 +550,5 @@ def build_asset_sidecar(
     }
 
 
-def write_json(path: Path, payload: dict[str, Any]) -> None:
-    with path.open("w", encoding="utf-8") as handle:
-        json.dump(payload, handle, indent=2)
-        handle.write("\n")
-
-
-def index_project_db(project_path: Path, asset: dict[str, Any]) -> None:
-    db_path = project_path / "project.db"
-    with sqlite3.connect(db_path) as connection:
-        connection.execute(
-            """
-            create table if not exists assets (
-              id text primary key,
-              type text not null,
-              display_name text not null,
-              file_path text not null,
-              generation_set_id text,
-              created_at text not null,
-              favorite integer not null default 0,
-              rating integer not null default 0,
-              rejected integer not null default 0,
-              trashed integer not null default 0
-            )
-            """
-        )
-        connection.execute(
-            """
-            insert or replace into assets (
-              id, type, display_name, file_path, generation_set_id, created_at,
-              favorite, rating, rejected, trashed
-            ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            (
-                asset["id"],
-                asset["type"],
-                asset["displayName"],
-                asset["file"]["path"],
-                asset["generationSetId"],
-                asset["createdAt"],
-                int(asset["status"]["favorite"]),
-                int(asset["status"]["rating"]),
-                int(asset["status"]["rejected"]),
-                int(asset["status"]["trashed"]),
-            ),
-        )
+def index_project_db(project_path: Path, asset: dict[str, Any], sidecar_path: Path | None = None) -> None:
+    index_asset(project_path, asset, sidecar_path or (project_path / asset["file"]["path"]).with_suffix(".sceneworks.json"))

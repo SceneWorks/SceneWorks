@@ -1,3 +1,7 @@
 # SceneWorks Shared Package
 
-Reserved for small cross-app helpers that are not tied to a single runtime.
+Small Python helpers shared by the API and worker runtimes:
+
+- JSON/time/slug parsing utilities.
+- Registry-backed project lookup with a shared `ProjectNotFound` contract.
+- Project SQLite migrations, asset indexing, sidecar lookup, purge, and reindex helpers.

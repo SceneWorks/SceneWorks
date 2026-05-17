@@ -1,6 +1,4 @@
-from datetime import UTC, datetime
 import json
-import re
 import sqlite3
 import tempfile
 import threading
@@ -9,6 +7,16 @@ from uuid import uuid4
 
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, Field
+
+from sceneworks_shared import (
+    ProjectNotFound,
+    apply_project_migrations,
+    find_project_path as shared_find_project_path,
+    load_registry as shared_load_registry,
+    reindex_project,
+    slugify,
+    utc_now,
+)
 
 from .settings import Settings
 
@@ -43,13 +51,11 @@ class ProjectSummary(BaseModel):
     createdAt: str
 
 
-def slugify(value: str) -> str:
-    slug = re.sub(r"[^a-zA-Z0-9]+", "-", value.strip()).strip("-").lower()
-    return slug or "project"
-
-
-def utc_now() -> str:
-    return datetime.now(UTC).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+class ReindexResult(BaseModel):
+    projectId: str
+    assets: int
+    generationSets: int
+    timelines: int
 
 
 def get_settings_from_request(request: Request) -> Settings:
@@ -63,11 +69,7 @@ def ensure_data_dirs(settings: Settings) -> None:
 
 
 def load_registry(settings: Settings) -> list[dict]:
-    if not settings.registry_path.exists():
-        return []
-
-    with settings.registry_path.open("r", encoding="utf-8") as handle:
-        return json.load(handle)
+    return shared_load_registry(settings.registry_path)
 
 
 def save_registry(settings: Settings, projects: list[dict]) -> None:
@@ -87,62 +89,7 @@ def save_registry(settings: Settings, projects: list[dict]) -> None:
 def create_project_db(project_path: Path) -> None:
     db_path = project_path / "project.db"
     with sqlite3.connect(db_path) as connection:
-        connection.execute(
-            """
-            create table if not exists project_metadata (
-              key text primary key,
-              value text not null
-            )
-            """
-        )
-        connection.execute(
-            "insert or replace into project_metadata (key, value) values (?, ?)",
-            ("schemaVersion", "1"),
-        )
-        connection.execute(
-            """
-            create table if not exists assets (
-              id text primary key,
-              type text not null,
-              display_name text not null,
-              file_path text not null,
-              generation_set_id text,
-              created_at text not null,
-              favorite integer not null default 0,
-              rating integer not null default 0,
-              rejected integer not null default 0,
-              trashed integer not null default 0
-            )
-            """
-        )
-        connection.execute(
-            """
-            create table if not exists generation_sets (
-              id text primary key,
-              mode text not null,
-              model text not null,
-              prompt text not null,
-              created_at text not null,
-              job_id text
-            )
-            """
-        )
-        connection.execute(
-            """
-            create table if not exists timelines (
-              id text primary key,
-              name text not null,
-              file_path text not null,
-              aspect_ratio text not null,
-              width integer not null,
-              height integer not null,
-              fps integer not null,
-              duration real not null default 0,
-              created_at text not null,
-              updated_at text not null
-            )
-            """
-        )
+        apply_project_migrations(connection)
 
 
 def write_project_file(settings: Settings, project_path: Path, project_id: str, name: str) -> dict:
@@ -178,14 +125,10 @@ def read_project_summary(project_path: Path) -> ProjectSummary:
 
 
 def find_project_path(settings: Settings, project_id: str) -> Path:
-    for item in load_registry(settings):
-        if item.get("id") == project_id:
-            project_path = Path(item["path"])
-            if project_path.exists():
-                return project_path
-            break
-
-    raise HTTPException(status_code=404, detail="Project not found")
+    try:
+        return shared_find_project_path(settings.registry_path, project_id)
+    except ProjectNotFound:
+        raise HTTPException(status_code=404, detail="Project not found") from None
 
 
 @router.get("", response_model=list[ProjectSummary])
@@ -207,10 +150,10 @@ def create_project(payload: ProjectCreateRequest, request: Request) -> ProjectSu
 
     with REGISTRY_LOCK:
         project_id = f"project_{uuid4().hex}"
-        folder_name = f"{slugify(payload.name)}.sceneworks"
+        folder_name = f"{slugify(payload.name, fallback='project')}.sceneworks"
         project_path = settings.projects_dir / folder_name
         if project_path.exists():
-            project_path = settings.projects_dir / f"{slugify(payload.name)}-{project_id[-8:]}.sceneworks"
+            project_path = settings.projects_dir / f"{slugify(payload.name, fallback='project')}-{project_id[-8:]}.sceneworks"
 
         project_path.mkdir(parents=True)
         for folder in PROJECT_FOLDERS:
@@ -230,3 +173,10 @@ def create_project(payload: ProjectCreateRequest, request: Request) -> ProjectSu
 def get_project(project_id: str, request: Request) -> ProjectSummary:
     settings = get_settings_from_request(request)
     return read_project_summary(find_project_path(settings, project_id))
+
+
+@router.post("/{project_id}/reindex", response_model=ReindexResult)
+def reindex_project_endpoint(project_id: str, request: Request) -> ReindexResult:
+    settings = get_settings_from_request(request)
+    counts = reindex_project(find_project_path(settings, project_id))
+    return ReindexResult(projectId=project_id, **counts)

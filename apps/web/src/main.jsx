@@ -76,10 +76,10 @@ async function apiFetch(path, token, options = {}) {
   return response.json();
 }
 
-function eventUrl(path, token) {
+function eventUrl(path, ticket) {
   const url = new URL(`${API_BASE_URL}${path}`);
-  if (token) {
-    url.searchParams.set("token", token);
+  if (ticket) {
+    url.searchParams.set("ticket", ticket);
   }
   return url.toString();
 }
@@ -315,8 +315,28 @@ function App() {
       }
     }
 
-    function connect() {
-      const source = new EventSource(eventUrl("/api/v1/jobs/events", token));
+    async function connect() {
+      let ticket = "";
+      try {
+        if (access.authRequired) {
+          const response = await apiFetch("/api/v1/jobs/events/ticket", token, { method: "POST" });
+          ticket = response.ticket;
+        }
+      } catch (err) {
+        setError(err.message);
+        if (!closed) {
+          const delay = Math.min(30000, 1000 * 2 ** reconnectAttempt);
+          reconnectAttempt += 1;
+          reconnectTimer = window.setTimeout(connect, delay);
+        }
+        return;
+      }
+
+      if (closed) {
+        return;
+      }
+
+      const source = new EventSource(eventUrl("/api/v1/jobs/events", ticket));
       events = source;
       source.addEventListener("job.updated", handleJobUpdated);
       source.addEventListener("worker.updated", handleWorkerUpdated);
@@ -344,7 +364,7 @@ function App() {
       }
       events?.close();
     };
-  }, [authenticated, token]);
+  }, [access.authRequired, authenticated, token]);
 
   async function refreshData() {
     try {
@@ -373,9 +393,10 @@ function App() {
       return;
     }
     try {
-      const items = await apiFetch(`/api/v1/projects/${projectId}/assets?includeRejected=true`, token);
+      const items = await apiFetch(`/api/v1/projects/${projectId}/assets?includeRejected=true&includeTrashed=true`, token);
       setAssets(items);
-      setSelectedAssetId((current) => current ?? items[0]?.id ?? null);
+      const defaultAsset = items.find((asset) => !asset.status?.trashed && !asset.status?.rejected) ?? items[0] ?? null;
+      setSelectedAssetId((current) => current ?? defaultAsset?.id ?? null);
       setError("");
     } catch (err) {
       setError(err.message);
@@ -592,6 +613,17 @@ function App() {
     }
   }
 
+  async function purgeAsset(asset) {
+    try {
+      await apiFetch(`/api/v1/projects/${asset.projectId}/assets/${asset.id}/purge`, token, { method: "DELETE" });
+      setAssets((items) => items.filter((item) => item.id !== asset.id));
+      setSelectedAssetId((current) => (current === asset.id ? null : current));
+      setError("");
+    } catch (err) {
+      setError(err.message);
+    }
+  }
+
   async function importAsset(file) {
     if (!activeProject || !file) {
       setError("Create or open a project first.");
@@ -746,6 +778,7 @@ function App() {
           <LibraryScreen
             assets={assets}
             deleteAsset={deleteAsset}
+            purgeAsset={purgeAsset}
             importAsset={importAsset}
             onPreview={setPreviewAsset}
             onSendImage={(asset) => {
@@ -780,6 +813,7 @@ function App() {
             setRequestedGpu={setRequestedGpu}
             updateAssetStatus={updateAssetStatus}
             deleteAsset={deleteAsset}
+            purgeAsset={purgeAsset}
           />
         ) : null}
 
@@ -789,6 +823,7 @@ function App() {
             assets={assets}
             createVideoJob={createVideoJob}
             deleteAsset={deleteAsset}
+            purgeAsset={purgeAsset}
             gpuOptions={gpuOptions}
             latestAssets={latestVideoAssets}
             onPreview={setPreviewAsset}
@@ -852,6 +887,7 @@ function App() {
 function LibraryScreen({
   assets,
   deleteAsset,
+  purgeAsset,
   importAsset,
   onPreview,
   onSendImage,
@@ -863,12 +899,16 @@ function LibraryScreen({
 }) {
   const [typeFilter, setTypeFilter] = useState("all");
   const [showRejected, setShowRejected] = useState(false);
+  const [showTrashed, setShowTrashed] = useState(false);
   const [isImporting, setIsImporting] = useState(false);
   const visibleAssets = assets.filter((asset) => {
     if (typeFilter !== "all" && asset.type !== typeFilter) {
       return false;
     }
     if (!showRejected && asset.status?.rejected) {
+      return false;
+    }
+    if (!showTrashed && asset.status?.trashed) {
       return false;
     }
     return true;
@@ -908,6 +948,10 @@ function LibraryScreen({
             <input checked={showRejected} onChange={(event) => setShowRejected(event.target.checked)} type="checkbox" />
             Rejected
           </label>
+          <label className="checkline">
+            <input checked={showTrashed} onChange={(event) => setShowTrashed(event.target.checked)} type="checkbox" />
+            Trash
+          </label>
         </div>
       </div>
 
@@ -921,6 +965,7 @@ function LibraryScreen({
         <AssetDetail
           asset={selectedAsset}
           deleteAsset={deleteAsset}
+          purgeAsset={purgeAsset}
           onPreview={onPreview}
           onSendImage={onSendImage}
           onSendVideo={onSendVideo}
@@ -1042,6 +1087,7 @@ function ImageStudio({
   assets,
   createImageJob,
   deleteAsset,
+  purgeAsset,
   gpuOptions,
   imageModels,
   latestAssets,
@@ -1226,6 +1272,7 @@ function ImageStudio({
                   deleteAsset={deleteAsset}
                   key={asset.id}
                   onPreview={onPreview}
+                  purgeAsset={purgeAsset}
                   updateAssetStatus={updateAssetStatus}
                 />
               ))}
@@ -1244,6 +1291,7 @@ function VideoStudio({
   assets,
   createVideoJob,
   deleteAsset,
+  purgeAsset,
   gpuOptions,
   latestAssets,
   onPreview,
@@ -1527,6 +1575,7 @@ function VideoStudio({
                   deleteAsset={deleteAsset}
                   key={asset.id}
                   onPreview={onPreview}
+                  purgeAsset={purgeAsset}
                   updateAssetStatus={updateAssetStatus}
                 />
               ))}
@@ -2068,7 +2117,7 @@ function AssetGrid({ assets, onPreview, selectedAsset, setSelectedAssetId }) {
   );
 }
 
-function AssetDetail({ asset, deleteAsset, onPreview, onSendImage, onSendVideo, onSendEditor, updateAssetStatus }) {
+function AssetDetail({ asset, deleteAsset, purgeAsset, onPreview, onSendImage, onSendVideo, onSendEditor, updateAssetStatus }) {
   if (!asset) {
     return <aside className="asset-detail empty-panel">No asset selected</aside>;
   }
@@ -2114,9 +2163,15 @@ function AssetDetail({ asset, deleteAsset, onPreview, onSendImage, onSendVideo, 
             Send to Editor
           </button>
         ) : null}
-        <button onClick={() => deleteAsset(asset)} type="button">
-          Discard
-        </button>
+        {asset.status?.trashed ? (
+          <button onClick={() => purgeAsset(asset)} type="button">
+            Purge
+          </button>
+        ) : (
+          <button onClick={() => deleteAsset(asset)} type="button">
+            Discard
+          </button>
+        )}
       </div>
       <dl>
         <div>
@@ -2136,9 +2191,12 @@ function AssetDetail({ asset, deleteAsset, onPreview, onSendImage, onSendVideo, 
   );
 }
 
-function AssetCard({ asset, deleteAsset, onPreview, updateAssetStatus }) {
+function AssetCard({ asset, deleteAsset, purgeAsset, onPreview, updateAssetStatus }) {
+  const classes = ["review-card", asset.status?.rejected ? "rejected" : "", asset.status?.trashed ? "trashed" : ""]
+    .filter(Boolean)
+    .join(" ");
   return (
-    <article className={asset.status?.rejected ? "review-card rejected" : "review-card"}>
+    <article className={classes}>
       <button className="preview-button" onClick={() => onPreview(asset)} type="button">
         <AssetMedia asset={asset} />
       </button>
@@ -2149,9 +2207,15 @@ function AssetCard({ asset, deleteAsset, onPreview, updateAssetStatus }) {
         <button onClick={() => updateAssetStatus(asset, { rejected: !asset.status?.rejected })} type="button">
           {asset.status?.rejected ? "Restore" : "Reject"}
         </button>
-        <button onClick={() => deleteAsset(asset)} type="button">
-          Discard
-        </button>
+        {asset.status?.trashed ? (
+          <button onClick={() => purgeAsset(asset)} type="button">
+            Purge
+          </button>
+        ) : (
+          <button onClick={() => deleteAsset(asset)} type="button">
+            Discard
+          </button>
+        )}
       </div>
     </article>
   );

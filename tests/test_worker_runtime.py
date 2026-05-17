@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from scene_worker.runtime import worker_capabilities
+from scene_worker.runtime import loaded_models_from_adapters, worker_capabilities
 
 
 def test_cpu_worker_does_not_advertise_gpu_generation_capabilities():
@@ -17,3 +17,11 @@ def test_gpu_worker_advertises_generation_capabilities():
 
     assert "image_generate" in capabilities
     assert "video_generate" in capabilities
+
+
+def test_loaded_models_are_collected_from_adapter_cache():
+    class Adapter:
+        def loaded_models(self):
+            return ["Tongyi-MAI/Z-Image-Turbo"]
+
+    assert loaded_models_from_adapters({"z": Adapter()}) == ["Tongyi-MAI/Z-Image-Turbo"]

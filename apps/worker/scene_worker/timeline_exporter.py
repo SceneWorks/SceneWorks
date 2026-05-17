@@ -1,10 +1,8 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import UTC, datetime
 import json
 import math
-import re
 import shutil
 import sqlite3
 import subprocess
@@ -12,6 +10,8 @@ import tempfile
 from pathlib import Path
 from typing import Any, Callable
 from uuid import uuid4
+
+from sceneworks_shared import find_asset_sidecar_path, read_json, safe_float, slugify, utc_now
 
 from .image_adapters import find_project_path, index_project_db, write_json
 from .settings import WorkerSettings
@@ -31,15 +31,6 @@ class ExportRequest:
     timeline_path: str
     resolution: int
     fps: int
-
-
-def utc_now() -> str:
-    return datetime.now(UTC).replace(microsecond=0).isoformat().replace("+00:00", "Z")
-
-
-def slugify(value: str) -> str:
-    slug = re.sub(r"[^a-zA-Z0-9]+", "-", value.strip()).strip("-").lower()
-    return (slug or "timeline-export")[:48]
 
 
 def export_request_from_job(job: dict[str, Any]) -> ExportRequest:
@@ -90,7 +81,7 @@ def run_timeline_export(
                 cursor = start
 
             asset = find_asset(project_path, item["assetId"])
-            segment_path = tmp_path / f"segment_{len(segments):04d}_{slugify(item.get('displayName', 'item'))}.mp4"
+            segment_path = tmp_path / f"segment_{len(segments):04d}_{slugify(item.get('displayName', 'item'), fallback='timeline-export', max_length=48)}.mp4"
             duration = render_item_segment(
                 ffmpeg=ffmpeg,
                 project_path=project_path,
@@ -112,7 +103,7 @@ def run_timeline_export(
             cursor = max(cursor, safe_float(item.get("timelineEnd"), start + duration))
             progress("running", "rendering", 0.12 + ((index + 1) / total) * 0.58, "Rendering timeline segments.")
 
-        output_rel = f"assets/renders/{utc_now()[:10]}_{slugify(request.timeline_name)}_{job['id'][-8:]}.mp4"
+        output_rel = f"assets/renders/{utc_now()[:10]}_{slugify(request.timeline_name, fallback='timeline-export', max_length=48)}_{job['id'][-8:]}.mp4"
         output_path = project_path / output_rel
         output_path.parent.mkdir(parents=True, exist_ok=True)
         progress("saving", "muxing", 0.78, "Muxing MP4 export.")
@@ -141,11 +132,6 @@ def run_timeline_export(
     }
 
 
-def read_json(path: Path) -> dict[str, Any]:
-    with path.open("r", encoding="utf-8") as handle:
-        return json.load(handle)
-
-
 def main_track_items(timeline: dict[str, Any]) -> list[dict[str, Any]]:
     for track in timeline.get("tracks", []):
         if track.get("id") == "track_main" or track.get("kind") == "video":
@@ -168,23 +154,10 @@ def even(value: float) -> int:
     return parsed if parsed % 2 == 0 else parsed + 1
 
 
-def safe_float(value: Any, default: float) -> float:
-    try:
-        parsed = float(value)
-    except (TypeError, ValueError):
-        return default
-    return max(0, parsed)
-
-
 def find_asset(project_path: Path, asset_id: str) -> dict[str, Any]:
-    for folder in ASSET_FOLDERS:
-        for sidecar_path in (project_path / folder).glob("*.sceneworks.json"):
-            try:
-                asset = read_json(sidecar_path)
-            except (OSError, json.JSONDecodeError):
-                continue
-            if asset.get("id") == asset_id:
-                return asset
+    sidecar_path = find_asset_sidecar_path(project_path, asset_id)
+    if sidecar_path is not None:
+        return read_json(sidecar_path)
     raise RuntimeError(f"Timeline asset not found: {asset_id}")
 
 

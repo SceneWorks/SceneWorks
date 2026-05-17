@@ -1,8 +1,6 @@
 from __future__ import annotations
 
-from datetime import UTC, datetime
 import json
-import re
 import sqlite3
 from pathlib import Path
 from typing import Any, Literal
@@ -10,6 +8,8 @@ from uuid import uuid4
 
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, Field, model_validator
+
+from sceneworks_shared import ensure_project_db_ready, read_json, slugify, utc_now, write_json
 
 from .jobs import queue_summary
 from .projects import find_project_path
@@ -110,49 +110,12 @@ class TimelineExportRequest(BaseModel):
         return self
 
 
-def utc_now() -> str:
-    return datetime.now(UTC).replace(microsecond=0).isoformat().replace("+00:00", "Z")
-
-
-def slugify(value: str) -> str:
-    slug = re.sub(r"[^a-zA-Z0-9]+", "-", value.strip()).strip("-").lower()
-    return (slug or "timeline")[:48]
-
-
 def timeline_file_path(project_path: Path, timeline_id: str, name: str) -> Path:
-    return project_path / "timelines" / f"{slugify(name)}-{timeline_id[-8:]}.sceneworks.timeline.json"
-
-
-def read_json(path: Path) -> dict[str, Any]:
-    with path.open("r", encoding="utf-8") as handle:
-        return json.load(handle)
-
-
-def write_json(path: Path, payload: dict[str, Any]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("w", encoding="utf-8") as handle:
-        json.dump(payload, handle, indent=2)
-        handle.write("\n")
+    return project_path / "timelines" / f"{slugify(name, fallback='timeline', max_length=48)}-{timeline_id[-8:]}.sceneworks.timeline.json"
 
 
 def ensure_timeline_db(project_path: Path) -> None:
-    with sqlite3.connect(project_path / "project.db") as connection:
-        connection.execute(
-            """
-            create table if not exists timelines (
-              id text primary key,
-              name text not null,
-              file_path text not null,
-              aspect_ratio text not null,
-              width integer not null,
-              height integer not null,
-              fps integer not null,
-              duration real not null default 0,
-              created_at text not null,
-              updated_at text not null
-            )
-            """
-        )
+    ensure_project_db_ready(project_path)
 
 
 def default_tracks() -> list[TimelineTrack]:
@@ -194,18 +157,28 @@ def index_timeline(project_path: Path, timeline: TimelineDocument, rel_path: str
 
 def find_timeline_file(project_path: Path, timeline_id: str) -> Path:
     ensure_timeline_db(project_path)
+    indexed_path = None
     with sqlite3.connect(project_path / "project.db") as connection:
         row = connection.execute("select file_path from timelines where id = ?", (timeline_id,)).fetchone()
     if row is not None:
-        path = project_path / row[0]
+        indexed_path = row[0]
+        path = project_path / indexed_path
         if path.exists():
             return path
     for candidate in (project_path / "timelines").glob("*.sceneworks.timeline.json"):
         try:
             if read_json(candidate).get("id") == timeline_id:
+                rel_path = str(candidate.relative_to(project_path)).replace("\\", "/")
+                with sqlite3.connect(project_path / "project.db") as connection:
+                    connection.execute("update timelines set file_path = ? where id = ?", (rel_path, timeline_id))
                 return candidate
         except (OSError, json.JSONDecodeError):
             continue
+    if indexed_path:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Timeline file not found at indexed path {indexed_path}; reindex required",
+        )
     raise HTTPException(status_code=404, detail="Timeline not found")
 
 

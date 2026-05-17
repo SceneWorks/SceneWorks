@@ -39,6 +39,8 @@ or:
 X-SceneWorks-Token: choose-a-private-token
 ```
 
+Event streams use a short-lived one-shot ticket instead of putting the access token in the URL. Clients should `POST /api/v1/jobs/events/ticket` with the normal auth header, then connect to `/api/v1/jobs/events?ticket=...`.
+
 This is for privacy and control over local media, model downloads, and long-running GPU work. It is not a content moderation system.
 
 ## Structure
@@ -50,7 +52,7 @@ apps/
   worker/    Placeholder worker package
 packages/
   schemas/   Shared schema placeholders
-  shared/    Cross-app shared notes/helpers placeholder
+  shared/    Cross-app Python helpers for JSON, project lookup, and project DB indexing
 config/
   manifests/ Built-in and user model/LoRA manifests
 data/

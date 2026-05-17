@@ -10,7 +10,7 @@ from typing import Any
 import httpx
 
 from .gpu import discover_gpu
-from .image_adapters import create_image_adapter
+from .image_adapters import ProceduralImageAdapter, ZImageDiffusersAdapter, create_image_adapter
 from .settings import WorkerSettings
 from .timeline_exporter import run_timeline_export
 from .video_adapters import ProceduralVideoAdapter
@@ -50,13 +50,22 @@ def worker_capabilities(gpu: dict) -> list[str]:
     return sorted(capabilities)
 
 
-def register_worker(api: ApiClient, settings: WorkerSettings, gpu: dict) -> None:
+def loaded_models_from_adapters(adapters: dict[str, object]) -> list[str]:
+    models: set[str] = set()
+    for adapter in adapters.values():
+        loaded_models = getattr(adapter, "loaded_models", None)
+        if callable(loaded_models):
+            models.update(loaded_models())
+    return sorted(models)
+
+
+def register_worker(api: ApiClient, settings: WorkerSettings, gpu: dict, loaded_models: list[str] | None = None) -> None:
     payload = {
         "workerId": settings.worker_id,
         "gpuId": gpu["id"],
         "gpuName": gpu["name"],
         "capabilities": worker_capabilities(gpu),
-        "loadedModels": [],
+        "loadedModels": loaded_models or [],
     }
     worker = api.post("/api/v1/workers/register", payload)
     emit({"event": "registered", "worker": worker, "reportedAt": now()})
@@ -67,10 +76,11 @@ def heartbeat(
     settings: WorkerSettings,
     status: str,
     current_job_id: str | None = None,
+    loaded_models: list[str] | None = None,
 ) -> None:
     api.post(
         f"/api/v1/workers/{settings.worker_id}/heartbeat",
-        {"status": status, "currentJobId": current_job_id, "loadedModels": []},
+        {"status": status, "currentJobId": current_job_id, "loadedModels": loaded_models or []},
     )
 
 
@@ -307,12 +317,16 @@ def run_placeholder_job(api: ApiClient, settings: WorkerSettings, job: dict) -> 
     heartbeat(api, settings, "idle")
 
 
-def run_image_job(api: ApiClient, settings: WorkerSettings, job: dict) -> None:
+def run_image_job(api: ApiClient, settings: WorkerSettings, job: dict, image_adapters: dict[str, object]) -> None:
     job_id = job["id"]
-    adapter = create_image_adapter(job)
+    adapter = create_image_adapter(job, image_adapters)
+
+    def adapter_loaded_models() -> list[str]:
+        loaded_models = getattr(adapter, "loaded_models", None)
+        return loaded_models() if callable(loaded_models) else []
 
     def progress(status: str, stage: str, value: float, message: str) -> None:
-        heartbeat(api, settings, "busy", job_id)
+        heartbeat(api, settings, "busy", job_id, adapter_loaded_models())
         update_job(
             api,
             job_id,
@@ -368,7 +382,7 @@ def run_image_job(api: ApiClient, settings: WorkerSettings, job: dict) -> None:
             },
         )
     finally:
-        heartbeat(api, settings, "idle")
+        heartbeat(api, settings, "idle", loaded_models_from_adapters(image_adapters))
 
 
 def run_video_job(api: ApiClient, settings: WorkerSettings, job: dict) -> None:
@@ -513,11 +527,15 @@ def main() -> None:
     settings = WorkerSettings()
     gpu = discover_gpu(settings.gpu_id)
     api = ApiClient(settings)
+    image_adapters: dict[str, object] = {
+        "procedural_preview": ProceduralImageAdapter(),
+        "z_image_diffusers": ZImageDiffusersAdapter(),
+    }
     max_registration_attempts = 20
 
     for attempt in range(1, max_registration_attempts + 1):
         try:
-            register_worker(api, settings, gpu)
+            register_worker(api, settings, gpu, loaded_models_from_adapters(image_adapters))
             break
         except httpx.HTTPError as exc:
             delay = min(30, settings.poll_seconds * (2 ** (attempt - 1)))
@@ -537,7 +555,7 @@ def main() -> None:
 
     while True:
         try:
-            heartbeat(api, settings, "idle")
+            heartbeat(api, settings, "idle", loaded_models=loaded_models_from_adapters(image_adapters))
             claimed = api.post("/api/v1/jobs/claim", {"workerId": settings.worker_id})
             job = claimed.get("job")
             if job is None:
@@ -548,7 +566,7 @@ def main() -> None:
             if job["type"] == "placeholder":
                 run_placeholder_job(api, settings, job)
             elif job["type"] in ("image_generate", "image_edit"):
-                run_image_job(api, settings, job)
+                run_image_job(api, settings, job, image_adapters)
             elif job["type"] in ("video_generate", "video_extend", "video_bridge"):
                 run_video_job(api, settings, job)
             elif job["type"] == "timeline_export":

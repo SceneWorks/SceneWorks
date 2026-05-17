@@ -1,7 +1,7 @@
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from .assets import router as assets_router
-from .events import EventHub
+from .events import EventHub, EventTicketStore
 from .image_generation import router as image_router
 from .jobs import router as jobs_router
 from .jobs_store import JobsStore
@@ -29,6 +29,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.state.settings = settings
     app.state.jobs_store = jobs_store
     app.state.event_hub = EventHub()
+    app.state.event_ticket_store = EventTicketStore()
 
     app.add_middleware(
         CORSMiddleware,

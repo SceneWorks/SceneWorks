@@ -9,7 +9,8 @@ COPY apps/api/requirements.txt ./requirements.txt
 RUN pip install --no-cache-dir -r requirements.txt
 
 COPY apps/api ./apps/api
-ENV PYTHONPATH=/app/apps/api
+COPY packages/shared ./packages/shared
+ENV PYTHONPATH=/app/apps/api:/app/packages/shared
 
 EXPOSE 8000
 
