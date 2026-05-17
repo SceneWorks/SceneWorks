@@ -16,6 +16,7 @@
     "cache"
   ],
   "sidecarPatterns": {
+    "project": "project.json",
     "asset": "*.sceneworks.json",
     "character": "*.sceneworks.character.json",
     "timeline": "*.sceneworks.timeline.json",
@@ -27,7 +28,7 @@
   "fixtures": [
     {
       "name": "project",
-      "path": "sidecars/project.sceneworks.json",
+      "path": "sidecars/project.json",
       "requiredTopLevelKeys": ["schemaVersion", "appVersion", "id", "name", "createdAt", "folders"]
     },
     {
@@ -48,7 +49,7 @@
     {
       "name": "recipe",
       "path": "sidecars/recipe.json",
-      "requiredTopLevelKeys": ["mode", "model", "adapter", "prompt", "negativePrompt", "seed", "loras", "stylePreset", "normalizedSettings", "rawAdapterSettings"]
+      "requiredTopLevelKeys": ["mode", "model", "adapter", "prompt", "negativePrompt", "seed", "loras", "normalizedSettings", "rawAdapterSettings"]
     },
     {
       "name": "character",
@@ -68,7 +69,7 @@
     {
       "name": "modelManifestEntry",
       "path": "sidecars/model-manifest-entry.json",
-      "requiredTopLevelKeys": ["id", "name", "type", "family", "provider", "tags", "downloads"]
+      "requiredTopLevelKeys": ["id", "name", "family", "type", "adapter", "capabilities", "downloads", "paths", "defaults", "limits", "loraCompatibility", "ui"]
     },
     {
       "name": "loraManifestEntry",
@@ -82,4 +83,3 @@
     }
   ]
 }
-

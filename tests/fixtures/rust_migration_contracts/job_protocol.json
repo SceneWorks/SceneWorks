@@ -38,6 +38,7 @@
     "importing",
     "loading_model",
     "estimating",
+    "generating",
     "running",
     "rendering",
     "extracting",
@@ -111,4 +112,3 @@
     "lastHeartbeatAt": "2026-05-17T13:00:04Z"
   }
 }
-

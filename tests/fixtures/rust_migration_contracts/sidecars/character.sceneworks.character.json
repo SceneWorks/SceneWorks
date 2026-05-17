@@ -43,11 +43,10 @@
       "scope": "project",
       "triggerWords": ["mira_person"],
       "defaultWeight": 0.8,
-      "compatibility": { "families": ["z_image", "wan"] },
+      "compatibility": { "families": ["z-image", "wan-video"] },
       "createdAt": "2026-05-17T13:00:00Z",
       "updatedAt": "2026-05-17T13:00:00Z"
     }
   ],
   "trainedLoras": []
 }
-

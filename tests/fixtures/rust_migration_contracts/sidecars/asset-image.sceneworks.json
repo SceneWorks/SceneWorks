@@ -33,7 +33,7 @@
       "width": 1024,
       "height": 1024,
       "count": 4,
-      "family": "z_image",
+      "family": "z-image",
       "characterId": null,
       "characterLookId": null,
       "characterConditioningActive": false,
@@ -48,4 +48,3 @@
     "jobId": "job_fixture"
   }
 }
-

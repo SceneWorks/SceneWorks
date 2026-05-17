@@ -2,6 +2,23 @@
   "schemaVersion": 1,
   "capturedFrom": "sceneworks_api.main.create_app OpenAPI paths",
   "capturedAt": "2026-05-17",
+  "openapiComponentSchemasSha256": "a34d9c8d68f9c320aba8ac046846787b8e6381840da0fa76e638a93aa0300cee",
+  "securityBehaviors": [
+    {
+      "name": "projectFilePathTraversal",
+      "path": "/api/v1/projects/{project_id}/files/{relative_path}",
+      "relativePath": "../outside.txt",
+      "statusCode": 400,
+      "detail": "Invalid project file path"
+    },
+    {
+      "name": "projectFileMissing",
+      "path": "/api/v1/projects/{project_id}/files/{relative_path}",
+      "relativePath": "assets/images/missing.png",
+      "statusCode": 404,
+      "detail": "File not found"
+    }
+  ],
   "endpoints": [
     { "family": "system", "path": "/api/v1/access", "methods": ["GET"], "usedBy": ["web"] },
     { "family": "system", "path": "/api/v1/auth/verify", "methods": ["POST"], "usedBy": ["web"] },
@@ -54,4 +71,3 @@
     { "family": "workers", "path": "/api/v1/workers/{worker_id}/heartbeat", "methods": ["POST"], "usedBy": ["worker"] }
   ]
 }
-

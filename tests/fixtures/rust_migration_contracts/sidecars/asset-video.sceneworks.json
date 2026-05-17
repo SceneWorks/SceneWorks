@@ -34,7 +34,7 @@
       "width": 768,
       "height": 512,
       "quality": "balanced",
-      "family": "wan",
+      "family": "wan-video",
       "sourceAssetId": null,
       "lastFrameAssetId": null,
       "sourceClipAssetId": "asset_source_clip",
@@ -65,4 +65,3 @@
     "jobId": "job_fixture"
   }
 }
-
