@@ -12,12 +12,13 @@ reqwest = { version = "0.12", default-features = false, features = ["json", "rus
 sceneworks-core = { path = "../../crates/sceneworks-core" }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
-tokio = { version = "1.40", features = ["fs", "io-util", "macros", "rt-multi-thread", "time"] }
+tempfile = "3.13"
+tokio = { version = "1.40", features = ["fs", "io-util", "macros", "process", "rt-multi-thread", "time"] }
 time = { version = "0.3", features = ["formatting"] }
+uuid = { version = "1.11", features = ["v4"] }
 
 [dev-dependencies]
 axum = "0.7"
-tempfile = "3.13"
 tower = { version = "0.5", features = ["util"] }
 
 [lints]

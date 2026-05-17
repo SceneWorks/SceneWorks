@@ -640,6 +640,16 @@ impl ProjectStore {
         normalize_asset(project_id, &project_path, &sidecar_path)
     }
 
+    pub fn index_asset_sidecar(
+        &self,
+        project_id: &str,
+        sidecar_path: &Path,
+    ) -> ProjectStoreResult<()> {
+        let project_path = self.find_project_path(project_id)?;
+        let asset = read_json(sidecar_path)?;
+        index_asset(&project_path, &asset, Some(sidecar_path))
+    }
+
     pub fn delete_asset(
         &self,
         project_id: &str,

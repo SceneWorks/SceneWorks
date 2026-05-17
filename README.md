@@ -46,10 +46,12 @@ The `sceneworks-rust-worker` binary handles CPU utility jobs for model downloads
 LoRA imports, FFmpeg frame extraction, and timeline MP4 exports.
 
 When running the stack outside Docker Compose, start `sceneworks-rust-worker`
-alongside the API if you want `model_download` and `lora_import` jobs to be
-claimed. As a temporary fallback, set `SCENEWORKS_LEGACY_MODEL_LORA_JOBS=1`
-before starting the Python worker to let it claim those two legacy utility jobs.
-Set `HF_TOKEN` when downloading from gated Hugging Face repositories.
+alongside the API if you want Rust-owned utility jobs to be claimed. As a
+temporary fallback, set `SCENEWORKS_LEGACY_MODEL_LORA_JOBS=1` or
+`SCENEWORKS_LEGACY_FFMPEG_JOBS=1` before starting the Python worker to let it
+claim those legacy utility jobs. Both Docker worker images install Debian
+Bookworm `ffmpeg`; host-mode workers use the `ffmpeg` found on `PATH`. Set
+`HF_TOKEN` when downloading from gated Hugging Face repositories.
 
 ## Local Access Control
 
@@ -84,7 +86,7 @@ apps/
   web/       React + Vite app shell
   api/       FastAPI service and backend filesystem owner
   rust-api/  Rust backend migration scaffold, not in the default runtime
-  rust-worker/ Rust CPU utility worker for model downloads and LoRA imports
+  rust-worker/ Rust CPU utility worker for model downloads, LoRA imports, frame extraction, and timeline exports
   worker/    Placeholder worker package
 crates/
   sceneworks-core/ Shared Rust contract/domain helpers

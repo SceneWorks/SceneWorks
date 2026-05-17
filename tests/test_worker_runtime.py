@@ -23,7 +23,7 @@ def test_cpu_worker_does_not_advertise_gpu_generation_capabilities():
     assert "image_generate" not in capabilities
     assert "video_generate" not in capabilities
     assert "model_download" not in capabilities
-    assert "timeline_export" in capabilities
+    assert "timeline_export" not in capabilities
 
 
 def test_gpu_worker_advertises_generation_capabilities():
@@ -59,6 +59,15 @@ def test_python_worker_can_advertise_legacy_model_lora_jobs(monkeypatch):
 
     assert "model_download" in capabilities
     assert "lora_import" in capabilities
+
+
+def test_python_worker_can_advertise_legacy_ffmpeg_jobs(monkeypatch):
+    monkeypatch.setenv("SCENEWORKS_LEGACY_FFMPEG_JOBS", "1")
+
+    capabilities = worker_capabilities({"id": "cpu", "name": "CPU", "capabilities": ["placeholder", "cpu"]})
+
+    assert "frame_extract" in capabilities
+    assert "timeline_export" in capabilities
 
 
 def test_loaded_models_are_collected_from_adapter_cache():
