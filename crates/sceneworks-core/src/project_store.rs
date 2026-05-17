@@ -114,6 +114,12 @@ pub struct TimelineFile {
     pub relative_path: String,
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub struct TimelineFileDocument {
+    pub file: TimelineFile,
+    pub document: Value,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AssetMutationResult {
     pub id: String,
@@ -298,7 +304,7 @@ impl ProjectStore {
         aspect_ratio: &str,
         fps: u32,
     ) -> ProjectStoreResult<Value> {
-        if name.trim().is_empty() {
+        if name.is_empty() {
             return Err(ProjectStoreError::BadRequest(
                 "Timeline name is required".to_owned(),
             ));
@@ -352,12 +358,13 @@ impl ProjectStore {
             ));
         }
         let name = required_str(&timeline, "name")?.to_owned();
-        if name.trim().is_empty() {
+        if name.is_empty() {
             return Err(ProjectStoreError::BadRequest(
                 "Timeline name is required".to_owned(),
             ));
         }
         let now = utc_now();
+        validate_and_default_timeline(&mut timeline)?;
         let duration = compute_timeline_duration(&timeline);
         let object = timeline.as_object_mut().ok_or_else(|| {
             ProjectStoreError::BadRequest("Timeline must be an object".to_owned())
@@ -377,7 +384,7 @@ impl ProjectStore {
         object
             .entry("transitions".to_owned())
             .or_insert_with(|| json!([]));
-        normalize_timeline_items(&mut timeline);
+        normalize_timeline_items(&mut timeline)?;
 
         let path = timeline_file_path(&project_path, &timeline_id, &name);
         let rel_path = relative_string(&project_path, &path)?;
@@ -407,6 +414,17 @@ impl ProjectStore {
     ) -> ProjectStoreResult<TimelineFile> {
         let project_path = self.find_project_path(project_id)?;
         find_timeline_file(&project_path, timeline_id)
+    }
+
+    pub fn timeline_file_and_document(
+        &self,
+        project_id: &str,
+        timeline_id: &str,
+    ) -> ProjectStoreResult<TimelineFileDocument> {
+        let project_path = self.find_project_path(project_id)?;
+        let file = find_timeline_file(&project_path, timeline_id)?;
+        let document = read_json(&file.path)?;
+        Ok(TimelineFileDocument { file, document })
     }
 
     pub fn list_assets(
@@ -985,9 +1003,230 @@ fn compute_timeline_duration(timeline: &Value) -> f64 {
         .fold(0.0, f64::max)
 }
 
-fn normalize_timeline_items(timeline: &mut Value) {
+fn validate_and_default_timeline(timeline: &mut Value) -> ProjectStoreResult<()> {
+    let object = timeline
+        .as_object_mut()
+        .ok_or_else(|| ProjectStoreError::BadRequest("Timeline must be an object".to_owned()))?;
+    object
+        .entry("schemaVersion".to_owned())
+        .or_insert_with(|| json!(1));
+    object
+        .entry("aspectRatio".to_owned())
+        .or_insert_with(|| Value::String("16:9".to_owned()));
+    object
+        .entry("width".to_owned())
+        .or_insert_with(|| json!(1280));
+    object
+        .entry("height".to_owned())
+        .or_insert_with(|| json!(720));
+    object.entry("fps".to_owned()).or_insert_with(|| json!(30));
+    object
+        .entry("duration".to_owned())
+        .or_insert_with(|| json!(0.0));
+    object
+        .entry("tracks".to_owned())
+        .or_insert_with(|| json!([]));
+    object
+        .entry("transitions".to_owned())
+        .or_insert_with(|| json!([]));
+
+    validate_u64_range(timeline, "schemaVersion", 0, u32::MAX as u64)?;
+    validate_enum(timeline, "aspectRatio", &["16:9", "9:16", "1:1"])?;
+    validate_u64_range(timeline, "width", 256, 3840)?;
+    validate_u64_range(timeline, "height", 256, 3840)?;
+    validate_u64_range(timeline, "fps", 1, 60)?;
+    validate_f64_range(timeline, "duration", 0.0, f64::INFINITY)?;
+
+    let tracks = timeline
+        .get_mut("tracks")
+        .and_then(Value::as_array_mut)
+        .ok_or_else(|| ProjectStoreError::BadRequest("tracks must be an array".to_owned()))?;
+    for track in tracks {
+        validate_timeline_track(track)?;
+    }
+
+    let transitions = timeline
+        .get_mut("transitions")
+        .and_then(Value::as_array_mut)
+        .ok_or_else(|| ProjectStoreError::BadRequest("transitions must be an array".to_owned()))?;
+    for transition in transitions {
+        validate_timeline_transition(transition)?;
+    }
+    Ok(())
+}
+
+fn validate_timeline_track(track: &mut Value) -> ProjectStoreResult<()> {
+    required_str(track, "id")?;
+    required_str(track, "name")?;
+    validate_enum(track, "kind", &["video", "overlay", "audio"])?;
+    let object = track.as_object_mut().ok_or_else(|| {
+        ProjectStoreError::BadRequest("Timeline track must be an object".to_owned())
+    })?;
+    object
+        .entry("locked".to_owned())
+        .or_insert_with(|| Value::Bool(false));
+    object
+        .entry("muted".to_owned())
+        .or_insert_with(|| Value::Bool(false));
+    object
+        .entry("items".to_owned())
+        .or_insert_with(|| json!([]));
+    validate_bool(track, "locked")?;
+    validate_bool(track, "muted")?;
+    let items = track
+        .get_mut("items")
+        .and_then(Value::as_array_mut)
+        .ok_or_else(|| ProjectStoreError::BadRequest("track items must be an array".to_owned()))?;
+    for item in items {
+        validate_timeline_item(item)?;
+    }
+    Ok(())
+}
+
+fn validate_timeline_item(item: &mut Value) -> ProjectStoreResult<()> {
+    required_str(item, "trackId")?;
+    validate_required_string(item, "assetId", Some(1), None)?;
+    validate_required_string(item, "displayName", Some(1), Some(160))?;
+    let object = item.as_object_mut().ok_or_else(|| {
+        ProjectStoreError::BadRequest("Timeline item must be an object".to_owned())
+    })?;
+    if !object.contains_key("id") || object.get("id") == Some(&Value::Null) {
+        object.insert(
+            "id".to_owned(),
+            Value::String(format!("item_{}", random_hex(16)?)),
+        );
+    }
+    object
+        .entry("type".to_owned())
+        .or_insert_with(|| Value::String("video".to_owned()));
+    object
+        .entry("sourceIn".to_owned())
+        .or_insert_with(|| json!(0.0));
+    object
+        .entry("sourceOut".to_owned())
+        .or_insert_with(|| json!(4.0));
+    object
+        .entry("timelineStart".to_owned())
+        .or_insert_with(|| json!(0.0));
+    object
+        .entry("timelineEnd".to_owned())
+        .or_insert_with(|| json!(4.0));
+    object
+        .entry("speed".to_owned())
+        .or_insert_with(|| json!(1.0));
+    object
+        .entry("fit".to_owned())
+        .or_insert_with(|| Value::String("fit".to_owned()));
+    object
+        .entry("volume".to_owned())
+        .or_insert_with(|| json!(1.0));
+    object
+        .entry("versionAssetIds".to_owned())
+        .or_insert_with(|| json!([]));
+    object
+        .entry("versionHistory".to_owned())
+        .or_insert_with(|| json!([]));
+
+    validate_required_string(item, "id", Some(1), None)?;
+    validate_enum(item, "type", &["video", "image", "audio"])?;
+    let source_in = validate_f64_range(item, "sourceIn", 0.0, f64::INFINITY)?;
+    let source_out = validate_f64_range(item, "sourceOut", 0.0, f64::INFINITY)?;
+    let timeline_start = validate_f64_range(item, "timelineStart", 0.0, f64::INFINITY)?;
+    let timeline_end = validate_f64_range(item, "timelineEnd", 0.0, f64::INFINITY)?;
+    validate_f64_range(item, "speed", 0.1, 8.0)?;
+    validate_enum(item, "fit", &["fit", "fill", "stretch"])?;
+    validate_f64_range(item, "volume", 0.0, 2.0)?;
+    if source_out <= source_in {
+        return Err(ProjectStoreError::BadRequest(
+            "sourceOut must be greater than sourceIn.".to_owned(),
+        ));
+    }
+    if timeline_end <= timeline_start {
+        return Err(ProjectStoreError::BadRequest(
+            "timelineEnd must be greater than timelineStart.".to_owned(),
+        ));
+    }
+
+    item.get("versionAssetIds")
+        .and_then(Value::as_array)
+        .ok_or_else(|| {
+            ProjectStoreError::BadRequest("versionAssetIds must be an array".to_owned())
+        })?;
+    let versions = item
+        .get_mut("versionHistory")
+        .and_then(Value::as_array_mut)
+        .ok_or_else(|| {
+            ProjectStoreError::BadRequest("versionHistory must be an array".to_owned())
+        })?;
+    for version in versions {
+        validate_timeline_item_version(version)?;
+    }
+    if let Some(transition) = item
+        .get_mut("transitionIn")
+        .filter(|value| !value.is_null())
+    {
+        validate_timeline_transition(transition)?;
+    }
+    if let Some(transition) = item
+        .get_mut("transitionOut")
+        .filter(|value| !value.is_null())
+    {
+        validate_timeline_transition(transition)?;
+    }
+    Ok(())
+}
+
+fn validate_timeline_item_version(version: &mut Value) -> ProjectStoreResult<()> {
+    validate_required_string(version, "assetId", Some(1), None)?;
+    let object = version.as_object_mut().ok_or_else(|| {
+        ProjectStoreError::BadRequest("Timeline item version must be an object".to_owned())
+    })?;
+    object
+        .entry("source".to_owned())
+        .or_insert_with(|| Value::String("manual".to_owned()));
+    validate_enum(
+        version,
+        "source",
+        &[
+            "original",
+            "replacement",
+            "extension",
+            "bridge",
+            "restore",
+            "manual",
+        ],
+    )
+}
+
+fn validate_timeline_transition(transition: &mut Value) -> ProjectStoreResult<()> {
+    let object = transition.as_object_mut().ok_or_else(|| {
+        ProjectStoreError::BadRequest("Timeline transition must be an object".to_owned())
+    })?;
+    if !object.contains_key("id") || object.get("id") == Some(&Value::Null) {
+        object.insert(
+            "id".to_owned(),
+            Value::String(format!("transition_{}", random_hex(16)?)),
+        );
+    }
+    object
+        .entry("type".to_owned())
+        .or_insert_with(|| Value::String("cut".to_owned()));
+    object
+        .entry("duration".to_owned())
+        .or_insert_with(|| json!(0.0));
+    validate_required_string(transition, "id", Some(1), None)?;
+    validate_enum(
+        transition,
+        "type",
+        &["cut", "crossfade", "fade_from_black", "fade_to_black"],
+    )?;
+    validate_f64_range(transition, "duration", 0.0, 10.0)?;
+    Ok(())
+}
+
+fn normalize_timeline_items(timeline: &mut Value) -> ProjectStoreResult<()> {
     let Some(tracks) = timeline.get_mut("tracks").and_then(Value::as_array_mut) else {
-        return;
+        return Ok(());
     };
     for track in tracks {
         let Some(items) = track.get_mut("items").and_then(Value::as_array_mut) else {
@@ -1021,7 +1260,7 @@ fn normalize_timeline_items(timeline: &mut Value) {
             let needs_history = object
                 .get("versionHistory")
                 .and_then(Value::as_array)
-                .is_none_or(Vec::is_empty);
+                .map_or(true, Vec::is_empty);
             if needs_history {
                 object.insert(
                     "versionHistory".to_owned(),
@@ -1036,6 +1275,73 @@ fn normalize_timeline_items(timeline: &mut Value) {
             }
         }
     }
+    Ok(())
+}
+
+fn validate_required_string(
+    payload: &Value,
+    key: &str,
+    min_length: Option<usize>,
+    max_length: Option<usize>,
+) -> ProjectStoreResult<()> {
+    let value = required_str(payload, key)?;
+    let length = value.chars().count();
+    if let Some(min) = min_length.filter(|min| length < *min) {
+        return Err(ProjectStoreError::BadRequest(format!(
+            "{key} must be at least {min} characters"
+        )));
+    }
+    if let Some(max) = max_length.filter(|max| length > *max) {
+        return Err(ProjectStoreError::BadRequest(format!(
+            "{key} must be at most {max} characters"
+        )));
+    }
+    Ok(())
+}
+
+fn validate_enum(payload: &Value, key: &str, allowed: &[&str]) -> ProjectStoreResult<()> {
+    let value = required_str(payload, key)?;
+    if !allowed.contains(&value) {
+        return Err(ProjectStoreError::BadRequest(format!(
+            "Unsupported value for {key}: {value}"
+        )));
+    }
+    Ok(())
+}
+
+fn validate_bool(payload: &Value, key: &str) -> ProjectStoreResult<()> {
+    if payload.get(key).and_then(Value::as_bool).is_none() {
+        return Err(ProjectStoreError::BadRequest(format!(
+            "{key} must be a boolean"
+        )));
+    }
+    Ok(())
+}
+
+fn validate_u64_range(payload: &Value, key: &str, min: u64, max: u64) -> ProjectStoreResult<u64> {
+    let value = payload
+        .get(key)
+        .and_then(Value::as_u64)
+        .ok_or_else(|| ProjectStoreError::BadRequest(format!("{key} must be an integer")))?;
+    if value < min || value > max {
+        return Err(ProjectStoreError::BadRequest(format!(
+            "{key} must be between {min} and {max}"
+        )));
+    }
+    Ok(value)
+}
+
+fn validate_f64_range(payload: &Value, key: &str, min: f64, max: f64) -> ProjectStoreResult<f64> {
+    let value = payload
+        .get(key)
+        .and_then(Value::as_f64)
+        .ok_or_else(|| ProjectStoreError::BadRequest(format!("{key} must be a number")))?;
+    if !value.is_finite() || value < min || value > max {
+        return Err(ProjectStoreError::BadRequest(format!(
+            "{key} must be between {min} and {max}"
+        )));
+    }
+    Ok(value)
 }
 
 fn timeline_file_path(project_path: &Path, timeline_id: &str, name: &str) -> PathBuf {
@@ -1116,6 +1422,8 @@ fn find_timeline_file(project_path: &Path, timeline_id: &str) -> ProjectStoreRes
         };
         if timeline.get("id").and_then(Value::as_str) == Some(timeline_id) {
             let rel_path = relative_string(project_path, &candidate)?;
+            // Single-statement autocommit keeps the stale-index repair atomic; if this grows
+            // beyond one write, wrap the whole repair in an explicit transaction.
             connection.execute(
                 "update timelines set file_path = ?1 where id = ?2",
                 params![rel_path, timeline_id],

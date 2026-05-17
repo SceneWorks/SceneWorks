@@ -409,7 +409,7 @@ struct ImageJobRequest {
     #[serde(default = "default_image_count")]
     count: u32,
     #[serde(default)]
-    seed: Option<u32>,
+    seed: Option<i64>,
     #[serde(default = "default_image_size")]
     width: u32,
     #[serde(default = "default_image_size")]
@@ -454,7 +454,7 @@ struct VideoJobRequest {
     #[serde(default = "default_video_quality")]
     quality: String,
     #[serde(default)]
-    seed: Option<u32>,
+    seed: Option<i64>,
     #[serde(default)]
     loras: Vec<Value>,
     #[serde(default)]
@@ -756,19 +756,14 @@ async fn create_timeline_export(
     Json(payload): Json<TimelineExportRequest>,
 ) -> Result<(StatusCode, Json<JobSnapshot>), ApiError> {
     validate_timeline_export(&payload)?;
-    let timeline_file = project_call(state.clone(), {
+    let timeline_result = project_call(state.clone(), {
         let project_id = project_id.clone();
         let timeline_id = timeline_id.clone();
-        move |store| store.timeline_file(&project_id, &timeline_id)
+        move |store| store.timeline_file_and_document(&project_id, &timeline_id)
     })
     .await?;
-    let timeline = project_call(state.clone(), {
-        let project_id = project_id.clone();
-        let timeline_id = timeline_id.clone();
-        move |store| store.get_timeline(&project_id, &timeline_id)
-    })
-    .await?;
-    let timeline_name = timeline
+    let timeline_name = timeline_result
+        .document
         .get("name")
         .and_then(Value::as_str)
         .unwrap_or("Timeline")
@@ -779,7 +774,7 @@ async fn create_timeline_export(
     job_payload.insert("timelineName".to_owned(), Value::String(timeline_name));
     job_payload.insert(
         "timelinePath".to_owned(),
-        Value::String(timeline_file.relative_path),
+        Value::String(timeline_result.file.relative_path),
     );
     job_payload.insert("resolution".to_owned(), json!(payload.resolution));
     job_payload.insert("fps".to_owned(), json!(payload.fps));
@@ -801,22 +796,17 @@ async fn extract_timeline_frame(
     Json(payload): Json<FrameExtractRequest>,
 ) -> Result<(StatusCode, Json<JobSnapshot>), ApiError> {
     validate_frame_extract(&payload)?;
-    let timeline_file = project_call(state.clone(), {
+    let timeline_result = project_call(state.clone(), {
         let project_id = project_id.clone();
         let timeline_id = timeline_id.clone();
-        move |store| store.timeline_file(&project_id, &timeline_id)
+        move |store| store.timeline_file_and_document(&project_id, &timeline_id)
     })
     .await?;
-    let timeline = project_call(state.clone(), {
-        let project_id = project_id.clone();
-        let timeline_id = timeline_id.clone();
-        move |store| store.get_timeline(&project_id, &timeline_id)
-    })
-    .await?;
-    let item = find_timeline_item(&timeline, &item_id)?;
+    let item = find_timeline_item(&timeline_result.document, &item_id)?;
     let source_asset_id = required_string_field(item, "assetId")?.to_owned();
     let timestamp = source_timestamp_for_item(item, payload.playhead_seconds)?;
-    let timeline_name = timeline
+    let timeline_name = timeline_result
+        .document
         .get("name")
         .and_then(Value::as_str)
         .unwrap_or("Timeline")
@@ -827,7 +817,7 @@ async fn extract_timeline_frame(
     job_payload.insert("timelineName".to_owned(), Value::String(timeline_name));
     job_payload.insert(
         "timelinePath".to_owned(),
-        Value::String(timeline_file.relative_path),
+        Value::String(timeline_result.file.relative_path),
     );
     job_payload.insert("timelineItemId".to_owned(), Value::String(item_id));
     job_payload.insert("sourceAssetId".to_owned(), Value::String(source_asset_id));
@@ -1343,7 +1333,7 @@ fn validate_timeline_export(payload: &TimelineExportRequest) -> Result<(), ApiEr
 }
 
 fn validate_frame_extract(payload: &FrameExtractRequest) -> Result<(), ApiError> {
-    if payload.playhead_seconds < 0.0 {
+    if !payload.playhead_seconds.is_finite() || payload.playhead_seconds < 0.0 {
         return Err(ApiError::bad_request(
             "playheadSeconds must be greater than or equal to 0",
         ));
@@ -1365,10 +1355,10 @@ fn validate_frame_extract(payload: &FrameExtractRequest) -> Result<(), ApiError>
 }
 
 fn validate_image_job(payload: &ImageJobRequest) -> Result<(), ApiError> {
-    if payload.project_id.trim().is_empty() {
+    if payload.project_id.is_empty() {
         return Err(ApiError::bad_request("projectId is required"));
     }
-    if payload.prompt.trim().is_empty() || payload.prompt.chars().count() > 4000 {
+    if payload.prompt.is_empty() || payload.prompt.chars().count() > 4000 {
         return Err(ApiError::bad_request(
             "prompt must be between 1 and 4000 characters",
         ));
@@ -1392,10 +1382,10 @@ fn validate_image_job(payload: &ImageJobRequest) -> Result<(), ApiError> {
 }
 
 fn validate_video_job(payload: &VideoJobRequest) -> Result<(), ApiError> {
-    if payload.project_id.trim().is_empty() {
+    if payload.project_id.is_empty() {
         return Err(ApiError::bad_request("projectId is required"));
     }
-    if payload.prompt.trim().is_empty() || payload.prompt.chars().count() > 4000 {
+    if payload.prompt.is_empty() || payload.prompt.chars().count() > 4000 {
         return Err(ApiError::bad_request(
             "prompt must be between 1 and 4000 characters",
         ));
@@ -1412,7 +1402,7 @@ fn validate_video_job(payload: &VideoJobRequest) -> Result<(), ApiError> {
     {
         return Err(ApiError::bad_request("Unsupported video mode"));
     }
-    if !(1.0..=30.0).contains(&payload.duration) {
+    if !payload.duration.is_finite() || !(1.0..=30.0).contains(&payload.duration) {
         return Err(ApiError::bad_request("duration must be between 1 and 30"));
     }
     if !(1..=60).contains(&payload.fps) {
@@ -1499,10 +1489,10 @@ fn find_timeline_item<'a>(timeline: &'a Value, item_id: &str) -> Result<&'a Valu
 }
 
 fn source_timestamp_for_item(item: &Value, playhead_seconds: f64) -> Result<f64, ApiError> {
-    let timeline_start = optional_f64_field(item, "timelineStart").unwrap_or(0.0);
-    let timeline_end = optional_f64_field(item, "timelineEnd").unwrap_or(4.0);
-    let source_in = optional_f64_field(item, "sourceIn").unwrap_or(0.0);
-    let speed = optional_f64_field(item, "speed").unwrap_or(1.0);
+    let timeline_start = required_finite_f64_field(item, "timelineStart")?;
+    let timeline_end = required_finite_f64_field(item, "timelineEnd")?;
+    let source_in = required_finite_f64_field(item, "sourceIn")?;
+    let speed = required_finite_f64_field(item, "speed")?;
     if timeline_end <= timeline_start {
         return Err(ApiError::bad_request(
             "timelineEnd must be greater than timelineStart.",
@@ -1521,6 +1511,17 @@ fn required_string_field<'a>(payload: &'a Value, field: &str) -> Result<&'a str,
 
 fn optional_f64_field(payload: &Value, field: &str) -> Option<f64> {
     payload.get(field).and_then(Value::as_f64)
+}
+
+fn required_finite_f64_field(payload: &Value, field: &str) -> Result<f64, ApiError> {
+    let value = optional_f64_field(payload, field)
+        .ok_or_else(|| ApiError::bad_request(format!("Missing required field: {field}")))?;
+    if !value.is_finite() {
+        return Err(ApiError::bad_request(format!(
+            "Invalid numeric value for {field}"
+        )));
+    }
+    Ok(value)
 }
 
 fn default_timeline_name() -> String {
@@ -2155,6 +2156,22 @@ mod tests {
         assert_eq!(edit_job["type"], "image_edit");
         assert!(edit_job["payload"].get("seeds").is_none());
 
+        let (status, wide_seed_job) = request(
+            app.clone(),
+            "POST",
+            "/api/v1/image/jobs",
+            json!({
+                "projectId": " ",
+                "mode": "text_to_image",
+                "prompt": "space project id stays Python-compatible",
+                "seed": -42
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED);
+        assert_eq!(wide_seed_job["payload"]["projectId"], " ");
+        assert_eq!(wide_seed_job["payload"]["seed"], -42);
+
         let (status, video_job) = request(
             app.clone(),
             "POST",
@@ -2175,7 +2192,113 @@ mod tests {
 
         let (status, queue) = request(app, "GET", "/api/v1/queue", Value::Null).await;
         assert_eq!(status, StatusCode::OK);
-        assert_eq!(queue["counts"]["queued"], 3);
+        assert_eq!(queue["counts"]["queued"], 4);
+    }
+
+    #[tokio::test]
+    async fn generation_routes_reject_invalid_payloads() {
+        let temp_dir = tempfile::tempdir().expect("temp dir creates");
+        let app = create_app(test_settings(&temp_dir)).expect("app creates");
+
+        let (status, _) = request(
+            app.clone(),
+            "POST",
+            "/api/v1/image/jobs",
+            json!({ "projectId": "project-1", "prompt": "x".repeat(4001) }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+
+        let (status, _) = request(
+            app,
+            "POST",
+            "/api/v1/video/jobs",
+            json!({
+                "projectId": "project-1",
+                "mode": "image_to_video",
+                "prompt": "missing source image"
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn timeline_routes_reject_invalid_payloads() {
+        let temp_dir = tempfile::tempdir().expect("temp dir creates");
+        let app = create_app(test_settings(&temp_dir)).expect("app creates");
+        let (_, created_project) = request(
+            app.clone(),
+            "POST",
+            "/api/v1/projects",
+            json!({ "name": "Invalid Timeline Project" }),
+        )
+        .await;
+        let project_id = created_project["id"]
+            .as_str()
+            .expect("project id")
+            .to_owned();
+
+        let (status, _) = request(
+            app.clone(),
+            "POST",
+            &format!("/api/v1/projects/{project_id}/timelines"),
+            json!({ "name": "Main timeline", "aspectRatio": "4:3", "fps": 30 }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+
+        let (_, mut timeline) = request(
+            app.clone(),
+            "POST",
+            &format!("/api/v1/projects/{project_id}/timelines"),
+            json!({ "name": "Main timeline" }),
+        )
+        .await;
+        let timeline_id = timeline["id"].as_str().expect("timeline id").to_owned();
+        timeline["tracks"][0]["items"] = json!([
+            {
+                "id": "item-1",
+                "trackId": "track_main",
+                "assetId": "asset-1",
+                "type": "video",
+                "displayName": "Clip",
+                "sourceIn": 4,
+                "sourceOut": 2,
+                "timelineStart": 0,
+                "timelineEnd": 4
+            }
+        ]);
+        let (status, _) = request(
+            app.clone(),
+            "PUT",
+            &format!("/api/v1/projects/{project_id}/timelines/{timeline_id}"),
+            json!({ "timeline": timeline.clone() }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+
+        timeline["tracks"][0]["items"][0]["sourceOut"] = json!(6);
+        timeline["tracks"][0]["kind"] = json!("audio_v2");
+        let (status, _) = request(
+            app,
+            "PUT",
+            &format!("/api/v1/projects/{project_id}/timelines/{timeline_id}"),
+            json!({ "timeline": timeline }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+    }
+
+    #[test]
+    fn frame_extract_rejects_non_finite_playhead() {
+        let result = super::validate_frame_extract(&super::FrameExtractRequest {
+            playhead_seconds: f64::NAN,
+            intended_use: "reuse".to_owned(),
+            requested_gpu: "auto".to_owned(),
+        });
+
+        assert!(result.is_err());
     }
 
     #[tokio::test]
