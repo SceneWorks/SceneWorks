@@ -62,7 +62,7 @@ services:
       SCENEWORKS_API_URL: http://api:${SCENEWORKS_API_PORT:-8000}
       SCENEWORKS_DATA_DIR: /sceneworks/data
       SCENEWORKS_WORKER_ID: rust-utility-worker-0
-      SCENEWORKS_GPU_ID: ${SCENEWORKS_RUST_WORKER_GPU_ID:-auto}
+      SCENEWORKS_GPU_ID: ${SCENEWORKS_RUST_WORKER_GPU_ID:-cpu}
       SCENEWORKS_ACCESS_TOKEN: ${SCENEWORKS_ACCESS_TOKEN:-}
       HF_TOKEN: ${HF_TOKEN:-}
       NVIDIA_VISIBLE_DEVICES: ${NVIDIA_VISIBLE_DEVICES:-all}
@@ -71,8 +71,7 @@ services:
     depends_on:
       api:
         condition: service_healthy
-    # Rust GPU children currently report device presence for migration parity.
-    # Keep GPU visibility here so auto discovery behaves like the Python worker.
+    # Keep GPU visibility available for explicit Rust GPU auto mode.
     deploy:
       resources:
         reservations:

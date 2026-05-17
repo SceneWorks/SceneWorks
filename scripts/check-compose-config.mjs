@@ -24,10 +24,12 @@ function assertEqual(actual, expected, label) {
 function assertRuntimeDefaults(config, label) {
   const api = config.services?.api;
   const worker = config.services?.worker;
+  const rustWorker = config.services?.["rust-worker"];
   assertEqual(api?.build?.dockerfile, "docker/rust-api.Dockerfile", `${label} api dockerfile`);
   assertEqual(api?.environment?.SCENEWORKS_API_RUNTIME, "rust", `${label} api runtime`);
   assertEqual(worker?.environment?.SCENEWORKS_UTILITY_JOBS, "1", `${label} python utility jobs`);
   assertEqual(worker?.environment?.SCENEWORKS_WORKER_ID, "python-inference-worker-0", `${label} python worker id`);
+  assertEqual(rustWorker?.environment?.SCENEWORKS_GPU_ID, "cpu", `${label} rust worker gpu mode`);
 }
 
 const tempRoot = await mkdtemp(path.join(os.tmpdir(), "sceneworks-compose-config-"));

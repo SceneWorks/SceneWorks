@@ -51,7 +51,7 @@ impl Settings {
                 .filter(|value| !value.is_empty()),
             data_dir: env_path("SCENEWORKS_DATA_DIR", "data"),
             worker_id: env_string("SCENEWORKS_WORKER_ID", "rust-utility-worker"),
-            gpu_id: env_string("SCENEWORKS_GPU_ID", "auto"),
+            gpu_id: env_string("SCENEWORKS_GPU_ID", "cpu"),
             is_child_worker: std::env::var("SCENEWORKS_WORKER_CHILD")
                 .is_ok_and(|value| value.trim() == "1"),
             poll_seconds: env_u64_any(
