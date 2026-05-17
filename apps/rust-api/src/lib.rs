@@ -1,9 +1,15 @@
+use std::collections::HashMap;
+use std::convert::Infallible;
 use std::net::SocketAddr;
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use axum::extract::{Path, Query, State};
-use axum::http::StatusCode;
+use axum::http::{header, HeaderMap, HeaderName, HeaderValue, Method, Request, StatusCode};
+use axum::middleware::{self, Next};
+use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
@@ -16,7 +22,25 @@ use sceneworks_core::jobs_store::{
     WorkerHeartbeat, JOB_STATUSES,
 };
 use serde::{Deserialize, Serialize};
-use serde_json::json;
+use serde_json::{json, Value};
+use tokio::sync::broadcast;
+use tokio_stream::wrappers::BroadcastStream;
+use tokio_stream::StreamExt;
+use tower_http::cors::{AllowOrigin, CorsLayer};
+
+const PUBLIC_PATHS: &[&str] = &[
+    "/api/v1/health",
+    "/api/v1/access",
+    "/api/v1/auth/verify",
+    "/api/v1/jobs/events",
+];
+const DEFAULT_CORS_ORIGINS: &str = concat!(
+    "http://localhost:5173,http://127.0.0.1:5173,",
+    "http://localhost:5174,http://127.0.0.1:5174,",
+    "http://localhost:5175,http://127.0.0.1:5175,",
+    "http://localhost:5176,http://127.0.0.1:5176"
+);
+static EVENT_TICKET_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Debug, Clone)]
 pub struct Settings {
@@ -26,6 +50,7 @@ pub struct Settings {
     pub data_dir: PathBuf,
     pub config_dir: PathBuf,
     pub access_token: String,
+    pub cors_origins: Vec<String>,
     pub worker_timeout_seconds: u64,
     pub jobs_db_path: PathBuf,
 }
@@ -51,6 +76,12 @@ impl Settings {
                 .unwrap_or_default()
                 .trim()
                 .to_owned(),
+            cors_origins: env_string("SCENEWORKS_CORS_ORIGINS", DEFAULT_CORS_ORIGINS)
+                .split(',')
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(str::to_owned)
+                .collect(),
             worker_timeout_seconds: std::env::var("SCENEWORKS_WORKER_TIMEOUT_SECONDS")
                 .ok()
                 .and_then(|value| value.parse().ok())
@@ -68,7 +99,71 @@ impl Settings {
 pub struct AppState {
     settings: Settings,
     jobs_store: Arc<JobsStore>,
+    events: broadcast::Sender<EventMessage>,
+    event_tickets: Arc<EventTicketStore>,
     interrupted_jobs_on_startup: usize,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct EventMessage {
+    event: String,
+    data: Value,
+}
+
+#[derive(Debug)]
+struct EventTicketStore {
+    ttl: Duration,
+    tickets: Mutex<HashMap<String, Instant>>,
+}
+
+impl EventTicketStore {
+    fn new(ttl_seconds: u64) -> Self {
+        Self {
+            ttl: Duration::from_secs(ttl_seconds),
+            tickets: Mutex::new(HashMap::new()),
+        }
+    }
+
+    fn issue(&self) -> Result<EventTicket, ApiError> {
+        let now = Instant::now();
+        let mut tickets = self
+            .tickets
+            .lock()
+            .map_err(|_| ApiError::internal("Event ticket store lock poisoned"))?;
+        prune_tickets(&mut tickets, now);
+        let ticket = format!(
+            "rust-event-ticket-{}-{}",
+            unix_millis(),
+            EVENT_TICKET_COUNTER.fetch_add(1, Ordering::Relaxed)
+        );
+        tickets.insert(ticket.clone(), now + self.ttl);
+        Ok(EventTicket {
+            ticket,
+            expires_in_seconds: self.ttl.as_secs(),
+        })
+    }
+
+    fn consume(&self, ticket: &str) -> Result<(), ApiError> {
+        let now = Instant::now();
+        let mut tickets = self
+            .tickets
+            .lock()
+            .map_err(|_| ApiError::internal("Event ticket store lock poisoned"))?;
+        prune_tickets(&mut tickets, now);
+        match tickets.remove(ticket) {
+            Some(expires_at) if expires_at >= now => Ok(()),
+            _ => Err(ApiError::unauthorized(
+                "Invalid or expired event stream ticket",
+            )),
+        }
+    }
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct EventTicket {
+    ticket: String,
+    expires_in_seconds: u64,
 }
 
 pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
@@ -88,13 +183,20 @@ pub fn create_app(settings: Settings) -> Result<Router, JobsStoreError> {
     let state = AppState {
         settings,
         jobs_store,
+        events: broadcast::channel(100).0,
+        event_tickets: Arc::new(EventTicketStore::new(30)),
         interrupted_jobs_on_startup,
     };
+    let cors = cors_layer(&state.settings);
 
     Ok(Router::new()
         .route("/api/v1/health", get(health))
+        .route("/api/v1/access", get(access))
+        .route("/api/v1/auth/verify", post(verify_access))
         .route("/api/v1/jobs", get(list_jobs).post(create_job))
         .route("/api/v1/jobs/claim", post(claim_job))
+        .route("/api/v1/jobs/events", get(job_events))
+        .route("/api/v1/jobs/events/ticket", post(create_event_ticket))
         .route("/api/v1/jobs/:job_id", get(get_job))
         .route("/api/v1/jobs/:job_id/cancel", post(cancel_job))
         .route("/api/v1/jobs/:job_id/retry", post(retry_job))
@@ -107,7 +209,9 @@ pub fn create_app(settings: Settings) -> Result<Router, JobsStoreError> {
             "/api/v1/workers/:worker_id/heartbeat",
             post(heartbeat_worker),
         )
-        .with_state(state))
+        .with_state(state.clone())
+        .layer(middleware::from_fn_with_state(state, access_control))
+        .layer(cors))
 }
 
 #[derive(Debug, Deserialize)]
@@ -116,6 +220,11 @@ struct JobsQuery {
     project_id: Option<String>,
     status: Option<String>,
     limit: Option<u32>,
+}
+
+#[derive(Debug, Deserialize)]
+struct EventsQuery {
+    ticket: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -138,6 +247,18 @@ struct DirectoriesResponse {
     jobs_db: String,
 }
 
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct AccessResponse {
+    auth_required: bool,
+    token_header: &'static str,
+}
+
+#[derive(Debug, Serialize)]
+struct VerifyResponse {
+    ok: bool,
+}
+
 async fn health(State(state): State<AppState>) -> Json<HealthResponse> {
     Json(HealthResponse {
         status: "ok",
@@ -154,37 +275,60 @@ async fn health(State(state): State<AppState>) -> Json<HealthResponse> {
     })
 }
 
+async fn access(State(state): State<AppState>) -> Json<AccessResponse> {
+    Json(AccessResponse {
+        auth_required: !state.settings.access_token.is_empty(),
+        token_header: "X-SceneWorks-Token",
+    })
+}
+
+async fn verify_access(State(state): State<AppState>, headers: HeaderMap) -> Json<VerifyResponse> {
+    Json(VerifyResponse {
+        ok: is_authorized(&headers, &state.settings),
+    })
+}
+
 async fn list_jobs(
     State(state): State<AppState>,
     Query(query): Query<JobsQuery>,
 ) -> Result<Json<Vec<JobSnapshot>>, ApiError> {
-    sweep_stale_workers(&state)?;
     if let Some(status) = &query.status {
         if !JOB_STATUSES.contains(&status.as_str()) {
             return Err(ApiError::bad_request("Unsupported job status"));
         }
     }
-    Ok(Json(state.jobs_store.list_jobs(
-        query.project_id.as_deref(),
-        query.status.as_deref(),
-        query.limit.unwrap_or(100),
-    )?))
+    Ok(Json(
+        store_call(state, move |store, timeout| {
+            store.mark_stale_workers_interrupted(timeout)?;
+            store.list_jobs(
+                query.project_id.as_deref(),
+                query.status.as_deref(),
+                query.limit.unwrap_or(100),
+            )
+        })
+        .await?,
+    ))
 }
 
 async fn create_job(
     State(state): State<AppState>,
     Json(payload): Json<JobCreateRequest>,
 ) -> Result<(StatusCode, Json<JobSnapshot>), ApiError> {
-    let job = state.jobs_store.create_job(CreateJob {
-        job_type: payload.job_type,
-        project_id: payload.project_id,
-        project_name: payload.project_name,
-        payload: payload.payload,
-        requested_gpu: payload.requested_gpu,
-        source_job_id: None,
-        duplicate_of_job_id: None,
-        attempts: 1,
-    })?;
+    let job = store_call(state.clone(), move |store, _timeout| {
+        store.create_job(CreateJob {
+            job_type: payload.job_type,
+            project_id: payload.project_id,
+            project_name: payload.project_name,
+            payload: payload.payload,
+            requested_gpu: payload.requested_gpu,
+            source_job_id: None,
+            duplicate_of_job_id: None,
+            attempts: 1,
+        })
+    })
+    .await?;
+    publish(&state, "job.updated", &job);
+    publish_queue(&state).await?;
     Ok((StatusCode::CREATED, Json(job)))
 }
 
@@ -192,9 +336,17 @@ async fn claim_job(
     State(state): State<AppState>,
     Json(payload): Json<ClaimRequest>,
 ) -> Result<Json<ClaimResponse>, ApiError> {
-    sweep_stale_workers(&state)?;
+    let response = store_call(state.clone(), move |store, timeout| {
+        store.mark_stale_workers_interrupted(timeout)?;
+        store.claim_next_job(&payload.worker_id)
+    })
+    .await?;
+    if let Some(job) = &response {
+        publish(&state, "job.updated", job);
+        publish_queue(&state).await?;
+    }
     Ok(Json(ClaimResponse {
-        job: state.jobs_store.claim_next_job(&payload.worker_id)?,
+        job: response,
         extra: Default::default(),
     }))
 }
@@ -203,24 +355,35 @@ async fn get_job(
     State(state): State<AppState>,
     Path(job_id): Path<String>,
 ) -> Result<Json<JobSnapshot>, ApiError> {
-    Ok(Json(state.jobs_store.get_job(&job_id)?))
+    Ok(Json(
+        store_call(state, move |store, _timeout| store.get_job(&job_id)).await?,
+    ))
 }
 
 async fn cancel_job(
     State(state): State<AppState>,
     Path(job_id): Path<String>,
 ) -> Result<Json<JobSnapshot>, ApiError> {
-    Ok(Json(state.jobs_store.cancel_job(&job_id)?))
+    let job = store_call(state.clone(), move |store, _timeout| {
+        store.cancel_job(&job_id)
+    })
+    .await?;
+    publish(&state, "job.updated", &job);
+    publish_queue(&state).await?;
+    Ok(Json(job))
 }
 
 async fn retry_job(
     State(state): State<AppState>,
     Path(job_id): Path<String>,
 ) -> Result<(StatusCode, Json<JobSnapshot>), ApiError> {
-    Ok((
-        StatusCode::CREATED,
-        Json(state.jobs_store.retry_job(&job_id)?),
-    ))
+    let job = store_call(state.clone(), move |store, _timeout| {
+        store.retry_job(&job_id)
+    })
+    .await?;
+    publish(&state, "job.updated", &job);
+    publish_queue(&state).await?;
+    Ok((StatusCode::CREATED, Json(job)))
 }
 
 async fn duplicate_job(
@@ -228,13 +391,18 @@ async fn duplicate_job(
     Path(job_id): Path<String>,
     Json(payload): Json<DuplicateJobRequest>,
 ) -> Result<(StatusCode, Json<JobSnapshot>), ApiError> {
-    let job = state.jobs_store.duplicate_job(
-        &job_id,
-        DuplicateJob {
-            payload_changes: payload.payload_changes,
-            requested_gpu: payload.requested_gpu,
-        },
-    )?;
+    let job = store_call(state.clone(), move |store, _timeout| {
+        store.duplicate_job(
+            &job_id,
+            DuplicateJob {
+                payload_changes: payload.payload_changes,
+                requested_gpu: payload.requested_gpu,
+            },
+        )
+    })
+    .await?;
+    publish(&state, "job.updated", &job);
+    publish_queue(&state).await?;
     Ok((StatusCode::CREATED, Json(job)))
 }
 
@@ -243,44 +411,61 @@ async fn update_job_progress(
     Path(job_id): Path<String>,
     Json(payload): Json<ProgressRequest>,
 ) -> Result<Json<JobSnapshot>, ApiError> {
-    let job = state.jobs_store.update_job_progress(
-        &job_id,
-        ProgressUpdate {
-            status: payload.status,
-            stage: payload.stage,
-            progress: number_to_f64(&payload.progress, "progress")?,
-            message: payload.message,
-            error: payload.error,
-            result: payload.result,
-            eta_seconds: optional_number_to_f64(payload.eta_seconds.as_ref(), "etaSeconds")?,
-        },
-    )?;
+    let progress = number_to_f64(&payload.progress, "progress")?;
+    let eta_seconds = optional_number_to_f64(payload.eta_seconds.as_ref(), "etaSeconds")?;
+    let job = store_call(state.clone(), move |store, _timeout| {
+        store.update_job_progress(
+            &job_id,
+            ProgressUpdate {
+                status: payload.status,
+                stage: payload.stage,
+                progress,
+                message: payload.message,
+                error: payload.error,
+                result: payload.result,
+                eta_seconds,
+            },
+        )
+    })
+    .await?;
+    publish(&state, "job.updated", &job);
+    publish_queue(&state).await?;
     Ok(Json(job))
 }
 
 async fn queue_summary(State(state): State<AppState>) -> Result<Json<QueueSummary>, ApiError> {
-    sweep_stale_workers(&state)?;
-    Ok(Json(state.jobs_store.queue_summary()?))
+    Ok(Json(queue_summary_snapshot(state).await?))
 }
 
 async fn list_workers(
     State(state): State<AppState>,
 ) -> Result<Json<Vec<WorkerSnapshot>>, ApiError> {
-    sweep_stale_workers(&state)?;
-    Ok(Json(state.jobs_store.list_workers()?))
+    Ok(Json(
+        store_call(state, move |store, timeout| {
+            store.mark_stale_workers_interrupted(timeout)?;
+            store.list_workers()
+        })
+        .await?,
+    ))
 }
 
 async fn register_worker(
     State(state): State<AppState>,
     Json(payload): Json<WorkerRegisterRequest>,
 ) -> Result<Json<WorkerSnapshot>, ApiError> {
-    Ok(Json(state.jobs_store.register_worker(RegisterWorker {
-        worker_id: payload.worker_id,
-        gpu_id: payload.gpu_id,
-        gpu_name: payload.gpu_name,
-        capabilities: payload.capabilities,
-        loaded_models: payload.loaded_models,
-    })?))
+    let worker = store_call(state.clone(), move |store, _timeout| {
+        store.register_worker(RegisterWorker {
+            worker_id: payload.worker_id,
+            gpu_id: payload.gpu_id,
+            gpu_name: payload.gpu_name,
+            capabilities: payload.capabilities,
+            loaded_models: payload.loaded_models,
+        })
+    })
+    .await?;
+    publish(&state, "worker.updated", &worker);
+    publish_queue(&state).await?;
+    Ok(Json(worker))
 }
 
 async fn heartbeat_worker(
@@ -288,21 +473,164 @@ async fn heartbeat_worker(
     Path(worker_id): Path<String>,
     Json(payload): Json<WorkerHeartbeatRequest>,
 ) -> Result<Json<WorkerSnapshot>, ApiError> {
-    Ok(Json(state.jobs_store.heartbeat_worker(
-        WorkerHeartbeat {
+    let worker = store_call(state.clone(), move |store, _timeout| {
+        store.heartbeat_worker(WorkerHeartbeat {
             worker_id,
             status: payload.status,
             current_job_id: payload.current_job_id,
             loaded_models: payload.loaded_models,
-        },
-    )?))
+        })
+    })
+    .await?;
+    publish(&state, "worker.updated", &worker);
+    Ok(Json(worker))
 }
 
-fn sweep_stale_workers(state: &AppState) -> Result<(), JobsStoreError> {
-    state
-        .jobs_store
-        .mark_stale_workers_interrupted(state.settings.worker_timeout_seconds)
-        .map(|_| ())
+async fn create_event_ticket(State(state): State<AppState>) -> Result<Json<EventTicket>, ApiError> {
+    Ok(Json(state.event_tickets.issue()?))
+}
+
+async fn job_events(
+    State(state): State<AppState>,
+    Query(query): Query<EventsQuery>,
+) -> Result<Sse<impl tokio_stream::Stream<Item = Result<Event, Infallible>>>, ApiError> {
+    if !state.settings.access_token.is_empty() {
+        state
+            .event_tickets
+            .consume(query.ticket.as_deref().unwrap_or_default())?;
+    }
+    let ready = tokio_stream::iter([Ok(Event::default()
+        .event("ready")
+        .data(json!({ "status": "connected" }).to_string()))]);
+    let messages =
+        BroadcastStream::new(state.events.subscribe()).filter_map(|message| match message {
+            Ok(message) => Some(Ok(Event::default()
+                .event(message.event)
+                .data(message.data.to_string()))),
+            Err(_) => None,
+        });
+    Ok(Sse::new(ready.chain(messages)).keep_alive(KeepAlive::default()))
+}
+
+async fn access_control(
+    State(state): State<AppState>,
+    request: Request<axum::body::Body>,
+    next: Next,
+) -> Response {
+    if request.method().as_str() == "OPTIONS"
+        || PUBLIC_PATHS.contains(&request.uri().path())
+        || is_authorized(request.headers(), &state.settings)
+    {
+        return next.run(request).await;
+    }
+
+    (
+        StatusCode::UNAUTHORIZED,
+        Json(json!({
+            "detail": "SceneWorks access token required",
+            "authRequired": true
+        })),
+    )
+        .into_response()
+}
+
+fn cors_layer(settings: &Settings) -> CorsLayer {
+    let origins = settings
+        .cors_origins
+        .iter()
+        .filter_map(|origin| HeaderValue::from_str(origin).ok())
+        .collect::<Vec<_>>();
+
+    CorsLayer::new()
+        .allow_origin(AllowOrigin::list(origins))
+        .allow_methods([
+            Method::GET,
+            Method::POST,
+            Method::PUT,
+            Method::PATCH,
+            Method::DELETE,
+            Method::OPTIONS,
+        ])
+        .allow_headers([
+            header::AUTHORIZATION,
+            header::CONTENT_TYPE,
+            HeaderName::from_static("x-sceneworks-token"),
+        ])
+}
+
+fn is_authorized(headers: &HeaderMap, settings: &Settings) -> bool {
+    if settings.access_token.is_empty() {
+        return true;
+    }
+    constant_time_eq(
+        token_from_headers(headers).as_bytes(),
+        settings.access_token.as_bytes(),
+    )
+}
+
+fn token_from_headers(headers: &HeaderMap) -> String {
+    if let Some(token) = headers
+        .get("x-sceneworks-token")
+        .and_then(|value| value.to_str().ok())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        return token.to_owned();
+    }
+    headers
+        .get("authorization")
+        .and_then(|value| value.to_str().ok())
+        .map(str::trim)
+        .and_then(|value| value.strip_prefix("Bearer "))
+        .map(str::trim)
+        .unwrap_or_default()
+        .to_owned()
+}
+
+fn constant_time_eq(left: &[u8], right: &[u8]) -> bool {
+    if left.len() != right.len() {
+        return false;
+    }
+    left.iter()
+        .zip(right.iter())
+        .fold(0, |difference, (left, right)| difference | (left ^ right))
+        == 0
+}
+
+async fn store_call<T, F>(state: AppState, operation: F) -> Result<T, ApiError>
+where
+    T: Send + 'static,
+    F: FnOnce(Arc<JobsStore>, u64) -> Result<T, JobsStoreError> + Send + 'static,
+{
+    let timeout = state.settings.worker_timeout_seconds;
+    let store = state.jobs_store.clone();
+    tokio::task::spawn_blocking(move || operation(store, timeout))
+        .await
+        .map_err(|error| ApiError::internal(error.to_string()))?
+        .map_err(Into::into)
+}
+
+async fn queue_summary_snapshot(state: AppState) -> Result<QueueSummary, ApiError> {
+    store_call(state, |store, timeout| {
+        store.mark_stale_workers_interrupted(timeout)?;
+        store.queue_summary()
+    })
+    .await
+}
+
+async fn publish_queue(state: &AppState) -> Result<(), ApiError> {
+    let queue = queue_summary_snapshot(state.clone()).await?;
+    publish(state, "queue.updated", &queue);
+    Ok(())
+}
+
+fn publish<T: Serialize>(state: &AppState, event: &str, data: &T) {
+    if let Ok(data) = serde_json::to_value(data) {
+        let _ = state.events.send(EventMessage {
+            event: event.to_owned(),
+            data,
+        });
+    }
 }
 
 fn number_to_f64(number: &serde_json::Number, field: &'static str) -> Result<f64, ApiError> {
@@ -342,6 +670,20 @@ impl ApiError {
             detail: detail.into(),
         }
     }
+
+    fn unauthorized(detail: impl Into<String>) -> Self {
+        Self {
+            status: StatusCode::UNAUTHORIZED,
+            detail: detail.into(),
+        }
+    }
+
+    fn internal(detail: impl Into<String>) -> Self {
+        Self {
+            status: StatusCode::INTERNAL_SERVER_ERROR,
+            detail: detail.into(),
+        }
+    }
 }
 
 impl From<JobsStoreError> for ApiError {
@@ -362,12 +704,20 @@ impl From<JobsStoreError> for ApiError {
                 status: StatusCode::BAD_REQUEST,
                 detail: format!("Job retry limit reached after {max_attempts} attempts."),
             },
-            other => Self {
-                status: StatusCode::INTERNAL_SERVER_ERROR,
-                detail: other.to_string(),
-            },
+            other => Self::internal(other.to_string()),
         }
     }
+}
+
+fn unix_millis() -> u128 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_millis())
+        .unwrap_or(0)
+}
+
+fn prune_tickets(tickets: &mut HashMap<String, Instant>, now: Instant) {
+    tickets.retain(|_, expires_at| *expires_at >= now);
 }
 
 impl IntoResponse for ApiError {
@@ -392,6 +742,10 @@ mod tests {
             data_dir: temp_dir.path().join("data"),
             config_dir: temp_dir.path().join("config"),
             access_token: String::new(),
+            cors_origins: vec![
+                "http://localhost:5173".to_owned(),
+                "http://127.0.0.1:5173".to_owned(),
+            ],
             worker_timeout_seconds: 90,
             jobs_db_path: temp_dir.path().join("jobs.db"),
         }
@@ -403,10 +757,24 @@ mod tests {
         uri: &str,
         body: Value,
     ) -> (StatusCode, Value) {
-        let request = Request::builder()
+        request_with_headers(app, method, uri, body, &[]).await
+    }
+
+    async fn request_with_headers(
+        app: axum::Router,
+        method: &str,
+        uri: &str,
+        body: Value,
+        headers: &[(&str, &str)],
+    ) -> (StatusCode, Value) {
+        let mut builder = Request::builder()
             .method(method)
             .uri(uri)
-            .header("content-type", "application/json")
+            .header("content-type", "application/json");
+        for (name, value) in headers {
+            builder = builder.header(*name, *value);
+        }
+        let request = builder
             .body(Body::from(body.to_string()))
             .expect("request builds");
         let response = app.oneshot(request).await.expect("response returns");
@@ -540,5 +908,124 @@ mod tests {
         assert_eq!(status, StatusCode::OK);
         assert_eq!(job["status"], "interrupted");
         assert_eq!(job["workerId"], Value::Null);
+    }
+
+    #[tokio::test]
+    async fn access_token_is_enforced_on_protected_routes() {
+        let temp_dir = tempfile::tempdir().expect("temp dir creates");
+        let mut settings = test_settings(&temp_dir);
+        settings.access_token = "secret-token".to_owned();
+        let app = create_app(settings).expect("app creates");
+
+        let (status, access) = request(app.clone(), "GET", "/api/v1/access", Value::Null).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(access["authRequired"], true);
+
+        let (status, error) = request(app.clone(), "GET", "/api/v1/jobs", Value::Null).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        assert_eq!(error["detail"], "SceneWorks access token required");
+
+        let (status, jobs) = request_with_headers(
+            app,
+            "GET",
+            "/api/v1/jobs",
+            Value::Null,
+            &[("x-sceneworks-token", "secret-token")],
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(jobs, json!([]));
+    }
+
+    #[tokio::test]
+    async fn bearer_token_is_accepted_for_access_verification() {
+        let temp_dir = tempfile::tempdir().expect("temp dir creates");
+        let mut settings = test_settings(&temp_dir);
+        settings.access_token = "secret-token".to_owned();
+        let app = create_app(settings).expect("app creates");
+
+        let (status, verified) = request_with_headers(
+            app,
+            "POST",
+            "/api/v1/auth/verify",
+            Value::Null,
+            &[("authorization", "Bearer secret-token")],
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(verified["ok"], true);
+    }
+
+    #[tokio::test]
+    async fn event_tickets_are_protected_and_match_python_shape() {
+        let temp_dir = tempfile::tempdir().expect("temp dir creates");
+        let mut settings = test_settings(&temp_dir);
+        settings.access_token = "secret-token".to_owned();
+        let app = create_app(settings).expect("app creates");
+
+        let (status, error) = request(
+            app.clone(),
+            "POST",
+            "/api/v1/jobs/events/ticket",
+            Value::Null,
+        )
+        .await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        assert_eq!(error["detail"], "SceneWorks access token required");
+
+        let (status, ticket) = request_with_headers(
+            app.clone(),
+            "POST",
+            "/api/v1/jobs/events/ticket",
+            Value::Null,
+            &[("x-sceneworks-token", "secret-token")],
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(ticket["ticket"]
+            .as_str()
+            .is_some_and(|value| !value.is_empty()));
+        assert_eq!(ticket["expiresInSeconds"], 30);
+
+        let (status, error) = request(
+            app,
+            "GET",
+            "/api/v1/jobs/events?ticket=missing",
+            Value::Null,
+        )
+        .await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        assert_eq!(error["detail"], "Invalid or expired event stream ticket");
+    }
+
+    #[tokio::test]
+    async fn cors_preflight_allows_frontend_origin_and_token_header() {
+        let temp_dir = tempfile::tempdir().expect("temp dir creates");
+        let app = create_app(test_settings(&temp_dir)).expect("app creates");
+        let request = Request::builder()
+            .method("OPTIONS")
+            .uri("/api/v1/jobs")
+            .header("origin", "http://localhost:5173")
+            .header("access-control-request-method", "POST")
+            .header("access-control-request-headers", "X-SceneWorks-Token")
+            .body(Body::empty())
+            .expect("request builds");
+
+        let response = app.oneshot(request).await.expect("response returns");
+
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response
+                .headers()
+                .get("access-control-allow-origin")
+                .and_then(|value| value.to_str().ok()),
+            Some("http://localhost:5173")
+        );
+        assert!(response
+            .headers()
+            .get("access-control-allow-headers")
+            .and_then(|value| value.to_str().ok())
+            .is_some_and(|value| value.to_ascii_lowercase().contains("x-sceneworks-token")));
     }
 }

@@ -301,3 +301,75 @@ fn stale_sweep_marks_worker_offline_and_job_interrupted() {
     assert_eq!(sweep.jobs[0].status, JobStatus::Interrupted);
     assert_eq!(sweep.jobs[0].worker_id, None);
 }
+
+#[test]
+fn json_columns_use_python_compatible_sorted_key_order() {
+    let store = store("json-order");
+    let job = store
+        .create_job(image_job(object(
+            json!({ "z": 1, "a": { "b": 2, "a": 1 } }),
+        )))
+        .expect("job creates");
+
+    let connection = Connection::open(store.db_path()).expect("db opens");
+    let payload_json: String = connection
+        .query_row(
+            "select payload_json from jobs where id = ?1",
+            params![job.id],
+            |row| row.get(0),
+        )
+        .expect("payload json loads");
+
+    assert_eq!(payload_json, r#"{"a":{"a":1,"b":2},"z":1}"#);
+}
+
+#[test]
+fn invalid_progress_numbers_are_rejected() {
+    let store = store("invalid-progress");
+    let job = store
+        .create_job(image_job(Map::new()))
+        .expect("job creates");
+
+    assert!(matches!(
+        store.update_job_progress(
+            &job.id,
+            ProgressUpdate {
+                status: JobStatus::Running,
+                stage: ProgressStage::Running,
+                progress: f64::NAN,
+                message: "bad progress".to_owned(),
+                error: None,
+                result: None,
+                eta_seconds: None,
+            },
+        ),
+        Err(JobsStoreError::InvalidNumber(field)) if field == "progress"
+    ));
+}
+
+#[test]
+fn elapsed_seconds_accepts_fractional_rfc3339_timestamps() {
+    let store = store("fractional-time");
+    let job = store
+        .create_job(image_job(Map::new()))
+        .expect("job creates");
+    let connection = Connection::open(store.db_path()).expect("db opens");
+    connection
+        .execute(
+            r#"
+            update jobs
+               set started_at = '2026-05-17T13:00:04.521Z',
+                   completed_at = '2026-05-17T13:00:09.999Z'
+             where id = ?1
+            "#,
+            params![job.id.clone()],
+        )
+        .expect("timestamps update");
+
+    let loaded = store.get_job(&job.id).expect("job loads");
+
+    assert_eq!(
+        loaded.elapsed_seconds.and_then(|value| value.as_i64()),
+        Some(5)
+    );
+}

@@ -1,9 +1,9 @@
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use rusqlite::{params, Connection, OptionalExtension, Row};
+use parking_lot::Mutex;
+use rusqlite::{params, params_from_iter, Connection, OptionalExtension, Row};
 use serde::de::DeserializeOwned;
 use serde_json::{Map, Number, Value};
 
@@ -46,7 +46,6 @@ pub enum JobsStoreError {
     InvalidStatus(String),
     InvalidNumber(String),
     RetryLimit { max_attempts: u32 },
-    LockPoisoned,
 }
 
 impl std::fmt::Display for JobsStoreError {
@@ -64,7 +63,6 @@ impl std::fmt::Display for JobsStoreError {
                     "Job retry limit reached after {max_attempts} attempts."
                 )
             }
-            Self::LockPoisoned => write!(formatter, "Jobs store lock was poisoned"),
         }
     }
 }
@@ -160,9 +158,10 @@ impl JobsStore {
     }
 
     pub fn initialize(&self) -> JobsStoreResult<()> {
-        let _guard = self.lock.lock().map_err(|_| JobsStoreError::LockPoisoned)?;
-        let connection = self.connect()?;
-        connection.execute_batch(
+        let _guard = self.lock.lock();
+        let mut connection = self.connect()?;
+        let transaction = connection.transaction()?;
+        transaction.execute_batch(
             "
             create table if not exists jobs (
               id text primary key,
@@ -212,15 +211,17 @@ impl JobsStore {
             );
             ",
         )?;
+        transaction.commit()?;
         Ok(())
     }
 
     pub fn mark_interrupted_on_startup(&self) -> JobsStoreResult<Vec<JobSnapshot>> {
-        let _guard = self.lock.lock().map_err(|_| JobsStoreError::LockPoisoned)?;
-        let connection = self.connect()?;
-        let interrupted = self.list_jobs_by_status_on_connection(&connection, ACTIVE_STATUSES)?;
+        let _guard = self.lock.lock();
+        let mut connection = self.connect()?;
+        let transaction = connection.transaction()?;
+        let interrupted = self.list_jobs_by_status_on_connection(&transaction, ACTIVE_STATUSES)?;
         let now = utc_now();
-        connection.execute(
+        transaction.execute(
             "
             update jobs
                set status = 'interrupted',
@@ -234,17 +235,21 @@ impl JobsStore {
             ",
             params![now],
         )?;
-        connection.execute(
+        transaction.execute(
             "update workers set status = 'offline', current_job_id = null where status != 'offline'",
             [],
         )?;
+        transaction.commit()?;
         Ok(interrupted)
     }
 
     pub fn create_job(&self, request: CreateJob) -> JobsStoreResult<JobSnapshot> {
-        let _guard = self.lock.lock().map_err(|_| JobsStoreError::LockPoisoned)?;
-        let connection = self.connect()?;
-        self.create_job_on_connection(&connection, request)
+        let _guard = self.lock.lock();
+        let mut connection = self.connect()?;
+        let transaction = connection.transaction()?;
+        let job = self.create_job_on_connection(&transaction, request)?;
+        transaction.commit()?;
+        Ok(job)
     }
 
     pub fn list_jobs(
@@ -253,7 +258,7 @@ impl JobsStore {
         status: Option<&str>,
         limit: u32,
     ) -> JobsStoreResult<Vec<JobSnapshot>> {
-        let _guard = self.lock.lock().map_err(|_| JobsStoreError::LockPoisoned)?;
+        let _guard = self.lock.lock();
         let connection = self.connect()?;
         let limit = limit.clamp(1, 500);
         let jobs = match (project_id, status) {
@@ -292,22 +297,23 @@ impl JobsStore {
     }
 
     pub fn get_job(&self, job_id: &str) -> JobsStoreResult<JobSnapshot> {
-        let _guard = self.lock.lock().map_err(|_| JobsStoreError::LockPoisoned)?;
+        let _guard = self.lock.lock();
         let connection = self.connect()?;
         self.get_job_on_connection(&connection, job_id)
     }
 
     pub fn cancel_job(&self, job_id: &str) -> JobsStoreResult<JobSnapshot> {
-        let _guard = self.lock.lock().map_err(|_| JobsStoreError::LockPoisoned)?;
-        let connection = self.connect()?;
-        let job = self.get_job_on_connection(&connection, job_id)?;
+        let _guard = self.lock.lock();
+        let mut connection = self.connect()?;
+        let transaction = connection.transaction()?;
+        let job = self.get_job_on_connection(&transaction, job_id)?;
         if is_terminal_status(job.status.as_str()) {
             return Ok(job);
         }
 
         let now = utc_now();
         if job.status == JobStatus::Queued {
-            connection.execute(
+            transaction.execute(
                 "
                 update jobs
                    set status = 'canceled',
@@ -323,7 +329,7 @@ impl JobsStore {
                 params![now, job_id],
             )?;
         } else {
-            connection.execute(
+            transaction.execute(
                 "
                 update jobs
                    set cancel_requested = 1,
@@ -334,20 +340,23 @@ impl JobsStore {
                 params![now, job_id],
             )?;
         }
-        self.get_job_on_connection(&connection, job_id)
+        let job = self.get_job_on_connection(&transaction, job_id)?;
+        transaction.commit()?;
+        Ok(job)
     }
 
     pub fn retry_job(&self, job_id: &str) -> JobsStoreResult<JobSnapshot> {
-        let _guard = self.lock.lock().map_err(|_| JobsStoreError::LockPoisoned)?;
-        let connection = self.connect()?;
-        let job = self.get_job_on_connection(&connection, job_id)?;
+        let _guard = self.lock.lock();
+        let mut connection = self.connect()?;
+        let transaction = connection.transaction()?;
+        let job = self.get_job_on_connection(&transaction, job_id)?;
         if job.attempts >= MAX_JOB_ATTEMPTS {
             return Err(JobsStoreError::RetryLimit {
                 max_attempts: MAX_JOB_ATTEMPTS,
             });
         }
-        self.create_job_on_connection(
-            &connection,
+        let job = self.create_job_on_connection(
+            &transaction,
             CreateJob {
                 job_type: job.job_type,
                 project_id: job.project_id,
@@ -358,7 +367,9 @@ impl JobsStore {
                 duplicate_of_job_id: None,
                 attempts: job.attempts + 1,
             },
-        )
+        )?;
+        transaction.commit()?;
+        Ok(job)
     }
 
     pub fn duplicate_job(
@@ -366,13 +377,14 @@ impl JobsStore {
         job_id: &str,
         request: DuplicateJob,
     ) -> JobsStoreResult<JobSnapshot> {
-        let _guard = self.lock.lock().map_err(|_| JobsStoreError::LockPoisoned)?;
-        let connection = self.connect()?;
-        let job = self.get_job_on_connection(&connection, job_id)?;
+        let _guard = self.lock.lock();
+        let mut connection = self.connect()?;
+        let transaction = connection.transaction()?;
+        let job = self.get_job_on_connection(&transaction, job_id)?;
         let mut payload = job.payload;
         payload.extend(request.payload_changes);
-        self.create_job_on_connection(
-            &connection,
+        let job = self.create_job_on_connection(
+            &transaction,
             CreateJob {
                 job_type: job.job_type,
                 project_id: job.project_id,
@@ -383,14 +395,17 @@ impl JobsStore {
                 duplicate_of_job_id: Some(job.id),
                 attempts: 1,
             },
-        )
+        )?;
+        transaction.commit()?;
+        Ok(job)
     }
 
     pub fn register_worker(&self, request: RegisterWorker) -> JobsStoreResult<WorkerSnapshot> {
-        let _guard = self.lock.lock().map_err(|_| JobsStoreError::LockPoisoned)?;
-        let connection = self.connect()?;
+        let _guard = self.lock.lock();
+        let mut connection = self.connect()?;
+        let transaction = connection.transaction()?;
         let now = utc_now();
-        connection.execute(
+        transaction.execute(
             "
             insert into workers (
               id, gpu_id, gpu_name, status, current_job_id, capabilities_json,
@@ -413,19 +428,22 @@ impl JobsStore {
                 now,
             ],
         )?;
-        self.get_worker_on_connection(&connection, &request.worker_id)
+        let worker = self.get_worker_on_connection(&transaction, &request.worker_id)?;
+        transaction.commit()?;
+        Ok(worker)
     }
 
     pub fn heartbeat_worker(&self, request: WorkerHeartbeat) -> JobsStoreResult<WorkerSnapshot> {
-        let _guard = self.lock.lock().map_err(|_| JobsStoreError::LockPoisoned)?;
-        let connection = self.connect()?;
-        let worker = self.get_worker_on_connection(&connection, &request.worker_id)?;
+        let _guard = self.lock.lock();
+        let mut connection = self.connect()?;
+        let transaction = connection.transaction()?;
+        let worker = self.get_worker_on_connection(&transaction, &request.worker_id)?;
         let now = utc_now();
         if request.current_job_id.is_none() {
             if let Some(previous_job_id) = worker.current_job_id {
-                let previous_job = self.get_job_on_connection(&connection, &previous_job_id)?;
+                let previous_job = self.get_job_on_connection(&transaction, &previous_job_id)?;
                 if is_active_status(previous_job.status.as_str()) {
-                    connection.execute(
+                    transaction.execute(
                         "
                         update jobs
                            set status = 'interrupted',
@@ -442,7 +460,7 @@ impl JobsStore {
                 }
             }
         }
-        connection.execute(
+        transaction.execute(
             "
             update workers
                set status = ?1,
@@ -460,25 +478,28 @@ impl JobsStore {
             ],
         )?;
         if let Some(job_id) = request.current_job_id {
-            connection.execute(
+            transaction.execute(
                 "update jobs set last_heartbeat_at = ?1, updated_at = ?1 where id = ?2",
                 params![now, job_id],
             )?;
         }
-        self.get_worker_on_connection(&connection, &request.worker_id)
+        let worker = self.get_worker_on_connection(&transaction, &request.worker_id)?;
+        transaction.commit()?;
+        Ok(worker)
     }
 
     pub fn mark_stale_workers_interrupted(
         &self,
         timeout_seconds: u64,
     ) -> JobsStoreResult<StaleSweep> {
-        let _guard = self.lock.lock().map_err(|_| JobsStoreError::LockPoisoned)?;
-        let connection = self.connect()?;
+        let _guard = self.lock.lock();
+        let mut connection = self.connect()?;
+        let transaction = connection.transaction()?;
         let now = now_unix_seconds();
         let timeout = i64::try_from(timeout_seconds.max(1)).unwrap_or(i64::MAX);
         let cutoff = format_unix_seconds(now.saturating_sub(timeout));
         let now_text = format_unix_seconds(now);
-        let mut statement = connection.prepare(
+        let mut statement = transaction.prepare(
             "
             select * from workers
              where status != 'offline'
@@ -497,10 +518,13 @@ impl JobsStore {
             .iter()
             .map(|worker| worker.id.clone())
             .collect::<Vec<_>>();
-        let active_jobs = self.active_jobs_for_workers(&connection, &worker_ids)?;
-
-        for worker_id in &worker_ids {
-            connection.execute(
+        drop(statement);
+        let active_jobs = self.active_jobs_for_workers(&transaction, &worker_ids)?;
+        let placeholders = placeholders_from(2, worker_ids.len());
+        let mut job_params = vec![now_text.as_str()];
+        job_params.extend(worker_ids.iter().map(String::as_str));
+        transaction.execute(
+            &format!(
                 "
                 update jobs
                    set status = 'interrupted',
@@ -510,31 +534,34 @@ impl JobsStore {
                        completed_at = ?1,
                        updated_at = ?1,
                        worker_id = null
-                 where worker_id = ?2
+                 where worker_id in ({placeholders})
                    and status in ('preparing', 'downloading', 'loading_model', 'running', 'saving')
-                ",
-                params![now_text, worker_id],
-            )?;
-            connection.execute(
+                "
+            ),
+            params_from_iter(job_params),
+        )?;
+
+        let mut worker_params = vec![now_text.as_str()];
+        worker_params.extend(worker_ids.iter().map(String::as_str));
+        transaction.execute(
+            &format!(
                 "
                 update workers
                    set status = 'offline',
                        current_job_id = null,
                        last_seen_at = ?1
-                 where id = ?2
-                ",
-                params![now_text, worker_id],
-            )?;
-        }
+                 where id in ({placeholders})
+                "
+            ),
+            params_from_iter(worker_params),
+        )?;
 
-        let updated_workers = worker_ids
-            .iter()
-            .map(|worker_id| self.get_worker_on_connection(&connection, worker_id))
-            .collect::<JobsStoreResult<Vec<_>>>()?;
+        let updated_workers = self.workers_by_ids(&transaction, &worker_ids)?;
         let updated_jobs = active_jobs
             .iter()
-            .map(|job| self.get_job_on_connection(&connection, &job.id))
+            .map(|job| self.get_job_on_connection(&transaction, &job.id))
             .collect::<JobsStoreResult<Vec<_>>>()?;
+        transaction.commit()?;
         Ok(StaleSweep {
             workers: updated_workers,
             jobs: updated_jobs,
@@ -542,10 +569,11 @@ impl JobsStore {
     }
 
     pub fn claim_next_job(&self, worker_id: &str) -> JobsStoreResult<Option<JobSnapshot>> {
-        let _guard = self.lock.lock().map_err(|_| JobsStoreError::LockPoisoned)?;
-        let connection = self.connect()?;
-        let worker = self.get_worker_on_connection(&connection, worker_id)?;
-        let has_active_gpu_job = connection
+        let _guard = self.lock.lock();
+        let mut connection = self.connect()?;
+        let transaction = connection.transaction()?;
+        let worker = self.get_worker_on_connection(&transaction, worker_id)?;
+        let has_active_gpu_job = transaction
             .query_row(
                 "
                 select id from jobs
@@ -560,7 +588,7 @@ impl JobsStore {
             .optional()?
             .is_some();
 
-        let mut statement = connection.prepare(
+        let mut statement = transaction.prepare(
             "
             select * from jobs
              where status = 'queued'
@@ -574,6 +602,8 @@ impl JobsStore {
             params![worker.gpu_id, i64::from(has_active_gpu_job)],
             row_to_job,
         )?)?;
+        // Faithful to the current Python queue behavior. Revisit before large multi-tenant queues so
+        // capability-incompatible jobs cannot hide a later compatible job indefinitely.
         let queued = queued_rows.into_iter().find(|job| {
             worker
                 .capabilities
@@ -583,6 +613,7 @@ impl JobsStore {
         let Some(queued) = queued else {
             return Ok(None);
         };
+        drop(statement);
 
         let assigned_gpu = if is_non_gpu_job_type(queued.job_type.as_str()) {
             "cpu".to_owned()
@@ -590,7 +621,7 @@ impl JobsStore {
             worker.gpu_id
         };
         let now = utc_now();
-        connection.execute(
+        transaction.execute(
             "
             update jobs
                set status = 'preparing',
@@ -604,12 +635,13 @@ impl JobsStore {
             ",
             params![assigned_gpu, worker_id, now, queued.id],
         )?;
-        connection.execute(
+        transaction.execute(
             "update workers set status = 'busy', current_job_id = ?1, last_seen_at = ?2 where id = ?3",
             params![queued.id, now, worker_id],
         )?;
-        self.get_job_on_connection(&connection, &queued.id)
-            .map(Some)
+        let job = self.get_job_on_connection(&transaction, &queued.id)?;
+        transaction.commit()?;
+        Ok(Some(job))
     }
 
     pub fn update_job_progress(
@@ -623,13 +655,21 @@ impl JobsStore {
             ));
         }
 
-        let _guard = self.lock.lock().map_err(|_| JobsStoreError::LockPoisoned)?;
-        let connection = self.connect()?;
+        if !update.progress.is_finite() {
+            return Err(JobsStoreError::InvalidNumber("progress".to_owned()));
+        }
+        if update.eta_seconds.is_some_and(|value| !value.is_finite()) {
+            return Err(JobsStoreError::InvalidNumber("etaSeconds".to_owned()));
+        }
+
+        let _guard = self.lock.lock();
+        let mut connection = self.connect()?;
+        let transaction = connection.transaction()?;
         let now = utc_now();
         let completed_at = is_terminal_status(update.status.as_str()).then_some(now.clone());
         let canceled_at = (update.status == JobStatus::Canceled).then_some(now.clone());
         let progress = update.progress.clamp(0.0, 1.0);
-        connection.execute(
+        transaction.execute(
             "
             update jobs
                set status = ?1,
@@ -658,20 +698,21 @@ impl JobsStore {
                 job_id,
             ],
         )?;
-        let job = self.get_job_on_connection(&connection, job_id)?;
+        let job = self.get_job_on_connection(&transaction, job_id)?;
         if is_terminal_status(update.status.as_str()) {
             if let Some(worker_id) = &job.worker_id {
-                connection.execute(
+                transaction.execute(
                     "update workers set status = 'idle', current_job_id = null, last_seen_at = ?1 where id = ?2",
                     params![now, worker_id],
                 )?;
             }
         }
+        transaction.commit()?;
         Ok(job)
     }
 
     pub fn list_workers(&self) -> JobsStoreResult<Vec<WorkerSnapshot>> {
-        let _guard = self.lock.lock().map_err(|_| JobsStoreError::LockPoisoned)?;
+        let _guard = self.lock.lock();
         let connection = self.connect()?;
         let mut statement = connection.prepare("select * from workers order by gpu_id, id")?;
         let workers = collect_workers(statement.query_map([], row_to_worker)?)?;
@@ -679,7 +720,7 @@ impl JobsStore {
     }
 
     pub fn get_worker(&self, worker_id: &str) -> JobsStoreResult<WorkerSnapshot> {
-        let _guard = self.lock.lock().map_err(|_| JobsStoreError::LockPoisoned)?;
+        let _guard = self.lock.lock();
         let connection = self.connect()?;
         self.get_worker_on_connection(&connection, worker_id)
     }
@@ -780,20 +821,41 @@ impl JobsStore {
         connection: &Connection,
         worker_ids: &[String],
     ) -> JobsStoreResult<Vec<JobSnapshot>> {
-        let mut jobs = Vec::new();
-        for worker_id in worker_ids {
-            let mut statement = connection.prepare(
-                "
-                select * from jobs
-                 where worker_id = ?1
-                   and status in ('preparing', 'downloading', 'loading_model', 'running', 'saving')
-                ",
-            )?;
-            jobs.extend(collect_jobs(
-                statement.query_map(params![worker_id], row_to_job)?,
-            )?);
+        if worker_ids.is_empty() {
+            return Ok(Vec::new());
         }
+        let placeholders = placeholders_from(1, worker_ids.len());
+        let mut statement = connection.prepare(&format!(
+            "
+            select * from jobs
+             where worker_id in ({placeholders})
+               and status in ('preparing', 'downloading', 'loading_model', 'running', 'saving')
+            "
+        ))?;
+        let jobs = collect_jobs(statement.query_map(
+            params_from_iter(worker_ids.iter().map(String::as_str)),
+            row_to_job,
+        )?)?;
         Ok(jobs)
+    }
+
+    fn workers_by_ids(
+        &self,
+        connection: &Connection,
+        worker_ids: &[String],
+    ) -> JobsStoreResult<Vec<WorkerSnapshot>> {
+        if worker_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let placeholders = placeholders_from(1, worker_ids.len());
+        let mut statement = connection.prepare(&format!(
+            "select * from workers where id in ({placeholders}) order by gpu_id, id"
+        ))?;
+        let workers = collect_workers(statement.query_map(
+            params_from_iter(worker_ids.iter().map(String::as_str)),
+            row_to_worker,
+        )?)?;
+        Ok(workers)
     }
 
     fn get_job_on_connection(
@@ -903,7 +965,9 @@ where
 }
 
 fn dumps<T: serde::Serialize>(value: &T) -> JobsStoreResult<String> {
-    serde_json::to_string(value).map_err(Into::into)
+    let mut value = serde_json::to_value(value)?;
+    sort_json_value(&mut value);
+    serde_json::to_string(&value).map_err(Into::into)
 }
 
 fn optional_dumps<T: serde::Serialize>(value: Option<&T>) -> JobsStoreResult<Option<String>> {
@@ -975,6 +1039,7 @@ fn parse_utc_seconds(value: &str) -> Option<i64> {
     let hour = value.get(11..13)?.parse::<i64>().ok()?;
     let minute = value.get(14..16)?.parse::<i64>().ok()?;
     let second = value.get(17..19)?.parse::<i64>().ok()?;
+    let suffix = value.get(19..)?;
     if value.get(4..5)? != "-"
         || value.get(7..8)? != "-"
         || value.get(10..11)? != "T"
@@ -989,6 +1054,17 @@ fn parse_utc_seconds(value: &str) -> Option<i64> {
         || second > 59
     {
         return None;
+    }
+    if suffix != "Z" {
+        if !suffix.starts_with('.') || !suffix.ends_with('Z') {
+            return None;
+        }
+        if !suffix[1..suffix.len() - 1]
+            .chars()
+            .all(|character| character.is_ascii_digit())
+        {
+            return None;
+        }
     }
     Some(days_from_civil(year, month, day) * 86_400 + hour * 3_600 + minute * 60 + second)
 }
@@ -1043,4 +1119,34 @@ fn is_terminal_status(status: &str) -> bool {
 
 fn is_non_gpu_job_type(job_type: &str) -> bool {
     NON_GPU_JOB_TYPES.contains(&job_type)
+}
+
+fn placeholders_from(start: usize, count: usize) -> String {
+    (start..start + count)
+        .map(|index| format!("?{index}"))
+        .collect::<Vec<_>>()
+        .join(",")
+}
+
+fn sort_json_value(value: &mut Value) {
+    match value {
+        Value::Object(map) => {
+            let mut entries = map
+                .iter_mut()
+                .map(|(key, value)| {
+                    sort_json_value(value);
+                    (key.clone(), value.clone())
+                })
+                .collect::<Vec<_>>();
+            entries.sort_by(|left, right| left.0.cmp(&right.0));
+            map.clear();
+            map.extend(entries);
+        }
+        Value::Array(items) => {
+            for item in items {
+                sort_json_value(item);
+            }
+        }
+        Value::Null | Value::Bool(_) | Value::Number(_) | Value::String(_) => {}
+    }
 }
