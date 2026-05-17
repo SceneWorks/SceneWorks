@@ -168,6 +168,7 @@ def test_rust_worker_claims_and_completes_lora_import_against_rust_api_binary(ru
             "SCENEWORKS_API_URL": rust_api,
             "SCENEWORKS_DATA_DIR": str(tmp_path / "data"),
             "SCENEWORKS_WORKER_ID": "rust-worker-smoke",
+            "SCENEWORKS_GPU_ID": "cpu",
             "SCENEWORKS_POLL_SECONDS": "1",
             "SCENEWORKS_HEARTBEAT_SECONDS": "5",
         }
@@ -216,6 +217,7 @@ def test_rust_worker_completes_ffmpeg_frame_and_timeline_jobs_against_rust_api_b
             "SCENEWORKS_API_URL": rust_api,
             "SCENEWORKS_DATA_DIR": str(tmp_path / "data"),
             "SCENEWORKS_WORKER_ID": "rust-ffmpeg-smoke",
+            "SCENEWORKS_GPU_ID": "cpu",
             "SCENEWORKS_POLL_SECONDS": "1",
             "SCENEWORKS_HEARTBEAT_SECONDS": "5",
         }

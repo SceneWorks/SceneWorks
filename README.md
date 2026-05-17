@@ -47,6 +47,10 @@ LoRA imports, FFmpeg frame extraction, and timeline MP4 exports. Set
 `SCENEWORKS_GPU_ID=auto` to let the Rust worker supervise one child per visible
 NVIDIA GPU plus a CPU utility child; use `NVIDIA_VISIBLE_DEVICES=none` for a CPU
 fallback-only worker or a comma-separated list to constrain the GPU children.
+The Rust worker defaults to auto mode, matching the Python worker. Shutdown waits
+up to 10 seconds for child workers by default; set
+`SCENEWORKS_WORKER_SHUTDOWN_TIMEOUT_SECONDS` to tune that grace period. On
+Windows, Rust listens for Ctrl+C; Unix workers also handle SIGTERM.
 
 When running the stack outside Docker Compose, start `sceneworks-rust-worker`
 alongside the API if you want Rust-owned utility jobs to be claimed. Rust GPU

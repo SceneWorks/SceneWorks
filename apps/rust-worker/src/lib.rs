@@ -36,6 +36,7 @@ pub struct Settings {
     pub is_child_worker: bool,
     pub poll_seconds: u64,
     pub heartbeat_seconds: u64,
+    pub shutdown_timeout_seconds: u64,
     pub huggingface_base_url: String,
     pub huggingface_token: Option<String>,
 }
@@ -50,7 +51,7 @@ impl Settings {
                 .filter(|value| !value.is_empty()),
             data_dir: env_path("SCENEWORKS_DATA_DIR", "data"),
             worker_id: env_string("SCENEWORKS_WORKER_ID", "rust-utility-worker"),
-            gpu_id: env_string("SCENEWORKS_GPU_ID", "cpu"),
+            gpu_id: env_string("SCENEWORKS_GPU_ID", "auto"),
             is_child_worker: std::env::var("SCENEWORKS_WORKER_CHILD")
                 .is_ok_and(|value| value.trim() == "1"),
             poll_seconds: env_u64_any(
@@ -62,6 +63,10 @@ impl Settings {
                     "SCENEWORKS_HEARTBEAT_SECONDS",
                     "SCENEWORKS_WORKER_HEARTBEAT_SECONDS",
                 ],
+                10,
+            ),
+            shutdown_timeout_seconds: env_u64_any(
+                &["SCENEWORKS_WORKER_SHUTDOWN_TIMEOUT_SECONDS"],
                 10,
             ),
             huggingface_base_url: env_string(
@@ -219,6 +224,7 @@ struct WorkerSpec {
 struct SupervisedChild {
     spec: WorkerSpec,
     process: Child,
+    restart_attempt: u32,
 }
 
 async fn supervise_auto_workers(settings: Settings) -> WorkerResult<()> {
@@ -231,8 +237,15 @@ async fn supervise_auto_workers(settings: Settings) -> WorkerResult<()> {
 
     let mut children = HashMap::new();
     for spec in auto_worker_specs(&settings.worker_id, &gpus) {
-        let process = start_child_worker(&settings, &spec).await?;
-        children.insert(spec.worker_id.clone(), SupervisedChild { spec, process });
+        let process = start_child_worker(&settings, &spec)?;
+        children.insert(
+            spec.worker_id.clone(),
+            SupervisedChild {
+                spec,
+                process,
+                restart_attempt: 0,
+            },
+        );
     }
 
     let mut interval = tokio::time::interval(Duration::from_secs(1));
@@ -240,7 +253,7 @@ async fn supervise_auto_workers(settings: Settings) -> WorkerResult<()> {
     loop {
         tokio::select! {
             _ = shutdown_signal() => {
-                stop_children(&mut children).await;
+                stop_children(&settings, &mut children).await;
                 return Ok(());
             }
             _ = interval.tick() => {
@@ -254,15 +267,28 @@ async fn restart_exited_children(
     settings: &Settings,
     children: &mut HashMap<String, SupervisedChild>,
 ) -> WorkerResult<()> {
+    restart_exited_children_with_spawner(settings, children, start_child_worker).await
+}
+
+async fn restart_exited_children_with_spawner<F>(
+    settings: &Settings,
+    children: &mut HashMap<String, SupervisedChild>,
+    mut spawner: F,
+) -> WorkerResult<()>
+where
+    F: FnMut(&Settings, &WorkerSpec) -> WorkerResult<Child>,
+{
     let mut exited = Vec::new();
     for (worker_id, child) in children.iter_mut() {
         if let Some(status) = child.process.try_wait()? {
+            let restart_attempt = child.restart_attempt.saturating_add(1);
+            let delay = retry_delay(settings.poll_seconds, restart_attempt);
             emit_json(json!({
                 "event": "worker_exited",
                 "workerId": worker_id,
                 "gpuId": child.spec.gpu_id,
                 "exitCode": status.code(),
-                "restartInSeconds": settings.poll_seconds,
+                "restartInSeconds": delay,
                 "reportedAt": now_rfc3339(),
             }));
             exited.push(worker_id.clone());
@@ -272,26 +298,30 @@ async fn restart_exited_children(
         let Some(mut child) = children.remove(&worker_id) else {
             continue;
         };
+        child.restart_attempt = child.restart_attempt.saturating_add(1);
+        let delay = retry_delay(settings.poll_seconds, child.restart_attempt);
         tokio::select! {
-            _ = tokio::time::sleep(Duration::from_secs(settings.poll_seconds.max(1))) => {}
+            _ = tokio::time::sleep(Duration::from_secs(delay)) => {}
             _ = shutdown_signal() => {
                 children.insert(worker_id, child);
-                stop_children(children).await;
+                stop_children(settings, children).await;
                 return Ok(());
             }
         }
-        let process = start_child_worker(settings, &child.spec).await?;
+        let process = spawner(settings, &child.spec)?;
         child.process = process;
         children.insert(child.spec.worker_id.clone(), child);
     }
     Ok(())
 }
 
-async fn stop_children(children: &mut HashMap<String, SupervisedChild>) {
+async fn stop_children(settings: &Settings, children: &mut HashMap<String, SupervisedChild>) {
     for child in children.values_mut() {
         terminate_child(&mut child.process).await;
     }
-    let deadline = tokio::time::sleep(Duration::from_secs(10));
+    let deadline = tokio::time::sleep(Duration::from_secs(
+        settings.shutdown_timeout_seconds.max(1),
+    ));
     tokio::pin!(deadline);
     loop {
         let mut remaining = 0_usize;
@@ -322,20 +352,17 @@ async fn terminate_child(child: &mut Child) {
     #[cfg(unix)]
     {
         if let Some(pid) = child.id() {
-            let _ = Command::new("kill")
-                .arg("-TERM")
-                .arg(pid.to_string())
-                .stdout(Stdio::null())
-                .stderr(Stdio::null())
-                .status()
-                .await;
+            let _ = nix::sys::signal::kill(
+                nix::unistd::Pid::from_raw(pid as i32),
+                nix::sys::signal::Signal::SIGTERM,
+            );
             return;
         }
     }
     let _ = child.start_kill();
 }
 
-async fn start_child_worker(_settings: &Settings, spec: &WorkerSpec) -> WorkerResult<Child> {
+fn start_child_worker(_settings: &Settings, spec: &WorkerSpec) -> WorkerResult<Child> {
     let executable = std::env::current_exe()?;
     emit_json(json!({
         "event": "starting_worker",
@@ -447,6 +474,7 @@ fn parse_nvidia_smi_gpus(output: &str) -> Vec<DiscoveredGpu> {
                 id: (*index).to_owned(),
                 name: format!("{name} ({memory_mb} MB)"),
                 capabilities: vec![
+                    WorkerCapability::Placeholder,
                     WorkerCapability::Gpu,
                     WorkerCapability::Unknown("nvidia".to_owned()),
                 ],
@@ -479,7 +507,7 @@ fn cpu_gpu() -> DiscoveredGpu {
     DiscoveredGpu {
         id: "cpu".to_owned(),
         name: "Rust CPU utility worker".to_owned(),
-        capabilities: vec![WorkerCapability::Cpu],
+        capabilities: vec![WorkerCapability::Placeholder, WorkerCapability::Cpu],
     }
 }
 
@@ -487,7 +515,7 @@ fn fallback_gpu(gpu_id: &str) -> DiscoveredGpu {
     DiscoveredGpu {
         id: gpu_id.to_owned(),
         name: format!("GPU {gpu_id}"),
-        capabilities: vec![WorkerCapability::Gpu],
+        capabilities: vec![WorkerCapability::Placeholder, WorkerCapability::Gpu],
     }
 }
 
@@ -561,11 +589,16 @@ fn slugify_worker_id_part(value: &str, fallback: &str) -> String {
 async fn shutdown_signal() {
     #[cfg(unix)]
     {
-        let mut term = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
-            .expect("SIGTERM handler installs");
-        tokio::select! {
-            _ = tokio::signal::ctrl_c() => {}
-            _ = term.recv() => {}
+        match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
+            Ok(mut term) => {
+                tokio::select! {
+                    _ = tokio::signal::ctrl_c() => {}
+                    _ = term.recv() => {}
+                }
+            }
+            Err(_) => {
+                let _ = tokio::signal::ctrl_c().await;
+            }
         }
     }
     #[cfg(not(unix))]
@@ -700,6 +733,9 @@ async fn run_utility_job(
     job: JobSnapshot,
 ) {
     let result = match job.job_type {
+        JobType::Placeholder => run_placeholder_job(api, settings, &job)
+            .await
+            .map_err(|error| ("Placeholder job failed.", error)),
         JobType::ModelDownload => run_model_download_job(api, settings, http_client, &job)
             .await
             .map_err(|error| ("Model download failed.", error)),
@@ -736,6 +772,90 @@ async fn run_utility_job(
         }
     }
     let _ = heartbeat(api, settings, WorkerStatus::Idle, None).await;
+}
+
+async fn run_placeholder_job(
+    api: &ApiClient,
+    settings: &Settings,
+    job: &JobSnapshot,
+) -> WorkerResult<()> {
+    let stages = [
+        (
+            JobStatus::Preparing,
+            ProgressStage::Preparing,
+            0.1,
+            "Preparing placeholder job.",
+        ),
+        (
+            JobStatus::Running,
+            ProgressStage::Running,
+            0.35,
+            "Running placeholder step 1.",
+        ),
+        (
+            JobStatus::Running,
+            ProgressStage::Running,
+            0.65,
+            "Running placeholder step 2.",
+        ),
+        (
+            JobStatus::Saving,
+            ProgressStage::Saving,
+            0.9,
+            "Saving placeholder result.",
+        ),
+    ];
+
+    for (status, stage, progress, message) in stages {
+        let snapshot: JobSnapshot = api.get_json(&format!("/api/v1/jobs/{}", job.id)).await?;
+        if snapshot.cancel_requested {
+            update_job(
+                api,
+                &job.id,
+                progress_payload(
+                    JobStatus::Canceled,
+                    ProgressStage::Canceled,
+                    progress,
+                    "Worker canceled the job before completion.",
+                    None,
+                    None,
+                    None,
+                ),
+            )
+            .await?;
+            return Err(WorkerError::Canceled(
+                "Worker canceled the job before completion.".to_owned(),
+            ));
+        }
+
+        heartbeat(api, settings, WorkerStatus::Busy, Some(&job.id)).await?;
+        update_job(
+            api,
+            &job.id,
+            progress_payload(status, stage, progress, message, None, None, None),
+        )
+        .await?;
+        tokio::time::sleep(Duration::from_millis(1500)).await;
+    }
+
+    let mut result = JsonObject::new();
+    result.insert("completedAt".to_owned(), Value::String(now_rfc3339()));
+    result.insert("output".to_owned(), Value::String("placeholder".to_owned()));
+    update_job(
+        api,
+        &job.id,
+        progress_payload(
+            JobStatus::Completed,
+            ProgressStage::Completed,
+            1.0,
+            "Placeholder job completed.",
+            None,
+            Some(result),
+            None,
+        ),
+    )
+    .await?;
+    Ok(())
 }
 
 async fn run_model_download_job(
@@ -2740,7 +2860,9 @@ fn env_u64_any(keys: &[&str], default: u64) -> u64 {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
     use std::path::PathBuf;
+    use std::process::Stdio as StdStdio;
     use std::time::Duration;
 
     use axum::extract::State;
@@ -2755,10 +2877,11 @@ mod tests {
         allow_pattern_matches, auto_worker_specs, bounded_tail, child_environment,
         concat_file_contents, copy_lora_source, cpu_gpu, cpu_worker_id, crossfade_duration,
         download_progress_payload, fallback_gpu, fresh_asset_id, gpu_worker_id, now_rfc3339,
-        output_dimensions, parse_nvidia_smi_gpus, run_ffmpeg, safe_download_dir, safe_project_path,
-        value_f64, visible_gpu_ids, worker_capabilities_with_utility, write_model_install_marker,
-        HuggingFaceSnapshot, Settings, WorkerError, WorkerSpec,
-        DEFAULT_TRANSITION_DURATION_SECONDS, INSTALL_MARKER,
+        output_dimensions, parse_nvidia_smi_gpus, restart_exited_children_with_spawner, run_ffmpeg,
+        safe_download_dir, safe_project_path, value_f64, visible_gpu_ids,
+        worker_capabilities_with_utility, write_model_install_marker, HuggingFaceSnapshot,
+        Settings, SupervisedChild, WorkerError, WorkerSpec, DEFAULT_TRANSITION_DURATION_SECONDS,
+        INSTALL_MARKER,
     };
 
     #[test]
@@ -2811,6 +2934,10 @@ mod tests {
             .capabilities
             .iter()
             .any(|capability| capability.as_str() == "nvidia"));
+        assert!(gpus[1]
+            .capabilities
+            .iter()
+            .any(|capability| capability.as_str() == "placeholder"));
 
         assert_eq!(visible_gpu_ids(None), None);
         assert_eq!(visible_gpu_ids(Some("all")), None);
@@ -2872,6 +2999,9 @@ mod tests {
             .any(|capability| capability.as_str() == "model_download"));
         assert!(cpu_capabilities
             .iter()
+            .any(|capability| capability.as_str() == "placeholder"));
+        assert!(cpu_capabilities
+            .iter()
             .any(|capability| capability.as_str() == "timeline_export"));
         assert!(!cpu_capabilities
             .iter()
@@ -2884,12 +3014,61 @@ mod tests {
         assert!(gpu_capabilities
             .iter()
             .any(|capability| capability.as_str() == "gpu"));
+        assert!(gpu_capabilities
+            .iter()
+            .any(|capability| capability.as_str() == "placeholder"));
         assert!(!gpu_capabilities
             .iter()
             .any(|capability| capability.as_str() == "model_download"));
         assert!(!gpu_capabilities
             .iter()
             .any(|capability| capability.as_str() == "image_generate"));
+    }
+
+    #[tokio::test]
+    async fn supervisor_restarts_exited_children_with_backoff_state() {
+        let settings = test_settings("http://127.0.0.1".to_owned(), None);
+        let spec = WorkerSpec {
+            worker_id: "worker-gpu-auto-0".to_owned(),
+            gpu_id: "0".to_owned(),
+        };
+        let mut exited = spawn_exit_child();
+        for _ in 0..20 {
+            if exited.try_wait().expect("child status checks").is_some() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+
+        let mut children = HashMap::from([(
+            spec.worker_id.clone(),
+            SupervisedChild {
+                spec,
+                process: exited,
+                restart_attempt: 0,
+            },
+        )]);
+        let mut spawns = 0_u32;
+
+        restart_exited_children_with_spawner(&settings, &mut children, |_settings, _spec| {
+            spawns += 1;
+            Ok(spawn_sleep_child())
+        })
+        .await
+        .expect("child restarts");
+
+        assert_eq!(spawns, 1);
+        let child = children
+            .get_mut("worker-gpu-auto-0")
+            .expect("restarted child is tracked");
+        assert_eq!(child.restart_attempt, 1);
+        assert!(child
+            .process
+            .try_wait()
+            .expect("child status checks")
+            .is_none());
+        let _ = child.process.start_kill();
+        let _ = child.process.wait().await;
     }
 
     #[tokio::test]
@@ -3150,8 +3329,43 @@ mod tests {
             is_child_worker: true,
             poll_seconds: 1,
             heartbeat_seconds: 5,
+            shutdown_timeout_seconds: 1,
             huggingface_base_url,
             huggingface_token: huggingface_token.map(str::to_owned),
         }
+    }
+
+    fn spawn_exit_child() -> tokio::process::Child {
+        let mut command = if cfg!(windows) {
+            let mut command = tokio::process::Command::new("cmd");
+            command.args(["/C", "exit /B 0"]);
+            command
+        } else {
+            let mut command = tokio::process::Command::new("sh");
+            command.args(["-c", "exit 0"]);
+            command
+        };
+        command
+            .stdout(StdStdio::null())
+            .stderr(StdStdio::null())
+            .spawn()
+            .expect("test child starts")
+    }
+
+    fn spawn_sleep_child() -> tokio::process::Child {
+        let mut command = if cfg!(windows) {
+            let mut command = tokio::process::Command::new("cmd");
+            command.args(["/C", "ping -n 30 127.0.0.1 >NUL"]);
+            command
+        } else {
+            let mut command = tokio::process::Command::new("sh");
+            command.args(["-c", "sleep 30"]);
+            command
+        };
+        command
+            .stdout(StdStdio::null())
+            .stderr(StdStdio::null())
+            .spawn()
+            .expect("test child starts")
     }
 }

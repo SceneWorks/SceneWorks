@@ -68,6 +68,8 @@ services:
     depends_on:
       api:
         condition: service_healthy
+    # Rust GPU children currently report device presence for migration parity.
+    # Keep GPU visibility here so auto discovery behaves like the Python worker.
     deploy:
       resources:
         reservations:
