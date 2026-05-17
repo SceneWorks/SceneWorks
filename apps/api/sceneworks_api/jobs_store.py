@@ -326,6 +326,25 @@ class JobsStore:
     ) -> dict:
         now = utc_now()
         with self._lock, self.connect() as connection:
+            worker = self.get_worker(worker_id, connection=connection)
+            previous_job_id = worker["currentJobId"]
+            if not current_job_id and previous_job_id:
+                previous_job = self.get_job(previous_job_id, connection=connection)
+                if previous_job["status"] in ACTIVE_STATUSES:
+                    connection.execute(
+                        """
+                        update jobs
+                           set status = 'interrupted',
+                               stage = 'interrupted',
+                               message = 'Job was interrupted after its worker restarted.',
+                               error = 'Worker heartbeat no longer referenced the active job.',
+                               completed_at = ?,
+                               updated_at = ?,
+                               worker_id = null
+                         where id = ?
+                        """,
+                        (now, now, previous_job_id),
+                    )
             connection.execute(
                 """
                 update workers

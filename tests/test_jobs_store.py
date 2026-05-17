@@ -102,6 +102,41 @@ def test_claim_skips_jobs_not_supported_by_worker_capabilities(tmp_path):
     assert store.claim_next_job("worker-1")["id"] == download_job["id"]
 
 
+def test_idle_heartbeat_interrupts_previous_active_job(tmp_path):
+    store = JobsStore(tmp_path / "jobs.db")
+    store.initialize()
+    store.register_worker(
+        worker_id="worker-1",
+        gpu_id="gpu-0",
+        gpu_name=None,
+        capabilities=["image_generate"],
+        loaded_models=[],
+    )
+    created = store.create_job(
+        job_type="image_generate",
+        project_id=None,
+        project_name=None,
+        payload={},
+        requested_gpu="auto",
+    )
+    claimed = store.claim_next_job("worker-1")
+
+    assert claimed["id"] == created["id"]
+
+    worker = store.heartbeat_worker(
+        worker_id="worker-1",
+        status="idle",
+        current_job_id=None,
+        loaded_models=[],
+    )
+    job = store.get_job(created["id"])
+
+    assert worker["status"] == "idle"
+    assert worker["currentJobId"] is None
+    assert job["status"] == "interrupted"
+    assert job["workerId"] is None
+
+
 def test_retry_job_is_capped(tmp_path):
     store = JobsStore(tmp_path / "jobs.db")
     store.initialize()

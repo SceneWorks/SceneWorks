@@ -1,10 +1,14 @@
 from __future__ import annotations
 
+from fnmatch import fnmatch
 import json
 import re
 from functools import lru_cache
 from pathlib import Path
 from typing import Any
+from urllib.error import HTTPError, URLError
+from urllib.parse import quote
+from urllib.request import urlopen
 
 from fastapi import APIRouter, HTTPException, Query, Request
 from pydantic import BaseModel, Field
@@ -99,6 +103,60 @@ def safe_download_dir(repo: str) -> str:
     return re.sub(r"[^a-zA-Z0-9_.-]+", "__", repo).strip("_") or "download"
 
 
+def format_bytes(value: int | float | None) -> str | None:
+    if value is None:
+        return None
+    size = float(max(0, value))
+    for unit in ("B", "KB", "MB", "GB", "TB"):
+        if size < 1024 or unit == "TB":
+            if unit == "B":
+                return f"{int(size)} {unit}"
+            return f"{size:.1f} {unit}"
+        size /= 1024
+    return f"{size:.1f} TB"
+
+
+def allow_pattern_matches(path: str, patterns: list[str]) -> bool:
+    if not patterns:
+        return True
+    return any(fnmatch(path, pattern) for pattern in patterns)
+
+
+def download_size_from_siblings(siblings: list[dict[str, Any]], files: list[str] | None = None) -> int | None:
+    patterns = files or []
+    total = 0
+    found_size = False
+    for sibling in siblings:
+        filename = sibling.get("rfilename", "")
+        if not allow_pattern_matches(filename, patterns):
+            continue
+        size = sibling.get("size")
+        if size is None:
+            continue
+        found_size = True
+        total += int(size)
+    return total if found_size else None
+
+
+@lru_cache(maxsize=64)
+def estimate_huggingface_download_size(repo: str, files_key: tuple[str, ...]) -> int | None:
+    url = f"https://huggingface.co/api/models/{quote(repo, safe='/')}?blobs=true"
+    try:
+        with urlopen(url, timeout=8) as response:
+            payload = json.load(response)
+    except (HTTPError, URLError, TimeoutError, OSError, json.JSONDecodeError):
+        return None
+    return download_size_from_siblings(payload.get("siblings", []), list(files_key))
+
+
+def model_install_marker(path: Path) -> Path:
+    return path / ".sceneworks-download-complete.json"
+
+
+def model_is_installed(path: Path) -> bool:
+    return path.is_dir() and model_install_marker(path).is_file()
+
+
 def model_download(model: dict[str, Any]) -> dict[str, Any] | None:
     for download in model.get("downloads", []):
         if download.get("provider") == "huggingface" and download.get("repo"):
@@ -122,13 +180,20 @@ def model_catalog(request: Request) -> list[dict[str, Any]]:
         download = model_download(model)
         installed_path = None
         installed = False
+        download_size_bytes = None
         if download:
             installed_path = settings.data_dir / "models" / safe_download_dir(download["repo"])
-            installed = installed_path.is_dir() and any(installed_path.iterdir())
+            installed = model_is_installed(installed_path)
+            download_size_bytes = estimate_huggingface_download_size(
+                download["repo"],
+                tuple(download.get("files", [])),
+            )
         models.append(
             {
                 **model,
                 "downloadable": bool(download),
+                "downloadSizeBytes": download_size_bytes,
+                "downloadSizeLabel": format_bytes(download_size_bytes),
                 "installState": "installed" if installed else "missing",
                 "installedPath": str(installed_path) if installed_path else None,
             }

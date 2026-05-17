@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import secrets
 from typing import Any, Literal
 
 from fastapi import APIRouter, Request
@@ -31,6 +32,17 @@ class ImageJobRequest(BaseModel):
     advanced: dict[str, Any] = Field(default_factory=dict)
 
 
+def random_image_seeds(count: int) -> list[int]:
+    return [secrets.randbits(32) for _ in range(count)]
+
+
+def image_job_payload(payload: ImageJobRequest) -> dict[str, Any]:
+    job_payload = payload.model_dump(exclude={"requestedGpu"})
+    if job_payload["seed"] is None:
+        job_payload["seeds"] = random_image_seeds(payload.count)
+    return job_payload
+
+
 @router.post("/jobs", status_code=201)
 def create_image_job(payload: ImageJobRequest, request: Request) -> dict:
     job_type = "image_edit" if payload.mode == "edit_image" else "image_generate"
@@ -38,7 +50,7 @@ def create_image_job(payload: ImageJobRequest, request: Request) -> dict:
         job_type=job_type,
         project_id=payload.projectId,
         project_name=payload.projectName,
-        payload=payload.model_dump(exclude={"requestedGpu"}),
+        payload=image_job_payload(payload),
         requested_gpu=payload.requestedGpu,
     )
     request.app.state.event_hub.publish("job.updated", job)
