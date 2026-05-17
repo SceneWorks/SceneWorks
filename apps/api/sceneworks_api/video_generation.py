@@ -68,6 +68,7 @@ def create_video_job(payload: VideoJobRequest, request: Request) -> dict:
     elif payload.mode == "video_bridge":
         job_type = "video_bridge"
     elif payload.mode == "replace_person":
+        # User-facing modes stay verb-first; backend job types group person workflows together.
         job_type = "person_replace"
     job = request.app.state.jobs_store.create_job(
         job_type=job_type,

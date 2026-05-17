@@ -58,10 +58,15 @@ def list_person_tracks(project_id: str, request: Request) -> list[dict[str, Any]
 @router.get("/{track_id}")
 def get_person_track(project_id: str, track_id: str, request: Request) -> dict[str, Any]:
     project_path = find_project_path(request.app.state.settings, project_id)
-    for track in list_person_tracks(project_id, request):
-        if track.get("id") == track_id:
-            return track
-    raise HTTPException(status_code=404, detail="Person track not found")
+    track_path = tracks_dir(project_path) / f"{track_id}.sceneworks.person-track.json"
+    try:
+        resolved_path = track_path.resolve()
+        resolved_path.relative_to(tracks_dir(project_path).resolve())
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid person track ID") from None
+    if not track_path.exists():
+        raise HTTPException(status_code=404, detail="Person track not found")
+    return normalize_track(project_path, track_path)
 
 
 @router.post("/detections", status_code=201)

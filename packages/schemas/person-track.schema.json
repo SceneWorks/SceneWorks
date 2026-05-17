@@ -37,6 +37,7 @@
       }
     },
     "corrections": { "type": "array" },
+    "recipe": { "$ref": "recipe.schema.json" },
     "status": {
       "type": "object",
       "properties": {

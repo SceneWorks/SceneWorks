@@ -147,6 +147,9 @@ def test_replace_person_video_sidecar_preserves_lineage():
     assert asset["recipe"]["mode"] == "replace_person"
     assert asset["recipe"]["normalizedSettings"]["personTrackId"] == "track-1"
     assert asset["recipe"]["normalizedSettings"]["replacementMode"] == "full_person_keep_outfit"
+    assert asset["recipe"]["normalizedSettings"]["personDetectionActive"] is False
+    assert asset["recipe"]["normalizedSettings"]["personTrackingActive"] is False
+    assert asset["recipe"]["normalizedSettings"]["replacementActive"] is False
     assert asset["lineage"]["sourceClipAssetId"] == "asset-video"
     assert asset["lineage"]["characterId"] == "character-1"
 

@@ -662,7 +662,8 @@ export function App() {
     setActiveView("Video");
   }
 
-  async function createPersonDetectionJob(payload) {
+  async function createPersonDetectionJob(payload, options = {}) {
+    const { navigateToQueue = false } = options;
     if (!activeProject) {
       setError("Create or open a project first.");
       return null;
@@ -672,7 +673,9 @@ export function App() {
         method: "POST",
         body: JSON.stringify({ ...payload, requestedGpu }),
       });
-      setActiveView("Queue");
+      if (navigateToQueue) {
+        setActiveView("Queue");
+      }
       setError("");
       refreshData();
       return job;
@@ -682,7 +685,8 @@ export function App() {
     }
   }
 
-  async function createPersonTrackJob(payload) {
+  async function createPersonTrackJob(payload, options = {}) {
+    const { navigateToQueue = false } = options;
     if (!activeProject) {
       setError("Create or open a project first.");
       return null;
@@ -692,7 +696,9 @@ export function App() {
         method: "POST",
         body: JSON.stringify({ ...payload, requestedGpu }),
       });
-      setActiveView("Queue");
+      if (navigateToQueue) {
+        setActiveView("Queue");
+      }
       setError("");
       refreshData();
       return job;

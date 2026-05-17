@@ -9,6 +9,7 @@ from sceneworks_api.person_tracking import (
     PersonTrackJobRequest,
     create_person_detection_job,
     create_person_track_job,
+    get_person_track,
     list_person_tracks,
 )
 from sceneworks_shared import write_json
@@ -102,3 +103,28 @@ def test_list_person_tracks_reads_project_sidecars(tmp_path):
 
     assert tracks[0]["id"] == "track_1"
     assert tracks[0]["path"] == "person-tracks/track_1.sceneworks.person-track.json"
+
+
+def test_get_person_track_reads_direct_sidecar(tmp_path):
+    project_path = tmp_path / "project.sceneworks"
+    track_dir = project_path / "person-tracks"
+    track_dir.mkdir(parents=True)
+    write_json(
+        track_dir / "track_1.sceneworks.person-track.json",
+        {
+            "schemaVersion": 1,
+            "id": "track_1",
+            "projectId": "project-1",
+            "name": "Hero",
+            "createdAt": "2026-05-17T00:00:00Z",
+            "sourceAssetId": "asset-video",
+            "representativeFrameAssetId": "asset-frame",
+            "frames": [],
+            "status": {},
+        },
+    )
+
+    track = get_person_track("project-1", "track_1", request_for_project(tmp_path, project_path))
+
+    assert track["id"] == "track_1"
+    assert track["path"] == "person-tracks/track_1.sceneworks.person-track.json"

@@ -14,7 +14,16 @@ from uuid import uuid4
 
 from PIL import Image, ImageDraw, ImageEnhance, ImageFont
 
-from sceneworks_shared import find_asset_sidecar_path, index_asset, read_json, safe_float, safe_int, slugify, utc_now
+from sceneworks_shared import (
+    find_asset_sidecar_path,
+    index_asset,
+    load_asset_with_media,
+    read_json,
+    safe_float,
+    safe_int,
+    slugify,
+    utc_now,
+)
 
 from .image_adapters import find_project_path, write_json
 from .settings import WorkerSettings
@@ -52,6 +61,9 @@ VIDEO_MODEL_TARGETS: dict[str, dict[str, Any]] = {
 
 
 ASSET_FOLDERS = ("assets/images", "assets/videos", "assets/uploads", "assets/frames", "assets/renders")
+PERSON_TRACK_SAMPLE_RATE_FPS = 2
+PERSON_TRACK_MAX_SAMPLES = 24
+PERSON_TRACK_X_DRIFT = 0.018
 
 
 @dataclass(frozen=True)
@@ -560,6 +572,31 @@ def build_video_asset_sidecar(
         if asset_id
     ]
     timeline_context = request.advanced.get("timelineContext", {})
+    normalized_settings = {
+        "duration": request.duration,
+        "fps": request.fps,
+        "width": request.width,
+        "height": request.height,
+        "quality": request.quality,
+        "family": target["family"],
+        "sourceAssetId": request.source_asset_id,
+        "lastFrameAssetId": request.last_frame_asset_id,
+        "sourceClipAssetId": request.source_clip_asset_id,
+        "bridgeRightClipAssetId": request.bridge_right_clip_asset_id,
+        "characterId": request.character_id,
+        "characterLookId": request.character_look_id,
+        "personTrackId": request.person_track_id,
+        "replacementMode": request.replacement_mode,
+        "timelineContextRef": "lineage.timeline",
+    }
+    if request.mode == "replace_person":
+        normalized_settings.update(
+            {
+                "personDetectionActive": False,
+                "personTrackingActive": False,
+                "replacementActive": False,
+            }
+        )
     return {
         "schemaVersion": 1,
         "id": asset_id,
@@ -590,23 +627,7 @@ def build_video_asset_sidecar(
             "negativePrompt": request.negative_prompt,
             "seed": seed,
             "loras": request.loras,
-            "normalizedSettings": {
-                "duration": request.duration,
-                "fps": request.fps,
-                "width": request.width,
-                "height": request.height,
-                "quality": request.quality,
-                "family": target["family"],
-                "sourceAssetId": request.source_asset_id,
-                "lastFrameAssetId": request.last_frame_asset_id,
-                "sourceClipAssetId": request.source_clip_asset_id,
-                "bridgeRightClipAssetId": request.bridge_right_clip_asset_id,
-                "characterId": request.character_id,
-                "characterLookId": request.character_look_id,
-                "personTrackId": request.person_track_id,
-                "replacementMode": request.replacement_mode,
-                "timelineContextRef": "lineage.timeline",
-            },
+            "normalizedSettings": normalized_settings,
             "rawAdapterSettings": raw_settings,
         },
         "lineage": {
@@ -629,14 +650,7 @@ def build_video_asset_sidecar(
 def source_asset_payload(project_path: Path, asset_id: str | None) -> tuple[dict[str, Any], Path]:
     if not asset_id:
         raise FileNotFoundError("Source asset is required.")
-    sidecar_path = find_asset_sidecar_path(project_path, asset_id)
-    if sidecar_path is None:
-        raise FileNotFoundError(f"Source asset not found: {asset_id}")
-    asset = read_json(sidecar_path)
-    media_path = project_path / asset.get("file", {}).get("path", "")
-    if not media_path.exists():
-        raise FileNotFoundError(f"Source media not found: {media_path}")
-    return asset, media_path
+    return load_asset_with_media(project_path, asset_id)
 
 
 def candidate_people(width: int, height: int, source_asset_id: str, timestamp: float) -> list[dict[str, Any]]:
@@ -730,7 +744,11 @@ def run_person_detect(
             "seed": 0,
             "loras": [],
             "stylePreset": "none",
-            "normalizedSettings": {"sourceTimestamp": timestamp, "detectionCount": len(detections)},
+            "normalizedSettings": {
+                "sourceTimestamp": timestamp,
+                "detectionCount": len(detections),
+                "personDetectionActive": False,
+            },
             "rawAdapterSettings": {"sourcePath": str(source_media_path.relative_to(project_path)).replace("\\", "/")},
         },
         "lineage": {
@@ -761,9 +779,13 @@ def run_person_detect(
     }
 
 
-def track_frames_from_detection(detection: dict[str, Any], duration: float, fps: float = 2) -> list[dict[str, Any]]:
+def track_frames_from_detection(
+    detection: dict[str, Any],
+    duration: float,
+    fps: float = PERSON_TRACK_SAMPLE_RATE_FPS,
+) -> list[dict[str, Any]]:
     box = detection.get("box", {})
-    sample_count = max(3, min(24, int(round(max(duration, 1) * fps))))
+    sample_count = max(3, min(PERSON_TRACK_MAX_SAMPLES, int(round(max(duration, 1) * fps))))
     frames = []
     for index in range(sample_count):
         t = index / max(1, sample_count - 1)
@@ -771,7 +793,7 @@ def track_frames_from_detection(detection: dict[str, Any], duration: float, fps:
             {
                 "timestamp": round(t * max(duration, 0), 3),
                 "box": {
-                    "x": round(safe_float(box.get("x"), 0.35, 0, 1) + (t - 0.5) * 0.018, 4),
+                    "x": round(safe_float(box.get("x"), 0.35, 0, 1) + (t - 0.5) * PERSON_TRACK_X_DRIFT, 4),
                     "y": round(safe_float(box.get("y"), 0.16, 0, 1), 4),
                     "width": round(safe_float(box.get("width"), 0.24, 0.01, 1), 4),
                     "height": round(safe_float(box.get("height"), 0.68, 0.01, 1), 4),
@@ -819,10 +841,27 @@ def run_person_track(
         "frames": frames,
         "corrections": [],
         "status": {
-            "sampleRateFps": 2,
+            "sampleRateFps": PERSON_TRACK_SAMPLE_RATE_FPS,
             "maskState": "deferred",
             "averageConfidence": round(sum(frame["confidence"] for frame in frames) / len(frames), 3),
             "correctionState": "ready_for_box_corrections",
+            "personTrackingActive": False,
+        },
+        "recipe": {
+            "mode": "person_track",
+            "model": "procedural-person-tracker",
+            "adapter": "procedural_person_tracking",
+            "prompt": f"Track {payload.get('trackName') or 'selected person'}",
+            "negativePrompt": "",
+            "seed": 0,
+            "loras": [],
+            "stylePreset": "none",
+            "normalizedSettings": {
+                "sampleRateFps": PERSON_TRACK_SAMPLE_RATE_FPS,
+                "personDetectionActive": False,
+                "personTrackingActive": False,
+            },
+            "rawAdapterSettings": {"selectedDetection": detection},
         },
         "lineage": {"jobId": job["id"], "parents": [source_asset_id, payload.get("representativeFrameAssetId")]},
     }
