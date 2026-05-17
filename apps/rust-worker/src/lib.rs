@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::fmt;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
@@ -17,7 +17,7 @@ use serde_json::{json, Number, Value};
 use time::format_description::well_known::Rfc3339;
 use time::OffsetDateTime;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::process::Command;
+use tokio::process::{Child, Command};
 use tokio::time::MissedTickBehavior;
 use uuid::Uuid;
 
@@ -32,6 +32,8 @@ pub struct Settings {
     pub access_token: Option<String>,
     pub data_dir: PathBuf,
     pub worker_id: String,
+    pub gpu_id: String,
+    pub is_child_worker: bool,
     pub poll_seconds: u64,
     pub heartbeat_seconds: u64,
     pub huggingface_base_url: String,
@@ -48,6 +50,9 @@ impl Settings {
                 .filter(|value| !value.is_empty()),
             data_dir: env_path("SCENEWORKS_DATA_DIR", "data"),
             worker_id: env_string("SCENEWORKS_WORKER_ID", "rust-utility-worker"),
+            gpu_id: env_string("SCENEWORKS_GPU_ID", "cpu"),
+            is_child_worker: std::env::var("SCENEWORKS_WORKER_CHILD")
+                .is_ok_and(|value| value.trim() == "1"),
             poll_seconds: env_u64_any(
                 &["SCENEWORKS_POLL_SECONDS", "SCENEWORKS_WORKER_POLL_SECONDS"],
                 2,
@@ -68,6 +73,14 @@ impl Settings {
                 .map(|value| value.trim().to_owned())
                 .filter(|value| !value.is_empty()),
         }
+    }
+
+    fn for_worker(&self, worker_id: String, gpu_id: String) -> Self {
+        let mut settings = self.clone();
+        settings.worker_id = worker_id;
+        settings.gpu_id = gpu_id;
+        settings.is_child_worker = true;
+        settings
     }
 }
 
@@ -190,31 +203,431 @@ where
     Ok(response.json::<T>().await?)
 }
 
-pub async fn run() -> WorkerResult<()> {
-    let settings = Settings::from_env();
-    let api = ApiClient::new(&settings);
-    let http_client = reqwest::Client::new();
-    register_worker_with_retry(&api, &settings).await;
+#[derive(Debug, Clone, Eq, PartialEq)]
+struct DiscoveredGpu {
+    id: String,
+    name: String,
+    capabilities: Vec<WorkerCapability>,
+}
+
+#[derive(Debug, Clone, Eq, PartialEq)]
+struct WorkerSpec {
+    worker_id: String,
+    gpu_id: String,
+}
+
+struct SupervisedChild {
+    spec: WorkerSpec,
+    process: Child,
+}
+
+async fn supervise_auto_workers(settings: Settings) -> WorkerResult<()> {
+    let gpus = discover_gpus().await;
+    if gpus.is_empty() {
+        let cpu_settings =
+            settings.for_worker(cpu_worker_id(&settings.worker_id), "cpu".to_owned());
+        return run_worker_loop(cpu_settings).await;
+    }
+
+    let mut children = HashMap::new();
+    for spec in auto_worker_specs(&settings.worker_id, &gpus) {
+        let process = start_child_worker(&settings, &spec).await?;
+        children.insert(spec.worker_id.clone(), SupervisedChild { spec, process });
+    }
+
+    let mut interval = tokio::time::interval(Duration::from_secs(1));
+    interval.set_missed_tick_behavior(MissedTickBehavior::Delay);
     loop {
-        if let Err(error) = poll_once(&api, &settings, &http_client).await {
-            eprintln!("rust_worker_poll_failed: {error}");
-            tokio::time::sleep(Duration::from_secs(settings.poll_seconds.max(1))).await;
+        tokio::select! {
+            _ = shutdown_signal() => {
+                stop_children(&mut children).await;
+                return Ok(());
+            }
+            _ = interval.tick() => {
+                restart_exited_children(&settings, &mut children).await?;
+            }
         }
     }
 }
 
-async fn register_worker_with_retry(api: &ApiClient, settings: &Settings) {
+async fn restart_exited_children(
+    settings: &Settings,
+    children: &mut HashMap<String, SupervisedChild>,
+) -> WorkerResult<()> {
+    let mut exited = Vec::new();
+    for (worker_id, child) in children.iter_mut() {
+        if let Some(status) = child.process.try_wait()? {
+            emit_json(json!({
+                "event": "worker_exited",
+                "workerId": worker_id,
+                "gpuId": child.spec.gpu_id,
+                "exitCode": status.code(),
+                "restartInSeconds": settings.poll_seconds,
+                "reportedAt": now_rfc3339(),
+            }));
+            exited.push(worker_id.clone());
+        }
+    }
+    for worker_id in exited {
+        let Some(mut child) = children.remove(&worker_id) else {
+            continue;
+        };
+        tokio::select! {
+            _ = tokio::time::sleep(Duration::from_secs(settings.poll_seconds.max(1))) => {}
+            _ = shutdown_signal() => {
+                children.insert(worker_id, child);
+                stop_children(children).await;
+                return Ok(());
+            }
+        }
+        let process = start_child_worker(settings, &child.spec).await?;
+        child.process = process;
+        children.insert(child.spec.worker_id.clone(), child);
+    }
+    Ok(())
+}
+
+async fn stop_children(children: &mut HashMap<String, SupervisedChild>) {
+    for child in children.values_mut() {
+        terminate_child(&mut child.process).await;
+    }
+    let deadline = tokio::time::sleep(Duration::from_secs(10));
+    tokio::pin!(deadline);
+    loop {
+        let mut remaining = 0_usize;
+        for child in children.values_mut() {
+            match child.process.try_wait() {
+                Ok(Some(_)) => {}
+                Ok(None) => remaining += 1,
+                Err(_) => {}
+            }
+        }
+        if remaining == 0 {
+            children.clear();
+            return;
+        }
+        tokio::select! {
+            _ = &mut deadline => break,
+            _ = tokio::time::sleep(Duration::from_millis(100)) => {}
+        }
+    }
+    for child in children.values_mut() {
+        let _ = child.process.start_kill();
+        let _ = child.process.wait().await;
+    }
+    children.clear();
+}
+
+async fn terminate_child(child: &mut Child) {
+    #[cfg(unix)]
+    {
+        if let Some(pid) = child.id() {
+            let _ = Command::new("kill")
+                .arg("-TERM")
+                .arg(pid.to_string())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status()
+                .await;
+            return;
+        }
+    }
+    let _ = child.start_kill();
+}
+
+async fn start_child_worker(_settings: &Settings, spec: &WorkerSpec) -> WorkerResult<Child> {
+    let executable = std::env::current_exe()?;
+    emit_json(json!({
+        "event": "starting_worker",
+        "workerId": spec.worker_id,
+        "gpuId": spec.gpu_id,
+        "reportedAt": now_rfc3339(),
+    }));
+    let mut command = Command::new(executable);
+    command.envs(child_environment(spec));
+    command.spawn().map_err(Into::into)
+}
+
+fn child_environment(spec: &WorkerSpec) -> BTreeMap<String, String> {
+    let mut env = BTreeMap::new();
+    env.insert("SCENEWORKS_WORKER_CHILD".to_owned(), "1".to_owned());
+    env.insert("SCENEWORKS_WORKER_ID".to_owned(), spec.worker_id.clone());
+    env.insert("SCENEWORKS_GPU_ID".to_owned(), spec.gpu_id.clone());
+    if spec.gpu_id == "cpu" {
+        env.insert("CUDA_VISIBLE_DEVICES".to_owned(), String::new());
+        env.insert("SCENEWORKS_UTILITY_JOBS".to_owned(), "1".to_owned());
+    } else {
+        env.insert("CUDA_VISIBLE_DEVICES".to_owned(), spec.gpu_id.clone());
+        env.insert("SCENEWORKS_UTILITY_JOBS".to_owned(), "0".to_owned());
+    }
+    env
+}
+
+fn auto_worker_specs(base_worker_id: &str, gpus: &[DiscoveredGpu]) -> Vec<WorkerSpec> {
+    let mut specs = gpus
+        .iter()
+        .map(|gpu| WorkerSpec {
+            worker_id: gpu_worker_id(base_worker_id, &gpu.id),
+            gpu_id: gpu.id.clone(),
+        })
+        .collect::<Vec<_>>();
+    specs.push(WorkerSpec {
+        worker_id: cpu_worker_id(base_worker_id),
+        gpu_id: "cpu".to_owned(),
+    });
+    specs
+}
+
+async fn discover_gpu(requested_gpu_id: &str) -> DiscoveredGpu {
+    if requested_gpu_id == "cpu" {
+        return cpu_gpu();
+    }
+    let gpus = discover_gpus().await;
+    if requested_gpu_id.is_empty() || requested_gpu_id == "auto" {
+        return gpus.into_iter().next().unwrap_or_else(cpu_gpu);
+    }
+    gpus.into_iter()
+        .find(|gpu| gpu.id == requested_gpu_id)
+        .unwrap_or_else(|| fallback_gpu(requested_gpu_id))
+}
+
+async fn discover_gpus() -> Vec<DiscoveredGpu> {
+    let visible_ids = visible_gpu_ids_from_env();
+    if visible_ids.as_ref().is_some_and(Vec::is_empty) {
+        return Vec::new();
+    }
+    let gpus = query_nvidia_gpus().await;
+    if let Some(ids) = visible_ids {
+        let by_id = gpus
+            .into_iter()
+            .map(|gpu| (gpu.id.clone(), gpu))
+            .collect::<BTreeMap<_, _>>();
+        return ids
+            .into_iter()
+            .map(|gpu_id| {
+                by_id
+                    .get(&gpu_id)
+                    .cloned()
+                    .unwrap_or_else(|| fallback_gpu(&gpu_id))
+            })
+            .collect();
+    }
+    gpus
+}
+
+async fn query_nvidia_gpus() -> Vec<DiscoveredGpu> {
+    let output = tokio::time::timeout(
+        Duration::from_secs(3),
+        Command::new("nvidia-smi")
+            .args([
+                "--query-gpu=index,name,memory.total",
+                "--format=csv,noheader,nounits",
+            ])
+            .output(),
+    )
+    .await;
+    match output {
+        Ok(Ok(output)) if output.status.success() => {
+            parse_nvidia_smi_gpus(&String::from_utf8_lossy(&output.stdout))
+        }
+        _ => Vec::new(),
+    }
+}
+
+fn parse_nvidia_smi_gpus(output: &str) -> Vec<DiscoveredGpu> {
+    output
+        .trim()
+        .lines()
+        .filter_map(|line| {
+            let parts = line.splitn(3, ',').map(str::trim).collect::<Vec<_>>();
+            let [index, name, memory_mb] = parts.as_slice() else {
+                return None;
+            };
+            Some(DiscoveredGpu {
+                id: (*index).to_owned(),
+                name: format!("{name} ({memory_mb} MB)"),
+                capabilities: vec![
+                    WorkerCapability::Gpu,
+                    WorkerCapability::Unknown("nvidia".to_owned()),
+                ],
+            })
+        })
+        .collect()
+}
+
+fn visible_gpu_ids_from_env() -> Option<Vec<String>> {
+    visible_gpu_ids(std::env::var("NVIDIA_VISIBLE_DEVICES").ok().as_deref())
+}
+
+fn visible_gpu_ids(value: Option<&str>) -> Option<Vec<String>> {
+    let value = value.map(str::trim).filter(|value| !value.is_empty())?;
+    match value {
+        "all" => None,
+        "void" | "none" => Some(Vec::new()),
+        _ => Some(
+            value
+                .split(',')
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(str::to_owned)
+                .collect(),
+        ),
+    }
+}
+
+fn cpu_gpu() -> DiscoveredGpu {
+    DiscoveredGpu {
+        id: "cpu".to_owned(),
+        name: "Rust CPU utility worker".to_owned(),
+        capabilities: vec![WorkerCapability::Cpu],
+    }
+}
+
+fn fallback_gpu(gpu_id: &str) -> DiscoveredGpu {
+    DiscoveredGpu {
+        id: gpu_id.to_owned(),
+        name: format!("GPU {gpu_id}"),
+        capabilities: vec![WorkerCapability::Gpu],
+    }
+}
+
+fn worker_capabilities(gpu: &DiscoveredGpu) -> Vec<WorkerCapability> {
+    let utility_jobs_enabled =
+        std::env::var("SCENEWORKS_UTILITY_JOBS").map_or(true, |value| value.trim() != "0");
+    worker_capabilities_with_utility(gpu, utility_jobs_enabled)
+}
+
+fn worker_capabilities_with_utility(
+    gpu: &DiscoveredGpu,
+    utility_jobs_enabled: bool,
+) -> Vec<WorkerCapability> {
+    let mut capabilities = gpu.capabilities.clone();
+    let is_cpu = capabilities.contains(&WorkerCapability::Cpu);
+    if is_cpu && utility_jobs_enabled {
+        capabilities.extend([
+            WorkerCapability::FrameExtract,
+            WorkerCapability::TimelineExport,
+            WorkerCapability::ModelDownload,
+            WorkerCapability::LoraImport,
+        ]);
+    }
+    capabilities.sort();
+    capabilities.dedup();
+    capabilities
+}
+
+fn gpu_worker_id(base_worker_id: &str, gpu_id: &str) -> String {
+    let safe_gpu_id = slugify_worker_id_part(gpu_id, "gpu");
+    if safe_gpu_id == "0" && base_worker_id.ends_with("-0") {
+        return base_worker_id.to_owned();
+    }
+    if base_worker_id.ends_with("-0") && safe_gpu_id.chars().all(|value| value.is_ascii_digit()) {
+        return format!(
+            "{}{}",
+            &base_worker_id[..base_worker_id.len() - 1],
+            safe_gpu_id
+        );
+    }
+    format!("{base_worker_id}-gpu-{safe_gpu_id}")
+}
+
+fn cpu_worker_id(base_worker_id: &str) -> String {
+    let base = base_worker_id.strip_suffix("-0").unwrap_or(base_worker_id);
+    format!("{base}-cpu")
+}
+
+fn slugify_worker_id_part(value: &str, fallback: &str) -> String {
+    let mut output = String::new();
+    let mut previous_dash = false;
+    for character in value.chars() {
+        if character.is_ascii_alphanumeric() || matches!(character, '_' | '.' | '-') {
+            output.push(character);
+            previous_dash = false;
+        } else if !previous_dash && !output.is_empty() {
+            output.push('-');
+            previous_dash = true;
+        }
+    }
+    while output.ends_with('-') {
+        output.pop();
+    }
+    if output.is_empty() {
+        fallback.to_owned()
+    } else {
+        output
+    }
+}
+
+async fn shutdown_signal() {
+    #[cfg(unix)]
+    {
+        let mut term = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+            .expect("SIGTERM handler installs");
+        tokio::select! {
+            _ = tokio::signal::ctrl_c() => {}
+            _ = term.recv() => {}
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = tokio::signal::ctrl_c().await;
+    }
+}
+
+fn emit_json(payload: Value) {
+    println!("{payload}");
+}
+
+pub async fn run() -> WorkerResult<()> {
+    let settings = Settings::from_env();
+    if settings.gpu_id == "auto" && !settings.is_child_worker {
+        return supervise_auto_workers(settings).await;
+    }
+    run_worker_loop(settings).await
+}
+
+async fn run_worker_loop(settings: Settings) -> WorkerResult<()> {
+    let gpu = discover_gpu(&settings.gpu_id).await;
+    let api = ApiClient::new(&settings);
+    let http_client = reqwest::Client::new();
+    register_worker_with_retry(&api, &settings, &gpu).await?;
+    loop {
+        tokio::select! {
+            result = poll_once(&api, &settings, &http_client) => {
+                if let Err(error) = result {
+                    eprintln!("rust_worker_poll_failed: {error}");
+                    tokio::time::sleep(Duration::from_secs(settings.poll_seconds.max(1))).await;
+                }
+            }
+            _ = shutdown_signal() => {
+                let _ = heartbeat(&api, &settings, WorkerStatus::Offline, None).await;
+                return Ok(());
+            }
+        }
+    }
+}
+
+async fn register_worker_with_retry(
+    api: &ApiClient,
+    settings: &Settings,
+    gpu: &DiscoveredGpu,
+) -> WorkerResult<()> {
     let mut attempt = 0_u32;
     loop {
-        match register_worker(api, settings).await {
-            Ok(_) => return,
+        match register_worker(api, settings, gpu).await {
+            Ok(_) => return Ok(()),
             Err(error) => {
                 attempt = attempt.saturating_add(1);
                 let delay = retry_delay(settings.poll_seconds, attempt);
                 eprintln!(
                     "rust_worker_register_failed: attempt={attempt} retryInSeconds={delay} error={error}"
                 );
-                tokio::time::sleep(Duration::from_secs(delay)).await;
+                tokio::select! {
+                    _ = tokio::time::sleep(Duration::from_secs(delay)) => {}
+                    _ = shutdown_signal() => return Err(WorkerError::Canceled(
+                        "Worker shutdown requested before registration completed.".to_owned(),
+                    )),
+                }
             }
         }
     }
@@ -243,20 +656,18 @@ async fn poll_once(
     Ok(())
 }
 
-async fn register_worker(api: &ApiClient, settings: &Settings) -> WorkerResult<WorkerSnapshot> {
+async fn register_worker(
+    api: &ApiClient,
+    settings: &Settings,
+    gpu: &DiscoveredGpu,
+) -> WorkerResult<WorkerSnapshot> {
     api.post_json(
         "/api/v1/workers/register",
         &WorkerRegisterRequest {
             worker_id: settings.worker_id.clone(),
-            gpu_id: "cpu".to_owned(),
-            gpu_name: Some("Rust CPU utility worker".to_owned()),
-            capabilities: vec![
-                WorkerCapability::Cpu,
-                WorkerCapability::FrameExtract,
-                WorkerCapability::TimelineExport,
-                WorkerCapability::ModelDownload,
-                WorkerCapability::LoraImport,
-            ],
+            gpu_id: gpu.id.clone(),
+            gpu_name: Some(gpu.name.clone()),
+            capabilities: worker_capabilities(gpu),
             loaded_models: Vec::new(),
             extra: BTreeMap::new(),
         },
@@ -2341,10 +2752,12 @@ mod tests {
     use tempfile::tempdir;
 
     use super::{
-        allow_pattern_matches, bounded_tail, concat_file_contents, copy_lora_source,
-        crossfade_duration, download_progress_payload, fresh_asset_id, now_rfc3339,
-        output_dimensions, run_ffmpeg, safe_download_dir, safe_project_path, value_f64,
-        write_model_install_marker, HuggingFaceSnapshot, Settings, WorkerError,
+        allow_pattern_matches, auto_worker_specs, bounded_tail, child_environment,
+        concat_file_contents, copy_lora_source, cpu_gpu, cpu_worker_id, crossfade_duration,
+        download_progress_payload, fallback_gpu, fresh_asset_id, gpu_worker_id, now_rfc3339,
+        output_dimensions, parse_nvidia_smi_gpus, run_ffmpeg, safe_download_dir, safe_project_path,
+        value_f64, visible_gpu_ids, worker_capabilities_with_utility, write_model_install_marker,
+        HuggingFaceSnapshot, Settings, WorkerError, WorkerSpec,
         DEFAULT_TRANSITION_DURATION_SECONDS, INSTALL_MARKER,
     };
 
@@ -2377,6 +2790,106 @@ mod tests {
         ));
         assert_eq!(safe_download_dir("owner/model name"), "owner__model__name");
         assert_eq!(safe_download_dir("///"), "download");
+    }
+
+    #[test]
+    fn nvidia_smi_parsing_and_visible_device_filtering_match_python_worker() {
+        let gpus = parse_nvidia_smi_gpus(
+            "0, NVIDIA RTX PRO 6000 Blackwell Max-Q Workstation Edition, 97887\n\
+             1, NVIDIA RTX PRO 6000 Blackwell Max-Q Workstation Edition, 97887\n",
+        );
+
+        assert_eq!(
+            gpus.iter().map(|gpu| gpu.id.as_str()).collect::<Vec<_>>(),
+            ["0", "1"]
+        );
+        assert_eq!(
+            gpus[0].name,
+            "NVIDIA RTX PRO 6000 Blackwell Max-Q Workstation Edition (97887 MB)"
+        );
+        assert!(gpus[1]
+            .capabilities
+            .iter()
+            .any(|capability| capability.as_str() == "nvidia"));
+
+        assert_eq!(visible_gpu_ids(None), None);
+        assert_eq!(visible_gpu_ids(Some("all")), None);
+        assert_eq!(visible_gpu_ids(Some("none")), Some(Vec::new()));
+        assert_eq!(
+            visible_gpu_ids(Some("0, GPU-abcd")),
+            Some(vec!["0".to_owned(), "GPU-abcd".to_owned()])
+        );
+    }
+
+    #[test]
+    fn auto_worker_ids_and_child_environment_match_python_supervisor() {
+        assert_eq!(gpu_worker_id("worker-gpu-auto-0", "0"), "worker-gpu-auto-0");
+        assert_eq!(gpu_worker_id("worker-gpu-auto-0", "1"), "worker-gpu-auto-1");
+        assert_eq!(cpu_worker_id("worker-gpu-auto-0"), "worker-gpu-auto-cpu");
+
+        let gpus = vec![fallback_gpu("0"), fallback_gpu("1")];
+        let specs = auto_worker_specs("worker-gpu-auto-0", &gpus);
+        assert_eq!(
+            specs
+                .iter()
+                .map(|spec| spec.worker_id.as_str())
+                .collect::<Vec<_>>(),
+            [
+                "worker-gpu-auto-0",
+                "worker-gpu-auto-1",
+                "worker-gpu-auto-cpu"
+            ]
+        );
+        assert_eq!(
+            specs
+                .iter()
+                .map(|spec| spec.gpu_id.as_str())
+                .collect::<Vec<_>>(),
+            ["0", "1", "cpu"]
+        );
+
+        let gpu_env = child_environment(&WorkerSpec {
+            worker_id: "worker-gpu-auto-1".to_owned(),
+            gpu_id: "1".to_owned(),
+        });
+        assert_eq!(gpu_env["SCENEWORKS_UTILITY_JOBS"], "0");
+        assert_eq!(gpu_env["CUDA_VISIBLE_DEVICES"], "1");
+
+        let cpu_env = child_environment(&WorkerSpec {
+            worker_id: "worker-gpu-auto-cpu".to_owned(),
+            gpu_id: "cpu".to_owned(),
+        });
+        assert_eq!(cpu_env["SCENEWORKS_UTILITY_JOBS"], "1");
+        assert_eq!(cpu_env["CUDA_VISIBLE_DEVICES"], "");
+    }
+
+    #[test]
+    fn rust_cpu_capabilities_do_not_claim_gpu_generation_jobs() {
+        let cpu_capabilities = worker_capabilities_with_utility(&cpu_gpu(), true);
+
+        assert!(cpu_capabilities
+            .iter()
+            .any(|capability| capability.as_str() == "model_download"));
+        assert!(cpu_capabilities
+            .iter()
+            .any(|capability| capability.as_str() == "timeline_export"));
+        assert!(!cpu_capabilities
+            .iter()
+            .any(|capability| capability.as_str() == "image_generate"));
+        assert!(!cpu_capabilities
+            .iter()
+            .any(|capability| capability.as_str() == "video_generate"));
+
+        let gpu_capabilities = worker_capabilities_with_utility(&fallback_gpu("0"), false);
+        assert!(gpu_capabilities
+            .iter()
+            .any(|capability| capability.as_str() == "gpu"));
+        assert!(!gpu_capabilities
+            .iter()
+            .any(|capability| capability.as_str() == "model_download"));
+        assert!(!gpu_capabilities
+            .iter()
+            .any(|capability| capability.as_str() == "image_generate"));
     }
 
     #[tokio::test]
@@ -2633,6 +3146,8 @@ mod tests {
             access_token: None,
             data_dir: PathBuf::from("data"),
             worker_id: "test-worker".to_owned(),
+            gpu_id: "cpu".to_owned(),
+            is_child_worker: true,
             poll_seconds: 1,
             heartbeat_seconds: 5,
             huggingface_base_url,

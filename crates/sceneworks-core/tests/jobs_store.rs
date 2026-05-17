@@ -179,6 +179,34 @@ fn claim_skips_jobs_not_supported_by_worker_capabilities() {
 }
 
 #[test]
+fn cpu_utility_worker_does_not_claim_gpu_generation_job() {
+    let store = store("cpu-utility-no-gpu-jobs");
+    store
+        .register_worker(RegisterWorker {
+            worker_id: "worker-cpu".to_owned(),
+            gpu_id: "cpu".to_owned(),
+            gpu_name: Some("Rust CPU utility worker".to_owned()),
+            capabilities: vec![
+                WorkerCapability::Cpu,
+                WorkerCapability::ModelDownload,
+                WorkerCapability::LoraImport,
+                WorkerCapability::FrameExtract,
+                WorkerCapability::TimelineExport,
+            ],
+            loaded_models: Vec::new(),
+        })
+        .expect("worker registers");
+    store
+        .create_job(image_job(Map::new()))
+        .expect("gpu job creates");
+
+    assert!(store
+        .claim_next_job("worker-cpu")
+        .expect("claim succeeds")
+        .is_none());
+}
+
+#[test]
 fn idle_heartbeat_interrupts_previous_active_job() {
     let store = store("idle-heartbeat");
     register_image_worker(&store);

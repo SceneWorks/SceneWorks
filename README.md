@@ -43,15 +43,21 @@ npm run rust:check
 To point workers at the Rust API during migration testing, start the Rust API
 binary on port 8000 and run the worker with `SCENEWORKS_API_URL=http://localhost:8000`.
 The `sceneworks-rust-worker` binary handles CPU utility jobs for model downloads,
-LoRA imports, FFmpeg frame extraction, and timeline MP4 exports.
+LoRA imports, FFmpeg frame extraction, and timeline MP4 exports. Set
+`SCENEWORKS_GPU_ID=auto` to let the Rust worker supervise one child per visible
+NVIDIA GPU plus a CPU utility child; use `NVIDIA_VISIBLE_DEVICES=none` for a CPU
+fallback-only worker or a comma-separated list to constrain the GPU children.
 
 When running the stack outside Docker Compose, start `sceneworks-rust-worker`
-alongside the API if you want Rust-owned utility jobs to be claimed. As a
-temporary fallback, set `SCENEWORKS_LEGACY_MODEL_LORA_JOBS=1` or
-`SCENEWORKS_LEGACY_FFMPEG_JOBS=1` before starting the Python worker to let it
-claim those legacy utility jobs. Both Docker worker images install Debian
-Bookworm `ffmpeg`; host-mode workers use the `ffmpeg` found on `PATH`. Set
-`HF_TOKEN` when downloading from gated Hugging Face repositories.
+alongside the API if you want Rust-owned utility jobs to be claimed. Rust GPU
+children currently report device presence only; GPU generation adapters remain
+Python-owned during the migration, so CPU utility workers do not advertise
+GPU-only generation capabilities. As a temporary fallback, set
+`SCENEWORKS_LEGACY_MODEL_LORA_JOBS=1` or `SCENEWORKS_LEGACY_FFMPEG_JOBS=1`
+before starting the Python worker to let it claim those legacy utility jobs.
+Both Docker worker images install Debian Bookworm `ffmpeg`; host-mode workers
+use the `ffmpeg` found on `PATH`. Set `HF_TOKEN` when downloading from gated
+Hugging Face repositories.
 
 ## Local Access Control
 
