@@ -503,17 +503,17 @@ struct ModelDownloadRequest {
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct LoraImportRequest {
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     lora_id: Option<String>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     name: Option<String>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     repo: Option<String>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     source_path: Option<String>,
     #[serde(default)]
     files: Vec<String>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     family: Option<String>,
 }
 
@@ -1714,13 +1714,27 @@ fn download_size_from_siblings(siblings: &[Value], files: &[String]) -> Option<u
         if !allow_pattern_matches(filename, files) {
             continue;
         }
-        let Some(size) = sibling.get("size").and_then(Value::as_u64) else {
+        let Some(size) = sibling.get("size").and_then(json_size_to_u64) else {
             continue;
         };
         found_size = true;
         total = total.saturating_add(size);
     }
     found_size.then_some(total)
+}
+
+fn json_size_to_u64(value: &Value) -> Option<u64> {
+    if let Some(value) = value.as_u64() {
+        return Some(value);
+    }
+    if let Some(value) = value.as_f64() {
+        return value.is_finite().then(|| value.max(0.0) as u64);
+    }
+    value
+        .as_str()
+        .and_then(|value| value.parse::<f64>().ok())
+        .filter(|value| value.is_finite())
+        .map(|value| value.max(0.0) as u64)
 }
 
 fn allow_pattern_matches(path: &str, patterns: &[String]) -> bool {
@@ -2861,13 +2875,15 @@ mod tests {
         assert_eq!(status, StatusCode::CREATED);
         assert_eq!(job["type"], "lora_import");
         assert_eq!(job["payload"]["repo"], "owner/lora");
+        assert!(job["payload"].get("loraId").is_none());
+        assert!(job["payload"].get("sourcePath").is_none());
     }
 
     #[test]
     fn model_download_size_helpers_match_python_shapes() {
         let siblings = json!([
             { "rfilename": "model-00001.safetensors", "size": 100 },
-            { "rfilename": "model-00002.safetensors", "size": 200 },
+            { "rfilename": "model-00002.safetensors", "size": "200" },
             { "rfilename": "README.md", "size": 50 },
             { "rfilename": "unknown.bin" }
         ]);
