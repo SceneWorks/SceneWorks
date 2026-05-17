@@ -2,6 +2,8 @@ from datetime import UTC, datetime
 import json
 import re
 import sqlite3
+import tempfile
+import threading
 from pathlib import Path
 from uuid import uuid4
 
@@ -12,6 +14,7 @@ from .settings import Settings
 
 
 router = APIRouter(prefix="/projects", tags=["projects"])
+REGISTRY_LOCK = threading.Lock()
 
 PROJECT_FOLDERS = [
     "assets/images",
@@ -69,9 +72,16 @@ def load_registry(settings: Settings) -> list[dict]:
 
 def save_registry(settings: Settings, projects: list[dict]) -> None:
     settings.data_dir.mkdir(parents=True, exist_ok=True)
-    with settings.registry_path.open("w", encoding="utf-8") as handle:
-        json.dump(projects, handle, indent=2)
-        handle.write("\n")
+    tmp_path = None
+    try:
+        with tempfile.NamedTemporaryFile("w", delete=False, dir=settings.data_dir, encoding="utf-8") as handle:
+            tmp_path = Path(handle.name)
+            json.dump(projects, handle, indent=2)
+            handle.write("\n")
+        tmp_path.replace(settings.registry_path)
+    finally:
+        if tmp_path and tmp_path.exists():
+            tmp_path.unlink(missing_ok=True)
 
 
 def create_project_db(project_path: Path) -> None:
@@ -195,22 +205,23 @@ def create_project(payload: ProjectCreateRequest, request: Request) -> ProjectSu
     settings = get_settings_from_request(request)
     ensure_data_dirs(settings)
 
-    project_id = f"project_{uuid4().hex}"
-    folder_name = f"{slugify(payload.name)}.sceneworks"
-    project_path = settings.projects_dir / folder_name
-    if project_path.exists():
-        project_path = settings.projects_dir / f"{slugify(payload.name)}-{project_id[-8:]}.sceneworks"
+    with REGISTRY_LOCK:
+        project_id = f"project_{uuid4().hex}"
+        folder_name = f"{slugify(payload.name)}.sceneworks"
+        project_path = settings.projects_dir / folder_name
+        if project_path.exists():
+            project_path = settings.projects_dir / f"{slugify(payload.name)}-{project_id[-8:]}.sceneworks"
 
-    project_path.mkdir(parents=True)
-    for folder in PROJECT_FOLDERS:
-        (project_path / folder).mkdir(parents=True, exist_ok=True)
+        project_path.mkdir(parents=True)
+        for folder in PROJECT_FOLDERS:
+            (project_path / folder).mkdir(parents=True, exist_ok=True)
 
-    write_project_file(settings, project_path, project_id, payload.name)
-    create_project_db(project_path)
+        write_project_file(settings, project_path, project_id, payload.name)
+        create_project_db(project_path)
 
-    registry = [item for item in load_registry(settings) if item.get("id") != project_id]
-    registry.insert(0, {"id": project_id, "name": payload.name, "path": str(project_path)})
-    save_registry(settings, registry)
+        registry = [item for item in load_registry(settings) if item.get("id") != project_id]
+        registry.insert(0, {"id": project_id, "name": payload.name, "path": str(project_path)})
+        save_registry(settings, registry)
 
     return read_project_summary(project_path)
 

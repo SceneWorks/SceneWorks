@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 import json
 import sqlite3
 import threading
@@ -12,6 +12,7 @@ from uuid import uuid4
 ACTIVE_STATUSES = ("preparing", "downloading", "loading_model", "running", "saving")
 TERMINAL_STATUSES = ("completed", "failed", "canceled", "interrupted")
 JOB_STATUSES = ("queued", *ACTIVE_STATUSES, *TERMINAL_STATUSES)
+NON_GPU_JOB_TYPES = ("model_download", "lora_import")
 
 
 def utc_now() -> str:
@@ -343,6 +344,63 @@ class JobsStore:
                 )
             return self.get_worker(worker_id, connection=connection)
 
+    def mark_stale_workers_interrupted(self, timeout_seconds: int) -> dict[str, list[dict]]:
+        now = datetime.now(UTC).replace(microsecond=0)
+        cutoff = (now - timedelta(seconds=max(1, timeout_seconds))).isoformat().replace("+00:00", "Z")
+        now_text = now.isoformat().replace("+00:00", "Z")
+        with self._lock, self.connect() as connection:
+            stale_workers = connection.execute(
+                """
+                select * from workers
+                 where status != 'offline'
+                   and last_seen_at < ?
+                """,
+                (cutoff,),
+            ).fetchall()
+            if not stale_workers:
+                return {"workers": [], "jobs": []}
+
+            worker_ids = [row["id"] for row in stale_workers]
+            active_jobs = connection.execute(
+                f"""
+                select * from jobs
+                 where worker_id in ({','.join('?' for _ in worker_ids)})
+                   and status in ({','.join('?' for _ in ACTIVE_STATUSES)})
+                """,
+                (*worker_ids, *ACTIVE_STATUSES),
+            ).fetchall()
+            connection.execute(
+                f"""
+                update jobs
+                   set status = 'interrupted',
+                       stage = 'interrupted',
+                       message = 'Job was interrupted after its worker stopped sending heartbeats.',
+                       error = 'Worker heartbeat timed out.',
+                       completed_at = ?,
+                       updated_at = ?,
+                       worker_id = null
+                 where worker_id in ({','.join('?' for _ in worker_ids)})
+                   and status in ({','.join('?' for _ in ACTIVE_STATUSES)})
+                """,
+                (now_text, now_text, *worker_ids, *ACTIVE_STATUSES),
+            )
+            connection.execute(
+                f"""
+                update workers
+                   set status = 'offline',
+                       current_job_id = null,
+                       last_seen_at = ?
+                 where id in ({','.join('?' for _ in worker_ids)})
+                """,
+                (now_text, *worker_ids),
+            )
+            updated_workers = [
+                self.get_worker(worker_id, connection=connection)
+                for worker_id in worker_ids
+            ]
+            updated_jobs = [self.get_job(row["id"], connection=connection) for row in active_jobs]
+            return {"workers": updated_workers, "jobs": updated_jobs}
+
     def claim_next_job(self, worker_id: str) -> dict | None:
         now = utc_now()
         with self._lock, self.connect() as connection:
@@ -353,25 +411,26 @@ class JobsStore:
                 select id from jobs
                  where assigned_gpu = ?
                    and status in ({','.join('?' for _ in ACTIVE_STATUSES)})
+                   and type not in ({','.join('?' for _ in NON_GPU_JOB_TYPES)})
                  limit 1
                 """,
-                (gpu_id, *ACTIVE_STATUSES),
+                (gpu_id, *ACTIVE_STATUSES, *NON_GPU_JOB_TYPES),
             ).fetchone()
-            if active_gpu_job is not None:
-                return None
 
             queued = connection.execute(
-                """
+                f"""
                 select * from jobs
                  where status = 'queued'
-                   and (requested_gpu = 'auto' or requested_gpu = ?)
+                   and (type in ({','.join('?' for _ in NON_GPU_JOB_TYPES)}) or requested_gpu = 'auto' or requested_gpu = ?)
+                   and (? = 0 or type in ({','.join('?' for _ in NON_GPU_JOB_TYPES)}))
                  order by created_at asc
                  limit 1
                 """,
-                (gpu_id,),
+                (*NON_GPU_JOB_TYPES, gpu_id, int(active_gpu_job is not None), *NON_GPU_JOB_TYPES),
             ).fetchone()
             if queued is None:
                 return None
+            assigned_gpu = "cpu" if queued["type"] in NON_GPU_JOB_TYPES else gpu_id
 
             connection.execute(
                 """
@@ -385,7 +444,7 @@ class JobsStore:
                        updated_at = ?
                  where id = ? and status = 'queued'
                 """,
-                (gpu_id, worker_id, now, now, queued["id"]),
+                (assigned_gpu, worker_id, now, now, queued["id"]),
             )
             connection.execute(
                 "update workers set status = 'busy', current_job_id = ?, last_seen_at = ? where id = ?",

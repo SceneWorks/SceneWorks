@@ -4,7 +4,7 @@ import "./styles.css";
 
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL ?? "http://localhost:8000";
 
-const navItems = ["Library", "Image", "Video", "Characters", "Editor", "Queue"];
+const navItems = ["Library", "Image", "Video", "Models", "Characters", "Editor", "Queue"];
 const terminalStatuses = new Set(["completed", "failed", "canceled", "interrupted"]);
 const actionStatuses = new Set(["failed", "canceled", "interrupted", "completed"]);
 const fallbackModels = [
@@ -60,7 +60,8 @@ const fallbackModels = [
 
 async function apiFetch(path, token, options = {}) {
   const headers = new Headers(options.headers ?? {});
-  if (options.body) {
+  const isFormData = options.body instanceof FormData;
+  if (options.body && !isFormData) {
     headers.set("Content-Type", "application/json");
   }
   if (token) {
@@ -176,6 +177,7 @@ function App() {
   const [jobs, setJobs] = useState([]);
   const [workers, setWorkers] = useState([]);
   const [models, setModels] = useState([]);
+  const [loras, setLoras] = useState([]);
   const [assets, setAssets] = useState([]);
   const [timelines, setTimelines] = useState([]);
   const [selectedTimelineId, setSelectedTimelineId] = useState(null);
@@ -275,8 +277,12 @@ function App() {
       return undefined;
     }
 
-    const events = new EventSource(eventUrl("/api/v1/jobs/events", token));
-    events.addEventListener("job.updated", (event) => {
+    let events = null;
+    let reconnectTimer = null;
+    let reconnectAttempt = 0;
+    let closed = false;
+
+    function handleJobUpdated(event) {
       const job = JSON.parse(event.data);
       setJobs((items) => [job, ...items.filter((item) => item.id !== job.id)].sort(sortNewest));
       if (job.status === "completed" && (job.result?.generationSetId || job.result?.assetIds?.length)) {
@@ -287,31 +293,58 @@ function App() {
           refreshAssets(job.projectId);
         }
       }
-    });
-    events.addEventListener("worker.updated", (event) => {
+    }
+
+    function handleWorkerUpdated(event) {
       const worker = JSON.parse(event.data);
       setWorkers((items) => [worker, ...items.filter((item) => item.id !== worker.id)].sort(sortWorkers));
-    });
-    events.onerror = () => {
-      events.close();
-    };
+    }
 
-    return () => events.close();
+    function connect() {
+      const source = new EventSource(eventUrl("/api/v1/jobs/events", token));
+      events = source;
+      source.addEventListener("job.updated", handleJobUpdated);
+      source.addEventListener("worker.updated", handleWorkerUpdated);
+      source.onopen = () => {
+        reconnectAttempt = 0;
+      };
+      source.onerror = () => {
+        source.close();
+        if (closed) {
+          return;
+        }
+        const delay = Math.min(30000, 1000 * 2 ** reconnectAttempt);
+        reconnectAttempt += 1;
+        reconnectTimer = window.setTimeout(connect, delay);
+      };
+    }
+
+    connect();
+
+    return () => {
+      closed = true;
+      if (reconnectTimer) {
+        window.clearTimeout(reconnectTimer);
+      }
+      events?.close();
+    };
   }, [authenticated, token]);
 
   async function refreshData() {
     try {
-      const [projectItems, jobItems, workerItems, modelItems] = await Promise.all([
+      const [projectItems, jobItems, workerItems, modelItems, loraItems] = await Promise.all([
         apiFetch("/api/v1/projects", token),
         apiFetch("/api/v1/jobs", token),
         apiFetch("/api/v1/workers", token),
         apiFetch("/api/v1/models", token),
+        apiFetch("/api/v1/loras", token),
       ]);
       setProjects(projectItems);
       setActiveProject((current) => current ?? projectItems[0] ?? null);
       setJobs(jobItems.sort(sortNewest));
       setWorkers(workerItems.sort(sortWorkers));
       setModels(modelItems);
+      setLoras(loraItems);
       setError("");
     } catch (err) {
       setError(err.message);
@@ -542,6 +575,40 @@ function App() {
     }
   }
 
+  async function importAsset(file) {
+    if (!activeProject || !file) {
+      setError("Create or open a project first.");
+      return;
+    }
+    const body = new FormData();
+    body.append("file", file);
+    try {
+      const imported = await apiFetch(`/api/v1/projects/${activeProject.id}/assets`, token, {
+        method: "POST",
+        body,
+      });
+      setAssets((items) => [imported, ...items.filter((item) => item.id !== imported.id)]);
+      setSelectedAssetId(imported.id);
+      setError("");
+    } catch (err) {
+      setError(err.message);
+    }
+  }
+
+  async function createModelDownloadJob(model) {
+    try {
+      await apiFetch(`/api/v1/models/${model.id}/download`, token, {
+        method: "POST",
+        body: JSON.stringify({ requestedGpu: "auto" }),
+      });
+      setActiveView("Queue");
+      setError("");
+      refreshData();
+    } catch (err) {
+      setError(err.message);
+    }
+  }
+
   async function jobAction(job, action) {
     try {
       const path = action === "duplicate" ? `/api/v1/jobs/${job.id}/duplicate` : `/api/v1/jobs/${job.id}/${action}`;
@@ -662,6 +729,7 @@ function App() {
           <LibraryScreen
             assets={assets}
             deleteAsset={deleteAsset}
+            importAsset={importAsset}
             onPreview={setPreviewAsset}
             onSendImage={(asset) => {
               setSelectedAssetId(asset.id);
@@ -733,6 +801,10 @@ function App() {
           />
         ) : null}
 
+        {activeView === "Models" ? (
+          <ModelManagerScreen jobs={jobs} loras={loras} models={models} onDownloadModel={createModelDownloadJob} />
+        ) : null}
+
         {activeView === "Editor" ? (
           <EditorScreen
             activeProject={activeProject}
@@ -763,6 +835,7 @@ function App() {
 function LibraryScreen({
   assets,
   deleteAsset,
+  importAsset,
   onPreview,
   onSendImage,
   onSendVideo,
@@ -773,6 +846,7 @@ function LibraryScreen({
 }) {
   const [typeFilter, setTypeFilter] = useState("all");
   const [showRejected, setShowRejected] = useState(false);
+  const [isImporting, setIsImporting] = useState(false);
   const visibleAssets = assets.filter((asset) => {
     if (typeFilter !== "all" && asset.type !== typeFilter) {
       return false;
@@ -783,6 +857,17 @@ function LibraryScreen({
     return true;
   });
 
+  async function handleImport(event) {
+    const [file] = event.target.files;
+    if (!file) {
+      return;
+    }
+    setIsImporting(true);
+    await importAsset(file);
+    setIsImporting(false);
+    event.target.value = "";
+  }
+
   return (
     <section className="main-surface library-surface">
       <div className="surface-header">
@@ -791,10 +876,15 @@ function LibraryScreen({
           <h2>Library</h2>
         </div>
         <div className="toolbar">
+          <label className="file-upload-button">
+            <input accept="image/*,video/*" disabled={isImporting} onChange={handleImport} type="file" />
+            {isImporting ? "Importing..." : "Import"}
+          </label>
           <select aria-label="Asset type" onChange={(event) => setTypeFilter(event.target.value)} value={typeFilter}>
             <option value="all">All media</option>
             <option value="image">Images</option>
             <option value="video">Videos</option>
+            <option value="upload">Uploads</option>
             <option value="render">Renders</option>
           </select>
           <label className="checkline">
@@ -821,6 +911,111 @@ function LibraryScreen({
           updateAssetStatus={updateAssetStatus}
         />
       </div>
+    </section>
+  );
+}
+
+function ModelManagerScreen({ jobs, loras, models, onDownloadModel }) {
+  const families = Array.from(new Set(models.map((model) => model.family).filter(Boolean))).sort();
+  const [familyFilter, setFamilyFilter] = useState(families[0] ?? "all");
+  const visibleLoras =
+    familyFilter === "all"
+      ? loras
+      : loras.filter((lora) => {
+          const compatibility = lora.compatibility ?? {};
+          const values =
+            lora.families ??
+            lora.compatibleFamilies ??
+            lora.modelFamilies ??
+            compatibility.families ??
+            (lora.family ? [lora.family] : []);
+          const families = Array.isArray(values) ? values : [values];
+          return families.includes(familyFilter);
+        });
+
+  useEffect(() => {
+    if (familyFilter !== "all" && !families.includes(familyFilter)) {
+      setFamilyFilter(families[0] ?? "all");
+    }
+  }, [families.join("|"), familyFilter]);
+
+  function activeDownloadFor(model) {
+    return jobs.find(
+      (job) =>
+        job.type === "model_download" &&
+        job.payload?.modelId === model.id &&
+        !terminalStatuses.has(job.status),
+    );
+  }
+
+  return (
+    <section className="main-surface models-surface">
+      <div className="surface-header">
+        <div className="section-heading">
+          <p className="eyebrow">Runtime assets</p>
+          <h2>Models</h2>
+        </div>
+        <label>
+          LoRA family
+          <select onChange={(event) => setFamilyFilter(event.target.value)} value={familyFilter}>
+            <option value="all">All families</option>
+            {families.map((family) => (
+              <option key={family} value={family}>
+                {family}
+              </option>
+            ))}
+          </select>
+        </label>
+      </div>
+
+      <div className="model-grid">
+        {models.map((model) => {
+          const downloadJob = activeDownloadFor(model);
+          const installed = model.installState === "installed";
+          return (
+            <article className="model-card" key={model.id}>
+              <div>
+                <p className="eyebrow">{model.type}</p>
+                <h3>{model.name}</h3>
+              </div>
+              <span className={installed ? "status-badge installed" : "status-badge"}>{installed ? "installed" : "missing"}</span>
+              <p>{model.ui?.description ?? model.family ?? model.id}</p>
+              <dl>
+                <div>
+                  <dt>Family</dt>
+                  <dd>{model.family ?? "unknown"}</dd>
+                </div>
+                <div>
+                  <dt>Repo</dt>
+                  <dd>{model.downloads?.[0]?.repo ?? "none"}</dd>
+                </div>
+              </dl>
+              <button disabled={installed || !model.downloadable || Boolean(downloadJob)} onClick={() => onDownloadModel(model)} type="button">
+                {downloadJob ? downloadJob.status : installed ? "Ready" : "Download"}
+              </button>
+            </article>
+          );
+        })}
+      </div>
+
+      <section className="lora-panel">
+        <div className="section-heading">
+          <p className="eyebrow">LoRAs</p>
+          <h2>{familyFilter === "all" ? "All compatible" : familyFilter}</h2>
+        </div>
+        {visibleLoras.length ? (
+          <div className="lora-list">
+            {visibleLoras.map((lora) => (
+              <article className="lora-row" key={lora.id ?? lora.name}>
+                <strong>{lora.name ?? lora.id}</strong>
+                <span>{lora.family ?? "compatible"}</span>
+              </article>
+            ))}
+          </div>
+        ) : (
+          <div className="empty-panel compact-panel">No LoRAs in this view</div>
+        )}
+      </section>
     </section>
   );
 }

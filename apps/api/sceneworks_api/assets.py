@@ -1,20 +1,26 @@
 from __future__ import annotations
 
 import json
+import mimetypes
+import re
+import shutil
+import sqlite3
 from pathlib import Path
 from typing import Any
+from uuid import uuid4
 
-from fastapi import APIRouter, HTTPException, Query, Request
+from fastapi import APIRouter, File, HTTPException, Query, Request, UploadFile
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 
-from .projects import find_project_path
+from .projects import find_project_path, utc_now
 
 
 router = APIRouter(prefix="/projects/{project_id}", tags=["assets"])
 
 ASSET_SIDECAR_PATTERN = "*.sceneworks.json"
 MEDIA_FOLDERS = ("assets/images", "assets/videos", "assets/uploads", "assets/frames", "assets/renders")
+ALLOWED_IMPORT_PREFIXES = ("image/", "video/")
 
 
 class AssetStatusUpdate(BaseModel):
@@ -33,6 +39,62 @@ def write_json(path: Path, payload: dict[str, Any]) -> None:
     with path.open("w", encoding="utf-8") as handle:
         json.dump(payload, handle, indent=2)
         handle.write("\n")
+
+
+def safe_filename(value: str, fallback: str = "upload") -> str:
+    name = value.replace("\\", "/").rsplit("/", 1)[-1]
+    stem = Path(name).stem
+    slug = re.sub(r"[^a-zA-Z0-9]+", "-", stem.strip()).strip("-").lower()
+    return slug[:64] or fallback
+
+
+def media_type_for_mime(mime_type: str) -> str:
+    if mime_type.startswith("image/"):
+        return "image"
+    if mime_type.startswith("video/"):
+        return "video"
+    raise HTTPException(status_code=400, detail="Only image and video uploads are supported")
+
+
+def index_asset_db(project_path: Path, asset: dict[str, Any]) -> None:
+    db_path = project_path / "project.db"
+    with sqlite3.connect(db_path) as connection:
+        connection.execute(
+            """
+            create table if not exists assets (
+              id text primary key,
+              type text not null,
+              display_name text not null,
+              file_path text not null,
+              generation_set_id text,
+              created_at text not null,
+              favorite integer not null default 0,
+              rating integer not null default 0,
+              rejected integer not null default 0,
+              trashed integer not null default 0
+            )
+            """
+        )
+        connection.execute(
+            """
+            insert or replace into assets (
+              id, type, display_name, file_path, generation_set_id, created_at,
+              favorite, rating, rejected, trashed
+            ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                asset["id"],
+                asset["type"],
+                asset["displayName"],
+                asset["file"]["path"],
+                asset.get("generationSetId"),
+                asset["createdAt"],
+                int(asset["status"]["favorite"]),
+                int(asset["status"]["rating"]),
+                int(asset["status"]["rejected"]),
+                int(asset["status"]["trashed"]),
+            ),
+        )
 
 
 def normalize_asset(project_id: str, project_path: Path, sidecar_path: Path) -> dict[str, Any]:
@@ -80,6 +142,83 @@ def list_assets(
             assets.append(asset)
 
     return sorted(assets, key=lambda item: item.get("createdAt", ""), reverse=True)
+
+
+@router.post("/assets", status_code=201)
+def import_asset(project_id: str, request: Request, file: UploadFile = File(...)) -> dict[str, Any]:
+    project_path = find_project_path(request.app.state.settings, project_id)
+    upload_dir = project_path / "assets" / "uploads"
+    upload_dir.mkdir(parents=True, exist_ok=True)
+
+    guessed_mime, _ = mimetypes.guess_type(file.filename or "")
+    content_type = file.content_type or ""
+    mime_type = guessed_mime if content_type in {"", "application/octet-stream"} else content_type
+    mime_type = mime_type or "application/octet-stream"
+    if not mime_type.startswith(ALLOWED_IMPORT_PREFIXES):
+        raise HTTPException(status_code=400, detail="Only image and video uploads are supported")
+
+    asset_id = f"asset_{uuid4().hex}"
+    created_at = utc_now()
+    extension = Path(file.filename or "").suffix.lower() or mimetypes.guess_extension(mime_type) or ".bin"
+    filename = f"{safe_filename(file.filename or '', asset_id)}-{asset_id[-8:]}{extension}"
+    media_path = upload_dir / filename
+    media_rel = str(media_path.relative_to(project_path)).replace("\\", "/")
+
+    try:
+        with media_path.open("wb") as handle:
+            shutil.copyfileobj(file.file, handle)
+    finally:
+        file.file.close()
+
+    if media_path.stat().st_size == 0:
+        media_path.unlink(missing_ok=True)
+        raise HTTPException(status_code=400, detail="Uploaded file is empty")
+
+    asset = {
+        "schemaVersion": 1,
+        "id": asset_id,
+        "projectId": project_id,
+        "generationSetId": None,
+        "type": media_type_for_mime(mime_type),
+        "displayName": Path(file.filename or filename).name,
+        "createdAt": created_at,
+        "file": {
+            "path": media_rel,
+            "mimeType": mime_type,
+            "width": None,
+            "height": None,
+            "duration": None,
+            "fps": None,
+        },
+        "status": {
+            "favorite": False,
+            "rating": 0,
+            "rejected": False,
+            "trashed": False,
+        },
+        "recipe": {
+            "mode": "upload",
+            "model": "manual-import",
+            "adapter": "api-upload",
+            "prompt": file.filename or filename,
+            "negativePrompt": "",
+            "seed": 0,
+            "loras": [],
+            "stylePreset": "none",
+            "normalizedSettings": {},
+            "rawAdapterSettings": {"contentType": mime_type},
+        },
+        "lineage": {
+            "parents": [],
+            "sourceAssetId": None,
+            "sourceTimestamp": None,
+            "jobId": None,
+        },
+    }
+    sidecar_path = media_path.with_suffix(".sceneworks.json")
+    write_json(sidecar_path, asset)
+    index_asset_db(project_path, asset)
+    return normalize_asset(project_id, project_path, sidecar_path)
 
 
 @router.patch("/assets/{asset_id}/status")

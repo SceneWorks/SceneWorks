@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 import json
+from pathlib import Path
+import shutil
 import time
 from typing import Any
 
@@ -47,7 +49,7 @@ def register_worker(api: ApiClient, settings: WorkerSettings, gpu: dict) -> None
         "gpuName": gpu["name"],
         "capabilities": sorted(
             set([*gpu["capabilities"], "image_generate", "image_edit", "video_generate", "video_extend", "video_bridge"])
-            | {"timeline_export"}
+            | {"timeline_export", "model_download", "lora_import"}
         ),
         "loadedModels": [],
     }
@@ -75,6 +77,178 @@ def update_job(api: ApiClient, job_id: str, payload: dict[str, Any]) -> dict:
 
 def job_cancel_requested(api: ApiClient, job_id: str) -> bool:
     return bool(api.get(f"/api/v1/jobs/{job_id}")["cancelRequested"])
+
+
+def safe_download_dir(value: str) -> str:
+    normalized = "".join(char if char.isalnum() or char in "._-" else "__" for char in value)
+    return normalized.strip("_") or "download"
+
+
+def snapshot_huggingface_repo(repo: str, target_dir: Path, files: list[str] | None = None) -> Path:
+    try:
+        from huggingface_hub import snapshot_download
+    except ImportError as exc:
+        raise RuntimeError("huggingface_hub is required for model and LoRA downloads") from exc
+
+    target_dir.mkdir(parents=True, exist_ok=True)
+    snapshot_download(
+        repo_id=repo,
+        local_dir=target_dir,
+        allow_patterns=files or None,
+        local_dir_use_symlinks=False,
+    )
+    return target_dir
+
+
+def run_model_download_job(api: ApiClient, settings: WorkerSettings, job: dict) -> None:
+    job_id = job["id"]
+    payload = job["payload"]
+    repo = payload.get("repo")
+    if not repo:
+        update_job(
+            api,
+            job_id,
+            {
+                "status": "failed",
+                "stage": "failed",
+                "progress": 1,
+                "message": "Model download is missing a repository.",
+                "error": "Missing payload.repo",
+            },
+        )
+        heartbeat(api, settings, "idle")
+        return
+
+    target_dir = Path(payload.get("targetDir") or settings.data_dir / "models" / safe_download_dir(repo))
+    try:
+        heartbeat(api, settings, "busy", job_id)
+        update_job(
+            api,
+            job_id,
+            {
+                "status": "downloading",
+                "stage": "downloading",
+                "progress": 0.1,
+                "message": f"Downloading {repo}.",
+            },
+        )
+        if job_cancel_requested(api, job_id):
+            raise InterruptedError("Model download canceled before transfer started.")
+        snapshot_huggingface_repo(repo, target_dir, payload.get("files") or [])
+        update_job(
+            api,
+            job_id,
+            {
+                "status": "completed",
+                "stage": "completed",
+                "progress": 1,
+                "message": "Model download completed.",
+                "result": {
+                    "modelId": payload.get("modelId"),
+                    "repo": repo,
+                    "path": str(target_dir),
+                    "completedAt": now(),
+                },
+            },
+        )
+    except InterruptedError as exc:
+        update_job(
+            api,
+            job_id,
+            {
+                "status": "canceled",
+                "stage": "canceled",
+                "progress": 1,
+                "message": str(exc),
+            },
+        )
+    except Exception as exc:
+        update_job(
+            api,
+            job_id,
+            {
+                "status": "failed",
+                "stage": "failed",
+                "progress": 1,
+                "message": "Model download failed.",
+                "error": str(exc),
+            },
+        )
+    finally:
+        heartbeat(api, settings, "idle")
+
+
+def run_lora_import_job(api: ApiClient, settings: WorkerSettings, job: dict) -> None:
+    job_id = job["id"]
+    payload = job["payload"]
+    repo = payload.get("repo")
+    source_path = payload.get("sourcePath")
+    target_name = safe_download_dir(payload.get("loraId") or payload.get("name") or repo or Path(source_path or "lora").stem)
+    target_dir = settings.data_dir / "loras" / target_name
+
+    try:
+        heartbeat(api, settings, "busy", job_id)
+        update_job(
+            api,
+            job_id,
+            {
+                "status": "downloading",
+                "stage": "importing",
+                "progress": 0.1,
+                "message": "Importing LoRA.",
+            },
+        )
+        if job_cancel_requested(api, job_id):
+            raise InterruptedError("LoRA import canceled before transfer started.")
+        if repo:
+            snapshot_huggingface_repo(repo, target_dir, payload.get("files") or [])
+        elif source_path:
+            source = Path(source_path).expanduser().resolve()
+            if not source.exists():
+                raise FileNotFoundError(f"LoRA source not found: {source}")
+            target_dir.mkdir(parents=True, exist_ok=True)
+            if source.is_dir():
+                shutil.copytree(source, target_dir, dirs_exist_ok=True)
+            else:
+                shutil.copy2(source, target_dir / source.name)
+        else:
+            raise ValueError("Provide repo or sourcePath for LoRA import")
+        update_job(
+            api,
+            job_id,
+            {
+                "status": "completed",
+                "stage": "completed",
+                "progress": 1,
+                "message": "LoRA import completed.",
+                "result": {"repo": repo, "path": str(target_dir), "completedAt": now()},
+            },
+        )
+    except InterruptedError as exc:
+        update_job(
+            api,
+            job_id,
+            {
+                "status": "canceled",
+                "stage": "canceled",
+                "progress": 1,
+                "message": str(exc),
+            },
+        )
+    except Exception as exc:
+        update_job(
+            api,
+            job_id,
+            {
+                "status": "failed",
+                "stage": "failed",
+                "progress": 1,
+                "message": "LoRA import failed.",
+                "error": str(exc),
+            },
+        )
+    finally:
+        heartbeat(api, settings, "idle")
 
 
 def run_placeholder_job(api: ApiClient, settings: WorkerSettings, job: dict) -> None:
@@ -361,6 +535,10 @@ def main() -> None:
                 run_video_job(api, settings, job)
             elif job["type"] == "timeline_export":
                 run_timeline_export_job(api, settings, job)
+            elif job["type"] == "model_download":
+                run_model_download_job(api, settings, job)
+            elif job["type"] == "lora_import":
+                run_lora_import_job(api, settings, job)
             else:
                 update_job(
                     api,

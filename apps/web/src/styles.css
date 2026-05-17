@@ -302,12 +302,28 @@ button:disabled {
 .detail-actions button,
 .review-actions button,
 .rating-row button,
+.file-upload-button,
 .modal-close {
   min-height: 34px;
   border: 1px solid #4b463d;
   background: #292722;
   color: #f3f0e8;
   padding: 7px 10px;
+}
+
+.file-upload-button {
+  display: inline-flex;
+  align-items: center;
+  cursor: pointer;
+  font-size: 13px;
+}
+
+.file-upload-button input {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  opacity: 0;
+  pointer-events: none;
 }
 
 .segmented-control button.active,
@@ -428,6 +444,80 @@ button:disabled {
 .asset-detail dd {
   margin: 0;
   overflow-wrap: anywhere;
+}
+
+.model-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
+  gap: 12px;
+}
+
+.model-card,
+.lora-panel,
+.lora-row {
+  border: 1px solid #3c3a34;
+  background: #23221f;
+}
+
+.model-card {
+  display: grid;
+  gap: 12px;
+  align-content: start;
+  padding: 14px;
+}
+
+.model-card h3,
+.model-card p,
+.model-card dl {
+  margin: 0;
+}
+
+.model-card p {
+  color: #c7bfb2;
+  line-height: 1.45;
+}
+
+.model-card dl {
+  display: grid;
+  gap: 8px;
+}
+
+.model-card dt {
+  color: #aaa397;
+  font-size: 12px;
+  text-transform: uppercase;
+}
+
+.model-card dd {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+.model-card button {
+  min-height: 36px;
+}
+
+.status-badge.installed {
+  border-color: #6ec6b8;
+  background: #183f3a;
+}
+
+.lora-panel {
+  display: grid;
+  gap: 12px;
+  padding: 14px;
+}
+
+.lora-list {
+  display: grid;
+  gap: 8px;
+}
+
+.lora-row {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px 12px;
 }
 
 .preview-button {

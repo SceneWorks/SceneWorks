@@ -63,6 +63,16 @@ def publish(request: Request, event: str, data: dict) -> None:
     request.app.state.event_hub.publish(event, data)
 
 
+def sweep_stale_workers(request: Request) -> None:
+    swept = get_store(request).mark_stale_workers_interrupted(request.app.state.settings.worker_timeout_seconds)
+    for job in swept["jobs"]:
+        publish(request, "job.updated", job)
+    for worker in swept["workers"]:
+        publish(request, "worker.updated", worker)
+    if swept["jobs"] or swept["workers"]:
+        publish(request, "queue.updated", queue_summary(request))
+
+
 @router.get("/jobs")
 def list_jobs(
     request: Request,
@@ -70,6 +80,7 @@ def list_jobs(
     status: str | None = Query(default=None),
     limit: int = Query(default=100, ge=1, le=500),
 ) -> list[dict]:
+    sweep_stale_workers(request)
     if status and status not in JOB_STATUSES:
         raise HTTPException(status_code=400, detail="Unsupported job status")
     return get_store(request).list_jobs(project_id=projectId, status=status, limit=limit)
@@ -115,6 +126,7 @@ async def job_events(request: Request) -> StreamingResponse:
 
 @router.post("/jobs/claim")
 def claim_job(payload: ClaimRequest, request: Request) -> dict:
+    sweep_stale_workers(request)
     try:
         job = get_store(request).claim_next_job(payload.workerId)
     except KeyError:
@@ -173,6 +185,7 @@ def duplicate_job(job_id: str, payload: DuplicateJobRequest, request: Request) -
 
 @router.get("/queue")
 def queue_summary(request: Request) -> dict:
+    sweep_stale_workers(request)
     jobs = get_store(request).list_jobs(limit=500)
     workers = get_store(request).list_workers()
     counts = {status: 0 for status in JOB_STATUSES}
@@ -187,6 +200,7 @@ def queue_summary(request: Request) -> dict:
 
 @router.get("/workers")
 def list_workers(request: Request) -> list[dict]:
+    sweep_stale_workers(request)
     return get_store(request).list_workers()
 
 
