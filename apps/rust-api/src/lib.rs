@@ -2,9 +2,8 @@ use std::collections::HashMap;
 use std::convert::Infallible;
 use std::net::SocketAddr;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use axum::extract::{Path, Query, State};
 use axum::http::{header, HeaderMap, HeaderName, HeaderValue, Method, Request, StatusCode};
@@ -13,6 +12,7 @@ use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
+use parking_lot::Mutex;
 use sceneworks_core::contracts::{
     ClaimRequest, ClaimResponse, DuplicateJobRequest, JobCreateRequest, JobSnapshot,
     ProgressRequest, QueueSummary, WorkerHeartbeatRequest, WorkerRegisterRequest, WorkerSnapshot,
@@ -22,11 +22,12 @@ use sceneworks_core::jobs_store::{
     WorkerHeartbeat, JOB_STATUSES,
 };
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Value};
-use tokio::sync::broadcast;
-use tokio_stream::wrappers::BroadcastStream;
+use serde_json::json;
+use tokio::sync::mpsc;
+use tokio_stream::wrappers::ReceiverStream;
 use tokio_stream::StreamExt;
 use tower_http::cors::{AllowOrigin, CorsLayer};
+use uuid::Uuid;
 
 const PUBLIC_PATHS: &[&str] = &[
     "/api/v1/health",
@@ -40,7 +41,8 @@ const DEFAULT_CORS_ORIGINS: &str = concat!(
     "http://localhost:5175,http://127.0.0.1:5175,",
     "http://localhost:5176,http://127.0.0.1:5176"
 );
-static EVENT_TICKET_COUNTER: AtomicU64 = AtomicU64::new(0);
+const EVENT_BUFFER_SIZE: usize = 100;
+const HEARTBEAT_SSE_TEXT: &str = "event: heartbeat\ndata: {}\n\n";
 
 #[derive(Debug, Clone)]
 pub struct Settings {
@@ -99,15 +101,47 @@ impl Settings {
 pub struct AppState {
     settings: Settings,
     jobs_store: Arc<JobsStore>,
-    events: broadcast::Sender<EventMessage>,
+    events: Arc<EventHub>,
     event_tickets: Arc<EventTicketStore>,
     interrupted_jobs_on_startup: usize,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone)]
 struct EventMessage {
     event: String,
-    data: Value,
+    data: String,
+}
+
+#[derive(Debug, Default)]
+struct EventHub {
+    state: Mutex<EventHubState>,
+}
+
+#[derive(Debug, Default)]
+struct EventHubState {
+    next_subscriber_id: u64,
+    subscribers: HashMap<u64, mpsc::Sender<EventMessage>>,
+}
+
+impl EventHub {
+    fn subscribe(&self) -> ReceiverStream<EventMessage> {
+        let (sender, receiver) = mpsc::channel(EVENT_BUFFER_SIZE);
+        let mut state = self.state.lock();
+        let subscriber_id = state.next_subscriber_id;
+        state.next_subscriber_id = state.next_subscriber_id.wrapping_add(1);
+        state.subscribers.insert(subscriber_id, sender);
+        ReceiverStream::new(receiver)
+    }
+
+    fn publish(&self, message: EventMessage) {
+        let mut state = self.state.lock();
+        state.subscribers.retain(|_, sender| {
+            sender
+                .try_send(message.clone())
+                .map(|_| true)
+                .unwrap_or(false)
+        });
+    }
 }
 
 #[derive(Debug)]
@@ -126,16 +160,9 @@ impl EventTicketStore {
 
     fn issue(&self) -> Result<EventTicket, ApiError> {
         let now = Instant::now();
-        let mut tickets = self
-            .tickets
-            .lock()
-            .map_err(|_| ApiError::internal("Event ticket store lock poisoned"))?;
+        let mut tickets = self.tickets.lock();
         prune_tickets(&mut tickets, now);
-        let ticket = format!(
-            "rust-event-ticket-{}-{}",
-            unix_millis(),
-            EVENT_TICKET_COUNTER.fetch_add(1, Ordering::Relaxed)
-        );
+        let ticket = Uuid::new_v4().simple().to_string();
         tickets.insert(ticket.clone(), now + self.ttl);
         Ok(EventTicket {
             ticket,
@@ -145,10 +172,7 @@ impl EventTicketStore {
 
     fn consume(&self, ticket: &str) -> Result<(), ApiError> {
         let now = Instant::now();
-        let mut tickets = self
-            .tickets
-            .lock()
-            .map_err(|_| ApiError::internal("Event ticket store lock poisoned"))?;
+        let mut tickets = self.tickets.lock();
         prune_tickets(&mut tickets, now);
         match tickets.remove(ticket) {
             Some(expires_at) if expires_at >= now => Ok(()),
@@ -183,7 +207,7 @@ pub fn create_app(settings: Settings) -> Result<Router, JobsStoreError> {
     let state = AppState {
         settings,
         jobs_store,
-        events: broadcast::channel(100).0,
+        events: Arc::new(EventHub::default()),
         event_tickets: Arc::new(EventTicketStore::new(30)),
         interrupted_jobs_on_startup,
     };
@@ -502,14 +526,15 @@ async fn job_events(
     let ready = tokio_stream::iter([Ok(Event::default()
         .event("ready")
         .data(json!({ "status": "connected" }).to_string()))]);
-    let messages =
-        BroadcastStream::new(state.events.subscribe()).filter_map(|message| match message {
-            Ok(message) => Some(Ok(Event::default()
-                .event(message.event)
-                .data(message.data.to_string()))),
-            Err(_) => None,
-        });
-    Ok(Sse::new(ready.chain(messages)).keep_alive(KeepAlive::default()))
+    let messages = state
+        .events
+        .subscribe()
+        .map(|message| Ok(Event::default().event(message.event).data(message.data)));
+    Ok(Sse::new(ready.chain(messages)).keep_alive(
+        KeepAlive::new()
+            .interval(Duration::from_secs(15))
+            .text(HEARTBEAT_SSE_TEXT),
+    ))
 }
 
 async fn access_control(
@@ -517,7 +542,7 @@ async fn access_control(
     request: Request<axum::body::Body>,
     next: Next,
 ) -> Response {
-    if request.method().as_str() == "OPTIONS"
+    if request.method() == Method::OPTIONS
         || PUBLIC_PATHS.contains(&request.uri().path())
         || is_authorized(request.headers(), &state.settings)
     {
@@ -625,8 +650,9 @@ async fn publish_queue(state: &AppState) -> Result<(), ApiError> {
 }
 
 fn publish<T: Serialize>(state: &AppState, event: &str, data: &T) {
-    if let Ok(data) = serde_json::to_value(data) {
-        let _ = state.events.send(EventMessage {
+    if let Ok(data) = serde_json::to_string(data) {
+        // Publishing with no subscribers is expected; slow subscribers are dropped so they reconnect.
+        state.events.publish(EventMessage {
             event: event.to_owned(),
             data,
         });
@@ -709,13 +735,6 @@ impl From<JobsStoreError> for ApiError {
     }
 }
 
-fn unix_millis() -> u128 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|duration| duration.as_millis())
-        .unwrap_or(0)
-}
-
 fn prune_tickets(tickets: &mut HashMap<String, Instant>, now: Instant) {
     tickets.retain(|_, expires_at| *expires_at >= now);
 }
@@ -728,10 +747,13 @@ impl IntoResponse for ApiError {
 
 #[cfg(test)]
 mod tests {
-    use super::{create_app, Settings};
+    use super::{
+        create_app, EventHub, EventMessage, Settings, EVENT_BUFFER_SIZE, HEARTBEAT_SSE_TEXT,
+    };
     use axum::body::{to_bytes, Body};
     use axum::http::{Request, StatusCode};
     use serde_json::{json, Value};
+    use tokio_stream::StreamExt;
     use tower::ServiceExt;
 
     fn test_settings(temp_dir: &tempfile::TempDir) -> Settings {
@@ -983,9 +1005,11 @@ mod tests {
         )
         .await;
         assert_eq!(status, StatusCode::OK);
-        assert!(ticket["ticket"]
-            .as_str()
-            .is_some_and(|value| !value.is_empty()));
+        assert!(
+            ticket["ticket"].as_str().is_some_and(
+                |value| value.len() == 32 && value.chars().all(|c| c.is_ascii_hexdigit())
+            )
+        );
         assert_eq!(ticket["expiresInSeconds"], 30);
 
         let (status, error) = request(
@@ -997,6 +1021,33 @@ mod tests {
         .await;
         assert_eq!(status, StatusCode::UNAUTHORIZED);
         assert_eq!(error["detail"], "Invalid or expired event stream ticket");
+    }
+
+    #[tokio::test]
+    async fn lagged_event_subscribers_are_disconnected() {
+        let hub = EventHub::default();
+        let mut stream = hub.subscribe();
+
+        for index in 0..EVENT_BUFFER_SIZE {
+            hub.publish(EventMessage {
+                event: "job.updated".to_owned(),
+                data: json!({ "index": index }).to_string(),
+            });
+        }
+        hub.publish(EventMessage {
+            event: "job.updated".to_owned(),
+            data: json!({ "index": EVENT_BUFFER_SIZE }).to_string(),
+        });
+
+        for _ in 0..EVENT_BUFFER_SIZE {
+            assert!(stream.next().await.is_some());
+        }
+        assert!(stream.next().await.is_none());
+    }
+
+    #[test]
+    fn heartbeat_event_matches_python_wire_shape() {
+        assert_eq!(HEARTBEAT_SSE_TEXT, "event: heartbeat\ndata: {}\n\n");
     }
 
     #[tokio::test]
