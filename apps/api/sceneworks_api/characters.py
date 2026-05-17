@@ -9,7 +9,7 @@ from uuid import uuid4
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, Field
 
-from sceneworks_shared import find_asset_sidecar_path, read_json, utc_now, write_json
+from sceneworks_shared import find_asset_records, find_asset_sidecar_path, read_json, utc_now, write_json
 
 from .jobs import queue_summary
 from .projects import find_project_path
@@ -120,10 +120,19 @@ def write_character(project_path: Path, character: dict[str, Any]) -> dict[str, 
     return character
 
 
-def asset_summary(project_id: str, project_path: Path, asset_id: str) -> dict[str, Any] | None:
-    sidecar = find_asset_sidecar_path(project_path, asset_id)
-    if sidecar is None:
-        return None
+def asset_sidecar_from_record(project_path: Path, record: dict[str, Any]) -> Path | None:
+    candidates = []
+    if record.get("sidecarPath"):
+        candidates.append(project_path / record["sidecarPath"])
+    if record.get("filePath"):
+        candidates.append((project_path / record["filePath"]).with_suffix(".sceneworks.json"))
+    for candidate in candidates:
+        if candidate.exists():
+            return candidate
+    return None
+
+
+def asset_summary_from_sidecar(project_id: str, sidecar: Path) -> dict[str, Any] | None:
     try:
         asset = read_json(sidecar)
     except (OSError, json.JSONDecodeError):
@@ -144,9 +153,16 @@ def asset_summary(project_id: str, project_path: Path, asset_id: str) -> dict[st
 
 def hydrate_character(project_id: str, project_path: Path, character: dict[str, Any]) -> dict[str, Any]:
     hydrated = dict(character)
+    asset_ids = [reference.get("assetId", "") for reference in hydrated.get("references", [])]
+    asset_records = find_asset_records(project_path, asset_ids)
+    asset_summaries = {}
+    for asset_id, record in asset_records.items():
+        sidecar = asset_sidecar_from_record(project_path, record)
+        if sidecar is not None:
+            asset_summaries[asset_id] = asset_summary_from_sidecar(project_id, sidecar)
     references = []
     for reference in hydrated.get("references", []):
-        references.append({**reference, "asset": asset_summary(project_id, project_path, reference.get("assetId", ""))})
+        references.append({**reference, "asset": asset_summaries.get(reference.get("assetId", ""))})
     hydrated["references"] = references
     hydrated["approvedReferences"] = [item for item in references if item.get("approved")]
     return hydrated
@@ -170,6 +186,7 @@ def update_asset_character_link(
         links.append(
             {
                 "characterId": character_id,
+                "source": "character-sidecar",
                 "approved": bool(reference.get("approved")),
                 "role": reference.get("role", "reference"),
                 "linkedAt": reference.get("addedAt") or utc_now(),
@@ -180,12 +197,36 @@ def update_asset_character_link(
     write_json(sidecar, asset)
 
 
-def copy_lora_into_project(project_path: Path, character_id: str, source_path_text: str | None) -> tuple[str | None, bool]:
+def assert_allowed_lora_source(project_path: Path, data_dir: Path, source_path: Path) -> None:
+    allowed_roots = [
+        (data_dir / "loras").resolve(),
+        (project_path / "loras").resolve(),
+    ]
+    resolved = source_path.resolve()
+    for root in allowed_roots:
+        try:
+            resolved.relative_to(root)
+            return
+        except ValueError:
+            continue
+    raise HTTPException(
+        status_code=400,
+        detail="LoRA source path must be inside the app-managed data/loras or project/loras folders",
+    )
+
+
+def copy_lora_into_project(
+    project_path: Path,
+    data_dir: Path,
+    character_id: str,
+    source_path_text: str | None,
+) -> tuple[str | None, bool]:
     if not source_path_text:
         return None, False
     source_path = Path(source_path_text)
     if not source_path.exists() or not source_path.is_file():
-        return source_path_text, False
+        raise HTTPException(status_code=400, detail=f"LoRA source path not found: {source_path_text}")
+    assert_allowed_lora_source(project_path, data_dir, source_path)
     target_dir = project_path / "loras" / "characters" / character_id
     target_dir.mkdir(parents=True, exist_ok=True)
     target = target_dir / source_path.name
@@ -271,6 +312,19 @@ def archive_character(project_id: str, character_id: str, request: Request) -> d
     character.setdefault("status", {})["archived"] = True
     write_character(project_path, character)
     return {"id": character_id, "status": "archived"}
+
+
+@router.post("/{character_id}/archive")
+def archive_character_explicit(project_id: str, character_id: str, request: Request) -> dict[str, str]:
+    return archive_character(project_id, character_id, request)
+
+
+@router.delete("/{character_id}/purge")
+def purge_character(project_id: str, character_id: str, request: Request) -> dict[str, str]:
+    project_path = find_project_path(request.app.state.settings, project_id)
+    path = find_character_file(project_path, character_id)
+    path.unlink()
+    return {"id": character_id, "status": "purged"}
 
 
 @router.post("/{character_id}/references", status_code=201)
@@ -389,7 +443,12 @@ def delete_look(project_id: str, character_id: str, look_id: str, request: Reque
 def attach_lora(project_id: str, character_id: str, payload: CharacterLoraRequest, request: Request) -> dict[str, Any]:
     project_path = find_project_path(request.app.state.settings, project_id)
     character = read_character(project_path, character_id)
-    project_lora_path, copied = copy_lora_into_project(project_path, character_id, payload.sourcePath)
+    project_lora_path, copied = copy_lora_into_project(
+        project_path,
+        request.app.state.settings.data_dir,
+        character_id,
+        payload.sourcePath,
+    )
     now = utc_now()
     link = {
         "id": f"character_lora_{uuid4().hex}",

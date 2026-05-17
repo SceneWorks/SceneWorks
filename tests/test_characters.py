@@ -3,6 +3,9 @@ from __future__ import annotations
 import json
 from types import SimpleNamespace
 
+import pytest
+from fastapi import HTTPException
+
 from sceneworks_api.characters import (
     CharacterCreate,
     CharacterLoraRequest,
@@ -15,6 +18,7 @@ from sceneworks_api.characters import (
     create_character,
     create_look,
     list_characters,
+    purge_character,
     update_reference,
 )
 from sceneworks_shared import index_asset, read_json, write_json
@@ -28,7 +32,7 @@ def request_for_project(tmp_path, project_path, jobs_store=None):
         json.dumps([{"id": "project-1", "name": "Project", "path": str(project_path)}]),
         encoding="utf-8",
     )
-    settings = SimpleNamespace(registry_path=registry_path)
+    settings = SimpleNamespace(registry_path=registry_path, data_dir=data_dir)
     state = SimpleNamespace(settings=settings)
     if jobs_store is not None:
         state.jobs_store = jobs_store
@@ -85,6 +89,7 @@ def test_character_crud_reference_approval_and_archive(tmp_path):
 
     asset = read_json(asset_sidecar)
     assert asset["metadata"]["characterReferences"][0]["characterId"] == character["id"]
+    assert asset["metadata"]["characterReferences"][0]["source"] == "character-sidecar"
     assert asset["metadata"]["characterReferences"][0]["approved"] is True
 
     archive_character("project-1", character["id"], request)
@@ -95,7 +100,9 @@ def test_character_crud_reference_approval_and_archive(tmp_path):
 def test_character_looks_and_lora_copy(tmp_path):
     project_path = tmp_path / "project.sceneworks"
     project_path.mkdir()
-    lora_source = tmp_path / "mira.safetensors"
+    lora_dir = tmp_path / "data" / "loras"
+    lora_dir.mkdir(parents=True)
+    lora_source = lora_dir / "mira.safetensors"
     lora_source.write_bytes(b"lora")
     request = request_for_project(tmp_path, project_path)
     character = create_character("project-1", CharacterCreate(name="Mira"), request)
@@ -123,3 +130,45 @@ def test_character_looks_and_lora_copy(tmp_path):
     assert link["copiedIntoProject"] is True
     assert link["projectPath"].startswith(f"loras/characters/{character['id']}/")
     assert (project_path / link["projectPath"]).read_bytes() == b"lora"
+
+
+def test_lora_copy_rejects_missing_and_outside_source_paths(tmp_path):
+    project_path = tmp_path / "project.sceneworks"
+    project_path.mkdir()
+    request = request_for_project(tmp_path, project_path)
+    character = create_character("project-1", CharacterCreate(name="Mira"), request)
+
+    missing = tmp_path / "data" / "loras" / "missing.safetensors"
+    with pytest.raises(HTTPException) as missing_exc:
+        attach_lora(
+            "project-1",
+            character["id"],
+            CharacterLoraRequest(name="Missing", sourcePath=str(missing)),
+            request,
+        )
+    assert missing_exc.value.status_code == 400
+    assert "not found" in missing_exc.value.detail
+
+    outside = tmp_path / "outside.safetensors"
+    outside.write_bytes(b"secret")
+    with pytest.raises(HTTPException) as outside_exc:
+        attach_lora(
+            "project-1",
+            character["id"],
+            CharacterLoraRequest(name="Outside", sourcePath=str(outside)),
+            request,
+        )
+    assert outside_exc.value.status_code == 400
+    assert "app-managed" in outside_exc.value.detail
+
+
+def test_purge_character_removes_sidecar(tmp_path):
+    project_path = tmp_path / "project.sceneworks"
+    project_path.mkdir()
+    request = request_for_project(tmp_path, project_path)
+    character = create_character("project-1", CharacterCreate(name="Mira"), request)
+
+    purged = purge_character("project-1", character["id"], request)
+
+    assert purged == {"id": character["id"], "status": "purged"}
+    assert not (project_path / "characters" / f"{character['id']}.sceneworks.character.json").exists()

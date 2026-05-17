@@ -138,30 +138,36 @@ export function ImageStudio({
           ) : null}
 
           {mode === "character_image" ? (
-            <div className="control-grid compact-controls">
-              <label>
-                Character
-                <select onChange={(event) => setCharacterId(event.target.value)} value={characterId}>
-                  <option value="">Select character</option>
-                  {characters.map((character) => (
-                    <option key={character.id} value={character.id}>
-                      {character.name}
-                    </option>
-                  ))}
-                </select>
-              </label>
-              <label>
-                Look
-                <select onChange={(event) => setCharacterLookId(event.target.value)} value={characterLookId}>
-                  <option value="">Default look</option>
-                  {(characters.find((character) => character.id === characterId)?.looks ?? []).map((look) => (
-                    <option key={look.id} value={look.id}>
-                      {look.name}
-                    </option>
-                  ))}
-                </select>
-              </label>
-            </div>
+            <>
+              <div className="control-grid compact-controls">
+                <label>
+                  Character
+                  <select onChange={(event) => setCharacterId(event.target.value)} value={characterId}>
+                    <option value="">Select character</option>
+                    {characters.map((character) => (
+                      <option key={character.id} value={character.id}>
+                        {character.name}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+                <label>
+                  Look
+                  <select onChange={(event) => setCharacterLookId(event.target.value)} value={characterLookId}>
+                    <option value="">Default look</option>
+                    {(characters.find((character) => character.id === characterId)?.looks ?? []).map((look) => (
+                      <option key={look.id} value={look.id}>
+                        {look.name}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+              </div>
+              <div className="guidance-strip">
+                <strong>Recipe-only character</strong>
+                <span>Character and look are saved with the recipe; adapter-level reference and LoRA conditioning are not active yet.</span>
+              </div>
+            </>
           ) : null}
 
           <label className="prompt-field">

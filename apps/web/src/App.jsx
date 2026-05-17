@@ -437,194 +437,157 @@ export function App() {
     }
   }
 
-  async function createCharacter(payload) {
+  async function withCharacterApi(callback) {
     if (!activeProject) {
       setError("Create or open a project first.");
       return null;
     }
     try {
-      const created = await apiFetch(`/api/v1/projects/${activeProject.id}/characters`, token, {
+      const result = await callback(activeProject.id);
+      setError("");
+      return result;
+    } catch (err) {
+      setError(err.message);
+      return null;
+    }
+  }
+
+  async function createCharacter(payload) {
+    return withCharacterApi(async (projectId) => {
+      const created = await apiFetch(`/api/v1/projects/${projectId}/characters`, token, {
         method: "POST",
         body: JSON.stringify(payload),
       });
       setCharacters((items) => [created, ...items.filter((item) => item.id !== created.id)]);
-      setError("");
       return created;
-    } catch (err) {
-      setError(err.message);
-      return null;
-    }
+    });
   }
 
   async function updateCharacter(characterId, changes) {
-    try {
-      const updated = await apiFetch(`/api/v1/projects/${activeProject.id}/characters/${characterId}`, token, {
+    return withCharacterApi(async (projectId) => {
+      const updated = await apiFetch(`/api/v1/projects/${projectId}/characters/${characterId}`, token, {
         method: "PATCH",
         body: JSON.stringify(changes),
       });
       setCharacters((items) => items.map((item) => (item.id === updated.id ? updated : item)));
-      setError("");
       return updated;
-    } catch (err) {
-      setError(err.message);
-      return null;
-    }
+    });
   }
 
   async function archiveCharacter(characterId) {
-    try {
-      await apiFetch(`/api/v1/projects/${activeProject.id}/characters/${characterId}`, token, { method: "DELETE" });
+    return withCharacterApi(async (projectId) => {
+      await apiFetch(`/api/v1/projects/${projectId}/characters/${characterId}/archive`, token, { method: "POST" });
       setCharacters((items) => items.filter((item) => item.id !== characterId));
-      setError("");
-    } catch (err) {
-      setError(err.message);
-    }
+      return { id: characterId, status: "archived" };
+    });
   }
 
   async function addCharacterReference(characterId, payload) {
-    try {
-      const updated = await apiFetch(`/api/v1/projects/${activeProject.id}/characters/${characterId}/references`, token, {
+    return withCharacterApi(async (projectId) => {
+      const updated = await apiFetch(`/api/v1/projects/${projectId}/characters/${characterId}/references`, token, {
         method: "POST",
         body: JSON.stringify(payload),
       });
       setCharacters((items) => items.map((item) => (item.id === updated.id ? updated : item)));
-      setError("");
       return updated;
-    } catch (err) {
-      setError(err.message);
-      return null;
-    }
+    });
   }
 
   async function updateCharacterReference(characterId, assetId, changes) {
-    try {
-      const updated = await apiFetch(`/api/v1/projects/${activeProject.id}/characters/${characterId}/references/${assetId}`, token, {
+    return withCharacterApi(async (projectId) => {
+      const updated = await apiFetch(`/api/v1/projects/${projectId}/characters/${characterId}/references/${assetId}`, token, {
         method: "PATCH",
         body: JSON.stringify(changes),
       });
       setCharacters((items) => items.map((item) => (item.id === updated.id ? updated : item)));
-      setError("");
       return updated;
-    } catch (err) {
-      setError(err.message);
-      return null;
-    }
+    });
   }
 
   async function removeCharacterReference(characterId, assetId) {
-    try {
-      const updated = await apiFetch(`/api/v1/projects/${activeProject.id}/characters/${characterId}/references/${assetId}`, token, {
+    return withCharacterApi(async (projectId) => {
+      const updated = await apiFetch(`/api/v1/projects/${projectId}/characters/${characterId}/references/${assetId}`, token, {
         method: "DELETE",
       });
       setCharacters((items) => items.map((item) => (item.id === updated.id ? updated : item)));
-      setError("");
       return updated;
-    } catch (err) {
-      setError(err.message);
-      return null;
-    }
+    });
   }
 
   async function createCharacterLook(characterId, payload) {
-    try {
-      const updated = await apiFetch(`/api/v1/projects/${activeProject.id}/characters/${characterId}/looks`, token, {
+    return withCharacterApi(async (projectId) => {
+      const updated = await apiFetch(`/api/v1/projects/${projectId}/characters/${characterId}/looks`, token, {
         method: "POST",
         body: JSON.stringify(payload),
       });
       setCharacters((items) => items.map((item) => (item.id === updated.id ? updated : item)));
-      setError("");
       return updated;
-    } catch (err) {
-      setError(err.message);
-      return null;
-    }
+    });
   }
 
   async function updateCharacterLook(characterId, lookId, changes) {
-    try {
-      const updated = await apiFetch(`/api/v1/projects/${activeProject.id}/characters/${characterId}/looks/${lookId}`, token, {
+    return withCharacterApi(async (projectId) => {
+      const updated = await apiFetch(`/api/v1/projects/${projectId}/characters/${characterId}/looks/${lookId}`, token, {
         method: "PATCH",
         body: JSON.stringify(changes),
       });
       setCharacters((items) => items.map((item) => (item.id === updated.id ? updated : item)));
-      setError("");
       return updated;
-    } catch (err) {
-      setError(err.message);
-      return null;
-    }
+    });
   }
 
   async function deleteCharacterLook(characterId, lookId) {
-    try {
-      const updated = await apiFetch(`/api/v1/projects/${activeProject.id}/characters/${characterId}/looks/${lookId}`, token, {
+    return withCharacterApi(async (projectId) => {
+      const updated = await apiFetch(`/api/v1/projects/${projectId}/characters/${characterId}/looks/${lookId}`, token, {
         method: "DELETE",
       });
       setCharacters((items) => items.map((item) => (item.id === updated.id ? updated : item)));
-      setError("");
       return updated;
-    } catch (err) {
-      setError(err.message);
-      return null;
-    }
+    });
   }
 
   async function attachCharacterLora(characterId, payload) {
-    try {
-      const updated = await apiFetch(`/api/v1/projects/${activeProject.id}/characters/${characterId}/loras`, token, {
+    return withCharacterApi(async (projectId) => {
+      const updated = await apiFetch(`/api/v1/projects/${projectId}/characters/${characterId}/loras`, token, {
         method: "POST",
         body: JSON.stringify(payload),
       });
       setCharacters((items) => items.map((item) => (item.id === updated.id ? updated : item)));
-      setError("");
       return updated;
-    } catch (err) {
-      setError(err.message);
-      return null;
-    }
+    });
   }
 
   async function updateCharacterLora(characterId, linkId, changes) {
-    try {
-      const updated = await apiFetch(`/api/v1/projects/${activeProject.id}/characters/${characterId}/loras/${linkId}`, token, {
+    return withCharacterApi(async (projectId) => {
+      const updated = await apiFetch(`/api/v1/projects/${projectId}/characters/${characterId}/loras/${linkId}`, token, {
         method: "PATCH",
         body: JSON.stringify(changes),
       });
       setCharacters((items) => items.map((item) => (item.id === updated.id ? updated : item)));
-      setError("");
       return updated;
-    } catch (err) {
-      setError(err.message);
-      return null;
-    }
+    });
   }
 
   async function detachCharacterLora(characterId, linkId) {
-    try {
-      const updated = await apiFetch(`/api/v1/projects/${activeProject.id}/characters/${characterId}/loras/${linkId}`, token, {
+    return withCharacterApi(async (projectId) => {
+      const updated = await apiFetch(`/api/v1/projects/${projectId}/characters/${characterId}/loras/${linkId}`, token, {
         method: "DELETE",
       });
       setCharacters((items) => items.map((item) => (item.id === updated.id ? updated : item)));
-      setError("");
       return updated;
-    } catch (err) {
-      setError(err.message);
-      return null;
-    }
+    });
   }
 
   async function createCharacterTestJob(characterId, payload) {
-    try {
-      await apiFetch(`/api/v1/projects/${activeProject.id}/characters/${characterId}/test-jobs`, token, {
+    return withCharacterApi(async (projectId) => {
+      await apiFetch(`/api/v1/projects/${projectId}/characters/${characterId}/test-jobs`, token, {
         method: "POST",
         body: JSON.stringify({ ...payload, requestedGpu }),
       });
       setActiveView("Queue");
-      setError("");
       refreshData();
-    } catch (err) {
-      setError(err.message);
-    }
+      return { id: characterId, status: "queued" };
+    });
   }
 
   async function createVideoJob(payload, options = {}) {

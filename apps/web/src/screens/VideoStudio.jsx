@@ -243,6 +243,12 @@ export function VideoStudio({
               </select>
             </label>
           </div>
+          {characterId ? (
+            <div className="guidance-strip">
+              <strong>Recipe-only character</strong>
+              <span>Character and look are saved with the recipe; adapter-level reference and LoRA conditioning are not active yet.</span>
+            </div>
+          ) : null}
 
           <label className="prompt-field">
             Prompt
