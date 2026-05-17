@@ -65,7 +65,7 @@ class TimelineItem(BaseModel):
     transitionOut: Transition | None = None
 
     @model_validator(mode="after")
-    def validate_ranges(self) -> "TimelineItem":
+    def validate_ranges_and_populate_version_metadata(self) -> "TimelineItem":
         if self.sourceOut <= self.sourceIn:
             raise ValueError("sourceOut must be greater than sourceIn.")
         if self.timelineEnd <= self.timelineStart:

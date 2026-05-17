@@ -10,6 +10,7 @@ export function ImageStudio({
   gpuOptions,
   imageModels,
   latestAssets,
+  launchRequest,
   onPreview,
   requestedGpu,
   selectedAsset,
@@ -34,13 +35,20 @@ export function ImageStudio({
   }, [imageModels, model]);
 
   useEffect(() => {
-    if ((selectedAsset?.type === "image" || selectedAsset?.type === "frame") && mode !== "edit_image") {
-      setMode("edit_image");
-    }
     if (mode === "edit_image" && selectedAsset?.id) {
       setSourceAssetId(selectedAsset.id);
     }
-  }, [mode, selectedAsset?.id, selectedAsset?.type]);
+  }, [mode, selectedAsset?.id]);
+
+  useEffect(() => {
+    if (launchRequest?.view !== "Image" || launchRequest.assetId !== selectedAsset?.id) {
+      return;
+    }
+    setMode(launchRequest.mode);
+    if (launchRequest.mode === "edit_image" && selectedAsset?.id) {
+      setSourceAssetId(selectedAsset.id);
+    }
+  }, [launchRequest?.id, selectedAsset?.id]);
 
   const availableModels = imageModels.filter((item) => {
     const caps = item.capabilities ?? [];

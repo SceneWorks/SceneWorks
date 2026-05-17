@@ -39,6 +39,7 @@ export function EditorScreen({
   const [isPlaying, setIsPlaying] = useState(false);
   const [playheadSeconds, setPlayheadSeconds] = useState(0);
   const [generationPrompt, setGenerationPrompt] = useState("Continue the action with matching motion and lighting");
+  const [extensionDuration, setExtensionDuration] = useState(4);
   const [timelineNotice, setTimelineNotice] = useState("");
 
   const selectedItem = useMemo(() => {
@@ -272,7 +273,7 @@ export function EditorScreen({
       setTimelineNotice("Select a video clip before extending.");
       return;
     }
-    const duration = Math.min(6, Math.max(2, itemDuration(selectedItem)));
+    const duration = Math.min(15, Math.max(1, Number(extensionDuration) || itemDuration(selectedItem)));
     const job = await queueTimelineVideoJob({
       mode: "extend_clip",
       prompt: generationPrompt,
@@ -541,6 +542,17 @@ export function EditorScreen({
                   <label className="prompt-field">
                     Generation prompt
                     <textarea onChange={(event) => setGenerationPrompt(event.target.value)} value={generationPrompt} />
+                  </label>
+                  <label>
+                    Extension duration
+                    <input
+                      max="15"
+                      min="1"
+                      onChange={(event) => setExtensionDuration(Number(event.target.value))}
+                      step="0.5"
+                      type="number"
+                      value={extensionDuration}
+                    />
                   </label>
                   <div className="hook-actions">
                     <button disabled={selectedItem.type !== "video"} onClick={() => extractFrame("reuse")} type="button">

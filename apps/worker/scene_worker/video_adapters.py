@@ -358,7 +358,7 @@ def load_seekable_image_frame(media_path: Path, timestamp: float, duration: Any 
 def load_ffmpeg_frame(media_path: Path, timestamp: float) -> Image.Image | None:
     ffmpeg = shutil.which("ffmpeg")
     if ffmpeg is None:
-        return None
+        raise RuntimeError("ffmpeg is not available for frame extraction.")
     with tempfile.TemporaryDirectory(prefix="sceneworks-frame-") as temp_dir:
         frame_path = Path(temp_dir) / "frame.png"
         command = [
@@ -374,8 +374,11 @@ def load_ffmpeg_frame(media_path: Path, timestamp: float) -> Image.Image | None:
             "image2",
             str(frame_path),
         ]
-        result = subprocess.run(command, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False)
+        result = subprocess.run(command, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True, check=False)
         if result.returncode != 0 or not frame_path.exists():
+            tail = "\n".join((result.stderr or "").splitlines()[-6:]).strip()
+            if tail:
+                raise RuntimeError(f"ffmpeg could not extract a frame at {timestamp:.3f}s: {tail}")
             return None
         try:
             return Image.open(frame_path).convert("RGB")
@@ -557,7 +560,7 @@ def build_video_asset_sidecar(
                 "lastFrameAssetId": request.last_frame_asset_id,
                 "sourceClipAssetId": request.source_clip_asset_id,
                 "bridgeRightClipAssetId": request.bridge_right_clip_asset_id,
-                "timelineContext": timeline_context,
+                "timelineContextRef": "lineage.timeline",
             },
             "rawAdapterSettings": raw_settings,
         },

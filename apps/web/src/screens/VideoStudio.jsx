@@ -10,6 +10,7 @@ export function VideoStudio({
   purgeAsset,
   gpuOptions,
   latestAssets,
+  launchRequest,
   onPreview,
   requestedGpu,
   selectedAsset,
@@ -43,15 +44,24 @@ export function VideoStudio({
   useEffect(() => {
     if (selectedAsset?.type === "image" || selectedAsset?.type === "frame") {
       setSourceAssetId(selectedAsset.id);
-      if (mode === "extend_clip") {
-        setMode("image_to_video");
-      }
     }
     if (selectedAsset?.type === "video") {
       setSourceClipAssetId(selectedAsset.id);
-      setMode("extend_clip");
     }
-  }, [mode, selectedAsset?.id, selectedAsset?.type]);
+  }, [selectedAsset?.id, selectedAsset?.type]);
+
+  useEffect(() => {
+    if (launchRequest?.view !== "Video" || launchRequest.assetId !== selectedAsset?.id) {
+      return;
+    }
+    setMode(launchRequest.mode);
+    if (selectedAsset?.type === "video") {
+      setSourceClipAssetId(selectedAsset.id);
+    }
+    if (selectedAsset?.type === "image" || selectedAsset?.type === "frame") {
+      setSourceAssetId(selectedAsset.id);
+    }
+  }, [launchRequest?.id, selectedAsset?.id, selectedAsset?.type]);
 
   useEffect(() => {
     if (!selectedModel) {
