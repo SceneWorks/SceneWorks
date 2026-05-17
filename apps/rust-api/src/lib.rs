@@ -5,7 +5,8 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use axum::extract::{Multipart, Path, Query, State};
+use axum::body::Body;
+use axum::extract::{DefaultBodyLimit, Multipart, Path, Query, State};
 use axum::http::{header, HeaderMap, HeaderName, HeaderValue, Method, Request, StatusCode};
 use axum::middleware::{self, Next};
 use axum::response::sse::{Event, KeepAlive, Sse};
@@ -26,9 +27,11 @@ use sceneworks_core::project_store::{
 };
 use serde::{Deserialize, Serialize};
 use serde_json::json;
+use tokio::io::AsyncWriteExt;
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
 use tokio_stream::StreamExt;
+use tokio_util::io::ReaderStream;
 use tower_http::cors::{AllowOrigin, CorsLayer};
 use uuid::Uuid;
 
@@ -46,6 +49,7 @@ const DEFAULT_CORS_ORIGINS: &str = concat!(
 );
 const EVENT_BUFFER_SIZE: usize = 100;
 const HEARTBEAT_SSE_TEXT: &str = "event: heartbeat\ndata: {}\n\n";
+const MAX_UPLOAD_BYTES: usize = 2 * 1024 * 1024 * 1024;
 
 #[derive(Debug, Clone)]
 pub struct Settings {
@@ -270,6 +274,7 @@ pub fn create_app(settings: Settings) -> Result<Router, JobsStoreError> {
         )
         .fallback(route_not_found)
         .with_state(state.clone())
+        .layer(DefaultBodyLimit::max(MAX_UPLOAD_BYTES))
         .layer(middleware::from_fn_with_state(state, access_control))
         .layer(cors))
 }
@@ -441,25 +446,58 @@ async fn import_asset(
         }
         let filename = field.file_name().unwrap_or("upload").to_owned();
         let content_type = field.content_type().map(str::to_owned);
-        let bytes = field
-            .bytes()
-            .await
-            .map_err(|error| ApiError::bad_request(error.to_string()))?
-            .to_vec();
+        let temp_path = write_upload_field_to_temp_file(&state, field).await?;
+        let source_path = temp_path.clone();
         let asset = project_call(state, move |store| {
             store.import_asset(
                 &project_id,
                 UploadAsset {
                     filename,
                     content_type,
-                    bytes,
+                    source_path,
                 },
             )
         })
-        .await?;
+        .await
+        .inspect_err(|_| {
+            let _ = std::fs::remove_file(&temp_path);
+        })?;
         return Ok((StatusCode::CREATED, Json(asset)));
     }
     Err(ApiError::bad_request("Upload file field is required"))
+}
+
+async fn write_upload_field_to_temp_file(
+    state: &AppState,
+    mut field: axum::extract::multipart::Field<'_>,
+) -> Result<PathBuf, ApiError> {
+    let upload_dir = state.settings.data_dir.join("cache").join("uploads");
+    tokio::fs::create_dir_all(&upload_dir)
+        .await
+        .map_err(|error| ApiError::internal(error.to_string()))?;
+    let temp_path = upload_dir.join(format!("upload-{}.tmp", Uuid::new_v4().simple()));
+    let mut file = tokio::fs::File::create(&temp_path)
+        .await
+        .map_err(|error| ApiError::internal(error.to_string()))?;
+    let mut uploaded_bytes = 0usize;
+    while let Some(chunk) = field
+        .chunk()
+        .await
+        .map_err(|error| ApiError::bad_request(error.to_string()))?
+    {
+        uploaded_bytes = uploaded_bytes.saturating_add(chunk.len());
+        if uploaded_bytes > MAX_UPLOAD_BYTES {
+            let _ = tokio::fs::remove_file(&temp_path).await;
+            return Err(ApiError::payload_too_large("Uploaded file is too large"));
+        }
+        file.write_all(&chunk)
+            .await
+            .map_err(|error| ApiError::internal(error.to_string()))?;
+    }
+    file.flush()
+        .await
+        .map_err(|error| ApiError::internal(error.to_string()))?;
+    Ok(temp_path)
 }
 
 async fn update_asset_status(
@@ -507,17 +545,25 @@ async fn get_project_file(
         store.project_file(&project_id, &relative_path)
     })
     .await?;
-    let bytes = tokio::fs::read(&project_file.path)
+    let file = tokio::fs::File::open(&project_file.path)
         .await
         .map_err(|error| ApiError::internal(error.to_string()))?;
-    Ok(([(header::CONTENT_TYPE, project_file.content_type)], bytes).into_response())
+    let stream = ReaderStream::new(file);
+    Ok((
+        [(header::CONTENT_TYPE, project_file.content_type)],
+        Body::from_stream(stream),
+    )
+        .into_response())
 }
 
 async fn route_not_found(request: Request<axum::body::Body>) -> Response {
     let path = request.uri().path();
     let lower_path = path.to_ascii_lowercase();
     if path.contains("/files/")
-        && (path.contains("..") || lower_path.contains("%2e") || lower_path.contains("%2f"))
+        && (path.contains("..")
+            || lower_path.contains("%2e")
+            || lower_path.contains("%2f")
+            || lower_path.contains("%5c"))
     {
         return (
             StatusCode::BAD_REQUEST,
@@ -936,6 +982,13 @@ impl ApiError {
         }
     }
 
+    fn payload_too_large(detail: impl Into<String>) -> Self {
+        Self {
+            status: StatusCode::PAYLOAD_TOO_LARGE,
+            detail: detail.into(),
+        }
+    }
+
     fn internal(detail: impl Into<String>) -> Self {
         Self {
             status: StatusCode::INTERNAL_SERVER_ERROR,
@@ -1226,6 +1279,18 @@ mod tests {
             .unwrap()
             .contains("/files/assets/uploads/"));
 
+        let (status, heic_upload) = request_multipart_upload(
+            app.clone(),
+            &format!("/api/v1/projects/{project_id}/assets"),
+            "Plate.HEIC",
+            "application/octet-stream",
+            b"heic-bytes",
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED);
+        assert_eq!(heic_upload["type"], "image");
+        assert_eq!(heic_upload["file"]["mimeType"], "image/heic");
+
         let asset_id = uploaded["id"].as_str().expect("asset id").to_owned();
         let (status, assets) = request(
             app.clone(),
@@ -1237,7 +1302,7 @@ mod tests {
         )
         .await;
         assert_eq!(status, StatusCode::OK);
-        assert_eq!(assets.as_array().unwrap().len(), 1);
+        assert_eq!(assets.as_array().unwrap().len(), 2);
 
         let (status, detail) = request(
             app.clone(),
@@ -1279,7 +1344,7 @@ mod tests {
         )
         .await;
         assert_eq!(status, StatusCode::OK);
-        assert_eq!(reindex["assets"], 1);
+        assert_eq!(reindex["assets"], 2);
 
         let (status, purged) = request(
             app,
@@ -1326,6 +1391,18 @@ mod tests {
                 .and_then(|value| value.to_str().ok()),
             Some("image/png")
         );
+
+        let (status, _, bytes) = request_raw(
+            app.clone(),
+            "GET",
+            &format!("/api/v1/projects/{project_id}/files/%2E%2E%2F%2E%2E%2Foutside.txt"),
+            Body::empty(),
+            &[],
+        )
+        .await;
+        let error: Value = serde_json::from_slice(&bytes).expect("json error parses");
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(error["detail"], "Invalid project file path");
 
         let (status, _, bytes) = request_raw(
             app,

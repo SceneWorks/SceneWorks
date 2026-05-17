@@ -112,7 +112,7 @@ pub struct AssetStatusPatch {
 pub struct UploadAsset {
     pub filename: String,
     pub content_type: Option<String>,
-    pub bytes: Vec<u8>,
+    pub source_path: PathBuf,
 }
 
 #[derive(Debug, Clone)]
@@ -134,6 +134,8 @@ struct RegistryItem {
 pub struct ProjectStore {
     data_dir: PathBuf,
     app_version: String,
+    /// Guards recent-project registry reads/writes only; project DB and project-file mutations
+    /// rely on SQLite transactions and filesystem operations for their own serialization.
     lock: Mutex<()>,
 }
 
@@ -310,7 +312,7 @@ impl ProjectStore {
     }
 
     pub fn import_asset(&self, project_id: &str, upload: UploadAsset) -> ProjectStoreResult<Value> {
-        if upload.bytes.is_empty() {
+        if fs::metadata(&upload.source_path)?.len() == 0 {
             return Err(ProjectStoreError::BadRequest(
                 "Uploaded file is empty".to_owned(),
             ));
@@ -324,9 +326,9 @@ impl ProjectStore {
             .content_type
             .as_deref()
             .filter(|value| !value.is_empty() && *value != "application/octet-stream")
+            .map(str::to_owned)
             .or(guessed_mime)
-            .unwrap_or("application/octet-stream")
-            .to_owned();
+            .unwrap_or_else(|| "application/octet-stream".to_owned());
         if !content_type.starts_with("image/") && !content_type.starts_with("video/") {
             return Err(ProjectStoreError::BadRequest(
                 "Only image and video uploads are supported".to_owned(),
@@ -342,7 +344,7 @@ impl ProjectStore {
             safe_filename(&upload.filename, &asset_id)
         );
         let media_path = upload_dir.join(filename);
-        fs::write(&media_path, &upload.bytes)?;
+        move_or_copy_file(&upload.source_path, &media_path)?;
         let media_rel = relative_string(&project_path, &media_path)?;
         let display_name = Path::new(&upload.filename)
             .file_name()
@@ -567,8 +569,7 @@ impl ProjectStore {
             return Err(ProjectStoreError::NotFound("File not found".to_owned()));
         }
         let content_type = guess_mime_from_filename(&target.display().to_string())
-            .unwrap_or("application/octet-stream")
-            .to_owned();
+            .unwrap_or_else(|| "application/octet-stream".to_owned());
         Ok(ProjectFile {
             path: target,
             content_type,
@@ -690,12 +691,13 @@ pub fn ensure_project_db_ready(project_path: &Path) -> ProjectStoreResult<()> {
     apply_project_migrations(&connect_project_db(project_path)?)
 }
 
-pub fn reindex_project_path(project_path: &Path) -> ProjectStoreResult<ReindexResult> {
-    let connection = connect_project_db(project_path)?;
-    apply_project_migrations(&connection)?;
-    connection.execute("delete from assets", [])?;
-    connection.execute("delete from generation_sets", [])?;
-    connection.execute("delete from timelines", [])?;
+fn reindex_project_path(project_path: &Path) -> ProjectStoreResult<ReindexCounts> {
+    let mut connection = connect_project_db(project_path)?;
+    let transaction = connection.transaction()?;
+    apply_project_migrations(&transaction)?;
+    transaction.execute("delete from assets", [])?;
+    transaction.execute("delete from generation_sets", [])?;
+    transaction.execute("delete from timelines", [])?;
 
     let mut counts = ReindexCounts::default();
     for sidecar_path in asset_sidecars(project_path)? {
@@ -706,7 +708,7 @@ pub fn reindex_project_path(project_path: &Path) -> ProjectStoreResult<ReindexRe
             continue;
         }
         let sidecar_rel = relative_string(project_path, &sidecar_path)?;
-        index_asset_on_connection(&connection, &asset, Some(&sidecar_rel))?;
+        index_asset_on_connection(&transaction, &asset, Some(&sidecar_rel))?;
         counts.assets += 1;
     }
 
@@ -721,7 +723,7 @@ pub fn reindex_project_path(project_path: &Path) -> ProjectStoreResult<ReindexRe
         if generation_set.get("id").is_none() {
             continue;
         }
-        connection.execute(
+        transaction.execute(
             "
             insert or replace into generation_sets (id, mode, model, prompt, created_at, job_id)
             values (?1, ?2, ?3, ?4, ?5, ?6)
@@ -754,7 +756,7 @@ pub fn reindex_project_path(project_path: &Path) -> ProjectStoreResult<ReindexRe
             continue;
         }
         let rel_path = relative_string(project_path, &entry)?;
-        connection.execute(
+        transaction.execute(
             "
             insert or replace into timelines (
               id, name, file_path, aspect_ratio, width, height, fps, duration, created_at, updated_at
@@ -778,12 +780,8 @@ pub fn reindex_project_path(project_path: &Path) -> ProjectStoreResult<ReindexRe
         counts.timelines += 1;
     }
 
-    Ok(ReindexResult {
-        project_id: String::new(),
-        assets: counts.assets,
-        generation_sets: counts.generation_sets,
-        timelines: counts.timelines,
-    })
+    transaction.commit()?;
+    Ok(counts)
 }
 
 fn read_project_summary(project_path: &Path) -> ProjectStoreResult<ProjectSummary> {
@@ -871,9 +869,12 @@ fn index_asset(
             .with_extension("sceneworks.json"),
     };
     let sidecar_rel = relative_string(project_path, &sidecar_path)?;
-    let connection = connect_project_db(project_path)?;
-    apply_project_migrations(&connection)?;
-    index_asset_on_connection(&connection, asset, Some(&sidecar_rel))
+    let mut connection = connect_project_db(project_path)?;
+    let transaction = connection.transaction()?;
+    apply_project_migrations(&transaction)?;
+    index_asset_on_connection(&transaction, asset, Some(&sidecar_rel))?;
+    transaction.commit()?;
+    Ok(())
 }
 
 fn index_asset_on_connection(
@@ -968,9 +969,11 @@ fn row_to_asset_record(row: &Row<'_>) -> rusqlite::Result<AssetRecord> {
 }
 
 fn purge_asset_record(project_path: &Path, asset_id: &str) -> ProjectStoreResult<()> {
-    let connection = connect_project_db(project_path)?;
-    apply_project_migrations(&connection)?;
-    connection.execute("delete from assets where id = ?1", params![asset_id])?;
+    let mut connection = connect_project_db(project_path)?;
+    let transaction = connection.transaction()?;
+    apply_project_migrations(&transaction)?;
+    transaction.execute("delete from assets where id = ?1", params![asset_id])?;
+    transaction.commit()?;
     Ok(())
 }
 
@@ -1043,7 +1046,14 @@ fn write_json(path: &Path, payload: &Value) -> ProjectStoreResult<()> {
     }
     let mut output = serde_json::to_string_pretty(payload)?;
     output.push('\n');
-    fs::write(path, output)?;
+    let tmp_path = path.with_extension(format!(
+        "{}.tmp",
+        path.extension()
+            .and_then(|extension| extension.to_str())
+            .unwrap_or("json")
+    ));
+    fs::write(&tmp_path, output)?;
+    fs::rename(tmp_path, path)?;
     Ok(())
 }
 
@@ -1066,6 +1076,7 @@ fn relative_string(root: &Path, path: &Path) -> ProjectStoreResult<String> {
 
 fn is_safe_relative_path(relative_path: &str) -> bool {
     !relative_path.trim().is_empty()
+        && !relative_path.contains('\\')
         && Path::new(relative_path)
             .components()
             .all(|component| matches!(component, std::path::Component::Normal(_)))
@@ -1142,26 +1153,24 @@ fn media_type_for_mime(mime_type: &str) -> ProjectStoreResult<&'static str> {
     ))
 }
 
-fn guess_mime_from_filename(filename: &str) -> Option<&'static str> {
-    match Path::new(filename)
-        .extension()
-        .and_then(|value| value.to_str())
-        .map(str::to_ascii_lowercase)
-        .as_deref()
-    {
-        Some("jpg" | "jpeg") => Some("image/jpeg"),
-        Some("png") => Some("image/png"),
-        Some("gif") => Some("image/gif"),
-        Some("webp") => Some("image/webp"),
-        Some("bmp") => Some("image/bmp"),
-        Some("svg") => Some("image/svg+xml"),
-        Some("mp4") => Some("video/mp4"),
-        Some("mov") => Some("video/quicktime"),
-        Some("webm") => Some("video/webm"),
-        Some("mkv") => Some("video/x-matroska"),
-        Some("avi") => Some("video/x-msvideo"),
-        _ => None,
-    }
+fn guess_mime_from_filename(filename: &str) -> Option<String> {
+    mime_guess::from_path(filename)
+        .first_raw()
+        .map(str::to_owned)
+        .or_else(|| {
+            match Path::new(filename)
+                .extension()
+                .and_then(|value| value.to_str())
+                .map(str::to_ascii_lowercase)
+                .as_deref()
+            {
+                Some("heic") => Some("image/heic".to_owned()),
+                Some("heif") => Some("image/heif".to_owned()),
+                Some("avif") => Some("image/avif".to_owned()),
+                Some("tif" | "tiff") => Some("image/tiff".to_owned()),
+                _ => None,
+            }
+        })
 }
 
 fn upload_extension(filename: &str, mime_type: &str) -> String {
@@ -1172,17 +1181,21 @@ fn upload_extension(filename: &str, mime_type: &str) -> String {
     {
         return format!(".{}", extension.to_ascii_lowercase());
     }
-    match mime_type {
-        "image/jpeg" => ".jpg",
-        "image/png" => ".png",
-        "image/gif" => ".gif",
-        "image/webp" => ".webp",
-        "video/mp4" => ".mp4",
-        "video/quicktime" => ".mov",
-        "video/webm" => ".webm",
-        _ => ".bin",
+    match mime_guess::get_mime_extensions_str(mime_type).and_then(|extensions| extensions.first()) {
+        Some(extension) => format!(".{extension}"),
+        None => ".bin".to_owned(),
     }
-    .to_owned()
+}
+
+fn move_or_copy_file(source: &Path, destination: &Path) -> ProjectStoreResult<()> {
+    match fs::rename(source, destination) {
+        Ok(()) => Ok(()),
+        Err(_) => {
+            fs::copy(source, destination)?;
+            fs::remove_file(source)?;
+            Ok(())
+        }
+    }
 }
 
 fn random_hex(bytes: usize) -> ProjectStoreResult<String> {
@@ -1232,7 +1245,7 @@ fn civil_from_days(days: i64) -> (i64, i64, i64) {
 
 #[cfg(test)]
 mod tests {
-    use super::{ProjectStore, PROJECT_FOLDERS};
+    use super::{guess_mime_from_filename, is_safe_relative_path, ProjectStore, PROJECT_FOLDERS};
     use serde_json::json;
 
     #[test]
@@ -1312,5 +1325,25 @@ mod tests {
         assert_eq!(counts.assets, 1);
         assert_eq!(counts.generation_sets, 1);
         assert_eq!(counts.timelines, 1);
+    }
+
+    #[test]
+    fn project_file_paths_reject_traversal_and_backslashes() {
+        assert!(is_safe_relative_path("assets/images/image.png"));
+        assert!(!is_safe_relative_path("../outside.txt"));
+        assert!(!is_safe_relative_path("assets\\..\\outside.txt"));
+        assert!(!is_safe_relative_path("/absolute/path.png"));
+    }
+
+    #[test]
+    fn mime_guess_covers_modern_image_uploads() {
+        assert_eq!(
+            guess_mime_from_filename("reference.heic").as_deref(),
+            Some("image/heic")
+        );
+        assert_eq!(
+            guess_mime_from_filename("reference.avif").as_deref(),
+            Some("image/avif")
+        );
     }
 }
