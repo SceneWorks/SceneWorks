@@ -75,9 +75,13 @@ export function ModelManagerScreen({ jobs, loras, models, onDownloadModel }) {
                   <dt>Repo</dt>
                   <dd>{model.downloads?.[0]?.repo ?? "none"}</dd>
                 </div>
+                <div>
+                  <dt>Download</dt>
+                  <dd>{model.downloadSizeLabel ?? "unknown"}</dd>
+                </div>
               </dl>
               <button disabled={installed || !model.downloadable || Boolean(downloadJob)} onClick={() => onDownloadModel(model)} type="button">
-                {downloadJob ? downloadJob.status : installed ? "Ready" : "Download"}
+                {downloadJob ? downloadJob.status : installed ? "Ready" : model.downloadSizeLabel ? `Download ${model.downloadSizeLabel}` : "Download"}
               </button>
             </article>
           );

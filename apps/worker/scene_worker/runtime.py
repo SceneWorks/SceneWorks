@@ -1,15 +1,21 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime
+from fnmatch import fnmatch
 import json
+import os
 from pathlib import Path
 import shutil
+import signal
+import subprocess
+import sys
+import threading
 import time
 from typing import Any
 
 import httpx
 
-from .gpu import discover_gpu
+from .gpu import cpu_worker_id, discover_gpu, discover_gpus, gpu_worker_id
 from .image_adapters import ProceduralImageAdapter, ZImageDiffusersAdapter, create_image_adapter
 from .settings import WorkerSettings
 from .timeline_exporter import run_timeline_export
@@ -44,7 +50,10 @@ class ApiClient:
 
 def worker_capabilities(gpu: dict) -> list[str]:
     gpu_capabilities = set(gpu["capabilities"])
-    capabilities = set(gpu["capabilities"]) | {"timeline_export", "model_download", "lora_import"}
+    utility_jobs_enabled = os.getenv("SCENEWORKS_UTILITY_JOBS", "1").strip() != "0"
+    capabilities = set(gpu["capabilities"])
+    if utility_jobs_enabled:
+        capabilities |= {"timeline_export", "model_download", "lora_import"}
     if "cpu" not in gpu_capabilities and "gpu" in gpu_capabilities:
         capabilities |= {"image_generate", "image_edit", "video_generate", "video_extend", "video_bridge"}
     return sorted(capabilities)
@@ -99,6 +108,114 @@ def safe_download_dir(value: str) -> str:
     return normalized.strip("_") or "download"
 
 
+def write_model_install_marker(target_dir: Path, payload: dict, repo: str, job_id: str) -> None:
+    marker = {
+        "repo": repo,
+        "modelId": payload.get("modelId"),
+        "modelName": payload.get("modelName"),
+        "jobId": job_id,
+        "completedAt": now(),
+    }
+    with (target_dir / ".sceneworks-download-complete.json").open("w", encoding="utf-8") as handle:
+        json.dump(marker, handle, indent=2, sort_keys=True)
+
+
+def format_bytes(value: int | float | None) -> str:
+    if value is None:
+        return "unknown"
+    size = float(max(0, value))
+    for unit in ("B", "KB", "MB", "GB", "TB"):
+        if size < 1024 or unit == "TB":
+            if unit == "B":
+                return f"{int(size)} {unit}"
+            return f"{size:.1f} {unit}"
+        size /= 1024
+    return f"{size:.1f} TB"
+
+
+def directory_size(path: Path) -> int:
+    if not path.exists():
+        return 0
+    total = 0
+    for item in path.rglob("*"):
+        if not item.is_file() or item.name == ".sceneworks-download-complete.json":
+            continue
+        try:
+            total += item.stat().st_size
+        except OSError:
+            continue
+    return total
+
+
+def allow_pattern_matches(path: str, patterns: list[str]) -> bool:
+    if not patterns:
+        return True
+    return any(fnmatch(path, pattern) for pattern in patterns)
+
+
+def estimate_huggingface_repo_size(repo: str, files: list[str] | None = None) -> int | None:
+    try:
+        from huggingface_hub import HfApi
+    except ImportError:
+        return None
+
+    try:
+        info = HfApi().model_info(repo, files_metadata=True)
+    except Exception as exc:
+        emit({"event": "download_size_unavailable", "repo": repo, "error": str(exc), "reportedAt": now()})
+        return None
+
+    patterns = files or []
+    total = 0
+    found_size = False
+    for sibling in getattr(info, "siblings", []):
+        filename = getattr(sibling, "rfilename", "")
+        if not allow_pattern_matches(filename, patterns):
+            continue
+        size = getattr(sibling, "size", None)
+        if size is None:
+            continue
+        found_size = True
+        total += int(size)
+    return total if found_size else None
+
+
+def download_progress_payload(
+    repo: str,
+    downloaded_bytes: int,
+    total_bytes: int | None,
+    *,
+    started_bytes: int,
+    started_at: float,
+) -> dict[str, Any]:
+    elapsed_seconds = max(0.001, time.monotonic() - started_at)
+    transferred_bytes = max(0, downloaded_bytes - started_bytes)
+    rate = transferred_bytes / elapsed_seconds
+    eta_seconds = None
+    if total_bytes and rate > 0:
+        eta_seconds = max(0, (max(0, total_bytes - downloaded_bytes)) / rate)
+
+    if total_bytes:
+        ratio = min(max(downloaded_bytes / total_bytes, 0), 1)
+        progress = 0.1 + ratio * 0.85
+        remaining_bytes = max(0, total_bytes - downloaded_bytes)
+        message = (
+            f"Downloading {repo}: {format_bytes(downloaded_bytes)} of {format_bytes(total_bytes)} "
+            f"({format_bytes(remaining_bytes)} left)."
+        )
+    else:
+        progress = 0.1
+        message = f"Downloading {repo}: {format_bytes(downloaded_bytes)} written."
+
+    return {
+        "status": "downloading",
+        "stage": "downloading",
+        "progress": progress,
+        "message": message,
+        "etaSeconds": eta_seconds,
+    }
+
+
 def snapshot_huggingface_repo(repo: str, target_dir: Path, files: list[str] | None = None) -> Path:
     try:
         from huggingface_hub import snapshot_download
@@ -113,6 +230,95 @@ def snapshot_huggingface_repo(repo: str, target_dir: Path, files: list[str] | No
         local_dir_use_symlinks=False,
     )
     return target_dir
+
+
+def monitor_download_progress(
+    api: ApiClient,
+    settings: WorkerSettings,
+    job_id: str,
+    repo: str,
+    target_dir: Path,
+    total_bytes: int | None,
+    stop_event: threading.Event,
+) -> None:
+    interval = max(5, min(settings.heartbeat_seconds, 15))
+    started_bytes = directory_size(target_dir)
+    started_at = time.monotonic()
+    while not stop_event.wait(interval):
+        try:
+            heartbeat(api, settings, "busy", job_id)
+            update_job(
+                api,
+                job_id,
+                download_progress_payload(
+                    repo,
+                    directory_size(target_dir),
+                    total_bytes,
+                    started_bytes=started_bytes,
+                    started_at=started_at,
+                ),
+            )
+        except httpx.HTTPError as exc:
+            emit({"event": "download_progress_failed", "jobId": job_id, "error": str(exc), "reportedAt": now()})
+
+
+def run_monitored_download(
+    api: ApiClient,
+    settings: WorkerSettings,
+    job_id: str,
+    repo: str,
+    target_dir: Path,
+    files: list[str] | None,
+    total_bytes: int | None,
+) -> Path:
+    stop_event = threading.Event()
+    thread = threading.Thread(
+        target=monitor_download_progress,
+        args=(api, settings, job_id, repo, target_dir, total_bytes, stop_event),
+        daemon=True,
+    )
+    thread.start()
+    try:
+        return snapshot_huggingface_repo(repo, target_dir, files)
+    finally:
+        stop_event.set()
+        thread.join(timeout=1)
+
+
+def keep_job_alive(
+    api: ApiClient,
+    settings: WorkerSettings,
+    job_id: str,
+    status: str,
+    stop_event: threading.Event,
+) -> None:
+    interval = max(5, min(settings.heartbeat_seconds, 30))
+    while not stop_event.wait(interval):
+        try:
+            heartbeat(api, settings, status, job_id)
+        except httpx.HTTPError as exc:
+            emit({"event": "heartbeat_failed", "jobId": job_id, "error": str(exc), "reportedAt": now()})
+
+
+def run_blocking_job_step(
+    api: ApiClient,
+    settings: WorkerSettings,
+    job_id: str,
+    status: str,
+    callback: Any,
+) -> Any:
+    stop_event = threading.Event()
+    thread = threading.Thread(
+        target=keep_job_alive,
+        args=(api, settings, job_id, status, stop_event),
+        daemon=True,
+    )
+    thread.start()
+    try:
+        return callback()
+    finally:
+        stop_event.set()
+        thread.join(timeout=1)
 
 
 def run_model_download_job(api: ApiClient, settings: WorkerSettings, job: dict) -> None:
@@ -137,6 +343,7 @@ def run_model_download_job(api: ApiClient, settings: WorkerSettings, job: dict) 
     target_dir = Path(payload.get("targetDir") or settings.data_dir / "models" / safe_download_dir(repo))
     try:
         heartbeat(api, settings, "busy", job_id)
+        total_bytes = estimate_huggingface_repo_size(repo, payload.get("files") or [])
         update_job(
             api,
             job_id,
@@ -144,12 +351,17 @@ def run_model_download_job(api: ApiClient, settings: WorkerSettings, job: dict) 
                 "status": "downloading",
                 "stage": "downloading",
                 "progress": 0.1,
-                "message": f"Downloading {repo}.",
+                "message": (
+                    f"Downloading {repo}: 0 B of {format_bytes(total_bytes)}."
+                    if total_bytes
+                    else f"Downloading {repo}: estimating size."
+                ),
             },
         )
         if job_cancel_requested(api, job_id):
             raise InterruptedError("Model download canceled before transfer started.")
-        snapshot_huggingface_repo(repo, target_dir, payload.get("files") or [])
+        run_monitored_download(api, settings, job_id, repo, target_dir, payload.get("files") or [], total_bytes)
+        write_model_install_marker(target_dir, payload, repo, job_id)
         update_job(
             api,
             job_id,
@@ -216,7 +428,13 @@ def run_lora_import_job(api: ApiClient, settings: WorkerSettings, job: dict) -> 
         if job_cancel_requested(api, job_id):
             raise InterruptedError("LoRA import canceled before transfer started.")
         if repo:
-            snapshot_huggingface_repo(repo, target_dir, payload.get("files") or [])
+            run_blocking_job_step(
+                api,
+                settings,
+                job_id,
+                "busy",
+                lambda: snapshot_huggingface_repo(repo, target_dir, payload.get("files") or []),
+            )
         elif source_path:
             source = Path(source_path).expanduser().resolve()
             if not source.exists():
@@ -341,11 +559,17 @@ def run_image_job(api: ApiClient, settings: WorkerSettings, job: dict, image_ada
     try:
         progress("preparing", "preparing", 0.08, "Preparing Image Studio request.")
         progress("loading_model", "loading_model", 0.16, "Resolving image adapter target.")
-        result = adapter.generate(
-            settings=settings,
-            job=job,
-            progress=progress,
-            cancel_requested=lambda: job_cancel_requested(api, job_id),
+        result = run_blocking_job_step(
+            api,
+            settings,
+            job_id,
+            "busy",
+            lambda: adapter.generate(
+                settings=settings,
+                job=job,
+                progress=progress,
+                cancel_requested=lambda: job_cancel_requested(api, job_id),
+            ),
         )
         update_job(
             api,
@@ -382,7 +606,7 @@ def run_image_job(api: ApiClient, settings: WorkerSettings, job: dict, image_ada
             },
         )
     finally:
-        heartbeat(api, settings, "idle", loaded_models_from_adapters(image_adapters))
+        heartbeat(api, settings, "idle", loaded_models=loaded_models_from_adapters(image_adapters))
 
 
 def run_video_job(api: ApiClient, settings: WorkerSettings, job: dict) -> None:
@@ -414,12 +638,18 @@ def run_video_job(api: ApiClient, settings: WorkerSettings, job: dict) -> None:
             0.18,
             f"Estimated {requirements['previewFrames']} preview frames for this clip.",
         )
-        result = adapter.run(
-            settings=settings,
-            job=job,
-            request=request,
-            progress=progress,
-            cancel_requested=lambda: job_cancel_requested(api, job_id),
+        result = run_blocking_job_step(
+            api,
+            settings,
+            job_id,
+            "busy",
+            lambda: adapter.run(
+                settings=settings,
+                job=job,
+                request=request,
+                progress=progress,
+                cancel_requested=lambda: job_cancel_requested(api, job_id),
+            ),
         )
         update_job(
             api,
@@ -479,11 +709,17 @@ def run_timeline_export_job(api: ApiClient, settings: WorkerSettings, job: dict)
 
     try:
         progress("preparing", "preparing", 0.06, "Preparing timeline export.")
-        result = run_timeline_export(
-            settings=settings,
-            job=job,
-            progress=progress,
-            cancel_requested=lambda: job_cancel_requested(api, job_id),
+        result = run_blocking_job_step(
+            api,
+            settings,
+            job_id,
+            "busy",
+            lambda: run_timeline_export(
+                settings=settings,
+                job=job,
+                progress=progress,
+                cancel_requested=lambda: job_cancel_requested(api, job_id),
+            ),
         )
         update_job(
             api,
@@ -523,8 +759,7 @@ def run_timeline_export_job(api: ApiClient, settings: WorkerSettings, job: dict)
         heartbeat(api, settings, "idle")
 
 
-def main() -> None:
-    settings = WorkerSettings()
+def run_worker_loop(settings: WorkerSettings) -> None:
     gpu = discover_gpu(settings.gpu_id)
     api = ApiClient(settings)
     image_adapters: dict[str, object] = {
@@ -590,3 +825,84 @@ def main() -> None:
         except httpx.HTTPError as exc:
             emit({"event": "api_error", "error": str(exc), "reportedAt": now()})
             time.sleep(settings.poll_seconds)
+
+
+def child_environment(settings: WorkerSettings, *, worker_id: str, gpu_id: str) -> dict[str, str]:
+    env = os.environ.copy()
+    env["SCENEWORKS_WORKER_CHILD"] = "1"
+    env["SCENEWORKS_WORKER_ID"] = worker_id
+    env["SCENEWORKS_GPU_ID"] = gpu_id
+    if gpu_id == "cpu":
+        env["CUDA_VISIBLE_DEVICES"] = ""
+        env["SCENEWORKS_UTILITY_JOBS"] = "1"
+    else:
+        env["CUDA_VISIBLE_DEVICES"] = gpu_id
+        env["SCENEWORKS_UTILITY_JOBS"] = "0"
+    return env
+
+
+def start_child_worker(settings: WorkerSettings, *, worker_id: str, gpu_id: str) -> subprocess.Popen:
+    emit({"event": "starting_worker", "workerId": worker_id, "gpuId": gpu_id, "reportedAt": now()})
+    return subprocess.Popen(
+        [sys.executable, "-m", "scene_worker"],
+        env=child_environment(settings, worker_id=worker_id, gpu_id=gpu_id),
+    )
+
+
+def supervise_auto_workers(settings: WorkerSettings) -> None:
+    gpus = discover_gpus()
+    if not gpus:
+        run_worker_loop(settings.for_worker(worker_id=cpu_worker_id(settings.worker_id), gpu_id="cpu"))
+        return
+
+    worker_specs = [(gpu_worker_id(settings.worker_id, gpu["id"]), gpu["id"]) for gpu in gpus]
+    worker_specs.append((cpu_worker_id(settings.worker_id), "cpu"))
+    children = {
+        worker_id: start_child_worker(settings, worker_id=worker_id, gpu_id=gpu_id)
+        for worker_id, gpu_id in worker_specs
+    }
+    shutting_down = False
+
+    def stop_children(_signum: int, _frame: object) -> None:
+        nonlocal shutting_down
+        shutting_down = True
+        for child in children.values():
+            if child.poll() is None:
+                child.terminate()
+
+    signal.signal(signal.SIGTERM, stop_children)
+    signal.signal(signal.SIGINT, stop_children)
+
+    while True:
+        for worker_id, child in list(children.items()):
+            exit_code = child.poll()
+            if exit_code is None:
+                continue
+            if shutting_down:
+                children.pop(worker_id)
+                continue
+            gpu_id = next(gpu_id for candidate_worker_id, gpu_id in worker_specs if candidate_worker_id == worker_id)
+            emit(
+                {
+                    "event": "worker_exited",
+                    "workerId": worker_id,
+                    "gpuId": gpu_id,
+                    "exitCode": exit_code,
+                    "restartInSeconds": settings.poll_seconds,
+                    "reportedAt": now(),
+                }
+            )
+            time.sleep(settings.poll_seconds)
+            children[worker_id] = start_child_worker(settings, worker_id=worker_id, gpu_id=gpu_id)
+
+        if shutting_down and not children:
+            return
+        time.sleep(1)
+
+
+def main() -> None:
+    settings = WorkerSettings()
+    if settings.gpu_id == "auto" and os.getenv("SCENEWORKS_WORKER_CHILD") != "1":
+        supervise_auto_workers(settings)
+        return
+    run_worker_loop(settings)

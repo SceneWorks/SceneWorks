@@ -73,6 +73,7 @@ class ImageRequest:
     model: str
     count: int
     seed: int | None
+    seeds: list[int]
     width: int
     height: int
     style_preset: str
@@ -106,6 +107,7 @@ def image_request_from_job(job: dict[str, Any]) -> ImageRequest:
         model=payload.get("model", "z_image_turbo"),
         count=safe_int(payload.get("count"), 4, 1, 8),
         seed=payload.get("seed"),
+        seeds=[int(seed) for seed in payload.get("seeds", []) if seed is not None],
         width=safe_int(payload.get("width"), 1024, 256, 2048),
         height=safe_int(payload.get("height"), 1024, 256, 2048),
         style_preset=payload.get("stylePreset", "cinematic"),
@@ -158,7 +160,7 @@ class ImageAssetWriter:
                 raise InterruptedError("Image generation canceled by user.")
 
             asset_id = f"asset_{uuid4().hex}"
-            seed = resolve_seed(request.seed, request.prompt, index)
+            seed = resolve_seed(request.seed, request.prompt, index, request.seeds)
             filename = f"{date_slug}_{request.model}_{prompt_slug}_{index + 1:04d}.png"
             media_rel = f"assets/images/{filename}"
             media_path = project_path / media_rel
@@ -233,7 +235,7 @@ class ZImageDiffusersAdapter:
         for index in range(total):
             if cancel_requested():
                 raise InterruptedError("Image generation canceled by user.")
-            seed = resolve_seed(request.seed, request.prompt, index)
+            seed = resolve_seed(request.seed, request.prompt, index, request.seeds)
             progress("running", "generating", 0.24 + (index / total) * 0.48, f"Running Z-Image {index + 1} of {total}.")
             images.append(self._run_pipeline(settings, pipe, request, seed))
 
@@ -365,7 +367,7 @@ class ProceduralImageAdapter:
         for index in range(request.count):
             if cancel_requested():
                 raise InterruptedError("Image generation canceled by user.")
-            seed = resolve_seed(request.seed, request.prompt, index)
+            seed = resolve_seed(request.seed, request.prompt, index, request.seeds)
             images.append(render_preview_image(request, model_target, seed, index))
             progress(
                 "running",
@@ -407,9 +409,11 @@ def model_supports_edit(model_id: str) -> bool:
     return bool(MODEL_TARGETS.get(model_id, {}).get("supportsEdit"))
 
 
-def resolve_seed(seed: int | None, prompt: str, index: int) -> int:
+def resolve_seed(seed: int | None, prompt: str, index: int, seeds: list[int] | None = None) -> int:
     if seed is not None:
         return int(seed) + index
+    if seeds and index < len(seeds):
+        return int(seeds[index])
     digest = hashlib.sha256(f"{prompt}:{index}".encode("utf-8")).hexdigest()
     return int(digest[:8], 16)
 
