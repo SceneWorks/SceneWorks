@@ -1,7 +1,8 @@
 use std::collections::HashMap;
 use std::convert::Infallible;
+use std::fs;
 use std::net::SocketAddr;
-use std::path::PathBuf;
+use std::path::{Path as FsPath, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -275,6 +276,13 @@ pub fn create_app(settings: Settings) -> Result<Router, JobsStoreError> {
         )
         .route("/api/v1/image/jobs", post(create_image_job))
         .route("/api/v1/video/jobs", post(create_video_job))
+        .route("/api/v1/models", get(list_models))
+        .route(
+            "/api/v1/models/:model_id/download",
+            post(create_model_download_job),
+        )
+        .route("/api/v1/loras", get(list_loras))
+        .route("/api/v1/loras/import", post(create_lora_import_job))
         .route("/api/v1/jobs", get(list_jobs).post(create_job))
         .route("/api/v1/jobs/claim", post(claim_job))
         .route("/api/v1/jobs/events", get(job_events))
@@ -311,6 +319,12 @@ struct JobsQuery {
 struct AssetsQuery {
     include_rejected: Option<bool>,
     include_trashed: Option<bool>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct LorasQuery {
+    model_family: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -477,6 +491,30 @@ struct VideoJobRequest {
     requested_gpu: String,
     #[serde(default)]
     advanced: JsonObject,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ModelDownloadRequest {
+    #[serde(default = "default_requested_gpu")]
+    requested_gpu: String,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct LoraImportRequest {
+    #[serde(default)]
+    lora_id: Option<String>,
+    #[serde(default)]
+    name: Option<String>,
+    #[serde(default)]
+    repo: Option<String>,
+    #[serde(default)]
+    source_path: Option<String>,
+    #[serde(default)]
+    files: Vec<String>,
+    #[serde(default)]
+    family: Option<String>,
 }
 
 async fn health(State(state): State<AppState>) -> Json<HealthResponse> {
@@ -922,6 +960,122 @@ async fn route_not_found(request: Request<axum::body::Body>) -> Response {
         .into_response()
 }
 
+async fn list_models(State(state): State<AppState>) -> Result<Json<Vec<Value>>, ApiError> {
+    Ok(Json(model_catalog(&state.settings).await?))
+}
+
+async fn create_model_download_job(
+    State(state): State<AppState>,
+    Path(model_id): Path<String>,
+    Json(payload): Json<ModelDownloadRequest>,
+) -> Result<(StatusCode, Json<JobSnapshot>), ApiError> {
+    let model = model_catalog(&state.settings)
+        .await?
+        .into_iter()
+        .find(|item| item.get("id").and_then(Value::as_str) == Some(model_id.as_str()))
+        .ok_or_else(|| ApiError {
+            status: StatusCode::NOT_FOUND,
+            detail: "Model not found".to_owned(),
+        })?;
+    let download = model_download(&model)
+        .ok_or_else(|| ApiError::bad_request("Model does not define a Hugging Face download"))?;
+    let repo = required_string_field(&download, "repo")?.to_owned();
+    let files = download
+        .get("files")
+        .and_then(Value::as_array)
+        .map(|values| {
+            values
+                .iter()
+                .filter_map(Value::as_str)
+                .map(str::to_owned)
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    let mut job_payload = JsonObject::new();
+    job_payload.insert("modelId".to_owned(), Value::String(model_id.clone()));
+    job_payload.insert(
+        "modelName".to_owned(),
+        Value::String(
+            model
+                .get("name")
+                .and_then(Value::as_str)
+                .unwrap_or(&model_id)
+                .to_owned(),
+        ),
+    );
+    job_payload.insert(
+        "provider".to_owned(),
+        download
+            .get("provider")
+            .cloned()
+            .unwrap_or_else(|| Value::String("huggingface".to_owned())),
+    );
+    job_payload.insert("repo".to_owned(), Value::String(repo.clone()));
+    job_payload.insert("files".to_owned(), json!(files));
+    job_payload.insert(
+        "targetDir".to_owned(),
+        Value::String(
+            state
+                .settings
+                .data_dir
+                .join("models")
+                .join(safe_download_dir(&repo))
+                .display()
+                .to_string(),
+        ),
+    );
+
+    let job = create_generation_job(
+        state,
+        JobType::ModelDownload,
+        None,
+        None,
+        job_payload,
+        requested_gpu_or_auto(payload.requested_gpu),
+    )
+    .await?;
+    Ok((StatusCode::CREATED, Json(job)))
+}
+
+async fn list_loras(
+    State(state): State<AppState>,
+    Query(query): Query<LorasQuery>,
+) -> Result<Json<Vec<Value>>, ApiError> {
+    let mut items = lora_catalog(&state.settings).await?;
+    if let Some(model_family) = query.model_family {
+        items.retain(|item| {
+            lora_families(item)
+                .iter()
+                .any(|family| family == &model_family)
+        });
+    }
+    Ok(Json(items))
+}
+
+async fn create_lora_import_job(
+    State(state): State<AppState>,
+    Json(payload): Json<LoraImportRequest>,
+) -> Result<(StatusCode, Json<JobSnapshot>), ApiError> {
+    if option_str_is_empty(payload.repo.as_deref())
+        && option_str_is_empty(payload.source_path.as_deref())
+    {
+        return Err(ApiError::bad_request(
+            "Provide a Hugging Face repo or source path",
+        ));
+    }
+    let payload = to_json_object(&payload)?;
+    let job = create_generation_job(
+        state,
+        JobType::LoraImport,
+        None,
+        None,
+        payload,
+        "auto".to_owned(),
+    )
+    .await?;
+    Ok((StatusCode::CREATED, Json(job)))
+}
+
 async fn list_jobs(
     State(state): State<AppState>,
     Query(query): Query<JobsQuery>,
@@ -1305,6 +1459,256 @@ fn publish<T: Serialize>(state: &AppState, event: &str, data: &T) {
             data,
         });
     }
+}
+
+async fn model_catalog(settings: &Settings) -> Result<Vec<Value>, ApiError> {
+    let manifest_dir = settings.config_dir.join("manifests");
+    let builtin = load_manifest_entries(&manifest_dir.join("builtin.models.jsonc"), "models")?;
+    let user = load_manifest_entries(&manifest_dir.join("user.models.jsonc"), "models")?;
+    let mut models = merge_entries_by_id(builtin, user);
+    for model in &mut models {
+        let download = model_download(model);
+        let (downloadable, installed_path, installed) = if let Some(download) = download {
+            let repo = required_string_field(&download, "repo")?;
+            let installed_path = settings
+                .data_dir
+                .join("models")
+                .join(safe_download_dir(repo));
+            let installed = model_is_installed(&installed_path);
+            (true, Some(installed_path.display().to_string()), installed)
+        } else {
+            (false, None, false)
+        };
+        let object = model
+            .as_object_mut()
+            .ok_or_else(|| ApiError::internal("Model manifest entry must be an object"))?;
+        object.insert("downloadable".to_owned(), Value::Bool(downloadable));
+        object.insert("downloadSizeBytes".to_owned(), Value::Null);
+        object.insert("downloadSizeLabel".to_owned(), Value::Null);
+        object.insert(
+            "installState".to_owned(),
+            Value::String(if installed { "installed" } else { "missing" }.to_owned()),
+        );
+        object.insert(
+            "installedPath".to_owned(),
+            installed_path.map(Value::String).unwrap_or(Value::Null),
+        );
+    }
+    models.sort_by(|left, right| {
+        let left_key = (
+            left.get("type").and_then(Value::as_str).unwrap_or_default(),
+            left.get("name").and_then(Value::as_str).unwrap_or_default(),
+        );
+        let right_key = (
+            right
+                .get("type")
+                .and_then(Value::as_str)
+                .unwrap_or_default(),
+            right
+                .get("name")
+                .and_then(Value::as_str)
+                .unwrap_or_default(),
+        );
+        left_key.cmp(&right_key)
+    });
+    Ok(models)
+}
+
+async fn lora_catalog(settings: &Settings) -> Result<Vec<Value>, ApiError> {
+    let manifest_dir = settings.config_dir.join("manifests");
+    let builtin = load_manifest_entries(&manifest_dir.join("builtin.loras.jsonc"), "loras")?;
+    let user = load_manifest_entries(&manifest_dir.join("user.loras.jsonc"), "loras")?;
+    let mut loras = merge_entries_by_id(builtin, user);
+    loras.sort_by(|left, right| {
+        let left_key = (
+            left.get("family")
+                .and_then(Value::as_str)
+                .unwrap_or_default(),
+            left.get("name").and_then(Value::as_str).unwrap_or_default(),
+        );
+        let right_key = (
+            right
+                .get("family")
+                .and_then(Value::as_str)
+                .unwrap_or_default(),
+            right
+                .get("name")
+                .and_then(Value::as_str)
+                .unwrap_or_default(),
+        );
+        left_key.cmp(&right_key)
+    });
+    Ok(loras)
+}
+
+fn load_manifest_entries(path: &FsPath, key: &str) -> Result<Vec<Value>, ApiError> {
+    if !path.exists() {
+        return Ok(Vec::new());
+    }
+    let payload =
+        fs::read_to_string(path).map_err(|error| ApiError::internal(error.to_string()))?;
+    let manifest: Value = serde_json::from_str(&strip_jsonc_comments(&payload))
+        .map_err(|error| ApiError::internal(error.to_string()))?;
+    Ok(manifest
+        .get(key)
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default())
+}
+
+fn merge_entries_by_id(builtin: Vec<Value>, user: Vec<Value>) -> Vec<Value> {
+    let mut entries = Vec::<Value>::new();
+    for entry in builtin {
+        if entry.get("id").and_then(Value::as_str).is_some() {
+            entries.push(entry);
+        }
+    }
+    for entry in user {
+        let Some(id) = entry.get("id").and_then(Value::as_str) else {
+            continue;
+        };
+        if let Some(existing) = entries
+            .iter_mut()
+            .find(|existing| existing.get("id").and_then(Value::as_str) == Some(id))
+        {
+            merge_object(existing, entry);
+        } else {
+            entries.push(entry);
+        }
+    }
+    entries
+}
+
+fn merge_object(base: &mut Value, override_value: Value) {
+    if let (Some(base_object), Some(override_object)) =
+        (base.as_object_mut(), override_value.as_object())
+    {
+        for (key, value) in override_object {
+            base_object.insert(key.clone(), value.clone());
+        }
+    } else {
+        *base = override_value;
+    }
+}
+
+fn strip_jsonc_comments(value: &str) -> String {
+    let mut output = String::with_capacity(value.len());
+    let mut chars = value.chars().peekable();
+    let mut in_string = false;
+    let mut escaped = false;
+    while let Some(character) = chars.next() {
+        if in_string {
+            output.push(character);
+            if escaped {
+                escaped = false;
+            } else if character == '\\' {
+                escaped = true;
+            } else if character == '"' {
+                in_string = false;
+            }
+            continue;
+        }
+
+        if character == '"' {
+            in_string = true;
+            output.push(character);
+            continue;
+        }
+        if character == '/' && chars.peek() == Some(&'/') {
+            chars.next();
+            for next in chars.by_ref() {
+                if next == '\r' || next == '\n' {
+                    output.push(next);
+                    break;
+                }
+            }
+            continue;
+        }
+        if character == '/' && chars.peek() == Some(&'*') {
+            chars.next();
+            let mut previous = '\0';
+            for next in chars.by_ref() {
+                if previous == '*' && next == '/' {
+                    break;
+                }
+                previous = next;
+            }
+            continue;
+        }
+        output.push(character);
+    }
+    output
+}
+
+fn model_download(model: &Value) -> Option<Value> {
+    model
+        .get("downloads")?
+        .as_array()?
+        .iter()
+        .find(|download| {
+            download.get("provider").and_then(Value::as_str) == Some("huggingface")
+                && download
+                    .get("repo")
+                    .and_then(Value::as_str)
+                    .is_some_and(|repo| !repo.is_empty())
+        })
+        .cloned()
+}
+
+fn safe_download_dir(repo: &str) -> String {
+    let mut output = String::new();
+    let mut in_replacement = false;
+    for character in repo.chars() {
+        if character.is_ascii_alphanumeric() || matches!(character, '_' | '.' | '-') {
+            output.push(character);
+            in_replacement = false;
+        } else if !in_replacement {
+            output.push_str("__");
+            in_replacement = true;
+        }
+    }
+    let output = output.trim_matches('_').to_owned();
+    if output.is_empty() {
+        "download".to_owned()
+    } else {
+        output
+    }
+}
+
+fn model_is_installed(path: &FsPath) -> bool {
+    path.is_dir() && path.join(".sceneworks-download-complete.json").is_file()
+}
+
+fn lora_families(lora: &Value) -> Vec<String> {
+    let compatibility = lora.get("compatibility").unwrap_or(&Value::Null);
+    let values = lora
+        .get("families")
+        .or_else(|| lora.get("compatibleFamilies"))
+        .or_else(|| lora.get("modelFamilies"))
+        .or_else(|| compatibility.get("families"))
+        .or_else(|| lora.get("family"));
+    match values {
+        Some(Value::Array(items)) => items
+            .iter()
+            .filter_map(Value::as_str)
+            .map(str::to_owned)
+            .collect(),
+        Some(Value::String(value)) => vec![value.clone()],
+        _ => Vec::new(),
+    }
+}
+
+fn requested_gpu_or_auto(value: String) -> String {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        "auto".to_owned()
+    } else {
+        trimmed.to_owned()
+    }
+}
+
+fn option_str_is_empty(value: Option<&str>) -> bool {
+    value.map(str::trim).unwrap_or_default().is_empty()
 }
 
 fn number_to_f64(number: &serde_json::Number, field: &'static str) -> Result<f64, ApiError> {
@@ -2193,6 +2597,124 @@ mod tests {
         let (status, queue) = request(app, "GET", "/api/v1/queue", Value::Null).await;
         assert_eq!(status, StatusCode::OK);
         assert_eq!(queue["counts"]["queued"], 4);
+    }
+
+    #[tokio::test]
+    async fn model_and_lora_routes_match_python_manifest_behavior() {
+        let temp_dir = tempfile::tempdir().expect("temp dir creates");
+        let config_dir = temp_dir.path().join("config/manifests");
+        std::fs::create_dir_all(&config_dir).expect("manifest dir creates");
+        std::fs::write(
+            config_dir.join("builtin.models.jsonc"),
+            r#"
+            {
+              "schemaVersion": 1,
+              "models": [
+                {
+                  "id": "base-model",
+                  "name": "Base Model",
+                  "family": "z-image",
+                  "type": "image",
+                  "adapter": "z_image_diffusers",
+                  "capabilities": ["text_to_image"],
+                  "downloads": [{ "provider": "huggingface", "repo": "owner/model", "files": ["*.safetensors"] }],
+                  "paths": {},
+                  "defaults": {},
+                  "limits": {},
+                  "loraCompatibility": {},
+                  "ui": { "label": "Base" }
+                }
+              ]
+            }
+            "#,
+        )
+        .expect("builtin models writes");
+        std::fs::write(
+            config_dir.join("user.models.jsonc"),
+            r#"
+            {
+              "schemaVersion": 1,
+              "models": [
+                { "id": "base-model", "name": "User Model", "ui": { "label": "User" } }
+              ]
+            }
+            "#,
+        )
+        .expect("user models writes");
+        std::fs::write(
+            config_dir.join("builtin.loras.jsonc"),
+            r#"
+            {
+              "schemaVersion": 1,
+              "loras": [
+                {
+                  "id": "style-lora",
+                  "name": "Style LoRA",
+                  "family": "z-image",
+                  "triggerWords": ["style"],
+                  "compatibility": { "families": ["z-image", "wan-video"] },
+                  "source": { "provider": "local", "path": "loras/style.safetensors" }
+                }
+              ]
+            }
+            "#,
+        )
+        .expect("builtin loras writes");
+        std::fs::write(
+            config_dir.join("user.loras.jsonc"),
+            r#"{ "schemaVersion": 1, "loras": [] }"#,
+        )
+        .expect("user loras writes");
+        let marker_dir = temp_dir.path().join("data/models/owner__model");
+        std::fs::create_dir_all(&marker_dir).expect("model dir creates");
+        std::fs::write(marker_dir.join(".sceneworks-download-complete.json"), "{}")
+            .expect("marker writes");
+
+        let app = create_app(test_settings(&temp_dir)).expect("app creates");
+        let (status, models) = request(app.clone(), "GET", "/api/v1/models", Value::Null).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(models[0]["name"], "User Model");
+        assert_eq!(models[0]["adapter"], "z_image_diffusers");
+        assert_eq!(models[0]["downloadable"], true);
+        assert_eq!(models[0]["installState"], "installed");
+        assert!(models[0]["installedPath"]
+            .as_str()
+            .is_some_and(|value| value.ends_with("owner__model")));
+
+        let (status, loras) = request(
+            app.clone(),
+            "GET",
+            "/api/v1/loras?modelFamily=wan-video",
+            Value::Null,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(loras.as_array().unwrap().len(), 1);
+        assert_eq!(loras[0]["id"], "style-lora");
+
+        let (status, job) = request(
+            app.clone(),
+            "POST",
+            "/api/v1/models/base-model/download",
+            json!({ "requestedGpu": "" }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED);
+        assert_eq!(job["type"], "model_download");
+        assert_eq!(job["requestedGpu"], "auto");
+        assert_eq!(job["payload"]["modelName"], "User Model");
+        assert_eq!(job["payload"]["targetDir"], models[0]["installedPath"]);
+
+        let (status, job) = request(
+            app,
+            "POST",
+            "/api/v1/loras/import",
+            json!({ "repo": "owner/lora", "name": "Imported LoRA", "files": ["adapter.safetensors"] }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED);
+        assert_eq!(job["type"], "lora_import");
+        assert_eq!(job["payload"]["repo"], "owner/lora");
     }
 
     #[tokio::test]
