@@ -4,6 +4,7 @@ use std::fs;
 use std::net::SocketAddr;
 use std::path::{Path as FsPath, PathBuf};
 use std::sync::Arc;
+use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
 use axum::body::Body;
@@ -52,6 +53,7 @@ const DEFAULT_CORS_ORIGINS: &str = concat!(
 const EVENT_BUFFER_SIZE: usize = 100;
 const HEARTBEAT_SSE_TEXT: &str = "event: heartbeat\ndata: {}\n\n";
 const MAX_UPLOAD_BYTES: usize = 2 * 1024 * 1024 * 1024;
+const MODEL_SIZE_CACHE_LIMIT: usize = 64;
 
 #[derive(Debug, Clone)]
 pub struct Settings {
@@ -199,6 +201,35 @@ struct EventTicket {
     ticket: String,
     expires_in_seconds: u64,
 }
+
+#[derive(Debug, Default)]
+struct ModelSizeCache {
+    entries: HashMap<ModelSizeCacheKey, Option<u64>>,
+    order: Vec<ModelSizeCacheKey>,
+}
+
+type ModelSizeCacheKey = (String, Vec<String>);
+
+impl ModelSizeCache {
+    fn get(&self, key: &ModelSizeCacheKey) -> Option<Option<u64>> {
+        self.entries.get(key).copied()
+    }
+
+    fn insert(&mut self, key: ModelSizeCacheKey, value: Option<u64>) {
+        if !self.entries.contains_key(&key) {
+            self.order.push(key.clone());
+        }
+        self.entries.insert(key, value);
+        while self.order.len() > MODEL_SIZE_CACHE_LIMIT {
+            if let Some(oldest) = self.order.first().cloned() {
+                self.order.remove(0);
+                self.entries.remove(&oldest);
+            }
+        }
+    }
+}
+
+static MODEL_SIZE_CACHE: OnceLock<Mutex<ModelSizeCache>> = OnceLock::new();
 
 pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
     let settings = Settings::from_env();
@@ -1681,16 +1712,27 @@ async fn estimate_huggingface_download_size(repo: &str, files: &[String]) -> Opt
     ) {
         return None;
     }
+    let cache_key = (repo.to_owned(), files.to_vec());
+    let cache = MODEL_SIZE_CACHE.get_or_init(|| Mutex::new(ModelSizeCache::default()));
+    if let Some(cached) = cache.lock().get(&cache_key) {
+        return cached;
+    }
     let url = format!(
         "https://huggingface.co/api/models/{}?blobs=true",
         quote_huggingface_repo(repo)
     );
+    let estimate = estimate_huggingface_download_size_uncached(&url, files).await;
+    cache.lock().insert(cache_key, estimate);
+    estimate
+}
+
+async fn estimate_huggingface_download_size_uncached(url: &str, files: &[String]) -> Option<u64> {
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(8))
         .build()
         .ok()?;
     let payload: Value = client
-        .get(url)
+        .get(url.to_owned())
         .send()
         .await
         .ok()?
@@ -2902,6 +2944,10 @@ mod tests {
             super::quote_huggingface_repo("owner/model name"),
             "owner/model%20name"
         );
+        let mut cache = super::ModelSizeCache::default();
+        let key = ("owner/model".to_owned(), vec!["*.safetensors".to_owned()]);
+        cache.insert(key.clone(), None);
+        assert_eq!(cache.get(&key), Some(None));
     }
 
     #[tokio::test]
