@@ -24,6 +24,7 @@ use uuid::Uuid;
 const INSTALL_MARKER: &str = ".sceneworks-download-complete.json";
 const DEFAULT_API_URL: &str = "http://localhost:8000";
 const DEFAULT_HUGGINGFACE_BASE_URL: &str = "https://huggingface.co";
+const DEFAULT_TRANSITION_DURATION_SECONDS: f64 = 0.5;
 
 #[derive(Debug, Clone)]
 pub struct Settings {
@@ -950,7 +951,7 @@ async fn run_timeline_export_job(
                     .map(str::to_owned),
                 transition_duration: value_f64(
                     transition_in.get("duration").unwrap_or(&Value::Null),
-                    0.0,
+                    DEFAULT_TRANSITION_DURATION_SECONDS,
                 ),
             });
             cursor = cursor.max(item_end);
@@ -1936,7 +1937,7 @@ async fn mux_with_crossfades(
     for (index, segment) in segments.iter().enumerate().skip(1) {
         let merged = tmp_path.join(format!("xfade_{index:04}.mp4"));
         if segment.transition.as_deref() == Some("crossfade") {
-            let duration = segment.transition_duration.clamp(0.1, 1.5);
+            let duration = crossfade_duration(segment.transition_duration);
             let offset = (current_duration - duration).max(0.0);
             run_ffmpeg(
                 vec![
@@ -1988,6 +1989,10 @@ async fn mux_with_crossfades(
     }
     tokio::fs::rename(current, output_path).await?;
     Ok(())
+}
+
+fn crossfade_duration(duration: f64) -> f64 {
+    duration.clamp(0.1, 1.5)
 }
 
 fn concat_file_contents<'a>(paths: impl Iterator<Item = &'a PathBuf>) -> String {
@@ -2337,9 +2342,10 @@ mod tests {
 
     use super::{
         allow_pattern_matches, bounded_tail, concat_file_contents, copy_lora_source,
-        download_progress_payload, fresh_asset_id, now_rfc3339, output_dimensions, run_ffmpeg,
-        safe_download_dir, safe_project_path, write_model_install_marker, HuggingFaceSnapshot,
-        Settings, WorkerError, INSTALL_MARKER,
+        crossfade_duration, download_progress_payload, fresh_asset_id, now_rfc3339,
+        output_dimensions, run_ffmpeg, safe_download_dir, safe_project_path, value_f64,
+        write_model_install_marker, HuggingFaceSnapshot, Settings, WorkerError,
+        DEFAULT_TRANSITION_DURATION_SECONDS, INSTALL_MARKER,
     };
 
     #[test]
@@ -2459,6 +2465,18 @@ mod tests {
         assert!(asset_id["asset_".len()..]
             .chars()
             .all(|character| character.is_ascii_hexdigit()));
+    }
+
+    #[test]
+    fn missing_crossfade_duration_defaults_to_python_mux_duration() {
+        let missing = json!(null);
+        assert_eq!(
+            value_f64(&missing, DEFAULT_TRANSITION_DURATION_SECONDS),
+            0.5
+        );
+        assert_eq!(crossfade_duration(0.5), 0.5);
+        assert_eq!(crossfade_duration(0.0), 0.1);
+        assert_eq!(crossfade_duration(2.0), 1.5);
     }
 
     #[test]
