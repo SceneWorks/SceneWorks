@@ -100,12 +100,14 @@ Compose, workers are wired to the selected `api` service automatically. The
 Compose `worker` service is the Python inference worker and the `rust-worker`
 service is the Rust utility worker; both use the same HTTP contract.
 The `sceneworks-rust-worker` binary handles CPU utility jobs for model downloads,
-LoRA imports, FFmpeg frame extraction, and timeline MP4 exports. Set
-`SCENEWORKS_GPU_ID=auto` to let the Rust worker supervise one child per visible
+LoRA imports, FFmpeg frame extraction, and timeline MP4 exports. The Rust worker
+defaults to `SCENEWORKS_GPU_ID=cpu` so it registers one CPU utility worker and
+does not duplicate the Python inference GPU workers. Set
+`SCENEWORKS_RUST_WORKER_GPU_ID=auto` in Compose, or `SCENEWORKS_GPU_ID=auto` in
+host mode, only if you want the Rust worker to supervise one child per visible
 NVIDIA GPU plus a CPU utility child; use `NVIDIA_VISIBLE_DEVICES=none` for a CPU
-fallback-only worker or a comma-separated list to constrain the GPU children.
-The Rust worker defaults to auto mode, matching the Python worker. Shutdown waits
-up to 10 seconds for child workers by default; set
+fallback-only worker or a comma-separated list to constrain GPU children.
+Shutdown waits up to 10 seconds for child workers by default; set
 `SCENEWORKS_WORKER_SHUTDOWN_TIMEOUT_SECONDS` to tune that grace period. On
 Windows, Rust listens for Ctrl+C; Unix workers also handle SIGTERM.
 

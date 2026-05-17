@@ -13,6 +13,26 @@ import { QueueScreen } from "./screens/QueueScreen.jsx";
 import { sortNewest, sortWorkers } from "./sorters.js";
 import { ensureItemVersionFields } from "./timeline.js";
 
+function isActiveWorker(worker) {
+  return worker.status !== "offline";
+}
+
+function hasCapability(worker, capability) {
+  return Array.isArray(worker.capabilities) && worker.capabilities.includes(capability);
+}
+
+function isPlaceholderOnlyGpuWorker(worker) {
+  if (!hasCapability(worker, "gpu")) {
+    return false;
+  }
+  const capabilities = Array.isArray(worker.capabilities) ? worker.capabilities : [];
+  return capabilities.every((capability) => ["placeholder", "gpu", "nvidia"].includes(capability));
+}
+
+function isSelectableGpuWorker(worker) {
+  return worker.gpuId && worker.gpuId !== "cpu" && hasCapability(worker, "gpu") && !isPlaceholderOnlyGpuWorker(worker);
+}
+
 export function App() {
   const [health, setHealth] = useState(null);
   const [access, setAccess] = useState({ authRequired: false });
@@ -86,10 +106,14 @@ export function App() {
     }
     return jobs.filter((job) => job.projectId === projectFilter);
   }, [jobs, projectFilter]);
+  const visibleWorkers = useMemo(
+    () => workers.filter((worker) => isActiveWorker(worker) && !isPlaceholderOnlyGpuWorker(worker)),
+    [workers],
+  );
   const gpuOptions = useMemo(() => {
-    const ids = workers.map((worker) => worker.gpuId).filter(Boolean);
+    const ids = visibleWorkers.filter(isSelectableGpuWorker).map((worker) => worker.gpuId);
     return ["auto", ...Array.from(new Set(ids))];
-  }, [workers]);
+  }, [visibleWorkers]);
   const mediaAssets = useMemo(
     () => assets.filter((asset) => ["image", "video", "upload", "frame", "render"].includes(asset.type)),
     [assets],
@@ -983,7 +1007,9 @@ export function App() {
               <StatusDot ok={health?.status === "ok"} />
               API
             </span>
-            <span>{workers.length ? `${workers.length} worker${workers.length === 1 ? "" : "s"}` : "No workers"}</span>
+            <span>
+              {visibleWorkers.length ? `${visibleWorkers.length} worker${visibleWorkers.length === 1 ? "" : "s"}` : "No workers"}
+            </span>
             <span>{gpuOptions.length > 1 ? `${gpuOptions.length - 1} GPU slot${gpuOptions.length === 2 ? "" : "s"}` : "GPU auto"}</span>
             <button className="queue-chip" onClick={() => setActiveView("Queue")} type="button">
               Queue {queueCounts.active}
@@ -1128,7 +1154,7 @@ export function App() {
             setJobPrompt={setJobPrompt}
             setProjectFilter={setProjectFilter}
             setRequestedGpu={setRequestedGpu}
-            workers={workers}
+            workers={visibleWorkers}
           />
         ) : null}
 
