@@ -6,7 +6,10 @@ use std::sync::Arc;
 use std::time::{Duration, Instant, UNIX_EPOCH};
 
 use axum::body::Body;
-use axum::extract::{DefaultBodyLimit, Multipart, Path, Query, State};
+use axum::extract::rejection::JsonRejection;
+use axum::extract::{
+    DefaultBodyLimit, FromRequest, Multipart, Path, Query, Request as AxumRequest, State,
+};
 use axum::http::{header, HeaderMap, HeaderName, HeaderValue, Method, Request, StatusCode};
 use axum::middleware::{self, Next};
 use axum::response::sse::{Event, KeepAlive, Sse};
@@ -27,6 +30,7 @@ use sceneworks_core::jobs_store::{
 use sceneworks_core::project_store::{
     AssetStatusPatch, ProjectStore, ProjectStoreError, UploadAsset,
 };
+use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use tokio::io::AsyncWriteExt;
@@ -121,6 +125,45 @@ pub struct AppState {
     model_size_cache: Arc<Mutex<ModelSizeCache>>,
     http_client: reqwest::Client,
     interrupted_jobs_on_startup: usize,
+}
+
+struct ApiJson<T>(T);
+
+#[axum::async_trait]
+impl<S, T> FromRequest<S> for ApiJson<T>
+where
+    T: DeserializeOwned,
+    S: Send + Sync,
+{
+    type Rejection = Response;
+
+    async fn from_request(request: AxumRequest, state: &S) -> Result<Self, Self::Rejection> {
+        match Json::<T>::from_request(request, state).await {
+            Ok(Json(value)) => Ok(Self(value)),
+            Err(rejection) => Err(json_rejection_response(rejection)),
+        }
+    }
+}
+
+fn json_rejection_response(rejection: JsonRejection) -> Response {
+    let detail = match rejection {
+        JsonRejection::JsonDataError(error) => error.body_text(),
+        JsonRejection::JsonSyntaxError(error) => error.body_text(),
+        other => other.body_text(),
+    };
+    (
+        StatusCode::UNPROCESSABLE_ENTITY,
+        Json(json!({
+            "detail": [{
+                "type": "json_invalid",
+                "loc": ["body", 0],
+                "msg": "JSON decode error",
+                "input": {},
+                "ctx": { "error": detail }
+            }]
+        })),
+    )
+        .into_response()
 }
 
 #[derive(Debug, Clone)]
@@ -640,7 +683,7 @@ async fn list_projects(
 
 async fn create_project(
     State(state): State<AppState>,
-    Json(payload): Json<ProjectCreateRequest>,
+    ApiJson(payload): ApiJson<ProjectCreateRequest>,
 ) -> Result<
     (
         StatusCode,
@@ -768,7 +811,7 @@ async fn write_upload_field_to_temp_file(
 async fn update_asset_status(
     State(state): State<AppState>,
     Path((project_id, asset_id)): Path<(String, String)>,
-    Json(payload): Json<AssetStatusPatch>,
+    ApiJson(payload): ApiJson<AssetStatusPatch>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     Ok(Json(
         project_call(state, move |store| {
@@ -833,7 +876,7 @@ async fn list_timelines(
 async fn create_timeline(
     State(state): State<AppState>,
     Path(project_id): Path<String>,
-    Json(payload): Json<TimelineCreateRequest>,
+    ApiJson(payload): ApiJson<TimelineCreateRequest>,
 ) -> Result<(StatusCode, Json<Value>), ApiError> {
     let timeline = project_call(state, move |store| {
         store.create_timeline(
@@ -862,7 +905,7 @@ async fn get_timeline(
 async fn update_timeline(
     State(state): State<AppState>,
     Path((project_id, timeline_id)): Path<(String, String)>,
-    Json(payload): Json<TimelineSaveRequest>,
+    ApiJson(payload): ApiJson<TimelineSaveRequest>,
 ) -> Result<Json<Value>, ApiError> {
     Ok(Json(
         project_call(state, move |store| {
@@ -875,7 +918,7 @@ async fn update_timeline(
 async fn create_timeline_export(
     State(state): State<AppState>,
     Path((project_id, timeline_id)): Path<(String, String)>,
-    Json(payload): Json<TimelineExportRequest>,
+    ApiJson(payload): ApiJson<TimelineExportRequest>,
 ) -> Result<(StatusCode, Json<JobSnapshot>), ApiError> {
     validate_timeline_export(&payload)?;
     let timeline_result = project_call(state.clone(), {
@@ -915,7 +958,7 @@ async fn create_timeline_export(
 async fn extract_timeline_frame(
     State(state): State<AppState>,
     Path((project_id, timeline_id, item_id)): Path<(String, String, String)>,
-    Json(payload): Json<FrameExtractRequest>,
+    ApiJson(payload): ApiJson<FrameExtractRequest>,
 ) -> Result<(StatusCode, Json<JobSnapshot>), ApiError> {
     validate_frame_extract(&payload)?;
     let timeline_result = project_call(state.clone(), {
@@ -966,7 +1009,7 @@ async fn extract_timeline_frame(
 
 async fn create_image_job(
     State(state): State<AppState>,
-    Json(payload): Json<ImageJobRequest>,
+    ApiJson(payload): ApiJson<ImageJobRequest>,
 ) -> Result<(StatusCode, Json<JobSnapshot>), ApiError> {
     validate_image_job(&payload)?;
     let job_type = if payload.mode == "edit_image" {
@@ -996,7 +1039,7 @@ async fn create_image_job(
 
 async fn create_video_job(
     State(state): State<AppState>,
-    Json(payload): Json<VideoJobRequest>,
+    ApiJson(payload): ApiJson<VideoJobRequest>,
 ) -> Result<(StatusCode, Json<JobSnapshot>), ApiError> {
     validate_video_job(&payload)?;
     let job_type = match payload.mode.as_str() {
@@ -1051,7 +1094,7 @@ async fn list_models(State(state): State<AppState>) -> Result<Json<Vec<Value>>, 
 async fn create_model_download_job(
     State(state): State<AppState>,
     Path(model_id): Path<String>,
-    Json(payload): Json<ModelDownloadRequest>,
+    ApiJson(payload): ApiJson<ModelDownloadRequest>,
 ) -> Result<(StatusCode, Json<JobSnapshot>), ApiError> {
     let model = model_catalog(&state)
         .await?
@@ -1135,7 +1178,7 @@ async fn list_loras(
 
 async fn create_lora_import_job(
     State(state): State<AppState>,
-    Json(payload): Json<LoraImportRequest>,
+    ApiJson(payload): ApiJson<LoraImportRequest>,
 ) -> Result<(StatusCode, Json<JobSnapshot>), ApiError> {
     if option_str_is_empty(payload.repo.as_deref())
         && option_str_is_empty(payload.source_path.as_deref())
@@ -1181,7 +1224,7 @@ async fn list_jobs(
 
 async fn create_job(
     State(state): State<AppState>,
-    Json(payload): Json<JobCreateRequest>,
+    ApiJson(payload): ApiJson<JobCreateRequest>,
 ) -> Result<(StatusCode, Json<JobSnapshot>), ApiError> {
     let job = store_call(state.clone(), move |store, _timeout| {
         store.create_job(CreateJob {
@@ -1203,7 +1246,7 @@ async fn create_job(
 
 async fn claim_job(
     State(state): State<AppState>,
-    Json(payload): Json<ClaimRequest>,
+    ApiJson(payload): ApiJson<ClaimRequest>,
 ) -> Result<Json<ClaimResponse>, ApiError> {
     let response = store_call(state.clone(), move |store, timeout| {
         store.mark_stale_workers_interrupted(timeout)?;
@@ -1258,7 +1301,7 @@ async fn retry_job(
 async fn duplicate_job(
     State(state): State<AppState>,
     Path(job_id): Path<String>,
-    Json(payload): Json<DuplicateJobRequest>,
+    ApiJson(payload): ApiJson<DuplicateJobRequest>,
 ) -> Result<(StatusCode, Json<JobSnapshot>), ApiError> {
     let job = store_call(state.clone(), move |store, _timeout| {
         store.duplicate_job(
@@ -1278,7 +1321,7 @@ async fn duplicate_job(
 async fn update_job_progress(
     State(state): State<AppState>,
     Path(job_id): Path<String>,
-    Json(payload): Json<ProgressRequest>,
+    ApiJson(payload): ApiJson<ProgressRequest>,
 ) -> Result<Json<JobSnapshot>, ApiError> {
     let progress = number_to_f64(&payload.progress, "progress")?;
     let eta_seconds = optional_number_to_f64(payload.eta_seconds.as_ref(), "etaSeconds")?;
@@ -1320,7 +1363,7 @@ async fn list_workers(
 
 async fn register_worker(
     State(state): State<AppState>,
-    Json(payload): Json<WorkerRegisterRequest>,
+    ApiJson(payload): ApiJson<WorkerRegisterRequest>,
 ) -> Result<Json<WorkerSnapshot>, ApiError> {
     let worker = store_call(state.clone(), move |store, _timeout| {
         store.register_worker(RegisterWorker {
@@ -1340,7 +1383,7 @@ async fn register_worker(
 async fn heartbeat_worker(
     State(state): State<AppState>,
     Path(worker_id): Path<String>,
-    Json(payload): Json<WorkerHeartbeatRequest>,
+    ApiJson(payload): ApiJson<WorkerHeartbeatRequest>,
 ) -> Result<Json<WorkerSnapshot>, ApiError> {
     let worker = store_call(state.clone(), move |store, _timeout| {
         store.heartbeat_worker(WorkerHeartbeat {

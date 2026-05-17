@@ -1143,9 +1143,24 @@ fn validate_timeline_item(item: &mut Value) -> ProjectStoreResult<()> {
     let source_out = validate_f64_range(item, "sourceOut", 0.0, f64::INFINITY)?;
     let timeline_start = validate_f64_range(item, "timelineStart", 0.0, f64::INFINITY)?;
     let timeline_end = validate_f64_range(item, "timelineEnd", 0.0, f64::INFINITY)?;
-    validate_f64_range(item, "speed", 0.1, 8.0)?;
+    let speed = validate_f64_range(item, "speed", 0.1, 8.0)?;
     validate_enum(item, "fit", &["fit", "fill", "stretch"])?;
-    validate_f64_range(item, "volume", 0.0, 2.0)?;
+    let volume = validate_f64_range(item, "volume", 0.0, 2.0)?;
+    let object = item.as_object_mut().ok_or_else(|| {
+        ProjectStoreError::BadRequest("Timeline item must be an object".to_owned())
+    })?;
+    object.insert("sourceIn".to_owned(), json!(source_in));
+    object.insert("sourceOut".to_owned(), json!(source_out));
+    object.insert("timelineStart".to_owned(), json!(timeline_start));
+    object.insert("timelineEnd".to_owned(), json!(timeline_end));
+    object.insert("speed".to_owned(), json!(speed));
+    object.insert("volume".to_owned(), json!(volume));
+    object
+        .entry("transitionIn".to_owned())
+        .or_insert(Value::Null);
+    object
+        .entry("transitionOut".to_owned())
+        .or_insert(Value::Null);
     if source_out <= source_in {
         return Err(ProjectStoreError::BadRequest(
             "sourceOut must be greater than sourceIn.".to_owned(),
