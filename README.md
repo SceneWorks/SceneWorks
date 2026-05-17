@@ -64,6 +64,8 @@ Event streams use a short-lived one-shot ticket instead of putting the access to
 
 This is for privacy and control over local media, model downloads, and long-running GPU work. It is not a content moderation system.
 
+For offline development or deterministic Rust API tests, set `SCENEWORKS_DISABLE_MODEL_SIZE_ESTIMATE=1` to skip live Hugging Face model size lookups. The catalog still returns the same fields with unknown sizes.
+
 ## Structure
 
 ```text

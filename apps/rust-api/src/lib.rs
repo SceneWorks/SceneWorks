@@ -1,11 +1,9 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::convert::Infallible;
-use std::fs;
 use std::net::SocketAddr;
 use std::path::{Path as FsPath, PathBuf};
 use std::sync::Arc;
-use std::sync::OnceLock;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, UNIX_EPOCH};
 
 use axum::body::Body;
 use axum::extract::{DefaultBodyLimit, Multipart, Path, Query, State};
@@ -15,6 +13,7 @@ use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{delete, get, patch, post};
 use axum::{Json, Router};
+use futures_util::future::join_all;
 use parking_lot::Mutex;
 use sceneworks_core::contracts::{
     ClaimRequest, ClaimResponse, DuplicateJobRequest, JobCreateRequest, JobSnapshot, JobType,
@@ -53,6 +52,7 @@ const DEFAULT_CORS_ORIGINS: &str = concat!(
 const EVENT_BUFFER_SIZE: usize = 100;
 const HEARTBEAT_SSE_TEXT: &str = "event: heartbeat\ndata: {}\n\n";
 const MAX_UPLOAD_BYTES: usize = 2 * 1024 * 1024 * 1024;
+const MANIFEST_CACHE_LIMIT: usize = 16;
 const MODEL_SIZE_CACHE_LIMIT: usize = 64;
 
 #[derive(Debug, Clone)]
@@ -115,6 +115,9 @@ pub struct AppState {
     project_store: Arc<ProjectStore>,
     events: Arc<EventHub>,
     event_tickets: Arc<EventTicketStore>,
+    manifest_cache: Arc<Mutex<ManifestCache>>,
+    model_size_cache: Arc<Mutex<ModelSizeCache>>,
+    http_client: reqwest::Client,
     interrupted_jobs_on_startup: usize,
 }
 
@@ -204,32 +207,75 @@ struct EventTicket {
 
 #[derive(Debug, Default)]
 struct ModelSizeCache {
-    entries: HashMap<ModelSizeCacheKey, Option<u64>>,
-    order: Vec<ModelSizeCacheKey>,
+    entries: HashMap<ModelSizeCacheKey, u64>,
+    order: VecDeque<ModelSizeCacheKey>,
 }
 
 type ModelSizeCacheKey = (String, Vec<String>);
 
 impl ModelSizeCache {
-    fn get(&self, key: &ModelSizeCacheKey) -> Option<Option<u64>> {
+    fn get(&mut self, key: &ModelSizeCacheKey) -> Option<u64> {
+        if self.entries.contains_key(key) {
+            self.touch(key);
+        }
         self.entries.get(key).copied()
     }
 
-    fn insert(&mut self, key: ModelSizeCacheKey, value: Option<u64>) {
-        if !self.entries.contains_key(&key) {
-            self.order.push(key.clone());
-        }
+    fn insert(&mut self, key: ModelSizeCacheKey, value: u64) {
+        self.order.retain(|existing| existing != &key);
+        self.order.push_back(key.clone());
         self.entries.insert(key, value);
         while self.order.len() > MODEL_SIZE_CACHE_LIMIT {
-            if let Some(oldest) = self.order.first().cloned() {
-                self.order.remove(0);
+            if let Some(oldest) = self.order.pop_front() {
                 self.entries.remove(&oldest);
             }
         }
     }
+
+    fn touch(&mut self, key: &ModelSizeCacheKey) {
+        self.order.retain(|existing| existing != key);
+        self.order.push_back(key.clone());
+    }
 }
 
-static MODEL_SIZE_CACHE: OnceLock<Mutex<ModelSizeCache>> = OnceLock::new();
+#[derive(Debug, Clone, Hash, Eq, PartialEq)]
+struct ManifestCacheKey {
+    path: PathBuf,
+    field: String,
+    modified_ns: u128,
+    size: u64,
+}
+
+#[derive(Debug, Default)]
+struct ManifestCache {
+    entries: HashMap<ManifestCacheKey, Vec<Value>>,
+    order: VecDeque<ManifestCacheKey>,
+}
+
+impl ManifestCache {
+    fn get(&mut self, key: &ManifestCacheKey) -> Option<Vec<Value>> {
+        if self.entries.contains_key(key) {
+            self.touch(key);
+        }
+        self.entries.get(key).cloned()
+    }
+
+    fn insert(&mut self, key: ManifestCacheKey, value: Vec<Value>) {
+        self.order.retain(|existing| existing != &key);
+        self.order.push_back(key.clone());
+        self.entries.insert(key, value);
+        while self.order.len() > MANIFEST_CACHE_LIMIT {
+            if let Some(oldest) = self.order.pop_front() {
+                self.entries.remove(&oldest);
+            }
+        }
+    }
+
+    fn touch(&mut self, key: &ManifestCacheKey) {
+        self.order.retain(|existing| existing != key);
+        self.order.push_back(key.clone());
+    }
+}
 
 pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
     let settings = Settings::from_env();
@@ -255,6 +301,9 @@ pub fn create_app(settings: Settings) -> Result<Router, JobsStoreError> {
         project_store,
         events: Arc::new(EventHub::default()),
         event_tickets: Arc::new(EventTicketStore::new(30)),
+        manifest_cache: Arc::new(Mutex::new(ManifestCache::default())),
+        model_size_cache: Arc::new(Mutex::new(ModelSizeCache::default())),
+        http_client: reqwest::Client::new(),
         interrupted_jobs_on_startup,
     };
     let cors = cors_layer(&state.settings);
@@ -992,7 +1041,7 @@ async fn route_not_found(request: Request<axum::body::Body>) -> Response {
 }
 
 async fn list_models(State(state): State<AppState>) -> Result<Json<Vec<Value>>, ApiError> {
-    Ok(Json(model_catalog(&state.settings).await?))
+    Ok(Json(model_catalog(&state).await?))
 }
 
 async fn create_model_download_job(
@@ -1000,7 +1049,7 @@ async fn create_model_download_job(
     Path(model_id): Path<String>,
     Json(payload): Json<ModelDownloadRequest>,
 ) -> Result<(StatusCode, Json<JobSnapshot>), ApiError> {
-    let model = model_catalog(&state.settings)
+    let model = model_catalog(&state)
         .await?
         .into_iter()
         .find(|item| item.get("id").and_then(Value::as_str) == Some(model_id.as_str()))
@@ -1036,10 +1085,7 @@ async fn create_model_download_job(
     );
     job_payload.insert(
         "provider".to_owned(),
-        download
-            .get("provider")
-            .cloned()
-            .unwrap_or_else(|| Value::String("huggingface".to_owned())),
+        Value::String(required_string_field(&download, "provider")?.to_owned()),
     );
     job_payload.insert("repo".to_owned(), Value::String(repo.clone()));
     job_payload.insert("files".to_owned(), json!(files));
@@ -1072,7 +1118,7 @@ async fn list_loras(
     State(state): State<AppState>,
     Query(query): Query<LorasQuery>,
 ) -> Result<Json<Vec<Value>>, ApiError> {
-    let mut items = lora_catalog(&state.settings).await?;
+    let mut items = lora_catalog(&state).await?;
     if let Some(model_family) = query.model_family {
         items.retain(|item| {
             lora_families(item)
@@ -1492,31 +1538,48 @@ fn publish<T: Serialize>(state: &AppState, event: &str, data: &T) {
     }
 }
 
-async fn model_catalog(settings: &Settings) -> Result<Vec<Value>, ApiError> {
-    let manifest_dir = settings.config_dir.join("manifests");
-    let builtin = load_manifest_entries(&manifest_dir.join("builtin.models.jsonc"), "models")?;
-    let user = load_manifest_entries(&manifest_dir.join("user.models.jsonc"), "models")?;
+#[derive(Debug, Clone)]
+struct DownloadContext {
+    repo: String,
+    files: Vec<String>,
+}
+
+async fn model_catalog(state: &AppState) -> Result<Vec<Value>, ApiError> {
+    let manifest_dir = state.settings.config_dir.join("manifests");
+    let builtin =
+        load_manifest_entries(state, &manifest_dir.join("builtin.models.jsonc"), "models").await?;
+    let user =
+        load_manifest_entries(state, &manifest_dir.join("user.models.jsonc"), "models").await?;
     let mut models = merge_entries_by_id(builtin, user);
-    for model in &mut models {
-        let download = model_download(model);
-        let (downloadable, installed_path, installed, download_size_bytes) =
-            if let Some(download) = download {
-                let repo = required_string_field(&download, "repo")?;
-                let files = string_array_field(&download, "files");
-                let download_size_bytes = estimate_huggingface_download_size(repo, &files).await;
-                let installed_path = settings
+    let download_contexts = models
+        .iter()
+        .map(model_download_context)
+        .collect::<Result<Vec<_>, _>>()?;
+    let download_size_bytes = join_all(download_contexts.iter().map(|context| async move {
+        match context {
+            Some(context) => {
+                estimate_huggingface_download_size(state, &context.repo, &context.files).await
+            }
+            None => None,
+        }
+    }))
+    .await;
+
+    for (model, (download_context, download_size_bytes)) in models
+        .iter_mut()
+        .zip(download_contexts.into_iter().zip(download_size_bytes))
+    {
+        let (downloadable, installed_path, installed) =
+            if let Some(download_context) = download_context {
+                let installed_path = state
+                    .settings
                     .data_dir
                     .join("models")
-                    .join(safe_download_dir(repo));
+                    .join(safe_download_dir(&download_context.repo));
                 let installed = model_is_installed(&installed_path);
-                (
-                    true,
-                    Some(installed_path.display().to_string()),
-                    installed,
-                    download_size_bytes,
-                )
+                (true, Some(installed_path.display().to_string()), installed)
             } else {
-                (false, None, false, None)
+                (false, None, false)
             };
         let object = model
             .as_object_mut()
@@ -1564,10 +1627,12 @@ async fn model_catalog(settings: &Settings) -> Result<Vec<Value>, ApiError> {
     Ok(models)
 }
 
-async fn lora_catalog(settings: &Settings) -> Result<Vec<Value>, ApiError> {
-    let manifest_dir = settings.config_dir.join("manifests");
-    let builtin = load_manifest_entries(&manifest_dir.join("builtin.loras.jsonc"), "loras")?;
-    let user = load_manifest_entries(&manifest_dir.join("user.loras.jsonc"), "loras")?;
+async fn lora_catalog(state: &AppState) -> Result<Vec<Value>, ApiError> {
+    let manifest_dir = state.settings.config_dir.join("manifests");
+    let builtin =
+        load_manifest_entries(state, &manifest_dir.join("builtin.loras.jsonc"), "loras").await?;
+    let user =
+        load_manifest_entries(state, &manifest_dir.join("user.loras.jsonc"), "loras").await?;
     let mut loras = merge_entries_by_id(builtin, user);
     loras.sort_by(|left, right| {
         let left_key = (
@@ -1591,19 +1656,50 @@ async fn lora_catalog(settings: &Settings) -> Result<Vec<Value>, ApiError> {
     Ok(loras)
 }
 
-fn load_manifest_entries(path: &FsPath, key: &str) -> Result<Vec<Value>, ApiError> {
-    if !path.exists() {
-        return Ok(Vec::new());
+async fn load_manifest_entries(
+    state: &AppState,
+    path: &FsPath,
+    field: &str,
+) -> Result<Vec<Value>, ApiError> {
+    let metadata = match tokio::fs::metadata(path).await {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(_) => return Err(ApiError::internal("Failed to load manifest")),
+    };
+    let cache_key = ManifestCacheKey {
+        path: path.to_path_buf(),
+        field: field.to_owned(),
+        modified_ns: metadata_modified_ns(&metadata),
+        size: metadata.len(),
+    };
+    if let Some(entries) = state.manifest_cache.lock().get(&cache_key) {
+        return Ok(entries);
     }
-    let payload =
-        fs::read_to_string(path).map_err(|error| ApiError::internal(error.to_string()))?;
+
+    let payload = tokio::fs::read_to_string(path)
+        .await
+        .map_err(|_| ApiError::internal("Failed to load manifest"))?;
     let manifest: Value = serde_json::from_str(&strip_jsonc_comments(&payload))
-        .map_err(|error| ApiError::internal(error.to_string()))?;
-    Ok(manifest
-        .get(key)
+        .map_err(|_| ApiError::internal("Failed to load manifest"))?;
+    let entries = manifest
+        .get(field)
         .and_then(Value::as_array)
         .cloned()
-        .unwrap_or_default())
+        .unwrap_or_default();
+    state
+        .manifest_cache
+        .lock()
+        .insert(cache_key, entries.clone());
+    Ok(entries)
+}
+
+fn metadata_modified_ns(metadata: &std::fs::Metadata) -> u128 {
+    metadata
+        .modified()
+        .ok()
+        .and_then(|modified| modified.duration_since(UNIX_EPOCH).ok())
+        .map(|duration| duration.as_nanos())
+        .unwrap_or(0)
 }
 
 fn merge_entries_by_id(builtin: Vec<Value>, user: Vec<Value>) -> Vec<Value> {
@@ -1705,7 +1801,21 @@ fn model_download(model: &Value) -> Option<Value> {
         .cloned()
 }
 
-async fn estimate_huggingface_download_size(repo: &str, files: &[String]) -> Option<u64> {
+fn model_download_context(model: &Value) -> Result<Option<DownloadContext>, ApiError> {
+    let Some(download) = model_download(model) else {
+        return Ok(None);
+    };
+    Ok(Some(DownloadContext {
+        repo: required_string_field(&download, "repo")?.to_owned(),
+        files: string_array_field(&download, "files"),
+    }))
+}
+
+async fn estimate_huggingface_download_size(
+    state: &AppState,
+    repo: &str,
+    files: &[String],
+) -> Option<u64> {
     if matches!(
         std::env::var("SCENEWORKS_DISABLE_MODEL_SIZE_ESTIMATE").as_deref(),
         Ok("1" | "true" | "TRUE" | "yes" | "YES")
@@ -1713,34 +1823,40 @@ async fn estimate_huggingface_download_size(repo: &str, files: &[String]) -> Opt
         return None;
     }
     let cache_key = (repo.to_owned(), files.to_vec());
-    let cache = MODEL_SIZE_CACHE.get_or_init(|| Mutex::new(ModelSizeCache::default()));
-    if let Some(cached) = cache.lock().get(&cache_key) {
-        return cached;
+    if let Some(cached) = state.model_size_cache.lock().get(&cache_key) {
+        return Some(cached);
     }
     let url = format!(
         "https://huggingface.co/api/models/{}?blobs=true",
         quote_huggingface_repo(repo)
     );
-    let estimate = estimate_huggingface_download_size_uncached(&url, files).await;
-    cache.lock().insert(cache_key, estimate);
+    let estimate =
+        estimate_huggingface_download_size_uncached(&state.http_client, &url, files).await;
+    if let Some(estimate) = estimate {
+        state.model_size_cache.lock().insert(cache_key, estimate);
+    }
     estimate
 }
 
-async fn estimate_huggingface_download_size_uncached(url: &str, files: &[String]) -> Option<u64> {
-    let client = reqwest::Client::builder()
-        .timeout(Duration::from_secs(8))
-        .build()
-        .ok()?;
-    let payload: Value = client
-        .get(url.to_owned())
-        .send()
-        .await
-        .ok()?
-        .error_for_status()
-        .ok()?
-        .json()
-        .await
-        .ok()?;
+async fn estimate_huggingface_download_size_uncached(
+    client: &reqwest::Client,
+    url: &str,
+    files: &[String],
+) -> Option<u64> {
+    let payload = tokio::time::timeout(Duration::from_secs(8), async {
+        client
+            .get(url.to_owned())
+            .send()
+            .await
+            .ok()?
+            .error_for_status()
+            .ok()?
+            .json::<Value>()
+            .await
+            .ok()
+    })
+    .await
+    .ok()??;
     let siblings = payload.get("siblings")?.as_array()?;
     download_size_from_siblings(siblings, files)
 }
@@ -1769,51 +1885,25 @@ fn json_size_to_u64(value: &Value) -> Option<u64> {
     if let Some(value) = value.as_u64() {
         return Some(value);
     }
-    if let Some(value) = value.as_f64() {
-        return value.is_finite().then(|| value.max(0.0) as u64);
-    }
-    value
-        .as_str()
-        .and_then(|value| value.parse::<f64>().ok())
-        .filter(|value| value.is_finite())
-        .map(|value| value.max(0.0) as u64)
+    value.as_str().and_then(|value| value.parse::<u64>().ok())
 }
 
 fn allow_pattern_matches(path: &str, patterns: &[String]) -> bool {
     if patterns.is_empty() {
         return true;
     }
-    patterns.iter().any(|pattern| wildcard_match(pattern, path))
+    patterns
+        .iter()
+        .any(|pattern| pattern_matches(pattern, path))
 }
 
-fn wildcard_match(pattern: &str, value: &str) -> bool {
-    let pattern = pattern.as_bytes();
-    let value = value.as_bytes();
-    let (mut pattern_index, mut value_index) = (0_usize, 0_usize);
-    let mut star_index = None;
-    let mut star_value_index = 0_usize;
-    while value_index < value.len() {
-        if pattern_index < pattern.len()
-            && (pattern[pattern_index] == b'?' || pattern[pattern_index] == value[value_index])
-        {
-            pattern_index += 1;
-            value_index += 1;
-        } else if pattern_index < pattern.len() && pattern[pattern_index] == b'*' {
-            star_index = Some(pattern_index);
-            pattern_index += 1;
-            star_value_index = value_index;
-        } else if let Some(index) = star_index {
-            pattern_index = index + 1;
-            star_value_index += 1;
-            value_index = star_value_index;
-        } else {
-            return false;
-        }
-    }
-    while pattern_index < pattern.len() && pattern[pattern_index] == b'*' {
-        pattern_index += 1;
-    }
-    pattern_index == pattern.len()
+fn pattern_matches(pattern: &str, value: &str) -> bool {
+    let (pattern, value) = if cfg!(windows) {
+        (pattern.to_ascii_lowercase(), value.to_ascii_lowercase())
+    } else {
+        (pattern.to_owned(), value.to_owned())
+    };
+    glob::Pattern::new(&pattern).is_ok_and(|pattern| pattern.matches(&value))
 }
 
 fn quote_huggingface_repo(repo: &str) -> String {
@@ -2938,16 +3028,65 @@ mod tests {
             super::download_size_from_siblings(siblings, &["*.ckpt".to_owned()]),
             None
         );
+        assert_eq!(super::json_size_to_u64(&json!("200.5")), None);
         assert_eq!(super::format_bytes(0), "0 B");
         assert_eq!(super::format_bytes(1024 * 1024 * 1024), "1.0 GB");
         assert_eq!(
             super::quote_huggingface_repo("owner/model name"),
             "owner/model%20name"
         );
+        assert!(super::model_download(&json!({
+            "downloads": [{ "repo": "owner/model" }]
+        }))
+        .is_none());
         let mut cache = super::ModelSizeCache::default();
         let key = ("owner/model".to_owned(), vec!["*.safetensors".to_owned()]);
-        cache.insert(key.clone(), None);
-        assert_eq!(cache.get(&key), Some(None));
+        cache.insert(key.clone(), 300);
+        assert_eq!(cache.get(&key), Some(300));
+        assert!(super::allow_pattern_matches(
+            "model-7.safetensors",
+            &["model-[0-9].safetensors".to_owned()]
+        ));
+        if cfg!(windows) {
+            assert!(super::allow_pattern_matches(
+                "Model.SAFETENSORS",
+                &["*.safetensors".to_owned()]
+            ));
+        }
+    }
+
+    #[test]
+    fn lora_family_filter_shapes_match_python_fallbacks() {
+        let shapes = [
+            json!({ "families": ["z-image"] }),
+            json!({ "compatibleFamilies": ["z-image"] }),
+            json!({ "modelFamilies": ["z-image"] }),
+            json!({ "compatibility": { "families": ["z-image"] } }),
+            json!({ "family": "z-image" }),
+        ];
+        for lora in shapes {
+            assert_eq!(super::lora_families(&lora), vec!["z-image".to_owned()]);
+        }
+    }
+
+    #[tokio::test]
+    async fn malformed_manifest_returns_stable_server_error() {
+        let temp_dir = tempfile::tempdir().expect("temp dir creates");
+        let config_dir = temp_dir.path().join("config/manifests");
+        std::fs::create_dir_all(&config_dir).expect("manifest dir creates");
+        std::fs::write(
+            config_dir.join("builtin.models.jsonc"),
+            r#"{ "models": [ /*"#,
+        )
+        .expect("manifest writes");
+        std::fs::write(config_dir.join("user.models.jsonc"), r#"{ "models": [] }"#)
+            .expect("manifest writes");
+
+        let app = create_app(test_settings(&temp_dir)).expect("app creates");
+        let (status, error) = request(app, "GET", "/api/v1/models", Value::Null).await;
+
+        assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(error["detail"], "Failed to load manifest");
     }
 
     #[tokio::test]
