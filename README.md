@@ -15,11 +15,16 @@ This starts the local stack with Docker Compose:
 
 The default compose API runtime is Python. During the Rust migration, switch the
 same `api` service to the Rust API by setting these values in `.env` before
-running `npm run dev` or `npm run stack:up`:
+rebuilding and starting the API:
 
 ```text
 SCENEWORKS_API_RUNTIME=rust
 SCENEWORKS_API_DOCKERFILE=docker/rust-api.Dockerfile
+```
+
+```powershell
+docker compose build api
+docker compose up -d api
 ```
 
 Rollback is intentionally just as explicit:
@@ -32,17 +37,24 @@ SCENEWORKS_API_DOCKERFILE=docker/api.Dockerfile
 Both API images keep the same compose service name, health URL, worker URL,
 host port, and mounted storage contracts. The API listens on
 `SCENEWORKS_API_PORT` inside the container and is exposed on the same host port.
-The web service receives `VITE_API_BASE_URL=http://localhost:${SCENEWORKS_API_PORT}`,
+`SCENEWORKS_WEB_PORT` controls the host port for the Vite web service. The web
+service receives `VITE_API_BASE_URL=http://localhost:${SCENEWORKS_API_PORT}`,
 and workers call `http://api:${SCENEWORKS_API_PORT}` on the compose network.
+The selected runtime is reported by `GET /api/v1/health` as `runtime`.
 
 API volume contracts are shared across Python and Rust:
 
-- `./data:/sceneworks/data` read/write for projects, models, LoRAs, and cache-backed app data.
-- `./config:/sceneworks/config:ro` read-only for manifests and app configuration.
-- `api-runtime:/sceneworks/runtime` read/write for runtime SQLite state, including `/sceneworks/runtime/jobs.db`.
+- `${SCENEWORKS_DATA_BIND:-./data}:/sceneworks/data` read/write for projects, models, LoRAs, and cache-backed app data.
+- `${SCENEWORKS_CONFIG_BIND:-./config}:/sceneworks/config:ro` read-only for manifests and app configuration.
+- `./data/cache/jobs.db` is the shared queue database for both runtimes, preserving existing compose queue history across migration flips and rollback.
 
 Both API runtimes expose `GET /api/v1/health`; compose checks it with `curl`
 inside the container so dependent services wait for the selected implementation.
+To exercise the Rust Docker path end to end, run:
+
+```powershell
+npm run check:docker:rust-api
+```
 
 Run the lightweight scaffold checks:
 
@@ -76,6 +88,9 @@ Rust API binary on port 8000 and run the worker with
 `SCENEWORKS_API_URL=http://localhost:8000`. In Docker Compose, the API runtime
 switch above keeps `SCENEWORKS_API_URL` wired to the selected `api` service
 automatically.
+The compose `worker` service is the Python inference worker and the
+`rust-worker` service is the Rust utility worker; both use the selected API
+runtime through the same HTTP contract.
 The `sceneworks-rust-worker` binary handles CPU utility jobs for model downloads,
 LoRA imports, FFmpeg frame extraction, and timeline MP4 exports. Set
 `SCENEWORKS_GPU_ID=auto` to let the Rust worker supervise one child per visible
@@ -120,6 +135,11 @@ X-SceneWorks-Token: choose-a-private-token
 Event streams use a short-lived one-shot ticket instead of putting the access token in the URL. Clients should `POST /api/v1/jobs/events/ticket` with the normal auth header, then connect to `/api/v1/jobs/events?ticket=...`.
 
 This is for privacy and control over local media, model downloads, and long-running GPU work. It is not a content moderation system.
+
+Inside Docker, `SCENEWORKS_API_HOST=0.0.0.0` is expected so the published host
+port can reach the container. Use `SCENEWORKS_ACCESS_TOKEN` for access control
+and extend `SCENEWORKS_CORS_ORIGINS` with LAN hostnames or IP origins when the
+web app is opened from another machine.
 
 For offline development or deterministic Rust API tests, set `SCENEWORKS_DISABLE_MODEL_SIZE_ESTIMATE=1` to skip live Hugging Face model size lookups. The catalog still returns the same fields with unknown sizes.
 

@@ -9,6 +9,7 @@
     "stack:down": "docker compose down",
     "check": "node scripts/check-scaffold.mjs",
     "check:health": "node scripts/check-health.mjs",
+    "check:docker:rust-api": "node scripts/check-docker-api-runtime.mjs rust",
     "rust:fmt": "cargo fmt --all -- --check",
     "rust:lint": "cargo clippy --workspace --all-targets -- -D warnings",
     "rust:test": "cargo test --workspace",

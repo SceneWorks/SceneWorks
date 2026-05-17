@@ -57,6 +57,7 @@ const MODEL_SIZE_CACHE_LIMIT: usize = 64;
 
 #[derive(Debug, Clone)]
 pub struct Settings {
+    pub api_runtime: String,
     pub app_version: String,
     pub host: String,
     pub port: u16,
@@ -77,6 +78,7 @@ impl Settings {
             .map(PathBuf::from)
             .unwrap_or_else(|| data_dir.join("cache").join("jobs.db"));
         Self {
+            api_runtime: env_string("SCENEWORKS_API_RUNTIME", "rust"),
             app_version: env_string("SCENEWORKS_APP_VERSION", "0.1.0"),
             host: env_string("SCENEWORKS_API_HOST", "0.0.0.0"),
             port: std::env::var("SCENEWORKS_API_PORT")
@@ -417,6 +419,7 @@ struct EventsQuery {
 struct HealthResponse {
     status: &'static str,
     service: &'static str,
+    runtime: String,
     version: String,
     auth_required: bool,
     directories: DirectoriesResponse,
@@ -601,6 +604,7 @@ async fn health(State(state): State<AppState>) -> Json<HealthResponse> {
     Json(HealthResponse {
         status: "ok",
         service: "sceneworks-api",
+        runtime: state.settings.api_runtime.clone(),
         version: state.settings.app_version.clone(),
         auth_required: !state.settings.access_token.is_empty(),
         directories: DirectoriesResponse {
@@ -2401,6 +2405,7 @@ mod tests {
 
     fn test_settings(temp_dir: &tempfile::TempDir) -> Settings {
         Settings {
+            api_runtime: "rust".to_owned(),
             app_version: "test".to_owned(),
             host: "127.0.0.1".to_owned(),
             port: 0,

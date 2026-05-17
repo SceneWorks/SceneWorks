@@ -17,6 +17,4 @@ RUN apt-get update \
 
 COPY --from=builder /app/target/release/sceneworks-rust-api /usr/local/bin/sceneworks-rust-api
 
-EXPOSE 8000
-
 CMD ["sceneworks-rust-api"]

@@ -16,6 +16,4 @@ COPY apps/api ./apps/api
 COPY packages/shared ./packages/shared
 ENV PYTHONPATH=/app/apps/api:/app/packages/shared
 
-EXPOSE 8000
-
 CMD ["python", "-m", "sceneworks_api"]

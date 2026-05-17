@@ -55,7 +55,9 @@ await assertContains("Cargo.toml", "apps/rust-api");
 await assertContains("crates/sceneworks-core/src/lib.rs", "/api/v1/health");
 await assertContains("docker-compose.yml", "NVIDIA_VISIBLE_DEVICES");
 await assertContains("docker-compose.yml", "SCENEWORKS_API_DOCKERFILE");
+await assertContains("docker-compose.yml", "/sceneworks/data/cache/jobs.db");
 await assertContains("docker/rust-api.Dockerfile", "sceneworks-rust-api");
+await assertContains("scripts/check-docker-api-runtime.mjs", "SCENEWORKS_API_RUNTIME");
 await assertContains("README.md", "SCENEWORKS_ACCESS_TOKEN");
 
 console.log("SceneWorks scaffold check passed.");
