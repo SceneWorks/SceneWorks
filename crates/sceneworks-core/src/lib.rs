@@ -1,3 +1,5 @@
+pub mod contracts;
+
 pub const API_PREFIX: &str = "/api/v1";
 pub const HEALTH_ROUTE: &str = "/health";
 
