@@ -34,10 +34,13 @@ export function ImageStudio({
   }, [imageModels, model]);
 
   useEffect(() => {
+    if ((selectedAsset?.type === "image" || selectedAsset?.type === "frame") && mode !== "edit_image") {
+      setMode("edit_image");
+    }
     if (mode === "edit_image" && selectedAsset?.id) {
       setSourceAssetId(selectedAsset.id);
     }
-  }, [mode, selectedAsset?.id]);
+  }, [mode, selectedAsset?.id, selectedAsset?.type]);
 
   const availableModels = imageModels.filter((item) => {
     const caps = item.capabilities ?? [];
@@ -95,7 +98,7 @@ export function ImageStudio({
               <select onChange={(event) => setSourceAssetId(event.target.value)} value={sourceAssetId}>
                 <option value="">Select image</option>
                 {assets
-                  .filter((asset) => asset.type === "image")
+                  .filter((asset) => asset.type === "image" || asset.type === "frame")
                   .map((asset) => (
                     <option key={asset.id} value={asset.id}>
                       {asset.displayName}
