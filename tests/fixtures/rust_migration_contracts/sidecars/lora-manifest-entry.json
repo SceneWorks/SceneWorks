@@ -1,0 +1,14 @@
+{
+  "id": "lora_fixture",
+  "name": "Mira Character LoRA",
+  "family": "z_image",
+  "triggerWords": ["mira_person"],
+  "compatibility": {
+    "families": ["z_image", "wan"]
+  },
+  "source": {
+    "provider": "local",
+    "path": "loras/mira.safetensors"
+  }
+}
+

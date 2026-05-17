@@ -1,0 +1,16 @@
+{
+  "id": "z_image_turbo",
+  "name": "Z-Image Turbo",
+  "type": "image",
+  "family": "z_image",
+  "provider": "huggingface",
+  "tags": ["image", "text_to_image"],
+  "downloads": [
+    {
+      "provider": "huggingface",
+      "repo": "Tongyi-MAI/Z-Image-Turbo",
+      "files": ["*.safetensors", "*.json", "*.txt"]
+    }
+  ]
+}
+
