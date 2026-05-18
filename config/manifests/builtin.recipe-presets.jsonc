@@ -7,6 +7,7 @@
       "name": "Cinematic",
       "scope": "builtin",
       "order": 10,
+      "workflow": "text_to_image",
       "modes": ["text_to_image", "edit_image", "character_image", "style_variations"],
       "model": "z_image_turbo",
       "defaults": {
@@ -17,7 +18,7 @@
       "prompt": {
         "suffix": "cinematic lighting, natural contrast, detailed production still"
       },
-      "builtInLoras": [
+      "loras": [
         { "id": "builtin_cinematic_detail", "weight": 0.55 }
       ],
       "ui": {
@@ -29,6 +30,7 @@
       "name": "Photoreal",
       "scope": "builtin",
       "order": 20,
+      "workflow": "text_to_image",
       "modes": ["text_to_image", "edit_image", "character_image", "style_variations"],
       "model": "z_image_turbo",
       "defaults": {
@@ -39,7 +41,7 @@
       "prompt": {
         "suffix": "natural lens rendering, realistic materials, believable lighting"
       },
-      "builtInLoras": [
+      "loras": [
         { "id": "builtin_photoreal_texture", "weight": 0.45 }
       ],
       "ui": {
@@ -51,6 +53,7 @@
       "name": "Anime",
       "scope": "builtin",
       "order": 30,
+      "workflow": "text_to_image",
       "modes": ["text_to_image", "character_image", "style_variations"],
       "model": "z_image_turbo",
       "defaults": {
@@ -61,7 +64,7 @@
       "prompt": {
         "suffix": "clean anime key art, expressive shape language, crisp line detail"
       },
-      "builtInLoras": [
+      "loras": [
         { "id": "builtin_anime_key_art", "weight": 0.65 }
       ],
       "ui": {
@@ -73,6 +76,7 @@
       "name": "Fantasy",
       "scope": "builtin",
       "order": 40,
+      "workflow": "text_to_image",
       "modes": ["text_to_image", "character_image", "style_variations"],
       "model": "z_image_turbo",
       "defaults": {
@@ -83,7 +87,7 @@
       "prompt": {
         "suffix": "mythic atmosphere, painterly detail, dramatic environment design"
       },
-      "builtInLoras": [
+      "loras": [
         { "id": "builtin_fantasy_atmosphere", "weight": 0.6 }
       ],
       "ui": {
@@ -95,6 +99,7 @@
       "name": "Product Shot",
       "scope": "builtin",
       "order": 50,
+      "workflow": "text_to_image",
       "modes": ["text_to_image", "edit_image", "style_variations"],
       "model": "z_image_turbo",
       "defaults": {
@@ -105,7 +110,7 @@
       "prompt": {
         "suffix": "controlled studio lighting, crisp edges, clean commercial composition"
       },
-      "builtInLoras": [
+      "loras": [
         { "id": "builtin_product_finish", "weight": 0.5 }
       ],
       "ui": {

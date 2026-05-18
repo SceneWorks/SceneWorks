@@ -1,0 +1,33 @@
+{
+  "id": "cinematic",
+  "name": "Cinematic",
+  "scope": "builtin",
+  "archived": false,
+  "order": 10,
+  "workflow": "text_to_image",
+  "model": "z_image_turbo",
+  "modes": ["text_to_image"],
+  "defaults": {
+    "count": 4,
+    "resolution": "1024x1024",
+    "negativePrompt": "flat lighting, low contrast"
+  },
+  "prompt": {
+    "prefix": "high production value",
+    "suffix": "cinematic lighting"
+  },
+  "loras": [
+    {
+      "id": "builtin_cinematic_detail",
+      "loraId": "builtin_cinematic_detail",
+      "sourceUrl": "https://example.com/loras/cinematic-detail.safetensors",
+      "name": "Cinematic Detail",
+      "displayName": "Cinematic Detail",
+      "compatibility": { "families": ["z-image"] },
+      "weight": 0.55
+    }
+  ],
+  "ui": {
+    "description": "Balanced cinematic color, contrast, and detail."
+  }
+}

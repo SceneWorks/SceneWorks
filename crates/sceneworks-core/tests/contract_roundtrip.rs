@@ -4,7 +4,7 @@ use std::path::PathBuf;
 use sceneworks_core::contracts::{
     Asset, Character, GenerationSet, JobProtocolFixture, LoraManifest, LoraManifestEntry,
     ModelInstallMarker, ModelManifest, ModelManifestEntry, PersonTrack, Project, QueueSummary,
-    Recipe, ResourceSidecarsFixture, Timeline,
+    Recipe, RecipePresetManifest, RecipePresetManifestEntry, ResourceSidecarsFixture, Timeline,
 };
 use serde::de::DeserializeOwned;
 use serde::Serialize;
@@ -66,6 +66,7 @@ fn persisted_sidecars_round_trip_without_field_drift() {
     assert_round_trip::<PersonTrack>("sidecars/person-track.sceneworks.person-track.json");
     assert_round_trip::<ModelManifestEntry>("sidecars/model-manifest-entry.json");
     assert_round_trip::<LoraManifestEntry>("sidecars/lora-manifest-entry.json");
+    assert_round_trip::<RecipePresetManifestEntry>("sidecars/recipe-preset-manifest-entry.json");
     assert_round_trip::<ModelInstallMarker>("sidecars/model-install-marker.json");
 }
 
@@ -120,13 +121,17 @@ fn queue_summary_contract_round_trips_known_shapes() {
 fn manifest_wrappers_round_trip_entries() {
     let model_entry = load_fixture("sidecars/model-manifest-entry.json");
     let lora_entry = load_fixture("sidecars/lora-manifest-entry.json");
+    let preset_entry = load_fixture("sidecars/recipe-preset-manifest-entry.json");
     let models = json!({ "schemaVersion": 1, "models": [model_entry], "futureRoot": true });
     let loras = json!({ "schemaVersion": 1, "loras": [lora_entry], "futureRoot": true });
+    let presets = json!({ "schemaVersion": 1, "presets": [preset_entry], "futureRoot": true });
 
     let typed_models: ModelManifest =
         serde_json::from_value(models.clone()).expect("model manifest parses");
     let typed_loras: LoraManifest =
         serde_json::from_value(loras.clone()).expect("lora manifest parses");
+    let typed_presets: RecipePresetManifest =
+        serde_json::from_value(presets.clone()).expect("recipe preset manifest parses");
 
     assert_eq!(
         serde_json::to_value(typed_models).expect("model manifest serializes"),
@@ -135,5 +140,9 @@ fn manifest_wrappers_round_trip_entries() {
     assert_eq!(
         serde_json::to_value(typed_loras).expect("lora manifest serializes"),
         loras
+    );
+    assert_eq!(
+        serde_json::to_value(typed_presets).expect("recipe preset manifest serializes"),
+        presets
     );
 }
