@@ -41,7 +41,7 @@ VIDEO_MODEL_TARGETS: dict[str, dict[str, Any]] = {
         "label": "LTX-2.3",
         "family": "ltx-video",
         "adapter": "ltx_video",
-        "repo": "Lightricks/LTX-2",
+        "repo": "Lightricks/LTX-2.3",
         "fallbackRepo": "Lightricks/LTX-Video",
         "capabilities": ["image_to_video", "text_to_video", "first_last_frame", "extend_clip", "video_bridge"],
         "recommendedMaxDuration": 10,
@@ -286,8 +286,11 @@ class DiffusersVideoAdapter(VideoGenerationAdapter):
 
     def estimate_requirements(self, request: VideoRequest) -> dict[str, Any]:
         target = model_target(request.model)
+        raw_frames = max(1, int(round(request.duration * request.fps)))
+        estimated_frames = self._num_frames(request)
         return {
-            "estimatedFrames": max(1, int(round(request.duration * request.fps))),
+            "estimatedFrames": estimated_frames,
+            "requestedFrames": raw_frames,
             "pixelCount": request.width * request.height,
             "recommendedMaxDuration": target["recommendedMaxDuration"],
             "gpuPreference": request.advanced.get("gpuPreference", "auto"),
@@ -517,7 +520,10 @@ class DiffusersVideoAdapter(VideoGenerationAdapter):
 
     def _num_frames(self, request: VideoRequest) -> int:
         raw_frames = max(1, int(round(request.duration * request.fps)))
-        if model_target(request.model)["adapter"] == "wan_video":
+        adapter = model_target(request.model)["adapter"]
+        if adapter == "ltx_video":
+            return ltx_frame_count(raw_frames)
+        if adapter == "wan_video":
             return max(5, raw_frames - ((raw_frames - 1) % 4))
         return raw_frames
 
@@ -670,6 +676,17 @@ def preview_frame_count(request: VideoRequest) -> int:
     if request.quality == "best":
         return max(18, min(80, raw_frames))
     return max(16, min(60, raw_frames))
+
+
+def ltx_frame_count(raw_frames: int) -> int:
+    frame_count = max(9, int(raw_frames))
+    lower = frame_count - ((frame_count - 1) % 8)
+    upper = lower + 8
+    if lower < 9:
+        return upper
+    lower_delta = abs(frame_count - lower)
+    upper_delta = abs(upper - frame_count)
+    return lower if lower_delta <= upper_delta else upper
 
 
 def load_source_image(project_path: Path, asset_id: str | None, width: int, height: int) -> Image.Image | None:
