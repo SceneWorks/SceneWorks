@@ -12,6 +12,7 @@ def test_parse_nvidia_smi_gpus_returns_all_devices():
     assert [gpu["id"] for gpu in gpus] == ["0", "1"]
     assert gpus[0]["name"] == "NVIDIA RTX PRO 6000 Blackwell Max-Q Workstation Edition (97887 MB)"
     assert "nvidia" in gpus[1]["capabilities"]
+    assert "placeholder" not in gpus[1]["capabilities"]
 
 
 def test_gpu_worker_id_preserves_existing_first_worker_id():

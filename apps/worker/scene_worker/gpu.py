@@ -30,7 +30,7 @@ def parse_nvidia_smi_gpus(output: str) -> list[dict]:
             {
                 "id": index,
                 "name": f"{name} ({memory_mb} MB)",
-                "capabilities": ["placeholder", "gpu", "nvidia"],
+                "capabilities": ["gpu", "nvidia"],
             }
         )
     return gpus
@@ -72,7 +72,7 @@ def discover_gpus() -> list[dict]:
     if ids is not None:
         by_id = {gpu["id"]: gpu for gpu in gpus}
         return [
-            by_id.get(gpu_id, {"id": gpu_id, "name": f"GPU {gpu_id}", "capabilities": ["placeholder", "gpu"]})
+            by_id.get(gpu_id, {"id": gpu_id, "name": f"GPU {gpu_id}", "capabilities": ["gpu"]})
             for gpu_id in ids
         ]
     return gpus
@@ -82,8 +82,8 @@ def discover_gpu(requested_gpu_id: str) -> dict:
     if requested_gpu_id == "cpu":
         return {
             "id": "cpu",
-            "name": "CPU utility worker",
-            "capabilities": ["placeholder", "cpu"],
+            "name": "CPU inference worker",
+            "capabilities": ["cpu"],
         }
 
     gpus = discover_gpus()
@@ -94,13 +94,13 @@ def discover_gpu(requested_gpu_id: str) -> dict:
         return {
             "id": requested_gpu_id,
             "name": f"GPU {requested_gpu_id}",
-            "capabilities": ["placeholder", "gpu"],
+            "capabilities": ["gpu"],
         }
 
     if gpus:
         return gpus[0]
     return {
         "id": "cpu",
-        "name": "CPU utility worker",
-        "capabilities": ["placeholder", "cpu"],
+        "name": "CPU inference worker",
+        "capabilities": ["cpu"],
     }

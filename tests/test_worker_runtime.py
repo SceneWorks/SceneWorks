@@ -22,7 +22,6 @@ from scene_worker.runtime import (
     loaded_models_from_adapters,
     resolve_loaded_models,
     resolve_lora_import_target,
-    run_placeholder_job,
     run_video_job,
     upsert_lora_manifest_entry,
     worker_capabilities,
@@ -35,6 +34,7 @@ def test_cpu_worker_does_not_advertise_gpu_generation_capabilities():
 
     assert "image_generate" not in capabilities
     assert "video_generate" not in capabilities
+    assert "placeholder" not in capabilities
     assert "model_download" not in capabilities
     assert "timeline_export" not in capabilities
 
@@ -45,14 +45,18 @@ def test_gpu_worker_advertises_generation_capabilities():
     assert "image_generate" in capabilities
     assert "video_generate" in capabilities
     assert "person_replace" in capabilities
+    assert "placeholder" not in capabilities
 
 
-def test_auto_gpu_worker_can_disable_utility_capabilities(monkeypatch):
-    monkeypatch.setenv("SCENEWORKS_UTILITY_JOBS", "0")
+def test_python_worker_does_not_advertise_rust_utility_capabilities(monkeypatch):
+    monkeypatch.setenv("SCENEWORKS_UTILITY_JOBS", "1")
+    monkeypatch.setenv("SCENEWORKS_LEGACY_MODEL_LORA_JOBS", "1")
+    monkeypatch.setenv("SCENEWORKS_LEGACY_FFMPEG_JOBS", "1")
 
     capabilities = worker_capabilities({"id": "gpu-0", "name": "GPU 0", "capabilities": ["placeholder", "gpu"]})
 
     assert "image_generate" in capabilities
+    assert "placeholder" not in capabilities
     assert "model_download" not in capabilities
     assert "lora_import" not in capabilities
     assert "person_track" not in capabilities
@@ -63,24 +67,6 @@ def test_python_cpu_worker_does_not_advertise_person_tracking_jobs():
 
     assert "person_detect" not in capabilities
     assert "person_track" not in capabilities
-
-
-def test_python_worker_can_advertise_legacy_model_lora_jobs(monkeypatch):
-    monkeypatch.setenv("SCENEWORKS_LEGACY_MODEL_LORA_JOBS", "1")
-
-    capabilities = worker_capabilities({"id": "cpu", "name": "CPU", "capabilities": ["placeholder", "cpu"]})
-
-    assert "model_download" in capabilities
-    assert "lora_import" in capabilities
-
-
-def test_python_worker_can_advertise_legacy_ffmpeg_jobs(monkeypatch):
-    monkeypatch.setenv("SCENEWORKS_LEGACY_FFMPEG_JOBS", "1")
-
-    capabilities = worker_capabilities({"id": "cpu", "name": "CPU", "capabilities": ["placeholder", "cpu"]})
-
-    assert "frame_extract" in capabilities
-    assert "timeline_export" in capabilities
 
 
 def test_lora_import_target_must_stay_under_allowed_roots(tmp_path):
@@ -135,8 +121,8 @@ def test_lora_manifest_upsert_is_atomic_and_preserves_created_at(tmp_path):
     assert payload["loras"] == [{"id": "style", "name": "Style Updated", "createdAt": "first"}]
 
 
-def test_python_cpu_child_honors_explicit_utility_disable(monkeypatch):
-    monkeypatch.setenv("SCENEWORKS_UTILITY_JOBS", "0")
+def test_python_cpu_child_disables_utility_jobs(monkeypatch):
+    monkeypatch.setenv("SCENEWORKS_UTILITY_JOBS", "1")
 
     env = child_environment(SimpleNamespace(), worker_id="python-inference-worker-cpu", gpu_id="cpu")
 
@@ -144,12 +130,11 @@ def test_python_cpu_child_honors_explicit_utility_disable(monkeypatch):
     assert env["SCENEWORKS_UTILITY_JOBS"] == "0"
 
 
-def test_python_cpu_child_keeps_utility_default_when_not_explicit(monkeypatch):
-    monkeypatch.delenv("SCENEWORKS_UTILITY_JOBS", raising=False)
+def test_python_gpu_child_disables_utility_jobs():
+    env = child_environment(SimpleNamespace(), worker_id="worker-gpu-0", gpu_id="0")
 
-    env = child_environment(SimpleNamespace(), worker_id="worker-cpu", gpu_id="cpu")
-
-    assert env["SCENEWORKS_UTILITY_JOBS"] == "1"
+    assert env["CUDA_VISIBLE_DEVICES"] == "0"
+    assert env["SCENEWORKS_UTILITY_JOBS"] == "0"
 
 
 def test_loaded_models_are_collected_from_adapter_cache():
@@ -378,34 +363,6 @@ def test_video_job_reports_dynamic_loaded_models_on_progress_and_keepalive(monke
         ["video-model-running"],
     ]
     assert blocking_models == [["video-model-loaded"], ["video-model-running"]]
-
-
-def test_worker_job_polling_propagates_cancel_requested(monkeypatch):
-    updates = []
-
-    class Api:
-        def post(self, path, payload):
-            if path.endswith("/heartbeat"):
-                return {}
-            if path.endswith("/progress"):
-                updates.append(payload)
-                return {"status": payload["status"], "stage": payload["stage"]}
-            raise AssertionError(path)
-
-        def get(self, _path):
-            return {"cancelRequested": bool(updates)}
-
-    monkeypatch.setattr("scene_worker.runtime.time.sleep", lambda _seconds: None)
-
-    run_placeholder_job(
-        Api(),
-        SimpleNamespace(worker_id="worker-1"),
-        {"id": "job-1", "payload": {}},
-    )
-
-    assert updates[-1]["status"] == "canceled"
-    assert updates[-1]["stage"] == "canceled"
-    assert updates[-1]["message"] == "Worker canceled the job before completion."
 
 
 def test_random_batch_seeds_are_used_per_image():
