@@ -313,7 +313,7 @@ def test_video_job_reports_dynamic_loaded_models_on_progress_and_keepalive(monke
         blocking_models.append(loaded_models())
         return result
 
-    monkeypatch.setattr("scene_worker.runtime.ProceduralVideoAdapter", VideoAdapter)
+    monkeypatch.setattr("scene_worker.runtime.create_video_adapter", lambda: VideoAdapter())
     monkeypatch.setattr("scene_worker.runtime.run_blocking_job_step", run_immediately)
 
     run_video_job(

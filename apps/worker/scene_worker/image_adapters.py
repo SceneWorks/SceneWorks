@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 import hashlib
 import importlib
+import inspect
 import json
 import os
 import warnings
@@ -74,6 +75,14 @@ MODEL_TARGETS = {
         # Uses Turbo weights via ZImageImg2ImgPipeline until the dedicated Edit checkpoint is released.
         "repo": "Tongyi-MAI/Z-Image-Turbo",
         "adapter": "z_image_diffusers",
+    },
+    "qwen_image": {
+        "label": "Qwen Image",
+        "family": "qwen-image",
+        "supportsEdit": False,
+        "steps": 20,
+        "repo": "Qwen/Qwen-Image",
+        "adapter": "qwen_image",
     },
     "qwen_image_edit": {
         "label": "Qwen Image Edit",
@@ -371,6 +380,128 @@ class ZImageDiffusersAdapter:
             return 0.0
 
 
+class QwenImageAdapter:
+    id = "qwen_image"
+
+    def __init__(self) -> None:
+        self._text_pipe: Any | None = None
+        self._edit_pipe: Any | None = None
+        self._loaded_repo: str | None = None
+        self._loaded_model: str | None = None
+
+    def loaded_models(self) -> list[str]:
+        return sorted({value for value in (self._loaded_repo, self._loaded_model) if value})
+
+    def generate(
+        self,
+        *,
+        settings: WorkerSettings,
+        job: dict[str, Any],
+        progress: ProgressCallback,
+        cancel_requested: CancelCallback,
+    ) -> dict[str, Any]:
+        request = image_request_from_job(job)
+        model_target = MODEL_TARGETS.get(request.model, {})
+        if model_target.get("adapter") != self.id:
+            raise RuntimeError(f"{request.model} is not a Qwen Image target.")
+        if request.mode == "edit_image" and not model_supports_edit(request.model):
+            raise RuntimeError(f"{request.model} does not support image editing.")
+
+        progress("loading_model", "loading_model", 0.18, f"Loading {model_target['label']}.")
+        pipe = self._load_pipeline(request, model_target, progress=progress)
+        images = []
+        for index in range(request.count):
+            if cancel_requested():
+                raise InterruptedError("Image generation canceled by user.")
+            seed = resolve_seed(request.seed, request.prompt, index, request.seeds)
+            progress("running", "generating", 0.24 + (index / request.count) * 0.48, f"Running Qwen Image {index + 1} of {request.count}.")
+            images.append(self._run_pipeline(settings, pipe, request, seed))
+
+        return ImageAssetWriter().write_outputs(
+            settings=settings,
+            job=job,
+            images=images,
+            adapter_id=self.id,
+            progress=progress,
+            cancel_requested=cancel_requested,
+            raw_settings={
+                **request.advanced,
+                "repo": self._repo_for_request(request, model_target),
+                "numInferenceSteps": self._num_inference_steps(request, model_target),
+                "guidanceScale": self._guidance_scale(request),
+                "realModelInference": True,
+            },
+        )
+
+    def _load_pipeline(self, request: ImageRequest, model_target: dict[str, Any], progress: ProgressCallback) -> Any:
+        torch = importlib.import_module("torch")
+        diffusers = importlib.import_module("diffusers")
+        repo = self._repo_for_request(request, model_target)
+        device = select_torch_device(torch)
+        dtype = select_torch_dtype(torch, device, request.advanced.get("dtype"))
+        use_edit = request.mode == "edit_image"
+        cached_pipe = self._edit_pipe if use_edit else self._text_pipe
+        if cached_pipe is not None and self._loaded_repo == repo:
+            self._loaded_model = request.model
+            progress("loading_model", "loading_model", 0.22, f"Using cached {model_target['label']}.")
+            return cached_pipe
+
+        pipeline_name = "QwenImageEditPipeline" if use_edit else "QwenImagePipeline"
+        pipeline_class = getattr(diffusers, pipeline_name, None)
+        if pipeline_class is None:
+            raise RuntimeError(f"The installed diffusers package does not expose {pipeline_name}. Install the latest diffusers build.")
+
+        progress("loading_model", "loading_model", 0.2, f"Loading {model_target['label']} model files.")
+        pipe = pipeline_class.from_pretrained(repo, torch_dtype=dtype)
+        if bool(request.advanced.get("cpuOffload", False)) and hasattr(pipe, "enable_model_cpu_offload"):
+            pipe.enable_model_cpu_offload()
+        else:
+            pipe.to(device)
+        if hasattr(pipe, "enable_vae_tiling"):
+            pipe.enable_vae_tiling()
+
+        if use_edit:
+            self._edit_pipe = pipe
+        else:
+            self._text_pipe = pipe
+        self._loaded_repo = repo
+        self._loaded_model = request.model
+        return pipe
+
+    def _run_pipeline(self, settings: WorkerSettings, pipe: Any, request: ImageRequest, seed: int) -> Image.Image:
+        torch = importlib.import_module("torch")
+        device = select_torch_device(torch)
+        generator = torch.Generator("cuda" if device == "cuda" else "cpu").manual_seed(seed)
+        kwargs = {
+            "prompt": request.prompt,
+            "height": request.height,
+            "width": request.width,
+            "num_inference_steps": self._num_inference_steps(request, MODEL_TARGETS[request.model]),
+            "guidance_scale": self._guidance_scale(request),
+            "generator": generator,
+        }
+        if request.negative_prompt:
+            kwargs["negative_prompt"] = request.negative_prompt
+        if request.mode == "edit_image":
+            kwargs["image"] = load_source_image(settings, request)
+            kwargs["strength"] = float(request.advanced.get("strength", 0.6))
+            kwargs["true_cfg_scale"] = float(request.advanced.get("trueCfgScale", 4.0))
+        output = pipe(**filter_call_kwargs(pipe, kwargs))
+        return output.images[0].convert("RGB")
+
+    def _repo_for_request(self, request: ImageRequest, model_target: dict[str, Any]) -> str:
+        return request.advanced.get("modelRepo") or model_target["repo"]
+
+    def _num_inference_steps(self, request: ImageRequest, model_target: dict[str, Any]) -> int:
+        return safe_int(request.advanced.get("steps"), model_target["steps"], 1, 80)
+
+    def _guidance_scale(self, request: ImageRequest) -> float:
+        try:
+            return float(request.advanced.get("guidanceScale", 4.0))
+        except (TypeError, ValueError):
+            return 4.0
+
+
 class ProceduralImageAdapter:
     id = "procedural_preview"
 
@@ -421,7 +552,7 @@ class ProceduralImageAdapter:
 def create_image_adapter(
     job: dict[str, Any],
     adapters: dict[str, object] | None = None,
-) -> ProceduralImageAdapter | ZImageDiffusersAdapter:
+) -> ProceduralImageAdapter | ZImageDiffusersAdapter | QwenImageAdapter:
     payload = job.get("payload", {})
     requested = os.getenv("SCENEWORKS_IMAGE_ADAPTER", payload.get("adapter", "")).strip()
     if requested == "procedural_preview":
@@ -429,11 +560,23 @@ def create_image_adapter(
     model_target = MODEL_TARGETS.get(payload.get("model", "z_image_turbo"), {})
     if model_target.get("adapter") == ZImageDiffusersAdapter.id:
         return adapters.get("z_image_diffusers") if adapters else ZImageDiffusersAdapter()
+    if model_target.get("adapter") == QwenImageAdapter.id:
+        return adapters.get("qwen_image") if adapters else QwenImageAdapter()
     return adapters.get("procedural_preview") if adapters else ProceduralImageAdapter()
 
 
 def model_supports_edit(model_id: str) -> bool:
     return bool(MODEL_TARGETS.get(model_id, {}).get("supportsEdit"))
+
+
+def filter_call_kwargs(pipe: Any, kwargs: dict[str, Any]) -> dict[str, Any]:
+    try:
+        accepted = set(inspect.signature(pipe.__call__).parameters)
+    except (TypeError, ValueError):
+        return kwargs
+    if not accepted:
+        return kwargs
+    return {key: value for key, value in kwargs.items() if key in accepted and value is not None}
 
 
 def resolve_seed(seed: int | None, prompt: str, index: int, seeds: list[int] | None = None) -> int:
