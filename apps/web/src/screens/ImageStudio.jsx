@@ -10,6 +10,8 @@ import {
   presetPromptParts as buildPresetPromptParts,
 } from "../presetUtils.js";
 
+const completedResultFallbackMs = 30000;
+
 export function ImageStudio({
   activeProject,
   assets,
@@ -47,6 +49,7 @@ export function ImageStudio({
   const [selectedLoraIds, setSelectedLoraIds] = useState([]);
   const [showIncompatibleLoras, setShowIncompatibleLoras] = useState(false);
   const [submitting, setSubmitting] = useState(false);
+  const [resultFallbackTick, setResultFallbackTick] = useState(0);
 
   function serializeLora(lora, override = {}) {
     return {
@@ -186,7 +189,37 @@ export function ImageStudio({
     return assetIds.length > 0 && assetIds.every((id) => assets.some((asset) => asset.id === id));
   }
 
-  const localJobs = trackedLocalJobs.filter((job) => job.status !== "completed" || !resultVisible(job));
+  function completedAnchorMs(job) {
+    return Date.parse(job.completedAt ?? job.updatedAt ?? "");
+  }
+
+  function completedWaitExpired(job, nowMs = Date.now()) {
+    const anchorMs = completedAnchorMs(job);
+    return Number.isFinite(anchorMs) && nowMs - anchorMs > completedResultFallbackMs;
+  }
+
+  useEffect(() => {
+    const nowMs = Date.now();
+    const pendingCompletedJobs = trackedLocalJobs.filter(
+      (job) =>
+        job.status === "completed" &&
+        Number.isFinite(completedAnchorMs(job)) &&
+        !resultVisible(job) &&
+        !completedWaitExpired(job, nowMs),
+    );
+    if (!pendingCompletedJobs.length) {
+      return undefined;
+    }
+    const nextDelay = Math.min(
+      ...pendingCompletedJobs.map((job) => Math.max(0, completedResultFallbackMs - (nowMs - completedAnchorMs(job)))),
+    );
+    const timer = window.setTimeout(() => setResultFallbackTick((value) => value + 1), nextDelay + 50);
+    return () => window.clearTimeout(timer);
+  }, [assets, latestAssets, trackedLocalJobs, resultFallbackTick]);
+
+  const localJobs = trackedLocalJobs.filter(
+    (job) => job.status !== "completed" || (!resultVisible(job) && !completedWaitExpired(job)),
+  );
   const hasReviewContent = Boolean(localJobs.length || latestAssets.length);
 
   async function submit(event) {

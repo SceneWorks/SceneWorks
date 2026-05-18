@@ -162,6 +162,80 @@ describe("SceneWorks app shell", () => {
     expect(container.textContent).toContain("V1 placeholder tracking");
   });
 
+  it("keeps completed Replace Person detections visible in Video Studio", async () => {
+    global.fetch.mockImplementation((url) => {
+      const path = new URL(url).pathname;
+      if (path.endsWith("/health")) {
+        return Promise.resolve(response({ status: "ok", authRequired: false }));
+      }
+      if (path.endsWith("/access")) {
+        return Promise.resolve(response({ authRequired: false }));
+      }
+      if (path.endsWith("/projects")) {
+        return Promise.resolve(response([{ id: "project-1", name: "Project One" }]));
+      }
+      if (path.endsWith("/models")) {
+        return Promise.resolve(
+          response([
+            {
+              id: "wan_replace",
+              name: "Wan Replace",
+              type: "video",
+              capabilities: ["replace_person", "image_to_video", "text_to_video"],
+              defaults: { duration: 4, fps: 24, resolution: "1280x720", quality: "balanced" },
+              limits: { durations: [4], fps: [24], resolutions: ["1280x720"] },
+            },
+          ]),
+        );
+      }
+      if (path.endsWith("/jobs")) {
+        return Promise.resolve(
+          response([
+            {
+              id: "detect-job-1",
+              type: "person_detect",
+              status: "completed",
+              projectId: "project-1",
+              payload: { sourceAssetId: "clip-1" },
+              result: {
+                frameAssetId: "frame-1",
+                detections: [{ id: "person-1", label: "person", confidence: 0.82, box: { x: 0.1, y: 0.2, width: 0.3, height: 0.4 } }],
+              },
+              createdAt: "2026-05-18T22:00:00Z",
+            },
+          ]),
+        );
+      }
+      if (path.endsWith("/assets")) {
+        return Promise.resolve(
+          response([
+            { id: "clip-1", type: "video", displayName: "Source Clip", file: { mimeType: "video/mp4" }, status: {} },
+            { id: "frame-1", type: "image", displayName: "Detection Frame", file: { mimeType: "image/png" }, status: {} },
+          ]),
+        );
+      }
+      return Promise.resolve(response([]));
+    });
+
+    root = createRoot(container);
+    await act(async () => {
+      root.render(<App />);
+    });
+    await settle();
+
+    await act(async () => {
+      [...container.querySelectorAll("button")].find((button) => button.textContent === "Video").click();
+    });
+    await settle();
+    await act(async () => {
+      [...container.querySelectorAll("button")].find((button) => button.textContent === "Replace Person").click();
+    });
+    await settle();
+
+    expect(container.textContent).toContain("1 candidates");
+    expect(container.textContent).not.toContain("No analysis yet");
+  });
+
   it("keeps image generation in the studio and shows local progress", async () => {
     const createdJobs = [];
     global.fetch.mockImplementation((url, options = {}) => {
@@ -741,6 +815,48 @@ describe("SceneWorks app shell", () => {
 
     expect(container.textContent).not.toContain("Finished. Fetching result...");
     expect(container.textContent).not.toContain("No fresh image batch");
+  });
+
+  it("hides completed image progress with stale missing result metadata", async () => {
+    const staleCompletedJob = {
+      id: "image-job-stale",
+      type: "image_generate",
+      status: "completed",
+      stage: "completed",
+      progress: 1,
+      elapsedSeconds: 8,
+      requestedGpu: "auto",
+      updatedAt: "2026-05-18T00:00:00Z",
+      payload: { prompt: "missing result metadata" },
+      result: {},
+    };
+
+    root = createRoot(container);
+    await act(async () => {
+      root.render(
+        <ImageStudio
+          activeProject={{ id: "project-1", name: "Noir" }}
+          assets={[]}
+          characters={[]}
+          createImageJob={() => {}}
+          deleteAsset={() => {}}
+          gpuOptions={["auto"]}
+          imageModels={[{ id: "z_image_turbo", name: "Z-Image", type: "image", family: "z-image" }]}
+          latestAssets={[]}
+          localJobs={[staleCompletedJob]}
+          loras={[]}
+          onPreview={() => {}}
+          purgeAsset={() => {}}
+          requestedGpu="auto"
+          selectedAsset={null}
+          setRequestedGpu={() => {}}
+          updateAssetStatus={() => {}}
+        />,
+      );
+    });
+
+    expect(container.textContent).not.toContain("Finished. Fetching result...");
+    expect(container.textContent).toContain("No fresh image batch");
   });
 
   it("submits compatible image LoRAs while capping simple user selections at two", async () => {

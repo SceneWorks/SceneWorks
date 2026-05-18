@@ -1316,6 +1316,7 @@ export function App() {
             latestAssets={latestVideoAssets}
             launchRequest={studioLaunch}
             loras={loras}
+            jobs={jobs}
             localJobs={videoLocalJobs}
             onLocalJobCreated={(job) => rememberLocalGenerationJob("video", job)}
             onOpenQueue={() => setActiveView("Queue")}
