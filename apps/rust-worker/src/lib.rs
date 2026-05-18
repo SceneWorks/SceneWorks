@@ -10,7 +10,7 @@ use reqwest::StatusCode;
 use sceneworks_core::contracts::{
     ClaimRequest, ClaimResponse, ContractNumber, JobSnapshot, JobStatus, JobType, JsonObject,
     ProgressRequest, ProgressStage, WorkerCapability, WorkerHeartbeatRequest,
-    WorkerRegisterRequest, WorkerSnapshot, WorkerStatus,
+    WorkerRegisterRequest, WorkerSnapshot, WorkerStatus, WorkerUtilizationSnapshot,
 };
 use sceneworks_core::lora_url::{
     lora_source_url_file_name, lora_source_url_file_stem, parse_lora_source_url_with_private,
@@ -228,11 +228,12 @@ where
     Ok(response.json::<T>().await?)
 }
 
-#[derive(Debug, Clone, Eq, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 struct DiscoveredGpu {
     id: String,
     name: String,
     capabilities: Vec<WorkerCapability>,
+    utilization: Option<WorkerUtilizationSnapshot>,
 }
 
 #[derive(Debug, Clone, Eq, PartialEq)]
@@ -467,7 +468,7 @@ async fn query_nvidia_gpus() -> Vec<DiscoveredGpu> {
         Duration::from_secs(3),
         Command::new("nvidia-smi")
             .args([
-                "--query-gpu=index,name,memory.total",
+                "--query-gpu=index,name,memory.total,memory.used,memory.free,utilization.gpu",
                 "--format=csv,noheader,nounits",
             ])
             .output(),
@@ -486,21 +487,56 @@ fn parse_nvidia_smi_gpus(output: &str) -> Vec<DiscoveredGpu> {
         .trim()
         .lines()
         .filter_map(|line| {
-            let parts = line.splitn(3, ',').map(str::trim).collect::<Vec<_>>();
-            let [index, name, memory_mb] = parts.as_slice() else {
+            let parts = line.split(',').map(str::trim).collect::<Vec<_>>();
+            if parts.len() < 3 {
                 return None;
-            };
+            }
+            let index = parts[0];
+            let name = parts[1];
+            let memory_mb = parts[2];
             Some(DiscoveredGpu {
-                id: (*index).to_owned(),
+                id: index.to_owned(),
                 name: format!("{name} ({memory_mb} MB)"),
                 capabilities: vec![
                     WorkerCapability::Placeholder,
                     WorkerCapability::Gpu,
                     WorkerCapability::Unknown("nvidia".to_owned()),
                 ],
+                utilization: utilization_from_parts(&parts),
             })
         })
         .collect()
+}
+
+fn utilization_from_parts(parts: &[&str]) -> Option<WorkerUtilizationSnapshot> {
+    if parts.len() < 6 {
+        return None;
+    }
+    Some(WorkerUtilizationSnapshot {
+        memory_total_mb: parse_u64(parts[2]),
+        memory_used_mb: parse_u64(parts[3]),
+        memory_free_mb: parse_u64(parts[4]),
+        gpu_load_percent: parse_f64(parts[5]),
+    })
+}
+
+fn parse_u64(value: &str) -> Option<u64> {
+    value.parse().ok()
+}
+
+fn parse_f64(value: &str) -> Option<f64> {
+    value.parse().ok()
+}
+
+async fn gpu_utilization(gpu_id: &str) -> Option<WorkerUtilizationSnapshot> {
+    if gpu_id == "cpu" {
+        return None;
+    }
+    query_nvidia_gpus()
+        .await
+        .into_iter()
+        .find(|gpu| gpu.id == gpu_id)
+        .and_then(|gpu| gpu.utilization)
 }
 
 fn visible_gpu_ids_from_env() -> Option<Vec<String>> {
@@ -528,6 +564,7 @@ fn cpu_gpu() -> DiscoveredGpu {
         id: "cpu".to_owned(),
         name: "Rust CPU utility worker".to_owned(),
         capabilities: vec![WorkerCapability::Placeholder, WorkerCapability::Cpu],
+        utilization: None,
     }
 }
 
@@ -536,6 +573,7 @@ fn fallback_gpu(gpu_id: &str) -> DiscoveredGpu {
         id: gpu_id.to_owned(),
         name: format!("GPU {gpu_id}"),
         capabilities: vec![WorkerCapability::Placeholder, WorkerCapability::Gpu],
+        utilization: None,
     }
 }
 
@@ -724,6 +762,7 @@ async fn register_worker(
             gpu_name: Some(gpu.name.clone()),
             capabilities: worker_capabilities(gpu),
             loaded_models: Vec::new(),
+            utilization: gpu.utilization.clone(),
             extra: BTreeMap::new(),
         },
     )
@@ -742,6 +781,7 @@ async fn heartbeat(
             status,
             current_job_id: current_job_id.map(str::to_owned),
             loaded_models: Vec::new(),
+            utilization: gpu_utilization(&settings.gpu_id).await,
             extra: BTreeMap::new(),
         },
     )
@@ -3849,6 +3889,7 @@ mod tests {
     use axum::response::{IntoResponse, Response};
     use axum::routing::{get, post};
     use axum::{Json, Router};
+    use sceneworks_core::contracts::WorkerUtilizationSnapshot;
     use serde_json::{json, Value};
     use tempfile::tempdir;
 
@@ -3899,8 +3940,8 @@ mod tests {
     #[test]
     fn nvidia_smi_parsing_and_visible_device_filtering_match_python_worker() {
         let gpus = parse_nvidia_smi_gpus(
-            "0, NVIDIA RTX PRO 6000 Blackwell Max-Q Workstation Edition, 97887\n\
-             1, NVIDIA RTX PRO 6000 Blackwell Max-Q Workstation Edition, 97887\n",
+            "0, NVIDIA RTX PRO 6000 Blackwell Max-Q Workstation Edition, 97887, 4096, 93791, 12\n\
+             1, NVIDIA RTX PRO 6000 Blackwell Max-Q Workstation Edition, 97887, 8192, 89695, 25\n",
         );
 
         assert_eq!(
@@ -3919,6 +3960,15 @@ mod tests {
             .capabilities
             .iter()
             .any(|capability| capability.as_str() == "placeholder"));
+        assert_eq!(
+            gpus[0].utilization,
+            Some(WorkerUtilizationSnapshot {
+                memory_total_mb: Some(97887),
+                memory_used_mb: Some(4096),
+                memory_free_mb: Some(93791),
+                gpu_load_percent: Some(12.0),
+            })
+        );
 
         assert_eq!(visible_gpu_ids(None), None);
         assert_eq!(visible_gpu_ids(Some("all")), None);

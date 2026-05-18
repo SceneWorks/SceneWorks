@@ -817,6 +817,7 @@ describe("SceneWorks app shell", () => {
               gpuName: "Fixture GPU 0",
               status: "idle",
               capabilities: ["placeholder", "gpu", "image_generate"],
+              utilization: { memoryTotalMb: 24576, memoryUsedMb: 4096, memoryFreeMb: 20480, gpuLoadPercent: 12 },
             },
             {
               id: "rust-gpu-1",
@@ -857,7 +858,10 @@ describe("SceneWorks app shell", () => {
     await settle();
 
     expect(container.textContent).toContain("Fixture GPU 0");
-    expect(container.textContent).toContain("Rust CPU utility worker");
+    expect(container.textContent).toContain("20.0 GB");
+    expect(container.textContent).toContain("4.0 GB / 24.0 GB");
+    expect(container.textContent).toContain("12%");
+    expect(container.textContent).not.toContain("Rust CPU utility worker");
     expect(container.textContent).not.toContain("Rust placeholder GPU");
     expect(container.textContent).not.toContain("Stale GPU");
     expect([...container.querySelector("#queue-gpu").options].map((option) => option.value)).toEqual(["auto", "0"]);
@@ -979,6 +983,58 @@ describe("SceneWorks app shell", () => {
     expect(container.textContent).toContain("Waiting for model download Qwen Image Edit to finish.");
     expect(container.textContent).toContain("Waiting for dependency job-dependency to finish.");
     expect(container.textContent).toContain("Warm: z_image_turbo");
+  });
+
+  it("updates Queue GPU utilization when worker props change", async () => {
+    const queueProps = {
+      activeProject: { id: "project-1", name: "Project 1" },
+      createJob: (event) => event.preventDefault(),
+      filteredJobs: [],
+      gpuOptions: ["auto", "0"],
+      jobAction: () => {},
+      jobPrompt: "Placeholder generation",
+      projectFilter: "all",
+      projects: [{ id: "project-1", name: "Project 1" }],
+      requestedGpu: "auto",
+      setJobPrompt: () => {},
+      setProjectFilter: () => {},
+      setRequestedGpu: () => {},
+    };
+    const worker = {
+      id: "python-gpu-0",
+      gpuId: "0",
+      gpuName: "Fixture GPU 0",
+      status: "idle",
+      capabilities: ["placeholder", "gpu", "image_generate"],
+      loadedModels: [],
+      utilization: { memoryTotalMb: 24576, memoryUsedMb: 4096, memoryFreeMb: 20480, gpuLoadPercent: 12 },
+    };
+
+    root = createRoot(container);
+    await act(async () => {
+      root.render(<QueueScreen {...queueProps} workers={[worker]} />);
+    });
+
+    expect(container.textContent).toContain("20.0 GB");
+    expect(container.textContent).toContain("12%");
+
+    await act(async () => {
+      root.render(
+        <QueueScreen
+          {...queueProps}
+          workers={[
+            {
+              ...worker,
+              utilization: { memoryTotalMb: 24576, memoryUsedMb: 12288, memoryFreeMb: 12288, gpuLoadPercent: 67 },
+            },
+          ]}
+        />,
+      );
+    });
+
+    expect(container.textContent).toContain("12.0 GB / 24.0 GB");
+    expect(container.textContent).toContain("67%");
+    expect(container.textContent).not.toContain("20.0 GB");
   });
 
   it("ignores duplicate image submits while job creation is in flight", async () => {

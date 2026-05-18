@@ -3,7 +3,7 @@ use std::path::PathBuf;
 
 use rusqlite::{params, Connection};
 use sceneworks_core::contracts::{
-    JobStatus, JobType, ProgressStage, WorkerCapability, WorkerStatus,
+    JobStatus, JobType, ProgressStage, WorkerCapability, WorkerStatus, WorkerUtilizationSnapshot,
 };
 use sceneworks_core::jobs_store::{
     CreateJob, DuplicateJob, JobsStore, JobsStoreError, ProgressUpdate, RegisterWorker,
@@ -49,6 +49,7 @@ fn register_image_worker(store: &JobsStore) {
             gpu_name: Some("GPU 0".to_owned()),
             capabilities: vec![WorkerCapability::ImageGenerate],
             loaded_models: Vec::new(),
+            utilization: None,
         })
         .expect("worker registers");
 }
@@ -105,6 +106,7 @@ fn non_gpu_jobs_can_claim_while_gpu_is_busy() {
                 WorkerCapability::ModelDownload,
             ],
             loaded_models: Vec::new(),
+            utilization: None,
         })
         .expect("worker registers");
 
@@ -150,6 +152,7 @@ fn claim_skips_jobs_not_supported_by_worker_capabilities() {
             gpu_name: None,
             capabilities: vec![WorkerCapability::ModelDownload],
             loaded_models: Vec::new(),
+            utilization: None,
         })
         .expect("worker registers");
     store
@@ -191,6 +194,7 @@ fn auto_claim_prefers_job_matching_loaded_model() {
                 "z_image_turbo".to_owned(),
                 "Tongyi-MAI/Z-Image-Turbo".to_owned(),
             ],
+            utilization: None,
         })
         .expect("worker registers");
     let other_model_job = store
@@ -225,6 +229,7 @@ fn loaded_model_preference_does_not_skip_explicit_gpu_job() {
             gpu_name: None,
             capabilities: vec![WorkerCapability::ImageGenerate],
             loaded_models: vec!["z_image_turbo".to_owned()],
+            utilization: None,
         })
         .expect("worker registers");
     let explicit_job = store
@@ -257,6 +262,7 @@ fn explicit_gpu_job_beats_younger_warm_auto_match() {
             gpu_name: None,
             capabilities: vec![WorkerCapability::ImageGenerate],
             loaded_models: vec!["model-x".to_owned()],
+            utilization: None,
         })
         .expect("worker registers");
     let auto_other = store
@@ -295,6 +301,56 @@ fn explicit_gpu_job_beats_younger_warm_auto_match() {
 }
 
 #[test]
+fn auto_gpu_claim_defers_to_less_loaded_compatible_worker() {
+    let store = store("auto-gpu-utilization-preference");
+    store
+        .register_worker(RegisterWorker {
+            worker_id: "worker-loaded".to_owned(),
+            gpu_id: "gpu-0".to_owned(),
+            gpu_name: Some("Loaded GPU".to_owned()),
+            capabilities: vec![WorkerCapability::ImageGenerate],
+            loaded_models: Vec::new(),
+            utilization: Some(WorkerUtilizationSnapshot {
+                memory_total_mb: Some(24_000),
+                memory_used_mb: Some(22_000),
+                memory_free_mb: Some(2_000),
+                gpu_load_percent: Some(92.0),
+            }),
+        })
+        .expect("loaded worker registers");
+    store
+        .register_worker(RegisterWorker {
+            worker_id: "worker-idle".to_owned(),
+            gpu_id: "gpu-1".to_owned(),
+            gpu_name: Some("Idle GPU".to_owned()),
+            capabilities: vec![WorkerCapability::ImageGenerate],
+            loaded_models: Vec::new(),
+            utilization: Some(WorkerUtilizationSnapshot {
+                memory_total_mb: Some(24_000),
+                memory_used_mb: Some(4_000),
+                memory_free_mb: Some(20_000),
+                gpu_load_percent: Some(8.0),
+            }),
+        })
+        .expect("idle worker registers");
+    let job = store
+        .create_job(image_job(object(json!({ "prompt": "mist" }))))
+        .expect("job creates");
+
+    assert!(store
+        .claim_next_job("worker-loaded")
+        .expect("loaded claim succeeds")
+        .is_none());
+    let claimed = store
+        .claim_next_job("worker-idle")
+        .expect("idle claim succeeds")
+        .expect("idle worker claims");
+
+    assert_eq!(claimed.id, job.id);
+    assert_eq!(claimed.assigned_gpu.as_deref(), Some("gpu-1"));
+}
+
+#[test]
 fn cpu_utility_worker_does_not_claim_gpu_generation_job() {
     let store = store("cpu-utility-no-gpu-jobs");
     store
@@ -310,6 +366,7 @@ fn cpu_utility_worker_does_not_claim_gpu_generation_job() {
                 WorkerCapability::TimelineExport,
             ],
             loaded_models: Vec::new(),
+            utilization: None,
         })
         .expect("worker registers");
     store
@@ -342,6 +399,7 @@ fn idle_heartbeat_interrupts_previous_active_job() {
             status: WorkerStatus::Idle,
             current_job_id: None,
             loaded_models: Vec::new(),
+            utilization: None,
         })
         .expect("heartbeat succeeds");
     let job = store.get_job(&created.id).expect("job loads");

@@ -12,7 +12,7 @@ from typing import Any, Callable
 
 import httpx
 
-from .gpu import cpu_worker_id, discover_gpu, discover_gpus, gpu_worker_id
+from .gpu import cpu_worker_id, discover_gpu, discover_gpus, gpu_utilization, gpu_worker_id
 from .image_adapters import ProceduralImageAdapter, QwenImageAdapter, ZImageDiffusersAdapter, create_image_adapter
 from .settings import WorkerSettings
 from .video_adapters import create_video_adapter
@@ -80,6 +80,8 @@ def register_worker(api: ApiClient, settings: WorkerSettings, gpu: dict, loaded_
         "capabilities": worker_capabilities(gpu),
         "loadedModels": loaded_models or [],
     }
+    if gpu.get("utilization"):
+        payload["utilization"] = gpu["utilization"]
     worker = api.post("/api/v1/workers/register", payload)
     emit({"event": "registered", "worker": worker, "reportedAt": now()})
 
@@ -91,9 +93,13 @@ def heartbeat(
     current_job_id: str | None = None,
     loaded_models: list[str] | None = None,
 ) -> None:
+    payload = {"status": status, "currentJobId": current_job_id, "loadedModels": loaded_models or []}
+    utilization = gpu_utilization(getattr(settings, "gpu_id", "cpu"))
+    if utilization:
+        payload["utilization"] = utilization
     api.post(
         f"/api/v1/workers/{settings.worker_id}/heartbeat",
-        {"status": status, "currentJobId": current_job_id, "loadedModels": loaded_models or []},
+        payload,
     )
 
 

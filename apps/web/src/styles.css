@@ -1575,15 +1575,65 @@ button:disabled {
 
 .worker-card {
   display: grid;
-  gap: 6px;
+  gap: 10px;
   padding: 12px;
   min-width: 0;
+}
+
+.worker-card-header,
+.worker-stat-grid {
+  display: grid;
+  gap: 4px;
+}
+
+.worker-card-header {
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: start;
+}
+
+.worker-card-header span {
+  color: #6ec6b8;
+  font-size: 12px;
+  text-align: right;
+}
+
+.worker-stat-grid {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.worker-stat-grid span {
+  min-width: 0;
+}
+
+.worker-stat-grid strong {
+  display: block;
+  margin-top: 2px;
+  font-size: 13px;
+  overflow-wrap: anywhere;
 }
 
 .worker-card span,
 .worker-card small {
   color: #aaa397;
   overflow-wrap: anywhere;
+}
+
+.worker-meter {
+  height: 7px;
+  overflow: hidden;
+  background: #191815;
+  border: 1px solid #3c3a34;
+}
+
+.worker-meter span {
+  display: block;
+  height: 100%;
+  background: #6ec6b8;
+  transition: width 180ms ease;
+}
+
+.worker-meter.gpu-load span {
+  background: #d7b46a;
 }
 
 .job-list {

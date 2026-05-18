@@ -102,6 +102,83 @@ function workerStatusLine(worker) {
   return worker.status === "idle" ? "Ready" : worker.status;
 }
 
+function isGpuWorker(worker) {
+  // Queue resource cards are for live GPU capacity; CPU utility workers stay out of this panel.
+  return worker.gpuId && worker.gpuId !== "cpu" && Array.isArray(worker.capabilities) && worker.capabilities.includes("gpu");
+}
+
+function formatMemory(mb) {
+  if (!Number.isFinite(mb)) {
+    return "Unknown";
+  }
+  if (mb >= 1024) {
+    return `${(mb / 1024).toFixed(1)} GB`;
+  }
+  return `${Math.round(mb)} MB`;
+}
+
+function boundedPercent(value) {
+  if (!Number.isFinite(value)) {
+    return null;
+  }
+  return Math.min(100, Math.max(0, value));
+}
+
+function memoryUsagePercent(utilization) {
+  const total = Number(utilization?.memoryTotalMb);
+  const used = Number(utilization?.memoryUsedMb);
+  if (!Number.isFinite(total) || total <= 0 || !Number.isFinite(used)) {
+    return null;
+  }
+  return boundedPercent((used / total) * 100);
+}
+
+function utilizationLabel(value) {
+  return Number.isFinite(value) ? `${Math.round(value)}%` : "Unknown";
+}
+
+function WorkerCard({ worker }) {
+  const utilization = worker.utilization ?? {};
+  const memoryPercent = memoryUsagePercent(utilization);
+  const loadPercent = boundedPercent(Number(utilization.gpuLoadPercent));
+  const freeMb = Number(utilization.memoryFreeMb);
+  const usedMb = Number(utilization.memoryUsedMb);
+  const totalMb = Number(utilization.memoryTotalMb);
+  return (
+    <div className="worker-card">
+      <div className="worker-card-header">
+        <strong>{worker.gpuName ?? `GPU ${worker.gpuId}`}</strong>
+        <span>{workerStatusLine(worker)}</span>
+      </div>
+      <div className="worker-stat-grid">
+        <span>
+          <small>Available</small>
+          <strong>{formatMemory(freeMb)}</strong>
+        </span>
+        <span>
+          <small>Memory</small>
+          <strong>{Number.isFinite(usedMb) && Number.isFinite(totalMb) ? `${formatMemory(usedMb)} / ${formatMemory(totalMb)}` : "Unknown"}</strong>
+        </span>
+        <span>
+          <small>Load</small>
+          <strong>{utilizationLabel(loadPercent)}</strong>
+        </span>
+      </div>
+      {memoryPercent === null ? null : (
+        <div className="worker-meter" aria-label={`GPU memory usage ${utilizationLabel(memoryPercent)}`}>
+          <span style={{ width: `${memoryPercent}%` }} />
+        </div>
+      )}
+      {loadPercent === null ? null : (
+        <div className="worker-meter gpu-load" aria-label={`GPU load ${utilizationLabel(loadPercent)}`}>
+          <span style={{ width: `${loadPercent}%` }} />
+        </div>
+      )}
+      <small>{worker.loadedModels?.length ? `Warm: ${worker.loadedModels.join(", ")}` : "No warm model"}</small>
+    </div>
+  );
+}
+
 export function QueueScreen({
   activeProject,
   createJob,
@@ -119,6 +196,7 @@ export function QueueScreen({
   workers,
 }) {
   const workersById = useMemo(() => new Map(workers.map((worker) => [worker.id, worker])), [workers]);
+  const gpuWorkers = useMemo(() => workers.filter(isGpuWorker), [workers]);
   return (
     <section className="main-surface queue-surface">
       <div className="queue-header">
@@ -156,19 +234,13 @@ export function QueueScreen({
       </div>
 
       <div className="worker-grid">
-        {workers.length === 0 ? (
+        {gpuWorkers.length === 0 ? (
           <div className="worker-card">
-            <strong>No workers registered</strong>
-            <span>Start the worker service to claim queued jobs.</span>
+            <strong>No GPU workers registered</strong>
+            <span>Start a GPU worker to claim generation jobs.</span>
           </div>
         ) : (
-          workers.map((worker) => (
-            <div className="worker-card" key={worker.id}>
-              <strong>{worker.gpuName ?? worker.gpuId}</strong>
-              <span>{workerStatusLine(worker)}</span>
-              <small>{worker.loadedModels?.length ? `Warm: ${worker.loadedModels.join(", ")}` : "No warm model"}</small>
-            </div>
-          ))
+          gpuWorkers.map((worker) => <WorkerCard key={worker.id} worker={worker} />)
         )}
       </div>
 

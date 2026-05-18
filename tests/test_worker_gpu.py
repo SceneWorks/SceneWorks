@@ -15,6 +15,17 @@ def test_parse_nvidia_smi_gpus_returns_all_devices():
     assert "placeholder" not in gpus[1]["capabilities"]
 
 
+def test_parse_nvidia_smi_gpus_includes_live_utilization_when_available():
+    gpus = parse_nvidia_smi_gpus("0, NVIDIA RTX, 24576, 4096, 20480, 12\n")
+
+    assert gpus[0]["utilization"] == {
+        "memoryTotalMb": 24576,
+        "memoryUsedMb": 4096,
+        "memoryFreeMb": 20480,
+        "gpuLoadPercent": 12.0,
+    }
+
+
 def test_gpu_worker_id_preserves_existing_first_worker_id():
     assert gpu_worker_id("worker-gpu-auto-0", "0") == "worker-gpu-auto-0"
     assert gpu_worker_id("worker-gpu-auto-0", "1") == "worker-gpu-auto-1"
