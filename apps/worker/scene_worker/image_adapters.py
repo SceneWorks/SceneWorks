@@ -3,7 +3,6 @@ from __future__ import annotations
 from dataclasses import dataclass
 import hashlib
 import importlib
-import inspect
 import json
 import os
 import warnings
@@ -25,6 +24,7 @@ from sceneworks_shared import (
     write_json,
 )
 
+from .adapter_utils import filter_call_kwargs
 from .settings import WorkerSettings
 
 
@@ -386,11 +386,12 @@ class QwenImageAdapter:
     def __init__(self) -> None:
         self._text_pipe: Any | None = None
         self._edit_pipe: Any | None = None
-        self._loaded_repo: str | None = None
+        self._text_repo: str | None = None
+        self._edit_repo: str | None = None
         self._loaded_model: str | None = None
 
     def loaded_models(self) -> list[str]:
-        return sorted({value for value in (self._loaded_repo, self._loaded_model) if value})
+        return sorted({value for value in (self._text_repo, self._edit_repo, self._loaded_model) if value})
 
     def generate(
         self,
@@ -441,10 +442,19 @@ class QwenImageAdapter:
         dtype = select_torch_dtype(torch, device, request.advanced.get("dtype"))
         use_edit = request.mode == "edit_image"
         cached_pipe = self._edit_pipe if use_edit else self._text_pipe
-        if cached_pipe is not None and self._loaded_repo == repo:
+        cached_repo = self._edit_repo if use_edit else self._text_repo
+        if cached_pipe is not None and cached_repo == repo:
             self._loaded_model = request.model
             progress("loading_model", "loading_model", 0.22, f"Using cached {model_target['label']}.")
             return cached_pipe
+        if cached_pipe is not None:
+            if use_edit:
+                self._edit_pipe = None
+                self._edit_repo = None
+            else:
+                self._text_pipe = None
+                self._text_repo = None
+            self._empty_cuda_cache(torch)
 
         pipeline_name = "QwenImageEditPipeline" if use_edit else "QwenImagePipeline"
         pipeline_class = getattr(diffusers, pipeline_name, None)
@@ -462,11 +472,16 @@ class QwenImageAdapter:
 
         if use_edit:
             self._edit_pipe = pipe
+            self._edit_repo = repo
         else:
             self._text_pipe = pipe
-        self._loaded_repo = repo
+            self._text_repo = repo
         self._loaded_model = request.model
         return pipe
+
+    def _empty_cuda_cache(self, torch: Any) -> None:
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
 
     def _run_pipeline(self, settings: WorkerSettings, pipe: Any, request: ImageRequest, seed: int) -> Image.Image:
         torch = importlib.import_module("torch")
@@ -555,8 +570,16 @@ def create_image_adapter(
 ) -> ProceduralImageAdapter | ZImageDiffusersAdapter | QwenImageAdapter:
     payload = job.get("payload", {})
     requested = os.getenv("SCENEWORKS_IMAGE_ADAPTER", payload.get("adapter", "")).strip()
-    if requested == "procedural_preview":
+    if requested == "auto":
+        requested = ""
+    if requested in {"procedural", "procedural_preview"}:
         return adapters.get("procedural_preview") if adapters else ProceduralImageAdapter()
+    if requested and requested not in {ZImageDiffusersAdapter.id, QwenImageAdapter.id}:
+        raise RuntimeError(f"Unsupported SCENEWORKS_IMAGE_ADAPTER value: {requested}.")
+    if requested == ZImageDiffusersAdapter.id:
+        return adapters.get("z_image_diffusers") if adapters else ZImageDiffusersAdapter()
+    if requested == QwenImageAdapter.id:
+        return adapters.get("qwen_image") if adapters else QwenImageAdapter()
     model_target = MODEL_TARGETS.get(payload.get("model", "z_image_turbo"), {})
     if model_target.get("adapter") == ZImageDiffusersAdapter.id:
         return adapters.get("z_image_diffusers") if adapters else ZImageDiffusersAdapter()
@@ -567,16 +590,6 @@ def create_image_adapter(
 
 def model_supports_edit(model_id: str) -> bool:
     return bool(MODEL_TARGETS.get(model_id, {}).get("supportsEdit"))
-
-
-def filter_call_kwargs(pipe: Any, kwargs: dict[str, Any]) -> dict[str, Any]:
-    try:
-        accepted = set(inspect.signature(pipe.__call__).parameters)
-    except (TypeError, ValueError):
-        return kwargs
-    if not accepted:
-        return kwargs
-    return {key: value for key, value in kwargs.items() if key in accepted and value is not None}
 
 
 def resolve_seed(seed: int | None, prompt: str, index: int, seeds: list[int] | None = None) -> int:

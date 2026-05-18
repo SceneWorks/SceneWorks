@@ -24,6 +24,13 @@ export const fallbackModels = [
     ui: { description: "Image edit target." },
   },
   {
+    id: "qwen_image_edit",
+    name: "Qwen Image Edit",
+    type: "image",
+    capabilities: ["edit_image"],
+    ui: { description: "Qwen image edit target." },
+  },
+  {
     id: "ltx_2_3",
     name: "LTX-2.3",
     type: "video",

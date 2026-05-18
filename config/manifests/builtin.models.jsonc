@@ -160,10 +160,16 @@
           "provider": "huggingface",
           "repo": "Lightricks/LTX-2",
           "files": []
+        },
+        {
+          "provider": "huggingface",
+          "repo": "Lightricks/LTX-Video",
+          "files": []
         }
       ],
       "paths": {
-        "model": "${HF_CACHE}/Lightricks/LTX-2"
+        "model": "${HF_CACHE}/Lightricks/LTX-2",
+        "imageToVideoModel": "${HF_CACHE}/Lightricks/LTX-Video"
       },
       "defaults": {
         "duration": 6,

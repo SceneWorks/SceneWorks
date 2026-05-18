@@ -4,7 +4,6 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass
 import hashlib
 import importlib
-import inspect
 import os
 import warnings
 from pathlib import Path
@@ -12,7 +11,7 @@ from textwrap import wrap
 from typing import Any, Callable
 from uuid import uuid4
 
-from PIL import Image, ImageDraw, ImageEnhance, ImageFont
+from PIL import Image, ImageDraw, ImageEnhance, ImageFont, UnidentifiedImageError
 
 from sceneworks_shared import (
     find_asset_sidecar_path,
@@ -25,6 +24,7 @@ from sceneworks_shared import (
     utc_now,
 )
 
+from .adapter_utils import filter_call_kwargs
 from .image_adapters import select_torch_device, select_torch_dtype, write_json
 from .settings import WorkerSettings
 
@@ -220,6 +220,7 @@ class ProceduralVideoAdapter(VideoGenerationAdapter):
             seed=seed,
             target=target,
             adapter_id=self.id,
+            mime_type="image/webp",
             raw_settings=raw_settings,
         )
 
@@ -266,7 +267,8 @@ class DiffusersVideoAdapter(VideoGenerationAdapter):
     id = "diffusers_video"
 
     def __init__(self) -> None:
-        self._pipelines: dict[str, Any] = {}
+        self._pipeline: Any | None = None
+        self._pipeline_key_value: str | None = None
         self._loaded_models: set[str] = set()
 
     def loaded_models(self) -> list[str]:
@@ -312,7 +314,7 @@ class DiffusersVideoAdapter(VideoGenerationAdapter):
 
         first_image = self._first_condition_image(project_path, request)
         last_image = self._last_condition_image(project_path, request)
-        self._validate_inputs(request, first_image, last_image)
+        self._validate_inputs(project_path, request, first_image, last_image)
         if cancel_requested():
             raise InterruptedError("Video generation canceled before inference.")
 
@@ -376,9 +378,9 @@ class DiffusersVideoAdapter(VideoGenerationAdapter):
             seed=seed,
             target=target,
             adapter_id=target["adapter"],
+            mime_type="video/mp4",
             raw_settings=raw_settings,
         )
-        asset["file"]["mimeType"] = "video/mp4"
 
         write_json(project_path / "generation-sets" / f"{generation_set_id}.json", generation_set)
         write_json(media_path.with_suffix(".sceneworks.json"), asset)
@@ -414,27 +416,28 @@ class DiffusersVideoAdapter(VideoGenerationAdapter):
 
     def _load_pipeline(self, request: VideoRequest, target: dict[str, Any]) -> Any:
         key = self._pipeline_key(request, target)
-        if key in self._pipelines:
+        repo = self._repo_for_request(request, target)
+        if self._pipeline is not None and self._pipeline_key_value == key:
             self._loaded_models.update({request.model, self._repo_for_request(request, target)})
-            return self._pipelines[key]
+            return self._pipeline
 
         torch = importlib.import_module("torch")
         diffusers = importlib.import_module("diffusers")
-        repo = self._repo_for_request(request, target)
         device = select_torch_device(torch)
         dtype = select_torch_dtype(torch, device, request.advanced.get("dtype"))
+        self._evict_pipeline(torch)
         pipeline_class = self._pipeline_class(diffusers, request, target)
         kwargs: dict[str, Any] = {"torch_dtype": dtype}
 
         if target["adapter"] == "wan_video":
             vae_class = getattr(diffusers, "AutoencoderKLWan", None)
             if vae_class is not None:
-                kwargs["vae"] = vae_class.from_pretrained(repo, subfolder="vae", torch_dtype=torch.float32)
+                kwargs["vae"] = vae_class.from_pretrained(repo, subfolder="vae", torch_dtype=dtype)
             if request.mode != "text_to_video":
                 transformers = importlib.import_module("transformers")
                 image_encoder_class = getattr(transformers, "CLIPVisionModel", None)
                 if image_encoder_class is not None:
-                    kwargs["image_encoder"] = image_encoder_class.from_pretrained(repo, subfolder="image_encoder", torch_dtype=torch.float32)
+                    kwargs["image_encoder"] = image_encoder_class.from_pretrained(repo, subfolder="image_encoder", torch_dtype=dtype)
 
         pipe = pipeline_class.from_pretrained(repo, **kwargs)
         if bool(request.advanced.get("cpuOffload", False)) and hasattr(pipe, "enable_model_cpu_offload"):
@@ -446,9 +449,17 @@ class DiffusersVideoAdapter(VideoGenerationAdapter):
         elif getattr(pipe, "vae", None) is not None and hasattr(pipe.vae, "enable_tiling"):
             pipe.vae.enable_tiling()
 
-        self._pipelines[key] = pipe
+        self._pipeline = pipe
+        self._pipeline_key_value = key
         self._loaded_models.update({request.model, repo})
         return pipe
+
+    def _evict_pipeline(self, torch: Any) -> None:
+        self._pipeline = None
+        self._pipeline_key_value = None
+        self._loaded_models.clear()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
 
     def _pipeline_class(self, diffusers: Any, request: VideoRequest, target: dict[str, Any]) -> Any:
         if target["adapter"] == "wan_video":
@@ -576,7 +587,7 @@ class DiffusersVideoAdapter(VideoGenerationAdapter):
             return load_source_frame(project_path, request.bridge_right_clip_asset_id, timestamp, request.width, request.height)
         return None
 
-    def _validate_inputs(self, request: VideoRequest, first_image: Image.Image | None, last_image: Image.Image | None) -> None:
+    def _validate_inputs(self, project_path: Path, request: VideoRequest, first_image: Image.Image | None, last_image: Image.Image | None) -> None:
         if request.mode in {"image_to_video", "first_last_frame"} and first_image is None:
             raise RuntimeError(f"{request.mode.replace('_', ' ').title()} requires a readable source image.")
         if request.mode == "first_last_frame" and last_image is None:
@@ -585,12 +596,26 @@ class DiffusersVideoAdapter(VideoGenerationAdapter):
             raise RuntimeError(f"{request.mode.replace('_', ' ').title()} requires a readable source clip frame.")
         if request.mode == "video_bridge" and last_image is None:
             raise RuntimeError("Bridge generation requires a readable right clip frame.")
+        if request.mode == "replace_person":
+            if not request.person_track_id:
+                raise RuntimeError("Replace Person requires a selected person track.")
+            if not request.character_id:
+                raise RuntimeError("Replace Person requires a character.")
+            if read_person_track(project_path, request.person_track_id) is None:
+                raise RuntimeError(f"Replace Person track not found: {request.person_track_id}.")
+            if read_character(project_path, request.character_id) is None:
+                raise RuntimeError(f"Replace Person character not found: {request.character_id}.")
+            if not character_reference_images(project_path, request.character_id, request.character_look_id, request.width, request.height):
+                raise RuntimeError("Replace Person requires at least one readable approved character reference image.")
 
 
 def create_video_adapter() -> VideoGenerationAdapter:
-    if os.getenv("SCENEWORKS_VIDEO_ADAPTER", "").strip() == "procedural_video":
+    requested = os.getenv("SCENEWORKS_VIDEO_ADAPTER", "").strip()
+    if not requested or requested == "diffusers_video":
+        return DiffusersVideoAdapter()
+    if requested in {"procedural", "procedural_video"}:
         return ProceduralVideoAdapter()
-    return DiffusersVideoAdapter()
+    raise RuntimeError(f"Unsupported SCENEWORKS_VIDEO_ADAPTER value: {requested}.")
 
 
 def video_request_from_job(job: dict[str, Any]) -> VideoRequest:
@@ -688,21 +713,20 @@ def load_source_frame(project_path: Path, asset_id: str | None, timestamp: float
 
 def load_source_video_frames(project_path: Path, asset_id: str | None, width: int, height: int, count: int) -> list[Image.Image]:
     if not asset_id:
-        return [gradient_frame(width, height, hashlib.sha256(b"missing-video").digest()) for _ in range(count)]
+        raise RuntimeError("Replace Person requires a source clip asset.")
     sidecar_path = find_asset_sidecar_path(project_path, asset_id)
     if sidecar_path is None:
-        return [gradient_frame(width, height, hashlib.sha256(asset_id.encode("utf-8")).digest()) for _ in range(count)]
+        raise RuntimeError(f"Source clip asset not found: {asset_id}.")
     payload = read_json(sidecar_path)
     media_path = project_path / payload.get("file", {}).get("path", "")
     if not media_path.exists():
-        return [gradient_frame(width, height, hashlib.sha256(asset_id.encode("utf-8")).digest()) for _ in range(count)]
+        raise RuntimeError(f"Source clip file is missing for asset {asset_id}.")
 
     frames = load_pil_video_frames(media_path, width, height, count)
     if not frames:
         frames = load_imageio_video_frames(media_path, width, height, count)
     if not frames:
-        first = load_source_frame(project_path, asset_id, 0, width, height) or gradient_frame(width, height, hashlib.sha256(asset_id.encode("utf-8")).digest())
-        frames = [first.copy() for _ in range(count)]
+        raise RuntimeError(f"Source clip frames could not be read for asset {asset_id}.")
     if len(frames) < count:
         frames.extend(frames[-1].copy() for _ in range(count - len(frames)))
     return frames[:count]
@@ -711,7 +735,9 @@ def load_source_video_frames(project_path: Path, asset_id: str | None, width: in
 def load_pil_video_frames(media_path: Path, width: int, height: int, count: int) -> list[Image.Image]:
     try:
         image = Image.open(media_path)
-    except (OSError, Image.DecompressionBombError, Image.DecompressionBombWarning):
+    except (Image.DecompressionBombError, Image.DecompressionBombWarning) as exc:
+        raise RuntimeError(f"Source media exceeds the safe image pixel limit: {media_path}") from exc
+    except (UnidentifiedImageError, OSError):
         return []
     frame_total = max(1, getattr(image, "n_frames", 1))
     frames = []
@@ -731,10 +757,14 @@ def load_imageio_video_frames(media_path: Path, width: int, height: int, count: 
         duration = safe_float(metadata.get("duration"), 0, 0, 3600)
         fps = safe_float(metadata.get("fps"), 24, 1, 240)
         frame_total = max(count, int(round(duration * fps))) if duration > 0 else count
-        return [
-            fit_frame(Image.fromarray(imageio.imread(media_path, index=index)).convert("RGB"), width, height)
-            for index in evenly_spaced_indices(frame_total, count)
-        ]
+        target_indices = set(evenly_spaced_indices(frame_total, count))
+        frames = []
+        for index, frame in enumerate(imageio.imiter(media_path)):
+            if index in target_indices:
+                frames.append(fit_frame(Image.fromarray(frame).convert("RGB"), width, height))
+                if len(frames) == len(target_indices):
+                    break
+        return frames
     except Exception:
         return []
 
@@ -755,8 +785,12 @@ def fit_frame(image: Image.Image, width: int, height: int) -> Image.Image:
 def load_seekable_image_frame(media_path: Path, timestamp: float, duration: Any = None) -> Image.Image | None:
     try:
         image = Image.open(media_path)
-    except (OSError, Image.DecompressionBombError, Image.DecompressionBombWarning):
+    except (Image.DecompressionBombError, Image.DecompressionBombWarning):
+        return None
+    except UnidentifiedImageError:
         return load_seekable_video_frame(media_path, timestamp)
+    except OSError:
+        return None
 
     try:
         frame_count = getattr(image, "n_frames", 1)
@@ -944,20 +978,6 @@ def frames_from_output(output: Any) -> list[Image.Image]:
     return []
 
 
-def accepted_call_parameters(pipe: Any) -> set[str]:
-    try:
-        return set(inspect.signature(pipe.__call__).parameters)
-    except (TypeError, ValueError):
-        return set()
-
-
-def filter_call_kwargs(pipe: Any, kwargs: dict[str, Any]) -> dict[str, Any]:
-    accepted = accepted_call_parameters(pipe)
-    if not accepted:
-        return kwargs
-    return {key: value for key, value in kwargs.items() if key in accepted and value is not None}
-
-
 def ltx_conditions(
     first_image: Image.Image | None,
     last_image: Image.Image | None,
@@ -988,7 +1008,7 @@ def person_track_masks(project_path: Path, track_id: str | None, width: int, hei
         if not boxes and isinstance(selected_box, dict):
             boxes = [selected_box]
     if not boxes:
-        boxes = [{"x": 0.32, "y": 0.12, "width": 0.36, "height": 0.76}]
+        raise RuntimeError(f"Person track has no usable boxes: {track_id}.")
 
     masks = []
     for index in range(count):
@@ -1048,7 +1068,7 @@ def character_reference_images(project_path: Path, character_id: str | None, loo
             if isinstance(reference, dict) and reference.get("approved")
         )
     images = []
-    for asset_id in [asset_id for asset_id in approved_ids if asset_id]:
+    for asset_id in [asset_id for asset_id in approved_ids if asset_id][:4]:
         image = load_source_image(project_path, asset_id, width, height)
         if image is not None:
             images.append(image)
@@ -1096,7 +1116,8 @@ def build_video_asset_sidecar(
     seed: int,
     target: dict[str, Any],
     raw_settings: dict[str, Any],
-    adapter_id: str = "procedural_video",
+    adapter_id: str,
+    mime_type: str,
 ) -> dict[str, Any]:
     parents = [
         asset_id
@@ -1144,7 +1165,7 @@ def build_video_asset_sidecar(
         "createdAt": created_at,
         "file": {
             "path": media_rel,
-            "mimeType": "image/webp",
+            "mimeType": mime_type,
             "width": request.width,
             "height": request.height,
             "duration": request.duration,
