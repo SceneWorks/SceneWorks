@@ -1088,7 +1088,12 @@ async fn run_lora_import_job(
         )
         .await?;
     } else if let Some(source_path) = source_path {
-        copy_lora_source(Path::new(source_path), &target_dir).await?;
+        import_lora_source_path(
+            Path::new(source_path),
+            &target_dir,
+            payload_bool(&job.payload, "uploadedSourcePath"),
+        )
+        .await?;
     } else if let Some(source_url) = source_url {
         download_lora_source_url(
             &DownloadContext {
@@ -2584,6 +2589,14 @@ pub fn download_progress_payload(
 }
 
 pub async fn copy_lora_source(source: &Path, target_dir: &Path) -> WorkerResult<()> {
+    import_lora_source_path(source, target_dir, false).await
+}
+
+async fn import_lora_source_path(
+    source: &Path,
+    target_dir: &Path,
+    prefer_move: bool,
+) -> WorkerResult<()> {
     let source = source.canonicalize()?;
     if !source.exists() {
         return Err(WorkerError::Io(std::io::Error::new(
@@ -2598,9 +2611,20 @@ pub async fn copy_lora_source(source: &Path, target_dir: &Path) -> WorkerResult<
         let target = target_dir.join(source.file_name().ok_or_else(|| {
             WorkerError::InvalidPayload("LoRA source has no filename".to_owned())
         })?);
+        if prefer_move {
+            match tokio::fs::rename(&source, &target).await {
+                Ok(()) => return Ok(()),
+                Err(error) if is_cross_device_rename_error(&error) => {}
+                Err(error) => return Err(error.into()),
+            }
+        }
         tokio::fs::copy(source, target).await?;
     }
     Ok(())
+}
+
+fn is_cross_device_rename_error(error: &std::io::Error) -> bool {
+    matches!(error.raw_os_error(), Some(17 | 18))
 }
 
 async fn copy_dir_recursive(source: &Path, target: &Path) -> WorkerResult<()> {
@@ -3832,12 +3856,13 @@ mod tests {
         allow_pattern_matches, auto_worker_specs, bounded_tail, candidate_people,
         child_environment, cleanup_uploaded_lora_source, concat_file_contents, copy_lora_source,
         cpu_gpu, cpu_worker_id, crossfade_duration, download_lora_source_url,
-        download_progress_payload, fallback_gpu, fresh_asset_id, gpu_worker_id, now_rfc3339,
-        output_dimensions, parse_nvidia_smi_gpus, restart_exited_children_with_spawner, run_ffmpeg,
-        safe_download_dir, safe_project_path, value_f64, visible_gpu_ids,
-        worker_capabilities_with_utility, write_model_install_marker, ApiClient, DownloadContext,
-        HuggingFaceSnapshot, Settings, SupervisedChild, WorkerError, WorkerSpec,
-        DEFAULT_MAX_LORA_URL_BYTES, DEFAULT_TRANSITION_DURATION_SECONDS, INSTALL_MARKER,
+        download_progress_payload, fallback_gpu, fresh_asset_id, gpu_worker_id,
+        import_lora_source_path, now_rfc3339, output_dimensions, parse_nvidia_smi_gpus,
+        restart_exited_children_with_spawner, run_ffmpeg, safe_download_dir, safe_project_path,
+        value_f64, visible_gpu_ids, worker_capabilities_with_utility, write_model_install_marker,
+        ApiClient, DownloadContext, HuggingFaceSnapshot, Settings, SupervisedChild, WorkerError,
+        WorkerSpec, DEFAULT_MAX_LORA_URL_BYTES, DEFAULT_TRANSITION_DURATION_SECONDS,
+        INSTALL_MARKER,
     };
 
     #[test]
@@ -4107,6 +4132,26 @@ mod tests {
 
         assert!(!source_file.exists());
         assert!(!upload_dir.exists());
+    }
+
+    #[tokio::test]
+    async fn uploaded_lora_file_import_prefers_move_over_copy() {
+        let temp = tempdir().expect("tempdir creates");
+        let source_file = temp.path().join("uploaded.safetensors");
+        tokio::fs::write(&source_file, b"lora").await.unwrap();
+        let target_dir = temp.path().join("target");
+
+        import_lora_source_path(&source_file, &target_dir, true)
+            .await
+            .unwrap();
+
+        assert!(!source_file.exists());
+        assert_eq!(
+            tokio::fs::read(target_dir.join("uploaded.safetensors"))
+                .await
+                .unwrap(),
+            b"lora"
+        );
     }
 
     #[tokio::test]

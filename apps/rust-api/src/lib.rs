@@ -3,7 +3,7 @@ use std::convert::Infallible;
 use std::net::SocketAddr;
 use std::path::{Path as FsPath, PathBuf};
 use std::sync::Arc;
-use std::time::{Duration, Instant, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use axum::body::Body;
 use axum::extract::rejection::JsonRejection;
@@ -66,9 +66,13 @@ const HEARTBEAT_SSE_DATA: &str = "{}";
 const HEARTBEAT_SSE_WIRE: &str = "event: heartbeat\ndata: {}\n\n";
 const MAX_UPLOAD_BYTES: usize = 2 * 1024 * 1024 * 1024;
 const MAX_MULTIPART_BODY_BYTES: usize = MAX_UPLOAD_BYTES + 16 * 1024 * 1024;
+const STALE_LORA_UPLOAD_SECONDS: u64 = 24 * 60 * 60;
 const MANIFEST_CACHE_LIMIT: usize = 16;
 const MODEL_SIZE_CACHE_LIMIT: usize = 64;
 const API_MANAGED_MANIFEST_HEADER: &str = "// This file is rewritten by the SceneWorks API. Inline JSONC comments are not preserved across writes.";
+#[cfg(test)]
+static TEST_MAX_LORA_UPLOAD_BYTES: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
 
 #[derive(Debug, Clone)]
 pub struct Settings {
@@ -343,6 +347,7 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 pub fn create_app(settings: Settings) -> Result<Router, JobsStoreError> {
+    let _ = sweep_stale_lora_uploads(&settings.data_dir);
     let jobs_store = Arc::new(JobsStore::new(&settings.jobs_db_path));
     jobs_store.initialize()?;
     let interrupted_jobs_on_startup = jobs_store.mark_interrupted_on_startup()?.len();
@@ -480,7 +485,10 @@ pub fn create_app(settings: Settings) -> Result<Router, JobsStoreError> {
             post(create_model_download_job),
         )
         .route("/api/v1/loras", get(list_loras))
-        .route("/api/v1/loras/import", post(create_lora_import_job))
+        .route(
+            "/api/v1/loras/import",
+            post(create_lora_import_job).layer(DefaultBodyLimit::max(MAX_MULTIPART_BODY_BYTES)),
+        )
         .route(
             "/api/v1/recipe-presets",
             get(list_recipe_presets).post(create_recipe_preset),
@@ -513,7 +521,7 @@ pub fn create_app(settings: Settings) -> Result<Router, JobsStoreError> {
         )
         .fallback(route_not_found)
         .with_state(state.clone())
-        .layer(DefaultBodyLimit::max(MAX_MULTIPART_BODY_BYTES))
+        .layer(DefaultBodyLimit::max(MAX_UPLOAD_BYTES))
         .layer(middleware::from_fn_with_state(state, access_control))
         .layer(cors))
 }
@@ -2302,10 +2310,7 @@ async fn create_lora_import_job(
             .map_err(IntoResponse::into_response)?;
         let result = queue_lora_import_job(state, payload).await;
         if result.is_err() {
-            let _ = tokio::fs::remove_file(&staged_path).await;
-            if let Some(parent) = staged_path.parent() {
-                let _ = tokio::fs::remove_dir(parent).await;
-            }
+            cleanup_staged_lora_upload(&staged_path).await;
         }
         return result.map_err(IntoResponse::into_response);
     }
@@ -2367,7 +2372,7 @@ async fn queue_lora_import_job(
         .clone()
         .unwrap_or_else(|| slugify_lora_id(&name));
     let target_name = safe_download_dir(&lora_id);
-    let (target_dir, manifest_path, source_path, project_id, project_name) =
+    let (target_dir, manifest_path, source_path, project_id, project_name, allowed_source_roots) =
         if payload.scope == "project" {
             let Some(project_id) = payload.project_id.clone() else {
                 return Err(ApiError::bad_request(
@@ -2384,6 +2389,10 @@ async fn queue_lora_import_job(
                 format!("loras/imports/{target_name}"),
                 Some(project_id),
                 None,
+                vec![
+                    state.settings.data_dir.join("loras"),
+                    project_path.join("loras"),
+                ],
             )
         } else {
             (
@@ -2396,8 +2405,17 @@ async fn queue_lora_import_job(
                 format!("loras/{target_name}"),
                 None,
                 None,
+                vec![state.settings.data_dir.join("loras")],
             )
         };
+    if let Some(source_path) = payload.source_path.as_deref() {
+        let allowed_source_roots = if payload.uploaded_source_path {
+            vec![state.settings.data_dir.join("cache").join("lora-uploads")]
+        } else {
+            allowed_source_roots
+        };
+        validate_lora_import_source_path(source_path, &allowed_source_roots)?;
+    }
     let timestamp = now_rfc3339();
     let mut manifest_entry = json!({
         "id": lora_id,
@@ -2467,42 +2485,53 @@ async fn lora_import_request_from_multipart(
     };
     let mut staged_path = None;
 
-    while let Some(field) = multipart
-        .next_field()
-        .await
-        .map_err(|error| ApiError::bad_request(error.to_string()))?
-    {
-        let field_name = field.name().unwrap_or("").to_owned();
-        if field_name == "file" {
-            if staged_path.is_some() {
-                return Err(ApiError::bad_request("Only one LoRA file can be uploaded"));
-            }
-            let upload_name =
-                sanitized_upload_filename(field.file_name().unwrap_or("lora.safetensors"));
-            let path = write_lora_upload_field_to_staged_file(state, field, &upload_name).await?;
-            payload.source_path = Some(path.display().to_string());
-            payload.files = vec![upload_name];
-            payload.uploaded_source_path = true;
-            staged_path = Some(path);
-            continue;
-        }
-
-        let value = field
-            .text()
+    let parse_result = async {
+        while let Some(field) = multipart
+            .next_field()
             .await
-            .map_err(|error| ApiError::bad_request(error.to_string()))?;
-        let value = value.trim();
-        if value.is_empty() {
-            continue;
+            .map_err(|error| ApiError::bad_request(error.to_string()))?
+        {
+            let field_name = field.name().unwrap_or("").to_owned();
+            if field_name == "file" {
+                if staged_path.is_some() {
+                    return Err(ApiError::bad_request("Only one LoRA file can be uploaded"));
+                }
+                let upload_name =
+                    sanitized_upload_filename(field.file_name().unwrap_or("lora.safetensors"));
+                let path =
+                    write_lora_upload_field_to_staged_file(state, field, &upload_name).await?;
+                payload.source_path = Some(path.display().to_string());
+                payload.files = vec![upload_name];
+                payload.uploaded_source_path = true;
+                staged_path = Some(path);
+                continue;
+            }
+
+            let value = field
+                .text()
+                .await
+                .map_err(|error| ApiError::bad_request(error.to_string()))?;
+            let value = value.trim();
+            if value.is_empty() {
+                continue;
+            }
+            match field_name.as_str() {
+                "loraId" => payload.lora_id = Some(value.to_owned()),
+                "name" => payload.name = Some(value.to_owned()),
+                "family" => payload.family = Some(value.to_owned()),
+                "scope" => payload.scope = value.to_owned(),
+                "projectId" => payload.project_id = Some(value.to_owned()),
+                _ => {}
+            }
         }
-        match field_name.as_str() {
-            "loraId" => payload.lora_id = Some(value.to_owned()),
-            "name" => payload.name = Some(value.to_owned()),
-            "family" => payload.family = Some(value.to_owned()),
-            "scope" => payload.scope = value.to_owned(),
-            "projectId" => payload.project_id = Some(value.to_owned()),
-            _ => {}
+        Ok(())
+    }
+    .await;
+    if let Err(error) = parse_result {
+        if let Some(path) = staged_path.as_deref() {
+            cleanup_staged_lora_upload(path).await;
         }
+        return Err(error);
     }
 
     let Some(staged_path) = staged_path else {
@@ -2530,27 +2559,50 @@ async fn write_lora_upload_field_to_staged_file(
         .await
         .map_err(|error| ApiError::internal(error.to_string()))?;
     let mut uploaded_bytes = 0usize;
-    while let Some(chunk) = field
-        .chunk()
-        .await
-        .map_err(|error| ApiError::bad_request(error.to_string()))?
-    {
-        uploaded_bytes = uploaded_bytes.saturating_add(chunk.len());
-        if uploaded_bytes > MAX_UPLOAD_BYTES {
-            let _ = tokio::fs::remove_file(&temp_path).await;
-            let _ = tokio::fs::remove_dir(&upload_dir).await;
-            return Err(ApiError::payload_too_large(
-                "Uploaded LoRA file exceeds the 2GB limit",
-            ));
-        }
-        file.write_all(&chunk)
+    let write_result = async {
+        while let Some(chunk) = field
+            .chunk()
             .await
-            .map_err(|error| ApiError::internal(error.to_string()))?;
+            .map_err(|error| ApiError::bad_request(error.to_string()))?
+        {
+            uploaded_bytes = uploaded_bytes.saturating_add(chunk.len());
+            if uploaded_bytes > max_lora_upload_bytes() {
+                return Err(ApiError::payload_too_large(
+                    "Uploaded LoRA file exceeds the 2GB limit",
+                ));
+            }
+            file.write_all(&chunk)
+                .await
+                .map_err(|error| ApiError::internal(error.to_string()))?;
+        }
+        file.flush()
+            .await
+            .map_err(|error| ApiError::internal(error.to_string()))
     }
-    file.flush()
-        .await
-        .map_err(|error| ApiError::internal(error.to_string()))?;
+    .await;
+    if let Err(error) = write_result {
+        cleanup_staged_lora_upload(&temp_path).await;
+        return Err(error);
+    }
     Ok(temp_path)
+}
+
+async fn cleanup_staged_lora_upload(path: &FsPath) {
+    let _ = tokio::fs::remove_file(path).await;
+    if let Some(parent) = path.parent() {
+        let _ = tokio::fs::remove_dir(parent).await;
+    }
+}
+
+fn max_lora_upload_bytes() -> usize {
+    #[cfg(test)]
+    {
+        let limit = TEST_MAX_LORA_UPLOAD_BYTES.load(std::sync::atomic::Ordering::SeqCst);
+        if limit > 0 {
+            return limit;
+        }
+    }
+    MAX_UPLOAD_BYTES
 }
 
 async fn list_jobs(
@@ -4433,6 +4485,73 @@ fn sanitized_upload_filename(filename: &str) -> String {
     }
 }
 
+fn validate_lora_import_source_path(
+    source_path: &str,
+    allowed_roots: &[PathBuf],
+) -> Result<(), ApiError> {
+    let source = FsPath::new(source_path);
+    if !source.is_absolute() {
+        return Err(ApiError::bad_request("LoRA sourcePath must be absolute"));
+    }
+    let source = std::fs::canonicalize(source)
+        .map_err(|_| ApiError::bad_request(format!("LoRA sourcePath not found: {source_path}")))?;
+    let metadata = std::fs::metadata(&source)
+        .map_err(|error| ApiError::bad_request(format!("Invalid LoRA sourcePath: {error}")))?;
+    if !metadata.is_file() && !metadata.is_dir() {
+        return Err(ApiError::bad_request(
+            "LoRA sourcePath must point to a file or directory",
+        ));
+    }
+    for root in allowed_roots {
+        if let Ok(root) = std::fs::canonicalize(root) {
+            if source.starts_with(root) {
+                return Ok(());
+            }
+        }
+    }
+    Err(ApiError::bad_request(
+        "LoRA sourcePath must be inside app-managed data/loras, project/loras, or staged upload folders",
+    ))
+}
+
+fn sweep_stale_lora_uploads(data_dir: &FsPath) -> std::io::Result<usize> {
+    sweep_stale_lora_uploads_before(
+        data_dir,
+        SystemTime::now() - Duration::from_secs(STALE_LORA_UPLOAD_SECONDS),
+    )
+}
+
+fn sweep_stale_lora_uploads_before(
+    data_dir: &FsPath,
+    cutoff: SystemTime,
+) -> std::io::Result<usize> {
+    let upload_root = data_dir.join("cache").join("lora-uploads");
+    let entries = match std::fs::read_dir(upload_root) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(0),
+        Err(error) => return Err(error),
+    };
+    let mut removed = 0usize;
+    for entry in entries {
+        let entry = entry?;
+        let file_type = entry.file_type()?;
+        if !file_type.is_dir() {
+            continue;
+        }
+        let filename = entry.file_name();
+        let filename = filename.to_string_lossy();
+        if !filename.starts_with("upload-") {
+            continue;
+        }
+        let modified = entry.metadata()?.modified().unwrap_or(UNIX_EPOCH);
+        if modified <= cutoff {
+            std::fs::remove_dir_all(entry.path())?;
+            removed += 1;
+        }
+    }
+    Ok(removed)
+}
+
 fn validate_source_url(source_url: &str) -> Result<(), ApiError> {
     parse_lora_source_url(source_url)
         .map(|_| ())
@@ -5060,12 +5179,15 @@ impl IntoResponse for ApiError {
 #[cfg(test)]
 mod tests {
     use super::{
-        create_app, strip_jsonc_comments, EventHub, EventMessage, Settings,
-        API_MANAGED_MANIFEST_HEADER, EVENT_BUFFER_SIZE, HEARTBEAT_SSE_DATA, HEARTBEAT_SSE_WIRE,
+        create_app, strip_jsonc_comments, sweep_stale_lora_uploads_before, EventHub, EventMessage,
+        Settings, API_MANAGED_MANIFEST_HEADER, EVENT_BUFFER_SIZE, HEARTBEAT_SSE_DATA,
+        HEARTBEAT_SSE_WIRE, TEST_MAX_LORA_UPLOAD_BYTES,
     };
     use axum::body::{to_bytes, Body};
     use axum::http::{Request, StatusCode};
     use serde_json::{json, Value};
+    use std::sync::atomic::Ordering;
+    use std::time::{Duration, SystemTime};
     use tokio_stream::StreamExt;
     use tower::ServiceExt;
 
@@ -5227,6 +5349,29 @@ mod tests {
         .await;
         let value = serde_json::from_slice(&bytes).expect("json body parses");
         (status, value)
+    }
+
+    #[test]
+    fn stale_lora_upload_sweep_removes_only_upload_dirs_before_cutoff() {
+        let temp_dir = tempfile::tempdir().expect("temp dir creates");
+        let upload_root = temp_dir.path().join("data/cache/lora-uploads");
+        let expired = upload_root.join("upload-expired");
+        let fresh = upload_root.join("upload-fresh");
+        let unrelated = upload_root.join("keep-me");
+        std::fs::create_dir_all(&expired).expect("expired dir creates");
+        std::fs::create_dir_all(&fresh).expect("fresh dir creates");
+        std::fs::create_dir_all(&unrelated).expect("unrelated dir creates");
+
+        let removed = sweep_stale_lora_uploads_before(
+            &temp_dir.path().join("data"),
+            SystemTime::now() + Duration::from_secs(1),
+        )
+        .expect("stale uploads sweep");
+
+        assert_eq!(removed, 2);
+        assert!(!expired.exists());
+        assert!(!fresh.exists());
+        assert!(unrelated.exists());
     }
 
     #[tokio::test]
@@ -6054,6 +6199,62 @@ mod tests {
         assert_eq!(
             source_path.file_name().and_then(|value| value.to_str()),
             Some("detail.safetensors")
+        );
+
+        TEST_MAX_LORA_UPLOAD_BYTES.store(4, Ordering::SeqCst);
+        let app = create_app(test_settings(&temp_dir)).expect("app creates");
+        let (bad_status, bad_error) = request_multipart_lora_upload(
+            app,
+            &[("name", "Too Large"), ("scope", "global")],
+            "too-large.safetensors",
+            b"12345",
+        )
+        .await;
+        TEST_MAX_LORA_UPLOAD_BYTES.store(0, Ordering::SeqCst);
+        assert_eq!(bad_status, StatusCode::PAYLOAD_TOO_LARGE);
+        assert_eq!(
+            bad_error["detail"],
+            "Uploaded LoRA file exceeds the 2GB limit"
+        );
+
+        let lora_source_dir = temp_dir.path().join("data").join("loras");
+        std::fs::create_dir_all(&lora_source_dir).expect("lora source dir creates");
+        let lora_source = lora_source_dir.join("safe-local.safetensors");
+        std::fs::write(&lora_source, b"local-source").expect("local source writes");
+        let app = create_app(test_settings(&temp_dir)).expect("app creates");
+        let (status, source_path_job) = request(
+            app,
+            "POST",
+            "/api/v1/loras/import",
+            json!({
+                "sourcePath": lora_source.display().to_string(),
+                "name": "Safe Local Source"
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED);
+        assert_eq!(
+            source_path_job["payload"]["manifestEntry"]["source"]["provider"],
+            "local"
+        );
+
+        let outside_source = temp_dir.path().join("outside.safetensors");
+        std::fs::write(&outside_source, b"private").expect("outside source writes");
+        let app = create_app(test_settings(&temp_dir)).expect("app creates");
+        let (bad_status, bad_error) = request(
+            app,
+            "POST",
+            "/api/v1/loras/import",
+            json!({
+                "sourcePath": outside_source.display().to_string(),
+                "name": "Unsafe Local Source"
+            }),
+        )
+        .await;
+        assert_eq!(bad_status, StatusCode::BAD_REQUEST);
+        assert_eq!(
+            bad_error["detail"],
+            "LoRA sourcePath must be inside app-managed data/loras, project/loras, or staged upload folders"
         );
 
         let app = create_app(test_settings(&temp_dir)).expect("app creates");

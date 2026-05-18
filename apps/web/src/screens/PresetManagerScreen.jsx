@@ -330,6 +330,7 @@ export function PresetManagerScreen({
         }));
       }
       setImportForm((current) => ({ ...current, sourceUrl: "", file: null, name: "" }));
+      // Force a re-mount so choosing the same file again still emits a change event.
       setFileInputKey((current) => current + 1);
       setMessage({ tone: "success", text: "LoRA import queued. Save after the import finishes." });
     } catch (err) {
