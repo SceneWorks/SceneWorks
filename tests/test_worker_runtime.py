@@ -22,7 +22,6 @@ from scene_worker.runtime import (
     loaded_models_from_adapters,
     resolve_loaded_models,
     resolve_lora_import_target,
-    run_placeholder_job,
     run_video_job,
     upsert_lora_manifest_entry,
     worker_capabilities,
@@ -35,6 +34,7 @@ def test_cpu_worker_does_not_advertise_gpu_generation_capabilities():
 
     assert "image_generate" not in capabilities
     assert "video_generate" not in capabilities
+    assert "placeholder" not in capabilities
     assert "model_download" not in capabilities
     assert "timeline_export" not in capabilities
 
@@ -45,6 +45,7 @@ def test_gpu_worker_advertises_generation_capabilities():
     assert "image_generate" in capabilities
     assert "video_generate" in capabilities
     assert "person_replace" in capabilities
+    assert "placeholder" not in capabilities
 
 
 def test_python_worker_does_not_advertise_rust_utility_capabilities(monkeypatch):
@@ -55,6 +56,7 @@ def test_python_worker_does_not_advertise_rust_utility_capabilities(monkeypatch)
     capabilities = worker_capabilities({"id": "gpu-0", "name": "GPU 0", "capabilities": ["placeholder", "gpu"]})
 
     assert "image_generate" in capabilities
+    assert "placeholder" not in capabilities
     assert "model_download" not in capabilities
     assert "lora_import" not in capabilities
     assert "person_track" not in capabilities
@@ -361,34 +363,6 @@ def test_video_job_reports_dynamic_loaded_models_on_progress_and_keepalive(monke
         ["video-model-running"],
     ]
     assert blocking_models == [["video-model-loaded"], ["video-model-running"]]
-
-
-def test_worker_job_polling_propagates_cancel_requested(monkeypatch):
-    updates = []
-
-    class Api:
-        def post(self, path, payload):
-            if path.endswith("/heartbeat"):
-                return {}
-            if path.endswith("/progress"):
-                updates.append(payload)
-                return {"status": payload["status"], "stage": payload["stage"]}
-            raise AssertionError(path)
-
-        def get(self, _path):
-            return {"cancelRequested": bool(updates)}
-
-    monkeypatch.setattr("scene_worker.runtime.time.sleep", lambda _seconds: None)
-
-    run_placeholder_job(
-        Api(),
-        SimpleNamespace(worker_id="worker-1"),
-        {"id": "job-1", "payload": {}},
-    )
-
-    assert updates[-1]["status"] == "canceled"
-    assert updates[-1]["stage"] == "canceled"
-    assert updates[-1]["message"] == "Worker canceled the job before completion."
 
 
 def test_random_batch_seeds_are_used_per_image():

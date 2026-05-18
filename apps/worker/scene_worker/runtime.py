@@ -54,7 +54,7 @@ class ApiClient:
 
 def worker_capabilities(gpu: dict) -> list[str]:
     gpu_capabilities = set(gpu["capabilities"])
-    capabilities = set(gpu["capabilities"])
+    capabilities = set(gpu["capabilities"]) - {"placeholder"}
     if "cpu" not in gpu_capabilities and "gpu" in gpu_capabilities:
         capabilities |= {"image_generate", "image_edit", "video_generate", "video_extend", "video_bridge", "person_replace"}
     return sorted(capabilities)
@@ -497,57 +497,6 @@ def run_blocking_job_step(
         thread.join(timeout=1)
 
 
-def run_placeholder_job(api: ApiClient, settings: WorkerSettings, job: dict) -> None:
-    job_id = job["id"]
-    stages = [
-        ("preparing", "preparing", 0.1, "Preparing placeholder job."),
-        ("running", "running", 0.35, "Running placeholder step 1."),
-        ("running", "running", 0.65, "Running placeholder step 2."),
-        ("saving", "saving", 0.9, "Saving placeholder result."),
-    ]
-
-    for status, stage, progress, message in stages:
-        if job_cancel_requested(api, job_id):
-            update_job(
-                api,
-                job_id,
-                {
-                    "status": "canceled",
-                    "stage": "canceled",
-                    "progress": progress,
-                    "message": "Worker canceled the job before completion.",
-                },
-            )
-            heartbeat(api, settings, "idle")
-            return
-
-        heartbeat(api, settings, "busy", job_id)
-        update_job(
-            api,
-            job_id,
-            {
-                "status": status,
-                "stage": stage,
-                "progress": progress,
-                "message": message,
-            },
-        )
-        time.sleep(1.5)
-
-    update_job(
-        api,
-        job_id,
-        {
-            "status": "completed",
-            "stage": "completed",
-            "progress": 1,
-            "message": "Placeholder job completed.",
-            "result": {"completedAt": now(), "output": "placeholder"},
-        },
-    )
-    heartbeat(api, settings, "idle")
-
-
 def run_image_job(api: ApiClient, settings: WorkerSettings, job: dict, image_adapters: dict[str, object]) -> None:
     job_id = job["id"]
     adapter = create_image_adapter(job, image_adapters)
@@ -749,9 +698,7 @@ def run_worker_loop(settings: WorkerSettings) -> None:
                 continue
 
             emit({"event": "claimed", "jobId": job["id"], "gpuId": job["assignedGpu"], "reportedAt": now()})
-            if job["type"] == "placeholder":
-                run_placeholder_job(api, settings, job)
-            elif job["type"] in ("image_generate", "image_edit"):
+            if job["type"] in ("image_generate", "image_edit"):
                 run_image_job(api, settings, job, image_adapters)
             elif job["type"] in ("video_generate", "video_extend", "video_bridge", "person_replace"):
                 run_video_job(api, settings, job)

@@ -106,7 +106,6 @@ def progress_stages_from_sources() -> set[str]:
         "apps/worker/scene_worker/runtime.py",
         "apps/worker/scene_worker/image_adapters.py",
         "apps/worker/scene_worker/video_adapters.py",
-        "apps/worker/scene_worker/timeline_exporter.py",
         "apps/api/sceneworks_api/jobs_store.py",
     )
     stages = set(re.findall(r'"stage"\s*:\s*"([^"]+)"', text))
@@ -174,11 +173,11 @@ def test_job_protocol_fixture_matches_python_contracts(tmp_path, monkeypatch):
     assert set(fixture["workerStatuses"]) == worker_statuses_from_store(tmp_path)
 
     assert fixture["workerCapabilityProfiles"]["cpu"] == worker_capabilities(
-        {"id": "cpu", "name": "CPU", "capabilities": ["placeholder", "cpu"]}
+        {"id": "cpu", "name": "CPU", "capabilities": ["cpu"]}
     )
 
     assert fixture["workerCapabilityProfiles"]["gpuChild"] == worker_capabilities(
-        {"id": "gpu-0", "name": "GPU 0", "capabilities": ["placeholder", "gpu"]}
+        {"id": "gpu-0", "name": "GPU 0", "capabilities": ["gpu"]}
     )
 
     JobCreateRequest.model_validate(fixture["requests"]["createJob"])
