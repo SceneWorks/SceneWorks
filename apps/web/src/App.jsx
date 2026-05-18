@@ -41,6 +41,7 @@ function failedJobNotice(job) {
 }
 
 const localJobStackLimit = 4;
+const maxLoraUploadBytes = 2 * 1024 * 1024 * 1024;
 
 export function App() {
   const [health, setHealth] = useState(null);
@@ -225,6 +226,13 @@ export function App() {
       }
       if (job.status === "completed" && job.type === "model_download") {
         refreshData();
+      }
+      if (job.status === "completed" && job.type === "lora_import") {
+        refreshData();
+        // refreshData loads the global catalog; project imports need the project overlay too.
+        if (job.projectId) {
+          refreshLoras(job.projectId);
+        }
       }
       if (job.status === "failed" && !hasVisibleLocalFailure(job)) {
         setError(failedJobNotice(job));
@@ -425,11 +433,14 @@ export function App() {
     return archived;
   }
 
-  async function createLoraImportJob(payload) {
+  async function createLoraImportJob(payload, options = {}) {
     if (payload.scope === "project" && !activeProject) {
       throw new Error("Create or open a project first.");
     }
     const { file, ...metadata } = payload;
+    if (file?.size > maxLoraUploadBytes) {
+      throw new Error("Uploaded LoRA file exceeds the 2GB limit");
+    }
     let body;
     if (file) {
       body = new FormData();
@@ -454,7 +465,10 @@ export function App() {
       method: "POST",
       body,
     });
-    setActiveView("Queue");
+    setJobs((items) => [job, ...items.filter((item) => item.id !== job.id)].sort(sortNewest));
+    if (options.navigateToQueue ?? false) {
+      setActiveView("Queue");
+    }
     setError("");
     refreshData();
     return job;
@@ -1367,10 +1381,12 @@ export function App() {
 
         {activeView === "Models" ? (
           <ModelManagerScreen
+            activeProject={activeProject}
             jobs={jobs}
             loras={loras}
             models={models}
             onDownloadModel={createModelDownloadJob}
+            onImportLora={createLoraImportJob}
             onOpenQueue={() => setActiveView("Queue")}
           />
         ) : null}
