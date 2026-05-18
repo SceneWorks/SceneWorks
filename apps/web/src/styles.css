@@ -755,6 +755,7 @@ button:disabled {
 }
 
 .guidance-strip,
+.lora-picker,
 .inline-warning {
   border: 1px solid #4b463d;
   background: #191815;
@@ -764,6 +765,51 @@ button:disabled {
   display: grid;
   gap: 4px;
   padding: 10px;
+}
+
+.lora-picker {
+  display: grid;
+  gap: 10px;
+  padding: 12px;
+}
+
+.lora-picker > div:first-child,
+.lora-choice {
+  display: flex;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.lora-picker > div:first-child span,
+.lora-choice small {
+  color: #aaa397;
+}
+
+.lora-choice-list {
+  display: grid;
+  gap: 8px;
+}
+
+.lora-choice {
+  align-items: center;
+  border: 1px solid #3c3a34;
+  background: #23221f;
+  padding: 9px 10px;
+}
+
+.lora-choice.active {
+  border-color: #6ec6b8;
+  background: #183f3a;
+}
+
+.lora-choice input {
+  width: auto;
+}
+
+.lora-choice span {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
 }
 
 .guidance-strip span,

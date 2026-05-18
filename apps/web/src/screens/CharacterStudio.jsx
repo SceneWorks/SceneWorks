@@ -154,7 +154,7 @@ export function CharacterStudio({
       triggerWords: lora.triggerWords ?? [],
       defaultWeight: lora.defaultWeight ?? 0.8,
       compatibility: { families: compatibleFamilies(lora) },
-      scope: "global",
+      scope: lora.scope ?? "global",
     });
     setLoraId("");
   }

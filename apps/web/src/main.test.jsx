@@ -2,6 +2,7 @@ import React, { act } from "react";
 import { createRoot } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { App, eventUrl } from "./main.jsx";
+import { ImageStudio } from "./screens/ImageStudio.jsx";
 import { QueueScreen } from "./screens/QueueScreen.jsx";
 
 class FakeEventSource {
@@ -282,5 +283,63 @@ describe("SceneWorks app shell", () => {
     expect(container.textContent).toContain("Waiting for model download Qwen Image Edit to finish.");
     expect(container.textContent).toContain("Waiting for dependency job-dependency to finish.");
     expect(container.textContent).toContain("Warm: z_image_turbo");
+  });
+
+  it("submits compatible image LoRAs while capping simple user selections at two", async () => {
+    const createImageJob = vi.fn();
+    root = createRoot(container);
+    await act(async () => {
+      root.render(
+        <ImageStudio
+          activeProject={{ id: "project-1", name: "Noir" }}
+          assets={[]}
+          characters={[]}
+          createImageJob={createImageJob}
+          deleteAsset={() => {}}
+          gpuOptions={["auto"]}
+          imageModels={[{ id: "z_image_turbo", name: "Z-Image", type: "image", family: "z-image" }]}
+          latestAssets={[]}
+          loras={[
+            { id: "built_in", name: "Built In", family: "z-image", scope: "builtin", defaultWeight: 0.6 },
+            { id: "global_style", name: "Global Style", family: "z-image", scope: "global" },
+            { id: "project_mira", name: "Project Mira", family: "z-image", scope: "project" },
+            { id: "third_user", name: "Third User", family: "z-image", scope: "global" },
+            { id: "qwen_only", name: "Qwen Only", family: "qwen-image", scope: "global" },
+          ]}
+          onPreview={() => {}}
+          purgeAsset={() => {}}
+          requestedGpu="auto"
+          selectedAsset={null}
+          setRequestedGpu={() => {}}
+          updateAssetStatus={() => {}}
+        />,
+      );
+    });
+
+    expect(container.textContent).toContain("Built In");
+    expect(container.textContent).not.toContain("Qwen Only");
+
+    const checkboxes = [...container.querySelectorAll('.lora-choice input[type="checkbox"]')];
+    await act(async () => {
+      checkboxes[0].click();
+      checkboxes[1].click();
+      checkboxes[2].click();
+    });
+
+    expect(checkboxes[3].disabled).toBe(true);
+
+    await act(async () => {
+      [...container.querySelectorAll("button")].find((button) => button.textContent === "Generate").click();
+    });
+
+    expect(createImageJob).toHaveBeenCalledWith(
+      expect.objectContaining({
+        loras: [
+          expect.objectContaining({ id: "built_in", scope: "builtin", weight: 0.6 }),
+          expect.objectContaining({ id: "global_style", scope: "global" }),
+          expect.objectContaining({ id: "project_mira", scope: "project" }),
+        ],
+      }),
+    );
   });
 });

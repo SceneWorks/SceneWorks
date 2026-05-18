@@ -1000,7 +1000,9 @@ async fn run_lora_import_job(
                 })
                 .unwrap_or_else(|| "lora".to_owned())
         });
-    let target_dir = settings.data_dir.join("loras").join(target_name);
+    let target_dir = optional_payload_string(&job.payload, "targetDir")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| settings.data_dir.join("loras").join(target_name));
 
     heartbeat(api, settings, WorkerStatus::Busy, Some(&job.id)).await?;
     update_job(

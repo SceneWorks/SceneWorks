@@ -491,7 +491,7 @@ def run_lora_import_job(api: ApiClient, settings: WorkerSettings, job: dict) -> 
     repo = payload.get("repo")
     source_path = payload.get("sourcePath")
     target_name = safe_download_dir(payload.get("loraId") or payload.get("name") or repo or Path(source_path or "lora").stem)
-    target_dir = settings.data_dir / "loras" / target_name
+    target_dir = Path(payload.get("targetDir") or settings.data_dir / "loras" / target_name).expanduser().resolve()
 
     try:
         heartbeat(api, settings, "busy", job_id)

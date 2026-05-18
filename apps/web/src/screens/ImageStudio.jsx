@@ -12,6 +12,7 @@ export function ImageStudio({
   imageModels,
   latestAssets,
   launchRequest,
+  loras = [],
   onPreview,
   requestedGpu,
   selectedAsset,
@@ -30,6 +31,23 @@ export function ImageStudio({
   const [sourceAssetId, setSourceAssetId] = useState(selectedAsset?.id ?? "");
   const [characterId, setCharacterId] = useState("");
   const [characterLookId, setCharacterLookId] = useState("");
+  const [selectedLoraIds, setSelectedLoraIds] = useState([]);
+
+  function loraFamilies(lora) {
+    const compatibility = lora.compatibility ?? {};
+    const values =
+      lora.families ??
+      lora.compatibleFamilies ??
+      lora.modelFamilies ??
+      compatibility.families ??
+      (lora.family ? [lora.family] : []);
+    return Array.isArray(values) ? values : [values].filter(Boolean);
+  }
+
+  function loraWeight(lora) {
+    const value = Number(lora.defaultWeight ?? lora.weight ?? 0.8);
+    return Number.isFinite(value) ? value : 0.8;
+  }
 
   useEffect(() => {
     if (!imageModels.some((item) => item.id === model)) {
@@ -76,7 +94,33 @@ export function ImageStudio({
     }
     return item.type === "image";
   });
+  const selectedModel = imageModels.find((item) => item.id === model);
+  const selectedModelFamily = selectedModel?.family ?? null;
+  const compatibleLoras = loras.filter((lora) => {
+    const families = loraFamilies(lora);
+    return !selectedModelFamily || families.length === 0 || families.includes(selectedModelFamily);
+  });
+  const selectedLoras = selectedLoraIds.map((id) => compatibleLoras.find((lora) => lora.id === id)).filter(Boolean);
+  const userSelectedLoraCount = selectedLoras.filter((lora) => lora.scope !== "builtin").length;
   const [width, height] = resolution.split("x").map((value) => Number(value));
+
+  useEffect(() => {
+    setSelectedLoraIds((ids) => ids.filter((id) => compatibleLoras.some((lora) => lora.id === id)));
+  }, [compatibleLoras.map((lora) => lora.id).join("|")]);
+
+  function toggleLora(lora) {
+    setSelectedLoraIds((ids) => {
+      if (ids.includes(lora.id)) {
+        return ids.filter((id) => id !== lora.id);
+      }
+      const selected = ids.map((id) => compatibleLoras.find((item) => item.id === id)).filter(Boolean);
+      const userCount = selected.filter((item) => item.scope !== "builtin").length;
+      if (lora.scope !== "builtin" && userCount >= 2) {
+        return ids;
+      }
+      return [...ids, lora.id];
+    });
+  }
 
   function submit(event) {
     event.preventDefault();
@@ -93,7 +137,14 @@ export function ImageStudio({
       characterId: mode === "character_image" ? characterId || null : null,
       characterLookId: mode === "character_image" ? characterLookId || null : null,
       sourceAssetId: mode === "edit_image" ? sourceAssetId || null : null,
-      loras: [],
+      loras: selectedLoras.map((lora) => ({
+        id: lora.id,
+        name: lora.name ?? lora.id,
+        scope: lora.scope ?? "global",
+        weight: loraWeight(lora),
+        triggerWords: lora.triggerWords ?? [],
+        compatibility: lora.compatibility ?? {},
+      })),
       advanced: { resolution },
     });
   }
@@ -201,6 +252,39 @@ export function ImageStudio({
               </select>
             </label>
           </div>
+
+          <section className="lora-picker" aria-label="LoRA selection">
+            <div>
+              <strong>LoRAs</strong>
+              <span>{selectedLoras.length ? `${selectedLoras.length} selected` : "Compatible with selected model"}</span>
+            </div>
+            {compatibleLoras.length ? (
+              <div className="lora-choice-list">
+                {compatibleLoras.map((lora) => {
+                  const checked = selectedLoraIds.includes(lora.id);
+                  const userLimitReached = lora.scope !== "builtin" && !checked && userSelectedLoraCount >= 2;
+                  return (
+                    <label className={checked ? "lora-choice active" : "lora-choice"} key={lora.id}>
+                      <input
+                        checked={checked}
+                        disabled={userLimitReached}
+                        onChange={() => toggleLora(lora)}
+                        type="checkbox"
+                      />
+                      <span>
+                        <strong>{lora.name ?? lora.id}</strong>
+                        <small>
+                          {lora.scope ?? "global"} {lora.family ? `| ${lora.family}` : ""}
+                        </small>
+                      </span>
+                    </label>
+                  );
+                })}
+              </div>
+            ) : (
+              <div className="empty-panel compact-panel">No compatible LoRAs</div>
+            )}
+          </section>
 
           <button className="advanced-toggle" onClick={() => setAdvancedOpen((value) => !value)} type="button">
             {advancedOpen ? "Hide advanced" : "Advanced"}
