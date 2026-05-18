@@ -103,6 +103,7 @@ function workerStatusLine(worker) {
 }
 
 function isGpuWorker(worker) {
+  // Queue resource cards are for live GPU capacity; CPU utility workers stay out of this panel.
   return worker.gpuId && worker.gpuId !== "cpu" && Array.isArray(worker.capabilities) && worker.capabilities.includes("gpu");
 }
 
@@ -163,12 +164,16 @@ function WorkerCard({ worker }) {
           <strong>{utilizationLabel(loadPercent)}</strong>
         </span>
       </div>
-      <div className="worker-meter" aria-label={`GPU memory usage ${utilizationLabel(memoryPercent)}`}>
-        <span style={{ width: `${memoryPercent ?? 0}%` }} />
-      </div>
-      <div className="worker-meter gpu-load" aria-label={`GPU load ${utilizationLabel(loadPercent)}`}>
-        <span style={{ width: `${loadPercent ?? 0}%` }} />
-      </div>
+      {memoryPercent === null ? null : (
+        <div className="worker-meter" aria-label={`GPU memory usage ${utilizationLabel(memoryPercent)}`}>
+          <span style={{ width: `${memoryPercent}%` }} />
+        </div>
+      )}
+      {loadPercent === null ? null : (
+        <div className="worker-meter gpu-load" aria-label={`GPU load ${utilizationLabel(loadPercent)}`}>
+          <span style={{ width: `${loadPercent}%` }} />
+        </div>
+      )}
       <small>{worker.loadedModels?.length ? `Warm: ${worker.loadedModels.join(", ")}` : "No warm model"}</small>
     </div>
   );

@@ -34,6 +34,18 @@ pub const JOB_STATUSES: &[&str] = &[
 ];
 pub const NON_GPU_JOB_TYPES: &[&str] = &["model_download", "lora_import"];
 pub const MAX_JOB_ATTEMPTS: u32 = 5;
+const DISPATCH_MEMORY_NOT_WORSE_TOLERANCE_MB: f64 = 512.0;
+const DISPATCH_MEMORY_RELIEF_THRESHOLD_MB: f64 = 1024.0;
+const DISPATCH_LOW_MEMORY_THRESHOLD_MB: f64 = 2048.0;
+const DISPATCH_HEALTHY_MEMORY_THRESHOLD_MB: f64 = 4096.0;
+const DISPATCH_LOAD_NOT_WORSE_TOLERANCE_PERCENT: f64 = 10.0;
+const DISPATCH_LOAD_RELIEF_THRESHOLD_PERCENT: f64 = 15.0;
+const DISPATCH_HIGH_LOAD_THRESHOLD_PERCENT: f64 = 85.0;
+const DISPATCH_RECOVERED_LOAD_THRESHOLD_PERCENT: f64 = 75.0;
+const DISPATCH_MEMORY_USAGE_NOT_WORSE_TOLERANCE_PERCENT: f64 = 10.0;
+const DISPATCH_MEMORY_USAGE_RELIEF_THRESHOLD_PERCENT: f64 = 10.0;
+const DISPATCH_HIGH_MEMORY_USAGE_THRESHOLD_PERCENT: f64 = 90.0;
+const DISPATCH_RECOVERED_MEMORY_USAGE_THRESHOLD_PERCENT: f64 = 80.0;
 
 pub type JobsStoreResult<T> = Result<T, JobsStoreError>;
 
@@ -1000,6 +1012,7 @@ fn loads_optional<T>(value: Option<&str>) -> Option<T>
 where
     T: DeserializeOwned,
 {
+    // Best-effort worker telemetry should disappear rather than poison the queue.
     value.and_then(|text| serde_json::from_str::<T>(text).ok())
 }
 
@@ -1264,10 +1277,17 @@ fn dispatch_score_is_better(candidate: DispatchScore, current: DispatchScore) ->
     let free_delta = candidate.free_memory_mb - current.free_memory_mb;
     let load_delta = current.gpu_load_percent - candidate.gpu_load_percent;
     let usage_delta = current.memory_usage_percent - candidate.memory_usage_percent;
-    let candidate_is_not_worse = candidate.free_memory_mb + 512.0 >= current.free_memory_mb
-        && candidate.gpu_load_percent <= current.gpu_load_percent + 10.0
-        && candidate.memory_usage_percent <= current.memory_usage_percent + 10.0;
-    let candidate_relief = free_delta >= 1024.0 || load_delta >= 15.0 || usage_delta >= 10.0;
+    // Prefer a meaningfully freer/lower-load GPU, with tolerance bands so two
+    // similarly healthy GPUs do not trade claims back and forth on tiny deltas.
+    let candidate_is_not_worse = candidate.free_memory_mb + DISPATCH_MEMORY_NOT_WORSE_TOLERANCE_MB
+        >= current.free_memory_mb
+        && candidate.gpu_load_percent
+            <= current.gpu_load_percent + DISPATCH_LOAD_NOT_WORSE_TOLERANCE_PERCENT
+        && candidate.memory_usage_percent
+            <= current.memory_usage_percent + DISPATCH_MEMORY_USAGE_NOT_WORSE_TOLERANCE_PERCENT;
+    let candidate_relief = free_delta >= DISPATCH_MEMORY_RELIEF_THRESHOLD_MB
+        || load_delta >= DISPATCH_LOAD_RELIEF_THRESHOLD_PERCENT
+        || usage_delta >= DISPATCH_MEMORY_USAGE_RELIEF_THRESHOLD_PERCENT;
 
     if candidate_is_not_worse && candidate_relief {
         return true;
@@ -1275,9 +1295,12 @@ fn dispatch_score_is_better(candidate: DispatchScore, current: DispatchScore) ->
     if candidate_is_not_worse && candidate.warm_model && !current.warm_model {
         return true;
     }
-    (current.free_memory_mb < 2048.0 && candidate.free_memory_mb >= 4096.0)
-        || (current.gpu_load_percent >= 85.0 && candidate.gpu_load_percent <= 75.0)
-        || (current.memory_usage_percent >= 90.0 && candidate.memory_usage_percent <= 80.0)
+    (current.free_memory_mb < DISPATCH_LOW_MEMORY_THRESHOLD_MB
+        && candidate.free_memory_mb >= DISPATCH_HEALTHY_MEMORY_THRESHOLD_MB)
+        || (current.gpu_load_percent >= DISPATCH_HIGH_LOAD_THRESHOLD_PERCENT
+            && candidate.gpu_load_percent <= DISPATCH_RECOVERED_LOAD_THRESHOLD_PERCENT)
+        || (current.memory_usage_percent >= DISPATCH_HIGH_MEMORY_USAGE_THRESHOLD_PERCENT
+            && candidate.memory_usage_percent <= DISPATCH_RECOVERED_MEMORY_USAGE_THRESHOLD_PERCENT)
 }
 
 fn choose_claimable_job(rows: Vec<JobSnapshot>, worker: &WorkerSnapshot) -> Option<JobSnapshot> {
