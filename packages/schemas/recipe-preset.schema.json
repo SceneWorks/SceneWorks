@@ -17,7 +17,10 @@
           "name": { "type": "string", "minLength": 1 },
           "scope": { "type": "string", "enum": ["builtin", "global", "project"] },
           "archived": { "type": "boolean" },
-          "order": { "type": "integer" },
+          "order": {
+            "type": "integer",
+            "description": "Caller-owned display order. Values do not need to be unique; lists sort by scope, then order, then name."
+          },
           "workflow": {
             "type": "string",
             "enum": ["text_to_image", "edit_image", "image_to_video", "text_to_video", "first_last_frame"]

@@ -3461,6 +3461,7 @@ fn normalize_recipe_preset_for_write(
         "Recipe preset model is required",
     )?;
     validate_recipe_preset_workflow(object.get("workflow").and_then(Value::as_str), require_all)?;
+    validate_recipe_preset_order(object.get("order"))?;
     validate_recipe_preset_defaults(object.get("defaults"))?;
     validate_recipe_preset_prompt(object.get("prompt"))?;
     normalize_recipe_preset_loras(object)?;
@@ -3507,6 +3508,15 @@ fn validate_recipe_preset_workflow(value: Option<&str>, require: bool) -> Result
         None if require => Err(ApiError::bad_request("Recipe preset workflow is required")),
         None => Ok(()),
     }
+}
+
+fn validate_recipe_preset_order(value: Option<&Value>) -> Result<(), ApiError> {
+    if value.is_some_and(|value| !value.is_i64()) {
+        return Err(ApiError::bad_request(
+            "Recipe preset order must be an integer",
+        ));
+    }
+    Ok(())
 }
 
 fn validate_recipe_preset_defaults(value: Option<&Value>) -> Result<(), ApiError> {
@@ -5489,6 +5499,7 @@ mod tests {
                 "name": "Soft Glow",
                 "model": "z_image_turbo",
                 "workflow": "text_to_image",
+                "order": 30,
                 "defaults": { "resolution": "1024x1024" },
                 "prompt": { "suffix": "soft glow" },
                 "loras": [{ "id": "style_lora", "weight": 0.5 }]
@@ -5525,6 +5536,48 @@ mod tests {
         assert_eq!(duplicate["id"], "soft_glow_copy");
         assert_eq!(duplicate["name"], "Soft Glow Copy");
         assert_eq!(duplicate["loras"][0]["id"], "style_lora");
+
+        for (id, name) in [("beta_order", "Beta Order"), ("alpha_order", "Alpha Order")] {
+            let (status, _) = request(
+                app.clone(),
+                "POST",
+                "/api/v1/recipe-presets",
+                json!({
+                    "id": id,
+                    "name": name,
+                    "model": "z_image_turbo",
+                    "workflow": "text_to_image",
+                    "order": 10
+                }),
+            )
+            .await;
+            assert_eq!(status, StatusCode::CREATED);
+        }
+
+        let (status, ordered) = request(
+            app.clone(),
+            "GET",
+            "/api/v1/recipe-presets?workflow=text_to_image&model=z_image_turbo",
+            Value::Null,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let ordered_ids = ordered
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|preset| preset["id"].as_str().unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            ordered_ids,
+            vec![
+                "builtin_readonly",
+                "alpha_order",
+                "beta_order",
+                "soft_glow",
+                "soft_glow_copy"
+            ]
+        );
 
         let (status, scoped) = request(
             app.clone(),
@@ -5638,12 +5691,40 @@ mod tests {
             .iter()
             .any(|preset| preset["id"] == "soft_glow" && preset["archived"] == true));
 
+        let (status, unarchived) = request(
+            app.clone(),
+            "PATCH",
+            "/api/v1/recipe-presets/soft_glow",
+            json!({ "archived": false }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(unarchived["archived"], false);
+
         let saved_manifest: Value = serde_json::from_str(
             &std::fs::read_to_string(config_dir.join("user.recipe-presets.jsonc"))
                 .expect("user recipe preset manifest reads"),
         )
         .expect("saved manifest parses");
         assert_eq!(saved_manifest["futureRoot"], true);
+
+        let (bad_status, bad_error) = request(
+            app.clone(),
+            "POST",
+            "/api/v1/recipe-presets",
+            json!({
+                "id": "Bad Id",
+                "name": "Bad Id",
+                "model": "z_image_turbo",
+                "workflow": "text_to_image"
+            }),
+        )
+        .await;
+        assert_eq!(bad_status, StatusCode::BAD_REQUEST);
+        assert_eq!(
+            bad_error["detail"],
+            "Recipe preset id must use lowercase letters, numbers, dashes, or underscores"
+        );
 
         let (bad_status, bad_error) = request(
             app.clone(),
@@ -5683,6 +5764,24 @@ mod tests {
         assert_eq!(
             bad_error["detail"],
             "Recipe presets can include at most 3 LoRAs"
+        );
+
+        let (bad_status, bad_error) = request(
+            app.clone(),
+            "POST",
+            "/api/v1/recipe-presets",
+            json!({
+                "name": "Overweighted LoRA",
+                "model": "z_image_turbo",
+                "workflow": "text_to_image",
+                "loras": [{ "id": "style_one", "weight": 2.5 }]
+            }),
+        )
+        .await;
+        assert_eq!(bad_status, StatusCode::BAD_REQUEST);
+        assert_eq!(
+            bad_error["detail"],
+            "Recipe preset LoRA weight must be between -2 and 2"
         );
 
         let create_one = request(
