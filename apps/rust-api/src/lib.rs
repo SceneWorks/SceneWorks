@@ -3377,6 +3377,7 @@ async fn save_manifest_entries(
             parent.display()
         ))
     })?;
+    let comments = load_manifest_comments(path).await?;
     let mut manifest = load_manifest_root(path).await?;
     manifest.entry("$schema".to_owned()).or_insert_with(|| {
         Value::String("https://sceneworks.local/schemas/recipe-preset.schema.json".to_owned())
@@ -3385,9 +3386,24 @@ async fn save_manifest_entries(
         .entry("schemaVersion".to_owned())
         .or_insert_with(|| json!(1));
     manifest.insert(field.to_owned(), Value::Array(entries));
-    let payload = serde_json::to_string_pretty(&Value::Object(manifest))
+    let mut payload = serde_json::to_string_pretty(&Value::Object(manifest))
         .map_err(|error| ApiError::internal(format!("Failed to encode manifest: {error}")))?;
+    payload = restore_jsonc_comments(&payload, &comments);
     write_manifest_atomic(path, &format!("{payload}\n")).await
+}
+
+async fn load_manifest_comments(path: &FsPath) -> Result<Vec<String>, ApiError> {
+    let payload = match tokio::fs::read_to_string(path).await {
+        Ok(payload) => payload,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) => {
+            return Err(ApiError::internal(format!(
+                "Failed to load manifest {}: {error}",
+                path.display()
+            )))
+        }
+    };
+    Ok(extract_jsonc_comments(&payload))
 }
 
 async fn load_manifest_root(path: &FsPath) -> Result<JsonObject, ApiError> {
@@ -3816,6 +3832,66 @@ fn strip_jsonc_comments(value: &str) -> String {
         }
         output.push(character);
     }
+    output
+}
+
+fn extract_jsonc_comments(value: &str) -> Vec<String> {
+    let mut comments = Vec::new();
+    let mut chars = value.chars().peekable();
+    let mut in_string = false;
+    let mut escaped = false;
+    while let Some(character) = chars.next() {
+        if in_string {
+            if escaped {
+                escaped = false;
+            } else if character == '\\' {
+                escaped = true;
+            } else if character == '"' {
+                in_string = false;
+            }
+            continue;
+        }
+
+        if character == '"' {
+            in_string = true;
+            continue;
+        }
+        if character == '/' && chars.peek() == Some(&'/') {
+            chars.next();
+            let mut comment = String::from("//");
+            for next in chars.by_ref() {
+                if next == '\r' || next == '\n' {
+                    break;
+                }
+                comment.push(next);
+            }
+            comments.push(comment);
+            continue;
+        }
+        if character == '/' && chars.peek() == Some(&'*') {
+            chars.next();
+            let mut comment = String::from("/*");
+            let mut previous = '\0';
+            for next in chars.by_ref() {
+                comment.push(next);
+                if previous == '*' && next == '/' {
+                    break;
+                }
+                previous = next;
+            }
+            comments.push(comment);
+        }
+    }
+    comments
+}
+
+fn restore_jsonc_comments(payload: &str, comments: &[String]) -> String {
+    if comments.is_empty() {
+        return payload.to_owned();
+    }
+    let mut output = comments.join("\n");
+    output.push('\n');
+    output.push_str(payload);
     output
 }
 
@@ -4583,8 +4659,8 @@ impl IntoResponse for ApiError {
 #[cfg(test)]
 mod tests {
     use super::{
-        create_app, EventHub, EventMessage, Settings, EVENT_BUFFER_SIZE, HEARTBEAT_SSE_DATA,
-        HEARTBEAT_SSE_WIRE,
+        create_app, strip_jsonc_comments, EventHub, EventMessage, Settings, EVENT_BUFFER_SIZE,
+        HEARTBEAT_SSE_DATA, HEARTBEAT_SSE_WIRE,
     };
     use axum::body::{to_bytes, Body};
     use axum::http::{Request, StatusCode};
@@ -5456,7 +5532,15 @@ mod tests {
         .expect("builtin recipe presets writes");
         std::fs::write(
             config_dir.join("user.recipe-presets.jsonc"),
-            r#"{ "schemaVersion": 1, "futureRoot": true, "presets": [] }"#,
+            r#"
+            // user preset notes survive API writes
+            {
+              "schemaVersion": 1,
+              /* preserve unknown root fields too */
+              "futureRoot": true,
+              "presets": []
+            }
+            "#,
         )
         .expect("user recipe presets writes");
         std::fs::write(
@@ -5701,11 +5785,14 @@ mod tests {
         assert_eq!(status, StatusCode::OK);
         assert_eq!(unarchived["archived"], false);
 
-        let saved_manifest: Value = serde_json::from_str(
-            &std::fs::read_to_string(config_dir.join("user.recipe-presets.jsonc"))
-                .expect("user recipe preset manifest reads"),
-        )
-        .expect("saved manifest parses");
+        let saved_manifest_text =
+            std::fs::read_to_string(config_dir.join("user.recipe-presets.jsonc"))
+                .expect("user recipe preset manifest reads");
+        assert!(saved_manifest_text.contains("// user preset notes survive API writes"));
+        assert!(saved_manifest_text.contains("/* preserve unknown root fields too */"));
+        let saved_manifest: Value =
+            serde_json::from_str(&strip_jsonc_comments(&saved_manifest_text))
+                .expect("saved manifest parses");
         assert_eq!(saved_manifest["futureRoot"], true);
 
         let (bad_status, bad_error) = request(
