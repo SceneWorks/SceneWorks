@@ -7,8 +7,17 @@ use rusqlite::{params, Connection, OptionalExtension, Row};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
 
+use crate::character_store::{
+    apply_character_migrations, clear_character_tables, reindex_characters_on_connection,
+    CharacterStore,
+};
+pub use crate::character_store::{
+    CharacterCreateInput, CharacterLookInput, CharacterLookUpdateInput, CharacterLoraInput,
+    CharacterLoraUpdateInput, CharacterMutationResult, CharacterReferenceInput,
+    CharacterReferenceUpdateInput, CharacterUpdateInput, CHARACTER_SIDECAR_PATTERN,
+};
+
 pub const ASSET_SIDECAR_PATTERN: &str = "*.sceneworks.json";
-pub const CHARACTER_SIDECAR_PATTERN: &str = ".sceneworks.character.json";
 pub const PROJECT_FOLDERS: &[&str] = &[
     "assets/images",
     "assets/videos",
@@ -134,78 +143,6 @@ pub struct AssetStatusPatch {
     pub rating: Option<u8>,
     pub rejected: Option<bool>,
     pub trashed: Option<bool>,
-}
-
-#[derive(Debug, Clone)]
-pub struct CharacterCreateInput {
-    pub name: String,
-    pub character_type: String,
-    pub description: String,
-}
-
-#[derive(Debug, Default, Clone)]
-pub struct CharacterUpdateInput {
-    pub name: Option<String>,
-    pub character_type: Option<String>,
-    pub description: Option<String>,
-    pub archived: Option<bool>,
-}
-
-#[derive(Debug, Clone)]
-pub struct CharacterReferenceInput {
-    pub asset_id: String,
-    pub approved: bool,
-    pub role: String,
-    pub notes: String,
-}
-
-#[derive(Debug, Default, Clone)]
-pub struct CharacterReferenceUpdateInput {
-    pub approved: Option<bool>,
-    pub role: Option<String>,
-    pub notes: Option<String>,
-}
-
-#[derive(Debug, Clone)]
-pub struct CharacterLookInput {
-    pub name: String,
-    pub description: String,
-    pub approved_reference_ids: Vec<String>,
-    pub recipe_settings: Map<String, Value>,
-}
-
-#[derive(Debug, Default, Clone)]
-pub struct CharacterLookUpdateInput {
-    pub name: Option<String>,
-    pub description: Option<String>,
-    pub approved_reference_ids: Option<Vec<String>>,
-    pub recipe_settings: Option<Map<String, Value>>,
-}
-
-#[derive(Debug, Clone)]
-pub struct CharacterLoraInput {
-    pub lora_id: Option<String>,
-    pub name: String,
-    pub source_path: Option<String>,
-    pub trigger_words: Vec<String>,
-    pub default_weight: f64,
-    pub compatibility: Map<String, Value>,
-    pub scope: String,
-}
-
-#[derive(Debug, Default, Clone)]
-pub struct CharacterLoraUpdateInput {
-    pub name: Option<String>,
-    pub trigger_words: Option<Vec<String>>,
-    pub default_weight: Option<f64>,
-    pub compatibility: Option<Map<String, Value>>,
-    pub scope: Option<String>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct CharacterMutationResult {
-    pub id: String,
-    pub status: String,
 }
 
 #[derive(Debug, Clone)]
@@ -587,33 +524,8 @@ impl ProjectStore {
         include_archived: bool,
     ) -> ProjectStoreResult<Vec<Value>> {
         let project_path = self.find_project_path(project_id)?;
-        let mut characters = Vec::new();
-        for path in character_sidecars(&project_path)? {
-            let Ok(character) = read_json(&path) else {
-                continue;
-            };
-            if character
-                .pointer("/status/archived")
-                .and_then(Value::as_bool)
-                .unwrap_or(false)
-                && !include_archived
-            {
-                continue;
-            }
-            characters.push(hydrate_character(project_id, &project_path, character)?);
-        }
-        characters.sort_by(|left, right| {
-            right
-                .get("updatedAt")
-                .and_then(Value::as_str)
-                .unwrap_or_default()
-                .cmp(
-                    left.get("updatedAt")
-                        .and_then(Value::as_str)
-                        .unwrap_or_default(),
-                )
-        });
-        Ok(characters)
+        CharacterStore::new(&self.data_dir, project_path)
+            .list_characters(project_id, include_archived)
     }
 
     pub fn create_character(
@@ -621,38 +533,13 @@ impl ProjectStore {
         project_id: &str,
         input: CharacterCreateInput,
     ) -> ProjectStoreResult<Value> {
-        validate_character_name(&input.name)?;
-        validate_character_type(&input.character_type)?;
-        validate_text_length(&input.description, "description", 2000)?;
         let project_path = self.find_project_path(project_id)?;
-        let now = utc_now();
-        let character_id = format!("character_{}", random_hex(16)?);
-        let character = json!({
-            "schemaVersion": 1,
-            "id": character_id,
-            "projectId": project_id,
-            "name": input.name.trim(),
-            "type": input.character_type,
-            "description": input.description.trim(),
-            "createdAt": now,
-            "updatedAt": now,
-            "status": { "archived": false },
-            "references": [],
-            "looks": [],
-            "loras": [],
-            "trainedLoras": []
-        });
-        write_json(
-            &character_file(&project_path, required_str(&character, "id")?),
-            &character,
-        )?;
-        hydrate_character(project_id, &project_path, character)
+        CharacterStore::new(&self.data_dir, project_path).create_character(project_id, input)
     }
 
     pub fn get_character(&self, project_id: &str, character_id: &str) -> ProjectStoreResult<Value> {
         let project_path = self.find_project_path(project_id)?;
-        let character = read_json(&find_character_file(&project_path, character_id)?)?;
-        hydrate_character(project_id, &project_path, character)
+        CharacterStore::new(&self.data_dir, project_path).get_character(project_id, character_id)
     }
 
     pub fn update_character(
@@ -662,35 +549,11 @@ impl ProjectStore {
         input: CharacterUpdateInput,
     ) -> ProjectStoreResult<Value> {
         let project_path = self.find_project_path(project_id)?;
-        let mut character = read_json(&find_character_file(&project_path, character_id)?)?;
-        let object = value_object_mut(&mut character, "Character sidecar")?;
-        if let Some(name) = input.name {
-            validate_character_name(&name)?;
-            object.insert("name".to_owned(), Value::String(name.trim().to_owned()));
-        }
-        if let Some(character_type) = input.character_type {
-            validate_character_type(&character_type)?;
-            object.insert("type".to_owned(), Value::String(character_type));
-        }
-        if let Some(description) = input.description {
-            validate_text_length(&description, "description", 2000)?;
-            object.insert(
-                "description".to_owned(),
-                Value::String(description.trim().to_owned()),
-            );
-        }
-        if let Some(archived) = input.archived {
-            object
-                .entry("status".to_owned())
-                .or_insert_with(|| json!({}))
-                .as_object_mut()
-                .ok_or_else(|| {
-                    ProjectStoreError::BadRequest("Character status must be an object".to_owned())
-                })?
-                .insert("archived".to_owned(), Value::Bool(archived));
-        }
-        write_character(&project_path, &mut character)?;
-        hydrate_character(project_id, &project_path, character)
+        CharacterStore::new(&self.data_dir, project_path).update_character(
+            project_id,
+            character_id,
+            input,
+        )
     }
 
     pub fn archive_character(
@@ -699,20 +562,7 @@ impl ProjectStore {
         character_id: &str,
     ) -> ProjectStoreResult<CharacterMutationResult> {
         let project_path = self.find_project_path(project_id)?;
-        let mut character = read_json(&find_character_file(&project_path, character_id)?)?;
-        value_object_mut(&mut character, "Character sidecar")?
-            .entry("status".to_owned())
-            .or_insert_with(|| json!({}))
-            .as_object_mut()
-            .ok_or_else(|| {
-                ProjectStoreError::BadRequest("Character status must be an object".to_owned())
-            })?
-            .insert("archived".to_owned(), Value::Bool(true));
-        write_character(&project_path, &mut character)?;
-        Ok(CharacterMutationResult {
-            id: character_id.to_owned(),
-            status: "archived".to_owned(),
-        })
+        CharacterStore::new(&self.data_dir, project_path).archive_character(character_id)
     }
 
     pub fn purge_character(
@@ -721,12 +571,7 @@ impl ProjectStore {
         character_id: &str,
     ) -> ProjectStoreResult<CharacterMutationResult> {
         let project_path = self.find_project_path(project_id)?;
-        let path = find_character_file(&project_path, character_id)?;
-        fs::remove_file(path)?;
-        Ok(CharacterMutationResult {
-            id: character_id.to_owned(),
-            status: "purged".to_owned(),
-        })
+        CharacterStore::new(&self.data_dir, project_path).purge_character(character_id)
     }
 
     pub fn add_character_reference(
@@ -735,37 +580,12 @@ impl ProjectStore {
         character_id: &str,
         input: CharacterReferenceInput,
     ) -> ProjectStoreResult<Value> {
-        validate_required_text(&input.asset_id, "assetId")?;
-        validate_text_length(&input.role, "role", 80)?;
-        validate_text_length(&input.notes, "notes", 1000)?;
         let project_path = self.find_project_path(project_id)?;
-        let mut character = read_json(&find_character_file(&project_path, character_id)?)?;
-        let now = utc_now();
-        let reference = json!({
-            "assetId": input.asset_id,
-            "approved": input.approved,
-            "role": if input.role.trim().is_empty() { "reference" } else { input.role.trim() },
-            "notes": input.notes,
-            "addedAt": now,
-            "approvedAt": if input.approved { Value::String(now) } else { Value::Null }
-        });
-        update_asset_character_link(&project_path, character_id, &reference, false)?;
-        let object = value_object_mut(&mut character, "Character sidecar")?;
-        let mut references = object
-            .remove("references")
-            .and_then(|value| value.as_array().cloned())
-            .unwrap_or_default()
-            .into_iter()
-            .filter(|item| {
-                item.get("assetId")
-                    .and_then(Value::as_str)
-                    .is_some_and(|asset_id| asset_id != input.asset_id)
-            })
-            .collect::<Vec<_>>();
-        references.insert(0, reference);
-        object.insert("references".to_owned(), Value::Array(references));
-        write_character(&project_path, &mut character)?;
-        hydrate_character(project_id, &project_path, character)
+        CharacterStore::new(&self.data_dir, project_path).add_reference(
+            project_id,
+            character_id,
+            input,
+        )
     }
 
     pub fn update_character_reference(
@@ -776,48 +596,12 @@ impl ProjectStore {
         input: CharacterReferenceUpdateInput,
     ) -> ProjectStoreResult<Value> {
         let project_path = self.find_project_path(project_id)?;
-        let mut character = read_json(&find_character_file(&project_path, character_id)?)?;
-        let references = character
-            .get_mut("references")
-            .and_then(Value::as_array_mut)
-            .ok_or_else(|| {
-                ProjectStoreError::BadRequest("Character references must be an array".to_owned())
-            })?;
-        let reference = references
-            .iter_mut()
-            .find(|item| item.get("assetId").and_then(Value::as_str) == Some(asset_id))
-            .ok_or_else(|| ProjectStoreError::NotFound("Reference not found".to_owned()))?;
-        if let Some(approved) = input.approved {
-            value_object_mut(reference, "Character reference")?
-                .insert("approved".to_owned(), Value::Bool(approved));
-            value_object_mut(reference, "Character reference")?.insert(
-                "approvedAt".to_owned(),
-                if approved {
-                    Value::String(utc_now())
-                } else {
-                    Value::Null
-                },
-            );
-        }
-        if let Some(role) = input.role {
-            validate_text_length(&role, "role", 80)?;
-            value_object_mut(reference, "Character reference")?.insert(
-                "role".to_owned(),
-                Value::String(if role.trim().is_empty() {
-                    "reference".to_owned()
-                } else {
-                    role
-                }),
-            );
-        }
-        if let Some(notes) = input.notes {
-            validate_text_length(&notes, "notes", 1000)?;
-            value_object_mut(reference, "Character reference")?
-                .insert("notes".to_owned(), Value::String(notes));
-        }
-        update_asset_character_link(&project_path, character_id, reference, false)?;
-        write_character(&project_path, &mut character)?;
-        hydrate_character(project_id, &project_path, character)
+        CharacterStore::new(&self.data_dir, project_path).update_reference(
+            project_id,
+            character_id,
+            asset_id,
+            input,
+        )
     }
 
     pub fn remove_character_reference(
@@ -827,28 +611,11 @@ impl ProjectStore {
         asset_id: &str,
     ) -> ProjectStoreResult<Value> {
         let project_path = self.find_project_path(project_id)?;
-        let mut character = read_json(&find_character_file(&project_path, character_id)?)?;
-        let references = character
-            .get("references")
-            .and_then(Value::as_array)
-            .cloned()
-            .unwrap_or_default();
-        let reference = references
-            .iter()
-            .find(|item| item.get("assetId").and_then(Value::as_str) == Some(asset_id))
-            .ok_or_else(|| ProjectStoreError::NotFound("Reference not found".to_owned()))?;
-        update_asset_character_link(&project_path, character_id, reference, true)?;
-        value_object_mut(&mut character, "Character sidecar")?.insert(
-            "references".to_owned(),
-            Value::Array(
-                references
-                    .into_iter()
-                    .filter(|item| item.get("assetId").and_then(Value::as_str) != Some(asset_id))
-                    .collect(),
-            ),
-        );
-        write_character(&project_path, &mut character)?;
-        hydrate_character(project_id, &project_path, character)
+        CharacterStore::new(&self.data_dir, project_path).remove_reference(
+            project_id,
+            character_id,
+            asset_id,
+        )
     }
 
     pub fn create_character_look(
@@ -857,23 +624,12 @@ impl ProjectStore {
         character_id: &str,
         input: CharacterLookInput,
     ) -> ProjectStoreResult<Value> {
-        validate_character_name(&input.name)?;
-        validate_text_length(&input.description, "description", 1000)?;
         let project_path = self.find_project_path(project_id)?;
-        let mut character = read_json(&find_character_file(&project_path, character_id)?)?;
-        let now = utc_now();
-        let look = json!({
-            "id": format!("look_{}", random_hex(16)?),
-            "name": input.name.trim(),
-            "description": input.description.trim(),
-            "approvedReferenceIds": input.approved_reference_ids,
-            "recipeSettings": input.recipe_settings,
-            "createdAt": now,
-            "updatedAt": now
-        });
-        prepend_array_field(&mut character, "looks", look)?;
-        write_character(&project_path, &mut character)?;
-        hydrate_character(project_id, &project_path, character)
+        CharacterStore::new(&self.data_dir, project_path).create_look(
+            project_id,
+            character_id,
+            input,
+        )
     }
 
     pub fn update_character_look(
@@ -884,41 +640,12 @@ impl ProjectStore {
         input: CharacterLookUpdateInput,
     ) -> ProjectStoreResult<Value> {
         let project_path = self.find_project_path(project_id)?;
-        let mut character = read_json(&find_character_file(&project_path, character_id)?)?;
-        let looks = character
-            .get_mut("looks")
-            .and_then(Value::as_array_mut)
-            .ok_or_else(|| {
-                ProjectStoreError::BadRequest("Character looks must be an array".to_owned())
-            })?;
-        let look = looks
-            .iter_mut()
-            .find(|item| item.get("id").and_then(Value::as_str) == Some(look_id))
-            .ok_or_else(|| ProjectStoreError::NotFound("Look not found".to_owned()))?;
-        let object = value_object_mut(look, "Character look")?;
-        if let Some(name) = input.name {
-            validate_character_name(&name)?;
-            object.insert("name".to_owned(), Value::String(name.trim().to_owned()));
-        }
-        if let Some(description) = input.description {
-            validate_text_length(&description, "description", 1000)?;
-            object.insert(
-                "description".to_owned(),
-                Value::String(description.trim().to_owned()),
-            );
-        }
-        if let Some(approved_reference_ids) = input.approved_reference_ids {
-            object.insert(
-                "approvedReferenceIds".to_owned(),
-                json!(approved_reference_ids),
-            );
-        }
-        if let Some(recipe_settings) = input.recipe_settings {
-            object.insert("recipeSettings".to_owned(), Value::Object(recipe_settings));
-        }
-        object.insert("updatedAt".to_owned(), Value::String(utc_now()));
-        write_character(&project_path, &mut character)?;
-        hydrate_character(project_id, &project_path, character)
+        CharacterStore::new(&self.data_dir, project_path).update_look(
+            project_id,
+            character_id,
+            look_id,
+            input,
+        )
     }
 
     pub fn delete_character_look(
@@ -928,23 +655,11 @@ impl ProjectStore {
         look_id: &str,
     ) -> ProjectStoreResult<Value> {
         let project_path = self.find_project_path(project_id)?;
-        let mut character = read_json(&find_character_file(&project_path, character_id)?)?;
-        let looks = character
-            .get("looks")
-            .and_then(Value::as_array)
-            .cloned()
-            .unwrap_or_default();
-        value_object_mut(&mut character, "Character sidecar")?.insert(
-            "looks".to_owned(),
-            Value::Array(
-                looks
-                    .into_iter()
-                    .filter(|item| item.get("id").and_then(Value::as_str) != Some(look_id))
-                    .collect(),
-            ),
-        );
-        write_character(&project_path, &mut character)?;
-        hydrate_character(project_id, &project_path, character)
+        CharacterStore::new(&self.data_dir, project_path).delete_look(
+            project_id,
+            character_id,
+            look_id,
+        )
     }
 
     pub fn attach_character_lora(
@@ -953,36 +668,12 @@ impl ProjectStore {
         character_id: &str,
         input: CharacterLoraInput,
     ) -> ProjectStoreResult<Value> {
-        validate_character_name(&input.name)?;
-        validate_lora_weight(input.default_weight)?;
-        validate_lora_scope(&input.scope, true)?;
         let project_path = self.find_project_path(project_id)?;
-        let mut character = read_json(&find_character_file(&project_path, character_id)?)?;
-        let (project_lora_path, copied) = copy_lora_into_project(
-            &project_path,
-            &self.data_dir,
+        CharacterStore::new(&self.data_dir, project_path).attach_lora(
+            project_id,
             character_id,
-            input.source_path.as_deref(),
-        )?;
-        let now = utc_now();
-        let link = json!({
-            "id": format!("character_lora_{}", random_hex(16)?),
-            "loraId": input.lora_id,
-            "name": input.name.trim(),
-            "sourcePath": input.source_path,
-            "projectPath": project_lora_path,
-            "copiedIntoProject": copied,
-            "category": "character",
-            "scope": input.scope,
-            "triggerWords": input.trigger_words,
-            "defaultWeight": input.default_weight,
-            "compatibility": input.compatibility,
-            "createdAt": now,
-            "updatedAt": now
-        });
-        prepend_array_field(&mut character, "loras", link)?;
-        write_character(&project_path, &mut character)?;
-        hydrate_character(project_id, &project_path, character)
+            input,
+        )
     }
 
     pub fn update_character_lora(
@@ -993,39 +684,12 @@ impl ProjectStore {
         input: CharacterLoraUpdateInput,
     ) -> ProjectStoreResult<Value> {
         let project_path = self.find_project_path(project_id)?;
-        let mut character = read_json(&find_character_file(&project_path, character_id)?)?;
-        let loras = character
-            .get_mut("loras")
-            .and_then(Value::as_array_mut)
-            .ok_or_else(|| {
-                ProjectStoreError::BadRequest("Character LoRAs must be an array".to_owned())
-            })?;
-        let lora = loras
-            .iter_mut()
-            .find(|item| item.get("id").and_then(Value::as_str) == Some(link_id))
-            .ok_or_else(|| ProjectStoreError::NotFound("Character LoRA not found".to_owned()))?;
-        let object = value_object_mut(lora, "Character LoRA")?;
-        if let Some(name) = input.name {
-            validate_character_name(&name)?;
-            object.insert("name".to_owned(), Value::String(name.trim().to_owned()));
-        }
-        if let Some(trigger_words) = input.trigger_words {
-            object.insert("triggerWords".to_owned(), json!(trigger_words));
-        }
-        if let Some(default_weight) = input.default_weight {
-            validate_lora_weight(default_weight)?;
-            object.insert("defaultWeight".to_owned(), json!(default_weight));
-        }
-        if let Some(compatibility) = input.compatibility {
-            object.insert("compatibility".to_owned(), Value::Object(compatibility));
-        }
-        if let Some(scope) = input.scope {
-            validate_lora_scope(&scope, true)?;
-            object.insert("scope".to_owned(), Value::String(scope));
-        }
-        object.insert("updatedAt".to_owned(), Value::String(utc_now()));
-        write_character(&project_path, &mut character)?;
-        hydrate_character(project_id, &project_path, character)
+        CharacterStore::new(&self.data_dir, project_path).update_lora_link(
+            project_id,
+            character_id,
+            link_id,
+            input,
+        )
     }
 
     pub fn detach_character_lora(
@@ -1035,23 +699,11 @@ impl ProjectStore {
         link_id: &str,
     ) -> ProjectStoreResult<Value> {
         let project_path = self.find_project_path(project_id)?;
-        let mut character = read_json(&find_character_file(&project_path, character_id)?)?;
-        let loras = character
-            .get("loras")
-            .and_then(Value::as_array)
-            .cloned()
-            .unwrap_or_default();
-        value_object_mut(&mut character, "Character sidecar")?.insert(
-            "loras".to_owned(),
-            Value::Array(
-                loras
-                    .into_iter()
-                    .filter(|item| item.get("id").and_then(Value::as_str) != Some(link_id))
-                    .collect(),
-            ),
-        );
-        write_character(&project_path, &mut character)?;
-        hydrate_character(project_id, &project_path, character)
+        CharacterStore::new(&self.data_dir, project_path).detach_lora(
+            project_id,
+            character_id,
+            link_id,
+        )
     }
 
     pub fn list_person_tracks(&self, project_id: &str) -> ProjectStoreResult<Vec<Value>> {
@@ -1461,7 +1113,7 @@ pub fn apply_project_migrations(connection: &Connection) -> ProjectStoreResult<(
           key text primary key,
           value text not null
         );
-        insert or replace into project_metadata (key, value) values ('schemaVersion', '1');
+        insert or ignore into project_metadata (key, value) values ('schemaVersion', '1');
         create table if not exists assets (
           id text primary key,
           type text not null,
@@ -1497,6 +1149,7 @@ pub fn apply_project_migrations(connection: &Connection) -> ProjectStoreResult<(
         ",
     )?;
     ensure_column(connection, "assets", "sidecar_path", "text")?;
+    apply_character_migrations(connection)?;
     Ok(())
 }
 
@@ -1511,6 +1164,7 @@ fn reindex_project_path(project_path: &Path) -> ProjectStoreResult<ReindexCounts
     transaction.execute("delete from assets", [])?;
     transaction.execute("delete from generation_sets", [])?;
     transaction.execute("delete from timelines", [])?;
+    clear_character_tables(&transaction)?;
 
     let mut counts = ReindexCounts::default();
     for sidecar_path in asset_sidecars(project_path)? {
@@ -1592,6 +1246,8 @@ fn reindex_project_path(project_path: &Path) -> ProjectStoreResult<ReindexCounts
         )?;
         counts.timelines += 1;
     }
+
+    reindex_characters_on_connection(&transaction, project_path)?;
 
     transaction.commit()?;
     Ok(counts)
@@ -2288,302 +1944,6 @@ fn asset_sidecars(project_path: &Path) -> ProjectStoreResult<Vec<PathBuf>> {
     let timeline_dir = project_path.join("timelines");
     sidecars.retain(|path| !path.starts_with(&timeline_dir));
     Ok(sidecars)
-}
-
-fn character_sidecars(project_path: &Path) -> ProjectStoreResult<Vec<PathBuf>> {
-    let character_dir = project_path.join("characters");
-    let mut sidecars = Vec::new();
-    if !character_dir.exists() {
-        return Ok(sidecars);
-    }
-    for entry in fs::read_dir(character_dir)? {
-        let path = entry?.path();
-        if path
-            .file_name()
-            .and_then(|value| value.to_str())
-            .is_some_and(|name| name.ends_with(CHARACTER_SIDECAR_PATTERN))
-        {
-            sidecars.push(path);
-        }
-    }
-    Ok(sidecars)
-}
-
-fn character_file(project_path: &Path, character_id: &str) -> PathBuf {
-    project_path
-        .join("characters")
-        .join(format!("{character_id}.sceneworks.character.json"))
-}
-
-fn find_character_file(project_path: &Path, character_id: &str) -> ProjectStoreResult<PathBuf> {
-    let path = character_file(project_path, character_id);
-    if path.exists() {
-        return Ok(path);
-    }
-    for candidate in character_sidecars(project_path)? {
-        let Ok(character) = read_json(&candidate) else {
-            continue;
-        };
-        if character.get("id").and_then(Value::as_str) == Some(character_id) {
-            return Ok(candidate);
-        }
-    }
-    Err(ProjectStoreError::NotFound(
-        "Character not found".to_owned(),
-    ))
-}
-
-fn write_character(project_path: &Path, character: &mut Value) -> ProjectStoreResult<()> {
-    let character_id = required_str(character, "id")?.to_owned();
-    value_object_mut(character, "Character sidecar")?
-        .insert("updatedAt".to_owned(), Value::String(utc_now()));
-    write_json(&character_file(project_path, &character_id), character)
-}
-
-fn hydrate_character(
-    project_id: &str,
-    project_path: &Path,
-    mut character: Value,
-) -> ProjectStoreResult<Value> {
-    let references = character
-        .get("references")
-        .and_then(Value::as_array)
-        .cloned()
-        .unwrap_or_default()
-        .into_iter()
-        .map(|mut reference| {
-            let asset = reference
-                .get("assetId")
-                .and_then(Value::as_str)
-                .and_then(|asset_id| {
-                    character_asset_summary(project_id, project_path, asset_id)
-                        .ok()
-                        .flatten()
-                })
-                .unwrap_or(Value::Null);
-            if let Some(object) = reference.as_object_mut() {
-                object.insert("asset".to_owned(), asset);
-            }
-            reference
-        })
-        .collect::<Vec<_>>();
-    let approved_references = references
-        .iter()
-        .filter(|reference| {
-            reference
-                .get("approved")
-                .and_then(Value::as_bool)
-                .unwrap_or(false)
-        })
-        .cloned()
-        .collect::<Vec<_>>();
-    let object = value_object_mut(&mut character, "Character sidecar")?;
-    object.insert("references".to_owned(), Value::Array(references));
-    object.insert(
-        "approvedReferences".to_owned(),
-        Value::Array(approved_references),
-    );
-    Ok(character)
-}
-
-fn character_asset_summary(
-    project_id: &str,
-    project_path: &Path,
-    asset_id: &str,
-) -> ProjectStoreResult<Option<Value>> {
-    let Some(sidecar_path) = find_asset_sidecar_path(project_path, asset_id)? else {
-        return Ok(None);
-    };
-    let asset = normalize_asset(project_id, project_path, &sidecar_path)?;
-    Ok(Some(json!({
-        "id": asset.get("id").cloned().unwrap_or(Value::Null),
-        "type": asset.get("type").cloned().unwrap_or(Value::Null),
-        "displayName": asset.get("displayName").cloned().unwrap_or(Value::Null),
-        "url": asset.get("url").cloned().unwrap_or(Value::Null),
-        "status": asset.get("status").cloned().unwrap_or_else(|| json!({})),
-        "file": asset.get("file").cloned().unwrap_or_else(|| json!({}))
-    })))
-}
-
-fn update_asset_character_link(
-    project_path: &Path,
-    character_id: &str,
-    reference: &Value,
-    remove: bool,
-) -> ProjectStoreResult<()> {
-    let asset_id = required_str(reference, "assetId")?;
-    let sidecar_path = find_asset_sidecar_path(project_path, asset_id)?
-        .ok_or_else(|| ProjectStoreError::NotFound("Reference asset not found".to_owned()))?;
-    let mut asset = read_json(&sidecar_path)?;
-    let metadata = value_object_mut(&mut asset, "Asset sidecar")?
-        .entry("metadata".to_owned())
-        .or_insert_with(|| json!({}));
-    let metadata = metadata.as_object_mut().ok_or_else(|| {
-        ProjectStoreError::BadRequest("Asset metadata must be an object".to_owned())
-    })?;
-    let mut links = metadata
-        .remove("characterReferences")
-        .and_then(|value| value.as_array().cloned())
-        .unwrap_or_default()
-        .into_iter()
-        .filter(|item| item.get("characterId").and_then(Value::as_str) != Some(character_id))
-        .collect::<Vec<_>>();
-    if !remove {
-        links.push(json!({
-            "characterId": character_id,
-            "source": "character-sidecar",
-            "approved": reference.get("approved").and_then(Value::as_bool).unwrap_or(false),
-            "role": reference.get("role").and_then(Value::as_str).unwrap_or("reference"),
-            "linkedAt": reference.get("addedAt").and_then(Value::as_str).unwrap_or("").to_owned(),
-            "approvedAt": reference.get("approvedAt").cloned().unwrap_or(Value::Null)
-        }));
-    }
-    metadata.insert("characterReferences".to_owned(), Value::Array(links));
-    write_json(&sidecar_path, &asset)?;
-    index_asset(project_path, &asset, Some(&sidecar_path))
-}
-
-fn copy_lora_into_project(
-    project_path: &Path,
-    data_dir: &Path,
-    character_id: &str,
-    source_path: Option<&str>,
-) -> ProjectStoreResult<(Option<String>, bool)> {
-    let Some(source_path) = source_path.filter(|value| !value.trim().is_empty()) else {
-        return Ok((None, false));
-    };
-    let source_path = PathBuf::from(source_path);
-    if !source_path.exists() || !(source_path.is_file() || source_path.is_dir()) {
-        return Err(ProjectStoreError::BadRequest(format!(
-            "LoRA source path not found: {}",
-            source_path.display()
-        )));
-    }
-    assert_allowed_lora_source(project_path, data_dir, &source_path)?;
-    let target_dir = project_path
-        .join("loras")
-        .join("characters")
-        .join(character_id);
-    fs::create_dir_all(&target_dir)?;
-    let target = target_dir.join(
-        source_path
-            .file_name()
-            .ok_or_else(|| ProjectStoreError::BadRequest("Invalid LoRA source path".to_owned()))?,
-    );
-    if fs::canonicalize(&source_path).ok() != fs::canonicalize(&target).ok() {
-        if source_path.is_dir() {
-            copy_dir_recursive(&source_path, &target)?;
-        } else {
-            fs::copy(&source_path, &target)?;
-        }
-    }
-    Ok((Some(relative_string(project_path, &target)?), true))
-}
-
-fn assert_allowed_lora_source(
-    project_path: &Path,
-    data_dir: &Path,
-    source_path: &Path,
-) -> ProjectStoreResult<()> {
-    let resolved = fs::canonicalize(source_path)?;
-    let roots = [data_dir.join("loras"), project_path.join("loras")];
-    for root in roots {
-        if let Ok(root) = fs::canonicalize(root) {
-            if resolved.starts_with(root) {
-                return Ok(());
-            }
-        }
-    }
-    Err(ProjectStoreError::BadRequest(
-        "LoRA source path must be inside the app-managed data/loras or project/loras folders"
-            .to_owned(),
-    ))
-}
-
-fn copy_dir_recursive(source: &Path, target: &Path) -> ProjectStoreResult<()> {
-    fs::create_dir_all(target)?;
-    for entry in fs::read_dir(source)? {
-        let entry = entry?;
-        let source_path = entry.path();
-        let target_path = target.join(entry.file_name());
-        if source_path.is_dir() {
-            copy_dir_recursive(&source_path, &target_path)?;
-        } else {
-            fs::copy(&source_path, &target_path)?;
-        }
-    }
-    Ok(())
-}
-
-fn prepend_array_field(payload: &mut Value, field: &str, value: Value) -> ProjectStoreResult<()> {
-    let object = value_object_mut(payload, "Character sidecar")?;
-    let mut values = object
-        .remove(field)
-        .and_then(|value| value.as_array().cloned())
-        .unwrap_or_default();
-    values.insert(0, value);
-    object.insert(field.to_owned(), Value::Array(values));
-    Ok(())
-}
-
-fn value_object_mut<'a>(
-    value: &'a mut Value,
-    label: &str,
-) -> ProjectStoreResult<&'a mut Map<String, Value>> {
-    value
-        .as_object_mut()
-        .ok_or_else(|| ProjectStoreError::BadRequest(format!("{label} must be an object")))
-}
-
-fn validate_required_text(value: &str, key: &str) -> ProjectStoreResult<()> {
-    if value.trim().is_empty() {
-        return Err(ProjectStoreError::BadRequest(format!("{key} is required")));
-    }
-    Ok(())
-}
-
-fn validate_character_name(value: &str) -> ProjectStoreResult<()> {
-    validate_required_text(value, "name")?;
-    validate_text_length(value, "name", 120)
-}
-
-fn validate_text_length(value: &str, key: &str, max: usize) -> ProjectStoreResult<()> {
-    if value.chars().count() > max {
-        return Err(ProjectStoreError::BadRequest(format!(
-            "{key} must be at most {max} characters"
-        )));
-    }
-    Ok(())
-}
-
-fn validate_character_type(value: &str) -> ProjectStoreResult<()> {
-    if matches!(value, "person" | "creature" | "object") {
-        Ok(())
-    } else {
-        Err(ProjectStoreError::BadRequest(
-            "Character type must be person, creature, or object".to_owned(),
-        ))
-    }
-}
-
-fn validate_lora_scope(value: &str, allow_external: bool) -> ProjectStoreResult<()> {
-    if matches!(value, "project" | "global") || (allow_external && value == "external") {
-        Ok(())
-    } else {
-        Err(ProjectStoreError::BadRequest(
-            "LoRA scope must be project, global, or external".to_owned(),
-        ))
-    }
-}
-
-fn validate_lora_weight(value: f64) -> ProjectStoreResult<()> {
-    if value.is_finite() && (-2.0..=2.0).contains(&value) {
-        Ok(())
-    } else {
-        Err(ProjectStoreError::BadRequest(
-            "defaultWeight must be between -2 and 2".to_owned(),
-        ))
-    }
 }
 
 fn collect_sidecars(path: &Path, sidecars: &mut Vec<PathBuf>) -> ProjectStoreResult<()> {
