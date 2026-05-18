@@ -1,5 +1,6 @@
 use std::collections::{BTreeMap, HashMap};
 use std::fmt;
+use std::net::IpAddr;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::time::{Duration, Instant};
@@ -10,6 +11,10 @@ use sceneworks_core::contracts::{
     ClaimRequest, ClaimResponse, ContractNumber, JobSnapshot, JobStatus, JobType, JsonObject,
     ProgressRequest, ProgressStage, WorkerCapability, WorkerHeartbeatRequest,
     WorkerRegisterRequest, WorkerSnapshot, WorkerStatus,
+};
+use sceneworks_core::lora_url::{
+    lora_source_url_file_name, lora_source_url_file_stem, parse_lora_source_url_with_private,
+    validate_public_ip,
 };
 use sceneworks_core::project_store::{ProjectStore, ProjectStoreError};
 use serde::Deserialize;
@@ -25,6 +30,7 @@ use uuid::Uuid;
 const INSTALL_MARKER: &str = ".sceneworks-download-complete.json";
 const DEFAULT_API_URL: &str = "http://localhost:8000";
 const DEFAULT_HUGGINGFACE_BASE_URL: &str = "https://huggingface.co";
+const DEFAULT_MAX_LORA_URL_BYTES: u64 = 8 * 1024 * 1024 * 1024;
 const DEFAULT_TRANSITION_DURATION_SECONDS: f64 = 0.5;
 const PERSON_TRACK_SAMPLE_RATE_FPS: f64 = 2.0;
 const PERSON_TRACK_MAX_SAMPLES: usize = 24;
@@ -44,6 +50,8 @@ pub struct Settings {
     pub shutdown_timeout_seconds: u64,
     pub huggingface_base_url: String,
     pub huggingface_token: Option<String>,
+    pub max_lora_url_bytes: u64,
+    pub allow_private_lora_urls: bool,
 }
 
 impl Settings {
@@ -83,6 +91,12 @@ impl Settings {
                 .ok()
                 .map(|value| value.trim().to_owned())
                 .filter(|value| !value.is_empty()),
+            max_lora_url_bytes: env_u64_any(
+                &["SCENEWORKS_MAX_LORA_URL_BYTES"],
+                DEFAULT_MAX_LORA_URL_BYTES,
+            ),
+            allow_private_lora_urls: std::env::var("SCENEWORKS_ALLOW_PRIVATE_LORA_URLS")
+                .is_ok_and(|value| value.trim() == "1"),
         }
     }
 
@@ -999,11 +1013,14 @@ async fn run_lora_import_job(
     job: &JobSnapshot,
 ) -> WorkerResult<()> {
     let repo = optional_payload_string(&job.payload, "repo");
+    let source_url = optional_payload_string(&job.payload, "sourceUrl");
     let source_path = optional_payload_string(&job.payload, "sourcePath");
     let target_name = optional_payload_string(&job.payload, "loraId")
         .or_else(|| optional_payload_string(&job.payload, "name"))
-        .or(repo)
-        .map(safe_download_dir)
+        .map(str::to_owned)
+        .or_else(|| repo.map(str::to_owned))
+        .or_else(|| source_url.and_then(|value| lora_source_url_file_stem(value).ok()))
+        .map(|value| safe_download_dir(&value))
         .unwrap_or_else(|| {
             source_path
                 .and_then(|path| {
@@ -1069,16 +1086,30 @@ async fn run_lora_import_job(
         .await?;
     } else if let Some(source_path) = source_path {
         copy_lora_source(Path::new(source_path), &target_dir).await?;
+    } else if let Some(source_url) = source_url {
+        download_lora_source_url(
+            &DownloadContext {
+                api,
+                client: http_client,
+                settings,
+                job_id: &job.id,
+                cancel_message: "LoRA import canceled by user.",
+            },
+            source_url,
+            &target_dir,
+        )
+        .await?;
     } else {
         return fail_job(
             api,
             &job.id,
             "LoRA import failed.",
-            Some("Provide repo or sourcePath for LoRA import".to_owned()),
+            Some("Provide repo, sourceUrl, or sourcePath for LoRA import".to_owned()),
         )
         .await;
     }
 
+    write_lora_install_marker(&target_dir, &job.payload, &job.id).await?;
     if let Some(manifest_entry) = job
         .payload
         .get("manifestEntry")
@@ -1093,6 +1124,12 @@ async fn run_lora_import_job(
     result.insert(
         "repo".to_owned(),
         repo.map(|value| Value::String(value.to_owned()))
+            .unwrap_or(Value::Null),
+    );
+    result.insert(
+        "sourceUrl".to_owned(),
+        source_url
+            .map(|value| Value::String(value.to_owned()))
             .unwrap_or(Value::Null),
     );
     result.insert(
@@ -2243,6 +2280,181 @@ async fn download_snapshot(
     Ok(())
 }
 
+async fn download_lora_source_url(
+    context: &DownloadContext<'_>,
+    source_url: &str,
+    target_dir: &Path,
+) -> WorkerResult<()> {
+    let url =
+        parse_lora_source_url_with_private(source_url, context.settings.allow_private_lora_urls)
+            .map_err(|error| WorkerError::InvalidPayload(error.message().to_owned()))?;
+    validate_lora_url_dns(context.settings, &url).await?;
+    let file_name = lora_source_url_file_name(source_url)
+        .map_err(|error| WorkerError::InvalidPayload(error.message().to_owned()))?;
+    tokio::fs::create_dir_all(target_dir).await?;
+    let target_path = target_dir.join(file_name);
+    let client = reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .build()?;
+    let total_bytes = lora_source_content_length(&client, source_url).await?;
+    if total_bytes.is_some_and(|total| total > context.settings.max_lora_url_bytes) {
+        return Err(WorkerError::InvalidPayload(format!(
+            "LoRA sourceUrl exceeds the {} limit",
+            format_bytes(context.settings.max_lora_url_bytes)
+        )));
+    }
+    let existing_bytes = existing_download_bytes(&target_path, total_bytes).await?;
+    if total_bytes.is_some_and(|total| total > 0 && existing_bytes == total) {
+        return Ok(());
+    }
+    let mut request = client.get(source_url);
+    if existing_bytes > 0 {
+        request = request.header(header::RANGE, format!("bytes={existing_bytes}-"));
+    }
+    let mut response = request.send().await?;
+    if response.status().is_redirection() {
+        return Err(WorkerError::InvalidPayload(
+            "LoRA sourceUrl redirects are not allowed".to_owned(),
+        ));
+    }
+    if response.status() == StatusCode::RANGE_NOT_SATISFIABLE {
+        let range_total = response
+            .headers()
+            .get(header::CONTENT_RANGE)
+            .and_then(|value| value.to_str().ok())
+            .and_then(content_range_total);
+        if total_bytes
+            .or(range_total)
+            .is_some_and(|total| total > 0 && existing_bytes == total)
+        {
+            return Ok(());
+        }
+    }
+    response = response.error_for_status()?;
+    let appending = existing_bytes > 0 && response.status() == StatusCode::PARTIAL_CONTENT;
+    let expected_bytes = total_bytes.or_else(|| {
+        response.content_length().map(|remaining| {
+            if appending {
+                existing_bytes + remaining
+            } else {
+                remaining
+            }
+        })
+    });
+    if expected_bytes.is_some_and(|total| total > context.settings.max_lora_url_bytes) {
+        return Err(WorkerError::InvalidPayload(format!(
+            "LoRA sourceUrl exceeds the {} limit",
+            format_bytes(context.settings.max_lora_url_bytes)
+        )));
+    }
+    let mut progress = DownloadProgress::new(
+        source_url,
+        if appending { existing_bytes } else { 0 },
+        expected_bytes,
+        progress_report_interval(context.settings),
+    );
+    let mut output = if appending {
+        tokio::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&target_path)
+            .await?
+    } else {
+        tokio::fs::File::create(&target_path).await?
+    };
+    let mut interval = tokio::time::interval(progress.report_interval());
+    interval.set_missed_tick_behavior(MissedTickBehavior::Delay);
+    interval.tick().await;
+    loop {
+        tokio::select! {
+            chunk = response.chunk() => {
+                let Some(chunk) = chunk? else {
+                    break;
+                };
+                check_cancel(context.api, context.job_id, context.cancel_message).await?;
+                output.write_all(&chunk).await?;
+                progress.record_transferred(u64::try_from(chunk.len()).unwrap_or(u64::MAX));
+                if progress.downloaded_bytes() > context.settings.max_lora_url_bytes {
+                    return Err(WorkerError::InvalidPayload(format!(
+                        "LoRA sourceUrl exceeds the {} limit",
+                        format_bytes(context.settings.max_lora_url_bytes)
+                    )));
+                }
+            }
+            _ = interval.tick() => {
+                report_download_progress(context, &progress).await?;
+            }
+        }
+    }
+    if expected_bytes.is_some_and(|expected| progress.downloaded_bytes() != expected) {
+        return Err(WorkerError::InvalidPayload(format!(
+            "LoRA sourceUrl download ended at {} but expected {}",
+            format_bytes(progress.downloaded_bytes()),
+            format_bytes(expected_bytes.unwrap_or_default())
+        )));
+    }
+    Ok(())
+}
+
+async fn lora_source_content_length(
+    client: &reqwest::Client,
+    source_url: &str,
+) -> WorkerResult<Option<u64>> {
+    let response = client.head(source_url).send().await?;
+    if response.status().is_success() {
+        return Ok(response.content_length().filter(|value| *value > 0));
+    }
+    if response.status().is_redirection() {
+        return Err(WorkerError::InvalidPayload(
+            "LoRA sourceUrl redirects are not allowed".to_owned(),
+        ));
+    }
+    if matches!(
+        response.status(),
+        StatusCode::METHOD_NOT_ALLOWED | StatusCode::NOT_IMPLEMENTED | StatusCode::FORBIDDEN
+    ) {
+        return Ok(None);
+    }
+    response.error_for_status()?;
+    Ok(None)
+}
+
+fn content_range_total(value: &str) -> Option<u64> {
+    value
+        .rsplit_once('/')
+        .and_then(|(_, total)| total.trim().parse::<u64>().ok())
+}
+
+async fn validate_lora_url_dns(settings: &Settings, url: &reqwest::Url) -> WorkerResult<()> {
+    if settings.allow_private_lora_urls {
+        return Ok(());
+    }
+    let Some(host) = url.host_str() else {
+        return Err(WorkerError::InvalidPayload(
+            "LoRA sourceUrl host is not allowed".to_owned(),
+        ));
+    };
+    if let Ok(address) = host.parse::<IpAddr>() {
+        validate_public_ip(address)
+            .map_err(|error| WorkerError::InvalidPayload(error.message().to_owned()))?;
+        return Ok(());
+    }
+    let port = url.port_or_known_default().unwrap_or(443);
+    let mut resolved_any = false;
+    for address in tokio::net::lookup_host((host, port)).await? {
+        resolved_any = true;
+        validate_public_ip(address.ip())
+            .map_err(|error| WorkerError::InvalidPayload(error.message().to_owned()))?;
+    }
+    if resolved_any {
+        Ok(())
+    } else {
+        Err(WorkerError::InvalidPayload(
+            "LoRA sourceUrl host did not resolve".to_owned(),
+        ))
+    }
+}
+
 async fn report_download_progress(
     context: &DownloadContext<'_>,
     progress: &DownloadProgress<'_>,
@@ -2417,6 +2629,26 @@ async fn write_model_install_marker(
         "repo": repo,
         "modelId": payload.get("modelId").cloned().unwrap_or(Value::Null),
         "modelName": payload.get("modelName").cloned().unwrap_or(Value::Null),
+        "jobId": job_id,
+        "completedAt": now_rfc3339(),
+    });
+    let bytes = serde_json::to_vec_pretty(&marker)?;
+    tokio::fs::write(target_dir.join(INSTALL_MARKER), bytes).await?;
+    Ok(())
+}
+
+async fn write_lora_install_marker(
+    target_dir: &Path,
+    payload: &JsonObject,
+    job_id: &str,
+) -> WorkerResult<()> {
+    tokio::fs::create_dir_all(target_dir).await?;
+    let marker = json!({
+        "loraId": payload.get("loraId").cloned().unwrap_or(Value::Null),
+        "loraName": payload.get("name").cloned().unwrap_or(Value::Null),
+        "repo": payload.get("repo").cloned().unwrap_or(Value::Null),
+        "sourceUrl": payload.get("sourceUrl").cloned().unwrap_or(Value::Null),
+        "sourcePath": payload.get("sourcePath").cloned().unwrap_or(Value::Null),
         "jobId": job_id,
         "completedAt": now_rfc3339(),
     });
@@ -3565,23 +3797,25 @@ mod tests {
     use std::process::Stdio as StdStdio;
     use std::time::Duration;
 
+    use axum::body::Body;
     use axum::extract::State;
     use axum::http::{HeaderMap, StatusCode as AxumStatusCode};
     use axum::response::{IntoResponse, Response};
-    use axum::routing::get;
+    use axum::routing::{get, post};
     use axum::{Json, Router};
-    use serde_json::json;
+    use serde_json::{json, Value};
     use tempfile::tempdir;
 
     use super::{
         allow_pattern_matches, auto_worker_specs, bounded_tail, candidate_people,
         child_environment, concat_file_contents, copy_lora_source, cpu_gpu, cpu_worker_id,
-        crossfade_duration, download_progress_payload, fallback_gpu, fresh_asset_id, gpu_worker_id,
-        now_rfc3339, output_dimensions, parse_nvidia_smi_gpus,
+        crossfade_duration, download_lora_source_url, download_progress_payload, fallback_gpu,
+        fresh_asset_id, gpu_worker_id, now_rfc3339, output_dimensions, parse_nvidia_smi_gpus,
         restart_exited_children_with_spawner, run_ffmpeg, safe_download_dir, safe_project_path,
         value_f64, visible_gpu_ids, worker_capabilities_with_utility, write_model_install_marker,
-        HuggingFaceSnapshot, Settings, SupervisedChild, WorkerError, WorkerSpec,
-        DEFAULT_TRANSITION_DURATION_SECONDS, INSTALL_MARKER,
+        ApiClient, DownloadContext, HuggingFaceSnapshot, Settings, SupervisedChild, WorkerError,
+        WorkerSpec, DEFAULT_MAX_LORA_URL_BYTES, DEFAULT_TRANSITION_DURATION_SECONDS,
+        INSTALL_MARKER,
     };
 
     #[test]
@@ -3833,6 +4067,147 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn lora_url_import_downloads_to_named_file() {
+        let temp = tempdir().expect("tempdir creates");
+        let source_url = spawn_binary_stub(b"url-lora".to_vec()).await;
+        let mut settings = test_settings("http://127.0.0.1".to_owned(), None);
+        settings.api_url = source_url.clone();
+        let api = ApiClient::new(&settings);
+        let client = reqwest::Client::new();
+        let target_dir = temp.path().join("url-target");
+
+        download_lora_source_url(
+            &DownloadContext {
+                api: &api,
+                client: &client,
+                settings: &settings,
+                job_id: "job-1",
+                cancel_message: "canceled",
+            },
+            &format!("{source_url}/loras/style.safetensors"),
+            &target_dir,
+        )
+        .await
+        .expect("url LoRA downloads");
+
+        assert_eq!(
+            tokio::fs::read(target_dir.join("style.safetensors"))
+                .await
+                .unwrap(),
+            b"url-lora"
+        );
+    }
+
+    #[tokio::test]
+    async fn lora_url_import_skips_existing_matching_file() {
+        let temp = tempdir().expect("tempdir creates");
+        let source_url = spawn_binary_stub(b"new-lora".to_vec()).await;
+        let mut settings = test_settings("http://127.0.0.1".to_owned(), None);
+        settings.api_url = source_url.clone();
+        let api = ApiClient::new(&settings);
+        let client = reqwest::Client::new();
+        let target_dir = temp.path().join("url-target");
+        tokio::fs::create_dir_all(&target_dir).await.unwrap();
+        tokio::fs::write(target_dir.join("style.safetensors"), b"old-lora")
+            .await
+            .unwrap();
+
+        download_lora_source_url(
+            &DownloadContext {
+                api: &api,
+                client: &client,
+                settings: &settings,
+                job_id: "job-1",
+                cancel_message: "canceled",
+            },
+            &format!("{source_url}/loras/style.safetensors"),
+            &target_dir,
+        )
+        .await
+        .expect("existing LoRA is accepted");
+
+        assert_eq!(
+            tokio::fs::read(target_dir.join("style.safetensors"))
+                .await
+                .unwrap(),
+            b"old-lora"
+        );
+    }
+
+    #[tokio::test]
+    async fn lora_url_import_rejects_failed_and_oversized_downloads() {
+        let temp = tempdir().expect("tempdir creates");
+        let missing_url =
+            spawn_binary_stub_with_options(b"missing".to_vec(), AxumStatusCode::NOT_FOUND, false)
+                .await;
+        let mut settings = test_settings("http://127.0.0.1".to_owned(), None);
+        settings.api_url = missing_url.clone();
+        let api = ApiClient::new(&settings);
+        let client = reqwest::Client::new();
+
+        let error = download_lora_source_url(
+            &DownloadContext {
+                api: &api,
+                client: &client,
+                settings: &settings,
+                job_id: "job-1",
+                cancel_message: "canceled",
+            },
+            &format!("{missing_url}/loras/missing.safetensors"),
+            &temp.path().join("missing-target"),
+        )
+        .await
+        .expect_err("failed URL returns an error");
+        assert!(error.to_string().contains("404"));
+
+        let large_url = spawn_binary_stub(b"too-large".to_vec()).await;
+        settings.api_url = large_url.clone();
+        settings.max_lora_url_bytes = 4;
+        let api = ApiClient::new(&settings);
+        let error = download_lora_source_url(
+            &DownloadContext {
+                api: &api,
+                client: &client,
+                settings: &settings,
+                job_id: "job-1",
+                cancel_message: "canceled",
+            },
+            &format!("{large_url}/loras/large.safetensors"),
+            &temp.path().join("large-target"),
+        )
+        .await
+        .expect_err("oversized URL returns an error");
+        assert!(error.to_string().contains("exceeds"));
+    }
+
+    #[tokio::test]
+    async fn lora_url_import_honors_midstream_cancel() {
+        let temp = tempdir().expect("tempdir creates");
+        let source_url =
+            spawn_binary_stub_with_options(b"url-lora".to_vec(), AxumStatusCode::OK, true).await;
+        let mut settings = test_settings("http://127.0.0.1".to_owned(), None);
+        settings.api_url = source_url.clone();
+        let api = ApiClient::new(&settings);
+        let client = reqwest::Client::new();
+
+        let error = download_lora_source_url(
+            &DownloadContext {
+                api: &api,
+                client: &client,
+                settings: &settings,
+                job_id: "job-1",
+                cancel_message: "LoRA import canceled by user.",
+            },
+            &format!("{source_url}/loras/style.safetensors"),
+            &temp.path().join("cancel-target"),
+        )
+        .await
+        .expect_err("cancel request interrupts the URL import");
+
+        assert!(matches!(error, WorkerError::Canceled(_)));
+    }
+
     #[test]
     fn now_matches_python_second_precision() {
         let value = now_rfc3339();
@@ -4034,6 +4409,123 @@ mod tests {
         Json(state.payload).into_response()
     }
 
+    #[derive(Clone)]
+    struct BinaryStubState {
+        bytes: Vec<u8>,
+        status: AxumStatusCode,
+        cancel_requested: bool,
+    }
+
+    async fn spawn_binary_stub(bytes: Vec<u8>) -> String {
+        spawn_binary_stub_with_options(bytes, AxumStatusCode::OK, false).await
+    }
+
+    async fn spawn_binary_stub_with_options(
+        bytes: Vec<u8>,
+        status: AxumStatusCode,
+        cancel_requested: bool,
+    ) -> String {
+        let state = BinaryStubState {
+            bytes,
+            status,
+            cancel_requested,
+        };
+        let app = Router::new()
+            .route("/api/v1/jobs/:job_id", get(job_stub))
+            .route("/api/v1/jobs/:job_id/progress", post(progress_stub))
+            .route("/*path", get(binary_stub).head(binary_head_stub))
+            .with_state(state);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("listener binds");
+        let address = listener.local_addr().expect("listener has address");
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.expect("stub serves");
+        });
+        format!("http://{address}")
+    }
+
+    async fn binary_stub(State(state): State<BinaryStubState>, headers: HeaderMap) -> Response {
+        let length = state.bytes.len();
+        if headers
+            .get(axum::http::header::RANGE)
+            .and_then(|value| value.to_str().ok())
+            .is_some_and(|value| value == format!("bytes={length}-"))
+        {
+            let mut response = Response::new(Body::empty());
+            *response.status_mut() = AxumStatusCode::RANGE_NOT_SATISFIABLE;
+            response.headers_mut().insert(
+                axum::http::header::CONTENT_RANGE,
+                axum::http::HeaderValue::from_str(&format!("bytes */{length}"))
+                    .expect("content range header"),
+            );
+            return response;
+        }
+        let mut response = state.bytes.into_response();
+        *response.status_mut() = state.status;
+        response.headers_mut().insert(
+            axum::http::header::CONTENT_LENGTH,
+            axum::http::HeaderValue::from_str(&length.to_string()).expect("content length header"),
+        );
+        response
+    }
+
+    async fn binary_head_stub(State(state): State<BinaryStubState>) -> Response {
+        let mut response = Response::new(Body::empty());
+        *response.status_mut() = state.status;
+        response.headers_mut().insert(
+            axum::http::header::CONTENT_LENGTH,
+            axum::http::HeaderValue::from_str(&state.bytes.len().to_string())
+                .expect("content length header"),
+        );
+        response
+    }
+
+    async fn job_stub(
+        State(state): State<BinaryStubState>,
+        axum::extract::Path(job_id): axum::extract::Path<String>,
+    ) -> Response {
+        Json(job_snapshot_json(&job_id, state.cancel_requested)).into_response()
+    }
+
+    async fn progress_stub(
+        State(state): State<BinaryStubState>,
+        axum::extract::Path(job_id): axum::extract::Path<String>,
+    ) -> Response {
+        Json(job_snapshot_json(&job_id, state.cancel_requested)).into_response()
+    }
+
+    fn job_snapshot_json(job_id: &str, cancel_requested: bool) -> Value {
+        json!({
+            "id": job_id,
+            "type": "lora_import",
+            "status": "running",
+            "projectId": null,
+            "projectName": null,
+            "payload": {},
+            "result": {},
+            "requestedGpu": "auto",
+            "assignedGpu": null,
+            "workerId": "test-worker",
+            "progress": 0.1,
+            "stage": "importing",
+            "message": "running",
+            "error": null,
+            "etaSeconds": null,
+            "elapsedSeconds": null,
+            "attempts": 1,
+            "sourceJobId": null,
+            "duplicateOfJobId": null,
+            "cancelRequested": cancel_requested,
+            "createdAt": "2026-05-18T00:00:00Z",
+            "updatedAt": "2026-05-18T00:00:00Z",
+            "startedAt": null,
+            "completedAt": null,
+            "canceledAt": null,
+            "lastHeartbeatAt": null
+        })
+    }
+
     fn test_settings(huggingface_base_url: String, huggingface_token: Option<&str>) -> Settings {
         Settings {
             api_url: "http://127.0.0.1:8000".to_owned(),
@@ -4048,6 +4540,8 @@ mod tests {
             shutdown_timeout_seconds: 1,
             huggingface_base_url,
             huggingface_token: huggingface_token.map(str::to_owned),
+            max_lora_url_bytes: DEFAULT_MAX_LORA_URL_BYTES,
+            allow_private_lora_urls: true,
         }
     }
 
