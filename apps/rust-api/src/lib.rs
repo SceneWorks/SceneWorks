@@ -476,7 +476,16 @@ pub fn create_app(settings: Settings) -> Result<Router, JobsStoreError> {
         )
         .route("/api/v1/loras", get(list_loras))
         .route("/api/v1/loras/import", post(create_lora_import_job))
-        .route("/api/v1/recipe-presets", get(list_recipe_presets))
+        .route(
+            "/api/v1/recipe-presets",
+            get(list_recipe_presets).post(create_recipe_preset),
+        )
+        .route(
+            "/api/v1/recipe-presets/:preset_id",
+            get(get_recipe_preset)
+                .patch(update_recipe_preset)
+                .delete(delete_recipe_preset),
+        )
         .route("/api/v1/jobs", get(list_jobs).post(create_job))
         .route("/api/v1/jobs/claim", post(claim_job))
         .route("/api/v1/jobs/events", get(job_events))
@@ -532,6 +541,9 @@ struct LorasQuery {
 #[serde(rename_all = "camelCase")]
 struct RecipePresetsQuery {
     project_id: Option<String>,
+    include_archived: Option<bool>,
+    model: Option<String>,
+    workflow: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -2029,9 +2041,137 @@ async fn list_recipe_presets(
     State(state): State<AppState>,
     Query(query): Query<RecipePresetsQuery>,
 ) -> Result<Json<Vec<Value>>, ApiError> {
-    Ok(Json(
-        recipe_preset_catalog(&state, query.project_id.as_deref()).await?,
-    ))
+    let mut presets = recipe_preset_catalog(&state, query.project_id.as_deref()).await?;
+    if !query.include_archived.unwrap_or(false) {
+        presets.retain(|preset| !recipe_preset_archived(preset));
+    }
+    if let Some(model) = query.model.as_deref() {
+        presets.retain(|preset| preset.get("model").and_then(Value::as_str) == Some(model));
+    }
+    if let Some(workflow) = query.workflow.as_deref() {
+        presets.retain(|preset| preset.get("workflow").and_then(Value::as_str) == Some(workflow));
+    }
+    Ok(Json(presets))
+}
+
+async fn get_recipe_preset(
+    State(state): State<AppState>,
+    Path(preset_id): Path<String>,
+    Query(query): Query<RecipePresetsQuery>,
+) -> Result<Json<Value>, ApiError> {
+    let preset = recipe_preset_catalog(&state, query.project_id.as_deref())
+        .await?
+        .into_iter()
+        .find(|preset| preset.get("id").and_then(Value::as_str) == Some(preset_id.as_str()))
+        .filter(|preset| query.include_archived.unwrap_or(false) || !recipe_preset_archived(preset))
+        .ok_or_else(|| ApiError {
+            status: StatusCode::NOT_FOUND,
+            detail: "Recipe preset not found".to_owned(),
+        })?;
+    Ok(Json(preset))
+}
+
+async fn create_recipe_preset(
+    State(state): State<AppState>,
+    ApiJson(payload): ApiJson<Value>,
+) -> Result<(StatusCode, Json<Value>), ApiError> {
+    let mut preset = recipe_preset_from_payload(payload)?;
+    let scope = recipe_preset_write_scope(&preset)?;
+    let project_id = take_string_field(&mut preset, "projectId");
+    let manifest_path =
+        recipe_preset_write_manifest_path(&state, &scope, project_id.as_deref()).await?;
+    let object = preset
+        .as_object_mut()
+        .ok_or_else(|| ApiError::bad_request("Recipe preset must be an object"))?;
+    let id = object
+        .get("id")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_owned)
+        .or_else(|| {
+            object
+                .get("name")
+                .and_then(Value::as_str)
+                .map(slugify_preset_id)
+        })
+        .ok_or_else(|| ApiError::bad_request("Recipe preset name is required"))?;
+    object.insert("id".to_owned(), Value::String(id.clone()));
+    let timestamp = now_rfc3339();
+    object
+        .entry("createdAt".to_owned())
+        .or_insert_with(|| Value::String(timestamp.clone()));
+    object.insert("updatedAt".to_owned(), Value::String(timestamp));
+    let preset = normalize_recipe_preset_for_write(preset, &scope, true)?;
+    let mut entries = load_manifest_entries(&state, &manifest_path, "presets").await?;
+    let existing = recipe_preset_catalog(&state, project_id.as_deref()).await?;
+    if entries
+        .iter()
+        .chain(existing.iter())
+        .any(|entry| entry.get("id").and_then(Value::as_str) == Some(id.as_str()))
+    {
+        return Err(ApiError::bad_request("Recipe preset already exists"));
+    }
+    entries.push(preset.clone());
+    save_manifest_entries(&manifest_path, "presets", entries).await?;
+    Ok((StatusCode::CREATED, Json(finalized_recipe_preset(preset)?)))
+}
+
+async fn update_recipe_preset(
+    State(state): State<AppState>,
+    Path(preset_id): Path<String>,
+    ApiJson(payload): ApiJson<Value>,
+) -> Result<Json<Value>, ApiError> {
+    let mut patch = recipe_preset_from_payload(payload)?;
+    let scope = recipe_preset_write_scope(&patch)?;
+    let project_id = take_string_field(&mut patch, "projectId");
+    let manifest_path =
+        recipe_preset_write_manifest_path(&state, &scope, project_id.as_deref()).await?;
+    let mut entries = load_manifest_entries(&state, &manifest_path, "presets").await?;
+    let Some(index) = entries
+        .iter()
+        .position(|entry| entry.get("id").and_then(Value::as_str) == Some(preset_id.as_str()))
+    else {
+        return recipe_preset_missing_for_write(&state, &preset_id, project_id.as_deref()).await;
+    };
+    let mut preset = entries[index].clone();
+    merge_object(&mut preset, patch);
+    if let Some(object) = preset.as_object_mut() {
+        object.insert("id".to_owned(), Value::String(preset_id));
+        object.insert("updatedAt".to_owned(), Value::String(now_rfc3339()));
+    }
+    let preset = normalize_recipe_preset_for_write(preset, &scope, false)?;
+    entries[index] = preset.clone();
+    save_manifest_entries(&manifest_path, "presets", entries).await?;
+    Ok(Json(finalized_recipe_preset(preset)?))
+}
+
+async fn delete_recipe_preset(
+    State(state): State<AppState>,
+    Path(preset_id): Path<String>,
+    ApiJson(payload): ApiJson<Value>,
+) -> Result<Json<Value>, ApiError> {
+    let mut patch = recipe_preset_from_payload(payload)?;
+    let scope = recipe_preset_write_scope(&patch)?;
+    let project_id = take_string_field(&mut patch, "projectId");
+    let manifest_path =
+        recipe_preset_write_manifest_path(&state, &scope, project_id.as_deref()).await?;
+    let mut entries = load_manifest_entries(&state, &manifest_path, "presets").await?;
+    let Some(index) = entries
+        .iter()
+        .position(|entry| entry.get("id").and_then(Value::as_str) == Some(preset_id.as_str()))
+    else {
+        return recipe_preset_missing_for_write(&state, &preset_id, project_id.as_deref()).await;
+    };
+    let mut preset = entries[index].clone();
+    if let Some(object) = preset.as_object_mut() {
+        object.insert("archived".to_owned(), Value::Bool(true));
+        object.insert("updatedAt".to_owned(), Value::String(now_rfc3339()));
+    }
+    let preset = normalize_recipe_preset_for_write(preset, &scope, false)?;
+    entries[index] = preset.clone();
+    save_manifest_entries(&manifest_path, "presets", entries).await?;
+    Ok(Json(finalized_recipe_preset(preset)?))
 }
 
 async fn create_lora_import_job(
@@ -2887,6 +3027,264 @@ fn recipe_preset_loras(preset: &Value) -> Vec<Value> {
         .unwrap_or_default()
 }
 
+fn recipe_preset_archived(preset: &Value) -> bool {
+    preset
+        .get("archived")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+}
+
+fn finalized_recipe_preset(mut preset: Value) -> Result<Value, ApiError> {
+    finalize_recipe_preset_entry(&mut preset)?;
+    Ok(preset)
+}
+
+fn recipe_preset_from_payload(payload: Value) -> Result<Value, ApiError> {
+    match payload {
+        Value::Null => Ok(Value::Object(JsonObject::new())),
+        Value::Object(_) => Ok(payload),
+        _ => Err(ApiError::bad_request(
+            "Recipe preset payload must be an object",
+        )),
+    }
+}
+
+fn take_string_field(payload: &mut Value, field: &str) -> Option<String> {
+    payload
+        .as_object_mut()
+        .and_then(|object| object.remove(field))
+        .and_then(|value| value.as_str().map(str::to_owned))
+}
+
+fn recipe_preset_write_scope(preset: &Value) -> Result<String, ApiError> {
+    let scope = preset
+        .get("scope")
+        .and_then(Value::as_str)
+        .unwrap_or("global")
+        .trim();
+    match scope {
+        "global" | "project" => Ok(scope.to_owned()),
+        "builtin" => Err(ApiError::bad_request(
+            "Built-in recipe presets are read-only",
+        )),
+        _ => Err(ApiError::bad_request(
+            "Recipe preset scope must be global or project",
+        )),
+    }
+}
+
+async fn recipe_preset_write_manifest_path(
+    state: &AppState,
+    scope: &str,
+    project_id: Option<&str>,
+) -> Result<PathBuf, ApiError> {
+    match scope {
+        "global" => Ok(state
+            .settings
+            .config_dir
+            .join("manifests")
+            .join("user.recipe-presets.jsonc")),
+        "project" => {
+            let Some(project_id) = project_id else {
+                return Err(ApiError::bad_request(
+                    "Project recipe presets require projectId",
+                ));
+            };
+            let project_path = project_path_for_id(state.clone(), project_id).await?;
+            Ok(project_path.join("recipes").join("presets.jsonc"))
+        }
+        _ => Err(ApiError::bad_request(
+            "Recipe preset scope must be global or project",
+        )),
+    }
+}
+
+async fn recipe_preset_missing_for_write(
+    state: &AppState,
+    preset_id: &str,
+    project_id: Option<&str>,
+) -> Result<Json<Value>, ApiError> {
+    let catalog = recipe_preset_catalog(state, project_id).await?;
+    if catalog.iter().any(|preset| {
+        preset.get("id").and_then(Value::as_str) == Some(preset_id)
+            && preset.get("scope").and_then(Value::as_str) == Some("builtin")
+    }) {
+        return Err(ApiError::bad_request(
+            "Built-in recipe presets are read-only",
+        ));
+    }
+    Err(ApiError {
+        status: StatusCode::NOT_FOUND,
+        detail: "Recipe preset not found".to_owned(),
+    })
+}
+
+async fn save_manifest_entries(
+    path: &FsPath,
+    field: &str,
+    entries: Vec<Value>,
+) -> Result<(), ApiError> {
+    let Some(parent) = path.parent() else {
+        return Err(ApiError::internal("Manifest path has no parent directory"));
+    };
+    tokio::fs::create_dir_all(parent)
+        .await
+        .map_err(|_| ApiError::internal("Failed to save manifest"))?;
+    let mut manifest = JsonObject::new();
+    manifest.insert(
+        "$schema".to_owned(),
+        Value::String("https://sceneworks.local/schemas/recipe-preset.schema.json".to_owned()),
+    );
+    manifest.insert("schemaVersion".to_owned(), json!(1));
+    manifest.insert(field.to_owned(), Value::Array(entries));
+    let payload = serde_json::to_string_pretty(&Value::Object(manifest))
+        .map_err(|_| ApiError::internal("Failed to save manifest"))?;
+    tokio::fs::write(path, format!("{payload}\n"))
+        .await
+        .map_err(|_| ApiError::internal("Failed to save manifest"))?;
+    Ok(())
+}
+
+fn normalize_recipe_preset_for_write(
+    mut preset: Value,
+    scope: &str,
+    require_all: bool,
+) -> Result<Value, ApiError> {
+    let object = preset
+        .as_object_mut()
+        .ok_or_else(|| ApiError::bad_request("Recipe preset must be an object"))?;
+    object.insert("scope".to_owned(), Value::String(scope.to_owned()));
+    validate_recipe_preset_id(object.get("id").and_then(Value::as_str))?;
+    validate_required_string_field(
+        object,
+        "name",
+        require_all,
+        "Recipe preset name is required",
+    )?;
+    validate_required_string_field(
+        object,
+        "model",
+        require_all,
+        "Recipe preset model is required",
+    )?;
+    validate_recipe_preset_workflow(object.get("workflow").and_then(Value::as_str), require_all)?;
+    validate_recipe_preset_defaults(object.get("defaults"))?;
+    validate_recipe_preset_prompt(object.get("prompt"))?;
+    normalize_recipe_preset_loras(object)?;
+    Ok(preset)
+}
+
+fn validate_recipe_preset_id(value: Option<&str>) -> Result<(), ApiError> {
+    let Some(value) = value.map(str::trim).filter(|value| !value.is_empty()) else {
+        return Err(ApiError::bad_request("Recipe preset id is required"));
+    };
+    let valid = value.chars().enumerate().all(|(index, character)| {
+        character.is_ascii_lowercase()
+            || character.is_ascii_digit()
+            || (index > 0 && matches!(character, '_' | '-'))
+    });
+    if !valid {
+        return Err(ApiError::bad_request(
+            "Recipe preset id must use lowercase letters, numbers, dashes, or underscores",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_required_string_field(
+    object: &JsonObject,
+    field: &str,
+    require: bool,
+    message: &'static str,
+) -> Result<(), ApiError> {
+    match object.get(field).and_then(Value::as_str).map(str::trim) {
+        Some(value) if !value.is_empty() => Ok(()),
+        _ if require => Err(ApiError::bad_request(message)),
+        _ => Ok(()),
+    }
+}
+
+fn validate_recipe_preset_workflow(value: Option<&str>, require: bool) -> Result<(), ApiError> {
+    match value {
+        Some(
+            "text_to_image" | "edit_image" | "image_to_video" | "text_to_video"
+            | "first_last_frame",
+        ) => Ok(()),
+        Some(_) => Err(ApiError::bad_request("Unsupported recipe preset workflow")),
+        None if require => Err(ApiError::bad_request("Recipe preset workflow is required")),
+        None => Ok(()),
+    }
+}
+
+fn validate_recipe_preset_defaults(value: Option<&Value>) -> Result<(), ApiError> {
+    let Some(defaults) = value else {
+        return Ok(());
+    };
+    let object = defaults
+        .as_object()
+        .ok_or_else(|| ApiError::bad_request("Recipe preset defaults must be an object"))?;
+    if let Some(resolution) = object.get("resolution").and_then(Value::as_str) {
+        let (width, height) = parse_recipe_preset_resolution(resolution)?;
+        validate_dimension(width, "width", 2048)?;
+        validate_dimension(height, "height", 2048)?;
+    }
+    if let Some(count) = object.get("count").and_then(Value::as_u64) {
+        if !(1..=8).contains(&count) {
+            return Err(ApiError::bad_request(
+                "Recipe preset count must be between 1 and 8",
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn validate_recipe_preset_prompt(value: Option<&Value>) -> Result<(), ApiError> {
+    if value.is_some_and(|value| !value.is_object()) {
+        return Err(ApiError::bad_request(
+            "Recipe preset prompt must be an object",
+        ));
+    }
+    Ok(())
+}
+
+fn normalize_recipe_preset_loras(object: &mut JsonObject) -> Result<(), ApiError> {
+    if !object.contains_key("loras") {
+        if let Some(loras) = object.remove("builtInLoras") {
+            object.insert("loras".to_owned(), loras);
+        }
+    } else {
+        object.remove("builtInLoras");
+    }
+    let Some(loras) = object.get_mut("loras") else {
+        return Ok(());
+    };
+    let items = loras
+        .as_array_mut()
+        .ok_or_else(|| ApiError::bad_request("Recipe preset loras must be an array"))?;
+    if items.len() > 3 {
+        return Err(ApiError::bad_request(
+            "Recipe presets can include at most 3 LoRAs",
+        ));
+    }
+    for item in items {
+        if let Some(id) = item.as_str().map(str::to_owned) {
+            *item = json!({ "id": id });
+        }
+        let object = item
+            .as_object()
+            .ok_or_else(|| ApiError::bad_request("Recipe preset LoRA must be an object"))?;
+        validate_recipe_preset_id(object.get("id").and_then(Value::as_str))?;
+        if let Some(weight) = object.get("weight").and_then(Value::as_f64) {
+            if !(-2.0..=2.0).contains(&weight) {
+                return Err(ApiError::bad_request(
+                    "Recipe preset LoRA weight must be between -2 and 2",
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
 fn preset_prompt(prompt: &str, preset: &Value) -> String {
     let fragments = preset.get("prompt").and_then(Value::as_object);
     [
@@ -3262,6 +3660,15 @@ fn slugify_lora_id(value: &str) -> String {
         "lora".to_owned()
     } else {
         output
+    }
+}
+
+fn slugify_preset_id(value: &str) -> String {
+    let id = slugify_lora_id(value);
+    if id == "lora" {
+        "preset".to_owned()
+    } else {
+        id
     }
 }
 
@@ -4623,6 +5030,143 @@ mod tests {
                 || value.ends_with("data\\loras\\imported_lora")));
         assert_eq!(job["payload"]["manifestEntry"]["scope"], "global");
         assert!(job["payload"].get("sourcePath").is_none());
+    }
+
+    #[tokio::test]
+    async fn recipe_preset_crud_routes_persist_global_and_project_presets() {
+        let temp_dir = tempfile::tempdir().expect("temp dir creates");
+        let config_dir = temp_dir.path().join("config/manifests");
+        std::fs::create_dir_all(&config_dir).expect("manifest dir creates");
+        std::fs::write(
+            config_dir.join("builtin.recipe-presets.jsonc"),
+            r#"
+            {
+              "schemaVersion": 1,
+              "presets": [
+                {
+                  "id": "builtin_readonly",
+                  "name": "Built-in Readonly",
+                  "scope": "builtin",
+                  "workflow": "text_to_image",
+                  "model": "z_image_turbo"
+                }
+              ]
+            }
+            "#,
+        )
+        .expect("builtin recipe presets writes");
+        std::fs::write(
+            config_dir.join("user.recipe-presets.jsonc"),
+            r#"{ "schemaVersion": 1, "presets": [] }"#,
+        )
+        .expect("user recipe presets writes");
+
+        let app = create_app(test_settings(&temp_dir)).expect("app creates");
+        let (status, created) = request(
+            app.clone(),
+            "POST",
+            "/api/v1/recipe-presets",
+            json!({
+                "name": "Soft Glow",
+                "model": "z_image_turbo",
+                "workflow": "text_to_image",
+                "defaults": { "resolution": "1024x1024" },
+                "prompt": { "suffix": "soft glow" },
+                "loras": [{ "id": "style_lora", "weight": 0.5 }]
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED);
+        assert_eq!(created["id"], "soft_glow");
+        assert_eq!(created["scope"], "global");
+        assert_eq!(created["builtInLoras"][0]["id"], "style_lora");
+
+        let (status, updated) = request(
+            app.clone(),
+            "PATCH",
+            "/api/v1/recipe-presets/soft_glow",
+            json!({
+                "defaults": { "negativePrompt": "noise" },
+                "loras": [{ "id": "style_lora", "weight": 0.75 }]
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(updated["defaults"]["negativePrompt"], "noise");
+        assert_eq!(updated["loras"][0]["weight"], 0.75);
+
+        let (status, readonly_error) = request(
+            app.clone(),
+            "PATCH",
+            "/api/v1/recipe-presets/builtin_readonly",
+            json!({ "name": "Nope" }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(
+            readonly_error["detail"],
+            "Built-in recipe presets are read-only"
+        );
+
+        let (_, project) = request(
+            app.clone(),
+            "POST",
+            "/api/v1/projects",
+            json!({ "name": "Preset Project" }),
+        )
+        .await;
+        let project_id = project["id"].as_str().expect("project id");
+        let project_path = std::path::PathBuf::from(project["path"].as_str().unwrap());
+        let (status, project_preset) = request(
+            app.clone(),
+            "POST",
+            "/api/v1/recipe-presets",
+            json!({
+                "id": "project_soft_glow",
+                "name": "Project Soft Glow",
+                "scope": "project",
+                "projectId": project_id,
+                "model": "z_image_turbo",
+                "workflow": "text_to_image"
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED);
+        assert_eq!(project_preset["scope"], "project");
+        assert!(project_path.join("recipes/presets.jsonc").is_file());
+
+        let (status, archived) = request(
+            app.clone(),
+            "DELETE",
+            "/api/v1/recipe-presets/soft_glow",
+            json!({}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(archived["archived"], true);
+
+        let (status, visible) =
+            request(app.clone(), "GET", "/api/v1/recipe-presets", Value::Null).await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(!visible
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|preset| preset["id"] == "soft_glow"));
+
+        let (status, archived_visible) = request(
+            app,
+            "GET",
+            "/api/v1/recipe-presets?includeArchived=true",
+            Value::Null,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(archived_visible
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|preset| preset["id"] == "soft_glow" && preset["archived"] == true));
     }
 
     #[test]
