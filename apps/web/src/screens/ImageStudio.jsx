@@ -123,9 +123,10 @@ export function ImageStudio({
   const presetLoraDetails = buildPresetLoraDetails(selectedRecipePreset, loras);
   const presetPromptParts = buildPresetPromptParts(selectedRecipePreset);
   const presetMissingLoras = presetLoraDetails.filter((lora) => lora.missing);
+  const hasPendingCompatibleLoras = Boolean(selectedModel) && loras.some((lora) => lora.installState === "missing" && loraMatchesModel(lora, selectedModel));
   const loraEmptyMessage = !selectedModel
     ? "No model selected"
-    : loras.some((lora) => lora.installState === "missing")
+    : hasPendingCompatibleLoras
       ? "No installed compatible LoRAs. Imports appear after the Queue completes."
       : showIncompatibleLoras
         ? "No installed LoRAs in the library."

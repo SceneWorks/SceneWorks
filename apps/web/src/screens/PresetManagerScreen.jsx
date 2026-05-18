@@ -1,9 +1,11 @@
 import React, { useEffect, useMemo, useState } from "react";
 import {
+  compactModeList,
   loraMatchesModel,
   presetLoraId,
   presetLoras,
   presetValidation,
+  presetValidationMessage,
   workflowModelType,
   workflowModes,
 } from "../presetUtils.js";
@@ -15,16 +17,6 @@ const workflowOptions = [
   ["text_to_video", "Text to Video"],
   ["first_last_frame", "First/Last Frame"],
 ];
-
-const modeLabels = {
-  text_to_image: "Text",
-  edit_image: "Edit",
-  character_image: "Character",
-  style_variations: "Variations",
-  image_to_video: "Image Video",
-  text_to_video: "Text Video",
-  first_last_frame: "First/Last",
-};
 
 function slugify(value) {
   return String(value ?? "")
@@ -77,10 +69,6 @@ function loraLabel(lora) {
   return [lora.scope, lora.family ?? "compatible"].filter(Boolean).join(" | ");
 }
 
-function compactModeList(workflow) {
-  return workflowModes(workflow).map((mode) => modeLabels[mode] ?? mode).join(", ");
-}
-
 function presetStatusLabel(status) {
   if (status.ok) {
     return "Ready";
@@ -89,16 +77,6 @@ function presetStatusLabel(status) {
     return `Waiting for ${status.missing.join(", ")}`;
   }
   return `Remove ${status.incompatible.join(", ")}`;
-}
-
-function presetValidationMessage(validation) {
-  if (validation.ok) {
-    return "";
-  }
-  if (validation.missing.length) {
-    return `Save blocked: ${validation.missing.join(", ")} has not finished importing. Wait for the Queue to complete, then save again.`;
-  }
-  return `Save blocked: ${validation.incompatible.join(", ")} is not compatible with the selected model. Remove it or choose a matching model.`;
 }
 
 export function PresetManagerScreen({
@@ -125,33 +103,18 @@ export function PresetManagerScreen({
   const selectedModel = models.find((model) => model.id === form.model) ?? availableModels[0] ?? null;
   const availableLoras = selectedModel ? loras.filter((lora) => lora.installState !== "missing" && loraMatchesModel(lora, selectedModel)) : [];
   const validation = presetValidation({ ...selectedPreset, loras: form.loras }, loras, selectedModel);
-  const validationMessage = presetValidationMessage(validation);
-  const unknownSelectedLoras = form.loras.filter((selection) => !loras.some((lora) => lora.id === selection.id)).map((lora) => lora.id);
-  const pendingSelectedLoras = form.loras
-    .filter((selection) => loras.some((lora) => lora.id === selection.id && lora.installState === "missing"))
-    .map((lora) => lora.id);
-  const incompatibleSelectedLoras = form.loras
-    .filter((selection) => {
-      const lora = loras.find((item) => item.id === selection.id);
-      return lora && !loraMatchesModel(lora, selectedModel);
-    })
-    .map((lora) => lora.id);
+  const validationMessage = editable ? presetValidationMessage(validation) : "";
   const saveDisabledReason = !editable
     ? "Built-in presets are read-only."
     : !form.name.trim()
       ? "Name is required."
       : !form.model
         ? "Choose a model before saving."
-        : unknownSelectedLoras.length
-          ? `Save blocked: ${unknownSelectedLoras.join(", ")} is not in the LoRA library yet. Wait for the import to finish.`
-          : pendingSelectedLoras.length
-            ? `Save blocked: ${pendingSelectedLoras.join(", ")} is still importing. Wait for the Queue to complete.`
-            : incompatibleSelectedLoras.length
-              ? `Save blocked: ${incompatibleSelectedLoras.join(", ")} does not match ${selectedModel?.name ?? "the selected model"}. Remove it or choose a compatible model.`
-              : "";
+        : validationMessage;
+  const hasPendingCompatibleLoras = Boolean(selectedModel) && loras.some((lora) => lora.installState === "missing" && loraMatchesModel(lora, selectedModel));
   const loraEmptyMessage = !selectedModel
     ? "No model selected"
-    : loras.some((lora) => lora.installState === "missing")
+    : hasPendingCompatibleLoras
       ? "No installed compatible LoRAs. Imports appear here after the Queue completes."
       : `No installed LoRAs match ${selectedModel.name ?? selectedModel.id}.`;
 
@@ -601,8 +564,7 @@ export function PresetManagerScreen({
             {!selectedModel ? <p className="helper-copy">Choose a model before importing so compatibility can be recorded.</p> : null}
           </section>
 
-          {validationMessage ? <p className="inline-warning">{validationMessage}</p> : null}
-          {!validationMessage && saveDisabledReason ? <p className="inline-warning">{saveDisabledReason}</p> : null}
+          {saveDisabledReason ? <p className="inline-warning">{saveDisabledReason}</p> : null}
           {message.text ? <p className={message.tone === "success" ? "inline-success" : "inline-warning"}>{message.text}</p> : null}
           <button className="primary-action" disabled={Boolean(saveDisabledReason) || saving} type="submit">
             {selectedPreset ? "Save Preset" : "Create Preset"}

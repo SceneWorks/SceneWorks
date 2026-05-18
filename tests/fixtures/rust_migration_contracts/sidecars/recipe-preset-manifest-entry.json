@@ -1,7 +1,7 @@
 {
-  "id": "cinematic",
-  "name": "Cinematic",
-  "scope": "builtin",
+  "id": "soft_glow",
+  "name": "Soft Glow",
+  "scope": "global",
   "archived": false,
   "order": 10,
   "workflow": "text_to_image",
@@ -18,16 +18,16 @@
   },
   "loras": [
     {
-      "id": "builtin_cinematic_detail",
-      "loraId": "builtin_cinematic_detail",
-      "sourceUrl": "https://example.com/loras/cinematic-detail.safetensors",
-      "name": "Cinematic Detail",
-      "displayName": "Cinematic Detail",
+      "id": "lora_fixture",
+      "loraId": "lora_fixture",
+      "sourceUrl": "https://example.com/loras/soft-glow.safetensors",
+      "name": "Soft Glow LoRA",
+      "displayName": "Soft Glow LoRA",
       "compatibility": { "families": ["z-image"] },
       "weight": 0.55
     }
   ],
   "ui": {
-    "description": "Balanced cinematic color, contrast, and detail."
+    "description": "User-managed soft light and contrast."
   }
 }

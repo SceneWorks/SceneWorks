@@ -426,7 +426,7 @@ describe("SceneWorks app shell", () => {
           latestAssets={[]}
           loras={[
             {
-              id: "builtin_cinematic_detail",
+              id: "cinematic_detail",
               name: "Cinematic Detail",
               family: "z-image",
               scope: "builtin",
@@ -444,7 +444,7 @@ describe("SceneWorks app shell", () => {
               workflow: "text_to_image",
               defaults: { count: 2, resolution: "1280x720", negativePrompt: "flat lighting" },
               prompt: { suffix: "cinematic lighting" },
-              builtInLoras: [{ id: "builtin_cinematic_detail", weight: 0.4 }],
+              builtInLoras: [{ id: "cinematic_detail", weight: 0.4 }],
               ui: { description: "Balanced cinematic color, contrast, and detail." },
             },
           ]}
@@ -809,7 +809,7 @@ describe("SceneWorks app shell", () => {
           duplicateRecipePreset={duplicateRecipePreset}
           imageModels={[{ id: "z_image_turbo", name: "Z-Image", type: "image", family: "z-image" }]}
           loras={[
-            { id: "builtin_cinematic_detail", name: "Cinematic Detail", family: "z-image", scope: "builtin", defaultWeight: 0.55 },
+            { id: "cinematic_detail", name: "Cinematic Detail", family: "z-image", scope: "builtin", defaultWeight: 0.55 },
             { id: "global_detail", name: "Global Detail", family: "z-image", scope: "global", defaultWeight: 0.7 },
             { id: "qwen_only", name: "Qwen Only", family: "qwen-image", scope: "global" },
           ]}
@@ -820,7 +820,7 @@ describe("SceneWorks app shell", () => {
               scope: "builtin",
               workflow: "text_to_image",
               model: "z_image_turbo",
-              loras: [{ id: "builtin_cinematic_detail", weight: 0.5 }],
+              loras: [{ id: "cinematic_detail", weight: 0.5 }],
               ui: { description: "Built in cinematic finish." },
             },
             {

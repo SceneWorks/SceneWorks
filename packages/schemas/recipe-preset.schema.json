@@ -93,6 +93,17 @@
               ]
             }
           },
+          "appliedDefaults": {
+            "description": "Read-only API metadata describing defaults synthesized while reading a legacy preset. These values are not persisted until the preset is saved through the API.",
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "notes": {
+                "type": "array",
+                "items": { "type": "string" }
+              }
+            }
+          },
           "ui": {
             "type": "object",
             "additionalProperties": true,

@@ -6,12 +6,26 @@ export const defaultModesByWorkflow = {
   first_last_frame: ["first_last_frame"],
 };
 
+export const modeLabels = {
+  text_to_image: "Text",
+  edit_image: "Edit",
+  character_image: "Character",
+  style_variations: "Variations",
+  image_to_video: "Image Video",
+  text_to_video: "Text Video",
+  first_last_frame: "First/Last",
+};
+
 export function workflowModelType(workflow) {
   return workflow?.includes("video") || workflow === "first_last_frame" ? "video" : "image";
 }
 
 export function workflowModes(workflow) {
   return defaultModesByWorkflow[workflow] ?? [workflow].filter(Boolean);
+}
+
+export function compactModeList(workflow) {
+  return workflowModes(workflow).map((mode) => modeLabels[mode] ?? mode).join(", ");
 }
 
 export function loraFamilies(lora) {
@@ -110,4 +124,18 @@ export function presetValidation(preset, loras, model) {
     incompatible,
     ok: missing.length === 0 && incompatible.length === 0,
   };
+}
+
+export function presetValidationMessage(validation) {
+  if (validation.ok) {
+    return "";
+  }
+  const parts = [];
+  if (validation.missing.length) {
+    parts.push(`${validation.missing.join(", ")} has not finished importing`);
+  }
+  if (validation.incompatible.length) {
+    parts.push(`${validation.incompatible.join(", ")} is not compatible with the selected model`);
+  }
+  return `Save blocked: ${parts.join("; ")}. Wait for imports to finish, remove incompatible LoRAs, or choose a matching model.`;
 }

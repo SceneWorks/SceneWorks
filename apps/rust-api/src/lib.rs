@@ -2997,6 +2997,7 @@ async fn recipe_preset_catalog(
         .into_iter()
         .map(|preset| normalize_recipe_preset_entry(preset, "global", &user_manifest))
         .collect::<Result<Vec<_>, _>>()?;
+    let models = model_catalog(state).await?;
     let mut presets = merge_entries_by_id(builtin, user);
     if let Some(project_id) = project_id {
         let project_path = project_path_for_id(state.clone(), project_id).await?;
@@ -3009,7 +3010,7 @@ async fn recipe_preset_catalog(
         presets = merge_entries_by_id(presets, project_presets);
     }
     for preset in presets.iter_mut() {
-        finalize_recipe_preset_entry(preset)?;
+        finalize_recipe_preset_entry(preset, &models)?;
     }
     presets.sort_by(|left, right| {
         let left_key = (
@@ -3071,10 +3072,9 @@ fn normalize_lora_entry(
             default_root.join(path)
         }
     });
-    let install_state = if installed_path.as_ref().is_some_and(|path| !path.exists()) {
-        "missing"
-    } else {
-        "installed"
+    let install_state = match installed_path.as_ref() {
+        Some(path) if path.exists() => "installed",
+        _ => "missing",
     };
     object.insert(
         "manifestPath".to_owned(),
@@ -3111,7 +3111,7 @@ fn normalize_recipe_preset_entry(
     Ok(preset)
 }
 
-fn finalize_recipe_preset_entry(preset: &mut Value) -> Result<(), ApiError> {
+fn finalize_recipe_preset_entry(preset: &mut Value, models: &[Value]) -> Result<(), ApiError> {
     let object = preset
         .as_object_mut()
         .ok_or_else(|| ApiError::internal("Recipe preset manifest entry must be an object"))?;
@@ -3128,9 +3128,9 @@ fn finalize_recipe_preset_entry(preset: &mut Value) -> Result<(), ApiError> {
         if let Some(model) = object
             .get("workflow")
             .and_then(Value::as_str)
-            .and_then(default_recipe_preset_model_for_workflow)
+            .and_then(|workflow| default_recipe_preset_model_for_workflow(models, workflow))
         {
-            object.insert("model".to_owned(), Value::String(model.to_owned()));
+            object.insert("model".to_owned(), Value::String(model.clone()));
             migration_notes.push(Value::String(format!(
                 "model defaulted to {model} for legacy preset"
             )));
@@ -3151,8 +3151,11 @@ fn finalize_recipe_preset_entry(preset: &mut Value) -> Result<(), ApiError> {
     }
     if !object.contains_key("loras") {
         if let Some(loras) = object.get("builtInLoras").cloned() {
+            let migrated_count = loras.as_array().map(Vec::len).unwrap_or_default();
             object.insert("loras".to_owned(), loras);
-            migration_notes.push(Value::String("builtInLoras migrated to loras".to_owned()));
+            if migrated_count > 0 {
+                migration_notes.push(Value::String("builtInLoras migrated to loras".to_owned()));
+            }
         }
     }
     let loras = object
@@ -3168,9 +3171,8 @@ fn finalize_recipe_preset_entry(preset: &mut Value) -> Result<(), ApiError> {
         .or_insert_with(|| Value::Object(JsonObject::new()));
     if !migration_notes.is_empty() {
         object.insert(
-            "migration".to_owned(),
+            "appliedDefaults".to_owned(),
             json!({
-                "defaultsApplied": true,
                 "notes": migration_notes
             }),
         );
@@ -3178,12 +3180,32 @@ fn finalize_recipe_preset_entry(preset: &mut Value) -> Result<(), ApiError> {
     Ok(())
 }
 
-fn default_recipe_preset_model_for_workflow(workflow: &str) -> Option<&'static str> {
-    match workflow {
-        "text_to_image" | "edit_image" => Some("z_image_turbo"),
-        "image_to_video" | "text_to_video" | "first_last_frame" => Some("ltx_2_3"),
-        _ => None,
-    }
+fn default_recipe_preset_model_for_workflow(models: &[Value], workflow: &str) -> Option<String> {
+    models
+        .iter()
+        .find(|model| {
+            model_supports_recipe_workflow(model, workflow)
+                && model.get("installState").and_then(Value::as_str) == Some("installed")
+        })
+        .or_else(|| {
+            models
+                .iter()
+                .find(|model| model_supports_recipe_workflow(model, workflow))
+        })
+        .and_then(|model| model.get("id").and_then(Value::as_str))
+        .map(str::to_owned)
+}
+
+fn model_supports_recipe_workflow(model: &Value, workflow: &str) -> bool {
+    model
+        .get("capabilities")
+        .and_then(Value::as_array)
+        .is_some_and(|capabilities| {
+            capabilities
+                .iter()
+                .filter_map(Value::as_str)
+                .any(|capability| capability == workflow)
+        })
 }
 
 fn default_recipe_preset_modes_for_workflow(workflow: &str) -> Vec<String> {
@@ -3233,7 +3255,7 @@ fn recipe_preset_archived(preset: &Value) -> bool {
 }
 
 fn finalized_recipe_preset(mut preset: Value) -> Result<Value, ApiError> {
-    finalize_recipe_preset_entry(&mut preset)?;
+    finalize_recipe_preset_entry(&mut preset, &[])?;
     Ok(preset)
 }
 
@@ -3274,6 +3296,7 @@ fn strip_recipe_preset_write_context(payload: &mut Value) {
         object.remove("scope");
         object.remove("manifestPath");
         object.remove("builtInLoras");
+        object.remove("appliedDefaults");
     }
 }
 
@@ -3281,6 +3304,7 @@ fn strip_recipe_preset_runtime_fields(payload: &mut Value) {
     if let Some(object) = payload.as_object_mut() {
         object.remove("manifestPath");
         object.remove("builtInLoras");
+        object.remove("appliedDefaults");
     }
 }
 
@@ -5524,7 +5548,7 @@ mod tests {
                   "family": "z-image",
                   "type": "image",
                   "adapter": "z_image_diffusers",
-                  "capabilities": ["text_to_image"],
+                  "capabilities": ["text_to_image", "edit_image"],
                   "downloads": [{ "provider": "huggingface", "repo": "owner/model", "files": ["*.safetensors"] }],
                   "paths": {},
                   "defaults": {},
@@ -5653,18 +5677,18 @@ mod tests {
             .find(|preset| preset["id"] == "legacy_edit")
             .expect("legacy edit preset");
         assert_eq!(legacy_edit["workflow"], "edit_image");
-        assert_eq!(legacy_edit["model"], "z_image_turbo");
+        assert_eq!(legacy_edit["model"], "base-model");
         assert_eq!(legacy_edit["loras"][0]["id"], "style-lora");
         assert_eq!(
-            legacy_edit["migration"]["notes"][0],
+            legacy_edit["appliedDefaults"]["notes"][0],
             "workflow inferred from legacy modes as edit_image"
         );
         assert_eq!(
-            legacy_edit["migration"]["notes"][1],
-            "model defaulted to z_image_turbo for legacy preset"
+            legacy_edit["appliedDefaults"]["notes"][1],
+            "model defaulted to base-model for legacy preset"
         );
         assert_eq!(
-            legacy_edit["migration"]["notes"][2],
+            legacy_edit["appliedDefaults"]["notes"][2],
             "builtInLoras migrated to loras"
         );
 
@@ -5945,7 +5969,15 @@ mod tests {
                   "name": "Unknown Family",
                   "triggerWords": [],
                   "compatibility": {},
-                  "source": { "provider": "builtin" }
+                  "source": { "provider": "local", "path": "loras/unknown.safetensors" }
+                },
+                {
+                  "id": "no_path_style",
+                  "name": "No Path Style",
+                  "family": "z-image",
+                  "triggerWords": [],
+                  "compatibility": { "families": ["z-image"] },
+                  "source": { "provider": "local" }
                 }
               ]
             }
@@ -5956,6 +5988,7 @@ mod tests {
         std::fs::create_dir_all(&lora_dir).expect("lora dir creates");
         write_test_safetensors(&lora_dir.join("style.safetensors"));
         write_test_safetensors(&lora_dir.join("qwen.safetensors"));
+        write_test_safetensors(&lora_dir.join("unknown.safetensors"));
 
         let app = create_app(test_settings(&temp_dir)).expect("app creates");
         // This also pins the positive compatibility path: style_lora is installed and compatible with z_image_turbo.
@@ -6332,6 +6365,24 @@ mod tests {
         assert_eq!(
             bad_error["detail"],
             "Recipe preset LoRA is not installed: deleted_style"
+        );
+
+        let (bad_status, bad_error) = request(
+            app.clone(),
+            "POST",
+            "/api/v1/recipe-presets",
+            json!({
+                "name": "No Path LoRA",
+                "model": "z_image_turbo",
+                "workflow": "text_to_image",
+                "loras": [{ "id": "no_path_style" }]
+            }),
+        )
+        .await;
+        assert_eq!(bad_status, StatusCode::BAD_REQUEST);
+        assert_eq!(
+            bad_error["detail"],
+            "Recipe preset LoRA is not installed: no_path_style"
         );
 
         let (bad_status, bad_error) = request(
