@@ -3,6 +3,7 @@ import { createRoot } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { App, eventUrl } from "./main.jsx";
 import { ImageStudio } from "./screens/ImageStudio.jsx";
+import { PresetManagerScreen } from "./screens/PresetManagerScreen.jsx";
 import { QueueScreen } from "./screens/QueueScreen.jsx";
 
 class FakeEventSource {
@@ -37,6 +38,19 @@ async function settle() {
   await act(async () => {
     await Promise.resolve();
     await Promise.resolve();
+  });
+}
+
+function field(container, labelText) {
+  const label = [...container.querySelectorAll("label")].find((item) => item.childNodes[0]?.textContent.trim() === labelText);
+  return label?.querySelector("input, select, textarea");
+}
+
+async function changeField(input, value) {
+  await act(async () => {
+    const setter = Object.getOwnPropertyDescriptor(input.constructor.prototype, "value")?.set;
+    setter?.call(input, value);
+    input.dispatchEvent(new window.Event(input.tagName === "SELECT" ? "change" : "input", { bubbles: true }));
   });
 }
 
@@ -461,5 +475,77 @@ describe("SceneWorks app shell", () => {
         advanced: { resolution: "1280x720" },
       }),
     );
+  });
+
+  it("creates, edits, duplicates, and archives recipe presets from the manager", async () => {
+    const createRecipePreset = vi.fn(async (payload) => payload);
+    const updateRecipePreset = vi.fn(async (id, payload) => ({ ...payload, id }));
+    const duplicateRecipePreset = vi.fn(async (id) => ({ id: `${id}_copy` }));
+    const deleteRecipePreset = vi.fn(async (id) => ({ id, archived: true }));
+    root = createRoot(container);
+    await act(async () => {
+      root.render(
+        <PresetManagerScreen
+          activeProject={{ id: "project-1", name: "Noir" }}
+          createRecipePreset={createRecipePreset}
+          deleteRecipePreset={deleteRecipePreset}
+          duplicateRecipePreset={duplicateRecipePreset}
+          imageModels={[{ id: "z_image_turbo", name: "Z-Image", type: "image" }]}
+          loras={[{ id: "builtin_cinematic_detail", name: "Cinematic Detail", family: "z-image", presetManaged: true }]}
+          recipePresets={[
+            {
+              id: "cinematic",
+              name: "Cinematic",
+              scope: "builtin",
+              workflow: "text_to_image",
+              model: "z_image_turbo",
+              ui: { description: "Built in cinematic finish." },
+            },
+            {
+              id: "moody",
+              name: "Moody",
+              scope: "global",
+              workflow: "text_to_image",
+              model: "z_image_turbo",
+              ui: { description: "Low key color." },
+            },
+          ]}
+          updateRecipePreset={updateRecipePreset}
+          videoModels={[{ id: "ltx_2_3", name: "LTX", type: "video" }]}
+        />,
+      );
+    });
+
+    await act(async () => {
+      [...container.querySelectorAll("button")].find((button) => button.textContent === "New Preset").click();
+    });
+    await changeField(field(container, "Name"), "Soft Morning");
+    expect(field(container, "ID").value).toBe("soft_morning");
+    await act(async () => {
+      [...container.querySelectorAll("button")].find((button) => button.textContent === "Create Preset").click();
+    });
+    expect(createRecipePreset).toHaveBeenCalledWith(expect.objectContaining({ id: "soft_morning", name: "Soft Morning", scope: "global" }));
+
+    await act(async () => {
+      [...container.querySelectorAll(".preset-row")].find((button) => button.textContent.includes("Moody")).click();
+    });
+    await changeField(field(container, "Description"), "Richer low key color.");
+    await act(async () => {
+      [...container.querySelectorAll("button")].find((button) => button.textContent === "Save Preset").click();
+    });
+    expect(updateRecipePreset).toHaveBeenCalledWith("moody", expect.objectContaining({ ui: { description: "Richer low key color." } }));
+
+    await act(async () => {
+      [...container.querySelectorAll("button")].find((button) => button.textContent === "Duplicate").click();
+    });
+    expect(duplicateRecipePreset).toHaveBeenCalledWith("moody", "global");
+
+    await act(async () => {
+      [...container.querySelectorAll(".preset-row")].find((button) => button.textContent.includes("Moody")).click();
+    });
+    await act(async () => {
+      [...container.querySelectorAll("button")].find((button) => button.textContent === "Archive").click();
+    });
+    expect(deleteRecipePreset).toHaveBeenCalledWith("moody");
   });
 });

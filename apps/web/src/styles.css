@@ -472,6 +472,9 @@ button:disabled {
 .model-card,
 .lora-panel,
 .lora-row,
+.preset-list,
+.preset-editor,
+.preset-row,
 .character-list,
 .character-editor,
 .character-section,
@@ -488,6 +491,66 @@ button:disabled {
   gap: 12px;
   align-content: start;
   padding: 14px;
+}
+
+.preset-layout {
+  display: grid;
+  grid-template-columns: minmax(240px, 340px) minmax(0, 1fr);
+  gap: 16px;
+  align-items: start;
+}
+
+.preset-list,
+.preset-editor {
+  display: grid;
+  gap: 10px;
+  align-content: start;
+  padding: 12px;
+}
+
+.preset-list {
+  max-height: 680px;
+  overflow: auto;
+}
+
+.preset-editor label {
+  display: grid;
+  gap: 7px;
+}
+
+.preset-row {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  width: 100%;
+  color: #f3f0e8;
+  padding: 10px;
+  text-align: left;
+}
+
+.preset-row.active {
+  border-color: #6ec6b8;
+  background: #183f3a;
+}
+
+.preset-row span:first-child {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+}
+
+.preset-row strong,
+.preset-row small,
+.preset-row > span:last-child {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.preset-row small,
+.preset-row > span:last-child {
+  color: #aaa397;
+  font-size: 12px;
 }
 
 .model-card h3,
@@ -1508,6 +1571,7 @@ button:disabled {
   .media-grid,
   .library-layout,
   .studio-layout,
+  .preset-layout,
   .character-layout,
   .queue-header,
   .job-composer,
