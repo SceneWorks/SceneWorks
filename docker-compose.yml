@@ -38,6 +38,8 @@ services:
       SCENEWORKS_GPU_ID: auto
       SCENEWORKS_UTILITY_JOBS: ${SCENEWORKS_PYTHON_UTILITY_JOBS:-1}
       SCENEWORKS_ACCESS_TOKEN: ${SCENEWORKS_ACCESS_TOKEN:-}
+      HF_HOME: ${SCENEWORKS_HF_HOME:-/sceneworks/data/cache/huggingface}
+      HUGGINGFACE_HUB_CACHE: ${SCENEWORKS_HUGGINGFACE_HUB_CACHE:-/sceneworks/data/cache/huggingface/hub}
       NVIDIA_VISIBLE_DEVICES: ${NVIDIA_VISIBLE_DEVICES:-all}
     volumes:
       - ${SCENEWORKS_DATA_BIND:-./data}:/sceneworks/data

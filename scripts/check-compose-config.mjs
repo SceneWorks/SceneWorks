@@ -29,6 +29,12 @@ function assertRuntimeDefaults(config, label) {
   assertEqual(api?.environment?.SCENEWORKS_API_RUNTIME, "rust", `${label} api runtime`);
   assertEqual(worker?.environment?.SCENEWORKS_UTILITY_JOBS, "1", `${label} python utility jobs`);
   assertEqual(worker?.environment?.SCENEWORKS_WORKER_ID, "python-inference-worker-0", `${label} python worker id`);
+  assertEqual(worker?.environment?.HF_HOME, "/sceneworks/data/cache/huggingface", `${label} python HF home`);
+  assertEqual(
+    worker?.environment?.HUGGINGFACE_HUB_CACHE,
+    "/sceneworks/data/cache/huggingface/hub",
+    `${label} python HF hub cache`,
+  );
   assertEqual(rustWorker?.environment?.SCENEWORKS_GPU_ID, "cpu", `${label} rust worker gpu mode`);
 }
 

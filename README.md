@@ -49,6 +49,7 @@ API volume contracts are shared across Python and Rust:
 - `${SCENEWORKS_DATA_BIND:-./data}:/sceneworks/data` read/write for projects, models, LoRAs, and cache-backed app data.
 - `${SCENEWORKS_CONFIG_BIND:-./config}:/sceneworks/config:ro` read-only for manifests and app configuration.
 - `./data/cache/jobs.db` is the shared queue database for both runtimes, preserving existing compose queue history across migration flips and rollback.
+- `./data/cache/huggingface` persists Diffusers/Hugging Face model downloads across worker container rebuilds and restarts.
 
 Both API runtimes expose `GET /api/v1/health`; Compose checks it with `curl`
 inside the container so dependent services wait for the selected implementation.
@@ -125,6 +126,10 @@ owns the model, LoRA, and FFmpeg utility families. Set
 The Python worker ID changed from `worker-gpu-auto-0` to
 `python-inference-worker-0`; existing queue databases may retain the old worker
 row until the stale-worker sweep marks it offline.
+When multiple GPU children are registered, auto GPU jobs may be claimed by a
+worker that already reports the requested model as warm before falling back to
+FIFO order. Explicit GPU selections and utility jobs keep their normal FIFO
+claim order.
 Both Docker worker images install Debian Bookworm `ffmpeg`; host-mode workers
 use the `ffmpeg` found on `PATH`. Set `HF_TOKEN` when downloading from gated
 Hugging Face repositories.
