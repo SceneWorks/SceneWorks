@@ -2363,13 +2363,20 @@ async fn create_lora_import_job(
         "source": {
             "provider": lora_source_provider(&payload),
             "repo": payload.repo.clone(),
-            "url": payload.source_url.clone(),
             "path": source_path,
         },
         "files": payload.files.clone(),
         "createdAt": timestamp,
         "updatedAt": timestamp,
     });
+    if let Some(source_url) = payload.source_url.clone() {
+        if let Some(source) = manifest_entry
+            .get_mut("source")
+            .and_then(Value::as_object_mut)
+        {
+            source.insert("url".to_owned(), Value::String(source_url));
+        }
+    }
     if let Some(family) = payload.family.clone() {
         if let Some(object) = manifest_entry.as_object_mut() {
             object.insert("family".to_owned(), Value::String(family));
