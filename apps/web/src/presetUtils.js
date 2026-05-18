@@ -38,6 +38,8 @@ export function loraMatchesModel(lora, model) {
 }
 
 export function presetMatchesWorkflow(preset, mode) {
+  // A preset has one primary workflow for persistence, but modes describe every
+  // Studio entry point where the picker should surface it.
   if (preset?.modes?.length) {
     return preset.modes.includes(mode);
   }
@@ -70,6 +72,8 @@ export function serializePresetLora(lora, presetLora = {}) {
     weight: loraWeight(lora, presetLora),
     triggerWords: lora?.triggerWords ?? [],
     compatibility: lora?.compatibility ?? presetLora?.compatibility ?? {},
+    installedPath: lora?.installedPath ?? presetLora?.installedPath ?? null,
+    source: lora?.source ?? presetLora?.source ?? null,
     presetManaged: true,
   };
 }

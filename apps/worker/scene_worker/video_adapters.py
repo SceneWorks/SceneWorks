@@ -26,6 +26,7 @@ from sceneworks_shared import (
 
 from .adapter_utils import filter_call_kwargs
 from .image_adapters import select_torch_device, select_torch_dtype, write_json
+from .lora_adapters import LoraPipelineState, apply_loras_to_pipeline, reject_loras_if_unsupported
 from .settings import WorkerSettings
 
 
@@ -134,6 +135,7 @@ class ProceduralVideoAdapter(VideoGenerationAdapter):
         return video_request_from_job(job)
 
     def ensure_models(self, request: VideoRequest) -> None:
+        reject_loras_if_unsupported(request.loras, self.id)
         target = model_target(request.model)
         if request.mode not in target["capabilities"]:
             raise RuntimeError(f"{target['label']} does not support {request.mode.replace('_', ' ')}.")
@@ -270,6 +272,7 @@ class DiffusersVideoAdapter(VideoGenerationAdapter):
         self._pipeline: Any | None = None
         self._pipeline_key_value: str | None = None
         self._loaded_models: set[str] = set()
+        self._loaded_lora_state = LoraPipelineState()
 
     def loaded_models(self) -> list[str]:
         return sorted(self._loaded_models)
@@ -314,6 +317,7 @@ class DiffusersVideoAdapter(VideoGenerationAdapter):
         target = model_target(request.model)
         progress("loading_model", "loading_model", 0.2, f"Loading {target['label']} Diffusers pipeline.")
         pipe = self._load_pipeline(request, target)
+        self._apply_loras(pipe, request, target)
 
         first_image = self._first_condition_image(project_path, request)
         last_image = self._last_condition_image(project_path, request)
@@ -461,8 +465,17 @@ class DiffusersVideoAdapter(VideoGenerationAdapter):
         self._pipeline = None
         self._pipeline_key_value = None
         self._loaded_models.clear()
+        self._loaded_lora_state = LoraPipelineState()
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
+
+    def _apply_loras(self, pipe: Any, request: VideoRequest, target: dict[str, Any]) -> None:
+        self._loaded_lora_state = apply_loras_to_pipeline(
+            pipe,
+            request.loras,
+            adapter_id=target["adapter"],
+            previous_state=self._loaded_lora_state,
+        )
 
     def _pipeline_class(self, diffusers: Any, request: VideoRequest, target: dict[str, Any]) -> Any:
         if target["adapter"] == "wan_video":

@@ -522,6 +522,59 @@ describe("SceneWorks app shell", () => {
     expect(createImageJob).toHaveBeenCalledWith(expect.objectContaining({ model: "qwen_image", recipePresetId: "qwen_detail" }));
   });
 
+  it("uses preset modes as the Image Studio picker surface", async () => {
+    root = createRoot(container);
+    await act(async () => {
+      root.render(
+        <ImageStudio
+          activeProject={{ id: "project-1", name: "Noir" }}
+          assets={[{ id: "image-1", type: "image", displayName: "Frame One" }]}
+          characters={[]}
+          createImageJob={() => {}}
+          deleteAsset={() => {}}
+          gpuOptions={["auto"]}
+          imageModels={[{ id: "z_image_turbo", name: "Z-Image", type: "image", family: "z-image", capabilities: ["edit_image"] }]}
+          latestAssets={[]}
+          loras={[]}
+          onPreview={() => {}}
+          purgeAsset={() => {}}
+          recipePresets={[
+            {
+              id: "cinematic",
+              name: "Cinematic",
+              model: "z_image_turbo",
+              workflow: "text_to_image",
+              modes: ["text_to_image", "edit_image", "character_image"],
+            },
+            {
+              id: "portrait_only",
+              name: "Portrait Only",
+              model: "z_image_turbo",
+              workflow: "text_to_image",
+              modes: ["character_image"],
+            },
+          ]}
+          requestedGpu="auto"
+          selectedAsset={{ id: "image-1", type: "image", displayName: "Frame One" }}
+          setRequestedGpu={() => {}}
+          updateAssetStatus={() => {}}
+        />,
+      );
+    });
+    await settle();
+
+    expect(container.textContent).toContain("Cinematic");
+    expect(container.textContent).not.toContain("Portrait Only");
+
+    await act(async () => {
+      [...container.querySelectorAll("button")].find((button) => button.textContent === "Edit").click();
+    });
+    await settle();
+
+    expect(container.textContent).toContain("Cinematic");
+    expect(container.textContent).not.toContain("Portrait Only");
+  });
+
   it("applies recipe preset defaults to video jobs", async () => {
     const createVideoJob = vi.fn();
     root = createRoot(container);
@@ -669,6 +722,74 @@ describe("SceneWorks app shell", () => {
 
     expect(container.textContent).toContain("Presets unavailable");
     expect(container.textContent).not.toContain("LTX Story");
+  });
+
+  it("uses preset modes as the Video Studio picker surface", async () => {
+    root = createRoot(container);
+    await act(async () => {
+      root.render(
+        <VideoStudio
+          activeProject={{ id: "project-1", name: "Noir" }}
+          assets={[
+            { id: "image-1", type: "image", displayName: "Frame One" },
+            { id: "image-2", type: "image", displayName: "Frame Two" },
+          ]}
+          characters={[]}
+          createPersonDetectionJob={() => {}}
+          createPersonTrackJob={() => {}}
+          createVideoJob={() => {}}
+          deleteAsset={() => {}}
+          gpuOptions={["auto"]}
+          latestAssets={[]}
+          loras={[]}
+          onPreview={() => {}}
+          personTracks={[]}
+          purgeAsset={() => {}}
+          recipePresets={[
+            {
+              id: "camera_bridge",
+              name: "Camera Bridge",
+              workflow: "image_to_video",
+              modes: ["image_to_video", "first_last_frame"],
+              model: "ltx_2_3",
+            },
+            {
+              id: "start_frame",
+              name: "Start Frame",
+              workflow: "image_to_video",
+              modes: ["image_to_video"],
+              model: "ltx_2_3",
+            },
+          ]}
+          requestedGpu="auto"
+          selectedAsset={{ id: "image-1", type: "image", displayName: "Frame One" }}
+          setRequestedGpu={() => {}}
+          updateAssetStatus={() => {}}
+          videoModels={[
+            {
+              id: "ltx_2_3",
+              name: "LTX",
+              type: "video",
+              capabilities: ["image_to_video", "text_to_video", "first_last_frame"],
+              defaults: { duration: 6, fps: 25, resolution: "768x512", quality: "balanced" },
+              limits: { durations: [4, 6, 8], fps: [24, 25, 30], resolutions: ["768x512", "1280x720"] },
+            },
+          ]}
+        />,
+      );
+    });
+    await settle();
+
+    expect(container.textContent).toContain("Camera Bridge");
+    expect(container.textContent).toContain("Start Frame");
+
+    await act(async () => {
+      [...container.querySelectorAll("button")].find((button) => button.textContent === "First/Last Frame").click();
+    });
+    await settle();
+
+    expect(container.textContent).toContain("Camera Bridge");
+    expect(container.textContent).not.toContain("Start Frame");
   });
 
   it("creates, edits, duplicates, and archives recipe presets from the manager", async () => {
