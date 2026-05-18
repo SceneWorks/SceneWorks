@@ -151,6 +151,7 @@ export function CharacterStudio({
     await attachCharacterLora(selectedCharacter.id, {
       loraId: lora.id,
       name: lora.name ?? lora.id,
+      sourcePath: lora.installedPath ?? lora.source?.path ?? null,
       triggerWords: lora.triggerWords ?? [],
       defaultWeight: lora.defaultWeight ?? 0.8,
       compatibility: { families: compatibleFamilies(lora) },

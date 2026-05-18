@@ -305,6 +305,7 @@ describe("SceneWorks app shell", () => {
             { id: "project_mira", name: "Project Mira", family: "z-image", scope: "project" },
             { id: "third_user", name: "Third User", family: "z-image", scope: "global" },
             { id: "qwen_only", name: "Qwen Only", family: "qwen-image", scope: "global" },
+            { id: "missing_lora", name: "Missing LoRA", family: "z-image", scope: "global", installState: "missing" },
           ]}
           onPreview={() => {}}
           purgeAsset={() => {}}
@@ -318,6 +319,7 @@ describe("SceneWorks app shell", () => {
 
     expect(container.textContent).toContain("Built In");
     expect(container.textContent).not.toContain("Qwen Only");
+    expect(container.textContent).not.toContain("Missing LoRA");
 
     const checkboxes = [...container.querySelectorAll('.lora-choice input[type="checkbox"]')];
     await act(async () => {
@@ -327,6 +329,16 @@ describe("SceneWorks app shell", () => {
     });
 
     expect(checkboxes[3].disabled).toBe(true);
+
+    await act(async () => {
+      [...container.querySelectorAll("button")].find((button) => button.textContent === "Advanced").click();
+    });
+    await act(async () => {
+      container.querySelector('.lora-picker .checkline input[type="checkbox"]').click();
+    });
+
+    expect(container.textContent).toContain("Qwen Only");
+    expect(container.textContent).not.toContain("Missing LoRA");
 
     await act(async () => {
       [...container.querySelectorAll("button")].find((button) => button.textContent === "Generate").click();

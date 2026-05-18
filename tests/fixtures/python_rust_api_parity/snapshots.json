@@ -276,7 +276,7 @@
     "completedAt": null,
     "createdAt": "<timestamp>",
     "duplicateOfJobId": null,
-    "elapsedSeconds": 1,
+    "elapsedSeconds": 0,
     "error": null,
     "etaSeconds": null,
     "id": "job_fixture",
@@ -368,7 +368,7 @@
     "completedAt": "<timestamp>",
     "createdAt": "<timestamp>",
     "duplicateOfJobId": null,
-    "elapsedSeconds": 1,
+    "elapsedSeconds": 0,
     "error": null,
     "etaSeconds": null,
     "id": "job_fixture",
@@ -423,8 +423,27 @@
       "files": [
         "adapter.safetensors"
       ],
+      "loraId": "imported_lora",
+      "manifestEntry": {
+        "createdAt": "<timestamp>",
+        "files": [
+          "adapter.safetensors"
+        ],
+        "id": "imported_lora",
+        "name": "Imported LoRA",
+        "scope": "global",
+        "source": {
+          "path": "loras/imported_lora",
+          "provider": "huggingface",
+          "repo": "owner/style-lora"
+        },
+        "updatedAt": "<timestamp>"
+      },
+      "manifestPath": "<runtime-root>/config/manifests/user.loras.jsonc",
       "name": "Imported LoRA",
-      "repo": "owner/style-lora"
+      "repo": "owner/style-lora",
+      "scope": "global",
+      "targetDir": "<runtime-root>/data/loras/imported_lora"
     },
     "progress": 0.0,
     "projectId": null,
@@ -449,7 +468,11 @@
       },
       "family": "z-image",
       "id": "style-lora",
+      "installState": "missing",
+      "installedPath": "<runtime-root>/data/loras/style.safetensors",
+      "manifestPath": "<runtime-root>/config/manifests/builtin.loras.jsonc",
       "name": "Style LoRA",
+      "scope": "builtin",
       "source": {
         "path": "loras/style.safetensors",
         "provider": "local"

@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from "react";
+import React, { useEffect, useMemo, useState } from "react";
 import { AssetCard } from "../components/assetPanels.jsx";
 
 export function ImageStudio({
@@ -32,6 +32,7 @@ export function ImageStudio({
   const [characterId, setCharacterId] = useState("");
   const [characterLookId, setCharacterLookId] = useState("");
   const [selectedLoraIds, setSelectedLoraIds] = useState([]);
+  const [showIncompatibleLoras, setShowIncompatibleLoras] = useState(false);
 
   function loraFamilies(lora) {
     const compatibility = lora.compatibility ?? {};
@@ -96,17 +97,24 @@ export function ImageStudio({
   });
   const selectedModel = imageModels.find((item) => item.id === model);
   const selectedModelFamily = selectedModel?.family ?? null;
-  const compatibleLoras = loras.filter((lora) => {
+  const compatibleLoras = useMemo(() => loras.filter((lora) => {
+    if (lora.installState === "missing") {
+      return false;
+    }
+    if (showIncompatibleLoras) {
+      return true;
+    }
     const families = loraFamilies(lora);
     return !selectedModelFamily || families.length === 0 || families.includes(selectedModelFamily);
-  });
+  }), [loras, selectedModelFamily, showIncompatibleLoras]);
+  const compatibleLoraKey = useMemo(() => compatibleLoras.map((lora) => lora.id).join("|"), [compatibleLoras]);
   const selectedLoras = selectedLoraIds.map((id) => compatibleLoras.find((lora) => lora.id === id)).filter(Boolean);
   const userSelectedLoraCount = selectedLoras.filter((lora) => lora.scope !== "builtin").length;
   const [width, height] = resolution.split("x").map((value) => Number(value));
 
   useEffect(() => {
     setSelectedLoraIds((ids) => ids.filter((id) => compatibleLoras.some((lora) => lora.id === id)));
-  }, [compatibleLoras.map((lora) => lora.id).join("|")]);
+  }, [compatibleLoraKey]);
 
   function toggleLora(lora) {
     setSelectedLoraIds((ids) => {
@@ -258,6 +266,16 @@ export function ImageStudio({
               <strong>LoRAs</strong>
               <span>{selectedLoras.length ? `${selectedLoras.length} selected` : "Compatible with selected model"}</span>
             </div>
+            {advancedOpen ? (
+              <label className="checkline">
+                <input
+                  checked={showIncompatibleLoras}
+                  onChange={(event) => setShowIncompatibleLoras(event.target.checked)}
+                  type="checkbox"
+                />
+                Show incompatible
+              </label>
+            ) : null}
             {compatibleLoras.length ? (
               <div className="lora-choice-list">
                 {compatibleLoras.map((lora) => {

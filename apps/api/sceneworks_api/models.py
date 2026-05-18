@@ -4,6 +4,8 @@ from fnmatch import fnmatch
 import json
 import os
 import re
+import tempfile
+import threading
 from functools import lru_cache
 from pathlib import Path
 from typing import Any
@@ -13,11 +15,12 @@ from urllib.request import urlopen
 
 from fastapi import APIRouter, HTTPException, Query, Request
 from pydantic import BaseModel, Field
-from sceneworks_shared import ProjectNotFound, find_project_path, slugify, utc_now, write_json
+from sceneworks_shared import ProjectNotFound, find_project_path, slugify, utc_now
 
 
 router = APIRouter(prefix="/models", tags=["models"])
 loras_router = APIRouter(prefix="/loras", tags=["loras"])
+LORA_MANIFEST_LOCK = threading.Lock()
 
 
 class ModelDownloadRequest(BaseModel):
@@ -146,26 +149,37 @@ def normalize_lora_entry(
             installed_path = default_root / source_path
     entry["manifestPath"] = str(manifest_path)
     entry["installedPath"] = str(installed_path) if installed_path else None
-    entry["installState"] = "installed" if installed_path and installed_path.exists() else "missing"
+    entry["installState"] = "missing" if installed_path and not installed_path.exists() else "installed"
     return entry
 
 
 def upsert_lora_manifest_entry(path: Path, entry: dict[str, Any]) -> None:
-    payload = lora_manifest_payload(path)
-    lora_id = entry["id"]
-    merged = []
-    found = False
-    for item in payload.get("loras", []):
-        if item.get("id") != lora_id:
-            merged.append(item)
-            continue
-        found = True
-        merged.append({**item, **entry, "createdAt": item.get("createdAt", entry.get("createdAt"))})
-    if not found:
-        merged.append(entry)
-    payload["loras"] = merged
-    write_json(path, payload)
-    load_manifest_cached.cache_clear()
+    with LORA_MANIFEST_LOCK:
+        payload = lora_manifest_payload(path)
+        lora_id = entry["id"]
+        merged = []
+        found = False
+        for item in payload.get("loras", []):
+            if item.get("id") != lora_id:
+                merged.append(item)
+                continue
+            found = True
+            merged.append({**item, **entry, "createdAt": item.get("createdAt", entry.get("createdAt"))})
+        if not found:
+            merged.append(entry)
+        payload["loras"] = merged
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp_path = None
+        try:
+            with tempfile.NamedTemporaryFile("w", delete=False, dir=path.parent, encoding="utf-8") as handle:
+                tmp_path = Path(handle.name)
+                json.dump(payload, handle, indent=2)
+                handle.write("\n")
+            tmp_path.replace(path)
+        finally:
+            if tmp_path and tmp_path.exists():
+                tmp_path.unlink(missing_ok=True)
+        load_manifest_cached.cache_clear()
 
 
 def format_bytes(value: int | float | None) -> str | None:
@@ -415,13 +429,15 @@ def create_lora_import_job(payload: LoraImportRequest, request: Request) -> dict
         "createdAt": timestamp,
         "updatedAt": timestamp,
     }
-    upsert_lora_manifest_entry(manifest_path, {key: value for key, value in manifest_entry.items() if value is not None})
+    manifest_entry = {key: value for key, value in manifest_entry.items() if value is not None}
 
     job_payload = {
         **payload.model_dump(exclude_none=True),
         "loraId": lora_id,
         "name": name,
         "targetDir": str(target_dir),
+        "manifestPath": str(manifest_path),
+        "manifestEntry": manifest_entry,
     }
     job = request.app.state.jobs_store.create_job(
         job_type="lora_import",

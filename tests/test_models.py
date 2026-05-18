@@ -108,7 +108,9 @@ def test_lora_catalog_merges_global_and_project_scopes(tmp_path):
 
     scopes = {lora["id"]: lora["scope"] for lora in loras}
     assert scopes == {"built_in": "builtin", "global_style": "global", "mira": "project"}
-    assert {lora["id"]: lora["installState"] for lora in loras}["mira"] == "installed"
+    install_states = {lora["id"]: lora["installState"] for lora in loras}
+    assert install_states["built_in"] == "installed"
+    assert install_states["mira"] == "installed"
 
 
 def test_project_lora_import_targets_project_manifest_and_folder(tmp_path):
@@ -179,7 +181,9 @@ def test_project_lora_import_targets_project_manifest_and_folder(tmp_path):
     )
 
     assert job["projectId"] == "project-1"
-    assert jobs_store.created["payload"]["targetDir"] == str(project_path / "loras" / "imports" / "mira_style")
-    manifest = json.loads((project_path / "loras" / "manifest.jsonc").read_text(encoding="utf-8"))
-    assert manifest["loras"][0]["scope"] == "project"
-    assert manifest["loras"][0]["source"]["path"] == "loras/imports/mira_style"
+    payload = jobs_store.created["payload"]
+    assert payload["targetDir"] == str(project_path / "loras" / "imports" / "mira_style")
+    assert payload["manifestPath"] == str(project_path / "loras" / "manifest.jsonc")
+    assert payload["manifestEntry"]["scope"] == "project"
+    assert payload["manifestEntry"]["source"]["path"] == "loras/imports/mira_style"
+    assert not (project_path / "loras" / "manifest.jsonc").exists()
