@@ -3115,22 +3115,44 @@ fn finalize_recipe_preset_entry(preset: &mut Value) -> Result<(), ApiError> {
     let object = preset
         .as_object_mut()
         .ok_or_else(|| ApiError::internal("Recipe preset manifest entry must be an object"))?;
+    let mut migration_notes = Vec::new();
     if !object.contains_key("workflow") {
         if let Some(workflow) = inferred_recipe_preset_workflow(object) {
             object.insert("workflow".to_owned(), Value::String(workflow.to_owned()));
+            migration_notes.push(Value::String(format!(
+                "workflow inferred from legacy modes as {workflow}"
+            )));
+        }
+    }
+    if !object.contains_key("model") {
+        if let Some(model) = object
+            .get("workflow")
+            .and_then(Value::as_str)
+            .and_then(default_recipe_preset_model_for_workflow)
+        {
+            object.insert("model".to_owned(), Value::String(model.to_owned()));
+            migration_notes.push(Value::String(format!(
+                "model defaulted to {model} for legacy preset"
+            )));
         }
     }
     if !object.contains_key("modes") {
         if let Some(workflow) = object.get("workflow").and_then(Value::as_str) {
             object.insert(
                 "modes".to_owned(),
-                Value::Array(vec![Value::String(workflow.to_owned())]),
+                Value::Array(
+                    default_recipe_preset_modes_for_workflow(workflow)
+                        .into_iter()
+                        .map(Value::String)
+                        .collect(),
+                ),
             );
         }
     }
     if !object.contains_key("loras") {
         if let Some(loras) = object.get("builtInLoras").cloned() {
             object.insert("loras".to_owned(), loras);
+            migration_notes.push(Value::String("builtInLoras migrated to loras".to_owned()));
         }
     }
     let loras = object
@@ -3144,7 +3166,38 @@ fn finalize_recipe_preset_entry(preset: &mut Value) -> Result<(), ApiError> {
     object
         .entry("prompt".to_owned())
         .or_insert_with(|| Value::Object(JsonObject::new()));
+    if !migration_notes.is_empty() {
+        object.insert(
+            "migration".to_owned(),
+            json!({
+                "defaultsApplied": true,
+                "notes": migration_notes
+            }),
+        );
+    }
     Ok(())
+}
+
+fn default_recipe_preset_model_for_workflow(workflow: &str) -> Option<&'static str> {
+    match workflow {
+        "text_to_image" | "edit_image" => Some("z_image_turbo"),
+        "image_to_video" | "text_to_video" | "first_last_frame" => Some("ltx_2_3"),
+        _ => None,
+    }
+}
+
+fn default_recipe_preset_modes_for_workflow(workflow: &str) -> Vec<String> {
+    match workflow {
+        "text_to_image" => vec!["text_to_image", "character_image", "style_variations"],
+        "edit_image" => vec!["edit_image"],
+        "image_to_video" => vec!["image_to_video"],
+        "text_to_video" => vec!["text_to_video"],
+        "first_last_frame" => vec!["first_last_frame"],
+        _ => vec![workflow],
+    }
+    .into_iter()
+    .map(str::to_owned)
+    .collect()
 }
 
 fn inferred_recipe_preset_workflow(object: &JsonObject) -> Option<&'static str> {
@@ -5546,7 +5599,8 @@ mod tests {
             {
               "schemaVersion": 1,
               "presets": [
-                { "id": "cinematic", "name": "My Cinematic", "defaults": { "count": 2, "resolution": "1280x720", "negativePrompt": "flat lighting" } }
+                { "id": "cinematic", "name": "My Cinematic", "defaults": { "count": 2, "resolution": "1280x720", "negativePrompt": "flat lighting" } },
+                { "id": "legacy_edit", "name": "Legacy Edit", "modes": ["edit_image"], "builtInLoras": [{ "id": "style-lora", "weight": 0.25 }] }
               ]
             }
             "#,
@@ -5582,14 +5636,37 @@ mod tests {
         let (status, presets) =
             request(app.clone(), "GET", "/api/v1/recipe-presets", Value::Null).await;
         assert_eq!(status, StatusCode::OK);
-        assert_eq!(presets.as_array().unwrap().len(), 1);
-        assert_eq!(presets[0]["id"], "cinematic");
-        assert_eq!(presets[0]["name"], "My Cinematic");
-        assert_eq!(presets[0]["scope"], "global");
-        assert_eq!(presets[0]["workflow"], "text_to_image");
-        assert_eq!(presets[0]["defaults"]["count"], 2);
-        assert_eq!(presets[0]["loras"][0]["id"], "style-lora");
-        assert_eq!(presets[0]["builtInLoras"][0]["id"], "style-lora");
+        let presets = presets.as_array().unwrap();
+        assert_eq!(presets.len(), 2);
+        let cinematic = presets
+            .iter()
+            .find(|preset| preset["id"] == "cinematic")
+            .expect("cinematic preset");
+        assert_eq!(cinematic["name"], "My Cinematic");
+        assert_eq!(cinematic["scope"], "global");
+        assert_eq!(cinematic["workflow"], "text_to_image");
+        assert_eq!(cinematic["defaults"]["count"], 2);
+        assert_eq!(cinematic["loras"][0]["id"], "style-lora");
+        assert_eq!(cinematic["builtInLoras"][0]["id"], "style-lora");
+        let legacy_edit = presets
+            .iter()
+            .find(|preset| preset["id"] == "legacy_edit")
+            .expect("legacy edit preset");
+        assert_eq!(legacy_edit["workflow"], "edit_image");
+        assert_eq!(legacy_edit["model"], "z_image_turbo");
+        assert_eq!(legacy_edit["loras"][0]["id"], "style-lora");
+        assert_eq!(
+            legacy_edit["migration"]["notes"][0],
+            "workflow inferred from legacy modes as edit_image"
+        );
+        assert_eq!(
+            legacy_edit["migration"]["notes"][1],
+            "model defaulted to z_image_turbo for legacy preset"
+        );
+        assert_eq!(
+            legacy_edit["migration"]["notes"][2],
+            "builtInLoras migrated to loras"
+        );
 
         let (_, project) = request(
             app.clone(),

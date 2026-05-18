@@ -8,7 +8,7 @@
       "scope": "builtin",
       "order": 10,
       "workflow": "text_to_image",
-      "modes": ["text_to_image", "edit_image", "character_image", "style_variations"],
+      "modes": ["text_to_image", "character_image", "style_variations"],
       "model": "z_image_turbo",
       "defaults": {
         "count": 4,
@@ -26,12 +26,35 @@
       }
     },
     {
+      "id": "cinematic_edit",
+      "name": "Cinematic Edit",
+      "scope": "builtin",
+      "order": 11,
+      "workflow": "edit_image",
+      "modes": ["edit_image"],
+      "model": "z_image_turbo",
+      "defaults": {
+        "count": 4,
+        "resolution": "1024x1024",
+        "negativePrompt": "flat lighting, low contrast, muddy detail"
+      },
+      "prompt": {
+        "suffix": "cinematic lighting, natural contrast, detailed production still"
+      },
+      "loras": [
+        { "id": "builtin_cinematic_detail", "weight": 0.55 }
+      ],
+      "ui": {
+        "description": "Cinematic color and detail scoped to image edits."
+      }
+    },
+    {
       "id": "photoreal",
       "name": "Photoreal",
       "scope": "builtin",
       "order": 20,
       "workflow": "text_to_image",
-      "modes": ["text_to_image", "edit_image", "character_image", "style_variations"],
+      "modes": ["text_to_image", "character_image", "style_variations"],
       "model": "z_image_turbo",
       "defaults": {
         "count": 4,
@@ -46,6 +69,29 @@
       ],
       "ui": {
         "description": "Natural image texture and realistic materials."
+      }
+    },
+    {
+      "id": "photoreal_edit",
+      "name": "Photoreal Edit",
+      "scope": "builtin",
+      "order": 21,
+      "workflow": "edit_image",
+      "modes": ["edit_image"],
+      "model": "z_image_turbo",
+      "defaults": {
+        "count": 4,
+        "resolution": "1024x1024",
+        "negativePrompt": "illustration, stylized, plastic skin, oversharpened"
+      },
+      "prompt": {
+        "suffix": "natural lens rendering, realistic materials, believable lighting"
+      },
+      "loras": [
+        { "id": "builtin_photoreal_texture", "weight": 0.45 }
+      ],
+      "ui": {
+        "description": "Photoreal texture scoped to image edits."
       }
     },
     {
@@ -100,7 +146,7 @@
       "scope": "builtin",
       "order": 50,
       "workflow": "text_to_image",
-      "modes": ["text_to_image", "edit_image", "style_variations"],
+      "modes": ["text_to_image", "style_variations"],
       "model": "z_image_turbo",
       "defaults": {
         "count": 2,
@@ -115,6 +161,29 @@
       ],
       "ui": {
         "description": "Clean commercial lighting and material finish."
+      }
+    },
+    {
+      "id": "product_edit",
+      "name": "Product Edit",
+      "scope": "builtin",
+      "order": 51,
+      "workflow": "edit_image",
+      "modes": ["edit_image"],
+      "model": "z_image_turbo",
+      "defaults": {
+        "count": 2,
+        "resolution": "1024x1024",
+        "negativePrompt": "clutter, warped logo, messy reflections, busy background"
+      },
+      "prompt": {
+        "suffix": "controlled studio lighting, crisp edges, clean commercial composition"
+      },
+      "loras": [
+        { "id": "builtin_product_finish", "weight": 0.5 }
+      ],
+      "ui": {
+        "description": "Commercial finish scoped to image edits."
       }
     }
   ]

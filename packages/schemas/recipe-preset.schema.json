@@ -67,6 +67,7 @@
             }
           },
           "builtInLoras": {
+            "description": "Deprecated legacy alias for loras. The API accepts this field on read and write migration paths, but API-managed manifest writes normalize it to loras.",
             "type": "array",
             "maxItems": 3,
             "items": {
