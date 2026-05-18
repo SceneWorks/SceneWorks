@@ -2076,10 +2076,9 @@ async fn get_recipe_preset(
         .into_iter()
         .find(|preset| preset.get("id").and_then(Value::as_str) == Some(preset_id.as_str()))
         .filter(|preset| {
-            query
-                .scope
-                .as_deref()
-                .is_none_or(|scope| preset.get("scope").and_then(Value::as_str) == Some(scope))
+            query.scope.as_deref().map_or(true, |scope| {
+                preset.get("scope").and_then(Value::as_str) == Some(scope)
+            })
         })
         .filter(|preset| query.include_archived.unwrap_or(false) || !recipe_preset_archived(preset))
         .ok_or_else(|| ApiError {
