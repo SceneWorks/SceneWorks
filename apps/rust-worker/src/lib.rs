@@ -1,6 +1,5 @@
 use std::collections::{BTreeMap, HashMap};
 use std::fmt;
-use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::time::{Duration, Instant};
@@ -15,6 +14,7 @@ use sceneworks_core::contracts::{
 use sceneworks_core::project_store::{ProjectStore, ProjectStoreError};
 use serde::Deserialize;
 use serde_json::{json, Number, Value};
+use sha2::{Digest, Sha256};
 use time::format_description::well_known::Rfc3339;
 use time::OffsetDateTime;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -1223,7 +1223,7 @@ async fn run_frame_extract(
     let frames_dir = project_path.join("assets").join("frames");
     tokio::fs::create_dir_all(&frames_dir).await?;
     tokio::fs::create_dir_all(project_path.join("recipes")).await?;
-    let asset_id = fresh_asset_id(&job.id);
+    let asset_id = fresh_asset_id();
     let created_at = now_rfc3339();
     let filename = format!(
         "{}_frame_{}.png",
@@ -1479,7 +1479,7 @@ async fn run_person_detect(
     let frames_dir = project_path.join("assets").join("frames");
     tokio::fs::create_dir_all(&frames_dir).await?;
     tokio::fs::create_dir_all(project_path.join("recipes")).await?;
-    let asset_id = fresh_asset_id(&job.id);
+    let asset_id = fresh_asset_id();
     let created_at = now_rfc3339();
     let filename = format!(
         "{}_person-frame_{}.png",
@@ -2693,6 +2693,7 @@ fn now_rfc3339() -> String {
 
 fn candidate_people(width: u32, height: u32, source_asset_id: &str, timestamp: f64) -> Vec<Value> {
     let seed = format!("{source_asset_id}:{timestamp:.3}:{width}x{height}");
+    let digest = Sha256::digest(seed.as_bytes());
     let templates = [
         (0.34, 0.16, 0.24, 0.68, 0.91),
         (0.58, 0.20, 0.20, 0.58, 0.78),
@@ -2702,7 +2703,7 @@ fn candidate_people(width: u32, height: u32, source_asset_id: &str, timestamp: f
         .iter()
         .enumerate()
         .map(|(index, (x, y, box_width, box_height, confidence))| {
-            let jitter = ((stable_hash_byte(&seed, index) % 13) as f64 - 6.0) / 1000.0;
+            let jitter = ((digest[index] % 13) as f64 - 6.0) / 1000.0;
             json!({
                 "id": format!("person_{}", index + 1),
                 "label": format!("Person {}", index + 1),
@@ -2756,13 +2757,6 @@ fn detection_box_f64(
         .and_then(|value| value.get(field))
         .map_or(default, |value| value_f64(value, default))
         .clamp(min_value, max_value)
-}
-
-fn stable_hash_byte(seed: &str, index: usize) -> u8 {
-    let mut hasher = std::collections::hash_map::DefaultHasher::new();
-    seed.hash(&mut hasher);
-    index.hash(&mut hasher);
-    ((hasher.finish() >> ((index % 8) * 8)) & 0xff) as u8
 }
 
 fn round_to(value: f64, places: u32) -> f64 {
@@ -3159,7 +3153,7 @@ fn build_render_asset(
     height: u32,
     duration: f64,
 ) -> Value {
-    let asset_id = fresh_asset_id(job_id);
+    let asset_id = fresh_asset_id();
     let created_at = now_rfc3339();
     let source_asset_ids = timeline
         .get("tracks")
@@ -3485,8 +3479,7 @@ fn value_f64(value: &Value, default: f64) -> f64 {
         .unwrap_or(default)
 }
 
-fn fresh_asset_id(job_id: &str) -> String {
-    let _ = job_id;
+fn fresh_asset_id() -> String {
     format!("asset_{}", Uuid::new_v4().simple())
 }
 
@@ -3581,14 +3574,14 @@ mod tests {
     use tempfile::tempdir;
 
     use super::{
-        allow_pattern_matches, auto_worker_specs, bounded_tail, child_environment,
-        concat_file_contents, copy_lora_source, cpu_gpu, cpu_worker_id, crossfade_duration,
-        download_progress_payload, fallback_gpu, fresh_asset_id, gpu_worker_id, now_rfc3339,
-        output_dimensions, parse_nvidia_smi_gpus, restart_exited_children_with_spawner, run_ffmpeg,
-        safe_download_dir, safe_project_path, value_f64, visible_gpu_ids,
-        worker_capabilities_with_utility, write_model_install_marker, HuggingFaceSnapshot,
-        Settings, SupervisedChild, WorkerError, WorkerSpec, DEFAULT_TRANSITION_DURATION_SECONDS,
-        INSTALL_MARKER,
+        allow_pattern_matches, auto_worker_specs, bounded_tail, candidate_people,
+        child_environment, concat_file_contents, copy_lora_source, cpu_gpu, cpu_worker_id,
+        crossfade_duration, download_progress_payload, fallback_gpu, fresh_asset_id, gpu_worker_id,
+        now_rfc3339, output_dimensions, parse_nvidia_smi_gpus,
+        restart_exited_children_with_spawner, run_ffmpeg, safe_download_dir, safe_project_path,
+        value_f64, visible_gpu_ids, worker_capabilities_with_utility, write_model_install_marker,
+        HuggingFaceSnapshot, Settings, SupervisedChild, WorkerError, WorkerSpec,
+        DEFAULT_TRANSITION_DURATION_SECONDS, INSTALL_MARKER,
     };
 
     #[test]
@@ -3864,12 +3857,21 @@ mod tests {
         assert!(concat.contains("C:/renders/clip one'\\''s.mp4"));
         assert!(concat.contains("file 'nested/two.mp4'"));
 
-        let asset_id = fresh_asset_id("job-ignored");
+        let asset_id = fresh_asset_id();
         assert!(asset_id.starts_with("asset_"));
         assert_eq!(asset_id.len(), "asset_".len() + 32);
         assert!(asset_id["asset_".len()..]
             .chars()
             .all(|character| character.is_ascii_hexdigit()));
+    }
+
+    #[test]
+    fn person_detection_jitter_uses_python_sha256_bytes() {
+        let detections = candidate_people(1280, 720, "asset_source_clip", 1.25);
+
+        assert_eq!(detections[0]["box"]["x"].as_f64(), Some(0.338));
+        assert_eq!(detections[1]["box"]["x"].as_f64(), Some(0.579));
+        assert_eq!(detections[2]["box"]["x"].as_f64(), Some(0.134));
     }
 
     #[test]
