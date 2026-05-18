@@ -2997,6 +2997,7 @@ async fn recipe_preset_catalog(
         .into_iter()
         .map(|preset| normalize_recipe_preset_entry(preset, "global", &user_manifest))
         .collect::<Result<Vec<_>, _>>()?;
+    let models = model_catalog(state).await?;
     let mut presets = merge_entries_by_id(builtin, user);
     if let Some(project_id) = project_id {
         let project_path = project_path_for_id(state.clone(), project_id).await?;
@@ -3009,7 +3010,7 @@ async fn recipe_preset_catalog(
         presets = merge_entries_by_id(presets, project_presets);
     }
     for preset in presets.iter_mut() {
-        finalize_recipe_preset_entry(preset)?;
+        finalize_recipe_preset_entry(preset, &models)?;
     }
     presets.sort_by(|left, right| {
         let left_key = (
@@ -3071,10 +3072,9 @@ fn normalize_lora_entry(
             default_root.join(path)
         }
     });
-    let install_state = if installed_path.as_ref().is_some_and(|path| !path.exists()) {
-        "missing"
-    } else {
-        "installed"
+    let install_state = match installed_path.as_ref() {
+        Some(path) if path.exists() => "installed",
+        _ => "missing",
     };
     object.insert(
         "manifestPath".to_owned(),
@@ -3111,26 +3111,51 @@ fn normalize_recipe_preset_entry(
     Ok(preset)
 }
 
-fn finalize_recipe_preset_entry(preset: &mut Value) -> Result<(), ApiError> {
+fn finalize_recipe_preset_entry(preset: &mut Value, models: &[Value]) -> Result<(), ApiError> {
     let object = preset
         .as_object_mut()
         .ok_or_else(|| ApiError::internal("Recipe preset manifest entry must be an object"))?;
+    let mut migration_notes = Vec::new();
     if !object.contains_key("workflow") {
         if let Some(workflow) = inferred_recipe_preset_workflow(object) {
             object.insert("workflow".to_owned(), Value::String(workflow.to_owned()));
+            migration_notes.push(Value::String(format!(
+                "workflow inferred from legacy modes as {workflow}"
+            )));
+        }
+    }
+    if !object.contains_key("model") {
+        if let Some(model) = object
+            .get("workflow")
+            .and_then(Value::as_str)
+            .and_then(|workflow| default_recipe_preset_model_for_workflow(models, workflow))
+        {
+            object.insert("model".to_owned(), Value::String(model.clone()));
+            migration_notes.push(Value::String(format!(
+                "model defaulted to {model} for legacy preset"
+            )));
         }
     }
     if !object.contains_key("modes") {
         if let Some(workflow) = object.get("workflow").and_then(Value::as_str) {
             object.insert(
                 "modes".to_owned(),
-                Value::Array(vec![Value::String(workflow.to_owned())]),
+                Value::Array(
+                    default_recipe_preset_modes_for_workflow(workflow)
+                        .into_iter()
+                        .map(Value::String)
+                        .collect(),
+                ),
             );
         }
     }
     if !object.contains_key("loras") {
         if let Some(loras) = object.get("builtInLoras").cloned() {
+            let migrated_count = loras.as_array().map(Vec::len).unwrap_or_default();
             object.insert("loras".to_owned(), loras);
+            if migrated_count > 0 {
+                migration_notes.push(Value::String("builtInLoras migrated to loras".to_owned()));
+            }
         }
     }
     let loras = object
@@ -3144,7 +3169,52 @@ fn finalize_recipe_preset_entry(preset: &mut Value) -> Result<(), ApiError> {
     object
         .entry("prompt".to_owned())
         .or_insert_with(|| Value::Object(JsonObject::new()));
+    if !migration_notes.is_empty() {
+        object.insert(
+            "appliedDefaults".to_owned(),
+            json!({
+                "notes": migration_notes
+            }),
+        );
+    }
     Ok(())
+}
+
+fn default_recipe_preset_model_for_workflow(models: &[Value], workflow: &str) -> Option<String> {
+    models
+        .iter()
+        .find(|model| {
+            model_supports_recipe_workflow(model, workflow)
+                && model.get("installState").and_then(Value::as_str) == Some("installed")
+        })
+        .and_then(|model| model.get("id").and_then(Value::as_str))
+        .map(str::to_owned)
+}
+
+fn model_supports_recipe_workflow(model: &Value, workflow: &str) -> bool {
+    model
+        .get("capabilities")
+        .and_then(Value::as_array)
+        .is_some_and(|capabilities| {
+            capabilities
+                .iter()
+                .filter_map(Value::as_str)
+                .any(|capability| capability == workflow)
+        })
+}
+
+fn default_recipe_preset_modes_for_workflow(workflow: &str) -> Vec<String> {
+    match workflow {
+        "text_to_image" => vec!["text_to_image", "character_image", "style_variations"],
+        "edit_image" => vec!["edit_image"],
+        "image_to_video" => vec!["image_to_video"],
+        "text_to_video" => vec!["text_to_video"],
+        "first_last_frame" => vec!["first_last_frame"],
+        _ => vec![workflow],
+    }
+    .into_iter()
+    .map(str::to_owned)
+    .collect()
 }
 
 fn inferred_recipe_preset_workflow(object: &JsonObject) -> Option<&'static str> {
@@ -3180,7 +3250,9 @@ fn recipe_preset_archived(preset: &Value) -> bool {
 }
 
 fn finalized_recipe_preset(mut preset: Value) -> Result<Value, ApiError> {
-    finalize_recipe_preset_entry(&mut preset)?;
+    // Write paths require an explicit model before this point, so single-preset
+    // response finalization does not need the read-side model catalog fallback.
+    finalize_recipe_preset_entry(&mut preset, &[])?;
     Ok(preset)
 }
 
@@ -3221,6 +3293,7 @@ fn strip_recipe_preset_write_context(payload: &mut Value) {
         object.remove("scope");
         object.remove("manifestPath");
         object.remove("builtInLoras");
+        object.remove("appliedDefaults");
     }
 }
 
@@ -3228,6 +3301,7 @@ fn strip_recipe_preset_runtime_fields(payload: &mut Value) {
     if let Some(object) = payload.as_object_mut() {
         object.remove("manifestPath");
         object.remove("builtInLoras");
+        object.remove("appliedDefaults");
     }
 }
 
@@ -5471,7 +5545,7 @@ mod tests {
                   "family": "z-image",
                   "type": "image",
                   "adapter": "z_image_diffusers",
-                  "capabilities": ["text_to_image"],
+                  "capabilities": ["text_to_image", "edit_image"],
                   "downloads": [{ "provider": "huggingface", "repo": "owner/model", "files": ["*.safetensors"] }],
                   "paths": {},
                   "defaults": {},
@@ -5546,7 +5620,8 @@ mod tests {
             {
               "schemaVersion": 1,
               "presets": [
-                { "id": "cinematic", "name": "My Cinematic", "defaults": { "count": 2, "resolution": "1280x720", "negativePrompt": "flat lighting" } }
+                { "id": "cinematic", "name": "My Cinematic", "defaults": { "count": 2, "resolution": "1280x720", "negativePrompt": "flat lighting" } },
+                { "id": "legacy_edit", "name": "Legacy Edit", "modes": ["edit_image"], "builtInLoras": [{ "id": "style-lora", "weight": 0.25 }] }
               ]
             }
             "#,
@@ -5582,14 +5657,37 @@ mod tests {
         let (status, presets) =
             request(app.clone(), "GET", "/api/v1/recipe-presets", Value::Null).await;
         assert_eq!(status, StatusCode::OK);
-        assert_eq!(presets.as_array().unwrap().len(), 1);
-        assert_eq!(presets[0]["id"], "cinematic");
-        assert_eq!(presets[0]["name"], "My Cinematic");
-        assert_eq!(presets[0]["scope"], "global");
-        assert_eq!(presets[0]["workflow"], "text_to_image");
-        assert_eq!(presets[0]["defaults"]["count"], 2);
-        assert_eq!(presets[0]["loras"][0]["id"], "style-lora");
-        assert_eq!(presets[0]["builtInLoras"][0]["id"], "style-lora");
+        let presets = presets.as_array().unwrap();
+        assert_eq!(presets.len(), 2);
+        let cinematic = presets
+            .iter()
+            .find(|preset| preset["id"] == "cinematic")
+            .expect("cinematic preset");
+        assert_eq!(cinematic["name"], "My Cinematic");
+        assert_eq!(cinematic["scope"], "global");
+        assert_eq!(cinematic["workflow"], "text_to_image");
+        assert_eq!(cinematic["defaults"]["count"], 2);
+        assert_eq!(cinematic["loras"][0]["id"], "style-lora");
+        assert_eq!(cinematic["builtInLoras"][0]["id"], "style-lora");
+        let legacy_edit = presets
+            .iter()
+            .find(|preset| preset["id"] == "legacy_edit")
+            .expect("legacy edit preset");
+        assert_eq!(legacy_edit["workflow"], "edit_image");
+        assert_eq!(legacy_edit["model"], "base-model");
+        assert_eq!(legacy_edit["loras"][0]["id"], "style-lora");
+        assert_eq!(
+            legacy_edit["appliedDefaults"]["notes"][0],
+            "workflow inferred from legacy modes as edit_image"
+        );
+        assert_eq!(
+            legacy_edit["appliedDefaults"]["notes"][1],
+            "model defaulted to base-model for legacy preset"
+        );
+        assert_eq!(
+            legacy_edit["appliedDefaults"]["notes"][2],
+            "builtInLoras migrated to loras"
+        );
 
         let (_, project) = request(
             app.clone(),
@@ -5868,7 +5966,15 @@ mod tests {
                   "name": "Unknown Family",
                   "triggerWords": [],
                   "compatibility": {},
-                  "source": { "provider": "builtin" }
+                  "source": { "provider": "local", "path": "loras/unknown.safetensors" }
+                },
+                {
+                  "id": "no_path_style",
+                  "name": "No Path Style",
+                  "family": "z-image",
+                  "triggerWords": [],
+                  "compatibility": { "families": ["z-image"] },
+                  "source": { "provider": "local" }
                 }
               ]
             }
@@ -5879,6 +5985,7 @@ mod tests {
         std::fs::create_dir_all(&lora_dir).expect("lora dir creates");
         write_test_safetensors(&lora_dir.join("style.safetensors"));
         write_test_safetensors(&lora_dir.join("qwen.safetensors"));
+        write_test_safetensors(&lora_dir.join("unknown.safetensors"));
 
         let app = create_app(test_settings(&temp_dir)).expect("app creates");
         // This also pins the positive compatibility path: style_lora is installed and compatible with z_image_turbo.
@@ -6262,6 +6369,24 @@ mod tests {
             "POST",
             "/api/v1/recipe-presets",
             json!({
+                "name": "No Path LoRA",
+                "model": "z_image_turbo",
+                "workflow": "text_to_image",
+                "loras": [{ "id": "no_path_style" }]
+            }),
+        )
+        .await;
+        assert_eq!(bad_status, StatusCode::BAD_REQUEST);
+        assert_eq!(
+            bad_error["detail"],
+            "Recipe preset LoRA is not installed: no_path_style"
+        );
+
+        let (bad_status, bad_error) = request(
+            app.clone(),
+            "POST",
+            "/api/v1/recipe-presets",
+            json!({
                 "name": "Unknown Family LoRA",
                 "model": "z_image_turbo",
                 "workflow": "text_to_image",
@@ -6346,6 +6471,137 @@ mod tests {
         .await;
         assert_eq!(bad_status, StatusCode::BAD_REQUEST);
         assert_eq!(bad_error["detail"], "Unsupported recipe preset workflow");
+    }
+
+    #[tokio::test]
+    async fn empty_builtin_preset_and_lora_manifests_ship_empty_catalogs() {
+        let temp_dir = tempfile::tempdir().expect("temp dir creates");
+        let config_dir = temp_dir.path().join("config/manifests");
+        std::fs::create_dir_all(&config_dir).expect("manifest dir creates");
+        std::fs::write(
+            config_dir.join("builtin.models.jsonc"),
+            r#"{ "schemaVersion": 1, "models": [] }"#,
+        )
+        .expect("builtin models writes");
+        std::fs::write(
+            config_dir.join("user.models.jsonc"),
+            r#"{ "schemaVersion": 1, "models": [] }"#,
+        )
+        .expect("user models writes");
+        std::fs::write(
+            config_dir.join("builtin.recipe-presets.jsonc"),
+            r#"{ "schemaVersion": 1, "presets": [] }"#,
+        )
+        .expect("builtin recipe presets writes");
+        std::fs::write(
+            config_dir.join("user.recipe-presets.jsonc"),
+            r#"{ "schemaVersion": 1, "presets": [] }"#,
+        )
+        .expect("user recipe presets writes");
+        std::fs::write(
+            config_dir.join("builtin.loras.jsonc"),
+            r#"{ "schemaVersion": 1, "loras": [] }"#,
+        )
+        .expect("builtin loras writes");
+        std::fs::write(
+            config_dir.join("user.loras.jsonc"),
+            r#"{ "schemaVersion": 1, "loras": [] }"#,
+        )
+        .expect("user loras writes");
+
+        let app = create_app(test_settings(&temp_dir)).expect("app creates");
+        let (status, presets) =
+            request(app.clone(), "GET", "/api/v1/recipe-presets", Value::Null).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(presets.as_array().expect("presets array").len(), 0);
+
+        let (status, loras) = request(app, "GET", "/api/v1/loras", Value::Null).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(loras.as_array().expect("loras array").len(), 0);
+    }
+
+    #[tokio::test]
+    async fn legacy_preset_read_defaults_do_not_select_uninstalled_models() {
+        std::env::set_var("SCENEWORKS_DISABLE_MODEL_SIZE_ESTIMATE", "1");
+        let temp_dir = tempfile::tempdir().expect("temp dir creates");
+        let config_dir = temp_dir.path().join("config/manifests");
+        std::fs::create_dir_all(&config_dir).expect("manifest dir creates");
+        std::fs::write(
+            config_dir.join("builtin.models.jsonc"),
+            r#"
+            {
+              "schemaVersion": 1,
+              "models": [
+                {
+                  "id": "missing_image_model",
+                  "name": "Missing Image Model",
+                  "family": "z-image",
+                  "type": "image",
+                  "adapter": "z_image_diffusers",
+                  "capabilities": ["text_to_image"],
+                  "downloads": [{ "provider": "huggingface", "repo": "owner/missing-model", "files": ["*.safetensors"] }],
+                  "paths": {},
+                  "defaults": {},
+                  "limits": {},
+                  "loraCompatibility": {},
+                  "ui": {}
+                }
+              ]
+            }
+            "#,
+        )
+        .expect("builtin models writes");
+        std::fs::write(
+            config_dir.join("user.models.jsonc"),
+            r#"{ "schemaVersion": 1, "models": [] }"#,
+        )
+        .expect("user models writes");
+        std::fs::write(
+            config_dir.join("builtin.recipe-presets.jsonc"),
+            r#"{ "schemaVersion": 1, "presets": [] }"#,
+        )
+        .expect("builtin recipe presets writes");
+        std::fs::write(
+            config_dir.join("user.recipe-presets.jsonc"),
+            r#"
+            {
+              "schemaVersion": 1,
+              "presets": [
+                { "id": "legacy_text", "name": "Legacy Text", "modes": ["text_to_image"] }
+              ]
+            }
+            "#,
+        )
+        .expect("user recipe presets writes");
+        std::fs::write(
+            config_dir.join("builtin.loras.jsonc"),
+            r#"{ "schemaVersion": 1, "loras": [] }"#,
+        )
+        .expect("builtin loras writes");
+        std::fs::write(
+            config_dir.join("user.loras.jsonc"),
+            r#"{ "schemaVersion": 1, "loras": [] }"#,
+        )
+        .expect("user loras writes");
+
+        let app = create_app(test_settings(&temp_dir)).expect("app creates");
+        let (status, presets) = request(app, "GET", "/api/v1/recipe-presets", Value::Null).await;
+        assert_eq!(status, StatusCode::OK);
+        let preset = &presets.as_array().expect("presets array")[0];
+        assert_eq!(preset["workflow"], "text_to_image");
+        assert!(preset.get("model").is_none());
+        assert_eq!(
+            preset["appliedDefaults"]["notes"][0],
+            "workflow inferred from legacy modes as text_to_image"
+        );
+        assert!(preset["appliedDefaults"]["notes"]
+            .as_array()
+            .expect("notes array")
+            .iter()
+            .all(|note| !note
+                .as_str()
+                .unwrap_or_default()
+                .contains("model defaulted")));
     }
 
     #[test]

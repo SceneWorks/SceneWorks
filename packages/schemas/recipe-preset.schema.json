@@ -67,6 +67,7 @@
             }
           },
           "builtInLoras": {
+            "description": "Deprecated legacy alias for loras. The API accepts this field on read and write migration paths, but API-managed manifest writes normalize it to loras.",
             "type": "array",
             "maxItems": 3,
             "items": {
@@ -90,6 +91,17 @@
                   }
                 }
               ]
+            }
+          },
+          "appliedDefaults": {
+            "description": "Read-only API metadata describing defaults synthesized while reading a legacy preset. These values are not persisted until the preset is saved through the API.",
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "notes": {
+                "type": "array",
+                "items": { "type": "string" }
+              }
             }
           },
           "ui": {

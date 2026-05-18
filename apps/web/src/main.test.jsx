@@ -426,7 +426,7 @@ describe("SceneWorks app shell", () => {
           latestAssets={[]}
           loras={[
             {
-              id: "builtin_cinematic_detail",
+              id: "cinematic_detail",
               name: "Cinematic Detail",
               family: "z-image",
               scope: "builtin",
@@ -444,7 +444,7 @@ describe("SceneWorks app shell", () => {
               workflow: "text_to_image",
               defaults: { count: 2, resolution: "1280x720", negativePrompt: "flat lighting" },
               prompt: { suffix: "cinematic lighting" },
-              builtInLoras: [{ id: "builtin_cinematic_detail", weight: 0.4 }],
+              builtInLoras: [{ id: "cinematic_detail", weight: 0.4 }],
               ui: { description: "Balanced cinematic color, contrast, and detail." },
             },
           ]}
@@ -459,7 +459,7 @@ describe("SceneWorks app shell", () => {
     expect(container.textContent).toContain("Cinematic");
     expect(container.textContent).toContain("Balanced cinematic color, contrast, and detail.");
     expect(container.textContent).toContain("Adds: cinematic lighting");
-    expect(container.textContent).toContain("Uses LoRA: Cinematic Detail");
+    expect(container.textContent).toContain("Preset LoRA applied at generation: Cinematic Detail");
 
     await act(async () => {
       [...container.querySelectorAll("button")].find((button) => button.textContent === "Generate").click();
@@ -628,7 +628,7 @@ describe("SceneWorks app shell", () => {
     expect(container.textContent).toContain("Dream Motion");
     expect(container.textContent).toContain("Soft camera motion.");
     expect(container.textContent).toContain("Adds: smooth camera motion");
-    expect(container.textContent).toContain("Uses LoRA: Video Motion");
+    expect(container.textContent).toContain("Preset LoRA applied at generation: Video Motion");
 
     await act(async () => {
       [...container.querySelectorAll("button")].find((button) => button.textContent === "Generate Clip").click();
@@ -809,7 +809,7 @@ describe("SceneWorks app shell", () => {
           duplicateRecipePreset={duplicateRecipePreset}
           imageModels={[{ id: "z_image_turbo", name: "Z-Image", type: "image", family: "z-image" }]}
           loras={[
-            { id: "builtin_cinematic_detail", name: "Cinematic Detail", family: "z-image", scope: "builtin", defaultWeight: 0.55 },
+            { id: "cinematic_detail", name: "Cinematic Detail", family: "z-image", scope: "builtin", defaultWeight: 0.55 },
             { id: "global_detail", name: "Global Detail", family: "z-image", scope: "global", defaultWeight: 0.7 },
             { id: "qwen_only", name: "Qwen Only", family: "qwen-image", scope: "global" },
           ]}
@@ -820,7 +820,7 @@ describe("SceneWorks app shell", () => {
               scope: "builtin",
               workflow: "text_to_image",
               model: "z_image_turbo",
-              loras: [{ id: "builtin_cinematic_detail", weight: 0.5 }],
+              loras: [{ id: "cinematic_detail", weight: 0.5 }],
               ui: { description: "Built in cinematic finish." },
             },
             {
@@ -859,7 +859,7 @@ describe("SceneWorks app shell", () => {
         modes: ["text_to_image", "character_image", "style_variations"],
       }),
     );
-    expect(container.textContent).toContain("Valid");
+    expect(container.textContent).toContain("Ready");
     expect(container.textContent).not.toContain("Qwen Only");
 
     await act(async () => {
@@ -897,5 +897,41 @@ describe("SceneWorks app shell", () => {
       [...container.querySelectorAll("button")].find((button) => button.textContent === "Archive").click();
     });
     expect(deleteRecipePreset).toHaveBeenCalledWith("moody", "global");
+  });
+
+  it("explains preset save blockers and no-model empty states", async () => {
+    const updateRecipePreset = vi.fn();
+    root = createRoot(container);
+    await act(async () => {
+      root.render(
+        <PresetManagerScreen
+          activeProject={{ id: "project-1", name: "Noir" }}
+          createLoraImportJob={() => {}}
+          createRecipePreset={() => {}}
+          deleteRecipePreset={() => {}}
+          duplicateRecipePreset={() => {}}
+          imageModels={[]}
+          loras={[{ id: "pending_style", name: "Pending Style", family: "z-image", scope: "global", installState: "missing" }]}
+          recipePresets={[
+            {
+              id: "blocked",
+              name: "Blocked",
+              scope: "global",
+              workflow: "text_to_image",
+              model: "z_image_turbo",
+              loras: [{ id: "pending_style" }],
+            },
+          ]}
+          updateRecipePreset={updateRecipePreset}
+          videoModels={[]}
+        />,
+      );
+    });
+
+    expect(container.textContent).toContain("No models");
+    expect(container.textContent).toContain("No model selected");
+    expect(container.textContent).toContain("Save blocked: pending_style has not finished importing.");
+    expect([...container.querySelectorAll("button")].find((button) => button.textContent === "Save Preset").disabled).toBe(true);
+    expect(updateRecipePreset).not.toHaveBeenCalled();
   });
 });
