@@ -119,11 +119,12 @@ fn blocked_ipv4(address: Ipv4Addr) -> bool {
 }
 
 fn blocked_ipv6(address: Ipv6Addr) -> bool {
+    let first_segment = address.segments()[0];
     address.is_loopback()
         || address.is_unspecified()
-        || address.is_unique_local()
-        || address.is_unicast_link_local()
-        || (address.segments()[0] == 0x2001 && address.segments()[1] == 0x0db8)
+        || (first_segment & 0xfe00) == 0xfc00
+        || (first_segment & 0xffc0) == 0xfe80
+        || (first_segment == 0x2001 && address.segments()[1] == 0x0db8)
         || address.is_multicast()
 }
 
