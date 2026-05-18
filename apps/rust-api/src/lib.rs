@@ -28,7 +28,10 @@ use sceneworks_core::jobs_store::{
     WorkerHeartbeat, JOB_STATUSES,
 };
 use sceneworks_core::project_store::{
-    AssetStatusPatch, ProjectStore, ProjectStoreError, UploadAsset,
+    AssetStatusPatch, CharacterCreateInput, CharacterLookInput, CharacterLookUpdateInput,
+    CharacterLoraInput, CharacterLoraUpdateInput, CharacterReferenceInput,
+    CharacterReferenceUpdateInput, CharacterUpdateInput, ProjectStore, ProjectStoreError,
+    UploadAsset,
 };
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
@@ -389,6 +392,52 @@ pub fn create_app(settings: Settings) -> Result<Router, JobsStoreError> {
             get(get_project_file),
         )
         .route(
+            "/api/v1/projects/:project_id/characters",
+            get(list_characters).post(create_character),
+        )
+        .route(
+            "/api/v1/projects/:project_id/characters/:character_id",
+            get(get_character)
+                .patch(update_character)
+                .delete(archive_character),
+        )
+        .route(
+            "/api/v1/projects/:project_id/characters/:character_id/archive",
+            post(archive_character_explicit),
+        )
+        .route(
+            "/api/v1/projects/:project_id/characters/:character_id/purge",
+            delete(purge_character),
+        )
+        .route(
+            "/api/v1/projects/:project_id/characters/:character_id/references",
+            post(add_character_reference),
+        )
+        .route(
+            "/api/v1/projects/:project_id/characters/:character_id/references/:asset_id",
+            patch(update_character_reference).delete(remove_character_reference),
+        )
+        .route(
+            "/api/v1/projects/:project_id/characters/:character_id/looks",
+            post(create_character_look),
+        )
+        .route(
+            "/api/v1/projects/:project_id/characters/:character_id/looks/:look_id",
+            patch(update_character_look).delete(delete_character_look),
+        )
+        .route(
+            "/api/v1/projects/:project_id/characters/:character_id/loras",
+            post(attach_character_lora),
+        )
+        .route(
+            "/api/v1/projects/:project_id/characters/:character_id/loras/:link_id",
+            patch(update_character_lora).delete(detach_character_lora),
+        )
+        .route(
+            "/api/v1/projects/:project_id/characters/:character_id/test-jobs",
+            post(create_character_test_job),
+        )
+        .route(
             "/api/v1/projects/:project_id/timelines",
             get(list_timelines).post(create_timeline),
         )
@@ -470,6 +519,12 @@ struct AssetsQuery {
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
+struct CharactersQuery {
+    include_archived: Option<bool>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct LorasQuery {
     model_family: Option<String>,
     project_id: Option<String>,
@@ -522,6 +577,113 @@ struct VerifyResponse {
 #[derive(Debug, Deserialize)]
 struct ProjectCreateRequest {
     name: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct CharacterCreateRequest {
+    name: String,
+    #[serde(default = "default_character_type", rename = "type")]
+    character_type: String,
+    #[serde(default)]
+    description: String,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct CharacterUpdateRequest {
+    name: Option<String>,
+    #[serde(default, rename = "type")]
+    character_type: Option<String>,
+    description: Option<String>,
+    archived: Option<bool>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct CharacterReferenceRequest {
+    asset_id: String,
+    #[serde(default)]
+    approved: bool,
+    #[serde(default = "default_reference_role")]
+    role: String,
+    #[serde(default)]
+    notes: String,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct CharacterReferenceUpdateRequest {
+    approved: Option<bool>,
+    role: Option<String>,
+    notes: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct CharacterLookRequest {
+    name: String,
+    #[serde(default)]
+    description: String,
+    #[serde(default)]
+    approved_reference_ids: Vec<String>,
+    #[serde(default)]
+    recipe_settings: JsonObject,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct CharacterLookUpdateRequest {
+    name: Option<String>,
+    description: Option<String>,
+    approved_reference_ids: Option<Vec<String>>,
+    recipe_settings: Option<JsonObject>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct CharacterLoraRequest {
+    #[serde(default)]
+    lora_id: Option<String>,
+    name: String,
+    #[serde(default)]
+    source_path: Option<String>,
+    #[serde(default)]
+    trigger_words: Vec<String>,
+    #[serde(default = "default_character_lora_weight")]
+    default_weight: f64,
+    #[serde(default)]
+    compatibility: JsonObject,
+    #[serde(default = "default_project_lora_scope")]
+    scope: String,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct CharacterLoraUpdateRequest {
+    name: Option<String>,
+    trigger_words: Option<Vec<String>>,
+    default_weight: Option<f64>,
+    compatibility: Option<JsonObject>,
+    scope: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct CharacterTestRequest {
+    prompt: String,
+    #[serde(default = "default_image_model")]
+    model: String,
+    #[serde(default = "default_image_count")]
+    count: u32,
+    #[serde(default = "default_image_size")]
+    width: u32,
+    #[serde(default = "default_image_size")]
+    height: u32,
+    #[serde(default = "default_requested_gpu")]
+    requested_gpu: String,
+    #[serde(default)]
+    look_id: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -919,6 +1081,375 @@ async fn get_project_file(
         Body::from_stream(stream),
     )
         .into_response())
+}
+
+async fn list_characters(
+    State(state): State<AppState>,
+    Path(project_id): Path<String>,
+    Query(query): Query<CharactersQuery>,
+) -> Result<Json<Vec<Value>>, ApiError> {
+    Ok(Json(
+        project_call(state, move |store| {
+            store.list_characters(&project_id, query.include_archived.unwrap_or(false))
+        })
+        .await?,
+    ))
+}
+
+async fn create_character(
+    State(state): State<AppState>,
+    Path(project_id): Path<String>,
+    ApiJson(payload): ApiJson<CharacterCreateRequest>,
+) -> Result<(StatusCode, Json<Value>), ApiError> {
+    let character = project_call(state, move |store| {
+        store.create_character(
+            &project_id,
+            CharacterCreateInput {
+                name: payload.name,
+                character_type: payload.character_type,
+                description: payload.description,
+            },
+        )
+    })
+    .await?;
+    Ok((StatusCode::CREATED, Json(character)))
+}
+
+async fn get_character(
+    State(state): State<AppState>,
+    Path((project_id, character_id)): Path<(String, String)>,
+) -> Result<Json<Value>, ApiError> {
+    Ok(Json(
+        project_call(state, move |store| {
+            store.get_character(&project_id, &character_id)
+        })
+        .await?,
+    ))
+}
+
+async fn update_character(
+    State(state): State<AppState>,
+    Path((project_id, character_id)): Path<(String, String)>,
+    ApiJson(payload): ApiJson<CharacterUpdateRequest>,
+) -> Result<Json<Value>, ApiError> {
+    Ok(Json(
+        project_call(state, move |store| {
+            store.update_character(
+                &project_id,
+                &character_id,
+                CharacterUpdateInput {
+                    name: payload.name,
+                    character_type: payload.character_type,
+                    description: payload.description,
+                    archived: payload.archived,
+                },
+            )
+        })
+        .await?,
+    ))
+}
+
+async fn archive_character(
+    State(state): State<AppState>,
+    Path((project_id, character_id)): Path<(String, String)>,
+) -> Result<Json<sceneworks_core::project_store::CharacterMutationResult>, ApiError> {
+    Ok(Json(
+        project_call(state, move |store| {
+            store.archive_character(&project_id, &character_id)
+        })
+        .await?,
+    ))
+}
+
+async fn archive_character_explicit(
+    State(state): State<AppState>,
+    Path((project_id, character_id)): Path<(String, String)>,
+) -> Result<Json<sceneworks_core::project_store::CharacterMutationResult>, ApiError> {
+    Ok(Json(
+        project_call(state, move |store| {
+            store.archive_character(&project_id, &character_id)
+        })
+        .await?,
+    ))
+}
+
+async fn purge_character(
+    State(state): State<AppState>,
+    Path((project_id, character_id)): Path<(String, String)>,
+) -> Result<Json<sceneworks_core::project_store::CharacterMutationResult>, ApiError> {
+    Ok(Json(
+        project_call(state, move |store| {
+            store.purge_character(&project_id, &character_id)
+        })
+        .await?,
+    ))
+}
+
+async fn add_character_reference(
+    State(state): State<AppState>,
+    Path((project_id, character_id)): Path<(String, String)>,
+    ApiJson(payload): ApiJson<CharacterReferenceRequest>,
+) -> Result<(StatusCode, Json<Value>), ApiError> {
+    let character = project_call(state, move |store| {
+        store.add_character_reference(
+            &project_id,
+            &character_id,
+            CharacterReferenceInput {
+                asset_id: payload.asset_id,
+                approved: payload.approved,
+                role: payload.role,
+                notes: payload.notes,
+            },
+        )
+    })
+    .await?;
+    Ok((StatusCode::CREATED, Json(character)))
+}
+
+async fn update_character_reference(
+    State(state): State<AppState>,
+    Path((project_id, character_id, asset_id)): Path<(String, String, String)>,
+    ApiJson(payload): ApiJson<CharacterReferenceUpdateRequest>,
+) -> Result<Json<Value>, ApiError> {
+    Ok(Json(
+        project_call(state, move |store| {
+            store.update_character_reference(
+                &project_id,
+                &character_id,
+                &asset_id,
+                CharacterReferenceUpdateInput {
+                    approved: payload.approved,
+                    role: payload.role,
+                    notes: payload.notes,
+                },
+            )
+        })
+        .await?,
+    ))
+}
+
+async fn remove_character_reference(
+    State(state): State<AppState>,
+    Path((project_id, character_id, asset_id)): Path<(String, String, String)>,
+) -> Result<Json<Value>, ApiError> {
+    Ok(Json(
+        project_call(state, move |store| {
+            store.remove_character_reference(&project_id, &character_id, &asset_id)
+        })
+        .await?,
+    ))
+}
+
+async fn create_character_look(
+    State(state): State<AppState>,
+    Path((project_id, character_id)): Path<(String, String)>,
+    ApiJson(payload): ApiJson<CharacterLookRequest>,
+) -> Result<(StatusCode, Json<Value>), ApiError> {
+    let character = project_call(state, move |store| {
+        store.create_character_look(
+            &project_id,
+            &character_id,
+            CharacterLookInput {
+                name: payload.name,
+                description: payload.description,
+                approved_reference_ids: payload.approved_reference_ids,
+                recipe_settings: payload.recipe_settings,
+            },
+        )
+    })
+    .await?;
+    Ok((StatusCode::CREATED, Json(character)))
+}
+
+async fn update_character_look(
+    State(state): State<AppState>,
+    Path((project_id, character_id, look_id)): Path<(String, String, String)>,
+    ApiJson(payload): ApiJson<CharacterLookUpdateRequest>,
+) -> Result<Json<Value>, ApiError> {
+    Ok(Json(
+        project_call(state, move |store| {
+            store.update_character_look(
+                &project_id,
+                &character_id,
+                &look_id,
+                CharacterLookUpdateInput {
+                    name: payload.name,
+                    description: payload.description,
+                    approved_reference_ids: payload.approved_reference_ids,
+                    recipe_settings: payload.recipe_settings,
+                },
+            )
+        })
+        .await?,
+    ))
+}
+
+async fn delete_character_look(
+    State(state): State<AppState>,
+    Path((project_id, character_id, look_id)): Path<(String, String, String)>,
+) -> Result<Json<Value>, ApiError> {
+    Ok(Json(
+        project_call(state, move |store| {
+            store.delete_character_look(&project_id, &character_id, &look_id)
+        })
+        .await?,
+    ))
+}
+
+async fn attach_character_lora(
+    State(state): State<AppState>,
+    Path((project_id, character_id)): Path<(String, String)>,
+    ApiJson(payload): ApiJson<CharacterLoraRequest>,
+) -> Result<(StatusCode, Json<Value>), ApiError> {
+    let character = project_call(state, move |store| {
+        store.attach_character_lora(
+            &project_id,
+            &character_id,
+            CharacterLoraInput {
+                lora_id: payload.lora_id,
+                name: payload.name,
+                source_path: payload.source_path,
+                trigger_words: payload.trigger_words,
+                default_weight: payload.default_weight,
+                compatibility: payload.compatibility,
+                scope: payload.scope,
+            },
+        )
+    })
+    .await?;
+    Ok((StatusCode::CREATED, Json(character)))
+}
+
+async fn update_character_lora(
+    State(state): State<AppState>,
+    Path((project_id, character_id, link_id)): Path<(String, String, String)>,
+    ApiJson(payload): ApiJson<CharacterLoraUpdateRequest>,
+) -> Result<Json<Value>, ApiError> {
+    Ok(Json(
+        project_call(state, move |store| {
+            store.update_character_lora(
+                &project_id,
+                &character_id,
+                &link_id,
+                CharacterLoraUpdateInput {
+                    name: payload.name,
+                    trigger_words: payload.trigger_words,
+                    default_weight: payload.default_weight,
+                    compatibility: payload.compatibility,
+                    scope: payload.scope,
+                },
+            )
+        })
+        .await?,
+    ))
+}
+
+async fn detach_character_lora(
+    State(state): State<AppState>,
+    Path((project_id, character_id, link_id)): Path<(String, String, String)>,
+) -> Result<Json<Value>, ApiError> {
+    Ok(Json(
+        project_call(state, move |store| {
+            store.detach_character_lora(&project_id, &character_id, &link_id)
+        })
+        .await?,
+    ))
+}
+
+async fn create_character_test_job(
+    State(state): State<AppState>,
+    Path((project_id, character_id)): Path<(String, String)>,
+    ApiJson(payload): ApiJson<CharacterTestRequest>,
+) -> Result<(StatusCode, Json<JobSnapshot>), ApiError> {
+    validate_character_test_job(&payload)?;
+    let character = project_call(state.clone(), {
+        let project_id = project_id.clone();
+        let character_id = character_id.clone();
+        move |store| store.get_character(&project_id, &character_id)
+    })
+    .await?;
+    let project_name = project_call(state.clone(), {
+        let project_id = project_id.clone();
+        move |store| store.project_stem(&project_id)
+    })
+    .await?;
+    let look = payload.look_id.as_deref().and_then(|look_id| {
+        character
+            .get("looks")
+            .and_then(Value::as_array)
+            .and_then(|looks| {
+                looks
+                    .iter()
+                    .find(|look| look.get("id").and_then(Value::as_str) == Some(look_id))
+                    .cloned()
+            })
+    });
+    let approved_reference_ids = character
+        .get("references")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter(|reference| {
+            reference
+                .get("approved")
+                .and_then(Value::as_bool)
+                .unwrap_or(false)
+        })
+        .filter_map(|reference| reference.get("assetId").and_then(Value::as_str))
+        .map(|asset_id| Value::String(asset_id.to_owned()))
+        .collect::<Vec<_>>();
+    let mut advanced = JsonObject::new();
+    advanced.insert(
+        "characterName".to_owned(),
+        character.get("name").cloned().unwrap_or(Value::Null),
+    );
+    advanced.insert(
+        "characterType".to_owned(),
+        character.get("type").cloned().unwrap_or(Value::Null),
+    );
+    advanced.insert(
+        "approvedReferenceIds".to_owned(),
+        Value::Array(approved_reference_ids),
+    );
+    advanced.insert("look".to_owned(), look.unwrap_or(Value::Null));
+
+    let mut job_payload = JsonObject::new();
+    job_payload.insert(
+        "mode".to_owned(),
+        Value::String("character_image".to_owned()),
+    );
+    job_payload.insert("prompt".to_owned(), Value::String(payload.prompt));
+    job_payload.insert("negativePrompt".to_owned(), Value::String(String::new()));
+    job_payload.insert("model".to_owned(), Value::String(payload.model));
+    job_payload.insert("count".to_owned(), json!(payload.count));
+    job_payload.insert("seed".to_owned(), Value::Null);
+    job_payload.insert("width".to_owned(), json!(payload.width));
+    job_payload.insert("height".to_owned(), json!(payload.height));
+    job_payload.insert(
+        "stylePreset".to_owned(),
+        Value::String("character-test".to_owned()),
+    );
+    job_payload.insert("sourceAssetId".to_owned(), Value::Null);
+    job_payload.insert(
+        "loras".to_owned(),
+        character.get("loras").cloned().unwrap_or_else(|| json!([])),
+    );
+    job_payload.insert("characterId".to_owned(), Value::String(character_id));
+    job_payload.insert(
+        "characterLookId".to_owned(),
+        payload.look_id.map(Value::String).unwrap_or(Value::Null),
+    );
+    job_payload.insert("advanced".to_owned(), Value::Object(advanced));
+    let job = create_generation_job(
+        state,
+        JobType::ImageGenerate,
+        Some(project_id),
+        Some(project_name),
+        job_payload,
+        requested_gpu_or_auto(payload.requested_gpu),
+    )
+    .await?;
+    Ok((StatusCode::CREATED, Json(job)))
 }
 
 async fn list_timelines(
@@ -2866,6 +3397,20 @@ fn validate_image_job(payload: &ImageJobRequest) -> Result<(), ApiError> {
     Ok(())
 }
 
+fn validate_character_test_job(payload: &CharacterTestRequest) -> Result<(), ApiError> {
+    if payload.prompt.is_empty() || payload.prompt.chars().count() > 4000 {
+        return Err(ApiError::bad_request(
+            "prompt must be between 1 and 4000 characters",
+        ));
+    }
+    if !(1..=8).contains(&payload.count) {
+        return Err(ApiError::bad_request("count must be between 1 and 8"));
+    }
+    validate_dimension(payload.width, "width", 2048)?;
+    validate_dimension(payload.height, "height", 2048)?;
+    Ok(())
+}
+
 fn validate_video_job(payload: &VideoJobRequest) -> Result<(), ApiError> {
     if payload.project_id.is_empty() {
         return Err(ApiError::bad_request("projectId is required"));
@@ -3039,6 +3584,22 @@ fn default_requested_gpu() -> String {
 
 fn default_lora_scope() -> String {
     "global".to_owned()
+}
+
+fn default_project_lora_scope() -> String {
+    "project".to_owned()
+}
+
+fn default_character_type() -> String {
+    "person".to_owned()
+}
+
+fn default_reference_role() -> String {
+    "reference".to_owned()
+}
+
+fn default_character_lora_weight() -> f64 {
+    0.8
 }
 
 fn default_track_name() -> String {
@@ -4264,6 +4825,175 @@ mod tests {
         let error: Value = serde_json::from_slice(&bytes).expect("json error parses");
         assert_eq!(status, StatusCode::BAD_REQUEST);
         assert_eq!(error["detail"], "Invalid project file path");
+    }
+
+    #[tokio::test]
+    async fn character_studio_routes_manage_references_loras_and_test_jobs() {
+        let temp_dir = tempfile::tempdir().expect("temp dir creates");
+        let settings = test_settings(&temp_dir);
+        let data_dir = settings.data_dir.clone();
+        let app = create_app(settings).expect("app creates");
+        let (_, project) = request(
+            app.clone(),
+            "POST",
+            "/api/v1/projects",
+            json!({ "name": "Characters" }),
+        )
+        .await;
+        let project_id = project["id"].as_str().expect("project id").to_owned();
+        let project_path = std::path::PathBuf::from(project["path"].as_str().unwrap());
+
+        let (status, asset) = request_multipart_upload(
+            app.clone(),
+            &format!("/api/v1/projects/{project_id}/assets"),
+            "reference.png",
+            "image/png",
+            b"png-bytes",
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED);
+        let asset_id = asset["id"].as_str().expect("asset id").to_owned();
+
+        let (status, character) = request(
+            app.clone(),
+            "POST",
+            &format!("/api/v1/projects/{project_id}/characters"),
+            json!({ "name": "Mira", "type": "person" }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED);
+        assert_eq!(character["name"], "Mira");
+        let character_id = character["id"].as_str().expect("character id").to_owned();
+
+        let (status, with_reference) = request(
+            app.clone(),
+            "POST",
+            &format!("/api/v1/projects/{project_id}/characters/{character_id}/references"),
+            json!({ "assetId": asset_id, "approved": false }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED);
+        assert_eq!(
+            with_reference["references"][0]["asset"]["displayName"],
+            "reference.png"
+        );
+
+        let (status, updated) = request(
+            app.clone(),
+            "PATCH",
+            &format!(
+                "/api/v1/projects/{project_id}/characters/{character_id}/references/{asset_id}"
+            ),
+            json!({ "approved": true, "role": "hero" }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(updated["approvedReferences"][0]["assetId"], asset_id);
+
+        let sidecar_path = project_path.join(
+            asset["sidecarPath"]
+                .as_str()
+                .expect("asset sidecar path")
+                .replace('/', std::path::MAIN_SEPARATOR_STR),
+        );
+        let asset_sidecar: Value = serde_json::from_str(
+            &std::fs::read_to_string(sidecar_path).expect("asset sidecar reads"),
+        )
+        .expect("asset sidecar parses");
+        assert_eq!(
+            asset_sidecar["metadata"]["characterReferences"][0]["characterId"],
+            character_id
+        );
+        assert_eq!(
+            asset_sidecar["metadata"]["characterReferences"][0]["approved"],
+            true
+        );
+
+        let (status, with_look) = request(
+            app.clone(),
+            "POST",
+            &format!("/api/v1/projects/{project_id}/characters/{character_id}/looks"),
+            json!({ "name": "Rain coat", "approvedReferenceIds": [asset_id], "recipeSettings": { "style": "noir" } }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED);
+        assert_eq!(with_look["looks"][0]["recipeSettings"]["style"], "noir");
+        let look_id = with_look["looks"][0]["id"]
+            .as_str()
+            .expect("look id")
+            .to_owned();
+
+        let lora_dir = data_dir.join("loras");
+        std::fs::create_dir_all(&lora_dir).expect("lora dir creates");
+        let lora_source = lora_dir.join("mira.safetensors");
+        std::fs::write(&lora_source, b"lora").expect("lora writes");
+        let (status, with_lora) = request(
+            app.clone(),
+            "POST",
+            &format!("/api/v1/projects/{project_id}/characters/{character_id}/loras"),
+            json!({
+                "name": "Mira LoRA",
+                "sourcePath": lora_source.display().to_string(),
+                "compatibility": { "families": ["sdxl"] },
+                "triggerWords": ["mira"]
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED);
+        assert_eq!(with_lora["loras"][0]["copiedIntoProject"], true);
+        let project_lora_path = project_path.join(
+            with_lora["loras"][0]["projectPath"]
+                .as_str()
+                .expect("project lora path")
+                .replace('/', std::path::MAIN_SEPARATOR_STR),
+        );
+        assert_eq!(
+            std::fs::read(project_lora_path).expect("lora copied"),
+            b"lora"
+        );
+
+        let (status, test_job) = request(
+            app.clone(),
+            "POST",
+            &format!("/api/v1/projects/{project_id}/characters/{character_id}/test-jobs"),
+            json!({ "prompt": "portrait", "lookId": look_id, "count": 2 }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED);
+        assert_eq!(test_job["type"], "image_generate");
+        assert_eq!(test_job["payload"]["mode"], "character_image");
+        assert_eq!(test_job["payload"]["characterId"], character_id);
+        assert_eq!(
+            test_job["payload"]["advanced"]["approvedReferenceIds"][0],
+            asset_id
+        );
+
+        let (status, _) = request(
+            app.clone(),
+            "POST",
+            &format!("/api/v1/projects/{project_id}/characters/{character_id}/archive"),
+            Value::Null,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let (status, visible) = request(
+            app.clone(),
+            "GET",
+            &format!("/api/v1/projects/{project_id}/characters"),
+            Value::Null,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(visible.as_array().unwrap().len(), 0);
+        let (status, archived) = request(
+            app,
+            "GET",
+            &format!("/api/v1/projects/{project_id}/characters?includeArchived=true"),
+            Value::Null,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(archived.as_array().unwrap().len(), 1);
     }
 
     #[tokio::test]
