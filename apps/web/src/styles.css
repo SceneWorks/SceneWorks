@@ -668,6 +668,38 @@ button:disabled {
   padding: 14px;
 }
 
+.lora-panel-header {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  align-items: end;
+}
+
+.lora-panel-header > span {
+  color: #aaa397;
+  font-size: 13px;
+}
+
+.models-import-panel label {
+  display: grid;
+  gap: 7px;
+}
+
+.models-import-grid {
+  display: grid;
+  grid-template-columns: minmax(110px, 0.6fr) minmax(130px, 0.8fr) minmax(220px, 1.7fr) minmax(140px, 1fr) auto;
+  gap: 8px;
+  align-items: end;
+}
+
+.models-import-grid button {
+  min-height: 38px;
+  border: 1px solid #6ec6b8;
+  background: #183f3a;
+  color: #f3f0e8;
+  padding: 8px 12px;
+}
+
 .lora-list {
   display: grid;
   gap: 8px;
@@ -1696,6 +1728,7 @@ button:disabled {
   .job-composer,
   .job-composer.compact,
   .inline-create,
+  .models-import-grid,
   .look-composer {
     grid-template-columns: 1fr;
   }
@@ -1706,6 +1739,11 @@ button:disabled {
   }
 
   .surface-header {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .lora-panel-header {
     align-items: flex-start;
     flex-direction: column;
   }

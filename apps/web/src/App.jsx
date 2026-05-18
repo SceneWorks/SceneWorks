@@ -226,6 +226,12 @@ export function App() {
       if (job.status === "completed" && job.type === "model_download") {
         refreshData();
       }
+      if (job.status === "completed" && job.type === "lora_import") {
+        refreshData();
+        if (job.projectId) {
+          refreshLoras(job.projectId);
+        }
+      }
       if (job.status === "failed" && !hasVisibleLocalFailure(job)) {
         setError(failedJobNotice(job));
       }
@@ -425,7 +431,7 @@ export function App() {
     return archived;
   }
 
-  async function createLoraImportJob(payload) {
+  async function createLoraImportJob(payload, options = {}) {
     if (payload.scope === "project" && !activeProject) {
       throw new Error("Create or open a project first.");
     }
@@ -454,7 +460,9 @@ export function App() {
       method: "POST",
       body,
     });
-    setActiveView("Queue");
+    if (options.navigateToQueue ?? true) {
+      setActiveView("Queue");
+    }
     setError("");
     refreshData();
     return job;
@@ -1367,10 +1375,12 @@ export function App() {
 
         {activeView === "Models" ? (
           <ModelManagerScreen
+            activeProject={activeProject}
             jobs={jobs}
             loras={loras}
             models={models}
             onDownloadModel={createModelDownloadJob}
+            onImportLora={(payload) => createLoraImportJob(payload, { navigateToQueue: false })}
             onOpenQueue={() => setActiveView("Queue")}
           />
         ) : null}

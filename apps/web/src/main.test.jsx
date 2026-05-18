@@ -3,6 +3,7 @@ import { createRoot } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { App, eventUrl } from "./main.jsx";
 import { ImageStudio } from "./screens/ImageStudio.jsx";
+import { ModelManagerScreen } from "./screens/ModelManagerScreen.jsx";
 import { PresetManagerScreen } from "./screens/PresetManagerScreen.jsx";
 import { QueueScreen } from "./screens/QueueScreen.jsx";
 import { VideoStudio } from "./screens/VideoStudio.jsx";
@@ -520,6 +521,87 @@ describe("SceneWorks app shell", () => {
     expect(container.textContent).toContain("Model download");
     expect(container.textContent).toContain("downloading");
     expect(container.textContent).not.toContain("Jobs and GPUs");
+  });
+
+  it("queues LoRA URL imports from the Models page", async () => {
+    const onImportLora = vi.fn(async (payload) => ({ payload: { ...payload, loraId: "detail_lora" } }));
+    root = createRoot(container);
+    await act(async () => {
+      root.render(
+        <ModelManagerScreen
+          activeProject={{ id: "project-1", name: "Noir" }}
+          jobs={[]}
+          loras={[]}
+          models={[{ id: "z_image_turbo", name: "Z-Image Turbo", type: "image", family: "z-image" }]}
+          onDownloadModel={() => {}}
+          onImportLora={onImportLora}
+          onOpenQueue={() => {}}
+        />,
+      );
+    });
+
+    await changeField(field(container, "Source URL"), "https://example.com/loras/detail.safetensors");
+    await changeField(field(container, "Name"), "Detail LoRA");
+    await act(async () => {
+      [...container.querySelectorAll("button")].find((button) => button.textContent === "Queue Import").click();
+    });
+
+    expect(onImportLora).toHaveBeenCalledWith(
+      expect.objectContaining({
+        sourceUrl: "https://example.com/loras/detail.safetensors",
+        name: "Detail LoRA",
+        scope: "global",
+        family: "z-image",
+      }),
+    );
+    expect(container.textContent).toContain("LoRA import queued for detail_lora.");
+  });
+
+  it("queues LoRA file uploads from the Models page with project scope", async () => {
+    const onImportLora = vi.fn(async (payload) => ({ payload: { ...payload, loraId: "uploaded_detail" } }));
+    const loraFile = new File(["lora"], "detail.safetensors", { type: "application/octet-stream" });
+    root = createRoot(container);
+    await act(async () => {
+      root.render(
+        <ModelManagerScreen
+          activeProject={{ id: "project-1", name: "Noir" }}
+          jobs={[
+            {
+              id: "lora-import-job-1",
+              type: "lora_import",
+              status: "running",
+              stage: "downloading",
+              progress: 0.3,
+              payload: { loraId: "existing_import" },
+            },
+          ]}
+          loras={[]}
+          models={[{ id: "z_image_turbo", name: "Z-Image Turbo", type: "image", family: "z-image" }]}
+          onDownloadModel={() => {}}
+          onImportLora={onImportLora}
+          onOpenQueue={() => {}}
+        />,
+      );
+    });
+
+    await act(async () => {
+      [...container.querySelectorAll("button")].find((button) => button.textContent === "Upload").click();
+    });
+    await changeField(field(container, "Scope"), "project");
+    await changeFile(field(container, "LoRA File"), loraFile);
+    await act(async () => {
+      [...container.querySelectorAll("button")].find((button) => button.textContent === "Queue Import").click();
+    });
+
+    expect(onImportLora).toHaveBeenCalledWith(
+      expect.objectContaining({
+        file: loraFile,
+        scope: "project",
+        family: "z-image",
+      }),
+    );
+    expect(container.textContent).toContain("LoRA import");
+    expect(container.textContent).toContain("running");
   });
 
   it("adds the SSE ticket as a query parameter", () => {
