@@ -5,6 +5,7 @@ import { App, eventUrl } from "./main.jsx";
 import { ImageStudio } from "./screens/ImageStudio.jsx";
 import { PresetManagerScreen } from "./screens/PresetManagerScreen.jsx";
 import { QueueScreen } from "./screens/QueueScreen.jsx";
+import { VideoStudio } from "./screens/VideoStudio.jsx";
 
 class FakeEventSource {
   constructor(url) {
@@ -473,6 +474,83 @@ describe("SceneWorks app shell", () => {
         recipePresetId: "cinematic",
         loras: [],
         advanced: { resolution: "1280x720" },
+      }),
+    );
+  });
+
+  it("applies recipe preset defaults to video jobs", async () => {
+    const createVideoJob = vi.fn();
+    root = createRoot(container);
+    await act(async () => {
+      root.render(
+        <VideoStudio
+          activeProject={{ id: "project-1", name: "Noir" }}
+          assets={[{ id: "image-1", type: "image", displayName: "Frame One" }]}
+          characters={[]}
+          createPersonDetectionJob={() => {}}
+          createPersonTrackJob={() => {}}
+          createVideoJob={createVideoJob}
+          deleteAsset={() => {}}
+          gpuOptions={["auto"]}
+          latestAssets={[]}
+          loras={[{ id: "video_motion", name: "Video Motion" }]}
+          onPreview={() => {}}
+          personTracks={[]}
+          purgeAsset={() => {}}
+          recipePresets={[
+            {
+              id: "dream_motion",
+              name: "Dream Motion",
+              workflow: "image_to_video",
+              model: "ltx_2_3",
+              defaults: { duration: 8, fps: 30, resolution: "1280x720", quality: "best", negativePrompt: "jitter" },
+              prompt: { suffix: "smooth camera motion" },
+              builtInLoras: [{ id: "video_motion" }],
+              ui: { description: "Soft camera motion." },
+            },
+          ]}
+          requestedGpu="auto"
+          selectedAsset={{ id: "image-1", type: "image", displayName: "Frame One" }}
+          setRequestedGpu={() => {}}
+          updateAssetStatus={() => {}}
+          videoModels={[
+            {
+              id: "ltx_2_3",
+              name: "LTX",
+              type: "video",
+              capabilities: ["image_to_video", "text_to_video", "first_last_frame", "extend_clip"],
+              defaults: { duration: 6, fps: 25, resolution: "768x512", quality: "balanced" },
+              limits: { durations: [4, 6, 8], fps: [24, 25, 30], resolutions: ["768x512", "1280x720"] },
+            },
+          ]}
+        />,
+      );
+    });
+    await settle();
+
+    expect(container.textContent).toContain("Dream Motion");
+    expect(container.textContent).toContain("Soft camera motion.");
+    expect(container.textContent).toContain("Adds: smooth camera motion");
+    expect(container.textContent).toContain("Uses LoRA: Video Motion");
+
+    await act(async () => {
+      [...container.querySelectorAll("button")].find((button) => button.textContent === "Generate Clip").click();
+    });
+
+    expect(createVideoJob).toHaveBeenCalledWith(
+      expect.objectContaining({
+        duration: 8,
+        fps: 30,
+        width: 1280,
+        height: 720,
+        quality: "best",
+        negativePrompt: "jitter",
+        recipePresetId: "dream_motion",
+        advanced: expect.objectContaining({
+          recipePresetName: "Dream Motion",
+          recipePresetPrompt: { suffix: "smooth camera motion" },
+          resolution: "1280x720",
+        }),
       }),
     );
   });

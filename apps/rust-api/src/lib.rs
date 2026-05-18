@@ -830,6 +830,8 @@ struct VideoJobRequest {
     #[serde(default)]
     seed: Option<i64>,
     #[serde(default)]
+    recipe_preset_id: Option<String>,
+    #[serde(default)]
     loras: Vec<Value>,
     #[serde(default)]
     character_id: Option<String>,
@@ -1913,6 +1915,9 @@ async fn create_video_job(
     let project_name = payload.project_name.clone();
     let mut job_payload = to_json_object(&payload)?;
     job_payload.remove("requestedGpu");
+    if payload.recipe_preset_id.is_none() {
+        job_payload.remove("recipePresetId");
+    }
     let job = create_generation_job(
         state,
         job_type,

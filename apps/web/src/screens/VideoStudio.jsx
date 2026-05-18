@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from "react";
+import React, { useEffect, useMemo, useState } from "react";
 import { AssetCard } from "../components/assetPanels.jsx";
 import { AssetMedia } from "../components/assetMedia.jsx";
 import { ReplacePersonPanel, findReplacementModel } from "./ReplacePersonPanel.jsx";
@@ -15,9 +15,11 @@ export function VideoStudio({
   gpuOptions,
   latestAssets,
   launchRequest,
+  loras = [],
   jobs = [],
   onPreview,
   personTracks = [],
+  recipePresets = [],
   requestedGpu,
   selectedAsset,
   setRequestedGpu,
@@ -29,6 +31,7 @@ export function VideoStudio({
   const [mode, setMode] = useState("image_to_video");
   const [prompt, setPrompt] = useState("Camera slowly pushes in while the scene comes alive");
   const [quality, setQuality] = useState("balanced");
+  const [recipePresetId, setRecipePresetId] = useState("");
   const [advancedOpen, setAdvancedOpen] = useState(false);
   const [model, setModel] = useState(videoModels[0]?.id ?? "ltx_2_3");
   const selectedModel = videoModels.find((item) => item.id === model) ?? videoModels[0];
@@ -51,6 +54,24 @@ export function VideoStudio({
   const capabilities = selectedModel?.capabilities ?? [];
   const supportsMode = capabilities.includes(mode);
   const implementedMode = ["image_to_video", "text_to_video", "first_last_frame", "extend_clip", "replace_person"].includes(mode);
+  const availableRecipePresets = useMemo(() => {
+    return recipePresets.filter((preset) => {
+      if (preset.modes?.length) {
+        return preset.modes.includes(mode);
+      }
+      return preset.workflow === mode;
+    });
+  }, [mode, recipePresets]);
+  const selectedRecipePreset = availableRecipePresets.find((preset) => preset.id === recipePresetId) ?? availableRecipePresets[0] ?? null;
+  const presetPromptParts = [selectedRecipePreset?.prompt?.prefix, selectedRecipePreset?.prompt?.suffix]
+    .filter((part) => String(part ?? "").trim());
+  const presetLoraDetails = (selectedRecipePreset?.builtInLoras ?? selectedRecipePreset?.loras ?? [])
+    .map((presetLora) => {
+      const loraId = typeof presetLora === "string" ? presetLora : presetLora.id;
+      const lora = loras.find((item) => item.id === loraId);
+      return lora ? { id: loraId, name: lora.name ?? loraId } : { id: loraId, name: loraId, missing: true };
+    })
+    .filter((lora) => lora.id);
 
   useEffect(() => {
     if (!videoModels.some((item) => item.id === model)) {
@@ -125,6 +146,37 @@ export function VideoStudio({
   }, [mode, supportsMode, videoModels]);
 
   useEffect(() => {
+    if (!availableRecipePresets.some((preset) => preset.id === recipePresetId)) {
+      setRecipePresetId(availableRecipePresets[0]?.id ?? "");
+    }
+  }, [availableRecipePresets, recipePresetId]);
+
+  useEffect(() => {
+    if (!selectedRecipePreset) {
+      return;
+    }
+    if (selectedRecipePreset.model) {
+      setModel(selectedRecipePreset.model);
+    }
+    const defaults = selectedRecipePreset.defaults ?? {};
+    if (defaults.duration) {
+      setDuration(Number(defaults.duration));
+    }
+    if (defaults.fps) {
+      setFps(Number(defaults.fps));
+    }
+    if (defaults.quality) {
+      setQuality(defaults.quality);
+    }
+    if (defaults.resolution) {
+      setResolution(defaults.resolution);
+    }
+    if (Object.prototype.hasOwnProperty.call(defaults, "negativePrompt")) {
+      setNegativePrompt(defaults.negativePrompt ?? "");
+    }
+  }, [selectedRecipePreset?.id]);
+
+  useEffect(() => {
     if (mode !== "replace_person") {
       return;
     }
@@ -197,6 +249,7 @@ export function VideoStudio({
       height,
       quality,
       seed: seed === "" ? null : Number(seed),
+      recipePresetId: selectedRecipePreset?.id ?? null,
       characterId: characterId || null,
       characterLookId: characterLookId || null,
       sourceAssetId: ["image_to_video", "first_last_frame"].includes(mode) ? sourceAssetId || null : null,
@@ -208,6 +261,8 @@ export function VideoStudio({
       advanced: {
         resolution,
         durationHint,
+        recipePresetName: selectedRecipePreset?.name ?? null,
+        recipePresetPrompt: selectedRecipePreset?.prompt ?? null,
         selectedPersonTrack: selectedTrack ?? null,
         replacementModeLabel: replacementModeLabels[replacementMode],
       },
@@ -332,7 +387,21 @@ export function VideoStudio({
             <textarea onChange={(event) => setPrompt(event.target.value)} value={prompt} />
           </label>
 
-          <div className="control-grid">
+          <div className="control-grid video-preset-grid">
+            <label>
+              Preset
+              <select disabled={!availableRecipePresets.length} onChange={(event) => setRecipePresetId(event.target.value)} value={recipePresetId}>
+                {availableRecipePresets.length ? (
+                  availableRecipePresets.map((preset) => (
+                    <option key={preset.id} value={preset.id}>
+                      {preset.name ?? preset.id}
+                    </option>
+                  ))
+                ) : (
+                  <option value="">No presets</option>
+                )}
+              </select>
+            </label>
             <label>
               Duration
               <select onChange={(event) => setDuration(Number(event.target.value))} value={duration}>
@@ -362,6 +431,24 @@ export function VideoStudio({
               </select>
             </label>
           </div>
+
+          {selectedRecipePreset ? (
+            <div className="guidance-strip">
+              <strong>{selectedRecipePreset.ui?.description ?? "Preset defaults active"}</strong>
+              <span>
+                {presetPromptParts.length ? `Adds: ${presetPromptParts.join(", ")}` : "No prompt fragments"}
+                {presetLoraDetails.length
+                  ? ` | Uses LoRA: ${presetLoraDetails.map((lora) => lora.name ?? lora.id).join(", ")}`
+                  : " | No preset LoRAs"}
+                {presetLoraDetails.some((lora) => lora.missing) ? " | Preset incomplete" : ""}
+              </span>
+            </div>
+          ) : (
+            <div className="guidance-strip">
+              <strong>Presets unavailable</strong>
+              <span>Generation can continue without preset defaults.</span>
+            </div>
+          )}
 
           <div className="guidance-strip">
             <strong>{selectedModel?.name ?? "Video model"}</strong>

@@ -817,6 +817,10 @@ button:disabled {
   grid-template-columns: minmax(320px, 460px) minmax(0, 1fr);
 }
 
+.video-preset-grid {
+  grid-template-columns: minmax(0, 1.2fr) repeat(3, minmax(0, 0.8fr));
+}
+
 .guidance-strip,
 .lora-picker,
 .inline-warning {

@@ -1225,9 +1225,11 @@ export function App() {
             gpuOptions={gpuOptions}
             latestAssets={latestVideoAssets}
             launchRequest={studioLaunch}
+            loras={loras}
             jobs={jobs}
             onPreview={setPreviewAsset}
             personTracks={personTracks}
+            recipePresets={recipePresets}
             requestedGpu={requestedGpu}
             selectedAsset={selectedAsset}
             setRequestedGpu={setRequestedGpu}
