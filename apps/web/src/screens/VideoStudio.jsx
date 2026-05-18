@@ -1,6 +1,12 @@
-import React, { useEffect, useState } from "react";
+import React, { useEffect, useMemo, useState } from "react";
 import { AssetCard } from "../components/assetPanels.jsx";
 import { AssetMedia } from "../components/assetMedia.jsx";
+import {
+  presetLoraDetails as buildPresetLoraDetails,
+  presetMatchesModel,
+  presetMatchesWorkflow,
+  presetPromptParts as buildPresetPromptParts,
+} from "../presetUtils.js";
 import { ReplacePersonPanel, findReplacementModel } from "./ReplacePersonPanel.jsx";
 
 export function VideoStudio({
@@ -15,9 +21,11 @@ export function VideoStudio({
   gpuOptions,
   latestAssets,
   launchRequest,
+  loras = [],
   jobs = [],
   onPreview,
   personTracks = [],
+  recipePresets = [],
   requestedGpu,
   selectedAsset,
   setRequestedGpu,
@@ -29,6 +37,7 @@ export function VideoStudio({
   const [mode, setMode] = useState("image_to_video");
   const [prompt, setPrompt] = useState("Camera slowly pushes in while the scene comes alive");
   const [quality, setQuality] = useState("balanced");
+  const [recipePresetId, setRecipePresetId] = useState("");
   const [advancedOpen, setAdvancedOpen] = useState(false);
   const [model, setModel] = useState(videoModels[0]?.id ?? "ltx_2_3");
   const selectedModel = videoModels.find((item) => item.id === model) ?? videoModels[0];
@@ -51,6 +60,13 @@ export function VideoStudio({
   const capabilities = selectedModel?.capabilities ?? [];
   const supportsMode = capabilities.includes(mode);
   const implementedMode = ["image_to_video", "text_to_video", "first_last_frame", "extend_clip", "replace_person"].includes(mode);
+  const availableRecipePresets = useMemo(() => {
+    return recipePresets.filter((preset) => presetMatchesWorkflow(preset, mode) && presetMatchesModel(preset, selectedModel));
+  }, [mode, recipePresets, selectedModel?.id]);
+  const selectedRecipePreset = availableRecipePresets.find((preset) => preset.id === recipePresetId) ?? availableRecipePresets[0] ?? null;
+  const presetPromptParts = buildPresetPromptParts(selectedRecipePreset);
+  const presetLoraDetails = buildPresetLoraDetails(selectedRecipePreset, loras);
+  const presetMissingLoras = presetLoraDetails.filter((lora) => lora.missing);
 
   useEffect(() => {
     if (!videoModels.some((item) => item.id === model)) {
@@ -125,6 +141,34 @@ export function VideoStudio({
   }, [mode, supportsMode, videoModels]);
 
   useEffect(() => {
+    if (!availableRecipePresets.some((preset) => preset.id === recipePresetId)) {
+      setRecipePresetId(availableRecipePresets[0]?.id ?? "");
+    }
+  }, [availableRecipePresets, recipePresetId]);
+
+  useEffect(() => {
+    if (!selectedRecipePreset) {
+      return;
+    }
+    const defaults = selectedRecipePreset.defaults ?? {};
+    if (defaults.duration) {
+      setDuration(Number(defaults.duration));
+    }
+    if (defaults.fps) {
+      setFps(Number(defaults.fps));
+    }
+    if (defaults.quality) {
+      setQuality(defaults.quality);
+    }
+    if (defaults.resolution) {
+      setResolution(defaults.resolution);
+    }
+    if (Object.prototype.hasOwnProperty.call(defaults, "negativePrompt")) {
+      setNegativePrompt(defaults.negativePrompt ?? "");
+    }
+  }, [selectedRecipePreset?.id]);
+
+  useEffect(() => {
     if (mode !== "replace_person") {
       return;
     }
@@ -163,7 +207,7 @@ export function VideoStudio({
     (mode === "first_last_frame" && sourceAssetId && lastFrameAssetId) ||
     (mode === "extend_clip" && sourceClipAssetId) ||
     (mode === "replace_person" && sourceClipAssetId && personTrackId && characterId);
-  const canSubmit = Boolean(activeProject && prompt.trim() && supportsMode && implementedMode && hasInputs);
+  const canSubmit = Boolean(activeProject && prompt.trim() && supportsMode && implementedMode && hasInputs && !presetMissingLoras.length);
   const [width, height] = resolution.split("x").map((value) => Number(value));
   const durationOptions = selectedModel?.limits?.durations ?? [4, 6, 8, 10];
   const resolutionOptions = selectedModel?.limits?.resolutions ?? ["768x512", "640x640", "1280x720", "720x1280"];
@@ -197,6 +241,7 @@ export function VideoStudio({
       height,
       quality,
       seed: seed === "" ? null : Number(seed),
+      recipePresetId: selectedRecipePreset?.id ?? null,
       characterId: characterId || null,
       characterLookId: characterLookId || null,
       sourceAssetId: ["image_to_video", "first_last_frame"].includes(mode) ? sourceAssetId || null : null,
@@ -204,10 +249,12 @@ export function VideoStudio({
       sourceClipAssetId: ["extend_clip", "replace_person"].includes(mode) ? sourceClipAssetId || null : null,
       personTrackId: mode === "replace_person" ? personTrackId || null : null,
       replacementMode: mode === "replace_person" ? replacementMode : "face_only",
-      loras: [],
+      loras: presetLoraDetails.filter((lora) => !lora.missing),
       advanced: {
         resolution,
         durationHint,
+        recipePresetName: selectedRecipePreset?.name ?? null,
+        recipePresetPrompt: selectedRecipePreset?.prompt ?? null,
         selectedPersonTrack: selectedTrack ?? null,
         replacementModeLabel: replacementModeLabels[replacementMode],
       },
@@ -332,7 +379,21 @@ export function VideoStudio({
             <textarea onChange={(event) => setPrompt(event.target.value)} value={prompt} />
           </label>
 
-          <div className="control-grid">
+          <div className="control-grid video-preset-grid">
+            <label>
+              Preset
+              <select disabled={!availableRecipePresets.length} onChange={(event) => setRecipePresetId(event.target.value)} value={recipePresetId}>
+                {availableRecipePresets.length ? (
+                  availableRecipePresets.map((preset) => (
+                    <option key={preset.id} value={preset.id}>
+                      {preset.name ?? preset.id}
+                    </option>
+                  ))
+                ) : (
+                  <option value="">No presets</option>
+                )}
+              </select>
+            </label>
             <label>
               Duration
               <select onChange={(event) => setDuration(Number(event.target.value))} value={duration}>
@@ -362,6 +423,24 @@ export function VideoStudio({
               </select>
             </label>
           </div>
+
+          {selectedRecipePreset ? (
+            <div className="guidance-strip">
+              <strong>{selectedRecipePreset.ui?.description ?? "Preset defaults active"}</strong>
+              <span>
+                {presetPromptParts.length ? `Adds: ${presetPromptParts.join(", ")}` : "No prompt fragments"}
+                {presetLoraDetails.length
+                  ? ` | Uses LoRA: ${presetLoraDetails.map((lora) => lora.name ?? lora.id).join(", ")}`
+                  : " | No preset LoRAs"}
+                {presetLoraDetails.some((lora) => lora.missing) ? " | Preset incomplete" : ""}
+              </span>
+            </div>
+          ) : (
+            <div className="guidance-strip">
+              <strong>Presets unavailable</strong>
+              <span>Generation can continue without preset defaults.</span>
+            </div>
+          )}
 
           <div className="guidance-strip">
             <strong>{selectedModel?.name ?? "Video model"}</strong>
@@ -416,6 +495,7 @@ export function VideoStudio({
           ) : null}
 
           {blockedMessage ? <p className="inline-warning">{blockedMessage}</p> : null}
+          {presetMissingLoras.length ? <p className="inline-warning">Preset is missing LoRA: {presetMissingLoras.map((lora) => lora.id).join(", ")}</p> : null}
           <button className="primary-action" disabled={!canSubmit} type="submit">
             {mode === "replace_person" ? "Replace Person" : "Generate Clip"}
           </button>

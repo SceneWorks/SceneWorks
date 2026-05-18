@@ -10,6 +10,7 @@ import { VideoStudio } from "./screens/VideoStudio.jsx";
 import { CharacterStudio } from "./screens/CharacterStudio.jsx";
 import { EditorScreen } from "./screens/EditorScreen.jsx";
 import { QueueScreen } from "./screens/QueueScreen.jsx";
+import { PresetManagerScreen } from "./screens/PresetManagerScreen.jsx";
 import { sortNewest, sortWorkers } from "./sorters.js";
 import { ensureItemVersionFields } from "./timeline.js";
 
@@ -343,9 +344,79 @@ export function App() {
       const items = await apiFetch(`/api/v1/recipe-presets${query}`, token);
       setRecipePresets(items);
       setError("");
+      return items;
     } catch (err) {
       setError(err.message);
+      return [];
     }
+  }
+
+  function recipePresetQuery(scope = null) {
+    const params = new URLSearchParams();
+    if (scope) {
+      params.set("scope", scope);
+    }
+    if (scope === "project" && activeProject?.id) {
+      params.set("projectId", activeProject.id);
+    }
+    const value = params.toString();
+    return value ? `?${value}` : "";
+  }
+
+  async function createRecipePreset(payload) {
+    if (payload.scope === "project" && !activeProject) {
+      throw new Error("Create or open a project first.");
+    }
+    const created = await apiFetch(`/api/v1/recipe-presets${recipePresetQuery(payload.scope)}`, token, {
+      method: "POST",
+      body: JSON.stringify(payload),
+    });
+    await refreshRecipePresets(activeProject?.id);
+    return created;
+  }
+
+  async function updateRecipePreset(presetId, payload, scope = payload.scope) {
+    const updated = await apiFetch(`/api/v1/recipe-presets/${encodeURIComponent(presetId)}${recipePresetQuery(scope)}`, token, {
+      method: "PATCH",
+      body: JSON.stringify(payload),
+    });
+    await refreshRecipePresets(activeProject?.id);
+    return updated;
+  }
+
+  async function duplicateRecipePreset(presetId, scope = null) {
+    const duplicated = await apiFetch(`/api/v1/recipe-presets/${encodeURIComponent(presetId)}/duplicate${recipePresetQuery(scope)}`, token, {
+      method: "POST",
+      body: JSON.stringify({}),
+    });
+    await refreshRecipePresets(activeProject?.id);
+    return duplicated;
+  }
+
+  async function deleteRecipePreset(presetId, scope = null) {
+    const archived = await apiFetch(`/api/v1/recipe-presets/${encodeURIComponent(presetId)}${recipePresetQuery(scope)}`, token, {
+      method: "DELETE",
+    });
+    await refreshRecipePresets(activeProject?.id);
+    return archived;
+  }
+
+  async function createLoraImportJob(payload) {
+    if (payload.scope === "project" && !activeProject) {
+      throw new Error("Create or open a project first.");
+    }
+    const job = await apiFetch("/api/v1/loras/import", token, {
+      method: "POST",
+      body: JSON.stringify({
+        ...payload,
+        projectId: payload.scope === "project" ? activeProject.id : null,
+        projectName: payload.scope === "project" ? activeProject.name : null,
+      }),
+    });
+    setActiveView("Queue");
+    setError("");
+    refreshData();
+    return job;
   }
 
   async function refreshPersonTracks(projectId = activeProject?.id) {
@@ -1172,13 +1243,30 @@ export function App() {
             gpuOptions={gpuOptions}
             latestAssets={latestVideoAssets}
             launchRequest={studioLaunch}
+            loras={loras}
             jobs={jobs}
             onPreview={setPreviewAsset}
             personTracks={personTracks}
+            recipePresets={recipePresets}
             requestedGpu={requestedGpu}
             selectedAsset={selectedAsset}
             setRequestedGpu={setRequestedGpu}
             updateAssetStatus={updateAssetStatus}
+            videoModels={videoModels}
+          />
+        ) : null}
+
+        {activeView === "Presets" ? (
+          <PresetManagerScreen
+            activeProject={activeProject}
+            createLoraImportJob={createLoraImportJob}
+            createRecipePreset={createRecipePreset}
+            deleteRecipePreset={deleteRecipePreset}
+            duplicateRecipePreset={duplicateRecipePreset}
+            imageModels={imageModels}
+            loras={loras}
+            recipePresets={recipePresets}
+            updateRecipePreset={updateRecipePreset}
             videoModels={videoModels}
           />
         ) : null}
