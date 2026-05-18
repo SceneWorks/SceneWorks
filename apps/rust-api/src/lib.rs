@@ -28,7 +28,10 @@ use sceneworks_core::jobs_store::{
     WorkerHeartbeat, JOB_STATUSES,
 };
 use sceneworks_core::project_store::{
-    AssetStatusPatch, ProjectStore, ProjectStoreError, UploadAsset,
+    AssetStatusPatch, CharacterCreateInput, CharacterLookInput, CharacterLookUpdateInput,
+    CharacterLoraInput, CharacterLoraUpdateInput, CharacterReferenceInput,
+    CharacterReferenceUpdateInput, CharacterUpdateInput, ProjectStore, ProjectStoreError,
+    UploadAsset,
 };
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
@@ -389,6 +392,52 @@ pub fn create_app(settings: Settings) -> Result<Router, JobsStoreError> {
             get(get_project_file),
         )
         .route(
+            "/api/v1/projects/:project_id/characters",
+            get(list_characters).post(create_character),
+        )
+        .route(
+            "/api/v1/projects/:project_id/characters/:character_id",
+            get(get_character)
+                .patch(update_character)
+                .delete(archive_character),
+        )
+        .route(
+            "/api/v1/projects/:project_id/characters/:character_id/archive",
+            post(archive_character_explicit),
+        )
+        .route(
+            "/api/v1/projects/:project_id/characters/:character_id/purge",
+            delete(purge_character),
+        )
+        .route(
+            "/api/v1/projects/:project_id/characters/:character_id/references",
+            post(add_character_reference),
+        )
+        .route(
+            "/api/v1/projects/:project_id/characters/:character_id/references/:asset_id",
+            patch(update_character_reference).delete(remove_character_reference),
+        )
+        .route(
+            "/api/v1/projects/:project_id/characters/:character_id/looks",
+            post(create_character_look),
+        )
+        .route(
+            "/api/v1/projects/:project_id/characters/:character_id/looks/:look_id",
+            patch(update_character_look).delete(delete_character_look),
+        )
+        .route(
+            "/api/v1/projects/:project_id/characters/:character_id/loras",
+            post(attach_character_lora),
+        )
+        .route(
+            "/api/v1/projects/:project_id/characters/:character_id/loras/:link_id",
+            patch(update_character_lora).delete(detach_character_lora),
+        )
+        .route(
+            "/api/v1/projects/:project_id/characters/:character_id/test-jobs",
+            post(create_character_test_job),
+        )
+        .route(
             "/api/v1/projects/:project_id/timelines",
             get(list_timelines).post(create_timeline),
         )
@@ -470,6 +519,12 @@ struct AssetsQuery {
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
+struct CharactersQuery {
+    include_archived: Option<bool>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct LorasQuery {
     model_family: Option<String>,
     project_id: Option<String>,
@@ -522,6 +577,113 @@ struct VerifyResponse {
 #[derive(Debug, Deserialize)]
 struct ProjectCreateRequest {
     name: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct CharacterCreateRequest {
+    name: String,
+    #[serde(default = "default_character_type", rename = "type")]
+    character_type: String,
+    #[serde(default)]
+    description: String,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct CharacterUpdateRequest {
+    name: Option<String>,
+    #[serde(default, rename = "type")]
+    character_type: Option<String>,
+    description: Option<String>,
+    archived: Option<bool>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct CharacterReferenceRequest {
+    asset_id: String,
+    #[serde(default)]
+    approved: bool,
+    #[serde(default = "default_reference_role")]
+    role: String,
+    #[serde(default)]
+    notes: String,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct CharacterReferenceUpdateRequest {
+    approved: Option<bool>,
+    role: Option<String>,
+    notes: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct CharacterLookRequest {
+    name: String,
+    #[serde(default)]
+    description: String,
+    #[serde(default)]
+    approved_reference_ids: Vec<String>,
+    #[serde(default)]
+    recipe_settings: JsonObject,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct CharacterLookUpdateRequest {
+    name: Option<String>,
+    description: Option<String>,
+    approved_reference_ids: Option<Vec<String>>,
+    recipe_settings: Option<JsonObject>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct CharacterLoraRequest {
+    #[serde(default)]
+    lora_id: Option<String>,
+    name: String,
+    #[serde(default)]
+    source_path: Option<String>,
+    #[serde(default)]
+    trigger_words: Vec<String>,
+    #[serde(default = "default_character_lora_weight")]
+    default_weight: f64,
+    #[serde(default)]
+    compatibility: JsonObject,
+    #[serde(default = "default_project_lora_scope")]
+    scope: String,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct CharacterLoraUpdateRequest {
+    name: Option<String>,
+    trigger_words: Option<Vec<String>>,
+    default_weight: Option<f64>,
+    compatibility: Option<JsonObject>,
+    scope: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct CharacterTestRequest {
+    prompt: String,
+    #[serde(default = "default_image_model")]
+    model: String,
+    #[serde(default = "default_image_count")]
+    count: u32,
+    #[serde(default = "default_image_size")]
+    width: u32,
+    #[serde(default = "default_image_size")]
+    height: u32,
+    #[serde(default = "default_requested_gpu")]
+    requested_gpu: String,
+    #[serde(default)]
+    look_id: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -607,6 +769,8 @@ struct ImageJobRequest {
     height: u32,
     #[serde(default = "default_style_preset")]
     style_preset: String,
+    #[serde(default)]
+    recipe_preset_id: Option<String>,
     #[serde(default)]
     loras: Vec<Value>,
     #[serde(default)]
@@ -919,6 +1083,375 @@ async fn get_project_file(
         .into_response())
 }
 
+async fn list_characters(
+    State(state): State<AppState>,
+    Path(project_id): Path<String>,
+    Query(query): Query<CharactersQuery>,
+) -> Result<Json<Vec<Value>>, ApiError> {
+    Ok(Json(
+        project_call(state, move |store| {
+            store.list_characters(&project_id, query.include_archived.unwrap_or(false))
+        })
+        .await?,
+    ))
+}
+
+async fn create_character(
+    State(state): State<AppState>,
+    Path(project_id): Path<String>,
+    ApiJson(payload): ApiJson<CharacterCreateRequest>,
+) -> Result<(StatusCode, Json<Value>), ApiError> {
+    let character = project_call(state, move |store| {
+        store.create_character(
+            &project_id,
+            CharacterCreateInput {
+                name: payload.name,
+                character_type: payload.character_type,
+                description: payload.description,
+            },
+        )
+    })
+    .await?;
+    Ok((StatusCode::CREATED, Json(character)))
+}
+
+async fn get_character(
+    State(state): State<AppState>,
+    Path((project_id, character_id)): Path<(String, String)>,
+) -> Result<Json<Value>, ApiError> {
+    Ok(Json(
+        project_call(state, move |store| {
+            store.get_character(&project_id, &character_id)
+        })
+        .await?,
+    ))
+}
+
+async fn update_character(
+    State(state): State<AppState>,
+    Path((project_id, character_id)): Path<(String, String)>,
+    ApiJson(payload): ApiJson<CharacterUpdateRequest>,
+) -> Result<Json<Value>, ApiError> {
+    Ok(Json(
+        project_call(state, move |store| {
+            store.update_character(
+                &project_id,
+                &character_id,
+                CharacterUpdateInput {
+                    name: payload.name,
+                    character_type: payload.character_type,
+                    description: payload.description,
+                    archived: payload.archived,
+                },
+            )
+        })
+        .await?,
+    ))
+}
+
+async fn archive_character(
+    State(state): State<AppState>,
+    Path((project_id, character_id)): Path<(String, String)>,
+) -> Result<Json<sceneworks_core::project_store::CharacterMutationResult>, ApiError> {
+    Ok(Json(
+        project_call(state, move |store| {
+            store.archive_character(&project_id, &character_id)
+        })
+        .await?,
+    ))
+}
+
+async fn archive_character_explicit(
+    State(state): State<AppState>,
+    Path((project_id, character_id)): Path<(String, String)>,
+) -> Result<Json<sceneworks_core::project_store::CharacterMutationResult>, ApiError> {
+    Ok(Json(
+        project_call(state, move |store| {
+            store.archive_character(&project_id, &character_id)
+        })
+        .await?,
+    ))
+}
+
+async fn purge_character(
+    State(state): State<AppState>,
+    Path((project_id, character_id)): Path<(String, String)>,
+) -> Result<Json<sceneworks_core::project_store::CharacterMutationResult>, ApiError> {
+    Ok(Json(
+        project_call(state, move |store| {
+            store.purge_character(&project_id, &character_id)
+        })
+        .await?,
+    ))
+}
+
+async fn add_character_reference(
+    State(state): State<AppState>,
+    Path((project_id, character_id)): Path<(String, String)>,
+    ApiJson(payload): ApiJson<CharacterReferenceRequest>,
+) -> Result<(StatusCode, Json<Value>), ApiError> {
+    let character = project_call(state, move |store| {
+        store.add_character_reference(
+            &project_id,
+            &character_id,
+            CharacterReferenceInput {
+                asset_id: payload.asset_id,
+                approved: payload.approved,
+                role: payload.role,
+                notes: payload.notes,
+            },
+        )
+    })
+    .await?;
+    Ok((StatusCode::CREATED, Json(character)))
+}
+
+async fn update_character_reference(
+    State(state): State<AppState>,
+    Path((project_id, character_id, asset_id)): Path<(String, String, String)>,
+    ApiJson(payload): ApiJson<CharacterReferenceUpdateRequest>,
+) -> Result<Json<Value>, ApiError> {
+    Ok(Json(
+        project_call(state, move |store| {
+            store.update_character_reference(
+                &project_id,
+                &character_id,
+                &asset_id,
+                CharacterReferenceUpdateInput {
+                    approved: payload.approved,
+                    role: payload.role,
+                    notes: payload.notes,
+                },
+            )
+        })
+        .await?,
+    ))
+}
+
+async fn remove_character_reference(
+    State(state): State<AppState>,
+    Path((project_id, character_id, asset_id)): Path<(String, String, String)>,
+) -> Result<Json<Value>, ApiError> {
+    Ok(Json(
+        project_call(state, move |store| {
+            store.remove_character_reference(&project_id, &character_id, &asset_id)
+        })
+        .await?,
+    ))
+}
+
+async fn create_character_look(
+    State(state): State<AppState>,
+    Path((project_id, character_id)): Path<(String, String)>,
+    ApiJson(payload): ApiJson<CharacterLookRequest>,
+) -> Result<(StatusCode, Json<Value>), ApiError> {
+    let character = project_call(state, move |store| {
+        store.create_character_look(
+            &project_id,
+            &character_id,
+            CharacterLookInput {
+                name: payload.name,
+                description: payload.description,
+                approved_reference_ids: payload.approved_reference_ids,
+                recipe_settings: payload.recipe_settings,
+            },
+        )
+    })
+    .await?;
+    Ok((StatusCode::CREATED, Json(character)))
+}
+
+async fn update_character_look(
+    State(state): State<AppState>,
+    Path((project_id, character_id, look_id)): Path<(String, String, String)>,
+    ApiJson(payload): ApiJson<CharacterLookUpdateRequest>,
+) -> Result<Json<Value>, ApiError> {
+    Ok(Json(
+        project_call(state, move |store| {
+            store.update_character_look(
+                &project_id,
+                &character_id,
+                &look_id,
+                CharacterLookUpdateInput {
+                    name: payload.name,
+                    description: payload.description,
+                    approved_reference_ids: payload.approved_reference_ids,
+                    recipe_settings: payload.recipe_settings,
+                },
+            )
+        })
+        .await?,
+    ))
+}
+
+async fn delete_character_look(
+    State(state): State<AppState>,
+    Path((project_id, character_id, look_id)): Path<(String, String, String)>,
+) -> Result<Json<Value>, ApiError> {
+    Ok(Json(
+        project_call(state, move |store| {
+            store.delete_character_look(&project_id, &character_id, &look_id)
+        })
+        .await?,
+    ))
+}
+
+async fn attach_character_lora(
+    State(state): State<AppState>,
+    Path((project_id, character_id)): Path<(String, String)>,
+    ApiJson(payload): ApiJson<CharacterLoraRequest>,
+) -> Result<(StatusCode, Json<Value>), ApiError> {
+    let character = project_call(state, move |store| {
+        store.attach_character_lora(
+            &project_id,
+            &character_id,
+            CharacterLoraInput {
+                lora_id: payload.lora_id,
+                name: payload.name,
+                source_path: payload.source_path,
+                trigger_words: payload.trigger_words,
+                default_weight: payload.default_weight,
+                compatibility: payload.compatibility,
+                scope: payload.scope,
+            },
+        )
+    })
+    .await?;
+    Ok((StatusCode::CREATED, Json(character)))
+}
+
+async fn update_character_lora(
+    State(state): State<AppState>,
+    Path((project_id, character_id, link_id)): Path<(String, String, String)>,
+    ApiJson(payload): ApiJson<CharacterLoraUpdateRequest>,
+) -> Result<Json<Value>, ApiError> {
+    Ok(Json(
+        project_call(state, move |store| {
+            store.update_character_lora(
+                &project_id,
+                &character_id,
+                &link_id,
+                CharacterLoraUpdateInput {
+                    name: payload.name,
+                    trigger_words: payload.trigger_words,
+                    default_weight: payload.default_weight,
+                    compatibility: payload.compatibility,
+                    scope: payload.scope,
+                },
+            )
+        })
+        .await?,
+    ))
+}
+
+async fn detach_character_lora(
+    State(state): State<AppState>,
+    Path((project_id, character_id, link_id)): Path<(String, String, String)>,
+) -> Result<Json<Value>, ApiError> {
+    Ok(Json(
+        project_call(state, move |store| {
+            store.detach_character_lora(&project_id, &character_id, &link_id)
+        })
+        .await?,
+    ))
+}
+
+async fn create_character_test_job(
+    State(state): State<AppState>,
+    Path((project_id, character_id)): Path<(String, String)>,
+    ApiJson(payload): ApiJson<CharacterTestRequest>,
+) -> Result<(StatusCode, Json<JobSnapshot>), ApiError> {
+    validate_character_test_job(&payload)?;
+    let character = project_call(state.clone(), {
+        let project_id = project_id.clone();
+        let character_id = character_id.clone();
+        move |store| store.get_character(&project_id, &character_id)
+    })
+    .await?;
+    let project_name = project_call(state.clone(), {
+        let project_id = project_id.clone();
+        move |store| store.project_stem(&project_id)
+    })
+    .await?;
+    let look = payload.look_id.as_deref().and_then(|look_id| {
+        character
+            .get("looks")
+            .and_then(Value::as_array)
+            .and_then(|looks| {
+                looks
+                    .iter()
+                    .find(|look| look.get("id").and_then(Value::as_str) == Some(look_id))
+                    .cloned()
+            })
+    });
+    let approved_reference_ids = character
+        .get("references")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter(|reference| {
+            reference
+                .get("approved")
+                .and_then(Value::as_bool)
+                .unwrap_or(false)
+        })
+        .filter_map(|reference| reference.get("assetId").and_then(Value::as_str))
+        .map(|asset_id| Value::String(asset_id.to_owned()))
+        .collect::<Vec<_>>();
+    let mut advanced = JsonObject::new();
+    advanced.insert(
+        "characterName".to_owned(),
+        character.get("name").cloned().unwrap_or(Value::Null),
+    );
+    advanced.insert(
+        "characterType".to_owned(),
+        character.get("type").cloned().unwrap_or(Value::Null),
+    );
+    advanced.insert(
+        "approvedReferenceIds".to_owned(),
+        Value::Array(approved_reference_ids),
+    );
+    advanced.insert("look".to_owned(), look.unwrap_or(Value::Null));
+
+    let mut job_payload = JsonObject::new();
+    job_payload.insert(
+        "mode".to_owned(),
+        Value::String("character_image".to_owned()),
+    );
+    job_payload.insert("prompt".to_owned(), Value::String(payload.prompt));
+    job_payload.insert("negativePrompt".to_owned(), Value::String(String::new()));
+    job_payload.insert("model".to_owned(), Value::String(payload.model));
+    job_payload.insert("count".to_owned(), json!(payload.count));
+    job_payload.insert("seed".to_owned(), Value::Null);
+    job_payload.insert("width".to_owned(), json!(payload.width));
+    job_payload.insert("height".to_owned(), json!(payload.height));
+    job_payload.insert(
+        "stylePreset".to_owned(),
+        Value::String("character-test".to_owned()),
+    );
+    job_payload.insert("sourceAssetId".to_owned(), Value::Null);
+    job_payload.insert(
+        "loras".to_owned(),
+        character.get("loras").cloned().unwrap_or_else(|| json!([])),
+    );
+    job_payload.insert("characterId".to_owned(), Value::String(character_id));
+    job_payload.insert(
+        "characterLookId".to_owned(),
+        payload.look_id.map(Value::String).unwrap_or(Value::Null),
+    );
+    job_payload.insert("advanced".to_owned(), Value::Object(advanced));
+    let job = create_generation_job(
+        state,
+        JobType::ImageGenerate,
+        Some(project_id),
+        Some(project_name),
+        job_payload,
+        requested_gpu_or_auto(payload.requested_gpu),
+    )
+    .await?;
+    Ok((StatusCode::CREATED, Json(job)))
+}
+
 async fn list_timelines(
     State(state): State<AppState>,
     Path(project_id): Path<String>,
@@ -1166,8 +1699,17 @@ async fn create_image_job(
     let project_name = payload.project_name.clone();
     let mut job_payload = to_json_object(&payload)?;
     job_payload.remove("requestedGpu");
+    if payload.recipe_preset_id.is_none() {
+        job_payload.remove("recipePresetId");
+    }
+    apply_recipe_preset_to_image_payload(&state, &payload, &mut job_payload).await?;
     if payload.seed.is_none() {
-        job_payload.insert("seeds".to_owned(), random_image_seeds(payload.count));
+        let count = job_payload
+            .get("count")
+            .and_then(Value::as_u64)
+            .and_then(|value| u32::try_from(value).ok())
+            .unwrap_or(payload.count);
+        job_payload.insert("seeds".to_owned(), random_image_seeds(count));
     }
     let job = create_generation_job(
         state,
@@ -1179,6 +1721,167 @@ async fn create_image_job(
     )
     .await?;
     Ok((StatusCode::CREATED, Json(job)))
+}
+
+async fn apply_recipe_preset_to_image_payload(
+    state: &AppState,
+    payload: &ImageJobRequest,
+    job_payload: &mut JsonObject,
+) -> Result<(), ApiError> {
+    let Some(preset_id) = payload.recipe_preset_id.as_deref() else {
+        return Ok(());
+    };
+    if payload.project_id.is_empty() {
+        return Err(ApiError::bad_request("projectId is required"));
+    }
+    let presets = recipe_preset_catalog(state, Some(&payload.project_id)).await?;
+    let preset = presets
+        .iter()
+        .find(|item| item.get("id").and_then(Value::as_str) == Some(preset_id))
+        .ok_or_else(|| ApiError::bad_request("Recipe preset not found"))?;
+
+    let expanded_prompt = preset_prompt(&payload.prompt, preset);
+    job_payload.insert("prompt".to_owned(), Value::String(expanded_prompt));
+    if let Some(model) = preset
+        .get("model")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        job_payload.insert("model".to_owned(), Value::String(model.to_owned()));
+    }
+    apply_recipe_preset_defaults(preset, job_payload)?;
+    job_payload.insert(
+        "stylePreset".to_owned(),
+        Value::String(preset_id.to_owned()),
+    );
+    let loras = lora_catalog(state, Some(&payload.project_id)).await?;
+    let existing_lora_ids = job_payload
+        .get("loras")
+        .and_then(Value::as_array)
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(|item| item.get("id").and_then(Value::as_str).map(str::to_owned))
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    let mut seen_lora_ids = existing_lora_ids;
+    let mut preset_loras = Vec::new();
+    let mut missing_lora_ids = Vec::new();
+    for preset_lora in preset
+        .get("builtInLoras")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default()
+    {
+        let Some(lora_id) = preset_lora_id(&preset_lora) else {
+            continue;
+        };
+        let Some(lora) = loras
+            .iter()
+            .find(|item| item.get("id").and_then(Value::as_str) == Some(lora_id))
+        else {
+            missing_lora_ids.push(Value::String(lora_id.to_owned()));
+            continue;
+        };
+        if seen_lora_ids.iter().any(|seen_id| seen_id == lora_id) {
+            continue;
+        }
+        preset_loras.push(serialize_preset_lora(lora, &preset_lora, lora_id));
+        seen_lora_ids.push(lora_id.to_owned());
+    }
+    let advanced = job_payload
+        .entry("advanced".to_owned())
+        .or_insert_with(|| Value::Object(JsonObject::new()));
+    if !advanced.is_object() {
+        *advanced = Value::Object(JsonObject::new());
+    }
+    let advanced = advanced
+        .as_object_mut()
+        .ok_or_else(|| ApiError::internal("advanced payload must be an object"))?;
+    advanced.insert(
+        "recipePresetId".to_owned(),
+        Value::String(preset_id.to_owned()),
+    );
+    advanced.remove("recipePresetName");
+    if missing_lora_ids.is_empty() {
+        advanced.remove("presetMissingLoras");
+    } else {
+        advanced.insert(
+            "presetMissingLoras".to_owned(),
+            Value::Array(missing_lora_ids),
+        );
+    }
+
+    let user_loras = job_payload
+        .remove("loras")
+        .and_then(|value| value.as_array().cloned())
+        .unwrap_or_default();
+    preset_loras.extend(user_loras);
+    job_payload.insert("loras".to_owned(), Value::Array(preset_loras));
+    Ok(())
+}
+
+fn apply_recipe_preset_defaults(
+    preset: &Value,
+    job_payload: &mut JsonObject,
+) -> Result<(), ApiError> {
+    let Some(defaults) = preset.get("defaults").and_then(Value::as_object) else {
+        return Ok(());
+    };
+    if let Some(count) = defaults.get("count").and_then(Value::as_u64) {
+        let count = u32::try_from(count)
+            .map_err(|_| ApiError::bad_request("Recipe preset count is out of range"))?;
+        if !(1..=8).contains(&count) {
+            return Err(ApiError::bad_request(
+                "Recipe preset count must be between 1 and 8",
+            ));
+        }
+        job_payload.insert("count".to_owned(), json!(count));
+    }
+    if let Some(resolution) = defaults.get("resolution").and_then(Value::as_str) {
+        let (width, height) = parse_recipe_preset_resolution(resolution)?;
+        validate_dimension(width, "width", 2048)?;
+        validate_dimension(height, "height", 2048)?;
+        job_payload.insert("width".to_owned(), json!(width));
+        job_payload.insert("height".to_owned(), json!(height));
+        let advanced = job_payload
+            .entry("advanced".to_owned())
+            .or_insert_with(|| Value::Object(JsonObject::new()));
+        if !advanced.is_object() {
+            *advanced = Value::Object(JsonObject::new());
+        }
+        advanced
+            .as_object_mut()
+            .ok_or_else(|| ApiError::internal("advanced payload must be an object"))?
+            .insert(
+                "resolution".to_owned(),
+                Value::String(resolution.to_owned()),
+            );
+    }
+    if let Some(negative_prompt) = defaults.get("negativePrompt").and_then(Value::as_str) {
+        job_payload.insert(
+            "negativePrompt".to_owned(),
+            Value::String(negative_prompt.to_owned()),
+        );
+    }
+    Ok(())
+}
+
+fn parse_recipe_preset_resolution(value: &str) -> Result<(u32, u32), ApiError> {
+    let Some((width, height)) = value.split_once('x') else {
+        return Err(ApiError::bad_request(
+            "Recipe preset resolution must use WIDTHxHEIGHT",
+        ));
+    };
+    let width = width
+        .parse::<u32>()
+        .map_err(|_| ApiError::bad_request("Recipe preset width must be a number"))?;
+    let height = height
+        .parse::<u32>()
+        .map_err(|_| ApiError::bad_request("Recipe preset height must be a number"))?;
+    Ok((width, height))
 }
 
 async fn create_video_job(
@@ -2054,6 +2757,7 @@ async fn recipe_preset_catalog(
             left.get("scope")
                 .and_then(Value::as_str)
                 .unwrap_or_default(),
+            left.get("order").and_then(Value::as_i64).unwrap_or(10_000),
             left.get("name").and_then(Value::as_str).unwrap_or_default(),
         );
         let right_key = (
@@ -2061,6 +2765,7 @@ async fn recipe_preset_catalog(
                 .get("scope")
                 .and_then(Value::as_str)
                 .unwrap_or_default(),
+            right.get("order").and_then(Value::as_i64).unwrap_or(10_000),
             right
                 .get("name")
                 .and_then(Value::as_str)
@@ -2157,6 +2862,52 @@ fn finalize_recipe_preset_entry(preset: &mut Value) -> Result<(), ApiError> {
         .entry("prompt".to_owned())
         .or_insert_with(|| Value::Object(JsonObject::new()));
     Ok(())
+}
+
+fn preset_prompt(prompt: &str, preset: &Value) -> String {
+    let fragments = preset.get("prompt").and_then(Value::as_object);
+    [
+        fragments
+            .and_then(|value| value.get("prefix"))
+            .and_then(Value::as_str),
+        Some(prompt),
+        fragments
+            .and_then(|value| value.get("suffix"))
+            .and_then(Value::as_str),
+    ]
+    .into_iter()
+    .flatten()
+    .map(str::trim)
+    .filter(|value| !value.is_empty())
+    .collect::<Vec<_>>()
+    .join(", ")
+}
+
+fn preset_lora_id(preset_lora: &Value) -> Option<&str> {
+    preset_lora
+        .as_str()
+        .or_else(|| preset_lora.get("id").and_then(Value::as_str))
+}
+
+fn preset_lora_weight(lora: &Value, preset_lora: &Value) -> f64 {
+    preset_lora
+        .get("weight")
+        .and_then(Value::as_f64)
+        .or_else(|| lora.get("defaultWeight").and_then(Value::as_f64))
+        .or_else(|| lora.get("weight").and_then(Value::as_f64))
+        .unwrap_or(0.8)
+}
+
+fn serialize_preset_lora(lora: &Value, preset_lora: &Value, lora_id: &str) -> Value {
+    json!({
+        "id": lora_id,
+        "name": lora.get("name").and_then(Value::as_str).unwrap_or(lora_id),
+        "scope": lora.get("scope").and_then(Value::as_str).unwrap_or("builtin"),
+        "weight": preset_lora_weight(lora, preset_lora),
+        "triggerWords": lora.get("triggerWords").cloned().unwrap_or_else(|| Value::Array(Vec::new())),
+        "compatibility": lora.get("compatibility").cloned().unwrap_or_else(|| Value::Object(JsonObject::new())),
+        "presetManaged": true
+    })
 }
 
 async fn load_manifest_entries(
@@ -2646,6 +3397,20 @@ fn validate_image_job(payload: &ImageJobRequest) -> Result<(), ApiError> {
     Ok(())
 }
 
+fn validate_character_test_job(payload: &CharacterTestRequest) -> Result<(), ApiError> {
+    if payload.prompt.is_empty() || payload.prompt.chars().count() > 4000 {
+        return Err(ApiError::bad_request(
+            "prompt must be between 1 and 4000 characters",
+        ));
+    }
+    if !(1..=8).contains(&payload.count) {
+        return Err(ApiError::bad_request("count must be between 1 and 8"));
+    }
+    validate_dimension(payload.width, "width", 2048)?;
+    validate_dimension(payload.height, "height", 2048)?;
+    Ok(())
+}
+
 fn validate_video_job(payload: &VideoJobRequest) -> Result<(), ApiError> {
     if payload.project_id.is_empty() {
         return Err(ApiError::bad_request("projectId is required"));
@@ -2819,6 +3584,22 @@ fn default_requested_gpu() -> String {
 
 fn default_lora_scope() -> String {
     "global".to_owned()
+}
+
+fn default_project_lora_scope() -> String {
+    "project".to_owned()
+}
+
+fn default_character_type() -> String {
+    "person".to_owned()
+}
+
+fn default_reference_role() -> String {
+    "reference".to_owned()
+}
+
+fn default_character_lora_weight() -> f64 {
+    0.8
 }
 
 fn default_track_name() -> String {
@@ -3668,7 +4449,9 @@ mod tests {
                 {
                   "id": "cinematic",
                   "name": "Cinematic",
-                  "defaults": { "count": 4 },
+                  "model": "preset-model",
+                  "defaults": { "count": 4, "resolution": "1280x720", "negativePrompt": "flat lighting" },
+                  "prompt": { "suffix": "cinematic lighting" },
                   "builtInLoras": [{ "id": "style-lora", "weight": 0.5 }]
                 }
               ]
@@ -3682,7 +4465,7 @@ mod tests {
             {
               "schemaVersion": 1,
               "presets": [
-                { "id": "cinematic", "name": "My Cinematic", "defaults": { "count": 2 } }
+                { "id": "cinematic", "name": "My Cinematic", "defaults": { "count": 2, "resolution": "1280x720", "negativePrompt": "flat lighting" } }
               ]
             }
             "#,
@@ -3724,6 +4507,48 @@ mod tests {
         assert_eq!(presets[0]["scope"], "global");
         assert_eq!(presets[0]["defaults"]["count"], 2);
         assert_eq!(presets[0]["builtInLoras"][0]["id"], "style-lora");
+
+        let (_, project) = request(
+            app.clone(),
+            "POST",
+            "/api/v1/projects",
+            json!({ "name": "Preset Project" }),
+        )
+        .await;
+        let project_id = project["id"].as_str().expect("project id");
+        let (status, image_job) = request(
+            app.clone(),
+            "POST",
+            "/api/v1/image/jobs",
+            json!({
+                "projectId": project_id,
+                "prompt": "city at night",
+                "model": "client-model",
+                "count": 1,
+                "width": 512,
+                "height": 512,
+                "negativePrompt": "client negative prompt",
+                "recipePresetId": "cinematic"
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED);
+        assert_eq!(
+            image_job["payload"]["prompt"],
+            "city at night, cinematic lighting"
+        );
+        assert_eq!(image_job["payload"]["loras"][0]["id"], "style-lora");
+        assert_eq!(image_job["payload"]["model"], "preset-model");
+        assert_eq!(image_job["payload"]["count"], 2);
+        assert_eq!(image_job["payload"]["seeds"].as_array().unwrap().len(), 2);
+        assert_eq!(image_job["payload"]["width"], 1280);
+        assert_eq!(image_job["payload"]["height"], 720);
+        assert_eq!(image_job["payload"]["negativePrompt"], "flat lighting");
+        assert_eq!(image_job["payload"]["advanced"]["resolution"], "1280x720");
+        assert_eq!(
+            image_job["payload"]["advanced"]["recipePresetId"],
+            "cinematic"
+        );
 
         let (status, job) = request(
             app.clone(),
@@ -4000,6 +4825,175 @@ mod tests {
         let error: Value = serde_json::from_slice(&bytes).expect("json error parses");
         assert_eq!(status, StatusCode::BAD_REQUEST);
         assert_eq!(error["detail"], "Invalid project file path");
+    }
+
+    #[tokio::test]
+    async fn character_studio_routes_manage_references_loras_and_test_jobs() {
+        let temp_dir = tempfile::tempdir().expect("temp dir creates");
+        let settings = test_settings(&temp_dir);
+        let data_dir = settings.data_dir.clone();
+        let app = create_app(settings).expect("app creates");
+        let (_, project) = request(
+            app.clone(),
+            "POST",
+            "/api/v1/projects",
+            json!({ "name": "Characters" }),
+        )
+        .await;
+        let project_id = project["id"].as_str().expect("project id").to_owned();
+        let project_path = std::path::PathBuf::from(project["path"].as_str().unwrap());
+
+        let (status, asset) = request_multipart_upload(
+            app.clone(),
+            &format!("/api/v1/projects/{project_id}/assets"),
+            "reference.png",
+            "image/png",
+            b"png-bytes",
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED);
+        let asset_id = asset["id"].as_str().expect("asset id").to_owned();
+
+        let (status, character) = request(
+            app.clone(),
+            "POST",
+            &format!("/api/v1/projects/{project_id}/characters"),
+            json!({ "name": "Mira", "type": "person" }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED);
+        assert_eq!(character["name"], "Mira");
+        let character_id = character["id"].as_str().expect("character id").to_owned();
+
+        let (status, with_reference) = request(
+            app.clone(),
+            "POST",
+            &format!("/api/v1/projects/{project_id}/characters/{character_id}/references"),
+            json!({ "assetId": asset_id, "approved": false }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED);
+        assert_eq!(
+            with_reference["references"][0]["asset"]["displayName"],
+            "reference.png"
+        );
+
+        let (status, updated) = request(
+            app.clone(),
+            "PATCH",
+            &format!(
+                "/api/v1/projects/{project_id}/characters/{character_id}/references/{asset_id}"
+            ),
+            json!({ "approved": true, "role": "hero" }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(updated["approvedReferences"][0]["assetId"], asset_id);
+
+        let sidecar_path = project_path.join(
+            asset["sidecarPath"]
+                .as_str()
+                .expect("asset sidecar path")
+                .replace('/', std::path::MAIN_SEPARATOR_STR),
+        );
+        let asset_sidecar: Value = serde_json::from_str(
+            &std::fs::read_to_string(sidecar_path).expect("asset sidecar reads"),
+        )
+        .expect("asset sidecar parses");
+        assert_eq!(
+            asset_sidecar["metadata"]["characterReferences"][0]["characterId"],
+            character_id
+        );
+        assert_eq!(
+            asset_sidecar["metadata"]["characterReferences"][0]["approved"],
+            true
+        );
+
+        let (status, with_look) = request(
+            app.clone(),
+            "POST",
+            &format!("/api/v1/projects/{project_id}/characters/{character_id}/looks"),
+            json!({ "name": "Rain coat", "approvedReferenceIds": [asset_id], "recipeSettings": { "style": "noir" } }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED);
+        assert_eq!(with_look["looks"][0]["recipeSettings"]["style"], "noir");
+        let look_id = with_look["looks"][0]["id"]
+            .as_str()
+            .expect("look id")
+            .to_owned();
+
+        let lora_dir = data_dir.join("loras");
+        std::fs::create_dir_all(&lora_dir).expect("lora dir creates");
+        let lora_source = lora_dir.join("mira.safetensors");
+        std::fs::write(&lora_source, b"lora").expect("lora writes");
+        let (status, with_lora) = request(
+            app.clone(),
+            "POST",
+            &format!("/api/v1/projects/{project_id}/characters/{character_id}/loras"),
+            json!({
+                "name": "Mira LoRA",
+                "sourcePath": lora_source.display().to_string(),
+                "compatibility": { "families": ["sdxl"] },
+                "triggerWords": ["mira"]
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED);
+        assert_eq!(with_lora["loras"][0]["copiedIntoProject"], true);
+        let project_lora_path = project_path.join(
+            with_lora["loras"][0]["projectPath"]
+                .as_str()
+                .expect("project lora path")
+                .replace('/', std::path::MAIN_SEPARATOR_STR),
+        );
+        assert_eq!(
+            std::fs::read(project_lora_path).expect("lora copied"),
+            b"lora"
+        );
+
+        let (status, test_job) = request(
+            app.clone(),
+            "POST",
+            &format!("/api/v1/projects/{project_id}/characters/{character_id}/test-jobs"),
+            json!({ "prompt": "portrait", "lookId": look_id, "count": 2 }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED);
+        assert_eq!(test_job["type"], "image_generate");
+        assert_eq!(test_job["payload"]["mode"], "character_image");
+        assert_eq!(test_job["payload"]["characterId"], character_id);
+        assert_eq!(
+            test_job["payload"]["advanced"]["approvedReferenceIds"][0],
+            asset_id
+        );
+
+        let (status, _) = request(
+            app.clone(),
+            "POST",
+            &format!("/api/v1/projects/{project_id}/characters/{character_id}/archive"),
+            Value::Null,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let (status, visible) = request(
+            app.clone(),
+            "GET",
+            &format!("/api/v1/projects/{project_id}/characters"),
+            Value::Null,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(visible.as_array().unwrap().len(), 0);
+        let (status, archived) = request(
+            app,
+            "GET",
+            &format!("/api/v1/projects/{project_id}/characters?includeArchived=true"),
+            Value::Null,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(archived.as_array().unwrap().len(), 1);
     }
 
     #[tokio::test]
