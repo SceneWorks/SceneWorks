@@ -9,7 +9,7 @@ use serde_json::{Map, Number, Value};
 
 use crate::contracts::{
     ContractNumber, JobSnapshot, JobStatus, JobType, ProgressStage, QueueSummary, WorkerCapability,
-    WorkerSnapshot, WorkerStatus,
+    WorkerSnapshot, WorkerStatus, WorkerUtilizationSnapshot,
 };
 
 pub const ACTIVE_STATUSES: &[&str] = &[
@@ -118,6 +118,7 @@ pub struct RegisterWorker {
     pub gpu_name: Option<String>,
     pub capabilities: Vec<WorkerCapability>,
     pub loaded_models: Vec<String>,
+    pub utilization: Option<WorkerUtilizationSnapshot>,
 }
 
 #[derive(Debug, Clone)]
@@ -126,6 +127,7 @@ pub struct WorkerHeartbeat {
     pub status: WorkerStatus,
     pub current_job_id: Option<String>,
     pub loaded_models: Vec<String>,
+    pub utilization: Option<WorkerUtilizationSnapshot>,
 }
 
 #[derive(Debug, Clone)]
@@ -206,11 +208,13 @@ impl JobsStore {
               current_job_id text,
               capabilities_json text not null,
               loaded_models_json text not null,
+              utilization_json text,
               registered_at text not null,
               last_seen_at text not null
             );
             ",
         )?;
+        ensure_column(&transaction, "workers", "utilization_json", "text")?;
         transaction.commit()?;
         Ok(())
     }
@@ -409,14 +413,15 @@ impl JobsStore {
             "
             insert into workers (
               id, gpu_id, gpu_name, status, current_job_id, capabilities_json,
-              loaded_models_json, registered_at, last_seen_at
-            ) values (?1, ?2, ?3, 'idle', null, ?4, ?5, ?6, ?6)
+              loaded_models_json, utilization_json, registered_at, last_seen_at
+            ) values (?1, ?2, ?3, 'idle', null, ?4, ?5, ?6, ?7, ?7)
             on conflict(id) do update set
               gpu_id = excluded.gpu_id,
               gpu_name = excluded.gpu_name,
               status = case when workers.current_job_id is null then 'idle' else workers.status end,
               capabilities_json = excluded.capabilities_json,
               loaded_models_json = excluded.loaded_models_json,
+              utilization_json = excluded.utilization_json,
               last_seen_at = excluded.last_seen_at
             ",
             params![
@@ -425,6 +430,7 @@ impl JobsStore {
                 request.gpu_name,
                 dumps(&request.capabilities)?,
                 dumps(&request.loaded_models)?,
+                optional_dumps(request.utilization.as_ref())?,
                 now,
             ],
         )?;
@@ -466,13 +472,15 @@ impl JobsStore {
                set status = ?1,
                    current_job_id = ?2,
                    loaded_models_json = ?3,
-                   last_seen_at = ?4
-             where id = ?5
+                   utilization_json = ?4,
+                   last_seen_at = ?5
+             where id = ?6
             ",
             params![
                 request.status.as_str(),
                 request.current_job_id,
                 dumps(&request.loaded_models)?,
+                optional_dumps(request.utilization.as_ref())?,
                 now,
                 request.worker_id,
             ],
@@ -609,6 +617,9 @@ impl JobsStore {
             return Ok(None);
         };
         drop(statement);
+        if should_defer_auto_gpu_claim(&transaction, &queued, &worker)? {
+            return Ok(None);
+        }
 
         let assigned_gpu = if is_non_gpu_job_type(queued.job_type.as_str()) {
             "cpu".to_owned()
@@ -939,6 +950,7 @@ fn row_to_worker(row: &Row<'_>) -> rusqlite::Result<WorkerSnapshot> {
             row.get::<_, Option<String>>("loaded_models_json")?
                 .as_deref(),
         ),
+        utilization: loads_optional(row.get::<_, Option<String>>("utilization_json")?.as_deref()),
         registered_at: row.get("registered_at")?,
         last_seen_at: row.get("last_seen_at")?,
         extra: Default::default(),
@@ -982,6 +994,13 @@ where
     value
         .and_then(|text| serde_json::from_str::<Vec<T>>(text).ok())
         .unwrap_or_default()
+}
+
+fn loads_optional<T>(value: Option<&str>) -> Option<T>
+where
+    T: DeserializeOwned,
+{
+    value.and_then(|text| serde_json::from_str::<T>(text).ok())
 }
 
 fn parse_string_enum<T>(value: &str) -> T
@@ -1104,6 +1123,25 @@ fn remove_sqlite_sidecars(db_path: &Path) {
     }
 }
 
+fn ensure_column(
+    connection: &Connection,
+    table: &str,
+    column: &str,
+    definition: &str,
+) -> JobsStoreResult<()> {
+    let mut statement = connection.prepare(&format!("pragma table_info({table})"))?;
+    let columns = statement
+        .query_map([], |row| row.get::<_, String>("name"))?
+        .collect::<Result<Vec<_>, _>>()?;
+    if !columns.iter().any(|existing| existing == column) {
+        connection.execute(
+            &format!("alter table {table} add column {column} {definition}"),
+            [],
+        )?;
+    }
+    Ok(())
+}
+
 fn is_active_status(status: &str) -> bool {
     ACTIVE_STATUSES.contains(&status)
 }
@@ -1116,15 +1154,136 @@ fn is_non_gpu_job_type(job_type: &str) -> bool {
     NON_GPU_JOB_TYPES.contains(&job_type)
 }
 
+fn should_defer_auto_gpu_claim(
+    connection: &Connection,
+    job: &JobSnapshot,
+    worker: &WorkerSnapshot,
+) -> JobsStoreResult<bool> {
+    if job.requested_gpu != "auto"
+        || is_non_gpu_job_type(job.job_type.as_str())
+        || worker.gpu_id == "cpu"
+    {
+        return Ok(false);
+    }
+    let current_score = dispatch_score(job, worker);
+    if !current_score.has_utilization {
+        return Ok(false);
+    }
+
+    let mut statement = connection.prepare(
+        "
+        select * from workers
+         where id != ?1
+           and gpu_id != 'cpu'
+           and status = 'idle'
+         order by gpu_id, id
+        ",
+    )?;
+    let candidates = collect_workers(statement.query_map(params![worker.id], row_to_worker)?)?;
+    for candidate in candidates {
+        if !worker_supports_job(&candidate, job)
+            || active_gpu_job_exists(connection, &candidate.gpu_id)?
+        {
+            continue;
+        }
+        let candidate_score = dispatch_score(job, &candidate);
+        if dispatch_score_is_better(candidate_score, current_score) {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+fn active_gpu_job_exists(connection: &Connection, gpu_id: &str) -> JobsStoreResult<bool> {
+    Ok(connection
+        .query_row(
+            "
+            select id from jobs
+             where assigned_gpu = ?1
+               and status in ('preparing', 'downloading', 'loading_model', 'running', 'saving')
+               and type not in ('model_download', 'lora_import')
+             limit 1
+            ",
+            params![gpu_id],
+            |_row| Ok(()),
+        )
+        .optional()?
+        .is_some())
+}
+
+fn worker_supports_job(worker: &WorkerSnapshot, job: &JobSnapshot) -> bool {
+    worker
+        .capabilities
+        .iter()
+        .any(|capability| capability.as_str() == job.job_type.as_str())
+}
+
+#[derive(Debug, Clone, Copy)]
+struct DispatchScore {
+    has_utilization: bool,
+    free_memory_mb: f64,
+    memory_usage_percent: f64,
+    gpu_load_percent: f64,
+    warm_model: bool,
+}
+
+fn dispatch_score(job: &JobSnapshot, worker: &WorkerSnapshot) -> DispatchScore {
+    let utilization = worker.utilization.as_ref();
+    let total = utilization
+        .and_then(|item| item.memory_total_mb)
+        .unwrap_or(0);
+    let used = utilization
+        .and_then(|item| item.memory_used_mb)
+        .unwrap_or(0);
+    let free = utilization
+        .and_then(|item| item.memory_free_mb)
+        .or_else(|| total.checked_sub(used));
+    let memory_usage_percent = if total > 0 {
+        used as f64 / total as f64 * 100.0
+    } else {
+        0.0
+    };
+    DispatchScore {
+        has_utilization: free.is_some()
+            || utilization.and_then(|item| item.gpu_load_percent).is_some()
+            || total > 0,
+        free_memory_mb: free.unwrap_or(0) as f64,
+        memory_usage_percent,
+        gpu_load_percent: utilization
+            .and_then(|item| item.gpu_load_percent)
+            .unwrap_or(0.0),
+        warm_model: job_matches_loaded_model(job, worker),
+    }
+}
+
+fn dispatch_score_is_better(candidate: DispatchScore, current: DispatchScore) -> bool {
+    if !candidate.has_utilization || !current.has_utilization {
+        return false;
+    }
+
+    let free_delta = candidate.free_memory_mb - current.free_memory_mb;
+    let load_delta = current.gpu_load_percent - candidate.gpu_load_percent;
+    let usage_delta = current.memory_usage_percent - candidate.memory_usage_percent;
+    let candidate_is_not_worse = candidate.free_memory_mb + 512.0 >= current.free_memory_mb
+        && candidate.gpu_load_percent <= current.gpu_load_percent + 10.0
+        && candidate.memory_usage_percent <= current.memory_usage_percent + 10.0;
+    let candidate_relief = free_delta >= 1024.0 || load_delta >= 15.0 || usage_delta >= 10.0;
+
+    if candidate_is_not_worse && candidate_relief {
+        return true;
+    }
+    if candidate_is_not_worse && candidate.warm_model && !current.warm_model {
+        return true;
+    }
+    (current.free_memory_mb < 2048.0 && candidate.free_memory_mb >= 4096.0)
+        || (current.gpu_load_percent >= 85.0 && candidate.gpu_load_percent <= 75.0)
+        || (current.memory_usage_percent >= 90.0 && candidate.memory_usage_percent <= 80.0)
+}
+
 fn choose_claimable_job(rows: Vec<JobSnapshot>, worker: &WorkerSnapshot) -> Option<JobSnapshot> {
     let compatible = rows
         .into_iter()
-        .filter(|job| {
-            worker
-                .capabilities
-                .iter()
-                .any(|capability| capability.as_str() == job.job_type.as_str())
-        })
+        .filter(|job| worker_supports_job(worker, job))
         .collect::<Vec<_>>();
     let first = compatible.first()?;
     if is_non_gpu_job_type(first.job_type.as_str()) || first.requested_gpu != "auto" {

@@ -22,18 +22,39 @@ def cpu_worker_id(base_worker_id: str) -> str:
 def parse_nvidia_smi_gpus(output: str) -> list[dict]:
     gpus = []
     for line in output.strip().splitlines():
-        parts = [part.strip() for part in line.split(",", maxsplit=2)]
-        if len(parts) != 3:
+        parts = [part.strip() for part in line.split(",")]
+        if len(parts) < 3:
             continue
-        index, name, memory_mb = parts
-        gpus.append(
-            {
-                "id": index,
-                "name": f"{name} ({memory_mb} MB)",
-                "capabilities": ["gpu", "nvidia"],
+        index, name, memory_mb = parts[:3]
+        gpu = {
+            "id": index,
+            "name": f"{name} ({memory_mb} MB)",
+            "capabilities": ["gpu", "nvidia"],
+        }
+        if len(parts) >= 6:
+            used_mb, free_mb, load_percent = parts[3:6]
+            gpu["utilization"] = {
+                "memoryTotalMb": parse_int(memory_mb),
+                "memoryUsedMb": parse_int(used_mb),
+                "memoryFreeMb": parse_int(free_mb),
+                "gpuLoadPercent": parse_float(load_percent),
             }
-        )
+        gpus.append(gpu)
     return gpus
+
+
+def parse_int(value: str) -> int | None:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def parse_float(value: str) -> float | None:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
 
 
 def query_nvidia_gpus() -> list[dict]:
@@ -41,7 +62,7 @@ def query_nvidia_gpus() -> list[dict]:
         result = subprocess.run(
             [
                 "nvidia-smi",
-                "--query-gpu=index,name,memory.total",
+                "--query-gpu=index,name,memory.total,memory.used,memory.free,utilization.gpu",
                 "--format=csv,noheader,nounits",
             ],
             check=True,
@@ -52,6 +73,15 @@ def query_nvidia_gpus() -> list[dict]:
         return parse_nvidia_smi_gpus(result.stdout)
     except (OSError, subprocess.SubprocessError):
         return []
+
+
+def gpu_utilization(gpu_id: str) -> dict | None:
+    if gpu_id == "cpu":
+        return None
+    for gpu in query_nvidia_gpus():
+        if gpu["id"] == gpu_id:
+            return gpu.get("utilization")
+    return None
 
 
 def visible_gpu_ids() -> list[str] | None:

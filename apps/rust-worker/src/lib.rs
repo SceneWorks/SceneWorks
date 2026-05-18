@@ -724,6 +724,7 @@ async fn register_worker(
             gpu_name: Some(gpu.name.clone()),
             capabilities: worker_capabilities(gpu),
             loaded_models: Vec::new(),
+            utilization: None,
             extra: BTreeMap::new(),
         },
     )
@@ -742,6 +743,7 @@ async fn heartbeat(
             status,
             current_job_id: current_job_id.map(str::to_owned),
             loaded_models: Vec::new(),
+            utilization: None,
             extra: BTreeMap::new(),
         },
     )

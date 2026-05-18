@@ -373,7 +373,7 @@ def test_main_check_exits_without_api_loop(monkeypatch):
     assert calls == ["worker-local-0"]
 
 
-def test_heartbeat_loaded_models_are_not_sent_as_current_job():
+def test_heartbeat_loaded_models_are_not_sent_as_current_job(monkeypatch):
     class Api:
         def __init__(self):
             self.path = None
@@ -386,12 +386,43 @@ def test_heartbeat_loaded_models_are_not_sent_as_current_job():
 
     class Settings:
         worker_id = "worker-1"
+        gpu_id = "0"
 
+    monkeypatch.setattr("scene_worker.runtime.gpu_utilization", lambda _gpu_id: None)
     api = Api()
     heartbeat(api, Settings(), "idle", loaded_models=["model-a"])
 
     assert api.path == "/api/v1/workers/worker-1/heartbeat"
     assert api.payload == {"status": "idle", "currentJobId": None, "loadedModels": ["model-a"]}
+
+
+def test_heartbeat_reports_gpu_utilization_when_available(monkeypatch):
+    class Api:
+        def __init__(self):
+            self.payload = None
+
+        def post(self, _path, payload):
+            self.payload = payload
+            return {}
+
+    class Settings:
+        worker_id = "worker-1"
+        gpu_id = "0"
+
+    monkeypatch.setattr(
+        "scene_worker.runtime.gpu_utilization",
+        lambda _gpu_id: {"memoryTotalMb": 24576, "memoryUsedMb": 4096, "memoryFreeMb": 20480, "gpuLoadPercent": 12},
+    )
+
+    api = Api()
+    heartbeat(api, Settings(), "idle")
+
+    assert api.payload["utilization"] == {
+        "memoryTotalMb": 24576,
+        "memoryUsedMb": 4096,
+        "memoryFreeMb": 20480,
+        "gpuLoadPercent": 12,
+    }
 
 
 def test_keepalive_heartbeat_reports_current_loaded_models_each_tick(monkeypatch):

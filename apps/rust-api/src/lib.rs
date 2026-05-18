@@ -2777,6 +2777,7 @@ async fn register_worker(
             gpu_name: payload.gpu_name,
             capabilities: payload.capabilities,
             loaded_models: payload.loaded_models,
+            utilization: payload.utilization,
         })
     })
     .await?;
@@ -2796,6 +2797,7 @@ async fn heartbeat_worker(
             status: payload.status,
             current_job_id: payload.current_job_id,
             loaded_models: payload.loaded_models,
+            utilization: payload.utilization,
         })
     })
     .await?;

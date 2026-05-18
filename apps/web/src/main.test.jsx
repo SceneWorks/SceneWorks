@@ -817,6 +817,7 @@ describe("SceneWorks app shell", () => {
               gpuName: "Fixture GPU 0",
               status: "idle",
               capabilities: ["placeholder", "gpu", "image_generate"],
+              utilization: { memoryTotalMb: 24576, memoryUsedMb: 4096, memoryFreeMb: 20480, gpuLoadPercent: 12 },
             },
             {
               id: "rust-gpu-1",
@@ -857,7 +858,10 @@ describe("SceneWorks app shell", () => {
     await settle();
 
     expect(container.textContent).toContain("Fixture GPU 0");
-    expect(container.textContent).toContain("Rust CPU utility worker");
+    expect(container.textContent).toContain("20.0 GB");
+    expect(container.textContent).toContain("4.0 GB / 24.0 GB");
+    expect(container.textContent).toContain("12%");
+    expect(container.textContent).not.toContain("Rust CPU utility worker");
     expect(container.textContent).not.toContain("Rust placeholder GPU");
     expect(container.textContent).not.toContain("Stale GPU");
     expect([...container.querySelector("#queue-gpu").options].map((option) => option.value)).toEqual(["auto", "0"]);

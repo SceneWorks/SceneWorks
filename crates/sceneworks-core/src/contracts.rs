@@ -432,6 +432,8 @@ pub struct WorkerRegisterRequest {
     pub gpu_name: Option<String>,
     pub capabilities: Vec<WorkerCapability>,
     pub loaded_models: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub utilization: Option<WorkerUtilizationSnapshot>,
     #[serde(flatten)]
     pub extra: ExtraFields,
 }
@@ -443,6 +445,8 @@ pub struct WorkerHeartbeatRequest {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub current_job_id: Option<String>,
     pub loaded_models: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub utilization: Option<WorkerUtilizationSnapshot>,
     #[serde(flatten)]
     pub extra: ExtraFields,
 }
@@ -530,10 +534,25 @@ pub struct WorkerSnapshot {
     pub current_job_id: Option<String>,
     pub capabilities: Vec<WorkerCapability>,
     pub loaded_models: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub utilization: Option<WorkerUtilizationSnapshot>,
     pub registered_at: String,
     pub last_seen_at: String,
     #[serde(flatten)]
     pub extra: ExtraFields,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkerUtilizationSnapshot {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub memory_total_mb: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub memory_used_mb: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub memory_free_mb: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gpu_load_percent: Option<f64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
