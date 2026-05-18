@@ -167,6 +167,7 @@ def test_rust_worker_claims_and_completes_lora_import_against_rust_api_binary(ru
         {
             "SCENEWORKS_API_URL": rust_api,
             "SCENEWORKS_DATA_DIR": str(tmp_path / "data"),
+            "SCENEWORKS_CONFIG_DIR": str(tmp_path / "config"),
             "SCENEWORKS_WORKER_ID": "rust-worker-smoke",
             "SCENEWORKS_GPU_ID": "cpu",
             "SCENEWORKS_POLL_SECONDS": "1",
@@ -194,8 +195,8 @@ def test_rust_worker_claims_and_completes_lora_import_against_rust_api_binary(ru
 
         assert completed["workerId"] == "rust-worker-smoke"
         assert completed["result"]["repo"] is None
-        assert completed["result"]["path"].endswith("Smoke__LoRA")
-        assert (tmp_path / "data" / "loras" / "Smoke__LoRA" / "tiny.safetensors").read_bytes() == b"lora"
+        assert completed["result"]["path"].endswith("smoke_lora")
+        assert (tmp_path / "data" / "loras" / "smoke_lora" / "tiny.safetensors").read_bytes() == b"lora"
     finally:
         worker.terminate()
         try:
@@ -216,6 +217,7 @@ def test_rust_worker_completes_ffmpeg_frame_and_timeline_jobs_against_rust_api_b
         {
             "SCENEWORKS_API_URL": rust_api,
             "SCENEWORKS_DATA_DIR": str(tmp_path / "data"),
+            "SCENEWORKS_CONFIG_DIR": str(tmp_path / "config"),
             "SCENEWORKS_WORKER_ID": "rust-ffmpeg-smoke",
             "SCENEWORKS_GPU_ID": "cpu",
             "SCENEWORKS_POLL_SECONDS": "1",

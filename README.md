@@ -8,68 +8,45 @@ SceneWorks is a local Docker-based AI image and video generation studio. This re
 npm run dev
 ```
 
-This starts the local stack with Docker Compose. By default, Compose now runs
-the Rust API and Rust utility worker as the backend runtime, plus the Python
-worker only for Diffusers/PyTorch image and video inference adapters:
+This starts the local stack with Docker Compose. Compose runs the Rust API and
+Rust utility worker as the backend runtime, plus the Python worker only for
+Diffusers/PyTorch image and video inference adapters:
 
 - Web: http://localhost:5173
 - API: http://localhost:8000/api/v1/health
 
-The selected API runtime is reported by `GET /api/v1/health` as `runtime`.
-Default Compose values are:
-
-```text
-SCENEWORKS_API_RUNTIME=rust
-SCENEWORKS_API_DOCKERFILE=docker/rust-api.Dockerfile
-SCENEWORKS_RUST_WORKER_GPU_ID=cpu
-```
-
-Rollback to the Python API remains available by setting these values in `.env`
-before rebuilding and starting the stack:
-
-```text
-SCENEWORKS_API_RUNTIME=python
-SCENEWORKS_API_DOCKERFILE=docker/api.Dockerfile
-```
+`GET /api/v1/health` reports `runtime: "rust"`. The Rust API image is built
+from `docker/rust-api.Dockerfile`; `SCENEWORKS_RUST_WORKER_GPU_ID=cpu` is the
+default utility worker mode.
 
 ```powershell
 docker compose build api
 docker compose up -d api web worker
 ```
 
-Both API images keep the same Compose service name, health URL, worker URL,
-host port, and mounted storage contracts. The API listens on
-`SCENEWORKS_API_PORT` inside the container and is exposed on the same host port.
+The API keeps the same Compose service name, health URL, worker URL, host port,
+and mounted storage contracts. It listens on `SCENEWORKS_API_PORT` inside the
+container and is exposed on the same host port.
 `SCENEWORKS_WEB_PORT` controls the host port for the Vite web service. The web
 service receives `VITE_API_BASE_URL=http://localhost:${SCENEWORKS_API_PORT}`,
 and workers call `http://api:${SCENEWORKS_API_PORT}` on the compose network.
-Recipe presets are a Rust API feature: `/api/v1/recipe-presets` and server-side
-`recipePresetId` expansion are intentionally not added to the Python rollback
-runtime.
 
-API volume contracts are shared across Python and Rust:
+API volume contracts:
 
 - `${SCENEWORKS_DATA_BIND:-./data}:/sceneworks/data` read/write for projects, models, LoRAs, and cache-backed app data.
 - `${SCENEWORKS_CONFIG_BIND:-./config}:/sceneworks/config:ro` read-only for manifests and app configuration.
-- `./data/cache/jobs.db` is the shared queue database for both runtimes, preserving existing compose queue history across migration flips and rollback.
+- `./data/cache/jobs.db` is the queue database, preserving existing compose queue history across rebuilds.
 - `./data/cache/huggingface` persists Diffusers/Hugging Face model downloads across worker container rebuilds and restarts.
 
-Both API runtimes expose `GET /api/v1/health`; Compose checks it with `curl`
-inside the container so dependent services wait for the selected implementation.
-SceneWorks 0.2.0 also aligns Rust video job payloads with the Python wire
-shape for default clip duration: omitted or integer `duration` values are queued
-as JSON integers, while explicit fractional values remain fractional.
+The API exposes `GET /api/v1/health`; Compose checks it with `curl` inside the
+container so dependent services wait for readiness. SceneWorks 0.2.0 queues
+default clip duration payloads as JSON integers when `duration` is omitted or
+integer-like, while explicit fractional values remain fractional.
 To exercise the default Rust Docker path end to end, run:
 
 ```powershell
 npm run check:docker:rust-api
 ```
-To exercise the Python API rollback path, run:
-
-```powershell
-npm run check:docker:python-api
-```
-
 Run the lightweight scaffold checks:
 
 ```powershell
@@ -100,7 +77,7 @@ npm run rust:check
 
 To point host-mode workers at the API, start the Rust API binary on port 8000
 and run each worker with `SCENEWORKS_API_URL=http://localhost:8000`. In Docker
-Compose, workers are wired to the selected `api` service automatically. The
+Compose, workers are wired to the `api` service automatically. The
 Compose `worker` service is the Python inference worker and the `rust-worker`
 service is the Rust utility worker; both use the same HTTP contract.
 The `sceneworks-rust-worker` binary handles CPU utility jobs for model downloads,
@@ -169,7 +146,6 @@ For offline development or deterministic Rust API tests, set `SCENEWORKS_DISABLE
 ```text
 apps/
   web/       React + Vite app shell
-  api/       FastAPI API rollback runtime
   rust-api/  Default Rust backend API
   rust-worker/ Rust CPU utility worker for model downloads, LoRA imports, frame extraction, and timeline exports
   worker/    Python Diffusers/PyTorch image and video inference sidecar
