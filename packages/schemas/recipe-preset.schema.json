@@ -50,6 +50,14 @@
               "additionalProperties": true,
               "properties": {
                 "id": { "type": "string", "pattern": "^[a-z0-9][a-z0-9_-]*$" },
+                "loraId": { "type": "string", "pattern": "^[a-z0-9][a-z0-9_-]*$" },
+                "sourceUrl": { "type": "string", "format": "uri" },
+                "name": { "type": "string", "minLength": 1 },
+                "displayName": { "type": "string", "minLength": 1 },
+                "compatibility": {
+                  "type": "object",
+                  "additionalProperties": true
+                },
                 "weight": { "type": "number", "minimum": -2, "maximum": 2 }
               }
             }
@@ -66,6 +74,14 @@
                   "additionalProperties": false,
                   "properties": {
                     "id": { "type": "string", "pattern": "^[a-z0-9][a-z0-9_-]*$" },
+                    "loraId": { "type": "string", "pattern": "^[a-z0-9][a-z0-9_-]*$" },
+                    "sourceUrl": { "type": "string", "format": "uri" },
+                    "name": { "type": "string", "minLength": 1 },
+                    "displayName": { "type": "string", "minLength": 1 },
+                    "compatibility": {
+                      "type": "object",
+                      "additionalProperties": true
+                    },
                     "weight": { "type": "number", "minimum": -2, "maximum": 2 }
                   }
                 }

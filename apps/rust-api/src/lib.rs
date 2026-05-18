@@ -2983,11 +2983,7 @@ fn finalize_recipe_preset_entry(preset: &mut Value) -> Result<(), ApiError> {
         .as_object_mut()
         .ok_or_else(|| ApiError::internal("Recipe preset manifest entry must be an object"))?;
     if !object.contains_key("workflow") {
-        if let Some(workflow) = object
-            .get("modes")
-            .and_then(Value::as_array)
-            .and_then(|modes| modes.iter().find_map(Value::as_str))
-        {
+        if let Some(workflow) = inferred_recipe_preset_workflow(object) {
             object.insert("workflow".to_owned(), Value::String(workflow.to_owned()));
         }
     }
@@ -3016,6 +3012,22 @@ fn finalize_recipe_preset_entry(preset: &mut Value) -> Result<(), ApiError> {
         .entry("prompt".to_owned())
         .or_insert_with(|| Value::Object(JsonObject::new()));
     Ok(())
+}
+
+fn inferred_recipe_preset_workflow(object: &JsonObject) -> Option<&'static str> {
+    object
+        .get("modes")
+        .and_then(Value::as_array)?
+        .iter()
+        .filter_map(Value::as_str)
+        .find_map(|mode| match mode {
+            "text_to_image" => Some("text_to_image"),
+            "edit_image" => Some("edit_image"),
+            "image_to_video" => Some("image_to_video"),
+            "text_to_video" => Some("text_to_video"),
+            "first_last_frame" => Some("first_last_frame"),
+            _ => None,
+        })
 }
 
 fn recipe_preset_loras(preset: &Value) -> Vec<Value> {
@@ -3274,6 +3286,17 @@ fn normalize_recipe_preset_loras(object: &mut JsonObject) -> Result<(), ApiError
             .as_object()
             .ok_or_else(|| ApiError::bad_request("Recipe preset LoRA must be an object"))?;
         validate_recipe_preset_id(object.get("id").and_then(Value::as_str))?;
+        if let Some(lora_id) = object.get("loraId").and_then(Value::as_str) {
+            validate_recipe_preset_id(Some(lora_id))?;
+        }
+        if object
+            .get("compatibility")
+            .is_some_and(|value| !value.is_object())
+        {
+            return Err(ApiError::bad_request(
+                "Recipe preset LoRA compatibility must be an object",
+            ));
+        }
         if let Some(weight) = object.get("weight").and_then(Value::as_f64) {
             if !(-2.0..=2.0).contains(&weight) {
                 return Err(ApiError::bad_request(

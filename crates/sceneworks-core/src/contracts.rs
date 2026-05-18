@@ -1054,6 +1054,16 @@ impl RecipePresetPrompt {
 pub struct RecipePresetLora {
     pub id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lora_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_url: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub display_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub compatibility: Option<JsonObject>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub weight: Option<ContractNumber>,
     #[serde(flatten)]
     pub extra: ExtraFields,

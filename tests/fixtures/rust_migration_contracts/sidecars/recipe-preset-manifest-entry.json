@@ -17,7 +17,15 @@
     "suffix": "cinematic lighting"
   },
   "loras": [
-    { "id": "builtin_cinematic_detail", "weight": 0.55 }
+    {
+      "id": "builtin_cinematic_detail",
+      "loraId": "builtin_cinematic_detail",
+      "sourceUrl": "https://example.com/loras/cinematic-detail.safetensors",
+      "name": "Cinematic Detail",
+      "displayName": "Cinematic Detail",
+      "compatibility": { "families": ["z-image"] },
+      "weight": 0.55
+    }
   ],
   "ui": {
     "description": "Balanced cinematic color, contrast, and detail."
