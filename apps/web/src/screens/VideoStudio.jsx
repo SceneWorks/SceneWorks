@@ -430,9 +430,9 @@ export function VideoStudio({
               <span>
                 {presetPromptParts.length ? `Adds: ${presetPromptParts.join(", ")}` : "No prompt fragments"}
                 {presetLoraDetails.length
-                  ? ` | Uses LoRA: ${presetLoraDetails.map((lora) => lora.name ?? lora.id).join(", ")}`
+                  ? ` | Preset LoRA applied at generation: ${presetLoraDetails.map((lora) => lora.name ?? lora.id).join(", ")}`
                   : " | No preset LoRAs"}
-                {presetLoraDetails.some((lora) => lora.missing) ? " | Preset incomplete" : ""}
+                {presetLoraDetails.some((lora) => lora.missing) ? " | Import still pending" : ""}
               </span>
             </div>
           ) : (
@@ -495,7 +495,11 @@ export function VideoStudio({
           ) : null}
 
           {blockedMessage ? <p className="inline-warning">{blockedMessage}</p> : null}
-          {presetMissingLoras.length ? <p className="inline-warning">Preset is missing LoRA: {presetMissingLoras.map((lora) => lora.id).join(", ")}</p> : null}
+          {presetMissingLoras.length ? (
+            <p className="inline-warning">
+              Preset cannot run until LoRA import finishes: {presetMissingLoras.map((lora) => lora.id).join(", ")}. Wait for the Queue or choose another preset.
+            </p>
+          ) : null}
           <button className="primary-action" disabled={!canSubmit} type="submit">
             {mode === "replace_person" ? "Replace Person" : "Generate Clip"}
           </button>

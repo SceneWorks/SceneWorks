@@ -123,6 +123,13 @@ export function ImageStudio({
   const presetLoraDetails = buildPresetLoraDetails(selectedRecipePreset, loras);
   const presetPromptParts = buildPresetPromptParts(selectedRecipePreset);
   const presetMissingLoras = presetLoraDetails.filter((lora) => lora.missing);
+  const loraEmptyMessage = !selectedModel
+    ? "No model selected"
+    : loras.some((lora) => lora.installState === "missing")
+      ? "No installed compatible LoRAs. Imports appear after the Queue completes."
+      : showIncompatibleLoras
+        ? "No installed LoRAs in the library."
+        : `No installed LoRAs match ${selectedModel.name ?? selectedModel.id}.`;
   const [width, height] = resolution.split("x").map((value) => Number(value));
 
   useEffect(() => {
@@ -301,9 +308,9 @@ export function ImageStudio({
               <span>
                 {presetPromptParts.length ? `Adds: ${presetPromptParts.join(", ")}` : "No prompt fragments"}
                 {presetLoraDetails.length
-                  ? ` | Uses LoRA: ${presetLoraDetails.map((lora) => lora.name ?? lora.id).join(", ")}`
+                  ? ` | Preset LoRA applied at generation: ${presetLoraDetails.map((lora) => lora.name ?? lora.id).join(", ")}`
                   : " | No preset LoRAs"}
-                {presetLoraDetails.some((lora) => lora.missing) ? " | Preset incomplete" : ""}
+                {presetLoraDetails.some((lora) => lora.missing) ? " | Import still pending" : ""}
               </span>
             </div>
           ) : (
@@ -316,7 +323,7 @@ export function ImageStudio({
           <section className="lora-picker" aria-label="LoRA selection">
             <div>
               <strong>LoRAs</strong>
-              <span>{selectedLoras.length ? `${selectedLoras.length} selected` : "Compatible with selected model"}</span>
+              <span>{selectedLoras.length ? `${selectedLoras.length} selected` : selectedModel ? "Installed and compatible" : "Choose a model"}</span>
             </div>
             {advancedOpen ? (
               <label className="checkline">
@@ -352,7 +359,7 @@ export function ImageStudio({
                 })}
               </div>
             ) : (
-              <div className="empty-panel compact-panel">No compatible LoRAs</div>
+              <div className="empty-panel compact-panel">{loraEmptyMessage}</div>
             )}
           </section>
 
@@ -392,7 +399,11 @@ export function ImageStudio({
             </div>
           ) : null}
 
-          {presetMissingLoras.length ? <p className="inline-warning">Preset is missing LoRA: {presetMissingLoras.map((lora) => lora.id).join(", ")}</p> : null}
+          {presetMissingLoras.length ? (
+            <p className="inline-warning">
+              Preset cannot run until LoRA import finishes: {presetMissingLoras.map((lora) => lora.id).join(", ")}. Wait for the Queue or choose another preset.
+            </p>
+          ) : null}
           <button
             className="primary-action"
             disabled={!activeProject || !prompt.trim() || (mode === "character_image" && !characterId) || Boolean(presetMissingLoras.length)}

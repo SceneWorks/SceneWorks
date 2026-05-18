@@ -902,10 +902,15 @@ button:disabled {
 }
 
 .guidance-strip span,
+.helper-copy,
 .inline-warning,
 .inline-success {
   color: #c7bfb2;
   line-height: 1.45;
+}
+
+.helper-copy {
+  margin: 0;
 }
 
 .inline-warning,

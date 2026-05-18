@@ -84,7 +84,7 @@ export function presetLoraDetails(preset, loras) {
       const id = presetLoraId(presetLora);
       const lora = loras.find((item) => item.id === id);
       return lora
-        ? { ...serializePresetLora(lora, presetLora), missing: false }
+        ? { ...serializePresetLora(lora, presetLora), missing: lora.installState === "missing" }
         : { id, name: id, weight: loraWeight(null, presetLora), missing: true };
     })
     .filter((lora) => lora.id);

@@ -16,6 +16,16 @@ const workflowOptions = [
   ["first_last_frame", "First/Last Frame"],
 ];
 
+const modeLabels = {
+  text_to_image: "Text",
+  edit_image: "Edit",
+  character_image: "Character",
+  style_variations: "Variations",
+  image_to_video: "Image Video",
+  text_to_video: "Text Video",
+  first_last_frame: "First/Last",
+};
+
 function slugify(value) {
   return String(value ?? "")
     .trim()
@@ -67,6 +77,30 @@ function loraLabel(lora) {
   return [lora.scope, lora.family ?? "compatible"].filter(Boolean).join(" | ");
 }
 
+function compactModeList(workflow) {
+  return workflowModes(workflow).map((mode) => modeLabels[mode] ?? mode).join(", ");
+}
+
+function presetStatusLabel(status) {
+  if (status.ok) {
+    return "Ready";
+  }
+  if (status.missing.length) {
+    return `Waiting for ${status.missing.join(", ")}`;
+  }
+  return `Remove ${status.incompatible.join(", ")}`;
+}
+
+function presetValidationMessage(validation) {
+  if (validation.ok) {
+    return "";
+  }
+  if (validation.missing.length) {
+    return `Save blocked: ${validation.missing.join(", ")} has not finished importing. Wait for the Queue to complete, then save again.`;
+  }
+  return `Save blocked: ${validation.incompatible.join(", ")} is not compatible with the selected model. Remove it or choose a matching model.`;
+}
+
 export function PresetManagerScreen({
   activeProject,
   createLoraImportJob,
@@ -89,9 +123,13 @@ export function PresetManagerScreen({
   const editable = !selectedPreset || selectedPreset.scope !== "builtin";
   const availableModels = modelOptions(models, form.workflow);
   const selectedModel = models.find((model) => model.id === form.model) ?? availableModels[0] ?? null;
-  const availableLoras = loras.filter((lora) => lora.installState !== "missing" && loraMatchesModel(lora, selectedModel));
+  const availableLoras = selectedModel ? loras.filter((lora) => lora.installState !== "missing" && loraMatchesModel(lora, selectedModel)) : [];
   const validation = presetValidation({ ...selectedPreset, loras: form.loras }, loras, selectedModel);
+  const validationMessage = presetValidationMessage(validation);
   const unknownSelectedLoras = form.loras.filter((selection) => !loras.some((lora) => lora.id === selection.id)).map((lora) => lora.id);
+  const pendingSelectedLoras = form.loras
+    .filter((selection) => loras.some((lora) => lora.id === selection.id && lora.installState === "missing"))
+    .map((lora) => lora.id);
   const incompatibleSelectedLoras = form.loras
     .filter((selection) => {
       const lora = loras.find((item) => item.id === selection.id);
@@ -103,12 +141,19 @@ export function PresetManagerScreen({
     : !form.name.trim()
       ? "Name is required."
       : !form.model
-        ? "Model is required."
+        ? "Choose a model before saving."
         : unknownSelectedLoras.length
-          ? `Wait for imported LoRA ${unknownSelectedLoras.join(", ")} to finish before saving.`
-          : incompatibleSelectedLoras.length
-            ? `Remove incompatible LoRA ${incompatibleSelectedLoras.join(", ")} before saving.`
-            : "";
+          ? `Save blocked: ${unknownSelectedLoras.join(", ")} is not in the LoRA library yet. Wait for the import to finish.`
+          : pendingSelectedLoras.length
+            ? `Save blocked: ${pendingSelectedLoras.join(", ")} is still importing. Wait for the Queue to complete.`
+            : incompatibleSelectedLoras.length
+              ? `Save blocked: ${incompatibleSelectedLoras.join(", ")} does not match ${selectedModel?.name ?? "the selected model"}. Remove it or choose a compatible model.`
+              : "";
+  const loraEmptyMessage = !selectedModel
+    ? "No model selected"
+    : loras.some((lora) => lora.installState === "missing")
+      ? "No installed compatible LoRAs. Imports appear here after the Queue completes."
+      : `No installed LoRAs match ${selectedModel.name ?? selectedModel.id}.`;
 
   useEffect(() => {
     if (selectedPreset && !recipePresets.some((preset) => preset.id === selectedPreset.id)) {
@@ -355,7 +400,6 @@ export function PresetManagerScreen({
             recipePresets.map((preset) => {
               const presetModel = models.find((model) => model.id === preset.model);
               const status = presetValidation(preset, loras, presetModel);
-              const label = status.ok ? "Valid" : status.missing.length ? `Missing ${status.missing.join(", ")}` : `Incompatible ${status.incompatible.join(", ")}`;
               return (
                 <button
                   className={selectedPresetId === preset.id ? "preset-row active" : "preset-row"}
@@ -369,12 +413,12 @@ export function PresetManagerScreen({
                       {preset.scope ?? "global"} | {preset.workflow}
                     </small>
                   </span>
-                  <span className={status.ok ? "preset-status ok" : "preset-status error"}>{label}</span>
+                  <span className={status.ok ? "preset-status ok" : "preset-status error"}>{presetStatusLabel(status)}</span>
                 </button>
               );
             })
           ) : (
-            <div className="empty-panel compact-panel">No presets</div>
+            <div className="empty-panel compact-panel">No presets yet</div>
           )}
         </section>
 
@@ -420,16 +464,20 @@ export function PresetManagerScreen({
             <label>
               Model
               <select disabled={!editable} onChange={(event) => updateField("model", event.target.value)} value={form.model}>
-                {availableModels.map((model) => (
-                  <option key={model.id} value={model.id}>
-                    {model.name ?? model.id}
-                  </option>
-                ))}
+                {availableModels.length ? (
+                  availableModels.map((model) => (
+                    <option key={model.id} value={model.id}>
+                      {model.name ?? model.id}
+                    </option>
+                  ))
+                ) : (
+                  <option value="">No models</option>
+                )}
               </select>
             </label>
             <label>
               Derived modes
-              <input disabled readOnly value={workflowModes(form.workflow).join(", ")} />
+              <input disabled readOnly value={compactModeList(form.workflow)} />
             </label>
           </div>
 
@@ -482,8 +530,8 @@ export function PresetManagerScreen({
 
           <section className="lora-picker" aria-label="Preset LoRAs">
             <div>
-              <strong>Managed LoRAs</strong>
-              <span>{form.loras.length}/3 selected</span>
+              <strong>Applied LoRAs</strong>
+              <span>{form.loras.length}/3 installed and compatible</span>
             </div>
             {availableLoras.length ? (
               <div className="lora-choice-list">
@@ -518,20 +566,20 @@ export function PresetManagerScreen({
                 })}
               </div>
             ) : (
-              <div className="empty-panel compact-panel">No compatible LoRAs</div>
+              <div className="empty-panel compact-panel">{loraEmptyMessage}</div>
             )}
           </section>
 
           <section className="lora-import-panel" aria-label="Import LoRA by URL">
             <div>
-              <strong>Add by URL</strong>
-              <span>{selectedModel?.family ?? "selected model family"}</span>
+              <strong>Import LoRA by URL</strong>
+              <span>{selectedModel?.family ?? "choose a model first"}</span>
             </div>
             <div className="inline-create">
               <label>
                 Source URL
                 <input
-                  disabled={!editable}
+                  disabled={!editable || !selectedModel}
                   onChange={(event) => setImportForm((current) => ({ ...current, sourceUrl: event.target.value }))}
                   placeholder="https://..."
                   value={importForm.sourceUrl}
@@ -540,24 +588,21 @@ export function PresetManagerScreen({
               <label>
                 Name
                 <input
-                  disabled={!editable}
+                  disabled={!editable || !selectedModel}
                   onChange={(event) => setImportForm((current) => ({ ...current, name: event.target.value }))}
                   placeholder="Optional"
                   value={importForm.name}
                 />
               </label>
-              <button disabled={!editable || saving || !importForm.sourceUrl.trim()} onClick={importLora} type="button">
+              <button disabled={!editable || saving || !selectedModel || !importForm.sourceUrl.trim()} onClick={importLora} type="button">
                 Queue Import
               </button>
             </div>
+            {!selectedModel ? <p className="helper-copy">Choose a model before importing so compatibility can be recorded.</p> : null}
           </section>
 
-          {!validation.ok ? (
-            <p className="inline-warning">
-              {validation.missing.length ? `Missing LoRA: ${validation.missing.join(", ")}` : `Incompatible LoRA: ${validation.incompatible.join(", ")}`}
-            </p>
-          ) : null}
-          {saveDisabledReason ? <p className="inline-warning">{saveDisabledReason}</p> : null}
+          {validationMessage ? <p className="inline-warning">{validationMessage}</p> : null}
+          {!validationMessage && saveDisabledReason ? <p className="inline-warning">{saveDisabledReason}</p> : null}
           {message.text ? <p className={message.tone === "success" ? "inline-success" : "inline-warning"}>{message.text}</p> : null}
           <button className="primary-action" disabled={Boolean(saveDisabledReason) || saving} type="submit">
             {selectedPreset ? "Save Preset" : "Create Preset"}
