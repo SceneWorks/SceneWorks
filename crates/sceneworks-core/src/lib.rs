@@ -1,3 +1,4 @@
+pub mod character_store;
 pub mod contracts;
 pub mod jobs_store;
 pub mod project_store;
