@@ -46,6 +46,7 @@ export function App() {
   const [queueSummary, setQueueSummary] = useState(null);
   const [models, setModels] = useState([]);
   const [loras, setLoras] = useState([]);
+  const [recipePresets, setRecipePresets] = useState([]);
   const [assets, setAssets] = useState([]);
   const [characters, setCharacters] = useState([]);
   const [personTracks, setPersonTracks] = useState([]);
@@ -146,6 +147,7 @@ export function App() {
       setCharacters([]);
       setPersonTracks([]);
       setTimelines([]);
+      setRecipePresets([]);
       setSelectedTimelineId(null);
       setActiveTimeline(null);
       return;
@@ -153,6 +155,7 @@ export function App() {
     refreshAssets(activeProject.id);
     refreshCharacters(activeProject.id);
     refreshLoras(activeProject.id);
+    refreshRecipePresets(activeProject.id);
     refreshPersonTracks(activeProject.id);
     refreshTimelines(activeProject.id);
   }, [activeProject?.id, authenticated, token]);
@@ -260,12 +263,13 @@ export function App() {
 
   async function refreshData() {
     try {
-      const [projectItems, jobItems, workerItems, modelItems, loraItems] = await Promise.all([
+      const [projectItems, jobItems, workerItems, modelItems, loraItems, recipePresetItems] = await Promise.all([
         apiFetch("/api/v1/projects", token),
         apiFetch("/api/v1/jobs", token),
         apiFetch("/api/v1/workers", token),
         apiFetch("/api/v1/models", token),
         apiFetch("/api/v1/loras", token),
+        apiFetch("/api/v1/recipe-presets", token),
       ]);
       setProjects(projectItems);
       setActiveProject((current) => current ?? projectItems[0] ?? null);
@@ -274,6 +278,7 @@ export function App() {
       setQueueSummary(null);
       setModels(modelItems);
       setLoras(loraItems);
+      setRecipePresets(recipePresetItems);
       setError("");
     } catch (err) {
       setError(err.message);
@@ -313,6 +318,17 @@ export function App() {
       const query = projectId ? `?projectId=${encodeURIComponent(projectId)}` : "";
       const items = await apiFetch(`/api/v1/loras${query}`, token);
       setLoras(items);
+      setError("");
+    } catch (err) {
+      setError(err.message);
+    }
+  }
+
+  async function refreshRecipePresets(projectId = activeProject?.id) {
+    try {
+      const query = projectId ? `?projectId=${encodeURIComponent(projectId)}` : "";
+      const items = await apiFetch(`/api/v1/recipe-presets${query}`, token);
+      setRecipePresets(items);
       setError("");
     } catch (err) {
       setError(err.message);
@@ -1120,6 +1136,7 @@ export function App() {
             launchRequest={studioLaunch}
             loras={loras}
             onPreview={setPreviewAsset}
+            recipePresets={recipePresets}
             requestedGpu={requestedGpu}
             selectedAsset={selectedAsset}
             setRequestedGpu={setRequestedGpu}

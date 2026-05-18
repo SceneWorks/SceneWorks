@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "capturedFrom": "sceneworks_api.main.create_app OpenAPI paths",
   "capturedAt": "2026-05-17",
-  "openapiComponentSchemasSha256": "a34d9c8d68f9c320aba8ac046846787b8e6381840da0fa76e638a93aa0300cee",
+  "openapiComponentSchemasSha256": "014fee444c85a2c6d7196817d869970c32503d96f7572dc5ba6a5125f01e246b",
   "securityBehaviors": [
     {
       "name": "projectFilePathTraversal",
@@ -37,6 +37,7 @@
     { "family": "loras", "path": "/api/v1/loras/import", "methods": ["POST"], "usedBy": ["web"] },
     { "family": "models", "path": "/api/v1/models", "methods": ["GET"], "usedBy": ["web"] },
     { "family": "models", "path": "/api/v1/models/{model_id}/download", "methods": ["POST"], "usedBy": ["web"] },
+    { "family": "recipePresets", "path": "/api/v1/recipe-presets", "methods": ["GET"], "usedBy": ["web"] },
     { "family": "projects", "path": "/api/v1/projects", "methods": ["GET", "POST"], "usedBy": ["web"] },
     { "family": "projects", "path": "/api/v1/projects/{project_id}", "methods": ["GET"], "usedBy": ["web"] },
     { "family": "assets", "path": "/api/v1/projects/{project_id}/assets", "methods": ["GET", "POST"], "usedBy": ["web"] },

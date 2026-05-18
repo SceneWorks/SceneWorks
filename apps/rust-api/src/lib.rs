@@ -429,6 +429,7 @@ pub fn create_app(settings: Settings) -> Result<Router, JobsStoreError> {
         )
         .route("/api/v1/loras", get(list_loras))
         .route("/api/v1/loras/import", post(create_lora_import_job))
+        .route("/api/v1/recipe-presets", get(list_recipe_presets))
         .route("/api/v1/jobs", get(list_jobs).post(create_job))
         .route("/api/v1/jobs/claim", post(claim_job))
         .route("/api/v1/jobs/events", get(job_events))
@@ -471,6 +472,12 @@ struct AssetsQuery {
 #[serde(rename_all = "camelCase")]
 struct LorasQuery {
     model_family: Option<String>,
+    project_id: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RecipePresetsQuery {
     project_id: Option<String>,
 }
 
@@ -1325,6 +1332,15 @@ async fn list_loras(
     Ok(Json(items))
 }
 
+async fn list_recipe_presets(
+    State(state): State<AppState>,
+    Query(query): Query<RecipePresetsQuery>,
+) -> Result<Json<Vec<Value>>, ApiError> {
+    Ok(Json(
+        recipe_preset_catalog(&state, query.project_id.as_deref()).await?,
+    ))
+}
+
 async fn create_lora_import_job(
     State(state): State<AppState>,
     ApiJson(payload): ApiJson<LoraImportRequest>,
@@ -2002,6 +2018,59 @@ async fn lora_catalog(state: &AppState, project_id: Option<&str>) -> Result<Vec<
     Ok(loras)
 }
 
+async fn recipe_preset_catalog(
+    state: &AppState,
+    project_id: Option<&str>,
+) -> Result<Vec<Value>, ApiError> {
+    let manifest_dir = state.settings.config_dir.join("manifests");
+    let builtin_manifest = manifest_dir.join("builtin.recipe-presets.jsonc");
+    let user_manifest = manifest_dir.join("user.recipe-presets.jsonc");
+    let builtin = load_manifest_entries(state, &builtin_manifest, "presets")
+        .await?
+        .into_iter()
+        .map(|preset| normalize_recipe_preset_entry(preset, "builtin", &builtin_manifest))
+        .collect::<Result<Vec<_>, _>>()?;
+    let user = load_manifest_entries(state, &user_manifest, "presets")
+        .await?
+        .into_iter()
+        .map(|preset| normalize_recipe_preset_entry(preset, "global", &user_manifest))
+        .collect::<Result<Vec<_>, _>>()?;
+    let mut presets = merge_entries_by_id(builtin, user);
+    if let Some(project_id) = project_id {
+        let project_path = project_path_for_id(state.clone(), project_id).await?;
+        let project_manifest = project_path.join("recipes").join("presets.jsonc");
+        let project_presets = load_manifest_entries(state, &project_manifest, "presets")
+            .await?
+            .into_iter()
+            .map(|preset| normalize_recipe_preset_entry(preset, "project", &project_manifest))
+            .collect::<Result<Vec<_>, _>>()?;
+        presets = merge_entries_by_id(presets, project_presets);
+    }
+    for preset in presets.iter_mut() {
+        finalize_recipe_preset_entry(preset)?;
+    }
+    presets.sort_by(|left, right| {
+        let left_key = (
+            left.get("scope")
+                .and_then(Value::as_str)
+                .unwrap_or_default(),
+            left.get("name").and_then(Value::as_str).unwrap_or_default(),
+        );
+        let right_key = (
+            right
+                .get("scope")
+                .and_then(Value::as_str)
+                .unwrap_or_default(),
+            right
+                .get("name")
+                .and_then(Value::as_str)
+                .unwrap_or_default(),
+        );
+        left_key.cmp(&right_key)
+    });
+    Ok(presets)
+}
+
 async fn project_path_for_id(state: AppState, project_id: &str) -> Result<PathBuf, ApiError> {
     let project_id = project_id.to_owned();
     let project = project_call(state, move |store| store.get_project(&project_id)).await?;
@@ -2054,6 +2123,40 @@ fn normalize_lora_entry(
         Value::String(install_state.to_owned()),
     );
     Ok(lora)
+}
+
+fn normalize_recipe_preset_entry(
+    mut preset: Value,
+    scope: &str,
+    manifest_path: &FsPath,
+) -> Result<Value, ApiError> {
+    let object = preset
+        .as_object_mut()
+        .ok_or_else(|| ApiError::internal("Recipe preset manifest entry must be an object"))?;
+    object
+        .entry("scope".to_owned())
+        .or_insert_with(|| Value::String(scope.to_owned()));
+    object.insert(
+        "manifestPath".to_owned(),
+        Value::String(manifest_path.display().to_string()),
+    );
+    Ok(preset)
+}
+
+fn finalize_recipe_preset_entry(preset: &mut Value) -> Result<(), ApiError> {
+    let object = preset
+        .as_object_mut()
+        .ok_or_else(|| ApiError::internal("Recipe preset manifest entry must be an object"))?;
+    object
+        .entry("builtInLoras".to_owned())
+        .or_insert_with(|| Value::Array(Vec::new()));
+    object
+        .entry("defaults".to_owned())
+        .or_insert_with(|| Value::Object(JsonObject::new()));
+    object
+        .entry("prompt".to_owned())
+        .or_insert_with(|| Value::Object(JsonObject::new()));
+    Ok(())
 }
 
 async fn load_manifest_entries(
@@ -3556,6 +3659,35 @@ mod tests {
             r#"{ "schemaVersion": 1, "loras": [] }"#,
         )
         .expect("user loras writes");
+        std::fs::write(
+            config_dir.join("builtin.recipe-presets.jsonc"),
+            r#"
+            {
+              "schemaVersion": 1,
+              "presets": [
+                {
+                  "id": "cinematic",
+                  "name": "Cinematic",
+                  "defaults": { "count": 4 },
+                  "builtInLoras": [{ "id": "style-lora", "weight": 0.5 }]
+                }
+              ]
+            }
+            "#,
+        )
+        .expect("builtin recipe presets writes");
+        std::fs::write(
+            config_dir.join("user.recipe-presets.jsonc"),
+            r#"
+            {
+              "schemaVersion": 1,
+              "presets": [
+                { "id": "cinematic", "name": "My Cinematic", "defaults": { "count": 2 } }
+              ]
+            }
+            "#,
+        )
+        .expect("user recipe presets writes");
         let marker_dir = temp_dir.path().join("data/models/owner__model");
         std::fs::create_dir_all(&marker_dir).expect("model dir creates");
         std::fs::write(marker_dir.join(".sceneworks-download-complete.json"), "{}")
@@ -3582,6 +3714,16 @@ mod tests {
         assert_eq!(status, StatusCode::OK);
         assert_eq!(loras.as_array().unwrap().len(), 1);
         assert_eq!(loras[0]["id"], "style-lora");
+
+        let (status, presets) =
+            request(app.clone(), "GET", "/api/v1/recipe-presets", Value::Null).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(presets.as_array().unwrap().len(), 1);
+        assert_eq!(presets[0]["id"], "cinematic");
+        assert_eq!(presets[0]["name"], "My Cinematic");
+        assert_eq!(presets[0]["scope"], "global");
+        assert_eq!(presets[0]["defaults"]["count"], 2);
+        assert_eq!(presets[0]["builtInLoras"][0]["id"], "style-lora");
 
         let (status, job) = request(
             app.clone(),

@@ -354,4 +354,70 @@ describe("SceneWorks app shell", () => {
       }),
     );
   });
+
+  it("applies recipe preset defaults and hidden preset LoRAs to image jobs", async () => {
+    const createImageJob = vi.fn();
+    root = createRoot(container);
+    await act(async () => {
+      root.render(
+        <ImageStudio
+          activeProject={{ id: "project-1", name: "Noir" }}
+          assets={[]}
+          characters={[]}
+          createImageJob={createImageJob}
+          deleteAsset={() => {}}
+          gpuOptions={["auto"]}
+          imageModels={[{ id: "z_image_turbo", name: "Z-Image", type: "image", family: "z-image" }]}
+          latestAssets={[]}
+          loras={[
+            {
+              id: "builtin_cinematic_detail",
+              name: "Cinematic Detail",
+              family: "z-image",
+              scope: "builtin",
+              defaultWeight: 0.55,
+              presetManaged: true,
+            },
+          ]}
+          onPreview={() => {}}
+          purgeAsset={() => {}}
+          recipePresets={[
+            {
+              id: "cinematic",
+              name: "Cinematic",
+              model: "z_image_turbo",
+              defaults: { count: 2, resolution: "1280x720", negativePrompt: "flat lighting" },
+              prompt: { suffix: "cinematic lighting" },
+              builtInLoras: [{ id: "builtin_cinematic_detail", weight: 0.4 }],
+            },
+          ]}
+          requestedGpu="auto"
+          selectedAsset={null}
+          setRequestedGpu={() => {}}
+          updateAssetStatus={() => {}}
+        />,
+      );
+    });
+
+    expect(container.textContent).toContain("Cinematic");
+    expect(container.textContent).not.toContain("Cinematic Detail");
+
+    await act(async () => {
+      [...container.querySelectorAll("button")].find((button) => button.textContent === "Generate").click();
+    });
+
+    expect(createImageJob).toHaveBeenCalledWith(
+      expect.objectContaining({
+        count: 2,
+        width: 1280,
+        height: 720,
+        negativePrompt: "flat lighting",
+        prompt: expect.stringContaining("cinematic lighting"),
+        loras: [
+          expect.objectContaining({ id: "builtin_cinematic_detail", scope: "builtin", weight: 0.4, presetManaged: true }),
+        ],
+        advanced: expect.objectContaining({ recipePresetId: "cinematic" }),
+      }),
+    );
+  });
 });

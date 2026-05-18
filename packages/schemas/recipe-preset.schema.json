@@ -1,0 +1,14 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://sceneworks.local/schemas/recipe-preset.schema.json",
+  "title": "SceneWorks Recipe Preset Manifest",
+  "type": "object",
+  "required": ["schemaVersion", "presets"],
+  "properties": {
+    "schemaVersion": { "type": "integer", "minimum": 1 },
+    "presets": {
+      "type": "array",
+      "items": { "type": "object" }
+    }
+  }
+}
