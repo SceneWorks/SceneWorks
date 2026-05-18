@@ -628,6 +628,10 @@ button:disabled {
 }
 
 .local-job-main h3 {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  overflow: hidden;
   margin: 0;
   font-size: 15px;
   line-height: 1.35;
@@ -646,6 +650,16 @@ button:disabled {
 .status-badge.installed {
   border-color: #6ec6b8;
   background: #183f3a;
+}
+
+.status-badge.completed {
+  color: #6ec6b8;
+}
+
+.status-badge.failed,
+.status-badge.canceled,
+.status-badge.interrupted {
+  color: #e28e78;
 }
 
 .lora-panel {

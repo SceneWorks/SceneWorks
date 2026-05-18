@@ -4,7 +4,8 @@ import { formatSeconds, percent } from "../formatting.js";
 const localErrorStatuses = new Set(["failed", "canceled", "interrupted"]);
 
 function formatJobType(type) {
-  return String(type ?? "job").replaceAll("_", " ");
+  const label = String(type ?? "job").replaceAll("_", " ");
+  return label.charAt(0).toUpperCase() + label.slice(1);
 }
 
 function jobTitle(job) {
@@ -17,6 +18,9 @@ function jobMessage(job) {
   }
   if (job.status === "queued") {
     return "Queued and waiting for an eligible worker.";
+  }
+  if (job.status === "completed") {
+    return "Finished. Fetching result...";
   }
   if (job.stage && job.stage !== job.status) {
     return `Stage: ${formatJobType(job.stage)}.`;
@@ -35,7 +39,7 @@ export function JobProgressCard({ job, label, onOpenQueue }) {
           <p className="eyebrow">{label ?? formatJobType(job.type)}</p>
           <h3>{jobTitle(job)}</h3>
         </div>
-        <span className="status-badge">{job.status}</span>
+        <span className={`status-badge ${job.status}`}>{job.status}</span>
       </div>
       <div className="progress-track" aria-label={`${progressLabel} complete`}>
         <span style={{ width: progressLabel }} />
@@ -46,9 +50,9 @@ export function JobProgressCard({ job, label, onOpenQueue }) {
         <span>GPU {job.assignedGpu ?? job.requestedGpu ?? "auto"}</span>
       </div>
       {message ? <p className={isError ? "job-message error-text" : "job-message"}>{message}</p> : null}
-      {isError && onOpenQueue ? (
+      {onOpenQueue ? (
         <button className="secondary-action" onClick={onOpenQueue} type="button">
-          Open Queue
+          {isError ? "Open Queue" : "View in Queue"}
         </button>
       ) : null}
     </article>

@@ -26,22 +26,8 @@ export function ModelManagerScreen({ jobs, loras, models, onDownloadModel, onOpe
     }
   }, [families.join("|"), familyFilter]);
 
-  function activeDownloadFor(model) {
-    return jobs.find(
-      (job) =>
-        job.type === "model_download" &&
-        job.payload?.modelId === model.id &&
-        !terminalStatuses.has(job.status),
-    );
-  }
-
-  function localDownloadFor(model) {
-    return jobs.find(
-      (job) =>
-        job.type === "model_download" &&
-        job.payload?.modelId === model.id &&
-        job.status !== "completed",
-    );
+  function downloadJobsFor(model) {
+    return jobs.filter((job) => job.type === "model_download" && job.payload?.modelId === model.id);
   }
 
   return (
@@ -66,9 +52,10 @@ export function ModelManagerScreen({ jobs, loras, models, onDownloadModel, onOpe
 
       <div className="model-grid">
         {models.map((model) => {
-          const downloadJob = activeDownloadFor(model);
+          const downloadJobs = downloadJobsFor(model);
+          const downloadJob = downloadJobs.find((job) => !terminalStatuses.has(job.status));
           const installed = model.installState === "installed";
-          const localDownloadJob = installed ? null : localDownloadFor(model);
+          const localDownloadJob = installed ? null : downloadJobs.find((job) => job.status !== "completed");
           const failedDownload = localDownloadJob && terminalStatuses.has(localDownloadJob.status);
           return (
             <article className="model-card" key={model.id}>

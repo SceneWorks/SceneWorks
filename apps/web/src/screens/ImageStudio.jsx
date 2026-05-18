@@ -19,10 +19,11 @@ export function ImageStudio({
   purgeAsset,
   gpuOptions,
   imageModels,
-  jobs = [],
   latestAssets,
   launchRequest,
+  localJobs: trackedLocalJobs = [],
   loras = [],
+  onLocalJobCreated,
   onOpenQueue,
   onPreview,
   recipePresets = [],
@@ -45,7 +46,7 @@ export function ImageStudio({
   const [characterLookId, setCharacterLookId] = useState("");
   const [selectedLoraIds, setSelectedLoraIds] = useState([]);
   const [showIncompatibleLoras, setShowIncompatibleLoras] = useState(false);
-  const [localJobIds, setLocalJobIds] = useState([]);
+  const [submitting, setSubmitting] = useState(false);
 
   function serializeLora(lora, override = {}) {
     return {
@@ -177,33 +178,46 @@ export function ImageStudio({
     });
   }
 
-  const localJobs = localJobIds
-    .map((id) => jobs.find((job) => job.id === id))
-    .filter((job) => job && job.status !== "completed");
+  function resultVisible(job) {
+    if (job.result?.generationSetId) {
+      return latestAssets.some((asset) => asset.generationSetId === job.result.generationSetId);
+    }
+    const assetIds = job.result?.assetIds ?? [];
+    return assetIds.length > 0 && assetIds.every((id) => assets.some((asset) => asset.id === id));
+  }
+
+  const localJobs = trackedLocalJobs.filter((job) => job.status !== "completed" || !resultVisible(job));
+  const hasReviewContent = Boolean(localJobs.length || latestAssets.length);
 
   async function submit(event) {
     event.preventDefault();
-    const job = await createImageJob({
-      mode,
-      prompt,
-      negativePrompt,
-      model,
-      count,
-      seed: seed === "" ? null : Number(seed),
-      width,
-      height,
-      stylePreset,
-      recipePresetId: selectedRecipePreset?.id ?? null,
-      characterId: mode === "character_image" ? characterId || null : null,
-      characterLookId: mode === "character_image" ? characterLookId || null : null,
-      sourceAssetId: mode === "edit_image" ? sourceAssetId || null : null,
-      loras: selectedLoras.map((lora) => serializeLora(lora)),
-      advanced: {
-        resolution,
-      },
-    });
-    if (job?.id) {
-      setLocalJobIds((ids) => [job.id, ...ids.filter((id) => id !== job.id)].slice(0, 4));
+    if (submitting) {
+      return;
+    }
+    setSubmitting(true);
+    try {
+      const job = await createImageJob({
+        mode,
+        prompt,
+        negativePrompt,
+        model,
+        count,
+        seed: seed === "" ? null : Number(seed),
+        width,
+        height,
+        stylePreset,
+        recipePresetId: selectedRecipePreset?.id ?? null,
+        characterId: mode === "character_image" ? characterId || null : null,
+        characterLookId: mode === "character_image" ? characterLookId || null : null,
+        sourceAssetId: mode === "edit_image" ? sourceAssetId || null : null,
+        loras: selectedLoras.map((lora) => serializeLora(lora)),
+        advanced: {
+          resolution,
+        },
+      });
+      onLocalJobCreated?.(job);
+    } finally {
+      setSubmitting(false);
     }
   }
 
@@ -418,10 +432,10 @@ export function ImageStudio({
           ) : null}
           <button
             className="primary-action"
-            disabled={!activeProject || !prompt.trim() || (mode === "character_image" && !characterId) || Boolean(presetMissingLoras.length)}
+            disabled={submitting || !activeProject || !prompt.trim() || (mode === "character_image" && !characterId) || Boolean(presetMissingLoras.length)}
             type="submit"
           >
-            Generate
+            {submitting ? "Queueing..." : "Generate"}
           </button>
         </section>
 
@@ -450,7 +464,7 @@ export function ImageStudio({
                 />
               ))}
             </div>
-          ) : localJobs.length ? null : (
+          ) : hasReviewContent ? null : (
             <div className="empty-panel">No fresh image batch</div>
           )}
         </section>

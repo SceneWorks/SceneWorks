@@ -40,6 +40,8 @@ function failedJobNotice(job) {
   return `${label}: ${detail}`;
 }
 
+const localJobStackLimit = 4;
+
 export function App() {
   const [health, setHealth] = useState(null);
   const [access, setAccess] = useState({ authRequired: false });
@@ -49,6 +51,7 @@ export function App() {
   const [activeView, setActiveView] = useState("Library");
   const [projectName, setProjectName] = useState("");
   const [jobs, setJobs] = useState([]);
+  const [localGenerationJobIds, setLocalGenerationJobIds] = useState({ image: [], video: [] });
   const [workers, setWorkers] = useState([]);
   const [queueSummary, setQueueSummary] = useState(null);
   const [models, setModels] = useState([]);
@@ -68,6 +71,8 @@ export function App() {
   const [previewAsset, setPreviewAsset] = useState(null);
   const [studioLaunch, setStudioLaunch] = useState(null);
   const [error, setError] = useState("");
+  const activeViewRef = useRef(activeView);
+  const localGenerationJobIdsRef = useRef(localGenerationJobIds);
   const selectedTimelineIdRef = useRef(null);
   const timelineApplyQueueRef = useRef(Promise.resolve());
 
@@ -90,6 +95,14 @@ export function App() {
   );
   const latestImageAssets = useMemo(() => latestAssets.filter((asset) => asset.type === "image"), [latestAssets]);
   const latestVideoAssets = useMemo(() => latestAssets.filter((asset) => asset.type === "video"), [latestAssets]);
+  const imageLocalJobs = useMemo(
+    () => localGenerationJobIds.image.map((id) => jobs.find((job) => job.id === id)).filter(Boolean),
+    [jobs, localGenerationJobIds.image],
+  );
+  const videoLocalJobs = useMemo(
+    () => localGenerationJobIds.video.map((id) => jobs.find((job) => job.id === id)).filter(Boolean),
+    [jobs, localGenerationJobIds.video],
+  );
   const queueCounts = useMemo(() => {
     if (queueSummary?.counts) {
       return {
@@ -126,6 +139,14 @@ export function App() {
     () => assets.filter((asset) => ["image", "video", "upload", "frame", "render"].includes(asset.type)),
     [assets],
   );
+
+  useEffect(() => {
+    activeViewRef.current = activeView;
+  }, [activeView]);
+
+  useEffect(() => {
+    localGenerationJobIdsRef.current = localGenerationJobIds;
+  }, [localGenerationJobIds]);
 
   useEffect(() => {
     selectedTimelineIdRef.current = selectedTimelineId;
@@ -205,7 +226,7 @@ export function App() {
       if (job.status === "completed" && job.type === "model_download") {
         refreshData();
       }
-      if (job.status === "failed") {
+      if (job.status === "failed" && !hasVisibleLocalFailure(job)) {
         setError(failedJobNotice(job));
       }
     }
@@ -615,6 +636,29 @@ export function App() {
       setError(err.message);
       return null;
     }
+  }
+
+  function rememberLocalGenerationJob(kind, job) {
+    if (!job?.id) {
+      return;
+    }
+    setLocalGenerationJobIds((current) => ({
+      ...current,
+      // Keep the local review stack compact for burst submissions.
+      [kind]: [job.id, ...current[kind].filter((id) => id !== job.id)].slice(0, localJobStackLimit),
+    }));
+  }
+
+  function hasVisibleLocalFailure(job) {
+    const active = activeViewRef.current;
+    const localIds = localGenerationJobIdsRef.current;
+    if (active === "Image" && localIds.image.includes(job.id)) {
+      return true;
+    }
+    if (active === "Video" && localIds.video.includes(job.id)) {
+      return true;
+    }
+    return active === "Models" && job.type === "model_download";
   }
 
   async function withCharacterApi(callback) {
@@ -1241,10 +1285,11 @@ export function App() {
             createImageJob={createImageJob}
             gpuOptions={gpuOptions}
             imageModels={imageModels}
-            jobs={jobs}
             latestAssets={latestImageAssets}
             launchRequest={studioLaunch}
             loras={loras}
+            localJobs={imageLocalJobs}
+            onLocalJobCreated={(job) => rememberLocalGenerationJob("image", job)}
             onOpenQueue={() => setActiveView("Queue")}
             onPreview={setPreviewAsset}
             recipePresets={recipePresets}
@@ -1271,7 +1316,8 @@ export function App() {
             latestAssets={latestVideoAssets}
             launchRequest={studioLaunch}
             loras={loras}
-            jobs={jobs}
+            localJobs={videoLocalJobs}
+            onLocalJobCreated={(job) => rememberLocalGenerationJob("video", job)}
             onOpenQueue={() => setActiveView("Queue")}
             onPreview={setPreviewAsset}
             personTracks={personTracks}

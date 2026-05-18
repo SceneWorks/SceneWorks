@@ -24,6 +24,8 @@ export function VideoStudio({
   launchRequest,
   loras = [],
   jobs = [],
+  localJobs: trackedLocalJobs = [],
+  onLocalJobCreated,
   onOpenQueue,
   onPreview,
   personTracks = [],
@@ -59,7 +61,7 @@ export function VideoStudio({
   const [trackName, setTrackName] = useState("Selected person");
   const [comparisonMode, setComparisonMode] = useState("side_by_side");
   const [abSide, setAbSide] = useState("replacement");
-  const [localJobIds, setLocalJobIds] = useState([]);
+  const [submitting, setSubmitting] = useState(false);
   const capabilities = selectedModel?.capabilities ?? [];
   const supportsMode = capabilities.includes(mode);
   const implementedMode = ["image_to_video", "text_to_video", "first_last_frame", "extend_clip", "replace_person"].includes(mode);
@@ -231,43 +233,56 @@ export function VideoStudio({
     full_person_replace_outfit: "Full Person, Replace Outfit",
   };
 
-  const localJobs = localJobIds
-    .map((id) => jobs.find((job) => job.id === id))
-    .filter((job) => job && job.status !== "completed");
+  function resultVisible(job) {
+    if (job.result?.generationSetId) {
+      return latestAssets.some((asset) => asset.generationSetId === job.result.generationSetId);
+    }
+    const assetIds = job.result?.assetIds ?? [];
+    return assetIds.length > 0 && assetIds.every((id) => assets.some((asset) => asset.id === id));
+  }
+
+  const localJobs = trackedLocalJobs.filter((job) => job.status !== "completed" || !resultVisible(job));
+  const hasReviewContent = Boolean(localJobs.length || latestAssets.length);
 
   async function submit(event) {
     event.preventDefault();
-    const job = await createVideoJob({
-      mode,
-      prompt,
-      negativePrompt,
-      model,
-      duration: Number(duration),
-      fps: Number(fps),
-      width,
-      height,
-      quality,
-      seed: seed === "" ? null : Number(seed),
-      recipePresetId: selectedRecipePreset?.id ?? null,
-      characterId: characterId || null,
-      characterLookId: characterLookId || null,
-      sourceAssetId: ["image_to_video", "first_last_frame"].includes(mode) ? sourceAssetId || null : null,
-      lastFrameAssetId: mode === "first_last_frame" ? lastFrameAssetId || null : null,
-      sourceClipAssetId: ["extend_clip", "replace_person"].includes(mode) ? sourceClipAssetId || null : null,
-      personTrackId: mode === "replace_person" ? personTrackId || null : null,
-      replacementMode: mode === "replace_person" ? replacementMode : "face_only",
-      loras: presetLoraDetails.filter((lora) => !lora.missing),
-      advanced: {
-        resolution,
-        durationHint,
-        recipePresetName: selectedRecipePreset?.name ?? null,
-        recipePresetPrompt: selectedRecipePreset?.prompt ?? null,
-        selectedPersonTrack: selectedTrack ?? null,
-        replacementModeLabel: replacementModeLabels[replacementMode],
-      },
-    });
-    if (job?.id) {
-      setLocalJobIds((ids) => [job.id, ...ids.filter((id) => id !== job.id)].slice(0, 4));
+    if (submitting) {
+      return;
+    }
+    setSubmitting(true);
+    try {
+      const job = await createVideoJob({
+        mode,
+        prompt,
+        negativePrompt,
+        model,
+        duration: Number(duration),
+        fps: Number(fps),
+        width,
+        height,
+        quality,
+        seed: seed === "" ? null : Number(seed),
+        recipePresetId: selectedRecipePreset?.id ?? null,
+        characterId: characterId || null,
+        characterLookId: characterLookId || null,
+        sourceAssetId: ["image_to_video", "first_last_frame"].includes(mode) ? sourceAssetId || null : null,
+        lastFrameAssetId: mode === "first_last_frame" ? lastFrameAssetId || null : null,
+        sourceClipAssetId: ["extend_clip", "replace_person"].includes(mode) ? sourceClipAssetId || null : null,
+        personTrackId: mode === "replace_person" ? personTrackId || null : null,
+        replacementMode: mode === "replace_person" ? replacementMode : "face_only",
+        loras: presetLoraDetails.filter((lora) => !lora.missing),
+        advanced: {
+          resolution,
+          durationHint,
+          recipePresetName: selectedRecipePreset?.name ?? null,
+          recipePresetPrompt: selectedRecipePreset?.prompt ?? null,
+          selectedPersonTrack: selectedTrack ?? null,
+          replacementModeLabel: replacementModeLabels[replacementMode],
+        },
+      });
+      onLocalJobCreated?.(job);
+    } finally {
+      setSubmitting(false);
     }
   }
 
@@ -510,8 +525,8 @@ export function VideoStudio({
               Preset cannot run until LoRA import finishes: {presetMissingLoras.map((lora) => lora.id).join(", ")}. Wait for the Queue or choose another preset.
             </p>
           ) : null}
-          <button className="primary-action" disabled={!canSubmit} type="submit">
-            {mode === "replace_person" ? "Replace Person" : "Generate Clip"}
+          <button className="primary-action" disabled={submitting || !canSubmit} type="submit">
+            {submitting ? "Queueing..." : mode === "replace_person" ? "Replace Person" : "Generate Clip"}
           </button>
         </section>
 
@@ -540,7 +555,7 @@ export function VideoStudio({
                 />
               ))}
             </div>
-          ) : localJobs.length ? null : (
+          ) : hasReviewContent ? null : (
             <div className="empty-panel">No fresh video clip</div>
           )}
 
