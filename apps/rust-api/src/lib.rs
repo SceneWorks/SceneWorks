@@ -869,6 +869,8 @@ struct LoraImportRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     repo: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    source_url: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     source_path: Option<String>,
     #[serde(default)]
     files: Vec<String>,
@@ -2272,11 +2274,15 @@ async fn create_lora_import_job(
     ApiJson(payload): ApiJson<LoraImportRequest>,
 ) -> Result<(StatusCode, Json<JobSnapshot>), ApiError> {
     if option_str_is_empty(payload.repo.as_deref())
+        && option_str_is_empty(payload.source_url.as_deref())
         && option_str_is_empty(payload.source_path.as_deref())
     {
         return Err(ApiError::bad_request(
-            "Provide a Hugging Face repo or source path",
+            "Provide a Hugging Face repo, source URL, or source path",
         ));
+    }
+    if let Some(source_url) = payload.source_url.as_deref() {
+        validate_source_url(source_url)?;
     }
     if !matches!(payload.scope.as_str(), "global" | "project") {
         return Err(ApiError::bad_request(
@@ -2287,6 +2293,7 @@ async fn create_lora_import_job(
         .name
         .clone()
         .or_else(|| payload.repo.clone())
+        .or_else(|| payload.source_url.as_deref().and_then(source_url_file_stem))
         .or_else(|| {
             payload.source_path.as_deref().and_then(|path| {
                 FsPath::new(path)
@@ -2338,8 +2345,9 @@ async fn create_lora_import_job(
         "name": name,
         "scope": payload.scope.clone(),
         "source": {
-            "provider": if payload.repo.is_some() { "huggingface" } else { "local" },
+            "provider": lora_source_provider(&payload),
             "repo": payload.repo.clone(),
+            "url": payload.source_url.clone(),
             "path": source_path,
         },
         "files": payload.files.clone(),
@@ -4000,6 +4008,50 @@ fn safe_download_dir(repo: &str) -> String {
     }
 }
 
+fn validate_source_url(source_url: &str) -> Result<(), ApiError> {
+    let url = reqwest::Url::parse(source_url)
+        .map_err(|_| ApiError::bad_request("LoRA sourceUrl must be a valid URL"))?;
+    if !matches!(url.scheme(), "http" | "https") {
+        return Err(ApiError::bad_request(
+            "LoRA sourceUrl must use http or https",
+        ));
+    }
+    if source_url_file_name(source_url).is_none() {
+        return Err(ApiError::bad_request(
+            "LoRA sourceUrl must include a filename",
+        ));
+    }
+    Ok(())
+}
+
+fn source_url_file_name(source_url: &str) -> Option<String> {
+    let url = reqwest::Url::parse(source_url).ok()?;
+    url.path_segments()?
+        .next_back()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_owned)
+}
+
+fn source_url_file_stem(source_url: &str) -> Option<String> {
+    source_url_file_name(source_url).and_then(|file_name| {
+        FsPath::new(&file_name)
+            .file_stem()
+            .and_then(|value| value.to_str())
+            .map(str::to_owned)
+    })
+}
+
+fn lora_source_provider(payload: &LoraImportRequest) -> &'static str {
+    if payload.repo.is_some() {
+        "huggingface"
+    } else if payload.source_url.is_some() {
+        "url"
+    } else {
+        "local"
+    }
+}
+
 fn slugify_lora_id(value: &str) -> String {
     let mut output = String::new();
     let mut previous_separator = false;
@@ -5430,6 +5482,35 @@ mod tests {
                 || value.ends_with("data\\loras\\imported_lora")));
         assert_eq!(job["payload"]["manifestEntry"]["scope"], "global");
         assert!(job["payload"].get("sourcePath").is_none());
+
+        let app = create_app(test_settings(&temp_dir)).expect("app creates");
+        let (status, url_job) = request(
+            app,
+            "POST",
+            "/api/v1/loras/import",
+            json!({
+                "sourceUrl": "https://example.com/loras/detail.safetensors",
+                "name": "Detail LoRA",
+                "family": "z-image"
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED);
+        assert_eq!(url_job["type"], "lora_import");
+        assert_eq!(
+            url_job["payload"]["sourceUrl"],
+            "https://example.com/loras/detail.safetensors"
+        );
+        assert_eq!(url_job["payload"]["loraId"], "detail_lora");
+        assert_eq!(
+            url_job["payload"]["manifestEntry"]["source"]["provider"],
+            "url"
+        );
+        assert_eq!(
+            url_job["payload"]["manifestEntry"]["source"]["url"],
+            "https://example.com/loras/detail.safetensors"
+        );
+        assert_eq!(url_job["payload"]["manifestEntry"]["family"], "z-image");
     }
 
     #[tokio::test]

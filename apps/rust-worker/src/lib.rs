@@ -999,11 +999,14 @@ async fn run_lora_import_job(
     job: &JobSnapshot,
 ) -> WorkerResult<()> {
     let repo = optional_payload_string(&job.payload, "repo");
+    let source_url = optional_payload_string(&job.payload, "sourceUrl");
     let source_path = optional_payload_string(&job.payload, "sourcePath");
     let target_name = optional_payload_string(&job.payload, "loraId")
         .or_else(|| optional_payload_string(&job.payload, "name"))
-        .or(repo)
-        .map(safe_download_dir)
+        .map(str::to_owned)
+        .or_else(|| repo.map(str::to_owned))
+        .or_else(|| source_url.and_then(source_url_file_stem))
+        .map(|value| safe_download_dir(&value))
         .unwrap_or_else(|| {
             source_path
                 .and_then(|path| {
@@ -1069,12 +1072,25 @@ async fn run_lora_import_job(
         .await?;
     } else if let Some(source_path) = source_path {
         copy_lora_source(Path::new(source_path), &target_dir).await?;
+    } else if let Some(source_url) = source_url {
+        download_lora_source_url(
+            &DownloadContext {
+                api,
+                client: http_client,
+                settings,
+                job_id: &job.id,
+                cancel_message: "LoRA import canceled by user.",
+            },
+            source_url,
+            &target_dir,
+        )
+        .await?;
     } else {
         return fail_job(
             api,
             &job.id,
             "LoRA import failed.",
-            Some("Provide repo or sourcePath for LoRA import".to_owned()),
+            Some("Provide repo, sourceUrl, or sourcePath for LoRA import".to_owned()),
         )
         .await;
     }
@@ -2243,6 +2259,50 @@ async fn download_snapshot(
     Ok(())
 }
 
+async fn download_lora_source_url(
+    context: &DownloadContext<'_>,
+    source_url: &str,
+    target_dir: &Path,
+) -> WorkerResult<()> {
+    let file_name = source_url_file_name(source_url).ok_or_else(|| {
+        WorkerError::InvalidPayload("LoRA sourceUrl must include a filename".to_owned())
+    })?;
+    tokio::fs::create_dir_all(target_dir).await?;
+    let target_path = target_dir.join(file_name);
+    let mut response = context
+        .client
+        .get(source_url)
+        .send()
+        .await?
+        .error_for_status()?;
+    let total_bytes = response.content_length();
+    let mut progress = DownloadProgress::new(
+        source_url,
+        0,
+        total_bytes,
+        progress_report_interval(context.settings),
+    );
+    let mut output = tokio::fs::File::create(&target_path).await?;
+    let mut interval = tokio::time::interval(progress.report_interval());
+    interval.set_missed_tick_behavior(MissedTickBehavior::Delay);
+    interval.tick().await;
+    loop {
+        tokio::select! {
+            chunk = response.chunk() => {
+                let Some(chunk) = chunk? else {
+                    break;
+                };
+                output.write_all(&chunk).await?;
+                progress.record_transferred(u64::try_from(chunk.len()).unwrap_or(u64::MAX));
+            }
+            _ = interval.tick() => {
+                report_download_progress(context, &progress).await?;
+            }
+        }
+    }
+    Ok(())
+}
+
 async fn report_download_progress(
     context: &DownloadContext<'_>,
     progress: &DownloadProgress<'_>,
@@ -2461,6 +2521,24 @@ pub fn safe_download_dir(value: &str) -> String {
     } else {
         output
     }
+}
+
+fn source_url_file_name(source_url: &str) -> Option<String> {
+    let url = reqwest::Url::parse(source_url).ok()?;
+    url.path_segments()?
+        .next_back()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_owned)
+}
+
+fn source_url_file_stem(source_url: &str) -> Option<String> {
+    source_url_file_name(source_url).and_then(|file_name| {
+        Path::new(&file_name)
+            .file_stem()
+            .and_then(|value| value.to_str())
+            .map(str::to_owned)
+    })
 }
 
 async fn directory_size(path: &Path) -> u64 {
@@ -3576,12 +3654,12 @@ mod tests {
     use super::{
         allow_pattern_matches, auto_worker_specs, bounded_tail, candidate_people,
         child_environment, concat_file_contents, copy_lora_source, cpu_gpu, cpu_worker_id,
-        crossfade_duration, download_progress_payload, fallback_gpu, fresh_asset_id, gpu_worker_id,
-        now_rfc3339, output_dimensions, parse_nvidia_smi_gpus,
+        crossfade_duration, download_lora_source_url, download_progress_payload, fallback_gpu,
+        fresh_asset_id, gpu_worker_id, now_rfc3339, output_dimensions, parse_nvidia_smi_gpus,
         restart_exited_children_with_spawner, run_ffmpeg, safe_download_dir, safe_project_path,
         value_f64, visible_gpu_ids, worker_capabilities_with_utility, write_model_install_marker,
-        HuggingFaceSnapshot, Settings, SupervisedChild, WorkerError, WorkerSpec,
-        DEFAULT_TRANSITION_DURATION_SECONDS, INSTALL_MARKER,
+        ApiClient, DownloadContext, HuggingFaceSnapshot, Settings, SupervisedChild, WorkerError,
+        WorkerSpec, DEFAULT_TRANSITION_DURATION_SECONDS, INSTALL_MARKER,
     };
 
     #[test]
@@ -3833,6 +3911,37 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn lora_url_import_downloads_to_named_file() {
+        let temp = tempdir().expect("tempdir creates");
+        let settings = test_settings("http://127.0.0.1".to_owned(), None);
+        let api = ApiClient::new(&settings);
+        let client = reqwest::Client::new();
+        let source_url = spawn_binary_stub(b"url-lora".to_vec()).await;
+        let target_dir = temp.path().join("url-target");
+
+        download_lora_source_url(
+            &DownloadContext {
+                api: &api,
+                client: &client,
+                settings: &settings,
+                job_id: "job-1",
+                cancel_message: "canceled",
+            },
+            &format!("{source_url}/loras/style.safetensors"),
+            &target_dir,
+        )
+        .await
+        .expect("url LoRA downloads");
+
+        assert_eq!(
+            tokio::fs::read(target_dir.join("style.safetensors"))
+                .await
+                .unwrap(),
+            b"url-lora"
+        );
+    }
+
     #[test]
     fn now_matches_python_second_precision() {
         let value = now_rfc3339();
@@ -4032,6 +4141,30 @@ mod tests {
             }
         }
         Json(state.payload).into_response()
+    }
+
+    #[derive(Clone)]
+    struct BinaryStubState {
+        bytes: Vec<u8>,
+    }
+
+    async fn spawn_binary_stub(bytes: Vec<u8>) -> String {
+        let state = BinaryStubState { bytes };
+        let app = Router::new()
+            .route("/*path", get(binary_stub))
+            .with_state(state);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("listener binds");
+        let address = listener.local_addr().expect("listener has address");
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.expect("stub serves");
+        });
+        format!("http://{address}")
+    }
+
+    async fn binary_stub(State(state): State<BinaryStubState>) -> Response {
+        state.bytes.into_response()
     }
 
     fn test_settings(huggingface_base_url: String, huggingface_token: Option<&str>) -> Settings {
