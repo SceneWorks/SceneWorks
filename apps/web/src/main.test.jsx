@@ -522,6 +522,59 @@ describe("SceneWorks app shell", () => {
     expect(createImageJob).toHaveBeenCalledWith(expect.objectContaining({ model: "qwen_image", recipePresetId: "qwen_detail" }));
   });
 
+  it("uses preset modes as the Image Studio picker surface", async () => {
+    root = createRoot(container);
+    await act(async () => {
+      root.render(
+        <ImageStudio
+          activeProject={{ id: "project-1", name: "Noir" }}
+          assets={[{ id: "image-1", type: "image", displayName: "Frame One" }]}
+          characters={[]}
+          createImageJob={() => {}}
+          deleteAsset={() => {}}
+          gpuOptions={["auto"]}
+          imageModels={[{ id: "z_image_turbo", name: "Z-Image", type: "image", family: "z-image", capabilities: ["edit_image"] }]}
+          latestAssets={[]}
+          loras={[]}
+          onPreview={() => {}}
+          purgeAsset={() => {}}
+          recipePresets={[
+            {
+              id: "cinematic",
+              name: "Cinematic",
+              model: "z_image_turbo",
+              workflow: "text_to_image",
+              modes: ["text_to_image", "edit_image", "character_image"],
+            },
+            {
+              id: "portrait_only",
+              name: "Portrait Only",
+              model: "z_image_turbo",
+              workflow: "text_to_image",
+              modes: ["character_image"],
+            },
+          ]}
+          requestedGpu="auto"
+          selectedAsset={{ id: "image-1", type: "image", displayName: "Frame One" }}
+          setRequestedGpu={() => {}}
+          updateAssetStatus={() => {}}
+        />,
+      );
+    });
+    await settle();
+
+    expect(container.textContent).toContain("Cinematic");
+    expect(container.textContent).not.toContain("Portrait Only");
+
+    await act(async () => {
+      [...container.querySelectorAll("button")].find((button) => button.textContent === "Edit").click();
+    });
+    await settle();
+
+    expect(container.textContent).toContain("Cinematic");
+    expect(container.textContent).not.toContain("Portrait Only");
+  });
+
   it("applies recipe preset defaults to video jobs", async () => {
     const createVideoJob = vi.fn();
     root = createRoot(container);

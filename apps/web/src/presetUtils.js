@@ -38,6 +38,8 @@ export function loraMatchesModel(lora, model) {
 }
 
 export function presetMatchesWorkflow(preset, mode) {
+  // A preset has one primary workflow for persistence, but modes describe every
+  // Studio entry point where the picker should surface it.
   if (preset?.modes?.length) {
     return preset.modes.includes(mode);
   }
