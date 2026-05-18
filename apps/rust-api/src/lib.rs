@@ -66,6 +66,7 @@ const HEARTBEAT_SSE_WIRE: &str = "event: heartbeat\ndata: {}\n\n";
 const MAX_UPLOAD_BYTES: usize = 2 * 1024 * 1024 * 1024;
 const MANIFEST_CACHE_LIMIT: usize = 16;
 const MODEL_SIZE_CACHE_LIMIT: usize = 64;
+const API_MANAGED_MANIFEST_HEADER: &str = "// This file is rewritten by the SceneWorks API. Inline JSONC comments are not preserved across writes.";
 
 #[derive(Debug, Clone)]
 pub struct Settings {
@@ -3377,7 +3378,6 @@ async fn save_manifest_entries(
             parent.display()
         ))
     })?;
-    let comments = load_manifest_comments(path).await?;
     let mut manifest = load_manifest_root(path).await?;
     manifest.entry("$schema".to_owned()).or_insert_with(|| {
         Value::String("https://sceneworks.local/schemas/recipe-preset.schema.json".to_owned())
@@ -3386,24 +3386,9 @@ async fn save_manifest_entries(
         .entry("schemaVersion".to_owned())
         .or_insert_with(|| json!(1));
     manifest.insert(field.to_owned(), Value::Array(entries));
-    let mut payload = serde_json::to_string_pretty(&Value::Object(manifest))
+    let payload = serde_json::to_string_pretty(&Value::Object(manifest))
         .map_err(|error| ApiError::internal(format!("Failed to encode manifest: {error}")))?;
-    payload = restore_jsonc_comments(&payload, &comments);
-    write_manifest_atomic(path, &format!("{payload}\n")).await
-}
-
-async fn load_manifest_comments(path: &FsPath) -> Result<Vec<String>, ApiError> {
-    let payload = match tokio::fs::read_to_string(path).await {
-        Ok(payload) => payload,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
-        Err(error) => {
-            return Err(ApiError::internal(format!(
-                "Failed to load manifest {}: {error}",
-                path.display()
-            )))
-        }
-    };
-    Ok(extract_jsonc_comments(&payload))
+    write_manifest_atomic(path, &format!("{API_MANAGED_MANIFEST_HEADER}\n{payload}\n")).await
 }
 
 async fn load_manifest_root(path: &FsPath) -> Result<JsonObject, ApiError> {
@@ -3832,66 +3817,6 @@ fn strip_jsonc_comments(value: &str) -> String {
         }
         output.push(character);
     }
-    output
-}
-
-fn extract_jsonc_comments(value: &str) -> Vec<String> {
-    let mut comments = Vec::new();
-    let mut chars = value.chars().peekable();
-    let mut in_string = false;
-    let mut escaped = false;
-    while let Some(character) = chars.next() {
-        if in_string {
-            if escaped {
-                escaped = false;
-            } else if character == '\\' {
-                escaped = true;
-            } else if character == '"' {
-                in_string = false;
-            }
-            continue;
-        }
-
-        if character == '"' {
-            in_string = true;
-            continue;
-        }
-        if character == '/' && chars.peek() == Some(&'/') {
-            chars.next();
-            let mut comment = String::from("//");
-            for next in chars.by_ref() {
-                if next == '\r' || next == '\n' {
-                    break;
-                }
-                comment.push(next);
-            }
-            comments.push(comment);
-            continue;
-        }
-        if character == '/' && chars.peek() == Some(&'*') {
-            chars.next();
-            let mut comment = String::from("/*");
-            let mut previous = '\0';
-            for next in chars.by_ref() {
-                comment.push(next);
-                if previous == '*' && next == '/' {
-                    break;
-                }
-                previous = next;
-            }
-            comments.push(comment);
-        }
-    }
-    comments
-}
-
-fn restore_jsonc_comments(payload: &str, comments: &[String]) -> String {
-    if comments.is_empty() {
-        return payload.to_owned();
-    }
-    let mut output = comments.join("\n");
-    output.push('\n');
-    output.push_str(payload);
     output
 }
 
@@ -4659,8 +4584,8 @@ impl IntoResponse for ApiError {
 #[cfg(test)]
 mod tests {
     use super::{
-        create_app, strip_jsonc_comments, EventHub, EventMessage, Settings, EVENT_BUFFER_SIZE,
-        HEARTBEAT_SSE_DATA, HEARTBEAT_SSE_WIRE,
+        create_app, strip_jsonc_comments, EventHub, EventMessage, Settings,
+        API_MANAGED_MANIFEST_HEADER, EVENT_BUFFER_SIZE, HEARTBEAT_SSE_DATA, HEARTBEAT_SSE_WIRE,
     };
     use axum::body::{to_bytes, Body};
     use axum::http::{Request, StatusCode};
@@ -5621,6 +5546,34 @@ mod tests {
         assert_eq!(duplicate["name"], "Soft Glow Copy");
         assert_eq!(duplicate["loras"][0]["id"], "style_lora");
 
+        let (_, project) = request(
+            app.clone(),
+            "POST",
+            "/api/v1/projects",
+            json!({ "name": "Preset Project" }),
+        )
+        .await;
+        let project_id = project["id"].as_str().expect("project id");
+        let project_path = std::path::PathBuf::from(project["path"].as_str().unwrap());
+        let (status, project_preset) = request(
+            app.clone(),
+            "POST",
+            "/api/v1/recipe-presets",
+            json!({
+                "id": "project_soft_glow",
+                "name": "Project Soft Glow",
+                "scope": "project",
+                "projectId": project_id,
+                "model": "z_image_turbo",
+                "workflow": "text_to_image",
+                "order": 1
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED);
+        assert_eq!(project_preset["scope"], "project");
+        assert!(project_path.join("recipes/presets.jsonc").is_file());
+
         for (id, name) in [("beta_order", "Beta Order"), ("alpha_order", "Alpha Order")] {
             let (status, _) = request(
                 app.clone(),
@@ -5641,7 +5594,9 @@ mod tests {
         let (status, ordered) = request(
             app.clone(),
             "GET",
-            "/api/v1/recipe-presets?workflow=text_to_image&model=z_image_turbo",
+            &format!(
+                "/api/v1/recipe-presets?projectId={project_id}&workflow=text_to_image&model=z_image_turbo"
+            ),
             Value::Null,
         )
         .await;
@@ -5659,7 +5614,8 @@ mod tests {
                 "alpha_order",
                 "beta_order",
                 "soft_glow",
-                "soft_glow_copy"
+                "soft_glow_copy",
+                "project_soft_glow"
             ]
         );
 
@@ -5689,33 +5645,6 @@ mod tests {
             readonly_error["detail"],
             "Built-in recipe presets are read-only"
         );
-
-        let (_, project) = request(
-            app.clone(),
-            "POST",
-            "/api/v1/projects",
-            json!({ "name": "Preset Project" }),
-        )
-        .await;
-        let project_id = project["id"].as_str().expect("project id");
-        let project_path = std::path::PathBuf::from(project["path"].as_str().unwrap());
-        let (status, project_preset) = request(
-            app.clone(),
-            "POST",
-            "/api/v1/recipe-presets",
-            json!({
-                "id": "project_soft_glow",
-                "name": "Project Soft Glow",
-                "scope": "project",
-                "projectId": project_id,
-                "model": "z_image_turbo",
-                "workflow": "text_to_image"
-            }),
-        )
-        .await;
-        assert_eq!(status, StatusCode::CREATED);
-        assert_eq!(project_preset["scope"], "project");
-        assert!(project_path.join("recipes/presets.jsonc").is_file());
 
         let (status, project_updated) = request(
             app.clone(),
@@ -5788,12 +5717,33 @@ mod tests {
         let saved_manifest_text =
             std::fs::read_to_string(config_dir.join("user.recipe-presets.jsonc"))
                 .expect("user recipe preset manifest reads");
-        assert!(saved_manifest_text.contains("// user preset notes survive API writes"));
-        assert!(saved_manifest_text.contains("/* preserve unknown root fields too */"));
+        assert!(saved_manifest_text.starts_with(API_MANAGED_MANIFEST_HEADER));
+        assert!(!saved_manifest_text.contains("// user preset notes survive API writes"));
+        assert!(!saved_manifest_text.contains("/* preserve unknown root fields too */"));
         let saved_manifest: Value =
             serde_json::from_str(&strip_jsonc_comments(&saved_manifest_text))
                 .expect("saved manifest parses");
         assert_eq!(saved_manifest["futureRoot"], true);
+
+        let (status, second_update) = request(
+            app.clone(),
+            "PATCH",
+            "/api/v1/recipe-presets/soft_glow",
+            json!({ "order": 31 }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(second_update["order"], 31);
+        let second_manifest_text =
+            std::fs::read_to_string(config_dir.join("user.recipe-presets.jsonc"))
+                .expect("user recipe preset manifest reads after second write");
+        assert!(second_manifest_text.starts_with(API_MANAGED_MANIFEST_HEADER));
+        assert_eq!(
+            second_manifest_text
+                .matches(API_MANAGED_MANIFEST_HEADER)
+                .count(),
+            1
+        );
 
         let (bad_status, bad_error) = request(
             app.clone(),
@@ -5811,6 +5761,24 @@ mod tests {
         assert_eq!(
             bad_error["detail"],
             "Recipe preset id must use lowercase letters, numbers, dashes, or underscores"
+        );
+
+        let (bad_status, bad_error) = request(
+            app.clone(),
+            "POST",
+            "/api/v1/recipe-presets",
+            json!({
+                "name": "Bad Order",
+                "model": "z_image_turbo",
+                "workflow": "text_to_image",
+                "order": "high"
+            }),
+        )
+        .await;
+        assert_eq!(bad_status, StatusCode::BAD_REQUEST);
+        assert_eq!(
+            bad_error["detail"],
+            "Recipe preset order must be an integer"
         );
 
         let (bad_status, bad_error) = request(

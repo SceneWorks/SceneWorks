@@ -2,6 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://sceneworks.local/schemas/recipe-preset.schema.json",
   "title": "SceneWorks Recipe Preset Manifest",
+  "description": "Recipe preset manifests may be rewritten by the SceneWorks API as generated JSONC with an API-managed header; inline comments are not preserved across API writes.",
   "type": "object",
   "required": ["schemaVersion", "presets"],
   "properties": {
@@ -19,7 +20,7 @@
           "archived": { "type": "boolean" },
           "order": {
             "type": "integer",
-            "description": "Caller-owned display order. Values do not need to be unique; lists sort by scope, then order, then name."
+            "description": "Caller-owned display order. Values do not need to be unique; lists sort by scope (builtin, then global, then project), then order, then name."
           },
           "workflow": {
             "type": "string",
