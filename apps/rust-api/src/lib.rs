@@ -1764,12 +1764,7 @@ async fn apply_recipe_preset_to_image_payload(
     let mut seen_lora_ids = existing_lora_ids;
     let mut preset_loras = Vec::new();
     let mut missing_lora_ids = Vec::new();
-    for preset_lora in preset
-        .get("builtInLoras")
-        .and_then(Value::as_array)
-        .cloned()
-        .unwrap_or_default()
-    {
+    for preset_lora in recipe_preset_loras(preset) {
         let Some(lora_id) = preset_lora_id(&preset_lora) else {
             continue;
         };
@@ -2847,9 +2842,33 @@ fn finalize_recipe_preset_entry(preset: &mut Value) -> Result<(), ApiError> {
     let object = preset
         .as_object_mut()
         .ok_or_else(|| ApiError::internal("Recipe preset manifest entry must be an object"))?;
-    object
-        .entry("builtInLoras".to_owned())
-        .or_insert_with(|| Value::Array(Vec::new()));
+    if !object.contains_key("workflow") {
+        if let Some(workflow) = object
+            .get("modes")
+            .and_then(Value::as_array)
+            .and_then(|modes| modes.iter().find_map(Value::as_str))
+        {
+            object.insert("workflow".to_owned(), Value::String(workflow.to_owned()));
+        }
+    }
+    if !object.contains_key("modes") {
+        if let Some(workflow) = object.get("workflow").and_then(Value::as_str) {
+            object.insert(
+                "modes".to_owned(),
+                Value::Array(vec![Value::String(workflow.to_owned())]),
+            );
+        }
+    }
+    if !object.contains_key("loras") {
+        if let Some(loras) = object.get("builtInLoras").cloned() {
+            object.insert("loras".to_owned(), loras);
+        }
+    }
+    let loras = object
+        .get("loras")
+        .cloned()
+        .unwrap_or_else(|| Value::Array(Vec::new()));
+    object.entry("builtInLoras".to_owned()).or_insert(loras);
     object
         .entry("defaults".to_owned())
         .or_insert_with(|| Value::Object(JsonObject::new()));
@@ -2857,6 +2876,15 @@ fn finalize_recipe_preset_entry(preset: &mut Value) -> Result<(), ApiError> {
         .entry("prompt".to_owned())
         .or_insert_with(|| Value::Object(JsonObject::new()));
     Ok(())
+}
+
+fn recipe_preset_loras(preset: &Value) -> Vec<Value> {
+    preset
+        .get("loras")
+        .or_else(|| preset.get("builtInLoras"))
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default()
 }
 
 fn preset_prompt(prompt: &str, preset: &Value) -> String {
@@ -4443,10 +4471,11 @@ mod tests {
                 {
                   "id": "cinematic",
                   "name": "Cinematic",
+                  "workflow": "text_to_image",
                   "model": "preset-model",
                   "defaults": { "count": 4, "resolution": "1280x720", "negativePrompt": "flat lighting" },
                   "prompt": { "suffix": "cinematic lighting" },
-                  "builtInLoras": [{ "id": "style-lora", "weight": 0.5 }]
+                  "loras": [{ "id": "style-lora", "weight": 0.5 }]
                 }
               ]
             }
@@ -4499,7 +4528,9 @@ mod tests {
         assert_eq!(presets[0]["id"], "cinematic");
         assert_eq!(presets[0]["name"], "My Cinematic");
         assert_eq!(presets[0]["scope"], "global");
+        assert_eq!(presets[0]["workflow"], "text_to_image");
         assert_eq!(presets[0]["defaults"]["count"], 2);
+        assert_eq!(presets[0]["loras"][0]["id"], "style-lora");
         assert_eq!(presets[0]["builtInLoras"][0]["id"], "style-lora");
 
         let (_, project) = request(

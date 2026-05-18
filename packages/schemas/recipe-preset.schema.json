@@ -10,15 +10,20 @@
       "type": "array",
       "items": {
         "type": "object",
-        "required": ["id", "name"],
+        "required": ["id", "name", "model", "workflow"],
         "additionalProperties": true,
         "properties": {
           "id": { "type": "string", "pattern": "^[a-z0-9][a-z0-9_-]*$" },
           "name": { "type": "string", "minLength": 1 },
           "scope": { "type": "string", "enum": ["builtin", "global", "project"] },
+          "archived": { "type": "boolean" },
           "order": { "type": "integer" },
+          "workflow": {
+            "type": "string",
+            "enum": ["text_to_image", "edit_image", "image_to_video", "text_to_video", "first_last_frame"]
+          },
           "modes": { "type": "array", "items": { "type": "string" } },
-          "model": { "type": "string" },
+          "model": { "type": "string", "minLength": 1 },
           "defaults": {
             "type": "object",
             "additionalProperties": true,
@@ -36,8 +41,22 @@
               "suffix": { "type": "string" }
             }
           },
+          "loras": {
+            "type": "array",
+            "maxItems": 3,
+            "items": {
+              "type": "object",
+              "required": ["id"],
+              "additionalProperties": true,
+              "properties": {
+                "id": { "type": "string", "pattern": "^[a-z0-9][a-z0-9_-]*$" },
+                "weight": { "type": "number", "minimum": -2, "maximum": 2 }
+              }
+            }
+          },
           "builtInLoras": {
             "type": "array",
+            "maxItems": 3,
             "items": {
               "oneOf": [
                 { "type": "string", "pattern": "^[a-z0-9][a-z0-9_-]*$" },

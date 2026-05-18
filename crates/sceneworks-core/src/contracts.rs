@@ -339,6 +339,24 @@ string_enum! {
 }
 
 string_enum! {
+    pub enum RecipePresetScope {
+        Builtin => "builtin",
+        Global => "global",
+        Project => "project",
+    }
+}
+
+string_enum! {
+    pub enum RecipePresetWorkflow {
+        TextToImage => "text_to_image",
+        ImageEdit => "edit_image",
+        ImageToVideo => "image_to_video",
+        TextToVideo => "text_to_video",
+        FirstLastFrame => "first_last_frame",
+    }
+}
+
+string_enum! {
     pub enum ModelKind {
         Image => "image",
         Video => "video",
@@ -954,6 +972,89 @@ pub struct LoraManifestEntry {
     pub trigger_words: Vec<String>,
     pub compatibility: JsonObject,
     pub source: JsonObject,
+    #[serde(flatten)]
+    pub extra: ExtraFields,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RecipePresetManifest {
+    pub schema_version: u32,
+    pub presets: Vec<RecipePresetManifestEntry>,
+    #[serde(flatten)]
+    pub extra: ExtraFields,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RecipePresetManifestEntry {
+    pub id: String,
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scope: Option<RecipePresetScope>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub archived: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub order: Option<i64>,
+    pub workflow: RecipePresetWorkflow,
+    pub model: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub modes: Vec<ContractMode>,
+    #[serde(default, skip_serializing_if = "RecipePresetDefaults::is_empty")]
+    pub defaults: RecipePresetDefaults,
+    #[serde(default, skip_serializing_if = "RecipePresetPrompt::is_empty")]
+    pub prompt: RecipePresetPrompt,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub loras: Vec<RecipePresetLora>,
+    #[serde(flatten)]
+    pub extra: ExtraFields,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RecipePresetDefaults {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub count: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resolution: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub negative_prompt: Option<String>,
+    #[serde(flatten)]
+    pub extra: ExtraFields,
+}
+
+impl RecipePresetDefaults {
+    pub fn is_empty(&self) -> bool {
+        self.count.is_none()
+            && self.resolution.is_none()
+            && self.negative_prompt.is_none()
+            && self.extra.is_empty()
+    }
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RecipePresetPrompt {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prefix: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub suffix: Option<String>,
+    #[serde(flatten)]
+    pub extra: ExtraFields,
+}
+
+impl RecipePresetPrompt {
+    pub fn is_empty(&self) -> bool {
+        self.prefix.is_none() && self.suffix.is_none() && self.extra.is_empty()
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RecipePresetLora {
+    pub id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub weight: Option<ContractNumber>,
     #[serde(flatten)]
     pub extra: ExtraFields,
 }
