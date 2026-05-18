@@ -669,11 +669,29 @@ def test_character_subsystem_contracts(parity_runtimes):
         snapshot=True,
     )
 
+    updated_characters = [
+        runtime.request(
+            "PATCH",
+            f"/api/v1/projects/{runtime.project_id}/characters/{character_id}",
+            json_payload={"description": "Lead performer, updated", "archived": False},
+        )
+        for runtime, character_id in zip(parity_runtimes, character_ids)
+    ]
+    assert_response_parity(
+        "character update response",
+        python_runtime,
+        rust_runtime,
+        updated_characters[0],
+        updated_characters[1],
+        expected_status=200,
+        snapshot=True,
+    )
+
     referenced_characters = [
         runtime.request(
             "POST",
             f"/api/v1/projects/{runtime.project_id}/characters/{character_id}/references",
-            json_payload={"assetId": runtime.asset_id, "approved": True, "role": "hero", "notes": "Primary face"},
+            json_payload={"assetId": runtime.asset_id, "approved": False, "role": "reference", "notes": "Primary face"},
         )
         for runtime, character_id in zip(parity_runtimes, character_ids)
     ]
@@ -684,6 +702,24 @@ def test_character_subsystem_contracts(parity_runtimes):
         referenced_characters[0],
         referenced_characters[1],
         expected_status=201,
+        snapshot=True,
+    )
+
+    updated_references = [
+        runtime.request(
+            "PATCH",
+            f"/api/v1/projects/{runtime.project_id}/characters/{character_id}/references/{runtime.asset_id}",
+            json_payload={"approved": True, "role": "hero", "notes": "Approved face"},
+        )
+        for runtime, character_id in zip(parity_runtimes, character_ids)
+    ]
+    assert_response_parity(
+        "character reference update response",
+        python_runtime,
+        rust_runtime,
+        updated_references[0],
+        updated_references[1],
+        expected_status=200,
         snapshot=True,
     )
 
@@ -703,6 +739,52 @@ def test_character_subsystem_contracts(parity_runtimes):
         asset_sidecars[1],
     )
     assert_snapshot("asset sidecar after character reference", normalized_asset_sidecar)
+
+    removed_references = [
+        runtime.request(
+            "DELETE",
+            f"/api/v1/projects/{runtime.project_id}/characters/{character_id}/references/{runtime.asset_id}",
+        )
+        for runtime, character_id in zip(parity_runtimes, character_ids)
+    ]
+    assert_response_parity(
+        "character reference delete response",
+        python_runtime,
+        rust_runtime,
+        removed_references[0],
+        removed_references[1],
+        expected_status=200,
+        snapshot=True,
+    )
+
+    cleaned_asset_sidecars = [sidecar_payload(runtime.project_path, runtime.asset_id) for runtime in parity_runtimes]
+    normalized_cleaned_asset_sidecar = assert_parity(
+        "asset sidecar after character reference removal",
+        python_runtime,
+        rust_runtime,
+        cleaned_asset_sidecars[0],
+        cleaned_asset_sidecars[1],
+    )
+    assert_snapshot("asset sidecar after character reference removal", normalized_cleaned_asset_sidecar)
+    for asset_sidecar in cleaned_asset_sidecars:
+        assert asset_sidecar["metadata"]["characterReferences"] == []
+
+    reattached_references = [
+        runtime.request(
+            "POST",
+            f"/api/v1/projects/{runtime.project_id}/characters/{character_id}/references",
+            json_payload={"assetId": runtime.asset_id, "approved": True, "role": "hero", "notes": "Approved face"},
+        )
+        for runtime, character_id in zip(parity_runtimes, character_ids)
+    ]
+    assert_response_parity(
+        "character reference reattach response",
+        python_runtime,
+        rust_runtime,
+        reattached_references[0],
+        reattached_references[1],
+        expected_status=201,
+    )
 
     created_looks = [
         runtime.request(
@@ -728,8 +810,33 @@ def test_character_subsystem_contracts(parity_runtimes):
     )
     look_ids = [response.body["looks"][0]["id"] for response in created_looks]
 
+    updated_looks = [
+        runtime.request(
+            "PATCH",
+            f"/api/v1/projects/{runtime.project_id}/characters/{character_id}/looks/{look_id}",
+            json_payload={
+                "name": "Rain coat revised",
+                "description": "Night exterior hero look",
+                "approvedReferenceIds": [runtime.asset_id],
+                "recipeSettings": {"style": "noir", "lens": "85mm"},
+            },
+        )
+        for runtime, character_id, look_id in zip(parity_runtimes, character_ids, look_ids)
+    ]
+    normalized_look_update_response = assert_response_parity(
+        "character look update response",
+        python_runtime,
+        rust_runtime,
+        updated_looks[0],
+        updated_looks[1],
+        expected_status=200,
+        snapshot=True,
+    )
+
     lora_sources = []
     for runtime in parity_runtimes:
+        # The parity harness root contains each runtime's data dir, so sourcePath is both valid
+        # for the API and normalized to <runtime-root> in snapshots.
         lora_dir = runtime.roots[0] / "data" / "loras"
         lora_dir.mkdir(parents=True, exist_ok=True)
         lora_source = lora_dir / "mira.safetensors"
@@ -757,6 +864,31 @@ def test_character_subsystem_contracts(parity_runtimes):
         expected_status=201,
         snapshot=True,
     )
+    lora_link_ids = [response.body["loras"][0]["id"] for response in attached_loras]
+
+    updated_loras = [
+        runtime.request(
+            "PATCH",
+            f"/api/v1/projects/{runtime.project_id}/characters/{character_id}/loras/{link_id}",
+            json_payload={
+                "name": "Mira LoRA revised",
+                "triggerWords": ["mira", "rain"],
+                "defaultWeight": 0.65,
+                "compatibility": {"families": ["z-image"], "notes": "parity"},
+                "scope": "project",
+            },
+        )
+        for runtime, character_id, link_id in zip(parity_runtimes, character_ids, lora_link_ids)
+    ]
+    assert_response_parity(
+        "character lora update response",
+        python_runtime,
+        rust_runtime,
+        updated_loras[0],
+        updated_loras[1],
+        expected_status=200,
+        snapshot=True,
+    )
 
     test_jobs = [
         runtime.request(
@@ -776,11 +908,45 @@ def test_character_subsystem_contracts(parity_runtimes):
         snapshot=True,
     )
 
+    deleted_looks = [
+        runtime.request(
+            "DELETE",
+            f"/api/v1/projects/{runtime.project_id}/characters/{character_id}/looks/{look_id}",
+        )
+        for runtime, character_id, look_id in zip(parity_runtimes, character_ids, look_ids)
+    ]
+    assert_response_parity(
+        "character look delete response",
+        python_runtime,
+        rust_runtime,
+        deleted_looks[0],
+        deleted_looks[1],
+        expected_status=200,
+        snapshot=True,
+    )
+
+    detached_loras = [
+        runtime.request(
+            "DELETE",
+            f"/api/v1/projects/{runtime.project_id}/characters/{character_id}/loras/{link_id}",
+        )
+        for runtime, character_id, link_id in zip(parity_runtimes, character_ids, lora_link_ids)
+    ]
+    assert_response_parity(
+        "character lora delete response",
+        python_runtime,
+        rust_runtime,
+        detached_loras[0],
+        detached_loras[1],
+        expected_status=200,
+        snapshot=True,
+    )
+
     archived_characters = [
         runtime.request("POST", f"/api/v1/projects/{runtime.project_id}/characters/{character_id}/archive")
         for runtime, character_id in zip(parity_runtimes, character_ids)
     ]
-    assert_response_parity(
+    normalized_post_archive_response = assert_response_parity(
         "character archive response",
         python_runtime,
         rust_runtime,
@@ -818,7 +984,57 @@ def test_character_subsystem_contracts(parity_runtimes):
         snapshot=True,
     )
 
+    delete_archive_characters = [
+        runtime.request(
+            "POST",
+            f"/api/v1/projects/{runtime.project_id}/characters",
+            json_payload={"name": "Delete Archive", "type": "object"},
+        )
+        for runtime in parity_runtimes
+    ]
+    delete_archive_ids = [response.body["id"] for response in delete_archive_characters]
+    delete_archive_responses = [
+        runtime.request("DELETE", f"/api/v1/projects/{runtime.project_id}/characters/{character_id}")
+        for runtime, character_id in zip(parity_runtimes, delete_archive_ids)
+    ]
+    normalized_delete_archive_response = assert_response_parity(
+        "character delete archive response",
+        python_runtime,
+        rust_runtime,
+        delete_archive_responses[0],
+        delete_archive_responses[1],
+        expected_status=200,
+        snapshot=True,
+    )
+    assert normalized_delete_archive_response == normalized_post_archive_response
+
+    purge_characters = [
+        runtime.request(
+            "POST",
+            f"/api/v1/projects/{runtime.project_id}/characters",
+            json_payload={"name": "Purge Me", "type": "object"},
+        )
+        for runtime in parity_runtimes
+    ]
+    purge_ids = [response.body["id"] for response in purge_characters]
+    purge_responses = [
+        runtime.request("DELETE", f"/api/v1/projects/{runtime.project_id}/characters/{character_id}/purge")
+        for runtime, character_id in zip(parity_runtimes, purge_ids)
+    ]
+    assert_response_parity(
+        "character purge response",
+        python_runtime,
+        rust_runtime,
+        purge_responses[0],
+        purge_responses[1],
+        expected_status=200,
+        snapshot=True,
+    )
+    for runtime, character_id in zip(parity_runtimes, purge_ids):
+        assert not (runtime.project_path / "characters" / f"{character_id}.sceneworks.character.json").exists()
+
     assert normalized_look_response["looks"][0]["approvedReferenceIds"] == ["asset_fixture"]
+    assert normalized_look_update_response["looks"][0]["recipeSettings"]["lens"] == "85mm"
 
 
 def test_timeline_and_worker_job_creation_contracts(parity_runtimes):
@@ -1131,3 +1347,82 @@ def test_error_case_contracts(parity_runtimes):
         for runtime in parity_runtimes
     ]
     assert_response_parity("malformed json error response", python_runtime, rust_runtime, malformed_bodies[0], malformed_bodies[1], expected_status=422, snapshot=True)
+
+    create_projects(parity_runtimes, python_runtime, rust_runtime)
+    characters = [
+        runtime.request(
+            "POST",
+            f"/api/v1/projects/{runtime.project_id}/characters",
+            json_payload={"name": "Errors", "type": "person"},
+        )
+        for runtime in parity_runtimes
+    ]
+    character_ids = [response.body["id"] for response in characters]
+
+    missing_characters = [
+        runtime.request("GET", f"/api/v1/projects/{runtime.project_id}/characters/character_missing")
+        for runtime in parity_runtimes
+    ]
+    assert_response_parity(
+        "missing character error response",
+        python_runtime,
+        rust_runtime,
+        missing_characters[0],
+        missing_characters[1],
+        expected_status=404,
+        snapshot=True,
+    )
+
+    missing_looks = [
+        runtime.request(
+            "PATCH",
+            f"/api/v1/projects/{runtime.project_id}/characters/{character_id}/looks/look_missing",
+            json_payload={"name": "Missing"},
+        )
+        for runtime, character_id in zip(parity_runtimes, character_ids)
+    ]
+    assert_response_parity(
+        "missing character look error response",
+        python_runtime,
+        rust_runtime,
+        missing_looks[0],
+        missing_looks[1],
+        expected_status=404,
+        snapshot=True,
+    )
+
+    missing_loras = [
+        runtime.request(
+            "PATCH",
+            f"/api/v1/projects/{runtime.project_id}/characters/{character_id}/loras/character_lora_missing",
+            json_payload={"name": "Missing"},
+        )
+        for runtime, character_id in zip(parity_runtimes, character_ids)
+    ]
+    assert_response_parity(
+        "missing character lora error response",
+        python_runtime,
+        rust_runtime,
+        missing_loras[0],
+        missing_loras[1],
+        expected_status=404,
+        snapshot=True,
+    )
+
+    invalid_lora_sources = [
+        runtime.request(
+            "POST",
+            f"/api/v1/projects/{runtime.project_id}/characters/{character_id}/loras",
+            json_payload={"name": "Missing source", "sourcePath": str(runtime.roots[0] / "data" / "loras" / "missing.safetensors")},
+        )
+        for runtime, character_id in zip(parity_runtimes, character_ids)
+    ]
+    assert_response_parity(
+        "invalid character lora source error response",
+        python_runtime,
+        rust_runtime,
+        invalid_lora_sources[0],
+        invalid_lora_sources[1],
+        expected_status=400,
+        snapshot=True,
+    )

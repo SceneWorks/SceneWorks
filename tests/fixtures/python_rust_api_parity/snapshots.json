@@ -114,6 +114,52 @@
     },
     "type": "image"
   },
+  "asset sidecar after character reference removal": {
+    "createdAt": "<timestamp>",
+    "displayName": "fixture image.png",
+    "file": {
+      "duration": null,
+      "fps": null,
+      "height": null,
+      "mimeType": "image/png",
+      "path": "assets/uploads/fixture-image-<upload-suffix>.png",
+      "width": null
+    },
+    "generationSetId": null,
+    "id": "asset_fixture",
+    "lineage": {
+      "jobId": null,
+      "parents": [],
+      "sourceAssetId": null,
+      "sourceTimestamp": null
+    },
+    "metadata": {
+      "characterReferences": []
+    },
+    "projectId": "project_fixture",
+    "recipe": {
+      "adapter": "api-upload",
+      "loras": [],
+      "mode": "upload",
+      "model": "manual-import",
+      "negativePrompt": "",
+      "normalizedSettings": {},
+      "prompt": "fixture image.png",
+      "rawAdapterSettings": {
+        "contentType": "image/png"
+      },
+      "seed": 0,
+      "stylePreset": "none"
+    },
+    "schemaVersion": 1,
+    "status": {
+      "favorite": false,
+      "rating": 0,
+      "rejected": false,
+      "trashed": false
+    },
+    "type": "image"
+  },
   "asset status project DB update response": {
     "createdAt": "<timestamp>",
     "displayName": "fixture image.png",
@@ -244,6 +290,10 @@
     "type": "person",
     "updatedAt": "<timestamp>"
   },
+  "character delete archive response": {
+    "id": "character_fixture",
+    "status": "archived"
+  },
   "character detail response": {
     "approvedReferences": [],
     "createdAt": "<timestamp>",
@@ -291,51 +341,15 @@
             "url": "/api/v1/projects/project_fixture/files/assets/uploads/fixture-image-<upload-suffix>.png"
           },
           "assetId": "asset_fixture",
-          "notes": "Primary face",
+          "notes": "Approved face",
           "role": "hero"
         }
       ],
       "createdAt": "<timestamp>",
-      "description": "Lead performer",
+      "description": "Lead performer, updated",
       "id": "character_fixture",
-      "looks": [
-        {
-          "approvedReferenceIds": [
-            "asset_fixture"
-          ],
-          "createdAt": "<timestamp>",
-          "description": "Night exterior look",
-          "id": "look_fixture",
-          "name": "Rain coat",
-          "recipeSettings": {
-            "style": "noir"
-          },
-          "updatedAt": "<timestamp>"
-        }
-      ],
-      "loras": [
-        {
-          "category": "character",
-          "compatibility": {
-            "families": [
-              "z-image"
-            ]
-          },
-          "copiedIntoProject": true,
-          "createdAt": "<timestamp>",
-          "defaultWeight": 0.8,
-          "id": "character_lora_fixture",
-          "loraId": null,
-          "name": "Mira LoRA",
-          "projectPath": "loras/characters/character_fixture/mira.safetensors",
-          "scope": "project",
-          "sourcePath": "<runtime-root>/data/loras/mira.safetensors",
-          "triggerWords": [
-            "mira"
-          ],
-          "updatedAt": "<timestamp>"
-        }
-      ],
+      "looks": [],
+      "loras": [],
       "name": "Mira",
       "projectId": "project_fixture",
       "references": [
@@ -364,7 +378,7 @@
             "url": "/api/v1/projects/project_fixture/files/assets/uploads/fixture-image-<upload-suffix>.png"
           },
           "assetId": "asset_fixture",
-          "notes": "Primary face",
+          "notes": "Approved face",
           "role": "hero"
         }
       ],
@@ -424,12 +438,12 @@
           "url": "/api/v1/projects/project_fixture/files/assets/uploads/fixture-image-<upload-suffix>.png"
         },
         "assetId": "asset_fixture",
-        "notes": "Primary face",
+        "notes": "Approved face",
         "role": "hero"
       }
     ],
     "createdAt": "<timestamp>",
-    "description": "Lead performer",
+    "description": "Lead performer, updated",
     "id": "character_fixture",
     "looks": [
       {
@@ -475,7 +489,198 @@
           "url": "/api/v1/projects/project_fixture/files/assets/uploads/fixture-image-<upload-suffix>.png"
         },
         "assetId": "asset_fixture",
-        "notes": "Primary face",
+        "notes": "Approved face",
+        "role": "hero"
+      }
+    ],
+    "schemaVersion": 1,
+    "status": {
+      "archived": false
+    },
+    "trainedLoras": [],
+    "type": "person",
+    "updatedAt": "<timestamp>"
+  },
+  "character look delete response": {
+    "approvedReferences": [
+      {
+        "addedAt": "<timestamp>",
+        "approved": true,
+        "approvedAt": "<timestamp>",
+        "asset": {
+          "displayName": "fixture image.png",
+          "file": {
+            "duration": null,
+            "fps": null,
+            "height": null,
+            "mimeType": "image/png",
+            "path": "assets/uploads/fixture-image-<upload-suffix>.png",
+            "width": null
+          },
+          "id": "asset_fixture",
+          "status": {
+            "favorite": false,
+            "rating": 0,
+            "rejected": false,
+            "trashed": false
+          },
+          "type": "image",
+          "url": "/api/v1/projects/project_fixture/files/assets/uploads/fixture-image-<upload-suffix>.png"
+        },
+        "assetId": "asset_fixture",
+        "notes": "Approved face",
+        "role": "hero"
+      }
+    ],
+    "createdAt": "<timestamp>",
+    "description": "Lead performer, updated",
+    "id": "character_fixture",
+    "looks": [],
+    "loras": [
+      {
+        "category": "character",
+        "compatibility": {
+          "families": [
+            "z-image"
+          ],
+          "notes": "parity"
+        },
+        "copiedIntoProject": true,
+        "createdAt": "<timestamp>",
+        "defaultWeight": 0.65,
+        "id": "character_lora_fixture",
+        "loraId": null,
+        "name": "Mira LoRA revised",
+        "projectPath": "loras/characters/character_fixture/mira.safetensors",
+        "scope": "project",
+        "sourcePath": "<runtime-root>/data/loras/mira.safetensors",
+        "triggerWords": [
+          "mira",
+          "rain"
+        ],
+        "updatedAt": "<timestamp>"
+      }
+    ],
+    "name": "Mira",
+    "projectId": "project_fixture",
+    "references": [
+      {
+        "addedAt": "<timestamp>",
+        "approved": true,
+        "approvedAt": "<timestamp>",
+        "asset": {
+          "displayName": "fixture image.png",
+          "file": {
+            "duration": null,
+            "fps": null,
+            "height": null,
+            "mimeType": "image/png",
+            "path": "assets/uploads/fixture-image-<upload-suffix>.png",
+            "width": null
+          },
+          "id": "asset_fixture",
+          "status": {
+            "favorite": false,
+            "rating": 0,
+            "rejected": false,
+            "trashed": false
+          },
+          "type": "image",
+          "url": "/api/v1/projects/project_fixture/files/assets/uploads/fixture-image-<upload-suffix>.png"
+        },
+        "assetId": "asset_fixture",
+        "notes": "Approved face",
+        "role": "hero"
+      }
+    ],
+    "schemaVersion": 1,
+    "status": {
+      "archived": false
+    },
+    "trainedLoras": [],
+    "type": "person",
+    "updatedAt": "<timestamp>"
+  },
+  "character look update response": {
+    "approvedReferences": [
+      {
+        "addedAt": "<timestamp>",
+        "approved": true,
+        "approvedAt": "<timestamp>",
+        "asset": {
+          "displayName": "fixture image.png",
+          "file": {
+            "duration": null,
+            "fps": null,
+            "height": null,
+            "mimeType": "image/png",
+            "path": "assets/uploads/fixture-image-<upload-suffix>.png",
+            "width": null
+          },
+          "id": "asset_fixture",
+          "status": {
+            "favorite": false,
+            "rating": 0,
+            "rejected": false,
+            "trashed": false
+          },
+          "type": "image",
+          "url": "/api/v1/projects/project_fixture/files/assets/uploads/fixture-image-<upload-suffix>.png"
+        },
+        "assetId": "asset_fixture",
+        "notes": "Approved face",
+        "role": "hero"
+      }
+    ],
+    "createdAt": "<timestamp>",
+    "description": "Lead performer, updated",
+    "id": "character_fixture",
+    "looks": [
+      {
+        "approvedReferenceIds": [
+          "asset_fixture"
+        ],
+        "createdAt": "<timestamp>",
+        "description": "Night exterior hero look",
+        "id": "look_fixture",
+        "name": "Rain coat revised",
+        "recipeSettings": {
+          "lens": "85mm",
+          "style": "noir"
+        },
+        "updatedAt": "<timestamp>"
+      }
+    ],
+    "loras": [],
+    "name": "Mira",
+    "projectId": "project_fixture",
+    "references": [
+      {
+        "addedAt": "<timestamp>",
+        "approved": true,
+        "approvedAt": "<timestamp>",
+        "asset": {
+          "displayName": "fixture image.png",
+          "file": {
+            "duration": null,
+            "fps": null,
+            "height": null,
+            "mimeType": "image/png",
+            "path": "assets/uploads/fixture-image-<upload-suffix>.png",
+            "width": null
+          },
+          "id": "asset_fixture",
+          "status": {
+            "favorite": false,
+            "rating": 0,
+            "rejected": false,
+            "trashed": false
+          },
+          "type": "image",
+          "url": "/api/v1/projects/project_fixture/files/assets/uploads/fixture-image-<upload-suffix>.png"
+        },
+        "assetId": "asset_fixture",
+        "notes": "Approved face",
         "role": "hero"
       }
     ],
@@ -514,12 +719,12 @@
           "url": "/api/v1/projects/project_fixture/files/assets/uploads/fixture-image-<upload-suffix>.png"
         },
         "assetId": "asset_fixture",
-        "notes": "Primary face",
+        "notes": "Approved face",
         "role": "hero"
       }
     ],
     "createdAt": "<timestamp>",
-    "description": "Lead performer",
+    "description": "Lead performer, updated",
     "id": "character_fixture",
     "looks": [
       {
@@ -527,10 +732,11 @@
           "asset_fixture"
         ],
         "createdAt": "<timestamp>",
-        "description": "Night exterior look",
+        "description": "Night exterior hero look",
         "id": "look_fixture",
-        "name": "Rain coat",
+        "name": "Rain coat revised",
         "recipeSettings": {
+          "lens": "85mm",
           "style": "noir"
         },
         "updatedAt": "<timestamp>"
@@ -587,7 +793,7 @@
           "url": "/api/v1/projects/project_fixture/files/assets/uploads/fixture-image-<upload-suffix>.png"
         },
         "assetId": "asset_fixture",
-        "notes": "Primary face",
+        "notes": "Approved face",
         "role": "hero"
       }
     ],
@@ -599,7 +805,7 @@
     "type": "person",
     "updatedAt": "<timestamp>"
   },
-  "character reference attach response": {
+  "character lora delete response": {
     "approvedReferences": [
       {
         "addedAt": "<timestamp>",
@@ -626,12 +832,12 @@
           "url": "/api/v1/projects/project_fixture/files/assets/uploads/fixture-image-<upload-suffix>.png"
         },
         "assetId": "asset_fixture",
-        "notes": "Primary face",
+        "notes": "Approved face",
         "role": "hero"
       }
     ],
     "createdAt": "<timestamp>",
-    "description": "Lead performer",
+    "description": "Lead performer, updated",
     "id": "character_fixture",
     "looks": [],
     "loras": [],
@@ -663,7 +869,267 @@
           "url": "/api/v1/projects/project_fixture/files/assets/uploads/fixture-image-<upload-suffix>.png"
         },
         "assetId": "asset_fixture",
+        "notes": "Approved face",
+        "role": "hero"
+      }
+    ],
+    "schemaVersion": 1,
+    "status": {
+      "archived": false
+    },
+    "trainedLoras": [],
+    "type": "person",
+    "updatedAt": "<timestamp>"
+  },
+  "character lora update response": {
+    "approvedReferences": [
+      {
+        "addedAt": "<timestamp>",
+        "approved": true,
+        "approvedAt": "<timestamp>",
+        "asset": {
+          "displayName": "fixture image.png",
+          "file": {
+            "duration": null,
+            "fps": null,
+            "height": null,
+            "mimeType": "image/png",
+            "path": "assets/uploads/fixture-image-<upload-suffix>.png",
+            "width": null
+          },
+          "id": "asset_fixture",
+          "status": {
+            "favorite": false,
+            "rating": 0,
+            "rejected": false,
+            "trashed": false
+          },
+          "type": "image",
+          "url": "/api/v1/projects/project_fixture/files/assets/uploads/fixture-image-<upload-suffix>.png"
+        },
+        "assetId": "asset_fixture",
+        "notes": "Approved face",
+        "role": "hero"
+      }
+    ],
+    "createdAt": "<timestamp>",
+    "description": "Lead performer, updated",
+    "id": "character_fixture",
+    "looks": [
+      {
+        "approvedReferenceIds": [
+          "asset_fixture"
+        ],
+        "createdAt": "<timestamp>",
+        "description": "Night exterior hero look",
+        "id": "look_fixture",
+        "name": "Rain coat revised",
+        "recipeSettings": {
+          "lens": "85mm",
+          "style": "noir"
+        },
+        "updatedAt": "<timestamp>"
+      }
+    ],
+    "loras": [
+      {
+        "category": "character",
+        "compatibility": {
+          "families": [
+            "z-image"
+          ],
+          "notes": "parity"
+        },
+        "copiedIntoProject": true,
+        "createdAt": "<timestamp>",
+        "defaultWeight": 0.65,
+        "id": "character_lora_fixture",
+        "loraId": null,
+        "name": "Mira LoRA revised",
+        "projectPath": "loras/characters/character_fixture/mira.safetensors",
+        "scope": "project",
+        "sourcePath": "<runtime-root>/data/loras/mira.safetensors",
+        "triggerWords": [
+          "mira",
+          "rain"
+        ],
+        "updatedAt": "<timestamp>"
+      }
+    ],
+    "name": "Mira",
+    "projectId": "project_fixture",
+    "references": [
+      {
+        "addedAt": "<timestamp>",
+        "approved": true,
+        "approvedAt": "<timestamp>",
+        "asset": {
+          "displayName": "fixture image.png",
+          "file": {
+            "duration": null,
+            "fps": null,
+            "height": null,
+            "mimeType": "image/png",
+            "path": "assets/uploads/fixture-image-<upload-suffix>.png",
+            "width": null
+          },
+          "id": "asset_fixture",
+          "status": {
+            "favorite": false,
+            "rating": 0,
+            "rejected": false,
+            "trashed": false
+          },
+          "type": "image",
+          "url": "/api/v1/projects/project_fixture/files/assets/uploads/fixture-image-<upload-suffix>.png"
+        },
+        "assetId": "asset_fixture",
+        "notes": "Approved face",
+        "role": "hero"
+      }
+    ],
+    "schemaVersion": 1,
+    "status": {
+      "archived": false
+    },
+    "trainedLoras": [],
+    "type": "person",
+    "updatedAt": "<timestamp>"
+  },
+  "character purge response": {
+    "id": "character_fixture",
+    "status": "purged"
+  },
+  "character reference attach response": {
+    "approvedReferences": [],
+    "createdAt": "<timestamp>",
+    "description": "Lead performer, updated",
+    "id": "character_fixture",
+    "looks": [],
+    "loras": [],
+    "name": "Mira",
+    "projectId": "project_fixture",
+    "references": [
+      {
+        "addedAt": "<timestamp>",
+        "approved": false,
+        "approvedAt": null,
+        "asset": {
+          "displayName": "fixture image.png",
+          "file": {
+            "duration": null,
+            "fps": null,
+            "height": null,
+            "mimeType": "image/png",
+            "path": "assets/uploads/fixture-image-<upload-suffix>.png",
+            "width": null
+          },
+          "id": "asset_fixture",
+          "status": {
+            "favorite": false,
+            "rating": 0,
+            "rejected": false,
+            "trashed": false
+          },
+          "type": "image",
+          "url": "/api/v1/projects/project_fixture/files/assets/uploads/fixture-image-<upload-suffix>.png"
+        },
+        "assetId": "asset_fixture",
         "notes": "Primary face",
+        "role": "reference"
+      }
+    ],
+    "schemaVersion": 1,
+    "status": {
+      "archived": false
+    },
+    "trainedLoras": [],
+    "type": "person",
+    "updatedAt": "<timestamp>"
+  },
+  "character reference delete response": {
+    "approvedReferences": [],
+    "createdAt": "<timestamp>",
+    "description": "Lead performer, updated",
+    "id": "character_fixture",
+    "looks": [],
+    "loras": [],
+    "name": "Mira",
+    "projectId": "project_fixture",
+    "references": [],
+    "schemaVersion": 1,
+    "status": {
+      "archived": false
+    },
+    "trainedLoras": [],
+    "type": "person",
+    "updatedAt": "<timestamp>"
+  },
+  "character reference update response": {
+    "approvedReferences": [
+      {
+        "addedAt": "<timestamp>",
+        "approved": true,
+        "approvedAt": "<timestamp>",
+        "asset": {
+          "displayName": "fixture image.png",
+          "file": {
+            "duration": null,
+            "fps": null,
+            "height": null,
+            "mimeType": "image/png",
+            "path": "assets/uploads/fixture-image-<upload-suffix>.png",
+            "width": null
+          },
+          "id": "asset_fixture",
+          "status": {
+            "favorite": false,
+            "rating": 0,
+            "rejected": false,
+            "trashed": false
+          },
+          "type": "image",
+          "url": "/api/v1/projects/project_fixture/files/assets/uploads/fixture-image-<upload-suffix>.png"
+        },
+        "assetId": "asset_fixture",
+        "notes": "Approved face",
+        "role": "hero"
+      }
+    ],
+    "createdAt": "<timestamp>",
+    "description": "Lead performer, updated",
+    "id": "character_fixture",
+    "looks": [],
+    "loras": [],
+    "name": "Mira",
+    "projectId": "project_fixture",
+    "references": [
+      {
+        "addedAt": "<timestamp>",
+        "approved": true,
+        "approvedAt": "<timestamp>",
+        "asset": {
+          "displayName": "fixture image.png",
+          "file": {
+            "duration": null,
+            "fps": null,
+            "height": null,
+            "mimeType": "image/png",
+            "path": "assets/uploads/fixture-image-<upload-suffix>.png",
+            "width": null
+          },
+          "id": "asset_fixture",
+          "status": {
+            "favorite": false,
+            "rating": 0,
+            "rejected": false,
+            "trashed": false
+          },
+          "type": "image",
+          "url": "/api/v1/projects/project_fixture/files/assets/uploads/fixture-image-<upload-suffix>.png"
+        },
+        "assetId": "asset_fixture",
+        "notes": "Approved face",
         "role": "hero"
       }
     ],
@@ -701,10 +1167,11 @@
             "asset_fixture"
           ],
           "createdAt": "<timestamp>",
-          "description": "Night exterior look",
+          "description": "Night exterior hero look",
           "id": "look_fixture",
-          "name": "Rain coat",
+          "name": "Rain coat revised",
           "recipeSettings": {
+            "lens": "85mm",
             "style": "noir"
           },
           "updatedAt": "<timestamp>"
@@ -720,19 +1187,21 @@
           "compatibility": {
             "families": [
               "z-image"
-            ]
+            ],
+            "notes": "parity"
           },
           "copiedIntoProject": true,
           "createdAt": "<timestamp>",
-          "defaultWeight": 0.8,
+          "defaultWeight": 0.65,
           "id": "character_lora_fixture",
           "loraId": null,
-          "name": "Mira LoRA",
+          "name": "Mira LoRA revised",
           "projectPath": "loras/characters/character_fixture/mira.safetensors",
           "scope": "project",
           "sourcePath": "<runtime-root>/data/loras/mira.safetensors",
           "triggerWords": [
-            "mira"
+            "mira",
+            "rain"
           ],
           "updatedAt": "<timestamp>"
         }
@@ -758,6 +1227,24 @@
     "type": "image_generate",
     "updatedAt": "<timestamp>",
     "workerId": null
+  },
+  "character update response": {
+    "approvedReferences": [],
+    "createdAt": "<timestamp>",
+    "description": "Lead performer, updated",
+    "id": "character_fixture",
+    "looks": [],
+    "loras": [],
+    "name": "Mira",
+    "projectId": "project_fixture",
+    "references": [],
+    "schemaVersion": 1,
+    "status": {
+      "archived": false
+    },
+    "trainedLoras": [],
+    "type": "person",
+    "updatedAt": "<timestamp>"
   },
   "concurrent claim response set": [
     {
@@ -856,6 +1343,9 @@
     "type": "image_generate",
     "updatedAt": "<timestamp>",
     "workerId": null
+  },
+  "invalid character lora source error response": {
+    "detail": "LoRA source path not found: <runtime-root>/data/loras/missing.safetensors"
   },
   "invalid job status error response": {
     "detail": "Unsupported job status"
@@ -1090,6 +1580,15 @@
       }
     ]
   },
+  "missing character error response": {
+    "detail": "Character not found"
+  },
+  "missing character look error response": {
+    "detail": "Look not found"
+  },
+  "missing character lora error response": {
+    "detail": "Character LoRA not found"
+  },
   "missing project error response": {
     "detail": "Project not found"
   },
@@ -1172,7 +1671,7 @@
   ],
   "persisted character sidecar": {
     "createdAt": "<timestamp>",
-    "description": "Lead performer",
+    "description": "Lead performer, updated",
     "id": "character_fixture",
     "looks": [],
     "loras": [],
@@ -1184,7 +1683,7 @@
         "approved": true,
         "approvedAt": "<timestamp>",
         "assetId": "asset_fixture",
-        "notes": "Primary face",
+        "notes": "Approved face",
         "role": "hero"
       }
     ],
