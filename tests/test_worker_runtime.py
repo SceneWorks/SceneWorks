@@ -36,6 +36,7 @@ from scene_worker.video_adapters import (
     create_video_adapter,
     evenly_spaced_indices,
     frames_from_output,
+    ltx_frame_count,
     load_seekable_image_frame,
     person_track_masks,
     video_request_from_job,
@@ -165,6 +166,14 @@ def test_friendly_failure_identifies_missing_model_files():
     assert "Model Manager" in error
     assert "Rust utility worker" in error
     assert "HF_TOKEN" in error
+
+
+def test_friendly_failure_identifies_ltx_frame_count_errors():
+    message, error = friendly_failure("Video generation", RuntimeError("num_frames must be divisible by 8 + 1"))
+
+    assert message == "Video generation failed because LTX requires a compatible frame count."
+    assert "(frames - 1)" in error
+    assert "Technical detail" in error
 
 
 def test_worker_check_reports_inference_sidecar_capabilities(monkeypatch):
@@ -428,6 +437,37 @@ def test_video_pipeline_evicts_previous_pipeline_and_loaded_models():
     assert adapter._pipeline_key_value is None
     assert adapter.loaded_models() == []
     assert Torch.cuda.emptied is True
+
+
+def test_ltx_frame_count_uses_nearest_8n_plus_one_value():
+    assert ltx_frame_count(100) == 97
+    assert ltx_frame_count(150) == 153
+    assert ltx_frame_count(200) == 201
+    assert ltx_frame_count(250) == 249
+
+
+def test_ltx_video_requirements_report_normalized_frame_count():
+    adapter = DiffusersVideoAdapter()
+    request = video_request_from_job(
+        {
+            "id": "job-1",
+            "payload": {
+                "projectId": "project-1",
+                "mode": "text_to_video",
+                "prompt": "city",
+                "model": "ltx_2_3",
+                "duration": 6,
+                "fps": 25,
+                "advanced": {},
+            },
+        }
+    )
+
+    requirements = adapter.estimate_requirements(request)
+
+    assert requirements["requestedFrames"] == 150
+    assert requirements["estimatedFrames"] == 153
+    assert requirements["repo"] == "Lightricks/LTX-2.3"
 
 
 def test_evenly_spaced_indices_are_bounded():

@@ -144,6 +144,23 @@ def friendly_failure(job_kind: str, exc: Exception) -> tuple[str, str]:
                 f"or a different GPU. Technical detail: {detail}"
             ),
         )
+    ltx_frame_markers = (
+        "num_frames",
+        "frame count",
+        "divisible by 8",
+        "multiple of 8",
+        "8 + 1",
+        "8n+1",
+    )
+    if ("ltx" in lowered or job_kind.lower().startswith("video")) and any(marker in lowered for marker in ltx_frame_markers):
+        return (
+            f"{job_kind} failed because LTX requires a compatible frame count.",
+            (
+                "LTX video frame counts must satisfy (frames - 1) being divisible by 8. "
+                "Try a standard SceneWorks duration/FPS preset or shorten the clip. "
+                f"Technical detail: {detail}"
+            ),
+        )
     missing_model_markers = (
         "repo id",
         "repository not found",

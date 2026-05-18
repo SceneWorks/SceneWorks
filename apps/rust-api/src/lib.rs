@@ -1735,13 +1735,15 @@ async fn apply_recipe_preset_to_image_payload(
 
     let expanded_prompt = preset_prompt(&payload.prompt, preset);
     job_payload.insert("prompt".to_owned(), Value::String(expanded_prompt));
-    if let Some(model) = preset
-        .get("model")
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-    {
-        job_payload.insert("model".to_owned(), Value::String(model.to_owned()));
+    if payload.model == default_image_model() {
+        if let Some(model) = preset
+            .get("model")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        {
+            job_payload.insert("model".to_owned(), Value::String(model.to_owned()));
+        }
     }
     apply_recipe_preset_defaults(preset, job_payload)?;
     job_payload.insert(
@@ -4530,7 +4532,7 @@ mod tests {
             "city at night, cinematic lighting"
         );
         assert_eq!(image_job["payload"]["loras"][0]["id"], "style-lora");
-        assert_eq!(image_job["payload"]["model"], "preset-model");
+        assert_eq!(image_job["payload"]["model"], "client-model");
         assert_eq!(image_job["payload"]["count"], 2);
         assert_eq!(image_job["payload"]["seeds"].as_array().unwrap().len(), 2);
         assert_eq!(image_job["payload"]["width"], 1280);
@@ -4541,6 +4543,23 @@ mod tests {
             image_job["payload"]["advanced"]["recipePresetId"],
             "cinematic"
         );
+
+        let (status, preset_model_job) = request(
+            app.clone(),
+            "POST",
+            "/api/v1/image/jobs",
+            json!({
+                "projectId": project_id,
+                "prompt": "city at dawn",
+                "count": 1,
+                "width": 512,
+                "height": 512,
+                "recipePresetId": "cinematic"
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED);
+        assert_eq!(preset_model_job["payload"]["model"], "preset-model");
 
         let (status, job) = request(
             app.clone(),

@@ -33,6 +33,12 @@ function isSelectableGpuWorker(worker) {
   return worker.gpuId && worker.gpuId !== "cpu" && hasCapability(worker, "gpu") && !isPlaceholderOnlyGpuWorker(worker);
 }
 
+function failedJobNotice(job) {
+  const label = String(job.type ?? "job").replaceAll("_", " ");
+  const detail = job.error || job.message || "Failed without additional worker detail.";
+  return `${label}: ${detail}`;
+}
+
 export function App() {
   const [health, setHealth] = useState(null);
   const [access, setAccess] = useState({ authRequired: false });
@@ -194,6 +200,9 @@ export function App() {
       }
       if (job.status === "completed" && job.projectId && job.type === "person_detect") {
         refreshAssets(job.projectId);
+      }
+      if (job.status === "failed") {
+        setError(failedJobNotice(job));
       }
     }
 
