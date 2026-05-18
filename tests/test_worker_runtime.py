@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from types import SimpleNamespace
 
 from scene_worker.image_adapters import (
@@ -17,10 +18,13 @@ from scene_worker.runtime import (
     friendly_failure,
     heartbeat,
     keep_job_alive,
+    lora_manifest_target,
     loaded_models_from_adapters,
     resolve_loaded_models,
+    resolve_lora_import_target,
     run_placeholder_job,
     run_video_job,
+    upsert_lora_manifest_entry,
     worker_capabilities,
 )
 from scene_worker.video_adapters import VIDEO_MODEL_TARGETS, build_video_asset_sidecar, video_request_from_job
@@ -77,6 +81,58 @@ def test_python_worker_can_advertise_legacy_ffmpeg_jobs(monkeypatch):
 
     assert "frame_extract" in capabilities
     assert "timeline_export" in capabilities
+
+
+def test_lora_import_target_must_stay_under_allowed_roots(tmp_path):
+    settings = SimpleNamespace(data_dir=tmp_path / "data", config_dir=tmp_path / "config")
+    target = resolve_lora_import_target(settings, {"targetDir": str(tmp_path / "data" / "loras" / "style")}, tmp_path / "fallback")
+
+    assert target == (tmp_path / "data" / "loras" / "style").resolve()
+
+    try:
+        resolve_lora_import_target(settings, {"targetDir": str(tmp_path / "outside")}, tmp_path / "fallback")
+    except ValueError as exc:
+        assert "targetDir" in str(exc)
+    else:
+        raise AssertionError("outside targetDir should reject")
+
+
+def test_project_lora_import_target_and_manifest_are_allowed(tmp_path):
+    settings = SimpleNamespace(data_dir=tmp_path / "data", config_dir=tmp_path / "config")
+    project_path = tmp_path / "projects" / "demo"
+    project_path.mkdir(parents=True)
+    settings.data_dir.mkdir()
+    (settings.data_dir / "recent-projects.json").write_text(
+        json.dumps([{"id": "project-1", "path": str(project_path)}]),
+        encoding="utf-8",
+    )
+
+    target_dir = project_path / "loras" / "imports" / "style"
+    target = resolve_lora_import_target(
+        settings,
+        {"projectId": "project-1", "targetDir": str(target_dir)},
+        tmp_path / "fallback",
+    )
+    manifest = lora_manifest_target(
+        settings,
+        {
+            "projectId": "project-1",
+            "manifestPath": str(project_path / "loras" / "manifest.jsonc"),
+            "manifestEntry": {"id": "style"},
+        },
+    )
+
+    assert target == target_dir.resolve()
+    assert manifest == (project_path / "loras" / "manifest.jsonc").resolve()
+
+
+def test_lora_manifest_upsert_is_atomic_and_preserves_created_at(tmp_path):
+    manifest = tmp_path / "user.loras.jsonc"
+    upsert_lora_manifest_entry(manifest, {"id": "style", "name": "Style", "createdAt": "first"})
+    upsert_lora_manifest_entry(manifest, {"id": "style", "name": "Style Updated", "createdAt": "second"})
+
+    payload = json.loads(manifest.read_text(encoding="utf-8"))
+    assert payload["loras"] == [{"id": "style", "name": "Style Updated", "createdAt": "first"}]
 
 
 def test_python_cpu_child_honors_explicit_utility_disable(monkeypatch):

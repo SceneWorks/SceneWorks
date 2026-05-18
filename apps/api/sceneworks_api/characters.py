@@ -224,14 +224,17 @@ def copy_lora_into_project(
     if not source_path_text:
         return None, False
     source_path = Path(source_path_text)
-    if not source_path.exists() or not source_path.is_file():
+    if not source_path.exists() or not (source_path.is_file() or source_path.is_dir()):
         raise HTTPException(status_code=400, detail=f"LoRA source path not found: {source_path_text}")
     assert_allowed_lora_source(project_path, data_dir, source_path)
     target_dir = project_path / "loras" / "characters" / character_id
     target_dir.mkdir(parents=True, exist_ok=True)
     target = target_dir / source_path.name
     if source_path.resolve() != target.resolve():
-        shutil.copy2(source_path, target)
+        if source_path.is_dir():
+            shutil.copytree(source_path, target, dirs_exist_ok=True)
+        else:
+            shutil.copy2(source_path, target)
     return str(target.relative_to(project_path)).replace("\\", "/"), True
 
 

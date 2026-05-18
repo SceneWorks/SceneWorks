@@ -152,6 +152,7 @@ export function App() {
     }
     refreshAssets(activeProject.id);
     refreshCharacters(activeProject.id);
+    refreshLoras(activeProject.id);
     refreshPersonTracks(activeProject.id);
     refreshTimelines(activeProject.id);
   }, [activeProject?.id, authenticated, token]);
@@ -301,6 +302,17 @@ export function App() {
     try {
       const items = await apiFetch(`/api/v1/projects/${projectId}/characters`, token);
       setCharacters(items);
+      setError("");
+    } catch (err) {
+      setError(err.message);
+    }
+  }
+
+  async function refreshLoras(projectId = activeProject?.id) {
+    try {
+      const query = projectId ? `?projectId=${encodeURIComponent(projectId)}` : "";
+      const items = await apiFetch(`/api/v1/loras${query}`, token);
+      setLoras(items);
       setError("");
     } catch (err) {
       setError(err.message);
@@ -1106,6 +1118,7 @@ export function App() {
             imageModels={imageModels}
             latestAssets={latestImageAssets}
             launchRequest={studioLaunch}
+            loras={loras}
             onPreview={setPreviewAsset}
             requestedGpu={requestedGpu}
             selectedAsset={selectedAsset}

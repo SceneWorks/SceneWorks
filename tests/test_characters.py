@@ -131,6 +131,19 @@ def test_character_looks_and_lora_copy(tmp_path):
     assert link["projectPath"].startswith(f"loras/characters/{character['id']}/")
     assert (project_path / link["projectPath"]).read_bytes() == b"lora"
 
+    lora_package = lora_dir / "package"
+    lora_package.mkdir()
+    (lora_package / "adapter.safetensors").write_bytes(b"adapter")
+    with_lora_dir = attach_lora(
+        "project-1",
+        character["id"],
+        CharacterLoraRequest(name="Packaged LoRA", sourcePath=str(lora_package)),
+        request,
+    )
+    dir_link = with_lora_dir["loras"][0]
+    assert dir_link["copiedIntoProject"] is True
+    assert (project_path / dir_link["projectPath"] / "adapter.safetensors").read_bytes() == b"adapter"
+
 
 def test_lora_copy_rejects_missing_and_outside_source_paths(tmp_path):
     project_path = tmp_path / "project.sceneworks"

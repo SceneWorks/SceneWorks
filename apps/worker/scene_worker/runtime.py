@@ -9,11 +9,13 @@ import shutil
 import signal
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 from typing import Any, Callable
 
 import httpx
+from sceneworks_shared import find_project_path
 
 from .gpu import cpu_worker_id, discover_gpu, discover_gpus, gpu_worker_id
 from .image_adapters import ProceduralImageAdapter, ZImageDiffusersAdapter, create_image_adapter
@@ -23,6 +25,7 @@ from .video_adapters import ProceduralVideoAdapter, run_frame_extract, run_perso
 
 
 LoadedModelsSource = Callable[[], list[str]] | None
+LORA_MANIFEST_LOCK = threading.Lock()
 
 
 def now() -> str:
@@ -183,6 +186,110 @@ def job_cancel_requested(api: ApiClient, job_id: str) -> bool:
 def safe_download_dir(value: str) -> str:
     normalized = "".join(char if char.isalnum() or char in "._-" else "__" for char in value)
     return normalized.strip("_") or "download"
+
+
+def strip_jsonc_comments(value: str) -> str:
+    output = []
+    index = 0
+    in_string = False
+    escaped = False
+    while index < len(value):
+        char = value[index]
+        next_char = value[index + 1] if index + 1 < len(value) else ""
+        if in_string:
+            output.append(char)
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == '"':
+                in_string = False
+            index += 1
+            continue
+        if char == '"':
+            in_string = True
+            output.append(char)
+            index += 1
+            continue
+        if char == "/" and next_char == "/":
+            index += 2
+            while index < len(value) and value[index] not in "\r\n":
+                index += 1
+            continue
+        if char == "/" and next_char == "*":
+            index += 2
+            while index + 1 < len(value) and not (value[index] == "*" and value[index + 1] == "/"):
+                index += 1
+            index += 2
+            continue
+        output.append(char)
+        index += 1
+    return "".join(output)
+
+
+def resolve_lora_import_target(settings: WorkerSettings, payload: dict[str, Any], fallback_target: Path) -> Path:
+    target = Path(payload.get("targetDir") or fallback_target).expanduser().resolve()
+    allowed_roots = [(settings.data_dir / "loras").resolve()]
+    project_id = payload.get("projectId")
+    if project_id:
+        project_path = find_project_path(settings.data_dir / "recent-projects.json", project_id)
+        allowed_roots.append((project_path / "loras" / "imports").resolve())
+    for root in allowed_roots:
+        try:
+            target.relative_to(root)
+            return target
+        except ValueError:
+            continue
+    raise ValueError("LoRA import targetDir must be inside app-managed data/loras or project/loras/imports")
+
+
+def lora_manifest_target(settings: WorkerSettings, payload: dict[str, Any]) -> Path | None:
+    manifest_path_text = payload.get("manifestPath")
+    manifest_entry = payload.get("manifestEntry")
+    if not manifest_path_text or not isinstance(manifest_entry, dict):
+        return None
+    manifest_path = Path(manifest_path_text).expanduser().resolve()
+    allowed = [(settings.config_dir / "manifests" / "user.loras.jsonc").resolve()]
+    project_id = payload.get("projectId")
+    if project_id:
+        project_path = find_project_path(settings.data_dir / "recent-projects.json", project_id)
+        allowed.append((project_path / "loras" / "manifest.jsonc").resolve())
+    if manifest_path not in allowed:
+        raise ValueError("LoRA manifestPath must target the global user manifest or the selected project's LoRA manifest")
+    return manifest_path
+
+
+def upsert_lora_manifest_entry(path: Path, entry: dict[str, Any]) -> None:
+    with LORA_MANIFEST_LOCK:
+        if path.exists():
+            with path.open("r", encoding="utf-8") as handle:
+                payload = json.loads(strip_jsonc_comments(handle.read()))
+        else:
+            payload = {"schemaVersion": 1, "loras": []}
+        payload.setdefault("schemaVersion", 1)
+        lora_id = entry["id"]
+        loras = []
+        found = False
+        for item in payload.get("loras", []):
+            if item.get("id") == lora_id:
+                found = True
+                loras.append({**item, **entry, "createdAt": item.get("createdAt", entry.get("createdAt"))})
+            else:
+                loras.append(item)
+        if not found:
+            loras.append(entry)
+        payload["loras"] = loras
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp_path = None
+        try:
+            with tempfile.NamedTemporaryFile("w", delete=False, dir=path.parent, encoding="utf-8") as handle:
+                tmp_path = Path(handle.name)
+                json.dump(payload, handle, indent=2)
+                handle.write("\n")
+            tmp_path.replace(path)
+        finally:
+            if tmp_path and tmp_path.exists():
+                tmp_path.unlink(missing_ok=True)
 
 
 def write_model_install_marker(target_dir: Path, payload: dict, repo: str, job_id: str) -> None:
@@ -491,7 +598,7 @@ def run_lora_import_job(api: ApiClient, settings: WorkerSettings, job: dict) -> 
     repo = payload.get("repo")
     source_path = payload.get("sourcePath")
     target_name = safe_download_dir(payload.get("loraId") or payload.get("name") or repo or Path(source_path or "lora").stem)
-    target_dir = settings.data_dir / "loras" / target_name
+    target_dir = resolve_lora_import_target(settings, payload, settings.data_dir / "loras" / target_name)
 
     try:
         heartbeat(api, settings, "busy", job_id)
@@ -527,6 +634,9 @@ def run_lora_import_job(api: ApiClient, settings: WorkerSettings, job: dict) -> 
                 shutil.copy2(source, target_dir / source.name)
         else:
             raise ValueError("Provide repo or sourcePath for LoRA import")
+        manifest_path = lora_manifest_target(settings, payload)
+        if manifest_path:
+            upsert_lora_manifest_entry(manifest_path, payload["manifestEntry"])
         update_job(
             api,
             job_id,

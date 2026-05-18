@@ -33,6 +33,8 @@ use sceneworks_core::project_store::{
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use time::format_description::well_known::Rfc3339;
+use time::OffsetDateTime;
 use tokio::io::AsyncWriteExt;
 use tokio::sync::mpsc;
 use tokio::time::{Instant as TokioInstant, MissedTickBehavior};
@@ -469,6 +471,7 @@ struct AssetsQuery {
 #[serde(rename_all = "camelCase")]
 struct LorasQuery {
     model_family: Option<String>,
+    project_id: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -682,6 +685,10 @@ struct LoraImportRequest {
     files: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     family: Option<String>,
+    #[serde(default = "default_lora_scope")]
+    scope: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    project_id: Option<String>,
 }
 
 async fn health(State(state): State<AppState>) -> Json<HealthResponse> {
@@ -1307,7 +1314,7 @@ async fn list_loras(
     State(state): State<AppState>,
     Query(query): Query<LorasQuery>,
 ) -> Result<Json<Vec<Value>>, ApiError> {
-    let mut items = lora_catalog(&state).await?;
+    let mut items = lora_catalog(&state, query.project_id.as_deref()).await?;
     if let Some(model_family) = query.model_family {
         items.retain(|item| {
             lora_families(item)
@@ -1329,12 +1336,96 @@ async fn create_lora_import_job(
             "Provide a Hugging Face repo or source path",
         ));
     }
-    let payload = to_json_object(&payload)?;
+    if !matches!(payload.scope.as_str(), "global" | "project") {
+        return Err(ApiError::bad_request(
+            "LoRA scope must be global or project",
+        ));
+    }
+    let name = payload
+        .name
+        .clone()
+        .or_else(|| payload.repo.clone())
+        .or_else(|| {
+            payload.source_path.as_deref().and_then(|path| {
+                FsPath::new(path)
+                    .file_stem()
+                    .and_then(|value| value.to_str())
+                    .map(str::to_owned)
+            })
+        })
+        .unwrap_or_else(|| "Imported LoRA".to_owned());
+    let lora_id = payload
+        .lora_id
+        .clone()
+        .unwrap_or_else(|| slugify_lora_id(&name));
+    let target_name = safe_download_dir(&lora_id);
+    let (target_dir, manifest_path, source_path, project_id, project_name) =
+        if payload.scope == "project" {
+            let Some(project_id) = payload.project_id.clone() else {
+                return Err(ApiError::bad_request(
+                    "Project LoRA imports require projectId",
+                ));
+            };
+            let project_path = project_path_for_id(state.clone(), &project_id).await?;
+            (
+                project_path
+                    .join("loras")
+                    .join("imports")
+                    .join(&target_name),
+                project_path.join("loras").join("manifest.jsonc"),
+                format!("loras/imports/{target_name}"),
+                Some(project_id),
+                None,
+            )
+        } else {
+            (
+                state.settings.data_dir.join("loras").join(&target_name),
+                state
+                    .settings
+                    .config_dir
+                    .join("manifests")
+                    .join("user.loras.jsonc"),
+                format!("loras/{target_name}"),
+                None,
+                None,
+            )
+        };
+    let timestamp = now_rfc3339();
+    let mut manifest_entry = json!({
+        "id": lora_id,
+        "name": name,
+        "scope": payload.scope.clone(),
+        "source": {
+            "provider": if payload.repo.is_some() { "huggingface" } else { "local" },
+            "repo": payload.repo.clone(),
+            "path": source_path,
+        },
+        "files": payload.files.clone(),
+        "createdAt": timestamp,
+        "updatedAt": timestamp,
+    });
+    if let Some(family) = payload.family.clone() {
+        if let Some(object) = manifest_entry.as_object_mut() {
+            object.insert("family".to_owned(), Value::String(family));
+        }
+    }
+    let mut payload = to_json_object(&payload)?;
+    payload.insert("loraId".to_owned(), manifest_entry["id"].clone());
+    payload.insert("name".to_owned(), manifest_entry["name"].clone());
+    payload.insert(
+        "targetDir".to_owned(),
+        Value::String(target_dir.display().to_string()),
+    );
+    payload.insert(
+        "manifestPath".to_owned(),
+        Value::String(manifest_path.display().to_string()),
+    );
+    payload.insert("manifestEntry".to_owned(), manifest_entry);
     let job = create_generation_job(
         state,
         JobType::LoraImport,
-        None,
-        None,
+        project_id,
+        project_name,
         payload,
         "auto".to_owned(),
     )
@@ -1845,21 +1936,58 @@ async fn model_catalog(state: &AppState) -> Result<Vec<Value>, ApiError> {
     Ok(models)
 }
 
-async fn lora_catalog(state: &AppState) -> Result<Vec<Value>, ApiError> {
+async fn lora_catalog(state: &AppState, project_id: Option<&str>) -> Result<Vec<Value>, ApiError> {
     let manifest_dir = state.settings.config_dir.join("manifests");
     let builtin =
         load_manifest_entries(state, &manifest_dir.join("builtin.loras.jsonc"), "loras").await?;
     let user =
         load_manifest_entries(state, &manifest_dir.join("user.loras.jsonc"), "loras").await?;
-    let mut loras = merge_entries_by_id(builtin, user);
+    let mut loras = Vec::new();
+    for lora in builtin {
+        loras.push(normalize_lora_entry(
+            lora,
+            "builtin",
+            &manifest_dir.join("builtin.loras.jsonc"),
+            &state.settings.data_dir,
+        )?);
+    }
+    let user = user
+        .into_iter()
+        .map(|lora| {
+            normalize_lora_entry(
+                lora,
+                "global",
+                &manifest_dir.join("user.loras.jsonc"),
+                &state.settings.data_dir,
+            )
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    loras = merge_entries_by_id(loras, user);
+    if let Some(project_id) = project_id {
+        let project_path = project_path_for_id(state.clone(), project_id).await?;
+        let project_manifest = project_path.join("loras").join("manifest.jsonc");
+        let project_loras = load_manifest_entries(state, &project_manifest, "loras")
+            .await?
+            .into_iter()
+            .map(|lora| normalize_lora_entry(lora, "project", &project_manifest, &project_path))
+            .collect::<Result<Vec<_>, _>>()?;
+        loras = merge_entries_by_id(loras, project_loras);
+    }
     loras.sort_by(|left, right| {
         let left_key = (
+            left.get("scope")
+                .and_then(Value::as_str)
+                .unwrap_or_default(),
             left.get("family")
                 .and_then(Value::as_str)
                 .unwrap_or_default(),
             left.get("name").and_then(Value::as_str).unwrap_or_default(),
         );
         let right_key = (
+            right
+                .get("scope")
+                .and_then(Value::as_str)
+                .unwrap_or_default(),
             right
                 .get("family")
                 .and_then(Value::as_str)
@@ -1872,6 +2000,60 @@ async fn lora_catalog(state: &AppState) -> Result<Vec<Value>, ApiError> {
         left_key.cmp(&right_key)
     });
     Ok(loras)
+}
+
+async fn project_path_for_id(state: AppState, project_id: &str) -> Result<PathBuf, ApiError> {
+    let project_id = project_id.to_owned();
+    let project = project_call(state, move |store| store.get_project(&project_id)).await?;
+    Ok(PathBuf::from(project.path))
+}
+
+fn normalize_lora_entry(
+    mut lora: Value,
+    scope: &str,
+    manifest_path: &FsPath,
+    default_root: &FsPath,
+) -> Result<Value, ApiError> {
+    let object = lora
+        .as_object_mut()
+        .ok_or_else(|| ApiError::internal("LoRA manifest entry must be an object"))?;
+    object
+        .entry("scope".to_owned())
+        .or_insert_with(|| Value::String(scope.to_owned()));
+    let source_path = object
+        .get("source")
+        .and_then(Value::as_object)
+        .and_then(|source| source.get("path"))
+        .and_then(Value::as_str)
+        .or_else(|| object.get("path").and_then(Value::as_str));
+    let installed_path = source_path.map(|source_path| {
+        let path = PathBuf::from(source_path);
+        if path.is_absolute() {
+            path
+        } else {
+            default_root.join(path)
+        }
+    });
+    let install_state = if installed_path.as_ref().is_some_and(|path| !path.exists()) {
+        "missing"
+    } else {
+        "installed"
+    };
+    object.insert(
+        "manifestPath".to_owned(),
+        Value::String(manifest_path.display().to_string()),
+    );
+    object.insert(
+        "installedPath".to_owned(),
+        installed_path
+            .map(|path| Value::String(path.display().to_string()))
+            .unwrap_or(Value::Null),
+    );
+    object.insert(
+        "installState".to_owned(),
+        Value::String(install_state.to_owned()),
+    );
+    Ok(lora)
 }
 
 async fn load_manifest_entries(
@@ -2182,6 +2364,36 @@ fn safe_download_dir(repo: &str) -> String {
     } else {
         output
     }
+}
+
+fn slugify_lora_id(value: &str) -> String {
+    let mut output = String::new();
+    let mut previous_separator = false;
+    for character in value.trim().chars() {
+        if character.is_ascii_alphanumeric() {
+            output.push(character.to_ascii_lowercase());
+            previous_separator = false;
+        } else if !previous_separator && !output.is_empty() {
+            output.push('_');
+            previous_separator = true;
+        }
+    }
+    while output.ends_with('_') {
+        output.pop();
+    }
+    if output.is_empty() {
+        "lora".to_owned()
+    } else {
+        output
+    }
+}
+
+fn now_rfc3339() -> String {
+    OffsetDateTime::now_utc()
+        .replace_nanosecond(0)
+        .expect("setting nanoseconds to zero must be valid")
+        .format(&Rfc3339)
+        .expect("formatting a UTC timestamp as RFC3339 must succeed")
 }
 
 fn model_is_installed(path: &FsPath) -> bool {
@@ -2500,6 +2712,10 @@ fn default_frame_intended_use() -> String {
 
 fn default_requested_gpu() -> String {
     "auto".to_owned()
+}
+
+fn default_lora_scope() -> String {
+    "global".to_owned()
 }
 
 fn default_track_name() -> String {
@@ -3390,7 +3606,13 @@ mod tests {
         assert_eq!(status, StatusCode::CREATED);
         assert_eq!(job["type"], "lora_import");
         assert_eq!(job["payload"]["repo"], "owner/lora");
-        assert!(job["payload"].get("loraId").is_none());
+        assert_eq!(job["payload"]["loraId"], "imported_lora");
+        assert_eq!(job["payload"]["scope"], "global");
+        assert!(job["payload"]["targetDir"]
+            .as_str()
+            .is_some_and(|value| value.ends_with("data/loras/imported_lora")
+                || value.ends_with("data\\loras\\imported_lora")));
+        assert_eq!(job["payload"]["manifestEntry"]["scope"], "global");
         assert!(job["payload"].get("sourcePath").is_none());
     }
 

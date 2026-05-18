@@ -98,7 +98,7 @@ export function ModelManagerScreen({ jobs, loras, models, onDownloadModel }) {
             {visibleLoras.map((lora) => (
               <article className="lora-row" key={lora.id ?? lora.name}>
                 <strong>{lora.name ?? lora.id}</strong>
-                <span>{lora.family ?? "compatible"}</span>
+                <span>{[lora.scope, lora.family ?? "compatible"].filter(Boolean).join(" | ")}</span>
               </article>
             ))}
           </div>

@@ -4,6 +4,8 @@ from fnmatch import fnmatch
 import json
 import os
 import re
+import tempfile
+import threading
 from functools import lru_cache
 from pathlib import Path
 from typing import Any
@@ -13,10 +15,12 @@ from urllib.request import urlopen
 
 from fastapi import APIRouter, HTTPException, Query, Request
 from pydantic import BaseModel, Field
+from sceneworks_shared import ProjectNotFound, find_project_path, slugify, utc_now
 
 
 router = APIRouter(prefix="/models", tags=["models"])
 loras_router = APIRouter(prefix="/loras", tags=["loras"])
+LORA_MANIFEST_LOCK = threading.Lock()
 
 
 class ModelDownloadRequest(BaseModel):
@@ -30,6 +34,8 @@ class LoraImportRequest(BaseModel):
     sourcePath: str | None = None
     files: list[str] = Field(default_factory=list)
     family: str | None = None
+    scope: str = "global"
+    projectId: str | None = None
 
 
 def strip_jsonc_comments(value: str) -> str:
@@ -100,8 +106,80 @@ def load_lora_manifest(path: Path) -> list[dict[str, Any]]:
     return [dict(item) for item in load_manifest_cached(str(path), manifest_signature(path), "loras")]
 
 
+def lora_manifest_payload(path: Path) -> dict[str, Any]:
+    if not path.exists():
+        return {"schemaVersion": 1, "loras": []}
+    with path.open("r", encoding="utf-8") as handle:
+        payload = json.loads(strip_jsonc_comments(handle.read()))
+    payload.setdefault("schemaVersion", 1)
+    payload.setdefault("loras", [])
+    return payload
+
+
 def safe_download_dir(repo: str) -> str:
     return re.sub(r"[^a-zA-Z0-9_.-]+", "__", repo).strip("_") or "download"
+
+
+def project_path_for_request(request: Request, project_id: str) -> Path:
+    try:
+        return find_project_path(request.app.state.settings.registry_path, project_id)
+    except ProjectNotFound:
+        raise HTTPException(status_code=404, detail="Project not found") from None
+
+
+def project_lora_manifest_path(project_path: Path) -> Path:
+    return project_path / "loras" / "manifest.jsonc"
+
+
+def normalize_lora_entry(
+    lora: dict[str, Any],
+    *,
+    scope: str,
+    manifest_path: Path,
+    default_root: Path,
+) -> dict[str, Any]:
+    entry = dict(lora)
+    entry.setdefault("scope", scope)
+    source = entry.get("source") if isinstance(entry.get("source"), dict) else {}
+    source_path = source.get("path") or entry.get("path")
+    installed_path = None
+    if source_path:
+        installed_path = Path(source_path)
+        if not installed_path.is_absolute():
+            installed_path = default_root / source_path
+    entry["manifestPath"] = str(manifest_path)
+    entry["installedPath"] = str(installed_path) if installed_path else None
+    entry["installState"] = "missing" if installed_path and not installed_path.exists() else "installed"
+    return entry
+
+
+def upsert_lora_manifest_entry(path: Path, entry: dict[str, Any]) -> None:
+    with LORA_MANIFEST_LOCK:
+        payload = lora_manifest_payload(path)
+        lora_id = entry["id"]
+        merged = []
+        found = False
+        for item in payload.get("loras", []):
+            if item.get("id") != lora_id:
+                merged.append(item)
+                continue
+            found = True
+            merged.append({**item, **entry, "createdAt": item.get("createdAt", entry.get("createdAt"))})
+        if not found:
+            merged.append(entry)
+        payload["loras"] = merged
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp_path = None
+        try:
+            with tempfile.NamedTemporaryFile("w", delete=False, dir=path.parent, encoding="utf-8") as handle:
+                tmp_path = Path(handle.name)
+                json.dump(payload, handle, indent=2)
+                handle.write("\n")
+            tmp_path.replace(path)
+        finally:
+            if tmp_path and tmp_path.exists():
+                tmp_path.unlink(missing_ok=True)
+        load_manifest_cached.cache_clear()
 
 
 def format_bytes(value: int | float | None) -> str | None:
@@ -204,17 +282,49 @@ def model_catalog(request: Request) -> list[dict[str, Any]]:
     return sorted(models, key=lambda model: (model.get("type", ""), model.get("name", "")))
 
 
-def lora_catalog(request: Request) -> list[dict[str, Any]]:
+def lora_catalog(request: Request, project_id: str | None = None) -> list[dict[str, Any]]:
     settings = request.app.state.settings
     manifest_dir = settings.config_dir / "manifests"
     builtin = load_lora_manifest(manifest_dir / "builtin.loras.jsonc")
     user = load_lora_manifest(manifest_dir / "user.loras.jsonc")
-    by_id = {lora["id"]: lora for lora in builtin if "id" in lora}
+    by_id = {
+        lora["id"]: normalize_lora_entry(
+            lora,
+            scope=lora.get("scope", "builtin"),
+            manifest_path=manifest_dir / "builtin.loras.jsonc",
+            default_root=settings.data_dir,
+        )
+        for lora in builtin
+        if "id" in lora
+    }
     for lora in user:
         lora_id = lora.get("id")
         if lora_id:
-            by_id[lora_id] = {**by_id.get(lora_id, {}), **lora}
-    return sorted(by_id.values(), key=lambda lora: (lora.get("family", ""), lora.get("name", "")))
+            by_id[lora_id] = {
+                **by_id.get(lora_id, {}),
+                **normalize_lora_entry(
+                    lora,
+                    scope=lora.get("scope", "global"),
+                    manifest_path=manifest_dir / "user.loras.jsonc",
+                    default_root=settings.data_dir,
+                ),
+            }
+    if project_id:
+        project_path = project_path_for_request(request, project_id)
+        project_manifest = project_lora_manifest_path(project_path)
+        for lora in load_lora_manifest(project_manifest):
+            lora_id = lora.get("id")
+            if lora_id:
+                by_id[lora_id] = {
+                    **by_id.get(lora_id, {}),
+                    **normalize_lora_entry(
+                        lora,
+                        scope=lora.get("scope", "project"),
+                        manifest_path=project_manifest,
+                        default_root=project_path,
+                    ),
+                }
+    return sorted(by_id.values(), key=lambda lora: (lora.get("scope", ""), lora.get("family", ""), lora.get("name", "")))
 
 
 def lora_families(lora: dict[str, Any]) -> set[str]:
@@ -266,8 +376,12 @@ def create_model_download_job(model_id: str, payload: ModelDownloadRequest, requ
 
 
 @loras_router.get("")
-def list_loras(request: Request, modelFamily: str | None = Query(default=None)) -> list[dict[str, Any]]:
-    items = lora_catalog(request)
+def list_loras(
+    request: Request,
+    modelFamily: str | None = Query(default=None),
+    projectId: str | None = Query(default=None),
+) -> list[dict[str, Any]]:
+    items = lora_catalog(request, projectId)
     if modelFamily:
         items = [item for item in items if modelFamily in lora_families(item)]
     return items
@@ -277,11 +391,59 @@ def list_loras(request: Request, modelFamily: str | None = Query(default=None)) 
 def create_lora_import_job(payload: LoraImportRequest, request: Request) -> dict[str, Any]:
     if not payload.repo and not payload.sourcePath:
         raise HTTPException(status_code=400, detail="Provide a Hugging Face repo or source path")
+    if payload.scope not in {"global", "project"}:
+        raise HTTPException(status_code=400, detail="LoRA scope must be global or project")
+
+    settings = request.app.state.settings
+    name = payload.name or payload.repo or Path(payload.sourcePath or "Imported LoRA").stem
+    lora_id = payload.loraId or slugify(name, fallback="lora").replace("-", "_")
+    target_name = safe_download_dir(lora_id)
+    if payload.scope == "project":
+        if not payload.projectId:
+            raise HTTPException(status_code=400, detail="Project LoRA imports require projectId")
+        project_path = project_path_for_request(request, payload.projectId)
+        target_dir = project_path / "loras" / "imports" / target_name
+        manifest_path = project_lora_manifest_path(project_path)
+        source_path = f"loras/imports/{target_name}"
+        project_id = payload.projectId
+        project_name = None
+    else:
+        target_dir = settings.data_dir / "loras" / target_name
+        manifest_path = settings.config_dir / "manifests" / "user.loras.jsonc"
+        source_path = f"loras/{target_name}"
+        project_id = None
+        project_name = None
+
+    timestamp = utc_now()
+    manifest_entry = {
+        "id": lora_id,
+        "name": name,
+        "family": payload.family,
+        "scope": payload.scope,
+        "source": {
+            "provider": "huggingface" if payload.repo else "local",
+            "repo": payload.repo,
+            "path": source_path,
+        },
+        "files": payload.files,
+        "createdAt": timestamp,
+        "updatedAt": timestamp,
+    }
+    manifest_entry = {key: value for key, value in manifest_entry.items() if value is not None}
+
+    job_payload = {
+        **payload.model_dump(exclude_none=True),
+        "loraId": lora_id,
+        "name": name,
+        "targetDir": str(target_dir),
+        "manifestPath": str(manifest_path),
+        "manifestEntry": manifest_entry,
+    }
     job = request.app.state.jobs_store.create_job(
         job_type="lora_import",
-        project_id=None,
-        project_name=None,
-        payload=payload.model_dump(exclude_none=True),
+        project_id=project_id,
+        project_name=project_name,
+        payload=job_payload,
         requested_gpu="auto",
     )
     request.app.state.event_hub.publish("job.updated", job)

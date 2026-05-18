@@ -31,6 +31,7 @@ pub struct Settings {
     pub api_url: String,
     pub access_token: Option<String>,
     pub data_dir: PathBuf,
+    pub config_dir: PathBuf,
     pub worker_id: String,
     pub gpu_id: String,
     pub is_child_worker: bool,
@@ -50,6 +51,7 @@ impl Settings {
                 .map(|value| value.trim().to_owned())
                 .filter(|value| !value.is_empty()),
             data_dir: env_path("SCENEWORKS_DATA_DIR", "data"),
+            config_dir: env_path("SCENEWORKS_CONFIG_DIR", "config"),
             worker_id: env_string("SCENEWORKS_WORKER_ID", "rust-utility-worker"),
             gpu_id: env_string("SCENEWORKS_GPU_ID", "cpu"),
             is_child_worker: std::env::var("SCENEWORKS_WORKER_CHILD")
@@ -1000,7 +1002,11 @@ async fn run_lora_import_job(
                 })
                 .unwrap_or_else(|| "lora".to_owned())
         });
-    let target_dir = settings.data_dir.join("loras").join(target_name);
+    let target_dir = resolve_lora_import_target(
+        settings,
+        &job.payload,
+        settings.data_dir.join("loras").join(target_name),
+    )?;
 
     heartbeat(api, settings, WorkerStatus::Busy, Some(&job.id)).await?;
     update_job(
@@ -1059,6 +1065,16 @@ async fn run_lora_import_job(
             Some("Provide repo or sourcePath for LoRA import".to_owned()),
         )
         .await;
+    }
+
+    if let Some(manifest_entry) = job
+        .payload
+        .get("manifestEntry")
+        .and_then(Value::as_object)
+        .cloned()
+    {
+        let manifest_path = lora_manifest_target(settings, &job.payload)?;
+        upsert_lora_manifest_entry(&manifest_path, manifest_entry).await?;
     }
 
     let mut result = JsonObject::new();
@@ -2107,6 +2123,93 @@ fn optional_payload_string<'a>(payload: &'a JsonObject, field: &str) -> Option<&
         .filter(|value| !value.trim().is_empty())
 }
 
+fn normalize_absolute_path(path: &Path) -> WorkerResult<PathBuf> {
+    let mut output = if path.is_absolute() {
+        PathBuf::new()
+    } else {
+        std::env::current_dir()?
+    };
+    for component in path.components() {
+        match component {
+            std::path::Component::Prefix(prefix) => output.push(prefix.as_os_str()),
+            std::path::Component::RootDir => output.push(component.as_os_str()),
+            std::path::Component::CurDir => {}
+            std::path::Component::ParentDir => {
+                if !output.pop() {
+                    return Err(WorkerError::InvalidPayload(format!(
+                        "Unsafe absolute path: {}",
+                        path.display()
+                    )));
+                }
+            }
+            std::path::Component::Normal(value) => output.push(value),
+        }
+    }
+    Ok(output)
+}
+
+fn project_path_for_payload(
+    settings: &Settings,
+    payload: &JsonObject,
+) -> WorkerResult<Option<PathBuf>> {
+    let Some(project_id) = optional_payload_string(payload, "projectId") else {
+        return Ok(None);
+    };
+    let store = ProjectStore::new(settings.data_dir.clone(), "worker");
+    let project = store.get_project(project_id)?;
+    Ok(Some(PathBuf::from(project.path)))
+}
+
+fn resolve_lora_import_target(
+    settings: &Settings,
+    payload: &JsonObject,
+    fallback_target: PathBuf,
+) -> WorkerResult<PathBuf> {
+    let target = normalize_absolute_path(
+        &optional_payload_string(payload, "targetDir")
+            .map(PathBuf::from)
+            .unwrap_or(fallback_target),
+    )?;
+    let mut allowed_roots = vec![normalize_absolute_path(&settings.data_dir.join("loras"))?];
+    if let Some(project_path) = project_path_for_payload(settings, payload)? {
+        allowed_roots.push(normalize_absolute_path(
+            &project_path.join("loras").join("imports"),
+        )?);
+    }
+    if allowed_roots.iter().any(|root| target.starts_with(root)) {
+        return Ok(target);
+    }
+    Err(WorkerError::InvalidPayload(
+        "LoRA import targetDir must be inside app-managed data/loras or project/loras/imports"
+            .to_owned(),
+    ))
+}
+
+fn lora_manifest_target(settings: &Settings, payload: &JsonObject) -> WorkerResult<PathBuf> {
+    let manifest_path = normalize_absolute_path(&PathBuf::from(required_payload_string(
+        payload,
+        "manifestPath",
+    )?))?;
+    let mut allowed = vec![normalize_absolute_path(
+        &settings
+            .config_dir
+            .join("manifests")
+            .join("user.loras.jsonc"),
+    )?];
+    if let Some(project_path) = project_path_for_payload(settings, payload)? {
+        allowed.push(normalize_absolute_path(
+            &project_path.join("loras").join("manifest.jsonc"),
+        )?);
+    }
+    if allowed.iter().any(|path| path == &manifest_path) {
+        return Ok(manifest_path);
+    }
+    Err(WorkerError::InvalidPayload(
+        "LoRA manifestPath must target the global user manifest or the selected project's LoRA manifest"
+            .to_owned(),
+    ))
+}
+
 fn payload_string_array(payload: &JsonObject, field: &str) -> Vec<String> {
     payload
         .get(field)
@@ -2154,9 +2257,9 @@ fn quote_path(value: &str) -> String {
 fn now_rfc3339() -> String {
     OffsetDateTime::now_utc()
         .replace_nanosecond(0)
-        .unwrap_or(OffsetDateTime::UNIX_EPOCH)
+        .expect("setting nanoseconds to zero must be valid")
         .format(&Rfc3339)
-        .unwrap_or_else(|_| "1970-01-01T00:00:00Z".to_owned())
+        .expect("formatting a UTC timestamp as RFC3339 must succeed")
 }
 
 fn export_request_from_job(job: &JobSnapshot) -> WorkerResult<TimelineExportRequest> {
@@ -2694,6 +2797,102 @@ fn bounded_tail(value: &str, max_lines: usize, max_chars: usize) -> String {
 
 async fn read_json_value(path: &Path) -> WorkerResult<Value> {
     Ok(serde_json::from_slice(&tokio::fs::read(path).await?)?)
+}
+
+fn strip_jsonc_comments(value: &str) -> String {
+    let mut output = String::with_capacity(value.len());
+    let mut chars = value.chars().peekable();
+    let mut in_string = false;
+    let mut escaped = false;
+    while let Some(character) = chars.next() {
+        if in_string {
+            output.push(character);
+            if escaped {
+                escaped = false;
+            } else if character == '\\' {
+                escaped = true;
+            } else if character == '"' {
+                in_string = false;
+            }
+            continue;
+        }
+        if character == '"' {
+            in_string = true;
+            output.push(character);
+            continue;
+        }
+        if character == '/' && chars.peek() == Some(&'/') {
+            chars.next();
+            for next in chars.by_ref() {
+                if next == '\r' || next == '\n' {
+                    output.push(next);
+                    break;
+                }
+            }
+            continue;
+        }
+        if character == '/' && chars.peek() == Some(&'*') {
+            chars.next();
+            let mut previous = '\0';
+            for next in chars.by_ref() {
+                if previous == '*' && next == '/' {
+                    break;
+                }
+                previous = next;
+            }
+            continue;
+        }
+        output.push(character);
+    }
+    output
+}
+
+async fn upsert_lora_manifest_entry(
+    path: &Path,
+    entry: serde_json::Map<String, Value>,
+) -> WorkerResult<()> {
+    let mut manifest = match tokio::fs::read_to_string(path).await {
+        Ok(payload) => serde_json::from_str(&strip_jsonc_comments(&payload))?,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            json!({ "schemaVersion": 1, "loras": [] })
+        }
+        Err(error) => return Err(error.into()),
+    };
+    let lora_id = entry
+        .get("id")
+        .and_then(Value::as_str)
+        .ok_or_else(|| WorkerError::InvalidPayload("LoRA manifest entry requires id".to_owned()))?;
+    let loras = manifest
+        .as_object_mut()
+        .ok_or_else(|| WorkerError::InvalidPayload("LoRA manifest must be an object".to_owned()))?
+        .entry("loras")
+        .or_insert_with(|| Value::Array(Vec::new()));
+    let loras = loras.as_array_mut().ok_or_else(|| {
+        WorkerError::InvalidPayload("LoRA manifest loras must be an array".to_owned())
+    })?;
+    let mut found = false;
+    for item in loras.iter_mut() {
+        if item.get("id").and_then(Value::as_str) != Some(lora_id) {
+            continue;
+        }
+        found = true;
+        let created_at = item.get("createdAt").cloned();
+        let Some(object) = item.as_object_mut() else {
+            return Err(WorkerError::InvalidPayload(
+                "LoRA manifest entry must be an object".to_owned(),
+            ));
+        };
+        for (key, value) in entry.clone() {
+            object.insert(key, value);
+        }
+        if let Some(created_at) = created_at {
+            object.insert("createdAt".to_owned(), created_at);
+        }
+    }
+    if !found {
+        loras.push(Value::Object(entry));
+    }
+    write_json_value(path, &manifest).await
 }
 
 async fn write_json_value(path: &Path, value: &Value) -> WorkerResult<()> {
@@ -3324,6 +3523,7 @@ mod tests {
             api_url: "http://127.0.0.1:8000".to_owned(),
             access_token: None,
             data_dir: PathBuf::from("data"),
+            config_dir: PathBuf::from("config"),
             worker_id: "test-worker".to_owned(),
             gpu_id: "cpu".to_owned(),
             is_child_worker: true,
