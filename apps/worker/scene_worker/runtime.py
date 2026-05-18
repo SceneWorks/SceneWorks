@@ -142,6 +142,37 @@ def update_job(api: ApiClient, job_id: str, payload: dict[str, Any]) -> dict:
     return job
 
 
+def friendly_failure(job_kind: str, exc: Exception) -> tuple[str, str]:
+    detail = str(exc).strip() or exc.__class__.__name__
+    lowered = detail.lower()
+    exc_name = exc.__class__.__name__.lower()
+    if "outofmemory" in exc_name or "out of memory" in lowered or "cuda error: out of memory" in lowered:
+        return (
+            f"{job_kind} failed because the GPU ran out of memory.",
+            (
+                "GPU memory was exhausted. Try a lower resolution, shorter clip, smaller batch count, "
+                f"or a different GPU. Technical detail: {detail}"
+            ),
+        )
+    missing_model_markers = (
+        "repo id",
+        "repository not found",
+        "is not a local folder",
+        "couldn't connect to 'https://huggingface.co'",
+        "model not found",
+        "model files",
+    )
+    if any(marker in lowered for marker in missing_model_markers):
+        return (
+            f"{job_kind} failed because required model files were not available.",
+            (
+                "The worker could not find or download the model files. Check that the model is installed, "
+                f"the Hugging Face repo is reachable, and HF_TOKEN is set for gated repos. Technical detail: {detail}"
+            ),
+        )
+    return (f"{job_kind} failed.", detail)
+
+
 def job_cancel_requested(api: ApiClient, job_id: str) -> bool:
     return bool(api.get(f"/api/v1/jobs/{job_id}")["cancelRequested"])
 
@@ -641,6 +672,7 @@ def run_image_job(api: ApiClient, settings: WorkerSettings, job: dict, image_ada
             },
         )
     except Exception as exc:
+        message, error = friendly_failure("Image generation", exc)
         update_job(
             api,
             job_id,
@@ -648,8 +680,8 @@ def run_image_job(api: ApiClient, settings: WorkerSettings, job: dict, image_ada
                 "status": "failed",
                 "stage": "failed",
                 "progress": 1,
-                "message": "Image generation failed.",
-                "error": str(exc),
+                "message": message,
+                "error": error,
             },
         )
     finally:
@@ -727,6 +759,7 @@ def run_video_job(api: ApiClient, settings: WorkerSettings, job: dict) -> None:
         )
     except Exception as exc:
         adapter.cleanup(job_id)
+        message, error = friendly_failure("Video generation", exc)
         update_job(
             api,
             job_id,
@@ -734,8 +767,8 @@ def run_video_job(api: ApiClient, settings: WorkerSettings, job: dict) -> None:
                 "status": "failed",
                 "stage": "failed",
                 "progress": 1,
-                "message": "Video generation failed.",
-                "error": str(exc),
+                "message": message,
+                "error": error,
             },
         )
     finally:

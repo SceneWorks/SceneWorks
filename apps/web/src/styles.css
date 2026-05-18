@@ -1312,11 +1312,13 @@ button:disabled {
   display: grid;
   gap: 6px;
   padding: 12px;
+  min-width: 0;
 }
 
 .worker-card span,
 .worker-card small {
   color: #aaa397;
+  overflow-wrap: anywhere;
 }
 
 .job-list {

@@ -2,11 +2,12 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
-from scene_worker.image_adapters import MODEL_TARGETS, build_asset_sidecar, image_request_from_job, resolve_seed
+from scene_worker.image_adapters import MODEL_TARGETS, ZImageDiffusersAdapter, build_asset_sidecar, image_request_from_job, resolve_seed
 from scene_worker.runtime import (
     download_progress_payload,
     format_bytes,
     child_environment,
+    friendly_failure,
     heartbeat,
     keep_job_alive,
     loaded_models_from_adapters,
@@ -94,6 +95,29 @@ def test_loaded_models_are_collected_from_adapter_cache():
             return ["Tongyi-MAI/Z-Image-Turbo"]
 
     assert loaded_models_from_adapters({"z": Adapter()}) == ["Tongyi-MAI/Z-Image-Turbo"]
+
+
+def test_z_image_loaded_models_include_repo_and_model_id():
+    adapter = ZImageDiffusersAdapter()
+    adapter._loaded_repo = "Tongyi-MAI/Z-Image-Turbo"
+    adapter._loaded_model = "z_image_turbo"
+
+    assert adapter.loaded_models() == ["Tongyi-MAI/Z-Image-Turbo", "z_image_turbo"]
+
+
+def test_friendly_failure_identifies_gpu_oom():
+    message, error = friendly_failure("Image generation", RuntimeError("CUDA error: out of memory"))
+
+    assert message == "Image generation failed because the GPU ran out of memory."
+    assert "lower resolution" in error
+    assert "Technical detail" in error
+
+
+def test_friendly_failure_identifies_missing_model_files():
+    message, error = friendly_failure("Image generation", RuntimeError("Repository not found: owner/model"))
+
+    assert message == "Image generation failed because required model files were not available."
+    assert "HF_TOKEN" in error
 
 
 def test_heartbeat_loaded_models_are_not_sent_as_current_job():

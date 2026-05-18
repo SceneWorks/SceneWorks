@@ -1,6 +1,54 @@
-import React from "react";
+import React, { useMemo } from "react";
 import { actionStatuses, terminalStatuses } from "../constants.js";
 import { formatSeconds, percent } from "../formatting.js";
+
+const nonGpuJobTypes = new Set(["model_download", "lora_import"]);
+
+function formatJobType(type) {
+  return String(type ?? "job").replaceAll("_", " ");
+}
+
+function workerSupports(worker, type) {
+  return Array.isArray(worker.capabilities) && worker.capabilities.includes(type);
+}
+
+function workerCanClaim(job, worker) {
+  if (!workerSupports(worker, job.type)) {
+    return false;
+  }
+  if (nonGpuJobTypes.has(job.type)) {
+    return true;
+  }
+  return job.requestedGpu === "auto" || job.requestedGpu === worker.gpuId;
+}
+
+function jobWaitingMessage(job, workers) {
+  if (job.status !== "queued") {
+    return job.error ?? job.message;
+  }
+  const candidates = workers.filter((worker) => workerCanClaim(job, worker));
+  if (!candidates.length) {
+    if (job.requestedGpu && job.requestedGpu !== "auto") {
+      return `Blocked: no active worker can run ${formatJobType(job.type)} on GPU ${job.requestedGpu}.`;
+    }
+    return `Blocked: no active worker supports ${formatJobType(job.type)}.`;
+  }
+  if (candidates.every((worker) => worker.status === "busy")) {
+    const target = job.requestedGpu && job.requestedGpu !== "auto" ? `GPU ${job.requestedGpu}` : "an eligible worker";
+    return `Waiting: ${target} is busy.`;
+  }
+  if (job.requestedGpu && job.requestedGpu !== "auto") {
+    return `Waiting for GPU ${job.requestedGpu} to claim the job.`;
+  }
+  return nonGpuJobTypes.has(job.type) ? "Waiting for a utility worker." : "Waiting for an available GPU worker.";
+}
+
+function workerStatusLine(worker) {
+  if (worker.status === "busy") {
+    return `Busy${worker.currentJobId ? ` with ${worker.currentJobId}` : ""}`;
+  }
+  return worker.status === "idle" ? "Ready" : worker.status;
+}
 
 export function QueueScreen({
   activeProject,
@@ -17,6 +65,7 @@ export function QueueScreen({
   setRequestedGpu,
   workers,
 }) {
+  const workersById = useMemo(() => new Map(workers.map((worker) => [worker.id, worker])), [workers]);
   return (
     <section className="main-surface queue-surface">
       <div className="queue-header">
@@ -63,8 +112,8 @@ export function QueueScreen({
           workers.map((worker) => (
             <div className="worker-card" key={worker.id}>
               <strong>{worker.gpuName ?? worker.gpuId}</strong>
-              <span>{worker.status}</span>
-              <small>{worker.currentJobId ?? "Idle"}</small>
+              <span>{workerStatusLine(worker)}</span>
+              <small>{worker.loadedModels?.length ? `Warm: ${worker.loadedModels.join(", ")}` : "No warm model"}</small>
             </div>
           ))
         )}
@@ -74,18 +123,27 @@ export function QueueScreen({
         {filteredJobs.length === 0 ? (
           <div className="empty-panel">No jobs in this view</div>
         ) : (
-          filteredJobs.map((job) => <JobRow job={job} jobAction={jobAction} key={job.id} />)
+          filteredJobs.map((job) => (
+            <JobRow
+              assignedWorker={workersById.get(job.workerId)}
+              job={job}
+              jobAction={jobAction}
+              key={job.id}
+              workers={workers}
+            />
+          ))
         )}
       </div>
     </section>
   );
 }
 
-function JobRow({ job, jobAction }) {
+function JobRow({ assignedWorker, job, jobAction, workers }) {
   const canCancel = !terminalStatuses.has(job.status);
   const maxAttempts = 5;
   const attempts = job.attempts ?? 1;
   const canRepeat = actionStatuses.has(job.status) && attempts < maxAttempts;
+  const displayMessage = jobWaitingMessage(job, workers);
   return (
     <article className={`job-row ${job.status}`}>
       <div className="job-main">
@@ -100,12 +158,13 @@ function JobRow({ job, jobAction }) {
         <span>Stage {job.stage}</span>
         <span>Elapsed {formatSeconds(job.elapsedSeconds)}</span>
         <span>GPU {job.assignedGpu ?? job.requestedGpu}</span>
+        {assignedWorker ? <span>{assignedWorker.gpuName ?? assignedWorker.id}</span> : null}
         <span>Attempt {attempts}/{maxAttempts}</span>
       </div>
       <div className="progress-track" aria-label={`${percent(job.progress)} complete`}>
         <span style={{ width: percent(job.progress) }} />
       </div>
-      <p className={job.error ? "job-message error-text" : "job-message"}>{job.error ?? job.message}</p>
+      <p className={job.error ? "job-message error-text" : "job-message"}>{displayMessage}</p>
       <div className="job-actions">
         <button disabled={!canCancel || job.cancelRequested} onClick={() => jobAction(job, "cancel")} type="button">
           Cancel

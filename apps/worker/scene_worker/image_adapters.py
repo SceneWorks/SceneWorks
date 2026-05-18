@@ -35,6 +35,14 @@ ProgressCallback = Callable[[str, str, float, str], None]
 CancelCallback = Callable[[], bool]
 
 
+def huggingface_repo_cache_exists(repo: str) -> bool:
+    default_home = Path.home() / ".cache" / "huggingface"
+    hf_home = Path(os.getenv("HF_HOME") or default_home)
+    cache_root = Path(os.getenv("HUGGINGFACE_HUB_CACHE") or hf_home / "hub")
+    repo_cache = cache_root / f"models--{repo.replace('/', '--')}"
+    return (repo_cache / "snapshots").exists() or (repo_cache / "blobs").exists()
+
+
 MODEL_TARGETS = {
     "z_image_turbo": {
         "label": "Z-Image-Turbo",
@@ -212,9 +220,10 @@ class ZImageDiffusersAdapter:
         self._text_pipe: Any | None = None
         self._img2img_pipe: Any | None = None
         self._loaded_repo: str | None = None
+        self._loaded_model: str | None = None
 
     def loaded_models(self) -> list[str]:
-        return [self._loaded_repo] if self._loaded_repo else []
+        return sorted({value for value in (self._loaded_repo, self._loaded_model) if value})
 
     def generate(
         self,
@@ -233,7 +242,7 @@ class ZImageDiffusersAdapter:
             raise RuntimeError(f"{request.model} is not a Z-Image Diffusers target.")
 
         progress("loading_model", "loading_model", 0.18, f"Loading {model_target['label']}.")
-        pipe = self._load_pipeline(request, model_target)
+        pipe = self._load_pipeline(request, model_target, progress=progress)
         images = []
         total = request.count
         for index in range(total):
@@ -259,7 +268,7 @@ class ZImageDiffusersAdapter:
             },
         )
 
-    def _load_pipeline(self, request: ImageRequest, model_target: dict[str, Any]) -> Any:
+    def _load_pipeline(self, request: ImageRequest, model_target: dict[str, Any], progress: ProgressCallback) -> Any:
         torch = importlib.import_module("torch")
         diffusers = importlib.import_module("diffusers")
         repo = request.advanced.get("modelRepo") or model_target["repo"]
@@ -268,6 +277,8 @@ class ZImageDiffusersAdapter:
         use_img2img = request.mode == "edit_image"
         cached_pipe = self._img2img_pipe if use_img2img else self._text_pipe
         if cached_pipe is not None and self._loaded_repo == repo:
+            self._loaded_model = request.model
+            progress("loading_model", "loading_model", 0.22, f"Using cached {model_target['label']}.")
             return cached_pipe
 
         if self._loaded_repo and self._loaded_repo != repo:
@@ -289,11 +300,14 @@ class ZImageDiffusersAdapter:
         if pipeline_class is None:
             pipeline_class = getattr(diffusers, "DiffusionPipeline")
 
+        cache_action = "Loading cached" if huggingface_repo_cache_exists(repo) else "Downloading"
+        progress("loading_model", "loading_model", 0.2, f"{cache_action} {model_target['label']} model files.")
         pipe = pipeline_class.from_pretrained(
             repo,
             torch_dtype=dtype,
             low_cpu_mem_usage=bool(request.advanced.get("lowCpuMemUsage", False)),
         )
+        progress("loading_model", "loading_model", 0.22, f"Moving {model_target['label']} to {device}.")
         if bool(request.advanced.get("cpuOffload", False)) and hasattr(pipe, "enable_model_cpu_offload"):
             pipe.enable_model_cpu_offload()
         else:
@@ -304,12 +318,14 @@ class ZImageDiffusersAdapter:
         else:
             self._text_pipe = pipe
         self._loaded_repo = repo
+        self._loaded_model = request.model
         return pipe
 
     def _evict_pipelines(self, torch: Any) -> None:
         self._text_pipe = None
         self._img2img_pipe = None
         self._loaded_repo = None
+        self._loaded_model = None
         self._empty_cuda_cache(torch)
 
     def _empty_cuda_cache(self, torch: Any) -> None:

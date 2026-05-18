@@ -602,14 +602,9 @@ impl JobsStore {
             params![worker.gpu_id, i64::from(has_active_gpu_job)],
             row_to_job,
         )?)?;
-        // Faithful to the current Python queue behavior. Revisit before large multi-tenant queues so
-        // capability-incompatible jobs cannot hide a later compatible job indefinitely.
-        let queued = queued_rows.into_iter().find(|job| {
-            worker
-                .capabilities
-                .iter()
-                .any(|capability| capability.as_str() == job.job_type.as_str())
-        });
+        // Keep this bounded while the queue is still small; revisit before large multi-tenant
+        // queues so capability-incompatible jobs cannot hide a later compatible job indefinitely.
+        let queued = choose_claimable_job(queued_rows, &worker);
         let Some(queued) = queued else {
             return Ok(None);
         };
@@ -1119,6 +1114,63 @@ fn is_terminal_status(status: &str) -> bool {
 
 fn is_non_gpu_job_type(job_type: &str) -> bool {
     NON_GPU_JOB_TYPES.contains(&job_type)
+}
+
+fn choose_claimable_job(rows: Vec<JobSnapshot>, worker: &WorkerSnapshot) -> Option<JobSnapshot> {
+    let compatible = rows
+        .into_iter()
+        .filter(|job| {
+            worker
+                .capabilities
+                .iter()
+                .any(|capability| capability.as_str() == job.job_type.as_str())
+        })
+        .collect::<Vec<_>>();
+    let first = compatible.first()?;
+    if is_non_gpu_job_type(first.job_type.as_str()) || first.requested_gpu != "auto" {
+        return compatible.into_iter().next();
+    }
+    compatible
+        .iter()
+        .find(|job| job_matches_loaded_model(job, worker))
+        .cloned()
+        .or_else(|| compatible.into_iter().next())
+}
+
+fn job_matches_loaded_model(job: &JobSnapshot, worker: &WorkerSnapshot) -> bool {
+    if job.requested_gpu != "auto"
+        || is_non_gpu_job_type(job.job_type.as_str())
+        || worker.loaded_models.is_empty()
+    {
+        return false;
+    }
+    let keys = desired_model_keys(&job.payload);
+    worker
+        .loaded_models
+        .iter()
+        .any(|loaded_model| keys.iter().any(|key| key == loaded_model))
+}
+
+fn desired_model_keys(payload: &Map<String, Value>) -> Vec<String> {
+    let mut keys = Vec::new();
+    push_string_value(&mut keys, payload.get("model"));
+    push_string_value(&mut keys, payload.get("repo"));
+    if let Some(advanced) = payload.get("advanced").and_then(Value::as_object) {
+        push_string_value(&mut keys, advanced.get("modelRepo"));
+        push_string_value(&mut keys, advanced.get("repo"));
+    }
+    keys.sort();
+    keys.dedup();
+    keys
+}
+
+fn push_string_value(output: &mut Vec<String>, value: Option<&Value>) {
+    if let Some(value) = value
+        .and_then(Value::as_str)
+        .filter(|value| !value.is_empty())
+    {
+        output.push(value.to_owned());
+    }
 }
 
 fn placeholders_from(start: usize, count: usize) -> String {

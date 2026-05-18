@@ -54,7 +54,7 @@ const DEFAULT_CORS_ORIGINS: &str = concat!(
     "http://localhost:5176,http://127.0.0.1:5176"
 );
 const EVENT_BUFFER_SIZE: usize = 100;
-const HEARTBEAT_SSE_TEXT: &str = "event: heartbeat\ndata: {}\n\n";
+const HEARTBEAT_SSE_TEXT: &str = "{}";
 const MAX_UPLOAD_BYTES: usize = 2 * 1024 * 1024 * 1024;
 const MANIFEST_CACHE_LIMIT: usize = 16;
 const MODEL_SIZE_CACHE_LIMIT: usize = 64;
@@ -3769,8 +3769,9 @@ mod tests {
     }
 
     #[test]
-    fn heartbeat_event_matches_python_wire_shape() {
-        assert_eq!(HEARTBEAT_SSE_TEXT, "event: heartbeat\ndata: {}\n\n");
+    fn heartbeat_keepalive_text_is_axum_safe() {
+        assert_eq!(HEARTBEAT_SSE_TEXT, "{}");
+        assert!(!HEARTBEAT_SSE_TEXT.contains(['\r', '\n']));
     }
 
     #[tokio::test]

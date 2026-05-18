@@ -17,6 +17,41 @@ NON_GPU_JOB_TYPES = ("model_download", "lora_import")
 MAX_JOB_ATTEMPTS = 5
 
 
+def desired_model_keys(payload: dict) -> set[str]:
+    keys: set[str] = set()
+    model = payload.get("model")
+    if isinstance(model, str) and model:
+        keys.add(model)
+    repo = payload.get("repo")
+    if isinstance(repo, str) and repo:
+        keys.add(repo)
+    advanced = payload.get("advanced")
+    if isinstance(advanced, dict):
+        for field in ("modelRepo", "repo"):
+            value = advanced.get(field)
+            if isinstance(value, str) and value:
+                keys.add(value)
+    return keys
+
+
+def job_matches_loaded_model(row: sqlite3.Row, loaded_models: set[str]) -> bool:
+    if row["requested_gpu"] != "auto" or row["type"] in NON_GPU_JOB_TYPES or not loaded_models:
+        return False
+    return bool(desired_model_keys(loads(row["payload_json"], {})) & loaded_models)
+
+
+def choose_claimable_job(rows: list[sqlite3.Row], capabilities: set[str], loaded_models: set[str]) -> sqlite3.Row | None:
+    compatible = [row for row in rows if row["type"] in capabilities]
+    if not compatible:
+        return None
+
+    first = compatible[0]
+    if first["type"] in NON_GPU_JOB_TYPES or first["requested_gpu"] != "auto":
+        return first
+
+    return next((row for row in compatible if job_matches_loaded_model(row, loaded_models)), first)
+
+
 def dumps(value: Any) -> str:
     return json.dumps(value if value is not None else {}, separators=(",", ":"), sort_keys=True)
 
@@ -426,6 +461,7 @@ class JobsStore:
             worker = self.get_worker(worker_id, connection=connection)
             gpu_id = worker["gpuId"]
             capabilities = set(worker["capabilities"])
+            loaded_models = set(worker["loadedModels"])
             active_gpu_job = connection.execute(
                 f"""
                 select id from jobs
@@ -450,7 +486,7 @@ class JobsStore:
             ).fetchall()
             # Keep this bounded while the queue is still small; revisit before large multi-tenant queues
             # so capability-incompatible jobs cannot hide a later compatible job indefinitely.
-            queued = next((row for row in queued_rows if row["type"] in capabilities), None)
+            queued = choose_claimable_job(queued_rows, capabilities, loaded_models)
             if queued is None:
                 return None
             assigned_gpu = "cpu" if queued["type"] in NON_GPU_JOB_TYPES else gpu_id
