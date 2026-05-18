@@ -8,9 +8,12 @@ import { QueueScreen } from "./screens/QueueScreen.jsx";
 import { VideoStudio } from "./screens/VideoStudio.jsx";
 
 class FakeEventSource {
+  static instances = [];
+
   constructor(url) {
     this.url = url;
     this.listeners = {};
+    FakeEventSource.instances.push(this);
   }
 
   addEventListener(event, handler) {
@@ -70,6 +73,7 @@ describe("SceneWorks app shell", () => {
     global.IS_REACT_ACT_ENVIRONMENT = true;
     container = document.createElement("div");
     document.body.appendChild(container);
+    FakeEventSource.instances = [];
     window.EventSource = FakeEventSource;
     window.localStorage.clear();
     global.fetch = vi.fn((url) => {
@@ -156,6 +160,366 @@ describe("SceneWorks app shell", () => {
 
     expect(container.textContent).toContain("Wan2.2");
     expect(container.textContent).toContain("V1 placeholder tracking");
+  });
+
+  it("keeps completed Replace Person detections visible in Video Studio", async () => {
+    global.fetch.mockImplementation((url) => {
+      const path = new URL(url).pathname;
+      if (path.endsWith("/health")) {
+        return Promise.resolve(response({ status: "ok", authRequired: false }));
+      }
+      if (path.endsWith("/access")) {
+        return Promise.resolve(response({ authRequired: false }));
+      }
+      if (path.endsWith("/projects")) {
+        return Promise.resolve(response([{ id: "project-1", name: "Project One" }]));
+      }
+      if (path.endsWith("/models")) {
+        return Promise.resolve(
+          response([
+            {
+              id: "wan_replace",
+              name: "Wan Replace",
+              type: "video",
+              capabilities: ["replace_person", "image_to_video", "text_to_video"],
+              defaults: { duration: 4, fps: 24, resolution: "1280x720", quality: "balanced" },
+              limits: { durations: [4], fps: [24], resolutions: ["1280x720"] },
+            },
+          ]),
+        );
+      }
+      if (path.endsWith("/jobs")) {
+        return Promise.resolve(
+          response([
+            {
+              id: "detect-job-1",
+              type: "person_detect",
+              status: "completed",
+              projectId: "project-1",
+              payload: { sourceAssetId: "clip-1" },
+              result: {
+                frameAssetId: "frame-1",
+                detections: [{ id: "person-1", label: "person", confidence: 0.82, box: { x: 0.1, y: 0.2, width: 0.3, height: 0.4 } }],
+              },
+              createdAt: "2026-05-18T22:00:00Z",
+            },
+          ]),
+        );
+      }
+      if (path.endsWith("/assets")) {
+        return Promise.resolve(
+          response([
+            { id: "clip-1", type: "video", displayName: "Source Clip", file: { mimeType: "video/mp4" }, status: {} },
+            { id: "frame-1", type: "image", displayName: "Detection Frame", file: { mimeType: "image/png" }, status: {} },
+          ]),
+        );
+      }
+      return Promise.resolve(response([]));
+    });
+
+    root = createRoot(container);
+    await act(async () => {
+      root.render(<App />);
+    });
+    await settle();
+
+    await act(async () => {
+      [...container.querySelectorAll("button")].find((button) => button.textContent === "Video").click();
+    });
+    await settle();
+    await act(async () => {
+      [...container.querySelectorAll("button")].find((button) => button.textContent === "Replace Person").click();
+    });
+    await settle();
+
+    expect(container.textContent).toContain("1 candidates");
+    expect(container.textContent).not.toContain("No analysis yet");
+  });
+
+  it("keeps image generation in the studio and shows local progress", async () => {
+    const createdJobs = [];
+    global.fetch.mockImplementation((url, options = {}) => {
+      const path = new URL(url).pathname;
+      if (path.endsWith("/health")) {
+        return Promise.resolve(response({ status: "ok", authRequired: false }));
+      }
+      if (path.endsWith("/access")) {
+        return Promise.resolve(response({ authRequired: false }));
+      }
+      if (path.endsWith("/projects")) {
+        return Promise.resolve(response([{ id: "project-1", name: "Noir" }]));
+      }
+      if (path.endsWith("/models")) {
+        return Promise.resolve(response([{ id: "z_image_turbo", name: "Z-Image", type: "image", family: "z-image" }]));
+      }
+      if (path.endsWith("/image/jobs") && options.method === "POST") {
+        const job = {
+          id: "image-job-1",
+          type: "image_generate",
+          status: "running",
+          stage: "running",
+          progress: 0.35,
+          elapsedSeconds: 4,
+          projectId: "project-1",
+          projectName: "Noir",
+          requestedGpu: "auto",
+          payload: { prompt: "A cinematic frame of a neon street at midnight" },
+        };
+        createdJobs.unshift(job);
+        return Promise.resolve(response(job));
+      }
+      if (path.endsWith("/jobs")) {
+        return Promise.resolve(response(createdJobs));
+      }
+      return Promise.resolve(response([]));
+    });
+
+    root = createRoot(container);
+    await act(async () => {
+      root.render(<App />);
+    });
+    await settle();
+
+    await act(async () => {
+      [...container.querySelectorAll("button")].find((button) => button.textContent === "Image").click();
+    });
+    await settle();
+    await act(async () => {
+      container.querySelector(".image-studio form").requestSubmit();
+    });
+    await settle();
+
+    expect(container.textContent).toContain("Image generation");
+    expect(container.textContent).toContain("running");
+    expect(container.textContent).not.toContain("Jobs and GPUs");
+
+    await act(async () => {
+      [...container.querySelectorAll("button")].find((button) => button.textContent === "Library").click();
+    });
+    await settle();
+    await act(async () => {
+      [...container.querySelectorAll("button")].find((button) => button.textContent === "Image").click();
+    });
+    await settle();
+
+    expect(container.textContent).toContain("Image generation");
+    expect(container.textContent).toContain("running");
+  });
+
+  it("shows local generation failures without duplicating the global banner", async () => {
+    const createdJobs = [];
+    global.fetch.mockImplementation((url, options = {}) => {
+      const path = new URL(url).pathname;
+      if (path.endsWith("/health")) {
+        return Promise.resolve(response({ status: "ok", authRequired: false }));
+      }
+      if (path.endsWith("/access")) {
+        return Promise.resolve(response({ authRequired: false }));
+      }
+      if (path.endsWith("/projects")) {
+        return Promise.resolve(response([{ id: "project-1", name: "Noir" }]));
+      }
+      if (path.endsWith("/models")) {
+        return Promise.resolve(response([{ id: "z_image_turbo", name: "Z-Image", type: "image", family: "z-image" }]));
+      }
+      if (path.endsWith("/image/jobs") && options.method === "POST") {
+        const job = {
+          id: "image-job-1",
+          type: "image_generate",
+          status: "running",
+          stage: "running",
+          progress: 0.25,
+          elapsedSeconds: 3,
+          projectId: "project-1",
+          projectName: "Noir",
+          requestedGpu: "auto",
+          payload: { prompt: "A cinematic frame of a neon street at midnight" },
+        };
+        createdJobs.unshift(job);
+        return Promise.resolve(response(job));
+      }
+      if (path.endsWith("/jobs")) {
+        return Promise.resolve(response(createdJobs));
+      }
+      return Promise.resolve(response([]));
+    });
+
+    root = createRoot(container);
+    await act(async () => {
+      root.render(<App />);
+    });
+    await settle();
+
+    await act(async () => {
+      [...container.querySelectorAll("button")].find((button) => button.textContent === "Image").click();
+    });
+    await settle();
+    await act(async () => {
+      container.querySelector(".image-studio form").requestSubmit();
+    });
+    await settle();
+
+    await act(async () => {
+      FakeEventSource.instances[0].listeners["job.updated"]({
+        data: JSON.stringify({ ...createdJobs[0], status: "failed", stage: "failed", progress: 0.25, error: "Adapter crashed" }),
+      });
+    });
+    await settle();
+
+    expect(container.textContent).toContain("Adapter crashed");
+    expect(container.textContent).not.toContain("image generate: Adapter crashed");
+  });
+
+  it("keeps video generation in the studio and shows local progress", async () => {
+    const createdJobs = [];
+    global.fetch.mockImplementation((url, options = {}) => {
+      const path = new URL(url).pathname;
+      if (path.endsWith("/health")) {
+        return Promise.resolve(response({ status: "ok", authRequired: false }));
+      }
+      if (path.endsWith("/access")) {
+        return Promise.resolve(response({ authRequired: false }));
+      }
+      if (path.endsWith("/projects")) {
+        return Promise.resolve(response([{ id: "project-1", name: "Noir" }]));
+      }
+      if (path.endsWith("/models")) {
+        return Promise.resolve(
+          response([
+            {
+              id: "ltx_2_3",
+              name: "LTX",
+              type: "video",
+              capabilities: ["image_to_video", "text_to_video"],
+              defaults: { duration: 6, fps: 25, resolution: "768x512", quality: "balanced" },
+              limits: { durations: [4, 6, 8], fps: [24, 25, 30], resolutions: ["768x512", "1280x720"] },
+            },
+          ]),
+        );
+      }
+      if (path.endsWith("/video/jobs") && options.method === "POST") {
+        const job = {
+          id: "video-job-1",
+          type: "video_generate",
+          status: "queued",
+          stage: "queued",
+          progress: 0,
+          elapsedSeconds: 0,
+          projectId: "project-1",
+          projectName: "Noir",
+          requestedGpu: "auto",
+          payload: { prompt: "Camera slowly pushes in while the scene comes alive" },
+        };
+        createdJobs.unshift(job);
+        return Promise.resolve(response(job));
+      }
+      if (path.endsWith("/jobs")) {
+        return Promise.resolve(response(createdJobs));
+      }
+      return Promise.resolve(response([]));
+    });
+
+    root = createRoot(container);
+    await act(async () => {
+      root.render(<App />);
+    });
+    await settle();
+
+    await act(async () => {
+      [...container.querySelectorAll("button")].find((button) => button.textContent === "Video").click();
+    });
+    await settle();
+    await act(async () => {
+      [...container.querySelectorAll("button")].find((button) => button.textContent === "Text to Video").click();
+    });
+    await settle();
+    await act(async () => {
+      container.querySelector(".video-studio form").requestSubmit();
+    });
+    await settle();
+
+    expect(container.textContent).toContain("Video generation");
+    expect(container.textContent).toContain("queued");
+    expect(container.textContent).not.toContain("Jobs and GPUs");
+
+    await act(async () => {
+      [...container.querySelectorAll("button")].find((button) => button.textContent === "Library").click();
+    });
+    await settle();
+    await act(async () => {
+      [...container.querySelectorAll("button")].find((button) => button.textContent === "Video").click();
+    });
+    await settle();
+
+    expect(container.textContent).toContain("Video generation");
+    expect(container.textContent).toContain("queued");
+  });
+
+  it("keeps model downloads on the Models page and shows local progress", async () => {
+    const createdJobs = [];
+    global.fetch.mockImplementation((url, options = {}) => {
+      const path = new URL(url).pathname;
+      if (path.endsWith("/health")) {
+        return Promise.resolve(response({ status: "ok", authRequired: false }));
+      }
+      if (path.endsWith("/access")) {
+        return Promise.resolve(response({ authRequired: false }));
+      }
+      if (path.endsWith("/models")) {
+        return Promise.resolve(
+          response([
+            {
+              id: "z_image_turbo",
+              name: "Z-Image Turbo",
+              type: "image",
+              family: "z-image",
+              downloadable: true,
+              installState: "missing",
+              downloadSizeLabel: "12 GB",
+              downloads: [{ provider: "huggingface", repo: "Tongyi-MAI/Z-Image-Turbo" }],
+            },
+          ]),
+        );
+      }
+      if (path.endsWith("/jobs")) {
+        return Promise.resolve(response(createdJobs));
+      }
+      if (path.endsWith("/models/z_image_turbo/download") && options.method === "POST") {
+        const job = {
+          id: "download-job-1",
+          type: "model_download",
+          status: "downloading",
+          stage: "downloading",
+          progress: 0.5,
+          elapsedSeconds: 12,
+          requestedGpu: "auto",
+          assignedGpu: "cpu",
+          payload: { modelId: "z_image_turbo", modelName: "Z-Image Turbo" },
+        };
+        createdJobs.unshift(job);
+        return Promise.resolve(response(job));
+      }
+      return Promise.resolve(response([]));
+    });
+
+    root = createRoot(container);
+    await act(async () => {
+      root.render(<App />);
+    });
+    await settle();
+
+    await act(async () => {
+      [...container.querySelectorAll("button")].find((button) => button.textContent === "Models").click();
+    });
+    await settle();
+    await act(async () => {
+      [...container.querySelectorAll("button")].find((button) => button.textContent === "Download 12 GB").click();
+    });
+    await settle();
+
+    expect(container.textContent).toContain("Model download");
+    expect(container.textContent).toContain("downloading");
+    expect(container.textContent).not.toContain("Jobs and GPUs");
   });
 
   it("adds the SSE ticket as a query parameter", () => {
@@ -345,6 +709,154 @@ describe("SceneWorks app shell", () => {
     expect(container.textContent).toContain("Waiting for model download Qwen Image Edit to finish.");
     expect(container.textContent).toContain("Waiting for dependency job-dependency to finish.");
     expect(container.textContent).toContain("Warm: z_image_turbo");
+  });
+
+  it("ignores duplicate image submits while job creation is in flight", async () => {
+    let resolveJob;
+    const createImageJob = vi.fn(
+      () =>
+        new Promise((resolve) => {
+          resolveJob = resolve;
+        }),
+    );
+    const onLocalJobCreated = vi.fn();
+    root = createRoot(container);
+    await act(async () => {
+      root.render(
+        <ImageStudio
+          activeProject={{ id: "project-1", name: "Noir" }}
+          assets={[]}
+          characters={[]}
+          createImageJob={createImageJob}
+          deleteAsset={() => {}}
+          gpuOptions={["auto"]}
+          imageModels={[{ id: "z_image_turbo", name: "Z-Image", type: "image", family: "z-image" }]}
+          latestAssets={[]}
+          localJobs={[]}
+          loras={[]}
+          onLocalJobCreated={onLocalJobCreated}
+          onPreview={() => {}}
+          purgeAsset={() => {}}
+          requestedGpu="auto"
+          selectedAsset={null}
+          setRequestedGpu={() => {}}
+          updateAssetStatus={() => {}}
+        />,
+      );
+    });
+
+    await act(async () => {
+      container.querySelector(".image-studio form").requestSubmit();
+    });
+    await settle();
+    await act(async () => {
+      container.querySelector(".image-studio form").requestSubmit();
+    });
+
+    expect(createImageJob).toHaveBeenCalledTimes(1);
+
+    await act(async () => {
+      resolveJob({ id: "image-job-1" });
+    });
+    await settle();
+
+    expect(onLocalJobCreated).toHaveBeenCalledWith({ id: "image-job-1" });
+  });
+
+  it("keeps completed image progress visible until the generated asset renders", async () => {
+    const completedJob = {
+      id: "image-job-1",
+      type: "image_generate",
+      status: "completed",
+      stage: "completed",
+      progress: 1,
+      elapsedSeconds: 8,
+      requestedGpu: "auto",
+      payload: { prompt: "long alley" },
+      result: { generationSetId: "gen-1", assetIds: ["asset-1"] },
+    };
+    const imageProps = {
+      activeProject: { id: "project-1", name: "Noir" },
+      assets: [],
+      characters: [],
+      createImageJob: () => {},
+      deleteAsset: () => {},
+      gpuOptions: ["auto"],
+      imageModels: [{ id: "z_image_turbo", name: "Z-Image", type: "image", family: "z-image" }],
+      latestAssets: [],
+      localJobs: [completedJob],
+      loras: [],
+      onPreview: () => {},
+      purgeAsset: () => {},
+      requestedGpu: "auto",
+      selectedAsset: null,
+      setRequestedGpu: () => {},
+      updateAssetStatus: () => {},
+    };
+
+    root = createRoot(container);
+    await act(async () => {
+      root.render(<ImageStudio {...imageProps} />);
+    });
+
+    expect(container.textContent).toContain("Finished. Fetching result...");
+    expect(container.textContent).not.toContain("No fresh image batch");
+
+    const generatedAsset = {
+      id: "asset-1",
+      type: "image",
+      displayName: "Generated Image",
+      generationSetId: "gen-1",
+      status: {},
+    };
+    await act(async () => {
+      root.render(<ImageStudio {...imageProps} assets={[generatedAsset]} latestAssets={[generatedAsset]} />);
+    });
+
+    expect(container.textContent).not.toContain("Finished. Fetching result...");
+    expect(container.textContent).not.toContain("No fresh image batch");
+  });
+
+  it("hides completed image progress with stale missing result metadata", async () => {
+    const staleCompletedJob = {
+      id: "image-job-stale",
+      type: "image_generate",
+      status: "completed",
+      stage: "completed",
+      progress: 1,
+      elapsedSeconds: 8,
+      requestedGpu: "auto",
+      updatedAt: "2026-05-18T00:00:00Z",
+      payload: { prompt: "missing result metadata" },
+      result: {},
+    };
+
+    root = createRoot(container);
+    await act(async () => {
+      root.render(
+        <ImageStudio
+          activeProject={{ id: "project-1", name: "Noir" }}
+          assets={[]}
+          characters={[]}
+          createImageJob={() => {}}
+          deleteAsset={() => {}}
+          gpuOptions={["auto"]}
+          imageModels={[{ id: "z_image_turbo", name: "Z-Image", type: "image", family: "z-image" }]}
+          latestAssets={[]}
+          localJobs={[staleCompletedJob]}
+          loras={[]}
+          onPreview={() => {}}
+          purgeAsset={() => {}}
+          requestedGpu="auto"
+          selectedAsset={null}
+          setRequestedGpu={() => {}}
+          updateAssetStatus={() => {}}
+        />,
+      );
+    });
+
+    expect(container.textContent).not.toContain("Finished. Fetching result...");
+    expect(container.textContent).toContain("No fresh image batch");
   });
 
   it("submits compatible image LoRAs while capping simple user selections at two", async () => {

@@ -1,6 +1,7 @@
 import React, { useEffect, useMemo, useState } from "react";
 import { AssetCard } from "../components/assetPanels.jsx";
 import { AssetMedia } from "../components/assetMedia.jsx";
+import { JobProgressCard } from "../components/JobProgress.jsx";
 import {
   presetLoraDetails as buildPresetLoraDetails,
   presetMatchesModel,
@@ -8,6 +9,8 @@ import {
   presetPromptParts as buildPresetPromptParts,
 } from "../presetUtils.js";
 import { ReplacePersonPanel, findReplacementModel } from "./ReplacePersonPanel.jsx";
+
+const completedResultFallbackMs = 30000;
 
 export function VideoStudio({
   activeProject,
@@ -23,6 +26,9 @@ export function VideoStudio({
   launchRequest,
   loras = [],
   jobs = [],
+  localJobs: trackedLocalJobs = [],
+  onLocalJobCreated,
+  onOpenQueue,
   onPreview,
   personTracks = [],
   recipePresets = [],
@@ -57,6 +63,8 @@ export function VideoStudio({
   const [trackName, setTrackName] = useState("Selected person");
   const [comparisonMode, setComparisonMode] = useState("side_by_side");
   const [abSide, setAbSide] = useState("replacement");
+  const [submitting, setSubmitting] = useState(false);
+  const [resultFallbackTick, setResultFallbackTick] = useState(0);
   const capabilities = selectedModel?.capabilities ?? [];
   const supportsMode = capabilities.includes(mode);
   const implementedMode = ["image_to_video", "text_to_video", "first_last_frame", "extend_clip", "replace_person"].includes(mode);
@@ -228,37 +236,87 @@ export function VideoStudio({
     full_person_replace_outfit: "Full Person, Replace Outfit",
   };
 
-  function submit(event) {
+  function resultVisible(job) {
+    if (job.result?.generationSetId) {
+      return latestAssets.some((asset) => asset.generationSetId === job.result.generationSetId);
+    }
+    const assetIds = job.result?.assetIds ?? [];
+    return assetIds.length > 0 && assetIds.every((id) => assets.some((asset) => asset.id === id));
+  }
+
+  function completedAnchorMs(job) {
+    return Date.parse(job.completedAt ?? job.updatedAt ?? "");
+  }
+
+  function completedWaitExpired(job, nowMs = Date.now()) {
+    const anchorMs = completedAnchorMs(job);
+    return Number.isFinite(anchorMs) && nowMs - anchorMs > completedResultFallbackMs;
+  }
+
+  useEffect(() => {
+    const nowMs = Date.now();
+    const pendingCompletedJobs = trackedLocalJobs.filter(
+      (job) =>
+        job.status === "completed" &&
+        Number.isFinite(completedAnchorMs(job)) &&
+        !resultVisible(job) &&
+        !completedWaitExpired(job, nowMs),
+    );
+    if (!pendingCompletedJobs.length) {
+      return undefined;
+    }
+    const nextDelay = Math.min(
+      ...pendingCompletedJobs.map((job) => Math.max(0, completedResultFallbackMs - (nowMs - completedAnchorMs(job)))),
+    );
+    const timer = window.setTimeout(() => setResultFallbackTick((value) => value + 1), nextDelay + 50);
+    return () => window.clearTimeout(timer);
+  }, [assets, latestAssets, trackedLocalJobs, resultFallbackTick]);
+
+  const localJobs = trackedLocalJobs.filter(
+    (job) => job.status !== "completed" || (!resultVisible(job) && !completedWaitExpired(job)),
+  );
+  const hasReviewContent = Boolean(localJobs.length || latestAssets.length);
+
+  async function submit(event) {
     event.preventDefault();
-    createVideoJob({
-      mode,
-      prompt,
-      negativePrompt,
-      model,
-      duration: Number(duration),
-      fps: Number(fps),
-      width,
-      height,
-      quality,
-      seed: seed === "" ? null : Number(seed),
-      recipePresetId: selectedRecipePreset?.id ?? null,
-      characterId: characterId || null,
-      characterLookId: characterLookId || null,
-      sourceAssetId: ["image_to_video", "first_last_frame"].includes(mode) ? sourceAssetId || null : null,
-      lastFrameAssetId: mode === "first_last_frame" ? lastFrameAssetId || null : null,
-      sourceClipAssetId: ["extend_clip", "replace_person"].includes(mode) ? sourceClipAssetId || null : null,
-      personTrackId: mode === "replace_person" ? personTrackId || null : null,
-      replacementMode: mode === "replace_person" ? replacementMode : "face_only",
-      loras: presetLoraDetails.filter((lora) => !lora.missing),
-      advanced: {
-        resolution,
-        durationHint,
-        recipePresetName: selectedRecipePreset?.name ?? null,
-        recipePresetPrompt: selectedRecipePreset?.prompt ?? null,
-        selectedPersonTrack: selectedTrack ?? null,
-        replacementModeLabel: replacementModeLabels[replacementMode],
-      },
-    });
+    if (submitting) {
+      return;
+    }
+    setSubmitting(true);
+    try {
+      const job = await createVideoJob({
+        mode,
+        prompt,
+        negativePrompt,
+        model,
+        duration: Number(duration),
+        fps: Number(fps),
+        width,
+        height,
+        quality,
+        seed: seed === "" ? null : Number(seed),
+        recipePresetId: selectedRecipePreset?.id ?? null,
+        characterId: characterId || null,
+        characterLookId: characterLookId || null,
+        sourceAssetId: ["image_to_video", "first_last_frame"].includes(mode) ? sourceAssetId || null : null,
+        lastFrameAssetId: mode === "first_last_frame" ? lastFrameAssetId || null : null,
+        sourceClipAssetId: ["extend_clip", "replace_person"].includes(mode) ? sourceClipAssetId || null : null,
+        personTrackId: mode === "replace_person" ? personTrackId || null : null,
+        replacementMode: mode === "replace_person" ? replacementMode : "face_only",
+        loras: presetLoraDetails.filter((lora) => !lora.missing),
+        advanced: {
+          resolution,
+          durationHint,
+          recipePresetName: selectedRecipePreset?.name ?? null,
+          recipePresetPrompt: selectedRecipePreset?.prompt ?? null,
+          selectedPersonTrack: selectedTrack ?? null,
+          replacementModeLabel: replacementModeLabels[replacementMode],
+        },
+      });
+      onLocalJobCreated?.(job);
+    } finally {
+      setSubmitting(false);
+    }
   }
 
   return (
@@ -500,8 +558,8 @@ export function VideoStudio({
               Preset cannot run until LoRA import finishes: {presetMissingLoras.map((lora) => lora.id).join(", ")}. Wait for the Queue or choose another preset.
             </p>
           ) : null}
-          <button className="primary-action" disabled={!canSubmit} type="submit">
-            {mode === "replace_person" ? "Replace Person" : "Generate Clip"}
+          <button className="primary-action" disabled={submitting || !canSubmit} type="submit">
+            {submitting ? "Queueing..." : mode === "replace_person" ? "Replace Person" : "Generate Clip"}
           </button>
         </section>
 
@@ -510,6 +568,13 @@ export function VideoStudio({
             <p className="eyebrow">Fresh clip</p>
             <h2>Review</h2>
           </div>
+          {localJobs.length ? (
+            <div className="local-job-stack">
+              {localJobs.map((job) => (
+                <JobProgressCard job={job} key={job.id} label="Video generation" onOpenQueue={onOpenQueue} />
+              ))}
+            </div>
+          ) : null}
           {latestAssets.length ? (
             <div className="review-grid video-review-grid">
               {latestAssets.map((asset) => (
@@ -523,7 +588,7 @@ export function VideoStudio({
                 />
               ))}
             </div>
-          ) : (
+          ) : hasReviewContent ? null : (
             <div className="empty-panel">No fresh video clip</div>
           )}
 

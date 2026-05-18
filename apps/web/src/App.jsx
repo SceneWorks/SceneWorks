@@ -40,6 +40,8 @@ function failedJobNotice(job) {
   return `${label}: ${detail}`;
 }
 
+const localJobStackLimit = 4;
+
 export function App() {
   const [health, setHealth] = useState(null);
   const [access, setAccess] = useState({ authRequired: false });
@@ -49,6 +51,7 @@ export function App() {
   const [activeView, setActiveView] = useState("Library");
   const [projectName, setProjectName] = useState("");
   const [jobs, setJobs] = useState([]);
+  const [localGenerationJobIds, setLocalGenerationJobIds] = useState({ image: [], video: [] });
   const [workers, setWorkers] = useState([]);
   const [queueSummary, setQueueSummary] = useState(null);
   const [models, setModels] = useState([]);
@@ -68,6 +71,8 @@ export function App() {
   const [previewAsset, setPreviewAsset] = useState(null);
   const [studioLaunch, setStudioLaunch] = useState(null);
   const [error, setError] = useState("");
+  const activeViewRef = useRef(activeView);
+  const localGenerationJobIdsRef = useRef(localGenerationJobIds);
   const selectedTimelineIdRef = useRef(null);
   const timelineApplyQueueRef = useRef(Promise.resolve());
 
@@ -90,6 +95,14 @@ export function App() {
   );
   const latestImageAssets = useMemo(() => latestAssets.filter((asset) => asset.type === "image"), [latestAssets]);
   const latestVideoAssets = useMemo(() => latestAssets.filter((asset) => asset.type === "video"), [latestAssets]);
+  const imageLocalJobs = useMemo(
+    () => localGenerationJobIds.image.map((id) => jobs.find((job) => job.id === id)).filter(Boolean),
+    [jobs, localGenerationJobIds.image],
+  );
+  const videoLocalJobs = useMemo(
+    () => localGenerationJobIds.video.map((id) => jobs.find((job) => job.id === id)).filter(Boolean),
+    [jobs, localGenerationJobIds.video],
+  );
   const queueCounts = useMemo(() => {
     if (queueSummary?.counts) {
       return {
@@ -126,6 +139,14 @@ export function App() {
     () => assets.filter((asset) => ["image", "video", "upload", "frame", "render"].includes(asset.type)),
     [assets],
   );
+
+  useEffect(() => {
+    activeViewRef.current = activeView;
+  }, [activeView]);
+
+  useEffect(() => {
+    localGenerationJobIdsRef.current = localGenerationJobIds;
+  }, [localGenerationJobIds]);
 
   useEffect(() => {
     selectedTimelineIdRef.current = selectedTimelineId;
@@ -202,7 +223,10 @@ export function App() {
       if (job.status === "completed" && job.projectId && job.type === "person_detect") {
         refreshAssets(job.projectId);
       }
-      if (job.status === "failed") {
+      if (job.status === "completed" && job.type === "model_download") {
+        refreshData();
+      }
+      if (job.status === "failed" && !hasVisibleLocalFailure(job)) {
         setError(failedJobNotice(job));
       }
     }
@@ -592,10 +616,10 @@ export function App() {
   async function createImageJob(payload) {
     if (!activeProject) {
       setError("Create or open a project first.");
-      return;
+      return null;
     }
     try {
-      await apiFetch("/api/v1/image/jobs", token, {
+      const job = await apiFetch("/api/v1/image/jobs", token, {
         method: "POST",
         body: JSON.stringify({
           ...payload,
@@ -604,12 +628,37 @@ export function App() {
           requestedGpu,
         }),
       });
-      setActiveView("Queue");
+      setJobs((items) => [job, ...items.filter((item) => item.id !== job.id)].sort(sortNewest));
       setError("");
       refreshData();
+      return job;
     } catch (err) {
       setError(err.message);
+      return null;
     }
+  }
+
+  function rememberLocalGenerationJob(kind, job) {
+    if (!job?.id) {
+      return;
+    }
+    setLocalGenerationJobIds((current) => ({
+      ...current,
+      // Keep the local review stack compact for burst submissions.
+      [kind]: [job.id, ...current[kind].filter((id) => id !== job.id)].slice(0, localJobStackLimit),
+    }));
+  }
+
+  function hasVisibleLocalFailure(job) {
+    const active = activeViewRef.current;
+    const localIds = localGenerationJobIdsRef.current;
+    if (active === "Image" && localIds.image.includes(job.id)) {
+      return true;
+    }
+    if (active === "Video" && localIds.video.includes(job.id)) {
+      return true;
+    }
+    return active === "Models" && job.type === "model_download";
   }
 
   async function withCharacterApi(callback) {
@@ -766,7 +815,7 @@ export function App() {
   }
 
   async function createVideoJob(payload, options = {}) {
-    const { navigateToQueue = true } = options;
+    const { navigateToQueue = false } = options;
     if (!activeProject) {
       setError("Create or open a project first.");
       return null;
@@ -784,6 +833,7 @@ export function App() {
       if (navigateToQueue) {
         setActiveView("Queue");
       }
+      setJobs((items) => [job, ...items.filter((item) => item.id !== job.id)].sort(sortNewest));
       setError("");
       refreshData();
       return job;
@@ -1076,15 +1126,17 @@ export function App() {
 
   async function createModelDownloadJob(model) {
     try {
-      await apiFetch(`/api/v1/models/${model.id}/download`, token, {
+      const job = await apiFetch(`/api/v1/models/${model.id}/download`, token, {
         method: "POST",
         body: JSON.stringify({ requestedGpu: "auto" }),
       });
-      setActiveView("Queue");
+      setJobs((items) => [job, ...items.filter((item) => item.id !== job.id)].sort(sortNewest));
       setError("");
       refreshData();
+      return job;
     } catch (err) {
       setError(err.message);
+      return null;
     }
   }
 
@@ -1236,6 +1288,9 @@ export function App() {
             latestAssets={latestImageAssets}
             launchRequest={studioLaunch}
             loras={loras}
+            localJobs={imageLocalJobs}
+            onLocalJobCreated={(job) => rememberLocalGenerationJob("image", job)}
+            onOpenQueue={() => setActiveView("Queue")}
             onPreview={setPreviewAsset}
             recipePresets={recipePresets}
             requestedGpu={requestedGpu}
@@ -1262,6 +1317,9 @@ export function App() {
             launchRequest={studioLaunch}
             loras={loras}
             jobs={jobs}
+            localJobs={videoLocalJobs}
+            onLocalJobCreated={(job) => rememberLocalGenerationJob("video", job)}
+            onOpenQueue={() => setActiveView("Queue")}
             onPreview={setPreviewAsset}
             personTracks={personTracks}
             recipePresets={recipePresets}
@@ -1308,7 +1366,13 @@ export function App() {
         ) : null}
 
         {activeView === "Models" ? (
-          <ModelManagerScreen jobs={jobs} loras={loras} models={models} onDownloadModel={createModelDownloadJob} />
+          <ModelManagerScreen
+            jobs={jobs}
+            loras={loras}
+            models={models}
+            onDownloadModel={createModelDownloadJob}
+            onOpenQueue={() => setActiveView("Queue")}
+          />
         ) : null}
 
         {activeView === "Editor" ? (

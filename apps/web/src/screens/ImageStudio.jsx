@@ -1,5 +1,6 @@
 import React, { useEffect, useMemo, useState } from "react";
 import { AssetCard } from "../components/assetPanels.jsx";
+import { JobProgressCard } from "../components/JobProgress.jsx";
 import {
   loraMatchesModel,
   loraWeight,
@@ -8,6 +9,8 @@ import {
   presetMatchesWorkflow,
   presetPromptParts as buildPresetPromptParts,
 } from "../presetUtils.js";
+
+const completedResultFallbackMs = 30000;
 
 export function ImageStudio({
   activeProject,
@@ -20,7 +23,10 @@ export function ImageStudio({
   imageModels,
   latestAssets,
   launchRequest,
+  localJobs: trackedLocalJobs = [],
   loras = [],
+  onLocalJobCreated,
+  onOpenQueue,
   onPreview,
   recipePresets = [],
   requestedGpu,
@@ -42,6 +48,8 @@ export function ImageStudio({
   const [characterLookId, setCharacterLookId] = useState("");
   const [selectedLoraIds, setSelectedLoraIds] = useState([]);
   const [showIncompatibleLoras, setShowIncompatibleLoras] = useState(false);
+  const [submitting, setSubmitting] = useState(false);
+  const [resultFallbackTick, setResultFallbackTick] = useState(0);
 
   function serializeLora(lora, override = {}) {
     return {
@@ -173,27 +181,77 @@ export function ImageStudio({
     });
   }
 
-  function submit(event) {
+  function resultVisible(job) {
+    if (job.result?.generationSetId) {
+      return latestAssets.some((asset) => asset.generationSetId === job.result.generationSetId);
+    }
+    const assetIds = job.result?.assetIds ?? [];
+    return assetIds.length > 0 && assetIds.every((id) => assets.some((asset) => asset.id === id));
+  }
+
+  function completedAnchorMs(job) {
+    return Date.parse(job.completedAt ?? job.updatedAt ?? "");
+  }
+
+  function completedWaitExpired(job, nowMs = Date.now()) {
+    const anchorMs = completedAnchorMs(job);
+    return Number.isFinite(anchorMs) && nowMs - anchorMs > completedResultFallbackMs;
+  }
+
+  useEffect(() => {
+    const nowMs = Date.now();
+    const pendingCompletedJobs = trackedLocalJobs.filter(
+      (job) =>
+        job.status === "completed" &&
+        Number.isFinite(completedAnchorMs(job)) &&
+        !resultVisible(job) &&
+        !completedWaitExpired(job, nowMs),
+    );
+    if (!pendingCompletedJobs.length) {
+      return undefined;
+    }
+    const nextDelay = Math.min(
+      ...pendingCompletedJobs.map((job) => Math.max(0, completedResultFallbackMs - (nowMs - completedAnchorMs(job)))),
+    );
+    const timer = window.setTimeout(() => setResultFallbackTick((value) => value + 1), nextDelay + 50);
+    return () => window.clearTimeout(timer);
+  }, [assets, latestAssets, trackedLocalJobs, resultFallbackTick]);
+
+  const localJobs = trackedLocalJobs.filter(
+    (job) => job.status !== "completed" || (!resultVisible(job) && !completedWaitExpired(job)),
+  );
+  const hasReviewContent = Boolean(localJobs.length || latestAssets.length);
+
+  async function submit(event) {
     event.preventDefault();
-    createImageJob({
-      mode,
-      prompt,
-      negativePrompt,
-      model,
-      count,
-      seed: seed === "" ? null : Number(seed),
-      width,
-      height,
-      stylePreset,
-      recipePresetId: selectedRecipePreset?.id ?? null,
-      characterId: mode === "character_image" ? characterId || null : null,
-      characterLookId: mode === "character_image" ? characterLookId || null : null,
-      sourceAssetId: mode === "edit_image" ? sourceAssetId || null : null,
-      loras: selectedLoras.map((lora) => serializeLora(lora)),
-      advanced: {
-        resolution,
-      },
-    });
+    if (submitting) {
+      return;
+    }
+    setSubmitting(true);
+    try {
+      const job = await createImageJob({
+        mode,
+        prompt,
+        negativePrompt,
+        model,
+        count,
+        seed: seed === "" ? null : Number(seed),
+        width,
+        height,
+        stylePreset,
+        recipePresetId: selectedRecipePreset?.id ?? null,
+        characterId: mode === "character_image" ? characterId || null : null,
+        characterLookId: mode === "character_image" ? characterLookId || null : null,
+        sourceAssetId: mode === "edit_image" ? sourceAssetId || null : null,
+        loras: selectedLoras.map((lora) => serializeLora(lora)),
+        advanced: {
+          resolution,
+        },
+      });
+      onLocalJobCreated?.(job);
+    } finally {
+      setSubmitting(false);
+    }
   }
 
   return (
@@ -407,10 +465,10 @@ export function ImageStudio({
           ) : null}
           <button
             className="primary-action"
-            disabled={!activeProject || !prompt.trim() || (mode === "character_image" && !characterId) || Boolean(presetMissingLoras.length)}
+            disabled={submitting || !activeProject || !prompt.trim() || (mode === "character_image" && !characterId) || Boolean(presetMissingLoras.length)}
             type="submit"
           >
-            Generate
+            {submitting ? "Queueing..." : "Generate"}
           </button>
         </section>
 
@@ -419,6 +477,13 @@ export function ImageStudio({
             <p className="eyebrow">Fresh batch</p>
             <h2>Review</h2>
           </div>
+          {localJobs.length ? (
+            <div className="local-job-stack">
+              {localJobs.map((job) => (
+                <JobProgressCard job={job} key={job.id} label="Image generation" onOpenQueue={onOpenQueue} />
+              ))}
+            </div>
+          ) : null}
           {latestAssets.length ? (
             <div className="review-grid">
               {latestAssets.map((asset) => (
@@ -432,7 +497,7 @@ export function ImageStudio({
                 />
               ))}
             </div>
-          ) : (
+          ) : hasReviewContent ? null : (
             <div className="empty-panel">No fresh image batch</div>
           )}
         </section>

@@ -1,7 +1,8 @@
 import React, { useEffect, useState } from "react";
+import { JobProgressCard } from "../components/JobProgress.jsx";
 import { terminalStatuses } from "../constants.js";
 
-export function ModelManagerScreen({ jobs, loras, models, onDownloadModel }) {
+export function ModelManagerScreen({ jobs, loras, models, onDownloadModel, onOpenQueue }) {
   const families = Array.from(new Set(models.map((model) => model.family).filter(Boolean))).sort();
   const [familyFilter, setFamilyFilter] = useState(families[0] ?? "all");
   const visibleLoras =
@@ -25,13 +26,8 @@ export function ModelManagerScreen({ jobs, loras, models, onDownloadModel }) {
     }
   }, [families.join("|"), familyFilter]);
 
-  function activeDownloadFor(model) {
-    return jobs.find(
-      (job) =>
-        job.type === "model_download" &&
-        job.payload?.modelId === model.id &&
-        !terminalStatuses.has(job.status),
-    );
+  function downloadJobsFor(model) {
+    return jobs.filter((job) => job.type === "model_download" && job.payload?.modelId === model.id);
   }
 
   return (
@@ -56,8 +52,11 @@ export function ModelManagerScreen({ jobs, loras, models, onDownloadModel }) {
 
       <div className="model-grid">
         {models.map((model) => {
-          const downloadJob = activeDownloadFor(model);
+          const downloadJobs = downloadJobsFor(model);
+          const downloadJob = downloadJobs.find((job) => !terminalStatuses.has(job.status));
           const installed = model.installState === "installed";
+          const localDownloadJob = installed ? null : downloadJobs.find((job) => job.status !== "completed");
+          const failedDownload = localDownloadJob && terminalStatuses.has(localDownloadJob.status);
           return (
             <article className="model-card" key={model.id}>
               <div>
@@ -80,8 +79,19 @@ export function ModelManagerScreen({ jobs, loras, models, onDownloadModel }) {
                   <dd>{model.downloadSizeLabel ?? "unknown"}</dd>
                 </div>
               </dl>
+              {localDownloadJob ? (
+                <JobProgressCard job={localDownloadJob} label="Model download" onOpenQueue={onOpenQueue} />
+              ) : null}
               <button disabled={installed || !model.downloadable || Boolean(downloadJob)} onClick={() => onDownloadModel(model)} type="button">
-                {downloadJob ? downloadJob.status : installed ? "Ready" : model.downloadSizeLabel ? `Download ${model.downloadSizeLabel}` : "Download"}
+                {downloadJob
+                  ? downloadJob.status
+                  : installed
+                    ? "Ready"
+                    : failedDownload
+                      ? "Retry Download"
+                      : model.downloadSizeLabel
+                        ? `Download ${model.downloadSizeLabel}`
+                        : "Download"}
               </button>
             </article>
           );
