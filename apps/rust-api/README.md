@@ -1,21 +1,9 @@
 # SceneWorks Rust API
 
-This binary is the default SceneWorks backend API. Docker Compose runs it as the
-`api` service with these defaults:
+This binary is the SceneWorks backend API. Docker Compose runs it as the `api`
+service with `docker/rust-api.Dockerfile`.
 
-```text
-SCENEWORKS_API_RUNTIME=rust
-SCENEWORKS_API_DOCKERFILE=docker/rust-api.Dockerfile
-```
-
-The Python FastAPI service remains the rollback runtime:
-
-```text
-SCENEWORKS_API_RUNTIME=python
-SCENEWORKS_API_DOCKERFILE=docker/api.Dockerfile
-```
-
-Both API runtimes use the same compose contracts:
+The API uses these compose contracts:
 
 - `SCENEWORKS_API_HOST` and `SCENEWORKS_API_PORT` control the container bind address.
 - `SCENEWORKS_DATA_DIR=/sceneworks/data` maps to `${SCENEWORKS_DATA_BIND:-./data}`.
@@ -24,11 +12,9 @@ Both API runtimes use the same compose contracts:
 - `SCENEWORKS_ACCESS_TOKEN`, `SCENEWORKS_CORS_ORIGINS`, and `SCENEWORKS_DISABLE_MODEL_SIZE_ESTIMATE` are honored by the Rust API.
 
 Compose checks `GET /api/v1/health` inside the container before starting
-dependent services. The health payload includes `runtime` so migration checks
-can confirm which implementation is serving traffic.
+dependent services. The health payload reports `runtime: "rust"`.
 
-After changing `SCENEWORKS_API_DOCKERFILE`, rebuild the API image before
-starting it:
+Rebuild the API image before starting it after dependency or source changes:
 
 ```powershell
 docker compose build api

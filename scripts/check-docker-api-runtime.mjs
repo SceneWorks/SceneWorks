@@ -5,20 +5,16 @@ import path from "node:path";
 import process from "node:process";
 import { setTimeout as sleep } from "node:timers/promises";
 
-const runtime = process.argv[2] ?? "rust";
-const dockerfile =
-  runtime === "rust" ? "docker/rust-api.Dockerfile" : "docker/api.Dockerfile";
-const port = process.env.SCENEWORKS_API_PORT || (runtime === "rust" ? "18000" : "18001");
-const projectName = `sceneworks-${runtime}-api-check`;
+const runtime = "rust";
+const port = process.env.SCENEWORKS_API_PORT || "18000";
+const projectName = "sceneworks-rust-api-check";
 const compose = ["compose", "-p", projectName];
-const tempRoot = await mkdtemp(path.join(os.tmpdir(), `sceneworks-${runtime}-api-`));
+const tempRoot = await mkdtemp(path.join(os.tmpdir(), "sceneworks-rust-api-"));
 const tempData = path.join(tempRoot, "data");
 await mkdir(path.join(tempData, "cache"), { recursive: true });
 
 const env = {
   ...process.env,
-  SCENEWORKS_API_RUNTIME: runtime,
-  SCENEWORKS_API_DOCKERFILE: dockerfile,
   SCENEWORKS_API_PORT: port,
   SCENEWORKS_DATA_BIND: tempData,
   SCENEWORKS_CONFIG_BIND: path.resolve("config"),

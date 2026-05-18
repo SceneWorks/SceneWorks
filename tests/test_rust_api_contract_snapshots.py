@@ -4,11 +4,9 @@ import atexit
 import json
 import os
 import re
-import shutil
 import socket
 import sqlite3
 import subprocess
-import sys
 import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
@@ -22,8 +20,11 @@ import pytest
 pytestmark = pytest.mark.parity
 
 ROOT = Path(__file__).resolve().parents[1]
-SNAPSHOT_PATH = ROOT / "tests" / "fixtures" / "python_rust_api_parity" / "snapshots.json"
-UPDATE_SNAPSHOTS = os.getenv("SCENEWORKS_UPDATE_PARITY_SNAPSHOTS", "").strip().lower() in {
+SNAPSHOT_PATH = ROOT / "tests" / "fixtures" / "rust_api_contract_snapshots" / "snapshots.json"
+UPDATE_SNAPSHOTS = os.getenv(
+    "UPDATE_SNAPSHOTS",
+    os.getenv("SCENEWORKS_UPDATE_PARITY_SNAPSHOTS", ""),
+).strip().lower() in {
     "1",
     "true",
     "yes",
@@ -64,19 +65,7 @@ def free_port() -> int:
         return int(sock.getsockname()[1])
 
 
-def pythonpath_env(previous: str | None) -> str:
-    paths = [
-        ROOT / "apps" / "api",
-        ROOT / "apps" / "worker",
-        ROOT / "packages" / "shared",
-    ]
-    parts = [str(path) for path in paths]
-    if previous:
-        parts.append(previous)
-    return os.pathsep.join(parts)
-
-
-def write_parity_manifests(config_dir: Path) -> None:
+def write_contract_manifests(config_dir: Path) -> None:
     manifest_dir = config_dir / "manifests"
     manifest_dir.mkdir(parents=True)
     (manifest_dir / "builtin.models.jsonc").write_text(
@@ -177,53 +166,27 @@ class ApiResponse:
 
 
 class ServerApiHarness:
-    def __init__(self, root: Path, runtime: str) -> None:
-        if runtime == "rust" and shutil.which("cargo") is None:
-            if os.getenv("SCENEWORKS_REQUIRE_CARGO_PARITY"):
-                pytest.fail("cargo is required for Python/Rust API parity tests")
-            pytest.skip("cargo is required for Python/Rust API parity tests")
-
+    def __init__(self, root: Path) -> None:
         self.root = root
-        self.runtime = runtime
-        write_parity_manifests(root / "config")
+        self.runtime = "rust"
+        write_contract_manifests(root / "config")
         port = free_port()
         self.base_url = f"http://127.0.0.1:{port}"
         env = os.environ.copy()
         env.update(
             {
-                "SCENEWORKS_API_RUNTIME": runtime,
                 "SCENEWORKS_API_HOST": "127.0.0.1",
                 "SCENEWORKS_API_PORT": str(port),
                 "SCENEWORKS_DATA_DIR": str(root / "data"),
                 "SCENEWORKS_CONFIG_DIR": str(root / "config"),
                 "SCENEWORKS_JOBS_DB_PATH": str(root / "data" / "cache" / "jobs.db"),
                 "SCENEWORKS_DISABLE_MODEL_SIZE_ESTIMATE": "1",
-                "PYTHONPATH": pythonpath_env(env.get("PYTHONPATH")),
             }
         )
         rust_binary = ROOT / "target" / "debug" / (
             "sceneworks-rust-api.exe" if os.name == "nt" else "sceneworks-rust-api"
         )
-        command = (
-            [
-                sys.executable,
-                "-m",
-                "uvicorn",
-                "sceneworks_api.main:app",
-                "--host",
-                "127.0.0.1",
-                "--port",
-                str(port),
-                "--log-level",
-                "warning",
-            ]
-            if runtime == "python"
-            else (
-                [str(rust_binary)]
-                if rust_binary.exists()
-                else ["cargo", "run", "-q", "-p", "sceneworks-rust-api"]
-            )
-        )
+        command = [str(rust_binary)] if rust_binary.exists() else ["cargo", "run", "-q", "-p", "sceneworks-rust-api"]
         self.process = subprocess.Popen(
             command,
             cwd=ROOT,
@@ -232,7 +195,7 @@ class ServerApiHarness:
             stderr=subprocess.PIPE,
             text=True,
         )
-        wait_for_health(self.base_url, self.process, runtime)
+        wait_for_health(self.base_url, self.process, "rust")
         self.client = httpx.Client(base_url=self.base_url, timeout=10)
 
     def request(
@@ -266,7 +229,7 @@ class ServerApiHarness:
 
 
 @dataclass
-class ParityRuntime:
+class ContractRuntime:
     name: str
     api: ServerApiHarness
     roots: tuple[Path, ...]
@@ -300,10 +263,10 @@ class ParityRuntime:
 
 
 @pytest.fixture()
-def parity_runtimes(tmp_path):
+def contract_runtimes(tmp_path):
     runtimes = [
-        ParityRuntime("python", ServerApiHarness(tmp_path / "python", "python"), (tmp_path / "python",)),
-        ParityRuntime("rust", ServerApiHarness(tmp_path / "rust", "rust"), (tmp_path / "rust",)),
+        ContractRuntime("rust-a", ServerApiHarness(tmp_path / "rust-a"), (tmp_path / "rust-a",)),
+        ContractRuntime("rust-b", ServerApiHarness(tmp_path / "rust-b"), (tmp_path / "rust-b",)),
     ]
     try:
         yield runtimes
@@ -325,13 +288,13 @@ def normalize_contract(value: Any, roots: tuple[Path, ...], path: str = "$") -> 
         normalized = UPLOAD_SUFFIX_RE.sub(r"\1-<upload-suffix>", normalized)
         normalized = PREFIXED_ID_RE.sub(lambda match: f"{match.group(1)}_fixture", normalized)
         normalized = CLAIM_WORKER_RE.sub("claim-worker-fixture", normalized)
-        # FastAPI/Pydantic and Axum report parser internals differently. The parity contract is
-        # the stable 422 envelope; the exact JSON parser wording/offset is intentionally ignored.
+        # The exact JSON parser wording/offset is intentionally ignored; the
+        # stable contract is the 422 envelope.
         if path.endswith(".ctx.error"):
             return "<json-decode-error>"
         if path.endswith(".ticket") and HEX_TOKEN_RE.match(normalized):
             return "<event-ticket>"
-        if normalized in {"python", "rust"}:
+        if normalized == "rust":
             return "<runtime>"
         return normalized
     if path.endswith(".loc[1]") and isinstance(value, int):
@@ -353,9 +316,9 @@ def diff_values(left: Any, right: Any, path: str = "$") -> list[str]:
         left_keys = set(left)
         right_keys = set(right)
         for key in sorted(left_keys - right_keys):
-            diffs.append(f"{path}.{key}: only in python")
+            diffs.append(f"{path}.{key}: only in baseline")
         for key in sorted(right_keys - left_keys):
-            diffs.append(f"{path}.{key}: only in rust")
+            diffs.append(f"{path}.{key}: only in candidate")
         for key in sorted(left_keys & right_keys):
             diffs.extend(diff_values(left[key], right[key], f"{path}.{key}"))
             if len(diffs) >= 12:
@@ -375,19 +338,25 @@ def diff_values(left: Any, right: Any, path: str = "$") -> list[str]:
     return []
 
 
-def assert_parity(label: str, python_runtime: ParityRuntime, rust_runtime: ParityRuntime, left: Any, right: Any) -> Any:
-    normalized_python = normalize_contract(left, python_runtime.roots)
-    normalized_rust = normalize_contract(right, rust_runtime.roots)
-    diffs = diff_values(normalized_python, normalized_rust)
+def assert_runtime_consistency(
+    label: str,
+    baseline_runtime: ContractRuntime,
+    candidate_runtime: ContractRuntime,
+    left: Any,
+    right: Any,
+) -> Any:
+    normalized_baseline = normalize_contract(left, baseline_runtime.roots)
+    normalized_candidate = normalize_contract(right, candidate_runtime.roots)
+    diffs = diff_values(normalized_baseline, normalized_candidate)
     assert not diffs, (
-        f"{label} contract drifted between Python and Rust:\n"
+        f"{label} contract drifted between isolated Rust runs:\n"
         + "\n".join(diffs)
-        + "\n\nPython:\n"
-        + json.dumps(normalized_python, indent=2, sort_keys=True)
-        + "\n\nRust:\n"
-        + json.dumps(normalized_rust, indent=2, sort_keys=True)
+        + "\n\nBaseline:\n"
+        + json.dumps(normalized_baseline, indent=2, sort_keys=True)
+        + "\n\nCandidate:\n"
+        + json.dumps(normalized_candidate, indent=2, sort_keys=True)
     )
-    return normalized_python
+    return normalized_baseline
 
 
 def snapshots() -> dict[str, Any]:
@@ -401,10 +370,10 @@ def assert_snapshot(label: str, normalized_value: Any) -> None:
         UPDATED_SNAPSHOTS[label] = normalized_value
         return
     expected = snapshots().get(label)
-    assert expected is not None, f"Missing parity snapshot for {label}"
+    assert expected is not None, f"Missing Rust API contract snapshot for {label}"
     diffs = diff_values(expected, normalized_value)
     assert not diffs, (
-        f"{label} no longer matches the saved parity baseline:\n"
+        f"{label} no longer matches the saved Rust API contract snapshot:\n"
         + "\n".join(diffs)
         + "\n\nExpected:\n"
         + json.dumps(expected, indent=2, sort_keys=True)
@@ -413,30 +382,35 @@ def assert_snapshot(label: str, normalized_value: Any) -> None:
     )
 
 
-def assert_response_parity(
+def assert_response_contract(
     label: str,
-    python_runtime: ParityRuntime,
-    rust_runtime: ParityRuntime,
-    python_response: ApiResponse,
-    rust_response: ApiResponse,
+    baseline_runtime: ContractRuntime,
+    candidate_runtime: ContractRuntime,
+    baseline_response: ApiResponse,
+    candidate_response: ApiResponse,
     *,
     expected_status: int | None = None,
     snapshot: bool = False,
 ) -> Any:
-    assert python_response.status_code == rust_response.status_code, (
-        f"{label} status drifted: Python {python_response.status_code}, Rust {rust_response.status_code}"
+    assert baseline_response.status_code == candidate_response.status_code, (
+        f"{label} status drifted: baseline {baseline_response.status_code}, candidate {candidate_response.status_code}"
     )
     if expected_status is not None:
-        assert python_response.status_code == expected_status, (
-            f"{label} returned {python_response.status_code}, expected {expected_status}"
+        assert baseline_response.status_code == expected_status, (
+            f"{label} returned {baseline_response.status_code}, expected {expected_status}"
         )
     else:
-        assert python_response.status_code < 400, f"{label} unexpectedly failed with {python_response.status_code}"
-    normalized = assert_parity(label, python_runtime, rust_runtime, python_response.body, rust_response.body)
+        assert baseline_response.status_code < 400, f"{label} unexpectedly failed with {baseline_response.status_code}"
+    normalized = assert_runtime_consistency(
+        label,
+        baseline_runtime,
+        candidate_runtime,
+        baseline_response.body,
+        candidate_response.body,
+    )
     if snapshot:
         assert_snapshot(label, normalized)
     return normalized
-
 
 def db_counts(project_path: Path) -> dict[str, int]:
     with sqlite3.connect(project_path / "project.db") as connection:
@@ -463,7 +437,7 @@ def character_sidecar_payload(project_path: Path, character_id: str) -> dict[str
     raise AssertionError(f"Missing character sidecar for {character_id} under {project_path}")
 
 
-def write_person_track_sidecar(runtime: ParityRuntime) -> None:
+def write_person_track_sidecar(runtime: ContractRuntime) -> None:
     assert runtime.project_id is not None
     assert runtime.project_path is not None
     track_dir = runtime.project_path / "person-tracks"
@@ -488,15 +462,15 @@ def write_person_track_sidecar(runtime: ParityRuntime) -> None:
     )
 
 
-def create_projects(runtimes: list[ParityRuntime], python_runtime: ParityRuntime, rust_runtime: ParityRuntime) -> None:
+def create_projects(runtimes: list[ContractRuntime], baseline_runtime: ContractRuntime, candidate_runtime: ContractRuntime) -> None:
     responses = [runtime.request("POST", "/api/v1/projects", json_payload={"name": "Parity Project"}) for runtime in runtimes]
     for runtime, response in zip(runtimes, responses):
         runtime.project_id = response.body["id"]
         runtime.project_path = Path(response.body["path"])
-    assert_response_parity(
+    assert_response_contract(
         "project create response",
-        python_runtime,
-        rust_runtime,
+        baseline_runtime,
+        candidate_runtime,
         responses[0],
         responses[1],
         expected_status=201,
@@ -504,7 +478,7 @@ def create_projects(runtimes: list[ParityRuntime], python_runtime: ParityRuntime
     )
 
 
-def upload_assets(runtimes: list[ParityRuntime], python_runtime: ParityRuntime, rust_runtime: ParityRuntime) -> None:
+def upload_assets(runtimes: list[ContractRuntime], baseline_runtime: ContractRuntime, candidate_runtime: ContractRuntime) -> None:
     responses = [
         runtime.request(
             "POST",
@@ -515,10 +489,10 @@ def upload_assets(runtimes: list[ParityRuntime], python_runtime: ParityRuntime, 
     ]
     for runtime, response in zip(runtimes, responses):
         runtime.asset_id = response.body["id"]
-    assert_response_parity(
+    assert_response_contract(
         "asset upload sidecar response",
-        python_runtime,
-        rust_runtime,
+        baseline_runtime,
+        candidate_runtime,
         responses[0],
         responses[1],
         expected_status=201,
@@ -527,9 +501,9 @@ def upload_assets(runtimes: list[ParityRuntime], python_runtime: ParityRuntime, 
 
 
 def create_character_pair(
-    runtimes: list[ParityRuntime],
-    python_runtime: ParityRuntime,
-    rust_runtime: ParityRuntime,
+    runtimes: list[ContractRuntime],
+    baseline_runtime: ContractRuntime,
+    candidate_runtime: ContractRuntime,
     *,
     payload: dict[str, Any] | None = None,
     label: str = "character create response",
@@ -545,10 +519,10 @@ def create_character_pair(
         for runtime in runtimes
     ]
     character_ids = [response.body["id"] for response in responses]
-    normalized = assert_response_parity(
+    normalized = assert_response_contract(
         label,
-        python_runtime,
-        rust_runtime,
+        baseline_runtime,
+        candidate_runtime,
         responses[0],
         responses[1],
         expected_status=201,
@@ -558,9 +532,9 @@ def create_character_pair(
 
 
 def attach_character_reference_pair(
-    runtimes: list[ParityRuntime],
-    python_runtime: ParityRuntime,
-    rust_runtime: ParityRuntime,
+    runtimes: list[ContractRuntime],
+    baseline_runtime: ContractRuntime,
+    candidate_runtime: ContractRuntime,
     character_ids: list[str],
     *,
     approved: bool = True,
@@ -580,10 +554,10 @@ def attach_character_reference_pair(
         )
         for runtime, character_id in zip(runtimes, character_ids)
     ]
-    return assert_response_parity(
+    return assert_response_contract(
         label,
-        python_runtime,
-        rust_runtime,
+        baseline_runtime,
+        candidate_runtime,
         responses[0],
         responses[1],
         expected_status=201,
@@ -592,9 +566,9 @@ def attach_character_reference_pair(
 
 
 def create_character_look_pair(
-    runtimes: list[ParityRuntime],
-    python_runtime: ParityRuntime,
-    rust_runtime: ParityRuntime,
+    runtimes: list[ContractRuntime],
+    baseline_runtime: ContractRuntime,
+    candidate_runtime: ContractRuntime,
     character_ids: list[str],
     *,
     snapshot: bool = True,
@@ -612,10 +586,10 @@ def create_character_look_pair(
         )
         for runtime, character_id in zip(runtimes, character_ids)
     ]
-    normalized = assert_response_parity(
+    normalized = assert_response_contract(
         "character look create response",
-        python_runtime,
-        rust_runtime,
+        baseline_runtime,
+        candidate_runtime,
         responses[0],
         responses[1],
         expected_status=201,
@@ -625,7 +599,7 @@ def create_character_look_pair(
     return look_ids, normalized
 
 
-def write_lora_sources(runtimes: list[ParityRuntime]) -> list[Path]:
+def write_lora_sources(runtimes: list[ContractRuntime]) -> list[Path]:
     lora_sources = []
     for runtime in runtimes:
         # The parity harness root contains each runtime's data dir, so sourcePath is both valid
@@ -639,9 +613,9 @@ def write_lora_sources(runtimes: list[ParityRuntime]) -> list[Path]:
 
 
 def attach_character_lora_pair(
-    runtimes: list[ParityRuntime],
-    python_runtime: ParityRuntime,
-    rust_runtime: ParityRuntime,
+    runtimes: list[ContractRuntime],
+    baseline_runtime: ContractRuntime,
+    candidate_runtime: ContractRuntime,
     character_ids: list[str],
     *,
     snapshot: bool = True,
@@ -659,10 +633,10 @@ def attach_character_lora_pair(
         )
         for runtime, character_id, lora_source in zip(runtimes, character_ids, write_lora_sources(runtimes))
     ]
-    normalized = assert_response_parity(
+    normalized = assert_response_contract(
         "character lora attach response",
-        python_runtime,
-        rust_runtime,
+        baseline_runtime,
+        candidate_runtime,
         responses[0],
         responses[1],
         expected_status=201,
@@ -674,7 +648,7 @@ def attach_character_lora_pair(
         assert copied_path.exists(), f"{runtime.name} did not copy character LoRA to {copied_path}"
         assert copied_path.read_bytes() == b"lora"
     copied_rel_paths = [response.body["loras"][0]["projectPath"] for response in responses]
-    assert_parity("character lora copied project path", python_runtime, rust_runtime, copied_rel_paths[0], copied_rel_paths[1])
+    assert_runtime_consistency("character lora copied project path", baseline_runtime, candidate_runtime, copied_rel_paths[0], copied_rel_paths[1])
     return lora_link_ids, normalized
 
 
@@ -698,7 +672,7 @@ def read_sse_message(lines: Any) -> dict[str, Any]:
     raise AssertionError("SSE stream ended before a complete event arrived")
 
 
-def collect_sse_events_during(runtime: ParityRuntime, action: Any, expected_events: tuple[str, ...]) -> tuple[Any, list[dict[str, Any]]]:
+def collect_sse_events_during(runtime: ContractRuntime, action: Any, expected_events: tuple[str, ...]) -> tuple[Any, list[dict[str, Any]]]:
     timeout = httpx.Timeout(10.0, connect=5.0, read=5.0)
     with httpx.Client(base_url=runtime.api.base_url, timeout=timeout) as client:
         ticket = client.post("/api/v1/jobs/events/ticket").json()["ticket"]
@@ -720,8 +694,8 @@ def collect_sse_events_during(runtime: ParityRuntime, action: Any, expected_even
     return action_result, events
 
 
-def test_system_manifest_and_http_contracts(parity_runtimes):
-    python_runtime, rust_runtime = parity_runtimes
+def test_system_manifest_and_http_contracts(contract_runtimes):
+    baseline_runtime, candidate_runtime = contract_runtimes
 
     for label, path, method, expected in [
         ("health response", "/api/v1/health", "GET", 200),
@@ -731,15 +705,15 @@ def test_system_manifest_and_http_contracts(parity_runtimes):
         ("model manifest response", "/api/v1/models", "GET", 200),
         ("lora manifest response", "/api/v1/loras?modelFamily=wan-video", "GET", 200),
     ]:
-        responses = [runtime.request(method, path) for runtime in parity_runtimes]
-        assert_response_parity(label, python_runtime, rust_runtime, responses[0], responses[1], expected_status=expected, snapshot=True)
+        responses = [runtime.request(method, path) for runtime in contract_runtimes]
+        assert_response_contract(label, baseline_runtime, candidate_runtime, responses[0], responses[1], expected_status=expected, snapshot=True)
 
     cors_headers = {
         "origin": "http://localhost:5173",
         "access-control-request-method": "POST",
         "access-control-request-headers": "X-SceneWorks-Token",
     }
-    cors = [runtime.request("OPTIONS", "/api/v1/jobs", headers=cors_headers) for runtime in parity_runtimes]
+    cors = [runtime.request("OPTIONS", "/api/v1/jobs", headers=cors_headers) for runtime in contract_runtimes]
     assert cors[0].status_code == cors[1].status_code == 200
     assert cors[0].headers.get("access-control-allow-origin") == cors[1].headers.get("access-control-allow-origin")
     assert cors[0].headers.get("access-control-allow-origin") == "http://localhost:5173"
@@ -748,56 +722,56 @@ def test_system_manifest_and_http_contracts(parity_runtimes):
         assert "x-sceneworks-token" in allow_headers
 
 
-def test_project_asset_sidecar_delete_and_db_contracts(parity_runtimes):
-    python_runtime, rust_runtime = parity_runtimes
-    create_projects(parity_runtimes, python_runtime, rust_runtime)
+def test_project_asset_sidecar_delete_and_db_contracts(contract_runtimes):
+    baseline_runtime, candidate_runtime = contract_runtimes
+    create_projects(contract_runtimes, baseline_runtime, candidate_runtime)
 
-    listed_projects = [runtime.request("GET", "/api/v1/projects") for runtime in parity_runtimes]
-    assert_response_parity("project list response", python_runtime, rust_runtime, listed_projects[0], listed_projects[1], snapshot=True)
+    listed_projects = [runtime.request("GET", "/api/v1/projects") for runtime in contract_runtimes]
+    assert_response_contract("project list response", baseline_runtime, candidate_runtime, listed_projects[0], listed_projects[1], snapshot=True)
 
-    upload_assets(parity_runtimes, python_runtime, rust_runtime)
+    upload_assets(contract_runtimes, baseline_runtime, candidate_runtime)
     patched_assets = [
         runtime.request(
             "PATCH",
             f"/api/v1/projects/{runtime.project_id}/assets/{runtime.asset_id}/status",
             json_payload={"favorite": True, "rating": 4},
         )
-        for runtime in parity_runtimes
+        for runtime in contract_runtimes
     ]
-    assert_response_parity(
+    assert_response_contract(
         "asset status project DB update response",
-        python_runtime,
-        rust_runtime,
+        baseline_runtime,
+        candidate_runtime,
         patched_assets[0],
         patched_assets[1],
         expected_status=200,
         snapshot=True,
     )
 
-    listed_assets = [runtime.request("GET", f"/api/v1/projects/{runtime.project_id}/assets") for runtime in parity_runtimes]
-    assert_response_parity("asset list response", python_runtime, rust_runtime, listed_assets[0], listed_assets[1], snapshot=True)
+    listed_assets = [runtime.request("GET", f"/api/v1/projects/{runtime.project_id}/assets") for runtime in contract_runtimes]
+    assert_response_contract("asset list response", baseline_runtime, candidate_runtime, listed_assets[0], listed_assets[1], snapshot=True)
 
-    sidecars = [sidecar_payload(runtime.project_path, runtime.asset_id) for runtime in parity_runtimes]
-    normalized_sidecar = assert_parity("persisted upload sidecar", python_runtime, rust_runtime, sidecars[0], sidecars[1])
+    sidecars = [sidecar_payload(runtime.project_path, runtime.asset_id) for runtime in contract_runtimes]
+    normalized_sidecar = assert_runtime_consistency("persisted upload sidecar", baseline_runtime, candidate_runtime, sidecars[0], sidecars[1])
     assert_snapshot("persisted upload sidecar", normalized_sidecar)
 
-    counts = [db_counts(runtime.project_path) for runtime in parity_runtimes]
-    assert_parity("project DB counts after sidecar writes", python_runtime, rust_runtime, counts[0], counts[1])
+    counts = [db_counts(runtime.project_path) for runtime in contract_runtimes]
+    assert_runtime_consistency("project DB counts after sidecar writes", baseline_runtime, candidate_runtime, counts[0], counts[1])
 
-    reindexed = [runtime.request("POST", f"/api/v1/projects/{runtime.project_id}/reindex") for runtime in parity_runtimes]
-    assert_response_parity("project reindex response", python_runtime, rust_runtime, reindexed[0], reindexed[1], expected_status=200, snapshot=True)
+    reindexed = [runtime.request("POST", f"/api/v1/projects/{runtime.project_id}/reindex") for runtime in contract_runtimes]
+    assert_response_contract("project reindex response", baseline_runtime, candidate_runtime, reindexed[0], reindexed[1], expected_status=200, snapshot=True)
 
     deleted = [
         runtime.request("DELETE", f"/api/v1/projects/{runtime.project_id}/assets/{runtime.asset_id}")
-        for runtime in parity_runtimes
+        for runtime in contract_runtimes
     ]
-    assert_response_parity("asset delete response", python_runtime, rust_runtime, deleted[0], deleted[1], expected_status=200, snapshot=True)
+    assert_response_contract("asset delete response", baseline_runtime, candidate_runtime, deleted[0], deleted[1], expected_status=200, snapshot=True)
 
-    visible_after_delete = [runtime.request("GET", f"/api/v1/projects/{runtime.project_id}/assets") for runtime in parity_runtimes]
-    assert_response_parity(
+    visible_after_delete = [runtime.request("GET", f"/api/v1/projects/{runtime.project_id}/assets") for runtime in contract_runtimes]
+    assert_response_contract(
         "asset list after delete response",
-        python_runtime,
-        rust_runtime,
+        baseline_runtime,
+        candidate_runtime,
         visible_after_delete[0],
         visible_after_delete[1],
         expected_status=200,
@@ -806,26 +780,26 @@ def test_project_asset_sidecar_delete_and_db_contracts(parity_runtimes):
 
     purged = [
         runtime.request("DELETE", f"/api/v1/projects/{runtime.project_id}/assets/{runtime.asset_id}/purge")
-        for runtime in parity_runtimes
+        for runtime in contract_runtimes
     ]
-    assert_response_parity("asset purge response", python_runtime, rust_runtime, purged[0], purged[1], expected_status=200, snapshot=True)
+    assert_response_contract("asset purge response", baseline_runtime, candidate_runtime, purged[0], purged[1], expected_status=200, snapshot=True)
 
 
 @pytest.mark.parity
-def test_character_lifecycle_contracts(parity_runtimes):
-    python_runtime, rust_runtime = parity_runtimes
-    create_projects(parity_runtimes, python_runtime, rust_runtime)
+def test_character_lifecycle_contracts(contract_runtimes):
+    baseline_runtime, candidate_runtime = contract_runtimes
+    create_projects(contract_runtimes, baseline_runtime, candidate_runtime)
 
-    character_ids, _ = create_character_pair(parity_runtimes, python_runtime, rust_runtime)
+    character_ids, _ = create_character_pair(contract_runtimes, baseline_runtime, candidate_runtime)
 
     listed_characters = [
         runtime.request("GET", f"/api/v1/projects/{runtime.project_id}/characters")
-        for runtime in parity_runtimes
+        for runtime in contract_runtimes
     ]
-    assert_response_parity(
+    assert_response_contract(
         "character list response",
-        python_runtime,
-        rust_runtime,
+        baseline_runtime,
+        candidate_runtime,
         listed_characters[0],
         listed_characters[1],
         expected_status=200,
@@ -834,12 +808,12 @@ def test_character_lifecycle_contracts(parity_runtimes):
 
     fetched_characters = [
         runtime.request("GET", f"/api/v1/projects/{runtime.project_id}/characters/{character_id}")
-        for runtime, character_id in zip(parity_runtimes, character_ids)
+        for runtime, character_id in zip(contract_runtimes, character_ids)
     ]
-    assert_response_parity(
+    assert_response_contract(
         "character detail response",
-        python_runtime,
-        rust_runtime,
+        baseline_runtime,
+        candidate_runtime,
         fetched_characters[0],
         fetched_characters[1],
         expected_status=200,
@@ -852,12 +826,12 @@ def test_character_lifecycle_contracts(parity_runtimes):
             f"/api/v1/projects/{runtime.project_id}/characters/{character_id}",
             json_payload={"description": "Lead performer, updated", "archived": False},
         )
-        for runtime, character_id in zip(parity_runtimes, character_ids)
+        for runtime, character_id in zip(contract_runtimes, character_ids)
     ]
-    assert_response_parity(
+    assert_response_contract(
         "character update response",
-        python_runtime,
-        rust_runtime,
+        baseline_runtime,
+        candidate_runtime,
         updated_characters[0],
         updated_characters[1],
         expected_status=200,
@@ -866,12 +840,12 @@ def test_character_lifecycle_contracts(parity_runtimes):
 
     archived_characters = [
         runtime.request("POST", f"/api/v1/projects/{runtime.project_id}/characters/{character_id}/archive")
-        for runtime, character_id in zip(parity_runtimes, character_ids)
+        for runtime, character_id in zip(contract_runtimes, character_ids)
     ]
-    normalized_post_archive_response = assert_response_parity(
+    normalized_post_archive_response = assert_response_contract(
         "character archive response",
-        python_runtime,
-        rust_runtime,
+        baseline_runtime,
+        candidate_runtime,
         archived_characters[0],
         archived_characters[1],
         expected_status=200,
@@ -880,12 +854,12 @@ def test_character_lifecycle_contracts(parity_runtimes):
 
     hidden_archived = [
         runtime.request("GET", f"/api/v1/projects/{runtime.project_id}/characters")
-        for runtime in parity_runtimes
+        for runtime in contract_runtimes
     ]
-    assert_response_parity(
+    assert_response_contract(
         "character list after archive response",
-        python_runtime,
-        rust_runtime,
+        baseline_runtime,
+        candidate_runtime,
         hidden_archived[0],
         hidden_archived[1],
         expected_status=200,
@@ -894,12 +868,12 @@ def test_character_lifecycle_contracts(parity_runtimes):
 
     visible_archived = [
         runtime.request("GET", f"/api/v1/projects/{runtime.project_id}/characters?includeArchived=true")
-        for runtime in parity_runtimes
+        for runtime in contract_runtimes
     ]
-    assert_response_parity(
+    assert_response_contract(
         "character list include archived response",
-        python_runtime,
-        rust_runtime,
+        baseline_runtime,
+        candidate_runtime,
         visible_archived[0],
         visible_archived[1],
         expected_status=200,
@@ -907,9 +881,9 @@ def test_character_lifecycle_contracts(parity_runtimes):
     )
 
     delete_archive_ids, _ = create_character_pair(
-        parity_runtimes,
-        python_runtime,
-        rust_runtime,
+        contract_runtimes,
+        baseline_runtime,
+        candidate_runtime,
         payload={"name": "Delete Archive", "type": "object"},
         label="character create for delete archive response",
     )
@@ -918,12 +892,12 @@ def test_character_lifecycle_contracts(parity_runtimes):
             "DELETE",
             f"/api/v1/projects/{runtime.project_id}/characters/{character_id}",
         )
-        for runtime, character_id in zip(parity_runtimes, delete_archive_ids)
+        for runtime, character_id in zip(contract_runtimes, delete_archive_ids)
     ]
-    normalized_delete_archive_response = assert_response_parity(
+    normalized_delete_archive_response = assert_response_contract(
         "character delete archive response",
-        python_runtime,
-        rust_runtime,
+        baseline_runtime,
+        candidate_runtime,
         delete_archive_responses[0],
         delete_archive_responses[1],
         expected_status=200,
@@ -932,40 +906,40 @@ def test_character_lifecycle_contracts(parity_runtimes):
     assert normalized_delete_archive_response == normalized_post_archive_response
 
     purge_ids, _ = create_character_pair(
-        parity_runtimes,
-        python_runtime,
-        rust_runtime,
+        contract_runtimes,
+        baseline_runtime,
+        candidate_runtime,
         payload={"name": "Purge Me", "type": "object"},
         label="character create for purge response",
     )
     purge_responses = [
         runtime.request("DELETE", f"/api/v1/projects/{runtime.project_id}/characters/{character_id}/purge")
-        for runtime, character_id in zip(parity_runtimes, purge_ids)
+        for runtime, character_id in zip(contract_runtimes, purge_ids)
     ]
-    assert_response_parity(
+    assert_response_contract(
         "character purge response",
-        python_runtime,
-        rust_runtime,
+        baseline_runtime,
+        candidate_runtime,
         purge_responses[0],
         purge_responses[1],
         expected_status=200,
         snapshot=True,
     )
-    for runtime, character_id in zip(parity_runtimes, purge_ids):
+    for runtime, character_id in zip(contract_runtimes, purge_ids):
         assert not (runtime.project_path / "characters" / f"{character_id}.sceneworks.character.json").exists()
 
 
 @pytest.mark.parity
-def test_character_reference_contracts(parity_runtimes):
-    python_runtime, rust_runtime = parity_runtimes
-    create_projects(parity_runtimes, python_runtime, rust_runtime)
-    upload_assets(parity_runtimes, python_runtime, rust_runtime)
-    character_ids, _ = create_character_pair(parity_runtimes, python_runtime, rust_runtime)
+def test_character_reference_contracts(contract_runtimes):
+    baseline_runtime, candidate_runtime = contract_runtimes
+    create_projects(contract_runtimes, baseline_runtime, candidate_runtime)
+    upload_assets(contract_runtimes, baseline_runtime, candidate_runtime)
+    character_ids, _ = create_character_pair(contract_runtimes, baseline_runtime, candidate_runtime)
 
     attach_character_reference_pair(
-        parity_runtimes,
-        python_runtime,
-        rust_runtime,
+        contract_runtimes,
+        baseline_runtime,
+        candidate_runtime,
         character_ids,
         approved=False,
     )
@@ -976,12 +950,12 @@ def test_character_reference_contracts(parity_runtimes):
             f"/api/v1/projects/{runtime.project_id}/characters/{character_id}/references/{runtime.asset_id}",
             json_payload={"approved": True, "role": "hero", "notes": "Approved face"},
         )
-        for runtime, character_id in zip(parity_runtimes, character_ids)
+        for runtime, character_id in zip(contract_runtimes, character_ids)
     ]
-    assert_response_parity(
+    assert_response_contract(
         "character reference update response",
-        python_runtime,
-        rust_runtime,
+        baseline_runtime,
+        candidate_runtime,
         updated_references[0],
         updated_references[1],
         expected_status=200,
@@ -990,16 +964,16 @@ def test_character_reference_contracts(parity_runtimes):
 
     sidecars = [
         character_sidecar_payload(runtime.project_path, character_id)
-        for runtime, character_id in zip(parity_runtimes, character_ids)
+        for runtime, character_id in zip(contract_runtimes, character_ids)
     ]
-    normalized_sidecar = assert_parity("persisted character sidecar", python_runtime, rust_runtime, sidecars[0], sidecars[1])
+    normalized_sidecar = assert_runtime_consistency("persisted character sidecar", baseline_runtime, candidate_runtime, sidecars[0], sidecars[1])
     assert_snapshot("persisted character sidecar", normalized_sidecar)
 
-    listed_assets = [runtime.request("GET", f"/api/v1/projects/{runtime.project_id}/assets") for runtime in parity_runtimes]
-    normalized_asset_response = assert_response_parity(
+    listed_assets = [runtime.request("GET", f"/api/v1/projects/{runtime.project_id}/assets") for runtime in contract_runtimes]
+    normalized_asset_response = assert_response_contract(
         "asset list after character reference response",
-        python_runtime,
-        rust_runtime,
+        baseline_runtime,
+        candidate_runtime,
         listed_assets[0],
         listed_assets[1],
         expected_status=200,
@@ -1007,11 +981,11 @@ def test_character_reference_contracts(parity_runtimes):
     )
     assert normalized_asset_response[0]["metadata"]["characterReferences"][0]["characterId"] == "character_fixture"
 
-    asset_sidecars = [sidecar_payload(runtime.project_path, runtime.asset_id) for runtime in parity_runtimes]
-    normalized_asset_sidecar = assert_parity(
+    asset_sidecars = [sidecar_payload(runtime.project_path, runtime.asset_id) for runtime in contract_runtimes]
+    normalized_asset_sidecar = assert_runtime_consistency(
         "asset sidecar after character reference",
-        python_runtime,
-        rust_runtime,
+        baseline_runtime,
+        candidate_runtime,
         asset_sidecars[0],
         asset_sidecars[1],
     )
@@ -1022,23 +996,23 @@ def test_character_reference_contracts(parity_runtimes):
             "DELETE",
             f"/api/v1/projects/{runtime.project_id}/characters/{character_id}/references/{runtime.asset_id}",
         )
-        for runtime, character_id in zip(parity_runtimes, character_ids)
+        for runtime, character_id in zip(contract_runtimes, character_ids)
     ]
-    assert_response_parity(
+    assert_response_contract(
         "character reference delete response",
-        python_runtime,
-        rust_runtime,
+        baseline_runtime,
+        candidate_runtime,
         removed_references[0],
         removed_references[1],
         expected_status=200,
         snapshot=True,
     )
 
-    cleaned_assets = [runtime.request("GET", f"/api/v1/projects/{runtime.project_id}/assets") for runtime in parity_runtimes]
-    normalized_cleaned_asset_response = assert_response_parity(
+    cleaned_assets = [runtime.request("GET", f"/api/v1/projects/{runtime.project_id}/assets") for runtime in contract_runtimes]
+    normalized_cleaned_asset_response = assert_response_contract(
         "asset list after character reference removal response",
-        python_runtime,
-        rust_runtime,
+        baseline_runtime,
+        candidate_runtime,
         cleaned_assets[0],
         cleaned_assets[1],
         expected_status=200,
@@ -1046,11 +1020,11 @@ def test_character_reference_contracts(parity_runtimes):
     )
     assert normalized_cleaned_asset_response[0]["metadata"]["characterReferences"] == []
 
-    cleaned_asset_sidecars = [sidecar_payload(runtime.project_path, runtime.asset_id) for runtime in parity_runtimes]
-    normalized_cleaned_asset_sidecar = assert_parity(
+    cleaned_asset_sidecars = [sidecar_payload(runtime.project_path, runtime.asset_id) for runtime in contract_runtimes]
+    normalized_cleaned_asset_sidecar = assert_runtime_consistency(
         "asset sidecar after character reference removal",
-        python_runtime,
-        rust_runtime,
+        baseline_runtime,
+        candidate_runtime,
         cleaned_asset_sidecars[0],
         cleaned_asset_sidecars[1],
     )
@@ -1060,17 +1034,17 @@ def test_character_reference_contracts(parity_runtimes):
 
 
 @pytest.mark.parity
-def test_character_look_and_lora_contracts(parity_runtimes):
-    python_runtime, rust_runtime = parity_runtimes
-    create_projects(parity_runtimes, python_runtime, rust_runtime)
-    upload_assets(parity_runtimes, python_runtime, rust_runtime)
-    character_ids, _ = create_character_pair(parity_runtimes, python_runtime, rust_runtime)
-    attach_character_reference_pair(parity_runtimes, python_runtime, rust_runtime, character_ids, snapshot=False)
+def test_character_look_and_lora_contracts(contract_runtimes):
+    baseline_runtime, candidate_runtime = contract_runtimes
+    create_projects(contract_runtimes, baseline_runtime, candidate_runtime)
+    upload_assets(contract_runtimes, baseline_runtime, candidate_runtime)
+    character_ids, _ = create_character_pair(contract_runtimes, baseline_runtime, candidate_runtime)
+    attach_character_reference_pair(contract_runtimes, baseline_runtime, candidate_runtime, character_ids, snapshot=False)
 
     look_ids, normalized_look_response = create_character_look_pair(
-        parity_runtimes,
-        python_runtime,
-        rust_runtime,
+        contract_runtimes,
+        baseline_runtime,
+        candidate_runtime,
         character_ids,
     )
 
@@ -1085,12 +1059,12 @@ def test_character_look_and_lora_contracts(parity_runtimes):
                 "recipeSettings": {"style": "noir", "lens": "85mm"},
             },
         )
-        for runtime, character_id, look_id in zip(parity_runtimes, character_ids, look_ids)
+        for runtime, character_id, look_id in zip(contract_runtimes, character_ids, look_ids)
     ]
-    normalized_look_update_response = assert_response_parity(
+    normalized_look_update_response = assert_response_contract(
         "character look update response",
-        python_runtime,
-        rust_runtime,
+        baseline_runtime,
+        candidate_runtime,
         updated_looks[0],
         updated_looks[1],
         expected_status=200,
@@ -1098,9 +1072,9 @@ def test_character_look_and_lora_contracts(parity_runtimes):
     )
 
     lora_link_ids, _ = attach_character_lora_pair(
-        parity_runtimes,
-        python_runtime,
-        rust_runtime,
+        contract_runtimes,
+        baseline_runtime,
+        candidate_runtime,
         character_ids,
     )
 
@@ -1116,12 +1090,12 @@ def test_character_look_and_lora_contracts(parity_runtimes):
                 "scope": "project",
             },
         )
-        for runtime, character_id, link_id in zip(parity_runtimes, character_ids, lora_link_ids)
+        for runtime, character_id, link_id in zip(contract_runtimes, character_ids, lora_link_ids)
     ]
-    assert_response_parity(
+    assert_response_contract(
         "character lora update response",
-        python_runtime,
-        rust_runtime,
+        baseline_runtime,
+        candidate_runtime,
         updated_loras[0],
         updated_loras[1],
         expected_status=200,
@@ -1133,12 +1107,12 @@ def test_character_look_and_lora_contracts(parity_runtimes):
             "DELETE",
             f"/api/v1/projects/{runtime.project_id}/characters/{character_id}/looks/{look_id}",
         )
-        for runtime, character_id, look_id in zip(parity_runtimes, character_ids, look_ids)
+        for runtime, character_id, look_id in zip(contract_runtimes, character_ids, look_ids)
     ]
-    assert_response_parity(
+    assert_response_contract(
         "character look delete response",
-        python_runtime,
-        rust_runtime,
+        baseline_runtime,
+        candidate_runtime,
         deleted_looks[0],
         deleted_looks[1],
         expected_status=200,
@@ -1150,12 +1124,12 @@ def test_character_look_and_lora_contracts(parity_runtimes):
             "DELETE",
             f"/api/v1/projects/{runtime.project_id}/characters/{character_id}/loras/{link_id}",
         )
-        for runtime, character_id, link_id in zip(parity_runtimes, character_ids, lora_link_ids)
+        for runtime, character_id, link_id in zip(contract_runtimes, character_ids, lora_link_ids)
     ]
-    assert_response_parity(
+    assert_response_contract(
         "character lora delete response",
-        python_runtime,
-        rust_runtime,
+        baseline_runtime,
+        candidate_runtime,
         detached_loras[0],
         detached_loras[1],
         expected_status=200,
@@ -1167,18 +1141,18 @@ def test_character_look_and_lora_contracts(parity_runtimes):
 
 
 @pytest.mark.parity
-def test_character_test_job_contracts(parity_runtimes):
-    python_runtime, rust_runtime = parity_runtimes
-    create_projects(parity_runtimes, python_runtime, rust_runtime)
-    upload_assets(parity_runtimes, python_runtime, rust_runtime)
-    character_ids, _ = create_character_pair(parity_runtimes, python_runtime, rust_runtime)
-    attach_character_reference_pair(parity_runtimes, python_runtime, rust_runtime, character_ids, snapshot=False)
-    look_ids, _ = create_character_look_pair(parity_runtimes, python_runtime, rust_runtime, character_ids, snapshot=False)
-    attach_character_lora_pair(parity_runtimes, python_runtime, rust_runtime, character_ids, snapshot=False)
+def test_character_test_job_contracts(contract_runtimes):
+    baseline_runtime, candidate_runtime = contract_runtimes
+    create_projects(contract_runtimes, baseline_runtime, candidate_runtime)
+    upload_assets(contract_runtimes, baseline_runtime, candidate_runtime)
+    character_ids, _ = create_character_pair(contract_runtimes, baseline_runtime, candidate_runtime)
+    attach_character_reference_pair(contract_runtimes, baseline_runtime, candidate_runtime, character_ids, snapshot=False)
+    look_ids, _ = create_character_look_pair(contract_runtimes, baseline_runtime, candidate_runtime, character_ids, snapshot=False)
+    attach_character_lora_pair(contract_runtimes, baseline_runtime, candidate_runtime, character_ids, snapshot=False)
 
     test_jobs = []
     event_sets = []
-    for runtime, character_id, look_id in zip(parity_runtimes, character_ids, look_ids):
+    for runtime, character_id, look_id in zip(contract_runtimes, character_ids, look_ids):
         response, events = collect_sse_events_during(
             runtime,
             lambda runtime=runtime, character_id=character_id, look_id=look_id: runtime.request(
@@ -1191,29 +1165,29 @@ def test_character_test_job_contracts(parity_runtimes):
         test_jobs.append(response)
         event_sets.append(events)
 
-    assert_response_parity(
+    assert_response_contract(
         "character test job response",
-        python_runtime,
-        rust_runtime,
+        baseline_runtime,
+        candidate_runtime,
         test_jobs[0],
         test_jobs[1],
         expected_status=201,
         snapshot=True,
     )
-    normalized_events = assert_parity(
+    normalized_events = assert_runtime_consistency(
         "character test job SSE events",
-        python_runtime,
-        rust_runtime,
+        baseline_runtime,
+        candidate_runtime,
         event_sets[0],
         event_sets[1],
     )
     assert_snapshot("character test job SSE events", normalized_events)
 
 
-def test_timeline_and_worker_job_creation_contracts(parity_runtimes):
-    python_runtime, rust_runtime = parity_runtimes
-    create_projects(parity_runtimes, python_runtime, rust_runtime)
-    upload_assets(parity_runtimes, python_runtime, rust_runtime)
+def test_timeline_and_worker_job_creation_contracts(contract_runtimes):
+    baseline_runtime, candidate_runtime = contract_runtimes
+    create_projects(contract_runtimes, baseline_runtime, candidate_runtime)
+    upload_assets(contract_runtimes, baseline_runtime, candidate_runtime)
 
     created_timelines = [
         runtime.request(
@@ -1221,12 +1195,12 @@ def test_timeline_and_worker_job_creation_contracts(parity_runtimes):
             f"/api/v1/projects/{runtime.project_id}/timelines",
             json_payload={"name": "Main timeline", "aspectRatio": "16:9", "fps": 24},
         )
-        for runtime in parity_runtimes
+        for runtime in contract_runtimes
     ]
-    assert_response_parity("timeline create response", python_runtime, rust_runtime, created_timelines[0], created_timelines[1], expected_status=201, snapshot=True)
+    assert_response_contract("timeline create response", baseline_runtime, candidate_runtime, created_timelines[0], created_timelines[1], expected_status=201, snapshot=True)
 
     updated_timelines = []
-    for runtime, created in zip(parity_runtimes, created_timelines):
+    for runtime, created in zip(contract_runtimes, created_timelines):
         timeline = json.loads(json.dumps(created.body))
         timeline_id = timeline["id"]
         timeline["tracks"][0]["items"] = [
@@ -1252,16 +1226,16 @@ def test_timeline_and_worker_job_creation_contracts(parity_runtimes):
                 json_payload={"timeline": timeline},
             )
         )
-    assert_response_parity("timeline update response", python_runtime, rust_runtime, updated_timelines[0], updated_timelines[1], expected_status=200, snapshot=True)
+    assert_response_contract("timeline update response", baseline_runtime, candidate_runtime, updated_timelines[0], updated_timelines[1], expected_status=200, snapshot=True)
 
-    listed_timelines = [runtime.request("GET", f"/api/v1/projects/{runtime.project_id}/timelines") for runtime in parity_runtimes]
-    assert_response_parity("timeline list response", python_runtime, rust_runtime, listed_timelines[0], listed_timelines[1], expected_status=200, snapshot=True)
+    listed_timelines = [runtime.request("GET", f"/api/v1/projects/{runtime.project_id}/timelines") for runtime in contract_runtimes]
+    assert_response_contract("timeline list response", baseline_runtime, candidate_runtime, listed_timelines[0], listed_timelines[1], expected_status=200, snapshot=True)
 
     detail_timelines = [
         runtime.request("GET", f"/api/v1/projects/{runtime.project_id}/timelines/{created.body['id']}")
-        for runtime, created in zip(parity_runtimes, created_timelines)
+        for runtime, created in zip(contract_runtimes, created_timelines)
     ]
-    assert_response_parity("timeline detail response", python_runtime, rust_runtime, detail_timelines[0], detail_timelines[1], expected_status=200, snapshot=True)
+    assert_response_contract("timeline detail response", baseline_runtime, candidate_runtime, detail_timelines[0], detail_timelines[1], expected_status=200, snapshot=True)
 
     frame_jobs = [
         runtime.request(
@@ -1269,9 +1243,9 @@ def test_timeline_and_worker_job_creation_contracts(parity_runtimes):
             f"/api/v1/projects/{runtime.project_id}/timelines/{created.body['id']}/items/item-1/frames",
             json_payload={"playheadSeconds": 0.5, "intendedUse": "reuse"},
         )
-        for runtime, created in zip(parity_runtimes, created_timelines)
+        for runtime, created in zip(contract_runtimes, created_timelines)
     ]
-    assert_response_parity("timeline frame job response", python_runtime, rust_runtime, frame_jobs[0], frame_jobs[1], expected_status=201, snapshot=True)
+    assert_response_contract("timeline frame job response", baseline_runtime, candidate_runtime, frame_jobs[0], frame_jobs[1], expected_status=201, snapshot=True)
 
     export_jobs = [
         runtime.request(
@@ -1279,28 +1253,28 @@ def test_timeline_and_worker_job_creation_contracts(parity_runtimes):
             f"/api/v1/projects/{runtime.project_id}/timelines/{created.body['id']}/exports",
             json_payload={"resolution": 640, "fps": 24, "requestedGpu": "auto"},
         )
-        for runtime, created in zip(parity_runtimes, created_timelines)
+        for runtime, created in zip(contract_runtimes, created_timelines)
     ]
-    assert_response_parity("timeline export job response", python_runtime, rust_runtime, export_jobs[0], export_jobs[1], expected_status=201, snapshot=True)
+    assert_response_contract("timeline export job response", baseline_runtime, candidate_runtime, export_jobs[0], export_jobs[1], expected_status=201, snapshot=True)
 
 
-def test_person_tracking_and_replace_person_contracts(parity_runtimes):
-    python_runtime, rust_runtime = parity_runtimes
-    create_projects(parity_runtimes, python_runtime, rust_runtime)
-    for runtime in parity_runtimes:
+def test_person_tracking_and_replace_person_contracts(contract_runtimes):
+    baseline_runtime, candidate_runtime = contract_runtimes
+    create_projects(contract_runtimes, baseline_runtime, candidate_runtime)
+    for runtime in contract_runtimes:
         write_person_track_sidecar(runtime)
 
     listed_tracks = [
         runtime.request("GET", f"/api/v1/projects/{runtime.project_id}/person-tracks")
-        for runtime in parity_runtimes
+        for runtime in contract_runtimes
     ]
-    assert_response_parity("person track list response", python_runtime, rust_runtime, listed_tracks[0], listed_tracks[1], expected_status=200, snapshot=True)
+    assert_response_contract("person track list response", baseline_runtime, candidate_runtime, listed_tracks[0], listed_tracks[1], expected_status=200, snapshot=True)
 
     track_details = [
         runtime.request("GET", f"/api/v1/projects/{runtime.project_id}/person-tracks/track_fixture")
-        for runtime in parity_runtimes
+        for runtime in contract_runtimes
     ]
-    assert_response_parity("person track detail response", python_runtime, rust_runtime, track_details[0], track_details[1], expected_status=200, snapshot=True)
+    assert_response_contract("person track detail response", baseline_runtime, candidate_runtime, track_details[0], track_details[1], expected_status=200, snapshot=True)
 
     detection_jobs = [
         runtime.request(
@@ -1308,9 +1282,9 @@ def test_person_tracking_and_replace_person_contracts(parity_runtimes):
             f"/api/v1/projects/{runtime.project_id}/person-tracks/detections",
             json_payload={"sourceAssetId": "asset-video", "sourceTimestamp": 1.25},
         )
-        for runtime in parity_runtimes
+        for runtime in contract_runtimes
     ]
-    assert_response_parity("person detection job response", python_runtime, rust_runtime, detection_jobs[0], detection_jobs[1], expected_status=201, snapshot=True)
+    assert_response_contract("person detection job response", baseline_runtime, candidate_runtime, detection_jobs[0], detection_jobs[1], expected_status=201, snapshot=True)
 
     track_jobs = [
         runtime.request(
@@ -1326,9 +1300,9 @@ def test_person_tracking_and_replace_person_contracts(parity_runtimes):
                 "trackName": "Hero",
             },
         )
-        for runtime in parity_runtimes
+        for runtime in contract_runtimes
     ]
-    assert_response_parity("person track job response", python_runtime, rust_runtime, track_jobs[0], track_jobs[1], expected_status=201, snapshot=True)
+    assert_response_contract("person track job response", baseline_runtime, candidate_runtime, track_jobs[0], track_jobs[1], expected_status=201, snapshot=True)
 
     replace_jobs = [
         runtime.request(
@@ -1344,20 +1318,20 @@ def test_person_tracking_and_replace_person_contracts(parity_runtimes):
                 "characterId": "character_fixture",
             },
         )
-        for runtime in parity_runtimes
+        for runtime in contract_runtimes
     ]
-    assert_response_parity("replace person job response", python_runtime, rust_runtime, replace_jobs[0], replace_jobs[1], expected_status=201, snapshot=True)
+    assert_response_contract("replace person job response", baseline_runtime, candidate_runtime, replace_jobs[0], replace_jobs[1], expected_status=201, snapshot=True)
 
 
-def test_model_lora_and_image_job_contracts(parity_runtimes):
-    python_runtime, rust_runtime = parity_runtimes
-    create_projects(parity_runtimes, python_runtime, rust_runtime)
+def test_model_lora_and_image_job_contracts(contract_runtimes):
+    baseline_runtime, candidate_runtime = contract_runtimes
+    create_projects(contract_runtimes, baseline_runtime, candidate_runtime)
 
     model_jobs = [
         runtime.request("POST", "/api/v1/models/base-model/download", json_payload={"requestedGpu": ""})
-        for runtime in parity_runtimes
+        for runtime in contract_runtimes
     ]
-    assert_response_parity("model download job response", python_runtime, rust_runtime, model_jobs[0], model_jobs[1], expected_status=201, snapshot=True)
+    assert_response_contract("model download job response", baseline_runtime, candidate_runtime, model_jobs[0], model_jobs[1], expected_status=201, snapshot=True)
 
     lora_jobs = [
         runtime.request(
@@ -1365,9 +1339,9 @@ def test_model_lora_and_image_job_contracts(parity_runtimes):
             "/api/v1/loras/import",
             json_payload={"repo": "owner/style-lora", "name": "Imported LoRA", "files": ["adapter.safetensors"]},
         )
-        for runtime in parity_runtimes
+        for runtime in contract_runtimes
     ]
-    assert_response_parity("lora import job response", python_runtime, rust_runtime, lora_jobs[0], lora_jobs[1], expected_status=201, snapshot=True)
+    assert_response_contract("lora import job response", baseline_runtime, candidate_runtime, lora_jobs[0], lora_jobs[1], expected_status=201, snapshot=True)
 
     image_jobs = [
         runtime.request(
@@ -1382,16 +1356,16 @@ def test_model_lora_and_image_job_contracts(parity_runtimes):
                 "requestedGpu": "auto",
             },
         )
-        for runtime in parity_runtimes
+        for runtime in contract_runtimes
     ]
-    for runtime, response in zip(parity_runtimes, image_jobs):
+    for runtime, response in zip(contract_runtimes, image_jobs):
         runtime.job_id = response.body["id"]
-    assert_response_parity("image job response", python_runtime, rust_runtime, image_jobs[0], image_jobs[1], expected_status=201, snapshot=True)
+    assert_response_contract("image job response", baseline_runtime, candidate_runtime, image_jobs[0], image_jobs[1], expected_status=201, snapshot=True)
 
 
-def test_job_state_transition_contracts(parity_runtimes):
-    python_runtime, rust_runtime = parity_runtimes
-    create_projects(parity_runtimes, python_runtime, rust_runtime)
+def test_job_state_transition_contracts(contract_runtimes):
+    baseline_runtime, candidate_runtime = contract_runtimes
+    create_projects(contract_runtimes, baseline_runtime, candidate_runtime)
 
     workers = [
         runtime.request(
@@ -1405,9 +1379,9 @@ def test_job_state_transition_contracts(parity_runtimes):
                 "loadedModels": ["Tongyi-MAI/Z-Image-Turbo"],
             },
         )
-        for runtime in parity_runtimes
+        for runtime in contract_runtimes
     ]
-    assert_response_parity("worker registration response", python_runtime, rust_runtime, workers[0], workers[1], expected_status=200, snapshot=True)
+    assert_response_contract("worker registration response", baseline_runtime, candidate_runtime, workers[0], workers[1], expected_status=200, snapshot=True)
 
     image_jobs = [
         runtime.request(
@@ -1422,14 +1396,14 @@ def test_job_state_transition_contracts(parity_runtimes):
                 "requestedGpu": "auto",
             },
         )
-        for runtime in parity_runtimes
+        for runtime in contract_runtimes
     ]
-    for runtime, response in zip(parity_runtimes, image_jobs):
+    for runtime, response in zip(contract_runtimes, image_jobs):
         runtime.job_id = response.body["id"]
-    assert_response_parity("transition image job response", python_runtime, rust_runtime, image_jobs[0], image_jobs[1], expected_status=201, snapshot=True)
+    assert_response_contract("transition image job response", baseline_runtime, candidate_runtime, image_jobs[0], image_jobs[1], expected_status=201, snapshot=True)
 
-    claimed_jobs = [runtime.request("POST", "/api/v1/jobs/claim", json_payload={"workerId": "parity-worker"}) for runtime in parity_runtimes]
-    assert_response_parity("job claim response", python_runtime, rust_runtime, claimed_jobs[0], claimed_jobs[1], expected_status=200, snapshot=True)
+    claimed_jobs = [runtime.request("POST", "/api/v1/jobs/claim", json_payload={"workerId": "parity-worker"}) for runtime in contract_runtimes]
+    assert_response_contract("job claim response", baseline_runtime, candidate_runtime, claimed_jobs[0], claimed_jobs[1], expected_status=200, snapshot=True)
 
     busy_workers = [
         runtime.request(
@@ -1441,12 +1415,12 @@ def test_job_state_transition_contracts(parity_runtimes):
                 "loadedModels": ["Tongyi-MAI/Z-Image-Turbo"],
             },
         )
-        for runtime in parity_runtimes
+        for runtime in contract_runtimes
     ]
-    assert_response_parity("busy worker heartbeat response", python_runtime, rust_runtime, busy_workers[0], busy_workers[1], expected_status=200, snapshot=True)
+    assert_response_contract("busy worker heartbeat response", baseline_runtime, candidate_runtime, busy_workers[0], busy_workers[1], expected_status=200, snapshot=True)
 
-    cancel_requests = [runtime.request("POST", f"/api/v1/jobs/{runtime.job_id}/cancel") for runtime in parity_runtimes]
-    assert_response_parity("job cancel request response", python_runtime, rust_runtime, cancel_requests[0], cancel_requests[1], expected_status=200, snapshot=True)
+    cancel_requests = [runtime.request("POST", f"/api/v1/jobs/{runtime.job_id}/cancel") for runtime in contract_runtimes]
+    assert_response_contract("job cancel request response", baseline_runtime, candidate_runtime, cancel_requests[0], cancel_requests[1], expected_status=200, snapshot=True)
 
     canceled_jobs = [
         runtime.request(
@@ -1459,15 +1433,15 @@ def test_job_state_transition_contracts(parity_runtimes):
                 "message": "Worker canceled the job before completion.",
             },
         )
-        for runtime in parity_runtimes
+        for runtime in contract_runtimes
     ]
-    assert_response_parity("job terminal progress response", python_runtime, rust_runtime, canceled_jobs[0], canceled_jobs[1], expected_status=200, snapshot=True)
+    assert_response_contract("job terminal progress response", baseline_runtime, candidate_runtime, canceled_jobs[0], canceled_jobs[1], expected_status=200, snapshot=True)
 
-    queues = [runtime.request("GET", "/api/v1/queue") for runtime in parity_runtimes]
-    assert_response_parity("queue summary after transitions", python_runtime, rust_runtime, queues[0], queues[1], expected_status=200, snapshot=True)
+    queues = [runtime.request("GET", "/api/v1/queue") for runtime in contract_runtimes]
+    assert_response_contract("queue summary after transitions", baseline_runtime, candidate_runtime, queues[0], queues[1], expected_status=200, snapshot=True)
 
 
-def concurrent_claim_result(runtime: ParityRuntime) -> list[Any]:
+def concurrent_claim_result(runtime: ContractRuntime) -> list[Any]:
     runtime.request(
         "POST",
         "/api/v1/workers/register",
@@ -1491,24 +1465,24 @@ def concurrent_claim_result(runtime: ParityRuntime) -> list[Any]:
     return claims
 
 
-def test_concurrent_claim_contracts(parity_runtimes):
-    python_runtime, rust_runtime = parity_runtimes
-    claims = [concurrent_claim_result(runtime) for runtime in parity_runtimes]
-    normalized_claims = assert_parity("concurrent claim response set", python_runtime, rust_runtime, claims[0], claims[1])
+def test_concurrent_claim_contracts(contract_runtimes):
+    baseline_runtime, candidate_runtime = contract_runtimes
+    claims = [concurrent_claim_result(runtime) for runtime in contract_runtimes]
+    normalized_claims = assert_runtime_consistency("concurrent claim response set", baseline_runtime, candidate_runtime, claims[0], claims[1])
     assert_snapshot("concurrent claim response set", normalized_claims)
     for runtime_claims in claims:
         assert sum(1 for claim in runtime_claims if claim["job"] is not None) == 1
         assert sum(1 for claim in runtime_claims if claim["job"] is None) == 1
 
 
-def test_error_case_contracts(parity_runtimes):
-    python_runtime, rust_runtime = parity_runtimes
+def test_error_case_contracts(contract_runtimes):
+    baseline_runtime, candidate_runtime = contract_runtimes
 
-    missing_projects = [runtime.request("GET", "/api/v1/projects/project_missing") for runtime in parity_runtimes]
-    assert_response_parity("missing project error response", python_runtime, rust_runtime, missing_projects[0], missing_projects[1], expected_status=404, snapshot=True)
+    missing_projects = [runtime.request("GET", "/api/v1/projects/project_missing") for runtime in contract_runtimes]
+    assert_response_contract("missing project error response", baseline_runtime, candidate_runtime, missing_projects[0], missing_projects[1], expected_status=404, snapshot=True)
 
-    invalid_statuses = [runtime.request("GET", "/api/v1/jobs?status=not_a_status") for runtime in parity_runtimes]
-    assert_response_parity("invalid job status error response", python_runtime, rust_runtime, invalid_statuses[0], invalid_statuses[1], expected_status=400, snapshot=True)
+    invalid_statuses = [runtime.request("GET", "/api/v1/jobs?status=not_a_status") for runtime in contract_runtimes]
+    assert_response_contract("invalid job status error response", baseline_runtime, candidate_runtime, invalid_statuses[0], invalid_statuses[1], expected_status=400, snapshot=True)
 
     malformed_bodies = [
         runtime.request(
@@ -1517,29 +1491,29 @@ def test_error_case_contracts(parity_runtimes):
             headers={"content-type": "application/json"},
             content='{"name":',
         )
-        for runtime in parity_runtimes
+        for runtime in contract_runtimes
     ]
-    assert_response_parity("malformed json error response", python_runtime, rust_runtime, malformed_bodies[0], malformed_bodies[1], expected_status=422, snapshot=True)
+    assert_response_contract("malformed json error response", baseline_runtime, candidate_runtime, malformed_bodies[0], malformed_bodies[1], expected_status=422, snapshot=True)
 
-    create_projects(parity_runtimes, python_runtime, rust_runtime)
+    create_projects(contract_runtimes, baseline_runtime, candidate_runtime)
     characters = [
         runtime.request(
             "POST",
             f"/api/v1/projects/{runtime.project_id}/characters",
             json_payload={"name": "Errors", "type": "person"},
         )
-        for runtime in parity_runtimes
+        for runtime in contract_runtimes
     ]
     character_ids = [response.body["id"] for response in characters]
 
     missing_characters = [
         runtime.request("GET", f"/api/v1/projects/{runtime.project_id}/characters/character_missing")
-        for runtime in parity_runtimes
+        for runtime in contract_runtimes
     ]
-    assert_response_parity(
+    assert_response_contract(
         "missing character error response",
-        python_runtime,
-        rust_runtime,
+        baseline_runtime,
+        candidate_runtime,
         missing_characters[0],
         missing_characters[1],
         expected_status=404,
@@ -1552,12 +1526,12 @@ def test_error_case_contracts(parity_runtimes):
             f"/api/v1/projects/{runtime.project_id}/characters/{character_id}/looks/look_missing",
             json_payload={"name": "Missing"},
         )
-        for runtime, character_id in zip(parity_runtimes, character_ids)
+        for runtime, character_id in zip(contract_runtimes, character_ids)
     ]
-    assert_response_parity(
+    assert_response_contract(
         "missing character look error response",
-        python_runtime,
-        rust_runtime,
+        baseline_runtime,
+        candidate_runtime,
         missing_looks[0],
         missing_looks[1],
         expected_status=404,
@@ -1570,12 +1544,12 @@ def test_error_case_contracts(parity_runtimes):
             f"/api/v1/projects/{runtime.project_id}/characters/{character_id}/loras/character_lora_missing",
             json_payload={"name": "Missing"},
         )
-        for runtime, character_id in zip(parity_runtimes, character_ids)
+        for runtime, character_id in zip(contract_runtimes, character_ids)
     ]
-    assert_response_parity(
+    assert_response_contract(
         "missing character lora error response",
-        python_runtime,
-        rust_runtime,
+        baseline_runtime,
+        candidate_runtime,
         missing_loras[0],
         missing_loras[1],
         expected_status=404,
@@ -1588,14 +1562,15 @@ def test_error_case_contracts(parity_runtimes):
             f"/api/v1/projects/{runtime.project_id}/characters/{character_id}/loras",
             json_payload={"name": "Missing source", "sourcePath": str(runtime.roots[0] / "data" / "loras" / "missing.safetensors")},
         )
-        for runtime, character_id in zip(parity_runtimes, character_ids)
+        for runtime, character_id in zip(contract_runtimes, character_ids)
     ]
-    assert_response_parity(
+    assert_response_contract(
         "invalid character lora source error response",
-        python_runtime,
-        rust_runtime,
+        baseline_runtime,
+        candidate_runtime,
         invalid_lora_sources[0],
         invalid_lora_sources[1],
         expected_status=400,
         snapshot=True,
     )
+

@@ -69,7 +69,6 @@ const MODEL_SIZE_CACHE_LIMIT: usize = 64;
 
 #[derive(Debug, Clone)]
 pub struct Settings {
-    pub api_runtime: String,
     pub app_version: String,
     pub host: String,
     pub port: u16,
@@ -90,7 +89,6 @@ impl Settings {
             .map(PathBuf::from)
             .unwrap_or_else(|| data_dir.join("cache").join("jobs.db"));
         Self {
-            api_runtime: env_string("SCENEWORKS_API_RUNTIME", "rust"),
             app_version: env_string("SCENEWORKS_APP_VERSION", "0.2.0"),
             host: env_string("SCENEWORKS_API_HOST", "0.0.0.0"),
             port: std::env::var("SCENEWORKS_API_PORT")
@@ -866,7 +864,7 @@ async fn health(State(state): State<AppState>) -> Json<HealthResponse> {
     Json(HealthResponse {
         status: "ok",
         service: "sceneworks-api",
-        runtime: state.settings.api_runtime.clone(),
+        runtime: "rust".to_owned(),
         version: state.settings.app_version.clone(),
         auth_required: !state.settings.access_token.is_empty(),
         directories: DirectoriesResponse {
@@ -3760,7 +3758,6 @@ mod tests {
 
     fn test_settings(temp_dir: &tempfile::TempDir) -> Settings {
         Settings {
-            api_runtime: "rust".to_owned(),
             app_version: "test".to_owned(),
             host: "127.0.0.1".to_owned(),
             port: 0,
@@ -3942,7 +3939,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn project_and_asset_routes_persist_python_compatible_state() {
+    async fn project_and_asset_routes_persist_contract_state() {
         let temp_dir = tempfile::tempdir().expect("temp dir creates");
         let app = create_app(test_settings(&temp_dir)).expect("app creates");
 
@@ -4266,7 +4263,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn person_tracking_routes_match_python_contracts() {
+    async fn person_tracking_routes_match_contracts() {
         let temp_dir = tempfile::tempdir().expect("temp dir creates");
         let app = create_app(test_settings(&temp_dir)).expect("app creates");
         let (_, project) = request(
@@ -4369,7 +4366,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn model_and_lora_routes_match_python_manifest_behavior() {
+    async fn model_and_lora_routes_match_manifest_behavior() {
         std::env::set_var("SCENEWORKS_DISABLE_MODEL_SIZE_ESTIMATE", "1");
         let temp_dir = tempfile::tempdir().expect("temp dir creates");
         let config_dir = temp_dir.path().join("config/manifests");
@@ -4579,7 +4576,7 @@ mod tests {
     }
 
     #[test]
-    fn model_download_size_helpers_match_python_shapes() {
+    fn model_download_size_helpers_match_contract_shapes() {
         let siblings = json!([
             { "rfilename": "model-00001.safetensors", "size": 100 },
             { "rfilename": "model-00002.safetensors", "size": "200" },
@@ -4623,7 +4620,7 @@ mod tests {
     }
 
     #[test]
-    fn lora_family_filter_shapes_match_python_fallbacks() {
+    fn lora_family_filter_shapes_match_contract_fallbacks() {
         let shapes = [
             json!({ "families": ["z-image"] }),
             json!({ "compatibleFamilies": ["z-image"] }),
@@ -5089,7 +5086,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn event_tickets_are_protected_and_match_python_shape() {
+    async fn event_tickets_are_protected_and_match_contract_shape() {
         let temp_dir = tempfile::tempdir().expect("temp dir creates");
         let mut settings = test_settings(&temp_dir);
         settings.access_token = "secret-token".to_owned();
@@ -5155,7 +5152,7 @@ mod tests {
     }
 
     #[test]
-    fn heartbeat_event_matches_python_wire_shape() {
+    fn heartbeat_event_matches_contract_wire_shape() {
         assert_eq!(HEARTBEAT_SSE_DATA, "{}");
         assert_eq!(HEARTBEAT_SSE_WIRE, "event: heartbeat\ndata: {}\n\n");
     }

@@ -3,9 +3,8 @@ services:
     restart: unless-stopped
     build:
       context: .
-      dockerfile: ${SCENEWORKS_API_DOCKERFILE:-docker/rust-api.Dockerfile}
+      dockerfile: docker/rust-api.Dockerfile
     environment:
-      SCENEWORKS_API_RUNTIME: ${SCENEWORKS_API_RUNTIME:-rust}
       SCENEWORKS_API_HOST: ${SCENEWORKS_API_HOST:-0.0.0.0}
       SCENEWORKS_API_PORT: ${SCENEWORKS_API_PORT:-8000}
       SCENEWORKS_DATA_DIR: /sceneworks/data

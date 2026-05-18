@@ -1,12 +1,12 @@
 # Rust Migration Contract Fixtures
 
-These fixtures capture the Python backend contract before the Rust backend
-migration begins. Rust ports should treat this folder as the compatibility
-baseline for HTTP route coverage, worker queue protocol strings, SSE event
-names, and persisted project sidecar shapes.
+These fixtures preserve the migration-era backend contract for HTTP route
+coverage, worker queue protocol strings, SSE event names, and persisted project
+sidecar shapes.
 
-The companion test `tests/test_rust_migration_contract_fixtures.py` checks the
-fixtures against the current Python implementation. When the Python contract
-changes intentionally, update these fixtures in the same change so Rust parity
-tests can see the new baseline.
+The live API contract is now enforced by
+`tests/test_rust_api_contract_snapshots.py`, which exercises the Rust API and
+compares normalized responses to committed snapshots. When the public contract
+changes intentionally, regenerate the snapshots with `UPDATE_SNAPSHOTS=1` and
+review the diff.
 
