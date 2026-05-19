@@ -403,12 +403,8 @@ mod tests {
         let mut keys = Vec::new();
         for block in 0..30 {
             for module in ["self_attn.q", "self_attn.k", "cross_attn.q", "ffn.0"] {
-                keys.push(format!(
-                    "transformer.blocks.{block}.{module}.lora_A.weight"
-                ));
-                keys.push(format!(
-                    "transformer.blocks.{block}.{module}.lora_B.weight"
-                ));
+                keys.push(format!("transformer.blocks.{block}.{module}.lora_A.weight"));
+                keys.push(format!("transformer.blocks.{block}.{module}.lora_B.weight"));
             }
         }
         let header = header_from_keys(&keys.iter().map(String::as_str).collect::<Vec<_>>());
@@ -493,10 +489,18 @@ mod tests {
                 "lora_unet_down_blocks_{block}_attentions_0_proj_in.lora_up.weight"
             ));
         }
-        keys.push("lora_te1_text_model_encoder_layers_0_self_attn_q_proj.lora_down.weight".to_owned());
-        keys.push("lora_te1_text_model_encoder_layers_0_self_attn_q_proj.lora_up.weight".to_owned());
-        keys.push("lora_te2_text_model_encoder_layers_0_self_attn_q_proj.lora_down.weight".to_owned());
-        keys.push("lora_te2_text_model_encoder_layers_0_self_attn_q_proj.lora_up.weight".to_owned());
+        keys.push(
+            "lora_te1_text_model_encoder_layers_0_self_attn_q_proj.lora_down.weight".to_owned(),
+        );
+        keys.push(
+            "lora_te1_text_model_encoder_layers_0_self_attn_q_proj.lora_up.weight".to_owned(),
+        );
+        keys.push(
+            "lora_te2_text_model_encoder_layers_0_self_attn_q_proj.lora_down.weight".to_owned(),
+        );
+        keys.push(
+            "lora_te2_text_model_encoder_layers_0_self_attn_q_proj.lora_up.weight".to_owned(),
+        );
         let header = header_from_keys(&keys.iter().map(String::as_str).collect::<Vec<_>>());
 
         assert_eq!(detect_lora_family(&header).as_deref(), Some("sdxl"));
@@ -513,7 +517,9 @@ mod tests {
                 "lora_unet_down_blocks_{block}_attentions_0_proj_in.lora_up.weight"
             ));
         }
-        keys.push("lora_te_text_model_encoder_layers_0_self_attn_q_proj.lora_down.weight".to_owned());
+        keys.push(
+            "lora_te_text_model_encoder_layers_0_self_attn_q_proj.lora_down.weight".to_owned(),
+        );
         keys.push("lora_te_text_model_encoder_layers_0_self_attn_q_proj.lora_up.weight".to_owned());
         let header = header_from_keys(&keys.iter().map(String::as_str).collect::<Vec<_>>());
 
@@ -528,10 +534,8 @@ mod tests {
 
     #[test]
     fn unknown_keys_return_none() {
-        let header = header_from_keys(&[
-            "weird.custom.module.weight",
-            "another.random.tensor.bias",
-        ]);
+        let header =
+            header_from_keys(&["weird.custom.module.weight", "another.random.tensor.bias"]);
         assert!(detect_lora_family(&header).is_none());
     }
 

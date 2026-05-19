@@ -5326,12 +5326,8 @@ mod tests {
         let mut keys = Vec::new();
         for block in 0..30 {
             for module in ["self_attn.q", "self_attn.k", "cross_attn.q", "ffn.0"] {
-                keys.push(format!(
-                    "transformer.blocks.{block}.{module}.lora_A.weight"
-                ));
-                keys.push(format!(
-                    "transformer.blocks.{block}.{module}.lora_B.weight"
-                ));
+                keys.push(format!("transformer.blocks.{block}.{module}.lora_A.weight"));
+                keys.push(format!("transformer.blocks.{block}.{module}.lora_B.weight"));
             }
         }
         keys
@@ -6616,10 +6612,7 @@ mod tests {
         )
         .await;
         assert_eq!(status, StatusCode::CREATED);
-        assert_eq!(
-            match_job["payload"]["manifestEntry"]["family"],
-            "z-image"
-        );
+        assert_eq!(match_job["payload"]["manifestEntry"]["family"], "z-image");
 
         // Wan-shaped tensors are detected and accepted when the user agrees.
         let wan_match_path = detect_dir.join("wan-match.safetensors");
@@ -6637,10 +6630,7 @@ mod tests {
         )
         .await;
         assert_eq!(status, StatusCode::CREATED);
-        assert_eq!(
-            wan_job["payload"]["manifestEntry"]["family"],
-            "wan-video"
-        );
+        assert_eq!(wan_job["payload"]["manifestEntry"]["family"], "wan-video");
 
         // Inconclusive header (only `__metadata__`) + supplied family is
         // accepted unchanged — the user-supplied label survives.
@@ -6679,10 +6669,7 @@ mod tests {
         )
         .await;
         assert_eq!(status, StatusCode::CREATED);
-        assert_eq!(
-            qwen_job["payload"]["manifestEntry"]["family"],
-            "qwen-image"
-        );
+        assert_eq!(qwen_job["payload"]["manifestEntry"]["family"], "qwen-image");
     }
 
     #[tokio::test]
