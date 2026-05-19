@@ -32,6 +32,7 @@ from scene_worker.lora_adapters import (
     lora_weight,
     normalize_lora_specs,
     reject_loras_if_unsupported,
+    validate_lora_compatibility,
 )
 from scene_worker.runtime import (
     child_environment,
@@ -427,6 +428,45 @@ def test_unsupported_adapter_guard_rejects_loras(tmp_path):
 
     with pytest.raises(RuntimeError, match="does not support LoRA application"):
         reject_loras_if_unsupported([{"id": "style", "installedPath": str(first)}], "procedural_preview")
+
+
+def test_lora_compatibility_guard_rejects_mismatched_family_before_load(tmp_path):
+    first = tmp_path / "style.safetensors"
+    first.write_bytes(b"lora")
+    pipe = FakeLoraPipe()
+
+    with pytest.raises(RuntimeError, match="LoRA style is not compatible with model family z-image"):
+        apply_loras_to_pipeline(
+            pipe,
+            [{"id": "style", "installedPath": str(first), "family": "qwen_image"}],
+            adapter_id="diffusers_test",
+            model_family="z-image",
+        )
+
+    assert pipe.loaded == []
+
+
+def test_lora_compatibility_guard_soft_passes_legacy_jobs_without_family(tmp_path):
+    first = tmp_path / "style.safetensors"
+    first.write_bytes(b"lora")
+    pipe = FakeLoraPipe()
+
+    apply_loras_to_pipeline(
+        pipe,
+        [{"id": "style", "installedPath": str(first)}],
+        adapter_id="diffusers_test",
+        model_family="z-image",
+    )
+
+    assert pipe.loaded[0][0] == str(first)
+
+
+def test_lora_compatibility_guard_accepts_normalized_family_aliases():
+    validate_lora_compatibility(
+        [{"id": "style", "compatibility": {"families": ["z_image"]}}],
+        model_family="z-image",
+        adapter_id="diffusers_test",
+    )
 
 
 def test_lora_weight_defaults_on_unparseable_values():

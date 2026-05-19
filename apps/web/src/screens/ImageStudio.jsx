@@ -127,6 +127,13 @@ export function ImageStudio({
       weight: Number.isFinite(Number(override.weight)) ? Number(override.weight) : loraWeight(lora),
       triggerWords: lora.triggerWords ?? [],
       compatibility: lora.compatibility ?? {},
+      family: lora.family ?? null,
+      families: lora.families ?? null,
+      compatibleFamilies: lora.compatibleFamilies ?? null,
+      modelFamilies: lora.modelFamilies ?? null,
+      installedPath: lora.installedPath ?? null,
+      sourcePath: lora.sourcePath ?? null,
+      source: lora.source ?? null,
       presetManaged: Boolean(lora.presetManaged),
     };
   }
@@ -196,6 +203,13 @@ export function ImageStudio({
   const compatibleLoraKey = useMemo(() => compatibleLoras.map((lora) => lora.id).join("|"), [compatibleLoras]);
   const selectedLoras = selectedLoraIds.map((id) => compatibleLoras.find((lora) => lora.id === id)).filter(Boolean);
   const userSelectedLoraCount = selectedLoras.filter((lora) => lora.scope !== "builtin").length;
+  const selectedLoraValidationResult = useMemo(() => {
+    const incompatible = selectedLoras.filter((lora) => !loraMatchesModel(lora, selectedModel)).map((lora) => lora.name ?? lora.id);
+    return {
+      incompatible,
+      ok: incompatible.length === 0,
+    };
+  }, [selectedLoras, selectedModel]);
   const presetLoraDetails = buildPresetLoraDetails(selectedRecipePreset, loras);
   const presetPromptParts = buildPresetPromptParts(selectedRecipePreset);
   const presetValidationResult = useMemo(
@@ -556,9 +570,14 @@ export function ImageStudio({
               Preset cannot run with {selectedModel?.name ?? "the selected model"} because these LoRAs are incompatible: {presetValidationResult.incompatible.join(", ")}. Choose another preset or model.
             </p>
           ) : null}
+          {selectedLoraValidationResult.incompatible.length ? (
+            <p className="inline-warning">
+              Generate is blocked because these selected LoRAs are incompatible with {selectedModel?.name ?? "the selected model"}: {selectedLoraValidationResult.incompatible.join(", ")}.
+            </p>
+          ) : null}
           <button
             className="primary-action"
-            disabled={submitting || !activeProject || !prompt.trim() || (mode === "character_image" && !characterId) || !presetValidationResult.ok}
+            disabled={submitting || !activeProject || !prompt.trim() || (mode === "character_image" && !characterId) || !presetValidationResult.ok || !selectedLoraValidationResult.ok}
             type="submit"
           >
             {submitting ? "Queueing..." : "Generate"}

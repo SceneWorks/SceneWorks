@@ -475,6 +475,7 @@ class DiffusersVideoAdapter(VideoGenerationAdapter):
             pipe,
             request.loras,
             adapter_id=target["adapter"],
+            model_family=target.get("family"),
             previous_state=self._loaded_lora_state,
         )
 

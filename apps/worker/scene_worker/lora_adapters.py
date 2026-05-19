@@ -46,6 +46,48 @@ def reject_loras_if_unsupported(loras: list[dict[str, Any]], adapter_id: str) ->
         raise RuntimeError(f"{adapter_id} does not support LoRA application for generation jobs.")
 
 
+def normalize_lora_family(family: Any) -> str:
+    return str(family or "").strip().lower().replace("_", "-")
+
+
+def lora_families(lora: dict[str, Any]) -> list[str]:
+    compatibility = lora.get("compatibility") if isinstance(lora.get("compatibility"), dict) else {}
+    values = next(
+        (
+            candidate
+            for candidate in (
+                lora.get("families"),
+                lora.get("compatibleFamilies"),
+                lora.get("modelFamilies"),
+                compatibility.get("families"),
+                [lora.get("family")] if lora.get("family") else None,
+            )
+            if candidate is not None
+        ),
+        [],
+    )
+    if not isinstance(values, list):
+        values = [values]
+    families = sorted({normalize_lora_family(value) for value in values if normalize_lora_family(value)})
+    return families
+
+
+def validate_lora_compatibility(loras: list[dict[str, Any]], *, model_family: str | None, adapter_id: str) -> None:
+    normalized_model_family = normalize_lora_family(model_family)
+    if not loras or not normalized_model_family:
+        return
+    for index, item in enumerate(loras):
+        lora = item if isinstance(item, dict) else {"id": str(item)}
+        lora_id = str(lora.get("id") or lora.get("loraId") or f"lora_{index + 1}").strip()
+        families = lora_families(lora)
+        if not families:
+            continue
+        if normalized_model_family not in families:
+            raise RuntimeError(
+                f"LoRA {lora_id} is not compatible with model family {normalized_model_family} for {adapter_id}."
+            )
+
+
 def normalize_lora_specs(loras: list[dict[str, Any]]) -> list[LoraSpec]:
     if len(loras) > MAX_JOB_LORAS:
         raise RuntimeError(f"Generation supports at most {MAX_JOB_LORAS} LoRAs per job.")
@@ -76,9 +118,11 @@ def apply_loras_to_pipeline(
     loras: list[dict[str, Any]],
     *,
     adapter_id: str,
+    model_family: str | None = None,
     previous_state: LoraPipelineState | None = None,
 ) -> LoraPipelineState:
     previous_state = previous_state or LoraPipelineState()
+    validate_lora_compatibility(loras, model_family=model_family, adapter_id=adapter_id)
     specs = normalize_lora_specs(loras)
     key = lora_cache_key_for_specs(specs)
     if key == previous_state.key:

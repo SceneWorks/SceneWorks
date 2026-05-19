@@ -36,6 +36,13 @@ PNG_1X1 = (
     b"\x00\x00\x00\x0cIDAT\x08\xd7c\xf8\xff\xff?\x00\x05\xfe"
     b"\x02\xfeA\xe2&\x9b\x00\x00\x00\x00IEND\xaeB`\x82"
 )
+
+
+def safetensors_bytes() -> bytes:
+    header = json.dumps({"__metadata__": {"format": "pt"}}, separators=(",", ":")).encode("utf-8")
+    return len(header).to_bytes(8, "little") + header + b"tensor-bytes"
+
+
 TIMESTAMP_RE = re.compile(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z")
 PREFIXED_ID_RE = re.compile(
     r"\b(project|asset|job|timeline|track|transition|genset|generation_set|"
@@ -101,6 +108,20 @@ def write_contract_manifests(config_dir: Path) -> None:
               "limits": {},
               "loraCompatibility": { "families": ["z-image"] },
               "ui": { "label": "Base" }
+            },
+            {
+              "id": "z_image_turbo",
+              "name": "Z-Image Turbo",
+              "family": "z-image",
+              "type": "image",
+              "adapter": "z_image_diffusers",
+              "capabilities": ["text_to_image", "edit_image", "character_image"],
+              "downloads": [],
+              "paths": {},
+              "defaults": { "width": 1024, "height": 1024 },
+              "limits": {},
+              "loraCompatibility": { "families": ["z-image"] },
+              "ui": { "label": "Z-Image" }
             }
           ]
         }
@@ -616,7 +637,7 @@ def write_lora_sources(runtimes: list[ContractRuntime]) -> list[Path]:
         lora_dir = runtime.roots[0] / "data" / "loras"
         lora_dir.mkdir(parents=True, exist_ok=True)
         lora_source = lora_dir / "mira.safetensors"
-        lora_source.write_bytes(b"lora")
+        lora_source.write_bytes(safetensors_bytes())
         lora_sources.append(lora_source)
     return lora_sources
 
@@ -655,7 +676,7 @@ def attach_character_lora_pair(
     for runtime, response in zip(runtimes, responses):
         copied_path = runtime.project_path / response.body["loras"][0]["projectPath"]
         assert copied_path.exists(), f"{runtime.name} did not copy character LoRA to {copied_path}"
-        assert copied_path.read_bytes() == b"lora"
+        assert copied_path.read_bytes() == safetensors_bytes()
     copied_rel_paths = [response.body["loras"][0]["projectPath"] for response in responses]
     assert_runtime_consistency("character lora copied project path", baseline_runtime, candidate_runtime, copied_rel_paths[0], copied_rel_paths[1])
     return lora_link_ids, normalized
@@ -691,6 +712,11 @@ def collect_sse_events_during(runtime: ContractRuntime, action: Any, expected_ev
             ready = read_sse_message(lines)
             assert ready == {"event": "ready", "data": {"status": "connected"}}
             action_result = action()
+            if action_result.status_code >= 400:
+                raise AssertionError(
+                    f"{runtime.name} action failed before expected SSE events {expected_events}: "
+                    f"{action_result.status_code} {json.dumps(action_result.body, sort_keys=True)}"
+                )
             events: list[dict[str, Any]] = []
             try:
                 while len(events) < len(expected_events):

@@ -36,13 +36,29 @@ export function loraFamilies(lora) {
     lora?.modelFamilies ??
     compatibility.families ??
     (lora?.family ? [lora.family] : []);
-  return Array.isArray(values) ? values : [values].filter(Boolean);
+  return normalizeFamilies(values);
 }
 
 export function modelLoraFamilies(model) {
   const compatibility = model?.loraCompatibility ?? {};
-  const values = model?.loraFamilies ?? compatibility.families ?? (model?.family ? [model.family] : []);
-  return Array.isArray(values) ? values : [values].filter(Boolean);
+  const values =
+    model?.families ??
+    model?.compatibleFamilies ??
+    model?.modelFamilies ??
+    model?.loraFamilies ??
+    compatibility.families ??
+    (model?.family ? [model.family] : []);
+  return normalizeFamilies(values);
+}
+
+export function normalizeLoraFamily(family) {
+  return String(family ?? "").trim().toLowerCase().replaceAll("_", "-");
+}
+
+export function normalizeFamilies(values) {
+  return (Array.isArray(values) ? values : [values])
+    .map(normalizeLoraFamily)
+    .filter(Boolean);
 }
 
 export function loraMatchesModel(lora, model) {
