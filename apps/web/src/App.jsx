@@ -130,6 +130,146 @@ function readStoredTheme() {
   }
 }
 
+function ProjectSwitcher({ activeProject, projects, onSelect, onCreate, disabled }) {
+  const [open, setOpen] = useState(false);
+  const [creating, setCreating] = useState(false);
+  const [name, setName] = useState("");
+  const [submitting, setSubmitting] = useState(false);
+  const containerRef = useRef(null);
+  const inputRef = useRef(null);
+
+  useEffect(() => {
+    if (!open) {
+      return undefined;
+    }
+    function onDocMouseDown(event) {
+      if (!containerRef.current?.contains(event.target)) {
+        setOpen(false);
+        setCreating(false);
+        setName("");
+      }
+    }
+    function onDocKey(event) {
+      if (event.key === "Escape") {
+        setOpen(false);
+        setCreating(false);
+        setName("");
+      }
+    }
+    document.addEventListener("mousedown", onDocMouseDown);
+    document.addEventListener("keydown", onDocKey);
+    return () => {
+      document.removeEventListener("mousedown", onDocMouseDown);
+      document.removeEventListener("keydown", onDocKey);
+    };
+  }, [open]);
+
+  useEffect(() => {
+    if (creating) {
+      inputRef.current?.focus();
+    }
+  }, [creating]);
+
+  async function submitNew(event) {
+    event.preventDefault();
+    const trimmed = name.trim();
+    if (!trimmed || submitting) {
+      return;
+    }
+    setSubmitting(true);
+    const created = await onCreate(trimmed);
+    setSubmitting(false);
+    if (created) {
+      setName("");
+      setCreating(false);
+      setOpen(false);
+    }
+  }
+
+  return (
+    <div className="project-switcher" ref={containerRef}>
+      <button
+        aria-expanded={open}
+        aria-haspopup="listbox"
+        className="project-pill"
+        disabled={disabled}
+        onClick={() => setOpen((value) => !value)}
+        title={activeProject?.name ?? "Pick a workspace"}
+        type="button"
+      >
+        <span className="project-pill-thumb" aria-hidden="true" />
+        <span className="project-pill-meta">
+          <strong>{activeProject?.name ?? "No workspace open"}</strong>
+          <span>
+            {projects.length} workspace{projects.length === 1 ? "" : "s"}
+          </span>
+        </span>
+        <Icon.ChevDown className="chev" />
+      </button>
+
+      {open ? (
+        <div className="project-menu" role="listbox">
+          {projects.length === 0 ? (
+            <p className="project-menu-empty">No workspaces yet — create the first one below.</p>
+          ) : (
+            projects.map((project) => (
+              <button
+                aria-selected={project.id === activeProject?.id}
+                className={project.id === activeProject?.id ? "project-menu-item active" : "project-menu-item"}
+                key={project.id}
+                onClick={() => {
+                  onSelect(project);
+                  setOpen(false);
+                  setCreating(false);
+                  setName("");
+                }}
+                role="option"
+                type="button"
+              >
+                <span className="project-menu-thumb" aria-hidden="true" />
+                <span className="project-menu-label">{project.name}</span>
+              </button>
+            ))
+          )}
+
+          {creating ? (
+            <form className="project-menu-create" onSubmit={submitNew}>
+              <input
+                aria-label="New workspace name"
+                disabled={submitting}
+                onChange={(event) => setName(event.target.value)}
+                onKeyDown={(event) => {
+                  if (event.key === "Escape") {
+                    event.preventDefault();
+                    setCreating(false);
+                    setName("");
+                  }
+                }}
+                placeholder="Workspace name"
+                ref={inputRef}
+                value={name}
+              />
+              <button disabled={!name.trim() || submitting} type="submit">
+                {submitting ? "Creating…" : "Create"}
+              </button>
+            </form>
+          ) : (
+            <button
+              className="project-menu-item project-menu-item-new"
+              disabled={disabled}
+              onClick={() => setCreating(true)}
+              type="button"
+            >
+              <Icon.Plus />
+              <span className="project-menu-label">New workspace</span>
+            </button>
+          )}
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
 function uploadLimitLabel(bytes) {
   const gib = bytes / (1024 * 1024 * 1024);
   return Number.isInteger(gib) ? `${gib}GB` : `${gib.toFixed(1)}GB`;
@@ -142,7 +282,6 @@ export function App() {
   const [projects, setProjects] = useState([]);
   const [activeProject, setActiveProject] = useState(null);
   const [activeView, setActiveView] = useState("Library");
-  const [projectName, setProjectName] = useState("");
   const [jobs, setJobs] = useState([]);
   const [localGenerationJobIds, setLocalGenerationJobIds] = useState({ image: [], video: [] });
   const [workers, setWorkers] = useState([]);
@@ -793,24 +932,24 @@ export function App() {
     refreshData();
   }
 
-  async function createProject(event) {
-    event.preventDefault();
-    if (!projectName.trim()) {
-      return;
+  async function createProject(name) {
+    const trimmed = String(name ?? "").trim();
+    if (!trimmed) {
+      return null;
     }
-
     try {
       const created = await apiFetch("/api/v1/projects", token, {
         method: "POST",
-        body: JSON.stringify({ name: projectName }),
+        body: JSON.stringify({ name: trimmed }),
       });
       setProjects((items) => [created, ...items.filter((item) => item.id !== created.id)]);
       setActiveProject(created);
-      setProjectName("");
       setActiveView("Image");
       setError("");
+      return created;
     } catch (err) {
       setError(err.message);
+      return null;
     }
   }
 
@@ -1398,6 +1537,14 @@ export function App() {
           </div>
         </div>
 
+        <ProjectSwitcher
+          activeProject={activeProject}
+          disabled={!authenticated}
+          onCreate={createProject}
+          onSelect={setActiveProject}
+          projects={projects}
+        />
+
         {navSections.map((section) => (
           <div className="sidebar-section" key={section.label}>
             <div className="sidebar-section-title">{section.label}</div>
@@ -1423,24 +1570,6 @@ export function App() {
           </div>
         ))}
 
-        <div className="sidebar-foot">
-          <button
-            className="project-pill"
-            onClick={() => setActiveView("Library")}
-            title={activeProject?.name ?? "No project open"}
-            type="button"
-          >
-            <span className="project-pill-thumb" aria-hidden="true" />
-            <span className="project-pill-meta">
-              <strong>{activeProject?.name ?? "No project open"}</strong>
-              <span>
-                {assets.length} asset{assets.length === 1 ? "" : "s"} ·{" "}
-                {visibleWorkers.length || "0"} worker{visibleWorkers.length === 1 ? "" : "s"}
-              </span>
-            </span>
-            <Icon.ChevDown className="chev" />
-          </button>
-        </div>
       </aside>
 
       <section className="workspace">
@@ -1498,46 +1627,6 @@ export function App() {
             </form>
           </section>
         ) : null}
-
-        <section className="project-band">
-          <div className="project-list">
-            <div className="section-heading">
-              <p className="eyebrow">Recent projects</p>
-              <h2>Open a workspace</h2>
-            </div>
-            <div className="project-buttons">
-              {projects.length === 0 ? (
-                <span className="empty-state">No projects yet</span>
-              ) : (
-                projects.map((project) => (
-                  <button
-                    className={activeProject?.id === project.id ? "project-pill active" : "project-pill"}
-                    key={project.id}
-                    onClick={() => setActiveProject(project)}
-                    type="button"
-                  >
-                    {project.name}
-                  </button>
-                ))
-              )}
-            </div>
-          </div>
-
-          <form className="create-project" onSubmit={createProject}>
-            <label htmlFor="project-name">New project</label>
-            <div className="form-row">
-              <input
-                id="project-name"
-                onChange={(event) => setProjectName(event.target.value)}
-                placeholder="Noir Alley"
-                value={projectName}
-              />
-              <button disabled={!authenticated} type="submit">
-                Create
-              </button>
-            </div>
-          </form>
-        </section>
 
         {activeView === "Library" ? (
           <LibraryScreen
