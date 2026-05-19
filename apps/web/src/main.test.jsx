@@ -2,6 +2,7 @@ import React, { act } from "react";
 import { createRoot } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { App, eventUrl } from "./main.jsx";
+import { liveElapsedSeconds } from "./formatting.js";
 import { ImageStudio } from "./screens/ImageStudio.jsx";
 import { ModelManagerScreen } from "./screens/ModelManagerScreen.jsx";
 import { PresetManagerScreen } from "./screens/PresetManagerScreen.jsx";
@@ -41,8 +42,9 @@ function errorResponse(status, detail) {
 
 async function settle() {
   await act(async () => {
-    await Promise.resolve();
-    await Promise.resolve();
+    for (let index = 0; index < 6; index += 1) {
+      await Promise.resolve();
+    }
   });
 }
 
@@ -578,6 +580,101 @@ describe("SceneWorks app shell", () => {
     expect(container.textContent).not.toContain("Jobs and GPUs");
   });
 
+  it("refreshes the project LoRA overlay when a LoRA import completes", async () => {
+    global.fetch.mockImplementation((url) => {
+      const parsed = new URL(url);
+      const path = parsed.pathname;
+      if (path.endsWith("/health")) {
+        return Promise.resolve(response({ status: "ok", authRequired: false }));
+      }
+      if (path.endsWith("/access")) {
+        return Promise.resolve(response({ authRequired: false }));
+      }
+      if (path.endsWith("/projects")) {
+        return Promise.resolve(response([{ id: "project-1", name: "Noir" }]));
+      }
+      return Promise.resolve(response([]));
+    });
+
+    root = createRoot(container);
+    await act(async () => {
+      root.render(<App />);
+    });
+    await settle();
+
+    global.fetch.mockClear();
+    await act(async () => {
+      FakeEventSource.instances[0].listeners["job.updated"]({
+        data: JSON.stringify({
+          id: "lora-import-job-1",
+          type: "lora_import",
+          status: "completed",
+          projectId: "project-1",
+          payload: { loraId: "detail_lora" },
+        }),
+      });
+    });
+    await settle();
+    await settle();
+
+    const loraRequests = global.fetch.mock.calls
+      .map(([url]) => new URL(url))
+      .filter((url) => url.pathname.endsWith("/loras"));
+    expect(loraRequests.some((url) => url.search === "")).toBe(true);
+    expect(loraRequests.some((url) => url.search === "?projectId=project-1")).toBe(true);
+  });
+
+  it("shows the global banner for failed LoRA imports on the Models page", async () => {
+    global.fetch.mockImplementation((url) => {
+      const path = new URL(url).pathname;
+      if (path.endsWith("/health")) {
+        return Promise.resolve(response({ status: "ok", authRequired: false }));
+      }
+      if (path.endsWith("/access")) {
+        return Promise.resolve(response({ authRequired: false }));
+      }
+      if (path.endsWith("/projects")) {
+        return Promise.resolve(response([{ id: "project-1", name: "Noir" }]));
+      }
+      if (path.endsWith("/models")) {
+        return Promise.resolve(
+          response([
+            { id: "z_image_turbo", name: "Z-Image Turbo", type: "image", family: "z-image" },
+            { id: "qwen_image", name: "Qwen Image", type: "image", family: "qwen-image" },
+          ]),
+        );
+      }
+      return Promise.resolve(response([]));
+    });
+
+    root = createRoot(container);
+    await act(async () => {
+      root.render(<App />);
+    });
+    await settle();
+
+    await act(async () => {
+      [...container.querySelectorAll("button")].find((button) => button.textContent === "Models").click();
+    });
+    await settle();
+    await changeField(field(container, "LoRA family"), "z-image");
+    await act(async () => {
+      FakeEventSource.instances[0].listeners["job.updated"]({
+        data: JSON.stringify({
+          id: "lora-import-job-1",
+          type: "lora_import",
+          status: "failed",
+          error: "Import worker crashed",
+          payload: { loraId: "qwen_detail", family: "qwen-image" },
+        }),
+      });
+    });
+    await settle();
+
+    expect(container.textContent).toContain("lora import: Import worker crashed");
+    expect(container.textContent).toContain("1 LoRA import is hidden by this family filter.");
+  });
+
   it("rejects oversized LoRA uploads before posting from the Models page", async () => {
     let importCalls = 0;
     global.fetch.mockImplementation((url, options = {}) => {
@@ -717,6 +814,72 @@ describe("SceneWorks app shell", () => {
     expect(container.textContent).toContain("LoRA import queued for detail_lora.");
   });
 
+  it("advances elapsed seconds for active job snapshots between server updates", () => {
+    const job = {
+      id: "image-job-1",
+      status: "running",
+      elapsedSeconds: 57,
+      startedAt: "2026-05-18T20:00:00Z",
+    };
+
+    expect(liveElapsedSeconds(job, Date.parse("2026-05-18T20:02:05Z"))).toBe(125);
+  });
+
+  it("resets the Models LoRA form after queueing and allows another import while one is pending", async () => {
+    const onImportLora = vi.fn(async (payload) => ({
+      id: `lora-import-job-${onImportLora.mock.calls.length}`,
+      type: "lora_import",
+      status: "queued",
+      progress: 0,
+      payload: { ...payload, loraId: `detail_lora_${onImportLora.mock.calls.length}` },
+    }));
+
+    function Harness() {
+      const [jobs, setJobs] = React.useState([]);
+      async function importLora(payload) {
+        const job = await onImportLora(payload);
+        setJobs((items) => [job, ...items]);
+        return job;
+      }
+      return (
+        <ModelManagerScreen
+          activeProject={{ id: "project-1", name: "Noir" }}
+          jobs={jobs}
+          loras={[]}
+          models={[{ id: "z_image_turbo", name: "Z-Image Turbo", type: "image", family: "z-image" }]}
+          onDownloadModel={() => {}}
+          onImportLora={importLora}
+          onOpenQueue={() => {}}
+        />
+      );
+    }
+
+    root = createRoot(container);
+    await act(async () => {
+      root.render(<Harness />);
+    });
+
+    await changeField(field(container, "Source URL"), "https://example.com/loras/one.safetensors");
+    await changeField(field(container, "Name"), "First Detail");
+    await act(async () => {
+      [...container.querySelectorAll("button")].find((button) => button.textContent === "Queue Import").click();
+    });
+
+    expect(field(container, "Source URL").value).toBe("");
+    expect(field(container, "Name").value).toBe("");
+    expect(container.textContent).toContain("LoRA imports");
+    expect(container.textContent).toContain("detail_lora_1");
+    expect(container.textContent).not.toContain("No LoRAs in this view");
+
+    await changeField(field(container, "Source URL"), "https://example.com/loras/two.safetensors");
+    await act(async () => {
+      [...container.querySelectorAll("button")].find((button) => button.textContent === "Queue Import").click();
+    });
+
+    expect(onImportLora).toHaveBeenCalledTimes(2);
+    expect(container.textContent).toContain("detail_lora_2");
+  });
+
   it("queues LoRA file uploads from the Models page with project scope", async () => {
     const onImportLora = vi.fn(async (payload) => ({ payload: { ...payload, loraId: "uploaded_detail" } }));
     const loraFile = new File(["lora"], "detail.safetensors", { type: "application/octet-stream" });
@@ -762,6 +925,38 @@ describe("SceneWorks app shell", () => {
     );
     expect(container.textContent).toContain("LoRA import");
     expect(container.textContent).toContain("running");
+  });
+
+  it("keeps failed Models LoRA imports visible inline", async () => {
+    root = createRoot(container);
+    await act(async () => {
+      root.render(
+        <ModelManagerScreen
+          activeProject={{ id: "project-1", name: "Noir" }}
+          jobs={[
+            {
+              id: "lora-import-job-1",
+              type: "lora_import",
+              status: "failed",
+              stage: "failed",
+              progress: 0.4,
+              error: "Adapter crashed",
+              payload: { loraId: "broken_detail", family: "z-image" },
+            },
+          ]}
+          loras={[]}
+          models={[{ id: "z_image_turbo", name: "Z-Image Turbo", type: "image", family: "z-image" }]}
+          onDownloadModel={() => {}}
+          onImportLora={() => {}}
+          onOpenQueue={() => {}}
+        />,
+      );
+    });
+
+    expect(container.textContent).toContain("LoRA imports");
+    expect(container.textContent).toContain("broken_detail");
+    expect(container.textContent).toContain("Adapter crashed");
+    expect(container.textContent).not.toContain("No LoRAs in this view");
   });
 
   it("shows Models page LoRA import errors and resets the queueing state", async () => {

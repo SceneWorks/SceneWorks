@@ -16,6 +16,7 @@ from scene_worker.image_adapters import (
     huggingface_repo_cache_path,
     image_request_from_job,
     resolve_seed,
+    select_torch_device,
 )
 from scene_worker.lora_adapters import (
     apply_loras_to_pipeline,
@@ -135,6 +136,40 @@ def test_python_gpu_child_selects_cuda_device():
     env = child_environment(SimpleNamespace(), worker_id="worker-gpu-0", gpu_id="0")
 
     assert env["CUDA_VISIBLE_DEVICES"] == "0"
+
+
+def test_select_torch_device_uses_assigned_gpu_when_multiple_cuda_devices_are_visible():
+    class Torch:
+        class cuda:
+            @staticmethod
+            def is_available():
+                return True
+
+            @staticmethod
+            def device_count():
+                return 2
+
+        class backends:
+            mps = None
+
+    assert select_torch_device(Torch, "1") == "cuda:1"
+
+
+def test_select_torch_device_uses_visible_cuda_default_when_child_process_is_narrowed():
+    class Torch:
+        class cuda:
+            @staticmethod
+            def is_available():
+                return True
+
+            @staticmethod
+            def device_count():
+                return 1
+
+        class backends:
+            mps = None
+
+    assert select_torch_device(Torch, "1") == "cuda"
 
 
 def test_loaded_models_are_collected_from_adapter_cache():

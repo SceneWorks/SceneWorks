@@ -2,6 +2,34 @@ import React, { useEffect, useState } from "react";
 import { JobProgressCard } from "../components/JobProgress.jsx";
 import { terminalStatuses } from "../constants.js";
 
+function loraFamilies(item) {
+  // Accept either a LoRA catalog entry or a lora_import job snapshot.
+  const compatibility = item.compatibility ?? {};
+  const values =
+    item.families ??
+    item.compatibleFamilies ??
+    item.modelFamilies ??
+    compatibility.families ??
+    item.payload?.manifestEntry?.families ??
+    item.payload?.manifestEntry?.compatibleFamilies ??
+    item.payload?.manifestEntry?.modelFamilies ??
+    item.payload?.manifestEntry?.compatibility?.families ??
+    item.payload?.family ??
+    item.payload?.manifestEntry?.family ??
+    item.family ??
+    [];
+  return Array.isArray(values) ? values : [values].filter(Boolean);
+}
+
+function matchesFamily(item, familyFilter) {
+  if (familyFilter === "all") {
+    return true;
+  }
+  const families = loraFamilies(item);
+  // Import jobs can briefly lack family metadata; completed catalog entries should not.
+  return item.type === "lora_import" && families.length === 0 ? true : families.includes(familyFilter);
+}
+
 export function ModelManagerScreen({ activeProject, jobs, loras, models, onDownloadModel, onImportLora, onOpenQueue }) {
   const families = Array.from(new Set(models.map((model) => model.family).filter(Boolean))).sort();
   const familiesKey = families.join("|");
@@ -17,20 +45,7 @@ export function ModelManagerScreen({ activeProject, jobs, loras, models, onDownl
     family: families[0] ?? "",
   });
   const [fileInputKey, setFileInputKey] = useState(0);
-  const visibleLoras =
-    familyFilter === "all"
-      ? loras
-      : loras.filter((lora) => {
-          const compatibility = lora.compatibility ?? {};
-          const values =
-            lora.families ??
-            lora.compatibleFamilies ??
-            lora.modelFamilies ??
-            compatibility.families ??
-            (lora.family ? [lora.family] : []);
-          const families = Array.isArray(values) ? values : [values];
-          return families.includes(familyFilter);
-        });
+  const visibleLoras = loras.filter((lora) => matchesFamily(lora, familyFilter));
 
   useEffect(() => {
     if (familyFilter !== "all" && !families.includes(familyFilter)) {
@@ -85,7 +100,10 @@ export function ModelManagerScreen({ activeProject, jobs, loras, models, onDownl
     }
   }
 
-  const activeLoraImportJobs = jobs.filter((job) => job.type === "lora_import" && !terminalStatuses.has(job.status));
+  const localLoraImportJobs = jobs.filter((job) => job.type === "lora_import" && job.status !== "completed" && matchesFamily(job, familyFilter));
+  const hiddenImportCount =
+    familyFilter === "all" ? 0 : jobs.filter((job) => job.type === "lora_import" && job.status !== "completed" && !matchesFamily(job, familyFilter)).length;
+  const visibleLoraCount = visibleLoras.length + localLoraImportJobs.length;
   const isFileImport = importForm.mode === "file";
   const importDisabled =
     importingLora ||
@@ -167,7 +185,7 @@ export function ModelManagerScreen({ activeProject, jobs, loras, models, onDownl
             <p className="eyebrow">LoRAs</p>
             <h2>{familyFilter === "all" ? "All compatible" : familyFilter}</h2>
           </div>
-          <span>{visibleLoras.length} installed or pending</span>
+          <span>{visibleLoraCount} installed or pending</span>
         </div>
         <form className="lora-import-panel models-import-panel" aria-label="Import LoRA" onSubmit={importLora}>
           <div>
@@ -267,17 +285,18 @@ export function ModelManagerScreen({ activeProject, jobs, loras, models, onDownl
           </div>
           {importForm.scope === "project" && !activeProject ? <p className="helper-copy">Open a project before importing a project LoRA.</p> : null}
           {importMessage.text ? <p className={importMessage.tone === "success" ? "inline-success" : "inline-warning"}>{importMessage.text}</p> : null}
-          {activeLoraImportJobs.length ? (
-            <div className="lora-import-progress">
-              <strong>LoRA imports in progress</strong>
-              <div className="local-job-stack">
-                {activeLoraImportJobs.map((job) => (
-                  <JobProgressCard job={job} key={job.id} label="LoRA import" onOpenQueue={onOpenQueue} />
-                ))}
-              </div>
-            </div>
-          ) : null}
         </form>
+        {localLoraImportJobs.length ? (
+          <div className="lora-import-progress">
+            <strong>LoRA imports in progress</strong>
+            <div className="local-job-stack">
+              {localLoraImportJobs.map((job) => (
+                <JobProgressCard job={job} key={job.id} label="LoRA import" onOpenQueue={onOpenQueue} />
+              ))}
+            </div>
+          </div>
+        ) : null}
+        {hiddenImportCount ? <p className="helper-copy">{hiddenImportCount} LoRA import{hiddenImportCount === 1 ? " is" : "s are"} hidden by this family filter.</p> : null}
         {visibleLoras.length ? (
           <div className="lora-list">
             {visibleLoras.map((lora) => (
@@ -287,6 +306,8 @@ export function ModelManagerScreen({ activeProject, jobs, loras, models, onDownl
               </article>
             ))}
           </div>
+        ) : localLoraImportJobs.length ? null : loras.length && familyFilter !== "all" ? (
+          <div className="empty-panel compact-panel">No LoRAs match {familyFilter}</div>
         ) : (
           <div className="empty-panel compact-panel">No LoRAs in this view</div>
         )}
