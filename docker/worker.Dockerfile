@@ -2,6 +2,7 @@ FROM python:3.12-slim AS builder
 
 ARG PYTORCH_INDEX_URL=https://download.pytorch.org/whl/cpu
 ARG PYTORCH_SPEC=torch>=2.7,<2.8
+ARG INCLUDE_LTX_PIPELINES=1
 
 ENV PYTHONDONTWRITEBYTECODE=1
 ENV PYTHONUNBUFFERED=1
@@ -16,9 +17,11 @@ RUN python -m venv /opt/venv
 ENV PATH="/opt/venv/bin:${PATH}"
 
 COPY apps/worker/requirements.txt ./requirements.txt
+COPY apps/worker/requirements-ltx.txt ./requirements-ltx.txt
 RUN pip install --no-cache-dir --upgrade pip \
     && pip install --no-cache-dir --no-compile --index-url "${PYTORCH_INDEX_URL}" "${PYTORCH_SPEC}" \
     && pip install --no-cache-dir --no-compile -r requirements.txt \
+    && if [ "${INCLUDE_LTX_PIPELINES}" = "1" ]; then pip install --no-cache-dir --no-compile -r requirements-ltx.txt; fi \
     && find /opt/venv -type d -name "__pycache__" -prune -exec rm -rf {} + \
     && rm -rf /opt/venv/lib/python3.12/site-packages/torch/include \
         /opt/venv/lib/python3.12/site-packages/torch/test \

@@ -320,7 +320,7 @@ class LtxPipelinesVideoAdapter(ProceduralVideoAdapter):
         if not self._mock_inference_enabled(request) and not self._dependencies_available():
             raise RuntimeError(
                 "Native LTX-2.3 generation requires optional worker dependencies. "
-                "Install apps/worker/requirements-ltx.txt in this worker environment or use "
+                "Install apps/worker/requirements-ltx.txt in this worker environment, rebuild the worker image, or use "
                 "advanced.mockNativeInference for local adapter smoke tests."
             )
 
@@ -1156,14 +1156,20 @@ class DiffusersVideoAdapter(VideoGenerationAdapter):
                 raise RuntimeError("Replace Person requires at least one readable approved character reference image.")
 
 
-def create_video_adapter() -> VideoGenerationAdapter:
+def create_video_adapter(job: dict[str, Any] | None = None) -> VideoGenerationAdapter:
     requested = os.getenv("SCENEWORKS_VIDEO_ADAPTER", "").strip()
-    if not requested or requested == "diffusers_video":
+    if requested in {"ltx", "ltx_pipelines", "native_ltx"}:
+        return LtxPipelinesVideoAdapter()
+    if requested == "diffusers_video":
         return DiffusersVideoAdapter()
     if requested in {"procedural", "procedural_video"}:
         return ProceduralVideoAdapter()
-    if requested in {"ltx", "ltx_pipelines", "native_ltx"}:
-        return LtxPipelinesVideoAdapter()
+    if not requested:
+        model = str((job or {}).get("payload", {}).get("model", "ltx_2_3"))
+        target = model_target(model)
+        if target["adapter"] == "ltx_video":
+            return LtxPipelinesVideoAdapter()
+        return DiffusersVideoAdapter()
     raise RuntimeError(f"Unsupported SCENEWORKS_VIDEO_ADAPTER value: {requested}.")
 
 

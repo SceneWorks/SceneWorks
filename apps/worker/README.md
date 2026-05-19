@@ -17,10 +17,11 @@ Override `PYTORCH_INDEX_URL` / `PYTORCH_SPEC` for direct `docker build`, or
 GPU workers with CPU-only PyTorch intentionally register without generation
 capabilities so jobs stay queued instead of crawling on CPU with an idle GPU.
 
-Native LTX-2.3 work is staged behind `SCENEWORKS_VIDEO_ADAPTER=ltx_pipelines`.
-The base worker does not install that stack by default; install
-`requirements-ltx.txt` into an LTX-specific worker environment when validating
-the native pipeline adapter.
+Video adapter selection follows the selected model by default: LTX-2.3 uses the
+native `ltx_pipelines` adapter, while Diffusers-compatible video models such as
+Wan2.2 use `diffusers_video`. Docker Compose builds the worker with
+`requirements-ltx.txt` by default. Set `SCENEWORKS_VIDEO_ADAPTER` only when you
+explicitly want to force one adapter for all video jobs.
 
 Native LTX-2.3 text-to-video and image-to-video require these local resources:
 
