@@ -41,8 +41,9 @@ function errorResponse(status, detail) {
 
 async function settle() {
   await act(async () => {
-    await Promise.resolve();
-    await Promise.resolve();
+    for (let index = 0; index < 6; index += 1) {
+      await Promise.resolve();
+    }
   });
 }
 
@@ -576,6 +577,101 @@ describe("SceneWorks app shell", () => {
     expect(container.textContent).toContain("LoRA imports in progress");
     expect(container.textContent).toContain("running");
     expect(container.textContent).not.toContain("Jobs and GPUs");
+  });
+
+  it("refreshes the project LoRA overlay when a LoRA import completes", async () => {
+    global.fetch.mockImplementation((url) => {
+      const parsed = new URL(url);
+      const path = parsed.pathname;
+      if (path.endsWith("/health")) {
+        return Promise.resolve(response({ status: "ok", authRequired: false }));
+      }
+      if (path.endsWith("/access")) {
+        return Promise.resolve(response({ authRequired: false }));
+      }
+      if (path.endsWith("/projects")) {
+        return Promise.resolve(response([{ id: "project-1", name: "Noir" }]));
+      }
+      return Promise.resolve(response([]));
+    });
+
+    root = createRoot(container);
+    await act(async () => {
+      root.render(<App />);
+    });
+    await settle();
+
+    global.fetch.mockClear();
+    await act(async () => {
+      FakeEventSource.instances[0].listeners["job.updated"]({
+        data: JSON.stringify({
+          id: "lora-import-job-1",
+          type: "lora_import",
+          status: "completed",
+          projectId: "project-1",
+          payload: { loraId: "detail_lora" },
+        }),
+      });
+    });
+    await settle();
+    await settle();
+
+    const loraRequests = global.fetch.mock.calls
+      .map(([url]) => new URL(url))
+      .filter((url) => url.pathname.endsWith("/loras"));
+    expect(loraRequests.some((url) => url.search === "")).toBe(true);
+    expect(loraRequests.some((url) => url.search === "?projectId=project-1")).toBe(true);
+  });
+
+  it("shows the global banner for failed LoRA imports on the Models page", async () => {
+    global.fetch.mockImplementation((url) => {
+      const path = new URL(url).pathname;
+      if (path.endsWith("/health")) {
+        return Promise.resolve(response({ status: "ok", authRequired: false }));
+      }
+      if (path.endsWith("/access")) {
+        return Promise.resolve(response({ authRequired: false }));
+      }
+      if (path.endsWith("/projects")) {
+        return Promise.resolve(response([{ id: "project-1", name: "Noir" }]));
+      }
+      if (path.endsWith("/models")) {
+        return Promise.resolve(
+          response([
+            { id: "z_image_turbo", name: "Z-Image Turbo", type: "image", family: "z-image" },
+            { id: "qwen_image", name: "Qwen Image", type: "image", family: "qwen-image" },
+          ]),
+        );
+      }
+      return Promise.resolve(response([]));
+    });
+
+    root = createRoot(container);
+    await act(async () => {
+      root.render(<App />);
+    });
+    await settle();
+
+    await act(async () => {
+      [...container.querySelectorAll("button")].find((button) => button.textContent === "Models").click();
+    });
+    await settle();
+    await changeField(field(container, "LoRA family"), "z-image");
+    await act(async () => {
+      FakeEventSource.instances[0].listeners["job.updated"]({
+        data: JSON.stringify({
+          id: "lora-import-job-1",
+          type: "lora_import",
+          status: "failed",
+          error: "Import worker crashed",
+          payload: { loraId: "qwen_detail", family: "qwen-image" },
+        }),
+      });
+    });
+    await settle();
+
+    expect(container.textContent).toContain("lora import: Import worker crashed");
+    expect(container.textContent).toContain("1 LoRA import is hidden by this family filter.");
   });
 
   it("rejects oversized LoRA uploads before posting from the Models page", async () => {

@@ -3,6 +3,7 @@ import { JobProgressCard } from "../components/JobProgress.jsx";
 import { terminalStatuses } from "../constants.js";
 
 function loraFamilies(item) {
+  // Accept either a LoRA catalog entry or a lora_import job snapshot.
   const compatibility = item.compatibility ?? {};
   const values =
     item.families ??
@@ -25,6 +26,7 @@ function matchesFamily(item, familyFilter) {
     return true;
   }
   const families = loraFamilies(item);
+  // Import jobs can briefly lack family metadata; completed catalog entries should not.
   return item.type === "lora_import" && families.length === 0 ? true : families.includes(familyFilter);
 }
 
@@ -294,7 +296,7 @@ export function ModelManagerScreen({ activeProject, jobs, loras, models, onDownl
             </div>
           </div>
         ) : null}
-        {hiddenImportCount ? <p className="helper-copy">{hiddenImportCount} queued LoRA import{hiddenImportCount === 1 ? " is" : "s are"} hidden by this family filter.</p> : null}
+        {hiddenImportCount ? <p className="helper-copy">{hiddenImportCount} LoRA import{hiddenImportCount === 1 ? " is" : "s are"} hidden by this family filter.</p> : null}
         {visibleLoras.length ? (
           <div className="lora-list">
             {visibleLoras.map((lora) => (

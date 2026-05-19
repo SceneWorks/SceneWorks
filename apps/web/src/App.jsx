@@ -372,11 +372,13 @@ export function App() {
   }
 
   function refreshDataWithLoraOverlay(projectId = activeProjectRef.current?.id) {
-    refreshData().then(() => {
-      if (projectId) {
-        refreshLoras(projectId);
-      }
-    });
+    refreshData()
+      .then(() => {
+        if (projectId) {
+          refreshLoras(projectId);
+        }
+      })
+      .catch(() => {});
   }
 
   async function refreshRecipePresets(projectId = activeProject?.id) {
@@ -479,7 +481,7 @@ export function App() {
       setActiveView("Queue");
     }
     setError("");
-    refreshDataWithLoraOverlay(metadata.scope === "project" ? activeProject?.id : activeProjectRef.current?.id);
+    refreshDataWithLoraOverlay(activeProject?.id);
     return job;
   }
 
@@ -681,7 +683,7 @@ export function App() {
     if (active === "Video" && localIds.video.includes(job.id)) {
       return true;
     }
-    return active === "Models" && (job.type === "model_download" || job.type === "lora_import");
+    return active === "Models" && job.type === "model_download";
   }
 
   async function withCharacterApi(callback) {
