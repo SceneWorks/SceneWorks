@@ -1299,6 +1299,163 @@ describe("SceneWorks app shell", () => {
     expect([...container.querySelector("#queue-gpu").options].map((option) => option.value)).toEqual(["auto", "0"]);
   });
 
+  it("shows queued job cancellation from the action response even when the list refresh is stale", async () => {
+    const queuedJob = {
+      id: "job-queued",
+      type: "image_generate",
+      status: "queued",
+      stage: "queued",
+      progress: 0,
+      projectId: "project-1",
+      projectName: "Project 1",
+      requestedGpu: "auto",
+      payload: { prompt: "mist" },
+      attempts: 1,
+      cancelRequested: false,
+      createdAt: "2026-05-19T09:00:00Z",
+      updatedAt: "2026-05-19T09:00:00Z",
+    };
+    const canceledJob = {
+      ...queuedJob,
+      status: "canceled",
+      stage: "canceled",
+      progress: 1,
+      cancelRequested: true,
+      message: "Canceled before a worker started.",
+      updatedAt: "2026-05-19T09:01:00Z",
+    };
+    global.fetch.mockImplementation((url, options = {}) => {
+      const path = new URL(url).pathname;
+      if (path.endsWith("/health")) {
+        return Promise.resolve(response({ status: "ok", authRequired: false }));
+      }
+      if (path.endsWith("/access")) {
+        return Promise.resolve(response({ authRequired: false }));
+      }
+      if (path.endsWith("/jobs/job-queued/cancel") && options.method === "POST") {
+        return Promise.resolve(response(canceledJob));
+      }
+      if (path.endsWith("/projects")) {
+        return Promise.resolve(response([{ id: "project-1", name: "Project 1" }]));
+      }
+      if (path.endsWith("/workers")) {
+        return Promise.resolve(response([]));
+      }
+      if (path.endsWith("/jobs")) {
+        return Promise.resolve(response([queuedJob]));
+      }
+      return Promise.resolve(response([]));
+    });
+
+    root = createRoot(container);
+    await act(async () => {
+      root.render(<App />);
+    });
+    await settle();
+    await act(async () => {
+      [...container.querySelectorAll("button")].find((button) => button.textContent === "Queue").click();
+    });
+    await settle();
+
+    expect(container.textContent).toContain("queued");
+
+    await act(async () => {
+      [...container.querySelectorAll(".job-actions button")].find((button) => button.textContent === "Cancel").click();
+    });
+    await settle();
+
+    expect(container.textContent).toContain("canceled");
+    expect(container.textContent).toContain("Canceled before a worker started.");
+    expect(container.textContent).not.toContain("queued");
+    expect(container.textContent).not.toContain("Waiting for an available GPU worker.");
+  });
+
+  it("keeps fresher SSE job state when a post-action refresh returns stale data", async () => {
+    const failedJob = {
+      id: "job-failed",
+      type: "image_generate",
+      status: "failed",
+      stage: "failed",
+      progress: 1,
+      projectId: "project-1",
+      projectName: "Project 1",
+      requestedGpu: "auto",
+      payload: { prompt: "mist" },
+      attempts: 1,
+      cancelRequested: false,
+      createdAt: "2026-05-19T09:00:00Z",
+      updatedAt: "2026-05-19T09:00:00Z",
+    };
+    const retryJob = {
+      ...failedJob,
+      id: "job-retry",
+      status: "running",
+      stage: "generating",
+      progress: 0.1,
+      attempts: 2,
+      updatedAt: "2026-05-19T09:01:00Z",
+    };
+    const fresherRetryJob = {
+      ...retryJob,
+      progress: 0.4,
+      message: "Worker advanced during refresh.",
+      updatedAt: "2026-05-19T09:02:00Z",
+    };
+    let jobsRequestCount = 0;
+    let resolvePostRetryJobs;
+    const postRetryJobs = new Promise((resolve) => {
+      resolvePostRetryJobs = resolve;
+    });
+    global.fetch.mockImplementation((url, options = {}) => {
+      const path = new URL(url).pathname;
+      if (path.endsWith("/health")) {
+        return Promise.resolve(response({ status: "ok", authRequired: false }));
+      }
+      if (path.endsWith("/access")) {
+        return Promise.resolve(response({ authRequired: false }));
+      }
+      if (path.endsWith("/jobs/job-failed/retry") && options.method === "POST") {
+        return Promise.resolve(response(retryJob));
+      }
+      if (path.endsWith("/projects")) {
+        return Promise.resolve(response([{ id: "project-1", name: "Project 1" }]));
+      }
+      if (path.endsWith("/workers")) {
+        return Promise.resolve(response([]));
+      }
+      if (path.endsWith("/jobs")) {
+        jobsRequestCount += 1;
+        return jobsRequestCount === 1 ? Promise.resolve(response([failedJob])) : postRetryJobs;
+      }
+      return Promise.resolve(response([]));
+    });
+
+    root = createRoot(container);
+    await act(async () => {
+      root.render(<App />);
+    });
+    await settle();
+    await act(async () => {
+      [...container.querySelectorAll("button")].find((button) => button.textContent === "Queue").click();
+    });
+    await settle();
+
+    await act(async () => {
+      [...container.querySelectorAll(".job-actions button")].find((button) => button.textContent === "Retry").click();
+      await Promise.resolve();
+    });
+    await act(async () => {
+      FakeEventSource.instances[0].listeners["job.updated"]({ data: JSON.stringify(fresherRetryJob) });
+    });
+    await act(async () => {
+      resolvePostRetryJobs(response([retryJob]));
+    });
+    await settle();
+
+    expect(container.querySelector(".progress-track")?.getAttribute("aria-label")).toBe("40% complete");
+    expect(container.textContent).toContain("Worker advanced during refresh.");
+  });
+
   it("explains queued GPU jobs that are waiting on capability or busy workers", async () => {
     root = createRoot(container);
     await act(async () => {

@@ -48,6 +48,26 @@ function isLoraImportNotice(message) {
   return String(message ?? "").startsWith("lora import: ");
 }
 
+function jobFreshnessMs(job) {
+  const timestamp = job?.updatedAt ?? job?.completedAt ?? job?.canceledAt ?? job?.startedAt ?? job?.createdAt;
+  const parsed = Date.parse(timestamp ?? "");
+  return Number.isFinite(parsed) ? parsed : 0;
+}
+
+function mergeFreshJobs(currentJobs, serverJobs) {
+  const merged = new Map();
+  for (const job of serverJobs) {
+    merged.set(job.id, job);
+  }
+  for (const current of currentJobs) {
+    const server = merged.get(current.id);
+    if (!server || jobFreshnessMs(current) > jobFreshnessMs(server)) {
+      merged.set(current.id, current);
+    }
+  }
+  return [...merged.values()].sort(sortNewest);
+}
+
 const localJobStackLimit = 4;
 const maxLoraUploadBytes = 2 * 1024 * 1024 * 1024;
 
@@ -347,7 +367,7 @@ export function App() {
     const projectItems = projectsResult.value;
     setProjects(projectItems);
     setActiveProject((current) => current ?? projectItems[0] ?? null);
-    setJobs(jobsResult.value.sort(sortNewest));
+    setJobs((current) => mergeFreshJobs(current, jobsResult.value));
     setWorkers(workersResult.value.sort(sortWorkers));
     setQueueSummary(null);
     setModels(modelsResult.value);
@@ -1193,9 +1213,10 @@ export function App() {
     try {
       const path = action === "duplicate" ? `/api/v1/jobs/${job.id}/duplicate` : `/api/v1/jobs/${job.id}/${action}`;
       const body = action === "duplicate" ? { payloadChanges: { duplicatedAt: new Date().toISOString() } } : {};
-      await apiFetch(path, token, { method: "POST", body: JSON.stringify(body) });
+      const updatedJob = await apiFetch(path, token, { method: "POST", body: JSON.stringify(body) });
+      setJobs((items) => [updatedJob, ...items.filter((item) => item.id !== updatedJob.id)].sort(sortNewest));
       setError("");
-      refreshData();
+      await refreshData();
     } catch (err) {
       setError(err.message);
     }

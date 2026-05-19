@@ -5479,6 +5479,75 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn canceling_queued_job_finishes_without_worker_acknowledgement() {
+        let temp_dir = tempfile::tempdir().expect("temp dir creates");
+        let app = create_app(test_settings(&temp_dir)).expect("app creates");
+
+        let (status, created) = request(
+            app.clone(),
+            "POST",
+            "/api/v1/jobs",
+            json!({
+                "type": "image_generate",
+                "projectId": "project-1",
+                "projectName": "Project 1",
+                "payload": { "prompt": "mist over hills" },
+                "requestedGpu": "auto"
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED);
+
+        let job_id = created["id"].as_str().expect("job id is string");
+        let (status, canceled) = request(
+            app.clone(),
+            "POST",
+            &format!("/api/v1/jobs/{job_id}/cancel"),
+            Value::Null,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(canceled["status"], "canceled");
+        assert_eq!(canceled["stage"], "canceled");
+        assert_eq!(canceled["progress"], 1.0);
+        assert_eq!(canceled["cancelRequested"], true);
+        assert_eq!(canceled["message"], "Canceled before a worker started.");
+        assert!(canceled["canceledAt"].is_string());
+        assert!(canceled["completedAt"].is_string());
+        assert_eq!(canceled["workerId"], Value::Null);
+
+        let (status, queue) = request(app.clone(), "GET", "/api/v1/queue", Value::Null).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(queue["counts"]["canceled"], 1);
+        assert_eq!(queue["counts"]["queued"], 0);
+
+        let (status, _) = request(
+            app.clone(),
+            "POST",
+            "/api/v1/workers/register",
+            json!({
+                "workerId": "worker-1",
+                "gpuId": "gpu-0",
+                "gpuName": "GPU 0",
+                "capabilities": ["image_generate"],
+                "loadedModels": []
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+
+        let (status, claimed) = request(
+            app,
+            "POST",
+            "/api/v1/jobs/claim",
+            json!({ "workerId": "worker-1" }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(claimed["job"], Value::Null);
+    }
+
+    #[tokio::test]
     async fn project_and_asset_routes_persist_contract_state() {
         let temp_dir = tempfile::tempdir().expect("temp dir creates");
         let app = create_app(test_settings(&temp_dir)).expect("app creates");
