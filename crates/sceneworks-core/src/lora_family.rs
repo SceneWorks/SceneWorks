@@ -253,13 +253,10 @@ const MIN_KEY_MATCHES: usize = 4;
 const MARGIN_NUM: usize = 3;
 const MARGIN_DEN: usize = 2;
 
-/// Block-index thresholds separating Z-Image (smaller, ~24 blocks) from
-/// Qwen-Image (larger, ~60 blocks). The gap between the two architectures
-/// is wide enough that picking middle thresholds and returning `None`
-/// inside the no-man's-land keeps the detector honest. Values are
-/// zero-indexed block numbers, so 27 means "highest block at index 27"
-/// (i.e. up to 28 blocks total).
-const ZIMAGE_MAX_BLOCK_INDEX: usize = 27;
+/// Block-index threshold for Qwen-Image (larger, ~60 blocks). Values are
+/// zero-indexed block numbers. Low block indices are intentionally not
+/// enough to identify Z-Image: a sparse Qwen LoRA may only train early
+/// blocks, and false hard rejections are worse than an inconclusive result.
 const QWEN_MIN_BLOCK_INDEX: usize = 39;
 
 fn detect_bucket(keys: &[String]) -> Option<Bucket> {
@@ -308,8 +305,6 @@ fn disambiguate_mm_dit(keys: &[String]) -> Option<String> {
     let max_block = max_transformer_block_index(keys)?;
     if max_block >= QWEN_MIN_BLOCK_INDEX {
         Some("qwen-image".to_owned())
-    } else if max_block <= ZIMAGE_MAX_BLOCK_INDEX {
-        Some("z-image".to_owned())
     } else {
         None
     }
@@ -472,11 +467,11 @@ mod tests {
     }
 
     #[test]
-    fn detects_z_image_by_block_count() {
+    fn low_mm_dit_block_count_is_inconclusive() {
         let keys = diffusers_double_stream_keys("transformer", 24);
         let header = header_from_keys(&keys.iter().map(String::as_str).collect::<Vec<_>>());
 
-        assert_eq!(detect_lora_family(&header).as_deref(), Some("z-image"));
+        assert!(detect_lora_family(&header).is_none());
     }
 
     #[test]

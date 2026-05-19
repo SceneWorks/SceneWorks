@@ -6558,10 +6558,10 @@ mod tests {
         let detect_dir = temp_dir.path().join("data").join("loras");
         std::fs::create_dir_all(&detect_dir).expect("detect dir creates");
 
-        // Z-Image-shaped file with a mismatched user-supplied family is
+        // Qwen-Image-shaped file with a mismatched user-supplied family is
         // rejected with both values surfaced in the error message.
-        let mismatch_path = detect_dir.join("z-as-wan.safetensors");
-        write_test_safetensors_with_keys(&mismatch_path, &z_image_tensor_keys());
+        let mismatch_path = detect_dir.join("qwen-as-wan.safetensors");
+        write_test_safetensors_with_keys(&mismatch_path, &qwen_image_tensor_keys());
         let app = create_app(test_settings(&temp_dir)).expect("app creates");
         let (status, mismatch_error) = request(
             app,
@@ -6577,13 +6577,13 @@ mod tests {
         assert_eq!(status, StatusCode::BAD_REQUEST);
         let detail = mismatch_error["detail"].as_str().expect("detail string");
         assert!(
-            detail.contains("z-image") && detail.contains("wan-video"),
+            detail.contains("qwen-image") && detail.contains("wan-video"),
             "mismatch error must surface both detected and supplied families, got: {detail}"
         );
 
-        // No user-supplied family + confident detection: the manifest entry
-        // is auto-populated with the detected family.
-        let auto_path = detect_dir.join("z-autofill.safetensors");
+        // Low-block MMDiT tensors are inconclusive rather than treated as
+        // Z-Image; sparse Qwen LoRAs can target only early blocks.
+        let auto_path = detect_dir.join("low-mmdit-no-autofill.safetensors");
         write_test_safetensors_with_keys(&auto_path, &z_image_tensor_keys());
         let app = create_app(test_settings(&temp_dir)).expect("app creates");
         let (status, auto_job) = request(
@@ -6597,12 +6597,10 @@ mod tests {
         )
         .await;
         assert_eq!(status, StatusCode::CREATED);
-        assert_eq!(
-            auto_job["payload"]["manifestEntry"]["family"],
-            "z-image"
-        );
+        assert!(auto_job["payload"]["manifestEntry"].get("family").is_none());
 
-        // Supplied family matches detection: import succeeds, family is kept.
+        // Supplied family + inconclusive MMDiT detection succeeds, and the
+        // user-supplied family is kept.
         let match_path = detect_dir.join("z-match.safetensors");
         write_test_safetensors_with_keys(&match_path, &z_image_tensor_keys());
         let app = create_app(test_settings(&temp_dir)).expect("app creates");
