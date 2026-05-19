@@ -2642,7 +2642,7 @@ describe("SceneWorks app shell", () => {
     await settle();
 
     const primaryLabels = [
-      ...container.querySelectorAll(".studio-controls > .generation-primary-grid label, .studio-controls > .prompt-field, .studio-controls > .count-control-grid label"),
+      ...container.querySelectorAll(".studio-controls > .generation-primary-grid label, .studio-controls > label"),
     ].map((label) => label.childNodes[0]?.textContent.trim());
     expect(primaryLabels).toEqual(["Model", "Preset", "Prompt", "Count"]);
     expect(field(container, "Preset").textContent).toContain("None");
@@ -2675,6 +2675,7 @@ describe("SceneWorks app shell", () => {
         loras: [],
       }),
     );
+    expect(createImageJob.mock.calls[0][0]).not.toHaveProperty("stylePreset");
   });
 
   it("blocks image presets whose managed LoRAs do not match the selected model", async () => {

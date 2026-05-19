@@ -4,37 +4,18 @@ import { AssetCard } from "../components/assetPanels.jsx";
 import { AssetMedia } from "../components/assetMedia.jsx";
 import { JobProgressCard } from "../components/JobProgress.jsx";
 import {
-  autoRecipePresetId,
+  clearPresetDefault,
   noRecipePresetId,
   presetLoraDetails as buildPresetLoraDetails,
   presetMatchesModel,
   presetMatchesWorkflow,
   presetPromptParts as buildPresetPromptParts,
   presetValidation,
+  rememberPresetDefault,
 } from "../presetUtils.js";
 import { ReplacePersonPanel, findReplacementModel } from "./ReplacePersonPanel.jsx";
 
 const completedResultFallbackMs = 30000;
-
-function rememberPresetDefault(snapshots, key, currentValue, appliedValue) {
-  const previousSnapshot = snapshots.current[key];
-  snapshots.current[key] = {
-    appliedValue,
-    previousValue:
-      previousSnapshot && Object.is(currentValue, previousSnapshot.appliedValue)
-        ? previousSnapshot.previousValue
-        : currentValue,
-  };
-}
-
-function clearPresetDefault(setter, snapshots, key) {
-  const snapshot = snapshots.current[key];
-  if (!snapshot) {
-    return;
-  }
-  setter((current) => (Object.is(current, snapshot.appliedValue) ? snapshot.previousValue : current));
-  delete snapshots.current[key];
-}
 
 export function VideoStudio({
   activeProject,
@@ -67,9 +48,9 @@ export function VideoStudio({
   const [mode, setMode] = useState("image_to_video");
   const [prompt, setPrompt] = useState("Camera slowly pushes in while the scene comes alive");
   const [quality, setQuality] = useState("balanced");
-  const [recipePresetId, setRecipePresetId] = useState(autoRecipePresetId);
   const [advancedOpen, setAdvancedOpen] = useState(false);
   const [model, setModel] = useState(videoModels[0]?.id ?? "ltx_2_3");
+  const [recipePresetId, setRecipePresetId] = useState(null);
   const selectedModel = videoModels.find((item) => item.id === model) ?? videoModels[0];
   const [duration, setDuration] = useState(selectedModel?.defaults?.duration ?? 6);
   const [resolution, setResolution] = useState(selectedModel?.defaults?.resolution ?? "768x512");
@@ -99,7 +80,9 @@ export function VideoStudio({
   const selectedRecipePreset =
     recipePresetId === noRecipePresetId
       ? null
-      : availableRecipePresets.find((preset) => preset.id === recipePresetId) ?? availableRecipePresets[0] ?? null;
+      : recipePresetId
+        ? availableRecipePresets.find((preset) => preset.id === recipePresetId) ?? null
+        : availableRecipePresets[0] ?? null;
   const presetPromptParts = buildPresetPromptParts(selectedRecipePreset);
   const presetLoraDetails = buildPresetLoraDetails(selectedRecipePreset, loras);
   const presetValidationResult = useMemo(
@@ -180,13 +163,13 @@ export function VideoStudio({
   }, [mode, supportsMode, videoModels]);
 
   useEffect(() => {
-    if (recipePresetId === noRecipePresetId) {
+    if (!recipePresetId || recipePresetId === noRecipePresetId) {
       return;
     }
-    if (selectedRecipePreset?.id && selectedRecipePreset.id !== recipePresetId) {
-      setRecipePresetId(selectedRecipePreset.id);
+    if (!selectedRecipePreset) {
+      setRecipePresetId(availableRecipePresets[0]?.id ?? noRecipePresetId);
     }
-  }, [recipePresetId, selectedRecipePreset?.id]);
+  }, [availableRecipePresets, recipePresetId, selectedRecipePreset]);
 
   useEffect(() => {
     if (!selectedRecipePreset) {

@@ -5,13 +5,14 @@ import { JobProgressCard } from "../components/JobProgress.jsx";
 import {
   loraMatchesModel,
   loraWeight,
-  autoRecipePresetId,
+  clearPresetDefault,
   noRecipePresetId,
   presetLoraDetails as buildPresetLoraDetails,
   presetMatchesModel,
   presetMatchesWorkflow,
   presetPromptParts as buildPresetPromptParts,
   presetValidation,
+  rememberPresetDefault,
 } from "../presetUtils.js";
 
 const completedResultFallbackMs = 30000;
@@ -21,26 +22,6 @@ const localErrorLabels = {
   canceled: "Canceled",
   interrupted: "Interrupted",
 };
-
-function rememberPresetDefault(snapshots, key, currentValue, appliedValue) {
-  const previousSnapshot = snapshots.current[key];
-  snapshots.current[key] = {
-    appliedValue,
-    previousValue:
-      previousSnapshot && Object.is(currentValue, previousSnapshot.appliedValue)
-        ? previousSnapshot.previousValue
-        : currentValue,
-  };
-}
-
-function clearPresetDefault(setter, snapshots, key) {
-  const snapshot = snapshots.current[key];
-  if (!snapshot) {
-    return;
-  }
-  setter((current) => (Object.is(current, snapshot.appliedValue) ? snapshot.previousValue : current));
-  delete snapshots.current[key];
-}
 
 function jobResultAssets(job, assets) {
   const catalogById = new Map(assets.map((asset) => [asset.id, asset]));
@@ -122,10 +103,10 @@ export function ImageStudio({
 }) {
   const [mode, setMode] = useState("text_to_image");
   const [prompt, setPrompt] = useState("A cinematic frame of a neon street at midnight");
-  const [stylePreset, setStylePreset] = useState(autoRecipePresetId);
   const [count, setCount] = useState(4);
   const [advancedOpen, setAdvancedOpen] = useState(false);
   const [model, setModel] = useState(imageModels[0]?.id ?? "z_image_turbo");
+  const [stylePreset, setStylePreset] = useState(null);
   const [seed, setSeed] = useState("");
   const [negativePrompt, setNegativePrompt] = useState("");
   const [resolution, setResolution] = useState("1024x1024");
@@ -213,7 +194,9 @@ export function ImageStudio({
   const selectedRecipePreset =
     stylePreset === noRecipePresetId
       ? null
-      : availableRecipePresets.find((preset) => preset.id === stylePreset) ?? availableRecipePresets[0] ?? null;
+      : stylePreset
+        ? availableRecipePresets.find((preset) => preset.id === stylePreset) ?? null
+        : availableRecipePresets[0] ?? null;
   const compatibleLoras = useMemo(() => loras.filter((lora) => {
     if (lora.presetManaged) {
       return false;
@@ -253,13 +236,13 @@ export function ImageStudio({
   const [width, height] = resolution.split("x").map((value) => Number(value));
 
   useEffect(() => {
-    if (stylePreset === noRecipePresetId) {
+    if (!stylePreset || stylePreset === noRecipePresetId) {
       return;
     }
-    if (selectedRecipePreset?.id && selectedRecipePreset.id !== stylePreset) {
-      setStylePreset(selectedRecipePreset.id);
+    if (!selectedRecipePreset) {
+      setStylePreset(availableRecipePresets[0]?.id ?? noRecipePresetId);
     }
-  }, [selectedRecipePreset?.id, stylePreset]);
+  }, [availableRecipePresets, selectedRecipePreset, stylePreset]);
 
   useEffect(() => {
     if (!selectedRecipePreset) {
@@ -389,7 +372,6 @@ export function ImageStudio({
         seed: seed === "" ? null : Number(seed),
         width,
         height,
-        stylePreset,
         recipePresetId: selectedRecipePreset?.id ?? null,
         characterId: mode === "character_image" ? characterId || null : null,
         characterLookId: mode === "character_image" ? characterLookId || null : null,
@@ -501,12 +483,10 @@ export function ImageStudio({
             <textarea onChange={(event) => setPrompt(event.target.value)} value={prompt} />
           </label>
 
-          <div className="control-grid count-control-grid">
-            <label>
-              Count
-              <input min="1" max="8" onChange={(event) => setCount(Number(event.target.value))} type="number" value={count} />
-            </label>
-          </div>
+          <label>
+            Count
+            <input min="1" max="8" onChange={(event) => setCount(Number(event.target.value))} type="number" value={count} />
+          </label>
           {selectedRecipePreset ? (
             <div className="guidance-strip">
               <strong>{selectedRecipePreset.ui?.description ?? "Preset defaults active"}</strong>
