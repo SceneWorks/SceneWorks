@@ -34,7 +34,7 @@ and workers call `http://api:${SCENEWORKS_API_PORT}` on the compose network.
 API volume contracts:
 
 - `${SCENEWORKS_DATA_BIND:-./data}:/sceneworks/data` read/write for projects, models, LoRAs, and cache-backed app data.
-- `${SCENEWORKS_CONFIG_BIND:-./config}:/sceneworks/config:ro` read-only for manifests and app configuration.
+- `${SCENEWORKS_CONFIG_BIND:-./config}:/sceneworks/config` writable for user manifests and app configuration.
 - `./data/cache/jobs.db` is the queue database, preserving existing compose queue history across rebuilds.
 - `./data/cache/huggingface` persists Diffusers/Hugging Face model downloads across worker container rebuilds and restarts.
 

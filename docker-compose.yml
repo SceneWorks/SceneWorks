@@ -17,7 +17,7 @@ services:
       - "${SCENEWORKS_API_PORT:-8000}:${SCENEWORKS_API_PORT:-8000}"
     volumes:
       - ${SCENEWORKS_DATA_BIND:-./data}:/sceneworks/data
-      - ${SCENEWORKS_CONFIG_BIND:-./config}:/sceneworks/config:ro
+      - ${SCENEWORKS_CONFIG_BIND:-./config}:/sceneworks/config
     healthcheck:
       test: ["CMD-SHELL", "curl -fsS \"http://127.0.0.1:$${SCENEWORKS_API_PORT:-8000}/api/v1/health\" >/dev/null"]
       interval: 20s

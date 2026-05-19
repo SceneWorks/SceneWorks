@@ -675,6 +675,58 @@ describe("SceneWorks app shell", () => {
     expect(container.textContent).toContain("1 LoRA import is hidden by this family filter.");
   });
 
+  it("clears a stale LoRA import banner when a later import completes", async () => {
+    global.fetch.mockImplementation((url) => {
+      const path = new URL(url).pathname;
+      if (path.endsWith("/health")) {
+        return Promise.resolve(response({ status: "ok", authRequired: false }));
+      }
+      if (path.endsWith("/access")) {
+        return Promise.resolve(response({ authRequired: false }));
+      }
+      if (path.endsWith("/projects")) {
+        return Promise.resolve(response([{ id: "project-1", name: "Noir" }]));
+      }
+      return Promise.resolve(response([]));
+    });
+
+    root = createRoot(container);
+    await act(async () => {
+      root.render(<App />);
+    });
+    await settle();
+
+    await act(async () => {
+      FakeEventSource.instances[0].listeners["job.updated"]({
+        data: JSON.stringify({
+          id: "lora-import-job-1",
+          type: "lora_import",
+          status: "failed",
+          createdAt: "2026-05-18T00:00:00Z",
+          error: "LoRA manifestPath must target the global user manifest or the selected project's LoRA manifest",
+          payload: { loraId: "detail_lora", family: "z-image" },
+        }),
+      });
+    });
+    await settle();
+    expect(container.textContent).toContain("lora import: LoRA manifestPath must target");
+
+    await act(async () => {
+      FakeEventSource.instances[0].listeners["job.updated"]({
+        data: JSON.stringify({
+          id: "lora-import-job-2",
+          type: "lora_import",
+          status: "completed",
+          createdAt: "2026-05-18T00:00:01Z",
+          payload: { loraId: "detail_lora", family: "z-image" },
+        }),
+      });
+    });
+    await settle();
+
+    expect(container.textContent).not.toContain("lora import: LoRA manifestPath must target");
+  });
+
   it("rejects oversized LoRA uploads before posting from the Models page", async () => {
     let importCalls = 0;
     global.fetch.mockImplementation((url, options = {}) => {
@@ -1014,6 +1066,47 @@ describe("SceneWorks app shell", () => {
     expect(container.textContent).toContain("broken_detail");
     expect(container.textContent).toContain("Adapter crashed");
     expect(container.textContent).not.toContain("No LoRAs in this view");
+  });
+
+  it("hides failed Models LoRA imports superseded by a completed retry", async () => {
+    root = createRoot(container);
+    await act(async () => {
+      root.render(
+        <ModelManagerScreen
+          activeProject={{ id: "project-1", name: "Noir" }}
+          jobs={[
+            {
+              id: "lora-import-job-2",
+              type: "lora_import",
+              status: "completed",
+              stage: "completed",
+              progress: 1,
+              createdAt: "2026-05-18T00:00:01Z",
+              payload: { loraId: "detail_lora", family: "z-image" },
+            },
+            {
+              id: "lora-import-job-1",
+              type: "lora_import",
+              status: "failed",
+              stage: "failed",
+              progress: 0.4,
+              createdAt: "2026-05-18T00:00:00Z",
+              error: "LoRA manifestPath must target the global user manifest or the selected project's LoRA manifest",
+              payload: { loraId: "detail_lora", family: "z-image" },
+            },
+          ]}
+          loras={[]}
+          models={[{ id: "z_image_turbo", name: "Z-Image Turbo", type: "image", family: "z-image" }]}
+          onDownloadModel={() => {}}
+          onImportLora={() => {}}
+          onOpenQueue={() => {}}
+        />,
+      );
+    });
+
+    expect(container.textContent).not.toContain("LoRA manifestPath must target");
+    expect(container.textContent).not.toContain("LoRA imports");
+    expect(container.textContent).toContain("No LoRAs in this view");
   });
 
   it("shows Models page LoRA import errors and resets the queueing state", async () => {
