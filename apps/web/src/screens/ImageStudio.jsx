@@ -12,6 +12,11 @@ import {
 
 const completedResultFallbackMs = 30000;
 const localErrorStatuses = new Set(["failed", "canceled", "interrupted"]);
+const localErrorLabels = {
+  failed: "Failed",
+  canceled: "Canceled",
+  interrupted: "Interrupted",
+};
 
 function jobResultAssets(job, assets) {
   const catalogById = new Map(assets.map((asset) => [asset.id, asset]));
@@ -27,7 +32,7 @@ function jobExpectedCount(job, completedCount) {
 
 function jobPendingSlotLabel(job, index) {
   if (localErrorStatuses.has(job.status)) {
-    return `${job.status} #${index + 1}`;
+    return `${localErrorLabels[job.status] ?? "Failed"} #${index + 1}`;
   }
   return `Pending #${index + 1}`;
 }
@@ -237,8 +242,9 @@ export function ImageStudio({
     return () => window.clearTimeout(timer);
   }, [assets, latestAssets, trackedLocalJobs, resultFallbackTick]);
 
-  const localJobs = trackedLocalJobs.filter(
-    (job) => job.status !== "completed" || (!resultVisible(job) && !completedWaitExpired(job)),
+  const localJobs = useMemo(
+    () => trackedLocalJobs.filter((job) => job.status !== "completed" || (!resultVisible(job) && !completedWaitExpired(job))),
+    [assets, latestAssets, trackedLocalJobs, resultFallbackTick],
   );
   const reviewSlots = useMemo(() => {
     if (!localJobs.length) {

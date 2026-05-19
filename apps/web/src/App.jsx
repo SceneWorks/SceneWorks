@@ -44,10 +44,6 @@ function isImageGenerationJob(job) {
   return ["image_generate", "image_edit"].includes(job.type);
 }
 
-function hasImageReviewResult(job) {
-  return Boolean(job.result?.generationSetId || job.result?.assetIds?.length || job.result?.assets?.length);
-}
-
 function isLoraImportNotice(message) {
   return String(message ?? "").startsWith("lora import: ");
 }
@@ -117,7 +113,7 @@ export function App() {
           activeProject?.id &&
           job.projectId === activeProject.id &&
           isImageGenerationJob(job) &&
-          (!terminalStatuses.has(job.status) || (job.status !== "completed" && hasImageReviewResult(job))),
+          !terminalStatuses.has(job.status),
       )
       .sort(sortNewest);
     const byId = new Map();
