@@ -13,7 +13,8 @@ use sceneworks_core::contracts::{
     WorkerRegisterRequest, WorkerSnapshot, WorkerStatus, WorkerUtilizationSnapshot,
 };
 use sceneworks_core::lora_family::{
-    detect_lora_family, first_safetensors_path, read_safetensors_header, SafetensorsHeaderError,
+    apply_model_manifest_defaults, detect_lora_family, detect_model_family, first_safetensors_path,
+    read_safetensors_header, reconcile_detected_family, SafetensorsHeaderError,
 };
 use sceneworks_core::lora_url::{
     lora_source_url_file_name, lora_source_url_file_stem, parse_lora_source_url_with_private,
@@ -34,6 +35,7 @@ const INSTALL_MARKER: &str = ".sceneworks-download-complete.json";
 const DEFAULT_API_URL: &str = "http://localhost:8000";
 const DEFAULT_HUGGINGFACE_BASE_URL: &str = "https://huggingface.co";
 const DEFAULT_MAX_LORA_URL_BYTES: u64 = 8 * 1024 * 1024 * 1024;
+const DEFAULT_MAX_MODEL_URL_BYTES: u64 = 256 * 1024 * 1024 * 1024;
 const DEFAULT_TRANSITION_DURATION_SECONDS: f64 = 0.5;
 const PERSON_TRACK_SAMPLE_RATE_FPS: f64 = 2.0;
 const PERSON_TRACK_MAX_SAMPLES: usize = 24;
@@ -54,6 +56,7 @@ pub struct Settings {
     pub huggingface_base_url: String,
     pub huggingface_token: Option<String>,
     pub max_lora_url_bytes: u64,
+    pub max_model_url_bytes: u64,
     pub allow_private_lora_urls: bool,
 }
 
@@ -97,6 +100,10 @@ impl Settings {
             max_lora_url_bytes: env_u64_any(
                 &["SCENEWORKS_MAX_LORA_URL_BYTES"],
                 DEFAULT_MAX_LORA_URL_BYTES,
+            ),
+            max_model_url_bytes: env_u64_any(
+                &["SCENEWORKS_MAX_MODEL_URL_BYTES"],
+                DEFAULT_MAX_MODEL_URL_BYTES,
             ),
             allow_private_lora_urls: std::env::var("SCENEWORKS_ALLOW_PRIVATE_LORA_URLS")
                 .is_ok_and(|value| value.trim() == "1"),
@@ -597,6 +604,7 @@ fn worker_capabilities_with_utility(
             WorkerCapability::FrameExtract,
             WorkerCapability::TimelineExport,
             WorkerCapability::ModelDownload,
+            WorkerCapability::ModelImport,
             WorkerCapability::LoraImport,
             WorkerCapability::PersonDetect,
             WorkerCapability::PersonTrack,
@@ -807,6 +815,9 @@ async fn run_utility_job(
         JobType::LoraImport => run_lora_import_job(api, settings, http_client, &job)
             .await
             .map_err(|error| ("LoRA import failed.", error)),
+        JobType::ModelImport => run_model_import_job(api, settings, http_client, &job)
+            .await
+            .map_err(|error| ("Model import failed.", error)),
         JobType::FrameExtract => run_frame_extract_job(api, settings, &job)
             .await
             .map_err(|error| ("Frame extraction failed.", error)),
@@ -833,8 +844,8 @@ async fn run_utility_job(
             result.map_err(|error| ("Utility job failed.", error))
         }
     };
-    if job.job_type == JobType::LoraImport {
-        let _ = cleanup_uploaded_lora_source(&job.payload).await;
+    if matches!(job.job_type, JobType::LoraImport | JobType::ModelImport) {
+        let _ = cleanup_uploaded_import_source(&job.payload).await;
     }
     if let Err((message, error)) = result {
         match error {
@@ -1204,7 +1215,7 @@ async fn run_lora_import_job(
         }
         (None, Some(detected)) => Some(detected),
         (Some(supplied), None) => {
-            println!(
+            eprintln!(
                 "LoRA import job {}: architecture detection inconclusive; accepting supplied family {supplied}",
                 job.id
             );
@@ -1255,6 +1266,223 @@ async fn run_lora_import_job(
             ProgressStage::Completed,
             1.0,
             "LoRA import completed.",
+            None,
+            Some(result),
+            None,
+        ),
+    )
+    .await?;
+    Ok(())
+}
+
+fn model_family_detection_error(error: SafetensorsHeaderError) -> String {
+    match error {
+        SafetensorsHeaderError::Io(io_error) => {
+            format!("Unable to inspect imported model file: {io_error}")
+        }
+        SafetensorsHeaderError::InvalidHeader => {
+            "Imported model file has an invalid safetensors header.".to_owned()
+        }
+    }
+}
+
+async fn run_model_import_job(
+    api: &ApiClient,
+    settings: &Settings,
+    http_client: &reqwest::Client,
+    job: &JobSnapshot,
+) -> WorkerResult<()> {
+    let repo = optional_payload_string(&job.payload, "repo");
+    let source_url = optional_payload_string(&job.payload, "sourceUrl");
+    let source_path = optional_payload_string(&job.payload, "sourcePath");
+    let target_name = optional_payload_string(&job.payload, "modelId")
+        .map(safe_download_dir)
+        .unwrap_or_else(|| "model".to_owned());
+    let target_dir = resolve_model_import_target(
+        settings,
+        &job.payload,
+        settings
+            .data_dir
+            .join("models")
+            .join("imports")
+            .join(target_name),
+    )?;
+
+    heartbeat(api, settings, WorkerStatus::Busy, Some(&job.id)).await?;
+    update_job(
+        api,
+        &job.id,
+        progress_payload(
+            JobStatus::Downloading,
+            ProgressStage::Importing,
+            0.1,
+            "Importing model.",
+            None,
+            None,
+            None,
+        ),
+    )
+    .await?;
+    check_cancel(
+        api,
+        &job.id,
+        "Model import canceled before transfer started.",
+    )
+    .await?;
+
+    if let Some(repo) = repo {
+        let files = payload_string_array(&job.payload, "files");
+        let revision = optional_payload_string(&job.payload, "revision").unwrap_or("main");
+        let snapshot =
+            HuggingFaceSnapshot::resolve(http_client, settings, repo, revision, &files).await?;
+        let mut progress = DownloadProgress::new(
+            repo,
+            directory_size(&target_dir).await,
+            snapshot.total_bytes(),
+            progress_report_interval(settings),
+        );
+        download_snapshot(
+            &DownloadContext {
+                api,
+                client: http_client,
+                settings,
+                job_id: &job.id,
+                cancel_message: "Model import canceled by user.",
+            },
+            &target_dir,
+            &snapshot,
+            &mut progress,
+        )
+        .await?;
+    } else if let Some(source_path) = source_path {
+        import_lora_source_path(
+            Path::new(source_path),
+            &target_dir,
+            payload_bool(&job.payload, "uploadedSourcePath"),
+        )
+        .await?;
+    } else if let Some(source_url) = source_url {
+        download_model_source_url(
+            &DownloadContext {
+                api,
+                client: http_client,
+                settings,
+                job_id: &job.id,
+                cancel_message: "Model import canceled by user.",
+            },
+            source_url,
+            &target_dir,
+        )
+        .await?;
+    } else {
+        return fail_job(
+            api,
+            &job.id,
+            "Model import failed.",
+            Some("Provide repo, sourceUrl, or sourcePath for model import".to_owned()),
+        )
+        .await;
+    }
+
+    let detected_family = match detect_model_family(&target_dir) {
+        Ok(detected) => detected,
+        Err(error) => {
+            return fail_job(
+                api,
+                &job.id,
+                "Model import failed.",
+                Some(model_family_detection_error(error)),
+            )
+            .await;
+        }
+    };
+    let supplied_family = optional_payload_string(&job.payload, "family").map(str::to_owned);
+    let resolved_family = match reconcile_detected_family(supplied_family, detected_family) {
+        Ok(family) => family,
+        Err(mismatch) => {
+            return fail_job(
+                api,
+                &job.id,
+                "Model import failed.",
+                Some(format!(
+                    "Model files appear to be {}, but family was declared as {}. Re-import with family {} or pick different files.",
+                    mismatch.detected, mismatch.supplied, mismatch.detected
+                )),
+            )
+            .await;
+        }
+    };
+
+    write_model_install_marker(&target_dir, &job.payload, repo.unwrap_or(""), &job.id).await?;
+    if let Some(manifest_entry) = job
+        .payload
+        .get("manifestEntry")
+        .and_then(Value::as_object)
+        .cloned()
+    {
+        let mut manifest_entry = manifest_entry;
+        if let Some(family) = resolved_family.clone() {
+            manifest_entry
+                .entry("family")
+                .or_insert(Value::String(family));
+        }
+        let model_type = manifest_entry
+            .get("type")
+            .and_then(Value::as_str)
+            .unwrap_or("image")
+            .to_owned();
+        let family = manifest_entry
+            .get("family")
+            .and_then(Value::as_str)
+            .map(str::to_owned);
+        apply_model_manifest_defaults(&mut manifest_entry, &model_type, family.as_deref());
+        if let Some(paths) = manifest_entry
+            .entry("paths")
+            .or_insert_with(|| json!({}))
+            .as_object_mut()
+        {
+            paths.insert(
+                "model".to_owned(),
+                Value::String(target_dir.display().to_string()),
+            );
+        }
+        let manifest_path = model_manifest_target(settings, &job.payload)?;
+        upsert_model_manifest_entry(&manifest_path, manifest_entry).await?;
+    }
+
+    let mut result = JsonObject::new();
+    result.insert(
+        "modelId".to_owned(),
+        job.payload.get("modelId").cloned().unwrap_or(Value::Null),
+    );
+    result.insert(
+        "repo".to_owned(),
+        repo.map(|value| Value::String(value.to_owned()))
+            .unwrap_or(Value::Null),
+    );
+    result.insert(
+        "sourceUrl".to_owned(),
+        source_url
+            .map(|value| Value::String(value.to_owned()))
+            .unwrap_or(Value::Null),
+    );
+    result.insert(
+        "path".to_owned(),
+        Value::String(target_dir.display().to_string()),
+    );
+    result.insert(
+        "family".to_owned(),
+        resolved_family.map(Value::String).unwrap_or(Value::Null),
+    );
+    result.insert("completedAt".to_owned(), Value::String(now_rfc3339()));
+    update_job(
+        api,
+        &job.id,
+        progress_payload(
+            JobStatus::Completed,
+            ProgressStage::Completed,
+            1.0,
+            "Model import completed.",
             None,
             Some(result),
             None,
@@ -2395,6 +2623,38 @@ async fn download_lora_source_url(
     source_url: &str,
     target_dir: &Path,
 ) -> WorkerResult<()> {
+    download_source_url(
+        context,
+        source_url,
+        target_dir,
+        "LoRA",
+        context.settings.max_lora_url_bytes,
+    )
+    .await
+}
+
+async fn download_model_source_url(
+    context: &DownloadContext<'_>,
+    source_url: &str,
+    target_dir: &Path,
+) -> WorkerResult<()> {
+    download_source_url(
+        context,
+        source_url,
+        target_dir,
+        "Model",
+        context.settings.max_model_url_bytes,
+    )
+    .await
+}
+
+async fn download_source_url(
+    context: &DownloadContext<'_>,
+    source_url: &str,
+    target_dir: &Path,
+    source_label: &str,
+    max_bytes: u64,
+) -> WorkerResult<()> {
     let url =
         parse_lora_source_url_with_private(source_url, context.settings.allow_private_lora_urls)
             .map_err(|error| WorkerError::InvalidPayload(error.message().to_owned()))?;
@@ -2407,10 +2667,10 @@ async fn download_lora_source_url(
         .redirect(reqwest::redirect::Policy::none())
         .build()?;
     let total_bytes = lora_source_content_length(&client, source_url).await?;
-    if total_bytes.is_some_and(|total| total > context.settings.max_lora_url_bytes) {
+    if total_bytes.is_some_and(|total| total > max_bytes) {
         return Err(WorkerError::InvalidPayload(format!(
-            "LoRA sourceUrl exceeds the {} limit",
-            format_bytes(context.settings.max_lora_url_bytes)
+            "{source_label} sourceUrl exceeds the {} limit",
+            format_bytes(max_bytes)
         )));
     }
     let existing_bytes = existing_download_bytes(&target_path, total_bytes).await?;
@@ -2451,10 +2711,10 @@ async fn download_lora_source_url(
             }
         })
     });
-    if expected_bytes.is_some_and(|total| total > context.settings.max_lora_url_bytes) {
+    if expected_bytes.is_some_and(|total| total > max_bytes) {
         return Err(WorkerError::InvalidPayload(format!(
-            "LoRA sourceUrl exceeds the {} limit",
-            format_bytes(context.settings.max_lora_url_bytes)
+            "{source_label} sourceUrl exceeds the {} limit",
+            format_bytes(max_bytes)
         )));
     }
     let mut progress = DownloadProgress::new(
@@ -2484,10 +2744,10 @@ async fn download_lora_source_url(
                 check_cancel(context.api, context.job_id, context.cancel_message).await?;
                 output.write_all(&chunk).await?;
                 progress.record_transferred(u64::try_from(chunk.len()).unwrap_or(u64::MAX));
-                if progress.downloaded_bytes() > context.settings.max_lora_url_bytes {
+                if progress.downloaded_bytes() > max_bytes {
                     return Err(WorkerError::InvalidPayload(format!(
-                        "LoRA sourceUrl exceeds the {} limit",
-                        format_bytes(context.settings.max_lora_url_bytes)
+                        "{source_label} sourceUrl exceeds the {} limit",
+                        format_bytes(max_bytes)
                     )));
                 }
             }
@@ -2917,7 +3177,7 @@ fn payload_bool(payload: &JsonObject, field: &str) -> bool {
     payload.get(field).and_then(Value::as_bool).unwrap_or(false)
 }
 
-async fn cleanup_uploaded_lora_source(payload: &JsonObject) -> WorkerResult<()> {
+async fn cleanup_uploaded_import_source(payload: &JsonObject) -> WorkerResult<()> {
     if !payload_bool(payload, "uploadedSourcePath") {
         return Ok(());
     }
@@ -2991,6 +3251,44 @@ fn resolve_lora_import_target(
     Err(WorkerError::InvalidPayload(
         "LoRA import targetDir must be inside app-managed data/loras or project/loras/imports"
             .to_owned(),
+    ))
+}
+
+fn resolve_model_import_target(
+    settings: &Settings,
+    payload: &JsonObject,
+    fallback_target: PathBuf,
+) -> WorkerResult<PathBuf> {
+    let target = normalize_absolute_path(
+        &optional_payload_string(payload, "targetDir")
+            .map(PathBuf::from)
+            .unwrap_or(fallback_target),
+    )?;
+    let allowed_roots = [normalize_absolute_path(&settings.data_dir.join("models"))?];
+    if allowed_roots.iter().any(|root| target.starts_with(root)) {
+        return Ok(target);
+    }
+    Err(WorkerError::InvalidPayload(
+        "Model import targetDir must be inside app-managed data/models".to_owned(),
+    ))
+}
+
+fn model_manifest_target(settings: &Settings, payload: &JsonObject) -> WorkerResult<PathBuf> {
+    let manifest_path = normalize_absolute_path(&PathBuf::from(required_payload_string(
+        payload,
+        "manifestPath",
+    )?))?;
+    let allowed = [normalize_absolute_path(
+        &settings
+            .config_dir
+            .join("manifests")
+            .join("user.models.jsonc"),
+    )?];
+    if allowed.iter().any(|path| path == &manifest_path) {
+        return Ok(manifest_path);
+    }
+    Err(WorkerError::InvalidPayload(
+        "Model manifestPath must target the global user model manifest".to_owned(),
     ))
 }
 
@@ -3777,6 +4075,53 @@ async fn upsert_lora_manifest_entry(
     write_json_value(path, &manifest).await
 }
 
+async fn upsert_model_manifest_entry(
+    path: &Path,
+    entry: serde_json::Map<String, Value>,
+) -> WorkerResult<()> {
+    let mut manifest = match tokio::fs::read_to_string(path).await {
+        Ok(payload) => serde_json::from_str(&strip_jsonc_comments(&payload))?,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            json!({ "schemaVersion": 1, "models": [] })
+        }
+        Err(error) => return Err(error.into()),
+    };
+    let model_id = entry.get("id").and_then(Value::as_str).ok_or_else(|| {
+        WorkerError::InvalidPayload("Model manifest entry requires id".to_owned())
+    })?;
+    let models = manifest
+        .as_object_mut()
+        .ok_or_else(|| WorkerError::InvalidPayload("Model manifest must be an object".to_owned()))?
+        .entry("models")
+        .or_insert_with(|| Value::Array(Vec::new()));
+    let models = models.as_array_mut().ok_or_else(|| {
+        WorkerError::InvalidPayload("Model manifest models must be an array".to_owned())
+    })?;
+    let mut found = false;
+    for item in models.iter_mut() {
+        if item.get("id").and_then(Value::as_str) != Some(model_id) {
+            continue;
+        }
+        found = true;
+        let created_at = item.get("createdAt").cloned();
+        let Some(object) = item.as_object_mut() else {
+            return Err(WorkerError::InvalidPayload(
+                "Model manifest entry must be an object".to_owned(),
+            ));
+        };
+        for (key, value) in entry.clone() {
+            object.insert(key, value);
+        }
+        if let Some(created_at) = created_at {
+            object.insert("createdAt".to_owned(), created_at);
+        }
+    }
+    if !found {
+        models.push(Value::Object(entry));
+    }
+    write_json_value(path, &manifest).await
+}
+
 async fn write_json_value(path: &Path, value: &Value) -> WorkerResult<()> {
     if let Some(parent) = path.parent() {
         tokio::fs::create_dir_all(parent).await?;
@@ -3957,15 +4302,15 @@ mod tests {
 
     use super::{
         allow_pattern_matches, auto_worker_specs, bounded_tail, candidate_people,
-        child_environment, cleanup_uploaded_lora_source, concat_file_contents, copy_lora_source,
+        child_environment, cleanup_uploaded_import_source, concat_file_contents, copy_lora_source,
         cpu_gpu, cpu_worker_id, crossfade_duration, download_lora_source_url,
         download_progress_payload, fallback_gpu, fresh_asset_id, gpu_worker_id,
         import_lora_source_path, now_rfc3339, output_dimensions, parse_nvidia_smi_gpus,
         restart_exited_children_with_spawner, run_ffmpeg, safe_download_dir, safe_project_path,
         value_f64, visible_gpu_ids, worker_capabilities_with_utility, write_model_install_marker,
         ApiClient, DownloadContext, HuggingFaceSnapshot, Settings, SupervisedChild, WorkerError,
-        WorkerSpec, DEFAULT_MAX_LORA_URL_BYTES, DEFAULT_TRANSITION_DURATION_SECONDS,
-        INSTALL_MARKER,
+        WorkerSpec, DEFAULT_MAX_LORA_URL_BYTES, DEFAULT_MAX_MODEL_URL_BYTES,
+        DEFAULT_TRANSITION_DURATION_SECONDS, INSTALL_MARKER,
     };
 
     #[test]
@@ -4240,7 +4585,7 @@ mod tests {
         );
         payload.insert("uploadedSourcePath".to_owned(), json!(true));
 
-        cleanup_uploaded_lora_source(&payload).await.unwrap();
+        cleanup_uploaded_import_source(&payload).await.unwrap();
 
         assert!(!source_file.exists());
         assert!(!upload_dir.exists());
@@ -4740,6 +5085,7 @@ mod tests {
             huggingface_base_url,
             huggingface_token: huggingface_token.map(str::to_owned),
             max_lora_url_bytes: DEFAULT_MAX_LORA_URL_BYTES,
+            max_model_url_bytes: DEFAULT_MAX_MODEL_URL_BYTES,
             allow_private_lora_urls: true,
         }
     }

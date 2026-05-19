@@ -12,7 +12,7 @@ use std::fs;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 
-use serde_json::Value;
+use serde_json::{json, Map, Value};
 
 /// Maximum allowed safetensors header size, in bytes. Matches the
 /// pre-existing 16 MiB cap enforced by the rust-api.
@@ -92,6 +92,196 @@ fn has_safetensors_extension(path: &Path) -> bool {
     path.extension()
         .and_then(|extension| extension.to_str())
         .is_some_and(|extension| extension.eq_ignore_ascii_case("safetensors"))
+}
+
+/// Returns the detected family for a base model directory or file.
+///
+/// Detection strategy, in priority order:
+/// 1. Diffusers `model_index.json` `_class_name` — canonical for diffusers
+///    snapshots and the most reliable signal.
+/// 2. Safetensors header architecture detection via [`detect_lora_family`] —
+///    the architecture-prefix substrings (e.g. `transformer.transformer_blocks.`)
+///    appear in base models as well as LoRAs, so the same detector usefully
+///    classifies single-file diffusers checkpoints.
+///
+/// Returns `Ok(None)` when no confident signal is available — callers should
+/// treat that as "unassociated" rather than as an error.
+pub fn detect_model_family(path: &Path) -> Result<Option<String>, SafetensorsHeaderError> {
+    if path.is_dir() {
+        if let Some(family) = read_diffusers_model_index_family(path) {
+            return Ok(Some(family));
+        }
+    } else if path.is_file()
+        && path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| name.eq_ignore_ascii_case("model_index.json"))
+    {
+        if let Some(parent) = path.parent() {
+            if let Some(family) = read_diffusers_model_index_family(parent) {
+                return Ok(Some(family));
+            }
+        }
+    }
+    let Some(safetensors_path) = first_safetensors_path(path) else {
+        return Ok(None);
+    };
+    let header = read_safetensors_header(&safetensors_path)?;
+    Ok(detect_lora_family(&header))
+}
+
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub struct FamilyMismatch {
+    pub supplied: String,
+    pub detected: String,
+}
+
+/// Applies the shared import policy for detected architecture families.
+///
+/// A confident detector result rejects a conflicting user-supplied family; a
+/// missing detector result keeps the supplied family, if any.
+pub fn reconcile_detected_family(
+    supplied: Option<String>,
+    detected: Option<String>,
+) -> Result<Option<String>, FamilyMismatch> {
+    match (supplied, detected) {
+        (Some(supplied), Some(detected)) if supplied != detected => {
+            Err(FamilyMismatch { supplied, detected })
+        }
+        (Some(supplied), Some(_)) => Ok(Some(supplied)),
+        (None, Some(detected)) => Ok(Some(detected)),
+        (Some(supplied), None) => Ok(Some(supplied)),
+        (None, None) => Ok(None),
+    }
+}
+
+/// Adds model-manifest defaults derived from the imported model type/family.
+/// Existing author-supplied fields are preserved.
+pub fn apply_model_manifest_defaults(
+    entry: &mut Map<String, Value>,
+    model_type: &str,
+    family: Option<&str>,
+) {
+    entry
+        .entry("downloads".to_owned())
+        .or_insert_with(|| Value::Array(Vec::new()));
+    entry
+        .entry("defaults".to_owned())
+        .or_insert_with(|| json!({}));
+    entry
+        .entry("limits".to_owned())
+        .or_insert_with(|| json!({}));
+    entry.entry("ui".to_owned()).or_insert_with(|| json!({}));
+
+    let Some(family) = family
+        .map(normalize_model_family)
+        .filter(|value| !value.is_empty())
+    else {
+        entry
+            .entry("loraCompatibility".to_owned())
+            .or_insert_with(|| json!({}));
+        return;
+    };
+
+    if let Some(adapter) = model_adapter_for_family(&family) {
+        entry
+            .entry("adapter".to_owned())
+            .or_insert_with(|| Value::String(adapter.to_owned()));
+    }
+
+    let capabilities = model_capabilities_for_type_and_family(model_type, &family);
+    if !capabilities.is_empty() {
+        entry.entry("capabilities".to_owned()).or_insert_with(|| {
+            Value::Array(
+                capabilities
+                    .into_iter()
+                    .map(|capability| Value::String(capability.to_owned()))
+                    .collect(),
+            )
+        });
+    }
+
+    let compatibility = entry
+        .entry("loraCompatibility".to_owned())
+        .or_insert_with(|| json!({}));
+    if let Some(object) = compatibility.as_object_mut() {
+        object
+            .entry("families".to_owned())
+            .or_insert_with(|| json!([family]));
+    }
+}
+
+pub fn model_adapter_for_family(family: &str) -> Option<&'static str> {
+    match normalize_model_family(family).as_str() {
+        "z-image" => Some("z_image_diffusers"),
+        "qwen-image" => Some("qwen_image"),
+        "ltx-video" => Some("ltx_video"),
+        "wan-video" => Some("wan_video"),
+        _ => None,
+    }
+}
+
+pub fn model_capabilities_for_type_and_family(model_type: &str, family: &str) -> Vec<&'static str> {
+    match (
+        model_type.trim().to_ascii_lowercase().as_str(),
+        normalize_model_family(family).as_str(),
+    ) {
+        ("image", "z-image") => vec!["text_to_image", "character_image", "style_variations"],
+        ("image", "qwen-image") => vec!["text_to_image", "style_variations"],
+        ("video", "ltx-video") => vec![
+            "image_to_video",
+            "text_to_video",
+            "first_last_frame",
+            "extend_clip",
+            "video_bridge",
+        ],
+        ("video", "wan-video") => vec![
+            "image_to_video",
+            "text_to_video",
+            "first_last_frame",
+            "extend_clip",
+            "video_bridge",
+            "replace_person",
+        ],
+        _ => Vec::new(),
+    }
+}
+
+fn normalize_model_family(family: &str) -> String {
+    family.trim().to_ascii_lowercase().replace('_', "-")
+}
+
+fn read_diffusers_model_index_family(dir: &Path) -> Option<String> {
+    let index_path = dir.join("model_index.json");
+    let bytes = fs::read(&index_path).ok()?;
+    let index: Value = serde_json::from_slice(&bytes).ok()?;
+    let class_name = index.get("_class_name").and_then(Value::as_str)?;
+    diffusers_class_name_to_family(class_name)
+}
+
+/// Maps a diffusers pipeline `_class_name` to a SceneWorks family. The map is
+/// intentionally conservative — only return a family when the mapping is
+/// unambiguous, and otherwise let the caller treat the model as unassociated.
+pub fn diffusers_class_name_to_family(class_name: &str) -> Option<String> {
+    let normalized = class_name.trim();
+    let lower = normalized.to_ascii_lowercase();
+    match lower.as_str() {
+        "zimagepipeline"
+        | "zimageimg2imgpipeline"
+        | "zimageturbopipeline"
+        | "zimageturboimg2imgpipeline" => Some("z-image".to_owned()),
+        "qwenimagepipeline" | "qwenimageimg2imgpipeline" | "qwenimageeditpipeline" => {
+            Some("qwen-image".to_owned())
+        }
+        "fluxpipeline" | "fluximg2imgpipeline" | "fluxinpaintpipeline" => Some("flux".to_owned()),
+        "wanpipeline" | "wani2vpipeline" | "wantext2videopipeline" => Some("wan-video".to_owned()),
+        "ltxpipeline" | "ltxvideopipeline" | "ltximagetovideopipeline" => {
+            Some("ltx-video".to_owned())
+        }
+        "stablediffusionpipeline" | "stablediffusionimg2imgpipeline" => Some("sd1.5".to_owned()),
+        "stablediffusionxlpipeline" | "stablediffusionxlimg2imgpipeline" => Some("sdxl".to_owned()),
+        _ => None,
+    }
 }
 
 /// Returns the detected LoRA architecture family or `None` if the header
@@ -369,6 +559,25 @@ mod tests {
         Value::Object(object)
     }
 
+    fn write_safetensors(path: &Path, keys: &[String]) {
+        // Emit a minimal valid safetensors layout: 8-byte little-endian header
+        // length, then a JSON header whose entries each point at empty tensor
+        // slices in the (empty) tensor section. The detector only reads the
+        // header, so empty offsets are fine.
+        let mut header = serde_json::Map::new();
+        header.insert("__metadata__".to_owned(), json!({"format": "pt"}));
+        for key in keys {
+            header.insert(
+                key.clone(),
+                json!({"dtype": "F16", "shape": [1], "data_offsets": [0, 0]}),
+            );
+        }
+        let header_bytes = serde_json::to_vec(&Value::Object(header)).expect("serialize header");
+        let mut buffer = (header_bytes.len() as u64).to_le_bytes().to_vec();
+        buffer.extend_from_slice(&header_bytes);
+        std::fs::write(path, buffer).expect("write safetensors");
+    }
+
     fn diffusers_double_stream_keys(prefix: &str, block_count: usize) -> Vec<String> {
         let mut keys = Vec::new();
         for block in 0..block_count {
@@ -543,5 +752,117 @@ mod tests {
     fn non_object_header_returns_none() {
         let header = json!(["not", "an", "object"]);
         assert!(detect_lora_family(&header).is_none());
+    }
+
+    #[test]
+    fn diffusers_class_names_map_to_known_families() {
+        assert_eq!(
+            diffusers_class_name_to_family("ZImagePipeline").as_deref(),
+            Some("z-image")
+        );
+        assert_eq!(
+            diffusers_class_name_to_family("QwenImagePipeline").as_deref(),
+            Some("qwen-image")
+        );
+        assert_eq!(
+            diffusers_class_name_to_family("FluxPipeline").as_deref(),
+            Some("flux")
+        );
+        assert_eq!(
+            diffusers_class_name_to_family("StableDiffusionXLPipeline").as_deref(),
+            Some("sdxl")
+        );
+        assert!(diffusers_class_name_to_family("UnknownCustomPipeline").is_none());
+    }
+
+    #[test]
+    fn reconcile_detected_family_rejects_mismatches_only() {
+        assert_eq!(
+            reconcile_detected_family(Some("z-image".to_owned()), Some("z-image".to_owned()))
+                .unwrap()
+                .as_deref(),
+            Some("z-image")
+        );
+        assert_eq!(
+            reconcile_detected_family(None, Some("qwen-image".to_owned()))
+                .unwrap()
+                .as_deref(),
+            Some("qwen-image")
+        );
+        assert_eq!(
+            reconcile_detected_family(Some("wan-video".to_owned()), None)
+                .unwrap()
+                .as_deref(),
+            Some("wan-video")
+        );
+        assert_eq!(
+            reconcile_detected_family(Some("z-image".to_owned()), Some("qwen-image".to_owned()))
+                .unwrap_err(),
+            FamilyMismatch {
+                supplied: "z-image".to_owned(),
+                detected: "qwen-image".to_owned(),
+            }
+        );
+    }
+
+    #[test]
+    fn model_manifest_defaults_follow_supported_families() {
+        let mut entry = serde_json::Map::new();
+        apply_model_manifest_defaults(&mut entry, "video", Some("wan_video"));
+
+        assert_eq!(entry["adapter"], "wan_video");
+        assert_eq!(
+            entry["capabilities"],
+            json!([
+                "image_to_video",
+                "text_to_video",
+                "first_last_frame",
+                "extend_clip",
+                "video_bridge",
+                "replace_person"
+            ])
+        );
+        assert_eq!(entry["loraCompatibility"]["families"], json!(["wan-video"]));
+        assert_eq!(entry["downloads"], json!([]));
+    }
+
+    #[test]
+    fn detect_model_family_reads_diffusers_index() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        std::fs::write(
+            temp.path().join("model_index.json"),
+            br#"{"_class_name": "ZImagePipeline", "_diffusers_version": "0.27.0"}"#,
+        )
+        .expect("write index");
+        let family = detect_model_family(temp.path()).expect("detect");
+        assert_eq!(family.as_deref(), Some("z-image"));
+    }
+
+    #[test]
+    fn detect_model_family_falls_back_to_header() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let keys = diffusers_double_stream_keys("transformer", 40);
+        write_safetensors(&temp.path().join("checkpoint.safetensors"), &keys);
+        let family = detect_model_family(temp.path()).expect("detect");
+        assert_eq!(family.as_deref(), Some("qwen-image"));
+    }
+
+    #[test]
+    fn detect_model_family_returns_none_for_empty_dir() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let family = detect_model_family(temp.path()).expect("detect");
+        assert!(family.is_none());
+    }
+
+    #[test]
+    fn detect_model_family_returns_none_for_unmapped_class_name() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        std::fs::write(
+            temp.path().join("model_index.json"),
+            br#"{"_class_name": "ExperimentalPipeline"}"#,
+        )
+        .expect("write index");
+        let family = detect_model_family(temp.path()).expect("detect");
+        assert!(family.is_none());
     }
 }

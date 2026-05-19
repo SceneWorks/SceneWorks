@@ -121,6 +121,7 @@ string_enum! {
         FrameExtract => "frame_extract",
         TimelineExport => "timeline_export",
         ModelDownload => "model_download",
+        ModelImport => "model_import",
         LoraImport => "lora_import",
     }
 }
@@ -177,6 +178,7 @@ string_enum! {
         FrameExtract => "frame_extract",
         TimelineExport => "timeline_export",
         ModelDownload => "model_download",
+        ModelImport => "model_import",
         LoraImport => "lora_import",
     }
 }
@@ -242,6 +244,7 @@ string_enum! {
         FrameExtract => "frame_extract",
         TimelineExport => "timeline_export",
         ModelDownload => "model_download",
+        ModelImport => "model_import",
         LoraImport => "lora_import",
     }
 }
