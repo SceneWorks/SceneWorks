@@ -3025,6 +3025,7 @@ fn publish<T: Serialize>(state: &AppState, event: &str, data: &T) {
 struct DownloadContext {
     repo: String,
     files: Vec<String>,
+    fallback_size_bytes: Option<u64>,
 }
 
 async fn model_catalog(state: &AppState) -> Result<Vec<Value>, ApiError> {
@@ -3052,6 +3053,12 @@ async fn model_catalog(state: &AppState) -> Result<Vec<Value>, ApiError> {
         .iter_mut()
         .zip(download_contexts.into_iter().zip(download_size_bytes))
     {
+        let fallback_size_bytes = download_context
+            .as_ref()
+            .and_then(|context| context.fallback_size_bytes);
+        let effective_download_size_bytes = download_size_bytes.or(fallback_size_bytes);
+        let download_size_estimated =
+            download_size_bytes.is_none() && fallback_size_bytes.is_some();
         let (downloadable, installed_path, installed) =
             if let Some(download_context) = download_context {
                 let installed_path = state
@@ -3070,16 +3077,20 @@ async fn model_catalog(state: &AppState) -> Result<Vec<Value>, ApiError> {
         object.insert("downloadable".to_owned(), Value::Bool(downloadable));
         object.insert(
             "downloadSizeBytes".to_owned(),
-            download_size_bytes
+            effective_download_size_bytes
                 .map(|value| json!(value))
                 .unwrap_or(Value::Null),
         );
         object.insert(
             "downloadSizeLabel".to_owned(),
-            download_size_bytes
+            effective_download_size_bytes
                 .map(format_bytes)
                 .map(Value::String)
                 .unwrap_or(Value::Null),
+        );
+        object.insert(
+            "downloadSizeEstimated".to_owned(),
+            Value::Bool(download_size_estimated),
         );
         object.insert(
             "installState".to_owned(),
@@ -4315,7 +4326,20 @@ fn model_download_context(model: &Value) -> Result<Option<DownloadContext>, ApiE
     Ok(Some(DownloadContext {
         repo: required_string_field(&download, "repo")?.to_owned(),
         files: string_array_field(&download, "files"),
+        fallback_size_bytes: manifest_download_size_bytes(model, &download),
     }))
+}
+
+fn manifest_download_size_bytes(model: &Value, download: &Value) -> Option<u64> {
+    // Prefer the selected download entry, then fall back to legacy model-level metadata.
+    ["estimatedSizeBytes", "downloadSizeBytes", "sizeBytes"]
+        .iter()
+        .find_map(|field| download.get(*field).and_then(json_size_to_u64))
+        .or_else(|| {
+            ["estimatedSizeBytes", "downloadSizeBytes", "sizeBytes"]
+                .iter()
+                .find_map(|field| model.get(*field).and_then(json_size_to_u64))
+        })
 }
 
 async fn estimate_huggingface_download_size(
@@ -5892,7 +5916,7 @@ mod tests {
                   "type": "image",
                   "adapter": "z_image_diffusers",
                   "capabilities": ["text_to_image", "edit_image"],
-                  "downloads": [{ "provider": "huggingface", "repo": "owner/model", "files": ["*.safetensors"] }],
+                  "downloads": [{ "provider": "huggingface", "repo": "owner/model", "files": ["*.safetensors"], "estimatedSizeBytes": 12884901888 }],
                   "paths": {},
                   "defaults": {},
                   "limits": {},
@@ -5984,6 +6008,9 @@ mod tests {
         assert_eq!(models[0]["name"], "User Model");
         assert_eq!(models[0]["adapter"], "z_image_diffusers");
         assert_eq!(models[0]["downloadable"], true);
+        assert_eq!(models[0]["downloadSizeBytes"], 12884901888_u64);
+        assert_eq!(models[0]["downloadSizeLabel"], "12.0 GB");
+        assert_eq!(models[0]["downloadSizeEstimated"], true);
         assert_eq!(models[0]["installState"], "installed");
         assert!(models[0]["installedPath"]
             .as_str()
@@ -7064,6 +7091,17 @@ mod tests {
         assert_eq!(super::json_size_to_u64(&json!("200.5")), None);
         assert_eq!(super::format_bytes(0), "0 B");
         assert_eq!(super::format_bytes(1024 * 1024 * 1024), "1.0 GB");
+        assert_eq!(
+            super::manifest_download_size_bytes(
+                &json!({ "downloads": [] }),
+                &json!({ "estimatedSizeBytes": "4096" })
+            ),
+            Some(4096)
+        );
+        assert_eq!(
+            super::manifest_download_size_bytes(&json!({ "sizeBytes": 2048 }), &json!({})),
+            Some(2048)
+        );
         assert_eq!(
             super::quote_huggingface_repo("owner/model name"),
             "owner/model%20name"

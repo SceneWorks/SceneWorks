@@ -1,5 +1,0 @@
-{
-  "$schema": "../../packages/schemas/lora-manifest.schema.json",
-  "schemaVersion": 1,
-  "loras": []
-}

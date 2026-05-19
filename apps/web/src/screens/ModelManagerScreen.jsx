@@ -30,6 +30,13 @@ function matchesFamily(item, familyFilter) {
   return item.type === "lora_import" && families.length === 0 ? true : families.includes(familyFilter);
 }
 
+function downloadSizeText(model) {
+  if (!model.downloadSizeLabel) {
+    return "Unavailable";
+  }
+  return model.downloadSizeEstimated ? `~${model.downloadSizeLabel}` : model.downloadSizeLabel;
+}
+
 export function ModelManagerScreen({ activeProject, jobs, loras, models, onDownloadModel, onImportLora, onOpenQueue }) {
   const families = Array.from(new Set(models.map((model) => model.family).filter(Boolean))).sort();
   const familiesKey = families.join("|");
@@ -138,6 +145,7 @@ export function ModelManagerScreen({ activeProject, jobs, loras, models, onDownl
           const installed = model.installState === "installed";
           const localDownloadJob = installed ? null : downloadJobs.find((job) => job.status !== "completed");
           const failedDownload = localDownloadJob && terminalStatuses.has(localDownloadJob.status);
+          const downloadSize = downloadSizeText(model);
           return (
             <article className="model-card" key={model.id}>
               <div>
@@ -156,8 +164,8 @@ export function ModelManagerScreen({ activeProject, jobs, loras, models, onDownl
                   <dd>{model.downloads?.[0]?.repo ?? "none"}</dd>
                 </div>
                 <div>
-                  <dt>Download</dt>
-                  <dd>{model.downloadSizeLabel ?? "unknown"}</dd>
+                  <dt>Download size</dt>
+                  <dd>{downloadSize}</dd>
                 </div>
               </dl>
               {localDownloadJob ? (
@@ -171,7 +179,7 @@ export function ModelManagerScreen({ activeProject, jobs, loras, models, onDownl
                     : failedDownload
                       ? "Retry Download"
                       : model.downloadSizeLabel
-                        ? `Download ${model.downloadSizeLabel}`
+                        ? `Download ${downloadSize}`
                         : "Download"}
               </button>
             </article>

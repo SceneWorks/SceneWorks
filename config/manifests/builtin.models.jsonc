@@ -10,10 +10,14 @@
       "adapter": "z_image_diffusers",
       "capabilities": ["text_to_image", "character_image", "style_variations"],
       "downloads": [
+        // Refresh estimatedSizeBytes from the Hugging Face recursive tree API:
+        // https://huggingface.co/api/models/<repo>/tree/main?recursive=true
+        // The value should match the bytes downloaded after any files filter, not necessarily the full repo.
         {
           "provider": "huggingface",
           "repo": "Tongyi-MAI/Z-Image-Turbo",
-          "files": []
+          "files": [],
+          "estimatedSizeBytes": 32899667397
         }
       ],
       "paths": {
@@ -50,7 +54,8 @@
         {
           "provider": "huggingface",
           "repo": "Tongyi-MAI/Z-Image-Turbo",
-          "files": []
+          "files": [],
+          "estimatedSizeBytes": 32899667397
         }
       ],
       "paths": {
@@ -87,7 +92,8 @@
         {
           "provider": "huggingface",
           "repo": "Qwen/Qwen-Image",
-          "files": []
+          "files": [],
+          "estimatedSizeBytes": 57704594653
         }
       ],
       "paths": {
@@ -123,7 +129,8 @@
         {
           "provider": "huggingface",
           "repo": "Qwen/Qwen-Image-Edit",
-          "files": []
+          "files": [],
+          "estimatedSizeBytes": 57720467613
         }
       ],
       "paths": {
@@ -159,12 +166,14 @@
         {
           "provider": "huggingface",
           "repo": "Lightricks/LTX-2.3",
-          "files": []
+          "files": [],
+          "estimatedSizeBytes": 157004895813
         },
         {
           "provider": "huggingface",
           "repo": "Lightricks/LTX-Video",
-          "files": []
+          "files": [],
+          "estimatedSizeBytes": 254107005436
         }
       ],
       "paths": {
@@ -208,7 +217,8 @@
         {
           "provider": "huggingface",
           "repo": "Wan-AI/Wan2.2-TI2V-5B-Diffusers",
-          "files": []
+          "files": [],
+          "estimatedSizeBytes": 34203021834
         }
       ],
       "paths": {
