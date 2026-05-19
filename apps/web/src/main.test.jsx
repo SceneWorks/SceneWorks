@@ -843,6 +843,17 @@ describe("SceneWorks app shell", () => {
               installState: "missing",
               downloads: [{ provider: "huggingface", repo: "owner/unknown" }],
             },
+            {
+              id: "exact_size",
+              name: "Exact Size",
+              type: "image",
+              family: "z-image",
+              downloadable: true,
+              installState: "missing",
+              downloadSizeLabel: "8.0 GB",
+              downloadSizeEstimated: false,
+              downloads: [{ provider: "huggingface", repo: "owner/exact" }],
+            },
           ]}
           onDownloadModel={() => {}}
           onImportLora={() => {}}
@@ -853,8 +864,11 @@ describe("SceneWorks app shell", () => {
 
     expect(container.textContent).toContain("Download size");
     expect(container.textContent).toContain("~30.6 GB");
+    expect(container.textContent).toContain("8.0 GB");
     expect(container.textContent).toContain("Unavailable");
     expect([...container.querySelectorAll("button")].some((button) => button.textContent === "Download ~30.6 GB")).toBe(true);
+    expect([...container.querySelectorAll("button")].some((button) => button.textContent === "Download 8.0 GB")).toBe(true);
+    expect(container.textContent).not.toContain("~8.0 GB");
   });
 
   it("advances elapsed seconds for active job snapshots between server updates", () => {

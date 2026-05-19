@@ -10,6 +10,9 @@
       "adapter": "z_image_diffusers",
       "capabilities": ["text_to_image", "character_image", "style_variations"],
       "downloads": [
+        // Refresh estimatedSizeBytes from the Hugging Face recursive tree API:
+        // https://huggingface.co/api/models/<repo>/tree/main?recursive=true
+        // The value should match the bytes downloaded after any files filter, not necessarily the full repo.
         {
           "provider": "huggingface",
           "repo": "Tongyi-MAI/Z-Image-Turbo",

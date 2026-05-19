@@ -8,7 +8,29 @@
     "schemaVersion": { "type": "integer", "minimum": 1 },
     "models": {
       "type": "array",
-      "items": { "type": "object" }
+      "items": {
+        "type": "object",
+        "properties": {
+          "downloads": {
+            "type": "array",
+            "description": "Download options are ordered by preference; the API uses the first supported entry as the canonical model download.",
+            "items": {
+              "type": "object",
+              "properties": {
+                "estimatedSizeBytes": {
+                  "type": ["integer", "string"],
+                  "description": "Estimated bytes for the actual files downloaded after applying the files filter. Refresh from the provider when upstream files change."
+                },
+                "files": {
+                  "type": "array",
+                  "items": { "type": "string" },
+                  "description": "Optional allow-list of provider file patterns included in the download."
+                }
+              }
+            }
+          }
+        }
+      }
     }
   }
 }

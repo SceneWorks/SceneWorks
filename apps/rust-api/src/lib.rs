@@ -4331,6 +4331,7 @@ fn model_download_context(model: &Value) -> Result<Option<DownloadContext>, ApiE
 }
 
 fn manifest_download_size_bytes(model: &Value, download: &Value) -> Option<u64> {
+    // Prefer the selected download entry, then fall back to legacy model-level metadata.
     ["estimatedSizeBytes", "downloadSizeBytes", "sizeBytes"]
         .iter()
         .find_map(|field| download.get(*field).and_then(json_size_to_u64))
