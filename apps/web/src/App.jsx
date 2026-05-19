@@ -72,6 +72,7 @@ export function App() {
   const [previewAsset, setPreviewAsset] = useState(null);
   const [studioLaunch, setStudioLaunch] = useState(null);
   const [error, setError] = useState("");
+  const activeProjectRef = useRef(null);
   const activeViewRef = useRef(activeView);
   const localGenerationJobIdsRef = useRef(localGenerationJobIds);
   const selectedTimelineIdRef = useRef(null);
@@ -144,6 +145,10 @@ export function App() {
   useEffect(() => {
     activeViewRef.current = activeView;
   }, [activeView]);
+
+  useEffect(() => {
+    activeProjectRef.current = activeProject;
+  }, [activeProject]);
 
   useEffect(() => {
     localGenerationJobIdsRef.current = localGenerationJobIds;
@@ -228,11 +233,7 @@ export function App() {
         refreshData();
       }
       if (job.status === "completed" && job.type === "lora_import") {
-        refreshData();
-        // refreshData loads the global catalog; project imports need the project overlay too.
-        if (job.projectId) {
-          refreshLoras(job.projectId);
-        }
+        refreshDataWithLoraOverlay(job.projectId ?? activeProjectRef.current?.id);
       }
       if (job.status === "failed" && !hasVisibleLocalFailure(job)) {
         setError(failedJobNotice(job));
@@ -370,6 +371,14 @@ export function App() {
     }
   }
 
+  function refreshDataWithLoraOverlay(projectId = activeProjectRef.current?.id) {
+    refreshData().then(() => {
+      if (projectId) {
+        refreshLoras(projectId);
+      }
+    });
+  }
+
   async function refreshRecipePresets(projectId = activeProject?.id) {
     try {
       const query = projectId ? `?projectId=${encodeURIComponent(projectId)}` : "";
@@ -470,7 +479,7 @@ export function App() {
       setActiveView("Queue");
     }
     setError("");
-    refreshData();
+    refreshDataWithLoraOverlay(metadata.scope === "project" ? activeProject?.id : activeProjectRef.current?.id);
     return job;
   }
 
@@ -672,7 +681,7 @@ export function App() {
     if (active === "Video" && localIds.video.includes(job.id)) {
       return true;
     }
-    return active === "Models" && job.type === "model_download";
+    return active === "Models" && (job.type === "model_download" || job.type === "lora_import");
   }
 
   async function withCharacterApi(callback) {

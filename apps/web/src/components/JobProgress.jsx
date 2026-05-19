@@ -9,7 +9,7 @@ function formatJobType(type) {
 }
 
 function jobTitle(job) {
-  return job.payload?.prompt ?? job.payload?.modelName ?? job.payload?.modelId ?? job.id;
+  return job.payload?.prompt ?? job.payload?.name ?? job.payload?.loraId ?? job.payload?.modelName ?? job.payload?.modelId ?? job.id;
 }
 
 function jobMessage(job) {
