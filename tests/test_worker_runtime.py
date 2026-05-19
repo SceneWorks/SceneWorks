@@ -700,6 +700,24 @@ def test_friendly_failure_identifies_missing_peft_backend():
     assert "Technical detail" in error
 
 
+def test_friendly_failure_identifies_missing_sentencepiece_backend():
+    message, error = friendly_failure(
+        "Video generation",
+        RuntimeError(
+            "The component <class 'transformers.models.t5.tokenization_t5."
+            "_LazyModule.__getattr__.<locals>.Placeholder'> of <class "
+            "'diffusers.pipelines.ltx.pipeline_ltx_image2video.LTXImageToVideoPipeline'> "
+            "cannot be loaded as it does not seem to have any of the loading methods defined."
+        ),
+    )
+
+    assert message == "Video generation failed because the worker is missing a tokenizer backend."
+    assert "SentencePiece" in error
+    assert "pip install -r apps/worker/requirements.txt" in error
+    assert "docker compose build worker --no-cache" in error
+    assert "Technical detail" in error
+
+
 def test_worker_check_reports_inference_sidecar_capabilities(monkeypatch):
     events = []
     monkeypatch.setattr("scene_worker.runtime.emit", events.append)
