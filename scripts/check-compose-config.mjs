@@ -23,7 +23,7 @@ function assertEqual(actual, expected, label) {
 
 function assertServiceMountsTarget(service, target, label) {
   const volumes = service?.volumes ?? [];
-  if (!volumes.some((volume) => volume?.target === target)) {
+  if (!volumes.some((volume) => volume?.target === target || (typeof volume === "string" && volume.split(":").includes(target)))) {
     throw new Error(`${label}: expected a volume mounted at ${target}`);
   }
 }

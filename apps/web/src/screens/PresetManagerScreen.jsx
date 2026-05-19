@@ -106,6 +106,7 @@ export function PresetManagerScreen({
   const availableLoras = selectedModel ? installedLoras.filter((lora) => loraMatchesModel(lora, selectedModel)) : [];
   const selectedIds = selectedLoraIds(form);
   const addableLoras = availableLoras.filter((lora) => !selectedIds.includes(lora.id));
+  const showLoraEmptyState = !availableLoras.length && !form.loras.length;
   const validation = presetValidation({ ...selectedPreset, loras: form.loras }, loras, selectedModel);
   const validationMessage = editable ? presetValidationMessage(validation) : "";
   const saveDisabledReason = !editable
@@ -145,6 +146,7 @@ export function PresetManagerScreen({
   }, [availableModels, form.model]);
 
   useEffect(() => {
+    // After adding a LoRA, select the next addable item so repeat adds stay one-click.
     if (!addableLoras.some((lora) => lora.id === selectedLoraToAdd)) {
       setSelectedLoraToAdd(addableLoras[0]?.id ?? "");
     }
@@ -495,16 +497,14 @@ export function PresetManagerScreen({
                         {lora.name ?? lora.id}
                       </option>
                     ))
-                  ) : (
-                    <option value="">No LoRAs available</option>
-                  )}
+                  ) : null}
                 </select>
               </label>
               <button disabled={!editable || !selectedLoraToAdd || form.loras.length >= 3} onClick={addSelectedLora} type="button">
                 Add LoRA
               </button>
             </div>
-            {!availableLoras.length ? (
+            {showLoraEmptyState ? (
               <div className="empty-panel compact-panel">
                 <span>{loraEmptyMessage}</span>
                 {onOpenModels ? (
@@ -536,10 +536,10 @@ export function PresetManagerScreen({
                         <label>
                           Weight
                           <input
-                            disabled={!editable}
+                            disabled={!editable || missing || incompatible}
                             max="2"
                             min="-2"
-                            onChange={(event) => updateLoraWeight(lora.id, event.target.value)}
+                            onChange={(event) => updateLoraWeight(selected.id, event.target.value)}
                             step="0.05"
                             type="number"
                             value={selected?.weight ?? ""}

@@ -1902,6 +1902,20 @@ describe("SceneWorks app shell", () => {
     expect(container.textContent).not.toContain("Qwen Only");
 
     await act(async () => {
+      [...container.querySelectorAll("button")].find((button) => button.textContent === "New Preset").click();
+    });
+    await changeField(field(container, "Name"), "Plain Morning");
+    await changeField(field(container, "Add LoRA"), "global_detail");
+    await act(async () => {
+      [...container.querySelectorAll("button")].find((button) => button.textContent === "Add LoRA").click();
+    });
+    expect(container.querySelector(".lora-choice-list").textContent).toContain("Global Detail");
+    await act(async () => {
+      [...container.querySelectorAll(".lora-choice button")].find((button) => button.textContent === "Remove").click();
+    });
+    expect(container.querySelector(".lora-choice-list")).toBeNull();
+
+    await act(async () => {
       [...container.querySelectorAll(".preset-row")].find((button) => button.textContent.includes("Moody")).click();
     });
     await changeField(field(container, "Description"), "Richer low key color.");
@@ -1933,7 +1947,7 @@ describe("SceneWorks app shell", () => {
     expect(deleteRecipePreset).toHaveBeenCalledWith("moody", "global");
   });
 
-  it("explains preset save blockers and no-model empty states", async () => {
+  it("explains preset save blockers and selected LoRA warning states", async () => {
     const updateRecipePreset = vi.fn();
     root = createRoot(container);
     await act(async () => {
@@ -1962,8 +1976,11 @@ describe("SceneWorks app shell", () => {
     });
 
     expect(container.textContent).toContain("No models");
-    expect(container.textContent).toContain("No model selected");
+    expect(container.textContent).not.toContain("No model selected");
+    expect(container.textContent).toContain("Pending Style");
+    expect(container.textContent).toContain("Missing or still importing");
     expect(container.textContent).toContain("Save blocked: pending_style has not finished importing.");
+    expect(field(container, "Weight").disabled).toBe(true);
     expect([...container.querySelectorAll("button")].find((button) => button.textContent === "Save Preset").disabled).toBe(true);
     expect(updateRecipePreset).not.toHaveBeenCalled();
   });
