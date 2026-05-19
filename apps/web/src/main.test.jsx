@@ -55,6 +55,18 @@ function field(container, labelText) {
   return label?.querySelector("input, select, textarea");
 }
 
+function loraPanel(container) {
+  return container.querySelector("form[aria-label='Import LoRA']");
+}
+
+function modelImportPanel(container) {
+  return container.querySelector("form[aria-label='Import model']");
+}
+
+function buttonInside(scope, label) {
+  return [...scope.querySelectorAll("button")].find((button) => button.textContent === label);
+}
+
 async function changeField(input, value) {
   await act(async () => {
     const setter = Object.getOwnPropertyDescriptor(input.constructor.prototype, "value")?.set;
@@ -979,9 +991,10 @@ describe("SceneWorks app shell", () => {
       [...container.querySelectorAll("button")].find((button) => button.textContent === "Models").click();
     });
     await settle();
-    await changeField(field(container, "Source URL"), "https://example.com/loras/detail.safetensors");
+    const panel = loraPanel(container);
+    await changeField(field(panel, "Source URL"), "https://example.com/loras/detail.safetensors");
     await act(async () => {
-      [...container.querySelectorAll("button")].find((button) => button.textContent === "Queue Import").click();
+      buttonInside(panel, "Queue Import").click();
     });
     await settle();
 
@@ -1173,11 +1186,12 @@ describe("SceneWorks app shell", () => {
     });
     await settle();
     await act(async () => {
-      [...container.querySelectorAll("button")].find((button) => button.textContent === "Upload").click();
+      buttonInside(loraPanel(container), "Upload").click();
     });
-    await changeFile(field(container, "LoRA File"), loraFile);
+    const panel = loraPanel(container);
+    await changeFile(field(panel, "LoRA File"), loraFile);
     await act(async () => {
-      [...container.querySelectorAll("button")].find((button) => button.textContent === "Queue Import").click();
+      buttonInside(loraPanel(container), "Queue Import").click();
     });
 
     expect(container.textContent).toContain("Uploaded LoRA file exceeds the 2GB limit");
@@ -1259,10 +1273,11 @@ describe("SceneWorks app shell", () => {
       );
     });
 
-    await changeField(field(container, "Source URL"), "https://example.com/loras/detail.safetensors");
-    await changeField(field(container, "Name"), "Detail LoRA");
+    const panel = loraPanel(container);
+    await changeField(field(panel, "Source URL"), "https://example.com/loras/detail.safetensors");
+    await changeField(field(panel, "Name"), "Detail LoRA");
     await act(async () => {
-      [...container.querySelectorAll("button")].find((button) => button.textContent === "Queue Import").click();
+      buttonInside(panel, "Queue Import").click();
     });
 
     expect(onImportLora).toHaveBeenCalledWith(
@@ -1298,17 +1313,18 @@ describe("SceneWorks app shell", () => {
 
     expect(field(container, "LoRA family").value).toBe("all");
     await changeField(field(container, "LoRA family"), "qwen-image");
-    await changeField(field(container, "Source URL"), "https://example.com/loras/detail.safetensors");
+    const panel = loraPanel(container);
+    await changeField(field(panel, "Source URL"), "https://example.com/loras/detail.safetensors");
     await act(async () => {
-      [...container.querySelectorAll("button")].find((button) => button.textContent === "Queue Import").click();
+      buttonInside(panel, "Queue Import").click();
     });
 
     expect(onImportLora.mock.calls[0][0]).not.toHaveProperty("family");
 
-    await changeField(field(container, "Family"), "z-image");
-    await changeField(field(container, "Source URL"), "https://example.com/loras/detail.safetensors");
+    await changeField(field(panel, "Family"), "z-image");
+    await changeField(field(panel, "Source URL"), "https://example.com/loras/detail.safetensors");
     await act(async () => {
-      [...container.querySelectorAll("button")].find((button) => button.textContent === "Queue Import").click();
+      buttonInside(panel, "Queue Import").click();
     });
 
     expect(onImportLora.mock.calls[1][0]).toEqual(
@@ -1341,14 +1357,15 @@ describe("SceneWorks app shell", () => {
       ]);
     });
 
-    await changeField(field(container, "Family"), "qwen-image");
-    expect(field(container, "Family").value).toBe("qwen-image");
+    const panel = loraPanel(container);
+    await changeField(field(panel, "Family"), "qwen-image");
+    expect(field(panel, "Family").value).toBe("qwen-image");
 
     await act(async () => {
       renderScreen([{ id: "z_image_turbo", name: "Z-Image Turbo", type: "image", family: "z-image" }]);
     });
 
-    expect(field(container, "Family").value).toBe("");
+    expect(field(loraPanel(container), "Family").value).toBe("");
   });
 
   it("shows model download size estimates and unavailable states before download", async () => {
@@ -1453,21 +1470,22 @@ describe("SceneWorks app shell", () => {
       root.render(<Harness />);
     });
 
-    await changeField(field(container, "Source URL"), "https://example.com/loras/one.safetensors");
-    await changeField(field(container, "Name"), "First Detail");
+    const panel = () => loraPanel(container);
+    await changeField(field(panel(), "Source URL"), "https://example.com/loras/one.safetensors");
+    await changeField(field(panel(), "Name"), "First Detail");
     await act(async () => {
-      [...container.querySelectorAll("button")].find((button) => button.textContent === "Queue Import").click();
+      buttonInside(panel(), "Queue Import").click();
     });
 
-    expect(field(container, "Source URL").value).toBe("");
-    expect(field(container, "Name").value).toBe("");
+    expect(field(panel(), "Source URL").value).toBe("");
+    expect(field(panel(), "Name").value).toBe("");
     expect(container.textContent).toContain("LoRA imports");
     expect(container.textContent).toContain("detail_lora_1");
     expect(container.textContent).not.toContain("No LoRAs in this view");
 
-    await changeField(field(container, "Source URL"), "https://example.com/loras/two.safetensors");
+    await changeField(field(panel(), "Source URL"), "https://example.com/loras/two.safetensors");
     await act(async () => {
-      [...container.querySelectorAll("button")].find((button) => button.textContent === "Queue Import").click();
+      buttonInside(panel(), "Queue Import").click();
     });
 
     expect(onImportLora).toHaveBeenCalledTimes(2);
@@ -1502,12 +1520,13 @@ describe("SceneWorks app shell", () => {
     });
 
     await act(async () => {
-      [...container.querySelectorAll("button")].find((button) => button.textContent === "Upload").click();
+      buttonInside(loraPanel(container), "Upload").click();
     });
-    await changeField(field(container, "Scope"), "project");
-    await changeFile(field(container, "LoRA File"), loraFile);
+    const panel = loraPanel(container);
+    await changeField(field(panel, "Scope"), "project");
+    await changeFile(field(panel, "LoRA File"), loraFile);
     await act(async () => {
-      [...container.querySelectorAll("button")].find((button) => button.textContent === "Queue Import").click();
+      buttonInside(loraPanel(container), "Queue Import").click();
     });
 
     expect(onImportLora).toHaveBeenCalledWith(
@@ -1613,13 +1632,137 @@ describe("SceneWorks app shell", () => {
       );
     });
 
-    await changeField(field(container, "Source URL"), "file:///tmp/detail.safetensors");
+    const panel = loraPanel(container);
+    await changeField(field(panel, "Source URL"), "file:///tmp/detail.safetensors");
     await act(async () => {
-      [...container.querySelectorAll("button")].find((button) => button.textContent === "Queue Import").click();
+      buttonInside(panel, "Queue Import").click();
     });
 
     expect(container.textContent).toContain("LoRA sourceUrl must use http or https");
-    expect([...container.querySelectorAll("button")].find((button) => button.textContent === "Queue Import").disabled).toBe(false);
+    expect(buttonInside(loraPanel(container), "Queue Import").disabled).toBe(false);
+  });
+
+  it("queues model URL imports from the Models page", async () => {
+    const onImportModel = vi.fn(async (payload) => ({
+      payload: { ...payload, modelId: "custom_model", manifestEntry: { family: "z-image" } },
+    }));
+    root = createRoot(container);
+    await act(async () => {
+      root.render(
+        <ModelManagerScreen
+          activeProject={null}
+          jobs={[]}
+          loras={[]}
+          models={[{ id: "z_image_turbo", name: "Z-Image Turbo", type: "image", family: "z-image" }]}
+          onDownloadModel={() => {}}
+          onImportLora={() => {}}
+          onImportModel={onImportModel}
+          onOpenQueue={() => {}}
+        />,
+      );
+    });
+
+    const panel = modelImportPanel(container);
+    await changeField(field(panel, "Source URL"), "https://example.com/models/custom.safetensors");
+    await changeField(field(panel, "Name"), "Custom Model");
+    await act(async () => {
+      buttonInside(panel, "Queue Import").click();
+    });
+
+    expect(onImportModel).toHaveBeenCalledWith(
+      expect.objectContaining({
+        sourceUrl: "https://example.com/models/custom.safetensors",
+        name: "Custom Model",
+        type: "image",
+      }),
+    );
+    expect(onImportModel.mock.calls[0][0]).not.toHaveProperty("family");
+    expect(container.textContent).toContain("Model import queued for custom_model.");
+    expect(container.textContent).toContain("Detected family: z-image.");
+  });
+
+  it("sends an explicit family override on model imports when chosen", async () => {
+    const onImportModel = vi.fn(async (payload) => ({
+      payload: { ...payload, modelId: "custom_model", manifestEntry: { family: payload.family } },
+    }));
+    root = createRoot(container);
+    await act(async () => {
+      root.render(
+        <ModelManagerScreen
+          activeProject={null}
+          jobs={[]}
+          loras={[]}
+          models={[{ id: "z_image_turbo", name: "Z-Image Turbo", type: "image", family: "z-image" }]}
+          onDownloadModel={() => {}}
+          onImportLora={() => {}}
+          onImportModel={onImportModel}
+          onOpenQueue={() => {}}
+        />,
+      );
+    });
+
+    const panel = modelImportPanel(container);
+    await changeField(field(panel, "Family"), "z-image");
+    await changeField(field(panel, "Source URL"), "https://example.com/models/custom.safetensors");
+    await act(async () => {
+      buttonInside(panel, "Queue Import").click();
+    });
+
+    expect(onImportModel.mock.calls[0][0]).toEqual(
+      expect.objectContaining({ family: "z-image" }),
+    );
+  });
+
+  it("renders unassociated models with a needs-family badge", async () => {
+    root = createRoot(container);
+    await act(async () => {
+      root.render(
+        <ModelManagerScreen
+          activeProject={null}
+          jobs={[]}
+          loras={[]}
+          models={[{ id: "imported_custom", name: "Imported Custom", type: "image" }]}
+          onDownloadModel={() => {}}
+          onImportLora={() => {}}
+          onImportModel={() => {}}
+          onOpenQueue={() => {}}
+        />,
+      );
+    });
+
+    expect(container.textContent).toContain("needs family");
+    expect(container.textContent).toContain("unassociated");
+  });
+
+  it("shows in-progress model imports inline", async () => {
+    root = createRoot(container);
+    await act(async () => {
+      root.render(
+        <ModelManagerScreen
+          activeProject={null}
+          jobs={[
+            {
+              id: "model-import-job-1",
+              type: "model_import",
+              status: "downloading",
+              stage: "downloading",
+              progress: 0.42,
+              payload: { modelId: "custom_model", name: "Custom Model" },
+            },
+          ]}
+          loras={[]}
+          models={[]}
+          onDownloadModel={() => {}}
+          onImportLora={() => {}}
+          onImportModel={() => {}}
+          onOpenQueue={() => {}}
+        />,
+      );
+    });
+
+    expect(container.textContent).toContain("Model imports in progress");
+    expect(container.textContent).toContain("Model import");
+    expect(container.textContent).toContain("downloading");
   });
 
   it("adds the SSE ticket as a query parameter", () => {

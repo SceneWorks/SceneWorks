@@ -28,7 +28,8 @@ use sceneworks_core::jobs_store::{
     WorkerHeartbeat, JOB_STATUSES,
 };
 use sceneworks_core::lora_family::{
-    detect_lora_family, first_safetensors_path, read_safetensors_header, SafetensorsHeaderError,
+    detect_lora_family, detect_model_family, first_safetensors_path, read_safetensors_header,
+    SafetensorsHeaderError,
 };
 use sceneworks_core::lora_url::{lora_source_url_file_stem, parse_lora_source_url, LoraUrlError};
 use sceneworks_core::project_store::{
@@ -487,6 +488,10 @@ pub fn create_app(settings: Settings) -> Result<Router, JobsStoreError> {
             "/api/v1/models/:model_id/download",
             post(create_model_download_job),
         )
+        .route(
+            "/api/v1/models/import",
+            post(create_model_import_job).layer(DefaultBodyLimit::max(MAX_MULTIPART_BODY_BYTES)),
+        )
         .route("/api/v1/loras", get(list_loras))
         .route(
             "/api/v1/loras/import",
@@ -872,6 +877,29 @@ struct VideoJobRequest {
 struct ModelDownloadRequest {
     #[serde(default = "default_requested_gpu")]
     requested_gpu: String,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ModelImportRequest {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    model_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    model_type: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    repo: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    source_url: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    source_path: Option<String>,
+    #[serde(default)]
+    files: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    family: Option<String>,
+    #[serde(default, skip_deserializing, skip_serializing_if = "bool_is_false")]
+    uploaded_source_path: bool,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -2600,6 +2628,372 @@ async fn cleanup_staged_lora_upload(path: &FsPath) {
     let _ = tokio::fs::remove_file(path).await;
     if let Some(parent) = path.parent() {
         let _ = tokio::fs::remove_dir(parent).await;
+    }
+}
+
+const ALLOWED_MODEL_TYPES: &[&str] = &["image", "video", "utility"];
+
+async fn create_model_import_job(
+    State(state): State<AppState>,
+    request: AxumRequest,
+) -> Result<(StatusCode, Json<JobSnapshot>), Response> {
+    let is_multipart = request
+        .headers()
+        .get(header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|value| value.starts_with("multipart/form-data"));
+    if is_multipart {
+        let multipart = Multipart::from_request(request, &state)
+            .await
+            .map_err(|error| ApiError::bad_request(error.to_string()).into_response())?;
+        let (payload, staged_path) = model_import_request_from_multipart(&state, multipart)
+            .await
+            .map_err(IntoResponse::into_response)?;
+        let result = queue_model_import_job(state, payload).await;
+        if result.is_err() {
+            cleanup_staged_model_upload(&staged_path).await;
+        }
+        return result.map_err(IntoResponse::into_response);
+    }
+
+    let payload = Json::<ModelImportRequest>::from_request(request, &state)
+        .await
+        .map(|Json(payload)| payload)
+        .map_err(json_rejection_response)?;
+    queue_model_import_job(state, payload)
+        .await
+        .map_err(IntoResponse::into_response)
+}
+
+async fn queue_model_import_job(
+    state: AppState,
+    mut payload: ModelImportRequest,
+) -> Result<(StatusCode, Json<JobSnapshot>), ApiError> {
+    if option_str_is_empty(payload.repo.as_deref())
+        && option_str_is_empty(payload.source_url.as_deref())
+        && option_str_is_empty(payload.source_path.as_deref())
+    {
+        return Err(ApiError::bad_request(
+            "Provide a Hugging Face repo, source URL, or source path",
+        ));
+    }
+    if let Some(source_url) = payload.source_url.as_deref() {
+        validate_source_url(source_url)?;
+    }
+    let model_type = match payload.model_type.as_deref().map(str::trim) {
+        Some(value) if !value.is_empty() => {
+            let normalized = value.to_ascii_lowercase();
+            if !ALLOWED_MODEL_TYPES.contains(&normalized.as_str()) {
+                return Err(ApiError::bad_request(format!(
+                    "Model type must be one of {}",
+                    ALLOWED_MODEL_TYPES.join(", ")
+                )));
+            }
+            normalized
+        }
+        _ => "image".to_owned(),
+    };
+    payload.model_type = Some(model_type.clone());
+    if let Some(family) = payload.family.take() {
+        let models = model_catalog(&state).await?;
+        payload.family = Some(validate_lora_family(&models, &family)?);
+    }
+    let name = payload
+        .name
+        .clone()
+        .or_else(|| payload.repo.clone())
+        .or_else(|| {
+            payload
+                .source_url
+                .as_deref()
+                .and_then(|value| lora_source_url_file_stem(value).ok())
+        })
+        .or_else(|| {
+            payload.source_path.as_deref().and_then(|path| {
+                FsPath::new(path)
+                    .file_stem()
+                    .and_then(|value| value.to_str())
+                    .map(str::to_owned)
+            })
+        })
+        .unwrap_or_else(|| "Imported Model".to_owned());
+    let model_id = payload
+        .model_id
+        .clone()
+        .unwrap_or_else(|| slugify_lora_id(&name));
+    let existing_ids = model_catalog(&state)
+        .await?
+        .into_iter()
+        .filter_map(|model| model.get("id").and_then(Value::as_str).map(str::to_owned))
+        .collect::<std::collections::HashSet<_>>();
+    if existing_ids.contains(&model_id) {
+        return Err(ApiError::bad_request(format!(
+            "Model id '{model_id}' already exists. Pick a different id or delete the existing model first."
+        )));
+    }
+    let target_name = safe_download_dir(&model_id);
+    let target_dir = state
+        .settings
+        .data_dir
+        .join("models")
+        .join("imports")
+        .join(&target_name);
+    let manifest_path = state
+        .settings
+        .config_dir
+        .join("manifests")
+        .join("user.models.jsonc");
+    let source_path_rel = format!("models/imports/{target_name}");
+    let allowed_source_roots = vec![state.settings.data_dir.join("models")];
+    if let Some(source_path) = payload.source_path.as_deref() {
+        let allowed_source_roots = if payload.uploaded_source_path {
+            vec![state.settings.data_dir.join("cache").join("model-uploads")]
+        } else {
+            allowed_source_roots
+        };
+        validate_lora_import_source_path(source_path, &allowed_source_roots)?;
+        let detected = detect_family_from_local_model_path(source_path)?;
+        payload.family = reconcile_model_family(
+            payload.family.take(),
+            detected,
+            &format!("source_path={source_path}"),
+        )?;
+    }
+    let timestamp = now_rfc3339();
+    let mut manifest_entry = json!({
+        "id": model_id,
+        "name": name,
+        "type": model_type,
+        "source": {
+            "provider": model_import_source_provider(&payload),
+            "repo": payload.repo.clone(),
+            "path": source_path_rel,
+        },
+        "files": payload.files.clone(),
+        "paths": {
+            "model": target_dir.display().to_string(),
+        },
+        "createdAt": timestamp,
+        "updatedAt": timestamp,
+    });
+    if let Some(source_url) = payload.source_url.clone() {
+        if let Some(source) = manifest_entry
+            .get_mut("source")
+            .and_then(Value::as_object_mut)
+        {
+            source.insert("url".to_owned(), Value::String(source_url));
+        }
+    }
+    if let Some(family) = payload.family.clone() {
+        if let Some(object) = manifest_entry.as_object_mut() {
+            object.insert("family".to_owned(), Value::String(family));
+        }
+    }
+    let mut payload = to_json_object(&payload)?;
+    payload.insert("modelId".to_owned(), manifest_entry["id"].clone());
+    payload.insert("modelName".to_owned(), manifest_entry["name"].clone());
+    payload.insert(
+        "targetDir".to_owned(),
+        Value::String(target_dir.display().to_string()),
+    );
+    payload.insert(
+        "manifestPath".to_owned(),
+        Value::String(manifest_path.display().to_string()),
+    );
+    payload.insert("manifestEntry".to_owned(), manifest_entry);
+    let job = create_generation_job(
+        state,
+        JobType::ModelImport,
+        None,
+        None,
+        payload,
+        "auto".to_owned(),
+    )
+    .await?;
+    Ok((StatusCode::CREATED, Json(job)))
+}
+
+async fn model_import_request_from_multipart(
+    state: &AppState,
+    mut multipart: Multipart,
+) -> Result<(ModelImportRequest, PathBuf), ApiError> {
+    let mut payload = ModelImportRequest {
+        model_id: None,
+        name: None,
+        model_type: None,
+        repo: None,
+        source_url: None,
+        source_path: None,
+        files: Vec::new(),
+        family: None,
+        uploaded_source_path: false,
+    };
+    let mut staged_path = None;
+
+    let parse_result = async {
+        while let Some(field) = multipart
+            .next_field()
+            .await
+            .map_err(|error| ApiError::bad_request(error.to_string()))?
+        {
+            let field_name = field.name().unwrap_or("").to_owned();
+            if field_name == "file" {
+                if staged_path.is_some() {
+                    return Err(ApiError::bad_request("Only one model file can be uploaded"));
+                }
+                let upload_name =
+                    sanitized_upload_filename(field.file_name().unwrap_or("model.safetensors"));
+                let path =
+                    write_model_upload_field_to_staged_file(state, field, &upload_name).await?;
+                payload.source_path = Some(path.display().to_string());
+                payload.files = vec![upload_name];
+                payload.uploaded_source_path = true;
+                staged_path = Some(path);
+                continue;
+            }
+
+            let value = field
+                .text()
+                .await
+                .map_err(|error| ApiError::bad_request(error.to_string()))?;
+            let value = value.trim();
+            if value.is_empty() {
+                continue;
+            }
+            match field_name.as_str() {
+                "modelId" => payload.model_id = Some(value.to_owned()),
+                "name" => payload.name = Some(value.to_owned()),
+                "type" => payload.model_type = Some(value.to_owned()),
+                "family" => payload.family = Some(value.to_owned()),
+                "repo" => payload.repo = Some(value.to_owned()),
+                "sourceUrl" => payload.source_url = Some(value.to_owned()),
+                _ => {}
+            }
+        }
+        Ok(())
+    }
+    .await;
+    if let Err(error) = parse_result {
+        if let Some(path) = staged_path.as_deref() {
+            cleanup_staged_model_upload(path).await;
+        }
+        return Err(error);
+    }
+
+    let Some(staged_path) = staged_path else {
+        return Err(ApiError::bad_request("Upload file field is required"));
+    };
+    Ok((payload, staged_path))
+}
+
+async fn write_model_upload_field_to_staged_file(
+    state: &AppState,
+    mut field: axum::extract::multipart::Field<'_>,
+    filename: &str,
+) -> Result<PathBuf, ApiError> {
+    let upload_dir = state
+        .settings
+        .data_dir
+        .join("cache")
+        .join("model-uploads")
+        .join(format!("upload-{}", Uuid::new_v4().simple()));
+    tokio::fs::create_dir_all(&upload_dir)
+        .await
+        .map_err(|error| ApiError::internal(error.to_string()))?;
+    let temp_path = upload_dir.join(filename);
+    let mut file = tokio::fs::File::create(&temp_path)
+        .await
+        .map_err(|error| ApiError::internal(error.to_string()))?;
+    let mut uploaded_bytes = 0usize;
+    let write_result = async {
+        while let Some(chunk) = field
+            .chunk()
+            .await
+            .map_err(|error| ApiError::bad_request(error.to_string()))?
+        {
+            uploaded_bytes = uploaded_bytes.saturating_add(chunk.len());
+            if uploaded_bytes > max_lora_upload_bytes() {
+                return Err(ApiError::payload_too_large(
+                    "Uploaded model file exceeds the size limit",
+                ));
+            }
+            file.write_all(&chunk)
+                .await
+                .map_err(|error| ApiError::internal(error.to_string()))?;
+        }
+        file.flush()
+            .await
+            .map_err(|error| ApiError::internal(error.to_string()))?;
+        Ok(())
+    }
+    .await;
+    if let Err(error) = write_result {
+        drop(file);
+        cleanup_staged_model_upload(&temp_path).await;
+        return Err(error);
+    }
+    Ok(temp_path)
+}
+
+async fn cleanup_staged_model_upload(path: &FsPath) {
+    let _ = tokio::fs::remove_file(path).await;
+    if let Some(parent) = path.parent() {
+        let _ = tokio::fs::remove_dir(parent).await;
+    }
+}
+
+fn model_import_source_provider(payload: &ModelImportRequest) -> &'static str {
+    if payload.repo.is_some() {
+        "huggingface"
+    } else if payload.source_url.is_some() {
+        "url"
+    } else {
+        "local"
+    }
+}
+
+/// Inspects a local model source (file or directory) and returns the detected
+/// family. Returns `Ok(None)` when the directory has no diffusers
+/// `model_index.json` and no readable `.safetensors`, or when the signal is
+/// ambiguous — callers should treat that as "unassociated".
+fn detect_family_from_local_model_path(source_path: &str) -> Result<Option<String>, ApiError> {
+    detect_model_family(FsPath::new(source_path)).map_err(|error| match error {
+        SafetensorsHeaderError::Io(io_error) => {
+            ApiError::bad_request(format!("Unable to inspect model file: {io_error}"))
+        }
+        SafetensorsHeaderError::InvalidHeader => {
+            ApiError::bad_request("Model file has an invalid safetensors header".to_owned())
+        }
+    })
+}
+
+/// Applies the import-time policy for base models: confident detection rejects
+/// a mismatched user-supplied family; an unsupplied family is filled in from
+/// the detection; an inconclusive detection accepts the supplied family
+/// unchanged (and leaves things unset if none was supplied).
+fn reconcile_model_family(
+    supplied: Option<String>,
+    detected: Option<String>,
+    context: &str,
+) -> Result<Option<String>, ApiError> {
+    match (supplied, detected) {
+        (Some(supplied), Some(detected)) => {
+            if supplied == detected {
+                Ok(Some(supplied))
+            } else {
+                Err(ApiError::bad_request(format!(
+                    "Model files appear to be {detected}, but family was declared as {supplied}. Re-import with family {detected} or pick different files."
+                )))
+            }
+        }
+        (None, Some(detected)) => Ok(Some(detected)),
+        (Some(supplied), None) => {
+            println!(
+                "Model import {context}: architecture detection inconclusive; accepting supplied family {supplied}"
+            );
+            Ok(Some(supplied))
+        }
+        (None, None) => Ok(None),
     }
 }
 
@@ -6670,6 +7064,203 @@ mod tests {
         .await;
         assert_eq!(status, StatusCode::CREATED);
         assert_eq!(qwen_job["payload"]["manifestEntry"]["family"], "qwen-image");
+    }
+
+    async fn request_multipart_model_upload(
+        app: axum::Router,
+        fields: &[(&str, &str)],
+        filename: &str,
+        bytes: &[u8],
+    ) -> (StatusCode, Value) {
+        let boundary = "SCENEWORKS_MODEL_BOUNDARY";
+        let mut body = Vec::new();
+        for (name, value) in fields {
+            body.extend_from_slice(format!("--{boundary}\r\n").as_bytes());
+            body.extend_from_slice(
+                format!("Content-Disposition: form-data; name=\"{name}\"\r\n\r\n").as_bytes(),
+            );
+            body.extend_from_slice(value.as_bytes());
+            body.extend_from_slice(b"\r\n");
+        }
+        body.extend_from_slice(format!("--{boundary}\r\n").as_bytes());
+        body.extend_from_slice(
+            format!("Content-Disposition: form-data; name=\"file\"; filename=\"{filename}\"\r\n")
+                .as_bytes(),
+        );
+        body.extend_from_slice(b"Content-Type: application/octet-stream\r\n\r\n");
+        body.extend_from_slice(bytes);
+        body.extend_from_slice(format!("\r\n--{boundary}--\r\n").as_bytes());
+        let (status, _, bytes) = request_raw(
+            app,
+            "POST",
+            "/api/v1/models/import",
+            body,
+            &[(
+                "content-type",
+                &format!("multipart/form-data; boundary={boundary}"),
+            )],
+        )
+        .await;
+        let value = serde_json::from_slice(&bytes).expect("json body parses");
+        (status, value)
+    }
+
+    #[tokio::test]
+    async fn model_import_routes_handle_url_upload_and_family_detection() {
+        std::env::set_var("SCENEWORKS_DISABLE_MODEL_SIZE_ESTIMATE", "1");
+        let temp_dir = tempfile::tempdir().expect("temp dir creates");
+        let config_dir = temp_dir.path().join("config/manifests");
+        std::fs::create_dir_all(&config_dir).expect("manifest dir creates");
+        std::fs::write(
+            config_dir.join("builtin.models.jsonc"),
+            r#"
+            {
+              "schemaVersion": 1,
+              "models": [
+                { "id": "z_image_turbo", "name": "Z-Image Turbo", "family": "z-image", "type": "image", "loraCompatibility": { "families": ["z-image"] } }
+              ]
+            }
+            "#,
+        )
+        .expect("builtin models writes");
+        std::fs::write(
+            config_dir.join("user.models.jsonc"),
+            r#"{ "schemaVersion": 1, "models": [] }"#,
+        )
+        .expect("user models writes");
+        std::fs::write(
+            config_dir.join("builtin.loras.jsonc"),
+            r#"{ "schemaVersion": 1, "loras": [] }"#,
+        )
+        .expect("builtin loras writes");
+        std::fs::write(
+            config_dir.join("user.loras.jsonc"),
+            r#"{ "schemaVersion": 1, "loras": [] }"#,
+        )
+        .expect("user loras writes");
+        std::fs::write(
+            config_dir.join("builtin.recipe-presets.jsonc"),
+            r#"{ "schemaVersion": 1, "presets": [] }"#,
+        )
+        .expect("builtin presets writes");
+        std::fs::write(
+            config_dir.join("user.recipe-presets.jsonc"),
+            r#"{ "schemaVersion": 1, "presets": [] }"#,
+        )
+        .expect("user presets writes");
+
+        // URL import without supplied family is accepted, payload echoes
+        // the request fields, and target dir lives under data/models/imports.
+        let app = create_app(test_settings(&temp_dir)).expect("app creates");
+        let (status, url_job) = request(
+            app,
+            "POST",
+            "/api/v1/models/import",
+            json!({
+                "sourceUrl": "https://example.com/models/custom.safetensors",
+                "name": "Custom Model",
+                "type": "image"
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED);
+        assert_eq!(url_job["type"], "model_import");
+        assert_eq!(url_job["requestedGpu"], "auto");
+        assert_eq!(url_job["payload"]["modelId"], "custom_model");
+        assert_eq!(url_job["payload"]["modelName"], "Custom Model");
+        assert_eq!(
+            url_job["payload"]["manifestEntry"]["source"]["provider"],
+            "url"
+        );
+        assert_eq!(url_job["payload"]["manifestEntry"]["type"], "image");
+        assert!(url_job["payload"]["targetDir"]
+            .as_str()
+            .is_some_and(|value| value.contains("models/imports/custom_model")
+                || value.contains("models\\imports\\custom_model")));
+        assert!(url_job["payload"]["manifestEntry"].get("family").is_none());
+
+        // Duplicate id is rejected with an actionable error.
+        let app = create_app(test_settings(&temp_dir)).expect("app creates");
+        let (dup_status, dup_error) = request(
+            app,
+            "POST",
+            "/api/v1/models/import",
+            json!({
+                "modelId": "z_image_turbo",
+                "sourceUrl": "https://example.com/models/clone.safetensors",
+                "name": "Clone"
+            }),
+        )
+        .await;
+        assert_eq!(dup_status, StatusCode::BAD_REQUEST);
+        assert!(dup_error["detail"]
+            .as_str()
+            .unwrap_or("")
+            .contains("already exists"));
+
+        // Local upload stages bytes, queues an import job, and family
+        // detection from a diffusers-style header auto-fills the manifest.
+        let app = create_app(test_settings(&temp_dir)).expect("app creates");
+        let upload_bytes = test_safetensors_bytes_with_keys(&qwen_image_tensor_keys());
+        let (upload_status, upload_job) = request_multipart_model_upload(
+            app,
+            &[("name", "Auto Family"), ("type", "image")],
+            "auto-family.safetensors",
+            &upload_bytes,
+        )
+        .await;
+        assert_eq!(upload_status, StatusCode::CREATED);
+        assert_eq!(upload_job["type"], "model_import");
+        assert_eq!(upload_job["payload"]["modelId"], "auto_family");
+        assert_eq!(upload_job["payload"]["uploadedSourcePath"], true);
+        assert_eq!(
+            upload_job["payload"]["manifestEntry"]["family"],
+            "qwen-image"
+        );
+        let source_path = std::path::PathBuf::from(
+            upload_job["payload"]["sourcePath"]
+                .as_str()
+                .expect("source path"),
+        );
+        assert_eq!(
+            std::fs::read(&source_path).expect("staged upload reads"),
+            upload_bytes
+        );
+
+        // Declared family must match detected family when detection is
+        // confident — mismatch is rejected at the API boundary.
+        let app = create_app(test_settings(&temp_dir)).expect("app creates");
+        let (mismatch_status, mismatch_error) = request_multipart_model_upload(
+            app,
+            &[
+                ("name", "Mismatch"),
+                ("type", "image"),
+                ("family", "z-image"),
+            ],
+            "mismatch.safetensors",
+            &test_safetensors_bytes_with_keys(&qwen_image_tensor_keys()),
+        )
+        .await;
+        assert_eq!(mismatch_status, StatusCode::BAD_REQUEST);
+        assert!(mismatch_error["detail"]
+            .as_str()
+            .unwrap_or("")
+            .contains("qwen-image"));
+
+        // Missing source produces an actionable error.
+        let app = create_app(test_settings(&temp_dir)).expect("app creates");
+        let (empty_status, empty_error) = request(
+            app,
+            "POST",
+            "/api/v1/models/import",
+            json!({ "name": "Nothing" }),
+        )
+        .await;
+        assert_eq!(empty_status, StatusCode::BAD_REQUEST);
+        assert!(empty_error["detail"]
+            .as_str()
+            .unwrap_or("")
+            .contains("Hugging Face repo"));
     }
 
     #[tokio::test]

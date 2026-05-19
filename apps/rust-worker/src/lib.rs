@@ -13,7 +13,8 @@ use sceneworks_core::contracts::{
     WorkerRegisterRequest, WorkerSnapshot, WorkerStatus, WorkerUtilizationSnapshot,
 };
 use sceneworks_core::lora_family::{
-    detect_lora_family, first_safetensors_path, read_safetensors_header, SafetensorsHeaderError,
+    detect_lora_family, detect_model_family, first_safetensors_path, read_safetensors_header,
+    SafetensorsHeaderError,
 };
 use sceneworks_core::lora_url::{
     lora_source_url_file_name, lora_source_url_file_stem, parse_lora_source_url_with_private,
@@ -597,6 +598,7 @@ fn worker_capabilities_with_utility(
             WorkerCapability::FrameExtract,
             WorkerCapability::TimelineExport,
             WorkerCapability::ModelDownload,
+            WorkerCapability::ModelImport,
             WorkerCapability::LoraImport,
             WorkerCapability::PersonDetect,
             WorkerCapability::PersonTrack,
@@ -807,6 +809,9 @@ async fn run_utility_job(
         JobType::LoraImport => run_lora_import_job(api, settings, http_client, &job)
             .await
             .map_err(|error| ("LoRA import failed.", error)),
+        JobType::ModelImport => run_model_import_job(api, settings, http_client, &job)
+            .await
+            .map_err(|error| ("Model import failed.", error)),
         JobType::FrameExtract => run_frame_extract_job(api, settings, &job)
             .await
             .map_err(|error| ("Frame extraction failed.", error)),
@@ -833,7 +838,7 @@ async fn run_utility_job(
             result.map_err(|error| ("Utility job failed.", error))
         }
     };
-    if job.job_type == JobType::LoraImport {
+    if matches!(job.job_type, JobType::LoraImport | JobType::ModelImport) {
         let _ = cleanup_uploaded_lora_source(&job.payload).await;
     }
     if let Err((message, error)) = result {
@@ -1255,6 +1260,235 @@ async fn run_lora_import_job(
             ProgressStage::Completed,
             1.0,
             "LoRA import completed.",
+            None,
+            Some(result),
+            None,
+        ),
+    )
+    .await?;
+    Ok(())
+}
+
+/// Runs the architecture detector against a downloaded/imported model
+/// directory or file. Reads diffusers `model_index.json` first and falls
+/// back to safetensors header detection. Returns `Ok(None)` when no
+/// confident signal is available — callers should leave the manifest
+/// entry unassociated rather than failing the import.
+fn detect_model_family_in_target(dir: &Path) -> Result<Option<String>, String> {
+    detect_model_family(dir).map_err(|error| match error {
+        SafetensorsHeaderError::Io(io_error) => {
+            format!("Unable to inspect imported model file: {io_error}")
+        }
+        SafetensorsHeaderError::InvalidHeader => {
+            "Imported model file has an invalid safetensors header.".to_owned()
+        }
+    })
+}
+
+async fn run_model_import_job(
+    api: &ApiClient,
+    settings: &Settings,
+    http_client: &reqwest::Client,
+    job: &JobSnapshot,
+) -> WorkerResult<()> {
+    let repo = optional_payload_string(&job.payload, "repo");
+    let source_url = optional_payload_string(&job.payload, "sourceUrl");
+    let source_path = optional_payload_string(&job.payload, "sourcePath");
+    let target_name = optional_payload_string(&job.payload, "modelId")
+        .or_else(|| optional_payload_string(&job.payload, "name"))
+        .map(str::to_owned)
+        .or_else(|| repo.map(str::to_owned))
+        .or_else(|| source_url.and_then(|value| lora_source_url_file_stem(value).ok()))
+        .map(|value| safe_download_dir(&value))
+        .unwrap_or_else(|| {
+            source_path
+                .and_then(|path| {
+                    Path::new(path)
+                        .file_stem()
+                        .and_then(|value| value.to_str())
+                        .map(safe_download_dir)
+                })
+                .unwrap_or_else(|| "model".to_owned())
+        });
+    let target_dir = resolve_model_import_target(
+        settings,
+        &job.payload,
+        settings
+            .data_dir
+            .join("models")
+            .join("imports")
+            .join(target_name),
+    )?;
+
+    heartbeat(api, settings, WorkerStatus::Busy, Some(&job.id)).await?;
+    update_job(
+        api,
+        &job.id,
+        progress_payload(
+            JobStatus::Downloading,
+            ProgressStage::Importing,
+            0.1,
+            "Importing model.",
+            None,
+            None,
+            None,
+        ),
+    )
+    .await?;
+    check_cancel(
+        api,
+        &job.id,
+        "Model import canceled before transfer started.",
+    )
+    .await?;
+
+    if let Some(repo) = repo {
+        let files = payload_string_array(&job.payload, "files");
+        let revision = optional_payload_string(&job.payload, "revision").unwrap_or("main");
+        let snapshot =
+            HuggingFaceSnapshot::resolve(http_client, settings, repo, revision, &files).await?;
+        let mut progress = DownloadProgress::new(
+            repo,
+            directory_size(&target_dir).await,
+            snapshot.total_bytes(),
+            progress_report_interval(settings),
+        );
+        download_snapshot(
+            &DownloadContext {
+                api,
+                client: http_client,
+                settings,
+                job_id: &job.id,
+                cancel_message: "Model import canceled by user.",
+            },
+            &target_dir,
+            &snapshot,
+            &mut progress,
+        )
+        .await?;
+    } else if let Some(source_path) = source_path {
+        import_lora_source_path(
+            Path::new(source_path),
+            &target_dir,
+            payload_bool(&job.payload, "uploadedSourcePath"),
+        )
+        .await?;
+    } else if let Some(source_url) = source_url {
+        download_lora_source_url(
+            &DownloadContext {
+                api,
+                client: http_client,
+                settings,
+                job_id: &job.id,
+                cancel_message: "Model import canceled by user.",
+            },
+            source_url,
+            &target_dir,
+        )
+        .await?;
+    } else {
+        return fail_job(
+            api,
+            &job.id,
+            "Model import failed.",
+            Some("Provide repo, sourceUrl, or sourcePath for model import".to_owned()),
+        )
+        .await;
+    }
+
+    let detected_family = match detect_model_family_in_target(&target_dir) {
+        Ok(detected) => detected,
+        Err(detail) => {
+            return fail_job(api, &job.id, "Model import failed.", Some(detail)).await;
+        }
+    };
+    let supplied_family = optional_payload_string(&job.payload, "family").map(str::to_owned);
+    let resolved_family = match (supplied_family, detected_family) {
+        (Some(supplied), Some(detected)) => {
+            if supplied != detected {
+                return fail_job(
+                    api,
+                    &job.id,
+                    "Model import failed.",
+                    Some(format!(
+                        "Model files appear to be {detected}, but family was declared as {supplied}. Re-import with family {detected} or pick different files."
+                    )),
+                )
+                .await;
+            }
+            Some(supplied)
+        }
+        (None, Some(detected)) => Some(detected),
+        (Some(supplied), None) => {
+            println!(
+                "Model import job {}: architecture detection inconclusive; accepting supplied family {supplied}",
+                job.id
+            );
+            Some(supplied)
+        }
+        (None, None) => None,
+    };
+
+    write_model_install_marker(&target_dir, &job.payload, repo.unwrap_or(""), &job.id).await?;
+    if let Some(manifest_entry) = job
+        .payload
+        .get("manifestEntry")
+        .and_then(Value::as_object)
+        .cloned()
+    {
+        let mut manifest_entry = manifest_entry;
+        if let Some(family) = resolved_family.clone() {
+            manifest_entry
+                .entry("family")
+                .or_insert(Value::String(family));
+        }
+        if let Some(paths) = manifest_entry
+            .entry("paths")
+            .or_insert_with(|| json!({}))
+            .as_object_mut()
+        {
+            paths.insert(
+                "model".to_owned(),
+                Value::String(target_dir.display().to_string()),
+            );
+        }
+        let manifest_path = model_manifest_target(settings, &job.payload)?;
+        upsert_model_manifest_entry(&manifest_path, manifest_entry).await?;
+    }
+
+    let mut result = JsonObject::new();
+    result.insert(
+        "modelId".to_owned(),
+        job.payload.get("modelId").cloned().unwrap_or(Value::Null),
+    );
+    result.insert(
+        "repo".to_owned(),
+        repo.map(|value| Value::String(value.to_owned()))
+            .unwrap_or(Value::Null),
+    );
+    result.insert(
+        "sourceUrl".to_owned(),
+        source_url
+            .map(|value| Value::String(value.to_owned()))
+            .unwrap_or(Value::Null),
+    );
+    result.insert(
+        "path".to_owned(),
+        Value::String(target_dir.display().to_string()),
+    );
+    result.insert(
+        "family".to_owned(),
+        resolved_family.map(Value::String).unwrap_or(Value::Null),
+    );
+    result.insert("completedAt".to_owned(), Value::String(now_rfc3339()));
+    update_job(
+        api,
+        &job.id,
+        progress_payload(
+            JobStatus::Completed,
+            ProgressStage::Completed,
+            1.0,
+            "Model import completed.",
             None,
             Some(result),
             None,
@@ -2994,6 +3228,44 @@ fn resolve_lora_import_target(
     ))
 }
 
+fn resolve_model_import_target(
+    settings: &Settings,
+    payload: &JsonObject,
+    fallback_target: PathBuf,
+) -> WorkerResult<PathBuf> {
+    let target = normalize_absolute_path(
+        &optional_payload_string(payload, "targetDir")
+            .map(PathBuf::from)
+            .unwrap_or(fallback_target),
+    )?;
+    let allowed_roots = [normalize_absolute_path(&settings.data_dir.join("models"))?];
+    if allowed_roots.iter().any(|root| target.starts_with(root)) {
+        return Ok(target);
+    }
+    Err(WorkerError::InvalidPayload(
+        "Model import targetDir must be inside app-managed data/models".to_owned(),
+    ))
+}
+
+fn model_manifest_target(settings: &Settings, payload: &JsonObject) -> WorkerResult<PathBuf> {
+    let manifest_path = normalize_absolute_path(&PathBuf::from(required_payload_string(
+        payload,
+        "manifestPath",
+    )?))?;
+    let allowed = [normalize_absolute_path(
+        &settings
+            .config_dir
+            .join("manifests")
+            .join("user.models.jsonc"),
+    )?];
+    if allowed.iter().any(|path| path == &manifest_path) {
+        return Ok(manifest_path);
+    }
+    Err(WorkerError::InvalidPayload(
+        "Model manifestPath must target the global user model manifest".to_owned(),
+    ))
+}
+
 fn lora_manifest_target(settings: &Settings, payload: &JsonObject) -> WorkerResult<PathBuf> {
     let manifest_path = normalize_absolute_path(&PathBuf::from(required_payload_string(
         payload,
@@ -3773,6 +4045,53 @@ async fn upsert_lora_manifest_entry(
     }
     if !found {
         loras.push(Value::Object(entry));
+    }
+    write_json_value(path, &manifest).await
+}
+
+async fn upsert_model_manifest_entry(
+    path: &Path,
+    entry: serde_json::Map<String, Value>,
+) -> WorkerResult<()> {
+    let mut manifest = match tokio::fs::read_to_string(path).await {
+        Ok(payload) => serde_json::from_str(&strip_jsonc_comments(&payload))?,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            json!({ "schemaVersion": 1, "models": [] })
+        }
+        Err(error) => return Err(error.into()),
+    };
+    let model_id = entry.get("id").and_then(Value::as_str).ok_or_else(|| {
+        WorkerError::InvalidPayload("Model manifest entry requires id".to_owned())
+    })?;
+    let models = manifest
+        .as_object_mut()
+        .ok_or_else(|| WorkerError::InvalidPayload("Model manifest must be an object".to_owned()))?
+        .entry("models")
+        .or_insert_with(|| Value::Array(Vec::new()));
+    let models = models.as_array_mut().ok_or_else(|| {
+        WorkerError::InvalidPayload("Model manifest models must be an array".to_owned())
+    })?;
+    let mut found = false;
+    for item in models.iter_mut() {
+        if item.get("id").and_then(Value::as_str) != Some(model_id) {
+            continue;
+        }
+        found = true;
+        let created_at = item.get("createdAt").cloned();
+        let Some(object) = item.as_object_mut() else {
+            return Err(WorkerError::InvalidPayload(
+                "Model manifest entry must be an object".to_owned(),
+            ));
+        };
+        for (key, value) in entry.clone() {
+            object.insert(key, value);
+        }
+        if let Some(created_at) = created_at {
+            object.insert("createdAt".to_owned(), created_at);
+        }
+    }
+    if !found {
+        models.push(Value::Object(entry));
     }
     write_json_value(path, &manifest).await
 }

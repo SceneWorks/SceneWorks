@@ -32,7 +32,7 @@ pub const JOB_STATUSES: &[&str] = &[
     "canceled",
     "interrupted",
 ];
-pub const NON_GPU_JOB_TYPES: &[&str] = &["model_download", "lora_import"];
+pub const NON_GPU_JOB_TYPES: &[&str] = &["model_download", "model_import", "lora_import"];
 pub const MAX_JOB_ATTEMPTS: u32 = 5;
 const DISPATCH_MEMORY_NOT_WORSE_TOLERANCE_MB: f64 = 512.0;
 const DISPATCH_MEMORY_RELIEF_THRESHOLD_MB: f64 = 1024.0;
@@ -601,7 +601,7 @@ impl JobsStore {
                 select id from jobs
                  where assigned_gpu = ?1
                    and status in ('preparing', 'downloading', 'loading_model', 'running', 'saving')
-                   and type not in ('model_download', 'lora_import')
+                   and type not in ('model_download', 'model_import', 'lora_import')
                  limit 1
                 ",
                 params![worker.gpu_id],
@@ -614,8 +614,8 @@ impl JobsStore {
             "
             select * from jobs
              where status = 'queued'
-               and (type in ('model_download', 'lora_import') or requested_gpu = 'auto' or requested_gpu = ?1)
-               and (?2 = 0 or type in ('model_download', 'lora_import'))
+               and (type in ('model_download', 'model_import', 'lora_import') or requested_gpu = 'auto' or requested_gpu = ?1)
+               and (?2 = 0 or type in ('model_download', 'model_import', 'lora_import'))
              order by created_at asc
              limit 50
             ",
@@ -1219,7 +1219,7 @@ fn active_gpu_job_exists(connection: &Connection, gpu_id: &str) -> JobsStoreResu
             select id from jobs
              where assigned_gpu = ?1
                and status in ('preparing', 'downloading', 'loading_model', 'running', 'saving')
-               and type not in ('model_download', 'lora_import')
+               and type not in ('model_download', 'model_import', 'lora_import')
              limit 1
             ",
             params![gpu_id],

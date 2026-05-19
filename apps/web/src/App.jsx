@@ -515,6 +515,36 @@ export function App() {
     return archived;
   }
 
+  async function createModelImportJob(payload, options = {}) {
+    const { file, ...metadata } = payload;
+    if (file?.size > maxLoraUploadBytes) {
+      throw new Error("Uploaded model file exceeds the 2GB limit");
+    }
+    let body;
+    if (file) {
+      body = new FormData();
+      Object.entries(metadata).forEach(([key, value]) => {
+        if (value != null && value !== "") {
+          body.append(key, value);
+        }
+      });
+      body.append("file", file);
+    } else {
+      body = JSON.stringify(metadata);
+    }
+    const job = await apiFetch("/api/v1/models/import", token, {
+      method: "POST",
+      body,
+    });
+    setJobs((items) => [job, ...items.filter((item) => item.id !== job.id)].sort(sortNewest));
+    if (options.navigateToQueue ?? false) {
+      setActiveView("Queue");
+    }
+    setError("");
+    refreshData();
+    return job;
+  }
+
   async function createLoraImportJob(payload, options = {}) {
     if (payload.scope === "project" && !activeProject) {
       throw new Error("Create or open a project first.");
@@ -1470,6 +1500,7 @@ export function App() {
             models={models}
             onDownloadModel={createModelDownloadJob}
             onImportLora={createLoraImportJob}
+            onImportModel={createModelImportJob}
             onOpenQueue={() => setActiveView("Queue")}
           />
         ) : null}

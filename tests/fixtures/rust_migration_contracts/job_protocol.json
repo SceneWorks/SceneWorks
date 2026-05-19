@@ -13,6 +13,7 @@
     "frame_extract",
     "timeline_export",
     "model_download",
+    "model_import",
     "lora_import"
   ],
   "statuses": [
@@ -29,7 +30,7 @@
   ],
   "activeStatuses": ["preparing", "downloading", "loading_model", "running", "saving"],
   "terminalStatuses": ["completed", "failed", "canceled", "interrupted"],
-  "nonGpuJobTypes": ["model_download", "lora_import"],
+  "nonGpuJobTypes": ["model_download", "model_import", "lora_import"],
   "workerStatuses": ["idle", "busy", "offline"],
   "progressStages": [
     "queued",
