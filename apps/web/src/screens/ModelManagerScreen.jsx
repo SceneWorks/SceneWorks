@@ -1,6 +1,7 @@
 import React, { useEffect, useState } from "react";
 import { JobProgressCard } from "../components/JobProgress.jsx";
 import { terminalStatuses } from "../constants.js";
+import { presetLoraId, presetLoras } from "../presetUtils.js";
 
 function loraFamilies(item) {
   // Accept either a LoRA catalog entry or a lora_import job snapshot.
@@ -70,7 +71,54 @@ const MODEL_TYPE_OPTIONS = [
   { value: "utility", label: "Utility" },
 ];
 
-export function ModelManagerScreen({ activeProject, jobs, loras, models, onDownloadModel, onImportLora, onImportModel, onOpenQueue }) {
+function referencedPresetNames(recipePresets, kind, id) {
+  return recipePresets
+    .filter((preset) => {
+      if (kind === "model") {
+        return preset.model === id;
+      }
+      return presetLoras(preset).some((lora) => presetLoraId(lora) === id);
+    })
+    .map((preset) => preset.name ?? preset.id)
+    .filter(Boolean);
+}
+
+function deleteConfirmation(kind, item, recipePresets) {
+  const name = item.name ?? item.id;
+  const presetNames = referencedPresetNames(recipePresets, kind, item.id);
+  const lines = [
+    `Delete ${kind} "${name}"?`,
+    "This removes the registry entry and SceneWorks-owned local files when available.",
+  ];
+  if (presetNames.length) {
+    lines.push(`Referenced by presets: ${presetNames.slice(0, 5).join(", ")}.`);
+    lines.push("Those presets will keep a broken reference until updated.");
+  }
+  if (item.scope === "builtin" || item.catalogScope === "builtin") {
+    lines.push("Built-in catalog entries stay protected; only local installed files can be removed.");
+  }
+  return lines.join("\n\n");
+}
+
+function deleteResultText(result, name) {
+  const removed = result?.removedManifestEntry ? "Removed the registry entry" : "Removed local files";
+  const warnings = result?.warnings?.length ? ` ${result.warnings.join(" ")}` : "";
+  return `${removed} for ${name}.${warnings}`;
+}
+
+export function ModelManagerScreen({
+  activeProject,
+  jobs,
+  loras,
+  models,
+  onDeleteLora,
+  onDeleteModel,
+  onDownloadModel,
+  onImportLora,
+  onImportModel,
+  onOpenQueue,
+  recipePresets = [],
+}) {
   const families = Array.from(new Set(models.map((model) => model.family).filter(Boolean))).sort();
   const familiesKey = families.join("|");
   const [familyFilter, setFamilyFilter] = useState("all");
@@ -96,6 +144,8 @@ export function ModelManagerScreen({ activeProject, jobs, loras, models, onDownl
     family: "",
   });
   const [modelFileInputKey, setModelFileInputKey] = useState(0);
+  const [deletingItem, setDeletingItem] = useState("");
+  const [deleteMessage, setDeleteMessage] = useState({ tone: "neutral", text: "" });
   const visibleLoras = loras.filter((lora) => matchesFamily(lora, familyFilter));
 
   useEffect(() => {
@@ -185,6 +235,44 @@ export function ModelManagerScreen({ activeProject, jobs, loras, models, onDownl
     }
   }
 
+  async function deleteModel(model) {
+    if (!onDeleteModel || model.removable === false) {
+      return;
+    }
+    if (typeof window.confirm === "function" && !window.confirm(deleteConfirmation("model", model, recipePresets))) {
+      return;
+    }
+    setDeletingItem(`model:${model.id}`);
+    setDeleteMessage({ tone: "neutral", text: "" });
+    try {
+      const result = await onDeleteModel(model);
+      setDeleteMessage({ tone: "success", text: deleteResultText(result, model.name ?? model.id) });
+    } catch (err) {
+      setDeleteMessage({ tone: "error", text: err.message });
+    } finally {
+      setDeletingItem("");
+    }
+  }
+
+  async function deleteLora(lora) {
+    if (!onDeleteLora || lora.removable === false) {
+      return;
+    }
+    if (typeof window.confirm === "function" && !window.confirm(deleteConfirmation("lora", lora, recipePresets))) {
+      return;
+    }
+    setDeletingItem(`lora:${lora.scope ?? "global"}:${lora.id}`);
+    setDeleteMessage({ tone: "neutral", text: "" });
+    try {
+      const result = await onDeleteLora(lora);
+      setDeleteMessage({ tone: "success", text: deleteResultText(result, lora.name ?? lora.id) });
+    } catch (err) {
+      setDeleteMessage({ tone: "error", text: err.message });
+    } finally {
+      setDeletingItem("");
+    }
+  }
+
   const completedImportTimes = completedLoraImportTimes(jobs);
   const pendingLoraImportJobs = jobs.filter((job) => job.type === "lora_import" && !isSupersededLoraImport(job, completedImportTimes));
   const localLoraImportJobs = pendingLoraImportJobs.filter((job) => job.status !== "completed" && matchesFamily(job, familyFilter));
@@ -241,6 +329,8 @@ export function ModelManagerScreen({ activeProject, jobs, loras, models, onDownl
           const failedDownload = localDownloadJob && terminalStatuses.has(localDownloadJob.status);
           const downloadSize = downloadSizeText(model);
           const unassociated = !model.family;
+          const deleteKey = `model:${model.id}`;
+          const canDelete = Boolean(onDeleteModel) && model.removable !== false;
           return (
             <article className="model-card" key={model.id}>
               <div>
@@ -271,21 +361,27 @@ export function ModelManagerScreen({ activeProject, jobs, loras, models, onDownl
               {localDownloadJob ? (
                 <JobProgressCard job={localDownloadJob} label="Model download" onOpenQueue={onOpenQueue} />
               ) : null}
-              <button disabled={installed || !model.downloadable || Boolean(downloadJob)} onClick={() => onDownloadModel(model)} type="button">
-                {downloadJob
-                  ? downloadJob.status
-                  : installed
-                    ? "Ready"
-                    : failedDownload
-                      ? "Retry Download"
-                      : model.downloadSizeLabel
-                        ? `Download ${downloadSize}`
-                        : "Download"}
-              </button>
+              <div className="model-card-actions">
+                <button disabled={installed || !model.downloadable || Boolean(downloadJob)} onClick={() => onDownloadModel(model)} type="button">
+                  {downloadJob
+                    ? downloadJob.status
+                    : installed
+                      ? "Ready"
+                      : failedDownload
+                        ? "Retry Download"
+                        : model.downloadSizeLabel
+                          ? `Download ${downloadSize}`
+                          : "Download"}
+                </button>
+                <button className="danger-action" disabled={!canDelete || deletingItem === deleteKey} onClick={() => deleteModel(model)} type="button">
+                  {model.removable === false ? "Protected" : deletingItem === deleteKey ? "Deleting" : "Delete"}
+                </button>
+              </div>
             </article>
           );
         })}
       </div>
+      {deleteMessage.text ? <p className={deleteMessage.tone === "success" ? "inline-success" : "inline-warning"}>{deleteMessage.text}</p> : null}
 
       <section className="model-import-panel-section">
         <form className="lora-import-panel models-import-panel" aria-label="Import model" onSubmit={importModel}>
@@ -531,9 +627,19 @@ export function ModelManagerScreen({ activeProject, jobs, loras, models, onDownl
               const statusText = missing ? "unavailable" : installed ? "installed" : "pending";
               return (
                 <article className={missing ? "lora-row warning" : "lora-row"} key={lora.id ?? lora.name}>
-                  <strong>{lora.name ?? lora.id}</strong>
-                  <span>{[lora.scope, lora.family ?? "compatible"].filter(Boolean).join(" | ")}</span>
+                  <span>
+                    <strong>{lora.name ?? lora.id}</strong>
+                    <small>{[lora.scope, lora.family ?? "compatible"].filter(Boolean).join(" | ")}</small>
+                  </span>
                   <span className={installed ? "status-badge installed" : "status-badge"}>{statusText}</span>
+                  <button
+                    className="danger-action"
+                    disabled={!onDeleteLora || lora.removable === false || deletingItem === `lora:${lora.scope ?? "global"}:${lora.id}`}
+                    onClick={() => deleteLora(lora)}
+                    type="button"
+                  >
+                    {lora.removable === false ? "Protected" : deletingItem === `lora:${lora.scope ?? "global"}:${lora.id}` ? "Deleting" : "Delete"}
+                  </button>
                 </article>
               );
             })}

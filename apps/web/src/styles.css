@@ -2008,6 +2008,12 @@ label {
   gap: 8px;
 }
 
+.model-card-actions {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 8px;
+}
+
 .local-job-stack {
   display: grid;
   gap: 10px;
