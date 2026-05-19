@@ -1,3 +1,6 @@
+export const autoRecipePresetId = "__auto_recipe_preset__";
+export const noRecipePresetId = "__no_recipe_preset__";
+
 export const defaultModesByWorkflow = {
   text_to_image: ["text_to_image", "character_image", "style_variations"],
   edit_image: ["edit_image"],

@@ -1,10 +1,12 @@
-import React, { useEffect, useMemo, useState } from "react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
 import { AssetPickerField } from "../components/AssetPicker.jsx";
 import { AssetCard } from "../components/assetPanels.jsx";
 import { JobProgressCard } from "../components/JobProgress.jsx";
 import {
   loraMatchesModel,
   loraWeight,
+  autoRecipePresetId,
+  noRecipePresetId,
   presetLoraDetails as buildPresetLoraDetails,
   presetMatchesModel,
   presetMatchesWorkflow,
@@ -19,6 +21,26 @@ const localErrorLabels = {
   canceled: "Canceled",
   interrupted: "Interrupted",
 };
+
+function rememberPresetDefault(snapshots, key, currentValue, appliedValue) {
+  const previousSnapshot = snapshots.current[key];
+  snapshots.current[key] = {
+    appliedValue,
+    previousValue:
+      previousSnapshot && Object.is(currentValue, previousSnapshot.appliedValue)
+        ? previousSnapshot.previousValue
+        : currentValue,
+  };
+}
+
+function clearPresetDefault(setter, snapshots, key) {
+  const snapshot = snapshots.current[key];
+  if (!snapshot) {
+    return;
+  }
+  setter((current) => (Object.is(current, snapshot.appliedValue) ? snapshot.previousValue : current));
+  delete snapshots.current[key];
+}
 
 function jobResultAssets(job, assets) {
   const catalogById = new Map(assets.map((asset) => [asset.id, asset]));
@@ -100,7 +122,7 @@ export function ImageStudio({
 }) {
   const [mode, setMode] = useState("text_to_image");
   const [prompt, setPrompt] = useState("A cinematic frame of a neon street at midnight");
-  const [stylePreset, setStylePreset] = useState("cinematic");
+  const [stylePreset, setStylePreset] = useState(autoRecipePresetId);
   const [count, setCount] = useState(4);
   const [advancedOpen, setAdvancedOpen] = useState(false);
   const [model, setModel] = useState(imageModels[0]?.id ?? "z_image_turbo");
@@ -114,6 +136,7 @@ export function ImageStudio({
   const [showIncompatibleLoras, setShowIncompatibleLoras] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [resultFallbackTick, setResultFallbackTick] = useState(0);
+  const presetDefaultSnapshots = useRef({});
   const editImageAssets = useMemo(
     () => assets.filter((asset) => asset.type === "image" || asset.type === "frame"),
     [assets],
@@ -187,7 +210,10 @@ export function ImageStudio({
   const availableRecipePresets = useMemo(() => {
     return recipePresets.filter((preset) => presetMatchesWorkflow(preset, mode) && presetMatchesModel(preset, selectedModel));
   }, [mode, recipePresets, selectedModel?.id]);
-  const selectedRecipePreset = availableRecipePresets.find((preset) => preset.id === stylePreset) ?? availableRecipePresets[0] ?? null;
+  const selectedRecipePreset =
+    stylePreset === noRecipePresetId
+      ? null
+      : availableRecipePresets.find((preset) => preset.id === stylePreset) ?? availableRecipePresets[0] ?? null;
   const compatibleLoras = useMemo(() => loras.filter((lora) => {
     if (lora.presetManaged) {
       return false;
@@ -227,24 +253,42 @@ export function ImageStudio({
   const [width, height] = resolution.split("x").map((value) => Number(value));
 
   useEffect(() => {
-    if (!availableRecipePresets.some((preset) => preset.id === stylePreset)) {
-      setStylePreset(availableRecipePresets[0]?.id ?? "");
+    if (stylePreset === noRecipePresetId) {
+      return;
     }
-  }, [availableRecipePresets, stylePreset]);
+    if (selectedRecipePreset?.id && selectedRecipePreset.id !== stylePreset) {
+      setStylePreset(selectedRecipePreset.id);
+    }
+  }, [selectedRecipePreset?.id, stylePreset]);
 
   useEffect(() => {
     if (!selectedRecipePreset) {
+      clearPresetDefault(setCount, presetDefaultSnapshots, "count");
+      clearPresetDefault(setResolution, presetDefaultSnapshots, "resolution");
+      clearPresetDefault(setNegativePrompt, presetDefaultSnapshots, "negativePrompt");
       return;
     }
     const defaults = selectedRecipePreset.defaults ?? {};
     if (defaults.count) {
-      setCount(Number(defaults.count));
+      const appliedValue = Number(defaults.count);
+      setCount((current) => {
+        rememberPresetDefault(presetDefaultSnapshots, "count", current, appliedValue);
+        return appliedValue;
+      });
     }
     if (defaults.resolution) {
-      setResolution(defaults.resolution);
+      const appliedValue = defaults.resolution;
+      setResolution((current) => {
+        rememberPresetDefault(presetDefaultSnapshots, "resolution", current, appliedValue);
+        return appliedValue;
+      });
     }
     if (Object.prototype.hasOwnProperty.call(defaults, "negativePrompt")) {
-      setNegativePrompt(defaults.negativePrompt ?? "");
+      const appliedValue = defaults.negativePrompt ?? "";
+      setNegativePrompt((current) => {
+        rememberPresetDefault(presetDefaultSnapshots, "negativePrompt", current, appliedValue);
+        return appliedValue;
+      });
     }
   }, [selectedRecipePreset?.id]);
 
@@ -384,6 +428,30 @@ export function ImageStudio({
 
       <form className="studio-layout" onSubmit={submit}>
         <section className="studio-controls">
+          <div className="control-grid generation-primary-grid">
+            <label>
+              Model
+              <select onChange={(event) => setModel(event.target.value)} value={model}>
+                {(availableModels.length ? availableModels : imageModels).map((item) => (
+                  <option key={item.id} value={item.id}>
+                    {item.name}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <label>
+              Preset
+              <select onChange={(event) => setStylePreset(event.target.value)} value={selectedRecipePreset?.id ?? noRecipePresetId}>
+                <option value={noRecipePresetId}>None</option>
+                {availableRecipePresets.map((preset) => (
+                  <option key={preset.id} value={preset.id}>
+                    {preset.name ?? preset.id}
+                  </option>
+                ))}
+              </select>
+            </label>
+          </div>
+
           {mode === "edit_image" ? (
             <AssetPickerField
               assets={editImageAssets}
@@ -433,34 +501,10 @@ export function ImageStudio({
             <textarea onChange={(event) => setPrompt(event.target.value)} value={prompt} />
           </label>
 
-          <div className="control-grid">
-            <label>
-              Style
-              <select disabled={!availableRecipePresets.length} onChange={(event) => setStylePreset(event.target.value)} value={stylePreset}>
-                {availableRecipePresets.length ? (
-                  availableRecipePresets.map((preset) => (
-                    <option key={preset.id} value={preset.id}>
-                      {preset.name ?? preset.id}
-                    </option>
-                  ))
-                ) : (
-                  <option value="">Presets unavailable</option>
-                )}
-              </select>
-            </label>
+          <div className="control-grid count-control-grid">
             <label>
               Count
               <input min="1" max="8" onChange={(event) => setCount(Number(event.target.value))} type="number" value={count} />
-            </label>
-            <label>
-              GPU
-              <select onChange={(event) => setRequestedGpu(event.target.value)} value={requestedGpu}>
-                {gpuOptions.map((gpu) => (
-                  <option key={gpu} value={gpu}>
-                    {gpu === "auto" ? "Auto" : gpu}
-                  </option>
-                ))}
-              </select>
             </label>
           </div>
           {selectedRecipePreset ? (
@@ -476,53 +520,10 @@ export function ImageStudio({
             </div>
           ) : (
             <div className="guidance-strip">
-              <strong>Presets unavailable</strong>
-              <span>Generation can continue, but no preset defaults or managed LoRAs will be applied.</span>
+              <strong>No preset selected</strong>
+              <span>Generation will use only the visible prompt, count, model, and advanced settings.</span>
             </div>
           )}
-
-          <section className="lora-picker" aria-label="LoRA selection">
-            <div>
-              <strong>LoRAs</strong>
-              <span>{selectedLoras.length ? `${selectedLoras.length} selected` : selectedModel ? "Installed and compatible" : "Choose a model"}</span>
-            </div>
-            {advancedOpen ? (
-              <label className="checkline">
-                <input
-                  checked={showIncompatibleLoras}
-                  onChange={(event) => setShowIncompatibleLoras(event.target.checked)}
-                  type="checkbox"
-                />
-                Show incompatible
-              </label>
-            ) : null}
-            {compatibleLoras.length ? (
-              <div className="lora-choice-list">
-                {compatibleLoras.map((lora) => {
-                  const checked = selectedLoraIds.includes(lora.id);
-                  const userLimitReached = lora.scope !== "builtin" && !checked && userSelectedLoraCount >= 2;
-                  return (
-                    <label className={checked ? "lora-choice active" : "lora-choice"} key={lora.id}>
-                      <input
-                        checked={checked}
-                        disabled={userLimitReached}
-                        onChange={() => toggleLora(lora)}
-                        type="checkbox"
-                      />
-                      <span>
-                        <strong>{lora.name ?? lora.id}</strong>
-                        <small>
-                          {lora.scope ?? "global"} {lora.family ? `| ${lora.family}` : ""}
-                        </small>
-                      </span>
-                    </label>
-                  );
-                })}
-              </div>
-            ) : (
-              <div className="empty-panel compact-panel">{loraEmptyMessage}</div>
-            )}
-          </section>
 
           <button className="advanced-toggle" onClick={() => setAdvancedOpen((value) => !value)} type="button">
             {advancedOpen ? "Hide advanced" : "Advanced"}
@@ -531,11 +532,11 @@ export function ImageStudio({
           {advancedOpen ? (
             <div className="advanced-panel">
               <label>
-                Model
-                <select onChange={(event) => setModel(event.target.value)} value={model}>
-                  {(availableModels.length ? availableModels : imageModels).map((item) => (
-                    <option key={item.id} value={item.id}>
-                      {item.name}
+                GPU
+                <select onChange={(event) => setRequestedGpu(event.target.value)} value={requestedGpu}>
+                  {gpuOptions.map((gpu) => (
+                    <option key={gpu} value={gpu}>
+                      {gpu === "auto" ? "Auto" : gpu}
                     </option>
                   ))}
                 </select>
@@ -557,6 +558,46 @@ export function ImageStudio({
                 Negative prompt
                 <textarea onChange={(event) => setNegativePrompt(event.target.value)} value={negativePrompt} />
               </label>
+              <section className="lora-picker" aria-label="LoRA selection">
+                <div>
+                  <strong>LoRAs</strong>
+                  <span>{selectedLoras.length ? `${selectedLoras.length} selected` : selectedModel ? "Installed and compatible" : "Choose a model"}</span>
+                </div>
+                <label className="checkline">
+                  <input
+                    checked={showIncompatibleLoras}
+                    onChange={(event) => setShowIncompatibleLoras(event.target.checked)}
+                    type="checkbox"
+                  />
+                  Show incompatible
+                </label>
+                {compatibleLoras.length ? (
+                  <div className="lora-choice-list">
+                    {compatibleLoras.map((lora) => {
+                      const checked = selectedLoraIds.includes(lora.id);
+                      const userLimitReached = lora.scope !== "builtin" && !checked && userSelectedLoraCount >= 2;
+                      return (
+                        <label className={checked ? "lora-choice active" : "lora-choice"} key={lora.id}>
+                          <input
+                            checked={checked}
+                            disabled={userLimitReached}
+                            onChange={() => toggleLora(lora)}
+                            type="checkbox"
+                          />
+                          <span>
+                            <strong>{lora.name ?? lora.id}</strong>
+                            <small>
+                              {lora.scope ?? "global"} {lora.family ? `| ${lora.family}` : ""}
+                            </small>
+                          </span>
+                        </label>
+                      );
+                    })}
+                  </div>
+                ) : (
+                  <div className="empty-panel compact-panel">{loraEmptyMessage}</div>
+                )}
+              </section>
             </div>
           ) : null}
 
