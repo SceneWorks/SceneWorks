@@ -138,6 +138,14 @@ export function ModelManagerScreen({ activeProject, jobs, loras, models, onDownl
   const hiddenImportCount =
     familyFilter === "all" ? 0 : pendingLoraImportJobs.filter((job) => job.status !== "completed" && !matchesFamily(job, familyFilter)).length;
   const visibleLoraCount = visibleLoras.length + localLoraImportJobs.length;
+  const installedLoraCount = visibleLoras.filter((lora) => lora.installState === "installed").length;
+  const unavailableLoraCount = visibleLoras.filter((lora) => lora.installState === "missing").length;
+  const pendingLoraCount = visibleLoraCount - installedLoraCount - unavailableLoraCount;
+  const loraCountText = [
+    installedLoraCount ? `${installedLoraCount} installed` : null,
+    unavailableLoraCount ? `${unavailableLoraCount} unavailable` : null,
+    pendingLoraCount ? `${pendingLoraCount} pending` : null,
+  ].filter(Boolean).join(" · ") || "0 visible";
   const isFileImport = importForm.mode === "file";
   const importDisabled =
     importingLora ||
@@ -220,7 +228,7 @@ export function ModelManagerScreen({ activeProject, jobs, loras, models, onDownl
             <p className="eyebrow">LoRAs</p>
             <h2>{familyFilter === "all" ? "All compatible" : familyFilter}</h2>
           </div>
-          <span>{visibleLoraCount} installed or pending</span>
+          <span>{loraCountText}</span>
         </div>
         <form className="lora-import-panel models-import-panel" aria-label="Import LoRA" onSubmit={importLora}>
           <div>
@@ -337,12 +345,18 @@ export function ModelManagerScreen({ activeProject, jobs, loras, models, onDownl
         {hiddenImportCount ? <p className="helper-copy">{hiddenImportCount} LoRA import{hiddenImportCount === 1 ? " is" : "s are"} hidden by this family filter.</p> : null}
         {visibleLoras.length ? (
           <div className="lora-list">
-            {visibleLoras.map((lora) => (
-              <article className="lora-row" key={lora.id ?? lora.name}>
-                <strong>{lora.name ?? lora.id}</strong>
-                <span>{[lora.scope, lora.family ?? "compatible"].filter(Boolean).join(" | ")}</span>
-              </article>
-            ))}
+            {visibleLoras.map((lora) => {
+              const installed = lora.installState === "installed";
+              const missing = lora.installState === "missing";
+              const statusText = missing ? "unavailable" : installed ? "installed" : "pending";
+              return (
+                <article className={missing ? "lora-row warning" : "lora-row"} key={lora.id ?? lora.name}>
+                  <strong>{lora.name ?? lora.id}</strong>
+                  <span>{[lora.scope, lora.family ?? "compatible"].filter(Boolean).join(" | ")}</span>
+                  <span className={installed ? "status-badge installed" : "status-badge"}>{statusText}</span>
+                </article>
+              );
+            })}
           </div>
         ) : localLoraImportJobs.length ? null : loras.length && familyFilter !== "all" ? (
           <div className="empty-panel compact-panel">No LoRAs match {familyFilter}</div>

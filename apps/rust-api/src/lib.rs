@@ -3294,7 +3294,7 @@ fn normalize_lora_entry(
         }
     });
     let install_state = match installed_path.as_ref() {
-        Some(path) if path.exists() => "installed",
+        Some(path) if lora_is_installed(path) => "installed",
         _ => "missing",
     };
     object.insert(
@@ -4267,14 +4267,15 @@ fn preferred_lora_str<'a>(
 ) -> &'a str {
     selected_lora
         .get(field)
-        .or_else(|| catalog_lora.get(field))
         .and_then(Value::as_str)
+        .or_else(|| catalog_lora.get(field).and_then(Value::as_str))
         .unwrap_or(fallback)
 }
 
 fn preferred_lora_value(selected_lora: &Value, catalog_lora: &Value, field: &str) -> Value {
     selected_lora
         .get(field)
+        .filter(|value| !value.is_null())
         .or_else(|| catalog_lora.get(field))
         .cloned()
         .unwrap_or(Value::Null)
@@ -4283,8 +4284,8 @@ fn preferred_lora_value(selected_lora: &Value, catalog_lora: &Value, field: &str
 fn preferred_lora_array(selected_lora: &Value, catalog_lora: &Value, field: &str) -> Value {
     selected_lora
         .get(field)
-        .or_else(|| catalog_lora.get(field))
         .filter(|value| value.is_array())
+        .or_else(|| catalog_lora.get(field).filter(|value| value.is_array()))
         .cloned()
         .unwrap_or_else(|| Value::Array(Vec::new()))
 }
@@ -4292,8 +4293,8 @@ fn preferred_lora_array(selected_lora: &Value, catalog_lora: &Value, field: &str
 fn preferred_lora_object(selected_lora: &Value, catalog_lora: &Value, field: &str) -> Value {
     selected_lora
         .get(field)
-        .or_else(|| catalog_lora.get(field))
         .filter(|value| value.is_object())
+        .or_else(|| catalog_lora.get(field).filter(|value| value.is_object()))
         .cloned()
         .unwrap_or_else(|| Value::Object(JsonObject::new()))
 }
@@ -4919,6 +4920,10 @@ fn now_rfc3339() -> String {
 
 fn model_is_installed(path: &FsPath) -> bool {
     path.is_dir() && path.join(".sceneworks-download-complete.json").is_file()
+}
+
+fn lora_is_installed(path: &FsPath) -> bool {
+    first_safetensors_path(path).is_some()
 }
 
 fn lora_families(lora: &Value) -> Vec<String> {
@@ -6706,6 +6711,46 @@ mod tests {
             "cinematic"
         );
 
+        let (status, null_path_job) = request(
+            app.clone(),
+            "POST",
+            "/api/v1/image/jobs",
+            json!({
+                "projectId": project_id,
+                "prompt": "city with selected lora",
+                "model": "base-model",
+                "count": 1,
+                "width": 512,
+                "height": 512,
+                "loras": [{
+                    "id": "style-lora",
+                    "name": null,
+                    "triggerWords": null,
+                    "compatibility": null,
+                    "installedPath": null,
+                    "sourcePath": null
+                }]
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED);
+        assert_eq!(null_path_job["payload"]["loras"][0]["id"], "style-lora");
+        assert_eq!(null_path_job["payload"]["loras"][0]["name"], "Style LoRA");
+        assert_eq!(
+            null_path_job["payload"]["loras"][0]["triggerWords"][0],
+            "style"
+        );
+        assert_eq!(
+            null_path_job["payload"]["loras"][0]["compatibility"]["families"][0],
+            "z-image"
+        );
+        assert!(null_path_job["payload"]["loras"][0]["installedPath"]
+            .as_str()
+            .is_some_and(|value| value.ends_with("data/loras/style.safetensors")
+                || value.ends_with("data\\loras\\style.safetensors")
+                || value.ends_with("loras/style.safetensors")
+                || value.ends_with("loras\\style.safetensors")));
+
         let (status, preset_model_job) = request(
             app.clone(),
             "POST",
@@ -7204,6 +7249,14 @@ mod tests {
                   "source": { "provider": "local", "path": "loras/deleted.safetensors" }
                 },
                 {
+                  "id": "empty_dir_style",
+                  "name": "Empty Dir Style",
+                  "family": "z-image",
+                  "triggerWords": [],
+                  "compatibility": { "families": ["z-image"] },
+                  "source": { "provider": "local", "path": "loras/empty-dir" }
+                },
+                {
                   "id": "unknown_family",
                   "name": "Unknown Family",
                   "triggerWords": [],
@@ -7225,11 +7278,22 @@ mod tests {
         .expect("user loras writes");
         let lora_dir = temp_dir.path().join("data/loras");
         std::fs::create_dir_all(&lora_dir).expect("lora dir creates");
+        std::fs::create_dir_all(lora_dir.join("empty-dir")).expect("empty lora dir creates");
         write_test_safetensors(&lora_dir.join("style.safetensors"));
         write_test_safetensors(&lora_dir.join("qwen.safetensors"));
         write_test_safetensors(&lora_dir.join("unknown.safetensors"));
 
         let app = create_app(test_settings(&temp_dir)).expect("app creates");
+        let (status, loras) = request(app.clone(), "GET", "/api/v1/loras", Value::Null).await;
+        assert_eq!(status, StatusCode::OK);
+        let empty_dir_style = loras
+            .as_array()
+            .expect("loras array")
+            .iter()
+            .find(|lora| lora["id"] == "empty_dir_style")
+            .expect("empty dir lora listed");
+        assert_eq!(empty_dir_style["installState"], "missing");
+
         // This also pins the positive compatibility path: style_lora is installed and compatible with z_image_turbo.
         let (status, created) = request(
             app.clone(),

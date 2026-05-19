@@ -1408,6 +1408,36 @@ describe("SceneWorks app shell", () => {
     expect(container.textContent).not.toContain("~8.0 GB");
   });
 
+  it("marks listed LoRAs unavailable when the backend reports missing install state", async () => {
+    root = createRoot(container);
+    await act(async () => {
+      root.render(
+        <ModelManagerScreen
+          activeProject={{ id: "project-1", name: "Noir" }}
+          jobs={[]}
+          loras={[
+            { id: "ready_style", name: "Ready Style", family: "z-image", scope: "global", installState: "installed" },
+            { id: "broken_style", name: "Broken Style", family: "z-image", scope: "global", installState: "missing" },
+          ]}
+          models={[{ id: "z_image_turbo", name: "Z-Image Turbo", type: "image", family: "z-image", installState: "installed" }]}
+          onDownloadModel={() => {}}
+          onImportLora={() => {}}
+          onOpenQueue={() => {}}
+        />,
+      );
+    });
+
+    const rows = [...container.querySelectorAll(".lora-row")];
+    expect(rows).toHaveLength(2);
+    expect(rows[0].textContent).toContain("Ready Style");
+    expect(rows[0].textContent).toContain("installed");
+    expect(rows[0].classList.contains("warning")).toBe(false);
+    expect(rows[1].textContent).toContain("Broken Style");
+    expect(rows[1].textContent).toContain("unavailable");
+    expect(rows[1].classList.contains("warning")).toBe(true);
+    expect(container.textContent).toContain("1 installed · 1 unavailable");
+  });
+
   it("advances elapsed seconds for active job snapshots between server updates", () => {
     const job = {
       id: "image-job-1",
