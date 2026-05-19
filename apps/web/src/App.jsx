@@ -1661,6 +1661,7 @@ export function App() {
             loras={loras}
             localJobs={imageLocalJobs}
             onLocalJobCreated={(job) => rememberLocalGenerationJob("image", job)}
+            onOpenPresets={() => setActiveView("Presets")}
             onOpenQueue={() => setActiveView("Queue")}
             onPreview={setPreviewAsset}
             recipePresets={recipePresets}

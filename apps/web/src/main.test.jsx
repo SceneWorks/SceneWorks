@@ -2649,20 +2649,27 @@ describe("SceneWorks app shell", () => {
     });
     await settle();
 
-    const primaryLabels = [
-      ...container.querySelectorAll(".studio-controls > .generation-primary-grid label, .studio-controls > label"),
-    ].map((label) => label.childNodes[0]?.textContent.trim());
-    expect(primaryLabels).toEqual(["Model", "Preset", "Prompt", "Count"]);
-    expect(field(container, "Preset").textContent).toContain("None");
-    expect(field(container, "Count").value).toBe("2");
+    // Primary recipe controls are surfaced in the rail (no longer behind Advanced),
+    // alongside the hero-mounted prompt + preset chip strip.
+    const railLabels = [...container.querySelectorAll(".recipe-rail > label, .recipe-rail .recipe-row label")].map(
+      (label) => label.childNodes[0]?.textContent.trim(),
+    );
+    expect(railLabels).toEqual(expect.arrayContaining(["Model", "Variations", "Aspect"]));
+    expect(container.querySelector(".prompt-input")).not.toBeNull();
+    expect(container.querySelector(".preset-chips").textContent).toContain("None");
+    expect(field(container, "Variations").value).toBe("2");
     expect(field(container, "GPU")).toBeUndefined();
     expect(container.textContent).not.toContain("LoRAs");
 
-    await changeField(field(container, "Preset"), field(container, "Preset").options[0].value);
+    await act(async () => {
+      [...container.querySelectorAll(".preset-chip")]
+        .find((chip) => chip.textContent.trim() === "None")
+        .click();
+    });
     await settle();
 
     expect(container.textContent).toContain("No preset selected");
-    expect(field(container, "Count").value).toBe("4");
+    expect(field(container, "Variations").value).toBe("4");
 
     await act(async () => {
       [...container.querySelectorAll("button")].find((button) => button.textContent === "Advanced").click();
