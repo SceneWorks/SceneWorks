@@ -40,6 +40,14 @@ function failedJobNotice(job) {
   return `${label}: ${detail}`;
 }
 
+function isImageGenerationJob(job) {
+  return ["image_generate", "image_edit"].includes(job.type);
+}
+
+function hasImageReviewResult(job) {
+  return Boolean(job.result?.generationSetId || job.result?.assetIds?.length || job.result?.assets?.length);
+}
+
 function isLoraImportNotice(message) {
   return String(message ?? "").startsWith("lora import: ");
 }
@@ -101,10 +109,25 @@ export function App() {
   );
   const latestImageAssets = useMemo(() => latestAssets.filter((asset) => asset.type === "image"), [latestAssets]);
   const latestVideoAssets = useMemo(() => latestAssets.filter((asset) => asset.type === "video"), [latestAssets]);
-  const imageLocalJobs = useMemo(
-    () => localGenerationJobIds.image.map((id) => jobs.find((job) => job.id === id)).filter(Boolean),
-    [jobs, localGenerationJobIds.image],
-  );
+  const imageLocalJobs = useMemo(() => {
+    const localJobs = localGenerationJobIds.image.map((id) => jobs.find((job) => job.id === id)).filter(Boolean);
+    const projectJobs = jobs
+      .filter(
+        (job) =>
+          activeProject?.id &&
+          job.projectId === activeProject.id &&
+          isImageGenerationJob(job) &&
+          (!terminalStatuses.has(job.status) || (job.status !== "completed" && hasImageReviewResult(job))),
+      )
+      .sort(sortNewest);
+    const byId = new Map();
+    [...localJobs, ...projectJobs].forEach((job) => {
+      if (job?.id && !byId.has(job.id)) {
+        byId.set(job.id, job);
+      }
+    });
+    return Array.from(byId.values()).slice(0, localJobStackLimit);
+  }, [activeProject?.id, jobs, localGenerationJobIds.image]);
   const videoLocalJobs = useMemo(
     () => localGenerationJobIds.video.map((id) => jobs.find((job) => job.id === id)).filter(Boolean),
     [jobs, localGenerationJobIds.video],

@@ -11,6 +11,26 @@ import {
 } from "../presetUtils.js";
 
 const completedResultFallbackMs = 30000;
+const localErrorStatuses = new Set(["failed", "canceled", "interrupted"]);
+
+function jobResultAssets(job, assets) {
+  const catalogById = new Map(assets.map((asset) => [asset.id, asset]));
+  return (job.result?.assets ?? [])
+    .map((asset) => catalogById.get(asset.id) ?? asset)
+    .filter((asset) => asset?.type === "image");
+}
+
+function jobExpectedCount(job, completedCount) {
+  const expected = Number(job.result?.expectedCount ?? job.result?.count ?? job.payload?.count);
+  return Number.isFinite(expected) && expected > 0 ? Math.max(expected, completedCount) : completedCount;
+}
+
+function jobPendingSlotLabel(job, index) {
+  if (localErrorStatuses.has(job.status)) {
+    return `${job.status} #${index + 1}`;
+  }
+  return `Pending #${index + 1}`;
+}
 
 export function ImageStudio({
   activeProject,
@@ -220,7 +240,28 @@ export function ImageStudio({
   const localJobs = trackedLocalJobs.filter(
     (job) => job.status !== "completed" || (!resultVisible(job) && !completedWaitExpired(job)),
   );
-  const hasReviewContent = Boolean(localJobs.length || latestAssets.length);
+  const reviewSlots = useMemo(() => {
+    if (!localJobs.length) {
+      return latestAssets.map((asset) => ({ type: "asset", id: asset.id, asset }));
+    }
+    return localJobs.flatMap((job) => {
+      const completedAssets = jobResultAssets(job, assets);
+      const expectedCount = jobExpectedCount(job, completedAssets.length);
+      return Array.from({ length: expectedCount }, (_, index) => {
+        const asset = completedAssets[index];
+        if (asset) {
+          return { type: "asset", id: `${job.id}:${asset.id}`, asset };
+        }
+        return {
+          type: "placeholder",
+          id: `${job.id}:slot-${index}`,
+          label: jobPendingSlotLabel(job, index),
+          isError: localErrorStatuses.has(job.status),
+        };
+      });
+    });
+  }, [assets, latestAssets, localJobs]);
+  const hasReviewContent = Boolean(localJobs.length || reviewSlots.length);
 
   async function submit(event) {
     event.preventDefault();
@@ -484,17 +525,23 @@ export function ImageStudio({
               ))}
             </div>
           ) : null}
-          {latestAssets.length ? (
+          {reviewSlots.length ? (
             <div className="review-grid">
-              {latestAssets.map((asset) => (
-                <AssetCard
-                  asset={asset}
-                  deleteAsset={deleteAsset}
-                  key={asset.id}
-                  onPreview={onPreview}
-                  purgeAsset={purgeAsset}
-                  updateAssetStatus={updateAssetStatus}
-                />
+              {reviewSlots.map((slot) => (
+                slot.type === "asset" ? (
+                  <AssetCard
+                    asset={slot.asset}
+                    deleteAsset={deleteAsset}
+                    key={slot.id}
+                    onPreview={onPreview}
+                    purgeAsset={purgeAsset}
+                    updateAssetStatus={updateAssetStatus}
+                  />
+                ) : (
+                  <div className={slot.isError ? "review-placeholder failed" : "review-placeholder"} key={slot.id}>
+                    <span>{slot.label}</span>
+                  </div>
+                )
               ))}
             </div>
           ) : hasReviewContent ? null : (

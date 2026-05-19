@@ -8,7 +8,7 @@ import os
 import warnings
 from pathlib import Path
 from textwrap import wrap
-from typing import Any, Callable
+from typing import Any, Callable, Protocol
 from uuid import uuid4
 
 from PIL import Image, ImageDraw, ImageFont
@@ -32,8 +32,18 @@ from .settings import WorkerSettings
 Image.MAX_IMAGE_PIXELS = 64_000_000
 warnings.simplefilter("error", Image.DecompressionBombWarning)
 
-ProgressCallback = Callable[[str, str, float, str], None]
 CancelCallback = Callable[[], bool]
+
+
+class ProgressCallback(Protocol):
+    def __call__(
+        self,
+        status: str,
+        stage: str,
+        value: float,
+        message: str,
+        result: dict[str, Any] | None = None,
+    ) -> None: ...
 
 
 def huggingface_repo_cache_exists(repo: str) -> bool:
@@ -219,12 +229,21 @@ class ImageAssetWriter:
                 "saving",
                 0.78 + ((index + 1) / len(images)) * 0.17,
                 f"Saved image asset {index + 1} of {len(images)}.",
+                {
+                    "generationSetId": generation_set_id,
+                    "assetIds": [item["id"] for item in assets],
+                    "assets": assets,
+                    "expectedCount": len(images),
+                    "adapter": adapter_id,
+                    "model": request.model,
+                },
             )
 
         return {
             "generationSetId": generation_set_id,
             "assetIds": [asset["id"] for asset in assets],
             "assets": assets,
+            "expectedCount": len(images),
             "adapter": adapter_id,
             "model": request.model,
         }

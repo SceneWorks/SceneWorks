@@ -915,6 +915,22 @@ button:disabled {
   padding: 10px;
 }
 
+.review-placeholder {
+  display: grid;
+  place-items: center;
+  min-height: 164px;
+  border: 1px dashed #4b463d;
+  background: #191815;
+  color: #c7bfb2;
+  font-size: 13px;
+  text-align: center;
+}
+
+.review-placeholder.failed {
+  border-color: #7a4739;
+  color: #f0b9a5;
+}
+
 .review-card.rejected {
   opacity: 0.58;
 }

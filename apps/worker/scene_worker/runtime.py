@@ -239,18 +239,17 @@ def run_image_job(api: ApiClient, settings: WorkerSettings, job: dict, image_ada
     def adapter_loaded_models() -> list[str]:
         return loaded_models_from_adapter(adapter, job_id=job_id)
 
-    def progress(status: str, stage: str, value: float, message: str) -> None:
+    def progress(status: str, stage: str, value: float, message: str, result: dict[str, Any] | None = None) -> None:
         heartbeat_with_loaded_models(api, settings, "busy", job_id, adapter_loaded_models)
-        update_job(
-            api,
-            job_id,
-            {
-                "status": status,
-                "stage": stage,
-                "progress": value,
-                "message": message,
-            },
-        )
+        payload = {
+            "status": status,
+            "stage": stage,
+            "progress": value,
+            "message": message,
+        }
+        if result is not None:
+            payload["result"] = result
+        update_job(api, job_id, payload)
 
     try:
         progress("preparing", "preparing", 0.08, "Preparing Image Studio request.")
