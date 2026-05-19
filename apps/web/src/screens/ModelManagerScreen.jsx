@@ -30,6 +30,33 @@ function matchesFamily(item, familyFilter) {
   return item.type === "lora_import" && families.length === 0 ? true : families.includes(familyFilter);
 }
 
+function loraImportKey(job) {
+  return job.payload?.loraId ?? job.payload?.sourceUrl ?? job.payload?.sourcePath ?? job.payload?.name ?? null;
+}
+
+function completedLoraImportTimes(jobs) {
+  const completed = new Map();
+  jobs
+    .filter((job) => job.type === "lora_import" && job.status === "completed")
+    .forEach((job) => {
+      const key = loraImportKey(job);
+      if (!key || !job.createdAt) {
+        return;
+      }
+      const previous = completed.get(key);
+      if (!previous || job.createdAt.localeCompare(previous) > 0) {
+        completed.set(key, job.createdAt);
+      }
+    });
+  return completed;
+}
+
+function isSupersededLoraImport(job, completedTimes) {
+  const key = loraImportKey(job);
+  const completedAt = key ? completedTimes.get(key) : null;
+  return Boolean(completedAt) && terminalStatuses.has(job.status) && job.status !== "completed" && completedAt.localeCompare(job.createdAt ?? "") > 0;
+}
+
 function downloadSizeText(model) {
   if (!model.downloadSizeLabel) {
     return "Unavailable";
@@ -107,9 +134,11 @@ export function ModelManagerScreen({ activeProject, jobs, loras, models, onDownl
     }
   }
 
-  const localLoraImportJobs = jobs.filter((job) => job.type === "lora_import" && job.status !== "completed" && matchesFamily(job, familyFilter));
+  const completedImportTimes = completedLoraImportTimes(jobs);
+  const pendingLoraImportJobs = jobs.filter((job) => job.type === "lora_import" && !isSupersededLoraImport(job, completedImportTimes));
+  const localLoraImportJobs = pendingLoraImportJobs.filter((job) => job.status !== "completed" && matchesFamily(job, familyFilter));
   const hiddenImportCount =
-    familyFilter === "all" ? 0 : jobs.filter((job) => job.type === "lora_import" && job.status !== "completed" && !matchesFamily(job, familyFilter)).length;
+    familyFilter === "all" ? 0 : pendingLoraImportJobs.filter((job) => job.status !== "completed" && !matchesFamily(job, familyFilter)).length;
   const visibleLoraCount = visibleLoras.length + localLoraImportJobs.length;
   const isFileImport = importForm.mode === "file";
   const importDisabled =

@@ -40,6 +40,10 @@ function failedJobNotice(job) {
   return `${label}: ${detail}`;
 }
 
+function isLoraImportNotice(message) {
+  return String(message ?? "").startsWith("lora import: ");
+}
+
 const localJobStackLimit = 4;
 const maxLoraUploadBytes = 2 * 1024 * 1024 * 1024;
 
@@ -233,6 +237,7 @@ export function App() {
         refreshData();
       }
       if (job.status === "completed" && job.type === "lora_import") {
+        setError((current) => (isLoraImportNotice(current) ? "" : current));
         refreshDataWithLoraOverlay(job.projectId ?? activeProjectRef.current?.id);
       }
       if (job.status === "failed" && !hasVisibleLocalFailure(job)) {

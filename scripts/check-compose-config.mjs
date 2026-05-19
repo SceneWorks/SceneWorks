@@ -28,6 +28,24 @@ function assertServiceMountsTarget(service, target, label) {
   }
 }
 
+function assertWritableMount(service, target, label) {
+  const volumes = service?.volumes ?? [];
+  const volume = volumes.find((item) => item?.target === target || (typeof item === "string" && item.split(":").includes(target)));
+  if (!volume) {
+    throw new Error(`${label}: expected a volume mounted at ${target}`);
+  }
+  if (typeof volume === "string") {
+    const [, , mode] = volume.split(":");
+    if (mode === "ro") {
+      throw new Error(`${label}: expected ${target} to be writable`);
+    }
+    return;
+  }
+  if (volume.read_only === true) {
+    throw new Error(`${label}: expected ${target} to be writable`);
+  }
+}
+
 function assertMissing(object, key, label) {
   if (Object.prototype.hasOwnProperty.call(object ?? {}, key)) {
     throw new Error(`${label}: expected ${key} to be absent`);
@@ -42,6 +60,7 @@ function assertRuntimeDefaults(config, label) {
   const removedRuntimeKey = ["SCENEWORKS_API", "RUNTIME"].join("_");
   assertEqual(api?.build?.dockerfile, "docker/rust-api.Dockerfile", `${label} api dockerfile`);
   assertMissing(api?.environment, removedRuntimeKey, `${label} api runtime switch`);
+  assertWritableMount(api, "/sceneworks/config", `${label} api config mount`);
   assertMissing(worker?.environment, "SCENEWORKS_UTILITY_JOBS", `${label} python utility jobs`);
   assertEqual(worker?.environment?.SCENEWORKS_WORKER_ID, "python-inference-worker-0", `${label} python worker id`);
   assertEqual(worker?.environment?.HF_HOME, "/sceneworks/data/cache/huggingface", `${label} python HF home`);
