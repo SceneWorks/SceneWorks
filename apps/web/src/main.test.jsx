@@ -1270,10 +1270,85 @@ describe("SceneWorks app shell", () => {
         sourceUrl: "https://example.com/loras/detail.safetensors",
         name: "Detail LoRA",
         scope: "global",
+      }),
+    );
+    expect(onImportLora.mock.calls[0][0]).not.toHaveProperty("family");
+    expect(container.textContent).toContain("LoRA import queued for detail_lora.");
+  });
+
+  it("keeps Models LoRA import family independent from the list filter", async () => {
+    const onImportLora = vi.fn(async (payload) => ({ payload: { ...payload, loraId: "detail_lora" } }));
+    root = createRoot(container);
+    await act(async () => {
+      root.render(
+        <ModelManagerScreen
+          activeProject={{ id: "project-1", name: "Noir" }}
+          jobs={[]}
+          loras={[]}
+          models={[
+            { id: "z_image_turbo", name: "Z-Image Turbo", type: "image", family: "z-image" },
+            { id: "qwen_image", name: "Qwen Image", type: "image", family: "qwen-image" },
+          ]}
+          onDownloadModel={() => {}}
+          onImportLora={onImportLora}
+          onOpenQueue={() => {}}
+        />,
+      );
+    });
+
+    expect(field(container, "LoRA family").value).toBe("all");
+    await changeField(field(container, "LoRA family"), "qwen-image");
+    await changeField(field(container, "Source URL"), "https://example.com/loras/detail.safetensors");
+    await act(async () => {
+      [...container.querySelectorAll("button")].find((button) => button.textContent === "Queue Import").click();
+    });
+
+    expect(onImportLora.mock.calls[0][0]).not.toHaveProperty("family");
+
+    await changeField(field(container, "Family"), "z-image");
+    await changeField(field(container, "Source URL"), "https://example.com/loras/detail.safetensors");
+    await act(async () => {
+      [...container.querySelectorAll("button")].find((button) => button.textContent === "Queue Import").click();
+    });
+
+    expect(onImportLora.mock.calls[1][0]).toEqual(
+      expect.objectContaining({
         family: "z-image",
       }),
     );
-    expect(container.textContent).toContain("LoRA import queued for detail_lora.");
+  });
+
+  it("clears an explicit Models LoRA import family when the model family disappears", async () => {
+    const onImportLora = vi.fn(async (payload) => ({ payload: { ...payload, loraId: "detail_lora" } }));
+    const renderScreen = (models) =>
+      root.render(
+        <ModelManagerScreen
+          activeProject={{ id: "project-1", name: "Noir" }}
+          jobs={[]}
+          loras={[]}
+          models={models}
+          onDownloadModel={() => {}}
+          onImportLora={onImportLora}
+          onOpenQueue={() => {}}
+        />,
+      );
+
+    root = createRoot(container);
+    await act(async () => {
+      renderScreen([
+        { id: "z_image_turbo", name: "Z-Image Turbo", type: "image", family: "z-image" },
+        { id: "qwen_image", name: "Qwen Image", type: "image", family: "qwen-image" },
+      ]);
+    });
+
+    await changeField(field(container, "Family"), "qwen-image");
+    expect(field(container, "Family").value).toBe("qwen-image");
+
+    await act(async () => {
+      renderScreen([{ id: "z_image_turbo", name: "Z-Image Turbo", type: "image", family: "z-image" }]);
+    });
+
+    expect(field(container, "Family").value).toBe("");
   });
 
   it("shows model download size estimates and unavailable states before download", async () => {
@@ -1439,9 +1514,9 @@ describe("SceneWorks app shell", () => {
       expect.objectContaining({
         file: loraFile,
         scope: "project",
-        family: "z-image",
       }),
     );
+    expect(onImportLora.mock.calls[0][0]).not.toHaveProperty("family");
     expect(container.textContent).toContain("LoRA import");
     expect(container.textContent).toContain("running");
   });
