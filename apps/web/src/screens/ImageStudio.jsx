@@ -1,4 +1,5 @@
 import React, { useEffect, useMemo, useState } from "react";
+import { AssetPickerField } from "../components/AssetPicker.jsx";
 import { AssetCard } from "../components/assetPanels.jsx";
 import { JobProgressCard } from "../components/JobProgress.jsx";
 import {
@@ -76,6 +77,10 @@ export function ImageStudio({
   const [showIncompatibleLoras, setShowIncompatibleLoras] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [resultFallbackTick, setResultFallbackTick] = useState(0);
+  const editImageAssets = useMemo(
+    () => assets.filter((asset) => asset.type === "image" || asset.type === "frame"),
+    [assets],
+  );
 
   function serializeLora(lora, override = {}) {
     return {
@@ -329,19 +334,14 @@ export function ImageStudio({
       <form className="studio-layout" onSubmit={submit}>
         <section className="studio-controls">
           {mode === "edit_image" ? (
-            <label>
-              Source
-              <select onChange={(event) => setSourceAssetId(event.target.value)} value={sourceAssetId}>
-                <option value="">Select image</option>
-                {assets
-                  .filter((asset) => asset.type === "image" || asset.type === "frame")
-                  .map((asset) => (
-                    <option key={asset.id} value={asset.id}>
-                      {asset.displayName}
-                    </option>
-                  ))}
-              </select>
-            </label>
+            <AssetPickerField
+              assets={editImageAssets}
+              buttonLabel="Select image"
+              emptyLabel="No source image selected"
+              label="Source"
+              onChange={setSourceAssetId}
+              value={sourceAssetId}
+            />
           ) : null}
 
           {mode === "character_image" ? (

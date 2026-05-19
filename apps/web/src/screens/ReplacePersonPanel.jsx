@@ -1,4 +1,5 @@
 import React from "react";
+import { AssetPickerField } from "../components/AssetPicker.jsx";
 import { AssetMedia } from "../components/assetMedia.jsx";
 
 export function findReplacementModel(videoModels) {
@@ -48,17 +49,14 @@ export function ReplacePersonPanel({
 
   return (
     <div className="replace-person-panel">
-      <label>
-        Source clip
-        <select onChange={(event) => setSourceClipAssetId(event.target.value)} value={sourceClipAssetId}>
-          <option value="">Select clip</option>
-          {videoAssets.map((asset) => (
-            <option key={asset.id} value={asset.id}>
-              {asset.displayName}
-            </option>
-          ))}
-        </select>
-      </label>
+      <AssetPickerField
+        assets={videoAssets}
+        buttonLabel="Select clip"
+        emptyLabel="No source clip selected"
+        label="Source clip"
+        onChange={setSourceClipAssetId}
+        value={sourceClipAssetId}
+      />
 
       <div className="guidance-strip">
         <strong>V1 placeholder tracking</strong>

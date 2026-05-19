@@ -2,7 +2,9 @@ import React, { act } from "react";
 import { createRoot } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { App, eventUrl } from "./main.jsx";
+import { AssetPickerField } from "./components/AssetPicker.jsx";
 import { liveElapsedSeconds } from "./formatting.js";
+import { CharacterStudio } from "./screens/CharacterStudio.jsx";
 import { ImageStudio } from "./screens/ImageStudio.jsx";
 import { ModelManagerScreen } from "./screens/ModelManagerScreen.jsx";
 import { PresetManagerScreen } from "./screens/PresetManagerScreen.jsx";
@@ -111,6 +113,232 @@ describe("SceneWorks app shell", () => {
 
     expect(container.textContent).toContain("Library");
     expect(container.textContent).toContain("Queue");
+  });
+
+  it("selects duplicate-titled assets through the thumbnail asset picker", async () => {
+    const onChange = vi.fn();
+    const assets = [
+      { id: "image-alpha", type: "image", displayName: "Shot", createdAt: "2026-05-19T09:00:00Z", recipe: { mode: "text_to_image" } },
+      { id: "image-beta", type: "image", displayName: "Shot", createdAt: "2026-05-19T09:05:00Z", recipe: { mode: "edit_image" } },
+      { id: "clip-gamma", type: "video", displayName: "Shot", createdAt: "2026-05-19T09:10:00Z", file: { mimeType: "video/mp4" } },
+      { id: "upload-delta", type: "upload", displayName: "Plate", createdAt: "2026-05-19T09:15:00Z" },
+    ];
+
+    root = createRoot(container);
+    await act(async () => {
+      root.render(
+        <AssetPickerField
+          assets={assets}
+          buttonLabel="Select image"
+          emptyLabel="No source image selected"
+          label="Source"
+          onChange={onChange}
+          value=""
+        />,
+      );
+    });
+
+    await act(async () => {
+      [...container.querySelectorAll("button")].find((button) => button.textContent === "Select image").click();
+    });
+
+    expect(container.querySelector('[role="dialog"]')).not.toBeNull();
+    expect(container.textContent).toContain("Images 2");
+    expect(container.textContent).toContain("Video 1");
+    expect(container.textContent).toContain("Uploads 1");
+    expect(container.textContent).toContain("Renders 2");
+
+    await act(async () => {
+      [...container.querySelectorAll(".asset-picker-toolbar button")].find((button) => button.textContent.includes("Video")).click();
+    });
+
+    expect(container.querySelectorAll(".asset-picker-card")).toHaveLength(1);
+    expect(container.querySelector('[title="clip-gamma"]')).not.toBeNull();
+
+    await act(async () => {
+      [...container.querySelectorAll(".asset-picker-toolbar button")].find((button) => button.textContent.includes("All")).click();
+    });
+    await changeField(container.querySelector('[aria-label="Search assets"]'), "plate");
+
+    expect(container.querySelectorAll(".asset-picker-card")).toHaveLength(1);
+    expect(container.textContent).toContain("Plate");
+
+    await act(async () => {
+      container.querySelector(".modal-backdrop").dispatchEvent(new MouseEvent("mousedown", { bubbles: true }));
+    });
+
+    expect(container.querySelector('[role="dialog"]')).toBeNull();
+
+    await act(async () => {
+      [...container.querySelectorAll("button")].find((button) => button.textContent === "Select image").click();
+    });
+
+    const cards = [...container.querySelectorAll(".asset-picker-card")];
+    await act(async () => {
+      cards[1].click();
+    });
+    await act(async () => {
+      [...container.querySelectorAll("button")].find((button) => button.textContent === "Use Selection").click();
+    });
+
+    expect(onChange).toHaveBeenCalledWith("image-beta");
+
+    await act(async () => {
+      root.render(
+        <AssetPickerField
+          assets={assets}
+          buttonLabel="Select image"
+          emptyLabel="No source image selected"
+          label="Source"
+          onChange={onChange}
+          value="image-beta"
+        />,
+      );
+    });
+
+    expect(container.textContent).toContain("image-beta".slice(-6));
+
+    await act(async () => {
+      [...container.querySelectorAll("button")].find((button) => button.textContent === "Change").click();
+    });
+    await act(async () => {
+      container.querySelector('[role="dialog"]').dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+    });
+
+    expect(container.querySelector('[role="dialog"]')).toBeNull();
+  });
+
+  it("keeps in-progress picker selection across parent rerenders", async () => {
+    const onChange = vi.fn();
+    const assets = [
+      { id: "image-alpha", type: "image", displayName: "Alpha" },
+      { id: "image-beta", type: "image", displayName: "Beta" },
+    ];
+
+    root = createRoot(container);
+    await act(async () => {
+      root.render(<AssetPickerField assets={assets} label="Source" onChange={onChange} value="image-alpha" />);
+    });
+
+    await act(async () => {
+      [...container.querySelectorAll("button")].find((button) => button.textContent === "Change").click();
+    });
+    await act(async () => {
+      container.querySelectorAll(".asset-picker-card")[1].click();
+    });
+    await act(async () => {
+      root.render(<AssetPickerField assets={[...assets]} label="Source" onChange={onChange} value="image-alpha" />);
+    });
+    await act(async () => {
+      [...container.querySelectorAll("button")].find((button) => button.textContent === "Use Selection").click();
+    });
+
+    expect(onChange).toHaveBeenCalledWith("image-beta");
+  });
+
+  it("toggles and confirms multiple assets through the thumbnail picker", async () => {
+    const onChange = vi.fn();
+    const assets = [
+      { id: "image-alpha", type: "image", displayName: "Alpha" },
+      { id: "image-beta", type: "image", displayName: "Beta" },
+      { id: "image-gamma", type: "image", displayName: "Gamma" },
+    ];
+
+    root = createRoot(container);
+    await act(async () => {
+      root.render(<AssetPickerField assets={assets} label="Reference assets" multiple onChange={onChange} values={[]} />);
+    });
+
+    await act(async () => {
+      [...container.querySelectorAll("button")].find((button) => button.textContent === "Select").click();
+    });
+
+    const cards = [...container.querySelectorAll(".asset-picker-card")];
+    await act(async () => {
+      cards[0].click();
+      cards[1].click();
+      cards[0].click();
+    });
+    await act(async () => {
+      [...container.querySelectorAll("button")].find((button) => button.textContent === "Use Selection").click();
+    });
+
+    expect(onChange).toHaveBeenCalledWith(["image-beta"]);
+
+    await act(async () => {
+      root.render(<AssetPickerField assets={assets} label="Reference assets" multiple onChange={onChange} values={["image-beta"]} />);
+    });
+
+    expect(container.querySelectorAll(".asset-preview-chip")).toHaveLength(1);
+    expect(container.textContent).toContain("Beta");
+  });
+
+  it("keeps unsaved character reference selections when a multi-add partially fails", async () => {
+    const addCharacterReference = vi.fn(async (_characterId, reference) => {
+      if (reference.assetId === "image-beta") {
+        throw new Error("network hiccup");
+      }
+      return {};
+    });
+    const assets = [
+      { id: "image-alpha", type: "image", displayName: "Alpha" },
+      { id: "image-beta", type: "image", displayName: "Beta" },
+    ];
+
+    root = createRoot(container);
+    await act(async () => {
+      root.render(
+        <CharacterStudio
+          activeProject={{ id: "project-1", name: "Noir" }}
+          addCharacterReference={addCharacterReference}
+          archiveCharacter={() => {}}
+          assets={assets}
+          attachCharacterLora={() => {}}
+          characters={[{ id: "char-1", name: "Mira", type: "person", references: [], approvedReferences: [], looks: [], loras: [] }]}
+          createCharacter={() => {}}
+          createCharacterLook={() => {}}
+          createCharacterTestJob={() => {}}
+          deleteAsset={() => {}}
+          deleteCharacterLook={() => {}}
+          detachCharacterLora={() => {}}
+          imageModels={[]}
+          latestAssets={[]}
+          loras={[]}
+          onPreview={() => {}}
+          onSendImage={() => {}}
+          onSendVideo={() => {}}
+          purgeAsset={() => {}}
+          removeCharacterReference={() => {}}
+          updateAssetStatus={() => {}}
+          updateCharacter={() => {}}
+          updateCharacterLook={() => {}}
+          updateCharacterLora={() => {}}
+          updateCharacterReference={() => {}}
+        />,
+      );
+    });
+
+    await act(async () => {
+      [...container.querySelectorAll("button")].find((button) => button.textContent === "Add image or frame").click();
+    });
+
+    const cards = [...container.querySelectorAll(".asset-picker-card")];
+    await act(async () => {
+      cards[0].click();
+      cards[1].click();
+    });
+    await act(async () => {
+      [...container.querySelectorAll("button")].find((button) => button.textContent === "Use Selection").click();
+    });
+    await act(async () => {
+      [...container.querySelectorAll("button")].find((button) => button.textContent === "Add").click();
+    });
+
+    expect(addCharacterReference).toHaveBeenCalledTimes(2);
+    expect(container.textContent).toContain("Added 1 reference");
+    expect(container.textContent).toContain("network hiccup");
+    expect(container.querySelectorAll(".asset-preview-chip")).toHaveLength(1);
+    expect(container.textContent).toContain("Beta");
   });
 
   it("keeps the shell usable when recipe presets are unavailable", async () => {

@@ -48,9 +48,10 @@ export function CharacterStudio({
   const [selectedCharacterId, setSelectedCharacterId] = useState(characters[0]?.id ?? "");
   const [draft, setDraft] = useState({ name: "", type: "person", description: "" });
   const [newCharacter, setNewCharacter] = useState({ name: "", type: "person", description: "" });
-  const [referenceAssetId, setReferenceAssetId] = useState("");
+  const [referenceAssetIds, setReferenceAssetIds] = useState([]);
   const [lookDraft, setLookDraft] = useState({ name: "", description: "" });
   const [selectedReferenceIds, setSelectedReferenceIds] = useState([]);
+  const [referenceMessage, setReferenceMessage] = useState("");
   const [loraId, setLoraId] = useState("");
   const [loraEdits, setLoraEdits] = useState({});
   const [testPrompt, setTestPrompt] = useState("A clean character reference portrait, consistent identity, studio lighting");
@@ -117,9 +118,24 @@ export function CharacterStudio({
 
   async function submitReference(event) {
     event.preventDefault();
-    if (selectedCharacter && referenceAssetId) {
-      await addCharacterReference(selectedCharacter.id, { assetId: referenceAssetId, approved: false });
-      setReferenceAssetId("");
+    if (selectedCharacter && referenceAssetIds.length) {
+      const savedAssetIds = [];
+      try {
+        for (const assetId of referenceAssetIds) {
+          await addCharacterReference(selectedCharacter.id, { assetId, approved: false });
+          savedAssetIds.push(assetId);
+        }
+        setReferenceAssetIds([]);
+        setReferenceMessage("");
+      } catch (err) {
+        const message = err?.message ?? "Unknown error";
+        setReferenceAssetIds((ids) => ids.filter((id) => !savedAssetIds.includes(id)));
+        setReferenceMessage(
+          savedAssetIds.length
+            ? `Added ${savedAssetIds.length} reference${savedAssetIds.length === 1 ? "" : "s"}. Could not add the remaining selection: ${message}`
+            : `Could not add references: ${message}`,
+        );
+      }
     }
   }
 
@@ -302,10 +318,11 @@ export function CharacterStudio({
             <CharacterReferences
               imageAssets={imageAssets}
               onPreview={onPreview}
-              referenceAssetId={referenceAssetId}
+              referenceMessage={referenceMessage}
+              referenceAssetIds={referenceAssetIds}
               removeCharacterReference={removeCharacterReference}
               selectedCharacter={selectedCharacter}
-              setReferenceAssetId={setReferenceAssetId}
+              setReferenceAssetIds={setReferenceAssetIds}
               submitReference={submitReference}
               updateCharacterReference={updateCharacterReference}
             />

@@ -16,13 +16,37 @@ export function assetCanRenderAsImage(asset) {
   return asset?.type === "image" || asset?.file?.mimeType?.startsWith("image/");
 }
 
-export function AssetMedia({ asset, className = "" }) {
+export function assetCanRenderAsVideo(asset) {
+  return asset?.type === "video" || asset?.file?.mimeType?.startsWith("video/");
+}
+
+export function AssetThumbnail({ asset, className = "" }) {
   if (!asset) {
     return null;
   }
   const src = assetUrl(asset);
-  if (asset.file?.mimeType?.startsWith("video/")) {
-    return <video className={className} controls muted playsInline src={src} />;
+  if (!src) {
+    return <span className={className}>{asset.type ?? "asset"}</span>;
+  }
+  if (assetCanRenderAsVideo(asset)) {
+    return <video className={className} muted playsInline preload="metadata" src={src} />;
+  }
+  if (assetCanRenderAsImage(asset)) {
+    return <img alt="" className={className} src={src} />;
+  }
+  return <span className={className}>{asset.type ?? "asset"}</span>;
+}
+
+export function AssetMedia({ asset, className = "", controls = true }) {
+  if (!asset) {
+    return null;
+  }
+  const src = assetUrl(asset);
+  if (!src) {
+    return <span className={className}>{asset.type ?? "asset"}</span>;
+  }
+  if (assetCanRenderAsVideo(asset)) {
+    return <video className={className} controls={controls} muted playsInline src={src} />;
   }
   if (assetCanRenderAsImage(asset)) {
     return <img alt="" className={className} src={src} />;
