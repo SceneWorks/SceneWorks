@@ -374,7 +374,7 @@ def run_image_job(api: ApiClient, settings: WorkerSettings, job: dict, image_ada
 
 def run_video_job(api: ApiClient, settings: WorkerSettings, job: dict) -> None:
     job_id = job["id"]
-    adapter = create_video_adapter()
+    adapter = create_video_adapter(job)
 
     def adapter_loaded_models() -> list[str]:
         return loaded_models_from_adapter(adapter, job_id=job_id)

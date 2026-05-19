@@ -966,7 +966,7 @@ def test_video_job_reports_dynamic_loaded_models_on_progress_and_keepalive(monke
         blocking_models.append(loaded_models())
         return result
 
-    monkeypatch.setattr("scene_worker.runtime.create_video_adapter", lambda: VideoAdapter())
+    monkeypatch.setattr("scene_worker.runtime.create_video_adapter", lambda _job=None: VideoAdapter())
     monkeypatch.setattr("scene_worker.runtime.run_blocking_job_step", run_immediately)
 
     run_video_job(
@@ -1019,7 +1019,7 @@ def test_video_job_estimate_progress_accepts_non_preview_frame_requirements(monk
         def cleanup(self, _job_id):
             raise AssertionError("cleanup should not be called")
 
-    monkeypatch.setattr("scene_worker.runtime.create_video_adapter", lambda: VideoAdapter())
+    monkeypatch.setattr("scene_worker.runtime.create_video_adapter", lambda _job=None: VideoAdapter())
     monkeypatch.setattr(
         "scene_worker.runtime.run_blocking_job_step",
         lambda *_args, **_kwargs: _args[4](),
@@ -1043,11 +1043,19 @@ def test_explicit_seed_uses_reproducible_ladder():
 
 
 def test_video_adapter_override_aliases_and_unknown_values(monkeypatch):
+    monkeypatch.delenv("SCENEWORKS_VIDEO_ADAPTER", raising=False)
+    assert create_video_adapter({"payload": {"model": "ltx_2_3"}}).__class__.__name__ == "LtxPipelinesVideoAdapter"
+    assert create_video_adapter({"payload": {"model": "wan_2_2"}}).__class__.__name__ == "DiffusersVideoAdapter"
+    assert create_video_adapter().__class__.__name__ == "LtxPipelinesVideoAdapter"
+
     monkeypatch.setenv("SCENEWORKS_VIDEO_ADAPTER", "procedural")
     assert create_video_adapter().__class__.__name__ == "ProceduralVideoAdapter"
 
     monkeypatch.setenv("SCENEWORKS_VIDEO_ADAPTER", "ltx_pipelines")
     assert create_video_adapter().__class__.__name__ == "LtxPipelinesVideoAdapter"
+
+    monkeypatch.setenv("SCENEWORKS_VIDEO_ADAPTER", "diffusers_video")
+    assert create_video_adapter().__class__.__name__ == "DiffusersVideoAdapter"
 
     monkeypatch.setenv("SCENEWORKS_VIDEO_ADAPTER", "typo")
     try:
