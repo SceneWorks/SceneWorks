@@ -167,6 +167,26 @@ def friendly_failure(job_kind: str, exc: Exception) -> tuple[str, str]:
                 f"Technical detail: {detail}"
             ),
         )
+    peft_markers = (
+        "peft backend",
+        "requires peft",
+        "requires the peft backend",
+        "peft is required",
+        "install peft",
+        "no module named 'peft'",
+        'no module named "peft"',
+    )
+    if any(marker in lowered for marker in peft_markers):
+        return (
+            f"{job_kind} failed because the selected preset or LoRA needs PEFT support.",
+            (
+                "The worker needs the PEFT backend to apply the selected preset LoRAs. "
+                "For bare-metal workers, run `pip install -r apps/worker/requirements.txt`; "
+                "for Docker Compose, run `docker compose build worker --no-cache`, then restart the worker and retry. "
+                "You can also choose a preset without LoRAs. "
+                f"Technical detail: {detail}"
+            ),
+        )
     missing_model_markers = (
         "repo id",
         "repository not found",

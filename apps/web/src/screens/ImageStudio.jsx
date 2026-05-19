@@ -8,6 +8,7 @@ import {
   presetMatchesModel,
   presetMatchesWorkflow,
   presetPromptParts as buildPresetPromptParts,
+  presetValidation,
 } from "../presetUtils.js";
 
 const completedResultFallbackMs = 30000;
@@ -155,7 +156,10 @@ export function ImageStudio({
   const userSelectedLoraCount = selectedLoras.filter((lora) => lora.scope !== "builtin").length;
   const presetLoraDetails = buildPresetLoraDetails(selectedRecipePreset, loras);
   const presetPromptParts = buildPresetPromptParts(selectedRecipePreset);
-  const presetMissingLoras = presetLoraDetails.filter((lora) => lora.missing);
+  const presetValidationResult = useMemo(
+    () => presetValidation(selectedRecipePreset, loras, selectedModel),
+    [selectedRecipePreset, loras, selectedModel],
+  );
   const hasPendingCompatibleLoras = Boolean(selectedModel) && loras.some((lora) => lora.installState === "missing" && loraMatchesModel(lora, selectedModel));
   const loraEmptyMessage = !selectedModel
     ? "No model selected"
@@ -505,14 +509,19 @@ export function ImageStudio({
             </div>
           ) : null}
 
-          {presetMissingLoras.length ? (
+          {presetValidationResult.missing.length ? (
             <p className="inline-warning">
-              Preset cannot run until LoRA import finishes: {presetMissingLoras.map((lora) => lora.id).join(", ")}. Wait for the Queue or choose another preset.
+              Preset cannot run until LoRA import finishes: {presetValidationResult.missing.join(", ")}. Wait for the Queue or choose another preset.
+            </p>
+          ) : null}
+          {presetValidationResult.incompatible.length ? (
+            <p className="inline-warning">
+              Preset cannot run with {selectedModel?.name ?? "the selected model"} because these LoRAs are incompatible: {presetValidationResult.incompatible.join(", ")}. Choose another preset or model.
             </p>
           ) : null}
           <button
             className="primary-action"
-            disabled={submitting || !activeProject || !prompt.trim() || (mode === "character_image" && !characterId) || Boolean(presetMissingLoras.length)}
+            disabled={submitting || !activeProject || !prompt.trim() || (mode === "character_image" && !characterId) || !presetValidationResult.ok}
             type="submit"
           >
             {submitting ? "Queueing..." : "Generate"}

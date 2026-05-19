@@ -7,5 +7,6 @@ imageio-ffmpeg>=0.6,<1
 torch>=2.7
 transformers>=4.57
 accelerate>=1.11
+peft>=0.17,<1
 safetensors>=0.6
 diffusers @ git+https://github.com/huggingface/diffusers.git

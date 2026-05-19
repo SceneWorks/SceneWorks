@@ -91,6 +91,11 @@ class FakeSingleLoraPipe:
         self.loaded.append((path, adapter_name))
 
 
+class FakePeftBackendErrorPipe:
+    def load_lora_weights(self, path, adapter_name=None):
+        raise ValueError("PEFT backend is required for this method.")
+
+
 def test_cpu_worker_does_not_advertise_gpu_generation_capabilities():
     capabilities = worker_capabilities({"id": "cpu", "name": "CPU", "capabilities": ["placeholder", "cpu"]})
 
@@ -307,6 +312,37 @@ def test_lora_loader_fails_when_pipeline_cannot_load_loras(tmp_path):
         apply_loras_to_pipeline(object(), [{"id": "style", "installedPath": str(first)}], adapter_id="diffusers_test")
 
 
+def test_lora_loader_explains_missing_peft_backend(tmp_path):
+    first = tmp_path / "style.safetensors"
+    first.write_bytes(b"lora")
+
+    with pytest.raises(RuntimeError, match="LoRA style requires the PEFT backend") as info:
+        apply_loras_to_pipeline(
+            FakePeftBackendErrorPipe(),
+            [{"id": "style", "installedPath": str(first)}],
+            adapter_id="diffusers_test",
+        )
+
+    assert isinstance(info.value.__cause__, ValueError)
+    assert "docker compose build worker --no-cache" in str(info.value)
+
+
+def test_lora_loader_detects_reworded_peft_backend_errors(tmp_path):
+    first = tmp_path / "style.safetensors"
+    first.write_bytes(b"lora")
+
+    class MissingPeftPipe:
+        def load_lora_weights(self, path, adapter_name=None):
+            raise ModuleNotFoundError("No module named 'peft'")
+
+    with pytest.raises(RuntimeError, match="LoRA style requires the PEFT backend"):
+        apply_loras_to_pipeline(
+            MissingPeftPipe(),
+            [{"id": "style", "installedPath": str(first)}],
+            adapter_id="diffusers_test",
+        )
+
+
 def test_unsupported_adapter_guard_rejects_loras(tmp_path):
     first = tmp_path / "style.safetensors"
     first.write_bytes(b"lora")
@@ -431,6 +467,18 @@ def test_friendly_failure_identifies_ltx_frame_count_errors():
 
     assert message == "Video generation failed because LTX requires a compatible frame count."
     assert "(frames - 1)" in error
+    assert "Technical detail" in error
+
+
+def test_friendly_failure_identifies_missing_peft_backend():
+    message, error = friendly_failure(
+        "Image generation",
+        RuntimeError("LoRA style requires the PEFT backend for z_image_diffusers."),
+    )
+
+    assert message == "Image generation failed because the selected preset or LoRA needs PEFT support."
+    assert "pip install -r apps/worker/requirements.txt" in error
+    assert "docker compose build worker --no-cache" in error
     assert "Technical detail" in error
 
 

@@ -7,6 +7,7 @@ import {
   presetMatchesModel,
   presetMatchesWorkflow,
   presetPromptParts as buildPresetPromptParts,
+  presetValidation,
 } from "../presetUtils.js";
 import { ReplacePersonPanel, findReplacementModel } from "./ReplacePersonPanel.jsx";
 
@@ -74,7 +75,10 @@ export function VideoStudio({
   const selectedRecipePreset = availableRecipePresets.find((preset) => preset.id === recipePresetId) ?? availableRecipePresets[0] ?? null;
   const presetPromptParts = buildPresetPromptParts(selectedRecipePreset);
   const presetLoraDetails = buildPresetLoraDetails(selectedRecipePreset, loras);
-  const presetMissingLoras = presetLoraDetails.filter((lora) => lora.missing);
+  const presetValidationResult = useMemo(
+    () => presetValidation(selectedRecipePreset, loras, selectedModel),
+    [selectedRecipePreset, loras, selectedModel],
+  );
 
   useEffect(() => {
     if (!videoModels.some((item) => item.id === model)) {
@@ -215,7 +219,7 @@ export function VideoStudio({
     (mode === "first_last_frame" && sourceAssetId && lastFrameAssetId) ||
     (mode === "extend_clip" && sourceClipAssetId) ||
     (mode === "replace_person" && sourceClipAssetId && personTrackId && characterId);
-  const canSubmit = Boolean(activeProject && prompt.trim() && supportsMode && implementedMode && hasInputs && !presetMissingLoras.length);
+  const canSubmit = Boolean(activeProject && prompt.trim() && supportsMode && implementedMode && hasInputs && presetValidationResult.ok);
   const [width, height] = resolution.split("x").map((value) => Number(value));
   const durationOptions = selectedModel?.limits?.durations ?? [4, 6, 8, 10];
   const resolutionOptions = selectedModel?.limits?.resolutions ?? ["768x512", "640x640", "1280x720", "720x1280"];
@@ -553,9 +557,14 @@ export function VideoStudio({
           ) : null}
 
           {blockedMessage ? <p className="inline-warning">{blockedMessage}</p> : null}
-          {presetMissingLoras.length ? (
+          {presetValidationResult.missing.length ? (
             <p className="inline-warning">
-              Preset cannot run until LoRA import finishes: {presetMissingLoras.map((lora) => lora.id).join(", ")}. Wait for the Queue or choose another preset.
+              Preset cannot run until LoRA import finishes: {presetValidationResult.missing.join(", ")}. Wait for the Queue or choose another preset.
+            </p>
+          ) : null}
+          {presetValidationResult.incompatible.length ? (
+            <p className="inline-warning">
+              Preset cannot run with {selectedModel?.name ?? "the selected model"} because these LoRAs are incompatible: {presetValidationResult.incompatible.join(", ")}. Choose another preset or model.
             </p>
           ) : null}
           <button className="primary-action" disabled={submitting || !canSubmit} type="submit">

@@ -105,16 +105,17 @@ def apply_loras_to_pipeline(
             raise RuntimeError(f"{adapter_id} cannot clear previously loaded LoRAs between jobs.")
 
     for spec in specs_to_load:
-        pipe.load_lora_weights(spec.path, adapter_name=spec.adapter_name)
+        try:
+            pipe.load_lora_weights(spec.path, adapter_name=spec.adapter_name)
+        except Exception as exc:
+            if is_peft_backend_error(exc):
+                raise RuntimeError(peft_backend_message(adapter_id, [spec])) from exc
+            raise
 
     names = tuple(spec.adapter_name for spec in specs)
     weights = [spec.weight for spec in specs]
     if hasattr(pipe, "set_adapters"):
-        try:
-            # Newer Diffusers releases use adapter_weights; older builds used weights.
-            pipe.set_adapters(list(names), adapter_weights=weights)
-        except TypeError:
-            pipe.set_adapters(list(names), weights=weights)
+        set_lora_adapters(pipe, names, weights, adapter_id=adapter_id, specs=specs)
     elif len(names) > 1 or any(weight != 1.0 for weight in weights):
         raise RuntimeError(f"{adapter_id} loaded LoRAs but cannot apply per-LoRA weights.")
     return LoraPipelineState(key=key, adapter_names=names, specs=tuple(specs))
@@ -149,6 +150,47 @@ def lora_weight(lora: dict[str, Any]) -> float:
         return float(lora.get("weight", lora.get("defaultWeight", 0.8)))
     except (TypeError, ValueError):
         return 0.8
+
+
+def set_lora_adapters(pipe: Any, names: tuple[str, ...], weights: list[float], *, adapter_id: str, specs: list[LoraSpec]) -> None:
+    try:
+        # Newer Diffusers releases use adapter_weights; older builds used weights.
+        pipe.set_adapters(list(names), adapter_weights=weights)
+        return
+    except TypeError as exc:
+        if is_peft_backend_error(exc):
+            raise RuntimeError(peft_backend_message(adapter_id, specs)) from exc
+
+    try:
+        pipe.set_adapters(list(names), weights=weights)
+    except Exception as exc:
+        if is_peft_backend_error(exc):
+            raise RuntimeError(peft_backend_message(adapter_id, specs)) from exc
+        raise
+
+
+def is_peft_backend_error(exc: Exception) -> bool:
+    lowered = str(exc).lower()
+    peft_markers = (
+        "peft backend",
+        "requires peft",
+        "peft is required",
+        "install peft",
+        "no module named 'peft'",
+        'no module named "peft"',
+    )
+    return (
+        isinstance(exc, (ImportError, ModuleNotFoundError)) and "peft" in lowered
+    ) or any(marker in lowered for marker in peft_markers)
+
+
+def peft_backend_message(adapter_id: str, specs: list[LoraSpec]) -> str:
+    lora_ids = ", ".join(spec.id for spec in specs) or "selected LoRA"
+    return (
+        f"LoRA {lora_ids} requires the PEFT backend for {adapter_id}. "
+        "For bare-metal workers, run `pip install -r apps/worker/requirements.txt`; "
+        "for Docker Compose, run `docker compose build worker --no-cache`, then restart the worker and retry the preset."
+    )
 
 
 def safe_adapter_name(lora_id: str, path: str) -> str:
