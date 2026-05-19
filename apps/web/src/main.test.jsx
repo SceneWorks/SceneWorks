@@ -814,6 +814,49 @@ describe("SceneWorks app shell", () => {
     expect(container.textContent).toContain("LoRA import queued for detail_lora.");
   });
 
+  it("shows model download size estimates and unavailable states before download", async () => {
+    root = createRoot(container);
+    await act(async () => {
+      root.render(
+        <ModelManagerScreen
+          activeProject={{ id: "project-1", name: "Noir" }}
+          jobs={[]}
+          loras={[]}
+          models={[
+            {
+              id: "z_image_turbo",
+              name: "Z-Image Turbo",
+              type: "image",
+              family: "z-image",
+              downloadable: true,
+              installState: "missing",
+              downloadSizeLabel: "30.6 GB",
+              downloadSizeEstimated: true,
+              downloads: [{ provider: "huggingface", repo: "Tongyi-MAI/Z-Image-Turbo" }],
+            },
+            {
+              id: "local_unknown",
+              name: "Unknown Size",
+              type: "image",
+              family: "z-image",
+              downloadable: true,
+              installState: "missing",
+              downloads: [{ provider: "huggingface", repo: "owner/unknown" }],
+            },
+          ]}
+          onDownloadModel={() => {}}
+          onImportLora={() => {}}
+          onOpenQueue={() => {}}
+        />,
+      );
+    });
+
+    expect(container.textContent).toContain("Download size");
+    expect(container.textContent).toContain("~30.6 GB");
+    expect(container.textContent).toContain("Unavailable");
+    expect([...container.querySelectorAll("button")].some((button) => button.textContent === "Download ~30.6 GB")).toBe(true);
+  });
+
   it("advances elapsed seconds for active job snapshots between server updates", () => {
     const job = {
       id: "image-job-1",

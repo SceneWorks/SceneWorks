@@ -1917,11 +1917,13 @@
         "height": 1024,
         "width": 1024
       },
-      "downloadSizeBytes": null,
-      "downloadSizeLabel": null,
+      "downloadSizeBytes": 12884901888,
+      "downloadSizeEstimated": true,
+      "downloadSizeLabel": "12.0 GB",
       "downloadable": true,
       "downloads": [
         {
+          "estimatedSizeBytes": 12884901888,
           "files": [
             "*.safetensors"
           ],
