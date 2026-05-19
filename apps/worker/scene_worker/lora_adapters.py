@@ -101,6 +101,8 @@ def normalize_lora_specs(loras: list[dict[str, Any]]) -> list[LoraSpec]:
             raise RuntimeError(f"LoRA {lora_id} is not installed. Import or download it before generation.")
         if not path.exists():
             raise RuntimeError(f"LoRA {lora_id} file is missing: {path}")
+        if path.is_dir() and not first_safetensors_path(path):
+            raise RuntimeError(f"LoRA {lora_id} has no .safetensors file under: {path}")
         path_text = str(path)
         specs.append(
             LoraSpec(
@@ -187,6 +189,14 @@ def lora_path(lora: dict[str, Any]) -> Path | None:
 
 def path_stem(path: Path | None) -> str | None:
     return path.stem if path else None
+
+
+def first_safetensors_path(path: Path) -> Path | None:
+    if path.is_file() and path.suffix.lower() == ".safetensors":
+        return path
+    if not path.is_dir():
+        return None
+    return next((candidate for candidate in path.rglob("*.safetensors") if candidate.is_file()), None)
 
 
 def lora_weight(lora: dict[str, Any]) -> float:

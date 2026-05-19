@@ -810,6 +810,11 @@ button:disabled {
   padding: 10px 12px;
 }
 
+.lora-row.warning {
+  border-color: #8f7552;
+  background: #2a251c;
+}
+
 .character-layout {
   display: grid;
   grid-template-columns: minmax(220px, 300px) minmax(0, 1fr);
