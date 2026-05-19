@@ -233,12 +233,15 @@ def friendly_failure(job_kind: str, exc: Exception) -> tuple[str, str]:
     missing_model_markers = (
         "repo id",
         "repository not found",
+        "entry not found",
         "is not a local folder",
         "couldn't connect to 'https://huggingface.co'",
+        "model_index.json",
         "no file named model_index.json",
         "error no file named",
         "cannot load model",
         "missing model file",
+        "missing resources",
     )
     if any(marker in lowered for marker in missing_model_markers):
         return (
