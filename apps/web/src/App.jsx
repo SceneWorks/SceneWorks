@@ -80,6 +80,12 @@ function generatedResultAssetCount(job) {
 
 const localJobStackLimit = 4;
 const maxLoraUploadBytes = 2 * 1024 * 1024 * 1024;
+const maxModelUploadBytes = 256 * 1024 * 1024 * 1024;
+
+function uploadLimitLabel(bytes) {
+  const gib = bytes / (1024 * 1024 * 1024);
+  return Number.isInteger(gib) ? `${gib}GB` : `${gib.toFixed(1)}GB`;
+}
 
 export function App() {
   const [health, setHealth] = useState(null);
@@ -513,6 +519,36 @@ export function App() {
     });
     await refreshRecipePresets(activeProject?.id);
     return archived;
+  }
+
+  async function createModelImportJob(payload, options = {}) {
+    const { file, ...metadata } = payload;
+    if (file?.size > maxModelUploadBytes) {
+      throw new Error(`Uploaded model file exceeds the ${uploadLimitLabel(maxModelUploadBytes)} limit`);
+    }
+    let body;
+    if (file) {
+      body = new FormData();
+      Object.entries(metadata).forEach(([key, value]) => {
+        if (value != null && value !== "") {
+          body.append(key, value);
+        }
+      });
+      body.append("file", file);
+    } else {
+      body = JSON.stringify(metadata);
+    }
+    const job = await apiFetch("/api/v1/models/import", token, {
+      method: "POST",
+      body,
+    });
+    setJobs((items) => [job, ...items.filter((item) => item.id !== job.id)].sort(sortNewest));
+    if (options.navigateToQueue ?? false) {
+      setActiveView("Queue");
+    }
+    setError("");
+    refreshData();
+    return job;
   }
 
   async function createLoraImportJob(payload, options = {}) {
@@ -1470,6 +1506,7 @@ export function App() {
             models={models}
             onDownloadModel={createModelDownloadJob}
             onImportLora={createLoraImportJob}
+            onImportModel={createModelImportJob}
             onOpenQueue={() => setActiveView("Queue")}
           />
         ) : null}
