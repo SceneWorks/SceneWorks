@@ -1296,6 +1296,7 @@ describe("SceneWorks app shell", () => {
       );
     });
 
+    expect(field(container, "LoRA family").value).toBe("all");
     await changeField(field(container, "LoRA family"), "qwen-image");
     await changeField(field(container, "Source URL"), "https://example.com/loras/detail.safetensors");
     await act(async () => {
@@ -1315,6 +1316,39 @@ describe("SceneWorks app shell", () => {
         family: "z-image",
       }),
     );
+  });
+
+  it("clears an explicit Models LoRA import family when the model family disappears", async () => {
+    const onImportLora = vi.fn(async (payload) => ({ payload: { ...payload, loraId: "detail_lora" } }));
+    const renderScreen = (models) =>
+      root.render(
+        <ModelManagerScreen
+          activeProject={{ id: "project-1", name: "Noir" }}
+          jobs={[]}
+          loras={[]}
+          models={models}
+          onDownloadModel={() => {}}
+          onImportLora={onImportLora}
+          onOpenQueue={() => {}}
+        />,
+      );
+
+    root = createRoot(container);
+    await act(async () => {
+      renderScreen([
+        { id: "z_image_turbo", name: "Z-Image Turbo", type: "image", family: "z-image" },
+        { id: "qwen_image", name: "Qwen Image", type: "image", family: "qwen-image" },
+      ]);
+    });
+
+    await changeField(field(container, "Family"), "qwen-image");
+    expect(field(container, "Family").value).toBe("qwen-image");
+
+    await act(async () => {
+      renderScreen([{ id: "z_image_turbo", name: "Z-Image Turbo", type: "image", family: "z-image" }]);
+    });
+
+    expect(field(container, "Family").value).toBe("");
   });
 
   it("shows model download size estimates and unavailable states before download", async () => {

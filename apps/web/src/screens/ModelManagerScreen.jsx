@@ -67,7 +67,7 @@ function downloadSizeText(model) {
 export function ModelManagerScreen({ activeProject, jobs, loras, models, onDownloadModel, onImportLora, onOpenQueue }) {
   const families = Array.from(new Set(models.map((model) => model.family).filter(Boolean))).sort();
   const familiesKey = families.join("|");
-  const [familyFilter, setFamilyFilter] = useState(families[0] ?? "all");
+  const [familyFilter, setFamilyFilter] = useState("all");
   const [importingLora, setImportingLora] = useState(false);
   const [importMessage, setImportMessage] = useState({ tone: "neutral", text: "" });
   const [importForm, setImportForm] = useState({
@@ -83,7 +83,7 @@ export function ModelManagerScreen({ activeProject, jobs, loras, models, onDownl
 
   useEffect(() => {
     if (familyFilter !== "all" && !families.includes(familyFilter)) {
-      setFamilyFilter(families[0] ?? "all");
+      setFamilyFilter("all");
     }
   }, [familiesKey, familyFilter]);
 
@@ -225,7 +225,7 @@ export function ModelManagerScreen({ activeProject, jobs, loras, models, onDownl
         <form className="lora-import-panel models-import-panel" aria-label="Import LoRA" onSubmit={importLora}>
           <div>
             <strong>Import LoRA</strong>
-            <span>{importForm.family || "auto family"}</span>
+            <span>{importForm.family || "auto-detect"}</span>
           </div>
           <div className="segmented-control compact-segment" aria-label="LoRA import source">
             <button
@@ -268,7 +268,7 @@ export function ModelManagerScreen({ activeProject, jobs, loras, models, onDownl
               >
                 {families.length ? (
                   <>
-                    <option value="">{isFileImport ? "Auto-detect from file" : "No family override"}</option>
+                    <option value="">Auto-detect</option>
                     {families.map((family) => (
                       <option key={family} value={family}>
                         {family}
