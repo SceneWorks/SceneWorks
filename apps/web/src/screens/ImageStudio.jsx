@@ -394,10 +394,13 @@ export function ImageStudio({
 
   return (
     <section className="main-surface image-studio">
-      <div className="surface-header">
+      <div className="surface-header hero">
         <div className="section-heading">
           <p className="eyebrow">Image Studio</p>
           <h2>{activeProject ? activeProject.name : "Create a project"}</h2>
+          <p className="hero-blurb">
+            Describe what you want — we'll render variations side by side. Pick a mode, then fill in the prompt below.
+          </p>
         </div>
         <div className="segmented-control" role="tablist" aria-label="Image mode">
           {[

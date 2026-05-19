@@ -1541,6 +1541,7 @@ export function App() {
 
         {activeView === "Library" ? (
           <LibraryScreen
+            activeProject={activeProject}
             assets={assets}
             deleteAsset={deleteAsset}
             purgeAsset={purgeAsset}
