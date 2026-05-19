@@ -187,7 +187,7 @@ fn gpu_generation_jobs_reject_cpu_requested_gpu() {
 
     let error = store
         .create_job(CreateJob {
-            requested_gpu: " cpu ".to_owned(),
+            requested_gpu: " CPU ".to_owned(),
             ..image_job(Map::new())
         })
         .expect_err("cpu requestedGpu should be rejected");
@@ -202,7 +202,7 @@ fn cpu_worker_cannot_claim_auto_gpu_generation_job_even_with_capability() {
     store
         .register_worker(RegisterWorker {
             worker_id: "worker-cpu".to_owned(),
-            gpu_id: "cpu".to_owned(),
+            gpu_id: "CPU".to_owned(),
             gpu_name: Some("CPU inference worker".to_owned()),
             capabilities: vec![WorkerCapability::Cpu, WorkerCapability::ImageGenerate],
             loaded_models: Vec::new(),

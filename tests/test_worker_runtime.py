@@ -16,7 +16,7 @@ from scene_worker.image_adapters import (
     create_image_adapter,
     huggingface_repo_cache_path,
     image_request_from_job,
-    require_cuda_for_gpu_worker,
+    require_inference_backend_for_gpu_worker,
     resolve_seed,
     select_torch_device,
 )
@@ -105,7 +105,7 @@ def test_cpu_worker_does_not_advertise_gpu_generation_capabilities():
 
 
 def test_gpu_worker_advertises_generation_capabilities(monkeypatch):
-    monkeypatch.setattr("scene_worker.runtime.torch_cuda_available", lambda: True)
+    monkeypatch.setattr("scene_worker.runtime.torch_inference_backend_available", lambda: True)
     capabilities = worker_capabilities({"id": "gpu-0", "name": "GPU 0", "capabilities": ["placeholder", "gpu"]})
 
     assert "image_generate" in capabilities
@@ -115,14 +115,14 @@ def test_gpu_worker_advertises_generation_capabilities(monkeypatch):
 
 
 def test_gpu_worker_without_cuda_torch_does_not_claim_generation_jobs(monkeypatch):
-    monkeypatch.setattr("scene_worker.runtime.torch_cuda_available", lambda: False)
+    monkeypatch.setattr("scene_worker.runtime.torch_inference_backend_available", lambda: False)
     capabilities = worker_capabilities({"id": "gpu-0", "name": "GPU 0", "capabilities": ["placeholder", "gpu", "nvidia"]})
 
     assert capabilities == ["gpu", "nvidia"]
 
 
 def test_python_worker_only_advertises_inference_job_capabilities(monkeypatch):
-    monkeypatch.setattr("scene_worker.runtime.torch_cuda_available", lambda: True)
+    monkeypatch.setattr("scene_worker.runtime.torch_inference_backend_available", lambda: True)
     capabilities = worker_capabilities({"id": "gpu-0", "name": "GPU 0", "capabilities": ["placeholder", "gpu"]})
     job_capabilities = [capability for capability in capabilities if capability != "gpu"]
 
@@ -196,7 +196,58 @@ def test_gpu_worker_fails_fast_when_torch_cuda_is_unavailable():
                 return False
 
     with pytest.raises(RuntimeError, match="CUDA-enabled PyTorch"):
-        require_cuda_for_gpu_worker(Torch, "0")
+        require_inference_backend_for_gpu_worker(Torch, "0")
+
+
+def test_auto_gpu_worker_fails_fast_when_inference_backend_is_unavailable():
+    class Torch:
+        class cuda:
+            @staticmethod
+            def is_available():
+                return False
+
+        class backends:
+            mps = None
+
+    with pytest.raises(RuntimeError, match="CUDA-enabled PyTorch"):
+        require_inference_backend_for_gpu_worker(Torch, "auto")
+
+
+def test_mps_worker_can_advertise_generation_capabilities(monkeypatch):
+    class Torch:
+        class cuda:
+            @staticmethod
+            def is_available():
+                return False
+
+        class backends:
+            class mps:
+                @staticmethod
+                def is_available():
+                    return True
+
+    monkeypatch.setattr("scene_worker.runtime.importlib.import_module", lambda name: Torch if name == "torch" else None)
+
+    capabilities = worker_capabilities({"id": "mps", "name": "Apple GPU", "capabilities": ["placeholder", "gpu"]})
+
+    assert "image_generate" in capabilities
+    assert "video_generate" in capabilities
+
+
+def test_gpu_worker_accepts_mps_inference_backend():
+    class Torch:
+        class cuda:
+            @staticmethod
+            def is_available():
+                return False
+
+        class backends:
+            class mps:
+                @staticmethod
+                def is_available():
+                    return True
+
+    require_inference_backend_for_gpu_worker(Torch, "mps")
 
 
 def test_loaded_models_are_collected_from_adapter_cache():
@@ -514,7 +565,7 @@ def test_friendly_failure_identifies_missing_peft_backend():
 def test_worker_check_reports_inference_sidecar_capabilities(monkeypatch):
     events = []
     monkeypatch.setattr("scene_worker.runtime.emit", events.append)
-    monkeypatch.setattr("scene_worker.runtime.torch_cuda_available", lambda: True)
+    monkeypatch.setattr("scene_worker.runtime.torch_inference_backend_available", lambda: True)
     monkeypatch.setattr(
         "scene_worker.runtime.discover_gpu",
         lambda _gpu_id: {"id": "0", "name": "GPU 0", "capabilities": ["gpu"]},

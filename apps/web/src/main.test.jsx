@@ -1554,6 +1554,15 @@ describe("SceneWorks app shell", () => {
           setRequestedGpu={() => {}}
           workers={[
             {
+              id: "misregistered-cpu",
+              gpuId: "cpu",
+              gpuName: "CPU worker",
+              status: "idle",
+              currentJobId: null,
+              capabilities: ["placeholder", "cpu", "video_generate"],
+              loadedModels: [],
+            },
+            {
               id: "python-gpu-0",
               gpuId: "0",
               gpuName: "Fixture GPU 0",

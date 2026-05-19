@@ -310,7 +310,7 @@ class ZImageDiffusersAdapter:
         torch = importlib.import_module("torch")
         diffusers = importlib.import_module("diffusers")
         repo = request.advanced.get("modelRepo") or model_target["repo"]
-        require_cuda_for_gpu_worker(torch, settings.gpu_id)
+        require_inference_backend_for_gpu_worker(torch, settings.gpu_id)
         device = select_torch_device(torch, settings.gpu_id)
         activate_torch_device(torch, device)
         dtype = select_torch_dtype(torch, device, request.advanced.get("dtype"))
@@ -480,7 +480,7 @@ class QwenImageAdapter:
         torch = importlib.import_module("torch")
         diffusers = importlib.import_module("diffusers")
         repo = self._repo_for_request(request, model_target)
-        require_cuda_for_gpu_worker(torch, settings.gpu_id)
+        require_inference_backend_for_gpu_worker(torch, settings.gpu_id)
         device = select_torch_device(torch, settings.gpu_id)
         activate_torch_device(torch, device)
         dtype = select_torch_dtype(torch, device, request.advanced.get("dtype"))
@@ -677,13 +677,20 @@ def select_torch_device(torch: Any, gpu_id: str | None = None) -> str:
     return "cpu"
 
 
-def require_cuda_for_gpu_worker(torch: Any, gpu_id: str | None) -> None:
-    requested = str(gpu_id or "").strip()
-    if requested and requested not in {"auto", "cpu"} and not torch.cuda.is_available():
+def torch_inference_backend_available(torch: Any) -> bool:
+    if torch.cuda.is_available():
+        return True
+    mps = getattr(getattr(torch, "backends", None), "mps", None)
+    return bool(mps and mps.is_available())
+
+
+def require_inference_backend_for_gpu_worker(torch: Any, gpu_id: str | None) -> None:
+    requested = str(gpu_id or "").strip().lower()
+    if requested != "cpu" and not torch_inference_backend_available(torch):
         raise RuntimeError(
             "CUDA-enabled PyTorch is not available in this GPU worker. "
             "Rebuild the worker with a CUDA PyTorch wheel, for example "
-            "`docker compose build --no-cache worker`, then restart the worker."
+            "`docker compose build worker --no-cache`, then restart the worker."
         )
 
 

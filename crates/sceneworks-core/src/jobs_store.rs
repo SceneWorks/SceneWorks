@@ -1230,7 +1230,7 @@ fn active_gpu_job_exists(connection: &Connection, gpu_id: &str) -> JobsStoreResu
 }
 
 fn worker_supports_job(worker: &WorkerSnapshot, job: &JobSnapshot) -> bool {
-    if job_requires_gpu(&job.job_type) && worker.gpu_id == "cpu" {
+    if job_requires_gpu(&job.job_type) && worker.gpu_id.eq_ignore_ascii_case("cpu") {
         return false;
     }
     worker
@@ -1374,11 +1374,16 @@ fn normalize_requested_gpu(value: &str) -> String {
     let trimmed = value.trim();
     if trimmed.is_empty() {
         "auto".to_owned()
+    } else if trimmed.eq_ignore_ascii_case("auto") || trimmed.eq_ignore_ascii_case("cpu") {
+        trimmed.to_ascii_lowercase()
     } else {
         trimmed.to_owned()
     }
 }
 
+// Keep GPU-required generation types in sync with
+// apps/worker/scene_worker/runtime.py::SUPPORTED_JOB_TYPES and
+// apps/web/src/screens/QueueScreen.jsx::gpuRequiredJobTypes.
 fn job_requires_gpu(job_type: &JobType) -> bool {
     matches!(
         job_type,
