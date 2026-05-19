@@ -1411,11 +1411,7 @@ label {
 }
 
 /* ---------- Video Studio hero variants ---------- */
-/* Hero contains: mode tabs row, source-thumb + prompt + render CTA row, motion chips row. */
-.surface-header.hero.video-prompt-hero .prompt-input-row {
-  grid-template-columns: auto minmax(0, 1fr) auto;
-}
-
+/* Hero contains: mode tabs row, prompt + render CTA row, motion chips row. */
 .prompt-source-thumb {
   display: block;
   width: 140px;
@@ -1509,10 +1505,6 @@ label {
 }
 
 @media (max-width: 720px) {
-  .surface-header.hero.video-prompt-hero .prompt-input-row {
-    grid-template-columns: 1fr;
-  }
-
   .prompt-source-thumb {
     width: 100%;
     height: 140px;
