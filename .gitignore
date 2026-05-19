@@ -212,6 +212,7 @@ apps/web/node_modules/
 apps/web/dist/
 
 # SceneWorks local runtime data
+config/manifests/user.loras.jsonc
 data/projects/*
 !data/projects/.gitkeep
 data/recent-projects.json
