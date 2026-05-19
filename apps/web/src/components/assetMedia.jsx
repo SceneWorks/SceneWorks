@@ -2,7 +2,14 @@ import React from "react";
 import { API_BASE_URL } from "../api.js";
 
 export function assetUrl(asset) {
-  return asset?.url ? API_BASE_URL + asset.url : "";
+  if (asset?.url) {
+    return API_BASE_URL + asset.url;
+  }
+  if (asset?.projectId && asset?.file?.path) {
+    const normalizedPath = String(asset.file.path).replaceAll("\\", "/");
+    return `${API_BASE_URL}/api/v1/projects/${asset.projectId}/files/${normalizedPath}`;
+  }
+  return "";
 }
 
 export function assetCanRenderAsImage(asset) {

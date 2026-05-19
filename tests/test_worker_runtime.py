@@ -8,6 +8,7 @@ import pytest
 
 from scene_worker.adapter_utils import filter_call_kwargs
 from scene_worker.image_adapters import (
+    ImageAssetWriter,
     MODEL_TARGETS,
     QwenImageAdapter,
     ZImageDiffusersAdapter,
@@ -350,6 +351,62 @@ def test_huggingface_repo_cache_path_stays_under_cache_root(monkeypatch, tmp_pat
     assert path is not None
     path.relative_to((tmp_path / "hub").resolve())
     assert path.name.startswith("models--")
+
+
+def test_image_asset_writer_reports_partial_result_assets(tmp_path):
+    data_dir = tmp_path / "data"
+    project_path = tmp_path / "project"
+    data_dir.mkdir()
+    project_path.mkdir()
+    (data_dir / "recent-projects.json").write_text(
+        json.dumps([{"id": "project-1", "path": str(project_path)}]),
+        encoding="utf-8",
+    )
+    job = {
+        "id": "job-1",
+        "payload": {
+            "projectId": "project-1",
+            "mode": "text_to_image",
+            "prompt": "Neon alley",
+            "model": "z_image_turbo",
+            "count": 2,
+            "width": 16,
+            "height": 16,
+        },
+    }
+    progress_calls = []
+
+    def progress(status, stage, value, message, result=None):
+        progress_calls.append(
+            {
+                "status": status,
+                "stage": stage,
+                "value": value,
+                "message": message,
+                "result": result,
+            }
+        )
+
+    result = ImageAssetWriter().write_outputs(
+        settings=SimpleNamespace(data_dir=data_dir),
+        job=job,
+        images=[
+            Image.new("RGB", (16, 16), (255, 0, 0)),
+            Image.new("RGB", (16, 16), (0, 255, 0)),
+        ],
+        adapter_id="procedural_preview",
+        progress=progress,
+        cancel_requested=lambda: False,
+        raw_settings={"preview": True},
+    )
+
+    result_progress = [call["result"] for call in progress_calls if call["result"]]
+    assert [len(item["assetIds"]) for item in result_progress] == [1, 2]
+    assert result_progress[0]["expectedCount"] == 2
+    assert result_progress[0]["generationSetId"] == result["generationSetId"]
+    assert result_progress[0]["assets"][0]["file"]["path"].startswith("assets/images/")
+    assert result_progress[1]["assetIds"] == result["assetIds"]
+    assert result["expectedCount"] == 2
 
 
 def test_friendly_failure_identifies_gpu_oom():
