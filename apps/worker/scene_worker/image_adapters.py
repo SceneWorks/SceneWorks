@@ -5,6 +5,7 @@ import hashlib
 import importlib
 import json
 import os
+import sys
 import warnings
 from pathlib import Path
 from textwrap import wrap
@@ -67,6 +68,127 @@ def huggingface_repo_cache_path(repo: str) -> Path | None:
     except (OSError, ValueError):
         return None
     return repo_cache
+
+
+def emit_worker_event(event: str, **payload: Any) -> None:
+    """Emit a structured JSON diagnostic event on the worker's stdout.
+
+    Mirrors `scene_worker.runtime.emit` so adapter-level phase markers
+    (pipeline load, device placement, per-image inference) land in the
+    same operator log stream as worker lifecycle events. Keeps phases
+    distinguishable when a generation job appears to hang.
+    """
+
+    payload["event"] = event
+    payload["reportedAt"] = utc_now()
+    sys.stdout.write(json.dumps(payload, sort_keys=True) + "\n")
+    sys.stdout.flush()
+
+
+def gpu_memory_snapshot(torch: Any, device: str) -> dict[str, Any] | None:
+    if not isinstance(device, str) or not device.startswith("cuda"):
+        return None
+    cuda = getattr(torch, "cuda", None)
+    if cuda is None:
+        return None
+    try:
+        if not bool(cuda.is_available()):
+            return None
+    except Exception:
+        return None
+    snapshot: dict[str, Any] = {"device": device}
+    index = None
+    if ":" in device:
+        try:
+            index = int(device.split(":", 1)[1])
+        except ValueError:
+            index = None
+    try:
+        allocated = int(cuda.memory_allocated(index) if index is not None else cuda.memory_allocated())
+        snapshot["allocatedMb"] = round(allocated / (1024 * 1024), 2)
+    except Exception:
+        pass
+    try:
+        reserved = int(cuda.memory_reserved(index) if index is not None else cuda.memory_reserved())
+        snapshot["reservedMb"] = round(reserved / (1024 * 1024), 2)
+    except Exception:
+        pass
+    return snapshot
+
+
+def pipeline_component_devices(pipe: Any) -> list[str]:
+    """Return the sorted, unique torch device strings of a pipeline's submodules."""
+
+    devices: set[str] = set()
+    components = getattr(pipe, "components", None)
+    if isinstance(components, dict):
+        candidates = list(components.values())
+    else:
+        candidate_names = ("transformer", "unet", "text_encoder", "text_encoder_2", "vae")
+        candidates = [getattr(pipe, name, None) for name in candidate_names]
+    for component in candidates:
+        if component is None:
+            continue
+        device = getattr(component, "device", None)
+        if device is None:
+            parameters = getattr(component, "parameters", None)
+            if callable(parameters):
+                try:
+                    first = next(parameters())
+                except StopIteration:
+                    first = None
+                except Exception:
+                    first = None
+                if first is not None:
+                    device = getattr(first, "device", None)
+        if device is None:
+            continue
+        devices.add(str(device))
+    return sorted(devices)
+
+
+def verify_pipeline_on_device(
+    pipe: Any,
+    *,
+    requested_device: str,
+    model_label: str,
+    allow_offload: bool,
+) -> list[str]:
+    """Confirm a GPU-bound pipeline actually landed on the requested CUDA device.
+
+    Returns the observed component device strings. Raises RuntimeError when
+    the worker asked for a CUDA device but no pipeline component is on a
+    matching CUDA device — that path is the most common source of jobs that
+    look "running" while the GPU stays idle.
+    """
+
+    devices = pipeline_component_devices(pipe)
+    if allow_offload or not requested_device.startswith("cuda"):
+        return devices
+    if not devices:
+        return devices
+    target_index = requested_device.split(":", 1)[1] if ":" in requested_device else None
+    for device in devices:
+        if not device.startswith("cuda"):
+            continue
+        if target_index is None:
+            return devices
+        if device == requested_device or device.startswith(f"cuda:{target_index}"):
+            return devices
+    observed = ", ".join(devices) or "no detected device"
+    raise RuntimeError(
+        f"{model_label} did not move onto {requested_device}; pipeline components are on {observed}. "
+        "Check CUDA driver compatibility and worker GPU assignment, then retry."
+    )
+
+
+def format_batch_running_message(label: str, index: int, total: int) -> str:
+    """Build a per-iteration "Running" progress message that names the actual
+    saved count alongside the in-flight index, so users do not see "Running 3
+    of 4" without prior images being durable."""
+
+    prefix = f"Generated {index} of {total}. " if index > 0 else ""
+    return f"{prefix}Running {label} {index + 1} of {total}."
 
 
 MODEL_TARGETS = {
@@ -306,14 +428,58 @@ class ZImageDiffusersAdapter:
             raise RuntimeError(f"{request.model} is not a Z-Image Diffusers target.")
 
         progress("loading_model", "loading_model", 0.18, f"Loading {model_target['label']}.")
-        pipe = self._load_pipeline(settings, request, model_target, progress=progress)
+        pipe = self._load_pipeline(settings, request, model_target, progress=progress, job_id=job["id"])
+        emit_worker_event(
+            "image_lora_apply_start",
+            jobId=job["id"],
+            adapter=self.id,
+            loraCount=len(request.loras),
+        )
         self._apply_loras(pipe, request)
+        emit_worker_event("image_lora_apply_complete", jobId=job["id"], adapter=self.id)
         total = request.count
+        torch = importlib.import_module("torch")
+        device = select_torch_device(torch, settings.gpu_id)
+        label = "Z-Image"
 
         def image_at_index(index: int) -> Image.Image:
             seed = resolve_seed(request.seed, request.prompt, index, request.seeds)
-            progress("running", "generating", image_batch_progress(index, total), f"Running Z-Image {index + 1} of {total}.")
-            return self._run_pipeline(settings, pipe, request, seed)
+            progress(
+                "running",
+                "generating",
+                image_batch_progress(index, total),
+                format_batch_running_message(label, index, total),
+            )
+            emit_worker_event(
+                "image_inference_start",
+                jobId=job["id"],
+                adapter=self.id,
+                model=request.model,
+                imageIndex=index,
+                imageCount=total,
+                device=device,
+                gpuMemory=gpu_memory_snapshot(torch, device),
+            )
+            try:
+                image = self._run_pipeline(settings, pipe, request, seed)
+            except Exception as exc:
+                emit_worker_event(
+                    "image_inference_failed",
+                    jobId=job["id"],
+                    adapter=self.id,
+                    imageIndex=index,
+                    error=str(exc),
+                    errorType=exc.__class__.__name__,
+                )
+                raise
+            emit_worker_event(
+                "image_inference_complete",
+                jobId=job["id"],
+                adapter=self.id,
+                imageIndex=index,
+                gpuMemory=gpu_memory_snapshot(torch, device),
+            )
+            return image
 
         return ImageAssetWriter().write_incremental_outputs(
             settings=settings,
@@ -332,7 +498,15 @@ class ZImageDiffusersAdapter:
             },
         )
 
-    def _load_pipeline(self, settings: WorkerSettings, request: ImageRequest, model_target: dict[str, Any], progress: ProgressCallback) -> Any:
+    def _load_pipeline(
+        self,
+        settings: WorkerSettings,
+        request: ImageRequest,
+        model_target: dict[str, Any],
+        progress: ProgressCallback,
+        *,
+        job_id: str,
+    ) -> Any:
         torch = importlib.import_module("torch")
         diffusers = importlib.import_module("diffusers")
         repo = request.advanced.get("modelRepo") or model_target["repo"]
@@ -341,10 +515,21 @@ class ZImageDiffusersAdapter:
         activate_torch_device(torch, device)
         dtype = select_torch_dtype(torch, device, request.advanced.get("dtype"))
         use_img2img = request.mode == "edit_image"
+        cpu_offload = bool(request.advanced.get("cpuOffload", False))
         cached_pipe = self._img2img_pipe if use_img2img else self._text_pipe
         if cached_pipe is not None and self._loaded_repo == repo:
             self._loaded_model = request.model
             progress("loading_model", "loading_model", 0.22, f"Using cached {model_target['label']}.")
+            emit_worker_event(
+                "image_pipeline_cache_hit",
+                jobId=job_id,
+                adapter=self.id,
+                model=request.model,
+                repo=repo,
+                device=device,
+                componentDevices=pipeline_component_devices(cached_pipe),
+                gpuMemory=gpu_memory_snapshot(torch, device),
+            )
             return cached_pipe
 
         if self._loaded_repo and self._loaded_repo != repo:
@@ -370,16 +555,52 @@ class ZImageDiffusersAdapter:
 
         cache_action = "Loading cached" if huggingface_repo_cache_exists(repo) else "Downloading"
         progress("loading_model", "loading_model", 0.2, f"{cache_action} {model_target['label']} model files.")
+        emit_worker_event(
+            "image_pipeline_load_start",
+            jobId=job_id,
+            adapter=self.id,
+            model=request.model,
+            repo=repo,
+            device=device,
+            dtype=str(dtype),
+            useImg2img=use_img2img,
+            cpuOffload=cpu_offload,
+            cached=cache_action == "Loading cached",
+        )
         pipe = pipeline_class.from_pretrained(
             repo,
             torch_dtype=dtype,
             low_cpu_mem_usage=bool(request.advanced.get("lowCpuMemUsage", False)),
         )
+        emit_worker_event(
+            "image_pipeline_load_complete",
+            jobId=job_id,
+            adapter=self.id,
+            model=request.model,
+            repo=repo,
+            componentDevices=pipeline_component_devices(pipe),
+        )
         progress("loading_model", "loading_model", 0.22, f"Moving {model_target['label']} to {device}.")
-        if bool(request.advanced.get("cpuOffload", False)) and hasattr(pipe, "enable_model_cpu_offload"):
+        if cpu_offload and hasattr(pipe, "enable_model_cpu_offload"):
             pipe.enable_model_cpu_offload()
         else:
             pipe.to(device)
+        component_devices = verify_pipeline_on_device(
+            pipe,
+            requested_device=device,
+            model_label=model_target["label"],
+            allow_offload=cpu_offload,
+        )
+        emit_worker_event(
+            "image_pipeline_on_device",
+            jobId=job_id,
+            adapter=self.id,
+            model=request.model,
+            requestedDevice=device,
+            cpuOffload=cpu_offload,
+            componentDevices=component_devices,
+            gpuMemory=gpu_memory_snapshot(torch, device),
+        )
 
         if use_img2img:
             self._img2img_pipe = pipe
@@ -476,13 +697,57 @@ class QwenImageAdapter:
             raise RuntimeError(f"{request.model} does not support image editing.")
 
         progress("loading_model", "loading_model", 0.18, f"Loading {model_target['label']}.")
-        pipe = self._load_pipeline(settings, request, model_target, progress=progress)
+        pipe = self._load_pipeline(settings, request, model_target, progress=progress, job_id=job["id"])
+        emit_worker_event(
+            "image_lora_apply_start",
+            jobId=job["id"],
+            adapter=self.id,
+            loraCount=len(request.loras),
+        )
         self._apply_loras(pipe, request)
+        emit_worker_event("image_lora_apply_complete", jobId=job["id"], adapter=self.id)
+        torch = importlib.import_module("torch")
+        device = select_torch_device(torch, settings.gpu_id)
+        label = "Qwen Image"
 
         def image_at_index(index: int) -> Image.Image:
             seed = resolve_seed(request.seed, request.prompt, index, request.seeds)
-            progress("running", "generating", image_batch_progress(index, request.count), f"Running Qwen Image {index + 1} of {request.count}.")
-            return self._run_pipeline(settings, pipe, request, seed)
+            progress(
+                "running",
+                "generating",
+                image_batch_progress(index, request.count),
+                format_batch_running_message(label, index, request.count),
+            )
+            emit_worker_event(
+                "image_inference_start",
+                jobId=job["id"],
+                adapter=self.id,
+                model=request.model,
+                imageIndex=index,
+                imageCount=request.count,
+                device=device,
+                gpuMemory=gpu_memory_snapshot(torch, device),
+            )
+            try:
+                image = self._run_pipeline(settings, pipe, request, seed)
+            except Exception as exc:
+                emit_worker_event(
+                    "image_inference_failed",
+                    jobId=job["id"],
+                    adapter=self.id,
+                    imageIndex=index,
+                    error=str(exc),
+                    errorType=exc.__class__.__name__,
+                )
+                raise
+            emit_worker_event(
+                "image_inference_complete",
+                jobId=job["id"],
+                adapter=self.id,
+                imageIndex=index,
+                gpuMemory=gpu_memory_snapshot(torch, device),
+            )
+            return image
 
         return ImageAssetWriter().write_incremental_outputs(
             settings=settings,
@@ -501,7 +766,15 @@ class QwenImageAdapter:
             },
         )
 
-    def _load_pipeline(self, settings: WorkerSettings, request: ImageRequest, model_target: dict[str, Any], progress: ProgressCallback) -> Any:
+    def _load_pipeline(
+        self,
+        settings: WorkerSettings,
+        request: ImageRequest,
+        model_target: dict[str, Any],
+        progress: ProgressCallback,
+        *,
+        job_id: str,
+    ) -> Any:
         torch = importlib.import_module("torch")
         diffusers = importlib.import_module("diffusers")
         repo = self._repo_for_request(request, model_target)
@@ -510,11 +783,22 @@ class QwenImageAdapter:
         activate_torch_device(torch, device)
         dtype = select_torch_dtype(torch, device, request.advanced.get("dtype"))
         use_edit = request.mode == "edit_image"
+        cpu_offload = bool(request.advanced.get("cpuOffload", False))
         cached_pipe = self._edit_pipe if use_edit else self._text_pipe
         cached_repo = self._edit_repo if use_edit else self._text_repo
         if cached_pipe is not None and cached_repo == repo:
             self._loaded_model = request.model
             progress("loading_model", "loading_model", 0.22, f"Using cached {model_target['label']}.")
+            emit_worker_event(
+                "image_pipeline_cache_hit",
+                jobId=job_id,
+                adapter=self.id,
+                model=request.model,
+                repo=repo,
+                device=device,
+                componentDevices=pipeline_component_devices(cached_pipe),
+                gpuMemory=gpu_memory_snapshot(torch, device),
+            )
             return cached_pipe
         if cached_pipe is not None:
             if use_edit:
@@ -532,13 +816,49 @@ class QwenImageAdapter:
             raise RuntimeError(f"The installed diffusers package does not expose {pipeline_name}. Install the latest diffusers build.")
 
         progress("loading_model", "loading_model", 0.2, f"Loading {model_target['label']} model files.")
+        emit_worker_event(
+            "image_pipeline_load_start",
+            jobId=job_id,
+            adapter=self.id,
+            model=request.model,
+            repo=repo,
+            device=device,
+            dtype=str(dtype),
+            useImg2img=use_edit,
+            cpuOffload=cpu_offload,
+            cached=huggingface_repo_cache_exists(repo),
+        )
         pipe = pipeline_class.from_pretrained(repo, torch_dtype=dtype)
-        if bool(request.advanced.get("cpuOffload", False)) and hasattr(pipe, "enable_model_cpu_offload"):
+        emit_worker_event(
+            "image_pipeline_load_complete",
+            jobId=job_id,
+            adapter=self.id,
+            model=request.model,
+            repo=repo,
+            componentDevices=pipeline_component_devices(pipe),
+        )
+        if cpu_offload and hasattr(pipe, "enable_model_cpu_offload"):
             pipe.enable_model_cpu_offload()
         else:
             pipe.to(device)
         if hasattr(pipe, "enable_vae_tiling"):
             pipe.enable_vae_tiling()
+        component_devices = verify_pipeline_on_device(
+            pipe,
+            requested_device=device,
+            model_label=model_target["label"],
+            allow_offload=cpu_offload,
+        )
+        emit_worker_event(
+            "image_pipeline_on_device",
+            jobId=job_id,
+            adapter=self.id,
+            model=request.model,
+            requestedDevice=device,
+            cpuOffload=cpu_offload,
+            componentDevices=component_devices,
+            gpuMemory=gpu_memory_snapshot(torch, device),
+        )
 
         if use_edit:
             self._edit_pipe = pipe

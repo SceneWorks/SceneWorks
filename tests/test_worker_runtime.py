@@ -14,12 +14,17 @@ from scene_worker.image_adapters import (
     ZImageDiffusersAdapter,
     build_asset_sidecar,
     create_image_adapter,
+    emit_worker_event,
+    format_batch_running_message,
+    gpu_memory_snapshot,
     huggingface_repo_cache_path,
     image_batch_progress,
     image_request_from_job,
+    pipeline_component_devices,
     require_inference_backend_for_gpu_worker,
     resolve_seed,
     select_torch_device,
+    verify_pipeline_on_device,
 )
 from scene_worker.lora_adapters import (
     apply_loras_to_pipeline,
@@ -1121,3 +1126,357 @@ def test_replace_person_video_sidecar_preserves_lineage():
     assert asset["recipe"]["normalizedSettings"]["replacementActive"] is False
     assert asset["lineage"]["sourceClipAssetId"] == "asset-video"
     assert asset["lineage"]["characterId"] == "character-1"
+
+
+def test_format_batch_running_message_names_completed_count_after_first_image():
+    assert format_batch_running_message("Z-Image", 0, 4) == "Running Z-Image 1 of 4."
+    assert format_batch_running_message("Z-Image", 2, 4) == "Generated 2 of 4. Running Z-Image 3 of 4."
+
+
+def test_gpu_memory_snapshot_returns_none_when_cuda_unavailable():
+    class Torch:
+        class cuda:
+            @staticmethod
+            def is_available():
+                return False
+
+    assert gpu_memory_snapshot(Torch, "cuda:0") is None
+    assert gpu_memory_snapshot(Torch, "cpu") is None
+
+
+def test_gpu_memory_snapshot_reports_allocated_and_reserved_bytes():
+    class Torch:
+        class cuda:
+            @staticmethod
+            def is_available():
+                return True
+
+            @staticmethod
+            def memory_allocated(index=None):
+                return 50 * 1024 * 1024
+
+            @staticmethod
+            def memory_reserved(index=None):
+                return 60 * 1024 * 1024
+
+    snapshot = gpu_memory_snapshot(Torch, "cuda:0")
+
+    assert snapshot == {"device": "cuda:0", "allocatedMb": 50.0, "reservedMb": 60.0}
+
+
+def test_pipeline_component_devices_inspects_known_submodules():
+    class Module:
+        def __init__(self, device):
+            self.device = device
+
+    class Pipe:
+        components = {"unet": Module("cuda:0"), "text_encoder": Module("cuda:0"), "vae": Module("cpu")}
+
+    assert pipeline_component_devices(Pipe()) == ["cpu", "cuda:0"]
+
+
+def test_pipeline_component_devices_falls_back_to_named_attributes():
+    class Module:
+        def __init__(self, device):
+            self.device = device
+
+    class Pipe:
+        transformer = Module("cuda:1")
+        vae = Module("cuda:1")
+
+    assert pipeline_component_devices(Pipe()) == ["cuda:1"]
+
+
+def test_verify_pipeline_on_device_raises_when_components_stayed_on_cpu():
+    class Module:
+        device = "cpu"
+
+    class Pipe:
+        components = {"unet": Module(), "vae": Module()}
+
+    with pytest.raises(RuntimeError, match="did not move onto cuda:0"):
+        verify_pipeline_on_device(
+            Pipe(),
+            requested_device="cuda:0",
+            model_label="Z-Image-Turbo",
+            allow_offload=False,
+        )
+
+
+def test_verify_pipeline_on_device_allows_cpu_offload_layouts():
+    class Module:
+        device = "cpu"
+
+    class Pipe:
+        components = {"unet": Module(), "vae": Module()}
+
+    devices = verify_pipeline_on_device(
+        Pipe(),
+        requested_device="cuda:0",
+        model_label="Z-Image-Turbo",
+        allow_offload=True,
+    )
+
+    assert devices == ["cpu"]
+
+
+def test_verify_pipeline_on_device_accepts_matching_cuda_index():
+    class Module:
+        def __init__(self, device):
+            self.device = device
+
+    class Pipe:
+        components = {"unet": Module("cuda:0"), "vae": Module("cuda:0")}
+
+    devices = verify_pipeline_on_device(
+        Pipe(),
+        requested_device="cuda:0",
+        model_label="Z-Image-Turbo",
+        allow_offload=False,
+    )
+
+    assert devices == ["cuda:0"]
+
+
+def test_emit_worker_event_writes_json_to_stdout(capsys):
+    emit_worker_event("image_inference_start", jobId="job-1", imageIndex=2)
+
+    out = capsys.readouterr().out.strip()
+    payload = json.loads(out)
+    assert payload["event"] == "image_inference_start"
+    assert payload["jobId"] == "job-1"
+    assert payload["imageIndex"] == 2
+    assert "reportedAt" in payload
+
+
+def test_z_image_adapter_emits_phase_diagnostics_and_running_message(tmp_path, monkeypatch, capsys):
+    data_dir = tmp_path / "data"
+    project_path = tmp_path / "project"
+    data_dir.mkdir()
+    project_path.mkdir()
+    (data_dir / "recent-projects.json").write_text(
+        json.dumps([{"id": "project-1", "path": str(project_path)}]),
+        encoding="utf-8",
+    )
+
+    class FakeTransformer:
+        device = "cuda:0"
+
+        def parameters(self):
+            return iter([])
+
+    class FakePipe:
+        components = {"transformer": FakeTransformer(), "vae": FakeTransformer()}
+
+        def __init__(self):
+            self.calls = 0
+
+        def to(self, device):
+            self._device = device
+            return self
+
+        def __call__(self, **_kwargs):
+            self.calls += 1
+            return SimpleNamespace(images=[Image.new("RGB", (8, 8), (10, 20, 30))])
+
+    class FakePipelineClass:
+        @staticmethod
+        def from_pretrained(repo, **_kwargs):
+            return FakePipe()
+
+    class FakeDiffusers:
+        ZImagePipeline = FakePipelineClass
+
+        @staticmethod
+        def __getattr__(name):
+            raise AttributeError(name)
+
+    class FakeTorch:
+        bfloat16 = "bfloat16"
+        float16 = "float16"
+        float32 = "float32"
+
+        class cuda:
+            @staticmethod
+            def is_available():
+                return True
+
+            @staticmethod
+            def device_count():
+                return 1
+
+            @staticmethod
+            def memory_allocated(index=None):
+                return 10 * 1024 * 1024
+
+            @staticmethod
+            def memory_reserved(index=None):
+                return 12 * 1024 * 1024
+
+            @staticmethod
+            def set_device(_device):
+                return None
+
+            @staticmethod
+            def empty_cache():
+                return None
+
+        class backends:
+            mps = None
+
+        @staticmethod
+        def Generator(_device):
+            class Gen:
+                def manual_seed(self, _seed):
+                    return self
+
+            return Gen()
+
+    real_import = __import__
+
+    def fake_import_module(name):
+        if name == "torch":
+            return FakeTorch
+        if name == "diffusers":
+            return FakeDiffusers
+        return real_import(name)
+
+    monkeypatch.setattr("scene_worker.image_adapters.importlib.import_module", fake_import_module)
+
+    job = {
+        "id": "job-z",
+        "payload": {
+            "projectId": "project-1",
+            "mode": "text_to_image",
+            "prompt": "Stormy bridge",
+            "model": "z_image_turbo",
+            "count": 2,
+            "width": 16,
+            "height": 16,
+        },
+    }
+
+    progress_calls: list[dict] = []
+
+    def progress(status, stage, value, message, result=None):
+        progress_calls.append(
+            {"status": status, "stage": stage, "value": value, "message": message, "result": result}
+        )
+
+    adapter = ZImageDiffusersAdapter()
+    adapter.generate(
+        settings=SimpleNamespace(data_dir=data_dir, gpu_id="0"),
+        job=job,
+        progress=progress,
+        cancel_requested=lambda: False,
+    )
+
+    events = [json.loads(line) for line in capsys.readouterr().out.strip().splitlines() if line.strip()]
+    event_names = [event["event"] for event in events]
+    assert "image_pipeline_load_start" in event_names
+    assert "image_pipeline_load_complete" in event_names
+    assert "image_pipeline_on_device" in event_names
+    assert event_names.count("image_inference_start") == 2
+    assert event_names.count("image_inference_complete") == 2
+    on_device = next(event for event in events if event["event"] == "image_pipeline_on_device")
+    assert on_device["componentDevices"] == ["cuda:0"]
+    assert on_device["gpuMemory"]["allocatedMb"] == 10.0
+
+    running_messages = [call["message"] for call in progress_calls if call["status"] == "running"]
+    assert running_messages == [
+        "Running Z-Image 1 of 2.",
+        "Generated 1 of 2. Running Z-Image 2 of 2.",
+    ]
+
+
+def test_z_image_adapter_fails_fast_when_pipeline_stays_on_cpu(tmp_path, monkeypatch):
+    data_dir = tmp_path / "data"
+    project_path = tmp_path / "project"
+    data_dir.mkdir()
+    project_path.mkdir()
+    (data_dir / "recent-projects.json").write_text(
+        json.dumps([{"id": "project-1", "path": str(project_path)}]),
+        encoding="utf-8",
+    )
+
+    class StuckOnCpu:
+        device = "cpu"
+
+    class FakePipe:
+        components = {"transformer": StuckOnCpu(), "vae": StuckOnCpu()}
+
+        def to(self, device):
+            return self
+
+    class FakePipelineClass:
+        @staticmethod
+        def from_pretrained(repo, **_kwargs):
+            return FakePipe()
+
+    class FakeDiffusers:
+        ZImagePipeline = FakePipelineClass
+
+    class FakeTorch:
+        bfloat16 = "bfloat16"
+        float16 = "float16"
+        float32 = "float32"
+
+        class cuda:
+            @staticmethod
+            def is_available():
+                return True
+
+            @staticmethod
+            def device_count():
+                return 1
+
+            @staticmethod
+            def memory_allocated(index=None):
+                return 0
+
+            @staticmethod
+            def memory_reserved(index=None):
+                return 0
+
+            @staticmethod
+            def set_device(_device):
+                return None
+
+            @staticmethod
+            def empty_cache():
+                return None
+
+        class backends:
+            mps = None
+
+    def fake_import_module(name):
+        if name == "torch":
+            return FakeTorch
+        if name == "diffusers":
+            return FakeDiffusers
+        raise ImportError(name)
+
+    monkeypatch.setattr("scene_worker.image_adapters.importlib.import_module", fake_import_module)
+
+    job = {
+        "id": "job-cpu-stuck",
+        "payload": {
+            "projectId": "project-1",
+            "mode": "text_to_image",
+            "prompt": "Misty harbor",
+            "model": "z_image_turbo",
+            "count": 1,
+            "width": 16,
+            "height": 16,
+        },
+    }
+
+    adapter = ZImageDiffusersAdapter()
+
+    with pytest.raises(RuntimeError, match="did not move onto"):
+        adapter.generate(
+            settings=SimpleNamespace(data_dir=data_dir, gpu_id="0"),
+            job=job,
+            progress=lambda *_args, **_kwargs: None,
+            cancel_requested=lambda: False,
+        )
