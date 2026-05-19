@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime
+import importlib
 import json
 import os
 import signal
@@ -21,6 +22,9 @@ from .video_adapters import create_video_adapter
 LoadedModelsSource = Callable[[], list[str]] | None
 IMAGE_JOB_TYPES = ("image_generate", "image_edit")
 VIDEO_JOB_TYPES = ("video_generate", "video_extend", "video_bridge", "person_replace")
+# Keep GPU-required generation types in sync with
+# crates/sceneworks-core/src/jobs_store.rs::job_requires_gpu and
+# apps/web/src/screens/QueueScreen.jsx::gpuRequiredJobTypes.
 SUPPORTED_JOB_TYPES = IMAGE_JOB_TYPES + VIDEO_JOB_TYPES
 
 
@@ -53,9 +57,23 @@ class ApiClient:
 def worker_capabilities(gpu: dict) -> list[str]:
     gpu_capabilities = set(gpu["capabilities"])
     capabilities = set(gpu["capabilities"]) - {"placeholder"}
-    if "cpu" not in gpu_capabilities and "gpu" in gpu_capabilities:
+    if "cpu" not in gpu_capabilities and "gpu" in gpu_capabilities and torch_inference_backend_available():
         capabilities |= set(SUPPORTED_JOB_TYPES)
     return sorted(capabilities)
+
+
+def torch_inference_backend_available() -> bool:
+    try:
+        torch = importlib.import_module("torch")
+    except Exception:
+        return False
+    try:
+        if bool(torch.cuda.is_available()):
+            return True
+        mps = getattr(getattr(torch, "backends", None), "mps", None)
+        return bool(mps and mps.is_available())
+    except Exception:
+        return False
 
 
 def loaded_models_from_adapter(adapter: object, *, job_id: str | None = None) -> list[str]:
@@ -148,6 +166,15 @@ def friendly_failure(job_kind: str, exc: Exception) -> tuple[str, str]:
             (
                 "GPU memory was exhausted. Try a lower resolution, shorter clip, smaller batch count, "
                 f"or a different GPU. Technical detail: {detail}"
+            ),
+        )
+    if "cuda-enabled pytorch" in lowered or "torch.cuda.is_available" in lowered:
+        return (
+            f"{job_kind} failed because the worker is missing CUDA-enabled PyTorch.",
+            (
+                "The worker claimed a GPU inference job, but PyTorch cannot use CUDA in that environment. "
+                "Rebuild the worker image with CUDA PyTorch support, then restart the worker and retry. "
+                f"Technical detail: {detail}"
             ),
         )
     ltx_frame_markers = (

@@ -310,6 +310,7 @@ class ZImageDiffusersAdapter:
         torch = importlib.import_module("torch")
         diffusers = importlib.import_module("diffusers")
         repo = request.advanced.get("modelRepo") or model_target["repo"]
+        require_inference_backend_for_gpu_worker(torch, settings.gpu_id)
         device = select_torch_device(torch, settings.gpu_id)
         activate_torch_device(torch, device)
         dtype = select_torch_dtype(torch, device, request.advanced.get("dtype"))
@@ -479,6 +480,7 @@ class QwenImageAdapter:
         torch = importlib.import_module("torch")
         diffusers = importlib.import_module("diffusers")
         repo = self._repo_for_request(request, model_target)
+        require_inference_backend_for_gpu_worker(torch, settings.gpu_id)
         device = select_torch_device(torch, settings.gpu_id)
         activate_torch_device(torch, device)
         dtype = select_torch_dtype(torch, device, request.advanced.get("dtype"))
@@ -673,6 +675,23 @@ def select_torch_device(torch: Any, gpu_id: str | None = None) -> str:
     if getattr(torch.backends, "mps", None) and torch.backends.mps.is_available():
         return "mps"
     return "cpu"
+
+
+def torch_inference_backend_available(torch: Any) -> bool:
+    if torch.cuda.is_available():
+        return True
+    mps = getattr(getattr(torch, "backends", None), "mps", None)
+    return bool(mps and mps.is_available())
+
+
+def require_inference_backend_for_gpu_worker(torch: Any, gpu_id: str | None) -> None:
+    requested = str(gpu_id or "").strip().lower()
+    if requested != "cpu" and not torch_inference_backend_available(torch):
+        raise RuntimeError(
+            "CUDA-enabled PyTorch is not available in this GPU worker. "
+            "Rebuild the worker with a CUDA PyTorch wheel, for example "
+            "`docker compose build worker --no-cache`, then restart the worker."
+        )
 
 
 def activate_torch_device(torch: Any, device: str) -> None:
