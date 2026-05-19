@@ -1068,29 +1068,16 @@ export function PresetManagerScreen({
 
           <aside className="preset-summary">
             <div className="summary-card">
-              <div className="summary-section-title">
-                <h2>Preview</h2>
-                <span className="meta">how it'll look</span>
-              </div>
-              <div className="preset-preview-card">
-                <div className="preset-preview-thumb" />
-                <div className="preset-preview-body">
-                  <strong>{form.name.trim() || "Untitled preset"}</strong>
-                  <span className="preview-desc">{form.description.trim() || "No description yet"}</span>
-                  <div className="preset-preview-chips">
-                    <span className="chip accent">{workflowDef.label}</span>
-                    {selectedModel ? <span className="chip">{selectedModel.name ?? selectedModel.id}</span> : null}
-                    {form.loras.length ? (
-                      <span className="chip">+{form.loras.length} LoRA{form.loras.length === 1 ? "" : "s"}</span>
-                    ) : null}
-                  </div>
-                </div>
-              </div>
-            </div>
-
-            <div className="summary-card">
-              <div className="summary-section-title"><h2>When used</h2></div>
+              <div className="summary-section-title"><h2>Details</h2></div>
               <dl className="detail-stack">
+                <div className="detail-row">
+                  <dt>Type</dt>
+                  <dd>{workflowDef.label}</dd>
+                </div>
+                <div className="detail-row">
+                  <dt>Model</dt>
+                  <dd>{selectedModel?.name ?? selectedModel?.id ?? "—"}</dd>
+                </div>
                 <div className="detail-row">
                   <dt>Scope</dt>
                   <dd>{form.scope === "project" ? activeProject?.name ?? "Project" : "All projects"}</dd>

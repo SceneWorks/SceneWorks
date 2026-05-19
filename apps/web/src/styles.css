@@ -2890,42 +2890,6 @@ label {
   gap: 8px;
 }
 
-.preset-summary .preset-preview-card {
-  border: 1px solid var(--border);
-  border-radius: var(--r-md);
-  overflow: hidden;
-  background: var(--surface);
-}
-
-.preset-summary .preset-preview-thumb {
-  aspect-ratio: 16 / 9;
-  background:
-    linear-gradient(135deg, color-mix(in oklch, var(--accent) 22%, transparent), transparent 60%),
-    color-mix(in oklch, var(--warm) 16%, var(--surface));
-}
-
-.preset-summary .preset-preview-body {
-  padding: 12px;
-  display: grid;
-  gap: 4px;
-}
-
-.preset-summary .preset-preview-body strong {
-  font-size: 14px;
-  font-weight: 600;
-}
-
-.preset-summary .preset-preview-body .preview-desc {
-  font-size: 12px;
-  color: var(--text-muted);
-}
-
-.preset-summary .preset-preview-chips {
-  display: flex;
-  gap: 6px;
-  margin-top: 6px;
-  flex-wrap: wrap;
-}
 
 .preset-summary .detail-stack {
   display: grid;
