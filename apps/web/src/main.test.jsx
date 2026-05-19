@@ -624,6 +624,101 @@ describe("SceneWorks app shell", () => {
     expect(container.textContent).toContain("Pending #4");
   });
 
+  it("reconstructs running image batch slots from partial asset records", async () => {
+    const createdJobs = [];
+    let currentAssets = [];
+    global.fetch.mockImplementation((url, options = {}) => {
+      const path = new URL(url).pathname;
+      if (path.endsWith("/health")) {
+        return Promise.resolve(response({ status: "ok", authRequired: false }));
+      }
+      if (path.endsWith("/access")) {
+        return Promise.resolve(response({ authRequired: false }));
+      }
+      if (path.endsWith("/projects")) {
+        return Promise.resolve(response([{ id: "project-1", name: "Noir" }]));
+      }
+      if (path.endsWith("/assets")) {
+        return Promise.resolve(response(currentAssets));
+      }
+      if (path.endsWith("/models")) {
+        return Promise.resolve(response([{ id: "z_image_turbo", name: "Z-Image", type: "image", family: "z-image" }]));
+      }
+      if (path.endsWith("/image/jobs") && options.method === "POST") {
+        const job = {
+          id: "image-job-1",
+          type: "image_generate",
+          status: "running",
+          stage: "running",
+          progress: 0.35,
+          elapsedSeconds: 4,
+          projectId: "project-1",
+          projectName: "Noir",
+          requestedGpu: "auto",
+          payload: { prompt: "A cinematic frame of a neon street at midnight", count: 4 },
+        };
+        createdJobs.unshift(job);
+        return Promise.resolve(response(job));
+      }
+      if (path.endsWith("/jobs")) {
+        return Promise.resolve(response(createdJobs));
+      }
+      return Promise.resolve(response([]));
+    });
+
+    root = createRoot(container);
+    await act(async () => {
+      root.render(<App />);
+    });
+    await settle();
+
+    await act(async () => {
+      [...container.querySelectorAll("button")].find((button) => button.textContent === "Image").click();
+    });
+    await settle();
+    await act(async () => {
+      container.querySelector(".image-studio form").requestSubmit();
+    });
+    await settle();
+
+    currentAssets = [
+      {
+        id: "asset-1",
+        projectId: "project-1",
+        generationSetId: "genset-1",
+        type: "image",
+        displayName: "Generated #1",
+        file: { path: "assets/images/generated_0001.png", mimeType: "image/png" },
+        status: { favorite: false, rejected: false, trashed: false },
+      },
+    ];
+    await act(async () => {
+      FakeEventSource.instances[0].listeners["job.updated"]({
+        data: JSON.stringify({
+          ...createdJobs[0],
+          status: "running",
+          stage: "generating",
+          progress: 0.48,
+          message: "Running Z-Image 2 of 4.",
+          result: {
+            generationSetId: "genset-1",
+            assetIds: ["asset-1"],
+            expectedCount: 4,
+          },
+        }),
+      });
+    });
+    await settle();
+
+    expect(container.textContent).toContain("Running Z-Image 2 of 4.");
+    expect(container.querySelector(".review-grid img")?.getAttribute("src")).toContain(
+      "/api/v1/projects/project-1/files/assets/images/generated_0001.png",
+    );
+    expect(container.textContent).not.toContain("Pending #1");
+    expect(container.textContent).toContain("Pending #2");
+    expect(container.textContent).toContain("Pending #4");
+  });
+
   it("shows local generation failures without duplicating the global banner", async () => {
     const createdJobs = [];
     global.fetch.mockImplementation((url, options = {}) => {
@@ -1967,6 +2062,69 @@ describe("SceneWorks app shell", () => {
 
     expect(container.textContent).not.toContain("Finished. Fetching result...");
     expect(container.textContent).not.toContain("No fresh image batch");
+  });
+
+  it("reconstructs running image batch slots from a generation set without asset ids", async () => {
+    const localJob = {
+      id: "image-job-1",
+      type: "image_generate",
+      status: "running",
+      stage: "generating",
+      progress: 0.82,
+      elapsedSeconds: 8,
+      requestedGpu: "auto",
+      payload: { prompt: "long alley", count: 3 },
+      result: { generationSetId: "gen-1", expectedCount: 3 },
+    };
+    const assets = [
+      {
+        id: "asset-2",
+        projectId: "project-1",
+        type: "image",
+        displayName: "Generated",
+        generationSetId: "gen-1",
+        file: { path: "runs/run_0007/assets/images/generated_0002.png", mimeType: "image/png" },
+        status: {},
+      },
+      {
+        id: "asset-1",
+        projectId: "project-1",
+        type: "image",
+        displayName: "Generated",
+        generationSetId: "gen-1",
+        file: { path: "assets/images/generated_0001.png", mimeType: "image/png" },
+        status: {},
+      },
+    ];
+
+    root = createRoot(container);
+    await act(async () => {
+      root.render(
+        <ImageStudio
+          activeProject={{ id: "project-1", name: "Noir" }}
+          assets={assets}
+          characters={[]}
+          createImageJob={() => {}}
+          deleteAsset={() => {}}
+          gpuOptions={["auto"]}
+          imageModels={[{ id: "z_image_turbo", name: "Z-Image", type: "image", family: "z-image" }]}
+          latestAssets={[]}
+          localJobs={[localJob]}
+          loras={[]}
+          onPreview={() => {}}
+          purgeAsset={() => {}}
+          requestedGpu="auto"
+          selectedAsset={null}
+          setRequestedGpu={() => {}}
+          updateAssetStatus={() => {}}
+        />,
+      );
+    });
+
+    const images = [...container.querySelectorAll(".review-grid img")].map((image) => image.getAttribute("src"));
+    expect(images[0]).toContain("/api/v1/projects/project-1/files/assets/images/generated_0001.png");
+    expect(images[1]).toContain("/api/v1/projects/project-1/files/runs/run_0007/assets/images/generated_0002.png");
+    expect(container.textContent).toContain("Pending #3");
   });
 
   it("hides completed image progress with stale missing result metadata", async () => {
