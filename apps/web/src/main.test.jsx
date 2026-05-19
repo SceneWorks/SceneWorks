@@ -3184,9 +3184,14 @@ describe("SceneWorks app shell", () => {
       [...container.querySelectorAll("button")].find((button) => button.textContent === "New Preset").click();
     });
     await changeField(field(container, "Name"), "Soft Morning");
-    await changeField(field(container, "Add LoRA"), "global_detail");
+    // New flow: open the LoRA picker, then click the compatible LoRA row to add it.
     await act(async () => {
       [...container.querySelectorAll("button")].find((button) => button.textContent === "Add LoRA").click();
+    });
+    await act(async () => {
+      [...container.querySelectorAll(".lora-pick-row")]
+        .find((button) => button.textContent.includes("Global Detail"))
+        .click();
     });
     await changeField(field(container, "Weight"), "0.35");
     expect(field(container, "ID").value).toBe("soft_morning");
@@ -3209,9 +3214,13 @@ describe("SceneWorks app shell", () => {
       [...container.querySelectorAll("button")].find((button) => button.textContent === "New Preset").click();
     });
     await changeField(field(container, "Name"), "Plain Morning");
-    await changeField(field(container, "Add LoRA"), "global_detail");
     await act(async () => {
       [...container.querySelectorAll("button")].find((button) => button.textContent === "Add LoRA").click();
+    });
+    await act(async () => {
+      [...container.querySelectorAll(".lora-pick-row")]
+        .find((button) => button.textContent.includes("Global Detail"))
+        .click();
     });
     expect(container.querySelector(".lora-choice-list").textContent).toContain("Global Detail");
     await act(async () => {
