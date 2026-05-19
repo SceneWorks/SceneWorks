@@ -168,13 +168,16 @@ def verify_pipeline_on_device(
     if not devices:
         return devices
     target_index = requested_device.split(":", 1)[1] if ":" in requested_device else None
+    unexpected_devices = []
     for device in devices:
-        if not device.startswith("cuda"):
-            continue
         if target_index is None:
-            return devices
-        if device == requested_device or device.startswith(f"cuda:{target_index}"):
-            return devices
+            if device == "cuda" or device.startswith("cuda:"):
+                continue
+        elif device == "cuda" or device == requested_device:
+            continue
+        unexpected_devices.append(device)
+    if not unexpected_devices:
+        return devices
     observed = ", ".join(devices) or "no detected device"
     raise RuntimeError(
         f"{model_label} did not move onto {requested_device}; pipeline components are on {observed}. "
@@ -581,7 +584,8 @@ class ZImageDiffusersAdapter:
             componentDevices=pipeline_component_devices(pipe),
         )
         progress("loading_model", "loading_model", 0.22, f"Moving {model_target['label']} to {device}.")
-        if cpu_offload and hasattr(pipe, "enable_model_cpu_offload"):
+        offload_enabled = cpu_offload and hasattr(pipe, "enable_model_cpu_offload")
+        if offload_enabled:
             pipe.enable_model_cpu_offload()
         else:
             pipe.to(device)
@@ -589,7 +593,7 @@ class ZImageDiffusersAdapter:
             pipe,
             requested_device=device,
             model_label=model_target["label"],
-            allow_offload=cpu_offload,
+            allow_offload=offload_enabled,
         )
         emit_worker_event(
             "image_pipeline_on_device",
@@ -597,7 +601,7 @@ class ZImageDiffusersAdapter:
             adapter=self.id,
             model=request.model,
             requestedDevice=device,
-            cpuOffload=cpu_offload,
+            cpuOffload=offload_enabled,
             componentDevices=component_devices,
             gpuMemory=gpu_memory_snapshot(torch, device),
         )
@@ -837,7 +841,8 @@ class QwenImageAdapter:
             repo=repo,
             componentDevices=pipeline_component_devices(pipe),
         )
-        if cpu_offload and hasattr(pipe, "enable_model_cpu_offload"):
+        offload_enabled = cpu_offload and hasattr(pipe, "enable_model_cpu_offload")
+        if offload_enabled:
             pipe.enable_model_cpu_offload()
         else:
             pipe.to(device)
@@ -847,7 +852,7 @@ class QwenImageAdapter:
             pipe,
             requested_device=device,
             model_label=model_target["label"],
-            allow_offload=cpu_offload,
+            allow_offload=offload_enabled,
         )
         emit_worker_event(
             "image_pipeline_on_device",
@@ -855,7 +860,7 @@ class QwenImageAdapter:
             adapter=self.id,
             model=request.model,
             requestedDevice=device,
-            cpuOffload=cpu_offload,
+            cpuOffload=offload_enabled,
             componentDevices=component_devices,
             gpuMemory=gpu_memory_snapshot(torch, device),
         )

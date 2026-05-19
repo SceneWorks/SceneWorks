@@ -1203,6 +1203,39 @@ def test_verify_pipeline_on_device_raises_when_components_stayed_on_cpu():
         )
 
 
+def test_verify_pipeline_on_device_raises_when_any_component_stayed_on_cpu():
+    class Module:
+        def __init__(self, device):
+            self.device = device
+
+    class Pipe:
+        components = {"transformer": Module("cuda:0"), "vae": Module("cpu")}
+
+    with pytest.raises(RuntimeError, match="pipeline components are on cpu, cuda:0"):
+        verify_pipeline_on_device(
+            Pipe(),
+            requested_device="cuda:0",
+            model_label="Z-Image-Turbo",
+            allow_offload=False,
+        )
+
+
+def test_verify_pipeline_on_device_rejects_wrong_cuda_index():
+    class Module:
+        device = "cuda:10"
+
+    class Pipe:
+        components = {"transformer": Module()}
+
+    with pytest.raises(RuntimeError, match="did not move onto cuda:1"):
+        verify_pipeline_on_device(
+            Pipe(),
+            requested_device="cuda:1",
+            model_label="Z-Image-Turbo",
+            allow_offload=False,
+        )
+
+
 def test_verify_pipeline_on_device_allows_cpu_offload_layouts():
     class Module:
         device = "cpu"
@@ -1389,7 +1422,7 @@ def test_z_image_adapter_emits_phase_diagnostics_and_running_message(tmp_path, m
     ]
 
 
-def test_z_image_adapter_fails_fast_when_pipeline_stays_on_cpu(tmp_path, monkeypatch):
+def test_z_image_adapter_fails_fast_when_pipeline_stays_on_cpu_with_offload_fallback(tmp_path, monkeypatch):
     data_dir = tmp_path / "data"
     project_path = tmp_path / "project"
     data_dir.mkdir()
@@ -1468,6 +1501,7 @@ def test_z_image_adapter_fails_fast_when_pipeline_stays_on_cpu(tmp_path, monkeyp
             "count": 1,
             "width": 16,
             "height": 16,
+            "advanced": {"cpuOffload": True},
         },
     }
 
