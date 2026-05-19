@@ -941,6 +941,104 @@ label {
   align-items: flex-end;
 }
 
+/* Hero strip — gradient background + decorative orb. Used as a modifier on
+   surface-header for the welcome / studio screens. Switches to grid so an
+   optional `.hero-stats` row can wrap below the title + actions. */
+.surface-header.hero {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 16px 24px;
+  align-items: end;
+  position: relative;
+  overflow: hidden;
+  padding: 22px;
+  border: 1px solid var(--border);
+  border-radius: var(--r-xl);
+  background: linear-gradient(
+    135deg,
+    color-mix(in oklch, var(--accent-soft) 70%, var(--surface)),
+    var(--surface) 60%
+  );
+}
+
+[data-theme="dark"] .surface-header.hero {
+  background: linear-gradient(135deg, color-mix(in oklch, var(--accent) 12%, var(--surface)), var(--surface) 65%);
+}
+
+.surface-header.hero::after {
+  content: "";
+  position: absolute;
+  right: -80px;
+  top: -80px;
+  width: 280px;
+  height: 280px;
+  border-radius: 50%;
+  background: radial-gradient(circle, color-mix(in oklch, var(--warm) 35%, transparent), transparent 70%);
+  pointer-events: none;
+  z-index: 0;
+}
+
+.surface-header.hero > * {
+  position: relative;
+  z-index: 1;
+}
+
+.surface-header.hero .section-heading h2 {
+  font-size: 24px;
+  letter-spacing: -0.015em;
+}
+
+.hero-blurb {
+  margin: 4px 0 0;
+  color: var(--text-muted);
+  font-size: 13.5px;
+  line-height: 1.5;
+  max-width: 60ch;
+}
+
+.hero-stats {
+  grid-column: 1 / -1;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin-top: 4px;
+}
+
+.hero-stat {
+  display: grid;
+  gap: 2px;
+  padding: 8px 14px;
+  min-width: 140px;
+  background: color-mix(in oklch, var(--surface) 88%, transparent);
+  border: 1px solid var(--border);
+  border-radius: var(--r-md);
+  backdrop-filter: blur(6px);
+}
+
+.hero-stat-label {
+  font-size: 10.5px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--text-faint);
+}
+
+.hero-stat-value {
+  font-size: 13.5px;
+  font-weight: 600;
+  color: var(--text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+@media (max-width: 720px) {
+  .surface-header.hero {
+    grid-template-columns: 1fr;
+    align-items: start;
+  }
+}
+
 .checkline {
   display: inline-flex;
   gap: 6px;

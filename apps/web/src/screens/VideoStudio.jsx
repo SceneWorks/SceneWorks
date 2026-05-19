@@ -363,10 +363,13 @@ export function VideoStudio({
 
   return (
     <section className="main-surface video-studio">
-      <div className="surface-header">
+      <div className="surface-header hero">
         <div className="section-heading">
           <p className="eyebrow">Video Studio</p>
           <h2>{activeProject ? activeProject.name : "Create a project"}</h2>
+          <p className="hero-blurb">
+            Bring a still to life, extend an existing clip, or render fresh motion from a prompt. Pick a mode to set the source and controls.
+          </p>
         </div>
         <div className="segmented-control mode-control" role="tablist" aria-label="Video mode">
           {modeOptions.map(([value, label]) => (
