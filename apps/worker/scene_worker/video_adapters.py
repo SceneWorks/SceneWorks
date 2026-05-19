@@ -43,6 +43,7 @@ VIDEO_MODEL_TARGETS: dict[str, dict[str, Any]] = {
         "family": "ltx-video",
         "adapter": "ltx_video",
         "repo": "Lightricks/LTX-2.3",
+        "textRepo": "Lightricks/LTX-2",
         "fallbackRepo": "Lightricks/LTX-Video",
         "capabilities": ["image_to_video", "text_to_video", "first_last_frame", "extend_clip", "video_bridge"],
         "recommendedMaxDuration": 10,
@@ -519,6 +520,8 @@ class DiffusersVideoAdapter(VideoGenerationAdapter):
     def _repo_for_request(self, request: VideoRequest, target: dict[str, Any]) -> str:
         if request.advanced.get("modelRepo"):
             return str(request.advanced["modelRepo"])
+        if target["adapter"] == "ltx_video" and request.mode == "text_to_video":
+            return target.get("textRepo") or target["repo"]
         if target["adapter"] == "ltx_video" and request.mode != "text_to_video":
             return target.get("fallbackRepo") or target["repo"]
         return target["repo"]

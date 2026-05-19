@@ -680,6 +680,20 @@ def test_friendly_failure_identifies_missing_model_files():
     assert "HF_TOKEN" in error
 
 
+def test_friendly_failure_identifies_missing_diffusers_model_index():
+    message, error = friendly_failure(
+        "Video generation",
+        RuntimeError(
+            "404 Client Error. Entry Not Found for url: "
+            "https://huggingface.co/Lightricks/LTX-2.3/resolve/main/model_index.json."
+        ),
+    )
+
+    assert message == "Video generation failed because required model files were not available."
+    assert "model_index.json" in error
+    assert "Technical detail" in error
+
+
 def test_friendly_failure_identifies_ltx_frame_count_errors():
     message, error = friendly_failure("Video generation", RuntimeError("num_frames must be divisible by 8 + 1"))
 
@@ -1090,7 +1104,48 @@ def test_ltx_video_requirements_report_normalized_frame_count():
 
     assert requirements["requestedFrames"] == 150
     assert requirements["estimatedFrames"] == 153
-    assert requirements["repo"] == "Lightricks/LTX-2.3"
+    assert requirements["repo"] == "Lightricks/LTX-2"
+
+
+def test_ltx_video_image_modes_keep_image_to_video_diffusers_repo():
+    adapter = DiffusersVideoAdapter()
+    request = video_request_from_job(
+        {
+            "id": "job-1",
+            "payload": {
+                "projectId": "project-1",
+                "mode": "image_to_video",
+                "prompt": "city",
+                "model": "ltx_2_3",
+                "sourceAssetId": "asset-image",
+                "advanced": {},
+            },
+        }
+    )
+
+    requirements = adapter.estimate_requirements(request)
+
+    assert requirements["repo"] == "Lightricks/LTX-Video"
+
+
+def test_ltx_video_model_repo_override_wins_over_mode_specific_repos():
+    adapter = DiffusersVideoAdapter()
+    request = video_request_from_job(
+        {
+            "id": "job-1",
+            "payload": {
+                "projectId": "project-1",
+                "mode": "text_to_video",
+                "prompt": "city",
+                "model": "ltx_2_3",
+                "advanced": {"modelRepo": "owner/custom-ltx-diffusers"},
+            },
+        }
+    )
+
+    requirements = adapter.estimate_requirements(request)
+
+    assert requirements["repo"] == "owner/custom-ltx-diffusers"
 
 
 def test_evenly_spaced_indices_are_bounded():
