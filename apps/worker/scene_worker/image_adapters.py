@@ -651,10 +651,12 @@ class ZImageDiffusersAdapter:
 
     def _apply_loras(self, pipe: Any, request: ImageRequest) -> None:
         key = "img2img" if request.mode == "edit_image" else "text"
+        model_target = MODEL_TARGETS.get(request.model, MODEL_TARGETS["z_image_turbo"])
         self._loaded_lora_states[key] = apply_loras_to_pipeline(
             pipe,
             request.loras,
             adapter_id=self.id,
+            model_family=model_target.get("family"),
             previous_state=self._loaded_lora_states.get(key),
         )
 
@@ -902,10 +904,12 @@ class QwenImageAdapter:
 
     def _apply_loras(self, pipe: Any, request: ImageRequest) -> None:
         key = "edit" if request.mode == "edit_image" else "text"
+        model_target = MODEL_TARGETS.get(request.model, MODEL_TARGETS["qwen_image"])
         self._loaded_lora_states[key] = apply_loras_to_pipeline(
             pipe,
             request.loras,
             adapter_id=self.id,
+            model_family=model_target.get("family"),
             previous_state=self._loaded_lora_states.get(key),
         )
 

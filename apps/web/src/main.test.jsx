@@ -2314,6 +2314,53 @@ describe("SceneWorks app shell", () => {
     );
   });
 
+  it("blocks image submit when a visible incompatible LoRA is selected", async () => {
+    const createImageJob = vi.fn();
+    root = createRoot(container);
+    await act(async () => {
+      root.render(
+        <ImageStudio
+          activeProject={{ id: "project-1", name: "Noir" }}
+          assets={[]}
+          characters={[]}
+          createImageJob={createImageJob}
+          deleteAsset={() => {}}
+          gpuOptions={["auto"]}
+          imageModels={[{ id: "z_image_turbo", name: "Z-Image", type: "image", family: "z-image" }]}
+          latestAssets={[]}
+          loras={[{ id: "qwen_only", name: "Qwen Only", family: "qwen-image", scope: "builtin" }]}
+          onPreview={() => {}}
+          purgeAsset={() => {}}
+          requestedGpu="auto"
+          selectedAsset={null}
+          setRequestedGpu={() => {}}
+          updateAssetStatus={() => {}}
+        />,
+      );
+    });
+
+    await act(async () => {
+      [...container.querySelectorAll("button")].find((button) => button.textContent === "Advanced").click();
+    });
+    await act(async () => {
+      container.querySelector('.lora-picker .checkline input[type="checkbox"]').click();
+    });
+    await act(async () => {
+      container.querySelector('.lora-choice input[type="checkbox"]').click();
+    });
+
+    const generate = [...container.querySelectorAll("button")].find((button) => button.textContent === "Generate");
+    expect(container.textContent).toContain("Generate is blocked");
+    expect(container.textContent).toContain("Qwen Only");
+    expect(generate.disabled).toBe(true);
+
+    await act(async () => {
+      generate.click();
+    });
+
+    expect(createImageJob).not.toHaveBeenCalled();
+  });
+
   it("applies recipe preset defaults and hidden preset LoRAs to image jobs", async () => {
     const createImageJob = vi.fn();
     root = createRoot(container);

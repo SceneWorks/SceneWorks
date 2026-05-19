@@ -1472,6 +1472,7 @@ async fn create_character_test_job(
         payload.look_id.map(Value::String).unwrap_or(Value::Null),
     );
     job_payload.insert("advanced".to_owned(), Value::Object(advanced));
+    validate_job_lora_compatibility(&state, Some(&project_id), &mut job_payload, true).await?;
     let job = create_generation_job(
         state,
         JobType::ImageGenerate,
@@ -1735,6 +1736,8 @@ async fn create_image_job(
         job_payload.remove("recipePresetId");
     }
     apply_recipe_preset_to_image_payload(&state, &payload, &mut job_payload).await?;
+    validate_job_lora_compatibility(&state, Some(&payload.project_id), &mut job_payload, false)
+        .await?;
     if payload.seed.is_none() {
         let count = job_payload
             .get("count")
@@ -1932,6 +1935,8 @@ async fn create_video_job(
     if payload.recipe_preset_id.is_none() {
         job_payload.remove("recipePresetId");
     }
+    validate_job_lora_compatibility(&state, Some(&payload.project_id), &mut job_payload, false)
+        .await?;
     let job = create_generation_job(
         state,
         job_type,
@@ -3907,11 +3912,67 @@ fn validate_recipe_preset_lora_compatibility(
     let Some(model_id) = preset.get("model").and_then(Value::as_str) else {
         return Ok(());
     };
+    validate_lora_specs_for_model(
+        models,
+        loras,
+        model_id,
+        &recipe_preset_loras(preset),
+        false,
+        "Recipe preset LoRA",
+    )?;
+    Ok(())
+}
+
+async fn validate_job_lora_compatibility(
+    state: &AppState,
+    project_id: Option<&str>,
+    job_payload: &mut JsonObject,
+    allow_inline_loras: bool,
+) -> Result<(), ApiError> {
+    let Some(loras) = job_payload
+        .get("loras")
+        .and_then(Value::as_array)
+        .filter(|loras| !loras.is_empty())
+        .cloned()
+    else {
+        return Ok(());
+    };
+    let model_id = job_payload
+        .get("model")
+        .and_then(Value::as_str)
+        .ok_or_else(|| ApiError::bad_request("Model is required for LoRA compatibility"))?;
+    let models = model_catalog(state).await?;
+    let catalog_loras = lora_catalog(state, project_id).await?;
+    let normalized = validate_lora_specs_for_model(
+        &models,
+        &catalog_loras,
+        model_id,
+        &loras,
+        allow_inline_loras,
+        "LoRA",
+    )?;
+    job_payload.insert("loras".to_owned(), Value::Array(normalized));
+    Ok(())
+}
+
+fn validate_lora_specs_for_model(
+    models: &[Value],
+    catalog_loras: &[Value],
+    model_id: &str,
+    attached_loras: &[Value],
+    allow_inline_loras: bool,
+    lora_label: &str,
+) -> Result<Vec<Value>, ApiError> {
+    if attached_loras.is_empty() {
+        return Ok(Vec::new());
+    }
     let Some(model) = models
         .iter()
         .find(|model| model.get("id").and_then(Value::as_str) == Some(model_id))
     else {
-        return Ok(());
+        return Err(ApiError::bad_request(format!(
+            "Model {model_id} not found; cannot verify LoRA compatibility"
+        )));
     };
     let model_families = model_lora_families(model);
     if model_families.is_empty() {
@@ -3919,19 +3980,19 @@ fn validate_recipe_preset_lora_compatibility(
             "Model {model_id} has no declared LoRA families"
         )));
     }
-    for preset_lora in recipe_preset_loras(preset) {
-        let Some(lora_id) = preset_lora_id(&preset_lora) else {
+    let mut normalized_loras = Vec::new();
+    for attached_lora in attached_loras {
+        let Some((lora_id, lora, normalized_lora, catalog_backed)) =
+            hydrate_lora_spec(catalog_loras, attached_lora, allow_inline_loras, lora_label)?
+        else {
             continue;
         };
-        let lora = loras
-            .iter()
-            .find(|lora| lora.get("id").and_then(Value::as_str) == Some(lora_id))
-            .ok_or_else(|| {
-                ApiError::bad_request(format!("Recipe preset LoRA not found: {lora_id}"))
-            })?;
-        if lora.get("installState").and_then(Value::as_str) != Some("installed") {
+        let install_state = lora.get("installState").and_then(Value::as_str);
+        if install_state.is_some_and(|state| state != "installed")
+            || (catalog_backed && install_state.is_none())
+        {
             return Err(ApiError::bad_request(format!(
-                "Recipe preset LoRA is not installed: {lora_id}"
+                "{lora_label} is not installed: {lora_id}"
             )));
         }
         validate_lora_safetensors_header(lora_id, lora)?;
@@ -3950,8 +4011,43 @@ fn validate_recipe_preset_lora_compatibility(
                 "LoRA {lora_id} is not compatible with model {model_id}"
             )));
         }
+        normalized_loras.push(normalized_lora);
     }
-    Ok(())
+    Ok(normalized_loras)
+}
+
+fn hydrate_lora_spec<'a>(
+    catalog_loras: &'a [Value],
+    attached_lora: &'a Value,
+    allow_inline_loras: bool,
+    lora_label: &str,
+) -> Result<Option<(&'a str, &'a Value, Value, bool)>, ApiError> {
+    let Some(lora_id) = job_lora_id(attached_lora) else {
+        return Ok(None);
+    };
+    let catalog_lora = if allow_inline_loras {
+        None
+    } else {
+        catalog_loras
+            .iter()
+            .find(|lora| lora.get("id").and_then(Value::as_str) == Some(lora_id))
+    };
+    if catalog_lora.is_none() && !allow_inline_loras {
+        return Err(ApiError::bad_request(format!(
+            "{lora_label} not found: {lora_id}"
+        )));
+    }
+    let source_lora = catalog_lora.unwrap_or(attached_lora);
+    let normalized_lora = match catalog_lora {
+        Some(catalog_lora) => serialize_job_lora(catalog_lora, attached_lora, lora_id),
+        None => normalize_inline_job_lora(attached_lora, lora_id),
+    };
+    Ok(Some((
+        lora_id,
+        source_lora,
+        normalized_lora,
+        catalog_lora.is_some(),
+    )))
 }
 
 /// Returns the parsed safetensors header for `lora` when one is available
@@ -3963,7 +4059,12 @@ fn validate_lora_safetensors_header(
     lora_id: &str,
     lora: &Value,
 ) -> Result<Option<Value>, ApiError> {
-    let Some(path) = lora.get("installedPath").and_then(Value::as_str) else {
+    let Some(path) = lora
+        .get("installedPath")
+        .or_else(|| lora.get("sourcePath"))
+        .or_else(|| lora.get("path"))
+        .and_then(Value::as_str)
+    else {
         return Ok(None);
     };
     let path = PathBuf::from(path);
@@ -4002,9 +4103,13 @@ fn families_from_value_chain(
         .unwrap_or(&Value::Null);
     let values = direct_fields
         .iter()
-        .find_map(|field| value.get(*field))
-        .or_else(|| compatibility.get("families"))
-        .or_else(|| value.get("family"));
+        .find_map(|field| value.get(*field).filter(|value| !value.is_null()))
+        .or_else(|| {
+            compatibility
+                .get("families")
+                .filter(|value| !value.is_null())
+        })
+        .or_else(|| value.get("family").filter(|value| !value.is_null()));
     let mut families = match values {
         Some(Value::Array(items)) => items
             .iter()
@@ -4102,6 +4207,12 @@ fn preset_lora_id(preset_lora: &Value) -> Option<&str> {
         .or_else(|| preset_lora.get("id").and_then(Value::as_str))
 }
 
+fn job_lora_id(lora: &Value) -> Option<&str> {
+    lora.as_str()
+        .or_else(|| lora.get("id").and_then(Value::as_str))
+        .or_else(|| lora.get("loraId").and_then(Value::as_str))
+}
+
 fn preset_lora_weight(lora: &Value, preset_lora: &Value) -> f64 {
     preset_lora
         .get("weight")
@@ -4117,12 +4228,85 @@ fn serialize_preset_lora(lora: &Value, preset_lora: &Value, lora_id: &str) -> Va
         "name": lora.get("name").and_then(Value::as_str).unwrap_or(lora_id),
         "scope": lora.get("scope").and_then(Value::as_str).unwrap_or("builtin"),
         "weight": preset_lora_weight(lora, preset_lora),
+        "family": lora.get("family").cloned().unwrap_or(Value::Null),
+        "families": lora.get("families").cloned().unwrap_or(Value::Null),
+        "compatibleFamilies": lora.get("compatibleFamilies").cloned().unwrap_or(Value::Null),
+        "modelFamilies": lora.get("modelFamilies").cloned().unwrap_or(Value::Null),
         "triggerWords": lora.get("triggerWords").cloned().unwrap_or_else(|| Value::Array(Vec::new())),
         "compatibility": lora.get("compatibility").cloned().unwrap_or_else(|| Value::Object(JsonObject::new())),
         "installedPath": lora.get("installedPath").cloned().unwrap_or(Value::Null),
         "source": lora.get("source").cloned().unwrap_or(Value::Null),
         "presetManaged": true
     })
+}
+
+fn serialize_job_lora(lora: &Value, selected_lora: &Value, lora_id: &str) -> Value {
+    json!({
+        "id": lora_id,
+        "name": preferred_lora_str(selected_lora, lora, "name", lora_id),
+        "scope": preferred_lora_str(selected_lora, lora, "scope", "global"),
+        "weight": preset_lora_weight(lora, selected_lora),
+        "family": preferred_lora_value(selected_lora, lora, "family"),
+        "families": preferred_lora_value(selected_lora, lora, "families"),
+        "compatibleFamilies": preferred_lora_value(selected_lora, lora, "compatibleFamilies"),
+        "modelFamilies": preferred_lora_value(selected_lora, lora, "modelFamilies"),
+        "triggerWords": preferred_lora_array(selected_lora, lora, "triggerWords"),
+        "compatibility": preferred_lora_object(selected_lora, lora, "compatibility"),
+        "installedPath": preferred_lora_value(selected_lora, lora, "installedPath"),
+        "sourcePath": preferred_lora_value(selected_lora, lora, "sourcePath"),
+        "source": preferred_lora_value(selected_lora, lora, "source"),
+        "presetManaged": selected_lora.get("presetManaged").and_then(Value::as_bool).unwrap_or(false)
+    })
+}
+
+fn preferred_lora_str<'a>(
+    selected_lora: &'a Value,
+    catalog_lora: &'a Value,
+    field: &str,
+    fallback: &'a str,
+) -> &'a str {
+    selected_lora
+        .get(field)
+        .or_else(|| catalog_lora.get(field))
+        .and_then(Value::as_str)
+        .unwrap_or(fallback)
+}
+
+fn preferred_lora_value(selected_lora: &Value, catalog_lora: &Value, field: &str) -> Value {
+    selected_lora
+        .get(field)
+        .or_else(|| catalog_lora.get(field))
+        .cloned()
+        .unwrap_or(Value::Null)
+}
+
+fn preferred_lora_array(selected_lora: &Value, catalog_lora: &Value, field: &str) -> Value {
+    selected_lora
+        .get(field)
+        .or_else(|| catalog_lora.get(field))
+        .filter(|value| value.is_array())
+        .cloned()
+        .unwrap_or_else(|| Value::Array(Vec::new()))
+}
+
+fn preferred_lora_object(selected_lora: &Value, catalog_lora: &Value, field: &str) -> Value {
+    selected_lora
+        .get(field)
+        .or_else(|| catalog_lora.get(field))
+        .filter(|value| value.is_object())
+        .cloned()
+        .unwrap_or_else(|| Value::Object(JsonObject::new()))
+}
+
+fn normalize_inline_job_lora(lora: &Value, lora_id: &str) -> Value {
+    match lora {
+        Value::Object(object) => {
+            let mut object = object.clone();
+            object.insert("id".to_owned(), Value::String(lora_id.to_owned()));
+            Value::Object(object)
+        }
+        _ => json!({ "id": lora_id }),
+    }
 }
 
 async fn load_manifest_entries(
@@ -6057,6 +6241,244 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn generation_job_routes_reject_incompatible_loras() {
+        let temp_dir = tempfile::tempdir().expect("temp dir creates");
+        let config_dir = temp_dir.path().join("config/manifests");
+        std::fs::create_dir_all(&config_dir).expect("manifest dir creates");
+        std::fs::write(
+            config_dir.join("builtin.models.jsonc"),
+            r#"
+            {
+              "schemaVersion": 1,
+              "models": [
+                {
+                  "id": "z_image_turbo",
+                  "name": "Z-Image",
+                  "family": "z-image",
+                  "type": "image",
+                  "adapter": "z_image_diffusers",
+                  "capabilities": ["text_to_image", "edit_image", "character_image"],
+                  "downloads": [],
+                  "paths": {},
+                  "defaults": {},
+                  "limits": {},
+                  "loraCompatibility": { "families": ["z-image"] },
+                  "ui": {}
+                },
+                {
+                  "id": "ltx_2_3",
+                  "name": "LTX",
+                  "family": "ltx-video",
+                  "type": "video",
+                  "adapter": "ltx_video",
+                  "capabilities": ["image_to_video", "text_to_video", "first_last_frame", "extend_clip", "video_bridge", "replace_person"],
+                  "downloads": [],
+                  "paths": {},
+                  "defaults": {},
+                  "limits": {},
+                  "loraCompatibility": { "families": ["ltx-video"] },
+                  "ui": {}
+                }
+              ]
+            }
+            "#,
+        )
+        .expect("builtin models writes");
+        std::fs::write(
+            config_dir.join("user.models.jsonc"),
+            r#"{ "schemaVersion": 1, "models": [] }"#,
+        )
+        .expect("user models writes");
+        std::fs::write(
+            config_dir.join("builtin.loras.jsonc"),
+            r#"{ "schemaVersion": 1, "loras": [] }"#,
+        )
+        .expect("builtin loras writes");
+        std::fs::write(
+            config_dir.join("user.loras.jsonc"),
+            r#"
+            {
+              "schemaVersion": 1,
+              "loras": [
+                {
+                  "id": "qwen_style",
+                  "name": "Qwen Style",
+                  "family": "qwen-image",
+                  "triggerWords": [],
+                  "compatibility": { "families": ["qwen-image"] },
+                  "source": { "provider": "local", "path": "loras/qwen.safetensors" }
+                }
+              ]
+            }
+            "#,
+        )
+        .expect("user loras writes");
+        std::fs::write(
+            config_dir.join("builtin.recipe-presets.jsonc"),
+            r#"
+            {
+              "schemaVersion": 1,
+              "presets": [
+                {
+                  "id": "bad_qwen",
+                  "name": "Bad Qwen",
+                  "workflow": "text_to_image",
+                  "model": "z_image_turbo",
+                  "loras": [{ "id": "qwen_style" }]
+                }
+              ]
+            }
+            "#,
+        )
+        .expect("builtin recipe presets writes");
+        std::fs::write(
+            config_dir.join("user.recipe-presets.jsonc"),
+            r#"{ "schemaVersion": 1, "presets": [] }"#,
+        )
+        .expect("user recipe presets writes");
+        let lora_dir = temp_dir.path().join("data/loras");
+        std::fs::create_dir_all(&lora_dir).expect("lora dir creates");
+        write_test_safetensors(&lora_dir.join("qwen.safetensors"));
+
+        let app = create_app(test_settings(&temp_dir)).expect("app creates");
+        let (_, project) = request(
+            app.clone(),
+            "POST",
+            "/api/v1/projects",
+            json!({ "name": "Compatibility" }),
+        )
+        .await;
+        let project_id = project["id"].as_str().expect("project id");
+        let (status, image_error) = request(
+            app.clone(),
+            "POST",
+            "/api/v1/image/jobs",
+            json!({
+                "projectId": project_id,
+                "prompt": "mist",
+                "model": "z_image_turbo",
+                "loras": [{ "id": "qwen_style" }]
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(
+            image_error["detail"],
+            "LoRA qwen_style is not compatible with model z_image_turbo"
+        );
+
+        let (status, unknown_model_error) = request(
+            app.clone(),
+            "POST",
+            "/api/v1/image/jobs",
+            json!({
+                "projectId": project_id,
+                "prompt": "mist",
+                "model": "missing_model",
+                "loras": [{ "id": "qwen_style" }]
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(
+            unknown_model_error["detail"],
+            "Model missing_model not found; cannot verify LoRA compatibility"
+        );
+
+        let (status, preset_error) = request(
+            app.clone(),
+            "POST",
+            "/api/v1/image/jobs",
+            json!({
+                "projectId": project_id,
+                "prompt": "mist",
+                "model": "z_image_turbo",
+                "recipePresetId": "bad_qwen"
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(
+            preset_error["detail"],
+            "LoRA qwen_style is not compatible with model z_image_turbo"
+        );
+
+        for (mode, extra) in [
+            ("image_to_video", json!({ "sourceAssetId": "asset-image" })),
+            ("text_to_video", json!({})),
+            (
+                "first_last_frame",
+                json!({ "sourceAssetId": "asset-first", "lastFrameAssetId": "asset-last" }),
+            ),
+            ("extend_clip", json!({ "sourceClipAssetId": "asset-video" })),
+            (
+                "video_bridge",
+                json!({ "sourceClipAssetId": "asset-left", "bridgeRightClipAssetId": "asset-right" }),
+            ),
+            (
+                "replace_person",
+                json!({ "sourceClipAssetId": "asset-video", "personTrackId": "track-1", "characterId": "character-1" }),
+            ),
+        ] {
+            let mut payload = json!({
+                "projectId": project_id,
+                "mode": mode,
+                "prompt": "motion",
+                "model": "ltx_2_3",
+                "loras": [{ "id": "qwen_style" }]
+            });
+            payload
+                .as_object_mut()
+                .expect("video payload object")
+                .extend(extra.as_object().expect("extra payload object").clone());
+            let (status, video_error) =
+                request(app.clone(), "POST", "/api/v1/video/jobs", payload).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{mode}");
+            assert_eq!(
+                video_error["detail"],
+                "LoRA qwen_style is not compatible with model ltx_2_3"
+            );
+        }
+
+        let (_, character) = request(
+            app.clone(),
+            "POST",
+            &format!("/api/v1/projects/{project_id}/characters"),
+            json!({ "name": "Mira", "type": "person" }),
+        )
+        .await;
+        let character_id = character["id"].as_str().expect("character id");
+        let character_lora = temp_dir
+            .path()
+            .join("data/loras/character-qwen.safetensors");
+        write_test_safetensors(&character_lora);
+        let (status, _) = request(
+            app.clone(),
+            "POST",
+            &format!("/api/v1/projects/{project_id}/characters/{character_id}/loras"),
+            json!({
+                "name": "Character Qwen",
+                "sourcePath": character_lora.display().to_string(),
+                "compatibility": { "families": ["qwen-image"] }
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED);
+        let (status, character_error) = request(
+            app,
+            "POST",
+            &format!("/api/v1/projects/{project_id}/characters/{character_id}/test-jobs"),
+            json!({ "prompt": "portrait", "model": "z_image_turbo" }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert!(character_error["detail"]
+            .as_str()
+            .unwrap()
+            .contains("is not compatible with model z_image_turbo"));
+    }
+
+    #[tokio::test]
     async fn model_and_lora_routes_match_manifest_behavior() {
         std::env::set_var("SCENEWORKS_DISABLE_MODEL_SIZE_ESTIMATE", "1");
         let temp_dir = tempfile::tempdir().expect("temp dir creates");
@@ -6136,7 +6558,7 @@ mod tests {
                   "id": "cinematic",
                   "name": "Cinematic",
                   "workflow": "text_to_image",
-                  "model": "preset-model",
+                  "model": "base-model",
                   "defaults": { "count": 4, "resolution": "1280x720", "negativePrompt": "flat lighting" },
                   "prompt": { "suffix": "cinematic lighting" },
                   "loras": [{ "id": "style-lora", "weight": 0.5 }]
@@ -6163,6 +6585,9 @@ mod tests {
         std::fs::create_dir_all(&marker_dir).expect("model dir creates");
         std::fs::write(marker_dir.join(".sceneworks-download-complete.json"), "{}")
             .expect("marker writes");
+        let lora_dir = temp_dir.path().join("data/loras");
+        std::fs::create_dir_all(&lora_dir).expect("lora dir creates");
+        write_test_safetensors(&lora_dir.join("style.safetensors"));
 
         let app = create_app(test_settings(&temp_dir)).expect("app creates");
         let (status, models) = request(app.clone(), "GET", "/api/v1/models", Value::Null).await;
@@ -6239,7 +6664,7 @@ mod tests {
             json!({
                 "projectId": project_id,
                 "prompt": "city at night",
-                "model": "client-model",
+                "model": "base-model",
                 "count": 1,
                 "width": 512,
                 "height": 512,
@@ -6264,7 +6689,12 @@ mod tests {
             image_job["payload"]["loras"][0]["source"]["path"],
             "loras/style.safetensors"
         );
-        assert_eq!(image_job["payload"]["model"], "client-model");
+        assert_eq!(image_job["payload"]["model"], "base-model");
+        assert_eq!(image_job["payload"]["loras"][0]["family"], "z-image");
+        assert_eq!(
+            image_job["payload"]["loras"][0]["compatibility"]["families"][0],
+            "z-image"
+        );
         assert_eq!(image_job["payload"]["count"], 2);
         assert_eq!(image_job["payload"]["seeds"].as_array().unwrap().len(), 2);
         assert_eq!(image_job["payload"]["width"], 1280);
@@ -6291,7 +6721,7 @@ mod tests {
         )
         .await;
         assert_eq!(status, StatusCode::CREATED);
-        assert_eq!(preset_model_job["payload"]["model"], "preset-model");
+        assert_eq!(preset_model_job["payload"]["model"], "base-model");
 
         let (status, job) = request(
             app.clone(),
@@ -7688,6 +8118,38 @@ mod tests {
         let temp_dir = tempfile::tempdir().expect("temp dir creates");
         let settings = test_settings(&temp_dir);
         let data_dir = settings.data_dir.clone();
+        let config_dir = settings.config_dir.join("manifests");
+        std::fs::create_dir_all(&config_dir).expect("manifest dir creates");
+        std::fs::write(
+            config_dir.join("builtin.models.jsonc"),
+            r#"
+            {
+              "schemaVersion": 1,
+              "models": [
+                {
+                  "id": "z_image_turbo",
+                  "name": "Z-Image",
+                  "family": "z-image",
+                  "type": "image",
+                  "adapter": "z_image_diffusers",
+                  "capabilities": ["text_to_image", "character_image"],
+                  "downloads": [],
+                  "paths": {},
+                  "defaults": {},
+                  "limits": {},
+                  "loraCompatibility": { "families": ["z-image"] },
+                  "ui": {}
+                }
+              ]
+            }
+            "#,
+        )
+        .expect("builtin models writes");
+        std::fs::write(
+            config_dir.join("user.models.jsonc"),
+            r#"{ "schemaVersion": 1, "models": [] }"#,
+        )
+        .expect("user models writes");
         let app = create_app(settings).expect("app creates");
         let (_, project) = request(
             app.clone(),
@@ -7782,7 +8244,7 @@ mod tests {
         let lora_dir = data_dir.join("loras");
         std::fs::create_dir_all(&lora_dir).expect("lora dir creates");
         let lora_source = lora_dir.join("mira.safetensors");
-        std::fs::write(&lora_source, b"lora").expect("lora writes");
+        write_test_safetensors(&lora_source);
         let (status, with_lora) = request(
             app.clone(),
             "POST",
@@ -7790,7 +8252,7 @@ mod tests {
             json!({
                 "name": "Mira LoRA",
                 "sourcePath": lora_source.display().to_string(),
-                "compatibility": { "families": ["sdxl"] },
+                "compatibility": { "families": ["z-image"] },
                 "triggerWords": ["mira"]
             }),
         )
@@ -7805,7 +8267,7 @@ mod tests {
         );
         assert_eq!(
             std::fs::read(project_lora_path).expect("lora copied"),
-            b"lora"
+            test_safetensors_bytes()
         );
 
         let (status, test_job) = request(

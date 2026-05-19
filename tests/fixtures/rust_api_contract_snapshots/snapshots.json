@@ -1956,6 +1956,39 @@
       "ui": {
         "label": "User"
       }
+    },
+    {
+      "adapter": "z_image_diffusers",
+      "capabilities": [
+        "text_to_image",
+        "edit_image",
+        "character_image"
+      ],
+      "defaults": {
+        "height": 1024,
+        "width": 1024
+      },
+      "downloadSizeBytes": null,
+      "downloadSizeEstimated": false,
+      "downloadSizeLabel": null,
+      "downloadable": false,
+      "downloads": [],
+      "family": "z-image",
+      "id": "z_image_turbo",
+      "installState": "missing",
+      "installedPath": null,
+      "limits": {},
+      "loraCompatibility": {
+        "families": [
+          "z-image"
+        ]
+      },
+      "name": "Z-Image Turbo",
+      "paths": {},
+      "type": "image",
+      "ui": {
+        "label": "Z-Image"
+      }
     }
   ],
   "persisted character sidecar": {
