@@ -489,6 +489,7 @@ pub fn create_app(settings: Settings) -> Result<Router, JobsStoreError> {
         .route("/api/v1/image/jobs", post(create_image_job))
         .route("/api/v1/video/jobs", post(create_video_job))
         .route("/api/v1/models", get(list_models))
+        .route("/api/v1/models/:model_id", delete(delete_model))
         .route(
             "/api/v1/models/:model_id/download",
             post(create_model_download_job),
@@ -499,6 +500,7 @@ pub fn create_app(settings: Settings) -> Result<Router, JobsStoreError> {
                 .layer(DefaultBodyLimit::max(MAX_MODEL_MULTIPART_BODY_BYTES)),
         )
         .route("/api/v1/loras", get(list_loras))
+        .route("/api/v1/loras/:lora_id", delete(delete_lora))
         .route(
             "/api/v1/loras/import",
             post(create_lora_import_job)
@@ -567,6 +569,13 @@ struct CharactersQuery {
 struct LorasQuery {
     model_family: Option<String>,
     project_id: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct CatalogDeleteQuery {
+    project_id: Option<String>,
+    scope: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -2107,6 +2116,161 @@ async fn list_loras(
     Ok(Json(items))
 }
 
+async fn delete_model(
+    State(state): State<AppState>,
+    Path(model_id): Path<String>,
+) -> Result<Json<Value>, ApiError> {
+    let catalog = model_catalog(&state).await?;
+    let model = catalog
+        .into_iter()
+        .find(|item| item.get("id").and_then(Value::as_str) == Some(model_id.as_str()))
+        .ok_or_else(|| ApiError {
+            status: StatusCode::NOT_FOUND,
+            detail: "Model not found".to_owned(),
+        })?;
+    let manifest_path = state
+        .settings
+        .config_dir
+        .join("manifests")
+        .join("user.models.jsonc");
+    let removed_entry =
+        remove_catalog_manifest_entry(&state, &manifest_path, "models", &model_id).await?;
+    let cleanup_source = removed_entry.as_ref().unwrap_or(&model);
+    let mut removed_paths = Vec::new();
+    let mut retained_paths = Vec::new();
+    let allowed_roots = vec![state.settings.data_dir.join("models")];
+    for path in model_artifact_paths(cleanup_source, &state.settings.data_dir) {
+        remove_owned_artifact_path(
+            path,
+            &allowed_roots,
+            &mut removed_paths,
+            &mut retained_paths,
+        )
+        .await?;
+    }
+    if removed_entry.is_none() && removed_paths.is_empty() {
+        return Err(ApiError::bad_request(
+            "Built-in model catalog entries are read-only unless local files are installed",
+        ));
+    }
+    let warnings = catalog_delete_warnings(&state, "model", &model_id, None).await?;
+    let policy = if removed_entry.is_some() {
+        "Removed the model registry entry and SceneWorks-owned local model files."
+    } else {
+        "Built-in model catalog entries are retained; SceneWorks-owned local model files were removed."
+    };
+    Ok(Json(json!({
+        "id": model_id,
+        "kind": "model",
+        "removedManifestEntry": removed_entry.is_some(),
+        "removedLocalArtifacts": !removed_paths.is_empty(),
+        "removedPaths": removed_paths,
+        "retainedPaths": retained_paths,
+        "warnings": warnings,
+        "policy": policy,
+    })))
+}
+
+async fn delete_lora(
+    State(state): State<AppState>,
+    Path(lora_id): Path<String>,
+    Query(query): Query<CatalogDeleteQuery>,
+) -> Result<Json<Value>, ApiError> {
+    let catalog = lora_catalog(&state, query.project_id.as_deref()).await?;
+    let lora = catalog
+        .into_iter()
+        .find(|item| {
+            item.get("id").and_then(Value::as_str) == Some(lora_id.as_str())
+                && query.scope.as_deref().map_or(true, |scope| {
+                    item.get("scope").and_then(Value::as_str) == Some(scope)
+                })
+        })
+        .ok_or_else(|| ApiError {
+            status: StatusCode::NOT_FOUND,
+            detail: "LoRA not found".to_owned(),
+        })?;
+    let scope = query
+        .scope
+        .as_deref()
+        .or_else(|| lora.get("scope").and_then(Value::as_str))
+        .unwrap_or("global");
+    let (manifest_path, allowed_roots, default_root) = match scope {
+        "global" => (
+            Some(
+                state
+                    .settings
+                    .config_dir
+                    .join("manifests")
+                    .join("user.loras.jsonc"),
+            ),
+            vec![state.settings.data_dir.join("loras")],
+            state.settings.data_dir.clone(),
+        ),
+        "project" => {
+            let Some(project_id) = query.project_id.as_deref() else {
+                return Err(ApiError::bad_request(
+                    "Project LoRA deletion requires projectId",
+                ));
+            };
+            let project_path = project_path_for_id(state.clone(), project_id).await?;
+            (
+                Some(project_path.join("loras").join("manifest.jsonc")),
+                vec![
+                    state.settings.data_dir.join("loras"),
+                    project_path.join("loras"),
+                ],
+                project_path,
+            )
+        }
+        "builtin" => (
+            None,
+            vec![state.settings.data_dir.join("loras")],
+            state.settings.data_dir.clone(),
+        ),
+        _ => return Err(ApiError::bad_request("Unsupported LoRA scope")),
+    };
+    let removed_entry = if let Some(manifest_path) = manifest_path.as_deref() {
+        remove_catalog_manifest_entry(&state, manifest_path, "loras", &lora_id).await?
+    } else {
+        None
+    };
+    let cleanup_source = removed_entry.as_ref().unwrap_or(&lora);
+    let mut removed_paths = Vec::new();
+    let mut retained_paths = Vec::new();
+    for path in lora_artifact_paths(cleanup_source, &default_root) {
+        remove_owned_artifact_path(
+            path,
+            &allowed_roots,
+            &mut removed_paths,
+            &mut retained_paths,
+        )
+        .await?;
+    }
+    if removed_entry.is_none() && removed_paths.is_empty() {
+        return Err(ApiError::bad_request(
+            "Built-in LoRA catalog entries are read-only unless local files are installed",
+        ));
+    }
+    let warnings =
+        catalog_delete_warnings(&state, "lora", &lora_id, query.project_id.as_deref()).await?;
+    let policy = if removed_entry.is_some() {
+        "Removed the LoRA registry entry and SceneWorks-owned local LoRA files."
+    } else {
+        "Built-in LoRA catalog entries are retained; SceneWorks-owned local LoRA files were removed."
+    };
+    Ok(Json(json!({
+        "id": lora_id,
+        "kind": "lora",
+        "scope": scope,
+        "removedManifestEntry": removed_entry.is_some(),
+        "removedLocalArtifacts": !removed_paths.is_empty(),
+        "removedPaths": removed_paths,
+        "retainedPaths": retained_paths,
+        "warnings": warnings,
+        "policy": policy,
+    })))
+}
+
 async fn list_recipe_presets(
     State(state): State<AppState>,
     Query(query): Query<RecipePresetsQuery>,
@@ -3448,6 +3612,10 @@ async fn model_catalog(state: &AppState) -> Result<Vec<Value>, ApiError> {
         load_manifest_entries(state, &manifest_dir.join("builtin.models.jsonc"), "models").await?;
     let user =
         load_manifest_entries(state, &manifest_dir.join("user.models.jsonc"), "models").await?;
+    let user_model_ids = user
+        .iter()
+        .filter_map(|model| model.get("id").and_then(Value::as_str).map(str::to_owned))
+        .collect::<std::collections::HashSet<_>>();
     let mut models = merge_entries_by_id(builtin, user);
     let download_contexts = models
         .iter()
@@ -3493,6 +3661,12 @@ async fn model_catalog(state: &AppState) -> Result<Vec<Value>, ApiError> {
         let object = model
             .as_object_mut()
             .ok_or_else(|| ApiError::internal("Model manifest entry must be an object"))?;
+        let model_id = object.get("id").and_then(Value::as_str).unwrap_or_default();
+        let user_managed = user_model_ids.contains(model_id);
+        object.insert(
+            "catalogScope".to_owned(),
+            Value::String(if user_managed { "user" } else { "builtin" }.to_owned()),
+        );
         object.insert("downloadable".to_owned(), Value::Bool(downloadable));
         object.insert(
             "downloadSizeBytes".to_owned(),
@@ -3518,6 +3692,10 @@ async fn model_catalog(state: &AppState) -> Result<Vec<Value>, ApiError> {
         object.insert(
             "installedPath".to_owned(),
             installed_path.map(Value::String).unwrap_or(Value::Null),
+        );
+        object.insert(
+            "removable".to_owned(),
+            Value::Bool(user_managed || installed),
         );
     }
     models.sort_by(|left, right| {
@@ -3576,6 +3754,23 @@ async fn lora_catalog(state: &AppState, project_id: Option<&str>) -> Result<Vec<
             .map(|lora| normalize_lora_entry(lora, "project", &project_manifest, &project_path))
             .collect::<Result<Vec<_>, _>>()?;
         loras = merge_entries_by_id(loras, project_loras);
+    }
+    for lora in &mut loras {
+        let object = lora
+            .as_object_mut()
+            .ok_or_else(|| ApiError::internal("LoRA manifest entry must be an object"))?;
+        let scope = object
+            .get("scope")
+            .and_then(Value::as_str)
+            .unwrap_or("builtin");
+        let installed = object
+            .get("installState")
+            .and_then(Value::as_str)
+            .is_some_and(|state| state == "installed");
+        object.insert(
+            "removable".to_owned(),
+            Value::Bool(scope != "builtin" || installed),
+        );
     }
     loras.sort_by(|left, right| {
         let left_key = (
@@ -4090,6 +4285,30 @@ where
     let (entries, result) = operation(entries)?;
     save_manifest_entries(path, field, entries).await?;
     Ok(result)
+}
+
+async fn remove_catalog_manifest_entry(
+    state: &AppState,
+    path: &FsPath,
+    field: &str,
+    id: &str,
+) -> Result<Option<Value>, ApiError> {
+    mutate_manifest_entries(state, path, field, |entries| {
+        let mut removed = None;
+        let entries = entries
+            .into_iter()
+            .filter(|entry| {
+                if entry.get("id").and_then(Value::as_str) == Some(id) {
+                    removed = Some(entry.clone());
+                    false
+                } else {
+                    true
+                }
+            })
+            .collect::<Vec<_>>();
+        Ok((entries, removed))
+    })
+    .await
 }
 
 fn manifest_write_lock(state: &AppState, path: &FsPath) -> Arc<AsyncMutex<()>> {
@@ -4616,6 +4835,84 @@ fn job_lora_id(lora: &Value) -> Option<&str> {
     lora.as_str()
         .or_else(|| lora.get("id").and_then(Value::as_str))
         .or_else(|| lora.get("loraId").and_then(Value::as_str))
+}
+
+async fn catalog_delete_warnings(
+    state: &AppState,
+    kind: &str,
+    id: &str,
+    project_id: Option<&str>,
+) -> Result<Vec<String>, ApiError> {
+    let mut warnings = Vec::new();
+    let presets = recipe_preset_catalog(state, project_id).await?;
+    let preset_names = presets
+        .iter()
+        .filter(|preset| match kind {
+            "model" => preset.get("model").and_then(Value::as_str) == Some(id),
+            "lora" => recipe_preset_loras(preset)
+                .iter()
+                .any(|lora| job_lora_id(lora) == Some(id) || preset_lora_id(lora) == Some(id)),
+            _ => false,
+        })
+        .filter_map(|preset| {
+            preset
+                .get("name")
+                .and_then(Value::as_str)
+                .or_else(|| preset.get("id").and_then(Value::as_str))
+        })
+        .take(5)
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+    if !preset_names.is_empty() {
+        warnings.push(format!(
+            "Recipe presets reference this {kind}: {}",
+            preset_names.join(", ")
+        ));
+    }
+
+    let item_id = id.to_owned();
+    let jobs = store_call(state.clone(), move |store, timeout| {
+        store.mark_stale_workers_interrupted(timeout)?;
+        store.list_jobs(None, None, 100)
+    })
+    .await?;
+    let job_ids = jobs
+        .iter()
+        .filter(|job| job_references_catalog_item(job, kind, &item_id))
+        .filter_map(|job| {
+            if job.id.is_empty() {
+                None
+            } else {
+                Some(job.id.clone())
+            }
+        })
+        .take(5)
+        .collect::<Vec<_>>();
+    if !job_ids.is_empty() {
+        warnings.push(format!(
+            "Recent or queued jobs reference this {kind}: {}",
+            job_ids.join(", ")
+        ));
+    }
+    Ok(warnings)
+}
+
+fn job_references_catalog_item(job: &JobSnapshot, kind: &str, id: &str) -> bool {
+    match kind {
+        "model" => {
+            job.payload.get("model").and_then(Value::as_str) == Some(id)
+                || job.payload.get("modelId").and_then(Value::as_str) == Some(id)
+        }
+        "lora" => {
+            job.payload.get("loraId").and_then(Value::as_str) == Some(id)
+                || job
+                    .payload
+                    .get("loras")
+                    .and_then(Value::as_array)
+                    .is_some_and(|loras| loras.iter().any(|lora| job_lora_id(lora) == Some(id)))
+        }
+        _ => false,
+    }
 }
 
 fn preset_lora_weight(lora: &Value, preset_lora: &Value) -> f64 {
@@ -5329,6 +5626,130 @@ fn model_is_installed(path: &FsPath) -> bool {
 
 fn lora_is_installed(path: &FsPath) -> bool {
     first_safetensors_path(path).is_some()
+}
+
+fn model_artifact_paths(model: &Value, data_dir: &FsPath) -> Vec<PathBuf> {
+    let mut paths = Vec::new();
+    if let Some(path) = model_manifest_installed_path(model, data_dir) {
+        paths.push(path);
+    }
+    if let Some(repo) = model_download(model).and_then(|download| {
+        download
+            .get("repo")
+            .and_then(Value::as_str)
+            .map(str::to_owned)
+    }) {
+        paths.push(data_dir.join("models").join(safe_download_dir(&repo)));
+    }
+    if let Some(source_path) = model
+        .get("source")
+        .and_then(Value::as_object)
+        .and_then(|source| source.get("path"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty() && !value.contains("${"))
+    {
+        let path = PathBuf::from(source_path);
+        paths.push(if path.is_absolute() {
+            path
+        } else {
+            data_dir.join(path)
+        });
+    }
+    unique_paths(paths)
+}
+
+fn lora_artifact_paths(lora: &Value, default_root: &FsPath) -> Vec<PathBuf> {
+    let mut paths = Vec::new();
+    if let Some(installed_path) = lora
+        .get("installedPath")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty() && !value.contains("${"))
+    {
+        paths.push(PathBuf::from(installed_path));
+    }
+    if let Some(source_path) = lora
+        .get("source")
+        .and_then(Value::as_object)
+        .and_then(|source| source.get("path"))
+        .and_then(Value::as_str)
+        .or_else(|| lora.get("path").and_then(Value::as_str))
+        .map(str::trim)
+        .filter(|value| !value.is_empty() && !value.contains("${"))
+    {
+        let path = PathBuf::from(source_path);
+        paths.push(if path.is_absolute() {
+            path
+        } else {
+            default_root.join(path)
+        });
+    }
+    unique_paths(paths)
+}
+
+fn unique_paths(paths: Vec<PathBuf>) -> Vec<PathBuf> {
+    let mut unique = Vec::new();
+    for path in paths {
+        if !unique.iter().any(|item| item == &path) {
+            unique.push(path);
+        }
+    }
+    unique
+}
+
+async fn remove_owned_artifact_path(
+    path: PathBuf,
+    allowed_roots: &[PathBuf],
+    removed_paths: &mut Vec<String>,
+    retained_paths: &mut Vec<String>,
+) -> Result<(), ApiError> {
+    let metadata = match tokio::fs::symlink_metadata(&path).await {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => {
+            return Err(ApiError::internal(format!(
+                "Failed to inspect artifact path {}: {error}",
+                path.display()
+            )))
+        }
+    };
+    let canonical_path = tokio::fs::canonicalize(&path).await.map_err(|error| {
+        ApiError::internal(format!(
+            "Failed to resolve artifact path {}: {error}",
+            path.display()
+        ))
+    })?;
+    let mut owned = false;
+    for root in allowed_roots {
+        if let Ok(canonical_root) = tokio::fs::canonicalize(root).await {
+            if canonical_path.starts_with(&canonical_root) && canonical_path != canonical_root {
+                owned = true;
+                break;
+            }
+        }
+    }
+    if !owned {
+        retained_paths.push(path.display().to_string());
+        return Ok(());
+    }
+    if metadata.is_dir() {
+        tokio::fs::remove_dir_all(&path).await.map_err(|error| {
+            ApiError::internal(format!(
+                "Failed to remove artifact directory {}: {error}",
+                path.display()
+            ))
+        })?;
+    } else {
+        tokio::fs::remove_file(&path).await.map_err(|error| {
+            ApiError::internal(format!(
+                "Failed to remove artifact file {}: {error}",
+                path.display()
+            ))
+        })?;
+    }
+    removed_paths.push(path.display().to_string());
+    Ok(())
 }
 
 fn model_manifest_installed_path(model: &Value, data_dir: &FsPath) -> Option<PathBuf> {
@@ -7840,6 +8261,132 @@ mod tests {
         assert_eq!(models[0]["downloadable"], false);
         assert_eq!(models[0]["installState"], "installed");
         assert_eq!(models[0]["installedPath"], model_dir.display().to_string());
+    }
+
+    #[tokio::test]
+    async fn catalog_delete_routes_remove_manifest_entries_and_owned_artifacts() {
+        std::env::set_var("SCENEWORKS_DISABLE_MODEL_SIZE_ESTIMATE", "1");
+        let temp_dir = tempfile::tempdir().expect("temp dir creates");
+        let config_dir = temp_dir.path().join("config/manifests");
+        std::fs::create_dir_all(&config_dir).expect("manifest dir creates");
+        let model_dir = temp_dir.path().join("data/models/imports/delete_me");
+        let lora_dir = temp_dir.path().join("data/loras/delete_style");
+        std::fs::create_dir_all(&model_dir).expect("model dir creates");
+        std::fs::create_dir_all(&lora_dir).expect("lora dir creates");
+        std::fs::write(model_dir.join(".sceneworks-download-complete.json"), "{}")
+            .expect("marker writes");
+        std::fs::write(lora_dir.join("adapter.safetensors"), b"lora").expect("lora writes");
+        std::fs::write(
+            config_dir.join("builtin.models.jsonc"),
+            r#"{ "schemaVersion": 1, "models": [] }"#,
+        )
+        .expect("builtin models writes");
+        std::fs::write(
+            config_dir.join("user.models.jsonc"),
+            format!(
+                r#"{{
+                  "schemaVersion": 1,
+                  "models": [{{
+                    "id": "delete_me",
+                    "name": "Delete Me",
+                    "type": "image",
+                    "family": "z-image",
+                    "paths": {{ "model": "{}" }}
+                  }}]
+                }}"#,
+                model_dir.display().to_string().replace('\\', "\\\\")
+            ),
+        )
+        .expect("user models writes");
+        std::fs::write(
+            config_dir.join("builtin.loras.jsonc"),
+            r#"{ "schemaVersion": 1, "loras": [] }"#,
+        )
+        .expect("builtin loras writes");
+        std::fs::write(
+            config_dir.join("user.loras.jsonc"),
+            format!(
+                r#"{{
+                  "schemaVersion": 1,
+                  "loras": [{{
+                    "id": "delete_style",
+                    "name": "Delete Style",
+                    "family": "z-image",
+                    "source": {{ "provider": "local", "path": "{}" }}
+                  }}]
+                }}"#,
+                lora_dir.display().to_string().replace('\\', "\\\\")
+            ),
+        )
+        .expect("user loras writes");
+        std::fs::write(
+            config_dir.join("builtin.recipe-presets.jsonc"),
+            r#"{ "schemaVersion": 1, "presets": [] }"#,
+        )
+        .expect("builtin presets writes");
+        std::fs::write(
+            config_dir.join("user.recipe-presets.jsonc"),
+            r#"
+            {
+              "schemaVersion": 1,
+              "presets": [
+                {
+                  "id": "moody",
+                  "name": "Moody",
+                  "workflow": "text_to_image",
+                  "model": "delete_me",
+                  "loras": [{ "id": "delete_style" }]
+                }
+              ]
+            }
+            "#,
+        )
+        .expect("user presets writes");
+
+        let app = create_app(test_settings(&temp_dir)).expect("app creates");
+        let (model_status, model_delete) = request(
+            app.clone(),
+            "DELETE",
+            "/api/v1/models/delete_me",
+            Value::Null,
+        )
+        .await;
+        assert_eq!(model_status, StatusCode::OK);
+        assert_eq!(model_delete["removedManifestEntry"], true);
+        assert_eq!(model_delete["removedLocalArtifacts"], true);
+        assert!(model_delete["warnings"][0]
+            .as_str()
+            .is_some_and(|warning| warning.contains("Moody")));
+        assert!(!model_dir.exists());
+        let models_manifest =
+            std::fs::read_to_string(config_dir.join("user.models.jsonc")).expect("models reads");
+        assert!(!models_manifest.contains("delete_me"));
+
+        let (lora_status, lora_delete) = request(
+            app.clone(),
+            "DELETE",
+            "/api/v1/loras/delete_style?scope=global",
+            Value::Null,
+        )
+        .await;
+        assert_eq!(lora_status, StatusCode::OK);
+        assert_eq!(lora_delete["removedManifestEntry"], true);
+        assert_eq!(lora_delete["removedLocalArtifacts"], true);
+        assert!(lora_delete["warnings"][0]
+            .as_str()
+            .is_some_and(|warning| warning.contains("Moody")));
+        assert!(!lora_dir.exists());
+        let loras_manifest =
+            std::fs::read_to_string(config_dir.join("user.loras.jsonc")).expect("loras reads");
+        assert!(!loras_manifest.contains("delete_style"));
+
+        let (models_status, models) =
+            request(app.clone(), "GET", "/api/v1/models", Value::Null).await;
+        assert_eq!(models_status, StatusCode::OK);
+        assert_eq!(models.as_array().expect("models array").len(), 0);
+        let (loras_status, loras) = request(app, "GET", "/api/v1/loras", Value::Null).await;
+        assert_eq!(loras_status, StatusCode::OK);
+        assert_eq!(loras.as_array().expect("loras array").len(), 0);
     }
 
     #[tokio::test]

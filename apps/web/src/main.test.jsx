@@ -1455,6 +1455,46 @@ describe("SceneWorks app shell", () => {
     expect(container.textContent).toContain("1 installed · 1 unavailable");
   });
 
+  it("confirms and deletes models and LoRAs from the Models page", async () => {
+    const onDeleteModel = vi.fn(async () => ({ removedManifestEntry: true, warnings: ["Recipe presets reference this model: Moody"] }));
+    const onDeleteLora = vi.fn(async () => ({ removedManifestEntry: true, warnings: ["Recipe presets reference this lora: Moody"] }));
+    const confirm = vi.spyOn(window, "confirm").mockReturnValue(true);
+    root = createRoot(container);
+    await act(async () => {
+      root.render(
+        <ModelManagerScreen
+          activeProject={{ id: "project-1", name: "Noir" }}
+          jobs={[]}
+          loras={[{ id: "ready_style", name: "Ready Style", family: "z-image", scope: "global", installState: "installed", removable: true }]}
+          models={[{ id: "z_image_turbo", name: "Z-Image Turbo", type: "image", family: "z-image", installState: "installed", removable: true }]}
+          onDeleteLora={onDeleteLora}
+          onDeleteModel={onDeleteModel}
+          onDownloadModel={() => {}}
+          onImportLora={() => {}}
+          onOpenQueue={() => {}}
+          recipePresets={[{ id: "moody", name: "Moody", model: "z_image_turbo", loras: [{ id: "ready_style" }] }]}
+        />,
+      );
+    });
+
+    await act(async () => {
+      container.querySelector(".model-card .danger-action").click();
+    });
+
+    expect(confirm).toHaveBeenCalledWith(expect.stringContaining('Delete model "Z-Image Turbo"?'));
+    expect(confirm.mock.calls[0][0]).toContain("Referenced by presets: Moody.");
+    expect(onDeleteModel).toHaveBeenCalledWith(expect.objectContaining({ id: "z_image_turbo" }));
+    expect(container.textContent).toContain("Removed the registry entry for Z-Image Turbo.");
+
+    await act(async () => {
+      container.querySelector(".lora-row .danger-action").click();
+    });
+
+    expect(confirm).toHaveBeenCalledWith(expect.stringContaining('Delete lora "Ready Style"?'));
+    expect(onDeleteLora).toHaveBeenCalledWith(expect.objectContaining({ id: "ready_style" }));
+    expect(container.textContent).toContain("Removed the registry entry for Ready Style.");
+  });
+
   it("advances elapsed seconds for active job snapshots between server updates", () => {
     const job = {
       id: "image-job-1",

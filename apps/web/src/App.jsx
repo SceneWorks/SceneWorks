@@ -125,12 +125,12 @@ export function App() {
 
   const authenticated = useMemo(() => !access.authRequired || token.length > 0, [access, token]);
   const imageModels = useMemo(() => {
-    const items = models.filter((model) => model.type === "image");
-    return items.length ? items : fallbackModels.filter((model) => model.type === "image");
+    const items = models.filter((model) => model.type === "image" && model.installState !== "missing");
+    return items.length || models.length ? items : fallbackModels.filter((model) => model.type === "image");
   }, [models]);
   const videoModels = useMemo(() => {
-    const items = models.filter((model) => model.type === "video");
-    return items.length ? items : fallbackModels.filter((model) => model.type === "video");
+    const items = models.filter((model) => model.type === "video" && model.installState !== "missing");
+    return items.length || models.length ? items : fallbackModels.filter((model) => model.type === "video");
   }, [models]);
   const selectedAsset = useMemo(
     () => assets.find((asset) => asset.id === selectedAssetId) ?? assets[0] ?? null,
@@ -519,6 +519,38 @@ export function App() {
     });
     await refreshRecipePresets(activeProject?.id);
     return archived;
+  }
+
+  async function deleteModel(model) {
+    const result = await apiFetch(`/api/v1/models/${encodeURIComponent(model.id)}`, token, {
+      method: "DELETE",
+    });
+    if (result.removedManifestEntry) {
+      setModels((items) => items.filter((item) => item.id !== model.id));
+    }
+    setError("");
+    await refreshData();
+    return result;
+  }
+
+  async function deleteLora(lora) {
+    const params = new URLSearchParams();
+    if (lora.scope) {
+      params.set("scope", lora.scope);
+    }
+    if (lora.scope === "project" && activeProject?.id) {
+      params.set("projectId", activeProject.id);
+    }
+    const query = params.toString() ? `?${params.toString()}` : "";
+    const result = await apiFetch(`/api/v1/loras/${encodeURIComponent(lora.id)}${query}`, token, {
+      method: "DELETE",
+    });
+    if (result.removedManifestEntry) {
+      setLoras((items) => items.filter((item) => item.id !== lora.id || item.scope !== lora.scope));
+    }
+    setError("");
+    await refreshDataWithLoraOverlay(activeProject?.id);
+    return result;
   }
 
   async function createModelImportJob(payload, options = {}) {
@@ -1504,10 +1536,13 @@ export function App() {
             jobs={jobs}
             loras={loras}
             models={models}
+            onDeleteLora={deleteLora}
+            onDeleteModel={deleteModel}
             onDownloadModel={createModelDownloadJob}
             onImportLora={createLoraImportJob}
             onImportModel={createModelImportJob}
             onOpenQueue={() => setActiveView("Queue")}
+            recipePresets={recipePresets}
           />
         ) : null}
 

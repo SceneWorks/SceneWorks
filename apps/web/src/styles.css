@@ -693,6 +693,12 @@ button:disabled {
   min-height: 36px;
 }
 
+.model-card-actions {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 8px;
+}
+
 .local-job-stack {
   display: grid;
   gap: 10px;
@@ -804,10 +810,28 @@ button:disabled {
 }
 
 .lora-row {
-  display: flex;
-  justify-content: space-between;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto auto;
   gap: 12px;
+  align-items: center;
   padding: 10px 12px;
+}
+
+.lora-row > span:first-child {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+}
+
+.lora-row strong,
+.lora-row small {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.lora-row small {
+  color: #aaa397;
 }
 
 .lora-row.warning {
