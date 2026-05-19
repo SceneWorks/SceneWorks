@@ -1,4 +1,5 @@
 import React from "react";
+import { AssetPickerField } from "../components/AssetPicker.jsx";
 import { AssetCard } from "../components/assetPanels.jsx";
 import { AssetMedia } from "../components/assetMedia.jsx";
 
@@ -31,10 +32,10 @@ function summarizeCompatibility(item) {
 export function CharacterReferences({
   imageAssets,
   onPreview,
-  referenceAssetId,
+  referenceAssetIds,
   removeCharacterReference,
   selectedCharacter,
-  setReferenceAssetId,
+  setReferenceAssetIds,
   submitReference,
   updateCharacterReference,
 }) {
@@ -44,16 +45,17 @@ export function CharacterReferences({
         <p className="eyebrow">References</p>
         <h2>Approved set</h2>
       </div>
-      <form className="inline-create" onSubmit={submitReference}>
-        <select onChange={(event) => setReferenceAssetId(event.target.value)} value={referenceAssetId}>
-          <option value="">Add image or frame</option>
-          {imageAssets.map((asset) => (
-            <option key={asset.id} value={asset.id}>
-              {asset.displayName}
-            </option>
-          ))}
-        </select>
-        <button disabled={!referenceAssetId} type="submit">
+      <form className="inline-create asset-reference-create" onSubmit={submitReference}>
+        <AssetPickerField
+          assets={imageAssets}
+          buttonLabel="Add image or frame"
+          emptyLabel="No references selected"
+          label="Reference assets"
+          multiple
+          onChange={setReferenceAssetIds}
+          values={referenceAssetIds}
+        />
+        <button disabled={!referenceAssetIds.length} type="submit">
           Add
         </button>
       </form>

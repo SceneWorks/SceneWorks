@@ -48,7 +48,7 @@ export function CharacterStudio({
   const [selectedCharacterId, setSelectedCharacterId] = useState(characters[0]?.id ?? "");
   const [draft, setDraft] = useState({ name: "", type: "person", description: "" });
   const [newCharacter, setNewCharacter] = useState({ name: "", type: "person", description: "" });
-  const [referenceAssetId, setReferenceAssetId] = useState("");
+  const [referenceAssetIds, setReferenceAssetIds] = useState([]);
   const [lookDraft, setLookDraft] = useState({ name: "", description: "" });
   const [selectedReferenceIds, setSelectedReferenceIds] = useState([]);
   const [loraId, setLoraId] = useState("");
@@ -117,9 +117,11 @@ export function CharacterStudio({
 
   async function submitReference(event) {
     event.preventDefault();
-    if (selectedCharacter && referenceAssetId) {
-      await addCharacterReference(selectedCharacter.id, { assetId: referenceAssetId, approved: false });
-      setReferenceAssetId("");
+    if (selectedCharacter && referenceAssetIds.length) {
+      for (const assetId of referenceAssetIds) {
+        await addCharacterReference(selectedCharacter.id, { assetId, approved: false });
+      }
+      setReferenceAssetIds([]);
     }
   }
 
@@ -302,10 +304,10 @@ export function CharacterStudio({
             <CharacterReferences
               imageAssets={imageAssets}
               onPreview={onPreview}
-              referenceAssetId={referenceAssetId}
+              referenceAssetIds={referenceAssetIds}
               removeCharacterReference={removeCharacterReference}
               selectedCharacter={selectedCharacter}
-              setReferenceAssetId={setReferenceAssetId}
+              setReferenceAssetIds={setReferenceAssetIds}
               submitReference={submitReference}
               updateCharacterReference={updateCharacterReference}
             />

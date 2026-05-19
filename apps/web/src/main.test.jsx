@@ -2,6 +2,7 @@ import React, { act } from "react";
 import { createRoot } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { App, eventUrl } from "./main.jsx";
+import { AssetPickerField } from "./components/AssetPicker.jsx";
 import { liveElapsedSeconds } from "./formatting.js";
 import { ImageStudio } from "./screens/ImageStudio.jsx";
 import { ModelManagerScreen } from "./screens/ModelManagerScreen.jsx";
@@ -111,6 +112,74 @@ describe("SceneWorks app shell", () => {
 
     expect(container.textContent).toContain("Library");
     expect(container.textContent).toContain("Queue");
+  });
+
+  it("selects duplicate-titled assets through the thumbnail asset picker", async () => {
+    const onChange = vi.fn();
+    const assets = [
+      { id: "image-alpha", type: "image", displayName: "Shot", createdAt: "2026-05-19T09:00:00Z", recipe: { mode: "text_to_image" } },
+      { id: "image-beta", type: "image", displayName: "Shot", createdAt: "2026-05-19T09:05:00Z", recipe: { mode: "edit_image" } },
+      { id: "clip-gamma", type: "video", displayName: "Shot", createdAt: "2026-05-19T09:10:00Z", file: { mimeType: "video/mp4" } },
+      { id: "upload-delta", type: "upload", displayName: "Plate", createdAt: "2026-05-19T09:15:00Z" },
+    ];
+
+    root = createRoot(container);
+    await act(async () => {
+      root.render(
+        <AssetPickerField
+          assets={assets}
+          buttonLabel="Select image"
+          emptyLabel="No source image selected"
+          label="Source"
+          onChange={onChange}
+          value=""
+        />,
+      );
+    });
+
+    await act(async () => {
+      [...container.querySelectorAll("button")].find((button) => button.textContent === "Select image").click();
+    });
+
+    expect(container.querySelector('[role="dialog"]')).not.toBeNull();
+    expect(container.textContent).toContain("Images 2");
+    expect(container.textContent).toContain("Video 1");
+    expect(container.textContent).toContain("Uploads 1");
+    expect(container.textContent).toContain("Renders 2");
+
+    const cards = [...container.querySelectorAll(".asset-picker-card")];
+    await act(async () => {
+      cards[1].click();
+    });
+    await act(async () => {
+      [...container.querySelectorAll("button")].find((button) => button.textContent === "Use Selection").click();
+    });
+
+    expect(onChange).toHaveBeenCalledWith("image-beta");
+
+    await act(async () => {
+      root.render(
+        <AssetPickerField
+          assets={assets}
+          buttonLabel="Select image"
+          emptyLabel="No source image selected"
+          label="Source"
+          onChange={onChange}
+          value="image-beta"
+        />,
+      );
+    });
+
+    expect(container.textContent).toContain("image-beta".slice(-6));
+
+    await act(async () => {
+      [...container.querySelectorAll("button")].find((button) => button.textContent === "Change").click();
+    });
+    await act(async () => {
+      window.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape" }));
+    });
+
+    expect(container.querySelector('[role="dialog"]')).toBeNull();
   });
 
   it("keeps the shell usable when recipe presets are unavailable", async () => {

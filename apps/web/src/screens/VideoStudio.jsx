@@ -1,4 +1,5 @@
 import React, { useEffect, useMemo, useState } from "react";
+import { AssetPickerField } from "../components/AssetPicker.jsx";
 import { AssetCard } from "../components/assetPanels.jsx";
 import { AssetMedia } from "../components/assetMedia.jsx";
 import { JobProgressCard } from "../components/JobProgress.jsx";
@@ -342,45 +343,36 @@ export function VideoStudio({
       <form className="studio-layout video-layout" onSubmit={submit}>
         <section className="studio-controls">
           {mode === "image_to_video" || mode === "first_last_frame" ? (
-            <label>
-              First frame
-              <select onChange={(event) => setSourceAssetId(event.target.value)} value={sourceAssetId}>
-                <option value="">Select image</option>
-                {imageAssets.map((asset) => (
-                  <option key={asset.id} value={asset.id}>
-                    {asset.displayName}
-                  </option>
-                ))}
-              </select>
-            </label>
+            <AssetPickerField
+              assets={imageAssets}
+              buttonLabel="Select image"
+              emptyLabel="No first frame selected"
+              label="First frame"
+              onChange={setSourceAssetId}
+              value={sourceAssetId}
+            />
           ) : null}
 
           {mode === "first_last_frame" ? (
-            <label>
-              Last frame
-              <select onChange={(event) => setLastFrameAssetId(event.target.value)} value={lastFrameAssetId}>
-                <option value="">Select image</option>
-                {imageAssets.map((asset) => (
-                  <option key={asset.id} value={asset.id}>
-                    {asset.displayName}
-                  </option>
-                ))}
-              </select>
-            </label>
+            <AssetPickerField
+              assets={imageAssets}
+              buttonLabel="Select image"
+              emptyLabel="No last frame selected"
+              label="Last frame"
+              onChange={setLastFrameAssetId}
+              value={lastFrameAssetId}
+            />
           ) : null}
 
           {mode === "extend_clip" ? (
-            <label>
-              Source clip
-              <select onChange={(event) => setSourceClipAssetId(event.target.value)} value={sourceClipAssetId}>
-                <option value="">Select clip</option>
-                {videoAssets.map((asset) => (
-                  <option key={asset.id} value={asset.id}>
-                    {asset.displayName}
-                  </option>
-                ))}
-              </select>
-            </label>
+            <AssetPickerField
+              assets={videoAssets}
+              buttonLabel="Select clip"
+              emptyLabel="No source clip selected"
+              label="Source clip"
+              onChange={setSourceClipAssetId}
+              value={sourceClipAssetId}
+            />
           ) : null}
 
           {mode === "replace_person" ? (
