@@ -76,7 +76,7 @@ export function ModelManagerScreen({ activeProject, jobs, loras, models, onDownl
     file: null,
     name: "",
     scope: "global",
-    family: families[0] ?? "",
+    family: "",
   });
   const [fileInputKey, setFileInputKey] = useState(0);
   const visibleLoras = loras.filter((lora) => matchesFamily(lora, familyFilter));
@@ -88,14 +88,8 @@ export function ModelManagerScreen({ activeProject, jobs, loras, models, onDownl
   }, [familiesKey, familyFilter]);
 
   useEffect(() => {
-    setImportForm((current) => {
-      if (current.family && families.includes(current.family)) {
-        return current;
-      }
-      const family = familyFilter !== "all" && families.includes(familyFilter) ? familyFilter : families[0] ?? "";
-      return { ...current, family };
-    });
-  }, [familiesKey, familyFilter]);
+    setImportForm((current) => (current.family && !families.includes(current.family) ? { ...current, family: "" } : current));
+  }, [familiesKey]);
 
   function downloadJobsFor(model) {
     return jobs.filter((job) => job.type === "model_download" && job.payload?.modelId === model.id);
@@ -113,11 +107,12 @@ export function ModelManagerScreen({ activeProject, jobs, loras, models, onDownl
       text: isFileImport ? "Uploading LoRA file before queueing import." : "",
     });
     try {
+      const familyOverride = importForm.family ? { family: importForm.family } : {};
       const job = await onImportLora({
         ...(isFileImport ? { file: importForm.file } : { sourceUrl: importForm.sourceUrl.trim() }),
         name: importForm.name.trim() || undefined,
         scope: importForm.scope,
-        family: importForm.family || undefined,
+        ...familyOverride,
       });
       const loraId = job?.payload?.loraId;
       const resolvedFamily = job?.payload?.manifestEntry?.family;
@@ -230,7 +225,7 @@ export function ModelManagerScreen({ activeProject, jobs, loras, models, onDownl
         <form className="lora-import-panel models-import-panel" aria-label="Import LoRA" onSubmit={importLora}>
           <div>
             <strong>Import LoRA</strong>
-            <span>{importForm.family || "choose a family"}</span>
+            <span>{importForm.family || "auto family"}</span>
           </div>
           <div className="segmented-control compact-segment" aria-label="LoRA import source">
             <button
@@ -273,7 +268,7 @@ export function ModelManagerScreen({ activeProject, jobs, loras, models, onDownl
               >
                 {families.length ? (
                   <>
-                    <option value="">Auto-detect from file</option>
+                    <option value="">{isFileImport ? "Auto-detect from file" : "No family override"}</option>
                     {families.map((family) => (
                       <option key={family} value={family}>
                         {family}
