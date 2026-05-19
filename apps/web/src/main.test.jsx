@@ -1913,6 +1913,136 @@ describe("SceneWorks app shell", () => {
     );
   });
 
+  it("blocks image presets whose managed LoRAs do not match the selected model", async () => {
+    const createImageJob = vi.fn();
+    root = createRoot(container);
+    await act(async () => {
+      root.render(
+        <ImageStudio
+          activeProject={{ id: "project-1", name: "Noir" }}
+          assets={[]}
+          characters={[]}
+          createImageJob={createImageJob}
+          deleteAsset={() => {}}
+          gpuOptions={["auto"]}
+          imageModels={[
+            { id: "z_image_turbo", name: "Z-Image", type: "image", family: "z-image" },
+            { id: "qwen_image", name: "Qwen Image", type: "image", family: "qwen-image" },
+          ]}
+          latestAssets={[]}
+          loras={[
+            {
+              id: "qwen_detail",
+              name: "Qwen Detail",
+              family: "qwen-image",
+              scope: "builtin",
+              presetManaged: true,
+            },
+          ]}
+          onPreview={() => {}}
+          purgeAsset={() => {}}
+          recipePresets={[
+            {
+              id: "cinematic",
+              name: "Cinematic",
+              workflow: "text_to_image",
+              builtInLoras: [{ id: "qwen_detail", weight: 0.4 }],
+            },
+          ]}
+          requestedGpu="auto"
+          selectedAsset={null}
+          setRequestedGpu={() => {}}
+          updateAssetStatus={() => {}}
+        />,
+      );
+    });
+
+    const generate = [...container.querySelectorAll("button")].find((button) => button.textContent === "Generate");
+    expect(container.textContent).toContain("Preset cannot run with Z-Image");
+    expect(container.textContent).toContain("qwen_detail");
+    expect(generate.disabled).toBe(true);
+
+    await act(async () => {
+      generate.click();
+    });
+
+    expect(createImageJob).not.toHaveBeenCalled();
+
+    await act(async () => {
+      [...container.querySelectorAll("button")].find((button) => button.textContent === "Advanced").click();
+    });
+    await changeField(field(container, "Model"), "qwen_image");
+    await settle();
+
+    expect(container.textContent).not.toContain("Preset cannot run with Qwen Image");
+    expect(generate.disabled).toBe(false);
+
+    await act(async () => {
+      generate.click();
+    });
+
+    expect(createImageJob).toHaveBeenCalledWith(expect.objectContaining({ model: "qwen_image", recipePresetId: "cinematic" }));
+  });
+
+  it("blocks video presets whose managed LoRAs do not match the selected model", async () => {
+    const createVideoJob = vi.fn();
+    root = createRoot(container);
+    await act(async () => {
+      root.render(
+        <VideoStudio
+          activeProject={{ id: "project-1", name: "Noir" }}
+          assets={[{ id: "image-1", type: "image", displayName: "Frame One" }]}
+          characters={[]}
+          createPersonDetectionJob={() => {}}
+          createPersonTrackJob={() => {}}
+          createVideoJob={createVideoJob}
+          deleteAsset={() => {}}
+          gpuOptions={["auto"]}
+          latestAssets={[]}
+          loras={[{ id: "wan_motion", name: "Wan Motion", family: "wan-video", scope: "builtin", presetManaged: true }]}
+          onPreview={() => {}}
+          personTracks={[]}
+          purgeAsset={() => {}}
+          recipePresets={[
+            {
+              id: "dream_motion",
+              name: "Dream Motion",
+              workflow: "image_to_video",
+              model: "ltx_2_3",
+              builtInLoras: [{ id: "wan_motion" }],
+            },
+          ]}
+          requestedGpu="auto"
+          selectedAsset={{ id: "image-1", type: "image", displayName: "Frame One" }}
+          setRequestedGpu={() => {}}
+          updateAssetStatus={() => {}}
+          videoModels={[
+            {
+              id: "ltx_2_3",
+              name: "LTX",
+              type: "video",
+              family: "ltx-video",
+              capabilities: ["image_to_video"],
+              defaults: { duration: 6, fps: 25, resolution: "768x512", quality: "balanced" },
+              loraCompatibility: { families: ["ltx-video"] },
+            },
+          ]}
+        />,
+      );
+    });
+
+    const generate = [...container.querySelectorAll("button")].find((button) => button.textContent === "Generate Clip");
+    expect(container.textContent).toContain("Preset cannot run with LTX");
+    expect(container.textContent).toContain("wan_motion");
+    expect(generate.disabled).toBe(true);
+
+    await act(async () => {
+      generate.click();
+    });
+
+    expect(createVideoJob).not.toHaveBeenCalled();
+  });
+
   it("keeps Qwen selected when applying a Qwen image preset", async () => {
     const createImageJob = vi.fn();
     root = createRoot(container);
