@@ -1,5 +1,6 @@
-import React from "react";
-import { formatSeconds, percent } from "../formatting.js";
+import React, { useEffect, useState } from "react";
+import { terminalStatuses } from "../constants.js";
+import { formatSeconds, liveElapsedSeconds, percent } from "../formatting.js";
 
 const localErrorStatuses = new Set(["failed", "canceled", "interrupted"]);
 
@@ -28,10 +29,26 @@ function jobMessage(job) {
   return "";
 }
 
+export function useLiveJobElapsedSeconds(job) {
+  const active = !terminalStatuses.has(job.status) && Boolean(job.startedAt);
+  const [nowMs, setNowMs] = useState(() => Date.now());
+
+  useEffect(() => {
+    if (!active) {
+      return undefined;
+    }
+    const timer = window.setInterval(() => setNowMs(Date.now()), 1000);
+    return () => window.clearInterval(timer);
+  }, [active, job.startedAt]);
+
+  return liveElapsedSeconds(job, nowMs);
+}
+
 export function JobProgressCard({ job, label, onOpenQueue }) {
   const isError = localErrorStatuses.has(job.status);
   const progressLabel = percent(job.progress);
   const message = jobMessage(job);
+  const elapsedSeconds = useLiveJobElapsedSeconds(job);
   return (
     <article className={`local-job-card ${job.status}`}>
       <div className="local-job-main">
@@ -46,7 +63,7 @@ export function JobProgressCard({ job, label, onOpenQueue }) {
       </div>
       <div className="job-meta">
         <span>{formatJobType(job.stage ?? job.status)}</span>
-        <span>{formatSeconds(job.elapsedSeconds)}</span>
+        <span>{formatSeconds(elapsedSeconds)}</span>
         <span>GPU {job.assignedGpu ?? job.requestedGpu ?? "auto"}</span>
       </div>
       {message ? <p className={isError ? "job-message error-text" : "job-message"}>{message}</p> : null}

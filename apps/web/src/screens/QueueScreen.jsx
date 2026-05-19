@@ -1,4 +1,5 @@
 import React, { useMemo } from "react";
+import { useLiveJobElapsedSeconds } from "../components/JobProgress.jsx";
 import { actionStatuses, terminalStatuses } from "../constants.js";
 import { formatSeconds, percent } from "../formatting.js";
 
@@ -270,6 +271,7 @@ function JobRow({ assignedWorker, job, jobAction, jobs, workers }) {
   const attempts = job.attempts ?? 1;
   const canRepeat = actionStatuses.has(job.status) && attempts < maxAttempts;
   const displayMessage = jobWaitingMessage(job, workers, jobs);
+  const elapsedSeconds = useLiveJobElapsedSeconds(job);
   return (
     <article className={`job-row ${job.status}`}>
       <div className="job-main">
@@ -282,7 +284,7 @@ function JobRow({ assignedWorker, job, jobAction, jobs, workers }) {
       <div className="job-meta">
         <span>{job.projectName ?? "Global"}</span>
         <span>Stage {job.stage}</span>
-        <span>Elapsed {formatSeconds(job.elapsedSeconds)}</span>
+        <span>Elapsed {formatSeconds(elapsedSeconds)}</span>
         <span>GPU {job.assignedGpu ?? job.requestedGpu}</span>
         {assignedWorker ? <span>{assignedWorker.gpuName ?? assignedWorker.id}</span> : null}
         <span>Attempt {attempts}/{maxAttempts}</span>

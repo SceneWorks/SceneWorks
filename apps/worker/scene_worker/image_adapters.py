@@ -260,7 +260,7 @@ class ZImageDiffusersAdapter:
             raise RuntimeError(f"{request.model} is not a Z-Image Diffusers target.")
 
         progress("loading_model", "loading_model", 0.18, f"Loading {model_target['label']}.")
-        pipe = self._load_pipeline(request, model_target, progress=progress)
+        pipe = self._load_pipeline(settings, request, model_target, progress=progress)
         self._apply_loras(pipe, request)
         images = []
         total = request.count
@@ -287,11 +287,12 @@ class ZImageDiffusersAdapter:
             },
         )
 
-    def _load_pipeline(self, request: ImageRequest, model_target: dict[str, Any], progress: ProgressCallback) -> Any:
+    def _load_pipeline(self, settings: WorkerSettings, request: ImageRequest, model_target: dict[str, Any], progress: ProgressCallback) -> Any:
         torch = importlib.import_module("torch")
         diffusers = importlib.import_module("diffusers")
         repo = request.advanced.get("modelRepo") or model_target["repo"]
-        device = select_torch_device(torch)
+        device = select_torch_device(torch, settings.gpu_id)
+        activate_torch_device(torch, device)
         dtype = select_torch_dtype(torch, device, request.advanced.get("dtype"))
         use_img2img = request.mode == "edit_image"
         cached_pipe = self._img2img_pipe if use_img2img else self._text_pipe
@@ -356,8 +357,9 @@ class ZImageDiffusersAdapter:
 
     def _run_pipeline(self, settings: WorkerSettings, pipe: Any, request: ImageRequest, seed: int) -> Image.Image:
         torch = importlib.import_module("torch")
-        device = select_torch_device(torch)
-        generator_device = "cuda" if device == "cuda" else "cpu"
+        device = select_torch_device(torch, settings.gpu_id)
+        activate_torch_device(torch, device)
+        generator_device = device if device.startswith("cuda") else "cpu"
         generator = torch.Generator(generator_device).manual_seed(seed)
         kwargs = {
             "prompt": request.prompt,
@@ -428,7 +430,7 @@ class QwenImageAdapter:
             raise RuntimeError(f"{request.model} does not support image editing.")
 
         progress("loading_model", "loading_model", 0.18, f"Loading {model_target['label']}.")
-        pipe = self._load_pipeline(request, model_target, progress=progress)
+        pipe = self._load_pipeline(settings, request, model_target, progress=progress)
         self._apply_loras(pipe, request)
         images = []
         for index in range(request.count):
@@ -454,11 +456,12 @@ class QwenImageAdapter:
             },
         )
 
-    def _load_pipeline(self, request: ImageRequest, model_target: dict[str, Any], progress: ProgressCallback) -> Any:
+    def _load_pipeline(self, settings: WorkerSettings, request: ImageRequest, model_target: dict[str, Any], progress: ProgressCallback) -> Any:
         torch = importlib.import_module("torch")
         diffusers = importlib.import_module("diffusers")
         repo = self._repo_for_request(request, model_target)
-        device = select_torch_device(torch)
+        device = select_torch_device(torch, settings.gpu_id)
+        activate_torch_device(torch, device)
         dtype = select_torch_dtype(torch, device, request.advanced.get("dtype"))
         use_edit = request.mode == "edit_image"
         cached_pipe = self._edit_pipe if use_edit else self._text_pipe
@@ -506,8 +509,9 @@ class QwenImageAdapter:
 
     def _run_pipeline(self, settings: WorkerSettings, pipe: Any, request: ImageRequest, seed: int) -> Image.Image:
         torch = importlib.import_module("torch")
-        device = select_torch_device(torch)
-        generator = torch.Generator("cuda" if device == "cuda" else "cpu").manual_seed(seed)
+        device = select_torch_device(torch, settings.gpu_id)
+        activate_torch_device(torch, device)
+        generator = torch.Generator(device if device.startswith("cuda") else "cpu").manual_seed(seed)
         kwargs = {
             "prompt": request.prompt,
             "height": request.height,
@@ -635,12 +639,26 @@ def resolve_seed(seed: int | None, prompt: str, index: int, seeds: list[int] | N
     return int(digest[:8], 16)
 
 
-def select_torch_device(torch: Any) -> str:
+def select_torch_device(torch: Any, gpu_id: str | None = None) -> str:
     if torch.cuda.is_available():
+        gpu_id = str(gpu_id or "").strip()
+        if gpu_id.isdigit():
+            try:
+                device_count = int(torch.cuda.device_count())
+            except (AttributeError, TypeError, ValueError):
+                device_count = 0
+            physical_index = int(gpu_id)
+            if device_count > 1 and physical_index < device_count:
+                return f"cuda:{physical_index}"
         return "cuda"
     if getattr(torch.backends, "mps", None) and torch.backends.mps.is_available():
         return "mps"
     return "cpu"
+
+
+def activate_torch_device(torch: Any, device: str) -> None:
+    if device.startswith("cuda:") and hasattr(torch.cuda, "set_device"):
+        torch.cuda.set_device(device)
 
 
 def select_torch_dtype(torch: Any, device: str, requested: Any) -> Any:

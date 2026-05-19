@@ -10,3 +10,15 @@ export function formatSeconds(seconds) {
 export function percent(value) {
   return `${Math.round((value ?? 0) * 100)}%`;
 }
+
+export function liveElapsedSeconds(job, nowMs = Date.now()) {
+  if (["completed", "failed", "canceled", "interrupted"].includes(job.status) || !job.startedAt) {
+    return job.elapsedSeconds;
+  }
+  const startedMs = Date.parse(job.startedAt);
+  if (!Number.isFinite(startedMs)) {
+    return job.elapsedSeconds;
+  }
+  const elapsed = Math.max(0, Math.floor((nowMs - startedMs) / 1000));
+  return Math.max(Number(job.elapsedSeconds) || 0, elapsed);
+}

@@ -2,6 +2,7 @@ import React, { act } from "react";
 import { createRoot } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { App, eventUrl } from "./main.jsx";
+import { liveElapsedSeconds } from "./formatting.js";
 import { ImageStudio } from "./screens/ImageStudio.jsx";
 import { ModelManagerScreen } from "./screens/ModelManagerScreen.jsx";
 import { PresetManagerScreen } from "./screens/PresetManagerScreen.jsx";
@@ -811,6 +812,17 @@ describe("SceneWorks app shell", () => {
       }),
     );
     expect(container.textContent).toContain("LoRA import queued for detail_lora.");
+  });
+
+  it("advances elapsed seconds for active job snapshots between server updates", () => {
+    const job = {
+      id: "image-job-1",
+      status: "running",
+      elapsedSeconds: 57,
+      startedAt: "2026-05-18T20:00:00Z",
+    };
+
+    expect(liveElapsedSeconds(job, Date.parse("2026-05-18T20:02:05Z"))).toBe(125);
   });
 
   it("resets the Models LoRA form after queueing and allows another import while one is pending", async () => {
