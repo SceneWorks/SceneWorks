@@ -51,6 +51,7 @@ export function CharacterStudio({
   const [referenceAssetIds, setReferenceAssetIds] = useState([]);
   const [lookDraft, setLookDraft] = useState({ name: "", description: "" });
   const [selectedReferenceIds, setSelectedReferenceIds] = useState([]);
+  const [referenceMessage, setReferenceMessage] = useState("");
   const [loraId, setLoraId] = useState("");
   const [loraEdits, setLoraEdits] = useState({});
   const [testPrompt, setTestPrompt] = useState("A clean character reference portrait, consistent identity, studio lighting");
@@ -118,10 +119,23 @@ export function CharacterStudio({
   async function submitReference(event) {
     event.preventDefault();
     if (selectedCharacter && referenceAssetIds.length) {
-      for (const assetId of referenceAssetIds) {
-        await addCharacterReference(selectedCharacter.id, { assetId, approved: false });
+      const savedAssetIds = [];
+      try {
+        for (const assetId of referenceAssetIds) {
+          await addCharacterReference(selectedCharacter.id, { assetId, approved: false });
+          savedAssetIds.push(assetId);
+        }
+        setReferenceAssetIds([]);
+        setReferenceMessage("");
+      } catch (err) {
+        const message = err?.message ?? "Unknown error";
+        setReferenceAssetIds((ids) => ids.filter((id) => !savedAssetIds.includes(id)));
+        setReferenceMessage(
+          savedAssetIds.length
+            ? `Added ${savedAssetIds.length} reference${savedAssetIds.length === 1 ? "" : "s"}. Could not add the remaining selection: ${message}`
+            : `Could not add references: ${message}`,
+        );
       }
-      setReferenceAssetIds([]);
     }
   }
 
@@ -304,6 +318,7 @@ export function CharacterStudio({
             <CharacterReferences
               imageAssets={imageAssets}
               onPreview={onPreview}
+              referenceMessage={referenceMessage}
               referenceAssetIds={referenceAssetIds}
               removeCharacterReference={removeCharacterReference}
               selectedCharacter={selectedCharacter}

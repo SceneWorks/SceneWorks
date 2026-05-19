@@ -32,6 +32,7 @@ function summarizeCompatibility(item) {
 export function CharacterReferences({
   imageAssets,
   onPreview,
+  referenceMessage,
   referenceAssetIds,
   removeCharacterReference,
   selectedCharacter,
@@ -59,6 +60,7 @@ export function CharacterReferences({
           Add
         </button>
       </form>
+      {referenceMessage ? <p className="inline-warning">{referenceMessage}</p> : null}
       <div className="character-reference-grid">
         {(selectedCharacter.references ?? []).map((reference) => (
           <article className={reference.approved ? "reference-card approved" : "reference-card"} key={reference.assetId}>

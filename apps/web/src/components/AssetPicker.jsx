@@ -65,6 +65,11 @@ function statusLabel(asset) {
   return asset?.status?.state ?? asset?.status?.label ?? "";
 }
 
+function assetIdentity(asset) {
+  const id = String(asset?.id ?? "");
+  return id.length <= 8 ? id : `...${id.slice(-6)}`;
+}
+
 function categoryMatches(asset, category) {
   if (category === "all") {
     return true;
@@ -100,6 +105,10 @@ function searchableText(asset) {
     .toLowerCase();
 }
 
+function assetSearchIndex(assets) {
+  return new Map(assets.map((asset) => [asset.id, searchableText(asset)]));
+}
+
 function normalizeSelection(ids, assets, multiple) {
   const available = new Set(assets.map((asset) => asset.id));
   const kept = ids.filter((id) => available.has(id));
@@ -118,8 +127,8 @@ export function AssetPreviewChips({ assets, emptyLabel = "No asset selected" }) 
           <AssetThumbnail asset={asset} />
           <span>
             <strong>{titleFor(asset)}</strong>
-            <small>
-              {typeLabel(asset)} | {compactDate(asset.createdAt ?? asset.updatedAt)} | {String(asset.id).slice(-6)}
+            <small title={asset.id}>
+              {typeLabel(asset)} | {compactDate(asset.createdAt ?? asset.updatedAt)} | ID {assetIdentity(asset)}
             </small>
           </span>
         </div>
@@ -133,6 +142,7 @@ export function AssetPickerField({
   buttonLabel = "Select",
   emptyLabel,
   label,
+  changeLabel = "Change",
   multiple = false,
   onChange,
   value = "",
@@ -152,7 +162,7 @@ export function AssetPickerField({
       <div className="asset-picker-head">
         <span className="asset-picker-label">{label}</span>
         <button aria-haspopup="dialog" onClick={() => setOpen(true)} type="button">
-          {selectedAssets.length ? "Change" : buttonLabel}
+          {selectedAssets.length ? changeLabel : buttonLabel}
         </button>
       </div>
       <AssetPreviewChips assets={selectedAssets} emptyLabel={emptyLabel ?? (multiple ? "No assets selected" : "No asset selected")} />
@@ -177,32 +187,23 @@ export function AssetPickerModal({ assets, initialSelectedIds, multiple = false,
   const dialogRef = useRef(null);
 
   useEffect(() => {
-    setSelectedIds(normalizeSelection(initialSelectedIds, assets, multiple));
-  }, [assets, initialSelectedIds, multiple]);
+    setSelectedIds((ids) => normalizeSelection(ids, assets, multiple));
+  }, [assets, multiple]);
 
   useEffect(() => {
     dialogRef.current?.focus();
   }, []);
 
-  useEffect(() => {
-    function onKeyDown(event) {
-      if (event.key === "Escape") {
-        event.preventDefault();
-        onCancel();
-      }
-    }
-    window.addEventListener("keydown", onKeyDown);
-    return () => window.removeEventListener("keydown", onKeyDown);
-  }, [onCancel]);
-
   const categoryCounts = useMemo(() => {
     return Object.fromEntries(categoryOptions.map(([key]) => [key, assets.filter((asset) => categoryMatches(asset, key)).length]));
   }, [assets]);
 
+  const searchIndex = useMemo(() => assetSearchIndex(assets), [assets]);
+
   const visibleAssets = useMemo(() => {
     const needle = query.trim().toLowerCase();
-    return assets.filter((asset) => categoryMatches(asset, category) && (!needle || searchableText(asset).includes(needle)));
-  }, [assets, category, query]);
+    return assets.filter((asset) => categoryMatches(asset, category) && (!needle || searchIndex.get(asset.id)?.includes(needle)));
+  }, [assets, category, query, searchIndex]);
 
   function toggleAsset(asset) {
     setSelectedIds((ids) => {
@@ -216,9 +217,15 @@ export function AssetPickerModal({ assets, initialSelectedIds, multiple = false,
   return (
     <div className="modal-backdrop" onMouseDown={(event) => event.target === event.currentTarget && onCancel()}>
       <section
-        aria-label={title}
+        aria-labelledby="asset-picker-title"
         aria-modal="true"
         className="asset-picker-modal"
+        onKeyDown={(event) => {
+          if (event.key === "Escape") {
+            event.preventDefault();
+            onCancel();
+          }
+        }}
         onMouseDown={(event) => event.stopPropagation()}
         ref={dialogRef}
         role="dialog"
@@ -226,8 +233,8 @@ export function AssetPickerModal({ assets, initialSelectedIds, multiple = false,
       >
         <header className="asset-picker-modal-head">
           <div>
-            <p className="eyebrow">{multiple ? "Choose assets" : "Choose asset"}</p>
-            <h2>{title}</h2>
+            <p className="eyebrow">Library</p>
+            <h2 id="asset-picker-title">{title}</h2>
           </div>
           <button className="modal-close" onClick={onCancel} type="button">
             Close
@@ -270,8 +277,8 @@ export function AssetPickerModal({ assets, initialSelectedIds, multiple = false,
                   <small>
                     {typeLabel(asset)} | {sourceLabel(asset)}
                   </small>
-                  <small>
-                    {compactDate(asset.createdAt ?? asset.updatedAt)} | ID {String(asset.id).slice(-6)}
+                  <small title={asset.id}>
+                    {compactDate(asset.createdAt ?? asset.updatedAt)} | ID {assetIdentity(asset)}
                     {status ? ` | ${status}` : ""}
                   </small>
                 </span>
