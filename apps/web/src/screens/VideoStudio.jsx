@@ -83,6 +83,7 @@ export function VideoStudio({
   const [quality, setQuality] = useState("balanced");
   const [ltxPipeline, setLtxPipeline] = useState("auto");
   const [distilledVariant, setDistilledVariant] = useState("1.1");
+  const [precision, setPrecision] = useState("fp8");
   const [advancedOpen, setAdvancedOpen] = useState(false);
   const [model, setModel] = useState(videoModels[0]?.id ?? ltxVideoModelId);
   const [selectedPresetId, setSelectedPresetId] = useState(null);
@@ -401,7 +402,7 @@ export function VideoStudio({
           recipePresetPrompt: selectedPreset?.prompt ?? null,
           selectedPersonTrack: selectedTrack ?? null,
           replacementModeLabel: replacementModeLabels[replacementMode],
-          ...(model === ltxVideoModelId ? { ltxPipeline, distilledVariant } : {}),
+          ...(model === ltxVideoModelId ? { ltxPipeline, distilledVariant, precision } : {}),
         },
       });
       onLocalJobCreated?.(job);
@@ -804,6 +805,13 @@ export function VideoStudio({
                         <select onChange={(event) => setDistilledVariant(event.target.value)} value={distilledVariant}>
                           <option value="1.1">1.1 (newer aesthetic + audio)</option>
                           <option value="1.0">1.0 (original)</option>
+                        </select>
+                      </label>
+                      <label>
+                        Precision
+                        <select onChange={(event) => setPrecision(event.target.value)} value={precision}>
+                          <option value="fp8">FP8 (lower VRAM)</option>
+                          <option value="bf16">BF16 (higher quality, CPU offload)</option>
                         </select>
                       </label>
                     </>

@@ -49,6 +49,8 @@ services:
       HF_HUB_CACHE: ${SCENEWORKS_HUGGINGFACE_HUB_CACHE:-/sceneworks/data/cache/huggingface/hub}
       HUGGINGFACE_HUB_CACHE: ${SCENEWORKS_HUGGINGFACE_HUB_CACHE:-/sceneworks/data/cache/huggingface/hub}
       NVIDIA_VISIBLE_DEVICES: ${NVIDIA_VISIBLE_DEVICES:-all}
+      # Reduces CUDA fragmentation OOM; recommended by the LTX stack alongside FP8.
+      PYTORCH_CUDA_ALLOC_CONF: ${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:True}
     volumes:
       - ${SCENEWORKS_DATA_BIND:-./data}:/sceneworks/data
       - ${SCENEWORKS_HF_CACHE_BIND:-./data/cache/huggingface}:/sceneworks/data/cache/huggingface
