@@ -1,8 +1,8 @@
 FROM python:3.12-slim AS builder
 
 ARG PYTORCH_INDEX_URL=https://download.pytorch.org/whl/cpu
-ARG PYTORCH_SPEC=torch>=2.7,<2.8
-ARG PYTORCH_AUDIO_SPEC=torchaudio>=2.7,<2.8
+ARG PYTORCH_SPEC=torch>=2.8,<2.9
+ARG PYTORCH_AUDIO_SPEC=torchaudio>=2.8,<2.9
 ARG INCLUDE_LTX_PIPELINES=1
 
 ENV PYTHONDONTWRITEBYTECODE=1
