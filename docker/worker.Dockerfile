@@ -20,8 +20,9 @@ COPY apps/worker/requirements.txt ./requirements.txt
 COPY apps/worker/requirements-ltx.txt ./requirements-ltx.txt
 RUN pip install --no-cache-dir --upgrade pip \
     && pip install --no-cache-dir --no-compile --index-url "${PYTORCH_INDEX_URL}" "${PYTORCH_SPEC}" \
-    && pip install --no-cache-dir --no-compile -r requirements.txt \
-    && if [ "${INCLUDE_LTX_PIPELINES}" = "1" ]; then pip install --no-cache-dir --no-compile -r requirements-ltx.txt; fi \
+    && pip freeze | grep -E '^(torch|nvidia-|triton)==.*' > /tmp/torch-constraints.txt \
+    && pip install --no-cache-dir --no-compile -c /tmp/torch-constraints.txt -r requirements.txt \
+    && if [ "${INCLUDE_LTX_PIPELINES}" = "1" ]; then pip install --no-cache-dir --no-compile -c /tmp/torch-constraints.txt -r requirements-ltx.txt; fi \
     && find /opt/venv -type d -name "__pycache__" -prune -exec rm -rf {} + \
     && rm -rf /opt/venv/lib/python3.12/site-packages/torch/include \
         /opt/venv/lib/python3.12/site-packages/torch/test \
