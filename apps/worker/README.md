@@ -31,6 +31,10 @@ Native LTX-2.3 text-to-video and image-to-video require these local resources:
 - `distilledLoraPath`
 - `gemmaRoot`
 
+Source-conditioned native LTX-2.3 modes such as image-to-video, first/last
+frame, and extend route through `ltx_pipelines.ic_lora` and require an
+installed LTX-compatible IC-LoRA in the selected preset.
+
 By default the worker resolves those from the model manifest `resources` block,
 preferring SceneWorks-managed imports under `data/models` and then the shared
 Hugging Face cache (`HUGGINGFACE_HUB_CACHE` or `HF_HOME/hub`). A job can
