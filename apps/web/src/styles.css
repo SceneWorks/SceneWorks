@@ -218,29 +218,24 @@ button:focus-visible {
   width: 32px;
   height: 32px;
   flex: 0 0 auto;
-  border-radius: 10px;
-  background: linear-gradient(135deg, var(--accent), var(--warm));
-  position: relative;
+  border-radius: 8px;
   display: grid;
   place-items: center;
-  color: transparent;
   box-shadow: 0 4px 12px color-mix(in oklch, var(--accent) 40%, transparent);
+  overflow: hidden;
 }
 
-.brand-mark::after {
-  content: "";
-  position: absolute;
-  inset: 6px;
-  border-radius: 6px;
-  background: var(--surface);
-  opacity: 0.18;
+.brand-mark img {
+  width: 32px;
+  height: 32px;
+  display: block;
 }
 
 .brand h1 {
   margin: 0;
   font-size: 16px;
   font-weight: 700;
-  letter-spacing: -0.01em;
+  letter-spacing: 0;
   color: var(--text);
 }
 
