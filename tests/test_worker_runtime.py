@@ -1419,10 +1419,13 @@ def test_native_ltx_precision_selects_quantization_and_offload(monkeypatch):
     assert adapter._quantization(req({})) == "fp8-cast"
     # Explicit bf16 -> no quantization.
     assert adapter._quantization(req({"precision": "bf16"})) is None
-    # bf16 keeps the default CPU offload.
-    assert adapter._offload_mode(req({"precision": "bf16"})) == "cpu"
-    # The fp8 path forces offload off (mutual exclusion in the loader).
-    assert adapter._offload_mode(req({}), override="none") == "none"
+    # Default offload is resident ("none") regardless of precision; CPU streaming
+    # leaks/thrashes on this stack, so callers opt into it explicitly.
+    assert adapter._offload_mode(req({"precision": "bf16"})) == "none"
+    assert adapter._offload_mode(req({})) == "none"
+    assert adapter._offload_mode(req({"offloadMode": "cpu"})) == "cpu"
+    # The override (used for the torch.compile path) forces resident.
+    assert adapter._offload_mode(req({"offloadMode": "cpu"}), override="none") == "none"
 
 
 def test_native_ltx_distilled_variant_switches_files(tmp_path):
@@ -1909,8 +1912,8 @@ def test_native_ltx_text_to_video_uses_ltx_pipeline_and_writes_mp4(monkeypatch, 
     assert media_path.read_bytes() == b"mp4"
     assert calls["init"]["checkpoint_path"] == str(checkpoint)
     assert calls["init"]["distilled_lora"] == [(str(lora), 0.6, {"rename": "map"})]
-    # Default precision is fp8: quantization is passed and offload is forced off
-    # (FP8 and weight offloading are mutually exclusive in the native loader).
+    # Default precision is fp8 with no torch.compile: quantization is passed and the
+    # default offload is resident ("none"); CPU streaming is opt-in.
     assert calls["init"]["quantization"] == "fp8-cast"
     assert calls["init"]["offload_mode"] == "none"
     assert calls["run"]["prompt"] == "Neon harbor"
