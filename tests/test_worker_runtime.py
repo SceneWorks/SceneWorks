@@ -497,6 +497,57 @@ def test_lora_specs_fail_before_inference_for_missing_or_excess_loras(tmp_path):
         normalize_lora_specs(many)
 
 
+def test_lora_specs_resolve_huggingface_cache_snapshot(monkeypatch, tmp_path):
+    cache_root = tmp_path / "hf" / "hub"
+    snapshot = write_huggingface_cache_resource(
+        cache_root,
+        "Lightricks/LTX-2.3-22b-IC-LoRA-Union-Control",
+        "ltx-2.3-22b-ic-lora-union-control-ref0.5.safetensors",
+    )
+    monkeypatch.setenv("HUGGINGFACE_HUB_CACHE", str(cache_root))
+
+    specs = normalize_lora_specs(
+        [
+            {
+                "id": "ltx_2_3_ic_union_control",
+                "weight": 0.7,
+                "source": {
+                    "provider": "huggingface",
+                    "repo": "Lightricks/LTX-2.3-22b-IC-LoRA-Union-Control",
+                    "file": "ltx-2.3-22b-ic-lora-union-control-ref0.5.safetensors",
+                },
+            }
+        ]
+    )
+
+    assert specs[0].path == str(snapshot / "ltx-2.3-22b-ic-lora-union-control-ref0.5.safetensors")
+    assert specs[0].weight == 0.7
+
+
+def test_lora_specs_prefer_huggingface_ref_main_snapshot(monkeypatch, tmp_path):
+    cache_root = tmp_path / "hf" / "hub"
+    repo = "Lightricks/LTX-2.3-22b-IC-LoRA-Union-Control"
+    file_name = "ltx-2.3-22b-ic-lora-union-control-ref0.5.safetensors"
+    write_huggingface_cache_resource(cache_root, repo, file_name, revision="aaa111")
+    main_snapshot = write_huggingface_cache_resource(cache_root, repo, file_name, revision="zzz999", refs_main=True)
+    monkeypatch.setenv("HUGGINGFACE_HUB_CACHE", str(cache_root))
+
+    specs = normalize_lora_specs(
+        [
+            {
+                "id": "ltx_2_3_ic_union_control",
+                "source": {
+                    "provider": "huggingface",
+                    "repo": repo,
+                    "file": file_name,
+                },
+            }
+        ]
+    )
+
+    assert specs[0].path == str(main_snapshot / file_name)
+
+
 def test_image_adapter_env_aliases_and_unknown_values(monkeypatch):
     monkeypatch.setenv("SCENEWORKS_IMAGE_ADAPTER", "procedural")
     assert create_image_adapter({"payload": {"model": "z_image_turbo"}}).__class__.__name__ == "ProceduralImageAdapter"
@@ -1200,10 +1251,14 @@ def write_native_ltx_resource_files(tmp_path):
     return checkpoint, spatial, lora, gemma
 
 
-def write_huggingface_cache_resource(cache_root, repo, file_name=None):
+def write_huggingface_cache_resource(cache_root, repo, file_name=None, revision="abc123", refs_main=False):
     safe_repo = "".join(char if char.isalnum() or char in "._-" else "--" for char in repo).strip("-")
-    snapshot = cache_root / f"models--{safe_repo}" / "snapshots" / "abc123"
+    repo_root = cache_root / f"models--{safe_repo}"
+    snapshot = repo_root / "snapshots" / revision
     snapshot.mkdir(parents=True, exist_ok=True)
+    if refs_main:
+        (repo_root / "refs").mkdir(parents=True, exist_ok=True)
+        (repo_root / "refs" / "main").write_text(revision, encoding="utf-8")
     if file_name is not None:
         path = snapshot / file_name
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -1489,7 +1544,7 @@ def test_native_ltx_adapter_rejects_unsupported_modes():
             "id": "job-1",
             "payload": {
                 "projectId": "project-1",
-                "mode": "video_bridge",
+                "mode": "replace_person",
                 "prompt": "city",
                 "model": "ltx_2_3",
                 "advanced": {},
@@ -1613,7 +1668,7 @@ def test_native_ltx_text_to_video_uses_ltx_pipeline_and_writes_mp4(monkeypatch, 
 
     monkeypatch.setattr("scene_worker.video_adapters.importlib.import_module", fake_import_module)
     adapter = LtxPipelinesVideoAdapter()
-    monkeypatch.setattr(adapter, "_dependencies_available", lambda: True)
+    monkeypatch.setattr(adapter, "_dependencies_available", lambda *_args: True)
     job = {
         "id": "job-real-ltx",
         "payload": {
@@ -1659,6 +1714,49 @@ def test_native_ltx_text_to_video_uses_ltx_pipeline_and_writes_mp4(monkeypatch, 
     assert result["requirements"]["mockedInference"] is False
 
 
+def test_native_ltx_dependency_probe_only_imports_selected_pipeline(monkeypatch):
+    imported = []
+
+    def fake_import_module(name):
+        imported.append(name)
+        if name == "ltx_pipelines.ic_lora":
+            raise ImportError(name)
+        return SimpleNamespace()
+
+    monkeypatch.setattr("scene_worker.video_adapters.importlib.util.find_spec", lambda _name: object())
+    monkeypatch.setattr("scene_worker.video_adapters.importlib.import_module", fake_import_module)
+    monkeypatch.setattr("scene_worker.video_adapters.install_ltx_pipelines_multigpu_compat", lambda: None)
+
+    adapter = LtxPipelinesVideoAdapter()
+    text_request = video_request_from_job(
+        {
+            "payload": {
+                "projectId": "project-1",
+                "mode": "text_to_video",
+                "prompt": "Neon harbor",
+                "model": "ltx_2_3",
+                "quality": "balanced",
+            }
+        }
+    )
+    ic_request = video_request_from_job(
+        {
+            "payload": {
+                "projectId": "project-1",
+                "mode": "image_to_video",
+                "prompt": "Neon harbor",
+                "model": "ltx_2_3",
+                "loras": [{"id": "identity", "icLora": True}],
+            }
+        }
+    )
+
+    assert adapter._dependencies_available(text_request) is True
+    assert "ltx_pipelines.ti2vid_two_stages" in imported
+    assert "ltx_pipelines.ic_lora" not in imported
+    assert adapter._dependencies_available(ic_request) is False
+
+
 def test_native_ltx_image_to_video_passes_source_image_conditioning(monkeypatch, tmp_path):
     data_dir = tmp_path / "data"
     config_dir = tmp_path / "config"
@@ -1678,6 +1776,8 @@ def test_native_ltx_image_to_video_passes_source_image_conditioning(monkeypatch,
     )
     checkpoint, spatial, lora, gemma = write_native_ltx_resource_files(tmp_path)
     write_native_ltx_manifest(config_dir, checkpoint=checkpoint, spatial=spatial, lora=lora, gemma=gemma)
+    ic_lora = tmp_path / "identity-control.safetensors"
+    ic_lora.write_bytes(b"ic-lora")
     calls = {"run": None, "encode": None}
 
     class FakePipeline:
@@ -1719,6 +1819,131 @@ def test_native_ltx_image_to_video_passes_source_image_conditioning(monkeypatch,
             )
         if name == "ltx_pipelines.utils.types":
             return SimpleNamespace(OffloadMode=FakeOffloadMode)
+        if name == "ltx_pipelines.ic_lora":
+            return SimpleNamespace(ICLoraPipeline=FakePipeline)
+        if name == "ltx_core.model.video_vae":
+            return SimpleNamespace(
+                TilingConfig=FakeTilingConfig,
+                get_video_chunks_number=lambda _frames, _tiling: 1,
+            )
+        if name == "ltx_pipelines.utils.media_io":
+            return SimpleNamespace(encode_video=fake_encode_video)
+        if name == "ltx_core.components.guiders":
+            return SimpleNamespace(MultiModalGuiderParams=FakeGuiderParams)
+        if name == "ltx_pipelines.utils.args":
+            return SimpleNamespace(ImageConditioningInput=FakeConditioningInput)
+        raise ImportError(name)
+
+    monkeypatch.setattr("scene_worker.video_adapters.importlib.import_module", fake_import_module)
+    adapter = LtxPipelinesVideoAdapter()
+    monkeypatch.setattr(adapter, "_dependencies_available", lambda *_args: True)
+    job = {
+        "id": "job-i2v",
+        "payload": {
+            "projectId": "project-1",
+            "mode": "image_to_video",
+            "prompt": "Make the harbor move",
+            "model": "ltx_2_3",
+            "sourceAssetId": "asset-source",
+            "duration": 1,
+            "fps": 12,
+            "width": 320,
+            "height": 256,
+            "quality": "balanced",
+            "loras": [
+                {
+                    "id": "identity_ic",
+                    "name": "Identity Control",
+                    "icLora": True,
+                    "installedPath": str(ic_lora),
+                    "weight": 0.65,
+                    "families": ["ltx-video"],
+                }
+            ],
+            "advanced": {"imageConditioningStrength": 0.7},
+        },
+    }
+    request = adapter.prepare(settings=SimpleNamespace(data_dir=data_dir, config_dir=config_dir), job=job)
+
+    adapter.ensure_models(request)
+    result = adapter.run(
+        settings=SimpleNamespace(data_dir=data_dir),
+        job=job,
+        request=request,
+        progress=lambda *_args: None,
+        cancel_requested=lambda: False,
+    )
+
+    image_condition = calls["run"]["images"][0]
+    assert calls["run"]["video_conditioning"] == []
+    assert image_condition.path == str(project_path / image_rel)
+    assert image_condition.frame_idx == 0
+    assert image_condition.strength == 0.7
+    assert result["assets"][0]["lineage"]["sourceAssetId"] == "asset-source"
+    assert result["assets"][0]["recipe"]["rawAdapterSettings"]["realModelInference"] is True
+
+
+def test_native_ltx_image_to_video_falls_back_without_ic_lora(monkeypatch, tmp_path):
+    data_dir = tmp_path / "data"
+    config_dir = tmp_path / "config"
+    project_path = tmp_path / "project"
+    data_dir.mkdir()
+    project_path.mkdir()
+    (data_dir / "recent-projects.json").write_text(
+        json.dumps([{"id": "project-1", "path": str(project_path)}]),
+        encoding="utf-8",
+    )
+    image_rel = "assets/images/source.png"
+    (project_path / "assets" / "images").mkdir(parents=True)
+    Image.new("RGB", (16, 16), "teal").save(project_path / image_rel)
+    (project_path / "assets" / "images" / "source.sceneworks.json").write_text(
+        json.dumps({"id": "asset-source", "file": {"path": image_rel}}),
+        encoding="utf-8",
+    )
+    checkpoint, spatial, lora, gemma = write_native_ltx_resource_files(tmp_path)
+    write_native_ltx_manifest(config_dir, checkpoint=checkpoint, spatial=spatial, lora=lora, gemma=gemma)
+    style_lora = tmp_path / "cinematic-style.safetensors"
+    style_lora.write_bytes(b"style-lora")
+    calls = {"init": None, "run": None}
+
+    class FakePipeline:
+        def __init__(self, **kwargs):
+            calls["init"] = kwargs
+
+        def __call__(self, **kwargs):
+            calls["run"] = kwargs
+            return ["video-chunk"], None
+
+    class FakeConditioningInput(NamedTuple):
+        path: str
+        frame_idx: int
+        strength: float
+
+    class FakeTilingConfig:
+        @staticmethod
+        def default():
+            return "tiling-config"
+
+    class FakeOffloadMode:
+        NONE = "none"
+        CPU = "cpu"
+        DISK = "disk"
+
+    class FakeGuiderParams:
+        def __init__(self, **kwargs):
+            self.kwargs = kwargs
+
+    def fake_encode_video(**kwargs):
+        Path(kwargs["output_path"]).write_bytes(b"mp4")
+
+    def fake_import_module(name):
+        if name == "ltx_core.loader":
+            return SimpleNamespace(
+                LoraPathStrengthAndSDOps=lambda path, strength, sd_ops: (path, strength, sd_ops),
+                LTXV_LORA_COMFY_RENAMING_MAP={"rename": "map"},
+            )
+        if name == "ltx_pipelines.utils.types":
+            return SimpleNamespace(OffloadMode=FakeOffloadMode)
         if name == "ltx_pipelines.ti2vid_two_stages":
             return SimpleNamespace(TI2VidTwoStagesPipeline=FakePipeline)
         if name == "ltx_core.model.video_vae":
@@ -1736,21 +1961,144 @@ def test_native_ltx_image_to_video_passes_source_image_conditioning(monkeypatch,
 
     monkeypatch.setattr("scene_worker.video_adapters.importlib.import_module", fake_import_module)
     adapter = LtxPipelinesVideoAdapter()
-    monkeypatch.setattr(adapter, "_dependencies_available", lambda: True)
+    monkeypatch.setattr(adapter, "_dependencies_available", lambda *_args: True)
+    request = adapter.prepare(
+        settings=SimpleNamespace(data_dir=data_dir, config_dir=config_dir),
+        job={
+            "id": "job-i2v-missing-lora",
+            "payload": {
+                "projectId": "project-1",
+                "mode": "image_to_video",
+                "prompt": "Make the harbor move",
+                "model": "ltx_2_3",
+                "sourceAssetId": "asset-source",
+                "duration": 1,
+                "fps": 12,
+                "width": 320,
+                "height": 256,
+                "quality": "balanced",
+                "loras": [
+                    {
+                        "id": "cinematic_style",
+                        "name": "Cinematic Style",
+                        "installedPath": str(style_lora),
+                        "weight": 0.55,
+                        "families": ["ltx-video"],
+                    }
+                ],
+                "advanced": {"imageConditioningStrength": 0.75},
+            },
+        },
+    )
+
+    adapter.ensure_models(request)
+    result = adapter.run(
+        settings=SimpleNamespace(data_dir=data_dir),
+        job={"id": "job-i2v-missing-lora"},
+        request=request,
+        progress=lambda *_args: None,
+        cancel_requested=lambda: False,
+    )
+
+    assert calls["init"]["checkpoint_path"] == str(checkpoint)
+    assert calls["init"]["distilled_lora"] == [(str(lora), 0.8, {"rename": "map"})]
+    assert calls["init"]["loras"] == ((str(style_lora), 0.55, {"rename": "map"}),)
+    assert calls["run"]["images"] == [FakeConditioningInput(str(project_path / image_rel), 0, 0.75)]
+    assert "video_conditioning" not in calls["run"]
+    assert result["requirements"]["pipeline"] == "ltx_pipelines.ti2vid_two_stages"
+
+
+def test_native_ltx_extend_clip_uses_ic_lora_video_conditioning(monkeypatch, tmp_path):
+    data_dir = tmp_path / "data"
+    config_dir = tmp_path / "config"
+    project_path = tmp_path / "project"
+    data_dir.mkdir()
+    project_path.mkdir()
+    (data_dir / "recent-projects.json").write_text(
+        json.dumps([{"id": "project-1", "path": str(project_path)}]),
+        encoding="utf-8",
+    )
+    video_rel = "assets/videos/source.mp4"
+    (project_path / "assets" / "videos").mkdir(parents=True)
+    (project_path / video_rel).write_bytes(b"source-video")
+    (project_path / "assets" / "videos" / "source.sceneworks.json").write_text(
+        json.dumps({"id": "asset-source-video", "type": "video", "file": {"path": video_rel}}),
+        encoding="utf-8",
+    )
+    checkpoint, spatial, lora, gemma = write_native_ltx_resource_files(tmp_path)
+    write_native_ltx_manifest(config_dir, checkpoint=checkpoint, spatial=spatial, lora=lora, gemma=gemma)
+    ic_lora = tmp_path / "identity-control.safetensors"
+    ic_lora.write_bytes(b"ic-lora")
+    calls = {"init": None, "run": None, "encode": None}
+
+    class FakePipeline:
+        def __init__(self, **kwargs):
+            calls["init"] = kwargs
+
+        def __call__(self, **kwargs):
+            calls["run"] = kwargs
+            return ["video-chunk"], None
+
+    class FakeTilingConfig:
+        @staticmethod
+        def default():
+            return "tiling-config"
+
+    class FakeOffloadMode:
+        NONE = "none"
+        CPU = "cpu"
+        DISK = "disk"
+
+    def fake_encode_video(**kwargs):
+        calls["encode"] = kwargs
+        Path(kwargs["output_path"]).write_bytes(b"mp4")
+
+    def fake_import_module(name):
+        if name == "ltx_core.loader":
+            return SimpleNamespace(
+                LoraPathStrengthAndSDOps=lambda path, strength, sd_ops: (path, strength, sd_ops),
+                LTXV_LORA_COMFY_RENAMING_MAP={"rename": "map"},
+            )
+        if name == "ltx_pipelines.utils.types":
+            return SimpleNamespace(OffloadMode=FakeOffloadMode)
+        if name == "ltx_pipelines.ic_lora":
+            return SimpleNamespace(ICLoraPipeline=FakePipeline)
+        if name == "ltx_core.model.video_vae":
+            return SimpleNamespace(
+                TilingConfig=FakeTilingConfig,
+                get_video_chunks_number=lambda _frames, _tiling: 1,
+            )
+        if name == "ltx_pipelines.utils.media_io":
+            return SimpleNamespace(encode_video=fake_encode_video)
+        raise ImportError(name)
+
+    monkeypatch.setattr("scene_worker.video_adapters.importlib.import_module", fake_import_module)
+    adapter = LtxPipelinesVideoAdapter()
+    monkeypatch.setattr(adapter, "_dependencies_available", lambda *_args: True)
     job = {
-        "id": "job-i2v",
+        "id": "job-extend-ic",
         "payload": {
             "projectId": "project-1",
-            "mode": "image_to_video",
-            "prompt": "Make the harbor move",
+            "mode": "extend_clip",
+            "prompt": "Keep the character walking",
             "model": "ltx_2_3",
-            "sourceAssetId": "asset-source",
+            "sourceClipAssetId": "asset-source-video",
             "duration": 1,
             "fps": 12,
             "width": 320,
             "height": 256,
             "quality": "balanced",
-            "advanced": {"imageConditioningStrength": 0.7},
+            "loras": [
+                {
+                    "id": "identity_ic",
+                    "name": "Identity Control",
+                    "icLora": True,
+                    "installedPath": str(ic_lora),
+                    "weight": 0.7,
+                    "families": ["ltx-video"],
+                }
+            ],
+            "advanced": {"videoConditioningStrength": 0.85, "conditioningAttentionStrength": 0.9},
         },
     }
     request = adapter.prepare(settings=SimpleNamespace(data_dir=data_dir, config_dir=config_dir), job=job)
@@ -1764,12 +2112,13 @@ def test_native_ltx_image_to_video_passes_source_image_conditioning(monkeypatch,
         cancel_requested=lambda: False,
     )
 
-    image_condition = calls["run"]["images"][0]
-    assert image_condition.path == str(project_path / image_rel)
-    assert image_condition.frame_idx == 0
-    assert image_condition.strength == 0.7
-    assert result["assets"][0]["lineage"]["sourceAssetId"] == "asset-source"
-    assert result["assets"][0]["recipe"]["rawAdapterSettings"]["realModelInference"] is True
+    assert calls["init"]["distilled_checkpoint_path"] == str(checkpoint)
+    assert calls["init"]["loras"] == ((str(ic_lora), 0.7, {"rename": "map"}),)
+    assert calls["run"]["images"] == []
+    assert calls["run"]["video_conditioning"] == [(str(project_path / video_rel), 0.85)]
+    assert calls["run"]["conditioning_attention_strength"] == 0.9
+    assert result["requirements"]["pipeline"] == "ltx_pipelines.ic_lora"
+    assert result["assets"][0]["lineage"]["sourceClipAssetId"] == "asset-source-video"
 
 
 def test_native_ltx_cleanup_deletes_temp_output_and_evicts_pipeline(monkeypatch, tmp_path):
@@ -1833,7 +2182,7 @@ def test_native_ltx_cleanup_deletes_temp_output_and_evicts_pipeline(monkeypatch,
 
     monkeypatch.setattr("scene_worker.video_adapters.importlib.import_module", fake_import_module)
     adapter = LtxPipelinesVideoAdapter()
-    monkeypatch.setattr(adapter, "_dependencies_available", lambda: True)
+    monkeypatch.setattr(adapter, "_dependencies_available", lambda *_args: True)
     job = {
         "id": "job-cleanup",
         "payload": {

@@ -30,7 +30,16 @@ from sceneworks_shared import (
 
 from .adapter_utils import filter_call_kwargs
 from .image_adapters import require_inference_backend_for_gpu_worker, select_torch_device, select_torch_dtype, write_json
-from .lora_adapters import LoraPipelineState, apply_loras_to_pipeline, reject_loras_if_unsupported
+from .lora_adapters import (
+    LoraPipelineState,
+    LoraSpec,
+    apply_loras_to_pipeline,
+    lora_cache_key_for_specs,
+    lora_looks_like_ic_lora,
+    normalize_lora_specs,
+    reject_loras_if_unsupported,
+    validate_lora_compatibility,
+)
 from .settings import WorkerSettings
 
 
@@ -301,13 +310,14 @@ class ProceduralVideoAdapter(VideoGenerationAdapter):
 class LtxPipelinesVideoAdapter(ProceduralVideoAdapter):
     id = "ltx_pipelines"
 
-    _supported_modes = {"text_to_video", "image_to_video"}
+    _supported_modes = {"text_to_video", "image_to_video", "first_last_frame", "extend_clip", "video_bridge"}
 
     def __init__(self) -> None:
         super().__init__()
         self._loaded_models: set[str] = set()
         self._settings: WorkerSettings | None = None
         self._resources_by_model: dict[str, LtxPipelinesResources] = {}
+        self._lora_specs_by_request_id: dict[int, list[LoraSpec]] = {}
         self._pipeline: Any | None = None
         self._pipeline_key_value: str | None = None
 
@@ -316,6 +326,7 @@ class LtxPipelinesVideoAdapter(ProceduralVideoAdapter):
 
     def prepare(self, *, settings: WorkerSettings, job: dict[str, Any]) -> VideoRequest:
         self._settings = settings
+        self._lora_specs_by_request_id.clear()
         return video_request_from_job(job)
 
     def ensure_models(self, request: VideoRequest) -> None:
@@ -327,7 +338,13 @@ class LtxPipelinesVideoAdapter(ProceduralVideoAdapter):
             raise RuntimeError(f"{target['label']} native pipelines currently support {supported}.")
         if request.duration > target["hardMaxDuration"]:
             raise RuntimeError(f"{target['label']} is limited to {target['hardMaxDuration']}s clips in this adapter.")
-        reject_loras_if_unsupported(request.loras, self.id)
+        validate_lora_compatibility(request.loras, model_family=target["family"], adapter_id=self.id)
+        self._ltx_lora_specs(request)
+        if self._uses_ic_lora_pipeline(request) and not self._has_ic_lora(request) and not self._mock_inference_enabled(request):
+            raise RuntimeError(
+                "Native LTX IC-LoRA video conditioning requires at least one installed LTX-compatible LoRA. "
+                "Add an IC-LoRA to the selected preset before running source-video conditioning."
+            )
         resources = self.resolve_resources(request)
         missing = self._missing_resources(request, resources)
         if missing:
@@ -336,7 +353,7 @@ class LtxPipelinesVideoAdapter(ProceduralVideoAdapter):
             if search_details:
                 details = f"{details}\nSearched Hugging Face cache paths:\n{search_details}"
             override_keys = ["checkpointPath", "spatialUpscalerPath", "gemmaRoot"]
-            if self._pipeline_module(request) != "ltx_pipelines.distilled":
+            if self._pipeline_module(request) == "ltx_pipelines.ti2vid_two_stages":
                 override_keys.insert(2, "distilledLoraPath")
             raise RuntimeError(
                 "Native LTX-2.3 requires local model resources before generation. "
@@ -345,7 +362,7 @@ class LtxPipelinesVideoAdapter(ProceduralVideoAdapter):
                 f"Missing resources:\n{details}"
             )
         self._resources_by_model[request.model] = resources
-        if not self._mock_inference_enabled(request) and not self._dependencies_available():
+        if not self._mock_inference_enabled(request) and not self._dependencies_available(request):
             raise RuntimeError(
                 "Native LTX-2.3 generation requires optional worker dependencies. "
                 "Install apps/worker/requirements-ltx.txt in this worker environment, rebuild the worker image, or use "
@@ -367,7 +384,7 @@ class LtxPipelinesVideoAdapter(ProceduralVideoAdapter):
             "adapter": self.id,
             "pipeline": self._pipeline_module(request),
             "resources": self._resource_summary(resources),
-            "nativeDependenciesAvailable": self._dependencies_available(),
+            "nativeDependenciesAvailable": self._dependencies_available(request),
             "mockedInference": mocked,
         }
 
@@ -414,6 +431,7 @@ class LtxPipelinesVideoAdapter(ProceduralVideoAdapter):
             "targetAdapter": self.id,
             "pipeline": self._pipeline_module(request),
             "resources": self._resource_summary(resources),
+            "icLoraConditioning": self._uses_ic_lora_pipeline(request),
             "steps": safe_int(request.advanced.get("steps"), steps, 1, 80),
             "frameCount": ltx_frame_count(max(1, int(round(request.duration * request.fps)))),
             "previewFrameCount": preview_frame_count(request),
@@ -450,7 +468,8 @@ class LtxPipelinesVideoAdapter(ProceduralVideoAdapter):
         self._temporary_outputs.setdefault(job["id"], []).append(temp_path)
 
         progress("preparing", "validating_inputs", 0.2, "Validating native LTX-2.3 inputs.")
-        conditioning_images = self._ltx_conditioning_images(project_path, request)
+        conditioning_images = self._ltx_conditioning_images(project_path, request, num_frames)
+        video_conditioning = self._ltx_video_conditioning(project_path, request)
         if cancel_requested():
             raise InterruptedError("Video generation canceled before native LTX pipeline load.")
 
@@ -467,6 +486,7 @@ class LtxPipelinesVideoAdapter(ProceduralVideoAdapter):
             seed=seed,
             num_frames=num_frames,
             conditioning_images=conditioning_images,
+            video_conditioning=video_conditioning,
         )
         if cancel_requested():
             raise InterruptedError("Video generation canceled before saving.")
@@ -521,15 +541,15 @@ class LtxPipelinesVideoAdapter(ProceduralVideoAdapter):
             "requirements": self.estimate_requirements(request),
         }
 
-    def _ltx_conditioning_images(self, project_path: Path, request: VideoRequest) -> list[Any]:
-        if request.mode == "text_to_video":
+    def _ltx_conditioning_images(self, project_path: Path, request: VideoRequest, num_frames: int) -> list[Any]:
+        if request.mode in {"text_to_video", "extend_clip", "video_bridge"}:
             return []
-        if request.mode != "image_to_video":
+        if request.mode not in {"image_to_video", "first_last_frame"}:
             raise RuntimeError(f"Native LTX-2.3 does not support {request.mode.replace('_', ' ')} yet.")
 
         media_path = source_asset_media_path(project_path, request.source_asset_id)
         if media_path is None:
-            raise RuntimeError("Image to Video requires a readable source image.")
+            raise RuntimeError(f"{request.mode.replace('_', ' ').title()} requires a readable source image.")
         try:
             with Image.open(media_path) as image:
                 image.verify()
@@ -539,13 +559,45 @@ class LtxPipelinesVideoAdapter(ProceduralVideoAdapter):
         install_ltx_pipelines_multigpu_compat()
         args_module = importlib.import_module("ltx_pipelines.utils.args")
         condition_class = getattr(args_module, "ImageConditioningInput")
-        return [
+        images = [
             condition_class(
                 str(media_path),
                 safe_int(request.advanced.get("imageFrameIndex"), 0, 0, 1_000_000),
                 self._advanced_float(request, "imageConditioningStrength", 1.0),
             )
         ]
+        if request.mode == "first_last_frame":
+            last_media_path = source_asset_media_path(project_path, request.last_frame_asset_id)
+            if last_media_path is None:
+                raise RuntimeError("First/Last Frame requires a readable last frame image.")
+            try:
+                with Image.open(last_media_path) as image:
+                    image.verify()
+            except (OSError, Image.DecompressionBombError, Image.DecompressionBombWarning) as exc:
+                raise RuntimeError("First/Last Frame requires a readable last frame image.") from exc
+            images.append(
+                condition_class(
+                    str(last_media_path),
+                    max(0, num_frames - 1),
+                    self._advanced_float(request, "lastFrameConditioningStrength", 1.0),
+                )
+            )
+        return images
+
+    def _ltx_video_conditioning(self, project_path: Path, request: VideoRequest) -> list[tuple[str, float]]:
+        if request.mode not in {"extend_clip", "video_bridge"}:
+            return []
+        conditionings: list[tuple[str, float]] = []
+        left_path = source_asset_media_path(project_path, request.source_clip_asset_id)
+        if left_path is None:
+            raise RuntimeError(f"{request.mode.replace('_', ' ').title()} requires a readable source clip.")
+        conditionings.append((str(left_path), self._advanced_float(request, "videoConditioningStrength", 1.0)))
+        if request.mode == "video_bridge":
+            right_path = source_asset_media_path(project_path, request.bridge_right_clip_asset_id)
+            if right_path is None:
+                raise RuntimeError("Video Bridge requires a readable right-side source clip.")
+            conditionings.append((str(right_path), self._advanced_float(request, "bridgeRightVideoConditioningStrength", 1.0)))
+        return conditionings
 
     def _load_ltx_pipeline(self, request: VideoRequest, resources: LtxPipelinesResources) -> Any:
         key = self._pipeline_key(request, resources)
@@ -555,14 +607,23 @@ class LtxPipelinesVideoAdapter(ProceduralVideoAdapter):
         install_ltx_pipelines_multigpu_compat()
         loader = importlib.import_module("ltx_core.loader")
         offload_mode = self._offload_mode(request)
+        loras = self._ltx_loras(loader, request)
+        # The native Lightricks constructors expose `loras` across distilled,
+        # two-stage, and IC-LoRA pipelines; `distilled_lora` remains separate.
         common_kwargs = {
             "gemma_root": str(resources.gemma_root),
             "spatial_upsampler_path": str(resources.spatial_upsampler_path),
-            "loras": (),
+            "loras": loras,
             "torch_compile": bool(request.advanced.get("compile", False)),
             "offload_mode": offload_mode,
         }
-        if self._pipeline_module(request) == "ltx_pipelines.distilled":
+        if self._pipeline_module(request) == "ltx_pipelines.ic_lora":
+            pipeline_module = importlib.import_module("ltx_pipelines.ic_lora")
+            pipeline = pipeline_module.ICLoraPipeline(
+                distilled_checkpoint_path=str(resources.checkpoint_path),
+                **common_kwargs,
+            )
+        elif self._pipeline_module(request) == "ltx_pipelines.distilled":
             pipeline_module = importlib.import_module("ltx_pipelines.distilled")
             pipeline = pipeline_module.DistilledPipeline(
                 distilled_checkpoint_path=str(resources.checkpoint_path),
@@ -594,6 +655,7 @@ class LtxPipelinesVideoAdapter(ProceduralVideoAdapter):
         seed: int,
         num_frames: int,
         conditioning_images: list[Any],
+        video_conditioning: list[tuple[str, float]],
     ) -> tuple[Any, Any, int, Any]:
         install_ltx_pipelines_multigpu_compat()
         video_vae = importlib.import_module("ltx_core.model.video_vae")
@@ -611,7 +673,15 @@ class LtxPipelinesVideoAdapter(ProceduralVideoAdapter):
             "tiling_config": tiling_config,
             "enhance_prompt": bool(request.advanced.get("enhancePrompt", False)),
         }
-        if self._pipeline_module(request) == "ltx_pipelines.distilled":
+        if self._pipeline_module(request) == "ltx_pipelines.ic_lora":
+            video, audio = pipeline(
+                **base_kwargs,
+                video_conditioning=video_conditioning,
+                conditioning_attention_strength=self._advanced_float(request, "conditioningAttentionStrength", 1.0),
+                skip_stage_2=bool(request.advanced.get("skipStage2", False)),
+                conditioning_attention_mask=None,
+            )
+        elif self._pipeline_module(request) == "ltx_pipelines.distilled":
             video, audio = pipeline(**base_kwargs)
         else:
             guiders = importlib.import_module("ltx_core.components.guiders")
@@ -640,9 +710,21 @@ class LtxPipelinesVideoAdapter(ProceduralVideoAdapter):
         return video, audio, video_chunks_number, media_io.encode_video
 
     def _pipeline_module(self, request: VideoRequest) -> str:
+        if self._uses_ic_lora_pipeline(request):
+            return "ltx_pipelines.ic_lora"
         if request.quality == "fast":
             return "ltx_pipelines.distilled"
         return "ltx_pipelines.ti2vid_two_stages"
+
+    def _uses_ic_lora_pipeline(self, request: VideoRequest) -> bool:
+        if bool(request.advanced.get("useIcLoraPipeline", False)):
+            return True
+        if request.mode in {"extend_clip", "video_bridge"}:
+            return True
+        return request.mode in {"image_to_video", "first_last_frame"} and self._has_ic_lora(request)
+
+    def _has_ic_lora(self, request: VideoRequest) -> bool:
+        return any(lora_looks_like_ic_lora(lora if isinstance(lora, dict) else {"id": str(lora)}) for lora in request.loras)
 
     def _num_inference_steps(self, request: VideoRequest, target: dict[str, Any]) -> int:
         default_steps = target["steps"].get(request.quality, target["steps"]["balanced"])
@@ -660,7 +742,27 @@ class LtxPipelinesVideoAdapter(ProceduralVideoAdapter):
                 str(resources.distilled_lora_path),
                 str(resources.gemma_root),
                 str(request.advanced.get("offloadMode", "none")),
+                lora_cache_key_for_specs(self._ltx_lora_specs(request)) if request.loras else "",
             ]
+        )
+
+    def _ltx_lora_specs(self, request: VideoRequest) -> list[LoraSpec]:
+        cache_key = id(request)
+        specs = self._lora_specs_by_request_id.get(cache_key)
+        if specs is None:
+            specs = normalize_lora_specs(request.loras)
+            self._lora_specs_by_request_id[cache_key] = specs
+        return specs
+
+    def _ltx_loras(self, loader: Any, request: VideoRequest) -> tuple[Any, ...]:
+        specs = self._ltx_lora_specs(request)
+        return tuple(
+            loader.LoraPathStrengthAndSDOps(
+                spec.path,
+                spec.weight,
+                loader.LTXV_LORA_COMFY_RENAMING_MAP,
+            )
+            for spec in specs
         )
 
     def _offload_mode(self, request: VideoRequest) -> Any:
@@ -695,7 +797,7 @@ class LtxPipelinesVideoAdapter(ProceduralVideoAdapter):
         settings = self._settings or WorkerSettings()
         entry = ltx_model_manifest_entry(settings, request.model)
         resources = entry.get("resources", {}) if isinstance(entry.get("resources"), dict) else {}
-        checkpoint_resource_key = "distilledCheckpoint" if self._pipeline_module(request) == "ltx_pipelines.distilled" else "checkpoint"
+        checkpoint_resource_key = "distilledCheckpoint" if self._pipeline_module(request) in {"ltx_pipelines.distilled", "ltx_pipelines.ic_lora"} else "checkpoint"
         return LtxPipelinesResources(
             checkpoint_path=self._resource_path(
                 settings,
@@ -794,7 +896,7 @@ class LtxPipelinesVideoAdapter(ProceduralVideoAdapter):
             ("spatialUpscalerPath", resources.spatial_upsampler_path, "file"),
             ("gemmaRoot", resources.gemma_root, "dir"),
         ]
-        if self._pipeline_module(request) != "ltx_pipelines.distilled":
+        if self._pipeline_module(request) == "ltx_pipelines.ti2vid_two_stages":
             required.insert(2, ("distilledLoraPath", resources.distilled_lora_path, "file"))
         missing = [
             (label, path)
@@ -815,7 +917,7 @@ class LtxPipelinesVideoAdapter(ProceduralVideoAdapter):
         entry = ltx_model_manifest_entry(settings, request.model)
         manifest_resources = entry.get("resources", {}) if isinstance(entry.get("resources"), dict) else {}
         resource_names = {
-            "checkpointPath": "distilledCheckpoint" if self._pipeline_module(request) == "ltx_pipelines.distilled" else "checkpoint",
+            "checkpointPath": "distilledCheckpoint" if self._pipeline_module(request) in {"ltx_pipelines.distilled", "ltx_pipelines.ic_lora"} else "checkpoint",
             "spatialUpscalerPath": "spatialUpscaler",
             "distilledLoraPath": "distilledLora",
             "temporalUpscalerPath": "temporalUpscaler",
@@ -855,12 +957,12 @@ class LtxPipelinesVideoAdapter(ProceduralVideoAdapter):
             "temporalUpscalerPath": str(resources.temporal_upsampler_path) if resources.temporal_upsampler_path else None,
         }
 
-    def _dependencies_available(self) -> bool:
+    def _dependencies_available(self, request: VideoRequest | None = None) -> bool:
         try:
             if importlib.util.find_spec("ltx_core") is None or importlib.util.find_spec("ltx_pipelines") is None:
                 return False
             install_ltx_pipelines_multigpu_compat()
-            importlib.import_module("ltx_pipelines.distilled")
+            importlib.import_module(self._pipeline_module(request) if request is not None else "ltx_pipelines.distilled")
             return True
         except (ImportError, ValueError):
             return False

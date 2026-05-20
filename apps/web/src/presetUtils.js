@@ -89,6 +89,35 @@ export function loraMatchesModel(lora, model) {
   return !modelFamilies.length || !families.length || families.some((family) => modelFamilies.includes(family));
 }
 
+export function loraLooksLikeIcLora(lora) {
+  if (lora?.icLora === true || lora?.isIcLora === true) {
+    return true;
+  }
+  if (String(lora?.conditioningRole ?? "").trim().toLowerCase().replaceAll("-", "_") === "ic_lora") {
+    return true;
+  }
+  const source = lora?.source ?? {};
+  const files = Array.isArray(source.files) ? source.files : Array.isArray(lora?.files) ? lora.files : [];
+  const text = [
+    lora?.id,
+    lora?.loraId,
+    lora?.name,
+    lora?.displayName,
+    lora?.installedPath,
+    lora?.sourcePath,
+    lora?.path,
+    source.repo,
+    source.file,
+    source.path,
+    ...files,
+  ]
+    .filter(Boolean)
+    .join(" ")
+    .toLowerCase()
+    .replaceAll("_", "-");
+  return text.includes("ic-lora") || text.includes("ltx-2-3-ic-");
+}
+
 export function presetMatchesWorkflow(preset, mode) {
   // A preset has one primary workflow for persistence, but modes describe every
   // Studio entry point where the picker should surface it.
@@ -124,6 +153,8 @@ export function serializePresetLora(lora, presetLora = {}) {
     weight: loraWeight(lora, presetLora),
     triggerWords: lora?.triggerWords ?? [],
     compatibility: lora?.compatibility ?? presetLora?.compatibility ?? {},
+    icLora: lora?.icLora ?? presetLora?.icLora ?? false,
+    conditioningRole: lora?.conditioningRole ?? presetLora?.conditioningRole ?? null,
     installedPath: lora?.installedPath ?? presetLora?.installedPath ?? null,
     source: lora?.source ?? presetLora?.source ?? null,
     presetManaged: true,

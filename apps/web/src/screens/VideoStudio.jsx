@@ -32,6 +32,7 @@ function estimateRenderSeconds(durationSeconds, quality) {
 }
 import {
   clearPresetDefault,
+  loraLooksLikeIcLora,
   noPresetId,
   presetLoraDetails as buildPresetLoraDetails,
   presetMatchesModel,
@@ -43,6 +44,8 @@ import {
 import { ReplacePersonPanel, findReplacementModel } from "./ReplacePersonPanel.jsx";
 
 const completedResultFallbackMs = 30000;
+const ltxVideoModelId = "ltx_2_3";
+const ltxIcLoraRequiredModes = new Set(["extend_clip", "video_bridge"]);
 
 export function VideoStudio({
   activeProject,
@@ -79,7 +82,7 @@ export function VideoStudio({
   const [prompt, setPrompt] = useState("Camera slowly pushes in while the scene comes alive");
   const [quality, setQuality] = useState("balanced");
   const [advancedOpen, setAdvancedOpen] = useState(false);
-  const [model, setModel] = useState(videoModels[0]?.id ?? "ltx_2_3");
+  const [model, setModel] = useState(videoModels[0]?.id ?? ltxVideoModelId);
   const [selectedPresetId, setSelectedPresetId] = useState(null);
   const selectedModel = videoModels.find((item) => item.id === model) ?? videoModels[0];
   const [duration, setDuration] = useState(selectedModel?.defaults?.duration ?? 6);
@@ -119,10 +122,12 @@ export function VideoStudio({
     () => presetValidation(selectedPreset, loras, selectedModel),
     [selectedPreset, loras, selectedModel],
   );
+  const requiresLtxIcLora = selectedModel?.id === ltxVideoModelId && ltxIcLoraRequiredModes.has(mode);
+  const hasLtxIcLora = presetLoraDetails.some((lora) => !lora.missing && loraLooksLikeIcLora(lora));
 
   useEffect(() => {
     if (!videoModels.some((item) => item.id === model)) {
-      setModel(videoModels[0]?.id ?? "ltx_2_3");
+      setModel(videoModels[0]?.id ?? ltxVideoModelId);
     }
   }, [videoModels, model]);
 
@@ -287,7 +292,15 @@ export function VideoStudio({
     (mode === "first_last_frame" && sourceAssetId && lastFrameAssetId) ||
     (mode === "extend_clip" && sourceClipAssetId) ||
     (mode === "replace_person" && sourceClipAssetId && personTrackId && characterId);
-  const canSubmit = Boolean(activeProject && prompt.trim() && supportsMode && implementedMode && hasInputs && presetValidationResult.ok);
+  const canSubmit = Boolean(
+    activeProject &&
+      prompt.trim() &&
+      supportsMode &&
+      implementedMode &&
+      hasInputs &&
+      presetValidationResult.ok &&
+      (!requiresLtxIcLora || hasLtxIcLora),
+  );
   const [width, height] = resolution.split("x").map((value) => Number(value));
   const durationOptions = selectedModel?.limits?.durations ?? [4, 6, 8, 10];
   const resolutionOptions = selectedModel?.limits?.resolutions ?? ["768x512", "640x640", "1280x720", "720x1280"];
@@ -301,7 +314,9 @@ export function VideoStudio({
       ? "This entry point is reserved for the next runtime slice."
       : !hasInputs
         ? "Required inputs are missing."
-        : "";
+        : requiresLtxIcLora && !hasLtxIcLora
+          ? "LTX video-conditioned generation needs an installed IC-LoRA preset."
+          : "";
   const replacementModeLabels = {
     face_only: "Face Only",
     full_person_keep_outfit: "Full Person, Keep Outfit",
@@ -813,8 +828,10 @@ export function VideoStudio({
                   </label>
                   {characterId ? (
                     <div className="guidance-strip">
-                      <strong>Preset-only character</strong>
-                      <span>Character and look are saved with the preset; adapter-level reference and LoRA conditioning are not active yet.</span>
+                      <strong>Character reference</strong>
+                      <span>
+                        Character and look are saved with the recipe; LTX image conditioning uses IC-LoRA when the selected preset includes one.
+                      </span>
                     </div>
                   ) : null}
                 </div>

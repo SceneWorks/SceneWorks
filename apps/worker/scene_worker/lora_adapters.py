@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 import hashlib
 import json
+import os
 import re
 from pathlib import Path
 from typing import Any
@@ -70,6 +71,32 @@ def lora_families(lora: dict[str, Any]) -> list[str]:
         values = [values]
     families = sorted({normalize_lora_family(value) for value in values if normalize_lora_family(value)})
     return families
+
+
+def lora_looks_like_ic_lora(lora: dict[str, Any]) -> bool:
+    if lora.get("icLora") is True or lora.get("isIcLora") is True:
+        return True
+    if str(lora.get("conditioningRole") or "").strip().lower().replace("-", "_") == "ic_lora":
+        return True
+    source = lora.get("source") if isinstance(lora.get("source"), dict) else {}
+    files = source.get("files") or lora.get("files") or []
+    if not isinstance(files, list):
+        files = [files]
+    values = [
+        lora.get("id"),
+        lora.get("loraId"),
+        lora.get("name"),
+        lora.get("displayName"),
+        lora.get("installedPath"),
+        lora.get("sourcePath"),
+        lora.get("path"),
+        source.get("repo"),
+        source.get("file"),
+        source.get("path"),
+        *files,
+    ]
+    text = " ".join(str(value) for value in values if value).lower().replace("_", "-")
+    return "ic-lora" in text or "ltx-2-3-ic-" in text
 
 
 def validate_lora_compatibility(loras: list[dict[str, Any]], *, model_family: str | None, adapter_id: str) -> None:
@@ -183,8 +210,82 @@ def lora_path(lora: dict[str, Any]) -> Path | None:
     source = lora.get("source") if isinstance(lora.get("source"), dict) else {}
     value = lora.get("installedPath") or lora.get("sourcePath") or lora.get("path") or source.get("path")
     if not value:
+        return huggingface_cached_lora_path(lora)
+    path = Path(str(value)).expanduser()
+    if path.exists():
+        return path
+    return huggingface_cached_lora_path(lora) or path
+
+
+def huggingface_cached_lora_path(lora: dict[str, Any]) -> Path | None:
+    source = lora.get("source") if isinstance(lora.get("source"), dict) else {}
+    provider = str(source.get("provider") or lora.get("provider") or "").strip().lower()
+    if provider != "huggingface":
         return None
-    return Path(str(value)).expanduser()
+    repo = str(source.get("repo") or lora.get("repo") or "").strip()
+    if not repo:
+        return None
+    root = huggingface_repo_cache_path(repo)
+    if root is None or not root.exists():
+        return None
+    file_name = source.get("file") or lora.get("file")
+    if not file_name:
+        files = source.get("files") or lora.get("files")
+        if isinstance(files, list) and files:
+            file_name = files[0]
+    if file_name:
+        for snapshot in huggingface_snapshot_dirs(root):
+            candidate = snapshot / str(file_name)
+            if candidate.is_file():
+                return candidate
+    main_snapshot = huggingface_main_snapshot_dir(root)
+    if main_snapshot is not None:
+        safetensors_path = first_safetensors_path(main_snapshot)
+        if safetensors_path is not None:
+            return safetensors_path
+    return first_safetensors_path(root)
+
+
+def huggingface_repo_cache_path(repo: str) -> Path | None:
+    safe_repo = "".join(character if character.isalnum() or character in "._-" else "--" for character in repo).strip("-")
+    if not safe_repo:
+        return None
+    return huggingface_hub_cache_dir() / f"models--{safe_repo}"
+
+
+def huggingface_hub_cache_dir() -> Path:
+    for key in ("HF_HUB_CACHE", "HUGGINGFACE_HUB_CACHE"):
+        value = os.getenv(key, "").strip()
+        if value:
+            return Path(value).expanduser()
+    hf_home = os.getenv("HF_HOME", "").strip()
+    if hf_home:
+        return Path(hf_home).expanduser() / "hub"
+    data_dir = Path(os.getenv("SCENEWORKS_DATA_DIR", "data")).expanduser()
+    return data_dir / "cache" / "huggingface" / "hub"
+
+
+def huggingface_snapshot_dirs(repo_root: Path) -> list[Path]:
+    snapshots = repo_root / "snapshots"
+    if not snapshots.is_dir():
+        return []
+    candidates = sorted(candidate for candidate in snapshots.iterdir() if candidate.is_dir())
+    main_snapshot = huggingface_main_snapshot_dir(repo_root)
+    if main_snapshot is None:
+        return candidates
+    return [main_snapshot, *[candidate for candidate in candidates if candidate != main_snapshot]]
+
+
+def huggingface_main_snapshot_dir(repo_root: Path) -> Path | None:
+    ref_path = repo_root / "refs" / "main"
+    try:
+        revision = ref_path.read_text(encoding="utf-8").strip()
+    except OSError:
+        return None
+    if not revision:
+        return None
+    snapshot = repo_root / "snapshots" / revision
+    return snapshot if snapshot.is_dir() else None
 
 
 def path_stem(path: Path | None) -> str | None:

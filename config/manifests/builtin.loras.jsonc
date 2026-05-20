@@ -1,5 +1,66 @@
 {
   "$schema": "../../packages/schemas/lora-manifest.schema.json",
   "schemaVersion": 1,
-  "loras": []
+  "loras": [
+    {
+      "id": "ltx_2_3_ic_union_control",
+      "name": "LTX-2.3 IC-LoRA Union Control",
+      "family": "ltx-video",
+      "triggerWords": [],
+      "compatibility": { "families": ["ltx-video"] },
+      "icLora": true,
+      "conditioningRole": "ic_lora",
+      "defaultWeight": 0.8,
+      "source": {
+        "provider": "huggingface",
+        "repo": "Lightricks/LTX-2.3-22b-IC-LoRA-Union-Control",
+        "file": "ltx-2.3-22b-ic-lora-union-control-ref0.5.safetensors"
+      }
+    },
+    {
+      "id": "ltx_2_3_ic_motion_track_control",
+      "name": "LTX-2.3 IC-LoRA Motion Track Control",
+      "family": "ltx-video",
+      "triggerWords": [],
+      "compatibility": { "families": ["ltx-video"] },
+      "icLora": true,
+      "conditioningRole": "ic_lora",
+      "defaultWeight": 0.8,
+      "source": {
+        "provider": "huggingface",
+        "repo": "Lightricks/LTX-2.3-22b-IC-LoRA-Motion-Track-Control",
+        "file": "ltx-2.3-22b-ic-lora-motion-track-control-ref0.5.safetensors"
+      }
+    },
+    {
+      "id": "ltx_2_3_ic_hdr",
+      "name": "LTX-2.3 IC-LoRA HDR",
+      "family": "ltx-video",
+      "triggerWords": [],
+      "compatibility": { "families": ["ltx-video"] },
+      "icLora": true,
+      "conditioningRole": "ic_lora",
+      "defaultWeight": 0.8,
+      "source": {
+        "provider": "huggingface",
+        "repo": "Lightricks/LTX-2.3-22b-IC-LoRA-HDR",
+        "file": "ltx-2.3-22b-ic-lora-hdr-0.9.safetensors"
+      }
+    },
+    {
+      "id": "ltx_2_3_ic_lipdub",
+      "name": "LTX-2.3 IC-LoRA LipDub",
+      "family": "ltx-video",
+      "triggerWords": [],
+      "compatibility": { "families": ["ltx-video"] },
+      "icLora": true,
+      "conditioningRole": "ic_lora",
+      "defaultWeight": 0.8,
+      "source": {
+        "provider": "huggingface",
+        "repo": "Lightricks/LTX-2.3-22b-IC-LoRA-LipDub",
+        "file": "ltx-2.3-22b-ic-lora-lipdub-0.9.safetensors"
+      }
+    }
+  ]
 }
