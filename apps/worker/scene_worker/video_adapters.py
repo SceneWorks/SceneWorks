@@ -30,7 +30,7 @@ from sceneworks_shared import (
 )
 
 from .adapter_utils import filter_call_kwargs
-from .image_adapters import require_inference_backend_for_gpu_worker, select_torch_device, select_torch_dtype, write_json
+from .image_adapters import emit_worker_event, gpu_memory_snapshot, require_inference_backend_for_gpu_worker, select_torch_device, select_torch_dtype, write_json
 from .lora_adapters import (
     LoraPipelineState,
     LoraSpec,
@@ -50,6 +50,24 @@ warnings.simplefilter("error", Image.DecompressionBombWarning)
 ProgressCallback = Callable[[str, str, float, str], None]
 CancelCallback = Callable[[], bool]
 _DelegatingBuilderT = TypeVar("_DelegatingBuilderT")
+
+
+def _ltx_inference_mode():
+    """torch.inference_mode() when torch is importable, else a no-op context.
+
+    ltx-core's pipeline __call__ runs with autograd enabled (only its CLI main()
+    is decorated), so direct callers must disable grad themselves or the per-step
+    activation graph is retained and OOMs. Falls back to nullcontext where torch
+    is unavailable (e.g. unit tests) so the adapter stays importable.
+    """
+    try:
+        import torch
+
+        return torch.inference_mode()
+    except Exception:
+        from contextlib import nullcontext
+
+        return nullcontext()
 
 
 VIDEO_MODEL_TARGETS: dict[str, dict[str, Any]] = {
@@ -313,17 +331,20 @@ class LtxPipelinesVideoAdapter(ProceduralVideoAdapter):
 
     _supported_modes = {"text_to_video", "image_to_video", "first_last_frame", "extend_clip", "video_bridge"}
 
-    # The two-stage pipeline holds the 22B base checkpoint, distilled LoRA,
-    # spatial upscaler, Gemma text encoder, and VAE. Without offloading, every
-    # component stays GPU-resident simultaneously and exhausts even 96GB cards.
-    # CPU offload mirrors ComfyUI's sequential component offloading (~half the
-    # peak VRAM); callers can override via advanced.offloadMode.
-    _default_offload_mode = "cpu"
+    # ltx-core builds each stage (text encoder, transformer, upscaler, VAE) inside
+    # a gpu_model() context that frees it before the next stage, so the components
+    # are NOT all resident simultaneously. offload_mode controls how each stage
+    # loads while active: "none" builds it fully on GPU (fast, higher per-stage
+    # peak), "cpu" layer-streams it (lower peak but ~30x slower and, on WSL2 without
+    # expandable_segments, prone to per-step allocator growth that OOMs mid-loop).
+    # Default to resident; callers opt into streaming via advanced.offloadMode.
+    _default_offload_mode = "none"
 
-    # FP8 quantizes the transformer weights (~half their VRAM) and is the native
-    # stack's primary memory-reduction lever — it matches ComfyUI's footprint and
-    # works on the bf16 checkpoints we ship. FP8 and weight offloading are mutually
-    # exclusive in the loader, so enabling FP8 forces offload_mode=none.
+    # FP8 quantizes the transformer weights (~half their VRAM). It coexists with
+    # offloading in ltx-core (layer streaming explicitly requires fp8_cast), so the
+    # only real conflict is torch.compile, which streaming cannot do — see
+    # _load_ltx_pipeline. Works on the bf16 checkpoints we ship (cast at load,
+    # which transiently holds bf16+fp8 — a known load-time peak we're profiling).
     _default_precision = "fp8"
 
     def __init__(self) -> None:
@@ -455,6 +476,76 @@ class LtxPipelinesVideoAdapter(ProceduralVideoAdapter):
             "realModelInference": not mocked,
         }
 
+    def _ltx_mem_profile_begin(self, job_id: str) -> None:
+        """Reset peak GPU stats before a run; start allocation history if profiling."""
+        try:
+            import torch
+
+            cuda = getattr(torch, "cuda", None)
+            if cuda is None or not cuda.is_available():
+                return
+            cuda.reset_peak_memory_stats()
+            if os.environ.get("SCENEWORKS_LTX_MEM_PROFILE"):
+                try:
+                    cuda.memory._record_memory_history(max_entries=200_000)
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
+    def _ltx_mem_event(
+        self,
+        stage: str,
+        job_id: str,
+        *,
+        request: VideoRequest | None = None,
+        num_frames: int | None = None,
+        error: str | None = None,
+    ) -> None:
+        """Emit current + peak GPU memory so we can localize the LTX footprint."""
+        try:
+            import torch
+
+            cuda = getattr(torch, "cuda", None)
+            if cuda is None or not cuda.is_available():
+                return
+            mb = lambda b: round(b / (1024 * 1024), 2)
+            gpu_memory = {
+                "allocatedMb": mb(cuda.memory_allocated()),
+                "reservedMb": mb(cuda.memory_reserved()),
+                "maxAllocatedMb": mb(cuda.max_memory_allocated()),
+                "maxReservedMb": mb(cuda.max_memory_reserved()),
+            }
+            dims = None
+            if request is not None:
+                dims = {
+                    "width": request.width,
+                    "height": request.height,
+                    "frames": num_frames,
+                    "precision": str(request.advanced.get("precision", self._default_precision)),
+                    "offload": str(request.advanced.get("offloadMode", self._default_offload_mode)),
+                }
+            emit_worker_event("ltx_gpu_memory", jobId=job_id, stage=stage, gpuMemory=gpu_memory, dims=dims, error=error)
+        except Exception:
+            pass
+
+    def _ltx_mem_dump_snapshot(self, settings: WorkerSettings, job_id: str) -> None:
+        """Dump a CUDA allocation snapshot (analyzable at pytorch.org/memory_viz)."""
+        if not os.environ.get("SCENEWORKS_LTX_MEM_PROFILE"):
+            return
+        try:
+            import torch
+
+            cuda = getattr(torch, "cuda", None)
+            if cuda is None or not cuda.is_available():
+                return
+            out = Path(settings.data_dir) / "cache" / f"ltx_mem_{job_id}.pickle"
+            out.parent.mkdir(parents=True, exist_ok=True)
+            cuda.memory._dump_snapshot(str(out))
+            emit_worker_event("ltx_mem_snapshot", jobId=job_id, path=str(out))
+        except Exception:
+            pass
+
     def _run_real_ltx_video(
         self,
         *,
@@ -487,32 +578,46 @@ class LtxPipelinesVideoAdapter(ProceduralVideoAdapter):
         if cancel_requested():
             raise InterruptedError("Video generation canceled before native LTX pipeline load.")
 
+        self._ltx_mem_profile_begin(job["id"])
         progress("loading_model", "loading_model", 0.28, "Loading native LTX-2.3 pipeline.")
-        pipeline = self._load_ltx_pipeline(request, resources)
-        if cancel_requested():
-            raise InterruptedError("Video generation canceled before native LTX inference.")
+        try:
+            pipeline = self._load_ltx_pipeline(request, resources)
+            self._ltx_mem_event("after_load", job["id"], request=request, num_frames=num_frames)
+            if cancel_requested():
+                raise InterruptedError("Video generation canceled before native LTX inference.")
 
-        progress("running", "generating", 0.4, "Running native LTX-2.3 inference.")
-        video, audio, video_chunks_number, encode_video = self._run_ltx_pipeline(
-            pipeline=pipeline,
-            request=request,
-            resources=resources,
-            seed=seed,
-            num_frames=num_frames,
-            conditioning_images=conditioning_images,
-            video_conditioning=video_conditioning,
-        )
+            progress("running", "generating", 0.4, "Running native LTX-2.3 inference.")
+            video, audio, video_chunks_number, encode_video = self._run_ltx_pipeline(
+                pipeline=pipeline,
+                request=request,
+                resources=resources,
+                seed=seed,
+                num_frames=num_frames,
+                conditioning_images=conditioning_images,
+                video_conditioning=video_conditioning,
+            )
+            self._ltx_mem_event("after_run", job["id"], request=request, num_frames=num_frames)
+        except InterruptedError:
+            raise
+        except Exception as exc:
+            self._ltx_mem_event("on_failure", job["id"], request=request, num_frames=num_frames, error=str(exc))
+            self._ltx_mem_dump_snapshot(settings, job["id"])
+            raise
         if cancel_requested():
             raise InterruptedError("Video generation canceled before saving.")
 
         progress("saving", "saving", 0.9, "Saving native LTX-2.3 MP4 asset and recipe.")
-        encode_video(
-            video=video,
-            fps=request.fps,
-            audio=audio,
-            output_path=str(temp_path),
-            video_chunks_number=video_chunks_number,
-        )
+        # The decoded video is a lazy iterator of inference tensors produced under
+        # inference_mode in _run_ltx_pipeline; decode/encode it under the same mode
+        # so the VAE decode stays grad-free and the inference tensors remain usable.
+        with _ltx_inference_mode():
+            encode_video(
+                video=video,
+                fps=request.fps,
+                audio=audio,
+                output_path=str(temp_path),
+                video_chunks_number=video_chunks_number,
+            )
         temp_path.replace(media_path)
 
         generation_set = {
@@ -621,9 +726,14 @@ class LtxPipelinesVideoAdapter(ProceduralVideoAdapter):
         install_ltx_pipelines_multigpu_compat()
         loader = importlib.import_module("ltx_core.loader")
         quantization = self._quantization(request)
-        # FP8 and weight offloading are mutually exclusive in the native loader
-        # (offloading silently disables FP8), so force offload off when FP8 is on.
-        offload_mode = self._offload_mode(request, override="none" if quantization is not None else None)
+        torch_compile = bool(request.advanced.get("compile", False))
+        # FP8 and CPU/disk offload coexist: at the pinned ltx-core commit, layer
+        # streaming explicitly requires QuantizationPolicy.fp8_cast() (DiffusionStage
+        # chains it into the streaming ops) and the Gemma encoder has its own streaming
+        # builder, so offloading streams the fp8 transformer and frees the ~23 GB text
+        # encoder after prompt encoding instead of pinning it resident. Streaming is the
+        # one thing torch.compile cannot do, so only force offload off when compile is on.
+        offload_mode = self._offload_mode(request, override="none" if torch_compile else None)
         loras = self._ltx_loras(loader, request)
         # The native Lightricks constructors expose `loras` across distilled,
         # two-stage, and IC-LoRA pipelines; `distilled_lora` remains separate.
@@ -632,7 +742,7 @@ class LtxPipelinesVideoAdapter(ProceduralVideoAdapter):
             "spatial_upsampler_path": str(resources.spatial_upsampler_path),
             "loras": loras,
             "quantization": quantization,
-            "torch_compile": bool(request.advanced.get("compile", False)),
+            "torch_compile": torch_compile,
             "offload_mode": offload_mode,
         }
         if self._pipeline_module(request) == "ltx_pipelines.ic_lora":
@@ -691,40 +801,45 @@ class LtxPipelinesVideoAdapter(ProceduralVideoAdapter):
             "tiling_config": tiling_config,
             "enhance_prompt": bool(request.advanced.get("enhancePrompt", False)),
         }
-        if self._pipeline_module(request) == "ltx_pipelines.ic_lora":
-            video, audio = pipeline(
-                **base_kwargs,
-                video_conditioning=video_conditioning,
-                conditioning_attention_strength=self._advanced_float(request, "conditioningAttentionStrength", 1.0),
-                skip_stage_2=bool(request.advanced.get("skipStage2", False)),
-                conditioning_attention_mask=None,
-            )
-        elif self._pipeline_module(request) == "ltx_pipelines.distilled":
-            video, audio = pipeline(**base_kwargs)
-        else:
-            guiders = importlib.import_module("ltx_core.components.guiders")
-            video, audio = pipeline(
-                **base_kwargs,
-                negative_prompt=request.negative_prompt or default_negative_prompt(model_target(request.model)),
-                num_inference_steps=self._num_inference_steps(request, model_target(request.model)),
-                video_guider_params=guiders.MultiModalGuiderParams(
-                    cfg_scale=self._advanced_float(request, "videoCfgGuidanceScale", 4.0),
-                    stg_scale=self._advanced_float(request, "videoStgGuidanceScale", 0.0),
-                    rescale_scale=self._advanced_float(request, "videoRescaleScale", 0.7),
-                    modality_scale=self._advanced_float(request, "a2vGuidanceScale", 1.0),
-                    skip_step=safe_int(request.advanced.get("videoSkipStep"), 0, 0, 80),
-                    stg_blocks=request.advanced.get("videoStgBlocks", []),
-                ),
-                audio_guider_params=guiders.MultiModalGuiderParams(
-                    cfg_scale=self._advanced_float(request, "audioCfgGuidanceScale", 1.0),
-                    stg_scale=self._advanced_float(request, "audioStgGuidanceScale", 0.0),
-                    rescale_scale=self._advanced_float(request, "audioRescaleScale", 0.0),
-                    modality_scale=self._advanced_float(request, "v2aGuidanceScale", 1.0),
-                    skip_step=safe_int(request.advanced.get("audioSkipStep"), 0, 0, 80),
-                    stg_blocks=request.advanced.get("audioStgBlocks", []),
-                ),
-                max_batch_size=safe_int(request.advanced.get("maxBatchSize"), 1, 1, 16),
-            )
+        # ltx-core's pipeline __call__ does NOT disable autograd (only its CLI main()
+        # is @torch.inference_mode()); calling it directly with grad enabled retains
+        # the full activation graph across every diffusion step (~80-100GB/step) and
+        # OOMs. Run inference under inference_mode, matching the diffusers adapter.
+        with _ltx_inference_mode():
+            if self._pipeline_module(request) == "ltx_pipelines.ic_lora":
+                video, audio = pipeline(
+                    **base_kwargs,
+                    video_conditioning=video_conditioning,
+                    conditioning_attention_strength=self._advanced_float(request, "conditioningAttentionStrength", 1.0),
+                    skip_stage_2=bool(request.advanced.get("skipStage2", False)),
+                    conditioning_attention_mask=None,
+                )
+            elif self._pipeline_module(request) == "ltx_pipelines.distilled":
+                video, audio = pipeline(**base_kwargs)
+            else:
+                guiders = importlib.import_module("ltx_core.components.guiders")
+                video, audio = pipeline(
+                    **base_kwargs,
+                    negative_prompt=request.negative_prompt or default_negative_prompt(model_target(request.model)),
+                    num_inference_steps=self._num_inference_steps(request, model_target(request.model)),
+                    video_guider_params=guiders.MultiModalGuiderParams(
+                        cfg_scale=self._advanced_float(request, "videoCfgGuidanceScale", 4.0),
+                        stg_scale=self._advanced_float(request, "videoStgGuidanceScale", 0.0),
+                        rescale_scale=self._advanced_float(request, "videoRescaleScale", 0.7),
+                        modality_scale=self._advanced_float(request, "a2vGuidanceScale", 1.0),
+                        skip_step=safe_int(request.advanced.get("videoSkipStep"), 0, 0, 80),
+                        stg_blocks=request.advanced.get("videoStgBlocks", []),
+                    ),
+                    audio_guider_params=guiders.MultiModalGuiderParams(
+                        cfg_scale=self._advanced_float(request, "audioCfgGuidanceScale", 1.0),
+                        stg_scale=self._advanced_float(request, "audioStgGuidanceScale", 0.0),
+                        rescale_scale=self._advanced_float(request, "audioRescaleScale", 0.0),
+                        modality_scale=self._advanced_float(request, "v2aGuidanceScale", 1.0),
+                        skip_step=safe_int(request.advanced.get("audioSkipStep"), 0, 0, 80),
+                        stg_blocks=request.advanced.get("audioStgBlocks", []),
+                    ),
+                    max_batch_size=safe_int(request.advanced.get("maxBatchSize"), 1, 1, 16),
+                )
         return video, audio, video_chunks_number, media_io.encode_video
 
     def _pipeline_module(self, request: VideoRequest) -> str:
