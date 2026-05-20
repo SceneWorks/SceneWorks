@@ -169,12 +169,6 @@
           "files": [],
           "default": true,
           "estimatedSizeBytes": 157004895813
-        },
-        {
-          "provider": "huggingface",
-          "repo": "Lightricks/LTX-Video",
-          "files": [],
-          "estimatedSizeBytes": 254107005436
         }
       ],
       "paths": {
