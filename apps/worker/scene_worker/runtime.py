@@ -298,9 +298,62 @@ def run_blocking_job_step(
         thread.join(timeout=1)
 
 
+def is_cuda_oom(exc: BaseException) -> bool:
+    """True if exc is a CUDA out-of-memory error (torch.OutOfMemoryError or a
+    RuntimeError carrying 'out of memory')."""
+    if type(exc).__name__ == "OutOfMemoryError":
+        return True
+    return "out of memory" in str(exc).lower()
+
+
+# Exit code used when a worker child restarts itself after a CUDA OOM so the
+# supervisor respawns it with a fresh (non-poisoned) CUDA context.
+OOM_RESTART_EXIT_CODE = 75
+
+
+def restart_worker_after_oom(settings: WorkerSettings, job_id: str) -> None:
+    """Exit the worker child after a CUDA OOM so the supervisor respawns it with a
+    fresh CUDA context — releasing VRAM the poisoned context can't reclaim in place.
+    Raises SystemExit, which propagates out of the claim loop and ends the process."""
+    emit(
+        {
+            "event": "worker_restart_after_oom",
+            "workerId": getattr(settings, "worker_id", None),
+            "gpuId": getattr(settings, "gpu_id", None),
+            "jobId": job_id,
+            "reportedAt": now(),
+        }
+    )
+    raise SystemExit(OOM_RESTART_EXIT_CODE)
+
+
+def should_skip_claim_low_vram(settings: WorkerSettings) -> bool:
+    """True if this GPU worker should defer claiming because its card is nearly
+    full — typically another process (e.g. ComfyUI) is using it — so jobs flow to
+    a free GPU instead. Never gates the CPU worker or when the threshold is 0."""
+    threshold = getattr(settings, "min_free_vram_mb", 0)
+    if threshold <= 0 or settings.gpu_id == "cpu":
+        return False
+    utilization = gpu_utilization(settings.gpu_id)
+    free_mb = utilization.get("memoryFreeMb") if utilization else None
+    if free_mb is None or free_mb >= threshold:
+        return False
+    emit(
+        {
+            "event": "claim_skipped_low_vram",
+            "gpuId": settings.gpu_id,
+            "memoryFreeMb": free_mb,
+            "thresholdMb": threshold,
+            "reportedAt": now(),
+        }
+    )
+    return True
+
+
 def run_image_job(api: ApiClient, settings: WorkerSettings, job: dict, image_adapters: dict[str, object]) -> None:
     job_id = job["id"]
     adapter = create_image_adapter(job, image_adapters)
+    needs_oom_restart = False
 
     def adapter_loaded_models() -> list[str]:
         return loaded_models_from_adapter(adapter, job_id=job_id)
@@ -356,6 +409,7 @@ def run_image_job(api: ApiClient, settings: WorkerSettings, job: dict, image_ada
             },
         )
     except Exception as exc:
+        needs_oom_restart = is_cuda_oom(exc)
         message, error = friendly_failure("Image generation", exc)
         update_job(
             api,
@@ -370,12 +424,15 @@ def run_image_job(api: ApiClient, settings: WorkerSettings, job: dict, image_ada
         )
     finally:
         heartbeat(api, settings, "idle", loaded_models=loaded_models_from_adapters(image_adapters))
+        if needs_oom_restart:
+            restart_worker_after_oom(settings, job_id)
 
 
 def run_video_job(api: ApiClient, settings: WorkerSettings, job: dict) -> None:
     job_id = job["id"]
     adapter = create_video_adapter(job)
     job_failed = False
+    needs_oom_restart = False
 
     def adapter_loaded_models() -> list[str]:
         return loaded_models_from_adapter(adapter, job_id=job_id)
@@ -455,6 +512,7 @@ def run_video_job(api: ApiClient, settings: WorkerSettings, job: dict) -> None:
         )
     except Exception as exc:
         job_failed = True
+        needs_oom_restart = is_cuda_oom(exc)
         message, error = friendly_failure("Video generation", exc)
         update_job(
             api,
@@ -476,6 +534,10 @@ def run_video_job(api: ApiClient, settings: WorkerSettings, job: dict) -> None:
         if job_failed:
             adapter.cleanup(job_id)
         heartbeat(api, settings, "idle", loaded_models=adapter_loaded_models())
+        # A CUDA OOM can leave the allocator/context unable to reclaim VRAM in
+        # place; restart the child so the supervisor gives it a fresh context.
+        if needs_oom_restart:
+            restart_worker_after_oom(settings, job_id)
 
 
 def run_worker_loop(settings: WorkerSettings) -> None:
@@ -511,6 +573,9 @@ def run_worker_loop(settings: WorkerSettings) -> None:
     while True:
         try:
             heartbeat(api, settings, "idle", loaded_models=loaded_models_from_adapters(image_adapters))
+            if should_skip_claim_low_vram(settings):
+                time.sleep(settings.poll_seconds)
+                continue
             claimed = api.post("/api/v1/jobs/claim", {"workerId": settings.worker_id})
             job = claimed.get("job")
             if job is None:

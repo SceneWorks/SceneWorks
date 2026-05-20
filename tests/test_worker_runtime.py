@@ -1128,14 +1128,67 @@ def test_video_job_failure_runs_cleanup_to_free_gpu(monkeypatch):
         lambda *_args, **_kwargs: _args[4](),
     )
 
-    run_video_job(
-        Api(),
-        SimpleNamespace(worker_id="worker-1"),
-        {"id": "job-oom", "payload": {"projectId": "project-1", "prompt": "clip"}},
+    # A CUDA OOM cleans up, marks the job failed, then exits (SystemExit) so the
+    # supervisor restarts the child with a fresh CUDA context — the poisoned
+    # context can't reliably reclaim VRAM in place.
+    with pytest.raises(SystemExit):
+        run_video_job(
+            Api(),
+            SimpleNamespace(worker_id="worker-1", gpu_id="0"),
+            {"id": "job-oom", "payload": {"projectId": "project-1", "prompt": "clip"}},
+        )
+
+    assert events["cleanup"] == 1
+    assert events["status"] == "failed"
+
+
+def test_video_job_nonoom_failure_does_not_restart(monkeypatch):
+    events = {"cleanup": 0, "status": None}
+
+    class Api:
+        def post(self, path, payload):
+            if path.endswith("/heartbeat"):
+                return {}
+            if path.endswith("/progress"):
+                events["status"] = payload.get("status")
+                return {"status": payload["status"], "stage": payload.get("stage")}
+            raise AssertionError(path)
+
+        def get(self, _path):
+            return {"cancelRequested": False}
+
+    class VideoAdapter:
+        def prepare(self, *, settings, job):
+            return {"job": job["id"]}
+
+        def ensure_models(self, _request):
+            return None
+
+        def estimate_requirements(self, _request):
+            return {"estimatedFrames": 121, "requestedFrames": 120}
+
+        def run(self, *, settings, job, request, progress, cancel_requested):
+            raise RuntimeError("num_frames must be divisible by 8 + 1")
+
+        def cancel(self, _job_id):
+            raise AssertionError("cancel should not be called")
+
+        def cleanup(self, _job_id):
+            events["cleanup"] += 1
+
+    monkeypatch.setattr("scene_worker.runtime.create_video_adapter", lambda _job=None: VideoAdapter())
+    monkeypatch.setattr(
+        "scene_worker.runtime.run_blocking_job_step",
+        lambda *_args, **_kwargs: _args[4](),
     )
 
-    # On failure the adapter is cleaned up (pipeline evicted + CUDA cache freed)
-    # so the GPU does not stay pinned until a worker restart.
+    # A non-OOM failure cleans up and marks failed but returns normally (no restart).
+    run_video_job(
+        Api(),
+        SimpleNamespace(worker_id="worker-1", gpu_id="0"),
+        {"id": "job-fail", "payload": {"projectId": "project-1", "prompt": "clip"}},
+    )
+
     assert events["cleanup"] == 1
     assert events["status"] == "failed"
 
