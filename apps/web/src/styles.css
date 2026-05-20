@@ -803,6 +803,7 @@ label {
 .detail-actions button,
 .review-actions button,
 .preview-actions button,
+.preview-nav-button,
 .file-upload-button,
 .modal-close,
 .asset-picker-head button,
@@ -845,6 +846,7 @@ label {
 .detail-actions button:hover:not(:disabled),
 .review-actions button:hover:not(:disabled),
 .preview-actions button:hover:not(:disabled),
+.preview-nav-button:hover:not(:disabled),
 .file-upload-button:hover,
 .modal-close:hover:not(:disabled),
 .asset-picker-head button:hover:not(:disabled),
@@ -3947,6 +3949,34 @@ label {
   object-fit: contain;
   background: var(--bg-2);
   border-radius: var(--r-sm);
+}
+
+.preview-modal-stage {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  gap: 12px;
+  align-items: center;
+  min-width: 0;
+}
+
+.preview-modal-stage img,
+.preview-modal-stage video {
+  min-width: 0;
+  width: 100%;
+}
+
+.preview-nav-button {
+  width: 40px;
+  height: 64px;
+  padding: 0;
+  border-radius: var(--r-md);
+  background: var(--surface-2);
+  color: var(--text-muted);
+}
+
+.preview-nav-button:disabled {
+  opacity: 0.35;
+  cursor: not-allowed;
 }
 
 .preview-modal footer {

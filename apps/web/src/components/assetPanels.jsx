@@ -146,14 +146,43 @@ export function AssetCard({ asset, deleteAsset, purgeAsset, onPreview, updateAss
   );
 }
 
-export function FullscreenPreview({ asset, deleteAsset, onClose, purgeAsset, updateAssetStatus }) {
+export function FullscreenPreview({
+  asset,
+  deleteAsset,
+  nextAsset,
+  onClose,
+  onPreviewAsset,
+  previousAsset,
+  purgeAsset,
+  updateAssetStatus,
+}) {
   return (
     <div className="modal-backdrop" role="dialog" aria-modal="true">
       <div className="preview-modal">
         <button className="modal-close" onClick={onClose} type="button">
           Close
         </button>
-        <AssetMedia asset={asset} />
+        <div className="preview-modal-stage">
+          <button
+            aria-label="Previous asset"
+            className="preview-nav-button previous"
+            disabled={!previousAsset}
+            onClick={() => previousAsset && onPreviewAsset(previousAsset)}
+            type="button"
+          >
+            <Icon.ArrowLeft size={18} />
+          </button>
+          <AssetMedia asset={asset} />
+          <button
+            aria-label="Next asset"
+            className="preview-nav-button next"
+            disabled={!nextAsset}
+            onClick={() => nextAsset && onPreviewAsset(nextAsset)}
+            type="button"
+          >
+            <Icon.ArrowRight size={18} />
+          </button>
+        </div>
         <footer>
           <div className="preview-modal-meta">
             <strong>{asset.displayName}</strong>

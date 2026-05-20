@@ -329,6 +329,19 @@ export function App() {
     () => (previewAsset ? assets.find((asset) => asset.id === previewAsset.id) ?? previewAsset : null),
     [assets, previewAsset],
   );
+  const previewNavigation = useMemo(() => {
+    if (!previewedAsset || assets.length < 2) {
+      return { previous: null, next: null };
+    }
+    const currentIndex = assets.findIndex((asset) => asset.id === previewedAsset.id);
+    if (currentIndex < 0) {
+      return { previous: null, next: null };
+    }
+    return {
+      previous: currentIndex > 0 ? assets[currentIndex - 1] : null,
+      next: currentIndex < assets.length - 1 ? assets[currentIndex + 1] : null,
+    };
+  }, [assets, previewedAsset]);
   const latestAssets = useMemo(
     () => assets.filter((asset) => asset.generationSetId === latestGenerationSetId),
     [assets, latestGenerationSetId],
@@ -1833,7 +1846,10 @@ export function App() {
             await deleteAsset(asset);
             setPreviewAsset(null);
           }}
+          nextAsset={previewNavigation.next}
           onClose={() => setPreviewAsset(null)}
+          onPreviewAsset={setPreviewAsset}
+          previousAsset={previewNavigation.previous}
           purgeAsset={async (asset) => {
             await purgeAsset(asset);
             setPreviewAsset(null);
