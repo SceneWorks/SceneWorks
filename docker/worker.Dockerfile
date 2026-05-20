@@ -37,6 +37,17 @@ ENV PYTHONUNBUFFERED=1
 ENV VIRTUAL_ENV=/opt/venv
 ENV PATH="/opt/venv/bin:${PATH}"
 
+# Triton (bundled with the CUDA torch wheels) JIT-compiles GPU kernels at
+# runtime — notably the fp8 path used by LTX-2.3 — and needs a host C compiler.
+# The slim runtime image ships none, so fp8 jobs failed with
+# "Failed to find C compiler. Please specify via CC environment variable...".
+# Triton bundles its own ptxas and CUDA headers and Python.h ships with the
+# base image, so gcc plus libc headers are all that is required.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends gcc libc6-dev \
+    && rm -rf /var/lib/apt/lists/*
+ENV CC=gcc
+
 WORKDIR /app
 
 COPY --from=builder /opt/venv /opt/venv
