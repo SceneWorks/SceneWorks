@@ -7,10 +7,12 @@ import importlib
 import importlib.util
 import json
 import os
+import sys
+import types
 import warnings
 from pathlib import Path
 from textwrap import wrap
-from typing import Any, Callable
+from typing import Any, Callable, Generic, TypeVar
 from uuid import uuid4
 
 from PIL import Image, ImageDraw, ImageEnhance, ImageFont, UnidentifiedImageError
@@ -37,6 +39,7 @@ warnings.simplefilter("error", Image.DecompressionBombWarning)
 
 ProgressCallback = Callable[[str, str, float, str], None]
 CancelCallback = Callable[[], bool]
+_DelegatingBuilderT = TypeVar("_DelegatingBuilderT")
 
 
 VIDEO_MODEL_TARGETS: dict[str, dict[str, Any]] = {
@@ -98,6 +101,25 @@ class LtxPipelinesResources:
     distilled_lora_path: Path
     gemma_root: Path
     temporal_upsampler_path: Path | None = None
+
+
+def install_ltx_pipelines_multigpu_compat() -> None:
+    if "ltx_pipelines.multigpu.delegating_builder" in sys.modules:
+        return
+
+    class DelegatingBuilder(Generic[_DelegatingBuilderT]):
+        def __init__(self, *_args: Any, **_kwargs: Any) -> None:
+            raise RuntimeError(
+                "The installed ltx-pipelines package references an optional multigpu DelegatingBuilder "
+                "that is not shipped by the package."
+            )
+
+    multigpu_module = types.ModuleType("ltx_pipelines.multigpu")
+    multigpu_module.__path__ = []
+    delegating_builder_module = types.ModuleType("ltx_pipelines.multigpu.delegating_builder")
+    delegating_builder_module.DelegatingBuilder = DelegatingBuilder
+    sys.modules.setdefault("ltx_pipelines.multigpu", multigpu_module)
+    sys.modules.setdefault("ltx_pipelines.multigpu.delegating_builder", delegating_builder_module)
 
 
 class VideoGenerationAdapter(ABC):
@@ -514,6 +536,7 @@ class LtxPipelinesVideoAdapter(ProceduralVideoAdapter):
         except (OSError, Image.DecompressionBombError, Image.DecompressionBombWarning) as exc:
             raise RuntimeError("Image to Video requires a readable source image.") from exc
 
+        install_ltx_pipelines_multigpu_compat()
         args_module = importlib.import_module("ltx_pipelines.utils.args")
         condition_class = getattr(args_module, "ImageConditioningInput")
         return [
@@ -529,6 +552,7 @@ class LtxPipelinesVideoAdapter(ProceduralVideoAdapter):
         if self._pipeline is not None and self._pipeline_key_value == key:
             return self._pipeline
 
+        install_ltx_pipelines_multigpu_compat()
         loader = importlib.import_module("ltx_core.loader")
         offload_mode = self._offload_mode(request)
         common_kwargs = {
@@ -571,6 +595,7 @@ class LtxPipelinesVideoAdapter(ProceduralVideoAdapter):
         num_frames: int,
         conditioning_images: list[Any],
     ) -> tuple[Any, Any, int, Any]:
+        install_ltx_pipelines_multigpu_compat()
         video_vae = importlib.import_module("ltx_core.model.video_vae")
         media_io = importlib.import_module("ltx_pipelines.utils.media_io")
         tiling_config = video_vae.TilingConfig.default()
@@ -640,6 +665,7 @@ class LtxPipelinesVideoAdapter(ProceduralVideoAdapter):
 
     def _offload_mode(self, request: VideoRequest) -> Any:
         offload_value = str(request.advanced.get("offloadMode", "none")).strip().lower()
+        install_ltx_pipelines_multigpu_compat()
         types_module = importlib.import_module("ltx_pipelines.utils.types")
         offload_mode = getattr(types_module, "OffloadMode")
         if offload_value == "cpu":
@@ -831,10 +857,11 @@ class LtxPipelinesVideoAdapter(ProceduralVideoAdapter):
 
     def _dependencies_available(self) -> bool:
         try:
-            return (
-                importlib.util.find_spec("ltx_core") is not None
-                and importlib.util.find_spec("ltx_pipelines") is not None
-            )
+            if importlib.util.find_spec("ltx_core") is None or importlib.util.find_spec("ltx_pipelines") is None:
+                return False
+            install_ltx_pipelines_multigpu_compat()
+            importlib.import_module("ltx_pipelines.distilled")
+            return True
         except (ImportError, ValueError):
             return False
 
