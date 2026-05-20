@@ -435,203 +435,13 @@ export function PresetManagerScreen({
           )}
         </section>
 
-        {creating ? renderCreateForm() : (
-        <form className="preset-editor" onSubmit={savePreset}>
-          <div className="control-grid compact-controls">
-            <label>
-              Name
-              <input disabled={!editable} onChange={(event) => updateField("name", event.target.value)} required value={form.name} />
-            </label>
-            <label>
-              ID
-              <input disabled={Boolean(selectedPreset) || !editable} onChange={(event) => updateField("id", event.target.value)} required value={form.id} />
-            </label>
-          </div>
-
-          <div className="control-grid">
-            <label>
-              Scope
-              <select disabled={!editable} onChange={(event) => updateField("scope", event.target.value)} value={form.scope}>
-                <option value="global">Global</option>
-                <option disabled={!activeProject} value="project">
-                  Project
-                </option>
-              </select>
-            </label>
-            <label>
-              Workflow
-              <select disabled={!editable} onChange={(event) => updateField("workflow", event.target.value)} value={form.workflow}>
-                {workflowOptions.map(([value, label]) => (
-                  <option key={value} value={value}>
-                    {label}
-                  </option>
-                ))}
-              </select>
-            </label>
-            <label>
-              Order
-              <input disabled={!editable} onChange={(event) => updateField("order", event.target.value)} type="number" value={form.order} />
-            </label>
-          </div>
-
-          <div className="control-grid compact-controls">
-            <label>
-              Model
-              <select disabled={!editable} onChange={(event) => updateField("model", event.target.value)} value={form.model}>
-                {availableModels.length ? (
-                  availableModels.map((model) => (
-                    <option key={model.id} value={model.id}>
-                      {model.name ?? model.id}
-                    </option>
-                  ))
-                ) : (
-                  <option value="">No models</option>
-                )}
-              </select>
-            </label>
-            <label>
-              Derived modes
-              <input disabled readOnly value={compactModeList(form.workflow)} />
-            </label>
-          </div>
-
-          <div className="control-grid">
-            <label>
-              Count
-              <input disabled={!editable} min="1" max="8" onChange={(event) => updateField("count", event.target.value)} type="number" value={form.count} />
-            </label>
-            <label>
-              Duration
-              <input disabled={!editable} min="1" max="30" onChange={(event) => updateField("duration", event.target.value)} type="number" value={form.duration} />
-            </label>
-            <label>
-              Resolution
-              <input disabled={!editable} onChange={(event) => updateField("resolution", event.target.value)} placeholder="1024x1024" value={form.resolution} />
-            </label>
-          </div>
-
-          <div className="control-grid compact-controls">
-            <label>
-              FPS
-              <input disabled={!editable} min="1" max="60" onChange={(event) => updateField("fps", event.target.value)} type="number" value={form.fps} />
-            </label>
-            <label>
-              Quality
-              <input disabled={!editable} onChange={(event) => updateField("quality", event.target.value)} value={form.quality} />
-            </label>
-          </div>
-
-          <label>
-            Negative
-            <input disabled={!editable} onChange={(event) => updateField("negativePrompt", event.target.value)} value={form.negativePrompt} />
-          </label>
-
-          <label>
-            Description
-            <input disabled={!editable} onChange={(event) => updateField("description", event.target.value)} value={form.description} />
-          </label>
-
-          <div className="control-grid compact-controls">
-            <label>
-              Prompt Prefix
-              <textarea disabled={!editable} onChange={(event) => updateField("promptPrefix", event.target.value)} value={form.promptPrefix} />
-            </label>
-            <label>
-              Prompt Suffix
-              <textarea disabled={!editable} onChange={(event) => updateField("promptSuffix", event.target.value)} value={form.promptSuffix} />
-            </label>
-          </div>
-
-          <section className="lora-picker" aria-label="Preset LoRAs">
-            <div>
-              <strong>Applied LoRAs</strong>
-              <span>{form.loras.length}/3 selected</span>
-            </div>
-            <div className="inline-create lora-add-row">
-              <label>
-                Add LoRA
-                <select
-                  disabled={!editable || !addableLoras.length || form.loras.length >= 3}
-                  onChange={(event) => setSelectedLoraToAdd(event.target.value)}
-                  value={selectedLoraToAdd}
-                >
-                  {addableLoras.length ? (
-                    addableLoras.map((lora) => (
-                      <option key={lora.id} value={lora.id}>
-                        {lora.name ?? lora.id}
-                      </option>
-                    ))
-                  ) : null}
-                </select>
-              </label>
-              <button disabled={!editable || !selectedLoraToAdd || form.loras.length >= 3} onClick={addSelectedLora} type="button">
-                Add LoRA
-              </button>
-            </div>
-            {showLoraEmptyState ? (
-              <div className="empty-panel compact-panel">
-                <span>{loraEmptyMessage}</span>
-                {onOpenModels ? (
-                  <button onClick={onOpenModels} type="button">
-                    Open Models
-                  </button>
-                ) : null}
-              </div>
-            ) : null}
-            {form.loras.length ? (
-              <div className="lora-choice-list">
-                {form.loras.map((selected) => {
-                  const lora = loras.find((item) => item.id === selected.id);
-                  const missing = !lora || lora.installState === "missing";
-                  const incompatible = lora && selectedModel && !loraMatchesModel(lora, selectedModel);
-                  return (
-                    <div className={incompatible || missing ? "lora-choice editable-lora-choice warning" : "lora-choice active editable-lora-choice"} key={selected.id}>
-                      <span>
-                        <strong>{lora?.name ?? selected.id}</strong>
-                        <small>
-                          {missing
-                            ? "Missing or still importing"
-                            : incompatible
-                              ? `${loraLabel(lora)} | incompatible with ${selectedModel?.name ?? selectedModel?.id}`
-                              : loraLabel(lora)}
-                        </small>
-                      </span>
-                      <div className="lora-selection-actions">
-                        <label>
-                          Weight
-                          <input
-                            disabled={!editable || missing || incompatible}
-                            max="2"
-                            min="-2"
-                            onChange={(event) => updateLoraWeight(selected.id, event.target.value)}
-                            step="0.05"
-                            type="number"
-                            value={selected?.weight ?? ""}
-                          />
-                        </label>
-                        <button disabled={!editable} onClick={() => removeLora(selected.id)} type="button">
-                          Remove
-                        </button>
-                      </div>
-                    </div>
-                  );
-                })}
-              </div>
-            ) : null}
-          </section>
-
-          {saveDisabledReason ? <p className="inline-warning">{saveDisabledReason}</p> : null}
-          {message.text ? <p className={message.tone === "success" ? "inline-success" : "inline-warning"}>{message.text}</p> : null}
-          <button className="primary-action" disabled={Boolean(saveDisabledReason) || busy} type="submit">
-            {selectedPreset ? "Save Preset" : "Create Preset"}
-          </button>
-        </form>
-        )}
+        {renderPresetForm()}
       </div>
     </section>
   );
 
-  function renderCreateForm() {
+  function renderPresetForm() {
+    const isCreatingPreset = creating || !selectedPreset;
     const workflowDef = workflowCards.find((card) => card.id === form.workflow) ?? workflowCards[0];
     const isVideo = isVideoWorkflow(form.workflow);
     const promptPreviewActive = form.promptPrefix.trim() || form.promptSuffix.trim();
@@ -644,20 +454,30 @@ export function PresetManagerScreen({
     return (
       <form className="preset-create-shell" onSubmit={savePreset}>
         <div className="preset-create-head">
-          <button className="preset-create-back" onClick={cancelCreate} type="button">
-            <Icon.ArrowLeft size={14} /> Back to Presets
-          </button>
-          <div className="preset-create-actions">
-            <button className="btn-secondary" onClick={cancelCreate} type="button">
-              Cancel
+          {isCreatingPreset ? (
+            <button className="preset-create-back" onClick={cancelCreate} type="button">
+              <Icon.ArrowLeft size={14} /> Back to Presets
             </button>
+          ) : (
+            <div className="preset-edit-context">
+              <span className="preset-edit-kicker">Editing preset</span>
+              <strong>{selectedPreset.name ?? selectedPreset.id}</strong>
+              <small>{selectedPreset.scope === "builtin" ? "Built-in preset" : `${selectedPreset.scope ?? "global"} preset`}</small>
+            </div>
+          )}
+          <div className="preset-create-actions">
+            {isCreatingPreset ? (
+              <button className="btn-secondary" onClick={cancelCreate} type="button">
+                Cancel
+              </button>
+            ) : null}
             <button
               className="btn-primary"
               disabled={Boolean(saveDisabledReason) || busy}
               type="submit"
             >
-              <Icon.Plus size={14} />
-              <span>{busy ? "Saving…" : "Create Preset"}</span>
+              {isCreatingPreset ? <Icon.Plus size={14} /> : <Icon.Preset size={14} />}
+              <span>{busy ? "Saving..." : isCreatingPreset ? "Create Preset" : "Save Preset"}</span>
             </button>
           </div>
         </div>
@@ -674,6 +494,7 @@ export function PresetManagerScreen({
                   <label className="field field-name">
                     <span>Name</span>
                     <input
+                      disabled={!editable}
                       onChange={(event) => updateField("name", event.target.value)}
                       placeholder="e.g. Atrium portraits"
                       required
@@ -683,6 +504,7 @@ export function PresetManagerScreen({
                   <label className="field">
                     <span>ID</span>
                     <input
+                      disabled={!isCreatingPreset || !editable}
                       onChange={(event) => updateField("id", event.target.value)}
                       placeholder="auto-generated from name"
                       required
@@ -693,6 +515,7 @@ export function PresetManagerScreen({
                   <label className="field">
                     <span>Description</span>
                     <input
+                      disabled={!editable}
                       onChange={(event) => updateField("description", event.target.value)}
                       placeholder="One line — what kind of shot this makes"
                       value={form.description}
@@ -704,7 +527,7 @@ export function PresetManagerScreen({
                       <button
                         aria-checked={form.scope === "project"}
                         className={form.scope === "project" ? "active" : ""}
-                        disabled={!activeProject}
+                        disabled={!activeProject || !editable}
                         onClick={() => updateField("scope", "project")}
                         role="radio"
                         type="button"
@@ -714,6 +537,7 @@ export function PresetManagerScreen({
                       <button
                         aria-checked={form.scope === "global"}
                         className={form.scope === "global" ? "active" : ""}
+                        disabled={!editable}
                         onClick={() => updateField("scope", "global")}
                         role="radio"
                         type="button"
@@ -738,6 +562,7 @@ export function PresetManagerScreen({
                     return (
                       <button
                         className={form.workflow === card.id ? "workflow-card active" : "workflow-card"}
+                        disabled={!editable}
                         key={card.id}
                         onClick={() => updateField("workflow", card.id)}
                         type="button"
@@ -768,6 +593,7 @@ export function PresetManagerScreen({
                     availableModels.map((modelOption) => (
                       <button
                         className={form.model === modelOption.id ? "preset-model-row active" : "preset-model-row"}
+                        disabled={!editable}
                         key={modelOption.id}
                         onClick={() => updateField("model", modelOption.id)}
                         type="button"
@@ -800,6 +626,7 @@ export function PresetManagerScreen({
                   <label className="field">
                     <span>Always prepend</span>
                     <textarea
+                      disabled={!editable}
                       onChange={(event) => updateField("promptPrefix", event.target.value)}
                       placeholder="e.g. Cinematic 35mm, warm tungsten,"
                       rows={2}
@@ -809,6 +636,7 @@ export function PresetManagerScreen({
                   <label className="field">
                     <span>Always append</span>
                     <textarea
+                      disabled={!editable}
                       onChange={(event) => updateField("promptSuffix", event.target.value)}
                       placeholder="e.g. shallow depth of field, neutral grade"
                       rows={2}
@@ -818,6 +646,7 @@ export function PresetManagerScreen({
                   <label className="field">
                     <span>Negative</span>
                     <input
+                      disabled={!editable}
                       onChange={(event) => updateField("negativePrompt", event.target.value)}
                       placeholder="oversaturated, hands, text, watermark"
                       value={form.negativePrompt}
@@ -847,6 +676,7 @@ export function PresetManagerScreen({
                   <label className="field">
                     <span>{isVideo ? "Clips per batch" : "Variations"}</span>
                     <select
+                      disabled={!editable}
                       onChange={(event) => updateField("count", event.target.value)}
                       value={form.count}
                     >
@@ -861,6 +691,7 @@ export function PresetManagerScreen({
                   <label className="field">
                     <span>{isVideo ? "Resolution" : "Aspect"}</span>
                     <select
+                      disabled={!editable}
                       onChange={(event) => updateField("resolution", event.target.value)}
                       value={form.resolution}
                     >
@@ -877,6 +708,7 @@ export function PresetManagerScreen({
                       <label className="field">
                         <span>Duration</span>
                         <select
+                          disabled={!editable}
                           onChange={(event) => updateField("duration", event.target.value)}
                           value={form.duration}
                         >
@@ -891,6 +723,7 @@ export function PresetManagerScreen({
                       <label className="field">
                         <span>Frames</span>
                         <select
+                          disabled={!editable}
                           onChange={(event) => updateField("fps", event.target.value)}
                           value={form.fps}
                         >
@@ -911,6 +744,7 @@ export function PresetManagerScreen({
                         <button
                           aria-checked={form.quality === value}
                           className={form.quality === value ? "active" : ""}
+                          disabled={!editable}
                           key={value}
                           onClick={() => updateField("quality", value)}
                           role="radio"
@@ -956,7 +790,7 @@ export function PresetManagerScreen({
                                 <label>
                                   Weight
                                   <input
-                                    disabled={missing || incompatible}
+                                    disabled={!editable || missing || incompatible}
                                     max="2"
                                     min="-2"
                                     onChange={(event) => updateLoraWeight(selected.id, event.target.value)}
@@ -965,13 +799,24 @@ export function PresetManagerScreen({
                                     value={selected?.weight ?? ""}
                                   />
                                 </label>
-                                <button onClick={() => removeLora(selected.id)} type="button">
+                                <button disabled={!editable} onClick={() => removeLora(selected.id)} type="button">
                                   Remove
                                 </button>
                               </div>
                             </div>
                           );
                         })}
+                      </div>
+                    ) : null}
+
+                    {showLoraEmptyState ? (
+                      <div className="empty-panel compact-panel">
+                        <span>{loraEmptyMessage}</span>
+                        {onOpenModels ? (
+                          <button onClick={onOpenModels} type="button">
+                            Open Models
+                          </button>
+                        ) : null}
                       </div>
                     ) : null}
 
@@ -1014,7 +859,7 @@ export function PresetManagerScreen({
                         <button
                           className="lora-add"
                           data-count={`${form.loras.length}/3`}
-                          disabled={!availableLoras.length}
+                          disabled={!editable || !availableLoras.length}
                           onClick={() => setShowLoraPicker(true)}
                           type="button"
                         >
@@ -1048,6 +893,7 @@ export function PresetManagerScreen({
                   <label>
                     Sort order
                     <input
+                      disabled={!editable}
                       onChange={(event) => updateField("order", event.target.value)}
                       placeholder="0"
                       type="number"

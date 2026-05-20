@@ -2255,26 +2255,32 @@ label {
 }
 
 .preset-layout {
-  grid-template-columns: minmax(240px, 340px) minmax(0, 1fr);
+  grid-template-columns: minmax(220px, 280px) minmax(0, 1fr);
 }
 
-/* Create mode: list shrinks to a slim nav, form + sticky summary fill the rest. */
+/* Preset create/edit share the same guided flow; edit keeps the selector rail. */
 .preset-layout.creating {
-  grid-template-columns: minmax(220px, 260px) minmax(0, 1fr) minmax(280px, 340px);
+  grid-template-columns: minmax(220px, 260px) minmax(0, 1fr);
 }
 
 @media (max-width: 1200px) {
+  .preset-layout,
   .preset-layout.creating {
     grid-template-columns: minmax(200px, 240px) minmax(0, 1fr);
   }
 
-  .preset-layout.creating .preset-summary {
+  .preset-create-body {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .preset-summary {
     grid-column: 1 / -1;
     position: static;
   }
 }
 
 @media (max-width: 860px) {
+  .preset-layout,
   .preset-layout.creating {
     grid-template-columns: 1fr;
   }
@@ -2284,6 +2290,8 @@ label {
 .preset-create-shell {
   display: grid;
   gap: var(--gap-3);
+  width: 100%;
+  max-width: 1120px;
   min-width: 0;
   align-content: start;
 }
@@ -2317,6 +2325,31 @@ label {
 .preset-create-actions {
   display: inline-flex;
   gap: 8px;
+}
+
+.preset-edit-context {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+}
+
+.preset-edit-kicker {
+  color: var(--text-faint);
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.preset-edit-context strong {
+  color: var(--text);
+  font-size: 16px;
+  font-weight: 600;
+}
+
+.preset-edit-context small {
+  color: var(--text-muted);
+  font-size: 12.5px;
 }
 
 .preset-create-actions .btn-secondary {
@@ -2366,7 +2399,7 @@ label {
 
 .preset-create-body {
   display: grid;
-  grid-template-columns: minmax(0, 1fr);
+  grid-template-columns: minmax(0, 760px) minmax(260px, 320px);
   gap: var(--gap-4);
   align-items: start;
 }
@@ -2385,6 +2418,17 @@ label {
   position: sticky;
   top: 86px;
   min-width: 0;
+}
+
+@media (max-width: 1200px) {
+  .preset-create-body {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .preset-summary {
+    grid-column: 1 / -1;
+    position: static;
+  }
 }
 
 .preset-section {
@@ -2543,6 +2587,14 @@ label {
   border-color: var(--accent);
   box-shadow: 0 0 0 3px color-mix(in oklch, var(--accent) 18%, transparent);
   background: color-mix(in oklch, var(--accent-soft) 60%, var(--surface));
+}
+
+.workflow-card:disabled,
+.preset-model-row:disabled,
+.scope-segment button:disabled,
+.quality-pick button:disabled {
+  cursor: not-allowed;
+  opacity: 0.58;
 }
 
 .workflow-card-icon {
