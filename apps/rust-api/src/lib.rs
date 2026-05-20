@@ -3748,6 +3748,7 @@ async fn lora_catalog(state: &AppState, project_id: Option<&str>) -> Result<Vec<
             "builtin",
             &manifest_dir.join("builtin.loras.jsonc"),
             &state.settings.data_dir,
+            &state.settings.data_dir,
         )?);
     }
     let user = user
@@ -3757,6 +3758,7 @@ async fn lora_catalog(state: &AppState, project_id: Option<&str>) -> Result<Vec<
                 lora,
                 "global",
                 &manifest_dir.join("user.loras.jsonc"),
+                &state.settings.data_dir,
                 &state.settings.data_dir,
             )
         })
@@ -3768,7 +3770,15 @@ async fn lora_catalog(state: &AppState, project_id: Option<&str>) -> Result<Vec<
         let project_loras = load_manifest_entries(state, &project_manifest, "loras")
             .await?
             .into_iter()
-            .map(|lora| normalize_lora_entry(lora, "project", &project_manifest, &project_path))
+            .map(|lora| {
+                normalize_lora_entry(
+                    lora,
+                    "project",
+                    &project_manifest,
+                    &project_path,
+                    &state.settings.data_dir,
+                )
+            })
             .collect::<Result<Vec<_>, _>>()?;
         loras = merge_entries_by_id(loras, project_loras);
     }
@@ -3889,6 +3899,7 @@ fn normalize_lora_entry(
     scope: &str,
     manifest_path: &FsPath,
     default_root: &FsPath,
+    data_dir: &FsPath,
 ) -> Result<Value, ApiError> {
     let object = lora
         .as_object_mut()
@@ -3902,7 +3913,7 @@ fn normalize_lora_entry(
         .and_then(|source| source.get("path"))
         .and_then(Value::as_str)
         .or_else(|| object.get("path").and_then(Value::as_str));
-    let installed_path = source_path.map(|source_path| {
+    let local_path = source_path.map(|source_path| {
         let path = PathBuf::from(source_path);
         if path.is_absolute() {
             path
@@ -3910,6 +3921,14 @@ fn normalize_lora_entry(
             default_root.join(path)
         }
     });
+    let lora_snapshot = Value::Object(object.clone());
+    let huggingface_path = lora_huggingface_cached_file(&lora_snapshot, data_dir);
+    let installed_path = match (local_path.as_ref(), huggingface_path.as_ref()) {
+        (Some(path), _) if lora_is_installed(path) => Some(path.clone()),
+        (_, Some(path)) if lora_is_installed(path) => Some(path.clone()),
+        (Some(path), _) => Some(path.clone()),
+        _ => None,
+    };
     let install_state = match installed_path.as_ref() {
         Some(path) if lora_is_installed(path) => "installed",
         _ => "missing",
@@ -5753,7 +5772,61 @@ fn lora_artifact_paths(lora: &Value, default_root: &FsPath) -> Vec<PathBuf> {
             default_root.join(path)
         });
     }
+    if let Some(path) = lora_huggingface_cached_file(lora, default_root) {
+        paths.push(path);
+    }
     unique_paths(paths)
+}
+
+fn lora_huggingface_cached_file(lora: &Value, data_dir: &FsPath) -> Option<PathBuf> {
+    let source = lora.get("source").and_then(Value::as_object);
+    let provider = source
+        .and_then(|source| source.get("provider"))
+        .or_else(|| lora.get("provider"))
+        .and_then(Value::as_str)?;
+    if provider != "huggingface" {
+        return None;
+    }
+    let repo = source
+        .and_then(|source| source.get("repo"))
+        .or_else(|| lora.get("repo"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())?;
+    let repo_root = huggingface_repo_cache_path(data_dir, repo)?;
+    if !repo_root.exists() {
+        return None;
+    }
+    let file_name = source
+        .and_then(|source| source.get("file"))
+        .or_else(|| lora.get("file"))
+        .and_then(Value::as_str)
+        .or_else(|| {
+            source
+                .and_then(|source| source.get("files"))
+                .or_else(|| lora.get("files"))
+                .and_then(Value::as_array)
+                .and_then(|files| files.first())
+                .and_then(Value::as_str)
+        });
+    if let Some(file_name) = file_name {
+        let snapshots = repo_root.join("snapshots");
+        if let Ok(entries) = std::fs::read_dir(&snapshots) {
+            let mut snapshots = entries
+                .flatten()
+                .map(|entry| entry.path())
+                .filter(|path| path.is_dir())
+                .collect::<Vec<_>>();
+            snapshots.sort();
+            for snapshot in snapshots {
+                let candidate = snapshot.join(file_name);
+                if candidate.is_file() {
+                    return Some(candidate);
+                }
+            }
+        }
+    }
+    first_safetensors_path(&repo_root)
 }
 
 fn unique_paths(paths: Vec<PathBuf>) -> Vec<PathBuf> {
@@ -8393,6 +8466,76 @@ mod tests {
         assert!(models[0]["installedPath"]
             .as_str()
             .is_some_and(|value| value.contains("models--owner--model")));
+    }
+
+    #[tokio::test]
+    async fn lora_catalog_uses_huggingface_cache_install_state() {
+        std::env::set_var("SCENEWORKS_DISABLE_MODEL_SIZE_ESTIMATE", "1");
+        let temp_dir = tempfile::tempdir().expect("temp dir creates");
+        let config_dir = temp_dir.path().join("config/manifests");
+        std::fs::create_dir_all(&config_dir).expect("manifest dir creates");
+        std::fs::write(
+            config_dir.join("builtin.models.jsonc"),
+            r#"{ "schemaVersion": 1, "models": [] }"#,
+        )
+        .expect("builtin models writes");
+        std::fs::write(
+            config_dir.join("user.models.jsonc"),
+            r#"{ "schemaVersion": 1, "models": [] }"#,
+        )
+        .expect("user models writes");
+        std::fs::write(
+            config_dir.join("builtin.loras.jsonc"),
+            r#"
+            {
+              "schemaVersion": 1,
+              "loras": [{
+                "id": "ltx_ic_union",
+                "name": "LTX IC Union",
+                "family": "ltx-video",
+                "compatibility": { "families": ["ltx-video"] },
+                "source": {
+                  "provider": "huggingface",
+                  "repo": "Lightricks/LTX-2.3-22b-IC-LoRA-Union-Control",
+                  "file": "ltx-2.3-22b-ic-lora-union-control-ref0.5.safetensors"
+                }
+              }]
+            }
+            "#,
+        )
+        .expect("builtin loras writes");
+        std::fs::write(
+            config_dir.join("user.loras.jsonc"),
+            r#"{ "schemaVersion": 1, "loras": [] }"#,
+        )
+        .expect("user loras writes");
+        std::fs::write(
+            config_dir.join("builtin.recipe-presets.jsonc"),
+            r#"{ "schemaVersion": 1, "presets": [] }"#,
+        )
+        .expect("builtin presets writes");
+        std::fs::write(
+            config_dir.join("user.recipe-presets.jsonc"),
+            r#"{ "schemaVersion": 1, "presets": [] }"#,
+        )
+        .expect("user presets writes");
+        let cache_file = temp_dir
+            .path()
+            .join("data/cache/huggingface/hub/models--Lightricks--LTX-2.3-22b-IC-LoRA-Union-Control/snapshots/abc123/ltx-2.3-22b-ic-lora-union-control-ref0.5.safetensors");
+        std::fs::create_dir_all(cache_file.parent().expect("cache file has parent"))
+            .expect("hf cache creates");
+        std::fs::write(&cache_file, b"lora").expect("lora cache writes");
+
+        let app = create_app(test_settings(&temp_dir)).expect("app creates");
+        let (status, loras) = request(app, "GET", "/api/v1/loras", Value::Null).await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(loras[0]["id"], "ltx_ic_union");
+        assert_eq!(loras[0]["installState"], "installed");
+        assert_eq!(
+            std::path::PathBuf::from(loras[0]["installedPath"].as_str().expect("installed path")),
+            cache_file
+        );
     }
 
     #[tokio::test]

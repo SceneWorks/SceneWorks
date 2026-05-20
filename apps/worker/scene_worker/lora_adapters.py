@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 import hashlib
 import json
+import os
 import re
 from pathlib import Path
 from typing import Any
@@ -182,9 +183,63 @@ def clear_loras(pipe: Any, adapter_names: tuple[str, ...], *, adapter_id: str) -
 def lora_path(lora: dict[str, Any]) -> Path | None:
     source = lora.get("source") if isinstance(lora.get("source"), dict) else {}
     value = lora.get("installedPath") or lora.get("sourcePath") or lora.get("path") or source.get("path")
+    fallback = huggingface_cached_lora_path(lora)
     if not value:
+        return fallback
+    path = Path(str(value)).expanduser()
+    if path.exists() or fallback is None:
+        return path
+    return fallback
+
+
+def huggingface_cached_lora_path(lora: dict[str, Any]) -> Path | None:
+    source = lora.get("source") if isinstance(lora.get("source"), dict) else {}
+    provider = str(source.get("provider") or lora.get("provider") or "").strip().lower()
+    if provider != "huggingface":
         return None
-    return Path(str(value)).expanduser()
+    repo = str(source.get("repo") or lora.get("repo") or "").strip()
+    if not repo:
+        return None
+    root = huggingface_repo_cache_path(repo)
+    if root is None or not root.exists():
+        return None
+    file_name = source.get("file") or lora.get("file")
+    if not file_name:
+        files = source.get("files") or lora.get("files")
+        if isinstance(files, list) and files:
+            file_name = files[0]
+    if file_name:
+        for snapshot in huggingface_snapshot_dirs(root):
+            candidate = snapshot / str(file_name)
+            if candidate.is_file():
+                return candidate
+    return first_safetensors_path(root)
+
+
+def huggingface_repo_cache_path(repo: str) -> Path | None:
+    safe_repo = "".join(character if character.isalnum() or character in "._-" else "--" for character in repo).strip("-")
+    if not safe_repo:
+        return None
+    return huggingface_hub_cache_dir() / f"models--{safe_repo}"
+
+
+def huggingface_hub_cache_dir() -> Path:
+    for key in ("HF_HUB_CACHE", "HUGGINGFACE_HUB_CACHE"):
+        value = os.getenv(key, "").strip()
+        if value:
+            return Path(value).expanduser()
+    hf_home = os.getenv("HF_HOME", "").strip()
+    if hf_home:
+        return Path(hf_home).expanduser() / "hub"
+    data_dir = Path(os.getenv("SCENEWORKS_DATA_DIR", "data")).expanduser()
+    return data_dir / "cache" / "huggingface" / "hub"
+
+
+def huggingface_snapshot_dirs(repo_root: Path) -> list[Path]:
+    snapshots = repo_root / "snapshots"
+    if not snapshots.is_dir():
+        return []
+    return sorted(candidate for candidate in snapshots.iterdir() if candidate.is_dir())
 
 
 def path_stem(path: Path | None) -> str | None:

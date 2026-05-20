@@ -497,6 +497,33 @@ def test_lora_specs_fail_before_inference_for_missing_or_excess_loras(tmp_path):
         normalize_lora_specs(many)
 
 
+def test_lora_specs_resolve_huggingface_cache_snapshot(monkeypatch, tmp_path):
+    cache_root = tmp_path / "hf" / "hub"
+    snapshot = write_huggingface_cache_resource(
+        cache_root,
+        "Lightricks/LTX-2.3-22b-IC-LoRA-Union-Control",
+        "ltx-2.3-22b-ic-lora-union-control-ref0.5.safetensors",
+    )
+    monkeypatch.setenv("HUGGINGFACE_HUB_CACHE", str(cache_root))
+
+    specs = normalize_lora_specs(
+        [
+            {
+                "id": "ltx_2_3_ic_union_control",
+                "weight": 0.7,
+                "source": {
+                    "provider": "huggingface",
+                    "repo": "Lightricks/LTX-2.3-22b-IC-LoRA-Union-Control",
+                    "file": "ltx-2.3-22b-ic-lora-union-control-ref0.5.safetensors",
+                },
+            }
+        ]
+    )
+
+    assert specs[0].path == str(snapshot / "ltx-2.3-22b-ic-lora-union-control-ref0.5.safetensors")
+    assert specs[0].weight == 0.7
+
+
 def test_image_adapter_env_aliases_and_unknown_values(monkeypatch):
     monkeypatch.setenv("SCENEWORKS_IMAGE_ADAPTER", "procedural")
     assert create_image_adapter({"payload": {"model": "z_image_turbo"}}).__class__.__name__ == "ProceduralImageAdapter"
