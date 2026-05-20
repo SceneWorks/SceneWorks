@@ -1556,7 +1556,7 @@ export function App() {
       <aside className="sidebar" aria-label="Primary">
         <div className="brand">
           <span className="brand-mark" aria-hidden="true">
-            SW
+            <img src="/sceneworks-logo.svg" alt="" />
           </span>
           <div>
             <h1>SceneWorks</h1>
