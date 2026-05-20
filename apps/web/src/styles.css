@@ -2065,11 +2065,12 @@ label {
 
 .local-job-card {
   display: grid;
-  gap: 9px;
+  gap: 12px;
   border: 1px solid var(--border);
   background: var(--surface-2);
   border-radius: var(--r-md);
   padding: 12px;
+  min-width: 0;
 }
 
 .local-job-card.failed,
@@ -2080,11 +2081,14 @@ label {
 }
 
 .local-job-main {
-  display: flex;
-  flex-wrap: wrap;
-  justify-content: space-between;
-  gap: 10px;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 10px 12px;
   align-items: start;
+}
+
+.local-job-main > div {
+  min-width: 0;
 }
 
 .local-job-main h3 {
@@ -2096,6 +2100,25 @@ label {
   font-size: 15px;
   font-weight: 600;
   line-height: 1.35;
+  overflow-wrap: anywhere;
+}
+
+.local-job-card .job-meta {
+  gap: 6px;
+}
+
+.local-job-card .job-meta span {
+  min-width: 0;
+  padding: 4px 8px;
+  border: 1px solid var(--border);
+  border-radius: var(--r-pill);
+  background: var(--surface);
+  line-height: 1.35;
+  overflow-wrap: anywhere;
+}
+
+.local-job-card .job-message {
+  line-height: 1.45;
   overflow-wrap: anywhere;
 }
 
@@ -2118,6 +2141,7 @@ label {
   font-weight: 600;
   text-transform: capitalize;
   letter-spacing: 0.02em;
+  white-space: nowrap;
 }
 
 .status-badge.installed,
