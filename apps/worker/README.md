@@ -12,8 +12,9 @@ Runtime dependencies live in `requirements.txt`. Test-only dependencies live in
 `requirements-dev.txt` and are intentionally excluded from the Docker image.
 The Dockerfile defaults to CPU-only PyTorch for direct image builds, while
 `docker-compose.yml` passes CUDA PyTorch build args for the inference worker.
-Override `PYTORCH_INDEX_URL` / `PYTORCH_SPEC` for direct `docker build`, or
-`SCENEWORKS_PYTORCH_INDEX_URL` / `SCENEWORKS_PYTORCH_SPEC` for Compose builds.
+Override `PYTORCH_INDEX_URL` / `PYTORCH_SPEC` / `PYTORCH_AUDIO_SPEC` for direct
+`docker build`, or `SCENEWORKS_PYTORCH_INDEX_URL` / `SCENEWORKS_PYTORCH_SPEC` /
+`SCENEWORKS_PYTORCH_AUDIO_SPEC` for Compose builds.
 GPU workers with CPU-only PyTorch intentionally register without generation
 capabilities so jobs stay queued instead of crawling on CPU with an idle GPU.
 
