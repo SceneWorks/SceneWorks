@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import importlib
 import json
+import sys
 from pathlib import Path
 from typing import NamedTuple
-from types import SimpleNamespace
+from types import ModuleType, SimpleNamespace
 
 from PIL import Image
 import pytest
@@ -57,6 +59,7 @@ from scene_worker.video_adapters import (
     create_video_adapter,
     evenly_spaced_indices,
     frames_from_output,
+    install_ltx_pipelines_multigpu_compat,
     ltx_model_manifest_entry,
     ltx_frame_count,
     load_seekable_image_frame,
@@ -1121,6 +1124,24 @@ def test_ltx_video_requirements_report_normalized_frame_count():
     assert requirements["requestedFrames"] == 150
     assert requirements["estimatedFrames"] == 153
     assert requirements["repo"] == "Lightricks/LTX-2.3"
+
+
+def test_ltx_pipelines_multigpu_compat_installs_missing_type_module(monkeypatch):
+    for module_name in (
+        "ltx_pipelines",
+        "ltx_pipelines.multigpu",
+        "ltx_pipelines.multigpu.delegating_builder",
+    ):
+        monkeypatch.delitem(sys.modules, module_name, raising=False)
+    parent = ModuleType("ltx_pipelines")
+    parent.__path__ = []
+    monkeypatch.setitem(sys.modules, "ltx_pipelines", parent)
+
+    install_ltx_pipelines_multigpu_compat()
+
+    module = importlib.import_module("ltx_pipelines.multigpu.delegating_builder")
+    with pytest.raises(RuntimeError, match="optional multigpu DelegatingBuilder"):
+        module.DelegatingBuilder()
 
 
 def write_native_ltx_manifest(config_dir, *, checkpoint=None, spatial=None, lora=None, gemma=None):
