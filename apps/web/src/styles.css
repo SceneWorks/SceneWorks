@@ -802,6 +802,7 @@ label {
 .advanced-toggle,
 .detail-actions button,
 .review-actions button,
+.preview-actions button,
 .file-upload-button,
 .modal-close,
 .asset-picker-head button,
@@ -843,6 +844,7 @@ label {
 .advanced-toggle:hover:not(:disabled),
 .detail-actions button:hover:not(:disabled),
 .review-actions button:hover:not(:disabled),
+.preview-actions button:hover:not(:disabled),
 .file-upload-button:hover,
 .modal-close:hover:not(:disabled),
 .asset-picker-head button:hover:not(:disabled),
@@ -991,6 +993,7 @@ label {
 .toolbar,
 .review-actions,
 .detail-actions,
+.preview-actions,
 .editor-actions,
 .timeline-create,
 .playback-bar,
@@ -3948,10 +3951,36 @@ label {
 
 .preview-modal footer {
   display: flex;
+  flex-wrap: wrap;
   justify-content: space-between;
   gap: 12px;
+  align-items: center;
   color: var(--text-muted);
   font-size: 13px;
+}
+
+.preview-modal-meta {
+  display: grid;
+  gap: 3px;
+  min-width: min(100%, 280px);
+}
+
+.preview-modal-meta strong,
+.preview-modal-meta span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.preview-actions {
+  gap: 8px;
+  justify-content: flex-end;
+}
+
+.preview-actions button {
+  min-height: 32px;
+  padding: 0 12px;
+  font-size: 12.5px;
 }
 
 .modal-close {

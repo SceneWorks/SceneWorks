@@ -325,6 +325,10 @@ export function App() {
     () => assets.find((asset) => asset.id === selectedAssetId) ?? assets[0] ?? null,
     [assets, selectedAssetId],
   );
+  const previewedAsset = useMemo(
+    () => (previewAsset ? assets.find((asset) => asset.id === previewAsset.id) ?? previewAsset : null),
+    [assets, previewAsset],
+  );
   const latestAssets = useMemo(
     () => assets.filter((asset) => asset.generationSetId === latestGenerationSetId),
     [assets, latestGenerationSetId],
@@ -1822,7 +1826,21 @@ export function App() {
         ) : null}
       </section>
 
-      {previewAsset ? <FullscreenPreview asset={previewAsset} onClose={() => setPreviewAsset(null)} /> : null}
+      {previewedAsset ? (
+        <FullscreenPreview
+          asset={previewedAsset}
+          deleteAsset={async (asset) => {
+            await deleteAsset(asset);
+            setPreviewAsset(null);
+          }}
+          onClose={() => setPreviewAsset(null)}
+          purgeAsset={async (asset) => {
+            await purgeAsset(asset);
+            setPreviewAsset(null);
+          }}
+          updateAssetStatus={updateAssetStatus}
+        />
+      ) : null}
     </main>
   );
 }

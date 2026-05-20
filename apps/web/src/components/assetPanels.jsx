@@ -146,7 +146,7 @@ export function AssetCard({ asset, deleteAsset, purgeAsset, onPreview, updateAss
   );
 }
 
-export function FullscreenPreview({ asset, onClose }) {
+export function FullscreenPreview({ asset, deleteAsset, onClose, purgeAsset, updateAssetStatus }) {
   return (
     <div className="modal-backdrop" role="dialog" aria-modal="true">
       <div className="preview-modal">
@@ -155,8 +155,27 @@ export function FullscreenPreview({ asset, onClose }) {
         </button>
         <AssetMedia asset={asset} />
         <footer>
-          <strong>{asset.displayName}</strong>
-          <span>{asset.recipe?.model}</span>
+          <div className="preview-modal-meta">
+            <strong>{asset.displayName}</strong>
+            <span>{asset.recipe?.model}</span>
+          </div>
+          <div className="preview-actions">
+            <button onClick={() => updateAssetStatus(asset, { favorite: !asset.status?.favorite })} type="button">
+              {asset.status?.favorite ? "Saved" : "Favorite"}
+            </button>
+            <button onClick={() => updateAssetStatus(asset, { rejected: !asset.status?.rejected })} type="button">
+              {asset.status?.rejected ? "Restore" : "Reject"}
+            </button>
+            {asset.status?.trashed ? (
+              <button className="danger-action" onClick={() => purgeAsset(asset)} type="button">
+                Purge
+              </button>
+            ) : (
+              <button className="danger-action" onClick={() => deleteAsset(asset)} type="button">
+                Discard
+              </button>
+            )}
+          </div>
         </footer>
       </div>
     </div>
