@@ -3194,6 +3194,12 @@ label {
 }
 
 /* ---------- Studio screens (image + video) ---------- */
+.studio-shell {
+  display: grid;
+  gap: var(--gap-4);
+  align-content: start;
+}
+
 .studio-layout {
   display: grid;
   grid-template-columns: minmax(300px, 420px) minmax(0, 1fr);
