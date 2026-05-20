@@ -375,6 +375,7 @@ def run_image_job(api: ApiClient, settings: WorkerSettings, job: dict, image_ada
 def run_video_job(api: ApiClient, settings: WorkerSettings, job: dict) -> None:
     job_id = job["id"]
     adapter = create_video_adapter(job)
+    job_failed = False
 
     def adapter_loaded_models() -> list[str]:
         return loaded_models_from_adapter(adapter, job_id=job_id)
@@ -453,7 +454,7 @@ def run_video_job(api: ApiClient, settings: WorkerSettings, job: dict) -> None:
             },
         )
     except Exception as exc:
-        adapter.cleanup(job_id)
+        job_failed = True
         message, error = friendly_failure("Video generation", exc)
         update_job(
             api,
@@ -467,6 +468,13 @@ def run_video_job(api: ApiClient, settings: WorkerSettings, job: dict) -> None:
             },
         )
     finally:
+        # Free GPU memory only after the except block exits: while the handler
+        # runs, the interpreter keeps the active exception (and its traceback)
+        # alive, and that traceback references the OOM tensors — so an
+        # empty_cache() inside the handler reclaims nothing and the memory stays
+        # held until the worker restarts.
+        if job_failed:
+            adapter.cleanup(job_id)
         heartbeat(api, settings, "idle", loaded_models=adapter_loaded_models())
 
 

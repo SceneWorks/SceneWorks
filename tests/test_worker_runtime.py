@@ -1088,6 +1088,58 @@ def test_video_job_estimate_progress_accepts_non_preview_frame_requirements(monk
     assert "Estimated 121 frames for this clip." in progress_messages
 
 
+def test_video_job_failure_runs_cleanup_to_free_gpu(monkeypatch):
+    events = {"cleanup": 0, "status": None}
+
+    class Api:
+        def post(self, path, payload):
+            if path.endswith("/heartbeat"):
+                return {}
+            if path.endswith("/progress"):
+                events["status"] = payload.get("status")
+                return {"status": payload["status"], "stage": payload.get("stage")}
+            raise AssertionError(path)
+
+        def get(self, _path):
+            return {"cancelRequested": False}
+
+    class VideoAdapter:
+        def prepare(self, *, settings, job):
+            return {"job": job["id"]}
+
+        def ensure_models(self, _request):
+            return None
+
+        def estimate_requirements(self, _request):
+            return {"estimatedFrames": 121, "requestedFrames": 120}
+
+        def run(self, *, settings, job, request, progress, cancel_requested):
+            raise RuntimeError("CUDA error: out of memory")
+
+        def cancel(self, _job_id):
+            raise AssertionError("cancel should not be called")
+
+        def cleanup(self, _job_id):
+            events["cleanup"] += 1
+
+    monkeypatch.setattr("scene_worker.runtime.create_video_adapter", lambda _job=None: VideoAdapter())
+    monkeypatch.setattr(
+        "scene_worker.runtime.run_blocking_job_step",
+        lambda *_args, **_kwargs: _args[4](),
+    )
+
+    run_video_job(
+        Api(),
+        SimpleNamespace(worker_id="worker-1"),
+        {"id": "job-oom", "payload": {"projectId": "project-1", "prompt": "clip"}},
+    )
+
+    # On failure the adapter is cleaned up (pipeline evicted + CUDA cache freed)
+    # so the GPU does not stay pinned until a worker restart.
+    assert events["cleanup"] == 1
+    assert events["status"] == "failed"
+
+
 def test_random_batch_seeds_are_used_per_image():
     assert resolve_seed(None, "city at night", 2, [101, 202, 303, 404]) == 303
 
@@ -1193,6 +1245,12 @@ def test_ltx_pipelines_multigpu_compat_installs_missing_type_module(monkeypatch)
     module = importlib.import_module("ltx_pipelines.multigpu.delegating_builder")
     with pytest.raises(RuntimeError, match="optional multigpu DelegatingBuilder"):
         module.DelegatingBuilder()
+
+
+class _FakeQuantizationPolicy:
+    @staticmethod
+    def fp8_cast():
+        return "fp8-cast"
 
 
 def write_native_ltx_manifest(config_dir, *, checkpoint=None, spatial=None, lora=None, gemma=None):
@@ -1336,6 +1394,35 @@ def test_native_ltx_pipeline_override_decouples_from_quality(tmp_path):
     # Auto preserves the quality-driven default.
     assert pipeline_for("balanced", {"ltxPipeline": "auto"}) == "ltx_pipelines.ti2vid_two_stages"
     assert pipeline_for("fast", {}) == "ltx_pipelines.distilled"
+
+
+def test_native_ltx_precision_selects_quantization_and_offload(monkeypatch):
+    import scene_worker.video_adapters as va
+
+    fake_offload = SimpleNamespace(CPU="cpu", DISK="disk", NONE="none")
+
+    def fake_import(name):
+        if name == "ltx_pipelines.utils.types":
+            return SimpleNamespace(OffloadMode=fake_offload)
+        if name == "ltx_core.quantization":
+            return SimpleNamespace(QuantizationPolicy=_FakeQuantizationPolicy)
+        raise ImportError(name)
+
+    monkeypatch.setattr("scene_worker.video_adapters.install_ltx_pipelines_multigpu_compat", lambda: None)
+    monkeypatch.setattr("scene_worker.video_adapters.importlib.import_module", fake_import)
+    adapter = va.LtxPipelinesVideoAdapter()
+
+    def req(advanced):
+        return SimpleNamespace(advanced=advanced)
+
+    # Default precision is fp8 -> a quantization policy is built.
+    assert adapter._quantization(req({})) == "fp8-cast"
+    # Explicit bf16 -> no quantization.
+    assert adapter._quantization(req({"precision": "bf16"})) is None
+    # bf16 keeps the default CPU offload.
+    assert adapter._offload_mode(req({"precision": "bf16"})) == "cpu"
+    # The fp8 path forces offload off (mutual exclusion in the loader).
+    assert adapter._offload_mode(req({}), override="none") == "none"
 
 
 def test_native_ltx_distilled_variant_switches_files(tmp_path):
@@ -1772,6 +1859,8 @@ def test_native_ltx_text_to_video_uses_ltx_pipeline_and_writes_mp4(monkeypatch, 
             )
         if name == "ltx_pipelines.utils.types":
             return SimpleNamespace(OffloadMode=FakeOffloadMode)
+        if name == "ltx_core.quantization":
+            return SimpleNamespace(QuantizationPolicy=_FakeQuantizationPolicy)
         if name == "ltx_pipelines.ti2vid_two_stages":
             return SimpleNamespace(TI2VidTwoStagesPipeline=FakePipeline)
         if name == "ltx_core.model.video_vae":
@@ -1820,6 +1909,10 @@ def test_native_ltx_text_to_video_uses_ltx_pipeline_and_writes_mp4(monkeypatch, 
     assert media_path.read_bytes() == b"mp4"
     assert calls["init"]["checkpoint_path"] == str(checkpoint)
     assert calls["init"]["distilled_lora"] == [(str(lora), 0.6, {"rename": "map"})]
+    # Default precision is fp8: quantization is passed and offload is forced off
+    # (FP8 and weight offloading are mutually exclusive in the native loader).
+    assert calls["init"]["quantization"] == "fp8-cast"
+    assert calls["init"]["offload_mode"] == "none"
     assert calls["run"]["prompt"] == "Neon harbor"
     assert calls["run"]["negative_prompt"] == "rain"
     assert calls["run"]["num_inference_steps"] == 7
@@ -1938,6 +2031,8 @@ def test_native_ltx_image_to_video_passes_source_image_conditioning(monkeypatch,
             )
         if name == "ltx_pipelines.utils.types":
             return SimpleNamespace(OffloadMode=FakeOffloadMode)
+        if name == "ltx_core.quantization":
+            return SimpleNamespace(QuantizationPolicy=_FakeQuantizationPolicy)
         if name == "ltx_pipelines.ic_lora":
             return SimpleNamespace(ICLoraPipeline=FakePipeline)
         if name == "ltx_core.model.video_vae":
@@ -2063,6 +2158,8 @@ def test_native_ltx_image_to_video_falls_back_without_ic_lora(monkeypatch, tmp_p
             )
         if name == "ltx_pipelines.utils.types":
             return SimpleNamespace(OffloadMode=FakeOffloadMode)
+        if name == "ltx_core.quantization":
+            return SimpleNamespace(QuantizationPolicy=_FakeQuantizationPolicy)
         if name == "ltx_pipelines.ti2vid_two_stages":
             return SimpleNamespace(TI2VidTwoStagesPipeline=FakePipeline)
         if name == "ltx_core.model.video_vae":
@@ -2180,6 +2277,8 @@ def test_native_ltx_extend_clip_uses_ic_lora_video_conditioning(monkeypatch, tmp
             )
         if name == "ltx_pipelines.utils.types":
             return SimpleNamespace(OffloadMode=FakeOffloadMode)
+        if name == "ltx_core.quantization":
+            return SimpleNamespace(QuantizationPolicy=_FakeQuantizationPolicy)
         if name == "ltx_pipelines.ic_lora":
             return SimpleNamespace(ICLoraPipeline=FakePipeline)
         if name == "ltx_core.model.video_vae":
@@ -2286,6 +2385,8 @@ def test_native_ltx_cleanup_deletes_temp_output_and_evicts_pipeline(monkeypatch,
             )
         if name == "ltx_pipelines.utils.types":
             return SimpleNamespace(OffloadMode=FakeOffloadMode)
+        if name == "ltx_core.quantization":
+            return SimpleNamespace(QuantizationPolicy=_FakeQuantizationPolicy)
         if name == "ltx_pipelines.ti2vid_two_stages":
             return SimpleNamespace(TI2VidTwoStagesPipeline=FakePipeline)
         if name == "ltx_core.model.video_vae":

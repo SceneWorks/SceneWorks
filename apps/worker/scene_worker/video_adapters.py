@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
+import gc
 import hashlib
 import importlib
 import importlib.util
@@ -319,6 +320,12 @@ class LtxPipelinesVideoAdapter(ProceduralVideoAdapter):
     # peak VRAM); callers can override via advanced.offloadMode.
     _default_offload_mode = "cpu"
 
+    # FP8 quantizes the transformer weights (~half their VRAM) and is the native
+    # stack's primary memory-reduction lever — it matches ComfyUI's footprint and
+    # works on the bf16 checkpoints we ship. FP8 and weight offloading are mutually
+    # exclusive in the loader, so enabling FP8 forces offload_mode=none.
+    _default_precision = "fp8"
+
     def __init__(self) -> None:
         super().__init__()
         self._loaded_models: set[str] = set()
@@ -613,7 +620,10 @@ class LtxPipelinesVideoAdapter(ProceduralVideoAdapter):
 
         install_ltx_pipelines_multigpu_compat()
         loader = importlib.import_module("ltx_core.loader")
-        offload_mode = self._offload_mode(request)
+        quantization = self._quantization(request)
+        # FP8 and weight offloading are mutually exclusive in the native loader
+        # (offloading silently disables FP8), so force offload off when FP8 is on.
+        offload_mode = self._offload_mode(request, override="none" if quantization is not None else None)
         loras = self._ltx_loras(loader, request)
         # The native Lightricks constructors expose `loras` across distilled,
         # two-stage, and IC-LoRA pipelines; `distilled_lora` remains separate.
@@ -621,6 +631,7 @@ class LtxPipelinesVideoAdapter(ProceduralVideoAdapter):
             "gemma_root": str(resources.gemma_root),
             "spatial_upsampler_path": str(resources.spatial_upsampler_path),
             "loras": loras,
+            "quantization": quantization,
             "torch_compile": bool(request.advanced.get("compile", False)),
             "offload_mode": offload_mode,
         }
@@ -754,6 +765,7 @@ class LtxPipelinesVideoAdapter(ProceduralVideoAdapter):
                 str(resources.distilled_lora_path),
                 str(resources.gemma_root),
                 str(request.advanced.get("offloadMode", self._default_offload_mode)),
+                str(request.advanced.get("precision", self._default_precision)),
                 lora_cache_key_for_specs(self._ltx_lora_specs(request)) if request.loras else "",
             ]
         )
@@ -796,8 +808,9 @@ class LtxPipelinesVideoAdapter(ProceduralVideoAdapter):
                 updated[key] = {**entry, "file": variants[variant]}
         return updated
 
-    def _offload_mode(self, request: VideoRequest) -> Any:
-        offload_value = str(request.advanced.get("offloadMode", self._default_offload_mode)).strip().lower()
+    def _offload_mode(self, request: VideoRequest, *, override: str | None = None) -> Any:
+        raw = override if override is not None else request.advanced.get("offloadMode", self._default_offload_mode)
+        offload_value = str(raw).strip().lower()
         install_ltx_pipelines_multigpu_compat()
         types_module = importlib.import_module("ltx_pipelines.utils.types")
         offload_mode = getattr(types_module, "OffloadMode")
@@ -806,6 +819,14 @@ class LtxPipelinesVideoAdapter(ProceduralVideoAdapter):
         if offload_value == "disk":
             return offload_mode.DISK
         return offload_mode.NONE
+
+    def _quantization(self, request: VideoRequest) -> Any:
+        precision = str(request.advanced.get("precision", self._default_precision)).strip().lower()
+        if precision != "fp8":
+            return None
+        install_ltx_pipelines_multigpu_compat()
+        quant_module = importlib.import_module("ltx_core.quantization")
+        return quant_module.QuantizationPolicy.fp8_cast()
 
     def _advanced_float(self, request: VideoRequest, key: str, fallback: float) -> float:
         try:
@@ -816,6 +837,10 @@ class LtxPipelinesVideoAdapter(ProceduralVideoAdapter):
     def _evict_pipeline(self) -> None:
         self._pipeline = None
         self._pipeline_key_value = None
+        # Drop reference cycles (e.g. frames retained by a failed run) before
+        # asking the CUDA allocator to release blocks — empty_cache() can only
+        # reclaim memory that is no longer referenced by any live Python object.
+        gc.collect()
         try:
             torch = importlib.import_module("torch")
             cuda = getattr(torch, "cuda", None)
