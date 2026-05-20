@@ -1,5 +1,5 @@
-import React, { useEffect, useMemo, useState } from "react";
-import { AssetMedia, assetCanRenderAsImage } from "../components/assetMedia.jsx";
+import React, { useEffect, useMemo, useRef, useState } from "react";
+import { AssetMedia, assetCanRenderAsImage, assetCanRenderAsVideo } from "../components/assetMedia.jsx";
 import { formatSeconds } from "../formatting.js";
 import {
   aspectOptions,
@@ -41,6 +41,7 @@ export function EditorScreen({
   const [generationPrompt, setGenerationPrompt] = useState("Continue the action with matching motion and lighting");
   const [extensionDuration, setExtensionDuration] = useState(4);
   const [timelineNotice, setTimelineNotice] = useState("");
+  const previewVideoRef = useRef(null);
 
   const selectedItem = useMemo(() => {
     if (!activeTimeline) {
@@ -64,8 +65,22 @@ export function EditorScreen({
     if (selectedItem) {
       setPlayheadSeconds(Number(selectedItem.timelineStart) || 0);
     }
+    setIsPlaying(false);
     setTimelineNotice("");
   }, [selectedItem?.id]);
+
+  useEffect(() => {
+    const video = previewVideoRef.current;
+    if (!assetCanRenderAsVideo(selectedAsset) || !video) {
+      setIsPlaying(false);
+      return;
+    }
+    if (isPlaying) {
+      video.play().catch(() => setIsPlaying(false));
+      return;
+    }
+    video.pause();
+  }, [isPlaying, selectedAsset?.id]);
 
   useEffect(() => {
     function onKeyDown(event) {
@@ -438,10 +453,21 @@ export function EditorScreen({
         <div className="editor-layout">
           <section className="editor-preview">
             <div className={`preview-canvas aspect-${activeTimeline.aspectRatio.replace(":", "-")}`}>
-              {selectedAsset ? <AssetMedia asset={selectedAsset} /> : <span>Select a timeline item</span>}
+              {selectedAsset ? (
+                <AssetMedia
+                  asset={selectedAsset}
+                  controls={false}
+                  onEnded={() => setIsPlaying(false)}
+                  onPause={() => setIsPlaying(false)}
+                  onPlay={() => setIsPlaying(true)}
+                  ref={previewVideoRef}
+                />
+              ) : (
+                <span>Select a timeline item</span>
+              )}
             </div>
             <div className="playback-bar">
-              <button onClick={() => setIsPlaying((value) => !value)} type="button">
+              <button disabled={!assetCanRenderAsVideo(selectedAsset)} onClick={() => setIsPlaying((value) => !value)} type="button">
                 {isPlaying ? "Pause" : "Play"}
               </button>
               <span>{formatSeconds(Math.round(duration))}</span>

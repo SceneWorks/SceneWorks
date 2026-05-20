@@ -1,5 +1,34 @@
 import React from "react";
 import { AssetMedia } from "./assetMedia.jsx";
+import { Icon } from "./Icons.jsx";
+
+function RatingControl({ asset, updateAssetStatus }) {
+  const currentRating = Number(asset.status?.rating) || 0;
+
+  return (
+    <div aria-label="Rating" className="rating-control" role="group">
+      <span className="rating-label">Rating</span>
+      <div className="rating-stars">
+        {[1, 2, 3, 4, 5].map((rating) => {
+          const active = currentRating >= rating;
+          return (
+            <button
+              aria-label={`Set rating to ${rating} ${rating === 1 ? "star" : "stars"}`}
+              aria-pressed={active}
+              className={active ? "star-rating-button active" : "star-rating-button"}
+              key={rating}
+              onClick={() => updateAssetStatus(asset, { rating })}
+              title={`${rating} ${rating === 1 ? "star" : "stars"}`}
+              type="button"
+            >
+              <Icon.Star filled={active} size={18} />
+            </button>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
 
 export function AssetGrid({ assets, onPreview, selectedAsset, setSelectedAssetId }) {
   if (!assets.length) {
@@ -36,18 +65,7 @@ export function AssetDetail({ asset, deleteAsset, purgeAsset, onPreview, onSendI
       </button>
       <h3>{asset.displayName}</h3>
       <p>{asset.recipe?.prompt ?? "No prompt"}</p>
-      <div className="rating-row">
-        {[1, 2, 3, 4, 5].map((rating) => (
-          <button
-            className={asset.status?.rating >= rating ? "active" : ""}
-            key={rating}
-            onClick={() => updateAssetStatus(asset, { rating })}
-            type="button"
-          >
-            {rating}
-          </button>
-        ))}
-      </div>
+      <RatingControl asset={asset} updateAssetStatus={updateAssetStatus} />
       <div className="detail-actions">
         <button onClick={() => updateAssetStatus(asset, { favorite: !asset.status?.favorite })} type="button">
           {asset.status?.favorite ? "Unfavorite" : "Favorite"}
@@ -128,17 +146,65 @@ export function AssetCard({ asset, deleteAsset, purgeAsset, onPreview, updateAss
   );
 }
 
-export function FullscreenPreview({ asset, onClose }) {
+export function FullscreenPreview({
+  asset,
+  deleteAsset,
+  nextAsset,
+  onClose,
+  onPreviewAsset,
+  previousAsset,
+  purgeAsset,
+  updateAssetStatus,
+}) {
   return (
     <div className="modal-backdrop" role="dialog" aria-modal="true">
       <div className="preview-modal">
         <button className="modal-close" onClick={onClose} type="button">
           Close
         </button>
-        <AssetMedia asset={asset} />
+        <div className="preview-modal-stage">
+          <button
+            aria-label="Previous asset"
+            className="preview-nav-button previous"
+            disabled={!previousAsset}
+            onClick={() => previousAsset && onPreviewAsset(previousAsset)}
+            type="button"
+          >
+            <Icon.ArrowLeft size={18} />
+          </button>
+          <AssetMedia asset={asset} />
+          <button
+            aria-label="Next asset"
+            className="preview-nav-button next"
+            disabled={!nextAsset}
+            onClick={() => nextAsset && onPreviewAsset(nextAsset)}
+            type="button"
+          >
+            <Icon.ArrowRight size={18} />
+          </button>
+        </div>
         <footer>
-          <strong>{asset.displayName}</strong>
-          <span>{asset.recipe?.model}</span>
+          <div className="preview-modal-meta">
+            <strong>{asset.displayName}</strong>
+            <span>{asset.recipe?.model}</span>
+          </div>
+          <div className="preview-actions">
+            <button onClick={() => updateAssetStatus(asset, { favorite: !asset.status?.favorite })} type="button">
+              {asset.status?.favorite ? "Saved" : "Favorite"}
+            </button>
+            <button onClick={() => updateAssetStatus(asset, { rejected: !asset.status?.rejected })} type="button">
+              {asset.status?.rejected ? "Restore" : "Reject"}
+            </button>
+            {asset.status?.trashed ? (
+              <button className="danger-action" onClick={() => purgeAsset(asset)} type="button">
+                Purge
+              </button>
+            ) : (
+              <button className="danger-action" onClick={() => deleteAsset(asset)} type="button">
+                Discard
+              </button>
+            )}
+          </div>
         </footer>
       </div>
     </div>
