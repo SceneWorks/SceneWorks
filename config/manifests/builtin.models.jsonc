@@ -178,8 +178,7 @@
         }
       ],
       "paths": {
-        "model": "${HF_CACHE}/Lightricks/LTX-2.3",
-        "imageToVideoModel": "${HF_CACHE}/Lightricks/LTX-Video"
+        "model": "${HF_CACHE}/Lightricks/LTX-2.3"
       },
       "resources": {
         "checkpoint": {
