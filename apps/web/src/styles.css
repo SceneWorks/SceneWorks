@@ -1653,6 +1653,11 @@ label {
   border-color: var(--border-strong);
 }
 
+.video-playback-bar .play-btn:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
 .video-playback-scrub {
   flex: 1;
   height: 6px;
@@ -3264,6 +3269,11 @@ label {
 .preview-button video {
   aspect-ratio: 16 / 11;
   border-radius: 0;
+}
+
+.preview-button video {
+  object-fit: contain;
+  background: var(--bg-2);
 }
 
 /* ---------- Studio screens (image + video) ---------- */

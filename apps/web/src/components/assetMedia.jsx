@@ -37,7 +37,7 @@ export function AssetThumbnail({ asset, className = "" }) {
   return <span className={className}>{asset.type ?? "asset"}</span>;
 }
 
-export function AssetMedia({ asset, className = "", controls = true }) {
+export const AssetMedia = React.forwardRef(function AssetMedia({ asset, className = "", controls = true, ...mediaProps }, ref) {
   if (!asset) {
     return null;
   }
@@ -46,10 +46,10 @@ export function AssetMedia({ asset, className = "", controls = true }) {
     return <span className={className}>{asset.type ?? "asset"}</span>;
   }
   if (assetCanRenderAsVideo(asset)) {
-    return <video className={className} controls={controls} muted playsInline src={src} />;
+    return <video className={className} controls={controls} muted playsInline preload="metadata" ref={ref} src={src} {...mediaProps} />;
   }
   if (assetCanRenderAsImage(asset)) {
-    return <img alt="" className={className} src={src} />;
+    return <img alt="" className={className} ref={ref} src={src} />;
   }
   return <span className={className}>{asset.type}</span>;
-}
+});

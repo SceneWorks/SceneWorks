@@ -1,7 +1,7 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import { AssetPickerField } from "../components/AssetPicker.jsx";
 import { AssetCard } from "../components/assetPanels.jsx";
-import { AssetMedia } from "../components/assetMedia.jsx";
+import { AssetMedia, assetCanRenderAsVideo } from "../components/assetMedia.jsx";
 import { Icon } from "../components/Icons.jsx";
 import { JobProgressCard } from "../components/JobProgress.jsx";
 
@@ -29,6 +29,12 @@ function estimateRenderSeconds(durationSeconds, quality) {
   if (quality === "fast") return Math.round(base * 0.5);
   if (quality === "best") return Math.round(base * 1.5);
   return Math.round(base);
+}
+
+function formatPlaybackTime(seconds) {
+  const safeSeconds = Math.max(0, Math.round(Number(seconds) || 0));
+  const minutes = Math.floor(safeSeconds / 60);
+  return `${minutes}:${String(safeSeconds % 60).padStart(2, "0")}`;
 }
 import {
   clearPresetDefault,
@@ -106,6 +112,10 @@ export function VideoStudio({
   const [abSide, setAbSide] = useState("replacement");
   const [submitting, setSubmitting] = useState(false);
   const [resultFallbackTick, setResultFallbackTick] = useState(0);
+  const previewVideoRef = useRef(null);
+  const [previewPlaying, setPreviewPlaying] = useState(false);
+  const [previewTime, setPreviewTime] = useState(0);
+  const [previewDuration, setPreviewDuration] = useState(0);
   const presetDefaultSnapshots = useRef({});
   const capabilities = selectedModel?.capabilities ?? [];
   const supportsMode = capabilities.includes(mode);
@@ -416,6 +426,27 @@ export function VideoStudio({
   const previewAsset = latestAssets[0] ?? null;
   const estimateSeconds = estimateRenderSeconds(duration, quality);
   const gpuLabel = formatGpuLabel(requestedGpu);
+  const previewCanPlay = assetCanRenderAsVideo(previewAsset);
+  const previewTotalSeconds = previewDuration || Number(previewAsset?.file?.duration) || Number(duration) || 0;
+  const previewProgress = previewTotalSeconds ? `${Math.min(100, (previewTime / previewTotalSeconds) * 100)}%` : "0%";
+
+  useEffect(() => {
+    setPreviewPlaying(false);
+    setPreviewTime(0);
+    setPreviewDuration(0);
+  }, [previewAsset?.id]);
+
+  function togglePreviewPlayback() {
+    const video = previewVideoRef.current;
+    if (!video || !previewCanPlay) {
+      return;
+    }
+    if (video.paused) {
+      video.play().catch(() => setPreviewPlaying(false));
+      return;
+    }
+    video.pause();
+  }
 
   function onPromptKeyDown(event) {
     if ((event.metaKey || event.ctrlKey) && event.key === "Enter") {
@@ -551,20 +582,37 @@ export function VideoStudio({
             <div className="video-preview-card">
               <div className="video-preview-stage">
                 {previewAsset ? (
-                  <AssetMedia asset={previewAsset} />
+                  <AssetMedia
+                    asset={previewAsset}
+                    controls={false}
+                    onEnded={() => setPreviewPlaying(false)}
+                    onLoadedMetadata={(event) => setPreviewDuration(event.currentTarget.duration || 0)}
+                    onPause={() => setPreviewPlaying(false)}
+                    onPlay={() => setPreviewPlaying(true)}
+                    onTimeUpdate={(event) => setPreviewTime(event.currentTarget.currentTime || 0)}
+                    ref={previewVideoRef}
+                  />
                 ) : (
                   <span className="video-preview-empty">No clip rendered yet — set up the prompt above and hit Render</span>
                 )}
               </div>
 
               <div className="video-playback-bar">
-                <button aria-label="Play preview" className="play-btn" type="button">
-                  <Icon.Play size={14} />
+                <button
+                  aria-label={previewPlaying ? "Pause preview" : "Play preview"}
+                  className="play-btn"
+                  disabled={!previewCanPlay}
+                  onClick={togglePreviewPlayback}
+                  type="button"
+                >
+                  {previewPlaying ? <Icon.Pause size={14} /> : <Icon.Play size={14} />}
                 </button>
                 <div aria-hidden="true" className="video-playback-scrub">
-                  <span className="video-playback-scrub-fill" />
+                  <span className="video-playback-scrub-fill" style={{ width: previewProgress }} />
                 </div>
-                <span className="video-playback-time">0:00 / 0:{String(Math.round(Number(duration) || 0)).padStart(2, "0")}</span>
+                <span className="video-playback-time">
+                  {formatPlaybackTime(previewTime)} / {formatPlaybackTime(previewTotalSeconds)}
+                </span>
                 <span className="video-playback-estimate">~{estimateSeconds}s on {gpuLabel}</span>
                 <button
                   className="send-editor-btn"
