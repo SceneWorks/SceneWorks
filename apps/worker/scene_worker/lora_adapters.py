@@ -213,8 +213,31 @@ def lora_path(lora: dict[str, Any]) -> Path | None:
         return huggingface_cached_lora_path(lora)
     path = Path(str(value)).expanduser()
     if path.exists():
-        return path
+        return resolve_lora_file(path, lora)
     return huggingface_cached_lora_path(lora) or path
+
+
+def resolve_lora_file(path: Path, lora: dict[str, Any]) -> Path:
+    # Installed LoRAs are stored as a directory (the manifest keeps the file name
+    # in `files`; `source.path`/`installedPath` point at the directory). The native
+    # ltx-core loader mmaps the given path directly, and mmap on a directory fails
+    # with ENODEV ("No such device (os error 19)"), so descend to the actual
+    # .safetensors file. Diffusers accepts a file too, so this is safe for every
+    # adapter.
+    if not path.is_dir():
+        return path
+    for name in lora_declared_files(lora):
+        candidate = path / name
+        if candidate.is_file():
+            return candidate
+    return first_safetensors_path(path) or path
+
+
+def lora_declared_files(lora: dict[str, Any]) -> list[str]:
+    source = lora.get("source") if isinstance(lora.get("source"), dict) else {}
+    raw = lora.get("files") or source.get("files") or source.get("file") or lora.get("file") or []
+    files = raw if isinstance(raw, list) else [raw]
+    return [str(name).strip() for name in files if str(name).strip()]
 
 
 def huggingface_cached_lora_path(lora: dict[str, Any]) -> Path | None:

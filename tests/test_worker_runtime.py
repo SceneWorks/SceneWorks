@@ -497,6 +497,31 @@ def test_lora_specs_fail_before_inference_for_missing_or_excess_loras(tmp_path):
         normalize_lora_specs(many)
 
 
+def test_lora_specs_resolve_installed_directory_to_safetensors_file(tmp_path):
+    # Installed LoRAs are stored as a directory and the Rust API reports the
+    # directory as `installedPath`. The native ltx-core loader mmaps the path
+    # directly, and mmap on a directory raises ENODEV ("No such device (os error
+    # 19)"), so the spec path must point at the .safetensors file, not the dir.
+    lora_dir = tmp_path / "loras" / "lauren"
+    lora_dir.mkdir(parents=True)
+    weights = lora_dir / "Lauren_ltx2.3.safetensors"
+    weights.write_bytes(b"")
+
+    specs = normalize_lora_specs(
+        [
+            {
+                "id": "lauren",
+                "weight": 0.8,
+                "files": ["Lauren_ltx2.3.safetensors"],
+                "installedPath": str(lora_dir),
+                "source": {"provider": "local", "path": "loras/lauren"},
+            }
+        ]
+    )
+
+    assert specs[0].path == str(weights)
+
+
 def test_lora_specs_resolve_huggingface_cache_snapshot(monkeypatch, tmp_path):
     cache_root = tmp_path / "hf" / "hub"
     snapshot = write_huggingface_cache_resource(
