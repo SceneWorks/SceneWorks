@@ -18,8 +18,10 @@ pub use crate::character_store::{
 };
 use crate::training::TrainingDataset;
 use crate::training_store::{
-    apply_training_dataset_migrations, TrainingDatasetCreateInput, TrainingDatasetMutationResult,
-    TrainingDatasetStore, TrainingDatasetSummary, TrainingDatasetUpdateInput,
+    apply_training_dataset_migrations, TrainingCaptionSidecarsResult,
+    TrainingDatasetBatchRenameInput, TrainingDatasetCaptionSidecarsInput,
+    TrainingDatasetCreateInput, TrainingDatasetMutationResult, TrainingDatasetStore,
+    TrainingDatasetSummary, TrainingDatasetUpdateInput,
 };
 
 pub const ASSET_SIDECAR_PATTERN: &str = "*.sceneworks.json";
@@ -305,6 +307,28 @@ impl ProjectStore {
     ) -> ProjectStoreResult<TrainingDataset> {
         let project_path = self.find_project_path(project_id)?;
         TrainingDatasetStore::new(project_path).update_dataset(project_id, dataset_id, input)
+    }
+
+    pub fn batch_rename_training_dataset_items(
+        &self,
+        project_id: &str,
+        dataset_id: &str,
+        input: TrainingDatasetBatchRenameInput,
+    ) -> ProjectStoreResult<TrainingDataset> {
+        let project_path = self.find_project_path(project_id)?;
+        TrainingDatasetStore::new(project_path)
+            .batch_rename_dataset_items(project_id, dataset_id, input)
+    }
+
+    pub fn write_training_dataset_caption_sidecars(
+        &self,
+        project_id: &str,
+        dataset_id: &str,
+        input: TrainingDatasetCaptionSidecarsInput,
+    ) -> ProjectStoreResult<TrainingCaptionSidecarsResult> {
+        let project_path = self.find_project_path(project_id)?;
+        TrainingDatasetStore::new(project_path)
+            .write_caption_sidecars(project_id, dataset_id, input)
     }
 
     pub fn delete_training_dataset(
