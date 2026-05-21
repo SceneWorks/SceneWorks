@@ -26,7 +26,7 @@ export function TrainingStudio({
   datasets = [],
   datasetsError = "",
   loadingDatasets = false,
-  onRefreshDatasets,
+  onRefreshDatasets = () => {},
 }) {
   const [activeTab, setActiveTab] = useState("dataset");
   const tabRefs = useRef({});
@@ -107,7 +107,7 @@ export function TrainingStudio({
             <div className="training-tabs" role="tablist" aria-label="Training workflow">
               {tabs.map((tab) => (
                 <button
-                  aria-controls={`training-panel-${tab.id}`}
+                  aria-controls={activeTab === tab.id ? `training-panel-${tab.id}` : undefined}
                   aria-selected={activeTab === tab.id}
                   className={activeTab === tab.id ? "active" : ""}
                   id={`training-tab-${tab.id}`}
@@ -150,15 +150,18 @@ export function TrainingStudio({
                     <div className="empty-panel">Loading training datasets</div>
                   ) : datasets.length ? (
                     <div className="training-dataset-list">
-                      {datasets.map((dataset) => (
-                        <article className="training-dataset-row" key={dataset.id}>
-                          <div>
-                            <strong>{dataset.name ?? dataset.id}</strong>
-                            <span>{formatDatasetModality(dataset)} dataset</span>
-                          </div>
-                          <span>{datasetItemCount(dataset)} item{datasetItemCount(dataset) === 1 ? "" : "s"}</span>
-                        </article>
-                      ))}
+                      {datasets.map((dataset) => {
+                        const itemCount = datasetItemCount(dataset);
+                        return (
+                          <article className="training-dataset-row" key={dataset.id}>
+                            <div>
+                              <strong>{dataset.name ?? dataset.id}</strong>
+                              <span>{formatDatasetModality(dataset)} dataset</span>
+                            </div>
+                            <span>{itemCount} item{itemCount === 1 ? "" : "s"}</span>
+                          </article>
+                        );
+                      })}
                     </div>
                   ) : (
                     <div className="empty-panel">No training datasets yet</div>
