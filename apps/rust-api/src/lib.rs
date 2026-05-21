@@ -384,6 +384,8 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
 fn spawn_inprocess_utility_worker(port: u16) -> InProcessUtilityWorker {
     let mut worker_settings = sceneworks_worker::Settings::from_env();
     worker_settings.api_url = format!("http://127.0.0.1:{port}");
+    worker_settings.gpu_id =
+        inprocess_worker_gpu_id(std::env::var("SCENEWORKS_RUST_WORKER_GPU_ID").ok());
     let grace = Duration::from_secs(worker_settings.shutdown_timeout_seconds.max(1));
     println!(
         "SceneWorks utility worker running in-process (loopback {})",
@@ -392,6 +394,19 @@ fn spawn_inprocess_utility_worker(port: u16) -> InProcessUtilityWorker {
     let handle =
         tokio::spawn(async move { sceneworks_worker::run_worker_loop(worker_settings).await });
     InProcessUtilityWorker { handle, grace }
+}
+
+/// GPU id for the in-process utility worker. Defaults to `cpu` so the embedded
+/// worker advertises CPU utility capabilities (downloads, imports, ffmpeg,
+/// person detect/track) regardless of the ambient `SCENEWORKS_GPU_ID` — which on
+/// a GPU host would otherwise make it register as a GPU worker that never claims
+/// utility jobs. `SCENEWORKS_RUST_WORKER_GPU_ID` overrides for the rare case of
+/// wanting the embedded worker on a specific GPU.
+fn inprocess_worker_gpu_id(override_var: Option<String>) -> String {
+    override_var
+        .map(|value| value.trim().to_owned())
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| "cpu".to_owned())
 }
 
 struct InProcessUtilityWorker {
@@ -3659,7 +3674,7 @@ async fn access_control(
     next: Next,
 ) -> Response {
     if request.method() == Method::OPTIONS
-        || PUBLIC_PATHS.contains(&request.uri().path())
+        || !requires_token(request.uri().path())
         || is_authorized(request.headers(), &state.settings)
     {
         return next.run(request).await;
@@ -3697,6 +3712,14 @@ fn cors_layer(settings: &Settings) -> CorsLayer {
             header::CONTENT_TYPE,
             HeaderName::from_static("x-sceneworks-token"),
         ])
+}
+
+/// Whether a path is gated by the access token. Only `/api/*` routes are
+/// protected (minus the explicitly public ones); everything else is the
+/// embedded web bundle / SPA fallback, which a browser must be able to load
+/// before it can attach the token header.
+fn requires_token(path: &str) -> bool {
+    path.starts_with("/api/") && !PUBLIC_PATHS.contains(&path)
 }
 
 fn is_authorized(headers: &HeaderMap, settings: &Settings) -> bool {
@@ -6669,9 +6692,10 @@ impl IntoResponse for ApiError {
 #[cfg(test)]
 mod tests {
     use super::{
-        create_app, lora_artifact_paths, strip_jsonc_comments, sweep_stale_lora_uploads_before,
-        EventHub, EventMessage, Settings, API_MANAGED_MANIFEST_HEADER, EVENT_BUFFER_SIZE,
-        HEARTBEAT_SSE_DATA, HEARTBEAT_SSE_WIRE, TEST_MAX_LORA_UPLOAD_BYTES,
+        create_app, inprocess_worker_gpu_id, lora_artifact_paths, requires_token,
+        strip_jsonc_comments, sweep_stale_lora_uploads_before, EventHub, EventMessage, Settings,
+        API_MANAGED_MANIFEST_HEADER, EVENT_BUFFER_SIZE, HEARTBEAT_SSE_DATA, HEARTBEAT_SSE_WIRE,
+        TEST_MAX_LORA_UPLOAD_BYTES,
     };
     use axum::body::{to_bytes, Body};
     use axum::http::{Request, StatusCode};
@@ -10491,6 +10515,49 @@ mod tests {
         .await;
         assert_eq!(status, StatusCode::OK);
         assert_eq!(jobs, json!([]));
+    }
+
+    #[test]
+    fn requires_token_only_gates_api_paths() {
+        // Non-API paths (embedded UI / SPA fallback) must never require a token,
+        // or the browser cannot load the bundle to prompt for one.
+        assert!(!requires_token("/"));
+        assert!(!requires_token("/assets/index-abc.js"));
+        assert!(!requires_token("/projects/some-id"));
+        // Public API paths stay open; other API paths stay gated.
+        assert!(!requires_token("/api/v1/health"));
+        assert!(requires_token("/api/v1/jobs"));
+        assert!(requires_token("/api/v1/projects"));
+    }
+
+    #[tokio::test]
+    async fn embedded_ui_root_is_reachable_with_access_token_set() {
+        let temp_dir = tempfile::tempdir().expect("temp dir creates");
+        let mut settings = test_settings(&temp_dir);
+        settings.access_token = "secret-token".to_owned();
+        let app = create_app(settings).expect("app creates");
+
+        // With a token configured and no header, the embedded UI root and assets
+        // must not be blocked by auth (404 here under default features since the
+        // bundle isn't embedded; the point is it is NOT 401).
+        let (status, _) = request(app.clone(), "GET", "/", Value::Null).await;
+        assert_ne!(status, StatusCode::UNAUTHORIZED);
+        let (status, _) = request(app.clone(), "GET", "/assets/app.js", Value::Null).await;
+        assert_ne!(status, StatusCode::UNAUTHORIZED);
+        // API routes stay protected.
+        let (status, _) = request(app, "GET", "/api/v1/jobs", Value::Null).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+    }
+
+    #[test]
+    fn inprocess_worker_defaults_to_cpu_utility() {
+        // Default (and blank override) → cpu so utility capabilities are
+        // advertised regardless of the ambient SCENEWORKS_GPU_ID.
+        assert_eq!(inprocess_worker_gpu_id(None), "cpu");
+        assert_eq!(inprocess_worker_gpu_id(Some("   ".to_owned())), "cpu");
+        // Explicit override is honored.
+        assert_eq!(inprocess_worker_gpu_id(Some("auto".to_owned())), "auto");
+        assert_eq!(inprocess_worker_gpu_id(Some("0".to_owned())), "0");
     }
 
     #[tokio::test]
