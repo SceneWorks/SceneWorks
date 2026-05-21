@@ -354,6 +354,7 @@ export function App() {
   const [assets, setAssets] = useState([]);
   const [characters, setCharacters] = useState([]);
   const [personTracks, setPersonTracks] = useState([]);
+  const [personReadiness, setPersonReadiness] = useState({});
   const [timelines, setTimelines] = useState([]);
   const [timelinesProjectId, setTimelinesProjectId] = useState(null);
   const [selectedTimelineId, setSelectedTimelineId] = useState(null);
@@ -675,7 +676,7 @@ export function App() {
         return { label, value: fallback, error: optional ? "" : `${label}: ${err.message}` };
       }
     };
-    const [projectsResult, jobsResult, workersResult, modelsResult, lorasResult, presetsResult, trainingTargetsResult] =
+    const [projectsResult, jobsResult, workersResult, modelsResult, lorasResult, presetsResult, trainingTargetsResult, capabilitiesResult] =
       await Promise.all([
         fetchInitial("Projects", "/api/v1/projects", []),
         fetchInitial("Jobs", "/api/v1/jobs", []),
@@ -684,6 +685,7 @@ export function App() {
         fetchInitial("LoRAs", "/api/v1/loras", []),
         fetchInitial("Presets", "/api/v1/recipe-presets", [], true),
         fetchInitial("Training targets", "/api/v1/training/targets", { schemaVersion: 1, targets: [] }),
+        fetchInitial("Capabilities", "/api/v1/capabilities/person", { person: {} }, true),
       ]);
     const projectItems = projectsResult.value;
     setProjects(projectItems);
@@ -693,6 +695,7 @@ export function App() {
     setWorkers(workersResult.value.sort(sortWorkers));
     setQueueSummary(null);
     setModels(modelsResult.value);
+    setPersonReadiness(capabilitiesResult.value?.person ?? {});
     setLoras(lorasResult.value);
     setPresets(presetsResult.value);
     setTrainingTargets(trainingTargetsResult.value);
@@ -1921,6 +1924,7 @@ export function App() {
               setActiveView("Editor");
             }}
             personTracks={personTracks}
+            personReadiness={personReadiness}
             presets={presets}
             requestedGpu={requestedGpu}
             selectedAsset={selectedAsset}

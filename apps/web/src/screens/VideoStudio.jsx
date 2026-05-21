@@ -74,6 +74,7 @@ export function VideoStudio({
   onPreview,
   onSendToEditor,
   personTracks = [],
+  personReadiness = {},
   presets = [],
   requestedGpu,
   selectedAsset,
@@ -549,6 +550,7 @@ export function VideoStudio({
               <ReplacePersonPanel
                 createPersonDetectionJob={createPersonDetectionJob}
                 createPersonTrackJob={createPersonTrackJob}
+                personReadiness={personReadiness}
                 detectionResult={detectionResult}
                 matchingTracks={matchingTracks}
                 personTrackId={personTrackId}

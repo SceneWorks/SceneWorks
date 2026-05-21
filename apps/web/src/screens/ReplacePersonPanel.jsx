@@ -37,7 +37,20 @@ export function ReplacePersonPanel({
   personTrackId,
   replacementMode,
   videoAssets,
+  personReadiness = {},
 }) {
+  // Default-open: only gate when readiness explicitly reports a backend missing.
+  const detectReady = personReadiness?.detect?.ready !== false;
+  const trackReady = personReadiness?.track?.ready !== false;
+  const replaceReady = personReadiness?.replace?.ready !== false;
+  const readinessNotice = !detectReady
+    ? "Detection unavailable: start a GPU worker with the detector backend installed (apps/worker/requirements-person.txt)."
+    : !trackReady
+      ? "Tracking unavailable: no live GPU worker is advertising the tracker capability."
+      : !replaceReady
+        ? "Replacement unavailable: no live GPU worker can run person replacement yet."
+        : "";
+
   function analyzeSource() {
     if (!sourceClipAssetId) {
       return;
@@ -76,8 +89,15 @@ export function ReplacePersonPanel({
         <span>Detection and tracking run on a GPU worker (YOLO + ByteTrack). Replacement uses per-frame segmentation masks when a segmenter is installed and falls back to box masks otherwise.</span>
       </div>
 
+      {readinessNotice ? (
+        <div className="guidance-strip warning" role="status">
+          <strong>Not ready</strong>
+          <span>{readinessNotice}</span>
+        </div>
+      ) : null}
+
       <div className="replace-actions">
-        <button disabled={!sourceClipAssetId} onClick={analyzeSource} type="button">
+        <button disabled={!sourceClipAssetId || !detectReady} onClick={analyzeSource} type="button">
           Analyze Source
         </button>
         <span>{detectionResult ? `${detectionResult.detections?.length ?? 0} candidates` : "No analysis yet"}</span>
@@ -113,7 +133,7 @@ export function ReplacePersonPanel({
           Track name
           <input onChange={(event) => setTrackName(event.target.value)} value={trackName} />
         </label>
-        <button disabled={!representativeFrame || !selectedDetection} onClick={createTrack} type="button">
+        <button disabled={!representativeFrame || !selectedDetection || !trackReady} onClick={createTrack} type="button">
           Save Track
         </button>
       </div>
