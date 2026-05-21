@@ -363,10 +363,13 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
     let settings = Settings::from_env();
     let address: SocketAddr = format!("{}:{}", settings.host, settings.port).parse()?;
     let run_utility_inprocess = settings.run_utility_inprocess;
-    let port = settings.port;
     let app = create_app(settings)?;
     let listener = tokio::net::TcpListener::bind(address).await?;
-    println!("SceneWorks Rust API listening on http://{address}");
+    // Use the actual bound address so port 0 (OS-assigned) is reported and the
+    // in-process worker connects to the real port.
+    let bound = listener.local_addr()?;
+    let port = bound.port();
+    println!("SceneWorks Rust API listening on http://{bound}");
 
     let utility_worker = run_utility_inprocess.then(|| spawn_inprocess_utility_worker(port));
 

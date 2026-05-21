@@ -13,6 +13,7 @@ import { CharacterStudio } from "./screens/CharacterStudio.jsx";
 import { EditorScreen } from "./screens/EditorScreen.jsx";
 import { QueueScreen } from "./screens/QueueScreen.jsx";
 import { PresetManagerScreen } from "./screens/PresetManagerScreen.jsx";
+import { SettingsScreen } from "./screens/SettingsScreen.jsx";
 import { sortNewest, sortWorkers } from "./sorters.js";
 import { ensureItemVersionFields } from "./timeline.js";
 
@@ -105,7 +106,10 @@ const navSections = [
   },
   {
     label: "System",
-    items: [{ id: "Queue", icon: Icon.Queue }],
+    items: [
+      { id: "Queue", icon: Icon.Queue },
+      { id: "Settings", icon: Icon.Sliders },
+    ],
   },
 ];
 
@@ -119,6 +123,7 @@ const viewTitles = {
   Presets: { title: "Presets", blurb: "Save and share recurring generation setups." },
   Models: { title: "Models", blurb: "Download, import and manage local checkpoints." },
   Queue: { title: "Queue", blurb: "All running and recent jobs across workers." },
+  Settings: { title: "Settings", blurb: "Paths, Hugging Face token, and detected GPU." },
 };
 
 function readStoredTheme() {
@@ -2048,6 +2053,7 @@ export function App() {
             updateCharacterReference={updateCharacterReference}
           />
         ) : null}
+        {activeView === "Settings" ? <SettingsScreen /> : null}
           </>
         )}
       </section>

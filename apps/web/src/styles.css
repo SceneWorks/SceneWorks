@@ -5279,3 +5279,77 @@ label {
   opacity: 0.55;
   cursor: not-allowed;
 }
+
+/* Settings screen (sc-1350) */
+.settings-screen {
+  display: flex;
+  flex-direction: column;
+  gap: var(--gap-md, 1rem);
+  max-width: 44rem;
+}
+
+.settings-card {
+  background: var(--surface, #fff);
+  border: 1px solid var(--border, #e2e2e2);
+  border-radius: var(--r-lg, 12px);
+  padding: var(--pad-panel, 1rem 1.25rem);
+}
+
+.settings-card h3 {
+  margin: 0 0 0.5rem;
+  font-size: 1rem;
+}
+
+.settings-value {
+  font-family: var(--font-mono, ui-monospace, Menlo, monospace);
+  font-size: 0.85rem;
+  word-break: break-all;
+}
+
+.settings-actions {
+  display: flex;
+  gap: 0.5rem;
+  align-items: center;
+  margin-top: 0.5rem;
+  flex-wrap: wrap;
+}
+
+.settings-actions input {
+  flex: 1 1 12rem;
+  min-width: 12rem;
+  padding: 0.4rem 0.6rem;
+  border: 1px solid var(--border, #e2e2e2);
+  border-radius: var(--r-md, 8px);
+  background: var(--surface-2, #f7f7f8);
+  color: var(--text, inherit);
+}
+
+.settings-muted {
+  color: var(--text-muted, #6b7280);
+  font-size: 0.85rem;
+}
+
+.settings-help {
+  font-size: 0.8rem;
+  color: var(--text-muted, #6b7280);
+  margin-top: 0.5rem;
+}
+
+.settings-help code {
+  font-family: var(--font-mono, ui-monospace, Menlo, monospace);
+  background: var(--surface-2, rgba(127, 127, 127, 0.15));
+  padding: 0.1rem 0.35rem;
+  border-radius: var(--r-sm, 4px);
+}
+
+.settings-list {
+  margin: 0;
+  padding-left: 1.2rem;
+}
+
+.settings-status {
+  padding: 0.5rem 0.75rem;
+  background: var(--accent-soft, rgba(108, 140, 255, 0.12));
+  border-radius: var(--r-md, 8px);
+  font-size: 0.85rem;
+}
