@@ -553,11 +553,13 @@ def test_ltx_replace_person_active_run_marks_replacement_active(tmp_path, monkey
     def fake_encode(*, video, fps, audio, output_path, video_chunks_number):
         Path(output_path).write_bytes(b"fake-mp4")
 
-    monkeypatch.setattr(
-        adapter,
-        "_run_ltx_pipeline",
-        lambda **_kwargs: (None, None, 1, fake_encode),
-    )
+    captured = {}
+
+    def fake_run(**kwargs):
+        captured.update(kwargs)
+        return (None, None, 1, fake_encode)
+
+    monkeypatch.setattr(adapter, "_run_ltx_pipeline", fake_run)
 
     job = _replacement_job(settings)
     request = video_request_from_job(job)
@@ -573,6 +575,11 @@ def test_ltx_replace_person_active_run_marks_replacement_active(tmp_path, monkey
     assert normalized["maskMode"] == "segmentation"
     assert normalized["replacementAdapter"] == "ltx_pipelines"
     assert normalized["personTrackId"] == "track_repl"
+    # Prove the masked control clip is injected into the native LTX path as
+    # video_conditioning (sc-1486), not just that the flag flipped.
+    video_conditioning = captured.get("video_conditioning")
+    assert video_conditioning, "replace_person must pass a control clip as video_conditioning"
+    assert str(video_conditioning[0][0]).endswith(".control.mp4")
 
 
 def test_ltx_replace_person_mock_run_stays_inactive(tmp_path, monkeypatch):
