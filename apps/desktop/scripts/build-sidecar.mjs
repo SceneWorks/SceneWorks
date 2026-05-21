@@ -2,7 +2,7 @@
 // Builds the sceneworks-rust-api binary (with the embedded web UI) and stages it
 // as a Tauri sidecar named for the host target triple. Wired as the
 // tauri.conf.json `beforeBuildCommand` so `tauri build` is self-contained.
-import { execFileSync } from "node:child_process";
+import { execFileSync, execSync } from "node:child_process";
 import { copyFileSync, mkdirSync, chmodSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -14,8 +14,9 @@ const repoRoot = resolve(desktopDir, "..", ".."); // repository root
 const npmCmd = process.platform === "win32" ? "npm.cmd" : "npm";
 
 function run(cmd, args, extraEnv = {}) {
-  console.log(`> ${cmd} ${args.join(" ")}`);
-  execFileSync(cmd, args, {
+  const cmdStr = `${cmd} ${args.join(" ")}`;
+  console.log(`> ${cmdStr}`);
+  execSync(cmdStr, {
     stdio: "inherit",
     cwd: repoRoot,
     env: { ...process.env, ...extraEnv },
