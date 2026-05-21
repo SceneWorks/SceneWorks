@@ -15,6 +15,13 @@ import httpx
 
 from .gpu import cpu_worker_id, discover_gpu, discover_gpus, gpu_utilization, gpu_worker_id
 from .image_adapters import ProceduralImageAdapter, QwenImageAdapter, ZImageDiffusersAdapter, create_image_adapter
+from .person_adapters import (
+    detector_backend_available,
+    run_person_detect,
+    run_person_track,
+    segmenter_backend_available,
+    tracker_backend_available,
+)
 from .settings import WorkerSettings
 from .training_adapters import (
     SUPPORTED_TRAINING_PLAN_VERSION,
@@ -28,6 +35,12 @@ from .video_adapters import create_video_adapter
 LoadedModelsSource = Callable[[], list[str]] | None
 IMAGE_JOB_TYPES = ("image_generate", "image_edit")
 VIDEO_JOB_TYPES = ("video_generate", "video_extend", "video_bridge", "person_replace")
+# Real person detection/tracking run in the Python GPU worker (YOLO/ByteTrack/SAM2),
+# replacing the Rust CPU procedural placeholders. Advertised only when the backend
+# is installed; the Rust utility worker keeps procedural previews under the distinct
+# person_detect_preview / person_track_preview capabilities. Keep in sync with
+# crates/sceneworks-core/src/contracts.rs::WorkerCapability and jobs_store::worker_supports_job.
+PERSON_JOB_TYPES = ("person_detect", "person_track")
 # Keep GPU-required job types in sync with
 # crates/sceneworks-core/src/jobs_store.rs::job_requires_gpu and
 # apps/web/src/screens/QueueScreen.jsx::gpuRequiredJobTypes.
@@ -83,6 +96,14 @@ def worker_capabilities(gpu: dict) -> list[str]:
             # Only a backend-capable worker advertises real training execution, so
             # the queue won't route a dryRun:false job to a worker that can't train.
             capabilities |= set(TRAINING_EXECUTE_CAPABILITIES)
+        # Real detection/tracking/segmentation are advertised per installed backend
+        # so the queue never routes a real person job to a worker that can't run it.
+        if detector_backend_available():
+            capabilities.add("person_detect")
+        if tracker_backend_available():
+            capabilities.add("person_track")
+        if segmenter_backend_available():
+            capabilities.add("person_segment")
     return sorted(capabilities)
 
 
@@ -589,6 +610,65 @@ def run_video_job(api: ApiClient, settings: WorkerSettings, job: dict) -> None:
 # live in training_adapters; the kernels there consume the Rust-resolved plan.
 
 
+def run_person_job(api: ApiClient, settings: WorkerSettings, job: dict) -> None:
+    """Run a real person_detect or person_track job in the GPU worker.
+
+    Detection and tracking now use model-backed adapters (YOLO/ByteTrack with
+    SAM2 masks) instead of the Rust procedural placeholders, so completed jobs
+    report active detection/tracking metadata and content-derived results.
+    """
+    job_id = job["id"]
+    job_type = job["type"]
+    needs_oom_restart = False
+
+    def progress(status: str, stage: str, value: float, message: str) -> None:
+        heartbeat(api, settings, "busy", job_id)
+        update_job(api, job_id, {"status": status, "stage": stage, "progress": value, "message": message})
+
+    runner = run_person_detect if job_type == "person_detect" else run_person_track
+    done_message = "Person candidates detected." if job_type == "person_detect" else "Reusable person track saved."
+
+    try:
+        progress("preparing", "preparing", 0.06, "Preparing person analysis.")
+        result = run_blocking_job_step(
+            api,
+            settings,
+            job_id,
+            "busy",
+            lambda: runner(
+                settings,
+                job,
+                progress=progress,
+                cancel_requested=lambda: job_cancel_requested(api, job_id),
+            ),
+            loaded_models=lambda: [],
+        )
+        update_job(
+            api,
+            job_id,
+            {"status": "completed", "stage": "completed", "progress": 1, "message": done_message, "result": result},
+        )
+    except InterruptedError as exc:
+        update_job(
+            api,
+            job_id,
+            {"status": "canceled", "stage": "canceled", "progress": 1, "message": str(exc)},
+        )
+    except Exception as exc:
+        needs_oom_restart = is_cuda_oom(exc)
+        kind = "Person detection" if job_type == "person_detect" else "Person tracking"
+        message, error = friendly_failure(kind, exc)
+        update_job(
+            api,
+            job_id,
+            {"status": "failed", "stage": "failed", "progress": 1, "message": message, "error": error},
+        )
+    finally:
+        heartbeat(api, settings, "idle")
+        if needs_oom_restart:
+            restart_worker_after_oom(settings, job_id)
+
+
 def run_lora_train_job(api: ApiClient, settings: WorkerSettings, job: dict) -> None:
     """Run a lora_train job: validate the plan, then either report a dry-run
     summary or execute the real training kernel.
@@ -779,6 +859,8 @@ def run_worker_loop(settings: WorkerSettings) -> None:
                 run_image_job(api, settings, job, image_adapters)
             elif job["type"] in VIDEO_JOB_TYPES:
                 run_video_job(api, settings, job)
+            elif job["type"] in PERSON_JOB_TYPES:
+                run_person_job(api, settings, job)
             elif job["type"] in TRAINING_JOB_TYPES:
                 run_lora_train_job(api, settings, job)
             else:
@@ -882,8 +964,8 @@ def run_check(settings: WorkerSettings) -> None:
             "workerId": settings.worker_id,
             "gpu": gpu,
             "capabilities": capabilities,
-            "jobTypes": [job_type for job_type in SUPPORTED_JOB_TYPES if job_type in capabilities],
-            "supportedJobTypes": list(SUPPORTED_JOB_TYPES),
+            "jobTypes": [job_type for job_type in SUPPORTED_JOB_TYPES + PERSON_JOB_TYPES if job_type in capabilities],
+            "supportedJobTypes": list(SUPPORTED_JOB_TYPES + PERSON_JOB_TYPES),
             "reportedAt": now(),
         }
     )

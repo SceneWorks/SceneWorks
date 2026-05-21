@@ -204,6 +204,34 @@ def test_python_cpu_worker_does_not_advertise_person_tracking_jobs():
     assert capabilities == ["cpu"]
 
 
+def test_gpu_worker_advertises_real_person_jobs_when_backends_installed(monkeypatch):
+    monkeypatch.setattr("scene_worker.runtime.torch_inference_backend_available", lambda: True)
+    monkeypatch.setattr("scene_worker.runtime.detector_backend_available", lambda: True)
+    monkeypatch.setattr("scene_worker.runtime.tracker_backend_available", lambda: True)
+    monkeypatch.setattr("scene_worker.runtime.segmenter_backend_available", lambda: True)
+    capabilities = worker_capabilities({"id": "gpu-0", "name": "GPU 0", "capabilities": ["placeholder", "gpu"]})
+    assert "person_detect" in capabilities
+    assert "person_track" in capabilities
+    assert "person_segment" in capabilities
+
+
+def test_gpu_worker_omits_person_jobs_without_detector_backend(monkeypatch):
+    monkeypatch.setattr("scene_worker.runtime.torch_inference_backend_available", lambda: True)
+    monkeypatch.setattr("scene_worker.runtime.detector_backend_available", lambda: False)
+    monkeypatch.setattr("scene_worker.runtime.tracker_backend_available", lambda: False)
+    monkeypatch.setattr("scene_worker.runtime.segmenter_backend_available", lambda: False)
+    capabilities = worker_capabilities({"id": "gpu-0", "name": "GPU 0", "capabilities": ["placeholder", "gpu"]})
+    assert "person_detect" not in capabilities
+    assert "person_track" not in capabilities
+
+
+def test_cpu_worker_never_advertises_real_person_jobs_even_with_backends(monkeypatch):
+    monkeypatch.setattr("scene_worker.runtime.detector_backend_available", lambda: True)
+    monkeypatch.setattr("scene_worker.runtime.tracker_backend_available", lambda: True)
+    capabilities = worker_capabilities({"id": "cpu", "name": "CPU", "capabilities": ["placeholder", "cpu"]})
+    assert capabilities == ["cpu"]
+
+
 def test_python_cpu_child_disables_cuda():
     env = child_environment(SimpleNamespace(), worker_id="python-inference-worker-cpu", gpu_id="cpu")
 
@@ -895,6 +923,9 @@ def test_worker_check_reports_inference_sidecar_capabilities(monkeypatch):
     events = []
     monkeypatch.setattr("scene_worker.runtime.emit", events.append)
     monkeypatch.setattr("scene_worker.runtime.torch_inference_backend_available", lambda: True)
+    monkeypatch.setattr("scene_worker.runtime.detector_backend_available", lambda: True)
+    monkeypatch.setattr("scene_worker.runtime.tracker_backend_available", lambda: True)
+    monkeypatch.setattr("scene_worker.runtime.segmenter_backend_available", lambda: True)
     monkeypatch.setattr(
         "scene_worker.runtime.discover_gpu",
         lambda _gpu_id: {"id": "0", "name": "GPU 0", "capabilities": ["gpu"]},
@@ -910,6 +941,8 @@ def test_worker_check_reports_inference_sidecar_capabilities(monkeypatch):
         "video_extend",
         "video_bridge",
         "person_replace",
+        "person_detect",
+        "person_track",
     ]
     assert events[0]["supportedJobTypes"] == events[0]["jobTypes"]
 
