@@ -13,9 +13,13 @@ const desktopDir = resolve(scriptDir, ".."); // apps/desktop
 const repoRoot = resolve(desktopDir, "..", ".."); // repository root
 const npmCmd = process.platform === "win32" ? "npm.cmd" : "npm";
 
-function run(cmd, args) {
+function run(cmd, args, extraEnv = {}) {
   console.log(`> ${cmd} ${args.join(" ")}`);
-  execFileSync(cmd, args, { stdio: "inherit", cwd: repoRoot });
+  execFileSync(cmd, args, {
+    stdio: "inherit",
+    cwd: repoRoot,
+    env: { ...process.env, ...extraEnv },
+  });
 }
 
 // Host target triple, e.g. aarch64-apple-darwin or x86_64-pc-windows-msvc.
@@ -29,8 +33,10 @@ if (!triple) {
 const exe = triple.includes("windows") ? ".exe" : "";
 
 // Build the web bundle + API binary with the embedded UI (single source of
-// truth for the embedded build).
-run(npmCmd, ["run", "api:build:embedded"]);
+// truth for the embedded build). Empty VITE_API_BASE_URL makes the embedded UI
+// talk to its own origin (the API serves it), so it works on the dynamic port
+// with no CORS.
+run(npmCmd, ["run", "api:build:embedded"], { VITE_API_BASE_URL: "" });
 
 const src = join(repoRoot, "target", "release", `sceneworks-rust-api${exe}`);
 const outDir = join(desktopDir, "binaries");
