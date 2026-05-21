@@ -1167,22 +1167,44 @@ def _real_train_plan(tmp_path, *, steps=4, save_every=2, item_count=1):
     }
 
 
+# Mirror crates/sceneworks-core/src/jobs_store.rs::JOB_STATUSES. The Rust API
+# rejects any other status with InvalidStatus, which would fail the job mid-run.
+_VALID_JOB_STATUSES = {
+    "queued",
+    "preparing",
+    "downloading",
+    "loading_model",
+    "running",
+    "saving",
+    "completed",
+    "failed",
+    "canceled",
+    "interrupted",
+}
+
+
 def test_z_image_trainer_runs_stages_checkpoints_and_saves(tmp_path):
     plan = _real_train_plan(tmp_path, steps=4, save_every=2)
     backend = FakeTrainingBackend()
     trainer = ZImageLoraTrainer(backend=backend)
-    stages = []
+    events_log = []
 
     result = trainer.train(
         settings=SimpleNamespace(worker_id="worker-1", gpu_id="0"),
         plan=plan,
-        progress=lambda status, stage, value, message: stages.append(stage),
+        progress=lambda status, stage, value, message: events_log.append((status, stage)),
         cancel_requested=lambda: False,
     )
 
+    stages = [stage for _status, stage in events_log]
+    statuses = {status for status, _stage in events_log}
     assert backend.events[0] == "load"
     assert ("step", 4) in backend.events
     assert {"loading_model", "caching_latents", "training", "saving"}.issubset(set(stages))
+    # Every emitted status must be a valid JobStatus; the Rust API rejects others.
+    # In particular, caching runs under "running" (not the invalid "caching").
+    assert statuses <= _VALID_JOB_STATUSES
+    assert ("running", "caching_latents") in events_log
     assert result["mode"] == "train"
     assert result["stepsCompleted"] == 4
     assert result["outputPath"] == backend.saved == os.path.join(plan["output"]["outputDir"], "mira.safetensors")

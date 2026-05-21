@@ -214,6 +214,11 @@ string_enum! {
         Estimating => "estimating",
         Generating => "generating",
         Running => "running",
+        // LoRA training stages (status stays `running`); see
+        // apps/worker/scene_worker/training_adapters.py.
+        CachingLatents => "caching_latents",
+        Training => "training",
+        Checkpointing => "checkpointing",
         Rendering => "rendering",
         Extracting => "extracting",
         Tracking => "tracking",

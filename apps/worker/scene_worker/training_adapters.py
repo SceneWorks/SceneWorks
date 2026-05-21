@@ -365,7 +365,7 @@ class ZImageLoraTrainer:
             _check_cancel(cancel_requested)
 
             progress(
-                "caching",
+                "running",
                 "caching_latents",
                 _CACHE_PROGRESS_START,
                 f"Encoding {len(items)} dataset item(s).",
@@ -698,7 +698,7 @@ class _ZImageLoraBackend:
 
                 if (index + 1) % 4 == 0 or index + 1 == count:
                     progress(
-                        "caching",
+                        "running",
                         "caching_latents",
                         _scaled(_CACHE_PROGRESS_START, _CACHE_PROGRESS_END, index + 1, count),
                         f"Encoded {index + 1} of {count} dataset item(s).",

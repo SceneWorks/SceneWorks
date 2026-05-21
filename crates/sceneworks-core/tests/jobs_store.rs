@@ -259,6 +259,57 @@ fn dry_run_lora_train_does_not_require_execute_capability() {
 }
 
 #[test]
+fn training_progress_stages_persist_under_running_and_reject_unknown_status() {
+    let store = store("training-progress-stages");
+    let job = store
+        .create_job(lora_train_job("auto", false))
+        .expect("training job creates");
+
+    // The trainer reports caching/training/checkpointing stages under the running
+    // status; all must be accepted and persisted, not rejected as invalid.
+    for (stage, label) in [
+        (ProgressStage::CachingLatents, "caching_latents"),
+        (ProgressStage::Training, "training"),
+        (ProgressStage::Checkpointing, "checkpointing"),
+    ] {
+        let updated = store
+            .update_job_progress(
+                &job.id,
+                ProgressUpdate {
+                    status: JobStatus::Running,
+                    stage,
+                    progress: 0.5,
+                    message: "training".to_owned(),
+                    error: None,
+                    result: None,
+                    eta_seconds: None,
+                },
+            )
+            .expect("running status with a training stage is accepted");
+        assert_eq!(updated.status, JobStatus::Running);
+        assert_eq!(updated.stage.as_str(), label);
+    }
+
+    // A non-contract status like "caching" (an earlier kernel bug) must be rejected
+    // rather than silently persisted.
+    let error = store
+        .update_job_progress(
+            &job.id,
+            ProgressUpdate {
+                status: JobStatus::Unknown("caching".to_owned()),
+                stage: ProgressStage::CachingLatents,
+                progress: 0.5,
+                message: "caching".to_owned(),
+                error: None,
+                result: None,
+                eta_seconds: None,
+            },
+        )
+        .expect_err("an unknown status is rejected");
+    assert!(matches!(error, JobsStoreError::InvalidStatus(_)));
+}
+
+#[test]
 fn gpu_generation_jobs_reject_cpu_requested_gpu() {
     let store = store("gpu-jobs-reject-cpu");
 
