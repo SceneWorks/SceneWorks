@@ -100,11 +100,13 @@ pub struct Settings {
     pub cors_origins: Vec<String>,
     pub worker_timeout_seconds: u64,
     pub jobs_db_path: PathBuf,
+    pub run_utility_inprocess: bool,
 }
 
 impl Settings {
     pub fn from_env() -> Self {
-        let data_dir = env_path("SCENEWORKS_DATA_DIR", "data");
+        let defaults = sceneworks_core::app_paths::AppPaths::platform_default();
+        let data_dir = env_path_or("SCENEWORKS_DATA_DIR", &defaults.data_dir);
         let jobs_db_path = std::env::var("SCENEWORKS_JOBS_DB_PATH")
             .ok()
             .filter(|value| !value.trim().is_empty())
@@ -118,7 +120,7 @@ impl Settings {
                 .and_then(|value| value.parse().ok())
                 .unwrap_or(8000),
             data_dir,
-            config_dir: env_path("SCENEWORKS_CONFIG_DIR", "config"),
+            config_dir: env_path_or("SCENEWORKS_CONFIG_DIR", &defaults.config_dir),
             access_token: std::env::var("SCENEWORKS_ACCESS_TOKEN")
                 .unwrap_or_default()
                 .trim()
@@ -134,6 +136,9 @@ impl Settings {
                 .and_then(|value| value.parse().ok())
                 .unwrap_or(90),
             jobs_db_path,
+            run_utility_inprocess: std::env::var("SCENEWORKS_RUN_UTILITY_INPROCESS")
+                .map(|value| matches!(value.trim(), "1" | "true" | "TRUE" | "True"))
+                .unwrap_or(false),
         }
     }
 
@@ -354,14 +359,106 @@ impl ManifestCache {
 pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
     let settings = Settings::from_env();
     let address: SocketAddr = format!("{}:{}", settings.host, settings.port).parse()?;
+    let run_utility_inprocess = settings.run_utility_inprocess;
+    let port = settings.port;
     let app = create_app(settings)?;
     let listener = tokio::net::TcpListener::bind(address).await?;
     println!("SceneWorks Rust API listening on http://{address}");
-    axum::serve(listener, app).await?;
+
+    let utility_worker = run_utility_inprocess.then(|| spawn_inprocess_utility_worker(port));
+
+    axum::serve(listener, app)
+        .with_graceful_shutdown(shutdown_signal())
+        .await?;
+
+    if let Some(worker) = utility_worker {
+        worker.shutdown().await;
+    }
     Ok(())
 }
 
+/// Spawns the utility worker loop ([`sceneworks_worker::run_worker_loop`]) as a
+/// tokio task in this process, pointed at the local API over loopback. The loop
+/// observes the same Ctrl+C/SIGTERM as the HTTP server (via the worker's own
+/// shutdown handling), so `shutdown()` only bounds the wait by the worker's
+/// configured grace period.
+fn spawn_inprocess_utility_worker(port: u16) -> InProcessUtilityWorker {
+    let mut worker_settings = sceneworks_worker::Settings::from_env();
+    worker_settings.api_url = format!("http://127.0.0.1:{port}");
+    worker_settings.gpu_id =
+        inprocess_worker_gpu_id(std::env::var("SCENEWORKS_RUST_WORKER_GPU_ID").ok());
+    let grace = Duration::from_secs(worker_settings.shutdown_timeout_seconds.max(1));
+    println!(
+        "SceneWorks utility worker running in-process (loopback {})",
+        worker_settings.api_url
+    );
+    let handle =
+        tokio::spawn(async move { sceneworks_worker::run_worker_loop(worker_settings).await });
+    InProcessUtilityWorker { handle, grace }
+}
+
+/// GPU id for the in-process utility worker. Defaults to `cpu` so the embedded
+/// worker advertises CPU utility capabilities (downloads, imports, ffmpeg,
+/// person detect/track) regardless of the ambient `SCENEWORKS_GPU_ID` — which on
+/// a GPU host would otherwise make it register as a GPU worker that never claims
+/// utility jobs. `SCENEWORKS_RUST_WORKER_GPU_ID` overrides for the rare case of
+/// wanting the embedded worker on a specific GPU.
+fn inprocess_worker_gpu_id(override_var: Option<String>) -> String {
+    override_var
+        .map(|value| value.trim().to_owned())
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| "cpu".to_owned())
+}
+
+struct InProcessUtilityWorker {
+    handle: tokio::task::JoinHandle<sceneworks_worker::WorkerResult<()>>,
+    grace: Duration,
+}
+
+impl InProcessUtilityWorker {
+    async fn shutdown(self) {
+        match tokio::time::timeout(self.grace, self.handle).await {
+            Ok(Ok(Ok(()))) => {}
+            Ok(Ok(Err(error))) => eprintln!("in-process utility worker exited with error: {error}"),
+            Ok(Err(join_error)) => eprintln!("in-process utility worker task failed: {join_error}"),
+            Err(_) => eprintln!(
+                "in-process utility worker did not stop within {}s grace period",
+                self.grace.as_secs()
+            ),
+        }
+    }
+}
+
+async fn shutdown_signal() {
+    let ctrl_c = async {
+        let _ = tokio::signal::ctrl_c().await;
+    };
+
+    #[cfg(unix)]
+    let terminate = async {
+        match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
+            Ok(mut stream) => {
+                stream.recv().await;
+            }
+            Err(_) => std::future::pending::<()>().await,
+        }
+    };
+
+    #[cfg(not(unix))]
+    let terminate = std::future::pending::<()>();
+
+    tokio::select! {
+        _ = ctrl_c => {}
+        _ = terminate => {}
+    }
+}
+
 pub fn create_app(settings: Settings) -> Result<Router, JobsStoreError> {
+    let _ = std::fs::create_dir_all(&settings.data_dir);
+    let _ = std::fs::create_dir_all(&settings.config_dir);
+    if let Some(jobs_db_parent) = settings.jobs_db_path.parent() {
+        let _ = std::fs::create_dir_all(jobs_db_parent);
+    }
     let _ = sweep_stale_lora_uploads(&settings.data_dir);
     let jobs_store = Arc::new(JobsStore::new(&settings.jobs_db_path));
     jobs_store.initialize()?;
@@ -560,7 +657,7 @@ pub fn create_app(settings: Settings) -> Result<Router, JobsStoreError> {
             "/api/v1/workers/:worker_id/heartbeat",
             post(heartbeat_worker),
         )
-        .fallback(route_not_found)
+        .fallback(app_fallback)
         .with_state(state.clone())
         .layer(DefaultBodyLimit::max(MAX_UPLOAD_BYTES))
         .layer(middleware::from_fn_with_state(state, access_control))
@@ -2104,6 +2201,59 @@ async fn create_video_job(
     Ok((StatusCode::CREATED, Json(job)))
 }
 
+/// Embedded production web bundle (apps/web/dist), compiled in only under the
+/// `embed-web` feature so default/server/test builds need no web build.
+#[cfg(feature = "embed-web")]
+mod web_assets {
+    use axum::http::{header, StatusCode, Uri};
+    use axum::response::{IntoResponse, Response};
+    use rust_embed::RustEmbed;
+
+    #[derive(RustEmbed)]
+    #[folder = "../web/dist"]
+    struct WebAssets;
+
+    pub(super) async fn serve(uri: Uri) -> Response {
+        let requested = uri.path().trim_start_matches('/');
+        let requested = if requested.is_empty() {
+            "index.html"
+        } else {
+            requested
+        };
+        if let Some(file) = WebAssets::get(requested) {
+            let mime = mime_guess::from_path(requested).first_or_octet_stream();
+            return (
+                [(header::CONTENT_TYPE, mime.as_ref())],
+                file.data.into_owned(),
+            )
+                .into_response();
+        }
+        // Single-page app: unknown non-API paths resolve to index.html so
+        // client-side deep links (e.g. project routes) load correctly.
+        match WebAssets::get("index.html") {
+            Some(index) => (
+                [(header::CONTENT_TYPE, "text/html; charset=utf-8")],
+                index.data.into_owned(),
+            )
+                .into_response(),
+            None => StatusCode::NOT_FOUND.into_response(),
+        }
+    }
+}
+
+/// Router fallback. With `embed-web`, non-API paths are served from the embedded
+/// web bundle (SPA fallback); API paths and all default-feature builds keep the
+/// existing JSON not-found behavior.
+async fn app_fallback(request: Request<axum::body::Body>) -> Response {
+    #[cfg(feature = "embed-web")]
+    {
+        if !request.uri().path().starts_with("/api/") {
+            return web_assets::serve(request.uri().clone()).await;
+        }
+    }
+    route_not_found(request).await
+}
+
 async fn route_not_found(request: Request<axum::body::Body>) -> Response {
     let path = request.uri().path();
     let lower_path = path.to_ascii_lowercase();
@@ -3559,7 +3709,7 @@ async fn access_control(
     next: Next,
 ) -> Response {
     if request.method() == Method::OPTIONS
-        || PUBLIC_PATHS.contains(&request.uri().path())
+        || !requires_token(request.uri().path())
         || is_authorized(request.headers(), &state.settings)
     {
         return next.run(request).await;
@@ -3597,6 +3747,14 @@ fn cors_layer(settings: &Settings) -> CorsLayer {
             header::CONTENT_TYPE,
             HeaderName::from_static("x-sceneworks-token"),
         ])
+}
+
+/// Whether a path is gated by the access token. Only `/api/*` routes are
+/// protected (minus the explicitly public ones); everything else is the
+/// embedded web bundle / SPA fallback, which a browser must be able to load
+/// before it can attach the token header.
+fn requires_token(path: &str) -> bool {
+    path.starts_with("/api/") && !PUBLIC_PATHS.contains(&path)
 }
 
 fn is_authorized(headers: &HeaderMap, settings: &Settings) -> bool {
@@ -6474,8 +6632,13 @@ fn env_string(name: &str, default: &str) -> String {
         .unwrap_or_else(|| default.to_owned())
 }
 
-fn env_path(name: &str, default: &str) -> PathBuf {
-    PathBuf::from(env_string(name, default))
+fn env_path_or(name: &str, default: &FsPath) -> PathBuf {
+    std::env::var(name)
+        .ok()
+        .map(|value| value.trim().to_owned())
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+        .unwrap_or_else(|| default.to_path_buf())
 }
 
 #[derive(Debug)]
@@ -6564,9 +6727,10 @@ impl IntoResponse for ApiError {
 #[cfg(test)]
 mod tests {
     use super::{
-        create_app, lora_artifact_paths, strip_jsonc_comments, sweep_stale_lora_uploads_before,
-        EventHub, EventMessage, Settings, API_MANAGED_MANIFEST_HEADER, EVENT_BUFFER_SIZE,
-        HEARTBEAT_SSE_DATA, HEARTBEAT_SSE_WIRE, TEST_MAX_LORA_UPLOAD_BYTES,
+        create_app, inprocess_worker_gpu_id, lora_artifact_paths, requires_token,
+        strip_jsonc_comments, sweep_stale_lora_uploads_before, EventHub, EventMessage, Settings,
+        API_MANAGED_MANIFEST_HEADER, EVENT_BUFFER_SIZE, HEARTBEAT_SSE_DATA, HEARTBEAT_SSE_WIRE,
+        TEST_MAX_LORA_UPLOAD_BYTES,
     };
     use axum::body::{to_bytes, Body};
     use axum::http::{Request, StatusCode};
@@ -6590,6 +6754,7 @@ mod tests {
             ],
             worker_timeout_seconds: 90,
             jobs_db_path: temp_dir.path().join("jobs.db"),
+            run_utility_inprocess: false,
         }
     }
 
@@ -10457,6 +10622,49 @@ mod tests {
         .await;
         assert_eq!(status, StatusCode::OK);
         assert_eq!(jobs, json!([]));
+    }
+
+    #[test]
+    fn requires_token_only_gates_api_paths() {
+        // Non-API paths (embedded UI / SPA fallback) must never require a token,
+        // or the browser cannot load the bundle to prompt for one.
+        assert!(!requires_token("/"));
+        assert!(!requires_token("/assets/index-abc.js"));
+        assert!(!requires_token("/projects/some-id"));
+        // Public API paths stay open; other API paths stay gated.
+        assert!(!requires_token("/api/v1/health"));
+        assert!(requires_token("/api/v1/jobs"));
+        assert!(requires_token("/api/v1/projects"));
+    }
+
+    #[tokio::test]
+    async fn embedded_ui_root_is_reachable_with_access_token_set() {
+        let temp_dir = tempfile::tempdir().expect("temp dir creates");
+        let mut settings = test_settings(&temp_dir);
+        settings.access_token = "secret-token".to_owned();
+        let app = create_app(settings).expect("app creates");
+
+        // With a token configured and no header, the embedded UI root and assets
+        // must not be blocked by auth (404 here under default features since the
+        // bundle isn't embedded; the point is it is NOT 401).
+        let (status, _) = request(app.clone(), "GET", "/", Value::Null).await;
+        assert_ne!(status, StatusCode::UNAUTHORIZED);
+        let (status, _) = request(app.clone(), "GET", "/assets/app.js", Value::Null).await;
+        assert_ne!(status, StatusCode::UNAUTHORIZED);
+        // API routes stay protected.
+        let (status, _) = request(app, "GET", "/api/v1/jobs", Value::Null).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+    }
+
+    #[test]
+    fn inprocess_worker_defaults_to_cpu_utility() {
+        // Default (and blank override) → cpu so utility capabilities are
+        // advertised regardless of the ambient SCENEWORKS_GPU_ID.
+        assert_eq!(inprocess_worker_gpu_id(None), "cpu");
+        assert_eq!(inprocess_worker_gpu_id(Some("   ".to_owned())), "cpu");
+        // Explicit override is honored.
+        assert_eq!(inprocess_worker_gpu_id(Some("auto".to_owned())), "auto");
+        assert_eq!(inprocess_worker_gpu_id(Some("0".to_owned())), "0");
     }
 
     #[tokio::test]

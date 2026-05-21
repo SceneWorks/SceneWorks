@@ -6,6 +6,7 @@ COPY Cargo.toml Cargo.lock rust-toolchain.toml rustfmt.toml ./
 COPY crates ./crates
 COPY apps/rust-api ./apps/rust-api
 COPY apps/rust-worker ./apps/rust-worker
+COPY apps/desktop ./apps/desktop
 
 RUN cargo build -p sceneworks-rust-worker --release
 
