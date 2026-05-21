@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import importlib
 import json
+import os
 import sys
 from pathlib import Path
 from typing import NamedTuple
@@ -47,9 +48,21 @@ from scene_worker.runtime import (
     main,
     resolve_loaded_models,
     run_check,
-    run_lora_train_dry_run_job,
+    run_lora_train_job,
     run_video_job,
     worker_capabilities,
+)
+from scene_worker.training_adapters import (
+    SUPPORTED_TRAINING_PLAN_VERSION,
+    TrainingKernelError,
+    ZImageLoraTrainer,
+    bucket_resolution,
+    create_training_kernel,
+    dry_run_training_summary,
+    flow_matching_velocity_target,
+    read_run_config,
+    resolve_pretrained_source,
+    validate_training_plan,
 )
 from scene_worker.video_adapters import (
     DiffusersVideoAdapter,
@@ -163,11 +176,25 @@ def test_python_worker_only_advertises_inference_job_capabilities(monkeypatch):
         "image_edit",
         "image_generate",
         "lora_train",
+        "lora_train_execute",
         "person_replace",
         "video_bridge",
         "video_extend",
         "video_generate",
     ]
+
+
+def test_gpu_worker_advertises_lora_train_execute_only_with_inference_backend(monkeypatch):
+    monkeypatch.setattr("scene_worker.runtime.torch_inference_backend_available", lambda: True)
+    with_backend = worker_capabilities({"id": "gpu-0", "name": "GPU 0", "capabilities": ["placeholder", "gpu"]})
+    assert "lora_train" in with_backend
+    assert "lora_train_execute" in with_backend
+
+    monkeypatch.setattr("scene_worker.runtime.torch_inference_backend_available", lambda: False)
+    without_backend = worker_capabilities({"id": "gpu-0", "name": "GPU 0", "capabilities": ["placeholder", "gpu"]})
+    # Dry-run validation stays claimable; real execution is not advertised.
+    assert "lora_train" in without_backend
+    assert "lora_train_execute" not in without_backend
 
 
 def test_python_cpu_worker_does_not_advertise_person_tracking_jobs():
@@ -859,10 +886,12 @@ def test_worker_check_reports_inference_sidecar_capabilities(monkeypatch):
 
 
 class _DryRunApi:
-    """Records job progress posts; heartbeats are accepted and ignored."""
+    """Records job progress posts; heartbeats are accepted and ignored. Job GETs
+    report no cancellation so a real run completes unless a test says otherwise."""
 
-    def __init__(self):
+    def __init__(self, cancel_requested=False):
         self.progress = []
+        self._cancel_requested = cancel_requested
 
     def post(self, path, payload):
         if path.endswith("/heartbeat"):
@@ -871,6 +900,9 @@ class _DryRunApi:
             self.progress.append(payload)
             return {"status": payload["status"], "stage": payload["stage"]}
         raise AssertionError(path)
+
+    def get(self, _path):
+        return {"cancelRequested": self._cancel_requested}
 
 
 def _lora_train_job(plan):
@@ -906,7 +938,7 @@ def test_lora_train_dry_run_completes_with_plan_summary(monkeypatch, tmp_path):
         },
     }
 
-    run_lora_train_dry_run_job(api, SimpleNamespace(worker_id="worker-1", gpu_id="cpu"), _lora_train_job(plan))
+    run_lora_train_job(api, SimpleNamespace(worker_id="worker-1", gpu_id="cpu"), _lora_train_job(plan))
 
     terminal = api.progress[-1]
     assert terminal["status"] == "completed"
@@ -931,7 +963,7 @@ def test_lora_train_dry_run_fails_cleanly_on_missing_dataset_image(monkeypatch, 
         "output": {},
     }
 
-    run_lora_train_dry_run_job(api, SimpleNamespace(worker_id="worker-1", gpu_id="cpu"), _lora_train_job(plan))
+    run_lora_train_job(api, SimpleNamespace(worker_id="worker-1", gpu_id="cpu"), _lora_train_job(plan))
 
     terminal = api.progress[-1]
     assert terminal["status"] == "failed"
@@ -943,29 +975,356 @@ def test_lora_train_dry_run_fails_on_unsupported_plan_version(monkeypatch):
     api = _DryRunApi()
     plan = {"planVersion": 999, "dataset": {"items": []}, "target": {}, "output": {}}
 
-    run_lora_train_dry_run_job(api, SimpleNamespace(worker_id="worker-1", gpu_id="cpu"), _lora_train_job(plan))
+    run_lora_train_job(api, SimpleNamespace(worker_id="worker-1", gpu_id="cpu"), _lora_train_job(plan))
 
     terminal = api.progress[-1]
     assert terminal["status"] == "failed"
     assert "version" in terminal["error"].lower()
 
 
-def test_lora_train_refuses_non_dry_run_job(monkeypatch):
-    monkeypatch.setattr("scene_worker.runtime.emit", lambda payload: None)
-    api = _DryRunApi()
-    # Defense-in-depth: even if a non-dry-run job reaches the worker, it must not
-    # report success without producing weights (real execution is not implemented).
-    job = {
-        "id": "job-train-1",
-        "type": "lora_train",
-        "payload": {"dryRun": False, "plan": {"planVersion": 1, "dataset": {"items": []}}},
+def test_dry_run_summary_records_base_model_repo_and_install_state(tmp_path):
+    model_dir = tmp_path / "model"
+    model_dir.mkdir()
+    plan = {
+        "planVersion": 1,
+        "dataset": {"datasetId": "ds_1", "datasetVersion": 4, "items": [{"imagePath": "x"}]},
+        "target": {
+            "targetId": "z_image_turbo_lora",
+            "kernel": "z_image_lora",
+            "baseModel": "z_image_turbo",
+            "baseModelRepo": "Tongyi-MAI/Z-Image-Turbo",
+            "baseModelPath": str(model_dir),
+        },
+        "output": {"loraId": "lora_1", "outputDir": str(tmp_path / "out"), "fileName": "a.safetensors"},
     }
 
-    run_lora_train_dry_run_job(api, SimpleNamespace(worker_id="worker-1", gpu_id="cpu"), job)
+    summary = dry_run_training_summary(plan, dry_run=True)
+
+    assert summary["baseModelRepo"] == "Tongyi-MAI/Z-Image-Turbo"
+    assert summary["baseModelInstalled"] is True
+    assert summary["datasetVersion"] == 4
+
+
+def test_validate_training_plan_rejects_bad_version_and_empty_dataset():
+    with pytest.raises(ValueError, match="version"):
+        validate_training_plan({"planVersion": 99, "dataset": {"items": [{"imagePath": "x"}]}})
+    with pytest.raises(ValueError, match="no items"):
+        validate_training_plan({"planVersion": SUPPORTED_TRAINING_PLAN_VERSION, "dataset": {"items": []}})
+
+
+def test_bucket_resolution_floors_to_multiple_of_32():
+    assert bucket_resolution(1024) == 1024
+    assert bucket_resolution(1000) == 992
+    assert bucket_resolution(20) == 32
+
+
+def test_flow_matching_velocity_target_uses_negated_pipeline_sign():
+    # The raw transformer output target is latents - noise, NOT noise - latents:
+    # diffusers' ZImagePipeline negates the transformer output before the scheduler,
+    # so the trained raw output is the negated flow velocity. Pin the sign so a
+    # refactor can't silently flip the training direction.
+    assert flow_matching_velocity_target(0.0, 1.0) == -1.0
+    assert flow_matching_velocity_target(2.0, -1.0) == 3.0
+    latents, noise = 0.7, 0.2
+    assert flow_matching_velocity_target(latents, noise) == latents - noise
+    assert flow_matching_velocity_target(latents, noise) == -(noise - latents)
+
+
+def test_read_run_config_defaults_lora_target_modules_and_parses_advanced():
+    config = read_run_config(
+        {
+            "config": {
+                "rank": 8,
+                "alpha": 12,
+                "learningRate": 0.0003,
+                "steps": 500,
+                "saveEvery": 100,
+                "optimizer": "adamw8bit",
+                "advanced": {"mixedPrecision": "bf16"},
+            }
+        }
+    )
+
+    assert config.rank == 8
+    assert config.alpha == 12
+    assert config.steps == 500
+    assert config.save_every == 100
+    assert config.mixed_precision == "bf16"
+    assert config.lora_target_modules == ["to_q", "to_k", "to_v", "to_out.0"]
+
+
+def test_create_training_kernel_resolves_known_and_rejects_unknown():
+    assert isinstance(create_training_kernel("z_image_lora"), ZImageLoraTrainer)
+    with pytest.raises(TrainingKernelError, match="No training kernel"):
+        create_training_kernel("not_a_kernel")
+
+
+def test_resolve_pretrained_source_prefers_loadable_model_dir(tmp_path):
+    model_dir = tmp_path / "models" / "z_image"
+    model_dir.mkdir(parents=True)
+    (model_dir / "model_index.json").write_text("{}", encoding="utf-8")
+
+    source = resolve_pretrained_source(
+        {"baseModelPath": str(model_dir), "baseModelRepo": "Tongyi-MAI/Z-Image-Turbo"}
+    )
+
+    assert source == str(model_dir)
+
+
+def test_resolve_pretrained_source_uses_hf_cache_snapshot(tmp_path):
+    cache_root = tmp_path / "hub"
+    snapshot = write_huggingface_cache_resource(
+        cache_root, "Tongyi-MAI/Z-Image-Turbo", "model_index.json", refs_main=True
+    )
+    repo_root = snapshot.parent.parent
+
+    source = resolve_pretrained_source({"baseModelPath": str(repo_root)})
+
+    assert source == str(snapshot)
+
+
+def test_resolve_pretrained_source_falls_back_to_repo_when_path_missing(tmp_path):
+    source = resolve_pretrained_source(
+        {"baseModelPath": str(tmp_path / "absent"), "baseModelRepo": "Tongyi-MAI/Z-Image-Turbo"}
+    )
+
+    assert source == "Tongyi-MAI/Z-Image-Turbo"
+
+
+class FakeTrainingBackend:
+    """Stand-in for the torch/diffusers backend so trainer orchestration is
+    testable without an inference backend."""
+
+    def __init__(self):
+        self.events = []
+        self.checkpoints = []
+        self.saved = None
+        self.cleaned = False
+
+    def loaded_models(self):
+        return ["fake/z-image"]
+
+    def load(self, *, settings, plan, config, progress):
+        self.events.append("load")
+
+    def prepare_dataset(self, *, items, config, progress, cancel_requested):
+        self.events.append("prepare")
+        return {"itemCount": len(items), "resolution": bucket_resolution(config.resolution)}
+
+    def train_step(self, *, step, total_steps, config):
+        self.events.append(("step", step))
+        return 0.5
+
+    def save_checkpoint(self, *, step, output_dir, file_name):
+        path = os.path.join(output_dir, f"ckpt-{step}.safetensors")
+        self.checkpoints.append(path)
+        return path
+
+    def save_final(self, *, output_dir, file_name):
+        self.saved = os.path.join(output_dir, file_name)
+        return self.saved
+
+    def cleanup(self):
+        self.cleaned = True
+
+
+def _real_train_plan(tmp_path, *, steps=4, save_every=2, item_count=1):
+    items = []
+    for index in range(item_count):
+        image = tmp_path / "images" / f"{index:03d}.png"
+        image.parent.mkdir(parents=True, exist_ok=True)
+        image.write_bytes(b"png")
+        items.append({"imagePath": str(image), "caption": f"miraStyle portrait {index}"})
+    return {
+        "planVersion": 1,
+        "dataset": {"datasetId": "ds_1", "datasetVersion": 3, "items": items},
+        "target": {
+            "targetId": "z_image_turbo_lora",
+            "kernel": "z_image_lora",
+            "baseModel": "z_image_turbo",
+            "baseModelPath": str(tmp_path / "model"),
+        },
+        "config": {
+            "rank": 16,
+            "alpha": 16,
+            "learningRate": 0.0001,
+            "steps": steps,
+            "batchSize": 1,
+            "gradientAccumulation": 1,
+            "resolution": 1024,
+            "saveEvery": save_every,
+            "seed": 42,
+            "optimizer": "adamw",
+            "advanced": {},
+        },
+        "output": {
+            "loraId": "lora_1",
+            "outputDir": str(tmp_path / "loras" / "lora_1"),
+            "fileName": "mira.safetensors",
+            "format": "safetensors",
+            "triggerWords": ["miraStyle"],
+        },
+    }
+
+
+# Mirror crates/sceneworks-core/src/jobs_store.rs::JOB_STATUSES. The Rust API
+# rejects any other status with InvalidStatus, which would fail the job mid-run.
+_VALID_JOB_STATUSES = {
+    "queued",
+    "preparing",
+    "downloading",
+    "loading_model",
+    "running",
+    "saving",
+    "completed",
+    "failed",
+    "canceled",
+    "interrupted",
+}
+
+
+def test_z_image_trainer_runs_stages_checkpoints_and_saves(tmp_path):
+    plan = _real_train_plan(tmp_path, steps=4, save_every=2)
+    backend = FakeTrainingBackend()
+    trainer = ZImageLoraTrainer(backend=backend)
+    events_log = []
+
+    result = trainer.train(
+        settings=SimpleNamespace(worker_id="worker-1", gpu_id="0"),
+        plan=plan,
+        progress=lambda status, stage, value, message: events_log.append((status, stage)),
+        cancel_requested=lambda: False,
+    )
+
+    stages = [stage for _status, stage in events_log]
+    statuses = {status for status, _stage in events_log}
+    assert backend.events[0] == "load"
+    assert ("step", 4) in backend.events
+    assert {"loading_model", "caching_latents", "training", "saving"}.issubset(set(stages))
+    # Every emitted status must be a valid JobStatus; the Rust API rejects others.
+    # In particular, caching runs under "running" (not the invalid "caching").
+    assert statuses <= _VALID_JOB_STATUSES
+    assert ("running", "caching_latents") in events_log
+    assert result["mode"] == "train"
+    assert result["stepsCompleted"] == 4
+    assert result["outputPath"] == backend.saved == os.path.join(plan["output"]["outputDir"], "mira.safetensors")
+    assert result["triggerWords"] == ["miraStyle"]
+    # save_every=2, steps=4 -> a single mid-run checkpoint at step 2 (step 4 is final).
+    assert backend.checkpoints == [os.path.join(plan["output"]["outputDir"], "ckpt-2.safetensors")]
+    assert backend.cleaned is True
+
+
+def test_z_image_trainer_cancels_and_skips_save(tmp_path):
+    plan = _real_train_plan(tmp_path, steps=10, save_every=0)
+    backend = FakeTrainingBackend()
+    trainer = ZImageLoraTrainer(backend=backend)
+    checks = {"count": 0}
+
+    def cancel_requested():
+        checks["count"] += 1
+        return checks["count"] > 3
+
+    with pytest.raises(InterruptedError):
+        trainer.train(
+            settings=SimpleNamespace(worker_id="worker-1", gpu_id="0"),
+            plan=plan,
+            progress=lambda *args: None,
+            cancel_requested=cancel_requested,
+        )
+
+    assert backend.saved is None
+    assert backend.cleaned is True
+
+
+def test_run_lora_train_job_executes_real_run(monkeypatch, tmp_path):
+    monkeypatch.setattr("scene_worker.runtime.emit", lambda payload: None)
+    monkeypatch.setattr("scene_worker.runtime.gpu_utilization", lambda _gpu_id: None)
+    monkeypatch.setattr(
+        "scene_worker.runtime.run_blocking_job_step",
+        lambda api, settings, job_id, status, callback, *, loaded_models: callback(),
+    )
+    backend = FakeTrainingBackend()
+    trainer = ZImageLoraTrainer(backend=backend)
+    monkeypatch.setattr("scene_worker.runtime.create_training_kernel", lambda _kernel_id: trainer)
+
+    api = _DryRunApi()
+    plan = _real_train_plan(tmp_path, steps=2, save_every=0)
+    job = {"id": "job-train-real", "type": "lora_train", "payload": {"dryRun": False, "plan": plan}}
+
+    run_lora_train_job(api, SimpleNamespace(worker_id="worker-1", gpu_id="0"), job)
+
+    terminal = api.progress[-1]
+    assert terminal["status"] == "completed"
+    assert terminal["stage"] == "completed"
+    assert terminal["result"]["mode"] == "train"
+    assert terminal["result"]["fileName"] == "mira.safetensors"
+    assert backend.saved is not None
+
+
+def test_run_lora_train_job_marks_canceled(monkeypatch, tmp_path):
+    monkeypatch.setattr("scene_worker.runtime.emit", lambda payload: None)
+    monkeypatch.setattr("scene_worker.runtime.gpu_utilization", lambda _gpu_id: None)
+    monkeypatch.setattr(
+        "scene_worker.runtime.run_blocking_job_step",
+        lambda api, settings, job_id, status, callback, *, loaded_models: callback(),
+    )
+
+    class CancelingTrainer:
+        kernel_id = "z_image_lora"
+
+        def loaded_models(self):
+            return []
+
+        def train(self, *, settings, plan, progress, cancel_requested):
+            raise InterruptedError("LoRA training canceled by user.")
+
+    monkeypatch.setattr("scene_worker.runtime.create_training_kernel", lambda _kernel_id: CancelingTrainer())
+
+    api = _DryRunApi()
+    job = {
+        "id": "job-train-cancel",
+        "type": "lora_train",
+        "payload": {"dryRun": False, "plan": {"planVersion": 1, "target": {"kernel": "z_image_lora"}}},
+    }
+
+    run_lora_train_job(api, SimpleNamespace(worker_id="worker-1", gpu_id="0"), job)
+
+    terminal = api.progress[-1]
+    assert terminal["status"] == "canceled"
+    assert "canceled" in terminal["message"].lower()
+
+
+def test_run_lora_train_job_reports_friendly_failure(monkeypatch, tmp_path):
+    monkeypatch.setattr("scene_worker.runtime.emit", lambda payload: None)
+    monkeypatch.setattr("scene_worker.runtime.gpu_utilization", lambda _gpu_id: None)
+    monkeypatch.setattr(
+        "scene_worker.runtime.run_blocking_job_step",
+        lambda api, settings, job_id, status, callback, *, loaded_models: callback(),
+    )
+
+    class FailingTrainer:
+        kernel_id = "z_image_lora"
+
+        def loaded_models(self):
+            return []
+
+        def train(self, *, settings, plan, progress, cancel_requested):
+            raise RuntimeError("Repository not found: Tongyi-MAI/Z-Image-Turbo")
+
+    monkeypatch.setattr("scene_worker.runtime.create_training_kernel", lambda _kernel_id: FailingTrainer())
+
+    api = _DryRunApi()
+    job = {
+        "id": "job-train-fail",
+        "type": "lora_train",
+        "payload": {"dryRun": False, "plan": {"planVersion": 1, "target": {"kernel": "z_image_lora"}}},
+    }
+
+    run_lora_train_job(api, SimpleNamespace(worker_id="worker-1", gpu_id="0"), job)
 
     terminal = api.progress[-1]
     assert terminal["status"] == "failed"
-    assert "not available" in terminal["error"].lower()
+    assert "model files were not available" in terminal["message"].lower()
 
 
 def test_main_check_exits_without_api_loop(monkeypatch):

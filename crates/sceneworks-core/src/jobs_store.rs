@@ -1259,10 +1259,31 @@ fn worker_supports_job(worker: &WorkerSnapshot, job: &JobSnapshot) -> bool {
     if job_requires_gpu(&job.job_type) && worker.gpu_id.eq_ignore_ascii_case("cpu") {
         return false;
     }
-    worker
-        .capabilities
-        .iter()
-        .any(|capability| capability.as_str() == job.job_type.as_str())
+    let advertises = |capability: &str| {
+        worker
+            .capabilities
+            .iter()
+            .any(|owned| owned.as_str() == capability)
+    };
+    if !advertises(job.job_type.as_str()) {
+        return false;
+    }
+    // A real (non-dry-run) LoRA training job additionally needs the execute
+    // capability, which a worker advertises only when its inference backend is
+    // available. Dry-run plan validation needs just the base `lora_train`
+    // capability. This keeps a real run queued for a capable worker instead of
+    // failing terminally after a torch-less worker claims it.
+    if is_real_training_job(job) {
+        return advertises(WorkerCapability::LoraTrainExecute.as_str());
+    }
+    true
+}
+
+/// True when a job is a real (non-dry-run) LoRA training run. The training
+/// payload defaults to dry-run; only an explicit `dryRun: false` is a real run.
+fn is_real_training_job(job: &JobSnapshot) -> bool {
+    matches!(job.job_type, JobType::LoraTrain)
+        && job.payload.get("dryRun").and_then(Value::as_bool) == Some(false)
 }
 
 #[derive(Debug, Clone, Copy)]

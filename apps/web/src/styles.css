@@ -1800,6 +1800,19 @@ label {
   justify-content: flex-end;
   flex-wrap: wrap;
   gap: 8px;
+  align-items: flex-end;
+}
+
+.training-run-mode {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin-right: auto;
+  font-size: 0.78rem;
+}
+
+.training-run-mode > span {
+  color: var(--text-muted, #94a3b8);
 }
 
 .training-config-snapshot {

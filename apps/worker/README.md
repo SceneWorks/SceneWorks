@@ -44,6 +44,40 @@ override them through matching advanced settings.
 Use `advanced.mockNativeInference=true` only for adapter smoke tests; otherwise
 the native adapter loads `ltx-pipelines` and writes MP4 video assets.
 
+## Native LoRA training (`lora_train`)
+
+Training jobs carry a fully normalized, Rust-resolved `TrainingPlan` (see
+`crates/sceneworks-core/src/training.rs`). The worker's kernels in
+`scene_worker/training_adapters.py` consume only that plan — they never read
+SceneWorks storage, config defaults, or the target registry directly.
+
+- **Dry run** (`payload.dryRun == true`, the default) validates the plan and that
+  its dataset images exist on the worker, then reports what a real run would
+  produce. It loads no model and needs no inference backend, so a GPU worker
+  advertises `lora_train` even without torch/CUDA.
+- **Real run** (`payload.dryRun == false`) routes to the kernel named by
+  `plan.target.kernel`. The first kernel is `z_image_lora`
+  (:class:`ZImageLoraTrainer`), an image LoRA trainer for Z-Image-Turbo. It loads
+  the diffusers `ZImagePipeline` components (transformer, VAE, Qwen3 text encoder)
+  via `from_pretrained`, attaches a PEFT LoRA to the transformer, caches per-item
+  latents and prompt embeddings, runs a flow-matching loop (the raw transformer-output
+  target is `latents - noise` — the negated velocity, since the pipeline negates the
+  output before the scheduler — at timestep `(1000 - t) / 1000`), and writes a `.safetensors`
+  adapter with `ZImagePipeline.save_lora_weights`. It reports preparing,
+  loading, caching, training, checkpointing (every `saveEvery` steps), and saving
+  stages, and honors cancellation between steps. A real run requires the
+  inference backend; the kernel reports clearly when it is missing.
+
+Registering the produced adapter as a usable SceneWorks LoRA (with provenance and
+Image Studio compatibility) is a separate step (story 1418); this kernel produces
+the weights file and a result summary.
+
+Training reuses the runtime dependencies in `requirements.txt` (torch, diffusers,
+transformers, peft, accelerate, safetensors). The `adamw8bit` optimizer uses
+`bitsandbytes` when present and falls back to torch AdamW otherwise. Override
+PEFT target modules per job via `config.advanced.loraTargetModules` when a base
+model names its attention layers differently.
+
 Use a local smoke check without contacting the API:
 
 ```powershell

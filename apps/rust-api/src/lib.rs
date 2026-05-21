@@ -1373,14 +1373,10 @@ async fn create_training_job(
     Path(project_id): Path<String>,
     ApiJson(payload): ApiJson<LoraTrainingRequest>,
 ) -> Result<(StatusCode, Json<JobSnapshot>), ApiError> {
-    // Only dry-run plan validation exists today; refuse to queue a job that would
-    // complete without producing weights (real execution arrives in story 1417).
-    if !payload.dry_run {
-        return Err(ApiError::bad_request(
-            "Real LoRA training is not available yet. Submit with \"dryRun\": true to validate the training plan.",
-        ));
-    }
-
+    // Both dry-run plan validation and real execution exist (story 1417). A
+    // dry-run resolves and validates the plan without producing weights; a real
+    // run hands the same plan to the worker's Z-Image LoRA kernel.
+    //
     // Targets come from the Rust-owned registry; the request only names one.
     let registry = builtin_training_targets();
     let target = registry
@@ -7866,7 +7862,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn create_training_job_rejects_non_dry_run_until_execution_exists() {
+    async fn create_training_job_queues_real_run_when_not_dry_run() {
         let temp_dir = tempfile::tempdir().expect("temp dir creates");
         let app = create_app(test_settings(&temp_dir)).expect("app creates");
         let (_, project) = request(
@@ -7877,31 +7873,59 @@ mod tests {
         )
         .await;
         let project_id = project["id"].as_str().expect("project id").to_owned();
+
+        let (_, asset) = request_multipart_upload(
+            app.clone(),
+            &format!("/api/v1/projects/{project_id}/assets"),
+            "Portrait.PNG",
+            "image/png",
+            b"png-bytes",
+        )
+        .await;
+        let asset_id = asset["id"].as_str().expect("asset id").to_owned();
+
+        let (_, dataset) = request(
+            app.clone(),
+            "POST",
+            &format!("/api/v1/projects/{project_id}/training/datasets"),
+            json!({
+                "name": "Aurora set",
+                "items": [{ "assetId": asset_id, "caption": { "text": "auroraStyle portrait" } }]
+            }),
+        )
+        .await;
+        let dataset_id = dataset["id"].as_str().expect("dataset id").to_owned();
+
         let (_, registry) =
             request(app.clone(), "GET", "/api/v1/training/targets", Value::Null).await;
-        let target_id = registry["targets"][0]["id"].as_str().unwrap().to_owned();
+        let target = registry["targets"][0].clone();
+        let target_id = target["id"].as_str().expect("target id").to_owned();
+        let config = target["defaults"].clone();
 
-        // dryRun:false must be refused before any job is queued — real training
-        // execution does not exist yet, so a "completed" job would be a false success.
-        let (status, error) = request(
+        // Real execution exists (story 1417): a non-dry-run job resolves the same
+        // plan and queues for the worker's Z-Image LoRA kernel.
+        let (status, job) = request(
             app.clone(),
             "POST",
             &format!("/api/v1/projects/{project_id}/training/jobs"),
             json!({
                 "targetId": target_id,
-                "datasetId": "ds_missing",
-                "config": registry["targets"][0]["defaults"].clone(),
-                "outputName": "Aurora",
+                "datasetId": dataset_id,
+                "config": config,
+                "outputName": "Aurora Style",
                 "dryRun": false
             }),
         )
         .await;
-        assert_eq!(status, StatusCode::BAD_REQUEST);
-        assert!(error["detail"]
-            .as_str()
-            .unwrap()
-            .contains("Real LoRA training is not available yet"));
+        assert_eq!(status, StatusCode::CREATED);
+        assert_eq!(job["type"], "lora_train");
+        assert_eq!(job["status"], "queued");
+        assert_eq!(job["payload"]["dryRun"], false);
+        // The plan is resolved and embedded just like the dry-run path.
+        assert_eq!(job["payload"]["plan"]["planVersion"], 1);
+        assert_eq!(job["payload"]["plan"]["target"]["kernel"], "z_image_lora");
 
+        let job_id = job["id"].as_str().expect("job id").to_owned();
         let (status, queued) = request(
             app.clone(),
             "GET",
@@ -7910,7 +7934,8 @@ mod tests {
         )
         .await;
         assert_eq!(status, StatusCode::OK);
-        assert_eq!(queued.as_array().expect("jobs list").len(), 0);
+        assert_eq!(queued[0]["id"], job_id);
+        assert_eq!(queued[0]["type"], "lora_train");
     }
 
     #[tokio::test]

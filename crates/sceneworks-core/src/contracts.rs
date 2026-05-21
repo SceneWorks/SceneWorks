@@ -214,6 +214,11 @@ string_enum! {
         Estimating => "estimating",
         Generating => "generating",
         Running => "running",
+        // LoRA training stages (status stays `running`); see
+        // apps/worker/scene_worker/training_adapters.py.
+        CachingLatents => "caching_latents",
+        Training => "training",
+        Checkpointing => "checkpointing",
         Rendering => "rendering",
         Extracting => "extracting",
         Tracking => "tracking",
@@ -253,6 +258,11 @@ string_enum! {
         ModelImport => "model_import",
         LoraImport => "lora_import",
         LoraTrain => "lora_train",
+        // Real (non-dry-run) LoRA training execution. Advertised separately from
+        // `LoraTrain` (dry-run plan validation, which needs no inference backend)
+        // so a real run only routes to a worker that can actually train. See
+        // jobs_store::worker_supports_job and apps/worker/scene_worker/runtime.py.
+        LoraTrainExecute => "lora_train_execute",
     }
 }
 

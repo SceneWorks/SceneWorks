@@ -182,6 +182,134 @@ fn claim_skips_jobs_not_supported_by_worker_capabilities() {
 }
 
 #[test]
+fn real_lora_train_requires_execute_capability() {
+    let store = store("lora-train-execute-routing");
+    // A GPU worker that can validate dry-run plans but lacks the inference backend
+    // advertises lora_train but not lora_train_execute.
+    store
+        .register_worker(RegisterWorker {
+            worker_id: "dry-only".to_owned(),
+            gpu_id: "gpu-0".to_owned(),
+            gpu_name: None,
+            capabilities: vec![WorkerCapability::Gpu, WorkerCapability::LoraTrain],
+            loaded_models: Vec::new(),
+            utilization: None,
+        })
+        .expect("worker registers");
+    let real = store
+        .create_job(lora_train_job("auto", false))
+        .expect("real training job creates");
+
+    // The dry-run-only worker must not claim the real job; it stays queued for a
+    // backend-capable worker instead of being claimed and failed.
+    assert!(store
+        .claim_next_job("dry-only")
+        .expect("claim succeeds")
+        .is_none());
+
+    store
+        .register_worker(RegisterWorker {
+            worker_id: "trainer".to_owned(),
+            gpu_id: "gpu-1".to_owned(),
+            gpu_name: None,
+            capabilities: vec![
+                WorkerCapability::Gpu,
+                WorkerCapability::LoraTrain,
+                WorkerCapability::LoraTrainExecute,
+            ],
+            loaded_models: Vec::new(),
+            utilization: None,
+        })
+        .expect("worker registers");
+    assert_eq!(
+        store
+            .claim_next_job("trainer")
+            .expect("claim succeeds")
+            .expect("job claimed")
+            .id,
+        real.id
+    );
+}
+
+#[test]
+fn dry_run_lora_train_does_not_require_execute_capability() {
+    let store = store("lora-train-dry-routing");
+    store
+        .register_worker(RegisterWorker {
+            worker_id: "dry-only".to_owned(),
+            gpu_id: "gpu-0".to_owned(),
+            gpu_name: None,
+            capabilities: vec![WorkerCapability::Gpu, WorkerCapability::LoraTrain],
+            loaded_models: Vec::new(),
+            utilization: None,
+        })
+        .expect("worker registers");
+    let dry = store
+        .create_job(lora_train_job("auto", true))
+        .expect("dry-run training job creates");
+
+    assert_eq!(
+        store
+            .claim_next_job("dry-only")
+            .expect("claim succeeds")
+            .expect("job claimed")
+            .id,
+        dry.id
+    );
+}
+
+#[test]
+fn training_progress_stages_persist_under_running_and_reject_unknown_status() {
+    let store = store("training-progress-stages");
+    let job = store
+        .create_job(lora_train_job("auto", false))
+        .expect("training job creates");
+
+    // The trainer reports caching/training/checkpointing stages under the running
+    // status; all must be accepted and persisted, not rejected as invalid.
+    for (stage, label) in [
+        (ProgressStage::CachingLatents, "caching_latents"),
+        (ProgressStage::Training, "training"),
+        (ProgressStage::Checkpointing, "checkpointing"),
+    ] {
+        let updated = store
+            .update_job_progress(
+                &job.id,
+                ProgressUpdate {
+                    status: JobStatus::Running,
+                    stage,
+                    progress: 0.5,
+                    message: "training".to_owned(),
+                    error: None,
+                    result: None,
+                    eta_seconds: None,
+                },
+            )
+            .expect("running status with a training stage is accepted");
+        assert_eq!(updated.status, JobStatus::Running);
+        assert_eq!(updated.stage.as_str(), label);
+    }
+
+    // A non-contract status like "caching" (an earlier kernel bug) must be rejected
+    // rather than silently persisted.
+    let error = store
+        .update_job_progress(
+            &job.id,
+            ProgressUpdate {
+                status: JobStatus::Unknown("caching".to_owned()),
+                stage: ProgressStage::CachingLatents,
+                progress: 0.5,
+                message: "caching".to_owned(),
+                error: None,
+                result: None,
+                eta_seconds: None,
+            },
+        )
+        .expect_err("an unknown status is rejected");
+    assert!(matches!(error, JobsStoreError::InvalidStatus(_)));
+}
+
+#[test]
 fn gpu_generation_jobs_reject_cpu_requested_gpu() {
     let store = store("gpu-jobs-reject-cpu");
 
@@ -614,12 +742,12 @@ fn elapsed_seconds_accepts_fractional_rfc3339_timestamps() {
     );
 }
 
-fn lora_train_job(requested_gpu: &str) -> CreateJob {
+fn lora_train_job(requested_gpu: &str, dry_run: bool) -> CreateJob {
     CreateJob {
         job_type: JobType::LoraTrain,
         project_id: Some("project-1".to_owned()),
         project_name: Some("Project 1".to_owned()),
-        payload: object(json!({ "dryRun": true })),
+        payload: object(json!({ "dryRun": dry_run, "plan": { "planVersion": 1 } })),
         requested_gpu: requested_gpu.to_owned(),
         source_job_id: None,
         duplicate_of_job_id: None,
@@ -632,7 +760,7 @@ fn lora_train_rejects_cpu_requested_gpu() {
     let store = store("lora-train-rejects-cpu");
 
     let error = store
-        .create_job(lora_train_job("cpu"))
+        .create_job(lora_train_job("cpu", true))
         .expect_err("cpu requestedGpu should be rejected for lora_train");
 
     assert!(matches!(error, JobsStoreError::InvalidRequestedGpu(_)));
@@ -653,7 +781,7 @@ fn cpu_worker_cannot_claim_lora_train_even_with_capability() {
         })
         .expect("worker registers");
     store
-        .create_job(lora_train_job("auto"))
+        .create_job(lora_train_job("auto", true))
         .expect("lora_train job creates");
 
     assert!(store
@@ -676,7 +804,7 @@ fn gpu_worker_with_capability_claims_lora_train() {
         })
         .expect("worker registers");
     let created = store
-        .create_job(lora_train_job("auto"))
+        .create_job(lora_train_job("auto", true))
         .expect("lora_train job creates");
 
     let claimed = store
@@ -704,7 +832,7 @@ fn gpu_worker_without_training_capability_skips_lora_train() {
         })
         .expect("worker registers");
     store
-        .create_job(lora_train_job("auto"))
+        .create_job(lora_train_job("auto", true))
         .expect("lora_train job creates");
 
     assert!(store
@@ -718,7 +846,10 @@ fn create_job_with_id_uses_supplied_id() {
     let store = store("create-job-with-id");
 
     let job = store
-        .create_job_with_id("job_lora_train_fixture".to_owned(), lora_train_job("auto"))
+        .create_job_with_id(
+            "job_lora_train_fixture".to_owned(),
+            lora_train_job("auto", true),
+        )
         .expect("job creates with supplied id");
 
     assert_eq!(job.id, "job_lora_train_fixture");

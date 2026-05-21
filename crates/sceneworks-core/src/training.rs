@@ -261,6 +261,11 @@ pub struct TrainingPlanTarget {
     pub modality: TrainingModality,
     pub output_kind: TrainingOutputKind,
     pub base_model: String,
+    /// Optional source repository for the base model weights. The kernel prefers
+    /// this for `from_pretrained` (matching the generation load path, cache or
+    /// download), falling back to `base_model_path` when absent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base_model_repo: Option<String>,
     /// Absolute, resolved path to the base model weights on the worker.
     pub base_model_path: String,
     #[serde(flatten)]
@@ -505,6 +510,7 @@ pub fn build_training_plan(
             modality: input.target.modality.clone(),
             output_kind: input.target.output_kind.clone(),
             base_model: input.target.base_model.clone(),
+            base_model_repo: input.target.base_model_repo.clone(),
             base_model_path: input.base_model_path,
             extra: ExtraFields::new(),
         },
