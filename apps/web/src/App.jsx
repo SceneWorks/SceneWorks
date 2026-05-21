@@ -1561,9 +1561,13 @@ export function App() {
     }
   }
 
-  async function importAsset(file) {
+  async function importAsset(file, options = {}) {
     if (!activeProject || !file) {
-      setError("Create or open a project first.");
+      const error = new Error("Create or open a project first.");
+      if (options.throwOnError) {
+        throw error;
+      }
+      setError(error.message);
       return;
     }
     const body = new FormData();
@@ -1578,6 +1582,9 @@ export function App() {
       setError("");
       return imported;
     } catch (err) {
+      if (options.throwOnError) {
+        throw err;
+      }
       setError(err.message);
       return null;
     }
@@ -1813,7 +1820,7 @@ export function App() {
             createDataset={createTrainingDataset}
             datasets={trainingDatasetsProjectId === activeProject?.id ? trainingDatasets : []}
             datasetsError={trainingDatasetsError}
-            importAsset={importAsset}
+            importAsset={(file) => importAsset(file, { throwOnError: true })}
             loadDataset={loadTrainingDataset}
             loadingDatasets={loadingTrainingDatasets}
             onPreview={setPreviewAsset}

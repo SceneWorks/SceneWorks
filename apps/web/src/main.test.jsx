@@ -292,6 +292,91 @@ describe("SceneWorks app shell", () => {
     expect(container.textContent).toContain("Dataset changes saved");
   });
 
+  it("lets users remove unavailable dataset assets before saving", async () => {
+    const loadDataset = vi.fn(async () => ({
+      id: "dataset-a",
+      name: "Portrait Set",
+      version: 3,
+      items: [
+        { assetId: "asset-a", displayName: "Mira.png", caption: { text: "mira portrait", triggerWords: [] } },
+        { assetId: "asset-missing", displayName: "Missing.png", caption: { text: "missing portrait", triggerWords: [] } },
+      ],
+    }));
+    const updateDataset = vi.fn(async (datasetId, payload) => ({
+      id: datasetId,
+      name: payload.name,
+      version: 4,
+      items: payload.items,
+    }));
+
+    root = createRoot(container);
+    await act(async () => {
+      root.render(
+        <TrainingStudio
+          activeProject={{ id: "project-a", name: "Project A" }}
+          assets={[{ id: "asset-a", type: "image", displayName: "Mira.png", file: { path: "assets/images/Mira.png", mimeType: "image/png" } }]}
+          datasets={[{ id: "dataset-a", name: "Portrait Set", modality: "image", itemCount: 2 }]}
+          loadDataset={loadDataset}
+          updateDataset={updateDataset}
+        />,
+      );
+    });
+
+    await act(async () => {
+      [...container.querySelectorAll(".training-dataset-row")].find((button) => button.textContent.includes("Portrait Set")).click();
+    });
+    await settle();
+
+    expect(container.textContent).toContain("Asset is no longer available");
+    expect([...container.querySelectorAll("button")].find((button) => button.textContent === "Save dataset").disabled).toBe(true);
+
+    await act(async () => {
+      [...container.querySelectorAll("button")].find((button) => button.textContent === "Remove").click();
+    });
+    await act(async () => {
+      [...container.querySelectorAll("button")].find((button) => button.textContent === "Save dataset").click();
+    });
+
+    expect(updateDataset).toHaveBeenCalledWith(
+      "dataset-a",
+      expect.objectContaining({
+        items: [expect.objectContaining({ assetId: "asset-a" })],
+      }),
+    );
+  });
+
+  it("does not save unchanged existing datasets", async () => {
+    const loadDataset = vi.fn(async () => ({
+      id: "dataset-a",
+      name: "Portrait Set",
+      version: 3,
+      items: [{ assetId: "asset-a", displayName: "Mira.png", caption: { text: "mira portrait", triggerWords: [] } }],
+    }));
+    const updateDataset = vi.fn();
+
+    root = createRoot(container);
+    await act(async () => {
+      root.render(
+        <TrainingStudio
+          activeProject={{ id: "project-a", name: "Project A" }}
+          assets={[{ id: "asset-a", type: "image", displayName: "Mira.png", file: { path: "assets/images/Mira.png", mimeType: "image/png" } }]}
+          datasets={[{ id: "dataset-a", name: "Portrait Set", modality: "image", itemCount: 1 }]}
+          loadDataset={loadDataset}
+          updateDataset={updateDataset}
+        />,
+      );
+    });
+
+    await act(async () => {
+      [...container.querySelectorAll(".training-dataset-row")].find((button) => button.textContent.includes("Portrait Set")).click();
+    });
+    await settle();
+
+    const saveButton = [...container.querySelectorAll("button")].find((button) => button.textContent === "Save dataset");
+    expect(saveButton.disabled).toBe(true);
+    expect(updateDataset).not.toHaveBeenCalled();
+  });
+
   it("selects duplicate-titled assets through the thumbnail asset picker", async () => {
     const onChange = vi.fn();
     const assets = [

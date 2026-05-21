@@ -1619,6 +1619,39 @@ label {
   background: var(--success);
 }
 
+.training-unavailable-list {
+  display: grid;
+  gap: 8px;
+}
+
+.training-unavailable-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 10px;
+  border: 1px solid color-mix(in oklch, var(--danger) 42%, var(--border));
+  border-radius: var(--r-sm);
+  background: color-mix(in oklch, var(--danger) 8%, var(--surface));
+}
+
+.training-unavailable-item > div {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+}
+
+.training-unavailable-item strong {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.training-unavailable-item span {
+  color: var(--text-muted);
+  font-size: 12px;
+}
+
 .training-asset-picker {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
@@ -1636,6 +1669,11 @@ label {
 .training-asset-card.selected {
   border-color: color-mix(in oklch, var(--accent) 58%, var(--border));
   box-shadow: inset 0 0 0 1px color-mix(in oklch, var(--accent) 34%, transparent);
+}
+
+.training-asset-card.disabled {
+  border-color: color-mix(in oklch, var(--danger) 42%, var(--border));
+  background: color-mix(in oklch, var(--danger) 7%, var(--surface));
 }
 
 .training-asset-card > button {
@@ -1669,6 +1707,16 @@ label {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.training-asset-badge {
+  justify-self: start;
+  padding: 3px 7px;
+  border-radius: var(--r-pill);
+  background: var(--danger-soft);
+  color: color-mix(in oklch, var(--danger) 75%, var(--text));
+  font-size: 11px;
+  font-weight: 700;
 }
 
 .training-dataset-actions {

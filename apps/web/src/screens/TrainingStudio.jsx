@@ -43,7 +43,7 @@ function datasetHealth({ activeDataset, imageAssets, selectedAssetIds }) {
   const duplicateFilenames = names.filter((name, index) => names.indexOf(name) !== index).length;
   const captionsByAssetId = new Map((activeDataset?.items ?? []).map((item) => [item.assetId, captionText(item)]));
   const missingCaptions = selectedAssetIds.filter((id) => !captionsByAssetId.get(id)).length;
-  const valid = selectedAssetIds.length > 0 && disabledItems === 0 && duplicateFilenames === 0;
+  const valid = selectedAssetIds.length > 0 && disabledItems === 0;
 
   return {
     disabledItems,
@@ -134,11 +134,12 @@ export function TrainingStudio({
   const activeIndex = tabs.findIndex((tab) => tab.id === activeTab);
   const active = tabs[activeIndex] ?? tabs[0];
   const datasetSummary = useMemo(() => summarizeDatasets(datasets), [datasets]);
-  const imageAssets = useMemo(
-    () => assets.filter((asset) => assetCanRenderAsImage(asset) && !asset.status?.trashed),
-    [assets],
-  );
+  const imageAssets = useMemo(() => assets.filter((asset) => assetCanRenderAsImage(asset)), [assets]);
   const assetsById = useMemo(() => new Map(imageAssets.map((asset) => [asset.id, asset])), [imageAssets]);
+  const unavailableAssetIds = useMemo(
+    () => selectedAssetIds.filter((assetId) => !assetsById.has(assetId)),
+    [assetsById, selectedAssetIds],
+  );
   const health = useMemo(
     () => datasetHealth({ activeDataset, imageAssets, selectedAssetIds }),
     [activeDataset, imageAssets, selectedAssetIds],
@@ -149,7 +150,12 @@ export function TrainingStudio({
     (draftName.trim() !== activeDataset.name ||
       selectedAssetIds.length !== originalAssetIds.length ||
       selectedAssetIds.some((id, index) => id !== originalAssetIds[index]));
-  const canSave = draftName.trim().length > 0 && selectedAssetIds.length > 0 && health.disabledItems === 0 && !savingDataset;
+  const canSave =
+    draftName.trim().length > 0 &&
+    selectedAssetIds.length > 0 &&
+    health.disabledItems === 0 &&
+    !savingDataset &&
+    (!activeDataset || dirty);
 
   useEffect(() => {
     setActiveDataset(null);
@@ -216,6 +222,11 @@ export function TrainingStudio({
     );
   }
 
+  function removeUnavailableAsset(assetId) {
+    setDatasetMessage("");
+    setSelectedAssetIds((current) => current.filter((id) => id !== assetId));
+  }
+
   function startNewDataset() {
     setActiveDataset(null);
     setDatasetError("");
@@ -242,6 +253,8 @@ export function TrainingStudio({
       }
       if (imported.length) {
         setSelectedAssetIds((current) => Array.from(new Set([...current, ...imported])));
+      } else {
+        setDatasetError("No images were imported.");
       }
     } catch (err) {
       setDatasetError(err.message);
@@ -419,14 +432,39 @@ export function TrainingStudio({
                       <DatasetHealth health={health} />
                       <div className="training-validity">
                         <span className={health.valid ? "training-valid-dot valid" : "training-valid-dot"} />
-                        <span>{health.valid ? "Dataset is ready for downstream steps" : "Add image assets and resolve flagged items"}</span>
+                        <span>{health.valid ? "Dataset is ready for downstream steps" : "Add image assets and remove disabled items"}</span>
                       </div>
+                      {unavailableAssetIds.length ? (
+                        <div className="training-unavailable-list" aria-label="Unavailable dataset items">
+                          {unavailableAssetIds.map((assetId) => (
+                            <div className="training-unavailable-item" key={assetId}>
+                              <div>
+                                <strong>{assetId}</strong>
+                                <span>Asset is no longer available</span>
+                              </div>
+                              <button className="secondary-action" onClick={() => removeUnavailableAsset(assetId)} type="button">
+                                Remove
+                              </button>
+                            </div>
+                          ))}
+                        </div>
+                      ) : null}
                       <div className="training-asset-picker" aria-label="Training dataset image assets">
                         {imageAssets.length ? (
                           imageAssets.map((asset) => {
                             const selected = selectedAssetIds.includes(asset.id);
+                            const disabled = asset.status?.rejected || asset.status?.trashed;
                             return (
-                              <article className={selected ? "training-asset-card selected" : "training-asset-card"} key={asset.id}>
+                              <article
+                                className={[
+                                  "training-asset-card",
+                                  selected ? "selected" : "",
+                                  disabled ? "disabled" : "",
+                                ]
+                                  .filter(Boolean)
+                                  .join(" ")}
+                                key={asset.id}
+                              >
                                 <button onClick={() => onPreview(asset)} type="button">
                                   <AssetThumbnail asset={asset} />
                                 </button>
@@ -434,6 +472,9 @@ export function TrainingStudio({
                                   <input checked={selected} onChange={() => toggleAsset(asset.id)} type="checkbox" />
                                   <span>{asset.displayName ?? imageAssetName(asset)}</span>
                                 </label>
+                                {disabled ? (
+                                  <span className="training-asset-badge">{asset.status?.trashed ? "Trashed" : "Rejected"}</span>
+                                ) : null}
                               </article>
                             );
                           })
