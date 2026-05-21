@@ -1170,6 +1170,116 @@ class LtxPipelinesVideoAdapter(ProceduralVideoAdapter):
             return False
 
 
+def _mlx_available() -> bool:
+    try:
+        import mlx.core as mx
+        return True
+    except ImportError:
+        return False
+
+
+def _mps_available() -> bool:
+    try:
+        import torch
+        return hasattr(torch.backends, "mps") and torch.backends.mps.is_available()
+    except ImportError:
+        return False
+
+
+class MlxVideoAdapter(VideoGenerationAdapter):
+    id = "mlx_video"
+
+    _supported_models = {"ltx_2_3", "wan_2_2", "wan_2_2_t2v_14b", "wan_2_2_i2v_14b"}
+    _supported_modes = {"text_to_video", "image_to_video", "first_last_frame", "extend_clip", "video_bridge"}
+
+    def __init__(self) -> None:
+        self._pipeline: Any | None = None
+        self._pipeline_key_value: str | None = None
+        self._loaded_models: set[str] = set()
+        self._settings: WorkerSettings | None = None
+
+    def loaded_models(self) -> list[str]:
+        return sorted(self._loaded_models)
+
+    def prepare(self, *, settings: WorkerSettings, job: dict[str, Any]) -> VideoRequest:
+        self._settings = settings
+        return video_request_from_job(job)
+
+    def ensure_models(self, request: VideoRequest) -> None:
+        if request.model not in self._supported_models:
+            raise RuntimeError(
+                f"MLX adapter does not support {model_target(request.model)['label']}. "
+                f"Supported models: {', '.join(model_target(m)['label'] for m in sorted(self._supported_models))}."
+            )
+        target = model_target(request.model)
+        if request.mode not in self._supported_modes:
+            supported = ", ".join(sorted(m.replace("_", " ") for m in self._supported_modes))
+            raise RuntimeError(f"{target['label']} MLX adapter currently supports {supported}.")
+        if request.duration > target["hardMaxDuration"]:
+            raise RuntimeError(f"{target['label']} is limited to {target['hardMaxDuration']}s clips in this adapter.")
+        if not _mlx_available():
+            raise RuntimeError(
+                "MLX video generation requires optional worker dependencies. "
+                "Install apps/worker/requirements-mlx.txt in this worker environment."
+            )
+
+    def estimate_requirements(self, request: VideoRequest) -> dict[str, Any]:
+        target = model_target(request.model)
+        raw_frames = max(1, int(round(request.duration * request.fps)))
+
+        memory_estimates = {
+            "ltx_2_3": {"peak_gb": 31, "description": "Q4 quantized, ~31 GB peak"},
+            "wan_2_2": {"peak_gb": 45, "description": "bf16, 40 steps, ~45 GB peak"},
+            "wan_2_2_t2v_14b": {"peak_gb": 133, "description": "bf16 + Lightning LoRA, 4 steps, ~133 GB peak"},
+            "wan_2_2_i2v_14b": {"peak_gb": 133, "description": "bf16 + Lightning LoRA, 4 steps, ~133 GB peak"},
+        }
+        mem_info = memory_estimates.get(request.model, {"peak_gb": 0, "description": "Unknown"})
+
+        return {
+            "estimatedFrames": raw_frames,
+            "requestedFrames": raw_frames,
+            "pixelCount": request.width * request.height,
+            "recommendedMaxDuration": target["recommendedMaxDuration"],
+            "gpuPreference": request.advanced.get("gpuPreference", "auto"),
+            "adapter": self.id,
+            "model": request.model,
+            "peakMemoryGb": mem_info["peak_gb"],
+            "memoryDescription": mem_info["description"],
+        }
+
+    def run(
+        self,
+        *,
+        settings: WorkerSettings,
+        job: dict[str, Any],
+        request: VideoRequest,
+        progress: ProgressCallback,
+        cancel_requested: CancelCallback,
+    ) -> dict[str, Any]:
+        raise NotImplementedError(
+            "MLX video generation is not yet implemented. "
+            "Per-model implementations are coming in sc-1503 (LTX), sc-1504 (Wan-5B), sc-1505 (Wan-14B)."
+        )
+
+    def cancel(self, _job_id: str) -> None:
+        return
+
+    def cleanup(self, _job_id: str) -> None:
+        self._loaded_models.clear()
+        self._pipeline = None
+        self._pipeline_key_value = None
+
+    def map_settings(self, request: VideoRequest, target: dict[str, Any]) -> dict[str, Any]:
+        return {
+            **request.advanced,
+            "adapterFamily": target["family"],
+            "targetAdapter": self.id,
+            "model": request.model,
+            "recommendedMaxDuration": target["recommendedMaxDuration"],
+            "realModelInference": True,
+        }
+
+
 class DiffusersVideoAdapter(VideoGenerationAdapter):
     id = "diffusers_video"
 
@@ -1570,11 +1680,21 @@ def create_video_adapter(job: dict[str, Any] | None = None) -> VideoGenerationAd
         return DiffusersVideoAdapter()
     if requested in {"procedural", "procedural_video"}:
         return ProceduralVideoAdapter()
+    if requested == "mlx_video":
+        return MlxVideoAdapter()
     if not requested:
         model = str((job or {}).get("payload", {}).get("model", "ltx_2_3"))
         target = model_target(model)
+
+        if target["adapter"] == "ltx_video" and _mps_available() and model in MlxVideoAdapter._supported_models:
+            return MlxVideoAdapter()
+
         if target["adapter"] == "ltx_video":
             return LtxPipelinesVideoAdapter()
+
+        if _mps_available() and model in MlxVideoAdapter._supported_models:
+            return MlxVideoAdapter()
+
         return DiffusersVideoAdapter()
     raise RuntimeError(f"Unsupported SCENEWORKS_VIDEO_ADAPTER value: {requested}.")
 
