@@ -623,8 +623,7 @@ class ZImageDiffusersAdapter:
         self._empty_cuda_cache(torch)
 
     def _empty_cuda_cache(self, torch: Any) -> None:
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
+        empty_torch_cache(torch)
 
     def _run_pipeline(self, settings: WorkerSettings, pipe: Any, request: ImageRequest, seed: int) -> Image.Image:
         torch = importlib.import_module("torch")
@@ -877,8 +876,7 @@ class QwenImageAdapter:
         return pipe
 
     def _empty_cuda_cache(self, torch: Any) -> None:
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
+        empty_torch_cache(torch)
 
     def _run_pipeline(self, settings: WorkerSettings, pipe: Any, request: ImageRequest, seed: int) -> Image.Image:
         torch = importlib.import_module("torch")
@@ -1031,8 +1029,27 @@ def select_torch_device(torch: Any, gpu_id: str | None = None) -> str:
                 return f"cuda:{physical_index}"
         return "cuda"
     if getattr(torch.backends, "mps", None) and torch.backends.mps.is_available():
+        # Route the few diffusers ops that lack an MPS kernel to CPU instead of
+        # erroring out. Set only when MPS is actually selected — never on CUDA
+        # or CPU hosts (sc-1332).
+        os.environ.setdefault("PYTORCH_ENABLE_MPS_FALLBACK", "1")
         return "mps"
     return "cpu"
+
+
+def empty_torch_cache(torch: Any) -> None:
+    """Release cached accelerator memory on whichever backend is active.
+
+    Clears the CUDA allocator cache on NVIDIA and the MPS allocator cache on
+    Apple Silicon; a no-op on CPU-only hosts (sc-1332).
+    """
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+    mps = getattr(getattr(torch, "backends", None), "mps", None)
+    if mps and mps.is_available():
+        mps_backend = getattr(torch, "mps", None)
+        if mps_backend is not None and hasattr(mps_backend, "empty_cache"):
+            mps_backend.empty_cache()
 
 
 def torch_inference_backend_available(torch: Any) -> bool:
