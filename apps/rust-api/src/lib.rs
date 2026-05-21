@@ -20,8 +20,8 @@ use futures_util::future::join_all;
 use parking_lot::Mutex;
 use sceneworks_core::contracts::{
     ClaimRequest, ClaimResponse, ContractNumber, DuplicateJobRequest, JobCreateRequest,
-    JobSnapshot, JobType, JsonObject, ProgressRequest, QueueSummary, WorkerHeartbeatRequest,
-    WorkerRegisterRequest, WorkerSnapshot,
+    JobSnapshot, JobStatus, JobType, JsonObject, ProgressRequest, QueueSummary,
+    WorkerHeartbeatRequest, WorkerRegisterRequest, WorkerSnapshot,
 };
 use sceneworks_core::jobs_store::{
     CreateJob, DuplicateJob, JobsStore, JobsStoreError, ProgressUpdate, RegisterWorker,
@@ -1415,10 +1415,60 @@ async fn create_training_job(
     let data_dir = state.settings.data_dir.clone();
     let base_model_path = resolve_base_model_path(target, &data_dir);
     let lora_id = format!("lora_{}", Uuid::new_v4().simple());
-    let output_dir = data_dir.join("loras").join(&lora_id);
     let file_name = format!("{}.safetensors", slugify_lora_id(&output_name));
     let job_id = format!("job_{}", Uuid::new_v4().simple());
     let requested_gpu = training_requested_gpu(&payload.config.advanced);
+
+    // Where the produced adapter is written. The target's default `outputScope`
+    // (project) lives in the config's `advanced` bag: project outputs land in the
+    // project's LoRA store, global outputs in the shared data dir. The manifest
+    // `source.path` stays relative to the scope's root so `normalize_lora_entry`
+    // resolves the installed path on either side. The matching manifest path is
+    // recomputed from the same trusted inputs at registration time
+    // (`register_trained_lora`), never read back from the job payload.
+    let output_scope = training_output_scope(&payload.config.advanced)?;
+    let (output_dir, _manifest_path) =
+        resolve_training_output_location(&state, &output_scope, Some(&project_id), &lora_id)
+            .await?;
+    let source_relpath = format!("loras/{lora_id}");
+
+    // Operational guardrails (story 1419): fail fast with actionable errors for
+    // the common setup problems, before a job is queued.
+    //
+    // The produced LoRA's family must be one an installed model accepts, or the
+    // output would never be selectable in Image Studio. When no model manifests
+    // are present the set is empty and this is a no-op. Families come straight
+    // from the manifests (not `model_catalog`) so this guardrail — which runs on
+    // every submit, including the offline dry-run path — makes no network calls.
+    let normalized_family = normalize_lora_family(&target.family);
+    let known_families = known_lora_families_from_manifests(&state).await?;
+    if !known_families.is_empty()
+        && !known_families
+            .iter()
+            .any(|family| family == &normalized_family)
+    {
+        return Err(ApiError::bad_request(format!(
+            "Training target '{}' produces LoRA family '{}', which no installed model accepts ({}). Install a compatible base model first.",
+            target.id,
+            target.family,
+            known_families.join(", ")
+        )));
+    }
+
+    // A real run loads the base model and writes weights, so it must have the
+    // model installed and room on disk. A dry run only resolves the plan, so it
+    // is exempt — that is how you preview a plan before installing the model.
+    if !payload.dry_run {
+        if !training_base_model_installed(&data_dir, target) {
+            return Err(ApiError::bad_request(format!(
+                "Base model '{}' is not installed. Install it from the model catalog before starting a real training run (dry runs work without it).",
+                target.base_model
+            )));
+        }
+        if let Some(message) = training_disk_space_error(&output_dir) {
+            return Err(ApiError::bad_request(message));
+        }
+    }
 
     // Rust resolves and validates the normalized plan before any job is queued.
     let plan = build_training_plan(BuildTrainingPlan {
@@ -1435,12 +1485,46 @@ async fn create_training_job(
     })
     .map_err(|error| ApiError::bad_request(error.to_string()))?;
 
+    // Pre-build the LoRA registry entry the completed job will register, mirroring
+    // the `lora_import` pattern: Rust owns LoRA registration. The descriptive
+    // metadata is captured here; the manifest path and the security-sensitive
+    // fields (id, scope, source path) are recomputed from trusted inputs when the
+    // entry is upserted on completion (story 1418), so this stays purely
+    // informational. Dry runs never register.
+    let timestamp = now_rfc3339();
+    let manifest_entry = json!({
+        "id": lora_id.clone(),
+        "name": output_name.clone(),
+        "scope": output_scope,
+        "family": target.family.clone(),
+        "baseModel": target.base_model.clone(),
+        "triggerWords": plan.output.trigger_words.clone(),
+        "source": {
+            "provider": "training",
+            "path": source_relpath,
+        },
+        "files": [plan.output.file_name.clone()],
+        "provenance": {
+            "kind": "training",
+            "trainingJobId": job_id.clone(),
+            "targetId": plan.provenance.target_id.clone(),
+            "datasetId": plan.provenance.dataset_id.clone(),
+            "datasetVersion": plan.provenance.dataset_version,
+            "baseModel": plan.provenance.base_model.clone(),
+            "configSnapshot": plan.provenance.config_snapshot.clone(),
+            "createdAt": timestamp.clone(),
+        },
+        "createdAt": timestamp.clone(),
+        "updatedAt": timestamp,
+    });
+
     let plan_value =
         serde_json::to_value(&plan).map_err(|error| ApiError::internal(error.to_string()))?;
     let mut job_payload = JsonObject::new();
     job_payload.insert("dryRun".to_owned(), Value::Bool(payload.dry_run));
     job_payload.insert("outputName".to_owned(), Value::String(output_name));
     job_payload.insert("plan".to_owned(), plan_value);
+    job_payload.insert("manifestEntry".to_owned(), manifest_entry);
 
     let job = store_call(state.clone(), move |store, _timeout| {
         store.create_job_with_id(
@@ -1495,6 +1579,188 @@ fn training_requested_gpu(advanced: &JsonObject) -> String {
         .unwrap_or_default()
         .to_owned();
     requested_gpu_or_auto(raw)
+}
+
+/// Resolves the output scope for a training run from the config's `advanced` bag.
+/// Defaults to `project` (the target default) and rejects anything other than the
+/// two scopes the LoRA registry understands.
+fn training_output_scope(advanced: &JsonObject) -> Result<String, ApiError> {
+    let scope = advanced
+        .get("outputScope")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or("project");
+    match scope {
+        "project" | "global" => Ok(scope.to_owned()),
+        other => Err(ApiError::bad_request(format!(
+            "Unsupported training outputScope: {other}. Use project or global."
+        ))),
+    }
+}
+
+/// Single source of truth for where a training run's adapter is written and its
+/// LoRA registered, derived only from trusted inputs: the scope, the owning
+/// project, and the pre-allocated LoRA id. `create_training_job` uses it to place
+/// the plan's output dir at submit time, and `register_trained_lora` recomputes
+/// it at completion so a (mutable) job payload can never redirect a manifest
+/// write outside the two canonical LoRA manifests. Returns
+/// `(output_dir, manifest_path)`.
+async fn resolve_training_output_location(
+    state: &AppState,
+    scope: &str,
+    project_id: Option<&str>,
+    lora_id: &str,
+) -> Result<(PathBuf, PathBuf), ApiError> {
+    match scope {
+        "project" => {
+            let project_id = project_id.ok_or_else(|| {
+                ApiError::bad_request("Project-scoped training requires a project id")
+            })?;
+            let loras_dir = project_path_for_id(state.clone(), project_id)
+                .await?
+                .join("loras");
+            Ok((loras_dir.join(lora_id), loras_dir.join("manifest.jsonc")))
+        }
+        "global" => {
+            let loras_dir = state.settings.data_dir.join("loras");
+            Ok((
+                loras_dir.join(lora_id),
+                state
+                    .settings
+                    .config_dir
+                    .join("manifests")
+                    .join("user.loras.jsonc"),
+            ))
+        }
+        other => Err(ApiError::bad_request(format!(
+            "Unsupported training outputScope: {other}. Use project or global."
+        ))),
+    }
+}
+
+/// Rejects a LoRA id that is not a single safe path component, so a crafted job
+/// payload cannot escape the LoRA output/manifest tree via `..` or path
+/// separators. Server-generated ids (`lora_<hex>`) always pass.
+fn validate_lora_id_component(lora_id: &str) -> Result<(), ApiError> {
+    let invalid = lora_id.is_empty()
+        || lora_id == "."
+        || lora_id == ".."
+        || lora_id.contains("..")
+        || lora_id.chars().any(|character| {
+            !(character.is_ascii_alphanumeric() || matches!(character, '_' | '-' | '.'))
+        });
+    if invalid {
+        return Err(ApiError::bad_request(format!(
+            "Invalid LoRA id for training output: {lora_id}"
+        )));
+    }
+    Ok(())
+}
+
+/// Whether the training target's base model weights are present on disk, using
+/// the same resolution `model_catalog` reports: the shared Hugging Face hub
+/// cache for the target's repo, or a SceneWorks-managed `data/models/<id>`
+/// install marker. A real run requires this; a dry run does not.
+fn training_base_model_installed(data_dir: &FsPath, target: &TrainingTarget) -> bool {
+    if let Some(repo) = target
+        .base_model_repo
+        .as_deref()
+        .map(str::trim)
+        .filter(|repo| !repo.is_empty())
+    {
+        if let Some(cache_path) = huggingface_repo_cache_path(data_dir, repo) {
+            if huggingface_repo_cache_exists(&cache_path) {
+                return true;
+            }
+        }
+    }
+    let managed = data_dir
+        .join("models")
+        .join(safe_download_dir(&target.base_model));
+    model_is_installed(&managed)
+}
+
+/// Minimum free space we require at the output location before queuing a real
+/// training run: enough headroom for periodic checkpoints plus the final
+/// adapter. Conservative so it only trips when a disk is genuinely low.
+const MIN_FREE_TRAINING_BYTES: u64 = 2 * 1024 * 1024 * 1024;
+
+/// Returns an actionable error message when the output volume is too low on
+/// space for a real run, or `None` when there is room (or free space cannot be
+/// determined — we do not block on an unknowable answer).
+fn training_disk_space_error(output_dir: &FsPath) -> Option<String> {
+    // `output_dir` itself rarely exists yet; probe the nearest existing parent.
+    let probe = nearest_existing_ancestor(output_dir)?;
+    let available = fs2::available_space(&probe).ok()?;
+    insufficient_disk_space(available, MIN_FREE_TRAINING_BYTES).then(|| {
+        format!(
+            "Not enough free disk space to train: {} available on the volume holding {}, but at least {} is recommended. Free up space and try again.",
+            human_gib(available),
+            probe.display(),
+            human_gib(MIN_FREE_TRAINING_BYTES)
+        )
+    })
+}
+
+/// Pure decision split out so the threshold logic is unit-testable without
+/// touching a real filesystem.
+fn insufficient_disk_space(available: u64, required: u64) -> bool {
+    available < required
+}
+
+/// Nearest ancestor of `path` (including itself) that exists on disk.
+fn nearest_existing_ancestor(path: &FsPath) -> Option<PathBuf> {
+    let mut current = Some(path);
+    while let Some(candidate) = current {
+        if candidate.exists() {
+            return Some(candidate.to_path_buf());
+        }
+        current = candidate.parent();
+    }
+    None
+}
+
+fn human_gib(bytes: u64) -> String {
+    format!("{:.1} GiB", bytes as f64 / (1024.0 * 1024.0 * 1024.0))
+}
+
+/// The trusted `files` list for a trained LoRA: the adapter file names the plan
+/// declared (staged into `manifestEntry.files` at submit), each validated as a
+/// plain in-tree file and confirmed to exist under the recomputed output dir.
+/// Returns `None` when none qualify.
+///
+/// Trusting the declared name rather than the first `.safetensors` on disk
+/// matters: the trainer leaves step checkpoints (`<stem>-stepNNN.safetensors`)
+/// in the same directory as the final `<stem>.safetensors`, and an arbitrary
+/// pick could register an under-trained checkpoint. Requiring plain components
+/// also keeps a crafted `..`-traversing `files` value from pointing generation
+/// at a safetensors outside `installedPath`.
+fn trusted_adapter_files(declared: Option<&Value>, output_dir: &FsPath) -> Option<Vec<String>> {
+    let declared = declared?.as_array()?;
+    let files = declared
+        .iter()
+        .filter_map(Value::as_str)
+        .filter(|name| is_plain_relative_file(name) && output_dir.join(name).is_file())
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+    if files.is_empty() {
+        None
+    } else {
+        Some(files)
+    }
+}
+
+/// Whether `name` is a single relative file path made only of normal components
+/// (no `..`, root, drive prefix, or `.`), so joining it to an output dir cannot
+/// escape that dir.
+fn is_plain_relative_file(name: &str) -> bool {
+    let path = FsPath::new(name);
+    !name.is_empty()
+        && path.file_name().is_some()
+        && path
+            .components()
+            .all(|component| matches!(component, std::path::Component::Normal(_)))
 }
 
 async fn get_project_file(
@@ -3716,6 +3982,17 @@ async fn update_job_progress(
 ) -> Result<Json<JobSnapshot>, ApiError> {
     let progress = number_to_f64(&payload.progress, "progress")?;
     let eta_seconds = optional_number_to_f64(payload.eta_seconds.as_ref(), "etaSeconds")?;
+    let mut result = payload.result;
+    // On a completing real training run, register the produced adapter as a
+    // SceneWorks LoRA *before* recording completion, and fold the outcome into
+    // the job result (story 1418). Doing it here keeps the result write atomic
+    // and makes a registration failure visible in the job record rather than
+    // silently dropping the trained output.
+    if matches!(payload.status, JobStatus::Completed) {
+        if let Some(status) = register_completed_training_lora(&state, &job_id).await {
+            result.get_or_insert_with(JsonObject::new).extend(status);
+        }
+    }
     let job = store_call(state.clone(), move |store, _timeout| {
         store.update_job_progress(
             &job_id,
@@ -3725,7 +4002,7 @@ async fn update_job_progress(
                 progress,
                 message: payload.message,
                 error: payload.error,
-                result: payload.result,
+                result,
                 eta_seconds,
             },
         )
@@ -3734,6 +4011,153 @@ async fn update_job_progress(
     publish(&state, "job.updated", &job);
     publish_queue(&state).await?;
     Ok(Json(job))
+}
+
+/// Attempts LoRA registration for a job reporting completion, returning result
+/// fields that describe the outcome — or `None` when the job is not a real
+/// training run with a staged output. Never errors the progress update: a
+/// registration failure is logged and surfaced via `loraRegistered: false` +
+/// `loraRegistrationError` so the trained output is not silently lost.
+async fn register_completed_training_lora(state: &AppState, job_id: &str) -> Option<JsonObject> {
+    let job = store_call(state.clone(), {
+        let job_id = job_id.to_owned();
+        move |store, _timeout| store.get_job(&job_id)
+    })
+    .await
+    .ok()?;
+    if !matches!(job.job_type, JobType::LoraTrain) {
+        return None;
+    }
+    match register_trained_lora(state, &job).await {
+        Ok(None) => None,
+        Ok(Some((lora_id, manifest_path))) => {
+            let mut status = JsonObject::new();
+            status.insert("loraRegistered".to_owned(), Value::Bool(true));
+            status.insert("loraId".to_owned(), Value::String(lora_id));
+            status.insert(
+                "loraManifestPath".to_owned(),
+                Value::String(manifest_path.display().to_string()),
+            );
+            Some(status)
+        }
+        Err(error) => {
+            eprintln!(
+                "Failed to register trained LoRA for job {}: {}",
+                job.id, error.detail
+            );
+            let mut status = JsonObject::new();
+            status.insert("loraRegistered".to_owned(), Value::Bool(false));
+            status.insert(
+                "loraRegistrationError".to_owned(),
+                Value::String(error.detail),
+            );
+            Some(status)
+        }
+    }
+}
+
+/// Registers a completed real training run's output as a normal SceneWorks LoRA,
+/// returning the registered `(lora_id, manifest_path)` or `None` when there is
+/// nothing to register (a dry run, or a job without a staged entry).
+///
+/// Security: the manifest path and output directory are recomputed from the
+/// run's scope, owning project, and a validated LoRA id — never from the
+/// (mutable) job payload — so a crafted or duplicated `lora_train` job cannot
+/// redirect the manifest write outside the two canonical LoRA manifests
+/// (`config_dir/manifests/user.loras.jsonc` or `<project>/loras/manifest.jsonc`).
+/// A run whose adapter is missing under the recomputed output dir registers
+/// nothing, so a failed/canceled/unwritten job never leaves a broken entry. The
+/// entry shows up in `/api/v1/loras` and is selectable in Image Studio.
+async fn register_trained_lora(
+    state: &AppState,
+    job: &JobSnapshot,
+) -> Result<Option<(String, PathBuf)>, ApiError> {
+    if job
+        .payload
+        .get("dryRun")
+        .and_then(Value::as_bool)
+        .unwrap_or(true)
+    {
+        return Ok(None);
+    }
+    let Some(manifest_entry) = job
+        .payload
+        .get("manifestEntry")
+        .and_then(Value::as_object)
+        .cloned()
+    else {
+        return Ok(None);
+    };
+    // Derive the security-sensitive fields from the entry but trust nothing: the
+    // scope is validated by `resolve_training_output_location`, and the id must be
+    // a safe single path component before it can name an output dir / manifest.
+    let scope = manifest_entry
+        .get("scope")
+        .and_then(Value::as_str)
+        .unwrap_or("project")
+        .to_owned();
+    let lora_id = manifest_entry
+        .get("id")
+        .and_then(Value::as_str)
+        .ok_or_else(|| ApiError::internal("Training manifest entry requires an id"))?
+        .to_owned();
+    validate_lora_id_component(&lora_id)?;
+
+    // Recompute the output dir and manifest path from trusted inputs; the job
+    // payload's own manifest/output paths are deliberately ignored.
+    let (output_dir, manifest_path) =
+        resolve_training_output_location(state, &scope, job.project_id.as_deref(), &lora_id)
+            .await?;
+    // Register the adapter file(s) the plan declared, validated as plain in-tree
+    // files that exist under the recomputed output dir. Using the declared final
+    // name (not the first `.safetensors` on disk) means a step checkpoint sharing
+    // the directory is never registered in place of the final adapter, while the
+    // validation still rejects any `..`-traversing name a crafted payload injects.
+    let Some(files) = trusted_adapter_files(manifest_entry.get("files"), &output_dir) else {
+        return Err(ApiError::internal(format!(
+            "No declared trained adapter found under {}; skipping LoRA registration",
+            output_dir.display()
+        )));
+    };
+
+    // Overwrite the security-sensitive fields with the trusted values, keeping
+    // the descriptive metadata (name, family, triggerWords, baseModel,
+    // provenance) the submit step captured. `source.path` stays relative so
+    // `normalize_lora_entry` resolves it under the scope root.
+    let mut entry = manifest_entry;
+    entry.insert("id".to_owned(), Value::String(lora_id.clone()));
+    entry.insert("scope".to_owned(), Value::String(scope));
+    entry.insert(
+        "source".to_owned(),
+        json!({ "provider": "training", "path": format!("loras/{lora_id}") }),
+    );
+    entry.insert(
+        "files".to_owned(),
+        Value::Array(files.into_iter().map(Value::String).collect()),
+    );
+    entry.insert("updatedAt".to_owned(), Value::String(now_rfc3339()));
+
+    let upsert_id = lora_id.clone();
+    mutate_manifest_entries(state, &manifest_path, "loras", move |entries| {
+        // Replace any prior entry with this id (re-run) so provenance refreshes
+        // without duplicating, preserving the original createdAt.
+        let created_at = entries
+            .iter()
+            .find(|item| item.get("id").and_then(Value::as_str) == Some(upsert_id.as_str()))
+            .and_then(|item| item.get("createdAt").cloned());
+        let mut entries = entries
+            .into_iter()
+            .filter(|item| item.get("id").and_then(Value::as_str) != Some(upsert_id.as_str()))
+            .collect::<Vec<_>>();
+        let mut entry = entry;
+        if let Some(created_at) = created_at {
+            entry.insert("createdAt".to_owned(), created_at);
+        }
+        entries.push(Value::Object(entry));
+        Ok((entries, ()))
+    })
+    .await?;
+    Ok(Some((lora_id, manifest_path)))
 }
 
 async fn queue_summary(State(state): State<AppState>) -> Result<Json<QueueSummary>, ApiError> {
@@ -6004,6 +6428,20 @@ fn known_lora_families(models: &[Value]) -> Vec<String> {
     families
 }
 
+/// LoRA families accepted by installed models, read directly from the model
+/// manifests. Unlike `known_lora_families(&model_catalog(..))`, this does no
+/// Hugging Face size-estimation, so callers on hot/offline paths (the training
+/// submit guardrail) stay local.
+async fn known_lora_families_from_manifests(state: &AppState) -> Result<Vec<String>, ApiError> {
+    let manifest_dir = state.settings.config_dir.join("manifests");
+    let mut models =
+        load_manifest_entries(state, &manifest_dir.join("builtin.models.jsonc"), "models").await?;
+    models.extend(
+        load_manifest_entries(state, &manifest_dir.join("user.models.jsonc"), "models").await?,
+    );
+    Ok(known_lora_families(&models))
+}
+
 fn slugify_lora_id(value: &str) -> String {
     let mut output = String::new();
     let mut previous_separator = false;
@@ -6871,10 +7309,10 @@ impl IntoResponse for ApiError {
 #[cfg(test)]
 mod tests {
     use super::{
-        create_app, inprocess_worker_gpu_id, lora_artifact_paths, requires_token,
-        strip_jsonc_comments, sweep_stale_lora_uploads_before, EventHub, EventMessage, Settings,
-        API_MANAGED_MANIFEST_HEADER, EVENT_BUFFER_SIZE, HEARTBEAT_SSE_DATA, HEARTBEAT_SSE_WIRE,
-        TEST_MAX_LORA_UPLOAD_BYTES,
+        create_app, inprocess_worker_gpu_id, insufficient_disk_space, lora_artifact_paths,
+        requires_token, strip_jsonc_comments, sweep_stale_lora_uploads_before, EventHub,
+        EventMessage, Settings, API_MANAGED_MANIFEST_HEADER, EVENT_BUFFER_SIZE, HEARTBEAT_SSE_DATA,
+        HEARTBEAT_SSE_WIRE, TEST_MAX_LORA_UPLOAD_BYTES,
     };
     use axum::body::{to_bytes, Body};
     use axum::http::{Request, StatusCode};
@@ -7703,7 +8141,6 @@ mod tests {
     async fn create_training_job_resolves_plan_and_queues_lora_train() {
         let temp_dir = tempfile::tempdir().expect("temp dir creates");
         let settings = test_settings(&temp_dir);
-        let data_dir = settings.data_dir.clone();
         let app = create_app(settings).expect("app creates");
 
         let (_, project) = request(
@@ -7790,11 +8227,36 @@ mod tests {
                 .expect("image path"),
             expected_image.display().to_string()
         );
-        // Output dir resolves under the data dir's loras folder.
+        // The default target scope is `project`, so the adapter is written into
+        // the project's LoRA store (not the shared data dir).
         assert_eq!(
             plan["output"]["outputDir"].as_str().expect("output dir"),
-            data_dir.join("loras").join(lora_id).display().to_string()
+            project_path
+                .join("loras")
+                .join(lora_id)
+                .display()
+                .to_string()
         );
+        // The submit-time manifest entry carries provenance for the LoRA that
+        // registration will recompute and upsert on completion. The manifest path
+        // itself is intentionally NOT persisted in the payload — it is recomputed
+        // from trusted inputs at completion so a tampered payload cannot redirect
+        // the write.
+        assert_eq!(job["payload"]["manifestEntry"]["scope"], "project");
+        assert_eq!(job["payload"]["manifestEntry"]["family"], "z-image");
+        assert_eq!(
+            job["payload"]["manifestEntry"]["source"]["path"],
+            format!("loras/{lora_id}")
+        );
+        assert_eq!(
+            job["payload"]["manifestEntry"]["provenance"]["datasetId"],
+            dataset_id
+        );
+        assert_eq!(
+            job["payload"]["manifestEntry"]["provenance"]["trainingJobId"],
+            job_id
+        );
+        assert!(job["payload"]["manifestPath"].is_null());
 
         // The job is queued and visible to the queue/worker surface.
         let (status, queued) = request(
@@ -7864,7 +8326,10 @@ mod tests {
     #[tokio::test]
     async fn create_training_job_queues_real_run_when_not_dry_run() {
         let temp_dir = tempfile::tempdir().expect("temp dir creates");
-        let app = create_app(test_settings(&temp_dir)).expect("app creates");
+        let settings = test_settings(&temp_dir);
+        let app = create_app(settings.clone()).expect("app creates");
+        // A real run requires the base model installed (story 1419 guardrail).
+        seed_installed_base_model(&settings.data_dir);
         let (_, project) = request(
             app.clone(),
             "POST",
@@ -7936,6 +8401,609 @@ mod tests {
         assert_eq!(status, StatusCode::OK);
         assert_eq!(queued[0]["id"], job_id);
         assert_eq!(queued[0]["type"], "lora_train");
+    }
+
+    /// Seeds the Z-Image-Turbo base model as installed (a managed-download
+    /// marker) so a real training run clears the missing-model guardrail.
+    fn seed_installed_base_model(data_dir: &std::path::Path) {
+        let model_dir = data_dir.join("models").join("z_image_turbo");
+        std::fs::create_dir_all(&model_dir).expect("model dir creates");
+        std::fs::write(model_dir.join(".sceneworks-download-complete.json"), "{}")
+            .expect("model marker writes");
+    }
+
+    /// Drives a project-scoped training job from submission to a completed result
+    /// and asserts the produced adapter is registered as a normal SceneWorks LoRA.
+    /// Seeds the base model so the real-run guardrails pass.
+    async fn submit_real_training_job(
+        app: axum::Router,
+        project_id: &str,
+        data_dir: &std::path::Path,
+    ) -> (String, std::path::PathBuf, std::path::PathBuf) {
+        seed_installed_base_model(data_dir);
+        let (_, asset) = request_multipart_upload(
+            app.clone(),
+            &format!("/api/v1/projects/{project_id}/assets"),
+            "Portrait.PNG",
+            "image/png",
+            b"png-bytes",
+        )
+        .await;
+        let asset_id = asset["id"].as_str().expect("asset id").to_owned();
+
+        let (_, dataset) = request(
+            app.clone(),
+            "POST",
+            &format!("/api/v1/projects/{project_id}/training/datasets"),
+            json!({
+                "name": "Aurora set",
+                "items": [{ "assetId": asset_id, "caption": { "text": "auroraStyle portrait" } }]
+            }),
+        )
+        .await;
+        let dataset_id = dataset["id"].as_str().expect("dataset id").to_owned();
+
+        let (_, registry) =
+            request(app.clone(), "GET", "/api/v1/training/targets", Value::Null).await;
+        let target_id = registry["targets"][0]["id"]
+            .as_str()
+            .expect("target id")
+            .to_owned();
+        let mut config = registry["targets"][0]["defaults"].clone();
+        // A trigger word flows from the config into the plan and the LoRA entry.
+        config["triggerWord"] = json!("auroraStyle");
+
+        let (status, job) = request(
+            app.clone(),
+            "POST",
+            &format!("/api/v1/projects/{project_id}/training/jobs"),
+            json!({
+                "targetId": target_id,
+                "datasetId": dataset_id,
+                "config": config,
+                "outputName": "Aurora Style",
+                "dryRun": false
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED);
+        let job_id = job["id"].as_str().expect("job id").to_owned();
+        let output_dir = std::path::PathBuf::from(
+            job["payload"]["plan"]["output"]["outputDir"]
+                .as_str()
+                .unwrap(),
+        );
+        let file_name = job["payload"]["plan"]["output"]["fileName"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let adapter_path = output_dir.join(file_name);
+        (job_id, output_dir, adapter_path)
+    }
+
+    #[tokio::test]
+    async fn completed_training_job_registers_lora_with_provenance() {
+        let temp_dir = tempfile::tempdir().expect("temp dir creates");
+        let settings = test_settings(&temp_dir);
+        let app = create_app(settings.clone()).expect("app creates");
+        let (_, project) = request(
+            app.clone(),
+            "POST",
+            "/api/v1/projects",
+            json!({ "name": "Training Project" }),
+        )
+        .await;
+        let project_id = project["id"].as_str().expect("project id").to_owned();
+
+        let (job_id, output_dir, adapter_path) =
+            submit_real_training_job(app.clone(), &project_id, &settings.data_dir).await;
+
+        // The worker writes the final adapter into the resolved output dir before
+        // it reports completion, alongside step checkpoints it does not clean up.
+        // Registration must pick the declared final adapter, not a checkpoint.
+        std::fs::create_dir_all(&output_dir).expect("output dir creates");
+        write_test_safetensors(&adapter_path);
+        let final_name = adapter_path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .expect("final adapter name")
+            .to_owned();
+        let stem = adapter_path
+            .file_stem()
+            .and_then(|stem| stem.to_str())
+            .expect("adapter stem");
+        write_test_safetensors(&output_dir.join(format!("{stem}-step000250.safetensors")));
+
+        let (status, completed) = request(
+            app.clone(),
+            "POST",
+            &format!("/api/v1/jobs/{job_id}/progress"),
+            json!({
+                "status": "completed",
+                "stage": "completed",
+                "progress": 1,
+                "message": "Trained LoRA saved.",
+                "result": { "outputPath": adapter_path.display().to_string() }
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(completed["status"], "completed");
+        // The registration outcome is folded into the job result so it is
+        // observable (rather than silently dropped on failure).
+        assert_eq!(completed["result"]["loraRegistered"], true);
+        assert!(completed["result"]["loraId"]
+            .as_str()
+            .is_some_and(|id| id.starts_with("lora_")));
+        assert!(completed["result"]["loraManifestPath"]
+            .as_str()
+            .is_some_and(|path| path.ends_with("manifest.jsonc")));
+
+        // The trained adapter is now a normal, installed, project-scoped LoRA.
+        let (status, loras) = request(
+            app.clone(),
+            "GET",
+            &format!("/api/v1/loras?projectId={project_id}"),
+            Value::Null,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let entry = loras
+            .as_array()
+            .expect("loras array")
+            .iter()
+            .find(|item| item["name"] == json!("Aurora Style"))
+            .expect("trained LoRA appears in catalog")
+            .clone();
+        assert_eq!(entry["scope"], "project");
+        assert_eq!(entry["family"], "z-image");
+        assert_eq!(entry["baseModel"], "z_image_turbo");
+        assert_eq!(entry["triggerWords"], json!(["auroraStyle"]));
+        assert_eq!(entry["installState"], "installed");
+        // The final adapter is registered, not the step checkpoint that shares
+        // the output directory.
+        assert_eq!(entry["files"], json!([final_name]));
+        // installedPath resolves to the trained adapter's directory (the same
+        // convention as imported LoRAs), and the adapter file lives under it.
+        let lora_id = entry["id"].as_str().expect("lora id");
+        let installed_path = entry["installedPath"].as_str().expect("installed path");
+        assert!(
+            installed_path.contains(lora_id),
+            "installed path {installed_path} should point at the trained adapter dir"
+        );
+        assert!(adapter_path.exists());
+        assert_eq!(entry["source"]["provider"], "training");
+        assert_eq!(entry["provenance"]["trainingJobId"], job_id);
+        assert!(entry["provenance"]["configSnapshot"].is_object());
+
+        // Provenance survives an app restart (manifest is on disk).
+        let reloaded = create_app(settings).expect("app reloads");
+        let (status, loras) = request(
+            reloaded,
+            "GET",
+            &format!("/api/v1/loras?projectId={project_id}"),
+            Value::Null,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(loras
+            .as_array()
+            .expect("loras array")
+            .iter()
+            .any(|item| item["name"] == json!("Aurora Style")
+                && item["provenance"]["trainingJobId"] == json!(job_id)));
+    }
+
+    #[tokio::test]
+    async fn failed_or_unwritten_training_job_registers_no_lora() {
+        let temp_dir = tempfile::tempdir().expect("temp dir creates");
+        let settings = test_settings(&temp_dir);
+        let app = create_app(settings.clone()).expect("app creates");
+        let (_, project) = request(
+            app.clone(),
+            "POST",
+            "/api/v1/projects",
+            json!({ "name": "Training Project" }),
+        )
+        .await;
+        let project_id = project["id"].as_str().expect("project id").to_owned();
+
+        // A failed job never registers, even though a manifest entry was staged.
+        let (failed_job_id, _output_dir, _adapter_path) =
+            submit_real_training_job(app.clone(), &project_id, &settings.data_dir).await;
+        let (status, _) = request(
+            app.clone(),
+            "POST",
+            &format!("/api/v1/jobs/{failed_job_id}/progress"),
+            json!({
+                "status": "failed",
+                "stage": "failed",
+                "progress": 1,
+                "message": "Training failed.",
+                "error": "CUDA out of memory"
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+
+        // A job that reports completed but produced no weights must not leave a
+        // broken registry entry either, and the failure is surfaced in the result.
+        let (completed_no_weights_id, _, _) =
+            submit_real_training_job(app.clone(), &project_id, &settings.data_dir).await;
+        let (status, completed) = request(
+            app.clone(),
+            "POST",
+            &format!("/api/v1/jobs/{completed_no_weights_id}/progress"),
+            json!({
+                "status": "completed",
+                "stage": "completed",
+                "progress": 1,
+                "message": "Reported complete without weights."
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(completed["result"]["loraRegistered"], false);
+        assert!(completed["result"]["loraRegistrationError"].is_string());
+
+        let (status, loras) = request(
+            app,
+            "GET",
+            &format!("/api/v1/loras?projectId={project_id}"),
+            Value::Null,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(loras
+            .as_array()
+            .expect("loras array")
+            .iter()
+            .all(|item| item["name"] != json!("Aurora Style")));
+    }
+
+    #[tokio::test]
+    async fn crafted_training_job_cannot_register_outside_canonical_manifest() {
+        let temp_dir = tempfile::tempdir().expect("temp dir creates");
+        let app = create_app(test_settings(&temp_dir)).expect("app creates");
+        let (_, project) = request(
+            app.clone(),
+            "POST",
+            "/api/v1/projects",
+            json!({ "name": "Training Project" }),
+        )
+        .await;
+        let project_id = project["id"].as_str().expect("project id").to_owned();
+        let project_path = std::path::PathBuf::from(project["path"].as_str().unwrap());
+
+        // A `lora_train` job can be crafted directly via the generic job endpoint
+        // with an attacker-chosen payload. Stage a real adapter under the canonical
+        // project output dir so registration would succeed if (and only if) it uses
+        // the recomputed path.
+        let crafted_lora_id = "lora_crafted01";
+        let adapter_dir = project_path.join("loras").join(crafted_lora_id);
+        std::fs::create_dir_all(&adapter_dir).expect("adapter dir creates");
+        write_test_safetensors(&adapter_dir.join("crafted.safetensors"));
+
+        // The payload points the manifest write and the source path at locations
+        // outside the canonical project manifest. Both must be ignored.
+        let evil_manifest = temp_dir.path().join("evil-manifest.jsonc");
+        let (status, job) = request(
+            app.clone(),
+            "POST",
+            "/api/v1/jobs",
+            json!({
+                "type": "lora_train",
+                "projectId": project_id,
+                "projectName": "Training Project",
+                "requestedGpu": "auto",
+                "payload": {
+                    "dryRun": false,
+                    "manifestPath": evil_manifest.display().to_string(),
+                    "manifestEntry": {
+                        "id": crafted_lora_id,
+                        "name": "Crafted LoRA",
+                        "scope": "project",
+                        "family": "z-image",
+                        "source": { "provider": "evil", "path": "../../../../escape/loras" },
+                        "files": ["crafted.safetensors"]
+                    }
+                }
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED);
+        let job_id = job["id"].as_str().expect("job id").to_owned();
+
+        let (status, completed) = request(
+            app.clone(),
+            "POST",
+            &format!("/api/v1/jobs/{job_id}/progress"),
+            json!({
+                "status": "completed",
+                "stage": "completed",
+                "progress": 1,
+                "message": "Crafted completion."
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+
+        // The write went to the canonical project manifest, not the payload path.
+        assert!(
+            !evil_manifest.exists(),
+            "payload manifestPath must be ignored"
+        );
+        assert_eq!(completed["result"]["loraRegistered"], true);
+        assert_eq!(
+            completed["result"]["loraManifestPath"]
+                .as_str()
+                .expect("manifest path"),
+            project_path
+                .join("loras")
+                .join("manifest.jsonc")
+                .display()
+                .to_string()
+        );
+
+        // The registered entry's source path was recomputed, not taken from the
+        // attacker payload.
+        let (status, loras) = request(
+            app.clone(),
+            "GET",
+            &format!("/api/v1/loras?projectId={project_id}"),
+            Value::Null,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let entry = loras
+            .as_array()
+            .expect("loras array")
+            .iter()
+            .find(|item| item["id"] == json!(crafted_lora_id))
+            .expect("crafted LoRA registered under canonical manifest")
+            .clone();
+        assert_eq!(entry["scope"], "project");
+        assert_eq!(entry["source"]["provider"], "training");
+        assert_eq!(entry["source"]["path"], format!("loras/{crafted_lora_id}"));
+        // `files` was validated against the recomputed output dir (the declared
+        // name exists there), so the registered entry points only inside the
+        // canonical LoRA directory.
+        assert_eq!(entry["files"], json!(["crafted.safetensors"]));
+
+        // A traversal id is rejected outright: nothing registers and the failure
+        // is visible.
+        let (_, evil_job) = request(
+            app.clone(),
+            "POST",
+            "/api/v1/jobs",
+            json!({
+                "type": "lora_train",
+                "projectId": project_id,
+                "projectName": "Training Project",
+                "requestedGpu": "auto",
+                "payload": {
+                    "dryRun": false,
+                    "manifestEntry": {
+                        "id": "../../pwned",
+                        "name": "Traversal",
+                        "scope": "project",
+                        "source": { "provider": "evil", "path": "loras/x" }
+                    }
+                }
+            }),
+        )
+        .await;
+        let evil_job_id = evil_job["id"].as_str().expect("job id").to_owned();
+        let (status, completed) = request(
+            app.clone(),
+            "POST",
+            &format!("/api/v1/jobs/{evil_job_id}/progress"),
+            json!({
+                "status": "completed",
+                "stage": "completed",
+                "progress": 1,
+                "message": "Traversal completion."
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(completed["result"]["loraRegistered"], false);
+        assert!(completed["result"]["loraRegistrationError"].is_string());
+
+        // A `..`-traversing files entry is rejected even when a valid adapter
+        // exists under the canonical output dir: registration only accepts plain
+        // in-tree file names, so generation can never be pointed outside it.
+        let traversal_lora_id = "lora_filestrav01";
+        let traversal_dir = project_path.join("loras").join(traversal_lora_id);
+        std::fs::create_dir_all(&traversal_dir).expect("adapter dir creates");
+        write_test_safetensors(&traversal_dir.join("real.safetensors"));
+        let (_, files_job) = request(
+            app.clone(),
+            "POST",
+            "/api/v1/jobs",
+            json!({
+                "type": "lora_train",
+                "projectId": project_id,
+                "projectName": "Training Project",
+                "requestedGpu": "auto",
+                "payload": {
+                    "dryRun": false,
+                    "manifestEntry": {
+                        "id": traversal_lora_id,
+                        "name": "Files Traversal",
+                        "scope": "project",
+                        "source": { "provider": "evil", "path": "loras/x" },
+                        "files": ["../../../../escape/evil.safetensors"]
+                    }
+                }
+            }),
+        )
+        .await;
+        let files_job_id = files_job["id"].as_str().expect("job id").to_owned();
+        let (status, completed) = request(
+            app.clone(),
+            "POST",
+            &format!("/api/v1/jobs/{files_job_id}/progress"),
+            json!({
+                "status": "completed",
+                "stage": "completed",
+                "progress": 1,
+                "message": "Files traversal completion."
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(completed["result"]["loraRegistered"], false);
+        assert!(completed["result"]["loraRegistrationError"].is_string());
+    }
+
+    #[tokio::test]
+    async fn real_training_job_rejected_when_base_model_missing() {
+        let temp_dir = tempfile::tempdir().expect("temp dir creates");
+        let app = create_app(test_settings(&temp_dir)).expect("app creates");
+        let (_, project) = request(
+            app.clone(),
+            "POST",
+            "/api/v1/projects",
+            json!({ "name": "Training Project" }),
+        )
+        .await;
+        let project_id = project["id"].as_str().expect("project id").to_owned();
+
+        let (_, asset) = request_multipart_upload(
+            app.clone(),
+            &format!("/api/v1/projects/{project_id}/assets"),
+            "Portrait.PNG",
+            "image/png",
+            b"png-bytes",
+        )
+        .await;
+        let asset_id = asset["id"].as_str().expect("asset id").to_owned();
+        let (_, dataset) = request(
+            app.clone(),
+            "POST",
+            &format!("/api/v1/projects/{project_id}/training/datasets"),
+            json!({
+                "name": "Aurora set",
+                "items": [{ "assetId": asset_id, "caption": { "text": "auroraStyle portrait" } }]
+            }),
+        )
+        .await;
+        let dataset_id = dataset["id"].as_str().expect("dataset id").to_owned();
+        let (_, registry) =
+            request(app.clone(), "GET", "/api/v1/training/targets", Value::Null).await;
+        let target_id = registry["targets"][0]["id"]
+            .as_str()
+            .expect("target id")
+            .to_owned();
+        let config = registry["targets"][0]["defaults"].clone();
+
+        // No base model is installed: a real run is rejected with an actionable
+        // message, but a dry run (plan preview) still succeeds.
+        let (status, error) = request(
+            app.clone(),
+            "POST",
+            &format!("/api/v1/projects/{project_id}/training/jobs"),
+            json!({
+                "targetId": target_id,
+                "datasetId": dataset_id,
+                "config": config,
+                "outputName": "Aurora Style",
+                "dryRun": false
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert!(error["detail"]
+            .as_str()
+            .unwrap()
+            .contains("is not installed"));
+
+        let (status, _) = request(
+            app.clone(),
+            "POST",
+            &format!("/api/v1/projects/{project_id}/training/jobs"),
+            json!({
+                "targetId": target_id,
+                "datasetId": dataset_id,
+                "config": config,
+                "outputName": "Aurora Style",
+                "dryRun": true
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED);
+    }
+
+    #[tokio::test]
+    async fn training_job_rejects_cpu_target() {
+        let temp_dir = tempfile::tempdir().expect("temp dir creates");
+        let app = create_app(test_settings(&temp_dir)).expect("app creates");
+        let (_, project) = request(
+            app.clone(),
+            "POST",
+            "/api/v1/projects",
+            json!({ "name": "Training Project" }),
+        )
+        .await;
+        let project_id = project["id"].as_str().expect("project id").to_owned();
+
+        let (_, asset) = request_multipart_upload(
+            app.clone(),
+            &format!("/api/v1/projects/{project_id}/assets"),
+            "Portrait.PNG",
+            "image/png",
+            b"png-bytes",
+        )
+        .await;
+        let asset_id = asset["id"].as_str().expect("asset id").to_owned();
+        let (_, dataset) = request(
+            app.clone(),
+            "POST",
+            &format!("/api/v1/projects/{project_id}/training/datasets"),
+            json!({
+                "name": "Aurora set",
+                "items": [{ "assetId": asset_id, "caption": { "text": "auroraStyle portrait" } }]
+            }),
+        )
+        .await;
+        let dataset_id = dataset["id"].as_str().expect("dataset id").to_owned();
+        let (_, registry) =
+            request(app.clone(), "GET", "/api/v1/training/targets", Value::Null).await;
+        let target_id = registry["targets"][0]["id"]
+            .as_str()
+            .expect("target id")
+            .to_owned();
+        let mut config = registry["targets"][0]["defaults"].clone();
+        // Targeting a CPU worker for a GPU-only job is rejected with an
+        // actionable message (a dry run is GPU-routed too, so this also holds).
+        config["advanced"]["requestedGpu"] = json!("cpu");
+
+        let (status, error) = request(
+            app.clone(),
+            "POST",
+            &format!("/api/v1/projects/{project_id}/training/jobs"),
+            json!({
+                "targetId": target_id,
+                "datasetId": dataset_id,
+                "config": config,
+                "outputName": "Aurora Style",
+                "dryRun": true
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert!(error["detail"]
+            .as_str()
+            .unwrap()
+            .contains("cannot target CPU workers"));
+    }
+
+    #[test]
+    fn insufficient_disk_space_threshold_is_strict_less_than() {
+        assert!(insufficient_disk_space(100, 200));
+        assert!(!insufficient_disk_space(200, 200));
+        assert!(!insufficient_disk_space(300, 200));
     }
 
     #[tokio::test]
