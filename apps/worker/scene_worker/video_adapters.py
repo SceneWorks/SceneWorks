@@ -1256,9 +1256,12 @@ class MlxVideoAdapter(VideoGenerationAdapter):
         progress: ProgressCallback,
         cancel_requested: CancelCallback,
     ) -> dict[str, Any]:
+        target = model_target(request.model)
+        if request.model == "ltx_2_3":
+            return self._run_ltx_mlx(settings, job, request, progress, cancel_requested)
         raise NotImplementedError(
-            "MLX video generation is not yet implemented. "
-            "Per-model implementations are coming in sc-1503 (LTX), sc-1504 (Wan-5B), sc-1505 (Wan-14B)."
+            f"MLX adapter for {target['label']} is not yet implemented. "
+            "Coming in sc-1504 (Wan-5B) and sc-1505 (Wan-14B)."
         )
 
     def cancel(self, _job_id: str) -> None:
@@ -1278,6 +1281,186 @@ class MlxVideoAdapter(VideoGenerationAdapter):
             "recommendedMaxDuration": target["recommendedMaxDuration"],
             "realModelInference": True,
         }
+
+    def _run_ltx_mlx(
+        self,
+        settings: WorkerSettings,
+        job: dict[str, Any],
+        request: VideoRequest,
+        progress: ProgressCallback,
+        cancel_requested: CancelCallback,
+    ) -> dict[str, Any]:
+        import subprocess
+        from PIL import Image as PILImage
+
+        project_path = find_project_path(settings.data_dir / "recent-projects.json", request.project_id)
+        for folder in ("assets/videos", "generation-sets", "recipes"):
+            (project_path / folder).mkdir(parents=True, exist_ok=True)
+
+        target = model_target(request.model)
+        progress("loading_model", "loading_model", 0.1, "Loading LTX-2.3 MLX Q4 pipeline.")
+
+        try:
+            import mlx.core as mx
+            from mlx_video import MLXLTXPipeline
+        except ImportError as e:
+            raise RuntimeError(f"MLX video generation requires mlx_video. {e}")
+
+        model_repo = "notapalindrome/ltx23-mlx-av-q4"
+        num_frames = max(1, int(round(request.duration * request.fps)))
+        num_frames = max(9, int(num_frames))
+
+        progress("loading_model", "loading_model", 0.2, "Initializing pipeline.")
+        try:
+            pipeline = MLXLTXPipeline.from_pretrained(model_repo)
+            self._loaded_models.add(request.model)
+        except Exception as e:
+            raise RuntimeError(f"Failed to load MLX LTX pipeline from {model_repo}: {e}")
+
+        first_image = self._first_condition_image(project_path, request)
+        last_image = self._last_condition_image(project_path, request)
+        self._validate_inputs(project_path, request, first_image, last_image)
+        if cancel_requested():
+            raise InterruptedError("Video generation canceled before inference.")
+
+        seed = resolve_seed(request.seed, request.prompt)
+        steps = target["steps"].get(request.quality, target["steps"]["balanced"])
+
+        progress("running", "generating", 0.3, f"Generating {num_frames} frames with LTX-2.3.")
+        try:
+            output = pipeline(
+                prompt=request.prompt,
+                negative_prompt=request.negative_prompt,
+                num_frames=num_frames,
+                height=request.height,
+                width=request.width,
+                num_inference_steps=steps,
+                guidance_scale=7.5,
+                seed=seed,
+                first_frame=first_image,
+                last_frame=last_image if request.mode == "first_last_frame" else None,
+            )
+        except Exception as e:
+            raise RuntimeError(f"MLX LTX-2.3 inference failed: {e}")
+
+        if cancel_requested():
+            raise InterruptedError("Video generation canceled before saving.")
+
+        frames = output.frames if hasattr(output, "frames") else list(output)
+        if not frames:
+            raise RuntimeError("LTX-2.3 MLX pipeline returned no video frames.")
+
+        generation_set_id = f"genset_{uuid4().hex}"
+        asset_id = f"asset_{uuid4().hex}"
+        created_at = utc_now()
+        raw_settings = self.map_settings(request, target)
+        filename_base = f"{created_at[:10]}_{request.model}_{slugify(request.prompt, fallback='video', max_length=42)}"
+        media_rel = f"assets/videos/{filename_base}.mp4"
+        media_path = project_path / media_rel
+        temp_path = media_path.with_suffix(".tmp.mp4")
+
+        progress("saving", "saving", 0.85, "Encoding video.")
+        try:
+            import torchvision
+            torchvision.io.write_video(str(temp_path), frames, fps=request.fps)
+        except Exception:
+            try:
+                import cv2
+                import numpy as np
+                fourcc = cv2.VideoWriter_fourcc(*"mp4v")
+                out = cv2.VideoWriter(str(temp_path), fourcc, request.fps, (request.width, request.height))
+                for frame in frames:
+                    if isinstance(frame, PILImage):
+                        frame = np.array(frame)
+                    if frame.max() <= 1.0:
+                        frame = (frame * 255).astype(np.uint8)
+                    frame_bgr = frame[..., ::-1]
+                    out.write(frame_bgr)
+                out.release()
+            except Exception as e:
+                raise RuntimeError(f"Failed to encode video: {e}")
+
+        temp_path.replace(media_path)
+
+        generation_set = {
+            "schemaVersion": 1,
+            "id": generation_set_id,
+            "projectId": request.project_id,
+            "jobId": job["id"],
+            "mode": request.mode,
+            "model": request.model,
+            "prompt": request.prompt,
+            "negativePrompt": request.negative_prompt,
+            "count": 1,
+            "createdAt": created_at,
+        }
+        asset = build_video_asset_sidecar(
+            asset_id=asset_id,
+            project_id=request.project_id,
+            generation_set_id=generation_set_id,
+            request=request,
+            job_id=job["id"],
+            media_rel=media_rel,
+            created_at=created_at,
+            seed=seed,
+            target=target,
+            adapter_id=self.id,
+            mime_type="video/mp4",
+            raw_settings=raw_settings,
+        )
+
+        write_json(project_path / "generation-sets" / f"{generation_set_id}.json", generation_set)
+        write_json(media_path.with_suffix(".sceneworks.json"), asset)
+        write_json(project_path / "recipes" / f"{asset_id}.recipe.json", asset["recipe"])
+        index_asset(project_path, asset)
+
+        progress("saving", "saved", 0.95, "Asset saved.")
+        return {
+            "generationSetId": generation_set_id,
+            "assetIds": [asset_id],
+            "assets": [asset],
+            "adapter": self.id,
+            "model": request.model,
+            "requirements": self.estimate_requirements(request),
+        }
+
+    def _first_condition_image(self, project_path: Path, request: VideoRequest) -> Any:
+        if request.source_asset_id:
+            asset_path = find_asset_sidecar_path(project_path, request.source_asset_id)
+            if asset_path and asset_path.exists():
+                sidecar = read_json(asset_path)
+                if sidecar and "mediaPath" in sidecar:
+                    image_path = (project_path / sidecar["mediaPath"]).resolve()
+                    if image_path.exists():
+                        try:
+                            from PIL import Image
+                            return Image.open(image_path).convert("RGB")
+                        except Exception:
+                            pass
+        return None
+
+    def _last_condition_image(self, project_path: Path, request: VideoRequest) -> Any:
+        if request.last_frame_asset_id:
+            asset_path = find_asset_sidecar_path(project_path, request.last_frame_asset_id)
+            if asset_path and asset_path.exists():
+                sidecar = read_json(asset_path)
+                if sidecar and "mediaPath" in sidecar:
+                    image_path = (project_path / sidecar["mediaPath"]).resolve()
+                    if image_path.exists():
+                        try:
+                            from PIL import Image
+                            return Image.open(image_path).convert("RGB")
+                        except Exception:
+                            pass
+        return None
+
+    def _validate_inputs(
+        self, project_path: Path, request: VideoRequest, first_image: Any, last_image: Any
+    ) -> None:
+        if request.mode == "image_to_video" and not first_image:
+            raise RuntimeError("Image-to-video mode requires a source image asset.")
+        if request.mode == "first_last_frame" and not first_image:
+            raise RuntimeError("First-last-frame mode requires a source image asset.")
 
 
 class DiffusersVideoAdapter(VideoGenerationAdapter):
