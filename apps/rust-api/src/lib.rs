@@ -1419,30 +1419,17 @@ async fn create_training_job(
     let job_id = format!("job_{}", Uuid::new_v4().simple());
     let requested_gpu = training_requested_gpu(&payload.config.advanced);
 
-    // Where the produced adapter is written and later registered. The target's
-    // default `outputScope` (project) lives in the config's `advanced` bag:
-    // project outputs land in the project's LoRA store and project manifest,
-    // global outputs in the shared data dir and the user LoRA manifest. The
-    // manifest `source.path` stays relative to the scope's root so
-    // `normalize_lora_entry` resolves the installed path on either side.
+    // Where the produced adapter is written. The target's default `outputScope`
+    // (project) lives in the config's `advanced` bag: project outputs land in the
+    // project's LoRA store, global outputs in the shared data dir. The manifest
+    // `source.path` stays relative to the scope's root so `normalize_lora_entry`
+    // resolves the installed path on either side. The matching manifest path is
+    // recomputed from the same trusted inputs at registration time
+    // (`register_trained_lora`), never read back from the job payload.
     let output_scope = training_output_scope(&payload.config.advanced)?;
-    let (output_dir, manifest_path) = match output_scope.as_str() {
-        "project" => {
-            let project_path = project_path_for_id(state.clone(), &project_id).await?;
-            (
-                project_path.join("loras").join(&lora_id),
-                project_path.join("loras").join("manifest.jsonc"),
-            )
-        }
-        _ => (
-            data_dir.join("loras").join(&lora_id),
-            state
-                .settings
-                .config_dir
-                .join("manifests")
-                .join("user.loras.jsonc"),
-        ),
-    };
+    let (output_dir, _manifest_path) =
+        resolve_training_output_location(&state, &output_scope, Some(&project_id), &lora_id)
+            .await?;
     let source_relpath = format!("loras/{lora_id}");
 
     // Rust resolves and validates the normalized plan before any job is queued.
@@ -1461,9 +1448,11 @@ async fn create_training_job(
     .map_err(|error| ApiError::bad_request(error.to_string()))?;
 
     // Pre-build the LoRA registry entry the completed job will register, mirroring
-    // the `lora_import` pattern: Rust owns LoRA registration, so the plan, manifest
-    // path, and entry are all resolved at submit time. On a successful real run,
-    // `update_job_progress` upserts this entry (story 1418); dry runs never do.
+    // the `lora_import` pattern: Rust owns LoRA registration. The descriptive
+    // metadata is captured here; the manifest path and the security-sensitive
+    // fields (id, scope, source path) are recomputed from trusted inputs when the
+    // entry is upserted on completion (story 1418), so this stays purely
+    // informational. Dry runs never register.
     let timestamp = now_rfc3339();
     let manifest_entry = json!({
         "id": lora_id.clone(),
@@ -1497,10 +1486,6 @@ async fn create_training_job(
     job_payload.insert("dryRun".to_owned(), Value::Bool(payload.dry_run));
     job_payload.insert("outputName".to_owned(), Value::String(output_name));
     job_payload.insert("plan".to_owned(), plan_value);
-    job_payload.insert(
-        "manifestPath".to_owned(),
-        Value::String(manifest_path.display().to_string()),
-    );
     job_payload.insert("manifestEntry".to_owned(), manifest_entry);
 
     let job = store_call(state.clone(), move |store, _timeout| {
@@ -1574,6 +1559,65 @@ fn training_output_scope(advanced: &JsonObject) -> Result<String, ApiError> {
             "Unsupported training outputScope: {other}. Use project or global."
         ))),
     }
+}
+
+/// Single source of truth for where a training run's adapter is written and its
+/// LoRA registered, derived only from trusted inputs: the scope, the owning
+/// project, and the pre-allocated LoRA id. `create_training_job` uses it to place
+/// the plan's output dir at submit time, and `register_trained_lora` recomputes
+/// it at completion so a (mutable) job payload can never redirect a manifest
+/// write outside the two canonical LoRA manifests. Returns
+/// `(output_dir, manifest_path)`.
+async fn resolve_training_output_location(
+    state: &AppState,
+    scope: &str,
+    project_id: Option<&str>,
+    lora_id: &str,
+) -> Result<(PathBuf, PathBuf), ApiError> {
+    match scope {
+        "project" => {
+            let project_id = project_id.ok_or_else(|| {
+                ApiError::bad_request("Project-scoped training requires a project id")
+            })?;
+            let loras_dir = project_path_for_id(state.clone(), project_id)
+                .await?
+                .join("loras");
+            Ok((loras_dir.join(lora_id), loras_dir.join("manifest.jsonc")))
+        }
+        "global" => {
+            let loras_dir = state.settings.data_dir.join("loras");
+            Ok((
+                loras_dir.join(lora_id),
+                state
+                    .settings
+                    .config_dir
+                    .join("manifests")
+                    .join("user.loras.jsonc"),
+            ))
+        }
+        other => Err(ApiError::bad_request(format!(
+            "Unsupported training outputScope: {other}. Use project or global."
+        ))),
+    }
+}
+
+/// Rejects a LoRA id that is not a single safe path component, so a crafted job
+/// payload cannot escape the LoRA output/manifest tree via `..` or path
+/// separators. Server-generated ids (`lora_<hex>`) always pass.
+fn validate_lora_id_component(lora_id: &str) -> Result<(), ApiError> {
+    let invalid = lora_id.is_empty()
+        || lora_id == "."
+        || lora_id == ".."
+        || lora_id.contains("..")
+        || lora_id.chars().any(|character| {
+            !(character.is_ascii_alphanumeric() || matches!(character, '_' | '-' | '.'))
+        });
+    if invalid {
+        return Err(ApiError::bad_request(format!(
+            "Invalid LoRA id for training output: {lora_id}"
+        )));
+    }
+    Ok(())
 }
 
 async fn get_project_file(
@@ -3795,6 +3839,17 @@ async fn update_job_progress(
 ) -> Result<Json<JobSnapshot>, ApiError> {
     let progress = number_to_f64(&payload.progress, "progress")?;
     let eta_seconds = optional_number_to_f64(payload.eta_seconds.as_ref(), "etaSeconds")?;
+    let mut result = payload.result;
+    // On a completing real training run, register the produced adapter as a
+    // SceneWorks LoRA *before* recording completion, and fold the outcome into
+    // the job result (story 1418). Doing it here keeps the result write atomic
+    // and makes a registration failure visible in the job record rather than
+    // silently dropping the trained output.
+    if matches!(payload.status, JobStatus::Completed) {
+        if let Some(status) = register_completed_training_lora(&state, &job_id).await {
+            result.get_or_insert_with(JsonObject::new).extend(status);
+        }
+    }
     let job = store_call(state.clone(), move |store, _timeout| {
         store.update_job_progress(
             &job_id,
@@ -3804,43 +3859,83 @@ async fn update_job_progress(
                 progress,
                 message: payload.message,
                 error: payload.error,
-                result: payload.result,
+                result,
                 eta_seconds,
             },
         )
     })
     .await?;
-    // A completed real training run becomes a normal SceneWorks LoRA (story 1418).
-    // Registration is best-effort: the job is already finished, so a failure here
-    // is logged rather than failing the worker's progress update.
-    if matches!(job.job_type, JobType::LoraTrain) && matches!(job.status, JobStatus::Completed) {
-        if let Err(error) = register_trained_lora(&state, &job).await {
-            eprintln!(
-                "Failed to register trained LoRA for job {}: {}",
-                job.id, error.detail
-            );
-        }
-    }
     publish(&state, "job.updated", &job);
     publish_queue(&state).await?;
     Ok(Json(job))
 }
 
-/// Registers a completed real training run's output as a normal SceneWorks LoRA.
+/// Attempts LoRA registration for a job reporting completion, returning result
+/// fields that describe the outcome — or `None` when the job is not a real
+/// training run with a staged output. Never errors the progress update: a
+/// registration failure is logged and surfaced via `loraRegistered: false` +
+/// `loraRegistrationError` so the trained output is not silently lost.
+async fn register_completed_training_lora(state: &AppState, job_id: &str) -> Option<JsonObject> {
+    let job = store_call(state.clone(), {
+        let job_id = job_id.to_owned();
+        move |store, _timeout| store.get_job(&job_id)
+    })
+    .await
+    .ok()?;
+    if !matches!(job.job_type, JobType::LoraTrain) {
+        return None;
+    }
+    match register_trained_lora(state, &job).await {
+        Ok(None) => None,
+        Ok(Some((lora_id, manifest_path))) => {
+            let mut status = JsonObject::new();
+            status.insert("loraRegistered".to_owned(), Value::Bool(true));
+            status.insert("loraId".to_owned(), Value::String(lora_id));
+            status.insert(
+                "loraManifestPath".to_owned(),
+                Value::String(manifest_path.display().to_string()),
+            );
+            Some(status)
+        }
+        Err(error) => {
+            eprintln!(
+                "Failed to register trained LoRA for job {}: {}",
+                job.id, error.detail
+            );
+            let mut status = JsonObject::new();
+            status.insert("loraRegistered".to_owned(), Value::Bool(false));
+            status.insert(
+                "loraRegistrationError".to_owned(),
+                Value::String(error.detail),
+            );
+            Some(status)
+        }
+    }
+}
+
+/// Registers a completed real training run's output as a normal SceneWorks LoRA,
+/// returning the registered `(lora_id, manifest_path)` or `None` when there is
+/// nothing to register (a dry run, or a job without a staged entry).
 ///
-/// The manifest entry and target manifest path are resolved at submit time (see
-/// [`create_training_job`]); this upserts the entry so the trained adapter shows
-/// up in `/api/v1/loras` and is selectable in Image Studio. Dry runs produce no
-/// weights and register nothing, and a run whose adapter is missing on disk is
-/// skipped so a failed or canceled job never leaves a broken registry entry.
-async fn register_trained_lora(state: &AppState, job: &JobSnapshot) -> Result<(), ApiError> {
+/// Security: the manifest path and output directory are recomputed from the
+/// run's scope, owning project, and a validated LoRA id — never from the
+/// (mutable) job payload — so a crafted or duplicated `lora_train` job cannot
+/// redirect the manifest write outside the two canonical LoRA manifests
+/// (`config_dir/manifests/user.loras.jsonc` or `<project>/loras/manifest.jsonc`).
+/// A run whose adapter is missing under the recomputed output dir registers
+/// nothing, so a failed/canceled/unwritten job never leaves a broken entry. The
+/// entry shows up in `/api/v1/loras` and is selectable in Image Studio.
+async fn register_trained_lora(
+    state: &AppState,
+    job: &JobSnapshot,
+) -> Result<Option<(String, PathBuf)>, ApiError> {
     if job
         .payload
         .get("dryRun")
         .and_then(Value::as_bool)
         .unwrap_or(true)
     {
-        return Ok(());
+        return Ok(None);
     }
     let Some(manifest_entry) = job
         .payload
@@ -3848,46 +3943,59 @@ async fn register_trained_lora(state: &AppState, job: &JobSnapshot) -> Result<()
         .and_then(Value::as_object)
         .cloned()
     else {
-        return Ok(());
+        return Ok(None);
     };
-    let Some(manifest_path) = job
-        .payload
-        .get("manifestPath")
+    // Derive the security-sensitive fields from the entry but trust nothing: the
+    // scope is validated by `resolve_training_output_location`, and the id must be
+    // a safe single path component before it can name an output dir / manifest.
+    let scope = manifest_entry
+        .get("scope")
         .and_then(Value::as_str)
-        .map(PathBuf::from)
-    else {
-        return Ok(());
-    };
-    let output_dir = job
-        .payload
-        .get("plan")
-        .and_then(|plan| plan.get("output"))
-        .and_then(|output| output.get("outputDir"))
-        .and_then(Value::as_str)
-        .ok_or_else(|| ApiError::internal("Training job plan is missing an output directory"))?;
-    if !lora_is_installed(FsPath::new(output_dir)) {
-        return Err(ApiError::internal(format!(
-            "Trained adapter not found under {output_dir}; skipping LoRA registration"
-        )));
-    }
+        .unwrap_or("project")
+        .to_owned();
     let lora_id = manifest_entry
         .get("id")
         .and_then(Value::as_str)
         .ok_or_else(|| ApiError::internal("Training manifest entry requires an id"))?
         .to_owned();
+    validate_lora_id_component(&lora_id)?;
+
+    // Recompute the output dir and manifest path from trusted inputs; the job
+    // payload's own manifest/output paths are deliberately ignored.
+    let (output_dir, manifest_path) =
+        resolve_training_output_location(state, &scope, job.project_id.as_deref(), &lora_id)
+            .await?;
+    if !lora_is_installed(&output_dir) {
+        return Err(ApiError::internal(format!(
+            "Trained adapter not found under {}; skipping LoRA registration",
+            output_dir.display()
+        )));
+    }
+
+    // Overwrite the security-sensitive fields with the trusted values, keeping
+    // the descriptive metadata (name, family, triggerWords, baseModel,
+    // provenance) the submit step captured. `source.path` stays relative so
+    // `normalize_lora_entry` resolves it under the scope root.
     let mut entry = manifest_entry;
+    entry.insert("id".to_owned(), Value::String(lora_id.clone()));
+    entry.insert("scope".to_owned(), Value::String(scope));
+    entry.insert(
+        "source".to_owned(),
+        json!({ "provider": "training", "path": format!("loras/{lora_id}") }),
+    );
     entry.insert("updatedAt".to_owned(), Value::String(now_rfc3339()));
 
+    let upsert_id = lora_id.clone();
     mutate_manifest_entries(state, &manifest_path, "loras", move |entries| {
         // Replace any prior entry with this id (re-run) so provenance refreshes
         // without duplicating, preserving the original createdAt.
         let created_at = entries
             .iter()
-            .find(|item| item.get("id").and_then(Value::as_str) == Some(lora_id.as_str()))
+            .find(|item| item.get("id").and_then(Value::as_str) == Some(upsert_id.as_str()))
             .and_then(|item| item.get("createdAt").cloned());
         let mut entries = entries
             .into_iter()
-            .filter(|item| item.get("id").and_then(Value::as_str) != Some(lora_id.as_str()))
+            .filter(|item| item.get("id").and_then(Value::as_str) != Some(upsert_id.as_str()))
             .collect::<Vec<_>>();
         let mut entry = entry;
         if let Some(created_at) = created_at {
@@ -3897,7 +4005,7 @@ async fn register_trained_lora(state: &AppState, job: &JobSnapshot) -> Result<()
         Ok((entries, ()))
     })
     .await?;
-    Ok(())
+    Ok(Some((lora_id, manifest_path)))
 }
 
 async fn queue_summary(State(state): State<AppState>) -> Result<Json<QueueSummary>, ApiError> {
@@ -7963,8 +8071,11 @@ mod tests {
                 .display()
                 .to_string()
         );
-        // The submit-time manifest entry carries provenance and targets the
-        // project LoRA manifest for registration on completion.
+        // The submit-time manifest entry carries provenance for the LoRA that
+        // registration will recompute and upsert on completion. The manifest path
+        // itself is intentionally NOT persisted in the payload — it is recomputed
+        // from trusted inputs at completion so a tampered payload cannot redirect
+        // the write.
         assert_eq!(job["payload"]["manifestEntry"]["scope"], "project");
         assert_eq!(job["payload"]["manifestEntry"]["family"], "z-image");
         assert_eq!(
@@ -7979,16 +8090,7 @@ mod tests {
             job["payload"]["manifestEntry"]["provenance"]["trainingJobId"],
             job_id
         );
-        assert_eq!(
-            job["payload"]["manifestPath"]
-                .as_str()
-                .expect("manifest path"),
-            project_path
-                .join("loras")
-                .join("manifest.jsonc")
-                .display()
-                .to_string()
-        );
+        assert!(job["payload"]["manifestPath"].is_null());
 
         // The job is queued and visible to the queue/worker surface.
         let (status, queued) = request(
@@ -8235,6 +8337,15 @@ mod tests {
         .await;
         assert_eq!(status, StatusCode::OK);
         assert_eq!(completed["status"], "completed");
+        // The registration outcome is folded into the job result so it is
+        // observable (rather than silently dropped on failure).
+        assert_eq!(completed["result"]["loraRegistered"], true);
+        assert!(completed["result"]["loraId"]
+            .as_str()
+            .is_some_and(|id| id.starts_with("lora_")));
+        assert!(completed["result"]["loraManifestPath"]
+            .as_str()
+            .is_some_and(|path| path.ends_with("manifest.jsonc")));
 
         // The trained adapter is now a normal, installed, project-scoped LoRA.
         let (status, loras) = request(
@@ -8320,10 +8431,10 @@ mod tests {
         assert_eq!(status, StatusCode::OK);
 
         // A job that reports completed but produced no weights must not leave a
-        // broken registry entry either.
+        // broken registry entry either, and the failure is surfaced in the result.
         let (completed_no_weights_id, _, _) =
             submit_real_training_job(app.clone(), &project_id).await;
-        let (status, _) = request(
+        let (status, completed) = request(
             app.clone(),
             "POST",
             &format!("/api/v1/jobs/{completed_no_weights_id}/progress"),
@@ -8336,6 +8447,8 @@ mod tests {
         )
         .await;
         assert_eq!(status, StatusCode::OK);
+        assert_eq!(completed["result"]["loraRegistered"], false);
+        assert!(completed["result"]["loraRegistrationError"].is_string());
 
         let (status, loras) = request(
             app,
@@ -8350,6 +8463,152 @@ mod tests {
             .expect("loras array")
             .iter()
             .all(|item| item["name"] != json!("Aurora Style")));
+    }
+
+    #[tokio::test]
+    async fn crafted_training_job_cannot_register_outside_canonical_manifest() {
+        let temp_dir = tempfile::tempdir().expect("temp dir creates");
+        let app = create_app(test_settings(&temp_dir)).expect("app creates");
+        let (_, project) = request(
+            app.clone(),
+            "POST",
+            "/api/v1/projects",
+            json!({ "name": "Training Project" }),
+        )
+        .await;
+        let project_id = project["id"].as_str().expect("project id").to_owned();
+        let project_path = std::path::PathBuf::from(project["path"].as_str().unwrap());
+
+        // A `lora_train` job can be crafted directly via the generic job endpoint
+        // with an attacker-chosen payload. Stage a real adapter under the canonical
+        // project output dir so registration would succeed if (and only if) it uses
+        // the recomputed path.
+        let crafted_lora_id = "lora_crafted01";
+        let adapter_dir = project_path.join("loras").join(crafted_lora_id);
+        std::fs::create_dir_all(&adapter_dir).expect("adapter dir creates");
+        write_test_safetensors(&adapter_dir.join("crafted.safetensors"));
+
+        // The payload points the manifest write and the source path at locations
+        // outside the canonical project manifest. Both must be ignored.
+        let evil_manifest = temp_dir.path().join("evil-manifest.jsonc");
+        let (status, job) = request(
+            app.clone(),
+            "POST",
+            "/api/v1/jobs",
+            json!({
+                "type": "lora_train",
+                "projectId": project_id,
+                "projectName": "Training Project",
+                "requestedGpu": "auto",
+                "payload": {
+                    "dryRun": false,
+                    "manifestPath": evil_manifest.display().to_string(),
+                    "manifestEntry": {
+                        "id": crafted_lora_id,
+                        "name": "Crafted LoRA",
+                        "scope": "project",
+                        "family": "z-image",
+                        "source": { "provider": "evil", "path": "../../../../escape/loras" },
+                        "files": ["crafted.safetensors"]
+                    }
+                }
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED);
+        let job_id = job["id"].as_str().expect("job id").to_owned();
+
+        let (status, completed) = request(
+            app.clone(),
+            "POST",
+            &format!("/api/v1/jobs/{job_id}/progress"),
+            json!({
+                "status": "completed",
+                "stage": "completed",
+                "progress": 1,
+                "message": "Crafted completion."
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+
+        // The write went to the canonical project manifest, not the payload path.
+        assert!(
+            !evil_manifest.exists(),
+            "payload manifestPath must be ignored"
+        );
+        assert_eq!(completed["result"]["loraRegistered"], true);
+        assert_eq!(
+            completed["result"]["loraManifestPath"]
+                .as_str()
+                .expect("manifest path"),
+            project_path
+                .join("loras")
+                .join("manifest.jsonc")
+                .display()
+                .to_string()
+        );
+
+        // The registered entry's source path was recomputed, not taken from the
+        // attacker payload.
+        let (status, loras) = request(
+            app.clone(),
+            "GET",
+            &format!("/api/v1/loras?projectId={project_id}"),
+            Value::Null,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let entry = loras
+            .as_array()
+            .expect("loras array")
+            .iter()
+            .find(|item| item["id"] == json!(crafted_lora_id))
+            .expect("crafted LoRA registered under canonical manifest")
+            .clone();
+        assert_eq!(entry["scope"], "project");
+        assert_eq!(entry["source"]["provider"], "training");
+        assert_eq!(entry["source"]["path"], format!("loras/{crafted_lora_id}"));
+
+        // A traversal id is rejected outright: nothing registers and the failure
+        // is visible.
+        let (_, evil_job) = request(
+            app.clone(),
+            "POST",
+            "/api/v1/jobs",
+            json!({
+                "type": "lora_train",
+                "projectId": project_id,
+                "projectName": "Training Project",
+                "requestedGpu": "auto",
+                "payload": {
+                    "dryRun": false,
+                    "manifestEntry": {
+                        "id": "../../pwned",
+                        "name": "Traversal",
+                        "scope": "project",
+                        "source": { "provider": "evil", "path": "loras/x" }
+                    }
+                }
+            }),
+        )
+        .await;
+        let evil_job_id = evil_job["id"].as_str().expect("job id").to_owned();
+        let (status, completed) = request(
+            app.clone(),
+            "POST",
+            &format!("/api/v1/jobs/{evil_job_id}/progress"),
+            json!({
+                "status": "completed",
+                "stage": "completed",
+                "progress": 1,
+                "message": "Traversal completion."
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(completed["result"]["loraRegistered"], false);
+        assert!(completed["result"]["loraRegistrationError"].is_string());
     }
 
     #[tokio::test]
