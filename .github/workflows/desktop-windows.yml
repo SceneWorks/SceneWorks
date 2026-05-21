@@ -15,8 +15,16 @@ on:
       - "apps/rust-worker/**"
       - "apps/worker/**"
       - "crates/**"
+      # Also bundled into the installer: sceneworks_shared (staged by
+      # stage-python.mjs) and the builtin model catalog (embedded via
+      # include_str! in setup.rs). Changes here can break the packaged app, so
+      # they must trigger the only job that compiles + packages the desktop.
+      - "packages/shared/**"
+      - "config/manifests/**"
       - "Cargo.toml"
       - "Cargo.lock"
+      # Root build script (api:build:embedded) driven by build-sidecar.mjs.
+      - "package.json"
       - ".github/workflows/desktop-windows.yml"
   push:
     branches:

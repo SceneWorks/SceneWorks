@@ -191,18 +191,23 @@ const BUILTIN_MANIFESTS: &[(&str, &str)] = &[
 
 /// Write the builtin manifests into `config_dir/manifests`, overwriting on every
 /// launch so they track the app version. User customizations live in the
-/// separate `user.*.jsonc` files, which this never touches.
-fn seed_builtin_manifests() {
+/// separate `user.*.jsonc` files, which this never touches. Each file is written
+/// atomically (temp + rename) so a crash or partial write can't leave a
+/// truncated manifest that parses to an empty/broken catalog. Returns an error
+/// if any required manifest can't be installed — the catalog is mandatory, so
+/// the caller aborts setup rather than starting with missing model mappings.
+fn seed_builtin_manifests() -> Result<(), String> {
     let dir = config_dir().join("manifests");
-    if let Err(error) = std::fs::create_dir_all(&dir) {
-        eprintln!("[desktop] seed manifests: create dir failed: {error}");
-        return;
-    }
+    std::fs::create_dir_all(&dir).map_err(|error| format!("create manifests dir: {error}"))?;
     for (name, contents) in BUILTIN_MANIFESTS {
-        if let Err(error) = std::fs::write(dir.join(name), contents) {
-            eprintln!("[desktop] seed manifests: write {name} failed: {error}");
-        }
+        let temp = dir.join(format!("{name}.tmp"));
+        std::fs::write(&temp, contents).map_err(|error| format!("write {name}: {error}"))?;
+        std::fs::rename(&temp, dir.join(name)).map_err(|error| {
+            let _ = std::fs::remove_file(&temp);
+            format!("install {name}: {error}")
+        })?;
     }
+    Ok(())
 }
 
 /// Data directory: the settings override if set, otherwise the platform default.
@@ -730,7 +735,11 @@ pub fn begin_shutdown(app: &AppHandle) -> bool {
 async fn run_startup(app: AppHandle) {
     // Provide the builtin model catalog the rust-api/worker expect before they
     // start, so Model Manager is populated and native video resources resolve.
-    seed_builtin_manifests();
+    // Mandatory: abort (rather than start a half-working app) if it can't be written.
+    if let Err(error) = seed_builtin_manifests() {
+        emit(&app, "error", format!("Setup failed: {error}"), true);
+        return;
+    }
     if let Err(error) = provision_venv(&app).await {
         emit(&app, "error", format!("Setup failed: {error}"), true);
         return;
