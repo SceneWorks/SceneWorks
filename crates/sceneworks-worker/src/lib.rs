@@ -169,7 +169,7 @@ impl From<ProjectStoreError> for WorkerError {
     }
 }
 
-type WorkerResult<T> = Result<T, WorkerError>;
+pub type WorkerResult<T> = Result<T, WorkerError>;
 
 #[derive(Clone)]
 struct ApiClient {
@@ -722,7 +722,7 @@ pub async fn run() -> WorkerResult<()> {
     run_worker_loop(settings).await
 }
 
-async fn run_worker_loop(settings: Settings) -> WorkerResult<()> {
+pub async fn run_worker_loop(settings: Settings) -> WorkerResult<()> {
     let gpu = discover_gpu(&settings.gpu_id).await;
     let api = ApiClient::new(&settings);
     let http_client = reqwest::Client::new();

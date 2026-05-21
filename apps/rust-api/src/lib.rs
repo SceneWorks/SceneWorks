@@ -94,6 +94,7 @@ pub struct Settings {
     pub cors_origins: Vec<String>,
     pub worker_timeout_seconds: u64,
     pub jobs_db_path: PathBuf,
+    pub run_utility_inprocess: bool,
 }
 
 impl Settings {
@@ -128,6 +129,9 @@ impl Settings {
                 .and_then(|value| value.parse().ok())
                 .unwrap_or(90),
             jobs_db_path,
+            run_utility_inprocess: std::env::var("SCENEWORKS_RUN_UTILITY_INPROCESS")
+                .map(|value| matches!(value.trim(), "1" | "true" | "TRUE" | "True"))
+                .unwrap_or(false),
         }
     }
 
@@ -348,11 +352,83 @@ impl ManifestCache {
 pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
     let settings = Settings::from_env();
     let address: SocketAddr = format!("{}:{}", settings.host, settings.port).parse()?;
+    let run_utility_inprocess = settings.run_utility_inprocess;
+    let port = settings.port;
     let app = create_app(settings)?;
     let listener = tokio::net::TcpListener::bind(address).await?;
     println!("SceneWorks Rust API listening on http://{address}");
-    axum::serve(listener, app).await?;
+
+    let utility_worker = run_utility_inprocess.then(|| spawn_inprocess_utility_worker(port));
+
+    axum::serve(listener, app)
+        .with_graceful_shutdown(shutdown_signal())
+        .await?;
+
+    if let Some(worker) = utility_worker {
+        worker.shutdown().await;
+    }
     Ok(())
+}
+
+/// Spawns the utility worker loop ([`sceneworks_worker::run_worker_loop`]) as a
+/// tokio task in this process, pointed at the local API over loopback. The loop
+/// observes the same Ctrl+C/SIGTERM as the HTTP server (via the worker's own
+/// shutdown handling), so `shutdown()` only bounds the wait by the worker's
+/// configured grace period.
+fn spawn_inprocess_utility_worker(port: u16) -> InProcessUtilityWorker {
+    let mut worker_settings = sceneworks_worker::Settings::from_env();
+    worker_settings.api_url = format!("http://127.0.0.1:{port}");
+    let grace = Duration::from_secs(worker_settings.shutdown_timeout_seconds.max(1));
+    println!(
+        "SceneWorks utility worker running in-process (loopback {})",
+        worker_settings.api_url
+    );
+    let handle =
+        tokio::spawn(async move { sceneworks_worker::run_worker_loop(worker_settings).await });
+    InProcessUtilityWorker { handle, grace }
+}
+
+struct InProcessUtilityWorker {
+    handle: tokio::task::JoinHandle<sceneworks_worker::WorkerResult<()>>,
+    grace: Duration,
+}
+
+impl InProcessUtilityWorker {
+    async fn shutdown(self) {
+        match tokio::time::timeout(self.grace, self.handle).await {
+            Ok(Ok(Ok(()))) => {}
+            Ok(Ok(Err(error))) => eprintln!("in-process utility worker exited with error: {error}"),
+            Ok(Err(join_error)) => eprintln!("in-process utility worker task failed: {join_error}"),
+            Err(_) => eprintln!(
+                "in-process utility worker did not stop within {}s grace period",
+                self.grace.as_secs()
+            ),
+        }
+    }
+}
+
+async fn shutdown_signal() {
+    let ctrl_c = async {
+        let _ = tokio::signal::ctrl_c().await;
+    };
+
+    #[cfg(unix)]
+    let terminate = async {
+        match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
+            Ok(mut stream) => {
+                stream.recv().await;
+            }
+            Err(_) => std::future::pending::<()>().await,
+        }
+    };
+
+    #[cfg(not(unix))]
+    let terminate = std::future::pending::<()>();
+
+    tokio::select! {
+        _ = ctrl_c => {}
+        _ = terminate => {}
+    }
 }
 
 pub fn create_app(settings: Settings) -> Result<Router, JobsStoreError> {
@@ -6479,6 +6555,7 @@ mod tests {
             ],
             worker_timeout_seconds: 90,
             jobs_db_path: temp_dir.path().join("jobs.db"),
+            run_utility_inprocess: false,
         }
     }
 

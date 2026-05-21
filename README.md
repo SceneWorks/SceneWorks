@@ -100,6 +100,14 @@ Shutdown waits up to 10 seconds for child workers by default; set
 `SCENEWORKS_WORKER_SHUTDOWN_TIMEOUT_SECONDS` to tune that grace period. On
 Windows, Rust listens for Ctrl+C; Unix workers also handle SIGTERM.
 
+For the desktop build, the utility worker loop can run **inside** the API
+process instead of as a separate binary: set `SCENEWORKS_RUN_UTILITY_INPROCESS=true`
+and the API spawns the loop as a task that talks to the local API over loopback,
+so a single `sceneworks-api` process serves the UI/API and claims utility jobs.
+It honors the same `SCENEWORKS_WORKER_SHUTDOWN_TIMEOUT_SECONDS` grace period on
+Ctrl+C/SIGTERM. The Docker server leaves this `false` and runs the standalone
+`sceneworks-rust-worker` container.
+
 When running the stack outside Docker Compose, start `sceneworks-rust-worker`
 alongside the API so Rust-owned utility jobs are claimed. GPU generation adapters
 remain Python-owned: the Python worker advertises image/video generation and
