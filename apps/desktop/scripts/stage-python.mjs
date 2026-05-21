@@ -1,0 +1,30 @@
+#!/usr/bin/env node
+// Stages the Python inference worker (source + requirements) into
+// apps/desktop/python-src so Tauri can bundle it as a resource (sc-1348/1347).
+// Avoids referencing ../worker directly from Tauri's resource globs. The staged
+// dir is gitignored and rebuilt on each `tauri build`.
+import { cpSync, mkdirSync, rmSync, existsSync } from "node:fs";
+import { dirname, join, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
+
+const scriptDir = dirname(fileURLToPath(import.meta.url));
+const desktopDir = resolve(scriptDir, ".."); // apps/desktop
+const repoRoot = resolve(desktopDir, "..", ".."); // repository root
+const workerDir = join(repoRoot, "apps", "worker");
+const outDir = join(desktopDir, "python-src");
+
+rmSync(outDir, { recursive: true, force: true });
+mkdirSync(outDir, { recursive: true });
+
+for (const file of ["requirements.txt", "requirements-ltx.txt"]) {
+  const src = join(workerDir, file);
+  if (existsSync(src)) cpSync(src, join(outDir, file));
+}
+
+// Copy the scene_worker package, skipping caches.
+cpSync(join(workerDir, "scene_worker"), join(outDir, "scene_worker"), {
+  recursive: true,
+  filter: (src) => !src.includes("__pycache__") && !src.endsWith(".pyc"),
+});
+
+console.log(`stage-python: staged worker source into ${outDir}`);

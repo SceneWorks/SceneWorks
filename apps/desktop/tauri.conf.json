@@ -5,9 +5,10 @@
   "identifier": "net.trefry.sceneworks",
   "build": {
     "frontendDist": "ui",
-    "beforeBuildCommand": "node scripts/build-sidecar.mjs"
+    "beforeBuildCommand": "node scripts/build-sidecar.mjs && node scripts/fetch-uv.mjs && node scripts/stage-python.mjs"
   },
   "app": {
+    "withGlobalTauri": true,
     "windows": [
       {
         "label": "main",
@@ -26,7 +27,8 @@
   "bundle": {
     "active": true,
     "targets": "all",
-    "externalBin": ["binaries/sceneworks-api"],
+    "externalBin": ["binaries/sceneworks-api", "binaries/uv"],
+    "resources": ["python-src/**/*"],
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",

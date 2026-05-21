@@ -6,7 +6,7 @@
     <title>SceneWorks</title>
     <style>
       :root {
-        color-scheme: light dark;
+        color-scheme: dark;
         font-family: -apple-system, "Segoe UI", system-ui, sans-serif;
       }
       html,
@@ -21,26 +21,125 @@
         color: #e7e9ee;
       }
       main {
-        text-align: center;
-        max-width: 32rem;
+        width: min(40rem, 88vw);
         padding: 2rem;
+        text-align: center;
       }
       h1 {
-        margin: 0 0 0.5rem;
-        font-size: 2rem;
+        margin: 0 0 0.25rem;
+        font-size: 1.9rem;
         letter-spacing: -0.01em;
       }
-      p {
-        margin: 0;
+      #status {
+        margin: 0 0 1.25rem;
         color: #9aa1ad;
-        line-height: 1.5;
+        min-height: 1.4em;
+      }
+      #status.error {
+        color: #ff8888;
+      }
+      .spinner {
+        width: 1.4rem;
+        height: 1.4rem;
+        margin: 0 auto 1rem;
+        border: 2px solid #2a2f3a;
+        border-top-color: #6c8cff;
+        border-radius: 50%;
+        animation: spin 0.8s linear infinite;
+      }
+      @keyframes spin {
+        to {
+          transform: rotate(360deg);
+        }
+      }
+      #log {
+        text-align: left;
+        background: #0a0c11;
+        border: 1px solid #1d222c;
+        border-radius: 8px;
+        padding: 0.75rem 1rem;
+        height: 9rem;
+        overflow-y: auto;
+        font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+        font-size: 0.78rem;
+        color: #7f8794;
+        white-space: pre-wrap;
+        display: none;
+      }
+      button {
+        margin-top: 1.25rem;
+        padding: 0.55rem 1.4rem;
+        font-size: 0.95rem;
+        border: 0;
+        border-radius: 8px;
+        background: #6c8cff;
+        color: #0a0c11;
+        font-weight: 600;
+        cursor: pointer;
+        display: none;
       }
     </style>
   </head>
   <body>
     <main>
+      <div class="spinner" id="spinner"></div>
       <h1>SceneWorks</h1>
-      <p>Starting the local engine&hellip;</p>
+      <p id="status">Starting&hellip;</p>
+      <pre id="log"></pre>
+      <button id="retry">Retry</button>
     </main>
+    <script>
+      const statusEl = document.getElementById("status");
+      const logEl = document.getElementById("log");
+      const spinnerEl = document.getElementById("spinner");
+      const retryEl = document.getElementById("retry");
+
+      function appendLog(line) {
+        logEl.style.display = "block";
+        logEl.textContent += line + "\n";
+        logEl.scrollTop = logEl.scrollHeight;
+      }
+
+      async function start() {
+        statusEl.classList.remove("error");
+        spinnerEl.style.display = "block";
+        retryEl.style.display = "none";
+        try {
+          await window.__TAURI__.core.invoke("start_setup");
+        } catch (err) {
+          showError(String(err));
+        }
+      }
+
+      function showError(message) {
+        statusEl.textContent = message;
+        statusEl.classList.add("error");
+        spinnerEl.style.display = "none";
+        retryEl.style.display = "inline-block";
+      }
+
+      async function main() {
+        if (!window.__TAURI__) {
+          statusEl.textContent = "Tauri bridge unavailable.";
+          return;
+        }
+        await window.__TAURI__.event.listen("setup-status", (event) => {
+          const { phase, message, error } = event.payload;
+          if (phase === "log") {
+            appendLog(message);
+            return;
+          }
+          if (error) {
+            showError(message);
+            return;
+          }
+          statusEl.textContent = message;
+        });
+        retryEl.addEventListener("click", start);
+        start();
+      }
+
+      main();
+    </script>
   </body>
 </html>
