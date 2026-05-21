@@ -33,6 +33,7 @@ pub struct TrainingDatasetUpdateInput {
     pub name: Option<String>,
     #[serde(default)]
     pub status: Option<TrainingDatasetStatus>,
+    /// Full replacement for the dataset's ordered item set when present.
     #[serde(default)]
     pub items: Option<Vec<TrainingDatasetItemInput>>,
 }
@@ -105,22 +106,7 @@ impl TrainingDatasetStore {
         project_id: &str,
     ) -> ProjectStoreResult<Vec<TrainingDatasetSummary>> {
         ensure_training_dataset_table(&self.project_path)?;
-        let mut summaries = Vec::new();
-        for manifest_path in dataset_manifest_paths(&self.project_path)? {
-            let dataset = read_dataset(&manifest_path)?;
-            if dataset.project_id.as_deref() != Some(project_id) {
-                continue;
-            }
-            index_dataset(&self.project_path, &dataset, &manifest_path)?;
-            summaries.push(summary_from_dataset(dataset));
-        }
-        summaries.sort_by(|left, right| {
-            right
-                .updated_at
-                .cmp(&left.updated_at)
-                .then_with(|| left.name.cmp(&right.name))
-        });
-        Ok(summaries)
+        list_dataset_summaries_from_index(&self.project_path, project_id)
     }
 
     pub fn create_dataset(
@@ -133,16 +119,23 @@ impl TrainingDatasetStore {
         validate_supported_modality(&modality)?;
         let dataset_id = format!("ds_{}", random_hex(16)?);
         let dataset_root = dataset_root(&self.project_path, &dataset_id);
-        fs::create_dir_all(dataset_root.join("images"))?;
+        let media_dir = dataset_root.join("images");
+        fs::create_dir_all(&media_dir)?;
         let now = utc_now();
-        let items = materialize_items(
+        let items = match materialize_items(
             &self.project_path,
-            &dataset_root,
+            &media_dir,
             &modality,
             project_id,
             input.items,
             &now,
-        )?;
+        ) {
+            Ok(items) => items,
+            Err(error) => {
+                let _ = fs::remove_dir_all(&dataset_root);
+                return Err(error);
+            }
+        };
         let dataset = TrainingDataset {
             schema_version: TRAINING_CONTRACT_SCHEMA_VERSION,
             id: dataset_id,
@@ -156,7 +149,10 @@ impl TrainingDatasetStore {
             items,
             extra: Default::default(),
         };
-        self.save_dataset(&dataset)?;
+        if let Err(error) = self.save_dataset(&dataset) {
+            let _ = fs::remove_dir_all(&dataset_root);
+            return Err(error);
+        }
         Ok(dataset)
     }
 
@@ -186,16 +182,35 @@ impl TrainingDatasetStore {
         }
         if let Some(items) = input.items {
             let dataset_root = dataset_root(&self.project_path, &dataset.id);
-            reset_dataset_media_dir(&dataset_root)?;
-            dataset.items = materialize_items(
+            let temp_media_dir = dataset_root.join(format!("images.tmp-{}", random_hex(8)?));
+            fs::create_dir_all(&temp_media_dir)?;
+            let now = utc_now();
+            let next_items = match materialize_items(
                 &self.project_path,
-                &dataset_root,
+                &temp_media_dir,
                 &dataset.modality,
                 project_id,
                 items,
-                &utc_now(),
-            )?;
+                &now,
+            ) {
+                Ok(items) => items,
+                Err(error) => {
+                    let _ = fs::remove_dir_all(&temp_media_dir);
+                    return Err(error);
+                }
+            };
+            let backup_media_dir = replace_dataset_media_dir(&dataset_root, &temp_media_dir)?;
+            dataset.items = next_items;
             dataset.version = dataset.version.saturating_add(1);
+            dataset.updated_at = utc_now();
+            let manifest_path = dataset_manifest_path(&self.project_path, &dataset.id);
+            if let Err(error) = write_json(&manifest_path, &dataset) {
+                rollback_dataset_media_dir(&dataset_root, backup_media_dir.as_deref());
+                return Err(error);
+            }
+            remove_optional_dir(backup_media_dir)?;
+            index_dataset(&self.project_path, &dataset, &manifest_path)?;
+            return Ok(dataset);
         }
         dataset.updated_at = utc_now();
         self.save_dataset(&dataset)?;
@@ -244,49 +259,57 @@ impl TrainingDatasetStore {
 
 fn materialize_items(
     project_path: &Path,
-    dataset_root: &Path,
+    media_dir: &Path,
     modality: &TrainingModality,
     project_id: &str,
     inputs: Vec<TrainingDatasetItemInput>,
     now: &str,
 ) -> ProjectStoreResult<Vec<TrainingDatasetItem>> {
-    inputs
-        .into_iter()
-        .enumerate()
-        .map(|(index, input)| {
-            materialize_item(
-                project_path,
-                dataset_root,
-                modality,
-                project_id,
-                input,
-                index,
-                now,
-            )
-        })
-        .collect()
+    let mut item_ids = Vec::new();
+    let mut items = Vec::new();
+    for (index, input) in inputs.into_iter().enumerate() {
+        let item_id = item_id_for_input(&input, index)?;
+        if item_ids.iter().any(|existing| existing == &item_id) {
+            return Err(ProjectStoreError::BadRequest(
+                "Training dataset item IDs must be unique".to_owned(),
+            ));
+        }
+        item_ids.push(item_id.clone());
+        let item = materialize_item(
+            project_path,
+            media_dir,
+            modality,
+            project_id,
+            input,
+            item_id,
+            now,
+        )?;
+        items.push(item);
+    }
+    Ok(items)
+}
+
+fn item_id_for_input(input: &TrainingDatasetItemInput, index: usize) -> ProjectStoreResult<String> {
+    match input.id.as_deref() {
+        Some(id) if is_safe_id(id) => Ok(id.to_owned()),
+        Some(_) => Err(ProjectStoreError::BadRequest(
+            "Invalid training dataset item ID".to_owned(),
+        )),
+        None => Ok(format!("item_{:04}", index + 1)),
+    }
 }
 
 fn materialize_item(
     project_path: &Path,
-    dataset_root: &Path,
+    media_dir: &Path,
     modality: &TrainingModality,
     project_id: &str,
     input: TrainingDatasetItemInput,
-    index: usize,
+    item_id: String,
     now: &str,
 ) -> ProjectStoreResult<TrainingDatasetItem> {
     validate_supported_modality(modality)?;
     let source = resolve_item_source(project_path, project_id, &input, modality)?;
-    let item_id = match input.id {
-        Some(id) if is_safe_id(&id) => id,
-        Some(_) => {
-            return Err(ProjectStoreError::BadRequest(
-                "Invalid training dataset item ID".to_owned(),
-            ));
-        }
-        None => format!("item_{:04}", index + 1),
-    };
     let extension = source
         .path
         .extension()
@@ -295,7 +318,7 @@ fn materialize_item(
         .map(|value| format!(".{}", value.to_ascii_lowercase()))
         .unwrap_or_else(|| ".bin".to_owned());
     let relative_path = format!("images/{item_id}{extension}");
-    let target_path = dataset_root.join(&relative_path);
+    let target_path = media_dir.join(format!("{item_id}{extension}"));
     if let Some(parent) = target_path.parent() {
         fs::create_dir_all(parent)?;
     }
@@ -382,7 +405,6 @@ fn resolve_asset_source(
     if !is_safe_id(asset_id) {
         return Err(ProjectStoreError::BadRequest("Invalid asset ID".to_owned()));
     }
-    ensure_training_dataset_table(project_path)?;
     let connection = Connection::open(project_path.join("project.db"))?;
     let (file_path, sidecar_path): (String, Option<String>) = connection
         .query_row(
@@ -502,15 +524,49 @@ pub fn apply_training_dataset_migrations(connection: &Connection) -> ProjectStor
           modality text not null,
           status text not null,
           version integer not null,
+          item_count integer not null default 0,
           file_path text not null,
           created_at text not null,
           updated_at text not null
         );
-        create index if not exists idx_training_datasets_updated
-          on training_datasets(updated_at);
+        create index if not exists idx_training_datasets_project_updated
+          on training_datasets(project_id, updated_at);
         ",
     )?;
+    ensure_training_dataset_column(connection, "item_count", "integer not null default 0")?;
     Ok(())
+}
+
+fn list_dataset_summaries_from_index(
+    project_path: &Path,
+    project_id: &str,
+) -> ProjectStoreResult<Vec<TrainingDatasetSummary>> {
+    let connection = Connection::open(project_path.join("project.db"))?;
+    let mut statement = connection.prepare(
+        "
+        select id, project_id, name, modality, status, version, item_count, created_at, updated_at
+          from training_datasets
+         where project_id = ?1
+         order by updated_at desc, name asc
+        ",
+    )?;
+    let summaries = statement
+        .query_map(params![project_id], |row| {
+            let item_count: i64 = row.get(6)?;
+            Ok(TrainingDatasetSummary {
+                id: row.get(0)?,
+                project_id: row.get(1)?,
+                name: row.get(2)?,
+                modality: parse_string_enum(&row.get::<_, String>(3)?),
+                status: parse_string_enum(&row.get::<_, String>(4)?),
+                version: row.get(5)?,
+                item_count: usize::try_from(item_count).unwrap_or(0),
+                created_at: row.get(7)?,
+                updated_at: row.get(8)?,
+            })
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(summaries)
 }
 
 fn index_dataset(
@@ -524,8 +580,8 @@ fn index_dataset(
     connection.execute(
         "
         insert or replace into training_datasets (
-          id, project_id, name, modality, status, version, file_path, created_at, updated_at
-        ) values (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+          id, project_id, name, modality, status, version, item_count, file_path, created_at, updated_at
+        ) values (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
         ",
         params![
             dataset.id,
@@ -534,6 +590,7 @@ fn index_dataset(
             dataset.modality.as_str(),
             dataset.status.as_str(),
             dataset.version,
+            i64::try_from(dataset.items.len()).unwrap_or(i64::MAX),
             rel_path,
             dataset.created_at,
             dataset.updated_at,
@@ -552,34 +609,30 @@ fn remove_dataset_index(project_path: &Path, dataset_id: &str) -> ProjectStoreRe
     Ok(())
 }
 
-fn summary_from_dataset(dataset: TrainingDataset) -> TrainingDatasetSummary {
-    TrainingDatasetSummary {
-        id: dataset.id,
-        project_id: dataset.project_id.unwrap_or_default(),
-        name: dataset.name,
-        modality: dataset.modality,
-        status: dataset.status,
-        version: dataset.version,
-        item_count: dataset.items.len(),
-        created_at: dataset.created_at,
-        updated_at: dataset.updated_at,
+fn ensure_training_dataset_column(
+    connection: &Connection,
+    column: &str,
+    definition: &str,
+) -> ProjectStoreResult<()> {
+    let mut statement = connection.prepare("pragma table_info(training_datasets)")?;
+    let columns = statement
+        .query_map([], |row| row.get::<_, String>("name"))?
+        .collect::<Result<Vec<_>, _>>()?;
+    if !columns.iter().any(|existing| existing == column) {
+        connection.execute(
+            &format!("alter table training_datasets add column {column} {definition}"),
+            [],
+        )?;
     }
+    Ok(())
 }
 
-fn dataset_manifest_paths(project_path: &Path) -> ProjectStoreResult<Vec<PathBuf>> {
-    let root = project_path.join("training").join("datasets");
-    if !root.exists() {
-        return Ok(Vec::new());
-    }
-    let mut paths = Vec::new();
-    for entry in fs::read_dir(root)? {
-        let entry = entry?;
-        let path = entry.path().join(DATASET_MANIFEST_NAME);
-        if path.exists() {
-            paths.push(path);
-        }
-    }
-    Ok(paths)
+fn parse_string_enum<T>(value: &str) -> T
+where
+    T: serde::de::DeserializeOwned,
+{
+    serde_json::from_value(Value::String(value.to_owned()))
+        .expect("string enum deserialization is infallible")
 }
 
 fn dataset_root(project_path: &Path, dataset_id: &str) -> PathBuf {
@@ -593,12 +646,38 @@ fn dataset_manifest_path(project_path: &Path, dataset_id: &str) -> PathBuf {
     dataset_root(project_path, dataset_id).join(DATASET_MANIFEST_NAME)
 }
 
-fn reset_dataset_media_dir(dataset_root: &Path) -> ProjectStoreResult<()> {
+fn replace_dataset_media_dir(
+    dataset_root: &Path,
+    temp_media_dir: &Path,
+) -> ProjectStoreResult<Option<PathBuf>> {
     let media_dir = dataset_root.join("images");
+    let backup_dir = dataset_root.join(format!("images.backup-{}", random_hex(8)?));
     if media_dir.exists() {
-        fs::remove_dir_all(&media_dir)?;
+        fs::rename(&media_dir, &backup_dir)?;
     }
-    fs::create_dir_all(&media_dir)?;
+    match fs::rename(temp_media_dir, &media_dir) {
+        Ok(()) => Ok(backup_dir.exists().then_some(backup_dir)),
+        Err(error) => {
+            if backup_dir.exists() {
+                let _ = fs::rename(&backup_dir, &media_dir);
+            }
+            Err(ProjectStoreError::Io(error))
+        }
+    }
+}
+
+fn rollback_dataset_media_dir(dataset_root: &Path, backup_media_dir: Option<&Path>) {
+    let media_dir = dataset_root.join("images");
+    let _ = fs::remove_dir_all(&media_dir);
+    if let Some(backup_media_dir) = backup_media_dir {
+        let _ = fs::rename(backup_media_dir, media_dir);
+    }
+}
+
+fn remove_optional_dir(path: Option<PathBuf>) -> ProjectStoreResult<()> {
+    if let Some(path) = path {
+        fs::remove_dir_all(path)?;
+    }
     Ok(())
 }
 

@@ -7146,6 +7146,44 @@ mod tests {
             updated["items"][0]["caption"]["text"],
             "miraStyle close portrait"
         );
+        let dataset_image_path = project_path
+            .join("training")
+            .join("datasets")
+            .join(&dataset_id)
+            .join("images")
+            .join("item_0001.png");
+        assert_eq!(
+            std::fs::read(&dataset_image_path).expect("dataset image remains"),
+            b"png-bytes"
+        );
+
+        let (status, error) = request(
+            reloaded_app.clone(),
+            "PATCH",
+            &format!("/api/v1/projects/{project_id}/training/datasets/{dataset_id}"),
+            json!({
+                "items": [
+                    { "assetId": asset_id },
+                    { "assetId": "asset_missing" }
+                ]
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(error["detail"], "Asset not found");
+        assert_eq!(
+            std::fs::read(&dataset_image_path).expect("old dataset image survives failed update"),
+            b"png-bytes"
+        );
+        let (status, detail_after_failed_update) = request(
+            reloaded_app.clone(),
+            "GET",
+            &format!("/api/v1/projects/{project_id}/training/datasets/{dataset_id}"),
+            Value::Null,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(detail_after_failed_update["version"], 2);
 
         let (status, error) = request(
             reloaded_app.clone(),
@@ -7159,6 +7197,22 @@ mod tests {
         .await;
         assert_eq!(status, StatusCode::BAD_REQUEST);
         assert_eq!(error["detail"], "Invalid dataset item path");
+
+        let (status, error) = request(
+            reloaded_app.clone(),
+            "POST",
+            &format!("/api/v1/projects/{project_id}/training/datasets"),
+            json!({
+                "name": "Duplicate Items",
+                "items": [
+                    { "id": "same_item", "assetId": asset_id },
+                    { "id": "same_item", "assetId": asset_id }
+                ]
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(error["detail"], "Training dataset item IDs must be unique");
 
         let (_, other_project) = request(
             reloaded_app.clone(),
@@ -7192,7 +7246,7 @@ mod tests {
         assert_eq!(error["detail"], "Asset not found");
 
         let (status, deleted) = request(
-            reloaded_app,
+            reloaded_app.clone(),
             "DELETE",
             &format!("/api/v1/projects/{project_id}/training/datasets/{dataset_id}"),
             Value::Null,
@@ -7200,6 +7254,15 @@ mod tests {
         .await;
         assert_eq!(status, StatusCode::OK);
         assert_eq!(deleted, json!({ "id": dataset_id, "status": "deleted" }));
+        let (status, listed_after_delete) = request(
+            reloaded_app,
+            "GET",
+            &format!("/api/v1/projects/{project_id}/training/datasets"),
+            Value::Null,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(listed_after_delete, json!([]));
     }
 
     #[tokio::test]
