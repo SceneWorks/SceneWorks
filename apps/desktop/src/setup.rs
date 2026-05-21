@@ -51,7 +51,7 @@ fn emit(app: &AppHandle, phase: &str, message: impl Into<String>, error: bool) {
 /// Per-OS application support root: `~/Library/Application Support/SceneWorks`
 /// (macOS), `%APPDATA%\SceneWorks` (Windows), `$XDG_DATA_HOME/sceneworks` or
 /// `~/.local/share/sceneworks` (Linux). Mirrors the API's path resolver.
-fn app_support_dir() -> PathBuf {
+pub fn app_support_dir() -> PathBuf {
     #[cfg(target_os = "macos")]
     if let Ok(home) = std::env::var("HOME") {
         return PathBuf::from(home)
@@ -150,6 +150,14 @@ fn data_dir() -> PathBuf {
 
 fn config_dir() -> PathBuf {
     app_support_dir().join("config")
+}
+
+/// Data directory: the settings override if set, otherwise the platform default.
+fn resolved_data_dir() -> PathBuf {
+    crate::settings::load_settings()
+        .data_dir
+        .map(PathBuf::from)
+        .unwrap_or_else(data_dir)
 }
 
 /// Directory containing the Python `scene_worker` package + requirements: the
@@ -316,6 +324,10 @@ fn spawn_api(app: &AppHandle, port: u16) -> Result<(), String> {
         .env("SCENEWORKS_API_HOST", "127.0.0.1")
         .env("SCENEWORKS_API_PORT", port.to_string())
         .env("SCENEWORKS_RUN_UTILITY_INPROCESS", "true")
+        .env(
+            "SCENEWORKS_DATA_DIR",
+            resolved_data_dir().to_string_lossy().to_string(),
+        )
         .spawn()
         .map_err(|error| format!("spawn api: {error}"))?;
     app.state::<Managed>()
@@ -399,7 +411,7 @@ fn supervise_worker(app: AppHandle, api_port: u16) {
                 );
                 return;
             }
-            let spawned = app
+            let mut command = app
                 .shell()
                 .command(python.to_string_lossy().to_string())
                 .args(["-m", "scene_worker"])
@@ -407,13 +419,16 @@ fn supervise_worker(app: AppHandle, api_port: u16) {
                 .env("SCENEWORKS_API_URL", &api_url)
                 .env(
                     "SCENEWORKS_DATA_DIR",
-                    data_dir().to_string_lossy().to_string(),
+                    resolved_data_dir().to_string_lossy().to_string(),
                 )
                 .env(
                     "SCENEWORKS_CONFIG_DIR",
                     config_dir().to_string_lossy().to_string(),
-                )
-                .spawn();
+                );
+            if let Some(token) = crate::settings::read_hf_token() {
+                command = command.env("HF_TOKEN", token);
+            }
+            let spawned = command.spawn();
             let (mut events, child) = match spawned {
                 Ok(pair) => pair,
                 Err(error) => {

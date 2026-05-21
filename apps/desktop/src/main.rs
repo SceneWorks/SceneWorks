@@ -1,6 +1,7 @@
 // Hide the extra console window on Windows in release builds.
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod settings;
 mod setup;
 
 use tauri::RunEvent;
@@ -8,8 +9,19 @@ use tauri::RunEvent;
 fn main() {
     let app = tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
+        .plugin(tauri_plugin_dialog::init())
         .manage(setup::Managed::default())
-        .invoke_handler(tauri::generate_handler![setup::start_setup])
+        .invoke_handler(tauri::generate_handler![
+            setup::start_setup,
+            settings::get_app_settings,
+            settings::set_data_dir,
+            settings::choose_data_dir,
+            settings::reveal_in_os,
+            settings::hf_token_present,
+            settings::set_hf_token,
+            settings::restart_worker,
+            settings::get_gpu_info,
+        ])
         .build(tauri::generate_context!())
         .expect("error while building the SceneWorks desktop shell");
 
