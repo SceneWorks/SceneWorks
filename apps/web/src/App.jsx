@@ -8,6 +8,7 @@ import { LibraryScreen } from "./screens/LibraryScreen.jsx";
 import { ModelManagerScreen } from "./screens/ModelManagerScreen.jsx";
 import { ImageStudio } from "./screens/ImageStudio.jsx";
 import { VideoStudio } from "./screens/VideoStudio.jsx";
+import { TrainingStudio } from "./screens/TrainingStudio.jsx";
 import { CharacterStudio } from "./screens/CharacterStudio.jsx";
 import { EditorScreen } from "./screens/EditorScreen.jsx";
 import { QueueScreen } from "./screens/QueueScreen.jsx";
@@ -90,6 +91,7 @@ const navSections = [
       { id: "Library", icon: Icon.Library },
       { id: "Image", icon: Icon.Image },
       { id: "Video", icon: Icon.Video },
+      { id: "Train", icon: Icon.Train },
       { id: "Editor", icon: Icon.Editor },
     ],
   },
@@ -111,6 +113,7 @@ const viewTitles = {
   Library: { title: "Library", blurb: "Browse stills and clips across all your projects." },
   Image: { title: "Image Studio", blurb: "Describe what you want — we'll render variations side by side." },
   Video: { title: "Video Studio", blurb: "Bring stills to life, or render new clips from scratch." },
+  Train: { title: "Training Studio", blurb: "Build datasets and prepare LoRA training plans." },
   Editor: { title: "Editor", blurb: "Cut, sequence and export your timeline." },
   Characters: { title: "Characters", blurb: "Keep the same face across every shot." },
   Presets: { title: "Presets", blurb: "Save and share recurring generation setups." },
@@ -289,6 +292,10 @@ export function App() {
   const [models, setModels] = useState([]);
   const [loras, setLoras] = useState([]);
   const [presets, setPresets] = useState([]);
+  const [trainingDatasets, setTrainingDatasets] = useState([]);
+  const [trainingDatasetsProjectId, setTrainingDatasetsProjectId] = useState(null);
+  const [loadingTrainingDatasets, setLoadingTrainingDatasets] = useState(false);
+  const [trainingDatasetsError, setTrainingDatasetsError] = useState("");
   const [assets, setAssets] = useState([]);
   const [characters, setCharacters] = useState([]);
   const [personTracks, setPersonTracks] = useState([]);
@@ -461,6 +468,9 @@ export function App() {
       setTimelines([]);
       setTimelinesProjectId(null);
       setPresets([]);
+      setTrainingDatasets([]);
+      setTrainingDatasetsProjectId(null);
+      setTrainingDatasetsError("");
       setSelectedTimelineId(null);
       setActiveTimeline(null);
       return;
@@ -469,6 +479,7 @@ export function App() {
     refreshCharacters(activeProject.id);
     refreshLoras(activeProject.id);
     refreshPresets(activeProject.id);
+    refreshTrainingDatasets(activeProject.id);
     refreshPersonTracks(activeProject.id);
     refreshTimelines(activeProject.id);
   }, [activeProject?.id, authenticated, token]);
@@ -687,6 +698,30 @@ export function App() {
     } catch (err) {
       setError(err.message);
       return [];
+    }
+  }
+
+  async function refreshTrainingDatasets(projectId = activeProject?.id) {
+    if (!projectId) {
+      setTrainingDatasets([]);
+      setTrainingDatasetsProjectId(null);
+      setTrainingDatasetsError("");
+      return [];
+    }
+    setLoadingTrainingDatasets(true);
+    try {
+      const items = await apiFetch(`/api/v1/projects/${projectId}/training/datasets`, token);
+      setTrainingDatasets(items);
+      setTrainingDatasetsProjectId(projectId);
+      setTrainingDatasetsError("");
+      return items;
+    } catch (err) {
+      setTrainingDatasets([]);
+      setTrainingDatasetsProjectId(projectId);
+      setTrainingDatasetsError(err.message);
+      return [];
+    } finally {
+      setLoadingTrainingDatasets(false);
     }
   }
 
@@ -1734,6 +1769,17 @@ export function App() {
             setRequestedGpu={setRequestedGpu}
             updateAssetStatus={updateAssetStatus}
             videoModels={videoModels}
+          />
+        ) : null}
+
+        {activeView === "Train" ? (
+          <TrainingStudio
+            activeProject={activeProject}
+            authenticated={authenticated}
+            datasets={trainingDatasetsProjectId === activeProject?.id ? trainingDatasets : []}
+            datasetsError={trainingDatasetsError}
+            loadingDatasets={loadingTrainingDatasets}
+            onRefreshDatasets={() => refreshTrainingDatasets(activeProject?.id)}
           />
         ) : null}
 
