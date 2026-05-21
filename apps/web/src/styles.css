@@ -1356,6 +1356,183 @@ label {
   align-content: start;
 }
 
+/* ---------- Training Studio ---------- */
+.training-studio-shell {
+  display: grid;
+  gap: var(--gap-4);
+  align-content: start;
+}
+
+.training-summary-band {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(300px, 420px);
+  gap: 18px;
+  align-items: stretch;
+}
+
+.training-metrics {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.training-metrics > div,
+.training-empty-state,
+.training-panel,
+.training-dataset-row,
+.training-step-block {
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+  background: var(--surface-2);
+}
+
+.training-metrics > div {
+  display: grid;
+  align-content: center;
+  gap: 4px;
+  min-height: 84px;
+  padding: 12px;
+}
+
+.training-metrics strong {
+  overflow-wrap: anywhere;
+  color: var(--text);
+  font-size: 18px;
+  font-weight: 700;
+  line-height: 1.2;
+}
+
+.training-metrics span,
+.training-dataset-row span,
+.training-step-block span,
+.training-empty-state span,
+.training-tabs small {
+  color: var(--text-muted);
+  font-size: 12px;
+}
+
+.training-empty-state {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-height: 120px;
+  padding: 18px;
+}
+
+.training-empty-state > div {
+  display: grid;
+  gap: 4px;
+}
+
+.training-tabs {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.training-tabs button {
+  display: grid;
+  min-height: 66px;
+  gap: 4px;
+  padding: 10px 12px;
+  text-align: left;
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+  background: var(--surface-2);
+  color: var(--text);
+}
+
+.training-tabs button:hover {
+  border-color: var(--border-strong);
+  background: var(--surface-hover);
+}
+
+.training-tabs button.active {
+  border-color: color-mix(in oklch, var(--accent) 55%, var(--border));
+  background: var(--surface);
+  box-shadow: var(--shadow-sm);
+}
+
+.training-tabs span {
+  font-weight: 700;
+}
+
+.training-panel {
+  display: grid;
+  gap: 14px;
+  padding: 16px;
+}
+
+.training-panel-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.training-panel-head h3 {
+  margin: 2px 0 0;
+  font-size: 18px;
+}
+
+.training-status-pill {
+  display: inline-flex;
+  align-items: center;
+  min-height: 28px;
+  padding: 0 10px;
+  border-radius: var(--r-pill);
+  background: var(--accent-soft);
+  color: var(--accent-strong);
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.training-dataset-list,
+.training-workflow-grid,
+.training-config-preview {
+  display: grid;
+  gap: 10px;
+}
+
+.training-dataset-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 12px;
+  background: var(--surface);
+}
+
+.training-dataset-row > div,
+.training-step-block {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+}
+
+.training-dataset-row strong {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.training-workflow-grid {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.training-step-block {
+  padding: 14px;
+}
+
+.training-config-preview {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.training-config-preview label {
+  display: grid;
+  gap: 7px;
+}
+
 .preset-rail-head {
   display: flex;
   align-items: baseline;
@@ -4594,6 +4771,11 @@ label {
   .media-grid,
   .library-layout,
   .studio-layout,
+  .training-summary-band,
+  .training-tabs,
+  .training-metrics,
+  .training-workflow-grid,
+  .training-config-preview,
   .preset-layout,
   .character-layout,
   .queue-header,
