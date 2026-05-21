@@ -1083,13 +1083,13 @@ def select_torch_dtype(torch: Any, device: str, requested: Any) -> Any:
         return torch.float16
     if requested == "float32" or device == "cpu":
         return torch.float32
-    if device == "mps":
-        # bfloat16 coverage on the MPS backend is incomplete and frequently
-        # forces slow CPU fallbacks (via PYTORCH_ENABLE_MPS_FALLBACK) or hard
-        # errors; float16 is the well-supported half-precision path on Apple
-        # Silicon. Explicit float16/float32 requests above still take priority
-        # (sc-1336).
-        return torch.float16
+    # bfloat16 for both CUDA and MPS. On MPS, float16 overflows to NaN and yields
+    # all-black images — the denoiser latents go NaN before the VAE, so upcasting
+    # only the VAE does not help. bfloat16 keeps float32's exponent range (no
+    # overflow) at half float32's memory and renders correctly + fast on Apple
+    # Silicon. Verified on an M-series Mac with Z-Image-Turbo: fp16 = black,
+    # bf16 = OK (~18s), fp32 = OK but ~2x memory and slower. Explicit
+    # float16/float32 requests above still win (sc-1336).
     return torch.bfloat16
 
 
