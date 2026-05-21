@@ -10,6 +10,7 @@ import { ModelManagerScreen } from "./screens/ModelManagerScreen.jsx";
 import { PresetManagerScreen } from "./screens/PresetManagerScreen.jsx";
 import { QueueScreen } from "./screens/QueueScreen.jsx";
 import { VideoStudio } from "./screens/VideoStudio.jsx";
+import { TrainingStudio } from "./screens/TrainingStudio.jsx";
 
 class FakeEventSource {
   static instances = [];
@@ -124,7 +125,256 @@ describe("SceneWorks app shell", () => {
     await settle();
 
     expect(container.textContent).toContain("Library");
+    expect(container.textContent).toContain("Train");
     expect(container.textContent).toContain("Queue");
+  });
+
+  it("opens the Train navigation item without exposing a queue action", async () => {
+    global.fetch = vi.fn((url) => {
+      const path = new URL(url).pathname;
+      if (path.endsWith("/health")) {
+        return Promise.resolve(response({ status: "ok", authRequired: false }));
+      }
+      if (path.endsWith("/access")) {
+        return Promise.resolve(response({ authRequired: false }));
+      }
+      if (path.endsWith("/jobs/events/ticket")) {
+        return Promise.resolve(response({ ticket: "stream-ticket" }));
+      }
+      if (path.endsWith("/projects")) {
+        return Promise.resolve(response([{ id: "project-a", name: "Project A" }]));
+      }
+      if (path.includes("/training/datasets")) {
+        return Promise.resolve(response([{ id: "dataset-a", name: "Portrait Set", modality: "image", itemCount: 2 }]));
+      }
+      return Promise.resolve(response([]));
+    });
+
+    root = createRoot(container);
+    await act(async () => {
+      root.render(<App />);
+    });
+    await settle();
+
+    await act(async () => {
+      [...container.querySelectorAll("button")].find((button) => button.textContent === "Train").click();
+    });
+    await settle();
+
+    expect(container.textContent).toContain("Training Studio");
+    expect(container.textContent).toContain("Portrait Set");
+    expect(container.textContent).toContain("Configure Job");
+    expect([...container.querySelectorAll("button")].some((button) => /queue training/i.test(button.textContent))).toBe(false);
+  });
+
+  it("supports keyboard navigation across Training Studio tabs", async () => {
+    root = createRoot(container);
+    await act(async () => {
+      root.render(
+        <TrainingStudio
+          activeProject={{ id: "project-a", name: "Project A" }}
+          datasets={[{ id: "dataset-a", name: "Portrait Set", modality: "image", itemCount: 2 }]}
+          onRefreshDatasets={() => {}}
+        />,
+      );
+    });
+
+    const datasetTab = container.querySelector("#training-tab-dataset");
+    datasetTab.focus();
+
+    await act(async () => {
+      datasetTab.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowRight", bubbles: true }));
+    });
+
+    expect(container.querySelector("#training-tab-rename-caption").getAttribute("aria-selected")).toBe("true");
+
+    await act(async () => {
+      container.querySelector("#training-tab-rename-caption").dispatchEvent(new KeyboardEvent("keydown", { key: "End", bubbles: true }));
+    });
+
+    expect(container.querySelector("#training-tab-configure").getAttribute("aria-selected")).toBe("true");
+    expect(container.textContent).toContain("Training submission is disabled");
+  });
+
+  it("creates a training dataset from selected image assets", async () => {
+    const createDataset = vi.fn(async (payload) => ({
+      id: "dataset-new",
+      name: payload.name,
+      version: 1,
+      items: payload.items.map((item) => ({ ...item, caption: { text: "", triggerWords: [] } })),
+    }));
+
+    root = createRoot(container);
+    await act(async () => {
+      root.render(
+        <TrainingStudio
+          activeProject={{ id: "project-a", name: "Project A" }}
+          assets={[{ id: "asset-a", type: "image", displayName: "Mira.png", file: { path: "assets/images/Mira.png", mimeType: "image/png" } }]}
+          createDataset={createDataset}
+          datasets={[]}
+        />,
+      );
+    });
+
+    await changeField(field(container, "Dataset name"), "Mira Set");
+    await act(async () => {
+      container.querySelector(".training-asset-card input").click();
+    });
+    await act(async () => {
+      [...container.querySelectorAll("button")].find((button) => button.textContent === "Create dataset").click();
+    });
+
+    expect(createDataset).toHaveBeenCalledWith(
+      expect.objectContaining({
+        name: "Mira Set",
+        modality: "image",
+        items: [expect.objectContaining({ assetId: "asset-a", displayName: "Mira.png" })],
+      }),
+    );
+    expect(container.textContent).toContain("Dataset created");
+  });
+
+  it("opens and saves an existing training dataset membership", async () => {
+    const loadDataset = vi.fn(async () => ({
+      id: "dataset-a",
+      name: "Portrait Set",
+      version: 3,
+      items: [{ assetId: "asset-a", displayName: "Mira.png", caption: { text: "mira portrait", triggerWords: [] } }],
+    }));
+    const updateDataset = vi.fn(async (datasetId, payload) => ({
+      id: datasetId,
+      name: payload.name,
+      version: 4,
+      items: payload.items.map((item) => ({ ...item, caption: item.caption ?? { text: "", triggerWords: [] } })),
+    }));
+    const assets = [
+      { id: "asset-a", type: "image", displayName: "Mira.png", file: { path: "assets/images/Mira.png", mimeType: "image/png" } },
+      { id: "asset-b", type: "image", displayName: "Mira close.png", file: { path: "assets/images/Mira-close.png", mimeType: "image/png" } },
+    ];
+
+    root = createRoot(container);
+    await act(async () => {
+      root.render(
+        <TrainingStudio
+          activeProject={{ id: "project-a", name: "Project A" }}
+          assets={assets}
+          datasets={[{ id: "dataset-a", name: "Portrait Set", modality: "image", itemCount: 1 }]}
+          loadDataset={loadDataset}
+          updateDataset={updateDataset}
+        />,
+      );
+    });
+
+    await act(async () => {
+      [...container.querySelectorAll(".training-dataset-row")].find((button) => button.textContent.includes("Portrait Set")).click();
+    });
+    await settle();
+    expect(loadDataset).toHaveBeenCalledWith("dataset-a");
+    expect(container.querySelectorAll(".training-asset-card input")[0].checked).toBe(true);
+
+    await act(async () => {
+      container.querySelectorAll(".training-asset-card input")[1].click();
+    });
+    await act(async () => {
+      [...container.querySelectorAll("button")].find((button) => button.textContent === "Save dataset").click();
+    });
+
+    expect(updateDataset).toHaveBeenCalledWith(
+      "dataset-a",
+      expect.objectContaining({
+        name: "Portrait Set",
+        items: [
+          expect.objectContaining({ assetId: "asset-a" }),
+          expect.objectContaining({ assetId: "asset-b" }),
+        ],
+      }),
+    );
+    expect(container.textContent).toContain("Dataset changes saved");
+  });
+
+  it("lets users remove unavailable dataset assets before saving", async () => {
+    const loadDataset = vi.fn(async () => ({
+      id: "dataset-a",
+      name: "Portrait Set",
+      version: 3,
+      items: [
+        { assetId: "asset-a", displayName: "Mira.png", caption: { text: "mira portrait", triggerWords: [] } },
+        { assetId: "asset-missing", displayName: "Missing.png", caption: { text: "missing portrait", triggerWords: [] } },
+      ],
+    }));
+    const updateDataset = vi.fn(async (datasetId, payload) => ({
+      id: datasetId,
+      name: payload.name,
+      version: 4,
+      items: payload.items,
+    }));
+
+    root = createRoot(container);
+    await act(async () => {
+      root.render(
+        <TrainingStudio
+          activeProject={{ id: "project-a", name: "Project A" }}
+          assets={[{ id: "asset-a", type: "image", displayName: "Mira.png", file: { path: "assets/images/Mira.png", mimeType: "image/png" } }]}
+          datasets={[{ id: "dataset-a", name: "Portrait Set", modality: "image", itemCount: 2 }]}
+          loadDataset={loadDataset}
+          updateDataset={updateDataset}
+        />,
+      );
+    });
+
+    await act(async () => {
+      [...container.querySelectorAll(".training-dataset-row")].find((button) => button.textContent.includes("Portrait Set")).click();
+    });
+    await settle();
+
+    expect(container.textContent).toContain("Asset is no longer available");
+    expect([...container.querySelectorAll("button")].find((button) => button.textContent === "Save dataset").disabled).toBe(true);
+
+    await act(async () => {
+      [...container.querySelectorAll("button")].find((button) => button.textContent === "Remove").click();
+    });
+    await act(async () => {
+      [...container.querySelectorAll("button")].find((button) => button.textContent === "Save dataset").click();
+    });
+
+    expect(updateDataset).toHaveBeenCalledWith(
+      "dataset-a",
+      expect.objectContaining({
+        items: [expect.objectContaining({ assetId: "asset-a" })],
+      }),
+    );
+  });
+
+  it("does not save unchanged existing datasets", async () => {
+    const loadDataset = vi.fn(async () => ({
+      id: "dataset-a",
+      name: "Portrait Set",
+      version: 3,
+      items: [{ assetId: "asset-a", displayName: "Mira.png", caption: { text: "mira portrait", triggerWords: [] } }],
+    }));
+    const updateDataset = vi.fn();
+
+    root = createRoot(container);
+    await act(async () => {
+      root.render(
+        <TrainingStudio
+          activeProject={{ id: "project-a", name: "Project A" }}
+          assets={[{ id: "asset-a", type: "image", displayName: "Mira.png", file: { path: "assets/images/Mira.png", mimeType: "image/png" } }]}
+          datasets={[{ id: "dataset-a", name: "Portrait Set", modality: "image", itemCount: 1 }]}
+          loadDataset={loadDataset}
+          updateDataset={updateDataset}
+        />,
+      );
+    });
+
+    await act(async () => {
+      [...container.querySelectorAll(".training-dataset-row")].find((button) => button.textContent.includes("Portrait Set")).click();
+    });
+    await settle();
+
+    const saveButton = [...container.querySelectorAll("button")].find((button) => button.textContent === "Save dataset");
+    expect(saveButton.disabled).toBe(true);
+    expect(updateDataset).not.toHaveBeenCalled();
   });
 
   it("selects duplicate-titled assets through the thumbnail asset picker", async () => {

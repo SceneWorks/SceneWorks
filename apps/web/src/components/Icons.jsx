@@ -24,6 +24,7 @@ export const Icon = {
   Image: (p) => <I {...p} d="M4 5h16v14H4zM4 16l5-5 4 4 3-3 4 4" />,
   Video: (p) => <I {...p} d="M3 6h12v12H3zM15 9l6-3v12l-6-3z" />,
   Editor: (p) => <I {...p} d="M3 8h18M3 12h12M3 16h18M16 10l4 2-4 2z" />,
+  Train: (p) => <I {...p} d="M5 19V5M12 19V5M19 19V5M3 9h4M10 15h4M17 11h4" />,
   Character: (p) => <I {...p} d="M12 12a4 4 0 100-8 4 4 0 000 8zM4 20a8 8 0 0116 0" />,
   Preset: (p) => <I {...p} d="M4 7h16M7 12h10M10 17h4" />,
   Model: (p) => <I {...p} d="M12 3l8 4.5v9L12 21l-8-4.5v-9zM12 3v9M12 12l8-4.5M12 12l-8-4.5" />,
