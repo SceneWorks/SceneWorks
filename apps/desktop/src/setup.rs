@@ -6,7 +6,6 @@
 //! local API. `start_setup` is also the retry entry point.
 
 use std::io::Write;
-use std::net::TcpListener;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
@@ -26,6 +25,8 @@ const HEALTH_TIMEOUT: Duration = Duration::from_secs(30);
 pub struct Managed {
     pub api: Mutex<Option<CommandChild>>,
     pub worker: Mutex<Option<CommandChild>>,
+    /// OS-assigned API port, discovered from the sidecar's startup line.
+    api_port: Mutex<Option<u16>>,
     running: AtomicBool,
     pub shutting_down: AtomicBool,
 }
@@ -188,12 +189,23 @@ fn append_log(path: &Path, line: &str) {
     }
 }
 
-fn reserve_free_port() -> std::io::Result<u16> {
-    let listener = TcpListener::bind("127.0.0.1:0")?;
-    Ok(listener.local_addr()?.port())
+/// Extract the port from the API's `listening on http://127.0.0.1:PORT` line.
+fn parse_listening_port(line: &str) -> Option<u16> {
+    const MARKER: &str = "127.0.0.1:";
+    let start = line.find(MARKER)? + MARKER.len();
+    line[start..]
+        .chars()
+        .take_while(char::is_ascii_digit)
+        .collect::<String>()
+        .parse()
+        .ok()
 }
 
-fn health_ok(port: u16) -> bool {
+/// Health check that also confirms the responder is genuinely the SceneWorks API
+/// (HTTP 200 with the expected service/runtime in the JSON body) before we
+/// navigate the privileged Tauri window to it — a foreign service that grabbed
+/// the port must not be trusted.
+fn health_is_sceneworks(port: u16) -> bool {
     use std::io::Read;
     use std::net::TcpStream;
     let Ok(mut stream) = TcpStream::connect(("127.0.0.1", port)) else {
@@ -209,10 +221,13 @@ fn health_ok(port: u16) -> bool {
     }
     let mut response = String::new();
     let _ = stream.read_to_string(&mut response);
-    response
+    let ok_status = response
         .lines()
         .next()
-        .is_some_and(|status_line| status_line.contains(" 200"))
+        .is_some_and(|status_line| status_line.contains(" 200"));
+    ok_status
+        && response.contains("\"service\":\"sceneworks-api\"")
+        && response.contains("\"runtime\":\"rust\"")
 }
 
 /// Run the bundled `uv` with the given args, streaming output to setup-status
@@ -316,17 +331,25 @@ async fn provision_venv(app: &AppHandle) -> Result<(), String> {
 }
 
 /// Spawn the API sidecar, pipe its output to api.log, and return the chosen port.
-fn spawn_api(app: &AppHandle, port: u16) -> Result<(), String> {
+fn spawn_api(app: &AppHandle) -> Result<(), String> {
     let (mut events, child) = app
         .shell()
         .sidecar("sceneworks-api")
         .map_err(|error| format!("locate api: {error}"))?
         .env("SCENEWORKS_API_HOST", "127.0.0.1")
-        .env("SCENEWORKS_API_PORT", port.to_string())
+        // Let the OS assign a free port (no reserve/release TOCTOU); the actual
+        // port is discovered from the API's startup line below.
+        .env("SCENEWORKS_API_PORT", "0")
         .env("SCENEWORKS_RUN_UTILITY_INPROCESS", "true")
         .env(
             "SCENEWORKS_DATA_DIR",
             resolved_data_dir().to_string_lossy().to_string(),
+        )
+        // Pin the config dir so the API and Python worker share one root on all
+        // platforms (Linux otherwise splits XDG data vs config).
+        .env(
+            "SCENEWORKS_CONFIG_DIR",
+            config_dir().to_string_lossy().to_string(),
         )
         .spawn()
         .map_err(|error| format!("spawn api: {error}"))?;
@@ -338,6 +361,7 @@ fn spawn_api(app: &AppHandle, port: u16) -> Result<(), String> {
 
     let log_path = logs_dir().join("api.log");
     let _ = std::fs::create_dir_all(logs_dir());
+    let app_handle = app.clone();
     tauri::async_runtime::spawn(async move {
         let mut file = std::fs::OpenOptions::new()
             .create(true)
@@ -347,7 +371,16 @@ fn spawn_api(app: &AppHandle, port: u16) -> Result<(), String> {
         while let Some(event) = events.recv().await {
             let entry = match event {
                 CommandEvent::Stdout(bytes) | CommandEvent::Stderr(bytes) => {
-                    String::from_utf8_lossy(&bytes).into_owned()
+                    let text = String::from_utf8_lossy(&bytes).into_owned();
+                    // Discover the OS-assigned port from the API's startup line.
+                    let state = app_handle.state::<Managed>();
+                    let mut port = state.api_port.lock().expect("api port lock");
+                    if port.is_none() {
+                        if let Some(found) = parse_listening_port(&text) {
+                            *port = Some(found);
+                        }
+                    }
+                    text
                 }
                 CommandEvent::Terminated(payload) => format!(
                     "[desktop] api sidecar terminated: code={:?} signal={:?}\n",
@@ -365,21 +398,28 @@ fn spawn_api(app: &AppHandle, port: u16) -> Result<(), String> {
     Ok(())
 }
 
-/// Health-gate the window on a background thread: once the API answers, navigate
-/// to it and start the Python worker; show an error after the timeout.
-fn gate_window(app: AppHandle, port: u16) {
-    let base_url = format!("http://127.0.0.1:{port}");
+/// Health-gate the window on a background thread: wait for the API's
+/// OS-assigned port, confirm the responder is genuinely SceneWorks, then
+/// navigate and start the Python worker; show an error after the timeout.
+fn gate_window(app: AppHandle) {
     std::thread::spawn(move || {
         let deadline = Instant::now() + HEALTH_TIMEOUT;
         loop {
-            if health_ok(port) {
-                if let Ok(url) = base_url.parse() {
-                    if let Some(window) = app.get_webview_window("main") {
-                        let _ = window.navigate(url);
+            let port = *app
+                .state::<Managed>()
+                .api_port
+                .lock()
+                .expect("api port lock");
+            if let Some(port) = port {
+                if health_is_sceneworks(port) {
+                    if let Ok(url) = format!("http://127.0.0.1:{port}").parse() {
+                        if let Some(window) = app.get_webview_window("main") {
+                            let _ = window.navigate(url);
+                        }
                     }
+                    supervise_worker(app, port);
+                    return;
                 }
-                supervise_worker(app, port);
-                return;
             }
             if Instant::now() >= deadline {
                 emit(&app, "error", "The local API did not start in time.", true);
@@ -565,23 +605,11 @@ async fn run_startup(app: AppHandle) {
         return;
     }
     emit(&app, "starting", "Starting the local engine…", false);
-    let port = match reserve_free_port() {
-        Ok(port) => port,
-        Err(error) => {
-            emit(
-                &app,
-                "error",
-                format!("Could not reserve a port: {error}"),
-                true,
-            );
-            return;
-        }
-    };
-    if let Err(error) = spawn_api(&app, port) {
+    if let Err(error) = spawn_api(&app) {
         emit(&app, "error", error, true);
         return;
     }
-    gate_window(app, port);
+    gate_window(app);
 }
 
 /// Frontend entry point (called on setup-screen load and on retry). Kicks off
