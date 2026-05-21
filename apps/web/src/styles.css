@@ -1499,7 +1499,9 @@ label {
 
 .training-dataset-list,
 .training-workflow-grid,
-.training-config-preview {
+.training-config-preview,
+.training-caption-editor,
+.training-caption-list {
   display: grid;
   gap: 10px;
 }
@@ -1742,6 +1744,83 @@ label {
 .training-config-preview label {
   display: grid;
   gap: 7px;
+}
+
+.training-caption-toolbar {
+  display: grid;
+  grid-template-columns: minmax(180px, 1fr) auto auto;
+  gap: 10px;
+  align-items: end;
+}
+
+.training-caption-toolbar label,
+.training-caption-fields label {
+  display: grid;
+  gap: 7px;
+  min-width: 0;
+  color: var(--text-muted);
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.training-caption-row {
+  display: grid;
+  grid-template-columns: 96px minmax(0, 1fr);
+  gap: 12px;
+  min-width: 0;
+  padding: 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+  background: var(--surface);
+}
+
+.training-caption-preview {
+  display: grid;
+  gap: 8px;
+  align-content: start;
+}
+
+.training-caption-preview button {
+  overflow: hidden;
+  width: 96px;
+  aspect-ratio: 1;
+  display: grid;
+  place-items: center;
+  padding: 0;
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+  background: var(--surface-2);
+  color: var(--text-muted);
+}
+
+.training-caption-preview img,
+.training-caption-preview video {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+
+.training-caption-preview span {
+  color: var(--text-muted);
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.training-caption-fields {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(120px, 1fr));
+  gap: 10px;
+  min-width: 0;
+}
+
+.training-caption-text {
+  grid-column: 1 / -1;
+}
+
+.training-caption-fields textarea {
+  resize: vertical;
+  min-height: 76px;
 }
 
 .preset-rail-head {
@@ -4990,6 +5069,9 @@ label {
   .training-health-grid,
   .training-workflow-grid,
   .training-config-preview,
+  .training-caption-toolbar,
+  .training-caption-row,
+  .training-caption-fields,
   .preset-layout,
   .character-layout,
   .queue-header,

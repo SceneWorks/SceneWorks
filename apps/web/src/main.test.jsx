@@ -420,6 +420,102 @@ describe("SceneWorks app shell", () => {
     expect(updateDataset).not.toHaveBeenCalled();
   });
 
+  it("renames dataset items and writes caption sidecars", async () => {
+    const renamedDataset = {
+      id: "dataset-a",
+      name: "Portrait Set",
+      version: 4,
+      items: [
+        {
+          id: "item_0007",
+          assetId: "asset-a",
+          path: "images/mira_0007.png",
+          displayName: "mira_0007.png",
+          caption: { text: "mira portrait", source: "manual", triggerWords: ["mira"] },
+        },
+      ],
+    };
+    const loadDataset = vi.fn(async () => ({
+      id: "dataset-a",
+      name: "Portrait Set",
+      version: 3,
+      items: [
+        {
+          id: "item_0001",
+          assetId: "asset-a",
+          path: "images/item_0001.png",
+          displayName: "item_0001.png",
+          caption: { text: "mira portrait", source: "manual", triggerWords: ["mira"] },
+        },
+      ],
+    }));
+    const batchRenameDataset = vi.fn(async () => renamedDataset);
+    const writeCaptionSidecars = vi.fn(async () => ({
+      dataset: {
+        ...renamedDataset,
+        version: 5,
+        items: [
+          {
+            ...renamedDataset.items[0],
+            caption: { text: "mira studio portrait", source: "manual", triggerWords: ["mira", "studio"] },
+          },
+        ],
+      },
+      sidecars: [{ itemId: "item_0007", captionPath: "training/datasets/dataset-a/images/mira_0007.txt" }],
+    }));
+
+    root = createRoot(container);
+    await act(async () => {
+      root.render(
+        <TrainingStudio
+          activeProject={{ id: "project-a", name: "Project A" }}
+          assets={[{ id: "asset-a", type: "image", displayName: "Mira.png", file: { path: "assets/images/Mira.png", mimeType: "image/png" } }]}
+          batchRenameDataset={batchRenameDataset}
+          datasets={[{ id: "dataset-a", name: "Portrait Set", modality: "image", itemCount: 1 }]}
+          loadDataset={loadDataset}
+          writeCaptionSidecars={writeCaptionSidecars}
+        />,
+      );
+    });
+
+    await act(async () => {
+      [...container.querySelectorAll(".training-dataset-row")].find((button) => button.textContent.includes("Portrait Set")).click();
+    });
+    await settle();
+    await act(async () => {
+      container.querySelector("#training-tab-rename-caption").click();
+    });
+    await changeField(field(container, "Item ID"), "item_0007");
+    await changeField(field(container, "File stem"), "mira_0007");
+    await changeField(field(container, "Display name"), "mira_0007.png");
+    await changeField(field(container, "Caption"), "mira studio portrait");
+    await changeField(field(container, "Trigger words"), "mira, studio");
+    await act(async () => {
+      [...container.querySelectorAll("button")].find((button) => button.textContent === "Write sidecars").click();
+    });
+    await settle();
+
+    expect(batchRenameDataset).toHaveBeenCalledWith("dataset-a", {
+      items: [
+        {
+          itemId: "item_0001",
+          newItemId: "item_0007",
+          fileStem: "mira_0007",
+          displayName: "mira_0007.png",
+        },
+      ],
+    });
+    expect(writeCaptionSidecars).toHaveBeenCalledWith("dataset-a", {
+      items: [
+        {
+          itemId: "item_0007",
+          caption: { text: "mira studio portrait", source: "manual", triggerWords: ["mira", "studio"] },
+        },
+      ],
+    });
+    expect(container.textContent).toContain("Caption sidecars written (1)");
+  });
+
   it("selects duplicate-titled assets through the thumbnail asset picker", async () => {
     const onChange = vi.fn();
     const assets = [

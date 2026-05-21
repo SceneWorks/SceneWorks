@@ -805,6 +805,38 @@ export function App() {
     return updated;
   }
 
+  async function batchRenameTrainingDataset(datasetId, payload, projectId = activeProject?.id) {
+    if (!projectId || !datasetId) {
+      throw new Error("Select a training dataset first.");
+    }
+    const updated = await apiFetch(
+      `/api/v1/projects/${projectId}/training/datasets/${encodeURIComponent(datasetId)}/batch-rename`,
+      token,
+      {
+        method: "POST",
+        body: JSON.stringify(payload),
+      },
+    );
+    await refreshTrainingDatasets(projectId);
+    return updated;
+  }
+
+  async function writeTrainingDatasetCaptionSidecars(datasetId, payload, projectId = activeProject?.id) {
+    if (!projectId || !datasetId) {
+      throw new Error("Select a training dataset first.");
+    }
+    const result = await apiFetch(
+      `/api/v1/projects/${projectId}/training/datasets/${encodeURIComponent(datasetId)}/caption-sidecars`,
+      token,
+      {
+        method: "POST",
+        body: JSON.stringify(payload),
+      },
+    );
+    await refreshTrainingDatasets(projectId);
+    return result;
+  }
+
   function presetQuery(scope = null) {
     const params = new URLSearchParams();
     if (scope) {
@@ -1873,6 +1905,7 @@ export function App() {
             activeProject={activeProject}
             authenticated={authenticated}
             assets={assets}
+            batchRenameDataset={batchRenameTrainingDataset}
             createDataset={createTrainingDataset}
             datasets={trainingDatasetsProjectId === activeProject?.id ? trainingDatasets : []}
             datasetsError={trainingDatasetsError}
@@ -1882,6 +1915,7 @@ export function App() {
             onPreview={setPreviewAsset}
             onRefreshDatasets={() => refreshTrainingDatasets(activeProject?.id)}
             updateDataset={updateTrainingDataset}
+            writeCaptionSidecars={writeTrainingDatasetCaptionSidecars}
           />
         ) : null}
 

@@ -30,6 +30,66 @@ function captionText(item) {
   return String(item?.caption?.text ?? "").trim();
 }
 
+function itemFileStem(item) {
+  const name = String(item?.path ?? item?.displayName ?? item?.id ?? "item").replaceAll("\\", "/").split("/").pop() || "item";
+  const dotIndex = name.lastIndexOf(".");
+  return dotIndex > 0 ? name.slice(0, dotIndex) : name;
+}
+
+function triggerWordsText(caption) {
+  return (caption?.triggerWords ?? caption?.trigger_words ?? []).join(", ");
+}
+
+function parseTriggerWords(value) {
+  return String(value ?? "")
+    .split(",")
+    .map((word) => word.trim())
+    .filter(Boolean);
+}
+
+function safeSlug(value, fallback = "item") {
+  const slug = String(value ?? "")
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9_-]+/g, "_")
+    .replace(/^_+|_+$/g, "")
+    .slice(0, 48);
+  return slug || fallback;
+}
+
+function orderedName(index, prefix) {
+  return `${safeSlug(prefix, "item")}_${String(index + 1).padStart(4, "0")}`;
+}
+
+function renameCaptionDrafts(dataset) {
+  return (dataset?.items ?? []).map((item, index) => ({
+    originalItemId: item.id ?? `item_${String(index + 1).padStart(4, "0")}`,
+    itemId: item.id ?? `item_${String(index + 1).padStart(4, "0")}`,
+    fileStem: itemFileStem(item),
+    displayName: item.displayName ?? imageAssetName(item),
+    captionText: item.caption?.text ?? "",
+    captionSource: item.caption?.source ?? "manual",
+    triggerWords: triggerWordsText(item.caption),
+    assetId: item.assetId ?? "",
+    path: item.path ?? "",
+  }));
+}
+
+function renameFieldsDirty(drafts, dataset) {
+  const items = dataset?.items ?? [];
+  if (drafts.length !== items.length) {
+    return true;
+  }
+  return drafts.some((draft, index) => {
+    const item = items[index] ?? {};
+    return (
+      draft.itemId !== item.id ||
+      draft.fileStem !== itemFileStem(item) ||
+      draft.displayName !== (item.displayName ?? imageAssetName(item))
+    );
+  });
+}
+
 function normalizeDatasetAssetIds(dataset) {
   return (dataset?.items ?? []).map((item) => item.assetId).filter(Boolean);
 }
@@ -109,6 +169,7 @@ export function TrainingStudio({
   activeProject,
   authenticated = true,
   assets = [],
+  batchRenameDataset = async () => null,
   createDataset = async () => null,
   datasets = [],
   datasetsError = "",
@@ -118,6 +179,7 @@ export function TrainingStudio({
   onPreview = () => {},
   onRefreshDatasets = () => {},
   updateDataset = async () => null,
+  writeCaptionSidecars = async () => null,
 }) {
   const [activeTab, setActiveTab] = useState("dataset");
   const [activeDataset, setActiveDataset] = useState(null);
@@ -129,6 +191,9 @@ export function TrainingStudio({
   const [savingDataset, setSavingDataset] = useState(false);
   const [selectedAssetIds, setSelectedAssetIds] = useState([]);
   const [selectedDatasetId, setSelectedDatasetId] = useState("");
+  const [renamePrefix, setRenamePrefix] = useState("");
+  const [renameCaptionDraftItems, setRenameCaptionDraftItems] = useState([]);
+  const [savingRenameCaption, setSavingRenameCaption] = useState(false);
   const tabRefs = useRef({});
 
   const activeIndex = tabs.findIndex((tab) => tab.id === activeTab);
@@ -156,6 +221,12 @@ export function TrainingStudio({
     health.disabledItems === 0 &&
     !savingDataset &&
     (!activeDataset || dirty);
+  const renameCaptionHasDraft = renameCaptionDraftItems.length > 0;
+  const renameCaptionHasInvalidDraft = renameCaptionDraftItems.some(
+    (item) => !item.itemId.trim() || !item.fileStem.trim() || !item.displayName.trim(),
+  );
+  const canSaveRenameCaption =
+    Boolean(activeDataset?.id) && renameCaptionHasDraft && !renameCaptionHasInvalidDraft && !savingRenameCaption;
 
   useEffect(() => {
     setActiveDataset(null);
@@ -164,7 +235,14 @@ export function TrainingStudio({
     setDraftName("");
     setSelectedAssetIds([]);
     setSelectedDatasetId("");
+    setRenamePrefix("");
+    setRenameCaptionDraftItems([]);
   }, [activeProject?.id]);
+
+  useEffect(() => {
+    setRenameCaptionDraftItems(renameCaptionDrafts(activeDataset));
+    setRenamePrefix(safeSlug(activeDataset?.name, "item"));
+  }, [activeDataset]);
 
   function focusTab(index) {
     const next = tabs[(index + tabs.length) % tabs.length];
@@ -236,6 +314,29 @@ export function TrainingStudio({
     setSelectedDatasetId("");
   }
 
+  function updateRenameCaptionDraft(originalItemId, patch) {
+    setDatasetMessage("");
+    setRenameCaptionDraftItems((current) =>
+      current.map((item) => (item.originalItemId === originalItemId ? { ...item, ...patch } : item)),
+    );
+  }
+
+  function applyOrderedNames() {
+    setDatasetMessage("");
+    setRenameCaptionDraftItems((current) =>
+      current.map((item, index) => {
+        const nextName = orderedName(index, renamePrefix || activeDataset?.name);
+        const extension = String(item.path).split(".").pop() || "png";
+        return {
+          ...item,
+          itemId: nextName,
+          fileStem: nextName,
+          displayName: `${nextName}.${extension}`,
+        };
+      }),
+    );
+  }
+
   async function handleImport(event) {
     const files = Array.from(event.target.files ?? []);
     if (!files.length) {
@@ -285,6 +386,47 @@ export function TrainingStudio({
       setDatasetError(err.message);
     } finally {
       setSavingDataset(false);
+    }
+  }
+
+  async function saveRenameCaption() {
+    if (!canSaveRenameCaption) {
+      return;
+    }
+    setSavingRenameCaption(true);
+    setDatasetError("");
+    setDatasetMessage("");
+    try {
+      let dataset = activeDataset;
+      const renameItems = renameCaptionDraftItems.map((item) => ({
+        itemId: item.originalItemId,
+        newItemId: item.itemId.trim(),
+        fileStem: item.fileStem.trim(),
+        displayName: item.displayName.trim(),
+      }));
+      if (renameFieldsDirty(renameCaptionDraftItems, activeDataset)) {
+        dataset = await batchRenameDataset(activeDataset.id, { items: renameItems });
+      }
+      const result = await writeCaptionSidecars(activeDataset.id, {
+        items: renameCaptionDraftItems.map((item) => ({
+          itemId: item.itemId.trim(),
+          caption: {
+            text: item.captionText,
+            source: item.captionSource,
+            triggerWords: parseTriggerWords(item.triggerWords),
+          },
+        })),
+      });
+      const nextDataset = result?.dataset ?? dataset;
+      setActiveDataset(nextDataset);
+      setDraftName(nextDataset?.name ?? draftName);
+      setSelectedAssetIds(normalizeDatasetAssetIds(nextDataset));
+      setSelectedDatasetId(nextDataset?.id ?? activeDataset.id);
+      setDatasetMessage(`Caption sidecars written${result?.sidecars?.length ? ` (${result.sidecars.length})` : ""}`);
+    } catch (err) {
+      setDatasetError(err.message);
+    } finally {
+      setSavingRenameCaption(false);
     }
   }
 
@@ -500,18 +642,106 @@ export function TrainingStudio({
                       <p className="eyebrow">Rename & Caption</p>
                       <h3>{active.title}</h3>
                     </div>
-                    <span className="training-status-pill">{health.valid ? "Dataset ready" : "Blocked"}</span>
+                    <span className="training-status-pill">{activeDataset ? `Version ${activeDataset.version}` : "Select dataset"}</span>
                   </div>
-                  <div className="training-workflow-grid">
-                    <div className="training-step-block">
-                      <strong>Batch rename</strong>
-                      <span>Stable filenames and ordered item ids will be prepared from the selected dataset.</span>
+                  {datasetError ? <p className="inline-warning">{datasetError}</p> : null}
+                  {datasetMessage ? <p className="inline-success">{datasetMessage}</p> : null}
+                  {!activeDataset ? (
+                    <div className="empty-panel compact-panel">Open a saved dataset to edit captions.</div>
+                  ) : (
+                    <div className="training-caption-editor">
+                      <div className="training-caption-toolbar">
+                        <label>
+                          Rename prefix
+                          <input onChange={(event) => setRenamePrefix(event.target.value)} value={renamePrefix} />
+                        </label>
+                        <button className="secondary-action" onClick={applyOrderedNames} type="button">
+                          <Icon.Sliders size={14} />
+                          Apply ordered names
+                        </button>
+                        <button
+                          className="primary-action"
+                          disabled={!canSaveRenameCaption}
+                          onClick={saveRenameCaption}
+                          type="button"
+                        >
+                          {savingRenameCaption ? "Writing" : "Write sidecars"}
+                        </button>
+                      </div>
+                      <div className="training-caption-list" aria-label="Rename and caption dataset items">
+                        {renameCaptionDraftItems.map((item, index) => {
+                          const asset = assetsById.get(item.assetId);
+                          return (
+                            <article className="training-caption-row" key={item.originalItemId}>
+                              <div className="training-caption-preview">
+                                <button disabled={!asset} onClick={() => asset && onPreview(asset)} type="button">
+                                  {asset ? <AssetThumbnail asset={asset} /> : <Icon.Image size={22} />}
+                                </button>
+                                <span>{String(index + 1).padStart(2, "0")}</span>
+                              </div>
+                              <div className="training-caption-fields">
+                                <label>
+                                  Item ID
+                                  <input
+                                    onChange={(event) => updateRenameCaptionDraft(item.originalItemId, { itemId: event.target.value })}
+                                    value={item.itemId}
+                                  />
+                                </label>
+                                <label>
+                                  File stem
+                                  <input
+                                    onChange={(event) => updateRenameCaptionDraft(item.originalItemId, { fileStem: event.target.value })}
+                                    value={item.fileStem}
+                                  />
+                                </label>
+                                <label>
+                                  Display name
+                                  <input
+                                    onChange={(event) =>
+                                      updateRenameCaptionDraft(item.originalItemId, { displayName: event.target.value })
+                                    }
+                                    value={item.displayName}
+                                  />
+                                </label>
+                                <label className="training-caption-text">
+                                  Caption
+                                  <textarea
+                                    onChange={(event) =>
+                                      updateRenameCaptionDraft(item.originalItemId, { captionText: event.target.value })
+                                    }
+                                    rows={3}
+                                    value={item.captionText}
+                                  />
+                                </label>
+                                <label>
+                                  Trigger words
+                                  <input
+                                    onChange={(event) =>
+                                      updateRenameCaptionDraft(item.originalItemId, { triggerWords: event.target.value })
+                                    }
+                                    value={item.triggerWords}
+                                  />
+                                </label>
+                                <label>
+                                  Source
+                                  <select
+                                    onChange={(event) =>
+                                      updateRenameCaptionDraft(item.originalItemId, { captionSource: event.target.value })
+                                    }
+                                    value={item.captionSource}
+                                  >
+                                    <option value="manual">Manual</option>
+                                    <option value="imported">Imported</option>
+                                    <option value="auto">Auto</option>
+                                  </select>
+                                </label>
+                              </div>
+                            </article>
+                          );
+                        })}
+                      </div>
                     </div>
-                    <div className="training-step-block">
-                      <strong>Caption sidecars</strong>
-                      <span>Caption metadata will stay attached to SceneWorks dataset items before sidecar export.</span>
-                    </div>
-                  </div>
+                  )}
                 </>
               ) : null}
 
