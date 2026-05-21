@@ -633,8 +633,12 @@ fn worker_capabilities_with_utility(
             WorkerCapability::ModelDownload,
             WorkerCapability::ModelImport,
             WorkerCapability::LoraImport,
-            WorkerCapability::PersonDetect,
-            WorkerCapability::PersonTrack,
+            // Procedural detection/tracking is a preview only. Real, model-backed
+            // PersonDetect/PersonTrack run on the Python GPU worker; advertising the
+            // preview capabilities here keeps the CPU placeholder claimable solely
+            // for explicit `preview: true` jobs (jobs_store::worker_supports_job).
+            WorkerCapability::PersonDetectPreview,
+            WorkerCapability::PersonTrackPreview,
         ]);
     }
     capabilities.sort();
@@ -4719,10 +4723,18 @@ mod tests {
         assert!(cpu_capabilities
             .iter()
             .any(|capability| capability.as_str() == "timeline_export"));
+        // The CPU utility worker advertises only the procedural *preview*
+        // capabilities; real detection/tracking route to the Python GPU worker.
         assert!(cpu_capabilities
             .iter()
-            .any(|capability| capability.as_str() == "person_detect"));
+            .any(|capability| capability.as_str() == "person_detect_preview"));
         assert!(cpu_capabilities
+            .iter()
+            .any(|capability| capability.as_str() == "person_track_preview"));
+        assert!(!cpu_capabilities
+            .iter()
+            .any(|capability| capability.as_str() == "person_detect"));
+        assert!(!cpu_capabilities
             .iter()
             .any(|capability| capability.as_str() == "person_track"));
         assert!(!cpu_capabilities

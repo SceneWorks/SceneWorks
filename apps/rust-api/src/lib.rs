@@ -914,6 +914,10 @@ struct PersonDetectionJobRequest {
     source_asset_id: String,
     #[serde(default)]
     source_timestamp: Option<f64>,
+    /// Opt into the Rust utility worker's procedural preview instead of real,
+    /// model-backed detection on the Python GPU worker. Defaults to real.
+    #[serde(default)]
+    preview: bool,
     #[serde(default = "default_requested_gpu")]
     requested_gpu: String,
 }
@@ -926,6 +930,10 @@ struct PersonTrackJobRequest {
     detection: JsonObject,
     #[serde(default = "default_track_name")]
     track_name: String,
+    /// Opt into the Rust utility worker's procedural preview instead of real,
+    /// model-backed tracking on the Python GPU worker. Defaults to real.
+    #[serde(default)]
+    preview: bool,
     #[serde(default = "default_requested_gpu")]
     requested_gpu: String,
 }
@@ -2332,6 +2340,9 @@ async fn create_person_detection_job(
         "sourceTimestamp".to_owned(),
         payload.source_timestamp.map_or(Value::Null, Value::from),
     );
+    if payload.preview {
+        job_payload.insert("preview".to_owned(), Value::Bool(true));
+    }
     let job = create_generation_job(
         state,
         JobType::PersonDetect,
@@ -2367,6 +2378,9 @@ async fn create_person_track_job(
     );
     job_payload.insert("detection".to_owned(), Value::Object(payload.detection));
     job_payload.insert("trackName".to_owned(), Value::String(payload.track_name));
+    if payload.preview {
+        job_payload.insert("preview".to_owned(), Value::Bool(true));
+    }
     let job = create_generation_job(
         state,
         JobType::PersonTrack,
