@@ -16,6 +16,12 @@ import httpx
 from .gpu import cpu_worker_id, discover_gpu, discover_gpus, gpu_utilization, gpu_worker_id
 from .image_adapters import ProceduralImageAdapter, QwenImageAdapter, ZImageDiffusersAdapter, create_image_adapter
 from .settings import WorkerSettings
+from .training_adapters import (
+    SUPPORTED_TRAINING_PLAN_VERSION,
+    create_training_kernel,
+    dry_run_training_summary,
+    validate_training_plan,
+)
 from .video_adapters import create_video_adapter
 
 
@@ -27,8 +33,9 @@ VIDEO_JOB_TYPES = ("video_generate", "video_extend", "video_bridge", "person_rep
 # apps/web/src/screens/QueueScreen.jsx::gpuRequiredJobTypes.
 SUPPORTED_JOB_TYPES = IMAGE_JOB_TYPES + VIDEO_JOB_TYPES
 # Training is GPU-required like generation, but a GPU worker advertises it even
-# without an inference backend: the story 1416 dry-run only validates a Rust-
-# resolved plan (no torch needed). Real execution is gated per platform in 1417.
+# without an inference backend: the dry-run path only validates a Rust-resolved
+# plan (no torch needed). A real (non-dry-run) run loads the kernel and requires
+# the inference backend, which the kernel enforces and reports clearly if absent.
 TRAINING_JOB_TYPES = ("lora_train",)
 
 
@@ -549,20 +556,28 @@ def run_video_job(api: ApiClient, settings: WorkerSettings, job: dict) -> None:
             restart_worker_after_oom(settings, job_id)
 
 
-# Highest training plan version this worker understands. Plans are resolved in
-# Rust (crates/sceneworks-core/src/training.rs::TRAINING_PLAN_VERSION); the worker
-# rejects any version it cannot interpret rather than guessing.
-SUPPORTED_TRAINING_PLAN_VERSION = 1
+# The supported training plan version and shared plan validation/summary helpers
+# live in training_adapters; the kernels there consume the Rust-resolved plan.
 
 
-def run_lora_train_dry_run_job(api: ApiClient, settings: WorkerSettings, job: dict) -> None:
-    """Validate a Rust-resolved training plan and complete with a dry-run summary.
+def run_lora_train_job(api: ApiClient, settings: WorkerSettings, job: dict) -> None:
+    """Run a lora_train job: validate the plan, then either report a dry-run
+    summary or execute the real training kernel.
 
-    This is the story 1416 stub: it claims a lora_train job, checks the embedded
-    plan and that its dataset inputs exist on the worker, and reports what a real
-    run would produce — without loading a model or training. Story 1417 replaces
-    the body with the narrow Z-Image LoRA execution kernel.
+    Dry-run (the default) validates the Rust-resolved plan and its dataset inputs
+    and reports what a real run would produce — no model load, no backend needed
+    (so a GPU worker without torch can still validate). A real run loads the
+    target's narrow execution kernel and trains an actual LoRA, reporting staged
+    progress and honoring cancellation.
     """
+    payload = job.get("payload") or {}
+    if bool(payload.get("dryRun", True)):
+        _run_lora_train_dry_run(api, settings, job, payload)
+    else:
+        _run_lora_train_execution(api, settings, job, payload)
+
+
+def _run_lora_train_dry_run(api: ApiClient, settings: WorkerSettings, job: dict, payload: dict) -> None:
     job_id = job["id"]
 
     def progress(status: str, stage: str, value: float, message: str) -> None:
@@ -575,60 +590,10 @@ def run_lora_train_dry_run_job(api: ApiClient, settings: WorkerSettings, job: di
 
     try:
         progress("preparing", "preparing", 0.1, "Validating training plan.")
-        payload = job.get("payload") or {}
-        # Real training execution does not exist yet; never let a non-dry-run job
-        # report success without producing weights (the API also rejects this).
-        if not payload.get("dryRun", True):
-            raise ValueError(
-                "Real LoRA training execution is not available yet; this worker only validates dry-run plans."
-            )
         plan = payload.get("plan")
-        if not isinstance(plan, dict):
-            raise ValueError("Training job payload is missing a resolved plan.")
-        plan_version = plan.get("planVersion")
-        if plan_version != SUPPORTED_TRAINING_PLAN_VERSION:
-            raise ValueError(
-                f"Unsupported training plan version {plan_version!r}; this worker "
-                f"understands version {SUPPORTED_TRAINING_PLAN_VERSION}."
-            )
-
-        dataset = plan.get("dataset") or {}
-        items = dataset.get("items") or []
-        if not items:
-            raise ValueError("Training plan dataset has no items to train on.")
-
-        progress("running", "running", 0.5, f"Checking {len(items)} dataset item(s).")
-        missing = [
-            item.get("imagePath")
-            for item in items
-            if not (item.get("imagePath") and os.path.exists(item["imagePath"]))
-        ]
-        if missing:
-            preview = ", ".join(str(path) for path in missing[:3])
-            raise FileNotFoundError(
-                f"{len(missing)} dataset image(s) are missing on the worker, e.g. {preview}."
-            )
-
-        output = plan.get("output") or {}
-        target = plan.get("target") or {}
-        base_model_path = target.get("baseModelPath")
-        summary = {
-            "mode": "dry_run",
-            "validated": True,
-            "dryRun": bool(payload.get("dryRun", True)),
-            "datasetItemCount": len(items),
-            "datasetId": dataset.get("datasetId"),
-            "datasetVersion": dataset.get("datasetVersion"),
-            "targetId": target.get("targetId"),
-            "kernel": target.get("kernel"),
-            "loraId": output.get("loraId"),
-            "outputDir": output.get("outputDir"),
-            "fileName": output.get("fileName"),
-            "baseModelPath": base_model_path,
-            "baseModelInstalled": bool(base_model_path and os.path.exists(base_model_path)),
-            "planVersion": plan_version,
-            "completedAt": now(),
-        }
+        items = validate_training_plan(plan, require_images=True)
+        progress("running", "running", 0.5, f"Checked {len(items)} dataset item(s).")
+        summary = dry_run_training_summary(plan, dry_run=True)
         update_job(
             api,
             job_id,
@@ -655,6 +620,87 @@ def run_lora_train_dry_run_job(api: ApiClient, settings: WorkerSettings, job: di
         )
     finally:
         heartbeat(api, settings, "idle")
+
+
+def _run_lora_train_execution(api: ApiClient, settings: WorkerSettings, job: dict, payload: dict) -> None:
+    job_id = job["id"]
+    trainer_holder: dict[str, Any] = {"trainer": None}
+    needs_oom_restart = False
+
+    def trainer_loaded_models() -> list[str]:
+        trainer = trainer_holder["trainer"]
+        return trainer.loaded_models() if trainer is not None else []
+
+    def progress(status: str, stage: str, value: float, message: str) -> None:
+        heartbeat_with_loaded_models(api, settings, "busy", job_id, trainer_loaded_models)
+        update_job(
+            api,
+            job_id,
+            {"status": status, "stage": stage, "progress": value, "message": message},
+        )
+
+    try:
+        plan = payload.get("plan")
+        if not isinstance(plan, dict):
+            raise ValueError("Training job payload is missing a resolved plan.")
+        kernel_id = (plan.get("target") or {}).get("kernel")
+        trainer = create_training_kernel(kernel_id)
+        trainer_holder["trainer"] = trainer
+        result = run_blocking_job_step(
+            api,
+            settings,
+            job_id,
+            "busy",
+            lambda: trainer.train(
+                settings=settings,
+                plan=plan,
+                progress=progress,
+                cancel_requested=lambda: job_cancel_requested(api, job_id),
+            ),
+            loaded_models=trainer_loaded_models,
+        )
+        update_job(
+            api,
+            job_id,
+            {
+                "status": "completed",
+                "stage": "completed",
+                "progress": 1,
+                "message": f"Trained LoRA saved as {result.get('fileName')}.",
+                "result": result,
+            },
+        )
+    except InterruptedError as exc:
+        update_job(
+            api,
+            job_id,
+            {
+                "status": "canceled",
+                "stage": "canceled",
+                "progress": 1,
+                "message": str(exc),
+            },
+        )
+    except Exception as exc:
+        needs_oom_restart = is_cuda_oom(exc)
+        message, error = friendly_failure("LoRA training", exc)
+        update_job(
+            api,
+            job_id,
+            {
+                "status": "failed",
+                "stage": "failed",
+                "progress": 1,
+                "message": message,
+                "error": error,
+            },
+        )
+    finally:
+        heartbeat(api, settings, "idle")
+        # A CUDA OOM can leave the allocator/context unable to reclaim VRAM in
+        # place; restart the child so the supervisor gives it a fresh context.
+        if needs_oom_restart:
+            restart_worker_after_oom(settings, job_id)
 
 
 def run_worker_loop(settings: WorkerSettings) -> None:
@@ -705,7 +751,7 @@ def run_worker_loop(settings: WorkerSettings) -> None:
             elif job["type"] in VIDEO_JOB_TYPES:
                 run_video_job(api, settings, job)
             elif job["type"] in TRAINING_JOB_TYPES:
-                run_lora_train_dry_run_job(api, settings, job)
+                run_lora_train_job(api, settings, job)
             else:
                 update_job(
                     api,

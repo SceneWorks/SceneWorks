@@ -9,6 +9,7 @@
     "modality": "image",
     "outputKind": "lora",
     "baseModel": "z_image_turbo",
+    "baseModelRepo": "Tongyi-MAI/Z-Image-Turbo",
     "baseModelPath": "/sceneworks/data/cache/huggingface/Tongyi-MAI/Z-Image-Turbo"
   },
   "dataset": {

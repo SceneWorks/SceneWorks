@@ -241,7 +241,7 @@ function outputKindLabel(target) {
   return kind.replaceAll("_", " ");
 }
 
-function trainingConfigSnapshot({ activeDataset, configDraft, selectedTarget }) {
+function trainingConfigSnapshot({ activeDataset, configDraft, selectedTarget, dryRun = true }) {
   const defaults = selectedTarget?.defaults ?? {};
   const advanced = compactObject({
     ...(defaults.advanced ?? {}),
@@ -260,7 +260,7 @@ function trainingConfigSnapshot({ activeDataset, configDraft, selectedTarget }) 
     datasetId: activeDataset.id,
     datasetVersion: activeDataset.version,
     outputName: configDraft.outputName.trim(),
-    dryRun: true,
+    dryRun,
     outputScope: configDraft.outputScope,
     qualityPreset: configDraft.qualityPreset,
     requestedGpu: configDraft.requestedGpu,
@@ -346,6 +346,9 @@ export function TrainingStudio({
   const [configError, setConfigError] = useState("");
   const [preparingConfig, setPreparingConfig] = useState(false);
   const [submittingJob, setSubmittingJob] = useState(false);
+  // Dry run validates the Rust-resolved plan without training; a real run hands
+  // the plan to the worker's Z-Image LoRA kernel. Default to the safe dry run.
+  const [trainingRunMode, setTrainingRunMode] = useState("dry_run");
   const configBasisRef = useRef("");
   const tabRefs = useRef({});
 
@@ -658,7 +661,8 @@ export function TrainingStudio({
     setConfigError("");
     setConfigMessage("");
     try {
-      const snapshot = trainingConfigSnapshot({ activeDataset, configDraft, selectedTarget });
+      const dryRun = trainingRunMode === "dry_run";
+      const snapshot = trainingConfigSnapshot({ activeDataset, configDraft, selectedTarget, dryRun });
       const result = await prepareTrainingConfig(snapshot);
       setConfigSnapshot(result ?? snapshot);
       setConfigMessage("Config snapshot ready");
@@ -677,17 +681,19 @@ export function TrainingStudio({
     setConfigError("");
     setConfigMessage("");
     try {
-      const snapshot = trainingConfigSnapshot({ activeDataset, configDraft, selectedTarget });
+      const dryRun = trainingRunMode === "dry_run";
+      const snapshot = trainingConfigSnapshot({ activeDataset, configDraft, selectedTarget, dryRun });
       const job = await createTrainingJob({
         targetId: snapshot.targetId,
         datasetId: snapshot.datasetId,
         datasetVersion: snapshot.datasetVersion,
         outputName: snapshot.outputName,
-        dryRun: true,
+        dryRun,
         config: snapshot.config,
       });
       setConfigSnapshot(snapshot);
-      setConfigMessage(`Queued dry-run job ${job?.id ?? ""}`.trim() + ". Track it in the Queue.");
+      const label = dryRun ? "dry-run" : "training";
+      setConfigMessage(`Queued ${label} job ${job?.id ?? ""}`.trim() + ". Track it in the Queue.");
     } catch (err) {
       setConfigError(err.message);
     } finally {
@@ -1196,6 +1202,18 @@ export function TrainingStudio({
                       ) : null}
 
                       <div className="training-config-actions">
+                        <label className="training-run-mode">
+                          <span>Run mode</span>
+                          <select
+                            aria-label="Training run mode"
+                            disabled={submittingJob}
+                            onChange={(event) => setTrainingRunMode(event.target.value)}
+                            value={trainingRunMode}
+                          >
+                            <option value="dry_run">Validate (dry run)</option>
+                            <option value="real">Run training (beta)</option>
+                          </select>
+                        </label>
                         <button className="secondary-action" onClick={resetConfigDefaults} type="button">
                           Reset defaults
                         </button>
@@ -1208,15 +1226,19 @@ export function TrainingStudio({
                           onClick={submitTrainingJob}
                           type="button"
                         >
-                          {submittingJob ? "Queuing" : "Queue dry-run job"}
+                          {submittingJob
+                            ? "Queuing"
+                            : trainingRunMode === "dry_run"
+                              ? "Queue dry-run job"
+                              : "Start training"}
                         </button>
                       </div>
                       {configSnapshot ? <pre className="training-config-snapshot">{JSON.stringify(configSnapshot, null, 2)}</pre> : null}
                     </div>
                   )}
                   <p className="view-copy">
-                    Queuing a dry run validates the Rust-resolved training plan and dataset on a GPU worker without training; real
-                    training execution arrives in a later story.
+                    A dry run validates the Rust-resolved training plan and dataset on a GPU worker without training. Run training
+                    (beta) hands the same plan to the worker's Z-Image LoRA kernel to produce a real .safetensors adapter.
                   </p>
                 </>
               ) : null}
