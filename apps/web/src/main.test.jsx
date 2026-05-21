@@ -68,6 +68,45 @@ function buttonInside(scope, label) {
   return [...scope.querySelectorAll("button")].find((button) => button.textContent === label);
 }
 
+const zImageTrainingTarget = {
+  id: "z_image_turbo_lora",
+  name: "Z-Image-Turbo LoRA",
+  modality: "image",
+  outputKind: "lora",
+  family: "z-image",
+  baseModel: "z_image_turbo",
+  kernel: "z_image_lora",
+  defaults: {
+    rank: 16,
+    alpha: 16,
+    learningRate: 0.0001,
+    steps: 2000,
+    batchSize: 1,
+    gradientAccumulation: 1,
+    resolution: 1024,
+    saveEvery: 250,
+    seed: 42,
+    optimizer: "adamw8bit",
+    advanced: {
+      mixedPrecision: "bf16",
+      scheduler: "constant",
+      epochs: 1,
+      repeats: 10,
+      bucketStrategy: "aspect",
+      sampleEvery: 250,
+      qualityPreset: "balanced",
+      outputScope: "project",
+      requestedGpu: "auto",
+    },
+  },
+  limits: {
+    resolutions: [512, 768, 1024],
+    qualityPresets: ["speed", "balanced", "quality"],
+    outputScopes: ["project", "global"],
+  },
+  ui: { label: "Z-Image-Turbo LoRA" },
+};
+
 async function changeField(input, value) {
   await act(async () => {
     const setter = Object.getOwnPropertyDescriptor(input.constructor.prototype, "value")?.set;
@@ -514,6 +553,195 @@ describe("SceneWorks app shell", () => {
       ],
     });
     expect(container.textContent).toContain("Caption sidecars written (1)");
+  });
+
+  it("builds a training config snapshot from registry defaults", async () => {
+    const loadDataset = vi.fn(async () => ({
+      id: "dataset-a",
+      name: "Portrait Set",
+      version: 5,
+      items: [
+        {
+          id: "item_0001",
+          assetId: "asset-a",
+          path: "images/item_0001.png",
+          displayName: "item_0001.png",
+          caption: { text: "mira portrait", source: "manual", triggerWords: ["mira"] },
+        },
+      ],
+    }));
+    const prepareTrainingConfig = vi.fn(async (snapshot) => snapshot);
+
+    root = createRoot(container);
+    await act(async () => {
+      root.render(
+        <TrainingStudio
+          activeProject={{ id: "project-a", name: "Project A" }}
+          datasets={[{ id: "dataset-a", name: "Portrait Set", modality: "image", itemCount: 1 }]}
+          gpuOptions={["auto", "0"]}
+          loadDataset={loadDataset}
+          prepareTrainingConfig={prepareTrainingConfig}
+          trainingTargets={[zImageTrainingTarget]}
+        />,
+      );
+    });
+    await settle();
+
+    await act(async () => {
+      container.querySelector("#training-tab-configure").click();
+    });
+    await changeField(field(container, "Dataset"), "dataset-a");
+    await settle();
+    await changeField(field(container, "Trigger phrase"), "miraStyle");
+
+    expect(field(container, "Target").value).toBe("z_image_turbo_lora");
+    expect(field(container, "Base model").value).toBe("z_image_turbo");
+    expect(field(container, "Rank").value).toBe("16");
+    expect(field(container, "Precision").value).toBe("bf16");
+
+    await act(async () => {
+      [...container.querySelectorAll("button")].find((button) => button.textContent === "Prepare config").click();
+    });
+    await settle();
+
+    expect(prepareTrainingConfig).toHaveBeenCalledWith(
+      expect.objectContaining({
+        targetId: "z_image_turbo_lora",
+        datasetId: "dataset-a",
+        datasetVersion: 5,
+        outputName: "Portrait Set LoRA",
+        requestedGpu: "auto",
+        config: expect.objectContaining({
+          rank: 16,
+          alpha: 16,
+          learningRate: 0.0001,
+          optimizer: "adamw8bit",
+          triggerWord: "miraStyle",
+          advanced: expect.objectContaining({
+            mixedPrecision: "bf16",
+            qualityPreset: "balanced",
+            outputScope: "project",
+          }),
+        }),
+      }),
+    );
+    expect(container.textContent).toContain("Config snapshot ready");
+  });
+
+  it("keeps config edits when GPU options are recomputed", async () => {
+    const loadDataset = vi.fn(async () => ({
+      id: "dataset-a",
+      name: "Portrait Set",
+      version: 5,
+      items: [
+        {
+          id: "item_0001",
+          assetId: "asset-a",
+          path: "images/item_0001.png",
+          displayName: "item_0001.png",
+          caption: { text: "mira portrait", source: "manual", triggerWords: ["mira"] },
+        },
+      ],
+    }));
+
+    function render(gpuOptions) {
+      root.render(
+        <TrainingStudio
+          activeProject={{ id: "project-a", name: "Project A" }}
+          datasets={[{ id: "dataset-a", name: "Portrait Set", modality: "image", itemCount: 1 }]}
+          gpuOptions={gpuOptions}
+          loadDataset={loadDataset}
+          trainingTargets={[zImageTrainingTarget]}
+        />,
+      );
+    }
+
+    root = createRoot(container);
+    await act(async () => {
+      render(["auto", "0"]);
+    });
+    await settle();
+    await act(async () => {
+      container.querySelector("#training-tab-configure").click();
+    });
+    await changeField(field(container, "Dataset"), "dataset-a");
+    await settle();
+    await changeField(field(container, "Trigger phrase"), "miraStyle");
+    await changeField(field(container, "Rank"), "24");
+    await changeField(field(container, "Requested GPU"), "0");
+
+    await act(async () => {
+      render(["auto", "0"]);
+    });
+    await settle();
+
+    expect(field(container, "Trigger phrase").value).toBe("miraStyle");
+    expect(field(container, "Rank").value).toBe("24");
+    expect(field(container, "Requested GPU").value).toBe("0");
+
+    await act(async () => {
+      render(["auto"]);
+    });
+    await settle();
+
+    expect(field(container, "Trigger phrase").value).toBe("miraStyle");
+    expect(field(container, "Rank").value).toBe("24");
+    expect(field(container, "Requested GPU").value).toBe("auto");
+  });
+
+  it("blocks config preparation until required fields are valid", async () => {
+    const loadDataset = vi.fn(async () => ({
+      id: "dataset-a",
+      name: "Portrait Set",
+      version: 5,
+      items: [
+        {
+          id: "item_0001",
+          assetId: "asset-a",
+          path: "images/item_0001.png",
+          displayName: "item_0001.png",
+          caption: { text: "mira portrait", source: "manual", triggerWords: ["mira"] },
+        },
+      ],
+    }));
+    const prepareTrainingConfig = vi.fn();
+
+    root = createRoot(container);
+    await act(async () => {
+      root.render(
+        <TrainingStudio
+          activeProject={{ id: "project-a", name: "Project A" }}
+          datasets={[{ id: "dataset-a", name: "Portrait Set", modality: "image", itemCount: 1 }]}
+          loadDataset={loadDataset}
+          prepareTrainingConfig={prepareTrainingConfig}
+          trainingTargets={[zImageTrainingTarget]}
+        />,
+      );
+    });
+    await settle();
+    await act(async () => {
+      container.querySelector("#training-tab-configure").click();
+    });
+
+    expect(container.textContent).toContain("Select a saved dataset");
+    expect(container.textContent).toContain("Add a trigger phrase");
+    expect([...container.querySelectorAll("button")].find((button) => button.textContent === "Prepare config").disabled).toBe(true);
+
+    await changeField(field(container, "Dataset"), "dataset-a");
+    await settle();
+    await changeField(field(container, "Trigger phrase"), "miraStyle");
+    await changeField(field(container, "Checkpoint cadence"), "");
+
+    const prepareButton = [...container.querySelectorAll("button")].find((button) => button.textContent === "Prepare config");
+    expect(container.textContent).toContain("Checkpoint cadence must be greater than zero");
+    expect(prepareButton.disabled).toBe(true);
+
+    await act(async () => {
+      prepareButton.click();
+    });
+    await settle();
+
+    expect(prepareTrainingConfig).not.toHaveBeenCalled();
   });
 
   it("selects duplicate-titled assets through the thumbnail asset picker", async () => {
