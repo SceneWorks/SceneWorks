@@ -1198,11 +1198,44 @@ def _mps_available() -> bool:
         return False
 
 
+def _ensure_ffmpeg_on_path() -> None:
+    """mlx-video-with-audio muxes audio by invoking ``ffmpeg`` from PATH. The
+    desktop ships no system ffmpeg, so expose the bundled one (SCENEWORKS_FFMPEG
+    or imageio-ffmpeg) under the name ``ffmpeg`` via a symlink dir on PATH."""
+    import shutil
+    import tempfile
+
+    if shutil.which("ffmpeg"):
+        return
+    exe = os.environ.get("SCENEWORKS_FFMPEG", "").strip()
+    if not exe:
+        try:
+            import imageio_ffmpeg
+
+            exe = imageio_ffmpeg.get_ffmpeg_exe()
+        except Exception:
+            return
+    if not exe or not Path(exe).exists():
+        return
+    link_dir = Path(tempfile.gettempdir()) / "sceneworks-ffmpeg-shim"
+    link_dir.mkdir(parents=True, exist_ok=True)
+    link = link_dir / "ffmpeg"
+    try:
+        if not link.exists():
+            link.symlink_to(exe)
+    except OSError:
+        return
+    os.environ["PATH"] = f"{link_dir}{os.pathsep}{os.environ.get('PATH', '')}"
+
+
 class MlxVideoAdapter(VideoGenerationAdapter):
     id = "mlx_video"
 
     _supported_models = {"ltx_2_3", "wan_2_2", "wan_2_2_t2v_14b", "wan_2_2_i2v_14b"}
-    _supported_modes = {"text_to_video", "image_to_video", "first_last_frame", "extend_clip", "video_bridge"}
+    # The mlx-video-with-audio high-level API exposes only text-to-video and
+    # single-image image-to-video. first/last-frame, bridge, extend, and
+    # replace_person stay on the PyTorch path (no spatial mask / multi-cond).
+    _supported_modes = {"text_to_video", "image_to_video"}
 
     def __init__(self) -> None:
         self._pipeline: Any | None = None
@@ -1271,10 +1304,8 @@ class MlxVideoAdapter(VideoGenerationAdapter):
         target = model_target(request.model)
         if request.model == "ltx_2_3":
             return self._run_ltx_mlx(settings, job, request, progress, cancel_requested)
-        if request.model == "wan_2_2":
-            return self._run_wan5b_mlx(settings, job, request, progress, cancel_requested)
-        if request.model in {"wan_2_2_t2v_14b", "wan_2_2_i2v_14b"}:
-            return self._run_wan14b_mlx(settings, job, request, progress, cancel_requested)
+        if request.model in {"wan_2_2", "wan_2_2_t2v_14b", "wan_2_2_i2v_14b"}:
+            return self._run_wan_mlx(settings, job, request, progress, cancel_requested)
         raise RuntimeError(f"MLX adapter does not support {target['label']}.")
 
     def cancel(self, _job_id: str) -> None:
@@ -1303,65 +1334,40 @@ class MlxVideoAdapter(VideoGenerationAdapter):
         progress: ProgressCallback,
         cancel_requested: CancelCallback,
     ) -> dict[str, Any]:
-        import subprocess
-        from PIL import Image as PILImage
-
         project_path = find_project_path(settings.data_dir / "recent-projects.json", request.project_id)
         for folder in ("assets/videos", "generation-sets", "recipes"):
             (project_path / folder).mkdir(parents=True, exist_ok=True)
 
         target = model_target(request.model)
-        progress("loading_model", "loading_model", 0.1, "Loading LTX-2.3 MLX Q4 pipeline.")
-
+        progress("loading_model", "loading_model", 0.1, "Loading LTX-2.3 (MLX Q4).")
         try:
-            import mlx.core as mx
-            from mlx_video import MLXLTXPipeline
+            from mlx_video.generate_av import generate_video_with_audio
         except ImportError as e:
-            raise RuntimeError(f"MLX video generation requires mlx_video. {e}")
-
-        model_repo = "notapalindrome/ltx23-mlx-av-q4"
-        num_frames = max(1, int(round(request.duration * request.fps)))
-        num_frames = max(9, int(num_frames))
-
-        progress("loading_model", "loading_model", 0.2, "Initializing pipeline.")
-        try:
-            pipeline = MLXLTXPipeline.from_pretrained(model_repo)
-            self._loaded_models.add(request.model)
-        except Exception as e:
-            raise RuntimeError(f"Failed to load MLX LTX pipeline from {model_repo}: {e}")
-
-        first_image = self._first_condition_image(project_path, request)
-        last_image = self._last_condition_image(project_path, request)
-        self._validate_inputs(project_path, request, first_image, last_image)
-        if cancel_requested():
-            raise InterruptedError("Video generation canceled before inference.")
-
-        seed = resolve_seed(request.seed, request.prompt)
-        steps = target["steps"].get(request.quality, target["steps"]["balanced"])
-
-        progress("running", "generating", 0.3, f"Generating {num_frames} frames with LTX-2.3.")
-        try:
-            output = pipeline(
-                prompt=request.prompt,
-                negative_prompt=request.negative_prompt,
-                num_frames=num_frames,
-                height=request.height,
-                width=request.width,
-                num_inference_steps=steps,
-                guidance_scale=7.5,
-                seed=seed,
-                first_frame=first_image,
-                last_frame=last_image if request.mode == "first_last_frame" else None,
+            raise RuntimeError(
+                "MLX LTX generation requires mlx-video-with-audio "
+                "(apps/worker/requirements-mlx.txt). " + str(e)
             )
-        except Exception as e:
-            raise RuntimeError(f"MLX LTX-2.3 inference failed: {e}")
+
+        _ensure_ffmpeg_on_path()  # generate_av muxes audio via `ffmpeg` on PATH
+
+        num_frames = ltx_frame_count(max(1, int(round(request.duration * request.fps))))
+        seed = resolve_seed(request.seed, request.prompt)
+
+        # Optional single-image conditioning (image-to-video). generate_av takes a
+        # file path, so persist the resized source frame to a temp PNG.
+        first_image = self._first_condition_image(project_path, request)
+        self._validate_inputs(project_path, request, first_image, None)
+        tmp_image: Path | None = None
+        image_path: str | None = None
+        if first_image is not None:
+            tmp_image = project_path / "assets" / "videos" / f".ltx_src_{uuid4().hex}.png"
+            first_image.resize((request.width, request.height)).save(tmp_image)
+            image_path = str(tmp_image)
 
         if cancel_requested():
-            raise InterruptedError("Video generation canceled before saving.")
-
-        frames = output.frames if hasattr(output, "frames") else list(output)
-        if not frames:
-            raise RuntimeError("LTX-2.3 MLX pipeline returned no video frames.")
+            if tmp_image is not None:
+                tmp_image.unlink(missing_ok=True)
+            raise InterruptedError("Video generation canceled before inference.")
 
         generation_set_id = f"genset_{uuid4().hex}"
         asset_id = f"asset_{uuid4().hex}"
@@ -1372,27 +1378,36 @@ class MlxVideoAdapter(VideoGenerationAdapter):
         media_path = project_path / media_rel
         temp_path = media_path.with_suffix(".tmp.mp4")
 
-        progress("saving", "saving", 0.85, "Encoding video.")
+        progress("running", "generating", 0.3, f"Generating {num_frames} frames with LTX-2.3 (MLX).")
+        self._loaded_models.update({request.model, "notapalindrome/ltx23-mlx-av-q4"})
         try:
-            import torchvision
-            torchvision.io.write_video(str(temp_path), frames, fps=request.fps)
-        except Exception:
-            try:
-                import cv2
-                import numpy as np
-                fourcc = cv2.VideoWriter_fourcc(*"mp4v")
-                out = cv2.VideoWriter(str(temp_path), fourcc, request.fps, (request.width, request.height))
-                for frame in frames:
-                    if isinstance(frame, PILImage):
-                        frame = np.array(frame)
-                    if frame.max() <= 1.0:
-                        frame = (frame * 255).astype(np.uint8)
-                    frame_bgr = frame[..., ::-1]
-                    out.write(frame_bgr)
-                out.release()
-            except Exception as e:
-                raise RuntimeError(f"Failed to encode video: {e}")
+            generate_video_with_audio(
+                model_repo="notapalindrome/ltx23-mlx-av-q4",
+                text_encoder_repo="mlx-community/gemma-3-12b-it-bf16",
+                prompt=request.prompt,
+                negative_prompt=request.negative_prompt or None,
+                height=request.height,
+                width=request.width,
+                num_frames=num_frames,
+                seed=seed,
+                fps=request.fps,
+                output_path=str(temp_path),
+                cfg_scale=safe_float(request.advanced.get("guidanceScale"), 3.0, 0.0, 30.0),
+                image=image_path,
+                image_strength=safe_float(request.advanced.get("imageConditioningStrength"), 1.0, 0.0, 1.0),
+                no_audio=False,
+            )
+        except Exception as e:
+            raise RuntimeError(f"MLX LTX-2.3 generation failed: {e}")
+        finally:
+            if tmp_image is not None:
+                tmp_image.unlink(missing_ok=True)
 
+        if not temp_path.exists():
+            raise RuntimeError("LTX-2.3 MLX generation produced no output file.")
+        if cancel_requested():
+            temp_path.unlink(missing_ok=True)
+            raise InterruptedError("Video generation canceled before saving.")
         temp_path.replace(media_path)
 
         generation_set = {
@@ -1475,7 +1490,45 @@ class MlxVideoAdapter(VideoGenerationAdapter):
         if request.mode == "first_last_frame" and not first_image:
             raise RuntimeError("First-last-frame mode requires a source image asset.")
 
-    def _run_wan5b_mlx(
+    def _resolve_wan_mlx(self, model: str) -> dict[str, Any]:
+        """Resolve the MLX Wan model dir, distill LoRA, and sampler params.
+
+        - wan_2_2_t2v_14b: turnkey — pre-converted MLX repo + the lightx2v
+          4-step Lightning LoRA, downloaded on demand.
+        - wan_2_2 (TI2V-5B) / wan_2_2_i2v_14b: no published MLX repo, so resolve
+          a locally-converted dir (sc-1504/sc-1506) and fail clearly if absent.
+        """
+        from huggingface_hub import hf_hub_download, snapshot_download
+
+        if model == "wan_2_2_t2v_14b":
+            model_dir = snapshot_download("AITRADER/Wan2.2-T2V-A14B-mlx-bf16")
+            base = "Wan2.2-T2V-A14B-4steps-lora-rank64-Seko-V1.1"
+            hi = hf_hub_download("lightx2v/Wan2.2-Lightning", f"{base}/high_noise_model.safetensors")
+            lo = hf_hub_download("lightx2v/Wan2.2-Lightning", f"{base}/low_noise_model.safetensors")
+            # Lightning distill: 4 steps, CFG baked in (guide_scale=1.0).
+            return {"model_dir": model_dir, "loras_high": [(hi, 1.0)], "loras_low": [(lo, 1.0)], "steps": 4, "guide_scale": 1.0}
+
+        # Conversion-dependent tiers: resolve a locally-converted MLX dir.
+        env = {"wan_2_2": "SCENEWORKS_MLX_WAN5B_DIR", "wan_2_2_i2v_14b": "SCENEWORKS_MLX_WAN14B_I2V_DIR"}.get(model)
+        candidates: list[Path] = []
+        override = os.environ.get(env, "").strip() if env else ""
+        if override:
+            candidates.append(Path(override))
+        if self._settings is not None:
+            candidates.append(Path(self._settings.data_dir) / "models" / "mlx" / model)
+        for path in candidates:
+            if (path / "config.json").exists():
+                # 5B runs full steps (config default); I2V-14B uses its distill LoRA.
+                return {"model_dir": str(path), "loras_high": None, "loras_low": None, "steps": None, "guide_scale": None}
+        target_dir = candidates[-1] if candidates else Path("<data>/models/mlx") / model
+        raise RuntimeError(
+            f"{model_target(model)['label']} has no pre-converted MLX weights. Convert the native "
+            f"checkpoint with `python -m mlx_video.convert_wan` into {target_dir}"
+            + (f" (or set ${env})" if env else "")
+            + ". Tracked by sc-1504 / sc-1506."
+        )
+
+    def _run_wan_mlx(
         self,
         settings: WorkerSettings,
         job: dict[str, Any],
@@ -1483,75 +1536,41 @@ class MlxVideoAdapter(VideoGenerationAdapter):
         progress: ProgressCallback,
         cancel_requested: CancelCallback,
     ) -> dict[str, Any]:
-        from PIL import Image as PILImage
-
         project_path = find_project_path(settings.data_dir / "recent-projects.json", request.project_id)
         for folder in ("assets/videos", "generation-sets", "recipes"):
             (project_path / folder).mkdir(parents=True, exist_ok=True)
 
         target = model_target(request.model)
-
-        if request.mode == "replace_person":
-            raise RuntimeError(
-                "Wan-5B replace_person mode is not supported on MLX. Use PyTorch/CUDA backend. "
-                "This limitation will be addressed in a future release."
-            )
-
-        progress("loading_model", "loading_model", 0.1, "Loading Wan-5B MLX pipeline.")
-
+        progress("loading_model", "loading_model", 0.1, f"Loading {target['label']} (MLX).")
         try:
-            import mlx.core as mx
-            from mlx_video import MLXWan5BPipeline
+            from mlx_video.generate_wan import generate_video as wan_generate_video
         except ImportError as e:
-            raise RuntimeError(f"MLX video generation requires mlx_video with Wan-5B support. {e}")
-
-        mlx_model_repo = "michaeltrefry/wan22-5b-mlx"
-        num_frames = max(1, int(round(request.duration * request.fps)))
-
-        progress("loading_model", "loading_model", 0.2, "Initializing Wan-5B pipeline.")
-        try:
-            pipeline = MLXWan5BPipeline.from_pretrained(mlx_model_repo)
-            self._loaded_models.add(request.model)
-        except Exception as e:
             raise RuntimeError(
-                f"Failed to load Wan-5B MLX pipeline from {mlx_model_repo}. "
-                "Pre-converted MLX weights not found. Use Model Manager to convert PyTorch → MLX. "
-                f"Details: {e}"
+                "MLX Wan generation requires mlx-video-with-audio "
+                "(apps/worker/requirements-mlx.txt). " + str(e)
             )
+
+        _ensure_ffmpeg_on_path()
+        spec = self._resolve_wan_mlx(request.model)
+
+        # Wan latents require frame counts of 4n+1.
+        raw_frames = max(1, int(round(request.duration * request.fps)))
+        num_frames = max(5, raw_frames - ((raw_frames - 1) % 4))
+        seed = resolve_seed(request.seed, request.prompt)
 
         first_image = self._first_condition_image(project_path, request)
         self._validate_inputs(project_path, request, first_image, None)
+        tmp_image: Path | None = None
+        image_path: str | None = None
+        if first_image is not None:
+            tmp_image = project_path / "assets" / "videos" / f".wan_src_{uuid4().hex}.png"
+            first_image.resize((request.width, request.height)).save(tmp_image)
+            image_path = str(tmp_image)
+
         if cancel_requested():
+            if tmp_image is not None:
+                tmp_image.unlink(missing_ok=True)
             raise InterruptedError("Video generation canceled before inference.")
-
-        seed = resolve_seed(request.seed, request.prompt)
-        steps = target["steps"].get(request.quality, target["steps"]["balanced"])
-
-        progress("running", "generating", 0.3, f"Generating {num_frames} frames with Wan-5B.")
-        try:
-            kwargs = {
-                "prompt": request.prompt,
-                "negative_prompt": request.negative_prompt,
-                "num_frames": num_frames,
-                "height": request.height,
-                "width": request.width,
-                "num_inference_steps": steps,
-                "guidance_scale": 7.5,
-                "seed": seed,
-            }
-            if request.mode == "image_to_video" and first_image:
-                kwargs["image"] = first_image
-
-            output = pipeline(**kwargs)
-        except Exception as e:
-            raise RuntimeError(f"Wan-5B MLX inference failed: {e}")
-
-        if cancel_requested():
-            raise InterruptedError("Video generation canceled before saving.")
-
-        frames = output.frames if hasattr(output, "frames") else list(output)
-        if not frames:
-            raise RuntimeError("Wan-5B MLX pipeline returned no video frames.")
 
         generation_set_id = f"genset_{uuid4().hex}"
         asset_id = f"asset_{uuid4().hex}"
@@ -1562,29 +1581,41 @@ class MlxVideoAdapter(VideoGenerationAdapter):
         media_path = project_path / media_rel
         temp_path = media_path.with_suffix(".tmp.mp4")
 
-        progress("saving", "saving", 0.85, "Encoding video.")
+        progress("running", "generating", 0.3, f"Generating {num_frames} frames with {target['label']} (MLX).")
+        self._loaded_models.update({request.model, str(spec["model_dir"])})
+        kwargs: dict[str, Any] = {
+            "model_dir": str(spec["model_dir"]),
+            "prompt": request.prompt,
+            "negative_prompt": request.negative_prompt or None,
+            "image": image_path,
+            "width": request.width,
+            "height": request.height,
+            "num_frames": num_frames,
+            "seed": seed,
+            "output_path": str(temp_path),
+            "loras_high": spec["loras_high"],
+            "loras_low": spec["loras_low"],
+        }
+        if spec["steps"] is not None:
+            kwargs["steps"] = spec["steps"]
+        if spec["guide_scale"] is not None:
+            kwargs["guide_scale"] = spec["guide_scale"]
         try:
-            import torchvision
-            torchvision.io.write_video(str(temp_path), frames, fps=request.fps)
-        except Exception:
-            try:
-                import cv2
-                import numpy as np
-                fourcc = cv2.VideoWriter_fourcc(*"mp4v")
-                out = cv2.VideoWriter(str(temp_path), fourcc, request.fps, (request.width, request.height))
-                for frame in frames:
-                    if isinstance(frame, PILImage):
-                        frame = np.array(frame)
-                    if frame.max() <= 1.0:
-                        frame = (frame * 255).astype(np.uint8)
-                    frame_bgr = frame[..., ::-1]
-                    out.write(frame_bgr)
-                out.release()
-            except Exception as e:
-                raise RuntimeError(f"Failed to encode video: {e}")
+            wan_generate_video(**kwargs)
+        except Exception as e:
+            raise RuntimeError(f"{target['label']} MLX generation failed: {e}")
+        finally:
+            if tmp_image is not None:
+                tmp_image.unlink(missing_ok=True)
 
+        if not temp_path.exists():
+            raise RuntimeError(f"{target['label']} MLX generation produced no output file.")
+        if cancel_requested():
+            temp_path.unlink(missing_ok=True)
+            raise InterruptedError("Video generation canceled before saving.")
         temp_path.replace(media_path)
 
+        progress("saving", "saving", 0.9, "Saving video asset and recipe.")
         generation_set = {
             "schemaVersion": 1,
             "id": generation_set_id,
@@ -1611,13 +1642,10 @@ class MlxVideoAdapter(VideoGenerationAdapter):
             mime_type="video/mp4",
             raw_settings=raw_settings,
         )
-
         write_json(project_path / "generation-sets" / f"{generation_set_id}.json", generation_set)
         write_json(media_path.with_suffix(".sceneworks.json"), asset)
         write_json(project_path / "recipes" / f"{asset_id}.recipe.json", asset["recipe"])
         index_asset(project_path, asset)
-
-        progress("saving", "saved", 0.95, "Asset saved.")
         return {
             "generationSetId": generation_set_id,
             "assetIds": [asset_id],
@@ -1626,194 +1654,6 @@ class MlxVideoAdapter(VideoGenerationAdapter):
             "model": request.model,
             "requirements": self.estimate_requirements(request),
         }
-
-    def _run_wan14b_mlx(
-        self,
-        settings: WorkerSettings,
-        job: dict[str, Any],
-        request: VideoRequest,
-        progress: ProgressCallback,
-        cancel_requested: CancelCallback,
-    ) -> dict[str, Any]:
-        from PIL import Image as PILImage
-
-        project_path = find_project_path(settings.data_dir / "recent-projects.json", request.project_id)
-        for folder in ("assets/videos", "generation-sets", "recipes"):
-            (project_path / folder).mkdir(parents=True, exist_ok=True)
-
-        target = model_target(request.model)
-
-        if request.mode == "replace_person":
-            raise RuntimeError(
-                "Wan-14B replace_person mode is not supported on MLX. Use PyTorch/CUDA backend. "
-                "This limitation will be addressed in a future release."
-            )
-
-        is_t2v = request.model == "wan_2_2_t2v_14b"
-        model_key = "T2V" if is_t2v else "I2V"
-        progress("loading_model", "loading_model", 0.1, f"Loading Wan-14B {model_key} MLX pipeline.")
-
-        try:
-            import mlx.core as mx
-            from mlx_video import MLXWan14BPipeline
-        except ImportError as e:
-            raise RuntimeError(f"MLX video generation requires mlx_video with Wan-14B support. {e}")
-
-        mlx_model_repo = f"michaeltrefry/wan22-14b-{model_key.lower()}-mlx"
-        num_frames = max(1, int(round(request.duration * request.fps)))
-
-        progress("loading_model", "loading_model", 0.2, "Initializing Wan-14B pipeline with Lightning LoRA.")
-        try:
-            pipeline = MLXWan14BPipeline.from_pretrained(mlx_model_repo)
-            self._loaded_models.add(request.model)
-        except Exception as e:
-            raise RuntimeError(
-                f"Failed to load Wan-14B {model_key} MLX pipeline from {mlx_model_repo}. "
-                "Pre-converted MLX weights not found. Use Model Manager to convert PyTorch → MLX. "
-                f"Details: {e}"
-            )
-
-        first_image = None
-        if request.mode in {"image_to_video", "first_last_frame"}:
-            first_image = self._first_condition_image(project_path, request)
-            self._validate_inputs(project_path, request, first_image, None)
-
-        if cancel_requested():
-            raise InterruptedError("Video generation canceled before inference.")
-
-        seed = resolve_seed(request.seed, request.prompt)
-        lora_config = {}
-        if request.loras:
-            progress("loading_model", "loading_model", 0.25, "Applying LoRA weights.")
-            for lora_spec in request.loras:
-                try:
-                    lora_config.update(self._load_wan14b_lora(lora_spec, pipeline))
-                except Exception as e:
-                    raise RuntimeError(f"Failed to apply LoRA {lora_spec.get('id')}: {e}")
-
-        steps = target["steps"].get(request.quality, target["steps"]["balanced"])
-        if request.loras:
-            steps = min(steps, 4)
-
-        progress("running", "generating", 0.3, f"Generating {num_frames} frames with Wan-14B + Lightning LoRA.")
-        try:
-            kwargs = {
-                "prompt": request.prompt,
-                "negative_prompt": request.negative_prompt,
-                "num_frames": num_frames,
-                "height": request.height,
-                "width": request.width,
-                "num_inference_steps": steps,
-                "guidance_scale": 4.0,
-                "seed": seed,
-            }
-            if request.mode == "image_to_video" and first_image:
-                kwargs["image"] = first_image
-            kwargs.update(lora_config)
-
-            output = pipeline(**kwargs)
-        except Exception as e:
-            raise RuntimeError(f"Wan-14B MLX inference failed: {e}")
-
-        if cancel_requested():
-            raise InterruptedError("Video generation canceled before saving.")
-
-        frames = output.frames if hasattr(output, "frames") else list(output)
-        if not frames:
-            raise RuntimeError("Wan-14B MLX pipeline returned no video frames.")
-
-        generation_set_id = f"genset_{uuid4().hex}"
-        asset_id = f"asset_{uuid4().hex}"
-        created_at = utc_now()
-        raw_settings = self.map_settings(request, target)
-        filename_base = f"{created_at[:10]}_{request.model}_{slugify(request.prompt, fallback='video', max_length=42)}"
-        media_rel = f"assets/videos/{filename_base}.mp4"
-        media_path = project_path / media_rel
-        temp_path = media_path.with_suffix(".tmp.mp4")
-
-        progress("saving", "saving", 0.85, "Encoding video.")
-        try:
-            import torchvision
-            torchvision.io.write_video(str(temp_path), frames, fps=request.fps)
-        except Exception:
-            try:
-                import cv2
-                import numpy as np
-                fourcc = cv2.VideoWriter_fourcc(*"mp4v")
-                out = cv2.VideoWriter(str(temp_path), fourcc, request.fps, (request.width, request.height))
-                for frame in frames:
-                    if isinstance(frame, PILImage):
-                        frame = np.array(frame)
-                    if frame.max() <= 1.0:
-                        frame = (frame * 255).astype(np.uint8)
-                    frame_bgr = frame[..., ::-1]
-                    out.write(frame_bgr)
-                out.release()
-            except Exception as e:
-                raise RuntimeError(f"Failed to encode video: {e}")
-
-        temp_path.replace(media_path)
-
-        generation_set = {
-            "schemaVersion": 1,
-            "id": generation_set_id,
-            "projectId": request.project_id,
-            "jobId": job["id"],
-            "mode": request.mode,
-            "model": request.model,
-            "prompt": request.prompt,
-            "negativePrompt": request.negative_prompt,
-            "count": 1,
-            "createdAt": created_at,
-        }
-        asset = build_video_asset_sidecar(
-            asset_id=asset_id,
-            project_id=request.project_id,
-            generation_set_id=generation_set_id,
-            request=request,
-            job_id=job["id"],
-            media_rel=media_rel,
-            created_at=created_at,
-            seed=seed,
-            target=target,
-            adapter_id=self.id,
-            mime_type="video/mp4",
-            raw_settings=raw_settings,
-        )
-
-        write_json(project_path / "generation-sets" / f"{generation_set_id}.json", generation_set)
-        write_json(media_path.with_suffix(".sceneworks.json"), asset)
-        write_json(project_path / "recipes" / f"{asset_id}.recipe.json", asset["recipe"])
-        index_asset(project_path, asset)
-
-        progress("saving", "saved", 0.95, "Asset saved.")
-        return {
-            "generationSetId": generation_set_id,
-            "assetIds": [asset_id],
-            "assets": [asset],
-            "adapter": self.id,
-            "model": request.model,
-            "requirements": self.estimate_requirements(request),
-        }
-
-    def _load_wan14b_lora(self, lora_spec: dict[str, Any], pipeline: Any) -> dict[str, Any]:
-        lora_asset_id = lora_spec.get("id")
-        lora_weight = safe_float(lora_spec.get("weight"), 1.0, 0.0, 2.0)
-
-        try:
-            project_path = Path(self._settings.data_dir) if self._settings else Path(".")
-            sidecar_path = find_asset_sidecar_path(project_path, lora_asset_id)
-            if not sidecar_path or not sidecar_path.exists():
-                raise FileNotFoundError(f"LoRA asset {lora_asset_id} not found")
-
-            sidecar = read_json(sidecar_path)
-            lora_path = (project_path / sidecar.get("mediaPath", "")).resolve()
-            if not lora_path.exists():
-                raise FileNotFoundError(f"LoRA file not found: {lora_path}")
-
-            return {"lora_path": str(lora_path), "lora_weight": lora_weight}
-        except Exception as e:
-            raise RuntimeError(f"Failed to locate LoRA {lora_asset_id}: {e}")
 
 
 class DiffusersVideoAdapter(VideoGenerationAdapter):
