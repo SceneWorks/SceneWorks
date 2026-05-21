@@ -40,8 +40,9 @@ use sceneworks_core::project_store::{
 };
 use sceneworks_core::training::TrainingDataset;
 use sceneworks_core::training_store::{
-    TrainingDatasetCreateInput, TrainingDatasetMutationResult, TrainingDatasetSummary,
-    TrainingDatasetUpdateInput,
+    TrainingCaptionSidecarsResult, TrainingDatasetBatchRenameInput,
+    TrainingDatasetCaptionSidecarsInput, TrainingDatasetCreateInput, TrainingDatasetMutationResult,
+    TrainingDatasetSummary, TrainingDatasetUpdateInput,
 };
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
@@ -515,6 +516,14 @@ pub fn create_app(settings: Settings) -> Result<Router, JobsStoreError> {
             get(get_training_dataset)
                 .patch(update_training_dataset)
                 .delete(delete_training_dataset),
+        )
+        .route(
+            "/api/v1/projects/:project_id/training/datasets/:dataset_id/batch-rename",
+            post(batch_rename_training_dataset_items),
+        )
+        .route(
+            "/api/v1/projects/:project_id/training/datasets/:dataset_id/caption-sidecars",
+            post(write_training_dataset_caption_sidecars),
         )
         .route(
             "/api/v1/projects/:project_id/files/*relative_path",
@@ -1301,6 +1310,32 @@ async fn update_training_dataset(
     Ok(Json(
         project_call(state, move |store| {
             store.update_training_dataset(&project_id, &dataset_id, payload)
+        })
+        .await?,
+    ))
+}
+
+async fn batch_rename_training_dataset_items(
+    State(state): State<AppState>,
+    Path((project_id, dataset_id)): Path<(String, String)>,
+    ApiJson(payload): ApiJson<TrainingDatasetBatchRenameInput>,
+) -> Result<Json<TrainingDataset>, ApiError> {
+    Ok(Json(
+        project_call(state, move |store| {
+            store.batch_rename_training_dataset_items(&project_id, &dataset_id, payload)
+        })
+        .await?,
+    ))
+}
+
+async fn write_training_dataset_caption_sidecars(
+    State(state): State<AppState>,
+    Path((project_id, dataset_id)): Path<(String, String)>,
+    ApiJson(payload): ApiJson<TrainingDatasetCaptionSidecarsInput>,
+) -> Result<Json<TrainingCaptionSidecarsResult>, ApiError> {
+    Ok(Json(
+        project_call(state, move |store| {
+            store.write_training_dataset_caption_sidecars(&project_id, &dataset_id, payload)
         })
         .await?,
     ))
@@ -7349,6 +7384,78 @@ mod tests {
         .await;
         assert_eq!(status, StatusCode::OK);
         assert_eq!(detail_after_failed_update["version"], 2);
+
+        let (status, sidecars) = request(
+            reloaded_app.clone(),
+            "POST",
+            &format!(
+                "/api/v1/projects/{project_id}/training/datasets/{dataset_id}/caption-sidecars"
+            ),
+            json!({
+                "items": [{
+                    "itemId": "item_0001",
+                    "caption": {
+                        "text": "miraStyle studio portrait",
+                        "triggerWords": ["miraStyle"]
+                    }
+                }]
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(sidecars["dataset"]["version"], 3);
+        assert_eq!(
+            sidecars["sidecars"][0]["captionPath"],
+            format!("training/datasets/{dataset_id}/images/item_0001.txt")
+        );
+        assert_eq!(
+            std::fs::read_to_string(
+                project_path
+                    .join("training")
+                    .join("datasets")
+                    .join(&dataset_id)
+                    .join("images")
+                    .join("item_0001.txt")
+            )
+            .expect("caption sidecar writes"),
+            "miraStyle studio portrait\n"
+        );
+
+        let (status, renamed) = request(
+            reloaded_app.clone(),
+            "POST",
+            &format!("/api/v1/projects/{project_id}/training/datasets/{dataset_id}/batch-rename"),
+            json!({
+                "items": [{
+                    "itemId": "item_0001",
+                    "newItemId": "item_0007",
+                    "fileStem": "mira_0007",
+                    "displayName": "mira_0007.png"
+                }]
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(renamed["version"], 4);
+        assert_eq!(renamed["items"][0]["id"], "item_0007");
+        assert_eq!(renamed["items"][0]["path"], "images/mira_0007.png");
+        assert_eq!(renamed["items"][0]["displayName"], "mira_0007.png");
+        let renamed_image_path = project_path
+            .join("training")
+            .join("datasets")
+            .join(&dataset_id)
+            .join("images")
+            .join("mira_0007.png");
+        assert_eq!(
+            std::fs::read(&renamed_image_path).expect("renamed dataset image remains"),
+            b"png-bytes"
+        );
+        assert!(!dataset_image_path.exists());
+        assert_eq!(
+            std::fs::read_to_string(renamed_image_path.with_extension("txt"))
+                .expect("caption sidecar follows rename"),
+            "miraStyle studio portrait\n"
+        );
 
         let (status, error) = request(
             reloaded_app.clone(),

@@ -40,6 +40,38 @@ pub struct TrainingDatasetUpdateInput {
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct TrainingDatasetBatchRenameInput {
+    pub items: Vec<TrainingDatasetRenameItemInput>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TrainingDatasetRenameItemInput {
+    pub item_id: String,
+    #[serde(default)]
+    pub new_item_id: Option<String>,
+    #[serde(default)]
+    pub file_stem: Option<String>,
+    #[serde(default)]
+    pub display_name: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TrainingDatasetCaptionSidecarsInput {
+    #[serde(default)]
+    pub items: Vec<TrainingDatasetCaptionSidecarItemInput>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TrainingDatasetCaptionSidecarItemInput {
+    pub item_id: String,
+    pub caption: CaptionInput,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct TrainingDatasetItemInput {
     #[serde(default)]
     pub id: Option<String>,
@@ -87,6 +119,21 @@ pub struct TrainingDatasetSummary {
 pub struct TrainingDatasetMutationResult {
     pub id: String,
     pub status: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TrainingCaptionSidecar {
+    pub item_id: String,
+    pub image_path: String,
+    pub caption_path: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TrainingCaptionSidecarsResult {
+    pub dataset: TrainingDataset,
+    pub sidecars: Vec<TrainingCaptionSidecar>,
 }
 
 #[derive(Debug)]
@@ -217,6 +264,58 @@ impl TrainingDatasetStore {
         Ok(dataset)
     }
 
+    pub fn batch_rename_dataset_items(
+        &self,
+        project_id: &str,
+        dataset_id: &str,
+        input: TrainingDatasetBatchRenameInput,
+    ) -> ProjectStoreResult<TrainingDataset> {
+        let mut dataset = self.read_dataset_by_id(dataset_id)?;
+        ensure_dataset_project(project_id, &dataset)?;
+        let plans = rename_plans(&self.project_path, &dataset, input.items)?;
+        if plans.is_empty() {
+            return Ok(dataset);
+        }
+        let applied_renames = apply_file_renames(&plans)?;
+        for plan in &plans {
+            if let Some(item) = dataset
+                .items
+                .iter_mut()
+                .find(|item| item.id == plan.original_item_id)
+            {
+                item.id = plan.next_item_id.clone();
+                item.path = plan.next_relative_path.clone();
+                item.display_name = plan.next_display_name.clone();
+            }
+        }
+        dataset.version = dataset.version.saturating_add(1);
+        dataset.updated_at = utc_now();
+        if let Err(error) = self.save_dataset(&dataset) {
+            rollback_file_renames(&applied_renames);
+            return Err(error);
+        }
+        Ok(dataset)
+    }
+
+    pub fn write_caption_sidecars(
+        &self,
+        project_id: &str,
+        dataset_id: &str,
+        input: TrainingDatasetCaptionSidecarsInput,
+    ) -> ProjectStoreResult<TrainingCaptionSidecarsResult> {
+        let mut dataset = self.read_dataset_by_id(dataset_id)?;
+        ensure_dataset_project(project_id, &dataset)?;
+        if !input.items.is_empty() {
+            let now = utc_now();
+            apply_caption_patches(&mut dataset, input.items, &now)?;
+            dataset.version = dataset.version.saturating_add(1);
+            dataset.updated_at = now;
+            self.save_dataset(&dataset)?;
+        }
+        let sidecars = write_dataset_caption_sidecars(&self.project_path, &dataset)?;
+        Ok(TrainingCaptionSidecarsResult { dataset, sidecars })
+    }
+
     pub fn delete_dataset(
         &self,
         project_id: &str,
@@ -255,6 +354,278 @@ impl TrainingDatasetStore {
         write_json(&manifest_path, dataset)?;
         index_dataset(&self.project_path, dataset, &manifest_path)
     }
+}
+
+#[derive(Debug, Clone)]
+struct RenamePlan {
+    original_item_id: String,
+    next_item_id: String,
+    next_relative_path: String,
+    next_display_name: String,
+    source_path: PathBuf,
+    destination_path: PathBuf,
+    source_caption_path: PathBuf,
+    destination_caption_path: PathBuf,
+}
+
+#[derive(Debug, Clone)]
+struct AppliedRename {
+    source: PathBuf,
+    destination: PathBuf,
+    temp: PathBuf,
+}
+
+fn rename_plans(
+    project_path: &Path,
+    dataset: &TrainingDataset,
+    inputs: Vec<TrainingDatasetRenameItemInput>,
+) -> ProjectStoreResult<Vec<RenamePlan>> {
+    if inputs.is_empty() {
+        return Err(ProjectStoreError::BadRequest(
+            "Batch rename requires at least one item".to_owned(),
+        ));
+    }
+    let dataset_root = dataset_root(project_path, &dataset.id);
+    let mut seen_inputs = Vec::new();
+    let mut plans = Vec::new();
+    for input in inputs {
+        if !is_safe_id(&input.item_id) {
+            return Err(ProjectStoreError::BadRequest(
+                "Invalid training dataset item ID".to_owned(),
+            ));
+        }
+        if seen_inputs.iter().any(|item_id| item_id == &input.item_id) {
+            return Err(ProjectStoreError::BadRequest(
+                "Batch rename item IDs must be unique".to_owned(),
+            ));
+        }
+        seen_inputs.push(input.item_id.clone());
+        let item = dataset
+            .items
+            .iter()
+            .find(|item| item.id == input.item_id)
+            .ok_or_else(|| {
+                ProjectStoreError::NotFound("Training dataset item not found".to_owned())
+            })?;
+        let next_item_id = match input.new_item_id.as_deref().map(str::trim) {
+            Some(value) if !value.is_empty() && is_safe_id(value) => value.to_owned(),
+            Some("") => item.id.clone(),
+            Some(_) => {
+                return Err(ProjectStoreError::BadRequest(
+                    "Invalid training dataset item ID".to_owned(),
+                ))
+            }
+            None => item.id.clone(),
+        };
+        let source_path = dataset_item_path(project_path, dataset, item)?;
+        if !source_path.exists() {
+            return Err(ProjectStoreError::NotFound(
+                "Training dataset item file not found".to_owned(),
+            ));
+        }
+        let extension = Path::new(&item.path)
+            .extension()
+            .and_then(|value| value.to_str())
+            .filter(|value| !value.is_empty())
+            .map(|value| format!(".{}", value.to_ascii_lowercase()))
+            .unwrap_or_else(|| ".bin".to_owned());
+        let current_stem = Path::new(&item.path)
+            .file_stem()
+            .and_then(|value| value.to_str())
+            .unwrap_or(item.id.as_str());
+        let next_stem = match input.file_stem.as_deref().map(str::trim) {
+            Some(value) if !value.is_empty() && is_safe_file_stem(value) => value.to_owned(),
+            Some("") => current_stem.to_owned(),
+            Some(_) => {
+                return Err(ProjectStoreError::BadRequest(
+                    "Invalid training dataset file stem".to_owned(),
+                ))
+            }
+            None => current_stem.to_owned(),
+        };
+        let next_relative_path = format!("images/{next_stem}{extension}");
+        let destination_path = dataset_root
+            .join("images")
+            .join(format!("{next_stem}{extension}"));
+        let next_display_name = display_name_for_rename(&input.display_name, &next_relative_path)?;
+        if next_item_id != item.id
+            || next_relative_path != item.path
+            || next_display_name != item.display_name
+        {
+            plans.push(RenamePlan {
+                original_item_id: item.id.clone(),
+                next_item_id,
+                next_relative_path,
+                next_display_name,
+                source_caption_path: source_path.with_extension("txt"),
+                destination_caption_path: destination_path.with_extension("txt"),
+                source_path,
+                destination_path,
+            });
+        }
+    }
+    validate_projected_dataset_items(dataset, &plans)?;
+    Ok(plans)
+}
+
+fn validate_projected_dataset_items(
+    dataset: &TrainingDataset,
+    plans: &[RenamePlan],
+) -> ProjectStoreResult<()> {
+    let mut projected_ids = Vec::new();
+    let mut projected_paths = Vec::new();
+    for item in &dataset.items {
+        let plan = plans.iter().find(|plan| plan.original_item_id == item.id);
+        let item_id = plan
+            .map(|plan| plan.next_item_id.as_str())
+            .unwrap_or(item.id.as_str());
+        let path = plan
+            .map(|plan| plan.next_relative_path.as_str())
+            .unwrap_or(item.path.as_str());
+        if projected_ids.iter().any(|existing| existing == &item_id) {
+            return Err(ProjectStoreError::BadRequest(
+                "Training dataset item IDs must be unique".to_owned(),
+            ));
+        }
+        if projected_paths.iter().any(|existing| existing == &path) {
+            return Err(ProjectStoreError::BadRequest(
+                "Training dataset item paths must be unique".to_owned(),
+            ));
+        }
+        projected_ids.push(item_id);
+        projected_paths.push(path);
+    }
+    let source_paths = plans
+        .iter()
+        .map(|plan| &plan.source_path)
+        .collect::<Vec<_>>();
+    for plan in plans {
+        if plan.destination_path.exists()
+            && plan.destination_path != plan.source_path
+            && !source_paths.contains(&&plan.destination_path)
+        {
+            return Err(ProjectStoreError::BadRequest(
+                "Training dataset item file already exists".to_owned(),
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn apply_file_renames(plans: &[RenamePlan]) -> ProjectStoreResult<Vec<AppliedRename>> {
+    let mut applied = Vec::new();
+    let token = random_hex(8)?;
+    let mut moves = Vec::new();
+    for (index, plan) in plans.iter().enumerate() {
+        if plan.source_path != plan.destination_path {
+            moves.push((
+                plan.source_path.clone(),
+                plan.destination_path.clone(),
+                plan.source_path
+                    .with_file_name(format!(".rename-{token}-{index}.tmp")),
+            ));
+        }
+        if plan.source_caption_path.exists()
+            && plan.source_caption_path != plan.destination_caption_path
+        {
+            moves.push((
+                plan.source_caption_path.clone(),
+                plan.destination_caption_path.clone(),
+                plan.source_caption_path
+                    .with_file_name(format!(".caption-rename-{token}-{index}.tmp")),
+            ));
+        }
+    }
+    for (source, destination, temp) in &moves {
+        if let Some(parent) = temp.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        match fs::rename(source, temp) {
+            Ok(()) => applied.push(AppliedRename {
+                source: source.clone(),
+                destination: destination.clone(),
+                temp: temp.clone(),
+            }),
+            Err(error) => {
+                rollback_file_renames(&applied);
+                return Err(ProjectStoreError::Io(error));
+            }
+        }
+    }
+    for rename in &applied {
+        if let Some(parent) = rename.destination.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        if let Err(error) = fs::rename(&rename.temp, &rename.destination) {
+            rollback_file_renames(&applied);
+            return Err(ProjectStoreError::Io(error));
+        }
+    }
+    Ok(applied)
+}
+
+fn rollback_file_renames(applied: &[AppliedRename]) {
+    for rename in applied.iter().rev() {
+        if rename.temp.exists() {
+            let _ = fs::rename(&rename.temp, &rename.source);
+        } else if rename.destination.exists() && !rename.source.exists() {
+            let _ = fs::rename(&rename.destination, &rename.source);
+        }
+    }
+}
+
+fn apply_caption_patches(
+    dataset: &mut TrainingDataset,
+    inputs: Vec<TrainingDatasetCaptionSidecarItemInput>,
+    now: &str,
+) -> ProjectStoreResult<()> {
+    let mut seen_inputs = Vec::new();
+    for input in inputs {
+        if !is_safe_id(&input.item_id) {
+            return Err(ProjectStoreError::BadRequest(
+                "Invalid training dataset item ID".to_owned(),
+            ));
+        }
+        if seen_inputs.iter().any(|item_id| item_id == &input.item_id) {
+            return Err(ProjectStoreError::BadRequest(
+                "Caption sidecar item IDs must be unique".to_owned(),
+            ));
+        }
+        seen_inputs.push(input.item_id.clone());
+        let item = dataset
+            .items
+            .iter_mut()
+            .find(|item| item.id == input.item_id)
+            .ok_or_else(|| {
+                ProjectStoreError::NotFound("Training dataset item not found".to_owned())
+            })?;
+        item.caption = Caption {
+            text: input.caption.text,
+            source: input.caption.source.unwrap_or(CaptionSource::Manual),
+            trigger_words: input.caption.trigger_words,
+            updated_at: Some(now.to_owned()),
+            extra: Default::default(),
+        };
+    }
+    Ok(())
+}
+
+fn write_dataset_caption_sidecars(
+    project_path: &Path,
+    dataset: &TrainingDataset,
+) -> ProjectStoreResult<Vec<TrainingCaptionSidecar>> {
+    let mut sidecars = Vec::new();
+    for item in &dataset.items {
+        let image_path = dataset_item_path(project_path, dataset, item)?;
+        let caption_path = image_path.with_extension("txt");
+        write_text(&caption_path, &format!("{}\n", item.caption.text))?;
+        sidecars.push(TrainingCaptionSidecar {
+            item_id: item.id.clone(),
+            image_path: item.path.clone(),
+            caption_path: relative_string(project_path, &caption_path)?,
+        });
+    }
+    Ok(sidecars)
 }
 
 fn materialize_items(
@@ -703,12 +1074,49 @@ fn write_json<T: Serialize>(path: &Path, payload: &T) -> ProjectStoreResult<()> 
     Ok(())
 }
 
+fn write_text(path: &Path, payload: &str) -> ProjectStoreResult<()> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let tmp_path = path.with_extension("txt.tmp");
+    fs::write(&tmp_path, payload)?;
+    fs::rename(tmp_path, path)?;
+    Ok(())
+}
+
 fn relative_string(root: &Path, path: &Path) -> ProjectStoreResult<String> {
     Ok(path
         .strip_prefix(root)
         .map_err(|_| ProjectStoreError::BadRequest("Path is outside project".to_owned()))?
         .to_string_lossy()
         .replace('\\', "/"))
+}
+
+fn dataset_item_path(
+    project_path: &Path,
+    dataset: &TrainingDataset,
+    item: &TrainingDatasetItem,
+) -> ProjectStoreResult<PathBuf> {
+    if !is_safe_relative_path(&item.path) {
+        return Err(ProjectStoreError::BadRequest(
+            "Invalid training dataset item path".to_owned(),
+        ));
+    }
+    let path = dataset_root(project_path, &dataset.id).join(&item.path);
+    let root = fs::canonicalize(project_path)?;
+    let canonical = fs::canonicalize(&path).map_err(|error| {
+        if error.kind() == std::io::ErrorKind::NotFound {
+            ProjectStoreError::NotFound("Training dataset item file not found".to_owned())
+        } else {
+            ProjectStoreError::Io(error)
+        }
+    })?;
+    if !canonical.starts_with(root) || !canonical.is_file() {
+        return Err(ProjectStoreError::BadRequest(
+            "Invalid training dataset item path".to_owned(),
+        ));
+    }
+    Ok(path)
 }
 
 fn is_safe_relative_path(relative_path: &str) -> bool {
@@ -724,6 +1132,28 @@ fn is_safe_id(value: &str) -> bool {
         && value
             .chars()
             .all(|character| character.is_ascii_alphanumeric() || matches!(character, '_' | '-'))
+}
+
+fn is_safe_file_stem(value: &str) -> bool {
+    let value = value.trim();
+    !value.is_empty()
+        && value.chars().count() <= 96
+        && value
+            .chars()
+            .all(|character| character.is_ascii_alphanumeric() || matches!(character, '_' | '-'))
+}
+
+fn display_name_for_rename(
+    input: &Option<String>,
+    relative_path: &str,
+) -> ProjectStoreResult<String> {
+    match input.as_deref().map(str::trim) {
+        Some(value) if value.chars().count() > 160 => Err(ProjectStoreError::BadRequest(
+            "Training dataset display name must be at most 160 characters".to_owned(),
+        )),
+        Some(value) if !value.is_empty() => Ok(value.to_owned()),
+        _ => Ok(input_display_name(Path::new(relative_path))),
+    }
 }
 
 fn input_display_name(path: &Path) -> String {
