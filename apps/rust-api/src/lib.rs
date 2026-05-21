@@ -1437,9 +1437,11 @@ async fn create_training_job(
     //
     // The produced LoRA's family must be one an installed model accepts, or the
     // output would never be selectable in Image Studio. When no model manifests
-    // are present the catalog is empty and this is a no-op.
+    // are present the set is empty and this is a no-op. Families come straight
+    // from the manifests (not `model_catalog`) so this guardrail — which runs on
+    // every submit, including the offline dry-run path — makes no network calls.
     let normalized_family = normalize_lora_family(&target.family);
-    let known_families = known_lora_families(&model_catalog(&state).await?);
+    let known_families = known_lora_families_from_manifests(&state).await?;
     if !known_families.is_empty()
         && !known_families
             .iter()
@@ -1723,26 +1725,42 @@ fn human_gib(bytes: u64) -> String {
     format!("{:.1} GiB", bytes as f64 / (1024.0 * 1024.0 * 1024.0))
 }
 
-/// The trusted `files` list for a trained LoRA: the `.safetensors` actually
-/// present under the recomputed output dir, expressed as forward-slash path
-/// components relative to that dir. Returns `None` when no adapter is found or
-/// the discovered path is not a plain in-tree file, so a crafted job payload can
-/// never inject a `..`-traversing `files` value that generation would later join
-/// to `installedPath` and resolve to a different safetensors.
-fn trained_adapter_files(output_dir: &FsPath) -> Option<Vec<String>> {
-    let adapter = first_safetensors_path(output_dir)?;
-    let relative = adapter.strip_prefix(output_dir).ok()?;
-    let mut parts = Vec::new();
-    for component in relative.components() {
-        match component {
-            std::path::Component::Normal(part) => parts.push(part.to_str()?.to_owned()),
-            _ => return None,
-        }
+/// The trusted `files` list for a trained LoRA: the adapter file names the plan
+/// declared (staged into `manifestEntry.files` at submit), each validated as a
+/// plain in-tree file and confirmed to exist under the recomputed output dir.
+/// Returns `None` when none qualify.
+///
+/// Trusting the declared name rather than the first `.safetensors` on disk
+/// matters: the trainer leaves step checkpoints (`<stem>-stepNNN.safetensors`)
+/// in the same directory as the final `<stem>.safetensors`, and an arbitrary
+/// pick could register an under-trained checkpoint. Requiring plain components
+/// also keeps a crafted `..`-traversing `files` value from pointing generation
+/// at a safetensors outside `installedPath`.
+fn trusted_adapter_files(declared: Option<&Value>, output_dir: &FsPath) -> Option<Vec<String>> {
+    let declared = declared?.as_array()?;
+    let files = declared
+        .iter()
+        .filter_map(Value::as_str)
+        .filter(|name| is_plain_relative_file(name) && output_dir.join(name).is_file())
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+    if files.is_empty() {
+        None
+    } else {
+        Some(files)
     }
-    if parts.is_empty() {
-        return None;
-    }
-    Some(vec![parts.join("/")])
+}
+
+/// Whether `name` is a single relative file path made only of normal components
+/// (no `..`, root, drive prefix, or `.`), so joining it to an output dir cannot
+/// escape that dir.
+fn is_plain_relative_file(name: &str) -> bool {
+    let path = FsPath::new(name);
+    !name.is_empty()
+        && path.file_name().is_some()
+        && path
+            .components()
+            .all(|component| matches!(component, std::path::Component::Normal(_)))
 }
 
 async fn get_project_file(
@@ -4090,13 +4108,14 @@ async fn register_trained_lora(
     let (output_dir, manifest_path) =
         resolve_training_output_location(state, &scope, job.project_id.as_deref(), &lora_id)
             .await?;
-    // Derive `files` from the adapter actually on disk under the recomputed
-    // output dir, never from the payload: a crafted entry could otherwise list a
-    // `..`-traversing file name that generation would later join to
-    // `installedPath` and load a different safetensors than the one registered.
-    let Some(files) = trained_adapter_files(&output_dir) else {
+    // Register the adapter file(s) the plan declared, validated as plain in-tree
+    // files that exist under the recomputed output dir. Using the declared final
+    // name (not the first `.safetensors` on disk) means a step checkpoint sharing
+    // the directory is never registered in place of the final adapter, while the
+    // validation still rejects any `..`-traversing name a crafted payload injects.
+    let Some(files) = trusted_adapter_files(manifest_entry.get("files"), &output_dir) else {
         return Err(ApiError::internal(format!(
-            "Trained adapter not found under {}; skipping LoRA registration",
+            "No declared trained adapter found under {}; skipping LoRA registration",
             output_dir.display()
         )));
     };
@@ -6409,6 +6428,20 @@ fn known_lora_families(models: &[Value]) -> Vec<String> {
     families
 }
 
+/// LoRA families accepted by installed models, read directly from the model
+/// manifests. Unlike `known_lora_families(&model_catalog(..))`, this does no
+/// Hugging Face size-estimation, so callers on hot/offline paths (the training
+/// submit guardrail) stay local.
+async fn known_lora_families_from_manifests(state: &AppState) -> Result<Vec<String>, ApiError> {
+    let manifest_dir = state.settings.config_dir.join("manifests");
+    let mut models =
+        load_manifest_entries(state, &manifest_dir.join("builtin.models.jsonc"), "models").await?;
+    models.extend(
+        load_manifest_entries(state, &manifest_dir.join("user.models.jsonc"), "models").await?,
+    );
+    Ok(known_lora_families(&models))
+}
+
 fn slugify_lora_id(value: &str) -> String {
     let mut output = String::new();
     let mut previous_separator = false;
@@ -8465,10 +8498,21 @@ mod tests {
         let (job_id, output_dir, adapter_path) =
             submit_real_training_job(app.clone(), &project_id, &settings.data_dir).await;
 
-        // The worker writes the adapter into the resolved output dir before it
-        // reports completion. Simulate that, then report the completed result.
+        // The worker writes the final adapter into the resolved output dir before
+        // it reports completion, alongside step checkpoints it does not clean up.
+        // Registration must pick the declared final adapter, not a checkpoint.
         std::fs::create_dir_all(&output_dir).expect("output dir creates");
         write_test_safetensors(&adapter_path);
+        let final_name = adapter_path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .expect("final adapter name")
+            .to_owned();
+        let stem = adapter_path
+            .file_stem()
+            .and_then(|stem| stem.to_str())
+            .expect("adapter stem");
+        write_test_safetensors(&output_dir.join(format!("{stem}-step000250.safetensors")));
 
         let (status, completed) = request(
             app.clone(),
@@ -8516,6 +8560,9 @@ mod tests {
         assert_eq!(entry["baseModel"], "z_image_turbo");
         assert_eq!(entry["triggerWords"], json!(["auroraStyle"]));
         assert_eq!(entry["installState"], "installed");
+        // The final adapter is registered, not the step checkpoint that shares
+        // the output directory.
+        assert_eq!(entry["files"], json!([final_name]));
         // installedPath resolves to the trained adapter's directory (the same
         // convention as imported LoRAs), and the adapter file lives under it.
         let lora_id = entry["id"].as_str().expect("lora id");
@@ -8658,7 +8705,7 @@ mod tests {
                         "scope": "project",
                         "family": "z-image",
                         "source": { "provider": "evil", "path": "../../../../escape/loras" },
-                        "files": ["../../../../escape/evil.safetensors"]
+                        "files": ["crafted.safetensors"]
                     }
                 }
             }),
@@ -8718,9 +8765,9 @@ mod tests {
         assert_eq!(entry["scope"], "project");
         assert_eq!(entry["source"]["provider"], "training");
         assert_eq!(entry["source"]["path"], format!("loras/{crafted_lora_id}"));
-        // `files` was derived from the adapter actually on disk, not the
-        // `..`-traversing value in the payload, so generation cannot be pointed
-        // at a safetensors outside the registered output dir.
+        // `files` was validated against the recomputed output dir (the declared
+        // name exists there), so the registered entry points only inside the
+        // canonical LoRA directory.
         assert_eq!(entry["files"], json!(["crafted.safetensors"]));
 
         // A traversal id is rejected outright: nothing registers and the failure
@@ -8756,6 +8803,52 @@ mod tests {
                 "stage": "completed",
                 "progress": 1,
                 "message": "Traversal completion."
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(completed["result"]["loraRegistered"], false);
+        assert!(completed["result"]["loraRegistrationError"].is_string());
+
+        // A `..`-traversing files entry is rejected even when a valid adapter
+        // exists under the canonical output dir: registration only accepts plain
+        // in-tree file names, so generation can never be pointed outside it.
+        let traversal_lora_id = "lora_filestrav01";
+        let traversal_dir = project_path.join("loras").join(traversal_lora_id);
+        std::fs::create_dir_all(&traversal_dir).expect("adapter dir creates");
+        write_test_safetensors(&traversal_dir.join("real.safetensors"));
+        let (_, files_job) = request(
+            app.clone(),
+            "POST",
+            "/api/v1/jobs",
+            json!({
+                "type": "lora_train",
+                "projectId": project_id,
+                "projectName": "Training Project",
+                "requestedGpu": "auto",
+                "payload": {
+                    "dryRun": false,
+                    "manifestEntry": {
+                        "id": traversal_lora_id,
+                        "name": "Files Traversal",
+                        "scope": "project",
+                        "source": { "provider": "evil", "path": "loras/x" },
+                        "files": ["../../../../escape/evil.safetensors"]
+                    }
+                }
+            }),
+        )
+        .await;
+        let files_job_id = files_job["id"].as_str().expect("job id").to_owned();
+        let (status, completed) = request(
+            app.clone(),
+            "POST",
+            &format!("/api/v1/jobs/{files_job_id}/progress"),
+            json!({
+                "status": "completed",
+                "stage": "completed",
+                "progress": 1,
+                "message": "Files traversal completion."
             }),
         )
         .await;
