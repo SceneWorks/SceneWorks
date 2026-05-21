@@ -68,14 +68,15 @@ pub struct Settings {
 
 impl Settings {
     pub fn from_env() -> Self {
+        let defaults = sceneworks_core::app_paths::AppPaths::platform_default();
         Self {
             api_url: env_string("SCENEWORKS_API_URL", DEFAULT_API_URL),
             access_token: std::env::var("SCENEWORKS_ACCESS_TOKEN")
                 .ok()
                 .map(|value| value.trim().to_owned())
                 .filter(|value| !value.is_empty()),
-            data_dir: env_path("SCENEWORKS_DATA_DIR", "data"),
-            config_dir: env_path("SCENEWORKS_CONFIG_DIR", "config"),
+            data_dir: env_path_or("SCENEWORKS_DATA_DIR", &defaults.data_dir),
+            config_dir: env_path_or("SCENEWORKS_CONFIG_DIR", &defaults.config_dir),
             worker_id: env_string("SCENEWORKS_WORKER_ID", "rust-utility-worker"),
             gpu_id: env_string("SCENEWORKS_GPU_ID", "cpu"),
             is_child_worker: std::env::var("SCENEWORKS_WORKER_CHILD")
@@ -4496,11 +4497,13 @@ fn env_string(key: &str, default: &str) -> String {
         .unwrap_or_else(|| default.to_owned())
 }
 
-fn env_path(key: &str, default: &str) -> PathBuf {
+fn env_path_or(key: &str, default: &std::path::Path) -> PathBuf {
     std::env::var(key)
         .ok()
+        .map(|value| value.trim().to_owned())
+        .filter(|value| !value.is_empty())
         .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from(default))
+        .unwrap_or_else(|| default.to_path_buf())
 }
 
 fn env_u64_any(keys: &[&str], default: u64) -> u64 {

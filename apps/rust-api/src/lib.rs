@@ -99,7 +99,8 @@ pub struct Settings {
 
 impl Settings {
     pub fn from_env() -> Self {
-        let data_dir = env_path("SCENEWORKS_DATA_DIR", "data");
+        let defaults = sceneworks_core::app_paths::AppPaths::platform_default();
+        let data_dir = env_path_or("SCENEWORKS_DATA_DIR", &defaults.data_dir);
         let jobs_db_path = std::env::var("SCENEWORKS_JOBS_DB_PATH")
             .ok()
             .filter(|value| !value.trim().is_empty())
@@ -113,7 +114,7 @@ impl Settings {
                 .and_then(|value| value.parse().ok())
                 .unwrap_or(8000),
             data_dir,
-            config_dir: env_path("SCENEWORKS_CONFIG_DIR", "config"),
+            config_dir: env_path_or("SCENEWORKS_CONFIG_DIR", &defaults.config_dir),
             access_token: std::env::var("SCENEWORKS_ACCESS_TOKEN")
                 .unwrap_or_default()
                 .trim()
@@ -432,6 +433,11 @@ async fn shutdown_signal() {
 }
 
 pub fn create_app(settings: Settings) -> Result<Router, JobsStoreError> {
+    let _ = std::fs::create_dir_all(&settings.data_dir);
+    let _ = std::fs::create_dir_all(&settings.config_dir);
+    if let Some(jobs_db_parent) = settings.jobs_db_path.parent() {
+        let _ = std::fs::create_dir_all(jobs_db_parent);
+    }
     let _ = sweep_stale_lora_uploads(&settings.data_dir);
     let jobs_store = Arc::new(JobsStore::new(&settings.jobs_db_path));
     jobs_store.initialize()?;
@@ -6492,8 +6498,13 @@ fn env_string(name: &str, default: &str) -> String {
         .unwrap_or_else(|| default.to_owned())
 }
 
-fn env_path(name: &str, default: &str) -> PathBuf {
-    PathBuf::from(env_string(name, default))
+fn env_path_or(name: &str, default: &FsPath) -> PathBuf {
+    std::env::var(name)
+        .ok()
+        .map(|value| value.trim().to_owned())
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+        .unwrap_or_else(|| default.to_path_buf())
 }
 
 #[derive(Debug)]
