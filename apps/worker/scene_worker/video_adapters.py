@@ -47,6 +47,18 @@ from .settings import WorkerSettings
 Image.MAX_IMAGE_PIXELS = 64_000_000
 warnings.simplefilter("error", Image.DecompressionBombWarning)
 
+
+def _ensure_pytorch_mps_fallback() -> None:
+    try:
+        import torch
+        if getattr(torch.backends, "mps", None) and torch.backends.mps.is_available():
+            os.environ.setdefault("PYTORCH_ENABLE_MPS_FALLBACK", "1")
+    except ImportError:
+        pass
+
+
+_ensure_pytorch_mps_fallback()
+
 ProgressCallback = Callable[[str, str, float, str], None]
 CancelCallback = Callable[[], bool]
 _DelegatingBuilderT = TypeVar("_DelegatingBuilderT")
