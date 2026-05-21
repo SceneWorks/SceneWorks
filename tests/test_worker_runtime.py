@@ -47,6 +47,7 @@ from scene_worker.runtime import (
     main,
     resolve_loaded_models,
     run_check,
+    run_lora_train_dry_run_job,
     run_video_job,
     worker_capabilities,
 )
@@ -133,7 +134,24 @@ def test_gpu_worker_without_cuda_torch_does_not_claim_generation_jobs(monkeypatc
     monkeypatch.setattr("scene_worker.runtime.torch_inference_backend_available", lambda: False)
     capabilities = worker_capabilities({"id": "gpu-0", "name": "GPU 0", "capabilities": ["placeholder", "gpu", "nvidia"]})
 
-    assert capabilities == ["gpu", "nvidia"]
+    # lora_train dry-run validation needs no inference backend, so it is
+    # advertised even without torch; generation job types are not.
+    assert capabilities == ["gpu", "lora_train", "nvidia"]
+    for job_type in ("image_generate", "image_edit", "video_generate"):
+        assert job_type not in capabilities
+
+
+def test_gpu_worker_advertises_lora_train_without_inference_backend(monkeypatch):
+    monkeypatch.setattr("scene_worker.runtime.torch_inference_backend_available", lambda: False)
+    capabilities = worker_capabilities({"id": "gpu-0", "name": "GPU 0", "capabilities": ["placeholder", "gpu"]})
+
+    assert "lora_train" in capabilities
+
+
+def test_cpu_worker_does_not_advertise_lora_train():
+    capabilities = worker_capabilities({"id": "cpu", "name": "CPU", "capabilities": ["placeholder", "cpu"]})
+
+    assert "lora_train" not in capabilities
 
 
 def test_python_worker_only_advertises_inference_job_capabilities(monkeypatch):
@@ -144,6 +162,7 @@ def test_python_worker_only_advertises_inference_job_capabilities(monkeypatch):
     assert job_capabilities == [
         "image_edit",
         "image_generate",
+        "lora_train",
         "person_replace",
         "video_bridge",
         "video_extend",
@@ -837,6 +856,116 @@ def test_worker_check_reports_inference_sidecar_capabilities(monkeypatch):
         "person_replace",
     ]
     assert events[0]["supportedJobTypes"] == events[0]["jobTypes"]
+
+
+class _DryRunApi:
+    """Records job progress posts; heartbeats are accepted and ignored."""
+
+    def __init__(self):
+        self.progress = []
+
+    def post(self, path, payload):
+        if path.endswith("/heartbeat"):
+            return {}
+        if path.endswith("/progress"):
+            self.progress.append(payload)
+            return {"status": payload["status"], "stage": payload["stage"]}
+        raise AssertionError(path)
+
+
+def _lora_train_job(plan):
+    return {
+        "id": "job-train-1",
+        "type": "lora_train",
+        "payload": {"dryRun": True, "plan": plan},
+    }
+
+
+def test_lora_train_dry_run_completes_with_plan_summary(monkeypatch, tmp_path):
+    monkeypatch.setattr("scene_worker.runtime.emit", lambda payload: None)
+    image = tmp_path / "images" / "001.png"
+    image.parent.mkdir(parents=True)
+    image.write_bytes(b"png")
+    api = _DryRunApi()
+    plan = {
+        "planVersion": 1,
+        "dataset": {
+            "datasetId": "ds_1",
+            "datasetVersion": 2,
+            "items": [{"imagePath": str(image), "caption": "auroraStyle portrait"}],
+        },
+        "target": {
+            "targetId": "z_image_turbo_lora",
+            "kernel": "z_image_lora",
+            "baseModelPath": str(tmp_path / "uninstalled-model"),
+        },
+        "output": {
+            "loraId": "lora_1",
+            "outputDir": str(tmp_path / "loras" / "lora_1"),
+            "fileName": "aurora.safetensors",
+        },
+    }
+
+    run_lora_train_dry_run_job(api, SimpleNamespace(worker_id="worker-1", gpu_id="cpu"), _lora_train_job(plan))
+
+    terminal = api.progress[-1]
+    assert terminal["status"] == "completed"
+    assert terminal["stage"] == "completed"
+    result = terminal["result"]
+    assert result["mode"] == "dry_run"
+    assert result["validated"] is True
+    assert result["datasetItemCount"] == 1
+    assert result["loraId"] == "lora_1"
+    assert result["fileName"] == "aurora.safetensors"
+    # The base model is not installed yet; the dry run records that without failing.
+    assert result["baseModelInstalled"] is False
+
+
+def test_lora_train_dry_run_fails_cleanly_on_missing_dataset_image(monkeypatch, tmp_path):
+    monkeypatch.setattr("scene_worker.runtime.emit", lambda payload: None)
+    api = _DryRunApi()
+    plan = {
+        "planVersion": 1,
+        "dataset": {"items": [{"imagePath": str(tmp_path / "missing.png"), "caption": "x"}]},
+        "target": {},
+        "output": {},
+    }
+
+    run_lora_train_dry_run_job(api, SimpleNamespace(worker_id="worker-1", gpu_id="cpu"), _lora_train_job(plan))
+
+    terminal = api.progress[-1]
+    assert terminal["status"] == "failed"
+    assert "missing" in terminal["error"].lower()
+
+
+def test_lora_train_dry_run_fails_on_unsupported_plan_version(monkeypatch):
+    monkeypatch.setattr("scene_worker.runtime.emit", lambda payload: None)
+    api = _DryRunApi()
+    plan = {"planVersion": 999, "dataset": {"items": []}, "target": {}, "output": {}}
+
+    run_lora_train_dry_run_job(api, SimpleNamespace(worker_id="worker-1", gpu_id="cpu"), _lora_train_job(plan))
+
+    terminal = api.progress[-1]
+    assert terminal["status"] == "failed"
+    assert "version" in terminal["error"].lower()
+
+
+def test_lora_train_refuses_non_dry_run_job(monkeypatch):
+    monkeypatch.setattr("scene_worker.runtime.emit", lambda payload: None)
+    api = _DryRunApi()
+    # Defense-in-depth: even if a non-dry-run job reaches the worker, it must not
+    # report success without producing weights (real execution is not implemented).
+    job = {
+        "id": "job-train-1",
+        "type": "lora_train",
+        "payload": {"dryRun": False, "plan": {"planVersion": 1, "dataset": {"items": []}}},
+    }
+
+    run_lora_train_dry_run_job(api, SimpleNamespace(worker_id="worker-1", gpu_id="cpu"), job)
+
+    terminal = api.progress[-1]
+    assert terminal["status"] == "failed"
+    assert "not available" in terminal["error"].lower()
 
 
 def test_main_check_exits_without_api_loop(monkeypatch):

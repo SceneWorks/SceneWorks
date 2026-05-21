@@ -265,7 +265,24 @@ impl JobsStore {
         let _guard = self.lock.lock();
         let mut connection = self.connect()?;
         let transaction = connection.transaction()?;
-        let job = self.create_job_on_connection(&transaction, request)?;
+        let job = self.create_job_on_connection(&transaction, request, None)?;
+        transaction.commit()?;
+        Ok(job)
+    }
+
+    /// Create a job under a caller-supplied id. Used when the payload must
+    /// reference its own job id before insertion — e.g. a `lora_train` job whose
+    /// resolved [`crate::training::TrainingPlan`] embeds `jobId`/`sourceJobId`.
+    /// The id must be unique; a collision surfaces as a SQLite error.
+    pub fn create_job_with_id(
+        &self,
+        id: String,
+        request: CreateJob,
+    ) -> JobsStoreResult<JobSnapshot> {
+        let _guard = self.lock.lock();
+        let mut connection = self.connect()?;
+        let transaction = connection.transaction()?;
+        let job = self.create_job_on_connection(&transaction, request, Some(id))?;
         transaction.commit()?;
         Ok(job)
     }
@@ -385,6 +402,7 @@ impl JobsStore {
                 duplicate_of_job_id: None,
                 attempts: job.attempts + 1,
             },
+            None,
         )?;
         transaction.commit()?;
         Ok(job)
@@ -413,6 +431,7 @@ impl JobsStore {
                 duplicate_of_job_id: Some(job.id),
                 attempts: 1,
             },
+            None,
         )?;
         transaction.commit()?;
         Ok(job)
@@ -787,6 +806,7 @@ impl JobsStore {
         &self,
         connection: &Connection,
         request: CreateJob,
+        job_id: Option<String>,
     ) -> JobsStoreResult<JobSnapshot> {
         let requested_gpu = normalize_requested_gpu(&request.requested_gpu);
         if job_requires_gpu(&request.job_type) && requested_gpu == "cpu" {
@@ -796,9 +816,15 @@ impl JobsStore {
             )));
         }
         let now = utc_now();
-        let job_hex: String =
-            connection.query_row("select lower(hex(randomblob(16)))", [], |row| row.get(0))?;
-        let job_id = format!("job_{job_hex}");
+        let job_id = match job_id {
+            Some(job_id) => job_id,
+            None => {
+                let job_hex: String =
+                    connection
+                        .query_row("select lower(hex(randomblob(16)))", [], |row| row.get(0))?;
+                format!("job_{job_hex}")
+            }
+        };
         connection.execute(
             "
             insert into jobs (
@@ -1381,9 +1407,11 @@ fn normalize_requested_gpu(value: &str) -> String {
     }
 }
 
-// Keep GPU-required generation types in sync with
-// apps/worker/scene_worker/runtime.py::SUPPORTED_JOB_TYPES and
-// apps/web/src/screens/QueueScreen.jsx::gpuRequiredJobTypes.
+// Keep GPU-required job types in sync with
+// apps/worker/scene_worker/runtime.py (SUPPORTED_JOB_TYPES + TRAINING_JOB_TYPES) and
+// apps/web/src/screens/QueueScreen.jsx::gpuRequiredJobTypes. `lora_train` is GPU-required
+// like generation, but its worker capability is advertised separately (the dry-run plan
+// validation needs no inference backend; real execution is gated per platform in story 1417).
 fn job_requires_gpu(job_type: &JobType) -> bool {
     matches!(
         job_type,
@@ -1393,6 +1421,7 @@ fn job_requires_gpu(job_type: &JobType) -> bool {
             | JobType::VideoExtend
             | JobType::VideoBridge
             | JobType::PersonReplace
+            | JobType::LoraTrain
     )
 }
 

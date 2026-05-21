@@ -613,3 +613,120 @@ fn elapsed_seconds_accepts_fractional_rfc3339_timestamps() {
         Some(5)
     );
 }
+
+fn lora_train_job(requested_gpu: &str) -> CreateJob {
+    CreateJob {
+        job_type: JobType::LoraTrain,
+        project_id: Some("project-1".to_owned()),
+        project_name: Some("Project 1".to_owned()),
+        payload: object(json!({ "dryRun": true })),
+        requested_gpu: requested_gpu.to_owned(),
+        source_job_id: None,
+        duplicate_of_job_id: None,
+        attempts: 1,
+    }
+}
+
+#[test]
+fn lora_train_rejects_cpu_requested_gpu() {
+    let store = store("lora-train-rejects-cpu");
+
+    let error = store
+        .create_job(lora_train_job("cpu"))
+        .expect_err("cpu requestedGpu should be rejected for lora_train");
+
+    assert!(matches!(error, JobsStoreError::InvalidRequestedGpu(_)));
+    assert!(error.to_string().contains("cannot target CPU workers"));
+}
+
+#[test]
+fn cpu_worker_cannot_claim_lora_train_even_with_capability() {
+    let store = store("cpu-cannot-claim-lora-train");
+    store
+        .register_worker(RegisterWorker {
+            worker_id: "worker-cpu".to_owned(),
+            gpu_id: "cpu".to_owned(),
+            gpu_name: Some("CPU inference worker".to_owned()),
+            capabilities: vec![WorkerCapability::Cpu, WorkerCapability::LoraTrain],
+            loaded_models: Vec::new(),
+            utilization: None,
+        })
+        .expect("worker registers");
+    store
+        .create_job(lora_train_job("auto"))
+        .expect("lora_train job creates");
+
+    assert!(store
+        .claim_next_job("worker-cpu")
+        .expect("claim succeeds")
+        .is_none());
+}
+
+#[test]
+fn gpu_worker_with_capability_claims_lora_train() {
+    let store = store("gpu-claims-lora-train");
+    store
+        .register_worker(RegisterWorker {
+            worker_id: "worker-gpu".to_owned(),
+            gpu_id: "gpu-0".to_owned(),
+            gpu_name: Some("GPU 0".to_owned()),
+            capabilities: vec![WorkerCapability::Gpu, WorkerCapability::LoraTrain],
+            loaded_models: Vec::new(),
+            utilization: None,
+        })
+        .expect("worker registers");
+    let created = store
+        .create_job(lora_train_job("auto"))
+        .expect("lora_train job creates");
+
+    let claimed = store
+        .claim_next_job("worker-gpu")
+        .expect("claim succeeds")
+        .expect("job claimed");
+
+    assert_eq!(claimed.id, created.id);
+    assert_eq!(claimed.job_type, JobType::LoraTrain);
+    assert_eq!(claimed.status, JobStatus::Preparing);
+    assert_eq!(claimed.assigned_gpu.as_deref(), Some("gpu-0"));
+}
+
+#[test]
+fn gpu_worker_without_training_capability_skips_lora_train() {
+    let store = store("gpu-without-training-cap");
+    store
+        .register_worker(RegisterWorker {
+            worker_id: "worker-gpu".to_owned(),
+            gpu_id: "gpu-0".to_owned(),
+            gpu_name: Some("GPU 0".to_owned()),
+            capabilities: vec![WorkerCapability::Gpu, WorkerCapability::ImageGenerate],
+            loaded_models: Vec::new(),
+            utilization: None,
+        })
+        .expect("worker registers");
+    store
+        .create_job(lora_train_job("auto"))
+        .expect("lora_train job creates");
+
+    assert!(store
+        .claim_next_job("worker-gpu")
+        .expect("claim succeeds")
+        .is_none());
+}
+
+#[test]
+fn create_job_with_id_uses_supplied_id() {
+    let store = store("create-job-with-id");
+
+    let job = store
+        .create_job_with_id("job_lora_train_fixture".to_owned(), lora_train_job("auto"))
+        .expect("job creates with supplied id");
+
+    assert_eq!(job.id, "job_lora_train_fixture");
+    assert_eq!(
+        store
+            .get_job("job_lora_train_fixture")
+            .expect("job loads")
+            .job_type,
+        JobType::LoraTrain
+    );
+}

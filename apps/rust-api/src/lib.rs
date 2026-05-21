@@ -38,7 +38,10 @@ use sceneworks_core::project_store::{
     CharacterReferenceUpdateInput, CharacterUpdateInput, ProjectStore, ProjectStoreError,
     UploadAsset,
 };
-use sceneworks_core::training::TrainingDataset;
+use sceneworks_core::training::{
+    build_training_plan, builtin_training_targets, BuildTrainingPlan, LoraTrainingRequest,
+    TrainingDataset, TrainingTarget, TrainingTargetRegistry,
+};
 use sceneworks_core::training_store::{
     TrainingCaptionSidecarsResult, TrainingDatasetBatchRenameInput,
     TrainingDatasetCaptionSidecarsInput, TrainingDatasetCreateInput, TrainingDatasetMutationResult,
@@ -488,6 +491,7 @@ pub fn create_app(settings: Settings) -> Result<Router, JobsStoreError> {
         .route("/api/v1/health", get(health))
         .route("/api/v1/access", get(access))
         .route("/api/v1/auth/verify", post(verify_access))
+        .route("/api/v1/training/targets", get(list_training_targets))
         .route("/api/v1/projects", get(list_projects).post(create_project))
         .route("/api/v1/projects/:project_id", get(get_project))
         .route(
@@ -527,6 +531,10 @@ pub fn create_app(settings: Settings) -> Result<Router, JobsStoreError> {
         .route(
             "/api/v1/projects/:project_id/training/datasets/:dataset_id/caption-sidecars",
             post(write_training_dataset_caption_sidecars),
+        )
+        .route(
+            "/api/v1/projects/:project_id/training/jobs",
+            post(create_training_job),
         )
         .route(
             "/api/v1/projects/:project_id/files/*relative_path",
@@ -1269,6 +1277,10 @@ async fn purge_asset(
     ))
 }
 
+async fn list_training_targets() -> Json<TrainingTargetRegistry> {
+    Json(builtin_training_targets())
+}
+
 async fn list_training_datasets(
     State(state): State<AppState>,
     Path(project_id): Path<String>,
@@ -1354,6 +1366,139 @@ async fn delete_training_dataset(
         })
         .await?,
     ))
+}
+
+async fn create_training_job(
+    State(state): State<AppState>,
+    Path(project_id): Path<String>,
+    ApiJson(payload): ApiJson<LoraTrainingRequest>,
+) -> Result<(StatusCode, Json<JobSnapshot>), ApiError> {
+    // Only dry-run plan validation exists today; refuse to queue a job that would
+    // complete without producing weights (real execution arrives in story 1417).
+    if !payload.dry_run {
+        return Err(ApiError::bad_request(
+            "Real LoRA training is not available yet. Submit with \"dryRun\": true to validate the training plan.",
+        ));
+    }
+
+    // Targets come from the Rust-owned registry; the request only names one.
+    let registry = builtin_training_targets();
+    let target = registry
+        .targets
+        .iter()
+        .find(|target| target.id == payload.target_id)
+        .ok_or_else(|| {
+            ApiError::bad_request(format!("Unknown training target: {}", payload.target_id))
+        })?;
+
+    let output_name = payload.output_name.trim().to_owned();
+    if output_name.is_empty() {
+        return Err(ApiError::bad_request("Training output name is required."));
+    }
+
+    // Load the dataset, its absolute root, and the project name for the queue.
+    let dataset_id = payload.dataset_id.clone();
+    let (dataset, dataset_root, project_name) = project_call(state.clone(), {
+        let project_id = project_id.clone();
+        move |store| store.training_dataset_for_plan(&project_id, &dataset_id)
+    })
+    .await?;
+
+    // We persist only the dataset's current version, so an older pin is unrunnable.
+    if let Some(requested_version) = payload.dataset_version {
+        if requested_version != dataset.version {
+            return Err(ApiError::bad_request(format!(
+                "Dataset {} is at version {}, but the request pinned version {requested_version}.",
+                dataset.id, dataset.version
+            )));
+        }
+    }
+
+    // Resolve absolute on-host paths and ids the kernel will consume. The job id
+    // is pre-allocated so the plan can embed its own `jobId`/`sourceJobId`.
+    let data_dir = state.settings.data_dir.clone();
+    let base_model_path = resolve_base_model_path(target, &data_dir);
+    let lora_id = format!("lora_{}", Uuid::new_v4().simple());
+    let output_dir = data_dir.join("loras").join(&lora_id);
+    let file_name = format!("{}.safetensors", slugify_lora_id(&output_name));
+    let job_id = format!("job_{}", Uuid::new_v4().simple());
+    let requested_gpu = training_requested_gpu(&payload.config.advanced);
+
+    // Rust resolves and validates the normalized plan before any job is queued.
+    let plan = build_training_plan(BuildTrainingPlan {
+        job_id: &job_id,
+        target,
+        dataset: &dataset,
+        config: payload.config,
+        lora_id: &lora_id,
+        base_model_path,
+        dataset_root: &dataset_root,
+        output_dir: &output_dir,
+        file_name,
+        created_at: now_rfc3339(),
+    })
+    .map_err(|error| ApiError::bad_request(error.to_string()))?;
+
+    let plan_value =
+        serde_json::to_value(&plan).map_err(|error| ApiError::internal(error.to_string()))?;
+    let mut job_payload = JsonObject::new();
+    job_payload.insert("dryRun".to_owned(), Value::Bool(payload.dry_run));
+    job_payload.insert("outputName".to_owned(), Value::String(output_name));
+    job_payload.insert("plan".to_owned(), plan_value);
+
+    let job = store_call(state.clone(), move |store, _timeout| {
+        store.create_job_with_id(
+            job_id,
+            CreateJob {
+                job_type: JobType::LoraTrain,
+                project_id: Some(project_id),
+                project_name: Some(project_name),
+                payload: job_payload,
+                requested_gpu,
+                source_job_id: None,
+                duplicate_of_job_id: None,
+                attempts: 1,
+            },
+        )
+    })
+    .await?;
+    publish(&state, "job.updated", &job);
+    publish_queue(&state).await?;
+    Ok((StatusCode::CREATED, Json(job)))
+}
+
+/// Absolute path to the target's base model weights on the worker host. Prefers
+/// the Hugging Face hub cache for the target's repo, falling back to the local
+/// models directory. The path need not exist yet — model installation is a
+/// separate job; the dry-run plan only records where the kernel will read from.
+fn resolve_base_model_path(target: &TrainingTarget, data_dir: &FsPath) -> String {
+    if let Some(repo) = target
+        .base_model_repo
+        .as_deref()
+        .map(str::trim)
+        .filter(|repo| !repo.is_empty())
+    {
+        if let Some(cache_path) = huggingface_repo_cache_path(data_dir, repo) {
+            return cache_path.display().to_string();
+        }
+    }
+    data_dir
+        .join("models")
+        .join(safe_download_dir(&target.base_model))
+        .display()
+        .to_string()
+}
+
+/// GPU selection for a training job, read from the config's advanced bag (the
+/// request has no top-level field). Defaults to `auto`; `lora_train` is
+/// GPU-required, so a `cpu` value is rejected downstream when the job is created.
+fn training_requested_gpu(advanced: &JsonObject) -> String {
+    let raw = advanced
+        .get("requestedGpu")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_owned();
+    requested_gpu_or_auto(raw)
 }
 
 async fn get_project_file(
@@ -7252,6 +7397,24 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn training_targets_route_returns_builtin_registry() {
+        let temp_dir = tempfile::tempdir().expect("temp dir creates");
+        let settings = test_settings(&temp_dir);
+        let app = create_app(settings).expect("app creates");
+
+        let (status, registry) = request(app, "GET", "/api/v1/training/targets", Value::Null).await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(registry["schemaVersion"], 1);
+        assert_eq!(registry["targets"][0]["id"], "z_image_turbo_lora");
+        assert_eq!(registry["targets"][0]["defaults"]["rank"], 16);
+        assert_eq!(
+            registry["targets"][0]["defaults"]["advanced"]["qualityPreset"],
+            "balanced"
+        );
+    }
+
+    #[tokio::test]
     async fn training_dataset_routes_persist_and_validate_project_assets() {
         let temp_dir = tempfile::tempdir().expect("temp dir creates");
         let settings = test_settings(&temp_dir);
@@ -7538,6 +7701,216 @@ mod tests {
         .await;
         assert_eq!(status, StatusCode::OK);
         assert_eq!(listed_after_delete, json!([]));
+    }
+
+    #[tokio::test]
+    async fn create_training_job_resolves_plan_and_queues_lora_train() {
+        let temp_dir = tempfile::tempdir().expect("temp dir creates");
+        let settings = test_settings(&temp_dir);
+        let data_dir = settings.data_dir.clone();
+        let app = create_app(settings).expect("app creates");
+
+        let (_, project) = request(
+            app.clone(),
+            "POST",
+            "/api/v1/projects",
+            json!({ "name": "Training Project" }),
+        )
+        .await;
+        let project_id = project["id"].as_str().expect("project id").to_owned();
+        let project_path = std::path::PathBuf::from(project["path"].as_str().unwrap());
+
+        let (_, asset) = request_multipart_upload(
+            app.clone(),
+            &format!("/api/v1/projects/{project_id}/assets"),
+            "Portrait.PNG",
+            "image/png",
+            b"png-bytes",
+        )
+        .await;
+        let asset_id = asset["id"].as_str().expect("asset id").to_owned();
+
+        let (_, dataset) = request(
+            app.clone(),
+            "POST",
+            &format!("/api/v1/projects/{project_id}/training/datasets"),
+            json!({
+                "name": "Aurora set",
+                "items": [{ "assetId": asset_id, "caption": { "text": "auroraStyle portrait" } }]
+            }),
+        )
+        .await;
+        let dataset_id = dataset["id"].as_str().expect("dataset id").to_owned();
+
+        let (_, registry) =
+            request(app.clone(), "GET", "/api/v1/training/targets", Value::Null).await;
+        let target = registry["targets"][0].clone();
+        let target_id = target["id"].as_str().expect("target id").to_owned();
+        let config = target["defaults"].clone();
+
+        let (status, job) = request(
+            app.clone(),
+            "POST",
+            &format!("/api/v1/projects/{project_id}/training/jobs"),
+            json!({
+                "targetId": target_id,
+                "datasetId": dataset_id,
+                "config": config,
+                "outputName": "Aurora Style",
+                "dryRun": true
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED);
+        assert_eq!(job["type"], "lora_train");
+        assert_eq!(job["status"], "queued");
+        assert_eq!(job["requestedGpu"], "auto");
+        assert_eq!(job["projectId"], project_id);
+        assert_eq!(job["payload"]["dryRun"], true);
+
+        let job_id = job["id"].as_str().expect("job id").to_owned();
+        let plan = &job["payload"]["plan"];
+        // The resolved plan is self-referential and fully normalized in Rust.
+        assert_eq!(plan["jobId"], job_id);
+        assert_eq!(plan["provenance"]["sourceJobId"], job_id);
+        assert_eq!(plan["target"]["targetId"], target_id);
+        assert_eq!(plan["dataset"]["datasetId"], dataset_id);
+        assert_eq!(plan["dataset"]["datasetVersion"], 1);
+        assert_eq!(plan["dataset"]["items"].as_array().unwrap().len(), 1);
+        let lora_id = plan["output"]["loraId"].as_str().expect("lora id");
+        assert!(lora_id.starts_with("lora_"));
+        assert_eq!(plan["output"]["fileName"], "aurora_style.safetensors");
+
+        // Item image paths resolve under the dataset root on disk.
+        let expected_image = project_path
+            .join("training")
+            .join("datasets")
+            .join(&dataset_id)
+            .join("images")
+            .join("item_0001.png");
+        assert_eq!(
+            plan["dataset"]["items"][0]["imagePath"]
+                .as_str()
+                .expect("image path"),
+            expected_image.display().to_string()
+        );
+        // Output dir resolves under the data dir's loras folder.
+        assert_eq!(
+            plan["output"]["outputDir"].as_str().expect("output dir"),
+            data_dir.join("loras").join(lora_id).display().to_string()
+        );
+
+        // The job is queued and visible to the queue/worker surface.
+        let (status, queued) = request(
+            app.clone(),
+            "GET",
+            "/api/v1/jobs?status=queued",
+            Value::Null,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(queued[0]["id"], job_id);
+        assert_eq!(queued[0]["type"], "lora_train");
+    }
+
+    #[tokio::test]
+    async fn create_training_job_rejects_unknown_target_and_missing_dataset() {
+        let temp_dir = tempfile::tempdir().expect("temp dir creates");
+        let app = create_app(test_settings(&temp_dir)).expect("app creates");
+        let (_, project) = request(
+            app.clone(),
+            "POST",
+            "/api/v1/projects",
+            json!({ "name": "Training Project" }),
+        )
+        .await;
+        let project_id = project["id"].as_str().expect("project id").to_owned();
+
+        let (_, registry) =
+            request(app.clone(), "GET", "/api/v1/training/targets", Value::Null).await;
+        let config = registry["targets"][0]["defaults"].clone();
+
+        let (status, error) = request(
+            app.clone(),
+            "POST",
+            &format!("/api/v1/projects/{project_id}/training/jobs"),
+            json!({
+                "targetId": "not_a_target",
+                "datasetId": "ds_missing",
+                "config": config,
+                "outputName": "Aurora"
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert!(error["detail"]
+            .as_str()
+            .unwrap()
+            .contains("Unknown training target"));
+
+        let target_id = registry["targets"][0]["id"].as_str().unwrap().to_owned();
+        let (status, error) = request(
+            app.clone(),
+            "POST",
+            &format!("/api/v1/projects/{project_id}/training/jobs"),
+            json!({
+                "targetId": target_id,
+                "datasetId": "ds_missing",
+                "config": registry["targets"][0]["defaults"].clone(),
+                "outputName": "Aurora"
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(error["detail"], "Training dataset not found");
+    }
+
+    #[tokio::test]
+    async fn create_training_job_rejects_non_dry_run_until_execution_exists() {
+        let temp_dir = tempfile::tempdir().expect("temp dir creates");
+        let app = create_app(test_settings(&temp_dir)).expect("app creates");
+        let (_, project) = request(
+            app.clone(),
+            "POST",
+            "/api/v1/projects",
+            json!({ "name": "Training Project" }),
+        )
+        .await;
+        let project_id = project["id"].as_str().expect("project id").to_owned();
+        let (_, registry) =
+            request(app.clone(), "GET", "/api/v1/training/targets", Value::Null).await;
+        let target_id = registry["targets"][0]["id"].as_str().unwrap().to_owned();
+
+        // dryRun:false must be refused before any job is queued — real training
+        // execution does not exist yet, so a "completed" job would be a false success.
+        let (status, error) = request(
+            app.clone(),
+            "POST",
+            &format!("/api/v1/projects/{project_id}/training/jobs"),
+            json!({
+                "targetId": target_id,
+                "datasetId": "ds_missing",
+                "config": registry["targets"][0]["defaults"].clone(),
+                "outputName": "Aurora",
+                "dryRun": false
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert!(error["detail"]
+            .as_str()
+            .unwrap()
+            .contains("Real LoRA training is not available yet"));
+
+        let (status, queued) = request(
+            app.clone(),
+            "GET",
+            "/api/v1/jobs?status=queued",
+            Value::Null,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(queued.as_array().expect("jobs list").len(), 0);
     }
 
     #[tokio::test]

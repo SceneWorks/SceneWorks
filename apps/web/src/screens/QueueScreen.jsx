@@ -4,10 +4,10 @@ import { actionStatuses, terminalStatuses } from "../constants.js";
 import { formatSeconds, percent } from "../formatting.js";
 
 const nonGpuJobTypes = new Set(["model_download", "lora_import"]);
-// Keep GPU-required generation types in sync with
+// Keep GPU-required job types in sync with
 // crates/sceneworks-core/src/jobs_store.rs::job_requires_gpu and
-// apps/worker/scene_worker/runtime.py::SUPPORTED_JOB_TYPES.
-const gpuRequiredJobTypes = new Set(["image_generate", "image_edit", "video_generate", "video_extend", "video_bridge", "person_replace"]);
+// apps/worker/scene_worker/runtime.py (SUPPORTED_JOB_TYPES + TRAINING_JOB_TYPES).
+const gpuRequiredJobTypes = new Set(["image_generate", "image_edit", "video_generate", "video_extend", "video_bridge", "person_replace", "lora_train"]);
 const terminalStatusesForBlocking = new Set(["completed", "failed", "canceled", "interrupted"]);
 
 function formatJobType(type) {

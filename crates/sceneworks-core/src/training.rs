@@ -21,6 +21,8 @@
 //! trailing flattened [`ExtraFields`] for forward compatibility, and string
 //! enums that round-trip unknown values via an `Unknown(String)` variant.
 
+use std::path::Path;
+
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use serde_json::{json, Value};
 
@@ -216,12 +218,17 @@ pub struct LoraTrainingRequest {
     pub config: TrainingConfig,
     /// Human-facing name for the resulting LoRA.
     pub output_name: String,
-    /// When true, the queue produces a [`TrainingPlan`] and stops short of
-    /// running the kernel (story 1416).
-    #[serde(default)]
+    /// When true, the queue resolves a [`TrainingPlan`] and stops short of
+    /// running the kernel. Defaults to true: dry-run is the only mode supported
+    /// today, so the API rejects `false` until real execution exists.
+    #[serde(default = "default_dry_run")]
     pub dry_run: bool,
     #[serde(flatten)]
     pub extra: ExtraFields,
+}
+
+fn default_dry_run() -> bool {
+    true
 }
 
 /// The fully normalized plan Rust hands to the Python execution kernel.
@@ -363,7 +370,15 @@ fn z_image_turbo_lora_target() -> TrainingTarget {
             advanced: object(json!({
                 "mixedPrecision": "bf16",
                 "cacheLatents": true,
-                "networkType": "lora"
+                "networkType": "lora",
+                "scheduler": "constant",
+                "epochs": 1,
+                "repeats": 10,
+                "bucketStrategy": "aspect",
+                "sampleEvery": 250,
+                "qualityPreset": "balanced",
+                "outputScope": "project",
+                "requestedGpu": "auto"
             })),
             extra: ExtraFields::new(),
         },
@@ -372,7 +387,9 @@ fn z_image_turbo_lora_target() -> TrainingTarget {
             "alpha": [1, 128],
             "steps": [200, 6000],
             "resolutions": [512, 768, 1024],
-            "batchSize": [1, 4]
+            "batchSize": [1, 4],
+            "qualityPresets": ["speed", "balanced", "quality"],
+            "outputScopes": ["project", "global"]
         })),
         ui: object(json!({
             "label": "Z-Image-Turbo LoRA",
@@ -391,4 +408,170 @@ fn object(value: Value) -> JsonObject {
         Value::Object(map) => map,
         _ => JsonObject::new(),
     }
+}
+
+/// Resolved inputs the [`build_training_plan`] resolver normalizes into a
+/// [`TrainingPlan`]. The caller (the Rust API) owns I/O — loading the dataset,
+/// allocating the output LoRA id, and resolving absolute on-host paths — so the
+/// builder itself stays a pure, testable normalization step.
+#[derive(Debug)]
+pub struct BuildTrainingPlan<'a> {
+    /// Id the job will be created under; embedded as the plan's `jobId` and
+    /// provenance `sourceJobId` so the plan is self-describing.
+    pub job_id: &'a str,
+    pub target: &'a TrainingTarget,
+    pub dataset: &'a TrainingDataset,
+    /// Resolved config (target defaults already merged with user overrides).
+    pub config: TrainingConfig,
+    /// Pre-allocated SceneWorks LoRA id the output registers under.
+    pub lora_id: &'a str,
+    /// Absolute path to the base model weights on the worker host.
+    pub base_model_path: String,
+    /// Absolute dataset root the worker reads images and captions from.
+    pub dataset_root: &'a Path,
+    /// Absolute directory the kernel writes the adapter into.
+    pub output_dir: &'a Path,
+    /// Adapter file name, e.g. `aurora_style.safetensors`.
+    pub file_name: String,
+    pub created_at: String,
+}
+
+/// Error produced when a [`LoraTrainingRequest`] cannot be resolved into a valid
+/// [`TrainingPlan`]. These map to client errors: the request is structurally
+/// fine but the dataset or config cannot produce a runnable plan.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TrainingPlanError {
+    /// The dataset has no items to train on.
+    EmptyDataset,
+    /// A hyperparameter is out of range; carries a human-facing reason.
+    InvalidConfig(String),
+}
+
+impl std::fmt::Display for TrainingPlanError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::EmptyDataset => {
+                formatter.write_str("Training dataset has no items. Add at least one image.")
+            }
+            Self::InvalidConfig(detail) => formatter.write_str(detail),
+        }
+    }
+}
+
+impl std::error::Error for TrainingPlanError {}
+
+/// Normalizes resolved request inputs into the [`TrainingPlan`] the Python
+/// kernel consumes. Validates the dataset is non-empty and the config is
+/// runnable; absolute paths and ids are resolved by the caller.
+pub fn build_training_plan(
+    input: BuildTrainingPlan<'_>,
+) -> Result<TrainingPlan, TrainingPlanError> {
+    validate_training_config(&input.config)?;
+    if input.dataset.items.is_empty() {
+        return Err(TrainingPlanError::EmptyDataset);
+    }
+
+    let items = input
+        .dataset
+        .items
+        .iter()
+        .map(|item| TrainingPlanItem {
+            image_path: resolve_item_path(input.dataset_root, &item.path),
+            caption: item.caption.text.clone(),
+            width: item.width,
+            height: item.height,
+            extra: ExtraFields::new(),
+        })
+        .collect::<Vec<_>>();
+
+    let trigger_words = match input.config.trigger_word.as_deref().map(str::trim) {
+        Some(word) if !word.is_empty() => vec![word.to_owned()],
+        _ => Vec::new(),
+    };
+
+    let config_snapshot = match serde_json::to_value(&input.config) {
+        Ok(Value::Object(map)) => map,
+        _ => JsonObject::new(),
+    };
+
+    Ok(TrainingPlan {
+        schema_version: TRAINING_CONTRACT_SCHEMA_VERSION,
+        plan_version: TRAINING_PLAN_VERSION,
+        job_id: input.job_id.to_owned(),
+        target: TrainingPlanTarget {
+            target_id: input.target.id.clone(),
+            kernel: input.target.kernel.clone(),
+            family: input.target.family.clone(),
+            modality: input.target.modality.clone(),
+            output_kind: input.target.output_kind.clone(),
+            base_model: input.target.base_model.clone(),
+            base_model_path: input.base_model_path,
+            extra: ExtraFields::new(),
+        },
+        dataset: TrainingPlanDataset {
+            dataset_id: input.dataset.id.clone(),
+            dataset_version: input.dataset.version,
+            root_path: input.dataset_root.display().to_string(),
+            items,
+            extra: ExtraFields::new(),
+        },
+        config: input.config,
+        output: TrainingPlanOutput {
+            lora_id: input.lora_id.to_owned(),
+            output_dir: input.output_dir.display().to_string(),
+            file_name: input.file_name,
+            format: "safetensors".to_owned(),
+            trigger_words,
+            extra: ExtraFields::new(),
+        },
+        provenance: TrainingProvenance {
+            dataset_id: input.dataset.id.clone(),
+            dataset_version: input.dataset.version,
+            target_id: input.target.id.clone(),
+            base_model: input.target.base_model.clone(),
+            config_snapshot,
+            output_lora_id: input.lora_id.to_owned(),
+            source_job_id: input.job_id.to_owned(),
+            created_at: input.created_at,
+            extra: ExtraFields::new(),
+        },
+        extra: ExtraFields::new(),
+    })
+}
+
+/// Joins a dataset item's forward-slash relative path onto the absolute root
+/// using the host's path separator. Dataset item paths are stored POSIX-style
+/// (the store forbids backslashes), so joining the whole string would leave
+/// mixed separators on Windows; pushing each component normalizes them.
+fn resolve_item_path(dataset_root: &Path, relative_path: &str) -> String {
+    let mut path = dataset_root.to_path_buf();
+    for component in Path::new(relative_path).components() {
+        path.push(component);
+    }
+    path.display().to_string()
+}
+
+fn validate_training_config(config: &TrainingConfig) -> Result<(), TrainingPlanError> {
+    let positive = |value: u32, field: &str| {
+        if value == 0 {
+            Err(TrainingPlanError::InvalidConfig(format!(
+                "{field} must be at least 1."
+            )))
+        } else {
+            Ok(())
+        }
+    };
+    positive(config.rank, "rank")?;
+    positive(config.alpha, "alpha")?;
+    positive(config.steps, "steps")?;
+    positive(config.resolution, "resolution")?;
+    positive(config.batch_size, "batchSize")?;
+    positive(config.gradient_accumulation, "gradientAccumulation")?;
+    let learning_rate = config.learning_rate.as_f64().unwrap_or(f64::NAN);
+    if !(learning_rate.is_finite() && learning_rate > 0.0) {
+        return Err(TrainingPlanError::InvalidConfig(
+            "learningRate must be a positive finite number.".to_owned(),
+        ));
+    }
+    Ok(())
 }

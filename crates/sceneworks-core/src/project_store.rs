@@ -299,6 +299,27 @@ impl ProjectStore {
         TrainingDatasetStore::new(project_path).get_dataset(project_id, dataset_id)
     }
 
+    /// Loads a training dataset together with its absolute on-disk root and the
+    /// project stem — the inputs the Rust API needs to resolve a
+    /// [`crate::training::TrainingPlan`] and label the queued job. Resolves the
+    /// project path once rather than re-reading the registry per value.
+    pub fn training_dataset_for_plan(
+        &self,
+        project_id: &str,
+        dataset_id: &str,
+    ) -> ProjectStoreResult<(TrainingDataset, PathBuf, String)> {
+        let project_path = self.find_project_path(project_id)?;
+        let dataset =
+            TrainingDatasetStore::new(project_path.clone()).get_dataset(project_id, dataset_id)?;
+        let root = crate::training_store::dataset_root(&project_path, dataset_id);
+        let project_stem = project_path
+            .file_stem()
+            .and_then(|stem| stem.to_str())
+            .unwrap_or_default()
+            .to_owned();
+        Ok((dataset, root, project_stem))
+    }
+
     pub fn update_training_dataset(
         &self,
         project_id: &str,

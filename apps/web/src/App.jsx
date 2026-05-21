@@ -345,6 +345,8 @@ export function App() {
   const [models, setModels] = useState([]);
   const [loras, setLoras] = useState([]);
   const [presets, setPresets] = useState([]);
+  const [trainingTargets, setTrainingTargets] = useState({ schemaVersion: 1, targets: [] });
+  const [trainingTargetsError, setTrainingTargetsError] = useState("");
   const [trainingDatasets, setTrainingDatasets] = useState([]);
   const [trainingDatasetsProjectId, setTrainingDatasetsProjectId] = useState(null);
   const [loadingTrainingDatasets, setLoadingTrainingDatasets] = useState(false);
@@ -521,6 +523,7 @@ export function App() {
       setTimelines([]);
       setTimelinesProjectId(null);
       setPresets([]);
+      setTrainingTargetsError("");
       setTrainingDatasets([]);
       setTrainingDatasetsProjectId(null);
       setTrainingDatasetsError("");
@@ -672,14 +675,16 @@ export function App() {
         return { label, value: fallback, error: optional ? "" : `${label}: ${err.message}` };
       }
     };
-    const [projectsResult, jobsResult, workersResult, modelsResult, lorasResult, presetsResult] = await Promise.all([
-      fetchInitial("Projects", "/api/v1/projects", []),
-      fetchInitial("Jobs", "/api/v1/jobs", []),
-      fetchInitial("Workers", "/api/v1/workers", []),
-      fetchInitial("Models", "/api/v1/models", []),
-      fetchInitial("LoRAs", "/api/v1/loras", []),
-      fetchInitial("Presets", "/api/v1/recipe-presets", [], true),
-    ]);
+    const [projectsResult, jobsResult, workersResult, modelsResult, lorasResult, presetsResult, trainingTargetsResult] =
+      await Promise.all([
+        fetchInitial("Projects", "/api/v1/projects", []),
+        fetchInitial("Jobs", "/api/v1/jobs", []),
+        fetchInitial("Workers", "/api/v1/workers", []),
+        fetchInitial("Models", "/api/v1/models", []),
+        fetchInitial("LoRAs", "/api/v1/loras", []),
+        fetchInitial("Presets", "/api/v1/recipe-presets", [], true),
+        fetchInitial("Training targets", "/api/v1/training/targets", { schemaVersion: 1, targets: [] }),
+      ]);
     const projectItems = projectsResult.value;
     setProjects(projectItems);
     setProjectsLoaded(true);
@@ -690,7 +695,14 @@ export function App() {
     setModels(modelsResult.value);
     setLoras(lorasResult.value);
     setPresets(presetsResult.value);
-    setError([projectsResult, jobsResult, workersResult, modelsResult, lorasResult, presetsResult].map((result) => result.error).filter(Boolean).join("; "));
+    setTrainingTargets(trainingTargetsResult.value);
+    setTrainingTargetsError(trainingTargetsResult.error);
+    setError(
+      [projectsResult, jobsResult, workersResult, modelsResult, lorasResult, presetsResult, trainingTargetsResult]
+        .map((result) => result.error)
+        .filter(Boolean)
+        .join("; "),
+    );
   }
 
   async function refreshAssets(projectId = activeProject?.id) {
@@ -808,6 +820,51 @@ export function App() {
     });
     await refreshTrainingDatasets(projectId);
     return updated;
+  }
+
+  async function batchRenameTrainingDataset(datasetId, payload, projectId = activeProject?.id) {
+    if (!projectId || !datasetId) {
+      throw new Error("Select a training dataset first.");
+    }
+    const updated = await apiFetch(
+      `/api/v1/projects/${projectId}/training/datasets/${encodeURIComponent(datasetId)}/batch-rename`,
+      token,
+      {
+        method: "POST",
+        body: JSON.stringify(payload),
+      },
+    );
+    await refreshTrainingDatasets(projectId);
+    return updated;
+  }
+
+  async function writeTrainingDatasetCaptionSidecars(datasetId, payload, projectId = activeProject?.id) {
+    if (!projectId || !datasetId) {
+      throw new Error("Select a training dataset first.");
+    }
+    const result = await apiFetch(
+      `/api/v1/projects/${projectId}/training/datasets/${encodeURIComponent(datasetId)}/caption-sidecars`,
+      token,
+      {
+        method: "POST",
+        body: JSON.stringify(payload),
+      },
+    );
+    await refreshTrainingDatasets(projectId);
+    return result;
+  }
+
+  async function createTrainingJob(request, projectId = activeProject?.id) {
+    if (!projectId) {
+      throw new Error("Select a workspace before creating a training job.");
+    }
+    const job = await apiFetch(`/api/v1/projects/${projectId}/training/jobs`, token, {
+      method: "POST",
+      body: JSON.stringify(request),
+    });
+    setJobs((items) => [job, ...items.filter((item) => item.id !== job.id)].sort(sortNewest));
+    setError("");
+    return job;
   }
 
   function presetQuery(scope = null) {
@@ -1878,15 +1935,21 @@ export function App() {
             activeProject={activeProject}
             authenticated={authenticated}
             assets={assets}
+            batchRenameDataset={batchRenameTrainingDataset}
             createDataset={createTrainingDataset}
+            createTrainingJob={createTrainingJob}
             datasets={trainingDatasetsProjectId === activeProject?.id ? trainingDatasets : []}
             datasetsError={trainingDatasetsError}
+            gpuOptions={gpuOptions}
             importAsset={(file) => importAsset(file, { throwOnError: true })}
             loadDataset={loadTrainingDataset}
             loadingDatasets={loadingTrainingDatasets}
             onPreview={setPreviewAsset}
             onRefreshDatasets={() => refreshTrainingDatasets(activeProject?.id)}
+            trainingTargets={trainingTargets.targets ?? []}
+            trainingTargetsError={trainingTargetsError}
             updateDataset={updateTrainingDataset}
+            writeCaptionSidecars={writeTrainingDatasetCaptionSidecars}
           />
         ) : null}
 

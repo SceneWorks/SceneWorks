@@ -1006,7 +1006,7 @@ where
         .expect("string enum deserialization is infallible")
 }
 
-fn dataset_root(project_path: &Path, dataset_id: &str) -> PathBuf {
+pub(crate) fn dataset_root(project_path: &Path, dataset_id: &str) -> PathBuf {
     project_path
         .join("training")
         .join("datasets")
