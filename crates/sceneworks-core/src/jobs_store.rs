@@ -1265,7 +1265,7 @@ fn worker_supports_job(worker: &WorkerSnapshot, job: &JobSnapshot) -> bool {
             .iter()
             .any(|owned| owned.as_str() == capability)
     };
-    if !advertises(job.job_type.as_str()) {
+    if !advertises(required_capability(job)) {
         return false;
     }
     // A real (non-dry-run) LoRA training job additionally needs the execute
@@ -1284,6 +1284,30 @@ fn worker_supports_job(worker: &WorkerSnapshot, job: &JobSnapshot) -> bool {
 fn is_real_training_job(job: &JobSnapshot) -> bool {
     matches!(job.job_type, JobType::LoraTrain)
         && job.payload.get("dryRun").and_then(Value::as_bool) == Some(false)
+}
+
+/// The worker capability a job requires. Person detection/tracking default to
+/// the real, model-backed capability served by the Python GPU worker; an
+/// explicit `preview: true` payload requests the Rust utility worker's
+/// procedural preview capability instead — so a real job never routes to the
+/// placeholder. Mirrors the dry-run training capability split.
+fn required_capability(job: &JobSnapshot) -> &str {
+    match job.job_type {
+        JobType::PersonDetect if person_job_is_preview(job) => {
+            WorkerCapability::PersonDetectPreview.as_str()
+        }
+        JobType::PersonTrack if person_job_is_preview(job) => {
+            WorkerCapability::PersonTrackPreview.as_str()
+        }
+        _ => job.job_type.as_str(),
+    }
+}
+
+/// True when a person detection/tracking job explicitly opts into the procedural
+/// preview path (`preview: true`); real model-backed runs are the default.
+fn person_job_is_preview(job: &JobSnapshot) -> bool {
+    matches!(job.job_type, JobType::PersonDetect | JobType::PersonTrack)
+        && job.payload.get("preview").and_then(Value::as_bool) == Some(true)
 }
 
 #[derive(Debug, Clone, Copy)]
