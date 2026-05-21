@@ -14,7 +14,8 @@
     "timeline_export",
     "model_download",
     "model_import",
-    "lora_import"
+    "lora_import",
+    "lora_train"
   ],
   "statuses": [
     "queued",
