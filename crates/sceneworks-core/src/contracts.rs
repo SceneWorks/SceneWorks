@@ -185,6 +185,7 @@ string_enum! {
         ModelDownload => "model_download",
         ModelImport => "model_import",
         LoraImport => "lora_import",
+        LoraTrain => "lora_train",
     }
 }
 
@@ -251,6 +252,7 @@ string_enum! {
         ModelDownload => "model_download",
         ModelImport => "model_import",
         LoraImport => "lora_import",
+        LoraTrain => "lora_train",
     }
 }
 

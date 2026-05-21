@@ -1,10 +1,11 @@
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use sceneworks_core::training::{
-    builtin_training_targets, LoraTrainingRequest, TrainingConfig, TrainingDataset,
-    TrainingModality, TrainingOutputKind, TrainingPlan, TrainingProvenance, TrainingTargetRegistry,
-    TRAINING_CONTRACT_SCHEMA_VERSION, TRAINING_PLAN_VERSION,
+    build_training_plan, builtin_training_targets, BuildTrainingPlan, LoraTrainingRequest,
+    TrainingConfig, TrainingDataset, TrainingModality, TrainingOutputKind, TrainingPlan,
+    TrainingPlanError, TrainingProvenance, TrainingTargetRegistry, TRAINING_CONTRACT_SCHEMA_VERSION,
+    TRAINING_PLAN_VERSION,
 };
 use serde::de::DeserializeOwned;
 use serde::Serialize;
@@ -131,4 +132,133 @@ fn training_plan_fixture_pins_current_plan_version() {
         plan["planVersion"].as_u64(),
         Some(u64::from(TRAINING_PLAN_VERSION))
     );
+}
+
+fn dataset_fixture() -> TrainingDataset {
+    serde_json::from_value(load_fixture("dataset.json")).expect("dataset fixture parses")
+}
+
+#[test]
+fn build_training_plan_resolves_paths_ids_and_provenance() {
+    let dataset = dataset_fixture();
+    let registry = builtin_training_targets();
+    let target = registry.targets.first().expect("a builtin target exists");
+    let dataset_root = Path::new("/data/training/ds_abc123");
+    let output_dir = Path::new("/data/loras/lora_new");
+    let mut config = target.defaults.clone();
+    config.trigger_word = Some("auroraStyle".to_owned());
+
+    let plan = build_training_plan(BuildTrainingPlan {
+        job_id: "job_test",
+        target,
+        dataset: &dataset,
+        config,
+        lora_id: "lora_new",
+        base_model_path: "/data/cache/huggingface/Tongyi-MAI/Z-Image-Turbo".to_owned(),
+        dataset_root,
+        output_dir,
+        file_name: "aurora_style.safetensors".to_owned(),
+        created_at: "2026-05-21T00:00:00Z".to_owned(),
+    })
+    .expect("plan resolves");
+
+    assert_eq!(plan.plan_version, TRAINING_PLAN_VERSION);
+    assert_eq!(plan.job_id, "job_test");
+    // The plan is self-referential so the kernel never needs the job record.
+    assert_eq!(plan.provenance.source_job_id, "job_test");
+    assert_eq!(plan.target.target_id, target.id);
+    assert_eq!(plan.target.kernel, target.kernel);
+    assert_eq!(
+        plan.target.base_model_path,
+        "/data/cache/huggingface/Tongyi-MAI/Z-Image-Turbo"
+    );
+    assert_eq!(plan.dataset.dataset_id, "ds_abc123");
+    assert_eq!(plan.dataset.dataset_version, 3);
+    assert_eq!(plan.dataset.items.len(), 2);
+    // Item paths resolve under the dataset root with the host separator.
+    let mut expected_image = dataset_root.to_path_buf();
+    for component in Path::new("images/001.png").components() {
+        expected_image.push(component);
+    }
+    assert_eq!(
+        plan.dataset.items[0].image_path,
+        expected_image.display().to_string()
+    );
+    assert_eq!(plan.output.lora_id, "lora_new");
+    assert_eq!(plan.output.file_name, "aurora_style.safetensors");
+    assert_eq!(plan.output.trigger_words, vec!["auroraStyle".to_owned()]);
+    assert_eq!(plan.provenance.output_lora_id, "lora_new");
+    assert_eq!(plan.provenance.dataset_version, 3);
+}
+
+#[test]
+fn build_training_plan_omits_trigger_words_when_unset() {
+    let dataset = dataset_fixture();
+    let registry = builtin_training_targets();
+    let target = registry.targets.first().expect("a builtin target exists");
+
+    let plan = build_training_plan(BuildTrainingPlan {
+        job_id: "job_test",
+        target,
+        dataset: &dataset,
+        config: target.defaults.clone(),
+        lora_id: "lora_new",
+        base_model_path: "/data/models/z_image_turbo".to_owned(),
+        dataset_root: Path::new("/data/training/ds_abc123"),
+        output_dir: Path::new("/data/loras/lora_new"),
+        file_name: "aurora.safetensors".to_owned(),
+        created_at: "2026-05-21T00:00:00Z".to_owned(),
+    })
+    .expect("plan resolves");
+
+    assert!(plan.output.trigger_words.is_empty());
+}
+
+#[test]
+fn build_training_plan_rejects_empty_dataset() {
+    let mut dataset = dataset_fixture();
+    dataset.items.clear();
+    let registry = builtin_training_targets();
+    let target = registry.targets.first().expect("a builtin target exists");
+
+    let error = build_training_plan(BuildTrainingPlan {
+        job_id: "job_test",
+        target,
+        dataset: &dataset,
+        config: target.defaults.clone(),
+        lora_id: "lora_new",
+        base_model_path: "/data/models/z_image_turbo".to_owned(),
+        dataset_root: Path::new("/data/training/ds_abc123"),
+        output_dir: Path::new("/data/loras/lora_new"),
+        file_name: "aurora.safetensors".to_owned(),
+        created_at: "2026-05-21T00:00:00Z".to_owned(),
+    })
+    .expect_err("empty dataset is rejected");
+
+    assert_eq!(error, TrainingPlanError::EmptyDataset);
+}
+
+#[test]
+fn build_training_plan_rejects_invalid_config() {
+    let dataset = dataset_fixture();
+    let registry = builtin_training_targets();
+    let target = registry.targets.first().expect("a builtin target exists");
+    let mut config = target.defaults.clone();
+    config.rank = 0;
+
+    let error = build_training_plan(BuildTrainingPlan {
+        job_id: "job_test",
+        target,
+        dataset: &dataset,
+        config,
+        lora_id: "lora_new",
+        base_model_path: "/data/models/z_image_turbo".to_owned(),
+        dataset_root: Path::new("/data/training/ds_abc123"),
+        output_dir: Path::new("/data/loras/lora_new"),
+        file_name: "aurora.safetensors".to_owned(),
+        created_at: "2026-05-21T00:00:00Z".to_owned(),
+    })
+    .expect_err("zero rank is rejected");
+
+    assert!(matches!(error, TrainingPlanError::InvalidConfig(_)));
 }

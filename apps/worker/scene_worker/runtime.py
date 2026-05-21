@@ -22,10 +22,14 @@ from .video_adapters import create_video_adapter
 LoadedModelsSource = Callable[[], list[str]] | None
 IMAGE_JOB_TYPES = ("image_generate", "image_edit")
 VIDEO_JOB_TYPES = ("video_generate", "video_extend", "video_bridge", "person_replace")
-# Keep GPU-required generation types in sync with
+# Keep GPU-required job types in sync with
 # crates/sceneworks-core/src/jobs_store.rs::job_requires_gpu and
 # apps/web/src/screens/QueueScreen.jsx::gpuRequiredJobTypes.
 SUPPORTED_JOB_TYPES = IMAGE_JOB_TYPES + VIDEO_JOB_TYPES
+# Training is GPU-required like generation, but a GPU worker advertises it even
+# without an inference backend: the story 1416 dry-run only validates a Rust-
+# resolved plan (no torch needed). Real execution is gated per platform in 1417.
+TRAINING_JOB_TYPES = ("lora_train",)
 
 
 def now() -> str:
@@ -57,8 +61,13 @@ class ApiClient:
 def worker_capabilities(gpu: dict) -> list[str]:
     gpu_capabilities = set(gpu["capabilities"])
     capabilities = set(gpu["capabilities"]) - {"placeholder"}
-    if "cpu" not in gpu_capabilities and "gpu" in gpu_capabilities and torch_inference_backend_available():
-        capabilities |= set(SUPPORTED_JOB_TYPES)
+    is_gpu_worker = "cpu" not in gpu_capabilities and "gpu" in gpu_capabilities
+    if is_gpu_worker:
+        # Dry-run plan validation needs no inference backend, so a GPU worker can
+        # claim lora_train even before torch/CUDA is installed (e.g. on Mac).
+        capabilities |= set(TRAINING_JOB_TYPES)
+        if torch_inference_backend_available():
+            capabilities |= set(SUPPORTED_JOB_TYPES)
     return sorted(capabilities)
 
 
@@ -540,6 +549,108 @@ def run_video_job(api: ApiClient, settings: WorkerSettings, job: dict) -> None:
             restart_worker_after_oom(settings, job_id)
 
 
+# Highest training plan version this worker understands. Plans are resolved in
+# Rust (crates/sceneworks-core/src/training.rs::TRAINING_PLAN_VERSION); the worker
+# rejects any version it cannot interpret rather than guessing.
+SUPPORTED_TRAINING_PLAN_VERSION = 1
+
+
+def run_lora_train_dry_run_job(api: ApiClient, settings: WorkerSettings, job: dict) -> None:
+    """Validate a Rust-resolved training plan and complete with a dry-run summary.
+
+    This is the story 1416 stub: it claims a lora_train job, checks the embedded
+    plan and that its dataset inputs exist on the worker, and reports what a real
+    run would produce — without loading a model or training. Story 1417 replaces
+    the body with the narrow Z-Image LoRA execution kernel.
+    """
+    job_id = job["id"]
+
+    def progress(status: str, stage: str, value: float, message: str) -> None:
+        heartbeat(api, settings, "busy", job_id)
+        update_job(
+            api,
+            job_id,
+            {"status": status, "stage": stage, "progress": value, "message": message},
+        )
+
+    try:
+        progress("preparing", "preparing", 0.1, "Validating training plan.")
+        payload = job.get("payload") or {}
+        plan = payload.get("plan")
+        if not isinstance(plan, dict):
+            raise ValueError("Training job payload is missing a resolved plan.")
+        plan_version = plan.get("planVersion")
+        if plan_version != SUPPORTED_TRAINING_PLAN_VERSION:
+            raise ValueError(
+                f"Unsupported training plan version {plan_version!r}; this worker "
+                f"understands version {SUPPORTED_TRAINING_PLAN_VERSION}."
+            )
+
+        dataset = plan.get("dataset") or {}
+        items = dataset.get("items") or []
+        if not items:
+            raise ValueError("Training plan dataset has no items to train on.")
+
+        progress("running", "running", 0.5, f"Checking {len(items)} dataset item(s).")
+        missing = [
+            item.get("imagePath")
+            for item in items
+            if not (item.get("imagePath") and os.path.exists(item["imagePath"]))
+        ]
+        if missing:
+            preview = ", ".join(str(path) for path in missing[:3])
+            raise FileNotFoundError(
+                f"{len(missing)} dataset image(s) are missing on the worker, e.g. {preview}."
+            )
+
+        output = plan.get("output") or {}
+        target = plan.get("target") or {}
+        base_model_path = target.get("baseModelPath")
+        summary = {
+            "mode": "dry_run",
+            "validated": True,
+            "dryRun": bool(payload.get("dryRun", True)),
+            "datasetItemCount": len(items),
+            "datasetId": dataset.get("datasetId"),
+            "datasetVersion": dataset.get("datasetVersion"),
+            "targetId": target.get("targetId"),
+            "kernel": target.get("kernel"),
+            "loraId": output.get("loraId"),
+            "outputDir": output.get("outputDir"),
+            "fileName": output.get("fileName"),
+            "baseModelPath": base_model_path,
+            "baseModelInstalled": bool(base_model_path and os.path.exists(base_model_path)),
+            "planVersion": plan_version,
+            "completedAt": now(),
+        }
+        update_job(
+            api,
+            job_id,
+            {
+                "status": "completed",
+                "stage": "completed",
+                "progress": 1,
+                "message": f"Dry run validated {len(items)} dataset item(s); training plan is ready.",
+                "result": summary,
+            },
+        )
+    except Exception as exc:  # noqa: BLE001 - report any validation failure cleanly
+        message, error = friendly_failure("Training dry run", exc)
+        update_job(
+            api,
+            job_id,
+            {
+                "status": "failed",
+                "stage": "failed",
+                "progress": 1,
+                "message": message,
+                "error": error,
+            },
+        )
+    finally:
+        heartbeat(api, settings, "idle")
+
+
 def run_worker_loop(settings: WorkerSettings) -> None:
     gpu = discover_gpu(settings.gpu_id)
     api = ApiClient(settings)
@@ -587,6 +698,8 @@ def run_worker_loop(settings: WorkerSettings) -> None:
                 run_image_job(api, settings, job, image_adapters)
             elif job["type"] in VIDEO_JOB_TYPES:
                 run_video_job(api, settings, job)
+            elif job["type"] in TRAINING_JOB_TYPES:
+                run_lora_train_dry_run_job(api, settings, job)
             else:
                 update_job(
                     api,
