@@ -1017,6 +1017,10 @@ def image_batch_progress(completed_count: int, total: int) -> float:
 
 
 def select_torch_device(torch: Any, gpu_id: str | None = None) -> str:
+    # An explicit "cpu" forces CPU on any platform, including Apple Silicon where
+    # MPS would otherwise be picked (honors SCENEWORKS_GPU_ID=cpu, sc-1335).
+    if str(gpu_id or "").strip().lower() == "cpu":
+        return "cpu"
     if torch.cuda.is_available():
         gpu_id = str(gpu_id or "").strip()
         if gpu_id.isdigit():
