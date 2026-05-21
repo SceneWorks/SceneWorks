@@ -59,6 +59,7 @@ from scene_worker.training_adapters import (
     bucket_resolution,
     create_training_kernel,
     dry_run_training_summary,
+    flow_matching_velocity_target,
     read_run_config,
     resolve_pretrained_source,
     validate_training_plan,
@@ -175,11 +176,25 @@ def test_python_worker_only_advertises_inference_job_capabilities(monkeypatch):
         "image_edit",
         "image_generate",
         "lora_train",
+        "lora_train_execute",
         "person_replace",
         "video_bridge",
         "video_extend",
         "video_generate",
     ]
+
+
+def test_gpu_worker_advertises_lora_train_execute_only_with_inference_backend(monkeypatch):
+    monkeypatch.setattr("scene_worker.runtime.torch_inference_backend_available", lambda: True)
+    with_backend = worker_capabilities({"id": "gpu-0", "name": "GPU 0", "capabilities": ["placeholder", "gpu"]})
+    assert "lora_train" in with_backend
+    assert "lora_train_execute" in with_backend
+
+    monkeypatch.setattr("scene_worker.runtime.torch_inference_backend_available", lambda: False)
+    without_backend = worker_capabilities({"id": "gpu-0", "name": "GPU 0", "capabilities": ["placeholder", "gpu"]})
+    # Dry-run validation stays claimable; real execution is not advertised.
+    assert "lora_train" in without_backend
+    assert "lora_train_execute" not in without_backend
 
 
 def test_python_cpu_worker_does_not_advertise_person_tracking_jobs():
@@ -1001,6 +1016,18 @@ def test_bucket_resolution_floors_to_multiple_of_32():
     assert bucket_resolution(1024) == 1024
     assert bucket_resolution(1000) == 992
     assert bucket_resolution(20) == 32
+
+
+def test_flow_matching_velocity_target_uses_negated_pipeline_sign():
+    # The raw transformer output target is latents - noise, NOT noise - latents:
+    # diffusers' ZImagePipeline negates the transformer output before the scheduler,
+    # so the trained raw output is the negated flow velocity. Pin the sign so a
+    # refactor can't silently flip the training direction.
+    assert flow_matching_velocity_target(0.0, 1.0) == -1.0
+    assert flow_matching_velocity_target(2.0, -1.0) == 3.0
+    latents, noise = 0.7, 0.2
+    assert flow_matching_velocity_target(latents, noise) == latents - noise
+    assert flow_matching_velocity_target(latents, noise) == -(noise - latents)
 
 
 def test_read_run_config_defaults_lora_target_modules_and_parses_advanced():

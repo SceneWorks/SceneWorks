@@ -500,6 +500,23 @@ def build_optimizer(name: str, params: list[Any], learning_rate: float) -> Any:
     return torch.optim.AdamW(params, lr=learning_rate)
 
 
+def flow_matching_velocity_target(latents: Any, noise: Any) -> Any:
+    """Training target for the RAW Z-Image transformer output: ``latents - noise``.
+
+    This is the **negated** flow-matching velocity, and the sign is load-bearing.
+    diffusers' ``ZImagePipeline`` negates the transformer output before handing it
+    to ``FlowMatchEulerDiscreteScheduler.step`` (``noise_pred = -noise_pred``), and
+    that scheduler integrates its input as the velocity ``noise - latents`` (for
+    ``x_sigma = (1 - sigma) * latents + sigma * noise``). So the raw output the
+    transformer is trained to produce is ``-(noise - latents) = latents - noise``.
+    Regressing toward ``noise - latents`` would train the LoRA to push the model in
+    the opposite denoising direction while the loss still looks like it converges.
+
+    Works on torch tensors (operator overloading) and plain numbers (for tests).
+    """
+    return latents - noise
+
+
 def bucket_resolution(resolution: int) -> int:
     """Floor a resolution to a multiple of 32 (Z-Image VAE factor 16 × patch 2),
     with a sane minimum."""
@@ -697,17 +714,18 @@ class _ZImageLoraBackend:
         embeds = self._embeds[index].to(device)
 
         # Rectified-flow / flow-matching training: interpolate between the clean
-        # latent (t=0) and noise (t=1); the velocity target is ``noise - latents``
-        # (ai-toolkit). The transformer takes the timestep scaled as
-        # ``(1000 - timestep) / 1000`` and per-item latent/embed lists, mirroring
-        # ZImagePipeline.__call__.
+        # latent (t=0) and noise (t=1). The transformer takes the timestep scaled
+        # as ``(1000 - timestep) / 1000`` and per-item latent/embed lists,
+        # mirroring ZImagePipeline.__call__. The target sign matches the diffusers
+        # pipeline, which negates the raw transformer output before the scheduler
+        # (see flow_matching_velocity_target).
         noise = torch.randn(
             latents.shape, generator=self._generator, device=device, dtype=latents.dtype
         )
         t = torch.rand(1, generator=self._generator, device=device, dtype=latents.dtype)
         t = t.clamp(1e-3, 1.0 - 1e-3)
         noisy = (1.0 - t) * latents + t * noise
-        target = noise - latents
+        target = flow_matching_velocity_target(latents, noise)
         timestep = t * 1000.0
         timestep_model_input = (1000.0 - timestep) / 1000.0
 

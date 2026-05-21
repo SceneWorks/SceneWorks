@@ -32,11 +32,16 @@ VIDEO_JOB_TYPES = ("video_generate", "video_extend", "video_bridge", "person_rep
 # crates/sceneworks-core/src/jobs_store.rs::job_requires_gpu and
 # apps/web/src/screens/QueueScreen.jsx::gpuRequiredJobTypes.
 SUPPORTED_JOB_TYPES = IMAGE_JOB_TYPES + VIDEO_JOB_TYPES
-# Training is GPU-required like generation, but a GPU worker advertises it even
-# without an inference backend: the dry-run path only validates a Rust-resolved
-# plan (no torch needed). A real (non-dry-run) run loads the kernel and requires
-# the inference backend, which the kernel enforces and reports clearly if absent.
+# Training is GPU-required like generation, but a GPU worker advertises lora_train
+# even without an inference backend: the dry-run path only validates a Rust-resolved
+# plan (no torch needed). Real (non-dry-run) execution needs the backend, so it is
+# advertised as a distinct capability (TRAINING_EXECUTE_CAPABILITIES) only when the
+# backend is available — the Rust dispatcher routes dryRun:false jobs only to workers
+# that advertise it, instead of letting a torch-less worker claim and fail one. Keep
+# in sync with crates/sceneworks-core/src/contracts.rs::WorkerCapability and
+# jobs_store::worker_supports_job.
 TRAINING_JOB_TYPES = ("lora_train",)
+TRAINING_EXECUTE_CAPABILITIES = ("lora_train_execute",)
 
 
 def now() -> str:
@@ -75,6 +80,9 @@ def worker_capabilities(gpu: dict) -> list[str]:
         capabilities |= set(TRAINING_JOB_TYPES)
         if torch_inference_backend_available():
             capabilities |= set(SUPPORTED_JOB_TYPES)
+            # Only a backend-capable worker advertises real training execution, so
+            # the queue won't route a dryRun:false job to a worker that can't train.
+            capabilities |= set(TRAINING_EXECUTE_CAPABILITIES)
     return sorted(capabilities)
 
 

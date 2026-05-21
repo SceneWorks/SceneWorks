@@ -60,8 +60,9 @@ SceneWorks storage, config defaults, or the target registry directly.
   (:class:`ZImageLoraTrainer`), an image LoRA trainer for Z-Image-Turbo. It loads
   the diffusers `ZImagePipeline` components (transformer, VAE, Qwen3 text encoder)
   via `from_pretrained`, attaches a PEFT LoRA to the transformer, caches per-item
-  latents and prompt embeddings, runs a flow-matching loop (velocity target
-  `noise - latents`, timestep `(1000 - t) / 1000`), and writes a `.safetensors`
+  latents and prompt embeddings, runs a flow-matching loop (the raw transformer-output
+  target is `latents - noise` — the negated velocity, since the pipeline negates the
+  output before the scheduler — at timestep `(1000 - t) / 1000`), and writes a `.safetensors`
   adapter with `ZImagePipeline.save_lora_weights`. It reports preparing,
   loading, caching, training, checkpointing (every `saveEvery` steps), and saving
   stages, and honors cancellation between steps. A real run requires the
