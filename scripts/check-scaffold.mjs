@@ -10,6 +10,8 @@ const requiredPaths = [
   "apps/web/src/styles.css",
   "apps/rust-api/Cargo.toml",
   "apps/rust-api/src/main.rs",
+  "apps/desktop/Cargo.toml",
+  "apps/desktop/src/main.rs",
   "apps/worker/scene_worker/runtime.py",
   "crates/sceneworks-core/Cargo.toml",
   "crates/sceneworks-core/src/lib.rs",
@@ -46,6 +48,7 @@ for (const requiredPath of requiredPaths) {
 
 await assertContains("apps/web/src/App.jsx", "/api/v1/health");
 await assertContains("Cargo.toml", "apps/rust-api");
+await assertContains("Cargo.toml", "apps/desktop");
 await assertContains("crates/sceneworks-core/src/lib.rs", "/api/v1/health");
 await assertContains("docker-compose.yml", "NVIDIA_VISIBLE_DEVICES");
 await assertContains("docker-compose.yml", "dockerfile: docker/rust-api.Dockerfile");

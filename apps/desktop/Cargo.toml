@@ -1,0 +1,15 @@
+[package]
+name = "sceneworks-desktop"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish = false
+
+# Placeholder desktop shell crate (sc-1331). The Tauri scaffold (WebView2 +
+# WebKit) and its dependencies land in sc-1345; this crate exists now so the
+# apps/desktop workspace member is wired into the Cargo workspace and CI checks.
+
+[dependencies]
+
+[lints]
+workspace = true
