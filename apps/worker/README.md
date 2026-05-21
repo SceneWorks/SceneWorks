@@ -44,6 +44,41 @@ override them through matching advanced settings.
 Use `advanced.mockNativeInference=true` only for adapter smoke tests; otherwise
 the native adapter loads `ltx-pipelines` and writes MP4 video assets.
 
+## Replace Person: detection, tracking, segmentation (`person_detect` / `person_track`)
+
+Real person detection and tracking run here, in the GPU worker, replacing the
+Rust utility worker's procedural placeholders (epic sc-1090). The backends live
+in `scene_worker/person_adapters.py` and are imported lazily, so the worker stays
+importable without them:
+
+- **Detection (`person_detect`)** runs Ultralytics YOLO over a representative
+  frame and returns pixel-derived candidate boxes with confidence and
+  adapter/model/runtime metadata. No-person frames return no candidates.
+- **Tracking (`person_track`)** follows the selected detection through real
+  source-video frames with YOLO + ByteTrack/BoT-SORT, samples the track, and
+  writes a reusable person-track sidecar. Lost/low-confidence frames are recorded
+  honestly (`detected: false`, flagged) rather than fabricated.
+- **Segmentation** generates per-frame person masks with SAM2 (or MatAnyone),
+  stored under `person-tracks/{id}/masks/`. Without a segmenter the track records
+  `maskState: degraded` and replacement falls back to box masks.
+
+Install these backends with `apps/worker/requirements-person.txt` (Docker Compose
+builds them by default; opt out with `INCLUDE_PERSON_BACKENDS=0`). A GPU worker
+advertises `person_detect` / `person_track` / `person_segment` only when the
+corresponding backend is installed, so a real job never routes to a worker that
+cannot run it. The Rust utility worker advertises `person_detect_preview` /
+`person_track_preview` and serves the procedural preview only for jobs created
+with `preview: true`.
+
+**Replace Person (`replace_person`)** on LTX-2.3 runs through the native
+`ltx_pipelines` adapter: it builds a masked control clip from the source frames +
+person-track masks + masking strength and injects it through the IC-LoRA
+video-conditioning path. The output sidecar sets `replacementActive: true` only
+when that real masked-control path ran (mocked/preview runs leave it false). Wan
+remains a secondary VACE/masked-conditioning path. Replacement requires a source
+clip, a saved person track, an approved character reference, and an installed
+LTX IC-LoRA; the job fails clearly when any are missing.
+
 ## Native LoRA training (`lora_train`)
 
 Training jobs carry a fully normalized, Rust-resolved `TrainingPlan` (see
