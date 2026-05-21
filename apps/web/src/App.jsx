@@ -1921,10 +1921,10 @@ export function App() {
             createDataset={createTrainingDataset}
             datasets={trainingDatasetsProjectId === activeProject?.id ? trainingDatasets : []}
             datasetsError={trainingDatasetsError}
+            gpuOptions={gpuOptions}
             importAsset={(file) => importAsset(file, { throwOnError: true })}
             loadDataset={loadTrainingDataset}
             loadingDatasets={loadingTrainingDatasets}
-            gpuOptions={gpuOptions}
             onPreview={setPreviewAsset}
             onRefreshDatasets={() => refreshTrainingDatasets(activeProject?.id)}
             trainingTargets={trainingTargets.targets ?? []}

@@ -628,6 +628,122 @@ describe("SceneWorks app shell", () => {
     expect(container.textContent).toContain("Config snapshot ready");
   });
 
+  it("keeps config edits when GPU options are recomputed", async () => {
+    const loadDataset = vi.fn(async () => ({
+      id: "dataset-a",
+      name: "Portrait Set",
+      version: 5,
+      items: [
+        {
+          id: "item_0001",
+          assetId: "asset-a",
+          path: "images/item_0001.png",
+          displayName: "item_0001.png",
+          caption: { text: "mira portrait", source: "manual", triggerWords: ["mira"] },
+        },
+      ],
+    }));
+
+    function render(gpuOptions) {
+      root.render(
+        <TrainingStudio
+          activeProject={{ id: "project-a", name: "Project A" }}
+          datasets={[{ id: "dataset-a", name: "Portrait Set", modality: "image", itemCount: 1 }]}
+          gpuOptions={gpuOptions}
+          loadDataset={loadDataset}
+          trainingTargets={[zImageTrainingTarget]}
+        />,
+      );
+    }
+
+    root = createRoot(container);
+    await act(async () => {
+      render(["auto", "0"]);
+    });
+    await settle();
+    await act(async () => {
+      container.querySelector("#training-tab-configure").click();
+    });
+    await changeField(field(container, "Dataset"), "dataset-a");
+    await settle();
+    await changeField(field(container, "Trigger phrase"), "miraStyle");
+    await changeField(field(container, "Rank"), "24");
+    await changeField(field(container, "Requested GPU"), "0");
+
+    await act(async () => {
+      render(["auto", "0"]);
+    });
+    await settle();
+
+    expect(field(container, "Trigger phrase").value).toBe("miraStyle");
+    expect(field(container, "Rank").value).toBe("24");
+    expect(field(container, "Requested GPU").value).toBe("0");
+
+    await act(async () => {
+      render(["auto"]);
+    });
+    await settle();
+
+    expect(field(container, "Trigger phrase").value).toBe("miraStyle");
+    expect(field(container, "Rank").value).toBe("24");
+    expect(field(container, "Requested GPU").value).toBe("auto");
+  });
+
+  it("blocks config preparation until required fields are valid", async () => {
+    const loadDataset = vi.fn(async () => ({
+      id: "dataset-a",
+      name: "Portrait Set",
+      version: 5,
+      items: [
+        {
+          id: "item_0001",
+          assetId: "asset-a",
+          path: "images/item_0001.png",
+          displayName: "item_0001.png",
+          caption: { text: "mira portrait", source: "manual", triggerWords: ["mira"] },
+        },
+      ],
+    }));
+    const prepareTrainingConfig = vi.fn();
+
+    root = createRoot(container);
+    await act(async () => {
+      root.render(
+        <TrainingStudio
+          activeProject={{ id: "project-a", name: "Project A" }}
+          datasets={[{ id: "dataset-a", name: "Portrait Set", modality: "image", itemCount: 1 }]}
+          loadDataset={loadDataset}
+          prepareTrainingConfig={prepareTrainingConfig}
+          trainingTargets={[zImageTrainingTarget]}
+        />,
+      );
+    });
+    await settle();
+    await act(async () => {
+      container.querySelector("#training-tab-configure").click();
+    });
+
+    expect(container.textContent).toContain("Select a saved dataset");
+    expect(container.textContent).toContain("Add a trigger phrase");
+    expect([...container.querySelectorAll("button")].find((button) => button.textContent === "Prepare config").disabled).toBe(true);
+
+    await changeField(field(container, "Dataset"), "dataset-a");
+    await settle();
+    await changeField(field(container, "Trigger phrase"), "miraStyle");
+    await changeField(field(container, "Checkpoint cadence"), "");
+
+    const prepareButton = [...container.querySelectorAll("button")].find((button) => button.textContent === "Prepare config");
+    expect(container.textContent).toContain("Checkpoint cadence must be greater than zero");
+    expect(prepareButton.disabled).toBe(true);
+
+    await act(async () => {
+      prepareButton.click();
+    });
+    await settle();
+
+    expect(prepareTrainingConfig).not.toHaveBeenCalled();
+  });
+
   it("selects duplicate-titled assets through the thumbnail asset picker", async () => {
     const onChange = vi.fn();
     const assets = [

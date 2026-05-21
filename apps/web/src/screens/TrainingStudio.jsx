@@ -152,7 +152,11 @@ function numericDraft(value) {
 }
 
 function numberFromDraft(value) {
-  const number = Number(value);
+  const trimmed = String(value ?? "").trim();
+  if (!trimmed) {
+    return null;
+  }
+  const number = Number(trimmed);
   return Number.isFinite(number) ? number : null;
 }
 
@@ -171,8 +175,9 @@ function configDraftFromTarget(target, dataset, gpuOptions) {
   const advanced = defaults.advanced ?? {};
   const firstGpu = gpuOptions[0] ?? "";
   const requestedGpu = asText(advanced.requestedGpu || firstGpu);
+  const outputLabel = outputKindLabel(target);
   return {
-    outputName: dataset?.name ? `${dataset.name} LoRA` : "",
+    outputName: dataset?.name ? `${dataset.name} ${outputLabel}` : "",
     triggerWord: asText(defaults.triggerWord),
     outputScope: asText(advanced.outputScope),
     qualityPreset: asText(advanced.qualityPreset),
@@ -205,7 +210,7 @@ function configValidation({ activeDataset, configDraft, selectedTarget }) {
     warnings.push("Select a saved dataset");
   }
   if (!configDraft.outputName?.trim()) {
-    warnings.push("Name the LoRA output");
+    warnings.push(`Name the ${outputKindLabel(selectedTarget)} output`);
   }
   if (!configDraft.triggerWord?.trim()) {
     warnings.push("Add a trigger phrase");
@@ -216,6 +221,9 @@ function configValidation({ activeDataset, configDraft, selectedTarget }) {
     ["learningRate", "Learning rate"],
     ["steps", "Steps"],
     ["resolution", "Resolution"],
+    ["batchSize", "Batch size"],
+    ["gradientAccumulation", "Gradient accumulation"],
+    ["saveEvery", "Checkpoint cadence"],
   ]) {
     const value = numberFromDraft(configDraft[field]);
     if (!value || value <= 0) {
@@ -223,6 +231,14 @@ function configValidation({ activeDataset, configDraft, selectedTarget }) {
     }
   }
   return warnings;
+}
+
+function outputKindLabel(target) {
+  const kind = String(target?.outputKind ?? "output").toLowerCase();
+  if (kind === "lora") {
+    return "LoRA";
+  }
+  return kind.replaceAll("_", " ");
 }
 
 function trainingConfigSnapshot({ activeDataset, configDraft, selectedTarget }) {
@@ -296,13 +312,13 @@ export function TrainingStudio({
   createDataset = async () => null,
   datasets = [],
   datasetsError = "",
+  gpuOptions = defaultGpuOptions,
   importAsset = async () => null,
   loadDataset = async () => null,
   loadingDatasets = false,
-  gpuOptions = defaultGpuOptions,
   onPreview = () => {},
-  prepareTrainingConfig = async (snapshot) => snapshot,
   onRefreshDatasets = () => {},
+  prepareTrainingConfig = async (snapshot) => snapshot,
   trainingTargets = [],
   trainingTargetsError = "",
   updateDataset = async () => null,
@@ -328,6 +344,7 @@ export function TrainingStudio({
   const [configMessage, setConfigMessage] = useState("");
   const [configError, setConfigError] = useState("");
   const [preparingConfig, setPreparingConfig] = useState(false);
+  const configBasisRef = useRef("");
   const tabRefs = useRef({});
 
   const activeIndex = tabs.findIndex((tab) => tab.id === activeTab);
@@ -369,6 +386,7 @@ export function TrainingStudio({
   const qualityPresets = rangeOptions(selectedTarget?.limits, "qualityPresets");
   const outputScopes = rangeOptions(selectedTarget?.limits, "outputScopes");
   const resolutionOptions = rangeOptions(selectedTarget?.limits, "resolutions");
+  const gpuOptionsKey = gpuOptions.join("\u0000");
   const configWarnings = configValidation({ activeDataset, configDraft, selectedTarget });
   const canPrepareConfig = configWarnings.length === 0 && !preparingConfig;
 
@@ -385,6 +403,7 @@ export function TrainingStudio({
     setConfigSnapshot(null);
     setConfigMessage("");
     setConfigError("");
+    configBasisRef.current = "";
   }, [activeProject?.id]);
 
   useEffect(() => {
@@ -400,14 +419,31 @@ export function TrainingStudio({
 
   useEffect(() => {
     if (!selectedTarget) {
-      setConfigDraft({});
+      if (configBasisRef.current) {
+        configBasisRef.current = "";
+        setConfigDraft({});
+      }
       return;
     }
+    const basis = `${selectedTarget.id}\u0000${activeDataset?.id ?? ""}`;
+    if (configBasisRef.current === basis) {
+      return;
+    }
+    configBasisRef.current = basis;
     setConfigDraft(configDraftFromTarget(selectedTarget, activeDataset, gpuOptions));
     setConfigSnapshot(null);
     setConfigMessage("");
     setConfigError("");
-  }, [activeDataset?.id, gpuOptions, selectedTarget]);
+  }, [activeDataset?.id, selectedTarget?.id]);
+
+  useEffect(() => {
+    setConfigDraft((current) => {
+      if (!current.requestedGpu || gpuOptions.includes(current.requestedGpu)) {
+        return current;
+      }
+      return { ...current, requestedGpu: gpuOptions[0] ?? "" };
+    });
+  }, [gpuOptionsKey]);
 
   function focusTab(index) {
     const next = tabs[(index + tabs.length) % tabs.length];
