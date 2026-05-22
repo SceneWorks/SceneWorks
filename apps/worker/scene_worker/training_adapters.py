@@ -715,6 +715,7 @@ class _ZImageLoraBackend:
             else config.lora_target_modules,
         )
         transformer.add_adapter(lora_config)
+        self._activate_lora_adapter(transformer)
         transformer.train()
         trainable = [param for param in transformer.parameters() if param.requires_grad]
         if not trainable:
@@ -866,6 +867,7 @@ class _ZImageLoraBackend:
         sample_dir.mkdir(parents=True, exist_ok=True)
         stem = Path(file_name).stem or "lora"
         was_training = bool(getattr(transformer, "training", False))
+        self._activate_lora_adapter(transformer)
         transformer.eval()
         samples: list[dict[str, Any]] = []
         try:
@@ -898,6 +900,30 @@ class _ZImageLoraBackend:
             if was_training:
                 transformer.train()
         return samples
+
+    def _activate_lora_adapter(self, transformer: Any) -> None:
+        for method_name in ("set_adapter", "enable_adapters"):
+            method = getattr(transformer, method_name, None)
+            if method is None:
+                continue
+            try:
+                if method_name == "set_adapter":
+                    method("default")
+                else:
+                    method()
+                emit_worker_event(
+                    "training_lora_adapter_active",
+                    kernel=ZImageLoraTrainer.kernel_id,
+                    method=method_name,
+                )
+                return
+            except Exception as exc:
+                emit_worker_event(
+                    "training_lora_adapter_activation_failed",
+                    kernel=ZImageLoraTrainer.kernel_id,
+                    method=method_name,
+                    error=str(exc),
+                )
 
     def save_final(self, *, output_dir: str, file_name: str) -> str:
         return self._save_lora(output_dir=output_dir, file_name=file_name)

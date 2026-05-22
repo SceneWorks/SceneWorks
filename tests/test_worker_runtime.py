@@ -64,6 +64,7 @@ from scene_worker.training_adapters import (
     SUPPORTED_TRAINING_PLAN_VERSION,
     TrainingKernelError,
     ZImageLoraTrainer,
+    _ZImageLoraBackend,
     build_optimizer,
     bucket_resolution,
     create_training_kernel,
@@ -1307,6 +1308,21 @@ def test_build_optimizer_uses_prodigy_with_aitoolkit_lr_floor(monkeypatch):
 
     assert isinstance(optimizer, FakeProdigy)
     assert calls == {"params": params, "kwargs": {"lr": 1.0, "eps": 1e-6}}
+
+
+def test_z_image_lora_backend_activates_default_adapter():
+    class FakeTransformer:
+        def __init__(self):
+            self.adapter_name = None
+
+        def set_adapter(self, name):
+            self.adapter_name = name
+
+    transformer = FakeTransformer()
+
+    _ZImageLoraBackend()._activate_lora_adapter(transformer)
+
+    assert transformer.adapter_name == "default"
 
 
 def test_read_run_config_defaults_lora_target_modules_and_parses_advanced():

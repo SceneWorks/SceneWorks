@@ -8673,7 +8673,7 @@ mod tests {
                 "items": [{
                     "itemId": "item_0001",
                     "caption": {
-                        "text": "miraStyle studio portrait",
+                        "text": "studio portrait",
                         "triggerWords": ["miraStyle"]
                     }
                 }]
@@ -8696,7 +8696,7 @@ mod tests {
                     .join("item_0001.txt")
             )
             .expect("caption sidecar writes"),
-            "miraStyle studio portrait\n"
+            "miraStyle, studio portrait\n"
         );
 
         let (status, caption_job) = request(
@@ -8769,7 +8769,7 @@ mod tests {
         assert_eq!(
             std::fs::read_to_string(renamed_image_path.with_extension("txt"))
                 .expect("caption sidecar follows rename"),
-            "miraStyle studio portrait\n"
+            "miraStyle, studio portrait\n"
         );
 
         let (status, error) = request(
