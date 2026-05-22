@@ -178,18 +178,6 @@ function parseTriggerWords(value) {
     .filter(Boolean);
 }
 
-function datasetTriggerWordsText(dataset) {
-  const words = [];
-  for (const item of dataset?.items ?? []) {
-    for (const word of item.caption?.triggerWords ?? item.caption?.trigger_words ?? []) {
-      if (!words.some((existing) => existing.toLowerCase() === String(word).toLowerCase())) {
-        words.push(String(word));
-      }
-    }
-  }
-  return words.join(", ");
-}
-
 function captionSeedFromName(value) {
   const name = String(value ?? "")
     .replaceAll("\\", "/")
@@ -656,7 +644,8 @@ export function TrainingStudio({
   useEffect(() => {
     setRenameCaptionDraftItems(renameCaptionDrafts(activeDataset));
     setRenamePrefix(safeSlug(activeDataset?.name, "item"));
-    setCaptionTriggerWords(datasetTriggerWordsText(activeDataset));
+    setCaptionTriggerWords(String(activeDataset?.name ?? "").trim());
+    setCaptionSettings((current) => ({ ...current, nameInput: String(activeDataset?.name ?? "").trim() }));
   }, [activeDataset]);
 
   useEffect(() => {
@@ -1378,7 +1367,7 @@ export function TrainingStudio({
                                 </select>
                               </label>
                               <label>
-                                Name
+                                Character Name
                                 <input
                                   onChange={(event) => updateCaptionSetting("nameInput", event.target.value)}
                                   value={captionSettings.nameInput}

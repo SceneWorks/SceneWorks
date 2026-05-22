@@ -767,7 +767,7 @@ describe("SceneWorks app shell", () => {
     await settle();
 
     expect(writeCaptionSidecars).toHaveBeenCalledWith("dataset-a", {
-      items: [{ itemId: "item_0001", caption: { text: "", source: "manual", triggerWords: ["miraStyle"] } }],
+      items: [{ itemId: "item_0001", caption: { text: "", source: "manual", triggerWords: ["Portrait Set"] } }],
     });
     expect(createCaptionJob).toHaveBeenCalledWith(
       "dataset-a",
@@ -855,17 +855,17 @@ describe("SceneWorks app shell", () => {
         {
           itemId: "item_0001",
           caption: {
-            text: "miraStyle, studio portrait with soft light",
+            text: "Portrait Set, studio portrait with soft light",
             source: "auto",
-            triggerWords: ["miraStyle"],
+            triggerWords: ["Portrait Set"],
           },
         },
       ],
     });
-    expect(container.textContent).toContain("miraStyle, studio portrait with soft light");
+    expect(container.textContent).toContain("Portrait Set, studio portrait with soft light");
   });
 
-  it("applies sidebar trigger words to every training caption item", async () => {
+  it("prefills caption sidebar defaults from the dataset name", async () => {
     const loadDataset = vi.fn(async () => ({
       id: "dataset-a",
       name: "Portrait Set",
@@ -915,7 +915,8 @@ describe("SceneWorks app shell", () => {
     await act(async () => {
       container.querySelector("#training-tab-rename-caption").click();
     });
-    expect(field(container, "Trigger words").value).toBe("oldOne, oldTwo");
+    expect(field(container, "Trigger words").value).toBe("Portrait Set");
+    expect(field(container, "Character Name").value).toBe("Portrait Set");
     await changeField(field(container, "Trigger words"), "miraStyle, portraitSet");
     await act(async () => {
       [...container.querySelectorAll("button")].find((button) => button.textContent === "Create Captions").click();
