@@ -12,6 +12,7 @@ from PIL import Image
 import pytest
 
 from scene_worker.adapter_utils import filter_call_kwargs
+from scene_worker.caption_adapters import JoyCaptionOptions, build_joy_caption_prompt, caption_with_trigger_words
 from scene_worker.image_adapters import (
     ImageAssetWriter,
     MODEL_TARGETS,
@@ -143,6 +144,7 @@ def test_gpu_worker_advertises_generation_capabilities(monkeypatch):
 
     assert "image_generate" in capabilities
     assert "video_generate" in capabilities
+    assert "training_caption" in capabilities
     assert "person_replace" in capabilities
     assert "placeholder" not in capabilities
 
@@ -154,7 +156,7 @@ def test_gpu_worker_without_cuda_torch_does_not_claim_generation_jobs(monkeypatc
     # lora_train dry-run validation needs no inference backend, so it is
     # advertised even without torch; generation job types are not.
     assert capabilities == ["gpu", "lora_train", "nvidia"]
-    for job_type in ("image_generate", "image_edit", "video_generate"):
+    for job_type in ("image_generate", "image_edit", "video_generate", "training_caption"):
         assert job_type not in capabilities
 
 
@@ -182,6 +184,7 @@ def test_python_worker_only_advertises_inference_job_capabilities(monkeypatch):
         "lora_train",
         "lora_train_execute",
         "person_replace",
+        "training_caption",
         "video_bridge",
         "video_extend",
         "video_generate",
@@ -1061,6 +1064,26 @@ def test_is_cuda_oom_detects_oom_by_type_and_message():
     assert not is_cuda_oom(RuntimeError("some other failure"))
 
 
+def test_joy_caption_prompt_builder_applies_length_and_name_options():
+    options = JoyCaptionOptions(
+        caption_type="Descriptive",
+        caption_length="40",
+        extra_options=["If there is a person/character in the image you must refer to them as {name}."],
+        name_input="Mira",
+    )
+
+    prompt = build_joy_caption_prompt(options)
+
+    assert "40 words or less" in prompt
+    assert "Mira" in prompt
+
+
+def test_caption_with_trigger_words_prepends_missing_tokens():
+    caption = caption_with_trigger_words("studio portrait with soft light", ["miraStyle", "studio"])
+
+    assert caption == "miraStyle, studio portrait with soft light"
+
+
 def test_worker_check_reports_inference_sidecar_capabilities(monkeypatch):
     events = []
     monkeypatch.setattr("scene_worker.runtime.emit", events.append)
@@ -1085,6 +1108,8 @@ def test_worker_check_reports_inference_sidecar_capabilities(monkeypatch):
         "person_replace",
         "person_detect",
         "person_track",
+        "lora_train",
+        "training_caption",
     ]
     assert events[0]["supportedJobTypes"] == events[0]["jobTypes"]
 

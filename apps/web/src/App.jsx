@@ -892,6 +892,23 @@ export function App() {
     return result;
   }
 
+  async function createTrainingDatasetCaptionJob(datasetId, payload, projectId = activeProject?.id) {
+    if (!projectId || !datasetId) {
+      throw new Error("Select a training dataset first.");
+    }
+    const job = await apiFetch(
+      `/api/v1/projects/${projectId}/training/datasets/${encodeURIComponent(datasetId)}/caption-jobs`,
+      token,
+      {
+        method: "POST",
+        body: JSON.stringify(payload),
+      },
+    );
+    setJobs((items) => [job, ...items.filter((item) => item.id !== job.id)].sort(sortNewest));
+    setError("");
+    return job;
+  }
+
   async function createTrainingJob(request, projectId = activeProject?.id) {
     if (!projectId) {
       throw new Error("Select a workspace before creating a training job.");
@@ -2040,6 +2057,7 @@ export function App() {
             assets={assets}
             batchRenameDataset={batchRenameTrainingDataset}
             createDataset={createTrainingDataset}
+            createCaptionJob={createTrainingDatasetCaptionJob}
             createTrainingJob={createTrainingJob}
             datasets={trainingDatasetsProjectId === activeProject?.id ? trainingDatasets : []}
             datasetsError={trainingDatasetsError}

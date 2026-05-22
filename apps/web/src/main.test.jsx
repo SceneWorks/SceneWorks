@@ -657,6 +657,7 @@ describe("SceneWorks app shell", () => {
       },
       sidecars: [{ itemId: "item_0007", captionPath: "training/datasets/dataset-a/images/mira_0007.txt" }],
     }));
+    const createCaptionJob = vi.fn(async () => ({ id: "job-caption-1", type: "training_caption" }));
 
     root = createRoot(container);
     await act(async () => {
@@ -665,6 +666,7 @@ describe("SceneWorks app shell", () => {
           activeProject={{ id: "project-a", name: "Project A" }}
           assets={[{ id: "asset-a", type: "image", displayName: "Mira.png", file: { path: "assets/images/Mira.png", mimeType: "image/png" } }]}
           batchRenameDataset={batchRenameDataset}
+          createCaptionJob={createCaptionJob}
           datasets={[{ id: "dataset-a", name: "Portrait Set", modality: "image", itemCount: 1 }]}
           loadDataset={loadDataset}
           writeCaptionSidecars={writeCaptionSidecars}
@@ -685,7 +687,7 @@ describe("SceneWorks app shell", () => {
     await changeField(field(container, "Caption"), "mira studio portrait");
     await changeField(field(container, "Trigger words"), "mira, studio");
     await act(async () => {
-      [...container.querySelectorAll("button")].find((button) => button.textContent === "Write sidecars").click();
+      [...container.querySelectorAll("button")].find((button) => button.textContent === "Create Captions").click();
     });
     await settle();
 
@@ -707,7 +709,156 @@ describe("SceneWorks app shell", () => {
         },
       ],
     });
-    expect(container.textContent).toContain("Caption sidecars written (1)");
+    expect(createCaptionJob).not.toHaveBeenCalled();
+    expect(container.textContent).toContain("Captions created (1)");
+  });
+
+  it("queues Joy Caption for missing training captions", async () => {
+    const loadDataset = vi.fn(async () => ({
+      id: "dataset-a",
+      name: "Portrait Set",
+      version: 3,
+      items: [
+        {
+          id: "item_0001",
+          assetId: "asset-a",
+          path: "images/item_0001.png",
+          displayName: "item_0001.png",
+          caption: { text: "", source: "manual", triggerWords: ["miraStyle"] },
+        },
+      ],
+    }));
+    const writeCaptionSidecars = vi.fn(async (datasetId, payload) => ({
+      dataset: {
+        id: datasetId,
+        name: "Portrait Set",
+        version: 4,
+        items: [{ id: "item_0001", assetId: "asset-a", path: "images/item_0001.png", caption: payload.items[0].caption }],
+      },
+      sidecars: [{ itemId: "item_0001", captionPath: "training/datasets/dataset-a/images/item_0001.txt" }],
+    }));
+    const createCaptionJob = vi.fn(async () => ({ id: "job-caption-1", type: "training_caption" }));
+
+    root = createRoot(container);
+    await act(async () => {
+      root.render(
+        <TrainingStudio
+          activeProject={{ id: "project-a", name: "Project A" }}
+          assets={[{ id: "asset-a", type: "image", displayName: "Mira.png", file: { path: "assets/images/Mira.png", mimeType: "image/png" } }]}
+          createCaptionJob={createCaptionJob}
+          datasets={[{ id: "dataset-a", name: "Portrait Set", modality: "image", itemCount: 1 }]}
+          loadDataset={loadDataset}
+          writeCaptionSidecars={writeCaptionSidecars}
+        />,
+      );
+    });
+
+    await act(async () => {
+      [...container.querySelectorAll(".training-dataset-row")].find((button) => button.textContent.includes("Portrait Set")).click();
+    });
+    await settle();
+    await act(async () => {
+      container.querySelector("#training-tab-rename-caption").click();
+    });
+    await act(async () => {
+      [...container.querySelectorAll("button")].find((button) => button.textContent === "Create Captions").click();
+    });
+    await settle();
+
+    expect(writeCaptionSidecars).toHaveBeenCalledWith("dataset-a", {
+      items: [{ itemId: "item_0001", caption: { text: "", source: "manual", triggerWords: ["miraStyle"] } }],
+    });
+    expect(createCaptionJob).toHaveBeenCalledWith(
+      "dataset-a",
+      expect.objectContaining({
+        captioner: "joy_caption",
+        recaption: false,
+        requestedGpu: "auto",
+      }),
+    );
+    expect(container.textContent).toContain("Caption job queued (job-caption-1)");
+  });
+
+  it("uses metadata fallback for missing training captions before writing sidecars", async () => {
+    const loadDataset = vi.fn(async () => ({
+      id: "dataset-a",
+      name: "Portrait Set",
+      version: 3,
+      items: [
+        {
+          id: "item_0001",
+          assetId: "asset-a",
+          path: "images/item_0001.png",
+          displayName: "item_0001.png",
+          caption: { text: "", source: "manual", triggerWords: ["miraStyle"] },
+        },
+      ],
+    }));
+    const writeCaptionSidecars = vi.fn(async (datasetId, payload) => ({
+      dataset: {
+        id: datasetId,
+        name: "Portrait Set",
+        version: 4,
+        items: [
+          {
+            id: "item_0001",
+            assetId: "asset-a",
+            path: "images/item_0001.png",
+            displayName: "item_0001.png",
+            caption: payload.items[0].caption,
+          },
+        ],
+      },
+      sidecars: [{ itemId: "item_0001", captionPath: "training/datasets/dataset-a/images/item_0001.txt" }],
+    }));
+
+    root = createRoot(container);
+    await act(async () => {
+      root.render(
+        <TrainingStudio
+          activeProject={{ id: "project-a", name: "Project A" }}
+          assets={[
+            {
+              id: "asset-a",
+              type: "image",
+              displayName: "Mira.png",
+              file: { path: "assets/images/Mira.png", mimeType: "image/png" },
+              recipe: { prompt: "studio portrait with soft light" },
+            },
+          ]}
+          datasets={[{ id: "dataset-a", name: "Portrait Set", modality: "image", itemCount: 1 }]}
+          loadDataset={loadDataset}
+          writeCaptionSidecars={writeCaptionSidecars}
+        />,
+      );
+    });
+
+    await act(async () => {
+      [...container.querySelectorAll(".training-dataset-row")].find((button) => button.textContent.includes("Portrait Set")).click();
+    });
+    await settle();
+    await act(async () => {
+      container.querySelector("#training-tab-rename-caption").click();
+    });
+    await changeField(field(container, "Method"), "metadata");
+    await act(async () => {
+      [...container.querySelectorAll("button")].find((button) => button.textContent === "Create Captions").click();
+    });
+    await settle();
+
+    expect(writeCaptionSidecars).toHaveBeenCalledWith("dataset-a", {
+      items: [
+        {
+          itemId: "item_0001",
+          caption: {
+            text: "miraStyle, studio portrait with soft light",
+            source: "auto",
+            triggerWords: ["miraStyle"],
+          },
+        },
+      ],
+    });
+    expect(container.textContent).toContain("miraStyle, studio portrait with soft light");
   });
 
   it("builds a training config snapshot from registry defaults", async () => {

@@ -8,6 +8,74 @@ const tabs = [
   { id: "configure", label: "Configure Job", title: "Configure training job", status: "Queue dry run" },
 ];
 const defaultGpuOptions = ["auto"];
+const joyCaptionModel = "fancyfeast/llama-joycaption-beta-one-hf-llava";
+const joyCaptionTypes = [
+  "Descriptive",
+  "Descriptive (Casual)",
+  "Straightforward",
+  "Stable Diffusion Prompt",
+  "MidJourney",
+  "Danbooru tag list",
+  "e621 tag list",
+  "Rule34 tag list",
+  "Booru-like tag list",
+  "Art Critic",
+  "Product Listing",
+  "Social Media Post",
+];
+const joyCaptionLengths = [
+  "any",
+  "very short",
+  "short",
+  "medium-length",
+  "long",
+  "very long",
+  "20",
+  "30",
+  "40",
+  "50",
+  "60",
+  "80",
+  "100",
+  "120",
+  "160",
+  "200",
+  "260",
+];
+const joyCaptionExtraOptions = [
+  { value: "If there is a person/character in the image you must refer to them as {name}.", label: "Use character name" },
+  {
+    value:
+      "Do NOT include information about people/characters that cannot be changed (like ethnicity, gender, etc), but do still include changeable attributes (like hair style).",
+    label: "Avoid fixed traits",
+  },
+  { value: "Include information about lighting.", label: "Include lighting" },
+  { value: "Include information about camera angle.", label: "Include camera angle" },
+  { value: "Do NOT include anything sexual; keep it PG.", label: "Keep it PG" },
+  { value: "Do NOT mention the image's resolution.", label: "Skip resolution" },
+  { value: "Include information on the image's composition style, such as leading lines, rule of thirds, or symmetry.", label: "Composition style" },
+  { value: "Do NOT mention any text that is in the image.", label: "Ignore text" },
+  { value: "Specify the depth of field and whether the background is in focus or blurred.", label: "Depth of field" },
+  { value: "Do NOT use any ambiguous language.", label: "No ambiguity" },
+  { value: "ONLY describe the most important elements of the image.", label: "Important elements only" },
+  { value: "Mention whether the image depicts an extreme close-up, close-up, medium close-up, medium shot, cowboy shot, medium wide shot, wide shot, or extreme wide shot.", label: "Shot size" },
+  { value: "Your response will be used by a text-to-image model, so avoid useless meta phrases like \"This image shows...\", \"You are looking at...\", etc.", label: "No meta phrases" },
+];
+const defaultCaptionSettings = {
+  captioner: "joy_caption",
+  modelNameOrPath: joyCaptionModel,
+  recaption: false,
+  requestedGpu: "auto",
+  captionType: "Descriptive",
+  captionLength: "long",
+  extraOptions: [],
+  nameInput: "",
+  temperature: "0.6",
+  topP: "0.9",
+  maxNewTokens: "256",
+  captionPrompt: "",
+  lowVram: false,
+};
 
 function formatDatasetModality(dataset) {
   return String(dataset.modality ?? "image").replaceAll("_", " ");
@@ -46,6 +114,51 @@ function parseTriggerWords(value) {
     .split(",")
     .map((word) => word.trim())
     .filter(Boolean);
+}
+
+function captionSeedFromName(value) {
+  const name = String(value ?? "")
+    .replaceAll("\\", "/")
+    .split("/")
+    .pop()
+    ?.replace(/\.[a-z0-9]+$/i, "")
+    .replace(/#\s*\d+$/u, "")
+    .replace(/[_-]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+  return name || "";
+}
+
+function captionSeedForItem(item, asset) {
+  const prompt = String(asset?.recipe?.prompt ?? "").trim();
+  if (prompt) {
+    return prompt;
+  }
+  return (
+    captionSeedFromName(item.displayName) ||
+    captionSeedFromName(item.fileStem) ||
+    captionSeedFromName(item.path) ||
+    "training image"
+  );
+}
+
+function captionWithTriggerWords(seed, triggerWords) {
+  const normalizedSeed = String(seed ?? "").trim();
+  const lowerSeed = normalizedSeed.toLowerCase();
+  const missingTriggerWords = triggerWords.filter((word) => !lowerSeed.includes(word.toLowerCase()));
+  return [...missingTriggerWords, normalizedSeed].filter(Boolean).join(", ");
+}
+
+function captionForDraftItem(item, asset) {
+  const text = String(item.captionText ?? "").trim();
+  if (text) {
+    return { source: item.captionSource, text };
+  }
+  const triggerWords = parseTriggerWords(item.triggerWords);
+  return {
+    source: "auto",
+    text: captionWithTriggerWords(captionSeedForItem(item, asset), triggerWords),
+  };
 }
 
 function safeSlug(value, fallback = "item") {
@@ -158,6 +271,18 @@ function numberFromDraft(value) {
   }
   const number = Number(trimmed);
   return Number.isFinite(number) ? number : null;
+}
+
+function boundedNumber(value, fallback, min, max) {
+  const number = Number(value);
+  if (!Number.isFinite(number)) {
+    return fallback;
+  }
+  return Math.min(max, Math.max(min, number));
+}
+
+function integerFromDraft(value, fallback, min, max) {
+  return Math.round(boundedNumber(value, fallback, min, max));
 }
 
 function compactObject(object) {
@@ -281,6 +406,26 @@ function trainingConfigSnapshot({ activeDataset, configDraft, selectedTarget, dr
   };
 }
 
+function trainingCaptionJobPayload(settings) {
+  return {
+    captioner: "joy_caption",
+    modelNameOrPath: String(settings.modelNameOrPath ?? "").trim() || joyCaptionModel,
+    recaption: Boolean(settings.recaption),
+    requestedGpu: settings.requestedGpu || "auto",
+    options: {
+      captionType: settings.captionType,
+      captionLength: settings.captionLength,
+      extraOptions: settings.extraOptions,
+      nameInput: String(settings.nameInput ?? "").trim(),
+      temperature: boundedNumber(settings.temperature, 0.6, 0, 2),
+      topP: boundedNumber(settings.topP, 0.9, 0, 1),
+      maxNewTokens: integerFromDraft(settings.maxNewTokens, 256, 1, 1024),
+      captionPrompt: String(settings.captionPrompt ?? "").trim(),
+      lowVram: Boolean(settings.lowVram),
+    },
+  };
+}
+
 function DatasetHealth({ health }) {
   return (
     <div className="training-health-grid" aria-label="Dataset health">
@@ -309,6 +454,7 @@ export function TrainingStudio({
   authenticated = true,
   assets = [],
   batchRenameDataset = async () => null,
+  createCaptionJob = async () => null,
   createDataset = async () => null,
   createTrainingJob = async () => null,
   datasets = [],
@@ -338,6 +484,7 @@ export function TrainingStudio({
   const [renamePrefix, setRenamePrefix] = useState("");
   const [renameCaptionDraftItems, setRenameCaptionDraftItems] = useState([]);
   const [savingRenameCaption, setSavingRenameCaption] = useState(false);
+  const [captionSettings, setCaptionSettings] = useState(defaultCaptionSettings);
   const [selectedTargetId, setSelectedTargetId] = useState("");
   const [configDraft, setConfigDraft] = useState({});
   const [showAdvancedConfig, setShowAdvancedConfig] = useState(false);
@@ -381,6 +528,7 @@ export function TrainingStudio({
   const renameCaptionHasInvalidDraft = renameCaptionDraftItems.some(
     (item) => !item.itemId.trim() || !item.fileStem.trim() || !item.displayName.trim(),
   );
+  const missingDraftCaptions = renameCaptionDraftItems.filter((item) => !String(item.captionText ?? "").trim()).length;
   const canSaveRenameCaption =
     Boolean(activeDataset?.id) && renameCaptionHasDraft && !renameCaptionHasInvalidDraft && !savingRenameCaption;
   const firstTarget = trainingTargets[0] ?? null;
@@ -404,6 +552,7 @@ export function TrainingStudio({
     setSelectedDatasetId("");
     setRenamePrefix("");
     setRenameCaptionDraftItems([]);
+    setCaptionSettings(defaultCaptionSettings);
     setConfigDraft({});
     setConfigSnapshot(null);
     setConfigMessage("");
@@ -443,6 +592,12 @@ export function TrainingStudio({
 
   useEffect(() => {
     setConfigDraft((current) => {
+      if (!current.requestedGpu || gpuOptions.includes(current.requestedGpu)) {
+        return current;
+      }
+      return { ...current, requestedGpu: gpuOptions[0] ?? "" };
+    });
+    setCaptionSettings((current) => {
       if (!current.requestedGpu || gpuOptions.includes(current.requestedGpu)) {
         return current;
       }
@@ -532,6 +687,22 @@ export function TrainingStudio({
     setConfigError("");
     setConfigSnapshot(null);
     setConfigDraft((current) => ({ ...current, [field]: value }));
+  }
+
+  function updateCaptionSetting(field, value) {
+    setDatasetMessage("");
+    setDatasetError("");
+    setCaptionSettings((current) => ({ ...current, [field]: value }));
+  }
+
+  function toggleCaptionExtraOption(value) {
+    setDatasetMessage("");
+    setCaptionSettings((current) => {
+      const values = current.extraOptions.includes(value)
+        ? current.extraOptions.filter((option) => option !== value)
+        : [...current.extraOptions, value];
+      return { ...current, extraOptions: values };
+    });
   }
 
   function resetConfigDefaults() {
@@ -630,22 +801,35 @@ export function TrainingStudio({
       if (renameFieldsDirty(renameCaptionDraftItems, activeDataset)) {
         dataset = await batchRenameDataset(activeDataset.id, { items: renameItems });
       }
-      const result = await writeCaptionSidecars(activeDataset.id, {
-        items: renameCaptionDraftItems.map((item) => ({
+      const useJoyCaption = captionSettings.captioner === "joy_caption";
+      const captionItems = renameCaptionDraftItems.map((item) => {
+        const asset = assetsById.get(item.assetId);
+        const caption = useJoyCaption
+          ? { source: item.captionSource, text: String(item.captionText ?? "") }
+          : captionForDraftItem(item, asset);
+        return {
           itemId: item.itemId.trim(),
           caption: {
-            text: item.captionText,
-            source: item.captionSource,
+            text: caption.text,
+            source: caption.source,
             triggerWords: parseTriggerWords(item.triggerWords),
           },
-        })),
+        };
+      });
+      const result = await writeCaptionSidecars(activeDataset.id, {
+        items: captionItems,
       });
       const nextDataset = result?.dataset ?? dataset;
       setActiveDataset(nextDataset);
       setDraftName(nextDataset?.name ?? draftName);
       setSelectedAssetIds(normalizeDatasetAssetIds(nextDataset));
       setSelectedDatasetId(nextDataset?.id ?? activeDataset.id);
-      setDatasetMessage(`Caption sidecars written${result?.sidecars?.length ? ` (${result.sidecars.length})` : ""}`);
+      if (useJoyCaption && (captionSettings.recaption || missingDraftCaptions > 0)) {
+        const job = await createCaptionJob(activeDataset.id, trainingCaptionJobPayload(captionSettings));
+        setDatasetMessage(`Caption job queued${job?.id ? ` (${job.id})` : ""}. Track it in the Queue.`);
+      } else {
+        setDatasetMessage(`Captions created${result?.sidecars?.length ? ` (${result.sidecars.length})` : ""}`);
+      }
     } catch (err) {
       setDatasetError(err.message);
     } finally {
@@ -920,26 +1104,9 @@ export function TrainingStudio({
                   {!activeDataset ? (
                     <div className="empty-panel compact-panel">Open a saved dataset to edit captions.</div>
                   ) : (
-                    <div className="training-caption-editor">
-                      <div className="training-caption-toolbar">
-                        <label>
-                          Rename prefix
-                          <input onChange={(event) => setRenamePrefix(event.target.value)} value={renamePrefix} />
-                        </label>
-                        <button className="secondary-action" onClick={applyOrderedNames} type="button">
-                          <Icon.Sliders size={14} />
-                          Apply ordered names
-                        </button>
-                        <button
-                          className="primary-action"
-                          disabled={!canSaveRenameCaption}
-                          onClick={saveRenameCaption}
-                          type="button"
-                        >
-                          {savingRenameCaption ? "Writing" : "Write sidecars"}
-                        </button>
-                      </div>
-                      <div className="training-caption-list" aria-label="Rename and caption dataset items">
+                    <div className="training-caption-workspace">
+                      <div className="training-caption-editor">
+                        <div className="training-caption-list" aria-label="Rename and caption dataset items">
                         {renameCaptionDraftItems.map((item, index) => {
                           const asset = assetsById.get(item.assetId);
                           return (
@@ -1010,8 +1177,194 @@ export function TrainingStudio({
                             </article>
                           );
                         })}
+                        </div>
                       </div>
-                    </div>
+                      <aside className="training-caption-sidebar" aria-label="Caption options">
+                        <div className="training-caption-sidebar-section">
+                          <div className="training-sidebar-heading">
+                            <span>Files</span>
+                            <strong>{renameCaptionDraftItems.length}</strong>
+                          </div>
+                          <label>
+                            Rename prefix
+                            <input onChange={(event) => setRenamePrefix(event.target.value)} value={renamePrefix} />
+                          </label>
+                          <button className="secondary-action" onClick={applyOrderedNames} type="button">
+                            <Icon.Sliders size={14} />
+                            Apply ordered names
+                          </button>
+                        </div>
+                        <div className="training-caption-sidebar-section">
+                          <div className="training-sidebar-heading">
+                            <span>Captioner</span>
+                            <strong>{missingDraftCaptions}</strong>
+                          </div>
+                          <label>
+                            Method
+                            <select
+                              onChange={(event) => updateCaptionSetting("captioner", event.target.value)}
+                              value={captionSettings.captioner}
+                            >
+                              <option value="joy_caption">Joy Caption</option>
+                              <option value="metadata">Metadata fallback</option>
+                            </select>
+                          </label>
+                          {captionSettings.captioner === "joy_caption" ? (
+                            <>
+                              <label>
+                                Model
+                                <input
+                                  onChange={(event) => updateCaptionSetting("modelNameOrPath", event.target.value)}
+                                  value={captionSettings.modelNameOrPath}
+                                />
+                              </label>
+                              <label>
+                                GPU
+                                <select
+                                  onChange={(event) => updateCaptionSetting("requestedGpu", event.target.value)}
+                                  value={captionSettings.requestedGpu}
+                                >
+                                  {gpuOptions.map((gpu) => (
+                                    <option key={gpu} value={gpu}>
+                                      {gpu}
+                                    </option>
+                                  ))}
+                                </select>
+                              </label>
+                              <label className="training-toggle-line">
+                                <input
+                                  checked={captionSettings.recaption}
+                                  onChange={(event) => updateCaptionSetting("recaption", event.target.checked)}
+                                  type="checkbox"
+                                />
+                                <span>Recaption existing</span>
+                              </label>
+                              <label className="training-toggle-line">
+                                <input
+                                  checked={captionSettings.lowVram}
+                                  onChange={(event) => updateCaptionSetting("lowVram", event.target.checked)}
+                                  type="checkbox"
+                                />
+                                <span>Low VRAM</span>
+                              </label>
+                            </>
+                          ) : null}
+                        </div>
+                        {captionSettings.captioner === "joy_caption" ? (
+                          <>
+                            <div className="training-caption-sidebar-section">
+                              <div className="training-sidebar-heading">
+                                <span>Prompt</span>
+                              </div>
+                              <label>
+                                Type
+                                <select
+                                  onChange={(event) => updateCaptionSetting("captionType", event.target.value)}
+                                  value={captionSettings.captionType}
+                                >
+                                  {joyCaptionTypes.map((type) => (
+                                    <option key={type} value={type}>
+                                      {type}
+                                    </option>
+                                  ))}
+                                </select>
+                              </label>
+                              <label>
+                                Length
+                                <select
+                                  onChange={(event) => updateCaptionSetting("captionLength", event.target.value)}
+                                  value={captionSettings.captionLength}
+                                >
+                                  {joyCaptionLengths.map((length) => (
+                                    <option key={length} value={length}>
+                                      {length}
+                                    </option>
+                                  ))}
+                                </select>
+                              </label>
+                              <label>
+                                Name
+                                <input
+                                  onChange={(event) => updateCaptionSetting("nameInput", event.target.value)}
+                                  value={captionSettings.nameInput}
+                                />
+                              </label>
+                              <label>
+                                Custom prompt
+                                <textarea
+                                  onChange={(event) => updateCaptionSetting("captionPrompt", event.target.value)}
+                                  rows={4}
+                                  value={captionSettings.captionPrompt}
+                                />
+                              </label>
+                            </div>
+                            <div className="training-caption-sidebar-section">
+                              <div className="training-sidebar-heading">
+                                <span>Sampling</span>
+                              </div>
+                              <label>
+                                Temperature
+                                <input
+                                  max="2"
+                                  min="0"
+                                  onChange={(event) => updateCaptionSetting("temperature", event.target.value)}
+                                  step="0.05"
+                                  type="number"
+                                  value={captionSettings.temperature}
+                                />
+                              </label>
+                              <label>
+                                Top P
+                                <input
+                                  max="1"
+                                  min="0"
+                                  onChange={(event) => updateCaptionSetting("topP", event.target.value)}
+                                  step="0.05"
+                                  type="number"
+                                  value={captionSettings.topP}
+                                />
+                              </label>
+                              <label>
+                                Max tokens
+                                <input
+                                  max="1024"
+                                  min="1"
+                                  onChange={(event) => updateCaptionSetting("maxNewTokens", event.target.value)}
+                                  step="1"
+                                  type="number"
+                                  value={captionSettings.maxNewTokens}
+                                />
+                              </label>
+                            </div>
+                            <div className="training-caption-sidebar-section">
+                              <div className="training-sidebar-heading">
+                                <span>Options</span>
+                              </div>
+                              <div className="training-caption-option-list">
+                                {joyCaptionExtraOptions.map((option) => (
+                                  <label className="training-toggle-line" key={option.value}>
+                                    <input
+                                      checked={captionSettings.extraOptions.includes(option.value)}
+                                      onChange={() => toggleCaptionExtraOption(option.value)}
+                                      type="checkbox"
+                                    />
+                                    <span>{option.label}</span>
+                                  </label>
+                                ))}
+                              </div>
+                            </div>
+                          </>
+                        ) : null}
+                        <button
+                          className="primary-action training-caption-submit"
+                          disabled={!canSaveRenameCaption}
+                          onClick={saveRenameCaption}
+                          type="button"
+                        >
+                          {savingRenameCaption ? "Creating" : "Create Captions"}
+                        </button>
+                      </aside>
+                      </div>
                   )}
                 </>
               ) : null}

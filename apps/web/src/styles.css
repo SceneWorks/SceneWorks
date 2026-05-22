@@ -1851,6 +1851,46 @@ label {
   align-items: end;
 }
 
+.training-caption-workspace {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(250px, 320px);
+  gap: 14px;
+  align-items: start;
+}
+
+.training-caption-sidebar {
+  display: grid;
+  gap: 10px;
+  position: sticky;
+  top: 12px;
+  min-width: 0;
+}
+
+.training-caption-sidebar-section {
+  display: grid;
+  gap: 10px;
+  padding: 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+  background: var(--surface);
+}
+
+.training-sidebar-heading {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 8px;
+  color: var(--text-muted);
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.training-sidebar-heading strong {
+  color: var(--text);
+  font-size: 14px;
+}
+
+.training-caption-sidebar label,
 .training-caption-toolbar label,
 .training-caption-fields label {
   display: grid;
@@ -1859,6 +1899,35 @@ label {
   color: var(--text-muted);
   font-size: 12px;
   font-weight: 700;
+}
+
+.training-toggle-line {
+  grid-template-columns: auto minmax(0, 1fr);
+  align-items: center;
+  color: var(--text);
+  font-weight: 600;
+}
+
+.training-toggle-line input {
+  width: auto;
+}
+
+.training-caption-option-list {
+  display: grid;
+  gap: 8px;
+  max-height: 260px;
+  overflow: auto;
+  padding-right: 2px;
+}
+
+.training-caption-sidebar textarea {
+  resize: vertical;
+  min-height: 92px;
+}
+
+.training-caption-submit {
+  width: 100%;
+  justify-content: center;
 }
 
 .training-caption-row {
@@ -5270,6 +5339,7 @@ label {
   .training-config-preview,
   .training-config-grid,
   .training-advanced-grid,
+  .training-caption-workspace,
   .training-caption-toolbar,
   .training-caption-row,
   .training-caption-fields,
