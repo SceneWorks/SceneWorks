@@ -1717,6 +1717,22 @@ export function App() {
     }
   }
 
+  async function createModelConvertJob(model) {
+    try {
+      const job = await apiFetch(`/api/v1/models/${model.id}/convert`, token, {
+        method: "POST",
+        body: JSON.stringify({ requestedGpu: "auto" }),
+      });
+      setJobs((items) => [job, ...items.filter((item) => item.id !== job.id)].sort(sortNewest));
+      setError("");
+      refreshData();
+      return job;
+    } catch (err) {
+      setError(err.message);
+      return null;
+    }
+  }
+
   async function jobAction(job, action) {
     try {
       const path = action === "duplicate" ? `/api/v1/jobs/${job.id}/duplicate` : `/api/v1/jobs/${job.id}/${action}`;
@@ -1996,6 +2012,7 @@ export function App() {
             onDeleteLora={deleteLora}
             onDeleteModel={deleteModel}
             onDownloadModel={createModelDownloadJob}
+            onConvertModel={createModelConvertJob}
             onImportLora={createLoraImportJob}
             onImportModel={createModelImportJob}
             onOpenQueue={() => setActiveView("Queue")}

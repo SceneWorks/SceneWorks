@@ -515,6 +515,12 @@ fn spawn_api(app: &AppHandle) -> Result<(), String> {
     if let Some(ffmpeg) = resolve_bundled_ffmpeg() {
         command = command.env("SCENEWORKS_FFMPEG", ffmpeg);
     }
+    // MLX model conversion (model_convert jobs) shells out to the venv's Python
+    // (mlx_video.convert_wan); point the in-process worker at the bundled interpreter.
+    command = command.env(
+        "SCENEWORKS_PYTHON",
+        venv_python(&venv_dir()).to_string_lossy().to_string(),
+    );
     let (mut events, child) = command
         .spawn()
         .map_err(|error| format!("spawn api: {error}"))?;

@@ -632,6 +632,7 @@ fn worker_capabilities_with_utility(
             WorkerCapability::TimelineExport,
             WorkerCapability::ModelDownload,
             WorkerCapability::ModelImport,
+            WorkerCapability::ModelConvert,
             WorkerCapability::LoraImport,
             WorkerCapability::PersonDetect,
             WorkerCapability::PersonTrack,
@@ -851,6 +852,9 @@ async fn run_utility_job(
         JobType::ModelImport => run_model_import_job(api, settings, http_client, &job)
             .await
             .map_err(|error| ("Model import failed.", error)),
+        JobType::ModelConvert => run_model_convert_job(api, settings, &job)
+            .await
+            .map_err(|error| ("Model conversion failed.", error)),
         JobType::FrameExtract => run_frame_extract_job(api, settings, &job)
             .await
             .map_err(|error| ("Frame extraction failed.", error)),
@@ -1129,6 +1133,186 @@ async fn run_model_download_job(
     )
     .await?;
     Ok(())
+}
+
+/// Convert a model's native (diffusers) checkpoint into the local MLX format on
+/// macOS/Apple Silicon. The native checkpoint must already be downloaded into the
+/// Hugging Face cache (via a model_download job); this shells out to the venv's
+/// Python `mlx_video.convert_wan` tool, which is where MLX/torch live. The desktop
+/// shell points `SCENEWORKS_PYTHON` at the bundled interpreter (mirrors
+/// `SCENEWORKS_FFMPEG`); dev/server fall back to `python3` on PATH.
+///
+/// Real conversion is exercised on Mac hardware in sc-1509; this wires the tracked
+/// job, progress, cancellation, and failure surfacing.
+async fn run_model_convert_job(
+    api: &ApiClient,
+    settings: &Settings,
+    job: &JobSnapshot,
+) -> WorkerResult<()> {
+    let model_id = required_payload_string(&job.payload, "modelId")?.to_owned();
+    let source_repo = required_payload_string(&job.payload, "sourceRepo")?.to_owned();
+    let output_dir = required_payload_string(&job.payload, "outputDir")?.to_owned();
+    let dtype = optional_payload_string(&job.payload, "dtype")
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or("bfloat16")
+        .to_owned();
+
+    heartbeat(api, settings, WorkerStatus::Busy, Some(&job.id)).await?;
+    update_job(
+        api,
+        &job.id,
+        progress_payload(
+            JobStatus::Preparing,
+            ProgressStage::Preparing,
+            0.05,
+            &format!("Preparing MLX conversion for {model_id}."),
+            None,
+            None,
+            None,
+        ),
+    )
+    .await?;
+    check_cancel(api, &job.id, "MLX conversion canceled before it started.").await?;
+
+    let Some(checkpoint_dir) = huggingface_snapshot_dir(&settings.data_dir, &source_repo) else {
+        fail_job(
+            api,
+            &job.id,
+            "Native checkpoint is not downloaded.",
+            Some(format!(
+                "Download {source_repo} before converting it to MLX."
+            )),
+        )
+        .await?;
+        return Ok(());
+    };
+
+    let python = std::env::var("SCENEWORKS_PYTHON")
+        .ok()
+        .map(|value| value.trim().to_owned())
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| "python3".to_owned());
+
+    if let Some(parent) = Path::new(&output_dir).parent() {
+        tokio::fs::create_dir_all(parent).await?;
+    }
+
+    update_job(
+        api,
+        &job.id,
+        progress_payload(
+            JobStatus::Running,
+            ProgressStage::Running,
+            0.2,
+            &format!("Converting {model_id} to MLX ({dtype}). This can take several minutes."),
+            None,
+            None,
+            None,
+        ),
+    )
+    .await?;
+
+    let mut child = Command::new(&python)
+        .arg("-m")
+        .arg("mlx_video.convert_wan")
+        .arg("--checkpoint-dir")
+        .arg(&checkpoint_dir)
+        .arg("--output-dir")
+        .arg(&output_dir)
+        .arg("--dtype")
+        .arg(&dtype)
+        .arg("--model-version")
+        .arg("auto")
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|error| {
+            WorkerError::InvalidPayload(format!(
+                "Failed to start MLX conversion ({python}). Ensure the worker venv has \
+                 mlx-video-with-audio installed: {error}"
+            ))
+        })?;
+
+    let mut stderr = child.stderr.take();
+    let stderr_task = tokio::spawn(async move {
+        let mut bytes = Vec::new();
+        if let Some(stderr) = stderr.as_mut() {
+            let _ = stderr.read_to_end(&mut bytes).await;
+        }
+        bytes
+    });
+
+    let mut interval = tokio::time::interval(progress_report_interval(settings));
+    interval.set_missed_tick_behavior(MissedTickBehavior::Delay);
+    let status = loop {
+        tokio::select! {
+            status = child.wait() => break status?,
+            _ = interval.tick() => {
+                heartbeat(api, settings, WorkerStatus::Busy, Some(&job.id)).await?;
+                if let Err(error) =
+                    check_cancel(api, &job.id, "MLX conversion canceled by user.").await
+                {
+                    let _ = child.kill().await;
+                    let _ = child.wait().await;
+                    return Err(error);
+                }
+            }
+        }
+    };
+    let stderr_bytes = stderr_task.await.unwrap_or_default();
+
+    if !status.success() {
+        let stderr_text = String::from_utf8_lossy(&stderr_bytes);
+        // Keep the tail (char-safe) so the job error surfaces the real failure.
+        let tail: String = stderr_text.trim().chars().rev().take(1200).collect();
+        let detail: String = tail.chars().rev().collect();
+        return Err(WorkerError::InvalidPayload(format!(
+            "MLX conversion failed (exit {}). {detail}",
+            status.code().unwrap_or(-1),
+        )));
+    }
+
+    let mut result = JsonObject::new();
+    result.insert("modelId".to_owned(), Value::String(model_id));
+    result.insert("sourceRepo".to_owned(), Value::String(source_repo));
+    result.insert("path".to_owned(), Value::String(output_dir));
+    result.insert("storage".to_owned(), Value::String("mlx_local".to_owned()));
+    result.insert("completedAt".to_owned(), Value::String(now_rfc3339()));
+    update_job(
+        api,
+        &job.id,
+        progress_payload(
+            JobStatus::Completed,
+            ProgressStage::Completed,
+            1.0,
+            "MLX conversion completed.",
+            None,
+            Some(result),
+            None,
+        ),
+    )
+    .await?;
+    Ok(())
+}
+
+/// Resolve the local Hugging Face snapshot directory for a cached repo (the dir that
+/// actually holds the checkpoint files). Prefers the commit referenced by
+/// `refs/main`, else the first snapshot directory. Returns `None` when the repo is
+/// not present in the cache.
+fn huggingface_snapshot_dir(data_dir: &Path, repo: &str) -> Option<PathBuf> {
+    let repo_dir = huggingface_repo_cache_path(data_dir, repo)?;
+    let snapshots = repo_dir.join("snapshots");
+    if let Ok(rev) = std::fs::read_to_string(repo_dir.join("refs").join("main")) {
+        let candidate = snapshots.join(rev.trim());
+        if candidate.is_dir() {
+            return Some(candidate);
+        }
+    }
+    std::fs::read_dir(&snapshots)
+        .ok()?
+        .flatten()
+        .map(|entry| entry.path())
+        .find(|path| path.is_dir())
 }
 
 async fn download_model_with_hf_cli(

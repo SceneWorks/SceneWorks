@@ -1315,6 +1315,8 @@ class MlxVideoAdapter(VideoGenerationAdapter):
         target = model_target(request.model)
         raw_frames = max(1, int(round(request.duration * request.fps)))
 
+        # peak_gb mirrors mlx.minMemoryGb in config/manifests/builtin.models.jsonc
+        # (the Model Manager gates on the manifest value); keep the two in sync.
         memory_estimates = {
             "ltx_2_3": {"peak_gb": 31, "description": "Q4 quantized, ~31 GB peak"},
             "wan_2_2": {"peak_gb": 45, "description": "bf16, 40 steps, ~45 GB peak"},

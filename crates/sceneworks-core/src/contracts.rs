@@ -184,6 +184,7 @@ string_enum! {
         TimelineExport => "timeline_export",
         ModelDownload => "model_download",
         ModelImport => "model_import",
+        ModelConvert => "model_convert",
         LoraImport => "lora_import",
         LoraTrain => "lora_train",
     }
@@ -256,6 +257,7 @@ string_enum! {
         TimelineExport => "timeline_export",
         ModelDownload => "model_download",
         ModelImport => "model_import",
+        ModelConvert => "model_convert",
         LoraImport => "lora_import",
         LoraTrain => "lora_train",
         // Real (non-dry-run) LoRA training execution. Advertised separately from
