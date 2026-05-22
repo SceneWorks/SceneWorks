@@ -564,9 +564,7 @@ where
     config
         .advanced
         .insert("timestepBias".to_owned(), json!("high_noise"));
-    config
-        .advanced
-        .insert("lossType".to_owned(), json!("mse"));
+    config.advanced.insert("lossType".to_owned(), json!("mse"));
     config
         .advanced
         .insert("gradientCheckpointing".to_owned(), json!(true));
