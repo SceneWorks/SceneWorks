@@ -20,8 +20,8 @@ use futures_util::future::join_all;
 use parking_lot::Mutex;
 use sceneworks_core::contracts::{
     ClaimRequest, ClaimResponse, ContractNumber, DuplicateJobRequest, JobCreateRequest,
-    JobSnapshot, JobStatus, JobType, JsonObject, ProgressRequest, QueueSummary,
-    WorkerHeartbeatRequest, WorkerRegisterRequest, WorkerSnapshot,
+    JobSnapshot, JobStatus, JobType, JsonObject, ProgressRequest, QueueSummary, WorkerCapability,
+    WorkerHeartbeatRequest, WorkerRegisterRequest, WorkerSnapshot, WorkerStatus,
 };
 use sceneworks_core::jobs_store::{
     CreateJob, DuplicateJob, JobsStore, JobsStoreError, ProgressUpdate, RegisterWorker,
@@ -618,6 +618,10 @@ pub fn create_app(settings: Settings) -> Result<Router, JobsStoreError> {
             "/api/v1/projects/:project_id/person-tracks/:track_id",
             get(get_person_track),
         )
+        .route(
+            "/api/v1/projects/:project_id/person-tracks/:track_id/corrections",
+            post(save_person_track_corrections),
+        )
         .route("/api/v1/image/jobs", post(create_image_job))
         .route("/api/v1/video/jobs", post(create_video_job))
         .route("/api/v1/models", get(list_models))
@@ -667,6 +671,10 @@ pub fn create_app(settings: Settings) -> Result<Router, JobsStoreError> {
         .route("/api/v1/jobs/:job_id/progress", post(update_job_progress))
         .route("/api/v1/queue", get(queue_summary))
         .route("/api/v1/workers", get(list_workers))
+        .route(
+            "/api/v1/capabilities/person",
+            get(person_capability_readiness),
+        )
         .route("/api/v1/workers/register", post(register_worker))
         .route(
             "/api/v1/workers/:worker_id/heartbeat",
@@ -918,6 +926,10 @@ struct PersonDetectionJobRequest {
     source_asset_id: String,
     #[serde(default)]
     source_timestamp: Option<f64>,
+    /// Opt into the Rust utility worker's procedural preview instead of real,
+    /// model-backed detection on the Python GPU worker. Defaults to real.
+    #[serde(default)]
+    preview: bool,
     #[serde(default = "default_requested_gpu")]
     requested_gpu: String,
 }
@@ -930,8 +942,23 @@ struct PersonTrackJobRequest {
     detection: JsonObject,
     #[serde(default = "default_track_name")]
     track_name: String,
+    /// Opt into the Rust utility worker's procedural preview instead of real,
+    /// model-backed tracking on the Python GPU worker. Defaults to real.
+    #[serde(default)]
+    preview: bool,
     #[serde(default = "default_requested_gpu")]
     requested_gpu: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct PersonTrackCorrectionsRequest {
+    /// The UI's full correction set for the track. Each entry targets a frame by
+    /// index and adjusts its box and/or rejects the frame; the store validates
+    /// ranges and stamps author/createdAt/source. Kept as raw values so the
+    /// schema-flexible `corrections` array can evolve without an API change.
+    #[serde(default)]
+    corrections: Vec<Value>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -2322,6 +2349,19 @@ async fn get_person_track(
     ))
 }
 
+async fn save_person_track_corrections(
+    State(state): State<AppState>,
+    Path((project_id, track_id)): Path<(String, String)>,
+    ApiJson(payload): ApiJson<PersonTrackCorrectionsRequest>,
+) -> Result<Json<Value>, ApiError> {
+    Ok(Json(
+        project_call(state, move |store| {
+            store.set_person_track_corrections(&project_id, &track_id, payload.corrections)
+        })
+        .await?,
+    ))
+}
+
 async fn create_person_detection_job(
     State(state): State<AppState>,
     Path(project_id): Path<String>,
@@ -2343,6 +2383,9 @@ async fn create_person_detection_job(
         "sourceTimestamp".to_owned(),
         payload.source_timestamp.map_or(Value::Null, Value::from),
     );
+    if payload.preview {
+        job_payload.insert("preview".to_owned(), Value::Bool(true));
+    }
     let job = create_generation_job(
         state,
         JobType::PersonDetect,
@@ -2378,6 +2421,9 @@ async fn create_person_track_job(
     );
     job_payload.insert("detection".to_owned(), Value::Object(payload.detection));
     job_payload.insert("trackName".to_owned(), Value::String(payload.track_name));
+    if payload.preview {
+        job_payload.insert("preview".to_owned(), Value::Bool(true));
+    }
     let job = create_generation_job(
         state,
         JobType::PersonTrack,
@@ -4258,6 +4304,49 @@ async fn list_workers(
             store.list_workers()
         })
         .await?,
+    ))
+}
+
+/// Person-workflow readiness derived from the live (non-offline) workers: a
+/// capability is ready when some live worker advertises it. Surfaces, per
+/// dependency, whether real detection/tracking/segmentation/replacement (and the
+/// procedural previews) can actually run, so the UI can gate Replace Person and
+/// explain why an action is unavailable (sc-1484).
+fn person_readiness_from_workers(workers: &[WorkerSnapshot]) -> Value {
+    let live: Vec<&WorkerSnapshot> = workers
+        .iter()
+        .filter(|worker| worker.status != WorkerStatus::Offline)
+        .collect();
+    let entry = |capability: WorkerCapability| {
+        let cap = capability.as_str();
+        let ready = live.iter().any(|worker| {
+            worker
+                .capabilities
+                .iter()
+                .any(|owned| owned.as_str() == cap)
+        });
+        json!({ "capability": cap, "ready": ready })
+    };
+    json!({
+        "detect": entry(WorkerCapability::PersonDetect),
+        "track": entry(WorkerCapability::PersonTrack),
+        "segment": entry(WorkerCapability::PersonSegment),
+        "replace": entry(WorkerCapability::PersonReplace),
+        "detectPreview": entry(WorkerCapability::PersonDetectPreview),
+        "trackPreview": entry(WorkerCapability::PersonTrackPreview),
+    })
+}
+
+async fn person_capability_readiness(
+    State(state): State<AppState>,
+) -> Result<Json<Value>, ApiError> {
+    let workers = store_call(state, move |store, timeout| {
+        store.mark_stale_workers_interrupted(timeout)?;
+        store.list_workers()
+    })
+    .await?;
+    Ok(Json(
+        json!({ "person": person_readiness_from_workers(&workers) }),
     ))
 }
 
@@ -7487,10 +7576,10 @@ impl IntoResponse for ApiError {
 mod tests {
     use super::{
         create_app, huggingface_repo_cache_path, inprocess_worker_gpu_id, insufficient_disk_space,
-        lora_artifact_paths, mlx_catalog_status, requires_token, strip_jsonc_comments,
-        sweep_stale_lora_uploads_before, EventHub, EventMessage, Settings,
-        API_MANAGED_MANIFEST_HEADER, EVENT_BUFFER_SIZE, HEARTBEAT_SSE_DATA, HEARTBEAT_SSE_WIRE,
-        TEST_MAX_LORA_UPLOAD_BYTES,
+        lora_artifact_paths, mlx_catalog_status, person_readiness_from_workers, requires_token,
+        strip_jsonc_comments, sweep_stale_lora_uploads_before, EventHub, EventMessage, Settings,
+        WorkerCapability, WorkerSnapshot, WorkerStatus, API_MANAGED_MANIFEST_HEADER,
+        EVENT_BUFFER_SIZE, HEARTBEAT_SSE_DATA, HEARTBEAT_SSE_WIRE, TEST_MAX_LORA_UPLOAD_BYTES,
     };
     use axum::body::{to_bytes, Body};
     use axum::http::{Request, StatusCode};
@@ -7499,6 +7588,62 @@ mod tests {
     use std::time::{Duration, SystemTime};
     use tokio_stream::StreamExt;
     use tower::ServiceExt;
+
+    fn readiness_worker(
+        id: &str,
+        status: WorkerStatus,
+        capabilities: Vec<WorkerCapability>,
+    ) -> WorkerSnapshot {
+        WorkerSnapshot {
+            id: id.to_owned(),
+            gpu_id: "0".to_owned(),
+            gpu_name: None,
+            status,
+            current_job_id: None,
+            capabilities,
+            loaded_models: Vec::new(),
+            utilization: None,
+            registered_at: "2026-05-21T00:00:00Z".to_owned(),
+            last_seen_at: "2026-05-21T00:00:00Z".to_owned(),
+            extra: Default::default(),
+        }
+    }
+
+    #[test]
+    fn person_readiness_reflects_live_worker_capabilities() {
+        let workers = vec![
+            readiness_worker(
+                "gpu",
+                WorkerStatus::Idle,
+                vec![
+                    WorkerCapability::PersonDetect,
+                    WorkerCapability::PersonTrack,
+                    WorkerCapability::PersonReplace,
+                ],
+            ),
+            readiness_worker(
+                "cpu",
+                WorkerStatus::Idle,
+                vec![
+                    WorkerCapability::PersonDetectPreview,
+                    WorkerCapability::PersonTrackPreview,
+                ],
+            ),
+            // Segment capability exists only on an offline worker -> not ready.
+            readiness_worker(
+                "dead",
+                WorkerStatus::Offline,
+                vec![WorkerCapability::PersonSegment],
+            ),
+        ];
+        let readiness = person_readiness_from_workers(&workers);
+        assert_eq!(readiness["detect"]["ready"], json!(true));
+        assert_eq!(readiness["detect"]["capability"], json!("person_detect"));
+        assert_eq!(readiness["track"]["ready"], json!(true));
+        assert_eq!(readiness["replace"]["ready"], json!(true));
+        assert_eq!(readiness["detectPreview"]["ready"], json!(true));
+        assert_eq!(readiness["segment"]["ready"], json!(false));
+    }
 
     fn test_settings(temp_dir: &tempfile::TempDir) -> Settings {
         Settings {

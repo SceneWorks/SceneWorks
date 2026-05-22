@@ -145,13 +145,24 @@ string_enum! {
 
 string_enum! {
     pub enum PersonTrackMaskState {
+        // "deferred" is the legacy procedural-preview state. Real tracks report
+        // segmentation mask states: active (masks for all detected frames),
+        // generated (partial), degraded (box fallback / no segmenter), or missing.
         Deferred => "deferred",
+        Active => "active",
+        Generated => "generated",
+        Degraded => "degraded",
+        Missing => "missing",
     }
 }
 
 string_enum! {
     pub enum PersonTrackCorrectionState {
+        // A freshly tracked sidecar advertises that it accepts box corrections.
         ReadyForBoxCorrections => "ready_for_box_corrections",
+        // Set once the correction UI has persisted at least one box adjustment or
+        // frame rejection into the sidecar's `corrections` array (sc-1485).
+        BoxCorrectionsApplied => "box_corrections_applied",
     }
 }
 
@@ -253,6 +264,16 @@ string_enum! {
         PersonDetect => "person_detect",
         PersonTrack => "person_track",
         PersonReplace => "person_replace",
+        // Procedural detection/tracking previews served by the Rust utility worker.
+        // Real, model-backed PersonDetect/PersonTrack jobs are served by the Python
+        // GPU worker (YOLO/ByteTrack/SAM2); these preview capabilities keep the CPU
+        // procedural path claimable only for explicit `preview: true` jobs, so a
+        // real job never routes to the placeholder. Segment availability is its own
+        // capability for replacement readiness. See jobs_store::worker_supports_job
+        // and apps/worker/scene_worker/runtime.py.
+        PersonDetectPreview => "person_detect_preview",
+        PersonTrackPreview => "person_track_preview",
+        PersonSegment => "person_segment",
         FrameExtract => "frame_extract",
         TimelineExport => "timeline_export",
         ModelDownload => "model_download",
