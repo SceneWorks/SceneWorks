@@ -991,6 +991,49 @@ describe("SceneWorks app shell", () => {
     expect(field(container, "Trigger phrase").value).toBe("manualTrigger");
   });
 
+  it("shows active training progress with live sample previews", async () => {
+    root = createRoot(container);
+    await act(async () => {
+      root.render(
+        <TrainingStudio
+          activeProject={{ id: "project-a", name: "Project A" }}
+          jobs={[
+            {
+              id: "job-train-1",
+              type: "lora_train",
+              status: "running",
+              stage: "rendering",
+              progress: 0.42,
+              elapsedSeconds: 31,
+              projectId: "project-a",
+              requestedGpu: "0",
+              payload: { outputName: "Portrait Set LoRA" },
+              result: {
+                latestTrainingSamples: [
+                  { step: 250, prompt: "Portrait Set, studio portrait", relativePath: "loras/lora_1/samples/sample-1.png" },
+                  { step: 250, prompt: "Portrait Set, full body", relativePath: "loras/lora_1/samples/sample-2.png" },
+                  { step: 250, prompt: "Portrait Set, outdoor", relativePath: "loras/lora_1/samples/sample-3.png" },
+                  { step: 250, prompt: "Portrait Set, close-up", relativePath: "loras/lora_1/samples/sample-4.png" },
+                ],
+              },
+            },
+          ]}
+          trainingTargets={[zImageTrainingTarget]}
+        />,
+      );
+    });
+
+    expect(container.textContent).toContain("Training in progress");
+    expect(container.textContent).toContain("Portrait Set LoRA");
+    expect(container.textContent).toContain("rendering");
+    expect([...container.querySelectorAll(".training-sample-tile img")].map((image) => image.src)).toEqual([
+      "http://localhost:8000/api/v1/projects/project-a/files/loras/lora_1/samples/sample-1.png",
+      "http://localhost:8000/api/v1/projects/project-a/files/loras/lora_1/samples/sample-2.png",
+      "http://localhost:8000/api/v1/projects/project-a/files/loras/lora_1/samples/sample-3.png",
+      "http://localhost:8000/api/v1/projects/project-a/files/loras/lora_1/samples/sample-4.png",
+    ]);
+  });
+
   it("builds a training config snapshot from registry defaults", async () => {
     const loadDataset = vi.fn(async () => ({
       id: "dataset-a",
@@ -1059,6 +1102,7 @@ describe("SceneWorks app shell", () => {
             mixedPrecision: "bf16",
             qualityPreset: "balanced",
             outputScope: "project",
+            samplePrompts: expect.arrayContaining([expect.stringContaining("miraStyle")]),
           }),
         }),
       }),

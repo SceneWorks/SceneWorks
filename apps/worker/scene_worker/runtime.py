@@ -746,13 +746,12 @@ def _run_lora_train_execution(api: ApiClient, settings: WorkerSettings, job: dic
         trainer = trainer_holder["trainer"]
         return trainer.loaded_models() if trainer is not None else []
 
-    def progress(status: str, stage: str, value: float, message: str) -> None:
+    def progress(status: str, stage: str, value: float, message: str, result: dict | None = None) -> None:
         heartbeat_with_loaded_models(api, settings, "busy", job_id, trainer_loaded_models)
-        update_job(
-            api,
-            job_id,
-            {"status": status, "stage": stage, "progress": value, "message": message},
-        )
+        payload = {"status": status, "stage": stage, "progress": value, "message": message}
+        if result is not None:
+            payload["result"] = result
+        update_job(api, job_id, payload)
 
     try:
         plan = payload.get("plan")

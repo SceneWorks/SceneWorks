@@ -1399,6 +1399,18 @@ class FakeTrainingBackend:
         self.checkpoints.append(path)
         return path
 
+    def generate_samples(self, *, step, prompts, output_dir, file_name, plan, config):
+        self.events.append(("sample", step))
+        return [
+            {
+                "step": step,
+                "prompt": prompt,
+                "path": os.path.join(output_dir, "samples", f"sample-{index}.png"),
+                "relativePath": f"loras/lora_1/samples/sample-{index}.png",
+            }
+            for index, prompt in enumerate(prompts[:4], start=1)
+        ]
+
     def save_final(self, *, output_dir, file_name):
         self.saved = os.path.join(output_dir, file_name)
         return self.saved
@@ -1407,7 +1419,7 @@ class FakeTrainingBackend:
         self.cleaned = True
 
 
-def _real_train_plan(tmp_path, *, steps=4, save_every=2, item_count=1):
+def _real_train_plan(tmp_path, *, steps=4, save_every=2, sample_every=0, item_count=1):
     items = []
     for index in range(item_count):
         image = tmp_path / "images" / f"{index:03d}.png"
@@ -1434,7 +1446,7 @@ def _real_train_plan(tmp_path, *, steps=4, save_every=2, item_count=1):
             "saveEvery": save_every,
             "seed": 42,
             "optimizer": "adamw",
-            "advanced": {},
+            "advanced": {"sampleEvery": sample_every} if sample_every else {},
         },
         "output": {
             "loraId": "lora_1",
@@ -1491,6 +1503,28 @@ def test_z_image_trainer_runs_stages_checkpoints_and_saves(tmp_path):
     # save_every=2, steps=4 -> a single mid-run checkpoint at step 2 (step 4 is final).
     assert backend.checkpoints == [os.path.join(plan["output"]["outputDir"], "ckpt-2.safetensors")]
     assert backend.cleaned is True
+
+
+def test_z_image_trainer_emits_training_samples_on_sample_cadence(tmp_path):
+    plan = _real_train_plan(tmp_path, steps=4, save_every=0, sample_every=2)
+    backend = FakeTrainingBackend()
+    trainer = ZImageLoraTrainer(backend=backend)
+    progress_results = []
+
+    result = trainer.train(
+        settings=SimpleNamespace(worker_id="worker-1", gpu_id="0"),
+        plan=plan,
+        progress=lambda *args: progress_results.append(args[4]) if len(args) > 4 else None,
+        cancel_requested=lambda: False,
+    )
+
+    assert ("sample", 2) in backend.events
+    assert ("sample", 4) in backend.events
+    assert len(result["latestTrainingSamples"]) == 4
+    assert result["latestTrainingSamples"][0]["step"] == 4
+    assert result["samplePrompts"][0].startswith("miraStyle")
+    sample_updates = [payload for payload in progress_results if payload]
+    assert sample_updates[-1]["latestTrainingSamples"][0]["relativePath"].startswith("loras/lora_1/samples/")
 
 
 def test_z_image_trainer_cancels_and_skips_save(tmp_path):

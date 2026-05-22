@@ -2063,6 +2063,7 @@ export function App() {
             datasetsError={trainingDatasetsError}
             gpuOptions={gpuOptions}
             importAsset={(file) => importAsset(file, { throwOnError: true })}
+            jobs={jobs}
             loadDataset={loadTrainingDataset}
             loadingDatasets={loadingTrainingDatasets}
             onPreview={setPreviewAsset}

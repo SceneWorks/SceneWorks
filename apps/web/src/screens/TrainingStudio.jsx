@@ -1,6 +1,10 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
+import { API_BASE_URL } from "../api.js";
 import { AssetThumbnail, assetCanRenderAsImage } from "../components/assetMedia.jsx";
 import { Icon } from "../components/Icons.jsx";
+import { useLiveJobElapsedSeconds } from "../components/JobProgress.jsx";
+import { terminalStatuses } from "../constants.js";
+import { formatSeconds, percent } from "../formatting.js";
 
 const tabs = [
   { id: "dataset", label: "Dataset", title: "Dataset intake", status: "Rust dataset store" },
@@ -442,6 +446,16 @@ function outputKindLabel(target) {
   return kind.replaceAll("_", " ");
 }
 
+function samplePromptsFromTrigger(triggerWord) {
+  const trigger = String(triggerWord ?? "").trim() || "the trained subject";
+  return [
+    `${trigger}, studio portrait, soft key light, detailed face`,
+    `${trigger}, full body fashion editorial photo, natural pose`,
+    `${trigger}, cinematic outdoor portrait, golden hour`,
+    `${trigger}, close-up character portrait, dramatic rim light`,
+  ];
+}
+
 function trainingConfigSnapshot({ activeDataset, configDraft, selectedTarget, dryRun = true }) {
   const defaults = selectedTarget?.defaults ?? {};
   const advanced = compactObject({
@@ -452,6 +466,7 @@ function trainingConfigSnapshot({ activeDataset, configDraft, selectedTarget, dr
     bucketStrategy: asText(configDraft.bucketStrategy).trim(),
     mixedPrecision: asText(configDraft.precision).trim(),
     sampleEvery: numberFromDraft(configDraft.sampleEvery),
+    samplePrompts: samplePromptsFromTrigger(configDraft.triggerWord),
     qualityPreset: configDraft.qualityPreset,
     outputScope: configDraft.outputScope,
     requestedGpu: configDraft.requestedGpu,
@@ -543,6 +558,92 @@ function DatasetHealth({ health }) {
   );
 }
 
+function latestTrainingSamples(job) {
+  const latest = Array.isArray(job.result?.latestTrainingSamples) ? job.result.latestTrainingSamples : [];
+  if (latest.length) {
+    return latest.slice(-4);
+  }
+  const samples = Array.isArray(job.result?.trainingSamples) ? job.result.trainingSamples : [];
+  return samples.slice(-4);
+}
+
+function trainingSampleUrl(projectId, sample) {
+  if (sample?.url) {
+    return sample.url.startsWith("http") ? sample.url : `${API_BASE_URL}${sample.url}`;
+  }
+  if (projectId && sample?.relativePath) {
+    return `${API_BASE_URL}/api/v1/projects/${projectId}/files/${String(sample.relativePath).replaceAll("\\", "/")}`;
+  }
+  return "";
+}
+
+function formatStage(value) {
+  return String(value ?? "queued").replaceAll("_", " ");
+}
+
+function TrainingLiveJobCard({ job, projectId }) {
+  const elapsedSeconds = useLiveJobElapsedSeconds(job);
+  const samples = latestTrainingSamples(job);
+  const progressLabel = percent(job.progress);
+  const samplePrompts = Array.isArray(job.result?.samplePrompts)
+    ? job.result.samplePrompts
+    : samplePromptsFromTrigger(job.payload?.plan?.config?.triggerWord);
+  return (
+    <article className="training-live-card">
+      <div className="training-live-head">
+        <div>
+          <p className="eyebrow">Training run</p>
+          <h3>{job.payload?.outputName ?? job.payload?.plan?.output?.loraId ?? job.id}</h3>
+        </div>
+        <span className={`status-badge ${job.status}`}>{job.status}</span>
+      </div>
+      <div className="progress-track" aria-label={`${progressLabel} complete`}>
+        <span style={{ width: progressLabel }} />
+      </div>
+      <div className="training-live-meta">
+        <span>{formatStage(job.stage ?? job.status)}</span>
+        <span>{formatSeconds(elapsedSeconds)}</span>
+        <span>GPU {job.assignedGpu ?? job.requestedGpu ?? "auto"}</span>
+      </div>
+      {job.message ? <p className="job-message">{job.message}</p> : null}
+      <div className="training-sample-grid" aria-label="Training sample images">
+        {samplePrompts.slice(0, 4).map((prompt, index) => {
+          const sample = samples[index];
+          const src = trainingSampleUrl(projectId, sample);
+          return (
+            <div className="training-sample-tile" key={`${job.id}-${index}`}>
+              {src ? <img alt="" src={src} /> : <span>{sample ? "Loading" : "Waiting"}</span>}
+              <small>{sample?.step ? `Step ${sample.step}` : prompt}</small>
+            </div>
+          );
+        })}
+      </div>
+    </article>
+  );
+}
+
+function TrainingLiveProgress({ jobs, projectId }) {
+  if (!jobs.length) {
+    return null;
+  }
+  return (
+    <section className="training-live-panel" aria-label="Active training progress">
+      <div className="training-live-title">
+        <div>
+          <p className="eyebrow">Live training</p>
+          <h3>Training in progress</h3>
+        </div>
+        <span>{jobs.length} active</span>
+      </div>
+      <div className="training-live-list">
+        {jobs.map((job) => (
+          <TrainingLiveJobCard job={job} key={job.id} projectId={projectId} />
+        ))}
+      </div>
+    </section>
+  );
+}
+
 export function TrainingStudio({
   activeProject,
   authenticated = true,
@@ -555,6 +656,7 @@ export function TrainingStudio({
   datasetsError = "",
   gpuOptions = defaultGpuOptions,
   importAsset = async () => null,
+  jobs = [],
   loadDataset = async () => null,
   loadingDatasets = false,
   onPreview = () => {},
@@ -642,6 +744,13 @@ export function TrainingStudio({
     configDraft.optimizer && !optimizerSelectOptions.includes(configDraft.optimizer)
       ? [...optimizerSelectOptions, configDraft.optimizer]
       : optimizerSelectOptions;
+  const activeTrainingJobs = useMemo(
+    () =>
+      jobs
+        .filter((job) => job.type === "lora_train" && job.projectId === activeProject?.id && !terminalStatuses.has(job.status))
+        .slice(0, 3),
+    [activeProject?.id, jobs],
+  );
   const gpuOptionsKey = gpuOptions.join("\u0000");
   const configWarnings = configValidation({ activeDataset, configDraft, selectedTarget });
   const canPrepareConfig = configWarnings.length === 0 && !preparingConfig;
@@ -1048,6 +1157,7 @@ export function TrainingStudio({
             </div>
           </div>
         </div>
+        <TrainingLiveProgress jobs={activeTrainingJobs} projectId={activeProject?.id} />
 
         {!authenticated ? (
           <div className="training-empty-state" role="status">
