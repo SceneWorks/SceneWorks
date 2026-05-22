@@ -14,6 +14,11 @@ fn main() {
         .invoke_handler(tauri::generate_handler![
             setup::start_setup,
             settings::get_app_settings,
+            settings::get_storage_setup,
+            settings::save_storage_setup,
+            settings::complete_setup,
+            settings::reset_setup,
+            settings::choose_folder,
             settings::set_data_dir,
             settings::choose_data_dir,
             settings::reveal_in_os,

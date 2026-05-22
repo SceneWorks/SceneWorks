@@ -14,8 +14,16 @@ import { EditorScreen } from "./screens/EditorScreen.jsx";
 import { QueueScreen } from "./screens/QueueScreen.jsx";
 import { PresetManagerScreen } from "./screens/PresetManagerScreen.jsx";
 import { SettingsScreen } from "./screens/SettingsScreen.jsx";
+import { SetupWizard } from "./screens/SetupWizard.jsx";
 import { sortNewest, sortWorkers } from "./sorters.js";
 import { ensureItemVersionFields } from "./timeline.js";
+
+// Desktop (Tauri) shell detection. The first-run setup wizard is desktop-only;
+// web/Docker keep the existing first-run project gate. Tauri commands persist the
+// wizard state (the API binds a random port each launch, so localStorage — keyed
+// to the origin — can't be relied on across launches).
+const isDesktopShell = typeof window !== "undefined" && !!window.__TAURI__;
+const tauriInvoke = (command, args) => window.__TAURI__.core.invoke(command, args);
 
 function isActiveWorker(worker) {
   return worker.status !== "offline";
@@ -336,6 +344,9 @@ export function App() {
   const [token, setToken] = useState(() => window.localStorage.getItem("sceneworks-token") ?? "");
   const [projects, setProjects] = useState([]);
   const [projectsLoaded, setProjectsLoaded] = useState(false);
+  // Desktop first-run wizard gate: null = unknown (still reading on desktop),
+  // true = no wizard needed (web, or already completed), false = show the wizard.
+  const [setupCompleted, setSetupCompleted] = useState(isDesktopShell ? null : true);
   const [activeProject, setActiveProject] = useState(null);
   const [activeView, setActiveView] = useState("Library");
   const [jobs, setJobs] = useState([]);
@@ -522,6 +533,16 @@ export function App() {
     apiFetch("/api/v1/access", "")
       .then(setAccess)
       .catch((err) => setError(err.message));
+  }, []);
+
+  useEffect(() => {
+    if (!isDesktopShell) {
+      return;
+    }
+    tauriInvoke("get_storage_setup")
+      .then((setup) => setSetupCompleted(Boolean(setup?.setupCompleted)))
+      // Never block the app on a storage-state read failure; fall through to the studio.
+      .catch(() => setSetupCompleted(true));
   }, []);
 
   useEffect(() => {
@@ -1150,6 +1171,16 @@ export function App() {
     window.localStorage.setItem("sceneworks-token", token);
     setError("");
     refreshData();
+  }
+
+  async function completeSetupWizard() {
+    try {
+      await tauriInvoke("complete_setup");
+    } catch {
+      // Persisting the marker failed; still dismiss the wizard so the user isn't
+      // trapped. Worst case it re-appears next launch.
+    }
+    setSetupCompleted(true);
   }
 
   async function createProject(name) {
@@ -1794,6 +1825,11 @@ export function App() {
   // First-run gate: until at least one workspace exists, replace the studio area
   // with a create prompt so navigation never lands on dead, project-scoped controls.
   const needsFirstProject = authenticated && projectsLoaded && projects.length === 0;
+  // Desktop first-run wizard (sc-1473): supersedes the project gate while the
+  // completion marker is unset. `null` means we're still reading the marker on
+  // desktop — hold the studio/gate back briefly to avoid a flash.
+  const setupGateLoading = isDesktopShell && setupCompleted === null;
+  const showSetupWizard = isDesktopShell && setupCompleted === false && authenticated;
 
   return (
     <main className="app">
@@ -1899,7 +1935,16 @@ export function App() {
           </section>
         ) : null}
 
-        {needsFirstProject ? (
+        {showSetupWizard ? (
+          <SetupWizard
+            jobs={jobs}
+            models={models}
+            onComplete={completeSetupWizard}
+            onCreateProject={createProject}
+            onDownloadModel={createModelDownloadJob}
+            onOpenQueue={() => setActiveView("Queue")}
+          />
+        ) : setupGateLoading ? null : needsFirstProject ? (
           <FirstRunProjectGate disabled={!authenticated} onCreate={createProject} />
         ) : (
           <>

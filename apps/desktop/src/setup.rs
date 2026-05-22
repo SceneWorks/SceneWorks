@@ -179,12 +179,54 @@ fn requirements_mlx_path(app: &AppHandle) -> PathBuf {
         .join("requirements-mlx.txt")
 }
 
-fn data_dir() -> PathBuf {
+/// Platform default workspace data directory, used when the user hasn't picked a
+/// custom location in the first-run splash / Settings.
+pub fn default_data_dir() -> PathBuf {
     app_support_dir().join("data")
 }
 
 fn config_dir() -> PathBuf {
     app_support_dir().join("config")
+}
+
+/// Shared per-user Hugging Face cache (`~/.cache/huggingface`) — the default
+/// `HF_HOME` when the user hasn't chosen a custom location. Dedups with other
+/// HF-based tools on the machine and reuses anything already downloaded.
+pub fn shared_huggingface_home() -> PathBuf {
+    if let Some(home) = std::env::var("HOME")
+        .or_else(|_| std::env::var("USERPROFILE"))
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+    {
+        return PathBuf::from(home).join(".cache").join("huggingface");
+    }
+    app_support_dir().join("cache").join("huggingface")
+}
+
+/// Hugging Face cache home injected into both sidecars so the rust-api model
+/// catalog and the Python inference worker resolve weights from the same root.
+/// Without this the API falls back to `<data_dir>/cache/huggingface` while the
+/// worker uses huggingface_hub's default `~/.cache/huggingface`, so they
+/// disagree and every catalog entry shows "missing" (sc-1473 Step 1 gap).
+/// Resolution order: an explicit `HF_HOME` in the environment (useful under
+/// `tauri dev`), then the user's persisted choice from the first-run splash, then
+/// the shared per-user cache. Because the splash persists this *before* the
+/// sidecars spawn, the chosen location takes effect with no app restart.
+fn huggingface_home() -> PathBuf {
+    if let Ok(value) = std::env::var("HF_HOME") {
+        let trimmed = value.trim();
+        if !trimmed.is_empty() {
+            return PathBuf::from(trimmed);
+        }
+    }
+    if let Some(dir) = crate::settings::load_settings()
+        .hf_home
+        .map(|value| value.trim().to_owned())
+        .filter(|value| !value.is_empty())
+    {
+        return PathBuf::from(dir);
+    }
+    shared_huggingface_home()
 }
 
 /// Builtin model/LoRA/recipe-preset catalogs the rust-api reads from
@@ -233,7 +275,7 @@ fn resolved_data_dir() -> PathBuf {
     crate::settings::load_settings()
         .data_dir
         .map(PathBuf::from)
-        .unwrap_or_else(data_dir)
+        .unwrap_or_else(default_data_dir)
 }
 
 /// Directory containing the Python `scene_worker` package + requirements: the
@@ -420,17 +462,27 @@ async fn provision_venv(app: &AppHandle) -> Result<(), String> {
         std::fs::create_dir_all(parent).map_err(|error| format!("create python dir: {error}"))?;
     }
 
-    emit(app, "creating", "Creating the Python environment…", false);
-    run_uv(
-        app,
-        vec![
-            "venv".to_owned(),
-            "--python".to_owned(),
-            "3.12".to_owned(),
-            venv.to_string_lossy().into_owned(),
-        ],
-    )
-    .await?;
+    // Create the venv only when its interpreter is missing. A prior run that
+    // created the venv but failed during dependency install (e.g. an
+    // unsatisfiable resolution) or was interrupted leaves a venv that `uv venv`
+    // refuses to overwrite — without this guard every retry dies on "a virtual
+    // environment already exists". When the interpreter is present we skip
+    // creation and let the install below reconcile the env. `--clear` wipes any
+    // partial/corrupt directory when we do (re)create from scratch.
+    if !python.exists() {
+        emit(app, "creating", "Creating the Python environment…", false);
+        run_uv(
+            app,
+            vec![
+                "venv".to_owned(),
+                "--clear".to_owned(),
+                "--python".to_owned(),
+                "3.12".to_owned(),
+                venv.to_string_lossy().into_owned(),
+            ],
+        )
+        .await?;
+    }
 
     emit(
         app,
@@ -509,7 +561,10 @@ fn spawn_api(app: &AppHandle) -> Result<(), String> {
         .env(
             "SCENEWORKS_CONFIG_DIR",
             config_dir().to_string_lossy().to_string(),
-        );
+        )
+        // The catalog's install-state detection resolves the HF cache from this;
+        // it must match the worker's download root or every model reads "missing".
+        .env("HF_HOME", huggingface_home().to_string_lossy().to_string());
     // The in-process utility worker shells out to ffmpeg; point it at the venv's
     // bundled binary since the desktop has no system ffmpeg on PATH.
     if let Some(ffmpeg) = resolve_bundled_ffmpeg() {
@@ -621,6 +676,9 @@ fn supervise_worker(app: AppHandle, api_port: u16) {
             shared_parent_dir(&app).to_string_lossy()
         );
         let api_url = format!("http://127.0.0.1:{api_port}");
+        // Match the API sidecar's HF cache root so downloaded weights land where
+        // the catalog looks for them (and reuse anything already cached there).
+        let hf_home = huggingface_home().to_string_lossy().to_string();
         let mut backoff = 1u64;
         loop {
             if app.state::<Managed>().shutting_down.load(Ordering::SeqCst) {
@@ -640,6 +698,7 @@ fn supervise_worker(app: AppHandle, api_port: u16) {
                 .current_dir(&src)
                 .env("PYTHONPATH", &pythonpath)
                 .env("SCENEWORKS_API_URL", &api_url)
+                .env("HF_HOME", &hf_home)
                 .env(
                     "SCENEWORKS_DATA_DIR",
                     resolved_data_dir().to_string_lossy().to_string(),
