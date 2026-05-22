@@ -13,6 +13,7 @@ from .image_adapters import require_inference_backend_for_gpu_worker, select_tor
 
 JOY_CAPTION_MODEL = "fancyfeast/llama-joycaption-beta-one-hf-llava"
 JOY_NAME_OPTION = "If there is a person/character in the image you must refer to them as {name}."
+JOY_CAPTION_RESAMPLE = Image.Resampling.BICUBIC
 
 JOY_CAPTION_TYPE_MAP: dict[str, tuple[str, str, str]] = {
     "Descriptive": (
@@ -131,6 +132,16 @@ def caption_with_trigger_words(caption: str, trigger_words: list[str]) -> str:
     return ", ".join([*missing, cleaned]).strip(", ")
 
 
+def normalize_processor_resample(processor: Any) -> None:
+    """Avoid torch resize modes such as Lanczos that Transformers may load from config."""
+    targets = [processor, getattr(processor, "image_processor", None)]
+    for target in targets:
+        if target is None:
+            continue
+        if hasattr(target, "resample"):
+            setattr(target, "resample", JOY_CAPTION_RESAMPLE)
+
+
 class JoyCaptioner:
     def __init__(self, *, model_name_or_path: str, options: JoyCaptionOptions, gpu_id: str) -> None:
         self.model_name_or_path = model_name_or_path or JOY_CAPTION_MODEL
@@ -154,7 +165,8 @@ class JoyCaptioner:
         self.torch = torch
         self.device = select_torch_device(torch, self.gpu_id)
         self.torch_dtype = select_torch_dtype(torch, self.device, None)
-        self.processor = AutoProcessor.from_pretrained(self.model_name_or_path, use_fast=True)
+        self.processor = AutoProcessor.from_pretrained(self.model_name_or_path, use_fast=False)
+        normalize_processor_resample(self.processor)
         self.tokenizer = self.processor.tokenizer
         self.model = LlavaForConditionalGeneration.from_pretrained(
             self.model_name_or_path,

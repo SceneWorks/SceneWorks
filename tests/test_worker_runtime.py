@@ -12,7 +12,13 @@ from PIL import Image
 import pytest
 
 from scene_worker.adapter_utils import filter_call_kwargs
-from scene_worker.caption_adapters import JoyCaptionOptions, build_joy_caption_prompt, caption_with_trigger_words
+from scene_worker.caption_adapters import (
+    JOY_CAPTION_RESAMPLE,
+    JoyCaptionOptions,
+    build_joy_caption_prompt,
+    caption_with_trigger_words,
+    normalize_processor_resample,
+)
 from scene_worker.image_adapters import (
     ImageAssetWriter,
     MODEL_TARGETS,
@@ -1082,6 +1088,14 @@ def test_caption_with_trigger_words_prepends_missing_tokens():
     caption = caption_with_trigger_words("studio portrait with soft light", ["miraStyle", "studio"])
 
     assert caption == "miraStyle, studio portrait with soft light"
+
+
+def test_normalize_processor_resample_replaces_unsupported_lanczos():
+    processor = SimpleNamespace(image_processor=SimpleNamespace(resample="lanczos"))
+
+    normalize_processor_resample(processor)
+
+    assert processor.image_processor.resample == JOY_CAPTION_RESAMPLE
 
 
 def test_worker_check_reports_inference_sidecar_capabilities(monkeypatch):
