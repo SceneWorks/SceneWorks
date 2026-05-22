@@ -1416,8 +1416,28 @@ class _LtxMlxLoraBackend:
             mx.eval(self._accumulated_grads)
         return float(loss)
 
+    def _save_lora(self, *, output_dir: str, file_name: str) -> str:
+        """Write the trained LoRA as safetensors keyed by the real LTX module
+        paths (``{module}.lora_A.weight`` [rank,in] / ``{module}.lora_B.weight``
+        [out,rank] + scalar ``{module}.alpha``), so ``mlx_video.lora`` round-trips
+        with no key remap and reproduces the same delta (scale = alpha/rank)."""
+        mx = self._mx
+        os.makedirs(output_dir, exist_ok=True)
+        state: dict[str, Any] = {}
+        for path in self._lora_paths:
+            wrapper = _get_submodule(self._transformer, path)
+            rank = wrapper.lora_a.shape[0]
+            state[f"{path}.lora_A.weight"] = wrapper.lora_a.astype(mx.float32)
+            state[f"{path}.lora_B.weight"] = wrapper.lora_b.astype(mx.float32)
+            state[f"{path}.alpha"] = mx.array(float(wrapper.scale) * float(rank), dtype=mx.float32)
+        mx.eval(list(state.values()))
+        output_path = os.path.join(output_dir, file_name)
+        mx.save_safetensors(output_path, state)
+        return output_path
+
     def save_checkpoint(self, *, step: int, output_dir: str, file_name: str) -> str | None:
-        raise NotImplementedError("LTX MLX adapter save lands in sc-1537.")
+        stem = Path(file_name).stem or "lora"
+        return self._save_lora(output_dir=output_dir, file_name=f"{stem}-step{step:06d}.safetensors")
 
     def generate_samples(
         self,
@@ -1434,7 +1454,7 @@ class _LtxMlxLoraBackend:
         return []
 
     def save_final(self, *, output_dir: str, file_name: str) -> str:
-        raise NotImplementedError("LTX MLX adapter save lands in sc-1537.")
+        return self._save_lora(output_dir=output_dir, file_name=file_name)
 
     def cleanup(self) -> None:
         self._latents = []
