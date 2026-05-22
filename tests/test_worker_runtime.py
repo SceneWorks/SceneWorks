@@ -72,6 +72,7 @@ from scene_worker.training_adapters import (
     dry_run_training_summary,
     flow_matching_velocity_target,
     read_run_config,
+    require_mlx_runtime,
     resolve_pretrained_source,
     validate_training_plan,
 )
@@ -1697,6 +1698,39 @@ def test_z_image_trainer_cancels_and_skips_save(tmp_path):
 
     assert backend.saved is None
     assert backend.cleaned is True
+
+
+def test_require_mlx_runtime_rejects_non_apple_silicon(monkeypatch):
+    import scene_worker.training_adapters as ta
+
+    monkeypatch.setattr(ta.sys, "platform", "linux")
+    monkeypatch.setattr(ta.platform, "machine", lambda: "x86_64")
+    with pytest.raises(TrainingKernelError, match="Apple Silicon"):
+        require_mlx_runtime()
+
+
+def test_require_mlx_runtime_rejects_apple_silicon_without_mlx(monkeypatch):
+    import scene_worker.training_adapters as ta
+
+    monkeypatch.setattr(ta.sys, "platform", "darwin")
+    monkeypatch.setattr(ta.platform, "machine", lambda: "arm64")
+
+    def _missing(name):
+        raise ImportError(f"No module named {name!r}")
+
+    monkeypatch.setattr(ta.importlib, "import_module", _missing)
+    with pytest.raises(TrainingKernelError, match="optional MLX worker dependencies"):
+        require_mlx_runtime()
+
+
+def test_require_mlx_runtime_passes_on_apple_silicon_with_mlx(monkeypatch):
+    import scene_worker.training_adapters as ta
+
+    monkeypatch.setattr(ta.sys, "platform", "darwin")
+    monkeypatch.setattr(ta.platform, "machine", lambda: "arm64")
+    monkeypatch.setattr(ta.importlib, "import_module", lambda name: ModuleType(name))
+    # Apple Silicon + MLX available: no error.
+    require_mlx_runtime()
 
 
 def test_create_training_kernel_resolves_ltx_mlx():

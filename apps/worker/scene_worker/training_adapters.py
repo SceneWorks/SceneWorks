@@ -992,9 +992,14 @@ LTX_SPATIAL_SCALE = 32
 def require_mlx_runtime() -> None:
     """The LTX kernel runs a native MLX (``mlx.core``) QLoRA loop, which only
     exists on Apple Silicon. Fail with a clear, user-facing message instead of a
-    deep import traceback when run elsewhere. The worker capability gate
-    (sc-1538) keeps such jobs off non-Mac workers; this is the in-kernel
-    backstop."""
+    deep import traceback when run elsewhere.
+
+    Gating (sc-1538): the Rust ``ltx_video_lora`` target is marked MLX/Apple-
+    Silicon-only so non-Mac clients never offer it. Worker capabilities are
+    coarse — any backend-capable GPU worker advertises ``lora_train_execute`` and
+    the kernel is resolved at execution — so this is the in-kernel backstop that
+    rejects, fast and clearly, an LTX job that still reaches a non-Apple-Silicon
+    worker."""
     if sys.platform != "darwin" or platform.machine() != "arm64":
         raise TrainingKernelError(
             "LTX-2.3 LoRA training requires Apple Silicon (macOS arm64); this "
