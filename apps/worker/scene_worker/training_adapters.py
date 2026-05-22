@@ -1116,6 +1116,117 @@ def load_ltx_transformer(model_path: Path) -> tuple[Any, Any]:
     return transformer, config
 
 
+def _get_submodule(root: Any, path: str) -> Any:
+    obj = root
+    for part in path.split("."):
+        obj = obj[int(part)] if part.isdigit() else getattr(obj, part)
+    return obj
+
+
+def _set_submodule(root: Any, path: str, value: Any) -> None:
+    parts = path.split(".")
+    parent = root
+    for part in parts[:-1]:
+        parent = parent[int(part)] if part.isdigit() else getattr(parent, part)
+    leaf = parts[-1]
+    if leaf.isdigit():
+        parent[int(leaf)] = value
+    else:
+        setattr(parent, leaf, value)
+
+
+def _linear_io_dims(base: Any, nn: Any) -> tuple[int, int]:
+    """Return (in_features, out_features) for an ``nn.Linear`` or quantized linear."""
+    if isinstance(base, nn.QuantizedLinear):
+        out_features = base.weight.shape[0]
+        in_features = base.weight.shape[1] * (32 // base.bits)
+        return in_features, out_features
+    weight = base.weight  # (out, in)
+    return weight.shape[1], weight.shape[0]
+
+
+_LORA_LINEAR_CLS: Any = None
+
+
+def _lora_linear_cls() -> Any:
+    """Lazily build the MLX LoRA linear wrapper class (mlx imports are deferred so
+    this module stays importable without MLX). Frozen base + trainable rank-r
+    A/B, matching the inference loader's math: ``base(x) + (x @ Aᵀ @ Bᵀ) * scale``.
+    ``B`` zero-init so the adapter starts as identity."""
+    global _LORA_LINEAR_CLS
+    if _LORA_LINEAR_CLS is None:
+        mx = importlib.import_module("mlx.core")
+        nn = importlib.import_module("mlx.nn")
+
+        class _MlxLoRALinear(nn.Module):
+            def __init__(self, base: Any, in_features: int, out_features: int, rank: int, alpha: float) -> None:
+                super().__init__()
+                self.base = base
+                self.scale = float(alpha) / float(rank)
+                self.lora_a = mx.random.normal((rank, in_features)) * 0.02
+                self.lora_b = mx.zeros((out_features, rank))
+
+            def __call__(self, x: Any) -> Any:
+                return self.base(x) + ((x @ self.lora_a.T) @ self.lora_b.T) * self.scale
+
+        _LORA_LINEAR_CLS = _MlxLoRALinear
+    return _LORA_LINEAR_CLS
+
+
+def inject_video_attention_lora(transformer: Any, config: TrainingRunConfig) -> list[str]:
+    """Inject trainable rank-r LoRA into the video self/cross-attention linear
+    projections (``config.lora_target_modules`` suffixes under ``attn1``/``attn2``),
+    freeze the base, and unfreeze only the LoRA params. Audio and AV-cross modules
+    are skipped — they never run in the still-image (``audio=None``) forward.
+
+    Returns the injected real module paths (used verbatim as save keys so the
+    inference loader round-trips without remapping)."""
+    nn = importlib.import_module("mlx.nn")
+    lora_cls = _lora_linear_cls()
+    suffixes = set(config.lora_target_modules or DEFAULT_LORA_TARGET_MODULES)
+
+    target_paths = [
+        name
+        for name, module in transformer.named_modules()
+        if isinstance(module, (nn.Linear, nn.QuantizedLinear))
+        and name.rsplit(".", 1)[-1] in suffixes
+        and (".attn1." in name or ".attn2." in name)
+    ]
+    if not target_paths:
+        raise TrainingKernelError(
+            "LTX LoRA injection matched no attention projections; check "
+            "advanced.loraTargetModules for this model."
+        )
+
+    transformer.freeze()
+    for path in target_paths:
+        base = _get_submodule(transformer, path)
+        in_features, out_features = _linear_io_dims(base, nn)
+        wrapper = lora_cls(base, in_features, out_features, config.rank, config.alpha)
+        _set_submodule(transformer, path, wrapper)
+        _get_submodule(transformer, path).unfreeze(recurse=False, keys=["lora_a", "lora_b"])
+    return target_paths
+
+
+def _build_mlx_optimizer(name: str, learning_rate: float) -> Any:
+    optim = importlib.import_module("mlx.optimizers")
+    normalized = (name or "").strip().lower().replace("-", "").replace("_", "")
+    if normalized == "adam":
+        return optim.Adam(learning_rate=learning_rate)
+    return optim.AdamW(learning_rate=learning_rate)
+
+
+def ltx_flow_target(clean: Any, noise: Any) -> Any:
+    """Rectified-flow velocity target for the RAW LTX transformer output.
+
+    LTX denoises with ``to_denoised(x_t, v, sigma) = x_t - sigma*v`` over the
+    schedule ``x_t = (1 - sigma)*x_0 + sigma*noise`` (mlx_video). Solving for the
+    velocity that recovers ``x_0`` gives ``v = noise - x_0`` — and the pipeline
+    feeds the raw transformer output straight into ``to_denoised`` (no negation,
+    unlike diffusers' Z-Image), so that is exactly the regression target."""
+    return noise - clean
+
+
 class _LtxMlxLoraBackend:
     """Native MLX LoRA training backend for LTX-2.3 (Apple Silicon).
 
@@ -1137,6 +1248,9 @@ class _LtxMlxLoraBackend:
         self._latents: list[Any] = []
         self._embeds: list[Any] = []
         self._positions: Any | None = None
+        self._optimizer: Any | None = None
+        self._lora_paths: list[str] = []
+        self._accumulated_grads: Any | None = None
 
     def loaded_models(self) -> list[str]:
         return [self._loaded_source] if self._loaded_source else []
@@ -1187,18 +1301,22 @@ class _LtxMlxLoraBackend:
         )
         mx.eval(text_encoder.parameters())
 
+        progress("loading_model", "loading_model", 0.18, "Attaching LoRA adapters to the transformer.")
+        lora_paths = inject_video_attention_lora(transformer, config)
+        self._optimizer = _build_mlx_optimizer(config.optimizer, config.learning_rate)
+        self._accumulated_grads = None
+
         self._transformer = transformer
         self._config = ltx_config
         self._vae = vae
         self._text_encoder = text_encoder
         self._loaded_source = repo
-        # LoRA injection into the transformer + optimizer construction land in
-        # sc-1536 (the training step); load() readies the models so the dataset
-        # can be cached here.
+        self._lora_paths = lora_paths
         emit_worker_event(
             "training_pipeline_load_complete",
             kernel=LtxMlxLoraTrainer.kernel_id,
             source=repo,
+            loraModules=len(lora_paths),
         )
 
     def prepare_dataset(
@@ -1248,9 +1366,55 @@ class _LtxMlxLoraBackend:
         return {"itemCount": count, "resolution": resolution, "latentEdge": latent_edge}
 
     def train_step(self, *, step: int, total_steps: int, config: TrainingRunConfig) -> float:
-        raise NotImplementedError(
-            "LTX MLX training step lands in sc-1536 (flow-matching loss + LoRA injection)."
-        )
+        mx = self._mx
+        nn = importlib.import_module("mlx.nn")
+        tree_utils = importlib.import_module("mlx.utils")
+        transformer_mod = importlib.import_module("mlx_video.models.ltx.transformer")
+        Modality = transformer_mod.Modality
+
+        index = (step - 1) % len(self._latents)
+        clean = self._latents[index]
+        embeds = self._embeds[index]
+        positions = self._positions
+
+        # Rectified-flow training: x_t = (1 - sigma)*clean + sigma*noise, with the
+        # raw transformer output regressed to v = noise - clean (ltx_flow_target).
+        noise = mx.random.normal(clean.shape, dtype=clean.dtype)
+        sigma = float(mx.random.uniform(low=1e-3, high=1.0 - 1e-3).item())
+        x_t = (1.0 - sigma) * clean + sigma * noise
+        target = ltx_flow_target(clean, noise)
+        timesteps = mx.full((clean.shape[0], clean.shape[1]), sigma, dtype=clean.dtype)
+
+        def loss_fn(model: Any) -> Any:
+            modality = Modality(
+                latent=x_t,
+                timesteps=timesteps,
+                positions=positions,
+                context=embeds,
+                context_mask=None,
+                enabled=True,
+            )
+            velocity, _ = model(video=modality, audio=None)
+            return mx.mean((velocity.astype(mx.float32) - target.astype(mx.float32)) ** 2)
+
+        loss_and_grad = nn.value_and_grad(self._transformer, loss_fn)
+        loss, grads = loss_and_grad(self._transformer)
+
+        accum = max(1, config.gradient_accumulation)
+        if self._accumulated_grads is None:
+            self._accumulated_grads = grads
+        else:
+            self._accumulated_grads = tree_utils.tree_map(
+                lambda a, b: a + b, self._accumulated_grads, grads
+            )
+        if step % accum == 0 or step == total_steps:
+            averaged = tree_utils.tree_map(lambda g: g / float(accum), self._accumulated_grads)
+            self._optimizer.update(self._transformer, averaged)
+            mx.eval(self._transformer.parameters(), self._optimizer.state)
+            self._accumulated_grads = None
+        else:
+            mx.eval(self._accumulated_grads)
+        return float(loss)
 
     def save_checkpoint(self, *, step: int, output_dir: str, file_name: str) -> str | None:
         raise NotImplementedError("LTX MLX adapter save lands in sc-1537.")
