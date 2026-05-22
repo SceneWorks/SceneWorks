@@ -760,6 +760,7 @@ describe("SceneWorks app shell", () => {
     await act(async () => {
       container.querySelector("#training-tab-rename-caption").click();
     });
+    expect(field(container, "Caption prompt").value).toContain("Write a long detailed description for this image.");
     await act(async () => {
       [...container.querySelectorAll("button")].find((button) => button.textContent === "Create Captions").click();
     });
@@ -774,6 +775,9 @@ describe("SceneWorks app shell", () => {
         captioner: "joy_caption",
         recaption: false,
         requestedGpu: "auto",
+        options: expect.objectContaining({
+          captionPrompt: "Write a long detailed description for this image.",
+        }),
       }),
     );
     expect(container.textContent).toContain("Caption job queued (job-caption-1)");

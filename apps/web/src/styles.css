@@ -1863,7 +1863,12 @@ label {
   gap: 10px;
   position: sticky;
   top: 12px;
+  max-height: calc(100vh - 24px);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  align-self: start;
   min-width: 0;
+  padding-right: 2px;
 }
 
 .training-caption-sidebar-section {
@@ -1922,7 +1927,7 @@ label {
 
 .training-caption-sidebar textarea {
   resize: vertical;
-  min-height: 92px;
+  min-height: 168px;
 }
 
 .training-caption-submit {
