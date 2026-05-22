@@ -110,6 +110,64 @@ fn builtin_registry_exposes_z_image_turbo_target() {
 }
 
 #[test]
+fn builtin_registry_exposes_ltx_video_target() {
+    let registry = builtin_training_targets();
+    let target = registry
+        .targets
+        .iter()
+        .find(|target| target.id == "ltx_video_lora")
+        .expect("ltx_video_lora target present");
+
+    assert_eq!(target.modality, TrainingModality::Video);
+    assert_eq!(target.output_kind, TrainingOutputKind::Lora);
+    assert_eq!(target.family, "ltx-video");
+    assert_eq!(target.base_model, "ltx_2_3");
+    assert_eq!(target.kernel, "ltx_mlx_lora");
+    assert_eq!(target.defaults.rank, 32);
+    assert_eq!(target.defaults.resolution, 768);
+    assert_eq!(target.defaults.optimizer, "adamw");
+    // Apple-Silicon/MLX-only marker the capability gate (story 1538) and the
+    // frontend key off.
+    assert_eq!(
+        target.limits.get("appleSiliconOnly"),
+        Some(&serde_json::Value::Bool(true))
+    );
+}
+
+#[test]
+fn ltx_video_target_resolves_image_dataset_into_plan() {
+    // The video target consumes the image dataset fixture unchanged: build a plan
+    // and confirm it carries the video target's kernel/family/modality.
+    let dataset = dataset_fixture();
+    let registry = builtin_training_targets();
+    let target = registry
+        .targets
+        .iter()
+        .find(|target| target.id == "ltx_video_lora")
+        .expect("ltx_video_lora target present");
+
+    let plan = build_training_plan(BuildTrainingPlan {
+        job_id: "job_ltx",
+        target,
+        dataset: &dataset,
+        config: target.defaults.clone(),
+        lora_id: "lora_ltx_new",
+        base_model_path: "/models/ltx".to_owned(),
+        dataset_root: Path::new("/data/training/ds_abc123"),
+        output_dir: Path::new("/data/loras/lora_ltx_new"),
+        file_name: "ltx_character.safetensors".to_owned(),
+        created_at: "2026-05-22T00:00:00Z".to_owned(),
+    })
+    .expect("ltx plan resolves");
+
+    assert_eq!(plan.plan_version, TRAINING_PLAN_VERSION);
+    assert_eq!(plan.target.kernel, "ltx_mlx_lora");
+    assert_eq!(plan.target.family, "ltx-video");
+    assert_eq!(plan.target.modality, TrainingModality::Video);
+    assert!(!plan.dataset.items.is_empty());
+}
+
+#[test]
 fn unknown_training_fields_and_values_are_preserved() {
     let mut dataset = load_fixture("dataset.json");
     // Unknown enum value falls back to the string-enum `Unknown` variant.
