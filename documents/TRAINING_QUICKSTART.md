@@ -154,6 +154,14 @@ under-fit; use earlier checkpoints if a 3000-step balanced run starts overfittin
 > model. Watch the worker `training_lora_weight_norm` event: a growing `loraBNorm`
 > across checkpoints confirms the adapter is learning.
 
+> **Apple Silicon — LTX-2.3 video LoRA:** the `ltx_mlx_lora` kernel
+> (`target.kernel`, gated to Apple Silicon) trains an LTX-2.3 *video* LoRA
+> natively in MLX from the same still-image dataset, registered under the
+> `ltx-video` family. Validated recipe: rank 32 / alpha 32 / lr 1e-4 / res 512
+> with short trigger-focused captions (`"a photo of <trigger>"`), ~1500 steps
+> (~1.35 s/step). It peaks ~59 GB during training, so use a **64 GB+ Mac**
+> (96 GB+ comfortable); generation peaks ~34 GB.
+
 AI Toolkit features such as EMA and Differential Output Preservation are not
 exposed as SceneWorks presets yet because the current worker does not implement
 their extra training passes.

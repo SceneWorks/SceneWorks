@@ -1716,7 +1716,7 @@ async fn create_training_job(
     // the common setup problems, before a job is queued.
     //
     // The produced LoRA's family must be one an installed model accepts, or the
-    // output would never be selectable in Image Studio. When no model manifests
+    // output would never be selectable in the Studio. When no model manifests
     // are present the set is empty and this is a no-op. Families come straight
     // from the manifests (not `model_catalog`) so this guardrail — which runs on
     // every submit, including the offline dry-run path — makes no network calls.
@@ -4533,7 +4533,8 @@ async fn register_completed_training_lora(state: &AppState, job_id: &str) -> Opt
 /// (`config_dir/manifests/user.loras.jsonc` or `<project>/loras/manifest.jsonc`).
 /// A run whose adapter is missing under the recomputed output dir registers
 /// nothing, so a failed/canceled/unwritten job never leaves a broken entry. The
-/// entry shows up in `/api/v1/loras` and is selectable in Image Studio.
+/// entry shows up in `/api/v1/loras` and is selectable in the Studio (Image or
+/// Video Studio, by LoRA family).
 async fn register_trained_lora(
     state: &AppState,
     job: &JobSnapshot,
