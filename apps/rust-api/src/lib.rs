@@ -1,5 +1,6 @@
 use std::collections::{HashMap, VecDeque};
 use std::convert::Infallible;
+use std::io::SeekFrom;
 use std::net::SocketAddr;
 use std::path::{Path as FsPath, PathBuf};
 use std::sync::Arc;
@@ -52,7 +53,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use time::format_description::well_known::Rfc3339;
 use time::OffsetDateTime;
-use tokio::io::AsyncWriteExt;
+use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
 use tokio::sync::{mpsc, Mutex as AsyncMutex};
 use tokio::time::{Instant as TokioInstant, MissedTickBehavior};
 use tokio_stream::wrappers::ReceiverStream;
@@ -1804,20 +1805,102 @@ fn is_plain_relative_file(name: &str) -> bool {
 async fn get_project_file(
     State(state): State<AppState>,
     Path((project_id, relative_path)): Path<(String, String)>,
+    headers: HeaderMap,
 ) -> Result<Response, ApiError> {
     let project_file = project_call(state, move |store| {
         store.project_file(&project_id, &relative_path)
     })
     .await?;
-    let file = tokio::fs::File::open(&project_file.path)
+    let mut file = tokio::fs::File::open(&project_file.path)
         .await
         .map_err(|error| ApiError::internal(error.to_string()))?;
+    let total = file
+        .metadata()
+        .await
+        .map_err(|error| ApiError::internal(error.to_string()))?
+        .len();
+    let content_type = project_file.content_type;
+
+    // WebKit/WKWebView (the macOS desktop webview) requires HTTP byte-range
+    // responses to play <video>: it probes with `Range: bytes=0-1` and treats
+    // any 200 reply as a non-seekable source it won't play. Honor a single
+    // range with 206 Partial Content; advertise Accept-Ranges otherwise.
+    if let Some(range_header) = headers.get(header::RANGE).and_then(|v| v.to_str().ok()) {
+        match parse_single_byte_range(range_header, total) {
+            Some((start, end)) => {
+                let len = end - start + 1;
+                file.seek(SeekFrom::Start(start))
+                    .await
+                    .map_err(|error| ApiError::internal(error.to_string()))?;
+                let stream = ReaderStream::new(file.take(len));
+                return Ok((
+                    StatusCode::PARTIAL_CONTENT,
+                    [
+                        (header::CONTENT_TYPE, content_type),
+                        (header::ACCEPT_RANGES, "bytes".to_string()),
+                        (
+                            header::CONTENT_RANGE,
+                            format!("bytes {start}-{end}/{total}"),
+                        ),
+                        (header::CONTENT_LENGTH, len.to_string()),
+                    ],
+                    Body::from_stream(stream),
+                )
+                    .into_response());
+            }
+            None => {
+                return Ok((
+                    StatusCode::RANGE_NOT_SATISFIABLE,
+                    [(header::CONTENT_RANGE, format!("bytes */{total}"))],
+                )
+                    .into_response());
+            }
+        }
+    }
+
     let stream = ReaderStream::new(file);
     Ok((
-        [(header::CONTENT_TYPE, project_file.content_type)],
+        [
+            (header::CONTENT_TYPE, content_type),
+            (header::ACCEPT_RANGES, "bytes".to_string()),
+            (header::CONTENT_LENGTH, total.to_string()),
+        ],
         Body::from_stream(stream),
     )
         .into_response())
+}
+
+/// Parse a single HTTP byte range (`bytes=start-end`, `bytes=start-`, or
+/// `bytes=-suffix`) against a known total size, returning an inclusive
+/// `(start, end)` clamped to the file. Returns `None` for unsatisfiable or
+/// multi-range requests (callers answer 416).
+fn parse_single_byte_range(value: &str, total: u64) -> Option<(u64, u64)> {
+    let spec = value.strip_prefix("bytes=")?.trim();
+    if spec.is_empty() || spec.contains(',') || total == 0 {
+        return None;
+    }
+    let (start_str, end_str) = spec.split_once('-')?;
+    let (start, end) = if start_str.is_empty() {
+        // Suffix range: last `suffix` bytes.
+        let suffix: u64 = end_str.parse().ok()?;
+        if suffix == 0 {
+            return None;
+        }
+        let start = total.saturating_sub(suffix);
+        (start, total - 1)
+    } else {
+        let start: u64 = start_str.parse().ok()?;
+        let end = if end_str.is_empty() {
+            total - 1
+        } else {
+            end_str.parse::<u64>().ok()?.min(total - 1)
+        };
+        (start, end)
+    };
+    if start > end || start >= total {
+        return None;
+    }
+    Some((start, end))
 }
 
 async fn list_characters(
@@ -12192,6 +12275,72 @@ mod tests {
         let error: Value = serde_json::from_slice(&bytes).expect("json error parses");
         assert_eq!(status, StatusCode::BAD_REQUEST);
         assert_eq!(error["detail"], "Invalid project file path");
+    }
+
+    #[tokio::test]
+    async fn project_file_route_serves_byte_ranges() {
+        let temp_dir = tempfile::tempdir().expect("temp dir creates");
+        let app = create_app(test_settings(&temp_dir)).expect("app creates");
+        let (_, created) = request(
+            app.clone(),
+            "POST",
+            "/api/v1/projects",
+            json!({ "name": "Ranges" }),
+        )
+        .await;
+        let project_id = created["id"].as_str().expect("project id").to_owned();
+        let project_path = std::path::PathBuf::from(created["path"].as_str().unwrap());
+        let media_path = project_path.join("assets/videos/clip.mp4");
+        std::fs::write(&media_path, b"0123456789").expect("media writes");
+        let uri = format!("/api/v1/projects/{project_id}/files/assets/videos/clip.mp4");
+
+        // A full request advertises range support so WebKit knows it can seek.
+        let (status, headers, bytes) =
+            request_raw(app.clone(), "GET", &uri, Body::empty(), &[]).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(bytes, b"0123456789");
+        assert_eq!(
+            headers.get("accept-ranges").and_then(|v| v.to_str().ok()),
+            Some("bytes")
+        );
+
+        // A bounded range yields 206 with the exact slice and Content-Range.
+        let (status, headers, bytes) = request_raw(
+            app.clone(),
+            "GET",
+            &uri,
+            Body::empty(),
+            &[("range", "bytes=2-5")],
+        )
+        .await;
+        assert_eq!(status, StatusCode::PARTIAL_CONTENT);
+        assert_eq!(bytes, b"2345");
+        assert_eq!(
+            headers.get("content-range").and_then(|v| v.to_str().ok()),
+            Some("bytes 2-5/10")
+        );
+        assert_eq!(
+            headers.get("accept-ranges").and_then(|v| v.to_str().ok()),
+            Some("bytes")
+        );
+
+        // An open-ended range serves to EOF (this is how WebKit fetches the
+        // trailing moov atom on a non-faststart MP4).
+        let (status, _, bytes) = request_raw(
+            app.clone(),
+            "GET",
+            &uri,
+            Body::empty(),
+            &[("range", "bytes=7-")],
+        )
+        .await;
+        assert_eq!(status, StatusCode::PARTIAL_CONTENT);
+        assert_eq!(bytes, b"789");
+
+        // An unsatisfiable range is rejected with 416.
+        let (status, _, _) =
+            request_raw(app, "GET", &uri, Body::empty(), &[("range", "bytes=99-")]).await;
+        assert_eq!(status, StatusCode::RANGE_NOT_SATISFIABLE);
     }
 
     #[tokio::test]

@@ -781,7 +781,9 @@ class LtxPipelinesVideoAdapter(ProceduralVideoAdapter):
                 output_path=str(temp_path),
                 video_chunks_number=video_chunks_number,
             )
+        faststart_mp4(temp_path)
         temp_path.replace(media_path)
+        write_poster_frame(media_path)
 
         if replacement_control is not None:
             # replacementActive is true ONLY here: the masked-control package was
@@ -1510,6 +1512,73 @@ def _ensure_ffmpeg_on_path() -> None:
     os.environ["PATH"] = f"{link_dir}{os.pathsep}{os.environ.get('PATH', '')}"
 
 
+def _resolve_ffmpeg() -> str | None:
+    """Locate an ffmpeg executable: SCENEWORKS_FFMPEG, then a system ffmpeg, then
+    the binary bundled with imageio-ffmpeg (always present in the desktop venv)."""
+    import shutil
+
+    exe = os.environ.get("SCENEWORKS_FFMPEG", "").strip() or shutil.which("ffmpeg")
+    if not exe:
+        try:
+            import imageio_ffmpeg
+
+            exe = imageio_ffmpeg.get_ffmpeg_exe()
+        except Exception:
+            return None
+    return exe if exe and Path(exe).exists() else None
+
+
+def faststart_mp4(path: Path) -> None:
+    """Remux a finished MP4 in place with the moov atom moved to the front
+    (``-movflags +faststart``). The ffmpeg/imageio muxers used by every video
+    adapter leave moov at EOF, which forces WebKit/WKWebView to issue a byte-range
+    seek to the end before it can start playback. Faststart lets it begin from the
+    first bytes. Best-effort: a missing or failing ffmpeg leaves the original file
+    untouched — the API's byte-range support is the load-bearing guarantee."""
+    import subprocess
+
+    if path.suffix.lower() != ".mp4" or not path.exists():
+        return
+    exe = _resolve_ffmpeg()
+    if not exe:
+        return
+    remuxed = path.with_suffix(".faststart.mp4")
+    try:
+        subprocess.run(
+            [exe, "-nostdin", "-y", "-i", str(path), "-c", "copy", "-movflags", "+faststart", str(remuxed)],
+            check=True,
+            capture_output=True,
+        )
+        remuxed.replace(path)
+    except Exception:
+        remuxed.unlink(missing_ok=True)
+
+
+def write_poster_frame(media_path: Path) -> None:
+    """Extract the first frame of a finished video to a sibling ``<name>.poster.jpg``
+    so the UI can show a real thumbnail. WKWebView (the macOS desktop webview) does
+    not paint a ``<video>``'s first frame as a poster on its own — it shows a blank
+    gray box — and seeking it via JS/media-fragment doesn't reliably help, so the UI
+    uses this static image instead. Best-effort: a missing/failing ffmpeg leaves no
+    poster (the UI falls back to a placeholder)."""
+    import subprocess
+
+    if media_path.suffix.lower() != ".mp4" or not media_path.exists():
+        return
+    exe = _resolve_ffmpeg()
+    if not exe:
+        return
+    poster = media_path.with_suffix(".poster.jpg")
+    try:
+        subprocess.run(
+            [exe, "-nostdin", "-y", "-i", str(media_path), "-frames:v", "1", "-q:v", "3", str(poster)],
+            check=True,
+            capture_output=True,
+        )
+    except Exception:
+        poster.unlink(missing_ok=True)
+
+
 # LTX user-LoRA injection. mlx-video-with-audio's turnkey generate_video_with_audio
 # builds the LTX transformer (LTXModel) internally and exposes no loras kwarg, so we
 # wrap LTXModel.load_weights to merge the pending LoRAs (apply_loras_to_model: dequant
@@ -1737,7 +1806,9 @@ class MlxVideoAdapter(VideoGenerationAdapter):
         if cancel_requested():
             temp_path.unlink(missing_ok=True)
             raise InterruptedError("Video generation canceled before saving.")
+        faststart_mp4(temp_path)
         temp_path.replace(media_path)
+        write_poster_frame(media_path)
 
         generation_set = {
             "schemaVersion": 1,
@@ -1964,7 +2035,9 @@ class MlxVideoAdapter(VideoGenerationAdapter):
         if cancel_requested():
             temp_path.unlink(missing_ok=True)
             raise InterruptedError("Video generation canceled before saving.")
+        faststart_mp4(temp_path)
         temp_path.replace(media_path)
+        write_poster_frame(media_path)
 
         progress("saving", "saving", 0.9, "Saving video asset and recipe.")
         generation_set = {
@@ -2114,7 +2187,9 @@ class DiffusersVideoAdapter(VideoGenerationAdapter):
         progress("saving", "saving", 0.9, "Saving generated MP4 asset and recipe.")
         diffusers_utils = importlib.import_module("diffusers.utils")
         diffusers_utils.export_to_video(frames, str(temp_path), fps=request.fps)
+        faststart_mp4(temp_path)
         temp_path.replace(media_path)
+        write_poster_frame(media_path)
 
         generation_set = {
             "schemaVersion": 1,
