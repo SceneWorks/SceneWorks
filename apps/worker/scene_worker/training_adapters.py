@@ -160,6 +160,11 @@ class TrainingRunConfig:
     save_every: int
     seed: int
     optimizer: str
+    weight_decay: float
+    timestep_type: str
+    timestep_bias: str
+    loss_type: str
+    gradient_checkpointing: bool
     mixed_precision: Any
     lora_target_modules: Any
     sample_every: int
@@ -185,6 +190,20 @@ def _as_float(value: Any, default: float) -> float:
     return parsed
 
 
+def _as_bool(value: Any, default: bool = False) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in {"1", "true", "yes", "on"}:
+            return True
+        if normalized in {"0", "false", "no", "off"}:
+            return False
+    if isinstance(value, (int, float)):
+        return bool(value)
+    return default
+
+
 def read_run_config(plan: dict[str, Any]) -> TrainingRunConfig:
     config = plan.get("config") or {}
     advanced = config.get("advanced") if isinstance(config.get("advanced"), dict) else {}
@@ -205,6 +224,11 @@ def read_run_config(plan: dict[str, Any]) -> TrainingRunConfig:
         save_every=_as_int(config.get("saveEvery"), 0, minimum=0),
         seed=_as_int(config.get("seed"), 42),
         optimizer=str(config.get("optimizer") or "adamw"),
+        weight_decay=_as_float(advanced.get("weightDecay"), 0.0),
+        timestep_type=str(advanced.get("timestepType") or "sigmoid"),
+        timestep_bias=str(advanced.get("timestepBias") or "balanced"),
+        loss_type=str(advanced.get("lossType") or "mse"),
+        gradient_checkpointing=_as_bool(advanced.get("gradientCheckpointing"), True),
         mixed_precision=advanced.get("mixedPrecision"),
         lora_target_modules=target_modules,
         sample_every=_as_int(advanced.get("sampleEvery"), 0, minimum=0),
@@ -567,7 +591,7 @@ def _training_message(step: int, total_steps: int, loss: float | None) -> str:
 # --------------------------------------------------------------------------- #
 
 
-def build_optimizer(name: str, params: list[Any], learning_rate: float) -> Any:
+def build_optimizer(name: str, params: list[Any], learning_rate: float, weight_decay: float = 0.0) -> Any:
     """Build an optimizer for the LoRA parameters. ``adamw8bit`` uses
     bitsandbytes when available and falls back to torch AdamW otherwise (the
     8-bit optimizer is an optional, CUDA-only dependency). ``prodigy`` and
@@ -581,11 +605,11 @@ def build_optimizer(name: str, params: list[Any], learning_rate: float) -> Any:
         except Exception as exc:
             raise TrainingKernelError("The Prodigy optimizer requires the prodigyopt Python package.") from exc
         use_lr = learning_rate if learning_rate >= 0.1 else 1.0
-        return prodigy_module.Prodigy(params, lr=use_lr, eps=1e-6)
+        return prodigy_module.Prodigy(params, lr=use_lr, eps=1e-6, weight_decay=weight_decay)
     if normalized in {"adamw8bit", "adam8bit"}:
         try:
             bnb = importlib.import_module("bitsandbytes")
-            return bnb.optim.AdamW8bit(params, lr=learning_rate)
+            return bnb.optim.AdamW8bit(params, lr=learning_rate, weight_decay=weight_decay)
         except Exception:
             emit_worker_event(
                 "training_optimizer_fallback",
@@ -593,10 +617,52 @@ def build_optimizer(name: str, params: list[Any], learning_rate: float) -> Any:
                 using="adamw",
                 reason="bitsandbytes unavailable",
             )
-            return torch.optim.AdamW(params, lr=learning_rate)
+            return torch.optim.AdamW(params, lr=learning_rate, weight_decay=weight_decay)
     if normalized == "adam":
-        return torch.optim.Adam(params, lr=learning_rate)
-    return torch.optim.AdamW(params, lr=learning_rate)
+        return torch.optim.Adam(params, lr=learning_rate, weight_decay=weight_decay)
+    return torch.optim.AdamW(params, lr=learning_rate, weight_decay=weight_decay)
+
+
+def sample_training_timestep(
+    torch: Any,
+    *,
+    generator: Any,
+    device: str,
+    dtype: Any,
+    timestep_type: str,
+    timestep_bias: str,
+) -> Any:
+    """Sample a normalized flow-matching timestep in [0, 1].
+
+    The `sigmoid` shape follows ai-toolkit's flowmatch scheduler: random normal
+    values are passed through sigmoid so most samples land near the middle of the
+    denoising range. Bias then nudges the normalized value toward high or low
+    noise while keeping the same single-sample training loop.
+    """
+
+    normalized_type = (timestep_type or "sigmoid").strip().lower().replace("-", "_")
+    if normalized_type in {"linear", "uniform"}:
+        t = torch.rand(1, generator=generator, device=device, dtype=dtype)
+    elif normalized_type == "weighted":
+        base = torch.rand(1, generator=generator, device=device, dtype=dtype)
+        center = torch.sigmoid(torch.randn(1, generator=generator, device=device, dtype=dtype))
+        t = (base + center) / 2.0
+    else:
+        t = torch.sigmoid(torch.randn(1, generator=generator, device=device, dtype=dtype))
+
+    normalized_bias = (timestep_bias or "balanced").strip().lower().replace("-", "_").replace(" ", "_")
+    if normalized_bias in {"high", "high_noise", "favor_high_noise"}:
+        t = torch.sqrt(t)
+    elif normalized_bias in {"low", "low_noise", "favor_low_noise"}:
+        t = t * t
+    return t.clamp(1e-3, 1.0 - 1e-3)
+
+
+def training_loss(torch: Any, prediction: Any, target: Any, loss_type: str) -> Any:
+    normalized = (loss_type or "mse").strip().lower().replace("-", "_").replace(" ", "_")
+    if normalized in {"mae", "l1", "mean_absolute_error"}:
+        return torch.nn.functional.l1_loss(prediction.float(), target.float())
+    return torch.nn.functional.mse_loss(prediction.float(), target.float())
 
 
 def flow_matching_velocity_target(latents: Any, noise: Any) -> Any:
@@ -733,6 +799,17 @@ class _ZImageLoraBackend:
         )
         transformer.add_adapter(lora_config)
         self._activate_lora_adapter(transformer)
+        if config.gradient_checkpointing:
+            if hasattr(transformer, "enable_gradient_checkpointing"):
+                transformer.enable_gradient_checkpointing()
+            elif hasattr(transformer, "gradient_checkpointing_enable"):
+                transformer.gradient_checkpointing_enable()
+            else:
+                emit_worker_event(
+                    "training_gradient_checkpointing_unavailable",
+                    kernel=ZImageLoraTrainer.kernel_id,
+                    transformer=type(transformer).__name__,
+                )
         transformer.train()
         trainable = [param for param in transformer.parameters() if param.requires_grad]
         if not trainable:
@@ -742,7 +819,9 @@ class _ZImageLoraBackend:
                 "advanced.loraTargetModules for this base model."
             )
 
-        self._optimizer = build_optimizer(config.optimizer, trainable, config.learning_rate)
+        self._optimizer = build_optimizer(
+            config.optimizer, trainable, config.learning_rate, config.weight_decay
+        )
         self._optimizer.zero_grad()
         vae_config = getattr(pipe.vae, "config", None)
         self._vae_scaling = float(getattr(vae_config, "scaling_factor", 1.0) or 1.0)
@@ -822,8 +901,14 @@ class _ZImageLoraBackend:
         noise = torch.randn(
             latents.shape, generator=self._generator, device=device, dtype=latents.dtype
         )
-        t = torch.rand(1, generator=self._generator, device=device, dtype=latents.dtype)
-        t = t.clamp(1e-3, 1.0 - 1e-3)
+        t = sample_training_timestep(
+            torch,
+            generator=self._generator,
+            device=device,
+            dtype=latents.dtype,
+            timestep_type=config.timestep_type,
+            timestep_bias=config.timestep_bias,
+        )
         noisy = (1.0 - t) * latents + t * noise
         target = flow_matching_velocity_target(latents, noise)
         timestep = t * 1000.0
@@ -846,7 +931,7 @@ class _ZImageLoraBackend:
             )
             self._diagnosed_forward = True
 
-        loss = torch.nn.functional.mse_loss(prediction.float(), target.float())
+        loss = training_loss(torch, prediction, target, config.loss_type)
         accum = max(1, config.gradient_accumulation)
         (loss / accum).backward()
         if step % accum == 0 or step == total_steps:

@@ -53,7 +53,38 @@ Recommended for a first run:
 The Rust store owns dataset layout under `<project>/training/datasets/<id>/` and
 exports caption sidecars; you never hand-edit trainer files.
 
-## 2. Dry run (validate the plan)
+## 2. Choose a training preset
+
+Training configuration starts from a named built-in preset. For
+`z_image_turbo_lora`, the default is **Character balanced**, which sets rank,
+alpha, learning rate, optimizer, steps, resolution, checkpoint cadence, and
+sample cadence from the Rust preset registry.
+
+The preset registry is available at:
+
+```http
+GET /api/v1/training/presets
+```
+
+Initial Z-Image-Turbo presets include:
+
+- `Character balanced` (`adamw8bit`, rank 16, 3000 steps, 1024px)
+- `Character conservative` (`adamw8bit`, rank 8, learning rate `0.00005`)
+- `Character balanced (AdamW)` (`adamw`)
+- `Prodigy character (experimental)` (`prodigyopt`, learning rate `1.0`)
+- `Style balanced` (rank 32, 3000 steps)
+- `Low VRAM character` (rank 8, 2000 steps, 768px)
+
+In the **Train** screen, changing the training target applies that target's
+default preset. Changing the optimizer while the draft is still pristine applies
+the matching optimizer preset. Manual edits are shown as customizations and are
+preserved during normal refreshes. Turbo presets use sigmoid/high-noise
+timestep sampling, MSE loss, weight decay `0.0001`, gradient checkpointing,
+and 8-step CFG-0 sample previews. They also record the
+`ostris/zimage_turbo_training_adapter` metadata used to derive the
+recommendation.
+
+## 3. Dry run (validate the plan)
 
 A dry run resolves and validates the full plan — dataset items exist, config is
 in range, paths are absolute — **without** loading the model or producing
@@ -63,6 +94,8 @@ weights. It is the fast way to catch problems before spending GPU time.
 POST /api/v1/projects/{projectId}/training/jobs
 {
   "targetId": "z_image_turbo_lora",
+  "presetId": "z_image_turbo_lora.character.adamw8bit.balanced",
+  "presetVersion": 1,
   "datasetId": "ds_…",
   "config": { …target defaults… },
   "outputName": "Aurora Style",
@@ -73,18 +106,19 @@ POST /api/v1/projects/{projectId}/training/jobs
 In the **Train** screen this is the *"Validate (dry run)"* action (the default).
 The job completes with a summary of what a real run would produce.
 
-Config defaults for `z_image_turbo_lora` (from the Rust registry): rank 16,
-alpha 16, learning rate 1e-4, 2000 steps, batch size 1, resolution 1024, save
-every 250 steps, `adamw8bit` optimizer. Advanced fields stay collapsed by
-default; `outputScope` defaults to `project`.
+The dry-run plan records `presetId`, `presetVersion`, `presetName`, the preset
+config snapshot, and the effective config snapshot. Existing direct submissions
+without a preset still work; when you provide a preset id, the API validates that
+the preset exists, matches the target, and matches the pinned version.
 
-## 3. Train for real
+## 4. Train for real
 
 Submit the same request with `"dryRun": false` (the *"Run training (beta)"*
 toggle in the Train screen). The job routes to a GPU worker's `z_image_lora`
 kernel, which loads the Z-Image-Turbo pipeline, attaches a PEFT LoRA to the
-transformer, caches latents and prompt embeddings, runs the flow-matching loop,
-checkpoints every `saveEvery` steps, and writes a `.safetensors` adapter.
+transformer, caches latents and prompt embeddings, runs the flow-matching loop
+with the configured timestep sampler/loss settings, checkpoints every
+`saveEvery` steps, and writes a `.safetensors` adapter.
 
 Progress reports flow through the job stream (`preparing → caching → training →
 checkpointing → saving → completed`) and the run honors cancellation between
@@ -95,13 +129,17 @@ steps.
 Training is more memory-intensive than generation. The validated baseline is a
 96 GB card. If you hit out-of-memory errors, lower the resolution (768 or 512),
 keep batch size at 1, and reduce rank. Fewer steps train faster but may
-under-fit; 1500–2500 steps is a reasonable first range.
+under-fit; use earlier checkpoints if a 3000-step balanced run starts overfitting.
 
 > **Note:** Z-Image-Turbo is a distilled (few-step) model. A LoRA trained
 > directly on it can work, but may need extra care for quality on some subjects.
 > Treat the first result as a baseline and iterate on dataset and steps.
 
-## 4. Where the output goes
+AI Toolkit features such as EMA and Differential Output Preservation are not
+exposed as SceneWorks presets yet because the current worker does not implement
+their extra training passes.
+
+## 5. Where the output goes
 
 On a successful real run the adapter is registered as a normal SceneWorks LoRA:
 
@@ -111,7 +149,7 @@ On a successful real run the adapter is registered as a normal SceneWorks LoRA:
   `data/loras/<loraId>/`, registered in `config/manifests/user.loras.jsonc`.
 
 The entry carries provenance back to the dataset (id + version), training target,
-job id, base model, and a config snapshot. It appears in `GET /api/v1/loras`
+selected preset metadata, job id, base model, and a config snapshot. It appears in `GET /api/v1/loras`
 (add `?projectId=…` for project-scoped) and is selectable in **Image Studio**
 under the `z-image` family. Type your trigger word in the prompt to invoke it.
 

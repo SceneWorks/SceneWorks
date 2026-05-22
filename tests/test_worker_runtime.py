@@ -73,6 +73,7 @@ from scene_worker.training_adapters import (
     flow_matching_velocity_target,
     read_run_config,
     resolve_pretrained_source,
+    sample_training_timestep,
     validate_training_plan,
 )
 from scene_worker.video_adapters import (
@@ -1287,6 +1288,24 @@ def test_flow_matching_velocity_target_uses_negated_pipeline_sign():
     assert flow_matching_velocity_target(latents, noise) == -(noise - latents)
 
 
+def test_sample_training_timestep_accepts_ai_toolkit_shape_and_bias():
+    torch = pytest.importorskip("torch")
+    generator = torch.Generator("cpu").manual_seed(7)
+
+    timestep = sample_training_timestep(
+        torch,
+        generator=generator,
+        device="cpu",
+        dtype=torch.float32,
+        timestep_type="sigmoid",
+        timestep_bias="high_noise",
+    )
+
+    assert timestep.shape == (1,)
+    assert float(timestep.item()) > 0.001
+    assert float(timestep.item()) < 0.999
+
+
 def test_build_optimizer_uses_prodigy_with_aitoolkit_lr_floor(monkeypatch):
     calls = {}
 
@@ -1305,10 +1324,10 @@ def test_build_optimizer_uses_prodigy_with_aitoolkit_lr_floor(monkeypatch):
     monkeypatch.setattr("scene_worker.training_adapters.importlib.import_module", fake_import_module)
     params = [object()]
 
-    optimizer = build_optimizer("prodigyopt", params, 0.0001)
+    optimizer = build_optimizer("prodigyopt", params, 0.0001, 0.0001)
 
     assert isinstance(optimizer, FakeProdigy)
-    assert calls == {"params": params, "kwargs": {"lr": 1.0, "eps": 1e-6}}
+    assert calls == {"params": params, "kwargs": {"lr": 1.0, "eps": 1e-6, "weight_decay": 0.0001}}
 
 
 def test_z_image_lora_backend_activates_default_adapter():
@@ -1336,7 +1355,14 @@ def test_read_run_config_defaults_lora_target_modules_and_parses_advanced():
                 "steps": 500,
                 "saveEvery": 100,
                 "optimizer": "adamw8bit",
-                "advanced": {"mixedPrecision": "bf16"},
+                "advanced": {
+                    "mixedPrecision": "bf16",
+                    "weightDecay": 0.0001,
+                    "timestepType": "sigmoid",
+                    "timestepBias": "high_noise",
+                    "lossType": "mse",
+                    "gradientCheckpointing": True,
+                },
             }
         }
     )
@@ -1346,6 +1372,11 @@ def test_read_run_config_defaults_lora_target_modules_and_parses_advanced():
     assert config.steps == 500
     assert config.save_every == 100
     assert config.mixed_precision == "bf16"
+    assert config.weight_decay == 0.0001
+    assert config.timestep_type == "sigmoid"
+    assert config.timestep_bias == "high_noise"
+    assert config.loss_type == "mse"
+    assert config.gradient_checkpointing is True
     assert config.lora_target_modules == ["to_q", "to_k", "to_v", "to_out.0"]
     assert config.sample_steps == 9
     assert config.sample_guidance_scale == 0.0
