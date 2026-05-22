@@ -345,7 +345,7 @@ pub struct TrainingProvenance {
 pub fn builtin_training_targets() -> TrainingTargetRegistry {
     TrainingTargetRegistry {
         schema_version: TRAINING_CONTRACT_SCHEMA_VERSION,
-        targets: vec![z_image_turbo_lora_target()],
+        targets: vec![z_image_turbo_lora_target(), ltx_video_lora_target()],
         extra: ExtraFields::new(),
     }
 }
@@ -400,6 +400,78 @@ fn z_image_turbo_lora_target() -> TrainingTarget {
             "label": "Z-Image-Turbo LoRA",
             "description": "Train an image LoRA for the Z-Image-Turbo base model.",
             "recommendedFor": ["character", "style"]
+        })),
+        extra: ExtraFields::new(),
+    }
+}
+
+/// Native MLX LoRA training for LTX-2.3 video, trained from a still-image dataset.
+///
+/// Apple-Silicon only: the `ltx_mlx_lora` kernel runs a native MLX (mlx.core /
+/// mlx.optimizers) QLoRA loop against the quantized LTX transformer, so the
+/// worker only advertises/accepts it on macOS with MLX (gated in story 1538).
+/// `modality` is the *output* modality (a video LoRA); the consumed dataset is
+/// images (the only dataset modality the store supports), surfaced via
+/// `ui.datasetModality`. The output registers as an `ltx-video` family LoRA the
+/// MLX LTX video adapter loads at inference.
+fn ltx_video_lora_target() -> TrainingTarget {
+    TrainingTarget {
+        id: "ltx_video_lora".to_owned(),
+        name: "LTX-2.3 Video LoRA".to_owned(),
+        modality: TrainingModality::Video,
+        output_kind: TrainingOutputKind::Lora,
+        family: "ltx-video".to_owned(),
+        base_model: "ltx_2_3".to_owned(),
+        base_model_repo: Some("notapalindrome/ltx23-mlx-av-q4".to_owned()),
+        kernel: "ltx_mlx_lora".to_owned(),
+        defaults: TrainingConfig {
+            rank: 32,
+            alpha: 32,
+            learning_rate: ContractNumber::from_f64(0.0001).expect("0.0001 is finite"),
+            steps: 1500,
+            batch_size: 1,
+            gradient_accumulation: 1,
+            resolution: 768,
+            save_every: 250,
+            seed: 42,
+            // MLX trains with mlx.optimizers.AdamW; bitsandbytes 8-bit is CUDA-only
+            // and never applies here.
+            optimizer: "adamw".to_owned(),
+            trigger_word: None,
+            advanced: object(json!({
+                "mixedPrecision": "bf16",
+                "cacheLatents": true,
+                "networkType": "lora",
+                "scheduler": "constant",
+                "backend": "mlx",
+                // Still-image training: each item encodes to a single latent frame.
+                "numFrames": 1,
+                "loraTargetModules": ["to_q", "to_k", "to_v", "to_out"],
+                "sampleEvery": 250,
+                "qualityPreset": "balanced",
+                "outputScope": "project",
+                "requestedGpu": "auto"
+            })),
+            extra: ExtraFields::new(),
+        },
+        limits: object(json!({
+            "rank": [4, 128],
+            "alpha": [1, 128],
+            "steps": [200, 4000],
+            "resolutions": [512, 768, 1024],
+            "batchSize": [1, 2],
+            "qualityPresets": ["speed", "balanced", "quality"],
+            "outputScopes": ["project", "global"],
+            "requiresBackend": "mlx",
+            "appleSiliconOnly": true
+        })),
+        ui: object(json!({
+            "label": "LTX-2.3 Video LoRA",
+            "description": "Train an LTX-2.3 video LoRA from still images. Apple Silicon only (native MLX).",
+            "recommendedFor": ["character", "style"],
+            "appleSiliconOnly": true,
+            "backend": "mlx",
+            "datasetModality": "image"
         })),
         extra: ExtraFields::new(),
     }
