@@ -1831,6 +1831,28 @@ def test_video_adapter_override_aliases_and_unknown_values(monkeypatch):
         raise AssertionError("Unknown video adapter override should fail loudly.")
 
 
+def test_mlx_routing_is_mode_aware_on_mps(monkeypatch):
+    # On an MPS host the MLX adapter only handles text_to_video / image_to_video;
+    # every other mode must stay on the PyTorch path or it fails in ensure_models.
+    monkeypatch.delenv("SCENEWORKS_VIDEO_ADAPTER", raising=False)
+    monkeypatch.setattr("scene_worker.video_adapters._mps_available", lambda: True)
+
+    def adapter(model, mode):
+        return create_video_adapter({"payload": {"model": model, "mode": mode}}).__class__.__name__
+
+    # Supported MLX modes route to MLX.
+    assert adapter("ltx_2_3", "text_to_video") == "MlxVideoAdapter"
+    assert adapter("ltx_2_3", "image_to_video") == "MlxVideoAdapter"
+    assert adapter("wan_2_2", "image_to_video") == "MlxVideoAdapter"
+
+    # Unsupported modes fall through to the PyTorch adapters, not MLX.
+    assert adapter("ltx_2_3", "first_last_frame") == "LtxPipelinesVideoAdapter"
+    assert adapter("ltx_2_3", "extend_clip") == "LtxPipelinesVideoAdapter"
+    assert adapter("ltx_2_3", "video_bridge") == "LtxPipelinesVideoAdapter"
+    assert adapter("wan_2_2", "video_bridge") == "DiffusersVideoAdapter"
+    assert adapter("wan_2_2", "replace_person") == "DiffusersVideoAdapter"
+
+
 def test_video_pipeline_evicts_previous_pipeline_and_loaded_models():
     adapter = DiffusersVideoAdapter()
     adapter._pipeline = object()

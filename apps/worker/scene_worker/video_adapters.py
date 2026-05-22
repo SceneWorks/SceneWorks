@@ -2137,18 +2137,26 @@ def create_video_adapter(job: dict[str, Any] | None = None) -> VideoGenerationAd
     if requested == "mlx_video":
         return MlxVideoAdapter()
     if not requested:
-        model = str((job or {}).get("payload", {}).get("model", "ltx_2_3"))
+        payload = (job or {}).get("payload", {})
+        model = str(payload.get("model", "ltx_2_3"))
+        # Mirror video_request_from_job's default so a mode-less job routes the way
+        # the adapter will interpret it.
+        mode = str(payload.get("mode", "image_to_video"))
         target = model_target(model)
 
-        if target["adapter"] == "ltx_video" and _mps_available() and model in MlxVideoAdapter._supported_models:
+        # MLX only covers text_to_video / image_to_video. Other modes
+        # (first_last_frame, extend_clip, video_bridge, replace_person) stay on the
+        # PyTorch path even on MPS hosts, where the native LTX / Diffusers adapters
+        # support them — routing them to MLX would fail in ensure_models.
+        mlx_eligible = (
+            _mps_available()
+            and model in MlxVideoAdapter._supported_models
+            and mode in MlxVideoAdapter._supported_modes
+        )
+        if mlx_eligible:
             return MlxVideoAdapter()
-
         if target["adapter"] == "ltx_video":
             return LtxPipelinesVideoAdapter()
-
-        if _mps_available() and model in MlxVideoAdapter._supported_models:
-            return MlxVideoAdapter()
-
         return DiffusersVideoAdapter()
     raise RuntimeError(f"Unsupported SCENEWORKS_VIDEO_ADAPTER value: {requested}.")
 
