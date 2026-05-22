@@ -6,6 +6,19 @@ export function findReplacementModel(videoModels) {
   return videoModels.find((item) => item.capabilities?.includes("replace_person")) ?? null;
 }
 
+const MASK_STATE_COPY = {
+  active: "Per-frame segmentation masks generated for tracked frames.",
+  generated: "Per-frame segmentation masks generated for most tracked frames.",
+  degraded: "Box-derived masks (segmentation backend unavailable on the worker).",
+  missing: "No masks yet — re-run tracking or correct the track.",
+  deferred: "Procedural preview track — not real tracking output.",
+};
+
+function maskStateCopy(track) {
+  const state = track?.status?.maskState;
+  return MASK_STATE_COPY[state] ?? "Tracked boxes are stored in the track sidecar.";
+}
+
 export function ReplacePersonPanel({
   createPersonDetectionJob,
   createPersonTrackJob,
@@ -24,7 +37,20 @@ export function ReplacePersonPanel({
   personTrackId,
   replacementMode,
   videoAssets,
+  personReadiness = {},
 }) {
+  // Default-open: only gate when readiness explicitly reports a backend missing.
+  const detectReady = personReadiness?.detect?.ready !== false;
+  const trackReady = personReadiness?.track?.ready !== false;
+  const replaceReady = personReadiness?.replace?.ready !== false;
+  const readinessNotice = !detectReady
+    ? "Detection unavailable: start a GPU worker with the detector backend installed (apps/worker/requirements-person.txt)."
+    : !trackReady
+      ? "Tracking unavailable: no live GPU worker is advertising the tracker capability."
+      : !replaceReady
+        ? "Replacement unavailable: no live GPU worker can run person replacement yet."
+        : "";
+
   function analyzeSource() {
     if (!sourceClipAssetId) {
       return;
@@ -59,12 +85,19 @@ export function ReplacePersonPanel({
       />
 
       <div className="guidance-strip">
-        <strong>V1 placeholder tracking</strong>
-        <span>Candidate boxes, tracking, and replacement output are procedural previews until a model adapter is connected.</span>
+        <strong>Real person tracking</strong>
+        <span>Detection and tracking run on a GPU worker (YOLO + ByteTrack). Replacement uses per-frame segmentation masks when a segmenter is installed and falls back to box masks otherwise.</span>
       </div>
 
+      {readinessNotice ? (
+        <div className="guidance-strip warning" role="status">
+          <strong>Not ready</strong>
+          <span>{readinessNotice}</span>
+        </div>
+      ) : null}
+
       <div className="replace-actions">
-        <button disabled={!sourceClipAssetId} onClick={analyzeSource} type="button">
+        <button disabled={!sourceClipAssetId || !detectReady} onClick={analyzeSource} type="button">
           Analyze Source
         </button>
         <span>{detectionResult ? `${detectionResult.detections?.length ?? 0} candidates` : "No analysis yet"}</span>
@@ -100,7 +133,7 @@ export function ReplacePersonPanel({
           Track name
           <input onChange={(event) => setTrackName(event.target.value)} value={trackName} />
         </label>
-        <button disabled={!representativeFrame || !selectedDetection} onClick={createTrack} type="button">
+        <button disabled={!representativeFrame || !selectedDetection || !trackReady} onClick={createTrack} type="button">
           Save Track
         </button>
       </div>
@@ -120,7 +153,7 @@ export function ReplacePersonPanel({
       {selectedTrack ? (
         <div className="guidance-strip">
           <strong>{selectedTrack.status?.averageConfidence ? `${Math.round(selectedTrack.status.averageConfidence * 100)}% track` : "Reusable track"}</strong>
-          <span>Box corrections are represented in the track sidecar; mask correction is deferred for the model adapter.</span>
+          <span>{maskStateCopy(selectedTrack)}</span>
         </div>
       ) : null}
 
