@@ -64,6 +64,7 @@ from scene_worker.training_adapters import (
     SUPPORTED_TRAINING_PLAN_VERSION,
     TrainingKernelError,
     ZImageLoraTrainer,
+    build_optimizer,
     bucket_resolution,
     create_training_kernel,
     dry_run_training_summary,
@@ -1282,6 +1283,30 @@ def test_flow_matching_velocity_target_uses_negated_pipeline_sign():
     latents, noise = 0.7, 0.2
     assert flow_matching_velocity_target(latents, noise) == latents - noise
     assert flow_matching_velocity_target(latents, noise) == -(noise - latents)
+
+
+def test_build_optimizer_uses_prodigy_with_aitoolkit_lr_floor(monkeypatch):
+    calls = {}
+
+    class FakeProdigy:
+        def __init__(self, params, **kwargs):
+            calls["params"] = params
+            calls["kwargs"] = kwargs
+
+    def fake_import_module(name):
+        if name == "torch":
+            return SimpleNamespace(optim=SimpleNamespace())
+        if name == "prodigyopt":
+            return SimpleNamespace(Prodigy=FakeProdigy)
+        raise ModuleNotFoundError(name)
+
+    monkeypatch.setattr("scene_worker.training_adapters.importlib.import_module", fake_import_module)
+    params = [object()]
+
+    optimizer = build_optimizer("prodigyopt", params, 0.0001)
+
+    assert isinstance(optimizer, FakeProdigy)
+    assert calls == {"params": params, "kwargs": {"lr": 1.0, "eps": 1e-6}}
 
 
 def test_read_run_config_defaults_lora_target_modules_and_parses_advanced():

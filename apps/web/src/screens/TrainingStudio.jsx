@@ -8,6 +8,14 @@ const tabs = [
   { id: "configure", label: "Configure Job", title: "Configure training job", status: "Queue dry run" },
 ];
 const defaultGpuOptions = ["auto"];
+const defaultOptimizerOptions = ["adamw8bit", "adamw", "adam", "prodigyopt"];
+const optimizerLabels = {
+  adam: "Adam",
+  adamw: "AdamW",
+  adamw8bit: "AdamW 8-bit",
+  prodigy: "Prodigy",
+  prodigyopt: "Prodigy",
+};
 const joyCaptionModel = "fancyfeast/llama-joycaption-beta-one-hf-llava";
 const joyCaptionTypes = [
   "Descriptive",
@@ -359,6 +367,10 @@ function rangeOptions(limits, key) {
   return Array.isArray(limits?.[key]) ? limits[key] : [];
 }
 
+function optimizerLabel(value) {
+  return optimizerLabels[value] ?? value;
+}
+
 function configDraftFromTarget(target, dataset, gpuOptions, triggerPhrase = "") {
   const defaults = target?.defaults ?? {};
   const advanced = defaults.advanced ?? {};
@@ -624,6 +636,12 @@ export function TrainingStudio({
   const qualityPresets = rangeOptions(selectedTarget?.limits, "qualityPresets");
   const outputScopes = rangeOptions(selectedTarget?.limits, "outputScopes");
   const resolutionOptions = rangeOptions(selectedTarget?.limits, "resolutions");
+  const optimizerOptions = rangeOptions(selectedTarget?.limits, "optimizers");
+  const optimizerSelectOptions = optimizerOptions.length ? optimizerOptions : defaultOptimizerOptions;
+  const visibleOptimizerOptions =
+    configDraft.optimizer && !optimizerSelectOptions.includes(configDraft.optimizer)
+      ? [...optimizerSelectOptions, configDraft.optimizer]
+      : optimizerSelectOptions;
   const gpuOptionsKey = gpuOptions.join("\u0000");
   const configWarnings = configValidation({ activeDataset, configDraft, selectedTarget });
   const canPrepareConfig = configWarnings.length === 0 && !preparingConfig;
@@ -1592,7 +1610,13 @@ export function TrainingStudio({
                           </label>
                           <label>
                             Optimizer
-                            <input onChange={(event) => updateConfigDraft("optimizer", event.target.value)} value={configDraft.optimizer ?? ""} />
+                            <select onChange={(event) => updateConfigDraft("optimizer", event.target.value)} value={configDraft.optimizer ?? ""}>
+                              {visibleOptimizerOptions.map((optimizer) => (
+                                <option key={optimizer} value={optimizer}>
+                                  {optimizerLabel(optimizer)}
+                                </option>
+                              ))}
+                            </select>
                           </label>
                           <label>
                             Learning rate

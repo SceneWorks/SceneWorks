@@ -479,10 +479,18 @@ def _training_message(step: int, total_steps: int, loss: float | None) -> str:
 def build_optimizer(name: str, params: list[Any], learning_rate: float) -> Any:
     """Build an optimizer for the LoRA parameters. ``adamw8bit`` uses
     bitsandbytes when available and falls back to torch AdamW otherwise (the
-    8-bit optimizer is an optional, CUDA-only dependency)."""
+    8-bit optimizer is an optional, CUDA-only dependency). ``prodigy`` and
+    ``prodigyopt`` use the Prodigy optimizer package."""
 
     torch = importlib.import_module("torch")
     normalized = (name or "").strip().lower().replace("-", "").replace("_", "")
+    if normalized in {"prodigy", "prodigyopt"}:
+        try:
+            prodigy_module = importlib.import_module("prodigyopt")
+        except Exception as exc:
+            raise TrainingKernelError("The Prodigy optimizer requires the prodigyopt Python package.") from exc
+        use_lr = learning_rate if learning_rate >= 0.1 else 1.0
+        return prodigy_module.Prodigy(params, lr=use_lr, eps=1e-6)
     if normalized in {"adamw8bit", "adam8bit"}:
         try:
             bnb = importlib.import_module("bitsandbytes")

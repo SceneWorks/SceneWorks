@@ -103,6 +103,7 @@ const zImageTrainingTarget = {
   },
   limits: {
     resolutions: [512, 768, 1024],
+    optimizers: ["adamw8bit", "adamw", "adam", "prodigyopt"],
     qualityPresets: ["speed", "balanced", "quality"],
     outputScopes: ["project", "global"],
   },
@@ -1033,6 +1034,8 @@ describe("SceneWorks app shell", () => {
     expect(field(container, "Base model").value).toBe("z_image_turbo");
     expect(field(container, "Rank").value).toBe("16");
     expect(field(container, "Precision").value).toBe("bf16");
+    expect([...field(container, "Optimizer").options].map((option) => option.value)).toEqual(["adamw8bit", "adamw", "adam", "prodigyopt"]);
+    await changeField(field(container, "Optimizer"), "prodigyopt");
 
     await act(async () => {
       [...container.querySelectorAll("button")].find((button) => button.textContent === "Prepare config").click();
@@ -1050,7 +1053,7 @@ describe("SceneWorks app shell", () => {
           rank: 16,
           alpha: 16,
           learningRate: 0.0001,
-          optimizer: "adamw8bit",
+          optimizer: "prodigyopt",
           triggerWord: "miraStyle",
           advanced: expect.objectContaining({
             mixedPrecision: "bf16",

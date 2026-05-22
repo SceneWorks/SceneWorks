@@ -393,6 +393,7 @@ fn z_image_turbo_lora_target() -> TrainingTarget {
             "steps": [200, 6000],
             "resolutions": [512, 768, 1024],
             "batchSize": [1, 4],
+            "optimizers": ["adamw8bit", "adamw", "adam", "prodigyopt"],
             "qualityPresets": ["speed", "balanced", "quality"],
             "outputScopes": ["project", "global"]
         })),
