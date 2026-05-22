@@ -1221,6 +1221,78 @@ describe("SceneWorks app shell", () => {
     expect(container.textContent).not.toContain("V1 placeholder tracking");
   });
 
+  it("updates Replace Person readiness when a capable worker registers over SSE", async () => {
+    root = createRoot(container);
+    await act(async () => {
+      root.render(<App />);
+    });
+    await settle();
+    await act(async () => {
+      [...container.querySelectorAll("button")].find((button) => button.textContent === "Video").click();
+    });
+    await settle();
+    await act(async () => {
+      [...container.querySelectorAll("button")].find((button) => button.textContent === "Replace person").click();
+    });
+    await settle();
+
+    // No live detector/tracker worker yet -> detection is gated with a reason.
+    expect(container.textContent).toContain("Detection unavailable");
+
+    // A GPU worker registers with the real person capabilities (sc-1484 finding:
+    // readiness must track live worker updates, not just the initial load).
+    await act(async () => {
+      FakeEventSource.instances[0].listeners["worker.updated"]({
+        data: JSON.stringify({
+          id: "python-gpu-0",
+          gpuId: "0",
+          gpuName: "GPU 0",
+          status: "idle",
+          capabilities: ["gpu", "person_detect", "person_track", "person_segment", "person_replace"],
+        }),
+      });
+    });
+    await settle();
+
+    // Readiness is recomputed from the live worker list, so the gate clears.
+    expect(container.textContent).not.toContain("Detection unavailable");
+    expect(container.textContent).not.toContain("Replacement unavailable");
+  });
+
+  it("surfaces replacement-unavailable when no live worker can run person replacement", async () => {
+    root = createRoot(container);
+    await act(async () => {
+      root.render(<App />);
+    });
+    await settle();
+    await act(async () => {
+      [...container.querySelectorAll("button")].find((button) => button.textContent === "Video").click();
+    });
+    await settle();
+    await act(async () => {
+      [...container.querySelectorAll("button")].find((button) => button.textContent === "Replace person").click();
+    });
+    await settle();
+
+    // Detector/tracker are live, but no worker advertises person_replace.
+    await act(async () => {
+      FakeEventSource.instances[0].listeners["worker.updated"]({
+        data: JSON.stringify({
+          id: "python-gpu-0",
+          gpuId: "0",
+          gpuName: "GPU 0",
+          status: "idle",
+          capabilities: ["gpu", "person_detect", "person_track"],
+        }),
+      });
+    });
+    await settle();
+
+    expect(container.textContent).not.toContain("Detection unavailable");
+    // The same replace-readiness flag that gates the submit button (sc-1484 finding).
+    expect(container.textContent).toContain("Replacement unavailable");
+  });
+
   it("keeps completed Replace Person detections visible in Video Studio", async () => {
     global.fetch.mockImplementation((url) => {
       const path = new URL(url).pathname;

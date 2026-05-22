@@ -306,6 +306,9 @@ export function VideoStudio({
     (mode === "first_last_frame" && sourceAssetId && lastFrameAssetId) ||
     (mode === "extend_clip" && sourceClipAssetId) ||
     (mode === "replace_person" && sourceClipAssetId && personTrackId && characterId);
+  // Don't let Replace Person queue a job the readiness endpoint says no live
+  // worker can run — that would sit unclaimable instead of honoring the gate.
+  const replaceReady = mode !== "replace_person" || personReadiness?.replace?.ready !== false;
   const canSubmit = Boolean(
     activeProject &&
       prompt.trim() &&
@@ -313,7 +316,8 @@ export function VideoStudio({
       implementedMode &&
       hasInputs &&
       presetValidationResult.ok &&
-      (!requiresLtxIcLora || hasLtxIcLora),
+      (!requiresLtxIcLora || hasLtxIcLora) &&
+      replaceReady,
   );
   const [width, height] = resolution.split("x").map((value) => Number(value));
   const durationOptions = selectedModel?.limits?.durations ?? [4, 6, 8, 10];
@@ -330,7 +334,9 @@ export function VideoStudio({
         ? "Required inputs are missing."
         : requiresLtxIcLora && !hasLtxIcLora
           ? "LTX video-conditioned generation needs an installed IC-LoRA preset."
-          : "";
+          : !replaceReady
+            ? "No live GPU worker can run person replacement yet."
+            : "";
   const replacementModeLabels = {
     face_only: "Face Only",
     full_person_keep_outfit: "Full Person, Keep Outfit",

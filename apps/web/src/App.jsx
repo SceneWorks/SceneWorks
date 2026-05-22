@@ -354,7 +354,6 @@ export function App() {
   const [assets, setAssets] = useState([]);
   const [characters, setCharacters] = useState([]);
   const [personTracks, setPersonTracks] = useState([]);
-  const [personReadiness, setPersonReadiness] = useState({});
   const [timelines, setTimelines] = useState([]);
   const [timelinesProjectId, setTimelinesProjectId] = useState(null);
   const [selectedTimelineId, setSelectedTimelineId] = useState(null);
@@ -462,6 +461,22 @@ export function App() {
     () => workers.filter((worker) => isActiveWorker(worker) && !isPlaceholderOnlyGpuWorker(worker)),
     [workers],
   );
+  // Person-workflow readiness, derived from the live (non-offline) workers so it
+  // tracks SSE worker registration/offline transitions instantly. Mirrors the
+  // server's GET /api/v1/capabilities/person (person_readiness_from_workers); the
+  // worker SSE handlers keep `workers` current, so this never goes stale.
+  const personReadiness = useMemo(() => {
+    const live = workers.filter((worker) => worker.status !== "offline");
+    const ready = (capability) => live.some((worker) => (worker.capabilities ?? []).includes(capability));
+    return {
+      detect: { capability: "person_detect", ready: ready("person_detect") },
+      track: { capability: "person_track", ready: ready("person_track") },
+      segment: { capability: "person_segment", ready: ready("person_segment") },
+      replace: { capability: "person_replace", ready: ready("person_replace") },
+      detectPreview: { capability: "person_detect_preview", ready: ready("person_detect_preview") },
+      trackPreview: { capability: "person_track_preview", ready: ready("person_track_preview") },
+    };
+  }, [workers]);
   const gpuOptions = useMemo(() => {
     const ids = visibleWorkers.filter(isSelectableGpuWorker).map((worker) => worker.gpuId);
     return ["auto", ...Array.from(new Set(ids))];
@@ -676,7 +691,7 @@ export function App() {
         return { label, value: fallback, error: optional ? "" : `${label}: ${err.message}` };
       }
     };
-    const [projectsResult, jobsResult, workersResult, modelsResult, lorasResult, presetsResult, trainingTargetsResult, capabilitiesResult] =
+    const [projectsResult, jobsResult, workersResult, modelsResult, lorasResult, presetsResult, trainingTargetsResult] =
       await Promise.all([
         fetchInitial("Projects", "/api/v1/projects", []),
         fetchInitial("Jobs", "/api/v1/jobs", []),
@@ -685,7 +700,6 @@ export function App() {
         fetchInitial("LoRAs", "/api/v1/loras", []),
         fetchInitial("Presets", "/api/v1/recipe-presets", [], true),
         fetchInitial("Training targets", "/api/v1/training/targets", { schemaVersion: 1, targets: [] }),
-        fetchInitial("Capabilities", "/api/v1/capabilities/person", { person: {} }, true),
       ]);
     const projectItems = projectsResult.value;
     setProjects(projectItems);
@@ -695,7 +709,6 @@ export function App() {
     setWorkers(workersResult.value.sort(sortWorkers));
     setQueueSummary(null);
     setModels(modelsResult.value);
-    setPersonReadiness(capabilitiesResult.value?.person ?? {});
     setLoras(lorasResult.value);
     setPresets(presetsResult.value);
     setTrainingTargets(trainingTargetsResult.value);
