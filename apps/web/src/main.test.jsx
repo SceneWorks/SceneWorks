@@ -1249,6 +1249,72 @@ describe("SceneWorks app shell", () => {
     );
   });
 
+  it("submits the selected de-distill adapter version for Z-Image-Turbo", async () => {
+    const loadDataset = vi.fn(async () => ({
+      id: "dataset-a",
+      name: "Portrait Set",
+      version: 5,
+      items: [
+        {
+          id: "item_0001",
+          assetId: "asset-a",
+          path: "images/item_0001.png",
+          displayName: "item_0001.png",
+          caption: { text: "mira portrait", source: "manual", triggerWords: ["mira"] },
+        },
+      ],
+    }));
+    const createTrainingJob = vi.fn(async () => ({ id: "job_dryrun_1", type: "lora_train", status: "queued" }));
+
+    root = createRoot(container);
+    await act(async () => {
+      root.render(
+        <TrainingStudio
+          activeProject={{ id: "project-a", name: "Project A" }}
+          createTrainingJob={createTrainingJob}
+          datasets={[{ id: "dataset-a", name: "Portrait Set", modality: "image", itemCount: 1 }]}
+          gpuOptions={["auto", "0"]}
+          loadDataset={loadDataset}
+          trainingPresets={zImageTrainingPresets}
+          trainingTargets={[zImageTrainingTarget]}
+        />,
+      );
+    });
+    await settle();
+
+    await act(async () => {
+      container.querySelector("#training-tab-configure").click();
+    });
+    await changeField(field(container, "Dataset"), "dataset-a");
+    await settle();
+
+    // The selector appears for Z-Image-Turbo and normalizes the preset's legacy
+    // "v2-default" value to "v2".
+    const adapterSelect = field(container, "De-distill adapter");
+    expect(adapterSelect).toBeTruthy();
+    expect(adapterSelect.value).toBe("v2");
+
+    await changeField(adapterSelect, "v1");
+
+    await act(async () => {
+      [...container.querySelectorAll("button")].find((button) => button.textContent === "Queue dry-run job").click();
+    });
+    await settle();
+
+    // The repo + chosen version must reach config.advanced — the worker only fuses
+    // the de-distill adapter when trainingAdapterRepo is present.
+    expect(createTrainingJob).toHaveBeenCalledWith(
+      expect.objectContaining({
+        config: expect.objectContaining({
+          advanced: expect.objectContaining({
+            trainingAdapterRepo: "ostris/zimage_turbo_training_adapter",
+            trainingAdapterVersion: "v1",
+          }),
+        }),
+      }),
+    );
+  });
+
   it("marks manual training preset edits as customizations", async () => {
     root = createRoot(container);
     await act(async () => {

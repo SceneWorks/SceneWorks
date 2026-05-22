@@ -23,6 +23,13 @@ const optimizerLabels = {
   prodigy: "Prodigy",
   prodigyopt: "Prodigy",
 };
+// Versions of the ostris de-distill training adapter (Z-Image-Turbo only). The
+// worker maps these to the matching repo file; legacy "v2-default" normalizes to v2.
+const trainingAdapterVersionOptions = ["v1", "v2"];
+const trainingAdapterVersionLabels = {
+  v1: "v1 — stable (smaller)",
+  v2: "v2 — experimental (heavier de-distill)",
+};
 const configFieldLabels = {
   outputName: "LoRA name",
   triggerWord: "Trigger phrase",
@@ -38,6 +45,7 @@ const configFieldLabels = {
   timestepType: "Timestep type",
   timestepBias: "Timestep bias",
   lossType: "Loss type",
+  trainingAdapterVersion: "De-distill adapter",
   gradientCheckpointing: "Gradient checkpointing",
   resolution: "Resolution",
   precision: "Precision",
@@ -365,6 +373,16 @@ function asText(value) {
   return value === null || value === undefined ? "" : String(value);
 }
 
+// Normalize a training-adapter version to the worker's canonical token. Mirrors
+// the worker's substring match so legacy "v2-default" shows as "v2" in the select.
+function normalizeTrainingAdapterVersion(value) {
+  const token = asText(value).trim();
+  const lower = token.toLowerCase();
+  if (lower.includes("v1")) return "v1";
+  if (lower.includes("v2")) return "v2";
+  return token;
+}
+
 function numericDraft(value) {
   return value === null || value === undefined ? "" : String(value);
 }
@@ -450,6 +468,8 @@ function configDraftFromTarget(target, dataset, gpuOptions, triggerPhrase = "", 
     timestepType: asText(advanced.timestepType || "sigmoid"),
     timestepBias: asText(advanced.timestepBias || "balanced"),
     lossType: asText(advanced.lossType || "mse"),
+    trainingAdapterRepo: asText(advanced.trainingAdapterRepo),
+    trainingAdapterVersion: normalizeTrainingAdapterVersion(advanced.trainingAdapterVersion),
     gradientCheckpointing: advanced.gradientCheckpointing !== false,
     resolution: numericDraft(defaults.resolution),
     precision: asText(advanced.mixedPrecision),
@@ -521,6 +541,11 @@ function trainingConfigSnapshot({ activeDataset, configDraft, selectedPreset, se
     timestepType: asText(configDraft.timestepType).trim(),
     timestepBias: asText(configDraft.timestepBias).trim(),
     lossType: asText(configDraft.lossType).trim(),
+    // Preset-only advanced keys (the submit spreads target defaults, not the
+    // preset), so carry the de-distill adapter through explicitly — the worker
+    // only fuses it when config.advanced.trainingAdapterRepo is present.
+    trainingAdapterRepo: asText(configDraft.trainingAdapterRepo).trim(),
+    trainingAdapterVersion: asText(configDraft.trainingAdapterVersion).trim(),
     gradientCheckpointing: Boolean(configDraft.gradientCheckpointing),
     mixedPrecision: asText(configDraft.precision).trim(),
     sampleEvery: numberFromDraft(configDraft.sampleEvery),
@@ -826,6 +851,13 @@ export function TrainingStudio({
     configDraft.optimizer && !optimizerSelectOptions.includes(configDraft.optimizer)
       ? [...optimizerSelectOptions, configDraft.optimizer]
       : optimizerSelectOptions;
+  // De-distill training adapter is Z-Image-Turbo-only: show the version selector
+  // only when the resolved config declares a trainingAdapterRepo.
+  const showTrainingAdapter = Boolean(asText(configDraft.trainingAdapterRepo).trim());
+  const visibleTrainingAdapterVersions =
+    configDraft.trainingAdapterVersion && !trainingAdapterVersionOptions.includes(configDraft.trainingAdapterVersion)
+      ? [...trainingAdapterVersionOptions, configDraft.trainingAdapterVersion]
+      : trainingAdapterVersionOptions;
   const activeTrainingJobs = useMemo(
     () =>
       jobs
@@ -1961,6 +1993,21 @@ export function TrainingStudio({
                               ))}
                             </select>
                           </label>
+                          {showTrainingAdapter ? (
+                            <label title="ostris de-distill adapter for the step-distilled Z-Image-Turbo base. Fused in for training, removed at inference. v1 is stable; v2 is a heavier, experimental de-distill.">
+                              De-distill adapter
+                              <select
+                                onChange={(event) => updateConfigDraft("trainingAdapterVersion", event.target.value)}
+                                value={configDraft.trainingAdapterVersion ?? ""}
+                              >
+                                {visibleTrainingAdapterVersions.map((version) => (
+                                  <option key={version} value={version}>
+                                    {trainingAdapterVersionLabels[version] ?? version}
+                                  </option>
+                                ))}
+                              </select>
+                            </label>
+                          ) : null}
                           <label>
                             Resolution
                             <select onChange={(event) => updateConfigDraft("resolution", event.target.value)} value={configDraft.resolution ?? ""}>
