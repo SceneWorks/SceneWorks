@@ -1036,10 +1036,21 @@ def test_friendly_failure_identifies_missing_sentencepiece_backend():
     )
 
     assert message == "Video generation failed because the worker is missing a tokenizer backend."
-    assert "SentencePiece" in error
+    assert "tokenizer support libraries" in error
     assert "pip install -r apps/worker/requirements.txt" in error
     assert "docker compose build worker --no-cache" in error
     assert "Technical detail" in error
+
+
+def test_friendly_failure_identifies_missing_protobuf_backend():
+    message, error = friendly_failure(
+        "Training captioning",
+        RuntimeError("requires the protobuf library but it was not found in your environment"),
+    )
+
+    assert message == "Training captioning failed because the worker is missing a tokenizer backend."
+    assert "tokenizer support libraries" in error
+    assert "pip install -r apps/worker/requirements.txt" in error
 
 
 def test_friendly_failure_identifies_disk_full_by_message():

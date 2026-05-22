@@ -284,6 +284,9 @@ def friendly_failure(job_kind: str, exc: Exception) -> tuple[str, str]:
             ),
         )
     tokenizer_backend_markers = (
+        "protobuf",
+        "protocolbuffers",
+        "requires the protobuf library",
         "sentencepiece",
         "tokenization_t5",
         "t5.tokenization",
@@ -293,7 +296,7 @@ def friendly_failure(job_kind: str, exc: Exception) -> tuple[str, str]:
         return (
             f"{job_kind} failed because the worker is missing a tokenizer backend.",
             (
-                "The selected video model needs the SentencePiece tokenizer runtime. "
+                "The selected model needs the tokenizer support libraries from the worker requirements. "
                 "For bare-metal workers, run `pip install -r apps/worker/requirements.txt`; "
                 "for Docker Compose, run `docker compose build worker --no-cache`, then restart the worker and retry. "
                 f"Technical detail: {detail}"
