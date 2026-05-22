@@ -68,7 +68,9 @@ from scene_worker.training_adapters import (
 from scene_worker.video_adapters import (
     DiffusersVideoAdapter,
     LtxPipelinesVideoAdapter,
+    MlxVideoAdapter,
     VIDEO_MODEL_TARGETS,
+    _PENDING_LTX_LORAS,
     build_video_asset_sidecar,
     character_reference_images,
     create_video_adapter,
@@ -483,6 +485,66 @@ def test_unsupported_adapter_guard_rejects_loras(tmp_path):
 
     with pytest.raises(RuntimeError, match="does not support LoRA application"):
         reject_loras_if_unsupported([{"id": "style", "installedPath": str(first)}], "procedural_preview")
+
+
+def _mlx_video_job(model, mode, loras):
+    return {"id": "job", "payload": {"projectId": "proj", "model": model, "mode": mode, "loras": loras}}
+
+
+def test_mlx_adapter_rejects_incompatible_lora_family(tmp_path):
+    lora_file = tmp_path / "wan_style.safetensors"
+    lora_file.write_bytes(b"lora")
+    request = video_request_from_job(
+        _mlx_video_job("ltx_2_3", "text_to_video", [{"id": "wan_style", "installedPath": str(lora_file), "family": "wan-video"}])
+    )
+    with pytest.raises(RuntimeError, match="not compatible with model family ltx-video"):
+        MlxVideoAdapter().ensure_models(request)
+
+
+def test_mlx_wan_user_loras_resolved_to_path_strength_tuples(tmp_path):
+    lora_file = tmp_path / "wan_motion.safetensors"
+    lora_file.write_bytes(b"lora")
+    request = video_request_from_job(
+        _mlx_video_job(
+            "wan_2_2",
+            "text_to_video",
+            [{"id": "wan_motion", "installedPath": str(lora_file), "weight": 0.7, "family": "wan-video"}],
+        )
+    )
+    assert MlxVideoAdapter()._wan_user_loras(request) == [(str(lora_file), 0.7)]
+
+
+def test_mlx_ltx_stages_loras_in_contextvar_only_when_present(tmp_path, monkeypatch):
+    lora_file = tmp_path / "ltx_style.safetensors"
+    lora_file.write_bytes(b"lora")
+    adapter = MlxVideoAdapter()
+    monkeypatch.setattr("scene_worker.video_adapters._install_ltx_lora_patch", lambda: None)
+    monkeypatch.setattr(adapter, "_ltx_lora_module_map", lambda specs: {"transformer_blocks.0.attn": [("w", specs[0].weight)]})
+    progress_calls: list[tuple] = []
+
+    def progress(*args, **kwargs):
+        progress_calls.append(args)
+
+    no_lora_request = video_request_from_job(_mlx_video_job("ltx_2_3", "text_to_video", []))
+    assert adapter._apply_ltx_loras(no_lora_request, progress) is None
+    assert _PENDING_LTX_LORAS.get() is None
+    assert progress_calls == []
+
+    lora_request = video_request_from_job(
+        _mlx_video_job(
+            "ltx_2_3",
+            "text_to_video",
+            [{"id": "ltx_style", "installedPath": str(lora_file), "weight": 0.6, "family": "ltx-video"}],
+        )
+    )
+    token = adapter._apply_ltx_loras(lora_request, progress)
+    try:
+        assert token is not None
+        assert _PENDING_LTX_LORAS.get() == {"transformer_blocks.0.attn": [("w", 0.6)]}
+        assert progress_calls  # merge progress emitted
+    finally:
+        _PENDING_LTX_LORAS.reset(token)
+    assert _PENDING_LTX_LORAS.get() is None
 
 
 def test_lora_compatibility_guard_rejects_mismatched_family_before_load(tmp_path):

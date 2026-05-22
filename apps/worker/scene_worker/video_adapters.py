@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+from contextvars import ContextVar
 from dataclasses import dataclass
 import gc
 import hashlib
@@ -1228,8 +1229,49 @@ def _ensure_ffmpeg_on_path() -> None:
     os.environ["PATH"] = f"{link_dir}{os.pathsep}{os.environ.get('PATH', '')}"
 
 
+# LTX user-LoRA injection. mlx-video-with-audio's turnkey generate_video_with_audio
+# builds the LTX transformer (LTXModel) internally and exposes no loras kwarg, so we
+# wrap LTXModel.load_weights to merge the pending LoRAs (apply_loras_to_model: dequant
+# only the LoRA'd layers to bf16, no requant precision loss, no per-step overhead) right
+# after the quantized weights load — the same primitive the package uses for quantized
+# Wan. The per-generation module map is passed through this ContextVar.
+_PENDING_LTX_LORAS: ContextVar[dict[str, Any] | None] = ContextVar("sceneworks_ltx_loras", default=None)
+_ltx_lora_patch_installed = False
+
+
+def _install_ltx_lora_patch() -> None:
+    """Idempotently wrap LTXModel.load_weights to apply the LoRAs in _PENDING_LTX_LORAS
+    after each load. Targets only LTXModel (the text encoder, VAEs, and vocoder are
+    distinct classes), and fires after nn.quantize so the LoRA'd layers are quantized."""
+    global _ltx_lora_patch_installed
+    if _ltx_lora_patch_installed:
+        return
+    from mlx_video.lora import apply_loras_to_model
+    from mlx_video.models.ltx.ltx import LTXModel
+
+    original_load_weights = LTXModel.load_weights
+    if getattr(original_load_weights, "_sw_lora_wrapped", False):  # guard against double-wrap
+        _ltx_lora_patch_installed = True
+        return
+
+    def _load_weights_with_loras(self, *args, **kwargs):
+        result = original_load_weights(self, *args, **kwargs)
+        pending = _PENDING_LTX_LORAS.get()
+        if pending and apply_loras_to_model(self, pending) == 0:
+            raise RuntimeError(
+                "Selected LoRA(s) matched no LTX-2.3 transformer layers — confirm the file is an LTX-video adapter."
+            )
+        return result
+
+    _load_weights_with_loras._sw_lora_wrapped = True
+    LTXModel.load_weights = _load_weights_with_loras
+    _ltx_lora_patch_installed = True
+
+
 class MlxVideoAdapter(VideoGenerationAdapter):
     id = "mlx_video"
+    _ltx_repo = "notapalindrome/ltx23-mlx-av-q4"
+    _ltx_text_encoder = "mlx-community/gemma-3-12b-it-bf16"
 
     _supported_models = {"ltx_2_3", "wan_2_2", "wan_2_2_t2v_14b", "wan_2_2_i2v_14b"}
     # The mlx-video-with-audio high-level API exposes only text-to-video and
@@ -1262,6 +1304,7 @@ class MlxVideoAdapter(VideoGenerationAdapter):
             raise RuntimeError(f"{target['label']} MLX adapter currently supports {supported}.")
         if request.duration > target["hardMaxDuration"]:
             raise RuntimeError(f"{target['label']} is limited to {target['hardMaxDuration']}s clips in this adapter.")
+        validate_lora_compatibility(request.loras, model_family=target["family"], adapter_id=self.id)
         if not _mlx_available():
             raise RuntimeError(
                 "MLX video generation requires optional worker dependencies. "
@@ -1378,12 +1421,13 @@ class MlxVideoAdapter(VideoGenerationAdapter):
         media_path = project_path / media_rel
         temp_path = media_path.with_suffix(".tmp.mp4")
 
+        lora_token = self._apply_ltx_loras(request, progress)
         progress("running", "generating", 0.3, f"Generating {num_frames} frames with LTX-2.3 (MLX).")
-        self._loaded_models.update({request.model, "notapalindrome/ltx23-mlx-av-q4"})
+        self._loaded_models.update({request.model, self._ltx_repo})
         try:
             generate_video_with_audio(
-                model_repo="notapalindrome/ltx23-mlx-av-q4",
-                text_encoder_repo="mlx-community/gemma-3-12b-it-bf16",
+                model_repo=self._ltx_repo,
+                text_encoder_repo=self._ltx_text_encoder,
                 prompt=request.prompt,
                 negative_prompt=request.negative_prompt or None,
                 height=request.height,
@@ -1400,6 +1444,8 @@ class MlxVideoAdapter(VideoGenerationAdapter):
         except Exception as e:
             raise RuntimeError(f"MLX LTX-2.3 generation failed: {e}")
         finally:
+            if lora_token is not None:
+                _PENDING_LTX_LORAS.reset(lora_token)
             if tmp_image is not None:
                 tmp_image.unlink(missing_ok=True)
 
@@ -1451,6 +1497,27 @@ class MlxVideoAdapter(VideoGenerationAdapter):
             "model": request.model,
             "requirements": self.estimate_requirements(request),
         }
+
+    def _apply_ltx_loras(self, request: VideoRequest, progress: ProgressCallback):
+        """Stage user LoRAs for the next LTX generation. Returns a ContextVar token
+        (reset in the caller's finally) or None when there are no LoRAs. The patched
+        LTXModel.load_weights merges the staged map into the transformer."""
+        specs = normalize_lora_specs(request.loras)
+        if not specs:
+            return None
+        progress("loading_model", "loading_model", 0.25, "Applying LoRA to LTX-2.3 transformer.")
+        _install_ltx_lora_patch()
+        return _PENDING_LTX_LORAS.set(self._ltx_lora_module_map(specs))
+
+    def _ltx_lora_module_map(self, specs: list[LoraSpec]) -> dict[str, Any]:
+        from mlx_video.lora import LoRAConfig, load_multiple_loras
+
+        module_to_loras = load_multiple_loras([LoRAConfig(path=spec.path, strength=spec.weight) for spec in specs])
+        if not module_to_loras:
+            raise RuntimeError(
+                "Selected LoRA(s) matched no LTX-2.3 transformer layers — confirm the file is an LTX-video adapter."
+            )
+        return module_to_loras
 
     def _first_condition_image(self, project_path: Path, request: VideoRequest) -> Any:
         if request.source_asset_id:
@@ -1528,6 +1595,12 @@ class MlxVideoAdapter(VideoGenerationAdapter):
             + ". Tracked by sc-1504 / sc-1506."
         )
 
+    def _wan_user_loras(self, request: VideoRequest) -> list[tuple[str, float]]:
+        """User-supplied LoRAs as (path, strength) tuples for the Wan MLX generator.
+        Passed via `loras` (applied to all experts); the distill LoRA stays in
+        loras_high/loras_low so the two never collide."""
+        return [(spec.path, spec.weight) for spec in normalize_lora_specs(request.loras)]
+
     def _run_wan_mlx(
         self,
         settings: WorkerSettings,
@@ -1596,6 +1669,9 @@ class MlxVideoAdapter(VideoGenerationAdapter):
             "loras_high": spec["loras_high"],
             "loras_low": spec["loras_low"],
         }
+        user_loras = self._wan_user_loras(request)
+        if user_loras:
+            kwargs["loras"] = user_loras
         if spec["steps"] is not None:
             kwargs["steps"] = spec["steps"]
         if spec["guide_scale"] is not None:
