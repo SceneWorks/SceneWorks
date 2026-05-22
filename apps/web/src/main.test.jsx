@@ -7,6 +7,7 @@ import { liveElapsedSeconds } from "./formatting.js";
 import { CharacterStudio } from "./screens/CharacterStudio.jsx";
 import { ImageStudio } from "./screens/ImageStudio.jsx";
 import { ModelManagerScreen } from "./screens/ModelManagerScreen.jsx";
+import { SetupWizard } from "./screens/SetupWizard.jsx";
 import { PresetManagerScreen } from "./screens/PresetManagerScreen.jsx";
 import { QueueScreen } from "./screens/QueueScreen.jsx";
 import { ReplacePersonPanel } from "./screens/ReplacePersonPanel.jsx";
@@ -158,6 +159,159 @@ describe("SceneWorks app shell", () => {
     });
     container.remove();
     vi.restoreAllMocks();
+  });
+
+  const wizardModels = [
+    {
+      id: "z_image_turbo",
+      name: "Z-Image-Turbo",
+      type: "image",
+      downloadable: true,
+      installState: "missing",
+      downloadSizeLabel: "30.6 GB",
+      downloadSizeBytes: 32899667397,
+      downloadSizeEstimated: true,
+      downloads: [{ repo: "Tongyi-MAI/Z-Image-Turbo" }],
+    },
+    {
+      id: "qwen_image",
+      name: "Qwen Image",
+      type: "image",
+      downloadable: true,
+      installState: "installed",
+      downloadSizeLabel: "53.7 GB",
+      downloadSizeBytes: 57704594653,
+      downloads: [{ repo: "Qwen/Qwen-Image" }],
+    },
+    {
+      id: "wan_2_2",
+      name: "Wan2.2",
+      type: "video",
+      downloadable: true,
+      installState: "missing",
+      downloadSizeLabel: "31.8 GB",
+      downloadSizeBytes: 34203021834,
+      downloadSizeEstimated: true,
+      downloads: [{ repo: "Wan-AI/Wan2.2-TI2V-5B" }],
+    },
+    {
+      id: "ltx_2_3",
+      name: "LTX-2.3",
+      type: "video",
+      downloadable: true,
+      installState: "missing",
+      downloadSizeLabel: "146 GB",
+      downloadSizeBytes: 157004895813,
+      downloads: [{ repo: "Lightricks/LTX-2.3" }],
+    },
+  ];
+
+  function renderWizard(overrides = {}) {
+    const props = {
+      models: wizardModels,
+      jobs: [],
+      onDownloadModel: vi.fn(),
+      onCreateProject: vi.fn(async (name) => ({ id: "project-new", name })),
+      onComplete: vi.fn(async () => {}),
+      onOpenQueue: vi.fn(),
+      ...overrides,
+    };
+    root = createRoot(container);
+    return props;
+  }
+
+  it("groups downloadable models, pre-checks recommended ones, and flags installed", async () => {
+    const props = renderWizard();
+    await act(async () => {
+      root.render(<SetupWizard {...props} />);
+    });
+    await settle();
+
+    expect(container.textContent).toContain("Image models");
+    expect(container.textContent).toContain("Video models");
+    expect(container.textContent).toContain("Recommended");
+    expect(container.textContent).toContain("Already installed");
+    expect(container.textContent).toContain("~30.6 GB");
+
+    const checkboxes = [...container.querySelectorAll("input[type=checkbox]")];
+    // DOM order: image group (z_image_turbo, qwen_image[installed]), then video (wan_2_2, ltx_2_3).
+    expect(checkboxes[0].checked).toBe(true); // z_image_turbo — recommended, small enough to auto-select
+    expect(checkboxes[1].disabled).toBe(true); // qwen_image — installed, not selectable
+    expect(checkboxes[2].checked).toBe(false); // wan_2_2 — not recommended
+    expect(checkboxes[3].checked).toBe(false); // ltx_2_3 — recommended but too large to auto-select (~146 GB)
+    // LTX-2.3 is still surfaced as recommended (badge) and shows its size so the choice is informed.
+    expect(container.textContent).toContain("146 GB");
+    expect(container.querySelectorAll(".setup-wizard-tag").length).toBe(2); // z_image_turbo + ltx_2_3
+  });
+
+  it("auto-selects only the small recommended model, leaving huge ones opt-in", async () => {
+    const props = renderWizard();
+    await act(async () => {
+      root.render(<SetupWizard {...props} />);
+    });
+    await settle();
+
+    const downloadButton = [...container.querySelectorAll("button")].find((button) =>
+      button.textContent.startsWith("Download"),
+    );
+    expect(downloadButton.textContent).toContain("1");
+    await act(async () => {
+      downloadButton.click();
+    });
+    await settle();
+
+    // Only the pre-checked image model downloads; LTX-2.3 stays opt-in.
+    expect(props.onDownloadModel).toHaveBeenCalledTimes(1);
+    expect(props.onDownloadModel.mock.calls[0][0].id).toBe("z_image_turbo");
+    // Re-firing is guarded: the button disables once nothing is pending.
+    expect(downloadButton.disabled).toBe(true);
+  });
+
+  it("advances to the project step and creates a project then marks setup complete", async () => {
+    const props = renderWizard();
+    await act(async () => {
+      root.render(<SetupWizard {...props} />);
+    });
+    await settle();
+
+    await act(async () => {
+      [...container.querySelectorAll("button")].find((button) => button.textContent === "Continue").click();
+    });
+    await settle();
+    expect(container.textContent).toContain("Create your first project");
+    // Skipping downloads is allowed — Continue advanced without firing any.
+    expect(props.onDownloadModel).not.toHaveBeenCalled();
+
+    const input = container.querySelector("input[type=text]") ?? container.querySelector("input");
+    await changeField(input, "My First Project");
+    await act(async () => {
+      [...container.querySelectorAll("button")].find((button) => button.textContent === "Finish setup").click();
+    });
+    await settle();
+
+    expect(props.onCreateProject).toHaveBeenCalledWith("My First Project");
+    expect(props.onComplete).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not mark setup complete when project creation fails", async () => {
+    const props = renderWizard({ onCreateProject: vi.fn(async () => null) });
+    await act(async () => {
+      root.render(<SetupWizard {...props} />);
+    });
+    await settle();
+    await act(async () => {
+      [...container.querySelectorAll("button")].find((button) => button.textContent === "Continue").click();
+    });
+    await settle();
+    const input = container.querySelector("input");
+    await changeField(input, "Doomed Project");
+    await act(async () => {
+      [...container.querySelectorAll("button")].find((button) => button.textContent === "Finish setup").click();
+    });
+    await settle();
+
+    expect(props.onCreateProject).toHaveBeenCalledWith("Doomed Project");
+    expect(props.onComplete).not.toHaveBeenCalled();
   });
 
   it("renders the app navigation against mocked API calls", async () => {

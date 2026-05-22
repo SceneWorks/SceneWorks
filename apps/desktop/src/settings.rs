@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Manager};
 use tauri_plugin_dialog::DialogExt;
 
-use crate::setup::{app_support_dir, Managed};
+use crate::setup::{app_support_dir, default_data_dir, shared_huggingface_home, Managed};
 
 const KEYRING_SERVICE: &str = "SceneWorks";
 const HF_TOKEN_ACCOUNT: &str = "huggingface_token";
@@ -17,9 +17,22 @@ const HF_TOKEN_ACCOUNT: &str = "huggingface_token";
 #[derive(Default, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AppSettings {
-    /// Override for the data directory; `None` uses the platform default.
+    /// Override for the workspace data directory (projects, generated assets,
+    /// imported/non-HF models, jobs.db); `None` uses the platform default.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub data_dir: Option<String>,
+    /// Hugging Face cache home (`HF_HOME`) for HF-downloaded model weights;
+    /// `None` uses the shared per-user cache (`~/.cache/huggingface`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hf_home: Option<String>,
+    /// Set once the first-run splash storage step (sc-1473 Step 1) has run, so
+    /// later launches skip straight to provisioning instead of re-prompting.
+    #[serde(default)]
+    pub storage_configured: bool,
+    /// Set once the in-app setup wizard (sc-1473 Steps 2-3) has completed, so the
+    /// studio shows directly. Cleared by `reset_setup` to re-run the wizard.
+    #[serde(default)]
+    pub setup_completed: bool,
 }
 
 fn settings_path() -> PathBuf {
@@ -74,6 +87,88 @@ fn run_capture(program: &str, args: &[&str]) -> Option<String> {
 #[tauri::command]
 pub fn get_app_settings() -> AppSettings {
     load_settings()
+}
+
+/// First-run storage state for the splash Step 1 + the in-app wizard gate. The
+/// `*Default` fields let the splash pre-fill the pickers with the locations the
+/// app would use today so a new user can just continue.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StorageSetup {
+    data_dir: Option<String>,
+    data_dir_default: String,
+    hf_home: Option<String>,
+    hf_home_default: String,
+    storage_configured: bool,
+    setup_completed: bool,
+}
+
+#[tauri::command]
+pub fn get_storage_setup() -> StorageSetup {
+    let settings = load_settings();
+    StorageSetup {
+        data_dir: settings.data_dir,
+        data_dir_default: default_data_dir().to_string_lossy().into_owned(),
+        hf_home: settings.hf_home,
+        hf_home_default: shared_huggingface_home().to_string_lossy().into_owned(),
+        storage_configured: settings.storage_configured,
+        setup_completed: settings.setup_completed,
+    }
+}
+
+/// Persist the splash Step 1 storage choice and mark storage configured. Empty
+/// strings clear the override (fall back to the platform default). This runs
+/// before the API/worker are spawned, so the chosen paths take effect with no
+/// restart.
+#[tauri::command]
+pub fn save_storage_setup(data_dir: String, hf_home: String) -> Result<AppSettings, String> {
+    let mut settings = load_settings();
+    let data_trimmed = data_dir.trim();
+    settings.data_dir = if data_trimmed.is_empty() {
+        None
+    } else {
+        Some(data_trimmed.to_owned())
+    };
+    let hf_trimmed = hf_home.trim();
+    settings.hf_home = if hf_trimmed.is_empty() {
+        None
+    } else {
+        Some(hf_trimmed.to_owned())
+    };
+    settings.storage_configured = true;
+    save_settings(&settings)?;
+    Ok(settings)
+}
+
+/// Mark the in-app setup wizard (Steps 2-3) complete so the studio shows on
+/// subsequent loads.
+#[tauri::command]
+pub fn complete_setup() -> Result<(), String> {
+    let mut settings = load_settings();
+    settings.setup_completed = true;
+    save_settings(&settings)
+}
+
+/// Clear the wizard-completed marker so the wizard re-runs (Settings → Re-run
+/// setup wizard). Storage configuration is left in place — relocating the data
+/// dir is a separate, restart-bound action handled by the data-directory control.
+#[tauri::command]
+pub fn reset_setup() -> Result<(), String> {
+    let mut settings = load_settings();
+    settings.setup_completed = false;
+    save_settings(&settings)
+}
+
+/// Generic folder picker for the splash storage step (workspace + HF cache
+/// pickers). Returns the chosen absolute path, or `None` if the dialog was
+/// dismissed.
+#[tauri::command]
+pub async fn choose_folder(app: AppHandle) -> Option<String> {
+    app.dialog()
+        .file()
+        .blocking_pick_folder()
+        .and_then(|file| file.into_path().ok())
+        .map(|path| path.to_string_lossy().into_owned())
 }
 
 #[tauri::command]

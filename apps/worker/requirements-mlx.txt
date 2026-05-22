@@ -3,10 +3,17 @@
 # bootstrap on darwin (apps/desktop/src/setup.rs). Never installed on Windows /
 # Linux / Docker, which keep the PyTorch worker unchanged.
 #
-# Validated 2026-05-21 on M-series (137 GB): mlx 0.31, mlx-video-with-audio 0.1.36,
-# mlx-vlm 0.5. The package is a native-MLX reimplementation of LTX-2.3 and Wan2.2.
-# Pulls transitively: numpy, safetensors, huggingface_hub, transformers[tokenizers],
+# Validated 2026-05-21 on M-series (137 GB): mlx 0.31, mlx-video-with-audio 0.1.36.
+# The package is a native-MLX reimplementation of LTX-2.3 and Wan2.2. Pulls
+# transitively: numpy, safetensors, huggingface_hub, transformers[tokenizers],
 # opencv-python, Pillow, soundfile (most already pinned in requirements.txt).
+#
+# mlx-vlm is a transitive dep of mlx-video-with-audio. Cap it below 0.3.10: from
+# 0.3.10 on it requires transformers>=5, which pulls huggingface-hub>=1.5 and
+# collides with the shared requirements.txt pin (huggingface_hub<1) — both files
+# resolve in one uv pass (setup.rs). 0.3.9 is the last release on
+# transformers>=4.57, so the venv resolves to transformers 4.57.x +
+# huggingface-hub 0.36.x, matching the PyTorch worker stack.
 mlx-video-with-audio>=0.1.36,<0.2
 mlx>=0.31,<1
-mlx-vlm>=0.5,<1
+mlx-vlm>=0.3.6,<0.3.10

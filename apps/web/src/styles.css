@@ -5394,6 +5394,253 @@ label {
   cursor: not-allowed;
 }
 
+/* First-run setup wizard (sc-1473, desktop) */
+.setup-wizard {
+  display: flex;
+  align-items: flex-start;
+  justify-content: center;
+  min-height: 60vh;
+  padding: 40px 24px;
+}
+
+.setup-wizard-card {
+  width: 100%;
+  max-width: 540px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  text-align: center;
+  gap: 14px;
+  padding: 36px 32px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 18px;
+  box-shadow: var(--shadow-glow);
+}
+
+.setup-wizard-mark {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 52px;
+  height: 52px;
+  border-radius: 14px;
+  background: var(--accent-soft);
+}
+
+.setup-wizard-mark img {
+  width: 30px;
+  height: 30px;
+}
+
+.setup-wizard-steps {
+  display: flex;
+  gap: 10px;
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  font-size: 0.78rem;
+  color: var(--text-muted);
+}
+
+.setup-wizard-steps li {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.setup-wizard-steps li::before {
+  content: "";
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--border);
+}
+
+.setup-wizard-steps li.active::before {
+  background: var(--accent);
+}
+
+.setup-wizard-steps li.done::before {
+  background: var(--accent-strong, var(--accent));
+}
+
+.setup-wizard-steps li.active {
+  color: var(--text);
+  font-weight: 600;
+}
+
+.setup-wizard-card h2 {
+  margin: 0;
+  font-size: 1.4rem;
+  color: var(--text);
+}
+
+.setup-wizard-lede {
+  margin: 0;
+  color: var(--text-muted);
+  line-height: 1.5;
+}
+
+.setup-wizard-models {
+  width: 100%;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  margin-top: 8px;
+  text-align: left;
+}
+
+.setup-wizard-group h3 {
+  margin: 0 0 8px;
+  font-size: 0.82rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--text-muted);
+}
+
+.setup-wizard-model {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--surface-2);
+  cursor: pointer;
+  margin-bottom: 8px;
+}
+
+.setup-wizard-model.installed {
+  opacity: 0.7;
+  cursor: default;
+}
+
+.setup-wizard-model input {
+  width: 16px;
+  height: 16px;
+  flex-shrink: 0;
+}
+
+.setup-wizard-model-main {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.setup-wizard-model-name {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-weight: 600;
+  color: var(--text);
+}
+
+.setup-wizard-model-meta {
+  font-size: 0.8rem;
+  color: var(--text-muted);
+}
+
+.setup-wizard-tag {
+  font-size: 0.68rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  padding: 2px 7px;
+  border-radius: 999px;
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+
+.setup-wizard-empty {
+  margin: 0;
+  color: var(--text-muted);
+}
+
+.setup-wizard-progress {
+  width: 100%;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin-top: 4px;
+}
+
+.setup-wizard-actions {
+  display: flex;
+  gap: 10px;
+  width: 100%;
+  margin-top: 12px;
+}
+
+.setup-wizard-form {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  width: 100%;
+  margin-top: 8px;
+}
+
+.setup-wizard-form input {
+  width: 100%;
+  padding: 11px 14px;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  color: var(--text);
+  font-size: 0.95rem;
+}
+
+.setup-wizard-form input:focus {
+  outline: 2px solid var(--accent);
+  border-color: var(--accent);
+}
+
+.setup-wizard-cta {
+  flex: 1;
+  padding: 11px 16px;
+  background: var(--accent);
+  color: var(--accent-fg);
+  border: none;
+  border-radius: 10px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.setup-wizard-cta:hover:not(:disabled) {
+  background: var(--accent-strong);
+}
+
+.setup-wizard-cta:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+.setup-wizard-secondary {
+  flex: 1;
+  padding: 11px 16px;
+  background: var(--surface-2);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.setup-wizard-secondary:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+.setup-wizard-back {
+  margin-top: 4px;
+  background: none;
+  border: none;
+  color: var(--text-muted);
+  cursor: pointer;
+  font-size: 0.85rem;
+}
+
 /* Settings screen (sc-1350) */
 .settings-screen {
   display: flex;

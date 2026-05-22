@@ -85,6 +85,15 @@ export function SettingsScreen() {
     }
   }
 
+  async function rerunSetupWizard() {
+    try {
+      await invoke("reset_setup");
+      window.location.reload();
+    } catch (error) {
+      setStatus(String(error));
+    }
+  }
+
   return (
     <div className="settings-screen">
       {status ? <p className="settings-status">{status}</p> : null}
@@ -158,6 +167,18 @@ export function SettingsScreen() {
         <div className="settings-actions">
           <button type="button" onClick={restartWorker}>
             Restart worker
+          </button>
+        </div>
+      </section>
+
+      <section className="settings-card">
+        <h3>Setup wizard</h3>
+        <p className="settings-muted">
+          Re-open the guided setup to download more models or create another project.
+        </p>
+        <div className="settings-actions">
+          <button type="button" onClick={rerunSetupWizard}>
+            Re-run setup wizard
           </button>
         </div>
       </section>

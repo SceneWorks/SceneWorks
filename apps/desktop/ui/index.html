@@ -67,7 +67,6 @@
         display: none;
       }
       button {
-        margin-top: 1.25rem;
         padding: 0.55rem 1.4rem;
         font-size: 0.95rem;
         border: 0;
@@ -76,28 +75,181 @@
         color: #0a0c11;
         font-weight: 600;
         cursor: pointer;
+      }
+      button:disabled {
+        opacity: 0.55;
+        cursor: default;
+      }
+      #retry {
+        margin-top: 1.25rem;
         display: none;
+      }
+
+      /* Both sections start hidden; main() reveals exactly one once it knows
+         whether the first-run storage step is needed. */
+      #provision {
+        display: none;
+      }
+
+      /* First-run storage step (sc-1473 Step 1) */
+      #storage {
+        display: none;
+        text-align: left;
+      }
+      #storage.visible {
+        display: block;
+      }
+      #storage .lede {
+        margin: 0.25rem 0 1.5rem;
+        color: #9aa1ad;
+        text-align: center;
+      }
+      .field {
+        margin-bottom: 1.25rem;
+        background: #161922;
+        border: 1px solid #1d222c;
+        border-radius: 12px;
+        padding: 1rem 1.1rem;
+      }
+      .field-label {
+        font-weight: 600;
+        font-size: 0.98rem;
+        margin: 0 0 0.25rem;
+      }
+      .field-help {
+        margin: 0 0 0.7rem;
+        font-size: 0.82rem;
+        line-height: 1.45;
+        color: #8b93a1;
+      }
+      .field-row {
+        display: flex;
+        gap: 0.5rem;
+      }
+      .field-row input {
+        flex: 1;
+        min-width: 0;
+        padding: 0.5rem 0.7rem;
+        background: #0a0c11;
+        border: 1px solid #2a2f3a;
+        border-radius: 8px;
+        color: #e7e9ee;
+        font-size: 0.85rem;
+        font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      }
+      .field-row input:focus {
+        outline: 2px solid #6c8cff;
+        border-color: #6c8cff;
+      }
+      .browse {
+        background: #2a2f3a;
+        color: #e7e9ee;
+        font-weight: 500;
+        white-space: nowrap;
+        padding: 0.5rem 0.9rem;
+      }
+      #storage-continue {
+        width: 100%;
+        margin-top: 0.25rem;
+        padding: 0.7rem;
+        font-size: 1rem;
+      }
+      .footnote {
+        margin: 0.9rem 0 0;
+        font-size: 0.78rem;
+        color: #6b7280;
+        text-align: center;
       }
     </style>
   </head>
   <body>
     <main>
-      <div class="spinner" id="spinner"></div>
       <h1>SceneWorks</h1>
-      <p id="status">Starting&hellip;</p>
-      <pre id="log"></pre>
-      <button id="retry">Retry</button>
+
+      <section id="storage">
+        <p class="lede">
+          Choose where to keep your files. The defaults work for most people — you
+          can change these later in Settings.
+        </p>
+
+        <div class="field">
+          <p class="field-label">Your workspace</p>
+          <p class="field-help">
+            Your projects, the images and videos you create, and any models you
+            import or download from sites like Civitai are stored here. Pick a
+            drive with plenty of free space.
+          </p>
+          <div class="field-row">
+            <input id="data-dir" type="text" spellcheck="false" aria-label="Workspace folder" />
+            <button class="browse" id="data-dir-browse" type="button">Browse…</button>
+          </div>
+        </div>
+
+        <div class="field">
+          <p class="field-label">Downloaded AI models</p>
+          <p class="field-help">
+            Large model files downloaded from Hugging Face are cached here. They're
+            kept in a shared folder by default so other AI apps on your computer
+            can reuse them — but you can store them anywhere, even inside your
+            workspace folder.
+          </p>
+          <div class="field-row">
+            <input id="hf-home" type="text" spellcheck="false" aria-label="AI model cache folder" />
+            <button class="browse" id="hf-home-browse" type="button">Browse…</button>
+          </div>
+        </div>
+
+        <button id="storage-continue" type="button">Continue</button>
+        <p class="footnote">You can change the model cache anytime; moving your workspace later needs a restart.</p>
+      </section>
+
+      <section id="provision">
+        <div class="spinner" id="spinner"></div>
+        <p id="status">Starting&hellip;</p>
+        <pre id="log"></pre>
+        <button id="retry">Retry</button>
+      </section>
     </main>
     <script>
       const statusEl = document.getElementById("status");
       const logEl = document.getElementById("log");
       const spinnerEl = document.getElementById("spinner");
       const retryEl = document.getElementById("retry");
+      const storageEl = document.getElementById("storage");
+      const provisionEl = document.getElementById("provision");
+      const dataDirEl = document.getElementById("data-dir");
+      const hfHomeEl = document.getElementById("hf-home");
+      const continueEl = document.getElementById("storage-continue");
+
+      const invoke = (command, args) => window.__TAURI__.core.invoke(command, args);
 
       function appendLog(line) {
         logEl.style.display = "block";
         logEl.textContent += line + "\n";
         logEl.scrollTop = logEl.scrollHeight;
+      }
+
+      function showProvision() {
+        storageEl.classList.remove("visible");
+        provisionEl.style.display = "block";
+      }
+
+      function showStorage(setup) {
+        provisionEl.style.display = "none";
+        dataDirEl.value = setup.dataDir || setup.dataDirDefault || "";
+        hfHomeEl.value = setup.hfHome || setup.hfHomeDefault || "";
+        storageEl.classList.add("visible");
+      }
+
+      async function browse(targetEl) {
+        try {
+          const picked = await invoke("choose_folder");
+          if (picked) {
+            targetEl.value = picked;
+          }
+        } catch (err) {
+          showError(String(err));
+        }
       }
 
       async function start() {
@@ -111,6 +263,23 @@
         }
       }
 
+      async function saveAndStart() {
+        continueEl.disabled = true;
+        try {
+          await invoke("save_storage_setup", {
+            dataDir: dataDirEl.value.trim(),
+            hfHome: hfHomeEl.value.trim(),
+          });
+        } catch (err) {
+          continueEl.disabled = false;
+          showProvision();
+          showError(String(err));
+          return;
+        }
+        showProvision();
+        start();
+      }
+
       function showError(message) {
         statusEl.textContent = message;
         statusEl.classList.add("error");
@@ -120,6 +289,7 @@
 
       async function main() {
         if (!window.__TAURI__) {
+          showProvision();
           statusEl.textContent = "Tauri bridge unavailable.";
           return;
         }
@@ -136,7 +306,26 @@
           statusEl.textContent = message;
         });
         retryEl.addEventListener("click", start);
-        start();
+        document.getElementById("data-dir-browse").addEventListener("click", () => browse(dataDirEl));
+        document.getElementById("hf-home-browse").addEventListener("click", () => browse(hfHomeEl));
+        continueEl.addEventListener("click", saveAndStart);
+
+        let setup = null;
+        try {
+          setup = await invoke("get_storage_setup");
+        } catch (err) {
+          // If we can't read the storage state, fall back to provisioning with
+          // whatever defaults are in effect rather than blocking launch.
+          showProvision();
+          start();
+          return;
+        }
+        if (setup.storageConfigured) {
+          showProvision();
+          start();
+        } else {
+          showStorage(setup);
+        }
       }
 
       main();
