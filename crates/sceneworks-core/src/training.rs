@@ -406,8 +406,7 @@ pub fn builtin_training_presets() -> TrainingPresetRegistry {
                 "z_image_turbo_lora.character.adamw8bit.balanced",
                 "Character balanced",
                 &["character"],
-                "adamw8bit",
-                "balanced",
+                ("adamw8bit", "balanced"),
                 |mut config| {
                     config.steps = 3000;
                     config
@@ -423,8 +422,7 @@ pub fn builtin_training_presets() -> TrainingPresetRegistry {
                 "z_image_turbo_lora.character.adamw8bit.conservative",
                 "Character conservative",
                 &["character"],
-                "adamw8bit",
-                "conservative",
+                ("adamw8bit", "conservative"),
                 |mut config| {
                     config.rank = 8;
                     config.alpha = 8;
@@ -442,8 +440,7 @@ pub fn builtin_training_presets() -> TrainingPresetRegistry {
                 "z_image_turbo_lora.character.adamw.balanced",
                 "Character balanced (AdamW)",
                 &["character"],
-                "adamw",
-                "balanced",
+                ("adamw", "balanced"),
                 |mut config| {
                     config.optimizer = "adamw".to_owned();
                     config.steps = 3000;
@@ -459,8 +456,7 @@ pub fn builtin_training_presets() -> TrainingPresetRegistry {
                 "z_image_turbo_lora.character.prodigyopt.balanced",
                 "Prodigy character (experimental)",
                 &["character"],
-                "prodigyopt",
-                "balanced",
+                ("prodigyopt", "balanced"),
                 |mut config| {
                     config.optimizer = "prodigyopt".to_owned();
                     config.learning_rate = number(1.0);
@@ -483,8 +479,7 @@ pub fn builtin_training_presets() -> TrainingPresetRegistry {
                 "z_image_turbo_lora.style.adamw8bit.balanced",
                 "Style balanced",
                 &["style"],
-                "adamw8bit",
-                "balanced",
+                ("adamw8bit", "balanced"),
                 |mut config| {
                     config.rank = 32;
                     config.alpha = 16;
@@ -502,8 +497,7 @@ pub fn builtin_training_presets() -> TrainingPresetRegistry {
                 "z_image_turbo_lora.character.adamw8bit.low_vram",
                 "Low VRAM character",
                 &["character"],
-                "adamw8bit",
-                "low_vram",
+                ("adamw8bit", "low_vram"),
                 |mut config| {
                     config.rank = 8;
                     config.alpha = 8;
@@ -534,14 +528,14 @@ fn z_image_preset<F>(
     id: &str,
     name: &str,
     recommended_for: &[&str],
-    optimizer: &str,
-    quality_preset: &str,
+    optimizer_quality: (&str, &str),
     mutate: F,
     ui: JsonObject,
 ) -> TrainingPreset
 where
     F: FnOnce(TrainingConfig) -> TrainingConfig,
 {
+    let (optimizer, quality_preset) = optimizer_quality;
     let mut config = mutate(target.defaults.clone());
     config.optimizer = optimizer.to_owned();
     config
