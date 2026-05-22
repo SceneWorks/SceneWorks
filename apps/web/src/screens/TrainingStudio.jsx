@@ -1702,6 +1702,31 @@ export function TrainingStudio({
                             ))}
                           </select>
                         </label>
+                        <label>
+                          Sample cadence
+                          <input
+                            onChange={(event) => updateConfigDraft("sampleEvery", event.target.value)}
+                            type="number"
+                            value={configDraft.sampleEvery ?? ""}
+                          />
+                        </label>
+                        <label>
+                          Sample steps
+                          <input
+                            onChange={(event) => updateConfigDraft("sampleSteps", event.target.value)}
+                            type="number"
+                            value={configDraft.sampleSteps ?? ""}
+                          />
+                        </label>
+                        <label>
+                          Guidance scale
+                          <input
+                            onChange={(event) => updateConfigDraft("sampleGuidanceScale", event.target.value)}
+                            step="0.1"
+                            type="number"
+                            value={configDraft.sampleGuidanceScale ?? ""}
+                          />
+                        </label>
                       </div>
 
                       <details
@@ -1785,31 +1810,6 @@ export function TrainingStudio({
                               onChange={(event) => updateConfigDraft("saveEvery", event.target.value)}
                               type="number"
                               value={configDraft.saveEvery ?? ""}
-                            />
-                          </label>
-                          <label>
-                            Sample cadence
-                            <input
-                              onChange={(event) => updateConfigDraft("sampleEvery", event.target.value)}
-                              type="number"
-                              value={configDraft.sampleEvery ?? ""}
-                            />
-                          </label>
-                          <label>
-                            Sample steps
-                            <input
-                              onChange={(event) => updateConfigDraft("sampleSteps", event.target.value)}
-                              type="number"
-                              value={configDraft.sampleSteps ?? ""}
-                            />
-                          </label>
-                          <label>
-                            Sample guidance
-                            <input
-                              onChange={(event) => updateConfigDraft("sampleGuidanceScale", event.target.value)}
-                              step="0.1"
-                              type="number"
-                              value={configDraft.sampleGuidanceScale ?? ""}
                             />
                           </label>
                         </div>
