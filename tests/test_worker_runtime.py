@@ -562,6 +562,53 @@ def test_mlx_adapter_rejects_incompatible_lora_family(tmp_path):
         MlxVideoAdapter().ensure_models(request)
 
 
+def test_mlx_condition_image_resolves_source_asset_from_file_path(tmp_path):
+    # Regression: MLX image_to_video / first_last_frame jobs failed with
+    # "Image-to-video mode requires a source image asset." because the adapter
+    # read a non-existent top-level `mediaPath` sidecar key instead of the real
+    # nested `file.path`, so the source image never resolved.
+    project_path = tmp_path / "project"
+    (project_path / "assets" / "images").mkdir(parents=True)
+    image_rel = "assets/images/source.png"
+    Image.new("RGB", (16, 16), "teal").save(project_path / image_rel)
+    (project_path / "assets" / "images" / "source.sceneworks.json").write_text(
+        json.dumps({"id": "asset-source", "file": {"path": image_rel}}),
+        encoding="utf-8",
+    )
+    adapter = MlxVideoAdapter()
+
+    i2v_request = video_request_from_job(
+        {
+            "id": "job-i2v",
+            "payload": {
+                "projectId": "project-1",
+                "model": "ltx_2_3",
+                "mode": "image_to_video",
+                "sourceAssetId": "asset-source",
+            },
+        }
+    )
+    first_image = adapter._first_condition_image(project_path, i2v_request)
+    assert first_image is not None
+    assert first_image.mode == "RGB"
+    # Validation now passes instead of raising the source-image error.
+    adapter._validate_inputs(project_path, i2v_request, first_image, None)
+
+    flf_request = video_request_from_job(
+        {
+            "id": "job-flf",
+            "payload": {
+                "projectId": "project-1",
+                "model": "ltx_2_3",
+                "mode": "first_last_frame",
+                "sourceAssetId": "asset-source",
+                "lastFrameAssetId": "asset-source",
+            },
+        }
+    )
+    assert adapter._last_condition_image(project_path, flf_request) is not None
+
+
 def test_mlx_wan_user_loras_resolved_to_path_strength_tuples(tmp_path):
     lora_file = tmp_path / "wan_motion.safetensors"
     lora_file.write_bytes(b"lora")

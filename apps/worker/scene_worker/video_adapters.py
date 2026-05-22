@@ -1803,34 +1803,26 @@ class MlxVideoAdapter(VideoGenerationAdapter):
         return module_to_loras
 
     def _first_condition_image(self, project_path: Path, request: VideoRequest) -> Any:
-        if request.source_asset_id:
-            asset_path = find_asset_sidecar_path(project_path, request.source_asset_id)
-            if asset_path and asset_path.exists():
-                sidecar = read_json(asset_path)
-                if sidecar and "mediaPath" in sidecar:
-                    image_path = (project_path / sidecar["mediaPath"]).resolve()
-                    if image_path.exists():
-                        try:
-                            from PIL import Image
-                            return Image.open(image_path).convert("RGB")
-                        except Exception:
-                            pass
-        return None
+        return self._condition_image(project_path, request.source_asset_id)
 
     def _last_condition_image(self, project_path: Path, request: VideoRequest) -> Any:
-        if request.last_frame_asset_id:
-            asset_path = find_asset_sidecar_path(project_path, request.last_frame_asset_id)
-            if asset_path and asset_path.exists():
-                sidecar = read_json(asset_path)
-                if sidecar and "mediaPath" in sidecar:
-                    image_path = (project_path / sidecar["mediaPath"]).resolve()
-                    if image_path.exists():
-                        try:
-                            from PIL import Image
-                            return Image.open(image_path).convert("RGB")
-                        except Exception:
-                            pass
-        return None
+        return self._condition_image(project_path, request.last_frame_asset_id)
+
+    def _condition_image(self, project_path: Path, asset_id: str | None) -> Any:
+        # Resolve via the shared helper: asset sidecars store the media path at
+        # `file.path`. The previous custom lookup read a non-existent top-level
+        # `mediaPath` key, so it always returned None and every MLX
+        # image_to_video / first_last_frame job failed the source-image check.
+        # Return the raw RGB image (the MLX pipeline does its own resizing).
+        media_path = source_asset_media_path(project_path, asset_id)
+        if media_path is None:
+            return None
+        try:
+            from PIL import Image
+
+            return Image.open(media_path).convert("RGB")
+        except Exception:
+            return None
 
     def _validate_inputs(
         self, project_path: Path, request: VideoRequest, first_image: Any, last_image: Any
