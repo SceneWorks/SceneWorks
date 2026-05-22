@@ -47,6 +47,14 @@ Recommended for a first run:
 - **Captions.** One short caption per image describing the subject, and a single
   **trigger word** you will later type to invoke the LoRA (e.g. `auroraStyle`).
   Put the trigger word in the caption and in the training config's `triggerWord`.
+  - **Identity / person LoRAs:** prefer a short, **unique non-word token** as the
+    trigger (e.g. `kls_woman`, not a common name) and keep captions minimal —
+    the trigger plus only what varies between shots (pose, outfit, setting). Long,
+    fully-descriptive captions bind the person's features (hair colour, face) to
+    ordinary words instead of the trigger, so a different inference prompt yields a
+    different person.
+  - **Style LoRAs:** detailed descriptive captions are appropriate — you *want* the
+    style attached broadly rather than to one token.
 - Datasets are versioned; provenance pins the exact version a run trained on, so a
   retrain is reproducible.
 
@@ -80,9 +88,13 @@ default preset. Changing the optimizer while the draft is still pristine applies
 the matching optimizer preset. Manual edits are shown as customizations and are
 preserved during normal refreshes. Turbo presets use sigmoid/high-noise
 timestep sampling, MSE loss, weight decay `0.0001`, gradient checkpointing,
-and 8-step CFG-0 sample previews. They also record the
-`ostris/zimage_turbo_training_adapter` metadata used to derive the
-recommendation.
+and 8-step CFG-0 sample previews. They also select the
+`ostris/zimage_turbo_training_adapter` **de-distill adapter**
+(`trainingAdapterRepo`/`trainingAdapterVersion`), which the worker fuses into the
+base transformer for training and excludes from the saved LoRA — see §4. The
+adapter version is a **De-distill adapter** dropdown in the Advanced panel
+(`v1` — stable, smaller; `v2` — experimental, heavier de-distill), so you can A/B
+the two on the same dataset.
 
 ## 3. Dry run (validate the plan)
 
@@ -115,10 +127,12 @@ the preset exists, matches the target, and matches the pinned version.
 
 Submit the same request with `"dryRun": false` (the *"Run training (beta)"*
 toggle in the Train screen). The job routes to a GPU worker's `z_image_lora`
-kernel, which loads the Z-Image-Turbo pipeline, attaches a PEFT LoRA to the
-transformer, caches latents and prompt embeddings, runs the flow-matching loop
-with the configured timestep sampler/loss settings, checkpoints every
-`saveEvery` steps, and writes a `.safetensors` adapter.
+kernel, which loads the Z-Image-Turbo pipeline, **fuses the configured de-distill
+training adapter into the transformer**, attaches a PEFT LoRA to the
+(now de-distilled) transformer, caches latents and prompt embeddings, runs the
+flow-matching loop with the configured timestep sampler/loss settings, checkpoints
+every `saveEvery` steps, and writes a `.safetensors` adapter that contains only the
+trained LoRA (the de-distill adapter is not saved).
 
 Progress reports flow through the job stream (`preparing → caching → training →
 checkpointing → saving → completed`) and the run honors cancellation between
@@ -131,9 +145,14 @@ Training is more memory-intensive than generation. The validated baseline is a
 keep batch size at 1, and reduce rank. Fewer steps train faster but may
 under-fit; use earlier checkpoints if a 3000-step balanced run starts overfitting.
 
-> **Note:** Z-Image-Turbo is a distilled (few-step) model. A LoRA trained
-> directly on it can work, but may need extra care for quality on some subjects.
-> Treat the first result as a baseline and iterate on dataset and steps.
+> **Note:** Z-Image-Turbo is a step-distilled (few-step) model. Training a LoRA
+> *directly* on the distilled weights makes the distillation break down
+> unpredictably — the LoRA learns (loss falls, weights move) but converges to
+> generic, off-identity output. The worker therefore fuses the
+> `ostris/zimage_turbo_training_adapter` de-distill adapter into the base before
+> training and ships only your LoRA, which inference applies to the plain distilled
+> model. Watch the worker `training_lora_weight_norm` event: a growing `loraBNorm`
+> across checkpoints confirms the adapter is learning.
 
 AI Toolkit features such as EMA and Differential Output Preservation are not
 exposed as SceneWorks presets yet because the current worker does not implement
