@@ -3,6 +3,7 @@ import { createRoot } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { App, eventUrl } from "./main.jsx";
 import { AssetPickerField } from "./components/AssetPicker.jsx";
+import { AssetDetail } from "./components/assetPanels.jsx";
 import { liveElapsedSeconds } from "./formatting.js";
 import { CharacterStudio } from "./screens/CharacterStudio.jsx";
 import { ImageStudio } from "./screens/ImageStudio.jsx";
@@ -5382,5 +5383,57 @@ describe("SceneWorks app shell", () => {
     expect(payload.prompt).toBe("An illustrated guide to brewing tea");
     expect(payload.model).toBe("sensenova_u1_8b");
     expect(payload.maxImages).toBe(6);
+  });
+
+  it("AssetDetail reopens a saved document from the Library", async () => {
+    global.fetch.mockImplementation((url) => {
+      if (String(url).includes("assets/documents")) {
+        return Promise.resolve(
+          response({
+            schemaVersion: 1,
+            id: "doc_1",
+            segments: [
+              { type: "text", text: "Boil the water." },
+              { type: "image", assetId: "img-1", path: "assets/images/a.png" },
+              { type: "text", text: "Steep three minutes." },
+            ],
+          }),
+        );
+      }
+      return Promise.resolve(response([]));
+    });
+    const documentAsset = {
+      id: "doc_1",
+      type: "document",
+      projectId: "project-1",
+      displayName: "Tea guide",
+      file: { path: "assets/documents/doc_1.json", mimeType: "application/json" },
+      url: "/api/v1/projects/project-1/files/assets/documents/doc_1.json",
+    };
+    root = createRoot(container);
+    await act(async () => {
+      root.render(
+        <AssetDetail
+          asset={documentAsset}
+          deleteAsset={() => {}}
+          purgeAsset={() => {}}
+          onPreview={() => {}}
+          onSendImage={() => {}}
+          onSendVideo={() => {}}
+          onSendEditor={() => {}}
+          updateAssetStatus={() => {}}
+        />,
+      );
+    });
+    await settle();
+
+    // The saved document's text + image segments render in order.
+    expect(container.textContent).toContain("Boil the water.");
+    expect(container.textContent).toContain("Steep three minutes.");
+    const image = container.querySelector("img.document-image");
+    expect(image).not.toBeNull();
+    expect(image.getAttribute("src")).toContain("assets/images/a.png");
+    // The document JSON was fetched from its file path.
+    expect(global.fetch).toHaveBeenCalledWith(expect.stringContaining("assets/documents/doc_1.json"));
   });
 });

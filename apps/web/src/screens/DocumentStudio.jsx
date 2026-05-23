@@ -1,6 +1,6 @@
 import React, { useEffect, useMemo, useState } from "react";
 import { AssetPickerField } from "../components/AssetPicker.jsx";
-import { assetUrl } from "../components/assetMedia.jsx";
+import { DocumentView } from "../components/DocumentView.jsx";
 import { JobProgressCard } from "../components/JobProgress.jsx";
 
 const MAX_IMAGES_DEFAULT = 6;
@@ -15,22 +15,7 @@ function DocumentResult({ job, assets, projectId, onOpenQueue }) {
   if (job.status !== "completed" || !Array.isArray(segments) || !segments.length) {
     return <JobProgressCard job={job} label="Interleaved document" onOpenQueue={onOpenQueue} />;
   }
-  return (
-    <article className="document-view" aria-label="Generated document">
-      {segments.map((segment, index) => {
-        if (segment.type === "text") {
-          return (
-            <p className="document-text" key={`segment-${index}`}>
-              {segment.text}
-            </p>
-          );
-        }
-        const asset = assets.find((item) => item.id === segment.assetId);
-        const src = assetUrl(asset ?? { projectId, file: { path: segment.path } });
-        return src ? <img alt="" className="document-image" key={`segment-${index}`} src={src} /> : null;
-      })}
-    </article>
-  );
+  return <DocumentView assets={assets} projectId={projectId} segments={segments} />;
 }
 
 export function DocumentStudio({
