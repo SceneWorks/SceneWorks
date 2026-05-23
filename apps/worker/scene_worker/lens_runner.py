@@ -22,6 +22,23 @@ import sys
 from pathlib import Path
 
 
+def _force_utf8_stdio() -> None:
+    """Force stdout/stderr to UTF-8 before importing transformers. On Windows the
+    sidecar's streams default to cp1252, and transformers' ``@auto_docstring``
+    decorator prints a 🚨 emoji while decorating model classes at import, crashing
+    the process with UnicodeEncodeError. No-op on Linux (where the worker container
+    runs). Mirrors scene_worker.runtime._force_utf8_stdio for the sidecar.
+    """
+    for stream in (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if reconfigure is None:
+            continue
+        try:
+            reconfigure(encoding="utf-8", errors="replace")
+        except (ValueError, OSError):
+            pass
+
+
 def _log(message: str) -> None:
     sys.stderr.write(f"[lens_runner] {message}\n")
     sys.stderr.flush()
@@ -57,6 +74,7 @@ def _apply_loras(transformer, loras) -> None:
 
 
 def main() -> int:
+    _force_utf8_stdio()
     if len(sys.argv) != 2:
         print(json.dumps({"error": "lens_runner expects exactly one argument: the spec JSON path"}))
         return 2

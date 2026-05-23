@@ -41,6 +41,25 @@ from pathlib import Path
 from typing import Any
 
 
+def _force_utf8_stdio() -> None:
+    """Force stdout/stderr to UTF-8 before importing transformers. On Windows the
+    sidecar's streams default to cp1252, and transformers' ``@auto_docstring``
+    decorator prints a 🚨 emoji while decorating model classes at import, which
+    crashes the process with UnicodeEncodeError. UTF-8 is already the default on
+    Linux (where the worker container runs), so this is a no-op there. The runner's
+    stdout IPC stays ASCII (json.dumps ensure_ascii), so widening never changes the
+    result bytes. Mirrors scene_worker.runtime._force_utf8_stdio for the sidecar.
+    """
+    for stream in (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if reconfigure is None:
+            continue
+        try:
+            reconfigure(encoding="utf-8", errors="replace")
+        except (ValueError, OSError):
+            pass
+
+
 def _log(message: str) -> None:
     sys.stderr.write(f"[lens_train_runner] {message}\n")
     sys.stderr.flush()
@@ -543,6 +562,7 @@ def _render_samples(
 
 
 def main() -> int:
+    _force_utf8_stdio()
     if len(sys.argv) != 2:
         print(json.dumps({"error": "lens_train_runner expects exactly one argument: the spec JSON path"}))
         return 2
