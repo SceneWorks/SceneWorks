@@ -1,6 +1,53 @@
 import React from "react";
-import { AssetMedia } from "./assetMedia.jsx";
+import { AssetMedia, assetUrl } from "./assetMedia.jsx";
+import { DocumentView } from "./DocumentView.jsx";
 import { Icon } from "./Icons.jsx";
+
+// Reopens a saved interleaved document: the asset's file points to the segments
+// JSON in assets/documents/, fetched here (served like any project file).
+function DocumentReader({ asset }) {
+  const url = assetUrl(asset);
+  const [segments, setSegments] = React.useState(null);
+  const [error, setError] = React.useState("");
+
+  React.useEffect(() => {
+    if (!url) {
+      setError("Document file is unavailable.");
+      return undefined;
+    }
+    let cancelled = false;
+    setSegments(null);
+    setError("");
+    fetch(url)
+      .then((response) => {
+        if (!response.ok) {
+          throw new Error(`Request failed (${response.status})`);
+        }
+        return response.json();
+      })
+      .then((document) => {
+        if (!cancelled) {
+          setSegments(Array.isArray(document?.segments) ? document.segments : []);
+        }
+      })
+      .catch((err) => {
+        if (!cancelled) {
+          setError(String(err?.message ?? err));
+        }
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [url]);
+
+  if (error) {
+    return <p className="empty-panel error-text">Couldn't load document: {error}</p>;
+  }
+  if (segments === null) {
+    return <p className="empty-panel">Loading document…</p>;
+  }
+  return <DocumentView projectId={asset.projectId} segments={segments} />;
+}
 
 function RatingControl({ asset, updateAssetStatus }) {
   const currentRating = Number(asset.status?.rating) || 0;
@@ -134,9 +181,13 @@ export function AssetDetail({
 
   return (
     <aside className="asset-detail">
-      <button className="preview-button" onClick={() => onPreview(asset)} type="button">
-        <AssetMedia asset={asset} />
-      </button>
+      {asset.type === "document" ? (
+        <DocumentReader asset={asset} />
+      ) : (
+        <button className="preview-button" onClick={() => onPreview(asset)} type="button">
+          <AssetMedia asset={asset} />
+        </button>
+      )}
       <h3>{asset.displayName}</h3>
       <p>{asset.recipe?.prompt ?? "No prompt"}</p>
       <RatingControl asset={asset} updateAssetStatus={updateAssetStatus} />
