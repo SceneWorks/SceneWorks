@@ -1331,6 +1331,55 @@ def sensenova_resolution_for(width: int, height: int) -> tuple[int, int]:
     )
 
 
+# SenseNova-U1 interleaved generation was trained at smaller buckets than plain
+# text-to-image (e.g. 1:1 = 1536² vs 2048², 16:9 = 2048×1152 vs 2720×1536), so it
+# has its own bucket set. Mirrors upstream examples/interleave/inference.py.
+_INTERLEAVE_RESOLUTIONS: dict[str, tuple[int, int]] = {
+    "1:1": (1536, 1536),
+    "16:9": (2048, 1152),
+    "9:16": (1152, 2048),
+    "3:2": (1888, 1248),
+    "2:3": (1248, 1888),
+    "4:3": (1760, 1312),
+    "3:4": (1312, 1760),
+    "1:2": (1088, 2144),
+    "2:1": (2144, 1088),
+    "1:3": (864, 2592),
+    "3:1": (2592, 864),
+}
+
+
+def interleave_resolution_for(width: int, height: int) -> tuple[int, int]:
+    """Snap a requested W×H to the nearest SenseNova-U1 *interleave* bucket by
+    aspect ratio (log-space). Off-bucket sizes degrade, as upstream warns."""
+    width = max(1, int(width))
+    height = max(1, int(height))
+    target = math.log(width / height)
+    return min(
+        _INTERLEAVE_RESOLUTIONS.values(),
+        key=lambda wh: abs(target - math.log(wh[0] / wh[1])),
+    )
+
+
+# Interleave inference requires a system prompt describing the think/no-think
+# protocol the model was trained with; without it the model won't interleave
+# correctly. Verbatim from upstream examples/interleave/inference.py (238d6cf).
+_INTERLEAVE_SYSTEM_MESSAGE = (
+    "You are a multimodal assistant capable of reasoning with both text and images. "
+    "You support two modes:\n\n"
+    "Think Mode: When reasoning is needed, you MUST start with a <think></think> block "
+    "and place all reasoning inside it. You MUST interleave text with generated images "
+    "using tags like <image1>, <image2>. Images can ONLY be generated between <think> and "
+    "</think>, and may be referenced in the final answer.\n\n"
+    "Non-Think Mode: When no reasoning is needed, directly provide the answer without "
+    "reasoning. Do not use tags like <image1>, <image2>; present any images naturally "
+    "alongside the text.\n\n"
+    "After the think block, always provide a concise, user-facing final answer. The answer "
+    "may include text, images, or both. Match the user's language in both reasoning and the "
+    "final answer."
+)
+
+
 class SenseNovaU1Adapter:
     """SenseNova-U1 unified multimodal model — text-to-image, run IN-PROCESS.
 
@@ -1800,6 +1849,320 @@ class SenseNovaU1Adapter:
         arr = (batch.float() * std + mean).clamp(0, 1).permute(0, 2, 3, 1).cpu().numpy()
         arr = (arr * 255.0).round().astype(np.uint8)
         return [Image.fromarray(a) for a in arr]
+
+    @staticmethod
+    def _advanced_float(advanced: dict[str, Any], key: str, default: float) -> float:
+        try:
+            return float(advanced.get(key, default))
+        except (TypeError, ValueError):
+            return default
+
+    def generate_interleaved(
+        self,
+        *,
+        settings: WorkerSettings,
+        job: dict[str, Any],
+        progress: ProgressCallback,
+        cancel_requested: CancelCallback,
+    ) -> dict[str, Any]:
+        """Interleaved text-image generation (sc-1576): one model pass yields
+        ordered text + images, persisted as a ``document`` asset. Reuses the cached
+        base understanding+generation model — never the distilled generation LoRA.
+        """
+        payload = job["payload"]
+        project_id = payload["projectId"]
+        prompt = str(payload.get("prompt") or "").strip()
+        if not prompt:
+            raise RuntimeError("Interleaved generation requires a prompt.")
+        model_id = payload.get("model", "sensenova_u1_8b")
+        model_target = MODEL_TARGETS.get(model_id, MODEL_TARGETS["sensenova_u1_8b"])
+        if model_target.get("adapter") != self.id:
+            raise RuntimeError(f"{model_id} is not a SenseNova-U1 target.")
+        advanced = payload.get("advanced", {}) if isinstance(payload.get("advanced"), dict) else {}
+        max_images = safe_int(payload.get("maxImages"), 6, 1, 10)
+        width, height = interleave_resolution_for(
+            safe_int(payload.get("width"), 2048, 256, 4096),
+            safe_int(payload.get("height"), 1152, 256, 4096),
+        )
+        source_asset_ids = [str(asset) for asset in (payload.get("sourceAssetIds") or []) if asset]
+        # Upstream interleave defaults (examples/interleave/inference.py @238d6cf).
+        steps = safe_int(advanced.get("numInferenceSteps"), 50, 1, 100)
+        cfg_scale = self._advanced_float(advanced, "guidanceScale", 4.0)
+        img_cfg_scale = self._advanced_float(advanced, "imageGuidanceScale", 1.0)
+        timestep_shift = self._advanced_float(advanced, "timestepShift", 3.0)
+        max_new_tokens = safe_int(advanced.get("maxNewTokens"), 2048, 64, 8192)
+        # Non-Think by default: the document is the deliverable, so skip the model's
+        # chain-of-thought (mirrors the VQA think=False choice — "present images
+        # naturally alongside the text"). Tunable; confirm on a real MPS run.
+        think_mode = bool(advanced.get("thinkMode", False))
+        seed = resolve_seed(payload.get("seed"), prompt, 0, None)
+
+        torch = importlib.import_module("torch")
+        require_inference_backend_for_gpu_worker(torch, settings.gpu_id)
+        device = select_torch_device(torch, settings.gpu_id)
+        activate_torch_device(torch, device)
+        dtype = select_torch_dtype(torch, device, advanced.get("dtype"))
+        repo = advanced.get("modelRepo") or model_target["repo"]
+
+        progress("loading_model", "loading_model", 0.18, f"Loading {model_target['label']}.")
+        model, tokenizer = self._load_model(torch, repo, device, dtype, distill_lora=None, job_id=job["id"])
+        self._loaded_model = model_id
+
+        input_images = self._load_input_images(settings, project_id, source_asset_ids)
+
+        if cancel_requested():
+            raise InterruptedError("Interleaved generation canceled by user.")
+        progress("running", "generating", 0.45, "Composing interleaved document.")
+        emit_worker_event(
+            "image_interleave_start",
+            jobId=job["id"],
+            adapter=self.id,
+            model=model_id,
+            device=device,
+            resolution=f"{width}x{height}",
+            maxImages=max_images,
+            inputImages=len(input_images),
+            thinkMode=think_mode,
+            gpuMemory=gpu_memory_snapshot(torch, device),
+        )
+        generated_text, images = self._run_interleave(
+            torch, model, tokenizer, prompt, input_images,
+            width, height, steps, cfg_scale, img_cfg_scale, timestep_shift,
+            max_images, max_new_tokens, think_mode, seed,
+        )
+        emit_worker_event(
+            "image_interleave_complete",
+            jobId=job["id"],
+            adapter=self.id,
+            imageCount=len(images),
+            textChars=len(generated_text),
+            gpuMemory=gpu_memory_snapshot(torch, device),
+        )
+
+        return self._write_interleaved_document(
+            settings=settings,
+            job=job,
+            project_id=project_id,
+            model_id=model_id,
+            prompt=prompt,
+            seed=seed,
+            generated_text=generated_text,
+            images=images,
+            cancel_requested=cancel_requested,
+            progress=progress,
+            raw_settings={
+                **advanced,
+                "repo": repo,
+                "numInferenceSteps": steps,
+                "guidanceScale": cfg_scale,
+                "imageGuidanceScale": img_cfg_scale,
+                "timestepShift": timestep_shift,
+                "maxImages": max_images,
+                "maxNewTokens": max_new_tokens,
+                "thinkMode": think_mode,
+                "resolution": f"{width}x{height}",
+                "realModelInference": True,
+            },
+        )
+
+    def _load_input_images(
+        self,
+        settings: WorkerSettings,
+        project_id: str,
+        source_asset_ids: list[str],
+    ) -> list[Image.Image]:
+        if not source_asset_ids:
+            return []
+        project_path = shared_find_project_path(settings.data_dir / "recent-projects.json", project_id)
+        images: list[Image.Image] = []
+        for asset_id in source_asset_ids:
+            path = find_asset_media_path(project_path, asset_id)
+            try:
+                images.append(Image.open(path).convert("RGB"))
+            except (OSError, Image.DecompressionBombError, Image.DecompressionBombWarning) as exc:
+                raise RuntimeError(f"Source image could not be loaded safely: {path}") from exc
+        return images
+
+    def _run_interleave(
+        self,
+        torch: Any,
+        model: Any,
+        tokenizer: Any,
+        prompt: str,
+        input_images: list[Image.Image],
+        width: int,
+        height: int,
+        steps: int,
+        cfg_scale: float,
+        img_cfg_scale: float,
+        timestep_shift: float,
+        max_images: int,
+        max_new_tokens: int,
+        think_mode: bool,
+        seed: int,
+    ) -> tuple[str, list[Image.Image]]:
+        generation_config = {"max_new_tokens": int(max_new_tokens), "do_sample": False}
+        with torch.inference_mode():
+            text, image_tensors = model.interleave_gen(
+                tokenizer,
+                prompt,
+                images=list(input_images),
+                generation_config=generation_config,
+                cfg_scale=cfg_scale,
+                img_cfg_scale=img_cfg_scale,
+                cfg_norm="none",
+                max_images=int(max_images),
+                enable_timestep_shift=True,
+                timestep_shift=timestep_shift,
+                image_size=(width, height),
+                cfg_interval=(0.0, 1.0),
+                num_steps=int(steps),
+                system_message=_INTERLEAVE_SYSTEM_MESSAGE,
+                think_mode=think_mode,
+                seed=int(seed),
+            )
+        pil_images: list[Image.Image] = []
+        for tensor in image_tensors:
+            pil_images.extend(self._to_pil(torch, tensor))
+        return str(text), pil_images
+
+    @staticmethod
+    def _build_interleaved_segments(
+        generated_text: str,
+        image_assets: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        """Split the model output on its inline ``<image>`` markers and slot the
+        generated image assets in order: text[0], image[0], text[1], image[1], …."""
+        parts = (generated_text or "").split("<image>")
+        segments: list[dict[str, Any]] = []
+        for index, part in enumerate(parts):
+            text = part.strip()
+            if text:
+                segments.append({"type": "text", "text": text})
+            if index < len(image_assets):
+                asset = image_assets[index]
+                segments.append({"type": "image", "assetId": asset["id"], "path": asset["file"]["path"]})
+        return segments
+
+    def _write_interleaved_document(
+        self,
+        *,
+        settings: WorkerSettings,
+        job: dict[str, Any],
+        project_id: str,
+        model_id: str,
+        prompt: str,
+        seed: int,
+        generated_text: str,
+        images: list[Image.Image],
+        cancel_requested: CancelCallback,
+        progress: ProgressCallback,
+        raw_settings: dict[str, Any],
+    ) -> dict[str, Any]:
+        project_path = shared_find_project_path(settings.data_dir / "recent-projects.json", project_id)
+        (project_path / "assets" / "documents").mkdir(parents=True, exist_ok=True)
+
+        # Generated images persist as ordinary image assets (individually browsable);
+        # the document references them in order.
+        image_assets: list[dict[str, Any]] = []
+        generation_set_id: str | None = None
+        image_asset_ids: list[str] = []
+        if images:
+            image_result = ImageAssetWriter().write_outputs(
+                settings=settings,
+                job=job,
+                images=images,
+                adapter_id=self.id,
+                progress=lambda *_args, **_kwargs: None,
+                cancel_requested=cancel_requested,
+                raw_settings={**raw_settings, "interleaved": True},
+            )
+            image_assets = image_result.get("assets", [])
+            generation_set_id = image_result.get("generationSetId")
+            image_asset_ids = list(image_result.get("assetIds", []))
+
+        segments = self._build_interleaved_segments(generated_text, image_assets)
+
+        created_at = utc_now()
+        document_id = f"doc_{uuid4().hex}"
+        media_rel = f"assets/documents/{document_id}.json"
+        document = {
+            "schemaVersion": 1,
+            "id": document_id,
+            "projectId": project_id,
+            "jobId": job["id"],
+            "model": model_id,
+            "prompt": prompt,
+            "createdAt": created_at,
+            "segments": segments,
+        }
+        write_json(project_path / media_rel, document)
+
+        asset_id = f"asset_{uuid4().hex}"
+        sidecar = {
+            "schemaVersion": 1,
+            "id": asset_id,
+            "projectId": project_id,
+            "generationSetId": generation_set_id,
+            "type": "document",
+            "displayName": prompt[:56] or "Interleaved document",
+            "createdAt": created_at,
+            "file": {
+                "path": media_rel,
+                "mimeType": "application/json",
+                "width": None,
+                "height": None,
+                "duration": None,
+                "fps": None,
+            },
+            "status": {"favorite": False, "rating": 0, "rejected": False, "trashed": False},
+            "recipe": {
+                "mode": "interleave",
+                "model": model_id,
+                "adapter": self.id,
+                "prompt": prompt,
+                "negativePrompt": "",
+                "seed": int(seed),
+                "loras": [],
+                "normalizedSettings": {
+                    "maxImages": raw_settings.get("maxImages"),
+                    "resolution": raw_settings.get("resolution"),
+                    "imageCount": len(image_assets),
+                },
+                "rawAdapterSettings": raw_settings,
+            },
+            "lineage": {
+                "parents": list(image_asset_ids),
+                "sourceAssetId": None,
+                "sourceTimestamp": None,
+                "jobId": job["id"],
+            },
+        }
+        sidecar_path = (project_path / media_rel).with_suffix(".sceneworks.json")
+        write_json(sidecar_path, sidecar)
+        index_asset(project_path, sidecar, sidecar_path)
+
+        progress(
+            "saving",
+            "saving",
+            1.0,
+            "Interleaved document saved.",
+            {
+                "documentId": document_id,
+                "documentAssetId": asset_id,
+                "assetIds": [asset_id, *image_asset_ids],
+                "imageAssetIds": image_asset_ids,
+                "segments": segments,
+            },
+        )
+        return {
+            "documentId": document_id,
+            "documentAssetId": asset_id,
+            "imageAssetIds": image_asset_ids,
+            "segments": segments,
+            "model": model_id,
+            "realModelInference": True,
+        }
 
 
 def create_image_adapter(
