@@ -31,6 +31,7 @@ pub const PROJECT_FOLDERS: &[&str] = &[
     "assets/uploads",
     "assets/frames",
     "assets/renders",
+    "assets/documents",
     "characters",
     "generation-sets",
     "loras",
@@ -47,6 +48,7 @@ const ASSET_FOLDERS: &[&str] = &[
     "assets/uploads",
     "assets/frames",
     "assets/renders",
+    "assets/documents",
     "trash",
 ];
 
@@ -2571,6 +2573,60 @@ mod tests {
         assert_eq!(counts.assets, 1);
         assert_eq!(counts.generation_sets, 1);
         assert_eq!(counts.timelines, 1);
+    }
+
+    #[test]
+    fn document_assets_are_indexed_and_listed() {
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        let store = ProjectStore::new(temp_dir.path().join("data"), "test-version");
+        let project = store.create_project("Docs").expect("project creates");
+        let project_path = std::path::PathBuf::from(&project.path);
+
+        // assets/documents is created at project init (PROJECT_FOLDERS).
+        assert!(project_path.join("assets/documents").exists());
+
+        let document_dir = project_path.join("assets/documents");
+        std::fs::write(
+            document_dir.join("doc_1.json"),
+            serde_json::to_string_pretty(&json!({
+                "schemaVersion": 1,
+                "id": "doc_1",
+                "projectId": project.id,
+                "jobId": "job-1",
+                "model": "sensenova_u1_8b",
+                "prompt": "illustrated guide",
+                "createdAt": "2026-05-23T00:00:00Z",
+                "segments": [
+                    {"type": "text", "text": "Step one."},
+                    {"type": "image", "assetId": "asset-img-1", "path": "assets/images/a.png"}
+                ]
+            }))
+            .expect("json"),
+        )
+        .expect("document writes");
+        std::fs::write(
+            document_dir.join("doc_1.sceneworks.json"),
+            serde_json::to_string_pretty(&json!({
+                "id": "doc_1",
+                "type": "document",
+                "displayName": "Illustrated guide",
+                "createdAt": "2026-05-23T00:00:00Z",
+                "file": {"path": "assets/documents/doc_1.json"},
+                "status": {"favorite": false, "rating": 0, "rejected": false, "trashed": false}
+            }))
+            .expect("json"),
+        )
+        .expect("sidecar writes");
+
+        let counts = store.reindex_project(&project.id).expect("reindex works");
+        assert_eq!(counts.assets, 1);
+
+        let assets = store
+            .list_assets(&project.id, false, false)
+            .expect("assets list");
+        assert_eq!(assets.len(), 1);
+        assert_eq!(assets[0]["id"], "doc_1");
+        assert_eq!(assets[0]["type"], "document");
     }
 
     #[test]

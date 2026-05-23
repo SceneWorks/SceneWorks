@@ -1,0 +1,44 @@
+{
+  "schemaVersion": 1,
+  "id": "asset_document_fixture",
+  "projectId": "project_fixture",
+  "generationSetId": null,
+  "type": "document",
+  "displayName": "How to brew tea",
+  "createdAt": "2026-05-23T15:00:00Z",
+  "file": {
+    "path": "assets/documents/doc_fixture.json",
+    "mimeType": "application/json",
+    "width": null,
+    "height": null,
+    "duration": null,
+    "fps": null
+  },
+  "status": {
+    "favorite": false,
+    "rating": 0,
+    "rejected": false,
+    "trashed": false
+  },
+  "recipe": {
+    "mode": "interleave",
+    "model": "sensenova_u1_8b",
+    "adapter": "sensenova_u1",
+    "prompt": "Write an illustrated guide to brewing tea",
+    "negativePrompt": "",
+    "seed": 7,
+    "loras": [],
+    "normalizedSettings": {
+      "maxImages": 6,
+      "width": 1024,
+      "height": 1024
+    },
+    "rawAdapterSettings": {}
+  },
+  "lineage": {
+    "parents": [],
+    "sourceAssetId": null,
+    "sourceTimestamp": null,
+    "jobId": "job_fixture"
+  }
+}

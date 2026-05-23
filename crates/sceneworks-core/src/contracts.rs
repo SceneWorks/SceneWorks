@@ -318,6 +318,17 @@ string_enum! {
         Upload => "upload",
         Frame => "frame",
         Render => "render",
+        // An interleaved text-image document (SenseNova-U1). The asset's `file`
+        // points to an InterleavedDocument JSON in assets/documents/; the images it
+        // references are ordinary `image` assets. See sc-1576.
+        Document => "document",
+    }
+}
+
+string_enum! {
+    pub enum DocumentSegmentKind {
+        Text => "text",
+        Image => "image",
     }
 }
 
@@ -720,6 +731,42 @@ pub struct AssetLineage {
     pub source_asset_id: Option<String>,
     pub source_timestamp: Option<ContractNumber>,
     pub job_id: Option<String>,
+    #[serde(flatten)]
+    pub extra: ExtraFields,
+}
+
+/// One ordered piece of an interleaved document: either a text run or a reference
+/// to a generated `image` asset. The producer (worker, sc-1606) splits the model's
+/// output text on its inline `<image>` markers and slots the images in order.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DocumentSegment {
+    #[serde(rename = "type")]
+    pub segment_type: DocumentSegmentKind,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub text: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub asset_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
+    #[serde(flatten)]
+    pub extra: ExtraFields,
+}
+
+/// On-disk schema for an interleaved text-image document, stored at
+/// `assets/documents/<id>.json`. The companion `<id>.sceneworks.json` is a regular
+/// `Asset` of type `document` whose `file.path` points here. See sc-1576 / sc-1605.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct InterleavedDocument {
+    pub schema_version: u32,
+    pub id: String,
+    pub project_id: String,
+    pub job_id: Option<String>,
+    pub model: String,
+    pub prompt: String,
+    pub created_at: String,
+    pub segments: Vec<DocumentSegment>,
     #[serde(flatten)]
     pub extra: ExtraFields,
 }

@@ -500,7 +500,7 @@ export function App() {
     return ["auto", ...Array.from(new Set(ids))];
   }, [visibleWorkers]);
   const mediaAssets = useMemo(
-    () => assets.filter((asset) => ["image", "video", "upload", "frame", "render"].includes(asset.type)),
+    () => assets.filter((asset) => ["image", "video", "upload", "frame", "render", "document"].includes(asset.type)),
     [assets],
   );
 
