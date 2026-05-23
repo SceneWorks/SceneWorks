@@ -30,7 +30,13 @@ from sceneworks_shared import (
 )
 
 from .adapter_utils import filter_call_kwargs
-from .lora_adapters import LoraPipelineState, apply_loras_to_pipeline, reject_loras_if_unsupported
+from .lora_adapters import (
+    LoraPipelineState,
+    apply_loras_to_pipeline,
+    normalize_lora_specs,
+    reject_loras_if_unsupported,
+    validate_lora_compatibility,
+)
 from .settings import WorkerSettings
 
 
@@ -1018,7 +1024,9 @@ class LensTurboAdapter:
     the shared asset writer. The vendored ``lens`` package (scene_worker/_vendor)
     is imported by the runner, not here.
 
-    Text-to-image only (no edit/img2img) and no LoRA support yet.
+    Text-to-image only (no edit/img2img). LoRAs (the `lens` family, trained by
+    the `lens_lora` kernel) are resolved here and applied to the transformer in
+    the sidecar via PeftAdapterMixin (sc-1587).
     """
 
     id = "lens_turbo"
@@ -1050,10 +1058,17 @@ class LensTurboAdapter:
         request = image_request_from_job(job)
         if request.mode == "edit_image":
             raise RuntimeError(f"{request.model} does not support image editing.")
-        reject_loras_if_unsupported(request.loras, self.id)
         model_target = MODEL_TARGETS.get(request.model, MODEL_TARGETS["lens_turbo"])
         if model_target.get("adapter") != self.id:
             raise RuntimeError(f"{request.model} is not a Lens target.")
+        # Lens LoRAs (sc-1587) are trained on the base and applied to the
+        # transformer inside the sidecar. Resolve + validate them in the main venv
+        # so a bad path or incompatible family fails before we spawn the
+        # subprocess; the sidecar only sees concrete file paths + weights.
+        validate_lora_compatibility(
+            request.loras, model_family=model_target.get("family"), adapter_id=self.id
+        )
+        lora_specs = normalize_lora_specs(request.loras)
         if not self._sidecar_available():
             raise RuntimeError(
                 "Lens generation requires the isolated Lens sidecar venv. Rebuild the worker image with "
@@ -1096,6 +1111,10 @@ class LensTurboAdapter:
                     "cpuOffload": bool(request.advanced.get("cpuOffload", False)),
                     "dtype": request.advanced.get("dtype"),
                     "device": device,
+                    "loras": [
+                        {"path": lora.path, "weight": lora.weight, "name": lora.adapter_name}
+                        for lora in lora_specs
+                    ],
                 },
                 progress=progress,
                 cancel_requested=cancel_requested,

@@ -27,6 +27,35 @@ def _log(message: str) -> None:
     sys.stderr.flush()
 
 
+def _apply_loras(transformer, loras) -> None:
+    """Inject + scale trained `lens` LoRAs on the transformer (PeftAdapterMixin).
+
+    Each ``loras`` entry is ``{"path", "weight", "name"}``, already resolved to a
+    concrete .safetensors file by the adapter. ``save_lora_adapter`` (training
+    kernel) and ``load_lora_adapter`` are the symmetric PeftAdapterMixin pair; the
+    ``prefix=None`` retry covers builds that saved the adapter without a
+    ``transformer.`` key prefix.
+    """
+    names: list[str] = []
+    weights: list[float] = []
+    for index, lora in enumerate(loras):
+        name = str(lora.get("name") or f"lora_{index}")
+        path = str(lora["path"])
+        try:
+            transformer.load_lora_adapter(path, adapter_name=name)
+        except Exception:  # noqa: BLE001 - retry with no key prefix before failing
+            transformer.load_lora_adapter(path, adapter_name=name, prefix=None)
+        names.append(name)
+        try:
+            weights.append(float(lora.get("weight", 1.0)))
+        except (TypeError, ValueError):
+            weights.append(1.0)
+    if hasattr(transformer, "set_adapters"):
+        transformer.set_adapters(names, weights=weights)
+    elif names and hasattr(transformer, "set_adapter"):
+        transformer.set_adapter(names[0])
+
+
 def main() -> int:
     if len(sys.argv) != 2:
         print(json.dumps({"error": "lens_runner expects exactly one argument: the spec JSON path"}))
@@ -81,6 +110,16 @@ def main() -> int:
     else:
         pipe.to(requested_device)
     _log("pipeline loaded")
+
+    # LensPipeline has no LoRA loader mixin, but LensTransformer2DModel inherits
+    # diffusers' PeftAdapterMixin, so trained `lens` LoRAs (sc-1587) load directly
+    # on the transformer. The adapter resolved each entry to a concrete file path
+    # + weight in the main venv; here we only inject and scale them. A LoRA trained
+    # on the base microsoft/Lens applies cleanly to Lens-Turbo (same architecture).
+    loras = spec.get("loras") or []
+    if loras:
+        _apply_loras(pipe.transformer, loras)
+        _log(f"applied {len(loras)} LoRA(s)")
 
     generator_device = requested_device if requested_device.startswith("cuda") else "cpu"
     base_resolution = int(spec.get("baseResolution", 1024))

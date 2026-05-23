@@ -883,6 +883,27 @@ def test_lens_turbo_model_target_defaults():
     assert target["repo"] == "microsoft/Lens-Turbo"
 
 
+def test_lens_base_model_target_defaults():
+    target = MODEL_TARGETS["lens"]
+    assert target["adapter"] == "lens_turbo"
+    assert target["family"] == "lens"
+    # Non-distilled base: 20-step / CFG 5.0 (vs Turbo's 4 / 1.0).
+    assert target["steps"] == 20
+    assert target["guidanceScale"] == 5.0
+    assert target["repo"] == "microsoft/Lens"
+
+
+def test_lens_guidance_scale_uses_per_model_default_and_override():
+    adapter = LensTurboAdapter()
+    base = MODEL_TARGETS["lens"]
+    turbo = MODEL_TARGETS["lens_turbo"]
+    # The per-model default applies when the request does not override guidance.
+    assert adapter._guidance_scale(SimpleNamespace(advanced={}), base) == 5.0
+    assert adapter._guidance_scale(SimpleNamespace(advanced={}), turbo) == 1.0
+    # An explicit request value wins for either variant.
+    assert adapter._guidance_scale(SimpleNamespace(advanced={"guidanceScale": 3.5}), base) == 3.5
+
+
 def test_lens_turbo_rejects_image_edit(tmp_path):
     job = {
         "id": "job_lens_edit",
