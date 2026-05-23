@@ -1,0 +1,23 @@
+{
+  "schemaVersion": 1,
+  "id": "doc_fixture",
+  "projectId": "project_fixture",
+  "jobId": "job_fixture",
+  "model": "sensenova_u1_8b",
+  "prompt": "Write an illustrated guide to brewing tea",
+  "createdAt": "2026-05-23T15:00:00Z",
+  "segments": [
+    { "type": "text", "text": "First, bring fresh water to a gentle boil." },
+    {
+      "type": "image",
+      "assetId": "asset_image_one",
+      "path": "assets/images/2026-05-23_sensenova_u1_8b_tea_0001.png"
+    },
+    { "type": "text", "text": "Add the leaves and steep for three minutes." },
+    {
+      "type": "image",
+      "assetId": "asset_image_two",
+      "path": "assets/images/2026-05-23_sensenova_u1_8b_tea_0002.png"
+    }
+  ]
+}

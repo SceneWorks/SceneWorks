@@ -2,9 +2,10 @@ use std::fs;
 use std::path::PathBuf;
 
 use sceneworks_core::contracts::{
-    Asset, Character, GenerationSet, JobProtocolFixture, LoraManifest, LoraManifestEntry,
-    ModelInstallMarker, ModelManifest, ModelManifestEntry, PersonTrack, Project, QueueSummary,
-    Recipe, RecipePresetManifest, RecipePresetManifestEntry, ResourceSidecarsFixture, Timeline,
+    Asset, Character, GenerationSet, InterleavedDocument, JobProtocolFixture, LoraManifest,
+    LoraManifestEntry, ModelInstallMarker, ModelManifest, ModelManifestEntry, PersonTrack, Project,
+    QueueSummary, Recipe, RecipePresetManifest, RecipePresetManifestEntry, ResourceSidecarsFixture,
+    Timeline,
 };
 use serde::de::DeserializeOwned;
 use serde::Serialize;
@@ -55,10 +56,16 @@ fn resource_sidecar_index_round_trips_without_field_drift() {
 }
 
 #[test]
+fn interleaved_document_round_trips_without_field_drift() {
+    assert_round_trip::<InterleavedDocument>("interleaved-document.json");
+}
+
+#[test]
 fn persisted_sidecars_round_trip_without_field_drift() {
     assert_round_trip::<Project>("sidecars/project.json");
     assert_round_trip::<Asset>("sidecars/asset-image.sceneworks.json");
     assert_round_trip::<Asset>("sidecars/asset-video.sceneworks.json");
+    assert_round_trip::<Asset>("sidecars/asset-document.sceneworks.json");
     assert_round_trip::<GenerationSet>("sidecars/generation-set.json");
     assert_round_trip::<Recipe>("sidecars/recipe.json");
     assert_round_trip::<Character>("sidecars/character.sceneworks.character.json");
