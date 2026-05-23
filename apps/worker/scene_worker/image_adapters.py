@@ -1657,9 +1657,12 @@ class SenseNovaU1Adapter:
         # VQA latency ~ output tokens (one model pass each) + input vision tokens
         # (prefill). Both default low for responsiveness and are tunable per request.
         max_new_tokens = safe_int(payload.get("maxNewTokens"), 256, 16, 2048)
-        # Downscale the understanding input — far fewer vision tokens, faster prefill,
-        # little quality loss for answering questions (default ~1024², not 2048²).
-        max_image_pixels = safe_int(payload.get("maxImagePixels"), 1024 * 1024, 256 * 256, 2048 * 2048)
+        # Downscale the understanding input — vision tokens (and prefill cost) scale
+        # with pixel count (~pixels/1024 tokens), and there's little perceptible
+        # difference for question answering between ~768px and ~1024px. Default ~768²
+        # (~576 tokens vs ~1024 at 1024²); tunable up via payload.maxImagePixels when a
+        # question needs fine detail or in-image text.
+        max_image_pixels = safe_int(payload.get("maxImagePixels"), 768 * 768, 256 * 256, 2048 * 2048)
 
         torch = importlib.import_module("torch")
         require_inference_backend_for_gpu_worker(torch, settings.gpu_id)
