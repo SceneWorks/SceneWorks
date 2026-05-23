@@ -4662,6 +4662,53 @@ describe("SceneWorks app shell", () => {
     expect(createImageJob).toHaveBeenCalledWith(expect.objectContaining({ model: "qwen_image", recipePresetId: "qwen_detail" }));
   });
 
+  it("offers SenseNova-U1 in edit mode via its edit_image capability", async () => {
+    root = createRoot(container);
+    await act(async () => {
+      root.render(
+        <ImageStudio
+          activeProject={{ id: "project-1", name: "Noir" }}
+          assets={[{ id: "image-1", type: "image", displayName: "Frame One" }]}
+          characters={[]}
+          createImageJob={() => {}}
+          deleteAsset={() => {}}
+          gpuOptions={["auto"]}
+          imageModels={[
+            { id: "z_image_turbo", name: "Z-Image", type: "image", family: "z-image", capabilities: ["text_to_image"] },
+            {
+              id: "sensenova_u1_8b",
+              name: "SenseNova-U1 8B",
+              type: "image",
+              family: "sensenova-u1",
+              capabilities: ["text_to_image", "edit_image"],
+              limits: { resolutions: ["2048x2048"] },
+            },
+          ]}
+          latestAssets={[]}
+          loras={[]}
+          onPreview={() => {}}
+          purgeAsset={() => {}}
+          presets={[]}
+          requestedGpu="auto"
+          selectedAsset={{ id: "image-1", type: "image", displayName: "Frame One" }}
+          setRequestedGpu={() => {}}
+          updateAssetStatus={() => {}}
+        />,
+      );
+    });
+    await settle();
+
+    await act(async () => {
+      [...container.querySelectorAll(".segmented-control button")].find((button) => button.textContent === "Edit").click();
+    });
+    await settle();
+
+    const modelValues = [...field(container, "Model").querySelectorAll("option")].map((option) => option.value);
+    expect(modelValues).toContain("sensenova_u1_8b");
+    // The text-to-image-only model is filtered out of the edit-mode picker.
+    expect(modelValues).not.toContain("z_image_turbo");
+  });
+
   it("uses preset modes as the Image Studio picker surface", async () => {
     root = createRoot(container);
     await act(async () => {

@@ -202,7 +202,7 @@
       "family": "sensenova-u1",
       "type": "image",
       "adapter": "sensenova_u1",
-      "capabilities": ["text_to_image"],
+      "capabilities": ["text_to_image", "edit_image"],
       "downloads": [
         {
           "provider": "huggingface",
@@ -235,8 +235,8 @@
       },
       "ui": {
         "label": "SenseNova-U1 8B",
-        "description": "Unified multimodal model (NEO-unify, ~16B). Native text-to-image with strong prompt following, dense text, and infographics. Heavy: ~42GB bf16, ~50 steps; runs on large-VRAM GPUs and 96GB+ Apple Silicon (MPS). Edit/VQA/interleaved not wired yet.",
-        "recommendedFor": ["text_to_image"]
+        "description": "Unified multimodal model (NEO-unify, ~16B). Native text-to-image and instruction-based editing with strong prompt following, dense text, and infographics. Heavy: ~42GB bf16, ~50 steps; runs on large-VRAM GPUs and 96GB+ Apple Silicon (MPS). VQA/interleaved not wired yet.",
+        "recommendedFor": ["text_to_image", "edit_image"]
       }
     },
     {
