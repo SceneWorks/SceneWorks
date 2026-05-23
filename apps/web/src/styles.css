@@ -2694,6 +2694,11 @@ label {
 .asset-detail {
   position: sticky;
   top: 86px;
+  /* Cap to the viewport and scroll internally so a tall panel (e.g. the VQA Ask
+     box + Q&A history) stays fully reachable instead of pinning off-screen. */
+  max-height: calc(100vh - 102px);
+  overflow-y: auto;
+  overscroll-behavior: contain;
   display: grid;
   gap: 12px;
   padding: 16px;
@@ -5494,6 +5499,8 @@ label {
 
   .asset-detail {
     position: static;
+    max-height: none;
+    overflow: visible;
   }
 
   .timeline-panel,
