@@ -1042,7 +1042,31 @@ def run_check(settings: WorkerSettings) -> None:
     )
 
 
+def _force_utf8_stdio() -> None:
+    """Force stdout/stderr to UTF-8 so the worker survives non-ASCII library output.
+
+    On Windows the worker's stdout/stderr default to the locale code page (cp1252
+    for en-US), so any dependency that ``print()``s a non-Latin-1 character raises
+    UnicodeEncodeError and kills the process. transformers' ``@auto_docstring``
+    decorator unconditionally prints an "undocumented parameters" developer notice
+    containing a 🚨 emoji while decorating the vendored SenseNova-U1 model classes
+    (and would for other models too), which crashed ``import sensenova_u1`` on
+    Windows. UTF-8 is already the default on Linux/macOS, so this is a no-op there.
+    The JSON events the worker emits on stdout are ASCII (json.dumps ensure_ascii),
+    so widening the encoding never changes the IPC bytes.
+    """
+    for stream in (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if reconfigure is None:
+            continue
+        try:
+            reconfigure(encoding="utf-8", errors="replace")
+        except (ValueError, OSError):
+            pass
+
+
 def main(argv: list[str] | None = None) -> None:
+    _force_utf8_stdio()
     args = list(sys.argv[1:] if argv is None else argv)
     settings = WorkerSettings()
     if args == ["--check"]:
