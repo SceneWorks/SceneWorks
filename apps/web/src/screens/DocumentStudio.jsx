@@ -76,7 +76,7 @@ export function DocumentStudio({
   }
 
   return (
-    <div className="studio document-studio">
+    <section className="main-surface document-studio">
       <form className="studio-form" onSubmit={submit}>
         {interleaveModels.length ? null : (
           <p className="empty-panel compact-panel">
@@ -156,6 +156,6 @@ export function DocumentStudio({
           <p className="empty-panel">Your generated document will appear here.</p>
         )}
       </section>
-    </div>
+    </section>
   );
 }

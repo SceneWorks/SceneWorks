@@ -1321,18 +1321,13 @@ label {
   }
 }
 
-/* Document Studio (interleaved text-image) — sc-1607/1608. The screen reuses the
-   generic .field / .studio-results class names, which only carry layout inside
-   preset/ImageStudio scopes, so give them rhythm here. */
-.document-studio {
-  display: grid;
-  gap: var(--gap-5);
-}
-
+/* Document Studio (interleaved text-image) — sc-1607/1608. The screen wraps in
+   .main-surface (edge margin + padded card, like Video/Image Studio); these rules
+   give the form/fields rhythm since the generic .field / .field-row class names
+   only carry layout inside preset/ImageStudio scopes. */
 .document-studio .studio-form {
   display: grid;
   gap: var(--gap-4);
-  max-width: 760px;
 }
 
 .document-studio .field {
