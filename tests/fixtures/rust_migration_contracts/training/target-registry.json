@@ -58,6 +58,64 @@
       }
     },
     {
+      "id": "lens_turbo_lora",
+      "name": "Lens LoRA",
+      "modality": "image",
+      "outputKind": "lora",
+      "family": "lens",
+      "baseModel": "lens",
+      "baseModelRepo": "microsoft/Lens",
+      "kernel": "lens_lora",
+      "defaults": {
+        "rank": 16,
+        "alpha": 16,
+        "learningRate": 0.0001,
+        "steps": 3000,
+        "batchSize": 1,
+        "gradientAccumulation": 1,
+        "resolution": 1024,
+        "saveEvery": 250,
+        "seed": 42,
+        "optimizer": "adamw8bit",
+        "advanced": {
+          "mixedPrecision": "bf16",
+          "cacheLatents": true,
+          "cacheTextEmbeddings": true,
+          "gradientCheckpointing": true,
+          "networkType": "lora",
+          "timestepType": "sigmoid",
+          "timestepBias": "high_noise",
+          "lossType": "mse",
+          "weightDecay": 0.0001,
+          "lrScheduler": "constant",
+          "loraTargetModules": ["img_qkv", "txt_qkv", "to_out", "to_add_out"],
+          "baseModelRepo": "microsoft/Lens",
+          "sampleEvery": 250,
+          "sampleSteps": 4,
+          "sampleGuidanceScale": 1.0,
+          "qualityPreset": "balanced",
+          "outputScope": "project",
+          "requestedGpu": "auto"
+        }
+      },
+      "limits": {
+        "rank": [4, 128],
+        "alpha": [1, 128],
+        "steps": [200, 6000],
+        "resolutions": [768, 1024, 1440],
+        "batchSize": [1, 4],
+        "optimizers": ["adamw8bit", "adamw", "adam", "prodigyopt"],
+        "lrSchedulers": ["constant", "linear", "cosine"],
+        "qualityPresets": ["speed", "balanced", "quality"],
+        "outputScopes": ["project", "global"]
+      },
+      "ui": {
+        "label": "Lens LoRA",
+        "description": "Train an image LoRA for Microsoft Lens (gpt-oss text encoder + FLUX.2 VAE). Trains on the non-distilled base and applies to Lens-Turbo.",
+        "recommendedFor": ["character", "style"]
+      }
+    },
+    {
       "id": "ltx_video_lora",
       "name": "LTX-2.3 Video LoRA",
       "modality": "video",

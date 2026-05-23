@@ -186,9 +186,11 @@
         "count": [1, 2, 4]
       },
       "loraCompatibility": {
-        // Lens LoRA training/inference is not supported yet.
-        "families": [],
-        "types": []
+        // Lens LoRA training (sc-1583) trains on the non-distilled microsoft/Lens
+        // and applies the adapter here on Lens-Turbo. The `lens` family maps to
+        // the `lens_turbo` adapter in lora_family.rs.
+        "families": ["lens"],
+        "types": ["style", "enhance", "character"]
       },
       "ui": {
         "label": "Lens-Turbo",
