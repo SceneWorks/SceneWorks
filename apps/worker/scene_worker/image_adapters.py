@@ -1654,7 +1654,15 @@ class SenseNovaU1Adapter:
         if model_target.get("adapter") != self.id:
             raise RuntimeError(f"{model_id} is not a SenseNova-U1 target.")
         advanced = payload.get("advanced", {}) if isinstance(payload.get("advanced"), dict) else {}
-        max_new_tokens = safe_int(payload.get("maxNewTokens"), 512, 16, 2048)
+        # VQA latency ~ output tokens (one model pass each) + input vision tokens
+        # (prefill). Both default low for responsiveness and are tunable per request.
+        max_new_tokens = safe_int(payload.get("maxNewTokens"), 256, 16, 2048)
+        # Downscale the understanding input — vision tokens (and prefill cost) scale
+        # with pixel count (~pixels/1024 tokens), and there's little perceptible
+        # difference for question answering between ~768px and ~1024px. Default ~768²
+        # (~576 tokens vs ~1024 at 1024²); tunable up via payload.maxImagePixels when a
+        # question needs fine detail or in-image text.
+        max_image_pixels = safe_int(payload.get("maxImagePixels"), 768 * 768, 256 * 256, 2048 * 2048)
 
         torch = importlib.import_module("torch")
         require_inference_backend_for_gpu_worker(torch, settings.gpu_id)
@@ -1686,7 +1694,7 @@ class SenseNovaU1Adapter:
             device=device,
             gpuMemory=gpu_memory_snapshot(torch, device),
         )
-        answer = self._run_vqa(torch, model, tokenizer, image, question, device, max_new_tokens)
+        answer = self._run_vqa(torch, model, tokenizer, image, question, device, max_new_tokens, max_image_pixels)
         emit_worker_event(
             "image_vqa_complete",
             jobId=job["id"],
@@ -1725,11 +1733,12 @@ class SenseNovaU1Adapter:
         question: str,
         device: str,
         max_new_tokens: int,
+        max_image_pixels: int,
     ) -> str:
         self._ensure_vendor_on_path()
         from sensenova_u1.models.neo_unify.utils import load_image_native
 
-        pixel_values, grid_hw = load_image_native(image)
+        pixel_values, grid_hw = load_image_native(image, max_pixels=int(max_image_pixels))
         pixel_values = pixel_values.to(device, dtype=model.dtype)
         grid_hw = grid_hw.to(device)
         generation_config = {"max_new_tokens": int(max_new_tokens), "do_sample": False}
