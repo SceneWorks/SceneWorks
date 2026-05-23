@@ -34,6 +34,7 @@ from scene_worker.image_adapters import (
     image_batch_progress,
     image_request_from_job,
     lens_resolution_for,
+    model_supports_edit,
     pipeline_component_devices,
     require_inference_backend_for_gpu_worker,
     resolve_seed,
@@ -954,17 +955,26 @@ def test_sensenova_u1_model_target_defaults():
     assert target["adapter"] == "sensenova_u1"
     assert target["family"] == "sensenova-u1"
     assert target["steps"] == 50
-    assert target["supportsEdit"] is False
+    # Unified model: the base entry supports instruction editing (it2i).
+    assert target["supportsEdit"] is True
     assert target["repo"] == "sensenova/SenseNova-U1-8B-MoT"
 
 
-def test_sensenova_u1_rejects_image_edit():
+def test_sensenova_u1_edit_support():
+    # The base unified model edits; the distill (fast) variant is text-to-image only.
+    assert model_supports_edit("sensenova_u1_8b") is True
+    assert model_supports_edit("sensenova_u1_8b_fast") is False
+
+
+def test_sensenova_u1_fast_rejects_image_edit():
+    # The worker guard backstops the capability list: the fast variant must reject
+    # edit jobs before any model load (it doesn't advertise edit_image).
     job = {
-        "id": "job_sensenova_edit",
+        "id": "job_sensenova_fast_edit",
         "payload": {
             "projectId": "project_x",
             "mode": "edit_image",
-            "model": "sensenova_u1_8b",
+            "model": "sensenova_u1_8b_fast",
             "prompt": "a cat",
         },
     }
@@ -974,7 +984,7 @@ def test_sensenova_u1_rejects_image_edit():
     except RuntimeError as exc:
         assert "does not support image editing" in str(exc)
     else:
-        raise AssertionError("SenseNova-U1 is text-to-image only and must reject edit_image.")
+        raise AssertionError("The SenseNova-U1 fast variant must reject edit_image.")
 
 
 def test_sensenova_resolution_for_snaps_to_buckets():

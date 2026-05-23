@@ -244,7 +244,8 @@ MODEL_TARGETS = {
     "sensenova_u1_8b": {
         "label": "SenseNova-U1 8B",
         "family": "sensenova-u1",
-        "supportsEdit": False,
+        # Unified model: same weights do text-to-image and instruction editing (it2i).
+        "supportsEdit": True,
         # Base 8B-MoT uses ~50 steps; an 8-step distill LoRA exists (cfg 1.0).
         "steps": 50,
         "repo": "sensenova/SenseNova-U1-8B-MoT",
@@ -1308,10 +1309,10 @@ class SenseNovaU1Adapter:
     type, so ``AutoModel.from_pretrained`` resolves it with no trust_remote_code.
     Attention uses torch SDPA (flash-attn optional), so it runs on CUDA and MPS.
 
-    Text-to-image only for now — no edit/img2img, VQA, or interleaved. The
-    ``sensenova_u1_8b_fast`` variant merges the upstream 8-step distill LoRA at
-    load (see ``distillLora`` in MODEL_TARGETS); user-supplied LoRAs are still
-    rejected.
+    Supports text-to-image and instruction-based editing (it2i); VQA and
+    interleaved generation are not wired yet. The ``sensenova_u1_8b_fast``
+    variant merges the upstream 8-step distill LoRA at load (see ``distillLora``
+    in MODEL_TARGETS); user-supplied LoRAs are still rejected.
     """
 
     id = "sensenova_u1"
@@ -1351,6 +1352,14 @@ class SenseNovaU1Adapter:
         except (TypeError, ValueError):
             return default
 
+    @staticmethod
+    def _image_guidance_scale(request: ImageRequest) -> float:
+        # Image-conditioning guidance for editing (it2i); upstream default is 1.0.
+        try:
+            return float(request.advanced.get("imageGuidanceScale", 1.0))
+        except (TypeError, ValueError):
+            return 1.0
+
     def generate(
         self,
         *,
@@ -1360,12 +1369,13 @@ class SenseNovaU1Adapter:
         cancel_requested: CancelCallback,
     ) -> dict[str, Any]:
         request = image_request_from_job(job)
-        if request.mode == "edit_image":
-            raise RuntimeError(f"{request.model} does not support image editing.")
         reject_loras_if_unsupported(request.loras, self.id)
         model_target = MODEL_TARGETS.get(request.model, MODEL_TARGETS["sensenova_u1_8b"])
         if model_target.get("adapter") != self.id:
             raise RuntimeError(f"{request.model} is not a SenseNova-U1 target.")
+        is_edit = request.mode == "edit_image"
+        if is_edit and not model_supports_edit(request.model):
+            raise RuntimeError(f"{request.model} does not support image editing.")
 
         torch = importlib.import_module("torch")
         require_inference_backend_for_gpu_worker(torch, settings.gpu_id)
@@ -1377,7 +1387,9 @@ class SenseNovaU1Adapter:
         steps = self._num_inference_steps(request, model_target)
         guidance_scale = self._guidance_scale(request, model_target)
         timestep_shift = float(request.advanced.get("timestepShift", 3.0) or 3.0)
+        img_guidance_scale = self._image_guidance_scale(request)
         width, height = sensenova_resolution_for(request.width, request.height)
+        source_image = load_source_image(settings, request) if is_edit else None
 
         progress("loading_model", "loading_model", 0.18, f"Loading {model_target['label']}.")
         model, tokenizer = self._load_model(torch, repo, device, dtype, distill_lora=distill_lora, job_id=job["id"])
@@ -1404,10 +1416,16 @@ class SenseNovaU1Adapter:
                 gpuMemory=gpu_memory_snapshot(torch, device),
             )
             try:
-                image = self._run_inference(
-                    torch, model, tokenizer, request.prompt,
-                    width, height, steps, guidance_scale, timestep_shift, seed,
-                )
+                if is_edit:
+                    image = self._run_edit_inference(
+                        torch, model, tokenizer, request.prompt, source_image,
+                        width, height, steps, guidance_scale, img_guidance_scale, timestep_shift, seed,
+                    )
+                else:
+                    image = self._run_inference(
+                        torch, model, tokenizer, request.prompt,
+                        width, height, steps, guidance_scale, timestep_shift, seed,
+                    )
             except Exception as exc:
                 emit_worker_event(
                     "image_inference_failed",
@@ -1440,6 +1458,7 @@ class SenseNovaU1Adapter:
                 "repo": repo,
                 "numInferenceSteps": steps,
                 "guidanceScale": guidance_scale,
+                **({"imageGuidanceScale": img_guidance_scale} if is_edit else {}),
                 "timestepShift": timestep_shift,
                 "resolution": f"{width}x{height}",
                 "realModelInference": True,
@@ -1563,6 +1582,42 @@ class SenseNovaU1Adapter:
                 prompt,
                 image_size=(width, height),
                 cfg_scale=guidance_scale,
+                cfg_norm="none",
+                timestep_shift=timestep_shift,
+                cfg_interval=(0.0, 1.0),
+                num_steps=steps,
+                batch_size=1,
+                seed=seed,
+                think_mode=False,
+            )
+        return self._to_pil(torch, tensor)[0]
+
+    def _run_edit_inference(
+        self,
+        torch: Any,
+        model: Any,
+        tokenizer: Any,
+        prompt: str,
+        source_image: Image.Image,
+        width: int,
+        height: int,
+        steps: int,
+        guidance_scale: float,
+        img_guidance_scale: float,
+        timestep_shift: float,
+        seed: int,
+    ) -> Image.Image:
+        # Instruction-based editing (it2i): the source image is the conditioning
+        # input; `image_size` is the output bucket. Defaults mirror the upstream
+        # editing example (cfg 4.0 text / 1.0 image, 50 steps, shift 3.0).
+        with torch.inference_mode():
+            tensor = model.it2i_generate(
+                tokenizer,
+                prompt,
+                [source_image],
+                image_size=(width, height),
+                cfg_scale=guidance_scale,
+                img_cfg_scale=img_guidance_scale,
                 cfg_norm="none",
                 timestep_shift=timestep_shift,
                 cfg_interval=(0.0, 1.0),
