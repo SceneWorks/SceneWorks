@@ -2277,6 +2277,82 @@ def test_lens_trainer_requires_sidecar(tmp_path, monkeypatch):
         )
 
 
+def test_lens_device_hint_delegates_to_select_torch_device(monkeypatch):
+    # On a real worker the driver has torch in the main venv, so the sidecar
+    # device hint must come from select_torch_device — picking "mps" on Apple
+    # Silicon exactly like the Lens inference adapter, not a hardcoded "cuda".
+    captured = {}
+
+    def _fake_import(name):
+        captured["imported"] = name
+        return SimpleNamespace(__name__="torch")
+
+    def _fake_select(torch, gpu_id):
+        captured["gpu_id"] = gpu_id
+        return "mps"
+
+    monkeypatch.setattr("scene_worker.training_adapters.importlib.import_module", _fake_import)
+    monkeypatch.setattr("scene_worker.training_adapters.select_torch_device", _fake_select)
+
+    device = LensLoraTrainer._device_hint(SimpleNamespace(gpu_id="0"))
+    assert device == "mps"
+    assert captured["imported"] == "torch"
+    assert captured["gpu_id"] == "0"
+
+
+def test_lens_device_hint_falls_back_to_mps_without_torch(monkeypatch):
+    # If torch is somehow unimportable in the main venv, the hint still resolves
+    # sensibly from the platform: Apple Silicon -> "mps", explicit cpu -> "cpu".
+    def _no_torch(name):
+        raise ImportError("no torch in this venv")
+
+    monkeypatch.setattr("scene_worker.training_adapters.importlib.import_module", _no_torch)
+    monkeypatch.setattr("scene_worker.training_adapters.sys.platform", "darwin")
+    monkeypatch.setattr("scene_worker.training_adapters.platform.machine", lambda: "arm64")
+
+    assert LensLoraTrainer._device_hint(SimpleNamespace(gpu_id="0")) == "mps"
+    assert LensLoraTrainer._device_hint(SimpleNamespace(gpu_id="cpu")) == "cpu"
+
+
+def test_lens_device_hint_falls_back_to_cuda_off_apple_silicon(monkeypatch):
+    def _no_torch(name):
+        raise ImportError("no torch in this venv")
+
+    monkeypatch.setattr("scene_worker.training_adapters.importlib.import_module", _no_torch)
+    monkeypatch.setattr("scene_worker.training_adapters.sys.platform", "linux")
+    monkeypatch.setattr("scene_worker.training_adapters.platform.machine", lambda: "x86_64")
+
+    assert LensLoraTrainer._device_hint(SimpleNamespace(gpu_id="1")) == "cuda:1"
+    assert LensLoraTrainer._device_hint(SimpleNamespace(gpu_id=None)) == "cuda"
+
+
+def test_lens_trainer_passes_resolved_device_to_sidecar(tmp_path, monkeypatch):
+    # The device the driver resolves must reach the sidecar spec verbatim, so a
+    # Mac run actually trains on "mps" instead of erroring on a "cuda" hint.
+    import subprocess as _subprocess
+
+    captured = {}
+
+    class _RecordingPopen(_FakeLensSidecarPopen):
+        def __init__(self, cmd, env=None, stdout=None, stderr=None):
+            spec = json.loads(Path(cmd[-1]).read_text(encoding="utf-8"))
+            captured["device"] = spec["device"]
+            super().__init__(cmd, env=env, stdout=stdout, stderr=stderr)
+
+    plan = _lens_train_plan(tmp_path, steps=2)
+    monkeypatch.setattr(LensLoraTrainer, "_sidecar_available", lambda self: True)
+    monkeypatch.setattr(LensLoraTrainer, "_device_hint", staticmethod(lambda settings: "mps"))
+    monkeypatch.setattr(_subprocess, "Popen", _RecordingPopen)
+
+    LensLoraTrainer().train(
+        settings=SimpleNamespace(worker_id="worker-1", gpu_id="0"),
+        plan=plan,
+        progress=lambda *args, **kwargs: None,
+        cancel_requested=lambda: False,
+    )
+    assert captured["device"] == "mps"
+
+
 def test_resolve_pretrained_source_prefers_loadable_model_dir(tmp_path):
     model_dir = tmp_path / "models" / "z_image"
     model_dir.mkdir(parents=True)
