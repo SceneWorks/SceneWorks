@@ -27,7 +27,34 @@ def _log(message: str) -> None:
     sys.stderr.flush()
 
 
+def _force_utf8_stdio() -> None:
+    """Force stdout/stderr to UTF-8 so the runner survives non-ASCII library output.
+
+    On Windows the sidecar's stdout/stderr default to the locale code page (cp1252
+    for en-US), so any dependency that ``print()``s a non-Latin-1 character raises
+    UnicodeEncodeError and kills the process. transformers' ``@auto_docstring``
+    decorator unconditionally prints an "undocumented parameters" developer notice
+    containing a 🚨 emoji while decorating model classes, which would crash the
+    ``import transformers`` / ``from lens import ...`` below on a Windows desktop
+    (where the Lens sidecar runs in a bundled venv). UTF-8 is already the default on
+    Linux/macOS, so this is a no-op there. The result JSON the runner prints on
+    stdout is ASCII (json.dumps ensure_ascii), so widening the encoding never changes
+    the bytes the adapter parses. Replicated from scene_worker.runtime rather than
+    imported to keep this module dependency-light (the sidecar venv lacks the main
+    worker stack).
+    """
+    for stream in (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if reconfigure is None:
+            continue
+        try:
+            reconfigure(encoding="utf-8", errors="replace")
+        except (ValueError, OSError):
+            pass
+
+
 def main() -> int:
+    _force_utf8_stdio()
     if len(sys.argv) != 2:
         print(json.dumps({"error": "lens_runner expects exactly one argument: the spec JSON path"}))
         return 2
