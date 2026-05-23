@@ -11,6 +11,7 @@ const gpuRequiredJobTypes = new Set([
   "image_generate",
   "image_edit",
   "image_vqa",
+  "image_interleave",
   "video_generate",
   "video_extend",
   "video_bridge",

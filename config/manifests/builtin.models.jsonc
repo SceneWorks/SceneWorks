@@ -244,7 +244,7 @@
       "family": "sensenova-u1",
       "type": "image",
       "adapter": "sensenova_u1",
-      "capabilities": ["text_to_image", "edit_image", "vqa"],
+      "capabilities": ["text_to_image", "edit_image", "vqa", "interleave"],
       "downloads": [
         {
           "provider": "huggingface",

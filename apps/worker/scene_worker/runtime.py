@@ -68,6 +68,12 @@ CAPTION_JOB_TYPES = ("training_caption",)
 # generation. Keep in sync with crates/sceneworks-core/src/contracts.rs::JobType /
 # WorkerCapability, jobs_store::job_requires_gpu, and QueueScreen gpuRequiredJobTypes.
 VQA_JOB_TYPES = ("image_vqa",)
+# Interleaved text-image generation: mixed output (ordered text + generated images),
+# GPU-required. sc-1604 wires the job type + routing + capability; the real worker
+# path (vendored interleave_gen) lands in sc-1606, where run_interleave_job's stub is
+# replaced. Keep in sync with contracts.rs::JobType/WorkerCapability,
+# jobs_store::job_requires_gpu, and QueueScreen gpuRequiredJobTypes.
+INTERLEAVE_JOB_TYPES = ("image_interleave",)
 
 
 def now() -> str:
@@ -108,6 +114,7 @@ def worker_capabilities(gpu: dict) -> list[str]:
             capabilities |= set(SUPPORTED_JOB_TYPES)
             capabilities |= set(CAPTION_JOB_TYPES)
             capabilities |= set(VQA_JOB_TYPES)
+            capabilities |= set(INTERLEAVE_JOB_TYPES)
             # Only a backend-capable worker advertises real training execution, so
             # the queue won't route a dryRun:false job to a worker that can't train.
             capabilities |= set(TRAINING_EXECUTE_CAPABILITIES)
@@ -569,6 +576,28 @@ def run_vqa_job(api: ApiClient, settings: WorkerSettings, job: dict, image_adapt
             restart_worker_after_oom(settings, job_id)
 
 
+def run_interleave_job(api: ApiClient, settings: WorkerSettings, job: dict, image_adapters: dict[str, object]) -> None:
+    # sc-1604 wires the job type, routing, and capability only. The real interleaved
+    # generation path (vendored interleave_gen → ordered text+image document) lands in
+    # sc-1606, replacing this stub. We fail fast with a clear message rather than leave
+    # the capability unadvertised, which would queue the job forever with no claimant.
+    job_id = job["id"]
+    try:
+        update_job(
+            api,
+            job_id,
+            {
+                "status": "failed",
+                "stage": "failed",
+                "progress": 1,
+                "message": "Interleaved text-image generation isn't available yet.",
+                "error": "image_interleave worker path is not implemented yet (sc-1606).",
+            },
+        )
+    finally:
+        heartbeat(api, settings, "idle", loaded_models=loaded_models_from_adapters(image_adapters))
+
+
 def run_video_job(api: ApiClient, settings: WorkerSettings, job: dict) -> None:
     job_id = job["id"]
     adapter = create_video_adapter(job)
@@ -986,6 +1015,8 @@ def run_worker_loop(settings: WorkerSettings) -> None:
                 run_image_job(api, settings, job, image_adapters)
             elif job["type"] in VQA_JOB_TYPES:
                 run_vqa_job(api, settings, job, image_adapters)
+            elif job["type"] in INTERLEAVE_JOB_TYPES:
+                run_interleave_job(api, settings, job, image_adapters)
             elif job["type"] in VIDEO_JOB_TYPES:
                 run_video_job(api, settings, job)
             elif job["type"] in PERSON_JOB_TYPES:

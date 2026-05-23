@@ -631,6 +631,7 @@ pub fn create_app(settings: Settings) -> Result<Router, JobsStoreError> {
         )
         .route("/api/v1/image/jobs", post(create_image_job))
         .route("/api/v1/image/vqa/jobs", post(create_vqa_job))
+        .route("/api/v1/image/interleave/jobs", post(create_interleave_job))
         .route("/api/v1/video/jobs", post(create_video_job))
         .route("/api/v1/models", get(list_models))
         .route("/api/v1/models/:model_id", delete(delete_model))
@@ -1086,6 +1087,40 @@ fn default_vqa_model() -> String {
 
 fn default_vqa_max_new_tokens() -> u32 {
     256
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct InterleaveJobRequest {
+    project_id: String,
+    #[serde(default)]
+    project_name: Option<String>,
+    prompt: String,
+    // Optional input images for grounded (it2i) interleaved generation.
+    #[serde(default)]
+    source_asset_ids: Vec<String>,
+    #[serde(default = "default_interleave_model")]
+    model: String,
+    #[serde(default = "default_interleave_max_images")]
+    max_images: u32,
+    #[serde(default = "default_image_size")]
+    width: u32,
+    #[serde(default = "default_image_size")]
+    height: u32,
+    #[serde(default)]
+    seed: Option<i64>,
+    #[serde(default = "default_requested_gpu")]
+    requested_gpu: String,
+    #[serde(default)]
+    advanced: JsonObject,
+}
+
+fn default_interleave_model() -> String {
+    "sensenova_u1_8b".to_owned()
+}
+
+fn default_interleave_max_images() -> u32 {
+    6
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -2879,6 +2914,55 @@ fn validate_vqa_job(payload: &VqaJobRequest) -> Result<(), ApiError> {
             "maxNewTokens must be between 16 and 2048",
         ));
     }
+    Ok(())
+}
+
+async fn create_interleave_job(
+    State(state): State<AppState>,
+    ApiJson(payload): ApiJson<InterleaveJobRequest>,
+) -> Result<(StatusCode, Json<JobSnapshot>), ApiError> {
+    validate_interleave_job(&payload)?;
+    let requested_gpu = payload.requested_gpu.clone();
+    let project_id = Some(payload.project_id.clone());
+    let project_name = payload.project_name.clone();
+    let mut job_payload = to_json_object(&payload)?;
+    job_payload.remove("requestedGpu");
+    let job = create_generation_job(
+        state,
+        JobType::ImageInterleave,
+        project_id,
+        project_name,
+        job_payload,
+        requested_gpu,
+    )
+    .await?;
+    Ok((StatusCode::CREATED, Json(job)))
+}
+
+fn validate_interleave_job(payload: &InterleaveJobRequest) -> Result<(), ApiError> {
+    if payload.project_id.is_empty() {
+        return Err(ApiError::bad_request("projectId is required"));
+    }
+    if payload.prompt.trim().is_empty() || payload.prompt.chars().count() > 4000 {
+        return Err(ApiError::bad_request(
+            "prompt must be between 1 and 4000 characters",
+        ));
+    }
+    // Upstream interleave_gen caps the run at 10 generated images.
+    if !(1..=10).contains(&payload.max_images) {
+        return Err(ApiError::bad_request("maxImages must be between 1 and 10"));
+    }
+    if payload
+        .source_asset_ids
+        .iter()
+        .any(|id| id.trim().is_empty())
+    {
+        return Err(ApiError::bad_request(
+            "sourceAssetIds must not contain blank ids",
+        ));
+    }
+    validate_dimension(payload.width, "width", MAX_IMAGE_DIMENSION)?;
+    validate_dimension(payload.height, "height", MAX_IMAGE_DIMENSION)?;
     Ok(())
 }
 
@@ -12749,6 +12833,53 @@ mod tests {
         let mut too_many_tokens = base.clone();
         too_many_tokens.max_new_tokens = 4096;
         assert!(super::validate_vqa_job(&too_many_tokens).is_err());
+    }
+
+    #[test]
+    fn interleave_job_validation_bounds_prompt_images_and_assets() {
+        let base = super::InterleaveJobRequest {
+            project_id: "project-1".to_owned(),
+            project_name: None,
+            prompt: "A short illustrated guide to brewing tea".to_owned(),
+            source_asset_ids: Vec::new(),
+            model: "sensenova_u1_8b".to_owned(),
+            max_images: 6,
+            width: 1024,
+            height: 1024,
+            seed: None,
+            requested_gpu: "auto".to_owned(),
+            advanced: serde_json::Map::new(),
+        };
+        assert!(super::validate_interleave_job(&base).is_ok());
+
+        // Optional input images (it2i) are allowed.
+        let mut with_sources = base.clone();
+        with_sources.source_asset_ids = vec!["asset_1".to_owned(), "asset_2".to_owned()];
+        assert!(super::validate_interleave_job(&with_sources).is_ok());
+
+        let mut blank_prompt = base.clone();
+        blank_prompt.prompt = "   ".to_owned();
+        assert!(super::validate_interleave_job(&blank_prompt).is_err());
+
+        let mut missing_project = base.clone();
+        missing_project.project_id = String::new();
+        assert!(super::validate_interleave_job(&missing_project).is_err());
+
+        let mut zero_images = base.clone();
+        zero_images.max_images = 0;
+        assert!(super::validate_interleave_job(&zero_images).is_err());
+
+        let mut too_many_images = base.clone();
+        too_many_images.max_images = 11;
+        assert!(super::validate_interleave_job(&too_many_images).is_err());
+
+        let mut blank_asset = base.clone();
+        blank_asset.source_asset_ids = vec!["  ".to_owned()];
+        assert!(super::validate_interleave_job(&blank_asset).is_err());
+
+        let mut tiny = base.clone();
+        tiny.width = 64;
+        assert!(super::validate_interleave_job(&tiny).is_err());
     }
 
     #[tokio::test]
