@@ -4,8 +4,12 @@ from dataclasses import dataclass
 import hashlib
 import importlib
 import json
+import math
 import os
+import shutil
+import subprocess
 import sys
+import tempfile
 import warnings
 from pathlib import Path
 from textwrap import wrap
@@ -227,6 +231,15 @@ MODEL_TARGETS = {
         "steps": 20,
         "repo": "Qwen/Qwen-Image-Edit",
         "adapter": "qwen_image",
+    },
+    "lens_turbo": {
+        "label": "Lens-Turbo",
+        "family": "lens",
+        "supportsEdit": False,
+        # Distilled 4-step variant; the base Lens model uses 20-50 steps.
+        "steps": 4,
+        "repo": "microsoft/Lens-Turbo",
+        "adapter": "lens_turbo",
     },
 }
 
@@ -927,6 +940,256 @@ class QwenImageAdapter:
             return 4.0
 
 
+# Lens trains on two base resolutions crossed with nine aspect ratios and expects
+# `base_resolution` + `aspect_ratio` rather than free width/height. These mirror
+# scene_worker/_vendor/lens/resolution.py so we can snap a SceneWorks W×H request
+# onto the nearest trained bucket without importing the (diffusers-injecting) lens
+# package just to read the table.
+_LENS_BASE_RESOLUTIONS = (1024, 1440)
+_LENS_ASPECT_RATIOS = (
+    ("1:2", 1 / 2),
+    ("9:16", 9 / 16),
+    ("2:3", 2 / 3),
+    ("3:4", 3 / 4),
+    ("1:1", 1.0),
+    ("4:3", 4 / 3),
+    ("3:2", 3 / 2),
+    ("16:9", 16 / 9),
+    ("2:1", 2.0),
+)
+
+
+def lens_resolution_for(width: int, height: int) -> tuple[int, str]:
+    """Snap a requested W×H to the nearest Lens (base_resolution, aspect_ratio).
+
+    The base is chosen by total area against the geometric midpoint of the two
+    bases' square areas (1024² and 1440²); the aspect ratio by closest log-ratio
+    so portrait/landscape requests land on the matching bucket.
+    """
+    width = max(1, int(width))
+    height = max(1, int(height))
+    base = 1440 if width * height >= 1024 * 1440 else 1024
+    target = math.log(width / height)
+    aspect = min(_LENS_ASPECT_RATIOS, key=lambda item: abs(target - math.log(item[1])))[0]
+    return base, aspect
+
+
+class LensTurboAdapter:
+    """Microsoft Lens / Lens-Turbo text-to-image, run OUT-OF-PROCESS.
+
+    Lens needs transformers 5.x (gpt-oss text encoder) + diffusers 0.38, which are
+    incompatible with the main worker venv's transformers 4.x stack that native
+    LTX-2.3 (ltx-core's Gemma-3 integration) requires. So Lens runs in a dedicated
+    sidecar venv (``/opt/lens-venv``) via ``scene_worker/lens_runner.py``; this
+    adapter only orchestrates that subprocess and writes the resulting PNGs through
+    the shared asset writer. The vendored ``lens`` package (scene_worker/_vendor)
+    is imported by the runner, not here.
+
+    Text-to-image only (no edit/img2img) and no LoRA support yet.
+    """
+
+    id = "lens_turbo"
+
+    def loaded_models(self) -> list[str]:
+        # The sidecar process loads and frees the model per job; nothing stays
+        # resident in this (main-venv) process.
+        return []
+
+    @staticmethod
+    def _lens_python() -> str:
+        return os.getenv("SCENEWORKS_LENS_PYTHON", "/opt/lens-venv/bin/python")
+
+    @staticmethod
+    def _runner_path() -> Path:
+        return Path(__file__).resolve().parent / "lens_runner.py"
+
+    def _sidecar_available(self) -> bool:
+        return Path(self._lens_python()).exists() and self._runner_path().exists()
+
+    def generate(
+        self,
+        *,
+        settings: WorkerSettings,
+        job: dict[str, Any],
+        progress: ProgressCallback,
+        cancel_requested: CancelCallback,
+    ) -> dict[str, Any]:
+        request = image_request_from_job(job)
+        if request.mode == "edit_image":
+            raise RuntimeError(f"{request.model} does not support image editing.")
+        reject_loras_if_unsupported(request.loras, self.id)
+        model_target = MODEL_TARGETS.get(request.model, MODEL_TARGETS["lens_turbo"])
+        if model_target.get("adapter") != self.id:
+            raise RuntimeError(f"{request.model} is not a Lens target.")
+        if not self._sidecar_available():
+            raise RuntimeError(
+                "Lens generation requires the isolated Lens sidecar venv. Rebuild the worker image with "
+                "INCLUDE_LENS=1 (the Docker Compose default), or set SCENEWORKS_LENS_PYTHON to a Python "
+                f"interpreter that has the lens stack installed (looked for {self._lens_python()})."
+            )
+
+        total = request.count
+        repo = request.advanced.get("modelRepo") or model_target["repo"]
+        steps = self._num_inference_steps(request, model_target)
+        guidance_scale = self._guidance_scale(request)
+        base_resolution, aspect_ratio = lens_resolution_for(request.width, request.height)
+        seeds = [resolve_seed(request.seed, request.prompt, index, request.seeds) for index in range(total)]
+        device = "cpu" if str(getattr(settings, "gpu_id", "")).strip().lower() == "cpu" else "cuda"
+        disable_mxfp4 = bool(request.advanced.get("disableMxfp4", False))
+
+        progress("loading_model", "loading_model", 0.18, f"Loading {model_target['label']} (sidecar venv).")
+        work_dir = Path(tempfile.mkdtemp(prefix="lens_sidecar_"))
+        try:
+            images = self._run_sidecar(
+                job_id=job["id"],
+                work_dir=work_dir,
+                label=model_target["label"],
+                total=total,
+                spec={
+                    "repo": repo,
+                    "prompt": request.prompt,
+                    "negativePrompt": request.negative_prompt,
+                    "baseResolution": base_resolution,
+                    "aspectRatio": aspect_ratio,
+                    "numInferenceSteps": steps,
+                    "guidanceScale": guidance_scale,
+                    "seeds": seeds,
+                    "disableMxfp4": disable_mxfp4,
+                    "cpuOffload": bool(request.advanced.get("cpuOffload", False)),
+                    "dtype": request.advanced.get("dtype"),
+                    "device": device,
+                },
+                progress=progress,
+                cancel_requested=cancel_requested,
+            )
+
+            def image_at_index(index: int) -> Image.Image:
+                progress(
+                    "running",
+                    "generating",
+                    image_batch_progress(index, total),
+                    format_batch_running_message("Lens-Turbo", index, total),
+                )
+                with Image.open(images[index]) as handle:
+                    return handle.convert("RGB")
+
+            return ImageAssetWriter().write_incremental_outputs(
+                settings=settings,
+                job=job,
+                image_count=total,
+                image_at_index=image_at_index,
+                adapter_id=self.id,
+                progress=progress,
+                cancel_requested=cancel_requested,
+                raw_settings={
+                    **request.advanced,
+                    "repo": repo,
+                    "numInferenceSteps": steps,
+                    "guidanceScale": guidance_scale,
+                    "baseResolution": base_resolution,
+                    "aspectRatio": aspect_ratio,
+                    "textEncoderMxfp4": not disable_mxfp4,
+                    "sidecarVenv": self._lens_python(),
+                    "realModelInference": True,
+                },
+            )
+        finally:
+            # The writer has read every PNG into the project by now; drop the
+            # sidecar's scratch dir regardless of success/failure.
+            shutil.rmtree(work_dir, ignore_errors=True)
+
+    def _run_sidecar(
+        self,
+        *,
+        job_id: str,
+        work_dir: Path,
+        label: str,
+        total: int,
+        spec: dict[str, Any],
+        progress: ProgressCallback,
+        cancel_requested: CancelCallback,
+    ) -> list[str]:
+        spec = {**spec, "outDir": str(work_dir)}
+        spec_path = work_dir / "spec.json"
+        spec_path.write_text(json.dumps(spec), encoding="utf-8")
+        stdout_log = work_dir / "stdout.log"
+        cmd = [self._lens_python(), str(self._runner_path()), str(spec_path)]
+        emit_worker_event(
+            "lens_sidecar_start",
+            jobId=job_id,
+            adapter=self.id,
+            repo=spec["repo"],
+            imageCount=total,
+            device=spec["device"],
+            mxfp4=not spec["disableMxfp4"],
+            sidecar=self._lens_python(),
+        )
+        progress("running", "generating", image_batch_progress(0, total), f"Running {label} ({total} image(s)).")
+        # stdout -> file (avoids any pipe-fill deadlock); stderr inherits to the
+        # worker log for diagnostics. Poll so the job stays cancelable; the
+        # heartbeat thread keeps it alive during the (minutes-long) run.
+        with stdout_log.open("w", encoding="utf-8") as out:
+            proc = subprocess.Popen(cmd, env=os.environ.copy(), stdout=out, stderr=None)
+            while True:
+                try:
+                    proc.wait(timeout=2)
+                    break
+                except subprocess.TimeoutExpired:
+                    if cancel_requested():
+                        proc.terminate()
+                        try:
+                            proc.wait(timeout=10)
+                        except subprocess.TimeoutExpired:
+                            proc.kill()
+                        raise InterruptedError("Image generation canceled by user.")
+        result = self._read_result(work_dir, stdout_log)
+        if proc.returncode != 0 or "error" in result:
+            error = result.get("error") or f"Lens sidecar exited with code {proc.returncode}."
+            emit_worker_event(
+                "lens_sidecar_failed",
+                jobId=job_id,
+                adapter=self.id,
+                error=error,
+                returnCode=proc.returncode,
+            )
+            raise RuntimeError(f"Lens generation failed in the sidecar venv: {error}")
+        images = [str(path) for path in result.get("images", [])]
+        if len(images) != total:
+            raise RuntimeError(f"Lens sidecar produced {len(images)} image(s); expected {total}.")
+        emit_worker_event("lens_sidecar_complete", jobId=job_id, adapter=self.id, imageCount=len(images))
+        return images
+
+    @staticmethod
+    def _read_result(work_dir: Path, stdout_log: Path) -> dict[str, Any]:
+        result_path = work_dir / "result.json"
+        if result_path.exists():
+            try:
+                return json.loads(result_path.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                pass
+        try:
+            lines = [line for line in stdout_log.read_text(encoding="utf-8").splitlines() if line.strip()]
+        except OSError:
+            lines = []
+        for line in reversed(lines):
+            try:
+                return json.loads(line)
+            except ValueError:
+                continue
+        return {"error": "Lens sidecar produced no parseable result."}
+
+    def _num_inference_steps(self, request: ImageRequest, model_target: dict[str, Any]) -> int:
+        return safe_int(request.advanced.get("steps"), model_target["steps"], 1, 80)
+
+    def _guidance_scale(self, request: ImageRequest) -> float:
+        # Lens-Turbo is distilled for guidance_scale ~1.0 (no CFG); the base Lens
+        # model uses ~5.0.
+        try:
+            return float(request.advanced.get("guidanceScale", 1.0))
+        except (TypeError, ValueError):
+            return 1.0
+
+
 class ProceduralImageAdapter:
     id = "procedural_preview"
 
@@ -976,24 +1239,28 @@ class ProceduralImageAdapter:
 def create_image_adapter(
     job: dict[str, Any],
     adapters: dict[str, object] | None = None,
-) -> ProceduralImageAdapter | ZImageDiffusersAdapter | QwenImageAdapter:
+) -> ProceduralImageAdapter | ZImageDiffusersAdapter | QwenImageAdapter | LensTurboAdapter:
     payload = job.get("payload", {})
     requested = os.getenv("SCENEWORKS_IMAGE_ADAPTER", payload.get("adapter", "")).strip()
     if requested == "auto":
         requested = ""
     if requested in {"procedural", "procedural_preview"}:
         return adapters.get("procedural_preview") if adapters else ProceduralImageAdapter()
-    if requested and requested not in {ZImageDiffusersAdapter.id, QwenImageAdapter.id}:
+    if requested and requested not in {ZImageDiffusersAdapter.id, QwenImageAdapter.id, LensTurboAdapter.id}:
         raise RuntimeError(f"Unsupported SCENEWORKS_IMAGE_ADAPTER value: {requested}.")
     if requested == ZImageDiffusersAdapter.id:
         return adapters.get("z_image_diffusers") if adapters else ZImageDiffusersAdapter()
     if requested == QwenImageAdapter.id:
         return adapters.get("qwen_image") if adapters else QwenImageAdapter()
+    if requested == LensTurboAdapter.id:
+        return adapters.get("lens_turbo") if adapters else LensTurboAdapter()
     model_target = MODEL_TARGETS.get(payload.get("model", "z_image_turbo"), {})
     if model_target.get("adapter") == ZImageDiffusersAdapter.id:
         return adapters.get("z_image_diffusers") if adapters else ZImageDiffusersAdapter()
     if model_target.get("adapter") == QwenImageAdapter.id:
         return adapters.get("qwen_image") if adapters else QwenImageAdapter()
+    if model_target.get("adapter") == LensTurboAdapter.id:
+        return adapters.get("lens_turbo") if adapters else LensTurboAdapter()
     return adapters.get("procedural_preview") if adapters else ProceduralImageAdapter()
 
 

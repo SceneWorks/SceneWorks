@@ -1,0 +1,25 @@
+# Microsoft Lens / Lens-Turbo SIDECAR venv dependencies.
+#
+# These install into a SEPARATE venv (/opt/lens-venv) in the worker image, not
+# the main worker venv. Lens needs transformers 5.x (gpt-oss text encoder) +
+# diffusers 0.38 (Flux.2 VAE), which are INCOMPATIBLE with the main worker's
+# transformers 4.x stack that native LTX-2.3 (ltx-core's Gemma-3 integration)
+# requires — e.g. transformers 5.x removes SiglipVisionModel.vision_model and
+# Gemma-3 rotary_emb_local that ltx-core reaches into. So Lens runs out-of-process
+# via scene_worker/lens_runner.py, invoked by LensTurboAdapter through this venv.
+#
+# torch / torchvision are installed first in the Dockerfile from the cu128 index
+# (LENS_PYTORCH_SPEC / LENS_PYTORCH_VISION_SPEC) and pinned via a constraints file,
+# exactly like the main venv. torchvision MUST be the cu128 build: diffusers 0.38's
+# Flux.2 VAE import pulls transformers AutoImageProcessor -> torchvision.io, and a
+# CPU torchvision ABI-mismatches CUDA torch ("operator torchvision::nms does not
+# exist"). transformers is capped <5.9 (diffusers 0.38 breaks on 5.9).
+diffusers==0.38.0
+transformers>=5.8,<5.9
+huggingface_hub>=1,<2
+accelerate>=1.11
+safetensors>=0.8.0rc0,<0.9
+einops>=0.8,<0.9
+kernels>=0.14,<0.15
+pillow>=12.0.0,<13
+numpy>=2.0,<3

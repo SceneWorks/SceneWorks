@@ -156,6 +156,47 @@
       }
     },
     {
+      "id": "lens_turbo",
+      "name": "Lens-Turbo",
+      "family": "lens",
+      "type": "image",
+      "adapter": "lens_turbo",
+      "capabilities": ["text_to_image", "style_variations"],
+      "downloads": [
+        {
+          "provider": "huggingface",
+          "repo": "microsoft/Lens-Turbo",
+          "files": [],
+          "estimatedSizeBytes": 30800000000
+        }
+      ],
+      "paths": {
+        "model": "${HF_CACHE}/microsoft/Lens-Turbo"
+      },
+      "defaults": {
+        "resolution": "1024x1024",
+        "steps": 4,
+        "guidanceScale": 1.0,
+        "count": 4
+      },
+      "limits": {
+        // Lens snaps W×H onto base_resolution (1024/1440) × aspect-ratio buckets;
+        // these map to 1:1 (1024 & 1440), 4:3, 3:4, 16:9, and 9:16 base-1024 buckets.
+        "resolutions": ["1024x1024", "1440x1440", "1152x864", "864x1152", "1376x768", "768x1376"],
+        "count": [1, 2, 4]
+      },
+      "loraCompatibility": {
+        // Lens LoRA training/inference is not supported yet.
+        "families": [],
+        "types": []
+      },
+      "ui": {
+        "label": "Lens-Turbo",
+        "description": "Microsoft Lens distilled 4-step text-to-image (gpt-oss-20b text encoder + FLUX.2 VAE). Strong prompt following and text rendering; needs a large-VRAM GPU (~30GB mxfp4 / ~60GB bf16).",
+        "recommendedFor": ["text_to_image", "style_variations"]
+      }
+    },
+    {
       "id": "ltx_2_3",
       "name": "LTX-2.3",
       "family": "ltx-video",

@@ -215,6 +215,7 @@ pub fn model_adapter_for_family(family: &str) -> Option<&'static str> {
     match normalize_model_family(family).as_str() {
         "z-image" => Some("z_image_diffusers"),
         "qwen-image" => Some("qwen_image"),
+        "lens" => Some("lens_turbo"),
         "ltx-video" => Some("ltx_video"),
         "wan-video" => Some("wan_video"),
         _ => None,
@@ -228,6 +229,7 @@ pub fn model_capabilities_for_type_and_family(model_type: &str, family: &str) ->
     ) {
         ("image", "z-image") => vec!["text_to_image", "character_image", "style_variations"],
         ("image", "qwen-image") => vec!["text_to_image", "style_variations"],
+        ("image", "lens") => vec!["text_to_image", "style_variations"],
         ("video", "ltx-video") => vec![
             "image_to_video",
             "text_to_video",
@@ -273,6 +275,7 @@ pub fn diffusers_class_name_to_family(class_name: &str) -> Option<String> {
         "qwenimagepipeline" | "qwenimageimg2imgpipeline" | "qwenimageeditpipeline" => {
             Some("qwen-image".to_owned())
         }
+        "lenspipeline" => Some("lens".to_owned()),
         "fluxpipeline" | "fluximg2imgpipeline" | "fluxinpaintpipeline" => Some("flux".to_owned()),
         "wanpipeline" | "wani2vpipeline" | "wantext2videopipeline" => Some("wan-video".to_owned()),
         "ltxpipeline" | "ltxvideopipeline" | "ltximagetovideopipeline" => {
