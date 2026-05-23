@@ -78,6 +78,7 @@ from scene_worker.training_adapters import (
     resolve_pretrained_source,
     resolve_training_adapter_source,
     sample_training_timestep,
+    seeded_sample,
     training_adapter_weight_name,
     validate_training_plan,
 )
@@ -1336,6 +1337,33 @@ def test_sample_training_timestep_accepts_ai_toolkit_shape_and_bias():
     assert timestep.shape == (1,)
     assert float(timestep.item()) > 0.001
     assert float(timestep.item()) < 0.999
+
+
+def test_seeded_sample_draws_on_generator_device_then_moves():
+    """Regression for the MPS crash: a cpu ``torch.Generator`` cannot drive a
+    ``torch.randn(..., device='mps')`` call. ``seeded_sample`` must draw on the
+    generator's own device and move to the target when they differ, and pass the
+    device straight through when they match. (``meta`` stands in for a non-cpu
+    target so the routing is exercised without an actual GPU/MPS backend.)"""
+    torch = pytest.importorskip("torch")
+    generator = torch.Generator("cpu").manual_seed(11)
+
+    seen_devices: list[str] = []
+
+    def fake_fn(shape, *, generator, device, dtype):  # noqa: ARG001
+        seen_devices.append(str(device))
+        return torch.zeros(shape, dtype=dtype)
+
+    # Matching device type → pass through, no move.
+    out = seeded_sample(torch, fake_fn, (2,), generator=generator, device="cpu", dtype=torch.float32)
+    assert seen_devices == ["cpu"]
+    assert out.device.type == "cpu"
+
+    # Mismatched target (cpu generator → non-cpu device) → draw on cpu, then move.
+    seen_devices.clear()
+    moved = seeded_sample(torch, fake_fn, (2,), generator=generator, device="meta", dtype=torch.float32)
+    assert seen_devices == ["cpu"], "must generate on the generator's device, not the mismatched target"
+    assert moved.device.type == "meta", "result must be moved to the requested device"
 
 
 def test_build_optimizer_uses_prodigy_with_aitoolkit_lr_floor(monkeypatch):

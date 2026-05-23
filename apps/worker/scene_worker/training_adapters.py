@@ -683,6 +683,21 @@ def build_optimizer(name: str, params: list[Any], learning_rate: float, weight_d
     return torch.optim.AdamW(params, lr=learning_rate, weight_decay=weight_decay)
 
 
+def seeded_sample(torch: Any, fn: Any, shape: Any, *, generator: Any, device: Any, dtype: Any) -> Any:
+    """Draw seeded random values, MPS-safe.
+
+    ``torch.Generator`` only lives on cpu/cuda, so on Apple Silicon a seeded run
+    pairs a cpu generator with tensors on ``mps``. ``torch.randn`` / ``torch.rand``
+    reject a cpu generator alongside a non-cpu ``device=`` argument, so when the
+    generator's device differs from the target device we draw on the generator's
+    device and move — mirroring diffusers' ``randn_tensor``. ``fn`` is
+    ``torch.randn`` or ``torch.rand``.
+    """
+    if generator is not None and generator.device.type != torch.device(device).type:
+        return fn(shape, generator=generator, device=generator.device, dtype=dtype).to(device)
+    return fn(shape, generator=generator, device=device, dtype=dtype)
+
+
 def sample_training_timestep(
     torch: Any,
     *,
@@ -702,13 +717,17 @@ def sample_training_timestep(
 
     normalized_type = (timestep_type or "sigmoid").strip().lower().replace("-", "_")
     if normalized_type in {"linear", "uniform"}:
-        t = torch.rand(1, generator=generator, device=device, dtype=dtype)
+        t = seeded_sample(torch, torch.rand, 1, generator=generator, device=device, dtype=dtype)
     elif normalized_type == "weighted":
-        base = torch.rand(1, generator=generator, device=device, dtype=dtype)
-        center = torch.sigmoid(torch.randn(1, generator=generator, device=device, dtype=dtype))
+        base = seeded_sample(torch, torch.rand, 1, generator=generator, device=device, dtype=dtype)
+        center = torch.sigmoid(
+            seeded_sample(torch, torch.randn, 1, generator=generator, device=device, dtype=dtype)
+        )
         t = (base + center) / 2.0
     else:
-        t = torch.sigmoid(torch.randn(1, generator=generator, device=device, dtype=dtype))
+        t = torch.sigmoid(
+            seeded_sample(torch, torch.randn, 1, generator=generator, device=device, dtype=dtype)
+        )
 
     normalized_bias = (timestep_bias or "balanced").strip().lower().replace("-", "_").replace(" ", "_")
     if normalized_bias in {"high", "high_noise", "favor_high_noise"}:
@@ -1069,8 +1088,8 @@ class _ZImageLoraBackend:
         # mirroring ZImagePipeline.__call__. The target sign matches the diffusers
         # pipeline, which negates the raw transformer output before the scheduler
         # (see flow_matching_velocity_target).
-        noise = torch.randn(
-            latents.shape, generator=self._generator, device=device, dtype=latents.dtype
+        noise = seeded_sample(
+            torch, torch.randn, latents.shape, generator=self._generator, device=device, dtype=latents.dtype
         )
         t = sample_training_timestep(
             torch,
