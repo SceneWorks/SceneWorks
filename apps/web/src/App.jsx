@@ -1306,7 +1306,7 @@ export function App() {
     }
   }
 
-  async function createVqaJob(asset, question) {
+  async function createVqaJob(asset, question, maxNewTokens) {
     if (!activeProject) {
       setError("Create or open a project first.");
       return null;
@@ -1319,6 +1319,7 @@ export function App() {
           projectName: activeProject.name,
           sourceAssetId: asset.id,
           question,
+          maxNewTokens,
           requestedGpu,
         }),
       });

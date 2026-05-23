@@ -2737,6 +2737,31 @@ label {
   overflow-wrap: anywhere;
 }
 
+.vqa-panel {
+  display: grid;
+  gap: 8px;
+}
+
+.vqa-controls {
+  display: flex;
+  align-items: flex-end;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.vqa-controls .vqa-length {
+  flex: 1;
+  min-width: 0;
+}
+
+.vqa-history {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 8px;
+}
+
 /* ---------- Model + LoRA panels ---------- */
 .model-grid {
   display: grid;

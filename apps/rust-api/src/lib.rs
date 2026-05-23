@@ -1072,6 +1072,8 @@ struct VqaJobRequest {
     question: String,
     #[serde(default = "default_vqa_model")]
     model: String,
+    #[serde(default = "default_vqa_max_new_tokens")]
+    max_new_tokens: u32,
     #[serde(default = "default_requested_gpu")]
     requested_gpu: String,
     #[serde(default)]
@@ -1080,6 +1082,10 @@ struct VqaJobRequest {
 
 fn default_vqa_model() -> String {
     "sensenova_u1_8b".to_owned()
+}
+
+fn default_vqa_max_new_tokens() -> u32 {
+    256
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -2866,6 +2872,11 @@ fn validate_vqa_job(payload: &VqaJobRequest) -> Result<(), ApiError> {
     if question.is_empty() || question.chars().count() > 4000 {
         return Err(ApiError::bad_request(
             "question must be between 1 and 4000 characters",
+        ));
+    }
+    if !(16..=2048).contains(&payload.max_new_tokens) {
+        return Err(ApiError::bad_request(
+            "maxNewTokens must be between 16 and 2048",
         ));
     }
     Ok(())
@@ -12710,10 +12721,18 @@ mod tests {
             source_asset_id: "asset_1".to_owned(),
             question: "What is in this image?".to_owned(),
             model: "sensenova_u1_8b".to_owned(),
+            max_new_tokens: 256,
             requested_gpu: "auto".to_owned(),
             advanced: serde_json::Map::new(),
         };
         assert!(super::validate_vqa_job(&base).is_ok());
+
+        // The UI's length presets are all valid.
+        for tokens in [256u32, 512, 1024] {
+            let mut request = base.clone();
+            request.max_new_tokens = tokens;
+            assert!(super::validate_vqa_job(&request).is_ok());
+        }
 
         let mut blank_question = base.clone();
         blank_question.question = "   ".to_owned();
@@ -12726,6 +12745,10 @@ mod tests {
         let mut missing_project = base.clone();
         missing_project.project_id = String::new();
         assert!(super::validate_vqa_job(&missing_project).is_err());
+
+        let mut too_many_tokens = base.clone();
+        too_many_tokens.max_new_tokens = 4096;
+        assert!(super::validate_vqa_job(&too_many_tokens).is_err());
     }
 
     #[tokio::test]
