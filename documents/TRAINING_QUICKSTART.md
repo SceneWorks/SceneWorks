@@ -157,8 +157,9 @@ under-fit; use earlier checkpoints if a 3000-step balanced run starts overfittin
 > **Apple Silicon — LTX-2.3 video LoRA:** the `ltx_mlx_lora` kernel
 > (`target.kernel`, gated to Apple Silicon) trains an LTX-2.3 *video* LoRA
 > natively in MLX from the same still-image dataset, registered under the
-> `ltx-video` family. Validated recipe: rank 32 / alpha 32 / lr 1e-4 / res 512
-> with short trigger-focused captions (`"a photo of <trigger>"`), ~1500 steps
+> `ltx-video` family. Validated recipe: rank 32 / alpha 32 / lr 1e-4 / weight
+> decay 0.01 / res 512 with short trigger-focused captions
+> (`"a photo of <trigger>"`), ~1500 steps
 > (~1.35 s/step). The gemma text encoder (~28 GB) is freed after caption
 > caching, so the training loop peaks ~27 GB; the whole-run ceiling is the
 > dataset-caching phase at ~42 GB (text encoder still resident), which fits a

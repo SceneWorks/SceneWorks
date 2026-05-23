@@ -116,8 +116,10 @@ SceneWorks storage, config defaults, or the target registry directly.
   Z-Image path above, the LTX `to_denoised` consumes the output directly). The
   adapter is saved keyed by the real module paths (`{module}.lora_A.weight` /
   `.lora_B.weight` + scalar `.alpha`) so `mlx_video.lora` round-trips at
-  inference with no key remap. Validated end-to-end: a rank-32 / 1500-step run on
-  ~76 stills (res 512, trigger-focused captions) produces a clearly attributable
+  inference with no key remap. The AdamW optimizer honors
+  `config.advanced.weightDecay` (passed through to MLX `AdamW`; plain `Adam` has
+  no decoupled decay). Validated end-to-end: a rank-32 / 1500-step run on
+  ~76 stills (res 512, weight decay 0.01, trigger-focused captions) produces a clearly attributable
   identity effect through the real `MlxVideoAdapter` generation path. Practical
   footprint: ~1.35 s/step. The gemma text encoder (~28 GB) is released after
   caption caching, so the **training loop peaks ~27 GB**; the whole-run ceiling
