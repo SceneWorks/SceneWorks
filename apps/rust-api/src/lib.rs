@@ -2928,8 +2928,8 @@ fn apply_recipe_preset_defaults(
     }
     if let Some(resolution) = defaults.get("resolution").and_then(Value::as_str) {
         let (width, height) = parse_recipe_preset_resolution(resolution)?;
-        validate_dimension(width, "width", 2048)?;
-        validate_dimension(height, "height", 2048)?;
+        validate_dimension(width, "width", MAX_IMAGE_DIMENSION)?;
+        validate_dimension(height, "height", MAX_IMAGE_DIMENSION)?;
         job_payload.insert("width".to_owned(), json!(width));
         job_payload.insert("height".to_owned(), json!(height));
         let advanced = job_payload
@@ -5893,8 +5893,8 @@ fn validate_recipe_preset_defaults(value: Option<&Value>) -> Result<(), ApiError
         .ok_or_else(|| ApiError::bad_request("Recipe preset defaults must be an object"))?;
     if let Some(resolution) = object.get("resolution").and_then(Value::as_str) {
         let (width, height) = parse_recipe_preset_resolution(resolution)?;
-        validate_dimension(width, "width", 2048)?;
-        validate_dimension(height, "height", 2048)?;
+        validate_dimension(width, "width", MAX_IMAGE_DIMENSION)?;
+        validate_dimension(height, "height", MAX_IMAGE_DIMENSION)?;
     }
     if let Some(count) = object.get("count").and_then(Value::as_u64) {
         if !(1..=8).contains(&count) {
@@ -7539,8 +7539,8 @@ fn validate_image_job(payload: &ImageJobRequest) -> Result<(), ApiError> {
     if !(1..=8).contains(&payload.count) {
         return Err(ApiError::bad_request("count must be between 1 and 8"));
     }
-    validate_dimension(payload.width, "width", 2048)?;
-    validate_dimension(payload.height, "height", 2048)?;
+    validate_dimension(payload.width, "width", MAX_IMAGE_DIMENSION)?;
+    validate_dimension(payload.height, "height", MAX_IMAGE_DIMENSION)?;
     Ok(())
 }
 
@@ -7553,8 +7553,8 @@ fn validate_character_test_job(payload: &CharacterTestRequest) -> Result<(), Api
     if !(1..=8).contains(&payload.count) {
         return Err(ApiError::bad_request("count must be between 1 and 8"));
     }
-    validate_dimension(payload.width, "width", 2048)?;
-    validate_dimension(payload.height, "height", 2048)?;
+    validate_dimension(payload.width, "width", MAX_IMAGE_DIMENSION)?;
+    validate_dimension(payload.height, "height", MAX_IMAGE_DIMENSION)?;
     Ok(())
 }
 
@@ -7625,6 +7625,11 @@ fn validate_video_job(payload: &VideoJobRequest) -> Result<(), ApiError> {
         _ => Ok(()),
     }
 }
+
+/// Upper bound for image width/height. A backstop only — per-model resolution is
+/// governed by manifest `limits.resolutions` + the UI. Covers SenseNova-U1's
+/// largest trained bucket (3456) with headroom; video uses its own lower cap.
+const MAX_IMAGE_DIMENSION: u32 = 4096;
 
 fn validate_dimension(value: u32, field: &'static str, max: u32) -> Result<(), ApiError> {
     if !(256..=max).contains(&value) {
@@ -12625,6 +12630,17 @@ mod tests {
         });
 
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn image_dimension_cap_covers_sensenova_buckets() {
+        // Raised so SenseNova-U1's true trained buckets (largest 3456) pass.
+        assert_eq!(super::MAX_IMAGE_DIMENSION, 4096);
+        assert!(super::validate_dimension(2720, "width", super::MAX_IMAGE_DIMENSION).is_ok());
+        assert!(super::validate_dimension(3456, "height", super::MAX_IMAGE_DIMENSION).is_ok());
+        assert!(super::validate_dimension(4096, "width", super::MAX_IMAGE_DIMENSION).is_ok());
+        assert!(super::validate_dimension(4097, "width", super::MAX_IMAGE_DIMENSION).is_err());
+        assert!(super::validate_dimension(255, "width", super::MAX_IMAGE_DIMENSION).is_err());
     }
 
     #[tokio::test]

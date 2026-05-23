@@ -306,8 +306,11 @@ def image_request_from_job(job: dict[str, Any]) -> ImageRequest:
         count=safe_int(payload.get("count"), 4, 1, 8),
         seed=payload.get("seed"),
         seeds=[int(seed) for seed in payload.get("seeds", []) if seed is not None],
-        width=safe_int(payload.get("width"), 1024, 256, 2048),
-        height=safe_int(payload.get("height"), 1024, 256, 2048),
+        # Backstop only — per-model resolution is governed by manifest limits + the UI.
+        # SenseNova-U1's trained buckets reach 3456 (the adapter snaps by aspect ratio),
+        # so this clamp must allow the requested ratio through rather than truncate it.
+        width=safe_int(payload.get("width"), 1024, 256, 4096),
+        height=safe_int(payload.get("height"), 1024, 256, 4096),
         style_preset=payload.get("stylePreset", "cinematic"),
         loras=payload.get("loras", []),
         character_id=payload.get("characterId"),

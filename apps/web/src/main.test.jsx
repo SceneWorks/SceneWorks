@@ -4367,6 +4367,48 @@ describe("SceneWorks app shell", () => {
     );
   });
 
+  it("aspect picker reflects the selected model's trained buckets", async () => {
+    root = createRoot(container);
+    await act(async () => {
+      root.render(
+        <ImageStudio
+          activeProject={{ id: "project-1", name: "Noir" }}
+          assets={[]}
+          characters={[]}
+          createImageJob={() => {}}
+          deleteAsset={() => {}}
+          gpuOptions={["auto", "1"]}
+          imageModels={[
+            {
+              id: "sensenova_u1_8b",
+              name: "SenseNova-U1 8B",
+              type: "image",
+              family: "sensenova-u1",
+              defaults: { resolution: "2048x2048" },
+              limits: { resolutions: ["2048x2048", "2720x1536", "1536x2720"] },
+            },
+          ]}
+          latestAssets={[]}
+          loras={[]}
+          onPreview={() => {}}
+          purgeAsset={() => {}}
+          presets={[]}
+          requestedGpu="auto"
+          selectedAsset={null}
+          setRequestedGpu={() => {}}
+          updateAssetStatus={() => {}}
+        />,
+      );
+    });
+    await settle();
+
+    const aspect = field(container, "Aspect");
+    const optionValues = [...aspect.querySelectorAll("option")].map((option) => option.value);
+    expect(optionValues).toEqual(["2048x2048", "2720x1536", "1536x2720"]);
+    // 1024x1024 isn't a SenseNova bucket, so the picker snaps to the model default.
+    expect(aspect.value).toBe("2048x2048");
+  });
+
   it("surfaces model and preset first and lets image generation run with no preset", async () => {
     const createImageJob = vi.fn();
     root = createRoot(container);
