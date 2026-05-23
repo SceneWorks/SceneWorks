@@ -5299,6 +5299,15 @@ describe("SceneWorks app shell", () => {
     await act(async () => {
       askButton.click();
     });
-    expect(createVqaJob).toHaveBeenCalledWith(asset, "What is the person wearing?");
+    // Defaults to the short (256-token) response length.
+    expect(createVqaJob).toHaveBeenCalledWith(asset, "What is the person wearing?", 256);
+
+    // Choosing a longer response length is passed through to the job.
+    await changeField(container.querySelector('select[aria-label="Response length"]'), "512");
+    await changeField(input, "Write a detailed critique of this image.");
+    await act(async () => {
+      [...container.querySelectorAll("button")].find((button) => button.textContent === "Ask").click();
+    });
+    expect(createVqaJob).toHaveBeenLastCalledWith(asset, "Write a detailed critique of this image.", 512);
   });
 });
