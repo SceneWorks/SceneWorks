@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 from pathlib import Path
 import shutil
@@ -11,7 +12,15 @@ from types import SimpleNamespace
 import httpx
 import pytest
 
-from scene_worker.runtime import ApiClient, heartbeat, job_cancel_requested, register_worker, update_job
+from scene_worker.runtime import (
+    ApiClient,
+    heartbeat,
+    job_cancel_requested,
+    register_worker,
+    run_image_job,
+    update_job,
+)
+from scene_worker.settings import WorkerSettings
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -154,6 +163,78 @@ def test_python_worker_protocol_round_trips_against_rust_api_binary(rust_api):
     )
     assert completed["status"] == "canceled"
     assert completed["cancelRequested"] is True
+
+
+@pytest.mark.e2e
+def test_python_worker_completes_procedural_image_job_against_rust_api_binary(
+    rust_api, tmp_path, monkeypatch
+):
+    # The rust_api fixture runs the API with SCENEWORKS_DATA_DIR=tmp_path/"data"; the
+    # in-process worker below shares that same data dir. recent-projects.json is owned
+    # by the desktop/web app (the Rust API never writes it), so seed it directly the
+    # way the worker resolves project paths.
+    data_dir = tmp_path / "data"
+    data_dir.mkdir(exist_ok=True)
+    project_path = tmp_path / "project"
+    project_path.mkdir()
+    (data_dir / "recent-projects.json").write_text(
+        json.dumps([{"id": "project-1", "path": str(project_path)}]),
+        encoding="utf-8",
+    )
+
+    monkeypatch.setenv("SCENEWORKS_API_URL", rust_api)
+    monkeypatch.setenv("SCENEWORKS_DATA_DIR", str(data_dir))
+    monkeypatch.setenv("SCENEWORKS_WORKER_ID", "image-e2e-worker")
+    monkeypatch.setenv("SCENEWORKS_GPU_ID", "gpu-0")
+    # The procedural adapter renders a deterministic preview with no model weights, so
+    # the whole image pipeline runs in CI without the multi-GB diffusion checkpoints.
+    monkeypatch.setenv("SCENEWORKS_IMAGE_ADAPTER", "procedural")
+
+    settings = WorkerSettings()
+    api = ApiClient(settings)
+    register_worker(
+        api,
+        settings,
+        {"id": "gpu-0", "name": "GPU 0", "capabilities": ["placeholder", "gpu", "image_generate"]},
+        loaded_models=[],
+    )
+
+    created = httpx.post(
+        f"{rust_api}/api/v1/image/jobs",
+        json={
+            "projectId": "project-1",
+            "prompt": "mist over rolling hills",
+            "model": "z_image_turbo",
+            "count": 1,
+            "requestedGpu": "gpu-0",
+        },
+        timeout=5,
+    )
+    created.raise_for_status()
+    job = created.json()
+    assert job["type"] == "image_generate"
+
+    claimed = api.post("/api/v1/jobs/claim", {"workerId": settings.worker_id})["job"]
+    assert claimed["id"] == job["id"]
+    assert claimed["type"] == "image_generate"
+    assert claimed["payload"]["projectId"] == "project-1"
+
+    # Drives the real dispatch path: create_image_adapter -> ProceduralImageAdapter ->
+    # ImageAssetWriter, reporting completion back to the Rust API over HTTP.
+    run_image_job(api, settings, claimed, {})
+
+    completed = httpx.get(f"{rust_api}/api/v1/jobs/{job['id']}", timeout=5).json()
+    assert completed["status"] == "completed"
+    assert completed["workerId"] == settings.worker_id
+    assets = completed["result"]["assets"]
+    assert len(assets) == 1
+    asset = assets[0]
+    assert asset["type"] == "image"
+    assert asset["file"]["mimeType"] == "image/png"
+    assert asset["recipe"]["adapter"] == "procedural_preview"
+    written = project_path / asset["file"]["path"]
+    assert written.exists()
+    assert written.suffix == ".png"
 
 
 def test_rust_worker_claims_and_completes_lora_import_against_rust_api_binary(rust_api, tmp_path):
