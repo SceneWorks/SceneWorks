@@ -197,6 +197,50 @@
       }
     },
     {
+      "id": "sensenova_u1_8b",
+      "name": "SenseNova-U1 8B",
+      "family": "sensenova-u1",
+      "type": "image",
+      "adapter": "sensenova_u1",
+      "capabilities": ["text_to_image"],
+      "downloads": [
+        {
+          "provider": "huggingface",
+          "repo": "sensenova/SenseNova-U1-8B-MoT",
+          "files": [],
+          "estimatedSizeBytes": 35200000000
+        }
+      ],
+      "paths": {
+        "model": "${HF_CACHE}/sensenova/SenseNova-U1-8B-MoT"
+      },
+      "defaults": {
+        "resolution": "2048x2048",
+        "steps": 50,
+        "guidanceScale": 4.0,
+        "count": 1
+      },
+      "limits": {
+        // SenseNova-U1 renders at fixed trained buckets and degrades off them.
+        // Only the 1:1 (2048²) bucket fits the worker's ≤2048 W/H clamp today;
+        // the wider 16:9/3:2/4:3 buckets (2720×1536, …) need that clamp raised —
+        // tracked as a follow-up. The adapter snaps any request to the nearest
+        // bucket by aspect ratio regardless.
+        "resolutions": ["2048x2048"],
+        "count": [1, 2, 4]
+      },
+      "loraCompatibility": {
+        // An 8-step distill LoRA exists upstream but is not wired yet.
+        "families": [],
+        "types": []
+      },
+      "ui": {
+        "label": "SenseNova-U1 8B",
+        "description": "Unified multimodal model (NEO-unify, ~16B). Native text-to-image with strong prompt following, dense text, and infographics. Heavy: ~42GB bf16, ~50 steps; runs on large-VRAM GPUs and 96GB+ Apple Silicon (MPS). Edit/VQA/interleaved not wired yet.",
+        "recommendedFor": ["text_to_image"]
+      }
+    },
+    {
       "id": "ltx_2_3",
       "name": "LTX-2.3",
       "family": "ltx-video",
