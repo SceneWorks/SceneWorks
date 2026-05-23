@@ -54,6 +54,12 @@ def main() -> int:
             "Lens sidecar requested a CUDA device but torch.cuda.is_available() is False in the "
             "lens venv. Rebuild the worker image with a CUDA (cu128) torch in /opt/lens-venv."
         )
+    if requested_device == "mps":
+        # Route the few ops without an MPS kernel (in the mxfp4-dequantized
+        # gpt-oss / Flux.2 VAE paths) to CPU instead of erroring. The adapter
+        # sets this too via select_torch_device; set it here so a standalone
+        # runner invocation is safe on Apple Silicon as well.
+        os.environ.setdefault("PYTORCH_ENABLE_MPS_FALLBACK", "1")
     dtype = {
         "float16": torch.float16,
         "float32": torch.float32,

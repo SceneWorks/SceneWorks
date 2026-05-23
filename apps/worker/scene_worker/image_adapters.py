@@ -1034,8 +1034,13 @@ class LensTurboAdapter:
         guidance_scale = self._guidance_scale(request)
         base_resolution, aspect_ratio = lens_resolution_for(request.width, request.height)
         seeds = [resolve_seed(request.seed, request.prompt, index, request.seeds) for index in range(total)]
-        device = "cpu" if str(getattr(settings, "gpu_id", "")).strip().lower() == "cpu" else "cuda"
-        disable_mxfp4 = bool(request.advanced.get("disableMxfp4", False))
+        torch = importlib.import_module("torch")
+        device = select_torch_device(torch, getattr(settings, "gpu_id", None))
+        # mxfp4 keeps the gpt-oss-20b text encoder small but needs CUDA + Triton
+        # kernels, which exist only on NVIDIA. On MPS/CPU the encoder must load
+        # dequantized to bf16 (transformers auto-falls back, but force it here so
+        # a non-CUDA host never reaches the Triton path).
+        disable_mxfp4 = bool(request.advanced.get("disableMxfp4", False)) or not device.startswith("cuda")
 
         progress("loading_model", "loading_model", 0.18, f"Loading {model_target['label']} (sidecar venv).")
         work_dir = Path(tempfile.mkdtemp(prefix="lens_sidecar_"))

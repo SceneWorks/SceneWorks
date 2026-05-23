@@ -20,12 +20,13 @@ use tauri_plugin_shell::ShellExt;
 const SETUP_VERSION: &str = "3";
 const HEALTH_TIMEOUT: Duration = Duration::from_secs(30);
 
-/// Lens sidecar venv torch stack. cu128 for Blackwell (sm_120); torchvision MUST
-/// match the CUDA torch build or diffusers 0.38's Flux.2 VAE import fails with
-/// "operator torchvision::nms does not exist". Mirrors the Docker /opt/lens-venv.
-#[cfg(not(target_os = "macos"))]
+/// Lens sidecar venv torch stack. Same versions on every platform; only the
+/// install index differs (see `provision_lens_venv`): macOS pulls the default
+/// PyPI wheels (MPS), Windows/Linux pull cu128 (Blackwell sm_120) where
+/// torchvision MUST match the CUDA torch build or diffusers 0.38's Flux.2 VAE
+/// import fails with "operator torchvision::nms does not exist". Mirrors the
+/// Docker /opt/lens-venv.
 const LENS_TORCH_SPEC: &str = "torch>=2.11,<2.12";
-#[cfg(not(target_os = "macos"))]
 const LENS_TORCHVISION_SPEC: &str = "torchvision>=0.26,<0.27";
 
 /// Process handles + run guards shared across the app.
@@ -121,7 +122,6 @@ fn marker_path() -> PathBuf {
     app_support_dir().join("python").join(".venv-marker")
 }
 
-#[cfg(not(target_os = "macos"))]
 fn lens_marker_path() -> PathBuf {
     app_support_dir().join("python").join(".lens-venv-marker")
 }
@@ -195,7 +195,6 @@ fn requirements_ltx_path(app: &AppHandle) -> PathBuf {
 /// requirements-lens.txt location (Microsoft Lens sidecar venv deps): the bundled
 /// resource in a packaged app, or the repo copy during development. Optional —
 /// absent in older worker checkouts, in which case Lens is unavailable.
-#[cfg(not(target_os = "macos"))]
 fn requirements_lens_path(app: &AppHandle) -> PathBuf {
     if let Ok(resources) = app.path().resource_dir() {
         let bundled = resources.join("python-src").join("requirements-lens.txt");
@@ -558,13 +557,14 @@ async fn provision_venv(app: &AppHandle) -> Result<(), String> {
     Ok(())
 }
 
-/// Provision the separate Lens sidecar venv (cu128 torch 2.11 + torchvision +
+/// Provision the separate Lens sidecar venv (torch 2.11 + torchvision +
 /// requirements-lens.txt). Runs in the BACKGROUND after the app is up so the large
-/// torch download never blocks launch; non-macOS only (Lens needs CUDA). Idempotent
-/// via its own marker. Failures are non-fatal: Lens stays unavailable (LensTurboAdapter
-/// reports a clear error) while the rest of the app works. Opt out with
-/// SCENEWORKS_DISABLE_LENS=1.
-#[cfg(not(target_os = "macos"))]
+/// torch download never blocks launch. macOS pulls MPS wheels from PyPI and runs
+/// the gpt-oss-20b text encoder dequantized to bf16 (mxfp4 needs CUDA + Triton, so
+/// `LensTurboAdapter` forces dequantization on non-CUDA devices); Windows/Linux use
+/// the cu128 stack. Idempotent via its own marker. Failures are non-fatal: Lens
+/// stays unavailable (LensTurboAdapter reports a clear error) while the rest of the
+/// app works. Opt out with SCENEWORKS_DISABLE_LENS=1.
 async fn provision_lens_venv(app: &AppHandle) -> Result<(), String> {
     if std::env::var("SCENEWORKS_DISABLE_LENS")
         .map(|value| matches!(value.trim(), "1" | "true" | "yes"))
@@ -582,13 +582,25 @@ async fn provision_lens_venv(app: &AppHandle) -> Result<(), String> {
     let venv = lens_venv_dir();
     let python = venv_python(&venv);
     let marker = lens_marker_path();
-    let index = std::env::var("SCENEWORKS_PYTORCH_INDEX_URL")
+    // torch / torchvision source: macOS uses the default PyPI index (its wheels
+    // bundle MPS), Windows/Linux use the cu128 index (Blackwell sm_120), where a
+    // CPU torchvision would ABI-mismatch the CUDA torch and break diffusers 0.38's
+    // Flux.2 VAE import. An explicit SCENEWORKS_PYTORCH_INDEX_URL overrides either.
+    let torch_index: Option<String> = std::env::var("SCENEWORKS_PYTORCH_INDEX_URL")
         .ok()
         .map(|value| value.trim().to_owned())
         .filter(|value| !value.is_empty())
-        .unwrap_or_else(|| "https://download.pytorch.org/whl/cu128".to_owned());
-    let expected =
-        format!("v{SETUP_VERSION}\n{LENS_TORCH_SPEC} {LENS_TORCHVISION_SPEC} @ {index}\n{body}");
+        .or_else(|| {
+            if cfg!(target_os = "macos") {
+                None
+            } else {
+                Some("https://download.pytorch.org/whl/cu128".to_owned())
+            }
+        });
+    let index_label = torch_index.as_deref().unwrap_or("pypi");
+    let expected = format!(
+        "v{SETUP_VERSION}\n{LENS_TORCH_SPEC} {LENS_TORCHVISION_SPEC} @ {index_label}\n{body}"
+    );
 
     if python.exists() {
         if let Ok(found) = std::fs::read_to_string(&marker) {
@@ -613,24 +625,25 @@ async fn provision_lens_venv(app: &AppHandle) -> Result<(), String> {
         )
         .await?;
     }
-    // torch + torchvision from the CUDA index first so they are an ABI-matched
-    // CUDA build (a CPU torchvision breaks diffusers 0.38's Flux.2 VAE import).
-    run_uv(
-        app,
-        vec![
-            "pip".to_owned(),
-            "install".to_owned(),
-            "--python".to_owned(),
-            python.to_string_lossy().into_owned(),
-            "--index-url".to_owned(),
-            index,
-            LENS_TORCH_SPEC.to_owned(),
-            LENS_TORCHVISION_SPEC.to_owned(),
-        ],
-    )
-    .await?;
+    // torch + torchvision from the resolved index first so they are an ABI-matched
+    // build (on CUDA a CPU torchvision breaks diffusers 0.38's Flux.2 VAE import;
+    // on macOS the default PyPI wheels carry MPS).
+    let mut torch_args = vec![
+        "pip".to_owned(),
+        "install".to_owned(),
+        "--python".to_owned(),
+        python.to_string_lossy().into_owned(),
+    ];
+    if let Some(ref index) = torch_index {
+        torch_args.push("--index-url".to_owned());
+        torch_args.push(index.clone());
+    }
+    torch_args.push(LENS_TORCH_SPEC.to_owned());
+    torch_args.push(LENS_TORCHVISION_SPEC.to_owned());
+    run_uv(app, torch_args).await?;
     // Then the remaining Lens deps from PyPI — they don't pin torch, so the
-    // cu128 torch/torchvision installed above stay put.
+    // torch/torchvision installed above stay put. (`kernels` installs as a no-op
+    // on macOS; the dequantized mxfp4 path never invokes its CUDA kernels.)
     run_uv(
         app,
         vec![
@@ -1129,12 +1142,11 @@ async fn run_startup(app: AppHandle) {
         return;
     }
     gate_window(app.clone());
-    // Provision the Lens sidecar venv in the background so its large cu128 torch
-    // download never blocks startup; Lens becomes usable once it finishes, while
-    // the rest of the app (incl. LTX/Z-Image/Qwen) is available immediately.
-    // Non-macOS only — Lens needs CUDA. Non-fatal: failures only mean Lens stays
+    // Provision the Lens sidecar venv in the background so its large torch download
+    // never blocks startup; Lens becomes usable once it finishes, while the rest of
+    // the app (incl. LTX/Z-Image/Qwen) is available immediately. macOS pulls MPS
+    // wheels, Windows/Linux pull cu128. Non-fatal: failures only mean Lens stays
     // unavailable.
-    #[cfg(not(target_os = "macos"))]
     {
         let lens_app = app.clone();
         tauri::async_runtime::spawn(async move {
