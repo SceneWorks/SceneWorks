@@ -211,6 +211,7 @@ def test_python_worker_only_advertises_inference_job_capabilities(monkeypatch):
     assert job_capabilities == [
         "image_edit",
         "image_generate",
+        "image_interleave",
         "image_vqa",
         "lora_train",
         "lora_train_execute",
