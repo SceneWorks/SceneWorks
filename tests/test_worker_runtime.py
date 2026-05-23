@@ -987,6 +987,22 @@ def test_sensenova_resolution_for_snaps_to_buckets():
     assert sensenova_resolution_for(1500, 1000) == (2496, 1664)
 
 
+def test_image_request_allows_sensenova_wide_buckets():
+    # The W/H clamp was raised (2048 -> 4096) so SenseNova's true trained buckets
+    # (up to 3456) survive into the adapter, which snaps by the requested aspect
+    # ratio. Truncating 2720x1536 to 2048x1536 would mis-snap 16:9 to a ~4:3 bucket.
+    request = image_request_from_job({"payload": {"projectId": "p", "width": 2720, "height": 1536}})
+    assert (request.width, request.height) == (2720, 1536)
+    assert sensenova_resolution_for(request.width, request.height) == (2720, 1536)
+    assert sensenova_resolution_for(2048, 1536) != (2720, 1536)
+
+
+def test_image_request_clamps_above_new_ceiling():
+    request = image_request_from_job({"payload": {"projectId": "p", "width": 9000, "height": 9000}})
+    assert request.width == 4096
+    assert request.height == 4096
+
+
 def test_create_image_adapter_routes_sensenova_u1_fast():
     adapter = create_image_adapter({"payload": {"model": "sensenova_u1_8b_fast"}})
     assert adapter.__class__.__name__ == "SenseNovaU1Adapter"

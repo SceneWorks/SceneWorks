@@ -42,6 +42,7 @@ export const fallbackModels = [
     name: "SenseNova-U1 8B",
     type: "image",
     capabilities: ["text_to_image"],
+    limits: { resolutions: ["2048x2048", "2720x1536", "2496x1664", "2368x1760", "1536x2720", "1664x2496", "1760x2368"] },
     ui: { description: "Unified multimodal model (NEO-unify, ~16B); native text-to-image with strong text rendering and infographics. Heavy (~42GB bf16); CUDA or 96GB+ Apple Silicon." },
   },
   {
@@ -49,6 +50,7 @@ export const fallbackModels = [
     name: "SenseNova-U1 8B Fast",
     type: "image",
     capabilities: ["text_to_image"],
+    limits: { resolutions: ["2048x2048", "2720x1536", "2496x1664", "2368x1760", "1536x2720", "1664x2496", "1760x2368"] },
     ui: { description: "8-step distilled SenseNova-U1; ~5-6x faster text-to-image (~50s/image on MPS) at a small quality trade-off. Shares the base 8B weights; a ~0.4GB distill LoRA downloads automatically." },
   },
   {
