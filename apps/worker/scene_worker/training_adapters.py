@@ -2114,9 +2114,24 @@ class LensLoraTrainer:
 
     @staticmethod
     def _device_hint(settings: WorkerSettings) -> str:
+        """Resolve the device the sidecar should train on, mirroring the Lens
+        inference adapter (``LensTurboAdapter.generate``): ``select_torch_device``
+        picks ``mps`` on Apple Silicon, ``cuda``/``cuda:N`` on NVIDIA, and ``cpu``
+        when ``SCENEWORKS_GPU_ID=cpu`` is set. The driver runs in the main worker
+        venv (which has torch); if torch is somehow unimportable here we fall back
+        to a platform heuristic so the hint is still sane (the sidecar re-resolves
+        and fails fast on a real mismatch)."""
         gpu_id = getattr(settings, "gpu_id", None)
-        token = str(gpu_id).strip() if gpu_id is not None else ""
-        return f"cuda:{token}" if token.isdigit() else "cuda"
+        try:
+            torch = importlib.import_module("torch")
+            return select_torch_device(torch, gpu_id)
+        except ImportError:
+            token = str(gpu_id or "").strip()
+            if token.lower() == "cpu":
+                return "cpu"
+            if sys.platform == "darwin" and platform.machine() == "arm64":
+                return "mps"
+            return f"cuda:{token}" if token.isdigit() else "cuda"
 
     def train(
         self,

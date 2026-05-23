@@ -172,19 +172,38 @@ def _build_lr_scheduler(torch: Any, optimizer: Any, name: str, total_updates: in
     return torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
 
 
+def _seeded_sample(torch: Any, fn: Any, shape: Any, *, generator: Any, device: str, dtype: Any) -> Any:
+    """Draw seeded random values, MPS-safe.
+
+    ``torch.Generator`` only lives on cpu/cuda, so on Apple Silicon a seeded run
+    pairs a cpu generator with tensors on ``mps``. ``torch.randn``/``torch.rand``
+    reject a cpu generator alongside a non-cpu ``device=`` argument, so when the
+    generator's device differs from the target we draw on the generator's device
+    and move — mirroring diffusers' ``randn_tensor`` and the main worker's
+    ``training_adapters.seeded_sample``. ``fn`` is ``torch.randn`` or ``torch.rand``.
+    """
+    if generator is not None and generator.device.type != torch.device(device).type:
+        return fn(shape, generator=generator, device=generator.device, dtype=dtype).to(device)
+    return fn(shape, generator=generator, device=device, dtype=dtype)
+
+
 def _sample_timestep(torch: Any, generator: Any, device: str, dtype: Any, ts_type: str, ts_bias: str) -> Any:
     """Sample a normalized flow-matching timestep (the noise fraction) in [0, 1],
     matching training_adapters.sample_training_timestep."""
 
     normalized_type = (ts_type or "sigmoid").strip().lower().replace("-", "_")
     if normalized_type in {"linear", "uniform"}:
-        t = torch.rand(1, generator=generator, device=device, dtype=dtype)
+        t = _seeded_sample(torch, torch.rand, 1, generator=generator, device=device, dtype=dtype)
     elif normalized_type == "weighted":
-        base = torch.rand(1, generator=generator, device=device, dtype=dtype)
-        center = torch.sigmoid(torch.randn(1, generator=generator, device=device, dtype=dtype))
+        base = _seeded_sample(torch, torch.rand, 1, generator=generator, device=device, dtype=dtype)
+        center = torch.sigmoid(
+            _seeded_sample(torch, torch.randn, 1, generator=generator, device=device, dtype=dtype)
+        )
         t = (base + center) / 2.0
     else:
-        t = torch.sigmoid(torch.randn(1, generator=generator, device=device, dtype=dtype))
+        t = torch.sigmoid(
+            _seeded_sample(torch, torch.randn, 1, generator=generator, device=device, dtype=dtype)
+        )
 
     normalized_bias = (ts_bias or "balanced").strip().lower().replace("-", "_").replace(" ", "_")
     if normalized_bias in {"high", "high_noise", "favor_high_noise"}:
@@ -375,6 +394,10 @@ def train(spec: dict[str, Any], progress: _Progress) -> dict[str, Any]:
             progress.emit(event="cache", done=index + 1, total=len(items))
     if device.startswith("cuda"):
         torch.cuda.empty_cache()
+    elif device == "mps" and getattr(torch, "mps", None) is not None:
+        # Release the caching-phase allocator cache; the Lens stack peaks near
+        # ~90 GB on Apple Silicon, so reclaiming here eases the train-loop ceiling.
+        torch.mps.empty_cache()
 
     # ---- Attach the trainable LoRA -----------------------------------------
     progress.emit(event="stage", stage="loading_model", message="Attaching LoRA adapter to the transformer.")
@@ -437,7 +460,9 @@ def train(spec: dict[str, Any], progress: _Progress) -> dict[str, Any]:
         features = [feat.to(device=device, dtype=dtype) for feat in entry["features"]]
         mask = entry["mask"].to(device)
 
-        noise = torch.randn(latents.shape, generator=train_generator, device=device, dtype=dtype)
+        noise = _seeded_sample(
+            torch, torch.randn, latents.shape, generator=train_generator, device=device, dtype=dtype
+        )
         t = _sample_timestep(torch, train_generator, device, dtype, ts_type, ts_bias)
         noisy = (1.0 - t) * latents + t * noise
         # Lens feeds the transformer output to FlowMatchEulerDiscreteScheduler.step
