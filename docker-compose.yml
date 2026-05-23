@@ -35,9 +35,15 @@ services:
       dockerfile: docker/worker.Dockerfile
       args:
         PYTORCH_INDEX_URL: ${SCENEWORKS_PYTORCH_INDEX_URL:-https://download.pytorch.org/whl/cu128}
-        PYTORCH_SPEC: ${SCENEWORKS_PYTORCH_SPEC:-torch>=2.11,<2.12}
-        PYTORCH_AUDIO_SPEC: ${SCENEWORKS_PYTORCH_AUDIO_SPEC:-torchaudio>=2.11,<2.12}
+        PYTORCH_SPEC: ${SCENEWORKS_PYTORCH_SPEC:-torch>=2.8,<2.9}
+        PYTORCH_AUDIO_SPEC: ${SCENEWORKS_PYTORCH_AUDIO_SPEC:-torchaudio>=2.8,<2.9}
         INCLUDE_LTX_PIPELINES: ${SCENEWORKS_INCLUDE_LTX_PIPELINES:-1}
+        # Lens sidecar venv (/opt/lens-venv): its own cu128 torch 2.11 +
+        # torchvision + transformers 5.8 + diffusers 0.38, isolated from the main
+        # transformers 4.x stack. Reuses PYTORCH_INDEX_URL (cu128) above.
+        INCLUDE_LENS: ${SCENEWORKS_INCLUDE_LENS:-1}
+        LENS_PYTORCH_SPEC: ${SCENEWORKS_LENS_PYTORCH_SPEC:-torch>=2.11,<2.12}
+        LENS_PYTORCH_VISION_SPEC: ${SCENEWORKS_LENS_PYTORCH_VISION_SPEC:-torchvision>=0.26,<0.27}
     environment:
       SCENEWORKS_API_URL: http://api:${SCENEWORKS_API_PORT:-8010}
       SCENEWORKS_DATA_DIR: /sceneworks/data

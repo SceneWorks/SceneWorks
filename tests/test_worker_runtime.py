@@ -891,6 +891,29 @@ def test_lens_turbo_rejects_image_edit(tmp_path):
         raise AssertionError("Lens-Turbo is text-to-image only and must reject edit_image.")
 
 
+def test_lens_turbo_requires_sidecar_when_missing(monkeypatch):
+    # Point the sidecar interpreter at a path that does not exist so the adapter
+    # reports the actionable "rebuild with INCLUDE_LENS" error instead of trying
+    # to import the (main-venv-incompatible) lens stack in-process.
+    monkeypatch.setenv("SCENEWORKS_LENS_PYTHON", "/nonexistent/lens-venv/bin/python")
+    job = {
+        "id": "job_lens_t2i",
+        "payload": {
+            "projectId": "project_x",
+            "mode": "text_to_image",
+            "model": "lens_turbo",
+            "prompt": "a cat",
+        },
+    }
+    noop = lambda *args, **kwargs: None  # noqa: E731
+    try:
+        LensTurboAdapter().generate(settings=None, job=job, progress=noop, cancel_requested=lambda: False)
+    except RuntimeError as exc:
+        assert "sidecar" in str(exc).lower()
+    else:
+        raise AssertionError("Lens generation must fail clearly when the sidecar venv is unavailable.")
+
+
 def test_lens_resolution_for_snaps_to_buckets():
     # Square requests pick the base by area: <1024*1440 px -> 1024, else 1440.
     assert lens_resolution_for(1024, 1024) == (1024, "1:1")

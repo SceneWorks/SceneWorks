@@ -6,7 +6,10 @@ import importlib
 import json
 import math
 import os
+import shutil
+import subprocess
 import sys
+import tempfile
 import warnings
 from pathlib import Path
 from textwrap import wrap
@@ -972,33 +975,36 @@ def lens_resolution_for(width: int, height: int) -> tuple[int, str]:
 
 
 class LensTurboAdapter:
-    """Microsoft Lens / Lens-Turbo text-to-image via the vendored `lens` package.
+    """Microsoft Lens / Lens-Turbo text-to-image, run OUT-OF-PROCESS.
 
-    Lens has no published pip package and no `trust_remote_code` path: importing
-    `lens` injects its custom `LensPipeline`/`LensTransformer2DModel`/
-    `LensGptOssEncoder` classes into the diffusers/transformers namespaces that
-    `model_index.json` references. The package is vendored at
-    `scene_worker/_vendor/lens` and placed on `sys.path` lazily here so the worker
-    stays importable on hosts without the Lens dependency stack installed.
+    Lens needs transformers 5.x (gpt-oss text encoder) + diffusers 0.38, which are
+    incompatible with the main worker venv's transformers 4.x stack that native
+    LTX-2.3 (ltx-core's Gemma-3 integration) requires. So Lens runs in a dedicated
+    sidecar venv (``/opt/lens-venv``) via ``scene_worker/lens_runner.py``; this
+    adapter only orchestrates that subprocess and writes the resulting PNGs through
+    the shared asset writer. The vendored ``lens`` package (scene_worker/_vendor)
+    is imported by the runner, not here.
 
     Text-to-image only (no edit/img2img) and no LoRA support yet.
     """
 
     id = "lens_turbo"
 
-    def __init__(self) -> None:
-        self._text_pipe: Any | None = None
-        self._loaded_repo: str | None = None
-        self._loaded_model: str | None = None
-
     def loaded_models(self) -> list[str]:
-        return sorted({value for value in (self._loaded_repo, self._loaded_model) if value})
+        # The sidecar process loads and frees the model per job; nothing stays
+        # resident in this (main-venv) process.
+        return []
 
     @staticmethod
-    def _vendor_on_path() -> None:
-        vendor = str(Path(__file__).resolve().parent / "_vendor")
-        if vendor not in sys.path:
-            sys.path.insert(0, vendor)
+    def _lens_python() -> str:
+        return os.getenv("SCENEWORKS_LENS_PYTHON", "/opt/lens-venv/bin/python")
+
+    @staticmethod
+    def _runner_path() -> Path:
+        return Path(__file__).resolve().parent / "lens_runner.py"
+
+    def _sidecar_available(self) -> bool:
+        return Path(self._lens_python()).exists() and self._runner_path().exists()
 
     def generate(
         self,
@@ -1015,199 +1021,162 @@ class LensTurboAdapter:
         model_target = MODEL_TARGETS.get(request.model, MODEL_TARGETS["lens_turbo"])
         if model_target.get("adapter") != self.id:
             raise RuntimeError(f"{request.model} is not a Lens target.")
+        if not self._sidecar_available():
+            raise RuntimeError(
+                "Lens generation requires the isolated Lens sidecar venv. Rebuild the worker image with "
+                "INCLUDE_LENS=1 (the Docker Compose default), or set SCENEWORKS_LENS_PYTHON to a Python "
+                f"interpreter that has the lens stack installed (looked for {self._lens_python()})."
+            )
 
-        progress("loading_model", "loading_model", 0.18, f"Loading {model_target['label']}.")
-        pipe = self._load_pipeline(settings, request, model_target, progress=progress, job_id=job["id"])
         total = request.count
-        torch = importlib.import_module("torch")
-        device = select_torch_device(torch, settings.gpu_id)
-        label = "Lens-Turbo"
-
-        def image_at_index(index: int) -> Image.Image:
-            seed = resolve_seed(request.seed, request.prompt, index, request.seeds)
-            progress(
-                "running",
-                "generating",
-                image_batch_progress(index, total),
-                format_batch_running_message(label, index, total),
-            )
-            emit_worker_event(
-                "image_inference_start",
-                jobId=job["id"],
-                adapter=self.id,
-                model=request.model,
-                imageIndex=index,
-                imageCount=total,
-                device=device,
-                gpuMemory=gpu_memory_snapshot(torch, device),
-            )
-            try:
-                image = self._run_pipeline(settings, pipe, request, seed)
-            except Exception as exc:
-                emit_worker_event(
-                    "image_inference_failed",
-                    jobId=job["id"],
-                    adapter=self.id,
-                    imageIndex=index,
-                    error=str(exc),
-                    errorType=exc.__class__.__name__,
-                )
-                raise
-            emit_worker_event(
-                "image_inference_complete",
-                jobId=job["id"],
-                adapter=self.id,
-                imageIndex=index,
-                gpuMemory=gpu_memory_snapshot(torch, device),
-            )
-            return image
-
-        base_resolution, aspect_ratio = lens_resolution_for(request.width, request.height)
-        return ImageAssetWriter().write_incremental_outputs(
-            settings=settings,
-            job=job,
-            image_count=total,
-            image_at_index=image_at_index,
-            adapter_id=self.id,
-            progress=progress,
-            cancel_requested=cancel_requested,
-            raw_settings={
-                **request.advanced,
-                "repo": request.advanced.get("modelRepo") or model_target["repo"],
-                "numInferenceSteps": self._num_inference_steps(request, model_target),
-                "guidanceScale": self._guidance_scale(request),
-                "baseResolution": base_resolution,
-                "aspectRatio": aspect_ratio,
-                "textEncoderMxfp4": not bool(request.advanced.get("disableMxfp4", False)),
-                "realModelInference": True,
-            },
-        )
-
-    def _load_pipeline(
-        self,
-        settings: WorkerSettings,
-        request: ImageRequest,
-        model_target: dict[str, Any],
-        progress: ProgressCallback,
-        *,
-        job_id: str,
-    ) -> Any:
-        self._vendor_on_path()
-        torch = importlib.import_module("torch")
-        transformers = importlib.import_module("transformers")
-        lens = importlib.import_module("lens")
         repo = request.advanced.get("modelRepo") or model_target["repo"]
-        require_inference_backend_for_gpu_worker(torch, settings.gpu_id)
-        device = select_torch_device(torch, settings.gpu_id)
-        activate_torch_device(torch, device)
-        dtype = select_torch_dtype(torch, device, request.advanced.get("dtype"))
-        cpu_offload = bool(request.advanced.get("cpuOffload", False))
+        steps = self._num_inference_steps(request, model_target)
+        guidance_scale = self._guidance_scale(request)
+        base_resolution, aspect_ratio = lens_resolution_for(request.width, request.height)
+        seeds = [resolve_seed(request.seed, request.prompt, index, request.seeds) for index in range(total)]
+        device = "cpu" if str(getattr(settings, "gpu_id", "")).strip().lower() == "cpu" else "cuda"
         disable_mxfp4 = bool(request.advanced.get("disableMxfp4", False))
 
-        if self._text_pipe is not None and self._loaded_repo == repo:
-            self._loaded_model = request.model
-            progress("loading_model", "loading_model", 0.22, f"Using cached {model_target['label']}.")
+        progress("loading_model", "loading_model", 0.18, f"Loading {model_target['label']} (sidecar venv).")
+        work_dir = Path(tempfile.mkdtemp(prefix="lens_sidecar_"))
+        try:
+            images = self._run_sidecar(
+                job_id=job["id"],
+                work_dir=work_dir,
+                label=model_target["label"],
+                total=total,
+                spec={
+                    "repo": repo,
+                    "prompt": request.prompt,
+                    "negativePrompt": request.negative_prompt,
+                    "baseResolution": base_resolution,
+                    "aspectRatio": aspect_ratio,
+                    "numInferenceSteps": steps,
+                    "guidanceScale": guidance_scale,
+                    "seeds": seeds,
+                    "disableMxfp4": disable_mxfp4,
+                    "cpuOffload": bool(request.advanced.get("cpuOffload", False)),
+                    "dtype": request.advanced.get("dtype"),
+                    "device": device,
+                },
+                progress=progress,
+                cancel_requested=cancel_requested,
+            )
+
+            def image_at_index(index: int) -> Image.Image:
+                progress(
+                    "running",
+                    "generating",
+                    image_batch_progress(index, total),
+                    format_batch_running_message("Lens-Turbo", index, total),
+                )
+                with Image.open(images[index]) as handle:
+                    return handle.convert("RGB")
+
+            return ImageAssetWriter().write_incremental_outputs(
+                settings=settings,
+                job=job,
+                image_count=total,
+                image_at_index=image_at_index,
+                adapter_id=self.id,
+                progress=progress,
+                cancel_requested=cancel_requested,
+                raw_settings={
+                    **request.advanced,
+                    "repo": repo,
+                    "numInferenceSteps": steps,
+                    "guidanceScale": guidance_scale,
+                    "baseResolution": base_resolution,
+                    "aspectRatio": aspect_ratio,
+                    "textEncoderMxfp4": not disable_mxfp4,
+                    "sidecarVenv": self._lens_python(),
+                    "realModelInference": True,
+                },
+            )
+        finally:
+            # The writer has read every PNG into the project by now; drop the
+            # sidecar's scratch dir regardless of success/failure.
+            shutil.rmtree(work_dir, ignore_errors=True)
+
+    def _run_sidecar(
+        self,
+        *,
+        job_id: str,
+        work_dir: Path,
+        label: str,
+        total: int,
+        spec: dict[str, Any],
+        progress: ProgressCallback,
+        cancel_requested: CancelCallback,
+    ) -> list[str]:
+        spec = {**spec, "outDir": str(work_dir)}
+        spec_path = work_dir / "spec.json"
+        spec_path.write_text(json.dumps(spec), encoding="utf-8")
+        stdout_log = work_dir / "stdout.log"
+        cmd = [self._lens_python(), str(self._runner_path()), str(spec_path)]
+        emit_worker_event(
+            "lens_sidecar_start",
+            jobId=job_id,
+            adapter=self.id,
+            repo=spec["repo"],
+            imageCount=total,
+            device=spec["device"],
+            mxfp4=not spec["disableMxfp4"],
+            sidecar=self._lens_python(),
+        )
+        progress("running", "generating", image_batch_progress(0, total), f"Running {label} ({total} image(s)).")
+        # stdout -> file (avoids any pipe-fill deadlock); stderr inherits to the
+        # worker log for diagnostics. Poll so the job stays cancelable; the
+        # heartbeat thread keeps it alive during the (minutes-long) run.
+        with stdout_log.open("w", encoding="utf-8") as out:
+            proc = subprocess.Popen(cmd, env=os.environ.copy(), stdout=out, stderr=None)
+            while True:
+                try:
+                    proc.wait(timeout=2)
+                    break
+                except subprocess.TimeoutExpired:
+                    if cancel_requested():
+                        proc.terminate()
+                        try:
+                            proc.wait(timeout=10)
+                        except subprocess.TimeoutExpired:
+                            proc.kill()
+                        raise InterruptedError("Image generation canceled by user.")
+        result = self._read_result(work_dir, stdout_log)
+        if proc.returncode != 0 or "error" in result:
+            error = result.get("error") or f"Lens sidecar exited with code {proc.returncode}."
             emit_worker_event(
-                "image_pipeline_cache_hit",
+                "lens_sidecar_failed",
                 jobId=job_id,
                 adapter=self.id,
-                model=request.model,
-                repo=repo,
-                device=device,
-                componentDevices=pipeline_component_devices(self._text_pipe),
-                gpuMemory=gpu_memory_snapshot(torch, device),
+                error=error,
+                returnCode=proc.returncode,
             )
-            return self._text_pipe
-        if self._loaded_repo and self._loaded_repo != repo:
-            self._evict(torch)
+            raise RuntimeError(f"Lens generation failed in the sidecar venv: {error}")
+        images = [str(path) for path in result.get("images", [])]
+        if len(images) != total:
+            raise RuntimeError(f"Lens sidecar produced {len(images)} image(s); expected {total}.")
+        emit_worker_event("lens_sidecar_complete", jobId=job_id, adapter=self.id, imageCount=len(images))
+        return images
 
-        cache_action = "Loading cached" if huggingface_repo_cache_exists(repo) else "Downloading"
-        progress("loading_model", "loading_model", 0.2, f"{cache_action} {model_target['label']} model files.")
-        emit_worker_event(
-            "image_pipeline_load_start",
-            jobId=job_id,
-            adapter=self.id,
-            model=request.model,
-            repo=repo,
-            device=device,
-            dtype=str(dtype),
-            useImg2img=False,
-            cpuOffload=cpu_offload,
-            mxfp4=not disable_mxfp4,
-            cached=cache_action == "Loading cached",
-        )
-        # Pre-load the gpt-oss-20b text encoder so MXFP4 dequantization is
-        # controllable (mirrors lens/inference.py). The hub weights are MXFP4;
-        # with Triton present they stay quantized (~13GB), otherwise transformers
-        # auto-dequantizes to bf16 (~40GB). disableMxfp4 forces bf16 explicitly.
-        text_encoder_kwargs: dict[str, Any] = {"subfolder": "text_encoder", "dtype": dtype}
-        mxfp4_config = getattr(transformers, "Mxfp4Config", None)
-        if mxfp4_config is not None:
-            text_encoder_kwargs["quantization_config"] = mxfp4_config(dequantize=disable_mxfp4)
-        text_encoder = lens.LensGptOssEncoder.from_pretrained(repo, **text_encoder_kwargs)
-        pipe = lens.LensPipeline.from_pretrained(repo, text_encoder=text_encoder, torch_dtype=dtype)
-        emit_worker_event(
-            "image_pipeline_load_complete",
-            jobId=job_id,
-            adapter=self.id,
-            model=request.model,
-            repo=repo,
-            componentDevices=pipeline_component_devices(pipe),
-        )
-        progress("loading_model", "loading_model", 0.22, f"Moving {model_target['label']} to {device}.")
-        offload_enabled = cpu_offload and hasattr(pipe, "enable_model_cpu_offload")
-        if offload_enabled:
-            pipe.enable_model_cpu_offload()
-        else:
-            pipe.to(device)
-        component_devices = verify_pipeline_on_device(
-            pipe,
-            requested_device=device,
-            model_label=model_target["label"],
-            allow_offload=offload_enabled,
-        )
-        emit_worker_event(
-            "image_pipeline_on_device",
-            jobId=job_id,
-            adapter=self.id,
-            model=request.model,
-            requestedDevice=device,
-            cpuOffload=offload_enabled,
-            componentDevices=component_devices,
-            gpuMemory=gpu_memory_snapshot(torch, device),
-        )
-        self._text_pipe = pipe
-        self._loaded_repo = repo
-        self._loaded_model = request.model
-        return pipe
-
-    def _evict(self, torch: Any) -> None:
-        self._text_pipe = None
-        self._loaded_repo = None
-        self._loaded_model = None
-        empty_torch_cache(torch)
-
-    def _run_pipeline(self, settings: WorkerSettings, pipe: Any, request: ImageRequest, seed: int) -> Image.Image:
-        torch = importlib.import_module("torch")
-        device = select_torch_device(torch, settings.gpu_id)
-        activate_torch_device(torch, device)
-        generator = torch.Generator(device if device.startswith("cuda") else "cpu").manual_seed(seed)
-        model_target = MODEL_TARGETS.get(request.model, MODEL_TARGETS["lens_turbo"])
-        base_resolution, aspect_ratio = lens_resolution_for(request.width, request.height)
-        kwargs = {
-            "prompt": request.prompt,
-            "base_resolution": base_resolution,
-            "aspect_ratio": aspect_ratio,
-            "num_inference_steps": self._num_inference_steps(request, model_target),
-            "guidance_scale": self._guidance_scale(request),
-            "num_images_per_prompt": 1,
-            "generator": generator,
-            "enable_reasoner": False,
-        }
-        if request.negative_prompt:
-            kwargs["negative_prompt"] = request.negative_prompt
-        output = pipe(**filter_call_kwargs(pipe, kwargs))
-        return output.images[0].convert("RGB")
+    @staticmethod
+    def _read_result(work_dir: Path, stdout_log: Path) -> dict[str, Any]:
+        result_path = work_dir / "result.json"
+        if result_path.exists():
+            try:
+                return json.loads(result_path.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                pass
+        try:
+            lines = [line for line in stdout_log.read_text(encoding="utf-8").splitlines() if line.strip()]
+        except OSError:
+            lines = []
+        for line in reversed(lines):
+            try:
+                return json.loads(line)
+            except ValueError:
+                continue
+        return {"error": "Lens sidecar produced no parseable result."}
 
     def _num_inference_steps(self, request: ImageRequest, model_target: dict[str, Any]) -> int:
         return safe_int(request.advanced.get("steps"), model_target["steps"], 1, 80)

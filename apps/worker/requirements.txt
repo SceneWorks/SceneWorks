@@ -1,34 +1,15 @@
 httpx==0.28.1
-# diffusers 0.38.0 + transformers 5.8 require huggingface_hub 1.x. The worker's
-# own hub usage is limited to hf_hub_download/snapshot_download (video MLX path)
-# and a cache-dir helper, all stable across the 1.0 major bump.
-huggingface_hub>=1.0,<2
+huggingface_hub>=0.36,<1
 pillow>=12.0.0,<13
 numpy>=2.0,<3
 imageio>=2.37,<3
 imageio-ffmpeg>=0.6,<1
-# Stack pinned to what Microsoft Lens / Lens-Turbo requires and what was
-# validated end-to-end (Z-Image-Turbo, Qwen, Lens-Turbo) on a Blackwell sm_120
-# GPU: torch 2.11 (cu128 wheel via the Dockerfile PYTORCH_INDEX_URL build arg),
-# diffusers 0.38.0 (still ships ZImagePipeline/QwenImagePipeline/LTXPipeline +
-# AutoencoderKLFlux2), and transformers 5.8 (ships transformers.models.gpt_oss,
-# Lens's text encoder). torch itself is installed first in the Dockerfile; this
-# floor keeps a bare `pip install -r` honest.
-torch>=2.11,<2.12
-transformers>=5.8,<6
+torch>=2.8,<2.9
+transformers>=4.57
 sentencepiece>=0.2,<1
 protobuf>=4.25,<7
 accelerate>=1.11
 peft>=0.17,<1
-# diffusers 0.38.0 depends on safetensors>=0.8.0rc0 (a pre-release at pin time);
-# the version specifier referencing the rc lets pip select it without a global
-# --pre.
-safetensors>=0.8.0rc0,<0.9
+safetensors>=0.6
 prodigyopt>=1.1,<2
-diffusers==0.38.0
-# einops: required by the vendored lens package (scene_worker/_vendor/lens) and
-# by ltx-core. kernels: provides the mxfp4 Triton kernels for Lens's gpt-oss-20b
-# text encoder; absent/unsupported Triton dequantizes the encoder to bf16
-# (~40GB vs ~13GB) which still runs.
-einops>=0.8,<0.9
-kernels>=0.14,<0.15
+diffusers @ git+https://github.com/huggingface/diffusers.git
