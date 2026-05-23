@@ -23,14 +23,18 @@ backend seam that real GPU runs exercise.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 import contextlib
 import importlib
 import json
 import math
 import os
 import platform
+import shutil
+import subprocess
 import sys
+import tempfile
+import time
 from pathlib import Path
 from typing import Any, Callable, Protocol
 
@@ -2076,6 +2080,297 @@ class LtxMlxLoraTrainer(ZImageLoraTrainer):
         return _LtxMlxLoraBackend()
 
 
+class LensLoraTrainer:
+    """Image LoRA trainer for Microsoft Lens, run OUT-OF-PROCESS.
+
+    Lens needs transformers 5.x + diffusers 0.38, incompatible with this (main)
+    worker venv's transformers 4.x stack, so — like the Lens inference adapter
+    (:class:`scene_worker.image_adapters.LensTurboAdapter`) — the whole training
+    loop runs in the dedicated Lens sidecar venv via
+    ``scene_worker/lens_train_runner.py``. Per-step IPC across the venv boundary
+    would be far too chatty, so unlike :class:`ZImageLoraTrainer` (which stages an
+    in-process backend) this driver only writes the spec, launches the subprocess,
+    maps its JSONL progress events onto the worker's progress bands, handles
+    cancellation, and shapes the result. The output is a ``lens`` family LoRA the
+    Lens adapter applies to Lens-Turbo at inference (sc-1587).
+    """
+
+    kernel_id = "lens_lora"
+
+    def loaded_models(self) -> list[str]:
+        # The sidecar loads and frees the base model per job; nothing resident here.
+        return []
+
+    @staticmethod
+    def _lens_python() -> str:
+        return os.getenv("SCENEWORKS_LENS_PYTHON", "/opt/lens-venv/bin/python")
+
+    @staticmethod
+    def _runner_path() -> Path:
+        return Path(__file__).resolve().parent / "lens_train_runner.py"
+
+    def _sidecar_available(self) -> bool:
+        return Path(self._lens_python()).exists() and self._runner_path().exists()
+
+    @staticmethod
+    def _device_hint(settings: WorkerSettings) -> str:
+        gpu_id = getattr(settings, "gpu_id", None)
+        token = str(gpu_id).strip() if gpu_id is not None else ""
+        return f"cuda:{token}" if token.isdigit() else "cuda"
+
+    def train(
+        self,
+        *,
+        settings: WorkerSettings,
+        plan: dict[str, Any],
+        progress: ProgressCallback,
+        cancel_requested: CancelCallback,
+    ) -> dict[str, Any]:
+        items = validate_training_plan(plan, require_images=True)
+        config = read_run_config(plan)
+        output = plan.get("output") or {}
+        target = plan.get("target") or {}
+        output_dir = str(output.get("outputDir") or "")
+        file_name = str(output.get("fileName") or "lora.safetensors")
+        if not output_dir:
+            raise TrainingKernelError("Training plan output is missing an output directory.")
+        if not self._sidecar_available():
+            raise TrainingKernelError(
+                "Lens LoRA training requires the isolated Lens sidecar venv. Rebuild the worker "
+                "image with INCLUDE_LENS=1 (the Docker Compose default), or set SCENEWORKS_LENS_PYTHON "
+                f"to a Python interpreter that has the lens stack installed (looked for {self._lens_python()})."
+            )
+        # The sidecar re-validates, but fail fast here for a plan handed directly
+        # to the worker with an unsupported LR scheduler.
+        normalize_lr_scheduler(config.lr_scheduler)
+
+        source = resolve_pretrained_source(target)
+        os.makedirs(output_dir, exist_ok=True)
+        progress("preparing", "preparing", 0.04, "Preparing Lens LoRA training run.")
+
+        work_dir = Path(tempfile.mkdtemp(prefix="lens_train_"))
+        progress_path = work_dir / "progress.jsonl"
+        progress_path.write_text("", encoding="utf-8")
+        result_path = work_dir / "result.json"
+        spec = {
+            "source": source,
+            "device": self._device_hint(settings),
+            "dtype": str(config.mixed_precision or "bfloat16"),
+            "disableMxfp4": bool((config.advanced or {}).get("disableMxfp4", False)),
+            "outputDir": output_dir,
+            "fileName": file_name,
+            "config": asdict(config),
+            "items": [
+                {"imagePath": item.get("imagePath"), "caption": item.get("caption") or ""}
+                for item in items
+            ],
+            "samplePrompts": list(config.sample_prompts or []),
+            "progressPath": str(progress_path),
+            "resultPath": str(result_path),
+        }
+        spec_path = work_dir / "spec.json"
+        spec_path.write_text(json.dumps(spec), encoding="utf-8")
+
+        total_steps = max(1, config.steps)
+        stdout_log = work_dir / "stdout.log"
+        cmd = [self._lens_python(), str(self._runner_path()), str(spec_path)]
+        emit_worker_event(
+            "lens_train_sidecar_start",
+            kernel=self.kernel_id,
+            source=source,
+            steps=total_steps,
+            datasetItemCount=len(items),
+            sidecar=self._lens_python(),
+        )
+        progress(
+            "loading_model",
+            "loading_model",
+            0.1,
+            f"Loading Lens base model for {target.get('targetId') or self.kernel_id}.",
+        )
+        try:
+            # stdout -> file (avoids any pipe-fill deadlock on a long run); stderr
+            # inherits to the worker log. Poll so the job stays cancelable and so we
+            # can tail the runner's JSONL progress file between waits.
+            with stdout_log.open("w", encoding="utf-8") as out:
+                proc = subprocess.Popen(cmd, env=os.environ.copy(), stdout=out, stderr=None)
+                cursor = 0
+                while True:
+                    try:
+                        proc.wait(timeout=2)
+                        self._drain_progress(progress_path, cursor, progress, total_steps)
+                        break
+                    except subprocess.TimeoutExpired:
+                        cursor = self._drain_progress(progress_path, cursor, progress, total_steps)
+                        if cancel_requested():
+                            proc.terminate()
+                            try:
+                                proc.wait(timeout=10)
+                            except subprocess.TimeoutExpired:
+                                proc.kill()
+                            raise InterruptedError("LoRA training canceled by user.")
+            result = self._read_result(result_path, stdout_log)
+            if proc.returncode != 0 or "error" in result:
+                error = result.get("error") or f"Lens training sidecar exited with code {proc.returncode}."
+                emit_worker_event(
+                    "lens_train_sidecar_failed",
+                    kernel=self.kernel_id,
+                    error=error,
+                    returnCode=proc.returncode,
+                )
+                raise TrainingKernelError(f"Lens LoRA training failed in the sidecar venv: {error}")
+            output_path = str(result.get("outputPath") or "")
+            if not output_path or not os.path.exists(output_path):
+                raise TrainingKernelError(
+                    f"Lens training sidecar reported success but produced no adapter at {output_path!r}."
+                )
+            emit_worker_event(
+                "lens_train_sidecar_complete",
+                kernel=self.kernel_id,
+                outputPath=output_path,
+                stepsCompleted=result.get("stepsCompleted"),
+            )
+            progress("saving", "saving", 0.97, "Saving trained LoRA weights.")
+            return self._result_summary(
+                plan=plan, config=config, result=result, total_steps=total_steps, items=items
+            )
+        finally:
+            shutil.rmtree(work_dir, ignore_errors=True)
+
+    @staticmethod
+    def _drain_progress(
+        path: Path, cursor: int, progress: ProgressCallback, total_steps: int
+    ) -> int:
+        """Forward any progress lines past ``cursor`` and return the new cursor."""
+        try:
+            lines = path.read_text(encoding="utf-8").splitlines()
+        except OSError:
+            return cursor
+        for line in lines[cursor:]:
+            text = line.strip()
+            if not text:
+                continue
+            try:
+                event = json.loads(text)
+            except ValueError:
+                continue
+            LensLoraTrainer._forward_event(event, progress, total_steps)
+        return len(lines)
+
+    @staticmethod
+    def _forward_event(event: dict[str, Any], progress: ProgressCallback, total_steps: int) -> None:
+        kind = event.get("event")
+        if kind == "stage":
+            stage = str(event.get("stage") or "running")
+            message = str(event.get("message") or "")
+            if stage == "caching_latents":
+                progress("running", "caching_latents", _CACHE_PROGRESS_START, message)
+            elif stage == "training":
+                progress("running", "training", _TRAIN_PROGRESS_START, message)
+            elif stage == "checkpointing":
+                progress("running", "checkpointing", _TRAIN_PROGRESS_START, message)
+            elif stage == "saving":
+                progress("saving", "saving", 0.95, message)
+            else:
+                progress("loading_model", "loading_model", 0.12, message)
+        elif kind == "cache":
+            done = int(event.get("done") or 0)
+            total = max(1, int(event.get("total") or 1))
+            progress(
+                "running",
+                "caching_latents",
+                _scaled(_CACHE_PROGRESS_START, _CACHE_PROGRESS_END, done, total),
+                f"Encoded {done} of {total} dataset item(s).",
+            )
+        elif kind == "step":
+            step = int(event.get("step") or 0)
+            loss = event.get("loss")
+            progress(
+                "running",
+                "training",
+                _scaled(_TRAIN_PROGRESS_START, _TRAIN_PROGRESS_END, step, total_steps),
+                _training_message(step, total_steps, float(loss) if loss is not None else None),
+            )
+        elif kind == "sample":
+            step = int(event.get("step") or 0)
+            samples = list(event.get("samples") or [])
+            progress(
+                "running",
+                "rendering",
+                _scaled(_TRAIN_PROGRESS_START, _TRAIN_PROGRESS_END, step, total_steps),
+                f"Rendered {len(samples)} training sample(s) at step {step}.",
+                {"latestTrainingSamples": samples},
+            )
+
+    @staticmethod
+    def _read_result(result_path: Path, stdout_log: Path) -> dict[str, Any]:
+        if result_path.exists():
+            try:
+                return json.loads(result_path.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                pass
+        try:
+            lines = [line for line in stdout_log.read_text(encoding="utf-8").splitlines() if line.strip()]
+        except OSError:
+            lines = []
+        for line in reversed(lines):
+            try:
+                return json.loads(line)
+            except ValueError:
+                continue
+        return {"error": "Lens training sidecar produced no parseable result."}
+
+    def _result_summary(
+        self,
+        *,
+        plan: dict[str, Any],
+        config: TrainingRunConfig,
+        result: dict[str, Any],
+        total_steps: int,
+        items: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        dataset = plan.get("dataset") or {}
+        target = plan.get("target") or {}
+        output = plan.get("output") or {}
+        training_samples = list(result.get("trainingSamples") or [])
+        return {
+            "mode": "train",
+            "kernel": self.kernel_id,
+            "loraId": output.get("loraId"),
+            "outputDir": output.get("outputDir"),
+            "fileName": output.get("fileName"),
+            "outputPath": result.get("outputPath"),
+            "format": output.get("format") or "safetensors",
+            "datasetId": dataset.get("datasetId"),
+            "datasetVersion": dataset.get("datasetVersion"),
+            "datasetItemCount": len(items),
+            "targetId": target.get("targetId"),
+            "baseModel": target.get("baseModel"),
+            "baseModelSource": result.get("baseModelSource"),
+            "steps": total_steps,
+            "stepsCompleted": result.get("stepsCompleted") or total_steps,
+            "checkpoints": list(result.get("checkpoints") or []),
+            "trainingSamples": training_samples,
+            "latestTrainingSamples": training_samples[-4:],
+            "samplePrompts": config.sample_prompts,
+            "sampleSettings": {
+                "numInferenceSteps": config.sample_steps,
+                "guidanceScale": config.sample_guidance_scale,
+                # Lens previews render on the multi-step base model, not Lens-Turbo.
+                "sampleSource": "live_adapter_base",
+            },
+            "rank": config.rank,
+            "alpha": config.alpha,
+            "learningRate": config.learning_rate,
+            "lrScheduler": config.lr_scheduler,
+            "lrWarmupSteps": config.lr_warmup_steps,
+            "resolution": result.get("resolution") or config.resolution,
+            "triggerWords": trigger_words(plan),
+            "planVersion": plan.get("planVersion"),
+            "completedAt": now(),
+        }
+
+
 # --------------------------------------------------------------------------- #
 # Kernel registry
 # --------------------------------------------------------------------------- #
@@ -2083,11 +2378,12 @@ class LtxMlxLoraTrainer(ZImageLoraTrainer):
 
 _TRAINING_KERNELS: dict[str, Callable[[], Any]] = {
     ZImageLoraTrainer.kernel_id: ZImageLoraTrainer,
+    LensLoraTrainer.kernel_id: LensLoraTrainer,
     LtxMlxLoraTrainer.kernel_id: LtxMlxLoraTrainer,
 }
 
 
-def create_training_kernel(kernel_id: Any) -> ZImageLoraTrainer:
+def create_training_kernel(kernel_id: Any) -> Any:
     """Return the trainer for a plan's ``target.kernel`` id, or raise for an
     unknown kernel. Mirrors the image/video adapter factories."""
 

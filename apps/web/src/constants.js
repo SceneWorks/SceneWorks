@@ -31,6 +31,13 @@ export const fallbackModels = [
     ui: { description: "Qwen image edit target." },
   },
   {
+    id: "lens",
+    name: "Lens",
+    type: "image",
+    capabilities: ["text_to_image", "style_variations"],
+    ui: { description: "Microsoft Lens base text-to-image (20-step, CFG 5.0); higher quality than Turbo, also the LoRA training base." },
+  },
+  {
     id: "lens_turbo",
     name: "Lens-Turbo",
     type: "image",
