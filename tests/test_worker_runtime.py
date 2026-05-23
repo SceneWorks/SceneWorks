@@ -987,6 +987,38 @@ def test_sensenova_resolution_for_snaps_to_buckets():
     assert sensenova_resolution_for(1500, 1000) == (2496, 1664)
 
 
+def test_create_image_adapter_routes_sensenova_u1_fast():
+    adapter = create_image_adapter({"payload": {"model": "sensenova_u1_8b_fast"}})
+    assert adapter.__class__.__name__ == "SenseNovaU1Adapter"
+    assert adapter.id == "sensenova_u1"
+
+
+def test_sensenova_u1_fast_model_target_defaults():
+    target = MODEL_TARGETS["sensenova_u1_8b_fast"]
+    assert target["adapter"] == "sensenova_u1"
+    assert target["family"] == "sensenova-u1"
+    # 8-step distill LoRA: shares the base weights, cfg 1.0 / 8 steps.
+    assert target["steps"] == 8
+    assert target["guidanceScale"] == 1.0
+    assert target["repo"] == "sensenova/SenseNova-U1-8B-MoT"
+    assert target["distillLora"] == {
+        "repo": "sensenova/SenseNova-U1-8B-MoT-LoRAs",
+        "file": "SenseNova-U1-8B-MoT-LoRA-8step-V1.0.safetensors",
+    }
+
+
+def test_sensenova_u1_guidance_scale_defaults_from_model_target():
+    request = image_request_from_job({"payload": {"projectId": "project_x", "prompt": "a cat"}})
+    # The fast variant defaults to cfg 1.0; the base variant to cfg 4.0.
+    assert SenseNovaU1Adapter._guidance_scale(request, MODEL_TARGETS["sensenova_u1_8b_fast"]) == 1.0
+    assert SenseNovaU1Adapter._guidance_scale(request, MODEL_TARGETS["sensenova_u1_8b"]) == 4.0
+    # An explicit request value overrides the per-model default.
+    override = image_request_from_job(
+        {"payload": {"projectId": "project_x", "prompt": "a cat", "advanced": {"guidanceScale": 2.5}}}
+    )
+    assert SenseNovaU1Adapter._guidance_scale(override, MODEL_TARGETS["sensenova_u1_8b_fast"]) == 2.5
+
+
 def test_huggingface_repo_cache_path_stays_under_cache_root(monkeypatch, tmp_path):
     monkeypatch.setenv("HUGGINGFACE_HUB_CACHE", str(tmp_path / "hub"))
 

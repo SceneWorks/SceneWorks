@@ -250,6 +250,20 @@ MODEL_TARGETS = {
         "repo": "sensenova/SenseNova-U1-8B-MoT",
         "adapter": "sensenova_u1",
     },
+    "sensenova_u1_8b_fast": {
+        "label": "SenseNova-U1 8B Fast",
+        "family": "sensenova-u1",
+        "supportsEdit": False,
+        # 8-step distill LoRA (cfg 1.0): shares the base weights, ~5-6x faster.
+        "steps": 8,
+        "guidanceScale": 1.0,
+        "repo": "sensenova/SenseNova-U1-8B-MoT",
+        "adapter": "sensenova_u1",
+        "distillLora": {
+            "repo": "sensenova/SenseNova-U1-8B-MoT-LoRAs",
+            "file": "SenseNova-U1-8B-MoT-LoRA-8step-V1.0.safetensors",
+        },
+    },
 }
 
 
@@ -1291,7 +1305,10 @@ class SenseNovaU1Adapter:
     type, so ``AutoModel.from_pretrained`` resolves it with no trust_remote_code.
     Attention uses torch SDPA (flash-attn optional), so it runs on CUDA and MPS.
 
-    Text-to-image only for now — no edit/img2img, VQA, interleaved, or LoRA.
+    Text-to-image only for now — no edit/img2img, VQA, or interleaved. The
+    ``sensenova_u1_8b_fast`` variant merges the upstream 8-step distill LoRA at
+    load (see ``distillLora`` in MODEL_TARGETS); user-supplied LoRAs are still
+    rejected.
     """
 
     id = "sensenova_u1"
@@ -1305,6 +1322,11 @@ class SenseNovaU1Adapter:
         self._tokenizer: Any = None
         self._repo: str | None = None
         self._loaded_model: str | None = None
+        # Identity of the distill LoRA merged into the cached model (or None for
+        # the base model). The merge mutates weights in place, so this must be
+        # part of the cache key — otherwise a fast-variant model would be reused
+        # for the base 50-step variant (and vice versa).
+        self._distill_lora_key: str | None = None
 
     def loaded_models(self) -> list[str]:
         return [self._loaded_model] if self._loaded_model else []
@@ -1319,11 +1341,12 @@ class SenseNovaU1Adapter:
         return safe_int(request.advanced.get("numInferenceSteps"), int(model_target.get("steps", 50)), 1, 100)
 
     @staticmethod
-    def _guidance_scale(request: ImageRequest) -> float:
+    def _guidance_scale(request: ImageRequest, model_target: dict[str, Any]) -> float:
+        default = float(model_target.get("guidanceScale", 4.0))
         try:
-            return float(request.advanced.get("guidanceScale", 4.0))
+            return float(request.advanced.get("guidanceScale", default))
         except (TypeError, ValueError):
-            return 4.0
+            return default
 
     def generate(
         self,
@@ -1347,13 +1370,14 @@ class SenseNovaU1Adapter:
         activate_torch_device(torch, device)
         dtype = select_torch_dtype(torch, device, request.advanced.get("dtype"))
         repo = request.advanced.get("modelRepo") or model_target["repo"]
+        distill_lora = model_target.get("distillLora") if isinstance(model_target.get("distillLora"), dict) else None
         steps = self._num_inference_steps(request, model_target)
-        guidance_scale = self._guidance_scale(request)
+        guidance_scale = self._guidance_scale(request, model_target)
         timestep_shift = float(request.advanced.get("timestepShift", 3.0) or 3.0)
         width, height = sensenova_resolution_for(request.width, request.height)
 
         progress("loading_model", "loading_model", 0.18, f"Loading {model_target['label']}.")
-        model, tokenizer = self._load_model(torch, repo, device, dtype, job_id=job["id"])
+        model, tokenizer = self._load_model(torch, repo, device, dtype, distill_lora=distill_lora, job_id=job["id"])
         self._loaded_model = request.model
         label = model_target["label"]
 
@@ -1426,15 +1450,18 @@ class SenseNovaU1Adapter:
         device: str,
         dtype: Any,
         *,
+        distill_lora: dict[str, Any] | None = None,
         job_id: str,
     ) -> tuple[Any, Any]:
-        if self._model is not None and self._repo == repo:
+        lora_key = f"{distill_lora['repo']}/{distill_lora['file']}" if distill_lora else None
+        if self._model is not None and self._repo == repo and self._distill_lora_key == lora_key:
             emit_worker_event(
                 "image_pipeline_cache_hit",
                 jobId=job_id,
                 adapter=self.id,
                 repo=repo,
                 device=device,
+                distillLora=lora_key,
                 gpuMemory=gpu_memory_snapshot(torch, device),
             )
             return self._model, self._tokenizer
@@ -1442,6 +1469,7 @@ class SenseNovaU1Adapter:
             self._model = None
             self._tokenizer = None
             self._repo = None
+            self._distill_lora_key = None
             empty_torch_cache(torch)
         self._ensure_vendor_on_path()
         import sensenova_u1  # noqa: F401 — import registers the neo_chat model type
@@ -1454,20 +1482,64 @@ class SenseNovaU1Adapter:
             repo=repo,
             device=device,
             dtype=str(dtype),
+            distillLora=lora_key,
             cached=huggingface_repo_cache_exists(repo),
         )
         model, tokenizer = load_model_and_tokenizer(repo, dtype=dtype, device=device)
+        if distill_lora:
+            self._merge_distill_lora(model, distill_lora, job_id=job_id)
         self._model = model
         self._tokenizer = tokenizer
         self._repo = repo
+        self._distill_lora_key = lora_key
         emit_worker_event(
             "image_pipeline_load_complete",
             jobId=job_id,
             adapter=self.id,
             repo=repo,
             device=device,
+            distillLora=lora_key,
         )
         return model, tokenizer
+
+    def _merge_distill_lora(self, model: Any, distill_lora: dict[str, Any], *, job_id: str) -> None:
+        """Resolve and merge the distill LoRA into the loaded model (in place).
+
+        The ~0.4GB LoRA lives in a separate HF repo from the base weights, so it
+        is fetched on demand: the local cache is checked first, then the hub. The
+        vendored merge folds the delta into the model weights, so it survives the
+        model cache (keyed by ``self._distill_lora_key``) with no per-call cost.
+        """
+        from sensenova_u1.utils import load_and_merge_lora_weight_from_safetensors
+
+        repo = str(distill_lora["repo"])
+        file_name = str(distill_lora["file"])
+        emit_worker_event(
+            "image_lora_apply_start",
+            jobId=job_id,
+            adapter=self.id,
+            loraRepo=repo,
+            loraFile=file_name,
+        )
+        lora_path = self._resolve_distill_lora_path(repo, file_name)
+        load_and_merge_lora_weight_from_safetensors(model, str(lora_path))
+        emit_worker_event(
+            "image_lora_apply_complete",
+            jobId=job_id,
+            adapter=self.id,
+            loraRepo=repo,
+            loraFile=file_name,
+            loraPath=str(lora_path),
+        )
+
+    @staticmethod
+    def _resolve_distill_lora_path(repo: str, file_name: str) -> str:
+        from huggingface_hub import hf_hub_download
+
+        try:
+            return hf_hub_download(repo_id=repo, filename=file_name, local_files_only=True)
+        except Exception:
+            return hf_hub_download(repo_id=repo, filename=file_name)
 
     def _run_inference(
         self,
