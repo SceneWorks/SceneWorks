@@ -4,6 +4,7 @@ from dataclasses import dataclass
 import hashlib
 import importlib
 import json
+import math
 import os
 import sys
 import warnings
@@ -227,6 +228,15 @@ MODEL_TARGETS = {
         "steps": 20,
         "repo": "Qwen/Qwen-Image-Edit",
         "adapter": "qwen_image",
+    },
+    "lens_turbo": {
+        "label": "Lens-Turbo",
+        "family": "lens",
+        "supportsEdit": False,
+        # Distilled 4-step variant; the base Lens model uses 20-50 steps.
+        "steps": 4,
+        "repo": "microsoft/Lens-Turbo",
+        "adapter": "lens_turbo",
     },
 }
 
@@ -927,6 +937,290 @@ class QwenImageAdapter:
             return 4.0
 
 
+# Lens trains on two base resolutions crossed with nine aspect ratios and expects
+# `base_resolution` + `aspect_ratio` rather than free width/height. These mirror
+# scene_worker/_vendor/lens/resolution.py so we can snap a SceneWorks W×H request
+# onto the nearest trained bucket without importing the (diffusers-injecting) lens
+# package just to read the table.
+_LENS_BASE_RESOLUTIONS = (1024, 1440)
+_LENS_ASPECT_RATIOS = (
+    ("1:2", 1 / 2),
+    ("9:16", 9 / 16),
+    ("2:3", 2 / 3),
+    ("3:4", 3 / 4),
+    ("1:1", 1.0),
+    ("4:3", 4 / 3),
+    ("3:2", 3 / 2),
+    ("16:9", 16 / 9),
+    ("2:1", 2.0),
+)
+
+
+def lens_resolution_for(width: int, height: int) -> tuple[int, str]:
+    """Snap a requested W×H to the nearest Lens (base_resolution, aspect_ratio).
+
+    The base is chosen by total area against the geometric midpoint of the two
+    bases' square areas (1024² and 1440²); the aspect ratio by closest log-ratio
+    so portrait/landscape requests land on the matching bucket.
+    """
+    width = max(1, int(width))
+    height = max(1, int(height))
+    base = 1440 if width * height >= 1024 * 1440 else 1024
+    target = math.log(width / height)
+    aspect = min(_LENS_ASPECT_RATIOS, key=lambda item: abs(target - math.log(item[1])))[0]
+    return base, aspect
+
+
+class LensTurboAdapter:
+    """Microsoft Lens / Lens-Turbo text-to-image via the vendored `lens` package.
+
+    Lens has no published pip package and no `trust_remote_code` path: importing
+    `lens` injects its custom `LensPipeline`/`LensTransformer2DModel`/
+    `LensGptOssEncoder` classes into the diffusers/transformers namespaces that
+    `model_index.json` references. The package is vendored at
+    `scene_worker/_vendor/lens` and placed on `sys.path` lazily here so the worker
+    stays importable on hosts without the Lens dependency stack installed.
+
+    Text-to-image only (no edit/img2img) and no LoRA support yet.
+    """
+
+    id = "lens_turbo"
+
+    def __init__(self) -> None:
+        self._text_pipe: Any | None = None
+        self._loaded_repo: str | None = None
+        self._loaded_model: str | None = None
+
+    def loaded_models(self) -> list[str]:
+        return sorted({value for value in (self._loaded_repo, self._loaded_model) if value})
+
+    @staticmethod
+    def _vendor_on_path() -> None:
+        vendor = str(Path(__file__).resolve().parent / "_vendor")
+        if vendor not in sys.path:
+            sys.path.insert(0, vendor)
+
+    def generate(
+        self,
+        *,
+        settings: WorkerSettings,
+        job: dict[str, Any],
+        progress: ProgressCallback,
+        cancel_requested: CancelCallback,
+    ) -> dict[str, Any]:
+        request = image_request_from_job(job)
+        if request.mode == "edit_image":
+            raise RuntimeError(f"{request.model} does not support image editing.")
+        reject_loras_if_unsupported(request.loras, self.id)
+        model_target = MODEL_TARGETS.get(request.model, MODEL_TARGETS["lens_turbo"])
+        if model_target.get("adapter") != self.id:
+            raise RuntimeError(f"{request.model} is not a Lens target.")
+
+        progress("loading_model", "loading_model", 0.18, f"Loading {model_target['label']}.")
+        pipe = self._load_pipeline(settings, request, model_target, progress=progress, job_id=job["id"])
+        total = request.count
+        torch = importlib.import_module("torch")
+        device = select_torch_device(torch, settings.gpu_id)
+        label = "Lens-Turbo"
+
+        def image_at_index(index: int) -> Image.Image:
+            seed = resolve_seed(request.seed, request.prompt, index, request.seeds)
+            progress(
+                "running",
+                "generating",
+                image_batch_progress(index, total),
+                format_batch_running_message(label, index, total),
+            )
+            emit_worker_event(
+                "image_inference_start",
+                jobId=job["id"],
+                adapter=self.id,
+                model=request.model,
+                imageIndex=index,
+                imageCount=total,
+                device=device,
+                gpuMemory=gpu_memory_snapshot(torch, device),
+            )
+            try:
+                image = self._run_pipeline(settings, pipe, request, seed)
+            except Exception as exc:
+                emit_worker_event(
+                    "image_inference_failed",
+                    jobId=job["id"],
+                    adapter=self.id,
+                    imageIndex=index,
+                    error=str(exc),
+                    errorType=exc.__class__.__name__,
+                )
+                raise
+            emit_worker_event(
+                "image_inference_complete",
+                jobId=job["id"],
+                adapter=self.id,
+                imageIndex=index,
+                gpuMemory=gpu_memory_snapshot(torch, device),
+            )
+            return image
+
+        base_resolution, aspect_ratio = lens_resolution_for(request.width, request.height)
+        return ImageAssetWriter().write_incremental_outputs(
+            settings=settings,
+            job=job,
+            image_count=total,
+            image_at_index=image_at_index,
+            adapter_id=self.id,
+            progress=progress,
+            cancel_requested=cancel_requested,
+            raw_settings={
+                **request.advanced,
+                "repo": request.advanced.get("modelRepo") or model_target["repo"],
+                "numInferenceSteps": self._num_inference_steps(request, model_target),
+                "guidanceScale": self._guidance_scale(request),
+                "baseResolution": base_resolution,
+                "aspectRatio": aspect_ratio,
+                "textEncoderMxfp4": not bool(request.advanced.get("disableMxfp4", False)),
+                "realModelInference": True,
+            },
+        )
+
+    def _load_pipeline(
+        self,
+        settings: WorkerSettings,
+        request: ImageRequest,
+        model_target: dict[str, Any],
+        progress: ProgressCallback,
+        *,
+        job_id: str,
+    ) -> Any:
+        self._vendor_on_path()
+        torch = importlib.import_module("torch")
+        transformers = importlib.import_module("transformers")
+        lens = importlib.import_module("lens")
+        repo = request.advanced.get("modelRepo") or model_target["repo"]
+        require_inference_backend_for_gpu_worker(torch, settings.gpu_id)
+        device = select_torch_device(torch, settings.gpu_id)
+        activate_torch_device(torch, device)
+        dtype = select_torch_dtype(torch, device, request.advanced.get("dtype"))
+        cpu_offload = bool(request.advanced.get("cpuOffload", False))
+        disable_mxfp4 = bool(request.advanced.get("disableMxfp4", False))
+
+        if self._text_pipe is not None and self._loaded_repo == repo:
+            self._loaded_model = request.model
+            progress("loading_model", "loading_model", 0.22, f"Using cached {model_target['label']}.")
+            emit_worker_event(
+                "image_pipeline_cache_hit",
+                jobId=job_id,
+                adapter=self.id,
+                model=request.model,
+                repo=repo,
+                device=device,
+                componentDevices=pipeline_component_devices(self._text_pipe),
+                gpuMemory=gpu_memory_snapshot(torch, device),
+            )
+            return self._text_pipe
+        if self._loaded_repo and self._loaded_repo != repo:
+            self._evict(torch)
+
+        cache_action = "Loading cached" if huggingface_repo_cache_exists(repo) else "Downloading"
+        progress("loading_model", "loading_model", 0.2, f"{cache_action} {model_target['label']} model files.")
+        emit_worker_event(
+            "image_pipeline_load_start",
+            jobId=job_id,
+            adapter=self.id,
+            model=request.model,
+            repo=repo,
+            device=device,
+            dtype=str(dtype),
+            useImg2img=False,
+            cpuOffload=cpu_offload,
+            mxfp4=not disable_mxfp4,
+            cached=cache_action == "Loading cached",
+        )
+        # Pre-load the gpt-oss-20b text encoder so MXFP4 dequantization is
+        # controllable (mirrors lens/inference.py). The hub weights are MXFP4;
+        # with Triton present they stay quantized (~13GB), otherwise transformers
+        # auto-dequantizes to bf16 (~40GB). disableMxfp4 forces bf16 explicitly.
+        text_encoder_kwargs: dict[str, Any] = {"subfolder": "text_encoder", "dtype": dtype}
+        mxfp4_config = getattr(transformers, "Mxfp4Config", None)
+        if mxfp4_config is not None:
+            text_encoder_kwargs["quantization_config"] = mxfp4_config(dequantize=disable_mxfp4)
+        text_encoder = lens.LensGptOssEncoder.from_pretrained(repo, **text_encoder_kwargs)
+        pipe = lens.LensPipeline.from_pretrained(repo, text_encoder=text_encoder, torch_dtype=dtype)
+        emit_worker_event(
+            "image_pipeline_load_complete",
+            jobId=job_id,
+            adapter=self.id,
+            model=request.model,
+            repo=repo,
+            componentDevices=pipeline_component_devices(pipe),
+        )
+        progress("loading_model", "loading_model", 0.22, f"Moving {model_target['label']} to {device}.")
+        offload_enabled = cpu_offload and hasattr(pipe, "enable_model_cpu_offload")
+        if offload_enabled:
+            pipe.enable_model_cpu_offload()
+        else:
+            pipe.to(device)
+        component_devices = verify_pipeline_on_device(
+            pipe,
+            requested_device=device,
+            model_label=model_target["label"],
+            allow_offload=offload_enabled,
+        )
+        emit_worker_event(
+            "image_pipeline_on_device",
+            jobId=job_id,
+            adapter=self.id,
+            model=request.model,
+            requestedDevice=device,
+            cpuOffload=offload_enabled,
+            componentDevices=component_devices,
+            gpuMemory=gpu_memory_snapshot(torch, device),
+        )
+        self._text_pipe = pipe
+        self._loaded_repo = repo
+        self._loaded_model = request.model
+        return pipe
+
+    def _evict(self, torch: Any) -> None:
+        self._text_pipe = None
+        self._loaded_repo = None
+        self._loaded_model = None
+        empty_torch_cache(torch)
+
+    def _run_pipeline(self, settings: WorkerSettings, pipe: Any, request: ImageRequest, seed: int) -> Image.Image:
+        torch = importlib.import_module("torch")
+        device = select_torch_device(torch, settings.gpu_id)
+        activate_torch_device(torch, device)
+        generator = torch.Generator(device if device.startswith("cuda") else "cpu").manual_seed(seed)
+        model_target = MODEL_TARGETS.get(request.model, MODEL_TARGETS["lens_turbo"])
+        base_resolution, aspect_ratio = lens_resolution_for(request.width, request.height)
+        kwargs = {
+            "prompt": request.prompt,
+            "base_resolution": base_resolution,
+            "aspect_ratio": aspect_ratio,
+            "num_inference_steps": self._num_inference_steps(request, model_target),
+            "guidance_scale": self._guidance_scale(request),
+            "num_images_per_prompt": 1,
+            "generator": generator,
+            "enable_reasoner": False,
+        }
+        if request.negative_prompt:
+            kwargs["negative_prompt"] = request.negative_prompt
+        output = pipe(**filter_call_kwargs(pipe, kwargs))
+        return output.images[0].convert("RGB")
+
+    def _num_inference_steps(self, request: ImageRequest, model_target: dict[str, Any]) -> int:
+        return safe_int(request.advanced.get("steps"), model_target["steps"], 1, 80)
+
+    def _guidance_scale(self, request: ImageRequest) -> float:
+        # Lens-Turbo is distilled for guidance_scale ~1.0 (no CFG); the base Lens
+        # model uses ~5.0.
+        try:
+            return float(request.advanced.get("guidanceScale", 1.0))
+        except (TypeError, ValueError):
+            return 1.0
+
+
 class ProceduralImageAdapter:
     id = "procedural_preview"
 
@@ -976,24 +1270,28 @@ class ProceduralImageAdapter:
 def create_image_adapter(
     job: dict[str, Any],
     adapters: dict[str, object] | None = None,
-) -> ProceduralImageAdapter | ZImageDiffusersAdapter | QwenImageAdapter:
+) -> ProceduralImageAdapter | ZImageDiffusersAdapter | QwenImageAdapter | LensTurboAdapter:
     payload = job.get("payload", {})
     requested = os.getenv("SCENEWORKS_IMAGE_ADAPTER", payload.get("adapter", "")).strip()
     if requested == "auto":
         requested = ""
     if requested in {"procedural", "procedural_preview"}:
         return adapters.get("procedural_preview") if adapters else ProceduralImageAdapter()
-    if requested and requested not in {ZImageDiffusersAdapter.id, QwenImageAdapter.id}:
+    if requested and requested not in {ZImageDiffusersAdapter.id, QwenImageAdapter.id, LensTurboAdapter.id}:
         raise RuntimeError(f"Unsupported SCENEWORKS_IMAGE_ADAPTER value: {requested}.")
     if requested == ZImageDiffusersAdapter.id:
         return adapters.get("z_image_diffusers") if adapters else ZImageDiffusersAdapter()
     if requested == QwenImageAdapter.id:
         return adapters.get("qwen_image") if adapters else QwenImageAdapter()
+    if requested == LensTurboAdapter.id:
+        return adapters.get("lens_turbo") if adapters else LensTurboAdapter()
     model_target = MODEL_TARGETS.get(payload.get("model", "z_image_turbo"), {})
     if model_target.get("adapter") == ZImageDiffusersAdapter.id:
         return adapters.get("z_image_diffusers") if adapters else ZImageDiffusersAdapter()
     if model_target.get("adapter") == QwenImageAdapter.id:
         return adapters.get("qwen_image") if adapters else QwenImageAdapter()
+    if model_target.get("adapter") == LensTurboAdapter.id:
+        return adapters.get("lens_turbo") if adapters else LensTurboAdapter()
     return adapters.get("procedural_preview") if adapters else ProceduralImageAdapter()
 
 

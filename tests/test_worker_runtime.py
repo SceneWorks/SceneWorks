@@ -21,6 +21,7 @@ from scene_worker.caption_adapters import (
 )
 from scene_worker.image_adapters import (
     ImageAssetWriter,
+    LensTurboAdapter,
     MODEL_TARGETS,
     QwenImageAdapter,
     ZImageDiffusersAdapter,
@@ -32,6 +33,7 @@ from scene_worker.image_adapters import (
     huggingface_repo_cache_path,
     image_batch_progress,
     image_request_from_job,
+    lens_resolution_for,
     pipeline_component_devices,
     require_inference_backend_for_gpu_worker,
     resolve_seed,
@@ -817,6 +819,59 @@ def test_image_adapter_env_aliases_and_unknown_values(monkeypatch):
         assert "Unsupported SCENEWORKS_IMAGE_ADAPTER" in str(exc)
     else:
         raise AssertionError("Unknown image adapter override should fail loudly.")
+
+
+def test_create_image_adapter_routes_lens_turbo():
+    adapter = create_image_adapter({"payload": {"model": "lens_turbo"}})
+    assert adapter.__class__.__name__ == "LensTurboAdapter"
+    assert adapter.id == "lens_turbo"
+
+
+def test_image_adapter_env_override_selects_lens(monkeypatch):
+    monkeypatch.setenv("SCENEWORKS_IMAGE_ADAPTER", "lens_turbo")
+    # Env override wins even when the payload names a different family's model.
+    adapter = create_image_adapter({"payload": {"model": "z_image_turbo"}})
+    assert adapter.__class__.__name__ == "LensTurboAdapter"
+
+
+def test_lens_turbo_model_target_defaults():
+    target = MODEL_TARGETS["lens_turbo"]
+    assert target["adapter"] == "lens_turbo"
+    assert target["family"] == "lens"
+    assert target["steps"] == 4
+    assert target["supportsEdit"] is False
+    assert target["repo"] == "microsoft/Lens-Turbo"
+
+
+def test_lens_turbo_rejects_image_edit(tmp_path):
+    job = {
+        "id": "job_lens_edit",
+        "payload": {
+            "projectId": "project_x",
+            "mode": "edit_image",
+            "model": "lens_turbo",
+            "prompt": "a cat",
+        },
+    }
+    noop = lambda *args, **kwargs: None  # noqa: E731
+    try:
+        LensTurboAdapter().generate(settings=None, job=job, progress=noop, cancel_requested=lambda: False)
+    except RuntimeError as exc:
+        assert "does not support image editing" in str(exc)
+    else:
+        raise AssertionError("Lens-Turbo is text-to-image only and must reject edit_image.")
+
+
+def test_lens_resolution_for_snaps_to_buckets():
+    # Square requests pick the base by area: <1024*1440 px -> 1024, else 1440.
+    assert lens_resolution_for(1024, 1024) == (1024, "1:1")
+    assert lens_resolution_for(1440, 1440) == (1440, "1:1")
+    assert lens_resolution_for(2048, 2048) == (1440, "1:1")
+    # Aspect ratio snaps by closest log-ratio (W:H).
+    assert lens_resolution_for(1280, 720) == (1024, "16:9")
+    assert lens_resolution_for(720, 1280) == (1024, "9:16")
+    assert lens_resolution_for(1152, 864) == (1024, "4:3")
+    assert lens_resolution_for(864, 1152) == (1024, "3:4")
 
 
 def test_huggingface_repo_cache_path_stays_under_cache_root(monkeypatch, tmp_path):

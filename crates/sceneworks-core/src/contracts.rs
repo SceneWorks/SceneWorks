@@ -136,6 +136,7 @@ string_enum! {
         ProceduralPreview => "procedural_preview",
         ZImageDiffusers => "z_image_diffusers",
         QwenImage => "qwen_image",
+        LensTurbo => "lens_turbo",
         ProceduralVideo => "procedural_video",
         ProceduralPersonTracking => "procedural_person_tracking",
         FfmpegFrameExtract => "ffmpeg-frame-extract",

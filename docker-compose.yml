@@ -35,8 +35,8 @@ services:
       dockerfile: docker/worker.Dockerfile
       args:
         PYTORCH_INDEX_URL: ${SCENEWORKS_PYTORCH_INDEX_URL:-https://download.pytorch.org/whl/cu128}
-        PYTORCH_SPEC: ${SCENEWORKS_PYTORCH_SPEC:-torch>=2.8,<2.9}
-        PYTORCH_AUDIO_SPEC: ${SCENEWORKS_PYTORCH_AUDIO_SPEC:-torchaudio>=2.8,<2.9}
+        PYTORCH_SPEC: ${SCENEWORKS_PYTORCH_SPEC:-torch>=2.11,<2.12}
+        PYTORCH_AUDIO_SPEC: ${SCENEWORKS_PYTORCH_AUDIO_SPEC:-torchaudio>=2.11,<2.12}
         INCLUDE_LTX_PIPELINES: ${SCENEWORKS_INCLUDE_LTX_PIPELINES:-1}
     environment:
       SCENEWORKS_API_URL: http://api:${SCENEWORKS_API_PORT:-8010}

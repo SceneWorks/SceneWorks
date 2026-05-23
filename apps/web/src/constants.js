@@ -31,6 +31,13 @@ export const fallbackModels = [
     ui: { description: "Qwen image edit target." },
   },
   {
+    id: "lens_turbo",
+    name: "Lens-Turbo",
+    type: "image",
+    capabilities: ["text_to_image", "style_variations"],
+    ui: { description: "Microsoft Lens distilled 4-step text-to-image; strong text rendering, large-VRAM GPU." },
+  },
+  {
     id: "ltx_2_3",
     name: "LTX-2.3",
     type: "video",

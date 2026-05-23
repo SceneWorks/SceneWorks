@@ -15,7 +15,13 @@ import httpx
 
 from .caption_adapters import run_training_caption_job
 from .gpu import cpu_worker_id, discover_gpu, discover_gpus, gpu_utilization, gpu_worker_id
-from .image_adapters import ProceduralImageAdapter, QwenImageAdapter, ZImageDiffusersAdapter, create_image_adapter
+from .image_adapters import (
+    LensTurboAdapter,
+    ProceduralImageAdapter,
+    QwenImageAdapter,
+    ZImageDiffusersAdapter,
+    create_image_adapter,
+)
 from .person_adapters import (
     detector_backend_available,
     run_person_detect,
@@ -875,6 +881,7 @@ def run_worker_loop(settings: WorkerSettings) -> None:
         "procedural_preview": ProceduralImageAdapter(),
         "qwen_image": QwenImageAdapter(),
         "z_image_diffusers": ZImageDiffusersAdapter(),
+        "lens_turbo": LensTurboAdapter(),
     }
     max_registration_attempts = 20
 

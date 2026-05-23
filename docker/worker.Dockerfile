@@ -1,8 +1,11 @@
 FROM python:3.12-slim AS builder
 
 ARG PYTORCH_INDEX_URL=https://download.pytorch.org/whl/cpu
-ARG PYTORCH_SPEC=torch>=2.8,<2.9
-ARG PYTORCH_AUDIO_SPEC=torchaudio>=2.8,<2.9
+# torch 2.11 / cu128 is required for Blackwell (sm_120) and matches the stack
+# Microsoft Lens needs (see apps/worker/requirements.txt). The cu128 wheel
+# bundles a Triton that the gpt-oss-20b mxfp4 text-encoder path uses.
+ARG PYTORCH_SPEC=torch>=2.11,<2.12
+ARG PYTORCH_AUDIO_SPEC=torchaudio>=2.11,<2.12
 ARG INCLUDE_LTX_PIPELINES=1
 # Real person detection/tracking/segmentation backends (ultralytics + SAM2) for
 # the Replace Person workflow (epic sc-1090). Opt-in like the LTX pipelines.
