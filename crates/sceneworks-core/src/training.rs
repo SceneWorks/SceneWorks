@@ -723,11 +723,13 @@ fn lens_turbo_lora_target() -> TrainingTarget {
                 // Non-distilled training base; override with "microsoft/Lens-Base"
                 // to train on the 50-step supervised checkpoint instead (sc-1584).
                 "baseModelRepo": "microsoft/Lens",
-                // Samples render through Lens-Turbo (the deployment target), so
-                // they use Turbo's 4-step / CFG 1.0 settings, not the base's.
-                "sampleEvery": 250,
-                "sampleSteps": 4,
-                "sampleGuidanceScale": 1.0,
+                // In-training previews render on the loaded base model (not the
+                // distilled Turbo), so they use the base's 20-step / CFG 5.0
+                // settings — 4-step / CFG 1.0 on the non-distilled base is garbage.
+                // Heavier than Turbo previews, so a wider cadence by default.
+                "sampleEvery": 500,
+                "sampleSteps": 20,
+                "sampleGuidanceScale": 5.0,
                 "qualityPreset": "balanced",
                 "outputScope": "project",
                 "requestedGpu": "auto"

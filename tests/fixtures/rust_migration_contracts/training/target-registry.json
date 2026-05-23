@@ -90,9 +90,9 @@
           "lrScheduler": "constant",
           "loraTargetModules": ["img_qkv", "txt_qkv", "to_out", "to_add_out"],
           "baseModelRepo": "microsoft/Lens",
-          "sampleEvery": 250,
-          "sampleSteps": 4,
-          "sampleGuidanceScale": 1.0,
+          "sampleEvery": 500,
+          "sampleSteps": 20,
+          "sampleGuidanceScale": 5.0,
           "qualityPreset": "balanced",
           "outputScope": "project",
           "requestedGpu": "auto"
