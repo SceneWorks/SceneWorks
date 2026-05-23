@@ -1306,6 +1306,33 @@ export function App() {
     }
   }
 
+  async function createVqaJob(asset, question, maxNewTokens) {
+    if (!activeProject) {
+      setError("Create or open a project first.");
+      return null;
+    }
+    try {
+      const job = await apiFetch("/api/v1/image/vqa/jobs", token, {
+        method: "POST",
+        body: JSON.stringify({
+          projectId: activeProject.id,
+          projectName: activeProject.name,
+          sourceAssetId: asset.id,
+          question,
+          maxNewTokens,
+          requestedGpu,
+        }),
+      });
+      setJobs((items) => [job, ...items.filter((item) => item.id !== job.id)].sort(sortNewest));
+      setError("");
+      refreshData();
+      return job;
+    } catch (err) {
+      setError(err.message);
+      return null;
+    }
+  }
+
   function rememberLocalGenerationJob(kind, job) {
     if (!job?.id) {
       return;
@@ -2005,6 +2032,9 @@ export function App() {
           <LibraryScreen
             activeProject={activeProject}
             assets={assets}
+            jobs={jobs}
+            imageModels={imageModels}
+            createVqaJob={createVqaJob}
             deleteAsset={deleteAsset}
             purgeAsset={purgeAsset}
             importAsset={importAsset}

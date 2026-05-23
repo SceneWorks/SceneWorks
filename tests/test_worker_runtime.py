@@ -34,6 +34,7 @@ from scene_worker.image_adapters import (
     image_batch_progress,
     image_request_from_job,
     lens_resolution_for,
+    model_supports_edit,
     pipeline_component_devices,
     require_inference_backend_for_gpu_worker,
     resolve_seed,
@@ -171,6 +172,7 @@ def test_gpu_worker_advertises_generation_capabilities(monkeypatch):
     capabilities = worker_capabilities({"id": "gpu-0", "name": "GPU 0", "capabilities": ["placeholder", "gpu"]})
 
     assert "image_generate" in capabilities
+    assert "image_vqa" in capabilities
     assert "video_generate" in capabilities
     assert "training_caption" in capabilities
     assert "person_replace" in capabilities
@@ -184,7 +186,7 @@ def test_gpu_worker_without_cuda_torch_does_not_claim_generation_jobs(monkeypatc
     # lora_train dry-run validation needs no inference backend, so it is
     # advertised even without torch; generation job types are not.
     assert capabilities == ["gpu", "lora_train", "nvidia"]
-    for job_type in ("image_generate", "image_edit", "video_generate", "training_caption"):
+    for job_type in ("image_generate", "image_edit", "image_vqa", "video_generate", "training_caption"):
         assert job_type not in capabilities
 
 
@@ -209,6 +211,7 @@ def test_python_worker_only_advertises_inference_job_capabilities(monkeypatch):
     assert job_capabilities == [
         "image_edit",
         "image_generate",
+        "image_vqa",
         "lora_train",
         "lora_train_execute",
         "person_replace",
@@ -976,27 +979,40 @@ def test_sensenova_u1_model_target_defaults():
     assert target["adapter"] == "sensenova_u1"
     assert target["family"] == "sensenova-u1"
     assert target["steps"] == 50
-    assert target["supportsEdit"] is False
+    # Unified model: the base entry supports instruction editing (it2i).
+    assert target["supportsEdit"] is True
     assert target["repo"] == "sensenova/SenseNova-U1-8B-MoT"
 
 
-def test_sensenova_u1_rejects_image_edit():
+def test_sensenova_u1_edit_support():
+    # Both the base unified model and the distilled fast variant support editing.
+    assert model_supports_edit("sensenova_u1_8b") is True
+    assert model_supports_edit("sensenova_u1_8b_fast") is True
+
+
+def test_sensenova_u1_vqa_strips_reasoning():
+    strip = SenseNovaU1Adapter._strip_reasoning
+    # A complete think block is removed, leaving only the answer.
+    assert strip("<think>\nweigh the options\n</think>\n\nIt's nighttime in Paris.") == "It's nighttime in Paris."
+    # A dangling/unclosed think block (reasoning truncated by the token cap) yields no leak.
+    assert strip("<think>\nreasoning that got cut off mid-thought") == ""
+    # A plain answer (no reasoning) is returned unchanged.
+    assert strip("A woman holds a yellow umbrella.") == "A woman holds a yellow umbrella."
+
+
+def test_sensenova_u1_vqa_requires_question():
+    # The VQA entry point validates the question before any model load (no torch).
     job = {
-        "id": "job_sensenova_edit",
-        "payload": {
-            "projectId": "project_x",
-            "mode": "edit_image",
-            "model": "sensenova_u1_8b",
-            "prompt": "a cat",
-        },
+        "id": "job_vqa",
+        "payload": {"projectId": "p", "sourceAssetId": "asset_1", "question": "   ", "model": "sensenova_u1_8b"},
     }
     noop = lambda *args, **kwargs: None  # noqa: E731
     try:
-        SenseNovaU1Adapter().generate(settings=None, job=job, progress=noop, cancel_requested=lambda: False)
+        SenseNovaU1Adapter().answer_question(settings=None, job=job, progress=noop, cancel_requested=lambda: False)
     except RuntimeError as exc:
-        assert "does not support image editing" in str(exc)
+        assert "requires a question" in str(exc)
     else:
-        raise AssertionError("SenseNova-U1 is text-to-image only and must reject edit_image.")
+        raise AssertionError("VQA must reject an empty question.")
 
 
 def test_sensenova_resolution_for_snaps_to_buckets():
@@ -1007,6 +1023,22 @@ def test_sensenova_resolution_for_snaps_to_buckets():
     assert sensenova_resolution_for(1024, 768) == (2368, 1760)
     assert sensenova_resolution_for(768, 1024) == (1760, 2368)
     assert sensenova_resolution_for(1500, 1000) == (2496, 1664)
+
+
+def test_image_request_allows_sensenova_wide_buckets():
+    # The W/H clamp was raised (2048 -> 4096) so SenseNova's true trained buckets
+    # (up to 3456) survive into the adapter, which snaps by the requested aspect
+    # ratio. Truncating 2720x1536 to 2048x1536 would mis-snap 16:9 to a ~4:3 bucket.
+    request = image_request_from_job({"payload": {"projectId": "p", "width": 2720, "height": 1536}})
+    assert (request.width, request.height) == (2720, 1536)
+    assert sensenova_resolution_for(request.width, request.height) == (2720, 1536)
+    assert sensenova_resolution_for(2048, 1536) != (2720, 1536)
+
+
+def test_image_request_clamps_above_new_ceiling():
+    request = image_request_from_job({"payload": {"projectId": "p", "width": 9000, "height": 9000}})
+    assert request.width == 4096
+    assert request.height == 4096
 
 
 def test_create_image_adapter_routes_sensenova_u1_fast():
@@ -1022,6 +1054,8 @@ def test_sensenova_u1_fast_model_target_defaults():
     # 8-step distill LoRA: shares the base weights, cfg 1.0 / 8 steps.
     assert target["steps"] == 8
     assert target["guidanceScale"] == 1.0
+    # Distilled editing (it2i) reuses the same variant + distill LoRA.
+    assert target["supportsEdit"] is True
     assert target["repo"] == "sensenova/SenseNova-U1-8B-MoT"
     assert target["distillLora"] == {
         "repo": "sensenova/SenseNova-U1-8B-MoT-LoRAs",

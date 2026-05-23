@@ -2694,6 +2694,11 @@ label {
 .asset-detail {
   position: sticky;
   top: 86px;
+  /* Cap to the viewport and scroll internally so a tall panel (e.g. the VQA Ask
+     box + Q&A history) stays fully reachable instead of pinning off-screen. */
+  max-height: calc(100vh - 102px);
+  overflow-y: auto;
+  overscroll-behavior: contain;
   display: grid;
   gap: 12px;
   padding: 16px;
@@ -2730,6 +2735,31 @@ label {
   font-family: var(--font-mono);
   font-size: 12px;
   overflow-wrap: anywhere;
+}
+
+.vqa-panel {
+  display: grid;
+  gap: 8px;
+}
+
+.vqa-controls {
+  display: flex;
+  align-items: flex-end;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.vqa-controls .vqa-length {
+  flex: 1;
+  min-width: 0;
+}
+
+.vqa-history {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 8px;
 }
 
 /* ---------- Model + LoRA panels ---------- */
@@ -5494,6 +5524,8 @@ label {
 
   .asset-detail {
     position: static;
+    max-height: none;
+    overflow: visible;
   }
 
   .timeline-panel,

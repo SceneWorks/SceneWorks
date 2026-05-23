@@ -6,6 +6,7 @@ import { AssetPickerField } from "./components/AssetPicker.jsx";
 import { liveElapsedSeconds } from "./formatting.js";
 import { CharacterStudio } from "./screens/CharacterStudio.jsx";
 import { ImageStudio } from "./screens/ImageStudio.jsx";
+import { LibraryScreen } from "./screens/LibraryScreen.jsx";
 import { ModelManagerScreen } from "./screens/ModelManagerScreen.jsx";
 import { SetupWizard } from "./screens/SetupWizard.jsx";
 import { PresetManagerScreen } from "./screens/PresetManagerScreen.jsx";
@@ -4367,6 +4368,48 @@ describe("SceneWorks app shell", () => {
     );
   });
 
+  it("aspect picker reflects the selected model's trained buckets", async () => {
+    root = createRoot(container);
+    await act(async () => {
+      root.render(
+        <ImageStudio
+          activeProject={{ id: "project-1", name: "Noir" }}
+          assets={[]}
+          characters={[]}
+          createImageJob={() => {}}
+          deleteAsset={() => {}}
+          gpuOptions={["auto", "1"]}
+          imageModels={[
+            {
+              id: "sensenova_u1_8b",
+              name: "SenseNova-U1 8B",
+              type: "image",
+              family: "sensenova-u1",
+              defaults: { resolution: "2048x2048" },
+              limits: { resolutions: ["2048x2048", "2720x1536", "1536x2720"] },
+            },
+          ]}
+          latestAssets={[]}
+          loras={[]}
+          onPreview={() => {}}
+          purgeAsset={() => {}}
+          presets={[]}
+          requestedGpu="auto"
+          selectedAsset={null}
+          setRequestedGpu={() => {}}
+          updateAssetStatus={() => {}}
+        />,
+      );
+    });
+    await settle();
+
+    const aspect = field(container, "Aspect");
+    const optionValues = [...aspect.querySelectorAll("option")].map((option) => option.value);
+    expect(optionValues).toEqual(["2048x2048", "2720x1536", "1536x2720"]);
+    // 1024x1024 isn't a SenseNova bucket, so the picker snaps to the model default.
+    expect(aspect.value).toBe("2048x2048");
+  });
+
   it("surfaces model and preset first and lets image generation run with no preset", async () => {
     const createImageJob = vi.fn();
     root = createRoot(container);
@@ -4618,6 +4661,66 @@ describe("SceneWorks app shell", () => {
     });
 
     expect(createImageJob).toHaveBeenCalledWith(expect.objectContaining({ model: "qwen_image", recipePresetId: "qwen_detail" }));
+  });
+
+  it("offers SenseNova-U1 in edit mode via its edit_image capability", async () => {
+    root = createRoot(container);
+    await act(async () => {
+      root.render(
+        <ImageStudio
+          activeProject={{ id: "project-1", name: "Noir" }}
+          assets={[{ id: "image-1", type: "image", displayName: "Frame One" }]}
+          characters={[]}
+          createImageJob={() => {}}
+          deleteAsset={() => {}}
+          gpuOptions={["auto"]}
+          imageModels={[
+            { id: "z_image_turbo", name: "Z-Image", type: "image", family: "z-image", capabilities: ["text_to_image"] },
+            {
+              id: "sensenova_u1_8b",
+              name: "SenseNova-U1 8B",
+              type: "image",
+              family: "sensenova-u1",
+              capabilities: ["text_to_image", "edit_image"],
+              limits: { resolutions: ["2048x2048"] },
+            },
+            {
+              id: "sensenova_u1_8b_fast",
+              name: "SenseNova-U1 8B Fast",
+              type: "image",
+              family: "sensenova-u1",
+              capabilities: ["text_to_image", "edit_image"],
+              limits: { resolutions: ["2048x2048"] },
+            },
+          ]}
+          latestAssets={[]}
+          loras={[]}
+          onPreview={() => {}}
+          purgeAsset={() => {}}
+          presets={[]}
+          requestedGpu="auto"
+          selectedAsset={{ id: "image-1", type: "image", displayName: "Frame One" }}
+          setRequestedGpu={() => {}}
+          updateAssetStatus={() => {}}
+        />,
+      );
+    });
+    await settle();
+
+    await act(async () => {
+      [...container.querySelectorAll(".segmented-control button")].find((button) => button.textContent === "Edit").click();
+    });
+    await settle();
+
+    const modelValues = [...field(container, "Model").querySelectorAll("option")].map((option) => option.value);
+    expect(modelValues).toContain("sensenova_u1_8b");
+    // The distilled fast variant also edits, so it appears in the edit picker.
+    expect(modelValues).toContain("sensenova_u1_8b_fast");
+    // The text-to-image-only model is filtered out of the edit-mode picker.
+    expect(modelValues).not.toContain("z_image_turbo");
+    // The selected model resets to an edit-capable one, so Generate doesn't submit
+    // the (filtered-out) text default and get rejected by the worker.
+    expect(field(container, "Model").value).toBe("sensenova_u1_8b");
   });
 
   it("uses preset modes as the Image Studio picker surface", async () => {
@@ -5148,5 +5251,63 @@ describe("SceneWorks app shell", () => {
     expect(saveTrackCorrections).toHaveBeenCalledWith("track_1", [
       { frameIndex: 1, rejected: true, author: "ui", source: "manual" },
     ]);
+  });
+
+  it("shows VQA history and asks a question from the asset detail panel", async () => {
+    const createVqaJob = vi.fn();
+    const asset = { id: "asset-1", type: "image", displayName: "Frame One", recipe: { prompt: "neon street" } };
+    root = createRoot(container);
+    await act(async () => {
+      root.render(
+        <LibraryScreen
+          activeProject={{ id: "project-1", name: "Noir" }}
+          assets={[asset]}
+          jobs={[
+            {
+              id: "job-vqa-1",
+              type: "image_vqa",
+              status: "completed",
+              payload: { sourceAssetId: "asset-1", question: "What time of day is it?" },
+              result: { question: "What time of day is it?", answer: "It appears to be nighttime." },
+            },
+          ]}
+          imageModels={[{ id: "sensenova_u1_8b", name: "SenseNova-U1 8B", type: "image", capabilities: ["text_to_image", "vqa"] }]}
+          createVqaJob={createVqaJob}
+          deleteAsset={() => {}}
+          purgeAsset={() => {}}
+          importAsset={() => {}}
+          onPreview={() => {}}
+          onSendImage={() => {}}
+          onSendVideo={() => {}}
+          onSendEditor={() => {}}
+          selectedAsset={asset}
+          setSelectedAssetId={() => {}}
+          updateAssetStatus={() => {}}
+        />,
+      );
+    });
+    await settle();
+
+    // The prior answer is surfaced on the asset.
+    expect(container.textContent).toContain("It appears to be nighttime.");
+
+    // Asking a new question dispatches a VQA job for this asset.
+    const input = container.querySelector('textarea[aria-label="Ask about this image"]');
+    expect(input).not.toBeNull();
+    await changeField(input, "What is the person wearing?");
+    const askButton = [...container.querySelectorAll("button")].find((button) => button.textContent === "Ask");
+    await act(async () => {
+      askButton.click();
+    });
+    // Defaults to the short (256-token) response length.
+    expect(createVqaJob).toHaveBeenCalledWith(asset, "What is the person wearing?", 256);
+
+    // Choosing a longer response length is passed through to the job.
+    await changeField(container.querySelector('select[aria-label="Response length"]'), "512");
+    await changeField(input, "Write a detailed critique of this image.");
+    await act(async () => {
+      [...container.querySelectorAll("button")].find((button) => button.textContent === "Ask").click();
+    });
+    expect(createVqaJob).toHaveBeenLastCalledWith(asset, "Write a detailed critique of this image.", 512);
   });
 });

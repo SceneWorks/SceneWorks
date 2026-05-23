@@ -53,7 +53,81 @@ export function AssetGrid({ assets, onPreview, selectedAsset, setSelectedAssetId
   );
 }
 
-export function AssetDetail({ asset, deleteAsset, purgeAsset, onPreview, onSendImage, onSendVideo, onSendEditor, updateAssetStatus }) {
+const VQA_LENGTHS = [
+  { value: 256, label: "Short (256)" },
+  { value: 512, label: "Medium (512)" },
+  { value: 1024, label: "Long (1024)" },
+];
+
+function VqaPanel({ asset, entries, pending, onAsk }) {
+  const [question, setQuestion] = React.useState("");
+  const [maxNewTokens, setMaxNewTokens] = React.useState(256);
+  const trimmed = question.trim();
+  const submit = () => {
+    if (!trimmed) {
+      return;
+    }
+    onAsk(asset, trimmed, maxNewTokens);
+    setQuestion("");
+  };
+
+  return (
+    <div className="vqa-panel">
+      <label className="vqa-ask">
+        Ask about this image
+        <textarea
+          aria-label="Ask about this image"
+          onChange={(event) => setQuestion(event.target.value)}
+          placeholder="e.g. What is the person wearing?"
+          rows={2}
+          value={question}
+        />
+      </label>
+      <div className="vqa-controls">
+        <label className="vqa-length">
+          Response length
+          <select
+            aria-label="Response length"
+            onChange={(event) => setMaxNewTokens(Number(event.target.value))}
+            value={maxNewTokens}
+          >
+            {VQA_LENGTHS.map((option) => (
+              <option key={option.value} value={option.value}>{option.label}</option>
+            ))}
+          </select>
+        </label>
+        <button disabled={!trimmed || pending} onClick={submit} type="button">
+          {pending ? "Asking…" : "Ask"}
+        </button>
+      </div>
+      {entries.length ? (
+        <ul className="vqa-history">
+          {entries.map((entry) => (
+            <li key={entry.jobId}>
+              <strong>{entry.question}</strong>
+              <p>{entry.answer}</p>
+            </li>
+          ))}
+        </ul>
+      ) : null}
+    </div>
+  );
+}
+
+export function AssetDetail({
+  asset,
+  deleteAsset,
+  purgeAsset,
+  onPreview,
+  onSendImage,
+  onSendVideo,
+  onSendEditor,
+  updateAssetStatus,
+  vqaEnabled = false,
+  vqaEntries = [],
+  vqaPending = false,
+  createVqaJob,
+}) {
   if (!asset) {
     return <aside className="asset-detail empty-panel">No asset selected</aside>;
   }
@@ -112,6 +186,9 @@ export function AssetDetail({ asset, deleteAsset, purgeAsset, onPreview, onSendI
           <dd>{asset.generationSetId ?? "None"}</dd>
         </div>
       </dl>
+      {vqaEnabled && asset.type === "image" ? (
+        <VqaPanel asset={asset} entries={vqaEntries} pending={vqaPending} onAsk={createVqaJob} />
+      ) : null}
     </aside>
   );
 }

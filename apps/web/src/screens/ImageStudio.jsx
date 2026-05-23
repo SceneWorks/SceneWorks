@@ -42,6 +42,14 @@ import {
 } from "../presetUtils.js";
 
 const completedResultFallbackMs = 30000;
+// Used only for models that don't declare limits.resolutions (e.g. user-imported).
+const DEFAULT_RESOLUTION_OPTIONS = ["768x768", "1024x1024", "1280x720", "720x1280"];
+
+function formatResolutionLabel(value) {
+  const [width, height] = String(value).split("x");
+  return height ? `${width} × ${height}` : value;
+}
+
 const localErrorStatuses = new Set(["failed", "canceled", "interrupted"]);
 const localErrorLabels = {
   failed: "Failed",
@@ -215,14 +223,48 @@ export function ImageStudio({
     }
   }, [characters, characterId]);
 
-  const availableModels = imageModels.filter((item) => {
-    const caps = item.capabilities ?? [];
-    if (mode === "edit_image") {
-      return caps.includes("edit_image") || caps.includes("image_edit");
+  const availableModels = useMemo(
+    () =>
+      imageModels.filter((item) => {
+        const caps = item.capabilities ?? [];
+        if (mode === "edit_image") {
+          return caps.includes("edit_image") || caps.includes("image_edit");
+        }
+        return item.type === "image";
+      }),
+    [imageModels, mode],
+  );
+  // When the mode change filters out the current model (e.g. Lens-Turbo is the
+  // text default but isn't edit-capable), snap to the first available model so
+  // the dropdown's displayed option matches the value actually submitted.
+  useEffect(() => {
+    if (availableModels.length && !availableModels.some((item) => item.id === model)) {
+      setModel(availableModels[0].id);
     }
-    return item.type === "image";
-  });
+  }, [availableModels, model]);
   const selectedModel = imageModels.find((item) => item.id === model);
+  const resolutionOptions = useMemo(
+    () =>
+      selectedModel?.limits?.resolutions?.length
+        ? selectedModel.limits.resolutions
+        : DEFAULT_RESOLUTION_OPTIONS,
+    [selectedModel],
+  );
+  // Keep the selected resolution valid for the current model's buckets. Switching
+  // to a model whose options exclude the current value snaps to its default (or
+  // 1024x1024, then the first option) rather than leaving a stale, unselectable value.
+  useEffect(() => {
+    if (resolutionOptions.includes(resolution)) {
+      return;
+    }
+    const modelDefault = selectedModel?.defaults?.resolution;
+    const preferred = resolutionOptions.includes(modelDefault)
+      ? modelDefault
+      : resolutionOptions.includes("1024x1024")
+        ? "1024x1024"
+        : resolutionOptions[0];
+    setResolution(preferred);
+  }, [resolutionOptions, resolution, selectedModel?.defaults?.resolution]);
   const availablePresets = useMemo(() => {
     return presets.filter((preset) => presetMatchesWorkflow(preset, mode) && presetMatchesModel(preset, selectedModel));
   }, [mode, presets, selectedModel?.id]);
@@ -640,10 +682,9 @@ export function ImageStudio({
               <label>
                 Aspect
                 <select onChange={(event) => setResolution(event.target.value)} value={resolution}>
-                  <option value="768x768">768 × 768</option>
-                  <option value="1024x1024">1024 × 1024</option>
-                  <option value="1280x720">1280 × 720</option>
-                  <option value="720x1280">720 × 1280</option>
+                  {resolutionOptions.map((option) => (
+                    <option key={option} value={option}>{formatResolutionLabel(option)}</option>
+                  ))}
                 </select>
               </label>
             </div>

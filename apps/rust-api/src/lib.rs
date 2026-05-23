@@ -630,6 +630,7 @@ pub fn create_app(settings: Settings) -> Result<Router, JobsStoreError> {
             post(save_person_track_corrections),
         )
         .route("/api/v1/image/jobs", post(create_image_job))
+        .route("/api/v1/image/vqa/jobs", post(create_vqa_job))
         .route("/api/v1/video/jobs", post(create_video_job))
         .route("/api/v1/models", get(list_models))
         .route("/api/v1/models/:model_id", delete(delete_model))
@@ -1059,6 +1060,32 @@ struct ImageJobRequest {
     requested_gpu: String,
     #[serde(default)]
     advanced: JsonObject,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct VqaJobRequest {
+    project_id: String,
+    #[serde(default)]
+    project_name: Option<String>,
+    source_asset_id: String,
+    question: String,
+    #[serde(default = "default_vqa_model")]
+    model: String,
+    #[serde(default = "default_vqa_max_new_tokens")]
+    max_new_tokens: u32,
+    #[serde(default = "default_requested_gpu")]
+    requested_gpu: String,
+    #[serde(default)]
+    advanced: JsonObject,
+}
+
+fn default_vqa_model() -> String {
+    "sensenova_u1_8b".to_owned()
+}
+
+fn default_vqa_max_new_tokens() -> u32 {
+    256
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -2812,6 +2839,49 @@ async fn create_image_job(
     Ok((StatusCode::CREATED, Json(job)))
 }
 
+async fn create_vqa_job(
+    State(state): State<AppState>,
+    ApiJson(payload): ApiJson<VqaJobRequest>,
+) -> Result<(StatusCode, Json<JobSnapshot>), ApiError> {
+    validate_vqa_job(&payload)?;
+    let requested_gpu = payload.requested_gpu.clone();
+    let project_id = Some(payload.project_id.clone());
+    let project_name = payload.project_name.clone();
+    let mut job_payload = to_json_object(&payload)?;
+    job_payload.remove("requestedGpu");
+    let job = create_generation_job(
+        state,
+        JobType::ImageVqa,
+        project_id,
+        project_name,
+        job_payload,
+        requested_gpu,
+    )
+    .await?;
+    Ok((StatusCode::CREATED, Json(job)))
+}
+
+fn validate_vqa_job(payload: &VqaJobRequest) -> Result<(), ApiError> {
+    if payload.project_id.is_empty() {
+        return Err(ApiError::bad_request("projectId is required"));
+    }
+    if payload.source_asset_id.trim().is_empty() {
+        return Err(ApiError::bad_request("sourceAssetId is required"));
+    }
+    let question = payload.question.trim();
+    if question.is_empty() || question.chars().count() > 4000 {
+        return Err(ApiError::bad_request(
+            "question must be between 1 and 4000 characters",
+        ));
+    }
+    if !(16..=2048).contains(&payload.max_new_tokens) {
+        return Err(ApiError::bad_request(
+            "maxNewTokens must be between 16 and 2048",
+        ));
+    }
+    Ok(())
+}
+
 async fn apply_recipe_preset_to_image_payload(
     state: &AppState,
     payload: &ImageJobRequest,
@@ -2928,8 +2998,8 @@ fn apply_recipe_preset_defaults(
     }
     if let Some(resolution) = defaults.get("resolution").and_then(Value::as_str) {
         let (width, height) = parse_recipe_preset_resolution(resolution)?;
-        validate_dimension(width, "width", 2048)?;
-        validate_dimension(height, "height", 2048)?;
+        validate_dimension(width, "width", MAX_IMAGE_DIMENSION)?;
+        validate_dimension(height, "height", MAX_IMAGE_DIMENSION)?;
         job_payload.insert("width".to_owned(), json!(width));
         job_payload.insert("height".to_owned(), json!(height));
         let advanced = job_payload
@@ -5893,8 +5963,8 @@ fn validate_recipe_preset_defaults(value: Option<&Value>) -> Result<(), ApiError
         .ok_or_else(|| ApiError::bad_request("Recipe preset defaults must be an object"))?;
     if let Some(resolution) = object.get("resolution").and_then(Value::as_str) {
         let (width, height) = parse_recipe_preset_resolution(resolution)?;
-        validate_dimension(width, "width", 2048)?;
-        validate_dimension(height, "height", 2048)?;
+        validate_dimension(width, "width", MAX_IMAGE_DIMENSION)?;
+        validate_dimension(height, "height", MAX_IMAGE_DIMENSION)?;
     }
     if let Some(count) = object.get("count").and_then(Value::as_u64) {
         if !(1..=8).contains(&count) {
@@ -7539,8 +7609,8 @@ fn validate_image_job(payload: &ImageJobRequest) -> Result<(), ApiError> {
     if !(1..=8).contains(&payload.count) {
         return Err(ApiError::bad_request("count must be between 1 and 8"));
     }
-    validate_dimension(payload.width, "width", 2048)?;
-    validate_dimension(payload.height, "height", 2048)?;
+    validate_dimension(payload.width, "width", MAX_IMAGE_DIMENSION)?;
+    validate_dimension(payload.height, "height", MAX_IMAGE_DIMENSION)?;
     Ok(())
 }
 
@@ -7553,8 +7623,8 @@ fn validate_character_test_job(payload: &CharacterTestRequest) -> Result<(), Api
     if !(1..=8).contains(&payload.count) {
         return Err(ApiError::bad_request("count must be between 1 and 8"));
     }
-    validate_dimension(payload.width, "width", 2048)?;
-    validate_dimension(payload.height, "height", 2048)?;
+    validate_dimension(payload.width, "width", MAX_IMAGE_DIMENSION)?;
+    validate_dimension(payload.height, "height", MAX_IMAGE_DIMENSION)?;
     Ok(())
 }
 
@@ -7625,6 +7695,11 @@ fn validate_video_job(payload: &VideoJobRequest) -> Result<(), ApiError> {
         _ => Ok(()),
     }
 }
+
+/// Upper bound for image width/height. A backstop only — per-model resolution is
+/// governed by manifest `limits.resolutions` + the UI. Covers SenseNova-U1's
+/// largest trained bucket (3456) with headroom; video uses its own lower cap.
+const MAX_IMAGE_DIMENSION: u32 = 4096;
 
 fn validate_dimension(value: u32, field: &'static str, max: u32) -> Result<(), ApiError> {
     if !(256..=max).contains(&value) {
@@ -12625,6 +12700,55 @@ mod tests {
         });
 
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn image_dimension_cap_covers_sensenova_buckets() {
+        // Raised so SenseNova-U1's true trained buckets (largest 3456) pass.
+        assert_eq!(super::MAX_IMAGE_DIMENSION, 4096);
+        assert!(super::validate_dimension(2720, "width", super::MAX_IMAGE_DIMENSION).is_ok());
+        assert!(super::validate_dimension(3456, "height", super::MAX_IMAGE_DIMENSION).is_ok());
+        assert!(super::validate_dimension(4096, "width", super::MAX_IMAGE_DIMENSION).is_ok());
+        assert!(super::validate_dimension(4097, "width", super::MAX_IMAGE_DIMENSION).is_err());
+        assert!(super::validate_dimension(255, "width", super::MAX_IMAGE_DIMENSION).is_err());
+    }
+
+    #[test]
+    fn vqa_job_validation_requires_question_and_asset() {
+        let base = super::VqaJobRequest {
+            project_id: "project-1".to_owned(),
+            project_name: None,
+            source_asset_id: "asset_1".to_owned(),
+            question: "What is in this image?".to_owned(),
+            model: "sensenova_u1_8b".to_owned(),
+            max_new_tokens: 256,
+            requested_gpu: "auto".to_owned(),
+            advanced: serde_json::Map::new(),
+        };
+        assert!(super::validate_vqa_job(&base).is_ok());
+
+        // The UI's length presets are all valid.
+        for tokens in [256u32, 512, 1024] {
+            let mut request = base.clone();
+            request.max_new_tokens = tokens;
+            assert!(super::validate_vqa_job(&request).is_ok());
+        }
+
+        let mut blank_question = base.clone();
+        blank_question.question = "   ".to_owned();
+        assert!(super::validate_vqa_job(&blank_question).is_err());
+
+        let mut missing_asset = base.clone();
+        missing_asset.source_asset_id = String::new();
+        assert!(super::validate_vqa_job(&missing_asset).is_err());
+
+        let mut missing_project = base.clone();
+        missing_project.project_id = String::new();
+        assert!(super::validate_vqa_job(&missing_project).is_err());
+
+        let mut too_many_tokens = base.clone();
+        too_many_tokens.max_new_tokens = 4096;
+        assert!(super::validate_vqa_job(&too_many_tokens).is_err());
     }
 
     #[tokio::test]

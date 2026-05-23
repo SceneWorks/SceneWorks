@@ -244,7 +244,7 @@
       "family": "sensenova-u1",
       "type": "image",
       "adapter": "sensenova_u1",
-      "capabilities": ["text_to_image"],
+      "capabilities": ["text_to_image", "edit_image", "vqa"],
       "downloads": [
         {
           "provider": "huggingface",
@@ -264,11 +264,10 @@
       },
       "limits": {
         // SenseNova-U1 renders at fixed trained buckets and degrades off them.
-        // Only the 1:1 (2048²) bucket fits the worker's ≤2048 W/H clamp today;
-        // the wider 16:9/3:2/4:3 buckets (2720×1536, …) need that clamp raised —
-        // tracked as a follow-up. The adapter snaps any request to the nearest
-        // bucket by aspect ratio regardless.
-        "resolutions": ["2048x2048"],
+        // These are the true output sizes; the adapter snaps any request to the
+        // nearest bucket by aspect ratio. (Panorama buckets 2:1/1:2/3:1/1:3 exist
+        // upstream but are omitted here.)
+        "resolutions": ["2048x2048", "2720x1536", "2496x1664", "2368x1760", "1536x2720", "1664x2496", "1760x2368"],
         "count": [1, 2, 4]
       },
       "loraCompatibility": {
@@ -278,8 +277,8 @@
       },
       "ui": {
         "label": "SenseNova-U1 8B",
-        "description": "Unified multimodal model (NEO-unify, ~16B). Native text-to-image with strong prompt following, dense text, and infographics. Heavy: ~42GB bf16, ~50 steps; runs on large-VRAM GPUs and 96GB+ Apple Silicon (MPS). Edit/VQA/interleaved not wired yet.",
-        "recommendedFor": ["text_to_image"]
+        "description": "Unified multimodal model (NEO-unify, ~16B). Native text-to-image and instruction-based editing with strong prompt following, dense text, and infographics. Heavy: ~42GB bf16, ~50 steps; runs on large-VRAM GPUs and 96GB+ Apple Silicon (MPS). VQA/interleaved not wired yet.",
+        "recommendedFor": ["text_to_image", "edit_image"]
       }
     },
     {
@@ -288,7 +287,7 @@
       "family": "sensenova-u1",
       "type": "image",
       "adapter": "sensenova_u1",
-      "capabilities": ["text_to_image"],
+      "capabilities": ["text_to_image", "edit_image"],
       "downloads": [
         {
           // Shares the SenseNova-U1 8B base weights; the ~0.4GB 8-step distill
@@ -311,9 +310,9 @@
         "count": 1
       },
       "limits": {
-        // Same trained buckets as the base model; only 1:1 (2048²) fits the
-        // worker's ≤2048 W/H clamp today. The adapter snaps to the nearest bucket.
-        "resolutions": ["2048x2048"],
+        // Same trained buckets as the base model; true output sizes (the adapter
+        // snaps any request to the nearest bucket by aspect ratio).
+        "resolutions": ["2048x2048", "2720x1536", "2496x1664", "2368x1760", "1536x2720", "1664x2496", "1760x2368"],
         "count": [1, 2, 4]
       },
       "loraCompatibility": {
@@ -323,8 +322,8 @@
       },
       "ui": {
         "label": "SenseNova-U1 8B Fast",
-        "description": "8-step distilled SenseNova-U1 — ~5–6× faster text-to-image (~50s/image on MPS vs ~4.6 min) at a small quality trade-off. Shares the SenseNova-U1 8B base weights (~35GB); a ~0.4GB distill LoRA downloads automatically on first use.",
-        "recommendedFor": ["text_to_image"]
+        "description": "8-step distilled SenseNova-U1 — ~5–6× faster text-to-image and editing (~50s/image on MPS vs ~4.6 min) at a small quality trade-off. Shares the SenseNova-U1 8B base weights (~35GB); a ~0.4GB distill LoRA downloads automatically on first use. Distilled editing is experimental — use the base SenseNova-U1 8B for max-quality edits.",
+        "recommendedFor": ["text_to_image", "edit_image"]
       }
     },
     {

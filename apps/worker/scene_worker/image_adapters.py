@@ -260,7 +260,8 @@ MODEL_TARGETS = {
     "sensenova_u1_8b": {
         "label": "SenseNova-U1 8B",
         "family": "sensenova-u1",
-        "supportsEdit": False,
+        # Unified model: same weights do text-to-image and instruction editing (it2i).
+        "supportsEdit": True,
         # Base 8B-MoT uses ~50 steps; an 8-step distill LoRA exists (cfg 1.0).
         "steps": 50,
         "repo": "sensenova/SenseNova-U1-8B-MoT",
@@ -269,7 +270,8 @@ MODEL_TARGETS = {
     "sensenova_u1_8b_fast": {
         "label": "SenseNova-U1 8B Fast",
         "family": "sensenova-u1",
-        "supportsEdit": False,
+        # Distilled editing (it2i) at 8 steps; the it2i path merges the same LoRA.
+        "supportsEdit": True,
         # 8-step distill LoRA (cfg 1.0): shares the base weights, ~5-6x faster.
         "steps": 8,
         "guidanceScale": 1.0,
@@ -322,8 +324,11 @@ def image_request_from_job(job: dict[str, Any]) -> ImageRequest:
         count=safe_int(payload.get("count"), 4, 1, 8),
         seed=payload.get("seed"),
         seeds=[int(seed) for seed in payload.get("seeds", []) if seed is not None],
-        width=safe_int(payload.get("width"), 1024, 256, 2048),
-        height=safe_int(payload.get("height"), 1024, 256, 2048),
+        # Backstop only — per-model resolution is governed by manifest limits + the UI.
+        # SenseNova-U1's trained buckets reach 3456 (the adapter snaps by aspect ratio),
+        # so this clamp must allow the requested ratio through rather than truncate it.
+        width=safe_int(payload.get("width"), 1024, 256, 4096),
+        height=safe_int(payload.get("height"), 1024, 256, 4096),
         style_preset=payload.get("stylePreset", "cinematic"),
         loras=payload.get("loras", []),
         character_id=payload.get("characterId"),
@@ -1336,10 +1341,10 @@ class SenseNovaU1Adapter:
     type, so ``AutoModel.from_pretrained`` resolves it with no trust_remote_code.
     Attention uses torch SDPA (flash-attn optional), so it runs on CUDA and MPS.
 
-    Text-to-image only for now — no edit/img2img, VQA, or interleaved. The
-    ``sensenova_u1_8b_fast`` variant merges the upstream 8-step distill LoRA at
-    load (see ``distillLora`` in MODEL_TARGETS); user-supplied LoRAs are still
-    rejected.
+    Supports text-to-image and instruction-based editing (it2i); VQA and
+    interleaved generation are not wired yet. The ``sensenova_u1_8b_fast``
+    variant merges the upstream 8-step distill LoRA at load (see ``distillLora``
+    in MODEL_TARGETS); user-supplied LoRAs are still rejected.
     """
 
     id = "sensenova_u1"
@@ -1379,6 +1384,14 @@ class SenseNovaU1Adapter:
         except (TypeError, ValueError):
             return default
 
+    @staticmethod
+    def _image_guidance_scale(request: ImageRequest) -> float:
+        # Image-conditioning guidance for editing (it2i); upstream default is 1.0.
+        try:
+            return float(request.advanced.get("imageGuidanceScale", 1.0))
+        except (TypeError, ValueError):
+            return 1.0
+
     def generate(
         self,
         *,
@@ -1388,12 +1401,13 @@ class SenseNovaU1Adapter:
         cancel_requested: CancelCallback,
     ) -> dict[str, Any]:
         request = image_request_from_job(job)
-        if request.mode == "edit_image":
-            raise RuntimeError(f"{request.model} does not support image editing.")
         reject_loras_if_unsupported(request.loras, self.id)
         model_target = MODEL_TARGETS.get(request.model, MODEL_TARGETS["sensenova_u1_8b"])
         if model_target.get("adapter") != self.id:
             raise RuntimeError(f"{request.model} is not a SenseNova-U1 target.")
+        is_edit = request.mode == "edit_image"
+        if is_edit and not model_supports_edit(request.model):
+            raise RuntimeError(f"{request.model} does not support image editing.")
 
         torch = importlib.import_module("torch")
         require_inference_backend_for_gpu_worker(torch, settings.gpu_id)
@@ -1405,7 +1419,9 @@ class SenseNovaU1Adapter:
         steps = self._num_inference_steps(request, model_target)
         guidance_scale = self._guidance_scale(request, model_target)
         timestep_shift = float(request.advanced.get("timestepShift", 3.0) or 3.0)
+        img_guidance_scale = self._image_guidance_scale(request)
         width, height = sensenova_resolution_for(request.width, request.height)
+        source_image = load_source_image(settings, request) if is_edit else None
 
         progress("loading_model", "loading_model", 0.18, f"Loading {model_target['label']}.")
         model, tokenizer = self._load_model(torch, repo, device, dtype, distill_lora=distill_lora, job_id=job["id"])
@@ -1432,10 +1448,16 @@ class SenseNovaU1Adapter:
                 gpuMemory=gpu_memory_snapshot(torch, device),
             )
             try:
-                image = self._run_inference(
-                    torch, model, tokenizer, request.prompt,
-                    width, height, steps, guidance_scale, timestep_shift, seed,
-                )
+                if is_edit:
+                    image = self._run_edit_inference(
+                        torch, model, tokenizer, request.prompt, source_image,
+                        width, height, steps, guidance_scale, img_guidance_scale, timestep_shift, seed,
+                    )
+                else:
+                    image = self._run_inference(
+                        torch, model, tokenizer, request.prompt,
+                        width, height, steps, guidance_scale, timestep_shift, seed,
+                    )
             except Exception as exc:
                 emit_worker_event(
                     "image_inference_failed",
@@ -1468,6 +1490,7 @@ class SenseNovaU1Adapter:
                 "repo": repo,
                 "numInferenceSteps": steps,
                 "guidanceScale": guidance_scale,
+                **({"imageGuidanceScale": img_guidance_scale} if is_edit else {}),
                 "timestepShift": timestep_shift,
                 "resolution": f"{width}x{height}",
                 "realModelInference": True,
@@ -1600,6 +1623,174 @@ class SenseNovaU1Adapter:
                 think_mode=False,
             )
         return self._to_pil(torch, tensor)[0]
+
+    def _run_edit_inference(
+        self,
+        torch: Any,
+        model: Any,
+        tokenizer: Any,
+        prompt: str,
+        source_image: Image.Image,
+        width: int,
+        height: int,
+        steps: int,
+        guidance_scale: float,
+        img_guidance_scale: float,
+        timestep_shift: float,
+        seed: int,
+    ) -> Image.Image:
+        # Instruction-based editing (it2i): the source image is the conditioning
+        # input; `image_size` is the output bucket. Defaults mirror the upstream
+        # editing example (cfg 4.0 text / 1.0 image, 50 steps, shift 3.0).
+        with torch.inference_mode():
+            tensor = model.it2i_generate(
+                tokenizer,
+                prompt,
+                [source_image],
+                image_size=(width, height),
+                cfg_scale=guidance_scale,
+                img_cfg_scale=img_guidance_scale,
+                cfg_norm="none",
+                timestep_shift=timestep_shift,
+                cfg_interval=(0.0, 1.0),
+                num_steps=steps,
+                batch_size=1,
+                seed=seed,
+                think_mode=False,
+            )
+        return self._to_pil(torch, tensor)[0]
+
+    def answer_question(
+        self,
+        *,
+        settings: WorkerSettings,
+        job: dict[str, Any],
+        progress: ProgressCallback,
+        cancel_requested: CancelCallback,
+    ) -> dict[str, Any]:
+        """Visual question answering (VQA): a text answer about a source image.
+
+        Reuses the cached base model (the understanding side) via the model's
+        ``chat`` path. Output is text, not an image asset, so this does not go
+        through ImageAssetWriter — the answer is returned in the job result.
+        """
+        payload = job["payload"]
+        project_id = payload["projectId"]
+        source_asset_id = payload.get("sourceAssetId")
+        question = str(payload.get("question") or "").strip()
+        if not question:
+            raise RuntimeError("Visual question answering requires a question.")
+        model_id = payload.get("model", "sensenova_u1_8b")
+        model_target = MODEL_TARGETS.get(model_id, MODEL_TARGETS["sensenova_u1_8b"])
+        if model_target.get("adapter") != self.id:
+            raise RuntimeError(f"{model_id} is not a SenseNova-U1 target.")
+        advanced = payload.get("advanced", {}) if isinstance(payload.get("advanced"), dict) else {}
+        # VQA latency ~ output tokens (one model pass each) + input vision tokens
+        # (prefill). Both default low for responsiveness and are tunable per request.
+        max_new_tokens = safe_int(payload.get("maxNewTokens"), 256, 16, 2048)
+        # Downscale the understanding input — vision tokens (and prefill cost) scale
+        # with pixel count (~pixels/1024 tokens), and there's little perceptible
+        # difference for question answering between ~768px and ~1024px. Default ~768²
+        # (~576 tokens vs ~1024 at 1024²); tunable up via payload.maxImagePixels when a
+        # question needs fine detail or in-image text.
+        max_image_pixels = safe_int(payload.get("maxImagePixels"), 768 * 768, 256 * 256, 2048 * 2048)
+
+        torch = importlib.import_module("torch")
+        require_inference_backend_for_gpu_worker(torch, settings.gpu_id)
+        device = select_torch_device(torch, settings.gpu_id)
+        activate_torch_device(torch, device)
+        dtype = select_torch_dtype(torch, device, advanced.get("dtype"))
+        repo = advanced.get("modelRepo") or model_target["repo"]
+
+        progress("loading_model", "loading_model", 0.18, f"Loading {model_target['label']}.")
+        # VQA uses the base understanding path — never the distilled generation LoRA.
+        model, tokenizer = self._load_model(torch, repo, device, dtype, distill_lora=None, job_id=job["id"])
+        self._loaded_model = model_id
+
+        source_path = self._resolve_source_path(settings, project_id, source_asset_id, advanced.get("sourceImagePath"))
+        try:
+            image = Image.open(source_path).convert("RGB")
+        except (OSError, Image.DecompressionBombError, Image.DecompressionBombWarning) as exc:
+            raise RuntimeError(f"Source image could not be loaded safely: {source_path}") from exc
+
+        if cancel_requested():
+            raise InterruptedError("Visual question answering canceled by user.")
+        progress("running", "generating", 0.6, "Analyzing image.")
+        emit_worker_event(
+            "image_vqa_start",
+            jobId=job["id"],
+            adapter=self.id,
+            model=model_id,
+            sourceAssetId=source_asset_id,
+            device=device,
+            gpuMemory=gpu_memory_snapshot(torch, device),
+        )
+        answer = self._run_vqa(torch, model, tokenizer, image, question, device, max_new_tokens, max_image_pixels)
+        emit_worker_event(
+            "image_vqa_complete",
+            jobId=job["id"],
+            adapter=self.id,
+            answerChars=len(answer),
+            gpuMemory=gpu_memory_snapshot(torch, device),
+        )
+        return {
+            "answer": answer,
+            "question": question,
+            "sourceAssetId": source_asset_id,
+            "model": model_id,
+            "realModelInference": True,
+        }
+
+    def _resolve_source_path(
+        self,
+        settings: WorkerSettings,
+        project_id: str,
+        source_asset_id: str | None,
+        source_image_path: str | None,
+    ) -> str:
+        if source_image_path:
+            return str(source_image_path)
+        if not source_asset_id:
+            raise RuntimeError("Visual question answering requires a source image asset.")
+        project_path = shared_find_project_path(settings.data_dir / "recent-projects.json", project_id)
+        return str(find_asset_media_path(project_path, source_asset_id))
+
+    def _run_vqa(
+        self,
+        torch: Any,
+        model: Any,
+        tokenizer: Any,
+        image: Image.Image,
+        question: str,
+        device: str,
+        max_new_tokens: int,
+        max_image_pixels: int,
+    ) -> str:
+        self._ensure_vendor_on_path()
+        from sensenova_u1.models.neo_unify.utils import load_image_native
+
+        pixel_values, grid_hw = load_image_native(image, max_pixels=int(max_image_pixels))
+        pixel_values = pixel_values.to(device, dtype=model.dtype)
+        grid_hw = grid_hw.to(device)
+        generation_config = {"max_new_tokens": int(max_new_tokens), "do_sample": False}
+        with torch.inference_mode():
+            # think=False skips the model's chain-of-thought so the budget goes to
+            # the answer (otherwise reasoning fills the output and can truncate it).
+            response = model.chat(tokenizer, pixel_values, question, generation_config, grid_hw=grid_hw, think=False)
+        return self._strip_reasoning(str(response))
+
+    @staticmethod
+    def _strip_reasoning(text: str) -> str:
+        """Drop any ``<think>…</think>`` reasoning so only the answer is returned.
+
+        Defensive backstop for the no-think prime: removes complete think blocks
+        and any dangling/unclosed one (e.g. reasoning truncated by max_new_tokens).
+        """
+        import re
+
+        cleaned = re.sub(r"(?s)<think>.*?</think>", "", text)
+        cleaned = re.sub(r"(?s)<think>.*$", "", cleaned)
+        return cleaned.strip()
 
     def _to_pil(self, torch: Any, batch: Any) -> list[Image.Image]:
         import numpy as np
