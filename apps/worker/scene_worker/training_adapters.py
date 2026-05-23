@@ -1497,12 +1497,13 @@ def inject_video_attention_lora(transformer: Any, config: TrainingRunConfig) -> 
     return target_paths
 
 
-def _build_mlx_optimizer(name: str, learning_rate: float) -> Any:
+def _build_mlx_optimizer(name: str, learning_rate: float, weight_decay: float = 0.0) -> Any:
     optim = importlib.import_module("mlx.optimizers")
     normalized = (name or "").strip().lower().replace("-", "").replace("_", "")
     if normalized == "adam":
+        # Plain Adam has no decoupled weight decay; the parameter applies to AdamW only.
         return optim.Adam(learning_rate=learning_rate)
-    return optim.AdamW(learning_rate=learning_rate)
+    return optim.AdamW(learning_rate=learning_rate, weight_decay=weight_decay)
 
 
 def ltx_flow_target(clean: Any, noise: Any) -> Any:
@@ -1592,7 +1593,9 @@ class _LtxMlxLoraBackend:
 
         progress("loading_model", "loading_model", 0.18, "Attaching LoRA adapters to the transformer.")
         lora_paths = inject_video_attention_lora(transformer, config)
-        self._optimizer = _build_mlx_optimizer(config.optimizer, config.learning_rate)
+        self._optimizer = _build_mlx_optimizer(
+            config.optimizer, config.learning_rate, config.weight_decay
+        )
         self._accumulated_grads = None
 
         self._transformer = transformer
