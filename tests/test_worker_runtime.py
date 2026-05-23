@@ -38,6 +38,8 @@ from scene_worker.image_adapters import (
     require_inference_backend_for_gpu_worker,
     resolve_seed,
     select_torch_device,
+    sensenova_resolution_for,
+    SenseNovaU1Adapter,
     verify_pipeline_on_device,
 )
 from scene_worker.lora_adapters import (
@@ -932,6 +934,57 @@ def test_lens_resolution_for_snaps_to_buckets():
     assert lens_resolution_for(720, 1280) == (1024, "9:16")
     assert lens_resolution_for(1152, 864) == (1024, "4:3")
     assert lens_resolution_for(864, 1152) == (1024, "3:4")
+
+
+def test_create_image_adapter_routes_sensenova_u1():
+    adapter = create_image_adapter({"payload": {"model": "sensenova_u1_8b"}})
+    assert adapter.__class__.__name__ == "SenseNovaU1Adapter"
+    assert adapter.id == "sensenova_u1"
+
+
+def test_image_adapter_env_override_selects_sensenova(monkeypatch):
+    monkeypatch.setenv("SCENEWORKS_IMAGE_ADAPTER", "sensenova_u1")
+    # Env override wins even when the payload names a different family's model.
+    adapter = create_image_adapter({"payload": {"model": "z_image_turbo"}})
+    assert adapter.__class__.__name__ == "SenseNovaU1Adapter"
+
+
+def test_sensenova_u1_model_target_defaults():
+    target = MODEL_TARGETS["sensenova_u1_8b"]
+    assert target["adapter"] == "sensenova_u1"
+    assert target["family"] == "sensenova-u1"
+    assert target["steps"] == 50
+    assert target["supportsEdit"] is False
+    assert target["repo"] == "sensenova/SenseNova-U1-8B-MoT"
+
+
+def test_sensenova_u1_rejects_image_edit():
+    job = {
+        "id": "job_sensenova_edit",
+        "payload": {
+            "projectId": "project_x",
+            "mode": "edit_image",
+            "model": "sensenova_u1_8b",
+            "prompt": "a cat",
+        },
+    }
+    noop = lambda *args, **kwargs: None  # noqa: E731
+    try:
+        SenseNovaU1Adapter().generate(settings=None, job=job, progress=noop, cancel_requested=lambda: False)
+    except RuntimeError as exc:
+        assert "does not support image editing" in str(exc)
+    else:
+        raise AssertionError("SenseNova-U1 is text-to-image only and must reject edit_image.")
+
+
+def test_sensenova_resolution_for_snaps_to_buckets():
+    # Snaps any request to the nearest SenseNova-U1 trained bucket by aspect ratio.
+    assert sensenova_resolution_for(1024, 1024) == (2048, 2048)
+    assert sensenova_resolution_for(1920, 1080) == (2720, 1536)
+    assert sensenova_resolution_for(1080, 1920) == (1536, 2720)
+    assert sensenova_resolution_for(1024, 768) == (2368, 1760)
+    assert sensenova_resolution_for(768, 1024) == (1760, 2368)
+    assert sensenova_resolution_for(1500, 1000) == (2496, 1664)
 
 
 def test_huggingface_repo_cache_path_stays_under_cache_root(monkeypatch, tmp_path):

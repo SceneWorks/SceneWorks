@@ -241,6 +241,15 @@ MODEL_TARGETS = {
         "repo": "microsoft/Lens-Turbo",
         "adapter": "lens_turbo",
     },
+    "sensenova_u1_8b": {
+        "label": "SenseNova-U1 8B",
+        "family": "sensenova-u1",
+        "supportsEdit": False,
+        # Base 8B-MoT uses ~50 steps; an 8-step distill LoRA exists (cfg 1.0).
+        "steps": 50,
+        "repo": "sensenova/SenseNova-U1-8B-MoT",
+        "adapter": "sensenova_u1",
+    },
 }
 
 
@@ -1241,17 +1250,275 @@ class ProceduralImageAdapter:
         )
 
 
+_SENSENOVA_RESOLUTIONS: dict[str, tuple[int, int]] = {
+    "1:1": (2048, 2048),
+    "16:9": (2720, 1536),
+    "9:16": (1536, 2720),
+    "3:2": (2496, 1664),
+    "2:3": (1664, 2496),
+    "4:3": (2368, 1760),
+    "3:4": (1760, 2368),
+    "1:2": (1440, 2880),
+    "2:1": (2880, 1440),
+    "1:3": (1152, 3456),
+    "3:1": (3456, 1152),
+}
+
+
+def sensenova_resolution_for(width: int, height: int) -> tuple[int, int]:
+    """Snap a requested W×H to the nearest SenseNova-U1 trained bucket (by aspect ratio).
+
+    SenseNova-U1 only renders well at its trained resolutions; off-bucket sizes
+    degrade (upstream warns). Pick the bucket whose aspect ratio is closest in
+    log-space so portrait/landscape requests land on the matching orientation.
+    """
+    width = max(1, int(width))
+    height = max(1, int(height))
+    target = math.log(width / height)
+    return min(
+        _SENSENOVA_RESOLUTIONS.values(),
+        key=lambda wh: abs(target - math.log(wh[0] / wh[1])),
+    )
+
+
+class SenseNovaU1Adapter:
+    """SenseNova-U1 unified multimodal model — text-to-image, run IN-PROCESS.
+
+    NEO-unify (Qwen3-based Mixture-of-Transformers; no separate VAE/encoder).
+    Unlike Lens, its deps (torch 2.8 / transformers 4.57.x / accelerate) match
+    the main worker venv, so it loads in-process via the vendored ``sensenova_u1``
+    package (scene_worker/_vendor): importing it registers the ``neo_chat`` model
+    type, so ``AutoModel.from_pretrained`` resolves it with no trust_remote_code.
+    Attention uses torch SDPA (flash-attn optional), so it runs on CUDA and MPS.
+
+    Text-to-image only for now — no edit/img2img, VQA, interleaved, or LoRA.
+    """
+
+    id = "sensenova_u1"
+
+    # Pixel normalization from the upstream T2I example (examples/t2i/inference.py).
+    _NORM_MEAN = (0.5, 0.5, 0.5)
+    _NORM_STD = (0.5, 0.5, 0.5)
+
+    def __init__(self) -> None:
+        self._model: Any = None
+        self._tokenizer: Any = None
+        self._repo: str | None = None
+        self._loaded_model: str | None = None
+
+    def loaded_models(self) -> list[str]:
+        return [self._loaded_model] if self._loaded_model else []
+
+    @staticmethod
+    def _ensure_vendor_on_path() -> None:
+        vendor = str(Path(__file__).resolve().parent / "_vendor")
+        if vendor not in sys.path:
+            sys.path.insert(0, vendor)
+
+    def _num_inference_steps(self, request: ImageRequest, model_target: dict[str, Any]) -> int:
+        return safe_int(request.advanced.get("numInferenceSteps"), int(model_target.get("steps", 50)), 1, 100)
+
+    @staticmethod
+    def _guidance_scale(request: ImageRequest) -> float:
+        try:
+            return float(request.advanced.get("guidanceScale", 4.0))
+        except (TypeError, ValueError):
+            return 4.0
+
+    def generate(
+        self,
+        *,
+        settings: WorkerSettings,
+        job: dict[str, Any],
+        progress: ProgressCallback,
+        cancel_requested: CancelCallback,
+    ) -> dict[str, Any]:
+        request = image_request_from_job(job)
+        if request.mode == "edit_image":
+            raise RuntimeError(f"{request.model} does not support image editing.")
+        reject_loras_if_unsupported(request.loras, self.id)
+        model_target = MODEL_TARGETS.get(request.model, MODEL_TARGETS["sensenova_u1_8b"])
+        if model_target.get("adapter") != self.id:
+            raise RuntimeError(f"{request.model} is not a SenseNova-U1 target.")
+
+        torch = importlib.import_module("torch")
+        require_inference_backend_for_gpu_worker(torch, settings.gpu_id)
+        device = select_torch_device(torch, settings.gpu_id)
+        activate_torch_device(torch, device)
+        dtype = select_torch_dtype(torch, device, request.advanced.get("dtype"))
+        repo = request.advanced.get("modelRepo") or model_target["repo"]
+        steps = self._num_inference_steps(request, model_target)
+        guidance_scale = self._guidance_scale(request)
+        timestep_shift = float(request.advanced.get("timestepShift", 3.0) or 3.0)
+        width, height = sensenova_resolution_for(request.width, request.height)
+
+        progress("loading_model", "loading_model", 0.18, f"Loading {model_target['label']}.")
+        model, tokenizer = self._load_model(torch, repo, device, dtype, job_id=job["id"])
+        self._loaded_model = request.model
+        label = model_target["label"]
+
+        def image_at_index(index: int) -> Image.Image:
+            seed = resolve_seed(request.seed, request.prompt, index, request.seeds)
+            progress(
+                "running",
+                "generating",
+                image_batch_progress(index, request.count),
+                format_batch_running_message(label, index, request.count),
+            )
+            emit_worker_event(
+                "image_inference_start",
+                jobId=job["id"],
+                adapter=self.id,
+                model=request.model,
+                imageIndex=index,
+                imageCount=request.count,
+                device=device,
+                resolution=f"{width}x{height}",
+                gpuMemory=gpu_memory_snapshot(torch, device),
+            )
+            try:
+                image = self._run_inference(
+                    torch, model, tokenizer, request.prompt,
+                    width, height, steps, guidance_scale, timestep_shift, seed,
+                )
+            except Exception as exc:
+                emit_worker_event(
+                    "image_inference_failed",
+                    jobId=job["id"],
+                    adapter=self.id,
+                    imageIndex=index,
+                    error=str(exc),
+                    errorType=exc.__class__.__name__,
+                )
+                raise
+            emit_worker_event(
+                "image_inference_complete",
+                jobId=job["id"],
+                adapter=self.id,
+                imageIndex=index,
+                gpuMemory=gpu_memory_snapshot(torch, device),
+            )
+            return image
+
+        return ImageAssetWriter().write_incremental_outputs(
+            settings=settings,
+            job=job,
+            image_count=request.count,
+            image_at_index=image_at_index,
+            adapter_id=self.id,
+            progress=progress,
+            cancel_requested=cancel_requested,
+            raw_settings={
+                **request.advanced,
+                "repo": repo,
+                "numInferenceSteps": steps,
+                "guidanceScale": guidance_scale,
+                "timestepShift": timestep_shift,
+                "resolution": f"{width}x{height}",
+                "realModelInference": True,
+            },
+        )
+
+    def _load_model(
+        self,
+        torch: Any,
+        repo: str,
+        device: str,
+        dtype: Any,
+        *,
+        job_id: str,
+    ) -> tuple[Any, Any]:
+        if self._model is not None and self._repo == repo:
+            emit_worker_event(
+                "image_pipeline_cache_hit",
+                jobId=job_id,
+                adapter=self.id,
+                repo=repo,
+                device=device,
+                gpuMemory=gpu_memory_snapshot(torch, device),
+            )
+            return self._model, self._tokenizer
+        if self._model is not None:
+            self._model = None
+            self._tokenizer = None
+            self._repo = None
+            empty_torch_cache(torch)
+        self._ensure_vendor_on_path()
+        import sensenova_u1  # noqa: F401 — import registers the neo_chat model type
+        from sensenova_u1.utils import load_model_and_tokenizer
+
+        emit_worker_event(
+            "image_pipeline_load_start",
+            jobId=job_id,
+            adapter=self.id,
+            repo=repo,
+            device=device,
+            dtype=str(dtype),
+            cached=huggingface_repo_cache_exists(repo),
+        )
+        model, tokenizer = load_model_and_tokenizer(repo, dtype=dtype, device=device)
+        self._model = model
+        self._tokenizer = tokenizer
+        self._repo = repo
+        emit_worker_event(
+            "image_pipeline_load_complete",
+            jobId=job_id,
+            adapter=self.id,
+            repo=repo,
+            device=device,
+        )
+        return model, tokenizer
+
+    def _run_inference(
+        self,
+        torch: Any,
+        model: Any,
+        tokenizer: Any,
+        prompt: str,
+        width: int,
+        height: int,
+        steps: int,
+        guidance_scale: float,
+        timestep_shift: float,
+        seed: int,
+    ) -> Image.Image:
+        with torch.inference_mode():
+            tensor = model.t2i_generate(
+                tokenizer,
+                prompt,
+                image_size=(width, height),
+                cfg_scale=guidance_scale,
+                cfg_norm="none",
+                timestep_shift=timestep_shift,
+                cfg_interval=(0.0, 1.0),
+                num_steps=steps,
+                batch_size=1,
+                seed=seed,
+                think_mode=False,
+            )
+        return self._to_pil(torch, tensor)[0]
+
+    def _to_pil(self, torch: Any, batch: Any) -> list[Image.Image]:
+        import numpy as np
+
+        mean = torch.tensor(self._NORM_MEAN, device=batch.device, dtype=torch.float32).view(1, 3, 1, 1)
+        std = torch.tensor(self._NORM_STD, device=batch.device, dtype=torch.float32).view(1, 3, 1, 1)
+        arr = (batch.float() * std + mean).clamp(0, 1).permute(0, 2, 3, 1).cpu().numpy()
+        arr = (arr * 255.0).round().astype(np.uint8)
+        return [Image.fromarray(a) for a in arr]
+
+
 def create_image_adapter(
     job: dict[str, Any],
     adapters: dict[str, object] | None = None,
-) -> ProceduralImageAdapter | ZImageDiffusersAdapter | QwenImageAdapter | LensTurboAdapter:
+) -> ProceduralImageAdapter | ZImageDiffusersAdapter | QwenImageAdapter | LensTurboAdapter | SenseNovaU1Adapter:
     payload = job.get("payload", {})
     requested = os.getenv("SCENEWORKS_IMAGE_ADAPTER", payload.get("adapter", "")).strip()
     if requested == "auto":
         requested = ""
     if requested in {"procedural", "procedural_preview"}:
         return adapters.get("procedural_preview") if adapters else ProceduralImageAdapter()
-    if requested and requested not in {ZImageDiffusersAdapter.id, QwenImageAdapter.id, LensTurboAdapter.id}:
+    if requested and requested not in {ZImageDiffusersAdapter.id, QwenImageAdapter.id, LensTurboAdapter.id, SenseNovaU1Adapter.id}:
         raise RuntimeError(f"Unsupported SCENEWORKS_IMAGE_ADAPTER value: {requested}.")
     if requested == ZImageDiffusersAdapter.id:
         return adapters.get("z_image_diffusers") if adapters else ZImageDiffusersAdapter()
@@ -1259,6 +1526,8 @@ def create_image_adapter(
         return adapters.get("qwen_image") if adapters else QwenImageAdapter()
     if requested == LensTurboAdapter.id:
         return adapters.get("lens_turbo") if adapters else LensTurboAdapter()
+    if requested == SenseNovaU1Adapter.id:
+        return adapters.get("sensenova_u1") if adapters else SenseNovaU1Adapter()
     model_target = MODEL_TARGETS.get(payload.get("model", "z_image_turbo"), {})
     if model_target.get("adapter") == ZImageDiffusersAdapter.id:
         return adapters.get("z_image_diffusers") if adapters else ZImageDiffusersAdapter()
@@ -1266,6 +1535,8 @@ def create_image_adapter(
         return adapters.get("qwen_image") if adapters else QwenImageAdapter()
     if model_target.get("adapter") == LensTurboAdapter.id:
         return adapters.get("lens_turbo") if adapters else LensTurboAdapter()
+    if model_target.get("adapter") == SenseNovaU1Adapter.id:
+        return adapters.get("sensenova_u1") if adapters else SenseNovaU1Adapter()
     return adapters.get("procedural_preview") if adapters else ProceduralImageAdapter()
 
 

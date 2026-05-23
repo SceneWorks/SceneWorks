@@ -19,6 +19,7 @@ from .image_adapters import (
     LensTurboAdapter,
     ProceduralImageAdapter,
     QwenImageAdapter,
+    SenseNovaU1Adapter,
     ZImageDiffusersAdapter,
     create_image_adapter,
 )
@@ -882,6 +883,7 @@ def run_worker_loop(settings: WorkerSettings) -> None:
         "qwen_image": QwenImageAdapter(),
         "z_image_diffusers": ZImageDiffusersAdapter(),
         "lens_turbo": LensTurboAdapter(),
+        "sensenova_u1": SenseNovaU1Adapter(),
     }
     max_registration_attempts = 20
 

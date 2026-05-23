@@ -137,6 +137,7 @@ string_enum! {
         ZImageDiffusers => "z_image_diffusers",
         QwenImage => "qwen_image",
         LensTurbo => "lens_turbo",
+        SenseNovaU1 => "sensenova_u1",
         ProceduralVideo => "procedural_video",
         ProceduralPersonTracking => "procedural_person_tracking",
         FfmpegFrameExtract => "ffmpeg-frame-extract",
