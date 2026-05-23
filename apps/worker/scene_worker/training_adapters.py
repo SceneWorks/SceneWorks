@@ -1633,6 +1633,13 @@ class _LtxMlxLoraBackend:
                     _scaled(_CACHE_PROGRESS_START, _CACHE_PROGRESS_END, index + 1, count),
                     f"Encoded {index + 1} of {count} dataset item(s).",
                 )
+        # The gemma text encoder (~28 GB) is only needed to cache the caption
+        # embeds above; the train loop runs the transformer alone. Release it now
+        # so it is not resident through training — drops the training-loop peak
+        # from ~59 GB to ~27 GB (the whole-run ceiling becomes the ~42 GB caching
+        # phase), which fits a 48 GB Mac.
+        self._text_encoder = None
+        mx.clear_cache()
         return {"itemCount": count, "resolution": resolution, "latentEdge": latent_edge}
 
     def train_step(self, *, step: int, total_steps: int, config: TrainingRunConfig) -> float:

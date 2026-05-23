@@ -159,8 +159,10 @@ under-fit; use earlier checkpoints if a 3000-step balanced run starts overfittin
 > natively in MLX from the same still-image dataset, registered under the
 > `ltx-video` family. Validated recipe: rank 32 / alpha 32 / lr 1e-4 / res 512
 > with short trigger-focused captions (`"a photo of <trigger>"`), ~1500 steps
-> (~1.35 s/step). It peaks ~59 GB during training, so use a **64 GB+ Mac**
-> (96 GB+ comfortable); generation peaks ~34 GB.
+> (~1.35 s/step). The gemma text encoder (~28 GB) is freed after caption
+> caching, so the training loop peaks ~27 GB; the whole-run ceiling is the
+> dataset-caching phase at ~42 GB (text encoder still resident), which fits a
+> **48 GB Mac** (64 GB+ comfortable). Generation peaks ~34 GB.
 
 AI Toolkit features such as EMA and Differential Output Preservation are not
 exposed as SceneWorks presets yet because the current worker does not implement
