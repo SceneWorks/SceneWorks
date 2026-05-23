@@ -232,6 +232,16 @@ MODEL_TARGETS = {
         "repo": "Qwen/Qwen-Image-Edit",
         "adapter": "qwen_image",
     },
+    "lens": {
+        "label": "Lens",
+        "family": "lens",
+        "supportsEdit": False,
+        # Non-distilled base: 20 steps, CFG 5.0. Also the LoRA training base.
+        "steps": 20,
+        "guidanceScale": 5.0,
+        "repo": "microsoft/Lens",
+        "adapter": "lens_turbo",
+    },
     "lens_turbo": {
         "label": "Lens-Turbo",
         "family": "lens",
@@ -1054,7 +1064,7 @@ class LensTurboAdapter:
         total = request.count
         repo = request.advanced.get("modelRepo") or model_target["repo"]
         steps = self._num_inference_steps(request, model_target)
-        guidance_scale = self._guidance_scale(request)
+        guidance_scale = self._guidance_scale(request, model_target)
         base_resolution, aspect_ratio = lens_resolution_for(request.width, request.height)
         seeds = [resolve_seed(request.seed, request.prompt, index, request.seeds) for index in range(total)]
         torch = importlib.import_module("torch")
@@ -1209,13 +1219,15 @@ class LensTurboAdapter:
     def _num_inference_steps(self, request: ImageRequest, model_target: dict[str, Any]) -> int:
         return safe_int(request.advanced.get("steps"), model_target["steps"], 1, 80)
 
-    def _guidance_scale(self, request: ImageRequest) -> float:
+    def _guidance_scale(self, request: ImageRequest, model_target: dict[str, Any]) -> float:
         # Lens-Turbo is distilled for guidance_scale ~1.0 (no CFG); the base Lens
-        # model uses ~5.0.
+        # model uses ~5.0. The per-model default comes from MODEL_TARGETS so each
+        # variant gets the right CFG when the request does not override it.
+        default = model_target.get("guidanceScale", 1.0)
         try:
-            return float(request.advanced.get("guidanceScale", 1.0))
+            return float(request.advanced.get("guidanceScale", default))
         except (TypeError, ValueError):
-            return 1.0
+            return float(default)
 
 
 class ProceduralImageAdapter:

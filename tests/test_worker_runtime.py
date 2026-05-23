@@ -69,6 +69,7 @@ from scene_worker.runtime import (
 from scene_worker.training_adapters import (
     SUPPORTED_LR_SCHEDULERS,
     SUPPORTED_TRAINING_PLAN_VERSION,
+    LensLoraTrainer,
     LtxMlxLoraTrainer,
     TrainingKernelError,
     ZImageLoraTrainer,
@@ -2078,8 +2079,147 @@ def test_z_image_lora_backend_generates_samples_with_turbo_guidance(tmp_path):
 
 def test_create_training_kernel_resolves_known_and_rejects_unknown():
     assert isinstance(create_training_kernel("z_image_lora"), ZImageLoraTrainer)
+    assert isinstance(create_training_kernel("lens_lora"), LensLoraTrainer)
     with pytest.raises(TrainingKernelError, match="No training kernel"):
         create_training_kernel("not_a_kernel")
+
+
+class _FakeLensSidecarPopen:
+    """Stand-in for the Lens training sidecar process: on construction it reads
+    the spec the driver wrote, emits a realistic progress.jsonl, writes the
+    output adapter + result.json, and exits 0 — so ``LensLoraTrainer``'s
+    subprocess orchestration is testable without the lens venv."""
+
+    def __init__(self, cmd, env=None, stdout=None, stderr=None):
+        spec = json.loads(Path(cmd[-1]).read_text(encoding="utf-8"))
+        steps = int(spec["config"]["steps"])
+        out_dir = Path(spec["outputDir"])
+        out_dir.mkdir(parents=True, exist_ok=True)
+        output_path = out_dir / spec["fileName"]
+        output_path.write_bytes(b"lora")
+        events = [
+            {"event": "stage", "stage": "loading_model", "message": "loading"},
+            {"event": "stage", "stage": "caching_latents", "message": "caching"},
+            {"event": "cache", "done": 1, "total": 1},
+            {"event": "stage", "stage": "training", "message": "training"},
+            {"event": "step", "step": steps, "total": steps, "loss": 0.25},
+            {"event": "saved", "path": str(output_path)},
+        ]
+        with Path(spec["progressPath"]).open("a", encoding="utf-8") as handle:
+            for event in events:
+                handle.write(json.dumps(event) + "\n")
+        Path(spec["resultPath"]).write_text(
+            json.dumps(
+                {
+                    "outputPath": str(output_path),
+                    "fileName": spec["fileName"],
+                    "stepsCompleted": steps,
+                    "checkpoints": [],
+                    "trainingSamples": [],
+                    "rank": spec["config"]["rank"],
+                    "alpha": spec["config"]["alpha"],
+                    "resolution": spec["config"]["resolution"],
+                    "baseModelSource": spec["source"],
+                }
+            ),
+            encoding="utf-8",
+        )
+        self.returncode = 0
+
+    def wait(self, timeout=None):
+        return 0
+
+    def terminate(self):
+        pass
+
+    def kill(self):
+        pass
+
+
+def _lens_train_plan(tmp_path, *, steps=4):
+    image = tmp_path / "images" / "000.png"
+    image.parent.mkdir(parents=True, exist_ok=True)
+    image.write_bytes(b"png")
+    return {
+        "planVersion": 1,
+        "dataset": {
+            "datasetId": "ds_1",
+            "datasetVersion": 1,
+            "items": [{"imagePath": str(image), "caption": "auroraStyle"}],
+        },
+        "target": {
+            "targetId": "lens_turbo_lora",
+            "kernel": "lens_lora",
+            "baseModel": "lens",
+            "baseModelRepo": "microsoft/Lens",
+            "baseModelPath": str(tmp_path / "absent"),
+        },
+        "config": {
+            "rank": 16,
+            "alpha": 16,
+            "learningRate": 0.0001,
+            "steps": steps,
+            "batchSize": 1,
+            "gradientAccumulation": 1,
+            "resolution": 1024,
+            "saveEvery": 0,
+            "seed": 42,
+            "optimizer": "adamw8bit",
+            "advanced": {
+                "lrScheduler": "constant",
+                "loraTargetModules": ["img_qkv", "txt_qkv", "to_out", "to_add_out"],
+            },
+        },
+        "output": {
+            "loraId": "lora_1",
+            "outputDir": str(tmp_path / "loras" / "lora_1"),
+            "fileName": "aurora.safetensors",
+            "format": "safetensors",
+            "triggerWords": ["auroraStyle"],
+        },
+    }
+
+
+def test_lens_trainer_drives_sidecar_and_shapes_result(tmp_path, monkeypatch):
+    import subprocess as _subprocess
+
+    plan = _lens_train_plan(tmp_path, steps=4)
+    monkeypatch.setattr(LensLoraTrainer, "_sidecar_available", lambda self: True)
+    monkeypatch.setattr(_subprocess, "Popen", _FakeLensSidecarPopen)
+
+    events = []
+    result = LensLoraTrainer().train(
+        settings=SimpleNamespace(worker_id="worker-1", gpu_id="0"),
+        plan=plan,
+        progress=lambda status, stage, value, message, result=None: events.append((status, stage)),
+        cancel_requested=lambda: False,
+    )
+
+    stages = {stage for _status, stage in events}
+    statuses = {status for status, _stage in events}
+    # The driver maps the sidecar's JSONL events onto valid JobStatus bands; in
+    # particular caching runs under "running" (not the invalid "caching").
+    assert {"caching_latents", "training", "saving"}.issubset(stages)
+    assert statuses <= _VALID_JOB_STATUSES
+    assert result["mode"] == "train"
+    assert result["kernel"] == "lens_lora"
+    assert result["stepsCompleted"] == 4
+    assert result["outputPath"] == os.path.join(plan["output"]["outputDir"], "aurora.safetensors")
+    assert result["baseModelSource"] == "microsoft/Lens"
+    assert result["triggerWords"] == ["auroraStyle"]
+    assert os.path.exists(result["outputPath"])
+
+
+def test_lens_trainer_requires_sidecar(tmp_path, monkeypatch):
+    plan = _lens_train_plan(tmp_path)
+    monkeypatch.setattr(LensLoraTrainer, "_sidecar_available", lambda self: False)
+    with pytest.raises(TrainingKernelError, match="Lens sidecar venv"):
+        LensLoraTrainer().train(
+            settings=SimpleNamespace(worker_id="w", gpu_id="0"),
+            plan=plan,
+            progress=lambda *args, **kwargs: None,
+            cancel_requested=lambda: False,
+        )
 
 
 def test_resolve_pretrained_source_prefers_loadable_model_dir(tmp_path):
