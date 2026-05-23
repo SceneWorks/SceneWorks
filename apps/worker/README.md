@@ -119,9 +119,10 @@ SceneWorks storage, config defaults, or the target registry directly.
   inference with no key remap. Validated end-to-end: a rank-32 / 1500-step run on
   ~76 stills (res 512, trigger-focused captions) produces a clearly attributable
   identity effect through the real `MlxVideoAdapter` generation path. Practical
-  footprint: ~1.35 s/step, **peak ~59 GB during training (needs a 64 GB+ Mac)**
-  and ~34 GB during generation; the gemma text encoder stays resident through the
-  loop, which dominates the training peak.
+  footprint: ~1.35 s/step. The gemma text encoder (~28 GB) is released after
+  caption caching, so the **training loop peaks ~27 GB**; the whole-run ceiling
+  is now the dataset-caching phase at **~42 GB (text encoder still resident)** —
+  a **48 GB Mac suffices** (64 GB+ comfortable). Generation peaks ~34 GB.
 
 The kernel produces the weights file and a result summary. Registering the
 produced adapter as a usable SceneWorks LoRA (with provenance and Image Studio
