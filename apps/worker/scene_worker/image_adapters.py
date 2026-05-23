@@ -30,7 +30,13 @@ from sceneworks_shared import (
 )
 
 from .adapter_utils import filter_call_kwargs
-from .lora_adapters import LoraPipelineState, apply_loras_to_pipeline, reject_loras_if_unsupported
+from .lora_adapters import (
+    LoraPipelineState,
+    apply_loras_to_pipeline,
+    normalize_lora_specs,
+    reject_loras_if_unsupported,
+    validate_lora_compatibility,
+)
 from .settings import WorkerSettings
 
 
@@ -231,6 +237,16 @@ MODEL_TARGETS = {
         "steps": 20,
         "repo": "Qwen/Qwen-Image-Edit",
         "adapter": "qwen_image",
+    },
+    "lens": {
+        "label": "Lens",
+        "family": "lens",
+        "supportsEdit": False,
+        # Non-distilled base: 20 steps, CFG 5.0. Also the LoRA training base.
+        "steps": 20,
+        "guidanceScale": 5.0,
+        "repo": "microsoft/Lens",
+        "adapter": "lens_turbo",
     },
     "lens_turbo": {
         "label": "Lens-Turbo",
@@ -1013,7 +1029,9 @@ class LensTurboAdapter:
     the shared asset writer. The vendored ``lens`` package (scene_worker/_vendor)
     is imported by the runner, not here.
 
-    Text-to-image only (no edit/img2img) and no LoRA support yet.
+    Text-to-image only (no edit/img2img). LoRAs (the `lens` family, trained by
+    the `lens_lora` kernel) are resolved here and applied to the transformer in
+    the sidecar via PeftAdapterMixin (sc-1587).
     """
 
     id = "lens_turbo"
@@ -1045,10 +1063,17 @@ class LensTurboAdapter:
         request = image_request_from_job(job)
         if request.mode == "edit_image":
             raise RuntimeError(f"{request.model} does not support image editing.")
-        reject_loras_if_unsupported(request.loras, self.id)
         model_target = MODEL_TARGETS.get(request.model, MODEL_TARGETS["lens_turbo"])
         if model_target.get("adapter") != self.id:
             raise RuntimeError(f"{request.model} is not a Lens target.")
+        # Lens LoRAs (sc-1587) are trained on the base and applied to the
+        # transformer inside the sidecar. Resolve + validate them in the main venv
+        # so a bad path or incompatible family fails before we spawn the
+        # subprocess; the sidecar only sees concrete file paths + weights.
+        validate_lora_compatibility(
+            request.loras, model_family=model_target.get("family"), adapter_id=self.id
+        )
+        lora_specs = normalize_lora_specs(request.loras)
         if not self._sidecar_available():
             raise RuntimeError(
                 "Lens generation requires the isolated Lens sidecar venv. Rebuild the worker image with "
@@ -1059,7 +1084,7 @@ class LensTurboAdapter:
         total = request.count
         repo = request.advanced.get("modelRepo") or model_target["repo"]
         steps = self._num_inference_steps(request, model_target)
-        guidance_scale = self._guidance_scale(request)
+        guidance_scale = self._guidance_scale(request, model_target)
         base_resolution, aspect_ratio = lens_resolution_for(request.width, request.height)
         seeds = [resolve_seed(request.seed, request.prompt, index, request.seeds) for index in range(total)]
         torch = importlib.import_module("torch")
@@ -1091,6 +1116,10 @@ class LensTurboAdapter:
                     "cpuOffload": bool(request.advanced.get("cpuOffload", False)),
                     "dtype": request.advanced.get("dtype"),
                     "device": device,
+                    "loras": [
+                        {"path": lora.path, "weight": lora.weight, "name": lora.adapter_name}
+                        for lora in lora_specs
+                    ],
                 },
                 progress=progress,
                 cancel_requested=cancel_requested,
@@ -1214,13 +1243,15 @@ class LensTurboAdapter:
     def _num_inference_steps(self, request: ImageRequest, model_target: dict[str, Any]) -> int:
         return safe_int(request.advanced.get("steps"), model_target["steps"], 1, 80)
 
-    def _guidance_scale(self, request: ImageRequest) -> float:
+    def _guidance_scale(self, request: ImageRequest, model_target: dict[str, Any]) -> float:
         # Lens-Turbo is distilled for guidance_scale ~1.0 (no CFG); the base Lens
-        # model uses ~5.0.
+        # model uses ~5.0. The per-model default comes from MODEL_TARGETS so each
+        # variant gets the right CFG when the request does not override it.
+        default = model_target.get("guidanceScale", 1.0)
         try:
-            return float(request.advanced.get("guidanceScale", 1.0))
+            return float(request.advanced.get("guidanceScale", default))
         except (TypeError, ValueError):
-            return 1.0
+            return float(default)
 
 
 class ProceduralImageAdapter:

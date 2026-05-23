@@ -156,6 +156,46 @@
       }
     },
     {
+      "id": "lens",
+      "name": "Lens",
+      "family": "lens",
+      "type": "image",
+      "adapter": "lens_turbo",
+      "capabilities": ["text_to_image", "style_variations"],
+      "downloads": [
+        {
+          "provider": "huggingface",
+          "repo": "microsoft/Lens",
+          "files": [],
+          "estimatedSizeBytes": 30800000000
+        }
+      ],
+      "paths": {
+        "model": "${HF_CACHE}/microsoft/Lens"
+      },
+      "defaults": {
+        // Non-distilled base: 20 steps, CFG 5.0 (vs Turbo's 4 / 1.0).
+        "resolution": "1024x1024",
+        "steps": 20,
+        "guidanceScale": 5.0,
+        "count": 1
+      },
+      "limits": {
+        "resolutions": ["1024x1024", "1440x1440", "1152x864", "864x1152", "1376x768", "768x1376"],
+        "count": [1, 2, 4]
+      },
+      "loraCompatibility": {
+        // Same `lens` family as Lens-Turbo; a LoRA trained here applies to both.
+        "families": ["lens"],
+        "types": ["style", "enhance", "character"]
+      },
+      "ui": {
+        "label": "Lens (base)",
+        "description": "Microsoft Lens base text-to-image (20-step, CFG 5.0): higher quality than Lens-Turbo, slower. Also the LoRA training base (sc-1583). gpt-oss-20b text encoder + FLUX.2 VAE; needs a large-VRAM GPU (~30GB mxfp4 / ~60GB bf16).",
+        "recommendedFor": ["text_to_image", "style_variations"]
+      }
+    },
+    {
       "id": "lens_turbo",
       "name": "Lens-Turbo",
       "family": "lens",
@@ -186,9 +226,11 @@
         "count": [1, 2, 4]
       },
       "loraCompatibility": {
-        // Lens LoRA training/inference is not supported yet.
-        "families": [],
-        "types": []
+        // Lens LoRA training (sc-1583) trains on the non-distilled microsoft/Lens
+        // and applies the adapter here on Lens-Turbo. The `lens` family maps to
+        // the `lens_turbo` adapter in lora_family.rs.
+        "families": ["lens"],
+        "types": ["style", "enhance", "character"]
       },
       "ui": {
         "label": "Lens-Turbo",

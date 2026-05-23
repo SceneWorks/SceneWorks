@@ -183,6 +183,57 @@ under-fit; use earlier checkpoints if a 3000-step balanced run starts overfittin
 > stack (peak rises to ~46 GB; a 64 GB+ Mac is recommended with them on), and the
 > distilled sampler ignores `sampleSteps`/`sampleGuidanceScale`.
 
+> **Lens LoRA (`microsoft/Lens` → Lens-Turbo):** the `lens_lora` kernel
+> (`target.kernel`) trains an image LoRA for Microsoft Lens. Lens-Turbo is a
+> 4-step *distillation* of `microsoft/Lens`; training a LoRA directly on the
+> distilled velocity field drifts (the same failure mode the Z-Image de-distill
+> adapter exists to avoid). So — unlike Z-Image — Lens needs **no de-distill
+> adapter**: it trains on the non-distilled **`microsoft/Lens`** (20-step, CFG 5.0,
+> the direct weight-parent of Turbo) and the resulting `lens`-family LoRA applies
+> cleanly to **Lens-Turbo** at inference. Install the **Lens (base)** model
+> (`microsoft/Lens`) from the Model Manager before a real run; `microsoft/Lens-Base`
+> (50-step supervised) is the fallback base, selectable via
+> `advanced.baseModelRepo`.
+>
+> Like the Lens inference path, training runs in the isolated **Lens sidecar venv**
+> (`/opt/lens-venv`: transformers 5.x + diffusers 0.38), not the main worker venv,
+> via `scene_worker/lens_train_runner.py`. The gpt-oss-20b text encoder + Flux.2
+> VAE encode the dataset once (latents + the 4 selected-layer text features are
+> cached), then the flow-matching loop trains a PEFT LoRA on the transformer's
+> **fused-QKV** projections (`img_qkv`/`txt_qkv`/`to_out`/`to_add_out` — Z-Image's
+> `to_q`/`to_k`/`to_v` would match nothing here). The 96 GB card is the validated
+> baseline; the text encoder (~16 GB mxfp4) stays resident, so lower-VRAM runs
+> should cut resolution (768) and rank first.
+>
+> **In-training previews render on the base Lens** (the loaded model), so the
+> defaults use the base's `sampleSteps: 20` / `sampleGuidanceScale: 5.0` — they are
+> a proxy for the concept on the base, **not** a Lens-Turbo (4-step) preview. They
+> add real time, so the default `sampleEvery` is wider (500); raise it or disable
+> previews to train faster.
+
+### Lens parameter defaults
+
+These are **principled starting points**, not empirically validated optima — Microsoft
+publishes no Lens LoRA-training guidance, so they are derived from the tuned
+Z-Image recipe plus general flow-matching DiT practice. Treat the right-hand
+column as the first knobs to sweep in a real validation pass.
+
+| Parameter | Default | Rationale / sweep note |
+| --- | --- | --- |
+| `rank` / `alpha` | 16 / 16 | Standard for style/character LoRAs (scale 1.0). Raise rank to 32 for complex styles; lower to 8 for tight identity or low VRAM. |
+| `learningRate` | `1e-4` | Typical for rank-16 flow-matching LoRAs on a non-distilled base. Lower to `5e-5` if identity drifts; Prodigy (`lr 1.0`) auto-tunes. |
+| `steps` | 3000 | Good for 10–30 images. Use earlier checkpoints if it overfits. |
+| `resolution` | 1024 | Lens snaps to 1024/1440 buckets; 768 for lower VRAM. |
+| `optimizer` | `adamw8bit` | bitsandbytes 8-bit AdamW; falls back to AdamW if unavailable. |
+| `timestepType` / `timestepBias` | `sigmoid` / `high_noise` | **Deliberate, and a sweep candidate.** `high_noise` biases training toward the high-noise sigmas where the 4-step *Turbo* deployment target actually evaluates the adapter. If outputs come out over-baked, try `balanced`. |
+| `lossType` | `mse` | Standard flow-matching objective. |
+| `lrScheduler` | `constant` | Holds LR fixed; `linear`/`cosine` (+ optional `lrWarmupSteps`) also honored. |
+
+The flow-matching target is **`noise - latents`** (note the sign — Lens feeds the
+transformer output to the scheduler without negation, the opposite of Z-Image),
+and the transformer timestep is the noise fraction directly. These are fixed in
+the kernel, not user knobs.
+
 AI Toolkit features such as EMA and Differential Output Preservation are not
 exposed as SceneWorks presets yet because the current worker does not implement
 their extra training passes.
@@ -214,6 +265,9 @@ messages:
 | Symptom | Cause | Fix |
 | --- | --- | --- |
 | *"Base model 'z_image_turbo' is not installed."* (submit) | Z-Image-Turbo not downloaded | Install it from the Model Manager, then retry the real run. Dry runs work without it. |
+| *"Base model 'lens' is not installed."* (submit) | `microsoft/Lens` (the Lens training base) not downloaded | Install **Lens (base)** from the Model Manager. Lens trains on the non-distilled base and applies the LoRA to Lens-Turbo. |
+| *"LoRA adapter attached no trainable parameters…"* (runtime) | `loraTargetModules` matched nothing | For Lens use the fused-QKV names (`img_qkv`, `txt_qkv`, `to_out`, `to_add_out`), not Z-Image's `to_q`/`to_k`/`to_v`. |
+| *"Lens LoRA training requires the isolated Lens sidecar venv…"* (submit) | Worker built without the Lens sidecar | Rebuild with `INCLUDE_LENS=1`, or set `SCENEWORKS_LENS_PYTHON`. |
 | *"… cannot target CPU workers."* (submit) | `requestedGpu` was `cpu` | Training is GPU-only. Use `auto` or a GPU id. |
 | *"Not enough free disk space to train…"* (submit) | Output volume low on space | Free space (model weights, checkpoints, cached latents are the largest consumers). |
 | Job stays **queued** | No GPU worker advertises `lora_train_execute` | Start a CUDA-enabled worker. A torch-less worker can claim dry runs only. |

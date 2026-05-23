@@ -22,26 +22,12 @@ import sys
 from pathlib import Path
 
 
-def _log(message: str) -> None:
-    sys.stderr.write(f"[lens_runner] {message}\n")
-    sys.stderr.flush()
-
-
 def _force_utf8_stdio() -> None:
-    """Force stdout/stderr to UTF-8 so the runner survives non-ASCII library output.
-
-    On Windows the sidecar's stdout/stderr default to the locale code page (cp1252
-    for en-US), so any dependency that ``print()``s a non-Latin-1 character raises
-    UnicodeEncodeError and kills the process. transformers' ``@auto_docstring``
-    decorator unconditionally prints an "undocumented parameters" developer notice
-    containing a 🚨 emoji while decorating model classes, which would crash the
-    ``import transformers`` / ``from lens import ...`` below on a Windows desktop
-    (where the Lens sidecar runs in a bundled venv). UTF-8 is already the default on
-    Linux/macOS, so this is a no-op there. The result JSON the runner prints on
-    stdout is ASCII (json.dumps ensure_ascii), so widening the encoding never changes
-    the bytes the adapter parses. Replicated from scene_worker.runtime rather than
-    imported to keep this module dependency-light (the sidecar venv lacks the main
-    worker stack).
+    """Force stdout/stderr to UTF-8 before importing transformers. On Windows the
+    sidecar's streams default to cp1252, and transformers' ``@auto_docstring``
+    decorator prints a 🚨 emoji while decorating model classes at import, crashing
+    the process with UnicodeEncodeError. No-op on Linux (where the worker container
+    runs). Mirrors scene_worker.runtime._force_utf8_stdio for the sidecar.
     """
     for stream in (sys.stdout, sys.stderr):
         reconfigure = getattr(stream, "reconfigure", None)
@@ -51,6 +37,40 @@ def _force_utf8_stdio() -> None:
             reconfigure(encoding="utf-8", errors="replace")
         except (ValueError, OSError):
             pass
+
+
+def _log(message: str) -> None:
+    sys.stderr.write(f"[lens_runner] {message}\n")
+    sys.stderr.flush()
+
+
+def _apply_loras(transformer, loras) -> None:
+    """Inject + scale trained `lens` LoRAs on the transformer (PeftAdapterMixin).
+
+    Each ``loras`` entry is ``{"path", "weight", "name"}``, already resolved to a
+    concrete .safetensors file by the adapter. ``save_lora_adapter`` (training
+    kernel) and ``load_lora_adapter`` are the symmetric PeftAdapterMixin pair; the
+    ``prefix=None`` retry covers builds that saved the adapter without a
+    ``transformer.`` key prefix.
+    """
+    names: list[str] = []
+    weights: list[float] = []
+    for index, lora in enumerate(loras):
+        name = str(lora.get("name") or f"lora_{index}")
+        path = str(lora["path"])
+        try:
+            transformer.load_lora_adapter(path, adapter_name=name)
+        except Exception:  # noqa: BLE001 - retry with no key prefix before failing
+            transformer.load_lora_adapter(path, adapter_name=name, prefix=None)
+        names.append(name)
+        try:
+            weights.append(float(lora.get("weight", 1.0)))
+        except (TypeError, ValueError):
+            weights.append(1.0)
+    if hasattr(transformer, "set_adapters"):
+        transformer.set_adapters(names, weights=weights)
+    elif names and hasattr(transformer, "set_adapter"):
+        transformer.set_adapter(names[0])
 
 
 def main() -> int:
@@ -108,6 +128,16 @@ def main() -> int:
     else:
         pipe.to(requested_device)
     _log("pipeline loaded")
+
+    # LensPipeline has no LoRA loader mixin, but LensTransformer2DModel inherits
+    # diffusers' PeftAdapterMixin, so trained `lens` LoRAs (sc-1587) load directly
+    # on the transformer. The adapter resolved each entry to a concrete file path
+    # + weight in the main venv; here we only inject and scale them. A LoRA trained
+    # on the base microsoft/Lens applies cleanly to Lens-Turbo (same architecture).
+    loras = spec.get("loras") or []
+    if loras:
+        _apply_loras(pipe.transformer, loras)
+        _log(f"applied {len(loras)} LoRA(s)")
 
     generator_device = requested_device if requested_device.startswith("cuda") else "cpu"
     base_resolution = int(spec.get("baseResolution", 1024))

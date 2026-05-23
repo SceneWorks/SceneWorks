@@ -397,7 +397,11 @@ pub struct TrainingProvenance {
 pub fn builtin_training_targets() -> TrainingTargetRegistry {
     TrainingTargetRegistry {
         schema_version: TRAINING_CONTRACT_SCHEMA_VERSION,
-        targets: vec![z_image_turbo_lora_target(), ltx_video_lora_target()],
+        targets: vec![
+            z_image_turbo_lora_target(),
+            lens_turbo_lora_target(),
+            ltx_video_lora_target(),
+        ],
         extra: ExtraFields::new(),
     }
 }
@@ -653,6 +657,101 @@ fn z_image_turbo_lora_target() -> TrainingTarget {
         ui: object(json!({
             "label": "Z-Image-Turbo LoRA",
             "description": "Train an image LoRA for the Z-Image-Turbo base model.",
+            "recommendedFor": ["character", "style"]
+        })),
+        extra: ExtraFields::new(),
+    }
+}
+
+/// Image LoRA training for Microsoft Lens, applied at inference to Lens-Turbo.
+///
+/// Lens-Turbo is a 4-step *distillation* of `microsoft/Lens`; training a LoRA
+/// directly on the distilled velocity field drifts (the same trap that produced
+/// off-identity LoRAs on Z-Image-Turbo). So this target trains against the
+/// non-distilled `microsoft/Lens` (20-step, CFG 5.0) — the direct weight-parent
+/// of Turbo, so the adapter transfers cleanly — and the output registers as a
+/// `lens` family LoRA the Lens adapter loads onto Lens-Turbo at generation time.
+/// `base_model_repo` points the plan's `baseModelPath` at the Lens HF cache,
+/// independent of the served `lens_turbo` model. `microsoft/Lens-Base` (50-step
+/// supervised) is the fallback base if RL-tuning hurts LoRA stability; override
+/// via `advanced.baseModelRepo` (sc-1584).
+///
+/// Unlike Z-Image's separate `to_q/to_k/to_v`, Lens uses *fused* QKV attention
+/// (`img_qkv`/`txt_qkv`) plus joint-attention output projections
+/// (`to_out`/`to_add_out`), so the default `loraTargetModules` must name those —
+/// the Z-Image defaults would match nothing and inject no adapter.
+fn lens_turbo_lora_target() -> TrainingTarget {
+    TrainingTarget {
+        id: "lens_turbo_lora".to_owned(),
+        name: "Lens LoRA".to_owned(),
+        modality: TrainingModality::Image,
+        output_kind: TrainingOutputKind::Lora,
+        family: "lens".to_owned(),
+        base_model: "lens".to_owned(),
+        base_model_repo: Some("microsoft/Lens".to_owned()),
+        kernel: "lens_lora".to_owned(),
+        defaults: TrainingConfig {
+            rank: 16,
+            alpha: 16,
+            learning_rate: ContractNumber::from_f64(0.0001).expect("0.0001 is finite"),
+            steps: 3000,
+            batch_size: 1,
+            gradient_accumulation: 1,
+            resolution: 1024,
+            save_every: 250,
+            seed: 42,
+            optimizer: "adamw8bit".to_owned(),
+            trigger_word: None,
+            advanced: object(json!({
+                "mixedPrecision": "bf16",
+                "cacheLatents": true,
+                "cacheTextEmbeddings": true,
+                "gradientCheckpointing": true,
+                "networkType": "lora",
+                "timestepType": "sigmoid",
+                "timestepBias": "high_noise",
+                "lossType": "mse",
+                "weightDecay": 0.0001,
+                // Learning-rate scheduler (see the Z-Image target); the worker
+                // honors `constant`/`linear`/`cosine` with an optional warmup.
+                "lrScheduler": "constant",
+                // Lens uses fused QKV attention plus joint-attention output
+                // projections, NOT Z-Image's separate to_q/to_k/to_v. These
+                // suffixes must match the LensTransformer2DModel module names or
+                // PEFT injects nothing.
+                "loraTargetModules": ["img_qkv", "txt_qkv", "to_out", "to_add_out"],
+                // Non-distilled training base; override with "microsoft/Lens-Base"
+                // to train on the 50-step supervised checkpoint instead (sc-1584).
+                "baseModelRepo": "microsoft/Lens",
+                // In-training previews render on the loaded base model (not the
+                // distilled Turbo), so they use the base's 20-step / CFG 5.0
+                // settings — 4-step / CFG 1.0 on the non-distilled base is garbage.
+                // Heavier than Turbo previews, so a wider cadence by default.
+                "sampleEvery": 500,
+                "sampleSteps": 20,
+                "sampleGuidanceScale": 5.0,
+                "qualityPreset": "balanced",
+                "outputScope": "project",
+                "requestedGpu": "auto"
+            })),
+            extra: ExtraFields::new(),
+        },
+        limits: object(json!({
+            "rank": [4, 128],
+            "alpha": [1, 128],
+            "steps": [200, 6000],
+            // Lens snaps onto 1024/1440 base-resolution buckets; 768 is allowed
+            // for lower-VRAM runs.
+            "resolutions": [768, 1024, 1440],
+            "batchSize": [1, 4],
+            "optimizers": ["adamw8bit", "adamw", "adam", "prodigyopt"],
+            "lrSchedulers": ["constant", "linear", "cosine"],
+            "qualityPresets": ["speed", "balanced", "quality"],
+            "outputScopes": ["project", "global"]
+        })),
+        ui: object(json!({
+            "label": "Lens LoRA",
+            "description": "Train an image LoRA for Microsoft Lens (gpt-oss text encoder + FLUX.2 VAE). Trains on the non-distilled base and applies to Lens-Turbo.",
             "recommendedFor": ["character", "style"]
         })),
         extra: ExtraFields::new(),
