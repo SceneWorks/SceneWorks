@@ -577,25 +577,60 @@ def run_vqa_job(api: ApiClient, settings: WorkerSettings, job: dict, image_adapt
 
 
 def run_interleave_job(api: ApiClient, settings: WorkerSettings, job: dict, image_adapters: dict[str, object]) -> None:
-    # sc-1604 wires the job type, routing, and capability only. The real interleaved
-    # generation path (vendored interleave_gen → ordered text+image document) lands in
-    # sc-1606, replacing this stub. We fail fast with a clear message rather than leave
-    # the capability unadvertised, which would queue the job forever with no claimant.
     job_id = job["id"]
+    adapter = image_adapters["sensenova_u1"]
+    needs_oom_restart = False
+
+    def adapter_loaded_models() -> list[str]:
+        return loaded_models_from_adapter(adapter, job_id=job_id)
+
+    def progress(status: str, stage: str, value: float, message: str, result: dict[str, Any] | None = None) -> None:
+        heartbeat_with_loaded_models(api, settings, "busy", job_id, adapter_loaded_models)
+        payload = {"status": status, "stage": stage, "progress": value, "message": message}
+        if result is not None:
+            payload["result"] = result
+        update_job(api, job_id, payload)
+
     try:
+        progress("preparing", "preparing", 0.08, "Preparing interleaved document.")
+        result = run_blocking_job_step(
+            api,
+            settings,
+            job_id,
+            "busy",
+            lambda: adapter.generate_interleaved(
+                settings=settings,
+                job=job,
+                progress=progress,
+                cancel_requested=lambda: job_cancel_requested(api, job_id),
+            ),
+            loaded_models=adapter_loaded_models,
+        )
         update_job(
             api,
             job_id,
             {
-                "status": "failed",
-                "stage": "failed",
+                "status": "completed",
+                "stage": "completed",
                 "progress": 1,
-                "message": "Interleaved text-image generation isn't available yet.",
-                "error": "image_interleave worker path is not implemented yet (sc-1606).",
+                "message": "Interleaved document ready.",
+                "result": result,
             },
+        )
+    except InterruptedError as exc:
+        update_job(api, job_id, {"status": "canceled", "stage": "canceled", "progress": 1, "message": str(exc)})
+    except Exception as exc:
+        needs_oom_restart = is_cuda_oom(exc)
+        message, error = friendly_failure("Interleaved generation", exc)
+        update_job(
+            api,
+            job_id,
+            {"status": "failed", "stage": "failed", "progress": 1, "message": message, "error": error},
         )
     finally:
         heartbeat(api, settings, "idle", loaded_models=loaded_models_from_adapters(image_adapters))
+        if needs_oom_restart:
+            restart_worker_after_oom(settings, job_id)
 
 
 def run_video_job(api: ApiClient, settings: WorkerSettings, job: dict) -> None:

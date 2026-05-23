@@ -37,6 +37,7 @@ from scene_worker.image_adapters import (
     model_supports_edit,
     pipeline_component_devices,
     require_inference_backend_for_gpu_worker,
+    interleave_resolution_for,
     resolve_seed,
     select_torch_device,
     sensenova_resolution_for,
@@ -1014,6 +1015,124 @@ def test_sensenova_u1_vqa_requires_question():
         assert "requires a question" in str(exc)
     else:
         raise AssertionError("VQA must reject an empty question.")
+
+
+def test_interleave_resolution_for_snaps_to_interleave_buckets():
+    # Interleave uses its own (smaller) trained buckets, distinct from t2i.
+    assert interleave_resolution_for(1000, 1000) == (1536, 1536)
+    assert interleave_resolution_for(1920, 1080) == (2048, 1152)
+    assert interleave_resolution_for(1080, 1920) == (1152, 2048)
+    # Same 16:9 request snaps differently for interleave vs t2i.
+    assert interleave_resolution_for(1920, 1080) != sensenova_resolution_for(1920, 1080)
+
+
+def test_generate_interleaved_requires_prompt():
+    # The prompt is validated before any model load (no torch needed).
+    adapter = SenseNovaU1Adapter()
+    job = {"id": "job_il", "payload": {"projectId": "p", "prompt": "   "}}
+    noop = lambda *args, **kwargs: None  # noqa: E731
+    with pytest.raises(RuntimeError, match="requires a prompt"):
+        adapter.generate_interleaved(settings=None, job=job, progress=noop, cancel_requested=lambda: False)
+
+
+def test_generate_interleaved_rejects_non_sensenova_model():
+    adapter = SenseNovaU1Adapter()
+    job = {"id": "job_il", "payload": {"projectId": "p", "prompt": "guide", "model": "z_image_turbo"}}
+    noop = lambda *args, **kwargs: None  # noqa: E731
+    with pytest.raises(RuntimeError, match="not a SenseNova-U1 target"):
+        adapter.generate_interleaved(settings=None, job=job, progress=noop, cancel_requested=lambda: False)
+
+
+def test_interleave_segments_interleave_text_and_images():
+    assets = [
+        {"id": "asset_a", "file": {"path": "assets/images/a.png"}},
+        {"id": "asset_b", "file": {"path": "assets/images/b.png"}},
+    ]
+    text = "Boil the water.<image>Steep the leaves.<image>Pour and enjoy."
+    segments = SenseNovaU1Adapter._build_interleaved_segments(text, assets)
+    assert segments == [
+        {"type": "text", "text": "Boil the water."},
+        {"type": "image", "assetId": "asset_a", "path": "assets/images/a.png"},
+        {"type": "text", "text": "Steep the leaves."},
+        {"type": "image", "assetId": "asset_b", "path": "assets/images/b.png"},
+        {"type": "text", "text": "Pour and enjoy."},
+    ]
+
+
+def test_interleave_segments_handles_leading_image_and_blank_text():
+    assets = [{"id": "asset_a", "file": {"path": "assets/images/a.png"}}]
+    segments = SenseNovaU1Adapter._build_interleaved_segments("<image>Only a caption.", assets)
+    assert segments == [
+        {"type": "image", "assetId": "asset_a", "path": "assets/images/a.png"},
+        {"type": "text", "text": "Only a caption."},
+    ]
+
+
+def test_interleave_segments_caps_images_to_available_assets():
+    # More <image> markers than generated images: extra markers emit no image segment.
+    assets = [{"id": "asset_a", "file": {"path": "assets/images/a.png"}}]
+    segments = SenseNovaU1Adapter._build_interleaved_segments("A<image>B<image>C", assets)
+    assert segments == [
+        {"type": "text", "text": "A"},
+        {"type": "image", "assetId": "asset_a", "path": "assets/images/a.png"},
+        {"type": "text", "text": "B"},
+        {"type": "text", "text": "C"},
+    ]
+
+
+def test_write_interleaved_document_persists_document_and_image_assets(tmp_path):
+    data_dir = tmp_path / "data"
+    project_path = tmp_path / "project"
+    data_dir.mkdir()
+    project_path.mkdir()
+    (data_dir / "recent-projects.json").write_text(
+        json.dumps([{"id": "project-1", "path": str(project_path)}]),
+        encoding="utf-8",
+    )
+    job = {"id": "job-1", "payload": {"projectId": "project-1", "model": "sensenova_u1_8b", "prompt": "guide"}}
+    progress_results = []
+
+    def progress(status, stage, value, message, result=None):
+        if result is not None:
+            progress_results.append(result)
+
+    result = SenseNovaU1Adapter()._write_interleaved_document(
+        settings=SimpleNamespace(data_dir=data_dir),
+        job=job,
+        project_id="project-1",
+        model_id="sensenova_u1_8b",
+        prompt="An illustrated guide to brewing tea",
+        seed=7,
+        generated_text="Boil water.<image>Steep.<image>Done.",
+        images=[Image.new("RGB", (16, 16), (255, 0, 0)), Image.new("RGB", (16, 16), (0, 255, 0))],
+        cancel_requested=lambda: False,
+        progress=progress,
+        raw_settings={"maxImages": 6, "resolution": "2048x1152"},
+    )
+
+    document_dir = project_path / "assets" / "documents"
+    doc_jsons = [p for p in document_dir.glob("*.json") if not p.name.endswith(".sceneworks.json")]
+    sidecars = list(document_dir.glob("*.sceneworks.json"))
+    assert len(doc_jsons) == 1
+    assert len(sidecars) == 1
+
+    document = json.loads(doc_jsons[0].read_text(encoding="utf-8"))
+    assert [segment["type"] for segment in document["segments"]] == ["text", "image", "text", "image", "text"]
+    assert document["model"] == "sensenova_u1_8b"
+    assert document["jobId"] == "job-1"
+
+    sidecar = json.loads(sidecars[0].read_text(encoding="utf-8"))
+    assert sidecar["type"] == "document"
+    assert sidecar["file"]["mimeType"] == "application/json"
+    assert sidecar["file"]["path"] == f"assets/documents/{document['id']}.json"
+    assert sidecar["recipe"]["mode"] == "interleave"
+
+    # The two generated images persist as ordinary image assets.
+    assert len(list((project_path / "assets" / "images").glob("*.png"))) == 2
+    assert len(result["imageAssetIds"]) == 2
+    assert result["documentId"] == document["id"]
+    assert result["segments"] == document["segments"]
+    assert progress_results and progress_results[-1]["documentId"] == document["id"]
 
 
 def test_sensenova_resolution_for_snaps_to_buckets():
