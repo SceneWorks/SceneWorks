@@ -24,6 +24,7 @@ import { useTraining } from "./hooks/useTraining.js";
 import { useModelsAndLoras } from "./hooks/useModelsAndLoras.js";
 import { usePersonTracks } from "./hooks/usePersonTracks.js";
 import { useTimelines } from "./hooks/useTimelines.js";
+import { AppContext } from "./context/AppContext.js";
 
 // Desktop (Tauri) shell detection. The first-run setup wizard is desktop-only;
 // web/Docker keep the existing first-run project gate. Tauri commands persist the
@@ -1212,7 +1213,29 @@ export function App() {
   const setupGateLoading = isDesktopShell && setupCompleted === null;
   const showSetupWizard = isDesktopShell && setupCompleted === false && authenticated;
 
+  // sc-1651 Phase B: shared primitives screens read via useAppContext() instead of
+  // drilled props. Screens build any screen-specific wrappers from these (e.g. a
+  // send-to-studio action with a mode). Grown one screen at a time as screens convert.
+  const appContextValue = {
+    activeProject,
+    mediaAssets,
+    setPreviewAsset,
+    sendAssetToImage,
+    sendAssetToVideo,
+    activeTimeline,
+    timelines,
+    selectedTimelineId,
+    setSelectedTimelineId,
+    setActiveTimeline,
+    createTimeline,
+    saveTimeline,
+    exportTimeline,
+    extractTimelineFrame,
+    queueTimelineVideoJob,
+  };
+
   return (
+    <AppContext.Provider value={appContextValue}>
     <main className="app">
       <aside className="sidebar" aria-label="Primary">
         <div className="brand">
@@ -1513,24 +1536,7 @@ export function App() {
         ) : null}
 
         {activeView === "Editor" ? (
-          <EditorScreen
-            activeProject={activeProject}
-            activeTimeline={activeTimeline}
-            assets={mediaAssets}
-            createTimeline={createTimeline}
-            extractTimelineFrame={extractTimelineFrame}
-            exportTimeline={exportTimeline}
-            onPreview={setPreviewAsset}
-            onSendImage={(asset) => sendAssetToImage(asset, "edit_image")}
-            onSendVideo={(asset) => sendAssetToVideo(asset, asset?.type === "video" ? "extend_clip" : "image_to_video")}
-            queueTimelineVideoJob={queueTimelineVideoJob}
-            refreshAssets={refreshAssets}
-            saveTimeline={saveTimeline}
-            selectedTimelineId={selectedTimelineId}
-            setActiveTimeline={setActiveTimeline}
-            setSelectedTimelineId={setSelectedTimelineId}
-            timelines={timelines}
-          />
+          <EditorScreen />
         ) : null}
 
         {activeView === "Characters" ? (
@@ -1586,5 +1592,6 @@ export function App() {
         />
       ) : null}
     </main>
+    </AppContext.Provider>
   );
 }
