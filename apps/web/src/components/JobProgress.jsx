@@ -44,8 +44,9 @@ export function useLiveJobElapsedSeconds(job) {
   return liveElapsedSeconds(job, nowMs);
 }
 
-export function JobProgressCard({ job, label, onOpenQueue }) {
+export function JobProgressCard({ job, label, onOpenQueue, onCancel }) {
   const isError = localErrorStatuses.has(job.status);
+  const canCancel = !terminalStatuses.has(job.status);
   const progressLabel = percent(job.progress);
   const message = jobMessage(job);
   const elapsedSeconds = useLiveJobElapsedSeconds(job);
@@ -67,7 +68,23 @@ export function JobProgressCard({ job, label, onOpenQueue }) {
         <span>GPU {job.assignedGpu ?? job.requestedGpu ?? "auto"}</span>
       </div>
       {message ? <p className={isError ? "job-message error-text" : "job-message"}>{message}</p> : null}
-      {onOpenQueue ? (
+      {onCancel && canCancel ? (
+        <div className="local-job-actions">
+          <button
+            className="secondary-action danger"
+            disabled={job.cancelRequested}
+            onClick={() => onCancel(job)}
+            type="button"
+          >
+            {job.cancelRequested ? "Canceling…" : "Cancel run"}
+          </button>
+          {onOpenQueue ? (
+            <button className="secondary-action" onClick={onOpenQueue} type="button">
+              View in Queue
+            </button>
+          ) : null}
+        </div>
+      ) : onOpenQueue ? (
         <button className="secondary-action" onClick={onOpenQueue} type="button">
           {isError ? "Open Queue" : "View in Queue"}
         </button>

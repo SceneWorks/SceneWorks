@@ -68,6 +68,7 @@ export function VideoStudio({
   loras = [],
   jobs = [],
   localJobs: trackedLocalJobs = [],
+  onCancelJob,
   onLocalJobCreated,
   onOpenPresets,
   onOpenQueue,
@@ -381,7 +382,11 @@ export function VideoStudio({
   }, [assets, latestAssets, trackedLocalJobs, resultFallbackTick]);
 
   const localJobs = trackedLocalJobs.filter(
-    (job) => job.status !== "completed" || (!resultVisible(job) && !completedWaitExpired(job)),
+    (job) =>
+      // Canceled runs produce no output, so drop them instead of leaving a
+      // "Canceled" progress card behind.
+      job.status !== "canceled" &&
+      (job.status !== "completed" || (!resultVisible(job) && !completedWaitExpired(job))),
   );
   const hasReviewContent = Boolean(localJobs.length || latestAssets.length);
 
@@ -584,7 +589,7 @@ export function VideoStudio({
             {localJobs.length ? (
               <div className="local-job-stack">
                 {localJobs.map((job) => (
-                  <JobProgressCard job={job} key={job.id} label="Video generation" onOpenQueue={onOpenQueue} />
+                  <JobProgressCard job={job} key={job.id} label="Video generation" onCancel={onCancelJob} onOpenQueue={onOpenQueue} />
                 ))}
               </div>
             ) : null}

@@ -3001,6 +3001,21 @@ label {
   background: var(--surface-2);
 }
 
+.secondary-action.danger {
+  border-color: color-mix(in oklch, var(--danger) 45%, var(--border));
+  color: var(--danger);
+}
+
+.secondary-action.danger:hover:not(:disabled) {
+  background: var(--danger-soft);
+}
+
+.local-job-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
 .status-badge {
   display: inline-flex;
   align-items: center;

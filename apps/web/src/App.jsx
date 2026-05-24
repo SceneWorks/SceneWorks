@@ -95,7 +95,9 @@ function generatedResultAssetCount(job) {
   return 0;
 }
 
-const localJobStackLimit = 4;
+// Studios show only the most recent run's progress card; starting a new run
+// replaces the previous one rather than stacking cards.
+const localJobStackLimit = 1;
 const maxLoraUploadBytes = 2 * 1024 * 1024 * 1024;
 const maxModelUploadBytes = 256 * 1024 * 1024 * 1024;
 
@@ -1367,7 +1369,7 @@ export function App() {
     }
     setLocalGenerationJobIds((current) => ({
       ...current,
-      // Keep the local review stack compact for burst submissions.
+      // Only the latest run is shown, so a new submission replaces the previous id.
       [kind]: [job.id, ...current[kind].filter((id) => id !== job.id)].slice(0, localJobStackLimit),
     }));
   }
@@ -2091,6 +2093,7 @@ export function App() {
             launchRequest={studioLaunch}
             loras={loras}
             localJobs={imageLocalJobs}
+            onCancelJob={(job) => jobAction(job, "cancel")}
             onLocalJobCreated={(job) => rememberLocalGenerationJob("image", job)}
             onOpenPresets={() => setActiveView("Presets")}
             onOpenQueue={() => setActiveView("Queue")}
@@ -2121,6 +2124,7 @@ export function App() {
             loras={loras}
             jobs={jobs}
             localJobs={videoLocalJobs}
+            onCancelJob={(job) => jobAction(job, "cancel")}
             onLocalJobCreated={(job) => rememberLocalGenerationJob("video", job)}
             onOpenPresets={() => setActiveView("Presets")}
             onOpenQueue={() => setActiveView("Queue")}
@@ -2151,6 +2155,7 @@ export function App() {
             gpuOptions={gpuOptions}
             imageModels={imageModels}
             jobs={jobs}
+            onCancelJob={(job) => jobAction(job, "cancel")}
             onOpenQueue={() => setActiveView("Queue")}
             requestedGpu={requestedGpu}
             setRequestedGpu={setRequestedGpu}
@@ -2228,6 +2233,7 @@ export function App() {
             onDeleteModel={deleteModel}
             onDownloadModel={createModelDownloadJob}
             onConvertModel={createModelConvertJob}
+            onCancelJob={(job) => jobAction(job, "cancel")}
             onImportLora={createLoraImportJob}
             onImportModel={createModelImportJob}
             onOpenQueue={() => setActiveView("Queue")}

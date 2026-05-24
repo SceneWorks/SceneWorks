@@ -131,6 +131,7 @@ export function ModelManagerScreen({
   jobs,
   loras,
   models,
+  onCancelJob,
   onConvertModel,
   onDeleteLora,
   onDeleteModel,
@@ -417,7 +418,7 @@ export function ModelManagerScreen({
                 </div>
               </dl>
               {localDownloadJob ? (
-                <JobProgressCard job={localDownloadJob} label="Model download" onOpenQueue={onOpenQueue} />
+                <JobProgressCard job={localDownloadJob} label="Model download" onCancel={onCancelJob} onOpenQueue={onOpenQueue} />
               ) : null}
               {mlxState ? (
                 <div className="mlx-status">
@@ -436,7 +437,7 @@ export function ModelManagerScreen({
                     </p>
                   ) : null}
                   {convertJob ? (
-                    <JobProgressCard job={convertJob} label="MLX conversion" onOpenQueue={onOpenQueue} />
+                    <JobProgressCard job={convertJob} label="MLX conversion" onCancel={onCancelJob} onOpenQueue={onOpenQueue} />
                   ) : null}
                   {showConvertButton ? (
                     <button
@@ -585,7 +586,7 @@ export function ModelManagerScreen({
             <strong>Model imports in progress</strong>
             <div className="local-job-stack">
               {pendingModelImportJobs.map((job) => (
-                <JobProgressCard job={job} key={job.id} label="Model import" onOpenQueue={onOpenQueue} />
+                <JobProgressCard job={job} key={job.id} label="Model import" onCancel={onCancelJob} onOpenQueue={onOpenQueue} />
               ))}
             </div>
           </div>
@@ -707,7 +708,7 @@ export function ModelManagerScreen({
             <strong>LoRA imports in progress</strong>
             <div className="local-job-stack">
               {localLoraImportJobs.map((job) => (
-                <JobProgressCard job={job} key={job.id} label="LoRA import" onOpenQueue={onOpenQueue} />
+                <JobProgressCard job={job} key={job.id} label="LoRA import" onCancel={onCancelJob} onOpenQueue={onOpenQueue} />
               ))}
             </div>
           </div>
