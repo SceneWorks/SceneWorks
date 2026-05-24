@@ -21,6 +21,7 @@ import { sortNewest, sortWorkers } from "./sorters.js";
 import { ensureItemVersionFields } from "./timeline.js";
 import { useCharacters } from "./hooks/useCharacters.js";
 import { usePresets } from "./hooks/usePresets.js";
+import { useTraining } from "./hooks/useTraining.js";
 
 // Desktop (Tauri) shell detection. The first-run setup wizard is desktop-only;
 // web/Docker keep the existing first-run project gate. Tauri commands persist the
@@ -371,10 +372,6 @@ export function App() {
   const [trainingPresets, setTrainingPresets] = useState({ schemaVersion: 1, presets: [] });
   const [trainingTargetsError, setTrainingTargetsError] = useState("");
   const [trainingPresetsError, setTrainingPresetsError] = useState("");
-  const [trainingDatasets, setTrainingDatasets] = useState([]);
-  const [trainingDatasetsProjectId, setTrainingDatasetsProjectId] = useState(null);
-  const [loadingTrainingDatasets, setLoadingTrainingDatasets] = useState(false);
-  const [trainingDatasetsError, setTrainingDatasetsError] = useState("");
   const [assets, setAssets] = useState([]);
   const [personTracks, setPersonTracks] = useState([]);
   const [timelines, setTimelines] = useState([]);
@@ -425,6 +422,24 @@ export function App() {
     duplicatePreset,
     deletePreset,
   } = usePresets({ token, activeProject, setError });
+
+  const {
+    trainingDatasets,
+    setTrainingDatasets,
+    trainingDatasetsProjectId,
+    setTrainingDatasetsProjectId,
+    loadingTrainingDatasets,
+    trainingDatasetsError,
+    setTrainingDatasetsError,
+    refreshTrainingDatasets,
+    loadTrainingDataset,
+    createTrainingDataset,
+    updateTrainingDataset,
+    batchRenameTrainingDataset,
+    writeTrainingDatasetCaptionSidecars,
+    createTrainingDatasetCaptionJob,
+    createTrainingJob,
+  } = useTraining({ token, activeProject, setError, setJobs });
 
   const authenticated = useMemo(() => !access.authRequired || token.length > 0, [access, token]);
   const imageModels = useMemo(() => {
@@ -853,127 +868,6 @@ export function App() {
         }
       })
       .catch(() => {});
-  }
-
-  async function refreshTrainingDatasets(projectId = activeProject?.id, { signal } = {}) {
-    if (!projectId) {
-      setTrainingDatasets([]);
-      setTrainingDatasetsProjectId(null);
-      setTrainingDatasetsError("");
-      return [];
-    }
-    setLoadingTrainingDatasets(true);
-    try {
-      const items = await apiFetch(`/api/v1/projects/${projectId}/training/datasets`, token, { signal });
-      setTrainingDatasets(items);
-      setTrainingDatasetsProjectId(projectId);
-      setTrainingDatasetsError("");
-      return items;
-    } catch (err) {
-      if (isAbortError(err)) return [];
-      setTrainingDatasets([]);
-      setTrainingDatasetsProjectId(projectId);
-      setTrainingDatasetsError(err.message);
-      return [];
-    } finally {
-      // A superseded load must not clear the loading flag the new load just set.
-      if (!signal?.aborted) {
-        setLoadingTrainingDatasets(false);
-      }
-    }
-  }
-
-  async function loadTrainingDataset(datasetId, projectId = activeProject?.id) {
-    if (!projectId || !datasetId) {
-      return null;
-    }
-    return apiFetch(`/api/v1/projects/${projectId}/training/datasets/${encodeURIComponent(datasetId)}`, token);
-  }
-
-  async function createTrainingDataset(payload, projectId = activeProject?.id) {
-    if (!projectId) {
-      throw new Error("Create or open a project first.");
-    }
-    const created = await apiFetch(`/api/v1/projects/${projectId}/training/datasets`, token, {
-      method: "POST",
-      body: JSON.stringify(payload),
-    });
-    await refreshTrainingDatasets(projectId);
-    return created;
-  }
-
-  async function updateTrainingDataset(datasetId, payload, projectId = activeProject?.id) {
-    if (!projectId || !datasetId) {
-      throw new Error("Select a training dataset first.");
-    }
-    const updated = await apiFetch(`/api/v1/projects/${projectId}/training/datasets/${encodeURIComponent(datasetId)}`, token, {
-      method: "PATCH",
-      body: JSON.stringify(payload),
-    });
-    await refreshTrainingDatasets(projectId);
-    return updated;
-  }
-
-  async function batchRenameTrainingDataset(datasetId, payload, projectId = activeProject?.id) {
-    if (!projectId || !datasetId) {
-      throw new Error("Select a training dataset first.");
-    }
-    const updated = await apiFetch(
-      `/api/v1/projects/${projectId}/training/datasets/${encodeURIComponent(datasetId)}/batch-rename`,
-      token,
-      {
-        method: "POST",
-        body: JSON.stringify(payload),
-      },
-    );
-    await refreshTrainingDatasets(projectId);
-    return updated;
-  }
-
-  async function writeTrainingDatasetCaptionSidecars(datasetId, payload, projectId = activeProject?.id) {
-    if (!projectId || !datasetId) {
-      throw new Error("Select a training dataset first.");
-    }
-    const result = await apiFetch(
-      `/api/v1/projects/${projectId}/training/datasets/${encodeURIComponent(datasetId)}/caption-sidecars`,
-      token,
-      {
-        method: "POST",
-        body: JSON.stringify(payload),
-      },
-    );
-    await refreshTrainingDatasets(projectId);
-    return result;
-  }
-
-  async function createTrainingDatasetCaptionJob(datasetId, payload, projectId = activeProject?.id) {
-    if (!projectId || !datasetId) {
-      throw new Error("Select a training dataset first.");
-    }
-    const job = await apiFetch(
-      `/api/v1/projects/${projectId}/training/datasets/${encodeURIComponent(datasetId)}/caption-jobs`,
-      token,
-      {
-        method: "POST",
-        body: JSON.stringify(payload),
-      },
-    );
-    setJobs((items) => [job, ...items.filter((item) => item.id !== job.id)].sort(sortNewest));
-    setError("");
-    return job;
-  }
-
-  async function createTrainingJob(request, projectId = activeProject?.id) {
-    if (!projectId) {
-      throw new Error("Select a workspace before creating a training job.");
-    }
-    const job = await apiFetch(`/api/v1/projects/${projectId}/training/jobs`, token, {
-      method: "POST",
-      body: JSON.stringify(request),
-    });
-    setJobs((items) => [job, ...items.filter((item) => item.id !== job.id)].sort(sortNewest));
-    setError("");
-    return job;
   }
 
   async function deleteModel(model) {
