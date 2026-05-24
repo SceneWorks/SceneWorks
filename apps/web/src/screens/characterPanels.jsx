@@ -2,30 +2,20 @@ import React from "react";
 import { AssetPickerField } from "../components/AssetPicker.jsx";
 import { AssetCard } from "../components/assetPanels.jsx";
 import { AssetMedia } from "../components/assetMedia.jsx";
-
-export function compatibleFamilies(item) {
-  const compatibility = item?.compatibility ?? {};
-  const values =
-    item?.families ??
-    item?.compatibleFamilies ??
-    item?.modelFamilies ??
-    compatibility.families ??
-    (item?.family ? [item.family] : []);
-  return Array.isArray(values) ? values : [values].filter(Boolean);
-}
+import { extractFamilies } from "../presetUtils.js";
 
 export function editableLora(link) {
   return {
     name: link?.name ?? "",
     triggerWords: (link?.triggerWords ?? []).join(", "),
     defaultWeight: link?.defaultWeight ?? 0.8,
-    families: compatibleFamilies(link).join(", "),
+    families: extractFamilies(link).join(", "),
     scope: link?.scope ?? "project",
   };
 }
 
 function summarizeCompatibility(item) {
-  const values = compatibleFamilies(item);
+  const values = extractFamilies(item);
   return values.length ? values.join(", ") : "Unspecified";
 }
 
