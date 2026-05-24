@@ -95,7 +95,9 @@ function generatedResultAssetCount(job) {
   return 0;
 }
 
-const localJobStackLimit = 4;
+// Studios show only the most recent run's progress card; starting a new run
+// replaces the previous one rather than stacking cards.
+const localJobStackLimit = 1;
 const maxLoraUploadBytes = 2 * 1024 * 1024 * 1024;
 const maxModelUploadBytes = 256 * 1024 * 1024 * 1024;
 
@@ -1367,7 +1369,7 @@ export function App() {
     }
     setLocalGenerationJobIds((current) => ({
       ...current,
-      // Keep the local review stack compact for burst submissions.
+      // Only the latest run is shown, so a new submission replaces the previous id.
       [kind]: [job.id, ...current[kind].filter((id) => id !== job.id)].slice(0, localJobStackLimit),
     }));
   }
