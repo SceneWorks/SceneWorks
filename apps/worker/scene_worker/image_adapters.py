@@ -29,7 +29,7 @@ from sceneworks_shared import (
     write_json,
 )
 
-from .adapter_utils import filter_call_kwargs
+from .adapter_utils import cancel_step_callback, filter_call_kwargs
 from .lora_adapters import (
     LoraPipelineState,
     apply_loras_to_pipeline,
@@ -535,7 +535,7 @@ class ZImageDiffusersAdapter:
                 gpuMemory=gpu_memory_snapshot(torch, device),
             )
             try:
-                image = self._run_pipeline(settings, pipe, request, seed)
+                image = self._run_pipeline(settings, pipe, request, seed, cancel_requested=cancel_requested)
             except Exception as exc:
                 emit_worker_event(
                     "image_inference_failed",
@@ -696,7 +696,14 @@ class ZImageDiffusersAdapter:
     def _empty_cuda_cache(self, torch: Any) -> None:
         empty_torch_cache(torch)
 
-    def _run_pipeline(self, settings: WorkerSettings, pipe: Any, request: ImageRequest, seed: int) -> Image.Image:
+    def _run_pipeline(
+        self,
+        settings: WorkerSettings,
+        pipe: Any,
+        request: ImageRequest,
+        seed: int,
+        cancel_requested: CancelCallback | None = None,
+    ) -> Image.Image:
         torch = importlib.import_module("torch")
         device = select_torch_device(torch, settings.gpu_id)
         activate_torch_device(torch, device)
@@ -715,7 +722,12 @@ class ZImageDiffusersAdapter:
         if request.mode == "edit_image":
             kwargs["image"] = load_source_image(settings, request)
             kwargs["strength"] = float(request.advanced.get("strength", 0.6))
+        step_callback = cancel_step_callback(pipe, cancel_requested)
+        if step_callback is not None:
+            kwargs["callback_on_step_end"] = step_callback
         output = pipe(**kwargs)
+        if cancel_requested is not None and cancel_requested():
+            raise InterruptedError("Image generation canceled by user.")
         image = output.images[0]
         return image.convert("RGB")
 
@@ -805,7 +817,7 @@ class QwenImageAdapter:
                 gpuMemory=gpu_memory_snapshot(torch, device),
             )
             try:
-                image = self._run_pipeline(settings, pipe, request, seed)
+                image = self._run_pipeline(settings, pipe, request, seed, cancel_requested=cancel_requested)
             except Exception as exc:
                 emit_worker_event(
                     "image_inference_failed",
@@ -949,7 +961,14 @@ class QwenImageAdapter:
     def _empty_cuda_cache(self, torch: Any) -> None:
         empty_torch_cache(torch)
 
-    def _run_pipeline(self, settings: WorkerSettings, pipe: Any, request: ImageRequest, seed: int) -> Image.Image:
+    def _run_pipeline(
+        self,
+        settings: WorkerSettings,
+        pipe: Any,
+        request: ImageRequest,
+        seed: int,
+        cancel_requested: CancelCallback | None = None,
+    ) -> Image.Image:
         torch = importlib.import_module("torch")
         device = select_torch_device(torch, settings.gpu_id)
         activate_torch_device(torch, device)
@@ -968,7 +987,12 @@ class QwenImageAdapter:
             kwargs["image"] = load_source_image(settings, request)
             kwargs["strength"] = float(request.advanced.get("strength", 0.6))
             kwargs["true_cfg_scale"] = float(request.advanced.get("trueCfgScale", 4.0))
+        step_callback = cancel_step_callback(pipe, cancel_requested)
+        if step_callback is not None:
+            kwargs["callback_on_step_end"] = step_callback
         output = pipe(**filter_call_kwargs(pipe, kwargs))
+        if cancel_requested is not None and cancel_requested():
+            raise InterruptedError("Image generation canceled by user.")
         return output.images[0].convert("RGB")
 
     def _apply_loras(self, pipe: Any, request: ImageRequest) -> None:

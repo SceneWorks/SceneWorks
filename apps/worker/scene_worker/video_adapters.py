@@ -30,7 +30,7 @@ from sceneworks_shared import (
     utc_now,
 )
 
-from .adapter_utils import filter_call_kwargs
+from .adapter_utils import cancel_step_callback, filter_call_kwargs
 from .image_adapters import emit_worker_event, empty_torch_cache, gpu_memory_snapshot, require_inference_backend_for_gpu_worker, select_torch_device, select_torch_dtype, write_json
 from .lora_adapters import (
     LoraPipelineState,
@@ -2165,6 +2165,9 @@ class DiffusersVideoAdapter(VideoGenerationAdapter):
             num_frames=num_frames,
         )
         progress("running", "generating", 0.32, f"Running {target['label']} inference.")
+        step_callback = cancel_step_callback(pipe, cancel_requested)
+        if step_callback is not None:
+            kwargs["callback_on_step_end"] = step_callback
         torch = importlib.import_module("torch")
         with torch.inference_mode():
             output = pipe(**kwargs)

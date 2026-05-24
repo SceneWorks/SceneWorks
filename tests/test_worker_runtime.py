@@ -4,6 +4,8 @@ import importlib
 import json
 import os
 import sys
+import threading
+import time
 from pathlib import Path
 from typing import NamedTuple
 from types import ModuleType, SimpleNamespace
@@ -11,7 +13,7 @@ from types import ModuleType, SimpleNamespace
 from PIL import Image
 import pytest
 
-from scene_worker.adapter_utils import filter_call_kwargs
+from scene_worker.adapter_utils import cancel_step_callback, filter_call_kwargs
 from scene_worker.caption_adapters import (
     JOY_CAPTION_RESAMPLE,
     JoyCaptionOptions,
@@ -55,6 +57,8 @@ from scene_worker.lora_adapters import (
     validate_lora_compatibility,
 )
 from scene_worker.runtime import (
+    FORCED_CANCEL_EXIT_CODE,
+    JobCancelMonitor,
     child_environment,
     friendly_failure,
     heartbeat,
@@ -2869,7 +2873,7 @@ def test_run_lora_train_job_executes_real_run(monkeypatch, tmp_path):
     monkeypatch.setattr("scene_worker.runtime.gpu_utilization", lambda _gpu_id: None)
     monkeypatch.setattr(
         "scene_worker.runtime.run_blocking_job_step",
-        lambda api, settings, job_id, status, callback, *, loaded_models: callback(),
+        lambda api, settings, job_id, status, callback, *, loaded_models: callback(lambda: False),
     )
     backend = FakeTrainingBackend()
     trainer = ZImageLoraTrainer(backend=backend)
@@ -2894,7 +2898,7 @@ def test_run_lora_train_job_marks_canceled(monkeypatch, tmp_path):
     monkeypatch.setattr("scene_worker.runtime.gpu_utilization", lambda _gpu_id: None)
     monkeypatch.setattr(
         "scene_worker.runtime.run_blocking_job_step",
-        lambda api, settings, job_id, status, callback, *, loaded_models: callback(),
+        lambda api, settings, job_id, status, callback, *, loaded_models: callback(lambda: False),
     )
 
     class CancelingTrainer:
@@ -2927,7 +2931,7 @@ def test_run_lora_train_job_reports_friendly_failure(monkeypatch, tmp_path):
     monkeypatch.setattr("scene_worker.runtime.gpu_utilization", lambda _gpu_id: None)
     monkeypatch.setattr(
         "scene_worker.runtime.run_blocking_job_step",
-        lambda api, settings, job_id, status, callback, *, loaded_models: callback(),
+        lambda api, settings, job_id, status, callback, *, loaded_models: callback(lambda: False),
     )
 
     class FailingTrainer:
@@ -3157,7 +3161,7 @@ def test_video_job_reports_dynamic_loaded_models_on_progress_and_keepalive(monke
 
     def run_immediately(_api, _settings, _job_id, _status, callback, *, loaded_models):
         blocking_models.append(loaded_models())
-        result = callback()
+        result = callback(lambda: False)
         blocking_models.append(loaded_models())
         return result
 
@@ -3217,7 +3221,7 @@ def test_video_job_estimate_progress_accepts_non_preview_frame_requirements(monk
     monkeypatch.setattr("scene_worker.runtime.create_video_adapter", lambda _job=None: VideoAdapter())
     monkeypatch.setattr(
         "scene_worker.runtime.run_blocking_job_step",
-        lambda *_args, **_kwargs: _args[4](),
+        lambda *_args, **_kwargs: _args[4](lambda: False),
     )
 
     run_video_job(
@@ -3266,7 +3270,7 @@ def test_video_job_failure_runs_cleanup_to_free_gpu(monkeypatch):
     monkeypatch.setattr("scene_worker.runtime.create_video_adapter", lambda _job=None: VideoAdapter())
     monkeypatch.setattr(
         "scene_worker.runtime.run_blocking_job_step",
-        lambda *_args, **_kwargs: _args[4](),
+        lambda *_args, **_kwargs: _args[4](lambda: False),
     )
 
     # A CUDA OOM cleans up, marks the job failed, then exits (SystemExit) so the
@@ -3320,7 +3324,7 @@ def test_video_job_nonoom_failure_does_not_restart(monkeypatch):
     monkeypatch.setattr("scene_worker.runtime.create_video_adapter", lambda _job=None: VideoAdapter())
     monkeypatch.setattr(
         "scene_worker.runtime.run_blocking_job_step",
-        lambda *_args, **_kwargs: _args[4](),
+        lambda *_args, **_kwargs: _args[4](lambda: False),
     )
 
     # A non-OOM failure cleans up and marks failed but returns normally (no restart).
@@ -5275,3 +5279,157 @@ def test_z_image_adapter_fails_fast_when_pipeline_stays_on_cpu_with_offload_fall
             progress=lambda *_args, **_kwargs: None,
             cancel_requested=lambda: False,
         )
+
+
+# --- Cancellation: JobCancelMonitor watchdog + per-step interrupt ---------------
+
+
+class _CancelPollApi:
+    """Fake API for JobCancelMonitor tests: GET reports a (mutable) cancel flag;
+    POST /progress records the payload so the test can assert the final status."""
+
+    def __init__(self, cancel_requested=False):
+        self.cancel_requested = cancel_requested
+        self.progress = []
+
+    def get(self, _path):
+        return {"cancelRequested": self.cancel_requested}
+
+    def post(self, path, payload):
+        if path.endswith("/heartbeat"):
+            return {}
+        if path.endswith("/progress"):
+            self.progress.append(payload)
+            return {"status": payload["status"], "stage": payload["stage"]}
+        raise AssertionError(path)
+
+
+def _wait_until(predicate, timeout=2.0, interval=0.02):
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if predicate():
+            return True
+        time.sleep(interval)
+    return predicate()
+
+
+def test_cancel_monitor_caches_cancel_state(monkeypatch):
+    monkeypatch.setattr("scene_worker.runtime.emit", lambda payload: None)
+    api = _CancelPollApi(cancel_requested=True)
+    settings = SimpleNamespace(worker_id="worker-1", force_cancel_seconds=0)
+    monitor = JobCancelMonitor(api, settings, "job-1", poll_interval=0.05, force_cancel_seconds=0)
+    monitor.start()
+    try:
+        assert _wait_until(monitor.requested)
+    finally:
+        monitor.stop()
+
+
+def test_cancel_monitor_does_not_escalate_without_cancel(monkeypatch):
+    monkeypatch.setattr("scene_worker.runtime.emit", lambda payload: None)
+    exits = []
+    monkeypatch.setattr("scene_worker.runtime.os._exit", lambda code: exits.append(code))
+    api = _CancelPollApi(cancel_requested=False)
+    settings = SimpleNamespace(worker_id="worker-1", force_cancel_seconds=0.1)
+    monitor = JobCancelMonitor(api, settings, "job-1", poll_interval=0.02, force_cancel_seconds=0.1)
+    monitor.start()
+    try:
+        time.sleep(0.3)
+        assert exits == []
+        assert monitor.requested() is False
+    finally:
+        monitor.stop()
+
+
+def test_cancel_monitor_force_terminates_after_deadline(monkeypatch):
+    monkeypatch.setattr("scene_worker.runtime.emit", lambda payload: None)
+    exited = threading.Event()
+    exits = []
+
+    def fake_exit(code):
+        exits.append(code)
+        exited.set()
+
+    monkeypatch.setattr("scene_worker.runtime.os._exit", fake_exit)
+    api = _CancelPollApi(cancel_requested=True)
+    settings = SimpleNamespace(worker_id="worker-1", force_cancel_seconds=0.15)
+    monitor = JobCancelMonitor(api, settings, "job-9", poll_interval=0.02, force_cancel_seconds=0.15)
+    monitor.start()
+    try:
+        assert exited.wait(timeout=2.0)
+    finally:
+        monitor.stop()
+    assert exits == [FORCED_CANCEL_EXIT_CODE]
+    # The job was marked canceled before the (mocked) process exit, so the UI
+    # resolves immediately instead of waiting for a stale-worker reaper.
+    terminal = api.progress[-1]
+    assert terminal["status"] == "canceled"
+    assert terminal["stage"] == "canceled"
+    assert "force-stopped" in terminal["message"].lower()
+
+
+def test_cancel_monitor_skips_escalation_when_stopped(monkeypatch):
+    # A cooperative cancel that finishes before the deadline must not force-kill.
+    monkeypatch.setattr("scene_worker.runtime.emit", lambda payload: None)
+    exits = []
+    monkeypatch.setattr("scene_worker.runtime.os._exit", lambda code: exits.append(code))
+    api = _CancelPollApi(cancel_requested=True)
+    settings = SimpleNamespace(worker_id="worker-1", force_cancel_seconds=5)
+    monitor = JobCancelMonitor(api, settings, "job-2", poll_interval=0.02, force_cancel_seconds=5)
+    monitor.start()
+    assert _wait_until(monitor.requested)  # cancel observed
+    monitor.stop()  # cooperative path finished the job before the deadline
+    time.sleep(0.1)
+    assert exits == []
+
+
+class _FakeStepPipe:
+    def __init__(self):
+        self._interrupt = False
+
+    def __call__(self, *, prompt=None, callback_on_step_end=None):
+        return None
+
+
+class _NoCallbackPipe:
+    def __call__(self, *, prompt=None):
+        return None
+
+
+def test_cancel_step_callback_sets_interrupt_when_canceled():
+    pipe = _FakeStepPipe()
+    callback = cancel_step_callback(pipe, lambda: True)
+    assert callback is not None
+    returned = callback(pipe, 0, None, {"latents": "x"})
+    assert returned == {"latents": "x"}  # callback must pass kwargs through
+    assert pipe._interrupt is True
+
+
+def test_cancel_step_callback_leaves_interrupt_when_not_canceled():
+    pipe = _FakeStepPipe()
+    callback = cancel_step_callback(pipe, lambda: False)
+    assert callback is not None
+    callback(pipe, 0, None, {})
+    assert pipe._interrupt is False
+
+
+def test_cancel_step_callback_none_without_predicate():
+    assert cancel_step_callback(_FakeStepPipe(), None) is None
+
+
+def test_cancel_step_callback_none_when_pipe_lacks_support():
+    assert cancel_step_callback(_NoCallbackPipe(), lambda: True) is None
+
+
+def test_worker_settings_force_cancel_seconds_default(monkeypatch):
+    monkeypatch.delenv("SCENEWORKS_WORKER_FORCE_CANCEL_SECONDS", raising=False)
+    from scene_worker.settings import WorkerSettings
+
+    assert WorkerSettings().force_cancel_seconds == 30
+
+
+def test_worker_settings_force_cancel_seconds_env_override(monkeypatch):
+    monkeypatch.setenv("SCENEWORKS_WORKER_FORCE_CANCEL_SECONDS", "5")
+    from scene_worker.settings import WorkerSettings
+
+    assert WorkerSettings().force_cancel_seconds == 5

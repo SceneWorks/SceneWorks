@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from contextlib import contextmanager
 from datetime import UTC, datetime
 import importlib
 import json
@@ -41,6 +42,8 @@ from .video_adapters import create_video_adapter
 
 
 LoadedModelsSource = Callable[[], list[str]] | None
+# Predicate adapters call to learn whether the running job has been canceled.
+CancelCallback = Callable[[], bool]
 IMAGE_JOB_TYPES = ("image_generate", "image_edit")
 VIDEO_JOB_TYPES = ("video_generate", "video_extend", "video_bridge", "person_replace")
 # Real person detection/tracking run in the Python GPU worker (YOLO/ByteTrack/SAM2),
@@ -350,6 +353,135 @@ def job_cancel_requested(api: ApiClient, job_id: str) -> bool:
     return bool(api.get(f"/api/v1/jobs/{job_id}")["cancelRequested"])
 
 
+class JobCancelMonitor:
+    """Watches a running job's cancel flag on a background thread.
+
+    Two responsibilities:
+
+    1. Cache the cancel state so hot paths (per-step pipe callbacks, tight
+       per-frame loops) can ask "was this canceled?" without an HTTP round-trip
+       on every check. ``requested`` returns the most recently polled value.
+    2. Enforce the hard-stop backstop: if the cancel flag stays set for longer
+       than ``settings.force_cancel_seconds`` while the job is still running, the
+       cooperative path failed to interrupt a wedged native call in time — so we
+       mark the job canceled and force-terminate the worker process. Its
+       supervisor (Tauri on desktop, the child supervisor / Docker on the web
+       build) respawns a clean worker. The worker runs one job at a time, so
+       killing the process cancels exactly the stuck job (at the cost of the
+       loaded model, which must reload on the next job).
+    """
+
+    def __init__(
+        self,
+        api: ApiClient,
+        settings: WorkerSettings,
+        job_id: str,
+        *,
+        poll_interval: float = 1.0,
+        force_cancel_seconds: float | None = None,
+    ) -> None:
+        self._api = api
+        self._settings = settings
+        self._job_id = job_id
+        self._poll_interval = max(0.05, poll_interval)
+        deadline = (
+            force_cancel_seconds
+            if force_cancel_seconds is not None
+            else getattr(settings, "force_cancel_seconds", 0)
+        )
+        self._deadline = max(0, deadline)
+        self._requested = False
+        self._requested_monotonic: float | None = None
+        self._stop = threading.Event()
+        self._thread: threading.Thread | None = None
+
+    def requested(self) -> bool:
+        """The most recently polled cancel state (cheap; no HTTP)."""
+        return self._requested
+
+    def start(self) -> "JobCancelMonitor":
+        self._thread = threading.Thread(
+            target=self._run,
+            name=f"cancel-monitor-{self._job_id}",
+            daemon=True,
+        )
+        self._thread.start()
+        return self
+
+    def stop(self) -> None:
+        self._stop.set()
+        if self._thread is not None:
+            self._thread.join(timeout=1)
+
+    def _run(self) -> None:
+        while not self._stop.wait(self._poll_interval):
+            try:
+                requested = job_cancel_requested(self._api, self._job_id)
+            except httpx.HTTPError as exc:
+                emit({"event": "cancel_poll_failed", "jobId": self._job_id, "error": str(exc), "reportedAt": now()})
+                continue
+            if not requested:
+                continue
+            self._requested = True
+            if self._requested_monotonic is None:
+                self._requested_monotonic = time.monotonic()
+                continue
+            if self._deadline and (time.monotonic() - self._requested_monotonic) >= self._deadline:
+                self._force_terminate()
+                return
+
+    def _force_terminate(self) -> None:
+        # Lost the race with a clean finish? Don't kill a process that's done.
+        if self._stop.is_set():
+            return
+        emit(
+            {
+                "event": "cancel_force_kill",
+                "jobId": self._job_id,
+                "workerId": getattr(self._settings, "worker_id", None),
+                "afterSeconds": self._deadline,
+                "reportedAt": now(),
+            }
+        )
+        # Mark the job canceled *before* exiting so the UI resolves immediately
+        # instead of waiting for a stale-worker reaper to notice the dead worker.
+        try:
+            update_job(
+                self._api,
+                self._job_id,
+                {
+                    "status": "canceled",
+                    "stage": "canceled",
+                    "progress": 1,
+                    "message": f"Force-stopped: cancellation was not acknowledged within {self._deadline}s.",
+                },
+            )
+        except httpx.HTTPError as exc:
+            emit(
+                {
+                    "event": "cancel_force_kill_finalize_failed",
+                    "jobId": self._job_id,
+                    "error": str(exc),
+                    "reportedAt": now(),
+                }
+            )
+        # The main thread is wedged in a native call we cannot interrupt from
+        # Python, so os._exit is the only way to stop it now. It skips interpreter
+        # cleanup by design — the supervisor restarts a fresh worker.
+        os._exit(FORCED_CANCEL_EXIT_CODE)
+
+
+@contextmanager
+def job_cancel_monitor(api: ApiClient, settings: WorkerSettings, job_id: str):
+    """Run a JobCancelMonitor for the duration of a job's blocking work."""
+    monitor = JobCancelMonitor(api, settings, job_id)
+    monitor.start()
+    try:
+        yield monitor
+    finally:
+        monitor.stop()
+
+
 def keep_job_alive(
     api: ApiClient,
     settings: WorkerSettings,
@@ -371,10 +503,16 @@ def run_blocking_job_step(
     settings: WorkerSettings,
     job_id: str,
     status: str,
-    callback: Any,
+    callback: Callable[[CancelCallback], Any],
     *,
     loaded_models: LoadedModelsSource,
 ) -> Any:
+    """Run a job's blocking work while keeping it alive and cancelable.
+
+    Spawns a heartbeat thread and a JobCancelMonitor for the duration of the
+    work, then invokes ``callback`` with a cached cancel predicate so adapters
+    can poll cancellation cheaply (and so the monitor can force-stop the worker
+    if a cancel goes unacknowledged past the deadline)."""
     stop_event = threading.Event()
     thread = threading.Thread(
         target=keep_job_alive,
@@ -383,7 +521,8 @@ def run_blocking_job_step(
     )
     thread.start()
     try:
-        return callback()
+        with job_cancel_monitor(api, settings, job_id) as monitor:
+            return callback(monitor.requested)
     finally:
         stop_event.set()
         thread.join(timeout=1)
@@ -400,6 +539,11 @@ def is_cuda_oom(exc: BaseException) -> bool:
 # Exit code used when a worker child restarts itself after a CUDA OOM so the
 # supervisor respawns it with a fresh (non-poisoned) CUDA context.
 OOM_RESTART_EXIT_CODE = 75
+
+# Exit code used when the worker force-terminates itself because a cancellation
+# went unacknowledged past force_cancel_seconds (the hard-stop backstop). The
+# supervisor respawns a clean worker.
+FORCED_CANCEL_EXIT_CODE = 76
 
 
 def restart_worker_after_oom(settings: WorkerSettings, job_id: str) -> None:
@@ -469,11 +613,11 @@ def run_image_job(api: ApiClient, settings: WorkerSettings, job: dict, image_ada
             settings,
             job_id,
             "busy",
-            lambda: adapter.generate(
+            lambda cancel: adapter.generate(
                 settings=settings,
                 job=job,
                 progress=progress,
-                cancel_requested=lambda: job_cancel_requested(api, job_id),
+                cancel_requested=cancel,
             ),
             loaded_models=adapter_loaded_models,
         )
@@ -541,11 +685,11 @@ def run_vqa_job(api: ApiClient, settings: WorkerSettings, job: dict, image_adapt
             settings,
             job_id,
             "busy",
-            lambda: adapter.answer_question(
+            lambda cancel: adapter.answer_question(
                 settings=settings,
                 job=job,
                 progress=progress,
-                cancel_requested=lambda: job_cancel_requested(api, job_id),
+                cancel_requested=cancel,
             ),
             loaded_models=adapter_loaded_models,
         )
@@ -598,11 +742,11 @@ def run_interleave_job(api: ApiClient, settings: WorkerSettings, job: dict, imag
             settings,
             job_id,
             "busy",
-            lambda: adapter.generate_interleaved(
+            lambda cancel: adapter.generate_interleaved(
                 settings=settings,
                 job=job,
                 progress=progress,
-                cancel_requested=lambda: job_cancel_requested(api, job_id),
+                cancel_requested=cancel,
             ),
             loaded_models=adapter_loaded_models,
         )
@@ -683,12 +827,12 @@ def run_video_job(api: ApiClient, settings: WorkerSettings, job: dict) -> None:
             settings,
             job_id,
             "busy",
-            lambda: adapter.run(
+            lambda cancel: adapter.run(
                 settings=settings,
                 job=job,
                 request=request,
                 progress=progress,
-                cancel_requested=lambda: job_cancel_requested(api, job_id),
+                cancel_requested=cancel,
             ),
             loaded_models=adapter_loaded_models,
         )
@@ -774,11 +918,11 @@ def run_person_job(api: ApiClient, settings: WorkerSettings, job: dict) -> None:
             settings,
             job_id,
             "busy",
-            lambda: runner(
+            lambda cancel: runner(
                 settings,
                 job,
                 progress=progress,
-                cancel_requested=lambda: job_cancel_requested(api, job_id),
+                cancel_requested=cancel,
             ),
             loaded_models=lambda: [],
         )
@@ -898,11 +1042,11 @@ def _run_lora_train_execution(api: ApiClient, settings: WorkerSettings, job: dic
             settings,
             job_id,
             "busy",
-            lambda: trainer.train(
+            lambda cancel: trainer.train(
                 settings=settings,
                 plan=plan,
                 progress=progress,
-                cancel_requested=lambda: job_cancel_requested(api, job_id),
+                cancel_requested=cancel,
             ),
             loaded_models=trainer_loaded_models,
         )
@@ -965,12 +1109,12 @@ def run_training_caption_worker_job(api: ApiClient, settings: WorkerSettings, jo
             settings,
             job_id,
             "busy",
-            lambda: run_training_caption_job(
+            lambda cancel: run_training_caption_job(
                 api=api,
                 settings=settings,
                 job=job,
                 progress=progress,
-                cancel_requested=lambda: job_cancel_requested(api, job_id),
+                cancel_requested=cancel,
             ),
             loaded_models=lambda: [],
         )

@@ -485,6 +485,9 @@ class LensPipeline(DiffusionPipeline):
         self.scheduler.set_timesteps(sigmas=sigmas, device=device, mu=mu)
 
         # 7. Denoising loop.
+        # Reset the interrupt flag so a callback_on_step_end can stop this run
+        # (used for cancellation) without leaking state into the next call.
+        self._interrupt = False
         img_shapes = [(1, latent_h, latent_w)]
         with self.progress_bar(total=num_inference_steps) as progress_bar:
             for i, t in enumerate(self.scheduler.timesteps):
@@ -522,6 +525,10 @@ class LensPipeline(DiffusionPipeline):
                     negative_prompt_embeds = cb_out.pop(
                         "negative_prompt_embeds", negative_prompt_embeds
                     )
+
+                # Stop early if a callback requested interruption (cancellation).
+                if getattr(self, "_interrupt", False):
+                    break
 
                 progress_bar.update()
 
