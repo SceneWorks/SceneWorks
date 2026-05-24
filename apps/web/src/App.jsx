@@ -23,6 +23,7 @@ import { useCharacters } from "./hooks/useCharacters.js";
 import { usePresets } from "./hooks/usePresets.js";
 import { useTraining } from "./hooks/useTraining.js";
 import { useModelsAndLoras } from "./hooks/useModelsAndLoras.js";
+import { usePersonTracks } from "./hooks/usePersonTracks.js";
 
 // Desktop (Tauri) shell detection. The first-run setup wizard is desktop-only;
 // web/Docker keep the existing first-run project gate. Tauri commands persist the
@@ -365,7 +366,6 @@ export function App() {
   const [trainingTargetsError, setTrainingTargetsError] = useState("");
   const [trainingPresetsError, setTrainingPresetsError] = useState("");
   const [assets, setAssets] = useState([]);
-  const [personTracks, setPersonTracks] = useState([]);
   const [timelines, setTimelines] = useState([]);
   const [timelinesProjectId, setTimelinesProjectId] = useState(null);
   const [selectedTimelineId, setSelectedTimelineId] = useState(null);
@@ -454,6 +454,15 @@ export function App() {
     refreshData,
     refreshDataWithLoraOverlay,
   });
+
+  const {
+    personTracks,
+    setPersonTracks,
+    refreshPersonTracks,
+    createPersonDetectionJob,
+    createPersonTrackJob,
+    saveTrackCorrections,
+  } = usePersonTracks({ token, activeProject, setError, requestedGpu, setActiveView, refreshData });
 
   const authenticated = useMemo(() => !access.authRequired || token.length > 0, [access, token]);
   const imageModels = useMemo(() => {
@@ -872,19 +881,6 @@ export function App() {
       .catch(() => {});
   }
 
-  async function refreshPersonTracks(projectId = activeProject?.id, { signal } = {}) {
-    if (!projectId) {
-      return;
-    }
-    try {
-      const items = await apiFetch(`/api/v1/projects/${projectId}/person-tracks`, token, { signal });
-      setPersonTracks(items);
-      setError("");
-    } catch (err) {
-      if (isAbortError(err)) return;
-      setError(err.message);
-    }
-  }
 
   async function refreshTimelines(projectId = activeProject?.id, { signal } = {}) {
     if (!projectId) {
@@ -1194,75 +1190,6 @@ export function App() {
       setStudioLaunch({ id: crypto.randomUUID(), view: "Video", assetId: asset.id, mode });
     }
     setActiveView("Video");
-  }
-
-  async function createPersonDetectionJob(payload, options = {}) {
-    const { navigateToQueue = false } = options;
-    if (!activeProject) {
-      setError("Create or open a project first.");
-      return null;
-    }
-    try {
-      const job = await apiFetch(`/api/v1/projects/${activeProject.id}/person-tracks/detections`, token, {
-        method: "POST",
-        body: JSON.stringify({ ...payload, requestedGpu }),
-      });
-      if (navigateToQueue) {
-        setActiveView("Queue");
-      }
-      setError("");
-      refreshData();
-      return job;
-    } catch (err) {
-      setError(err.message);
-      return null;
-    }
-  }
-
-  async function createPersonTrackJob(payload, options = {}) {
-    const { navigateToQueue = false } = options;
-    if (!activeProject) {
-      setError("Create or open a project first.");
-      return null;
-    }
-    try {
-      const job = await apiFetch(`/api/v1/projects/${activeProject.id}/person-tracks/jobs`, token, {
-        method: "POST",
-        body: JSON.stringify({ ...payload, requestedGpu }),
-      });
-      if (navigateToQueue) {
-        setActiveView("Queue");
-      }
-      setError("");
-      refreshData();
-      return job;
-    } catch (err) {
-      setError(err.message);
-      return null;
-    }
-  }
-
-  async function saveTrackCorrections(trackId, corrections) {
-    if (!activeProject) {
-      setError("Create or open a project first.");
-      return null;
-    }
-    try {
-      const track = await apiFetch(
-        `/api/v1/projects/${activeProject.id}/person-tracks/${trackId}/corrections`,
-        token,
-        {
-          method: "POST",
-          body: JSON.stringify({ corrections }),
-        },
-      );
-      setPersonTracks((items) => items.map((item) => (item.id === track.id ? track : item)));
-      setError("");
-      return track;
-    } catch (err) {
-      setError(err.message);
-      return null;
-    }
   }
 
   function sendCharacterToImage(character, lookId = null) {
