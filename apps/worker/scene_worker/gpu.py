@@ -95,12 +95,86 @@ def query_mps_gpus() -> list[dict]:
         available = False
     if not available:
         return []
-    return [{"id": "mps", "name": "Apple GPU (unified)", "capabilities": ["gpu", "mps"]}]
+    gpu = {"id": "mps", "name": "Apple GPU (unified)", "capabilities": ["gpu", "mps"]}
+    utilization = query_mps_utilization()
+    if utilization:
+        gpu["utilization"] = utilization
+    return [gpu]
+
+
+def _sysctl_memsize_mb() -> int | None:
+    """Total unified memory (MB) on macOS via `sysctl hw.memsize`."""
+    try:
+        result = subprocess.run(
+            ["sysctl", "-n", "hw.memsize"],
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=2,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    value = parse_int(result.stdout.strip())
+    return value // (1024 * 1024) if value is not None else None
+
+
+def _ioreg_accelerator_stats() -> dict[str, int]:
+    """Numeric PerformanceStatistics from the IOAccelerator IOKit node.
+
+    `ioreg` exposes the integrated GPU's live stats (e.g. "Device Utilization %",
+    "In use system memory") without elevated privileges, unlike powermetrics.
+    Returns the last-seen value per integer key (a Mac has one such accelerator);
+    empty when ioreg is unavailable.
+    """
+    try:
+        result = subprocess.run(
+            ["ioreg", "-r", "-c", "IOAccelerator", "-d", "1"],
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=3,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return {}
+    stats: dict[str, int] = {}
+    for key, value in re.findall(r'"([^"]+)"\s*=\s*(\d+)', result.stdout):
+        stats[key] = int(value)
+    return stats
+
+
+def query_mps_utilization() -> dict | None:
+    """Apple Silicon unified-memory + GPU-load snapshot, shaped like the nvidia path.
+
+    Memory total is the machine's unified RAM; GPU-resident memory and load come
+    from IOKit's IOAccelerator node (unprivileged). Returns None when neither
+    probe yields anything (non-Apple-Silicon, sandboxed, etc.).
+    """
+    if sys.platform != "darwin":
+        return None
+    stats = _ioreg_accelerator_stats()
+    total_mb = _sysctl_memsize_mb()
+    snapshot: dict = {}
+    if total_mb is not None:
+        snapshot["memoryTotalMb"] = total_mb
+    used_bytes = stats.get("In use system memory") or stats.get("Alloc system memory")
+    if used_bytes is not None:
+        used_mb = int(used_bytes) // (1024 * 1024)
+        snapshot["memoryUsedMb"] = used_mb
+        if total_mb is not None:
+            snapshot["memoryFreeMb"] = max(0, total_mb - used_mb)
+    load = stats.get("Device Utilization %")
+    if load is None:
+        load = stats.get("GPU Activity(%)")
+    if load is not None:
+        snapshot["gpuLoadPercent"] = float(load)
+    return snapshot or None
 
 
 def gpu_utilization(gpu_id: str) -> dict | None:
     if gpu_id == "cpu":
         return None
+    if gpu_id == "mps":
+        return query_mps_utilization()
     for gpu in query_nvidia_gpus():
         if gpu["id"] == gpu_id:
             return gpu.get("utilization")

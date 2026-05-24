@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import gc
 import hashlib
 import importlib
 import json
@@ -96,6 +97,25 @@ def emit_worker_event(event: str, **payload: Any) -> None:
 
 
 def gpu_memory_snapshot(torch: Any, device: str) -> dict[str, Any] | None:
+    if isinstance(device, str) and device.startswith("mps"):
+        # MPS uses unified memory, so allocated/driver figures double as the
+        # process's accelerator footprint — the only built-in signal for the Mac
+        # memory growth (CUDA-style per-device stats don't exist here).
+        mps_backend = getattr(torch, "mps", None)
+        if mps_backend is None:
+            return None
+        snapshot: dict[str, Any] = {"device": "mps"}
+        for key, attr in (
+            ("allocatedMb", "current_allocated_memory"),
+            ("driverAllocatedMb", "driver_allocated_memory"),
+        ):
+            fn = getattr(mps_backend, attr, None)
+            if callable(fn):
+                try:
+                    snapshot[key] = round(int(fn()) / (1024 * 1024), 2)
+                except Exception:
+                    pass
+        return snapshot
     if not isinstance(device, str) or not device.startswith("cuda"):
         return None
     cuda = getattr(torch, "cuda", None)
@@ -485,6 +505,14 @@ class ZImageDiffusersAdapter:
     def loaded_models(self) -> list[str]:
         return sorted({value for value in (self._loaded_repo, self._loaded_model) if value})
 
+    def unload(self) -> bool:
+        """Free any resident pipeline so another family can load (cross-adapter
+        eviction). Returns True if it actually freed something."""
+        if self._text_pipe is None and self._img2img_pipe is None:
+            return False
+        self._evict_pipelines(importlib.import_module("torch"))
+        return True
+
     def generate(
         self,
         *,
@@ -694,7 +722,10 @@ class ZImageDiffusersAdapter:
         self._empty_cuda_cache(torch)
 
     def _empty_cuda_cache(self, torch: Any) -> None:
-        empty_torch_cache(torch)
+        # gc.collect() first: the pipeline we just dropped is held alive by its
+        # nn.Module reference cycles until the cyclic collector runs, so a bare
+        # empty_cache() would reclaim nothing on MPS.
+        release_inference_memory(torch)
 
     def _run_pipeline(
         self,
@@ -768,6 +799,20 @@ class QwenImageAdapter:
 
     def loaded_models(self) -> list[str]:
         return sorted({value for value in (self._text_repo, self._edit_repo, self._loaded_model) if value})
+
+    def unload(self) -> bool:
+        """Free any resident pipeline so another family can load (cross-adapter
+        eviction). Returns True if it actually freed something."""
+        if self._text_pipe is None and self._edit_pipe is None:
+            return False
+        self._text_pipe = None
+        self._edit_pipe = None
+        self._text_repo = None
+        self._edit_repo = None
+        self._loaded_model = None
+        self._loaded_lora_states.clear()
+        self._empty_cuda_cache(importlib.import_module("torch"))
+        return True
 
     def generate(
         self,
@@ -959,7 +1004,9 @@ class QwenImageAdapter:
         return pipe
 
     def _empty_cuda_cache(self, torch: Any) -> None:
-        empty_torch_cache(torch)
+        # gc.collect() first so the just-dropped pipeline is actually collected
+        # before empty_cache() asks the allocator to return its blocks.
+        release_inference_memory(torch)
 
     def _run_pipeline(
         self,
@@ -1454,6 +1501,19 @@ class SenseNovaU1Adapter:
     def loaded_models(self) -> list[str]:
         return [self._loaded_model] if self._loaded_model else []
 
+    def unload(self) -> bool:
+        """Free the resident model so another family can load (cross-adapter
+        eviction). Returns True if it actually freed something."""
+        if self._model is None:
+            return False
+        self._model = None
+        self._tokenizer = None
+        self._repo = None
+        self._distill_lora_key = None
+        self._loaded_model = None
+        release_inference_memory(importlib.import_module("torch"))
+        return True
+
     @staticmethod
     def _ensure_vendor_on_path() -> None:
         vendor = str(Path(__file__).resolve().parent / "_vendor")
@@ -1611,7 +1671,12 @@ class SenseNovaU1Adapter:
             self._tokenizer = None
             self._repo = None
             self._distill_lora_key = None
-            empty_torch_cache(torch)
+            # gc.collect() before empty_cache(): the 8B-MoT we just dropped is
+            # kept alive by its nn.Module reference cycles until the cyclic
+            # collector runs, so on MPS a bare empty_cache() leaves the old model
+            # resident alongside the replacement (base↔fast switches stacked to
+            # tens of GB before this fix).
+            release_inference_memory(torch)
         self._ensure_vendor_on_path()
         import sensenova_u1  # noqa: F401 — import registers the neo_chat model type
         from sensenova_u1.utils import load_model_and_tokenizer
@@ -2296,6 +2361,62 @@ def empty_torch_cache(torch: Any) -> None:
         mps_backend = getattr(torch, "mps", None)
         if mps_backend is not None and hasattr(mps_backend, "empty_cache"):
             mps_backend.empty_cache()
+
+
+def release_inference_memory(torch: Any) -> None:
+    """Collect dropped references, then return cached accelerator blocks to the OS.
+
+    A bare ``empty_cache()`` reclaims nothing while a just-dropped model/pipeline
+    is still kept alive by reference cycles in its ``nn.Module`` graph (the cyclic
+    collector has not run yet), and the MPS/CUDA caching allocator only returns
+    freed blocks to the OS on ``empty_cache()``. Both steps are required, in order:
+    collect first, then empty — otherwise an evicted multi-GB model lingers
+    alongside its replacement (the cross-model accumulation that pins MPS memory).
+    """
+    gc.collect()
+    empty_torch_cache(torch)
+
+
+def release_image_worker_memory() -> None:
+    """Drop transient inference buffers after a job WITHOUT evicting cached models.
+
+    Returns the post-generation activation pool (tens of GB at large resolutions)
+    to the OS so an idle worker does not sit at peak memory, while cached
+    pipelines/models stay resident for fast reuse. The just-finished job's tensors
+    are already unreferenced here, so ``empty_cache()`` reclaims them; the model,
+    still held by the adapter, is untouched. No-op when torch is unavailable.
+    """
+    try:
+        torch = importlib.import_module("torch")
+    except Exception:
+        return
+    release_inference_memory(torch)
+
+
+def evict_other_image_adapters(adapters: dict[str, object], keep_id: str) -> None:
+    """Enforce a single resident image model: unload every adapter except keep_id.
+
+    Each adapter is a long-lived singleton that only evicts its OWN previous model
+    on a within-family switch, so without this, running e.g. Qwen then SenseNova
+    leaves both multi-GB models resident. Called before a job loads its model so
+    the previous family's weights are freed first (no transient double residency).
+    Adapters with nothing resident (procedural, out-of-process Lens) expose no
+    unload and are skipped.
+    """
+    freed: list[str] = []
+    for adapter_id, adapter in adapters.items():
+        if adapter_id == keep_id:
+            continue
+        unload = getattr(adapter, "unload", None)
+        if not callable(unload):
+            continue
+        try:
+            if unload():
+                freed.append(adapter_id)
+        except Exception as exc:  # noqa: BLE001 - never let cleanup abort a job
+            emit_worker_event("image_adapter_unload_failed", adapter=adapter_id, error=str(exc))
+    if freed:
+        emit_worker_event("image_adapters_evicted", keep=keep_id, evicted=freed)
 
 
 def torch_inference_backend_available(torch: Any) -> bool:
