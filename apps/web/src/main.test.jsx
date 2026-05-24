@@ -26,6 +26,31 @@ function withAppContext(value, ui) {
   return <AppContext.Provider value={value}>{ui}</AppContext.Provider>;
 }
 
+// ModelManagerScreen (sc-1651 Phase B) reads primitives from context and derives
+// its own on* callbacks. This adapter lets the existing tests keep their old
+// prop-shaped objects (and their assertions on those fns) while feeding the
+// screen via the provider.
+function withModelManagerContext(p) {
+  return withAppContext(
+    {
+      activeProject: p.activeProject,
+      jobs: p.jobs,
+      loras: p.loras,
+      models: p.models,
+      presets: p.recipePresets,
+      jobAction: p.onCancelJob ? (job) => p.onCancelJob(job) : () => {},
+      setActiveView: p.onOpenQueue ? () => p.onOpenQueue() : () => {},
+      deleteLora: p.onDeleteLora,
+      deleteModel: p.onDeleteModel,
+      createModelDownloadJob: p.onDownloadModel,
+      createModelConvertJob: p.onConvertModel,
+      createLoraImportJob: p.onImportLora,
+      createModelImportJob: p.onImportModel,
+    },
+    <ModelManagerScreen />,
+  );
+}
+
 // jsdom 27 omits Blob.text(); all real browsers implement it. Polyfill so the
 // dataset import flow (which reads .txt caption sidecars) is exercisable here.
 if (typeof Blob !== "undefined" && typeof Blob.prototype.text !== "function") {
@@ -3028,15 +3053,15 @@ describe("SceneWorks app shell", () => {
     root = createRoot(container);
     await act(async () => {
       root.render(
-        <ModelManagerScreen
-          activeProject={{ id: "project-1", name: "Noir" }}
-          jobs={[]}
-          loras={[]}
-          models={[{ id: "z_image_turbo", name: "Z-Image Turbo", type: "image", family: "z-image" }]}
-          onDownloadModel={() => {}}
-          onImportLora={onImportLora}
-          onOpenQueue={() => {}}
-        />,
+        withModelManagerContext({
+          activeProject: { id: "project-1", name: "Noir" },
+          jobs: [],
+          loras: [],
+          models: [{ id: "z_image_turbo", name: "Z-Image Turbo", type: "image", family: "z-image" }],
+          onDownloadModel: () => {},
+          onImportLora,
+          onOpenQueue: () => {},
+        }),
       );
     });
 
@@ -3063,18 +3088,18 @@ describe("SceneWorks app shell", () => {
     root = createRoot(container);
     await act(async () => {
       root.render(
-        <ModelManagerScreen
-          activeProject={{ id: "project-1", name: "Noir" }}
-          jobs={[]}
-          loras={[]}
-          models={[
+        withModelManagerContext({
+          activeProject: { id: "project-1", name: "Noir" },
+          jobs: [],
+          loras: [],
+          models: [
             { id: "z_image_turbo", name: "Z-Image Turbo", type: "image", family: "z-image" },
             { id: "qwen_image", name: "Qwen Image", type: "image", family: "qwen-image" },
-          ]}
-          onDownloadModel={() => {}}
-          onImportLora={onImportLora}
-          onOpenQueue={() => {}}
-        />,
+          ],
+          onDownloadModel: () => {},
+          onImportLora,
+          onOpenQueue: () => {},
+        }),
       );
     });
 
@@ -3105,15 +3130,15 @@ describe("SceneWorks app shell", () => {
     const onImportLora = vi.fn(async (payload) => ({ payload: { ...payload, loraId: "detail_lora" } }));
     const renderScreen = (models) =>
       root.render(
-        <ModelManagerScreen
-          activeProject={{ id: "project-1", name: "Noir" }}
-          jobs={[]}
-          loras={[]}
-          models={models}
-          onDownloadModel={() => {}}
-          onImportLora={onImportLora}
-          onOpenQueue={() => {}}
-        />,
+        withModelManagerContext({
+          activeProject: { id: "project-1", name: "Noir" },
+          jobs: [],
+          loras: [],
+          models,
+          onDownloadModel: () => {},
+          onImportLora,
+          onOpenQueue: () => {},
+        }),
       );
 
     root = createRoot(container);
@@ -3139,11 +3164,11 @@ describe("SceneWorks app shell", () => {
     root = createRoot(container);
     await act(async () => {
       root.render(
-        <ModelManagerScreen
-          activeProject={{ id: "project-1", name: "Noir" }}
-          jobs={[]}
-          loras={[]}
-          models={[
+        withModelManagerContext({
+          activeProject: { id: "project-1", name: "Noir" },
+          jobs: [],
+          loras: [],
+          models: [
             {
               id: "z_image_turbo",
               name: "Z-Image Turbo",
@@ -3175,11 +3200,11 @@ describe("SceneWorks app shell", () => {
               downloadSizeEstimated: false,
               downloads: [{ provider: "huggingface", repo: "owner/exact" }],
             },
-          ]}
-          onDownloadModel={() => {}}
-          onImportLora={() => {}}
-          onOpenQueue={() => {}}
-        />,
+          ],
+          onDownloadModel: () => {},
+          onImportLora: () => {},
+          onOpenQueue: () => {},
+        }),
       );
     });
 
@@ -3196,18 +3221,18 @@ describe("SceneWorks app shell", () => {
     root = createRoot(container);
     await act(async () => {
       root.render(
-        <ModelManagerScreen
-          activeProject={{ id: "project-1", name: "Noir" }}
-          jobs={[]}
-          loras={[
+        withModelManagerContext({
+          activeProject: { id: "project-1", name: "Noir" },
+          jobs: [],
+          loras: [
             { id: "ready_style", name: "Ready Style", family: "z-image", scope: "global", installState: "installed" },
             { id: "broken_style", name: "Broken Style", family: "z-image", scope: "global", installState: "missing" },
-          ]}
-          models={[{ id: "z_image_turbo", name: "Z-Image Turbo", type: "image", family: "z-image", installState: "installed" }]}
-          onDownloadModel={() => {}}
-          onImportLora={() => {}}
-          onOpenQueue={() => {}}
-        />,
+          ],
+          models: [{ id: "z_image_turbo", name: "Z-Image Turbo", type: "image", family: "z-image", installState: "installed" }],
+          onDownloadModel: () => {},
+          onImportLora: () => {},
+          onOpenQueue: () => {},
+        }),
       );
     });
 
@@ -3229,18 +3254,18 @@ describe("SceneWorks app shell", () => {
     root = createRoot(container);
     await act(async () => {
       root.render(
-        <ModelManagerScreen
-          activeProject={{ id: "project-1", name: "Noir" }}
-          jobs={[]}
-          loras={[{ id: "ready_style", name: "Ready Style", family: "z-image", scope: "global", installState: "installed", removable: true }]}
-          models={[{ id: "z_image_turbo", name: "Z-Image Turbo", type: "image", family: "z-image", installState: "installed", removable: true }]}
-          onDeleteLora={onDeleteLora}
-          onDeleteModel={onDeleteModel}
-          onDownloadModel={() => {}}
-          onImportLora={() => {}}
-          onOpenQueue={() => {}}
-          recipePresets={[{ id: "moody", name: "Moody", model: "z_image_turbo", loras: [{ id: "ready_style" }] }]}
-        />,
+        withModelManagerContext({
+          activeProject: { id: "project-1", name: "Noir" },
+          jobs: [],
+          loras: [{ id: "ready_style", name: "Ready Style", family: "z-image", scope: "global", installState: "installed", removable: true }],
+          models: [{ id: "z_image_turbo", name: "Z-Image Turbo", type: "image", family: "z-image", installState: "installed", removable: true }],
+          onDeleteLora,
+          onDeleteModel,
+          onDownloadModel: () => {},
+          onImportLora: () => {},
+          onOpenQueue: () => {},
+          recipePresets: [{ id: "moody", name: "Moody", model: "z_image_turbo", loras: [{ id: "ready_style" }] }],
+        }),
       );
     });
 
@@ -3289,17 +3314,15 @@ describe("SceneWorks app shell", () => {
         setJobs((items) => [job, ...items]);
         return job;
       }
-      return (
-        <ModelManagerScreen
-          activeProject={{ id: "project-1", name: "Noir" }}
-          jobs={jobs}
-          loras={[]}
-          models={[{ id: "z_image_turbo", name: "Z-Image Turbo", type: "image", family: "z-image" }]}
-          onDownloadModel={() => {}}
-          onImportLora={importLora}
-          onOpenQueue={() => {}}
-        />
-      );
+      return withModelManagerContext({
+        activeProject: { id: "project-1", name: "Noir" },
+        jobs,
+        loras: [],
+        models: [{ id: "z_image_turbo", name: "Z-Image Turbo", type: "image", family: "z-image" }],
+        onDownloadModel: () => {},
+        onImportLora: importLora,
+        onOpenQueue: () => {},
+      });
     }
 
     root = createRoot(container);
@@ -3335,9 +3358,9 @@ describe("SceneWorks app shell", () => {
     root = createRoot(container);
     await act(async () => {
       root.render(
-        <ModelManagerScreen
-          activeProject={{ id: "project-1", name: "Noir" }}
-          jobs={[
+        withModelManagerContext({
+          activeProject: { id: "project-1", name: "Noir" },
+          jobs: [
             {
               id: "lora-import-job-1",
               type: "lora_import",
@@ -3346,13 +3369,13 @@ describe("SceneWorks app shell", () => {
               progress: 0.3,
               payload: { loraId: "existing_import" },
             },
-          ]}
-          loras={[]}
-          models={[{ id: "z_image_turbo", name: "Z-Image Turbo", type: "image", family: "z-image" }]}
-          onDownloadModel={() => {}}
-          onImportLora={onImportLora}
-          onOpenQueue={() => {}}
-        />,
+          ],
+          loras: [],
+          models: [{ id: "z_image_turbo", name: "Z-Image Turbo", type: "image", family: "z-image" }],
+          onDownloadModel: () => {},
+          onImportLora,
+          onOpenQueue: () => {},
+        }),
       );
     });
 
@@ -3381,9 +3404,9 @@ describe("SceneWorks app shell", () => {
     root = createRoot(container);
     await act(async () => {
       root.render(
-        <ModelManagerScreen
-          activeProject={{ id: "project-1", name: "Noir" }}
-          jobs={[
+        withModelManagerContext({
+          activeProject: { id: "project-1", name: "Noir" },
+          jobs: [
             {
               id: "lora-import-job-1",
               type: "lora_import",
@@ -3393,13 +3416,13 @@ describe("SceneWorks app shell", () => {
               error: "Adapter crashed",
               payload: { loraId: "broken_detail", family: "z-image" },
             },
-          ]}
-          loras={[]}
-          models={[{ id: "z_image_turbo", name: "Z-Image Turbo", type: "image", family: "z-image" }]}
-          onDownloadModel={() => {}}
-          onImportLora={() => {}}
-          onOpenQueue={() => {}}
-        />,
+          ],
+          loras: [],
+          models: [{ id: "z_image_turbo", name: "Z-Image Turbo", type: "image", family: "z-image" }],
+          onDownloadModel: () => {},
+          onImportLora: () => {},
+          onOpenQueue: () => {},
+        }),
       );
     });
 
@@ -3413,9 +3436,9 @@ describe("SceneWorks app shell", () => {
     root = createRoot(container);
     await act(async () => {
       root.render(
-        <ModelManagerScreen
-          activeProject={{ id: "project-1", name: "Noir" }}
-          jobs={[
+        withModelManagerContext({
+          activeProject: { id: "project-1", name: "Noir" },
+          jobs: [
             {
               id: "lora-import-job-2",
               type: "lora_import",
@@ -3435,13 +3458,13 @@ describe("SceneWorks app shell", () => {
               error: "LoRA manifestPath must target the global user manifest or the selected project's LoRA manifest",
               payload: { loraId: "detail_lora", family: "z-image" },
             },
-          ]}
-          loras={[]}
-          models={[{ id: "z_image_turbo", name: "Z-Image Turbo", type: "image", family: "z-image" }]}
-          onDownloadModel={() => {}}
-          onImportLora={() => {}}
-          onOpenQueue={() => {}}
-        />,
+          ],
+          loras: [],
+          models: [{ id: "z_image_turbo", name: "Z-Image Turbo", type: "image", family: "z-image" }],
+          onDownloadModel: () => {},
+          onImportLora: () => {},
+          onOpenQueue: () => {},
+        }),
       );
     });
 
@@ -3457,15 +3480,15 @@ describe("SceneWorks app shell", () => {
     root = createRoot(container);
     await act(async () => {
       root.render(
-        <ModelManagerScreen
-          activeProject={{ id: "project-1", name: "Noir" }}
-          jobs={[]}
-          loras={[]}
-          models={[{ id: "z_image_turbo", name: "Z-Image Turbo", type: "image", family: "z-image" }]}
-          onDownloadModel={() => {}}
-          onImportLora={onImportLora}
-          onOpenQueue={() => {}}
-        />,
+        withModelManagerContext({
+          activeProject: { id: "project-1", name: "Noir" },
+          jobs: [],
+          loras: [],
+          models: [{ id: "z_image_turbo", name: "Z-Image Turbo", type: "image", family: "z-image" }],
+          onDownloadModel: () => {},
+          onImportLora,
+          onOpenQueue: () => {},
+        }),
       );
     });
 
@@ -3486,16 +3509,16 @@ describe("SceneWorks app shell", () => {
     root = createRoot(container);
     await act(async () => {
       root.render(
-        <ModelManagerScreen
-          activeProject={null}
-          jobs={[]}
-          loras={[]}
-          models={[{ id: "z_image_turbo", name: "Z-Image Turbo", type: "image", family: "z-image" }]}
-          onDownloadModel={() => {}}
-          onImportLora={() => {}}
-          onImportModel={onImportModel}
-          onOpenQueue={() => {}}
-        />,
+        withModelManagerContext({
+          activeProject: null,
+          jobs: [],
+          loras: [],
+          models: [{ id: "z_image_turbo", name: "Z-Image Turbo", type: "image", family: "z-image" }],
+          onDownloadModel: () => {},
+          onImportLora: () => {},
+          onImportModel,
+          onOpenQueue: () => {},
+        }),
       );
     });
 
@@ -3525,16 +3548,16 @@ describe("SceneWorks app shell", () => {
     root = createRoot(container);
     await act(async () => {
       root.render(
-        <ModelManagerScreen
-          activeProject={null}
-          jobs={[]}
-          loras={[]}
-          models={[{ id: "z_image_turbo", name: "Z-Image Turbo", type: "image", family: "z-image" }]}
-          onDownloadModel={() => {}}
-          onImportLora={() => {}}
-          onImportModel={onImportModel}
-          onOpenQueue={() => {}}
-        />,
+        withModelManagerContext({
+          activeProject: null,
+          jobs: [],
+          loras: [],
+          models: [{ id: "z_image_turbo", name: "Z-Image Turbo", type: "image", family: "z-image" }],
+          onDownloadModel: () => {},
+          onImportLora: () => {},
+          onImportModel,
+          onOpenQueue: () => {},
+        }),
       );
     });
 
@@ -3554,16 +3577,16 @@ describe("SceneWorks app shell", () => {
     root = createRoot(container);
     await act(async () => {
       root.render(
-        <ModelManagerScreen
-          activeProject={null}
-          jobs={[]}
-          loras={[]}
-          models={[{ id: "imported_custom", name: "Imported Custom", type: "image" }]}
-          onDownloadModel={() => {}}
-          onImportLora={() => {}}
-          onImportModel={() => {}}
-          onOpenQueue={() => {}}
-        />,
+        withModelManagerContext({
+          activeProject: null,
+          jobs: [],
+          loras: [],
+          models: [{ id: "imported_custom", name: "Imported Custom", type: "image" }],
+          onDownloadModel: () => {},
+          onImportLora: () => {},
+          onImportModel: () => {},
+          onOpenQueue: () => {},
+        }),
       );
     });
 
@@ -3575,9 +3598,9 @@ describe("SceneWorks app shell", () => {
     root = createRoot(container);
     await act(async () => {
       root.render(
-        <ModelManagerScreen
-          activeProject={null}
-          jobs={[
+        withModelManagerContext({
+          activeProject: null,
+          jobs: [
             {
               id: "model-import-job-1",
               type: "model_import",
@@ -3586,14 +3609,14 @@ describe("SceneWorks app shell", () => {
               progress: 0.42,
               payload: { modelId: "custom_model", name: "Custom Model" },
             },
-          ]}
-          loras={[]}
-          models={[]}
-          onDownloadModel={() => {}}
-          onImportLora={() => {}}
-          onImportModel={() => {}}
-          onOpenQueue={() => {}}
-        />,
+          ],
+          loras: [],
+          models: [],
+          onDownloadModel: () => {},
+          onImportLora: () => {},
+          onImportModel: () => {},
+          onOpenQueue: () => {},
+        }),
       );
     });
 
