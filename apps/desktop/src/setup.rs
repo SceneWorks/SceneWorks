@@ -868,6 +868,11 @@ fn supervise_worker(app: AppHandle, api_port: u16) {
                 .env("SCENEWORKS_WORKER_ID", &worker_id)
                 .env("SCENEWORKS_API_URL", &api_url)
                 .env("HF_HOME", &hf_home)
+                // The worker watches this pid and self-terminates if we (the
+                // shell) die without a clean shutdown — macOS has no
+                // PR_SET_PDEATHSIG, so otherwise a force-quit/crash orphans the
+                // worker to launchd with its multi-GB model resident forever.
+                .env("SCENEWORKS_PARENT_PID", std::process::id().to_string())
                 // Point LensTurboAdapter at the Lens sidecar venv interpreter. The
                 // adapter existence-checks it at job time, so this is safe even
                 // while the venv is still provisioning in the background (and on
