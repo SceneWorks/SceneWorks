@@ -1096,7 +1096,12 @@ class NEOChatModel(PreTrainedModel):
 
         generated_text = ""
         generated_images =[]
-        max_images = 10
+        # SceneWorks vendored patch (re-apply on re-vendoring upstream 238d6cf; sc-1606):
+        # upstream hardcoded ``max_images = 10`` here, shadowing the caller's value that
+        # already sized ``image_size_list`` above. The img_count guard below would then run
+        # to 10 regardless, so any caller passing max_images < 10 IndexErrors once the model
+        # emits more images than its cap. Dropping the line lets the parameter govern both
+        # the list size and the guard (a cross-platform fix; our callers cap maxImages 1-10).
         img_count = 0
 
         next_token = torch.argmax(outputs_cond.logits[:, -1, :], dim=-1)

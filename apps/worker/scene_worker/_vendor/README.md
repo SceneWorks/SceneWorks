@@ -44,9 +44,24 @@ torch SDPA when `flash_attn` is absent, so it runs on CUDA and MPS unchanged.
   `transformers>=4.57,<4.58`, accelerate, sentencepiece, safetensors) match the
   worker stack. Pip-install is not viable — upstream `pyproject` requires
   Python <3.12 (the worker is 3.12) and pins a cu128 torch.
-- Only the T2I path is wired today (`model.t2i_generate`); the `gguf` /
-  `--vram_mode` offload paths are unused (the offload path is the only place
-  upstream hard-excludes MPS).
+- Wired paths: `t2i_generate` (text-to-image), `it2i_generate` (instruction
+  editing), `chat` (VQA), and `interleave_gen` (interleaved text-image
+  documents). The `gguf` / `--vram_mode` offload paths are unused (the offload
+  path is the only place upstream hard-excludes MPS).
+
+### Local patches (re-apply on re-vendoring)
+
+SceneWorks-local edits to `sensenova_u1/models/neo_unify/modeling_neo_chat.py`:
+
+1. **`chat()` think flag (sc-1575):** added a `think` parameter; when `False` it
+   primes `<think>\n\n</think>` so VQA returns the answer instead of the model's
+   chain-of-thought. `SenseNovaU1Adapter.answer_question` passes `think=False`.
+2. **`interleave_gen()` max_images fix (sc-1606):** removed a hardcoded
+   `max_images = 10` that shadowed the caller's value (which had already sized
+   `image_size_list`), leaving the per-image guard at 10 regardless — so any
+   caller passing `max_images < 10` hit an `IndexError` once the model emitted
+   more images than its cap. Control-flow bug, not numerics; affects all
+   platforms.
 
 To update: re-copy `src/sensenova_u1/` from the upstream repo at the desired
-commit and update the commit hash above.
+commit, update the commit hash above, and re-apply the local patches.
