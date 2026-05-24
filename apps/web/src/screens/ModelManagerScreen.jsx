@@ -1,32 +1,15 @@
 import React, { useEffect, useState } from "react";
 import { JobProgressCard } from "../components/JobProgress.jsx";
 import { terminalStatuses } from "../constants.js";
-import { presetLoraId, presetLoras } from "../presetUtils.js";
-
-function loraFamilies(item) {
-  // Accept either a LoRA catalog entry or a lora_import job snapshot.
-  const compatibility = item.compatibility ?? {};
-  const values =
-    item.families ??
-    item.compatibleFamilies ??
-    item.modelFamilies ??
-    compatibility.families ??
-    item.payload?.manifestEntry?.families ??
-    item.payload?.manifestEntry?.compatibleFamilies ??
-    item.payload?.manifestEntry?.modelFamilies ??
-    item.payload?.manifestEntry?.compatibility?.families ??
-    item.payload?.family ??
-    item.payload?.manifestEntry?.family ??
-    item.family ??
-    [];
-  return Array.isArray(values) ? values : [values].filter(Boolean);
-}
+import { extractFamilies, presetLoraId, presetLoras } from "../presetUtils.js";
 
 function matchesFamily(item, familyFilter) {
   if (familyFilter === "all") {
     return true;
   }
-  const families = loraFamilies(item);
+  // Accept either a LoRA catalog entry or a lora_import job snapshot (whose
+  // family metadata lives under payload.manifestEntry).
+  const families = extractFamilies(item, { includeManifest: true });
   // Import jobs can briefly lack family metadata; completed catalog entries should not.
   return item.type === "lora_import" && families.length === 0 ? true : families.includes(familyFilter);
 }

@@ -4,9 +4,9 @@ import {
   CharacterLooks,
   CharacterReferences,
   CharacterTest,
-  compatibleFamilies,
   editableLora,
 } from "./characterPanels.jsx";
+import { extractFamilies } from "../presetUtils.js";
 
 const characterTypes = [
   ["person", "Person"],
@@ -170,7 +170,7 @@ export function CharacterStudio({
       sourcePath: lora.installedPath ?? lora.source?.path ?? null,
       triggerWords: lora.triggerWords ?? [],
       defaultWeight: lora.defaultWeight ?? 0.8,
-      compatibility: { families: compatibleFamilies(lora) },
+      compatibility: { families: extractFamilies(lora) },
       scope: lora.scope ?? "global",
     });
     setLoraId("");

@@ -50,15 +50,36 @@ export function compactModeList(workflow) {
   return workflowModes(workflow).map((mode) => modeLabels[mode] ?? mode).join(", ");
 }
 
-export function loraFamilies(lora) {
-  const compatibility = lora?.compatibility ?? {};
+// Pull the raw families array out of a LoRA/model entry or a lora_import job
+// snapshot, trying the various shapes producers use. Pass includeManifest for
+// import-job snapshots, whose family metadata lives under payload.manifestEntry.
+// Output is raw (unnormalized) — callers that match should normalizeFamilies().
+export function extractFamilies(item, { includeManifest = false } = {}) {
+  const compatibility = item?.compatibility ?? {};
+  const manifest = item?.payload?.manifestEntry ?? {};
+  const manifestCompatibility = manifest?.compatibility ?? {};
   const values =
-    lora?.families ??
-    lora?.compatibleFamilies ??
-    lora?.modelFamilies ??
+    item?.families ??
+    item?.compatibleFamilies ??
+    item?.modelFamilies ??
     compatibility.families ??
-    (lora?.family ? [lora.family] : []);
-  return normalizeFamilies(values);
+    (includeManifest
+      ? manifest.families ??
+        manifest.compatibleFamilies ??
+        manifest.modelFamilies ??
+        manifestCompatibility.families ??
+        item?.payload?.family ??
+        manifest.family ??
+        item?.family ??
+        []
+      : item?.family
+        ? [item.family]
+        : []);
+  return Array.isArray(values) ? values : [values].filter(Boolean);
+}
+
+export function loraFamilies(lora) {
+  return normalizeFamilies(extractFamilies(lora));
 }
 
 export function modelLoraFamilies(model) {
