@@ -49,41 +49,56 @@ import {
   useGenerationStudio,
 } from "./generationStudio.jsx";
 import { ReplacePersonPanel, findReplacementModel } from "./ReplacePersonPanel.jsx";
+import { useAppContext } from "../context/AppContext.js";
 
 const ltxVideoModelId = "ltx_2_3";
 const ltxIcLoraRequiredModes = new Set(["extend_clip", "video_bridge"]);
 
-export function VideoStudio({
-  activeProject,
-  assets,
-  characters,
-  createPersonDetectionJob,
-  createPersonTrackJob,
-  createVideoJob,
-  deleteAsset,
-  purgeAsset,
-  gpuOptions,
-  latestAssets,
-  launchRequest,
-  loras = [],
-  jobs = [],
-  localJobs: trackedLocalJobs = [],
-  onCancelJob,
-  onLocalJobCreated,
-  onOpenPresets,
-  onOpenQueue,
-  onPreview,
-  onSendToEditor,
-  personTracks = [],
-  personReadiness = {},
-  presets = [],
-  requestedGpu,
-  saveTrackCorrections,
-  selectedAsset,
-  setRequestedGpu,
-  updateAssetStatus,
-  videoModels,
-}) {
+export function VideoStudio() {
+  const {
+    activeProject,
+    assets,
+    characters,
+    createPersonDetectionJob,
+    createPersonTrackJob,
+    createVideoJob,
+    deleteAsset,
+    purgeAsset,
+    gpuOptions,
+    latestVideoAssets,
+    studioLaunch,
+    loras = [],
+    jobs = [],
+    videoLocalJobs = [],
+    jobAction,
+    rememberLocalGenerationJob,
+    setActiveView,
+    setSelectedAssetId,
+    setPreviewAsset,
+    personTracks = [],
+    personReadiness = {},
+    presets = [],
+    requestedGpu,
+    saveTrackCorrections,
+    selectedAsset,
+    setRequestedGpu,
+    updateAssetStatus,
+    videoModels,
+  } = useAppContext();
+  const latestAssets = latestVideoAssets;
+  const launchRequest = studioLaunch;
+  const trackedLocalJobs = videoLocalJobs;
+  const onCancelJob = (job) => jobAction(job, "cancel");
+  const onLocalJobCreated = (job) => rememberLocalGenerationJob("video", job);
+  const onOpenPresets = () => setActiveView("Presets");
+  const onOpenQueue = () => setActiveView("Queue");
+  const onPreview = setPreviewAsset;
+  const onSendToEditor = (asset) => {
+    if (asset?.id) {
+      setSelectedAssetId(asset.id);
+    }
+    setActiveView("Editor");
+  };
   const [motion, setMotion] = useState("slow push-in");
   const imageAssets = assets.filter((asset) => asset.type === "image" || asset.type === "frame");
   const videoAssets = assets.filter((asset) => asset.type === "video");

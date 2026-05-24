@@ -1255,6 +1255,18 @@ export function App() {
     setProjectFilter,
     projects,
     visibleWorkers,
+    // Generation studios (sc-1651 Phase B batch 3)
+    createVideoJob,
+    latestVideoAssets,
+    videoLocalJobs,
+    studioLaunch,
+    rememberLocalGenerationJob,
+    // Person tracks (Video Studio + Replace Person)
+    personTracks,
+    personReadiness,
+    createPersonDetectionJob,
+    createPersonTrackJob,
+    saveTrackCorrections,
     // Models / GPU
     imageModels,
     videoModels,
@@ -1439,42 +1451,7 @@ export function App() {
         ) : null}
 
         {activeView === "Video" ? (
-          <VideoStudio
-            activeProject={activeProject}
-            assets={assets}
-            characters={characters}
-            createPersonDetectionJob={createPersonDetectionJob}
-            createPersonTrackJob={createPersonTrackJob}
-            createVideoJob={createVideoJob}
-            deleteAsset={deleteAsset}
-            purgeAsset={purgeAsset}
-            gpuOptions={gpuOptions}
-            latestAssets={latestVideoAssets}
-            launchRequest={studioLaunch}
-            loras={loras}
-            jobs={jobs}
-            localJobs={videoLocalJobs}
-            onCancelJob={(job) => jobAction(job, "cancel")}
-            onLocalJobCreated={(job) => rememberLocalGenerationJob("video", job)}
-            onOpenPresets={() => setActiveView("Presets")}
-            onOpenQueue={() => setActiveView("Queue")}
-            onPreview={setPreviewAsset}
-            onSendToEditor={(asset) => {
-              if (asset?.id) {
-                setSelectedAssetId(asset.id);
-              }
-              setActiveView("Editor");
-            }}
-            personTracks={personTracks}
-            personReadiness={personReadiness}
-            presets={presets}
-            requestedGpu={requestedGpu}
-            saveTrackCorrections={saveTrackCorrections}
-            selectedAsset={selectedAsset}
-            setRequestedGpu={setRequestedGpu}
-            updateAssetStatus={updateAssetStatus}
-            videoModels={videoModels}
-          />
+          <VideoStudio />
         ) : null}
 
         {activeView === "Document" ? (

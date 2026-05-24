@@ -4757,21 +4757,22 @@ describe("SceneWorks app shell", () => {
     root = createRoot(container);
     await act(async () => {
       root.render(
-        <VideoStudio
-          activeProject={{ id: "project-1", name: "Noir" }}
-          assets={[{ id: "image-1", type: "image", displayName: "Frame One" }]}
-          characters={[]}
-          createPersonDetectionJob={() => {}}
-          createPersonTrackJob={() => {}}
-          createVideoJob={createVideoJob}
-          deleteAsset={() => {}}
-          gpuOptions={["auto"]}
-          latestAssets={[]}
-          loras={[{ id: "wan_motion", name: "Wan Motion", family: "wan-video", scope: "builtin", presetManaged: true }]}
-          onPreview={() => {}}
-          personTracks={[]}
-          purgeAsset={() => {}}
-          presets={[
+        withAppContext(
+          {
+          activeProject: { id: "project-1", name: "Noir" },
+          assets: [{ id: "image-1", type: "image", displayName: "Frame One" }],
+          characters: [],
+          createPersonDetectionJob: () => {},
+          createPersonTrackJob: () => {},
+          createVideoJob,
+          deleteAsset: () => {},
+          gpuOptions: ["auto"],
+          latestVideoAssets: [],
+          loras: [{ id: "wan_motion", name: "Wan Motion", family: "wan-video", scope: "builtin", presetManaged: true }],
+          setPreviewAsset: () => {},
+          personTracks: [],
+          purgeAsset: () => {},
+          presets: [
             {
               id: "dream_motion",
               name: "Dream Motion",
@@ -4779,12 +4780,12 @@ describe("SceneWorks app shell", () => {
               model: "ltx_2_3",
               builtInLoras: [{ id: "wan_motion" }],
             },
-          ]}
-          requestedGpu="auto"
-          selectedAsset={{ id: "image-1", type: "image", displayName: "Frame One" }}
-          setRequestedGpu={() => {}}
-          updateAssetStatus={() => {}}
-          videoModels={[
+          ],
+          requestedGpu: "auto",
+          selectedAsset: { id: "image-1", type: "image", displayName: "Frame One" },
+          setRequestedGpu: () => {},
+          updateAssetStatus: () => {},
+          videoModels: [
             {
               id: "ltx_2_3",
               name: "LTX",
@@ -4794,8 +4795,10 @@ describe("SceneWorks app shell", () => {
               defaults: { duration: 6, fps: 25, resolution: "768x512", quality: "balanced" },
               loraCompatibility: { families: ["ltx-video"] },
             },
-          ]}
-        />,
+          ],
+          },
+          <VideoStudio />,
+        ),
       );
     });
 
@@ -5017,21 +5020,23 @@ describe("SceneWorks app shell", () => {
     root = createRoot(container);
     await act(async () => {
       root.render(
-        <VideoStudio
-          activeProject={{ id: "project-1", name: "Noir" }}
-          assets={[{ id: "image-1", type: "image", displayName: "Frame One" }]}
-          characters={[]}
-          createPersonDetectionJob={() => {}}
-          createPersonTrackJob={() => {}}
-          createVideoJob={createVideoJob}
-          deleteAsset={() => {}}
-          gpuOptions={["auto"]}
-          latestAssets={[]}
-          loras={[{ id: "video_motion", name: "Video Motion" }]}
-          onPreview={() => {}}
-          personTracks={[]}
-          purgeAsset={() => {}}
-          presets={[
+        withAppContext(
+          {
+          activeProject: { id: "project-1", name: "Noir" },
+          assets: [{ id: "image-1", type: "image", displayName: "Frame One" }],
+          characters: [],
+          createPersonDetectionJob: () => {},
+          createPersonTrackJob: () => {},
+          createVideoJob,
+          deleteAsset: () => {},
+          gpuOptions: ["auto"],
+          latestVideoAssets: [],
+          loras: [{ id: "video_motion", name: "Video Motion" }],
+          setPreviewAsset: () => {},
+          rememberLocalGenerationJob: () => {},
+          personTracks: [],
+          purgeAsset: () => {},
+          presets: [
             {
               id: "dream_motion",
               name: "Dream Motion",
@@ -5042,12 +5047,12 @@ describe("SceneWorks app shell", () => {
               builtInLoras: [{ id: "video_motion" }],
               ui: { description: "Soft camera motion." },
             },
-          ]}
-          requestedGpu="auto"
-          selectedAsset={{ id: "image-1", type: "image", displayName: "Frame One" }}
-          setRequestedGpu={() => {}}
-          updateAssetStatus={() => {}}
-          videoModels={[
+          ],
+          requestedGpu: "auto",
+          selectedAsset: { id: "image-1", type: "image", displayName: "Frame One" },
+          setRequestedGpu: () => {},
+          updateAssetStatus: () => {},
+          videoModels: [
             {
               id: "ltx_2_3",
               name: "LTX",
@@ -5056,8 +5061,10 @@ describe("SceneWorks app shell", () => {
               defaults: { duration: 6, fps: 25, resolution: "768x512", quality: "balanced" },
               limits: { durations: [4, 6, 8], fps: [24, 25, 30], resolutions: ["768x512", "1280x720"] },
             },
-          ]}
-        />,
+          ],
+          },
+          <VideoStudio />,
+        ),
       );
     });
     await settle();
@@ -5094,30 +5101,31 @@ describe("SceneWorks app shell", () => {
     root = createRoot(container);
     await act(async () => {
       root.render(
-        <VideoStudio
-          activeProject={{ id: "project-1", name: "Noir" }}
-          assets={[{ id: "image-1", type: "image", displayName: "Frame One" }]}
-          characters={[]}
-          createPersonDetectionJob={() => {}}
-          createPersonTrackJob={() => {}}
-          createVideoJob={() => {}}
-          deleteAsset={() => {}}
-          gpuOptions={["auto"]}
-          latestAssets={[]}
-          loras={[]}
-          onPreview={() => {}}
-          personTracks={[]}
-          purgeAsset={() => {}}
-          presets={[
+        withAppContext(
+          {
+          activeProject: { id: "project-1", name: "Noir" },
+          assets: [{ id: "image-1", type: "image", displayName: "Frame One" }],
+          characters: [],
+          createPersonDetectionJob: () => {},
+          createPersonTrackJob: () => {},
+          createVideoJob: () => {},
+          deleteAsset: () => {},
+          gpuOptions: ["auto"],
+          latestVideoAssets: [],
+          loras: [],
+          setPreviewAsset: () => {},
+          personTracks: [],
+          purgeAsset: () => {},
+          presets: [
             { id: "ltx_motion", name: "LTX Motion", workflow: "image_to_video", model: "ltx_2_3" },
             { id: "ltx_story", name: "LTX Story", workflow: "text_to_video", model: "ltx_2_3" },
             { id: "wan_motion", name: "Wan Motion", workflow: "image_to_video", model: "wan_2_2" },
-          ]}
-          requestedGpu="auto"
-          selectedAsset={{ id: "image-1", type: "image", displayName: "Frame One" }}
-          setRequestedGpu={() => {}}
-          updateAssetStatus={() => {}}
-          videoModels={[
+          ],
+          requestedGpu: "auto",
+          selectedAsset: { id: "image-1", type: "image", displayName: "Frame One" },
+          setRequestedGpu: () => {},
+          updateAssetStatus: () => {},
+          videoModels: [
             {
               id: "ltx_2_3",
               name: "LTX",
@@ -5134,8 +5142,10 @@ describe("SceneWorks app shell", () => {
               defaults: { duration: 5, fps: 24, resolution: "1280x720", quality: "balanced" },
               limits: { durations: [4, 5], fps: [24], resolutions: ["1280x720"] },
             },
-          ]}
-        />,
+          ],
+          },
+          <VideoStudio />,
+        ),
       );
     });
     await settle();
@@ -5165,24 +5175,25 @@ describe("SceneWorks app shell", () => {
     root = createRoot(container);
     await act(async () => {
       root.render(
-        <VideoStudio
-          activeProject={{ id: "project-1", name: "Noir" }}
-          assets={[
+        withAppContext(
+          {
+          activeProject: { id: "project-1", name: "Noir" },
+          assets: [
             { id: "image-1", type: "image", displayName: "Frame One" },
             { id: "image-2", type: "image", displayName: "Frame Two" },
-          ]}
-          characters={[]}
-          createPersonDetectionJob={() => {}}
-          createPersonTrackJob={() => {}}
-          createVideoJob={() => {}}
-          deleteAsset={() => {}}
-          gpuOptions={["auto"]}
-          latestAssets={[]}
-          loras={[]}
-          onPreview={() => {}}
-          personTracks={[]}
-          purgeAsset={() => {}}
-          presets={[
+          ],
+          characters: [],
+          createPersonDetectionJob: () => {},
+          createPersonTrackJob: () => {},
+          createVideoJob: () => {},
+          deleteAsset: () => {},
+          gpuOptions: ["auto"],
+          latestVideoAssets: [],
+          loras: [],
+          setPreviewAsset: () => {},
+          personTracks: [],
+          purgeAsset: () => {},
+          presets: [
             {
               id: "camera_bridge",
               name: "Camera Bridge",
@@ -5197,12 +5208,12 @@ describe("SceneWorks app shell", () => {
               modes: ["image_to_video"],
               model: "ltx_2_3",
             },
-          ]}
-          requestedGpu="auto"
-          selectedAsset={{ id: "image-1", type: "image", displayName: "Frame One" }}
-          setRequestedGpu={() => {}}
-          updateAssetStatus={() => {}}
-          videoModels={[
+          ],
+          requestedGpu: "auto",
+          selectedAsset: { id: "image-1", type: "image", displayName: "Frame One" },
+          setRequestedGpu: () => {},
+          updateAssetStatus: () => {},
+          videoModels: [
             {
               id: "ltx_2_3",
               name: "LTX",
@@ -5211,8 +5222,10 @@ describe("SceneWorks app shell", () => {
               defaults: { duration: 6, fps: 25, resolution: "768x512", quality: "balanced" },
               limits: { durations: [4, 6, 8], fps: [24, 25, 30], resolutions: ["768x512", "1280x720"] },
             },
-          ]}
-        />,
+          ],
+          },
+          <VideoStudio />,
+        ),
       );
     });
     await settle();
