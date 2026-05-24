@@ -2091,6 +2091,7 @@ export function App() {
             launchRequest={studioLaunch}
             loras={loras}
             localJobs={imageLocalJobs}
+            onCancelJob={(job) => jobAction(job, "cancel")}
             onLocalJobCreated={(job) => rememberLocalGenerationJob("image", job)}
             onOpenPresets={() => setActiveView("Presets")}
             onOpenQueue={() => setActiveView("Queue")}
@@ -2121,6 +2122,7 @@ export function App() {
             loras={loras}
             jobs={jobs}
             localJobs={videoLocalJobs}
+            onCancelJob={(job) => jobAction(job, "cancel")}
             onLocalJobCreated={(job) => rememberLocalGenerationJob("video", job)}
             onOpenPresets={() => setActiveView("Presets")}
             onOpenQueue={() => setActiveView("Queue")}
@@ -2151,6 +2153,7 @@ export function App() {
             gpuOptions={gpuOptions}
             imageModels={imageModels}
             jobs={jobs}
+            onCancelJob={(job) => jobAction(job, "cancel")}
             onOpenQueue={() => setActiveView("Queue")}
             requestedGpu={requestedGpu}
             setRequestedGpu={setRequestedGpu}
@@ -2228,6 +2231,7 @@ export function App() {
             onDeleteModel={deleteModel}
             onDownloadModel={createModelDownloadJob}
             onConvertModel={createModelConvertJob}
+            onCancelJob={(job) => jobAction(job, "cancel")}
             onImportLora={createLoraImportJob}
             onImportModel={createModelImportJob}
             onOpenQueue={() => setActiveView("Queue")}

@@ -126,6 +126,7 @@ export function ImageStudio({
   launchRequest,
   localJobs: trackedLocalJobs = [],
   loras = [],
+  onCancelJob,
   onLocalJobCreated,
   onOpenPresets,
   onOpenQueue,
@@ -158,6 +159,15 @@ export function ImageStudio({
     () => assets.filter((asset) => asset.type === "image" || asset.type === "frame"),
     [assets],
   );
+
+  function handleModeChange(nextMode) {
+    if (nextMode === "edit_image") {
+      setCount(1);
+    } else if (nextMode === "text_to_image") {
+      setCount(4);
+    }
+    setMode(nextMode);
+  }
 
   function serializeLora(lora, override = {}) {
     return {
@@ -499,7 +509,7 @@ export function ImageStudio({
                 <button
                   className={mode === value ? "active" : ""}
                   key={value}
-                  onClick={() => setMode(value)}
+                  onClick={() => handleModeChange(value)}
                   type="button"
                 >
                   {value === "text_to_image" ? <Icon.Sparkle size={13} /> : null}
@@ -606,7 +616,7 @@ export function ImageStudio({
             {localJobs.length ? (
               <div className="local-job-stack">
                 {localJobs.map((job) => (
-                  <JobProgressCard job={job} key={job.id} label="Image generation" onOpenQueue={onOpenQueue} />
+                  <JobProgressCard job={job} key={job.id} label="Image generation" onCancel={onCancelJob} onOpenQueue={onOpenQueue} />
                 ))}
               </div>
             ) : null}

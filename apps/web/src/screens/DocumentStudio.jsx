@@ -20,10 +20,10 @@ function formatResolutionLabel(value) {
   return height ? `${width} × ${height}` : value;
 }
 
-function DocumentResult({ job, assets, projectId, onOpenQueue }) {
+function DocumentResult({ job, assets, projectId, onCancel, onOpenQueue }) {
   const segments = job.result?.segments;
   if (job.status !== "completed" || !Array.isArray(segments) || !segments.length) {
-    return <JobProgressCard job={job} label="Interleaved document" onOpenQueue={onOpenQueue} />;
+    return <JobProgressCard job={job} label="Interleaved document" onCancel={onCancel} onOpenQueue={onOpenQueue} />;
   }
   return <DocumentView assets={assets} projectId={projectId} segments={segments} />;
 }
@@ -35,6 +35,7 @@ export function DocumentStudio({
   gpuOptions,
   imageModels,
   jobs,
+  onCancelJob,
   onOpenQueue,
   requestedGpu,
   setRequestedGpu,
@@ -200,6 +201,7 @@ export function DocumentStudio({
           <DocumentResult
             assets={assets ?? []}
             job={latestJob}
+            onCancel={onCancelJob}
             onOpenQueue={onOpenQueue}
             projectId={activeProject?.id}
           />

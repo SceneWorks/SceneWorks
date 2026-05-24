@@ -4132,6 +4132,94 @@ describe("SceneWorks app shell", () => {
     expect(container.textContent).toContain("Pending #3");
   });
 
+  it("cancels a running image job from the studio progress card", async () => {
+    const runningJob = {
+      id: "image-job-cancel",
+      type: "image_generate",
+      status: "running",
+      stage: "generating",
+      progress: 0.4,
+      requestedGpu: "auto",
+      payload: { prompt: "cancel me" },
+      result: {},
+    };
+    const onCancelJob = vi.fn();
+    root = createRoot(container);
+    await act(async () => {
+      root.render(
+        <ImageStudio
+          activeProject={{ id: "project-1", name: "Noir" }}
+          assets={[]}
+          characters={[]}
+          createImageJob={() => {}}
+          deleteAsset={() => {}}
+          gpuOptions={["auto"]}
+          imageModels={[{ id: "z_image_turbo", name: "Z-Image", type: "image", family: "z-image" }]}
+          latestAssets={[]}
+          localJobs={[runningJob]}
+          loras={[]}
+          onCancelJob={onCancelJob}
+          onPreview={() => {}}
+          purgeAsset={() => {}}
+          requestedGpu="auto"
+          selectedAsset={null}
+          setRequestedGpu={() => {}}
+          updateAssetStatus={() => {}}
+        />,
+      );
+    });
+    await settle();
+
+    const cancelButton = [...container.querySelectorAll("button")].find((button) => button.textContent === "Cancel run");
+    expect(cancelButton).not.toBeUndefined();
+
+    await act(async () => {
+      cancelButton.click();
+    });
+
+    expect(onCancelJob).toHaveBeenCalledWith(expect.objectContaining({ id: "image-job-cancel" }));
+  });
+
+  it("hides the cancel control once an image job reaches a terminal state", async () => {
+    const completedJob = {
+      id: "image-job-done",
+      type: "image_generate",
+      status: "completed",
+      stage: "completed",
+      progress: 1,
+      requestedGpu: "auto",
+      payload: { prompt: "all done" },
+      result: {},
+    };
+    root = createRoot(container);
+    await act(async () => {
+      root.render(
+        <ImageStudio
+          activeProject={{ id: "project-1", name: "Noir" }}
+          assets={[]}
+          characters={[]}
+          createImageJob={() => {}}
+          deleteAsset={() => {}}
+          gpuOptions={["auto"]}
+          imageModels={[{ id: "z_image_turbo", name: "Z-Image", type: "image", family: "z-image" }]}
+          latestAssets={[]}
+          localJobs={[completedJob]}
+          loras={[]}
+          onCancelJob={() => {}}
+          onPreview={() => {}}
+          purgeAsset={() => {}}
+          requestedGpu="auto"
+          selectedAsset={null}
+          setRequestedGpu={() => {}}
+          updateAssetStatus={() => {}}
+        />,
+      );
+    });
+    await settle();
+
+    expect([...container.querySelectorAll("button")].some((button) => button.textContent === "Cancel run")).toBe(false);
+  });
+
   it("hides completed image progress with stale missing result metadata", async () => {
     const staleCompletedJob = {
       id: "image-job-stale",
@@ -4776,6 +4864,51 @@ describe("SceneWorks app shell", () => {
 
     expect(container.textContent).toContain("Cinematic");
     expect(container.textContent).not.toContain("Portrait Only");
+  });
+
+  it("drops variations to 1 in edit mode and restores 4 for text", async () => {
+    root = createRoot(container);
+    await act(async () => {
+      root.render(
+        <ImageStudio
+          activeProject={{ id: "project-1", name: "Noir" }}
+          assets={[{ id: "image-1", type: "image", displayName: "Frame One" }]}
+          characters={[]}
+          createImageJob={() => {}}
+          deleteAsset={() => {}}
+          gpuOptions={["auto"]}
+          imageModels={[
+            { id: "z_image_turbo", name: "Z-Image", type: "image", family: "z-image", capabilities: ["text_to_image", "edit_image"] },
+          ]}
+          latestAssets={[]}
+          loras={[]}
+          onPreview={() => {}}
+          purgeAsset={() => {}}
+          presets={[]}
+          requestedGpu="auto"
+          selectedAsset={{ id: "image-1", type: "image", displayName: "Frame One" }}
+          setRequestedGpu={() => {}}
+          updateAssetStatus={() => {}}
+        />,
+      );
+    });
+    await settle();
+
+    expect(field(container, "Variations").value).toBe("4");
+
+    await act(async () => {
+      [...container.querySelectorAll("button")].find((button) => button.textContent === "Edit").click();
+    });
+    await settle();
+
+    expect(field(container, "Variations").value).toBe("1");
+
+    await act(async () => {
+      [...container.querySelectorAll("button")].find((button) => button.textContent === "Text").click();
+    });
+    await settle();
+
+    expect(field(container, "Variations").value).toBe("4");
   });
 
   it("applies preset defaults to video jobs", async () => {
