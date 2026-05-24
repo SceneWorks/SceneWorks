@@ -17,6 +17,11 @@ class WorkerSettings:
         self.access_token = os.getenv("SCENEWORKS_ACCESS_TOKEN", "").strip()
         self.heartbeat_seconds = int(os.getenv("SCENEWORKS_WORKER_HEARTBEAT_SECONDS", "30"))
         self.poll_seconds = int(os.getenv("SCENEWORKS_WORKER_POLL_SECONDS", "3"))
+        # Hard-stop backstop: if a running job's cancellation isn't honored
+        # cooperatively within this many seconds, the worker force-terminates
+        # itself so its supervisor respawns it (releasing the wedged job/model).
+        # 0 disables the backstop, leaving cancellation cooperative-only.
+        self.force_cancel_seconds = int(os.getenv("SCENEWORKS_WORKER_FORCE_CANCEL_SECONDS", "30"))
         # A GPU worker won't claim a job when its GPU has less free VRAM than this
         # (MB), so jobs flow to a free card when another tool (e.g. ComfyUI) is using
         # one. 0 disables the gate. CPU workers are never gated.
@@ -33,4 +38,5 @@ class WorkerSettings:
         settings.heartbeat_seconds = self.heartbeat_seconds
         settings.poll_seconds = self.poll_seconds
         settings.min_free_vram_mb = self.min_free_vram_mb
+        settings.force_cancel_seconds = self.force_cancel_seconds
         return settings
