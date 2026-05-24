@@ -23,6 +23,8 @@ from .image_adapters import (
     SenseNovaU1Adapter,
     ZImageDiffusersAdapter,
     create_image_adapter,
+    evict_other_image_adapters,
+    release_image_worker_memory,
 )
 from .person_adapters import (
     detector_backend_available,
@@ -567,7 +569,11 @@ def should_skip_claim_low_vram(settings: WorkerSettings) -> bool:
     full — typically another process (e.g. ComfyUI) is using it — so jobs flow to
     a free GPU instead. Never gates the CPU worker or when the threshold is 0."""
     threshold = getattr(settings, "min_free_vram_mb", 0)
-    if threshold <= 0 or settings.gpu_id == "cpu":
+    # Never gate the CPU worker; never gate MPS either — it's the single
+    # accelerator on a Mac (no alternate card to defer to), and gating its
+    # unified "free memory" against the NVIDIA-tuned threshold would just stall
+    # all work. The free-memory figure is still reported for display.
+    if threshold <= 0 or settings.gpu_id in ("cpu", "mps"):
         return False
     utilization = gpu_utilization(settings.gpu_id)
     free_mb = utilization.get("memoryFreeMb") if utilization else None
@@ -588,6 +594,9 @@ def should_skip_claim_low_vram(settings: WorkerSettings) -> bool:
 def run_image_job(api: ApiClient, settings: WorkerSettings, job: dict, image_adapters: dict[str, object]) -> None:
     job_id = job["id"]
     adapter = create_image_adapter(job, image_adapters)
+    # Free any other family's resident model before this one loads, so only one
+    # image model stays resident at a time.
+    evict_other_image_adapters(image_adapters, getattr(adapter, "id", ""))
     needs_oom_restart = False
 
     def adapter_loaded_models() -> list[str]:
@@ -658,6 +667,10 @@ def run_image_job(api: ApiClient, settings: WorkerSettings, job: dict, image_ada
             },
         )
     finally:
+        # Return the (potentially tens of GB) generation activation pool to the OS
+        # so an idle worker doesn't sit at peak memory. Cached models stay resident
+        # for fast reuse; the just-finished job's tensors are already unreferenced.
+        release_image_worker_memory()
         heartbeat(api, settings, "idle", loaded_models=loaded_models_from_adapters(image_adapters))
         if needs_oom_restart:
             restart_worker_after_oom(settings, job_id)
@@ -666,6 +679,8 @@ def run_image_job(api: ApiClient, settings: WorkerSettings, job: dict, image_ada
 def run_vqa_job(api: ApiClient, settings: WorkerSettings, job: dict, image_adapters: dict[str, object]) -> None:
     job_id = job["id"]
     adapter = image_adapters["sensenova_u1"]
+    # Free any other family's resident model before this one loads.
+    evict_other_image_adapters(image_adapters, getattr(adapter, "id", ""))
     needs_oom_restart = False
 
     def adapter_loaded_models() -> list[str]:
@@ -715,6 +730,10 @@ def run_vqa_job(api: ApiClient, settings: WorkerSettings, job: dict, image_adapt
             {"status": "failed", "stage": "failed", "progress": 1, "message": message, "error": error},
         )
     finally:
+        # Return the (potentially tens of GB) generation activation pool to the OS
+        # so an idle worker doesn't sit at peak memory. Cached models stay resident
+        # for fast reuse; the just-finished job's tensors are already unreferenced.
+        release_image_worker_memory()
         heartbeat(api, settings, "idle", loaded_models=loaded_models_from_adapters(image_adapters))
         if needs_oom_restart:
             restart_worker_after_oom(settings, job_id)
@@ -723,6 +742,8 @@ def run_vqa_job(api: ApiClient, settings: WorkerSettings, job: dict, image_adapt
 def run_interleave_job(api: ApiClient, settings: WorkerSettings, job: dict, image_adapters: dict[str, object]) -> None:
     job_id = job["id"]
     adapter = image_adapters["sensenova_u1"]
+    # Free any other family's resident model before this one loads.
+    evict_other_image_adapters(image_adapters, getattr(adapter, "id", ""))
     needs_oom_restart = False
 
     def adapter_loaded_models() -> list[str]:
@@ -772,6 +793,10 @@ def run_interleave_job(api: ApiClient, settings: WorkerSettings, job: dict, imag
             {"status": "failed", "stage": "failed", "progress": 1, "message": message, "error": error},
         )
     finally:
+        # Return the (potentially tens of GB) generation activation pool to the OS
+        # so an idle worker doesn't sit at peak memory. Cached models stay resident
+        # for fast reuse; the just-finished job's tensors are already unreferenced.
+        release_image_worker_memory()
         heartbeat(api, settings, "idle", loaded_models=loaded_models_from_adapters(image_adapters))
         if needs_oom_restart:
             restart_worker_after_oom(settings, job_id)
@@ -1339,6 +1364,64 @@ def _force_utf8_stdio() -> None:
             pass
 
 
+def _pid_alive(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        # Exists but owned by another user — still alive for our purposes.
+        return True
+    except OSError:
+        return False
+    return True
+
+
+def start_parent_death_watchdog() -> None:
+    """Terminate this process when the launching desktop shell goes away.
+
+    macOS has no ``PR_SET_PDEATHSIG``, so a sidecar whose parent force-quits or
+    crashes orphans to launchd (PPID=1) and keeps its multi-GB model resident
+    indefinitely — the desktop only tears sidecars down on a clean
+    ``RunEvent::ExitRequested``. When ``SCENEWORKS_PARENT_PID`` is set (only the
+    desktop shell sets it), a daemon thread watches that pid and signals this
+    process to stop once it disappears, covering force-quit, crash, and any exit
+    path that skips graceful teardown. Unset in Docker/server runs, so it is a
+    no-op there.
+
+    SIGTERM is sent first so a supervisor parent runs its ``stop_children``
+    handler; a leaf worker has no SIGTERM handler, so the default disposition
+    terminates it immediately (releasing the loaded model) even mid-inference,
+    since signal delivery is handled by the kernel regardless of the blocked
+    thread. SIGKILL escalates if the process lingers past the grace window.
+    """
+    raw = os.getenv("SCENEWORKS_PARENT_PID", "").strip()
+    if not raw:
+        return
+    try:
+        parent_pid = int(raw)
+    except ValueError:
+        return
+    if parent_pid <= 1:
+        return
+
+    def watch() -> None:
+        while _pid_alive(parent_pid):
+            time.sleep(3)
+        emit({"event": "parent_exited", "parentPid": parent_pid, "pid": os.getpid(), "reportedAt": now()})
+        try:
+            os.kill(os.getpid(), signal.SIGTERM)
+        except OSError:
+            pass
+        time.sleep(5)
+        try:
+            os.kill(os.getpid(), signal.SIGKILL)
+        except OSError:
+            pass
+
+    threading.Thread(target=watch, name="parent-death-watchdog", daemon=True).start()
+
+
 def main(argv: list[str] | None = None) -> None:
     _force_utf8_stdio()
     args = list(sys.argv[1:] if argv is None else argv)
@@ -1348,6 +1431,7 @@ def main(argv: list[str] | None = None) -> None:
         return
     if args:
         raise SystemExit(f"Unsupported scene_worker arguments: {' '.join(args)}")
+    start_parent_death_watchdog()
     if settings.gpu_id == "auto" and os.getenv("SCENEWORKS_WORKER_CHILD") != "1":
         supervise_auto_workers(settings)
         return
