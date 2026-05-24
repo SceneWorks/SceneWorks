@@ -11,24 +11,31 @@ import {
   trackItems,
   transitionOptions,
 } from "../timeline.js";
+import { useAppContext } from "../context/AppContext.js";
 
-export function EditorScreen({
-  activeProject,
-  activeTimeline,
-  assets,
-  createTimeline,
-  extractTimelineFrame,
-  exportTimeline,
-  onPreview,
-  onSendImage,
-  onSendVideo,
-  queueTimelineVideoJob,
-  saveTimeline,
-  selectedTimelineId,
-  setActiveTimeline,
-  setSelectedTimelineId,
-  timelines,
-}) {
+export function EditorScreen() {
+  const {
+    activeProject,
+    activeTimeline,
+    mediaAssets,
+    setPreviewAsset,
+    sendAssetToImage,
+    sendAssetToVideo,
+    createTimeline,
+    extractTimelineFrame,
+    exportTimeline,
+    queueTimelineVideoJob,
+    saveTimeline,
+    selectedTimelineId,
+    setActiveTimeline,
+    setSelectedTimelineId,
+    timelines,
+  } = useAppContext();
+  const assets = mediaAssets;
+  const onPreview = setPreviewAsset;
+  const onSendImage = (asset) => sendAssetToImage(asset, "edit_image");
+  const onSendVideo = (asset) => sendAssetToVideo(asset, asset?.type === "video" ? "extend_clip" : "image_to_video");
+
   const [newTimelineName, setNewTimelineName] = useState("Main timeline");
   const [newAspectRatio, setNewAspectRatio] = useState("16:9");
   const [selectedItemId, setSelectedItemId] = useState(null);
