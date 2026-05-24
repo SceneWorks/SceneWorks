@@ -13534,15 +13534,15 @@ mod tests {
             .expect("spawn dummy parent");
         let pid = parent.id() as i32;
 
-        assert!(super::pid_alive(pid), "freshly spawned parent reads as dead");
+        assert!(
+            super::pid_alive(pid),
+            "freshly spawned parent reads as dead"
+        );
         // Still alive -> the watchdog must not resolve within a poll cycle.
         assert!(
-            tokio::time::timeout(
-                Duration::from_millis(200),
-                super::parent_death(Some(pid)),
-            )
-            .await
-            .is_err(),
+            tokio::time::timeout(Duration::from_millis(200), super::parent_death(Some(pid)),)
+                .await
+                .is_err(),
             "watchdog resolved while the parent was still alive"
         );
 
