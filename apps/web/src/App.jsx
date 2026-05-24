@@ -19,6 +19,7 @@ import { SettingsScreen } from "./screens/SettingsScreen.jsx";
 import { SetupWizard } from "./screens/SetupWizard.jsx";
 import { sortNewest, sortWorkers } from "./sorters.js";
 import { ensureItemVersionFields } from "./timeline.js";
+import { useCharacters } from "./hooks/useCharacters.js";
 
 // Desktop (Tauri) shell detection. The first-run setup wizard is desktop-only;
 // web/Docker keep the existing first-run project gate. Tauri commands persist the
@@ -375,7 +376,6 @@ export function App() {
   const [loadingTrainingDatasets, setLoadingTrainingDatasets] = useState(false);
   const [trainingDatasetsError, setTrainingDatasetsError] = useState("");
   const [assets, setAssets] = useState([]);
-  const [characters, setCharacters] = useState([]);
   const [personTracks, setPersonTracks] = useState([]);
   const [timelines, setTimelines] = useState([]);
   const [timelinesProjectId, setTimelinesProjectId] = useState(null);
@@ -396,6 +396,25 @@ export function App() {
   const selectedTimelineIdRef = useRef(null);
   const timelineApplyQueueRef = useRef(Promise.resolve());
   const generatedAssetRefreshesRef = useRef(new Map());
+
+  const {
+    characters,
+    setCharacters,
+    refreshCharacters,
+    createCharacter,
+    updateCharacter,
+    archiveCharacter,
+    addCharacterReference,
+    updateCharacterReference,
+    removeCharacterReference,
+    createCharacterLook,
+    updateCharacterLook,
+    deleteCharacterLook,
+    attachCharacterLora,
+    updateCharacterLora,
+    detachCharacterLora,
+    createCharacterTestJob,
+  } = useCharacters({ token, activeProject, setError, requestedGpu, setActiveView, refreshData });
 
   const authenticated = useMemo(() => !access.authRequired || token.length > 0, [access, token]);
   const imageModels = useMemo(() => {
@@ -797,20 +816,6 @@ export function App() {
       setAssets(items);
       const defaultAsset = items.find((asset) => !asset.status?.trashed && !asset.status?.rejected) ?? items[0] ?? null;
       setSelectedAssetId((current) => current ?? defaultAsset?.id ?? null);
-      setError("");
-    } catch (err) {
-      if (isAbortError(err)) return;
-      setError(err.message);
-    }
-  }
-
-  async function refreshCharacters(projectId = activeProject?.id, { signal } = {}) {
-    if (!projectId) {
-      return;
-    }
-    try {
-      const items = await apiFetch(`/api/v1/projects/${projectId}/characters`, token, { signal });
-      setCharacters(items);
       setError("");
     } catch (err) {
       if (isAbortError(err)) return;
@@ -1399,159 +1404,6 @@ export function App() {
       return true;
     }
     return active === "Models" && job.type === "model_download";
-  }
-
-  async function withCharacterApi(callback) {
-    if (!activeProject) {
-      setError("Create or open a project first.");
-      return null;
-    }
-    try {
-      const result = await callback(activeProject.id);
-      setError("");
-      return result;
-    } catch (err) {
-      setError(err.message);
-      return null;
-    }
-  }
-
-  async function createCharacter(payload) {
-    return withCharacterApi(async (projectId) => {
-      const created = await apiFetch(`/api/v1/projects/${projectId}/characters`, token, {
-        method: "POST",
-        body: JSON.stringify(payload),
-      });
-      setCharacters((items) => [created, ...items.filter((item) => item.id !== created.id)]);
-      return created;
-    });
-  }
-
-  async function updateCharacter(characterId, changes) {
-    return withCharacterApi(async (projectId) => {
-      const updated = await apiFetch(`/api/v1/projects/${projectId}/characters/${characterId}`, token, {
-        method: "PATCH",
-        body: JSON.stringify(changes),
-      });
-      setCharacters((items) => items.map((item) => (item.id === updated.id ? updated : item)));
-      return updated;
-    });
-  }
-
-  async function archiveCharacter(characterId) {
-    return withCharacterApi(async (projectId) => {
-      await apiFetch(`/api/v1/projects/${projectId}/characters/${characterId}/archive`, token, { method: "POST" });
-      setCharacters((items) => items.filter((item) => item.id !== characterId));
-      return { id: characterId, status: "archived" };
-    });
-  }
-
-  async function addCharacterReference(characterId, payload) {
-    return withCharacterApi(async (projectId) => {
-      const updated = await apiFetch(`/api/v1/projects/${projectId}/characters/${characterId}/references`, token, {
-        method: "POST",
-        body: JSON.stringify(payload),
-      });
-      setCharacters((items) => items.map((item) => (item.id === updated.id ? updated : item)));
-      return updated;
-    });
-  }
-
-  async function updateCharacterReference(characterId, assetId, changes) {
-    return withCharacterApi(async (projectId) => {
-      const updated = await apiFetch(`/api/v1/projects/${projectId}/characters/${characterId}/references/${assetId}`, token, {
-        method: "PATCH",
-        body: JSON.stringify(changes),
-      });
-      setCharacters((items) => items.map((item) => (item.id === updated.id ? updated : item)));
-      return updated;
-    });
-  }
-
-  async function removeCharacterReference(characterId, assetId) {
-    return withCharacterApi(async (projectId) => {
-      const updated = await apiFetch(`/api/v1/projects/${projectId}/characters/${characterId}/references/${assetId}`, token, {
-        method: "DELETE",
-      });
-      setCharacters((items) => items.map((item) => (item.id === updated.id ? updated : item)));
-      return updated;
-    });
-  }
-
-  async function createCharacterLook(characterId, payload) {
-    return withCharacterApi(async (projectId) => {
-      const updated = await apiFetch(`/api/v1/projects/${projectId}/characters/${characterId}/looks`, token, {
-        method: "POST",
-        body: JSON.stringify(payload),
-      });
-      setCharacters((items) => items.map((item) => (item.id === updated.id ? updated : item)));
-      return updated;
-    });
-  }
-
-  async function updateCharacterLook(characterId, lookId, changes) {
-    return withCharacterApi(async (projectId) => {
-      const updated = await apiFetch(`/api/v1/projects/${projectId}/characters/${characterId}/looks/${lookId}`, token, {
-        method: "PATCH",
-        body: JSON.stringify(changes),
-      });
-      setCharacters((items) => items.map((item) => (item.id === updated.id ? updated : item)));
-      return updated;
-    });
-  }
-
-  async function deleteCharacterLook(characterId, lookId) {
-    return withCharacterApi(async (projectId) => {
-      const updated = await apiFetch(`/api/v1/projects/${projectId}/characters/${characterId}/looks/${lookId}`, token, {
-        method: "DELETE",
-      });
-      setCharacters((items) => items.map((item) => (item.id === updated.id ? updated : item)));
-      return updated;
-    });
-  }
-
-  async function attachCharacterLora(characterId, payload) {
-    return withCharacterApi(async (projectId) => {
-      const updated = await apiFetch(`/api/v1/projects/${projectId}/characters/${characterId}/loras`, token, {
-        method: "POST",
-        body: JSON.stringify(payload),
-      });
-      setCharacters((items) => items.map((item) => (item.id === updated.id ? updated : item)));
-      return updated;
-    });
-  }
-
-  async function updateCharacterLora(characterId, linkId, changes) {
-    return withCharacterApi(async (projectId) => {
-      const updated = await apiFetch(`/api/v1/projects/${projectId}/characters/${characterId}/loras/${linkId}`, token, {
-        method: "PATCH",
-        body: JSON.stringify(changes),
-      });
-      setCharacters((items) => items.map((item) => (item.id === updated.id ? updated : item)));
-      return updated;
-    });
-  }
-
-  async function detachCharacterLora(characterId, linkId) {
-    return withCharacterApi(async (projectId) => {
-      const updated = await apiFetch(`/api/v1/projects/${projectId}/characters/${characterId}/loras/${linkId}`, token, {
-        method: "DELETE",
-      });
-      setCharacters((items) => items.map((item) => (item.id === updated.id ? updated : item)));
-      return updated;
-    });
-  }
-
-  async function createCharacterTestJob(characterId, payload) {
-    return withCharacterApi(async (projectId) => {
-      await apiFetch(`/api/v1/projects/${projectId}/characters/${characterId}/test-jobs`, token, {
-        method: "POST",
-        body: JSON.stringify({ ...payload, requestedGpu }),
-      });
-      setActiveView("Queue");
-      refreshData();
-      return { id: characterId, status: "queued" };
-    });
   }
 
   async function createVideoJob(payload, options = {}) {
