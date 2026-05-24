@@ -2,6 +2,7 @@ import React from "react";
 import { AssetMedia, assetUrl } from "./assetMedia.jsx";
 import { DocumentView } from "./DocumentView.jsx";
 import { Icon } from "./Icons.jsx";
+import { Modal } from "./Modal.jsx";
 
 // Reopens a saved interleaved document: the asset's file points to the segments
 // JSON in assets/documents/, fetched here (served like any project file).
@@ -285,12 +286,11 @@ export function FullscreenPreview({
   updateAssetStatus,
 }) {
   return (
-    <div className="modal-backdrop" role="dialog" aria-modal="true">
-      <div className="preview-modal">
-        <button className="modal-close" onClick={onClose} type="button">
-          Close
-        </button>
-        <div className="preview-modal-stage">
+    <Modal className="preview-modal" label="Asset preview" onClose={onClose}>
+      <button className="modal-close" onClick={onClose} type="button">
+        Close
+      </button>
+      <div className="preview-modal-stage">
           <button
             aria-label="Previous asset"
             className="preview-nav-button previous"
@@ -334,7 +334,6 @@ export function FullscreenPreview({
             )}
           </div>
         </footer>
-      </div>
-    </div>
+    </Modal>
   );
 }

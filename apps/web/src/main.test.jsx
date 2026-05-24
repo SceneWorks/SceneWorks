@@ -3,7 +3,7 @@ import { createRoot } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { App, eventUrl } from "./main.jsx";
 import { AssetPickerField } from "./components/AssetPicker.jsx";
-import { AssetDetail } from "./components/assetPanels.jsx";
+import { AssetDetail, FullscreenPreview } from "./components/assetPanels.jsx";
 import { liveElapsedSeconds } from "./formatting.js";
 import { CharacterStudio } from "./screens/CharacterStudio.jsx";
 import { ImageStudio } from "./screens/ImageStudio.jsx";
@@ -1728,6 +1728,46 @@ describe("SceneWorks app shell", () => {
     });
 
     expect(container.querySelector('[role="dialog"]')).toBeNull();
+  });
+
+  it("dismisses FullscreenPreview via Escape and backdrop click", async () => {
+    const onClose = vi.fn();
+    const noop = () => {};
+    const asset = {
+      id: "asset-a",
+      displayName: "Plate",
+      type: "image",
+      status: {},
+      file: { path: "assets/images/plate.png" },
+    };
+
+    root = createRoot(container);
+    await act(async () => {
+      root.render(
+        <FullscreenPreview
+          asset={asset}
+          deleteAsset={noop}
+          nextAsset={null}
+          onClose={onClose}
+          onPreviewAsset={noop}
+          previousAsset={null}
+          purgeAsset={noop}
+          updateAssetStatus={noop}
+        />,
+      );
+    });
+
+    expect(container.querySelector('[role="dialog"]')).not.toBeNull();
+
+    await act(async () => {
+      container.querySelector('[role="dialog"]').dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+    });
+    expect(onClose).toHaveBeenCalledTimes(1);
+
+    await act(async () => {
+      container.querySelector(".modal-backdrop").dispatchEvent(new MouseEvent("mousedown", { bubbles: true }));
+    });
+    expect(onClose).toHaveBeenCalledTimes(2);
   });
 
   it("keeps in-progress picker selection across parent rerenders", async () => {

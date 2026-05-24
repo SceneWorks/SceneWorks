@@ -134,8 +134,8 @@ export function SettingsScreen() {
         <h3>Detected GPU</h3>
         {gpu?.devices?.length ? (
           <ul className="settings-list">
-            {gpu.devices.map((device, index) => (
-              <li key={index}>{device}</li>
+            {gpu.devices.map((device) => (
+              <li key={device}>{device}</li>
             ))}
           </ul>
         ) : (

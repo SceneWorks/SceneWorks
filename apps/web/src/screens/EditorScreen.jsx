@@ -82,6 +82,12 @@ export function EditorScreen({
     video.pause();
   }, [isPlaying, selectedAsset?.id]);
 
+  // Keep the global keydown listener mounted once and read live editor state
+  // through a ref, so undo/redo/delete don't re-bind window on every history
+  // or selection change.
+  const shortcutStateRef = useRef({ undo, redo, removeSelectedItem, selectedItemId });
+  shortcutStateRef.current = { undo, redo, removeSelectedItem, selectedItemId };
+
   useEffect(() => {
     function onKeyDown(event) {
       const target = event.target;
@@ -89,6 +95,7 @@ export function EditorScreen({
       if (isTyping) {
         return;
       }
+      const { undo, redo, removeSelectedItem, selectedItemId } = shortcutStateRef.current;
       if (event.code === "Space") {
         event.preventDefault();
         setIsPlaying((value) => !value);
@@ -114,7 +121,7 @@ export function EditorScreen({
     }
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, [activeTimeline, history, future, selectedItemId]);
+  }, []);
 
   async function submitNewTimeline(event) {
     event.preventDefault();

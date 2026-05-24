@@ -1,5 +1,6 @@
-import React, { useEffect, useMemo, useRef, useState } from "react";
+import React, { useEffect, useMemo, useState } from "react";
 import { AssetThumbnail, assetCanRenderAsImage, assetCanRenderAsVideo } from "./assetMedia.jsx";
+import { Modal } from "./Modal.jsx";
 
 const categoryOptions = [
   ["all", "All"],
@@ -184,15 +185,10 @@ export function AssetPickerModal({ assets, initialSelectedIds, multiple = false,
   const [category, setCategory] = useState("all");
   const [query, setQuery] = useState("");
   const [selectedIds, setSelectedIds] = useState(() => normalizeSelection(initialSelectedIds, assets, multiple));
-  const dialogRef = useRef(null);
 
   useEffect(() => {
     setSelectedIds((ids) => normalizeSelection(ids, assets, multiple));
   }, [assets, multiple]);
-
-  useEffect(() => {
-    dialogRef.current?.focus();
-  }, []);
 
   const categoryCounts = useMemo(() => {
     return Object.fromEntries(categoryOptions.map(([key]) => [key, assets.filter((asset) => categoryMatches(asset, key)).length]));
@@ -215,22 +211,7 @@ export function AssetPickerModal({ assets, initialSelectedIds, multiple = false,
   }
 
   return (
-    <div className="modal-backdrop" onMouseDown={(event) => event.target === event.currentTarget && onCancel()}>
-      <section
-        aria-labelledby="asset-picker-title"
-        aria-modal="true"
-        className="asset-picker-modal"
-        onKeyDown={(event) => {
-          if (event.key === "Escape") {
-            event.preventDefault();
-            onCancel();
-          }
-        }}
-        onMouseDown={(event) => event.stopPropagation()}
-        ref={dialogRef}
-        role="dialog"
-        tabIndex={-1}
-      >
+    <Modal className="asset-picker-modal" labelledBy="asset-picker-title" onClose={onCancel}>
         <header className="asset-picker-modal-head">
           <div>
             <p className="eyebrow">Library</p>
@@ -299,7 +280,6 @@ export function AssetPickerModal({ assets, initialSelectedIds, multiple = false,
             </button>
           </div>
         </footer>
-      </section>
-    </div>
+    </Modal>
   );
 }
