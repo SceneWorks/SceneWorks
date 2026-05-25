@@ -472,94 +472,6 @@ class ImageAssetWriter:
             "assetWrites": asset_writes,
         }
 
-    def persist_images_directly(
-        self,
-        *,
-        settings: WorkerSettings,
-        job: dict[str, Any],
-        images: list[Image.Image],
-        adapter_id: str,
-        raw_settings: dict[str, Any],
-        cancel_requested: CancelCallback = lambda: False,
-    ) -> dict[str, Any]:
-        """Build + write the sidecar/generation-set/recipe and index project.db for
-        a fixed set of images, returning the built asset records.
-
-        Story 1656 moves the main image-generate path to the Rust project-store
-        writer (``write_incremental_outputs`` now ships flat facts). The
-        interleave/document path still needs the built image assets synchronously
-        (to compose the document segments + sidecar) and is migrated in a later
-        slice, so it keeps writing its embedded images here for now. This mirrors
-        the pre-migration ``write_incremental_outputs`` behavior."""
-        request = image_request_from_job(job)
-        project_path = shared_find_project_path(settings.data_dir / "recent-projects.json", request.project_id)
-        for folder in ("assets/images", "generation-sets", "recipes"):
-            (project_path / folder).mkdir(parents=True, exist_ok=True)
-
-        created_at = utc_now()
-        generation_set_id = f"genset_{uuid4().hex}"
-        model_target = MODEL_TARGETS.get(request.model, MODEL_TARGETS["z_image_turbo"])
-        prompt_slug = slugify(request.prompt, fallback="image", max_length=42)
-        date_slug = created_at[:10]
-        images_dir = project_path / "assets" / "images" / generation_set_id
-        images_dir.mkdir(parents=True, exist_ok=True)
-        image_count = len(images)
-        assets = []
-
-        generation_set = {
-            "schemaVersion": 1,
-            "id": generation_set_id,
-            "projectId": request.project_id,
-            "jobId": job["id"],
-            "mode": request.mode,
-            "model": request.model,
-            "prompt": request.prompt,
-            "negativePrompt": request.negative_prompt,
-            "count": image_count,
-            "createdAt": created_at,
-        }
-        write_json(project_path / "generation-sets" / f"{generation_set_id}.json", generation_set)
-
-        for index, image in enumerate(images):
-            if cancel_requested():
-                raise InterruptedError("Image generation canceled by user.")
-            asset_id = f"asset_{uuid4().hex}"
-            seed = resolve_seed(request.seed, request.prompt, index, request.seeds)
-            filename = f"{date_slug}_{request.model}_{prompt_slug}_{index + 1:04d}.png"
-            media_rel = f"assets/images/{generation_set_id}/{filename}"
-            media_path = project_path / media_rel
-            sidecar_path = media_path.with_suffix(".sceneworks.json")
-            image.save(media_path, "PNG")
-            asset = build_asset_sidecar(
-                asset_id=asset_id,
-                project_id=request.project_id,
-                generation_set_id=generation_set_id,
-                request=request,
-                job_id=job["id"],
-                media_rel=media_rel,
-                created_at=created_at,
-                seed=seed,
-                index=index,
-                width=image.width,
-                height=image.height,
-                model_target=model_target,
-                adapter_id=adapter_id,
-                raw_settings=raw_settings,
-            )
-            write_json(sidecar_path, asset)
-            write_json(project_path / "recipes" / f"{asset_id}.recipe.json", asset["recipe"])
-            index_asset(project_path, asset, sidecar_path)
-            assets.append(asset)
-
-        return {
-            "generationSetId": generation_set_id,
-            "assetIds": [asset["id"] for asset in assets],
-            "assets": assets,
-            "expectedCount": image_count,
-            "adapter": adapter_id,
-            "model": request.model,
-        }
-
 
 class ZImageDiffusersAdapter:
     id = "z_image_diffusers"
@@ -2210,19 +2122,21 @@ class SenseNovaU1Adapter:
     @staticmethod
     def _build_interleaved_segments(
         generated_text: str,
-        image_assets: list[dict[str, Any]],
+        image_writes: list[dict[str, Any]],
     ) -> list[dict[str, Any]]:
         """Split the model output on its inline ``<image>`` markers and slot the
-        generated image assets in order: text[0], image[0], text[1], image[1], …."""
+        generated image assets in order: text[0], image[0], text[1], image[1], ….
+        Reads the worker-reported image facts (assetId + mediaPath); Rust builds
+        the image sidecars from the same facts (story 1656)."""
         parts = (generated_text or "").split("<image>")
         segments: list[dict[str, Any]] = []
         for index, part in enumerate(parts):
             text = part.strip()
             if text:
                 segments.append({"type": "text", "text": text})
-            if index < len(image_assets):
-                asset = image_assets[index]
-                segments.append({"type": "image", "assetId": asset["id"], "path": asset["file"]["path"]})
+            if index < len(image_writes):
+                write = image_writes[index]
+                segments.append({"type": "image", "assetId": write["assetId"], "path": write["mediaPath"]})
         return segments
 
     def _write_interleaved_document(
@@ -2243,106 +2157,80 @@ class SenseNovaU1Adapter:
         project_path = shared_find_project_path(settings.data_dir / "recent-projects.json", project_id)
         (project_path / "assets" / "documents").mkdir(parents=True, exist_ok=True)
 
-        # Generated images persist as ordinary image assets (individually browsable);
-        # the document references them in order.
-        image_assets: list[dict[str, Any]] = []
-        generation_set_id: str | None = None
-        image_asset_ids: list[str] = []
-        if images:
-            image_result = ImageAssetWriter().persist_images_directly(
-                settings=settings,
-                job=job,
-                images=images,
-                adapter_id=self.id,
-                cancel_requested=cancel_requested,
-                raw_settings={**raw_settings, "interleaved": True},
-            )
-            image_assets = image_result.get("assets", [])
-            generation_set_id = image_result.get("generationSetId")
-            image_asset_ids = list(image_result.get("assetIds", []))
+        # Generated images persist as ordinary image assets — the worker saves the
+        # PNG bytes + reports facts, and the Rust API builds + indexes their
+        # sidecars (story 1656). The document references them in order.
+        image_result = ImageAssetWriter().write_outputs(
+            settings=settings,
+            job=job,
+            images=images,
+            adapter_id=self.id,
+            progress=lambda *_args, **_kwargs: None,
+            cancel_requested=cancel_requested,
+            raw_settings={**raw_settings, "interleaved": True},
+        )
+        image_writes = image_result.get("assetWrites", [])
+        generation_set_id = image_result.get("generationSetId")
+        generation_set = image_result.get("generationSet")
+        image_asset_ids = [write["assetId"] for write in image_writes]
 
-        segments = self._build_interleaved_segments(generated_text, image_assets)
+        segments = self._build_interleaved_segments(generated_text, image_writes)
 
         created_at = utc_now()
         document_id = f"doc_{uuid4().hex}"
         media_rel = f"assets/documents/{document_id}.json"
-        document = {
-            "schemaVersion": 1,
-            "id": document_id,
-            "projectId": project_id,
-            "jobId": job["id"],
-            "model": model_id,
-            "prompt": prompt,
-            "createdAt": created_at,
-            "segments": segments,
-        }
-        write_json(project_path / media_rel, document)
-
-        asset_id = f"asset_{uuid4().hex}"
-        sidecar = {
-            "schemaVersion": 1,
-            "id": asset_id,
-            "projectId": project_id,
-            "generationSetId": generation_set_id,
-            "type": "document",
-            "displayName": prompt[:56] or "Interleaved document",
-            "createdAt": created_at,
-            "file": {
-                "path": media_rel,
-                "mimeType": "application/json",
-                "width": None,
-                "height": None,
-                "duration": None,
-                "fps": None,
-            },
-            "status": {"favorite": False, "rating": 0, "rejected": False, "trashed": False},
-            "recipe": {
-                "mode": "interleave",
-                "model": model_id,
-                "adapter": self.id,
-                "prompt": prompt,
-                "negativePrompt": "",
-                "seed": int(seed),
-                "loras": [],
-                "normalizedSettings": {
-                    "maxImages": raw_settings.get("maxImages"),
-                    "resolution": raw_settings.get("resolution"),
-                    "imageCount": len(image_assets),
-                },
-                "rawAdapterSettings": raw_settings,
-            },
-            "lineage": {
-                "parents": list(image_asset_ids),
-                "sourceAssetId": None,
-                "sourceTimestamp": None,
-                "jobId": job["id"],
-            },
-        }
-        sidecar_path = (project_path / media_rel).with_suffix(".sceneworks.json")
-        write_json(sidecar_path, sidecar)
-        index_asset(project_path, sidecar, sidecar_path)
-
-        progress(
-            "saving",
-            "saving",
-            1.0,
-            "Interleaved document saved.",
+        # The worker saves the document body (the "media"); the Rust API builds the
+        # document sidecar + indexes project.db from the document fact below.
+        write_json(
+            project_path / media_rel,
             {
-                "documentId": document_id,
-                "documentAssetId": asset_id,
-                "assetIds": [asset_id, *image_asset_ids],
-                "imageAssetIds": image_asset_ids,
+                "schemaVersion": 1,
+                "id": document_id,
+                "projectId": project_id,
+                "jobId": job["id"],
+                "model": model_id,
+                "prompt": prompt,
+                "createdAt": created_at,
                 "segments": segments,
             },
         )
-        return {
+
+        asset_id = f"asset_{uuid4().hex}"
+        document_write = {
+            "type": "document",
+            "assetId": asset_id,
+            "mediaPath": media_rel,
+            "mimeType": "application/json",
+            "displayName": prompt[:56] or "Interleaved document",
+            "createdAt": created_at,
+            "mode": "interleave",
+            "model": model_id,
+            "adapter": self.id,
+            "prompt": prompt,
+            "negativePrompt": "",
+            "seed": int(seed),
+            "loras": [],
+            "rawAdapterSettings": raw_settings,
+            "maxImages": raw_settings.get("maxImages"),
+            "resolution": raw_settings.get("resolution"),
+            "imageCount": len(image_asset_ids),
+            "parents": list(image_asset_ids),
+        }
+        asset_writes = [*image_writes, document_write]
+        result = {
             "documentId": document_id,
             "documentAssetId": asset_id,
             "imageAssetIds": image_asset_ids,
             "segments": segments,
             "model": model_id,
             "realModelInference": True,
+            "generationSetId": generation_set_id,
+            "expectedCount": len(asset_writes),
+            "generationSet": generation_set,
+            "assetWrites": asset_writes,
         }
+        progress("saving", "saving", 1.0, "Interleaved document saved.", result)
+        return result
 
 
 def create_image_adapter(

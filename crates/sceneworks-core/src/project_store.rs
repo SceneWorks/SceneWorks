@@ -2090,10 +2090,10 @@ fn build_generated_asset_sidecar(
                 "image".to_owned()
             }
         });
-    let (file, recipe, lineage) = if media_type == "video" {
-        build_video_sidecar_parts(job_id, fact)
-    } else {
-        build_image_sidecar_parts(job_id, fact)
+    let (file, recipe, lineage) = match media_type.as_str() {
+        "video" => build_video_sidecar_parts(job_id, fact),
+        "document" => build_document_sidecar_parts(job_id, fact),
+        _ => build_image_sidecar_parts(job_id, fact),
     };
     json!({
         "schemaVersion": 1,
@@ -2234,6 +2234,44 @@ fn build_video_sidecar_parts(job_id: &str, fact: &Value) -> (Value, Value, Value
         "replacementMode": get("replacementMode"),
         "sourceTimestamp": Value::Null,
         "timeline": fact.get("timelineContext").cloned().unwrap_or_else(|| json!({})),
+        "jobId": job_id,
+    });
+    (file, recipe, lineage)
+}
+
+/// `(file, recipe, lineage)` for an interleaved document asset (story 1656,
+/// slice 4). The worker writes the document body JSON (the "media"); Rust builds
+/// this sidecar from the document fact. The recipe mode is `interleave` and
+/// lineage parents are the embedded image asset ids.
+fn build_document_sidecar_parts(job_id: &str, fact: &Value) -> (Value, Value, Value) {
+    let get = |key: &str| fact.get(key).cloned().unwrap_or(Value::Null);
+    let file = json!({
+        "path": get("mediaPath"),
+        "mimeType": get("mimeType"),
+        "width": Value::Null,
+        "height": Value::Null,
+        "duration": Value::Null,
+        "fps": Value::Null,
+    });
+    let recipe = json!({
+        "mode": get("mode"),
+        "model": get("model"),
+        "adapter": get("adapter"),
+        "prompt": get("prompt"),
+        "negativePrompt": get("negativePrompt"),
+        "seed": get("seed"),
+        "loras": fact.get("loras").cloned().unwrap_or_else(|| json!([])),
+        "normalizedSettings": {
+            "maxImages": get("maxImages"),
+            "resolution": get("resolution"),
+            "imageCount": get("imageCount"),
+        },
+        "rawAdapterSettings": fact.get("rawAdapterSettings").cloned().unwrap_or_else(|| json!({})),
+    });
+    let lineage = json!({
+        "parents": fact.get("parents").cloned().unwrap_or_else(|| json!([])),
+        "sourceAssetId": Value::Null,
+        "sourceTimestamp": Value::Null,
         "jobId": job_id,
     });
     (file, recipe, lineage)
@@ -2696,6 +2734,51 @@ mod tests {
         assert_eq!(normalized["replacementActive"], json!(true));
         assert_eq!(normalized["maskMode"], json!("segmentation"));
         assert_eq!(normalized["personDetectionActive"], json!(false));
+    }
+
+    #[test]
+    fn build_generated_asset_sidecar_assembles_document() {
+        // sc-1656 slice 4: interleaved document asset. The worker writes the body
+        // JSON; Rust builds this sidecar — type document, mimeType
+        // application/json, recipe.mode interleave, lineage.parents = image ids.
+        let fact = json!({
+            "type": "document",
+            "assetId": "asset-doc",
+            "mediaPath": "assets/documents/doc_1.json",
+            "mimeType": "application/json",
+            "displayName": "An illustrated guide",
+            "createdAt": "2026-05-17T00:00:00Z",
+            "mode": "interleave",
+            "model": "sensenova_u1_8b",
+            "adapter": "sensenova_u1",
+            "prompt": "An illustrated guide",
+            "negativePrompt": "",
+            "seed": 7,
+            "loras": [],
+            "rawAdapterSettings": {"maxImages": 6},
+            "maxImages": 6,
+            "resolution": "2048x1152",
+            "imageCount": 2,
+            "parents": ["asset-img-1", "asset-img-2"],
+        });
+        let asset = build_generated_asset_sidecar("project-1", "job-1", "genset-1", &fact);
+        assert_eq!(asset["type"], json!("document"));
+        assert_eq!(asset["file"]["mimeType"], json!("application/json"));
+        assert_eq!(asset["file"]["path"], json!("assets/documents/doc_1.json"));
+        assert_eq!(asset["recipe"]["mode"], json!("interleave"));
+        assert_eq!(
+            asset["recipe"]["normalizedSettings"]["imageCount"],
+            json!(2)
+        );
+        assert_eq!(
+            asset["recipe"]["normalizedSettings"]["resolution"],
+            json!("2048x1152")
+        );
+        assert_eq!(
+            asset["lineage"]["parents"],
+            json!(["asset-img-1", "asset-img-2"])
+        );
+        assert_eq!(asset["generationSetId"], json!("genset-1"));
     }
 
     #[test]
