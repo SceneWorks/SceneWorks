@@ -107,7 +107,6 @@ from scene_worker.video_adapters import (
     MlxVideoAdapter,
     VIDEO_MODEL_TARGETS,
     _PENDING_LTX_LORAS,
-    build_video_asset_sidecar,
     character_reference_images,
     create_video_adapter,
     evenly_spaced_indices,
@@ -118,6 +117,7 @@ from scene_worker.video_adapters import (
     load_seekable_image_frame,
     person_track_masks,
     safe_download_dir,
+    video_generation_result,
     video_request_from_job,
 )
 
@@ -3973,13 +3973,13 @@ def test_native_ltx_mocked_run_writes_scene_video_asset(monkeypatch, tmp_path):
         cancel_requested=lambda: False,
     )
 
-    asset = result["assets"][0]
-    media_path = project_path / asset["file"]["path"]
+    asset = result["assetWrites"][0]
+    media_path = project_path / asset["mediaPath"]
     assert media_path.exists()
     assert result["adapter"] == "ltx_pipelines"
-    assert asset["recipe"]["adapter"] == "ltx_pipelines"
-    assert asset["recipe"]["rawAdapterSettings"]["pipeline"] == "ltx_pipelines.ti2vid_two_stages"
-    assert asset["recipe"]["rawAdapterSettings"]["mockedNativeInference"] is True
+    assert asset["adapter"] == "ltx_pipelines"
+    assert asset["rawAdapterSettings"]["pipeline"] == "ltx_pipelines.ti2vid_two_stages"
+    assert asset["rawAdapterSettings"]["mockedNativeInference"] is True
     assert adapter.loaded_models() == ["ltx_2_3", "ltx_pipelines.ti2vid_two_stages"]
 
 
@@ -4077,8 +4077,8 @@ def test_native_ltx_text_to_video_uses_ltx_pipeline_and_writes_mp4(monkeypatch, 
         cancel_requested=lambda: False,
     )
 
-    asset = result["assets"][0]
-    media_path = project_path / asset["file"]["path"]
+    asset = result["assetWrites"][0]
+    media_path = project_path / asset["mediaPath"]
     assert media_path.read_bytes() == b"mp4"
     assert calls["init"]["checkpoint_path"] == str(checkpoint)
     assert calls["init"]["distilled_lora"] == [(str(lora), 0.6, {"rename": "map"})]
@@ -4093,9 +4093,9 @@ def test_native_ltx_text_to_video_uses_ltx_pipeline_and_writes_mp4(monkeypatch, 
     assert calls["encode"]["video"] == ["video-chunk"]
     assert calls["encode"]["audio"] == "audio-track"
     assert calls["encode"]["video_chunks_number"] == 2
-    assert asset["file"]["mimeType"] == "video/mp4"
-    assert asset["recipe"]["rawAdapterSettings"]["realModelInference"] is True
-    assert asset["recipe"]["rawAdapterSettings"]["mockedNativeInference"] is False
+    assert asset["mimeType"] == "video/mp4"
+    assert asset["rawAdapterSettings"]["realModelInference"] is True
+    assert asset["rawAdapterSettings"]["mockedNativeInference"] is False
     assert result["requirements"]["mockedInference"] is False
 
 
@@ -4267,8 +4267,8 @@ def test_native_ltx_image_to_video_passes_source_image_conditioning(monkeypatch,
     assert image_condition.path == str(project_path / image_rel)
     assert image_condition.frame_idx == 0
     assert image_condition.strength == 0.7
-    assert result["assets"][0]["lineage"]["sourceAssetId"] == "asset-source"
-    assert result["assets"][0]["recipe"]["rawAdapterSettings"]["realModelInference"] is True
+    assert result["assetWrites"][0]["sourceAssetId"] == "asset-source"
+    assert result["assetWrites"][0]["rawAdapterSettings"]["realModelInference"] is True
 
 
 def test_native_ltx_image_to_video_falls_back_without_ic_lora(monkeypatch, tmp_path):
@@ -4512,7 +4512,7 @@ def test_native_ltx_extend_clip_uses_ic_lora_video_conditioning(monkeypatch, tmp
     assert calls["run"]["video_conditioning"] == [(str(project_path / video_rel), 0.85)]
     assert calls["run"]["conditioning_attention_strength"] == 0.9
     assert result["requirements"]["pipeline"] == "ltx_pipelines.ic_lora"
-    assert result["assets"][0]["lineage"]["sourceClipAssetId"] == "asset-source-video"
+    assert result["assetWrites"][0]["sourceClipAssetId"] == "asset-source-video"
 
 
 def test_native_ltx_cleanup_deletes_temp_output_and_evicts_pipeline(monkeypatch, tmp_path):
@@ -4801,7 +4801,11 @@ def test_character_image_recipe_marks_conditioning_inactive():
     assert normalized["characterConditioningActive"] is False
 
 
-def test_replace_person_video_sidecar_preserves_lineage():
+def test_replace_person_video_result_carries_lineage_facts():
+    # sc-1656 slice 3: the worker reports flat video facts and the Rust API builds
+    # the sidecar. Pin the facts the worker emits for a replace_person job — the
+    # honest personDetection/replacement defaults now live in the Rust builder
+    # (project_store::build_generated_asset_sidecar), tested Rust-side.
     job = {
         "id": "job-1",
         "payload": {
@@ -4819,30 +4823,29 @@ def test_replace_person_video_sidecar_preserves_lineage():
     }
     request = video_request_from_job(job)
 
-    asset = build_video_asset_sidecar(
-        asset_id="asset-output",
-        project_id="project-1",
-        generation_set_id="genset-1",
+    result = video_generation_result(
         request=request,
-        job_id="job-1",
-        media_rel="assets/videos/replacement.webp",
-        created_at="2026-05-17T00:00:00Z",
-        seed=44,
         target=VIDEO_MODEL_TARGETS["wan_2_2"],
         adapter_id="wan_video",
+        asset_id="asset-output",
+        generation_set_id="genset-1",
+        media_rel="assets/videos/replacement.mp4",
+        seed=44,
+        created_at="2026-05-17T00:00:00Z",
         mime_type="video/mp4",
         raw_settings={},
     )
-
-    assert asset["recipe"]["mode"] == "replace_person"
-    assert asset["file"]["mimeType"] == "video/mp4"
-    assert asset["recipe"]["normalizedSettings"]["personTrackId"] == "track-1"
-    assert asset["recipe"]["normalizedSettings"]["replacementMode"] == "full_person_keep_outfit"
-    assert asset["recipe"]["normalizedSettings"]["personDetectionActive"] is False
-    assert asset["recipe"]["normalizedSettings"]["personTrackingActive"] is False
-    assert asset["recipe"]["normalizedSettings"]["replacementActive"] is False
-    assert asset["lineage"]["sourceClipAssetId"] == "asset-video"
-    assert asset["lineage"]["characterId"] == "character-1"
+    fact = result["assetWrites"][0]
+    assert fact["type"] == "video"
+    assert fact["mode"] == "replace_person"
+    assert fact["mimeType"] == "video/mp4"
+    assert fact["personTrackId"] == "track-1"
+    assert fact["replacementMode"] == "full_person_keep_outfit"
+    assert fact["sourceClipAssetId"] == "asset-video"
+    assert fact["characterId"] == "character-1"
+    # No real masked-control path ran here, so the worker reports no
+    # replacementStatus; the Rust builder fills the honest false defaults.
+    assert "replacementStatus" not in fact
 
 
 def test_build_sidecar_outputs_match_cross_language_schema_contract():
@@ -4884,33 +4887,11 @@ def test_build_sidecar_outputs_match_cross_language_schema_contract():
         adapter_id="procedural_preview",
         raw_settings={},
     )
-    video_asset = build_video_asset_sidecar(
-        asset_id="asset-video",
-        project_id="project-1",
-        generation_set_id="genset-1",
-        request=video_request_from_job(
-            {
-                "id": "job-1",
-                "payload": {
-                    "projectId": "project-1",
-                    "mode": "text_to_video",
-                    "prompt": "city",
-                    "model": "wan_2_2",
-                    "advanced": {},
-                },
-            }
-        ),
-        job_id="job-1",
-        media_rel="assets/videos/city.mp4",
-        created_at="2026-05-17T00:00:00Z",
-        seed=7,
-        target=VIDEO_MODEL_TARGETS["wan_2_2"],
-        adapter_id="wan_video",
-        mime_type="video/mp4",
-        raw_settings={},
-    )
 
-    for fixture_name, asset in (("imageAsset", image_asset), ("videoAsset", video_asset)):
+    # The video sidecar schema moved to Rust in slice 3 (build_video_sidecar_parts);
+    # it is pinned by contract_roundtrip.rs + the Rust builder unit tests. The image
+    # builder is still used by the interleave path (persist_images_directly).
+    for fixture_name, asset in (("imageAsset", image_asset),):
         missing = [key for key in required[fixture_name] if key not in asset]
         assert not missing, f"{fixture_name} is missing contract keys: {missing}"
         recipe_missing = [key for key in required["recipe"] if key not in asset["recipe"]]
