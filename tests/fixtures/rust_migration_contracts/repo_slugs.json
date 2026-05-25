@@ -1,0 +1,36 @@
+{
+  "schemaVersion": 1,
+  "comment": "Cross-language drift guard (sc-1667) for the pure repo->directory slug string ops shared by the Rust API, the Rust CPU worker, and the Python GPU worker. These are the only genuinely de-duplicable part of the HF path math; runtime cache/snapshot resolution must stay in the worker (snapshot dirs only exist post-download and depend on the worker filesystem). safeDownloadDir = managed models dir name (data_dir/models/<X>): runs of unsafe chars collapse to a single '__', trim '_', empty -> 'download'. safeRepoDirName = the '<X>' in the HF hub cache dir 'models--<X>': every unsafe char -> '--', trim '-', empty -> null. Unsafe = anything not [A-Za-z0-9._-]. Repo ids are ASCII (Python uses Unicode isalnum, Rust uses is_ascii_alphanumeric; they only diverge on non-ASCII, which HF repo ids never contain), so cases stay ASCII.",
+  "cases": [
+    {
+      "repo": "Lightricks/LTX-2.3",
+      "safeDownloadDir": "Lightricks__LTX-2.3",
+      "safeRepoDirName": "Lightricks--LTX-2.3"
+    },
+    {
+      "repo": "google/gemma-3-12b-it-qat-q4_0-unquantized",
+      "safeDownloadDir": "google__gemma-3-12b-it-qat-q4_0-unquantized",
+      "safeRepoDirName": "google--gemma-3-12b-it-qat-q4_0-unquantized"
+    },
+    {
+      "repo": "owner/model-name",
+      "safeDownloadDir": "owner__model-name",
+      "safeRepoDirName": "owner--model-name"
+    },
+    {
+      "repo": "owner//repo",
+      "safeDownloadDir": "owner__repo",
+      "safeRepoDirName": "owner----repo"
+    },
+    {
+      "repo": "/leading/trailing/",
+      "safeDownloadDir": "leading__trailing",
+      "safeRepoDirName": "leading--trailing"
+    },
+    {
+      "repo": "///",
+      "safeDownloadDir": "download",
+      "safeRepoDirName": null
+    }
+  ]
+}

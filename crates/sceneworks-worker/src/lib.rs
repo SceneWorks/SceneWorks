@@ -3548,8 +3548,12 @@ fn huggingface_hub_cache_dir(data_dir: &Path) -> PathBuf {
     data_dir.join("cache").join("huggingface").join("hub")
 }
 
-fn huggingface_repo_cache_path(data_dir: &Path, repo: &str) -> Option<PathBuf> {
-    let cache_dir = huggingface_hub_cache_dir(data_dir);
+/// The `<X>` in Hugging Face hub's `models--<X>` cache directory name: every
+/// character outside `[A-Za-z0-9._-]` becomes `--`, then surrounding `-` are
+/// trimmed. `None` when nothing survives. Kept byte-identical to the Python
+/// worker (`hf_cache.safe_repo_dir_name`) and the Rust API — pinned by the
+/// `repo_slugs.json` cross-language contract (story 1667).
+fn safe_repo_dir_name(repo: &str) -> Option<String> {
     let safe_repo = repo
         .chars()
         .map(|character| {
@@ -3563,9 +3567,15 @@ fn huggingface_repo_cache_path(data_dir: &Path, repo: &str) -> Option<PathBuf> {
         .trim_matches('-')
         .to_owned();
     if safe_repo.is_empty() {
-        return None;
+        None
+    } else {
+        Some(safe_repo)
     }
-    Some(cache_dir.join(format!("models--{safe_repo}")))
+}
+
+fn huggingface_repo_cache_path(data_dir: &Path, repo: &str) -> Option<PathBuf> {
+    let safe_repo = safe_repo_dir_name(repo)?;
+    Some(huggingface_hub_cache_dir(data_dir).join(format!("models--{safe_repo}")))
 }
 
 async fn directory_size(path: &Path) -> u64 {
@@ -4869,6 +4879,33 @@ mod tests {
             path.file_name().and_then(|name| name.to_str()),
             Some("models--owner--model-name")
         );
+    }
+
+    #[test]
+    fn repo_slug_functions_match_cross_language_contract() {
+        // story 1667: these repo->dir slug ops are duplicated in the Python
+        // worker and the Rust API; repo_slugs.json is the shared contract that
+        // pins them byte-for-byte across languages.
+        let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../tests/fixtures/rust_migration_contracts/repo_slugs.json");
+        let contract: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&fixture).expect("read repo_slugs.json"))
+                .expect("parse repo_slugs.json");
+        let cases = contract["cases"].as_array().expect("cases array");
+        assert!(!cases.is_empty(), "repo_slugs fixture has no cases");
+        for case in cases {
+            let repo = case["repo"].as_str().expect("repo string");
+            assert_eq!(
+                super::safe_download_dir(repo),
+                case["safeDownloadDir"].as_str().expect("safeDownloadDir"),
+                "safe_download_dir drift for {repo:?}"
+            );
+            assert_eq!(
+                super::safe_repo_dir_name(repo).as_deref(),
+                case["safeRepoDirName"].as_str(),
+                "safe_repo_dir_name drift for {repo:?}"
+            );
+        }
     }
 
     #[test]
