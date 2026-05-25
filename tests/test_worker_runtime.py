@@ -2910,7 +2910,7 @@ def test_run_lora_train_job_executes_real_run(monkeypatch, tmp_path):
     monkeypatch.setattr("scene_worker.runtime.gpu_utilization", lambda _gpu_id: None)
     monkeypatch.setattr(
         "scene_worker.runtime.run_blocking_job_step",
-        lambda api, settings, job_id, status, callback, *, loaded_models: callback(lambda: False),
+        lambda api, settings, job_id, status, callback, *, loaded_models, on_force_terminate=None: callback(lambda: False),
     )
     backend = FakeTrainingBackend()
     trainer = ZImageLoraTrainer(backend=backend)
@@ -2935,7 +2935,7 @@ def test_run_lora_train_job_marks_canceled(monkeypatch, tmp_path):
     monkeypatch.setattr("scene_worker.runtime.gpu_utilization", lambda _gpu_id: None)
     monkeypatch.setattr(
         "scene_worker.runtime.run_blocking_job_step",
-        lambda api, settings, job_id, status, callback, *, loaded_models: callback(lambda: False),
+        lambda api, settings, job_id, status, callback, *, loaded_models, on_force_terminate=None: callback(lambda: False),
     )
 
     class CancelingTrainer:
@@ -2968,7 +2968,7 @@ def test_run_lora_train_job_reports_friendly_failure(monkeypatch, tmp_path):
     monkeypatch.setattr("scene_worker.runtime.gpu_utilization", lambda _gpu_id: None)
     monkeypatch.setattr(
         "scene_worker.runtime.run_blocking_job_step",
-        lambda api, settings, job_id, status, callback, *, loaded_models: callback(lambda: False),
+        lambda api, settings, job_id, status, callback, *, loaded_models, on_force_terminate=None: callback(lambda: False),
     )
 
     class FailingTrainer:
@@ -3537,6 +3537,93 @@ def test_require_patch_target_raises_when_required_callable_is_not_callable():
 def test_require_patch_target_allows_non_callable_when_not_required():
     owner = SimpleNamespace(some_attr=123)
     assert _require_patch_target(owner, "some_attr", pin="some-dep==1.0", patch="example patch") == 123
+
+
+def test_video_adapter_tracks_and_discards_temp_outputs(tmp_path):
+    # The temp registry now lives on the base VideoGenerationAdapter, so the MLX and
+    # Diffusers adapters (which extend the base directly) get force-cancel reaping too
+    # via the already-wired on_force_terminate hook (sc-1719).
+    adapter = MlxVideoAdapter()
+    first = tmp_path / "a.tmp.mp4"
+    second = tmp_path / "b.control.mp4"
+    first.write_bytes(b"x")
+    second.write_bytes(b"y")
+    adapter.track_temp_output("job-1", first)
+    adapter.track_temp_output("job-1", second)
+
+    adapter.discard_temp_outputs("job-1")
+
+    assert not first.exists()
+    assert not second.exists()
+    # Idempotent: the entry is popped, so a later cleanup after the force-cancel hook
+    # is a harmless no-op.
+    adapter.discard_temp_outputs("job-1")
+
+
+def test_mlx_cancel_reaps_temp_but_keeps_pipeline(tmp_path):
+    adapter = MlxVideoAdapter()
+    adapter._pipeline = object()
+    temp = tmp_path / "clip.tmp.mp4"
+    temp.write_bytes(b"x")
+    adapter.track_temp_output("job-2", temp)
+
+    adapter.cancel("job-2")
+
+    assert not temp.exists()  # temp reaped on cooperative cancel
+    assert adapter._pipeline is not None  # ...but the resident pipeline stays loaded
+
+
+def test_mlx_cleanup_reaps_temp_and_evicts_pipeline(tmp_path):
+    adapter = MlxVideoAdapter()
+    adapter._pipeline = object()
+    temp = tmp_path / "clip.tmp.mp4"
+    temp.write_bytes(b"x")
+    adapter.track_temp_output("job-3", temp)
+
+    adapter.cleanup("job-3")
+
+    assert not temp.exists()
+    assert adapter._pipeline is None
+
+
+def test_diffusers_cleanup_reaps_temp_outputs(tmp_path):
+    adapter = DiffusersVideoAdapter()
+    temp = tmp_path / "clip.tmp.mp4"
+    temp.write_bytes(b"x")
+    adapter.track_temp_output("job-4", temp)
+
+    adapter.cleanup("job-4")
+
+    assert not temp.exists()
+
+
+def test_lens_adapter_discards_sidecar_scratch_dir(tmp_path):
+    adapter = LensTurboAdapter()
+    scratch = tmp_path / "lens_sidecar_abc"
+    scratch.mkdir()
+    (scratch / "spec.json").write_text("{}", encoding="utf-8")
+    adapter._scratch_dir = scratch
+
+    adapter.discard_temp_outputs("job-5")
+
+    assert not scratch.exists()
+    assert adapter._scratch_dir is None
+    # No scratch dir registered -> no-op.
+    adapter.discard_temp_outputs("job-5")
+
+
+def test_lens_trainer_discards_scratch_dir(tmp_path):
+    trainer = LensLoraTrainer()
+    scratch = tmp_path / "lens_train_abc"
+    scratch.mkdir()
+    (scratch / "spec.json").write_text("{}", encoding="utf-8")
+    trainer._scratch_dir = scratch
+
+    trainer.discard_temp_outputs()
+
+    assert not scratch.exists()
+    # Lazily-set attr cleared; a second call is a harmless no-op.
+    trainer.discard_temp_outputs()
 
 
 class _FakeQuantizationPolicy:
@@ -5344,6 +5431,39 @@ def test_cancel_monitor_force_terminates_after_deadline(monkeypatch):
     assert terminal["status"] == "canceled"
     assert terminal["stage"] == "canceled"
     assert "force-stopped" in terminal["message"].lower()
+
+
+def test_cancel_monitor_runs_on_force_terminate_hook_before_exit(monkeypatch):
+    # The force-cancel backstop reaps tracked temp files via on_force_terminate
+    # before the hard os._exit (which skips cooperative adapter cleanup) — the
+    # image/training runners rely on this to drop their scratch dirs (sc-1719).
+    monkeypatch.setattr("scene_worker.runtime.emit", lambda payload: None)
+    events: list[tuple[str, object]] = []
+    exited = threading.Event()
+
+    def fake_exit(code):
+        events.append(("exit", code))
+        exited.set()
+
+    monkeypatch.setattr("scene_worker.runtime.os._exit", fake_exit)
+    api = _CancelPollApi(cancel_requested=True)
+    settings = SimpleNamespace(worker_id="worker-1", force_cancel_seconds=0.1)
+    monitor = JobCancelMonitor(
+        api,
+        settings,
+        "job-hook",
+        poll_interval=0.02,
+        force_cancel_seconds=0.1,
+        on_force_terminate=lambda: events.append(("hook", None)),
+    )
+    monitor.start()
+    try:
+        assert exited.wait(timeout=2.0)
+    finally:
+        monitor.stop()
+    assert ("hook", None) in events
+    # The reap must run before the process exits.
+    assert events.index(("hook", None)) < events.index(("exit", FORCED_CANCEL_EXIT_CODE))
 
 
 def test_cancel_monitor_skips_escalation_when_stopped(monkeypatch):

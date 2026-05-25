@@ -378,6 +378,15 @@ def install_ltx_pipelines_multigpu_compat() -> None:
 class VideoGenerationAdapter(ABC):
     id: str
 
+    def __init__(self) -> None:
+        # job_id -> temp files to reap if the job is force-canceled. The cancel
+        # backstop's os._exit skips cooperative cleanup, so the monitor's
+        # filesystem-only on_force_terminate hook calls discard_temp_outputs to
+        # remove these. Adapters that write temp files register them via
+        # track_temp_output (sc-1719). Subclasses with their own __init__ must
+        # call super().__init__().
+        self._temporary_outputs: dict[str, list[Path]] = {}
+
     @abstractmethod
     def prepare(self, *, settings: WorkerSettings, job: dict[str, Any]) -> VideoRequest:
         raise NotImplementedError
@@ -410,21 +419,22 @@ class VideoGenerationAdapter(ABC):
     def cleanup(self, job_id: str) -> None:
         raise NotImplementedError
 
+    def track_temp_output(self, job_id: str, path: Path) -> None:
+        """Register a temp file to reap if the job is force-canceled (filesystem-only)."""
+        self._temporary_outputs.setdefault(job_id, []).append(path)
+
     def discard_temp_outputs(self, job_id: str) -> None:
-        """Reap the job's temp files only — no model/pipeline teardown.
+        """Reap the job's tracked temp files only — no model/pipeline teardown.
 
         The force-cancel backstop calls this from the monitor thread right before
         os._exit, so it must stay filesystem-only: the main thread may be wedged
-        in a native call and touching torch/GPU from here would be unsafe.
-        Adapters that track temp files override this; the default is a no-op."""
-        return
+        in a native call and touching torch/GPU from here would be unsafe."""
+        for path in self._temporary_outputs.pop(job_id, []):
+            path.unlink(missing_ok=True)
 
 
 class ProceduralVideoAdapter(VideoGenerationAdapter):
     id = "procedural_video"
-
-    def __init__(self) -> None:
-        self._temporary_outputs: dict[str, list[Path]] = {}
 
     def prepare(self, *, settings: WorkerSettings, job: dict[str, Any]) -> VideoRequest:
         return video_request_from_job(job)
@@ -471,7 +481,7 @@ class ProceduralVideoAdapter(VideoGenerationAdapter):
         media_rel = f"assets/videos/{filename_base}.webp"
         media_path = project_path / media_rel
         temp_path = media_path.with_suffix(".tmp.webp")
-        self._temporary_outputs.setdefault(job["id"], []).append(temp_path)
+        self.track_temp_output(job["id"], temp_path)
 
         first_image = load_source_image(project_path, request.source_asset_id, request.width, request.height)
         last_image = load_source_image(project_path, request.last_frame_asset_id, request.width, request.height)
@@ -518,10 +528,6 @@ class ProceduralVideoAdapter(VideoGenerationAdapter):
 
     def cleanup(self, job_id: str) -> None:
         self.discard_temp_outputs(job_id)
-
-    def discard_temp_outputs(self, job_id: str) -> None:
-        for path in self._temporary_outputs.pop(job_id, []):
-            path.unlink(missing_ok=True)
 
     def map_settings(self, request: VideoRequest, target: dict[str, Any]) -> dict[str, Any]:
         steps = target["steps"].get(request.quality, target["steps"]["balanced"])
@@ -783,14 +789,14 @@ class LtxPipelinesVideoAdapter(ProceduralVideoAdapter):
         media_rel = f"assets/videos/{filename_base}.mp4"
         media_path = project_path / media_rel
         temp_path = media_path.with_suffix(".tmp.mp4")
-        self._temporary_outputs.setdefault(job["id"], []).append(temp_path)
+        self.track_temp_output(job["id"], temp_path)
 
         progress("preparing", "validating_inputs", 0.2, "Validating native LTX-2.3 inputs.")
         replacement_control: LtxReplacementControl | None = None
         replacement_status: dict[str, Any] | None = None
         if request.mode == "replace_person":
             control_clip = media_path.with_suffix(".control.mp4")
-            self._temporary_outputs.setdefault(job["id"], []).append(control_clip)
+            self.track_temp_output(job["id"], control_clip)
             progress("preparing", "building_control", 0.24, "Building masked control clip from person track.")
             replacement_control = self._ltx_replacement_control(project_path, request, num_frames, control_clip)
             conditioning_images = []
@@ -1651,6 +1657,7 @@ class MlxVideoAdapter(VideoGenerationAdapter):
     _supported_modes = {"text_to_video", "image_to_video"}
 
     def __init__(self) -> None:
+        super().__init__()
         self._pipeline: Any | None = None
         self._pipeline_key_value: str | None = None
         self._loaded_models: set[str] = set()
@@ -1724,13 +1731,16 @@ class MlxVideoAdapter(VideoGenerationAdapter):
             return self._run_wan_mlx(settings, job, request, progress, cancel_requested)
         raise RuntimeError(f"MLX adapter does not support {target['label']}.")
 
-    def cancel(self, _job_id: str) -> None:
-        return
+    def cancel(self, job_id: str) -> None:
+        # Reap tracked temp files but keep the resident pipeline loaded for reuse
+        # (filesystem-only; safe on the cooperative-cancel path).
+        self.discard_temp_outputs(job_id)
 
-    def cleanup(self, _job_id: str) -> None:
+    def cleanup(self, job_id: str) -> None:
         self._loaded_models.clear()
         self._pipeline = None
         self._pipeline_key_value = None
+        self.discard_temp_outputs(job_id)
 
     def map_settings(self, request: VideoRequest, target: dict[str, Any]) -> dict[str, Any]:
         return {
@@ -1793,6 +1803,7 @@ class MlxVideoAdapter(VideoGenerationAdapter):
         media_rel = f"assets/videos/{filename_base}.mp4"
         media_path = project_path / media_rel
         temp_path = media_path.with_suffix(".tmp.mp4")
+        self.track_temp_output(job["id"], temp_path)
 
         lora_token = self._apply_ltx_loras(request, progress)
         progress("running", "generating", 0.3, f"Generating {num_frames} frames with LTX-2.3 (MLX).")
@@ -1990,6 +2001,7 @@ class MlxVideoAdapter(VideoGenerationAdapter):
         media_rel = f"assets/videos/{filename_base}.mp4"
         media_path = project_path / media_rel
         temp_path = media_path.with_suffix(".tmp.mp4")
+        self.track_temp_output(job["id"], temp_path)
 
         progress("running", "generating", 0.3, f"Generating {num_frames} frames with {target['label']} (MLX).")
         self._loaded_models.update({request.model, str(spec["model_dir"])})
@@ -2050,6 +2062,7 @@ class DiffusersVideoAdapter(VideoGenerationAdapter):
     id = "diffusers_video"
 
     def __init__(self) -> None:
+        super().__init__()
         self._pipeline: Any | None = None
         self._pipeline_key_value: str | None = None
         self._loaded_models: set[str] = set()
@@ -2152,6 +2165,7 @@ class DiffusersVideoAdapter(VideoGenerationAdapter):
         media_rel = f"assets/videos/{filename_base}.mp4"
         media_path = project_path / media_rel
         temp_path = media_path.with_suffix(".tmp.mp4")
+        self.track_temp_output(job["id"], temp_path)
 
         progress("saving", "saving", 0.9, "Saving generated MP4 asset and recipe.")
         diffusers_utils = importlib.import_module("diffusers.utils")
@@ -2174,11 +2188,11 @@ class DiffusersVideoAdapter(VideoGenerationAdapter):
             extra={"requirements": self.estimate_requirements(request)},
         )
 
-    def cancel(self, _job_id: str) -> None:
-        return
+    def cancel(self, job_id: str) -> None:
+        self.discard_temp_outputs(job_id)
 
-    def cleanup(self, _job_id: str) -> None:
-        return
+    def cleanup(self, job_id: str) -> None:
+        self.discard_temp_outputs(job_id)
 
     def map_settings(self, request: VideoRequest, target: dict[str, Any]) -> dict[str, Any]:
         return {

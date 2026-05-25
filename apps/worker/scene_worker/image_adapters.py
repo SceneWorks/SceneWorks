@@ -1115,6 +1115,23 @@ class LensTurboAdapter:
 
     id = "lens_turbo"
 
+    def __init__(self) -> None:
+        # Sidecar scratch dir for the in-flight job, reaped by discard_temp_outputs
+        # on force-cancel (os._exit skips the finally in generate). One job runs at
+        # a time (sc-1719).
+        self._scratch_dir: Path | None = None
+
+    def discard_temp_outputs(self, job_id: str | None = None) -> None:
+        """Reap the in-flight sidecar scratch dir only — filesystem-only.
+
+        Called from generate's finally and from the force-cancel monitor thread
+        right before os._exit, so it must stay filesystem-only (no torch/GPU; the
+        main thread may be wedged in a native call)."""
+        work_dir = self._scratch_dir
+        if work_dir is not None:
+            shutil.rmtree(work_dir, ignore_errors=True)
+            self._scratch_dir = None
+
     def loaded_models(self) -> list[str]:
         # The sidecar process loads and frees the model per job; nothing stays
         # resident in this (main-venv) process.
@@ -1177,6 +1194,7 @@ class LensTurboAdapter:
 
         progress("loading_model", "loading_model", 0.18, f"Loading {model_target['label']} (sidecar venv).")
         work_dir = Path(tempfile.mkdtemp(prefix="lens_sidecar_"))
+        self._scratch_dir = work_dir
         try:
             images = self._run_sidecar(
                 job_id=job["id"],
@@ -1237,8 +1255,9 @@ class LensTurboAdapter:
             )
         finally:
             # The writer has read every PNG into the project by now; drop the
-            # sidecar's scratch dir regardless of success/failure.
-            shutil.rmtree(work_dir, ignore_errors=True)
+            # sidecar's scratch dir regardless of success/failure (also clears the
+            # force-cancel registry).
+            self.discard_temp_outputs(job["id"])
 
     def _run_sidecar(
         self,
