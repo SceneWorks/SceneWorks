@@ -1,11 +1,12 @@
 use super::auth::requires_token;
+use super::events::{EventHub, EventMessage};
 use super::training::insufficient_disk_space;
 use super::workers::person_readiness_from_workers;
 use super::{
     create_app, huggingface_repo_cache_path, inprocess_worker_gpu_id, lora_artifact_paths,
     merge_model_manifest_entry, mlx_catalog_status, safe_download_dir, safe_repo_dir_name,
-    strip_jsonc_comments, sweep_stale_lora_uploads_before, EventHub, EventMessage, Settings,
-    WorkerCapability, WorkerSnapshot, WorkerStatus, API_MANAGED_MANIFEST_HEADER, EVENT_BUFFER_SIZE,
+    strip_jsonc_comments, sweep_stale_lora_uploads_before, Settings, WorkerCapability,
+    WorkerSnapshot, WorkerStatus, API_MANAGED_MANIFEST_HEADER, EVENT_BUFFER_SIZE,
     HEARTBEAT_SSE_DATA, HEARTBEAT_SSE_WIRE, TEST_MAX_LORA_UPLOAD_BYTES,
 };
 use axum::body::{to_bytes, Body};
