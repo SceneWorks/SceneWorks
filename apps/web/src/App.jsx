@@ -1257,8 +1257,10 @@ export function App() {
     visibleWorkers,
     // Generation studios (sc-1651 Phase B batch 3)
     createVideoJob,
+    createImageJob,
     latestVideoAssets,
     videoLocalJobs,
+    imageLocalJobs,
     studioLaunch,
     rememberLocalGenerationJob,
     // Person tracks (Video Studio + Replace Person)
@@ -1431,30 +1433,7 @@ export function App() {
         ) : null}
 
         {activeView === "Image" ? (
-          <ImageStudio
-            activeProject={activeProject}
-            assets={assets}
-            characters={characters}
-            createImageJob={createImageJob}
-            gpuOptions={gpuOptions}
-            imageModels={imageModels}
-            latestAssets={latestImageAssets}
-            launchRequest={studioLaunch}
-            loras={loras}
-            localJobs={imageLocalJobs}
-            onCancelJob={(job) => jobAction(job, "cancel")}
-            onLocalJobCreated={(job) => rememberLocalGenerationJob("image", job)}
-            onOpenPresets={() => setActiveView("Presets")}
-            onOpenQueue={() => setActiveView("Queue")}
-            onPreview={setPreviewAsset}
-            presets={presets}
-            requestedGpu={requestedGpu}
-            selectedAsset={selectedAsset}
-            setRequestedGpu={setRequestedGpu}
-            updateAssetStatus={updateAssetStatus}
-            deleteAsset={deleteAsset}
-            purgeAsset={purgeAsset}
-          />
+          <ImageStudio />
         ) : null}
 
         {activeView === "Video" ? (
