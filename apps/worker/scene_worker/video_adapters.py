@@ -425,50 +425,24 @@ class ProceduralVideoAdapter(VideoGenerationAdapter):
         temp_path.replace(media_path)
 
         sidecar_path = media_path.with_suffix(".sceneworks.json")
-        generation_set = {
-            "schemaVersion": 1,
-            "id": generation_set_id,
-            "projectId": request.project_id,
-            "jobId": job["id"],
-            "mode": request.mode,
-            "model": request.model,
-            "prompt": request.prompt,
-            "negativePrompt": request.negative_prompt,
-            "count": 1,
-            "createdAt": created_at,
-        }
-        asset = build_video_asset_sidecar(
-            asset_id=asset_id,
-            project_id=request.project_id,
-            generation_set_id=generation_set_id,
-            request=request,
-            job_id=job["id"],
-            media_rel=media_rel,
-            created_at=created_at,
-            seed=seed,
-            target=target,
-            adapter_id=self.id,
-            mime_type="image/webp",
-            raw_settings=raw_settings,
-        )
-
         progress("saving", "saving", 0.9, "Saving video asset and recipe.")
         if cancel_requested():
             media_path.unlink(missing_ok=True)
             raise InterruptedError("Video generation canceled before asset promotion.")
 
-        write_json(project_path / "generation-sets" / f"{generation_set_id}.json", generation_set)
-        write_json(sidecar_path, asset)
-        write_json(project_path / "recipes" / f"{asset_id}.recipe.json", asset["recipe"])
-        index_asset(project_path, asset)
-        return {
-            "generationSetId": generation_set_id,
-            "assetIds": [asset_id],
-            "assets": [asset],
-            "adapter": self.id,
-            "model": request.model,
-            "requirements": self.estimate_requirements(request),
-        }
+        return video_generation_result(
+            request=request,
+            target=target,
+            adapter_id=self.id,
+            asset_id=asset_id,
+            generation_set_id=generation_set_id,
+            media_rel=media_rel,
+            seed=seed,
+            created_at=created_at,
+            mime_type="image/webp",
+            raw_settings=raw_settings,
+            extra={"requirements": self.estimate_requirements(request)},
+        )
 
     def cancel(self, job_id: str) -> None:
         self.cleanup(job_id)
@@ -822,46 +796,21 @@ class LtxPipelinesVideoAdapter(ProceduralVideoAdapter):
                 "correctionCount": replacement_control.correction_count,
             }
 
-        generation_set = {
-            "schemaVersion": 1,
-            "id": generation_set_id,
-            "projectId": request.project_id,
-            "jobId": job["id"],
-            "mode": request.mode,
-            "model": request.model,
-            "prompt": request.prompt,
-            "negativePrompt": request.negative_prompt,
-            "count": 1,
-            "createdAt": created_at,
-        }
-        asset = build_video_asset_sidecar(
-            asset_id=asset_id,
-            project_id=request.project_id,
-            generation_set_id=generation_set_id,
+        self._loaded_models.update({request.model, self._pipeline_module(request), str(resources.checkpoint_path)})
+        return video_generation_result(
             request=request,
-            job_id=job["id"],
-            media_rel=media_rel,
-            created_at=created_at,
-            seed=seed,
             target=target,
             adapter_id=self.id,
+            asset_id=asset_id,
+            generation_set_id=generation_set_id,
+            media_rel=media_rel,
+            seed=seed,
+            created_at=created_at,
             mime_type="video/mp4",
             raw_settings=self.map_settings(request, target),
             replacement_status=replacement_status,
+            extra={"requirements": self.estimate_requirements(request)},
         )
-        write_json(project_path / "generation-sets" / f"{generation_set_id}.json", generation_set)
-        write_json(media_path.with_suffix(".sceneworks.json"), asset)
-        write_json(project_path / "recipes" / f"{asset_id}.recipe.json", asset["recipe"])
-        index_asset(project_path, asset)
-        self._loaded_models.update({request.model, self._pipeline_module(request), str(resources.checkpoint_path)})
-        return {
-            "generationSetId": generation_set_id,
-            "assetIds": [asset_id],
-            "assets": [asset],
-            "adapter": self.id,
-            "model": request.model,
-            "requirements": self.estimate_requirements(request),
-        }
 
     def _ltx_conditioning_images(self, project_path: Path, request: VideoRequest, num_frames: int) -> list[Any]:
         if request.mode in {"text_to_video", "extend_clip", "video_bridge"}:
@@ -1800,47 +1749,20 @@ class MlxVideoAdapter(VideoGenerationAdapter):
         temp_path.replace(media_path)
         write_poster_frame(media_path)
 
-        generation_set = {
-            "schemaVersion": 1,
-            "id": generation_set_id,
-            "projectId": request.project_id,
-            "jobId": job["id"],
-            "mode": request.mode,
-            "model": request.model,
-            "prompt": request.prompt,
-            "negativePrompt": request.negative_prompt,
-            "count": 1,
-            "createdAt": created_at,
-        }
-        asset = build_video_asset_sidecar(
-            asset_id=asset_id,
-            project_id=request.project_id,
-            generation_set_id=generation_set_id,
+        progress("saving", "saved", 0.95, "Asset saved.")
+        return video_generation_result(
             request=request,
-            job_id=job["id"],
-            media_rel=media_rel,
-            created_at=created_at,
-            seed=seed,
             target=target,
             adapter_id=self.id,
+            asset_id=asset_id,
+            generation_set_id=generation_set_id,
+            media_rel=media_rel,
+            seed=seed,
+            created_at=created_at,
             mime_type="video/mp4",
             raw_settings=raw_settings,
+            extra={"requirements": self.estimate_requirements(request)},
         )
-
-        write_json(project_path / "generation-sets" / f"{generation_set_id}.json", generation_set)
-        write_json(media_path.with_suffix(".sceneworks.json"), asset)
-        write_json(project_path / "recipes" / f"{asset_id}.recipe.json", asset["recipe"])
-        index_asset(project_path, asset)
-
-        progress("saving", "saved", 0.95, "Asset saved.")
-        return {
-            "generationSetId": generation_set_id,
-            "assetIds": [asset_id],
-            "assets": [asset],
-            "adapter": self.id,
-            "model": request.model,
-            "requirements": self.estimate_requirements(request),
-        }
 
     def _apply_ltx_loras(self, request: VideoRequest, progress: ProgressCallback):
         """Stage user LoRAs for the next LTX generation. Returns a ContextVar token
@@ -2027,44 +1949,19 @@ class MlxVideoAdapter(VideoGenerationAdapter):
         write_poster_frame(media_path)
 
         progress("saving", "saving", 0.9, "Saving video asset and recipe.")
-        generation_set = {
-            "schemaVersion": 1,
-            "id": generation_set_id,
-            "projectId": request.project_id,
-            "jobId": job["id"],
-            "mode": request.mode,
-            "model": request.model,
-            "prompt": request.prompt,
-            "negativePrompt": request.negative_prompt,
-            "count": 1,
-            "createdAt": created_at,
-        }
-        asset = build_video_asset_sidecar(
-            asset_id=asset_id,
-            project_id=request.project_id,
-            generation_set_id=generation_set_id,
+        return video_generation_result(
             request=request,
-            job_id=job["id"],
-            media_rel=media_rel,
-            created_at=created_at,
-            seed=seed,
             target=target,
             adapter_id=self.id,
+            asset_id=asset_id,
+            generation_set_id=generation_set_id,
+            media_rel=media_rel,
+            seed=seed,
+            created_at=created_at,
             mime_type="video/mp4",
             raw_settings=raw_settings,
+            extra={"requirements": self.estimate_requirements(request)},
         )
-        write_json(project_path / "generation-sets" / f"{generation_set_id}.json", generation_set)
-        write_json(media_path.with_suffix(".sceneworks.json"), asset)
-        write_json(project_path / "recipes" / f"{asset_id}.recipe.json", asset["recipe"])
-        index_asset(project_path, asset)
-        return {
-            "generationSetId": generation_set_id,
-            "assetIds": [asset_id],
-            "assets": [asset],
-            "adapter": self.id,
-            "model": request.model,
-            "requirements": self.estimate_requirements(request),
-        }
 
 
 class DiffusersVideoAdapter(VideoGenerationAdapter):
@@ -2181,45 +2078,19 @@ class DiffusersVideoAdapter(VideoGenerationAdapter):
         temp_path.replace(media_path)
         write_poster_frame(media_path)
 
-        generation_set = {
-            "schemaVersion": 1,
-            "id": generation_set_id,
-            "projectId": request.project_id,
-            "jobId": job["id"],
-            "mode": request.mode,
-            "model": request.model,
-            "prompt": request.prompt,
-            "negativePrompt": request.negative_prompt,
-            "count": 1,
-            "createdAt": created_at,
-        }
-        asset = build_video_asset_sidecar(
-            asset_id=asset_id,
-            project_id=request.project_id,
-            generation_set_id=generation_set_id,
+        return video_generation_result(
             request=request,
-            job_id=job["id"],
-            media_rel=media_rel,
-            created_at=created_at,
-            seed=seed,
             target=target,
             adapter_id=target["adapter"],
+            asset_id=asset_id,
+            generation_set_id=generation_set_id,
+            media_rel=media_rel,
+            seed=seed,
+            created_at=created_at,
             mime_type="video/mp4",
             raw_settings=raw_settings,
+            extra={"requirements": self.estimate_requirements(request)},
         )
-
-        write_json(project_path / "generation-sets" / f"{generation_set_id}.json", generation_set)
-        write_json(media_path.with_suffix(".sceneworks.json"), asset)
-        write_json(project_path / "recipes" / f"{asset_id}.recipe.json", asset["recipe"])
-        index_asset(project_path, asset)
-        return {
-            "generationSetId": generation_set_id,
-            "assetIds": [asset_id],
-            "assets": [asset],
-            "adapter": target["adapter"],
-            "model": request.model,
-            "requirements": self.estimate_requirements(request),
-        }
 
     def cancel(self, _job_id: str) -> None:
         return
@@ -3110,40 +2981,51 @@ def default_negative_prompt(target: dict[str, Any]) -> str:
     return "worst quality, inconsistent motion, blurry, jittery, distorted"
 
 
-def build_video_asset_sidecar(
+def video_generation_result(
     *,
-    asset_id: str,
-    project_id: str,
-    generation_set_id: str,
     request: VideoRequest,
-    job_id: str,
-    media_rel: str,
-    created_at: str,
-    seed: int,
     target: dict[str, Any],
-    raw_settings: dict[str, Any],
     adapter_id: str,
+    asset_id: str,
+    generation_set_id: str,
+    media_rel: str,
+    seed: int,
+    created_at: str,
     mime_type: str,
+    raw_settings: dict[str, Any],
     replacement_status: dict[str, Any] | None = None,
+    extra: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    parents = [
-        asset_id
-        for asset_id in [
-            request.source_asset_id,
-            request.last_frame_asset_id,
-            request.source_clip_asset_id,
-            request.bridge_right_clip_asset_id,
-        ]
-        if asset_id
-    ]
-    timeline_context = request.advanced.get("timelineContext", {})
-    normalized_settings = {
-        "duration": request.duration,
-        "fps": request.fps,
+    """Worker->API result for a generated video asset (story 1656).
+
+    The worker saves the media bytes (and runs faststart/poster — those stay
+    worker-side, sc-1654) but no longer builds/writes the sidecar/generation-set/
+    recipe or indexes project.db. It ships flat per-asset facts (``assetWrites``)
+    + generation-set facts; the Rust API builds the sidecar
+    (``project_store::build_generated_asset_sidecar`` video branch), writes it +
+    the recipe + generation-set, indexes project.db, and re-injects the built
+    sidecar into ``result.assets``."""
+    fact = {
+        "type": "video",
+        "assetId": asset_id,
+        "mediaPath": media_rel,
+        "mimeType": mime_type,
         "width": request.width,
         "height": request.height,
+        "duration": request.duration,
+        "fps": request.fps,
         "quality": request.quality,
         "family": target["family"],
+        "seed": seed,
+        "displayName": request.prompt[:56] or "Generated video",
+        "createdAt": created_at,
+        "mode": request.mode,
+        "model": request.model,
+        "adapter": adapter_id,
+        "prompt": request.prompt,
+        "negativePrompt": request.negative_prompt,
+        "loras": request.loras,
+        "rawAdapterSettings": raw_settings,
         "sourceAssetId": request.source_asset_id,
         "lastFrameAssetId": request.last_frame_asset_id,
         "sourceClipAssetId": request.source_clip_asset_id,
@@ -3152,66 +3034,27 @@ def build_video_asset_sidecar(
         "characterLookId": request.character_look_id,
         "personTrackId": request.person_track_id,
         "replacementMode": request.replacement_mode,
-        "timelineContextRef": "lineage.timeline",
+        "timelineContext": request.advanced.get("timelineContext", {}),
     }
-    if request.mode == "replace_person":
-        # Honest defaults: a replacement asset only claims active detection/
-        # tracking/replacement when the adapter actually ran a real masked-control
-        # path and reported it via replacement_status (sc-1483/sc-1487). Adapters
-        # that did not (mocked previews, not-yet-upgraded paths) leave these false.
-        replacement_settings = {
-            "personDetectionActive": False,
-            "personTrackingActive": False,
-            "replacementActive": False,
-        }
-        if replacement_status:
-            replacement_settings.update(replacement_status)
-        normalized_settings.update(replacement_settings)
-    return {
-        "schemaVersion": 1,
-        "id": asset_id,
-        "projectId": project_id,
-        "generationSetId": generation_set_id,
-        "type": "video",
-        "displayName": f"{request.prompt[:56] or 'Generated video'}",
+    if replacement_status is not None:
+        fact["replacementStatus"] = replacement_status
+    generation_set = {
+        "id": generation_set_id,
+        "mode": request.mode,
+        "model": request.model,
+        "prompt": request.prompt,
+        "negativePrompt": request.negative_prompt,
+        "count": 1,
         "createdAt": created_at,
-        "file": {
-            "path": media_rel,
-            "mimeType": mime_type,
-            "width": request.width,
-            "height": request.height,
-            "duration": request.duration,
-            "fps": request.fps,
-        },
-        "status": {
-            "favorite": False,
-            "rating": 0,
-            "rejected": False,
-            "trashed": False,
-        },
-        "recipe": {
-            "mode": request.mode,
-            "model": request.model,
-            "adapter": adapter_id,
-            "prompt": request.prompt,
-            "negativePrompt": request.negative_prompt,
-            "seed": seed,
-            "loras": request.loras,
-            "normalizedSettings": normalized_settings,
-            "rawAdapterSettings": raw_settings,
-        },
-        "lineage": {
-            "parents": parents,
-            "sourceAssetId": request.source_asset_id,
-            "lastFrameAssetId": request.last_frame_asset_id,
-            "sourceClipAssetId": request.source_clip_asset_id,
-            "bridgeRightClipAssetId": request.bridge_right_clip_asset_id,
-            "personTrackId": request.person_track_id,
-            "characterId": request.character_id,
-            "characterLookId": request.character_look_id,
-            "replacementMode": request.replacement_mode,
-            "sourceTimestamp": None,
-            "timeline": timeline_context,
-            "jobId": job_id,
-        },
     }
+    result = {
+        "generationSetId": generation_set_id,
+        "expectedCount": 1,
+        "adapter": adapter_id,
+        "model": request.model,
+        "generationSet": generation_set,
+        "assetWrites": [fact],
+    }
+    if extra:
+        result.update(extra)
+    return result

@@ -29,8 +29,8 @@ from scene_worker.person_adapters import (
 from scene_worker.video_adapters import (
     LtxPipelinesResources,
     LtxPipelinesVideoAdapter,
-    build_video_asset_sidecar,
     person_track_masks,
+    video_generation_result,
     video_request_from_job,
 )
 
@@ -597,24 +597,25 @@ def test_person_track_masks_prefers_stored_segmentation(tmp_path):
     assert nonzero < (bbox[2] - bbox[0]) * (bbox[3] - bbox[1]) * 0.95
 
 
-def test_build_sidecar_marks_replacement_inactive_without_status(tmp_path):
+def test_replace_person_result_omits_replacement_status_without_real_run(tmp_path):
+    # sc-1656 slice 3: when no real masked-control path ran, the worker emits no
+    # replacementStatus fact; the Rust builder then fills replacementActive=False
+    # (the honest defaults moved to project_store::build_generated_asset_sidecar).
     settings = _seed_replacement_project(tmp_path)
     request = video_request_from_job(_replacement_job(settings))
-    asset = build_video_asset_sidecar(
-        asset_id="asset_x",
-        project_id="proj_1",
-        generation_set_id="gen_x",
+    result = video_generation_result(
         request=request,
-        job_id="job_replace_1",
-        media_rel="assets/videos/out.mp4",
-        created_at="2026-05-21T00:00:00Z",
-        seed=1,
         target={"family": "ltx-video"},
-        raw_settings={},
         adapter_id="ltx_pipelines",
+        asset_id="asset_x",
+        generation_set_id="gen_x",
+        media_rel="assets/videos/out.mp4",
+        seed=1,
+        created_at="2026-05-21T00:00:00Z",
         mime_type="video/mp4",
+        raw_settings={},
     )
-    assert asset["recipe"]["normalizedSettings"]["replacementActive"] is False
+    assert "replacementStatus" not in result["assetWrites"][0]
 
 
 def test_ltx_replacement_control_builds_segmentation_package(tmp_path):
@@ -709,11 +710,13 @@ def test_ltx_replace_person_active_run_marks_replacement_active(tmp_path, monkey
         progress=lambda *_a, **_k: None,
         cancel_requested=lambda: False,
     )
-    normalized = result["assets"][0]["recipe"]["normalizedSettings"]
-    assert normalized["replacementActive"] is True
-    assert normalized["maskMode"] == "segmentation"
-    assert normalized["replacementAdapter"] == "ltx_pipelines"
-    assert normalized["personTrackId"] == "track_repl"
+    # The worker reports the honest replacement_status as a fact; the Rust builder
+    # folds it into the sidecar's normalizedSettings (sc-1656 slice 3).
+    replacement_status = result["assetWrites"][0]["replacementStatus"]
+    assert replacement_status["replacementActive"] is True
+    assert replacement_status["maskMode"] == "segmentation"
+    assert replacement_status["replacementAdapter"] == "ltx_pipelines"
+    assert replacement_status["personTrackId"] == "track_repl"
     # Prove the masked control clip is injected into the native LTX path as
     # video_conditioning (sc-1486), not just that the flag flipped.
     video_conditioning = captured.get("video_conditioning")
@@ -734,8 +737,9 @@ def test_ltx_replace_person_mock_run_stays_inactive(tmp_path, monkeypatch):
         progress=lambda *_a, **_k: None,
         cancel_requested=lambda: False,
     )
-    asset = result["assets"][0]
-    assert asset["recipe"]["normalizedSettings"]["replacementActive"] is False
+    # No real masked-control run -> the worker reports no replacementStatus fact;
+    # the Rust builder then fills replacementActive=False.
+    assert "replacementStatus" not in result["assetWrites"][0]
 
 
 def test_ensure_models_replace_person_requires_track_and_character(tmp_path):

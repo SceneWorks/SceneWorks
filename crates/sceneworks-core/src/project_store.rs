@@ -2072,18 +2072,28 @@ fn build_generated_asset_sidecar(
     fact: &Value,
 ) -> Value {
     let get = |key: &str| fact.get(key).cloned().unwrap_or(Value::Null);
+    // The worker sends an explicit `type` (a procedural video preview is a .webp,
+    // so mime alone can't classify it); fall back to mime for image facts that
+    // predate it.
     let mime = fact
         .get("mimeType")
         .and_then(Value::as_str)
         .unwrap_or("image/png");
-    let media_type = if mime.starts_with("video/") {
-        "video"
+    let media_type = fact
+        .get("type")
+        .and_then(Value::as_str)
+        .map(str::to_owned)
+        .unwrap_or_else(|| {
+            if mime.starts_with("video/") {
+                "video".to_owned()
+            } else {
+                "image".to_owned()
+            }
+        });
+    let (file, recipe, lineage) = if media_type == "video" {
+        build_video_sidecar_parts(job_id, fact)
     } else {
-        "image"
-    };
-    let parents = match fact.get("sourceAssetId").and_then(Value::as_str) {
-        Some(source) => vec![Value::String(source.to_owned())],
-        None => Vec::new(),
+        build_image_sidecar_parts(job_id, fact)
     };
     json!({
         "schemaVersion": 1,
@@ -2093,43 +2103,140 @@ fn build_generated_asset_sidecar(
         "type": media_type,
         "displayName": get("displayName"),
         "createdAt": get("createdAt"),
-        "file": {
-            "path": get("mediaPath"),
-            "mimeType": mime,
-            "width": get("width"),
-            "height": get("height"),
-            "duration": get("duration"),
-            "fps": get("fps"),
-        },
+        "file": file,
         "status": { "favorite": false, "rating": 0, "rejected": false, "trashed": false },
-        "recipe": {
-            "mode": get("mode"),
-            "model": get("model"),
-            "adapter": get("adapter"),
-            "prompt": get("prompt"),
-            "negativePrompt": get("negativePrompt"),
-            "seed": get("seed"),
-            "loras": fact.get("loras").cloned().unwrap_or_else(|| json!([])),
-            "stylePreset": get("stylePreset"),
-            "normalizedSettings": {
-                "width": get("normalizedWidth"),
-                "height": get("normalizedHeight"),
-                "count": get("count"),
-                "family": get("family"),
-                "characterId": get("characterId"),
-                "characterLookId": get("characterLookId"),
-                "characterConditioningActive": false,
-                "characterConditioningNote": "Character metadata is recorded, but adapter-level character conditioning is not active in this build.",
-            },
-            "rawAdapterSettings": fact.get("rawAdapterSettings").cloned().unwrap_or_else(|| json!({})),
-        },
-        "lineage": {
-            "parents": parents,
-            "sourceAssetId": get("sourceAssetId"),
-            "sourceTimestamp": Value::Null,
-            "jobId": job_id,
-        },
+        "recipe": recipe,
+        "lineage": lineage,
     })
+}
+
+/// `(file, recipe, lineage)` for a generated image asset, matching the worker's
+/// former `build_asset_sidecar` (story 1656).
+fn build_image_sidecar_parts(job_id: &str, fact: &Value) -> (Value, Value, Value) {
+    let get = |key: &str| fact.get(key).cloned().unwrap_or(Value::Null);
+    let parents = match fact.get("sourceAssetId").and_then(Value::as_str) {
+        Some(source) => vec![Value::String(source.to_owned())],
+        None => Vec::new(),
+    };
+    let file = json!({
+        "path": get("mediaPath"),
+        "mimeType": get("mimeType"),
+        "width": get("width"),
+        "height": get("height"),
+        "duration": Value::Null,
+        "fps": Value::Null,
+    });
+    let recipe = json!({
+        "mode": get("mode"),
+        "model": get("model"),
+        "adapter": get("adapter"),
+        "prompt": get("prompt"),
+        "negativePrompt": get("negativePrompt"),
+        "seed": get("seed"),
+        "loras": fact.get("loras").cloned().unwrap_or_else(|| json!([])),
+        "stylePreset": get("stylePreset"),
+        "normalizedSettings": {
+            "width": get("normalizedWidth"),
+            "height": get("normalizedHeight"),
+            "count": get("count"),
+            "family": get("family"),
+            "characterId": get("characterId"),
+            "characterLookId": get("characterLookId"),
+            "characterConditioningActive": false,
+            "characterConditioningNote": "Character metadata is recorded, but adapter-level character conditioning is not active in this build.",
+        },
+        "rawAdapterSettings": fact.get("rawAdapterSettings").cloned().unwrap_or_else(|| json!({})),
+    });
+    let lineage = json!({
+        "parents": parents,
+        "sourceAssetId": get("sourceAssetId"),
+        "sourceTimestamp": Value::Null,
+        "jobId": job_id,
+    });
+    (file, recipe, lineage)
+}
+
+/// `(file, recipe, lineage)` for a generated video asset, matching the worker's
+/// former `build_video_asset_sidecar` (story 1656): video file carries
+/// duration/fps, the recipe has no `stylePreset`, normalizedSettings are
+/// video-shaped (and fold in the honest `replacement_status` for replace_person),
+/// and lineage tracks the four source clip/frame ids + the timeline context.
+fn build_video_sidecar_parts(job_id: &str, fact: &Value) -> (Value, Value, Value) {
+    let get = |key: &str| fact.get(key).cloned().unwrap_or(Value::Null);
+    let source_keys = [
+        "sourceAssetId",
+        "lastFrameAssetId",
+        "sourceClipAssetId",
+        "bridgeRightClipAssetId",
+    ];
+    let parents: Vec<Value> = source_keys
+        .iter()
+        .filter_map(|key| fact.get(*key).and_then(Value::as_str))
+        .map(|id| Value::String(id.to_owned()))
+        .collect();
+    let file = json!({
+        "path": get("mediaPath"),
+        "mimeType": get("mimeType"),
+        "width": get("width"),
+        "height": get("height"),
+        "duration": get("duration"),
+        "fps": get("fps"),
+    });
+    let mut normalized = json!({
+        "duration": get("duration"),
+        "fps": get("fps"),
+        "width": get("width"),
+        "height": get("height"),
+        "quality": get("quality"),
+        "family": get("family"),
+        "sourceAssetId": get("sourceAssetId"),
+        "lastFrameAssetId": get("lastFrameAssetId"),
+        "sourceClipAssetId": get("sourceClipAssetId"),
+        "bridgeRightClipAssetId": get("bridgeRightClipAssetId"),
+        "characterId": get("characterId"),
+        "characterLookId": get("characterLookId"),
+        "personTrackId": get("personTrackId"),
+        "replacementMode": get("replacementMode"),
+        "timelineContextRef": "lineage.timeline",
+    });
+    if fact.get("mode").and_then(Value::as_str) == Some("replace_person") {
+        if let Some(object) = normalized.as_object_mut() {
+            object.insert("personDetectionActive".to_owned(), Value::Bool(false));
+            object.insert("personTrackingActive".to_owned(), Value::Bool(false));
+            object.insert("replacementActive".to_owned(), Value::Bool(false));
+            if let Some(status) = fact.get("replacementStatus").and_then(Value::as_object) {
+                for (key, value) in status {
+                    object.insert(key.clone(), value.clone());
+                }
+            }
+        }
+    }
+    let recipe = json!({
+        "mode": get("mode"),
+        "model": get("model"),
+        "adapter": get("adapter"),
+        "prompt": get("prompt"),
+        "negativePrompt": get("negativePrompt"),
+        "seed": get("seed"),
+        "loras": fact.get("loras").cloned().unwrap_or_else(|| json!([])),
+        "normalizedSettings": normalized,
+        "rawAdapterSettings": fact.get("rawAdapterSettings").cloned().unwrap_or_else(|| json!({})),
+    });
+    let lineage = json!({
+        "parents": parents,
+        "sourceAssetId": get("sourceAssetId"),
+        "lastFrameAssetId": get("lastFrameAssetId"),
+        "sourceClipAssetId": get("sourceClipAssetId"),
+        "bridgeRightClipAssetId": get("bridgeRightClipAssetId"),
+        "personTrackId": get("personTrackId"),
+        "characterId": get("characterId"),
+        "characterLookId": get("characterLookId"),
+        "replacementMode": get("replacementMode"),
+        "sourceTimestamp": Value::Null,
+        "timeline": fact.get("timelineContext").cloned().unwrap_or_else(|| json!({})),
+        "jobId": job_id,
+    });
+    (file, recipe, lineage)
 }
 
 fn index_asset(
@@ -2530,6 +2637,65 @@ mod tests {
         let asset = build_generated_asset_sidecar("project-1", "job-1", "genset_y", &fact);
         assert_eq!(asset["type"], json!("video"));
         assert_eq!(asset["file"]["mimeType"], json!("video/mp4"));
+    }
+
+    #[test]
+    fn build_generated_asset_sidecar_assembles_video_replace_person() {
+        // sc-1656 slice 3: the video branch carries duration/fps, has no
+        // stylePreset, builds video-shaped normalizedSettings + lineage, and fills
+        // the honest replace_person defaults when no replacementStatus is reported.
+        let fact = json!({
+            "type": "video",
+            "assetId": "asset-output",
+            "mediaPath": "assets/videos/replacement.mp4",
+            "mimeType": "video/mp4",
+            "width": 1280, "height": 720, "duration": 6.0, "fps": 25,
+            "quality": "balanced", "family": "ltx-video",
+            "seed": 44, "displayName": "Replace the hero",
+            "createdAt": "2026-05-17T00:00:00Z",
+            "mode": "replace_person", "model": "wan_2_2", "adapter": "wan_video",
+            "prompt": "Replace the hero", "negativePrompt": "", "loras": [],
+            "rawAdapterSettings": {},
+            "sourceClipAssetId": "asset-video",
+            "personTrackId": "track-1",
+            "replacementMode": "full_person_keep_outfit",
+            "characterId": "character-1", "characterLookId": "look-1",
+            "timelineContext": {},
+        });
+        let asset = build_generated_asset_sidecar("project-1", "job-1", "genset-1", &fact);
+        assert_eq!(asset["type"], json!("video"));
+        assert_eq!(asset["file"]["duration"], json!(6.0));
+        assert_eq!(asset["file"]["fps"], json!(25));
+        assert!(asset["recipe"].get("stylePreset").is_none());
+        let normalized = &asset["recipe"]["normalizedSettings"];
+        assert_eq!(normalized["personTrackId"], json!("track-1"));
+        assert_eq!(
+            normalized["replacementMode"],
+            json!("full_person_keep_outfit")
+        );
+        assert_eq!(normalized["timelineContextRef"], json!("lineage.timeline"));
+        assert_eq!(normalized["personDetectionActive"], json!(false));
+        assert_eq!(normalized["replacementActive"], json!(false));
+        assert_eq!(asset["lineage"]["sourceClipAssetId"], json!("asset-video"));
+        assert_eq!(asset["lineage"]["characterId"], json!("character-1"));
+        assert_eq!(asset["lineage"]["parents"], json!(["asset-video"]));
+    }
+
+    #[test]
+    fn build_generated_asset_sidecar_merges_replacement_status() {
+        let fact = json!({
+            "type": "video",
+            "assetId": "a",
+            "mediaPath": "assets/videos/x.mp4",
+            "mimeType": "video/mp4",
+            "mode": "replace_person",
+            "replacementStatus": {"replacementActive": true, "maskMode": "segmentation"},
+        });
+        let asset = build_generated_asset_sidecar("p", "j", "g", &fact);
+        let normalized = &asset["recipe"]["normalizedSettings"];
+        assert_eq!(normalized["replacementActive"], json!(true));
+        assert_eq!(normalized["maskMode"], json!("segmentation"));
+        assert_eq!(normalized["personDetectionActive"], json!(false));
     }
 
     #[test]
