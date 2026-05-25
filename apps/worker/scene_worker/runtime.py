@@ -652,6 +652,10 @@ def run_image_job(api: ApiClient, settings: WorkerSettings, job: dict, image_ada
         # the job and re-scanning recent-projects.json.
         request = image_request_from_job(job)
         project_path = find_project_path(settings.data_dir / "recent-projects.json", request.project_id)
+        # Some adapters (e.g. the Lens sidecar) hold a filesystem scratch dir to reap
+        # if the cancel backstop force-kills the worker — os._exit skips the adapter's
+        # own finally (sc-1719). Filesystem-only; no-op for adapters without one.
+        discard_scratch = getattr(adapter, "discard_temp_outputs", None)
         result = run_blocking_job_step(
             api,
             settings,
@@ -666,6 +670,7 @@ def run_image_job(api: ApiClient, settings: WorkerSettings, job: dict, image_ada
                 cancel_requested=cancel,
             ),
             loaded_models=adapter_loaded_models,
+            on_force_terminate=(lambda: discard_scratch(job_id)) if callable(discard_scratch) else None,
         )
         update_job(
             api,
@@ -1109,6 +1114,10 @@ def _run_lora_train_execution(api: ApiClient, settings: WorkerSettings, job: dic
         kernel_id = (plan.get("target") or {}).get("kernel")
         trainer = create_training_kernel(kernel_id)
         trainer_holder["trainer"] = trainer
+        # The Lens trainer holds a sidecar scratch dir to reap if the cancel backstop
+        # force-kills the worker (os._exit skips train()'s finally) — sc-1719.
+        # Filesystem-only; no-op for kernels without a scratch dir.
+        discard_scratch = getattr(trainer, "discard_temp_outputs", None)
         result = run_blocking_job_step(
             api,
             settings,
@@ -1121,6 +1130,7 @@ def _run_lora_train_execution(api: ApiClient, settings: WorkerSettings, job: dic
                 cancel_requested=cancel,
             ),
             loaded_models=trainer_loaded_models,
+            on_force_terminate=(lambda: discard_scratch(job_id)) if callable(discard_scratch) else None,
         )
         update_job(
             api,

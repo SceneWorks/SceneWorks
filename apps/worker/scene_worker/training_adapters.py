@@ -2097,6 +2097,18 @@ class LensLoraTrainer:
         # The sidecar loads and frees the base model per job; nothing resident here.
         return []
 
+    def discard_temp_outputs(self, job_id: str | None = None) -> None:
+        """Reap the in-flight training scratch dir only — filesystem-only.
+
+        Called from train's finally and from the force-cancel monitor thread right
+        before os._exit, so it must stay filesystem-only (no torch/GPU; the main
+        thread may be wedged in a native call). A trainer is created per job and
+        the worker runs one job at a time, so a single scratch dir suffices (sc-1719)."""
+        work_dir = getattr(self, "_scratch_dir", None)
+        if work_dir is not None:
+            shutil.rmtree(work_dir, ignore_errors=True)
+            self._scratch_dir = None
+
     @staticmethod
     def _lens_python() -> str:
         return os.getenv("SCENEWORKS_LENS_PYTHON", "/opt/lens-venv/bin/python")
@@ -2160,6 +2172,7 @@ class LensLoraTrainer:
         progress("preparing", "preparing", 0.04, "Preparing Lens LoRA training run.")
 
         work_dir = Path(tempfile.mkdtemp(prefix="lens_train_"))
+        self._scratch_dir = work_dir
         progress_path = work_dir / "progress.jsonl"
         progress_path.write_text("", encoding="utf-8")
         result_path = work_dir / "result.json"
@@ -2246,7 +2259,7 @@ class LensLoraTrainer:
                 plan=plan, config=config, result=result, total_steps=total_steps, items=items
             )
         finally:
-            shutil.rmtree(work_dir, ignore_errors=True)
+            self.discard_temp_outputs()
 
     @staticmethod
     def _drain_progress(
