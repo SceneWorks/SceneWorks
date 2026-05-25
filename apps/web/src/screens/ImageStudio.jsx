@@ -42,6 +42,7 @@ import {
   useGenerationStudio,
 } from "./generationStudio.jsx";
 import { useAppContext } from "../context/AppContext.js";
+import { errorStatuses } from "../jobTypes.js";
 
 // Used only for models that don't declare limits.resolutions (e.g. user-imported).
 const DEFAULT_RESOLUTION_OPTIONS = ["768x768", "1024x1024", "1280x720", "720x1280"];
@@ -51,7 +52,6 @@ function formatResolutionLabel(value) {
   return height ? `${width} × ${height}` : value;
 }
 
-const localErrorStatuses = new Set(["failed", "canceled", "interrupted"]);
 const localErrorLabels = {
   failed: "Failed",
   canceled: "Canceled",
@@ -108,7 +108,7 @@ function assetBatchIndex(asset) {
 }
 
 function jobPendingSlotLabel(job, index) {
-  if (localErrorStatuses.has(job.status)) {
+  if (errorStatuses.has(job.status)) {
     return `${localErrorLabels[job.status] ?? "Failed"} #${index + 1}`;
   }
   return `Pending #${index + 1}`;
@@ -396,7 +396,7 @@ export function ImageStudio() {
           type: "placeholder",
           id: `${job.id}:slot-${index}`,
           label: jobPendingSlotLabel(job, index),
-          isError: localErrorStatuses.has(job.status),
+          isError: errorStatuses.has(job.status),
         };
       });
     });
