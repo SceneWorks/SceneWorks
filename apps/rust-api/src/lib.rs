@@ -7398,7 +7398,12 @@ fn huggingface_hub_cache_dir(data_dir: &FsPath) -> PathBuf {
     data_dir.join("cache").join("huggingface").join("hub")
 }
 
-fn huggingface_repo_cache_path(data_dir: &FsPath, repo: &str) -> Option<PathBuf> {
+/// The `<X>` in Hugging Face hub's `models--<X>` cache directory name: every
+/// character outside `[A-Za-z0-9._-]` becomes `--`, then surrounding `-` are
+/// trimmed. `None` when nothing survives. Kept byte-identical to the Python
+/// worker (`hf_cache.safe_repo_dir_name`) and the Rust CPU worker — pinned by
+/// the `repo_slugs.json` cross-language contract (story 1667).
+fn safe_repo_dir_name(repo: &str) -> Option<String> {
     let safe_repo = repo
         .chars()
         .map(|character| {
@@ -7412,8 +7417,14 @@ fn huggingface_repo_cache_path(data_dir: &FsPath, repo: &str) -> Option<PathBuf>
         .trim_matches('-')
         .to_owned();
     if safe_repo.is_empty() {
-        return None;
+        None
+    } else {
+        Some(safe_repo)
     }
+}
+
+fn huggingface_repo_cache_path(data_dir: &FsPath, repo: &str) -> Option<PathBuf> {
+    let safe_repo = safe_repo_dir_name(repo)?;
     Some(huggingface_hub_cache_dir(data_dir).join(format!("models--{safe_repo}")))
 }
 
@@ -8257,10 +8268,10 @@ mod tests {
     use super::{
         create_app, huggingface_repo_cache_path, inprocess_worker_gpu_id, insufficient_disk_space,
         lora_artifact_paths, merge_model_manifest_entry, mlx_catalog_status,
-        person_readiness_from_workers, requires_token, strip_jsonc_comments,
-        sweep_stale_lora_uploads_before, EventHub, EventMessage, Settings, WorkerCapability,
-        WorkerSnapshot, WorkerStatus, API_MANAGED_MANIFEST_HEADER, EVENT_BUFFER_SIZE,
-        HEARTBEAT_SSE_DATA, HEARTBEAT_SSE_WIRE, TEST_MAX_LORA_UPLOAD_BYTES,
+        person_readiness_from_workers, requires_token, safe_download_dir, safe_repo_dir_name,
+        strip_jsonc_comments, sweep_stale_lora_uploads_before, EventHub, EventMessage, Settings,
+        WorkerCapability, WorkerSnapshot, WorkerStatus, API_MANAGED_MANIFEST_HEADER,
+        EVENT_BUFFER_SIZE, HEARTBEAT_SSE_DATA, HEARTBEAT_SSE_WIRE, TEST_MAX_LORA_UPLOAD_BYTES,
     };
     use axum::body::{to_bytes, Body};
     use axum::http::{Request, StatusCode};
@@ -8365,6 +8376,33 @@ mod tests {
         let user = json!({"id": "ltx_2_3", "name": "user"});
         assert_eq!(merge_model_manifest_entry(None, Some(user.clone())), user);
         assert_eq!(merge_model_manifest_entry(None, None), json!({}));
+    }
+
+    #[test]
+    fn repo_slug_functions_match_cross_language_contract() {
+        // story 1667: these repo->dir slug ops are duplicated in the Python
+        // worker and the Rust CPU worker; repo_slugs.json is the shared contract
+        // pinning them byte-for-byte across languages.
+        let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../tests/fixtures/rust_migration_contracts/repo_slugs.json");
+        let contract: Value =
+            serde_json::from_str(&std::fs::read_to_string(&fixture).expect("read repo_slugs.json"))
+                .expect("parse repo_slugs.json");
+        let cases = contract["cases"].as_array().expect("cases array");
+        assert!(!cases.is_empty(), "repo_slugs fixture has no cases");
+        for case in cases {
+            let repo = case["repo"].as_str().expect("repo string");
+            assert_eq!(
+                safe_download_dir(repo),
+                case["safeDownloadDir"].as_str().expect("safeDownloadDir"),
+                "safe_download_dir drift for {repo:?}"
+            );
+            assert_eq!(
+                safe_repo_dir_name(repo).as_deref(),
+                case["safeRepoDirName"].as_str(),
+                "safe_repo_dir_name drift for {repo:?}"
+            );
+        }
     }
 
     fn test_settings(temp_dir: &tempfile::TempDir) -> Settings {

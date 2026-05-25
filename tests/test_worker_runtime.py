@@ -14,6 +14,7 @@ from PIL import Image
 import pytest
 
 from scene_worker.adapter_utils import cancel_step_callback, filter_call_kwargs
+from scene_worker.hf_cache import safe_repo_dir_name
 from scene_worker.caption_adapters import (
     JOY_CAPTION_RESAMPLE,
     JoyCaptionOptions,
@@ -5375,3 +5376,18 @@ def test_worker_settings_force_cancel_seconds_env_override(monkeypatch):
     from scene_worker.settings import WorkerSettings
 
     assert WorkerSettings().force_cancel_seconds == 5
+
+
+def test_repo_slug_functions_match_cross_language_contract():
+    # sc-1667: the repo->directory slug string ops are duplicated in the Rust
+    # API, the Rust CPU worker, and here. They must stay byte-identical so a
+    # repo resolves to the same managed dir / HF cache dir in every language.
+    # This fixture is the shared contract; matching Rust tests live in
+    # apps/rust-api and crates/sceneworks-worker.
+    fixture_path = Path(__file__).resolve().parent / "fixtures" / "rust_migration_contracts" / "repo_slugs.json"
+    cases = json.loads(fixture_path.read_text(encoding="utf-8"))["cases"]
+    assert cases, "repo_slugs fixture has no cases"
+    for case in cases:
+        repo = case["repo"]
+        assert safe_download_dir(repo) == case["safeDownloadDir"], f"safe_download_dir drift for {repo!r}"
+        assert safe_repo_dir_name(repo) == case["safeRepoDirName"], f"safe_repo_dir_name drift for {repo!r}"
