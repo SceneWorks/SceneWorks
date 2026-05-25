@@ -2,6 +2,7 @@ import React, { useEffect, useState } from "react";
 import { JobProgressCard } from "../components/JobProgress.jsx";
 import { terminalStatuses } from "../constants.js";
 import { extractFamilies, presetLoraId, presetLoras } from "../presetUtils.js";
+import { useAppContext } from "../context/AppContext.js";
 
 function matchesFamily(item, familyFilter) {
   if (familyFilter === "all") {
@@ -109,21 +110,30 @@ function deleteResultText(result, name) {
   return `${removed} for ${name}.${warnings}`;
 }
 
-export function ModelManagerScreen({
-  activeProject,
-  jobs,
-  loras,
-  models,
-  onCancelJob,
-  onConvertModel,
-  onDeleteLora,
-  onDeleteModel,
-  onDownloadModel,
-  onImportLora,
-  onImportModel,
-  onOpenQueue,
-  recipePresets = [],
-}) {
+export function ModelManagerScreen() {
+  const {
+    activeProject,
+    jobs,
+    loras,
+    models,
+    jobAction,
+    setActiveView,
+    deleteLora: deleteLoraAction,
+    deleteModel: deleteModelAction,
+    createModelDownloadJob,
+    createModelConvertJob,
+    createLoraImportJob,
+    createModelImportJob,
+    presets: recipePresets = [],
+  } = useAppContext();
+  const onCancelJob = (job) => jobAction(job, "cancel");
+  const onConvertModel = createModelConvertJob;
+  const onDeleteLora = deleteLoraAction;
+  const onDeleteModel = deleteModelAction;
+  const onDownloadModel = createModelDownloadJob;
+  const onImportLora = createLoraImportJob;
+  const onImportModel = createModelImportJob;
+  const onOpenQueue = () => setActiveView("Queue");
   const families = Array.from(new Set(models.map((model) => model.family).filter(Boolean))).sort();
   const familiesKey = families.join("|");
   const [familyFilter, setFamilyFilter] = useState("all");

@@ -1270,7 +1270,14 @@ export function App() {
     // Models / GPU
     imageModels,
     videoModels,
+    models,
     loras,
+    deleteLora,
+    deleteModel,
+    createModelDownloadJob,
+    createModelConvertJob,
+    createLoraImportJob,
+    createModelImportJob,
     gpuOptions,
     requestedGpu,
     setRequestedGpu,
@@ -1494,21 +1501,7 @@ export function App() {
         ) : null}
 
         {activeView === "Models" ? (
-          <ModelManagerScreen
-            activeProject={activeProject}
-            jobs={jobs}
-            loras={loras}
-            models={models}
-            onDeleteLora={deleteLora}
-            onDeleteModel={deleteModel}
-            onDownloadModel={createModelDownloadJob}
-            onConvertModel={createModelConvertJob}
-            onCancelJob={(job) => jobAction(job, "cancel")}
-            onImportLora={createLoraImportJob}
-            onImportModel={createModelImportJob}
-            onOpenQueue={() => setActiveView("Queue")}
-            recipePresets={presets}
-          />
+          <ModelManagerScreen />
         ) : null}
 
         {activeView === "Editor" ? (
