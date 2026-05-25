@@ -1,26 +1,9 @@
 import React, { useMemo } from "react";
 import { useLiveJobElapsedSeconds } from "../components/JobProgress.jsx";
 import { actionStatuses, terminalStatuses } from "../constants.js";
+import { GPU_REQUIRED_JOB_TYPES, NON_GPU_JOB_TYPES } from "../jobTypes.js";
 import { formatSeconds, percent } from "../formatting.js";
 import { useAppContext } from "../context/AppContext.js";
-
-const nonGpuJobTypes = new Set(["model_download", "model_import", "model_convert", "lora_import"]);
-// Keep GPU-required job types in sync with
-// crates/sceneworks-core/src/jobs_store.rs::job_requires_gpu and
-// apps/worker/scene_worker/runtime.py (SUPPORTED_JOB_TYPES + TRAINING_JOB_TYPES + CAPTION_JOB_TYPES).
-const gpuRequiredJobTypes = new Set([
-  "image_generate",
-  "image_edit",
-  "image_vqa",
-  "image_interleave",
-  "video_generate",
-  "video_extend",
-  "video_bridge",
-  "person_replace",
-  "lora_train",
-  "training_caption",
-]);
-const terminalStatusesForBlocking = new Set(["completed", "failed", "canceled", "interrupted"]);
 
 function formatJobType(type) {
   return String(type ?? "job").replaceAll("_", " ");
@@ -34,10 +17,10 @@ function workerCanClaim(job, worker) {
   if (!workerSupports(worker, job.type)) {
     return false;
   }
-  if (nonGpuJobTypes.has(job.type)) {
+  if (NON_GPU_JOB_TYPES.has(job.type)) {
     return true;
   }
-  if (gpuRequiredJobTypes.has(job.type) && worker.gpuId === "cpu") {
+  if (GPU_REQUIRED_JOB_TYPES.has(job.type) && worker.gpuId === "cpu") {
     return false;
   }
   return job.requestedGpu === "auto" || job.requestedGpu === worker.gpuId;
@@ -68,7 +51,7 @@ function activeModelDownloadFor(job, jobs) {
   return jobs.find(
     (candidate) =>
       candidate.type === "model_download" &&
-      !terminalStatusesForBlocking.has(candidate.status) &&
+      !terminalStatuses.has(candidate.status) &&
       (keys.has(candidate.payload?.modelId) || keys.has(candidate.payload?.repo)),
   );
 }
@@ -83,7 +66,7 @@ function activeDependencyFor(job, jobs) {
     return null;
   }
   const dependency = jobs.find((candidate) => candidate.id === id);
-  return dependency && !terminalStatusesForBlocking.has(dependency.status) ? dependency : null;
+  return dependency && !terminalStatuses.has(dependency.status) ? dependency : null;
 }
 
 function jobWaitingMessage(job, workers, jobs) {
@@ -112,7 +95,7 @@ function jobWaitingMessage(job, workers, jobs) {
   if (job.requestedGpu && job.requestedGpu !== "auto") {
     return `Waiting for GPU ${job.requestedGpu} to claim the job.`;
   }
-  return nonGpuJobTypes.has(job.type) ? "Waiting for a utility worker." : "Waiting for an available GPU worker.";
+  return NON_GPU_JOB_TYPES.has(job.type) ? "Waiting for a utility worker." : "Waiting for an available GPU worker.";
 }
 
 function workerStatusLine(worker) {

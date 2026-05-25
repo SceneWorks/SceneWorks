@@ -1,5 +1,7 @@
-export const terminalStatuses = new Set(["completed", "failed", "canceled", "interrupted"]);
-export const actionStatuses = new Set(["failed", "canceled", "interrupted", "completed"]);
+// Job-status/job-type/quality enums live in jobTypes.js (single source of truth,
+// sc-1657). Re-exported here so existing `from "./constants.js"` importers are
+// unaffected.
+export { terminalStatuses, actionStatuses } from "./jobTypes.js";
 
 // SenseNova-U1 interleave resolution buckets (distinct from plain text-to-image).
 // Mirrors the worker's interleave_resolution_for / upstream examples/interleave.

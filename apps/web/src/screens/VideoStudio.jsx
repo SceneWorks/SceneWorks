@@ -50,6 +50,7 @@ import {
 } from "./generationStudio.jsx";
 import { ReplacePersonPanel, findReplacementModel } from "./ReplacePersonPanel.jsx";
 import { useAppContext } from "../context/AppContext.js";
+import { qualityChoices } from "../jobTypes.js";
 
 const ltxVideoModelId = "ltx_2_3";
 const ltxIcLoraRequiredModes = new Set(["extend_clip", "video_bridge"]);
@@ -713,11 +714,7 @@ export function VideoStudio() {
               <label>
                 Quality
                 <div className="quality-segment" role="radiogroup" aria-label="Quality">
-                  {[
-                    ["fast", "Draft"],
-                    ["balanced", "Balanced"],
-                    ["best", "Final"],
-                  ].map(([value, label]) => (
+                  {qualityChoices.map(([value, label]) => (
                     <button
                       aria-checked={quality === value}
                       className={quality === value ? "active" : ""}

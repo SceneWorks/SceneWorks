@@ -1,8 +1,7 @@
 import React, { useEffect, useState } from "react";
 import { terminalStatuses } from "../constants.js";
+import { errorStatuses } from "../jobTypes.js";
 import { formatSeconds, liveElapsedSeconds, percent } from "../formatting.js";
-
-const localErrorStatuses = new Set(["failed", "canceled", "interrupted"]);
 
 function formatJobType(type) {
   const label = String(type ?? "job").replaceAll("_", " ");
@@ -45,7 +44,7 @@ export function useLiveJobElapsedSeconds(job) {
 }
 
 export function JobProgressCard({ job, label, onOpenQueue, onCancel }) {
-  const isError = localErrorStatuses.has(job.status);
+  const isError = errorStatuses.has(job.status);
   const canCancel = !terminalStatuses.has(job.status);
   const progressLabel = percent(job.progress);
   const message = jobMessage(job);

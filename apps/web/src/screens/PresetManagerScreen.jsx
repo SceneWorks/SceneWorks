@@ -11,6 +11,7 @@ import {
   workflowModes,
 } from "../presetUtils.js";
 import { useAppContext } from "../context/AppContext.js";
+import { qualityChoices } from "../jobTypes.js";
 
 const workflowOptions = [
   ["text_to_image", "Text to Image"],
@@ -26,12 +27,6 @@ const workflowCards = [
   { id: "image_to_video", label: "Image → Video", desc: "Animate a starting frame.", outputs: "Video", icon: "Video" },
   { id: "text_to_video", label: "Text → Video", desc: "Generate a clip from prose.", outputs: "Video", icon: "Sparkle" },
   { id: "first_last_frame", label: "First/Last Frame", desc: "Render the in-betweens of two frames.", outputs: "Video", icon: "ArrowRight" },
-];
-
-const qualityChoices = [
-  ["draft", "Draft"],
-  ["balanced", "Balanced"],
-  ["final", "Final"],
 ];
 
 const imageAspectChoices = ["1024x1024", "1536x1024", "1024x1536", "2048x1152"];

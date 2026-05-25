@@ -18,6 +18,7 @@ import { ReplacePersonPanel } from "./screens/ReplacePersonPanel.jsx";
 import { VideoStudio } from "./screens/VideoStudio.jsx";
 import { TrainingStudio } from "./screens/TrainingStudio.jsx";
 import { AppContext } from "./context/AppContext.js";
+import { qualityChoices, GPU_REQUIRED_JOB_TYPES, errorStatuses } from "./jobTypes.js";
 
 // sc-1651 Phase B: screens converted to useAppContext() read their data from the
 // provider instead of props. Tests wrap the screen in a provider carrying only the
@@ -3696,6 +3697,23 @@ describe("SceneWorks app shell", () => {
 
   it("adds the SSE ticket as a query parameter", () => {
     expect(eventUrl("/api/v1/jobs/events", "stream-ticket")).toContain("ticket=stream-ticket");
+  });
+
+  it("uses one worker-canonical quality enum across studios (no draft/final drift)", () => {
+    // sc-1657: PresetManager previously used draft/balanced/final while VideoStudio
+    // and the worker (video_adapters.py step maps) use fast/balanced/best, so saved
+    // presets didn't match the studio control. Pin the shared values.
+    expect(qualityChoices.map(([value]) => value)).toEqual(["fast", "balanced", "best"]);
+    expect(qualityChoices.map(([, label]) => label)).toEqual(["Draft", "Balanced", "Final"]);
+  });
+
+  it("keeps the centralized job-type/status enums consistent", () => {
+    // GPU-required job types must stay aligned with the Rust dispatch gate
+    // (jobs_store.rs::job_requires_gpu); errorStatuses is terminal minus completed.
+    expect(GPU_REQUIRED_JOB_TYPES.has("video_generate")).toBe(true);
+    expect(GPU_REQUIRED_JOB_TYPES.has("model_download")).toBe(false);
+    expect([...errorStatuses].sort()).toEqual(["canceled", "failed", "interrupted"]);
+    expect(errorStatuses.has("completed")).toBe(false);
   });
 
   it("filters stale and placeholder-only GPU workers from the queue view", async () => {
