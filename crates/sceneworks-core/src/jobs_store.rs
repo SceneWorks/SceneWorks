@@ -1,5 +1,6 @@
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
 
 use parking_lot::Mutex;
 use rusqlite::{params, params_from_iter, Connection, OptionalExtension, Row, ToSql};
@@ -40,6 +41,23 @@ pub const NON_GPU_JOB_TYPES: &[&str] = &[
     "lora_import",
 ];
 pub const MAX_JOB_ATTEMPTS: u32 = 5;
+
+/// The non-GPU job types as a quoted SQL list for `type in (...)` / `type not in
+/// (...)` dispatch filters, derived once from [`NON_GPU_JOB_TYPES`]. This keeps
+/// the SQL from drifting away from the declared contract — the drift this fixes
+/// was `model_convert` living in the const but missing from the hard-coded SQL
+/// lists (sc-1629). Values are crate constants, never user input, so direct
+/// interpolation is safe.
+fn non_gpu_job_types_sql() -> &'static str {
+    static SQL: OnceLock<String> = OnceLock::new();
+    SQL.get_or_init(|| {
+        NON_GPU_JOB_TYPES
+            .iter()
+            .map(|job_type| format!("'{job_type}'"))
+            .collect::<Vec<_>>()
+            .join(", ")
+    })
+}
 const DISPATCH_MEMORY_NOT_WORSE_TOLERANCE_MB: f64 = 512.0;
 const DISPATCH_MEMORY_RELIEF_THRESHOLD_MB: f64 = 1024.0;
 const DISPATCH_LOW_MEMORY_THRESHOLD_MB: f64 = 2048.0;
@@ -618,28 +636,32 @@ impl JobsStore {
         let worker = self.get_worker_on_connection(&transaction, worker_id)?;
         let has_active_gpu_job = transaction
             .query_row(
-                "
+                &format!(
+                    "
                 select id from jobs
                  where assigned_gpu = ?1
                    and status in ('preparing', 'downloading', 'loading_model', 'running', 'saving')
-                   and type not in ('model_download', 'model_import', 'lora_import')
+                   and type not in ({})
                  limit 1
                 ",
+                    non_gpu_job_types_sql()
+                ),
                 params![worker.gpu_id],
                 |_row| Ok(()),
             )
             .optional()?
             .is_some();
 
-        let mut statement = transaction.prepare(
+        let mut statement = transaction.prepare(&format!(
             "
             select * from jobs
              where status = 'queued'
-               and (type in ('model_download', 'model_import', 'lora_import') or requested_gpu = 'auto' or requested_gpu = ?1)
-               and (?2 = 0 or type in ('model_download', 'model_import', 'lora_import'))
+               and (type in ({list}) or requested_gpu = 'auto' or requested_gpu = ?1)
+               and (?2 = 0 or type in ({list}))
              order by created_at asc
             ",
-        )?;
+            list = non_gpu_job_types_sql()
+        ))?;
         let queued_rows = collect_jobs(statement.query_map(
             params![worker.gpu_id, i64::from(has_active_gpu_job)],
             row_to_job,
@@ -1203,13 +1225,16 @@ fn should_defer_auto_gpu_claim(
 fn active_gpu_job_exists(connection: &Connection, gpu_id: &str) -> JobsStoreResult<bool> {
     Ok(connection
         .query_row(
-            "
+            &format!(
+                "
             select id from jobs
              where assigned_gpu = ?1
                and status in ('preparing', 'downloading', 'loading_model', 'running', 'saving')
-               and type not in ('model_download', 'model_import', 'lora_import')
+               and type not in ({})
              limit 1
             ",
+                non_gpu_job_types_sql()
+            ),
             params![gpu_id],
             |_row| Ok(()),
         )

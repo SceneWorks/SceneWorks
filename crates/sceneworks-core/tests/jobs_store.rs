@@ -143,6 +143,62 @@ fn non_gpu_jobs_can_claim_while_gpu_is_busy() {
 }
 
 #[test]
+fn model_convert_can_claim_while_gpu_is_busy() {
+    // sc-1629: model_convert is declared non-GPU (NON_GPU_JOB_TYPES) and the
+    // worker/UI treat it that way, but the dispatch SQL used to omit it from its
+    // non-GPU lists — so a queued model_convert would be gated behind GPU work.
+    // It must claim on the CPU lane even while a GPU job is active on the worker.
+    let store = store("model-convert-claim");
+    store
+        .register_worker(RegisterWorker {
+            worker_id: "worker-1".to_owned(),
+            gpu_id: "gpu-0".to_owned(),
+            gpu_name: None,
+            capabilities: vec![
+                WorkerCapability::ImageGenerate,
+                WorkerCapability::ModelConvert,
+            ],
+            loaded_models: Vec::new(),
+            utilization: None,
+        })
+        .expect("worker registers");
+
+    let gpu_job = store
+        .create_job(image_job(Map::new()))
+        .expect("gpu job creates");
+    let convert_job = store
+        .create_job(CreateJob {
+            job_type: JobType::ModelConvert,
+            project_id: None,
+            project_name: None,
+            payload: object(json!({ "model": "owner/model" })),
+            requested_gpu: "auto".to_owned(),
+            source_job_id: None,
+            duplicate_of_job_id: None,
+            attempts: 1,
+        })
+        .expect("convert job creates");
+
+    // First claim takes the GPU job; it is now active on gpu-0.
+    assert_eq!(
+        store
+            .claim_next_job("worker-1")
+            .expect("first claim succeeds")
+            .expect("first job")
+            .id,
+        gpu_job.id
+    );
+    // With a GPU job active only non-GPU work is claimable; model_convert must
+    // still claim and land on the CPU lane.
+    let second = store
+        .claim_next_job("worker-1")
+        .expect("second claim succeeds")
+        .expect("second job");
+    assert_eq!(second.id, convert_job.id);
+    assert_eq!(second.assigned_gpu.as_deref(), Some("cpu"));
+}
+
+#[test]
 fn claim_skips_jobs_not_supported_by_worker_capabilities() {
     let store = store("capabilities");
     store
