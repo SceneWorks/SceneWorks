@@ -4836,6 +4836,78 @@ def test_replace_person_video_sidecar_preserves_lineage():
     assert asset["lineage"]["characterId"] == "character-1"
 
 
+def test_build_sidecar_outputs_match_cross_language_schema_contract():
+    # sc-1656 slice 1: the Python build_*_sidecar functions and the Rust typed
+    # Asset/Recipe structs both serialize the project-store schema. Pin the
+    # Python builders to the same resource_sidecars.json contract that Rust
+    # round-trips (crates/sceneworks-core/tests/contract_roundtrip.rs) so the two
+    # implementations can't drift before Rust becomes the single writer (sc-1656).
+    fixture_path = Path(__file__).resolve().parent / "fixtures" / "rust_migration_contracts" / "resource_sidecars.json"
+    required = {
+        fixture["name"]: fixture["requiredTopLevelKeys"]
+        for fixture in json.loads(fixture_path.read_text(encoding="utf-8"))["fixtures"]
+    }
+
+    image_asset = build_asset_sidecar(
+        asset_id="asset-image",
+        project_id="project-1",
+        generation_set_id="genset-1",
+        request=image_request_from_job(
+            {
+                "id": "job-1",
+                "payload": {
+                    "projectId": "project-1",
+                    "mode": "text_to_image",
+                    "prompt": "city",
+                    "model": "z_image_turbo",
+                    "advanced": {},
+                },
+            }
+        ),
+        job_id="job-1",
+        media_rel="assets/images/city.png",
+        created_at="2026-05-17T00:00:00Z",
+        seed=7,
+        index=0,
+        width=512,
+        height=512,
+        model_target=MODEL_TARGETS["z_image_turbo"],
+        adapter_id="procedural_preview",
+        raw_settings={},
+    )
+    video_asset = build_video_asset_sidecar(
+        asset_id="asset-video",
+        project_id="project-1",
+        generation_set_id="genset-1",
+        request=video_request_from_job(
+            {
+                "id": "job-1",
+                "payload": {
+                    "projectId": "project-1",
+                    "mode": "text_to_video",
+                    "prompt": "city",
+                    "model": "wan_2_2",
+                    "advanced": {},
+                },
+            }
+        ),
+        job_id="job-1",
+        media_rel="assets/videos/city.mp4",
+        created_at="2026-05-17T00:00:00Z",
+        seed=7,
+        target=VIDEO_MODEL_TARGETS["wan_2_2"],
+        adapter_id="wan_video",
+        mime_type="video/mp4",
+        raw_settings={},
+    )
+
+    for fixture_name, asset in (("imageAsset", image_asset), ("videoAsset", video_asset)):
+        missing = [key for key in required[fixture_name] if key not in asset]
+        assert not missing, f"{fixture_name} is missing contract keys: {missing}"
+        recipe_missing = [key for key in required["recipe"] if key not in asset["recipe"]]
+        assert not recipe_missing, f"{fixture_name} recipe is missing contract keys: {recipe_missing}"
+
+
 def test_format_batch_running_message_names_completed_count_after_first_image():
     assert format_batch_running_message("Z-Image", 0, 4) == "Running Z-Image 1 of 4."
     assert format_batch_running_message("Z-Image", 2, 4) == "Generated 2 of 4. Running Z-Image 3 of 4."
