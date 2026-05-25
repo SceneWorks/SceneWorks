@@ -2063,8 +2063,8 @@ fn ensure_column(
 /// is the single owner of this envelope schema now (story 1656): the worker
 /// ships values (paths, dimensions, seed, recipe inputs) and Rust builds the
 /// `file`/`status`/`recipe`/`lineage` structure, matching the shape pinned by
-/// `resource_sidecars.json` and the Python `build_asset_sidecar`. `type` is
-/// derived from the mime so the video slice can reuse this.
+/// `resource_sidecars.json` and the worker's former Python `build_asset_sidecar`.
+/// `type` is derived from the mime so the video slice can reuse this.
 fn build_generated_asset_sidecar(
     project_id: &str,
     job_id: &str,
@@ -2611,8 +2611,8 @@ mod tests {
             "negativePrompt": "",
             "loras": [],
             "stylePreset": "none",
-            "characterId": Value::Null,
-            "characterLookId": Value::Null,
+            "characterId": "character-1",
+            "characterLookId": "look-1",
             "sourceAssetId": Value::Null,
             "rawAdapterSettings": {"steps": 8},
         });
@@ -2661,6 +2661,21 @@ mod tests {
         assert_eq!(
             asset["recipe"]["normalizedSettings"]["family"],
             json!("z-image")
+        );
+        // Character metadata propagates into normalizedSettings but conditioning
+        // stays inactive (formerly pinned Python-side by
+        // test_character_image_recipe_marks_conditioning_inactive).
+        assert_eq!(
+            asset["recipe"]["normalizedSettings"]["characterId"],
+            json!("character-1")
+        );
+        assert_eq!(
+            asset["recipe"]["normalizedSettings"]["characterLookId"],
+            json!("look-1")
+        );
+        assert_eq!(
+            asset["recipe"]["normalizedSettings"]["characterConditioningActive"],
+            json!(false)
         );
         assert_eq!(asset["lineage"]["jobId"], json!("job-1"));
     }
