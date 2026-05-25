@@ -18,20 +18,22 @@ use super::gpu::{
     cpu_gpu, cpu_worker_id, fallback_gpu, gpu_worker_id, parse_nvidia_smi_gpus, visible_gpu_ids,
     worker_capabilities_with_utility,
 };
+use super::model_jobs::{
+    check_downloaded_model_family, finalize_converted_dir, DownloadFamilyCheck,
+};
 use super::supervisor::{
     auto_worker_specs, child_environment, restart_exited_children_with_spawner,
     utility_worker_specs, SupervisedChild, WorkerSpec,
 };
 use super::{
-    allow_pattern_matches, bounded_tail, candidate_people, check_downloaded_model_family,
-    cleanup_uploaded_import_source, concat_file_contents, copy_lora_source, crossfade_duration,
-    download_lora_source_url, download_progress_payload, download_snapshot, finalize_converted_dir,
-    fresh_asset_id, import_lora_source_path, now_rfc3339, output_dimensions,
-    resolve_model_convert_output, resolve_model_import_target, run_ffmpeg, safe_download_dir,
-    safe_project_path, value_f64, write_model_install_marker, DownloadContext, DownloadFamilyCheck,
-    DownloadProgress, HuggingFaceSnapshot, JsonObject, Settings, SnapshotFile, WorkerError,
-    DEFAULT_MAX_LORA_URL_BYTES, DEFAULT_MAX_MODEL_URL_BYTES, DEFAULT_TRANSITION_DURATION_SECONDS,
-    INSTALL_MARKER,
+    allow_pattern_matches, bounded_tail, candidate_people, cleanup_uploaded_import_source,
+    concat_file_contents, copy_lora_source, crossfade_duration, download_lora_source_url,
+    download_progress_payload, download_snapshot, fresh_asset_id, import_lora_source_path,
+    now_rfc3339, output_dimensions, resolve_model_convert_output, resolve_model_import_target,
+    run_ffmpeg, safe_download_dir, safe_project_path, value_f64, write_model_install_marker,
+    DownloadContext, DownloadProgress, HuggingFaceSnapshot, JsonObject, Settings, SnapshotFile,
+    WorkerError, DEFAULT_MAX_LORA_URL_BYTES, DEFAULT_MAX_MODEL_URL_BYTES,
+    DEFAULT_TRANSITION_DURATION_SECONDS, INSTALL_MARKER,
 };
 
 fn write_safetensors_with_keys(path: &std::path::Path, keys: &[String]) {
