@@ -14,6 +14,10 @@ use serde_json::{json, Value};
 use tempfile::tempdir;
 
 use super::api_client::ApiClient;
+use super::downloads::{
+    download_lora_source_url, download_progress_payload, download_snapshot, DownloadContext,
+    DownloadProgress, HuggingFaceSnapshot, SnapshotFile,
+};
 use super::gpu::{
     cpu_gpu, cpu_worker_id, fallback_gpu, gpu_worker_id, parse_nvidia_smi_gpus, visible_gpu_ids,
     worker_capabilities_with_utility,
@@ -30,12 +34,10 @@ use super::supervisor::{
 };
 use super::{
     allow_pattern_matches, bounded_tail, cleanup_uploaded_import_source, copy_lora_source,
-    download_lora_source_url, download_progress_payload, download_snapshot, fresh_asset_id,
-    import_lora_source_path, now_rfc3339, resolve_model_convert_output,
+    fresh_asset_id, import_lora_source_path, now_rfc3339, resolve_model_convert_output,
     resolve_model_import_target, safe_download_dir, safe_project_path, value_f64,
-    write_model_install_marker, DownloadContext, DownloadProgress, HuggingFaceSnapshot, JsonObject,
-    Settings, SnapshotFile, WorkerError, DEFAULT_MAX_LORA_URL_BYTES, DEFAULT_MAX_MODEL_URL_BYTES,
-    DEFAULT_TRANSITION_DURATION_SECONDS, INSTALL_MARKER,
+    write_model_install_marker, JsonObject, Settings, WorkerError, DEFAULT_MAX_LORA_URL_BYTES,
+    DEFAULT_MAX_MODEL_URL_BYTES, DEFAULT_TRANSITION_DURATION_SECONDS, INSTALL_MARKER,
 };
 
 fn write_safetensors_with_keys(path: &std::path::Path, keys: &[String]) {
