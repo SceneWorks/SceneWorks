@@ -13,19 +13,22 @@ use sceneworks_core::contracts::WorkerUtilizationSnapshot;
 use serde_json::{json, Value};
 use tempfile::tempdir;
 
+use super::gpu::{
+    cpu_gpu, cpu_worker_id, fallback_gpu, gpu_worker_id, parse_nvidia_smi_gpus, visible_gpu_ids,
+    worker_capabilities_with_utility,
+};
 use super::{
     allow_pattern_matches, auto_worker_specs, bounded_tail, candidate_people,
     check_downloaded_model_family, child_environment, cleanup_uploaded_import_source,
-    concat_file_contents, copy_lora_source, cpu_gpu, cpu_worker_id, crossfade_duration,
-    download_lora_source_url, download_progress_payload, download_snapshot, fallback_gpu,
-    finalize_converted_dir, fresh_asset_id, gpu_worker_id, import_lora_source_path, now_rfc3339,
-    output_dimensions, parse_nvidia_smi_gpus, resolve_model_convert_output,
+    concat_file_contents, copy_lora_source, crossfade_duration, download_lora_source_url,
+    download_progress_payload, download_snapshot, finalize_converted_dir, fresh_asset_id,
+    import_lora_source_path, now_rfc3339, output_dimensions, resolve_model_convert_output,
     resolve_model_import_target, restart_exited_children_with_spawner, run_ffmpeg,
-    safe_download_dir, safe_project_path, utility_worker_specs, value_f64, visible_gpu_ids,
-    worker_capabilities_with_utility, write_model_install_marker, ApiClient, DownloadContext,
-    DownloadFamilyCheck, DownloadProgress, HuggingFaceSnapshot, JsonObject, Settings, SnapshotFile,
-    SupervisedChild, WorkerError, WorkerSpec, DEFAULT_MAX_LORA_URL_BYTES,
-    DEFAULT_MAX_MODEL_URL_BYTES, DEFAULT_TRANSITION_DURATION_SECONDS, INSTALL_MARKER,
+    safe_download_dir, safe_project_path, utility_worker_specs, value_f64,
+    write_model_install_marker, ApiClient, DownloadContext, DownloadFamilyCheck, DownloadProgress,
+    HuggingFaceSnapshot, JsonObject, Settings, SnapshotFile, SupervisedChild, WorkerError,
+    WorkerSpec, DEFAULT_MAX_LORA_URL_BYTES, DEFAULT_MAX_MODEL_URL_BYTES,
+    DEFAULT_TRANSITION_DURATION_SECONDS, INSTALL_MARKER,
 };
 
 fn write_safetensors_with_keys(path: &std::path::Path, keys: &[String]) {
