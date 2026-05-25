@@ -1036,8 +1036,8 @@ def test_generate_interleaved_rejects_non_sensenova_model():
 
 def test_interleave_segments_interleave_text_and_images():
     assets = [
-        {"id": "asset_a", "file": {"path": "assets/images/a.png"}},
-        {"id": "asset_b", "file": {"path": "assets/images/b.png"}},
+        {"assetId": "asset_a", "mediaPath": "assets/images/a.png"},
+        {"assetId": "asset_b", "mediaPath": "assets/images/b.png"},
     ]
     text = "Boil the water.<image>Steep the leaves.<image>Pour and enjoy."
     segments = SenseNovaU1Adapter._build_interleaved_segments(text, assets)
@@ -1051,7 +1051,7 @@ def test_interleave_segments_interleave_text_and_images():
 
 
 def test_interleave_segments_handles_leading_image_and_blank_text():
-    assets = [{"id": "asset_a", "file": {"path": "assets/images/a.png"}}]
+    assets = [{"assetId": "asset_a", "mediaPath": "assets/images/a.png"}]
     segments = SenseNovaU1Adapter._build_interleaved_segments("<image>Only a caption.", assets)
     assert segments == [
         {"type": "image", "assetId": "asset_a", "path": "assets/images/a.png"},
@@ -1061,7 +1061,7 @@ def test_interleave_segments_handles_leading_image_and_blank_text():
 
 def test_interleave_segments_caps_images_to_available_assets():
     # More <image> markers than generated images: extra markers emit no image segment.
-    assets = [{"id": "asset_a", "file": {"path": "assets/images/a.png"}}]
+    assets = [{"assetId": "asset_a", "mediaPath": "assets/images/a.png"}]
     segments = SenseNovaU1Adapter._build_interleaved_segments("A<image>B<image>C", assets)
     assert segments == [
         {"type": "text", "text": "A"},
@@ -1103,28 +1103,38 @@ def test_write_interleaved_document_persists_document_and_image_assets(tmp_path)
 
     document_dir = project_path / "assets" / "documents"
     doc_jsons = [p for p in document_dir.glob("*.json") if not p.name.endswith(".sceneworks.json")]
-    sidecars = list(document_dir.glob("*.sceneworks.json"))
+    # The worker writes the document body; the Rust API builds the sidecar from
+    # the document fact (story 1656 slice 4), so no sidecar lands here.
     assert len(doc_jsons) == 1
-    assert len(sidecars) == 1
+    assert not list(document_dir.glob("*.sceneworks.json"))
 
     document = json.loads(doc_jsons[0].read_text(encoding="utf-8"))
     assert [segment["type"] for segment in document["segments"]] == ["text", "image", "text", "image", "text"]
     assert document["model"] == "sensenova_u1_8b"
     assert document["jobId"] == "job-1"
 
-    sidecar = json.loads(sidecars[0].read_text(encoding="utf-8"))
-    assert sidecar["type"] == "document"
-    assert sidecar["file"]["mimeType"] == "application/json"
-    assert sidecar["file"]["path"] == f"assets/documents/{document['id']}.json"
-    assert sidecar["recipe"]["mode"] == "interleave"
-
-    # The two generated images persist as ordinary image assets.
-    # rglob: the writer nests each generation set in its own subfolder.
+    # The two generated images persist as ordinary image assets (Rust writes their
+    # sidecars from facts); the worker still saves their PNG bytes, nested in the
+    # generation-set subfolder.
     assert len(list((project_path / "assets" / "images").rglob("*.png"))) == 2
     assert len(result["imageAssetIds"]) == 2
     assert result["documentId"] == document["id"]
     assert result["segments"] == document["segments"]
     assert progress_results and progress_results[-1]["documentId"] == document["id"]
+
+    # The worker emits flat facts: two image facts + one document fact; the Rust
+    # API builds + indexes all three sidecars on completion.
+    asset_writes = result["assetWrites"]
+    assert len(asset_writes) == 3
+    assert all(write["mimeType"] == "image/png" for write in asset_writes[:2])
+    document_write = asset_writes[-1]
+    assert document_write["type"] == "document"
+    assert document_write["assetId"] == result["documentAssetId"]
+    assert document_write["mediaPath"] == f"assets/documents/{document['id']}.json"
+    assert document_write["mimeType"] == "application/json"
+    assert document_write["mode"] == "interleave"
+    assert document_write["imageCount"] == 2
+    assert document_write["parents"] == result["imageAssetIds"]
 
 
 def test_sensenova_resolution_for_snaps_to_buckets():
@@ -4888,9 +4898,11 @@ def test_build_sidecar_outputs_match_cross_language_schema_contract():
         raw_settings={},
     )
 
-    # The video sidecar schema moved to Rust in slice 3 (build_video_sidecar_parts);
-    # it is pinned by contract_roundtrip.rs + the Rust builder unit tests. The image
-    # builder is still used by the interleave path (persist_images_directly).
+    # The video + document sidecar schemas are Rust-owned now
+    # (build_video_sidecar_parts / build_document_sidecar_parts), pinned by
+    # contract_roundtrip.rs + the Rust builder unit tests. build_asset_sidecar is
+    # retained as a tested utility; the production image path ships facts and the
+    # Rust API builds the sidecar.
     for fixture_name, asset in (("imageAsset", image_asset),):
         missing = [key for key in required[fixture_name] if key not in asset]
         assert not missing, f"{fixture_name} is missing contract keys: {missing}"
