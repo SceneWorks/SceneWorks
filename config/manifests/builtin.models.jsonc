@@ -40,7 +40,16 @@
       "ui": {
         "label": "Z-Image-Turbo",
         "description": "Fast first image target for local text-to-image generation.",
-        "recommendedFor": ["text_to_image", "style_variations"]
+        "recommendedFor": ["text_to_image", "style_variations"],
+        "promptGuide": {
+          "title": "Z-Image-Turbo Prompt Guide",
+          "path": "/prompt-guides/z-image-turbo.md",
+          "sources": [
+            { "label": "Z-Image-Turbo model card", "url": "https://huggingface.co/Tongyi-MAI/Z-Image-Turbo" },
+            { "label": "Tongyi-MAI prompting discussion", "url": "https://huggingface.co/Tongyi-MAI/Z-Image-Turbo/discussions/8" },
+            { "label": "Z-Image prompt enhancer template", "url": "https://huggingface.co/spaces/Tongyi-MAI/Z-Image-Turbo/blob/main/pe.py" }
+          ]
+        }
       }
     },
     {
@@ -78,7 +87,16 @@
       "ui": {
         "label": "Z-Image-Edit",
         "description": "Z-Image edit target using Diffusers ZImageImg2ImgPipeline while the dedicated Edit checkpoint is pending release.",
-        "recommendedFor": ["edit_image"]
+        "recommendedFor": ["edit_image"],
+        "promptGuide": {
+          "title": "Z-Image-Edit Prompt Guide",
+          "path": "/prompt-guides/z-image-edit.md",
+          "sources": [
+            { "label": "Z-Image-Turbo model card", "url": "https://huggingface.co/Tongyi-MAI/Z-Image-Turbo" },
+            { "label": "Tongyi-MAI prompting discussion", "url": "https://huggingface.co/Tongyi-MAI/Z-Image-Turbo/discussions/8" },
+            { "label": "Z-Image prompt enhancer template", "url": "https://huggingface.co/spaces/Tongyi-MAI/Z-Image-Turbo/blob/main/pe.py" }
+          ]
+        }
       }
     },
     {
@@ -115,7 +133,16 @@
       "ui": {
         "label": "Qwen Image",
         "description": "Higher-control Qwen text-to-image target backed by Diffusers.",
-        "recommendedFor": ["text_to_image", "style_variations"]
+        "recommendedFor": ["text_to_image", "style_variations"],
+        "promptGuide": {
+          "title": "Qwen Image Prompt Guide",
+          "path": "/prompt-guides/qwen-image.md",
+          "sources": [
+            { "label": "Qwen Cloud image prompt guide", "url": "https://docs.qwencloud.com/developer-guides/accuracy-tuning/image-generation" },
+            { "label": "Qwen Cloud text-to-image docs", "url": "https://docs.qwencloud.com/developer-guides/image-generation/text-to-image" },
+            { "label": "Supplemental Qwen-style prompt guide", "url": "https://www.qwenimagen.com/prompt-guide" }
+          ]
+        }
       }
     },
     {
@@ -152,7 +179,16 @@
       "ui": {
         "label": "Qwen Image Edit",
         "description": "Higher-control image edit target kept behind the same adapter contract.",
-        "recommendedFor": ["edit_image"]
+        "recommendedFor": ["edit_image"],
+        "promptGuide": {
+          "title": "Qwen Image Edit Prompt Guide",
+          "path": "/prompt-guides/qwen-image-edit.md",
+          "sources": [
+            { "label": "Qwen Cloud image editing docs", "url": "https://docs.qwencloud.com/developer-guides/image-generation/image-editing" },
+            { "label": "Qwen Cloud image prompt guide", "url": "https://docs.qwencloud.com/developer-guides/accuracy-tuning/image-generation" },
+            { "label": "Qwen Cloud text-to-image docs", "url": "https://docs.qwencloud.com/developer-guides/image-generation/text-to-image" }
+          ]
+        }
       }
     },
     {
@@ -192,7 +228,15 @@
       "ui": {
         "label": "Lens (base)",
         "description": "Microsoft Lens base text-to-image (20-step, CFG 5.0): higher quality than Lens-Turbo, slower. Also the LoRA training base (sc-1583). gpt-oss-20b text encoder + FLUX.2 VAE; needs a large-VRAM GPU (~30GB mxfp4 / ~60GB bf16).",
-        "recommendedFor": ["text_to_image", "style_variations"]
+        "recommendedFor": ["text_to_image", "style_variations"],
+        "promptGuide": {
+          "title": "Lens Prompt Guide",
+          "path": "/prompt-guides/lens.md",
+          "sources": [
+            { "label": "Microsoft Lens model card", "url": "https://huggingface.co/microsoft/Lens" },
+            { "label": "Microsoft Lens-Turbo model card", "url": "https://huggingface.co/microsoft/Lens-Turbo" }
+          ]
+        }
       }
     },
     {
@@ -235,7 +279,15 @@
       "ui": {
         "label": "Lens-Turbo",
         "description": "Microsoft Lens distilled 4-step text-to-image (gpt-oss-20b text encoder + FLUX.2 VAE). Strong prompt following and text rendering; needs a large-VRAM GPU (~30GB mxfp4 / ~60GB bf16).",
-        "recommendedFor": ["text_to_image", "style_variations"]
+        "recommendedFor": ["text_to_image", "style_variations"],
+        "promptGuide": {
+          "title": "Lens-Turbo Prompt Guide",
+          "path": "/prompt-guides/lens-turbo.md",
+          "sources": [
+            { "label": "Microsoft Lens-Turbo model card", "url": "https://huggingface.co/microsoft/Lens-Turbo" },
+            { "label": "Microsoft Lens model card", "url": "https://huggingface.co/microsoft/Lens" }
+          ]
+        }
       }
     },
     {
@@ -278,7 +330,16 @@
       "ui": {
         "label": "SenseNova-U1 8B",
         "description": "Unified multimodal model (NEO-unify, ~16B). Native text-to-image and instruction-based editing with strong prompt following, dense text, and infographics. Heavy: ~42GB bf16, ~50 steps; runs on large-VRAM GPUs and 96GB+ Apple Silicon (MPS). VQA/interleaved not wired yet.",
-        "recommendedFor": ["text_to_image", "edit_image"]
+        "recommendedFor": ["text_to_image", "edit_image"],
+        "promptGuide": {
+          "title": "SenseNova-U1 8B Prompt Guide",
+          "path": "/prompt-guides/sensenova-u1-8b.md",
+          "sources": [
+            { "label": "SenseNova-U1 model card", "url": "https://huggingface.co/sensenova/SenseNova-U1-8B-MoT" },
+            { "label": "SenseNova-U1 prompt enhancement doc", "url": "https://huggingface.co/sensenova/SenseNova-U1-8B-MoT/blob/main/docs/prompt_enhancement.md" },
+            { "label": "SenseNova-U1 Infographic model card", "url": "https://huggingface.co/sensenova/SenseNova-U1-8B-MoT-Infographic" }
+          ]
+        }
       }
     },
     {
@@ -323,7 +384,16 @@
       "ui": {
         "label": "SenseNova-U1 8B Fast",
         "description": "8-step distilled SenseNova-U1 — ~5–6× faster text-to-image and editing (~50s/image on MPS vs ~4.6 min) at a small quality trade-off. Shares the SenseNova-U1 8B base weights (~35GB); a ~0.4GB distill LoRA downloads automatically on first use. Distilled editing is experimental — use the base SenseNova-U1 8B for max-quality edits.",
-        "recommendedFor": ["text_to_image", "edit_image"]
+        "recommendedFor": ["text_to_image", "edit_image"],
+        "promptGuide": {
+          "title": "SenseNova-U1 8B Fast Prompt Guide",
+          "path": "/prompt-guides/sensenova-u1-8b-fast.md",
+          "sources": [
+            { "label": "SenseNova-U1 model card", "url": "https://huggingface.co/sensenova/SenseNova-U1-8B-MoT" },
+            { "label": "SenseNova-U1 prompt enhancement doc", "url": "https://huggingface.co/sensenova/SenseNova-U1-8B-MoT/blob/main/docs/prompt_enhancement.md" },
+            { "label": "SenseNova-U1 Infographic model card", "url": "https://huggingface.co/sensenova/SenseNova-U1-8B-MoT-Infographic" }
+          ]
+        }
       }
     },
     {
@@ -406,7 +476,15 @@
         "label": "LTX-2.3",
         "description": "First-class short-shot video target for image-to-video and text-to-video.",
         "recommendedFor": ["image_to_video", "text_to_video", "first_last_frame", "extend_clip", "video_bridge"],
-        "durationHint": "Best for short clips. Start with 4-8 seconds; 10 seconds is the normal ceiling for the current workflow."
+        "durationHint": "Best for short clips. Start with 4-8 seconds; 10 seconds is the normal ceiling for the current workflow.",
+        "promptGuide": {
+          "title": "LTX-2.3 Prompt Guide",
+          "path": "/prompt-guides/ltx-2-3.md",
+          "sources": [
+            { "label": "LTX official prompting guide", "url": "https://docs.ltx.video/api-documentation/guides/prompting-guide" },
+            { "label": "LTX-2.3 prompt guide blog", "url": "https://ltx.io/model/model-blog/ltx-2-3-prompt-guide" }
+          ]
+        }
       }
     },
     {
@@ -455,7 +533,16 @@
         "label": "Wan2.2",
         "description": "Fallback video family kept behind the adapter contract for future runtime support.",
         "recommendedFor": ["image_to_video", "text_to_video"],
-        "durationHint": "Use shorter clips until local looping behavior is validated."
+        "durationHint": "Use shorter clips until local looping behavior is validated.",
+        "promptGuide": {
+          "title": "Wan2.2 Prompt Guide",
+          "path": "/prompt-guides/wan-2-2.md",
+          "sources": [
+            { "label": "Qwen Cloud video prompt guide", "url": "https://docs.qwencloud.com/developer-guides/accuracy-tuning/video-generation" },
+            { "label": "Wan2.2 GitHub repo", "url": "https://github.com/Wan-Video/Wan2.2" },
+            { "label": "Wan2.2 TI2V model card", "url": "https://huggingface.co/Wan-AI/Wan2.2-TI2V-5B-Diffusers" }
+          ]
+        }
       }
     },
     // Wan2.2 A14B is a high/low-noise mixture-of-experts model split into separate
@@ -506,7 +593,16 @@
         "label": "Wan2.2 14B (T2V)",
         "description": "Wan2.2 A14B text-to-video (high/low-noise mixture-of-experts). Higher fidelity than the 5B model; needs ample VRAM for both experts.",
         "recommendedFor": ["text_to_video"],
-        "durationHint": "Heavier than 5B — keep clips at 5s or less. Generates at 16fps."
+        "durationHint": "Heavier than 5B — keep clips at 5s or less. Generates at 16fps.",
+        "promptGuide": {
+          "title": "Wan2.2 14B Text-to-Video Prompt Guide",
+          "path": "/prompt-guides/wan-2-2-t2v-14b.md",
+          "sources": [
+            { "label": "Qwen Cloud video prompt guide", "url": "https://docs.qwencloud.com/developer-guides/accuracy-tuning/video-generation" },
+            { "label": "Wan2.2 GitHub repo", "url": "https://github.com/Wan-Video/Wan2.2" },
+            { "label": "Wan2.2 TI2V model card", "url": "https://huggingface.co/Wan-AI/Wan2.2-TI2V-5B-Diffusers" }
+          ]
+        }
       }
     },
     {
@@ -556,7 +652,16 @@
         "label": "Wan2.2 14B (I2V)",
         "description": "Wan2.2 A14B image-to-video (high/low-noise mixture-of-experts). Higher fidelity than the 5B model; needs ample VRAM for both experts.",
         "recommendedFor": ["image_to_video", "first_last_frame", "extend_clip", "video_bridge"],
-        "durationHint": "Heavier than 5B — keep clips at 5s or less. Generates at 16fps."
+        "durationHint": "Heavier than 5B — keep clips at 5s or less. Generates at 16fps.",
+        "promptGuide": {
+          "title": "Wan2.2 14B Image-to-Video Prompt Guide",
+          "path": "/prompt-guides/wan-2-2-i2v-14b.md",
+          "sources": [
+            { "label": "Qwen Cloud video prompt guide", "url": "https://docs.qwencloud.com/developer-guides/accuracy-tuning/video-generation" },
+            { "label": "Wan2.2 GitHub repo", "url": "https://github.com/Wan-Video/Wan2.2" },
+            { "label": "Wan2.2 TI2V model card", "url": "https://huggingface.co/Wan-AI/Wan2.2-TI2V-5B-Diffusers" }
+          ]
+        }
       }
     }
   ]
