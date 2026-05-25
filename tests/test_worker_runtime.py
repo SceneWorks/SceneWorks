@@ -1659,6 +1659,10 @@ def test_worker_check_reports_inference_sidecar_capabilities(monkeypatch):
         "person_track",
         "lora_train",
         "training_caption",
+        # sc-1635: VQA + interleave are advertised and dispatched, so the check
+        # must report them too.
+        "image_vqa",
+        "image_interleave",
     ]
     assert events[0]["supportedJobTypes"] == events[0]["jobTypes"]
 

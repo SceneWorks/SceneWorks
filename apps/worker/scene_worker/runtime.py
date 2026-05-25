@@ -81,6 +81,20 @@ VQA_JOB_TYPES = ("image_vqa",)
 # replaced. Keep in sync with contracts.rs::JobType/WorkerCapability,
 # jobs_store::job_requires_gpu, and QueueScreen gpuRequiredJobTypes.
 INTERLEAVE_JOB_TYPES = ("image_interleave",)
+# Every runtime-dispatchable job-type group, in a stable order, for the
+# ``--check`` diagnostic. Derived from the groups above so run_check can't drift
+# out of sync and underreport readiness (sc-1635: VQA + interleave were
+# advertised and dispatched but missing from the check output).
+# ``lora_train_execute`` is a capability flag, not a dispatchable job type, so it
+# is intentionally absent here (it still appears in the ``capabilities`` field).
+ALL_JOB_TYPES = (
+    SUPPORTED_JOB_TYPES
+    + PERSON_JOB_TYPES
+    + TRAINING_JOB_TYPES
+    + CAPTION_JOB_TYPES
+    + VQA_JOB_TYPES
+    + INTERLEAVE_JOB_TYPES
+)
 
 
 def emit(payload: dict) -> None:
@@ -1388,11 +1402,9 @@ def run_check(settings: WorkerSettings) -> None:
             "gpu": gpu,
             "capabilities": capabilities,
             "jobTypes": [
-                job_type
-                for job_type in SUPPORTED_JOB_TYPES + PERSON_JOB_TYPES + TRAINING_JOB_TYPES + CAPTION_JOB_TYPES
-                if job_type in capabilities
+                job_type for job_type in ALL_JOB_TYPES if job_type in capabilities
             ],
-            "supportedJobTypes": list(SUPPORTED_JOB_TYPES + PERSON_JOB_TYPES + TRAINING_JOB_TYPES + CAPTION_JOB_TYPES),
+            "supportedJobTypes": list(ALL_JOB_TYPES),
             "reportedAt": utc_now(),
         }
     )
