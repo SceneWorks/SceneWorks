@@ -28,7 +28,6 @@ from scene_worker.image_adapters import (
     MODEL_TARGETS,
     QwenImageAdapter,
     ZImageDiffusersAdapter,
-    build_asset_sidecar,
     create_image_adapter,
     emit_worker_event,
     format_batch_running_message,
@@ -4773,44 +4772,6 @@ def test_character_reference_images_are_capped(tmp_path):
     assert len(character_reference_images(project_path, "character_1", None, 16, 16)) == 4
 
 
-def test_character_image_recipe_marks_conditioning_inactive():
-    job = {
-        "id": "job-1",
-        "payload": {
-            "projectId": "project-1",
-            "mode": "character_image",
-            "prompt": "Mira portrait",
-            "model": "z_image_turbo",
-            "characterId": "character-1",
-            "characterLookId": "look-1",
-            "advanced": {},
-        },
-    }
-    request = image_request_from_job(job)
-
-    asset = build_asset_sidecar(
-        asset_id="asset-1",
-        project_id="project-1",
-        generation_set_id="genset-1",
-        request=request,
-        job_id="job-1",
-        media_rel="assets/images/mira.png",
-        created_at="2026-05-17T00:00:00Z",
-        seed=101,
-        index=0,
-        width=512,
-        height=512,
-        model_target=MODEL_TARGETS["z_image_turbo"],
-        adapter_id="procedural_preview",
-        raw_settings={},
-    )
-
-    normalized = asset["recipe"]["normalizedSettings"]
-    assert normalized["characterId"] == "character-1"
-    assert normalized["characterLookId"] == "look-1"
-    assert normalized["characterConditioningActive"] is False
-
-
 def test_replace_person_video_result_carries_lineage_facts():
     # sc-1656 slice 3: the worker reports flat video facts and the Rust API builds
     # the sidecar. Pin the facts the worker emits for a replace_person job — the
@@ -4856,58 +4817,6 @@ def test_replace_person_video_result_carries_lineage_facts():
     # No real masked-control path ran here, so the worker reports no
     # replacementStatus; the Rust builder fills the honest false defaults.
     assert "replacementStatus" not in fact
-
-
-def test_build_sidecar_outputs_match_cross_language_schema_contract():
-    # sc-1656 slice 1: the Python build_*_sidecar functions and the Rust typed
-    # Asset/Recipe structs both serialize the project-store schema. Pin the
-    # Python builders to the same resource_sidecars.json contract that Rust
-    # round-trips (crates/sceneworks-core/tests/contract_roundtrip.rs) so the two
-    # implementations can't drift before Rust becomes the single writer (sc-1656).
-    fixture_path = Path(__file__).resolve().parent / "fixtures" / "rust_migration_contracts" / "resource_sidecars.json"
-    required = {
-        fixture["name"]: fixture["requiredTopLevelKeys"]
-        for fixture in json.loads(fixture_path.read_text(encoding="utf-8"))["fixtures"]
-    }
-
-    image_asset = build_asset_sidecar(
-        asset_id="asset-image",
-        project_id="project-1",
-        generation_set_id="genset-1",
-        request=image_request_from_job(
-            {
-                "id": "job-1",
-                "payload": {
-                    "projectId": "project-1",
-                    "mode": "text_to_image",
-                    "prompt": "city",
-                    "model": "z_image_turbo",
-                    "advanced": {},
-                },
-            }
-        ),
-        job_id="job-1",
-        media_rel="assets/images/city.png",
-        created_at="2026-05-17T00:00:00Z",
-        seed=7,
-        index=0,
-        width=512,
-        height=512,
-        model_target=MODEL_TARGETS["z_image_turbo"],
-        adapter_id="procedural_preview",
-        raw_settings={},
-    )
-
-    # The video + document sidecar schemas are Rust-owned now
-    # (build_video_sidecar_parts / build_document_sidecar_parts), pinned by
-    # contract_roundtrip.rs + the Rust builder unit tests. build_asset_sidecar is
-    # retained as a tested utility; the production image path ships facts and the
-    # Rust API builds the sidecar.
-    for fixture_name, asset in (("imageAsset", image_asset),):
-        missing = [key for key in required[fixture_name] if key not in asset]
-        assert not missing, f"{fixture_name} is missing contract keys: {missing}"
-        recipe_missing = [key for key in required["recipe"] if key not in asset["recipe"]]
-        assert not recipe_missing, f"{fixture_name} recipe is missing contract keys: {recipe_missing}"
 
 
 def test_format_batch_running_message_names_completed_count_after_first_image():
