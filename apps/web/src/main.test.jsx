@@ -30,6 +30,40 @@ function withAppContext(value, ui) {
 // its own on* callbacks. This adapter lets the existing tests keep their old
 // prop-shaped objects (and their assertions on those fns) while feeding the
 // screen via the provider.
+// ImageStudio (sc-1651 Phase B) — same adapter idea as ModelManager: keep the
+// old prop-shaped fixtures (and their assertions) and map onto the provider.
+function withImageStudioContext(p) {
+  return withAppContext(
+    {
+      activeProject: p.activeProject,
+      assets: p.assets,
+      characters: p.characters,
+      createImageJob: p.createImageJob,
+      deleteAsset: p.deleteAsset,
+      purgeAsset: p.purgeAsset,
+      gpuOptions: p.gpuOptions,
+      imageModels: p.imageModels,
+      latestImageAssets: p.latestAssets,
+      studioLaunch: p.launchRequest,
+      imageLocalJobs: p.localJobs,
+      loras: p.loras,
+      presets: p.presets,
+      requestedGpu: p.requestedGpu,
+      selectedAsset: p.selectedAsset,
+      setRequestedGpu: p.setRequestedGpu,
+      updateAssetStatus: p.updateAssetStatus,
+      setPreviewAsset: p.onPreview ?? (() => {}),
+      jobAction: p.onCancelJob ? (job) => p.onCancelJob(job) : () => {},
+      rememberLocalGenerationJob: p.onLocalJobCreated ? (_kind, job) => p.onLocalJobCreated(job) : () => {},
+      setActiveView: (view) => {
+        if (view === "Presets") p.onOpenPresets?.();
+        else if (view === "Queue") p.onOpenQueue?.();
+      },
+    },
+    <ImageStudio />,
+  );
+}
+
 function withModelManagerContext(p) {
   return withAppContext(
     {
@@ -4057,25 +4091,25 @@ describe("SceneWorks app shell", () => {
     root = createRoot(container);
     await act(async () => {
       root.render(
-        <ImageStudio
-          activeProject={{ id: "project-1", name: "Noir" }}
-          assets={[]}
-          characters={[]}
-          createImageJob={createImageJob}
-          deleteAsset={() => {}}
-          gpuOptions={["auto"]}
-          imageModels={[{ id: "z_image_turbo", name: "Z-Image", type: "image", family: "z-image" }]}
-          latestAssets={[]}
-          localJobs={[]}
-          loras={[]}
-          onLocalJobCreated={onLocalJobCreated}
-          onPreview={() => {}}
-          purgeAsset={() => {}}
-          requestedGpu="auto"
-          selectedAsset={null}
-          setRequestedGpu={() => {}}
-          updateAssetStatus={() => {}}
-        />,
+        withImageStudioContext({
+          activeProject: { id: "project-1", name: "Noir" },
+          assets: [],
+          characters: [],
+          createImageJob,
+          deleteAsset: () => {},
+          gpuOptions: ["auto"],
+          imageModels: [{ id: "z_image_turbo", name: "Z-Image", type: "image", family: "z-image" }],
+          latestAssets: [],
+          localJobs: [],
+          loras: [],
+          onLocalJobCreated,
+          onPreview: () => {},
+          purgeAsset: () => {},
+          requestedGpu: "auto",
+          selectedAsset: null,
+          setRequestedGpu: () => {},
+          updateAssetStatus: () => {},
+        }),
       );
     });
 
@@ -4130,7 +4164,7 @@ describe("SceneWorks app shell", () => {
 
     root = createRoot(container);
     await act(async () => {
-      root.render(<ImageStudio {...imageProps} />);
+      root.render(withImageStudioContext(imageProps));
     });
 
     expect(container.textContent).toContain("Finished. Fetching result...");
@@ -4144,7 +4178,7 @@ describe("SceneWorks app shell", () => {
       status: {},
     };
     await act(async () => {
-      root.render(<ImageStudio {...imageProps} assets={[generatedAsset]} latestAssets={[generatedAsset]} />);
+      root.render(withImageStudioContext({ ...imageProps, assets: [generatedAsset], latestAssets: [generatedAsset] }));
     });
 
     expect(container.textContent).not.toContain("Finished. Fetching result...");
@@ -4187,24 +4221,24 @@ describe("SceneWorks app shell", () => {
     root = createRoot(container);
     await act(async () => {
       root.render(
-        <ImageStudio
-          activeProject={{ id: "project-1", name: "Noir" }}
-          assets={assets}
-          characters={[]}
-          createImageJob={() => {}}
-          deleteAsset={() => {}}
-          gpuOptions={["auto"]}
-          imageModels={[{ id: "z_image_turbo", name: "Z-Image", type: "image", family: "z-image" }]}
-          latestAssets={[]}
-          localJobs={[localJob]}
-          loras={[]}
-          onPreview={() => {}}
-          purgeAsset={() => {}}
-          requestedGpu="auto"
-          selectedAsset={null}
-          setRequestedGpu={() => {}}
-          updateAssetStatus={() => {}}
-        />,
+        withImageStudioContext({
+          activeProject: { id: "project-1", name: "Noir" },
+          assets,
+          characters: [],
+          createImageJob: () => {},
+          deleteAsset: () => {},
+          gpuOptions: ["auto"],
+          imageModels: [{ id: "z_image_turbo", name: "Z-Image", type: "image", family: "z-image" }],
+          latestAssets: [],
+          localJobs: [localJob],
+          loras: [],
+          onPreview: () => {},
+          purgeAsset: () => {},
+          requestedGpu: "auto",
+          selectedAsset: null,
+          setRequestedGpu: () => {},
+          updateAssetStatus: () => {},
+        }),
       );
     });
 
@@ -4229,25 +4263,25 @@ describe("SceneWorks app shell", () => {
     root = createRoot(container);
     await act(async () => {
       root.render(
-        <ImageStudio
-          activeProject={{ id: "project-1", name: "Noir" }}
-          assets={[]}
-          characters={[]}
-          createImageJob={() => {}}
-          deleteAsset={() => {}}
-          gpuOptions={["auto"]}
-          imageModels={[{ id: "z_image_turbo", name: "Z-Image", type: "image", family: "z-image" }]}
-          latestAssets={[]}
-          localJobs={[runningJob]}
-          loras={[]}
-          onCancelJob={onCancelJob}
-          onPreview={() => {}}
-          purgeAsset={() => {}}
-          requestedGpu="auto"
-          selectedAsset={null}
-          setRequestedGpu={() => {}}
-          updateAssetStatus={() => {}}
-        />,
+        withImageStudioContext({
+          activeProject: { id: "project-1", name: "Noir" },
+          assets: [],
+          characters: [],
+          createImageJob: () => {},
+          deleteAsset: () => {},
+          gpuOptions: ["auto"],
+          imageModels: [{ id: "z_image_turbo", name: "Z-Image", type: "image", family: "z-image" }],
+          latestAssets: [],
+          localJobs: [runningJob],
+          loras: [],
+          onCancelJob,
+          onPreview: () => {},
+          purgeAsset: () => {},
+          requestedGpu: "auto",
+          selectedAsset: null,
+          setRequestedGpu: () => {},
+          updateAssetStatus: () => {},
+        }),
       );
     });
     await settle();
@@ -4276,25 +4310,25 @@ describe("SceneWorks app shell", () => {
     root = createRoot(container);
     await act(async () => {
       root.render(
-        <ImageStudio
-          activeProject={{ id: "project-1", name: "Noir" }}
-          assets={[]}
-          characters={[]}
-          createImageJob={() => {}}
-          deleteAsset={() => {}}
-          gpuOptions={["auto"]}
-          imageModels={[{ id: "z_image_turbo", name: "Z-Image", type: "image", family: "z-image" }]}
-          latestAssets={[]}
-          localJobs={[completedJob]}
-          loras={[]}
-          onCancelJob={() => {}}
-          onPreview={() => {}}
-          purgeAsset={() => {}}
-          requestedGpu="auto"
-          selectedAsset={null}
-          setRequestedGpu={() => {}}
-          updateAssetStatus={() => {}}
-        />,
+        withImageStudioContext({
+          activeProject: { id: "project-1", name: "Noir" },
+          assets: [],
+          characters: [],
+          createImageJob: () => {},
+          deleteAsset: () => {},
+          gpuOptions: ["auto"],
+          imageModels: [{ id: "z_image_turbo", name: "Z-Image", type: "image", family: "z-image" }],
+          latestAssets: [],
+          localJobs: [completedJob],
+          loras: [],
+          onCancelJob: () => {},
+          onPreview: () => {},
+          purgeAsset: () => {},
+          requestedGpu: "auto",
+          selectedAsset: null,
+          setRequestedGpu: () => {},
+          updateAssetStatus: () => {},
+        }),
       );
     });
     await settle();
@@ -4319,24 +4353,24 @@ describe("SceneWorks app shell", () => {
     root = createRoot(container);
     await act(async () => {
       root.render(
-        <ImageStudio
-          activeProject={{ id: "project-1", name: "Noir" }}
-          assets={[]}
-          characters={[]}
-          createImageJob={() => {}}
-          deleteAsset={() => {}}
-          gpuOptions={["auto"]}
-          imageModels={[{ id: "z_image_turbo", name: "Z-Image", type: "image", family: "z-image" }]}
-          latestAssets={[]}
-          localJobs={[staleCompletedJob]}
-          loras={[]}
-          onPreview={() => {}}
-          purgeAsset={() => {}}
-          requestedGpu="auto"
-          selectedAsset={null}
-          setRequestedGpu={() => {}}
-          updateAssetStatus={() => {}}
-        />,
+        withImageStudioContext({
+          activeProject: { id: "project-1", name: "Noir" },
+          assets: [],
+          characters: [],
+          createImageJob: () => {},
+          deleteAsset: () => {},
+          gpuOptions: ["auto"],
+          imageModels: [{ id: "z_image_turbo", name: "Z-Image", type: "image", family: "z-image" }],
+          latestAssets: [],
+          localJobs: [staleCompletedJob],
+          loras: [],
+          onPreview: () => {},
+          purgeAsset: () => {},
+          requestedGpu: "auto",
+          selectedAsset: null,
+          setRequestedGpu: () => {},
+          updateAssetStatus: () => {},
+        }),
       );
     });
 
@@ -4358,24 +4392,24 @@ describe("SceneWorks app shell", () => {
     root = createRoot(container);
     await act(async () => {
       root.render(
-        <ImageStudio
-          activeProject={{ id: "project-1", name: "Noir" }}
-          assets={[]}
-          characters={[]}
-          createImageJob={() => {}}
-          deleteAsset={() => {}}
-          gpuOptions={["auto"]}
-          imageModels={[{ id: "z_image_turbo", name: "Z-Image", type: "image", family: "z-image" }]}
-          latestAssets={[]}
-          localJobs={[canceledJob]}
-          loras={[]}
-          onPreview={() => {}}
-          purgeAsset={() => {}}
-          requestedGpu="auto"
-          selectedAsset={null}
-          setRequestedGpu={() => {}}
-          updateAssetStatus={() => {}}
-        />,
+        withImageStudioContext({
+          activeProject: { id: "project-1", name: "Noir" },
+          assets: [],
+          characters: [],
+          createImageJob: () => {},
+          deleteAsset: () => {},
+          gpuOptions: ["auto"],
+          imageModels: [{ id: "z_image_turbo", name: "Z-Image", type: "image", family: "z-image" }],
+          latestAssets: [],
+          localJobs: [canceledJob],
+          loras: [],
+          onPreview: () => {},
+          purgeAsset: () => {},
+          requestedGpu: "auto",
+          selectedAsset: null,
+          setRequestedGpu: () => {},
+          updateAssetStatus: () => {},
+        }),
       );
     });
     await settle();
@@ -4391,30 +4425,30 @@ describe("SceneWorks app shell", () => {
     root = createRoot(container);
     await act(async () => {
       root.render(
-        <ImageStudio
-          activeProject={{ id: "project-1", name: "Noir" }}
-          assets={[]}
-          characters={[]}
-          createImageJob={createImageJob}
-          deleteAsset={() => {}}
-          gpuOptions={["auto"]}
-          imageModels={[{ id: "z_image_turbo", name: "Z-Image", type: "image", family: "z-image" }]}
-          latestAssets={[]}
-          loras={[
+        withImageStudioContext({
+          activeProject: { id: "project-1", name: "Noir" },
+          assets: [],
+          characters: [],
+          createImageJob,
+          deleteAsset: () => {},
+          gpuOptions: ["auto"],
+          imageModels: [{ id: "z_image_turbo", name: "Z-Image", type: "image", family: "z-image" }],
+          latestAssets: [],
+          loras: [
             { id: "built_in", name: "Built In", family: "z-image", scope: "builtin", defaultWeight: 0.6 },
             { id: "global_style", name: "Global Style", family: "z-image", scope: "global" },
             { id: "project_mira", name: "Project Mira", family: "z-image", scope: "project", files: ["mira.safetensors"] },
             { id: "third_user", name: "Third User", family: "z-image", scope: "global" },
             { id: "qwen_only", name: "Qwen Only", family: "qwen-image", scope: "global" },
             { id: "missing_lora", name: "Missing LoRA", family: "z-image", scope: "global", installState: "missing" },
-          ]}
-          onPreview={() => {}}
-          purgeAsset={() => {}}
-          requestedGpu="auto"
-          selectedAsset={null}
-          setRequestedGpu={() => {}}
-          updateAssetStatus={() => {}}
-        />,
+          ],
+          onPreview: () => {},
+          purgeAsset: () => {},
+          requestedGpu: "auto",
+          selectedAsset: null,
+          setRequestedGpu: () => {},
+          updateAssetStatus: () => {},
+        }),
       );
     });
 
@@ -4463,23 +4497,23 @@ describe("SceneWorks app shell", () => {
     root = createRoot(container);
     await act(async () => {
       root.render(
-        <ImageStudio
-          activeProject={{ id: "project-1", name: "Noir" }}
-          assets={[]}
-          characters={[]}
-          createImageJob={createImageJob}
-          deleteAsset={() => {}}
-          gpuOptions={["auto"]}
-          imageModels={[{ id: "z_image_turbo", name: "Z-Image", type: "image", family: "z-image" }]}
-          latestAssets={[]}
-          loras={[{ id: "qwen_only", name: "Qwen Only", family: "qwen-image", scope: "builtin" }]}
-          onPreview={() => {}}
-          purgeAsset={() => {}}
-          requestedGpu="auto"
-          selectedAsset={null}
-          setRequestedGpu={() => {}}
-          updateAssetStatus={() => {}}
-        />,
+        withImageStudioContext({
+          activeProject: { id: "project-1", name: "Noir" },
+          assets: [],
+          characters: [],
+          createImageJob,
+          deleteAsset: () => {},
+          gpuOptions: ["auto"],
+          imageModels: [{ id: "z_image_turbo", name: "Z-Image", type: "image", family: "z-image" }],
+          latestAssets: [],
+          loras: [{ id: "qwen_only", name: "Qwen Only", family: "qwen-image", scope: "builtin" }],
+          onPreview: () => {},
+          purgeAsset: () => {},
+          requestedGpu: "auto",
+          selectedAsset: null,
+          setRequestedGpu: () => {},
+          updateAssetStatus: () => {},
+        }),
       );
     });
 
@@ -4518,16 +4552,16 @@ describe("SceneWorks app shell", () => {
     root = createRoot(container);
     await act(async () => {
       root.render(
-        <ImageStudio
-          activeProject={{ id: "project-1", name: "Noir" }}
-          assets={[]}
-          characters={[]}
-          createImageJob={createImageJob}
-          deleteAsset={() => {}}
-          gpuOptions={["auto"]}
-          imageModels={[{ id: "z_image_turbo", name: "Z-Image", type: "image", family: "z-image" }]}
-          latestAssets={[]}
-          loras={[
+        withImageStudioContext({
+          activeProject: { id: "project-1", name: "Noir" },
+          assets: [],
+          characters: [],
+          createImageJob,
+          deleteAsset: () => {},
+          gpuOptions: ["auto"],
+          imageModels: [{ id: "z_image_turbo", name: "Z-Image", type: "image", family: "z-image" }],
+          latestAssets: [],
+          loras: [
             {
               id: "cinematic_detail",
               name: "Cinematic Detail",
@@ -4536,10 +4570,10 @@ describe("SceneWorks app shell", () => {
               defaultWeight: 0.55,
               presetManaged: true,
             },
-          ]}
-          onPreview={() => {}}
-          purgeAsset={() => {}}
-          presets={[
+          ],
+          onPreview: () => {},
+          purgeAsset: () => {},
+          presets: [
             {
               id: "cinematic",
               name: "Cinematic",
@@ -4550,12 +4584,12 @@ describe("SceneWorks app shell", () => {
               builtInLoras: [{ id: "cinematic_detail", weight: 0.4 }],
               ui: { description: "Balanced cinematic color, contrast, and detail." },
             },
-          ]}
-          requestedGpu="auto"
-          selectedAsset={null}
-          setRequestedGpu={() => {}}
-          updateAssetStatus={() => {}}
-        />,
+          ],
+          requestedGpu: "auto",
+          selectedAsset: null,
+          setRequestedGpu: () => {},
+          updateAssetStatus: () => {},
+        }),
       );
     });
 
@@ -4586,14 +4620,14 @@ describe("SceneWorks app shell", () => {
     root = createRoot(container);
     await act(async () => {
       root.render(
-        <ImageStudio
-          activeProject={{ id: "project-1", name: "Noir" }}
-          assets={[]}
-          characters={[]}
-          createImageJob={() => {}}
-          deleteAsset={() => {}}
-          gpuOptions={["auto", "1"]}
-          imageModels={[
+        withImageStudioContext({
+          activeProject: { id: "project-1", name: "Noir" },
+          assets: [],
+          characters: [],
+          createImageJob: () => {},
+          deleteAsset: () => {},
+          gpuOptions: ["auto", "1"],
+          imageModels: [
             {
               id: "sensenova_u1_8b",
               name: "SenseNova-U1 8B",
@@ -4602,17 +4636,17 @@ describe("SceneWorks app shell", () => {
               defaults: { resolution: "2048x2048" },
               limits: { resolutions: ["2048x2048", "2720x1536", "1536x2720"] },
             },
-          ]}
-          latestAssets={[]}
-          loras={[]}
-          onPreview={() => {}}
-          purgeAsset={() => {}}
-          presets={[]}
-          requestedGpu="auto"
-          selectedAsset={null}
-          setRequestedGpu={() => {}}
-          updateAssetStatus={() => {}}
-        />,
+          ],
+          latestAssets: [],
+          loras: [],
+          onPreview: () => {},
+          purgeAsset: () => {},
+          presets: [],
+          requestedGpu: "auto",
+          selectedAsset: null,
+          setRequestedGpu: () => {},
+          updateAssetStatus: () => {},
+        }),
       );
     });
     await settle();
@@ -4629,19 +4663,19 @@ describe("SceneWorks app shell", () => {
     root = createRoot(container);
     await act(async () => {
       root.render(
-        <ImageStudio
-          activeProject={{ id: "project-1", name: "Noir" }}
-          assets={[]}
-          characters={[]}
-          createImageJob={createImageJob}
-          deleteAsset={() => {}}
-          gpuOptions={["auto", "1"]}
-          imageModels={[{ id: "z_image_turbo", name: "Z-Image", type: "image", family: "z-image" }]}
-          latestAssets={[]}
-          loras={[{ id: "cinematic_detail", name: "Cinematic Detail", family: "z-image", scope: "builtin", presetManaged: true }]}
-          onPreview={() => {}}
-          purgeAsset={() => {}}
-          presets={[
+        withImageStudioContext({
+          activeProject: { id: "project-1", name: "Noir" },
+          assets: [],
+          characters: [],
+          createImageJob,
+          deleteAsset: () => {},
+          gpuOptions: ["auto", "1"],
+          imageModels: [{ id: "z_image_turbo", name: "Z-Image", type: "image", family: "z-image" }],
+          latestAssets: [],
+          loras: [{ id: "cinematic_detail", name: "Cinematic Detail", family: "z-image", scope: "builtin", presetManaged: true }],
+          onPreview: () => {},
+          purgeAsset: () => {},
+          presets: [
             {
               id: "cinematic",
               name: "Cinematic",
@@ -4650,12 +4684,12 @@ describe("SceneWorks app shell", () => {
               defaults: { count: 2, negativePrompt: "flat lighting" },
               builtInLoras: [{ id: "cinematic_detail" }],
             },
-          ]}
-          requestedGpu="auto"
-          selectedAsset={null}
-          setRequestedGpu={() => {}}
-          updateAssetStatus={() => {}}
-        />,
+          ],
+          requestedGpu: "auto",
+          selectedAsset: null,
+          setRequestedGpu: () => {},
+          updateAssetStatus: () => {},
+        }),
       );
     });
     await settle();
@@ -4709,19 +4743,19 @@ describe("SceneWorks app shell", () => {
     root = createRoot(container);
     await act(async () => {
       root.render(
-        <ImageStudio
-          activeProject={{ id: "project-1", name: "Noir" }}
-          assets={[]}
-          characters={[]}
-          createImageJob={createImageJob}
-          deleteAsset={() => {}}
-          gpuOptions={["auto"]}
-          imageModels={[
+        withImageStudioContext({
+          activeProject: { id: "project-1", name: "Noir" },
+          assets: [],
+          characters: [],
+          createImageJob,
+          deleteAsset: () => {},
+          gpuOptions: ["auto"],
+          imageModels: [
             { id: "z_image_turbo", name: "Z-Image", type: "image", family: "z-image" },
             { id: "qwen_image", name: "Qwen Image", type: "image", family: "qwen-image" },
-          ]}
-          latestAssets={[]}
-          loras={[
+          ],
+          latestAssets: [],
+          loras: [
             {
               id: "qwen_detail",
               name: "Qwen Detail",
@@ -4729,22 +4763,22 @@ describe("SceneWorks app shell", () => {
               scope: "builtin",
               presetManaged: true,
             },
-          ]}
-          onPreview={() => {}}
-          purgeAsset={() => {}}
-          presets={[
+          ],
+          onPreview: () => {},
+          purgeAsset: () => {},
+          presets: [
             {
               id: "cinematic",
               name: "Cinematic",
               workflow: "text_to_image",
               builtInLoras: [{ id: "qwen_detail", weight: 0.4 }],
             },
-          ]}
-          requestedGpu="auto"
-          selectedAsset={null}
-          setRequestedGpu={() => {}}
-          updateAssetStatus={() => {}}
-        />,
+          ],
+          requestedGpu: "auto",
+          selectedAsset: null,
+          setRequestedGpu: () => {},
+          updateAssetStatus: () => {},
+        }),
       );
     });
 
@@ -4842,30 +4876,30 @@ describe("SceneWorks app shell", () => {
     root = createRoot(container);
     await act(async () => {
       root.render(
-        <ImageStudio
-          activeProject={{ id: "project-1", name: "Noir" }}
-          assets={[]}
-          characters={[]}
-          createImageJob={createImageJob}
-          deleteAsset={() => {}}
-          gpuOptions={["auto"]}
-          imageModels={[
+        withImageStudioContext({
+          activeProject: { id: "project-1", name: "Noir" },
+          assets: [],
+          characters: [],
+          createImageJob,
+          deleteAsset: () => {},
+          gpuOptions: ["auto"],
+          imageModels: [
             { id: "qwen_image", name: "Qwen Image", type: "image", family: "qwen-image" },
             { id: "z_image_turbo", name: "Z-Image", type: "image", family: "z-image" },
-          ]}
-          latestAssets={[]}
-          loras={[]}
-          onPreview={() => {}}
-          purgeAsset={() => {}}
-          presets={[
+          ],
+          latestAssets: [],
+          loras: [],
+          onPreview: () => {},
+          purgeAsset: () => {},
+          presets: [
             { id: "qwen_detail", name: "Qwen Detail", model: "qwen_image", workflow: "text_to_image", defaults: { count: 1 } },
             { id: "cinematic", name: "Cinematic", model: "z_image_turbo", workflow: "text_to_image", defaults: { count: 4 } },
-          ]}
-          requestedGpu="auto"
-          selectedAsset={null}
-          setRequestedGpu={() => {}}
-          updateAssetStatus={() => {}}
-        />,
+          ],
+          requestedGpu: "auto",
+          selectedAsset: null,
+          setRequestedGpu: () => {},
+          updateAssetStatus: () => {},
+        }),
       );
     });
     await settle();
@@ -4884,14 +4918,14 @@ describe("SceneWorks app shell", () => {
     root = createRoot(container);
     await act(async () => {
       root.render(
-        <ImageStudio
-          activeProject={{ id: "project-1", name: "Noir" }}
-          assets={[{ id: "image-1", type: "image", displayName: "Frame One" }]}
-          characters={[]}
-          createImageJob={() => {}}
-          deleteAsset={() => {}}
-          gpuOptions={["auto"]}
-          imageModels={[
+        withImageStudioContext({
+          activeProject: { id: "project-1", name: "Noir" },
+          assets: [{ id: "image-1", type: "image", displayName: "Frame One" }],
+          characters: [],
+          createImageJob: () => {},
+          deleteAsset: () => {},
+          gpuOptions: ["auto"],
+          imageModels: [
             { id: "z_image_turbo", name: "Z-Image", type: "image", family: "z-image", capabilities: ["text_to_image"] },
             {
               id: "sensenova_u1_8b",
@@ -4909,17 +4943,17 @@ describe("SceneWorks app shell", () => {
               capabilities: ["text_to_image", "edit_image"],
               limits: { resolutions: ["2048x2048"] },
             },
-          ]}
-          latestAssets={[]}
-          loras={[]}
-          onPreview={() => {}}
-          purgeAsset={() => {}}
-          presets={[]}
-          requestedGpu="auto"
-          selectedAsset={{ id: "image-1", type: "image", displayName: "Frame One" }}
-          setRequestedGpu={() => {}}
-          updateAssetStatus={() => {}}
-        />,
+          ],
+          latestAssets: [],
+          loras: [],
+          onPreview: () => {},
+          purgeAsset: () => {},
+          presets: [],
+          requestedGpu: "auto",
+          selectedAsset: { id: "image-1", type: "image", displayName: "Frame One" },
+          setRequestedGpu: () => {},
+          updateAssetStatus: () => {},
+        }),
       );
     });
     await settle();
@@ -4944,19 +4978,19 @@ describe("SceneWorks app shell", () => {
     root = createRoot(container);
     await act(async () => {
       root.render(
-        <ImageStudio
-          activeProject={{ id: "project-1", name: "Noir" }}
-          assets={[{ id: "image-1", type: "image", displayName: "Frame One" }]}
-          characters={[]}
-          createImageJob={() => {}}
-          deleteAsset={() => {}}
-          gpuOptions={["auto"]}
-          imageModels={[{ id: "z_image_turbo", name: "Z-Image", type: "image", family: "z-image", capabilities: ["edit_image"] }]}
-          latestAssets={[]}
-          loras={[]}
-          onPreview={() => {}}
-          purgeAsset={() => {}}
-          presets={[
+        withImageStudioContext({
+          activeProject: { id: "project-1", name: "Noir" },
+          assets: [{ id: "image-1", type: "image", displayName: "Frame One" }],
+          characters: [],
+          createImageJob: () => {},
+          deleteAsset: () => {},
+          gpuOptions: ["auto"],
+          imageModels: [{ id: "z_image_turbo", name: "Z-Image", type: "image", family: "z-image", capabilities: ["edit_image"] }],
+          latestAssets: [],
+          loras: [],
+          onPreview: () => {},
+          purgeAsset: () => {},
+          presets: [
             {
               id: "cinematic",
               name: "Cinematic",
@@ -4971,12 +5005,12 @@ describe("SceneWorks app shell", () => {
               workflow: "text_to_image",
               modes: ["character_image"],
             },
-          ]}
-          requestedGpu="auto"
-          selectedAsset={{ id: "image-1", type: "image", displayName: "Frame One" }}
-          setRequestedGpu={() => {}}
-          updateAssetStatus={() => {}}
-        />,
+          ],
+          requestedGpu: "auto",
+          selectedAsset: { id: "image-1", type: "image", displayName: "Frame One" },
+          setRequestedGpu: () => {},
+          updateAssetStatus: () => {},
+        }),
       );
     });
     await settle();
@@ -4997,26 +5031,26 @@ describe("SceneWorks app shell", () => {
     root = createRoot(container);
     await act(async () => {
       root.render(
-        <ImageStudio
-          activeProject={{ id: "project-1", name: "Noir" }}
-          assets={[{ id: "image-1", type: "image", displayName: "Frame One" }]}
-          characters={[]}
-          createImageJob={() => {}}
-          deleteAsset={() => {}}
-          gpuOptions={["auto"]}
-          imageModels={[
+        withImageStudioContext({
+          activeProject: { id: "project-1", name: "Noir" },
+          assets: [{ id: "image-1", type: "image", displayName: "Frame One" }],
+          characters: [],
+          createImageJob: () => {},
+          deleteAsset: () => {},
+          gpuOptions: ["auto"],
+          imageModels: [
             { id: "z_image_turbo", name: "Z-Image", type: "image", family: "z-image", capabilities: ["text_to_image", "edit_image"] },
-          ]}
-          latestAssets={[]}
-          loras={[]}
-          onPreview={() => {}}
-          purgeAsset={() => {}}
-          presets={[]}
-          requestedGpu="auto"
-          selectedAsset={{ id: "image-1", type: "image", displayName: "Frame One" }}
-          setRequestedGpu={() => {}}
-          updateAssetStatus={() => {}}
-        />,
+          ],
+          latestAssets: [],
+          loras: [],
+          onPreview: () => {},
+          purgeAsset: () => {},
+          presets: [],
+          requestedGpu: "auto",
+          selectedAsset: { id: "image-1", type: "image", displayName: "Frame One" },
+          setRequestedGpu: () => {},
+          updateAssetStatus: () => {},
+        }),
       );
     });
     await settle();

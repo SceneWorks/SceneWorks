@@ -41,6 +41,7 @@ import {
   PresetValidationWarnings,
   useGenerationStudio,
 } from "./generationStudio.jsx";
+import { useAppContext } from "../context/AppContext.js";
 
 // Used only for models that don't declare limits.resolutions (e.g. user-imported).
 const DEFAULT_RESOLUTION_OPTIONS = ["768x768", "1024x1024", "1280x720", "720x1280"];
@@ -113,30 +114,38 @@ function jobPendingSlotLabel(job, index) {
   return `Pending #${index + 1}`;
 }
 
-export function ImageStudio({
-  activeProject,
-  assets,
-  characters,
-  createImageJob,
-  deleteAsset,
-  purgeAsset,
-  gpuOptions,
-  imageModels,
-  latestAssets,
-  launchRequest,
-  localJobs: trackedLocalJobs = [],
-  loras = [],
-  onCancelJob,
-  onLocalJobCreated,
-  onOpenPresets,
-  onOpenQueue,
-  onPreview,
-  presets = [],
-  requestedGpu,
-  selectedAsset,
-  setRequestedGpu,
-  updateAssetStatus,
-}) {
+export function ImageStudio() {
+  const {
+    activeProject,
+    assets,
+    characters,
+    createImageJob,
+    deleteAsset,
+    purgeAsset,
+    gpuOptions,
+    imageModels,
+    latestImageAssets,
+    studioLaunch,
+    imageLocalJobs = [],
+    loras = [],
+    jobAction,
+    rememberLocalGenerationJob,
+    setActiveView,
+    setPreviewAsset,
+    presets = [],
+    requestedGpu,
+    selectedAsset,
+    setRequestedGpu,
+    updateAssetStatus,
+  } = useAppContext();
+  const latestAssets = latestImageAssets;
+  const launchRequest = studioLaunch;
+  const trackedLocalJobs = imageLocalJobs;
+  const onCancelJob = (job) => jobAction(job, "cancel");
+  const onLocalJobCreated = (job) => rememberLocalGenerationJob("image", job);
+  const onOpenPresets = () => setActiveView("Presets");
+  const onOpenQueue = () => setActiveView("Queue");
+  const onPreview = setPreviewAsset;
   const [suggestions] = useState(() => pickSuggestions(4));
   const [mode, setMode] = useState("text_to_image");
   const [prompt, setPrompt] = useState("A cinematic frame of a neon street at midnight");
