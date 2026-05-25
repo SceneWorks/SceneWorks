@@ -32,42 +32,60 @@ export const fallbackModels = [
     name: "Z-Image-Turbo",
     type: "image",
     capabilities: ["text_to_image", "style_variations", "character_image"],
-    ui: { description: "Fast local text-to-image target." },
+    ui: {
+      description: "Fast local text-to-image target.",
+      promptGuide: { title: "Z-Image-Turbo Prompt Guide", path: "/prompt-guides/z-image-turbo.md" },
+    },
   },
   {
     id: "qwen_image",
     name: "Qwen Image",
     type: "image",
     capabilities: ["text_to_image", "style_variations"],
-    ui: { description: "Qwen text-to-image target." },
+    ui: {
+      description: "Qwen text-to-image target.",
+      promptGuide: { title: "Qwen Image Prompt Guide", path: "/prompt-guides/qwen-image.md" },
+    },
   },
   {
     id: "z_image_edit",
     name: "Z-Image-Edit",
     type: "image",
     capabilities: ["edit_image"],
-    ui: { description: "Image edit target." },
+    ui: {
+      description: "Image edit target.",
+      promptGuide: { title: "Z-Image-Edit Prompt Guide", path: "/prompt-guides/z-image-edit.md" },
+    },
   },
   {
     id: "qwen_image_edit",
     name: "Qwen Image Edit",
     type: "image",
     capabilities: ["edit_image"],
-    ui: { description: "Qwen image edit target." },
+    ui: {
+      description: "Qwen image edit target.",
+      promptGuide: { title: "Qwen Image Edit Prompt Guide", path: "/prompt-guides/qwen-image-edit.md" },
+    },
   },
   {
     id: "lens",
     name: "Lens",
     type: "image",
     capabilities: ["text_to_image", "style_variations"],
-    ui: { description: "Microsoft Lens base text-to-image (20-step, CFG 5.0); higher quality than Turbo, also the LoRA training base." },
+    ui: {
+      description: "Microsoft Lens base text-to-image (20-step, CFG 5.0); higher quality than Turbo, also the LoRA training base.",
+      promptGuide: { title: "Lens Prompt Guide", path: "/prompt-guides/lens.md" },
+    },
   },
   {
     id: "lens_turbo",
     name: "Lens-Turbo",
     type: "image",
     capabilities: ["text_to_image", "style_variations"],
-    ui: { description: "Microsoft Lens distilled 4-step text-to-image; strong text rendering, large-VRAM GPU." },
+    ui: {
+      description: "Microsoft Lens distilled 4-step text-to-image; strong text rendering, large-VRAM GPU.",
+      promptGuide: { title: "Lens-Turbo Prompt Guide", path: "/prompt-guides/lens-turbo.md" },
+    },
   },
   {
     id: "sensenova_u1_8b",
@@ -75,7 +93,10 @@ export const fallbackModels = [
     type: "image",
     capabilities: ["text_to_image", "edit_image", "vqa", "interleave"],
     limits: { resolutions: ["2048x2048", "2720x1536", "2496x1664", "2368x1760", "1536x2720", "1664x2496", "1760x2368"] },
-    ui: { description: "Unified multimodal model (NEO-unify, ~16B); native text-to-image and instruction editing with strong text rendering and infographics. Heavy (~42GB bf16); CUDA or 96GB+ Apple Silicon." },
+    ui: {
+      description: "Unified multimodal model (NEO-unify, ~16B); native text-to-image and instruction editing with strong text rendering and infographics. Heavy (~42GB bf16); CUDA or 96GB+ Apple Silicon.",
+      promptGuide: { title: "SenseNova-U1 8B Prompt Guide", path: "/prompt-guides/sensenova-u1-8b.md" },
+    },
   },
   {
     id: "sensenova_u1_8b_fast",
@@ -83,7 +104,10 @@ export const fallbackModels = [
     type: "image",
     capabilities: ["text_to_image", "edit_image"],
     limits: { resolutions: ["2048x2048", "2720x1536", "2496x1664", "2368x1760", "1536x2720", "1664x2496", "1760x2368"] },
-    ui: { description: "8-step distilled SenseNova-U1; ~5-6x faster text-to-image and editing (~50s/image on MPS) at a small quality trade-off. Shares the base 8B weights; a ~0.4GB distill LoRA downloads automatically. Distilled editing is experimental — use the base model for max-quality edits." },
+    ui: {
+      description: "8-step distilled SenseNova-U1; ~5-6x faster text-to-image and editing (~50s/image on MPS) at a small quality trade-off. Shares the base 8B weights; a ~0.4GB distill LoRA downloads automatically. Distilled editing is experimental — use the base model for max-quality edits.",
+      promptGuide: { title: "SenseNova-U1 8B Fast Prompt Guide", path: "/prompt-guides/sensenova-u1-8b-fast.md" },
+    },
   },
   {
     id: "ltx_2_3",
@@ -100,6 +124,7 @@ export const fallbackModels = [
     ui: {
       description: "First-class short-shot video target.",
       durationHint: "Best at 10s or less for the current workflow.",
+      promptGuide: { title: "LTX-2.3 Prompt Guide", path: "/prompt-guides/ltx-2-3.md" },
     },
   },
   {
@@ -117,6 +142,7 @@ export const fallbackModels = [
     ui: {
       description: "Fallback video family.",
       durationHint: "Keep clips short until local looping behavior is validated.",
+      promptGuide: { title: "Wan2.2 Prompt Guide", path: "/prompt-guides/wan-2-2.md" },
     },
   },
   {
@@ -134,6 +160,7 @@ export const fallbackModels = [
     ui: {
       description: "Wan2.2 A14B text-to-video (high/low-noise mixture-of-experts).",
       durationHint: "Heavier than 5B — keep clips at 5s or less. Generates at 16fps.",
+      promptGuide: { title: "Wan2.2 14B Text-to-Video Prompt Guide", path: "/prompt-guides/wan-2-2-t2v-14b.md" },
     },
   },
   {
@@ -151,6 +178,7 @@ export const fallbackModels = [
     ui: {
       description: "Wan2.2 A14B image-to-video (high/low-noise mixture-of-experts).",
       durationHint: "Heavier than 5B — keep clips at 5s or less. Generates at 16fps.",
+      promptGuide: { title: "Wan2.2 14B Image-to-Video Prompt Guide", path: "/prompt-guides/wan-2-2-i2v-14b.md" },
     },
   },
 ];
