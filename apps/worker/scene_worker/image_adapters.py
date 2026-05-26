@@ -324,6 +324,14 @@ MODEL_TARGETS = {
         "variant": "fp16",
         "repo": "Kwai-Kolors/Kolors-diffusers",
         "adapter": "kolors_diffusers",
+        # IP-Adapter-Plus (general reference image) for Character Studio "many
+        # images from one reference". Needs its own CLIP-ViT-L-336 image encoder
+        # and the safetensors weights from a PR revision. >24GB with the adapter.
+        "ipAdapter": {
+            "repo": "Kwai-Kolors/Kolors-IP-Adapter-Plus",
+            "weight": "ip_adapter_plus_general.safetensors",
+            "revision": "refs/pr/4",
+        },
     },
     "chroma1_hd": {
         "label": "Chroma1-HD",
@@ -386,6 +394,7 @@ class ImageRequest:
     character_id: str | None
     character_look_id: str | None
     source_asset_id: str | None
+    reference_asset_id: str | None
     advanced: dict[str, Any]
     model_manifest_entry: dict[str, Any]
     upscale: UpscaleRequest = field(default_factory=UpscaleRequest)
@@ -436,6 +445,7 @@ def image_request_from_job(job: dict[str, Any]) -> ImageRequest:
         character_id=payload.get("characterId"),
         character_look_id=payload.get("characterLookId"),
         source_asset_id=payload.get("sourceAssetId"),
+        reference_asset_id=payload.get("referenceAssetId"),
         model_manifest_entry=(
             payload.get("modelManifestEntry") if isinstance(payload.get("modelManifestEntry"), dict) else {}
         ),
@@ -1746,7 +1756,17 @@ class KolorsDiffusersAdapter:
         self._img2img_pipe: Any | None = None
         self._loaded_repo: str | None = None
         self._loaded_model: str | None = None
+        # Whether the resident text pipe has the IP-Adapter (+ image encoder) loaded.
+        # A plain-T2I pipe and an IP-Adapter pipe are not interchangeable, so this is
+        # part of the text-pipe cache key.
+        self._text_ip_adapter: bool = False
         self._loaded_lora_states: dict[str, LoraPipelineState] = {}
+
+    @staticmethod
+    def _use_ip_adapter(request: ImageRequest) -> bool:
+        # IP-Adapter reference conditioning runs on the text-to-image pipeline only
+        # (reference + img2img edit together is a future enhancement).
+        return request.mode != "edit_image" and bool(request.reference_asset_id)
 
     def loaded_models(self) -> list[str]:
         return sorted({value for value in (self._loaded_repo, self._loaded_model) if value})
@@ -1866,9 +1886,18 @@ class KolorsDiffusersAdapter:
         activate_torch_device(torch, device)
         dtype = select_torch_dtype(torch, device, request.advanced.get("dtype"))
         use_img2img = request.mode == "edit_image"
+        use_ip_adapter = self._use_ip_adapter(request)
+        ip_adapter = model_target.get("ipAdapter") or {}
+        if use_ip_adapter and not ip_adapter:
+            raise RuntimeError(
+                f"{request.model} does not support reference-image (IP-Adapter) generation."
+            )
         cpu_offload = bool(request.advanced.get("cpuOffload", False))
         cached_pipe = self._img2img_pipe if use_img2img else self._text_pipe
-        if cached_pipe is not None and self._loaded_repo == repo:
+        # The text pipe's IP-Adapter state is part of its cache key: a plain-T2I pipe
+        # cannot serve a reference job, and vice versa.
+        text_state_matches = use_img2img or self._text_ip_adapter == use_ip_adapter
+        if cached_pipe is not None and self._loaded_repo == repo and text_state_matches:
             self._loaded_model = request.model
             progress("loading_model", "loading_model", 0.22, f"Using cached {model_target['label']}.")
             emit_worker_event(
@@ -1883,18 +1912,26 @@ class KolorsDiffusersAdapter:
             )
             return cached_pipe
 
-        # Hold only one pipeline per repo: evict the other mode (or a stale repo)
-        # before loading so we don't keep two ~16GB Kolors pipelines resident.
+        # Hold only one pipeline per repo: evict stale pipes (other mode, stale repo,
+        # or a text pipe whose IP-Adapter state no longer matches) before loading so we
+        # don't keep two ~16GB Kolors pipelines resident.
         if self._loaded_repo and self._loaded_repo != repo:
             self._evict_pipelines(torch)
-        elif use_img2img and self._text_pipe is not None:
-            self._text_pipe = None
-            self._forget_loaded_loras("text")
-            self._empty_cuda_cache(torch)
-        elif not use_img2img and self._img2img_pipe is not None:
-            self._img2img_pipe = None
-            self._forget_loaded_loras("img2img")
-            self._empty_cuda_cache(torch)
+        elif use_img2img:
+            if self._text_pipe is not None:
+                self._text_pipe = None
+                self._text_ip_adapter = False
+                self._forget_loaded_loras("text")
+                self._empty_cuda_cache(torch)
+        else:
+            if self._text_pipe is not None:
+                self._text_pipe = None
+                self._forget_loaded_loras("text")
+                self._empty_cuda_cache(torch)
+            if self._img2img_pipe is not None:
+                self._img2img_pipe = None
+                self._forget_loaded_loras("img2img")
+                self._empty_cuda_cache(torch)
 
         pipeline_name = "KolorsImg2ImgPipeline" if use_img2img else "KolorsPipeline"
         pipeline_class = getattr(diffusers, pipeline_name, None)
@@ -1915,19 +1952,50 @@ class KolorsDiffusersAdapter:
             device=device,
             dtype=str(dtype),
             useImg2img=use_img2img,
+            useIpAdapter=use_ip_adapter,
             cpuOffload=cpu_offload,
             cached=cache_action == "Loading cached",
         )
         # fp16-only repo: pass the variant or from_pretrained looks for the
         # nonexistent default diffusion_pytorch_model.bin and fails (e.g. in vae/).
-        pipe = pipeline_class.from_pretrained(
-            repo, torch_dtype=dtype, variant=model_target.get("variant")
-        )
+        from_pretrained_kwargs: dict[str, Any] = {
+            "torch_dtype": dtype,
+            "variant": model_target.get("variant"),
+        }
+        if use_ip_adapter:
+            # IP-Adapter-Plus needs its own CLIP-ViT-L-336 image encoder, loaded from a
+            # PR revision that ships safetensors; pass it in so load_ip_adapter wires it
+            # up (with image_encoder_folder=None below).
+            transformers = importlib.import_module("transformers")
+            encoder_class = getattr(transformers, "CLIPVisionModelWithProjection", None)
+            if encoder_class is None:
+                raise RuntimeError(
+                    "transformers does not expose CLIPVisionModelWithProjection, "
+                    "required for the Kolors IP-Adapter image encoder."
+                )
+            from_pretrained_kwargs["image_encoder"] = encoder_class.from_pretrained(
+                ip_adapter["repo"],
+                subfolder="image_encoder",
+                revision=ip_adapter.get("revision"),
+                torch_dtype=dtype,
+                low_cpu_mem_usage=True,
+            )
+        pipe = pipeline_class.from_pretrained(repo, **from_pretrained_kwargs)
         # Kolors-diffusers ships EulerDiscreteScheduler; the model card recommends
         # DPMSolverMultistep with Karras sigmas for the ~25-step config.
         scheduler_class = getattr(diffusers, "DPMSolverMultistepScheduler", None)
         if scheduler_class is not None and getattr(pipe, "scheduler", None) is not None:
             pipe.scheduler = scheduler_class.from_config(pipe.scheduler.config, use_karras_sigmas=True)
+        if use_ip_adapter:
+            # image_encoder_folder=None: we already supplied the encoder above.
+            pipe.load_ip_adapter(
+                ip_adapter["repo"],
+                subfolder="",
+                weight_name=ip_adapter["weight"],
+                revision=ip_adapter.get("revision"),
+                image_encoder_folder=None,
+            )
+            pipe.set_ip_adapter_scale(self._ip_adapter_scale(request))
         emit_worker_event(
             "image_pipeline_load_complete",
             jobId=job_id,
@@ -1936,6 +2004,8 @@ class KolorsDiffusersAdapter:
             repo=repo,
             componentDevices=pipeline_component_devices(pipe),
         )
+        # IP-Adapter pushes Kolors past ~24GB; if memory is tight enable cpuOffload in
+        # advanced settings (forcing offload on MPS has its own caveats, so it stays opt-in).
         offload_enabled = cpu_offload and hasattr(pipe, "enable_model_cpu_offload")
         if offload_enabled:
             pipe.enable_model_cpu_offload()
@@ -1967,6 +2037,7 @@ class KolorsDiffusersAdapter:
             self._img2img_pipe = pipe
         else:
             self._text_pipe = pipe
+            self._text_ip_adapter = use_ip_adapter
         self._loaded_repo = repo
         self._loaded_model = request.model
         return pipe
@@ -1974,6 +2045,7 @@ class KolorsDiffusersAdapter:
     def _evict_pipelines(self, torch: Any) -> None:
         self._text_pipe = None
         self._img2img_pipe = None
+        self._text_ip_adapter = False
         self._loaded_repo = None
         self._loaded_model = None
         self._loaded_lora_states.clear()
@@ -2013,6 +2085,12 @@ class KolorsDiffusersAdapter:
             # far the result moves from it (0 = unchanged, 1 = full re-generation).
             kwargs["image"] = load_source_image(project_path, request)
             kwargs["strength"] = float(request.advanced.get("strength", 0.6))
+        elif self._use_ip_adapter(request):
+            # IP-Adapter conditions T2I on a reference image (style/identity). Vary
+            # prompt/seed across the batch to get many images of the same subject.
+            kwargs["ip_adapter_image"] = load_reference_image(project_path, request.reference_asset_id)
+            if hasattr(pipe, "set_ip_adapter_scale"):
+                pipe.set_ip_adapter_scale(self._ip_adapter_scale(request))
         step_callback = cancel_step_callback(pipe, cancel_requested)
         if step_callback is not None:
             kwargs["callback_on_step_end"] = step_callback
@@ -2055,6 +2133,15 @@ class KolorsDiffusersAdapter:
             1,
             256,
         )
+
+    def _ip_adapter_scale(self, request: ImageRequest) -> float:
+        # How strongly the reference image conditions the result (0 = ignore,
+        # 1 = maximal). ~0.6 keeps subject identity while letting the prompt steer.
+        try:
+            scale = float(request.advanced.get("ipAdapterScale", 0.6))
+        except (TypeError, ValueError):
+            return 0.6
+        return max(0.0, min(1.0, scale))
 
 
 class ChromaDiffusersAdapter:
@@ -3810,6 +3897,23 @@ def load_source_image(project_path: Path, request: ImageRequest) -> Image.Image:
     except (OSError, Image.DecompressionBombError, Image.DecompressionBombWarning) as exc:
         raise RuntimeError(f"Source image could not be loaded safely: {source_path}") from exc
     return image.resize((request.width, request.height))
+
+
+def load_reference_image(project_path: Path, reference_asset_id: str) -> Image.Image:
+    # IP-Adapter reference image (style/identity conditioning). Resolved only through
+    # the project sidecar/DB (find_asset_media_path constrains to the project root) —
+    # no client-supplied path escape hatch. Returned at native resolution: the
+    # IP-Adapter's CLIP image encoder does its own preprocessing, so resizing it to the
+    # output W×H here would distort the conditioning.
+    if not reference_asset_id:
+        raise RuntimeError("Reference-image generation requires a reference image asset.")
+    reference_path = find_asset_media_path(project_path, reference_asset_id)
+    try:
+        return Image.open(reference_path).convert("RGB")
+    except (OSError, Image.DecompressionBombError, Image.DecompressionBombWarning) as exc:
+        raise RuntimeError(
+            f"Reference image could not be loaded safely: {reference_path}"
+        ) from exc
 
 
 def find_asset_media_path(project_path: Path, asset_id: str) -> Path:
