@@ -15,7 +15,12 @@
     <script src="/theme-init.js"></script>
   </head>
   <body>
-    <div id="root"></div>
+    <div id="root">
+      <main class="app-boot-fallback" role="status">
+        <strong>SceneWorks is starting</strong>
+        <span>If this stays here, refresh the page or check the browser console.</span>
+      </main>
+    </div>
     <script type="module" src="/src/main.jsx"></script>
   </body>
 </html>

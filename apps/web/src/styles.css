@@ -5479,6 +5479,40 @@ label {
   border-style: dashed;
 }
 
+.app-fallback {
+  min-height: 100vh;
+  display: grid;
+  place-items: center;
+  padding: 24px;
+  background: var(--bg);
+}
+
+.app-boot-fallback {
+  min-height: 100vh;
+  display: grid;
+  place-items: center;
+  align-content: center;
+  gap: 8px;
+  padding: 24px;
+  color: var(--text);
+  background: var(--bg);
+  font-family: "Plus Jakarta Sans", system-ui, sans-serif;
+  text-align: center;
+}
+
+.app-boot-fallback span {
+  max-width: 420px;
+  color: var(--text-muted);
+  font-size: 13px;
+}
+
+.app-fallback-panel {
+  width: min(100%, 520px);
+  display: grid;
+  gap: 14px;
+  color: var(--text);
+}
+
 .job-row {
   display: grid;
   gap: 10px;
