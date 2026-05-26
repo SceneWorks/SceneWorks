@@ -23,6 +23,7 @@ from .image_adapters import (
     LensTurboAdapter,
     ProceduralImageAdapter,
     QwenImageAdapter,
+    SdxlDiffusersAdapter,
     SenseNovaU1Adapter,
     ZImageDiffusersAdapter,
     create_image_adapter,
@@ -1255,6 +1256,7 @@ def run_worker_loop(settings: WorkerSettings) -> None:
         "sensenova_u1": SenseNovaU1Adapter(),
         "flux_diffusers": FluxDiffusersAdapter(),
         "kolors_diffusers": KolorsDiffusersAdapter(),
+        "sdxl_diffusers": SdxlDiffusersAdapter(),
         "chroma_diffusers": ChromaDiffusersAdapter(),
     }
     max_registration_attempts = 20
