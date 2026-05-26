@@ -2203,6 +2203,63 @@ async fn timeline_routes_persist_and_create_worker_jobs() {
 }
 
 #[tokio::test]
+async fn image_job_route_threads_upscale_contract_when_enabled() {
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+
+    let base_request = json!({
+        "projectId": "project-1",
+        "mode": "text_to_image",
+        "prompt": "mist over hills",
+        "count": 1,
+        "seed": 123
+    });
+    let (status, base_job) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/image/jobs",
+        base_request.clone(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    assert!(base_job["payload"].get("upscale").is_none());
+
+    let mut disabled_request = base_request.clone();
+    disabled_request["upscale"] = json!({ "enabled": false, "factor": 4, "engine": "real-esrgan" });
+    let (status, disabled_job) =
+        request(app.clone(), "POST", "/api/v1/image/jobs", disabled_request).await;
+    assert_eq!(status, StatusCode::CREATED);
+    assert_eq!(disabled_job["payload"], base_job["payload"]);
+
+    let mut enabled_request = base_request;
+    enabled_request["upscale"] = json!({ "enabled": true, "factor": 4, "engine": "real-esrgan" });
+    let (status, enabled_job) =
+        request(app.clone(), "POST", "/api/v1/image/jobs", enabled_request).await;
+    assert_eq!(status, StatusCode::CREATED);
+    assert_eq!(
+        enabled_job["payload"]["upscale"],
+        json!({ "enabled": true, "factor": 4, "engine": "real-esrgan" })
+    );
+
+    let (status, error) = request(
+        app,
+        "POST",
+        "/api/v1/image/jobs",
+        json!({
+            "projectId": "project-1",
+            "mode": "text_to_image",
+            "prompt": "mist over hills",
+            "count": 1,
+            "seed": 123,
+            "upscale": { "enabled": true, "factor": 3, "engine": "real-esrgan" }
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(error["detail"], "upscale.factor must be 2 or 4");
+}
+
+#[tokio::test]
 async fn image_and_video_job_routes_normalize_payloads() {
     let temp_dir = tempfile::tempdir().expect("temp dir creates");
     let app = create_app(test_settings(&temp_dir)).expect("app creates");

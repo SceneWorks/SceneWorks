@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import gc
 import hashlib
 import importlib
@@ -291,6 +291,13 @@ MODEL_TARGETS = {
 
 
 @dataclass(frozen=True)
+class UpscaleRequest:
+    enabled: bool = False
+    factor: int = 2
+    engine: str = "real-esrgan"
+
+
+@dataclass(frozen=True)
 class ImageRequest:
     project_id: str
     mode: str
@@ -308,6 +315,19 @@ class ImageRequest:
     character_look_id: str | None
     source_asset_id: str | None
     advanced: dict[str, Any]
+    upscale: UpscaleRequest = field(default_factory=UpscaleRequest)
+
+
+def upscale_request_from_payload(payload: dict[str, Any]) -> UpscaleRequest:
+    raw = payload.get("upscale")
+    if not isinstance(raw, dict):
+        return UpscaleRequest()
+    enabled = bool(raw.get("enabled", False))
+    factor = safe_int(raw.get("factor"), 2, 2, 4)
+    if factor not in {2, 4}:
+        factor = 2
+    engine = str(raw.get("engine") or "real-esrgan").strip() or "real-esrgan"
+    return UpscaleRequest(enabled=enabled, factor=factor, engine=engine)
 
 
 def image_request_from_job(job: dict[str, Any]) -> ImageRequest:
@@ -331,6 +351,7 @@ def image_request_from_job(job: dict[str, Any]) -> ImageRequest:
         character_id=payload.get("characterId"),
         character_look_id=payload.get("characterLookId"),
         source_asset_id=payload.get("sourceAssetId"),
+        upscale=upscale_request_from_payload(payload),
         advanced=payload.get("advanced", {}),
     )
 
@@ -2509,5 +2530,3 @@ def render_preview_image(request: ImageRequest, model_target: dict[str, Any], se
         draw.text((28, y), line, fill=(255, 255, 255, 242), font=font)
         y += 18
     return image
-
-

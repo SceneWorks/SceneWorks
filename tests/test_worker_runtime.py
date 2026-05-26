@@ -1177,6 +1177,25 @@ def test_image_request_clamps_above_new_ceiling():
     assert request.height == 4096
 
 
+def test_image_request_parses_optional_upscale_contract():
+    default_request = image_request_from_job({"payload": {"projectId": "p"}})
+    assert default_request.upscale.enabled is False
+    assert default_request.upscale.factor == 2
+    assert default_request.upscale.engine == "real-esrgan"
+
+    request = image_request_from_job(
+        {
+            "payload": {
+                "projectId": "p",
+                "upscale": {"enabled": True, "factor": 4, "engine": "real-esrgan"},
+            }
+        }
+    )
+    assert request.upscale.enabled is True
+    assert request.upscale.factor == 4
+    assert request.upscale.engine == "real-esrgan"
+
+
 def test_create_image_adapter_routes_sensenova_u1_fast():
     adapter = create_image_adapter({"payload": {"model": "sensenova_u1_8b_fast"}})
     assert adapter.__class__.__name__ == "SenseNovaU1Adapter"

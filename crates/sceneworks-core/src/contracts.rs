@@ -491,6 +491,44 @@ pub struct JobCreateRequest {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct ImageUpscaleRequest {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default = "default_image_upscale_factor")]
+    pub factor: u8,
+    #[serde(default = "default_image_upscale_engine")]
+    pub engine: String,
+    #[serde(flatten)]
+    pub extra: ExtraFields,
+}
+
+impl Default for ImageUpscaleRequest {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            factor: default_image_upscale_factor(),
+            engine: default_image_upscale_engine(),
+            extra: ExtraFields::default(),
+        }
+    }
+}
+
+impl ImageUpscaleRequest {
+    pub fn is_disabled(&self) -> bool {
+        !self.enabled
+    }
+}
+
+pub const fn default_image_upscale_factor() -> u8 {
+    2
+}
+
+pub fn default_image_upscale_engine() -> String {
+    "real-esrgan".to_owned()
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct WorkerRegisterRequest {
     pub worker_id: String,
     pub gpu_id: String,
@@ -1200,4 +1238,40 @@ pub struct ModelInstallMarker {
     pub completed_at: String,
     #[serde(flatten)]
     pub extra: ExtraFields,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn image_upscale_request_round_trips_when_present() {
+        let value = json!({
+            "enabled": true,
+            "factor": 4,
+            "engine": "real-esrgan"
+        });
+
+        let request: ImageUpscaleRequest =
+            serde_json::from_value(value.clone()).expect("upscale request parses");
+
+        assert!(request.enabled);
+        assert_eq!(request.factor, 4);
+        assert_eq!(request.engine, "real-esrgan");
+        assert_eq!(
+            serde_json::to_value(request).expect("upscale request serializes"),
+            value
+        );
+    }
+
+    #[test]
+    fn image_upscale_request_defaults_to_disabled() {
+        let request: ImageUpscaleRequest =
+            serde_json::from_value(json!({})).expect("empty upscale request parses");
+
+        assert!(request.is_disabled());
+        assert_eq!(request.factor, 2);
+        assert_eq!(request.engine, "real-esrgan");
+    }
 }

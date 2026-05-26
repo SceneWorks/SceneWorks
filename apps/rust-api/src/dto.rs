@@ -366,6 +366,8 @@ pub(crate) struct ImageJobRequest {
     pub(crate) source_asset_id: Option<String>,
     #[serde(default = "default_requested_gpu")]
     pub(crate) requested_gpu: String,
+    #[serde(default, skip_serializing_if = "ImageUpscaleRequest::is_disabled")]
+    pub(crate) upscale: ImageUpscaleRequest,
     #[serde(default)]
     pub(crate) advanced: JsonObject,
 }

@@ -20,9 +20,9 @@ use axum::{Json, Router};
 use futures_util::future::join_all;
 use parking_lot::Mutex;
 use sceneworks_core::contracts::{
-    ClaimRequest, ClaimResponse, ContractNumber, DuplicateJobRequest, JobCreateRequest,
-    JobSnapshot, JobStatus, JobType, JsonObject, ProgressRequest, QueueSummary, WorkerCapability,
-    WorkerHeartbeatRequest, WorkerRegisterRequest, WorkerSnapshot, WorkerStatus,
+    ClaimRequest, ClaimResponse, ContractNumber, DuplicateJobRequest, ImageUpscaleRequest,
+    JobCreateRequest, JobSnapshot, JobStatus, JobType, JsonObject, ProgressRequest, QueueSummary,
+    WorkerCapability, WorkerHeartbeatRequest, WorkerRegisterRequest, WorkerSnapshot, WorkerStatus,
 };
 use sceneworks_core::jobs_store::{
     CreateJob, DuplicateJob, JobsStore, JobsStoreError, ProgressUpdate, RegisterWorker,
@@ -1643,6 +1643,14 @@ fn validate_image_job(payload: &ImageJobRequest) -> Result<(), ApiError> {
     }
     validate_dimension(payload.width, "width", MAX_IMAGE_DIMENSION)?;
     validate_dimension(payload.height, "height", MAX_IMAGE_DIMENSION)?;
+    if payload.upscale.enabled {
+        if ![2, 4].contains(&payload.upscale.factor) {
+            return Err(ApiError::bad_request("upscale.factor must be 2 or 4"));
+        }
+        if payload.upscale.engine.trim().is_empty() {
+            return Err(ApiError::bad_request("upscale.engine is required"));
+        }
+    }
     Ok(())
 }
 
