@@ -1211,7 +1211,7 @@ def test_create_image_upscaler_rejects_unknown_engine():
         create_image_upscaler(request)
 
 
-def test_image_asset_writer_applies_enabled_upscaler(monkeypatch, tmp_path):
+def test_image_asset_writer_retains_original_and_adds_upscaled_variant(monkeypatch, tmp_path):
     class FakeUpscaler:
         id = "real-esrgan"
 
@@ -1249,9 +1249,22 @@ def test_image_asset_writer_applies_enabled_upscaler(monkeypatch, tmp_path):
         job_id=job["id"],
     )
 
-    write = result["assetWrites"][0]
-    assert (write["width"], write["height"]) == (32, 24)
-    assert write["rawAdapterSettings"]["upscale"] == {
+    assert result["expectedCount"] == 2
+    assert len(result["assetWrites"]) == 2
+
+    original_write, upscaled_write = result["assetWrites"]
+    assert (original_write["width"], original_write["height"]) == (16, 12)
+    assert "upscale" not in original_write["rawAdapterSettings"]
+    assert upscaled_write["sourceAssetId"] == original_write["assetId"]
+    assert upscaled_write["parents"] == [original_write["assetId"]]
+    assert upscaled_write["extra"] == {
+        "isUpscaled": True,
+        "upscaledFromAssetId": original_write["assetId"],
+        "factor": 2,
+        "engine": "real-esrgan",
+    }
+    assert (upscaled_write["width"], upscaled_write["height"]) == (32, 24)
+    assert upscaled_write["rawAdapterSettings"]["upscale"] == {
         "enabled": True,
         "engine": "real-esrgan",
         "factor": 2,
@@ -1260,7 +1273,9 @@ def test_image_asset_writer_applies_enabled_upscaler(monkeypatch, tmp_path):
         "width": 32,
         "height": 24,
     }
-    with Image.open(project_path / write["mediaPath"]) as saved:
+    with Image.open(project_path / original_write["mediaPath"]) as saved:
+        assert saved.size == (16, 12)
+    with Image.open(project_path / upscaled_write["mediaPath"]) as saved:
         assert saved.size == (32, 24)
 
 

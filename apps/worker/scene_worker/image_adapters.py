@@ -439,6 +439,58 @@ class ImageAssetWriter:
         }
         asset_writes: list[dict[str, Any]] = []
         upscaler = create_image_upscaler(request, settings=settings, job_id=job_id)
+        expected_asset_count = image_count * (2 if upscaler is not None else 1)
+
+        def append_image_write(
+            *,
+            image: Image.Image,
+            asset_id: str,
+            filename: str,
+            seed: int,
+            index: int,
+            source_asset_id: str | None,
+            raw_adapter_settings: dict[str, Any],
+            display_suffix: str = "",
+            parents: list[str] | None = None,
+            extra: dict[str, Any] | None = None,
+        ) -> dict[str, Any]:
+            media_rel = f"assets/images/{generation_set_id}/{filename}"
+            image.save(project_path / media_rel, "PNG")
+            write = {
+                "assetId": asset_id,
+                "mediaPath": media_rel,
+                "mimeType": "image/png",
+                # True saved pixel dimensions, not the request's. SenseNova-U1 (and
+                # any model that snaps to a trained bucket) saves at a size that
+                # differs from request.width/height.
+                "width": image.width,
+                "height": image.height,
+                "normalizedWidth": request.width,
+                "normalizedHeight": request.height,
+                "count": request.count,
+                "family": model_target["family"],
+                "seed": seed,
+                "index": index,
+                "displayName": f"{request.prompt[:56] or 'Generated image'} #{index + 1}{display_suffix}",
+                "createdAt": created_at,
+                "mode": request.mode,
+                "model": request.model,
+                "adapter": adapter_id,
+                "prompt": request.prompt,
+                "negativePrompt": request.negative_prompt,
+                "loras": request.loras,
+                "stylePreset": request.style_preset,
+                "characterId": request.character_id,
+                "characterLookId": request.character_look_id,
+                "sourceAssetId": source_asset_id,
+                "rawAdapterSettings": raw_adapter_settings,
+            }
+            if parents is not None:
+                write["parents"] = parents
+            if extra is not None:
+                write["extra"] = extra
+            asset_writes.append(write)
+            return write
 
         for index in range(image_count):
             if cancel_requested():
@@ -449,7 +501,19 @@ class ImageAssetWriter:
                 raise InterruptedError("Image generation canceled by user.")
             source_width = image.width
             source_height = image.height
-            upscale_settings: dict[str, Any] | None = None
+            seed = resolve_seed(request.seed, request.prompt, index, request.seeds)
+            original_asset_id = f"asset_{uuid4().hex}"
+            original_filename = f"{date_slug}_{request.model}_{prompt_slug}_{index + 1:04d}.png"
+            append_image_write(
+                image=image,
+                asset_id=original_asset_id,
+                filename=original_filename,
+                seed=seed,
+                index=index,
+                source_asset_id=request.source_asset_id,
+                raw_adapter_settings=dict(raw_settings),
+            )
+
             if upscaler is not None:
                 progress(
                     "running",
@@ -457,59 +521,40 @@ class ImageAssetWriter:
                     image_batch_progress(index, image_count),
                     f"Upscaling image {index + 1} of {image_count}.",
                 )
-                image = upscaler.upscale(image, request=request, cancel_requested=cancel_requested)
+                upscaled_image = upscaler.upscale(image, request=request, cancel_requested=cancel_requested)
                 if cancel_requested():
                     raise InterruptedError("Image generation canceled by user.")
-                upscale_settings = {
+                upscale_settings: dict[str, Any] = {
                     "enabled": True,
                     "engine": upscaler.id,
                     "factor": request.upscale.factor,
                     "sourceWidth": source_width,
                     "sourceHeight": source_height,
-                    "width": image.width,
-                    "height": image.height,
+                    "width": upscaled_image.width,
+                    "height": upscaled_image.height,
                 }
-            asset_raw_settings = dict(raw_settings)
-            if upscale_settings is not None:
-                asset_raw_settings["upscale"] = upscale_settings
-
-            asset_id = f"asset_{uuid4().hex}"
-            seed = resolve_seed(request.seed, request.prompt, index, request.seeds)
-            filename = f"{date_slug}_{request.model}_{prompt_slug}_{index + 1:04d}.png"
-            media_rel = f"assets/images/{generation_set_id}/{filename}"
-            image.save(project_path / media_rel, "PNG")
-
-            asset_writes.append(
-                {
-                    "assetId": asset_id,
-                    "mediaPath": media_rel,
-                    "mimeType": "image/png",
-                    # True saved pixel dimensions, not the request's. SenseNova-U1 (and
-                    # any model that snaps to a trained bucket) saves at a size that
-                    # differs from request.width/height.
-                    "width": image.width,
-                    "height": image.height,
-                    "normalizedWidth": request.width,
-                    "normalizedHeight": request.height,
-                    "count": request.count,
-                    "family": model_target["family"],
-                    "seed": seed,
-                    "index": index,
-                    "displayName": f"{request.prompt[:56] or 'Generated image'} #{index + 1}",
-                    "createdAt": created_at,
-                    "mode": request.mode,
-                    "model": request.model,
-                    "adapter": adapter_id,
-                    "prompt": request.prompt,
-                    "negativePrompt": request.negative_prompt,
-                    "loras": request.loras,
-                    "stylePreset": request.style_preset,
-                    "characterId": request.character_id,
-                    "characterLookId": request.character_look_id,
-                    "sourceAssetId": request.source_asset_id,
-                    "rawAdapterSettings": asset_raw_settings,
-                }
-            )
+                upscaled_raw_settings = dict(raw_settings)
+                upscaled_raw_settings["upscale"] = upscale_settings
+                append_image_write(
+                    image=upscaled_image,
+                    asset_id=f"asset_{uuid4().hex}",
+                    filename=(
+                        f"{date_slug}_{request.model}_{prompt_slug}_{index + 1:04d}"
+                        f"_upscaled_x{request.upscale.factor}.png"
+                    ),
+                    seed=seed,
+                    index=index,
+                    source_asset_id=original_asset_id,
+                    raw_adapter_settings=upscaled_raw_settings,
+                    display_suffix=f" ({request.upscale.factor}x upscaled)",
+                    parents=[original_asset_id],
+                    extra={
+                        "isUpscaled": True,
+                        "upscaledFromAssetId": original_asset_id,
+                        "factor": request.upscale.factor,
+                        "engine": upscaler.id,
+                    },
+                )
             progress(
                 "saving",
                 "saving",
@@ -517,7 +562,7 @@ class ImageAssetWriter:
                 f"Saved image asset {index + 1} of {image_count}.",
                 {
                     "generationSetId": generation_set_id,
-                    "expectedCount": image_count,
+                    "expectedCount": expected_asset_count,
                     "adapter": adapter_id,
                     "model": request.model,
                     "generationSet": generation_set,
@@ -527,7 +572,7 @@ class ImageAssetWriter:
 
         return {
             "generationSetId": generation_set_id,
-            "expectedCount": image_count,
+            "expectedCount": expected_asset_count,
             "adapter": adapter_id,
             "model": request.model,
             "generationSet": generation_set,
