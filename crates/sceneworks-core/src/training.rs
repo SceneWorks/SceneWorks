@@ -399,6 +399,7 @@ pub fn builtin_training_targets() -> TrainingTargetRegistry {
         schema_version: TRAINING_CONTRACT_SCHEMA_VERSION,
         targets: vec![
             z_image_turbo_lora_target(),
+            sdxl_lora_target(),
             lens_turbo_lora_target(),
             ltx_video_lora_target(),
         ],
@@ -409,6 +410,7 @@ pub fn builtin_training_targets() -> TrainingTargetRegistry {
 /// The built-in training presets Rust owns out of the box.
 pub fn builtin_training_presets() -> TrainingPresetRegistry {
     let target = z_image_turbo_lora_target();
+    let sdxl_target = sdxl_lora_target();
     TrainingPresetRegistry {
         schema_version: TRAINING_CONTRACT_SCHEMA_VERSION,
         presets: vec![
@@ -529,6 +531,70 @@ pub fn builtin_training_presets() -> TrainingPresetRegistry {
                     "order": 60
                 })),
             ),
+            sdxl_preset(
+                &sdxl_target,
+                "sdxl_lora.character.adamw8bit.balanced",
+                "Character balanced",
+                &["character"],
+                ("adamw8bit", "balanced"),
+                |config| config,
+                object(json!({
+                    "description": "Balanced first run for 12-25 clean character images on SDXL.",
+                    "default": true,
+                    "order": 10
+                })),
+            ),
+            sdxl_preset(
+                &sdxl_target,
+                "sdxl_lora.character.adamw8bit.conservative",
+                "Character conservative",
+                &["character"],
+                ("adamw8bit", "conservative"),
+                |mut config| {
+                    config.rank = 8;
+                    config.alpha = 8;
+                    config.learning_rate = number(0.00005);
+                    config
+                },
+                object(json!({
+                    "description": "Lower-rank, lower-LR character preset for tight identity datasets.",
+                    "order": 20
+                })),
+            ),
+            sdxl_preset(
+                &sdxl_target,
+                "sdxl_lora.style.adamw8bit.balanced",
+                "Style balanced",
+                &["style"],
+                ("adamw8bit", "balanced"),
+                |mut config| {
+                    config.rank = 32;
+                    config.alpha = 16;
+                    config
+                },
+                object(json!({
+                    "description": "Higher-capacity style LoRA defaults for texture and look transfer.",
+                    "order": 30
+                })),
+            ),
+            sdxl_preset(
+                &sdxl_target,
+                "sdxl_lora.character.adamw8bit.low_vram",
+                "Low VRAM character",
+                &["character"],
+                ("adamw8bit", "low_vram"),
+                |mut config| {
+                    config.rank = 8;
+                    config.alpha = 8;
+                    config.resolution = 768;
+                    config.steps = 1200;
+                    config
+                },
+                object(json!({
+                    "description": "768px preset for tighter-VRAM SDXL training.",
+                    "order": 40
+                })),
+            ),
         ],
         extra: ExtraFields::new(),
     }
@@ -569,6 +635,58 @@ where
     config
         .advanced
         .insert("timestepBias".to_owned(), json!("high_noise"));
+    config.advanced.insert("lossType".to_owned(), json!("mse"));
+    config
+        .advanced
+        .insert("gradientCheckpointing".to_owned(), json!(true));
+    config
+        .advanced
+        .insert("cacheTextEmbeddings".to_owned(), json!(true));
+    config
+        .advanced
+        .insert("weightDecay".to_owned(), json!(0.0001));
+    TrainingPreset {
+        id: id.to_owned(),
+        version: 1,
+        target_id: target.id.clone(),
+        name: name.to_owned(),
+        recommended_for: recommended_for
+            .iter()
+            .map(|value| (*value).to_owned())
+            .collect(),
+        optimizer: optimizer.to_owned(),
+        quality_preset: quality_preset.to_owned(),
+        config,
+        ui,
+        extra: ExtraFields::new(),
+    }
+}
+
+fn sdxl_preset<F>(
+    target: &TrainingTarget,
+    id: &str,
+    name: &str,
+    recommended_for: &[&str],
+    optimizer_quality: (&str, &str),
+    mutate: F,
+    ui: JsonObject,
+) -> TrainingPreset
+where
+    F: FnOnce(TrainingConfig) -> TrainingConfig,
+{
+    let (optimizer, quality_preset) = optimizer_quality;
+    let mut config = mutate(target.defaults.clone());
+    config.optimizer = optimizer.to_owned();
+    config
+        .advanced
+        .insert("qualityPreset".to_owned(), json!(quality_preset));
+    // SDXL uses real CFG, so previews render at a positive guidance (the
+    // flow-matching Z-Image presets sample at guidance 0.0). No de-distill
+    // training adapter applies (SDXL base is not step-distilled).
+    config.advanced.insert("sampleSteps".to_owned(), json!(30));
+    config
+        .advanced
+        .insert("sampleGuidanceScale".to_owned(), json!(7.0));
     config.advanced.insert("lossType".to_owned(), json!("mse"));
     config
         .advanced
@@ -828,6 +946,84 @@ fn ltx_video_lora_target() -> TrainingTarget {
             "appleSiliconOnly": true,
             "backend": "mlx",
             "datasetModality": "image"
+        })),
+        extra: ExtraFields::new(),
+    }
+}
+
+/// Generic SDXL-UNet image LoRA training, applied at inference to the SDXL base
+/// model (and the shared foundation epic 1929 extends for Kolors).
+///
+/// SDXL is the first U-Net (non-DiT) training target: the `sdxl_lora` kernel
+/// runs an epsilon/v-prediction loop on a DDPM noise schedule with the SDXL
+/// `added_cond_kwargs` (pooled text embeds + add_time_ids), unlike the
+/// flow-matching transformer kernels. The LoRA injects into the SDXL UNet's
+/// separate `to_q`/`to_k`/`to_v` attention projections plus the `to_out.0`
+/// output projection; the output registers as an `sdxl` family LoRA the SDXL
+/// adapter loads at generation time.
+fn sdxl_lora_target() -> TrainingTarget {
+    TrainingTarget {
+        id: "sdxl_lora".to_owned(),
+        name: "Stable Diffusion XL LoRA".to_owned(),
+        modality: TrainingModality::Image,
+        output_kind: TrainingOutputKind::Lora,
+        family: "sdxl".to_owned(),
+        base_model: "sdxl".to_owned(),
+        base_model_repo: Some("stabilityai/stable-diffusion-xl-base-1.0".to_owned()),
+        kernel: "sdxl_lora".to_owned(),
+        defaults: TrainingConfig {
+            rank: 16,
+            alpha: 16,
+            learning_rate: ContractNumber::from_f64(0.0001).expect("0.0001 is finite"),
+            steps: 1500,
+            batch_size: 1,
+            gradient_accumulation: 1,
+            resolution: 1024,
+            save_every: 250,
+            seed: 42,
+            optimizer: "adamw8bit".to_owned(),
+            trigger_word: None,
+            advanced: object(json!({
+                "mixedPrecision": "bf16",
+                "cacheLatents": true,
+                "cacheTextEmbeddings": true,
+                "gradientCheckpointing": true,
+                "networkType": "lora",
+                "lossType": "mse",
+                "weightDecay": 0.0001,
+                // Learning-rate scheduler (see the Z-Image target); the worker
+                // honors `constant`/`linear`/`cosine` with an optional warmup.
+                "lrScheduler": "constant",
+                // SDXL UNet attention modules: separate q/k/v projections plus the
+                // attention output projection. These match the PEFT target names
+                // the diffusers SDXL DreamBooth-LoRA reference uses.
+                "loraTargetModules": ["to_q", "to_k", "to_v", "to_out.0"],
+                // SDXL uses real classifier-free guidance, so in-training previews
+                // render at a positive guidance (unlike distilled Z-Image at 0.0).
+                "sampleEvery": 250,
+                "sampleSteps": 30,
+                "sampleGuidanceScale": 7.0,
+                "qualityPreset": "balanced",
+                "outputScope": "project",
+                "requestedGpu": "auto"
+            })),
+            extra: ExtraFields::new(),
+        },
+        limits: object(json!({
+            "rank": [4, 128],
+            "alpha": [1, 128],
+            "steps": [200, 6000],
+            "resolutions": [768, 1024],
+            "batchSize": [1, 4],
+            "optimizers": ["adamw8bit", "adamw", "adam", "prodigyopt"],
+            "lrSchedulers": ["constant", "linear", "cosine"],
+            "qualityPresets": ["speed", "balanced", "quality"],
+            "outputScopes": ["project", "global"]
+        })),
+        ui: object(json!({
+            "label": "Stable Diffusion XL LoRA",
+            "description": "Train an image LoRA for Stable Diffusion XL. The generic SDXL-UNet trainer and the shared foundation for SDXL-family models.",
+            "recommendedFor": ["character", "style"]
         })),
         extra: ExtraFields::new(),
     }

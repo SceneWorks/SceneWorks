@@ -58,6 +58,61 @@
       }
     },
     {
+      "id": "sdxl_lora",
+      "name": "Stable Diffusion XL LoRA",
+      "modality": "image",
+      "outputKind": "lora",
+      "family": "sdxl",
+      "baseModel": "sdxl",
+      "baseModelRepo": "stabilityai/stable-diffusion-xl-base-1.0",
+      "kernel": "sdxl_lora",
+      "defaults": {
+        "rank": 16,
+        "alpha": 16,
+        "learningRate": 0.0001,
+        "steps": 1500,
+        "batchSize": 1,
+        "gradientAccumulation": 1,
+        "resolution": 1024,
+        "saveEvery": 250,
+        "seed": 42,
+        "optimizer": "adamw8bit",
+        "advanced": {
+          "mixedPrecision": "bf16",
+          "cacheLatents": true,
+          "cacheTextEmbeddings": true,
+          "gradientCheckpointing": true,
+          "networkType": "lora",
+          "lossType": "mse",
+          "weightDecay": 0.0001,
+          "lrScheduler": "constant",
+          "loraTargetModules": ["to_q", "to_k", "to_v", "to_out.0"],
+          "sampleEvery": 250,
+          "sampleSteps": 30,
+          "sampleGuidanceScale": 7.0,
+          "qualityPreset": "balanced",
+          "outputScope": "project",
+          "requestedGpu": "auto"
+        }
+      },
+      "limits": {
+        "rank": [4, 128],
+        "alpha": [1, 128],
+        "steps": [200, 6000],
+        "resolutions": [768, 1024],
+        "batchSize": [1, 4],
+        "optimizers": ["adamw8bit", "adamw", "adam", "prodigyopt"],
+        "lrSchedulers": ["constant", "linear", "cosine"],
+        "qualityPresets": ["speed", "balanced", "quality"],
+        "outputScopes": ["project", "global"]
+      },
+      "ui": {
+        "label": "Stable Diffusion XL LoRA",
+        "description": "Train an image LoRA for Stable Diffusion XL. The generic SDXL-UNet trainer and the shared foundation for SDXL-family models.",
+        "recommendedFor": ["character", "style"]
+      }
+    },
+    {
       "id": "lens_turbo_lora",
       "name": "Lens LoRA",
       "modality": "image",

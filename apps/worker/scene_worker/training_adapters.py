@@ -1374,6 +1374,490 @@ class _ZImageLoraBackend:
 
 
 # --------------------------------------------------------------------------- #
+# SDXL-UNet LoRA backend (torch / diffusers / PEFT) — the shared foundation for
+# every SDXL-architecture LoRA target. Kolors (epic 1929) subclasses it by
+# swapping the pipeline class + the prompt encoder (see the seams below).
+# --------------------------------------------------------------------------- #
+
+
+class _SdxlLoraBackend:
+    """Real SDXL-UNet LoRA training backend.
+
+    Loads ``StableDiffusionXLPipeline``, caches per-item VAE latents + frozen
+    dual-CLIP prompt embeddings (text + pooled), attaches a PEFT LoRA to
+    ``pipe.unet``, and runs the SDXL epsilon/v-prediction objective with the
+    SDXL ``added_cond_kwargs`` (pooled text embeds + ``add_time_ids``) on a DDPM
+    noise schedule. This is the **first U-Net (non-DiT) trainer** in the repo;
+    the existing kernels are flow-matching transformer trainers, so the noise
+    schedule, the integer timesteps, and the ``added_cond_kwargs`` forward are
+    deliberately isolated here from the shared orchestration.
+
+    Extension seams for epic 1929 (Kolors = SDXL UNet + ChatGLM3): override
+    :attr:`pipeline_class_name` and :meth:`_encode_prompt`. Everything else —
+    the UNet LoRA injection, the training loop, the save path — is shared.
+    """
+
+    # Seams a same-architecture subclass (Kolors) overrides.
+    kernel_id = "sdxl_lora"
+    pipeline_class_name = "StableDiffusionXLPipeline"
+    # SDXL base ships an fp16 variant; Kolors-diffusers is also fp16-only.
+    load_variant: str | None = "fp16"
+
+    def __init__(self) -> None:
+        self._torch: Any | None = None
+        self._device: str | None = None
+        self._dtype: Any | None = None
+        self._pipeline: Any | None = None
+        self._unet: Any | None = None
+        self._vae: Any | None = None
+        self._noise_scheduler: Any | None = None
+        self._num_train_timesteps: int = 1000
+        self._prediction_type: str = "epsilon"
+        self._optimizer: Any | None = None
+        self._lr_scheduler: Any | None = None
+        self._generator: Any | None = None
+        self._loaded_source: str | None = None
+        self._latents: list[Any] = []
+        self._prompt_embeds: list[Any] = []
+        self._pooled_embeds: list[Any] = []
+        self._add_time_ids: Any | None = None
+        self._vae_scaling: float = 1.0
+        self._diagnosed_forward = False
+
+    def loaded_models(self) -> list[str]:
+        return [self._loaded_source] if self._loaded_source else []
+
+    def load(
+        self,
+        *,
+        settings: WorkerSettings,
+        plan: dict[str, Any],
+        config: TrainingRunConfig,
+        progress: ProgressCallback,
+    ) -> None:
+        torch = importlib.import_module("torch")
+        diffusers = importlib.import_module("diffusers")
+        peft = importlib.import_module("peft")
+        self._torch = torch
+
+        require_inference_backend_for_gpu_worker(torch, settings.gpu_id)
+        device = select_torch_device(torch, settings.gpu_id)
+        activate_torch_device(torch, device)
+        dtype = select_torch_dtype(torch, device, config.mixed_precision)
+        source = resolve_pretrained_source(plan.get("target") or {})
+
+        pipeline_class = getattr(diffusers, self.pipeline_class_name, None)
+        if pipeline_class is None:
+            raise TrainingKernelError(
+                f"The installed diffusers build does not expose {self.pipeline_class_name}; "
+                "install a diffusers build with SDXL support."
+            )
+        ddpm_class = getattr(diffusers, "DDPMScheduler", None)
+        if ddpm_class is None:
+            raise TrainingKernelError(
+                "The installed diffusers build does not expose DDPMScheduler, "
+                "required for the SDXL training noise schedule."
+            )
+
+        emit_worker_event(
+            "training_pipeline_load_start",
+            kernel=self.kernel_id,
+            source=source,
+            device=device,
+            dtype=str(dtype),
+        )
+        progress("loading_model", "loading_model", 0.12, "Loading SDXL base model files.")
+        from_pretrained_kwargs: dict[str, Any] = {"torch_dtype": dtype}
+        if self.load_variant:
+            from_pretrained_kwargs["variant"] = self.load_variant
+        pipe = pipeline_class.from_pretrained(source, **from_pretrained_kwargs)
+        pipe.to(device)
+        # The SDXL fp16 VAE emits NaN latents; it is frozen and only used for the
+        # one-time latent cache, so upcast it to fp32 for numerically safe encodes.
+        pipe.vae.to(dtype=torch.float32)
+
+        unet = pipe.unet
+        unet.requires_grad_(False)
+        pipe.vae.requires_grad_(False)
+        for encoder_attr in ("text_encoder", "text_encoder_2"):
+            encoder = getattr(pipe, encoder_attr, None)
+            if encoder is not None:
+                encoder.requires_grad_(False)
+
+        # Train on a DDPM schedule derived from the base model's own scheduler
+        # config so num_train_timesteps + prediction_type match (SDXL base is
+        # epsilon). The inference scheduler (Euler) is a different object.
+        self._noise_scheduler = ddpm_class.from_config(pipe.scheduler.config)
+        self._num_train_timesteps = int(
+            getattr(self._noise_scheduler.config, "num_train_timesteps", 1000) or 1000
+        )
+        self._prediction_type = str(
+            getattr(self._noise_scheduler.config, "prediction_type", "epsilon") or "epsilon"
+        )
+
+        progress("loading_model", "loading_model", 0.16, "Attaching LoRA adapter to the U-Net.")
+        lora_config = peft.LoraConfig(
+            r=config.rank,
+            lora_alpha=config.alpha,
+            init_lora_weights="gaussian",
+            target_modules=list(config.lora_target_modules)
+            if isinstance(config.lora_target_modules, (list, tuple))
+            else config.lora_target_modules,
+        )
+        unet.add_adapter(lora_config)
+        self._activate_lora_adapter(unet)
+        if config.gradient_checkpointing:
+            # Frozen base + LoRA: force inputs to require grad so reentrant
+            # checkpointing doesn't drop gradients to the adapter.
+            if hasattr(unet, "enable_input_require_grads"):
+                try:
+                    unet.enable_input_require_grads()
+                except Exception:
+                    pass
+            if hasattr(unet, "enable_gradient_checkpointing"):
+                unet.enable_gradient_checkpointing()
+            elif hasattr(unet, "gradient_checkpointing_enable"):
+                unet.gradient_checkpointing_enable()
+            else:
+                emit_worker_event(
+                    "training_gradient_checkpointing_unavailable",
+                    kernel=self.kernel_id,
+                    unet=type(unet).__name__,
+                )
+        unet.train()
+        trainable = [param for param in unet.parameters() if param.requires_grad]
+        if not trainable:
+            raise TrainingKernelError(
+                "LoRA adapter attached no trainable parameters; the configured "
+                "target modules did not match any U-Net layers. Adjust "
+                "advanced.loraTargetModules for this base model."
+            )
+
+        self._optimizer = build_optimizer(
+            config.optimizer, trainable, config.learning_rate, config.weight_decay
+        )
+        self._optimizer.zero_grad()
+        total_updates, warmup_updates = lr_schedule_updates(
+            config.steps, config.gradient_accumulation, config.lr_warmup_steps
+        )
+        self._lr_scheduler = build_lr_scheduler(
+            torch,
+            self._optimizer,
+            config.lr_scheduler,
+            total_updates=total_updates,
+            warmup_updates=warmup_updates,
+        )
+        vae_config = getattr(pipe.vae, "config", None)
+        self._vae_scaling = float(getattr(vae_config, "scaling_factor", 1.0) or 1.0)
+        self._pipeline = pipe
+        self._unet = unet
+        self._vae = pipe.vae
+        self._device = device
+        self._dtype = dtype
+        self._loaded_source = source
+        generator_device = device if str(device).startswith("cuda") else "cpu"
+        self._generator = torch.Generator(generator_device).manual_seed(int(config.seed))
+        lora_a_norm, lora_b_norm = self._lora_param_norms()
+        emit_worker_event(
+            "training_pipeline_load_complete",
+            kernel=self.kernel_id,
+            source=source,
+            trainableTensors=len(trainable),
+            predictionType=self._prediction_type,
+            loraANorm=lora_a_norm,
+            loraBNorm=lora_b_norm,
+            lrScheduler=config.lr_scheduler,
+            lrWarmupSteps=config.lr_warmup_steps,
+            gpuMemory=gpu_memory_snapshot(torch, device),
+        )
+
+    def _encode_prompt(self, pipe: Any, caption: str, device: str) -> tuple[Any, Any]:
+        """Return ``(prompt_embeds, pooled_prompt_embeds)`` for one caption.
+
+        Overridable seam: SDXL uses the dual-CLIP ``encode_prompt``; epic 1929's
+        Kolors backend swaps in ``KolorsPipeline.encode_prompt`` (ChatGLM3,
+        ``max_sequence_length=256``) here and changes nothing else.
+        """
+        prompt_embeds, _, pooled_prompt_embeds, _ = pipe.encode_prompt(
+            prompt=caption,
+            prompt_2=None,
+            device=device,
+            num_images_per_prompt=1,
+            do_classifier_free_guidance=False,
+        )
+        return prompt_embeds, pooled_prompt_embeds
+
+    def _lora_param_norms(self) -> tuple[float, float]:
+        unet = self._unet
+        if unet is None or not hasattr(unet, "named_parameters"):
+            return 0.0, 0.0
+        a_sq = 0.0
+        b_sq = 0.0
+        for name, param in unet.named_parameters():
+            if not getattr(param, "requires_grad", False):
+                continue
+            try:
+                value = float(param.detach().float().pow(2).sum().to("cpu"))
+            except Exception:
+                continue
+            if "lora_B" in name or "lora_b" in name:
+                b_sq += value
+            elif "lora_A" in name or "lora_a" in name:
+                a_sq += value
+        return round(a_sq**0.5, 6), round(b_sq**0.5, 6)
+
+    def _activate_lora_adapter(self, unet: Any) -> None:
+        for method_name in ("set_adapter", "enable_adapters"):
+            method = getattr(unet, method_name, None)
+            if method is None:
+                continue
+            try:
+                if method_name == "set_adapter":
+                    method("default")
+                else:
+                    method()
+                return
+            except Exception as exc:
+                emit_worker_event(
+                    "training_lora_adapter_activation_failed",
+                    kernel=self.kernel_id,
+                    method=method_name,
+                    error=str(exc),
+                )
+
+    def prepare_dataset(
+        self,
+        *,
+        items: list[dict[str, Any]],
+        config: TrainingRunConfig,
+        progress: ProgressCallback,
+        cancel_requested: CancelCallback,
+    ) -> dict[str, Any]:
+        torch = self._torch
+        pipe = self._pipeline
+        vae = self._vae
+        resolution = bucket_resolution(config.resolution)
+        count = len(items)
+        self._latents = []
+        self._prompt_embeds = []
+        self._pooled_embeds = []
+        # SDXL micro-conditioning: [orig_h, orig_w, crop_top, crop_left,
+        # target_h, target_w]. We square center-crop, so original == target and
+        # the crop offset is 0. Built once and shared across the (bsz=1) loop.
+        self._add_time_ids = torch.tensor(
+            [[resolution, resolution, 0, 0, resolution, resolution]],
+            dtype=self._dtype,
+            device=self._device,
+        )
+        with torch.no_grad():
+            for index, item in enumerate(items):
+                if cancel_requested():
+                    raise InterruptedError("LoRA training canceled by user.")
+                image = _load_training_image(item["imagePath"], resolution)
+                # Encode in fp32 (VAE was upcast in load) to avoid fp16 NaN latents.
+                pixel = _image_to_tensor(torch, image, torch.float32, self._device)
+                latent = vae.encode(pixel).latent_dist.sample(generator=self._generator)
+                latent = latent * self._vae_scaling
+                self._latents.append(latent.detach().to("cpu"))
+
+                prompt_embeds, pooled = self._encode_prompt(
+                    pipe, str(item.get("caption") or ""), self._device
+                )
+                self._prompt_embeds.append(prompt_embeds.detach().to("cpu"))
+                self._pooled_embeds.append(pooled.detach().to("cpu"))
+
+                if (index + 1) % 4 == 0 or index + 1 == count:
+                    progress(
+                        "running",
+                        "caching_latents",
+                        _scaled(_CACHE_PROGRESS_START, _CACHE_PROGRESS_END, index + 1, count),
+                        f"Encoded {index + 1} of {count} dataset item(s).",
+                    )
+        return {"itemCount": count, "resolution": resolution}
+
+    def train_step(self, *, step: int, total_steps: int, config: TrainingRunConfig) -> float:
+        torch = self._torch
+        unet = self._unet
+        device = self._device
+        index = (step - 1) % len(self._latents)
+        latents = self._latents[index].to(device=device, dtype=self._dtype)
+        prompt_embeds = self._prompt_embeds[index].to(device=device, dtype=self._dtype)
+        pooled = self._pooled_embeds[index].to(device=device, dtype=self._dtype)
+
+        noise = seeded_sample(
+            torch, torch.randn, latents.shape, generator=self._generator, device=device, dtype=latents.dtype
+        )
+        # SDXL trains on the discrete DDPM schedule: integer timesteps + add_noise,
+        # not the flow-matching interpolation the DiT kernels use. The cpu generator
+        # (MPS-safe) draws on its own device, then we move to the compute device.
+        generator_device = self._generator.device
+        timesteps = torch.randint(
+            0,
+            self._num_train_timesteps,
+            (latents.shape[0],),
+            generator=self._generator,
+            device=generator_device,
+        ).to(device)
+        noisy = self._noise_scheduler.add_noise(latents, noise, timesteps)
+        added_cond_kwargs = {"text_embeds": pooled, "time_ids": self._add_time_ids}
+        model_pred = unet(
+            noisy,
+            timesteps,
+            encoder_hidden_states=prompt_embeds,
+            added_cond_kwargs=added_cond_kwargs,
+            return_dict=False,
+        )[0]
+        if self._prediction_type == "v_prediction":
+            target = self._noise_scheduler.get_velocity(latents, noise, timesteps)
+        else:
+            target = noise
+        if not self._diagnosed_forward:
+            emit_worker_event(
+                "training_forward_shapes",
+                kernel=self.kernel_id,
+                latent=list(latents.shape),
+                prediction=list(model_pred.shape),
+                target=list(target.shape),
+                predictionType=self._prediction_type,
+            )
+            self._diagnosed_forward = True
+
+        loss = training_loss(torch, model_pred, target, config.loss_type)
+        accum = max(1, config.gradient_accumulation)
+        (loss / accum).backward()
+        if step % accum == 0 or step == total_steps:
+            self._optimizer.step()
+            self._optimizer.zero_grad()
+            if self._lr_scheduler is not None:
+                self._lr_scheduler.step()
+        return float(loss.detach().to("cpu"))
+
+    def save_checkpoint(self, *, step: int, output_dir: str, file_name: str) -> str | None:
+        stem = Path(file_name).stem or "lora"
+        checkpoint_name = f"{stem}-step{step:06d}.safetensors"
+        return self._save_lora(output_dir=output_dir, file_name=checkpoint_name)
+
+    def generate_samples(
+        self,
+        *,
+        step: int,
+        prompts: list[str],
+        output_dir: str,
+        file_name: str,
+        plan: dict[str, Any],
+        config: TrainingRunConfig,
+    ) -> list[dict[str, Any]]:
+        torch = self._torch
+        pipe = self._pipeline
+        unet = self._unet
+        if torch is None or pipe is None or unet is None or not prompts:
+            return []
+
+        sample_dir = Path(output_dir) / "samples" / f"step-{step:06d}"
+        sample_dir.mkdir(parents=True, exist_ok=True)
+        stem = Path(file_name).stem or "lora"
+        was_training = bool(getattr(unet, "training", False))
+        self._activate_lora_adapter(unet)
+        unet.eval()
+        edge = min(1024, bucket_resolution(config.resolution))
+        samples: list[dict[str, Any]] = []
+        try:
+            with torch.no_grad():
+                for index, prompt in enumerate(prompts[:4]):
+                    generator_device = self._device if str(self._device).startswith("cuda") else "cpu"
+                    generator = torch.Generator(generator_device).manual_seed(int(config.seed) + step + index)
+                    kwargs = {
+                        "prompt": prompt,
+                        "height": edge,
+                        "width": edge,
+                        "num_inference_steps": config.sample_steps,
+                        "guidance_scale": config.sample_guidance_scale,
+                        "generator": generator,
+                    }
+                    output = pipe(**filter_call_kwargs(pipe, kwargs))
+                    image = output.images[0].convert("RGB")
+                    sample_name = f"{stem}-step{step:06d}-{index + 1}.png"
+                    sample_path = sample_dir / sample_name
+                    image.save(sample_path)
+                    samples.append(
+                        {
+                            "step": step,
+                            "prompt": prompt,
+                            "path": str(sample_path),
+                            "relativePath": project_relative_path(plan, sample_path),
+                            "sampleSource": "live_adapter",
+                            "numInferenceSteps": config.sample_steps,
+                            "guidanceScale": config.sample_guidance_scale,
+                            "createdAt": utc_now(),
+                        }
+                    )
+        finally:
+            if was_training:
+                unet.train()
+        return samples
+
+    def save_final(self, *, output_dir: str, file_name: str) -> str:
+        return self._save_lora(output_dir=output_dir, file_name=file_name)
+
+    def _save_lora(self, *, output_dir: str, file_name: str) -> str:
+        from peft.utils import get_peft_model_state_dict
+
+        os.makedirs(output_dir, exist_ok=True)
+        lora_state_dict = get_peft_model_state_dict(self._unet)
+        type(self._pipeline).save_lora_weights(
+            output_dir,
+            unet_lora_layers=lora_state_dict,
+            weight_name=file_name,
+            safe_serialization=True,
+        )
+        lora_a_norm, lora_b_norm = self._lora_param_norms()
+        emit_worker_event(
+            "training_lora_weight_norm",
+            kernel=self.kernel_id,
+            fileName=file_name,
+            tensors=len(lora_state_dict),
+            loraANorm=lora_a_norm,
+            loraBNorm=lora_b_norm,
+        )
+        return os.path.join(output_dir, file_name)
+
+    def cleanup(self) -> None:
+        torch = self._torch
+        self._latents = []
+        self._prompt_embeds = []
+        self._pooled_embeds = []
+        self._add_time_ids = None
+        self._optimizer = None
+        self._unet = None
+        self._vae = None
+        self._pipeline = None
+        self._noise_scheduler = None
+        self._loaded_source = None
+        if torch is not None:
+            try:
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+            except Exception:
+                pass
+
+
+class SdxlLoraTrainer(ZImageLoraTrainer):
+    """Generic SDXL-UNet LoRA trainer.
+
+    Reuses :class:`ZImageLoraTrainer`'s backend-agnostic staged orchestration
+    (prepare → load → cache → train → checkpoint → save) with the SDXL U-Net
+    backend. Trained from a still-image dataset; the output is an ``sdxl`` family
+    LoRA the SDXL adapter loads at inference. This is the shared foundation epic
+    1929 extends for Kolors (subclass + swap the pipeline class + prompt encoder).
+    """
+
+    kernel_id = "sdxl_lora"
+
+    def _create_backend(self) -> _SdxlLoraBackend:
+        return _SdxlLoraBackend()
+
+
+# --------------------------------------------------------------------------- #
 # Native MLX LTX-2.3 LoRA backend (Apple Silicon)
 # --------------------------------------------------------------------------- #
 
@@ -2402,6 +2886,7 @@ class LensLoraTrainer:
 
 _TRAINING_KERNELS: dict[str, Callable[[], Any]] = {
     ZImageLoraTrainer.kernel_id: ZImageLoraTrainer,
+    SdxlLoraTrainer.kernel_id: SdxlLoraTrainer,
     LensLoraTrainer.kernel_id: LensLoraTrainer,
     LtxMlxLoraTrainer.kernel_id: LtxMlxLoraTrainer,
 }
