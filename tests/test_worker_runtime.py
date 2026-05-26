@@ -97,9 +97,11 @@ from scene_worker.training_adapters import (
     SdxlLoraTrainer,
     TrainingKernelError,
     WanLoraTrainer,
+    WanMoeLoraTrainer,
     ZImageLoraTrainer,
     _SdxlLoraBackend,
     _WanLoraBackend,
+    _WanMoeLoraBackend,
     _ZImageLoraBackend,
     _build_mlx_lr_schedule,
     _build_mlx_optimizer,
@@ -3302,6 +3304,7 @@ def test_create_training_kernel_resolves_known_and_rejects_unknown():
     assert isinstance(create_training_kernel("z_image_lora"), ZImageLoraTrainer)
     assert isinstance(create_training_kernel("sdxl_lora"), SdxlLoraTrainer)
     assert isinstance(create_training_kernel("wan_lora"), WanLoraTrainer)
+    assert isinstance(create_training_kernel("wan_moe_lora"), WanMoeLoraTrainer)
     assert isinstance(create_training_kernel("lens_lora"), LensLoraTrainer)
     with pytest.raises(TrainingKernelError, match="No training kernel"):
         create_training_kernel("not_a_kernel")
@@ -3343,6 +3346,53 @@ def test_wan_lora_backend_read_run_config_uses_wan_target_modules():
     }
     config = read_run_config(plan)
     assert list(config.lora_target_modules) == ["to_q", "to_k", "to_v", "to_out.0"]
+
+
+def test_wan_moe_lora_trainer_extends_wan_backend():
+    # WanMoeLoraTrainer subclasses the dense Wan trainer's backend for the A14B
+    # two-expert case; it shares the orchestration and only swaps the backend.
+    trainer = create_training_kernel("wan_moe_lora")
+    assert isinstance(trainer, ZImageLoraTrainer)
+    assert trainer.kernel_id == "wan_moe_lora"
+    backend = trainer._create_backend()
+    assert isinstance(backend, _WanMoeLoraBackend)
+    assert isinstance(backend, _WanLoraBackend)
+    assert backend.kernel_id == "wan_moe_lora"
+    for method in ("load", "prepare_dataset", "train_step", "save_final", "cleanup"):
+        assert callable(getattr(backend, method)), method
+
+
+def test_wan_moe_lora_backend_parses_gguf_quant_spec_and_boundary():
+    backend = _WanMoeLoraBackend()
+    # Default boundary (A14B = 0.875) before any load.
+    assert backend._boundary == 0.875
+    # A complete gguf baseQuantization advanced block parses into an expert spec.
+    gguf = read_run_config(
+        {
+            "config": {
+                "advanced": {
+                    "baseQuantization": {
+                        "format": "gguf",
+                        "repo": "QuantStack/Wan2.2-T2V-A14B-GGUF",
+                        "highNoiseFile": "HighNoise/hi.gguf",
+                        "lowNoiseFile": "LowNoise/lo.gguf",
+                    }
+                }
+            }
+        }
+    )
+    spec = backend._quant_spec(gguf)
+    assert spec == {
+        "repo": "QuantStack/Wan2.2-T2V-A14B-GGUF",
+        "highNoiseFile": "HighNoise/hi.gguf",
+        "lowNoiseFile": "LowNoise/lo.gguf",
+    }
+    # No quant block -> bf16 path (None); an incomplete block is ignored.
+    assert backend._quant_spec(read_run_config({"config": {"advanced": {}}})) is None
+    incomplete = read_run_config(
+        {"config": {"advanced": {"baseQuantization": {"format": "gguf", "repo": "R"}}}}
+    )
+    assert backend._quant_spec(incomplete) is None
 
 
 def test_sdxl_lora_trainer_reuses_zimage_orchestration_with_sdxl_backend():

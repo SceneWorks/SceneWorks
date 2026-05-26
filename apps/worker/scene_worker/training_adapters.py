@@ -2284,6 +2284,407 @@ class WanLoraTrainer(ZImageLoraTrainer):
 
 
 # --------------------------------------------------------------------------- #
+# Real torch/diffusers/peft backend for Wan2.2 A14B (MoE dual-expert) video
+# --------------------------------------------------------------------------- #
+
+
+class _WanMoeLoraBackend(_WanLoraBackend):
+    """Wan2.2 A14B MoE dual-expert video LoRA backend.
+
+    Extends the dense 5B Wan backend to the A14B two-expert architecture: a
+    high-noise expert (``transformer`` — early/large-timestep denoising) and a
+    low-noise expert (``transformer_2`` — late/small-timestep). It trains a
+    SEPARATE LoRA on each expert, alternating per training step and sampling each
+    expert's timestep WITHIN its own noise band, split at the pipeline's
+    ``boundary_ratio`` (0.875 for A14B). Two per-expert safetensors are saved
+    (``<name>.high_noise`` / ``<name>.low_noise``) which the inference loader
+    applies to the matching expert.
+
+    Expert loading is pluggable:
+    - **bf16** (default, CUDA production): both experts come from
+      ``WanPipeline.from_pretrained(repo)`` (``transformer`` + ``transformer_2``).
+    - **Q8_0 GGUF** (memory-bound hosts incl. Apple-Silicon validation): each
+      expert loads via ``WanTransformer3DModel.from_single_file(..., GGUFQuantizationConfig)``
+      and injects as ``transformer`` / ``transformer_2``. The spike (sc-1950)
+      confirmed a LoRA trains on a GGUF-quantized base. Selected via
+      ``advanced.baseQuantization = {"format": "gguf", "repo": ..., "highNoiseFile": ..., "lowNoiseFile": ...}``.
+
+    A14B bf16 (~56GB of transformers + umT5 + VAE) is GPU-only; the GGUF path
+    (~28GB for both experts) is what fits a 128GB Mac for desk validation.
+    """
+
+    kernel_id = "wan_moe_lora"
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._hi: Any | None = None
+        self._lo: Any | None = None
+        self._hi_opt: Any | None = None
+        self._lo_opt: Any | None = None
+        self._hi_sched: Any | None = None
+        self._lo_sched: Any | None = None
+        self._boundary: float = 0.875
+        self._hi_micro = 0
+        self._lo_micro = 0
+
+    def load(
+        self,
+        *,
+        settings: WorkerSettings,
+        plan: dict[str, Any],
+        config: TrainingRunConfig,
+        progress: ProgressCallback,
+    ) -> None:
+        torch = importlib.import_module("torch")
+        diffusers = importlib.import_module("diffusers")
+        peft = importlib.import_module("peft")
+        self._torch = torch
+
+        require_inference_backend_for_gpu_worker(torch, settings.gpu_id)
+        device = select_torch_device(torch, settings.gpu_id)
+        activate_torch_device(torch, device)
+        dtype = select_torch_dtype(torch, device, config.mixed_precision)
+        if str(device) == "mps":
+            dtype = torch.float32
+        source = resolve_pretrained_source(plan.get("target") or {})
+
+        emit_worker_event(
+            "training_pipeline_load_start",
+            kernel=self.kernel_id,
+            source=source,
+            device=device,
+            dtype=str(dtype),
+        )
+        progress("loading_model", "loading_model", 0.12, "Loading Wan2.2 A14B experts.")
+        pipe, hi, lo = self._load_experts(diffusers, source, dtype, device, config, progress)
+        if lo is None:
+            raise TrainingKernelError(
+                "The Wan MoE trainer requires a two-expert (A14B) model, but the "
+                "loaded pipeline has no transformer_2 (low-noise expert)."
+            )
+        self._boundary = self._resolve_boundary(pipe)
+
+        hi.requires_grad_(False)
+        lo.requires_grad_(False)
+        pipe.vae.requires_grad_(False)
+        text_encoder = getattr(pipe, "text_encoder", None)
+        if text_encoder is not None:
+            text_encoder.requires_grad_(False)
+
+        progress("loading_model", "loading_model", 0.16, "Attaching LoRA adapters to both experts.")
+        self._hi_opt, self._hi_sched = self._attach_expert_lora(peft, hi, config, torch)
+        self._lo_opt, self._lo_sched = self._attach_expert_lora(peft, lo, config, torch)
+
+        self._latents_mean, self._latents_std = self._vae_normalization(torch, pipe.vae)
+        self._pipeline = pipe
+        self._hi, self._lo = hi, lo
+        # Parent helpers default to self._transformer; point it at the high-noise
+        # expert so any inherited diagnostic still works, but saving is per-expert.
+        self._transformer = hi
+        self._vae = pipe.vae
+        self._device = device
+        self._dtype = dtype
+        self._loaded_source = source
+        generator_device = device if str(device).startswith("cuda") else "cpu"
+        self._generator = torch.Generator(generator_device).manual_seed(int(config.seed))
+        emit_worker_event(
+            "training_pipeline_load_complete",
+            kernel=self.kernel_id,
+            source=source,
+            boundaryRatio=self._boundary,
+            quantized=self._quant_spec(config) is not None,
+            gpuMemory=gpu_memory_snapshot(torch, device),
+        )
+
+    def _quant_spec(self, config: TrainingRunConfig) -> dict[str, Any] | None:
+        """Parse ``advanced.baseQuantization`` into a GGUF expert spec, or None for
+        the default bf16 path."""
+        spec = (config.advanced or {}).get("baseQuantization")
+        if not isinstance(spec, dict):
+            return None
+        if str(spec.get("format") or "").strip().lower() != "gguf":
+            return None
+        repo = spec.get("repo")
+        hi = spec.get("highNoiseFile")
+        lo = spec.get("lowNoiseFile")
+        if not (repo and hi and lo):
+            return None
+        return {"repo": str(repo), "highNoiseFile": str(hi), "lowNoiseFile": str(lo)}
+
+    def _load_experts(
+        self, diffusers: Any, source: str, dtype: Any, device: str,
+        config: TrainingRunConfig, progress: ProgressCallback,
+    ) -> tuple[Any, Any, Any]:
+        pipeline_class = getattr(diffusers, "WanPipeline", None)
+        if pipeline_class is None:
+            raise TrainingKernelError(
+                "The installed diffusers build does not expose WanPipeline; "
+                "install a diffusers build with Wan2.2 support."
+            )
+        quant = self._quant_spec(config)
+        if quant is not None:
+            transformer_class = getattr(diffusers, "WanTransformer3DModel", None)
+            gguf_config = getattr(diffusers, "GGUFQuantizationConfig", None)
+            if transformer_class is None or gguf_config is None:
+                raise TrainingKernelError(
+                    "GGUF-base Wan training requires diffusers WanTransformer3DModel "
+                    "+ GGUFQuantizationConfig (and the gguf package)."
+                )
+            from huggingface_hub import hf_hub_download
+
+            def _resolve(file_ref: str) -> str:
+                return file_ref if os.path.exists(file_ref) else hf_hub_download(quant["repo"], file_ref)
+
+            progress("loading_model", "loading_model", 0.13, "Loading high-noise expert (GGUF).")
+            hi = transformer_class.from_single_file(
+                _resolve(quant["highNoiseFile"]),
+                quantization_config=gguf_config(compute_dtype=dtype),
+                config=source, subfolder="transformer", torch_dtype=dtype,
+            )
+            progress("loading_model", "loading_model", 0.15, "Loading low-noise expert (GGUF).")
+            lo = transformer_class.from_single_file(
+                _resolve(quant["lowNoiseFile"]),
+                quantization_config=gguf_config(compute_dtype=dtype),
+                config=source, subfolder="transformer", torch_dtype=dtype,
+            )
+            pipe = pipeline_class.from_pretrained(
+                source, transformer=hi, transformer_2=lo, torch_dtype=dtype
+            )
+        else:
+            pipe = pipeline_class.from_pretrained(source, torch_dtype=dtype)
+            hi = pipe.transformer
+            lo = getattr(pipe, "transformer_2", None)
+        pipe.to(device)
+        return pipe, hi, lo
+
+    def _resolve_boundary(self, pipe: Any) -> float:
+        cfg = getattr(pipe, "config", None)
+        value = None
+        if cfg is not None:
+            try:
+                value = cfg.get("boundary_ratio") if hasattr(cfg, "get") else getattr(cfg, "boundary_ratio", None)
+            except Exception:
+                value = None
+        if value is None:
+            value = getattr(pipe, "boundary_ratio", None)
+        try:
+            value = float(value)
+        except (TypeError, ValueError):
+            value = 0.875
+        # A null/zero boundary_ratio (dense models) is meaningless for MoE.
+        return value if 0.0 < value < 1.0 else 0.875
+
+    def _attach_expert_lora(self, peft: Any, expert: Any, config: TrainingRunConfig, torch: Any) -> tuple[Any, Any]:
+        lora_config = peft.LoraConfig(
+            r=config.rank,
+            lora_alpha=config.alpha,
+            init_lora_weights="gaussian",
+            target_modules=list(config.lora_target_modules)
+            if isinstance(config.lora_target_modules, (list, tuple))
+            else config.lora_target_modules,
+        )
+        expert.add_adapter(lora_config)
+        self._activate_lora_adapter(expert)
+        if config.gradient_checkpointing:
+            if hasattr(expert, "enable_input_require_grads"):
+                try:
+                    expert.enable_input_require_grads()
+                except Exception:
+                    pass
+            if hasattr(expert, "enable_gradient_checkpointing"):
+                expert.enable_gradient_checkpointing()
+            elif hasattr(expert, "gradient_checkpointing_enable"):
+                expert.gradient_checkpointing_enable()
+        expert.train()
+        trainable = [param for param in expert.parameters() if param.requires_grad]
+        if not trainable:
+            raise TrainingKernelError(
+                "LoRA adapter attached no trainable parameters on a Wan expert; the "
+                "configured target modules matched no layers. Adjust advanced.loraTargetModules."
+            )
+        optimizer = build_optimizer(config.optimizer, trainable, config.learning_rate, config.weight_decay)
+        optimizer.zero_grad()
+        # Each expert trains ~half the micro-steps (alternating), so its scheduler
+        # decays over half the updates. constant + no warmup yields None (fixed LR).
+        total_updates, warmup_updates = lr_schedule_updates(
+            config.steps, config.gradient_accumulation, config.lr_warmup_steps
+        )
+        scheduler = build_lr_scheduler(
+            torch, optimizer, config.lr_scheduler,
+            total_updates=max(1, total_updates // 2),
+            warmup_updates=warmup_updates // 2,
+        )
+        return optimizer, scheduler
+
+    def prepare_dataset(
+        self,
+        *,
+        items: list[dict[str, Any]],
+        config: TrainingRunConfig,
+        progress: ProgressCallback,
+        cancel_requested: CancelCallback,
+    ) -> dict[str, Any]:
+        prepared = super().prepare_dataset(
+            items=items, config=config, progress=progress, cancel_requested=cancel_requested
+        )
+        # Free the umT5 text encoder after caching embeddings: training never needs
+        # it again (in-training samples are off), and it is ~11-22GB on the
+        # memory-bound A14B path.
+        pipe = self._pipeline
+        if pipe is not None and getattr(pipe, "text_encoder", None) is not None:
+            try:
+                pipe.text_encoder = None
+                if self._torch is not None and self._torch.cuda.is_available():
+                    self._torch.cuda.empty_cache()
+            except Exception:
+                pass
+        return prepared
+
+    def train_step(self, *, step: int, total_steps: int, config: TrainingRunConfig) -> float:
+        torch = self._torch
+        device = self._device
+        dtype = self._dtype
+        # Alternate experts so both get balanced updates; each samples a timestep
+        # only within its own noise band (split at boundary_ratio).
+        high = step % 2 == 1
+        if high:
+            expert, optimizer, scheduler = self._hi, self._hi_opt, self._hi_sched
+            band_lo, band_hi = self._boundary, 1.0
+        else:
+            expert, optimizer, scheduler = self._lo, self._lo_opt, self._lo_sched
+            band_lo, band_hi = 0.0, self._boundary
+
+        index = (step - 1) % len(self._latents)
+        latents = self._latents[index].to(device=device, dtype=dtype)
+        embeds = self._embeds[index].to(device=device, dtype=dtype)
+        noise = seeded_sample(
+            torch, torch.randn, latents.shape, generator=self._generator, device=device, dtype=latents.dtype
+        )
+        t_unit = sample_training_timestep(
+            torch, generator=self._generator, device=device, dtype=latents.dtype,
+            timestep_type=config.timestep_type, timestep_bias=config.timestep_bias,
+        )
+        t = band_lo + t_unit * (band_hi - band_lo)
+        t_broadcast = t.view(-1, *([1] * (latents.dim() - 1)))
+        noisy = (1.0 - t_broadcast) * latents + t_broadcast * noise
+        target = noise - latents
+        timestep = t * 1000.0
+
+        prediction = expert(
+            hidden_states=noisy, timestep=timestep, encoder_hidden_states=embeds, return_dict=False
+        )[0]
+        if not self._diagnosed_forward:
+            emit_worker_event(
+                "training_forward_shapes",
+                kernel=self.kernel_id,
+                expert="high_noise" if high else "low_noise",
+                boundaryRatio=self._boundary,
+                latent=list(latents.shape),
+                prediction=list(prediction.shape),
+            )
+            self._diagnosed_forward = True
+
+        loss = training_loss(torch, prediction, target, config.loss_type)
+        accum = max(1, config.gradient_accumulation)
+        (loss / accum).backward()
+        if high:
+            self._hi_micro += 1
+            micro = self._hi_micro
+        else:
+            self._lo_micro += 1
+            micro = self._lo_micro
+        if micro % accum == 0 or step >= total_steps - 1:
+            optimizer.step()
+            optimizer.zero_grad()
+            if scheduler is not None:
+                scheduler.step()
+        return float(loss.detach().to("cpu"))
+
+    def save_checkpoint(self, *, step: int, output_dir: str, file_name: str) -> str | None:
+        stem = Path(file_name).stem or "lora"
+        ext = Path(file_name).suffix or ".safetensors"
+        return self._save_both(output_dir=output_dir, stem=f"{stem}-step{step:06d}", ext=ext)
+
+    def save_final(self, *, output_dir: str, file_name: str) -> str:
+        stem = Path(file_name).stem or "lora"
+        ext = Path(file_name).suffix or ".safetensors"
+        return self._save_both(output_dir=output_dir, stem=stem, ext=ext)
+
+    def _save_both(self, *, output_dir: str, stem: str, ext: str) -> str:
+        from peft.utils import get_peft_model_state_dict
+
+        os.makedirs(output_dir, exist_ok=True)
+        primary: str | None = None
+        for expert, suffix in ((self._hi, "high_noise"), (self._lo, "low_noise")):
+            name = f"{stem}.{suffix}{ext}"
+            lora_state_dict = get_peft_model_state_dict(expert)
+            type(self._pipeline).save_lora_weights(
+                output_dir,
+                transformer_lora_layers=lora_state_dict,
+                weight_name=name,
+                safe_serialization=True,
+            )
+            a_norm, b_norm = self._expert_lora_norms(expert)
+            emit_worker_event(
+                "training_lora_weight_norm",
+                kernel=self.kernel_id,
+                fileName=name,
+                expert=suffix,
+                tensors=len(lora_state_dict),
+                loraANorm=a_norm,
+                loraBNorm=b_norm,
+            )
+            path = os.path.join(output_dir, name)
+            if primary is None:
+                primary = path
+        # Both files are written; the high-noise path is reported as the primary
+        # output (the loader discovers the low-noise sibling by the naming pair).
+        return primary or os.path.join(output_dir, f"{stem}{ext}")
+
+    def _expert_lora_norms(self, expert: Any) -> tuple[float, float]:
+        if expert is None or not hasattr(expert, "named_parameters"):
+            return 0.0, 0.0
+        a_sq = 0.0
+        b_sq = 0.0
+        for name, param in expert.named_parameters():
+            if not getattr(param, "requires_grad", False):
+                continue
+            try:
+                value = float(param.detach().float().pow(2).sum().to("cpu"))
+            except Exception:
+                continue
+            if "lora_B" in name or "lora_b" in name:
+                b_sq += value
+            elif "lora_A" in name or "lora_a" in name:
+                a_sq += value
+        return round(a_sq**0.5, 6), round(b_sq**0.5, 6)
+
+    def cleanup(self) -> None:
+        self._hi = None
+        self._lo = None
+        self._hi_opt = None
+        self._lo_opt = None
+        super().cleanup()
+
+
+class WanMoeLoraTrainer(ZImageLoraTrainer):
+    """Wan2.2 A14B MoE dual-expert video LoRA trainer (torch/diffusers).
+
+    Reuses :class:`ZImageLoraTrainer`'s staged orchestration with the two-expert
+    Wan MoE backend. Trains a separate LoRA on the high-noise and low-noise
+    experts (split at the pipeline's ``boundary_ratio``), saving two ``wan-video``
+    family safetensors the inference loader applies per expert. Extends the dense
+    5B :class:`WanLoraTrainer`'s recipe. GPU-only for the bf16 base; the Q8_0 GGUF
+    base path fits memory-bound hosts.
+    """
+
+    kernel_id = "wan_moe_lora"
+
+    def _create_backend(self) -> _WanMoeLoraBackend:
+        return _WanMoeLoraBackend()
+
+
+# --------------------------------------------------------------------------- #
 # Native MLX LTX-2.3 LoRA backend (Apple Silicon)
 # --------------------------------------------------------------------------- #
 
@@ -3314,6 +3715,7 @@ _TRAINING_KERNELS: dict[str, Callable[[], Any]] = {
     ZImageLoraTrainer.kernel_id: ZImageLoraTrainer,
     SdxlLoraTrainer.kernel_id: SdxlLoraTrainer,
     WanLoraTrainer.kernel_id: WanLoraTrainer,
+    WanMoeLoraTrainer.kernel_id: WanMoeLoraTrainer,
     LensLoraTrainer.kernel_id: LensLoraTrainer,
     LtxMlxLoraTrainer.kernel_id: LtxMlxLoraTrainer,
 }

@@ -339,6 +339,29 @@ fn wan_target_resolves_image_dataset_into_plan() {
 }
 
 #[test]
+fn builtin_registry_exposes_wan_moe_targets() {
+    let registry = builtin_training_targets();
+    for (id, base_model) in [
+        ("wan_t2v_14b_lora", "wan_2_2_t2v_14b"),
+        ("wan_i2v_14b_lora", "wan_2_2_i2v_14b"),
+    ] {
+        let target = registry
+            .targets
+            .iter()
+            .find(|target| target.id == id)
+            .unwrap_or_else(|| panic!("{id} target present"));
+        assert_eq!(target.modality, TrainingModality::Video);
+        assert_eq!(target.output_kind, TrainingOutputKind::Lora);
+        assert_eq!(target.family, "wan-video");
+        assert_eq!(target.base_model, base_model);
+        // Both A14B variants share the dual-expert MoE kernel.
+        assert_eq!(target.kernel, "wan_moe_lora");
+        assert_eq!(target.defaults.rank, 32);
+        assert_eq!(target.defaults.resolution, 512);
+    }
+}
+
+#[test]
 fn unknown_training_fields_and_values_are_preserved() {
     let mut dataset = load_fixture("dataset.json");
     // Unknown enum value falls back to the string-enum `Unknown` variant.
