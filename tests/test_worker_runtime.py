@@ -27,6 +27,8 @@ from scene_worker.image_adapters import (
     LensTurboAdapter,
     MODEL_TARGETS,
     QwenImageAdapter,
+    REAL_ESRGAN_MODEL_SPECS,
+    RealEsrganUpscaler,
     ZImageDiffusersAdapter,
     create_image_adapter,
     create_image_upscaler,
@@ -1209,6 +1211,56 @@ def test_create_image_upscaler_rejects_unknown_engine():
 
     with pytest.raises(RuntimeError, match="Unsupported image upscale engine"):
         create_image_upscaler(request)
+
+
+def test_real_esrgan_resolves_manifest_weight_through_hf_cache(monkeypatch, tmp_path):
+    calls: list[dict[str, object]] = []
+    resolved_path = tmp_path / "RealESRGAN_x2plus.pth"
+    resolved_path.write_bytes(b"weights")
+
+    def fake_hf_hub_download(**kwargs):
+        calls.append(kwargs)
+        if kwargs.get("local_files_only"):
+            raise RuntimeError("cache miss")
+        return str(resolved_path)
+
+    fake_hub = ModuleType("huggingface_hub")
+    fake_hub.hf_hub_download = fake_hf_hub_download
+    monkeypatch.setitem(sys.modules, "huggingface_hub", fake_hub)
+    monkeypatch.delenv("HF_HUB_CACHE", raising=False)
+    monkeypatch.delenv("HUGGINGFACE_HUB_CACHE", raising=False)
+    monkeypatch.delenv("HF_HOME", raising=False)
+
+    settings = SimpleNamespace(data_dir=tmp_path / "data", gpu_id="cpu")
+    request = image_request_from_job(
+        {
+            "payload": {
+                "projectId": "p",
+                "upscale": {"enabled": True, "factor": 2, "engine": "real-esrgan"},
+                "modelManifestEntry": {
+                    "resources": {
+                        "imageUpscalers": {
+                            "real-esrgan": {
+                                "x2": {"repo": "example/upscalers", "file": "RealESRGAN_x2plus.pth"}
+                            }
+                        }
+                    }
+                },
+            }
+        }
+    )
+
+    path = RealEsrganUpscaler(settings=settings)._resolve_model_path(
+        request,
+        REAL_ESRGAN_MODEL_SPECS[2],
+    )
+
+    assert path == resolved_path
+    assert calls[0]["repo_id"] == "example/upscalers"
+    assert calls[0]["filename"] == "RealESRGAN_x2plus.pth"
+    assert calls[0]["cache_dir"] == str(settings.data_dir / "cache" / "huggingface" / "hub")
+    assert calls[0]["local_files_only"] is True
+    assert calls[-1].get("local_files_only") is not True
 
 
 def test_image_asset_writer_retains_original_and_adds_upscaled_variant(monkeypatch, tmp_path):

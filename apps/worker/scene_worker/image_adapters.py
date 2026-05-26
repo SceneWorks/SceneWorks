@@ -31,7 +31,7 @@ from sceneworks_shared import (
 )
 
 from .adapter_utils import cancel_step_callback, filter_call_kwargs
-from .hf_cache import huggingface_repo_cache_path
+from .hf_cache import huggingface_cache_roots, huggingface_repo_cache_path
 from .lora_adapters import (
     LoraPipelineState,
     apply_loras_to_pipeline,
@@ -315,6 +315,7 @@ class ImageRequest:
     character_look_id: str | None
     source_asset_id: str | None
     advanced: dict[str, Any]
+    model_manifest_entry: dict[str, Any]
     upscale: UpscaleRequest = field(default_factory=UpscaleRequest)
 
 
@@ -363,6 +364,9 @@ def image_request_from_job(job: dict[str, Any]) -> ImageRequest:
         character_id=payload.get("characterId"),
         character_look_id=payload.get("characterLookId"),
         source_asset_id=payload.get("sourceAssetId"),
+        model_manifest_entry=(
+            payload.get("modelManifestEntry") if isinstance(payload.get("modelManifestEntry"), dict) else {}
+        ),
         upscale=upscale_request_from_payload(payload),
         advanced=payload.get("advanced", {}),
     )
@@ -583,13 +587,15 @@ class ImageAssetWriter:
 REAL_ESRGAN_MODEL_SPECS: dict[int, dict[str, Any]] = {
     2: {
         "name": "RealESRGAN_x2plus",
-        "url": "https://github.com/xinntao/Real-ESRGAN/releases/download/v0.2.1/RealESRGAN_x2plus.pth",
+        "repo": "nateraw/real-esrgan",
+        "file": "RealESRGAN_x2plus.pth",
         "scale": 2,
         "num_block": 23,
     },
     4: {
         "name": "RealESRGAN_x4plus",
-        "url": "https://github.com/xinntao/Real-ESRGAN/releases/download/v0.1.0/RealESRGAN_x4plus.pth",
+        "repo": "nateraw/real-esrgan",
+        "file": "RealESRGAN_x4plus.pth",
         "scale": 4,
         "num_block": 23,
     },
@@ -708,22 +714,55 @@ class RealEsrganUpscaler:
             if not path.is_file():
                 raise RuntimeError(f"Real-ESRGAN model file does not exist: {path}")
             return path
-        download_util = importlib.import_module("basicsr.utils.download_util")
-        cache_root = Path(
-            os.getenv("SCENEWORKS_UPSCALER_CACHE_DIR")
-            or os.getenv("SCENEWORKS_CACHE_DIR", "")
-            or Path.home() / ".cache" / "sceneworks"
+        resource = self._manifest_resource(request, request.upscale.factor)
+        repo = str(resource.get("repo") or spec["repo"])
+        file_name = str(resource.get("file") or spec["file"])
+        return self._hf_hub_download(repo, file_name)
+
+    def _hf_hub_download(self, repo: str, file_name: str) -> Path:
+        from huggingface_hub import hf_hub_download
+
+        roots = huggingface_cache_roots(self._settings)
+        first_error: Exception | None = None
+        for cache_root in roots:
+            try:
+                return Path(
+                    hf_hub_download(
+                        repo_id=repo,
+                        filename=file_name,
+                        cache_dir=str(cache_root),
+                        local_files_only=True,
+                    )
+                )
+            except Exception as exc:  # noqa: BLE001 - try the next configured cache root.
+                first_error = exc
+
+        cache_root = roots[0]
+        try:
+            return Path(hf_hub_download(repo_id=repo, filename=file_name, cache_dir=str(cache_root)))
+        except Exception as exc:  # noqa: BLE001 - surface the download context.
+            raise RuntimeError(
+                f"Unable to resolve Real-ESRGAN weight {file_name} from Hugging Face repo {repo}."
+            ) from (first_error or exc)
+
+    @staticmethod
+    def _manifest_resource(request: ImageRequest, factor: int) -> dict[str, Any]:
+        resources = request.model_manifest_entry.get("resources", {})
+        if not isinstance(resources, dict):
+            return {}
+        upscalers = resources.get("imageUpscalers") or resources.get("upscalers")
+        if not isinstance(upscalers, dict):
+            return {}
+        real_esrgan = (
+            upscalers.get("real-esrgan")
+            or upscalers.get("realEsrgan")
+            or upscalers.get("real_esrgan")
+            or {}
         )
-        model_dir = cache_root / "upscalers" / "real-esrgan"
-        model_dir.mkdir(parents=True, exist_ok=True)
-        return Path(
-            download_util.load_file_from_url(
-                url=spec["url"],
-                model_dir=str(model_dir),
-                progress=True,
-                file_name=f"{spec['name']}.pth",
-            )
-        )
+        if not isinstance(real_esrgan, dict):
+            return {}
+        resource = real_esrgan.get(f"x{factor}") or real_esrgan.get(str(factor)) or {}
+        return resource if isinstance(resource, dict) else {}
 
 
 def ensure_realesrgan_torchvision_compat() -> None:
