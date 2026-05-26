@@ -212,10 +212,12 @@ class ServerApiHarness:
                 "SCENEWORKS_DISABLE_MODEL_SIZE_ESTIMATE": "1",
             }
         )
-        rust_binary = ROOT / "target" / "debug" / (
-            "sceneworks-rust-api.exe" if os.name == "nt" else "sceneworks-rust-api"
+        rust_binary = os.getenv("SCENEWORKS_RUST_API_BINARY")
+        command = (
+            [rust_binary]
+            if rust_binary
+            else ["cargo", "run", "-q", "-p", "sceneworks-rust-api"]
         )
-        command = [str(rust_binary)] if rust_binary.exists() else ["cargo", "run", "-q", "-p", "sceneworks-rust-api"]
         self.process = subprocess.Popen(
             command,
             cwd=ROOT,
@@ -1645,4 +1647,3 @@ def test_error_case_contracts(contract_runtimes):
         expected_status=400,
         snapshot=True,
     )
-
