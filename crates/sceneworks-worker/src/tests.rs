@@ -36,11 +36,12 @@ use super::supervisor::{
 };
 use super::{
     allow_pattern_matches, bounded_tail, cleanup_uploaded_import_source, copy_lora_source,
-    fresh_asset_id, import_lora_source_path, now_rfc3339, parse_credentials_env,
-    resolve_model_convert_output, resolve_model_import_target, safe_download_dir,
-    safe_project_path, value_f64, write_model_install_marker, CredentialScheme, JsonObject,
-    Settings, WorkerCredential, WorkerError, DEFAULT_MAX_LORA_URL_BYTES,
-    DEFAULT_MAX_MODEL_URL_BYTES, DEFAULT_TRANSITION_DURATION_SECONDS, INSTALL_MARKER,
+    fresh_asset_id, import_lora_source_file_as, import_lora_source_path, now_rfc3339,
+    parse_credentials_env, resolve_model_convert_output, resolve_model_import_target,
+    safe_download_dir, safe_project_path, value_f64, wan_moe_pair_filenames,
+    write_model_install_marker, CredentialScheme, JsonObject, Settings, WorkerCredential,
+    WorkerError, DEFAULT_MAX_LORA_URL_BYTES, DEFAULT_MAX_MODEL_URL_BYTES,
+    DEFAULT_TRANSITION_DURATION_SECONDS, INSTALL_MARKER,
 };
 
 fn write_safetensors_with_keys(path: &std::path::Path, keys: &[String]) {
@@ -527,6 +528,51 @@ async fn uploaded_lora_file_import_prefers_move_over_copy() {
             .unwrap(),
         b"lora"
     );
+}
+
+#[tokio::test]
+async fn paired_moe_upload_writes_high_low_convention_files() {
+    // sc-1991: a bring-your-own Wan A14B MoE pair must land in one record under the
+    // dot-delimited high/low_noise convention (off-convention upload names are
+    // normalized), so the Python resolver detects the pair and resolves the high
+    // half as the primary. Both halves are written into the same target dir.
+    let temp = tempdir().expect("tempdir creates");
+    let high_upload = temp.path().join("upload-hi").join("HighNoise.safetensors");
+    let low_upload = temp.path().join("upload-lo").join("low-noise.safetensors");
+    tokio::fs::create_dir_all(high_upload.parent().unwrap())
+        .await
+        .unwrap();
+    tokio::fs::create_dir_all(low_upload.parent().unwrap())
+        .await
+        .unwrap();
+    tokio::fs::write(&high_upload, b"high").await.unwrap();
+    tokio::fs::write(&low_upload, b"low").await.unwrap();
+    let target_dir = temp.path().join("loras").join("my_moe");
+
+    let (high_name, low_name) = wan_moe_pair_filenames("my_moe");
+    assert_eq!(high_name, "my_moe.high_noise.safetensors");
+    assert_eq!(low_name, "my_moe.low_noise.safetensors");
+
+    import_lora_source_file_as(&high_upload, &target_dir, &high_name, true)
+        .await
+        .unwrap();
+    import_lora_source_file_as(&low_upload, &target_dir, &low_name, true)
+        .await
+        .unwrap();
+
+    assert_eq!(
+        tokio::fs::read(target_dir.join(&high_name)).await.unwrap(),
+        b"high"
+    );
+    assert_eq!(
+        tokio::fs::read(target_dir.join(&low_name)).await.unwrap(),
+        b"low"
+    );
+    // The high-noise file sorts first, so directory resolution picks it as primary.
+    assert!(high_name < low_name);
+    // prefer_move consumed both staged uploads.
+    assert!(!high_upload.exists());
+    assert!(!low_upload.exists());
 }
 
 #[tokio::test]

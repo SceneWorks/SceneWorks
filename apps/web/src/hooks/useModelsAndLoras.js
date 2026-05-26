@@ -105,9 +105,12 @@ export function useModelsAndLoras({
     if (payload.scope === "project" && !activeProject) {
       throw new Error("Create or open a project first.");
     }
-    const { file, ...metadata } = payload;
+    const { file, secondaryFile, ...metadata } = payload;
     if (file?.size > maxLoraUploadBytes) {
       throw new Error("Uploaded LoRA file exceeds the 2GB limit");
+    }
+    if (secondaryFile?.size > maxLoraUploadBytes) {
+      throw new Error("Uploaded low-noise expert file exceeds the 2GB limit");
     }
     let body;
     if (file) {
@@ -122,6 +125,11 @@ export function useModelsAndLoras({
         }
       });
       body.append("file", file);
+      // Wan A14B MoE pair (sc-1991): the low-noise expert half rides along as a
+      // second file part the API stages under the high/low_noise convention.
+      if (secondaryFile) {
+        body.append("secondaryFile", secondaryFile);
+      }
     } else {
       body = JSON.stringify({
         ...metadata,

@@ -676,6 +676,42 @@ async fn import_lora_source_path(
     Ok(())
 }
 
+/// Write one staged LoRA upload into `target_dir` under an explicit
+/// `target_filename`, renaming it from its uploaded name. Used for paired Wan A14B
+/// MoE imports (sc-1991): the two staged uploads must land as
+/// `<stem>.high_noise.safetensors` / `<stem>.low_noise.safetensors` so the Python
+/// worker's filename-convention split detects them as one two-expert pair.
+async fn import_lora_source_file_as(
+    source: &Path,
+    target_dir: &Path,
+    target_filename: &str,
+    prefer_move: bool,
+) -> WorkerResult<()> {
+    let source = source.canonicalize()?;
+    tokio::fs::create_dir_all(target_dir).await?;
+    let target = target_dir.join(target_filename);
+    if prefer_move {
+        match tokio::fs::rename(&source, &target).await {
+            Ok(()) => return Ok(()),
+            Err(error) if is_cross_device_rename_error(&error) => {}
+            Err(error) => return Err(error.into()),
+        }
+    }
+    tokio::fs::copy(source, target).await?;
+    Ok(())
+}
+
+/// The `<stem>.high_noise.safetensors` / `<stem>.low_noise.safetensors` filenames
+/// for a Wan A14B MoE LoRA pair stored under one record. The high-noise file sorts
+/// first alphabetically, so it resolves as the primary (transformer) and the
+/// low-noise file as the `transformer_2` sibling.
+pub(crate) fn wan_moe_pair_filenames(stem: &str) -> (String, String) {
+    (
+        format!("{stem}.high_noise.safetensors"),
+        format!("{stem}.low_noise.safetensors"),
+    )
+}
+
 fn is_cross_device_rename_error(error: &std::io::Error) -> bool {
     matches!(error.raw_os_error(), Some(17 | 18))
 }

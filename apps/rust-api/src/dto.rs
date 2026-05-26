@@ -549,10 +549,19 @@ pub(crate) struct LoraImportRequest {
     pub(crate) files: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) family: Option<String>,
+    /// Specific base model the LoRA targets (e.g. `wan_2_2_t2v_14b`). Recorded on
+    /// the manifest entry so the loader's base-model gating can match it (sc-1955).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) base_model: Option<String>,
     #[serde(default = "default_lora_scope")]
     pub(crate) scope: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) project_id: Option<String>,
     #[serde(default, skip_deserializing, skip_serializing_if = "bool_is_false")]
     pub(crate) uploaded_source_path: bool,
+    /// Staged path of the low-noise expert half for a Wan A14B MoE upload (sc-1991).
+    /// Set server-side from the `secondaryFile` multipart part only; never from
+    /// client JSON. Its presence flags the import as a paired MoE write.
+    #[serde(default, skip_deserializing, skip_serializing_if = "Option::is_none")]
+    pub(crate) secondary_source_path: Option<String>,
 }
