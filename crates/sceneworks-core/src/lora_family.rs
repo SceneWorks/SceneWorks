@@ -218,6 +218,7 @@ pub fn model_adapter_for_family(family: &str) -> Option<&'static str> {
         "lens" => Some("lens_turbo"),
         "sensenova-u1" => Some("sensenova_u1"),
         "flux" => Some("flux_diffusers"),
+        "chroma" => Some("chroma_diffusers"),
         "ltx-video" => Some("ltx_video"),
         "wan-video" => Some("wan_video"),
         _ => None,
@@ -234,6 +235,7 @@ pub fn model_capabilities_for_type_and_family(model_type: &str, family: &str) ->
         ("image", "lens") => vec!["text_to_image", "style_variations"],
         ("image", "sensenova-u1") => vec!["text_to_image", "edit_image", "vqa", "interleave"],
         ("image", "flux") => vec!["text_to_image", "style_variations"],
+        ("image", "chroma") => vec!["text_to_image", "style_variations"],
         ("video", "ltx-video") => vec![
             "image_to_video",
             "text_to_video",
@@ -281,6 +283,7 @@ pub fn diffusers_class_name_to_family(class_name: &str) -> Option<String> {
         }
         "lenspipeline" => Some("lens".to_owned()),
         "fluxpipeline" | "fluximg2imgpipeline" | "fluxinpaintpipeline" => Some("flux".to_owned()),
+        "chromapipeline" | "chromaimg2imgpipeline" => Some("chroma".to_owned()),
         "wanpipeline" | "wani2vpipeline" | "wantext2videopipeline" => Some("wan-video".to_owned()),
         "ltxpipeline" | "ltxvideopipeline" | "ltximagetovideopipeline" => {
             Some("ltx-video".to_owned())
@@ -792,6 +795,15 @@ mod tests {
     }
 
     #[test]
+    fn chroma_family_maps_to_chroma_diffusers_adapter_and_image_capabilities() {
+        assert_eq!(model_adapter_for_family("chroma"), Some("chroma_diffusers"));
+        assert_eq!(
+            model_capabilities_for_type_and_family("image", "chroma"),
+            vec!["text_to_image", "style_variations"],
+        );
+    }
+
+    #[test]
     fn detects_ltx_video() {
         let mut keys = Vec::new();
         for block in 0..28 {
@@ -913,6 +925,10 @@ mod tests {
         assert_eq!(
             diffusers_class_name_to_family("FluxPipeline").as_deref(),
             Some("flux")
+        );
+        assert_eq!(
+            diffusers_class_name_to_family("ChromaPipeline").as_deref(),
+            Some("chroma")
         );
         assert_eq!(
             diffusers_class_name_to_family("StableDiffusionXLPipeline").as_deref(),

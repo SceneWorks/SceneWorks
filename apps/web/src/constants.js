@@ -130,6 +130,33 @@ export const fallbackModels = [
     },
   },
   {
+    id: "chroma1_hd",
+    name: "Chroma1-HD",
+    type: "image",
+    capabilities: ["text_to_image", "style_variations"],
+    ui: {
+      description: "Chroma1-HD — high-resolution text-to-image, Apache-2.0 (commercial-safe). FLUX.1-schnell-derived 8.9B + T5-XXL; true CFG with negative prompts (~40 steps, guidance 3.0). Large-VRAM GPU.",
+    },
+  },
+  {
+    id: "chroma1_base",
+    name: "Chroma1-Base",
+    type: "image",
+    capabilities: ["text_to_image", "style_variations"],
+    ui: {
+      description: "Chroma1-Base — text-to-image foundation tuned for finetuning, Apache-2.0 (commercial-safe). FLUX.1-schnell-derived 8.9B + T5-XXL; true CFG with negative prompts (~40 steps, guidance 3.0). Large-VRAM GPU.",
+    },
+  },
+  {
+    id: "chroma1_flash",
+    name: "Chroma1-Flash",
+    type: "image",
+    capabilities: ["text_to_image", "style_variations"],
+    ui: {
+      description: "Chroma1-Flash — fast CFG-baked text-to-image, Apache-2.0 (commercial-safe). FLUX.1-schnell-derived 8.9B + T5-XXL; ~8-step generation, CFG disabled (guidance 1.0, no negative prompt). Large-VRAM GPU.",
+    },
+  },
+  {
     id: "ltx_2_3",
     name: "LTX-2.3",
     type: "video",
