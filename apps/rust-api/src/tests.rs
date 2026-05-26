@@ -3552,6 +3552,109 @@ async fn model_and_lora_routes_match_manifest_behavior() {
     assert_eq!(qwen_job["payload"]["manifestEntry"]["family"], "qwen-image");
 }
 
+async fn request_multipart_lora_pair_upload(
+    app: axum::Router,
+    fields: &[(&str, &str)],
+    primary: (&str, &[u8]),
+    secondary: (&str, &[u8]),
+) -> (StatusCode, Value) {
+    let boundary = "SCENEWORKS_LORA_PAIR_BOUNDARY";
+    let mut body = Vec::new();
+    for (name, value) in fields {
+        body.extend_from_slice(format!("--{boundary}\r\n").as_bytes());
+        body.extend_from_slice(
+            format!("Content-Disposition: form-data; name=\"{name}\"\r\n\r\n").as_bytes(),
+        );
+        body.extend_from_slice(value.as_bytes());
+        body.extend_from_slice(b"\r\n");
+    }
+    for (part_name, (filename, bytes)) in [("file", primary), ("secondaryFile", secondary)] {
+        body.extend_from_slice(format!("--{boundary}\r\n").as_bytes());
+        body.extend_from_slice(
+            format!(
+                "Content-Disposition: form-data; name=\"{part_name}\"; filename=\"{filename}\"\r\n"
+            )
+            .as_bytes(),
+        );
+        body.extend_from_slice(b"Content-Type: application/octet-stream\r\n\r\n");
+        body.extend_from_slice(bytes);
+        body.extend_from_slice(b"\r\n");
+    }
+    body.extend_from_slice(format!("--{boundary}--\r\n").as_bytes());
+    let (status, _, bytes) = request_raw(
+        app,
+        "POST",
+        "/api/v1/loras/import",
+        body,
+        &[(
+            "content-type",
+            &format!("multipart/form-data; boundary={boundary}"),
+        )],
+    )
+    .await;
+    let value = serde_json::from_slice(&bytes).expect("json body parses");
+    (status, value)
+}
+
+#[tokio::test]
+async fn paired_moe_lora_upload_writes_convention_files_and_records_base_model() {
+    // sc-1991: a bring-your-own Wan A14B MoE pair uploads as two file parts
+    // (`file` = high-noise, `secondaryFile` = low-noise) under one record. The
+    // import normalizes both halves to the dot-delimited high/low_noise convention
+    // (off-convention upload names included) and persists the chosen A14B baseModel.
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+    let wan_bytes = test_safetensors_bytes_with_keys(&wan_video_tensor_keys());
+    let (status, job) = request_multipart_lora_pair_upload(
+        app,
+        &[
+            ("name", "Wan MoE"),
+            ("scope", "global"),
+            ("family", "wan-video"),
+            ("baseModel", "wan_2_2_t2v_14b"),
+        ],
+        // Community names that do NOT match the convention — must be normalized.
+        ("high_noise_model.safetensors", &wan_bytes),
+        ("low_noise_model.safetensors", &wan_bytes),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::CREATED);
+    assert_eq!(job["type"], "lora_import");
+    let lora_id = job["payload"]["loraId"].as_str().expect("loraId");
+    assert_eq!(job["payload"]["manifestEntry"]["family"], "wan-video");
+    assert_eq!(
+        job["payload"]["manifestEntry"]["baseModel"],
+        "wan_2_2_t2v_14b"
+    );
+    assert_eq!(
+        job["payload"]["manifestEntry"]["files"][0],
+        format!("{lora_id}.high_noise.safetensors")
+    );
+    assert_eq!(
+        job["payload"]["manifestEntry"]["files"][1],
+        format!("{lora_id}.low_noise.safetensors")
+    );
+
+    // Both halves staged on disk; the worker renames them on import.
+    let primary = std::path::PathBuf::from(
+        job["payload"]["sourcePath"]
+            .as_str()
+            .expect("primary source path"),
+    );
+    let secondary = std::path::PathBuf::from(
+        job["payload"]["secondarySourcePath"]
+            .as_str()
+            .expect("secondary source path"),
+    );
+    assert_eq!(std::fs::read(&primary).expect("primary reads"), wan_bytes);
+    assert_eq!(
+        std::fs::read(&secondary).expect("secondary reads"),
+        wan_bytes
+    );
+    assert_ne!(primary, secondary);
+}
+
 async fn request_multipart_model_upload(
     app: axum::Router,
     fields: &[(&str, &str)],

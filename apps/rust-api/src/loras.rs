@@ -280,12 +280,14 @@ pub(crate) async fn create_lora_import_job(
         let multipart = Multipart::from_request(request, &state)
             .await
             .map_err(|error| ApiError::bad_request(error.to_string()).into_response())?;
-        let (payload, staged_path) = lora_import_request_from_multipart(&state, multipart)
+        let (payload, staged_paths) = lora_import_request_from_multipart(&state, multipart)
             .await
             .map_err(IntoResponse::into_response)?;
         let result = queue_lora_import_job(state, payload).await;
         if result.is_err() {
-            cleanup_staged_lora_upload(&staged_path).await;
+            for path in &staged_paths {
+                cleanup_staged_lora_upload(path).await;
+            }
         }
         return result.map_err(IntoResponse::into_response);
     }
@@ -390,6 +392,15 @@ pub(crate) async fn queue_lora_import_job(
             allowed_source_roots
         };
         validate_lora_import_source_path(source_path, &allowed_source_roots)?;
+        // A paired Wan A14B MoE upload (sc-1991) carries a second low-noise file.
+        // Validate it against the same upload root and record both halves under the
+        // high/low_noise convention so the worker resolves the high half as primary
+        // (transformer) and the low half as the transformer_2 sibling.
+        if let Some(secondary_source_path) = payload.secondary_source_path.as_deref() {
+            validate_lora_import_source_path(secondary_source_path, &allowed_source_roots)?;
+            let (high_name, low_name) = wan_moe_pair_filenames(&target_name);
+            payload.files = vec![high_name, low_name];
+        }
         let detected = detect_family_from_local_path(source_path)?;
         payload.family = reconcile_lora_family(
             payload.family.take(),
@@ -424,6 +435,11 @@ pub(crate) async fn queue_lora_import_job(
             object.insert("family".to_owned(), Value::String(family));
         }
     }
+    if let Some(base_model) = payload.base_model.clone() {
+        if let Some(object) = manifest_entry.as_object_mut() {
+            object.insert("baseModel".to_owned(), Value::String(base_model));
+        }
+    }
     let mut payload = to_json_object(&payload)?;
     payload.insert("loraId".to_owned(), manifest_entry["id"].clone());
     payload.insert("name".to_owned(), manifest_entry["name"].clone());
@@ -451,7 +467,7 @@ pub(crate) async fn queue_lora_import_job(
 pub(crate) async fn lora_import_request_from_multipart(
     state: &AppState,
     mut multipart: Multipart,
-) -> Result<(LoraImportRequest, PathBuf), ApiError> {
+) -> Result<(LoraImportRequest, Vec<PathBuf>), ApiError> {
     let mut payload = LoraImportRequest {
         lora_id: None,
         name: None,
@@ -460,11 +476,16 @@ pub(crate) async fn lora_import_request_from_multipart(
         source_path: None,
         files: Vec::new(),
         family: None,
+        base_model: None,
         scope: default_lora_scope(),
         project_id: None,
         uploaded_source_path: false,
+        secondary_source_path: None,
     };
     let mut staged_path = None;
+    // Wan A14B MoE imports (sc-1991) carry a second `secondaryFile` part for the
+    // low-noise expert half. Staged separately so a failed queue cleans up both.
+    let mut secondary_staged_path = None;
 
     let parse_result = async {
         while let Some(field) = multipart
@@ -487,6 +508,20 @@ pub(crate) async fn lora_import_request_from_multipart(
                 staged_path = Some(path);
                 continue;
             }
+            if field_name == "secondaryFile" {
+                if secondary_staged_path.is_some() {
+                    return Err(ApiError::bad_request(
+                        "Only one low-noise expert file can be uploaded",
+                    ));
+                }
+                let upload_name =
+                    sanitized_upload_filename(field.file_name().unwrap_or("low_noise.safetensors"));
+                let path =
+                    write_lora_upload_field_to_staged_file(state, field, &upload_name).await?;
+                payload.secondary_source_path = Some(path.display().to_string());
+                secondary_staged_path = Some(path);
+                continue;
+            }
 
             let value = field
                 .text()
@@ -500,6 +535,7 @@ pub(crate) async fn lora_import_request_from_multipart(
                 "loraId" => payload.lora_id = Some(value.to_owned()),
                 "name" => payload.name = Some(value.to_owned()),
                 "family" => payload.family = Some(value.to_owned()),
+                "baseModel" => payload.base_model = Some(value.to_owned()),
                 "scope" => payload.scope = value.to_owned(),
                 "projectId" => payload.project_id = Some(value.to_owned()),
                 _ => {}
@@ -508,17 +544,25 @@ pub(crate) async fn lora_import_request_from_multipart(
         Ok(())
     }
     .await;
+    let staged_paths: Vec<PathBuf> = staged_path
+        .iter()
+        .chain(secondary_staged_path.iter())
+        .cloned()
+        .collect();
     if let Err(error) = parse_result {
-        if let Some(path) = staged_path.as_deref() {
+        for path in &staged_paths {
             cleanup_staged_lora_upload(path).await;
         }
         return Err(error);
     }
 
-    let Some(staged_path) = staged_path else {
+    if staged_path.is_none() {
+        for path in &staged_paths {
+            cleanup_staged_lora_upload(path).await;
+        }
         return Err(ApiError::bad_request("Upload file field is required"));
-    };
-    Ok((payload, staged_path))
+    }
+    Ok((payload, staged_paths))
 }
 
 pub(crate) async fn write_lora_upload_field_to_staged_file(
@@ -824,6 +868,18 @@ pub(crate) fn lora_source_provider(payload: &LoraImportRequest) -> &'static str 
     } else {
         "local"
     }
+}
+
+/// The `<stem>.high_noise.safetensors` / `<stem>.low_noise.safetensors` filenames
+/// for a paired Wan A14B MoE LoRA stored under one record (sc-1991). The high-noise
+/// file sorts first, so it resolves as the primary (transformer) and the low-noise
+/// file as the `transformer_2` sibling. Must match the worker's identical
+/// convention so the manifest `files` agree with the on-disk layout.
+pub(crate) fn wan_moe_pair_filenames(stem: &str) -> (String, String) {
+    (
+        format!("{stem}.high_noise.safetensors"),
+        format!("{stem}.low_noise.safetensors"),
+    )
 }
 
 pub(crate) fn lora_url_error_message(error: LoraUrlError) -> &'static str {

@@ -136,3 +136,139 @@ describe("ModelManagerScreen gated-model notice", () => {
     expect(container.querySelector(".model-gated-notice")).toBeNull();
   });
 });
+
+const WAN_MOE_MODEL = {
+  id: "wan_2_2_t2v_14b",
+  name: "Wan 2.2 T2V A14B",
+  type: "video",
+  family: "wan-video",
+  installState: "ready",
+  ui: { description: "Wan A14B MoE video model." },
+};
+
+function setNativeValue(element, value) {
+  const proto = element.tagName === "SELECT" ? window.HTMLSelectElement.prototype : window.HTMLInputElement.prototype;
+  Object.getOwnPropertyDescriptor(proto, "value").set.call(element, value);
+}
+
+describe("ModelManagerScreen Wan A14B MoE LoRA import (sc-1991)", () => {
+  let container;
+  let root;
+  let createLoraImportJob;
+  let ModelManagerScreen;
+  let AppContext;
+
+  beforeEach(async () => {
+    global.IS_REACT_ACT_ENVIRONMENT = true;
+    createLoraImportJob = vi.fn(async () => ({ payload: { loraId: "wan_moe", manifestEntry: { family: "wan-video" } } }));
+    window.__TAURI__ = { core: { invoke: vi.fn(async () => null) } };
+    vi.resetModules();
+    ({ AppContext } = await import("../context/AppContext.js"));
+    ({ ModelManagerScreen } = await import("./ModelManagerScreen.jsx"));
+    container = document.createElement("div");
+    document.body.appendChild(container);
+    root = createRoot(container);
+  });
+
+  afterEach(async () => {
+    await act(async () => {
+      root.unmount();
+    });
+    container.remove();
+    delete window.__TAURI__;
+    vi.restoreAllMocks();
+  });
+
+  async function render() {
+    const value = {
+      activeProject: null,
+      jobs: [],
+      loras: [],
+      models: [WAN_MOE_MODEL],
+      presets: [],
+      jobAction: () => {},
+      setActiveView: () => {},
+      deleteLora: () => {},
+      deleteModel: () => {},
+      createModelDownloadJob: () => {},
+      createModelConvertJob: () => {},
+      createLoraImportJob,
+      createModelImportJob: () => {},
+    };
+    await act(async () => {
+      root.render(
+        <AppContext.Provider value={value}>
+          <ModelManagerScreen />
+        </AppContext.Provider>,
+      );
+    });
+    await act(async () => {});
+  }
+
+  // Both the model and LoRA import forms share the .lora-import-panel class, so
+  // scope queries to the LoRA form by its aria-label.
+  function loraForm() {
+    return container.querySelector('form[aria-label="Import LoRA"]');
+  }
+
+  function labelStartingWith(prefix) {
+    return [...loraForm().querySelectorAll("label")].find((label) =>
+      label.textContent.trim().startsWith(prefix),
+    );
+  }
+
+  async function change(element, val) {
+    await act(async () => {
+      setNativeValue(element, val);
+      // Dispatch a single event so React's value tracker doesn't pre-record the new
+      // value and then skip onChange: "change" for <select>, "input" for inputs.
+      element.dispatchEvent(
+        new window.Event(element.tagName === "SELECT" ? "change" : "input", { bubbles: true }),
+      );
+    });
+  }
+
+  async function selectWanVideoFamily() {
+    const familySelect = labelStartingWith("Family").querySelector("select");
+    await change(familySelect, "wan-video");
+  }
+
+  it("reveals the base-model selector only after the wan-video family is chosen", async () => {
+    await render();
+    expect(labelStartingWith("Base model")).toBeUndefined();
+    await selectWanVideoFamily();
+    const baseModelLabel = labelStartingWith("Base model");
+    expect(baseModelLabel).toBeTruthy();
+    expect(baseModelLabel.textContent).toContain("Wan 2.2 T2V A14B");
+  });
+
+  it("surfaces the low-noise slot and a warning for an A14B upload missing its second half", async () => {
+    await render();
+    await selectWanVideoFamily();
+    await change(labelStartingWith("Base model").querySelector("select"), "wan_2_2_t2v_14b");
+    // Switch from URL to Upload mode.
+    const uploadButton = [...loraForm().querySelectorAll("button")].find(
+      (button) => button.textContent === "Upload",
+    );
+    await act(async () => {
+      uploadButton.dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
+    });
+    expect(labelStartingWith("Low-noise expert")).toBeTruthy();
+    expect(container.textContent).toContain("two-expert model");
+  });
+
+  it("threads the chosen base model into the import request", async () => {
+    await render();
+    await selectWanVideoFamily();
+    await change(labelStartingWith("Base model").querySelector("select"), "wan_2_2_t2v_14b");
+    await change(labelStartingWith("Source URL").querySelector("input"), "https://example.com/wan-moe.safetensors");
+    const form = container.querySelector('form[aria-label="Import LoRA"]');
+    await act(async () => {
+      form.dispatchEvent(new window.Event("submit", { bubbles: true, cancelable: true }));
+    });
+    expect(createLoraImportJob).toHaveBeenCalledTimes(1);
+    const payload = createLoraImportJob.mock.calls[0][0];
+    expect(payload.family).toBe("wan-video");
+    expect(payload.baseModel).toBe("wan_2_2_t2v_14b");
+  });
+});

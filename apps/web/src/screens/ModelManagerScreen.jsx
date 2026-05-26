@@ -5,6 +5,11 @@ import { hasPresentCredential, loadCredentials } from "../credentials.js";
 import { extractFamilies, presetLoraId, presetLoras } from "../presetUtils.js";
 import { useAppContext } from "../context/AppContext.js";
 
+// Wan A14B is a two-expert mixture; its LoRAs come as a high/low-noise pair. These
+// base models accept the optional low-noise expert upload (sc-1991). The 5B model
+// (wan_2_2) is dense and takes a single-file LoRA.
+const WAN_MOE_BASE_MODELS = new Set(["wan_2_2_t2v_14b", "wan_2_2_i2v_14b"]);
+
 function matchesFamily(item, familyFilter) {
   if (familyFilter === "all") {
     return true;
@@ -175,9 +180,11 @@ export function ModelManagerScreen() {
     mode: "url",
     sourceUrl: "",
     file: null,
+    secondaryFile: null,
     name: "",
     scope: "global",
     family: "",
+    baseModel: "",
   });
   const [fileInputKey, setFileInputKey] = useState(0);
   const [importingModel, setImportingModel] = useState(false);
@@ -202,6 +209,14 @@ export function ModelManagerScreen() {
   const [credentials, setCredentials] = useState([]);
   const hasGatedModel = models.some((model) => model.gated);
   const visibleLoras = loras.filter((lora) => matchesFamily(lora, familyFilter));
+  // Wan A14B MoE paired upload (sc-1991): when the user targets the wan-video
+  // family, let them pick the specific base model and (for two-expert A14B models)
+  // upload the low-noise expert half alongside the high-noise primary.
+  const wanBaseModelOptions = models.filter((model) => model.family === "wan-video");
+  const showBaseModelSelect = importForm.family === "wan-video" && wanBaseModelOptions.length > 0;
+  const isMoeBaseModel = WAN_MOE_BASE_MODELS.has(importForm.baseModel);
+  const showSecondaryFileSlot = isMoeBaseModel && importForm.mode === "file";
+  const moeMissingSecondary = showSecondaryFileSlot && Boolean(importForm.file) && !importForm.secondaryFile;
 
   useEffect(() => {
     if (familyFilter !== "all" && !families.includes(familyFilter)) {
@@ -212,6 +227,16 @@ export function ModelManagerScreen() {
   useEffect(() => {
     setImportForm((current) => (current.family && !families.includes(current.family) ? { ...current, family: "" } : current));
   }, [familiesKey]);
+
+  // The base model + low-noise slot only apply to wan-video imports; clear them
+  // when the family changes away so a stale baseModel can't ride along.
+  useEffect(() => {
+    setImportForm((current) =>
+      current.family !== "wan-video" && (current.baseModel || current.secondaryFile)
+        ? { ...current, baseModel: "", secondaryFile: null }
+        : current,
+    );
+  }, [importForm.family]);
 
   useEffect(() => {
     if (!isDesktop) {
@@ -274,17 +299,26 @@ export function ModelManagerScreen() {
     });
     try {
       const familyOverride = importForm.family ? { family: importForm.family } : {};
+      // Carry the chosen base model (wan-video) and, for an A14B MoE upload, the
+      // low-noise expert half so both land in one record (sc-1991).
+      const baseModelOverride = showBaseModelSelect && importForm.baseModel ? { baseModel: importForm.baseModel } : {};
+      const secondaryOverride =
+        isFileImport && showSecondaryFileSlot && importForm.secondaryFile
+          ? { secondaryFile: importForm.secondaryFile }
+          : {};
       const job = await onImportLora({
         ...(isFileImport ? { file: importForm.file } : { sourceUrl: importForm.sourceUrl.trim() }),
         name: importForm.name.trim() || undefined,
         scope: importForm.scope,
         ...familyOverride,
+        ...baseModelOverride,
+        ...secondaryOverride,
       });
       const loraId = job?.payload?.loraId;
       const resolvedFamily = job?.payload?.manifestEntry?.family;
       const detectionNote =
         !importForm.family && resolvedFamily ? ` Detected family: ${resolvedFamily}.` : "";
-      setImportForm((current) => ({ ...current, sourceUrl: "", file: null, name: "" }));
+      setImportForm((current) => ({ ...current, sourceUrl: "", file: null, secondaryFile: null, name: "" }));
       // Force a re-mount so choosing the same file again still emits a change event.
       setFileInputKey((current) => current + 1);
       setImportMessage({
@@ -720,23 +754,60 @@ export function ModelManagerScreen() {
                 )}
               </select>
             </label>
-            {isFileImport ? (
+            {showBaseModelSelect ? (
               <label>
-                LoRA File
-                <span className="file-picker-row">
-                  <span className="file-upload-button">
-                    Choose
-                    <input
-                      accept=".safetensors,.ckpt,.pt,.bin"
-                      disabled={importingLora}
-                      key={fileInputKey}
-                      onChange={(event) => setImportForm((current) => ({ ...current, file: event.target.files?.[0] ?? null }))}
-                      type="file"
-                    />
-                  </span>
-                  <span className="selected-file-name">{importForm.file?.name ?? "No file selected"}</span>
-                </span>
+                Base model
+                <select
+                  disabled={importingLora}
+                  onChange={(event) => setImportForm((current) => ({ ...current, baseModel: event.target.value }))}
+                  value={importForm.baseModel}
+                >
+                  <option value="">Auto / unspecified</option>
+                  {wanBaseModelOptions.map((model) => (
+                    <option key={model.id} value={model.id}>
+                      {model.name ?? model.id}
+                    </option>
+                  ))}
+                </select>
               </label>
+            ) : null}
+            {isFileImport ? (
+              <>
+                <label>
+                  LoRA File
+                  <span className="file-picker-row">
+                    <span className="file-upload-button">
+                      Choose
+                      <input
+                        accept=".safetensors,.ckpt,.pt,.bin"
+                        disabled={importingLora}
+                        key={fileInputKey}
+                        onChange={(event) => setImportForm((current) => ({ ...current, file: event.target.files?.[0] ?? null }))}
+                        type="file"
+                      />
+                    </span>
+                    <span className="selected-file-name">{importForm.file?.name ?? "No file selected"}</span>
+                  </span>
+                </label>
+                {showSecondaryFileSlot ? (
+                  <label>
+                    Low-noise expert (Wan A14B MoE)
+                    <span className="file-picker-row">
+                      <span className="file-upload-button">
+                        Choose
+                        <input
+                          accept=".safetensors,.ckpt,.pt,.bin"
+                          disabled={importingLora}
+                          key={`secondary-${fileInputKey}`}
+                          onChange={(event) => setImportForm((current) => ({ ...current, secondaryFile: event.target.files?.[0] ?? null }))}
+                          type="file"
+                        />
+                      </span>
+                      <span className="selected-file-name">{importForm.secondaryFile?.name ?? "No file selected"}</span>
+                    </span>
+                  </label>
+                ) : null}
+              </>
             ) : (
               <label>
                 Source URL
@@ -761,6 +832,18 @@ export function ModelManagerScreen() {
               {importingLora ? (isFileImport ? "Uploading" : "Queueing...") : "Queue Import"}
             </button>
           </div>
+          {showSecondaryFileSlot ? (
+            <p className="helper-copy">
+              Wan A14B is a two-expert model. Upload both the high-noise file and the low-noise expert so each expert
+              gets its own weights.
+            </p>
+          ) : null}
+          {moeMissingSecondary ? (
+            <p className="inline-warning">
+              No low-noise expert selected — this LoRA will load into the high-noise expert only, leaving the
+              low-noise expert un-adapted.
+            </p>
+          ) : null}
           {importForm.scope === "project" && !activeProject ? <p className="helper-copy">Open a project before importing a project LoRA.</p> : null}
           {importMessage.text ? <p className={importMessage.tone === "success" ? "inline-success" : "inline-warning"}>{importMessage.text}</p> : null}
         </form>

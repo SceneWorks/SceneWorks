@@ -589,7 +589,7 @@ pub(crate) async fn run_lora_import_job(
     let target_dir = resolve_lora_import_target(
         settings,
         &job.payload,
-        settings.data_dir.join("loras").join(target_name),
+        settings.data_dir.join("loras").join(&target_name),
     )?;
 
     heartbeat(api, settings, WorkerStatus::Busy, Some(&job.id)).await?;
@@ -640,12 +640,32 @@ pub(crate) async fn run_lora_import_job(
         )
         .await?;
     } else if let Some(source_path) = source_path {
-        import_lora_source_path(
-            Path::new(source_path),
-            &target_dir,
-            payload_bool(&job.payload, "uploadedSourcePath"),
-        )
-        .await?;
+        let prefer_move = payload_bool(&job.payload, "uploadedSourcePath");
+        if let Some(secondary_source_path) =
+            optional_payload_string(&job.payload, "secondarySourcePath")
+        {
+            // Paired Wan A14B MoE upload (sc-1991): write both halves into one
+            // record under the high/low_noise convention so the high half resolves
+            // as the primary (transformer) and the low half as the transformer_2
+            // sibling, regardless of the user's original upload filenames.
+            let (high_name, low_name) = wan_moe_pair_filenames(&target_name);
+            import_lora_source_file_as(
+                Path::new(source_path),
+                &target_dir,
+                &high_name,
+                prefer_move,
+            )
+            .await?;
+            import_lora_source_file_as(
+                Path::new(secondary_source_path),
+                &target_dir,
+                &low_name,
+                prefer_move,
+            )
+            .await?;
+        } else {
+            import_lora_source_path(Path::new(source_path), &target_dir, prefer_move).await?;
+        }
     } else if let Some(source_url) = source_url {
         download_lora_source_url(
             &DownloadContext {

@@ -781,7 +781,40 @@ def test_mlx_wan_user_loras_resolved_to_path_strength_tuples(tmp_path):
             [{"id": "wan_motion", "installedPath": str(lora_file), "weight": 0.7, "family": "wan-video"}],
         )
     )
-    assert MlxVideoAdapter()._wan_user_loras(request) == [(str(lora_file), 0.7)]
+    # A single-file LoRA has no low-noise sibling, so it applies to every expert
+    # via the shared `loras` list; high/low expert lists stay empty.
+    high, low, shared = MlxVideoAdapter()._wan_user_loras(request)
+    assert (high, low, shared) == ([], [], [(str(lora_file), 0.7)])
+
+
+def test_mlx_wan_moe_user_lora_routes_low_noise_to_low_expert(tmp_path):
+    # sc-1991: a Wan A14B MoE LoRA (high/low pair) must route its high half to the
+    # high-noise expert and its low half to the low-noise expert on MLX, mirroring
+    # the torch load_into_transformer_2 split. Previously the high half was applied
+    # to both experts and the low half dropped.
+    moe = tmp_path / "wan_moe"
+    moe.mkdir()
+    (moe / "char.high_noise.safetensors").write_bytes(b"lora")
+    (moe / "char.low_noise.safetensors").write_bytes(b"lora")
+    request = video_request_from_job(
+        _mlx_video_job(
+            "wan_2_2_t2v_14b",
+            "text_to_video",
+            [
+                {
+                    "id": "char",
+                    "installedPath": str(moe),
+                    "weight": 0.8,
+                    "family": "wan-video",
+                    "baseModel": "wan_2_2_t2v_14b",
+                }
+            ],
+        )
+    )
+    high, low, shared = MlxVideoAdapter()._wan_user_loras(request)
+    assert len(high) == 1 and high[0][0].endswith("char.high_noise.safetensors") and high[0][1] == 0.8
+    assert len(low) == 1 and low[0][0].endswith("char.low_noise.safetensors") and low[0][1] == 0.8
+    assert shared == []
 
 
 def test_mlx_local_dir_prefers_env_override_then_data_dir(tmp_path, monkeypatch):

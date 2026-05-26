@@ -1988,11 +1988,27 @@ class MlxVideoAdapter(VideoGenerationAdapter):
                 return str(path)
         return None
 
-    def _wan_user_loras(self, request: VideoRequest) -> list[tuple[str, float]]:
-        """User-supplied LoRAs as (path, strength) tuples for the Wan MLX generator.
-        Passed via `loras` (applied to all experts); the distill LoRA stays in
-        loras_high/loras_low so the two never collide."""
-        return [(spec.path, spec.weight) for spec in normalize_lora_specs(request.loras)]
+    def _wan_user_loras(
+        self, request: VideoRequest
+    ) -> tuple[list[tuple[str, float]], list[tuple[str, float]], list[tuple[str, float]]]:
+        """Split user LoRAs into (high, low, shared) (path, strength) tuples.
+
+        A Wan A14B MoE LoRA carries its low-noise half in `spec.secondary_path`
+        (sc-1955). The high half routes to the high-noise expert (`loras_high`) and
+        the low half to the low-noise expert (`loras_low`), mirroring the torch
+        `load_into_transformer_2` split. Single-file LoRAs have no sibling and apply
+        to every expert via `loras`. Keeping MoE halves out of `loras` stops the
+        high-noise weights from leaking onto the low-noise expert."""
+        high: list[tuple[str, float]] = []
+        low: list[tuple[str, float]] = []
+        shared: list[tuple[str, float]] = []
+        for spec in normalize_lora_specs(request.loras):
+            if spec.secondary_path:
+                high.append((spec.path, spec.weight))
+                low.append((spec.secondary_path, spec.weight))
+            else:
+                shared.append((spec.path, spec.weight))
+        return high, low, shared
 
     def _run_wan_mlx(
         self,
@@ -2063,9 +2079,14 @@ class MlxVideoAdapter(VideoGenerationAdapter):
             "loras_high": spec["loras_high"],
             "loras_low": spec["loras_low"],
         }
-        user_loras = self._wan_user_loras(request)
-        if user_loras:
-            kwargs["loras"] = user_loras
+        user_high, user_low, user_shared = self._wan_user_loras(request)
+        if user_high or user_low:
+            # MoE LoRA halves merge into the per-expert lists alongside any distill
+            # LoRA so the low-noise expert gets its own low-noise weights.
+            kwargs["loras_high"] = [*(spec["loras_high"] or []), *user_high]
+            kwargs["loras_low"] = [*(spec["loras_low"] or []), *user_low]
+        if user_shared:
+            kwargs["loras"] = user_shared
         if spec["steps"] is not None:
             kwargs["steps"] = spec["steps"]
         if spec["guide_scale"] is not None:
