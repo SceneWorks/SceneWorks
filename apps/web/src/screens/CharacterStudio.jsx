@@ -308,7 +308,10 @@ export function CharacterStudio() {
                 <button onClick={() => archiveCharacter(selectedCharacter.id)} type="button">
                   Archive
                 </button>
-                <button onClick={() => onSendImage(selectedCharacter, testLookId || null)} type="button">
+                <button
+                  onClick={() => onSendImage(selectedCharacter, testLookId || null, approvedReferences[0]?.assetId ?? null)}
+                  type="button"
+                >
                   Image
                 </button>
                 <button onClick={() => onSendVideo(selectedCharacter, testLookId || null)} type="button">
@@ -317,12 +320,13 @@ export function CharacterStudio() {
               </div>
             </form>
             <div className="guidance-strip">
-              <strong>Character conditioning</strong>
-              <span>Character selections are recorded in presets now; adapter-level reference and LoRA conditioning will activate in a later runtime slice.</span>
+              <strong>Reference identity</strong>
+              <span>Approve a reference image, then use Generate variations (or the Image button) to create new images that keep this character's appearance with Kolors IP-Adapter. LoRA conditioning activates in a later runtime slice.</span>
             </div>
 
             <CharacterReferences
               imageAssets={imageAssets}
+              onGenerateFromReference={(assetId) => onSendImage(selectedCharacter, testLookId || null, assetId)}
               onPreview={onPreview}
               referenceMessage={referenceMessage}
               referenceAssetIds={referenceAssetIds}
