@@ -5106,6 +5106,7 @@ describe("SceneWorks app shell", () => {
     let modelOptions = [...field(container, "Model").options].map((option) => option.textContent);
     expect(modelOptions).toContain("Kolors");
     expect(modelOptions).toContain("FLUX");
+    const sceneSuggestions = [...container.querySelectorAll(".suggestion")].map((button) => button.textContent).join("|");
 
     await act(async () => {
       [...container.querySelectorAll(".segmented-control button")].find((button) => button.textContent === "With character").click();
@@ -5116,6 +5117,107 @@ describe("SceneWorks app shell", () => {
     modelOptions = [...field(container, "Model").options].map((option) => option.textContent);
     expect(modelOptions).toContain("Kolors");
     expect(modelOptions).not.toContain("FLUX");
+
+    // Suggestions swap to the variation-oriented set in character mode.
+    const characterSuggestions = [...container.querySelectorAll(".suggestion")].map((button) => button.textContent).join("|");
+    expect(characterSuggestions).not.toBe(sceneSuggestions);
+  });
+
+  it("seeds a character-aware default prompt from the character's notes", async () => {
+    root = createRoot(container);
+    await act(async () => {
+      root.render(
+        withImageStudioContext({
+          activeProject: { id: "project-1", name: "Noir" },
+          assets: [],
+          characters: [
+            { id: "char-1", name: "Mira", type: "person", description: "A grizzled detective in a trench coat", looks: [], approvedReferences: [] },
+          ],
+          createImageJob: () => {},
+          deleteAsset: () => {},
+          gpuOptions: ["auto"],
+          imageModels: [{ id: "kolors", name: "Kolors", type: "image", capabilities: ["text_to_image", "character_image"] }],
+          latestAssets: [],
+          launchRequest: { id: "launch-prompt-1", view: "Image", characterId: "char-1", mode: "character_image" },
+          loras: [],
+          onPreview: () => {},
+          purgeAsset: () => {},
+          requestedGpu: "auto",
+          selectedAsset: null,
+          setRequestedGpu: () => {},
+          updateAssetStatus: () => {},
+        }),
+      );
+    });
+    await settle();
+
+    expect(container.querySelector(".prompt-input").value).toBe("A grizzled detective in a trench coat");
+  });
+
+  it("falls back to a type-specific default prompt when the character has no notes", async () => {
+    root = createRoot(container);
+    await act(async () => {
+      root.render(
+        withImageStudioContext({
+          activeProject: { id: "project-1", name: "Noir" },
+          assets: [],
+          characters: [{ id: "char-2", name: "Echo", type: "creature", looks: [], approvedReferences: [] }],
+          createImageJob: () => {},
+          deleteAsset: () => {},
+          gpuOptions: ["auto"],
+          imageModels: [{ id: "kolors", name: "Kolors", type: "image", capabilities: ["text_to_image", "character_image"] }],
+          latestAssets: [],
+          launchRequest: { id: "launch-prompt-2", view: "Image", characterId: "char-2", mode: "character_image" },
+          loras: [],
+          onPreview: () => {},
+          purgeAsset: () => {},
+          requestedGpu: "auto",
+          selectedAsset: null,
+          setRequestedGpu: () => {},
+          updateAssetStatus: () => {},
+        }),
+      );
+    });
+    await settle();
+
+    expect(container.querySelector(".prompt-input").value).toBe("The creature in a new setting, varied pose, natural lighting");
+  });
+
+  it("keeps an edited prompt when switching into character mode", async () => {
+    root = createRoot(container);
+    await act(async () => {
+      root.render(
+        withImageStudioContext({
+          activeProject: { id: "project-1", name: "Noir" },
+          assets: [],
+          characters: [
+            { id: "char-1", name: "Mira", type: "person", description: "A grizzled detective", looks: [], approvedReferences: [] },
+          ],
+          createImageJob: () => {},
+          deleteAsset: () => {},
+          gpuOptions: ["auto"],
+          imageModels: [{ id: "kolors", name: "Kolors", type: "image", capabilities: ["text_to_image", "character_image"] }],
+          latestAssets: [],
+          loras: [],
+          onPreview: () => {},
+          purgeAsset: () => {},
+          requestedGpu: "auto",
+          selectedAsset: null,
+          setRequestedGpu: () => {},
+          updateAssetStatus: () => {},
+        }),
+      );
+    });
+
+    await changeField(container.querySelector(".prompt-input"), "my own deliberate scene");
+    await act(async () => {
+      [...container.querySelectorAll(".segmented-control button")].find((button) => button.textContent === "With character").click();
+    });
+    await changeField(field(container, "Character"), "char-1");
+    await settle();
+
+    // The user's wording survives entering character mode.
+    expect(container.querySelector(".prompt-input").value).toBe("my own deliberate scene");
   });
 
   it("generates without a reference and warns when the character has no approved reference image", async () => {

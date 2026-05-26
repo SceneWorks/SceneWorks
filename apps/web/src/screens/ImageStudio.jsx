@@ -20,14 +20,45 @@ const PROMPT_SUGGESTION_POOL = [
   "Lighthouse beam slicing through coastal fog",
 ];
 
-function pickSuggestions(count) {
-  const pool = [...PROMPT_SUGGESTION_POOL];
+// Character (IP-Adapter) variations: the reference image supplies identity, so
+// these describe scene / pose / lighting to vary rather than a standalone subject.
+const CHARACTER_SUGGESTION_POOL = [
+  "studio portrait, soft key light",
+  "in a sunlit park, candid",
+  "city street at dusk, cinematic",
+  "seated at a wooden desk, warm light",
+  "walking through a busy market, natural light",
+  "close-up, dramatic side lighting",
+  "outdoors at golden hour, backlit",
+  "neutral grey backdrop, even studio lighting",
+];
+
+function pickSuggestions(count, pool = PROMPT_SUGGESTION_POOL) {
+  const available = [...pool];
   const result = [];
-  for (let index = 0; index < count && pool.length; index += 1) {
-    const pick = Math.floor(Math.random() * pool.length);
-    result.push(pool.splice(pick, 1)[0]);
+  for (let index = 0; index < count && available.length; index += 1) {
+    const pick = Math.floor(Math.random() * available.length);
+    result.push(available.splice(pick, 1)[0]);
   }
   return result;
+}
+
+// Seeded into the prompt when entering character mode (only when untouched). The
+// character's own notes win if present; otherwise a neutral, type-appropriate
+// variation prompt — identity still comes from the reference image, not this text.
+function defaultCharacterPrompt(character) {
+  const note = (character?.description ?? "").trim();
+  if (note) {
+    return note;
+  }
+  switch (character?.type) {
+    case "creature":
+      return "The creature in a new setting, varied pose, natural lighting";
+    case "object":
+      return "The object from a fresh angle and setting, studio lighting";
+    default:
+      return "Portrait of the character, varied pose and expression, natural lighting";
+  }
 }
 import {
   loraMatchesModel,
@@ -151,9 +182,18 @@ export function ImageStudio() {
   const onOpenPresets = () => setActiveView("Presets");
   const onOpenQueue = () => setActiveView("Queue");
   const onPreview = setPreviewAsset;
-  const [suggestions] = useState(() => pickSuggestions(4));
+  const [sceneSuggestions] = useState(() => pickSuggestions(4));
+  const [characterSuggestions] = useState(() => pickSuggestions(4, CHARACTER_SUGGESTION_POOL));
   const [mode, setMode] = useState("text_to_image");
   const [prompt, setPrompt] = useState("A cinematic frame of a neon street at midnight");
+  // True once the user types or picks a suggestion, so the character-mode default
+  // prompt never clobbers their own wording.
+  const promptEdited = useRef(false);
+  const setPromptFromUser = (value) => {
+    promptEdited.current = true;
+    setPrompt(value);
+  };
+  const suggestions = mode === "character_image" ? characterSuggestions : sceneSuggestions;
   const [count, setCount] = useState(4);
   const [advancedOpen, setAdvancedOpen] = useState(false);
   const [model, setModel] = useState(imageModels[0]?.id ?? "z_image_turbo");
@@ -297,6 +337,18 @@ export function ImageStudio() {
     }
     setReferenceAssetId(characterReferences[0]?.assetId ?? "");
   }, [mode, characterReferences, referenceAssetId]);
+  // Seed a character-appropriate default prompt when entering character mode, unless
+  // the user has already typed/picked their own. The generic text-to-image default
+  // ("neon street at midnight") makes no sense for character variations.
+  useEffect(() => {
+    if (mode !== "character_image" || !characterId || promptEdited.current) {
+      return;
+    }
+    const character = characters.find((item) => item.id === characterId);
+    if (character) {
+      setPrompt(defaultCharacterPrompt(character));
+    }
+  }, [mode, characterId, characters]);
   const resolutionOptions = useMemo(
     () =>
       selectedModel?.limits?.resolutions?.length
@@ -539,7 +591,7 @@ export function ImageStudio() {
             <textarea
               aria-label="Prompt"
               className="prompt-input"
-              onChange={(event) => setPrompt(event.target.value)}
+              onChange={(event) => setPromptFromUser(event.target.value)}
               onKeyDown={onPromptKeyDown}
               placeholder="Describe your shot — subject, lighting, mood, lens…"
               value={prompt}
@@ -556,7 +608,7 @@ export function ImageStudio() {
               <button
                 className="suggestion"
                 key={suggestion}
-                onClick={() => setPrompt(suggestion)}
+                onClick={() => setPromptFromUser(suggestion)}
                 type="button"
               >
                 <Icon.Sparkle size={11} />
