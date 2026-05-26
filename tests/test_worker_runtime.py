@@ -7,7 +7,7 @@ import sys
 import threading
 import time
 from pathlib import Path
-from typing import NamedTuple
+from typing import Any, NamedTuple
 from types import ModuleType, SimpleNamespace
 
 from PIL import Image
@@ -45,6 +45,13 @@ from scene_worker.image_adapters import (
     sensenova_resolution_for,
     SenseNovaU1Adapter,
     verify_pipeline_on_device,
+)
+from scene_worker.upscalers import (
+    RealESRGANUpscaler,
+    TileSlice,
+    UpscaleJob,
+    create_upscaler_engine,
+    tile_slices,
 )
 from scene_worker.lora_adapters import (
     apply_loras_to_pipeline,
@@ -4992,6 +4999,93 @@ def test_gpu_memory_snapshot_reports_allocated_and_reserved_bytes():
     snapshot = gpu_memory_snapshot(Torch, "cuda:0")
 
     assert snapshot == {"device": "cuda:0", "allocatedMb": 50.0, "reservedMb": 60.0}
+
+
+def test_upscaler_engine_selection_is_import_safe_without_torch(monkeypatch):
+    imported: list[str] = []
+
+    def fail_torch_import(name):
+        imported.append(name)
+        if name == "torch":
+            raise AssertionError("torch must not be imported while selecting an upscaler")
+        return importlib.import_module(name)
+
+    monkeypatch.setattr("scene_worker.upscalers.importlib.import_module", fail_torch_import)
+
+    engine = create_upscaler_engine("real-esrgan")
+
+    assert isinstance(engine, RealESRGANUpscaler)
+    assert imported == []
+
+
+def test_upscaler_tile_slices_cover_edges_without_overlap_gaps():
+    assert tile_slices(5, 3, 2) == [
+        TileSlice(0, 0, 2, 2),
+        TileSlice(2, 0, 4, 2),
+        TileSlice(4, 0, 5, 2),
+        TileSlice(0, 2, 2, 3),
+        TileSlice(2, 2, 4, 3),
+        TileSlice(4, 2, 5, 3),
+    ]
+    assert tile_slices(5, 3, 0) == [TileSlice(0, 0, 5, 3)]
+
+
+def test_real_esrgan_upscale_lazily_imports_torch_and_reuses_device_helpers(tmp_path, monkeypatch):
+    weights = tmp_path / "realesrgan.pth"
+    weights.write_bytes(b"stub")
+
+    class FakeTorch:
+        float32 = "float32"
+        bfloat16 = "bfloat16"
+        float16 = "float16"
+
+        class cuda:
+            @staticmethod
+            def is_available():
+                return False
+
+        class backends:
+            mps = None
+
+    imports: list[str] = []
+
+    def fake_import_module(name):
+        imports.append(name)
+        if name == "torch":
+            return FakeTorch
+        return importlib.import_module(name)
+
+    seen: dict[str, Any] = {}
+
+    def fake_load_model(self, torch, weights_path, *, factor, device, dtype):
+        seen.update({"torch": torch, "weights_path": weights_path, "factor": factor, "device": device, "dtype": dtype})
+        return object()
+
+    def fake_upscale_with_model(self, torch, model, image, *, factor, device, dtype, tile_size, tile_pad):
+        seen.update({"tile_size": tile_size, "tile_pad": tile_pad})
+        return image.resize((image.width * factor, image.height * factor))
+
+    monkeypatch.setattr("scene_worker.upscalers.importlib.import_module", fake_import_module)
+    monkeypatch.setattr(RealESRGANUpscaler, "_load_model", fake_load_model)
+    monkeypatch.setattr(RealESRGANUpscaler, "_upscale_with_model", fake_upscale_with_model)
+
+    result = RealESRGANUpscaler().upscale(
+        Image.new("RGB", (3, 4), "white"),
+        job=UpscaleJob(factor=2, weights_path=weights, tile_size=64, tile_pad=4),
+        settings=SimpleNamespace(gpu_id="cpu"),
+    )
+
+    assert result.size == (6, 8)
+    assert imports == ["torch"]
+    assert seen == {
+        "torch": FakeTorch,
+        "weights_path": weights,
+        "factor": 2,
+        "device": "cpu",
+        "dtype": "float32",
+        "tile_size": 64,
+        "tile_pad": 4,
+    }
 
 
 def test_pipeline_component_devices_inspects_known_submodules():
