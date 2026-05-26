@@ -1538,6 +1538,94 @@ def test_sdxl_num_inference_steps_default_and_override():
     assert adapter._num_inference_steps(SimpleNamespace(advanced={"steps": 999}), sdxl) == 80
 
 
+def test_sdxl_adapter_applies_sdxl_lora(tmp_path):
+    # A trained sdxl-family LoRA loads onto the SDXL pipeline via
+    # StableDiffusionXLPipeline.load_lora_weights and its weight is applied (sc-1943).
+    lora = tmp_path / "aurora_style.safetensors"
+    lora.write_bytes(b"lora")
+    pipe = FakeLoraPipe()
+    adapter = SdxlDiffusersAdapter()
+    request = SimpleNamespace(
+        model="sdxl",
+        mode="text_to_image",
+        loras=[
+            {
+                "id": "aurora_style",
+                "installedPath": str(lora),
+                "weight": 0.75,
+                "compatibility": {"families": ["sdxl"]},
+            }
+        ],
+    )
+    adapter._apply_loras(pipe, request)
+    state = adapter._loaded_lora_states["text"]
+    assert [path for path, _name in pipe.loaded] == [str(lora)]
+    assert pipe.set_calls == [(list(state.adapter_names), [0.75])]
+
+
+def test_sdxl_adapter_rejects_incompatible_lora_family(tmp_path):
+    # SDXL accepts only sdxl-family LoRAs (no extra-compatible families, unlike
+    # chroma↔flux): a flux LoRA is filtered out before it can load (sc-1927/sc-1943).
+    lora = tmp_path / "flux_style.safetensors"
+    lora.write_bytes(b"lora")
+    pipe = FakeLoraPipe()
+    adapter = SdxlDiffusersAdapter()
+    request = SimpleNamespace(
+        model="sdxl",
+        mode="text_to_image",
+        loras=[
+            {
+                "id": "flux_style",
+                "installedPath": str(lora),
+                "compatibility": {"families": ["flux"]},
+            }
+        ],
+    )
+    try:
+        adapter._apply_loras(pipe, request)
+    except RuntimeError as exc:
+        assert "not compatible with model family sdxl" in str(exc)
+    else:
+        raise AssertionError("SDXL must reject a LoRA whose family is not sdxl.")
+
+
+def test_sdxl_backend_save_lora_writes_unet_diffusers_format(tmp_path, monkeypatch):
+    # The trainer saves an sdxl-family LoRA via StableDiffusionXLPipeline's own
+    # save_lora_weights(unet_lora_layers=...) — the diffusers format the inference
+    # loader (load_lora_weights) round-trips. Torch-free: fake peft + pipeline.
+    import sys
+    import types as types_module
+
+    fake_state = {"unet.down_blocks.0.attentions.0.lora_A.weight": "tensor"}
+    fake_peft_utils = types_module.ModuleType("peft.utils")
+    fake_peft_utils.get_peft_model_state_dict = lambda _module: fake_state
+    monkeypatch.setitem(sys.modules, "peft.utils", fake_peft_utils)
+
+    saved: dict[str, object] = {}
+
+    class FakeSdxlPipeline:
+        @staticmethod
+        def save_lora_weights(
+            output_dir, *, unet_lora_layers=None, weight_name=None, safe_serialization=None, **_kwargs
+        ):
+            saved["output_dir"] = output_dir
+            saved["unet_lora_layers"] = unet_lora_layers
+            saved["weight_name"] = weight_name
+            saved["safe_serialization"] = safe_serialization
+
+    backend = _SdxlLoraBackend()
+    backend._unet = object()
+    backend._pipeline = FakeSdxlPipeline()
+    output_path = backend._save_lora(output_dir=str(tmp_path), file_name="aurora_style.safetensors")
+
+    # unet_lora_layers carries the PEFT state dict; this is the only LoRA layer
+    # kwarg the trainer passes (UNet-only), and the key the SDXL loader consumes.
+    assert saved["unet_lora_layers"] is fake_state
+    assert saved["weight_name"] == "aurora_style.safetensors"
+    assert saved["safe_serialization"] is True
+    assert output_path == str(tmp_path / "aurora_style.safetensors")
+
+
 def test_create_image_adapter_routes_sensenova_u1():
     adapter = create_image_adapter({"payload": {"model": "sensenova_u1_8b"}})
     assert adapter.__class__.__name__ == "SenseNovaU1Adapter"
