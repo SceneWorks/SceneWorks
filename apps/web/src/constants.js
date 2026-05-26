@@ -170,6 +170,16 @@ export const fallbackModels = [
     },
   },
   {
+    id: "sdxl",
+    name: "Stable Diffusion XL",
+    type: "image",
+    capabilities: ["text_to_image", "edit_image", "style_variations"],
+    ui: {
+      description: "Stability AI Stable Diffusion XL base 1.0 — open text-to-image foundation with the largest LoRA/finetune ecosystem. CreativeML OpenRAIL++-M (commercial use OK, ungated). SDXL UNet + dual CLIP; ~6.9GB fp16, real CFG + negative prompt, ~30 steps at guidance 7.0; native 1024x1024.",
+      promptGuide: { title: "Stable Diffusion XL Prompt Guide", path: "/prompt-guides/sdxl.md" },
+    },
+  },
+  {
     id: "ltx_2_3",
     name: "LTX-2.3",
     type: "video",

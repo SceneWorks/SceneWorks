@@ -712,6 +712,64 @@
       }
     },
     {
+      "id": "sdxl",
+      "name": "Stable Diffusion XL",
+      "family": "sdxl",
+      "type": "image",
+      "adapter": "sdxl_diffusers",
+      "capabilities": ["text_to_image", "edit_image", "style_variations"],
+      "downloads": [
+        {
+          // Diffusers checkpoint: SDXL base 1.0 (UNet + dual CLIP text encoders
+          // + VAE). Whole-repo download; the worker loads the fp16 variant.
+          // CreativeML OpenRAIL++-M: use-based restrictions, commercial use OK,
+          // ungated (no HF token required).
+          "provider": "huggingface",
+          "repo": "stabilityai/stable-diffusion-xl-base-1.0",
+          "files": [],
+          "estimatedSizeBytes": 6938040320
+        }
+      ],
+      "paths": {
+        "model": "${HF_CACHE}/stabilityai/stable-diffusion-xl-base-1.0"
+      },
+      "defaults": {
+        // SDXL base 1.0: EulerDiscreteScheduler default; real CFG with a
+        // negative prompt. ~30 steps at guidance 7.0 is a solid baseline.
+        "resolution": "1024x1024",
+        "steps": 30,
+        "guidanceScale": 7.0,
+        "count": 4
+      },
+      "limits": {
+        // Native 1024x1024 plus the canonical SDXL aspect-ratio buckets.
+        "resolutions": ["1024x1024", "1152x896", "896x1152", "1216x832", "832x1216", "1344x768", "768x1344"],
+        "count": [1, 2, 4]
+      },
+      "loraCompatibility": {
+        // Declare the real family so the picker only offers sdxl-family LoRAs
+        // (per sc-1927: an empty families list would match EVERY LoRA). SDXL is
+        // the most common community LoRA architecture, so imported sdxl LoRAs
+        // become compatible immediately.
+        "families": ["sdxl"],
+        "types": ["style", "enhance", "character"]
+      },
+      "ui": {
+        "label": "Stable Diffusion XL",
+        "description": "Stability AI Stable Diffusion XL base 1.0 — the widely-supported open text-to-image foundation with the largest LoRA/finetune ecosystem. CreativeML OpenRAIL++-M (commercial use OK, ungated). SDXL UNet + dual CLIP text encoders; ~6.9GB fp16, real CFG + negative prompt. Recommended ~30 steps at guidance 7.0; native 1024x1024.",
+        "recommendedFor": ["text_to_image", "edit_image", "style_variations"],
+        "promptGuide": {
+          "title": "Stable Diffusion XL Prompt Guide",
+          "path": "/prompt-guides/sdxl.md",
+          "sources": [
+            { "label": "SDXL base 1.0 model card", "url": "https://huggingface.co/stabilityai/stable-diffusion-xl-base-1.0" },
+            { "label": "SDXL technical report", "url": "https://arxiv.org/abs/2307.01952" },
+            { "label": "Diffusers SDXL pipeline docs", "url": "https://huggingface.co/docs/diffusers/main/en/api/pipelines/stable_diffusion/stable_diffusion_xl" }
+          ]
+        }
+      }
+    },
+    {
       "id": "ltx_2_3",
       "name": "LTX-2.3",
       "family": "ltx-video",

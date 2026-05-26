@@ -141,6 +141,7 @@ string_enum! {
         FluxDiffusers => "flux_diffusers",
         ChromaDiffusers => "chroma_diffusers",
         KolorsDiffusers => "kolors_diffusers",
+        SdxlDiffusers => "sdxl_diffusers",
         ProceduralVideo => "procedural_video",
         ProceduralPersonTracking => "procedural_person_tracking",
         FfmpegFrameExtract => "ffmpeg-frame-extract",
@@ -1364,6 +1365,18 @@ mod tests {
             serde_json::to_value(RecipeAdapter::ChromaDiffusers)
                 .expect("chroma adapter serializes"),
             json!("chroma_diffusers")
+        );
+    }
+
+    #[test]
+    fn sdxl_diffusers_recipe_adapter_round_trips() {
+        assert_eq!(RecipeAdapter::SdxlDiffusers.as_str(), "sdxl_diffusers");
+        let parsed: RecipeAdapter =
+            serde_json::from_value(json!("sdxl_diffusers")).expect("sdxl adapter parses");
+        assert_eq!(parsed, RecipeAdapter::SdxlDiffusers);
+        assert_eq!(
+            serde_json::to_value(RecipeAdapter::SdxlDiffusers).expect("sdxl adapter serializes"),
+            json!("sdxl_diffusers")
         );
     }
 }
