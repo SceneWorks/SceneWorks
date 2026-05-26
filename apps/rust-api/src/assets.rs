@@ -108,6 +108,19 @@ pub(crate) async fn update_asset_status(
     ))
 }
 
+pub(crate) async fn update_asset_tags(
+    State(state): State<AppState>,
+    Path((project_id, asset_id)): Path<(String, String)>,
+    ApiJson(payload): ApiJson<AssetTagsPatch>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    Ok(Json(
+        project_call(state, move |store| {
+            store.update_asset_tags(&project_id, &asset_id, payload)
+        })
+        .await?,
+    ))
+}
+
 pub(crate) async fn delete_asset(
     State(state): State<AppState>,
     Path((project_id, asset_id)): Path<(String, String)>,

@@ -190,6 +190,13 @@ function buttonInside(scope, label) {
   return [...scope.querySelectorAll("button")].find((button) => button.textContent === label);
 }
 
+function navLabels(container, sectionLabel) {
+  const section = [...container.querySelectorAll(".sidebar-section")].find(
+    (item) => item.querySelector(".sidebar-section-title")?.textContent === sectionLabel,
+  );
+  return [...(section?.querySelectorAll(".nav-label") ?? [])].map((item) => item.textContent);
+}
+
 const zImageTrainingTarget = {
   id: "z_image_turbo_lora",
   name: "Z-Image-Turbo LoRA",
@@ -512,7 +519,9 @@ describe("SceneWorks app shell", () => {
     });
     await settle();
 
-    expect(container.textContent).toContain("Library");
+    expect(container.textContent).toContain("Assets");
+    expect(navLabels(container, "Workspace")).not.toContain("Library");
+    expect(navLabels(container, "Library")).toContain("Assets");
     expect(container.textContent).toContain("Train");
     expect(container.textContent).toContain("Queue");
   });
@@ -2038,6 +2047,7 @@ describe("SceneWorks app shell", () => {
     await settle();
 
     expect(container.textContent).toContain("Library");
+    expect(container.textContent).toContain("Assets");
     expect(container.textContent).toContain("Project One");
     expect(container.textContent).not.toContain("Not Found");
   });
@@ -2351,7 +2361,7 @@ describe("SceneWorks app shell", () => {
     expect(container.textContent).not.toContain("Jobs and GPUs");
 
     await act(async () => {
-      [...container.querySelectorAll("button")].find((button) => button.textContent === "Library").click();
+      [...container.querySelectorAll("button")].find((button) => button.textContent === "Assets").click();
     });
     await settle();
     await act(async () => {
@@ -2682,7 +2692,7 @@ describe("SceneWorks app shell", () => {
     expect(container.textContent).not.toContain("Jobs and GPUs");
 
     await act(async () => {
-      [...container.querySelectorAll("button")].find((button) => button.textContent === "Library").click();
+      [...container.querySelectorAll("button")].find((button) => button.textContent === "Assets").click();
     });
     await settle();
     await act(async () => {
@@ -5679,6 +5689,137 @@ describe("SceneWorks app shell", () => {
       [...container.querySelectorAll("button")].find((button) => button.textContent === "Ask").click();
     });
     expect(createVqaJob).toHaveBeenLastCalledWith(asset, "Write a detailed critique of this image.", 512);
+  });
+
+  it("filters library assets by tag and edits selected asset tags", async () => {
+    const updateAssetTags = vi.fn();
+    const portrait = {
+      id: "asset-portrait",
+      projectId: "project-1",
+      type: "image",
+      displayName: "Portrait One",
+      tags: ["portrait"],
+      recipe: { prompt: "studio portrait" },
+      status: { favorite: false, rating: 0, rejected: false, trashed: false },
+    };
+    const landscape = {
+      id: "asset-landscape",
+      projectId: "project-1",
+      type: "image",
+      displayName: "Wide Hill",
+      tags: ["landscape"],
+      recipe: { prompt: "wide hill" },
+      status: { favorite: false, rating: 0, rejected: false, trashed: false },
+    };
+    root = createRoot(container);
+    await act(async () => {
+      root.render(
+        withAppContext(
+          {
+            activeProject: { id: "project-1", name: "Tagged" },
+            assets: [portrait, landscape],
+            jobs: [],
+            imageModels: [],
+            createVqaJob: vi.fn(),
+            deleteAsset: () => {},
+            purgeAsset: () => {},
+            importAsset: () => {},
+            setPreviewAsset: () => {},
+            sendAssetToImage: () => {},
+            sendAssetToVideo: () => {},
+            selectedAsset: portrait,
+            setSelectedAssetId: () => {},
+            setActiveView: () => {},
+            updateAssetStatus: () => {},
+            updateAssetTags,
+          },
+          <LibraryScreen />,
+        ),
+      );
+    });
+    await settle();
+
+    await changeField(container.querySelector('select[aria-label="Asset tag"]'), "landscape");
+    const filteredTiles = [...container.querySelectorAll(".asset-tile")];
+    expect(filteredTiles).toHaveLength(1);
+    expect(filteredTiles[0].textContent).toContain("Wide Hill");
+
+    await changeField(container.querySelector('input[aria-label="Add asset tag"]'), "  Moody  ");
+    await act(async () => {
+      [...container.querySelectorAll(".asset-tag-form button")].find((button) => button.textContent === "Add").click();
+    });
+    expect(updateAssetTags).toHaveBeenCalledWith(portrait, ["portrait", "moody"]);
+
+    await act(async () => {
+      container.querySelector('button[aria-label="Remove portrait tag"]').click();
+    });
+    expect(updateAssetTags).toHaveBeenLastCalledWith(portrait, []);
+  });
+
+  it("shows discarded assets in Trashcan and exposes restore and purge actions", async () => {
+    const updateAssetStatus = vi.fn();
+    const purgeAsset = vi.fn();
+    const active = {
+      id: "asset-active",
+      projectId: "project-1",
+      type: "image",
+      displayName: "Active Frame",
+      recipe: { prompt: "active" },
+      status: { favorite: false, rating: 0, rejected: false, trashed: false },
+    };
+    const trashed = {
+      id: "asset-trash",
+      projectId: "project-1",
+      type: "image",
+      displayName: "Discarded Frame",
+      recipe: { prompt: "discarded" },
+      status: { favorite: false, rating: 0, rejected: false, trashed: true },
+    };
+    root = createRoot(container);
+    await act(async () => {
+      root.render(
+        withAppContext(
+          {
+            activeProject: { id: "project-1", name: "Trash" },
+            assets: [active, trashed],
+            jobs: [],
+            imageModels: [],
+            createVqaJob: vi.fn(),
+            deleteAsset: () => {},
+            purgeAsset,
+            importAsset: () => {},
+            setPreviewAsset: () => {},
+            sendAssetToImage: () => {},
+            sendAssetToVideo: () => {},
+            selectedAsset: trashed,
+            setSelectedAssetId: () => {},
+            setActiveView: () => {},
+            updateAssetStatus,
+            updateAssetTags: () => {},
+          },
+          <LibraryScreen />,
+        ),
+      );
+    });
+    await settle();
+
+    expect([...container.querySelectorAll(".asset-tile")].map((tile) => tile.textContent).join(" ")).toContain("Active Frame");
+    expect([...container.querySelectorAll(".asset-tile")].map((tile) => tile.textContent).join(" ")).not.toContain("Discarded Frame");
+
+    await act(async () => {
+      [...container.querySelectorAll('button')].find((button) => button.textContent === "Trashcan").click();
+    });
+    expect([...container.querySelectorAll(".asset-tile")].map((tile) => tile.textContent).join(" ")).toContain("Discarded Frame");
+
+    await act(async () => {
+      [...container.querySelectorAll("button")].find((button) => button.textContent === "Restore").click();
+    });
+    expect(updateAssetStatus).toHaveBeenCalledWith(trashed, { trashed: false });
+
+    await act(async () => {
+      [...container.querySelectorAll("button")].find((button) => button.textContent === "Purge").click();
+    });
+    expect(purgeAsset).toHaveBeenCalledWith(trashed);
   });
 
   it("DocumentStudio renders an interleaved document and submits a compose job", async () => {

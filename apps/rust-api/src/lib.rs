@@ -34,10 +34,10 @@ use sceneworks_core::lora_family::{
 };
 use sceneworks_core::lora_url::{lora_source_url_file_stem, parse_lora_source_url, LoraUrlError};
 use sceneworks_core::project_store::{
-    AssetStatusPatch, CharacterCreateInput, CharacterLookInput, CharacterLookUpdateInput,
-    CharacterLoraInput, CharacterLoraUpdateInput, CharacterReferenceInput,
-    CharacterReferenceUpdateInput, CharacterUpdateInput, ProjectStore, ProjectStoreError,
-    UploadAsset,
+    AssetStatusPatch, AssetTagsPatch, CharacterCreateInput, CharacterLookInput,
+    CharacterLookUpdateInput, CharacterLoraInput, CharacterLoraUpdateInput,
+    CharacterReferenceInput, CharacterReferenceUpdateInput, CharacterUpdateInput, ProjectStore,
+    ProjectStoreError, UploadAsset,
 };
 use sceneworks_core::time::{format_unix_seconds, now_unix_seconds};
 use sceneworks_core::training::{
@@ -448,6 +448,10 @@ pub fn create_app(settings: Settings) -> Result<Router, JobsStoreError> {
         .route(
             "/api/v1/projects/:project_id/assets/:asset_id/status",
             patch(update_asset_status),
+        )
+        .route(
+            "/api/v1/projects/:project_id/assets/:asset_id/tags",
+            patch(update_asset_tags),
         )
         .route(
             "/api/v1/projects/:project_id/training/datasets",

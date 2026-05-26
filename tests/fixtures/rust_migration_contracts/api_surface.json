@@ -45,6 +45,7 @@
     { "family": "assets", "path": "/api/v1/projects/{project_id}/assets/{asset_id}", "methods": ["DELETE"], "usedBy": ["web"] },
     { "family": "assets", "path": "/api/v1/projects/{project_id}/assets/{asset_id}/purge", "methods": ["DELETE"], "usedBy": ["web"] },
     { "family": "assets", "path": "/api/v1/projects/{project_id}/assets/{asset_id}/status", "methods": ["PATCH"], "usedBy": ["web"] },
+    { "family": "assets", "path": "/api/v1/projects/{project_id}/assets/{asset_id}/tags", "methods": ["PATCH"], "usedBy": ["web"] },
     { "family": "characters", "path": "/api/v1/projects/{project_id}/characters", "methods": ["GET", "POST"], "usedBy": ["web"] },
     { "family": "characters", "path": "/api/v1/projects/{project_id}/characters/{character_id}", "methods": ["DELETE", "GET", "PATCH"], "usedBy": ["web"] },
     { "family": "characters", "path": "/api/v1/projects/{project_id}/characters/{character_id}/archive", "methods": ["POST"], "usedBy": ["web"] },

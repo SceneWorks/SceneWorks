@@ -20,6 +20,7 @@ export function LibraryScreen() {
     setSelectedAssetId,
     setActiveView,
     updateAssetStatus,
+    updateAssetTags,
   } = useAppContext();
   const onPreview = setPreviewAsset;
   const onSendImage = (asset) => sendAssetToImage(asset);
@@ -41,8 +42,9 @@ export function LibraryScreen() {
     }));
   const vqaPending = assetVqaJobs.some((job) => !terminalStatuses.has(job.status));
   const [typeFilter, setTypeFilter] = useState("all");
+  const [tagFilter, setTagFilter] = useState("all");
   const [showRejected, setShowRejected] = useState(false);
-  const [showTrashed, setShowTrashed] = useState(false);
+  const [assetMode, setAssetMode] = useState("assets");
   const [isImporting, setIsImporting] = useState(false);
   const visibleAssets = assets.filter((asset) => {
     if (typeFilter !== "all" && asset.type !== typeFilter) {
@@ -51,7 +53,13 @@ export function LibraryScreen() {
     if (!showRejected && asset.status?.rejected) {
       return false;
     }
-    if (!showTrashed && asset.status?.trashed) {
+    if (assetMode === "trashcan" && !asset.status?.trashed) {
+      return false;
+    }
+    if (assetMode === "assets" && asset.status?.trashed) {
+      return false;
+    }
+    if (tagFilter !== "all" && !(asset.tags ?? []).includes(tagFilter)) {
       return false;
     }
     return true;
@@ -71,13 +79,14 @@ export function LibraryScreen() {
   const imageCount = assets.filter((asset) => asset.type === "image").length;
   const videoCount = assets.filter((asset) => asset.type === "video").length;
   const uploadCount = assets.filter((asset) => asset.type === "upload").length;
+  const availableTags = [...new Set(assets.flatMap((asset) => (Array.isArray(asset.tags) ? asset.tags : [])))].sort();
 
   return (
     <section className="main-surface library-surface">
       <div className="surface-header hero">
         <div className="section-heading">
           <p className="eyebrow">Project assets</p>
-          <h2>Library</h2>
+          <h2>Assets</h2>
           <p className="hero-blurb">
             Browse stills and clips across {activeProject?.name ?? "your project"} — pick a recent render to drop into the editor, or send one back to a studio for another pass.
           </p>
@@ -94,14 +103,26 @@ export function LibraryScreen() {
             <option value="upload">Uploads</option>
             <option value="render">Renders</option>
           </select>
+          <select aria-label="Asset tag" onChange={(event) => setTagFilter(event.target.value)} value={tagFilter}>
+            <option value="all">All tags</option>
+            {availableTags.map((tag) => (
+              <option key={tag} value={tag}>
+                {tag}
+              </option>
+            ))}
+          </select>
           <label className="checkline">
             <input checked={showRejected} onChange={(event) => setShowRejected(event.target.checked)} type="checkbox" />
             Rejected
           </label>
-          <label className="checkline">
-            <input checked={showTrashed} onChange={(event) => setShowTrashed(event.target.checked)} type="checkbox" />
-            Trash
-          </label>
+          <div className="segmented-control" role="group" aria-label="Asset collection">
+            <button className={assetMode === "assets" ? "active" : ""} onClick={() => setAssetMode("assets")} type="button">
+              Assets
+            </button>
+            <button className={assetMode === "trashcan" ? "active" : ""} onClick={() => setAssetMode("trashcan")} type="button">
+              Trashcan
+            </button>
+          </div>
         </div>
         <div className="hero-stats">
           <div className="hero-stat">
@@ -139,6 +160,8 @@ export function LibraryScreen() {
           onSendVideo={onSendVideo}
           onSendEditor={onSendEditor}
           updateAssetStatus={updateAssetStatus}
+          updateAssetTags={updateAssetTags}
+          availableTags={availableTags}
           vqaEnabled={vqaEnabled}
           vqaEntries={vqaEntries}
           vqaPending={vqaPending}

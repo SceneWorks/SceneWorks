@@ -667,6 +667,16 @@ async fn project_and_asset_routes_persist_contract_state() {
     assert_eq!(updated["status"]["rating"], 4);
     assert_eq!(updated["status"]["rejected"], true);
 
+    let (status, tagged) = request(
+        app.clone(),
+        "PATCH",
+        &format!("/api/v1/projects/{project_id}/assets/{asset_id}/tags"),
+        json!({ "tags": [" Portrait ", "portrait", "Reference"] }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(tagged["tags"], json!(["portrait", "reference"]));
+
     let (status, deleted) = request(
         app.clone(),
         "DELETE",

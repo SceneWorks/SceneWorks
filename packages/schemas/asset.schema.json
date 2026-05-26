@@ -11,6 +11,11 @@
     "generationSetId": { "type": ["string", "null"] },
     "type": { "enum": ["image", "video", "upload", "frame", "render"] },
     "displayName": { "type": "string", "minLength": 1 },
+    "tags": {
+      "type": "array",
+      "items": { "type": "string", "minLength": 1 },
+      "uniqueItems": true
+    },
     "createdAt": { "type": "string", "format": "date-time" },
     "file": {
       "type": "object",
