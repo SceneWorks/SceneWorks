@@ -1858,6 +1858,432 @@ class SdxlLoraTrainer(ZImageLoraTrainer):
 
 
 # --------------------------------------------------------------------------- #
+# Real torch/diffusers/peft backend for Wan2.2 video
+# --------------------------------------------------------------------------- #
+
+
+class _WanLoraBackend:
+    """Real Wan2.2 video LoRA training backend (torch/diffusers/peft).
+
+    Loads the diffusers ``WanPipeline`` components, attaches a PEFT LoRA to the
+    transformer, caches per-item video latents (Wan-VAE) + umT5 prompt embeddings,
+    and runs a flow-matching velocity loop. Trained from a still-image dataset
+    (each item encodes to a single latent frame, T=1) — the same approach the
+    shipped LTX video LoRA uses — so it reuses the shared image dataset path. The
+    latent cache keeps the Wan-VAE 5D shape ``(B, C, T, H, W)``, so a future
+    clip dataset can supply ``T > 1`` frames without changing the training loop.
+    The 14B MoE trainer (sc-1953) extends this for the two-expert case.
+
+    Wan specifics vs the Z-Image backend (validated in spike sc-1950):
+    - ``WanPipeline`` / ``WanTransformer3DModel`` / ``AutoencoderKLWan``; no
+      de-distill adapter (Wan2.2-TI2V-5B is not step-distilled).
+    - **MPS runs in fp32.** Wan's ``patch_embedding`` (a Conv3d) and the 3D causal
+      VAE have no bf16 Metal kernel, so bf16 raises on Apple Silicon; CUDA keeps
+      bf16 (or the requested mixed precision).
+    - Wan-VAE latent normalization uses per-channel ``latents_mean`` /
+      ``latents_std`` (not a single ``scaling_factor`` / ``shift_factor``).
+    - The flow-matching target is ``noise - latents``: WanPipeline integrates the
+      raw transformer output as the velocity ``d/dt[(1-t)·x0 + t·noise] = noise - x0``
+      and does NOT negate it first (unlike ZImagePipeline — see
+      ``flow_matching_velocity_target``), so the sign is the opposite of the
+      Z-Image backend's.
+    - Output registers as a ``wan-video`` family LoRA; the diffusers transformer
+      LoRA keys (``transformer.blocks.N.attn1/attn2.*``) are what the inference
+      loader (sc-1955) keys 5B-vs-14B gating on.
+    """
+
+    kernel_id = "wan_lora"
+
+    def __init__(self) -> None:
+        self._torch: Any | None = None
+        self._device: str | None = None
+        self._dtype: Any | None = None
+        self._pipeline: Any | None = None
+        self._transformer: Any | None = None
+        self._vae: Any | None = None
+        self._optimizer: Any | None = None
+        self._lr_scheduler: Any | None = None
+        self._generator: Any | None = None
+        self._loaded_source: str | None = None
+        self._latents: list[Any] = []
+        self._embeds: list[Any] = []
+        self._latents_mean: Any | None = None
+        self._latents_std: Any | None = None
+        self._diagnosed_forward = False
+
+    def loaded_models(self) -> list[str]:
+        return [self._loaded_source] if self._loaded_source else []
+
+    def load(
+        self,
+        *,
+        settings: WorkerSettings,
+        plan: dict[str, Any],
+        config: TrainingRunConfig,
+        progress: ProgressCallback,
+    ) -> None:
+        torch = importlib.import_module("torch")
+        diffusers = importlib.import_module("diffusers")
+        peft = importlib.import_module("peft")
+        self._torch = torch
+
+        require_inference_backend_for_gpu_worker(torch, settings.gpu_id)
+        device = select_torch_device(torch, settings.gpu_id)
+        activate_torch_device(torch, device)
+        dtype = select_torch_dtype(torch, device, config.mixed_precision)
+        # Apple Silicon: Wan's Conv3d patch_embedding + 3D VAE have no bf16/fp16
+        # Metal kernel, so force fp32 on MPS regardless of the requested precision
+        # (sc-1950). CUDA keeps the selected dtype.
+        if str(device) == "mps":
+            dtype = torch.float32
+        source = resolve_pretrained_source(plan.get("target") or {})
+
+        pipeline_class = getattr(diffusers, "WanPipeline", None)
+        if pipeline_class is None:
+            raise TrainingKernelError(
+                "The installed diffusers build does not expose WanPipeline; "
+                "install a diffusers build with Wan2.2 support."
+            )
+
+        emit_worker_event(
+            "training_pipeline_load_start",
+            kernel=self.kernel_id,
+            source=source,
+            device=device,
+            dtype=str(dtype),
+        )
+        progress("loading_model", "loading_model", 0.12, "Loading Wan2.2 base model files.")
+        pipe = pipeline_class.from_pretrained(source, torch_dtype=dtype)
+        pipe.to(device)
+
+        transformer = pipe.transformer
+        transformer.requires_grad_(False)
+        pipe.vae.requires_grad_(False)
+        text_encoder = getattr(pipe, "text_encoder", None)
+        if text_encoder is not None:
+            text_encoder.requires_grad_(False)
+
+        progress("loading_model", "loading_model", 0.16, "Attaching LoRA adapter to the transformer.")
+        lora_config = peft.LoraConfig(
+            r=config.rank,
+            lora_alpha=config.alpha,
+            init_lora_weights="gaussian",
+            target_modules=list(config.lora_target_modules)
+            if isinstance(config.lora_target_modules, (list, tuple))
+            else config.lora_target_modules,
+        )
+        transformer.add_adapter(lora_config)
+        self._activate_lora_adapter(transformer)
+        if config.gradient_checkpointing:
+            # Frozen base + LoRA: force inputs to require grad so reentrant
+            # checkpointing does not drop gradients to the adapter (its inputs
+            # otherwise don't require grad). Mirrors the Z-Image backend.
+            if hasattr(transformer, "enable_input_require_grads"):
+                try:
+                    transformer.enable_input_require_grads()
+                except Exception:
+                    pass
+            if hasattr(transformer, "enable_gradient_checkpointing"):
+                transformer.enable_gradient_checkpointing()
+            elif hasattr(transformer, "gradient_checkpointing_enable"):
+                transformer.gradient_checkpointing_enable()
+            else:
+                emit_worker_event(
+                    "training_gradient_checkpointing_unavailable",
+                    kernel=self.kernel_id,
+                    transformer=type(transformer).__name__,
+                )
+        transformer.train()
+        trainable = [param for param in transformer.parameters() if param.requires_grad]
+        if not trainable:
+            raise TrainingKernelError(
+                "LoRA adapter attached no trainable parameters; the configured "
+                "target modules did not match any transformer layers. Adjust "
+                "advanced.loraTargetModules for this base model."
+            )
+
+        self._optimizer = build_optimizer(
+            config.optimizer, trainable, config.learning_rate, config.weight_decay
+        )
+        self._optimizer.zero_grad()
+        total_updates, warmup_updates = lr_schedule_updates(
+            config.steps, config.gradient_accumulation, config.lr_warmup_steps
+        )
+        self._lr_scheduler = build_lr_scheduler(
+            torch,
+            self._optimizer,
+            config.lr_scheduler,
+            total_updates=total_updates,
+            warmup_updates=warmup_updates,
+        )
+        self._latents_mean, self._latents_std = self._vae_normalization(torch, pipe.vae)
+        self._pipeline = pipe
+        self._transformer = transformer
+        self._vae = pipe.vae
+        self._device = device
+        self._dtype = dtype
+        self._loaded_source = source
+        generator_device = device if str(device).startswith("cuda") else "cpu"
+        self._generator = torch.Generator(generator_device).manual_seed(int(config.seed))
+        lora_a_norm, lora_b_norm = self._lora_param_norms()
+        emit_worker_event(
+            "training_pipeline_load_complete",
+            kernel=self.kernel_id,
+            source=source,
+            trainableTensors=len(trainable),
+            loraANorm=lora_a_norm,
+            loraBNorm=lora_b_norm,
+            lrScheduler=config.lr_scheduler,
+            lrWarmupSteps=config.lr_warmup_steps,
+            gpuMemory=gpu_memory_snapshot(torch, device),
+        )
+
+    def _vae_normalization(self, torch: Any, vae: Any) -> tuple[Any | None, Any | None]:
+        """Build the Wan-VAE per-channel ``(mean, 1/std)`` latent normalizers as
+        ``(1, C, 1, 1, 1)`` tensors, or ``(None, None)`` if the VAE config lacks
+        them (then raw latents are used). WanPipeline normalizes encoded latents
+        as ``(latent - mean) / std``."""
+
+        cfg = getattr(vae, "config", None)
+        mean = getattr(cfg, "latents_mean", None)
+        std = getattr(cfg, "latents_std", None)
+        if not mean or not std:
+            return None, None
+        mean_t = torch.tensor(mean, dtype=torch.float32).view(1, len(mean), 1, 1, 1)
+        std_t = torch.tensor(std, dtype=torch.float32).view(1, len(std), 1, 1, 1)
+        return mean_t, std_t
+
+    def prepare_dataset(
+        self,
+        *,
+        items: list[dict[str, Any]],
+        config: TrainingRunConfig,
+        progress: ProgressCallback,
+        cancel_requested: CancelCallback,
+    ) -> dict[str, Any]:
+        torch = self._torch
+        pipe = self._pipeline
+        vae = self._vae
+        resolution = bucket_resolution(config.resolution)
+        count = len(items)
+        self._latents = []
+        self._embeds = []
+        # Encode latents with the VAE in fp32 to avoid NaNs in the 3D causal VAE
+        # (matches the SDXL backend's caching upcast); cached latents are cast to
+        # the training dtype per step. On MPS the whole stack is already fp32.
+        vae_dtype = next(vae.parameters()).dtype
+        mean = self._latents_mean
+        std = self._latents_std
+        with torch.no_grad():
+            if vae_dtype != torch.float32:
+                vae.to(torch.float32)
+            for index, item in enumerate(items):
+                if cancel_requested():
+                    raise InterruptedError("LoRA training canceled by user.")
+                image = _load_training_image(item["imagePath"], resolution)
+                pixel = _image_to_tensor(torch, image, torch.float32, self._device)
+                # Wan-VAE expects a 5D video tensor (B, C, T, H, W); a still image
+                # is a single frame (T=1).
+                pixel = pixel.unsqueeze(2)
+                latent = vae.encode(pixel).latent_dist.sample(generator=self._generator)
+                if mean is not None and std is not None:
+                    latent = (latent - mean.to(latent.device)) / std.to(latent.device)
+                self._latents.append(latent.detach().to(device="cpu", dtype=torch.float32))
+
+                prompt_embeds, _ = pipe.encode_prompt(
+                    prompt=str(item.get("caption") or ""),
+                    do_classifier_free_guidance=False,
+                    num_videos_per_prompt=1,
+                    device=self._device,
+                )
+                embed = prompt_embeds[0] if isinstance(prompt_embeds, (list, tuple)) else prompt_embeds
+                self._embeds.append(embed.detach().to(device="cpu", dtype=torch.float32))
+
+                if (index + 1) % 4 == 0 or index + 1 == count:
+                    progress(
+                        "running",
+                        "caching_latents",
+                        _scaled(_CACHE_PROGRESS_START, _CACHE_PROGRESS_END, index + 1, count),
+                        f"Encoded {index + 1} of {count} dataset item(s).",
+                    )
+            if vae_dtype != torch.float32:
+                vae.to(vae_dtype)
+        return {"itemCount": count, "resolution": resolution}
+
+    def train_step(self, *, step: int, total_steps: int, config: TrainingRunConfig) -> float:
+        torch = self._torch
+        transformer = self._transformer
+        device = self._device
+        dtype = self._dtype
+        index = (step - 1) % len(self._latents)
+        latents = self._latents[index].to(device=device, dtype=dtype)
+        embeds = self._embeds[index].to(device=device, dtype=dtype)
+
+        # Flow matching: interpolate clean latent (t=0) toward noise (t=1). Wan's
+        # WanPipeline integrates the raw transformer output as the velocity
+        # ``noise - latents`` (no negation), so that is the regression target. The
+        # timestep is the noise level scaled to [0, 1000] (t=1 -> 1000 = full noise).
+        noise = seeded_sample(
+            torch, torch.randn, latents.shape, generator=self._generator, device=device, dtype=latents.dtype
+        )
+        t = sample_training_timestep(
+            torch,
+            generator=self._generator,
+            device=device,
+            dtype=latents.dtype,
+            timestep_type=config.timestep_type,
+            timestep_bias=config.timestep_bias,
+        )
+        t_broadcast = t.view(-1, *([1] * (latents.dim() - 1)))
+        noisy = (1.0 - t_broadcast) * latents + t_broadcast * noise
+        target = noise - latents
+        timestep = t * 1000.0
+
+        prediction = transformer(
+            hidden_states=noisy,
+            timestep=timestep,
+            encoder_hidden_states=embeds,
+            return_dict=False,
+        )[0]
+        if not self._diagnosed_forward:
+            emit_worker_event(
+                "training_forward_shapes",
+                kernel=self.kernel_id,
+                latent=list(latents.shape),
+                prediction=list(prediction.shape),
+                target=list(target.shape),
+            )
+            self._diagnosed_forward = True
+
+        loss = training_loss(torch, prediction, target, config.loss_type)
+        accum = max(1, config.gradient_accumulation)
+        (loss / accum).backward()
+        if step % accum == 0 or step == total_steps:
+            self._optimizer.step()
+            self._optimizer.zero_grad()
+            if self._lr_scheduler is not None:
+                self._lr_scheduler.step()
+        return float(loss.detach().to("cpu"))
+
+    def save_checkpoint(self, *, step: int, output_dir: str, file_name: str) -> str | None:
+        stem = Path(file_name).stem or "lora"
+        checkpoint_name = f"{stem}-step{step:06d}.safetensors"
+        return self._save_lora(output_dir=output_dir, file_name=checkpoint_name)
+
+    def generate_samples(
+        self,
+        *,
+        step: int,
+        prompts: list[str],
+        output_dir: str,
+        file_name: str,
+        plan: dict[str, Any],
+        config: TrainingRunConfig,
+    ) -> list[dict[str, Any]]:
+        # In-training video sample rendering is intentionally not implemented for
+        # the first cut (Wan video generation per step is expensive); presets set
+        # sampleEvery=0 so the orchestration never calls this. Tracked as a
+        # follow-up alongside the video-clip dataset work.
+        return []
+
+    def save_final(self, *, output_dir: str, file_name: str) -> str:
+        return self._save_lora(output_dir=output_dir, file_name=file_name)
+
+    def _save_lora(self, *, output_dir: str, file_name: str) -> str:
+        from peft.utils import get_peft_model_state_dict
+
+        os.makedirs(output_dir, exist_ok=True)
+        lora_state_dict = get_peft_model_state_dict(self._transformer)
+        type(self._pipeline).save_lora_weights(
+            output_dir,
+            transformer_lora_layers=lora_state_dict,
+            weight_name=file_name,
+            safe_serialization=True,
+        )
+        lora_a_norm, lora_b_norm = self._lora_param_norms()
+        emit_worker_event(
+            "training_lora_weight_norm",
+            kernel=self.kernel_id,
+            fileName=file_name,
+            tensors=len(lora_state_dict),
+            loraANorm=lora_a_norm,
+            loraBNorm=lora_b_norm,
+        )
+        return os.path.join(output_dir, file_name)
+
+    def _activate_lora_adapter(self, transformer: Any) -> None:
+        for method_name in ("set_adapter", "enable_adapters"):
+            method = getattr(transformer, method_name, None)
+            if method is None:
+                continue
+            try:
+                if method_name == "set_adapter":
+                    method("default")
+                else:
+                    method()
+                return
+            except Exception as exc:
+                emit_worker_event(
+                    "training_lora_adapter_activation_failed",
+                    kernel=self.kernel_id,
+                    method=method_name,
+                    error=str(exc),
+                )
+
+    def _lora_param_norms(self) -> tuple[float, float]:
+        transformer = self._transformer
+        if transformer is None or not hasattr(transformer, "named_parameters"):
+            return 0.0, 0.0
+        a_sq = 0.0
+        b_sq = 0.0
+        for name, param in transformer.named_parameters():
+            if not getattr(param, "requires_grad", False):
+                continue
+            try:
+                value = float(param.detach().float().pow(2).sum().to("cpu"))
+            except Exception:
+                continue
+            if "lora_B" in name or "lora_b" in name:
+                b_sq += value
+            elif "lora_A" in name or "lora_a" in name:
+                a_sq += value
+        return round(a_sq**0.5, 6), round(b_sq**0.5, 6)
+
+    def cleanup(self) -> None:
+        torch = self._torch
+        self._latents = []
+        self._embeds = []
+        self._optimizer = None
+        self._transformer = None
+        self._vae = None
+        self._pipeline = None
+        self._loaded_source = None
+        if torch is not None:
+            try:
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+            except Exception:
+                pass
+
+
+class WanLoraTrainer(ZImageLoraTrainer):
+    """Wan2.2-TI2V-5B video LoRA trainer (torch/diffusers).
+
+    Reuses :class:`ZImageLoraTrainer`'s backend-agnostic staged orchestration
+    (prepare → load → cache → train → checkpoint → save) with the torch Wan
+    backend. Trained from a still-image dataset (single latent frame); the output
+    is a ``wan-video`` family LoRA the Wan video adapter loads at inference. The
+    14B MoE trainer (sc-1953) extends this for the two-expert (high/low-noise)
+    case.
+    """
+
+    kernel_id = "wan_lora"
+
+    def _create_backend(self) -> _WanLoraBackend:
+        return _WanLoraBackend()
+
+
+# --------------------------------------------------------------------------- #
 # Native MLX LTX-2.3 LoRA backend (Apple Silicon)
 # --------------------------------------------------------------------------- #
 
@@ -2887,6 +3313,7 @@ class LensLoraTrainer:
 _TRAINING_KERNELS: dict[str, Callable[[], Any]] = {
     ZImageLoraTrainer.kernel_id: ZImageLoraTrainer,
     SdxlLoraTrainer.kernel_id: SdxlLoraTrainer,
+    WanLoraTrainer.kernel_id: WanLoraTrainer,
     LensLoraTrainer.kernel_id: LensLoraTrainer,
     LtxMlxLoraTrainer.kernel_id: LtxMlxLoraTrainer,
 }

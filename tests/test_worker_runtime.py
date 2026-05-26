@@ -96,8 +96,10 @@ from scene_worker.training_adapters import (
     LtxMlxLoraTrainer,
     SdxlLoraTrainer,
     TrainingKernelError,
+    WanLoraTrainer,
     ZImageLoraTrainer,
     _SdxlLoraBackend,
+    _WanLoraBackend,
     _ZImageLoraBackend,
     _build_mlx_lr_schedule,
     _build_mlx_optimizer,
@@ -3299,9 +3301,48 @@ def test_z_image_lora_backend_generates_samples_with_turbo_guidance(tmp_path):
 def test_create_training_kernel_resolves_known_and_rejects_unknown():
     assert isinstance(create_training_kernel("z_image_lora"), ZImageLoraTrainer)
     assert isinstance(create_training_kernel("sdxl_lora"), SdxlLoraTrainer)
+    assert isinstance(create_training_kernel("wan_lora"), WanLoraTrainer)
     assert isinstance(create_training_kernel("lens_lora"), LensLoraTrainer)
     with pytest.raises(TrainingKernelError, match="No training kernel"):
         create_training_kernel("not_a_kernel")
+
+
+def test_wan_lora_trainer_reuses_zimage_orchestration_with_wan_backend():
+    # WanLoraTrainer subclasses ZImageLoraTrainer (shared staged orchestration)
+    # and only swaps the kernel id + the torch Wan backend it builds. The 14B MoE
+    # trainer (sc-1953) extends this for the two-expert case.
+    trainer = create_training_kernel("wan_lora")
+    assert isinstance(trainer, ZImageLoraTrainer)
+    assert trainer.kernel_id == "wan_lora"
+    backend = trainer._create_backend()
+    assert isinstance(backend, _WanLoraBackend)
+    assert backend.kernel_id == "wan_lora"
+    # Implements the full TrainingBackend protocol.
+    for method in (
+        "load",
+        "prepare_dataset",
+        "train_step",
+        "save_checkpoint",
+        "generate_samples",
+        "save_final",
+        "cleanup",
+        "loaded_models",
+    ):
+        assert callable(getattr(backend, method)), method
+
+
+def test_wan_lora_backend_read_run_config_uses_wan_target_modules():
+    # The Rust wan_lora target declares the Wan transformer attention modules; the
+    # kernel reads them straight from the plan's advanced config.
+    plan = {
+        "config": {
+            "rank": 32,
+            "steps": 1500,
+            "advanced": {"loraTargetModules": ["to_q", "to_k", "to_v", "to_out.0"]},
+        }
+    }
+    config = read_run_config(plan)
+    assert list(config.lora_target_modules) == ["to_q", "to_k", "to_v", "to_out.0"]
 
 
 def test_sdxl_lora_trainer_reuses_zimage_orchestration_with_sdxl_backend():
