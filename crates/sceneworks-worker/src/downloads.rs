@@ -132,6 +132,9 @@ async fn download_file(
     };
     let mut interval = tokio::time::interval(progress.report_interval());
     interval.set_missed_tick_behavior(MissedTickBehavior::Delay);
+    // A tokio interval's first tick is immediate; consume it so the first chunk
+    // doesn't spuriously fire a zero-byte progress report before any transfer.
+    interval.tick().await;
     loop {
         tokio::select! {
             chunk = response.chunk() => {
