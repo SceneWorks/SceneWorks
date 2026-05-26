@@ -24,6 +24,16 @@ from scene_worker.settings import WorkerSettings
 
 
 ROOT = Path(__file__).resolve().parents[1]
+
+
+def _minimal_safetensors() -> bytes:
+    # Smallest valid safetensors: 8-byte little-endian header length + JSON header.
+    # The import path inspects this header for architecture detection, so a stub
+    # like b"lora" is rejected with an invalid-header 400.
+    header = b'{"__metadata__":{"format":"pt"}}'
+    return len(header).to_bytes(8, "little") + header
+
+
 PNG_1X1 = (
     b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00\x00\x01"
     b"\x00\x00\x00\x01\x08\x02\x00\x00\x00\x90wS\xde\x00"
@@ -118,10 +128,13 @@ def test_python_worker_protocol_round_trips_against_rust_api_binary(rust_api):
     )
     api = ApiClient(settings)
 
+    # An image_generate job is only offered to workers advertising the
+    # image_generate capability, so register with it (mirrors the procedural e2e
+    # worker) or the claim below returns no job.
     register_worker(
         api,
         settings,
-        {"id": "gpu-0", "name": "GPU 0", "capabilities": ["placeholder", "gpu"]},
+        {"id": "gpu-0", "name": "GPU 0", "capabilities": ["placeholder", "gpu", "image_generate"]},
         loaded_models=[],
     )
     created = httpx.post(
@@ -241,8 +254,12 @@ def test_rust_worker_claims_and_completes_lora_import_against_rust_api_binary(ru
     if shutil.which("cargo") is None:
         pytest.skip("cargo is required for the Rust worker smoke test")
 
-    source = tmp_path / "tiny.safetensors"
-    source.write_bytes(b"lora")
+    # The Rust API only imports a sourcePath from app-managed roots (data/loras,
+    # project loras, or staged uploads) for path safety; stage the source inside
+    # the worker's data/loras dir so the import isn't rejected.
+    source = tmp_path / "data" / "loras" / "tiny.safetensors"
+    source.parent.mkdir(parents=True, exist_ok=True)
+    source.write_bytes(_minimal_safetensors())
     env = os.environ.copy()
     env.update(
         {
@@ -274,10 +291,14 @@ def test_rust_worker_claims_and_completes_lora_import_against_rust_api_binary(ru
 
         completed = wait_for_job_status(rust_api, job["id"], "completed", worker)
 
-        assert completed["workerId"] == "rust-worker-smoke"
+        # The supervisor spawns per-device child workers (e.g. <id>-cpu-2), so the
+        # configured WORKER_ID is a prefix of the claiming worker's id.
+        assert completed["workerId"].startswith("rust-worker-smoke")
         assert completed["result"]["repo"] is None
         assert completed["result"]["path"].endswith("smoke_lora")
-        assert (tmp_path / "data" / "loras" / "smoke_lora" / "tiny.safetensors").read_bytes() == b"lora"
+        assert (
+            tmp_path / "data" / "loras" / "smoke_lora" / "tiny.safetensors"
+        ).read_bytes() == _minimal_safetensors()
     finally:
         worker.terminate()
         try:
