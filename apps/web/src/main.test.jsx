@@ -4933,6 +4933,24 @@ describe("SceneWorks app shell", () => {
         },
       }),
     );
+
+    await changeField(field(container, "Engine"), "aura-sr");
+    expect(field(container, "Scale").value).toBe("4");
+    expect([...field(container, "Scale").querySelectorAll("option")].map((option) => option.value)).toEqual(["4"]);
+
+    await act(async () => {
+      [...container.querySelectorAll("button")].find((button) => button.textContent === "Generate").click();
+    });
+
+    expect(createImageJob).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        upscale: {
+          enabled: true,
+          factor: 4,
+          engine: "aura-sr",
+        },
+      }),
+    );
   });
 
   it("blocks image presets whose managed LoRAs do not match the selected model", async () => {
