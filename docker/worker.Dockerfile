@@ -82,7 +82,7 @@ ENV PATH="/opt/venv/bin:${PATH}"
 # Triton bundles its own ptxas and CUDA headers and Python.h ships with the
 # base image, so gcc plus libc headers are all that is required.
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends gcc libc6-dev \
+    && apt-get install -y --no-install-recommends gcc libc6-dev libgl1 libglib2.0-0 libxcb1 \
     && rm -rf /var/lib/apt/lists/*
 ENV CC=gcc
 
