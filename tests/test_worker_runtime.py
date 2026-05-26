@@ -1057,6 +1057,51 @@ def test_flux_rejects_image_edit():
         raise AssertionError("FLUX.1 is text-to-image only and must reject edit_image.")
 
 
+def test_flux_adapter_applies_flux_lora(tmp_path):
+    lora = tmp_path / "flux_style.safetensors"
+    lora.write_bytes(b"lora")
+    pipe = FakeLoraPipe()
+    adapter = FluxDiffusersAdapter()
+    request = SimpleNamespace(
+        model="flux_schnell",
+        loras=[
+            {
+                "id": "flux_style",
+                "installedPath": str(lora),
+                "weight": 0.7,
+                "compatibility": {"families": ["flux"]},
+            }
+        ],
+    )
+    adapter._apply_loras(pipe, request)
+    state = adapter._loaded_lora_states["text"]
+    assert [path for path, _name in pipe.loaded] == [str(lora)]
+    assert pipe.set_calls == [(list(state.adapter_names), [0.7])]
+
+
+def test_flux_adapter_rejects_incompatible_lora_family(tmp_path):
+    lora = tmp_path / "qwen_style.safetensors"
+    lora.write_bytes(b"lora")
+    pipe = FakeLoraPipe()
+    adapter = FluxDiffusersAdapter()
+    request = SimpleNamespace(
+        model="flux_dev",
+        loras=[
+            {
+                "id": "qwen_style",
+                "installedPath": str(lora),
+                "compatibility": {"families": ["qwen-image"]},
+            }
+        ],
+    )
+    try:
+        adapter._apply_loras(pipe, request)
+    except RuntimeError as exc:
+        assert "not compatible with model family flux" in str(exc)
+    else:
+        raise AssertionError("FLUX.1 must reject a LoRA whose family is not flux.")
+
+
 def test_create_image_adapter_routes_sensenova_u1():
     adapter = create_image_adapter({"payload": {"model": "sensenova_u1_8b"}})
     assert adapter.__class__.__name__ == "SenseNovaU1Adapter"
