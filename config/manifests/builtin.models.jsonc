@@ -494,6 +494,58 @@
       }
     },
     {
+      "id": "kolors",
+      "name": "Kolors",
+      "family": "kolors",
+      "type": "image",
+      "adapter": "kolors_diffusers",
+      "capabilities": ["text_to_image", "style_variations"],
+      "downloads": [
+        {
+          // Self-contained diffusers checkpoint: bundles the ChatGLM3-6B text
+          // encoder + SDXL-style UNet + VAE. Whole-repo download (~16.5 GiB, approx).
+          "provider": "huggingface",
+          "repo": "Kwai-Kolors/Kolors-diffusers",
+          "files": [],
+          "estimatedSizeBytes": 17716740096
+        }
+      ],
+      "paths": {
+        "model": "${HF_CACHE}/Kwai-Kolors/Kolors-diffusers"
+      },
+      "defaults": {
+        // Model card: DPMSolverMultistep (Karras) / Euler; guidance ~5.0, ~25 steps.
+        "resolution": "1024x1024",
+        "steps": 25,
+        "guidanceScale": 5.0,
+        "count": 4
+      },
+      "limits": {
+        "resolutions": ["768x768", "1024x1024", "1280x720", "720x1280"],
+        "count": [1, 2, 4]
+      },
+      "loraCompatibility": {
+        // Kolors uses an SDXL-style UNet; generation-side Kolors LoRA is not wired
+        // yet, so advertise no compatible families until that lands.
+        "families": [],
+        "types": ["style", "enhance", "character"]
+      },
+      "ui": {
+        "label": "Kolors",
+        "description": "Kwai-Kolors Kolors — photorealistic text-to-image with strong Chinese + English prompting and text rendering (Midjourney-v6-level human eval). Apache-2.0 (commercial-safe). ChatGLM3-6B text encoder + SDXL-style UNet; ~16.5GB checkpoint, real CFG + negative prompt. Recommended ~25 steps at guidance 5.0.",
+        "recommendedFor": ["text_to_image", "style_variations"],
+        "promptGuide": {
+          "title": "Kolors Prompt Guide",
+          "path": "/prompt-guides/kolors.md",
+          "sources": [
+            { "label": "Kolors model card", "url": "https://huggingface.co/Kwai-Kolors/Kolors" },
+            { "label": "Kolors diffusers checkpoint", "url": "https://huggingface.co/Kwai-Kolors/Kolors-diffusers" },
+            { "label": "Diffusers Kolors pipeline docs", "url": "https://huggingface.co/docs/diffusers/main/en/api/pipelines/kolors" }
+          ]
+        }
+      }
+    },
+    {
       "id": "ltx_2_3",
       "name": "LTX-2.3",
       "family": "ltx-video",
