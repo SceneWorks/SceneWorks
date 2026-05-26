@@ -110,6 +110,26 @@ export const fallbackModels = [
     },
   },
   {
+    id: "flux_schnell",
+    name: "FLUX.1 [schnell]",
+    type: "image",
+    capabilities: ["text_to_image", "style_variations"],
+    ui: {
+      description: "FLUX.1 [schnell] — fast ~4-step distilled text-to-image, Apache-2.0 (commercial-safe). ~34GB bf16, large-VRAM GPU.",
+      promptGuide: { title: "FLUX.1 [schnell] Prompt Guide", path: "/prompt-guides/flux-schnell.md" },
+    },
+  },
+  {
+    id: "flux_dev",
+    name: "FLUX.1 [dev]",
+    type: "image",
+    capabilities: ["text_to_image", "style_variations"],
+    ui: {
+      description: "FLUX.1 [dev] — higher-quality ~28-step text-to-image under the FLUX.1 [dev] Non-Commercial License (non-commercial only); gated download needs an HF token + license acceptance. ~34GB bf16, large-VRAM GPU.",
+      promptGuide: { title: "FLUX.1 [dev] Prompt Guide", path: "/prompt-guides/flux-dev.md" },
+    },
+  },
+  {
     id: "ltx_2_3",
     name: "LTX-2.3",
     type: "video",

@@ -397,6 +397,105 @@
       }
     },
     {
+      "id": "flux_schnell",
+      "name": "FLUX.1 [schnell]",
+      "family": "flux",
+      "type": "image",
+      "adapter": "flux_diffusers",
+      "capabilities": ["text_to_image", "style_variations"],
+      "downloads": [
+        {
+          // Whole-repo download (~53.9 GiB: bundles the original single-file
+          // checkpoint AND the diffusers folders FluxPipeline loads).
+          "provider": "huggingface",
+          "repo": "black-forest-labs/FLUX.1-schnell",
+          "files": [],
+          "estimatedSizeBytes": 57845743616
+        }
+      ],
+      "paths": {
+        "model": "${HF_CACHE}/black-forest-labs/FLUX.1-schnell"
+      },
+      "defaults": {
+        // Guidance-distilled: ignores CFG (guidance 0), ~4 steps.
+        "resolution": "1024x1024",
+        "steps": 4,
+        "guidanceScale": 0,
+        "count": 4
+      },
+      "limits": {
+        "resolutions": ["768x768", "1024x1024", "1280x720", "720x1280"],
+        "count": [1, 2, 4]
+      },
+      "loraCompatibility": {
+        // Flipped to ["flux"] in sc-1784 once generation-side LoRA lands.
+        "families": [],
+        "types": []
+      },
+      "ui": {
+        "label": "FLUX.1 [schnell]",
+        "description": "Black Forest Labs FLUX.1 [schnell] — fast ~4-step distilled text-to-image, Apache-2.0 (commercial-safe). 12B transformer + T5-XXL text encoder; ~34GB bf16 VRAM, needs a large-VRAM GPU.",
+        "recommendedFor": ["text_to_image", "style_variations"],
+        "promptGuide": {
+          "title": "FLUX.1 [schnell] Prompt Guide",
+          "path": "/prompt-guides/flux-schnell.md",
+          "sources": [
+            { "label": "FLUX.1 [schnell] model card", "url": "https://huggingface.co/black-forest-labs/FLUX.1-schnell" },
+            { "label": "Diffusers Flux pipeline docs", "url": "https://huggingface.co/docs/diffusers/main/en/api/pipelines/flux" }
+          ]
+        }
+      }
+    },
+    {
+      "id": "flux_dev",
+      "name": "FLUX.1 [dev]",
+      "family": "flux",
+      "type": "image",
+      "adapter": "flux_diffusers",
+      "capabilities": ["text_to_image", "style_variations"],
+      "downloads": [
+        {
+          // Gated repo (Non-Commercial License). Whole-repo download (~53.9 GiB).
+          "provider": "huggingface",
+          "repo": "black-forest-labs/FLUX.1-dev",
+          "files": [],
+          "estimatedSizeBytes": 57886638080
+        }
+      ],
+      "paths": {
+        "model": "${HF_CACHE}/black-forest-labs/FLUX.1-dev"
+      },
+      "defaults": {
+        // Guided: guidance ~3.5, ~28 steps (higher quality than schnell).
+        "resolution": "1024x1024",
+        "steps": 28,
+        "guidanceScale": 3.5,
+        "count": 1
+      },
+      "limits": {
+        "resolutions": ["768x768", "1024x1024", "1280x720", "720x1280"],
+        "count": [1, 2, 4]
+      },
+      "loraCompatibility": {
+        // Flipped to ["flux"] in sc-1784 once generation-side LoRA lands.
+        "families": [],
+        "types": []
+      },
+      "ui": {
+        "label": "FLUX.1 [dev]",
+        "description": "Black Forest Labs FLUX.1 [dev] — higher-quality ~28-step (guidance 3.5) text-to-image. Distributed under the FLUX.1 [dev] Non-Commercial License: generations are for non-commercial use only. Gated Hugging Face download — accept the license at huggingface.co/black-forest-labs/FLUX.1-dev and configure an HF token before downloading. For commercial use choose FLUX.1 [schnell] (Apache-2.0). 12B transformer + T5-XXL; ~34GB bf16 VRAM, large-VRAM GPU.",
+        "recommendedFor": ["text_to_image", "style_variations"],
+        "promptGuide": {
+          "title": "FLUX.1 [dev] Prompt Guide",
+          "path": "/prompt-guides/flux-dev.md",
+          "sources": [
+            { "label": "FLUX.1 [dev] model card", "url": "https://huggingface.co/black-forest-labs/FLUX.1-dev" },
+            { "label": "Diffusers Flux pipeline docs", "url": "https://huggingface.co/docs/diffusers/main/en/api/pipelines/flux" }
+          ]
+        }
+      }
+    },
+    {
       "id": "ltx_2_3",
       "name": "LTX-2.3",
       "family": "ltx-video",
