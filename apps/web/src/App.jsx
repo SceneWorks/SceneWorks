@@ -1104,11 +1104,18 @@ export function App() {
     setActiveView("Video");
   }
 
-  function sendCharacterToImage(character, lookId = null) {
+  function sendCharacterToImage(character, lookId = null, referenceAssetId = null) {
     if (!character) {
       return;
     }
-    setStudioLaunch({ id: crypto.randomUUID(), view: "Image", characterId: character.id, lookId, mode: "character_image" });
+    setStudioLaunch({
+      id: crypto.randomUUID(),
+      view: "Image",
+      characterId: character.id,
+      lookId,
+      referenceAssetId,
+      mode: "character_image",
+    });
     setActiveView("Image");
   }
 

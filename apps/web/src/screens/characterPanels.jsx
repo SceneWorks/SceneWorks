@@ -21,6 +21,7 @@ function summarizeCompatibility(item) {
 
 export function CharacterReferences({
   imageAssets,
+  onGenerateFromReference,
   onPreview,
   referenceMessage,
   referenceAssetIds,
@@ -69,6 +70,11 @@ export function CharacterReferences({
               >
                 {reference.approved ? "Approved" : "Approve"}
               </button>
+              {reference.approved && onGenerateFromReference ? (
+                <button onClick={() => onGenerateFromReference(reference.assetId)} type="button">
+                  Generate variations
+                </button>
+              ) : null}
               <button onClick={() => removeCharacterReference(selectedCharacter.id, reference.assetId)} type="button">
                 Remove
               </button>

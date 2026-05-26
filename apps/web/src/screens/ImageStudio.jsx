@@ -1,6 +1,7 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import { AssetPickerField } from "../components/AssetPicker.jsx";
 import { AssetCard } from "../components/assetPanels.jsx";
+import { AssetMedia } from "../components/assetMedia.jsx";
 import { Icon } from "../components/Icons.jsx";
 import { JobProgressCard } from "../components/JobProgress.jsx";
 
@@ -158,6 +159,10 @@ export function ImageStudio() {
   const [sourceAssetId, setSourceAssetId] = useState(selectedAsset?.id ?? "");
   const [characterId, setCharacterId] = useState("");
   const [characterLookId, setCharacterLookId] = useState("");
+  // Character reference (IP-Adapter) — the approved reference image whose identity
+  // Kolors copies across variations. `ipAdapterScale` rides in `advanced`.
+  const [referenceAssetId, setReferenceAssetId] = useState("");
+  const [ipAdapterScale, setIpAdapterScale] = useState(0.6);
   const [upscaleEnabled, setUpscaleEnabled] = useState(false);
   const [upscaleFactor, setUpscaleFactor] = useState(2);
   const [upscaleEngine, setUpscaleEngine] = useState("real-esrgan");
@@ -173,7 +178,7 @@ export function ImageStudio() {
   function handleModeChange(nextMode) {
     if (nextMode === "edit_image") {
       setCount(1);
-    } else if (nextMode === "text_to_image") {
+    } else if (nextMode === "text_to_image" || nextMode === "character_image") {
       setCount(4);
     }
     setMode(nextMode);
@@ -219,6 +224,9 @@ export function ImageStudio() {
       setMode(launchRequest.mode ?? "character_image");
       setCharacterId(launchRequest.characterId);
       setCharacterLookId(launchRequest.lookId ?? "");
+      if (launchRequest.referenceAssetId) {
+        setReferenceAssetId(launchRequest.referenceAssetId);
+      }
       return;
     }
     if (launchRequest.assetId !== selectedAsset?.id) {
@@ -237,6 +245,11 @@ export function ImageStudio() {
         if (mode === "edit_image") {
           return caps.includes("edit_image") || caps.includes("image_edit");
         }
+        if (mode === "character_image") {
+          // Only models with a reference-image (IP-Adapter) engine can preserve a
+          // character's identity from one reference; gate the picker to them.
+          return caps.includes("character_image");
+        }
         return item.type === "image";
       }),
     [imageModels, mode],
@@ -250,6 +263,28 @@ export function ImageStudio() {
     }
   }, [availableModels, model]);
   const selectedModel = imageModels.find((item) => item.id === model);
+  // Approved reference images for the selected character (the IP-Adapter identity
+  // source). Resolve the full asset from the catalog so thumbnails render even when
+  // the character payload only carries assetIds.
+  const characterReferences = useMemo(() => {
+    const character = characters.find((item) => item.id === characterId);
+    return (character?.approvedReferences ?? []).map((reference) => ({
+      assetId: reference.assetId,
+      role: reference.role ?? null,
+      asset: reference.asset ?? assets.find((item) => item.id === reference.assetId) ?? null,
+    }));
+  }, [characters, characterId, assets]);
+  // Keep the selected reference valid: default to the first approved reference when
+  // none is chosen or the current one no longer belongs to this character.
+  useEffect(() => {
+    if (mode !== "character_image") {
+      return;
+    }
+    if (characterReferences.some((reference) => reference.assetId === referenceAssetId)) {
+      return;
+    }
+    setReferenceAssetId(characterReferences[0]?.assetId ?? "");
+  }, [mode, characterReferences, referenceAssetId]);
   const resolutionOptions = useMemo(
     () =>
       selectedModel?.limits?.resolutions?.length
@@ -426,6 +461,7 @@ export function ImageStudio() {
         characterId: mode === "character_image" ? characterId || null : null,
         characterLookId: mode === "character_image" ? characterLookId || null : null,
         sourceAssetId: mode === "edit_image" ? sourceAssetId || null : null,
+        referenceAssetId: mode === "character_image" ? referenceAssetId || null : null,
         loras: selectedLoras.map((lora) => serializeLora(lora)),
         ...(upscaleEnabled
           ? {
@@ -438,6 +474,9 @@ export function ImageStudio() {
           : {}),
         advanced: {
           resolution,
+          // IP-Adapter reference strength only applies when a character reference is
+          // attached; the worker reads advanced.ipAdapterScale (default 0.6).
+          ...(mode === "character_image" && referenceAssetId ? { ipAdapterScale } : {}),
         },
       });
       onLocalJobCreated?.(job);
@@ -554,10 +593,54 @@ export function ImageStudio() {
                     </select>
                   </label>
                 </div>
-                <div className="guidance-strip">
-                  <strong>Preset-only character</strong>
-                  <span>Character and look are saved with the preset; adapter-level reference and LoRA conditioning are not active yet.</span>
-                </div>
+                {characterId ? (
+                  characterReferences.length ? (
+                    <div className="character-reference-picker">
+                      <span className="reference-picker-label">Reference identity</span>
+                      <div className="reference-thumb-row">
+                        {characterReferences.map((reference) => (
+                          <button
+                            aria-label={`Use ${reference.asset?.displayName ?? reference.assetId} as reference`}
+                            aria-pressed={reference.assetId === referenceAssetId}
+                            className={reference.assetId === referenceAssetId ? "reference-thumb active" : "reference-thumb"}
+                            key={reference.assetId}
+                            onClick={() => setReferenceAssetId(reference.assetId)}
+                            title={reference.asset?.displayName ?? reference.assetId}
+                            type="button"
+                          >
+                            {reference.asset ? <AssetMedia asset={reference.asset} controls={false} /> : <span>Missing asset</span>}
+                          </button>
+                        ))}
+                      </div>
+                      <label className="reference-strength">
+                        Reference strength
+                        <input
+                          max="1"
+                          min="0"
+                          onChange={(event) => setIpAdapterScale(Number(event.target.value))}
+                          step="0.05"
+                          type="range"
+                          value={ipAdapterScale}
+                        />
+                        <span>{ipAdapterScale.toFixed(2)}</span>
+                      </label>
+                      <div className="guidance-strip">
+                        <strong>Identity from reference</strong>
+                        <span>Kolors IP-Adapter carries this reference's appearance across every variation. Raise Variations and leave the seed blank to explore different takes.</span>
+                      </div>
+                    </div>
+                  ) : (
+                    <div className="guidance-strip">
+                      <strong>No approved reference</strong>
+                      <span>Approve a reference image for this character in Character Studio to generate identity-preserving variations. Generating now uses the prompt only.</span>
+                    </div>
+                  )
+                ) : (
+                  <div className="guidance-strip">
+                    <strong>Select a character</strong>
+                    <span>Choose a character with an approved reference image to copy its identity across variations.</span>
+                  </div>
+                )}
               </>
             ) : null}
           </div>

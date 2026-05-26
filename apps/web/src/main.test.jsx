@@ -2092,6 +2092,54 @@ describe("SceneWorks app shell", () => {
     expect(container.textContent).toContain("Beta");
   });
 
+  it("launches reference-based generation from an approved character reference", async () => {
+    const sendCharacterToImage = vi.fn();
+    const reference = { assetId: "ref-1", approved: true, asset: { id: "ref-1", type: "image", displayName: "Mira ref" } };
+    root = createRoot(container);
+    await act(async () => {
+      root.render(
+        withAppContext(
+          {
+            activeProject: { id: "project-1", name: "Noir" },
+            addCharacterReference: () => {},
+            archiveCharacter: () => {},
+            assets: [],
+            attachCharacterLora: () => {},
+            characters: [
+              { id: "char-1", name: "Mira", type: "person", references: [reference], approvedReferences: [reference], looks: [], loras: [] },
+            ],
+            createCharacter: () => {},
+            createCharacterLook: () => {},
+            createCharacterTestJob: () => {},
+            deleteAsset: () => {},
+            deleteCharacterLook: () => {},
+            detachCharacterLora: () => {},
+            imageModels: [],
+            latestImageAssets: [],
+            loras: [],
+            setPreviewAsset: () => {},
+            sendCharacterToImage,
+            sendCharacterToVideo: () => {},
+            purgeAsset: () => {},
+            removeCharacterReference: () => {},
+            updateAssetStatus: () => {},
+            updateCharacter: () => {},
+            updateCharacterLook: () => {},
+            updateCharacterLora: () => {},
+            updateCharacterReference: () => {},
+          },
+          <CharacterStudio />,
+        ),
+      );
+    });
+
+    await act(async () => {
+      [...container.querySelectorAll("button")].find((button) => button.textContent === "Generate variations").click();
+    });
+
+    expect(sendCharacterToImage).toHaveBeenCalledWith(expect.objectContaining({ id: "char-1" }), null, "ref-1");
+  });
+
   it("keeps the shell usable when presets are unavailable", async () => {
     global.fetch.mockImplementation((url) => {
       const path = new URL(url).pathname;
@@ -4931,6 +4979,167 @@ describe("SceneWorks app shell", () => {
           factor: 4,
           engine: "real-esrgan",
         },
+      }),
+    );
+  });
+
+  it("submits a Kolors character job with the approved reference and IP-Adapter scale", async () => {
+    const createImageJob = vi.fn();
+    root = createRoot(container);
+    await act(async () => {
+      root.render(
+        withImageStudioContext({
+          activeProject: { id: "project-1", name: "Noir" },
+          assets: [],
+          characters: [
+            {
+              id: "char-1",
+              name: "Mira",
+              type: "person",
+              looks: [],
+              approvedReferences: [
+                {
+                  assetId: "ref-1",
+                  approved: true,
+                  asset: {
+                    id: "ref-1",
+                    type: "image",
+                    displayName: "Mira ref",
+                    projectId: "project-1",
+                    file: { path: "assets/images/ref_0001.png", mimeType: "image/png" },
+                  },
+                },
+              ],
+            },
+          ],
+          createImageJob,
+          deleteAsset: () => {},
+          gpuOptions: ["auto"],
+          imageModels: [
+            {
+              id: "kolors",
+              name: "Kolors",
+              type: "image",
+              family: "kolors",
+              capabilities: ["text_to_image", "edit_image", "character_image", "style_variations"],
+            },
+          ],
+          latestAssets: [],
+          launchRequest: { id: "launch-1", view: "Image", characterId: "char-1", referenceAssetId: "ref-1", mode: "character_image" },
+          loras: [],
+          onPreview: () => {},
+          purgeAsset: () => {},
+          requestedGpu: "auto",
+          selectedAsset: null,
+          setRequestedGpu: () => {},
+          updateAssetStatus: () => {},
+        }),
+      );
+    });
+    await settle();
+
+    // The approved reference renders as a selected identity thumbnail.
+    expect(container.textContent).toContain("Reference identity");
+    expect(container.querySelector(".reference-thumb.active")).not.toBeNull();
+
+    await act(async () => {
+      [...container.querySelectorAll("button")].find((button) => button.textContent === "Generate").click();
+    });
+
+    expect(createImageJob).toHaveBeenCalledWith(
+      expect.objectContaining({
+        mode: "character_image",
+        characterId: "char-1",
+        referenceAssetId: "ref-1",
+        count: 4,
+        advanced: { resolution: "1024x1024", ipAdapterScale: 0.6 },
+      }),
+    );
+  });
+
+  it("limits the character image model picker to reference-capable models", async () => {
+    root = createRoot(container);
+    await act(async () => {
+      root.render(
+        withImageStudioContext({
+          activeProject: { id: "project-1", name: "Noir" },
+          assets: [],
+          characters: [{ id: "char-1", name: "Mira", type: "person", looks: [], approvedReferences: [] }],
+          createImageJob: () => {},
+          deleteAsset: () => {},
+          gpuOptions: ["auto"],
+          imageModels: [
+            { id: "kolors", name: "Kolors", type: "image", capabilities: ["text_to_image", "character_image"] },
+            { id: "flux_dev", name: "FLUX", type: "image", capabilities: ["text_to_image"] },
+          ],
+          latestAssets: [],
+          loras: [],
+          onPreview: () => {},
+          purgeAsset: () => {},
+          requestedGpu: "auto",
+          selectedAsset: null,
+          setRequestedGpu: () => {},
+          updateAssetStatus: () => {},
+        }),
+      );
+    });
+
+    // Text mode lists every image model.
+    let modelOptions = [...field(container, "Model").options].map((option) => option.textContent);
+    expect(modelOptions).toContain("Kolors");
+    expect(modelOptions).toContain("FLUX");
+
+    await act(async () => {
+      [...container.querySelectorAll(".segmented-control button")].find((button) => button.textContent === "With character").click();
+    });
+    await settle();
+
+    // Character mode hides models without a reference (IP-Adapter) engine.
+    modelOptions = [...field(container, "Model").options].map((option) => option.textContent);
+    expect(modelOptions).toContain("Kolors");
+    expect(modelOptions).not.toContain("FLUX");
+  });
+
+  it("generates without a reference and warns when the character has no approved reference image", async () => {
+    const createImageJob = vi.fn();
+    root = createRoot(container);
+    await act(async () => {
+      root.render(
+        withImageStudioContext({
+          activeProject: { id: "project-1", name: "Noir" },
+          assets: [],
+          characters: [{ id: "char-2", name: "Echo", type: "creature", looks: [], approvedReferences: [] }],
+          createImageJob,
+          deleteAsset: () => {},
+          gpuOptions: ["auto"],
+          imageModels: [{ id: "kolors", name: "Kolors", type: "image", capabilities: ["text_to_image", "character_image"] }],
+          latestAssets: [],
+          launchRequest: { id: "launch-2", view: "Image", characterId: "char-2", mode: "character_image" },
+          loras: [],
+          onPreview: () => {},
+          purgeAsset: () => {},
+          requestedGpu: "auto",
+          selectedAsset: null,
+          setRequestedGpu: () => {},
+          updateAssetStatus: () => {},
+        }),
+      );
+    });
+    await settle();
+
+    expect(container.textContent).toContain("No approved reference");
+    expect(container.querySelector(".reference-thumb")).toBeNull();
+
+    await act(async () => {
+      [...container.querySelectorAll("button")].find((button) => button.textContent === "Generate").click();
+    });
+
+    expect(createImageJob).toHaveBeenCalledWith(
+      expect.objectContaining({
+        mode: "character_image",
+        characterId: "char-2",
+        referenceAssetId: null,
+        advanced: { resolution: "1024x1024" },
       }),
     );
   });
