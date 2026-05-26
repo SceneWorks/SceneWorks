@@ -237,6 +237,15 @@ fn json_rejection_response(rejection: JsonRejection) -> Response {
 }
 
 pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
+    // Host mode (no HF cache env set): default HF_HOME to the shared ~/.cache/
+    // huggingface so the catalog and downloads agree on the OS cache rather than
+    // the private data dir (sc-1904 follow-up). Desktop/Compose already inject it.
+    if let Some(home) = sceneworks_core::hf_home::ensure_default_huggingface_home() {
+        println!(
+            "SceneWorks Rust API defaulting HF_HOME to {}",
+            home.display()
+        );
+    }
     let settings = Settings::from_env();
     let address: SocketAddr = format!("{}:{}", settings.host, settings.port).parse()?;
     let run_utility_inprocess = settings.run_utility_inprocess;

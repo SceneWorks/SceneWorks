@@ -311,6 +311,13 @@ fn emit_json(payload: Value) {
 }
 
 pub async fn run() -> WorkerResult<()> {
+    // Host mode (no HF cache env set): default HF_HOME to the shared ~/.cache/
+    // huggingface so downloads land in the OS cache rather than the private data
+    // dir (sc-1904 follow-up). Set before spawning child workers so they inherit
+    // it; desktop/Compose already inject HF_HOME, making this a no-op there.
+    if let Some(home) = sceneworks_core::hf_home::ensure_default_huggingface_home() {
+        println!("rust_worker defaulting HF_HOME to {}", home.display());
+    }
     let settings = Settings::from_env();
     if !settings.is_child_worker {
         if settings.gpu_id == "auto" {
