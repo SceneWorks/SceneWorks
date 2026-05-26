@@ -812,6 +812,7 @@ label {
 .bin-actions button,
 .advanced-toggle,
 .detail-actions button,
+.asset-tag-form button,
 .review-actions button,
 .preview-actions button,
 .preview-nav-button,
@@ -855,6 +856,7 @@ label {
 .bin-actions button:hover:not(:disabled),
 .advanced-toggle:hover:not(:disabled),
 .detail-actions button:hover:not(:disabled),
+.asset-tag-form button:hover:not(:disabled),
 .review-actions button:hover:not(:disabled),
 .preview-actions button:hover:not(:disabled),
 .preview-nav-button:hover:not(:disabled),
@@ -2805,6 +2807,74 @@ label {
   font-family: var(--font-mono);
   font-size: 12px;
   overflow-wrap: anywhere;
+}
+
+.asset-tags {
+  display: grid;
+  gap: 8px;
+}
+
+.asset-tag-list,
+.asset-tile-tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  align-items: center;
+}
+
+.asset-tag {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  min-height: 26px;
+  padding: 3px 8px;
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+  background: var(--bg-2);
+  color: var(--text-muted);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.asset-tag.compact {
+  min-height: 22px;
+  padding: 2px 6px;
+  font-size: 11px;
+}
+
+.asset-tag button {
+  min-height: 20px;
+  padding: 0 5px;
+  border: 0;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--text-faint);
+  font-size: 11px;
+}
+
+.asset-tag button:hover {
+  background: var(--surface-hover);
+  color: var(--text);
+}
+
+.asset-tag-empty {
+  color: var(--text-faint);
+  font-size: 12px;
+}
+
+.asset-tag-form {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 8px;
+}
+
+.asset-tag-form input {
+  min-width: 0;
+}
+
+.asset-tag-form button {
+  min-height: 34px;
+  padding: 0 12px;
 }
 
 .vqa-panel {

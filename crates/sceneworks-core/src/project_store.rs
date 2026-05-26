@@ -1,3 +1,4 @@
+use std::collections::BTreeSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -150,6 +151,12 @@ pub struct AssetStatusPatch {
     pub rating: Option<u8>,
     pub rejected: Option<bool>,
     pub trashed: Option<bool>,
+}
+
+#[derive(Debug, Default, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AssetTagsPatch {
+    pub tags: Vec<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -1139,6 +1146,28 @@ impl ProjectStore {
         if let Some(value) = patch.trashed {
             status.insert("trashed".to_owned(), Value::Bool(value));
         }
+        write_json(&sidecar_path, &asset)?;
+        index_asset(&project_path, &asset, Some(&sidecar_path))?;
+        normalize_asset(project_id, &project_path, &sidecar_path)
+    }
+
+    pub fn update_asset_tags(
+        &self,
+        project_id: &str,
+        asset_id: &str,
+        patch: AssetTagsPatch,
+    ) -> ProjectStoreResult<Value> {
+        let tags = normalize_asset_tags(&patch.tags)?;
+        let (project_path, _project_guard) = self.lock_project(project_id)?;
+        let sidecar_path = self.find_asset_sidecar(&project_path, asset_id)?;
+        let mut asset = read_json(&sidecar_path)?;
+        let object = asset.as_object_mut().ok_or_else(|| {
+            ProjectStoreError::BadRequest("Asset sidecar must be an object".to_owned())
+        })?;
+        object.insert(
+            "tags".to_owned(),
+            Value::Array(tags.into_iter().map(Value::String).collect()),
+        );
         write_json(&sidecar_path, &asset)?;
         index_asset(&project_path, &asset, Some(&sidecar_path))?;
         normalize_asset(project_id, &project_path, &sidecar_path)
@@ -2517,6 +2546,31 @@ fn required_str<'a>(payload: &'a Value, key: &str) -> ProjectStoreResult<&'a str
         .ok_or_else(|| ProjectStoreError::BadRequest(format!("Missing required field: {key}")))
 }
 
+fn normalize_asset_tags(tags: &[String]) -> ProjectStoreResult<Vec<String>> {
+    let mut seen = BTreeSet::new();
+    let mut normalized = Vec::new();
+    for tag in tags {
+        let value = tag.trim().to_ascii_lowercase();
+        if value.is_empty() {
+            continue;
+        }
+        if value.len() > 40 {
+            return Err(ProjectStoreError::BadRequest(
+                "Asset tags must be 40 characters or fewer".to_owned(),
+            ));
+        }
+        if seen.insert(value.clone()) {
+            normalized.push(value);
+        }
+    }
+    if normalized.len() > 24 {
+        return Err(ProjectStoreError::BadRequest(
+            "Assets can have at most 24 tags".to_owned(),
+        ));
+    }
+    Ok(normalized)
+}
+
 fn safe_filename(value: &str, fallback: &str) -> String {
     let name = value.replace('\\', "/");
     let stem = Path::new(name.rsplit('/').next().unwrap_or_default())
@@ -2592,10 +2646,24 @@ fn move_or_copy_file(source: &Path, destination: &Path) -> ProjectStoreResult<()
 mod tests {
     use super::{
         build_generated_asset_sidecar, guess_mime_from_filename, is_safe_relative_path,
-        CharacterCreateInput, CharacterLookInput, ProjectStore, PROJECT_FOLDERS,
+        normalize_asset_tags, CharacterCreateInput, CharacterLookInput, ProjectStore,
+        PROJECT_FOLDERS,
     };
     use serde_json::{json, Value};
     use std::sync::Arc;
+
+    #[test]
+    fn normalize_asset_tags_trims_lowercases_and_deduplicates() {
+        let tags = normalize_asset_tags(&[
+            " Portrait ".to_owned(),
+            "portrait".to_owned(),
+            "Reference".to_owned(),
+            "".to_owned(),
+        ])
+        .expect("normalized tags");
+
+        assert_eq!(tags, vec!["portrait", "reference"]);
+    }
 
     #[test]
     fn build_generated_asset_sidecar_assembles_the_contract_schema() {

@@ -109,7 +109,6 @@ const navSections = [
   {
     label: "Workspace",
     items: [
-      { id: "Library", icon: Icon.Library },
       { id: "Image", icon: Icon.Image },
       { id: "Video", icon: Icon.Video },
       { id: "Document", icon: Icon.Wand },
@@ -120,6 +119,7 @@ const navSections = [
   {
     label: "Library",
     items: [
+      { id: "Library", label: "Assets", icon: Icon.Library },
       { id: "Characters", icon: Icon.Character },
       { id: "Presets", icon: Icon.Preset },
       { id: "Models", icon: Icon.Model },
@@ -135,7 +135,7 @@ const navSections = [
 ];
 
 const viewTitles = {
-  Library: { title: "Library", blurb: "Browse stills and clips across all your projects." },
+  Library: { title: "Assets", blurb: "Browse stills and clips across all your projects." },
   Image: { title: "Image Studio", blurb: "Describe what you want — we'll render variations side by side." },
   Video: { title: "Video Studio", blurb: "Bring stills to life, or render new clips from scratch." },
   Document: { title: "Document Studio", blurb: "Generate interleaved text-image documents — guides, storyboards, tutorials." },
@@ -1128,11 +1128,27 @@ export function App() {
     }
   }
 
+  async function updateAssetTags(asset, tags) {
+    try {
+      const updated = await apiFetch(`/api/v1/projects/${asset.projectId}/assets/${asset.id}/tags`, token, {
+        method: "PATCH",
+        body: JSON.stringify({ tags }),
+      });
+      setAssets((items) => items.map((item) => (item.id === updated.id ? updated : item)));
+      setError("");
+    } catch (err) {
+      setError(err.message);
+    }
+  }
+
   async function deleteAsset(asset) {
     try {
       await apiFetch(`/api/v1/projects/${asset.projectId}/assets/${asset.id}`, token, { method: "DELETE" });
-      setAssets((items) => items.filter((item) => item.id !== asset.id));
-      setSelectedAssetId((current) => (current === asset.id ? null : current));
+      setAssets((items) =>
+        items.map((item) =>
+          item.id === asset.id ? { ...item, status: { ...item.status, trashed: true } } : item,
+        ),
+      );
       setError("");
     } catch (err) {
       setError(err.message);
@@ -1233,6 +1249,7 @@ export function App() {
     purgeAsset,
     importAsset,
     updateAssetStatus,
+    updateAssetTags,
     latestImageAssets,
     // Jobs / queue
     jobs,
@@ -1350,16 +1367,17 @@ export function App() {
               {section.items.map((item) => {
                 const IconComponent = item.icon;
                 const active = activeIndicators[item.id];
+                const label = item.label ?? item.id;
                 return (
                   <button
                     className={activeView === item.id ? "nav-item active" : "nav-item"}
                     key={item.id}
                     onClick={() => setActiveView(item.id)}
-                    title={item.id}
+                    title={label}
                     type="button"
                   >
                     <IconComponent />
-                    <span className="nav-label">{item.id}</span>
+                    <span className="nav-label">{label}</span>
                     {active ? <span aria-hidden="true" className="nav-pulse" /> : null}
                   </button>
                 );

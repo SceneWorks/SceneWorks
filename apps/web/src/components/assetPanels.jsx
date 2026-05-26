@@ -74,6 +74,61 @@ function RatingControl({ asset, updateAssetStatus }) {
   );
 }
 
+function normalizeTagInput(value) {
+  return String(value ?? "").trim().toLowerCase();
+}
+
+function AssetTags({ asset, availableTags = [], updateAssetTags = () => {} }) {
+  const [draft, setDraft] = React.useState("");
+  const tags = Array.isArray(asset.tags) ? asset.tags : [];
+  const suggestions = availableTags.filter((tag) => !tags.includes(tag));
+
+  function submit(event) {
+    event.preventDefault();
+    const tag = normalizeTagInput(draft);
+    if (!tag || tags.includes(tag)) {
+      setDraft("");
+      return;
+    }
+    updateAssetTags(asset, [...tags, tag]);
+    setDraft("");
+  }
+
+  return (
+    <div className="asset-tags">
+      <div className="asset-tag-list" aria-label="Asset tags">
+        {tags.length ? (
+          tags.map((tag) => (
+            <span className="asset-tag" key={tag}>
+              {tag}
+              <button aria-label={`Remove ${tag} tag`} onClick={() => updateAssetTags(asset, tags.filter((item) => item !== tag))} type="button">
+                Remove
+              </button>
+            </span>
+          ))
+        ) : (
+          <span className="asset-tag-empty">No tags</span>
+        )}
+      </div>
+      <form className="asset-tag-form" onSubmit={submit}>
+        <input
+          aria-label="Add asset tag"
+          list="asset-tag-suggestions"
+          onChange={(event) => setDraft(event.target.value)}
+          placeholder="Add tag"
+          value={draft}
+        />
+        <datalist id="asset-tag-suggestions">
+          {suggestions.map((tag) => (
+            <option key={tag} value={tag} />
+          ))}
+        </datalist>
+        <button type="submit">Add</button>
+      </form>
+    </div>
+  );
+}
+
 export function AssetGrid({ assets, onPreview, selectedAsset, setSelectedAssetId }) {
   if (!assets.length) {
     return <div className="empty-panel">No assets in this view</div>;
@@ -91,6 +146,15 @@ export function AssetGrid({ assets, onPreview, selectedAsset, setSelectedAssetId
         >
           <AssetMedia asset={asset} />
           <strong>{asset.displayName}</strong>
+          {Array.isArray(asset.tags) && asset.tags.length ? (
+            <div className="asset-tile-tags">
+              {asset.tags.map((tag) => (
+                <span className="asset-tag compact" key={tag}>
+                  {tag}
+                </span>
+              ))}
+            </div>
+          ) : null}
         </button>
       ))}
     </div>
@@ -167,6 +231,8 @@ export function AssetDetail({
   onSendVideo,
   onSendEditor,
   updateAssetStatus,
+  updateAssetTags,
+  availableTags,
   vqaEnabled = false,
   vqaEntries = [],
   vqaPending = false,
@@ -187,6 +253,7 @@ export function AssetDetail({
       )}
       <h3>{asset.displayName}</h3>
       <p>{asset.recipe?.prompt ?? "No prompt"}</p>
+      <AssetTags asset={asset} availableTags={availableTags} updateAssetTags={updateAssetTags} />
       <RatingControl asset={asset} updateAssetStatus={updateAssetStatus} />
       <div className="detail-actions">
         <button onClick={() => updateAssetStatus(asset, { favorite: !asset.status?.favorite })} type="button">
@@ -211,9 +278,14 @@ export function AssetDetail({
           </button>
         ) : null}
         {asset.status?.trashed ? (
-          <button onClick={() => purgeAsset(asset)} type="button">
-            Purge
-          </button>
+          <>
+            <button onClick={() => updateAssetStatus(asset, { trashed: false })} type="button">
+              Restore
+            </button>
+            <button onClick={() => purgeAsset(asset)} type="button">
+              Purge
+            </button>
+          </>
         ) : (
           <button onClick={() => deleteAsset(asset)} type="button">
             Discard
@@ -258,9 +330,14 @@ export function AssetCard({ asset, deleteAsset, purgeAsset, onPreview, updateAss
           {asset.status?.rejected ? "Restore" : "Reject"}
         </button>
         {asset.status?.trashed ? (
-          <button onClick={() => purgeAsset(asset)} type="button">
-            Purge
-          </button>
+          <>
+            <button onClick={() => updateAssetStatus(asset, { trashed: false })} type="button">
+              Restore
+            </button>
+            <button onClick={() => purgeAsset(asset)} type="button">
+              Purge
+            </button>
+          </>
         ) : (
           <button onClick={() => deleteAsset(asset)} type="button">
             Discard
@@ -320,9 +397,14 @@ export function FullscreenPreview({
               {asset.status?.rejected ? "Restore" : "Reject"}
             </button>
             {asset.status?.trashed ? (
-              <button className="danger-action" onClick={() => purgeAsset(asset)} type="button">
-                Purge
-              </button>
+              <>
+                <button onClick={() => updateAssetStatus(asset, { trashed: false })} type="button">
+                  Restore
+                </button>
+                <button className="danger-action" onClick={() => purgeAsset(asset)} type="button">
+                  Purge
+                </button>
+              </>
             ) : (
               <button className="danger-action" onClick={() => deleteAsset(asset)} type="button">
                 Discard
