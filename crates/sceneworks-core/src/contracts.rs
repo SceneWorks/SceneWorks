@@ -139,6 +139,7 @@ string_enum! {
         LensTurbo => "lens_turbo",
         SenseNovaU1 => "sensenova_u1",
         FluxDiffusers => "flux_diffusers",
+        KolorsDiffusers => "kolors_diffusers",
         ProceduralVideo => "procedural_video",
         ProceduralPersonTracking => "procedural_person_tracking",
         FfmpegFrameExtract => "ffmpeg-frame-extract",

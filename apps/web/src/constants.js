@@ -130,6 +130,16 @@ export const fallbackModels = [
     },
   },
   {
+    id: "kolors",
+    name: "Kolors",
+    type: "image",
+    capabilities: ["text_to_image", "style_variations"],
+    ui: {
+      description: "Kwai-Kolors Kolors — photorealistic text-to-image with strong Chinese + English prompting and text rendering. Apache-2.0 (commercial-safe). ChatGLM3-6B + SDXL-style UNet; ~16.5GB, real CFG + negative prompt, ~25 steps at guidance 5.0.",
+      promptGuide: { title: "Kolors Prompt Guide", path: "/prompt-guides/kolors.md" },
+    },
+  },
+  {
     id: "ltx_2_3",
     name: "LTX-2.3",
     type: "video",
