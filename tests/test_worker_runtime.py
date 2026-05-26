@@ -33,6 +33,7 @@ from scene_worker.image_adapters import (
     QwenImageAdapter,
     REAL_ESRGAN_MODEL_SPECS,
     RealEsrganUpscaler,
+    SdxlDiffusersAdapter,
     ZImageDiffusersAdapter,
     create_image_adapter,
     create_image_upscaler,
@@ -93,8 +94,10 @@ from scene_worker.training_adapters import (
     SUPPORTED_TRAINING_PLAN_VERSION,
     LensLoraTrainer,
     LtxMlxLoraTrainer,
+    SdxlLoraTrainer,
     TrainingKernelError,
     ZImageLoraTrainer,
+    _SdxlLoraBackend,
     _ZImageLoraBackend,
     _build_mlx_lr_schedule,
     _build_mlx_optimizer,
@@ -1472,6 +1475,155 @@ def test_kolors_reference_run_pipeline_passes_ip_adapter_image(tmp_path, monkeyp
     assert seen == [(project_path, "asset-ref")]
     assert pipe.scales == [0.7]
     assert result is FakeOutput.images[0]
+
+
+def test_create_image_adapter_routes_sdxl():
+    adapter = create_image_adapter({"payload": {"model": "sdxl"}})
+    assert adapter.__class__.__name__ == "SdxlDiffusersAdapter"
+    assert adapter.id == "sdxl_diffusers"
+
+
+def test_image_adapter_env_override_selects_sdxl(monkeypatch):
+    monkeypatch.setenv("SCENEWORKS_IMAGE_ADAPTER", "sdxl_diffusers")
+    # Env override wins even when the payload names a different family's model.
+    adapter = create_image_adapter({"payload": {"model": "z_image_turbo"}})
+    assert adapter.__class__.__name__ == "SdxlDiffusersAdapter"
+
+
+def test_sdxl_model_target_defaults():
+    sdxl = MODEL_TARGETS["sdxl"]
+    assert sdxl["adapter"] == "sdxl_diffusers"
+    assert sdxl["family"] == "sdxl"
+    # Unified base checkpoint does both T2I and img2img edit.
+    assert sdxl["supportsEdit"] is True
+    # Real CFG with negative prompt: ~30 steps at guidance 7.0.
+    assert sdxl["steps"] == 30
+    assert sdxl["guidanceScale"] == 7.0
+    # fp16 variant; two CLIP encoders so there is no max_sequence_length knob.
+    assert sdxl["variant"] == "fp16"
+    assert "maxSequenceLength" not in sdxl
+    assert sdxl["repo"] == "stabilityai/stable-diffusion-xl-base-1.0"
+
+
+def test_sdxl_supports_edit():
+    # SDXL base is a unified checkpoint: StableDiffusionXLPipeline (T2I) +
+    # StableDiffusionXLImg2ImgPipeline (edit).
+    assert model_supports_edit("sdxl") is True
+
+
+def test_create_image_adapter_routes_sdxl_edit():
+    # Edit jobs route to the same adapter; it switches pipeline by mode.
+    adapter = create_image_adapter({"payload": {"model": "sdxl", "mode": "edit_image"}})
+    assert adapter.__class__.__name__ == "SdxlDiffusersAdapter"
+    assert adapter.id == "sdxl_diffusers"
+
+
+def test_sdxl_guidance_scale_uses_per_model_default_and_override():
+    adapter = SdxlDiffusersAdapter()
+    sdxl = MODEL_TARGETS["sdxl"]
+    # SDXL uses real CFG; the per-model default (7.0) applies without an override.
+    assert adapter._guidance_scale(SimpleNamespace(advanced={}), sdxl) == 7.0
+    # An explicit request value wins.
+    assert adapter._guidance_scale(SimpleNamespace(advanced={"guidanceScale": 5.0}), sdxl) == 5.0
+    # Unparseable override falls back to the per-model default.
+    assert adapter._guidance_scale(SimpleNamespace(advanced={"guidanceScale": "x"}), sdxl) == 7.0
+
+
+def test_sdxl_num_inference_steps_default_and_override():
+    adapter = SdxlDiffusersAdapter()
+    sdxl = MODEL_TARGETS["sdxl"]
+    assert adapter._num_inference_steps(SimpleNamespace(advanced={}), sdxl) == 30
+    # Explicit override is honored and clamped to [1, 80].
+    assert adapter._num_inference_steps(SimpleNamespace(advanced={"steps": 45}), sdxl) == 45
+    assert adapter._num_inference_steps(SimpleNamespace(advanced={"steps": 999}), sdxl) == 80
+
+
+def test_sdxl_adapter_applies_sdxl_lora(tmp_path):
+    # A trained sdxl-family LoRA loads onto the SDXL pipeline via
+    # StableDiffusionXLPipeline.load_lora_weights and its weight is applied (sc-1943).
+    lora = tmp_path / "aurora_style.safetensors"
+    lora.write_bytes(b"lora")
+    pipe = FakeLoraPipe()
+    adapter = SdxlDiffusersAdapter()
+    request = SimpleNamespace(
+        model="sdxl",
+        mode="text_to_image",
+        loras=[
+            {
+                "id": "aurora_style",
+                "installedPath": str(lora),
+                "weight": 0.75,
+                "compatibility": {"families": ["sdxl"]},
+            }
+        ],
+    )
+    adapter._apply_loras(pipe, request)
+    state = adapter._loaded_lora_states["text"]
+    assert [path for path, _name in pipe.loaded] == [str(lora)]
+    assert pipe.set_calls == [(list(state.adapter_names), [0.75])]
+
+
+def test_sdxl_adapter_rejects_incompatible_lora_family(tmp_path):
+    # SDXL accepts only sdxl-family LoRAs (no extra-compatible families, unlike
+    # chroma↔flux): a flux LoRA is filtered out before it can load (sc-1927/sc-1943).
+    lora = tmp_path / "flux_style.safetensors"
+    lora.write_bytes(b"lora")
+    pipe = FakeLoraPipe()
+    adapter = SdxlDiffusersAdapter()
+    request = SimpleNamespace(
+        model="sdxl",
+        mode="text_to_image",
+        loras=[
+            {
+                "id": "flux_style",
+                "installedPath": str(lora),
+                "compatibility": {"families": ["flux"]},
+            }
+        ],
+    )
+    try:
+        adapter._apply_loras(pipe, request)
+    except RuntimeError as exc:
+        assert "not compatible with model family sdxl" in str(exc)
+    else:
+        raise AssertionError("SDXL must reject a LoRA whose family is not sdxl.")
+
+
+def test_sdxl_backend_save_lora_writes_unet_diffusers_format(tmp_path, monkeypatch):
+    # The trainer saves an sdxl-family LoRA via StableDiffusionXLPipeline's own
+    # save_lora_weights(unet_lora_layers=...) — the diffusers format the inference
+    # loader (load_lora_weights) round-trips. Torch-free: fake peft + pipeline.
+    import sys
+    import types as types_module
+
+    fake_state = {"unet.down_blocks.0.attentions.0.lora_A.weight": "tensor"}
+    fake_peft_utils = types_module.ModuleType("peft.utils")
+    fake_peft_utils.get_peft_model_state_dict = lambda _module: fake_state
+    monkeypatch.setitem(sys.modules, "peft.utils", fake_peft_utils)
+
+    saved: dict[str, object] = {}
+
+    class FakeSdxlPipeline:
+        @staticmethod
+        def save_lora_weights(
+            output_dir, *, unet_lora_layers=None, weight_name=None, safe_serialization=None, **_kwargs
+        ):
+            saved["output_dir"] = output_dir
+            saved["unet_lora_layers"] = unet_lora_layers
+            saved["weight_name"] = weight_name
+            saved["safe_serialization"] = safe_serialization
+
+    backend = _SdxlLoraBackend()
+    backend._unet = object()
+    backend._pipeline = FakeSdxlPipeline()
+    output_path = backend._save_lora(output_dir=str(tmp_path), file_name="aurora_style.safetensors")
+
+    # unet_lora_layers carries the PEFT state dict; this is the only LoRA layer
+    # kwarg the trainer passes (UNet-only), and the key the SDXL loader consumes.
+    assert saved["unet_lora_layers"] is fake_state
+    assert saved["weight_name"] == "aurora_style.safetensors"
+    assert saved["safe_serialization"] is True
+    assert output_path == str(tmp_path / "aurora_style.safetensors")
 
 
 def test_create_image_adapter_routes_sensenova_u1():
@@ -3146,9 +3298,39 @@ def test_z_image_lora_backend_generates_samples_with_turbo_guidance(tmp_path):
 
 def test_create_training_kernel_resolves_known_and_rejects_unknown():
     assert isinstance(create_training_kernel("z_image_lora"), ZImageLoraTrainer)
+    assert isinstance(create_training_kernel("sdxl_lora"), SdxlLoraTrainer)
     assert isinstance(create_training_kernel("lens_lora"), LensLoraTrainer)
     with pytest.raises(TrainingKernelError, match="No training kernel"):
         create_training_kernel("not_a_kernel")
+
+
+def test_sdxl_lora_trainer_reuses_zimage_orchestration_with_sdxl_backend():
+    # SdxlLoraTrainer subclasses ZImageLoraTrainer (shared staged orchestration)
+    # and only swaps the kernel id + the backend it builds.
+    trainer = create_training_kernel("sdxl_lora")
+    assert isinstance(trainer, ZImageLoraTrainer)
+    assert trainer.kernel_id == "sdxl_lora"
+    backend = trainer._create_backend()
+    assert isinstance(backend, _SdxlLoraBackend)
+    # Extension seams epic 1929 (Kolors) overrides: the pipeline class + the
+    # prompt encoder. Everything else is shared.
+    assert backend.kernel_id == "sdxl_lora"
+    assert backend.pipeline_class_name == "StableDiffusionXLPipeline"
+    assert backend.load_variant == "fp16"
+
+
+def test_sdxl_lora_backend_read_run_config_uses_sdxl_target_modules():
+    # The Rust sdxl_lora target declares the SDXL UNet attention modules; the
+    # kernel reads them straight from the plan's advanced config.
+    plan = {
+        "config": {
+            "rank": 16,
+            "steps": 1500,
+            "advanced": {"loraTargetModules": ["to_q", "to_k", "to_v", "to_out.0"]},
+        }
+    }
+    config = read_run_config(plan)
+    assert list(config.lora_target_modules) == ["to_q", "to_k", "to_v", "to_out.0"]
 
 
 class _FakeLensSidecarPopen:
@@ -4158,6 +4340,121 @@ def test_video_adapter_override_aliases_and_unknown_values(monkeypatch):
         assert "Unsupported SCENEWORKS_VIDEO_ADAPTER" in str(exc)
     else:
         raise AssertionError("Unknown video adapter override should fail loudly.")
+
+
+def test_create_video_adapter_routes_svd_to_diffusers(monkeypatch):
+    # SVD is a diffusers pipeline (not the native LTX stack), so it routes to the
+    # generic DiffusersVideoAdapter. Force the non-MPS path so MLX eligibility
+    # (which SVD is not part of) doesn't shadow the assertion on Apple Silicon.
+    monkeypatch.delenv("SCENEWORKS_VIDEO_ADAPTER", raising=False)
+    monkeypatch.setattr("scene_worker.video_adapters._mps_available", lambda: False)
+    adapter = create_video_adapter({"payload": {"model": "svd", "mode": "image_to_video"}})
+    assert adapter.__class__.__name__ == "DiffusersVideoAdapter"
+
+
+def test_svd_video_model_target_defaults():
+    target = VIDEO_MODEL_TARGETS["svd"]
+    assert target["adapter"] == "svd_video"
+    assert target["family"] == "svd"
+    # Image-conditioned only — no text_to_video or timeline modes.
+    assert target["capabilities"] == ["image_to_video"]
+    assert target["repo"] == "stabilityai/stable-video-diffusion-img2vid-xt"
+    assert target["variant"] == "fp16"
+    # Fixed-length clip defined by the checkpoint.
+    assert target["numFrames"] == 25
+
+
+def test_svd_num_frames_is_fixed_regardless_of_duration():
+    adapter = DiffusersVideoAdapter()
+    # Duration/fps would imply 60 frames for a 6s clip, but SVD emits its fixed
+    # 25-frame burst regardless.
+    request = video_request_from_job(
+        {"id": "job-svd", "payload": {"projectId": "p", "mode": "image_to_video", "model": "svd", "duration": 6, "fps": 10}}
+    )
+    assert adapter._num_frames(request) == 25
+
+
+def test_svd_pipeline_class_resolves_stable_video_diffusion():
+    adapter = DiffusersVideoAdapter()
+    target = VIDEO_MODEL_TARGETS["svd"]
+    request = video_request_from_job({"id": "j", "payload": {"projectId": "p", "mode": "image_to_video", "model": "svd"}})
+    fake_diffusers = SimpleNamespace(StableVideoDiffusionPipeline="SVD_PIPE_CLASS")
+    assert adapter._pipeline_class(fake_diffusers, request, target) == "SVD_PIPE_CLASS"
+    # Missing pipeline class fails loudly rather than silently mis-routing.
+    try:
+        adapter._pipeline_class(SimpleNamespace(), request, target)
+    except RuntimeError as exc:
+        assert "StableVideoDiffusionPipeline" in str(exc)
+    else:
+        raise AssertionError("SVD must require StableVideoDiffusionPipeline.")
+
+
+def test_svd_pipeline_kwargs_build_image_conditioning_without_prompt(monkeypatch):
+    # The SVD branch of _pipeline_kwargs animates the source image with motion
+    # controls and passes NO prompt/height/width/guidance (unlike Wan/LTX).
+    adapter = DiffusersVideoAdapter()
+    target = VIDEO_MODEL_TARGETS["svd"]
+
+    class FakeGen:
+        def manual_seed(self, _seed):
+            return self
+
+    fake_torch = SimpleNamespace(Generator=lambda _device: FakeGen())
+    monkeypatch.setattr(
+        "scene_worker.video_adapters.importlib.import_module",
+        lambda name: fake_torch if name == "torch" else importlib.import_module(name),
+    )
+    monkeypatch.setattr("scene_worker.video_adapters.select_torch_device", lambda *_a, **_k: "cpu")
+
+    class FakeImage:
+        def resize(self, _size):
+            return "RESIZED_IMAGE"
+
+    class FakePipe:
+        # filter_call_kwargs keeps only named params, so this signature gates
+        # which kwargs survive — proving the SVD branch produces these and no prompt.
+        def __call__(
+            self,
+            *,
+            image=None,
+            num_frames=None,
+            num_inference_steps=None,
+            decode_chunk_size=None,
+            motion_bucket_id=None,
+            fps=None,
+            noise_aug_strength=None,
+            generator=None,
+        ):
+            return None
+
+    request = video_request_from_job(
+        {
+            "id": "job-svd",
+            "payload": {
+                "projectId": "p",
+                "mode": "image_to_video",
+                "model": "svd",
+                "advanced": {"motionBucketId": 90, "conditioningFps": 6},
+            },
+        }
+    )
+    kwargs = adapter._pipeline_kwargs(
+        pipe=FakePipe(),
+        project_path=Path("/tmp/project"),
+        request=request,
+        target=target,
+        first_image=FakeImage(),
+        last_image=None,
+        seed=7,
+        num_frames=25,
+    )
+    assert kwargs["image"] == "RESIZED_IMAGE"
+    assert kwargs["num_frames"] == 25
+    assert kwargs["motion_bucket_id"] == 90
+    assert kwargs["fps"] == 6
+    assert kwargs["noise_aug_strength"] == 0.02
+    assert "prompt" not in kwargs
+    assert "guidance_scale" not in kwargs
 
 
 def test_mlx_routing_is_mode_aware_on_mps(monkeypatch):
@@ -6271,7 +6568,7 @@ def test_edit_run_pipeline_threads_project_path(tmp_path, monkeypatch):
 
     # Signature guard: project_path must precede the optional cancel_requested,
     # because every call site passes it positionally.
-    for adapter_cls in (ZImageDiffusersAdapter, QwenImageAdapter):
+    for adapter_cls in (ZImageDiffusersAdapter, QwenImageAdapter, SdxlDiffusersAdapter):
         params = list(inspect.signature(adapter_cls._run_pipeline).parameters)
         assert "project_path" in params, f"{adapter_cls.__name__}._run_pipeline must accept project_path"
         assert params.index("project_path") < params.index("cancel_requested")
@@ -6316,7 +6613,11 @@ def test_edit_run_pipeline_threads_project_path(tmp_path, monkeypatch):
     # Runtime guard: invoke the edit_image branch directly (gpu_id="cpu" keeps
     # device selection off real torch) so project_path resolves at the exact line
     # that raised NameError instead of crashing.
-    for adapter, model in ((ZImageDiffusersAdapter(), "z_image_edit"), (QwenImageAdapter(), "qwen_image_edit")):
+    for adapter, model in (
+        (ZImageDiffusersAdapter(), "z_image_edit"),
+        (QwenImageAdapter(), "qwen_image_edit"),
+        (SdxlDiffusersAdapter(), "sdxl"),
+    ):
         seen_paths.clear()
         request = image_request_from_job(
             {

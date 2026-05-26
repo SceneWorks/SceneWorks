@@ -220,8 +220,10 @@ pub fn model_adapter_for_family(family: &str) -> Option<&'static str> {
         "flux" => Some("flux_diffusers"),
         "chroma" => Some("chroma_diffusers"),
         "kolors" => Some("kolors_diffusers"),
+        "sdxl" => Some("sdxl_diffusers"),
         "ltx-video" => Some("ltx_video"),
         "wan-video" => Some("wan_video"),
+        "svd" => Some("svd_video"),
         _ => None,
     }
 }
@@ -238,6 +240,7 @@ pub fn model_capabilities_for_type_and_family(model_type: &str, family: &str) ->
         ("image", "flux") => vec!["text_to_image", "style_variations"],
         ("image", "chroma") => vec!["text_to_image", "style_variations"],
         ("image", "kolors") => vec!["text_to_image", "character_image", "style_variations"],
+        ("image", "sdxl") => vec!["text_to_image", "edit_image", "style_variations"],
         ("video", "ltx-video") => vec![
             "image_to_video",
             "text_to_video",
@@ -253,6 +256,9 @@ pub fn model_capabilities_for_type_and_family(model_type: &str, family: &str) ->
             "video_bridge",
             "replace_person",
         ],
+        // Stable Video Diffusion is image-conditioned only (no text prompt) and
+        // does not support the timeline/replacement modes.
+        ("video", "svd") => vec!["image_to_video"],
         _ => Vec::new(),
     }
 }
@@ -836,6 +842,25 @@ mod tests {
         assert_eq!(
             model_capabilities_for_type_and_family("image", "kolors"),
             vec!["text_to_image", "character_image", "style_variations"],
+        );
+    }
+
+    #[test]
+    fn sdxl_family_maps_to_sdxl_diffusers_adapter_and_image_capabilities() {
+        assert_eq!(model_adapter_for_family("sdxl"), Some("sdxl_diffusers"));
+        assert_eq!(
+            model_capabilities_for_type_and_family("image", "sdxl"),
+            vec!["text_to_image", "edit_image", "style_variations"],
+        );
+    }
+
+    #[test]
+    fn svd_family_maps_to_svd_video_adapter_and_image_to_video_only() {
+        assert_eq!(model_adapter_for_family("svd"), Some("svd_video"));
+        // SVD is image-conditioned only — no text-to-video or timeline modes.
+        assert_eq!(
+            model_capabilities_for_type_and_family("video", "svd"),
+            vec!["image_to_video"],
         );
     }
 

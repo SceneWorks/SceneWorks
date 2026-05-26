@@ -160,6 +160,60 @@ fn builtin_registry_exposes_z_image_turbo_target() {
 }
 
 #[test]
+fn builtin_registry_exposes_sdxl_target() {
+    let registry = builtin_training_targets();
+    let target = registry
+        .targets
+        .iter()
+        .find(|target| target.id == "sdxl_lora")
+        .expect("sdxl_lora target present");
+
+    assert_eq!(target.modality, TrainingModality::Image);
+    assert_eq!(target.output_kind, TrainingOutputKind::Lora);
+    assert_eq!(target.family, "sdxl");
+    assert_eq!(target.base_model, "sdxl");
+    assert_eq!(target.kernel, "sdxl_lora");
+    assert_eq!(target.defaults.rank, 16);
+    assert_eq!(target.defaults.resolution, 1024);
+    // Real CFG previews (positive guidance), unlike the distilled Z-Image target.
+    assert_eq!(
+        target.defaults.advanced.get("sampleGuidanceScale"),
+        Some(&serde_json::json!(7.0))
+    );
+    // SDXL UNet attention modules drive the LoRA injection.
+    assert_eq!(
+        target.defaults.advanced.get("loraTargetModules"),
+        Some(&serde_json::json!(["to_q", "to_k", "to_v", "to_out.0"]))
+    );
+}
+
+#[test]
+fn builtin_presets_expose_sdxl_character_default() {
+    let registry = sceneworks_core::training::builtin_training_presets();
+    let default_character = registry
+        .presets
+        .iter()
+        .find(|preset| preset.id == "sdxl_lora.character.adamw8bit.balanced")
+        .expect("sdxl character balanced preset present");
+
+    assert_eq!(default_character.target_id, "sdxl_lora");
+    assert_eq!(default_character.optimizer, "adamw8bit");
+    assert_eq!(default_character.config.rank, 16);
+    assert_eq!(
+        default_character.ui.get("default"),
+        Some(&serde_json::json!(true))
+    );
+
+    let style = registry
+        .presets
+        .iter()
+        .find(|preset| preset.id == "sdxl_lora.style.adamw8bit.balanced")
+        .expect("sdxl style preset present");
+    assert_eq!(style.config.rank, 32);
+    assert_eq!(style.config.alpha, 16);
+}
+
+#[test]
 fn builtin_registry_exposes_ltx_video_target() {
     let registry = builtin_training_targets();
     let target = registry

@@ -170,6 +170,16 @@ export const fallbackModels = [
     },
   },
   {
+    id: "sdxl",
+    name: "Stable Diffusion XL",
+    type: "image",
+    capabilities: ["text_to_image", "edit_image", "style_variations"],
+    ui: {
+      description: "Stability AI Stable Diffusion XL base 1.0 — open text-to-image foundation with the largest LoRA/finetune ecosystem. CreativeML OpenRAIL++-M (commercial use OK, ungated). SDXL UNet + dual CLIP; ~6.9GB fp16, real CFG + negative prompt, ~30 steps at guidance 7.0; native 1024x1024.",
+      promptGuide: { title: "Stable Diffusion XL Prompt Guide", path: "/prompt-guides/sdxl.md" },
+    },
+  },
+  {
     id: "ltx_2_3",
     name: "LTX-2.3",
     type: "video",
@@ -185,6 +195,26 @@ export const fallbackModels = [
       description: "First-class short-shot video target.",
       durationHint: "Best at 10s or less for the current workflow.",
       promptGuide: { title: "LTX-2.3 Prompt Guide", path: "/prompt-guides/ltx-2-3.md" },
+    },
+  },
+  {
+    id: "svd",
+    name: "Stable Video Diffusion",
+    type: "video",
+    capabilities: ["image_to_video"],
+    // Image-conditioned only — no text prompt (Video Studio drops the prompt requirement).
+    promptless: true,
+    defaults: { duration: 4, fps: 7, resolution: "1024x576", quality: "balanced" },
+    limits: {
+      durations: [4],
+      recommendedMaxDuration: 4,
+      fps: [6, 7, 8, 10, 12, 25],
+      resolutions: ["1024x576", "576x1024"],
+    },
+    ui: {
+      description: "Stable Video Diffusion (img2vid-XT) — animates a source image into a short ~25-frame clip; no text prompt. Stability AI Community License (commercial free under $1M revenue, ungated).",
+      durationHint: "Fixed ~25-frame clip from one image; adjust playback fps for pacing.",
+      promptGuide: { title: "Stable Video Diffusion Guide", path: "/prompt-guides/svd.md" },
     },
   },
   {
