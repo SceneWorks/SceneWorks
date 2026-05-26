@@ -196,13 +196,16 @@ startup.
 
 ## LoRA Training
 
-SceneWorks can train an image LoRA for Z-Image-Turbo locally: build a captioned
-dataset, validate the plan with a dry run, train on a CUDA GPU worker, and the
-result is registered as a normal SceneWorks LoRA selectable in Image Studio.
+SceneWorks can train image LoRAs locally — for Z-Image-Turbo, Stable Diffusion
+XL, and Microsoft Lens (plus LTX-2.3 video LoRAs natively on Apple Silicon):
+build a captioned dataset, validate the plan with a dry run, train on a GPU
+worker, and the result is registered as a normal SceneWorks LoRA selectable in
+Image Studio. The Stable Diffusion XL kernel is the generic SDXL-UNet trainer
+that SDXL-family models (e.g. Kolors) extend.
 See [documents/TRAINING_QUICKSTART.md](documents/TRAINING_QUICKSTART.md) for a
-step-by-step first run, recommended dataset sizes and captions, VRAM/disk notes,
-where outputs live, and troubleshooting. Training contracts live in
-`crates/sceneworks-core/src/training.rs`; the execution kernel is
+step-by-step first run, per-target notes, recommended dataset sizes and captions,
+VRAM/disk notes, where outputs live, and troubleshooting. Training contracts live
+in `crates/sceneworks-core/src/training.rs`; the execution kernel is
 `apps/worker/scene_worker/training_adapters.py`.
 
 ## Structure

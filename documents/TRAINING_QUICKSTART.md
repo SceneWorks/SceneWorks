@@ -238,6 +238,26 @@ AI Toolkit features such as EMA and Differential Output Preservation are not
 exposed as SceneWorks presets yet because the current worker does not implement
 their extra training passes.
 
+> **Stable Diffusion XL LoRA (`sdxl_lora`):** the `sdxl_lora` kernel
+> (`target.kernel`) trains an image LoRA for Stable Diffusion XL base 1.0, and is
+> the **generic SDXL-UNet trainer** — the shared foundation epic 1929 (Kolors
+> LoRA training) extends by swapping the pipeline class + text encoder. It is the
+> first **U-Net (non-DiT)** trainer in the repo: unlike the flow-matching
+> transformer kernels (Z-Image / Lens / LTX), it runs the SDXL **ε/v-prediction**
+> objective on a **DDPM** noise schedule (integer timesteps) with the SDXL
+> `added_cond_kwargs` (pooled CLIP text embeds + `add_time_ids`). SDXL base is
+> **not** step-distilled, so — unlike Z-Image — it needs **no de-distill adapter**;
+> and it uses real classifier-free guidance, so in-training previews render at a
+> positive `sampleGuidanceScale` (7.0). The LoRA injects into the UNet attention
+> projections (`to_q`/`to_k`/`to_v`/`to_out.0`) and is saved as an `sdxl`-family
+> diffusers safetensors the SDXL adapter loads at generation. Install **Stable
+> Diffusion XL** (`stabilityai/stable-diffusion-xl-base-1.0`) from the Model
+> Manager before a real run; defaults are rank 16 / alpha 16 / lr 1e-4 / ~1500
+> steps / 1024px, with character / style / low-VRAM presets. CreativeML
+> OpenRAIL++-M (commercial-OK, ungated). Watch the worker
+> `training_lora_weight_norm` event — a growing `loraBNorm` across checkpoints
+> confirms the adapter is learning.
+
 ## 5. Where the output goes
 
 On a successful real run the adapter is registered as a normal SceneWorks LoRA:
