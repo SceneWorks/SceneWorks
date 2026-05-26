@@ -4359,6 +4359,10 @@ def test_explicit_seed_uses_reproducible_ladder():
 
 def test_video_adapter_override_aliases_and_unknown_values(monkeypatch):
     monkeypatch.delenv("SCENEWORKS_VIDEO_ADAPTER", raising=False)
+    # Pin the non-MPS (CUDA/CI) routing so MLX eligibility on Apple Silicon doesn't
+    # shadow the alias assertions — ltx_2_3/wan route to MlxVideoAdapter on MPS
+    # (matches test_create_video_adapter_routes_svd_to_diffusers).
+    monkeypatch.setattr("scene_worker.video_adapters._mps_available", lambda: False)
     assert create_video_adapter({"payload": {"model": "ltx_2_3"}}).__class__.__name__ == "LtxPipelinesVideoAdapter"
     assert create_video_adapter({"payload": {"model": "wan_2_2"}}).__class__.__name__ == "DiffusersVideoAdapter"
     assert create_video_adapter({"payload": {"model": "wan_2_2_t2v_14b"}}).__class__.__name__ == "DiffusersVideoAdapter"
@@ -5282,6 +5286,21 @@ def test_native_ltx_text_to_video_uses_ltx_pipeline_and_writes_mp4(monkeypatch, 
     monkeypatch.setattr("scene_worker.video_adapters.importlib.import_module", fake_import_module)
     adapter = LtxPipelinesVideoAdapter()
     monkeypatch.setattr(adapter, "_dependencies_available", lambda *_args: True)
+    # Pin the CUDA gating recipe so the fp8 default is exercised deterministically.
+    # On a host with torch+MPS installed the gating would disable fp8 (it only
+    # assumes CUDA when torch is absent, e.g. the CI parity job), so without this
+    # the fp8-cast assertion below is host-dependent.
+    monkeypatch.setattr(
+        adapter,
+        "_ltx_device_gating",
+        lambda: {
+            "device": None,
+            "disable_fp8": False,
+            "force_offload_none": False,
+            "fp32_audio": False,
+            "guard_cuda_sync": False,
+        },
+    )
     job = {
         "id": "job-real-ltx",
         "payload": {
