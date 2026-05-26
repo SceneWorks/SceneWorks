@@ -1,7 +1,7 @@
 import React, { act } from "react";
 import { createRoot } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { App, eventUrl } from "./main.jsx";
+import { App, ErrorBoundary, eventUrl } from "./main.jsx";
 import { AssetPickerField } from "./components/AssetPicker.jsx";
 import { AssetDetail, FullscreenPreview } from "./components/assetPanels.jsx";
 import { liveElapsedSeconds } from "./formatting.js";
@@ -391,6 +391,31 @@ describe("SceneWorks app shell", () => {
     });
     container.remove();
     vi.restoreAllMocks();
+  });
+
+  it("shows a fallback instead of a blank screen when rendering fails", async () => {
+    function BrokenScreen() {
+      throw new Error("Render smoke signal");
+    }
+
+    const preventExpectedError = (event) => event.preventDefault();
+    window.addEventListener("error", preventExpectedError);
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    root = createRoot(container);
+    try {
+      await act(async () => {
+        root.render(
+          <ErrorBoundary>
+            <BrokenScreen />
+          </ErrorBoundary>,
+        );
+      });
+    } finally {
+      window.removeEventListener("error", preventExpectedError);
+    }
+
+    expect(container.textContent).toContain("Something went wrong");
+    expect(container.textContent).toContain("Render smoke signal");
   });
 
   const wizardModels = [
