@@ -5,6 +5,7 @@ import { App, ErrorBoundary, eventUrl } from "./main.jsx";
 import { AssetPickerField } from "./components/AssetPicker.jsx";
 import { AssetDetail, FullscreenPreview } from "./components/assetPanels.jsx";
 import { liveElapsedSeconds } from "./formatting.js";
+import { foldUpscaledAssetVariants } from "./assetVariants.js";
 import { extractFamilies } from "./presetUtils.js";
 import { CharacterStudio } from "./screens/CharacterStudio.jsx";
 import { ImageStudio } from "./screens/ImageStudio.jsx";
@@ -1903,6 +1904,56 @@ describe("SceneWorks app shell", () => {
       container.querySelector(".modal-backdrop").dispatchEvent(new MouseEvent("mousedown", { bubbles: true }));
     });
     expect(onClose).toHaveBeenCalledTimes(2);
+  });
+
+  it("toggles FullscreenPreview between original and upscaled variants", async () => {
+    const noop = () => {};
+    const original = {
+      id: "asset-original",
+      projectId: "project-1",
+      displayName: "Plate",
+      type: "image",
+      status: {},
+      file: { path: "assets/images/original.png" },
+    };
+    const upscaled = {
+      id: "asset-upscaled",
+      projectId: "project-1",
+      displayName: "Plate (2x upscaled)",
+      type: "image",
+      status: {},
+      file: { path: "assets/images/upscaled.png" },
+      lineage: { sourceAssetId: "asset-original", parents: ["asset-original"] },
+      extra: { isUpscaled: true, upscaledFromAssetId: "asset-original", factor: 2, engine: "real-esrgan" },
+      variants: { original, upscaled: null },
+    };
+    upscaled.variants.upscaled = upscaled;
+
+    root = createRoot(container);
+    await act(async () => {
+      root.render(
+        <FullscreenPreview
+          asset={upscaled}
+          deleteAsset={noop}
+          nextAsset={null}
+          onClose={noop}
+          onPreviewAsset={noop}
+          previousAsset={null}
+          purgeAsset={noop}
+          updateAssetStatus={noop}
+        />,
+      );
+    });
+
+    expect(container.querySelector(".preview-modal img").getAttribute("src")).toContain("upscaled.png");
+    expect(container.textContent).toContain("Original");
+    expect(container.textContent).toContain("Upscaled");
+
+    await act(async () => {
+      [...container.querySelectorAll(".preview-variant-toggle button")].find((button) => button.textContent === "Original").click();
+    });
+
+    expect(container.querySelector(".preview-modal img").getAttribute("src")).toContain("original.png");
   });
 
   it("keeps in-progress picker selection across parent rerenders", async () => {
@@ -5837,6 +5888,91 @@ describe("SceneWorks app shell", () => {
       container.querySelector('button[aria-label="Remove portrait tag"]').click();
     });
     expect(updateAssetTags).toHaveBeenLastCalledWith(portrait, []);
+  });
+
+  it("folds original and upscaled library variants into one representative tile", async () => {
+    const setPreviewAsset = vi.fn();
+    const original = {
+      id: "asset-original",
+      projectId: "project-1",
+      type: "image",
+      displayName: "Castle original",
+      file: { path: "assets/images/castle-original.png", mimeType: "image/png" },
+      recipe: { prompt: "castle" },
+      status: { favorite: false, rating: 0, rejected: false, trashed: false },
+    };
+    const upscaled = {
+      id: "asset-upscaled",
+      projectId: "project-1",
+      type: "image",
+      displayName: "Castle upscaled",
+      file: { path: "assets/images/castle-upscaled.png", mimeType: "image/png" },
+      lineage: { sourceAssetId: "asset-original", parents: ["asset-original"] },
+      extra: { isUpscaled: true, upscaledFromAssetId: "asset-original", factor: 2, engine: "real-esrgan" },
+      recipe: { prompt: "castle" },
+      status: { favorite: false, rating: 0, rejected: false, trashed: false },
+    };
+    const other = {
+      id: "asset-other",
+      projectId: "project-1",
+      type: "image",
+      displayName: "Other frame",
+      file: { path: "assets/images/other.png", mimeType: "image/png" },
+      recipe: { prompt: "other" },
+      status: { favorite: false, rating: 0, rejected: false, trashed: false },
+    };
+
+    expect(foldUpscaledAssetVariants([original, upscaled, other]).map((asset) => asset.id)).toEqual([
+      "asset-upscaled",
+      "asset-other",
+    ]);
+
+    root = createRoot(container);
+    await act(async () => {
+      root.render(
+        withAppContext(
+          {
+            activeProject: { id: "project-1", name: "Variants" },
+            assets: [original, upscaled, other],
+            jobs: [],
+            imageModels: [],
+            createVqaJob: vi.fn(),
+            deleteAsset: () => {},
+            purgeAsset: () => {},
+            importAsset: () => {},
+            setPreviewAsset,
+            sendAssetToImage: () => {},
+            sendAssetToVideo: () => {},
+            selectedAsset: upscaled,
+            setSelectedAssetId: () => {},
+            setActiveView: () => {},
+            updateAssetStatus: () => {},
+            updateAssetTags: () => {},
+          },
+          <LibraryScreen />,
+        ),
+      );
+    });
+
+    const tiles = [...container.querySelectorAll(".asset-tile")];
+    expect(tiles).toHaveLength(2);
+    expect(tiles.map((tile) => tile.textContent).join(" ")).toContain("Castle upscaled");
+    expect(tiles.map((tile) => tile.textContent).join(" ")).not.toContain("Castle original");
+    expect(tiles[0].querySelector("img").getAttribute("src")).toContain("castle-upscaled.png");
+
+    await act(async () => {
+      tiles[0].dispatchEvent(new MouseEvent("dblclick", { bubbles: true }));
+    });
+
+    expect(setPreviewAsset).toHaveBeenCalledWith(
+      expect.objectContaining({
+        id: "asset-upscaled",
+        variants: {
+          original,
+          upscaled,
+        },
+      }),
+    );
   });
 
   it("shows discarded assets in Trashcan and exposes restore and purge actions", async () => {

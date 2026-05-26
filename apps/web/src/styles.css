@@ -5116,6 +5116,10 @@ label {
   white-space: nowrap;
 }
 
+.preview-variant-toggle {
+  min-width: 188px;
+}
+
 .preview-actions {
   gap: 8px;
   justify-content: flex-end;
