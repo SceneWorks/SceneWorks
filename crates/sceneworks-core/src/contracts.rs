@@ -139,6 +139,7 @@ string_enum! {
         LensTurbo => "lens_turbo",
         SenseNovaU1 => "sensenova_u1",
         FluxDiffusers => "flux_diffusers",
+        ChromaDiffusers => "chroma_diffusers",
         KolorsDiffusers => "kolors_diffusers",
         ProceduralVideo => "procedural_video",
         ProceduralPersonTracking => "procedural_person_tracking",
@@ -1275,5 +1276,18 @@ mod tests {
         assert!(request.is_disabled());
         assert_eq!(request.factor, 2);
         assert_eq!(request.engine, "real-esrgan");
+    }
+
+    #[test]
+    fn chroma_diffusers_recipe_adapter_round_trips() {
+        assert_eq!(RecipeAdapter::ChromaDiffusers.as_str(), "chroma_diffusers");
+        let parsed: RecipeAdapter =
+            serde_json::from_value(json!("chroma_diffusers")).expect("chroma adapter parses");
+        assert_eq!(parsed, RecipeAdapter::ChromaDiffusers);
+        assert_eq!(
+            serde_json::to_value(RecipeAdapter::ChromaDiffusers)
+                .expect("chroma adapter serializes"),
+            json!("chroma_diffusers")
+        );
     }
 }

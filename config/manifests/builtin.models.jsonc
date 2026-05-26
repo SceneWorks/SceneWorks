@@ -494,6 +494,126 @@
       }
     },
     {
+      "id": "chroma1_hd",
+      "name": "Chroma1-HD",
+      "family": "chroma",
+      "type": "image",
+      "adapter": "chroma_diffusers",
+      "capabilities": ["text_to_image", "style_variations"],
+      "downloads": [
+        {
+          // Whole-repo download (diffusers ChromaPipeline layout + bundled checkpoint).
+          "provider": "huggingface",
+          "repo": "lodestones/Chroma1-HD",
+          "files": [],
+          "estimatedSizeBytes": 45300383271
+        }
+      ],
+      "paths": {
+        "model": "${HF_CACHE}/lodestones/Chroma1-HD"
+      },
+      "defaults": {
+        // True classifier-free guidance with negative prompts: ~40 steps, guidance 3.0.
+        "resolution": "1024x1024",
+        "steps": 40,
+        "guidanceScale": 3.0,
+        "count": 1
+      },
+      "limits": {
+        "resolutions": ["768x768", "1024x1024", "1280x720", "720x1280"],
+        "count": [1, 2, 4]
+      },
+      "loraCompatibility": {
+        "families": ["chroma"],
+        "types": ["style", "enhance", "character"]
+      },
+      "ui": {
+        "label": "Chroma1-HD",
+        "description": "Lodestones Chroma1-HD — high-resolution text-to-image, Apache-2.0 (commercial-safe). FLUX.1-schnell-derived 8.9B transformer + T5-XXL text encoder (no CLIP); true classifier-free guidance with negative prompts (~40 steps, guidance 3.0). Needs a large-VRAM GPU.",
+        "recommendedFor": ["text_to_image", "style_variations"]
+      }
+    },
+    {
+      "id": "chroma1_base",
+      "name": "Chroma1-Base",
+      "family": "chroma",
+      "type": "image",
+      "adapter": "chroma_diffusers",
+      "capabilities": ["text_to_image", "style_variations"],
+      "downloads": [
+        {
+          // Whole-repo download (diffusers ChromaPipeline layout + bundled checkpoint).
+          "provider": "huggingface",
+          "repo": "lodestones/Chroma1-Base",
+          "files": [],
+          "estimatedSizeBytes": 45294403859
+        }
+      ],
+      "paths": {
+        "model": "${HF_CACHE}/lodestones/Chroma1-Base"
+      },
+      "defaults": {
+        // Neutral finetuning foundation: ~40 steps, guidance 3.0, true CFG + negative prompts.
+        "resolution": "1024x1024",
+        "steps": 40,
+        "guidanceScale": 3.0,
+        "count": 1
+      },
+      "limits": {
+        "resolutions": ["768x768", "1024x1024", "1280x720", "720x1280"],
+        "count": [1, 2, 4]
+      },
+      "loraCompatibility": {
+        "families": ["chroma"],
+        "types": ["style", "enhance", "character"]
+      },
+      "ui": {
+        "label": "Chroma1-Base",
+        "description": "Lodestones Chroma1-Base — text-to-image foundation tuned for finetuning, Apache-2.0 (commercial-safe). FLUX.1-schnell-derived 8.9B transformer + T5-XXL text encoder (no CLIP); true classifier-free guidance with negative prompts (~40 steps, guidance 3.0). Needs a large-VRAM GPU.",
+        "recommendedFor": ["text_to_image", "style_variations"]
+      }
+    },
+    {
+      "id": "chroma1_flash",
+      "name": "Chroma1-Flash",
+      "family": "chroma",
+      "type": "image",
+      "adapter": "chroma_diffusers",
+      "capabilities": ["text_to_image", "style_variations"],
+      "downloads": [
+        {
+          // Whole-repo download (diffusers ChromaPipeline layout + bundled checkpoints).
+          "provider": "huggingface",
+          "repo": "lodestones/Chroma1-Flash",
+          "files": [],
+          "estimatedSizeBytes": 63094436928
+        }
+      ],
+      "paths": {
+        "model": "${HF_CACHE}/lodestones/Chroma1-Flash"
+      },
+      "defaults": {
+        // CFG baked: ~8 steps, guidance 1.0 (CFG off, negative prompt ignored).
+        "resolution": "1024x1024",
+        "steps": 8,
+        "guidanceScale": 1.0,
+        "count": 4
+      },
+      "limits": {
+        "resolutions": ["768x768", "1024x1024", "1280x720", "720x1280"],
+        "count": [1, 2, 4]
+      },
+      "loraCompatibility": {
+        "families": ["chroma"],
+        "types": ["style", "enhance", "character"]
+      },
+      "ui": {
+        "label": "Chroma1-Flash",
+        "description": "Lodestones Chroma1-Flash — fast CFG-baked text-to-image, Apache-2.0 (commercial-safe). FLUX.1-schnell-derived 8.9B transformer + T5-XXL text encoder (no CLIP); ~8-step generation with CFG disabled (guidance 1.0, negative prompt ignored). Needs a large-VRAM GPU.",
+        "recommendedFor": ["text_to_image", "style_variations"]
+      }
+    },
+    {
       "id": "kolors",
       "name": "Kolors",
       "family": "kolors",

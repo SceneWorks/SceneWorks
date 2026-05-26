@@ -23,6 +23,7 @@ from scene_worker.caption_adapters import (
     normalize_processor_resample,
 )
 from scene_worker.image_adapters import (
+    ChromaDiffusersAdapter,
     FluxDiffusersAdapter,
     ImageAssetWriter,
     KolorsDiffusersAdapter,
@@ -1111,6 +1112,134 @@ def test_flux_adapter_rejects_incompatible_lora_family(tmp_path):
         assert "not compatible with model family flux" in str(exc)
     else:
         raise AssertionError("FLUX.1 must reject a LoRA whose family is not flux.")
+
+
+def test_create_image_adapter_routes_chroma_variants():
+    for model in ("chroma1_hd", "chroma1_base", "chroma1_flash"):
+        adapter = create_image_adapter({"payload": {"model": model}})
+        assert adapter.__class__.__name__ == "ChromaDiffusersAdapter"
+        assert adapter.id == "chroma_diffusers"
+
+
+def test_image_adapter_env_override_selects_chroma(monkeypatch):
+    monkeypatch.setenv("SCENEWORKS_IMAGE_ADAPTER", "chroma_diffusers")
+    # Env override wins even when the payload names a different family's model.
+    adapter = create_image_adapter({"payload": {"model": "z_image_turbo"}})
+    assert adapter.__class__.__name__ == "ChromaDiffusersAdapter"
+
+
+def test_chroma_model_target_defaults():
+    hd = MODEL_TARGETS["chroma1_hd"]
+    base = MODEL_TARGETS["chroma1_base"]
+    flash = MODEL_TARGETS["chroma1_flash"]
+    for target in (hd, base, flash):
+        assert target["adapter"] == "chroma_diffusers"
+        assert target["family"] == "chroma"
+        assert target["supportsEdit"] is False
+        assert target["maxSequenceLength"] == 512
+    # HD/Base: real CFG with negative prompts (~40 steps, guidance 3.0).
+    assert hd["steps"] == 40
+    assert hd["guidanceScale"] == 3.0
+    assert hd["repo"] == "lodestones/Chroma1-HD"
+    assert base["steps"] == 40
+    assert base["guidanceScale"] == 3.0
+    assert base["repo"] == "lodestones/Chroma1-Base"
+    # Flash: CFG baked off (~8 steps, guidance 1.0).
+    assert flash["steps"] == 8
+    assert flash["guidanceScale"] == 1.0
+    assert flash["repo"] == "lodestones/Chroma1-Flash"
+
+
+def test_chroma_guidance_scale_uses_per_model_default_and_override():
+    adapter = ChromaDiffusersAdapter()
+    hd = MODEL_TARGETS["chroma1_hd"]
+    flash = MODEL_TARGETS["chroma1_flash"]
+    # Per-model default applies when the request does not override guidance.
+    assert adapter._guidance_scale(SimpleNamespace(advanced={}), hd) == 3.0
+    assert adapter._guidance_scale(SimpleNamespace(advanced={}), flash) == 1.0
+    # An explicit request value wins.
+    assert adapter._guidance_scale(SimpleNamespace(advanced={"guidanceScale": 4.5}), hd) == 4.5
+    # Unparseable override falls back to the per-model default.
+    assert adapter._guidance_scale(SimpleNamespace(advanced={"guidanceScale": "x"}), hd) == 3.0
+
+
+def test_chroma_num_inference_steps_default_and_override():
+    adapter = ChromaDiffusersAdapter()
+    hd = MODEL_TARGETS["chroma1_hd"]
+    flash = MODEL_TARGETS["chroma1_flash"]
+    # Defaults come straight from the model target.
+    assert adapter._num_inference_steps(SimpleNamespace(advanced={}), hd) == 40
+    assert adapter._num_inference_steps(SimpleNamespace(advanced={}), flash) == 8
+    # Explicit override is honored and clamped to [1, 80].
+    assert adapter._num_inference_steps(SimpleNamespace(advanced={"steps": 20}), hd) == 20
+    assert adapter._num_inference_steps(SimpleNamespace(advanced={"steps": 999}), flash) == 80
+
+
+def test_chroma_rejects_image_edit():
+    job = {
+        "id": "job_chroma_edit",
+        "payload": {
+            "projectId": "project_x",
+            "mode": "edit_image",
+            "model": "chroma1_hd",
+            "prompt": "a cat",
+        },
+    }
+    noop = lambda *args, **kwargs: None  # noqa: E731
+    try:
+        ChromaDiffusersAdapter().generate(
+            settings=None, job=job, request=image_request_from_job(job), project_path=None,
+            progress=noop, cancel_requested=lambda: False,
+        )
+    except RuntimeError as exc:
+        assert "does not support image editing" in str(exc)
+    else:
+        raise AssertionError("Chroma1 is text-to-image only and must reject edit_image.")
+
+
+def test_chroma_adapter_applies_chroma_lora(tmp_path):
+    lora = tmp_path / "chroma_style.safetensors"
+    lora.write_bytes(b"lora")
+    pipe = FakeLoraPipe()
+    adapter = ChromaDiffusersAdapter()
+    request = SimpleNamespace(
+        model="chroma1_hd",
+        loras=[
+            {
+                "id": "chroma_style",
+                "installedPath": str(lora),
+                "weight": 0.7,
+                "compatibility": {"families": ["chroma"]},
+            }
+        ],
+    )
+    adapter._apply_loras(pipe, request)
+    state = adapter._loaded_lora_states["text"]
+    assert [path for path, _name in pipe.loaded] == [str(lora)]
+    assert pipe.set_calls == [(list(state.adapter_names), [0.7])]
+
+
+def test_chroma_adapter_rejects_incompatible_lora_family(tmp_path):
+    lora = tmp_path / "flux_style.safetensors"
+    lora.write_bytes(b"lora")
+    pipe = FakeLoraPipe()
+    adapter = ChromaDiffusersAdapter()
+    request = SimpleNamespace(
+        model="chroma1_base",
+        loras=[
+            {
+                "id": "flux_style",
+                "installedPath": str(lora),
+                "compatibility": {"families": ["flux"]},
+            }
+        ],
+    )
+    try:
+        adapter._apply_loras(pipe, request)
+    except RuntimeError as exc:
+        assert "not compatible with model family chroma" in str(exc)
+    else:
+        raise AssertionError("Chroma1 must reject a LoRA whose family is not chroma.")
 
 
 def test_create_image_adapter_routes_kolors():
