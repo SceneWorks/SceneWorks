@@ -364,6 +364,11 @@ pub(crate) struct ImageJobRequest {
     pub(crate) character_look_id: Option<String>,
     #[serde(default)]
     pub(crate) source_asset_id: Option<String>,
+    // Reference image for IP-Adapter (style/identity conditioning) — distinct from
+    // source_asset_id (the img2img edit base). Drives the Character Studio
+    // "many images from one reference" flow. ip_adapter_scale rides in `advanced`.
+    #[serde(default)]
+    pub(crate) reference_asset_id: Option<String>,
     #[serde(default = "default_requested_gpu")]
     pub(crate) requested_gpu: String,
     #[serde(default, skip_serializing_if = "ImageUpscaleRequest::is_disabled")]

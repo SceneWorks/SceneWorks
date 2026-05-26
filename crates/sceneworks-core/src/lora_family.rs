@@ -237,7 +237,7 @@ pub fn model_capabilities_for_type_and_family(model_type: &str, family: &str) ->
         ("image", "sensenova-u1") => vec!["text_to_image", "edit_image", "vqa", "interleave"],
         ("image", "flux") => vec!["text_to_image", "style_variations"],
         ("image", "chroma") => vec!["text_to_image", "style_variations"],
-        ("image", "kolors") => vec!["text_to_image", "style_variations"],
+        ("image", "kolors") => vec!["text_to_image", "character_image", "style_variations"],
         ("video", "ltx-video") => vec![
             "image_to_video",
             "text_to_video",
@@ -835,7 +835,7 @@ mod tests {
         assert_eq!(model_adapter_for_family("kolors"), Some("kolors_diffusers"));
         assert_eq!(
             model_capabilities_for_type_and_family("image", "kolors"),
-            vec!["text_to_image", "style_variations"],
+            vec!["text_to_image", "character_image", "style_variations"],
         );
     }
 

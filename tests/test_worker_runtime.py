@@ -42,6 +42,7 @@ from scene_worker.image_adapters import (
     image_batch_progress,
     image_request_from_job,
     lens_resolution_for,
+    load_reference_image,
     model_supports_edit,
     pipeline_component_devices,
     require_inference_backend_for_gpu_worker,
@@ -1355,6 +1356,120 @@ def test_create_image_adapter_routes_kolors_edit():
     adapter = create_image_adapter({"payload": {"model": "kolors", "mode": "edit_image"}})
     assert adapter.__class__.__name__ == "KolorsDiffusersAdapter"
     assert adapter.id == "kolors_diffusers"
+
+
+def test_kolors_reference_asset_id_parsed():
+    request = image_request_from_job(
+        {"payload": {"projectId": "p", "model": "kolors", "referenceAssetId": "asset-ref"}}
+    )
+    assert request.reference_asset_id == "asset-ref"
+
+
+def test_kolors_use_ip_adapter_only_for_text_with_reference():
+    use = KolorsDiffusersAdapter._use_ip_adapter
+    # IP-Adapter runs on the T2I pipeline with a reference image.
+    assert use(SimpleNamespace(mode="text_to_image", reference_asset_id="a")) is True
+    # Not for edit jobs (reference + img2img together is a future enhancement)...
+    assert use(SimpleNamespace(mode="edit_image", reference_asset_id="a")) is False
+    # ...and not without a reference image.
+    assert use(SimpleNamespace(mode="text_to_image", reference_asset_id=None)) is False
+
+
+def test_kolors_ip_adapter_scale_default_and_clamp():
+    adapter = KolorsDiffusersAdapter()
+    assert adapter._ip_adapter_scale(SimpleNamespace(advanced={})) == 0.6
+    assert adapter._ip_adapter_scale(SimpleNamespace(advanced={"ipAdapterScale": 0.4})) == 0.4
+    # Clamped to [0, 1]; unparseable falls back to the default.
+    assert adapter._ip_adapter_scale(SimpleNamespace(advanced={"ipAdapterScale": 5})) == 1.0
+    assert adapter._ip_adapter_scale(SimpleNamespace(advanced={"ipAdapterScale": -2})) == 0.0
+    assert adapter._ip_adapter_scale(SimpleNamespace(advanced={"ipAdapterScale": "x"})) == 0.6
+
+
+def test_load_reference_image_requires_asset(tmp_path):
+    try:
+        load_reference_image(tmp_path, "")
+    except RuntimeError as exc:
+        assert "reference image asset" in str(exc)
+    else:
+        raise AssertionError("load_reference_image must reject a missing reference asset id.")
+
+
+def test_kolors_reference_run_pipeline_passes_ip_adapter_image(tmp_path, monkeypatch):
+    """A T2I job with referenceAssetId drives the IP-Adapter branch of _run_pipeline:
+    load_reference_image(project_path, reference_asset_id) → ip_adapter_image kwarg, plus
+    a per-request set_ip_adapter_scale. Mirrors test_edit_run_pipeline_threads_project_path
+    so it runs torch-free in CI."""
+
+    class FakeImage:
+        def convert(self, _mode):
+            return self
+
+    class FakeOutput:
+        images = [FakeImage()]
+
+    class FakePipe:
+        def __init__(self):
+            self.scales: list[float] = []
+
+        def set_ip_adapter_scale(self, scale):
+            self.scales.append(scale)
+
+        def __call__(self, **kwargs):
+            self.last_kwargs = kwargs
+            return FakeOutput()
+
+    class FakeTorch:
+        @staticmethod
+        def Generator(_device):
+            class Gen:
+                def manual_seed(self, _seed):
+                    return self
+
+            return Gen()
+
+    monkeypatch.setattr(
+        "scene_worker.image_adapters.importlib.import_module",
+        lambda name: FakeTorch if name == "torch" else importlib.import_module(name),
+    )
+
+    seen: list[tuple] = []
+
+    def fake_load_reference_image(project_path, reference_asset_id):
+        seen.append((project_path, reference_asset_id))
+        return FakeImage()
+
+    monkeypatch.setattr(
+        "scene_worker.image_adapters.load_reference_image", fake_load_reference_image
+    )
+
+    project_path = tmp_path / "project"
+    project_path.mkdir()
+    request = image_request_from_job(
+        {
+            "payload": {
+                "projectId": "project-1",
+                "mode": "text_to_image",
+                "model": "kolors",
+                "prompt": "a portrait of the character",
+                "referenceAssetId": "asset-ref",
+                "width": 16,
+                "height": 16,
+                "count": 1,
+                "advanced": {"ipAdapterScale": 0.7},
+            }
+        }
+    )
+    pipe = FakePipe()
+    result = KolorsDiffusersAdapter()._run_pipeline(
+        SimpleNamespace(gpu_id="cpu"), pipe, request, 7, project_path
+    )
+    # The IP-Adapter branch ran: it loaded the reference image (→ ip_adapter_image
+    # kwarg) and applied the per-request scale. (filter_call_kwargs only keeps a
+    # pipe's *named* params, and FakePipe takes **kwargs, so we assert via the
+    # observable side effects rather than last_kwargs — same as the edit test.)
+    assert seen == [(project_path, "asset-ref")]
+    assert pipe.scales == [0.7]
+    assert result is FakeOutput.images[0]
 
 
 def test_create_image_adapter_routes_sensenova_u1():
