@@ -1008,11 +1008,13 @@ mod base_model_gating_tests {
     fn rejects_wan_5b_lora_on_14b_model() {
         let models = wan_models();
         let lora = json!({ "id": "char", "families": ["wan-video"], "baseModel": "wan_2_2" });
-        let err = validate_lora_specs_for_model(
-            &models, &[], "wan_2_2_t2v_14b", &[lora], true, "LoRA",
-        )
-        .expect_err("5B LoRA must be rejected on the 14B model");
-        assert!(format!("{err:?}").contains("not interchangeable"), "got: {err:?}");
+        let err =
+            validate_lora_specs_for_model(&models, &[], "wan_2_2_t2v_14b", &[lora], true, "LoRA")
+                .expect_err("5B LoRA must be rejected on the 14B model");
+        assert!(
+            format!("{err:?}").contains("not interchangeable"),
+            "got: {err:?}"
+        );
     }
 
     #[test]
