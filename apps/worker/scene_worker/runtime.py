@@ -17,6 +17,7 @@ from sceneworks_shared import find_project_path, utc_now
 from .caption_adapters import run_training_caption_job
 from .gpu import cpu_worker_id, discover_gpu, discover_gpus, gpu_utilization, gpu_worker_id
 from .image_adapters import (
+    ChromaDiffusersAdapter,
     FluxDiffusersAdapter,
     LensTurboAdapter,
     ProceduralImageAdapter,
@@ -1252,6 +1253,7 @@ def run_worker_loop(settings: WorkerSettings) -> None:
         "lens_turbo": LensTurboAdapter(),
         "sensenova_u1": SenseNovaU1Adapter(),
         "flux_diffusers": FluxDiffusersAdapter(),
+        "chroma_diffusers": ChromaDiffusersAdapter(),
     }
     max_registration_attempts = 20
 
