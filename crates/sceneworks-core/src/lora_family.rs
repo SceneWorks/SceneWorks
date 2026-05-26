@@ -772,8 +772,12 @@ mod tests {
         let mut keys = Vec::new();
         for block in 0..19 {
             for module in ["qkv_lora1", "qkv_lora2", "proj_lora1", "proj_lora2"] {
-                keys.push(format!("double_blocks.{block}.processor.{module}.down.weight"));
-                keys.push(format!("double_blocks.{block}.processor.{module}.up.weight"));
+                keys.push(format!(
+                    "double_blocks.{block}.processor.{module}.down.weight"
+                ));
+                keys.push(format!(
+                    "double_blocks.{block}.processor.{module}.up.weight"
+                ));
             }
         }
         let header = header_from_keys(&keys.iter().map(String::as_str).collect::<Vec<_>>());
