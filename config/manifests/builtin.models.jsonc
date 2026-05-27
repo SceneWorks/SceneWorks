@@ -821,6 +821,19 @@
         "label": "InstantID (RealVisXL)",
         "description": "Identity-preserving character generation: holds a person's face from a single reference image while the prompt drives scene, pose, and wardrobe. Built on RealVisXL_V5.0 (photoreal SDXL, openrail++ commercial-OK) with InstantID's ArcFace embedding + 5-point-landmark ControlNet — the sc-2009 winner for faithful likeness with scene freedom (vs IP-Adapter resemblance only). Pick a character with an approved reference image, then raise Variations to explore takes. ~30 steps at guidance 5.0; ~22GB peak on Apple Silicon. Needs the InstantID weights (~4GB) + antelopev2 face pack, fetched on first use.",
         "recommendedFor": ["character_image"],
+        // InstantID identity tuning surfaced in the character-image picker. The
+        // reference-strength slider drives ipAdapterScale (default raised to 0.8 for
+        // InstantID vs the global 0.6); identityStructure adds a second slider for
+        // controlnetConditioningScale (IdentityNet/landmark lock — the lever that
+        // measurably trades pose freedom for face-geometry likeness, sc-2009 sweep).
+        "referenceStrengthDefault": 0.8,
+        "identityStructure": {
+          "label": "Identity structure",
+          "default": 0.8,
+          "min": 0.3,
+          "max": 1.0,
+          "step": 0.05
+        },
         "promptGuide": {
           "title": "InstantID (RealVisXL) Prompt Guide",
           "path": "/prompt-guides/instantid-realvisxl.md",
