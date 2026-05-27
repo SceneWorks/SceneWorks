@@ -91,11 +91,10 @@ from scene_worker.runtime import (
     worker_capabilities,
 )
 from scene_worker.prompt_refine import (
-    PromptRefineMalformed,
     PromptRefineUnavailable,
+    PromptRefiner,
     build_system_prompt,
     clean_output,
-    refine_prompt,
 )
 from scene_worker.training_adapters import (
     SUPPORTED_LR_SCHEDULERS,
@@ -211,8 +210,7 @@ class FakePeftBackendErrorPipe:
 def test_cpu_worker_does_not_advertise_gpu_generation_capabilities():
     capabilities = worker_capabilities({"id": "cpu", "name": "CPU", "capabilities": ["placeholder", "cpu"]})
 
-    # prompt_refine is non-GPU and advertised by every Python worker (sc-2041).
-    assert capabilities == ["cpu", "prompt_refine"]
+    assert capabilities == ["cpu"]
     assert "placeholder" not in capabilities
 
 
@@ -233,10 +231,9 @@ def test_gpu_worker_without_cuda_torch_does_not_claim_generation_jobs(monkeypatc
     capabilities = worker_capabilities({"id": "gpu-0", "name": "GPU 0", "capabilities": ["placeholder", "gpu", "nvidia"]})
 
     # lora_train dry-run validation needs no inference backend, so it is
-    # advertised even without torch; generation job types are not. prompt_refine
-    # also needs no inference backend (sc-2041).
-    assert capabilities == ["gpu", "lora_train", "nvidia", "prompt_refine"]
-    for job_type in ("image_generate", "image_edit", "image_vqa", "video_generate", "training_caption"):
+    # advertised even without torch; generation job types are not.
+    assert capabilities == ["gpu", "lora_train", "nvidia"]
+    for job_type in ("image_generate", "image_edit", "image_vqa", "video_generate", "training_caption", "prompt_refine"):
         assert job_type not in capabilities
 
 
@@ -290,7 +287,7 @@ def test_gpu_worker_advertises_lora_train_execute_only_with_inference_backend(mo
 def test_python_cpu_worker_does_not_advertise_person_tracking_jobs():
     capabilities = worker_capabilities({"id": "cpu", "name": "CPU", "capabilities": ["placeholder", "cpu"]})
 
-    assert capabilities == ["cpu", "prompt_refine"]
+    assert capabilities == ["cpu"]
 
 
 def test_gpu_worker_advertises_real_person_jobs_when_backends_installed(monkeypatch):
@@ -318,7 +315,7 @@ def test_cpu_worker_never_advertises_real_person_jobs_even_with_backends(monkeyp
     monkeypatch.setattr("scene_worker.runtime.detector_backend_available", lambda: True)
     monkeypatch.setattr("scene_worker.runtime.tracker_backend_available", lambda: True)
     capabilities = worker_capabilities({"id": "cpu", "name": "CPU", "capabilities": ["placeholder", "cpu"]})
-    assert capabilities == ["cpu", "prompt_refine"]
+    assert capabilities == ["cpu"]
 
 
 def test_python_cpu_child_disables_cuda():
@@ -7289,45 +7286,33 @@ def _refine_settings(**overrides):
     base = {
         "worker_id": "worker-1",
         "gpu_id": "cpu",
-        "prompt_refine_base_url": "http://localhost:11434/v1",
-        "prompt_refine_api_key": "",
-        "prompt_refine_model": "gemma-heretic",
-        "prompt_refine_timeout_seconds": 60.0,
-        "prompt_refine_max_tokens": 1024,
+        "prompt_refine_model": "",
+        "prompt_refine_max_new_tokens": 512,
     }
     base.update(overrides)
     return SimpleNamespace(**base)
 
 
-def _install_fake_openai(monkeypatch, *, content=None, raises=None):
-    module = ModuleType("openai")
+class _FakeRefiner:
+    """Stands in for PromptRefiner in handler tests — no torch/transformers."""
 
-    class APITimeoutError(Exception):
-        pass
+    instances = []
 
-    class APIConnectionError(Exception):
-        pass
+    def __init__(self, *, model_name_or_path, gpu_id, max_new_tokens):
+        self.model_name_or_path = model_name_or_path
+        self.gpu_id = gpu_id
+        self.max_new_tokens = max_new_tokens
+        self.loaded = False
+        _FakeRefiner.instances.append(self)
 
-    captured = {}
+    def loaded_models(self):
+        return [self.model_name_or_path] if self.loaded and self.model_name_or_path else []
 
-    class _OpenAI:
-        def __init__(self, **kwargs):
-            captured["init"] = kwargs
+    def load(self):
+        self.loaded = True
 
-            def create(**call_kwargs):
-                captured["call"] = call_kwargs
-                if raises is not None:
-                    raise raises
-                message = SimpleNamespace(content=content)
-                return SimpleNamespace(choices=[SimpleNamespace(message=message)])
-
-            self.chat = SimpleNamespace(completions=SimpleNamespace(create=create))
-
-    module.OpenAI = _OpenAI
-    module.APITimeoutError = APITimeoutError
-    module.APIConnectionError = APIConnectionError
-    monkeypatch.setitem(sys.modules, "openai", module)
-    return captured, APITimeoutError, APIConnectionError
+    def refine(self, prompt, *, guide, workflow):
+        return f"Refined ({workflow}): {prompt}"
 
 
 def test_build_system_prompt_uses_workflow_medium_and_embeds_guide():
@@ -7346,44 +7331,67 @@ def test_clean_output_strips_reasoning_and_quoting():
     assert clean_output("```\nA vivid sunset over hills.\n```") == "A vivid sunset over hills."
 
 
-def test_refine_prompt_raises_when_runtime_unconfigured():
+def test_prompt_refiner_load_unavailable_without_backend():
+    # torch/transformers aren't installed in the CI worker-test env, so load()
+    # surfaces a clear PromptRefineUnavailable rather than an opaque ImportError.
     with pytest.raises(PromptRefineUnavailable):
-        refine_prompt("a dog", guide=None, workflow="image", base_url="", api_key="", model="")
+        PromptRefiner(model_name_or_path="some/model", gpu_id="cpu").load()
 
 
-def test_refine_prompt_success_calls_endpoint(monkeypatch):
-    captured, _, _ = _install_fake_openai(monkeypatch, content="A golden retriever in a sunlit park.")
-    out = refine_prompt(
-        "dog in park",
-        guide="# Guide",
-        workflow="image",
-        base_url="http://localhost:11434/v1",
-        api_key="",
-        model="gemma-heretic",
-    )
-    assert out == "A golden retriever in a sunlit park."
-    # Placeholder key supplied when none configured; model + system prompt forwarded.
-    assert captured["init"]["api_key"] == "not-needed"
-    assert captured["call"]["model"] == "gemma-heretic"
-    assert captured["call"]["messages"][0]["role"] == "system"
+def test_prompt_refiner_refine_applies_chat_template_and_cleans():
+    # Drive refine() with a fake tokenizer/model so we exercise the chat-template
+    # → generate → decode → clean path without real weights.
+    refiner = PromptRefiner(model_name_or_path="some/model", gpu_id="cpu")
 
+    class _Ids:
+        shape = (1, 3)
 
-def test_refine_prompt_raises_malformed_on_empty_response(monkeypatch):
-    _install_fake_openai(monkeypatch, content="   ")
-    with pytest.raises(PromptRefineMalformed):
-        refine_prompt(
-            "dog",
-            guide=None,
-            workflow="image",
-            base_url="http://localhost:11434/v1",
-            api_key="",
-            model="gemma-heretic",
-        )
+        def to(self, _device):
+            return self
+
+    captured = {}
+
+    class _Tokenizer:
+        pad_token_id = 0
+        eos_token_id = 0
+
+        def apply_chat_template(self, messages, **kwargs):
+            captured["messages"] = messages
+            return _Ids()
+
+        def decode(self, tokens, **kwargs):
+            return "<think>scheming</think>A vivid neon street at midnight."
+
+    class _Model:
+        def generate(self, **kwargs):
+            captured["generate"] = kwargs
+            return [[101, 102, 103, 201, 202]]
+
+    class _NoGrad:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+    refiner.tokenizer = _Tokenizer()
+    refiner.model = _Model()
+    refiner.device = "cpu"
+    refiner.torch = SimpleNamespace(no_grad=lambda: _NoGrad())
+
+    out = refiner.refine("neon street", guide="# Guide", workflow="image")
+
+    assert out == "A vivid neon street at midnight."  # think-block stripped
+    # Instruction + guide folded into a single user turn (portable across templates).
+    assert captured["messages"][0]["role"] == "user"
+    assert "# Guide" in captured["messages"][0]["content"]
+    assert "neon street" in captured["messages"][0]["content"]
 
 
 def test_run_prompt_refine_job_writes_refined_result(monkeypatch):
     monkeypatch.setattr("scene_worker.runtime.emit", lambda payload: None)
-    monkeypatch.setattr("scene_worker.runtime.refine_prompt", lambda prompt, **kwargs: "Refined: " + prompt)
+    monkeypatch.setattr("scene_worker.runtime.PromptRefiner", _FakeRefiner)
+    _FakeRefiner.instances = []
     api = _DryRunApi()
     job = {"id": "job-refine-1", "type": "prompt_refine", "payload": {"prompt": "dog in park", "workflow": "image"}}
 
@@ -7391,22 +7399,26 @@ def test_run_prompt_refine_job_writes_refined_result(monkeypatch):
 
     terminal = api.progress[-1]
     assert terminal["status"] == "completed"
-    assert terminal["result"]["refinedPrompt"] == "Refined: dog in park"
+    assert terminal["result"]["refinedPrompt"] == "Refined (image): dog in park"
     assert terminal["result"]["originalPrompt"] == "dog in park"
+    # Loaded the model before refining; emitted a loading_model stage.
+    assert _FakeRefiner.instances[0].loaded is True
+    assert any(entry["stage"] == "loading_model" for entry in api.progress)
 
 
-def test_run_prompt_refine_job_reports_runtime_failure(monkeypatch):
+def test_run_prompt_refine_job_reports_failure(monkeypatch):
     monkeypatch.setattr("scene_worker.runtime.emit", lambda payload: None)
 
-    def _boom(prompt, **kwargs):
-        raise PromptRefineUnavailable("Prompt refinement runtime is not configured.")
+    class _BoomRefiner(_FakeRefiner):
+        def refine(self, prompt, *, guide, workflow):
+            raise PromptRefineUnavailable("Could not load the prompt-refinement model.")
 
-    monkeypatch.setattr("scene_worker.runtime.refine_prompt", _boom)
+    monkeypatch.setattr("scene_worker.runtime.PromptRefiner", _BoomRefiner)
     api = _DryRunApi()
     job = {"id": "job-refine-2", "type": "prompt_refine", "payload": {"prompt": "dog", "workflow": "image"}}
 
-    run_prompt_refine_job(api, _refine_settings(prompt_refine_base_url="", prompt_refine_model=""), job)
+    run_prompt_refine_job(api, _refine_settings(), job)
 
     terminal = api.progress[-1]
     assert terminal["status"] == "failed"
-    assert "not configured" in terminal["message"]
+    assert "Could not load" in terminal["message"]

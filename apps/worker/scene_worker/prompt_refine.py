@@ -1,18 +1,27 @@
 """Prompt refinement (sc-2041).
 
-Rewrites a user's prompt to follow the selected model's prompt guide, by calling
-an OpenAI-compatible ``/chat/completions`` endpoint (e.g. a local gemma GGUF
-served by Ollama / llama.cpp / LM Studio). This mirrors the calling approach of
-the vendored Lens ``PromptReasoner`` (``_vendor/lens/reasoner.py``), but injects
-the model's guide and the image/video workflow into the system prompt — which the
-reasoner's fixed, image-only system prompt cannot do — and keeps the refine path
-free of the reasoner's torch/diffusers import side effects.
+Rewrites a user's prompt to follow the selected model's prompt guide, using a
+small instruction LLM loaded **in-process** via transformers — the same shape as
+JoyCaption captioning (`caption_adapters.py`). The model downloads on demand via
+the HF cache on first use and runs on the worker's device (MPS on Apple Silicon),
+so there is no external API endpoint and no env setup for users.
 """
 
 from __future__ import annotations
 
 import re
-from typing import Optional
+from typing import Any, Optional
+
+from .image_adapters import (
+    require_inference_backend_for_gpu_worker,
+    select_torch_device,
+    select_torch_dtype,
+)
+
+# Default refinement model: a small, uncensored instruction LLM suitable for
+# unrestricted creative prompt rewriting on modest local hardware. Overridable
+# via PROMPT_REFINE_MODEL. Downloaded on demand (HF cache), like JoyCaption.
+DEFAULT_REFINE_MODEL = "llmfan46/gemma-4-E2B-it-ultra-uncensored-heretic"
 
 
 class PromptRefineError(RuntimeError):
@@ -20,15 +29,11 @@ class PromptRefineError(RuntimeError):
 
 
 class PromptRefineUnavailable(PromptRefineError):
-    """The refinement runtime is not configured or unreachable."""
-
-
-class PromptRefineTimeout(PromptRefineError):
-    """The refinement runtime did not respond in time."""
+    """The refinement model/backend could not be loaded."""
 
 
 class PromptRefineMalformed(PromptRefineError):
-    """The runtime returned an empty or unusable response."""
+    """The model returned an empty or unusable rewrite."""
 
 
 _THINK_BLOCK_RE = re.compile(r"<think>.*?</think>", re.DOTALL | re.IGNORECASE)
@@ -70,64 +75,104 @@ def clean_output(text: str) -> str:
     return text
 
 
+class PromptRefiner:
+    """Loads a small instruction LLM in-process and rewrites prompts. Mirrors
+    `JoyCaptioner`: lazy `load()`, shared MPS-aware device/dtype helpers, and a
+    `model.generate` call."""
+
+    def __init__(self, *, model_name_or_path: str, gpu_id: str, max_new_tokens: int = 512) -> None:
+        self.model_name_or_path = model_name_or_path or DEFAULT_REFINE_MODEL
+        self.gpu_id = gpu_id
+        self.max_new_tokens = int(max_new_tokens)
+        self.model = None
+        self.tokenizer = None
+        self.torch = None
+        self.device = None
+        self.torch_dtype = None
+
+    def loaded_models(self) -> list[str]:
+        return [self.model_name_or_path] if self.model is not None else []
+
+    def load(self) -> None:
+        try:
+            import torch
+            from transformers import AutoModelForCausalLM, AutoTokenizer
+        except ImportError as exc:  # pragma: no cover - import guard
+            raise PromptRefineUnavailable(
+                "transformers/torch are not available in this worker environment."
+            ) from exc
+
+        try:
+            require_inference_backend_for_gpu_worker(torch, self.gpu_id)
+            self.torch = torch
+            self.device = select_torch_device(torch, self.gpu_id)
+            self.torch_dtype = select_torch_dtype(torch, self.device, None)
+            self.tokenizer = AutoTokenizer.from_pretrained(self.model_name_or_path)
+            self.model = AutoModelForCausalLM.from_pretrained(
+                self.model_name_or_path,
+                torch_dtype=self.torch_dtype,
+            )
+            self.model.to(self.device)
+            self.model.eval()
+        except PromptRefineError:
+            raise
+        except Exception as exc:
+            raise PromptRefineUnavailable(
+                f"Could not load the prompt-refinement model '{self.model_name_or_path}': {exc}"
+            ) from exc
+
+    def refine(self, prompt: str, *, guide: Optional[str], workflow: Optional[str]) -> str:
+        prompt = (prompt or "").strip()
+        if not prompt:
+            raise PromptRefineMalformed("Prompt is empty.")
+        if self.model is None or self.tokenizer is None:
+            self.load()
+
+        # Fold the instructions + guide into a single user turn. Some chat
+        # templates (e.g. Gemma) reject a system role, so this stays portable.
+        system_prompt = build_system_prompt(guide, workflow)
+        content = f"{system_prompt}\n\n# Prompt to rewrite\n\n{prompt}"
+        messages = [{"role": "user", "content": content}]
+        input_ids = self.tokenizer.apply_chat_template(
+            messages,
+            add_generation_prompt=True,
+            return_tensors="pt",
+        ).to(self.device)
+
+        pad_token_id = self.tokenizer.pad_token_id
+        if pad_token_id is None:
+            pad_token_id = self.tokenizer.eos_token_id
+        with self.torch.no_grad():
+            generated = self.model.generate(
+                input_ids=input_ids,
+                max_new_tokens=self.max_new_tokens,
+                do_sample=True,
+                temperature=0.7,
+                top_p=0.9,
+                use_cache=True,
+                pad_token_id=pad_token_id,
+            )[0]
+        generated = generated[input_ids.shape[1] :]
+        text = self.tokenizer.decode(generated, skip_special_tokens=True).strip()
+        refined = clean_output(text)
+        if not refined:
+            raise PromptRefineMalformed("The refinement model returned an empty prompt.")
+        return refined
+
+
 def refine_prompt(
     prompt: str,
     *,
     guide: Optional[str],
     workflow: Optional[str],
-    base_url: str,
-    api_key: str,
-    model: str,
-    timeout: float = 60.0,
-    max_tokens: int = 1024,
+    gpu_id: str,
+    model: Optional[str] = None,
+    max_new_tokens: int = 512,
 ) -> str:
-    """Refine ``prompt`` via an OpenAI-compatible endpoint and return the rewrite.
-
-    Raises ``PromptRefineUnavailable`` when the runtime is unconfigured or cannot
-    be reached, ``PromptRefineTimeout`` on timeout, and ``PromptRefineMalformed``
-    when the response is empty.
-    """
-    prompt = (prompt or "").strip()
-    if not prompt:
-        raise PromptRefineMalformed("Prompt is empty.")
-    if not base_url or not model:
-        raise PromptRefineUnavailable(
-            "Prompt refinement runtime is not configured. Set PROMPT_REFINE_BASE_URL "
-            "and PROMPT_REFINE_MODEL (and optionally PROMPT_REFINE_API_KEY) to an "
-            "OpenAI-compatible endpoint."
-        )
-
-    try:
-        from openai import OpenAI
-        from openai import APIConnectionError, APITimeoutError
-    except ImportError as exc:  # pragma: no cover - import guard
-        raise PromptRefineUnavailable(
-            "The 'openai' package is not installed in the worker environment."
-        ) from exc
-
-    # Many local servers (Ollama, llama.cpp) ignore the key but the client
-    # requires a non-empty value, so fall back to a placeholder.
-    client = OpenAI(api_key=api_key or "not-needed", base_url=base_url, timeout=timeout)
-    system_prompt = build_system_prompt(guide, workflow)
-    try:
-        response = client.chat.completions.create(
-            model=model,
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": prompt},
-            ],
-            max_tokens=max_tokens,
-        )
-    except APITimeoutError as exc:
-        raise PromptRefineTimeout("The refinement runtime timed out.") from exc
-    except APIConnectionError as exc:
-        raise PromptRefineUnavailable(
-            f"Could not reach the refinement runtime at {base_url}."
-        ) from exc
-
-    choices = getattr(response, "choices", None) or []
-    raw = (choices[0].message.content if choices else "") or ""
-    refined = clean_output(raw)
-    if not refined:
-        raise PromptRefineMalformed("The refinement runtime returned an empty prompt.")
-    return refined
+    """Convenience: load the model and refine a single prompt in one call."""
+    refiner = PromptRefiner(
+        model_name_or_path=model or DEFAULT_REFINE_MODEL,
+        gpu_id=gpu_id,
+        max_new_tokens=max_new_tokens,
+    )
+    return refiner.refine(prompt, guide=guide, workflow=workflow)
