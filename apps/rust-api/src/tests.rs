@@ -2862,6 +2862,15 @@ async fn video_jobs_expand_recipe_presets_server_side() {
             "mode": "text_to_video",
             "prompt": "a fox runs",
             "model": "vid-model",
+            // Client render settings that DIFFER from the preset's declared
+            // defaults — the studio seeds the form from the preset but the user
+            // is free to override, so these submitted values must win.
+            "duration": 10,
+            "fps": 24,
+            "width": 640,
+            "height": 640,
+            "quality": "fast",
+            "negativePrompt": "client jitter",
             "recipePresetId": "dream_motion"
         }),
     )
@@ -2873,13 +2882,14 @@ async fn video_jobs_expand_recipe_presets_server_side() {
         video_job["payload"]["prompt"],
         "cinematic, a fox runs, smooth camera motion"
     );
-    // Render defaults come from the preset.
-    assert_eq!(video_job["payload"]["duration"], 8);
-    assert_eq!(video_job["payload"]["fps"], 30);
-    assert_eq!(video_job["payload"]["width"], 1280);
-    assert_eq!(video_job["payload"]["height"], 720);
-    assert_eq!(video_job["payload"]["quality"], "best");
-    assert_eq!(video_job["payload"]["negativePrompt"], "jitter");
+    // Render settings are client-owned and overrideable: the submitted values
+    // win over the preset's declared defaults (8 / 30 / 1280x720 / best / jitter).
+    assert_eq!(video_job["payload"]["duration"], 10);
+    assert_eq!(video_job["payload"]["fps"], 24);
+    assert_eq!(video_job["payload"]["width"], 640);
+    assert_eq!(video_job["payload"]["height"], 640);
+    assert_eq!(video_job["payload"]["quality"], "fast");
+    assert_eq!(video_job["payload"]["negativePrompt"], "client jitter");
     // Preset LoRA merged in (client sent none) and stamped under advanced.
     assert_eq!(video_job["payload"]["loras"][0]["id"], "motion-lora");
     assert_eq!(
@@ -3075,11 +3085,16 @@ async fn model_and_lora_routes_match_manifest_behavior() {
             "projectId": project_id,
             "prompt": "city at night",
             "model": "base-model",
+            // Client render settings that DIFFER from the preset's declared
+            // defaults (count 2 / 1280x720 / "flat lighting") — the studio seeds
+            // the form from the preset but the user can override, so these
+            // submitted values must win.
             "count": 1,
             "width": 512,
             "height": 512,
             "negativePrompt": "client negative prompt",
-            "recipePresetId": "cinematic"
+            "recipePresetId": "cinematic",
+            "advanced": { "resolution": "512x512" }
         }),
     )
     .await;
@@ -3105,12 +3120,14 @@ async fn model_and_lora_routes_match_manifest_behavior() {
         image_job["payload"]["loras"][0]["compatibility"]["families"][0],
         "z-image"
     );
-    assert_eq!(image_job["payload"]["count"], 2);
-    assert_eq!(image_job["payload"]["seeds"].as_array().unwrap().len(), 2);
-    assert_eq!(image_job["payload"]["width"], 1280);
-    assert_eq!(image_job["payload"]["height"], 720);
-    assert_eq!(image_job["payload"]["negativePrompt"], "flat lighting");
-    assert_eq!(image_job["payload"]["advanced"]["resolution"], "1280x720");
+    // Render settings are client-owned and overrideable: the submitted values
+    // win over the preset's declared defaults.
+    assert_eq!(image_job["payload"]["count"], 1);
+    assert_eq!(image_job["payload"]["seeds"].as_array().unwrap().len(), 1);
+    assert_eq!(image_job["payload"]["width"], 512);
+    assert_eq!(image_job["payload"]["height"], 512);
+    assert_eq!(image_job["payload"]["negativePrompt"], "client negative prompt");
+    assert_eq!(image_job["payload"]["advanced"]["resolution"], "512x512");
     assert_eq!(
         image_job["payload"]["advanced"]["recipePresetId"],
         "cinematic"

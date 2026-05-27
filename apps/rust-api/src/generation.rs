@@ -164,7 +164,9 @@ pub(crate) async fn apply_recipe_preset_to_image_payload(
             job_payload.insert("model".to_owned(), Value::String(model.to_owned()));
         }
     }
-    apply_recipe_preset_defaults(preset, job_payload)?;
+    // Render defaults (count/resolution/negativePrompt) are intentionally NOT
+    // applied here — the studio seeds those into the form from the preset and the
+    // user can override them, so the submitted values are authoritative.
     job_payload.insert(
         "stylePreset".to_owned(),
         Value::String(preset_id.to_owned()),
@@ -248,52 +250,6 @@ pub(crate) async fn merge_preset_loras_into_payload(
     Ok(())
 }
 
-pub(crate) fn apply_recipe_preset_defaults(
-    preset: &Value,
-    job_payload: &mut JsonObject,
-) -> Result<(), ApiError> {
-    let Some(defaults) = preset.get("defaults").and_then(Value::as_object) else {
-        return Ok(());
-    };
-    if let Some(count) = defaults.get("count").and_then(Value::as_u64) {
-        let count = u32::try_from(count)
-            .map_err(|_| ApiError::bad_request("Recipe preset count is out of range"))?;
-        if !(1..=8).contains(&count) {
-            return Err(ApiError::bad_request(
-                "Recipe preset count must be between 1 and 8",
-            ));
-        }
-        job_payload.insert("count".to_owned(), json!(count));
-    }
-    if let Some(resolution) = defaults.get("resolution").and_then(Value::as_str) {
-        let (width, height) = parse_recipe_preset_resolution(resolution)?;
-        validate_dimension(width, "width", MAX_IMAGE_DIMENSION)?;
-        validate_dimension(height, "height", MAX_IMAGE_DIMENSION)?;
-        job_payload.insert("width".to_owned(), json!(width));
-        job_payload.insert("height".to_owned(), json!(height));
-        let advanced = job_payload
-            .entry("advanced".to_owned())
-            .or_insert_with(|| Value::Object(JsonObject::new()));
-        if !advanced.is_object() {
-            *advanced = Value::Object(JsonObject::new());
-        }
-        advanced
-            .as_object_mut()
-            .ok_or_else(|| ApiError::internal("advanced payload must be an object"))?
-            .insert(
-                "resolution".to_owned(),
-                Value::String(resolution.to_owned()),
-            );
-    }
-    if let Some(negative_prompt) = defaults.get("negativePrompt").and_then(Value::as_str) {
-        job_payload.insert(
-            "negativePrompt".to_owned(),
-            Value::String(negative_prompt.to_owned()),
-        );
-    }
-    Ok(())
-}
-
 pub(crate) fn parse_recipe_preset_resolution(value: &str) -> Result<(u32, u32), ApiError> {
     let Some((width, height)) = value.split_once('x') else {
         return Err(ApiError::bad_request(
@@ -312,8 +268,10 @@ pub(crate) fn parse_recipe_preset_resolution(value: &str) -> Result<(u32, u32), 
 /// Server-side expansion of a video job's recipe preset, mirroring
 /// apply_recipe_preset_to_image_payload: the client sends the raw prompt plus
 /// recipePresetId and the server folds in the preset's prompt prefix/suffix,
-/// model, render defaults, and LoRAs. Keeps preset semantics identical across
-/// the image and video studios.
+/// model, and LoRAs. Render defaults (duration/fps/resolution/quality/
+/// negativePrompt) are intentionally NOT applied here — the studio seeds those
+/// into the form from the preset and the user can override them, so the
+/// submitted values are authoritative.
 pub(crate) async fn apply_recipe_preset_to_video_payload(
     state: &AppState,
     payload: &VideoJobRequest,
@@ -343,54 +301,8 @@ pub(crate) async fn apply_recipe_preset_to_video_payload(
             job_payload.insert("model".to_owned(), Value::String(model.to_owned()));
         }
     }
-    apply_recipe_preset_video_defaults(preset, job_payload)?;
     merge_preset_loras_into_payload(state, &payload.project_id, preset_id, preset, job_payload)
         .await
-}
-
-pub(crate) fn apply_recipe_preset_video_defaults(
-    preset: &Value,
-    job_payload: &mut JsonObject,
-) -> Result<(), ApiError> {
-    let Some(defaults) = preset.get("defaults").and_then(Value::as_object) else {
-        return Ok(());
-    };
-    if let Some(duration) = defaults.get("duration") {
-        if !duration
-            .as_f64()
-            .is_some_and(|value| value.is_finite() && (1.0..=30.0).contains(&value))
-        {
-            return Err(ApiError::bad_request(
-                "Recipe preset duration must be between 1 and 30",
-            ));
-        }
-        job_payload.insert("duration".to_owned(), duration.clone());
-    }
-    if let Some(fps) = defaults.get("fps") {
-        if !fps.as_u64().is_some_and(|value| (1..=60).contains(&value)) {
-            return Err(ApiError::bad_request(
-                "Recipe preset fps must be between 1 and 60",
-            ));
-        }
-        job_payload.insert("fps".to_owned(), fps.clone());
-    }
-    if let Some(quality) = defaults.get("quality").and_then(Value::as_str) {
-        job_payload.insert("quality".to_owned(), Value::String(quality.to_owned()));
-    }
-    if let Some(resolution) = defaults.get("resolution").and_then(Value::as_str) {
-        let (width, height) = parse_recipe_preset_resolution(resolution)?;
-        validate_dimension(width, "width", MAX_VIDEO_DIMENSION)?;
-        validate_dimension(height, "height", MAX_VIDEO_DIMENSION)?;
-        job_payload.insert("width".to_owned(), json!(width));
-        job_payload.insert("height".to_owned(), json!(height));
-    }
-    if let Some(negative_prompt) = defaults.get("negativePrompt").and_then(Value::as_str) {
-        job_payload.insert(
-            "negativePrompt".to_owned(),
-            Value::String(negative_prompt.to_owned()),
-        );
-    }
-    Ok(())
 }
 
 pub(crate) async fn create_video_job(
