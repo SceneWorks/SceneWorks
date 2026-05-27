@@ -2092,6 +2092,82 @@ describe("SceneWorks app shell", () => {
     expect(container.textContent).toContain("Beta");
   });
 
+  it("fires a one-click angle-set batch job from the Character Studio panel", async () => {
+    const createImageJob = vi.fn(async () => ({ id: "job-angle" }));
+    const baseContext = {
+      activeProject: { id: "project-1", name: "Noir" },
+      addCharacterReference: () => {},
+      archiveCharacter: () => {},
+      assets: [],
+      attachCharacterLora: () => {},
+      characters: [
+        {
+          id: "char-1",
+          name: "Mira",
+          type: "person",
+          references: [],
+          approvedReferences: [{ assetId: "ref-1", role: "hero", asset: { id: "ref-1", type: "image", displayName: "Mira ref" } }],
+          looks: [],
+          loras: [],
+        },
+      ],
+      createCharacter: () => {},
+      createCharacterLook: () => {},
+      createCharacterTestJob: () => {},
+      createImageJob,
+      importAsset: vi.fn(),
+      deleteAsset: () => {},
+      deleteCharacterLook: () => {},
+      detachCharacterLora: () => {},
+      imageModels: [
+        {
+          id: "instantid_realvisxl",
+          name: "InstantID (RealVisXL)",
+          type: "image",
+          ui: { viewAngles: [{ id: "front", label: "Front" }, { id: "left_profile", label: "Left profile" }, { id: "up", label: "Looking up" }] },
+        },
+      ],
+      latestImageAssets: [],
+      loras: [],
+      setPreviewAsset: () => {},
+      sendCharacterToImage: () => {},
+      sendCharacterToVideo: () => {},
+      purgeAsset: () => {},
+      removeCharacterReference: () => {},
+      updateAssetStatus: () => {},
+      updateCharacter: () => {},
+      updateCharacterLook: () => {},
+      updateCharacterLora: () => {},
+      updateCharacterReference: () => {},
+    };
+    root = createRoot(container);
+    await act(async () => {
+      root.render(withAppContext(baseContext, <CharacterStudio />));
+    });
+
+    // The angle-set panel renders with the model's angle count in the button.
+    const generateButton = [...container.querySelectorAll("button")].find((button) =>
+      button.textContent.startsWith("Generate angle set"),
+    );
+    expect(generateButton).toBeTruthy();
+    expect(generateButton.textContent).toContain("3 views");
+
+    await act(async () => {
+      generateButton.click();
+    });
+
+    // One batch job: character_image to the InstantID model with advanced.angleSet.
+    expect(createImageJob).toHaveBeenCalledWith(
+      expect.objectContaining({
+        mode: "character_image",
+        model: "instantid_realvisxl",
+        characterId: "char-1",
+        referenceAssetId: "ref-1",
+        advanced: expect.objectContaining({ angleSet: true, ipAdapterScale: 0.8 }),
+      }),
+    );
+  });
+
   it("launches reference-based generation from an approved character reference", async () => {
     const sendCharacterToImage = vi.fn();
     const reference = { assetId: "ref-1", approved: true, asset: { id: "ref-1", type: "image", displayName: "Mira ref" } };
