@@ -155,6 +155,14 @@ def _view_angle_kps(angle: str, side: int) -> np.ndarray | None:
     return np.array(points, dtype=np.float32) * float(side)
 
 
+# Order the one-click "angle set" (advanced.angleSet) generates the character in:
+# front, the two three-quarters, full profiles, then the up/down/diagonal tilts.
+ANGLE_SET_ORDER: tuple[str, ...] = (
+    "front", "three_quarter_left", "three_quarter_right", "left_profile", "right_profile",
+    "up", "down", "up_left", "up_right", "down_left", "down_right",
+)
+
+
 class InstantIDAdapter:
     """Identity-preserving SDXL generation via InstantID (face embedding + IdentityNet)."""
 
@@ -320,6 +328,7 @@ class InstantIDAdapter:
         seed: int,
         project_path: Path,
         cancel_requested: CancelCallback | None = None,
+        view_angle_override: str | None = None,
     ) -> Image.Image:
         torch = importlib.import_module("torch")
         device = select_torch_device(torch, settings.gpu_id)
@@ -328,7 +337,8 @@ class InstantIDAdapter:
         model_target = MODEL_TARGETS[request.model]
 
         reference = load_reference_image(project_path, request.reference_asset_id)
-        view_angle = self._view_angle(request)
+        # An explicit per-call angle (the angle-set batch) wins over advanced.viewAngle.
+        view_angle = view_angle_override if view_angle_override in VIEW_ANGLE_KPS else self._view_angle(request)
         if view_angle is not None:
             # View-angle mode: pose from the canonical landmark pack, identity from the
             # reference embedding. Square canvas so the pack kps share the output aspect
@@ -392,14 +402,21 @@ class InstantIDAdapter:
         torch = importlib.import_module("torch")
         device = select_torch_device(torch, settings.gpu_id)
         label = model_target["label"]
+        # One-click angle set (advanced.angleSet): generate the character once per packed
+        # view angle in a single job (pipeline already loaded), instead of `count` copies
+        # of one angle. Identity comes from the same reference embedding throughout.
+        angle_set = bool(request.advanced.get("angleSet"))
+        angles = [a for a in ANGLE_SET_ORDER if a in VIEW_ANGLE_KPS] if angle_set else []
+        total = len(angles) if angle_set else request.count
 
         def image_at_index(index: int) -> Image.Image:
             seed = resolve_seed(request.seed, request.prompt, index, request.seeds)
+            angle = angles[index] if angle_set else None
             progress(
                 "running",
                 "generating",
-                image_batch_progress(index, request.count),
-                format_batch_running_message(label, index, request.count),
+                image_batch_progress(index, total),
+                format_batch_running_message(label, index, total),
             )
             emit_worker_event(
                 "image_inference_start",
@@ -407,12 +424,19 @@ class InstantIDAdapter:
                 adapter=self.id,
                 model=request.model,
                 imageIndex=index,
-                imageCount=request.count,
+                imageCount=total,
+                viewAngle=angle,
                 device=device,
             )
             try:
                 image = self._run_pipeline(
-                    settings, pipe, request, seed, project_path, cancel_requested=cancel_requested
+                    settings,
+                    pipe,
+                    request,
+                    seed,
+                    project_path,
+                    cancel_requested=cancel_requested,
+                    view_angle_override=angle,
                 )
             except Exception as exc:
                 emit_worker_event(
@@ -430,7 +454,7 @@ class InstantIDAdapter:
         return ImageAssetWriter().write_incremental_outputs(
             request=request,
             project_path=project_path,
-            image_count=request.count,
+            image_count=total,
             image_at_index=image_at_index,
             adapter_id=self.id,
             progress=progress,

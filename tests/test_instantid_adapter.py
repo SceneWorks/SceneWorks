@@ -13,6 +13,7 @@ from PIL import Image
 
 from scene_worker.image_adapters import MODEL_TARGETS, create_image_adapter, image_request_from_job
 from scene_worker.instantid_adapter import (
+    ANGLE_SET_ORDER,
     VIEW_ANGLE_KPS,
     InstantIDAdapter,
     _letterbox,
@@ -172,3 +173,11 @@ def test_view_angle_resolves_only_known_angles():
     assert InstantIDAdapter._view_angle(SimpleNamespace(advanced={"viewAngle": "left_profile"})) == "left_profile"
     assert InstantIDAdapter._view_angle(SimpleNamespace(advanced={"viewAngle": "bogus"})) is None
     assert InstantIDAdapter._view_angle(SimpleNamespace(advanced={})) is None
+
+
+def test_angle_set_order_covers_pack_without_dupes():
+    # The one-click angle set generates every packed angle exactly once, front first.
+    assert len(ANGLE_SET_ORDER) == 11
+    assert len(set(ANGLE_SET_ORDER)) == len(ANGLE_SET_ORDER)
+    assert ANGLE_SET_ORDER[0] == "front"
+    assert all(angle in VIEW_ANGLE_KPS for angle in ANGLE_SET_ORDER)
