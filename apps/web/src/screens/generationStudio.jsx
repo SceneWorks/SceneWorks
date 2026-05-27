@@ -94,8 +94,9 @@ export function useGenerationStudio({
   assets,
   latestAssets,
   trackedLocalJobs,
+  initialPresetId = null,
 }) {
-  const [selectedPresetId, setSelectedPresetId] = useState(null);
+  const [selectedPresetId, setSelectedPresetId] = useState(initialPresetId);
   const [resultFallbackTick, setResultFallbackTick] = useState(0);
 
   // Snap the model back into range when the catalog changes out from under it.

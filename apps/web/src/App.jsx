@@ -1504,11 +1504,11 @@ export function App() {
         ) : null}
 
         {activeView === "Image" ? (
-          <ImageStudio />
+          <ImageStudio key={activeProject?.id ?? "default"} />
         ) : null}
 
         {activeView === "Video" ? (
-          <VideoStudio />
+          <VideoStudio key={activeProject?.id ?? "default"} />
         ) : null}
 
         {activeView === "Document" ? (

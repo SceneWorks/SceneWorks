@@ -53,6 +53,7 @@ import {
 } from "./generationStudio.jsx";
 import { ReplacePersonPanel, findReplacementModel } from "./ReplacePersonPanel.jsx";
 import { useAppContext } from "../context/AppContext.js";
+import { loadStudioSettings, useStudioSettingsWriter } from "../hooks/useStudioSettings.js";
 import { qualityChoices } from "../jobTypes.js";
 
 const ltxVideoModelId = "ltx_2_3";
@@ -103,27 +104,30 @@ export function VideoStudio() {
     }
     setActiveView("Editor");
   };
-  const [motion, setMotion] = useState("slow push-in");
+  // Last-used settings for this workspace, restored on mount. The component is keyed
+  // by workspace in App.jsx, so this reads the right snapshot per workspace.
+  const saved = useMemo(() => loadStudioSettings("video", activeProject?.id ?? null), [activeProject?.id]);
+  const [motion, setMotion] = useState(saved.motion ?? "slow push-in");
   const imageAssets = assets.filter((asset) => asset.type === "image" || asset.type === "frame");
   const videoAssets = assets.filter((asset) => asset.type === "video");
-  const [mode, setMode] = useState("image_to_video");
-  const [prompt, setPrompt] = useState("Camera slowly pushes in while the scene comes alive");
-  const [quality, setQuality] = useState("balanced");
-  const [ltxPipeline, setLtxPipeline] = useState("auto");
-  const [distilledVariant, setDistilledVariant] = useState("1.1");
-  const [precision, setPrecision] = useState("fp8");
-  const [quantization, setQuantization] = useState("auto");
-  const [advancedOpen, setAdvancedOpen] = useState(false);
-  const [selectedLoraIds, setSelectedLoraIds] = useState([]);
-  const [loraWeights, setLoraWeights] = useState({});
-  const [showIncompatibleLoras, setShowIncompatibleLoras] = useState(false);
-  const [model, setModel] = useState(videoModels[0]?.id ?? ltxVideoModelId);
+  const [mode, setMode] = useState(saved.mode ?? "image_to_video");
+  const [prompt, setPrompt] = useState(saved.prompt ?? "Camera slowly pushes in while the scene comes alive");
+  const [quality, setQuality] = useState(saved.quality ?? "balanced");
+  const [ltxPipeline, setLtxPipeline] = useState(saved.ltxPipeline ?? "auto");
+  const [distilledVariant, setDistilledVariant] = useState(saved.distilledVariant ?? "1.1");
+  const [precision, setPrecision] = useState(saved.precision ?? "fp8");
+  const [quantization, setQuantization] = useState(saved.quantization ?? "auto");
+  const [advancedOpen, setAdvancedOpen] = useState(saved.advancedOpen ?? false);
+  const [selectedLoraIds, setSelectedLoraIds] = useState(saved.selectedLoraIds ?? []);
+  const [loraWeights, setLoraWeights] = useState(saved.loraWeights ?? {});
+  const [showIncompatibleLoras, setShowIncompatibleLoras] = useState(saved.showIncompatibleLoras ?? false);
+  const [model, setModel] = useState(saved.model ?? videoModels[0]?.id ?? ltxVideoModelId);
   const selectedModel = videoModels.find((item) => item.id === model) ?? videoModels[0];
-  const [duration, setDuration] = useState(selectedModel?.defaults?.duration ?? 6);
-  const [resolution, setResolution] = useState(selectedModel?.defaults?.resolution ?? "768x512");
-  const [fps, setFps] = useState(selectedModel?.defaults?.fps ?? 25);
-  const [seed, setSeed] = useState("");
-  const [negativePrompt, setNegativePrompt] = useState("");
+  const [duration, setDuration] = useState(saved.duration ?? selectedModel?.defaults?.duration ?? 6);
+  const [resolution, setResolution] = useState(saved.resolution ?? selectedModel?.defaults?.resolution ?? "768x512");
+  const [fps, setFps] = useState(saved.fps ?? selectedModel?.defaults?.fps ?? 25);
+  const [seed, setSeed] = useState(saved.seed ?? "");
+  const [negativePrompt, setNegativePrompt] = useState(saved.negativePrompt ?? "");
   const [sourceAssetId, setSourceAssetId] = useState(["image", "frame"].includes(selectedAsset?.type) ? selectedAsset.id : "");
   const [lastFrameAssetId, setLastFrameAssetId] = useState("");
   const [sourceClipAssetId, setSourceClipAssetId] = useState(selectedAsset?.type === "video" ? selectedAsset.id : "");
@@ -152,6 +156,7 @@ export function VideoStudio() {
   const {
     availablePresets,
     selectedPreset,
+    selectedPresetId,
     setSelectedPresetId,
     presetPromptParts,
     presetLoraDetails,
@@ -173,6 +178,7 @@ export function VideoStudio() {
     assets,
     latestAssets,
     trackedLocalJobs,
+    initialPresetId: saved.selectedPresetId ?? null,
   });
   const requiresLtxIcLora = selectedModel?.id === ltxVideoModelId && ltxIcLoraRequiredModes.has(mode);
   const hasLtxIcLora = presetLoraDetails.some((lora) => !lora.missing && loraLooksLikeIcLora(lora));
@@ -303,7 +309,18 @@ export function VideoStudio() {
     }
   }, [mode, supportsMode, videoModels]);
 
+  // When restoring a snapshot, the saved length/fps/quality/resolution/negativePrompt
+  // already reflect the user's last state — skip the one preset-default pass that fires
+  // as the restored preset resolves so it doesn't overwrite them. "None" applies no
+  // defaults, so no guard is needed there.
+  const skipPresetDefaultsOnHydrate = useRef(
+    Object.keys(saved).length > 0 && saved.selectedPresetId !== noPresetId,
+  );
   useEffect(() => {
+    if (skipPresetDefaultsOnHydrate.current && selectedPreset) {
+      skipPresetDefaultsOnHydrate.current = false;
+      return;
+    }
     if (!selectedPreset) {
       clearPresetDefault(setDuration, presetDefaultSnapshots, "duration");
       clearPresetDefault(setFps, presetDefaultSnapshots, "fps");
@@ -349,6 +366,28 @@ export function VideoStudio() {
       });
     }
   }, [selectedPreset?.id]);
+
+  useStudioSettingsWriter("video", activeProject?.id ?? null, {
+    motion,
+    mode,
+    prompt,
+    quality,
+    ltxPipeline,
+    distilledVariant,
+    precision,
+    quantization,
+    advancedOpen,
+    selectedLoraIds,
+    loraWeights,
+    showIncompatibleLoras,
+    model,
+    duration,
+    resolution,
+    fps,
+    seed,
+    negativePrompt,
+    selectedPresetId,
+  });
 
   useEffect(() => {
     if (mode !== "replace_person") {
