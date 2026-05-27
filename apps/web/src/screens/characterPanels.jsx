@@ -278,6 +278,15 @@ export function CharacterTest({
   testResolution,
   updateAssetStatus,
 }) {
+  const [showOutputs, setShowOutputs] = React.useState(false);
+  // Scope the outputs grid to THIS character (its generated images + approved
+  // references) instead of dumping every recent project image, and keep it
+  // collapsed by default so it never turns the studio into an endless scroll.
+  const characterAssets = (latestAssets ?? []).filter(
+    (asset) =>
+      asset.characterId === selectedCharacter.id ||
+      (asset.metadata?.characterReferences ?? []).some((ref) => ref.characterId === selectedCharacter.id),
+  );
   return (
     <section className="character-section test-character-panel">
       <div className="section-heading">
@@ -333,26 +342,37 @@ export function CharacterTest({
           Test Character
         </button>
       </form>
-      <div className="review-grid">
-        {latestAssets.map((asset) => (
-          <div className="test-result" key={asset.id}>
-            <AssetCard
-              asset={asset}
-              deleteAsset={deleteAsset}
-              onPreview={onPreview}
-              purgeAsset={purgeAsset}
-              updateAssetStatus={updateAssetStatus}
-            />
-            <button
-              onClick={() => addCharacterReference(selectedCharacter.id, { assetId: asset.id, approved: true, role: "test-output" })}
-              type="button"
-            >
-              Approve as Reference
-            </button>
-          </div>
-        ))}
-        {latestAssets.length ? null : <div className="empty-panel compact-panel">No test outputs yet</div>}
+      <div className="review-panel-head">
+        <button className="advanced-toggle" onClick={() => setShowOutputs((value) => !value)} type="button">
+          {showOutputs ? "Hide" : "Show"} this character's images ({characterAssets.length})
+        </button>
       </div>
+      {showOutputs ? (
+        <div className="review-grid">
+          {characterAssets.map((asset) => (
+            <div className="test-result" key={asset.id}>
+              <AssetCard
+                asset={asset}
+                deleteAsset={deleteAsset}
+                onPreview={onPreview}
+                purgeAsset={purgeAsset}
+                updateAssetStatus={updateAssetStatus}
+              />
+              <button
+                onClick={() => addCharacterReference(selectedCharacter.id, { assetId: asset.id, approved: true, role: "test-output" })}
+                type="button"
+              >
+                Approve as Reference
+              </button>
+            </div>
+          ))}
+          {characterAssets.length ? null : (
+            <div className="empty-panel compact-panel">
+              No images for this character yet — generate an angle set or a test above.
+            </div>
+          )}
+        </div>
+      ) : null}
     </section>
   );
 }
