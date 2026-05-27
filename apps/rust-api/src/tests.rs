@@ -3126,7 +3126,10 @@ async fn model_and_lora_routes_match_manifest_behavior() {
     assert_eq!(image_job["payload"]["seeds"].as_array().unwrap().len(), 1);
     assert_eq!(image_job["payload"]["width"], 512);
     assert_eq!(image_job["payload"]["height"], 512);
-    assert_eq!(image_job["payload"]["negativePrompt"], "client negative prompt");
+    assert_eq!(
+        image_job["payload"]["negativePrompt"],
+        "client negative prompt"
+    );
     assert_eq!(image_job["payload"]["advanced"]["resolution"], "512x512");
     assert_eq!(
         image_job["payload"]["advanced"]["recipePresetId"],
