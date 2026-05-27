@@ -345,6 +345,15 @@ export function CharacterStudio() {
               updateCharacterReference={updateCharacterReference}
             />
 
+            <CharacterAngleSet
+              addCharacterReference={addCharacterReference}
+              angleModel={angleModel}
+              approvedReferences={approvedReferences}
+              createImageJob={createImageJob}
+              importAsset={importAsset}
+              selectedCharacter={selectedCharacter}
+            />
+
             <CharacterLooks
               approvedReferences={approvedReferences}
               createCharacterLook={createCharacterLook}
@@ -392,15 +401,6 @@ export function CharacterStudio() {
               testPrompt={testPrompt}
               testResolution={testResolution}
               updateAssetStatus={updateAssetStatus}
-            />
-
-            <CharacterAngleSet
-              addCharacterReference={addCharacterReference}
-              angleModel={angleModel}
-              approvedReferences={approvedReferences}
-              createImageJob={createImageJob}
-              importAsset={importAsset}
-              selectedCharacter={selectedCharacter}
             />
           </section>
         </div>
