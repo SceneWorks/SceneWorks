@@ -499,8 +499,15 @@ class ProceduralVideoAdapter(VideoGenerationAdapter):
         target = model_target(request.model)
         raw_settings = self.map_settings(request, target)
         filename_base = f"{created_at[:10]}_{request.model}_{slugify(request.prompt, fallback='video', max_length=42)}"
-        media_rel = f"assets/videos/{filename_base}.webp"
+        # Nest under a per-generation UUID folder so two renders that share the
+        # same date + model + prompt slug (e.g. a recipe preset whose long prompt
+        # prefix dominates the 42-char slug) cannot collide on a flat
+        # `assets/videos/<date>_<model>_<prompt>.webp` name and overwrite each
+        # other's media, sidecar, or temp files. Mirrors the image adapter; the
+        # folder UUID carries uniqueness and discovery is path/sidecar-based.
+        media_rel = f"assets/videos/{generation_set_id}/{filename_base}.webp"
         media_path = project_path / media_rel
+        media_path.parent.mkdir(parents=True, exist_ok=True)
         temp_path = media_path.with_suffix(".tmp.webp")
         self.track_temp_output(job["id"], temp_path)
 
@@ -809,8 +816,15 @@ class LtxPipelinesVideoAdapter(ProceduralVideoAdapter):
         asset_id = f"asset_{uuid4().hex}"
         created_at = utc_now()
         filename_base = f"{created_at[:10]}_{request.model}_{slugify(request.prompt, fallback='video', max_length=42)}"
-        media_rel = f"assets/videos/{filename_base}.mp4"
+        # Nest under a per-generation UUID folder so two renders that share the
+        # same date + model + prompt slug (e.g. a recipe preset whose long prompt
+        # prefix dominates the 42-char slug) cannot collide on a flat
+        # `assets/videos/<date>_<model>_<prompt>.mp4` name and overwrite each
+        # other's media, sidecar, or temp files. Mirrors the image adapter; the
+        # folder UUID carries uniqueness and discovery is path/sidecar-based.
+        media_rel = f"assets/videos/{generation_set_id}/{filename_base}.mp4"
         media_path = project_path / media_rel
+        media_path.parent.mkdir(parents=True, exist_ok=True)
         temp_path = media_path.with_suffix(".tmp.mp4")
         self.track_temp_output(job["id"], temp_path)
 
@@ -1825,8 +1839,15 @@ class MlxVideoAdapter(VideoGenerationAdapter):
         created_at = utc_now()
         raw_settings = self.map_settings(request, target)
         filename_base = f"{created_at[:10]}_{request.model}_{slugify(request.prompt, fallback='video', max_length=42)}"
-        media_rel = f"assets/videos/{filename_base}.mp4"
+        # Nest under a per-generation UUID folder so two renders that share the
+        # same date + model + prompt slug (e.g. a recipe preset whose long prompt
+        # prefix dominates the 42-char slug) cannot collide on a flat
+        # `assets/videos/<date>_<model>_<prompt>.mp4` name and overwrite each
+        # other's media, sidecar, or temp files. Mirrors the image adapter; the
+        # folder UUID carries uniqueness and discovery is path/sidecar-based.
+        media_rel = f"assets/videos/{generation_set_id}/{filename_base}.mp4"
         media_path = project_path / media_rel
+        media_path.parent.mkdir(parents=True, exist_ok=True)
         temp_path = media_path.with_suffix(".tmp.mp4")
         self.track_temp_output(job["id"], temp_path)
 
@@ -2059,8 +2080,15 @@ class MlxVideoAdapter(VideoGenerationAdapter):
         created_at = utc_now()
         raw_settings = self.map_settings(request, target)
         filename_base = f"{created_at[:10]}_{request.model}_{slugify(request.prompt, fallback='video', max_length=42)}"
-        media_rel = f"assets/videos/{filename_base}.mp4"
+        # Nest under a per-generation UUID folder so two renders that share the
+        # same date + model + prompt slug (e.g. a recipe preset whose long prompt
+        # prefix dominates the 42-char slug) cannot collide on a flat
+        # `assets/videos/<date>_<model>_<prompt>.mp4` name and overwrite each
+        # other's media, sidecar, or temp files. Mirrors the image adapter; the
+        # folder UUID carries uniqueness and discovery is path/sidecar-based.
+        media_rel = f"assets/videos/{generation_set_id}/{filename_base}.mp4"
         media_path = project_path / media_rel
+        media_path.parent.mkdir(parents=True, exist_ok=True)
         temp_path = media_path.with_suffix(".tmp.mp4")
         self.track_temp_output(job["id"], temp_path)
 
@@ -2228,8 +2256,15 @@ class DiffusersVideoAdapter(VideoGenerationAdapter):
         created_at = utc_now()
         raw_settings = self.map_settings(request, target)
         filename_base = f"{created_at[:10]}_{request.model}_{slugify(request.prompt, fallback='video', max_length=42)}"
-        media_rel = f"assets/videos/{filename_base}.mp4"
+        # Nest under a per-generation UUID folder so two renders that share the
+        # same date + model + prompt slug (e.g. a recipe preset whose long prompt
+        # prefix dominates the 42-char slug) cannot collide on a flat
+        # `assets/videos/<date>_<model>_<prompt>.mp4` name and overwrite each
+        # other's media, sidecar, or temp files. Mirrors the image adapter; the
+        # folder UUID carries uniqueness and discovery is path/sidecar-based.
+        media_rel = f"assets/videos/{generation_set_id}/{filename_base}.mp4"
         media_path = project_path / media_rel
+        media_path.parent.mkdir(parents=True, exist_ok=True)
         temp_path = media_path.with_suffix(".tmp.mp4")
         self.track_temp_output(job["id"], temp_path)
 
