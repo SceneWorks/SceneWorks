@@ -6146,11 +6146,11 @@ def test_native_ltx_cleanup_deletes_temp_output_and_evicts_pipeline(monkeypatch,
             progress=lambda *_args: None,
             cancel_requested=lambda: False,
         )
-    assert list((project_path / "assets" / "videos").glob("*.tmp.mp4"))
+    assert list((project_path / "assets" / "videos").rglob("*.tmp.mp4"))
 
     adapter.cleanup(job["id"])
 
-    assert list((project_path / "assets" / "videos").glob("*.tmp.mp4")) == []
+    assert list((project_path / "assets" / "videos").rglob("*.tmp.mp4")) == []
     assert adapter.loaded_models() == []
     assert adapter._pipeline is None
 
