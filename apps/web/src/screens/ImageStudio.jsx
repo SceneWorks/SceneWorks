@@ -485,28 +485,29 @@ export function ImageStudio() {
     setLoraWeights((current) => ({ ...current, [id]: value }));
   }
 
-  const reviewSlots = useMemo(() => {
-    if (!localJobs.length) {
-      return latestAssets.map((asset) => ({ type: "asset", id: asset.id, asset }));
-    }
-    return localJobs.flatMap((job) => {
-      const completedAssets = jobResultAssets(job, assets);
-      const expectedCount = jobExpectedCount(job, completedAssets.length);
-      return Array.from({ length: expectedCount }, (_, index) => {
-        const asset = completedAssets[index];
-        if (asset) {
-          return { type: "asset", id: `${job.id}:${asset.id}`, asset };
-        }
-        return {
-          type: "placeholder",
-          id: `${job.id}:slot-${index}`,
-          label: jobPendingSlotLabel(job, index),
-          isError: errorStatuses.has(job.status),
-        };
-      });
-    });
-  }, [assets, latestAssets, localJobs]);
-  const hasReviewContent = Boolean(localJobs.length || reviewSlots.length);
+  // Each stacked run carries its own card and review slots so a run's output sits
+  // directly beneath its progress card, and queued runs show their pending slots.
+  const localJobGroups = useMemo(
+    () =>
+      localJobs.map((job) => {
+        const completedAssets = jobResultAssets(job, assets);
+        const expectedCount = jobExpectedCount(job, completedAssets.length);
+        const slots = Array.from({ length: expectedCount }, (_, index) => {
+          const asset = completedAssets[index];
+          if (asset) {
+            return { type: "asset", id: `${job.id}:${asset.id}`, asset };
+          }
+          return {
+            type: "placeholder",
+            id: `${job.id}:slot-${index}`,
+            label: jobPendingSlotLabel(job, index),
+            isError: errorStatuses.has(job.status),
+          };
+        });
+        return { job, slots };
+      }),
+    [assets, localJobs],
+  );
 
   async function submit(event) {
     event.preventDefault();
@@ -746,33 +747,48 @@ export function ImageStudio() {
                 to generate
               </span>
             </div>
-            {localJobs.length ? (
+            {localJobGroups.length ? (
               <div className="local-job-stack">
-                {localJobs.map((job) => (
-                  <JobProgressCard job={job} key={job.id} label="Image generation" onCancel={onCancelJob} onOpenQueue={onOpenQueue} />
+                {localJobGroups.map(({ job, slots }) => (
+                  <article className="local-job-group" key={job.id}>
+                    <JobProgressCard job={job} label="Image generation" onCancel={onCancelJob} onOpenQueue={onOpenQueue} />
+                    {slots.length ? (
+                      <div className="review-grid">
+                        {slots.map((slot) =>
+                          slot.type === "asset" ? (
+                            <AssetCard
+                              asset={slot.asset}
+                              deleteAsset={deleteAsset}
+                              key={slot.id}
+                              onPreview={onPreview}
+                              purgeAsset={purgeAsset}
+                              updateAssetStatus={updateAssetStatus}
+                            />
+                          ) : (
+                            <div className={slot.isError ? "review-placeholder failed" : "review-placeholder"} key={slot.id}>
+                              <span>{slot.label}</span>
+                            </div>
+                          ),
+                        )}
+                      </div>
+                    ) : null}
+                  </article>
                 ))}
               </div>
-            ) : null}
-            {reviewSlots.length ? (
+            ) : latestAssets.length ? (
               <div className="review-grid">
-                {reviewSlots.map((slot) =>
-                  slot.type === "asset" ? (
-                    <AssetCard
-                      asset={slot.asset}
-                      deleteAsset={deleteAsset}
-                      key={slot.id}
-                      onPreview={onPreview}
-                      purgeAsset={purgeAsset}
-                      updateAssetStatus={updateAssetStatus}
-                    />
-                  ) : (
-                    <div className={slot.isError ? "review-placeholder failed" : "review-placeholder"} key={slot.id}>
-                      <span>{slot.label}</span>
-                    </div>
-                  ),
-                )}
+                {latestAssets.map((asset) => (
+                  <AssetCard
+                    asset={asset}
+                    deleteAsset={deleteAsset}
+                    key={asset.id}
+                    onPreview={onPreview}
+                    purgeAsset={purgeAsset}
+                    updateAssetStatus={updateAssetStatus}
+                  />
+                ))}
               </div>
-            ) : hasReviewContent ? null : (
+            ) : (
               <div className="empty-panel">No fresh image batch</div>
             )}
           </section>

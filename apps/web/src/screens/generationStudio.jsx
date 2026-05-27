@@ -1,4 +1,5 @@
 import React, { useEffect, useMemo, useState } from "react";
+import { terminalStatuses } from "../jobTypes.js";
 import {
   noPresetId,
   presetLoraDetails as buildPresetLoraDetails,
@@ -94,6 +95,30 @@ export function useGenerationStudio({
     return assetIds.length > 0 && assetIds.every((id) => assets.some((asset) => asset.id === id));
   }
 
+  function jobCreatedMs(job) {
+    const parsed = Date.parse(job?.createdAt ?? "");
+    return Number.isFinite(parsed) ? parsed : 0;
+  }
+
+  // A finished run is replaced once a strictly-newer run leaves the queue (i.e.
+  // a worker picked it up). Canceled runs never "start", so they don't bump the
+  // run above them off the stack.
+  function successorStarted(job) {
+    return trackedLocalJobs.some(
+      (other) =>
+        other.id !== job.id &&
+        other.status !== "queued" &&
+        other.status !== "canceled" &&
+        jobCreatedMs(other) > jobCreatedMs(job),
+    );
+  }
+
+  function hasPendingSuccessor(job) {
+    return trackedLocalJobs.some(
+      (other) => other.id !== job.id && other.status !== "canceled" && jobCreatedMs(other) > jobCreatedMs(job),
+    );
+  }
+
   function completedAnchorMs(job) {
     return Date.parse(job.completedAt ?? job.updatedAt ?? "");
   }
@@ -125,15 +150,39 @@ export function useGenerationStudio({
     return () => window.clearTimeout(timer);
   }, [assets, latestAssets, trackedLocalJobs, resultFallbackTick]);
 
+  // The visible stack: every running and queued run, plus the most recent finished
+  // run, ordered (by trackedLocalJobs) oldest-first so the active run sits on top
+  // and queued runs follow. A finished run holds its place — showing its rendered
+  // batch above the pending queue — until the next run actually starts, at which
+  // point that run slides up to replace it. Canceled runs drop immediately.
   const localJobs = useMemo(
     () =>
-      trackedLocalJobs.filter(
-        (job) =>
-          // Canceled runs produce no output, so drop them instead of leaving a
-          // "Canceled" progress card behind.
-          job.status !== "canceled" &&
-          (job.status !== "completed" || (!resultVisible(job) && !completedWaitExpired(job))),
-      ),
+      trackedLocalJobs.filter((job) => {
+        if (job.status === "canceled") {
+          return false;
+        }
+        // Running and queued runs always stack.
+        if (!terminalStatuses.has(job.status)) {
+          return true;
+        }
+        // A finished run slides out the moment its successor starts.
+        if (successorStarted(job)) {
+          return false;
+        }
+        if (job.status === "completed") {
+          // With a run still queued behind it, keep the completed run (and its
+          // rendered batch) on top until that run starts. Standing alone, collapse
+          // to the plain latest-batch grid once its assets render (or the wait
+          // window expires) so a stale progress card never lingers.
+          if (hasPendingSuccessor(job)) {
+            return true;
+          }
+          return !resultVisible(job) && !completedWaitExpired(job);
+        }
+        // Failed/interrupted runs with nothing started behind them stay visible so
+        // the outcome is clear until the user moves on.
+        return true;
+      }),
     [assets, latestAssets, trackedLocalJobs, resultFallbackTick],
   );
 

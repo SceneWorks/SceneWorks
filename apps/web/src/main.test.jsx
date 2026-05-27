@@ -4604,6 +4604,147 @@ describe("SceneWorks app shell", () => {
     expect(container.textContent).toContain("No fresh image batch");
   });
 
+  it("stacks multiple image runs, each with its own progress card and slots", async () => {
+    const runningJob = {
+      id: "image-job-run",
+      type: "image_generate",
+      status: "running",
+      stage: "generating",
+      progress: 0.5,
+      requestedGpu: "auto",
+      createdAt: "2026-05-27T10:00:00Z",
+      payload: { prompt: "first run", count: 2 },
+      result: { generationSetId: "gen-1", expectedCount: 2 },
+    };
+    const queuedJob = {
+      id: "image-job-queue",
+      type: "image_generate",
+      status: "queued",
+      progress: 0,
+      requestedGpu: "auto",
+      createdAt: "2026-05-27T10:01:00Z",
+      payload: { prompt: "second run", count: 3 },
+      result: { expectedCount: 3 },
+    };
+    const renderedAsset = {
+      id: "asset-1",
+      projectId: "project-1",
+      type: "image",
+      displayName: "Generated",
+      generationSetId: "gen-1",
+      file: { path: "assets/images/generated_0001.png", mimeType: "image/png" },
+      status: {},
+    };
+    root = createRoot(container);
+    await act(async () => {
+      root.render(
+        withImageStudioContext({
+          activeProject: { id: "project-1", name: "Noir" },
+          assets: [renderedAsset],
+          characters: [],
+          createImageJob: () => {},
+          deleteAsset: () => {},
+          gpuOptions: ["auto"],
+          imageModels: [{ id: "z_image_turbo", name: "Z-Image", type: "image", family: "z-image" }],
+          latestAssets: [],
+          localJobs: [runningJob, queuedJob],
+          loras: [],
+          onPreview: () => {},
+          purgeAsset: () => {},
+          requestedGpu: "auto",
+          selectedAsset: null,
+          setRequestedGpu: () => {},
+          updateAssetStatus: () => {},
+        }),
+      );
+    });
+    await settle();
+
+    expect(container.querySelectorAll(".local-job-group").length).toBe(2);
+    expect(container.querySelectorAll(".local-job-card").length).toBe(2);
+    // Running run renders its one finished image alongside its remaining slot.
+    expect(container.querySelector(".review-grid img")?.getAttribute("src")).toContain(
+      "/api/v1/projects/project-1/files/assets/images/generated_0001.png",
+    );
+    // Queued run shows its own pending slots while it waits.
+    expect(container.textContent).toContain("Pending #3");
+    expect(container.textContent).not.toContain("No fresh image batch");
+  });
+
+  it("holds a completed run above the queue until the next run starts", async () => {
+    const completedJob = {
+      id: "image-job-done",
+      type: "image_generate",
+      status: "completed",
+      stage: "completed",
+      progress: 1,
+      requestedGpu: "auto",
+      createdAt: "2026-05-27T10:00:00Z",
+      completedAt: "2026-05-27T10:00:30Z",
+      payload: { prompt: "finished run" },
+      result: { generationSetId: "gen-1", assetIds: ["asset-1"] },
+    };
+    const nextJob = {
+      id: "image-job-next",
+      type: "image_generate",
+      status: "queued",
+      progress: 0,
+      requestedGpu: "auto",
+      createdAt: "2026-05-27T10:01:00Z",
+      payload: { prompt: "next run", count: 2 },
+      result: { expectedCount: 2 },
+    };
+    const renderedAsset = {
+      id: "asset-1",
+      projectId: "project-1",
+      type: "image",
+      displayName: "Generated",
+      generationSetId: "gen-1",
+      file: { path: "assets/images/generated_0001.png", mimeType: "image/png" },
+      status: {},
+    };
+    const baseProps = {
+      activeProject: { id: "project-1", name: "Noir" },
+      assets: [renderedAsset],
+      characters: [],
+      createImageJob: () => {},
+      deleteAsset: () => {},
+      gpuOptions: ["auto"],
+      imageModels: [{ id: "z_image_turbo", name: "Z-Image", type: "image", family: "z-image" }],
+      latestAssets: [renderedAsset],
+      loras: [],
+      onPreview: () => {},
+      purgeAsset: () => {},
+      requestedGpu: "auto",
+      selectedAsset: null,
+      setRequestedGpu: () => {},
+      updateAssetStatus: () => {},
+    };
+
+    root = createRoot(container);
+    // Completed run with a run still queued behind it: both stay, completed on top.
+    await act(async () => {
+      root.render(withImageStudioContext({ ...baseProps, localJobs: [completedJob, nextJob] }));
+    });
+    await settle();
+    expect(container.querySelectorAll(".local-job-group").length).toBe(2);
+    expect(container.textContent).toContain("Pending #2");
+
+    // The next run starts: the completed run slides out and the running run remains.
+    await act(async () => {
+      root.render(
+        withImageStudioContext({
+          ...baseProps,
+          localJobs: [completedJob, { ...nextJob, status: "running", stage: "generating", progress: 0.3 }],
+        }),
+      );
+    });
+    await settle();
+    expect(container.querySelectorAll(".local-job-group").length).toBe(1);
+    expect(container.querySelector(".local-job-card.running")).not.toBeNull();
+    expect(container.querySelector(".local-job-card.completed")).toBeNull();
+  });
+
   it("submits compatible image LoRAs while capping simple user selections at two", async () => {
     const createImageJob = vi.fn();
     root = createRoot(container);

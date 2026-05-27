@@ -17,7 +17,7 @@ import { QueueScreen } from "./screens/QueueScreen.jsx";
 import { PresetManagerScreen } from "./screens/PresetManagerScreen.jsx";
 import { SettingsScreen } from "./screens/SettingsScreen.jsx";
 import { SetupWizard } from "./screens/SetupWizard.jsx";
-import { sortNewest, sortWorkers } from "./sorters.js";
+import { sortNewest, sortOldest, sortWorkers } from "./sorters.js";
 import { useCharacters } from "./hooks/useCharacters.js";
 import { usePresets } from "./hooks/usePresets.js";
 import { useTraining } from "./hooks/useTraining.js";
@@ -64,6 +64,10 @@ function isImageGenerationJob(job) {
   return ["image_generate", "image_edit"].includes(job.type);
 }
 
+function isVideoGenerationJob(job) {
+  return ["video_generate", "video_extend", "video_bridge"].includes(job.type);
+}
+
 function isLoraImportNotice(message) {
   return String(message ?? "").startsWith("lora import: ");
 }
@@ -102,9 +106,32 @@ function generatedResultAssetCount(job) {
   return 0;
 }
 
-// Studios show only the most recent run's progress card; starting a new run
-// replaces the previous one rather than stacking cards.
-const localJobStackLimit = 1;
+// Studios stack every running and queued run (plus the most recent finished run
+// until its successor starts), so a new submission no longer evicts the prior
+// progress card. Capped so a long session can't grow the visible stack unbounded.
+const localJobStackLimit = 25;
+
+// Build a studio's local-job stack: the runs it explicitly remembered plus any
+// still-active generation jobs for the open project, de-duped and ordered
+// oldest-first (running run on top, queued runs following in execution order),
+// keeping only the most recent `localJobStackLimit` entries.
+function buildLocalJobStack(rememberedIds, jobs, activeProjectId, isGenerationJob) {
+  const remembered = rememberedIds.map((id) => jobs.find((job) => job.id === id)).filter(Boolean);
+  const projectJobs = jobs.filter(
+    (job) =>
+      activeProjectId &&
+      job.projectId === activeProjectId &&
+      isGenerationJob(job) &&
+      !terminalStatuses.has(job.status),
+  );
+  const byId = new Map();
+  [...remembered, ...projectJobs].forEach((job) => {
+    if (job?.id && !byId.has(job.id)) {
+      byId.set(job.id, job);
+    }
+  });
+  return Array.from(byId.values()).sort(sortOldest).slice(-localJobStackLimit);
+}
 
 const navSections = [
   {
@@ -525,28 +552,13 @@ export function App() {
   );
   const latestImageAssets = useMemo(() => latestAssets.filter((asset) => asset.type === "image"), [latestAssets]);
   const latestVideoAssets = useMemo(() => latestAssets.filter((asset) => asset.type === "video"), [latestAssets]);
-  const imageLocalJobs = useMemo(() => {
-    const localJobs = localGenerationJobIds.image.map((id) => jobs.find((job) => job.id === id)).filter(Boolean);
-    const projectJobs = jobs
-      .filter(
-        (job) =>
-          activeProject?.id &&
-          job.projectId === activeProject.id &&
-          isImageGenerationJob(job) &&
-          !terminalStatuses.has(job.status),
-      )
-      .sort(sortNewest);
-    const byId = new Map();
-    [...localJobs, ...projectJobs].forEach((job) => {
-      if (job?.id && !byId.has(job.id)) {
-        byId.set(job.id, job);
-      }
-    });
-    return Array.from(byId.values()).slice(0, localJobStackLimit);
-  }, [activeProject?.id, jobs, localGenerationJobIds.image]);
+  const imageLocalJobs = useMemo(
+    () => buildLocalJobStack(localGenerationJobIds.image, jobs, activeProject?.id, isImageGenerationJob),
+    [activeProject?.id, jobs, localGenerationJobIds.image],
+  );
   const videoLocalJobs = useMemo(
-    () => localGenerationJobIds.video.map((id) => jobs.find((job) => job.id === id)).filter(Boolean),
-    [jobs, localGenerationJobIds.video],
+    () => buildLocalJobStack(localGenerationJobIds.video, jobs, activeProject?.id, isVideoGenerationJob),
+    [activeProject?.id, jobs, localGenerationJobIds.video],
   );
   const queueCounts = useMemo(() => {
     if (queueSummary?.counts) {
@@ -1037,7 +1049,8 @@ export function App() {
     }
     setLocalGenerationJobIds((current) => ({
       ...current,
-      // Only the latest run is shown, so a new submission replaces the previous id.
+      // Remember every submitted run (newest first, capped) so running and queued
+      // runs stack in the studio instead of the latest run evicting the previous one.
       [kind]: [job.id, ...current[kind].filter((id) => id !== job.id)].slice(0, localJobStackLimit),
     }));
   }

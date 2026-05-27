@@ -3076,6 +3076,12 @@ label {
   gap: 10px;
 }
 
+/* One stacked run: its progress card with that run's review slots directly below. */
+.local-job-group {
+  display: grid;
+  gap: 10px;
+}
+
 .local-job-card {
   display: grid;
   gap: 12px;
