@@ -75,6 +75,7 @@ import {
   useGenerationStudio,
 } from "./generationStudio.jsx";
 import { useAppContext } from "../context/AppContext.js";
+import { loadStudioSettings, useStudioSettingsWriter } from "../hooks/useStudioSettings.js";
 import { errorStatuses } from "../jobTypes.js";
 
 // Used only for models that don't declare limits.resolutions (e.g. user-imported).
@@ -183,24 +184,28 @@ export function ImageStudio() {
   const onOpenPresets = () => setActiveView("Presets");
   const onOpenQueue = () => setActiveView("Queue");
   const onPreview = setPreviewAsset;
+  // Last-used settings for this workspace, restored on mount. The component is keyed
+  // by workspace in App.jsx, so this reads the right snapshot per workspace.
+  const saved = useMemo(() => loadStudioSettings("image", activeProject?.id ?? null), [activeProject?.id]);
   const [sceneSuggestions] = useState(() => pickSuggestions(4));
   const [characterSuggestions] = useState(() => pickSuggestions(4, CHARACTER_SUGGESTION_POOL));
-  const [mode, setMode] = useState("text_to_image");
-  const [prompt, setPrompt] = useState("A cinematic frame of a neon street at midnight");
+  const [mode, setMode] = useState(saved.mode ?? "text_to_image");
+  const [prompt, setPrompt] = useState(saved.prompt ?? "A cinematic frame of a neon street at midnight");
   // True once the user types or picks a suggestion, so the character-mode default
-  // prompt never clobbers their own wording.
-  const promptEdited = useRef(false);
+  // prompt never clobbers their own wording. A restored prompt counts as edited so
+  // re-entering character mode doesn't overwrite it.
+  const promptEdited = useRef(saved.prompt != null);
   const setPromptFromUser = (value) => {
     promptEdited.current = true;
     setPrompt(value);
   };
   const suggestions = mode === "character_image" ? characterSuggestions : sceneSuggestions;
-  const [count, setCount] = useState(4);
-  const [advancedOpen, setAdvancedOpen] = useState(false);
-  const [model, setModel] = useState(imageModels[0]?.id ?? "z_image_turbo");
-  const [seed, setSeed] = useState("");
-  const [negativePrompt, setNegativePrompt] = useState("");
-  const [resolution, setResolution] = useState("1024x1024");
+  const [count, setCount] = useState(saved.count ?? 4);
+  const [advancedOpen, setAdvancedOpen] = useState(saved.advancedOpen ?? false);
+  const [model, setModel] = useState(saved.model ?? imageModels[0]?.id ?? "z_image_turbo");
+  const [seed, setSeed] = useState(saved.seed ?? "");
+  const [negativePrompt, setNegativePrompt] = useState(saved.negativePrompt ?? "");
+  const [resolution, setResolution] = useState(saved.resolution ?? "1024x1024");
   const [sourceAssetId, setSourceAssetId] = useState(selectedAsset?.id ?? "");
   const [characterId, setCharacterId] = useState("");
   const [characterLookId, setCharacterLookId] = useState("");
@@ -208,16 +213,16 @@ export function ImageStudio() {
   // identity is carried across variations. `ipAdapterScale` rides in `advanced`; for
   // InstantID, `controlnetScale` (IdentityNet landmark lock) rides there too.
   const [referenceAssetId, setReferenceAssetId] = useState("");
-  const [ipAdapterScale, setIpAdapterScale] = useState(0.6);
-  const [controlnetScale, setControlnetScale] = useState(0.8);
+  const [ipAdapterScale, setIpAdapterScale] = useState(saved.ipAdapterScale ?? 0.6);
+  const [controlnetScale, setControlnetScale] = useState(saved.controlnetScale ?? 0.8);
   // InstantID canonical head angle ("" = match the reference's own angle). Rides advanced.viewAngle.
-  const [viewAngle, setViewAngle] = useState("");
-  const [upscaleEnabled, setUpscaleEnabled] = useState(false);
-  const [upscaleFactor, setUpscaleFactor] = useState(2);
-  const [upscaleEngine, setUpscaleEngine] = useState("real-esrgan");
-  const [selectedLoraIds, setSelectedLoraIds] = useState([]);
-  const [loraWeights, setLoraWeights] = useState({});
-  const [showIncompatibleLoras, setShowIncompatibleLoras] = useState(false);
+  const [viewAngle, setViewAngle] = useState(saved.viewAngle ?? "");
+  const [upscaleEnabled, setUpscaleEnabled] = useState(saved.upscaleEnabled ?? false);
+  const [upscaleFactor, setUpscaleFactor] = useState(saved.upscaleFactor ?? 2);
+  const [upscaleEngine, setUpscaleEngine] = useState(saved.upscaleEngine ?? "real-esrgan");
+  const [selectedLoraIds, setSelectedLoraIds] = useState(saved.selectedLoraIds ?? []);
+  const [loraWeights, setLoraWeights] = useState(saved.loraWeights ?? {});
+  const [showIncompatibleLoras, setShowIncompatibleLoras] = useState(saved.showIncompatibleLoras ?? false);
   const [submitting, setSubmitting] = useState(false);
   const presetDefaultSnapshots = useRef({});
   const editImageAssets = useMemo(
@@ -304,8 +309,14 @@ export function ImageStudio() {
   const viewAngles = Array.isArray(selectedModel?.ui?.viewAngles) ? selectedModel.ui.viewAngles : null;
   // Reset the reference tuning to the selected model's declared defaults whenever the
   // model changes, so InstantID starts at its tuned 0.8/0.8 and Kolors at 0.6, and the
-  // view angle never carries over to a model that doesn't support it.
+  // view angle never carries over to a model that doesn't support it. Skip the mount
+  // run when restoring a snapshot so the user's saved tuning survives.
+  const skipReferenceTuningReset = useRef(saved.ipAdapterScale != null);
   useEffect(() => {
+    if (skipReferenceTuningReset.current) {
+      skipReferenceTuningReset.current = false;
+      return;
+    }
     const ui = imageModels.find((item) => item.id === model)?.ui ?? {};
     setIpAdapterScale(typeof ui.referenceStrengthDefault === "number" ? ui.referenceStrengthDefault : 0.6);
     setControlnetScale(typeof ui.identityStructure?.default === "number" ? ui.identityStructure.default : 0.8);
@@ -370,6 +381,7 @@ export function ImageStudio() {
   const {
     availablePresets,
     selectedPreset,
+    selectedPresetId,
     setSelectedPresetId,
     presetPromptParts,
     presetLoraDetails,
@@ -391,6 +403,7 @@ export function ImageStudio() {
     assets,
     latestAssets,
     trackedLocalJobs,
+    initialPresetId: saved.selectedPresetId ?? null,
   });
   const compatibleLoras = useMemo(() => loras.filter((lora) => {
     if (lora.presetManaged) {
@@ -429,7 +442,18 @@ export function ImageStudio() {
         : `No installed LoRAs match ${selectedModel.name ?? selectedModel.id}.`;
   const [width, height] = resolution.split("x").map((value) => Number(value));
 
+  // When restoring a snapshot, the saved count/resolution/negativePrompt already
+  // reflect the user's last state — skip the one preset-default pass that fires as the
+  // restored preset resolves so it doesn't overwrite them. "None" applies no defaults,
+  // so no guard is needed there.
+  const skipPresetDefaultsOnHydrate = useRef(
+    Object.keys(saved).length > 0 && saved.selectedPresetId !== noPresetId,
+  );
   useEffect(() => {
+    if (skipPresetDefaultsOnHydrate.current && selectedPreset) {
+      skipPresetDefaultsOnHydrate.current = false;
+      return;
+    }
     if (!selectedPreset) {
       clearPresetDefault(setCount, presetDefaultSnapshots, "count");
       clearPresetDefault(setResolution, presetDefaultSnapshots, "resolution");
@@ -459,6 +483,27 @@ export function ImageStudio() {
       });
     }
   }, [selectedPreset?.id]);
+
+  useStudioSettingsWriter("image", activeProject?.id ?? null, {
+    mode,
+    prompt,
+    count,
+    advancedOpen,
+    model,
+    seed,
+    negativePrompt,
+    resolution,
+    ipAdapterScale,
+    controlnetScale,
+    viewAngle,
+    upscaleEnabled,
+    upscaleFactor,
+    upscaleEngine,
+    selectedLoraIds,
+    loraWeights,
+    showIncompatibleLoras,
+    selectedPresetId,
+  });
 
   useEffect(() => {
     setSelectedLoraIds((ids) => ids.filter((id) => compatibleLoras.some((lora) => lora.id === id)));

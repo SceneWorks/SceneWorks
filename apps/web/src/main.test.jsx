@@ -4391,6 +4391,52 @@ describe("SceneWorks app shell", () => {
     expect(onLocalJobCreated).toHaveBeenCalledWith({ id: "image-job-1" });
   });
 
+  it("remembers studio settings per workspace across remounts", async () => {
+    const imageProps = {
+      activeProject: { id: "project-1", name: "Noir" },
+      assets: [],
+      characters: [],
+      createImageJob: () => {},
+      deleteAsset: () => {},
+      gpuOptions: ["auto"],
+      imageModels: [{ id: "z_image_turbo", name: "Z-Image", type: "image", family: "z-image" }],
+      latestAssets: [],
+      localJobs: [],
+      loras: [],
+      onPreview: () => {},
+      purgeAsset: () => {},
+      requestedGpu: "auto",
+      selectedAsset: null,
+      setRequestedGpu: () => {},
+      updateAssetStatus: () => {},
+    };
+    const promptField = () => container.querySelector("textarea[aria-label='Prompt']");
+
+    root = createRoot(container);
+    await act(async () => {
+      root.render(withImageStudioContext(imageProps));
+    });
+    const defaultPrompt = promptField().value;
+    await changeField(promptField(), "a custom remembered prompt");
+    await settle();
+
+    // Leaving the studio and returning to the same workspace restores the prompt.
+    await act(async () => root.unmount());
+    root = createRoot(container);
+    await act(async () => {
+      root.render(withImageStudioContext(imageProps));
+    });
+    expect(promptField().value).toBe("a custom remembered prompt");
+
+    // A different workspace starts from its own settings, not workspace-1's.
+    await act(async () => root.unmount());
+    root = createRoot(container);
+    await act(async () => {
+      root.render(withImageStudioContext({ ...imageProps, activeProject: { id: "project-2", name: "Other" } }));
+    });
+    expect(promptField().value).toBe(defaultPrompt);
+  });
+
   it("keeps completed image progress visible until the generated asset renders", async () => {
     const completedJob = {
       id: "image-job-1",
