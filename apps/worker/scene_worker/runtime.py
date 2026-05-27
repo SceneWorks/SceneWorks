@@ -40,7 +40,7 @@ from .person_adapters import (
     segmenter_backend_available,
     tracker_backend_available,
 )
-from .prompt_refine import PromptRefineError, refine_prompt
+from .prompt_refine import PromptRefineError, PromptRefiner
 from .settings import WorkerSettings
 from .training_adapters import (
     SUPPORTED_TRAINING_PLAN_VERSION,
@@ -87,12 +87,11 @@ VQA_JOB_TYPES = ("image_vqa",)
 # replaced. Keep in sync with contracts.rs::JobType/WorkerCapability,
 # jobs_store::job_requires_gpu, and QueueScreen gpuRequiredJobTypes.
 INTERLEAVE_JOB_TYPES = ("image_interleave",)
-# Prompt refinement (sc-2041): a lightweight, non-GPU job that rewrites a user's
-# prompt via an OpenAI-compatible endpoint. Advertised by every Python worker
-# (it needs no inference backend), so the Rust utility worker — which lacks the
-# capability — never claims it. Keep in sync with
-# crates/sceneworks-core/src/contracts.rs::JobType/WorkerCapability and
-# jobs_store::NON_GPU_JOB_TYPES.
+# Prompt refinement (sc-2041): rewrites a user's prompt with a small instruction
+# LLM loaded in-process (like JoyCaption captioning). It needs the torch inference
+# backend, so it is advertised only by a backend-capable Python worker — the Rust
+# utility worker never claims it. Keep in sync with
+# crates/sceneworks-core/src/contracts.rs::JobType/WorkerCapability.
 PROMPT_REFINE_JOB_TYPES = ("prompt_refine",)
 # Every runtime-dispatchable job-type group, in a stable order, for the
 # ``--check`` diagnostic. Derived from the groups above so run_check can't drift
@@ -136,12 +135,6 @@ class ApiClient:
 def worker_capabilities(gpu: dict) -> list[str]:
     gpu_capabilities = set(gpu["capabilities"])
     capabilities = set(gpu["capabilities"]) - {"placeholder"}
-    # Prompt refinement needs only an OpenAI-compatible endpoint (no inference
-    # backend), so every Python worker advertises it. When the endpoint is
-    # unconfigured the job is still claimed and fails fast with a clear message,
-    # rather than sitting queued forever. The Rust utility worker never advertises
-    # this, so it never claims a refine job.
-    capabilities |= set(PROMPT_REFINE_JOB_TYPES)
     is_gpu_worker = "cpu" not in gpu_capabilities and "gpu" in gpu_capabilities
     if is_gpu_worker:
         # Dry-run plan validation needs no inference backend, so a GPU worker can
@@ -152,6 +145,9 @@ def worker_capabilities(gpu: dict) -> list[str]:
             capabilities |= set(CAPTION_JOB_TYPES)
             capabilities |= set(VQA_JOB_TYPES)
             capabilities |= set(INTERLEAVE_JOB_TYPES)
+            # Prompt refinement loads a small LLM in-process (like captioning), so
+            # it needs the inference backend and is advertised alongside it.
+            capabilities |= set(PROMPT_REFINE_JOB_TYPES)
             # Only a backend-capable worker advertises real training execution, so
             # the queue won't route a dryRun:false job to a worker that can't train.
             capabilities |= set(TRAINING_EXECUTE_CAPABILITIES)
@@ -1265,23 +1261,25 @@ def run_prompt_refine_job(api: ApiClient, settings: WorkerSettings, job: dict) -
     job_id = job["id"]
     payload = job.get("payload") or {}
     prompt = (payload.get("prompt") or "").strip()
+    refiner = PromptRefiner(
+        model_name_or_path=payload.get("model") or getattr(settings, "prompt_refine_model", "") or "",
+        gpu_id=getattr(settings, "gpu_id", "auto"),
+        max_new_tokens=getattr(settings, "prompt_refine_max_new_tokens", 512),
+    )
     try:
-        heartbeat(api, settings, "busy", job_id)
+        heartbeat_with_loaded_models(api, settings, "busy", job_id, refiner.loaded_models)
         update_job(
             api,
             job_id,
-            {"status": "running", "stage": "running", "progress": 0.2, "message": "Refining prompt…"},
+            {"status": "loading_model", "stage": "loading_model", "progress": 0.1, "message": "Loading refinement model."},
         )
-        refined = refine_prompt(
-            prompt,
-            guide=payload.get("guide"),
-            workflow=payload.get("workflow"),
-            base_url=settings.prompt_refine_base_url,
-            api_key=settings.prompt_refine_api_key,
-            model=settings.prompt_refine_model,
-            timeout=settings.prompt_refine_timeout_seconds,
-            max_tokens=settings.prompt_refine_max_tokens,
+        refiner.load()
+        update_job(
+            api,
+            job_id,
+            {"status": "running", "stage": "running", "progress": 0.4, "message": "Refining prompt…"},
         )
+        refined = refiner.refine(prompt, guide=payload.get("guide"), workflow=payload.get("workflow"))
         update_job(
             api,
             job_id,
@@ -1296,8 +1294,8 @@ def run_prompt_refine_job(api: ApiClient, settings: WorkerSettings, job: dict) -
     except InterruptedError as exc:
         update_job(api, job_id, {"status": "canceled", "stage": "canceled", "progress": 1, "message": str(exc)})
     except PromptRefineError as exc:
-        # Expected, user-facing failures (runtime unconfigured/unreachable, timeout,
-        # empty response) carry a clear message already.
+        # Expected, user-facing failures (model couldn't load, empty rewrite) carry
+        # a clear message already.
         update_job(
             api,
             job_id,

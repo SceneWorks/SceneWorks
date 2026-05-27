@@ -57,6 +57,10 @@ services:
       HF_HUB_CACHE: ${SCENEWORKS_HUGGINGFACE_HUB_CACHE:-/sceneworks/data/cache/huggingface/hub}
       HUGGINGFACE_HUB_CACHE: ${SCENEWORKS_HUGGINGFACE_HUB_CACHE:-/sceneworks/data/cache/huggingface/hub}
       NVIDIA_VISIBLE_DEVICES: ${NVIDIA_VISIBLE_DEVICES:-all}
+      # "Refine my prompt" (sc-2041) loads a small LLM in-process and downloads on
+      # demand — no setup needed. Optionally override the default model repo.
+      PROMPT_REFINE_MODEL: ${PROMPT_REFINE_MODEL:-}
+      PROMPT_REFINE_MAX_NEW_TOKENS: ${PROMPT_REFINE_MAX_NEW_TOKENS:-512}
       # expandable_segments reduces CUDA fragmentation OOM and is recommended by
       # the LTX stack alongside FP8, BUT it relies on the CUDA virtual-memory
       # (cuMem*) API, which is unsupported under Docker Desktop's WSL2/WDDM
