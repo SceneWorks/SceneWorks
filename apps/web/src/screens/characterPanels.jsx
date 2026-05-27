@@ -2,6 +2,7 @@ import React from "react";
 import { AssetPickerField } from "../components/AssetPicker.jsx";
 import { AssetCard } from "../components/assetPanels.jsx";
 import { AssetMedia } from "../components/assetMedia.jsx";
+import { JobProgressCard } from "../components/JobProgress.jsx";
 import { extractFamilies } from "../presetUtils.js";
 
 export function editableLora(link) {
@@ -387,12 +388,16 @@ export function CharacterAngleSet({
   createImageJob,
   importAsset,
   addCharacterReference,
+  latestAssets = [],
+  imageLocalJobs = [],
+  rememberLocalGenerationJob,
 }) {
   const angleCount = angleModel?.ui?.viewAngles?.length ?? 0;
   const [referenceAssetId, setReferenceAssetId] = React.useState("");
   const [prompt, setPrompt] = React.useState("");
   const [submitting, setSubmitting] = React.useState(false);
   const [status, setStatus] = React.useState("");
+  const [jobId, setJobId] = React.useState(null);
   const fileInputRef = React.useRef(null);
   const characterId = selectedCharacter?.id;
 
@@ -407,6 +412,15 @@ export function CharacterAngleSet({
   if (!angleModel || !selectedCharacter) {
     return null;
   }
+
+  // The just-launched batch job (live progress while it runs) + this character's
+  // images (they stream in as the worker writes each angle).
+  const activeJob = imageLocalJobs.find((job) => job.id === jobId);
+  const characterImages = (latestAssets ?? []).filter(
+    (asset) =>
+      asset.characterId === characterId ||
+      (asset.metadata?.characterReferences ?? []).some((ref) => ref.characterId === characterId),
+  );
 
   async function onUpload(event) {
     const file = event.target.files?.[0];
@@ -439,12 +453,20 @@ export function CharacterAngleSet({
         referenceAssetId,
         prompt: prompt.trim(),
         negativePrompt: "plastic skin, airbrushed, cgi, 3d render, cartoon, anime, waxy, overprocessed, deformed, multiple people",
-        count: angleCount,
+        // angleSet makes the worker emit one image per pack angle regardless of count;
+        // count must satisfy the API's 1-8 guard, so send 1 (the worker overrides it).
+        count: 1,
         width: 1024,
         height: 1024,
         advanced: { angleSet: true, ipAdapterScale: 0.8 },
       });
-      setStatus(job ? `Generating ${angleCount} angles — they'll appear in your latest images shortly.` : "");
+      if (job?.id) {
+        rememberLocalGenerationJob?.("image", job);
+        setJobId(job.id);
+        setStatus("");
+      } else {
+        setStatus("Could not start the job — check the error banner.");
+      }
     } finally {
       setSubmitting(false);
     }
@@ -491,7 +513,15 @@ export function CharacterAngleSet({
         Prompt
         <textarea onChange={(event) => setPrompt(event.target.value)} rows={2} value={prompt} />
       </label>
-      {status ? <p className="inline-warning">{status}</p> : null}
+      {activeJob ? <JobProgressCard job={activeJob} label={`Angle set · ${angleCount} views`} /> : null}
+      {!activeJob && status ? <p className="inline-warning">{status}</p> : null}
+      {characterImages.length ? (
+        <div className="review-grid">
+          {characterImages.map((asset) => (
+            <AssetMedia asset={asset} controls={false} key={asset.id} />
+          ))}
+        </div>
+      ) : null}
     </section>
   );
 }

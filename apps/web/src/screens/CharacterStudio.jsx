@@ -40,6 +40,8 @@ export function CharacterStudio() {
     createCharacterTestJob,
     createImageJob,
     importAsset,
+    imageLocalJobs,
+    rememberLocalGenerationJob,
     deleteAsset,
     purgeAsset,
     imageModels,
@@ -350,7 +352,10 @@ export function CharacterStudio() {
               angleModel={angleModel}
               approvedReferences={approvedReferences}
               createImageJob={createImageJob}
+              imageLocalJobs={imageLocalJobs}
               importAsset={importAsset}
+              latestAssets={latestAssets}
+              rememberLocalGenerationJob={rememberLocalGenerationJob}
               selectedCharacter={selectedCharacter}
             />
 

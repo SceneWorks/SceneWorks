@@ -2116,6 +2116,8 @@ describe("SceneWorks app shell", () => {
       createCharacterTestJob: () => {},
       createImageJob,
       importAsset: vi.fn(),
+      imageLocalJobs: [],
+      rememberLocalGenerationJob: vi.fn(),
       deleteAsset: () => {},
       deleteCharacterLook: () => {},
       detachCharacterLora: () => {},
@@ -2156,16 +2158,19 @@ describe("SceneWorks app shell", () => {
       generateButton.click();
     });
 
-    // One batch job: character_image to the InstantID model with advanced.angleSet.
+    // One batch job with a valid count (worker expands to all pack angles) +
+    // advanced.angleSet; the job is tracked for live in-panel progress.
     expect(createImageJob).toHaveBeenCalledWith(
       expect.objectContaining({
         mode: "character_image",
         model: "instantid_realvisxl",
         characterId: "char-1",
         referenceAssetId: "ref-1",
+        count: 1,
         advanced: expect.objectContaining({ angleSet: true, ipAdapterScale: 0.8 }),
       }),
     );
+    expect(baseContext.rememberLocalGenerationJob).toHaveBeenCalledWith("image", { id: "job-angle" });
   });
 
   it("launches reference-based generation from an approved character reference", async () => {
