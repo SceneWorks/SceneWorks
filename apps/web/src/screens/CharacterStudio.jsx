@@ -1,5 +1,6 @@
 import React, { useEffect, useMemo, useState } from "react";
 import {
+  CharacterAngleSet,
   CharacterLoras,
   CharacterLooks,
   CharacterReferences,
@@ -37,6 +38,8 @@ export function CharacterStudio() {
     updateCharacterLora,
     detachCharacterLora,
     createCharacterTestJob,
+    createImageJob,
+    importAsset,
     deleteAsset,
     purgeAsset,
     imageModels,
@@ -72,6 +75,11 @@ export function CharacterStudio() {
   );
   const selectedCharacter = characters.find((item) => item.id === selectedCharacterId) ?? characters[0] ?? null;
   const approvedReferences = selectedCharacter?.approvedReferences ?? [];
+  // The InstantID-style model that can render a one-click angle set (declares view angles).
+  const angleModel = useMemo(
+    () => imageModels.find((item) => Array.isArray(item.ui?.viewAngles) && item.ui.viewAngles.length > 0) ?? null,
+    [imageModels],
+  );
 
   useEffect(() => {
     if (!selectedCharacter && characters[0]?.id) {
@@ -384,6 +392,15 @@ export function CharacterStudio() {
               testPrompt={testPrompt}
               testResolution={testResolution}
               updateAssetStatus={updateAssetStatus}
+            />
+
+            <CharacterAngleSet
+              addCharacterReference={addCharacterReference}
+              angleModel={angleModel}
+              approvedReferences={approvedReferences}
+              createImageJob={createImageJob}
+              importAsset={importAsset}
+              selectedCharacter={selectedCharacter}
             />
           </section>
         </div>

@@ -356,3 +356,122 @@ export function CharacterTest({
     </section>
   );
 }
+
+// One-click multi-angle "turnaround": one reference -> all of the InstantID model's
+// view angles in a single batch job (advanced.angleSet). Only rendered when an
+// InstantID-style model (one that declares ui.viewAngles) is available.
+export function CharacterAngleSet({
+  selectedCharacter,
+  angleModel,
+  approvedReferences,
+  createImageJob,
+  importAsset,
+  addCharacterReference,
+}) {
+  const angleCount = angleModel?.ui?.viewAngles?.length ?? 0;
+  const [referenceAssetId, setReferenceAssetId] = React.useState("");
+  const [prompt, setPrompt] = React.useState("");
+  const [submitting, setSubmitting] = React.useState(false);
+  const [status, setStatus] = React.useState("");
+  const fileInputRef = React.useRef(null);
+  const characterId = selectedCharacter?.id;
+
+  React.useEffect(() => {
+    setReferenceAssetId(approvedReferences[0]?.assetId ?? "");
+  }, [characterId, approvedReferences]);
+  React.useEffect(() => {
+    setPrompt(`${selectedCharacter?.name || "the character"}, neutral expression, plain background, photorealistic`);
+    setStatus("");
+  }, [characterId, selectedCharacter?.name]);
+
+  if (!angleModel || !selectedCharacter) {
+    return null;
+  }
+
+  async function onUpload(event) {
+    const file = event.target.files?.[0];
+    event.target.value = "";
+    if (!file) {
+      return;
+    }
+    setStatus("Uploading reference…");
+    const asset = await importAsset(file, { throwOnError: false });
+    if (asset?.id) {
+      setReferenceAssetId(asset.id);
+      await addCharacterReference(characterId, { assetId: asset.id, approved: true, role: "angle-set-reference" });
+      setStatus("");
+    } else {
+      setStatus("Upload failed — try another image.");
+    }
+  }
+
+  async function generate() {
+    if (!referenceAssetId || submitting) {
+      return;
+    }
+    setSubmitting(true);
+    setStatus("");
+    try {
+      const job = await createImageJob({
+        mode: "character_image",
+        model: angleModel.id,
+        characterId,
+        referenceAssetId,
+        prompt: prompt.trim(),
+        negativePrompt: "plastic skin, airbrushed, cgi, 3d render, cartoon, anime, waxy, overprocessed, deformed, multiple people",
+        count: angleCount,
+        width: 1024,
+        height: 1024,
+        advanced: { angleSet: true, ipAdapterScale: 0.8 },
+      });
+      setStatus(job ? `Generating ${angleCount} angles — they'll appear in your latest images shortly.` : "");
+    } finally {
+      setSubmitting(false);
+    }
+  }
+
+  return (
+    <section className="character-section">
+      <div className="section-heading">
+        <p className="eyebrow">Angle set</p>
+        <h2>{angleModel.name} turnaround</h2>
+      </div>
+      <p>
+        Generate {angleCount} consistent views of this character (front, three-quarters, profiles, up/down and the
+        diagonals) from one reference, in a single job. A good starting set for curating a character LoRA.
+      </p>
+      {approvedReferences.length ? (
+        <div className="reference-thumb-row">
+          {approvedReferences.map((reference) => (
+            <button
+              aria-label={`Use ${reference.asset?.displayName ?? reference.assetId} as the angle-set reference`}
+              aria-pressed={reference.assetId === referenceAssetId}
+              className={reference.assetId === referenceAssetId ? "reference-thumb active" : "reference-thumb"}
+              key={reference.assetId}
+              onClick={() => setReferenceAssetId(reference.assetId)}
+              type="button"
+            >
+              {reference.asset ? <AssetMedia asset={reference.asset} controls={false} /> : <span>Missing asset</span>}
+            </button>
+          ))}
+        </div>
+      ) : (
+        <p className="inline-warning">No approved reference yet — upload one below or approve a reference above.</p>
+      )}
+      <div className="inline-create">
+        <button onClick={() => fileInputRef.current?.click()} type="button">
+          Upload reference
+        </button>
+        <input accept="image/*" hidden onChange={onUpload} ref={fileInputRef} type="file" />
+        <button disabled={!referenceAssetId || submitting} onClick={generate} type="button">
+          {submitting ? "Starting…" : `Generate angle set (${angleCount} views)`}
+        </button>
+      </div>
+      <label>
+        Prompt
+        <textarea onChange={(event) => setPrompt(event.target.value)} rows={2} value={prompt} />
+      </label>
+      {status ? <p className="inline-warning">{status}</p> : null}
+    </section>
+  );
+}
