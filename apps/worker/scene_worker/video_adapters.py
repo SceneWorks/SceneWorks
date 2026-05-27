@@ -238,6 +238,22 @@ VIDEO_MODEL_TARGETS: dict[str, dict[str, Any]] = {
         "steps": {"fast": 6, "balanced": 8, "best": 20},
         "durationHint": "Best as short shots. Start with 4-8 seconds; 10 seconds is the current workflow ceiling.",
     },
+    # Community LTX-2.3 merge (TenStrip/LTX2.3-10Eros), I2V-tuned. Same ltx-video
+    # family and ltx_video adapter as ltx_2_3, so it reuses the native torch pipeline
+    # (CUDA) and the MLX path; the bf16 checkpoint shares the official LTX-2.3 key
+    # layout. On Apple Silicon the MLX adapter loads a locally-converted Q4 dir.
+    "ltx_2_3_eros": {
+        "label": "LTX-2.3 10Eros",
+        "family": "ltx-video",
+        "adapter": "ltx_video",
+        "repo": "TenStrip/LTX2.3-10Eros",
+        "fallbackRepo": "Lightricks/LTX-2.3",
+        "capabilities": ["image_to_video", "text_to_video", "first_last_frame", "extend_clip", "video_bridge", "replace_person"],
+        "recommendedMaxDuration": 10,
+        "hardMaxDuration": 15,
+        "steps": {"fast": 6, "balanced": 8, "best": 20},
+        "durationHint": "Best as short shots. Start with 4-8 seconds; 10 seconds is the current workflow ceiling.",
+    },
     "wan_2_2": {
         "label": "Wan2.2",
         "family": "wan-video",
@@ -1687,7 +1703,7 @@ class MlxVideoAdapter(VideoGenerationAdapter):
     _ltx_repo = "notapalindrome/ltx23-mlx-av-q4"
     _ltx_text_encoder = "mlx-community/gemma-3-12b-it-bf16"
 
-    _supported_models = {"ltx_2_3", "wan_2_2", "wan_2_2_t2v_14b", "wan_2_2_i2v_14b"}
+    _supported_models = {"ltx_2_3", "ltx_2_3_eros", "wan_2_2", "wan_2_2_t2v_14b", "wan_2_2_i2v_14b"}
     # The mlx-video-with-audio high-level API exposes only text-to-video and
     # single-image image-to-video. first/last-frame, bridge, extend, and
     # replace_person stay on the PyTorch path (no spatial mask / multi-cond).
@@ -1736,6 +1752,7 @@ class MlxVideoAdapter(VideoGenerationAdapter):
         # (the Model Manager gates on the manifest value); keep the two in sync.
         memory_estimates = {
             "ltx_2_3": {"peak_gb": 31, "description": "Q4 quantized, ~31 GB peak"},
+            "ltx_2_3_eros": {"peak_gb": 31, "description": "Q4 quantized, ~31 GB peak"},
             "wan_2_2": {"peak_gb": 45, "description": "bf16, 40 steps, ~45 GB peak"},
             "wan_2_2_t2v_14b": {"peak_gb": 133, "description": "bf16 + Lightning LoRA, 4 steps, ~133 GB peak"},
             "wan_2_2_i2v_14b": {"peak_gb": 133, "description": "bf16 + Lightning LoRA, 4 steps, ~133 GB peak"},
@@ -1764,7 +1781,7 @@ class MlxVideoAdapter(VideoGenerationAdapter):
         cancel_requested: CancelCallback,
     ) -> dict[str, Any]:
         target = model_target(request.model)
-        if request.model == "ltx_2_3":
+        if target["family"] == "ltx-video":
             return self._run_ltx_mlx(settings, job, request, progress, cancel_requested)
         if request.model in {"wan_2_2", "wan_2_2_t2v_14b", "wan_2_2_i2v_14b"}:
             return self._run_wan_mlx(settings, job, request, progress, cancel_requested)
@@ -1804,7 +1821,8 @@ class MlxVideoAdapter(VideoGenerationAdapter):
             (project_path / folder).mkdir(parents=True, exist_ok=True)
 
         target = model_target(request.model)
-        progress("loading_model", "loading_model", 0.1, "Loading LTX-2.3 (MLX Q4).")
+        model_repo = self._ltx_mlx_repo(request.model)
+        progress("loading_model", "loading_model", 0.1, f"Loading {target['label']} (MLX Q4).")
         try:
             from mlx_video.generate_av import generate_video_with_audio
         except ImportError as e:
@@ -1852,11 +1870,11 @@ class MlxVideoAdapter(VideoGenerationAdapter):
         self.track_temp_output(job["id"], temp_path)
 
         lora_token = self._apply_ltx_loras(request, progress)
-        progress("running", "generating", 0.3, f"Generating {num_frames} frames with LTX-2.3 (MLX).")
-        self._loaded_models.update({request.model, self._ltx_repo})
+        progress("running", "generating", 0.3, f"Generating {num_frames} frames with {target['label']} (MLX).")
+        self._loaded_models.update({request.model, model_repo})
         try:
             generate_video_with_audio(
-                model_repo=self._ltx_repo,
+                model_repo=model_repo,
                 text_encoder_repo=self._ltx_text_encoder,
                 prompt=request.prompt,
                 negative_prompt=request.negative_prompt or None,
@@ -1901,6 +1919,34 @@ class MlxVideoAdapter(VideoGenerationAdapter):
             mime_type="video/mp4",
             raw_settings=raw_settings,
             extra={"requirements": self.estimate_requirements(request)},
+        )
+
+    def _ltx_mlx_repo(self, model: str) -> str:
+        """Resolve the MLX model repo/dir for an ltx-video model.
+
+        Prefers a locally-converted MLX dir (what `mlx_video.convert` writes into
+        `<data>/models/mlx/<model>`) so a converted checkpoint transparently supersedes
+        any turnkey repo. ltx_2_3 falls back to the published community Q4 repo; models
+        with no published MLX repo (e.g. ltx_2_3_eros) must be converted locally first.
+        """
+        env = {
+            "ltx_2_3": "SCENEWORKS_MLX_LTX23_DIR",
+            "ltx_2_3_eros": "SCENEWORKS_MLX_LTX23_EROS_DIR",
+        }.get(model)
+        local_dir = self._local_mlx_dir(model, env)
+        if local_dir is not None:
+            return local_dir
+        if model == "ltx_2_3":
+            return self._ltx_repo
+        target_dir = (
+            Path(self._settings.data_dir) / "models" / "mlx" / model
+            if self._settings is not None
+            else Path("<data>/models/mlx") / model
+        )
+        raise RuntimeError(
+            f"{model_target(model)['label']} has no MLX weights. Convert the bf16 checkpoint into "
+            f"{target_dir} with `python -m mlx_video.convert --hf-path <checkpoint> "
+            f"--mlx-path {target_dir} --quantize --q-bits 4`."
         )
 
     def _apply_ltx_loras(self, request: VideoRequest, progress: ProgressCallback):

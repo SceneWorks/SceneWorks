@@ -861,6 +861,96 @@
       }
     },
     {
+      "id": "ltx_2_3_eros",
+      "name": "LTX-2.3 10Eros",
+      "family": "ltx-video",
+      "type": "video",
+      "adapter": "ltx_video",
+      "capabilities": ["image_to_video", "text_to_video", "first_last_frame", "extend_clip", "video_bridge", "replace_person"],
+      "downloads": [
+        {
+          "provider": "huggingface",
+          "repo": "TenStrip/LTX2.3-10Eros",
+          // Community LTX-2.3 merge (Sulphur-2-base, I2V-tuned). The repo also ships
+          // fp8 and fp8-transformer variants; we only need the bf16 all-in-one, which
+          // shares the official ltx-2.3-22b-distilled key layout (model.diffusion_model.*
+          // transformer + bundled vae/audio_vae/vocoder), so it is a drop-in checkpoint.
+          "files": ["10Eros_v1_bf16.safetensors"],
+          "default": true,
+          "estimatedSizeBytes": 46139885510
+        }
+      ],
+      "paths": {
+        "model": "${HF_CACHE}/TenStrip/LTX2.3-10Eros"
+      },
+      "resources": {
+        "checkpoint": {
+          "repo": "TenStrip/LTX2.3-10Eros",
+          "file": "10Eros_v1_bf16.safetensors"
+        },
+        "distilledCheckpoint": {
+          "repo": "TenStrip/LTX2.3-10Eros",
+          "file": "10Eros_v1_bf16.safetensors"
+        },
+        "spatialUpscaler": {
+          "repo": "Lightricks/LTX-2.3",
+          "file": "ltx-2.3-spatial-upscaler-x2-1.1.safetensors"
+        },
+        "distilledLora": {
+          // TenStrip's recommended cond_safe distill LoRA for 10Eros (the model card
+          // warns that larger distill LoRAs harm the fine-tune). Only consumed by the
+          // CUDA ti2vid_two_stages torch path; the MLX path runs the converted dir.
+          "repo": "TenStrip/LTX2.3_Distilled_Lora_1.1_Experiments",
+          "file": "ltx-2.3-22b-distilled-lora-1.1_fro90_ceil72_condsafe.safetensors"
+        },
+        "gemma": {
+          "repo": "google/gemma-3-12b-it-qat-q4_0-unquantized"
+        }
+      },
+      "defaults": {
+        "duration": 6,
+        "fps": 25,
+        "resolution": "768x512",
+        "quality": "balanced",
+        "steps": 8
+      },
+      "limits": {
+        "durations": [4, 6, 8, 10, 12, 15],
+        "recommendedMaxDuration": 10,
+        "hardMaxDuration": 15,
+        "fps": [24, 25, 30],
+        "resolutions": ["768x512", "512x768", "640x640", "1280x720", "720x1280"],
+        "requiresDimensionsMultipleOf": 32
+      },
+      "loraCompatibility": {
+        "families": ["ltx-video"],
+        "types": ["style", "motion", "character", "enhance"]
+      },
+      "mlx": {
+        // No published MLX repo; the bf16 checkpoint is converted locally
+        // (python -m mlx_video.convert --quantize --q-bits 4) into
+        // <data>/models/mlx/ltx_2_3_eros. minMemoryGb mirrors the LTX-2.3 Q4 tier.
+        "minMemoryGb": 31,
+        "requiresConversion": true,
+        "convertSourceRepo": "TenStrip/LTX2.3-10Eros",
+        "textEncoderRepo": "mlx-community/gemma-3-12b-it-bf16"
+      },
+      "ui": {
+        "label": "LTX-2.3 10Eros",
+        "description": "Community LTX-2.3 merge tuned for image-to-video. Same family as LTX-2.3 — uses LTX-video LoRAs. Responds to detailed, command-style prompts.",
+        "recommendedFor": ["image_to_video", "text_to_video"],
+        "durationHint": "Best for short clips. Start with 4-8 seconds; 10 seconds is the normal ceiling for the current workflow.",
+        "promptGuide": {
+          "title": "LTX-2.3 10Eros Prompt Guide",
+          "path": "/prompt-guides/ltx-2-3-10eros.md",
+          "sources": [
+            { "label": "LTX official prompting guide", "url": "https://docs.ltx.video/api-documentation/guides/prompting-guide" },
+            { "label": "TenStrip LTX2.3-10Eros model card", "url": "https://huggingface.co/TenStrip/LTX2.3-10Eros" }
+          ]
+        }
+      }
+    },
+    {
       "id": "svd",
       "name": "Stable Video Diffusion",
       "family": "svd",

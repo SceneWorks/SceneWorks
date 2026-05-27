@@ -148,8 +148,27 @@ export function presetMatchesWorkflow(preset, mode) {
   return preset?.workflow === mode;
 }
 
-export function presetMatchesModel(preset, model) {
-  return !preset?.model || !model?.id || preset.model === model.id;
+export function presetMatchesModel(preset, model, models = null) {
+  if (!preset?.model || !model?.id) {
+    return true;
+  }
+  if (preset.model === model.id) {
+    return true;
+  }
+  // Family-aware fallback: a preset pinned to a sibling model still applies when
+  // both models share a LoRA family (e.g. an ltx_2_3 preset under ltx_2_3_eros —
+  // both "ltx-video"). Needs the catalog to resolve the preset's pinned model id
+  // into its family; without it (e.g. offline fallback) we stay strict.
+  if (Array.isArray(models)) {
+    const presetModelFamilies = modelLoraFamilies(models.find((item) => item.id === preset.model));
+    const modelFamilies = modelLoraFamilies(model);
+    return (
+      presetModelFamilies.length > 0 &&
+      modelFamilies.length > 0 &&
+      presetModelFamilies.some((family) => modelFamilies.includes(family))
+    );
+  }
+  return false;
 }
 
 export function presetLoras(preset) {

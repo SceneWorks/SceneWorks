@@ -59,8 +59,8 @@ export function useGenerationStudio({
   }, [characters, characterId]);
 
   const availablePresets = useMemo(
-    () => presets.filter((preset) => presetMatchesWorkflow(preset, mode) && presetMatchesModel(preset, selectedModel)),
-    [mode, presets, selectedModel?.id],
+    () => presets.filter((preset) => presetMatchesWorkflow(preset, mode) && presetMatchesModel(preset, selectedModel, models)),
+    [mode, presets, selectedModel?.id, models],
   );
   const selectedPreset =
     selectedPresetId === noPresetId
