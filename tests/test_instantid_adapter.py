@@ -11,7 +11,7 @@ from types import SimpleNamespace
 import pytest
 from PIL import Image
 
-from scene_worker.image_adapters import MODEL_TARGETS, image_request_from_job
+from scene_worker.image_adapters import MODEL_TARGETS, create_image_adapter, image_request_from_job
 from scene_worker.instantid_adapter import InstantIDAdapter, _letterbox
 
 _TEST_TARGET = {
@@ -102,3 +102,37 @@ def test_requires_reference_image(instantid_model):
 
 def test_unload_when_empty_is_false():
     assert InstantIDAdapter().unload() is False
+
+
+def test_builtin_realvisxl_target_is_wired():
+    # The public sc-2009 target: model id matches the builtin manifest + web
+    # constants, routes to the registered adapter, and carries the spike-validated
+    # params. Guards the worker MODEL_TARGETS <-> adapter-registry wiring.
+    target = MODEL_TARGETS["instantid_realvisxl"]
+    assert target["adapter"] == InstantIDAdapter.id == "instantid_sdxl"
+    assert target["family"] == "sdxl"
+    assert target["supportsEdit"] is False
+    assert target["repo"] == "SG161222/RealVisXL_V5.0"
+    assert target["steps"] == 30
+    assert target["guidanceScale"] == 5.0
+    instant = target["instantId"]
+    assert instant["repo"] == "InstantX/InstantID"
+    assert instant["controlnetSubfolder"] == "ControlNetModel"
+    assert instant["ipAdapter"] == "ip-adapter.bin"
+
+
+def test_dispatch_routes_instantid_model_to_adapter():
+    # Regression: the model -> adapter dispatch must route instantid_realvisxl to
+    # the InstantID adapter, NOT fall through to the procedural placeholder.
+    job = {"id": "j", "payload": {"model": "instantid_realvisxl", "mode": "character_image"}}
+    # No adapters dict (test/direct path) -> lazily constructed.
+    assert isinstance(create_image_adapter(job, None), InstantIDAdapter)
+    # Runtime path: resolves the registered instance from the adapters dict.
+    registered = InstantIDAdapter()
+    assert create_image_adapter(job, {"instantid_sdxl": registered}) is registered
+
+
+def test_dispatch_accepts_instantid_adapter_override():
+    # SCENEWORKS_IMAGE_ADAPTER=instantid_sdxl must be an accepted explicit override.
+    job = {"id": "j", "payload": {"model": "z_image_turbo", "adapter": "instantid_sdxl"}}
+    assert isinstance(create_image_adapter(job, None), InstantIDAdapter)

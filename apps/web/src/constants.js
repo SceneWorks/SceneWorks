@@ -180,6 +180,17 @@ export const fallbackModels = [
     },
   },
   {
+    id: "instantid_realvisxl",
+    name: "InstantID (RealVisXL)",
+    type: "image",
+    // Reference-driven only — appears solely in the "With character" picker.
+    capabilities: ["character_image"],
+    ui: {
+      description: "Identity-preserving character generation — holds a person's face from a single reference image while the prompt drives scene, pose, and wardrobe. RealVisXL_V5.0 (photoreal SDXL, openrail++ commercial-OK) + InstantID ArcFace embedding & landmark ControlNet; faithful likeness with scene freedom (vs IP-Adapter resemblance only). Pick a character with an approved reference, then raise Variations. ~30 steps at guidance 5.0, ~22GB peak.",
+      promptGuide: { title: "InstantID (RealVisXL) Prompt Guide", path: "/prompt-guides/instantid-realvisxl.md" },
+    },
+  },
+  {
     id: "ltx_2_3",
     name: "LTX-2.3",
     type: "video",
