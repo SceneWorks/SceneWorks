@@ -187,6 +187,145 @@ fn progress_keeps_running_max_for_peak_gpu_meters() {
     );
 }
 
+/// sc-2087 — server-side job-title derivation populates the JobSnapshot.title
+/// field per the design spec table. Front-end falls back to its own derivation
+/// only when this is None, so the queue never displays a raw job id.
+#[test]
+fn job_snapshot_title_is_derived_from_payload() {
+    let store = store("title-derivation");
+    register_image_worker(&store);
+
+    fn create(store: &JobsStore, job_type: JobType, payload: Value) -> String {
+        store
+            .create_job(CreateJob {
+                job_type,
+                project_id: Some("p".to_owned()),
+                project_name: Some("P".to_owned()),
+                payload: object(payload),
+                requested_gpu: "auto".to_owned(),
+                source_job_id: None,
+                duplicate_of_job_id: None,
+                attempts: 1,
+            })
+            .expect("job creates")
+            .id
+    }
+
+    let image_id = create(
+        &store,
+        JobType::ImageGenerate,
+        json!({ "prompt": "a sunset over the mountains" }),
+    );
+    let lora_train_id = create(
+        &store,
+        JobType::LoraTrain,
+        json!({ "loraName": "kelsie-v3" }),
+    );
+    let caption_id = create(
+        &store,
+        JobType::TrainingCaption,
+        json!({ "datasetName": "kelsie-set" }),
+    );
+    let video_id = create(
+        &store,
+        JobType::VideoGenerate,
+        json!({ "prompt": "slow push-in on a foggy lighthouse" }),
+    );
+    let character_id_job = create(
+        &store,
+        JobType::ImageGenerate,
+        json!({ "prompt": "ignored", "characterId": "char-1", "characterName": "Aria" }),
+    );
+    let lora_import_id = create(
+        &store,
+        JobType::LoraImport,
+        json!({ "loraName": "detail_lora" }),
+    );
+    let model_download_id = create(
+        &store,
+        JobType::ModelDownload,
+        json!({ "modelName": "Z-Image Turbo" }),
+    );
+    let prompt_refine_id = create(
+        &store,
+        JobType::PromptRefine,
+        json!({ "prompt": "make it better please" }),
+    );
+    let unnamed_lora_id = create(&store, JobType::LoraTrain, json!({}));
+    let person_detect_id = create(&store, JobType::PersonDetect, json!({}));
+
+    let title = |id: &str| store.get_job(id).expect("loads").title.clone();
+    assert_eq!(
+        title(&image_id).as_deref(),
+        Some("Generate Image — a sunset over the mountains"),
+    );
+    assert_eq!(
+        title(&lora_train_id).as_deref(),
+        Some("Training Run — kelsie-v3"),
+    );
+    assert_eq!(
+        title(&caption_id).as_deref(),
+        Some("Dataset Captioning — kelsie-set"),
+    );
+    assert_eq!(
+        title(&video_id).as_deref(),
+        Some("Generate Video — slow push-in on a foggy lighthouse"),
+    );
+    assert_eq!(
+        title(&character_id_job).as_deref(),
+        Some("Character Turnaround — Aria"),
+    );
+    assert_eq!(
+        title(&lora_import_id).as_deref(),
+        Some("LoRA Import — detail_lora"),
+    );
+    assert_eq!(
+        title(&model_download_id).as_deref(),
+        Some("Model Import — Z-Image Turbo"),
+    );
+    assert_eq!(
+        title(&prompt_refine_id).as_deref(),
+        Some("Prompt Refine — make it better please"),
+    );
+    assert_eq!(
+        title(&unnamed_lora_id).as_deref(),
+        Some("Training Run — (unnamed LoRA)"),
+    );
+    // person_detect (and other types without a meaningful subject) intentionally
+    // return None so the frontend can fall back to its own derivation.
+    assert_eq!(title(&person_detect_id), None);
+}
+
+/// Long image-generation prompts are truncated on a word boundary with an
+/// ellipsis so the title doesn't blow out the queue row.
+#[test]
+fn job_snapshot_title_truncates_long_prompts() {
+    let store = store("title-truncation");
+    register_image_worker(&store);
+    // 100 chars of "a " repeating, well over the 80-char cap.
+    let long_prompt = "a ".repeat(60);
+    let id = store
+        .create_job(CreateJob {
+            job_type: JobType::ImageGenerate,
+            project_id: Some("p".to_owned()),
+            project_name: Some("P".to_owned()),
+            payload: object(json!({ "prompt": long_prompt })),
+            requested_gpu: "auto".to_owned(),
+            source_job_id: None,
+            duplicate_of_job_id: None,
+            attempts: 1,
+        })
+        .expect("job creates")
+        .id;
+    let title = store.get_job(&id).expect("loads").title.unwrap();
+    assert!(title.starts_with("Generate Image — "));
+    assert!(
+        title.ends_with("…"),
+        "title should end with ellipsis: {title}"
+    );
+    assert!(title.len() < 110, "title should be short: {title}");
+}
+
 #[test]
 fn non_gpu_jobs_can_claim_while_gpu_is_busy() {
     let store = store("non-gpu-claim");

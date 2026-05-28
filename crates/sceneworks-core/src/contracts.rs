@@ -631,6 +631,12 @@ pub struct JobSnapshot {
     /// Pair of peak_gpu_memory_pct.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub peak_gpu_load_pct: Option<ContractNumber>,
+    /// Human-readable job title derived server-side from job type + payload
+    /// (sc-2087). The WorkerProgressCard reads `title` first and only falls
+    /// back to client-side derivation when this is absent, so queue rows
+    /// always show something more meaningful than the bare job id.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
     #[serde(flatten)]
     pub extra: ExtraFields,
 }

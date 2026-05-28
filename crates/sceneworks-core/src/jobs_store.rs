@@ -1012,13 +1012,16 @@ fn row_to_job(row: &Row<'_>) -> rusqlite::Result<JobSnapshot> {
     let elapsed_seconds = started_at
         .as_deref()
         .and_then(|started| elapsed_seconds(started, completed_at.as_deref()));
+    let job_type: JobType = parse_string_enum(&row.get::<_, String>("type")?);
+    let payload = loads_object(row.get::<_, Option<String>>("payload_json")?.as_deref());
+    let title = derive_job_title(&job_type, &payload);
     Ok(JobSnapshot {
         id: row.get("id")?,
-        job_type: parse_string_enum(&row.get::<_, String>("type")?),
+        job_type,
         status: parse_string_enum(&row.get::<_, String>("status")?),
         project_id: row.get("project_id")?,
         project_name: row.get("project_name")?,
-        payload: loads_object(row.get::<_, Option<String>>("payload_json")?.as_deref()),
+        payload,
         result: loads_object(row.get::<_, Option<String>>("result_json")?.as_deref()),
         requested_gpu: row.get("requested_gpu")?,
         assigned_gpu: row.get("assigned_gpu")?,
@@ -1041,8 +1044,107 @@ fn row_to_job(row: &Row<'_>) -> rusqlite::Result<JobSnapshot> {
         last_heartbeat_at: row.get("last_heartbeat_at")?,
         peak_gpu_memory_pct: peak_memory.map(number_from_f64),
         peak_gpu_load_pct: peak_load.map(number_from_f64),
+        title,
         extra: Default::default(),
     })
+}
+
+/// Server-side derivation of the human-readable job title surfaced in the
+/// queue and WorkerProgressCard (sc-2087). Mirrors the Job Title table in
+/// docs/design/worker-progress-card.md. Returns None for types where the
+/// payload doesn't carry a meaningful subject — the frontend then falls back
+/// to its own derivation, keeping the queue from ever showing only a raw job
+/// id as the row identifier.
+fn derive_job_title(job_type: &JobType, payload: &Map<String, Value>) -> Option<String> {
+    /// Find the first string value at any of the candidate keys.
+    fn first_str<'a>(payload: &'a Map<String, Value>, keys: &[&str]) -> Option<&'a str> {
+        keys.iter()
+            .find_map(|key| payload.get(*key).and_then(Value::as_str))
+            .filter(|value| !value.trim().is_empty())
+    }
+    /// Truncate a prompt to ~max chars on a word boundary, append an ellipsis
+    /// when truncated. Mirrors the JS helper in WorkerProgressCard.jsx.
+    fn truncate_prompt(prompt: &str, max: usize) -> String {
+        if prompt.len() <= max {
+            return prompt.to_owned();
+        }
+        let mut cut = prompt[..max].to_owned();
+        if let Some(space) = cut.rfind(' ') {
+            if space > (max * 6) / 10 {
+                cut.truncate(space);
+            }
+        }
+        format!("{}…", cut.trim_end())
+    }
+
+    match job_type {
+        JobType::LoraTrain => {
+            let subject = first_str(payload, &["loraName", "outputName", "targetName", "loraId"])
+                .map(str::to_owned)
+                .or_else(|| {
+                    payload
+                        .get("plan")
+                        .and_then(|plan| plan.get("output"))
+                        .and_then(|output| output.get("loraId"))
+                        .and_then(Value::as_str)
+                        .map(str::to_owned)
+                })
+                .unwrap_or_else(|| "(unnamed LoRA)".to_owned());
+            Some(format!("Training Run — {subject}"))
+        }
+        JobType::TrainingCaption => {
+            let subject = first_str(payload, &["datasetName", "datasetId"])
+                .unwrap_or("(unnamed dataset)")
+                .to_owned();
+            Some(format!("Dataset Captioning — {subject}"))
+        }
+        JobType::ImageGenerate
+        | JobType::ImageEdit
+        | JobType::ImageVqa
+        | JobType::ImageInterleave => {
+            // Character Turnaround override: a character generation has
+            // characterId + characterName on the payload.
+            if payload.get("characterId").and_then(Value::as_str).is_some() {
+                if let Some(name) = first_str(payload, &["characterName"]) {
+                    return Some(format!("Character Turnaround — {name}"));
+                }
+            }
+            let prompt = first_str(payload, &["prompt"]).unwrap_or("(no prompt)");
+            Some(format!("Generate Image — {}", truncate_prompt(prompt, 80)))
+        }
+        JobType::VideoGenerate | JobType::VideoExtend | JobType::VideoBridge => {
+            let prompt = first_str(payload, &["prompt"]).unwrap_or("(no prompt)");
+            Some(format!("Generate Video — {}", truncate_prompt(prompt, 80)))
+        }
+        JobType::PersonReplace => {
+            let prompt = first_str(payload, &["prompt"]).unwrap_or("(no prompt)");
+            Some(format!("Person Replace — {}", truncate_prompt(prompt, 80)))
+        }
+        JobType::ModelDownload | JobType::ModelImport | JobType::ModelConvert => {
+            let subject =
+                first_str(payload, &["modelName", "filename", "modelId", "repo"]).unwrap_or("");
+            if subject.is_empty() {
+                Some("Model Import".to_owned())
+            } else {
+                Some(format!("Model Import — {subject}"))
+            }
+        }
+        JobType::LoraImport => {
+            let subject = first_str(payload, &["loraName", "filename", "loraId"]).unwrap_or("");
+            if subject.is_empty() {
+                Some("LoRA Import".to_owned())
+            } else {
+                Some(format!("LoRA Import — {subject}"))
+            }
+        }
+        JobType::PromptRefine => {
+            let prompt = first_str(payload, &["prompt"]).unwrap_or("(empty prompt)");
+            Some(format!("Prompt Refine — {}", truncate_prompt(prompt, 60)))
+        }
+        // Person detect/track/segment + anything else — let the frontend
+        // fall back to its own derivation.
+        _ => None,
+    }
 }
 
 fn row_to_worker(row: &Row<'_>) -> rusqlite::Result<WorkerSnapshot> {

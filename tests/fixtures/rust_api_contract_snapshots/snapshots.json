@@ -1302,7 +1302,7 @@
           "stylePreset": "character-test",
           "width": 1024
         },
-        "progress": 0.0,
+        "progress": 0,
         "projectId": "project_fixture",
         "projectName": null,
         "requestedGpu": "auto",
@@ -1311,6 +1311,7 @@
         "stage": "queued",
         "startedAt": null,
         "status": "queued",
+        "title": "Generate Image — portrait in rain",
         "type": "image_generate",
         "updatedAt": "<timestamp>",
         "workerId": null
@@ -1392,7 +1393,7 @@
               "stylePreset": "character-test",
               "width": 1024
             },
-            "progress": 0.0,
+            "progress": 0,
             "projectId": "project_fixture",
             "projectName": null,
             "requestedGpu": "auto",
@@ -1401,6 +1402,7 @@
             "stage": "queued",
             "startedAt": null,
             "status": "queued",
+            "title": "Generate Image — portrait in rain",
             "type": "image_generate",
             "updatedAt": "<timestamp>",
             "workerId": null
@@ -1496,7 +1498,7 @@
       "stylePreset": "character-test",
       "width": 1024
     },
-    "progress": 0.0,
+    "progress": 0,
     "projectId": "project_fixture",
     "projectName": null,
     "requestedGpu": "auto",
@@ -1505,6 +1507,7 @@
     "stage": "queued",
     "startedAt": null,
     "status": "queued",
+    "title": "Generate Image — portrait in rain",
     "type": "image_generate",
     "updatedAt": "<timestamp>",
     "workerId": null
@@ -1547,7 +1550,7 @@
         "lastHeartbeatAt": null,
         "message": "Worker claimed job.",
         "payload": {},
-        "progress": 0.0,
+        "progress": 0,
         "projectId": null,
         "projectName": null,
         "requestedGpu": "auto",
@@ -1556,6 +1559,7 @@
         "stage": "preparing",
         "startedAt": "<timestamp>",
         "status": "preparing",
+        "title": "Generate Image — (no prompt)",
         "type": "image_generate",
         "updatedAt": "<timestamp>",
         "workerId": "claim-worker-fixture"
@@ -1656,7 +1660,7 @@
       "stylePreset": "cinematic",
       "width": 1024
     },
-    "progress": 0.0,
+    "progress": 0,
     "projectId": "project_fixture",
     "projectName": "Parity Project",
     "requestedGpu": "auto",
@@ -1665,6 +1669,7 @@
     "stage": "queued",
     "startedAt": null,
     "status": "queued",
+    "title": "Generate Image — mist over hills",
     "type": "image_generate",
     "updatedAt": "<timestamp>",
     "workerId": null
@@ -1751,7 +1756,7 @@
       "stylePreset": "cinematic",
       "width": 1024
     },
-    "progress": 0.0,
+    "progress": 0,
     "projectId": "project_fixture",
     "projectName": "Parity Project",
     "requestedGpu": "auto",
@@ -1760,6 +1765,7 @@
     "stage": "preparing",
     "startedAt": "<timestamp>",
     "status": "preparing",
+    "title": "Generate Image — mist over hills",
     "type": "image_generate",
     "updatedAt": "<timestamp>",
     "workerId": "parity-worker"
@@ -1841,7 +1847,7 @@
         "stylePreset": "cinematic",
         "width": 1024
       },
-      "progress": 0.0,
+      "progress": 0,
       "projectId": "project_fixture",
       "projectName": "Parity Project",
       "requestedGpu": "auto",
@@ -1850,6 +1856,7 @@
       "stage": "preparing",
       "startedAt": "<timestamp>",
       "status": "preparing",
+      "title": "Generate Image — mist over hills",
       "type": "image_generate",
       "updatedAt": "<timestamp>",
       "workerId": "parity-worker"
@@ -1931,7 +1938,7 @@
       "stylePreset": "cinematic",
       "width": 1024
     },
-    "progress": 1.0,
+    "progress": 1,
     "projectId": "project_fixture",
     "projectName": "Parity Project",
     "requestedGpu": "auto",
@@ -1940,6 +1947,7 @@
     "stage": "canceled",
     "startedAt": "<timestamp>",
     "status": "canceled",
+    "title": "Generate Image — mist over hills",
     "type": "image_generate",
     "updatedAt": "<timestamp>",
     "workerId": "parity-worker"
@@ -1984,7 +1992,7 @@
       "scope": "global",
       "targetDir": "<runtime-root>/data/loras/imported_lora"
     },
-    "progress": 0.0,
+    "progress": 0,
     "projectId": null,
     "projectName": null,
     "requestedGpu": "auto",
@@ -1993,6 +2001,7 @@
     "stage": "queued",
     "startedAt": null,
     "status": "queued",
+    "title": "LoRA Import — imported_lora",
     "type": "lora_import",
     "updatedAt": "<timestamp>",
     "workerId": null
@@ -2075,7 +2084,7 @@
       "repo": "owner/base-model",
       "targetDir": "<runtime-root>/data/models/owner__base-model"
     },
-    "progress": 0.0,
+    "progress": 0,
     "projectId": null,
     "projectName": null,
     "requestedGpu": "auto",
@@ -2084,6 +2093,7 @@
     "stage": "queued",
     "startedAt": null,
     "status": "queued",
+    "title": "Model Import — User Model",
     "type": "model_download",
     "updatedAt": "<timestamp>",
     "workerId": null
@@ -2266,7 +2276,7 @@
       "sourceAssetId": "asset-video",
       "sourceTimestamp": 1.25
     },
-    "progress": 0.0,
+    "progress": 0,
     "projectId": "project_fixture",
     "projectName": "parity-project",
     "requestedGpu": "auto",
@@ -2314,7 +2324,7 @@
         "confidence": 0.91,
         "detected": true,
         "mask": null,
-        "timestamp": 0.0
+        "timestamp": 0
       },
       {
         "box": {
@@ -2357,7 +2367,7 @@
         "confidence": 0.91,
         "detected": true,
         "mask": null,
-        "timestamp": 0.0
+        "timestamp": 0
       },
       {
         "box": {
@@ -2415,7 +2425,7 @@
       "sourceAssetId": "asset-video",
       "trackName": "Hero"
     },
-    "progress": 0.0,
+    "progress": 0,
     "projectId": "project_fixture",
     "projectName": "parity-project",
     "requestedGpu": "auto",
@@ -2443,7 +2453,7 @@
           "confidence": 0.91,
           "detected": true,
           "mask": null,
-          "timestamp": 0.0
+          "timestamp": 0
         },
         {
           "box": {
@@ -2565,7 +2575,7 @@
       "sourceClipAssetId": "asset-video",
       "width": 768
     },
-    "progress": 0.0,
+    "progress": 0,
     "projectId": "project_fixture",
     "projectName": "Parity Project",
     "requestedGpu": "auto",
@@ -2574,6 +2584,7 @@
     "stage": "queued",
     "startedAt": null,
     "status": "queued",
+    "title": "Person Replace — hero walks through rain",
     "type": "person_replace",
     "updatedAt": "<timestamp>",
     "workerId": null
@@ -2581,7 +2592,7 @@
   "timeline create response": {
     "aspectRatio": "16:9",
     "createdAt": "<timestamp>",
-    "duration": 0.0,
+    "duration": 0,
     "fps": 24,
     "height": 720,
     "id": "timeline_fixture",
@@ -2621,7 +2632,7 @@
   "timeline detail response": {
     "aspectRatio": "16:9",
     "createdAt": "<timestamp>",
-    "duration": 1.0,
+    "duration": 1,
     "fps": 24,
     "height": 720,
     "id": "timeline_fixture",
@@ -2638,11 +2649,11 @@
             "displayName": "Still",
             "fit": "fit",
             "id": "item-1",
-            "sourceIn": 0.0,
-            "sourceOut": 1.0,
-            "speed": 1.0,
-            "timelineEnd": 1.0,
-            "timelineStart": 0.0,
+            "sourceIn": 0,
+            "sourceOut": 1,
+            "speed": 1,
+            "timelineEnd": 1,
+            "timelineStart": 0,
             "trackId": "track_main",
             "transitionIn": null,
             "transitionOut": null,
@@ -2659,7 +2670,7 @@
                 "source": "original"
               }
             ],
-            "volume": 1.0
+            "volume": 1
           }
         ],
         "kind": "video",
@@ -2710,7 +2721,7 @@
       "timelineName": "Main timeline",
       "timelinePath": "timelines/main-timeline-<upload-suffix>.sceneworks.timeline.json"
     },
-    "progress": 0.0,
+    "progress": 0,
     "projectId": "project_fixture",
     "projectName": null,
     "requestedGpu": "auto",
@@ -2748,7 +2759,7 @@
       "timelineName": "Main timeline",
       "timelinePath": "timelines/main-timeline-<upload-suffix>.sceneworks.timeline.json"
     },
-    "progress": 0.0,
+    "progress": 0,
     "projectId": "project_fixture",
     "projectName": null,
     "requestedGpu": "auto",
@@ -2765,7 +2776,7 @@
     {
       "aspectRatio": "16:9",
       "createdAt": "<timestamp>",
-      "duration": 1.0,
+      "duration": 1,
       "filePath": "timelines/main-timeline-<upload-suffix>.sceneworks.timeline.json",
       "fps": 24,
       "height": 720,
@@ -2778,7 +2789,7 @@
   "timeline update response": {
     "aspectRatio": "16:9",
     "createdAt": "<timestamp>",
-    "duration": 1.0,
+    "duration": 1,
     "fps": 24,
     "height": 720,
     "id": "timeline_fixture",
@@ -2795,11 +2806,11 @@
             "displayName": "Still",
             "fit": "fit",
             "id": "item-1",
-            "sourceIn": 0.0,
-            "sourceOut": 1.0,
-            "speed": 1.0,
-            "timelineEnd": 1.0,
-            "timelineStart": 0.0,
+            "sourceIn": 0,
+            "sourceOut": 1,
+            "speed": 1,
+            "timelineEnd": 1,
+            "timelineStart": 0,
             "trackId": "track_main",
             "transitionIn": null,
             "transitionOut": null,
@@ -2816,7 +2827,7 @@
                 "source": "original"
               }
             ],
-            "volume": 1.0
+            "volume": 1
           }
         ],
         "kind": "video",
@@ -2921,7 +2932,7 @@
       "stylePreset": "cinematic",
       "width": 1024
     },
-    "progress": 0.0,
+    "progress": 0,
     "projectId": "project_fixture",
     "projectName": "Parity Project",
     "requestedGpu": "auto",
@@ -2930,6 +2941,7 @@
     "stage": "queued",
     "startedAt": null,
     "status": "queued",
+    "title": "Generate Image — mist over hills",
     "type": "image_generate",
     "updatedAt": "<timestamp>",
     "workerId": null
