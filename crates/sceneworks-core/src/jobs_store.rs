@@ -780,8 +780,14 @@ impl JobsStore {
                    completed_at = coalesce(?8, completed_at),
                    canceled_at = coalesce(?9, canceled_at),
                    updated_at = ?10,
-                   peak_gpu_memory_pct = max(coalesce(peak_gpu_memory_pct, 0), coalesce(?11, peak_gpu_memory_pct, 0)),
-                   peak_gpu_load_pct   = max(coalesce(peak_gpu_load_pct,   0), coalesce(?12, peak_gpu_load_pct,   0))
+                   peak_gpu_memory_pct = case
+                       when ?11 is null then peak_gpu_memory_pct
+                       else max(coalesce(peak_gpu_memory_pct, 0), ?11)
+                   end,
+                   peak_gpu_load_pct = case
+                       when ?12 is null then peak_gpu_load_pct
+                       else max(coalesce(peak_gpu_load_pct, 0), ?12)
+                   end
              where id = ?13
             ",
             params![

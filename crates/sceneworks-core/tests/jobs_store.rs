@@ -187,6 +187,41 @@ fn progress_keeps_running_max_for_peak_gpu_meters() {
     );
 }
 
+/// A job whose every progress update omits the peak fields (e.g. a CPU-only
+/// utility worker, or a path where gpu_utilization() returned nothing) must
+/// keep peak_gpu_memory_pct / peak_gpu_load_pct NULL across the whole
+/// lifecycle — otherwise the snapshot diverges from a job that ran on a
+/// peerless backend, breaking parity (sc-2086 fix-forward).
+#[test]
+fn progress_leaves_peaks_null_when_no_samples_arrive() {
+    let store = store("peak-null-no-samples");
+    register_image_worker(&store);
+    let created = store
+        .create_job(image_job(object(json!({ "prompt": "p" }))))
+        .expect("job creates");
+    store.claim_next_job("worker-1").expect("claim ok");
+
+    let progress_no_peaks = ProgressUpdate {
+        status: JobStatus::Running,
+        stage: ProgressStage::Running,
+        progress: 0.5,
+        message: "running".to_owned(),
+        error: None,
+        result: None,
+        eta_seconds: None,
+        peak_gpu_memory_pct: None,
+        peak_gpu_load_pct: None,
+    };
+    for _ in 0..3 {
+        store
+            .update_job_progress(&created.id, progress_no_peaks.clone())
+            .expect("progress update");
+    }
+    let final_job = store.get_job(&created.id).expect("loads");
+    assert!(final_job.peak_gpu_memory_pct.is_none());
+    assert!(final_job.peak_gpu_load_pct.is_none());
+}
+
 /// sc-2087 — server-side job-title derivation populates the JobSnapshot.title
 /// field per the design spec table. Front-end falls back to its own derivation
 /// only when this is None, so the queue never displays a raw job id.
