@@ -185,6 +185,7 @@ class TrainingRunConfig:
     sample_prompts: list[str]
     training_adapter_repo: str | None = None
     training_adapter_version: str | None = None
+    weight_noise_sigma: float = 0.0
     advanced: dict[str, Any] = field(default_factory=dict)
 
 
@@ -260,6 +261,7 @@ def read_run_config(plan: dict[str, Any]) -> TrainingRunConfig:
         sample_prompts=[str(prompt).strip() for prompt in sample_prompts if str(prompt).strip()][:4],
         training_adapter_repo=_as_optional_str(advanced.get("trainingAdapterRepo")),
         training_adapter_version=_as_optional_str(advanced.get("trainingAdapterVersion")),
+        weight_noise_sigma=max(0.0, _as_float(advanced.get("weightNoiseSigma"), 0.0)),
         advanced=advanced,
     )
 
@@ -844,6 +846,25 @@ def training_loss(torch: Any, prediction: Any, target: Any, loss_type: str) -> A
     return torch.nn.functional.mse_loss(prediction.float(), target.float())
 
 
+def apply_weight_noise(torch: Any, optimizer: Any, sigma: float) -> None:
+    """Add small Gaussian noise to every trainable parameter the optimizer owns.
+
+    Implements the "weight noising" regularizer from BuffaloBuffaloBuffaloBuffalo /
+    ai-toolkit-perceptual: a per-step Gaussian perturbation that biases LoRA
+    training toward flatter loss minima and reduces character-LoRA memorization.
+    Opt-in via ``advanced.weightNoiseSigma`` (``0`` disables — the default).
+    """
+
+    if not sigma or sigma <= 0.0:
+        return
+    with torch.no_grad():
+        for group in optimizer.param_groups:
+            for param in group.get("params", ()):
+                if param is None or not param.requires_grad:
+                    continue
+                param.add_(torch.randn_like(param) * sigma)
+
+
 def flow_matching_velocity_target(latents: Any, noise: Any) -> Any:
     """Training target for the RAW Z-Image transformer output: ``latents - noise``.
 
@@ -1241,6 +1262,7 @@ class _ZImageLoraBackend:
         (loss / accum).backward()
         if step % accum == 0 or step == total_steps:
             self._optimizer.step()
+            apply_weight_noise(torch, self._optimizer, config.weight_noise_sigma)
             self._optimizer.zero_grad()
             # Advance the LR scheduler once per optimizer update (``None`` for a
             # plain constant schedule, leaving the LR fixed).
@@ -1736,6 +1758,7 @@ class _SdxlLoraBackend:
         (loss / accum).backward()
         if step % accum == 0 or step == total_steps:
             self._optimizer.step()
+            apply_weight_noise(torch, self._optimizer, config.weight_noise_sigma)
             self._optimizer.zero_grad()
             if self._lr_scheduler is not None:
                 self._lr_scheduler.step()
@@ -2169,6 +2192,7 @@ class _WanLoraBackend:
         (loss / accum).backward()
         if step % accum == 0 or step == total_steps:
             self._optimizer.step()
+            apply_weight_noise(torch, self._optimizer, config.weight_noise_sigma)
             self._optimizer.zero_grad()
             if self._lr_scheduler is not None:
                 self._lr_scheduler.step()
@@ -2604,6 +2628,7 @@ class _WanMoeLoraBackend(_WanLoraBackend):
             micro = self._lo_micro
         if micro % accum == 0 or step >= total_steps - 1:
             optimizer.step()
+            apply_weight_noise(torch, optimizer, config.weight_noise_sigma)
             optimizer.zero_grad()
             if scheduler is not None:
                 scheduler.step()
