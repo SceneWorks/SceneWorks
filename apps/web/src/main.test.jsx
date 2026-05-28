@@ -3025,8 +3025,8 @@ describe("SceneWorks app shell", () => {
     });
     await settle();
 
-    expect(container.textContent).toContain("Video generation");
-    expect(container.textContent).toContain("queued");
+    expect(container.textContent).toContain("Generate Video");
+    expect(container.textContent).toContain("Queued");
     expect(container.textContent).not.toContain("Jobs and GPUs");
 
     await act(async () => {
@@ -3038,8 +3038,8 @@ describe("SceneWorks app shell", () => {
     });
     await settle();
 
-    expect(container.textContent).toContain("Video generation");
-    expect(container.textContent).toContain("queued");
+    expect(container.textContent).toContain("Generate Video");
+    expect(container.textContent).toContain("Queued");
   });
 
   it("keeps model downloads on the Models page and shows local progress", async () => {
