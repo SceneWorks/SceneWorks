@@ -153,15 +153,20 @@ function StatusBadge({ status }) {
   return <span className={`status-badge worker-progress-card__status ${status}`}>{label}</span>;
 }
 
-function HardwarePills({ device, vendor, architecture }) {
+function HardwarePills({ device, gpuLabel, architecture }) {
   if (!device) return null;
+  // Apple Silicon / MLX runs against Unified Memory — the Mem meter reflects
+  // shared system memory, not dedicated VRAM. Worth surfacing so the meter
+  // number isn't misread as a discrete-VRAM figure.
+  const sharedMem = architecture === "mps" || architecture === "mlx";
   return (
-    <div className="worker-progress-card__hw-pills">
+    <div className="worker-progress-card__hw-info">
       <span className="worker-progress-card__pill device">{device}</span>
-      {vendor ? <span className="worker-progress-card__pill vendor">{vendor}</span> : null}
+      {gpuLabel ? <span className="worker-progress-card__hw-name" title={gpuLabel}>{gpuLabel}</span> : null}
       {architecture ? (
         <span className={`worker-progress-card__pill arch arch-${architecture}`}>{architecture}</span>
       ) : null}
+      {sharedMem ? <span className="worker-progress-card__hw-note">shared mem</span> : null}
     </div>
   );
 }
@@ -394,26 +399,33 @@ export function WorkerProgressCard({
         ) : null}
       </div>
       <div className="worker-progress-card__status-row">
-        <span>
+        <span className="worker-progress-card__status-stage">
           <small>Stage:</small>
           <strong>{defaultChipLabel(job.stage ?? job.status)}</strong>
         </span>
-        <span>
-          <small>Elapsed:</small>
-          <strong>{formatSeconds(elapsedSeconds)}</strong>
-        </span>
-        {attempts > 1 || actionStatuses.has(job.status) ? (
-          <span>
-            <small>Attempt:</small>
-            <strong>{attempts}/{MAX_ATTEMPTS}</strong>
+        {job.message ? (
+          <span className="worker-progress-card__status-message" title={job.message}>
+            {job.message}
           </span>
-        ) : null}
+        ) : (
+          <span aria-hidden="true" />
+        )}
+        <span className="worker-progress-card__status-right">
+          {attempts > 1 || actionStatuses.has(job.status) ? (
+            <span className="worker-progress-card__status-attempt">
+              <small>Attempt:</small>
+              <strong>{attempts}/{MAX_ATTEMPTS}</strong>
+            </span>
+          ) : null}
+          <span>
+            <small>Elapsed:</small>
+            <strong>{formatSeconds(elapsedSeconds)}</strong>
+          </span>
+        </span>
       </div>
       <ProgressBar status={job.status} progress={job.progress} />
-      {job.error || job.message ? (
-        <p className={`worker-progress-card__message${job.error ? " error" : ""}`}>
-          {job.error ?? job.message}
-        </p>
+      {job.error ? (
+        <p className="worker-progress-card__message error">{job.error}</p>
       ) : null}
       <div className="worker-progress-card__actions">
         {canCancel ? (
