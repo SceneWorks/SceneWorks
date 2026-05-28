@@ -4,6 +4,7 @@ import { actionStatuses, terminalStatuses } from "../jobTypes.js";
 import { formatSeconds, percent } from "../formatting.js";
 import { useAppContext } from "../context/AppContext.js";
 import { deriveWorkerHardware, findWorkerForJob, liveMeters } from "../workers.js";
+import { AssetMedia, AssetThumbnail, assetUrl, posterUrl } from "./assetMedia.jsx";
 
 // WorkerProgressCard — unified worker/job progress component (sc-2083).
 // Renders the same 6-row skeleton everywhere (Image Studio, Video Studio,
@@ -190,6 +191,130 @@ function ProgressBar({ status, progress }) {
   );
 }
 
+// Thumbnails region (sc-2084). Four variants — image-grid, video-player,
+// small-row, hidden — covering Image Studio (large grid), Video Studio
+// (single player), Queue + batch (compact row), and Caption/Import (no
+// thumbnails). Interim thumbnails are emitted by image-producing workers in
+// sc-2085; until that ships interimAssets is just empty.
+const THUMBNAIL_VARIANTS = new Set(["image-grid", "video-player", "small-row", "hidden"]);
+
+function mergeThumbnails(finalAssets, interimAssets) {
+  const finalArray = Array.isArray(finalAssets) ? finalAssets : [];
+  const interimArray = Array.isArray(interimAssets) ? interimAssets : [];
+  if (interimArray.length === 0) return finalArray;
+  if (finalArray.length === 0) return interimArray;
+  // Dedupe by id; finals supersede interims.
+  const finalIds = new Set(finalArray.map((asset) => asset?.id).filter(Boolean));
+  const survivingInterim = interimArray.filter((asset) => !finalIds.has(asset?.id));
+  return [...finalArray, ...survivingInterim];
+}
+
+function ThumbnailGrid({ assets, variant, onThumbnailClick, isRunning, expectedCount }) {
+  const items = Array.isArray(assets) ? assets : [];
+  const cellClass = variant === "small-row" ? "worker-progress-card__thumb-cell small" : "worker-progress-card__thumb-cell";
+  const skeletonCount = Math.max(0, (expectedCount ?? 0) - items.length);
+  const showSkeletons = isRunning && skeletonCount > 0;
+  if (items.length === 0 && !showSkeletons) {
+    return null;
+  }
+  return (
+    <div
+      className={`worker-progress-card__thumbnails worker-progress-card__thumbnails--${variant}`}
+      role="group"
+      aria-label="Job output"
+    >
+      {items.map((asset, index) => {
+        const interactive = !!onThumbnailClick;
+        const inner = <AssetThumbnail asset={asset} className="worker-progress-card__thumb-media" />;
+        const key = asset.id ?? `interim-${index}`;
+        const isInterim = asset.__interim === true;
+        return interactive ? (
+          <button
+            key={key}
+            className={`${cellClass}${isInterim ? " interim" : ""}`}
+            type="button"
+            onClick={() => onThumbnailClick(asset)}
+            aria-label={asset.displayName ?? "Open asset"}
+          >
+            {inner}
+          </button>
+        ) : (
+          <span key={key} className={`${cellClass}${isInterim ? " interim" : ""}`}>
+            {inner}
+          </span>
+        );
+      })}
+      {showSkeletons
+        ? Array.from({ length: skeletonCount }, (_, i) => (
+            <span key={`skel-${i}`} className={`${cellClass} skeleton`} aria-hidden="true" />
+          ))
+        : null}
+    </div>
+  );
+}
+
+function VideoThumbnail({ assets, onThumbnailClick }) {
+  const asset = Array.isArray(assets) ? assets[0] : null;
+  if (!asset) {
+    return (
+      <div
+        className="worker-progress-card__thumbnails worker-progress-card__thumbnails--video-player empty"
+        role="group"
+        aria-label="Video output pending"
+      >
+        <span className="worker-progress-card__video-placeholder">Rendering…</span>
+      </div>
+    );
+  }
+  // While encoding, the asset may have a poster but no playable src yet; the
+  // AssetMedia component handles both cases. Click-through opens the modal.
+  const interactive = !!onThumbnailClick;
+  const src = assetUrl(asset);
+  const poster = posterUrl(asset);
+  return (
+    <div
+      className="worker-progress-card__thumbnails worker-progress-card__thumbnails--video-player"
+      role="group"
+      aria-label="Job output"
+    >
+      {src ? (
+        <AssetMedia asset={asset} className="worker-progress-card__video" />
+      ) : poster ? (
+        <img alt="" className="worker-progress-card__video" src={poster} />
+      ) : (
+        <span className="worker-progress-card__video-placeholder">Rendering…</span>
+      )}
+      {interactive ? (
+        <button
+          type="button"
+          className="worker-progress-card__video-open"
+          onClick={() => onThumbnailClick(asset)}
+        >
+          Open
+        </button>
+      ) : null}
+    </div>
+  );
+}
+
+function ThumbnailsRegion({ variant, finalAssets, interimAssets, onThumbnailClick, isRunning, expectedCount }) {
+  if (variant === "hidden") return null;
+  if (!THUMBNAIL_VARIANTS.has(variant)) return null;
+  if (variant === "video-player") {
+    return <VideoThumbnail assets={finalAssets} onThumbnailClick={onThumbnailClick} />;
+  }
+  const merged = mergeThumbnails(finalAssets, interimAssets);
+  return (
+    <ThumbnailGrid
+      assets={merged}
+      variant={variant}
+      onThumbnailClick={onThumbnailClick}
+      isRunning={isRunning}
+      expectedCount={expectedCount}
+    />
+  );
+}
+
 export function WorkerProgressCard({
   job,
   onCancel,
@@ -198,6 +323,11 @@ export function WorkerProgressCard({
   onOpenQueue,
   hideOpenQueue = false,
   className,
+  thumbnailsVariant = "hidden",
+  thumbnailAssets,
+  interimThumbnailAssets,
+  expectedThumbnailCount,
+  onThumbnailClick,
 }) {
   const { workersById, visibleWorkers } = useAppContext();
   const worker = useMemo(() => {
@@ -280,6 +410,14 @@ export function WorkerProgressCard({
           <button className="secondary-action" onClick={() => onOpenQueue(job)} type="button">View in Queue</button>
         ) : null}
       </div>
+      <ThumbnailsRegion
+        variant={thumbnailsVariant}
+        finalAssets={thumbnailAssets}
+        interimAssets={interimThumbnailAssets}
+        onThumbnailClick={onThumbnailClick}
+        isRunning={!isTerminal}
+        expectedCount={expectedThumbnailCount}
+      />
     </article>
   );
 }

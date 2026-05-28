@@ -285,3 +285,176 @@ describe("WorkerProgressCard layout", () => {
     expect(onCancel.mock.calls[0][0]).toBe(job);
   });
 });
+
+describe("WorkerProgressCard thumbnails", () => {
+  let api;
+  afterEach(() => {
+    api?.cleanup();
+    api = null;
+  });
+
+  const completedJob = {
+    id: "job-1",
+    type: "image_generate",
+    status: "completed",
+    progress: 1,
+    attempts: 1,
+    payload: {},
+  };
+  const runningJob = {
+    id: "job-2",
+    type: "image_generate",
+    status: "running",
+    progress: 0.4,
+    attempts: 1,
+    startedAt: "2026-05-28T12:00:00Z",
+    payload: { count: 4 },
+  };
+  const videoJob = {
+    id: "job-v",
+    type: "video_generate",
+    status: "completed",
+    progress: 1,
+    attempts: 1,
+    payload: {},
+  };
+
+  const imageAssets = [
+    { id: "a-1", type: "image", url: "/api/v1/files/a-1.png" },
+    { id: "a-2", type: "image", url: "/api/v1/files/a-2.png" },
+  ];
+  const interimAsset = { id: "interim-1", type: "image", url: "/api/v1/files/i-1.jpg", __interim: true };
+  const videoAsset = { id: "v-1", type: "video", url: "/api/v1/files/v-1.mp4" };
+
+  it("hides the thumbnails region by default (variant=hidden)", () => {
+    api = render(<WorkerProgressCard job={completedJob} thumbnailAssets={imageAssets} />, makeContext([]));
+    expect(api.container.querySelector(".worker-progress-card__thumbnails")).toBeNull();
+  });
+
+  it("renders image-grid variant with one cell per final asset", () => {
+    api = render(
+      <WorkerProgressCard
+        job={completedJob}
+        thumbnailsVariant="image-grid"
+        thumbnailAssets={imageAssets}
+      />,
+      makeContext([]),
+    );
+    const grid = api.container.querySelector(".worker-progress-card__thumbnails--image-grid");
+    expect(grid).not.toBeNull();
+    expect(grid.querySelectorAll(".worker-progress-card__thumb-cell")).toHaveLength(2);
+  });
+
+  it("merges interim and final assets, deduping by id", () => {
+    const dup = { id: "a-1", type: "image", url: "/x", __interim: true };
+    api = render(
+      <WorkerProgressCard
+        job={runningJob}
+        thumbnailsVariant="image-grid"
+        thumbnailAssets={imageAssets}
+        interimThumbnailAssets={[dup, interimAsset]}
+      />,
+      makeContext([]),
+    );
+    const cells = api.container.querySelectorAll(".worker-progress-card__thumb-cell:not(.skeleton)");
+    expect(cells).toHaveLength(3); // a-1, a-2, interim-1 (dup of a-1 dropped)
+  });
+
+  it("renders skeleton cells up to expectedThumbnailCount while running", () => {
+    api = render(
+      <WorkerProgressCard
+        job={runningJob}
+        thumbnailsVariant="image-grid"
+        thumbnailAssets={[imageAssets[0]]}
+        expectedThumbnailCount={4}
+      />,
+      makeContext([]),
+    );
+    const skeletons = api.container.querySelectorAll(".worker-progress-card__thumb-cell.skeleton");
+    expect(skeletons).toHaveLength(3);
+  });
+
+  it("does not render skeletons after the job completes", () => {
+    api = render(
+      <WorkerProgressCard
+        job={completedJob}
+        thumbnailsVariant="image-grid"
+        thumbnailAssets={[imageAssets[0]]}
+        expectedThumbnailCount={4}
+      />,
+      makeContext([]),
+    );
+    expect(api.container.querySelectorAll(".worker-progress-card__thumb-cell.skeleton")).toHaveLength(0);
+  });
+
+  it("renders small-row variant with compact cells", () => {
+    api = render(
+      <WorkerProgressCard
+        job={completedJob}
+        thumbnailsVariant="small-row"
+        thumbnailAssets={imageAssets}
+      />,
+      makeContext([]),
+    );
+    const grid = api.container.querySelector(".worker-progress-card__thumbnails--small-row");
+    expect(grid).not.toBeNull();
+    const cells = grid.querySelectorAll(".worker-progress-card__thumb-cell.small");
+    expect(cells).toHaveLength(2);
+  });
+
+  it("invokes onThumbnailClick when a cell is activated", () => {
+    const onThumbnailClick = vi.fn();
+    api = render(
+      <WorkerProgressCard
+        job={completedJob}
+        thumbnailsVariant="image-grid"
+        thumbnailAssets={imageAssets}
+        onThumbnailClick={onThumbnailClick}
+      />,
+      makeContext([]),
+    );
+    const cell = api.container.querySelector(".worker-progress-card__thumb-cell");
+    act(() => {
+      cell.dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
+    });
+    expect(onThumbnailClick).toHaveBeenCalledTimes(1);
+    expect(onThumbnailClick.mock.calls[0][0].id).toBe("a-1");
+  });
+
+  it("renders video-player variant with a video element when an asset is present", () => {
+    api = render(
+      <WorkerProgressCard
+        job={videoJob}
+        thumbnailsVariant="video-player"
+        thumbnailAssets={[videoAsset]}
+      />,
+      makeContext([]),
+    );
+    expect(api.container.querySelector(".worker-progress-card__thumbnails--video-player")).not.toBeNull();
+    expect(api.container.querySelector("video")).not.toBeNull();
+  });
+
+  it("renders a video placeholder when no asset is available yet", () => {
+    api = render(
+      <WorkerProgressCard
+        job={{ ...videoJob, status: "running" }}
+        thumbnailsVariant="video-player"
+        thumbnailAssets={[]}
+      />,
+      makeContext([]),
+    );
+    expect(api.container.querySelector(".worker-progress-card__video-placeholder")).not.toBeNull();
+  });
+
+  it("renders nothing for image-grid when there are no assets and the job is terminal", () => {
+    api = render(
+      <WorkerProgressCard
+        job={completedJob}
+        thumbnailsVariant="image-grid"
+        thumbnailAssets={[]}
+      />,
+      makeContext([]),
+    );
+    expect(api.container.querySelector(".worker-progress-card__thumbnails")).toBeNull();
+  });
+});

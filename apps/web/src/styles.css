@@ -6793,3 +6793,113 @@ label {
     flex: 1 1 100%;
   }
 }
+
+/* Thumbnails region (sc-2084). Variant chosen via the thumbnailsVariant prop. */
+.worker-progress-card__thumbnails {
+  display: grid;
+  gap: 8px;
+  min-width: 0;
+}
+
+.worker-progress-card__thumbnails--image-grid {
+  grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
+}
+
+.worker-progress-card__thumbnails--small-row {
+  grid-auto-flow: column;
+  grid-auto-columns: 56px;
+  overflow-x: auto;
+  gap: 6px;
+}
+
+.worker-progress-card__thumbnails--video-player {
+  display: grid;
+  position: relative;
+}
+
+.worker-progress-card__thumb-cell {
+  display: block;
+  padding: 0;
+  border: 1px solid var(--border);
+  border-radius: var(--r-md);
+  overflow: hidden;
+  background: var(--surface);
+  cursor: pointer;
+  aspect-ratio: 1 / 1;
+  width: 100%;
+  min-width: 0;
+}
+
+.worker-progress-card__thumb-cell.small {
+  width: 56px;
+  height: 56px;
+  border-radius: var(--r-sm, 6px);
+}
+
+.worker-progress-card__thumb-cell.skeleton {
+  background: linear-gradient(
+    90deg,
+    var(--surface),
+    color-mix(in oklch, var(--surface-2) 70%, var(--surface)),
+    var(--surface)
+  );
+  background-size: 200% 100%;
+  animation: worker-progress-card-skeleton 1400ms ease-in-out infinite;
+  cursor: default;
+}
+
+@keyframes worker-progress-card-skeleton {
+  from { background-position: 200% 0; }
+  to { background-position: -200% 0; }
+}
+
+.worker-progress-card__thumb-cell.interim {
+  outline: 1px dashed color-mix(in oklch, var(--accent) 55%, transparent);
+  outline-offset: -1px;
+}
+
+.worker-progress-card__thumb-media {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.worker-progress-card__video {
+  width: 100%;
+  max-height: 360px;
+  border-radius: var(--r-md);
+  background: var(--surface);
+  object-fit: contain;
+}
+
+.worker-progress-card__video-placeholder {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 100%;
+  aspect-ratio: 16 / 9;
+  background: color-mix(in oklch, var(--surface) 70%, var(--surface-2));
+  border: 1px dashed var(--border);
+  border-radius: var(--r-md);
+  color: var(--text-muted);
+  font-size: 12px;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.worker-progress-card__thumbnails--video-player.empty {
+  /* container itself shows the placeholder */
+}
+
+.worker-progress-card__video-open {
+  position: absolute;
+  right: 8px;
+  bottom: 8px;
+  padding: 4px 10px;
+  border-radius: var(--r-pill);
+  border: 1px solid var(--border);
+  background: color-mix(in oklch, var(--surface-2) 80%, transparent);
+  font-size: 11px;
+  cursor: pointer;
+}
