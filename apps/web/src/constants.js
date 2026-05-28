@@ -206,6 +206,9 @@ export const fallbackModels = [
         { id: "down_right", label: "Down · right" },
         { id: "front", label: "Front" },
       ],
+      // Pose library (advanced.poses): generate the character in poses chosen from the
+      // bundled OpenPose gallery. Gates the pose picker in Character/Image Studio.
+      poseLibrary: true,
     },
   },
   {

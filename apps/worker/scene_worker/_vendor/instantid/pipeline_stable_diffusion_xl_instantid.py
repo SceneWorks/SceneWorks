@@ -36,7 +36,11 @@ from diffusers.utils.torch_utils import is_compiled_module, is_torch_version
 from diffusers.pipelines.stable_diffusion_xl import StableDiffusionXLPipelineOutput
 
 from diffusers import StableDiffusionXLControlNetPipeline
-from diffusers.pipelines.controlnet.multicontrolnet import MultiControlNetModel
+
+try:  # diffusers >=0.34 canonical path; the old re-export now errors on instantiation
+    from diffusers.models.controlnets.multicontrolnet import MultiControlNetModel
+except ImportError:  # older diffusers
+    from diffusers.pipelines.controlnet.multicontrolnet import MultiControlNetModel
 from diffusers.utils.import_utils import is_xformers_available
 
 from ip_adapter.resampler import Resampler

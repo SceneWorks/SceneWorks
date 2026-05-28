@@ -420,6 +420,12 @@ MODEL_TARGETS = {
             "controlnetSubfolder": "ControlNetModel",
             "ipAdapter": "ip-adapter.bin",
         },
+        # Full-body pose set (advanced.bodyPoseSet): an OpenPose ControlNet drives the
+        # standing pose while IdentityNet anchors the face. xinsir SDXL OpenPose is
+        # Apache-2.0 and the strongest open one; fetched on demand (sc-2065).
+        "openPose": {
+            "repo": "xinsir/controlnet-openpose-sdxl-1.0",
+        },
     },
 }
 

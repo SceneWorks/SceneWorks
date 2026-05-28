@@ -851,6 +851,12 @@
           { "id": "down_right", "label": "Down · right" },
           { "id": "front", "label": "Front" }
         ],
+        // Pose library: generate the character in poses chosen from the bundled OpenPose
+        // gallery (advanced.poses). An OpenPose ControlNet (xinsir, Apache-2.0; ~2.5GB,
+        // fetched on first use) drives the pose while IdentityNet anchors the face; a
+        // face-restoration pass re-imposes identity at the small full-body face size
+        // (sc-2063). This flag gates the pose picker in Character/Image Studio.
+        "poseLibrary": true,
         "promptGuide": {
           "title": "InstantID (RealVisXL) Prompt Guide",
           "path": "/prompt-guides/instantid-realvisxl.md",

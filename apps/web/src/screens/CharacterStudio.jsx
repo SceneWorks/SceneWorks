@@ -3,6 +3,7 @@ import {
   CharacterAngleSet,
   CharacterLoras,
   CharacterLooks,
+  CharacterPoseLibrary,
   CharacterReferences,
   CharacterTest,
   editableLora,
@@ -80,6 +81,11 @@ export function CharacterStudio() {
   // The InstantID-style model that can render a one-click angle set (declares view angles).
   const angleModel = useMemo(
     () => imageModels.find((item) => Array.isArray(item.ui?.viewAngles) && item.ui.viewAngles.length > 0) ?? null,
+    [imageModels],
+  );
+  // The InstantID-style model that supports the pose library (OpenPose-driven poses).
+  const poseModel = useMemo(
+    () => imageModels.find((item) => item.ui?.poseLibrary) ?? null,
     [imageModels],
   );
 
@@ -356,6 +362,19 @@ export function CharacterStudio() {
               importAsset={importAsset}
               latestAssets={latestAssets}
               onPreview={onPreview}
+              rememberLocalGenerationJob={rememberLocalGenerationJob}
+              selectedCharacter={selectedCharacter}
+            />
+
+            <CharacterPoseLibrary
+              addCharacterReference={addCharacterReference}
+              approvedReferences={approvedReferences}
+              createImageJob={createImageJob}
+              imageLocalJobs={imageLocalJobs}
+              importAsset={importAsset}
+              latestAssets={latestAssets}
+              onPreview={onPreview}
+              poseModel={poseModel}
               rememberLocalGenerationJob={rememberLocalGenerationJob}
               selectedCharacter={selectedCharacter}
             />

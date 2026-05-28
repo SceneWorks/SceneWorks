@@ -26,8 +26,9 @@ from pathlib import Path
 from typing import Any
 
 import numpy as np
-from PIL import Image
+from PIL import Image, ImageDraw, ImageFilter
 
+from .openpose_skeleton import draw_bodypose, face_box_from_keypoints, normalize_keypoints
 from .image_adapters import (
     CancelCallback,
     ImageAssetWriter,
@@ -162,6 +163,13 @@ ANGLE_SET_ORDER: tuple[str, ...] = (
     "up", "down", "up_left", "up_right", "down_left", "down_right",
 )
 
+# Pose-library generation (advanced.poses) renders on a SQUARE canvas (the library
+# skeletons are square, and the OpenPose control image must share the output aspect —
+# the kps-distortion rule). The face is small at full-body framing, so a face-restoration
+# pass re-imposes identity afterward (sc-2063 spike: ~0.38 -> ~0.88 ArcFace cosine).
+_POSE_SIZE: int = 1024
+_FACE_RESTORE_PROMPT = "close-up portrait of the woman's face, soft natural light, photorealistic, sharp focus"
+
 
 class InstantIDAdapter:
     """Identity-preserving SDXL generation via InstantID (face embedding + IdentityNet)."""
@@ -172,6 +180,9 @@ class InstantIDAdapter:
         self._pipe: Any | None = None
         self._loaded_repo: str | None = None
         self._loaded_model: str | None = None
+        # "identity" (IdentityNet only) vs "multi" (IdentityNet + OpenPose). A job that
+        # switches between view-angle and full-body-pose modes reloads the pipeline.
+        self._loaded_controlnet_mode: str | None = None
         self._face_app: Any | None = None
 
     def loaded_models(self) -> list[str]:
@@ -183,6 +194,7 @@ class InstantIDAdapter:
         self._pipe = None
         self._loaded_repo = None
         self._loaded_model = None
+        self._loaded_controlnet_mode = None
         self._empty_cache(importlib.import_module("torch"))
         return True
 
@@ -228,6 +240,7 @@ class InstantIDAdapter:
         progress: ProgressCallback,
         *,
         job_id: str,
+        pose_set: bool = False,
     ) -> Any:
         torch = importlib.import_module("torch")
         repo = request.advanced.get("modelRepo") or model_target["repo"]
@@ -235,8 +248,12 @@ class InstantIDAdapter:
         device = select_torch_device(torch, settings.gpu_id)
         activate_torch_device(torch, device)
         dtype = select_torch_dtype(torch, device, request.advanced.get("dtype"))
+        # Full-body pose set adds an OpenPose ControlNet (MultiControlNet); other modes
+        # use IdentityNet alone. The mode is part of the cache key so a job that changes
+        # mode reloads rather than feeding the wrong number of control images.
+        mode = "multi" if pose_set else "identity"
 
-        if self._pipe is not None and self._loaded_repo == repo:
+        if self._pipe is not None and self._loaded_repo == repo and self._loaded_controlnet_mode == mode:
             progress("loading_model", "loading_model", 0.22, f"Using cached {model_target['label']}.")
             self._loaded_model = request.model
             return self._pipe
@@ -258,15 +275,29 @@ class InstantIDAdapter:
             device=device,
             dtype=str(dtype),
             useInstantId=True,
+            controlnetMode=mode,
         )
 
         pipeline_class, _ = _import_instantid()
         diffusers = importlib.import_module("diffusers")
         from huggingface_hub import hf_hub_download
 
-        controlnet = diffusers.ControlNetModel.from_pretrained(
+        identitynet = diffusers.ControlNetModel.from_pretrained(
             instant_repo, subfolder=instant.get("controlnetSubfolder", "ControlNetModel"), torch_dtype=dtype
         )
+        if pose_set:
+            open_pose = model_target.get("openPose") or {}
+            open_pose_repo = open_pose.get("repo")
+            if not open_pose_repo:
+                raise RuntimeError(f"{request.model} has no OpenPose configuration for the full-body pose set.")
+            openpose_net = diffusers.ControlNetModel.from_pretrained(open_pose_repo, torch_dtype=dtype)
+            try:  # diffusers >=0.34 canonical path; old re-export errors on instantiation
+                from diffusers.models.controlnets.multicontrolnet import MultiControlNetModel
+            except ImportError:
+                from diffusers.pipelines.controlnet.multicontrolnet import MultiControlNetModel
+            controlnet: Any = MultiControlNetModel([identitynet, openpose_net])
+        else:
+            controlnet = identitynet
         from_pretrained_kwargs: dict[str, Any] = {"controlnet": controlnet, "torch_dtype": dtype}
         if model_target.get("variant"):
             from_pretrained_kwargs["variant"] = model_target["variant"]
@@ -287,6 +318,7 @@ class InstantIDAdapter:
         self._pipe = pipe
         self._loaded_repo = repo
         self._loaded_model = request.model
+        self._loaded_controlnet_mode = mode
         return pipe
 
     def _ip_adapter_scale(self, request: ImageRequest) -> float:
@@ -310,6 +342,174 @@ class InstantIDAdapter:
             return float(request.advanced.get("guidanceScale", default))
         except (TypeError, ValueError):
             return float(default)
+
+    def _openpose_scale(self, request: ImageRequest) -> float:
+        try:
+            return float(request.advanced.get("openPoseScale", 0.7))
+        except (TypeError, ValueError):
+            return 0.7
+
+    @staticmethod
+    def _normalized_kps(face: Any) -> np.ndarray:
+        """Reference 5-point kps normalized to the face bbox (so they can be re-placed at
+        any position/scale on a new canvas)."""
+        kps = np.asarray(face["kps"], dtype=np.float32)
+        x1, y1, x2, y2 = face["bbox"]
+        origin = np.array([x1, y1], dtype=np.float32)
+        size = np.array([max(1.0, x2 - x1), max(1.0, y2 - y1)], dtype=np.float32)
+        return (kps - origin) / size
+
+    def _run_pose(
+        self,
+        settings: WorkerSettings,
+        pipe: Any,
+        request: ImageRequest,
+        seed: int,
+        project_path: Path,
+        keypoints: list[Any],
+        cancel_requested: CancelCallback | None = None,
+    ) -> Image.Image:
+        """Generate the character in one library pose (square canvas): the OpenPose
+        skeleton (rendered from `keypoints`) drives the pose, IdentityNet anchors the face
+        when the head is visible, then the face-restoration pass re-imposes identity at the
+        small full-body face size."""
+        torch = importlib.import_module("torch")
+        device = select_torch_device(torch, settings.gpu_id)
+        activate_torch_device(torch, device)
+        _, draw_kps = _import_instantid()
+        model_target = MODEL_TARGETS[request.model]
+        width = height = _POSE_SIZE
+
+        reference = load_reference_image(project_path, request.reference_asset_id)
+        face = self._largest_face(_letterbox(reference, width, height))
+        face_emb = face["embedding"]
+        skeleton = Image.fromarray(draw_bodypose(width, height, keypoints))
+        face_box = face_box_from_keypoints(keypoints)
+        openpose_scale = self._openpose_scale(request)
+
+        if face_box is not None:
+            cx, cy, face_h_frac = face_box
+            norm = self._normalized_kps(face)
+            x1, y1, x2, y2 = face["bbox"]
+            aspect = max(1.0, x2 - x1) / max(1.0, y2 - y1)
+            face_h = height * face_h_frac
+            face_w = face_h * aspect
+            placed = norm.copy()
+            placed[:, 0] = cx * width + (placed[:, 0] - 0.5) * face_w
+            placed[:, 1] = cy * height + (placed[:, 1] - 0.5) * face_h
+            face_kps = draw_kps(Image.new("RGB", (width, height), (0, 0, 0)), placed)
+            control_images = [face_kps, skeleton]
+            control_scales = [self._controlnet_scale(request), openpose_scale]
+            ip_scale = self._ip_adapter_scale(request)
+        else:
+            # No visible face (e.g. a back view or occluded head): OpenPose only; the
+            # shared seed + prompt carry hair/wardrobe continuity. Disable IdentityNet +
+            # ip-adapter so no face is forced onto the back of the head.
+            control_images = [Image.new("RGB", (width, height), (0, 0, 0)), skeleton]
+            control_scales = [0.0, max(openpose_scale, 0.85)]
+            ip_scale = 0.0
+
+        prompt = request.prompt
+        pipe.set_ip_adapter_scale(ip_scale)
+        generator = torch.Generator(device if device.startswith("cuda") else "cpu").manual_seed(seed)
+        kwargs: dict[str, Any] = {
+            "prompt": prompt,
+            "negative_prompt": request.negative_prompt,
+            "image_embeds": face_emb,
+            "image": control_images,
+            "controlnet_conditioning_scale": control_scales,
+            "ip_adapter_scale": ip_scale,
+            "width": width,
+            "height": height,
+            "num_inference_steps": self._num_inference_steps(request, model_target),
+            "guidance_scale": self._guidance_scale(request, model_target),
+            "generator": generator,
+        }
+        step_callback = cancel_step_callback(pipe, cancel_requested)
+        if step_callback is not None:
+            kwargs["callback_on_step_end"] = step_callback
+        output = pipe(**filter_call_kwargs(pipe, kwargs))
+        if cancel_requested is not None and cancel_requested():
+            raise InterruptedError("Image generation canceled by user.")
+        base = output.images[0].convert("RGB")
+        if face_box is not None:
+            base = self._restore_face(settings, pipe, request, base, face_emb, seed, cancel_requested)
+        return base
+
+    def _restore_face(
+        self,
+        settings: WorkerSettings,
+        pipe: Any,
+        request: ImageRequest,
+        base: Image.Image,
+        reference_embedding: Any,
+        seed: int,
+        cancel_requested: CancelCallback | None = None,
+    ) -> Image.Image:
+        """ADetailer-style identity restoration: detect the (small) face in a full-body
+        image, crop + upscale to 1024, re-run InstantID on the crop with the reference
+        embedding, and paste it back with a feathered mask. Recovers ArcFace identity
+        from ~0.38 to ~0.88 at full-body framing (sc-2063). No-op if no face is found."""
+        import cv2
+
+        torch = importlib.import_module("torch")
+        device = select_torch_device(torch, settings.gpu_id)
+        _, draw_kps = _import_instantid()
+        model_target = MODEL_TARGETS[request.model]
+
+        bgr = cv2.cvtColor(np.array(base), cv2.COLOR_RGB2BGR)
+        faces = self._face_analysis().get(bgr)
+        if not faces:
+            return base
+        face = sorted(faces, key=lambda f: (f.bbox[2] - f.bbox[0]) * (f.bbox[3] - f.bbox[1]))[-1]
+        x1, y1, x2, y2 = face["bbox"]
+        cx, cy = (x1 + x2) / 2, (y1 + y2) / 2
+        half = max(x2 - x1, y2 - y1) * 1.9 / 2
+        a, b = int(max(0, cx - half)), int(max(0, cy - half))
+        c, d = int(min(base.width, cx + half)), int(min(base.height, cy + half))
+        crop_w, crop_h = c - a, d - b
+        if crop_w < 16 or crop_h < 16:
+            return base
+
+        side = 1024
+        kps = np.asarray(face["kps"], dtype=np.float32).copy()
+        kps[:, 0] = (kps[:, 0] - a) / crop_w * side
+        kps[:, 1] = (kps[:, 1] - b) / crop_h * side
+        crop_kps = draw_kps(Image.new("RGB", (side, side), (0, 0, 0)), kps)
+        blank = Image.new("RGB", (side, side), (0, 0, 0))
+
+        pipe.set_ip_adapter_scale(self._ip_adapter_scale(request))
+        generator = torch.Generator(device if device.startswith("cuda") else "cpu").manual_seed(seed)
+        kwargs: dict[str, Any] = {
+            "prompt": _FACE_RESTORE_PROMPT,
+            "negative_prompt": request.negative_prompt,
+            "image_embeds": reference_embedding,
+            # Only IdentityNet acts on the crop; OpenPose is zeroed out.
+            "image": [crop_kps, blank],
+            "controlnet_conditioning_scale": [self._controlnet_scale(request), 0.0],
+            "ip_adapter_scale": self._ip_adapter_scale(request),
+            "width": side,
+            "height": side,
+            "num_inference_steps": self._num_inference_steps(request, model_target),
+            "guidance_scale": self._guidance_scale(request, model_target),
+            "generator": generator,
+        }
+        step_callback = cancel_step_callback(pipe, cancel_requested)
+        if step_callback is not None:
+            kwargs["callback_on_step_end"] = step_callback
+        restored = pipe(**filter_call_kwargs(pipe, kwargs)).images[0].convert("RGB")
+        if cancel_requested is not None and cancel_requested():
+            raise InterruptedError("Image generation canceled by user.")
+
+        small = restored.resize((crop_w, crop_h), Image.LANCZOS)
+        mask = Image.new("L", (crop_w, crop_h), 0)
+        ImageDraw.Draw(mask).ellipse(
+            [int(crop_w * 0.1), int(crop_h * 0.1), int(crop_w * 0.9), int(crop_h * 0.9)], fill=255
+        )
+        mask = mask.filter(ImageFilter.GaussianBlur(max(4, crop_w // 12)))
+        composited = base.copy()
+        composited.paste(small, (a, b), mask)
+        return composited
 
     @staticmethod
     def _view_angle(request: ImageRequest) -> str | None:
@@ -397,25 +597,41 @@ class InstantIDAdapter:
             raise RuntimeError("InstantID generation requires a character reference image.")
         _require_instantid_extras()
 
+        # Pose library (advanced.poses): a list of {id, keypoints} selected from the pose
+        # gallery — generate the character once per pose in a single job, each with a
+        # face-restoration pass. Needs the MultiControlNet (IdentityNet + OpenPose) pipe.
+        raw_poses = request.advanced.get("poses")
+        pose_entries = [p for p in raw_poses if isinstance(p, dict)] if isinstance(raw_poses, list) else []
+        pose_set = len(pose_entries) > 0
         progress("loading_model", "loading_model", 0.18, f"Loading {model_target['label']} (InstantID).")
-        pipe = self._load_pipeline(settings, request, model_target, progress=progress, job_id=job["id"])
+        pipe = self._load_pipeline(
+            settings, request, model_target, progress=progress, job_id=job["id"], pose_set=pose_set
+        )
         torch = importlib.import_module("torch")
         device = select_torch_device(torch, settings.gpu_id)
         label = model_target["label"]
         # One-click angle set (advanced.angleSet): generate the character once per packed
         # view angle in a single job (pipeline already loaded), instead of `count` copies
         # of one angle. Identity comes from the same reference embedding throughout.
-        angle_set = bool(request.advanced.get("angleSet"))
+        angle_set = bool(request.advanced.get("angleSet")) and not pose_set
         angles = [a for a in ANGLE_SET_ORDER if a in VIEW_ANGLE_KPS] if angle_set else []
-        total = len(angles) if angle_set else request.count
-        # Every angle in a set shares ONE seed so the noise-derived attributes InstantID
-        # does NOT lock (hair, wardrobe, lighting) stay consistent across the turnaround —
-        # only the pose (kps) changes. Plain batches keep per-image seeds for variety.
+        pose_keypoints = [normalize_keypoints(p.get("keypoints")) for p in pose_entries] if pose_set else []
+        if pose_set:
+            total = len(pose_entries)
+        elif angle_set:
+            total = len(angles)
+        else:
+            total = request.count
+        # Every image in a set shares ONE seed so the noise-derived attributes InstantID
+        # does NOT lock (hair, wardrobe, lighting) stay consistent across the set — only
+        # the pose changes. Plain batches keep per-image seeds for variety.
         set_seed = resolve_seed(request.seed, request.prompt, 0, request.seeds)
 
         def image_at_index(index: int) -> Image.Image:
-            seed = set_seed if angle_set else resolve_seed(request.seed, request.prompt, index, request.seeds)
+            grouped = angle_set or pose_set
+            seed = set_seed if grouped else resolve_seed(request.seed, request.prompt, index, request.seeds)
             angle = angles[index] if angle_set else None
+            pose_id = pose_entries[index].get("id") if pose_set else None
             progress(
                 "running",
                 "generating",
@@ -430,18 +646,25 @@ class InstantIDAdapter:
                 imageIndex=index,
                 imageCount=total,
                 viewAngle=angle,
+                poseId=pose_id,
                 device=device,
             )
             try:
-                image = self._run_pipeline(
-                    settings,
-                    pipe,
-                    request,
-                    seed,
-                    project_path,
-                    cancel_requested=cancel_requested,
-                    view_angle_override=angle,
-                )
+                if pose_set:
+                    image = self._run_pose(
+                        settings, pipe, request, seed, project_path, pose_keypoints[index],
+                        cancel_requested=cancel_requested,
+                    )
+                else:
+                    image = self._run_pipeline(
+                        settings,
+                        pipe,
+                        request,
+                        seed,
+                        project_path,
+                        cancel_requested=cancel_requested,
+                        view_angle_override=angle,
+                    )
             except Exception as exc:
                 emit_worker_event(
                     "image_inference_failed",
@@ -469,6 +692,7 @@ class InstantIDAdapter:
                 "instantId": True,
                 "ipAdapterScale": self._ip_adapter_scale(request),
                 "controlnetConditioningScale": self._controlnet_scale(request),
+                **({"openPoseScale": self._openpose_scale(request), "poseLibrary": True} if pose_set else {}),
                 "numInferenceSteps": self._num_inference_steps(request, model_target),
                 "guidanceScale": self._guidance_scale(request, model_target),
                 "realModelInference": True,

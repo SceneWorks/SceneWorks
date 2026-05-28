@@ -2174,6 +2174,112 @@ describe("SceneWorks app shell", () => {
     expect(baseContext.rememberLocalGenerationJob).toHaveBeenCalledWith("image", { id: "job-angle" });
   });
 
+  it("fires a pose-library batch job from the Character Studio pose picker", async () => {
+    const poseKeypoints = Array.from({ length: 18 }, (_, i) => [0.5, i / 18]);
+    global.fetch = vi.fn(async () => ({
+      ok: true,
+      json: async () => ({
+        version: 1,
+        categories: ["standing"],
+        poses: [
+          { id: "standing_01", category: "standing", label: "Standing 01", preview: "poses/standing_01.png", keypoints: poseKeypoints },
+        ],
+      }),
+    }));
+    const createImageJob = vi.fn(async () => ({ id: "job-pose" }));
+    const baseContext = {
+      activeProject: { id: "project-1", name: "Noir" },
+      addCharacterReference: () => {},
+      archiveCharacter: () => {},
+      assets: [],
+      attachCharacterLora: () => {},
+      characters: [
+        {
+          id: "char-1",
+          name: "Mira",
+          type: "person",
+          references: [],
+          approvedReferences: [{ assetId: "ref-1", role: "hero", asset: { id: "ref-1", type: "image", displayName: "Mira ref" } }],
+          looks: [],
+          loras: [],
+        },
+      ],
+      createCharacter: () => {},
+      createCharacterLook: () => {},
+      createCharacterTestJob: () => {},
+      createImageJob,
+      importAsset: vi.fn(),
+      imageLocalJobs: [],
+      rememberLocalGenerationJob: vi.fn(),
+      deleteAsset: () => {},
+      deleteCharacterLook: () => {},
+      detachCharacterLora: () => {},
+      imageModels: [
+        {
+          id: "instantid_realvisxl",
+          name: "InstantID (RealVisXL)",
+          type: "image",
+          ui: { poseLibrary: true },
+        },
+      ],
+      latestImageAssets: [],
+      loras: [],
+      setPreviewAsset: () => {},
+      sendCharacterToImage: () => {},
+      sendCharacterToVideo: () => {},
+      purgeAsset: () => {},
+      removeCharacterReference: () => {},
+      updateAssetStatus: () => {},
+      updateCharacter: () => {},
+      updateCharacterLook: () => {},
+      updateCharacterLora: () => {},
+      updateCharacterReference: () => {},
+    };
+    root = createRoot(container);
+    await act(async () => {
+      root.render(withAppContext(baseContext, <CharacterStudio />));
+    });
+    // Let the bundled pose library fetch resolve and the picker render.
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    // The pose thumbnail loads from the library; select it.
+    const poseButton = [...container.querySelectorAll("button")].find((button) =>
+      (button.getAttribute("aria-label") ?? "").includes("pose Standing 01"),
+    );
+    expect(poseButton).toBeTruthy();
+    await act(async () => {
+      poseButton.click();
+    });
+
+    const generateButton = [...container.querySelectorAll("button")].find((button) =>
+      button.textContent.startsWith("Generate") && button.textContent.includes("pose"),
+    );
+    expect(generateButton).toBeTruthy();
+    await act(async () => {
+      generateButton.click();
+    });
+
+    // One batch job carrying the selected pose's keypoints in advanced.poses; the worker
+    // emits one image per pose. count stays within the API's 1-8 guard.
+    expect(createImageJob).toHaveBeenCalledWith(
+      expect.objectContaining({
+        mode: "character_image",
+        model: "instantid_realvisxl",
+        characterId: "char-1",
+        referenceAssetId: "ref-1",
+        count: 1,
+        advanced: expect.objectContaining({
+          ipAdapterScale: 0.8,
+          poses: [{ id: "standing_01", keypoints: poseKeypoints }],
+        }),
+      }),
+    );
+    expect(baseContext.rememberLocalGenerationJob).toHaveBeenCalledWith("image", { id: "job-pose" });
+  });
+
   it("launches reference-based generation from an approved character reference", async () => {
     const sendCharacterToImage = vi.fn();
     const reference = { assetId: "ref-1", approved: true, asset: { id: "ref-1", type: "image", displayName: "Mira ref" } };
