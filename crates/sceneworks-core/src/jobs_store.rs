@@ -177,6 +177,13 @@ pub struct ProgressUpdate {
     pub error: Option<String>,
     pub result: Option<Map<String, Value>>,
     pub eta_seconds: Option<f64>,
+    /// Sampled GPU memory percentage observed by the worker at this progress
+    /// point (0..100). The store keeps a running max across a job's progress
+    /// updates (sc-2086) so completed-row meters render the peak.
+    pub peak_gpu_memory_pct: Option<f64>,
+    /// Sampled GPU load percentage observed at this progress point (0..100).
+    /// Same running-max semantics as peak_gpu_memory_pct.
+    pub peak_gpu_load_pct: Option<f64>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -253,6 +260,10 @@ impl JobsStore {
             ",
         )?;
         ensure_column(&transaction, "workers", "utilization_json", "text")?;
+        // sc-2086: per-job peak GPU memory % and load %, written by the worker
+        // along with progress so a completed row shows the peak the run reached.
+        ensure_column(&transaction, "jobs", "peak_gpu_memory_pct", "real")?;
+        ensure_column(&transaction, "jobs", "peak_gpu_load_pct", "real")?;
         transaction.commit()?;
         Ok(())
     }
@@ -728,6 +739,18 @@ impl JobsStore {
         if update.eta_seconds.is_some_and(|value| !value.is_finite()) {
             return Err(JobsStoreError::InvalidNumber("etaSeconds".to_owned()));
         }
+        if update
+            .peak_gpu_memory_pct
+            .is_some_and(|value| !value.is_finite())
+        {
+            return Err(JobsStoreError::InvalidNumber("peakGpuMemoryPct".to_owned()));
+        }
+        if update
+            .peak_gpu_load_pct
+            .is_some_and(|value| !value.is_finite())
+        {
+            return Err(JobsStoreError::InvalidNumber("peakGpuLoadPct".to_owned()));
+        }
 
         let _guard = self.lock.lock();
         let mut connection = self.connect()?;
@@ -736,6 +759,14 @@ impl JobsStore {
         let completed_at = is_terminal_status(update.status.as_str()).then_some(now.clone());
         let canceled_at = (update.status == JobStatus::Canceled).then_some(now.clone());
         let progress = update.progress.clamp(0.0, 1.0);
+        // Peaks are clamped to 0..100 and persisted as a running max so a stale
+        // progress report (lower sample) can't ratchet the peak down (sc-2086).
+        let peak_memory = update
+            .peak_gpu_memory_pct
+            .map(|value| value.clamp(0.0, 100.0));
+        let peak_load = update
+            .peak_gpu_load_pct
+            .map(|value| value.clamp(0.0, 100.0));
         transaction.execute(
             "
             update jobs
@@ -748,8 +779,16 @@ impl JobsStore {
                    eta_seconds = ?7,
                    completed_at = coalesce(?8, completed_at),
                    canceled_at = coalesce(?9, canceled_at),
-                   updated_at = ?10
-             where id = ?11
+                   updated_at = ?10,
+                   peak_gpu_memory_pct = case
+                       when ?11 is null then peak_gpu_memory_pct
+                       else max(coalesce(peak_gpu_memory_pct, 0), ?11)
+                   end,
+                   peak_gpu_load_pct = case
+                       when ?12 is null then peak_gpu_load_pct
+                       else max(coalesce(peak_gpu_load_pct, 0), ?12)
+                   end
+             where id = ?13
             ",
             params![
                 update.status.as_str(),
@@ -762,6 +801,8 @@ impl JobsStore {
                 completed_at,
                 canceled_at,
                 now,
+                peak_memory,
+                peak_load,
                 job_id,
             ],
         )?;
@@ -969,19 +1010,24 @@ impl JobsStore {
 fn row_to_job(row: &Row<'_>) -> rusqlite::Result<JobSnapshot> {
     let progress: f64 = row.get("progress")?;
     let eta_seconds: Option<f64> = row.get("eta_seconds")?;
+    let peak_memory: Option<f64> = row.get("peak_gpu_memory_pct").ok().flatten();
+    let peak_load: Option<f64> = row.get("peak_gpu_load_pct").ok().flatten();
     let created_at: String = row.get("created_at")?;
     let started_at: Option<String> = row.get("started_at")?;
     let completed_at: Option<String> = row.get("completed_at")?;
     let elapsed_seconds = started_at
         .as_deref()
         .and_then(|started| elapsed_seconds(started, completed_at.as_deref()));
+    let job_type: JobType = parse_string_enum(&row.get::<_, String>("type")?);
+    let payload = loads_object(row.get::<_, Option<String>>("payload_json")?.as_deref());
+    let title = derive_job_title(&job_type, &payload);
     Ok(JobSnapshot {
         id: row.get("id")?,
-        job_type: parse_string_enum(&row.get::<_, String>("type")?),
+        job_type,
         status: parse_string_enum(&row.get::<_, String>("status")?),
         project_id: row.get("project_id")?,
         project_name: row.get("project_name")?,
-        payload: loads_object(row.get::<_, Option<String>>("payload_json")?.as_deref()),
+        payload,
         result: loads_object(row.get::<_, Option<String>>("result_json")?.as_deref()),
         requested_gpu: row.get("requested_gpu")?,
         assigned_gpu: row.get("assigned_gpu")?,
@@ -1002,8 +1048,109 @@ fn row_to_job(row: &Row<'_>) -> rusqlite::Result<JobSnapshot> {
         completed_at,
         canceled_at: row.get("canceled_at")?,
         last_heartbeat_at: row.get("last_heartbeat_at")?,
+        peak_gpu_memory_pct: peak_memory.map(number_from_f64),
+        peak_gpu_load_pct: peak_load.map(number_from_f64),
+        title,
         extra: Default::default(),
     })
+}
+
+/// Server-side derivation of the human-readable job title surfaced in the
+/// queue and WorkerProgressCard (sc-2087). Mirrors the Job Title table in
+/// docs/design/worker-progress-card.md. Returns None for types where the
+/// payload doesn't carry a meaningful subject — the frontend then falls back
+/// to its own derivation, keeping the queue from ever showing only a raw job
+/// id as the row identifier.
+fn derive_job_title(job_type: &JobType, payload: &Map<String, Value>) -> Option<String> {
+    /// Find the first string value at any of the candidate keys.
+    fn first_str<'a>(payload: &'a Map<String, Value>, keys: &[&str]) -> Option<&'a str> {
+        keys.iter()
+            .find_map(|key| payload.get(*key).and_then(Value::as_str))
+            .filter(|value| !value.trim().is_empty())
+    }
+    /// Truncate a prompt to ~max chars on a word boundary, append an ellipsis
+    /// when truncated. Mirrors the JS helper in WorkerProgressCard.jsx.
+    fn truncate_prompt(prompt: &str, max: usize) -> String {
+        if prompt.len() <= max {
+            return prompt.to_owned();
+        }
+        let mut cut = prompt[..max].to_owned();
+        if let Some(space) = cut.rfind(' ') {
+            if space > (max * 6) / 10 {
+                cut.truncate(space);
+            }
+        }
+        format!("{}…", cut.trim_end())
+    }
+
+    match job_type {
+        JobType::LoraTrain => {
+            let subject = first_str(payload, &["loraName", "outputName", "targetName", "loraId"])
+                .map(str::to_owned)
+                .or_else(|| {
+                    payload
+                        .get("plan")
+                        .and_then(|plan| plan.get("output"))
+                        .and_then(|output| output.get("loraId"))
+                        .and_then(Value::as_str)
+                        .map(str::to_owned)
+                })
+                .unwrap_or_else(|| "(unnamed LoRA)".to_owned());
+            Some(format!("Training Run — {subject}"))
+        }
+        JobType::TrainingCaption => {
+            let subject = first_str(payload, &["datasetName", "datasetId"])
+                .unwrap_or("(unnamed dataset)")
+                .to_owned();
+            Some(format!("Dataset Captioning — {subject}"))
+        }
+        JobType::ImageGenerate
+        | JobType::ImageEdit
+        | JobType::ImageVqa
+        | JobType::ImageInterleave => {
+            // Character Turnaround override: a character generation has
+            // characterId + characterName on the payload.
+            if payload.get("characterId").and_then(Value::as_str).is_some() {
+                if let Some(name) = first_str(payload, &["characterName"]) {
+                    return Some(format!("Character Turnaround — {name}"));
+                }
+            }
+            let prompt = first_str(payload, &["prompt"]).unwrap_or("(no prompt)");
+            Some(format!("Generate Image — {}", truncate_prompt(prompt, 80)))
+        }
+        JobType::VideoGenerate | JobType::VideoExtend | JobType::VideoBridge => {
+            let prompt = first_str(payload, &["prompt"]).unwrap_or("(no prompt)");
+            Some(format!("Generate Video — {}", truncate_prompt(prompt, 80)))
+        }
+        JobType::PersonReplace => {
+            let prompt = first_str(payload, &["prompt"]).unwrap_or("(no prompt)");
+            Some(format!("Person Replace — {}", truncate_prompt(prompt, 80)))
+        }
+        JobType::ModelDownload | JobType::ModelImport | JobType::ModelConvert => {
+            let subject =
+                first_str(payload, &["modelName", "filename", "modelId", "repo"]).unwrap_or("");
+            if subject.is_empty() {
+                Some("Model Import".to_owned())
+            } else {
+                Some(format!("Model Import — {subject}"))
+            }
+        }
+        JobType::LoraImport => {
+            let subject = first_str(payload, &["loraName", "filename", "loraId"]).unwrap_or("");
+            if subject.is_empty() {
+                Some("LoRA Import".to_owned())
+            } else {
+                Some(format!("LoRA Import — {subject}"))
+            }
+        }
+        JobType::PromptRefine => {
+            let prompt = first_str(payload, &["prompt"]).unwrap_or("(empty prompt)");
+            Some(format!("Prompt Refine — {}", truncate_prompt(prompt, 60)))
+        }
+        // Person detect/track/segment + anything else — let the frontend
+        // fall back to its own derivation.
+        _ => None,
+    }
 }
 
 fn row_to_worker(row: &Row<'_>) -> rusqlite::Result<WorkerSnapshot> {

@@ -1311,6 +1311,7 @@
         "stage": "queued",
         "startedAt": null,
         "status": "queued",
+        "title": "Generate Image \u2014 portrait in rain",
         "type": "image_generate",
         "updatedAt": "<timestamp>",
         "workerId": null
@@ -1401,6 +1402,7 @@
             "stage": "queued",
             "startedAt": null,
             "status": "queued",
+            "title": "Generate Image \u2014 portrait in rain",
             "type": "image_generate",
             "updatedAt": "<timestamp>",
             "workerId": null
@@ -1505,6 +1507,7 @@
     "stage": "queued",
     "startedAt": null,
     "status": "queued",
+    "title": "Generate Image \u2014 portrait in rain",
     "type": "image_generate",
     "updatedAt": "<timestamp>",
     "workerId": null
@@ -1556,6 +1559,7 @@
         "stage": "preparing",
         "startedAt": "<timestamp>",
         "status": "preparing",
+        "title": "Generate Image \u2014 (no prompt)",
         "type": "image_generate",
         "updatedAt": "<timestamp>",
         "workerId": "claim-worker-fixture"
@@ -1665,6 +1669,7 @@
     "stage": "queued",
     "startedAt": null,
     "status": "queued",
+    "title": "Generate Image \u2014 mist over hills",
     "type": "image_generate",
     "updatedAt": "<timestamp>",
     "workerId": null
@@ -1760,6 +1765,7 @@
     "stage": "preparing",
     "startedAt": "<timestamp>",
     "status": "preparing",
+    "title": "Generate Image \u2014 mist over hills",
     "type": "image_generate",
     "updatedAt": "<timestamp>",
     "workerId": "parity-worker"
@@ -1850,6 +1856,7 @@
       "stage": "preparing",
       "startedAt": "<timestamp>",
       "status": "preparing",
+      "title": "Generate Image \u2014 mist over hills",
       "type": "image_generate",
       "updatedAt": "<timestamp>",
       "workerId": "parity-worker"
@@ -1940,6 +1947,7 @@
     "stage": "canceled",
     "startedAt": "<timestamp>",
     "status": "canceled",
+    "title": "Generate Image \u2014 mist over hills",
     "type": "image_generate",
     "updatedAt": "<timestamp>",
     "workerId": "parity-worker"
@@ -1993,6 +2001,7 @@
     "stage": "queued",
     "startedAt": null,
     "status": "queued",
+    "title": "LoRA Import \u2014 imported_lora",
     "type": "lora_import",
     "updatedAt": "<timestamp>",
     "workerId": null
@@ -2084,6 +2093,7 @@
     "stage": "queued",
     "startedAt": null,
     "status": "queued",
+    "title": "Model Import \u2014 User Model",
     "type": "model_download",
     "updatedAt": "<timestamp>",
     "workerId": null
@@ -2574,6 +2584,7 @@
     "stage": "queued",
     "startedAt": null,
     "status": "queued",
+    "title": "Person Replace \u2014 hero walks through rain",
     "type": "person_replace",
     "updatedAt": "<timestamp>",
     "workerId": null
@@ -2930,6 +2941,7 @@
     "stage": "queued",
     "startedAt": null,
     "status": "queued",
+    "title": "Generate Image \u2014 mist over hills",
     "type": "image_generate",
     "updatedAt": "<timestamp>",
     "workerId": null

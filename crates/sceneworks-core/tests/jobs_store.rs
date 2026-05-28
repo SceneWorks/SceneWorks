@@ -82,6 +82,8 @@ fn job_lifecycle_create_claim_complete() {
                 error: None,
                 result: Some(object(json!({ "assetIds": ["asset-1"] }))),
                 eta_seconds: None,
+                peak_gpu_memory_pct: None,
+                peak_gpu_load_pct: None,
             },
         )
         .expect("progress updates");
@@ -91,6 +93,272 @@ fn job_lifecycle_create_claim_complete() {
     assert_eq!(completed.result, object(json!({ "assetIds": ["asset-1"] })));
     assert_eq!(worker.status, WorkerStatus::Idle);
     assert_eq!(worker.current_job_id, None);
+}
+
+/// sc-2086 — successive progress reports must ratchet the per-job peak GPU
+/// stats up only, so a stale low sample later in the run can't clobber the
+/// max. Also covers clamp-to-100 and the None-passthrough case for status-only
+/// updates.
+#[test]
+fn progress_keeps_running_max_for_peak_gpu_meters() {
+    let store = store("peak-gpu-meters");
+    register_image_worker(&store);
+    let created = store
+        .create_job(image_job(object(json!({ "prompt": "p" }))))
+        .expect("job creates");
+    store.claim_next_job("worker-1").expect("claim ok");
+
+    fn progress(memory: Option<f64>, load: Option<f64>) -> ProgressUpdate {
+        ProgressUpdate {
+            status: JobStatus::Running,
+            stage: ProgressStage::Running,
+            progress: 0.5,
+            message: "running".to_owned(),
+            error: None,
+            result: None,
+            eta_seconds: None,
+            peak_gpu_memory_pct: memory,
+            peak_gpu_load_pct: load,
+        }
+    }
+
+    let job = store
+        .update_job_progress(&created.id, progress(Some(40.0), Some(60.0)))
+        .expect("first sample");
+    assert_eq!(
+        job.peak_gpu_memory_pct.as_ref().and_then(|n| n.as_f64()),
+        Some(40.0)
+    );
+    assert_eq!(
+        job.peak_gpu_load_pct.as_ref().and_then(|n| n.as_f64()),
+        Some(60.0)
+    );
+
+    // Higher samples ratchet up.
+    let job = store
+        .update_job_progress(&created.id, progress(Some(72.5), Some(85.0)))
+        .expect("higher sample");
+    assert_eq!(
+        job.peak_gpu_memory_pct.as_ref().and_then(|n| n.as_f64()),
+        Some(72.5)
+    );
+    assert_eq!(
+        job.peak_gpu_load_pct.as_ref().and_then(|n| n.as_f64()),
+        Some(85.0)
+    );
+
+    // Lower samples are ignored — peak stays at the previous max.
+    let job = store
+        .update_job_progress(&created.id, progress(Some(20.0), Some(10.0)))
+        .expect("lower sample");
+    assert_eq!(
+        job.peak_gpu_memory_pct.as_ref().and_then(|n| n.as_f64()),
+        Some(72.5)
+    );
+    assert_eq!(
+        job.peak_gpu_load_pct.as_ref().and_then(|n| n.as_f64()),
+        Some(85.0)
+    );
+
+    // None passes through (status-only update) and leaves peaks untouched.
+    let job = store
+        .update_job_progress(&created.id, progress(None, None))
+        .expect("status-only update");
+    assert_eq!(
+        job.peak_gpu_memory_pct.as_ref().and_then(|n| n.as_f64()),
+        Some(72.5)
+    );
+    assert_eq!(
+        job.peak_gpu_load_pct.as_ref().and_then(|n| n.as_f64()),
+        Some(85.0)
+    );
+
+    // Over-100 samples (rare but possible from buggy backends) clamp.
+    let job = store
+        .update_job_progress(&created.id, progress(Some(120.0), Some(150.0)))
+        .expect("clamped sample");
+    assert_eq!(
+        job.peak_gpu_memory_pct.as_ref().and_then(|n| n.as_f64()),
+        Some(100.0)
+    );
+    assert_eq!(
+        job.peak_gpu_load_pct.as_ref().and_then(|n| n.as_f64()),
+        Some(100.0)
+    );
+}
+
+/// A job whose every progress update omits the peak fields (e.g. a CPU-only
+/// utility worker, or a path where gpu_utilization() returned nothing) must
+/// keep peak_gpu_memory_pct / peak_gpu_load_pct NULL across the whole
+/// lifecycle — otherwise the snapshot diverges from a job that ran on a
+/// peerless backend, breaking parity (sc-2086 fix-forward).
+#[test]
+fn progress_leaves_peaks_null_when_no_samples_arrive() {
+    let store = store("peak-null-no-samples");
+    register_image_worker(&store);
+    let created = store
+        .create_job(image_job(object(json!({ "prompt": "p" }))))
+        .expect("job creates");
+    store.claim_next_job("worker-1").expect("claim ok");
+
+    let progress_no_peaks = ProgressUpdate {
+        status: JobStatus::Running,
+        stage: ProgressStage::Running,
+        progress: 0.5,
+        message: "running".to_owned(),
+        error: None,
+        result: None,
+        eta_seconds: None,
+        peak_gpu_memory_pct: None,
+        peak_gpu_load_pct: None,
+    };
+    for _ in 0..3 {
+        store
+            .update_job_progress(&created.id, progress_no_peaks.clone())
+            .expect("progress update");
+    }
+    let final_job = store.get_job(&created.id).expect("loads");
+    assert!(final_job.peak_gpu_memory_pct.is_none());
+    assert!(final_job.peak_gpu_load_pct.is_none());
+}
+
+/// sc-2087 — server-side job-title derivation populates the JobSnapshot.title
+/// field per the design spec table. Front-end falls back to its own derivation
+/// only when this is None, so the queue never displays a raw job id.
+#[test]
+fn job_snapshot_title_is_derived_from_payload() {
+    let store = store("title-derivation");
+    register_image_worker(&store);
+
+    fn create(store: &JobsStore, job_type: JobType, payload: Value) -> String {
+        store
+            .create_job(CreateJob {
+                job_type,
+                project_id: Some("p".to_owned()),
+                project_name: Some("P".to_owned()),
+                payload: object(payload),
+                requested_gpu: "auto".to_owned(),
+                source_job_id: None,
+                duplicate_of_job_id: None,
+                attempts: 1,
+            })
+            .expect("job creates")
+            .id
+    }
+
+    let image_id = create(
+        &store,
+        JobType::ImageGenerate,
+        json!({ "prompt": "a sunset over the mountains" }),
+    );
+    let lora_train_id = create(
+        &store,
+        JobType::LoraTrain,
+        json!({ "loraName": "kelsie-v3" }),
+    );
+    let caption_id = create(
+        &store,
+        JobType::TrainingCaption,
+        json!({ "datasetName": "kelsie-set" }),
+    );
+    let video_id = create(
+        &store,
+        JobType::VideoGenerate,
+        json!({ "prompt": "slow push-in on a foggy lighthouse" }),
+    );
+    let character_id_job = create(
+        &store,
+        JobType::ImageGenerate,
+        json!({ "prompt": "ignored", "characterId": "char-1", "characterName": "Aria" }),
+    );
+    let lora_import_id = create(
+        &store,
+        JobType::LoraImport,
+        json!({ "loraName": "detail_lora" }),
+    );
+    let model_download_id = create(
+        &store,
+        JobType::ModelDownload,
+        json!({ "modelName": "Z-Image Turbo" }),
+    );
+    let prompt_refine_id = create(
+        &store,
+        JobType::PromptRefine,
+        json!({ "prompt": "make it better please" }),
+    );
+    let unnamed_lora_id = create(&store, JobType::LoraTrain, json!({}));
+    let person_detect_id = create(&store, JobType::PersonDetect, json!({}));
+
+    let title = |id: &str| store.get_job(id).expect("loads").title.clone();
+    assert_eq!(
+        title(&image_id).as_deref(),
+        Some("Generate Image — a sunset over the mountains"),
+    );
+    assert_eq!(
+        title(&lora_train_id).as_deref(),
+        Some("Training Run — kelsie-v3"),
+    );
+    assert_eq!(
+        title(&caption_id).as_deref(),
+        Some("Dataset Captioning — kelsie-set"),
+    );
+    assert_eq!(
+        title(&video_id).as_deref(),
+        Some("Generate Video — slow push-in on a foggy lighthouse"),
+    );
+    assert_eq!(
+        title(&character_id_job).as_deref(),
+        Some("Character Turnaround — Aria"),
+    );
+    assert_eq!(
+        title(&lora_import_id).as_deref(),
+        Some("LoRA Import — detail_lora"),
+    );
+    assert_eq!(
+        title(&model_download_id).as_deref(),
+        Some("Model Import — Z-Image Turbo"),
+    );
+    assert_eq!(
+        title(&prompt_refine_id).as_deref(),
+        Some("Prompt Refine — make it better please"),
+    );
+    assert_eq!(
+        title(&unnamed_lora_id).as_deref(),
+        Some("Training Run — (unnamed LoRA)"),
+    );
+    // person_detect (and other types without a meaningful subject) intentionally
+    // return None so the frontend can fall back to its own derivation.
+    assert_eq!(title(&person_detect_id), None);
+}
+
+/// Long image-generation prompts are truncated on a word boundary with an
+/// ellipsis so the title doesn't blow out the queue row.
+#[test]
+fn job_snapshot_title_truncates_long_prompts() {
+    let store = store("title-truncation");
+    register_image_worker(&store);
+    // 100 chars of "a " repeating, well over the 80-char cap.
+    let long_prompt = "a ".repeat(60);
+    let id = store
+        .create_job(CreateJob {
+            job_type: JobType::ImageGenerate,
+            project_id: Some("p".to_owned()),
+            project_name: Some("P".to_owned()),
+            payload: object(json!({ "prompt": long_prompt })),
+            requested_gpu: "auto".to_owned(),
+            source_job_id: None,
+            duplicate_of_job_id: None,
+            attempts: 1,
+        })
+        .expect("job creates")
+        .id;
+    let title = store.get_job(&id).expect("loads").title.unwrap();
+    assert!(title.starts_with("Generate Image — "));
+    assert!(
+        title.ends_with("…"),
+        "title should end with ellipsis: {title}"
+    );
+    assert!(title.len() < 110, "title should be short: {title}");
 }
 
 #[test]
@@ -384,6 +652,8 @@ fn training_progress_stages_persist_under_running_and_reject_unknown_status() {
                     error: None,
                     result: None,
                     eta_seconds: None,
+                    peak_gpu_memory_pct: None,
+                    peak_gpu_load_pct: None,
                 },
             )
             .expect("running status with a training stage is accepted");
@@ -404,6 +674,8 @@ fn training_progress_stages_persist_under_running_and_reject_unknown_status() {
                 error: None,
                 result: None,
                 eta_seconds: None,
+                peak_gpu_memory_pct: None,
+                peak_gpu_load_pct: None,
             },
         )
         .expect_err("an unknown status is rejected");
@@ -862,6 +1134,8 @@ fn invalid_progress_numbers_are_rejected() {
                 error: None,
                 result: None,
                 eta_seconds: None,
+                peak_gpu_memory_pct: None,
+                peak_gpu_load_pct: None,
             },
         ),
         Err(JobsStoreError::InvalidNumber(field)) if field == "progress"

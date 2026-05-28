@@ -207,6 +207,37 @@ def heartbeat(
     )
 
 
+def track_job_peaks(payload: dict, peaks: dict, settings: WorkerSettings) -> None:
+    """Sample GPU utilization, ratchet the running max into `peaks`, and fold
+    the peaks into a progress payload (sc-2086).
+
+    `peaks` is a per-job dict (`{"memory": float, "load": float}`) that the
+    caller carries across every progress() call inside one job, so the
+    completed-row hardware meters show the highest values observed during the
+    run instead of whatever the last sample happened to be.
+
+    Defensive against minimal test settings (SimpleNamespace) that may not
+    carry a gpu_id attribute — falls back to "cpu" the same way heartbeat()
+    does. gpu_utilization() returns None for unknown gpu ids, so the helper
+    no-ops cleanly when there's nothing to sample.
+    """
+    gpu_id = getattr(settings, "gpu_id", "cpu")
+    utilization = gpu_utilization(gpu_id)
+    if utilization:
+        mem_used = utilization.get("memoryUsedMb")
+        mem_total = utilization.get("memoryTotalMb")
+        if mem_used and mem_total and mem_total > 0:
+            pct = min(100.0, (float(mem_used) / float(mem_total)) * 100.0)
+            peaks["memory"] = max(peaks.get("memory", 0.0), pct)
+        load = utilization.get("gpuLoadPercent")
+        if load is not None:
+            peaks["load"] = max(peaks.get("load", 0.0), min(100.0, float(load)))
+    if peaks.get("memory"):
+        payload["peakGpuMemoryPct"] = peaks["memory"]
+    if peaks.get("load"):
+        payload["peakGpuLoadPct"] = peaks["load"]
+
+
 def resolve_loaded_models(source: LoadedModelsSource, *, job_id: str | None = None) -> list[str]:
     if source is None:
         return []
@@ -662,6 +693,8 @@ def run_image_job(api: ApiClient, settings: WorkerSettings, job: dict, image_ada
     def adapter_loaded_models() -> list[str]:
         return loaded_models_from_adapter(adapter, job_id=job_id)
 
+    peaks: dict[str, float] = {}
+
     def progress(status: str, stage: str, value: float, message: str, result: dict[str, Any] | None = None) -> None:
         heartbeat_with_loaded_models(api, settings, "busy", job_id, adapter_loaded_models)
         payload = {
@@ -672,6 +705,7 @@ def run_image_job(api: ApiClient, settings: WorkerSettings, job: dict, image_ada
         }
         if result is not None:
             payload["result"] = result
+        track_job_peaks(payload, peaks, settings)
         update_job(api, job_id, payload)
 
     try:
@@ -758,11 +792,14 @@ def run_vqa_job(api: ApiClient, settings: WorkerSettings, job: dict, image_adapt
     def adapter_loaded_models() -> list[str]:
         return loaded_models_from_adapter(adapter, job_id=job_id)
 
+    peaks: dict[str, float] = {}
+
     def progress(status: str, stage: str, value: float, message: str, result: dict[str, Any] | None = None) -> None:
         heartbeat_with_loaded_models(api, settings, "busy", job_id, adapter_loaded_models)
         payload = {"status": status, "stage": stage, "progress": value, "message": message}
         if result is not None:
             payload["result"] = result
+        track_job_peaks(payload, peaks, settings)
         update_job(api, job_id, payload)
 
     try:
@@ -821,11 +858,14 @@ def run_interleave_job(api: ApiClient, settings: WorkerSettings, job: dict, imag
     def adapter_loaded_models() -> list[str]:
         return loaded_models_from_adapter(adapter, job_id=job_id)
 
+    peaks: dict[str, float] = {}
+
     def progress(status: str, stage: str, value: float, message: str, result: dict[str, Any] | None = None) -> None:
         heartbeat_with_loaded_models(api, settings, "busy", job_id, adapter_loaded_models)
         payload = {"status": status, "stage": stage, "progress": value, "message": message}
         if result is not None:
             payload["result"] = result
+        track_job_peaks(payload, peaks, settings)
         update_job(api, job_id, payload)
 
     try:
@@ -890,18 +930,18 @@ def run_video_job(api: ApiClient, settings: WorkerSettings, job: dict) -> None:
     def adapter_loaded_models() -> list[str]:
         return loaded_models_from_adapter(adapter, job_id=job_id)
 
+    peaks: dict[str, float] = {}
+
     def progress(status: str, stage: str, value: float, message: str) -> None:
         heartbeat_with_loaded_models(api, settings, "busy", job_id, adapter_loaded_models)
-        update_job(
-            api,
-            job_id,
-            {
-                "status": status,
-                "stage": stage,
-                "progress": value,
-                "message": message,
-            },
-        )
+        payload = {
+            "status": status,
+            "stage": stage,
+            "progress": value,
+            "message": message,
+        }
+        track_job_peaks(payload, peaks, settings)
+        update_job(api, job_id, payload)
 
     try:
         progress("preparing", "preparing", 0.06, "Preparing Video Studio request.")
@@ -1010,10 +1050,13 @@ def run_person_job(api: ApiClient, settings: WorkerSettings, job: dict) -> None:
     job_id = job["id"]
     job_type = job["type"]
     needs_oom_restart = False
+    peaks: dict[str, float] = {}
 
     def progress(status: str, stage: str, value: float, message: str) -> None:
         heartbeat(api, settings, "busy", job_id)
-        update_job(api, job_id, {"status": status, "stage": stage, "progress": value, "message": message})
+        payload = {"status": status, "stage": stage, "progress": value, "message": message}
+        track_job_peaks(payload, peaks, settings)
+        update_job(api, job_id, payload)
 
     runner = run_person_detect if job_type == "person_detect" else run_person_track
     done_message = "Person candidates detected." if job_type == "person_detect" else "Reusable person track saved."
@@ -1078,14 +1121,13 @@ def run_lora_train_job(api: ApiClient, settings: WorkerSettings, job: dict) -> N
 
 def _run_lora_train_dry_run(api: ApiClient, settings: WorkerSettings, job: dict, payload: dict) -> None:
     job_id = job["id"]
+    peaks: dict[str, float] = {}
 
     def progress(status: str, stage: str, value: float, message: str) -> None:
         heartbeat(api, settings, "busy", job_id)
-        update_job(
-            api,
-            job_id,
-            {"status": status, "stage": stage, "progress": value, "message": message},
-        )
+        update_payload = {"status": status, "stage": stage, "progress": value, "message": message}
+        track_job_peaks(update_payload, peaks, settings)
+        update_job(api, job_id, update_payload)
 
     try:
         progress("preparing", "preparing", 0.1, "Validating training plan.")
@@ -1130,12 +1172,15 @@ def _run_lora_train_execution(api: ApiClient, settings: WorkerSettings, job: dic
         trainer = trainer_holder["trainer"]
         return trainer.loaded_models() if trainer is not None else []
 
+    peaks: dict[str, float] = {}
+
     def progress(status: str, stage: str, value: float, message: str, result: dict | None = None) -> None:
         heartbeat_with_loaded_models(api, settings, "busy", job_id, trainer_loaded_models)
-        payload = {"status": status, "stage": stage, "progress": value, "message": message}
+        update_payload = {"status": status, "stage": stage, "progress": value, "message": message}
         if result is not None:
-            payload["result"] = result
-        update_job(api, job_id, payload)
+            update_payload["result"] = result
+        track_job_peaks(update_payload, peaks, settings)
+        update_job(api, job_id, update_payload)
 
     try:
         plan = payload.get("plan")
@@ -1209,10 +1254,13 @@ def _run_lora_train_execution(api: ApiClient, settings: WorkerSettings, job: dic
 def run_training_caption_worker_job(api: ApiClient, settings: WorkerSettings, job: dict) -> None:
     job_id = job["id"]
     needs_oom_restart = False
+    peaks: dict[str, float] = {}
 
     def progress(status: str, stage: str, value: float, message: str) -> None:
         heartbeat(api, settings, "busy", job_id)
-        update_job(api, job_id, {"status": status, "stage": stage, "progress": value, "message": message})
+        payload = {"status": status, "stage": stage, "progress": value, "message": message}
+        track_job_peaks(payload, peaks, settings)
+        update_job(api, job_id, payload)
 
     try:
         progress("preparing", "preparing", 0.04, "Preparing training caption job.")
