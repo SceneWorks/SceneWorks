@@ -1,9 +1,9 @@
 import React, { useMemo } from "react";
-import { useLiveJobElapsedSeconds } from "../components/JobProgress.jsx";
-import { actionStatuses, terminalStatuses } from "../constants.js";
+import { WorkerProgressCard } from "../components/WorkerProgressCard.jsx";
+import { terminalStatuses } from "../constants.js";
 import { GPU_REQUIRED_JOB_TYPES, NON_GPU_JOB_TYPES } from "../jobTypes.js";
-import { formatSeconds, percent } from "../formatting.js";
 import { useAppContext } from "../context/AppContext.js";
+import { buildWorkersById } from "../workers.js";
 
 function formatJobType(type) {
   return String(type ?? "job").replaceAll("_", " ");
@@ -185,6 +185,7 @@ function WorkerCard({ worker }) {
 export function QueueScreen() {
   const {
     activeProject,
+    assets = [],
     createPlaceholderJob,
     filteredJobs,
     gpuOptions,
@@ -196,12 +197,19 @@ export function QueueScreen() {
     requestedGpu,
     setJobPrompt,
     setProjectFilter,
+    setPreviewAsset,
     setRequestedGpu,
     visibleWorkers,
+    workersById: workersByIdFromContext,
   } = useAppContext();
   const createJob = createPlaceholderJob;
   const workers = visibleWorkers;
-  const workersById = useMemo(() => new Map(workers.map((worker) => [worker.id, worker])), [workers]);
+  // Prefer the shared index from context (sc-2082); fall back for legacy
+  // contexts that may not yet expose it (test harnesses, etc.).
+  const workersById = useMemo(
+    () => workersByIdFromContext ?? buildWorkersById(workers),
+    [workersByIdFromContext, workers],
+  );
   const gpuWorkers = useMemo(() => workers.filter(isGpuWorker), [workers]);
   return (
     <section className="main-surface queue-surface">
@@ -254,61 +262,67 @@ export function QueueScreen() {
         {filteredJobs.length === 0 ? (
           <div className="empty-panel">No jobs in this view</div>
         ) : (
-          filteredJobs.map((job) => (
-            <JobRow
-              assignedWorker={workersById.get(job.workerId)}
-              job={job}
-              jobAction={jobAction}
-              key={job.id}
-              jobs={jobs}
-              workers={workers}
-            />
-          ))
+          filteredJobs.map((job) => {
+            const message = jobWaitingMessage(job, workers, jobs);
+            const variant = thumbnailVariantForJob(job);
+            const thumbnails = variant === "hidden" ? [] : resolveJobAssets(job, assets);
+            // Inject the queue's context-aware waiting/error message via job.message
+            // so the shared WorkerProgressCard surface it without per-screen plumbing.
+            const enrichedJob = message && message !== job.message ? { ...job, message } : job;
+            return (
+              <WorkerProgressCard
+                key={job.id}
+                job={enrichedJob}
+                thumbnailsVariant={variant}
+                thumbnailAssets={thumbnails}
+                onThumbnailClick={setPreviewAsset ?? undefined}
+                onCancel={(j) => jobAction(j, "cancel")}
+                onRetry={(j) => jobAction(j, "retry")}
+                onDuplicate={(j) => jobAction(j, "duplicate")}
+                hideOpenQueue
+              />
+            );
+          })
         )}
       </div>
     </section>
   );
 }
 
-function JobRow({ assignedWorker, job, jobAction, jobs, workers }) {
-  const canCancel = !terminalStatuses.has(job.status);
-  const maxAttempts = 5;
-  const attempts = job.attempts ?? 1;
-  const canRepeat = actionStatuses.has(job.status) && attempts < maxAttempts;
-  const displayMessage = jobWaitingMessage(job, workers, jobs);
-  const elapsedSeconds = useLiveJobElapsedSeconds(job);
-  return (
-    <article className={`job-row ${job.status}`}>
-      <div className="job-main">
-        <div>
-          <p className="eyebrow">{job.type}</p>
-          <h3>{job.payload.prompt ?? job.id}</h3>
-        </div>
-        <span className="status-badge">{job.status}</span>
-      </div>
-      <div className="job-meta">
-        <span>{job.projectName ?? "Global"}</span>
-        <span>Stage {job.stage}</span>
-        <span>Elapsed {formatSeconds(elapsedSeconds)}</span>
-        <span>GPU {job.assignedGpu ?? job.requestedGpu}</span>
-        {assignedWorker ? <span>{assignedWorker.gpuName ?? assignedWorker.id}</span> : null}
-        <span>Attempt {attempts}/{maxAttempts}</span>
-      </div>
-      <div className="progress-track" aria-label={`${percent(job.progress)} complete`}>
-        <span style={{ width: percent(job.progress) }} />
-      </div>
-      <p className={job.error ? "job-message error-text" : "job-message"}>{displayMessage}</p>
-      <div className="job-actions">
-        <button disabled={!canCancel || job.cancelRequested} onClick={() => jobAction(job, "cancel")} type="button">
-          Cancel
-        </button>
-        <button disabled={!canRepeat} onClick={() => jobAction(job, "retry")} type="button">
-          Retry
-        </button>
-        <button disabled={!canRepeat} onClick={() => jobAction(job, "duplicate")} type="button">
-          Duplicate
-        </button>
-      </div>
-    </article>
-  );
+// Variants per job type: asset-producing jobs get the compact small-row of
+// thumbnails; caption / import / prompt-refine jobs hide thumbnails per the
+// design spec (docs/design/worker-progress-card.md).
+function thumbnailVariantForJob(job) {
+  switch (job?.type) {
+    case "training_caption":
+    case "model_download":
+    case "model_import":
+    case "model_convert":
+    case "lora_import":
+    case "prompt_refine":
+      return "hidden";
+    default:
+      return "small-row";
+  }
+}
+
+// Resolve a job's produced asset records against the live catalog. Generic over
+// image/video so the queue's small-row works for both. Matches the resolution
+// strategy used by ImageStudio.jobResultAssets / VideoStudio.jobVideoResultAssets.
+function resolveJobAssets(job, assets) {
+  if (!job?.result) return [];
+  const catalogById = new Map((assets ?? []).map((asset) => [asset.id, asset]));
+  const resultAssets = Array.isArray(job.result.assets) ? job.result.assets : [];
+  const resultById = new Map(resultAssets.map((asset) => [asset.id, catalogById.get(asset.id) ?? asset]));
+  const assetIds = job.result.assetIds ?? [];
+  if (assetIds.length) {
+    return assetIds.map((id) => resultById.get(id) ?? catalogById.get(id)).filter(Boolean);
+  }
+  if (resultAssets.length) {
+    return resultAssets.map((asset) => catalogById.get(asset.id) ?? asset);
+  }
+  if (job.result.generationSetId) {
+    return (assets ?? []).filter((asset) => asset.generationSetId === job.result.generationSetId);
+  }
+  return [];
 }

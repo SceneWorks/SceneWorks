@@ -3,7 +3,7 @@ import { AssetPickerField } from "../components/AssetPicker.jsx";
 import { AssetCard } from "../components/assetPanels.jsx";
 import { AssetMedia, assetCanRenderAsVideo } from "../components/assetMedia.jsx";
 import { Icon } from "../components/Icons.jsx";
-import { JobProgressCard } from "../components/JobProgress.jsx";
+import { WorkerProgressCard } from "../components/WorkerProgressCard.jsx";
 import { PromptGuideModal } from "../components/PromptGuideModal.jsx";
 import { RefinePromptControl } from "../components/RefinePromptControl.jsx";
 
@@ -37,6 +37,26 @@ function formatPlaybackTime(seconds) {
   const safeSeconds = Math.max(0, Math.round(Number(seconds) || 0));
   const minutes = Math.floor(safeSeconds / 60);
   return `${minutes}:${String(safeSeconds % 60).padStart(2, "0")}`;
+}
+
+// Resolve a video job's result assets against the live catalog so the
+// WorkerProgressCard video-player variant can play the finished clip (sc-2089).
+// Mirrors the image-side `jobResultAssets` helper in ImageStudio.jsx.
+function jobVideoResultAssets(job, assets) {
+  const catalogById = new Map(assets.map((asset) => [asset.id, asset]));
+  const resultAssets = (job.result?.assets ?? []).filter((asset) => asset?.type === "video");
+  const resultById = new Map(resultAssets.map((asset) => [asset.id, catalogById.get(asset.id) ?? asset]));
+  const assetIds = job.result?.assetIds ?? [];
+  if (assetIds.length) {
+    return assetIds.map((id) => resultById.get(id) ?? catalogById.get(id)).filter((asset) => asset?.type === "video");
+  }
+  if (resultAssets.length) {
+    return resultAssets.map((asset) => catalogById.get(asset.id) ?? asset);
+  }
+  if (job.result?.generationSetId) {
+    return assets.filter((asset) => asset.type === "video" && asset.generationSetId === job.result.generationSetId);
+  }
+  return [];
 }
 import {
   clearPresetDefault,
@@ -84,6 +104,7 @@ export function VideoStudio() {
     purgeAsset,
     gpuOptions,
     latestVideoAssets,
+    recentVideoAssets,
     studioLaunch,
     loras = [],
     jobs = [],
@@ -103,7 +124,10 @@ export function VideoStudio() {
     updateAssetStatus,
     videoModels,
   } = useAppContext();
-  const latestAssets = latestVideoAssets;
+  // Recent Assets (sc-2089) — 20 most recent video assets in the active
+  // project. Falls back to the legacy single-generation list for test
+  // contexts that haven't migrated.
+  const latestAssets = recentVideoAssets ?? latestVideoAssets;
   const launchRequest = studioLaunch;
   const trackedLocalJobs = videoLocalJobs;
   const onCancelJob = (job) => jobAction(job, "cancel");
@@ -771,10 +795,21 @@ export function VideoStudio() {
         <div className="video-results">
           <div className="video-main-stack">
             {localJobs.length ? (
-              <div className="local-job-stack">
-                {localJobs.map((job) => (
-                  <JobProgressCard job={job} key={job.id} label="Video generation" onCancel={onCancelJob} onOpenQueue={onOpenQueue} />
-                ))}
+              <div className="worker-progress-card-stack local-job-stack">
+                {localJobs.map((job) => {
+                  const jobAssets = jobVideoResultAssets(job, assets);
+                  return (
+                    <WorkerProgressCard
+                      key={job.id}
+                      job={job}
+                      thumbnailsVariant="video-player"
+                      thumbnailAssets={jobAssets}
+                      onThumbnailClick={onPreview}
+                      onCancel={onCancelJob}
+                      onOpenQueue={onOpenQueue}
+                    />
+                  );
+                })}
               </div>
             ) : null}
 

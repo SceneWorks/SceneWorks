@@ -3,7 +3,7 @@ import { AssetPickerField } from "../components/AssetPicker.jsx";
 import { AssetCard } from "../components/assetPanels.jsx";
 import { AssetMedia } from "../components/assetMedia.jsx";
 import { Icon } from "../components/Icons.jsx";
-import { JobProgressCard } from "../components/JobProgress.jsx";
+import { WorkerProgressCard } from "../components/WorkerProgressCard.jsx";
 import { PromptGuideModal } from "../components/PromptGuideModal.jsx";
 import { PoseLibraryPicker } from "../components/PoseLibraryPicker.jsx";
 import { RefinePromptControl } from "../components/RefinePromptControl.jsx";
@@ -80,7 +80,6 @@ import {
 } from "./generationStudio.jsx";
 import { useAppContext } from "../context/AppContext.js";
 import { loadStudioSettings, useStudioSettingsWriter } from "../hooks/useStudioSettings.js";
-import { errorStatuses } from "../jobTypes.js";
 import {
   SAMPLER_LABELS,
   SCHEDULER_LABELS,
@@ -104,12 +103,6 @@ function formatResolutionLabel(value) {
   const [width, height] = String(value).split("x");
   return height ? `${width} × ${height}` : value;
 }
-
-const localErrorLabels = {
-  failed: "Failed",
-  canceled: "Canceled",
-  interrupted: "Interrupted",
-};
 
 function jobResultAssets(job, assets) {
   const catalogById = new Map(assets.map((asset) => [asset.id, asset]));
@@ -160,13 +153,6 @@ function assetBatchIndex(asset) {
   return nameMatch ? Number(nameMatch[1]) - 1 : Number.POSITIVE_INFINITY;
 }
 
-function jobPendingSlotLabel(job, index) {
-  if (errorStatuses.has(job.status)) {
-    return `${localErrorLabels[job.status] ?? "Failed"} #${index + 1}`;
-  }
-  return `Pending #${index + 1}`;
-}
-
 export function ImageStudio() {
   const {
     activeProject,
@@ -179,6 +165,7 @@ export function ImageStudio() {
     gpuOptions,
     imageModels,
     latestImageAssets,
+    recentImageAssets,
     studioLaunch,
     imageLocalJobs = [],
     loras = [],
@@ -192,7 +179,14 @@ export function ImageStudio() {
     setRequestedGpu,
     updateAssetStatus,
   } = useAppContext();
-  const latestAssets = latestImageAssets;
+  // Recent Assets list (sc-2088). When the new context value is available, use
+  // the bounded 20-most-recent list; fall back to the legacy single-generation
+  // list for test contexts that haven't migrated. The existing useGenerationStudio
+  // selectStackedJobs() machinery collapses a completed job out of the stack as
+  // soon as its assets surface here, so the worker card disappearing matches the
+  // spec ("when the current worker completes its assets are added to recent
+  // assets, the worker disappears").
+  const latestAssets = recentImageAssets ?? latestImageAssets;
   const launchRequest = studioLaunch;
   const trackedLocalJobs = imageLocalJobs;
   const onCancelJob = (job) => jobAction(job, "cancel");
@@ -610,26 +604,16 @@ export function ImageStudio() {
     setLoraWeights((current) => ({ ...current, [id]: value }));
   }
 
-  // Each stacked run carries its own card and review slots so a run's output sits
-  // directly beneath its progress card, and queued runs show their pending slots.
+  // Each stacked run carries its already-resolved completed assets + the
+  // expected count, which the WorkerProgressCard image-grid variant uses to
+  // render thumbnails + skeleton cells (sc-2088 — replaces the explicit slot
+  // construction the legacy JobProgressCard wrapper needed).
   const localJobGroups = useMemo(
     () =>
       localJobs.map((job) => {
         const completedAssets = jobResultAssets(job, assets);
         const expectedCount = jobExpectedCount(job, completedAssets.length);
-        const slots = Array.from({ length: expectedCount }, (_, index) => {
-          const asset = completedAssets[index];
-          if (asset) {
-            return { type: "asset", id: `${job.id}:${asset.id}`, asset };
-          }
-          return {
-            type: "placeholder",
-            id: `${job.id}:slot-${index}`,
-            label: jobPendingSlotLabel(job, index),
-            isError: errorStatuses.has(job.status),
-          };
-        });
-        return { job, slots };
+        return { job, completedAssets, expectedCount };
       }),
     [assets, localJobs],
   );
@@ -951,47 +935,38 @@ export function ImageStudio() {
               </span>
             </div>
             {localJobGroups.length ? (
-              <div className="local-job-stack">
-                {localJobGroups.map(({ job, slots }) => (
-                  <article className="local-job-group" key={job.id}>
-                    <JobProgressCard job={job} label="Image generation" onCancel={onCancelJob} onOpenQueue={onOpenQueue} />
-                    {slots.length ? (
-                      <div className="review-grid">
-                        {slots.map((slot) =>
-                          slot.type === "asset" ? (
-                            <AssetCard
-                              asset={slot.asset}
-                              deleteAsset={deleteAsset}
-                              key={slot.id}
-                              onPreview={onPreview}
-                              purgeAsset={purgeAsset}
-                              updateAssetStatus={updateAssetStatus}
-                            />
-                          ) : (
-                            <div className={slot.isError ? "review-placeholder failed" : "review-placeholder"} key={slot.id}>
-                              <span>{slot.label}</span>
-                            </div>
-                          ),
-                        )}
-                      </div>
-                    ) : null}
-                  </article>
-                ))}
-              </div>
-            ) : latestAssets.length ? (
-              <div className="review-grid">
-                {latestAssets.map((asset) => (
-                  <AssetCard
-                    asset={asset}
-                    deleteAsset={deleteAsset}
-                    key={asset.id}
-                    onPreview={onPreview}
-                    purgeAsset={purgeAsset}
-                    updateAssetStatus={updateAssetStatus}
+              <div className="worker-progress-card-stack local-job-stack">
+                {localJobGroups.map(({ job, completedAssets, expectedCount }) => (
+                  <WorkerProgressCard
+                    key={job.id}
+                    job={job}
+                    thumbnailsVariant="image-grid"
+                    thumbnailAssets={completedAssets}
+                    expectedThumbnailCount={expectedCount}
+                    onThumbnailClick={onPreview}
+                    onCancel={onCancelJob}
+                    onOpenQueue={onOpenQueue}
                   />
                 ))}
               </div>
-            ) : (
+            ) : null}
+            {latestAssets.length ? (
+              <div className="recent-assets">
+                {localJobGroups.length ? <h3 className="recent-assets__title">Recent Assets</h3> : null}
+                <div className="review-grid">
+                  {latestAssets.map((asset) => (
+                    <AssetCard
+                      asset={asset}
+                      deleteAsset={deleteAsset}
+                      key={asset.id}
+                      onPreview={onPreview}
+                      purgeAsset={purgeAsset}
+                      updateAssetStatus={updateAssetStatus}
+                    />
+                  ))}
+                </div>
+              </div>
+            ) : localJobGroups.length ? null : (
               <div className="empty-panel">No fresh image batch</div>
             )}
           </section>
