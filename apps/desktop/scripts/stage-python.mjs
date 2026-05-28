@@ -27,6 +27,10 @@ for (const file of [
   // InstantID face-identity extras (insightface/onnxruntime/onnx/peft/einops);
   // installed into the main venv by setup.rs so the instantid_sdxl adapter runs.
   "requirements-instantid.txt",
+  // PuLID-FLUX face-identity extras (timm/facexlib/ftfy + shared
+  // insightface/onnxruntime). Installed into the main venv by setup.rs so the
+  // pulid_flux adapter runs (sc-2012, epic 2003).
+  "requirements-pulid-flux.txt",
 ]) {
   const src = join(workerDir, file);
   if (existsSync(src)) cpSync(src, join(outDir, file));

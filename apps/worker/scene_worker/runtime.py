@@ -33,6 +33,7 @@ from .image_adapters import (
     torch_inference_backend_available,
 )
 from .instantid_adapter import InstantIDAdapter
+from .pulid_flux_adapter import PuLIDFluxAdapter
 from .person_adapters import (
     detector_backend_available,
     run_person_detect,
@@ -1410,6 +1411,7 @@ def run_worker_loop(settings: WorkerSettings) -> None:
         "sdxl_diffusers": SdxlDiffusersAdapter(),
         "chroma_diffusers": ChromaDiffusersAdapter(),
         "instantid_sdxl": InstantIDAdapter(),
+        "pulid_flux": PuLIDFluxAdapter(),
     }
     max_registration_attempts = 20
 

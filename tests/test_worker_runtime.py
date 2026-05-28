@@ -8157,16 +8157,17 @@ def test_character_image_capability_implies_engine_or_tuning_declaration():
             continue
         target = MODEL_TARGETS.get(model["id"], {})
         ui = model.get("ui") or {}
-        has_engine = bool(target.get("ipAdapter") or target.get("instantId"))
+        has_engine = bool(target.get("ipAdapter") or target.get("instantId") or target.get("pulidFlux"))
         has_variation_ui = bool(ui.get("variationStrength"))
         if not (has_engine or has_variation_ui):
             misleading.append(model["id"])
     assert not misleading, (
         f"Models advertise `character_image` without engine wiring or a "
-        f"`ui.variationStrength` declaration: {misleading}. Add an `ipAdapter` "
-        f"or `instantId` block in MODEL_TARGETS for an IP-Adapter / face-ID "
-        f"backbone, or declare `ui.variationStrength` for an edit-style backbone "
-        f"(sc-2017), or drop the capability flag (the z_image_turbo bug, sc-2005)."
+        f"`ui.variationStrength` declaration: {misleading}. Add an `ipAdapter`, "
+        f"`instantId`, or `pulidFlux` block in MODEL_TARGETS for an IP-Adapter / "
+        f"face-ID backbone, or declare `ui.variationStrength` for an edit-style "
+        f"backbone (sc-2017), or drop the capability flag (the z_image_turbo bug, "
+        f"sc-2005)."
     )
 
 
@@ -8181,7 +8182,7 @@ def test_models_with_engine_block_advertise_character_image():
     manifest_by_id = {model["id"]: model for model in manifest.get("models", [])}
     unreachable: list[str] = []
     for model_id, target in MODEL_TARGETS.items():
-        if not (target.get("ipAdapter") or target.get("instantId")):
+        if not (target.get("ipAdapter") or target.get("instantId") or target.get("pulidFlux")):
             continue
         builtin = manifest_by_id.get(model_id)
         if builtin is None:
