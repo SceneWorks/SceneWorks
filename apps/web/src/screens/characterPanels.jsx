@@ -3,6 +3,8 @@ import { AssetPickerField } from "../components/AssetPicker.jsx";
 import { AssetCard } from "../components/assetPanels.jsx";
 import { AssetMedia } from "../components/assetMedia.jsx";
 import { JobProgressCard } from "../components/JobProgress.jsx";
+import { PoseLibraryPicker } from "../components/PoseLibraryPicker.jsx";
+import { usePoseLibrary } from "../poseLibrary.js";
 import { extractFamilies } from "../presetUtils.js";
 
 export function editableLora(link) {
@@ -522,6 +524,182 @@ export function CharacterAngleSet({
         <textarea onChange={(event) => setPrompt(event.target.value)} rows={2} value={prompt} />
       </label>
       {activeJob ? <JobProgressCard job={activeJob} label={`Angle set · ${angleCount} views`} /> : null}
+      {!activeJob && status ? <p className="inline-warning">{status}</p> : null}
+      {characterImages.length ? (
+        <div className="reference-thumb-row">
+          {characterImages.map((asset) => (
+            <button
+              aria-label={`Preview ${asset.displayName ?? asset.id}`}
+              className="reference-thumb"
+              key={asset.id}
+              onClick={() => onPreview?.(asset)}
+              type="button"
+            >
+              <AssetMedia asset={asset} controls={false} />
+            </button>
+          ))}
+        </div>
+      ) : null}
+    </section>
+  );
+}
+
+// Pose library: pick one or more poses from the bundled OpenPose gallery and generate
+// the character in each, in a single batch job (advanced.poses) sharing one seed for
+// wardrobe/hair consistency. An OpenPose ControlNet drives the pose; a face-restoration
+// pass re-imposes identity at the small full-body face size. Only rendered for a model
+// that supports the pose library (ui.poseLibrary).
+export function CharacterPoseLibrary({
+  selectedCharacter,
+  poseModel,
+  approvedReferences,
+  createImageJob,
+  importAsset,
+  addCharacterReference,
+  latestAssets = [],
+  imageLocalJobs = [],
+  rememberLocalGenerationJob,
+  onPreview,
+}) {
+  const { byId } = usePoseLibrary();
+  const [selectedPoseIds, setSelectedPoseIds] = React.useState([]);
+  const [referenceAssetId, setReferenceAssetId] = React.useState("");
+  const [prompt, setPrompt] = React.useState("");
+  const [submitting, setSubmitting] = React.useState(false);
+  const [status, setStatus] = React.useState("");
+  const [jobId, setJobId] = React.useState(null);
+  const fileInputRef = React.useRef(null);
+  const characterId = selectedCharacter?.id;
+
+  React.useEffect(() => {
+    setReferenceAssetId(approvedReferences[0]?.assetId ?? "");
+  }, [characterId, approvedReferences]);
+  React.useEffect(() => {
+    // Pose-neutral prompt: the skeleton sets the stance, so describe only appearance +
+    // outfit/shoes (InstantID preserves the face but NOT hair/wardrobe).
+    const appearance = (selectedCharacter?.description ?? "").trim() || selectedCharacter?.name || "the character";
+    setPrompt(`${appearance}, consistent outfit and shoes, plain grey background, soft even lighting, sharp focus, photorealistic`);
+    setStatus("");
+  }, [characterId, selectedCharacter?.name, selectedCharacter?.description]);
+
+  if (!poseModel || !selectedCharacter) {
+    return null;
+  }
+
+  const activeJob = imageLocalJobs.find((job) => job.id === jobId);
+  const characterImages = (latestAssets ?? []).filter(
+    (asset) =>
+      asset.recipe?.normalizedSettings?.characterId === characterId ||
+      (asset.metadata?.characterReferences ?? []).some((ref) => ref.characterId === characterId),
+  );
+
+  function togglePose(id) {
+    setSelectedPoseIds((ids) => (ids.includes(id) ? ids.filter((value) => value !== id) : [...ids, id]));
+  }
+
+  async function onUpload(event) {
+    const file = event.target.files?.[0];
+    event.target.value = "";
+    if (!file) {
+      return;
+    }
+    setStatus("Uploading reference…");
+    const asset = await importAsset(file, { throwOnError: false });
+    if (asset?.id) {
+      setReferenceAssetId(asset.id);
+      await addCharacterReference(characterId, { assetId: asset.id, approved: true, role: "pose-set-reference" });
+      setStatus("");
+    } else {
+      setStatus("Upload failed — try another image.");
+    }
+  }
+
+  async function generate() {
+    const poses = selectedPoseIds.map((id) => byId[id]).filter(Boolean).map((pose) => ({ id: pose.id, keypoints: pose.keypoints }));
+    if (!referenceAssetId || !poses.length || submitting) {
+      return;
+    }
+    setSubmitting(true);
+    setStatus("");
+    try {
+      const job = await createImageJob({
+        mode: "character_image",
+        model: poseModel.id,
+        characterId,
+        referenceAssetId,
+        prompt: prompt.trim(),
+        negativePrompt:
+          "cropped, out of frame, multiple people, extra limbs, deformed hands, extra fingers, " +
+          "plastic skin, airbrushed, cgi, 3d render, cartoon, anime, waxy, blurry",
+        // The worker emits one image per pose in `advanced.poses` regardless of count;
+        // count must satisfy the API's 1-8 guard, so send 1.
+        count: 1,
+        width: 1024,
+        height: 1024,
+        advanced: { poses, ipAdapterScale: 0.8 },
+      });
+      if (job?.id) {
+        rememberLocalGenerationJob?.("image", job);
+        setJobId(job.id);
+        setStatus("");
+      } else {
+        setStatus("Could not start the job — check the error banner.");
+      }
+    } finally {
+      setSubmitting(false);
+    }
+  }
+
+  return (
+    <section className="character-section">
+      <div className="section-heading">
+        <p className="eyebrow">Pose library</p>
+        <h2>Generate {selectedCharacter.name} in a pose</h2>
+      </div>
+      <p>
+        Pick one or more poses and generate this character in each, in a single job. An OpenPose ControlNet drives the
+        pose; each image adds a face-restoration pass so identity holds at full-body size, so larger selections take a
+        while.
+      </p>
+      {approvedReferences.length ? (
+        <div className="reference-thumb-row">
+          {approvedReferences.map((reference) => (
+            <button
+              aria-label={`Use ${reference.asset?.displayName ?? reference.assetId} as the pose reference`}
+              aria-pressed={reference.assetId === referenceAssetId}
+              className={reference.assetId === referenceAssetId ? "reference-thumb active" : "reference-thumb"}
+              key={reference.assetId}
+              onClick={() => setReferenceAssetId(reference.assetId)}
+              type="button"
+            >
+              {reference.asset ? <AssetMedia asset={reference.asset} controls={false} /> : <span>Missing asset</span>}
+            </button>
+          ))}
+        </div>
+      ) : (
+        <p className="inline-warning">No approved reference yet — upload one below or approve a reference above.</p>
+      )}
+      <PoseLibraryPicker
+        onClear={() => setSelectedPoseIds([])}
+        onToggle={togglePose}
+        selectedIds={selectedPoseIds}
+      />
+      <div className="inline-create">
+        <button onClick={() => fileInputRef.current?.click()} type="button">
+          Upload reference
+        </button>
+        <input accept="image/*" hidden onChange={onUpload} ref={fileInputRef} type="file" />
+        <button disabled={!referenceAssetId || !selectedPoseIds.length || submitting} onClick={generate} type="button">
+          {submitting
+            ? "Starting…"
+            : `Generate ${selectedPoseIds.length || ""} pose${selectedPoseIds.length === 1 ? "" : "s"}`.replace("  ", " ")}
+        </button>
+      </div>
+      <label>
+        Prompt
+        <textarea onChange={(event) => setPrompt(event.target.value)} rows={2} value={prompt} />
+      </label>
+      {activeJob ? <JobProgressCard job={activeJob} label={`Pose library · ${selectedPoseIds.length} pose${selectedPoseIds.length === 1 ? "" : "s"}`} /> : null}
       {!activeJob && status ? <p className="inline-warning">{status}</p> : null}
       {characterImages.length ? (
         <div className="reference-thumb-row">

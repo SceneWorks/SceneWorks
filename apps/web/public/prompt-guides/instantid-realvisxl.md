@@ -18,6 +18,10 @@ This is a **reference-driven** model: it only runs in the "With character" flow 
 
 The head angle does **not** come from the prompt — describing "profile" or "looking left" won't rotate the face, because identity pins it toward the reference's angle. Instead use the **View angle** dropdown: front, three-quarter left/right, left/right profile, looking up, looking down, and the four diagonals. Each renders the *same* character at that angle with identity preserved (validated ~0.81–0.89 likeness across all of them). View-angle renders square. Leave it on **Match reference** to keep the reference's own angle. Generating one character across several angles is also how you build a consistent set for training a character LoRA.
 
+## Pose Library
+
+The **Pose library** picker (in Character Studio and Image Studio) generates the character in poses you choose from a bundled gallery — standing, sitting, dancing, jumping, and more. Tick one or more poses and generate; you get one image per pose in a single job, sharing one seed so hair/clothing stay consistent. An **OpenPose ControlNet** drives the pose from the pose's skeleton; the prompt should describe the **outfit and shoes** (InstantID holds the face, not the wardrobe) — leave stance words out, the skeleton sets the pose. Because the face is small at full-body framing, each image adds an automatic **face-restoration pass** (the face is detected, upscaled, re-rendered with the character's identity, and blended back in) that recovers likeness to ~0.88 cosine. Poses where the face isn't visible (e.g. from behind) rely on the shared seed for continuity. Each pose is two renders, so larger selections take longer and use more memory.
+
 ## Choose A Good Reference
 
 Identity quality is set by the reference more than the prompt:

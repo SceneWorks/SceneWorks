@@ -5,7 +5,9 @@ import { AssetMedia } from "../components/assetMedia.jsx";
 import { Icon } from "../components/Icons.jsx";
 import { JobProgressCard } from "../components/JobProgress.jsx";
 import { PromptGuideModal } from "../components/PromptGuideModal.jsx";
+import { PoseLibraryPicker } from "../components/PoseLibraryPicker.jsx";
 import { RefinePromptControl } from "../components/RefinePromptControl.jsx";
+import { usePoseLibrary } from "../poseLibrary.js";
 
 const PROMPT_SUGGESTION_POOL = [
   "Barista pouring espresso, morning light",
@@ -220,6 +222,10 @@ export function ImageStudio() {
   const [controlnetScale, setControlnetScale] = useState(saved.controlnetScale ?? 0.8);
   // InstantID canonical head angle ("" = match the reference's own angle). Rides advanced.viewAngle.
   const [viewAngle, setViewAngle] = useState(saved.viewAngle ?? "");
+  // Pose library: selected pose ids. When non-empty, the job carries advanced.poses
+  // (one image per pose) instead of the normal variations count. Transient (not saved).
+  const [selectedPoseIds, setSelectedPoseIds] = useState([]);
+  const { byId: poseById } = usePoseLibrary();
   const [upscaleEnabled, setUpscaleEnabled] = useState(saved.upscaleEnabled ?? false);
   const [upscaleFactor, setUpscaleFactor] = useState(saved.upscaleFactor ?? 2);
   const [upscaleEngine, setUpscaleEngine] = useState(saved.upscaleEngine ?? "real-esrgan");
@@ -317,6 +323,8 @@ export function ImageStudio() {
   const identityStructure = selectedModel?.ui?.identityStructure;
   // Canonical head angles the model can render from a frontal reference (InstantID).
   const viewAngles = Array.isArray(selectedModel?.ui?.viewAngles) ? selectedModel.ui.viewAngles : null;
+  // Whether the model supports the OpenPose pose library (InstantID).
+  const poseLibrary = Boolean(selectedModel?.ui?.poseLibrary);
   // Reset the reference tuning to the selected model's declared defaults whenever the
   // model changes, so InstantID starts at its tuned 0.8/0.8 and Kolors at 0.6, and the
   // view angle never carries over to a model that doesn't support it. Skip the mount
@@ -331,6 +339,7 @@ export function ImageStudio() {
     setIpAdapterScale(typeof ui.referenceStrengthDefault === "number" ? ui.referenceStrengthDefault : 0.6);
     setControlnetScale(typeof ui.identityStructure?.default === "number" ? ui.identityStructure.default : 0.8);
     setViewAngle("");
+    setSelectedPoseIds([]);
   }, [model]);
   // Approved reference images for the selected character (the IP-Adapter identity
   // source). Resolve the full asset from the catalog so thumbnails render even when
@@ -577,12 +586,18 @@ export function ImageStudio() {
     }
     setSubmitting(true);
     try {
+      // Pose library: when poses are selected, the job emits one image per pose
+      // (advanced.poses) instead of `count` variations.
+      const posePayload =
+        mode === "character_image" && referenceAssetId && poseLibrary && selectedPoseIds.length
+          ? selectedPoseIds.map((id) => poseById[id]).filter(Boolean).map((pose) => ({ id: pose.id, keypoints: pose.keypoints }))
+          : [];
       const job = await createImageJob({
         mode,
         prompt,
         negativePrompt,
         model,
-        count,
+        count: posePayload.length ? 1 : count,
         seed: seed === "" ? null : Number(seed),
         width,
         height,
@@ -611,11 +626,13 @@ export function ImageStudio() {
           ...(mode === "character_image" && referenceAssetId && identityStructure
             ? { controlnetConditioningScale: controlnetScale }
             : {}),
-          // View angle (InstantID) — only when a specific angle is chosen; "" means
-          // match the reference's own angle (omit so the worker uses default behavior).
-          ...(mode === "character_image" && referenceAssetId && viewAngles && viewAngle
+          // View angle (InstantID) — only when a specific angle is chosen and no pose is
+          // selected (a library pose drives the whole body, superseding the head angle).
+          ...(mode === "character_image" && referenceAssetId && viewAngles && viewAngle && !posePayload.length
             ? { viewAngle }
             : {}),
+          // Pose library (InstantID) — one image per selected pose.
+          ...(posePayload.length ? { poses: posePayload } : {}),
         },
       });
       onLocalJobCreated?.(job);
@@ -803,6 +820,23 @@ export function ImageStudio() {
                             ))}
                           </select>
                         </label>
+                      ) : null}
+                      {poseLibrary ? (
+                        <details className="pose-library-details">
+                          <summary>
+                            Pose library{selectedPoseIds.length ? ` · ${selectedPoseIds.length} selected` : ""}
+                          </summary>
+                          <PoseLibraryPicker
+                            onClear={() => setSelectedPoseIds([])}
+                            onToggle={(id) =>
+                              setSelectedPoseIds((ids) =>
+                                ids.includes(id) ? ids.filter((value) => value !== id) : [...ids, id],
+                              )
+                            }
+                            selectedIds={selectedPoseIds}
+                          />
+                          <p className="muted">Selecting poses generates one image per pose (overrides Variations).</p>
+                        </details>
                       ) : null}
                       <div className="guidance-strip">
                         <strong>Identity from reference</strong>
