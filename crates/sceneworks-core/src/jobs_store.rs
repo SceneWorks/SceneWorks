@@ -177,6 +177,13 @@ pub struct ProgressUpdate {
     pub error: Option<String>,
     pub result: Option<Map<String, Value>>,
     pub eta_seconds: Option<f64>,
+    /// Sampled GPU memory percentage observed by the worker at this progress
+    /// point (0..100). The store keeps a running max across a job's progress
+    /// updates (sc-2086) so completed-row meters render the peak.
+    pub peak_gpu_memory_pct: Option<f64>,
+    /// Sampled GPU load percentage observed at this progress point (0..100).
+    /// Same running-max semantics as peak_gpu_memory_pct.
+    pub peak_gpu_load_pct: Option<f64>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -253,6 +260,10 @@ impl JobsStore {
             ",
         )?;
         ensure_column(&transaction, "workers", "utilization_json", "text")?;
+        // sc-2086: per-job peak GPU memory % and load %, written by the worker
+        // along with progress so a completed row shows the peak the run reached.
+        ensure_column(&transaction, "jobs", "peak_gpu_memory_pct", "real")?;
+        ensure_column(&transaction, "jobs", "peak_gpu_load_pct", "real")?;
         transaction.commit()?;
         Ok(())
     }
@@ -728,6 +739,18 @@ impl JobsStore {
         if update.eta_seconds.is_some_and(|value| !value.is_finite()) {
             return Err(JobsStoreError::InvalidNumber("etaSeconds".to_owned()));
         }
+        if update
+            .peak_gpu_memory_pct
+            .is_some_and(|value| !value.is_finite())
+        {
+            return Err(JobsStoreError::InvalidNumber("peakGpuMemoryPct".to_owned()));
+        }
+        if update
+            .peak_gpu_load_pct
+            .is_some_and(|value| !value.is_finite())
+        {
+            return Err(JobsStoreError::InvalidNumber("peakGpuLoadPct".to_owned()));
+        }
 
         let _guard = self.lock.lock();
         let mut connection = self.connect()?;
@@ -736,6 +759,14 @@ impl JobsStore {
         let completed_at = is_terminal_status(update.status.as_str()).then_some(now.clone());
         let canceled_at = (update.status == JobStatus::Canceled).then_some(now.clone());
         let progress = update.progress.clamp(0.0, 1.0);
+        // Peaks are clamped to 0..100 and persisted as a running max so a stale
+        // progress report (lower sample) can't ratchet the peak down (sc-2086).
+        let peak_memory = update
+            .peak_gpu_memory_pct
+            .map(|value| value.clamp(0.0, 100.0));
+        let peak_load = update
+            .peak_gpu_load_pct
+            .map(|value| value.clamp(0.0, 100.0));
         transaction.execute(
             "
             update jobs
@@ -748,8 +779,10 @@ impl JobsStore {
                    eta_seconds = ?7,
                    completed_at = coalesce(?8, completed_at),
                    canceled_at = coalesce(?9, canceled_at),
-                   updated_at = ?10
-             where id = ?11
+                   updated_at = ?10,
+                   peak_gpu_memory_pct = max(coalesce(peak_gpu_memory_pct, 0), coalesce(?11, peak_gpu_memory_pct, 0)),
+                   peak_gpu_load_pct   = max(coalesce(peak_gpu_load_pct,   0), coalesce(?12, peak_gpu_load_pct,   0))
+             where id = ?13
             ",
             params![
                 update.status.as_str(),
@@ -762,6 +795,8 @@ impl JobsStore {
                 completed_at,
                 canceled_at,
                 now,
+                peak_memory,
+                peak_load,
                 job_id,
             ],
         )?;
@@ -969,6 +1004,8 @@ impl JobsStore {
 fn row_to_job(row: &Row<'_>) -> rusqlite::Result<JobSnapshot> {
     let progress: f64 = row.get("progress")?;
     let eta_seconds: Option<f64> = row.get("eta_seconds")?;
+    let peak_memory: Option<f64> = row.get("peak_gpu_memory_pct").ok().flatten();
+    let peak_load: Option<f64> = row.get("peak_gpu_load_pct").ok().flatten();
     let created_at: String = row.get("created_at")?;
     let started_at: Option<String> = row.get("started_at")?;
     let completed_at: Option<String> = row.get("completed_at")?;
@@ -1002,6 +1039,8 @@ fn row_to_job(row: &Row<'_>) -> rusqlite::Result<JobSnapshot> {
         completed_at,
         canceled_at: row.get("canceled_at")?,
         last_heartbeat_at: row.get("last_heartbeat_at")?,
+        peak_gpu_memory_pct: peak_memory.map(number_from_f64),
+        peak_gpu_load_pct: peak_load.map(number_from_f64),
         extra: Default::default(),
     })
 }

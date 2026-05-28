@@ -125,6 +125,10 @@ pub(crate) async fn update_job_progress(
 ) -> Result<Json<JobSnapshot>, ApiError> {
     let progress = number_to_f64(&payload.progress, "progress")?;
     let eta_seconds = optional_number_to_f64(payload.eta_seconds.as_ref(), "etaSeconds")?;
+    let peak_gpu_memory_pct =
+        optional_number_to_f64(payload.peak_gpu_memory_pct.as_ref(), "peakGpuMemoryPct")?;
+    let peak_gpu_load_pct =
+        optional_number_to_f64(payload.peak_gpu_load_pct.as_ref(), "peakGpuLoadPct")?;
     let mut result = payload.result;
     // On a completing real training run, register the produced adapter as a
     // SceneWorks LoRA *before* recording completion, and fold the outcome into
@@ -153,6 +157,8 @@ pub(crate) async fn update_job_progress(
                 error: payload.error,
                 result,
                 eta_seconds,
+                peak_gpu_memory_pct,
+                peak_gpu_load_pct,
             },
         )
     })

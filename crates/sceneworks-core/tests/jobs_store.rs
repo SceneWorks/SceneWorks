@@ -82,6 +82,8 @@ fn job_lifecycle_create_claim_complete() {
                 error: None,
                 result: Some(object(json!({ "assetIds": ["asset-1"] }))),
                 eta_seconds: None,
+                peak_gpu_memory_pct: None,
+                peak_gpu_load_pct: None,
             },
         )
         .expect("progress updates");
@@ -91,6 +93,98 @@ fn job_lifecycle_create_claim_complete() {
     assert_eq!(completed.result, object(json!({ "assetIds": ["asset-1"] })));
     assert_eq!(worker.status, WorkerStatus::Idle);
     assert_eq!(worker.current_job_id, None);
+}
+
+/// sc-2086 — successive progress reports must ratchet the per-job peak GPU
+/// stats up only, so a stale low sample later in the run can't clobber the
+/// max. Also covers clamp-to-100 and the None-passthrough case for status-only
+/// updates.
+#[test]
+fn progress_keeps_running_max_for_peak_gpu_meters() {
+    let store = store("peak-gpu-meters");
+    register_image_worker(&store);
+    let created = store
+        .create_job(image_job(object(json!({ "prompt": "p" }))))
+        .expect("job creates");
+    store.claim_next_job("worker-1").expect("claim ok");
+
+    fn progress(memory: Option<f64>, load: Option<f64>) -> ProgressUpdate {
+        ProgressUpdate {
+            status: JobStatus::Running,
+            stage: ProgressStage::Running,
+            progress: 0.5,
+            message: "running".to_owned(),
+            error: None,
+            result: None,
+            eta_seconds: None,
+            peak_gpu_memory_pct: memory,
+            peak_gpu_load_pct: load,
+        }
+    }
+
+    let job = store
+        .update_job_progress(&created.id, progress(Some(40.0), Some(60.0)))
+        .expect("first sample");
+    assert_eq!(
+        job.peak_gpu_memory_pct.as_ref().and_then(|n| n.as_f64()),
+        Some(40.0)
+    );
+    assert_eq!(
+        job.peak_gpu_load_pct.as_ref().and_then(|n| n.as_f64()),
+        Some(60.0)
+    );
+
+    // Higher samples ratchet up.
+    let job = store
+        .update_job_progress(&created.id, progress(Some(72.5), Some(85.0)))
+        .expect("higher sample");
+    assert_eq!(
+        job.peak_gpu_memory_pct.as_ref().and_then(|n| n.as_f64()),
+        Some(72.5)
+    );
+    assert_eq!(
+        job.peak_gpu_load_pct.as_ref().and_then(|n| n.as_f64()),
+        Some(85.0)
+    );
+
+    // Lower samples are ignored — peak stays at the previous max.
+    let job = store
+        .update_job_progress(&created.id, progress(Some(20.0), Some(10.0)))
+        .expect("lower sample");
+    assert_eq!(
+        job.peak_gpu_memory_pct.as_ref().and_then(|n| n.as_f64()),
+        Some(72.5)
+    );
+    assert_eq!(
+        job.peak_gpu_load_pct.as_ref().and_then(|n| n.as_f64()),
+        Some(85.0)
+    );
+
+    // None passes through (status-only update) and leaves peaks untouched.
+    let job = store
+        .update_job_progress(&created.id, progress(None, None))
+        .expect("status-only update");
+    assert_eq!(
+        job.peak_gpu_memory_pct.as_ref().and_then(|n| n.as_f64()),
+        Some(72.5)
+    );
+    assert_eq!(
+        job.peak_gpu_load_pct.as_ref().and_then(|n| n.as_f64()),
+        Some(85.0)
+    );
+
+    // Over-100 samples (rare but possible from buggy backends) clamp.
+    let job = store
+        .update_job_progress(&created.id, progress(Some(120.0), Some(150.0)))
+        .expect("clamped sample");
+    assert_eq!(
+        job.peak_gpu_memory_pct.as_ref().and_then(|n| n.as_f64()),
+        Some(100.0)
+    );
+    assert_eq!(
+        job.peak_gpu_load_pct.as_ref().and_then(|n| n.as_f64()),
+        Some(100.0)
+    );
 }
 
 #[test]
@@ -384,6 +478,8 @@ fn training_progress_stages_persist_under_running_and_reject_unknown_status() {
                     error: None,
                     result: None,
                     eta_seconds: None,
+                    peak_gpu_memory_pct: None,
+                    peak_gpu_load_pct: None,
                 },
             )
             .expect("running status with a training stage is accepted");
@@ -404,6 +500,8 @@ fn training_progress_stages_persist_under_running_and_reject_unknown_status() {
                 error: None,
                 result: None,
                 eta_seconds: None,
+                peak_gpu_memory_pct: None,
+                peak_gpu_load_pct: None,
             },
         )
         .expect_err("an unknown status is rejected");
@@ -862,6 +960,8 @@ fn invalid_progress_numbers_are_rejected() {
                 error: None,
                 result: None,
                 eta_seconds: None,
+                peak_gpu_memory_pct: None,
+                peak_gpu_load_pct: None,
             },
         ),
         Err(JobsStoreError::InvalidNumber(field)) if field == "progress"

@@ -578,6 +578,16 @@ pub struct ProgressRequest {
     pub result: Option<JsonObject>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub eta_seconds: Option<ContractNumber>,
+    /// Sampled GPU memory usage percentage (0..100) at this progress point.
+    /// The server tracks the running max across a job's progress reports so a
+    /// completed row's meters can show the peak after the job finishes
+    /// (sc-2086).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub peak_gpu_memory_pct: Option<ContractNumber>,
+    /// Sampled GPU load percentage (0..100) at this progress point. Same
+    /// running-max treatment as peak_gpu_memory_pct (sc-2086).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub peak_gpu_load_pct: Option<ContractNumber>,
     #[serde(flatten)]
     pub extra: ExtraFields,
 }
@@ -612,6 +622,15 @@ pub struct JobSnapshot {
     pub completed_at: Option<String>,
     pub canceled_at: Option<String>,
     pub last_heartbeat_at: Option<String>,
+    /// Highest GPU memory percentage the worker observed for this job (0..100).
+    /// Populated by sc-2086 and read by the WorkerProgressCard hardware row on
+    /// terminal jobs so static meters reflect the peak observed during the run.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub peak_gpu_memory_pct: Option<ContractNumber>,
+    /// Highest GPU load percentage the worker observed for this job (0..100).
+    /// Pair of peak_gpu_memory_pct.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub peak_gpu_load_pct: Option<ContractNumber>,
     #[serde(flatten)]
     pub extra: ExtraFields,
 }
