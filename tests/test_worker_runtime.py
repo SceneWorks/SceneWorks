@@ -30,6 +30,7 @@ from scene_worker.image_adapters import (
     KolorsDiffusersAdapter,
     LensTurboAdapter,
     MlxFluxAdapter,
+    MlxQwenAdapter,
     MODEL_TARGETS,
     QwenImageAdapter,
     REAL_ESRGAN_MODEL_SPECS,
@@ -1607,50 +1608,292 @@ def test_mlx_flux_rejects_reference_asset():
         raise AssertionError("MlxFluxAdapter must reject reference-image jobs (no FLUX IP-Adapter in mflux).")
 
 
-def test_flux_manifest_has_mlx_block():
-    # Manifest-driven auto-dispatch + Model Manager memory tier (sc-1970).
-    # The Rust API owns the canonical jsonc parser; here we just confirm both
-    # FLUX entries carry an `mlx` block and the contents look right. A regex
-    # walks each entry's bounded braces so a URL containing `//` (e.g. the
-    # FLUX model-card link) doesn't break the structural check.
+def _manifest_brace_walker():
+    # Helper for the mlx-block manifest tests. Returns (raw, find_entry_block,
+    # find_mlx_block) that walk balanced braces so a URL containing `//` (in
+    # the entry text) doesn't trip a naive jsonc strip.
     from pathlib import Path
-    import re
 
     manifest_path = Path(__file__).resolve().parent.parent / "config" / "manifests" / "builtin.models.jsonc"
     raw = manifest_path.read_text(encoding="utf-8")
 
-    def find_entry_block(model_id: str) -> str:
-        # Each entry opens with `"id": "<model_id>"` and is contained in the
-        # surrounding `{ ... }` block of the entry. Walk forward from the id
-        # marker to find the matching closing brace by depth.
-        anchor = raw.index(f'"id": "{model_id}"')
-        # Step back to the opening brace of the entry.
-        start = raw.rfind("{", 0, anchor)
-        assert start != -1, f"entry start brace for {model_id} not found"
+    def find_balanced_block(start_index: int) -> str:
         depth = 0
-        for index in range(start, len(raw)):
+        for index in range(start_index, len(raw)):
             ch = raw[index]
             if ch == "{":
                 depth += 1
             elif ch == "}":
                 depth -= 1
                 if depth == 0:
-                    return raw[start : index + 1]
-        raise AssertionError(f"unterminated entry block for {model_id}")
+                    return raw[start_index : index + 1]
+        raise AssertionError(f"unterminated brace block from index {start_index}")
+
+    def find_entry_block(model_id: str) -> str:
+        anchor = raw.index(f'"id": "{model_id}"')
+        start = raw.rfind("{", 0, anchor)
+        assert start != -1, f"entry start brace for {model_id} not found"
+        return find_balanced_block(start)
+
+    def find_mlx_block(entry_block: str) -> str:
+        import re
+
+        match = re.search(r'"mlx"\s*:\s*\{', entry_block)
+        assert match, "entry block has no mlx block"
+        # Resolve the entry block's position in the raw manifest, then walk
+        # balanced braces from the actual opening brace so nested limits {...}
+        # are captured (Qwen carries a sampler/scheduler limits override, FLUX
+        # does not).
+        entry_start = raw.index(entry_block)
+        mlx_open = entry_start + match.end() - 1
+        return find_balanced_block(mlx_open)
+
+    return raw, find_entry_block, find_mlx_block
+
+
+def test_flux_manifest_has_mlx_block():
+    # Manifest-driven auto-dispatch + Model Manager memory tier (sc-1970).
+    # The Rust API owns the canonical jsonc parser; here we just confirm both
+    # FLUX entries carry an `mlx` block and the contents look right.
+    import re
+
+    _, find_entry_block, find_mlx_block = _manifest_brace_walker()
 
     for model_id in ("flux_schnell", "flux_dev"):
         block = find_entry_block(model_id)
-        mlx_match = re.search(r'"mlx"\s*:\s*\{([^}]*)\}', block)
-        assert mlx_match, f"{model_id} manifest must declare an mlx block (sc-1970)"
-        body = mlx_match.group(1)
-        quant_match = re.search(r'"quantize"\s*:\s*(\d+)', body)
-        mem_match = re.search(r'"minMemoryGb"\s*:\s*(\d+)', body)
+        mlx_block = find_mlx_block(block)
+        quant_match = re.search(r'"quantize"\s*:\s*(\d+)', mlx_block)
+        mem_match = re.search(r'"minMemoryGb"\s*:\s*(\d+)', mlx_block)
         assert quant_match and int(quant_match.group(1)) in {3, 4, 5, 6, 8}, (
-            f"{model_id} mlx.quantize must be a supported quant level"
+            f"{model_id} mlx.quantize must be a supported quant level (sc-1970)"
         )
         assert mem_match and int(mem_match.group(1)) > 0, (
-            f"{model_id} mlx.minMemoryGb must be a positive int"
+            f"{model_id} mlx.minMemoryGb must be a positive int (sc-1970)"
         )
+
+
+def test_qwen_image_manifest_has_mlx_block():
+    # sc-1972: qwen_image carries an mlx block + sampler/scheduler limits
+    # override (mflux's loop is sealed on "linear" — match the wan_2_2
+    # precedent of restricting the menu to default-only when the MLX path is
+    # the active backend, epic 1753 §14).
+    import re
+
+    _, find_entry_block, find_mlx_block = _manifest_brace_walker()
+    block = find_entry_block("qwen_image")
+    mlx_block = find_mlx_block(block)
+    quant_match = re.search(r'"quantize"\s*:\s*(\d+)', mlx_block)
+    mem_match = re.search(r'"minMemoryGb"\s*:\s*(\d+)', mlx_block)
+    assert quant_match and int(quant_match.group(1)) in {3, 4, 5, 6, 8}, (
+        "qwen_image mlx.quantize must be a supported quant level (sc-1972)"
+    )
+    assert mem_match and int(mem_match.group(1)) > 0, (
+        "qwen_image mlx.minMemoryGb must be a positive int (sc-1972)"
+    )
+    # MLX sampler/scheduler menu override
+    assert '"samplers": ["default"]' in mlx_block, (
+        "qwen_image mlx must restrict samplers to default (mflux loop is linear-only)"
+    )
+    assert '"schedulers": ["default"]' in mlx_block, (
+        "qwen_image mlx must restrict schedulers to default (mflux loop is linear-only)"
+    )
+
+
+def test_create_image_adapter_routes_qwen_image(monkeypatch):
+    # Pin the auto-dispatch off the MLX path so this asserts the torch
+    # fallback on every host (a developer Mac with the mlx-flux sidecar
+    # installed would otherwise route here to MlxQwenAdapter — sc-1972).
+    monkeypatch.setenv("SCENEWORKS_DISABLE_MLX_FLUX", "1")
+    adapter = create_image_adapter({"payload": {"model": "qwen_image"}})
+    assert adapter.__class__.__name__ == "QwenImageAdapter"
+    assert adapter.id == "qwen_image"
+
+
+def test_image_adapter_env_override_selects_mlx_qwen(monkeypatch):
+    # Explicit env override picks MlxQwenAdapter regardless of platform or
+    # sidecar availability — the adapter exists; sidecar absence surfaces at
+    # job time as an actionable error.
+    monkeypatch.setenv("SCENEWORKS_IMAGE_ADAPTER", "mlx_qwen")
+    adapter = create_image_adapter({"payload": {"model": "qwen_image"}})
+    assert adapter.__class__.__name__ == "MlxQwenAdapter"
+    assert adapter.id == "mlx_qwen"
+
+
+def test_qwen_auto_dispatch_routes_to_mlx_when_sidecar_available(monkeypatch):
+    monkeypatch.delenv("SCENEWORKS_DISABLE_MLX_FLUX", raising=False)
+    monkeypatch.delenv("SCENEWORKS_IMAGE_ADAPTER", raising=False)
+    monkeypatch.setattr("sys.platform", "darwin")
+    monkeypatch.setattr(MlxQwenAdapter, "_sidecar_available", lambda self: True)
+    adapter = create_image_adapter({"payload": {"model": "qwen_image"}})
+    assert adapter.__class__.__name__ == "MlxQwenAdapter"
+
+
+def test_qwen_auto_dispatch_falls_back_when_sidecar_missing(monkeypatch):
+    monkeypatch.delenv("SCENEWORKS_DISABLE_MLX_FLUX", raising=False)
+    monkeypatch.delenv("SCENEWORKS_IMAGE_ADAPTER", raising=False)
+    monkeypatch.setattr("sys.platform", "darwin")
+    monkeypatch.setattr(MlxQwenAdapter, "_sidecar_available", lambda self: False)
+    adapter = create_image_adapter({"payload": {"model": "qwen_image"}})
+    assert adapter.__class__.__name__ == "QwenImageAdapter"
+
+
+def test_qwen_auto_dispatch_respects_disable_env(monkeypatch):
+    # SCENEWORKS_DISABLE_MLX_FLUX=1 is the single mflux-sidecar opt-out; it
+    # disables both the FLUX and Qwen MLX paths (one venv, one switch).
+    monkeypatch.setenv("SCENEWORKS_DISABLE_MLX_FLUX", "1")
+    monkeypatch.delenv("SCENEWORKS_IMAGE_ADAPTER", raising=False)
+    monkeypatch.setattr("sys.platform", "darwin")
+    monkeypatch.setattr(MlxQwenAdapter, "_sidecar_available", lambda self: True)
+    adapter = create_image_adapter({"payload": {"model": "qwen_image"}})
+    assert adapter.__class__.__name__ == "QwenImageAdapter"
+
+
+def test_qwen_auto_dispatch_skips_mlx_on_non_macos(monkeypatch):
+    monkeypatch.delenv("SCENEWORKS_DISABLE_MLX_FLUX", raising=False)
+    monkeypatch.delenv("SCENEWORKS_IMAGE_ADAPTER", raising=False)
+    monkeypatch.setattr("sys.platform", "linux")
+    monkeypatch.setattr(MlxQwenAdapter, "_sidecar_available", lambda self: True)
+    adapter = create_image_adapter({"payload": {"model": "qwen_image"}})
+    assert adapter.__class__.__name__ == "QwenImageAdapter"
+
+
+def test_qwen_auto_dispatch_skips_mlx_for_edit_image(monkeypatch):
+    # mflux ships QwenImageEdit but the v1 MLX adapter is T2I-only (needs
+    # spec extension to thread image_paths); edit_image must keep going to
+    # the torch QwenImageAdapter for now.
+    monkeypatch.delenv("SCENEWORKS_DISABLE_MLX_FLUX", raising=False)
+    monkeypatch.delenv("SCENEWORKS_IMAGE_ADAPTER", raising=False)
+    monkeypatch.setattr("sys.platform", "darwin")
+    monkeypatch.setattr(MlxQwenAdapter, "_sidecar_available", lambda self: True)
+    adapter = create_image_adapter(
+        {"payload": {"model": "qwen_image", "mode": "edit_image"}}
+    )
+    assert adapter.__class__.__name__ == "QwenImageAdapter"
+
+
+def test_qwen_auto_dispatch_skips_mlx_for_qwen_image_edit_model(monkeypatch):
+    # qwen_image_edit / qwen_image_edit_2509 are not in MlxQwenAdapter's
+    # supported set; auto-dispatch must keep them on the torch path.
+    monkeypatch.delenv("SCENEWORKS_DISABLE_MLX_FLUX", raising=False)
+    monkeypatch.delenv("SCENEWORKS_IMAGE_ADAPTER", raising=False)
+    monkeypatch.setattr("sys.platform", "darwin")
+    monkeypatch.setattr(MlxQwenAdapter, "_sidecar_available", lambda self: True)
+    adapter = create_image_adapter({"payload": {"model": "qwen_image_edit"}})
+    assert adapter.__class__.__name__ == "QwenImageAdapter"
+    adapter = create_image_adapter({"payload": {"model": "qwen_image_edit_2509"}})
+    assert adapter.__class__.__name__ == "QwenImageAdapter"
+
+
+def test_qwen_auto_dispatch_skips_mlx_when_reference_asset_present(monkeypatch):
+    # Character/reference flow needs QwenImageEdit.image_paths threading
+    # (deferred); reference jobs stay on the torch path.
+    monkeypatch.delenv("SCENEWORKS_DISABLE_MLX_FLUX", raising=False)
+    monkeypatch.delenv("SCENEWORKS_IMAGE_ADAPTER", raising=False)
+    monkeypatch.setattr("sys.platform", "darwin")
+    monkeypatch.setattr(MlxQwenAdapter, "_sidecar_available", lambda self: True)
+    adapter = create_image_adapter(
+        {"payload": {"model": "qwen_image", "referenceAssetId": "asset_ref"}}
+    )
+    assert adapter.__class__.__name__ == "QwenImageAdapter"
+
+
+def test_mlx_qwen_resolve_quantize_order():
+    adapter = MlxQwenAdapter()
+    request = SimpleNamespace(advanced={}, model_manifest_entry={})
+    assert adapter._resolve_quantize(request) == 8
+    request = SimpleNamespace(advanced={}, model_manifest_entry={"mlx": {"quantize": 4}})
+    assert adapter._resolve_quantize(request) == 4
+    request = SimpleNamespace(
+        advanced={"mlxQuantize": 3}, model_manifest_entry={"mlx": {"quantize": 8}}
+    )
+    assert adapter._resolve_quantize(request) == 3
+    request = SimpleNamespace(advanced={"mlxQuantize": 0}, model_manifest_entry={})
+    assert adapter._resolve_quantize(request) is None
+    request = SimpleNamespace(
+        advanced={"mlxQuantize": "junk"}, model_manifest_entry={"mlx": {"quantize": 6}}
+    )
+    assert adapter._resolve_quantize(request) == 6
+
+
+def test_mlx_qwen_requires_sidecar_when_missing(monkeypatch):
+    monkeypatch.setenv("SCENEWORKS_MLX_FLUX_PYTHON", "/nonexistent/mlx-flux-venv/bin/python")
+    job = {
+        "id": "job_mlx_qwen_t2i",
+        "payload": {
+            "projectId": "p",
+            "mode": "text_to_image",
+            "model": "qwen_image",
+            "prompt": "a cat",
+        },
+    }
+    noop = lambda *args, **kwargs: None  # noqa: E731
+    try:
+        MlxQwenAdapter().generate(
+            settings=None, job=job, request=image_request_from_job(job), project_path=None,
+            progress=noop, cancel_requested=lambda: False,
+        )
+    except RuntimeError as exc:
+        assert "sidecar" in str(exc).lower()
+    else:
+        raise AssertionError("MLX Qwen generation must fail clearly when the sidecar venv is unavailable.")
+
+
+def test_mlx_qwen_rejects_unsupported_model():
+    # Any non-Qwen model must fail early; the dispatch never sends these here.
+    job = {
+        "id": "job_mlx_qwen_wrong_model",
+        "payload": {"projectId": "p", "mode": "text_to_image", "model": "flux_schnell", "prompt": "x"},
+    }
+    noop = lambda *args, **kwargs: None  # noqa: E731
+    try:
+        MlxQwenAdapter().generate(
+            settings=None, job=job, request=image_request_from_job(job), project_path=None,
+            progress=noop, cancel_requested=lambda: False,
+        )
+    except RuntimeError as exc:
+        assert "Qwen-Image target" in str(exc) or "MlxQwenAdapter supports" in str(exc)
+    else:
+        raise AssertionError("MlxQwenAdapter must reject non-Qwen models.")
+
+
+def test_mlx_qwen_rejects_image_edit():
+    job = {
+        "id": "job_mlx_qwen_edit",
+        "payload": {"projectId": "p", "mode": "edit_image", "model": "qwen_image", "prompt": "x"},
+    }
+    noop = lambda *args, **kwargs: None  # noqa: E731
+    try:
+        MlxQwenAdapter().generate(
+            settings=None, job=job, request=image_request_from_job(job), project_path=None,
+            progress=noop, cancel_requested=lambda: False,
+        )
+    except RuntimeError as exc:
+        assert "text-to-image only" in str(exc).lower()
+    else:
+        raise AssertionError("MlxQwenAdapter is T2I-only and must reject edit_image.")
+
+
+def test_mlx_qwen_rejects_reference_asset():
+    job = {
+        "id": "job_mlx_qwen_ref",
+        "payload": {
+            "projectId": "p",
+            "mode": "text_to_image",
+            "model": "qwen_image",
+            "prompt": "x",
+            "referenceAssetId": "asset_ref",
+        },
+    }
+    noop = lambda *args, **kwargs: None  # noqa: E731
+    try:
+        MlxQwenAdapter().generate(
+            settings=None, job=job, request=image_request_from_job(job), project_path=None,
+            progress=noop, cancel_requested=lambda: False,
+        )
+    except RuntimeError as exc:
+        assert "character" in str(exc).lower() or "reference-image" in str(exc).lower()
+    else:
+        raise AssertionError("MlxQwenAdapter must reject reference-image jobs (deferred follow-up).")
 
 
 def test_flux_model_target_defaults():

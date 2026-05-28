@@ -2449,6 +2449,308 @@ class MlxFluxAdapter:
         return {"error": "MLX FLUX sidecar produced no parseable result."}
 
 
+class MlxQwenAdapter:
+    """Qwen-Image text-to-image via mflux (Apple MLX), run OUT-OF-PROCESS.
+
+    Mirrors `MlxFluxAdapter` (sc-1970) — same sidecar venv (`/opt/mlx-flux-venv`),
+    same `mlx_flux_runner.py` (which dispatches on `spec["model"]` to the matching
+    mflux family class — `Flux1` for FLUX, `QwenImage` for Qwen). The sidecar is
+    required because mflux's transformers>=5 + huggingface_hub>=1 stack cannot
+    coexist with the main worker venv's transformers 4.57.x + huggingface_hub<1
+    (same divergence that forced the Lens sidecar and the FLUX MLX sidecar).
+    sc-1972.
+
+    Spike measurement (sc-1969 spike venv, M5 Max 128 GB, mflux 0.17.5,
+    Qwen-Image Q8, 1024² 20 steps): 7.30 s/step (~146 s wall-clock), ~65.5 GB
+    peak footprint. Direct comparison vs the torch `QwenImageAdapter` baseline
+    is deferred to the in-tree QA pass — the per-step cadence here is the same
+    order of magnitude as the FLUX path's spike, and the win mflux provides
+    is the optional Q4 lever for tighter Mac memory budgets.
+
+    v1 scope: `qwen_image` text-to-image only. `qwen_image_edit` and
+    `qwen_image_edit_2509` need spec/runner extension for `image_paths` (mflux
+    `QwenImageEdit.generate_image` signature differs slightly) plus reference
+    asset threading from the main venv; tracked as a follow-up.
+
+    Selected when ALL of:
+      - the request model is in ``_supported_models`` (qwen_image)
+      - ``sys.platform == "darwin"``
+      - the sidecar venv exists (``_sidecar_available()``)
+      - ``SCENEWORKS_DISABLE_MLX_FLUX`` is unset (one env shared by the whole
+        mflux sidecar — opt-out is global to the venv, not per-family)
+      - the request has no reference asset and no edit_image mode (T2I-only)
+
+    Falls back to `QwenImageAdapter` (torch / diffusers) on any of these
+    failing. Never regresses the torch path.
+    """
+
+    id = "mlx_qwen"
+    _supported_models = {"qwen_image"}
+
+    def __init__(self) -> None:
+        # Per-job scratch dir, reaped by discard_temp_outputs on force-cancel.
+        # Mirrors MlxFluxAdapter's lifecycle exactly.
+        self._scratch_dir: Path | None = None
+
+    def discard_temp_outputs(self, job_id: str | None = None) -> None:
+        work_dir = self._scratch_dir
+        if work_dir is not None:
+            shutil.rmtree(work_dir, ignore_errors=True)
+            self._scratch_dir = None
+
+    def loaded_models(self) -> list[str]:
+        return []
+
+    @staticmethod
+    def _sidecar_python() -> str:
+        # Shared sidecar venv with MlxFluxAdapter (both Pythons live in
+        # /opt/mlx-flux-venv). The env var is set by the desktop bootstrap
+        # for every host; existence is gated by `_sidecar_available()`.
+        return os.getenv("SCENEWORKS_MLX_FLUX_PYTHON", "/opt/mlx-flux-venv/bin/python")
+
+    @staticmethod
+    def _runner_path() -> Path:
+        # Same runner as MlxFluxAdapter; the runner dispatches on the spec's
+        # `model` field to the matching mflux family class.
+        return Path(__file__).resolve().parent / "mlx_flux_runner.py"
+
+    def _sidecar_available(self) -> bool:
+        return Path(self._sidecar_python()).exists() and self._runner_path().exists()
+
+    def generate(
+        self,
+        *,
+        settings: WorkerSettings,
+        job: dict[str, Any],
+        request: ImageRequest,
+        project_path: Path,
+        progress: ProgressCallback,
+        cancel_requested: CancelCallback,
+    ) -> dict[str, Any]:
+        model_target = MODEL_TARGETS.get(request.model, {})
+        if model_target.get("adapter") != QwenImageAdapter.id:
+            raise RuntimeError(f"{request.model} is not a Qwen-Image target.")
+        if request.model not in self._supported_models:
+            raise RuntimeError(
+                f"MlxQwenAdapter supports "
+                f"{', '.join(sorted(self._supported_models))}, not {request.model}."
+            )
+        if request.mode == "edit_image":
+            raise RuntimeError(
+                f"{request.model} MLX adapter is text-to-image only (v1). "
+                "Set SCENEWORKS_IMAGE_ADAPTER=qwen_image for the torch edit path."
+            )
+        if request.reference_asset_id:
+            raise RuntimeError(
+                f"{request.model} reference-image (character) generation is not yet wired "
+                "on the MLX backend (needs mflux QwenImageEdit.image_paths threading). "
+                "Use the torch path (SCENEWORKS_IMAGE_ADAPTER=qwen_image)."
+            )
+
+        # Resolve + validate LoRAs in the main venv so a bad path or incompatible
+        # family fails before we spawn the subprocess. The sidecar only sees
+        # concrete file paths + weights.
+        validate_lora_compatibility(
+            request.loras, model_family=model_target.get("family"), adapter_id=self.id, model_id=request.model
+        )
+        lora_specs = normalize_lora_specs(request.loras)
+
+        if not self._sidecar_available():
+            raise RuntimeError(
+                "MLX Qwen generation requires the isolated mlx-flux sidecar venv "
+                "(shared with MlxFluxAdapter). The desktop bootstrap installs it on "
+                "first launch (apps/desktop/src/setup.rs provision_mlx_flux_venv); "
+                "rebuild without SCENEWORKS_DISABLE_MLX_FLUX=1, or set "
+                "SCENEWORKS_MLX_FLUX_PYTHON to a Python interpreter that has mflux "
+                f"installed (looked for {self._sidecar_python()})."
+            )
+
+        total = request.count
+        steps = self._num_inference_steps(request, model_target)
+        guidance = self._guidance_scale(request)
+        quantize = self._resolve_quantize(request)
+        seeds = [resolve_seed(request.seed, request.prompt, index, request.seeds) for index in range(total)]
+
+        progress(
+            "loading_model",
+            "loading_model",
+            0.18,
+            f"Loading {model_target['label']} (MLX sidecar venv).",
+        )
+        work_dir = Path(tempfile.mkdtemp(prefix="mlx_qwen_sidecar_"))
+        self._scratch_dir = work_dir
+        try:
+            images = self._run_sidecar(
+                job_id=job["id"],
+                work_dir=work_dir,
+                label=model_target["label"],
+                total=total,
+                spec={
+                    "model": request.model,
+                    "prompt": request.prompt,
+                    "negativePrompt": request.negative_prompt or None,
+                    "seeds": seeds,
+                    "height": request.height,
+                    "width": request.width,
+                    "numInferenceSteps": steps,
+                    "guidance": guidance,
+                    "quantize": quantize,
+                    "loras": [
+                        {"path": lora.path, "weight": lora.weight, "name": lora.adapter_name}
+                        for lora in lora_specs
+                    ],
+                },
+                progress=progress,
+                cancel_requested=cancel_requested,
+            )
+
+            def image_at_index(index: int) -> Image.Image:
+                progress(
+                    "running",
+                    "generating",
+                    image_batch_progress(index, total),
+                    format_batch_running_message(model_target["label"], index, total),
+                )
+                with Image.open(images[index]) as handle:
+                    return handle.convert("RGB")
+
+            return ImageAssetWriter().write_incremental_outputs(
+                request=request,
+                project_path=project_path,
+                image_count=total,
+                image_at_index=image_at_index,
+                adapter_id=self.id,
+                progress=progress,
+                cancel_requested=cancel_requested,
+                raw_settings={
+                    **request.advanced,
+                    "repo": model_target["repo"],
+                    "numInferenceSteps": steps,
+                    "guidanceScale": guidance,
+                    "mlxQuantize": quantize,
+                    "sidecarVenv": self._sidecar_python(),
+                    "realModelInference": True,
+                },
+                settings=settings,
+                job_id=job["id"],
+            )
+        finally:
+            self.discard_temp_outputs(job["id"])
+
+    def _num_inference_steps(self, request: ImageRequest, model_target: dict[str, Any]) -> int:
+        return safe_int(request.advanced.get("steps"), model_target["steps"], 1, 80)
+
+    def _guidance_scale(self, request: ImageRequest) -> float:
+        # Qwen-Image defaults to 4.0 (matches QwenImageAdapter — model-card
+        # default for both the torch path and the mflux path).
+        try:
+            return float(request.advanced.get("guidanceScale", 4.0))
+        except (TypeError, ValueError):
+            return 4.0
+
+    def _resolve_quantize(self, request: ImageRequest) -> int | None:
+        """Pick the mflux quantize level. Order: advanced > manifest > Q8 default.
+        Identical to MlxFluxAdapter._resolve_quantize."""
+        override = request.advanced.get("mlxQuantize")
+        if override is not None and not isinstance(override, bool):
+            try:
+                parsed = int(override)
+                return parsed if parsed > 0 else None
+            except (TypeError, ValueError):
+                pass
+        mlx_entry = request.model_manifest_entry.get("mlx") if request.model_manifest_entry else None
+        if isinstance(mlx_entry, dict):
+            manifest_q = mlx_entry.get("quantize")
+            if manifest_q is not None:
+                try:
+                    parsed = int(manifest_q)
+                    return parsed if parsed > 0 else None
+                except (TypeError, ValueError):
+                    pass
+        return 8
+
+    def _run_sidecar(
+        self,
+        *,
+        job_id: str,
+        work_dir: Path,
+        label: str,
+        total: int,
+        spec: dict[str, Any],
+        progress: ProgressCallback,
+        cancel_requested: CancelCallback,
+    ) -> list[str]:
+        spec = {**spec, "outDir": str(work_dir)}
+        spec_path = work_dir / "spec.json"
+        spec_path.write_text(json.dumps(spec), encoding="utf-8")
+        stdout_log = work_dir / "stdout.log"
+        cmd = [self._sidecar_python(), str(self._runner_path()), str(spec_path)]
+        emit_worker_event(
+            "mlx_qwen_sidecar_start",
+            jobId=job_id,
+            adapter=self.id,
+            model=spec["model"],
+            imageCount=total,
+            quantize=spec.get("quantize"),
+            sidecar=self._sidecar_python(),
+        )
+        progress(
+            "running",
+            "generating",
+            image_batch_progress(0, total),
+            f"Running {label} ({total} image(s)).",
+        )
+        with stdout_log.open("w", encoding="utf-8") as out:
+            proc = subprocess.Popen(cmd, env=os.environ.copy(), stdout=out, stderr=None)
+            while True:
+                try:
+                    proc.wait(timeout=2)
+                    break
+                except subprocess.TimeoutExpired:
+                    if cancel_requested():
+                        proc.terminate()
+                        try:
+                            proc.wait(timeout=10)
+                        except subprocess.TimeoutExpired:
+                            proc.kill()
+                        raise InterruptedError("Image generation canceled by user.")
+        result = self._read_result(work_dir, stdout_log)
+        if proc.returncode != 0 or "error" in result:
+            error = result.get("error") or f"MLX Qwen sidecar exited with code {proc.returncode}."
+            emit_worker_event(
+                "mlx_qwen_sidecar_failed",
+                jobId=job_id,
+                adapter=self.id,
+                error=error,
+                returnCode=proc.returncode,
+            )
+            raise RuntimeError(f"MLX Qwen generation failed in the sidecar venv: {error}")
+        images = [str(path) for path in result.get("images", [])]
+        if len(images) != total:
+            raise RuntimeError(f"MLX Qwen sidecar produced {len(images)} image(s); expected {total}.")
+        emit_worker_event("mlx_qwen_sidecar_complete", jobId=job_id, adapter=self.id, imageCount=len(images))
+        return images
+
+    @staticmethod
+    def _read_result(work_dir: Path, stdout_log: Path) -> dict[str, Any]:
+        result_path = work_dir / "result.json"
+        if result_path.exists():
+            try:
+                return json.loads(result_path.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                pass
+        try:
+            lines = [line for line in stdout_log.read_text(encoding="utf-8").splitlines() if line.strip()]
+        except OSError:
+            lines = []
+        for line in reversed(lines):
+            try:
+                return json.loads(line)
+            except ValueError:
+                continue
+        return {"error": "MLX Qwen sidecar produced no parseable result."}
+
+
 class KolorsDiffusersAdapter:
     """Kwai-Kolors Kolors text-to-image via diffusers.KolorsPipeline.
 
@@ -4804,6 +5106,7 @@ def create_image_adapter(
     ProceduralImageAdapter
     | ZImageDiffusersAdapter
     | QwenImageAdapter
+    | MlxQwenAdapter
     | LensTurboAdapter
     | SenseNovaU1Adapter
     | FluxDiffusersAdapter
@@ -4825,6 +5128,7 @@ def create_image_adapter(
     if requested and requested not in {
         ZImageDiffusersAdapter.id,
         QwenImageAdapter.id,
+        MlxQwenAdapter.id,
         LensTurboAdapter.id,
         SenseNovaU1Adapter.id,
         FluxDiffusersAdapter.id,
@@ -4840,6 +5144,8 @@ def create_image_adapter(
         return adapters.get("z_image_diffusers") if adapters else ZImageDiffusersAdapter()
     if requested == QwenImageAdapter.id:
         return adapters.get("qwen_image") if adapters else QwenImageAdapter()
+    if requested == MlxQwenAdapter.id:
+        return adapters.get("mlx_qwen") if adapters else MlxQwenAdapter()
     if requested == LensTurboAdapter.id:
         return adapters.get("lens_turbo") if adapters else LensTurboAdapter()
     if requested == SenseNovaU1Adapter.id:
@@ -4862,6 +5168,14 @@ def create_image_adapter(
     if model_target.get("adapter") == ZImageDiffusersAdapter.id:
         return adapters.get("z_image_diffusers") if adapters else ZImageDiffusersAdapter()
     if model_target.get("adapter") == QwenImageAdapter.id:
+        # Qwen auto-dispatch: prefer MlxQwenAdapter on macOS when its sidecar venv
+        # is installed AND the model is supported AND the job is plain T2I (no
+        # reference asset, no edit_image — mflux QwenImageEdit needs spec
+        # extension, deferred). Otherwise fall back to the torch path.
+        # SCENEWORKS_DISABLE_MLX_FLUX (shared with the FLUX path) forces torch.
+        # sc-1972.
+        if _should_route_qwen_to_mlx(payload):
+            return adapters.get("mlx_qwen") if adapters else MlxQwenAdapter()
         return adapters.get("qwen_image") if adapters else QwenImageAdapter()
     if model_target.get("adapter") == LensTurboAdapter.id:
         return adapters.get("lens_turbo") if adapters else LensTurboAdapter()
@@ -4916,6 +5230,41 @@ def _should_route_flux_to_mlx(payload: dict[str, Any]) -> bool:
     if payload.get("referenceAssetId"):
         return False
     return MlxFluxAdapter()._sidecar_available()
+
+
+def _should_route_qwen_to_mlx(payload: dict[str, Any]) -> bool:
+    """Decide whether the Qwen-Image auto-dispatch path should pick MlxQwenAdapter
+    (mflux sidecar venv) over QwenImageAdapter (torch/diffusers). All checks must
+    pass; any failure falls back to the torch path so we never regress it.
+    sc-1972.
+
+    Mirrors `_should_route_flux_to_mlx` exactly except for the supported-models
+    set: only `qwen_image` is wired today. `qwen_image_edit` and
+    `qwen_image_edit_2509` need additional spec/runner work for mflux's
+    QwenImageEdit.image_paths interface, so they stay on the torch path.
+
+    Gates:
+      1. SCENEWORKS_DISABLE_MLX_FLUX unset (shared opt-out — one env var per
+         sidecar venv, not per mflux family).
+      2. Platform == darwin.
+      3. Model in MlxQwenAdapter._supported_models.
+      4. mode != "edit_image".
+      5. No referenceAssetId (character/reference flow is on the torch
+         path while QwenImageEdit threading is deferred).
+      6. Sidecar venv exists.
+    """
+    if os.getenv("SCENEWORKS_DISABLE_MLX_FLUX", "").strip().lower() in {"1", "true", "yes"}:
+        return False
+    if sys.platform != "darwin":
+        return False
+    model = payload.get("model")
+    if model not in MlxQwenAdapter._supported_models:
+        return False
+    if payload.get("mode") == "edit_image":
+        return False
+    if payload.get("referenceAssetId"):
+        return False
+    return MlxQwenAdapter()._sidecar_available()
 
 
 def _instantid_adapter(adapters: dict[str, object] | None) -> "InstantIDAdapter":
