@@ -8,7 +8,12 @@
       "family": "z-image",
       "type": "image",
       "adapter": "z_image_diffusers",
-      "capabilities": ["text_to_image", "character_image", "style_variations"],
+      // No `character_image`: ZImageDiffusersAdapter has no IP-Adapter / reference-
+      // conditioning wiring, and no Z-Image IP-Adapter weights exist upstream. The
+      // flag previously caused Character Studio to silently ignore the reference
+      // image and generate from the prompt only (sc-2005). For SDXL-style reference
+      // work pick sdxl / realvisxl; for identity pick instantid_realvisxl.
+      "capabilities": ["text_to_image", "style_variations"],
       "downloads": [
         // Refresh estimatedSizeBytes from the Hugging Face recursive tree API:
         // https://huggingface.co/api/models/<repo>/tree/main?recursive=true

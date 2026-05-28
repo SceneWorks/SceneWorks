@@ -31,7 +31,8 @@ export const fallbackModels = [
     id: "z_image_turbo",
     name: "Z-Image-Turbo",
     type: "image",
-    capabilities: ["text_to_image", "style_variations", "character_image"],
+    // No `character_image`: the worker adapter has no IP-Adapter wiring (sc-2005).
+    capabilities: ["text_to_image", "style_variations"],
     ui: {
       description: "Fast local text-to-image target.",
       promptGuide: { title: "Z-Image-Turbo Prompt Guide", path: "/prompt-guides/z-image-turbo.md" },
