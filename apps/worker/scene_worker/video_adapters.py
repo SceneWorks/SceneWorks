@@ -31,6 +31,7 @@ from sceneworks_shared import (
 )
 
 from .adapter_utils import cancel_step_callback, filter_call_kwargs
+from .sampler_registry import apply_sampler, sampler_selection_from_advanced
 from .hf_cache import huggingface_cache_root, huggingface_cache_roots, huggingface_repo_cache_path_for_root
 from .image_adapters import emit_worker_event, empty_torch_cache, gpu_memory_snapshot, require_inference_backend_for_gpu_worker, select_torch_device, select_torch_dtype, write_json
 from .lora_adapters import (
@@ -2414,6 +2415,12 @@ class DiffusersVideoAdapter(VideoGenerationAdapter):
 
         seed = resolve_seed(request.seed, request.prompt)
         num_frames = self._num_frames(request)
+        # Configurable sampler / scheduler (epic 1753 sc-1768). Only the
+        # torch-backed Wan diffusers path applies these; the MLX backend has
+        # its own ODE solver and the manifest pins mlx.limits to default-only
+        # so the picker hides on MLX-capable platforms.
+        sampler_key, scheduler_key, shift_value = sampler_selection_from_advanced(request.advanced)
+        apply_sampler(pipe, sampler_key, scheduler_key, shift_value, adapter=target["adapter"])
         kwargs = self._pipeline_kwargs(
             pipe=pipe,
             project_path=project_path,

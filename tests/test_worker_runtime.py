@@ -7106,6 +7106,112 @@ def test_edit_run_pipeline_threads_project_path(tmp_path, monkeypatch):
         assert result is FakeOutput.images[0]
 
 
+def test_diffusers_image_adapters_call_apply_sampler(tmp_path, monkeypatch):
+    """Epic 1753 sc-1762: Z-Image and Qwen ``_run_pipeline`` must thread the
+    sampler/scheduler/shift selection into ``apply_sampler`` so the user's
+    choice actually swaps the pipeline scheduler. A regression here would
+    silently ignore the advanced fields and leave the model on its default
+    scheduler — exactly the bug class this epic exists to prevent.
+    """
+
+    class FakeImage:
+        def convert(self, _mode):
+            return self
+
+    class FakeOutput:
+        images = [FakeImage()]
+
+    class FakePipe:
+        scheduler = None
+
+        def __call__(self, **kwargs):
+            return FakeOutput()
+
+    class FakeTorch:
+        @staticmethod
+        def Generator(_device):
+            class Gen:
+                def manual_seed(self, _seed):
+                    return self
+
+            return Gen()
+
+    monkeypatch.setattr(
+        "scene_worker.image_adapters.importlib.import_module",
+        lambda name: FakeTorch if name == "torch" else importlib.import_module(name),
+    )
+
+    captured: list[tuple[str, ...]] = []
+
+    def fake_apply_sampler(pipe, sampler, scheduler, shift, *, adapter=None):
+        captured.append((adapter, sampler, scheduler, shift))
+        return {"sampler": sampler, "scheduler": scheduler, "shift": shift, "noop": False}
+
+    monkeypatch.setattr("scene_worker.image_adapters.apply_sampler", fake_apply_sampler)
+
+    for adapter, model in (
+        (ZImageDiffusersAdapter(), "z_image_turbo"),
+        (QwenImageAdapter(), "qwen_image"),
+    ):
+        captured.clear()
+        request = image_request_from_job(
+            {
+                "payload": {
+                    "projectId": "project-1",
+                    "mode": "text_to_image",
+                    "model": model,
+                    "prompt": "still life with sampler swap",
+                    "width": 16,
+                    "height": 16,
+                    "count": 1,
+                    "advanced": {
+                        "sampler": "dpmpp",
+                        "scheduler": "karras",
+                    },
+                }
+            }
+        )
+        adapter._run_pipeline(
+            SimpleNamespace(gpu_id="cpu"),
+            FakePipe(),
+            request,
+            7,
+            tmp_path,
+        )
+        assert captured == [(adapter.id, "dpmpp", "karras", None)], (
+            f"{adapter.id} did not thread sampler/scheduler into apply_sampler"
+        )
+
+    # Shift axis: scheduler == "shift" must pass through a numeric shift value.
+    captured.clear()
+    request = image_request_from_job(
+        {
+            "payload": {
+                "projectId": "project-1",
+                "mode": "text_to_image",
+                "model": "z_image_turbo",
+                "prompt": "shift test",
+                "width": 16,
+                "height": 16,
+                "count": 1,
+                "advanced": {
+                    "sampler": "euler",
+                    "scheduler": "shift",
+                    "schedulerShift": 4.5,
+                },
+            }
+        }
+    )
+    ZImageDiffusersAdapter()._run_pipeline(
+        SimpleNamespace(gpu_id="cpu"),
+        FakePipe(),
+        request,
+        9,
+        tmp_path,
+    )
+    assert captured == [("z_image_diffusers", "euler", "shift", pytest.approx(4.5))]
+
+
 # --- Cancellation: JobCancelMonitor watchdog + per-step interrupt ---------------
 
 

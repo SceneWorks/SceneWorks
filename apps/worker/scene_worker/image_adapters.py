@@ -31,6 +31,7 @@ from sceneworks_shared import (
 )
 
 from .adapter_utils import cancel_step_callback, filter_call_kwargs
+from .sampler_registry import apply_sampler, sampler_selection_from_advanced
 from .hf_cache import huggingface_cache_roots, huggingface_repo_cache_path
 from .lora_adapters import (
     LoraPipelineState,
@@ -1279,6 +1280,8 @@ class ZImageDiffusersAdapter:
         activate_torch_device(torch, device)
         generator_device = device if device.startswith("cuda") else "cpu"
         generator = torch.Generator(generator_device).manual_seed(seed)
+        sampler_key, scheduler_key, shift_value = sampler_selection_from_advanced(request.advanced)
+        apply_sampler(pipe, sampler_key, scheduler_key, shift_value, adapter=self.id)
         kwargs = {
             "prompt": request.prompt,
             "height": request.height,
@@ -1563,6 +1566,8 @@ class QwenImageAdapter:
         device = select_torch_device(torch, settings.gpu_id)
         activate_torch_device(torch, device)
         generator = torch.Generator(device if device.startswith("cuda") else "cpu").manual_seed(seed)
+        sampler_key, scheduler_key, shift_value = sampler_selection_from_advanced(request.advanced)
+        apply_sampler(pipe, sampler_key, scheduler_key, shift_value, adapter=self.id)
         kwargs = {
             "prompt": request.prompt,
             "height": request.height,
@@ -3082,6 +3087,7 @@ class LensTurboAdapter:
         guidance_scale = self._guidance_scale(request, model_target)
         base_resolution, aspect_ratio = lens_resolution_for(request.width, request.height)
         seeds = [resolve_seed(request.seed, request.prompt, index, request.seeds) for index in range(total)]
+        lens_sampler, lens_scheduler, lens_shift = sampler_selection_from_advanced(request.advanced)
         torch = importlib.import_module("torch")
         device = select_torch_device(torch, getattr(settings, "gpu_id", None))
         # mxfp4 keeps the gpt-oss-20b text encoder small but needs CUDA + Triton
@@ -3116,6 +3122,14 @@ class LensTurboAdapter:
                         {"path": lora.path, "weight": lora.weight, "name": lora.adapter_name}
                         for lora in lora_specs
                     ],
+                    # Configurable sampler / scheduler (epic 1753 sc-1764). The
+                    # sidecar's lens_runner swaps pipe.scheduler via
+                    # apply_sampler before generation; the vendored Lens loop
+                    # branches between its empirical mu+linear-sigma path
+                    # (default) and the scheduler-native path (non-default).
+                    **({"sampler": lens_sampler} if lens_sampler != "default" else {}),
+                    **({"scheduler": lens_scheduler} if lens_scheduler != "default" else {}),
+                    **({"schedulerShift": lens_shift} if lens_shift is not None else {}),
                 },
                 progress=progress,
                 cancel_requested=cancel_requested,
@@ -3473,7 +3487,16 @@ class SenseNovaU1Adapter:
         distill_lora = model_target.get("distillLora") if isinstance(model_target.get("distillLora"), dict) else None
         steps = self._num_inference_steps(request, model_target)
         guidance_scale = self._guidance_scale(request, model_target)
-        timestep_shift = float(request.advanced.get("timestepShift", 3.0) or 3.0)
+        # Native timestep shift is the only sampling knob SenseNova exposes.
+        # Image Studio surfaces it via the generic "schedulerShift" advanced
+        # field (epic 1753 sc-1765); accept either name for back-compat.
+        timestep_shift_raw = request.advanced.get("schedulerShift", request.advanced.get("timestepShift", 3.0))
+        try:
+            timestep_shift = float(timestep_shift_raw) if timestep_shift_raw is not None else 3.0
+        except (TypeError, ValueError):
+            timestep_shift = 3.0
+        if timestep_shift <= 0.0:
+            timestep_shift = 3.0
         img_guidance_scale = self._image_guidance_scale(request)
         width, height = sensenova_resolution_for(request.width, request.height)
         source_image = load_source_image(project_path, request) if is_edit else None

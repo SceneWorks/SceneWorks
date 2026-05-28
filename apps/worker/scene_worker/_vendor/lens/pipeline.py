@@ -422,6 +422,7 @@ class LensPipeline(DiffusionPipeline):
         callback_on_step_end_tensor_inputs: List[str] = ["latents"],
         max_sequence_length: int = 512,
         enable_reasoner: bool = False,
+        use_custom_sigmas: bool = True,
     ):
         # 0. Resolution defaulting.
         if base_resolution is not None and aspect_ratio is not None:
@@ -480,9 +481,19 @@ class LensPipeline(DiffusionPipeline):
         )
 
         # 6. Scheduler.
-        mu = compute_empirical_mu(seq_len, num_inference_steps)
-        sigmas = np.linspace(1.0, 1.0 / num_inference_steps, num_inference_steps)
-        self.scheduler.set_timesteps(sigmas=sigmas, device=device, mu=mu)
+        # The Lens model card calibrates an empirical mu + linear-sigma
+        # schedule against FlowMatchEulerDiscreteScheduler. When the caller
+        # opts into a non-default sampler / scheduler (epic 1753 sc-1764) we
+        # skip the Lens-custom sigmas and let the (swapped) scheduler build
+        # its own — DPM++/UniPC do not accept hand-rolled sigmas, and
+        # karras/beta/exponential pathways need the scheduler's own sigma
+        # builder to honor the config flag.
+        if use_custom_sigmas:
+            mu = compute_empirical_mu(seq_len, num_inference_steps)
+            sigmas = np.linspace(1.0, 1.0 / num_inference_steps, num_inference_steps)
+            self.scheduler.set_timesteps(sigmas=sigmas, device=device, mu=mu)
+        else:
+            self.scheduler.set_timesteps(num_inference_steps=num_inference_steps, device=device)
 
         # 7. Denoising loop.
         # Reset the interrupt flag so a callback_on_step_end can stop this run

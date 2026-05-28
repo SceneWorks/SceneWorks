@@ -27,11 +27,16 @@
         "resolution": "1024x1024",
         "steps": 8,
         "guidanceScale": 0,
-        "count": 4
+        "count": 4,
+        "sampler": "default",
+        "scheduler": "default"
       },
       "limits": {
         "resolutions": ["768x768", "1024x1024", "1280x720", "720x1280"],
-        "count": [1, 2, 4, 8]
+        "count": [1, 2, 4, 8],
+        // Flow-matching DiT — full diffusers flow menu (epic 1753).
+        "samplers": ["default", "euler", "heun", "dpmpp", "unipc"],
+        "schedulers": ["default", "simple", "shift", "karras", "exponential", "beta"]
       },
       "loraCompatibility": {
         "families": ["z-image"],
@@ -74,11 +79,15 @@
         "resolution": "1024x1024",
         "steps": 8,
         "guidanceScale": 0,
-        "count": 4
+        "count": 4,
+        "sampler": "default",
+        "scheduler": "default"
       },
       "limits": {
         "resolutions": ["768x768", "1024x1024", "1280x720", "720x1280"],
-        "count": [1, 2, 4, 8]
+        "count": [1, 2, 4, 8],
+        "samplers": ["default", "euler", "heun", "dpmpp", "unipc"],
+        "schedulers": ["default", "simple", "shift", "karras", "exponential", "beta"]
       },
       "loraCompatibility": {
         "families": ["z-image"],
@@ -120,11 +129,16 @@
       "defaults": {
         "resolution": "1024x1024",
         "steps": 20,
-        "count": 4
+        "count": 4,
+        "sampler": "default",
+        "scheduler": "default"
       },
       "limits": {
         "resolutions": ["768x768", "1024x1024", "1280x720", "720x1280"],
-        "count": [1, 2, 4]
+        "count": [1, 2, 4],
+        // Flow-matching DiT — full diffusers flow menu (epic 1753).
+        "samplers": ["default", "euler", "heun", "dpmpp", "unipc"],
+        "schedulers": ["default", "simple", "shift", "karras", "exponential", "beta"]
       },
       "loraCompatibility": {
         "families": ["qwen-image"],
@@ -166,11 +180,15 @@
       "defaults": {
         "resolution": "1024x1024",
         "steps": 20,
-        "count": 4
+        "count": 4,
+        "sampler": "default",
+        "scheduler": "default"
       },
       "limits": {
         "resolutions": ["768x768", "1024x1024", "1280x720", "720x1280"],
-        "count": [1, 2, 4]
+        "count": [1, 2, 4],
+        "samplers": ["default", "euler", "heun", "dpmpp", "unipc"],
+        "schedulers": ["default", "simple", "shift", "karras", "exponential", "beta"]
       },
       "loraCompatibility": {
         "families": ["qwen-image"],
@@ -214,11 +232,17 @@
         "resolution": "1024x1024",
         "steps": 20,
         "guidanceScale": 5.0,
-        "count": 1
+        "count": 1,
+        "sampler": "default",
+        "scheduler": "default"
       },
       "limits": {
         "resolutions": ["1024x1024", "1440x1440", "1152x864", "864x1152", "1376x768", "768x1376"],
-        "count": [1, 2, 4]
+        "count": [1, 2, 4],
+        // Vendored flow-matching loop — sampler/scheduler threaded through
+        // sc-1764. Full flow menu surfaced once the vendored loop swap lands.
+        "samplers": ["default", "euler", "heun", "dpmpp", "unipc"],
+        "schedulers": ["default", "simple", "shift", "karras", "exponential", "beta"]
       },
       "loraCompatibility": {
         // Same `lens` family as Lens-Turbo; a LoRA trained here applies to both.
@@ -261,13 +285,19 @@
         "resolution": "1024x1024",
         "steps": 4,
         "guidanceScale": 1.0,
-        "count": 4
+        "count": 4,
+        "sampler": "default",
+        "scheduler": "default"
       },
       "limits": {
         // Lens snaps W×H onto base_resolution (1024/1440) × aspect-ratio buckets;
         // these map to 1:1 (1024 & 1440), 4:3, 3:4, 16:9, and 9:16 base-1024 buckets.
         "resolutions": ["1024x1024", "1440x1440", "1152x864", "864x1152", "1376x768", "768x1376"],
-        "count": [1, 2, 4]
+        "count": [1, 2, 4],
+        // Vendored flow-matching loop — sampler/scheduler threaded through
+        // sc-1764. Full flow menu surfaced once the vendored loop swap lands.
+        "samplers": ["default", "euler", "heun", "dpmpp", "unipc"],
+        "schedulers": ["default", "simple", "shift", "karras", "exponential", "beta"]
       },
       "loraCompatibility": {
         // Lens LoRA training (sc-1583) trains on the non-distilled microsoft/Lens
@@ -312,7 +342,14 @@
         "resolution": "2048x2048",
         "steps": 50,
         "guidanceScale": 4.0,
-        "count": 1
+        "count": 1,
+        // Sealed t2i_generate — no scheduler swap. SenseNova reads
+        // advanced.schedulerShift (aliased to its native timestepShift)
+        // directly, so the UI surfaces a single "shift" scheduler axis (epic
+        // 1753 sc-1765). Sampler menu stays default-only and hides.
+        "sampler": "default",
+        "scheduler": "shift",
+        "schedulerShift": 3.0
       },
       "limits": {
         // SenseNova-U1 renders at fixed trained buckets and degrades off them.
@@ -320,7 +357,9 @@
         // nearest bucket by aspect ratio. (Panorama buckets 2:1/1:2/3:1/1:3 exist
         // upstream but are omitted here.)
         "resolutions": ["2048x2048", "2720x1536", "2496x1664", "2368x1760", "1536x2720", "1664x2496", "1760x2368"],
-        "count": [1, 2, 4]
+        "count": [1, 2, 4],
+        "samplers": ["default"],
+        "schedulers": ["shift"]
       },
       "loraCompatibility": {
         // An 8-step distill LoRA exists upstream but is not wired yet.
@@ -368,13 +407,18 @@
         // 8-step distill LoRA: cfg 1.0 / 8 steps (vs base 4.0 / 50).
         "steps": 8,
         "guidanceScale": 1.0,
-        "count": 1
+        "count": 1,
+        "sampler": "default",
+        "scheduler": "shift",
+        "schedulerShift": 3.0
       },
       "limits": {
         // Same trained buckets as the base model; true output sizes (the adapter
         // snaps any request to the nearest bucket by aspect ratio).
         "resolutions": ["2048x2048", "2720x1536", "2496x1664", "2368x1760", "1536x2720", "1664x2496", "1760x2368"],
-        "count": [1, 2, 4]
+        "count": [1, 2, 4],
+        "samplers": ["default"],
+        "schedulers": ["shift"]
       },
       "loraCompatibility": {
         // The distill LoRA is baked into this variant; user LoRAs are not wired.
@@ -1149,14 +1193,20 @@
         "duration": 5,
         "fps": 24,
         "resolution": "1280x720",
-        "quality": "balanced"
+        "quality": "balanced",
+        "sampler": "default",
+        "scheduler": "default"
       },
       "limits": {
         "durations": [4, 5, 6, 7, 8],
         "recommendedMaxDuration": 7,
         "hardMaxDuration": 8,
         "fps": [16, 24],
-        "resolutions": ["832x480", "1280x720", "720x1280"]
+        "resolutions": ["832x480", "1280x720", "720x1280"],
+        // Diffusers WanPipeline (torch backend) supports flow-matching swaps
+        // via apply_sampler. Per-backend MLX override below pins default-only.
+        "samplers": ["default", "euler", "heun", "dpmpp", "unipc"],
+        "schedulers": ["default", "simple", "shift", "karras", "exponential", "beta"]
       },
       "loraCompatibility": {
         "families": ["wan-video"],
@@ -1187,7 +1237,13 @@
         // converted locally (tracked model_convert job) into <data>/models/mlx/wan_2_2.
         "minMemoryGb": 45,
         "requiresConversion": true,
-        "convertSourceRepo": "Wan-AI/Wan2.2-TI2V-5B-Diffusers"
+        "convertSourceRepo": "Wan-AI/Wan2.2-TI2V-5B-Diffusers",
+        // MLX path is sealed (own ODE solver, no diffusers scheduler) — override
+        // the top-level sampler/scheduler menu to default-only (epic 1753 §14).
+        "limits": {
+          "samplers": ["default"],
+          "schedulers": ["default"]
+        }
       },
       "ui": {
         "label": "Wan2.2",
@@ -1230,14 +1286,20 @@
         "duration": 5,
         "fps": 16,
         "resolution": "1280x720",
-        "quality": "balanced"
+        "quality": "balanced",
+        "sampler": "default",
+        "scheduler": "default"
       },
       "limits": {
         "durations": [3, 4, 5],
         "recommendedMaxDuration": 5,
         "hardMaxDuration": 5,
         "fps": [16],
-        "resolutions": ["832x480", "480x832", "1280x720", "720x1280"]
+        "resolutions": ["832x480", "480x832", "1280x720", "720x1280"],
+        // Diffusers WanPipeline (torch backend) supports flow-matching swaps
+        // via apply_sampler. MLX path is default-only — declared on mlx.limits.
+        "samplers": ["default", "euler", "heun", "dpmpp", "unipc"],
+        "schedulers": ["default", "simple", "shift", "karras", "exponential", "beta"]
       },
       "loraCompatibility": {
         "families": ["wan-video"],
@@ -1271,7 +1333,11 @@
         // Turnkey: pre-converted MLX repo + the lightx2v 4-step Lightning LoRA
         // (downloaded on demand by MlxVideoAdapter at generation time).
         "minMemoryGb": 133,
-        "repo": "AITRADER/Wan2.2-T2V-A14B-mlx-bf16"
+        "repo": "AITRADER/Wan2.2-T2V-A14B-mlx-bf16",
+        "limits": {
+          "samplers": ["default"],
+          "schedulers": ["default"]
+        }
       },
       "ui": {
         "label": "Wan2.2 14B (T2V)",
@@ -1311,14 +1377,20 @@
         "duration": 5,
         "fps": 16,
         "resolution": "1280x720",
-        "quality": "balanced"
+        "quality": "balanced",
+        "sampler": "default",
+        "scheduler": "default"
       },
       "limits": {
         "durations": [3, 4, 5],
         "recommendedMaxDuration": 5,
         "hardMaxDuration": 5,
         "fps": [16],
-        "resolutions": ["832x480", "480x832", "1280x720", "720x1280"]
+        "resolutions": ["832x480", "480x832", "1280x720", "720x1280"],
+        // Diffusers WanPipeline (torch backend) supports flow-matching swaps
+        // via apply_sampler. MLX path is default-only — declared on mlx.limits.
+        "samplers": ["default", "euler", "heun", "dpmpp", "unipc"],
+        "schedulers": ["default", "simple", "shift", "karras", "exponential", "beta"]
       },
       "loraCompatibility": {
         "families": ["wan-video"],
@@ -1352,7 +1424,11 @@
         // <data>/models/mlx/wan_2_2_i2v_14b. Its distill LoRA is applied at run time.
         "minMemoryGb": 133,
         "requiresConversion": true,
-        "convertSourceRepo": "Wan-AI/Wan2.2-I2V-A14B-Diffusers"
+        "convertSourceRepo": "Wan-AI/Wan2.2-I2V-A14B-Diffusers",
+        "limits": {
+          "samplers": ["default"],
+          "schedulers": ["default"]
+        }
       },
       "ui": {
         "label": "Wan2.2 14B (I2V)",
