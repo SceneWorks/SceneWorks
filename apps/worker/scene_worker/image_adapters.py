@@ -2133,6 +2133,322 @@ class FluxDiffusersAdapter:
         return max(1.0, min(10.0, scale))
 
 
+class MlxFluxAdapter:
+    """FLUX.1 [schnell] / [dev] text-to-image via mflux (Apple MLX), run OUT-OF-PROCESS.
+
+    mflux 0.17.5 hard-requires transformers>=5 + huggingface_hub>=1, which conflict
+    with the main worker venv's transformers 4.57.x + huggingface_hub<1 (held there
+    for native LTX-2.3 and the existing FluxDiffusersAdapter / Wan / Kolors / etc.
+    diffusers paths). So mflux runs in a dedicated sidecar venv
+    (`/opt/mlx-flux-venv`) via ``scene_worker/mlx_flux_runner.py``; this adapter
+    only orchestrates that subprocess and writes the resulting PNGs through the
+    shared asset writer. Mirrors LensTurboAdapter (same dep-divergence pattern).
+
+    Spike sc-1969 (2026-05-28, M5 Max 128 GB) verdict: GO. mflux bf16 ~2.84 s/step
+    vs torch/MPS FluxDiffusersAdapter ~4.06 s/step (~30% faster) at 1024² 4-step.
+    Q4 and Q8 match bf16 speed on M-series (mlx ops dominate over memory
+    bandwidth), with significant peak-memory reduction (Q4 41.6 GB vs bf16 65.8 GB).
+    XLabs FLUX LoRA (152 weight keys) loaded cleanly via mflux's lora_paths plumbing.
+
+    Selected when ALL of:
+      - the request model is in ``_supported_models`` (flux_schnell, flux_dev)
+      - MPS is available (``_mps_available()``)
+      - the sidecar venv exists (``_sidecar_available()``)
+      - ``SCENEWORKS_DISABLE_MLX_FLUX`` is unset
+      - the request has no reference asset (mflux has no FLUX IP-Adapter today)
+
+    Falls back to FluxDiffusersAdapter (torch/MPS) on any of these failing.
+    Never regresses the torch path — adapter is purely additive.
+
+    Text-to-image only for v1; mflux also covers Kontext (edit), Fill, Depth,
+    Redux, ControlNet, Qwen-Image, Z-Image, FLUX.2 — out of sc-1970 scope.
+    """
+
+    id = "mlx_flux"
+    _supported_models = {"flux_schnell", "flux_dev"}
+
+    def __init__(self) -> None:
+        # Sidecar scratch dir for the in-flight job, reaped by discard_temp_outputs
+        # on force-cancel (os._exit skips the finally in generate). Mirrors
+        # LensTurboAdapter's per-job scratch lifecycle.
+        self._scratch_dir: Path | None = None
+
+    def discard_temp_outputs(self, job_id: str | None = None) -> None:
+        """Reap the in-flight sidecar scratch dir only — filesystem-only.
+
+        Called from generate's finally and from the force-cancel monitor thread
+        right before os._exit, so it must stay filesystem-only (no torch/GPU)."""
+        work_dir = self._scratch_dir
+        if work_dir is not None:
+            shutil.rmtree(work_dir, ignore_errors=True)
+            self._scratch_dir = None
+
+    def loaded_models(self) -> list[str]:
+        # The sidecar process loads and frees the model per job; nothing stays
+        # resident in this (main-venv) process.
+        return []
+
+    @staticmethod
+    def _sidecar_python() -> str:
+        return os.getenv("SCENEWORKS_MLX_FLUX_PYTHON", "/opt/mlx-flux-venv/bin/python")
+
+    @staticmethod
+    def _runner_path() -> Path:
+        return Path(__file__).resolve().parent / "mlx_flux_runner.py"
+
+    def _sidecar_available(self) -> bool:
+        return Path(self._sidecar_python()).exists() and self._runner_path().exists()
+
+    def generate(
+        self,
+        *,
+        settings: WorkerSettings,
+        job: dict[str, Any],
+        request: ImageRequest,
+        project_path: Path,
+        progress: ProgressCallback,
+        cancel_requested: CancelCallback,
+    ) -> dict[str, Any]:
+        model_target = MODEL_TARGETS.get(request.model, {})
+        if model_target.get("adapter") != FluxDiffusersAdapter.id:
+            raise RuntimeError(f"{request.model} is not a FLUX.1 target.")
+        if request.model not in self._supported_models:
+            raise RuntimeError(
+                f"MlxFluxAdapter supports "
+                f"{', '.join(sorted(self._supported_models))}, not {request.model}."
+            )
+        if request.mode == "edit_image":
+            # mflux supports Kontext edit but the FLUX SceneWorks contract is
+            # T2I-only today; routing edit_image here would silently change
+            # behavior. The dispatch shouldn't pick MLX for edit jobs.
+            raise RuntimeError(f"{request.model} MLX adapter is text-to-image only (v1).")
+        if request.reference_asset_id:
+            # FLUX IP-Adapter (XLabs) lives on the torch path. mflux has no
+            # equivalent today, so a reference-image request must fall back.
+            raise RuntimeError(
+                f"{request.model} reference-image (IP-Adapter) generation is not supported on "
+                "the MLX backend. Use the torch path (SCENEWORKS_IMAGE_ADAPTER=flux_diffusers)."
+            )
+
+        # Resolve + validate LoRAs in the main venv so a bad path or incompatible
+        # family fails before we spawn the subprocess. The sidecar only sees
+        # concrete file paths + weights.
+        validate_lora_compatibility(
+            request.loras, model_family=model_target.get("family"), adapter_id=self.id, model_id=request.model
+        )
+        lora_specs = normalize_lora_specs(request.loras)
+
+        if not self._sidecar_available():
+            raise RuntimeError(
+                "MLX FLUX generation requires the isolated mlx-flux sidecar venv. The desktop "
+                "bootstrap installs it on first launch (apps/desktop/src/setup.rs "
+                "provision_mlx_flux_venv); rebuild without SCENEWORKS_DISABLE_MLX_FLUX=1, or set "
+                "SCENEWORKS_MLX_FLUX_PYTHON to a Python interpreter that has mflux installed "
+                f"(looked for {self._sidecar_python()})."
+            )
+
+        total = request.count
+        steps = self._num_inference_steps(request, model_target)
+        guidance = self._guidance_scale(request, model_target)
+        quantize = self._resolve_quantize(request)
+        seeds = [resolve_seed(request.seed, request.prompt, index, request.seeds) for index in range(total)]
+
+        progress(
+            "loading_model",
+            "loading_model",
+            0.18,
+            f"Loading {model_target['label']} (MLX sidecar venv).",
+        )
+        work_dir = Path(tempfile.mkdtemp(prefix="mlx_flux_sidecar_"))
+        self._scratch_dir = work_dir
+        try:
+            images = self._run_sidecar(
+                job_id=job["id"],
+                work_dir=work_dir,
+                label=model_target["label"],
+                total=total,
+                spec={
+                    "model": request.model,
+                    "prompt": request.prompt,
+                    "negativePrompt": request.negative_prompt or None,
+                    "seeds": seeds,
+                    "height": request.height,
+                    "width": request.width,
+                    "numInferenceSteps": steps,
+                    "guidance": guidance,
+                    "quantize": quantize,
+                    "loras": [
+                        {"path": lora.path, "weight": lora.weight, "name": lora.adapter_name}
+                        for lora in lora_specs
+                    ],
+                },
+                progress=progress,
+                cancel_requested=cancel_requested,
+            )
+
+            def image_at_index(index: int) -> Image.Image:
+                progress(
+                    "running",
+                    "generating",
+                    image_batch_progress(index, total),
+                    format_batch_running_message(model_target["label"], index, total),
+                )
+                with Image.open(images[index]) as handle:
+                    return handle.convert("RGB")
+
+            return ImageAssetWriter().write_incremental_outputs(
+                request=request,
+                project_path=project_path,
+                image_count=total,
+                image_at_index=image_at_index,
+                adapter_id=self.id,
+                progress=progress,
+                cancel_requested=cancel_requested,
+                raw_settings={
+                    **request.advanced,
+                    "repo": model_target["repo"],
+                    "numInferenceSteps": steps,
+                    "guidanceScale": guidance,
+                    "mlxQuantize": quantize,
+                    "sidecarVenv": self._sidecar_python(),
+                    "realModelInference": True,
+                },
+                settings=settings,
+                job_id=job["id"],
+            )
+        finally:
+            # The writer has read every PNG into the project by now; drop the
+            # sidecar's scratch dir regardless of success/failure (also clears
+            # the force-cancel registry).
+            self.discard_temp_outputs(job["id"])
+
+    def _num_inference_steps(self, request: ImageRequest, model_target: dict[str, Any]) -> int:
+        return safe_int(request.advanced.get("steps"), model_target["steps"], 1, 80)
+
+    def _guidance_scale(self, request: ImageRequest, model_target: dict[str, Any]) -> float:
+        default = model_target.get("guidanceScale", 0.0)
+        try:
+            return float(request.advanced.get("guidanceScale", default))
+        except (TypeError, ValueError):
+            return float(default)
+
+    def _resolve_quantize(self, request: ImageRequest) -> int | None:
+        """Pick the mflux quantize level. Order: advanced override > manifest
+        mlx.quantize > Q8 default.
+
+        Q8 was the sc-1969 spike sweet spot: same per-step time as bf16 on M-series,
+        ~25% peak-memory reduction, no visible quality drift. Q4 is the right pick
+        for ≤64 GB Macs (peak ~41.6 GB at 1024²) with minor detail drift. None
+        keeps the model in bf16 (highest memory, zero quality loss).
+        """
+        override = request.advanced.get("mlxQuantize")
+        if override is not None:
+            if isinstance(override, bool):
+                # Treat True/False as "no override" rather than 0/1 quant.
+                pass
+            else:
+                try:
+                    parsed = int(override)
+                    return parsed if parsed > 0 else None
+                except (TypeError, ValueError):
+                    pass
+        mlx_entry = request.model_manifest_entry.get("mlx") if request.model_manifest_entry else None
+        if isinstance(mlx_entry, dict):
+            manifest_q = mlx_entry.get("quantize")
+            if manifest_q is not None:
+                try:
+                    parsed = int(manifest_q)
+                    return parsed if parsed > 0 else None
+                except (TypeError, ValueError):
+                    pass
+        return 8
+
+    def _run_sidecar(
+        self,
+        *,
+        job_id: str,
+        work_dir: Path,
+        label: str,
+        total: int,
+        spec: dict[str, Any],
+        progress: ProgressCallback,
+        cancel_requested: CancelCallback,
+    ) -> list[str]:
+        spec = {**spec, "outDir": str(work_dir)}
+        spec_path = work_dir / "spec.json"
+        spec_path.write_text(json.dumps(spec), encoding="utf-8")
+        stdout_log = work_dir / "stdout.log"
+        cmd = [self._sidecar_python(), str(self._runner_path()), str(spec_path)]
+        emit_worker_event(
+            "mlx_flux_sidecar_start",
+            jobId=job_id,
+            adapter=self.id,
+            model=spec["model"],
+            imageCount=total,
+            quantize=spec.get("quantize"),
+            sidecar=self._sidecar_python(),
+        )
+        progress(
+            "running",
+            "generating",
+            image_batch_progress(0, total),
+            f"Running {label} ({total} image(s)).",
+        )
+        # stdout -> file (avoids any pipe-fill deadlock); stderr inherits to the
+        # worker log for diagnostics. Poll so the job stays cancelable; the
+        # heartbeat thread keeps it alive during the (minutes-long) run. Mirrors
+        # LensTurboAdapter._run_sidecar.
+        with stdout_log.open("w", encoding="utf-8") as out:
+            proc = subprocess.Popen(cmd, env=os.environ.copy(), stdout=out, stderr=None)
+            while True:
+                try:
+                    proc.wait(timeout=2)
+                    break
+                except subprocess.TimeoutExpired:
+                    if cancel_requested():
+                        proc.terminate()
+                        try:
+                            proc.wait(timeout=10)
+                        except subprocess.TimeoutExpired:
+                            proc.kill()
+                        raise InterruptedError("Image generation canceled by user.")
+        result = self._read_result(work_dir, stdout_log)
+        if proc.returncode != 0 or "error" in result:
+            error = result.get("error") or f"MLX FLUX sidecar exited with code {proc.returncode}."
+            emit_worker_event(
+                "mlx_flux_sidecar_failed",
+                jobId=job_id,
+                adapter=self.id,
+                error=error,
+                returnCode=proc.returncode,
+            )
+            raise RuntimeError(f"MLX FLUX generation failed in the sidecar venv: {error}")
+        images = [str(path) for path in result.get("images", [])]
+        if len(images) != total:
+            raise RuntimeError(f"MLX FLUX sidecar produced {len(images)} image(s); expected {total}.")
+        emit_worker_event("mlx_flux_sidecar_complete", jobId=job_id, adapter=self.id, imageCount=len(images))
+        return images
+
+    @staticmethod
+    def _read_result(work_dir: Path, stdout_log: Path) -> dict[str, Any]:
+        result_path = work_dir / "result.json"
+        if result_path.exists():
+            try:
+                return json.loads(result_path.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                pass
+        try:
+            lines = [line for line in stdout_log.read_text(encoding="utf-8").splitlines() if line.strip()]
+        except OSError:
+            lines = []
+        for line in reversed(lines):
+            try:
+                return json.loads(line)
+            except ValueError:
+                continue
+        return {"error": "MLX FLUX sidecar produced no parseable result."}
+
+
 class KolorsDiffusersAdapter:
     """Kwai-Kolors Kolors text-to-image via diffusers.KolorsPipeline.
 
@@ -4491,6 +4807,7 @@ def create_image_adapter(
     | LensTurboAdapter
     | SenseNovaU1Adapter
     | FluxDiffusersAdapter
+    | MlxFluxAdapter
     | KolorsDiffusersAdapter
     | SdxlDiffusersAdapter
     | ChromaDiffusersAdapter
@@ -4511,6 +4828,7 @@ def create_image_adapter(
         LensTurboAdapter.id,
         SenseNovaU1Adapter.id,
         FluxDiffusersAdapter.id,
+        MlxFluxAdapter.id,
         KolorsDiffusersAdapter.id,
         SdxlDiffusersAdapter.id,
         ChromaDiffusersAdapter.id,
@@ -4528,6 +4846,8 @@ def create_image_adapter(
         return adapters.get("sensenova_u1") if adapters else SenseNovaU1Adapter()
     if requested == FluxDiffusersAdapter.id:
         return adapters.get("flux_diffusers") if adapters else FluxDiffusersAdapter()
+    if requested == MlxFluxAdapter.id:
+        return adapters.get("mlx_flux") if adapters else MlxFluxAdapter()
     if requested == KolorsDiffusersAdapter.id:
         return adapters.get("kolors_diffusers") if adapters else KolorsDiffusersAdapter()
     if requested == SdxlDiffusersAdapter.id:
@@ -4548,6 +4868,12 @@ def create_image_adapter(
     if model_target.get("adapter") == SenseNovaU1Adapter.id:
         return adapters.get("sensenova_u1") if adapters else SenseNovaU1Adapter()
     if model_target.get("adapter") == FluxDiffusersAdapter.id:
+        # FLUX auto-dispatch: prefer MlxFluxAdapter on macOS when its sidecar venv is
+        # installed AND the model is supported AND the job has no reference image
+        # (mflux has no FLUX IP-Adapter today). Otherwise fall back to the torch
+        # path. SCENEWORKS_DISABLE_MLX_FLUX forces the torch path. sc-1970.
+        if _should_route_flux_to_mlx(payload):
+            return adapters.get("mlx_flux") if adapters else MlxFluxAdapter()
         return adapters.get("flux_diffusers") if adapters else FluxDiffusersAdapter()
     if model_target.get("adapter") == KolorsDiffusersAdapter.id:
         return adapters.get("kolors_diffusers") if adapters else KolorsDiffusersAdapter()
@@ -4560,6 +4886,36 @@ def create_image_adapter(
     if model_target.get("adapter") == "pulid_flux":
         return _pulid_flux_adapter(adapters)
     return adapters.get("procedural_preview") if adapters else ProceduralImageAdapter()
+
+
+def _should_route_flux_to_mlx(payload: dict[str, Any]) -> bool:
+    """Decide whether the FLUX auto-dispatch path should pick MlxFluxAdapter
+    (mflux sidecar venv) over FluxDiffusersAdapter (torch/MPS). All checks must
+    pass; any failure falls back to the torch path so we never regress it.
+    sc-1970.
+
+    Gates:
+      1. SCENEWORKS_DISABLE_MLX_FLUX must be unset (escape hatch).
+      2. Platform must be darwin (Apple Silicon — mflux/MLX is Mac-only).
+      3. Model must be in MlxFluxAdapter._supported_models.
+      4. Job must not request edit_image (mflux T2I-only for v1).
+      5. Job must not have a reference asset (no FLUX IP-Adapter in mflux).
+      6. The sidecar venv must exist (installed by provision_mlx_flux_venv on
+         first launch). Spinning up a temp adapter just to read its predicate
+         is cheap — no model load happens here.
+    """
+    if os.getenv("SCENEWORKS_DISABLE_MLX_FLUX", "").strip().lower() in {"1", "true", "yes"}:
+        return False
+    if sys.platform != "darwin":
+        return False
+    model = payload.get("model")
+    if model not in MlxFluxAdapter._supported_models:
+        return False
+    if payload.get("mode") == "edit_image":
+        return False
+    if payload.get("referenceAssetId"):
+        return False
+    return MlxFluxAdapter()._sidecar_available()
 
 
 def _instantid_adapter(adapters: dict[str, object] | None) -> "InstantIDAdapter":
