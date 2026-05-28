@@ -4,6 +4,36 @@
   "title": "SceneWorks Model Manifest",
   "type": "object",
   "required": ["schemaVersion", "models"],
+  "$defs": {
+    "samplerKey": {
+      "type": "string",
+      "enum": ["default", "euler", "heun", "dpmpp", "unipc"],
+      "description": "Integration method offered by a diffusers flow-matching adapter (epic 1753). \"default\" = whatever the loaded pipeline ships with (no swap)."
+    },
+    "schedulerKey": {
+      "type": "string",
+      "enum": ["default", "simple", "shift", "karras", "exponential", "beta"],
+      "description": "Sigma / timestep schedule axis (epic 1753). \"shift\" pairs with defaults.schedulerShift / advanced.schedulerShift. \"default\" preserves the trained schedule."
+    },
+    "samplerLimits": {
+      "type": "object",
+      "description": "Per-model sampler / scheduler capability lists used to gate Image / Video Studio dropdowns. Omit the keys entirely to disable the controls; include single-element [\"default\"] arrays for sealed adapters so the manifest is still self-describing.",
+      "properties": {
+        "samplers": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": { "$ref": "#/$defs/samplerKey" }
+        },
+        "schedulers": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": { "$ref": "#/$defs/schedulerKey" }
+        }
+      }
+    }
+  },
   "properties": {
     "schemaVersion": { "type": "integer", "minimum": 1 },
     "models": {
@@ -11,6 +41,37 @@
       "items": {
         "type": "object",
         "properties": {
+          "defaults": {
+            "type": "object",
+            "description": "Model defaults surfaced as form initial values in the studios. Sampler / scheduler defaults are read by the UI (the worker just honors whatever rides on advanced).",
+            "properties": {
+              "sampler": { "$ref": "#/$defs/samplerKey" },
+              "scheduler": { "$ref": "#/$defs/schedulerKey" },
+              "schedulerShift": {
+                "type": "number",
+                "exclusiveMinimum": 0,
+                "description": "Default shift value when scheduler == \"shift\". Typical range 1.0–6.0."
+              }
+            }
+          },
+          "limits": {
+            "type": "object",
+            "description": "Per-model capability lists. Sampler / scheduler arrays gate the Image / Video Studio dropdowns; omit them to hide the controls.",
+            "properties": {
+              "samplers": {
+                "type": "array",
+                "minItems": 1,
+                "uniqueItems": true,
+                "items": { "$ref": "#/$defs/samplerKey" }
+              },
+              "schedulers": {
+                "type": "array",
+                "minItems": 1,
+                "uniqueItems": true,
+                "items": { "$ref": "#/$defs/schedulerKey" }
+              }
+            }
+          },
           "ui": {
             "type": "object",
             "description": "Display metadata for model catalog and studio surfaces.",
@@ -70,6 +131,10 @@
               "convertSourceRepo": {
                 "type": "string",
                 "description": "Native checkpoint repo used as the conversion source when requiresConversion is true."
+              },
+              "limits": {
+                "$ref": "#/$defs/samplerLimits",
+                "description": "Per-backend capability override (epic 1753). MLX-backed Wan/LTX adapters expose only [\"default\"]; the top-level limits.samplers/schedulers describe the torch path."
               }
             }
           },

@@ -82,12 +82,18 @@ def main() -> int:
 
     # The vendored `lens` package lives next to this file in _vendor/. Importing
     # it registers LensPipeline/LensTransformer2DModel/LensGptOssEncoder into the
-    # diffusers/transformers namespaces that model_index.json references.
-    sys.path.insert(0, str(Path(__file__).resolve().parent / "_vendor"))
+    # diffusers/transformers namespaces that model_index.json references. Adding
+    # the parent (scene_worker) dir makes ``sampler_registry`` importable so the
+    # Lens sidecar can swap pipe.scheduler via the same flow-compatible registry
+    # the main-venv adapters use (epic 1753 sc-1764).
+    runner_dir = Path(__file__).resolve().parent
+    sys.path.insert(0, str(runner_dir / "_vendor"))
+    sys.path.insert(0, str(runner_dir.parent))
 
     import torch  # noqa: E402  (heavy import deferred until the spec is valid)
     import transformers  # noqa: E402
     from lens import LensGptOssEncoder, LensPipeline  # noqa: E402
+    from scene_worker.sampler_registry import apply_sampler  # noqa: E402
 
     repo = spec["repo"]
     seeds = [int(seed) for seed in spec.get("seeds", [])] or [0]
@@ -147,6 +153,19 @@ def main() -> int:
     prompt = spec.get("prompt", "")
     negative_prompt = spec.get("negativePrompt") or ""
 
+    # Configurable sampler / scheduler (epic 1753 sc-1764). When the spec asks
+    # for anything other than model-default, swap pipe.scheduler via the shared
+    # registry — the vendored LensPipeline.__call__ checks
+    # ``use_custom_sigmas`` to skip its empirical mu+linear-sigma override and
+    # let the new scheduler compute its own sigma schedule.
+    sampler_key = spec.get("sampler") or "default"
+    scheduler_key = spec.get("scheduler") or "default"
+    scheduler_shift = spec.get("schedulerShift")
+    sampler_active = sampler_key != "default" or scheduler_key != "default" or scheduler_shift is not None
+    if sampler_active:
+        apply_sampler(pipe, sampler_key, scheduler_key, scheduler_shift, adapter="lens_turbo")
+        _log(f"sampler swap applied sampler={sampler_key} scheduler={scheduler_key} shift={scheduler_shift}")
+
     images: list[str] = []
     for index, seed in enumerate(seeds):
         generator = torch.Generator(generator_device).manual_seed(int(seed))
@@ -159,6 +178,11 @@ def main() -> int:
             "num_images_per_prompt": 1,
             "generator": generator,
             "enable_reasoner": False,
+            # Lens's empirical mu + linear-sigma path is the calibration the
+            # model card specifies. When the user opts into a non-default
+            # sampler / scheduler axis the vendored loop must defer to the
+            # swapped scheduler's own sigma builder instead (epic 1753).
+            "use_custom_sigmas": not sampler_active,
         }
         if negative_prompt:
             kwargs["negative_prompt"] = negative_prompt

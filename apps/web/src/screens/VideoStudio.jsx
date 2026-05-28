@@ -57,6 +57,16 @@ import { ReplacePersonPanel, findReplacementModel } from "./ReplacePersonPanel.j
 import { useAppContext } from "../context/AppContext.js";
 import { loadStudioSettings, useStudioSettingsWriter } from "../hooks/useStudioSettings.js";
 import { qualityChoices } from "../jobTypes.js";
+import {
+  SAMPLER_LABELS,
+  SCHEDULER_LABELS,
+  guidanceDefaultFromModel,
+  samplerDefaultFromModel,
+  samplerOptionsFromModel,
+  schedulerDefaultFromModel,
+  schedulerOptionsFromModel,
+  stepsDefaultFromModel,
+} from "../samplerOptions.js";
 
 const ltxVideoModelId = "ltx_2_3";
 const ltxIcLoraRequiredModes = new Set(["extend_clip", "video_bridge"]);
@@ -138,6 +148,20 @@ export function VideoStudio() {
   const [fps, setFps] = useState(saved.fps ?? selectedModel?.defaults?.fps ?? 25);
   const [seed, setSeed] = useState(saved.seed ?? "");
   const [negativePrompt, setNegativePrompt] = useState(saved.negativePrompt ?? "");
+  // Configurable sampler / scheduler (epic 1753). The Wan diffusers (torch)
+  // adapter applies these; MLX-backed video paths advertise default-only via
+  // mlx.limits and the picker hides itself there.
+  const [sampler, setSampler] = useState(saved.sampler ?? "default");
+  const [scheduler, setScheduler] = useState(saved.scheduler ?? "default");
+  const [schedulerShift, setSchedulerShift] = useState(saved.schedulerShift ?? 3.0);
+  const [stepsOverride, setStepsOverride] = useState(saved.steps ?? "");
+  const [guidanceOverride, setGuidanceOverride] = useState(saved.guidanceScale ?? "");
+  // LTX-2.3 native guidance knobs (epic 1753 sc-1769). The native ltx-core
+  // path has no diffusers scheduler to swap — these three values (cfg + STG +
+  // rescale) drive its sealed MultiModalGuiderParams instead.
+  const [ltxVideoCfg, setLtxVideoCfg] = useState(saved.videoCfgGuidanceScale ?? "");
+  const [ltxVideoStg, setLtxVideoStg] = useState(saved.videoStgGuidanceScale ?? "");
+  const [ltxVideoRescale, setLtxVideoRescale] = useState(saved.videoRescaleScale ?? "");
   const [sourceAssetId, setSourceAssetId] = useState(["image", "frame"].includes(selectedAsset?.type) ? selectedAsset.id : "");
   const [lastFrameAssetId, setLastFrameAssetId] = useState("");
   const [sourceClipAssetId, setSourceClipAssetId] = useState(selectedAsset?.type === "video" ? selectedAsset.id : "");
@@ -190,6 +214,31 @@ export function VideoStudio() {
     trackedLocalJobs,
     initialPresetId: saved.selectedPresetId ?? null,
   });
+  // Sampler / scheduler menus declared by the model. Video Wan torch
+  // declares the full menu; sealed paths (LTX native, MLX) drop to
+  // default-only and the picker hides.
+  const samplerOptions = useMemo(() => samplerOptionsFromModel(selectedModel), [selectedModel]);
+  const schedulerOptions = useMemo(() => schedulerOptionsFromModel(selectedModel), [selectedModel]);
+  const showSamplerPicker = samplerOptions.length > 1;
+  const showSchedulerPicker = schedulerOptions.length > 1;
+  useEffect(() => {
+    if (samplerOptions.includes(sampler)) {
+      return;
+    }
+    const preferred = samplerOptions.includes(samplerDefaultFromModel(selectedModel))
+      ? samplerDefaultFromModel(selectedModel)
+      : samplerOptions[0];
+    setSampler(preferred);
+  }, [samplerOptions, sampler, selectedModel]);
+  useEffect(() => {
+    if (schedulerOptions.includes(scheduler)) {
+      return;
+    }
+    const preferred = schedulerOptions.includes(schedulerDefaultFromModel(selectedModel))
+      ? schedulerDefaultFromModel(selectedModel)
+      : schedulerOptions[0];
+    setScheduler(preferred);
+  }, [schedulerOptions, scheduler, selectedModel]);
   const requiresLtxIcLora = selectedModel?.id === ltxVideoModelId && ltxIcLoraRequiredModes.has(mode);
   const hasLtxIcLora = presetLoraDetails.some((lora) => !lora.missing && loraLooksLikeIcLora(lora));
   const compatibleLoras = useMemo(() => loras.filter((lora) => {
@@ -397,6 +446,14 @@ export function VideoStudio() {
     seed,
     negativePrompt,
     selectedPresetId,
+    sampler,
+    scheduler,
+    schedulerShift,
+    steps: stepsOverride,
+    guidanceScale: guidanceOverride,
+    videoCfgGuidanceScale: ltxVideoCfg,
+    videoStgGuidanceScale: ltxVideoStg,
+    videoRescaleScale: ltxVideoRescale,
   });
 
   useEffect(() => {
@@ -514,6 +571,32 @@ export function VideoStudio() {
           replacementModeLabel: replacementModeLabels[replacementMode],
           ...(model === ltxVideoModelId ? { ltxPipeline, distilledVariant, precision } : {}),
           ...(supportsQuantization && quantization !== "auto" ? { quantization } : {}),
+          // Configurable sampler / scheduler (epic 1753). Sealed adapters
+          // (LTX native, MLX) silently fall back to default; only the Wan
+          // diffusers (torch) path actually applies these.
+          ...(sampler && sampler !== "default" ? { sampler } : {}),
+          ...(scheduler && scheduler !== "default" ? { scheduler } : {}),
+          ...(scheduler === "shift" && Number.isFinite(Number(schedulerShift))
+            ? { schedulerShift: Number(schedulerShift) }
+            : {}),
+          ...(stepsOverride !== "" && Number.isFinite(Number(stepsOverride))
+            ? { steps: Number(stepsOverride) }
+            : {}),
+          ...(guidanceOverride !== "" && Number.isFinite(Number(guidanceOverride))
+            ? { guidanceScale: Number(guidanceOverride) }
+            : {}),
+          // LTX native guidance knobs (epic 1753 sc-1769). Only emitted for
+          // the LTX adapter — the worker would silently ignore them on other
+          // adapters but keeping the payload tight avoids surprise overrides.
+          ...(selectedModel?.adapter === "ltx_video" && ltxVideoCfg !== "" && Number.isFinite(Number(ltxVideoCfg))
+            ? { videoCfgGuidanceScale: Number(ltxVideoCfg) }
+            : {}),
+          ...(selectedModel?.adapter === "ltx_video" && ltxVideoStg !== "" && Number.isFinite(Number(ltxVideoStg))
+            ? { videoStgGuidanceScale: Number(ltxVideoStg) }
+            : {}),
+          ...(selectedModel?.adapter === "ltx_video" && ltxVideoRescale !== "" && Number.isFinite(Number(ltxVideoRescale))
+            ? { videoRescaleScale: Number(ltxVideoRescale) }
+            : {}),
         },
       });
       onLocalJobCreated?.(job);
@@ -959,6 +1042,46 @@ export function VideoStudio() {
                       </label>
                     </>
                   ) : null}
+                  {selectedModel?.adapter === "ltx_video" ? (
+                    <>
+                      <label>
+                        Video CFG
+                        <input
+                          min="0"
+                          max="30"
+                          onChange={(event) => setLtxVideoCfg(event.target.value)}
+                          placeholder="4.0"
+                          step="0.1"
+                          type="number"
+                          value={ltxVideoCfg}
+                        />
+                      </label>
+                      <label>
+                        Video STG
+                        <input
+                          min="0"
+                          max="10"
+                          onChange={(event) => setLtxVideoStg(event.target.value)}
+                          placeholder="0.0"
+                          step="0.1"
+                          type="number"
+                          value={ltxVideoStg}
+                        />
+                      </label>
+                      <label>
+                        Video rescale
+                        <input
+                          min="0"
+                          max="2"
+                          onChange={(event) => setLtxVideoRescale(event.target.value)}
+                          placeholder="0.7"
+                          step="0.05"
+                          type="number"
+                          value={ltxVideoRescale}
+                        />
+                      </label>
+                    </>
+                  ) : null}
                   {supportsQuantization ? (
                     <label>
                       Quantization
@@ -986,6 +1109,69 @@ export function VideoStudio() {
                   <label>
                     Seed
                     <input onChange={(event) => setSeed(event.target.value)} placeholder="Random" type="number" value={seed} />
+                  </label>
+                  {showSamplerPicker ? (
+                    <label>
+                      Sampler
+                      <select onChange={(event) => setSampler(event.target.value)} value={sampler}>
+                        {samplerOptions.map((key) => (
+                          <option key={key} value={key}>
+                            {SAMPLER_LABELS[key] ?? key}
+                          </option>
+                        ))}
+                      </select>
+                    </label>
+                  ) : null}
+                  {showSchedulerPicker ? (
+                    <label>
+                      Scheduler
+                      <select onChange={(event) => setScheduler(event.target.value)} value={scheduler}>
+                        {schedulerOptions.map((key) => (
+                          <option key={key} value={key}>
+                            {SCHEDULER_LABELS[key] ?? key}
+                          </option>
+                        ))}
+                      </select>
+                    </label>
+                  ) : null}
+                  {scheduler === "shift" ? (
+                    <label>
+                      Schedule shift
+                      <input
+                        max="10"
+                        min="0.1"
+                        onChange={(event) => setSchedulerShift(Number(event.target.value))}
+                        step="0.1"
+                        type="number"
+                        value={schedulerShift}
+                      />
+                    </label>
+                  ) : null}
+                  <label>
+                    Steps
+                    <input
+                      min="1"
+                      max="80"
+                      onChange={(event) => setStepsOverride(event.target.value)}
+                      placeholder={String(stepsDefaultFromModel(selectedModel) ?? "")}
+                      type="number"
+                      value={stepsOverride}
+                    />
+                  </label>
+                  <label>
+                    Guidance
+                    <input
+                      min="0"
+                      max="30"
+                      onChange={(event) => setGuidanceOverride(event.target.value)}
+                      placeholder={(() => {
+                        const value = guidanceDefaultFromModel(selectedModel);
+                        return value == null ? "" : String(value);
+                      })()}
+                      step="0.1"
+                      type="number"
+                      value={guidanceOverride}
+                    />
                   </label>
                   <label>
                     Character

@@ -81,6 +81,17 @@ import {
 import { useAppContext } from "../context/AppContext.js";
 import { loadStudioSettings, useStudioSettingsWriter } from "../hooks/useStudioSettings.js";
 import { errorStatuses } from "../jobTypes.js";
+import {
+  SAMPLER_LABELS,
+  SCHEDULER_LABELS,
+  guidanceDefaultFromModel,
+  samplerDefaultFromModel,
+  samplerOptionsFromModel,
+  schedulerDefaultFromModel,
+  schedulerOptionsFromModel,
+  schedulerShiftDefaultFromModel,
+  stepsDefaultFromModel,
+} from "../samplerOptions.js";
 
 // Used only for models that don't declare limits.resolutions (e.g. user-imported).
 const DEFAULT_RESOLUTION_OPTIONS = ["768x768", "1024x1024", "1280x720", "720x1280"];
@@ -225,6 +236,17 @@ export function ImageStudio() {
   // Pose library: selected pose ids. When non-empty, the job carries advanced.poses
   // (one image per pose) instead of the normal variations count. Transient (not saved).
   const [selectedPoseIds, setSelectedPoseIds] = useState([]);
+  // Configurable sampler / scheduler (epic 1753). Restored from per-workspace
+  // settings; reset to the selected model's manifest defaults whenever the
+  // model changes and the saved value is no longer offered by limits.
+  const [sampler, setSampler] = useState(saved.sampler ?? "default");
+  const [scheduler, setScheduler] = useState(saved.scheduler ?? "default");
+  const [schedulerShift, setSchedulerShift] = useState(saved.schedulerShift ?? 3.0);
+  // Steps / guidance: previously worker-only knobs surfaced via this same
+  // advanced panel. "" represents "use the model default" so the user can
+  // clear the override.
+  const [stepsOverride, setStepsOverride] = useState(saved.steps ?? "");
+  const [guidanceOverride, setGuidanceOverride] = useState(saved.guidanceScale ?? "");
   const [faceRestore, setFaceRestore] = useState(true);
   const { byId: poseById } = usePoseLibrary();
   const [upscaleEnabled, setUpscaleEnabled] = useState(saved.upscaleEnabled ?? false);
@@ -383,6 +405,33 @@ export function ImageStudio() {
         : DEFAULT_RESOLUTION_OPTIONS,
     [selectedModel],
   );
+  // Sampler / scheduler menus declared by the model. The advanced panel hides
+  // the dropdowns when the menu has fewer than 2 options (epic 1753 §7.4).
+  const samplerOptions = useMemo(() => samplerOptionsFromModel(selectedModel), [selectedModel]);
+  const schedulerOptions = useMemo(() => schedulerOptionsFromModel(selectedModel), [selectedModel]);
+  const showSamplerPicker = samplerOptions.length > 1;
+  const showSchedulerPicker = schedulerOptions.length > 1;
+  // Snap the sampler / scheduler back to the model's declared default when the
+  // current value is no longer in the menu (e.g. user switched to a sealed
+  // model whose only option is "default"). Mirrors the resolution-snap effect.
+  useEffect(() => {
+    if (samplerOptions.includes(sampler)) {
+      return;
+    }
+    const preferred = samplerOptions.includes(samplerDefaultFromModel(selectedModel))
+      ? samplerDefaultFromModel(selectedModel)
+      : samplerOptions[0];
+    setSampler(preferred);
+  }, [samplerOptions, sampler, selectedModel]);
+  useEffect(() => {
+    if (schedulerOptions.includes(scheduler)) {
+      return;
+    }
+    const preferred = schedulerOptions.includes(schedulerDefaultFromModel(selectedModel))
+      ? schedulerDefaultFromModel(selectedModel)
+      : schedulerOptions[0];
+    setScheduler(preferred);
+  }, [schedulerOptions, scheduler, selectedModel]);
   // Keep the selected resolution valid for the current model's buckets. Switching
   // to a model whose options exclude the current value snaps to its default (or
   // 1024x1024, then the first option) rather than leaving a stale, unselectable value.
@@ -523,6 +572,11 @@ export function ImageStudio() {
     loraWeights,
     showIncompatibleLoras,
     selectedPresetId,
+    sampler,
+    scheduler,
+    schedulerShift,
+    steps: stepsOverride,
+    guidanceScale: guidanceOverride,
   });
 
   useEffect(() => {
@@ -619,6 +673,22 @@ export function ImageStudio() {
           : {}),
         advanced: {
           resolution,
+          // Configurable sampler / scheduler (epic 1753). Worker registry
+          // falls back to model-native when given "default", so emitting the
+          // values unconditionally is safe — invalid values are ignored.
+          ...(sampler && sampler !== "default" ? { sampler } : {}),
+          ...(scheduler && scheduler !== "default" ? { scheduler } : {}),
+          ...(scheduler === "shift" && Number.isFinite(Number(schedulerShift))
+            ? { schedulerShift: Number(schedulerShift) }
+            : {}),
+          // Step / guidance overrides — empty string means "use the model
+          // default", which the worker reads off MODEL_TARGETS.
+          ...(stepsOverride !== "" && Number.isFinite(Number(stepsOverride))
+            ? { steps: Number(stepsOverride) }
+            : {}),
+          ...(guidanceOverride !== "" && Number.isFinite(Number(guidanceOverride))
+            ? { guidanceScale: Number(guidanceOverride) }
+            : {}),
           // IP-Adapter / InstantID reference strength only applies when a character
           // reference is attached; the worker reads advanced.ipAdapterScale.
           ...(mode === "character_image" && referenceAssetId ? { ipAdapterScale } : {}),
@@ -1008,6 +1078,69 @@ export function ImageStudio() {
                 <label>
                   Seed
                   <input onChange={(event) => setSeed(event.target.value)} placeholder="Random" type="number" value={seed} />
+                </label>
+                {showSamplerPicker ? (
+                  <label>
+                    Sampler
+                    <select onChange={(event) => setSampler(event.target.value)} value={sampler}>
+                      {samplerOptions.map((key) => (
+                        <option key={key} value={key}>
+                          {SAMPLER_LABELS[key] ?? key}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                ) : null}
+                {showSchedulerPicker ? (
+                  <label>
+                    Scheduler
+                    <select onChange={(event) => setScheduler(event.target.value)} value={scheduler}>
+                      {schedulerOptions.map((key) => (
+                        <option key={key} value={key}>
+                          {SCHEDULER_LABELS[key] ?? key}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                ) : null}
+                {scheduler === "shift" ? (
+                  <label>
+                    Schedule shift
+                    <input
+                      max="10"
+                      min="0.1"
+                      onChange={(event) => setSchedulerShift(Number(event.target.value))}
+                      step="0.1"
+                      type="number"
+                      value={schedulerShift}
+                    />
+                  </label>
+                ) : null}
+                <label>
+                  Steps
+                  <input
+                    min="1"
+                    max="80"
+                    onChange={(event) => setStepsOverride(event.target.value)}
+                    placeholder={String(stepsDefaultFromModel(selectedModel) ?? "")}
+                    type="number"
+                    value={stepsOverride}
+                  />
+                </label>
+                <label>
+                  Guidance
+                  <input
+                    min="0"
+                    max="30"
+                    onChange={(event) => setGuidanceOverride(event.target.value)}
+                    placeholder={(() => {
+                      const value = guidanceDefaultFromModel(selectedModel);
+                      return value == null ? "" : String(value);
+                    })()}
+                    step="0.1"
+                    type="number"
+                    value={guidanceOverride}
+                  />
                 </label>
                 <label className="checkline upscale-toggle">
                   <input
