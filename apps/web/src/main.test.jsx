@@ -2694,8 +2694,8 @@ describe("SceneWorks app shell", () => {
     });
     await settle();
 
-    expect(container.textContent).toContain("Image generation");
-    expect(container.textContent).toContain("running");
+    expect(container.textContent).toContain("Generate Image");
+    expect(container.textContent).toContain("Running");
     expect(container.textContent).not.toContain("Jobs and GPUs");
 
     await act(async () => {
@@ -2707,8 +2707,8 @@ describe("SceneWorks app shell", () => {
     });
     await settle();
 
-    expect(container.textContent).toContain("Image generation");
-    expect(container.textContent).toContain("running");
+    expect(container.textContent).toContain("Generate Image");
+    expect(container.textContent).toContain("Running");
   });
 
   it("shows completed image batch items before the whole job finishes", async () => {
@@ -2791,11 +2791,11 @@ describe("SceneWorks app shell", () => {
     });
     await settle();
 
-    expect(container.querySelector(".review-grid img")?.getAttribute("src")).toContain(
+    expect(container.querySelector(".worker-progress-card__thumb-media")?.getAttribute("src")).toContain(
       "/api/v1/projects/project-1/files/assets/images/generated-1.png",
     );
-    expect(container.textContent).toContain("Pending #2");
-    expect(container.textContent).toContain("Pending #4");
+    // 1 completed asset + 3 pending slots = 4 total cells; skeletons fill the gaps.
+    expect(container.querySelectorAll(".worker-progress-card__thumb-cell.skeleton").length).toBe(3);
   });
 
   it("reconstructs running image batch slots from partial asset records", async () => {
@@ -2885,12 +2885,12 @@ describe("SceneWorks app shell", () => {
     await settle();
 
     expect(container.textContent).toContain("Running Z-Image 2 of 4.");
-    expect(container.querySelector(".review-grid img")?.getAttribute("src")).toContain(
+    expect(container.querySelector(".worker-progress-card__thumb-media")?.getAttribute("src")).toContain(
       "/api/v1/projects/project-1/files/assets/images/generated_0001.png",
     );
-    expect(container.textContent).not.toContain("Pending #1");
-    expect(container.textContent).toContain("Pending #2");
-    expect(container.textContent).toContain("Pending #4");
+    // 1 completed thumbnail + 3 pending skeleton slots = 4 total cells.
+    expect(container.querySelectorAll(".worker-progress-card__thumb-cell:not(.skeleton)").length).toBe(1);
+    expect(container.querySelectorAll(".worker-progress-card__thumb-cell.skeleton").length).toBe(3);
   });
 
   it("shows local generation failures without duplicating the global banner", async () => {
@@ -4614,7 +4614,8 @@ describe("SceneWorks app shell", () => {
       root.render(withImageStudioContext(imageProps));
     });
 
-    expect(container.textContent).toContain("Finished. Fetching result...");
+    // Card stays visible while the completed job waits for its asset to arrive.
+    expect(container.querySelector(".worker-progress-card")).not.toBeNull();
     expect(container.textContent).not.toContain("No fresh image batch");
 
     const generatedAsset = {
@@ -4628,7 +4629,9 @@ describe("SceneWorks app shell", () => {
       root.render(withImageStudioContext({ ...imageProps, assets: [generatedAsset], latestAssets: [generatedAsset] }));
     });
 
-    expect(container.textContent).not.toContain("Finished. Fetching result...");
+    // Once the asset surfaces in latestAssets the card collapses out of the stack
+    // (selectStackedJobs + resultVisible). The asset itself is in Recent Assets.
+    expect(container.querySelector(".worker-progress-card")).toBeNull();
     expect(container.textContent).not.toContain("No fresh image batch");
   });
 
@@ -4689,10 +4692,11 @@ describe("SceneWorks app shell", () => {
       );
     });
 
-    const images = [...container.querySelectorAll(".review-grid img")].map((image) => image.getAttribute("src"));
+    const images = [...container.querySelectorAll(".worker-progress-card__thumb-media")].map((image) => image.getAttribute("src"));
     expect(images[0]).toContain("/api/v1/projects/project-1/files/assets/images/generated_0001.png");
     expect(images[1]).toContain("/api/v1/projects/project-1/files/runs/run_0007/assets/images/generated_0002.png");
-    expect(container.textContent).toContain("Pending #3");
+    // 2 completed thumbnails + 1 skeleton slot = 3 total cells.
+    expect(container.querySelectorAll(".worker-progress-card__thumb-cell.skeleton").length).toBe(1);
   });
 
   it("cancels a running image job from the studio progress card", async () => {
@@ -4733,7 +4737,7 @@ describe("SceneWorks app shell", () => {
     });
     await settle();
 
-    const cancelButton = [...container.querySelectorAll("button")].find((button) => button.textContent === "Cancel run");
+    const cancelButton = [...container.querySelectorAll("button")].find((button) => button.textContent === "Cancel");
     expect(cancelButton).not.toBeUndefined();
 
     await act(async () => {
@@ -4923,14 +4927,13 @@ describe("SceneWorks app shell", () => {
     });
     await settle();
 
-    expect(container.querySelectorAll(".local-job-group").length).toBe(2);
-    expect(container.querySelectorAll(".local-job-card").length).toBe(2);
+    expect(container.querySelectorAll(".worker-progress-card").length).toBe(2);
     // Running run renders its one finished image alongside its remaining slot.
-    expect(container.querySelector(".review-grid img")?.getAttribute("src")).toContain(
+    expect(container.querySelector(".worker-progress-card__thumb-media")?.getAttribute("src")).toContain(
       "/api/v1/projects/project-1/files/assets/images/generated_0001.png",
     );
-    // Queued run shows its own pending slots while it waits.
-    expect(container.textContent).toContain("Pending #3");
+    // Queued run shows its own pending skeleton slots while it waits.
+    expect(container.querySelectorAll(".worker-progress-card__thumb-cell.skeleton").length).toBeGreaterThan(0);
     expect(container.textContent).not.toContain("No fresh image batch");
   });
 
@@ -4990,8 +4993,9 @@ describe("SceneWorks app shell", () => {
       root.render(withImageStudioContext({ ...baseProps, localJobs: [completedJob, nextJob] }));
     });
     await settle();
-    expect(container.querySelectorAll(".local-job-group").length).toBe(2);
-    expect(container.textContent).toContain("Pending #2");
+    expect(container.querySelectorAll(".worker-progress-card").length).toBe(2);
+    // The queued next run shows skeleton slots for its expected outputs.
+    expect(container.querySelectorAll(".worker-progress-card__thumb-cell.skeleton").length).toBeGreaterThan(0);
 
     // The next run starts: the completed run slides out and the running run remains.
     await act(async () => {
@@ -5003,9 +5007,9 @@ describe("SceneWorks app shell", () => {
       );
     });
     await settle();
-    expect(container.querySelectorAll(".local-job-group").length).toBe(1);
-    expect(container.querySelector(".local-job-card.running")).not.toBeNull();
-    expect(container.querySelector(".local-job-card.completed")).toBeNull();
+    expect(container.querySelectorAll(".worker-progress-card").length).toBe(1);
+    expect(container.querySelector(".worker-progress-card.running")).not.toBeNull();
+    expect(container.querySelector(".worker-progress-card.completed")).toBeNull();
   });
 
   it("submits compatible image LoRAs while capping simple user selections at two", async () => {

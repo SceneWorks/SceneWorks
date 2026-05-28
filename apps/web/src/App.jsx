@@ -557,6 +557,28 @@ export function App() {
   );
   const latestImageAssets = useMemo(() => latestAssets.filter((asset) => asset.type === "image"), [latestAssets]);
   const latestVideoAssets = useMemo(() => latestAssets.filter((asset) => asset.type === "video"), [latestAssets]);
+  // Recent Assets (sc-2088 / sc-2089) — the 20 most recent image/video assets
+  // generated in the active project. Replaces `latestImageAssets`/
+  // `latestVideoAssets` (which only ever showed the latest single generation
+  // set) as the studio "what just came out" list. Sorted newest-first.
+  const recentImageAssets = useMemo(
+    () =>
+      assets
+        .filter((asset) => asset.type === "image" && (!activeProject?.id || asset.projectId === activeProject.id))
+        .slice()
+        .sort(sortNewest)
+        .slice(0, 20),
+    [assets, activeProject?.id],
+  );
+  const recentVideoAssets = useMemo(
+    () =>
+      assets
+        .filter((asset) => asset.type === "video" && (!activeProject?.id || asset.projectId === activeProject.id))
+        .slice()
+        .sort(sortNewest)
+        .slice(0, 20),
+    [assets, activeProject?.id],
+  );
   const imageLocalJobs = useMemo(
     () => buildLocalJobStack(localGenerationJobIds.image, jobs, activeProject?.id, isImageGenerationJob),
     [activeProject?.id, jobs, localGenerationJobIds.image],
@@ -1342,6 +1364,8 @@ export function App() {
     createImageJob,
     refinePrompt,
     latestVideoAssets,
+    recentImageAssets,
+    recentVideoAssets,
     videoLocalJobs,
     imageLocalJobs,
     documentLocalJobs,

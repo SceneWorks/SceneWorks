@@ -6782,6 +6782,18 @@ label {
   gap: 8px;
 }
 
+.worker-progress-card__message {
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.45;
+  color: var(--text-muted);
+  overflow-wrap: anywhere;
+}
+
+.worker-progress-card__message.error {
+  color: var(--danger);
+}
+
 @media (max-width: 480px) {
   .worker-progress-card__title-row {
     grid-template-columns: 1fr;
@@ -6902,4 +6914,26 @@ label {
   background: color-mix(in oklch, var(--surface-2) 80%, transparent);
   font-size: 11px;
   cursor: pointer;
+}
+
+/* Stacked WorkerProgressCards in Image/Video Studio (sc-2088 / sc-2089).
+   The stack wraps active jobs; Recent Assets renders below it. */
+.worker-progress-card-stack {
+  display: grid;
+  gap: 12px;
+}
+
+.recent-assets {
+  display: grid;
+  gap: 10px;
+  margin-top: 16px;
+}
+
+.recent-assets__title {
+  margin: 0;
+  font-size: 13px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--text-muted);
 }

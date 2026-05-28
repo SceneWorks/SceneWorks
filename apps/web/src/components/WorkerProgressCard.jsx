@@ -389,6 +389,11 @@ export function WorkerProgressCard({
         ) : null}
       </div>
       <ProgressBar status={job.status} progress={job.progress} />
+      {job.error || job.message ? (
+        <p className={`worker-progress-card__message${job.error ? " error" : ""}`}>
+          {job.error ?? job.message}
+        </p>
+      ) : null}
       <div className="worker-progress-card__actions">
         {canCancel ? (
           <button
