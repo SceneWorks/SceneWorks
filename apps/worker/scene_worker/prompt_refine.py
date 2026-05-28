@@ -18,10 +18,12 @@ from .image_adapters import (
     select_torch_dtype,
 )
 
-# Default refinement model: a small, uncensored instruction LLM suitable for
-# unrestricted creative prompt rewriting on modest local hardware. Overridable
-# via PROMPT_REFINE_MODEL. Downloaded on demand (HF cache), like JoyCaption.
-DEFAULT_REFINE_MODEL = "llmfan46/gemma-4-E2B-it-ultra-uncensored-heretic"
+# Default refinement model: a small, text-only, uncensored (abliterated)
+# instruction LLM. Loads via AutoModelForCausalLM on any recent transformers
+# (model_type "llama"), unlike multimodal models that need a processor + an
+# image-text-to-text class. Overridable via PROMPT_REFINE_MODEL; downloaded on
+# demand (HF cache), like JoyCaption. NOTE: point this only at text causal LMs.
+DEFAULT_REFINE_MODEL = "huihui-ai/Llama-3.2-3B-Instruct-abliterated"
 
 
 class PromptRefineError(RuntimeError):
