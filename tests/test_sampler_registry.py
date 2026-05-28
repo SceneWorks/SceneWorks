@@ -9,6 +9,7 @@ and an `__init__` signature whose accepted params govern feature detection.
 from __future__ import annotations
 
 import inspect
+import math
 import sys
 from types import ModuleType, SimpleNamespace
 from typing import Any
@@ -91,6 +92,16 @@ class FlowMatchHeunDiscreteScheduler(_StubScheduler):
             use_dynamic_shifting=use_dynamic_shifting,
         )
 
+    def set_timesteps(
+        self,
+        num_inference_steps: int,
+        device: Any = None,
+    ) -> None:
+        # Mirrors the real diffusers signature: no `mu`, no `**kwargs`.
+        # Without the registry's mu-absorbing shim, a flow pipeline forwarding
+        # `mu=…` through retrieve_timesteps would TypeError here.
+        self.config.num_inference_steps = num_inference_steps  # type: ignore[union-attr]
+
 
 class DPMSolverMultistepScheduler(_StubScheduler):
     def __init__(
@@ -102,6 +113,7 @@ class DPMSolverMultistepScheduler(_StubScheduler):
         use_karras_sigmas: bool = False,
         use_exponential_sigmas: bool = False,
         use_beta_sigmas: bool = False,
+        use_dynamic_shifting: bool = False,
     ) -> None:
         super().__init__(
             num_train_timesteps=num_train_timesteps,
@@ -110,7 +122,19 @@ class DPMSolverMultistepScheduler(_StubScheduler):
             use_karras_sigmas=use_karras_sigmas,
             use_exponential_sigmas=use_exponential_sigmas,
             use_beta_sigmas=use_beta_sigmas,
+            use_dynamic_shifting=use_dynamic_shifting,
         )
+
+    def set_timesteps(
+        self,
+        num_inference_steps: int | None = None,
+        device: Any = None,
+        sigmas: Any = None,
+        mu: float | None = None,
+    ) -> None:
+        # Mirrors real diffusers DPMSolver: mu requires use_dynamic_shifting.
+        if mu is not None:
+            assert self.config.use_dynamic_shifting  # type: ignore[union-attr]
 
 
 class UniPCMultistepScheduler(_StubScheduler):
@@ -120,12 +144,26 @@ class UniPCMultistepScheduler(_StubScheduler):
         num_train_timesteps: int = 1000,
         use_flow_sigmas: bool = False,
         use_karras_sigmas: bool = False,
+        use_dynamic_shifting: bool = False,
     ) -> None:
         super().__init__(
             num_train_timesteps=num_train_timesteps,
             use_flow_sigmas=use_flow_sigmas,
             use_karras_sigmas=use_karras_sigmas,
+            use_dynamic_shifting=use_dynamic_shifting,
         )
+
+    def set_timesteps(
+        self,
+        num_inference_steps: int | None = None,
+        device: Any = None,
+        sigmas: Any = None,
+        mu: float | None = None,
+    ) -> None:
+        # Mirrors real diffusers UniPC: complains only if dyn-shift requested
+        # without mu. Accepts mu silently in either configuration.
+        if self.config.use_dynamic_shifting and mu is None:  # type: ignore[union-attr]
+            raise ValueError("mu required when use_dynamic_shifting=True")
 
 
 class OldHeunScheduler(_StubScheduler):
@@ -219,11 +257,83 @@ def test_dpmpp_pins_flow_mode_overrides(fake_diffusers: ModuleType) -> None:
     assert pipe.scheduler.config.prediction_type == "flow_prediction"
 
 
+def test_dpmpp_pins_use_dynamic_shifting_for_mu_compat(
+    fake_diffusers: ModuleType,
+) -> None:
+    """The flow pipelines (Z-Image/Qwen/FLUX) forward ``mu`` through
+    ``retrieve_timesteps`` to ``set_timesteps``. DPMSolver asserts on
+    ``mu is not None`` requiring ``use_dynamic_shifting=True``. Regression
+    guard for the Windows/CUDA finding on PR #312."""
+    pipe = _make_default_pipe()
+    # Source FlowMatchEuler has use_dynamic_shifting=False — must NOT carry
+    # over; the dpmpp swap must force it on.
+    assert pipe.scheduler.config.use_dynamic_shifting is False
+    apply_sampler(pipe, "dpmpp", "default")
+    assert pipe.scheduler.config.use_dynamic_shifting is True
+    # And the call-site that takes mu must not raise.
+    pipe.scheduler.set_timesteps(num_inference_steps=8, mu=0.7)
+
+
 def test_unipc_pins_flow_sigmas(fake_diffusers: ModuleType) -> None:
     pipe = _make_default_pipe()
     apply_sampler(pipe, "unipc", "default")
     assert isinstance(pipe.scheduler, UniPCMultistepScheduler)
     assert pipe.scheduler.config.use_flow_sigmas is True
+
+
+def test_unipc_pins_use_dynamic_shifting_for_mu_compat(
+    fake_diffusers: ModuleType,
+) -> None:
+    """UniPC accepts ``mu`` silently regardless of ``use_dynamic_shifting``,
+    but with the flag off it discards mu and the trained dynamic shift never
+    lands. Pinning the flag matches diffusers' intent."""
+    pipe = _make_default_pipe()
+    apply_sampler(pipe, "unipc", "default")
+    assert pipe.scheduler.config.use_dynamic_shifting is True
+    # mu kwarg is accepted with the flag on.
+    pipe.scheduler.set_timesteps(num_inference_steps=8, mu=0.7)
+
+
+def test_heun_mu_shim_absorbs_mu_into_static_shift(
+    fake_diffusers: ModuleType,
+) -> None:
+    """FlowMatchHeun's ``set_timesteps(num_inference_steps, device=None)``
+    has no ``mu`` kwarg in diffusers 0.39+. The registry installs an
+    instance-level shim that translates ``mu`` -> static ``shift = exp(mu)``
+    and forwards without the kwarg. Regression guard for the Windows/CUDA
+    Heun TypeError on PR #312."""
+    pipe = _make_default_pipe()
+    result = apply_sampler(pipe, "heun", "default")
+    assert result["muShimInstalled"] is True
+    # The pipeline-forwarded mu must not raise, and must update config.shift
+    # via the exp(mu) translation so the trained dynamic shift still lands.
+    pipe.scheduler.set_timesteps(num_inference_steps=8, mu=0.7)
+    assert pipe.scheduler.config.shift == pytest.approx(math.exp(0.7))
+
+
+def test_dpmpp_unipc_do_not_get_a_mu_shim(fake_diffusers: ModuleType) -> None:
+    """DPMSolver and UniPC accept ``mu`` natively (once dynamic-shifting is
+    pinned). No shim should install for them."""
+    for sampler in ("dpmpp", "unipc"):
+        pipe = _make_default_pipe()
+        result = apply_sampler(pipe, sampler, "default")
+        assert result["muShimInstalled"] is False, sampler
+
+
+def test_mu_shim_is_idempotent_across_repeat_apply(
+    fake_diffusers: ModuleType,
+) -> None:
+    """A second apply_sampler call on the same dirty pipe must not stack
+    shims — the first shim's ``_sceneworks_mu_shim`` sentinel blocks rewrap."""
+    pipe = _make_default_pipe()
+    apply_sampler(pipe, "heun", "default")
+    first_shim = pipe.scheduler.set_timesteps
+    apply_sampler(pipe, "heun", "simple")
+    # New scheduler instance from the second apply gets its own first-time shim.
+    assert pipe.scheduler.set_timesteps is not first_shim
+    # And the shim is still functional on the new instance.
+    pipe.scheduler.set_timesteps(num_inference_steps=4, mu=1.2)
+    assert pipe.scheduler.config.shift == pytest.approx(math.exp(1.2))
 
 
 def test_karras_sigma_flag_is_threaded_when_supported(
