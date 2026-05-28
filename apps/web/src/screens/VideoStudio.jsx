@@ -1,4 +1,5 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
+import { pickClosestResolution } from "../resolutionMatch.js";
 import { AssetPickerField } from "../components/AssetPicker.jsx";
 import { AssetCard } from "../components/assetPanels.jsx";
 import { AssetMedia, assetCanRenderAsVideo } from "../components/assetMedia.jsx";
@@ -381,6 +382,28 @@ export function VideoStudio() {
       return options.includes(Number(current)) ? current : selectedModel.defaults?.fps ?? options[0];
     });
   }, [selectedModel?.id]);
+
+  // I2V: when the user picks a source image (or first/last frame) after mount,
+  // snap resolution to whichever option in the model's list best matches the
+  // image's aspect ratio. The ref tracks the last-seen id so polling-driven
+  // assets refreshes don't re-fire, and so the saved snapshot's resolution is
+  // preserved when the asset id is just being restored on mount.
+  const i2vSourceAssetId = sourceAssetId || lastFrameAssetId;
+  const lastI2vAssetIdRef = useRef(i2vSourceAssetId);
+  useEffect(() => {
+    if (i2vSourceAssetId === lastI2vAssetIdRef.current) {
+      return;
+    }
+    lastI2vAssetIdRef.current = i2vSourceAssetId;
+    if (!i2vSourceAssetId) return;
+    if (!["image_to_video", "first_last_frame"].includes(mode)) return;
+    const asset = assets.find((item) => item.id === i2vSourceAssetId);
+    const width = asset?.file?.width;
+    const height = asset?.file?.height;
+    if (!width || !height) return;
+    const match = pickClosestResolution(width, height, selectedModel?.limits?.resolutions);
+    if (match) setResolution(match);
+  }, [i2vSourceAssetId, mode, selectedModel?.id, assets]);
 
   useEffect(() => {
     if (mode !== "replace_person" || supportsMode) {
