@@ -2274,6 +2274,7 @@ describe("SceneWorks app shell", () => {
         advanced: expect.objectContaining({
           ipAdapterScale: 0.8,
           poses: [{ id: "standing_01", keypoints: poseKeypoints }],
+          faceRestore: true,
         }),
       }),
     );
