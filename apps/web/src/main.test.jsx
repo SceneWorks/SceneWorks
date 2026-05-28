@@ -4867,7 +4867,7 @@ describe("SceneWorks app shell", () => {
     });
     await settle();
 
-    expect(container.querySelector(".local-job-card")).toBeNull();
+    expect(container.querySelector(".worker-progress-card")).toBeNull();
     expect(container.querySelector(".review-placeholder")).toBeNull();
     expect(container.textContent).not.toContain("Canceled #");
     expect(container.textContent).toContain("No fresh image batch");

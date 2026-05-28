@@ -1,10 +1,26 @@
-import React, { useMemo } from "react";
-import { useLiveJobElapsedSeconds } from "./JobProgress.jsx";
+import React, { useEffect, useMemo, useState } from "react";
 import { actionStatuses, terminalStatuses } from "../jobTypes.js";
-import { formatSeconds, percent } from "../formatting.js";
+import { formatSeconds, liveElapsedSeconds, percent } from "../formatting.js";
 import { useAppContext } from "../context/AppContext.js";
 import { deriveWorkerHardware, findWorkerForJob, liveMeters } from "../workers.js";
 import { AssetMedia, AssetThumbnail, assetUrl, posterUrl } from "./assetMedia.jsx";
+
+// Live-ticking elapsed seconds for in-flight jobs. Re-exported here after the
+// sc-2093 cleanup deleted the legacy JobProgress.jsx that originally housed it.
+export function useLiveJobElapsedSeconds(job) {
+  const active = !terminalStatuses.has(job.status) && Boolean(job.startedAt);
+  const [nowMs, setNowMs] = useState(() => Date.now());
+
+  useEffect(() => {
+    if (!active) {
+      return undefined;
+    }
+    const timer = window.setInterval(() => setNowMs(Date.now()), 1000);
+    return () => window.clearInterval(timer);
+  }, [active, job.startedAt]);
+
+  return liveElapsedSeconds(job, nowMs);
+}
 
 // WorkerProgressCard — unified worker/job progress component (sc-2083).
 // Renders the same 6-row skeleton everywhere (Image Studio, Video Studio,

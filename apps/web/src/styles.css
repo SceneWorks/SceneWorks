@@ -805,7 +805,6 @@ label {
 .form-row button,
 .queue-chip,
 .job-composer button,
-.job-actions button,
 .editor-actions button,
 .timeline-create button,
 .playback-bar button,
@@ -849,7 +848,6 @@ label {
 .form-row button:hover:not(:disabled),
 .queue-chip:hover:not(:disabled),
 .job-composer button:hover:not(:disabled),
-.job-actions button:hover:not(:disabled),
 .editor-actions button:hover:not(:disabled),
 .timeline-create button:hover:not(:disabled),
 .playback-bar button:hover:not(:disabled),
@@ -1668,7 +1666,6 @@ label {
 .training-empty-state,
 .training-panel,
 .training-live-panel,
-.training-live-card,
 .training-dataset-row,
 .training-step-block,
 .training-dataset-list-panel,
@@ -1757,23 +1754,24 @@ label {
   padding: 14px;
 }
 
-.training-live-title,
-.training-live-head,
-.training-live-meta {
+/* .training-live-title remains because TrainingStudio.jsx still renders it as the
+   panel's heading row. .training-live-head / .training-live-meta /
+   .training-live-card / .training-sample-grid / .training-sample-tile were all
+   removed in sc-2093 — the WorkerProgressCard absorbs them. */
+
+.training-live-title {
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: 12px;
 }
 
-.training-live-title h3,
-.training-live-head h3 {
+.training-live-title h3 {
   margin: 2px 0 0;
   font-size: 16px;
 }
 
-.training-live-title > span,
-.training-live-meta {
+.training-live-title > span {
   color: var(--text-muted);
   font-size: 12px;
 }
@@ -1781,56 +1779,6 @@ label {
 .training-live-list {
   display: grid;
   gap: 10px;
-}
-
-.training-live-card {
-  display: grid;
-  gap: 10px;
-  min-width: 0;
-  padding: 12px;
-  background: var(--surface);
-}
-
-.training-sample-grid {
-  display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
-  gap: 8px;
-}
-
-.training-sample-tile {
-  display: grid;
-  gap: 6px;
-  min-width: 0;
-}
-
-.training-sample-tile img,
-.training-sample-tile > span {
-  width: 100%;
-  aspect-ratio: 1;
-  border: 1px solid var(--border);
-  border-radius: var(--r-sm);
-  background: var(--surface-2);
-}
-
-.training-sample-tile img {
-  object-fit: cover;
-  display: block;
-}
-
-.training-sample-tile > span {
-  display: grid;
-  place-items: center;
-  color: var(--text-muted);
-  font-size: 12px;
-  font-weight: 700;
-}
-
-.training-sample-tile small {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  color: var(--text-muted);
-  font-size: 11px;
 }
 
 .training-panel {
@@ -3227,64 +3175,10 @@ label {
   gap: 10px;
 }
 
-.local-job-card {
-  display: grid;
-  gap: 12px;
-  border: 1px solid var(--border);
-  background: var(--surface-2);
-  border-radius: var(--r-md);
-  padding: 12px;
-  min-width: 0;
-}
-
-.local-job-card.failed,
-.local-job-card.canceled,
-.local-job-card.interrupted {
-  border-color: color-mix(in oklch, var(--danger) 45%, var(--border));
-  background: var(--danger-soft);
-}
-
-.local-job-main {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
-  gap: 10px 12px;
-  align-items: start;
-}
-
-.local-job-main > div {
-  min-width: 0;
-}
-
-.local-job-main h3 {
-  display: -webkit-box;
-  -webkit-box-orient: vertical;
-  -webkit-line-clamp: 2;
-  overflow: hidden;
-  margin: 0;
-  font-size: 15px;
-  font-weight: 600;
-  line-height: 1.35;
-  overflow-wrap: anywhere;
-}
-
-.local-job-card .job-meta {
-  gap: 6px;
-}
-
-.local-job-card .job-meta span {
-  min-width: 0;
-  padding: 4px 8px;
-  border: 1px solid var(--border);
-  border-radius: var(--r-pill);
-  background: var(--surface);
-  line-height: 1.35;
-  overflow-wrap: anywhere;
-}
-
-.local-job-card .job-message {
-  line-height: 1.45;
-  overflow-wrap: anywhere;
-}
+/* Legacy .local-job-card / .local-job-main / .job-message / .local-job-actions
+   blocks were removed in sc-2093 — the WorkerProgressCard owns all of that now.
+   The .local-job-group and .local-job-stack wrappers are kept because Image,
+   Video, Training, and Document studios still use them as the stack container. */
 
 .secondary-action {
   justify-self: start;
@@ -3300,12 +3194,6 @@ label {
 
 .secondary-action.danger:hover:not(:disabled) {
   background: var(--danger-soft);
-}
-
-.local-job-actions {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 8px;
 }
 
 .status-badge {
@@ -5780,8 +5668,7 @@ label {
 }
 
 .worker-card,
-.empty-panel,
-.job-row {
+.empty-panel {
   border: 1px solid var(--border);
   background: var(--surface);
   border-radius: var(--r-md);
@@ -5903,35 +5790,11 @@ label {
   color: var(--text);
 }
 
-.job-row {
-  display: grid;
-  gap: 10px;
-  padding: 14px;
-}
-
-.job-main,
-.job-meta,
-.job-actions {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 10px;
-  align-items: center;
-}
-
-.job-main {
-  justify-content: space-between;
-}
-
-.job-main h3 {
-  margin: 0;
-  font-size: 15px;
-  font-weight: 600;
-}
-
-.job-meta {
-  color: var(--text-muted);
-  font-size: 12px;
-}
+/* Legacy .job-row / .job-main / .job-meta / .job-actions / .job-message and the
+   .job-row.<status> status-badge overrides were removed in sc-2093 — the
+   WorkerProgressCard handles all per-row layout + status styling now. The
+   shared .progress-track primitive is kept because the WorkerProgressCard
+   still composes its progress bar on top of it. */
 
 .progress-track {
   height: 8px;
@@ -5948,31 +5811,8 @@ label {
   transition: width 180ms ease;
 }
 
-.job-message {
-  margin: 0;
-  color: var(--text-muted);
-  font-size: 13px;
-}
-
 .error-text {
   color: var(--danger);
-}
-
-.job-row.completed .status-badge {
-  color: var(--accent-strong);
-  background: var(--accent-soft);
-  border-color: transparent;
-}
-
-[data-theme="dark"] .job-row.completed .status-badge {
-  color: var(--accent);
-}
-
-.job-row.failed .status-badge,
-.job-row.interrupted .status-badge {
-  color: var(--danger);
-  background: var(--danger-soft);
-  border-color: color-mix(in oklch, var(--danger) 35%, transparent);
 }
 
 /* ---------- Inline create rows ---------- */
@@ -6063,7 +5903,6 @@ label {
   .training-config-preview,
   .training-config-grid,
   .training-advanced-grid,
-  .training-sample-grid,
   .training-caption-workspace,
   .training-caption-toolbar,
   .training-caption-row,
