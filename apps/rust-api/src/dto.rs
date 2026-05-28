@@ -25,6 +25,10 @@ pub(crate) struct PromptRefineRequest {
 pub(crate) struct AssetsQuery {
     pub(crate) include_rejected: Option<bool>,
     pub(crate) include_trashed: Option<bool>,
+    /// Scope to one character: assets generated in association with it
+    /// (recipe.normalizedSettings.characterId) or referencing it
+    /// (metadata.characterReferences[].characterId).
+    pub(crate) character_id: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
