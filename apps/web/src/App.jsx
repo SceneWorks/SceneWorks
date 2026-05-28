@@ -26,6 +26,7 @@ import { usePersonTracks } from "./hooks/usePersonTracks.js";
 import { useTimelines } from "./hooks/useTimelines.js";
 import { AppContext } from "./context/AppContext.js";
 import { findFoldedAssetById, foldUpscaledAssetVariants } from "./assetVariants.js";
+import { buildWorkersById } from "./workers.js";
 
 // Desktop (Tauri) shell detection. The first-run setup wizard is desktop-only;
 // web/Docker keep the existing first-run project gate. Tauri commands persist the
@@ -596,6 +597,9 @@ export function App() {
     () => workers.filter((worker) => isActiveWorker(worker) && !isPlaceholderOnlyGpuWorker(worker)),
     [workers],
   );
+  // O(1) lookup by worker.id so every WorkerProgressCard consumer reads live
+  // worker state without rebuilding the map per screen (sc-2082).
+  const workersById = useMemo(() => buildWorkersById(workers), [workers]);
   // Person-workflow readiness, derived from the live (non-offline) workers so it
   // tracks SSE worker registration/offline transitions instantly. Mirrors the
   // server's GET /api/v1/capabilities/person (person_readiness_from_workers); the
@@ -1332,6 +1336,7 @@ export function App() {
     setProjectFilter,
     projects,
     visibleWorkers,
+    workersById,
     // Generation studios (sc-1651 Phase B batch 3)
     createVideoJob,
     createImageJob,
