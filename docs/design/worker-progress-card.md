@@ -128,14 +128,30 @@ Variant chosen by the consumer via prop `thumbnailsVariant`:
 
 **Thumbnail sourcing:**
 
-- Final assets: `job.result.assets` (existing)
-- Interim previews while running: `job.interimThumbnails[]` streamed via heartbeat (see sc-2085)
-- All thumbnails clickable → existing full-asset modal/route
+- Final assets: `job.result.assets` (existing).
+- Interim previews while running: arrive through the same `job.result.assets` / `assetIds` channel — see [In-progress thumbnail streaming](#in-progress-thumbnail-streaming-sc-2085) for how this actually works in the pipeline.
+- All thumbnails clickable → existing full-asset modal/route.
 
 **Empty states:**
 
-- `image-grid`, `small-row`: while job is `queued` show a placeholder skeleton row matching the expected output count if known (`payload.batchSize`); otherwise show a single shimmering tile
-- `video-player`: poster placeholder with a small overlay icon
+- `image-grid`, `small-row`: while job is `queued` show a placeholder skeleton row matching the expected output count if known (`payload.batchSize`); otherwise show a single shimmering tile.
+- `video-player`: poster placeholder with a small overlay icon.
+
+### In-progress thumbnail streaming (sc-2085)
+
+Image batches stream thumbnails as the run progresses — a 4-image batch lights up as `[●, ▱, ▱, ▱] → [●, ●, ▱, ▱] → … → [●, ●, ●, ●]` over the course of the job, with skeleton cells holding the empty slots. The card never needs a separate `job.interimThumbnails[]` transport because the existing per-asset streaming flow already satisfies the spec's "heartbeat-emitted interim previews" requirement:
+
+1. **Worker** saves each completed batch image as a sidecar **as soon as it's written** and emits an `assetWrites` fact in the next `progress()` call's `result` payload.
+2. **API** (`apps/rust-api/src/jobs.rs::persist_reported_assets`) materializes those facts into real `AssetSidecar` rows, then re-injects them into `result.assets` / `result.assetIds` so the snapshot carries the resolved records.
+3. **SSE** emits `job.updated` with the new snapshot. The frontend `jobs` store updates and every `WorkerProgressCard` with `thumbnailsVariant="image-grid"` re-renders, showing the new thumbnail alongside any remaining skeleton cells (skeleton count = `expectedThumbnailCount` − resolved thumbnails).
+4. **Training samples** ride the same shape via `result.latestTrainingSamples`; the card's `trainingSampleAssets` helper translates each sample into an asset-shaped record so it goes through `AssetThumbnail` exactly like a batch image.
+
+Existing test coverage:
+- `apps/web/src/main.test.jsx::shows completed image batch items before the whole job finishes`
+- `apps/web/src/main.test.jsx::reconstructs running image batch slots from partial asset records`
+- `apps/web/src/main.test.jsx::shows active training progress with live sample previews`
+
+A separate "per-denoising-step preview of a single image" (showing the partial latent at step N before the full image is saved) is **not** in scope. If we want that later it needs a decode-latent-to-jpeg call inside the diffusion loop and a transient storage slot — that's a polish slice for a future story, not part of sc-2085.
 
 ## Job Title rules
 
