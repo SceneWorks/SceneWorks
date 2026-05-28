@@ -1,20 +1,28 @@
-"""Out-of-process FLUX.1 image generation runner via mflux (Apple MLX).
+"""Out-of-process mflux (Apple MLX) image generation runner.
 
-Executed by `scene_worker.image_adapters.MlxFluxAdapter` via the dedicated
-mflux sidecar venv (`/opt/mlx-flux-venv`) — NOT the main worker venv. mflux
-hard-requires transformers>=5 + huggingface_hub>=1, which conflict with the
-main worker stack (transformers 4.57.x + huggingface_hub<1) that native LTX-2.3
-and the existing diffusers FluxPipeline path depend on. So mflux runs isolated
-here, mirroring the Lens sidecar pattern (lens_runner.py / LensTurboAdapter).
+Executed by the sidecar-orchestrating adapters in
+`scene_worker.image_adapters` (`MlxFluxAdapter`, `MlxQwenAdapter`, …) via the
+dedicated mflux sidecar venv (`/opt/mlx-flux-venv`) — NOT the main worker venv.
+mflux hard-requires transformers>=5 + huggingface_hub>=1, which conflict with
+the main worker stack (transformers 4.57.x + huggingface_hub<1) that native
+LTX-2.3 and the existing diffusers FluxPipeline / QwenImagePipeline paths
+depend on. So mflux runs isolated here, mirroring the Lens sidecar pattern
+(lens_runner.py / LensTurboAdapter).
+
+The file is named `mlx_flux_runner.py` because FLUX was the first family wired
+up (sc-1970); the runner is intentionally general across the mflux model
+catalog (sc-1972 added Qwen-Image; Z-Image / FIBO / FLUX.2 follow the same
+template). Adding a new mflux family is a one-arm extension to
+``_resolve_model_handle``.
 
 Contract: argv[1] is a path to a JSON spec; the runner writes one PNG per seed
 into spec["outDir"] and prints a single result JSON object to stdout:
-    {"images": ["<outDir>/mlx_flux_0000.png", ...]}
+    {"images": ["<outDir>/mlx_<family>_0000.png", ...]}
 Progress and diagnostics go to stderr (captured into the worker log). A non-zero
 exit code with an "error" JSON on stdout signals failure to the adapter.
 
 Spec keys:
-    model: "flux_schnell" | "flux_dev" — picks ModelConfig.schnell()/.dev()
+    model: e.g. "flux_schnell" | "flux_dev" | "qwen_image"
     prompt: str
     negativePrompt: str | None
     seeds: list[int]
@@ -26,7 +34,7 @@ Spec keys:
     loras: list[{"path": str, "weight": float, "name": str}]
     outDir: str (sidecar writes PNGs + result.json here)
 
-Validated 2026-05-28 against mflux 0.17.5 (sc-1969 spike).
+Validated 2026-05-28 against mflux 0.17.5 (sc-1969 FLUX spike, sc-1972 Qwen verify).
 """
 from __future__ import annotations
 
@@ -40,18 +48,29 @@ def _log(message: str) -> None:
     sys.stderr.flush()
 
 
-def _resolve_model_config(model_id: str):
-    """Map a SceneWorks model id onto an mflux ModelConfig factory.
+def _resolve_model_handle(model_id: str) -> tuple[type, object, str]:
+    """Map a SceneWorks model id onto an mflux (class, ModelConfig, filename_prefix).
 
-    mflux exposes one factory per FLUX variant on `ModelConfig`; this mapping
-    must match the `_supported_models` set in `MlxFluxAdapter`.
+    Each branch instantiates an mflux txt2img class for one model family and
+    returns it alongside a `ModelConfig` factory and the per-image filename
+    prefix used in `outDir`. Both classes expose the same
+    `(quantize, model_config, lora_paths, lora_scales)` constructor and the
+    same `generate_image(seed, prompt, num_inference_steps, height, width,
+    guidance, negative_prompt, ...)` keyword interface (mflux 0.17.5), so the
+    main loop is family-agnostic. Keep this map in sync with the
+    `_supported_models` sets in the corresponding adapters.
     """
     from mflux.models.common.config.model_config import ModelConfig
 
     if model_id == "flux_schnell":
-        return ModelConfig.schnell()
+        from mflux.models.flux.variants.txt2img.flux import Flux1
+        return Flux1, ModelConfig.schnell(), "mlx_flux"
     if model_id == "flux_dev":
-        return ModelConfig.dev()
+        from mflux.models.flux.variants.txt2img.flux import Flux1
+        return Flux1, ModelConfig.dev(), "mlx_flux"
+    if model_id == "qwen_image":
+        from mflux.models.qwen.variants.txt2img.qwen_image import QwenImage
+        return QwenImage, ModelConfig.qwen_image(), "mlx_qwen"
     raise RuntimeError(f"mlx_flux_runner: unsupported model id {model_id!r}.")
 
 
@@ -79,10 +98,8 @@ def main() -> int:
     result_path = out_dir / "result.json"
 
     # Heavy imports deferred until the spec is valid: a bad spec fails cleanly
-    # before mflux loads MLX + the 23GB FLUX transformer.
-    from mflux.models.flux.variants.txt2img.flux import Flux1
-
-    model_config = _resolve_model_config(model_id)
+    # before mflux loads MLX + the multi-GB transformer.
+    model_cls, model_config, filename_prefix = _resolve_model_handle(model_id)
 
     lora_paths: list[str] = []
     lora_scales: list[float] = []
@@ -98,23 +115,23 @@ def main() -> int:
         lora_scales.append(scale)
 
     _log(
-        f"loading Flux1 model={model_id} quantize={quantize} "
+        f"loading {model_cls.__name__} model={model_id} quantize={quantize} "
         f"loras={len(lora_paths)} steps={steps} guidance={guidance}"
     )
-    flux = Flux1(
+    model = model_cls(
         quantize=quantize,
         lora_paths=lora_paths or None,
         lora_scales=lora_scales or None,
         model_config=model_config,
     )
-    _log("Flux1 loaded; entering generation loop")
+    _log(f"{model_cls.__name__} loaded; entering generation loop")
 
     images: list[str] = []
     for index, seed in enumerate(seeds):
         # mflux 0.17.5 generate_image() takes per-call kwargs; older 0.12.x
         # took a Config object. Pin in requirements-mlx-flux.txt anchors us
         # to the kwargs form.
-        result = flux.generate_image(
+        result = model.generate_image(
             seed=int(seed),
             prompt=prompt,
             num_inference_steps=steps,
@@ -123,7 +140,7 @@ def main() -> int:
             guidance=guidance,
             negative_prompt=negative_prompt,
         )
-        path = out_dir / f"mlx_flux_{index:04d}.png"
+        path = out_dir / f"{filename_prefix}_{index:04d}.png"
         result.image.save(path, "PNG")
         images.append(str(path))
         _log(f"generated image {index + 1}/{len(seeds)} -> {path}")

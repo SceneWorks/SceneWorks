@@ -149,6 +149,24 @@
         "families": ["qwen-image"],
         "types": ["style", "enhance", "character"]
       },
+      // macOS-only MLX backend (sc-1972, riding on the sc-1970 mflux sidecar
+      // venv at /opt/mlx-flux-venv). Selected by the worker auto-dispatch
+      // when the sidecar is installed, the job is plain T2I, and no reference
+      // asset is present; otherwise the torch QwenImageAdapter remains the
+      // default. mflux's generate loop is sealed on "linear" — override the
+      // sampler/scheduler menu to default-only when the MLX backend is the
+      // active path (epic 1753 §14, mirrors the wan_2_2 precedent).
+      // minMemoryGb mirrors the sc-1972 verify measurement (Q8 1024² peak
+      // ~66 GB on M5 Max); Q4 brings this within 64 GB-Mac reach via the
+      // advanced.mlxQuantize override.
+      "mlx": {
+        "minMemoryGb": 50,
+        "quantize": 8,
+        "limits": {
+          "samplers": ["default"],
+          "schedulers": ["default"]
+        }
+      },
       "ui": {
         "label": "Qwen Image",
         "description": "Higher-control Qwen text-to-image target backed by Diffusers.",

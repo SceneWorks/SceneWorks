@@ -22,6 +22,7 @@ from .image_adapters import (
     KolorsDiffusersAdapter,
     LensTurboAdapter,
     MlxFluxAdapter,
+    MlxQwenAdapter,
     ProceduralImageAdapter,
     QwenImageAdapter,
     SdxlDiffusersAdapter,
@@ -1404,6 +1405,7 @@ def run_worker_loop(settings: WorkerSettings) -> None:
     image_adapters: dict[str, object] = {
         "procedural_preview": ProceduralImageAdapter(),
         "qwen_image": QwenImageAdapter(),
+        "mlx_qwen": MlxQwenAdapter(),
         "z_image_diffusers": ZImageDiffusersAdapter(),
         "lens_turbo": LensTurboAdapter(),
         "sensenova_u1": SenseNovaU1Adapter(),
