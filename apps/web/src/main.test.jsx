@@ -4196,16 +4196,16 @@ describe("SceneWorks app shell", () => {
     });
     await settle();
 
-    expect(container.textContent).toContain("queued");
+    expect(container.textContent).toContain("Queued");
 
     await act(async () => {
-      [...container.querySelectorAll(".job-actions button")].find((button) => button.textContent === "Cancel").click();
+      [...container.querySelectorAll(".worker-progress-card__actions button")].find((button) => button.textContent === "Cancel").click();
     });
     await settle();
 
-    expect(container.textContent).toContain("canceled");
+    expect(container.textContent).toContain("Cancelled");
     expect(container.textContent).toContain("Canceled before a worker started.");
-    expect(container.textContent).not.toContain("queued");
+    expect(container.textContent).not.toContain("Queued");
     expect(container.textContent).not.toContain("Waiting for an available GPU worker.");
   });
 
@@ -4280,7 +4280,7 @@ describe("SceneWorks app shell", () => {
     await settle();
 
     await act(async () => {
-      [...container.querySelectorAll(".job-actions button")].find((button) => button.textContent === "Retry").click();
+      [...container.querySelectorAll(".worker-progress-card__actions button")].find((button) => button.textContent === "Retry").click();
       await Promise.resolve();
     });
     await act(async () => {
