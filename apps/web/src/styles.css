@@ -6469,9 +6469,9 @@ label {
 
 .worker-progress-card__hardware {
   display: flex;
-  flex-wrap: wrap;
-  gap: 8px 12px;
-  align-items: center;
+  flex-direction: column;
+  gap: 6px;
+  align-items: stretch;
 }
 
 .worker-progress-card__hw-pills {
@@ -6513,19 +6513,16 @@ label {
 }
 
 .worker-progress-card__meters {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 10px;
-  flex: 1 1 240px;
-  min-width: 200px;
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 4px;
 }
 
 .worker-progress-card__meter {
   display: grid;
   grid-template-columns: auto 1fr auto;
   align-items: center;
-  gap: 6px;
-  flex: 1 1 120px;
+  gap: 8px;
   font-size: 11px;
   color: var(--text-muted);
 }
@@ -6567,14 +6564,16 @@ label {
 .worker-progress-card__status-row {
   display: flex;
   flex-wrap: wrap;
-  gap: 6px 14px;
-  font-size: 12px;
+  gap: 4px 16px;
+  font-size: 12.5px;
+  align-items: baseline;
 }
 
 .worker-progress-card__status-row > span {
   display: inline-flex;
-  flex-direction: column;
-  gap: 2px;
+  flex-direction: row;
+  align-items: baseline;
+  gap: 6px;
   min-width: 0;
 }
 
