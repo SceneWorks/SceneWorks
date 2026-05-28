@@ -13,11 +13,13 @@ Unlike IP-Adapter models (Kolors, SDXL, FLUX), Qwen-Image-Edit doesn't blend a r
 - **Qwen2.5-VL** for visual *semantics* (who the subject is, what the scene contains)
 - **VAE encoder** for visual *appearance* (color, texture, lighting)
 
-The diffusion then renders the prompt while both encoders steer toward the reference. The variation knob is `trueCfgScale` rather than a reference-strength slider:
+The diffusion then renders the prompt while both encoders steer toward the reference. The slider is `trueCfgScale` (labeled **"Prompt strength"** in the picker) — and it does **not** trade identity for variation. The sc-2013 hardware spike measured ArcFace cosine 0.81 / 0.82 / 0.82 at trueCfgScale 2 / 4 / 6 on the same prompt and seed — face identity holds steady across the entire range. What the slider actually controls is how strictly the model follows the **prompt's scene/composition** vs the **reference's own surroundings**:
 
-- **High `trueCfgScale` (5–6)** = prompt-dominant → more variation from the reference (new pose, new outfit, new scene work better here).
-- **Low `trueCfgScale` (~1–2)** = reference-dominant → closer to the source (subtle prompt-driven adjustments, style transfer).
-- **Default 4.0** is the model-card sweet spot.
+- **High `trueCfgScale` (5–6)** = prompt-dominant → the model leans into your scene description (new pose, new outfit, new setting) while keeping the subject's face/identity intact.
+- **Low `trueCfgScale` (~1–2)** = reference-dominant → the output stays close to the reference's framing/styling (smaller scene changes, subtle prompt-driven adjustments).
+- **Default 4.0** is the model-card sweet spot and the sc-2013 photoreal default.
+
+If you want to loosen identity (different person, "inspired by" rather than "same character"), trueCfgScale won't get you there — switch to a resemblance-tier backbone (Kolors / SDXL / FLUX IP-Adapter).
 
 ## Prompt Shape For Character Studio
 
@@ -52,18 +54,21 @@ The model preserves everything you don't mention.
 - **Resolution**: 1024×1024 is the trained center; canonical aspect-ratio buckets (768×768, 1280×720, 720×1280) work well.
 - **Don't fight the dual-control architecture**: long lists of "high quality, masterpiece, 8k" tags don't help much — the semantic+appearance encoders are doing that work from the reference.
 - **Multi-image references** (Edit Plus pipeline only): supply multiple approved references for stronger identity averaging. Useful for invented characters with multiple hero shots.
-- **trueCfgScale sweep**: try 2 / 4 / 6 in early sessions to find the right variation amount per character. Photoreal characters often want ~4; stylized/painted characters often want ~3.
+- **trueCfgScale sweep**: try 2 / 4 / 6 to find the right *prompt adherence* — identity won't shift (the sc-2013 spike measured Δ0.011 cosine across the range), but scene/composition fidelity does. Photoreal characters often want ~4; stylized/painted characters often want ~3 (lets more of the reference's styling through).
+- **Mac wait time**: at the model card's 50-step default this is ~16 minutes per image on MPS — the slowest engine in the picker by ~8×. Drop steps to 20 in advanced settings if you want sub-10-minute iteration (~7 min/image; small quality hit per the model card's 50-step recommendation).
 
 ## Comparison To Other Character Studio Backbones
 
-| Backbone | Identity tier | When to pick |
+| Backbone | Identity tier (mean ArcFace cosine on sc-2013 / sc-2009 / sc-2012 / sc-2015 spikes) | When to pick |
 |---|---|---|
-| **InstantID (RealVisXL)** | Faithful face geometry (ArcFace + landmarks) | Highest-fidelity face likeness for real people |
-| **Kolors / SDXL / RealVisXL IP-Adapter** | Resemblance (CLIP/face embed) | Scene-flexible "looks like" without faithful identity |
-| **FLUX IP-Adapter** | Resemblance (XLabs CLIP-L) | Scene-flexible resemblance on FLUX's quality |
-| **Qwen Image Edit (2509)** | **Semantic + appearance** of the whole reference | Subject + outfit + setting continuity, varied poses/scenes, multi-reference |
+| **InstantID (RealVisXL)** | 0.876 — faithful face geometry (ArcFace + landmark ControlNet) | Highest-fidelity face likeness for real people; photoreal SDXL |
+| **PuLID-FLUX** | 0.80 — faithful face geometry (PuLID cross-attention) | Same fidelity tier as InstantID, on FLUX's look |
+| **Qwen Image Edit (2509)** | **0.75 — dual-control (semantic + appearance)** | **2nd-strongest face identity in the picker without a face-specialized engine.** Subject + outfit + setting continuity, varied poses/scenes, multi-image reference. Slowest engine on Mac (~16 min/image at 50 steps). |
+| **Kolors / SDXL / RealVisXL IP-Adapter** | ~0.5 — resemblance (CLIP/face embed) | Scene-flexible "looks like" without faithful identity |
+| **FLUX IP-Adapter** | ~0.5 — resemblance (XLabs CLIP-L) | Scene-flexible resemblance on FLUX's quality |
+| **SenseNova-U1** | 0.33 — wardrobe + accessories preserved, face drifts | When outfit + props consistency matters more than face identity |
 
-Qwen complements the IP-Adapter family — it carries more of the reference's *context* (outfit, lighting) along with the subject, where IP-Adapter focuses on the subject alone.
+Qwen is the surprise face-identity engine of the epic — its dual-control architecture preserves face structure remarkably well without any explicit face-recognition signal. The tradeoffs vs InstantID/PuLID-FLUX: slightly lower identity fidelity (still 2nd-strongest), much slower on Mac, but no face detection step (works on stylized characters that ArcFace-based engines can't gate on).
 
 ## Sources
 

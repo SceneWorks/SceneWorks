@@ -66,12 +66,15 @@ export const fallbackModels = [
     // dual-control architecture; reference goes through `image=` + trueCfgScale.
     capabilities: ["edit_image", "character_image"],
     ui: {
-      description: "Qwen image edit target. Dual-control architecture (semantic + appearance) handles both localized edits and subject-consistency across new scenes/poses (Character Studio reference). Apache-2.0, ungated.",
+      description: "Qwen image edit target. Dual-control architecture (semantic + appearance) handles both localized edits and subject-consistency across new scenes/poses (Character Studio reference). Apache-2.0, ungated. trueCfgScale is the slider lever; sc-2013 spike measured identity steady across the range — the knob controls prompt adherence, not identity-vs-variation.",
       promptGuide: { title: "Qwen Image Edit Prompt Guide", path: "/prompt-guides/qwen-image-edit.md" },
-      // Qwen's variation knob is trueCfgScale; the IP-Adapter reference-strength
-      // slider would be a no-op here. Hide it and surface variation instead (sc-2017).
+      // Qwen's slider drives trueCfgScale; the IP-Adapter reference-strength
+      // slider would be a no-op here. Hide it and surface trueCfgScale instead
+      // (sc-2017). Labeled "Prompt strength" because the sc-2013 spike showed
+      // identity holds across the range (ArcFace cosine Δ0.011 at tc 2→6); the
+      // knob is a prompt-adherence vs reference-surroundings tradeoff.
       hideReferenceStrength: true,
-      variationStrength: { label: "Variation", default: 4.0, min: 1.0, max: 10.0, step: 0.5 },
+      variationStrength: { label: "Prompt strength", default: 4.0, min: 1.0, max: 10.0, step: 0.5 },
     },
   },
   {
@@ -80,10 +83,10 @@ export const fallbackModels = [
     type: "image",
     capabilities: ["edit_image", "character_image"],
     ui: {
-      description: "September monthly iteration of Qwen-Image-Edit (Qwen/Qwen-Image-Edit-2509) via QwenImageEditPlusPipeline. Enhanced subject-consistency for character-in-new-context generation; multi-image reference support. Apache-2.0, ungated; ~50 steps at trueCfgScale 4.0.",
+      description: "September monthly iteration of Qwen-Image-Edit (Qwen/Qwen-Image-Edit-2509) via QwenImageEditPlusPipeline. Enhanced subject-consistency for character-in-new-context generation; multi-image reference support. Apache-2.0, ungated; ~50 steps at trueCfgScale 4.0. sc-2013 spike: 2nd-strongest face-identity engine in the epic (mean ArcFace 0.75) behind InstantID, but slowest by ~8x on Mac (~16 min/image at 50 steps; drop to 20 steps in advanced for ~7 min).",
       promptGuide: { title: "Qwen Image Edit (2509) Prompt Guide", path: "/prompt-guides/qwen-image-edit-2509.md" },
       hideReferenceStrength: true,
-      variationStrength: { label: "Variation", default: 4.0, min: 1.0, max: 10.0, step: 0.5 },
+      variationStrength: { label: "Prompt strength", default: 4.0, min: 1.0, max: 10.0, step: 0.5 },
     },
   },
   {
