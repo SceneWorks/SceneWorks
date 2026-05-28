@@ -241,15 +241,18 @@
       },
       "ui": {
         "label": "Qwen Image Edit",
-        "description": "Higher-control image edit target backed by Diffusers QwenImageEditPipeline. Dual-control architecture (Qwen2.5-VL for semantic, VAE encoder for appearance) supports both localized edits (background change, object swap) and subject-consistency across new scenes/poses (Character Studio reference). Apache-2.0, ungated. With a character reference, runs the same pipeline with the reference as the `image=` kwarg — variation steered by `trueCfgScale` (4.0 default).",
+        "description": "Higher-control image edit target backed by Diffusers QwenImageEditPipeline. Dual-control architecture (Qwen2.5-VL for semantic, VAE encoder for appearance) supports both localized edits (background change, object swap) and subject-consistency across new scenes/poses (Character Studio reference). Apache-2.0, ungated. With a character reference, runs the same pipeline with the reference as the `image=` kwarg; `trueCfgScale` (4.0 default) steers prompt adherence — identity stays steady across the range, the knob controls how strictly the model follows the scene/composition described in the prompt vs the reference's own surroundings (sc-2013 spike measured ArcFace cosine Δ0.011 across tc 2→6).",
         "recommendedFor": ["edit_image", "character_image"],
-        // Qwen-Image-Edit's variation knob is true_cfg_scale (not an IP-Adapter
+        // Qwen-Image-Edit's slider is true_cfg_scale (not an IP-Adapter
         // reference-strength scalar): the existing "Reference strength" slider
         // would be a no-op here. Hide it and surface variationStrength instead so
-        // the user has a real lever (sc-2017).
+        // the user has a real lever (sc-2017). Labeled "Prompt strength" because
+        // the sc-2013 spike showed identity holds steady across the range; the
+        // knob is a prompt-adherence vs reference-surroundings tradeoff, NOT an
+        // identity-vs-variation tradeoff.
         "hideReferenceStrength": true,
         "variationStrength": {
-          "label": "Variation",
+          "label": "Prompt strength",
           "default": 4.0,
           "min": 1.0,
           "max": 10.0,
@@ -290,8 +293,13 @@
         "model": "${HF_CACHE}/Qwen/Qwen-Image-Edit-2509"
       },
       "defaults": {
-        // Model-card defaults: 50 steps + true_cfg_scale 4.0 (the variation knob;
-        // higher = more prompt-driven variation, lower = closer to reference).
+        // Model-card defaults: 50 steps + true_cfg_scale 4.0. The sc-2013
+        // hardware spike measured identity holding steady across the slider
+        // range (ArcFace cosine 0.8125 / 0.8187 / 0.8240 at tc 2 / 4 / 6 on
+        // the studio portrait prompt) — the knob is prompt-adherence vs the
+        // reference's own surroundings, NOT identity-vs-variation. Mac users
+        // wanting sub-10-minute generations should override steps to 20 in
+        // advanced settings (~7 min/image vs ~16 min at 50; minor quality hit).
         "resolution": "1024x1024",
         "steps": 50,
         "count": 4,
@@ -310,13 +318,17 @@
       },
       "ui": {
         "label": "Qwen Image Edit (2509)",
-        "description": "September monthly iteration of Qwen-Image-Edit (Qwen/Qwen-Image-Edit-2509) backed by the multi-image `QwenImageEditPlusPipeline`. Enhanced subject-consistency for character-in-new-context generation — the model card calls out \"changing a person's pose while maintaining excellent identity consistency\". Apache-2.0, ungated. Recommended ~50 steps at trueCfgScale 4.0; bf16 MPS-supported per Qwen.",
+        "description": "September monthly iteration of Qwen-Image-Edit (Qwen/Qwen-Image-Edit-2509) backed by the multi-image `QwenImageEditPlusPipeline`. Enhanced subject-consistency for character-in-new-context generation — sc-2013 hardware spike measured ArcFace cosine 0.75 mean vs reference, second only to InstantID across the epic. Apache-2.0, ungated. Recommended ~50 steps at trueCfgScale 4.0; bf16 MPS-supported per Qwen. Slowest engine in the picker on Mac (~16 min/image at 50 steps; drop to 20 steps in advanced settings for ~7 min/image at a small quality cost).",
         "recommendedFor": ["edit_image", "character_image"],
-        // Same variation-knob shape as qwen_image_edit (the picker hides the
+        // Same trueCfgScale slider as qwen_image_edit (the picker hides the
         // no-op IP-Adapter reference-strength slider and surfaces trueCfgScale).
+        // Labeled "Prompt strength" per the sc-2013 measurement — identity is
+        // steady across the slider range; the knob controls how strictly the
+        // model adheres to the prompt's scene/composition vs the reference's
+        // own surroundings.
         "hideReferenceStrength": true,
         "variationStrength": {
-          "label": "Variation",
+          "label": "Prompt strength",
           "default": 4.0,
           "min": 1.0,
           "max": 10.0,
