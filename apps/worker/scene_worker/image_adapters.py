@@ -316,6 +316,18 @@ MODEL_TARGETS = {
         "maxSequenceLength": 512,
         "repo": "black-forest-labs/FLUX.1-dev",
         "adapter": "flux_diffusers",
+        # XLabs FLUX IP-Adapter for Character Studio reference (sc-2011). The
+        # diffusers-blessed path: FluxIPAdapterMixin natively handles encoder load,
+        # weight load, and scale setting; FluxPipeline takes ip_adapter_image=
+        # alongside true_cfg_scale for real CFG against the negative prompt (FLUX
+        # is otherwise guidance-distilled). License: FLUX.1 [dev] NC — same posture
+        # as the base flux_dev built-in (already NC + gated). schnell has no native
+        # IP-Adapter, so this block lives only on flux_dev.
+        "ipAdapter": {
+            "repo": "XLabs-AI/flux-ip-adapter",
+            "weight": "ip_adapter.safetensors",
+            "imageEncoderRepo": "openai/clip-vit-large-patch14",
+        },
     },
     "kolors": {
         "label": "Kolors",
@@ -1674,7 +1686,18 @@ class FluxDiffusersAdapter:
         self._text_pipe: Any | None = None
         self._text_repo: str | None = None
         self._loaded_model: str | None = None
+        # Whether the resident pipe has the IP-Adapter (+ image encoder) loaded.
+        # A plain-T2I pipe and an IP-Adapter pipe are not interchangeable, so this
+        # is part of the cache key (mirrors KolorsDiffusersAdapter / SdxlDiffusersAdapter).
+        self._text_ip_adapter: bool = False
         self._loaded_lora_states: dict[str, LoraPipelineState] = {}
+
+    @staticmethod
+    def _use_ip_adapter(request: ImageRequest) -> bool:
+        # FLUX is T2I-only today (no edit_image); the reference branch still gates
+        # on mode for parity with the SDXL/Kolors templates and to future-proof
+        # FLUX.1 Kontext when it lands.
+        return request.mode != "edit_image" and bool(request.reference_asset_id)
 
     def loaded_models(self) -> list[str]:
         return sorted({value for value in (self._text_repo, self._loaded_model) if value})
@@ -1686,6 +1709,7 @@ class FluxDiffusersAdapter:
             return False
         self._text_pipe = None
         self._text_repo = None
+        self._text_ip_adapter = False
         self._loaded_model = None
         self._loaded_lora_states.clear()
         self._empty_cuda_cache(importlib.import_module("torch"))
@@ -1740,7 +1764,9 @@ class FluxDiffusersAdapter:
                 gpuMemory=gpu_memory_snapshot(torch, device),
             )
             try:
-                image = self._run_pipeline(settings, pipe, request, seed, cancel_requested=cancel_requested)
+                image = self._run_pipeline(
+                    settings, pipe, request, seed, project_path, cancel_requested=cancel_requested
+                )
             except Exception as exc:
                 emit_worker_event(
                     "image_inference_failed",
@@ -1794,8 +1820,18 @@ class FluxDiffusersAdapter:
         device = select_torch_device(torch, settings.gpu_id)
         activate_torch_device(torch, device)
         dtype = select_torch_dtype(torch, device, request.advanced.get("dtype"))
+        use_ip_adapter = self._use_ip_adapter(request)
+        ip_adapter = model_target.get("ipAdapter") or {}
+        if use_ip_adapter and not ip_adapter:
+            raise RuntimeError(
+                f"{request.model} does not support reference-image (IP-Adapter) generation."
+            )
         cpu_offload = bool(request.advanced.get("cpuOffload", False))
-        if self._text_pipe is not None and self._text_repo == repo:
+        if (
+            self._text_pipe is not None
+            and self._text_repo == repo
+            and self._text_ip_adapter == use_ip_adapter
+        ):
             self._loaded_model = request.model
             progress("loading_model", "loading_model", 0.22, f"Using cached {model_target['label']}.")
             emit_worker_event(
@@ -1812,6 +1848,7 @@ class FluxDiffusersAdapter:
         if self._text_pipe is not None:
             self._text_pipe = None
             self._text_repo = None
+            self._text_ip_adapter = False
             self._empty_cuda_cache(torch)
             self._forget_loaded_loras("text")
 
@@ -1832,10 +1869,24 @@ class FluxDiffusersAdapter:
             device=device,
             dtype=str(dtype),
             useImg2img=False,
+            useIpAdapter=use_ip_adapter,
             cpuOffload=cpu_offload,
             cached=huggingface_repo_cache_exists(repo),
         )
         pipe = pipeline_class.from_pretrained(repo, torch_dtype=dtype)
+        if use_ip_adapter:
+            # FluxIPAdapterMixin.load_ip_adapter takes the image-encoder repo/subfolder
+            # directly (no separate CLIPVisionModelWithProjection.from_pretrained step),
+            # unlike SDXL/Kolors. XLabs default = openai/clip-vit-large-patch14.
+            pipe.load_ip_adapter(
+                ip_adapter["repo"],
+                weight_name=ip_adapter["weight"],
+                subfolder=ip_adapter.get("subfolder", ""),
+                image_encoder_pretrained_model_name_or_path=ip_adapter["imageEncoderRepo"],
+                image_encoder_subfolder=ip_adapter.get("imageEncoderSubfolder", ""),
+                image_encoder_dtype=dtype,
+            )
+            pipe.set_ip_adapter_scale(self._ip_adapter_scale(request))
         emit_worker_event(
             "image_pipeline_load_complete",
             jobId=job_id,
@@ -1875,6 +1926,7 @@ class FluxDiffusersAdapter:
         )
         self._text_pipe = pipe
         self._text_repo = repo
+        self._text_ip_adapter = use_ip_adapter
         self._loaded_model = request.model
         return pipe
 
@@ -1887,6 +1939,7 @@ class FluxDiffusersAdapter:
         pipe: Any,
         request: ImageRequest,
         seed: int,
+        project_path: Path,
         cancel_requested: CancelCallback | None = None,
     ) -> Image.Image:
         torch = importlib.import_module("torch")
@@ -1900,11 +1953,22 @@ class FluxDiffusersAdapter:
             "width": request.width,
             "num_inference_steps": self._num_inference_steps(request, model_target),
             # FLUX uses embedded (distilled) guidance: schnell ignores it (0.0),
-            # dev follows it (~3.5). There is no separate negative-prompt CFG path.
+            # dev follows it (~3.5). Real CFG against negative_prompt rides on the
+            # parallel true_cfg_scale kwarg, set by the IP-Adapter branch below.
             "guidance_scale": self._guidance_scale(request, model_target),
             "max_sequence_length": self._max_sequence_length(request, model_target),
             "generator": generator,
         }
+        if self._use_ip_adapter(request):
+            # IP-Adapter conditions T2I on a reference image. FLUX is guidance-
+            # distilled, so the diffusers FLUX pipeline exposes true_cfg_scale to
+            # turn real classifier-free guidance against negative_prompt back on
+            # for the duration of the IP-Adapter run (XLabs default ~4.0).
+            kwargs["ip_adapter_image"] = load_reference_image(project_path, request.reference_asset_id)
+            kwargs["negative_prompt"] = request.negative_prompt
+            kwargs["true_cfg_scale"] = self._true_cfg_scale(request)
+            if hasattr(pipe, "set_ip_adapter_scale"):
+                pipe.set_ip_adapter_scale(self._ip_adapter_scale(request))
         step_callback = cancel_step_callback(pipe, cancel_requested)
         if step_callback is not None:
             kwargs["callback_on_step_end"] = step_callback
@@ -1946,6 +2010,29 @@ class FluxDiffusersAdapter:
             1,
             512,
         )
+
+    def _ip_adapter_scale(self, request: ImageRequest) -> float:
+        # How strongly the reference conditions the result (0 = ignore, 1 = maximal).
+        # XLabs+CLIP-L is a resemblance tier; 0.7 holds composition/style while
+        # leaving the prompt headroom. Faithful face identity belongs to PuLID-FLUX
+        # (sc-2012), not this engine.
+        try:
+            scale = float(request.advanced.get("ipAdapterScale", 0.7))
+        except (TypeError, ValueError):
+            return 0.7
+        return max(0.0, min(1.0, scale))
+
+    def _true_cfg_scale(self, request: ImageRequest) -> float:
+        # FLUX is guidance-distilled, so its `guidance_scale` is the distilled
+        # signal baked into the model — it does NOT do CFG against the negative
+        # prompt. With IP-Adapter, the diffusers FluxPipeline exposes the parallel
+        # `true_cfg_scale` kwarg that re-enables real classifier-free guidance for
+        # the duration of the run. XLabs docs default ~4.0 (range ~1.0 – 6.0).
+        try:
+            scale = float(request.advanced.get("trueCfgScale", 4.0))
+        except (TypeError, ValueError):
+            return 4.0
+        return max(1.0, min(10.0, scale))
 
 
 class KolorsDiffusersAdapter:

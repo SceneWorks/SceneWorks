@@ -1260,6 +1260,14 @@ def test_flux_model_target_defaults():
     assert dev["guidanceScale"] == 3.5
     assert dev["maxSequenceLength"] == 512
     assert dev["repo"] == "black-forest-labs/FLUX.1-dev"
+    # XLabs FLUX IP-Adapter is the diffusers-blessed character-image path; CLIP-L
+    # encoder, no subfolder. flux_schnell has no native IP-Adapter trained for it,
+    # so the block lives on flux_dev only (sc-2011).
+    ip_adapter = dev["ipAdapter"]
+    assert ip_adapter["repo"] == "XLabs-AI/flux-ip-adapter"
+    assert ip_adapter["weight"] == "ip_adapter.safetensors"
+    assert ip_adapter["imageEncoderRepo"] == "openai/clip-vit-large-patch14"
+    assert "ipAdapter" not in schnell
 
 
 def test_flux_guidance_scale_uses_per_model_default_and_override():
@@ -1296,6 +1304,160 @@ def test_flux_max_sequence_length_default_and_override():
     # Override honored, clamped to the T5 max of 512.
     assert adapter._max_sequence_length(SimpleNamespace(advanced={"maxSequenceLength": 128}), dev) == 128
     assert adapter._max_sequence_length(SimpleNamespace(advanced={"maxSequenceLength": 4096}), dev) == 512
+
+
+def test_flux_reference_asset_id_parsed():
+    request = image_request_from_job(
+        {"payload": {"projectId": "p", "model": "flux_dev", "referenceAssetId": "asset-ref"}}
+    )
+    assert request.reference_asset_id == "asset-ref"
+
+
+def test_flux_use_ip_adapter_only_for_text_with_reference():
+    use = FluxDiffusersAdapter._use_ip_adapter
+    # IP-Adapter runs on the T2I pipeline with a reference image.
+    assert use(SimpleNamespace(mode="text_to_image", reference_asset_id="a")) is True
+    # FLUX is T2I-only today but the gate still mirrors SDXL/Kolors so reference +
+    # img2img (FLUX.1 Kontext) can opt in cleanly when that path lands.
+    assert use(SimpleNamespace(mode="edit_image", reference_asset_id="a")) is False
+    # No reference image → no IP-Adapter regardless of mode.
+    assert use(SimpleNamespace(mode="text_to_image", reference_asset_id=None)) is False
+
+
+def test_flux_ip_adapter_scale_default_and_clamp():
+    adapter = FluxDiffusersAdapter()
+    # XLabs+CLIP-L is the resemblance tier (faithful identity = PuLID-FLUX); the
+    # default 0.7 matches SDXL plus-face — same headroom for the prompt.
+    assert adapter._ip_adapter_scale(SimpleNamespace(advanced={})) == 0.7
+    assert adapter._ip_adapter_scale(SimpleNamespace(advanced={"ipAdapterScale": 0.4})) == 0.4
+    # Clamped to [0, 1]; unparseable falls back to the default.
+    assert adapter._ip_adapter_scale(SimpleNamespace(advanced={"ipAdapterScale": 5})) == 1.0
+    assert adapter._ip_adapter_scale(SimpleNamespace(advanced={"ipAdapterScale": -2})) == 0.0
+    assert adapter._ip_adapter_scale(SimpleNamespace(advanced={"ipAdapterScale": "x"})) == 0.7
+
+
+def test_flux_true_cfg_scale_default_and_clamp():
+    adapter = FluxDiffusersAdapter()
+    # FLUX is guidance-distilled, so real CFG against negative_prompt rides on
+    # the parallel true_cfg_scale kwarg. XLabs docs default 4.0; clamp [1, 10]
+    # (below 1.0 disables CFG, above 10 hard-bakes the negative prompt).
+    assert adapter._true_cfg_scale(SimpleNamespace(advanced={})) == 4.0
+    assert adapter._true_cfg_scale(SimpleNamespace(advanced={"trueCfgScale": 2.5})) == 2.5
+    assert adapter._true_cfg_scale(SimpleNamespace(advanced={"trueCfgScale": 0.0})) == 1.0
+    assert adapter._true_cfg_scale(SimpleNamespace(advanced={"trueCfgScale": 99})) == 10.0
+    assert adapter._true_cfg_scale(SimpleNamespace(advanced={"trueCfgScale": "x"})) == 4.0
+
+
+def test_flux_reference_run_pipeline_passes_ip_adapter_image_and_true_cfg(tmp_path, monkeypatch):
+    """A T2I FLUX job with referenceAssetId drives the IP-Adapter branch of
+    _run_pipeline: load_reference_image(project_path, reference_asset_id) →
+    ip_adapter_image kwarg, set_ip_adapter_scale() per request, and true_cfg_scale
+    + negative_prompt onto kwargs. Mirrors the SDXL torch-free pattern."""
+
+    class FakeImage:
+        def convert(self, _mode):
+            return self
+
+    class FakeOutput:
+        images = [FakeImage()]
+
+    class FakePipe:
+        def __init__(self):
+            self.scales: list[float] = []
+            self.last_kwargs: dict[str, Any] = {}
+
+        def set_ip_adapter_scale(self, scale):
+            self.scales.append(scale)
+
+        # Named params so filter_call_kwargs keeps the FLUX-specific kwargs we
+        # need to assert (it introspects __call__ via inspect.signature and drops
+        # anything not in the accepted-name set; a bare **kwargs is treated as
+        # accepting nothing because the var-keyword param itself is the only
+        # name in the signature).
+        def __call__(
+            self,
+            *,
+            prompt=None,
+            negative_prompt=None,
+            ip_adapter_image=None,
+            true_cfg_scale=None,
+            height=None,
+            width=None,
+            num_inference_steps=None,
+            guidance_scale=None,
+            max_sequence_length=None,
+            generator=None,
+            **kwargs,
+        ):
+            self.last_kwargs = {
+                "prompt": prompt,
+                "negative_prompt": negative_prompt,
+                "ip_adapter_image": ip_adapter_image,
+                "true_cfg_scale": true_cfg_scale,
+                "height": height,
+                "width": width,
+                "num_inference_steps": num_inference_steps,
+                "guidance_scale": guidance_scale,
+                "max_sequence_length": max_sequence_length,
+                "generator": generator,
+                **kwargs,
+            }
+            return FakeOutput()
+
+    class FakeTorch:
+        @staticmethod
+        def Generator(_device):
+            class Gen:
+                def manual_seed(self, _seed):
+                    return self
+
+            return Gen()
+
+    monkeypatch.setattr(
+        "scene_worker.image_adapters.importlib.import_module",
+        lambda name: FakeTorch if name == "torch" else importlib.import_module(name),
+    )
+
+    seen: list[tuple] = []
+
+    def fake_load_reference_image(project_path, reference_asset_id):
+        seen.append((project_path, reference_asset_id))
+        return FakeImage()
+
+    monkeypatch.setattr(
+        "scene_worker.image_adapters.load_reference_image", fake_load_reference_image
+    )
+
+    project_path = tmp_path / "project"
+    project_path.mkdir()
+    request = image_request_from_job(
+        {
+            "payload": {
+                "projectId": "project-1",
+                "mode": "text_to_image",
+                "model": "flux_dev",
+                "prompt": "a portrait of the character",
+                "negativePrompt": "blurry",
+                "referenceAssetId": "asset-ref",
+                "width": 16,
+                "height": 16,
+                "count": 1,
+                "advanced": {"ipAdapterScale": 0.5, "trueCfgScale": 3.0},
+            }
+        }
+    )
+    pipe = FakePipe()
+    result = FluxDiffusersAdapter()._run_pipeline(
+        SimpleNamespace(gpu_id="cpu"), pipe, request, 7, project_path
+    )
+    # IP-Adapter branch ran: reference loaded → ip_adapter_image kwarg, per-request
+    # scale applied, and true_cfg_scale + negative_prompt threaded through.
+    assert seen == [(project_path, "asset-ref")]
+    assert pipe.scales == [0.5]
+    assert pipe.last_kwargs["true_cfg_scale"] == 3.0
+    assert pipe.last_kwargs["negative_prompt"] == "blurry"
+    assert pipe.last_kwargs["ip_adapter_image"] is not None
+    assert result is FakeOutput.images[0]
 
 
 def test_flux_rejects_image_edit():

@@ -31,7 +31,8 @@ export const fallbackModels = [
     id: "z_image_turbo",
     name: "Z-Image-Turbo",
     type: "image",
-    capabilities: ["text_to_image", "style_variations", "character_image"],
+    // No `character_image`: the worker adapter has no IP-Adapter wiring (sc-2005).
+    capabilities: ["text_to_image", "style_variations"],
     ui: {
       description: "Fast local text-to-image target.",
       promptGuide: { title: "Z-Image-Turbo Prompt Guide", path: "/prompt-guides/z-image-turbo.md" },
@@ -123,9 +124,10 @@ export const fallbackModels = [
     id: "flux_dev",
     name: "FLUX.1 [dev]",
     type: "image",
-    capabilities: ["text_to_image", "style_variations"],
+    // character_image: XLabs FLUX IP-Adapter (sc-2011 resemblance tier).
+    capabilities: ["text_to_image", "character_image", "style_variations"],
     ui: {
-      description: "FLUX.1 [dev] — higher-quality ~28-step text-to-image under the FLUX.1 [dev] Non-Commercial License (non-commercial only); gated download needs an HF token + license acceptance. ~34GB bf16, large-VRAM GPU.",
+      description: "FLUX.1 [dev] — higher-quality ~28-step text-to-image under the FLUX.1 [dev] Non-Commercial License (non-commercial only); gated download needs an HF token + license acceptance. ~34GB bf16, large-VRAM GPU. With a character reference, runs XLabs IP-Adapter for scene-flexible resemblance (faithful identity belongs to PuLID-FLUX).",
       promptGuide: { title: "FLUX.1 [dev] Prompt Guide", path: "/prompt-guides/flux-dev.md" },
     },
   },
