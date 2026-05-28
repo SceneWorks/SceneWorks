@@ -5,16 +5,75 @@ pub(crate) async fn list_assets(
     Path(project_id): Path<String>,
     Query(query): Query<AssetsQuery>,
 ) -> Result<Json<Vec<serde_json::Value>>, ApiError> {
-    Ok(Json(
-        project_call(state, move |store| {
-            store.list_assets(
-                &project_id,
-                query.include_rejected.unwrap_or(false),
-                query.include_trashed.unwrap_or(false),
-            )
-        })
-        .await?,
-    ))
+    let character_id = query.character_id.clone();
+    let assets = project_call(state, move |store| {
+        store.list_assets(
+            &project_id,
+            query.include_rejected.unwrap_or(false),
+            query.include_trashed.unwrap_or(false),
+        )
+    })
+    .await?;
+    let assets = match character_id {
+        Some(character_id) if !character_id.is_empty() => assets
+            .into_iter()
+            .filter(|asset| asset_matches_character(asset, &character_id))
+            .collect(),
+        _ => assets,
+    };
+    Ok(Json(assets))
+}
+
+/// An asset belongs to a character when it was generated in association with it
+/// (recipe.normalizedSettings.characterId) or generated referencing it
+/// (metadata.characterReferences[].characterId). Powers the per-character gallery so
+/// character outputs persist beyond the transient "recent generations" window.
+fn asset_matches_character(asset: &serde_json::Value, character_id: &str) -> bool {
+    let by_recipe = asset
+        .get("recipe")
+        .and_then(|recipe| recipe.get("normalizedSettings"))
+        .and_then(|settings| settings.get("characterId"))
+        .and_then(serde_json::Value::as_str)
+        == Some(character_id);
+    let by_reference = asset
+        .get("metadata")
+        .and_then(|metadata| metadata.get("characterReferences"))
+        .and_then(serde_json::Value::as_array)
+        .is_some_and(|refs| {
+            refs.iter().any(|reference| {
+                reference
+                    .get("characterId")
+                    .and_then(serde_json::Value::as_str)
+                    == Some(character_id)
+            })
+        });
+    by_recipe || by_reference
+}
+
+#[cfg(test)]
+mod character_filter_tests {
+    use super::asset_matches_character;
+    use serde_json::json;
+
+    #[test]
+    fn matches_by_recipe_character_id() {
+        let asset = json!({ "recipe": { "normalizedSettings": { "characterId": "char-1" } } });
+        assert!(asset_matches_character(&asset, "char-1"));
+        assert!(!asset_matches_character(&asset, "char-2"));
+    }
+
+    #[test]
+    fn matches_by_character_reference() {
+        let asset = json!({ "metadata": { "characterReferences": [{ "characterId": "char-9" }] } });
+        assert!(asset_matches_character(&asset, "char-9"));
+        assert!(!asset_matches_character(&asset, "char-1"));
+    }
+
+    #[test]
+    fn no_match_when_unassociated() {
+        let asset = json!({ "recipe": { "normalizedSettings": { "width": 1024 } } });
+        assert!(!asset_matches_character(&asset, "char-1"));
+    }
 }
 
 pub(crate) async fn get_asset(
