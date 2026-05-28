@@ -110,6 +110,18 @@ fn lens_venv_dir() -> PathBuf {
     app_support_dir().join("python").join("lens-venv")
 }
 
+/// Separate MLX FLUX sidecar venv (mflux 0.17.x — its own torch/transformers/
+/// huggingface_hub stack), kept apart from the main venv for the same dep
+/// reason as Lens. MlxFluxAdapter runs its interpreter via
+/// SCENEWORKS_MLX_FLUX_PYTHON. mflux is Apple-MLX only, so `provision_mlx_flux_venv`
+/// runs only on darwin (this helper returns a valid path on every platform so the
+/// env var the worker reads is always defined — `MlxFluxAdapter._sidecar_available`
+/// existence-checks it at job time and a missing path simply falls back to the
+/// torch FluxDiffusersAdapter on Windows / Linux). sc-1970.
+fn mlx_flux_venv_dir() -> PathBuf {
+    app_support_dir().join("python").join("mlx-flux-venv")
+}
+
 pub fn venv_python(venv: &Path) -> PathBuf {
     if cfg!(target_os = "windows") {
         venv.join("Scripts").join("python.exe")
@@ -124,6 +136,13 @@ fn marker_path() -> PathBuf {
 
 fn lens_marker_path() -> PathBuf {
     app_support_dir().join("python").join(".lens-venv-marker")
+}
+
+#[cfg(target_os = "macos")]
+fn mlx_flux_marker_path() -> PathBuf {
+    app_support_dir()
+        .join("python")
+        .join(".mlx-flux-venv-marker")
 }
 
 /// Platform-appropriate logs directory (also used for the API/worker logs).
@@ -245,6 +264,27 @@ fn requirements_mlx_path(app: &AppHandle) -> PathBuf {
         .join("..")
         .join("worker")
         .join("requirements-mlx.txt")
+}
+
+/// requirements-mlx-flux.txt location (mflux FLUX MLX image inference deps): the
+/// bundled resource in a packaged app, or the repo copy during development.
+/// macOS-only sidecar venv (mflux's transformers>=5 + huggingface_hub>=1 cannot
+/// coexist with the main worker venv's transformers 4.57 + huggingface_hub<1
+/// stack). sc-1970. Provisioned in the background by `provision_mlx_flux_venv`.
+#[cfg(target_os = "macos")]
+fn requirements_mlx_flux_path(app: &AppHandle) -> PathBuf {
+    if let Ok(resources) = app.path().resource_dir() {
+        let bundled = resources
+            .join("python-src")
+            .join("requirements-mlx-flux.txt");
+        if bundled.exists() {
+            return bundled;
+        }
+    }
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("..")
+        .join("worker")
+        .join("requirements-mlx-flux.txt")
 }
 
 /// Platform default workspace data directory, used when the user hasn't picked a
@@ -693,6 +733,83 @@ async fn provision_lens_venv(app: &AppHandle) -> Result<(), String> {
     Ok(())
 }
 
+/// Provision the separate mflux FLUX MLX sidecar venv (mflux 0.17.x + its bundled
+/// torch/transformers/huggingface_hub stack). macOS-only — mflux is Apple MLX,
+/// and the dep stack conflicts with the main worker's transformers 4.57 +
+/// huggingface_hub<1 pins (held there for native LTX-2.3 / Wan / FluxDiffusersAdapter).
+/// Runs in the BACKGROUND after the app is up so the install never blocks launch.
+/// Idempotent via its own marker. Failures are non-fatal: the MLX FLUX backend
+/// stays unavailable (MlxFluxAdapter raises a clear error, dispatch falls back
+/// to FluxDiffusersAdapter on the torch path). Opt out with
+/// SCENEWORKS_DISABLE_MLX_FLUX=1.
+///
+/// sc-1970. Spike sc-1969 measured mflux bf16 ~30% faster per step than the
+/// torch FluxDiffusersAdapter, Q4/Q8 same speed with significant peak-memory
+/// reduction (~41.6 GB at Q4 vs ~65.8 GB at bf16 for 1024² 4-step schnell).
+#[cfg(target_os = "macos")]
+async fn provision_mlx_flux_venv(app: &AppHandle) -> Result<(), String> {
+    if std::env::var("SCENEWORKS_DISABLE_MLX_FLUX")
+        .map(|value| matches!(value.trim(), "1" | "true" | "yes"))
+        .unwrap_or(false)
+    {
+        return Ok(());
+    }
+    let requirements = requirements_mlx_flux_path(app);
+    if !requirements.exists() {
+        // Older worker checkout without the requirements file; the MLX FLUX
+        // backend stays off and the torch path remains the default on macOS.
+        return Ok(());
+    }
+    let body = std::fs::read_to_string(&requirements)
+        .map_err(|error| format!("read requirements-mlx-flux: {error}"))?;
+    let venv = mlx_flux_venv_dir();
+    let python = venv_python(&venv);
+    let marker = mlx_flux_marker_path();
+    let expected = format!("v{SETUP_VERSION}\n{body}");
+
+    if python.exists() {
+        if let Ok(found) = std::fs::read_to_string(&marker) {
+            if found == expected {
+                return Ok(());
+            }
+        }
+    }
+    if let Some(parent) = venv.parent() {
+        std::fs::create_dir_all(parent).map_err(|error| format!("create python dir: {error}"))?;
+    }
+    if !python.exists() {
+        run_uv(
+            app,
+            vec![
+                "venv".to_owned(),
+                "--clear".to_owned(),
+                "--python".to_owned(),
+                "3.12".to_owned(),
+                venv.to_string_lossy().into_owned(),
+            ],
+        )
+        .await?;
+    }
+    // mflux pulls its own torch (>=2.7), transformers (>=5), huggingface_hub
+    // (>=1.1.6), and mlx — so a single -r install is enough; no torch index
+    // override (Apple Silicon MPS wheels are on default PyPI).
+    run_uv(
+        app,
+        vec![
+            "pip".to_owned(),
+            "install".to_owned(),
+            "--python".to_owned(),
+            python.to_string_lossy().into_owned(),
+            "-r".to_owned(),
+            requirements.to_string_lossy().into_owned(),
+        ],
+    )
+    .await?;
+    std::fs::write(&marker, &expected)
+        .map_err(|error| format!("write mlx-flux marker: {error}"))?;
+    Ok(())
+}
+
 /// Resolve the ffmpeg binary bundled with the venv's imageio-ffmpeg, used by the
 /// API's in-process utility worker for timeline export / frame extraction. The
 /// desktop ships no system ffmpeg, so without this those jobs fail. Returns None
@@ -913,6 +1030,17 @@ fn supervise_worker(app: AppHandle, api_port: u16) {
                 .env(
                     "SCENEWORKS_LENS_PYTHON",
                     venv_python(&lens_venv_dir()).to_string_lossy().to_string(),
+                )
+                // Point MlxFluxAdapter at the mflux sidecar venv interpreter.
+                // The adapter existence-checks it at job time so this is safe
+                // even while the venv is still provisioning in the background
+                // (and on Windows/Linux, where it never exists and dispatch
+                // falls back to the torch FluxDiffusersAdapter). sc-1970.
+                .env(
+                    "SCENEWORKS_MLX_FLUX_PYTHON",
+                    venv_python(&mlx_flux_venv_dir())
+                        .to_string_lossy()
+                        .to_string(),
                 )
                 .env(
                     "SCENEWORKS_DATA_DIR",
@@ -1200,6 +1328,23 @@ async fn run_startup(app: AppHandle) {
                 append_log(
                     &logs_dir().join("lens-setup.log"),
                     &format!("[desktop] lens venv provisioning failed: {error}\n"),
+                );
+            }
+        });
+    }
+    // Same pattern for the mflux FLUX MLX sidecar venv (macOS-only). mflux's
+    // transformers>=5 + huggingface_hub>=1 stack cannot coexist with the main
+    // worker venv's transformers 4.57 + huggingface_hub<1 pins. Non-fatal:
+    // failures mean MlxFluxAdapter stays unavailable and the worker keeps
+    // routing FLUX jobs to FluxDiffusersAdapter on the torch/MPS path. sc-1970.
+    #[cfg(target_os = "macos")]
+    {
+        let mlx_flux_app = app.clone();
+        tauri::async_runtime::spawn(async move {
+            if let Err(error) = provision_mlx_flux_venv(&mlx_flux_app).await {
+                append_log(
+                    &logs_dir().join("mlx-flux-setup.log"),
+                    &format!("[desktop] mlx-flux venv provisioning failed: {error}\n"),
                 );
             }
         });

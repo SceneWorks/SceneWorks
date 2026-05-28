@@ -563,6 +563,18 @@
         "families": ["flux"],
         "types": ["style", "enhance", "character"]
       },
+      // macOS-only MLX backend (sc-1970). Optional sidecar venv at /opt/mlx-flux-venv
+      // (apps/desktop/src/setup.rs provision_mlx_flux_venv); the worker auto-routes
+      // FLUX schnell jobs here when the venv exists, falling back to the torch path
+      // (FluxDiffusersAdapter) otherwise. sc-1969 spike: bf16 ~30% faster per step,
+      // Q4/Q8 same speed with lower peak memory. quantize default Q8 (sweet spot —
+      // matches bf16 speed on M-series, ~25% mem reduction, no visible quality drift).
+      // minMemoryGb mirrors the Q4 peak (sc-1969: ~41.6 GB) so 64 GB Macs see this
+      // tier; advanced.mlxQuantize=4 makes Q4 the runtime pick on smaller Macs.
+      "mlx": {
+        "minMemoryGb": 42,
+        "quantize": 8
+      },
       "ui": {
         "label": "FLUX.1 [schnell]",
         "description": "Black Forest Labs FLUX.1 [schnell] — fast ~4-step distilled text-to-image, Apache-2.0 (commercial-safe). 12B transformer + T5-XXL text encoder; ~34GB bf16 VRAM, needs a large-VRAM GPU.",
@@ -613,6 +625,17 @@
       "loraCompatibility": {
         "families": ["flux"],
         "types": ["style", "enhance", "character"]
+      },
+      // macOS-only MLX backend (sc-1970). Same sidecar-venv path as flux_schnell.
+      // The MLX adapter is T2I-only for v1, so reference-image (IP-Adapter)
+      // generations on flux_dev keep routing to the torch path even on macOS
+      // (see _should_route_flux_to_mlx in image_adapters.py). FLUX.1 [dev] uses
+      // 28 steps + guidance 3.5 (per the model card), so a single MLX run is
+      // proportionally longer than schnell; Q8 default keeps peak memory tight
+      // on 64 GB Macs.
+      "mlx": {
+        "minMemoryGb": 42,
+        "quantize": 8
       },
       // Gated download: accept the FLUX.1 [dev] Non-Commercial License on the model
       // card and add a Hugging Face token before downloading. `credentialHost`/

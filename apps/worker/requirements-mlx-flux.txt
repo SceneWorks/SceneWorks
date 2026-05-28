@@ -1,0 +1,27 @@
+# Apple Silicon (MPS) MLX FLUX.1 image inference deps via mflux
+# (filipstrand/mflux, MIT). macOS-only, isolated SIDECAR venv
+# (`/opt/mlx-flux-venv`): installed by the desktop bootstrap on darwin
+# (apps/desktop/src/setup.rs, provision_mlx_flux_venv). Never installed on
+# Windows / Linux / Docker, which keep the PyTorch worker unchanged.
+#
+# Why isolated (not folded into requirements-mlx.txt): mflux 0.17.5 hard-requires
+# `transformers>=5.0.0,<6.0` and `huggingface-hub>=1.1.6,<2.0`, which conflict
+# with the main worker venv's pinned `transformers 4.57.x` + `huggingface_hub<1`
+# stack (deliberately held there to coexist with native LTX-2.3 / Wan / the
+# existing diffusers FluxPipeline path; see requirements-mlx.txt comments
+# explaining the mlx-vlm<0.3.10 cap for the same reason). mflux's mlx pin
+# (`mlx>=0.27,<0.32`) is also tighter than `requirements-mlx.txt`'s
+# `mlx>=0.31,<1`. Older mflux versions don't escape: 0.12.0 was the last on
+# transformers 4 but pins `mlx<0.31`, still conflicting. Sidecar venv per the
+# LensTurboAdapter precedent (requirements-lens.txt + `/opt/lens-venv`).
+#
+# Spike validated 2026-05-28 (sc-1969) on M5 Max 128 GB: mflux 0.17.5 bf16
+# 2.84 s/step (FLUX.1-schnell, 4 steps, 1024²) — ~30% faster than torch/MPS
+# bf16 4.06 s/step via `FluxDiffusersAdapter`. Q4 / Q8 same per-step speed
+# with significant peak-memory reduction (65.8 → 41.6 GB at Q4).
+#
+# Runner: apps/worker/scene_worker/mlx_flux_runner.py
+# Adapter: `MlxFluxAdapter` in apps/worker/scene_worker/image_adapters.py
+# mflux pulls its own torch, transformers, huggingface_hub, mlx, etc. — pin
+# only mflux here and let it resolve the rest.
+mflux>=0.17.5,<0.18

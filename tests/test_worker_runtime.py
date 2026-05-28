@@ -29,6 +29,7 @@ from scene_worker.image_adapters import (
     ImageAssetWriter,
     KolorsDiffusersAdapter,
     LensTurboAdapter,
+    MlxFluxAdapter,
     MODEL_TARGETS,
     QwenImageAdapter,
     REAL_ESRGAN_MODEL_SPECS,
@@ -1388,7 +1389,11 @@ def test_lens_resolution_for_snaps_to_buckets():
     assert lens_resolution_for(864, 1152) == (1024, "3:4")
 
 
-def test_create_image_adapter_routes_flux_schnell_and_dev():
+def test_create_image_adapter_routes_flux_schnell_and_dev(monkeypatch):
+    # Pin the auto-dispatch off the MLX path so this asserts the torch fallback
+    # on every host (a developer Mac with the mlx-flux sidecar installed would
+    # otherwise route here to MlxFluxAdapter — sc-1970).
+    monkeypatch.setenv("SCENEWORKS_DISABLE_MLX_FLUX", "1")
     schnell = create_image_adapter({"payload": {"model": "flux_schnell"}})
     assert schnell.__class__.__name__ == "FluxDiffusersAdapter"
     assert schnell.id == "flux_diffusers"
@@ -1401,6 +1406,251 @@ def test_image_adapter_env_override_selects_flux(monkeypatch):
     # Env override wins even when the payload names a different family's model.
     adapter = create_image_adapter({"payload": {"model": "z_image_turbo"}})
     assert adapter.__class__.__name__ == "FluxDiffusersAdapter"
+
+
+def test_image_adapter_env_override_selects_mlx_flux(monkeypatch):
+    # Explicit env override picks MlxFluxAdapter regardless of platform or
+    # sidecar availability — the adapter exists; sidecar absence surfaces at
+    # job time as an actionable error (sc-1970).
+    monkeypatch.setenv("SCENEWORKS_IMAGE_ADAPTER", "mlx_flux")
+    adapter = create_image_adapter({"payload": {"model": "flux_schnell"}})
+    assert adapter.__class__.__name__ == "MlxFluxAdapter"
+    assert adapter.id == "mlx_flux"
+
+
+def test_flux_auto_dispatch_routes_to_mlx_when_sidecar_available(monkeypatch):
+    # On macOS, when the sidecar venv exists and the model is supported, FLUX
+    # auto-dispatch picks MlxFluxAdapter over FluxDiffusersAdapter (sc-1970).
+    monkeypatch.delenv("SCENEWORKS_DISABLE_MLX_FLUX", raising=False)
+    monkeypatch.delenv("SCENEWORKS_IMAGE_ADAPTER", raising=False)
+    monkeypatch.setattr("sys.platform", "darwin")
+    monkeypatch.setattr(MlxFluxAdapter, "_sidecar_available", lambda self: True)
+    adapter = create_image_adapter({"payload": {"model": "flux_schnell"}})
+    assert adapter.__class__.__name__ == "MlxFluxAdapter"
+
+
+def test_flux_auto_dispatch_falls_back_when_sidecar_missing(monkeypatch):
+    # Sidecar missing → never regress the torch path. sc-1970 promise: the
+    # MLX backend is purely additive.
+    monkeypatch.delenv("SCENEWORKS_DISABLE_MLX_FLUX", raising=False)
+    monkeypatch.delenv("SCENEWORKS_IMAGE_ADAPTER", raising=False)
+    monkeypatch.setattr("sys.platform", "darwin")
+    monkeypatch.setattr(MlxFluxAdapter, "_sidecar_available", lambda self: False)
+    adapter = create_image_adapter({"payload": {"model": "flux_schnell"}})
+    assert adapter.__class__.__name__ == "FluxDiffusersAdapter"
+
+
+def test_flux_auto_dispatch_respects_disable_env(monkeypatch):
+    # SCENEWORKS_DISABLE_MLX_FLUX=1 forces the torch path even when the
+    # sidecar is installed — escape hatch for parity testing / debugging.
+    monkeypatch.setenv("SCENEWORKS_DISABLE_MLX_FLUX", "1")
+    monkeypatch.delenv("SCENEWORKS_IMAGE_ADAPTER", raising=False)
+    monkeypatch.setattr("sys.platform", "darwin")
+    monkeypatch.setattr(MlxFluxAdapter, "_sidecar_available", lambda self: True)
+    adapter = create_image_adapter({"payload": {"model": "flux_schnell"}})
+    assert adapter.__class__.__name__ == "FluxDiffusersAdapter"
+
+
+def test_flux_auto_dispatch_skips_mlx_on_non_macos(monkeypatch):
+    # mflux is Apple-MLX only. On Windows / Linux the dispatch must never
+    # pick MlxFluxAdapter even if SCENEWORKS_MLX_FLUX_PYTHON points at an
+    # interpreter (the desktop bootstrap sets the env var on every host so
+    # the worker has a defined value — actual availability is platform-gated).
+    monkeypatch.delenv("SCENEWORKS_DISABLE_MLX_FLUX", raising=False)
+    monkeypatch.delenv("SCENEWORKS_IMAGE_ADAPTER", raising=False)
+    monkeypatch.setattr("sys.platform", "linux")
+    monkeypatch.setattr(MlxFluxAdapter, "_sidecar_available", lambda self: True)
+    adapter = create_image_adapter({"payload": {"model": "flux_schnell"}})
+    assert adapter.__class__.__name__ == "FluxDiffusersAdapter"
+
+
+def test_flux_auto_dispatch_skips_mlx_for_edit_image(monkeypatch):
+    # mflux supports Kontext edit but the SceneWorks v1 MLX adapter is T2I-only;
+    # edit_image must keep routing to the torch path until edit is wired.
+    monkeypatch.delenv("SCENEWORKS_DISABLE_MLX_FLUX", raising=False)
+    monkeypatch.delenv("SCENEWORKS_IMAGE_ADAPTER", raising=False)
+    monkeypatch.setattr("sys.platform", "darwin")
+    monkeypatch.setattr(MlxFluxAdapter, "_sidecar_available", lambda self: True)
+    adapter = create_image_adapter(
+        {"payload": {"model": "flux_schnell", "mode": "edit_image"}}
+    )
+    assert adapter.__class__.__name__ == "FluxDiffusersAdapter"
+
+
+def test_flux_auto_dispatch_skips_mlx_when_reference_asset_present(monkeypatch):
+    # FLUX IP-Adapter (XLabs, sc-2011) lives on the torch path. mflux has no
+    # equivalent today, so reference-image jobs keep going to FluxDiffusersAdapter
+    # even on macOS with the sidecar installed.
+    monkeypatch.delenv("SCENEWORKS_DISABLE_MLX_FLUX", raising=False)
+    monkeypatch.delenv("SCENEWORKS_IMAGE_ADAPTER", raising=False)
+    monkeypatch.setattr("sys.platform", "darwin")
+    monkeypatch.setattr(MlxFluxAdapter, "_sidecar_available", lambda self: True)
+    adapter = create_image_adapter(
+        {"payload": {"model": "flux_dev", "referenceAssetId": "asset_ref"}}
+    )
+    assert adapter.__class__.__name__ == "FluxDiffusersAdapter"
+
+
+def test_mlx_flux_resolve_quantize_order():
+    # Quantize resolution order: advanced.mlxQuantize > manifest.mlx.quantize > 8.
+    adapter = MlxFluxAdapter()
+    # Default Q8 when nothing is set.
+    request = SimpleNamespace(advanced={}, model_manifest_entry={})
+    assert adapter._resolve_quantize(request) == 8
+    # Manifest mlx.quantize wins over default.
+    request = SimpleNamespace(advanced={}, model_manifest_entry={"mlx": {"quantize": 4}})
+    assert adapter._resolve_quantize(request) == 4
+    # Advanced override wins over manifest.
+    request = SimpleNamespace(
+        advanced={"mlxQuantize": 3}, model_manifest_entry={"mlx": {"quantize": 8}}
+    )
+    assert adapter._resolve_quantize(request) == 3
+    # Zero (or anything non-positive) in either source means "bf16 / no quant".
+    request = SimpleNamespace(advanced={"mlxQuantize": 0}, model_manifest_entry={})
+    assert adapter._resolve_quantize(request) is None
+    # Unparseable override falls through to the manifest (then the default).
+    request = SimpleNamespace(
+        advanced={"mlxQuantize": "junk"}, model_manifest_entry={"mlx": {"quantize": 6}}
+    )
+    assert adapter._resolve_quantize(request) == 6
+
+
+def test_mlx_flux_requires_sidecar_when_missing(monkeypatch):
+    # No sidecar → actionable error, no silent in-proc mflux import (which
+    # would crash the worker because mflux's transformers/hf_hub stack
+    # conflicts with the main worker venv). sc-1970.
+    monkeypatch.setenv("SCENEWORKS_MLX_FLUX_PYTHON", "/nonexistent/mlx-flux-venv/bin/python")
+    job = {
+        "id": "job_mlx_flux_t2i",
+        "payload": {
+            "projectId": "project_x",
+            "mode": "text_to_image",
+            "model": "flux_schnell",
+            "prompt": "a cat",
+        },
+    }
+    noop = lambda *args, **kwargs: None  # noqa: E731
+    try:
+        MlxFluxAdapter().generate(
+            settings=None,
+            job=job,
+            request=image_request_from_job(job),
+            project_path=None,
+            progress=noop,
+            cancel_requested=lambda: False,
+        )
+    except RuntimeError as exc:
+        assert "sidecar" in str(exc).lower()
+    else:
+        raise AssertionError("MLX FLUX generation must fail clearly when the sidecar venv is unavailable.")
+
+
+def test_mlx_flux_rejects_unsupported_model():
+    # _supported_models gates which model ids the MLX adapter will run; anything
+    # else must fail loudly (the dispatch never sends these here, but a direct
+    # caller / env-var override could).
+    job = {
+        "id": "job_mlx_flux_wrong_model",
+        "payload": {"projectId": "p", "mode": "text_to_image", "model": "z_image_turbo", "prompt": "x"},
+    }
+    noop = lambda *args, **kwargs: None  # noqa: E731
+    try:
+        MlxFluxAdapter().generate(
+            settings=None, job=job, request=image_request_from_job(job), project_path=None,
+            progress=noop, cancel_requested=lambda: False,
+        )
+    except RuntimeError as exc:
+        assert "FLUX.1 target" in str(exc) or "MlxFluxAdapter supports" in str(exc)
+    else:
+        raise AssertionError("MlxFluxAdapter must reject non-FLUX models.")
+
+
+def test_mlx_flux_rejects_image_edit(tmp_path):
+    job = {
+        "id": "job_mlx_flux_edit",
+        "payload": {"projectId": "p", "mode": "edit_image", "model": "flux_schnell", "prompt": "x"},
+    }
+    noop = lambda *args, **kwargs: None  # noqa: E731
+    try:
+        MlxFluxAdapter().generate(
+            settings=None, job=job, request=image_request_from_job(job), project_path=None,
+            progress=noop, cancel_requested=lambda: False,
+        )
+    except RuntimeError as exc:
+        assert "text-to-image only" in str(exc).lower()
+    else:
+        raise AssertionError("MlxFluxAdapter is T2I-only and must reject edit_image.")
+
+
+def test_mlx_flux_rejects_reference_asset():
+    job = {
+        "id": "job_mlx_flux_ref",
+        "payload": {
+            "projectId": "p",
+            "mode": "text_to_image",
+            "model": "flux_dev",
+            "prompt": "x",
+            "referenceAssetId": "asset_ref",
+        },
+    }
+    noop = lambda *args, **kwargs: None  # noqa: E731
+    try:
+        MlxFluxAdapter().generate(
+            settings=None, job=job, request=image_request_from_job(job), project_path=None,
+            progress=noop, cancel_requested=lambda: False,
+        )
+    except RuntimeError as exc:
+        # The reference-asset gate runs before the sidecar check, so the error
+        # surfaces even without a sidecar present.
+        assert "IP-Adapter" in str(exc) or "reference-image" in str(exc)
+    else:
+        raise AssertionError("MlxFluxAdapter must reject reference-image jobs (no FLUX IP-Adapter in mflux).")
+
+
+def test_flux_manifest_has_mlx_block():
+    # Manifest-driven auto-dispatch + Model Manager memory tier (sc-1970).
+    # The Rust API owns the canonical jsonc parser; here we just confirm both
+    # FLUX entries carry an `mlx` block and the contents look right. A regex
+    # walks each entry's bounded braces so a URL containing `//` (e.g. the
+    # FLUX model-card link) doesn't break the structural check.
+    from pathlib import Path
+    import re
+
+    manifest_path = Path(__file__).resolve().parent.parent / "config" / "manifests" / "builtin.models.jsonc"
+    raw = manifest_path.read_text(encoding="utf-8")
+
+    def find_entry_block(model_id: str) -> str:
+        # Each entry opens with `"id": "<model_id>"` and is contained in the
+        # surrounding `{ ... }` block of the entry. Walk forward from the id
+        # marker to find the matching closing brace by depth.
+        anchor = raw.index(f'"id": "{model_id}"')
+        # Step back to the opening brace of the entry.
+        start = raw.rfind("{", 0, anchor)
+        assert start != -1, f"entry start brace for {model_id} not found"
+        depth = 0
+        for index in range(start, len(raw)):
+            ch = raw[index]
+            if ch == "{":
+                depth += 1
+            elif ch == "}":
+                depth -= 1
+                if depth == 0:
+                    return raw[start : index + 1]
+        raise AssertionError(f"unterminated entry block for {model_id}")
+
+    for model_id in ("flux_schnell", "flux_dev"):
+        block = find_entry_block(model_id)
+        mlx_match = re.search(r'"mlx"\s*:\s*\{([^}]*)\}', block)
+        assert mlx_match, f"{model_id} manifest must declare an mlx block (sc-1970)"
+        body = mlx_match.group(1)
+        quant_match = re.search(r'"quantize"\s*:\s*(\d+)', body)
+        mem_match = re.search(r'"minMemoryGb"\s*:\s*(\d+)', body)
+        assert quant_match and int(quant_match.group(1)) in {3, 4, 5, 6, 8}, (
+            f"{model_id} mlx.quantize must be a supported quant level"
+        )
+        assert mem_match and int(mem_match.group(1)) > 0, (
+            f"{model_id} mlx.minMemoryGb must be a positive int"
+        )
 
 
 def test_flux_model_target_defaults():
