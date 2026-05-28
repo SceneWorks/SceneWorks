@@ -34,6 +34,7 @@ from __future__ import annotations
 import importlib
 import inspect
 import json
+import math
 import sys
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -72,13 +73,23 @@ _SAMPLERS: dict[str, SamplerSpec | None] = {
     "default": None,
     "euler": SamplerSpec("FlowMatchEulerDiscreteScheduler", {}),
     "heun": SamplerSpec("FlowMatchHeunDiscreteScheduler", {}),
+    # ``use_dynamic_shifting=True`` is what lets a non-FlowMatch scheduler
+    # accept the ``mu`` kwarg that flow-pipeline ``__call__`` methods (Z-Image,
+    # Qwen, FLUX, …) unconditionally forward via diffusers ``retrieve_timesteps``.
+    # Without it DPMSolver's ``set_timesteps`` asserts on ``mu is not None``;
+    # UniPC silently discards ``mu`` (i.e. the trained dynamic shift never lands).
+    # Pinning the flag here makes both classes honor the pipeline-computed mu.
     "dpmpp": SamplerSpec(
         "DPMSolverMultistepScheduler",
-        {"use_flow_sigmas": True, "prediction_type": "flow_prediction"},
+        {
+            "use_flow_sigmas": True,
+            "prediction_type": "flow_prediction",
+            "use_dynamic_shifting": True,
+        },
     ),
     "unipc": SamplerSpec(
         "UniPCMultistepScheduler",
-        {"use_flow_sigmas": True},
+        {"use_flow_sigmas": True, "use_dynamic_shifting": True},
     ),
 }
 
@@ -188,6 +199,86 @@ def _coerce_config(config: Any) -> dict[str, Any]:
         return dict(config)
     except (TypeError, ValueError):
         return {}
+
+
+def _set_timesteps_accepts_mu(scheduler: Any) -> bool:
+    """Best-effort check: does ``scheduler.set_timesteps`` accept a ``mu`` kwarg?
+
+    Used to decide whether to install a mu-absorbing shim
+    (``_install_mu_shim``). Returns ``True`` when ``mu`` is a named param OR
+    the method accepts ``**kwargs``; ``False`` only when both are absent.
+    A signature inspection failure conservatively returns ``True`` so we
+    don't shim something we can't reason about.
+    """
+    set_timesteps = getattr(scheduler, "set_timesteps", None)
+    if set_timesteps is None:
+        return True
+    try:
+        sig = inspect.signature(set_timesteps)
+    except (TypeError, ValueError):
+        return True
+    params = sig.parameters
+    if "mu" in params:
+        return True
+    return any(p.kind == inspect.Parameter.VAR_KEYWORD for p in params.values())
+
+
+def _install_mu_shim(scheduler: Any, adapter: str | None) -> bool:
+    """Wrap ``scheduler.set_timesteps`` so callers passing ``mu=…`` don't crash.
+
+    Required for ``FlowMatchHeunDiscreteScheduler`` whose ``set_timesteps``
+    signature is ``(num_inference_steps, device=None)`` — no ``mu``, no
+    ``**kwargs``. The flow pipelines (Z-Image, Qwen, FLUX, …) always forward
+    ``mu`` through ``retrieve_timesteps``, so a plain swap into Heun raises
+    ``TypeError: ... unexpected keyword argument 'mu'``.
+
+    The shim translates ``mu`` to the static-shift form Heun *does* support:
+    ``scheduler.config.shift = exp(mu)`` (the same translation DPMSolver does
+    internally when ``use_dynamic_shifting`` is on), then delegates to the
+    real ``set_timesteps`` without the ``mu`` kwarg. Returns ``True`` when
+    the shim was installed.
+    """
+    set_timesteps = getattr(scheduler, "set_timesteps", None)
+    if set_timesteps is None:
+        return False
+    if getattr(scheduler, "_sceneworks_mu_shim", False):
+        return False
+
+    def shim(*args: Any, **kwargs: Any) -> Any:
+        mu_value = kwargs.pop("mu", None)
+        if mu_value is not None:
+            try:
+                shift_value = float(math.exp(float(mu_value)))
+            except (TypeError, ValueError):
+                shift_value = None
+            if shift_value is not None:
+                config = getattr(scheduler, "config", None)
+                if config is not None:
+                    try:
+                        # Diffusers FrozenDict supports item assignment; both
+                        # FrozenDict and SimpleNamespace accept attribute set.
+                        if hasattr(config, "__setitem__"):
+                            try:
+                                config["shift"] = shift_value
+                            except (TypeError, KeyError):
+                                pass
+                        if hasattr(config, "shift"):
+                            try:
+                                config.shift = shift_value
+                            except (AttributeError, TypeError):
+                                pass
+                    except Exception:  # noqa: BLE001
+                        pass
+        return set_timesteps(*args, **kwargs)
+
+    scheduler.set_timesteps = shim
+    scheduler._sceneworks_mu_shim = True
+    _emit(
+        "sampler_mu_shim_installed",
+        adapter=adapter,
+        schedulerClass=type(scheduler).__name__,
+    )
+    return True
 
 
 def _restore_original(pipe: Any) -> bool:
@@ -318,6 +409,9 @@ def apply_sampler(
 
     pipe.scheduler = new_scheduler
     pipe._sceneworks_sampler_dirty = True
+    mu_shim_installed = False
+    if not _set_timesteps_accepts_mu(new_scheduler):
+        mu_shim_installed = _install_mu_shim(new_scheduler, adapter=adapter)
     _emit(
         "sampler_applied",
         adapter=adapter,
@@ -327,6 +421,7 @@ def apply_sampler(
         schedulerClass=getattr(target_cls, "__name__", None),
         droppedFlags=dropped,
         appliedFlags=sorted(filtered),
+        muShimInstalled=mu_shim_installed,
     )
     return {
         "sampler": sampler_key,
@@ -335,6 +430,7 @@ def apply_sampler(
         "schedulerClass": getattr(target_cls, "__name__", None),
         "appliedFlags": sorted(filtered),
         "droppedFlags": dropped,
+        "muShimInstalled": mu_shim_installed,
         "noop": False,
     }
 
