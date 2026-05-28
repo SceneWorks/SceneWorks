@@ -982,6 +982,29 @@
         "families": ["sdxl"],
         "types": ["style", "enhance", "character"]
       },
+      // macOS-only MLX backend (sc-1975, path C). In-process via the vendored
+      // mlx-examples/stable_diffusion at scene_worker/_vendor/mlx_sd/ — no
+      // sidecar venv (deps are already in the worker venv when
+      // requirements-mlx.txt is installed). The auto-dispatch prefers MLX
+      // when MlxSdxlAdapter._mlx_sd_available() is true on darwin, the job
+      // is plain T2I, and no reference asset is present; otherwise the
+      // torch SdxlDiffusersAdapter remains the default. Escape hatch:
+      // SCENEWORKS_DISABLE_MLX_SDXL=1.
+      //
+      // No mlx.quantize knob yet — Apple's default Q8 recipe breaks SDXL
+      // base 1.0 (works on sdxl-turbo only); spike sc-1975 measured the bf16
+      // path at ~1.08 s/step on M5 Max (~3× the torch baseline) which is the
+      // headline win.
+      //
+      // No sampler/scheduler limits override either: mlx-examples runs the
+      // SDXL EulerDiscrete schedule its own way, which already matches the
+      // torch path's default. If the picker grows sampler choices later
+      // (currently the manifest has no `limits.samplers` for sdxl), this
+      // block will need the same default-only override as the mflux family
+      // entries.
+      "mlx": {
+        "minMemoryGb": 50
+      },
       "ui": {
         "label": "Stable Diffusion XL",
         "description": "Stability AI Stable Diffusion XL base 1.0 — the widely-supported open text-to-image foundation with the largest LoRA/finetune ecosystem. CreativeML OpenRAIL++-M (commercial use OK, ungated). SDXL UNet + dual CLIP text encoders; ~6.9GB fp16, real CFG + negative prompt. Recommended ~30 steps at guidance 7.0; native 1024x1024. With a character reference, runs IP-Adapter plus-face for scene-flexible resemblance (faithful likeness — see InstantID).",
