@@ -103,6 +103,31 @@ async function assertBuiltinPromptGuides() {
   }
 }
 
+async function assertCharacterImageTuningSurface() {
+  // Catch the sc-2017 picker UX mismatch at build time: a model that opts out
+  // of the IP-Adapter Reference-strength slider via `ui.hideReferenceStrength`
+  // must surface a `ui.variationStrength` slider in its place, otherwise the
+  // "With character" picker leaves the user with no identity-tuning control.
+  // The engine-wiring half of the sc-2018 guard lives in pytest because the
+  // scaffold can't see worker MODEL_TARGETS without parsing Python.
+  const manifestPath = "config/manifests/builtin.models.jsonc";
+  const manifest = JSON.parse(stripJsoncComments(await readFile(path.join(root, manifestPath), "utf8")));
+  const unbalanced = [];
+  for (const model of manifest.models ?? []) {
+    const ui = model.ui ?? {};
+    if (ui.hideReferenceStrength && !ui.variationStrength) {
+      unbalanced.push(model.id);
+    }
+  }
+  if (unbalanced.length) {
+    throw new Error(
+      `${manifestPath} models hide the Reference-strength slider without declaring ` +
+        `ui.variationStrength: ${unbalanced.join(", ")}. Add variationStrength or ` +
+        `drop hideReferenceStrength.`,
+    );
+  }
+}
+
 for (const requiredPath of requiredPaths) {
   await assertReadable(requiredPath);
 }
@@ -119,5 +144,6 @@ await assertContains(".env.example", "SCENEWORKS_RUST_WORKER_GPU_ID=cpu");
 await assertContains("docker/rust-api.Dockerfile", "sceneworks-rust-api");
 await assertContains("README.md", "SCENEWORKS_ACCESS_TOKEN");
 await assertBuiltinPromptGuides();
+await assertCharacterImageTuningSurface();
 
 console.log("SceneWorks scaffold check passed.");

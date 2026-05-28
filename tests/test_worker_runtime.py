@@ -8025,3 +8025,141 @@ def test_run_prompt_refine_job_reports_failure(monkeypatch):
     terminal = api.progress[-1]
     assert terminal["status"] == "failed"
     assert "Could not load" in terminal["message"]
+
+
+# ---------------------------------------------------------------------------
+# Multi-model Character Studio reference matrix (epic 2003 / sc-2018)
+# ---------------------------------------------------------------------------
+
+import re as _matrix_re
+
+
+def _strip_jsonc_comments(body: str) -> str:
+    """Mirror scripts/check-scaffold.mjs::stripJsoncComments so the audit reads
+    the real `config/manifests/builtin.models.jsonc` without a JSONC dependency.
+    Walks the body char-by-char, suppressing // line and /* block */ comments
+    but leaving them intact when they appear inside string literals.
+    """
+    result: list[str] = []
+    in_string = False
+    escaped = False
+    i = 0
+    while i < len(body):
+        char = body[i]
+        nxt = body[i + 1] if i + 1 < len(body) else ""
+        if in_string:
+            result.append(char)
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == '"':
+                in_string = False
+            i += 1
+            continue
+        if char == '"':
+            in_string = True
+            result.append(char)
+            i += 1
+            continue
+        if char == "/" and nxt == "/":
+            while i < len(body) and body[i] != "\n":
+                i += 1
+            result.append("\n")
+            continue
+        if char == "/" and nxt == "*":
+            i += 2
+            while i < len(body) - 1 and not (body[i] == "*" and body[i + 1] == "/"):
+                i += 1
+            i += 2
+            continue
+        result.append(char)
+        i += 1
+    return "".join(result)
+
+
+def _load_builtin_models_manifest() -> dict:
+    manifest_path = Path(__file__).resolve().parent.parent / "config" / "manifests" / "builtin.models.jsonc"
+    raw = manifest_path.read_text(encoding="utf-8")
+    return json.loads(_strip_jsonc_comments(raw))
+
+
+def test_character_image_capability_implies_engine_or_tuning_declaration():
+    """Every builtin model that advertises `character_image` must have either
+    a worker engine block (`ipAdapter` / `instantId` in MODEL_TARGETS) OR a
+    `ui.variationStrength` declaration in the manifest. Otherwise the capability
+    flag is dishonest — the picker shows the model in "With character" mode but
+    the worker silently ignores the reference, the same shape as z_image_turbo's
+    pre-sc-2005 bug. This is the cross-backbone guard for epic 2003 (sc-2018):
+    adding a future character_image backbone without engine wiring will fail
+    here before it ever reaches a user.
+    """
+    manifest = _load_builtin_models_manifest()
+    misleading: list[str] = []
+    for model in manifest.get("models", []):
+        capabilities = model.get("capabilities") or []
+        if "character_image" not in capabilities:
+            continue
+        target = MODEL_TARGETS.get(model["id"], {})
+        ui = model.get("ui") or {}
+        has_engine = bool(target.get("ipAdapter") or target.get("instantId"))
+        has_variation_ui = bool(ui.get("variationStrength"))
+        if not (has_engine or has_variation_ui):
+            misleading.append(model["id"])
+    assert not misleading, (
+        f"Models advertise `character_image` without engine wiring or a "
+        f"`ui.variationStrength` declaration: {misleading}. Add an `ipAdapter` "
+        f"or `instantId` block in MODEL_TARGETS for an IP-Adapter / face-ID "
+        f"backbone, or declare `ui.variationStrength` for an edit-style backbone "
+        f"(sc-2017), or drop the capability flag (the z_image_turbo bug, sc-2005)."
+    )
+
+
+def test_models_with_engine_block_advertise_character_image():
+    """The reverse-drift guard. Any model that ships an `ipAdapter` or
+    `instantId` block in MODEL_TARGETS exists to serve Character Studio's
+    reference flow — the manifest must advertise the capability so the picker
+    surfaces it. Catches the case where someone wires the worker engine but
+    forgets to flip the manifest flag, leaving the engine unreachable.
+    """
+    manifest = _load_builtin_models_manifest()
+    manifest_by_id = {model["id"]: model for model in manifest.get("models", [])}
+    unreachable: list[str] = []
+    for model_id, target in MODEL_TARGETS.items():
+        if not (target.get("ipAdapter") or target.get("instantId")):
+            continue
+        builtin = manifest_by_id.get(model_id)
+        if builtin is None:
+            # Worker-only target not exposed as a built-in (unwired path).
+            continue
+        capabilities = builtin.get("capabilities") or []
+        if "character_image" not in capabilities:
+            unreachable.append(model_id)
+    assert not unreachable, (
+        f"Models have engine blocks in MODEL_TARGETS but the builtin manifest "
+        f"does not advertise `character_image`: {unreachable}. Add the capability "
+        f"to `capabilities` and `ui.recommendedFor` so the Image Studio "
+        f"\"With character\" picker surfaces the model."
+    )
+
+
+def test_hide_reference_strength_models_declare_a_variation_knob():
+    """Symmetry guard for the sc-2017 picker UX. A model that opts out of the
+    IP-Adapter reference-strength slider via `ui.hideReferenceStrength` MUST
+    also declare `ui.variationStrength` — otherwise the picker shows no tuning
+    control at all, and the worker silently runs at default true_cfg_scale.
+    """
+    manifest = _load_builtin_models_manifest()
+    unbalanced: list[str] = []
+    for model in manifest.get("models", []):
+        ui = model.get("ui") or {}
+        if not ui.get("hideReferenceStrength"):
+            continue
+        if not ui.get("variationStrength"):
+            unbalanced.append(model["id"])
+    assert not unbalanced, (
+        f"Models hide the Reference-strength slider without declaring "
+        f"`ui.variationStrength`: {unbalanced}. The picker would leave the user "
+        f"with NO identity tuning control. Add `variationStrength` or drop "
+        f"`hideReferenceStrength`."
+    )
