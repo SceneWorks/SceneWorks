@@ -19,6 +19,11 @@ from scene_worker.instantid_adapter import (
     _letterbox,
     _view_angle_kps,
 )
+from scene_worker.openpose_skeleton import (
+    draw_bodypose,
+    face_box_from_keypoints,
+    normalize_keypoints,
+)
 
 _TEST_TARGET = {
     "label": "Test InstantID",
@@ -181,3 +186,64 @@ def test_angle_set_order_covers_pack_without_dupes():
     assert len(set(ANGLE_SET_ORDER)) == len(ANGLE_SET_ORDER)
     assert ANGLE_SET_ORDER[0] == "front"
     assert all(angle in VIEW_ANGLE_KPS for angle in ANGLE_SET_ORDER)
+
+
+# ---- pose library (sc-2064 / sc-2065) -------------------------------------------
+
+# A minimal front-standing COCO-18 skeleton (normalized) for the renderer/face-box tests.
+_FRONT_KPS = [
+    [0.50, 0.09], [0.50, 0.16], [0.44, 0.17], [0.42, 0.29], [0.41, 0.40],
+    [0.56, 0.17], [0.58, 0.29], [0.59, 0.40], [0.47, 0.47], [0.46, 0.70],
+    [0.46, 0.93], [0.53, 0.47], [0.54, 0.70], [0.54, 0.93], [0.48, 0.078],
+    [0.52, 0.078], [0.46, 0.088], [0.54, 0.088],
+]
+
+
+def test_normalize_keypoints_coerces_to_18():
+    # [x,y], [x,y,conf], None, and conf<=0 are all handled; result is always length 18.
+    raw = [[0.5, 0.1], [0.4, 0.2, 1.0], None, [0.3, 0.3, 0.0]]
+    out = normalize_keypoints(raw)
+    assert len(out) == 18
+    assert out[0] == (0.5, 0.1)
+    assert out[1] == (0.4, 0.2)
+    assert out[2] is None  # explicit None
+    assert out[3] is None  # confidence 0 -> dropped
+    assert all(p is None for p in out[4:])  # padded to 18
+    assert normalize_keypoints(None) == [None] * 18
+
+
+def test_draw_bodypose_renders_colored():
+    # Renders an OpenPose control image of the requested size with colored joints/limbs.
+    skel = draw_bodypose(64, 96, normalize_keypoints(_FRONT_KPS))
+    assert skel.shape == (96, 64, 3)
+    assert str(skel.dtype) == "uint8"
+    assert skel.any()  # not an all-black canvas
+    # An all-empty skeleton stays black.
+    assert not draw_bodypose(64, 96, [None] * 18).any()
+
+
+def test_face_box_from_keypoints():
+    # A head (nose/eyes/neck present) yields a (cx, cy, height_frac) box; no head -> None
+    # so the adapter disables IdentityNet + the face-restoration pass.
+    box = face_box_from_keypoints(normalize_keypoints(_FRONT_KPS))
+    assert box is not None and len(box) == 3
+    cx, cy, fhf = box
+    assert 0.0 <= cx <= 1.0 and 0.0 <= cy <= 1.0
+    assert 0.045 <= fhf <= 0.20  # clamped small full-body face fraction
+    # Head keypoints (nose=0, eyes=14/15) absent -> None.
+    headless = list(normalize_keypoints(_FRONT_KPS))
+    for i in (0, 14, 15):
+        headless[i] = None
+    assert face_box_from_keypoints(headless) is None
+
+
+def test_realvisxl_target_has_openpose_for_pose_library():
+    open_pose = MODEL_TARGETS["instantid_realvisxl"].get("openPose")
+    assert open_pose and open_pose["repo"] == "xinsir/controlnet-openpose-sdxl-1.0"
+
+
+def test_openpose_scale_default_and_override():
+    adapter = InstantIDAdapter()
+    assert adapter._openpose_scale(SimpleNamespace(advanced={})) == 0.7
+    assert adapter._openpose_scale(SimpleNamespace(advanced={"openPoseScale": 0.55})) == 0.55
+    assert adapter._openpose_scale(SimpleNamespace(advanced={"openPoseScale": "x"})) == 0.7
