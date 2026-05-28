@@ -388,23 +388,23 @@ export function WorkerProgressCard({
         <HardwarePills {...hardware} />
         {hardware.device === "GPU" ? (
           <div className="worker-progress-card__meters" data-meter-source={meters.source}>
-            <MeterBar label="Mem" value={meters.memUsedPct} />
-            <MeterBar label="Load" value={meters.loadPct} />
+            <MeterBar label="Mem:" value={meters.memUsedPct} />
+            <MeterBar label="Load:" value={meters.loadPct} />
           </div>
         ) : null}
       </div>
       <div className="worker-progress-card__status-row">
         <span>
-          <small>Stage</small>
+          <small>Stage:</small>
           <strong>{defaultChipLabel(job.stage ?? job.status)}</strong>
         </span>
         <span>
-          <small>Elapsed</small>
+          <small>Elapsed:</small>
           <strong>{formatSeconds(elapsedSeconds)}</strong>
         </span>
         {attempts > 1 || actionStatuses.has(job.status) ? (
           <span>
-            <small>Attempt</small>
+            <small>Attempt:</small>
             <strong>{attempts}/{MAX_ATTEMPTS}</strong>
           </span>
         ) : null}
