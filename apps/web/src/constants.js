@@ -245,6 +245,23 @@ export const fallbackModels = [
     },
   },
   {
+    id: "pulid_flux_dev",
+    name: "PuLID-FLUX (FLUX.1 [dev])",
+    type: "image",
+    // Reference-driven only — appears solely in the "With character" picker.
+    capabilities: ["character_image"],
+    ui: {
+      description: "Identity-preserving FLUX character generation — holds a person's face from a single reference image while the prompt drives scene, pose, and wardrobe. FLUX.1-dev + PuLID IDFormer cross-attention; the sc-2012 spike measured 0.8016 ArcFace cosine vs reference at id_weight=1.0 / start-cfg=4 (above InstantID-SDXL no-restore; no face-restoration pass needed). Pick a character with an approved reference, then raise Variations. ~30 steps at guidance 4.0, ~85 GB peak unified memory. License: FLUX.1 [dev] non-commercial (gated).",
+      promptGuide: { title: "PuLID-FLUX Prompt Guide", path: "/prompt-guides/pulid-flux.md" },
+      // Identity tuning: reference strength drives idWeight (PuLID's identity-strength
+      // analog of InstantID's ip_adapter_scale); identityStructure adds a second slider
+      // for timestepToStartCfg (higher = identity injected later in the denoise = more
+      // editability but weaker identity; PuLID photoreal recommendation is 4).
+      referenceStrengthDefault: 1.0,
+      identityStructure: { label: "Identity start step", default: 4, min: 0, max: 8, step: 1 },
+    },
+  },
+  {
     id: "ltx_2_3",
     name: "LTX-2.3",
     type: "video",
