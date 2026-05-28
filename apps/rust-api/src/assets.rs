@@ -50,32 +50,6 @@ fn asset_matches_character(asset: &serde_json::Value, character_id: &str) -> boo
     by_recipe || by_reference
 }
 
-#[cfg(test)]
-mod character_filter_tests {
-    use super::asset_matches_character;
-    use serde_json::json;
-
-    #[test]
-    fn matches_by_recipe_character_id() {
-        let asset = json!({ "recipe": { "normalizedSettings": { "characterId": "char-1" } } });
-        assert!(asset_matches_character(&asset, "char-1"));
-        assert!(!asset_matches_character(&asset, "char-2"));
-    }
-
-    #[test]
-    fn matches_by_character_reference() {
-        let asset = json!({ "metadata": { "characterReferences": [{ "characterId": "char-9" }] } });
-        assert!(asset_matches_character(&asset, "char-9"));
-        assert!(!asset_matches_character(&asset, "char-1"));
-    }
-
-    #[test]
-    fn no_match_when_unassociated() {
-        let asset = json!({ "recipe": { "normalizedSettings": { "width": 1024 } } });
-        assert!(!asset_matches_character(&asset, "char-1"));
-    }
-}
-
 pub(crate) async fn get_asset(
     State(state): State<AppState>,
     Path((project_id, asset_id)): Path<(String, String)>,
@@ -202,4 +176,30 @@ pub(crate) async fn purge_asset(
         })
         .await?,
     ))
+}
+
+#[cfg(test)]
+mod character_filter_tests {
+    use super::asset_matches_character;
+    use serde_json::json;
+
+    #[test]
+    fn matches_by_recipe_character_id() {
+        let asset = json!({ "recipe": { "normalizedSettings": { "characterId": "char-1" } } });
+        assert!(asset_matches_character(&asset, "char-1"));
+        assert!(!asset_matches_character(&asset, "char-2"));
+    }
+
+    #[test]
+    fn matches_by_character_reference() {
+        let asset = json!({ "metadata": { "characterReferences": [{ "characterId": "char-9" }] } });
+        assert!(asset_matches_character(&asset, "char-9"));
+        assert!(!asset_matches_character(&asset, "char-1"));
+    }
+
+    #[test]
+    fn no_match_when_unassociated() {
+        let asset = json!({ "recipe": { "normalizedSettings": { "width": 1024 } } });
+        assert!(!asset_matches_character(&asset, "char-1"));
+    }
 }
