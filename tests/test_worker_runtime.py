@@ -112,6 +112,7 @@ from scene_worker.training_adapters import (
     _ZImageLoraBackend,
     _build_mlx_lr_schedule,
     _build_mlx_optimizer,
+    apply_weight_noise,
     build_lr_scheduler,
     build_optimizer,
     bucket_resolution,
@@ -3633,6 +3634,60 @@ def test_read_run_config_defaults_lr_scheduler_to_constant():
     config = read_run_config({"config": {}})
     assert config.lr_scheduler == "constant"
     assert config.lr_warmup_steps == 0
+
+
+def test_read_run_config_defaults_weight_noise_sigma_to_zero():
+    config = read_run_config({"config": {}})
+    assert config.weight_noise_sigma == 0.0
+
+
+def test_read_run_config_parses_weight_noise_sigma():
+    config = read_run_config(
+        {"config": {"advanced": {"weightNoiseSigma": 0.00125}}}
+    )
+    assert config.weight_noise_sigma == pytest.approx(0.00125)
+
+
+def test_read_run_config_clamps_negative_weight_noise_sigma_to_zero():
+    config = read_run_config(
+        {"config": {"advanced": {"weightNoiseSigma": -0.01}}}
+    )
+    assert config.weight_noise_sigma == 0.0
+
+
+def test_apply_weight_noise_is_no_op_when_sigma_is_zero():
+    torch = pytest.importorskip("torch")
+
+    param = torch.nn.Parameter(torch.zeros(4))
+    optimizer = torch.optim.SGD([param], lr=0.0)
+    apply_weight_noise(torch, optimizer, 0.0)
+    assert torch.equal(param.detach(), torch.zeros(4))
+
+
+def test_apply_weight_noise_perturbs_with_expected_magnitude():
+    torch = pytest.importorskip("torch")
+
+    torch.manual_seed(0)
+    param = torch.nn.Parameter(torch.zeros(4096))
+    optimizer = torch.optim.SGD([param], lr=0.0)
+    sigma = 0.01
+    apply_weight_noise(torch, optimizer, sigma)
+    # Population std of N(0, sigma) ~= sigma; allow a generous bound for 4096 samples.
+    std = float(param.detach().std())
+    assert std == pytest.approx(sigma, rel=0.1)
+    # Mean should be near zero — perturbation is centered.
+    assert abs(float(param.detach().mean())) < sigma
+
+
+def test_apply_weight_noise_skips_frozen_params():
+    torch = pytest.importorskip("torch")
+
+    trainable = torch.nn.Parameter(torch.zeros(8))
+    frozen = torch.nn.Parameter(torch.zeros(8), requires_grad=False)
+    optimizer = torch.optim.SGD([{"params": [trainable, frozen]}], lr=0.0)
+    apply_weight_noise(torch, optimizer, 0.01)
+    assert torch.equal(frozen.detach(), torch.zeros(8))
+    assert not torch.equal(trainable.detach(), torch.zeros(8))
 
 
 def test_build_mlx_lr_schedule_constant_no_warmup_is_plain_float():
