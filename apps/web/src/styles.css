@@ -805,7 +805,6 @@ label {
 .form-row button,
 .queue-chip,
 .job-composer button,
-.job-actions button,
 .editor-actions button,
 .timeline-create button,
 .playback-bar button,
@@ -849,7 +848,6 @@ label {
 .form-row button:hover:not(:disabled),
 .queue-chip:hover:not(:disabled),
 .job-composer button:hover:not(:disabled),
-.job-actions button:hover:not(:disabled),
 .editor-actions button:hover:not(:disabled),
 .timeline-create button:hover:not(:disabled),
 .playback-bar button:hover:not(:disabled),
@@ -1668,7 +1666,6 @@ label {
 .training-empty-state,
 .training-panel,
 .training-live-panel,
-.training-live-card,
 .training-dataset-row,
 .training-step-block,
 .training-dataset-list-panel,
@@ -1757,23 +1754,24 @@ label {
   padding: 14px;
 }
 
-.training-live-title,
-.training-live-head,
-.training-live-meta {
+/* .training-live-title remains because TrainingStudio.jsx still renders it as the
+   panel's heading row. .training-live-head / .training-live-meta /
+   .training-live-card / .training-sample-grid / .training-sample-tile were all
+   removed in sc-2093 — the WorkerProgressCard absorbs them. */
+
+.training-live-title {
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: 12px;
 }
 
-.training-live-title h3,
-.training-live-head h3 {
+.training-live-title h3 {
   margin: 2px 0 0;
   font-size: 16px;
 }
 
-.training-live-title > span,
-.training-live-meta {
+.training-live-title > span {
   color: var(--text-muted);
   font-size: 12px;
 }
@@ -1781,56 +1779,6 @@ label {
 .training-live-list {
   display: grid;
   gap: 10px;
-}
-
-.training-live-card {
-  display: grid;
-  gap: 10px;
-  min-width: 0;
-  padding: 12px;
-  background: var(--surface);
-}
-
-.training-sample-grid {
-  display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
-  gap: 8px;
-}
-
-.training-sample-tile {
-  display: grid;
-  gap: 6px;
-  min-width: 0;
-}
-
-.training-sample-tile img,
-.training-sample-tile > span {
-  width: 100%;
-  aspect-ratio: 1;
-  border: 1px solid var(--border);
-  border-radius: var(--r-sm);
-  background: var(--surface-2);
-}
-
-.training-sample-tile img {
-  object-fit: cover;
-  display: block;
-}
-
-.training-sample-tile > span {
-  display: grid;
-  place-items: center;
-  color: var(--text-muted);
-  font-size: 12px;
-  font-weight: 700;
-}
-
-.training-sample-tile small {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  color: var(--text-muted);
-  font-size: 11px;
 }
 
 .training-panel {
@@ -3227,64 +3175,10 @@ label {
   gap: 10px;
 }
 
-.local-job-card {
-  display: grid;
-  gap: 12px;
-  border: 1px solid var(--border);
-  background: var(--surface-2);
-  border-radius: var(--r-md);
-  padding: 12px;
-  min-width: 0;
-}
-
-.local-job-card.failed,
-.local-job-card.canceled,
-.local-job-card.interrupted {
-  border-color: color-mix(in oklch, var(--danger) 45%, var(--border));
-  background: var(--danger-soft);
-}
-
-.local-job-main {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
-  gap: 10px 12px;
-  align-items: start;
-}
-
-.local-job-main > div {
-  min-width: 0;
-}
-
-.local-job-main h3 {
-  display: -webkit-box;
-  -webkit-box-orient: vertical;
-  -webkit-line-clamp: 2;
-  overflow: hidden;
-  margin: 0;
-  font-size: 15px;
-  font-weight: 600;
-  line-height: 1.35;
-  overflow-wrap: anywhere;
-}
-
-.local-job-card .job-meta {
-  gap: 6px;
-}
-
-.local-job-card .job-meta span {
-  min-width: 0;
-  padding: 4px 8px;
-  border: 1px solid var(--border);
-  border-radius: var(--r-pill);
-  background: var(--surface);
-  line-height: 1.35;
-  overflow-wrap: anywhere;
-}
-
-.local-job-card .job-message {
-  line-height: 1.45;
-  overflow-wrap: anywhere;
-}
+/* Legacy .local-job-card / .local-job-main / .job-message / .local-job-actions
+   blocks were removed in sc-2093 — the WorkerProgressCard owns all of that now.
+   The .local-job-group and .local-job-stack wrappers are kept because Image,
+   Video, Training, and Document studios still use them as the stack container. */
 
 .secondary-action {
   justify-self: start;
@@ -3300,12 +3194,6 @@ label {
 
 .secondary-action.danger:hover:not(:disabled) {
   background: var(--danger-soft);
-}
-
-.local-job-actions {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 8px;
 }
 
 .status-badge {
@@ -5780,8 +5668,7 @@ label {
 }
 
 .worker-card,
-.empty-panel,
-.job-row {
+.empty-panel {
   border: 1px solid var(--border);
   background: var(--surface);
   border-radius: var(--r-md);
@@ -5903,35 +5790,11 @@ label {
   color: var(--text);
 }
 
-.job-row {
-  display: grid;
-  gap: 10px;
-  padding: 14px;
-}
-
-.job-main,
-.job-meta,
-.job-actions {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 10px;
-  align-items: center;
-}
-
-.job-main {
-  justify-content: space-between;
-}
-
-.job-main h3 {
-  margin: 0;
-  font-size: 15px;
-  font-weight: 600;
-}
-
-.job-meta {
-  color: var(--text-muted);
-  font-size: 12px;
-}
+/* Legacy .job-row / .job-main / .job-meta / .job-actions / .job-message and the
+   .job-row.<status> status-badge overrides were removed in sc-2093 — the
+   WorkerProgressCard handles all per-row layout + status styling now. The
+   shared .progress-track primitive is kept because the WorkerProgressCard
+   still composes its progress bar on top of it. */
 
 .progress-track {
   height: 8px;
@@ -5948,31 +5811,8 @@ label {
   transition: width 180ms ease;
 }
 
-.job-message {
-  margin: 0;
-  color: var(--text-muted);
-  font-size: 13px;
-}
-
 .error-text {
   color: var(--danger);
-}
-
-.job-row.completed .status-badge {
-  color: var(--accent-strong);
-  background: var(--accent-soft);
-  border-color: transparent;
-}
-
-[data-theme="dark"] .job-row.completed .status-badge {
-  color: var(--accent);
-}
-
-.job-row.failed .status-badge,
-.job-row.interrupted .status-badge {
-  color: var(--danger);
-  background: var(--danger-soft);
-  border-color: color-mix(in oklch, var(--danger) 35%, transparent);
 }
 
 /* ---------- Inline create rows ---------- */
@@ -6063,7 +5903,6 @@ label {
   .training-config-preview,
   .training-config-grid,
   .training-advanced-grid,
-  .training-sample-grid,
   .training-caption-workspace,
   .training-caption-toolbar,
   .training-caption-row,
@@ -6516,4 +6355,448 @@ label {
   background: var(--accent-soft, rgba(108, 140, 255, 0.12));
   border-radius: var(--r-md, 8px);
   font-size: 0.85rem;
+}
+
+/*
+ * WorkerProgressCard (sc-2083) — unified worker/job progress component.
+ * See docs/design/worker-progress-card.md. Replaces .local-job-card, .job-row,
+ * and .training-live-card as those screens migrate (sc-2088..2092). Until
+ * cleanup (sc-2093) lands, the legacy classes coexist.
+ */
+.worker-progress-card {
+  display: grid;
+  gap: 10px;
+  border: 1px solid var(--border);
+  background: var(--surface-2);
+  border-radius: var(--r-md);
+  padding: 12px;
+  min-width: 0;
+}
+
+.worker-progress-card.failed,
+.worker-progress-card.canceled,
+.worker-progress-card.interrupted {
+  border-color: color-mix(in oklch, var(--danger) 45%, var(--border));
+  background: var(--danger-soft);
+}
+
+.worker-progress-card__header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.worker-progress-card__type {
+  display: inline-flex;
+  align-items: center;
+  padding: 3px 10px;
+  border-radius: var(--r-pill);
+  border: 1px solid var(--border);
+  background: var(--surface);
+  font-size: 11.5px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+
+/* Job-type chip color modifiers. Background uses accent-soft so the chip
+   reads as a category label, not a CTA. */
+.worker-progress-card__type.chip-image-generate,
+.worker-progress-card__type.chip-image-edit,
+.worker-progress-card__type.chip-image-vqa,
+.worker-progress-card__type.chip-image-interleave,
+.worker-progress-card__type.chip-person-replace {
+  background: var(--accent-soft);
+  color: var(--accent-strong);
+  border-color: transparent;
+}
+
+.worker-progress-card__type.chip-video-generate,
+.worker-progress-card__type.chip-video-extend,
+.worker-progress-card__type.chip-video-bridge {
+  background: color-mix(in oklch, var(--accent) 18%, var(--surface));
+  color: var(--accent-strong);
+  border-color: transparent;
+}
+
+.worker-progress-card__type.chip-lora-train {
+  background: color-mix(in oklch, #f59f00 22%, var(--surface));
+  color: color-mix(in oklch, #b45309 85%, var(--text));
+  border-color: transparent;
+}
+
+.worker-progress-card__type.chip-training-caption {
+  background: color-mix(in oklch, #facc15 22%, var(--surface));
+  color: color-mix(in oklch, #854d0e 85%, var(--text));
+  border-color: transparent;
+}
+
+.worker-progress-card__type.chip-model-download,
+.worker-progress-card__type.chip-model-import,
+.worker-progress-card__type.chip-model-convert,
+.worker-progress-card__type.chip-lora-import {
+  background: color-mix(in oklch, var(--text-muted) 18%, var(--surface));
+  color: var(--text);
+}
+
+.worker-progress-card__title-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: baseline;
+  gap: 8px;
+}
+
+.worker-progress-card__title {
+  margin: 0;
+  font-size: 15px;
+  font-weight: 600;
+  line-height: 1.35;
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  overflow: hidden;
+  overflow-wrap: anywhere;
+}
+
+.worker-progress-card__id {
+  font-family: var(--font-mono, ui-monospace, SFMono-Regular, monospace);
+  font-size: 11px;
+  color: var(--text-muted);
+  cursor: copy;
+}
+
+.worker-progress-card__hardware {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 12px;
+  align-items: center;
+}
+
+.worker-progress-card__hw-pills {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.worker-progress-card__pill {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px 8px;
+  border-radius: var(--r-pill);
+  border: 1px solid var(--border);
+  background: var(--surface);
+  font-size: 10.5px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+  white-space: nowrap;
+}
+
+.worker-progress-card__pill.device {
+  color: var(--text);
+}
+
+.worker-progress-card__pill.arch.arch-cuda {
+  background: color-mix(in oklch, #16a34a 16%, var(--surface));
+  color: color-mix(in oklch, #15803d 85%, var(--text));
+  border-color: transparent;
+}
+
+.worker-progress-card__pill.arch.arch-mps,
+.worker-progress-card__pill.arch.arch-mlx {
+  background: color-mix(in oklch, #2563eb 16%, var(--surface));
+  color: color-mix(in oklch, #1d4ed8 85%, var(--text));
+  border-color: transparent;
+}
+
+.worker-progress-card__meters {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  flex: 1 1 240px;
+  min-width: 200px;
+}
+
+.worker-progress-card__meter {
+  display: grid;
+  grid-template-columns: auto 1fr auto;
+  align-items: center;
+  gap: 6px;
+  flex: 1 1 120px;
+  font-size: 11px;
+  color: var(--text-muted);
+}
+
+.worker-progress-card__meter-label {
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.worker-progress-card__meter-bar {
+  display: block;
+  height: 6px;
+  border-radius: 3px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  overflow: hidden;
+  position: relative;
+}
+
+.worker-progress-card__meter-bar > span {
+  display: block;
+  height: 100%;
+  background: var(--accent);
+  border-radius: 3px;
+  transition: width 200ms ease;
+}
+
+.worker-progress-card__meter.empty .worker-progress-card__meter-bar {
+  background: transparent;
+}
+
+.worker-progress-card__meter-value {
+  font-variant-numeric: tabular-nums;
+  min-width: 32px;
+  text-align: right;
+}
+
+.worker-progress-card__status-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 14px;
+  font-size: 12px;
+}
+
+.worker-progress-card__status-row > span {
+  display: inline-flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.worker-progress-card__status-row small {
+  font-size: 10.5px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--text-muted);
+}
+
+.worker-progress-card__status-row strong {
+  font-size: 12.5px;
+  font-weight: 600;
+}
+
+.worker-progress-card__progress.indeterminate {
+  position: relative;
+  overflow: hidden;
+}
+
+.worker-progress-card__progress.indeterminate::after {
+  content: "";
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 40%;
+  background: linear-gradient(
+    90deg,
+    transparent,
+    color-mix(in oklch, var(--accent) 65%, transparent),
+    transparent
+  );
+  animation: worker-progress-card-indeterminate 1400ms ease-in-out infinite;
+}
+
+@keyframes worker-progress-card-indeterminate {
+  from { transform: translateX(-100%); }
+  to { transform: translateX(350%); }
+}
+
+.worker-progress-card__actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.worker-progress-card__message {
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.45;
+  color: var(--text-muted);
+  overflow-wrap: anywhere;
+}
+
+.worker-progress-card__message.error {
+  color: var(--danger);
+}
+
+@media (max-width: 480px) {
+  .worker-progress-card__title-row {
+    grid-template-columns: 1fr;
+  }
+  .worker-progress-card__id {
+    justify-self: start;
+  }
+  .worker-progress-card__actions .secondary-action {
+    flex: 1 1 100%;
+  }
+}
+
+/* Thumbnails region (sc-2084). Variant chosen via the thumbnailsVariant prop. */
+.worker-progress-card__thumbnails {
+  display: grid;
+  gap: 8px;
+  min-width: 0;
+}
+
+.worker-progress-card__thumbnails--image-grid {
+  grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
+}
+
+.worker-progress-card__thumbnails--small-row {
+  grid-auto-flow: column;
+  grid-auto-columns: 56px;
+  overflow-x: auto;
+  gap: 6px;
+}
+
+.worker-progress-card__thumbnails--video-player {
+  display: grid;
+  position: relative;
+}
+
+.worker-progress-card__thumb-cell {
+  display: block;
+  padding: 0;
+  border: 1px solid var(--border);
+  border-radius: var(--r-md);
+  overflow: hidden;
+  background: var(--surface);
+  cursor: pointer;
+  aspect-ratio: 1 / 1;
+  width: 100%;
+  min-width: 0;
+}
+
+.worker-progress-card__thumb-cell.small {
+  width: 56px;
+  height: 56px;
+  border-radius: var(--r-sm, 6px);
+}
+
+.worker-progress-card__thumb-cell.skeleton {
+  background: linear-gradient(
+    90deg,
+    var(--surface),
+    color-mix(in oklch, var(--surface-2) 70%, var(--surface)),
+    var(--surface)
+  );
+  background-size: 200% 100%;
+  animation: worker-progress-card-skeleton 1400ms ease-in-out infinite;
+  cursor: default;
+}
+
+@keyframes worker-progress-card-skeleton {
+  from { background-position: 200% 0; }
+  to { background-position: -200% 0; }
+}
+
+.worker-progress-card__thumb-cell.interim {
+  outline: 1px dashed color-mix(in oklch, var(--accent) 55%, transparent);
+  outline-offset: -1px;
+}
+
+.worker-progress-card__thumb-media {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.worker-progress-card__thumb-label {
+  display: block;
+  padding: 4px 6px;
+  font-size: 10.5px;
+  line-height: 1.3;
+  color: var(--text-muted);
+  text-align: center;
+  background: var(--surface);
+  border-top: 1px solid var(--border);
+}
+
+/* When a label is present the cell needs to shed its 1:1 aspect to fit the
+   text under the thumb. Pin the media to a square area and let the label sit
+   below it. */
+.worker-progress-card__thumb-cell:has(.worker-progress-card__thumb-label) {
+  aspect-ratio: auto;
+  display: grid;
+  grid-template-rows: 1fr auto;
+}
+
+.worker-progress-card__thumb-cell:has(.worker-progress-card__thumb-label) .worker-progress-card__thumb-media {
+  aspect-ratio: 1 / 1;
+}
+
+.worker-progress-card__video {
+  width: 100%;
+  max-height: 360px;
+  border-radius: var(--r-md);
+  background: var(--surface);
+  object-fit: contain;
+}
+
+.worker-progress-card__video-placeholder {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 100%;
+  aspect-ratio: 16 / 9;
+  background: color-mix(in oklch, var(--surface) 70%, var(--surface-2));
+  border: 1px dashed var(--border);
+  border-radius: var(--r-md);
+  color: var(--text-muted);
+  font-size: 12px;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.worker-progress-card__thumbnails--video-player.empty {
+  /* container itself shows the placeholder */
+}
+
+.worker-progress-card__video-open {
+  position: absolute;
+  right: 8px;
+  bottom: 8px;
+  padding: 4px 10px;
+  border-radius: var(--r-pill);
+  border: 1px solid var(--border);
+  background: color-mix(in oklch, var(--surface-2) 80%, transparent);
+  font-size: 11px;
+  cursor: pointer;
+}
+
+/* Stacked WorkerProgressCards in Image/Video Studio (sc-2088 / sc-2089).
+   The stack wraps active jobs; Recent Assets renders below it. */
+.worker-progress-card-stack {
+  display: grid;
+  gap: 12px;
+}
+
+.recent-assets {
+  display: grid;
+  gap: 10px;
+  margin-top: 16px;
+}
+
+.recent-assets__title {
+  margin: 0;
+  font-size: 13px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--text-muted);
 }
