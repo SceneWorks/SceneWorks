@@ -410,9 +410,13 @@ export function App() {
   const [jobPrompt, setJobPrompt] = useState("Placeholder generation");
   const [latestGenerationSetId, setLatestGenerationSetId] = useState(null);
   const [previewAsset, setPreviewAsset] = useState(null);
+  // Which way the user last scrolled in the fullscreen preview, so discarding an
+  // asset advances in that same direction.
+  const previewDirectionRef = useRef("next");
   const [studioLaunch, setStudioLaunch] = useState(null);
   const [error, setError] = useState("");
   const [theme, setTheme] = useState(readStoredTheme);
+  const desktopThemeHydrated = useRef(false);
   const activeProjectRef = useRef(null);
   const activeViewRef = useRef(activeView);
   const localGenerationJobIdsRef = useRef(localGenerationJobIds);
@@ -535,7 +539,13 @@ export function App() {
     () => assets.find((asset) => asset.id === selectedAssetId) ?? assets[0] ?? null,
     [assets, selectedAssetId],
   );
-  const foldedPreviewAssets = useMemo(() => foldUpscaledAssetVariants(assets), [assets]);
+  // Discarded (trashed) assets are excluded from the fullscreen navigation so
+  // they don't show up while scrolling; purged assets are already dropped from
+  // `assets` entirely.
+  const foldedPreviewAssets = useMemo(
+    () => foldUpscaledAssetVariants(assets.filter((asset) => !asset.status?.trashed)),
+    [assets],
+  );
   const previewedAsset = useMemo(
     () => (previewAsset ? findFoldedAssetById(foldedPreviewAssets, previewAsset.id) ?? previewAsset : null),
     [foldedPreviewAssets, previewAsset],
@@ -671,6 +681,39 @@ export function App() {
     } catch {
       // ignore (private mode etc.)
     }
+  }, [theme]);
+
+  // Desktop: localStorage is keyed to the API's per-launch random port, so it
+  // can't carry the theme across restarts (see isDesktopShell note). Seed from
+  // the durable setting on launch, then persist every change back to it.
+  useEffect(() => {
+    if (!isDesktopShell) {
+      return;
+    }
+    let cancelled = false;
+    tauriInvoke("get_app_settings")
+      .then((settings) => {
+        const stored = settings?.theme;
+        if (!cancelled && (stored === "dark" || stored === "light")) {
+          setTheme(stored);
+        }
+      })
+      .catch(() => {})
+      .finally(() => {
+        desktopThemeHydrated.current = true;
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  useEffect(() => {
+    // Wait until the stored theme has loaded so the initial render doesn't
+    // overwrite it with the default before we've read it back.
+    if (!isDesktopShell || !desktopThemeHydrated.current) {
+      return;
+    }
+    tauriInvoke("save_app_theme", { theme }).catch(() => {});
   }, [theme]);
 
   useEffect(() => {
@@ -1621,12 +1664,23 @@ export function App() {
         <FullscreenPreview
           asset={previewedAsset}
           deleteAsset={async (asset) => {
+            // Stay in the preview and advance to the neighbour in the direction
+            // the user was scrolling (falling back to the other side, then to
+            // closing once nothing is left).
+            const { previous, next } = previewNavigation;
+            const target =
+              previewDirectionRef.current === "previous" ? previous ?? next : next ?? previous;
             await deleteAsset(asset);
-            setPreviewAsset(null);
+            setPreviewAsset(target ?? null);
           }}
           nextAsset={previewNavigation.next}
           onClose={() => setPreviewAsset(null)}
-          onPreviewAsset={setPreviewAsset}
+          onPreviewAsset={(asset, direction) => {
+            if (direction) {
+              previewDirectionRef.current = direction;
+            }
+            setPreviewAsset(asset);
+          }}
           previousAsset={previewNavigation.previous}
           purgeAsset={async (asset) => {
             await purgeAsset(asset);

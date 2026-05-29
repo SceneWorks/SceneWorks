@@ -375,7 +375,7 @@ export function FullscreenPreview({
             aria-label="Previous asset"
             className="preview-nav-button previous"
             disabled={!previousAsset}
-            onClick={() => previousAsset && onPreviewAsset(previousAsset)}
+            onClick={() => previousAsset && onPreviewAsset(previousAsset, "previous")}
             type="button"
           >
             <Icon.ArrowLeft size={18} />
@@ -385,7 +385,7 @@ export function FullscreenPreview({
             aria-label="Next asset"
             className="preview-nav-button next"
             disabled={!nextAsset}
-            onClick={() => nextAsset && onPreviewAsset(nextAsset)}
+            onClick={() => nextAsset && onPreviewAsset(nextAsset, "next")}
             type="button"
           >
             <Icon.ArrowRight size={18} />
