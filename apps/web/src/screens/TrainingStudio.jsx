@@ -29,6 +29,13 @@ const optimizerLabels = {
   prodigyopt: "Prodigy",
   rose: "Rose",
 };
+// Adapter network parameterization. `lora` is the universal default; `lokr`
+// (LyCORIS Kronecker) is offered only on targets whose `limits.networkTypes`
+// advertise it (epic 2193).
+const networkTypeLabels = {
+  lora: "LoRA",
+  lokr: "LoKr (LyCORIS Kronecker)",
+};
 // Versions of the ostris de-distill training adapter (Z-Image-Turbo only). The
 // worker maps these to the matching repo file; legacy "v2-default" normalizes to v2.
 const trainingAdapterVersionOptions = ["v1", "v2"];
@@ -44,6 +51,8 @@ const configFieldLabels = {
   requestedGpu: "Requested GPU",
   rank: "Rank",
   alpha: "Alpha",
+  networkType: "Network type",
+  decomposeFactor: "LoKr factor",
   optimizer: "Optimizer",
   learningRate: "Learning rate",
   weightDecay: "Weight decay",
@@ -478,6 +487,10 @@ function optimizerLabel(value) {
   return optimizerLabels[value] ?? value;
 }
 
+function networkTypeLabel(value) {
+  return networkTypeLabels[value] ?? value;
+}
+
 function optionLabel(value) {
   return String(value ?? "")
     .split("_")
@@ -503,7 +516,7 @@ function defaultPresetForTarget(presets, targetId) {
   return targetPresets.find((preset) => preset.ui?.default) ?? targetPresets[0] ?? null;
 }
 
-function configDraftFromTarget(target, dataset, gpuOptions, triggerPhrase = "", preset = null, previousDraft = {}) {
+export function configDraftFromTarget(target, dataset, gpuOptions, triggerPhrase = "", preset = null, previousDraft = {}) {
   const defaults = preset?.config ?? target?.defaults ?? {};
   const advanced = defaults.advanced ?? {};
   const firstGpu = gpuOptions[0] ?? "";
@@ -517,6 +530,10 @@ function configDraftFromTarget(target, dataset, gpuOptions, triggerPhrase = "", 
     requestedGpu: gpuOptions.includes(requestedGpu) ? requestedGpu : firstGpu,
     rank: numericDraft(defaults.rank),
     alpha: numericDraft(defaults.alpha),
+    networkType: asText(advanced.networkType || "lora"),
+    // LoKr block-decomposition factor; -1 = auto. Only consumed when networkType
+    // is lokr (the worker ignores it otherwise).
+    decomposeFactor: numericDraft(advanced.decomposeFactor ?? -1),
     optimizer: asText(defaults.optimizer),
     learningRate: numericDraft(defaults.learningRate),
     weightDecay: numericDraft(advanced.weightDecay),
@@ -591,10 +608,14 @@ function samplePromptsFromTrigger(triggerWord) {
   ];
 }
 
-function trainingConfigSnapshot({ activeDataset, configDraft, selectedPreset, selectedTarget, dryRun = true }) {
+export function trainingConfigSnapshot({ activeDataset, configDraft, selectedPreset, selectedTarget, dryRun = true }) {
   const defaults = selectedTarget?.defaults ?? {};
+  const networkType = asText(configDraft.networkType).trim() || "lora";
   const advanced = compactObject({
     ...(defaults.advanced ?? {}),
+    networkType,
+    // LoKr factor only matters for lokr; omit it otherwise so lora jobs stay clean.
+    decomposeFactor: networkType === "lokr" ? numberFromDraft(configDraft.decomposeFactor) : undefined,
     weightDecay: numberFromDraft(configDraft.weightDecay),
     lrScheduler: asText(configDraft.lrScheduler).trim() || "constant",
     lrWarmupSteps: numberFromDraft(configDraft.lrWarmupSteps),
@@ -978,6 +999,11 @@ export function TrainingStudio({ mode = "training" } = {}) {
     configDraft.optimizer && !optimizerSelectOptions.includes(configDraft.optimizer)
       ? [...optimizerSelectOptions, configDraft.optimizer]
       : optimizerSelectOptions;
+  // Network type: only render the picker when the target advertises a real choice
+  // (more than just lora). LoKr targets gain the picker + the LoKr factor field.
+  const networkTypeOptions = rangeOptions(selectedTarget?.limits, "networkTypes");
+  const showNetworkType = networkTypeOptions.length > 1;
+  const isLokrNetwork = asText(configDraft.networkType).trim() === "lokr";
   const lrSchedulerLimitOptions = rangeOptions(selectedTarget?.limits, "lrSchedulers");
   const lrSchedulerSelectOptions = lrSchedulerLimitOptions.length ? lrSchedulerLimitOptions : lrSchedulerOptions;
   const visibleLrSchedulerOptions =
@@ -1955,6 +1981,33 @@ export function TrainingStudio({ mode = "training" } = {}) {
                             Alpha
                             <input onChange={(event) => updateConfigDraft("alpha", event.target.value)} type="number" value={configDraft.alpha ?? ""} />
                           </label>
+                          {showNetworkType ? (
+                            <label title="Adapter parameterization. LoRA is the standard low-rank adapter; LoKr (LyCORIS Kronecker) trains a much smaller, often more expressive adapter (torch backends only).">
+                              Network type
+                              <select
+                                onChange={(event) => updateConfigDraft("networkType", event.target.value)}
+                                value={configDraft.networkType ?? "lora"}
+                              >
+                                {networkTypeOptions.map((option) => (
+                                  <option key={option} value={option}>
+                                    {networkTypeLabel(option)}
+                                  </option>
+                                ))}
+                              </select>
+                            </label>
+                          ) : null}
+                          {showNetworkType && isLokrNetwork ? (
+                            <label title="LoKr block-decomposition factor. -1 lets LyCORIS pick the largest factor automatically; larger values trade adapter size for capacity.">
+                              LoKr factor
+                              <input
+                                min="-1"
+                                onChange={(event) => updateConfigDraft("decomposeFactor", event.target.value)}
+                                step="1"
+                                type="number"
+                                value={configDraft.decomposeFactor ?? ""}
+                              />
+                            </label>
+                          ) : null}
                           <label>
                             Optimizer
                             <select onChange={(event) => updateConfigDraft("optimizer", event.target.value)} value={configDraft.optimizer ?? ""}>
