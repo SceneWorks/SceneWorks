@@ -1998,19 +1998,77 @@ label {
   min-width: 0;
 }
 
-.training-dataset-form {
+/* Dataset header fields aligned to the 4 health columns (sc-2025 polish):
+   row 1 = name | version | Add images, row 2 = prefix | Apply names | Caption all;
+   the health grid below (row 3) shares the same 4-column geometry. */
+.training-dataset-fields {
   display: grid;
-  grid-template-columns: minmax(180px, 1fr) minmax(120px, 160px) auto;
-  gap: 10px;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 8px;
   align-items: end;
 }
 
-.training-dataset-form label:not(.file-upload-button) {
+.field-name,
+.field-prefix {
   display: grid;
   gap: 7px;
+  grid-column: 1 / span 2;
   font-size: 12px;
   font-weight: 700;
   color: var(--text-muted);
+}
+
+.field-name {
+  grid-row: 1;
+}
+
+.field-prefix {
+  grid-row: 2;
+}
+
+.field-version {
+  grid-row: 1;
+  grid-column: 3;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: 44px;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-muted);
+}
+
+.field-add {
+  grid-row: 1;
+  grid-column: 4;
+}
+
+.field-apply {
+  grid-row: 2;
+  grid-column: 3;
+}
+
+.field-caption {
+  grid-row: 2;
+  grid-column: 4;
+}
+
+/* Split the difference: inputs grow a touch (larger font), buttons shrink, both
+   land on a shared 44px control height. */
+.training-dataset-fields input {
+  height: 44px;
+  font-size: 15px;
+}
+
+.training-dataset-fields .primary-action {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  width: 100%;
+  height: 44px;
+  padding-top: 0;
+  padding-bottom: 0;
 }
 
 .training-health-grid {
@@ -2046,18 +2104,19 @@ label {
 }
 
 /* Save lives in the health row (sc-2025) so a small edit needs no scroll. */
+/* Save sits in the health row's 4th column (sc-2025): no card chrome, button
+   bottom-aligned with the stat cards, same size as Add images / Caption all. */
 .training-health-action {
-  gap: 6px !important;
-  justify-items: stretch;
+  border: none !important;
+  background: none !important;
+  padding: 0 !important;
+  align-content: end !important;
 }
 
 .training-health-action button {
   width: 100%;
+  height: 44px;
   justify-content: center;
-}
-
-.training-health-action span {
-  text-align: center;
 }
 
 .training-validity {
@@ -5604,31 +5663,6 @@ label {
   white-space: nowrap;
 }
 
-/* Dataset member grid (sc-2026): the editor body shows only members + captions */
-/* Dataset toolbar (sc-2025): rename + caption actions above the card grid */
-.training-dataset-toolbar {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 10px;
-  align-items: flex-end;
-}
-
-/* Push "Caption all" to the far right of the toolbar (sc-2025). */
-.training-caption-all {
-  margin-left: auto;
-}
-
-.training-rename-field {
-  display: grid;
-  gap: 4px;
-  font-size: 12px;
-  color: var(--text-muted);
-}
-
-.training-rename-field input {
-  min-width: 160px;
-}
-
 /* Unified image + caption cards (sc-2025): thumbnail + read-only name/source,
    editable caption underneath, actions at the bottom. Responsive auto-fill. */
 .training-caption-grid {
@@ -6142,7 +6176,7 @@ label {
   .training-tabs,
   .training-metrics,
   .training-dataset-workspace,
-  .training-dataset-form,
+  .training-dataset-fields,
   .training-health-grid,
   .training-workflow-grid,
   .training-config-preview,
