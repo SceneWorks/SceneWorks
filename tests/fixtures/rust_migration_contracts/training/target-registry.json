@@ -22,39 +22,79 @@
         "seed": 42,
         "optimizer": "adamw8bit",
         "advanced": {
-          "mixedPrecision": "bf16",
           "cacheLatents": true,
           "cacheTextEmbeddings": true,
           "gradientCheckpointing": true,
-          "networkType": "lora",
-          "timestepType": "sigmoid",
-          "timestepBias": "high_noise",
           "lossType": "mse",
-          "weightDecay": 0.0001,
           "lrScheduler": "constant",
-          "sampleEvery": 250,
-          "sampleSteps": 8,
-          "sampleGuidanceScale": 0.0,
-          "qualityPreset": "balanced",
+          "mixedPrecision": "bf16",
+          "networkType": "lora",
           "outputScope": "project",
-          "requestedGpu": "auto"
+          "qualityPreset": "balanced",
+          "requestedGpu": "auto",
+          "sampleEvery": 250,
+          "sampleGuidanceScale": 0.0,
+          "sampleSteps": 8,
+          "timestepBias": "high_noise",
+          "timestepType": "sigmoid",
+          "weightDecay": 0.0001
         }
       },
       "limits": {
-        "rank": [4, 128],
-        "alpha": [1, 128],
-        "steps": [200, 6000],
-        "resolutions": [512, 768, 1024],
-        "batchSize": [1, 4],
-        "optimizers": ["adamw8bit", "adamw", "adam", "prodigyopt", "rose"],
-        "lrSchedulers": ["constant", "linear", "cosine"],
-        "qualityPresets": ["speed", "balanced", "quality"],
-        "outputScopes": ["project", "global"]
+        "alpha": [
+          1,
+          128
+        ],
+        "batchSize": [
+          1,
+          4
+        ],
+        "lrSchedulers": [
+          "constant",
+          "linear",
+          "cosine"
+        ],
+        "networkTypes": [
+          "lora",
+          "lokr"
+        ],
+        "optimizers": [
+          "adamw8bit",
+          "adamw",
+          "adam",
+          "prodigyopt",
+          "rose"
+        ],
+        "outputScopes": [
+          "project",
+          "global"
+        ],
+        "qualityPresets": [
+          "speed",
+          "balanced",
+          "quality"
+        ],
+        "rank": [
+          4,
+          128
+        ],
+        "resolutions": [
+          512,
+          768,
+          1024
+        ],
+        "steps": [
+          200,
+          6000
+        ]
       },
       "ui": {
-        "label": "Z-Image-Turbo LoRA",
         "description": "Train an image LoRA for the Z-Image-Turbo base model.",
-        "recommendedFor": ["character", "style"]
+        "label": "Z-Image-Turbo LoRA",
+        "recommendedFor": [
+          "character",
+          "style"
+        ]
       }
     },
     {
@@ -78,38 +118,82 @@
         "seed": 42,
         "optimizer": "adamw8bit",
         "advanced": {
-          "mixedPrecision": "bf16",
           "cacheLatents": true,
           "cacheTextEmbeddings": true,
           "gradientCheckpointing": true,
-          "networkType": "lora",
+          "loraTargetModules": [
+            "to_q",
+            "to_k",
+            "to_v",
+            "to_out.0"
+          ],
           "lossType": "mse",
-          "weightDecay": 0.0001,
           "lrScheduler": "constant",
-          "loraTargetModules": ["to_q", "to_k", "to_v", "to_out.0"],
-          "sampleEvery": 250,
-          "sampleSteps": 30,
-          "sampleGuidanceScale": 7.0,
-          "qualityPreset": "balanced",
+          "mixedPrecision": "bf16",
+          "networkType": "lora",
           "outputScope": "project",
-          "requestedGpu": "auto"
+          "qualityPreset": "balanced",
+          "requestedGpu": "auto",
+          "sampleEvery": 250,
+          "sampleGuidanceScale": 7.0,
+          "sampleSteps": 30,
+          "weightDecay": 0.0001
         }
       },
       "limits": {
-        "rank": [4, 128],
-        "alpha": [1, 128],
-        "steps": [200, 6000],
-        "resolutions": [768, 1024],
-        "batchSize": [1, 4],
-        "optimizers": ["adamw8bit", "adamw", "adam", "prodigyopt", "rose"],
-        "lrSchedulers": ["constant", "linear", "cosine"],
-        "qualityPresets": ["speed", "balanced", "quality"],
-        "outputScopes": ["project", "global"]
+        "alpha": [
+          1,
+          128
+        ],
+        "batchSize": [
+          1,
+          4
+        ],
+        "lrSchedulers": [
+          "constant",
+          "linear",
+          "cosine"
+        ],
+        "networkTypes": [
+          "lora",
+          "lokr"
+        ],
+        "optimizers": [
+          "adamw8bit",
+          "adamw",
+          "adam",
+          "prodigyopt",
+          "rose"
+        ],
+        "outputScopes": [
+          "project",
+          "global"
+        ],
+        "qualityPresets": [
+          "speed",
+          "balanced",
+          "quality"
+        ],
+        "rank": [
+          4,
+          128
+        ],
+        "resolutions": [
+          768,
+          1024
+        ],
+        "steps": [
+          200,
+          6000
+        ]
       },
       "ui": {
-        "label": "Stable Diffusion XL LoRA",
         "description": "Train an image LoRA for Stable Diffusion XL. The generic SDXL-UNet trainer and the shared foundation for SDXL-family models.",
-        "recommendedFor": ["character", "style"]
+        "label": "Stable Diffusion XL LoRA",
+        "recommendedFor": [
+          "character",
+          "style"
+        ]
       }
     },
     {
@@ -133,41 +217,85 @@
         "seed": 42,
         "optimizer": "adamw8bit",
         "advanced": {
-          "mixedPrecision": "bf16",
+          "baseModelRepo": "microsoft/Lens",
           "cacheLatents": true,
           "cacheTextEmbeddings": true,
           "gradientCheckpointing": true,
-          "networkType": "lora",
-          "timestepType": "sigmoid",
-          "timestepBias": "high_noise",
+          "loraTargetModules": [
+            "img_qkv",
+            "txt_qkv",
+            "to_out",
+            "to_add_out"
+          ],
           "lossType": "mse",
-          "weightDecay": 0.0001,
           "lrScheduler": "constant",
-          "loraTargetModules": ["img_qkv", "txt_qkv", "to_out", "to_add_out"],
-          "baseModelRepo": "microsoft/Lens",
-          "sampleEvery": 500,
-          "sampleSteps": 20,
-          "sampleGuidanceScale": 5.0,
-          "qualityPreset": "balanced",
+          "mixedPrecision": "bf16",
+          "networkType": "lora",
           "outputScope": "project",
-          "requestedGpu": "auto"
+          "qualityPreset": "balanced",
+          "requestedGpu": "auto",
+          "sampleEvery": 500,
+          "sampleGuidanceScale": 5.0,
+          "sampleSteps": 20,
+          "timestepBias": "high_noise",
+          "timestepType": "sigmoid",
+          "weightDecay": 0.0001
         }
       },
       "limits": {
-        "rank": [4, 128],
-        "alpha": [1, 128],
-        "steps": [200, 6000],
-        "resolutions": [768, 1024, 1440],
-        "batchSize": [1, 4],
-        "optimizers": ["adamw8bit", "adamw", "adam", "prodigyopt", "rose"],
-        "lrSchedulers": ["constant", "linear", "cosine"],
-        "qualityPresets": ["speed", "balanced", "quality"],
-        "outputScopes": ["project", "global"]
+        "alpha": [
+          1,
+          128
+        ],
+        "batchSize": [
+          1,
+          4
+        ],
+        "lrSchedulers": [
+          "constant",
+          "linear",
+          "cosine"
+        ],
+        "networkTypes": [
+          "lora"
+        ],
+        "optimizers": [
+          "adamw8bit",
+          "adamw",
+          "adam",
+          "prodigyopt",
+          "rose"
+        ],
+        "outputScopes": [
+          "project",
+          "global"
+        ],
+        "qualityPresets": [
+          "speed",
+          "balanced",
+          "quality"
+        ],
+        "rank": [
+          4,
+          128
+        ],
+        "resolutions": [
+          768,
+          1024,
+          1440
+        ],
+        "steps": [
+          200,
+          6000
+        ]
       },
       "ui": {
-        "label": "Lens LoRA",
         "description": "Train an image LoRA for Microsoft Lens (gpt-oss text encoder + FLUX.2 VAE). Trains on the non-distilled base and applies to Lens-Turbo.",
-        "recommendedFor": ["character", "style"]
+        "label": "Lens LoRA",
+        "recommendedFor": [
+          "character",
+          "style"
+        ]
       }
     },
     {
@@ -191,38 +319,76 @@
         "seed": 42,
         "optimizer": "adamw",
         "advanced": {
-          "mixedPrecision": "bf16",
-          "cacheLatents": true,
-          "networkType": "lora",
-          "lrScheduler": "constant",
           "backend": "mlx",
+          "cacheLatents": true,
+          "loraTargetModules": [
+            "to_q",
+            "to_k",
+            "to_v",
+            "to_out"
+          ],
+          "lrScheduler": "constant",
+          "mixedPrecision": "bf16",
+          "networkType": "lora",
           "numFrames": 1,
-          "loraTargetModules": ["to_q", "to_k", "to_v", "to_out"],
-          "sampleEvery": 250,
-          "qualityPreset": "balanced",
           "outputScope": "project",
-          "requestedGpu": "auto"
+          "qualityPreset": "balanced",
+          "requestedGpu": "auto",
+          "sampleEvery": 250
         }
       },
       "limits": {
-        "rank": [4, 128],
-        "alpha": [1, 128],
-        "steps": [200, 4000],
-        "resolutions": [512, 768, 1024],
-        "batchSize": [1, 2],
-        "lrSchedulers": ["constant", "linear", "cosine"],
-        "qualityPresets": ["speed", "balanced", "quality"],
-        "outputScopes": ["project", "global"],
+        "alpha": [
+          1,
+          128
+        ],
+        "appleSiliconOnly": true,
+        "batchSize": [
+          1,
+          2
+        ],
+        "lrSchedulers": [
+          "constant",
+          "linear",
+          "cosine"
+        ],
+        "networkTypes": [
+          "lora"
+        ],
+        "outputScopes": [
+          "project",
+          "global"
+        ],
+        "qualityPresets": [
+          "speed",
+          "balanced",
+          "quality"
+        ],
+        "rank": [
+          4,
+          128
+        ],
         "requiresBackend": "mlx",
-        "appleSiliconOnly": true
+        "resolutions": [
+          512,
+          768,
+          1024
+        ],
+        "steps": [
+          200,
+          4000
+        ]
       },
       "ui": {
-        "label": "LTX-2.3 Video LoRA",
-        "description": "Train an LTX-2.3 video LoRA from still images. Apple Silicon only (native MLX).",
-        "recommendedFor": ["character", "style"],
         "appleSiliconOnly": true,
         "backend": "mlx",
-        "datasetModality": "image"
+        "datasetModality": "image",
+        "description": "Train an LTX-2.3 video LoRA from still images. Apple Silicon only (native MLX).",
+        "label": "LTX-2.3 Video LoRA",
+        "recommendedFor": [
+          "character",
+          "style"
+        ]
       }
     },
     {
@@ -246,40 +412,83 @@
         "seed": 42,
         "optimizer": "adamw",
         "advanced": {
-          "mixedPrecision": "bf16",
           "cacheLatents": true,
           "cacheTextEmbeddings": true,
           "gradientCheckpointing": true,
-          "networkType": "lora",
-          "timestepType": "sigmoid",
-          "timestepBias": "balanced",
+          "loraTargetModules": [
+            "to_q",
+            "to_k",
+            "to_v",
+            "to_out.0"
+          ],
           "lossType": "mse",
-          "weightDecay": 0.0001,
           "lrScheduler": "constant",
+          "mixedPrecision": "bf16",
+          "networkType": "lora",
           "numFrames": 1,
-          "loraTargetModules": ["to_q", "to_k", "to_v", "to_out.0"],
-          "sampleEvery": 0,
-          "qualityPreset": "balanced",
           "outputScope": "project",
-          "requestedGpu": "auto"
+          "qualityPreset": "balanced",
+          "requestedGpu": "auto",
+          "sampleEvery": 0,
+          "timestepBias": "balanced",
+          "timestepType": "sigmoid",
+          "weightDecay": 0.0001
         }
       },
       "limits": {
-        "rank": [4, 128],
-        "alpha": [1, 128],
-        "steps": [200, 4000],
-        "resolutions": [512, 768],
-        "batchSize": [1, 2],
-        "optimizers": ["adamw8bit", "adamw", "adam", "prodigyopt", "rose"],
-        "lrSchedulers": ["constant", "linear", "cosine"],
-        "qualityPresets": ["speed", "balanced", "quality"],
-        "outputScopes": ["project", "global"]
+        "alpha": [
+          1,
+          128
+        ],
+        "batchSize": [
+          1,
+          2
+        ],
+        "lrSchedulers": [
+          "constant",
+          "linear",
+          "cosine"
+        ],
+        "networkTypes": [
+          "lora"
+        ],
+        "optimizers": [
+          "adamw8bit",
+          "adamw",
+          "adam",
+          "prodigyopt",
+          "rose"
+        ],
+        "outputScopes": [
+          "project",
+          "global"
+        ],
+        "qualityPresets": [
+          "speed",
+          "balanced",
+          "quality"
+        ],
+        "rank": [
+          4,
+          128
+        ],
+        "resolutions": [
+          512,
+          768
+        ],
+        "steps": [
+          200,
+          4000
+        ]
       },
       "ui": {
-        "label": "Wan2.2 Video LoRA",
+        "datasetModality": "image",
         "description": "Train a Wan2.2 video LoRA from still images (Wan2.2-TI2V-5B). Runs on CUDA and Apple Silicon (MPS).",
-        "recommendedFor": ["character", "style"],
-        "datasetModality": "image"
+        "label": "Wan2.2 Video LoRA",
+        "recommendedFor": [
+          "character",
+          "style"
+        ]
       }
     },
     {
@@ -303,40 +512,83 @@
         "seed": 42,
         "optimizer": "adamw",
         "advanced": {
-          "mixedPrecision": "bf16",
           "cacheLatents": true,
           "cacheTextEmbeddings": true,
           "gradientCheckpointing": true,
-          "networkType": "lora",
-          "timestepType": "sigmoid",
-          "timestepBias": "balanced",
+          "loraTargetModules": [
+            "to_q",
+            "to_k",
+            "to_v",
+            "to_out.0"
+          ],
           "lossType": "mse",
-          "weightDecay": 0.0001,
           "lrScheduler": "constant",
+          "mixedPrecision": "bf16",
+          "networkType": "lora",
           "numFrames": 1,
-          "loraTargetModules": ["to_q", "to_k", "to_v", "to_out.0"],
-          "sampleEvery": 0,
-          "qualityPreset": "balanced",
           "outputScope": "project",
-          "requestedGpu": "auto"
+          "qualityPreset": "balanced",
+          "requestedGpu": "auto",
+          "sampleEvery": 0,
+          "timestepBias": "balanced",
+          "timestepType": "sigmoid",
+          "weightDecay": 0.0001
         }
       },
       "limits": {
-        "rank": [4, 128],
-        "alpha": [1, 128],
-        "steps": [200, 4000],
-        "resolutions": [512, 768],
-        "batchSize": [1, 2],
-        "optimizers": ["adamw8bit", "adamw", "adam", "prodigyopt", "rose"],
-        "lrSchedulers": ["constant", "linear", "cosine"],
-        "qualityPresets": ["speed", "balanced", "quality"],
-        "outputScopes": ["project", "global"]
+        "alpha": [
+          1,
+          128
+        ],
+        "batchSize": [
+          1,
+          2
+        ],
+        "lrSchedulers": [
+          "constant",
+          "linear",
+          "cosine"
+        ],
+        "networkTypes": [
+          "lora"
+        ],
+        "optimizers": [
+          "adamw8bit",
+          "adamw",
+          "adam",
+          "prodigyopt",
+          "rose"
+        ],
+        "outputScopes": [
+          "project",
+          "global"
+        ],
+        "qualityPresets": [
+          "speed",
+          "balanced",
+          "quality"
+        ],
+        "rank": [
+          4,
+          128
+        ],
+        "resolutions": [
+          512,
+          768
+        ],
+        "steps": [
+          200,
+          4000
+        ]
       },
       "ui": {
-        "label": "Wan2.2 14B T2V Video LoRA",
+        "datasetModality": "image",
         "description": "Train a Wan2.2 14B (A14B MoE, text-to-video) LoRA from still images. Trains both noise experts; GPU-only at bf16 (Q8_0 GGUF base fits smaller hosts).",
-        "recommendedFor": ["character", "style"],
-        "datasetModality": "image"
+        "label": "Wan2.2 14B T2V Video LoRA",
+        "recommendedFor": [
+          "character",
+          "style"
+        ]
       }
     },
     {
@@ -360,40 +612,83 @@
         "seed": 42,
         "optimizer": "adamw",
         "advanced": {
-          "mixedPrecision": "bf16",
           "cacheLatents": true,
           "cacheTextEmbeddings": true,
           "gradientCheckpointing": true,
-          "networkType": "lora",
-          "timestepType": "sigmoid",
-          "timestepBias": "balanced",
+          "loraTargetModules": [
+            "to_q",
+            "to_k",
+            "to_v",
+            "to_out.0"
+          ],
           "lossType": "mse",
-          "weightDecay": 0.0001,
           "lrScheduler": "constant",
+          "mixedPrecision": "bf16",
+          "networkType": "lora",
           "numFrames": 1,
-          "loraTargetModules": ["to_q", "to_k", "to_v", "to_out.0"],
-          "sampleEvery": 0,
-          "qualityPreset": "balanced",
           "outputScope": "project",
-          "requestedGpu": "auto"
+          "qualityPreset": "balanced",
+          "requestedGpu": "auto",
+          "sampleEvery": 0,
+          "timestepBias": "balanced",
+          "timestepType": "sigmoid",
+          "weightDecay": 0.0001
         }
       },
       "limits": {
-        "rank": [4, 128],
-        "alpha": [1, 128],
-        "steps": [200, 4000],
-        "resolutions": [512, 768],
-        "batchSize": [1, 2],
-        "optimizers": ["adamw8bit", "adamw", "adam", "prodigyopt", "rose"],
-        "lrSchedulers": ["constant", "linear", "cosine"],
-        "qualityPresets": ["speed", "balanced", "quality"],
-        "outputScopes": ["project", "global"]
+        "alpha": [
+          1,
+          128
+        ],
+        "batchSize": [
+          1,
+          2
+        ],
+        "lrSchedulers": [
+          "constant",
+          "linear",
+          "cosine"
+        ],
+        "networkTypes": [
+          "lora"
+        ],
+        "optimizers": [
+          "adamw8bit",
+          "adamw",
+          "adam",
+          "prodigyopt",
+          "rose"
+        ],
+        "outputScopes": [
+          "project",
+          "global"
+        ],
+        "qualityPresets": [
+          "speed",
+          "balanced",
+          "quality"
+        ],
+        "rank": [
+          4,
+          128
+        ],
+        "resolutions": [
+          512,
+          768
+        ],
+        "steps": [
+          200,
+          4000
+        ]
       },
       "ui": {
-        "label": "Wan2.2 14B I2V Video LoRA",
+        "datasetModality": "image",
         "description": "Train a Wan2.2 14B (A14B MoE, image-to-video) LoRA from still images. Trains both noise experts; GPU-only at bf16 (Q8_0 GGUF base fits smaller hosts).",
-        "recommendedFor": ["character", "style"],
-        "datasetModality": "image"
+        "label": "Wan2.2 14B I2V Video LoRA",
+        "recommendedFor": [
+          "character",
+          "style"
+        ]
       }
     }
   ]
