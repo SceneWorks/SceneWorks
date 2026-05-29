@@ -6,11 +6,16 @@ pub(crate) async fn list_assets(
     Query(query): Query<AssetsQuery>,
 ) -> Result<Json<Vec<serde_json::Value>>, ApiError> {
     let character_id = query.character_id.clone();
+    let scope = match query.scope.as_deref() {
+        Some("library") => sceneworks_core::project_store::AssetScope::Library,
+        _ => sceneworks_core::project_store::AssetScope::All,
+    };
     let assets = project_call(state, move |store| {
         store.list_assets(
             &project_id,
             query.include_rejected.unwrap_or(false),
             query.include_trashed.unwrap_or(false),
+            scope,
         )
     })
     .await?;
