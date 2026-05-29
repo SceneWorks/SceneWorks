@@ -96,6 +96,35 @@ adapter version is a **De-distill adapter** dropdown in the Advanced panel
 (`v1` — stable, smaller; `v2` — experimental, heavier de-distill), so you can A/B
 the two on the same dataset.
 
+## Network type — LoRA vs LoKr
+
+Most targets train a standard **LoRA** (a low-rank `B·A` update). The
+**Z-Image-Turbo** and **SDXL** targets also offer **LoKr** (LyCORIS
+Kronecker-product), selectable as a **Network type** dropdown in the Advanced
+panel on targets that advertise it (`limits.networkTypes`). LoKr parameterizes
+the weight delta as a Kronecker product (`W₁ ⊗ W₂`, with one factor optionally
+low-rank), which produces a **much smaller adapter** — e.g. a rank-16 SDXL LoKr
+is ~2.7 MB vs tens of MB for the LoRA equivalent — at comparable or better
+fidelity. A single **LoKr factor** (`decomposeFactor`, `-1` = auto) controls the
+block split; leave it on auto to start.
+
+Because LoKr changes the saved file, it also changes how inference loads it:
+
+- diffusers' `load_lora_weights` understands only LoRA keys, so a LoKr adapter
+  (`lokr_w1`/`lokr_w2`) is applied by rebuilding its `peft.LoKrConfig` from the
+  file's safetensors metadata and **injecting it** into the UNet/transformer
+  (`peft.inject_adapter_in_model`). The worker does this automatically — the
+  trainer stamps `networkType` / `rank` / `alpha` / `decomposeFactor` /
+  `targetModules` into the file header so generation can reconstruct the network.
+- **Torch backends only.** The MLX image backends apply LoRA via a Kronecker-free
+  merge, so they **reject** a LoKr adapter with a clear error rather than
+  mis-applying it — train LoKr only where you will generate on torch.
+
+Everything else — datasets, presets, dry run, output registration — is identical
+to LoRA. `networkType` / `decomposeFactor` live in the config's free-form
+`advanced` bag (gated per target by `limits.networkTypes`), not as first-class
+config fields.
+
 ## 3. Dry run (validate the plan)
 
 A dry run resolves and validates the full plan — dataset items exist, config is
@@ -348,6 +377,7 @@ messages:
 | *"LoRA adapter attached no trainable parameters…"* (runtime) | `loraTargetModules` matched nothing | For Lens use the fused-QKV names (`img_qkv`, `txt_qkv`, `to_out`, `to_add_out`), not Z-Image's `to_q`/`to_k`/`to_v`. |
 | *"Lens LoRA training requires the isolated Lens sidecar venv…"* (submit) | Worker built without the Lens sidecar | Rebuild with `INCLUDE_LENS=1`, or set `SCENEWORKS_LENS_PYTHON`. |
 | *"… cannot target CPU workers."* (submit) | `requestedGpu` was `cpu` | Training is GPU-only. Use `auto` or a GPU id. |
+| *"… cannot apply the LoKr adapter …"* (runtime) | A LoKr adapter was sent to the MLX generation backend | Generate the LoKr LoRA on a torch backend; MLX supports only standard LoRA (see *Network type*). |
 | *"Not enough free disk space to train…"* (submit) | Output volume low on space | Free space (model weights, checkpoints, cached latents are the largest consumers). |
 | Job stays **queued** | No GPU worker advertises `lora_train_execute` | Start a CUDA-enabled worker. A torch-less worker can claim dry runs only. |
 | *"… GPU ran out of memory."* (runtime) | VRAM exhausted | Lower resolution, batch size, or rank. |

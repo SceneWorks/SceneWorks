@@ -94,6 +94,48 @@ fn builtin_registry_matches_committed_snapshot() {
 }
 
 #[test]
+fn builtin_targets_gate_network_types() {
+    let registry = builtin_training_targets();
+
+    let advertises = |target: &sceneworks_core::training::TrainingTarget, value: &str| {
+        target
+            .limits
+            .get("networkTypes")
+            .and_then(Value::as_array)
+            .is_some_and(|types| types.iter().any(|entry| entry.as_str() == Some(value)))
+    };
+
+    // Every target advertises `lora`; only the spike-validated torch image
+    // backends (epic 2193) advertise `lokr`.
+    let lokr_targets: Vec<&str> = registry
+        .targets
+        .iter()
+        .filter(|target| {
+            assert!(
+                advertises(target, "lora"),
+                "target {} must advertise lora in limits.networkTypes",
+                target.id
+            );
+            advertises(target, "lokr")
+        })
+        .map(|target| target.id.as_str())
+        .collect();
+
+    assert_eq!(lokr_targets, ["z_image_turbo_lora", "sdxl_lora"]);
+}
+
+#[test]
+#[ignore = "regen helper: run with REGEN_FIXTURE=1 to rewrite target-registry.json"]
+fn regen_target_registry_fixture() {
+    if std::env::var("REGEN_FIXTURE").is_err() {
+        return;
+    }
+    let pretty = serde_json::to_string_pretty(&builtin_training_targets())
+        .expect("builtin registry serializes");
+    fs::write(fixture_path("target-registry.json"), pretty + "\n").expect("write fixture");
+}
+
+#[test]
 fn builtin_preset_registry_matches_committed_snapshot() {
     let expected = load_fixture("preset-registry.json");
     let encoded = serde_json::to_value(sceneworks_core::training::builtin_training_presets())

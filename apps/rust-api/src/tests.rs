@@ -5,8 +5,8 @@ use super::workers::person_readiness_from_workers;
 use super::{
     create_app, huggingface_repo_cache_path, inprocess_worker_gpu_id, lora_artifact_paths,
     merge_model_manifest_entry, mlx_catalog_status, safe_download_dir, safe_repo_dir_name,
-    strip_jsonc_comments, sweep_stale_lora_uploads_before, Settings, WorkerCapability,
-    WorkerSnapshot, WorkerStatus, API_MANAGED_MANIFEST_HEADER, EVENT_BUFFER_SIZE,
+    serialize_job_lora, strip_jsonc_comments, sweep_stale_lora_uploads_before, Settings,
+    WorkerCapability, WorkerSnapshot, WorkerStatus, API_MANAGED_MANIFEST_HEADER, EVENT_BUFFER_SIZE,
     HEARTBEAT_SSE_DATA, HEARTBEAT_SSE_WIRE, TEST_MAX_LORA_UPLOAD_BYTES,
 };
 use axum::body::{to_bytes, Body};
@@ -16,6 +16,28 @@ use std::sync::atomic::Ordering;
 use std::time::{Duration, SystemTime};
 use tokio_stream::StreamExt;
 use tower::ServiceExt;
+
+#[test]
+fn serialize_job_lora_carries_network_type_to_payload() {
+    // A trained LoKr adapter records networkType (epic 2193); the generation
+    // payload must carry it so the worker can route LoKr off the MLX backend
+    // without opening the file.
+    let lora = json!({
+        "id": "char",
+        "family": "sdxl",
+        "networkType": "lokr",
+        "source": { "provider": "training" },
+    });
+    let payload = serialize_job_lora(&lora, &json!({}), "char");
+    assert_eq!(
+        payload.get("networkType").and_then(Value::as_str),
+        Some("lokr")
+    );
+
+    // A plain LoRA without the field stays absent/null (treated as lora downstream).
+    let plain = serialize_job_lora(&json!({ "id": "x", "family": "sdxl" }), &json!({}), "x");
+    assert!(plain.get("networkType").map(Value::is_null).unwrap_or(true));
+}
 
 fn readiness_worker(
     id: &str,

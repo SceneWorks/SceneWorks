@@ -69,13 +69,18 @@ from scene_worker.upscalers import (
     tile_slices,
 )
 from scene_worker.lora_adapters import (
+    LoraSpec,
+    adapter_network_type,
     apply_loras_to_pipeline,
+    clear_loras,
     first_safetensors_path,
     lora_cache_key,
     lora_weight,
     normalize_lora_specs,
     reject_loras_if_unsupported,
+    reject_lokr_loras,
     resolve_lora_file,
+    set_adapter_weights_on_module,
     validate_lora_compatibility,
 )
 from scene_worker.runtime import (
@@ -120,6 +125,7 @@ from scene_worker.training_adapters import (
     apply_weight_noise,
     build_lr_scheduler,
     build_optimizer,
+    build_peft_network_config,
     bucket_resolution,
     create_training_kernel,
     dry_run_training_summary,
@@ -135,6 +141,7 @@ from scene_worker.training_adapters import (
     seeded_sample,
     training_adapter_weight_name,
     validate_training_plan,
+    write_lokr_adapter,
 )
 from scene_worker.video_adapters import (
     DiffusersVideoAdapter,
@@ -188,6 +195,25 @@ class FakeTargetedLoraPipe(FakeLoraPipe):
 
     def delete_adapters(self, names):
         self.deleted.append(names)
+
+
+class FakeDenoiserModule:
+    """Stand-in for a pipeline's unet/transformer that records module-level
+    set_adapters calls (the LoKr weight path)."""
+
+    def __init__(self):
+        self.set_calls = []
+
+    def set_adapters(self, names, weights=None):
+        self.set_calls.append((list(names), list(weights) if weights is not None else None))
+
+
+class FakeLokrPipe(FakeTargetedLoraPipe):
+    """A pipe exposing a denoiser module so LoKr can inject into it."""
+
+    def __init__(self):
+        super().__init__()
+        self.unet = FakeDenoiserModule()
 
 
 class FakeMoeLoraPipe(FakeLoraPipe):
@@ -843,6 +869,76 @@ def test_lora_loader_clears_previous_adapters_between_jobs(tmp_path):
 
     assert pipe.unloaded == 1
     assert pipe.loaded[-1][0] == str(second)
+
+
+def test_adapter_network_type_defaults_to_lora_for_plain_file(tmp_path):
+    plain = tmp_path / "plain.safetensors"
+    plain.write_bytes(b"not a real safetensors header")
+    # Unreadable/absent metadata resolves to lora — every legacy adapter is lora.
+    assert adapter_network_type(plain) == "lora"
+
+
+def test_reject_lokr_loras_raises_only_for_lokr(monkeypatch, tmp_path):
+    lora_file = tmp_path / "a.safetensors"
+    lora_file.write_bytes(b"x")
+    lokr_file = tmp_path / "b.safetensors"
+    lokr_file.write_bytes(b"x")
+    types = {str(lora_file): "lora", str(lokr_file): "lokr"}
+    monkeypatch.setattr(
+        "scene_worker.lora_adapters.adapter_network_type", lambda path: types[str(path)]
+    )
+    lora_spec = LoraSpec(id="a", path=str(lora_file), weight=1.0, adapter_name="a")
+    lokr_spec = LoraSpec(id="b", path=str(lokr_file), weight=1.0, adapter_name="b")
+
+    reject_lokr_loras([lora_spec], "mlx_test")  # all-lora: no raise
+    with pytest.raises(RuntimeError, match="LoKr"):
+        reject_lokr_loras([lora_spec, lokr_spec], "mlx_test")
+
+
+def test_apply_loras_routes_lokr_through_injection(monkeypatch, tmp_path):
+    lokr_file = tmp_path / "char.safetensors"
+    lokr_file.write_bytes(b"x")
+    monkeypatch.setattr("scene_worker.lora_adapters.adapter_network_type", lambda path: "lokr")
+    injected = []
+    monkeypatch.setattr(
+        "scene_worker.lora_adapters.inject_lokr_adapter",
+        lambda pipe, spec, *, adapter_id: injected.append(spec.adapter_name),
+    )
+    pipe = FakeLokrPipe()
+
+    state = apply_loras_to_pipeline(
+        pipe,
+        [{"id": "char", "installedPath": str(lokr_file), "weight": 0.7}],
+        adapter_id="sdxl_test",
+    )
+
+    # LoKr never calls load_lora_weights; it injects, then sets weight on the module.
+    assert pipe.loaded == []
+    assert injected == list(state.adapter_names)
+    assert len(state.adapter_names) == 1
+    assert pipe.unet.set_calls[-1] == (list(state.adapter_names), [0.7])
+
+
+def test_clear_loras_prefers_delete_adapters_so_lokr_is_removed():
+    # delete_adapters removes injected LoKr adapters; unload_lora_weights (LoRA-only)
+    # would leak them into the next job.
+    pipe = FakeTargetedLoraPipe()
+    clear_loras(pipe, ("char",), adapter_id="sdxl_test")
+    assert pipe.deleted == [["char"]]
+    assert pipe.unloaded == 0
+
+
+def test_set_adapter_weights_on_module_applies_and_guards():
+    module = FakeDenoiserModule()
+    spec = LoraSpec(id="c", path="p", weight=0.5, adapter_name="c")
+    set_adapter_weights_on_module(module, ("c",), [0.5], adapter_id="t", specs=[spec])
+    assert module.set_calls == [(["c"], [0.5])]
+
+    # No module support: a single full-weight adapter is already active (fine),
+    # but multiple / non-unity weights cannot be honored.
+    set_adapter_weights_on_module(None, ("c",), [1.0], adapter_id="t", specs=[spec])
+    with pytest.raises(RuntimeError, match="per-adapter weights"):
+        set_adapter_weights_on_module(None, ("c", "d"), [1.0, 0.5], adapter_id="t", specs=[spec])
 
 
 def test_lora_loader_reuses_overlap_when_adapter_can_delete_targeted_loras(tmp_path):
@@ -2066,6 +2162,32 @@ def test_should_route_flux2_to_mlx_predicate(monkeypatch):
     assert _should_route_flux2_to_mlx({"model": "flux2_klein_9b"}) is False
     # Unsupported model never matches.
     assert _should_route_flux2_to_mlx({"model": "flux_dev"}) is False
+
+
+def test_request_has_lokr_lora_detection():
+    from scene_worker.image_adapters import _request_has_lokr_lora
+
+    # Recorded networkType (top-level, mirroring baseModel) or nested in
+    # compatibility — both are read with no file I/O (epic 2193).
+    assert _request_has_lokr_lora({"loras": [{"id": "a", "networkType": "lokr"}]}) is True
+    assert _request_has_lokr_lora({"loras": [{"id": "a", "compatibility": {"networkType": "LoKr"}}]}) is True
+    assert _request_has_lokr_lora({"loras": [{"id": "a", "networkType": "lora"}]}) is False
+    assert _request_has_lokr_lora({"loras": []}) is False
+    assert _request_has_lokr_lora({}) is False
+
+
+def test_should_route_sdxl_to_mlx_falls_back_for_lokr(monkeypatch):
+    from scene_worker.image_adapters import _should_route_sdxl_to_mlx
+
+    monkeypatch.delenv("SCENEWORKS_DISABLE_MLX_SDXL", raising=False)
+    monkeypatch.setattr("sys.platform", "darwin")
+    monkeypatch.setattr(MlxSdxlAdapter, "_mlx_sd_available", lambda: True)
+    model = next(iter(MlxSdxlAdapter._supported_models))
+
+    # A normal LoRA stays on MLX; a LoKr LoRA falls back to the torch path so it
+    # actually applies (MLX can't merge LoKr) instead of erroring.
+    assert _should_route_sdxl_to_mlx({"model": model, "loras": [{"id": "a", "networkType": "lora"}]}) is True
+    assert _should_route_sdxl_to_mlx({"model": model, "loras": [{"id": "a", "networkType": "lokr"}]}) is False
 
 
 def test_mlx_flux2_kv_allows_no_reference_txt2img(monkeypatch):
@@ -4734,6 +4856,117 @@ def test_build_optimizer_uses_rose(monkeypatch):
         "params": params,
         "kwargs": {"lr": 0.0005, "weight_decay": 0.01, "compute_dtype": "fp32"},
     }
+
+
+def _run_config_for_network(advanced=None):
+    plan = {"config": {"rank": 8, "alpha": 8, "advanced": advanced or {}}}
+    return read_run_config(plan)
+
+
+def test_read_run_config_defaults_network_type_to_lora():
+    config = _run_config_for_network()
+    assert config.network_type == "lora"
+    assert config.decompose_factor == -1
+
+
+def test_read_run_config_parses_lokr_network_and_factor():
+    config = _run_config_for_network({"networkType": "LoKr", "decomposeFactor": 8})
+    # networkType is normalized to lowercase so the trainer's equality check is stable.
+    assert config.network_type == "lokr"
+    assert config.decompose_factor == 8
+
+
+def test_build_peft_network_config_defaults_to_lora():
+    fake_peft = SimpleNamespace(
+        LoraConfig=lambda **kw: ("lora", kw),
+        LoKrConfig=lambda **kw: ("lokr", kw),
+    )
+    config = _run_config_for_network({"loraTargetModules": ["to_q", "to_v"]})
+    kind, kwargs = build_peft_network_config(fake_peft, config)
+    assert kind == "lora"
+    assert kwargs == {
+        "r": config.rank,
+        "lora_alpha": config.alpha,
+        "init_lora_weights": "gaussian",
+        "target_modules": ["to_q", "to_v"],
+    }
+
+
+def test_build_peft_network_config_builds_lokr_with_decompose_factor():
+    fake_peft = SimpleNamespace(
+        LoraConfig=lambda **kw: ("lora", kw),
+        LoKrConfig=lambda **kw: ("lokr", kw),
+    )
+    config = _run_config_for_network(
+        {"networkType": "lokr", "decomposeFactor": 16, "loraTargetModules": ["to_q"]}
+    )
+    kind, kwargs = build_peft_network_config(fake_peft, config)
+    assert kind == "lokr"
+    assert kwargs == {
+        "r": config.rank,
+        "alpha": config.alpha,
+        "decompose_factor": 16,
+        "init_weights": True,
+        "target_modules": ["to_q"],
+    }
+
+
+def test_write_lokr_adapter_stamps_metadata_and_serializes_cpu_tensors(monkeypatch, tmp_path):
+    captured = {}
+
+    def fake_save_file(tensors, path, metadata=None):
+        captured["tensors"] = tensors
+        captured["path"] = path
+        captured["metadata"] = metadata
+        Path(path).write_bytes(b"")
+
+    fake_module = SimpleNamespace(save_file=fake_save_file)
+    # Inject the parent package too so the function's `from safetensors.torch
+    # import save_file` never touches the filesystem regardless of install state.
+    monkeypatch.setitem(sys.modules, "safetensors", SimpleNamespace(torch=fake_module))
+    monkeypatch.setitem(sys.modules, "safetensors.torch", fake_module)
+
+    class FakeTensor:
+        def __init__(self):
+            self.moved = []
+
+        def detach(self):
+            self.moved.append("detach")
+            return self
+
+        def cpu(self):
+            self.moved.append("cpu")
+            return self
+
+        def contiguous(self):
+            self.moved.append("contiguous")
+            return self
+
+    state = {"blk.lokr_w1": FakeTensor(), "blk.lokr_w2": FakeTensor()}
+    path = write_lokr_adapter(
+        state,
+        str(tmp_path),
+        "adapter.safetensors",
+        rank=8,
+        alpha=16,
+        decompose_factor=8,
+        target_modules=["to_q", "to_v"],
+    )
+
+    assert path == str(tmp_path / "adapter.safetensors")
+    # Routing + reconstruction metadata: the inference loader (epic 2193) reads
+    # networkType to route and rank/alpha/decomposeFactor/targetModules to rebuild
+    # the matching LoKrConfig for injection.
+    assert captured["metadata"] == {
+        "format": "pt",
+        "networkType": "lokr",
+        "rank": "8",
+        "alpha": "16",
+        "decomposeFactor": "8",
+        "targetModules": '["to_q", "to_v"]',
+    }
+    assert set(captured["tensors"]) == {"blk.lokr_w1", "blk.lokr_w2"}
+    assert captured["tensors"]["blk.lokr_w1"].moved == ["detach", "cpu", "contiguous"]
 
 
 def test_lr_schedule_updates_converts_microsteps_to_optimizer_updates():

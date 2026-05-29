@@ -919,6 +919,10 @@ fn z_image_turbo_lora_target() -> TrainingTarget {
             "resolutions": [512, 768, 1024],
             "batchSize": [1, 4],
             "optimizers": ["adamw8bit", "adamw", "adam", "prodigyopt", "rose"],
+            // Network parameterization for the adapter. `lora` is the universal
+            // default; `lokr` (LyCORIS Kronecker) is a torch/PEFT-only option
+            // advertised on the validated image backends (epic 2193).
+            "networkTypes": ["lora", "lokr"],
             "lrSchedulers": ["constant", "linear", "cosine"],
             "qualityPresets": ["speed", "balanced", "quality"],
             "outputScopes": ["project", "global"]
@@ -1014,6 +1018,9 @@ fn lens_turbo_lora_target() -> TrainingTarget {
             "resolutions": [768, 1024, 1440],
             "batchSize": [1, 4],
             "optimizers": ["adamw8bit", "adamw", "adam", "prodigyopt", "rose"],
+            // Lens trains in a separate sidecar venv; LoKr is not validated there
+            // yet (epic 2193 v1 targets Z-Image/SDXL), so only `lora`.
+            "networkTypes": ["lora"],
             "lrSchedulers": ["constant", "linear", "cosine"],
             "qualityPresets": ["speed", "balanced", "quality"],
             "outputScopes": ["project", "global"]
@@ -1084,6 +1091,9 @@ fn ltx_video_lora_target() -> TrainingTarget {
             "steps": [200, 4000],
             "resolutions": [512, 768, 1024],
             "batchSize": [1, 2],
+            // MLX backend: the LoKr inference path (Kronecker merge) is out of
+            // scope for epic 2193 v1, so this target stays `lora`-only.
+            "networkTypes": ["lora"],
             "lrSchedulers": ["constant", "linear", "cosine"],
             "qualityPresets": ["speed", "balanced", "quality"],
             "outputScopes": ["project", "global"],
@@ -1176,6 +1186,9 @@ fn wan_lora_target() -> TrainingTarget {
             "resolutions": [512, 768],
             "batchSize": [1, 2],
             "optimizers": ["adamw8bit", "adamw", "adam", "prodigyopt", "rose"],
+            // Wan is a torch backend, but epic 2193 v1 validates LoKr on the
+            // image backends (Z-Image/SDXL) first; video stays `lora`-only.
+            "networkTypes": ["lora"],
             "lrSchedulers": ["constant", "linear", "cosine"],
             "qualityPresets": ["speed", "balanced", "quality"],
             "outputScopes": ["project", "global"]
@@ -1255,6 +1268,9 @@ fn wan_moe_lora_target(
             "resolutions": [512, 768],
             "batchSize": [1, 2],
             "optimizers": ["adamw8bit", "adamw", "adam", "prodigyopt", "rose"],
+            // Wan is a torch backend, but epic 2193 v1 validates LoKr on the
+            // image backends (Z-Image/SDXL) first; video stays `lora`-only.
+            "networkTypes": ["lora"],
             "lrSchedulers": ["constant", "linear", "cosine"],
             "qualityPresets": ["speed", "balanced", "quality"],
             "outputScopes": ["project", "global"]
@@ -1354,6 +1370,9 @@ fn sdxl_lora_target() -> TrainingTarget {
             "resolutions": [768, 1024],
             "batchSize": [1, 4],
             "optimizers": ["adamw8bit", "adamw", "adam", "prodigyopt", "rose"],
+            // See the Z-Image target: `lokr` (LyCORIS Kronecker) is advertised on
+            // the validated torch/PEFT image backends (epic 2193).
+            "networkTypes": ["lora", "lokr"],
             "lrSchedulers": ["constant", "linear", "cosine"],
             "qualityPresets": ["speed", "balanced", "quality"],
             "outputScopes": ["project", "global"]
