@@ -78,7 +78,10 @@ pub(crate) fn asset_origin(asset: &Value) -> String {
         .and_then(|recipe| recipe.get("mode"))
         .and_then(Value::as_str)
         .unwrap_or_default();
-    let asset_type = asset.get("type").and_then(Value::as_str).unwrap_or_default();
+    let asset_type = asset
+        .get("type")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
     derive_origin(mode, asset_type).to_owned()
 }
 
@@ -178,9 +181,15 @@ mod origin_tests {
 
     #[test]
     fn derives_character_studio_from_character_image_mode() {
-        assert_eq!(derive_origin("character_image", "image"), "character_studio");
+        assert_eq!(
+            derive_origin("character_image", "image"),
+            "character_studio"
+        );
         // Mode wins over media type so a character test frame still classifies.
-        assert_eq!(derive_origin("character_image", "video"), "character_studio");
+        assert_eq!(
+            derive_origin("character_image", "video"),
+            "character_studio"
+        );
     }
 
     #[test]
@@ -211,7 +220,8 @@ mod origin_tests {
         let legacy = json!({ "type": "image", "recipe": { "mode": "character_image" } });
         assert_eq!(asset_origin(&legacy), "character_studio");
         // Empty origin falls back to derivation rather than returning "".
-        let empty = json!({ "type": "video", "origin": "", "recipe": { "mode": "image_to_video" } });
+        let empty =
+            json!({ "type": "video", "origin": "", "recipe": { "mode": "image_to_video" } });
         assert_eq!(asset_origin(&empty), "video_studio");
     }
 }

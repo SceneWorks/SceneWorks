@@ -1205,7 +1205,10 @@ async fn asset_library_scope_excludes_character_studio_outputs() {
     // directly as sidecars (no explicit origin → derived on the first reindex,
     // which the initial /assets call triggers because the table is empty).
     let image_dir = project_path.join("assets/images");
-    for (id, mode) in [("img_studio_1", "text_to_image"), ("char_test_1", "character_image")] {
+    for (id, mode) in [
+        ("img_studio_1", "text_to_image"),
+        ("char_test_1", "character_image"),
+    ] {
         std::fs::write(image_dir.join(format!("{id}.png")), b"png-bytes").expect("media");
         std::fs::write(
             image_dir.join(format!("{id}.sceneworks.json")),
