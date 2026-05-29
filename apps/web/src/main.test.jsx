@@ -2560,6 +2560,78 @@ describe("SceneWorks app shell", () => {
     expect(openDatasetInLibrary).toHaveBeenCalledWith("ds-new");
   });
 
+  it("hides discarded character images from the grid and surfaces them in the Trashcan", async () => {
+    const assets = [
+      { id: "img-active", type: "image", displayName: "keep", recipe: { normalizedSettings: { characterId: "char-1" } } },
+      {
+        id: "img-trashed",
+        type: "image",
+        displayName: "discarded",
+        status: { trashed: true },
+        recipe: { normalizedSettings: { characterId: "char-1" } },
+      },
+    ];
+    root = createRoot(container);
+    await act(async () => {
+      root.render(
+        withAppContext(
+          {
+            activeProject: { id: "project-1", name: "Noir" },
+            addCharacterReference: () => {},
+            archiveCharacter: () => {},
+            assets,
+            attachCharacterLora: () => {},
+            characters: [{ id: "char-1", name: "Mira", type: "person", references: [], approvedReferences: [], looks: [], loras: [] }],
+            createCharacter: () => {},
+            createCharacterLook: () => {},
+            createCharacterTestJob: () => {},
+            deleteAsset: () => {},
+            deleteCharacterLook: () => {},
+            detachCharacterLora: () => {},
+            imageModels: [],
+            latestImageAssets: assets,
+            loras: [],
+            setPreviewAsset: () => {},
+            sendCharacterToImage: () => {},
+            sendCharacterToVideo: () => {},
+            purgeAsset: () => {},
+            removeCharacterReference: () => {},
+            updateAssetStatus: () => {},
+            updateCharacter: () => {},
+            updateCharacterLook: () => {},
+            updateCharacterLora: () => {},
+            updateCharacterReference: () => {},
+          },
+          <CharacterStudio />,
+        ),
+      );
+    });
+
+    // The active toggle counts only non-trashed images for this character.
+    const showButton = [...container.querySelectorAll("button")].find((button) =>
+      button.textContent.includes("Show this character's images (1)"),
+    );
+    expect(showButton).toBeTruthy();
+    await act(async () => {
+      showButton.click();
+    });
+
+    // Active grid shows the kept image, not the discarded one.
+    expect(container.querySelectorAll(".review-grid .review-card").length).toBe(1);
+    expect(container.querySelectorAll(".review-grid .review-card.trashed").length).toBe(0);
+
+    // Switch to the Trashcan view and the discarded image becomes reachable.
+    const trashButton = [...container.querySelectorAll("button")].find((button) =>
+      button.textContent.includes("Trashcan (1)"),
+    );
+    expect(trashButton).toBeTruthy();
+    await act(async () => {
+      trashButton.click();
+    });
+    expect(container.querySelectorAll(".review-grid .review-card.trashed").length).toBe(1);
+    expect([...container.querySelectorAll(".review-grid button")].some((button) => button.textContent === "Purge")).toBe(true);
+  });
+
   it("launches reference-based generation from an approved character reference", async () => {
     const sendCharacterToImage = vi.fn();
     const reference = { assetId: "ref-1", approved: true, asset: { id: "ref-1", type: "image", displayName: "Mira ref" } };

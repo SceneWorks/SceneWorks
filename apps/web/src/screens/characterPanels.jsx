@@ -296,14 +296,21 @@ export function CharacterTest({
   updateAssetStatus,
 }) {
   const [showOutputs, setShowOutputs] = React.useState(false);
+  const [viewMode, setViewMode] = React.useState("active");
   // Scope the outputs grid to THIS character (its generated images + approved
   // references) instead of dumping every recent project image, and keep it
   // collapsed by default so it never turns the studio into an endless scroll.
-  const characterAssets = (latestAssets ?? []).filter(
+  const scopedAssets = (latestAssets ?? []).filter(
     (asset) =>
       asset.recipe?.normalizedSettings?.characterId === selectedCharacter.id ||
       (asset.metadata?.characterReferences ?? []).some((ref) => ref.characterId === selectedCharacter.id),
   );
+  // Discarded (status.trashed) images leave the active grid so they don't keep
+  // their slots, but stay reachable through the Trashcan view for restore/purge.
+  const activeAssets = scopedAssets.filter((asset) => !asset.status?.trashed);
+  const trashedAssets = scopedAssets.filter((asset) => asset.status?.trashed);
+  const showingTrash = viewMode === "trashed";
+  const characterAssets = showingTrash ? trashedAssets : activeAssets;
   return (
     <section className="character-section test-character-panel">
       <div className="section-heading">
@@ -361,8 +368,18 @@ export function CharacterTest({
       </form>
       <div className="review-panel-head">
         <button className="advanced-toggle" onClick={() => setShowOutputs((value) => !value)} type="button">
-          {showOutputs ? "Hide" : "Show"} this character's images ({characterAssets.length})
+          {showOutputs ? "Hide" : "Show"} this character's images ({activeAssets.length})
         </button>
+        {showOutputs ? (
+          <div className="segmented-control" role="group" aria-label="Character image collection">
+            <button className={showingTrash ? "" : "active"} onClick={() => setViewMode("active")} type="button">
+              Images ({activeAssets.length})
+            </button>
+            <button className={showingTrash ? "active" : ""} onClick={() => setViewMode("trashed")} type="button">
+              Trashcan ({trashedAssets.length})
+            </button>
+          </div>
+        ) : null}
       </div>
       {showOutputs ? (
         <div className="review-grid">
@@ -375,17 +392,21 @@ export function CharacterTest({
                 purgeAsset={purgeAsset}
                 updateAssetStatus={updateAssetStatus}
               />
-              <button
-                onClick={() => addCharacterReference(selectedCharacter.id, { assetId: asset.id, approved: true, role: "test-output" })}
-                type="button"
-              >
-                Approve as Reference
-              </button>
+              {showingTrash ? null : (
+                <button
+                  onClick={() => addCharacterReference(selectedCharacter.id, { assetId: asset.id, approved: true, role: "test-output" })}
+                  type="button"
+                >
+                  Approve as Reference
+                </button>
+              )}
             </div>
           ))}
           {characterAssets.length ? null : (
             <div className="empty-panel compact-panel">
-              No images for this character yet — generate an angle set or a test above.
+              {showingTrash
+                ? "Trashcan is empty — discarded images for this character will appear here."
+                : "No images for this character yet — generate an angle set or a test above."}
             </div>
           )}
         </div>
