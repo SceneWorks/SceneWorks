@@ -285,26 +285,23 @@ export function CharacterStudio() {
           <p className="eyebrow">Character Studio</p>
           <h2>{activeProject ? activeProject.name : "Create a project"}</h2>
         </div>
+        <CompactSelector
+          createLabel="New character"
+          disabled={!activeProject}
+          getSubtitle={(character) =>
+            `${typeLabel(character.type)} · ${character.references?.length ?? 0} ref${(character.references?.length ?? 0) === 1 ? "" : "s"}`
+          }
+          getThumbAsset={characterThumbAsset}
+          items={characters}
+          label="Select character"
+          onCreate={createDraftCharacter}
+          onSelect={(character) => setSelectedCharacterId(character.id)}
+          placeholder="Select a character"
+          selectedId={selectedCharacter?.id ?? ""}
+        />
       </div>
 
       <div className="character-layout">
-        <div className="character-selector-bar">
-          <CompactSelector
-            createLabel="New character"
-            disabled={!activeProject}
-            getSubtitle={(character) =>
-              `${typeLabel(character.type)} · ${character.references?.length ?? 0} ref${(character.references?.length ?? 0) === 1 ? "" : "s"}`
-            }
-            getThumbAsset={characterThumbAsset}
-            items={characters}
-            label="Select character"
-            onCreate={createDraftCharacter}
-            onSelect={(character) => setSelectedCharacterId(character.id)}
-            placeholder="Select a character"
-            selectedId={selectedCharacter?.id ?? ""}
-          />
-        </div>
-
         {!selectedCharacter ? (
           <div className="empty-panel">No characters yet — use “New character” to start.</div>
         ) : (
@@ -334,17 +331,20 @@ export function CharacterStudio() {
                 />
               </label>
               <div className="detail-actions">
-                <button type="submit">Save</button>
-                <button onClick={() => archiveCharacter(selectedCharacter.id)} type="button">
+                <button className="primary-action" type="submit">
+                  Save
+                </button>
+                <button className="secondary-action" onClick={() => archiveCharacter(selectedCharacter.id)} type="button">
                   Archive
                 </button>
                 <button
+                  className="secondary-action"
                   onClick={() => onSendImage(selectedCharacter, testLookId || null, approvedReferences[0]?.assetId ?? null)}
                   type="button"
                 >
                   Image
                 </button>
-                <button onClick={() => onSendVideo(selectedCharacter, testLookId || null)} type="button">
+                <button className="secondary-action" onClick={() => onSendVideo(selectedCharacter, testLookId || null)} type="button">
                   Video
                 </button>
               </div>

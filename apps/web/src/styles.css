@@ -3367,10 +3367,6 @@ label {
   align-items: start;
 }
 
-.character-selector-bar {
-  display: flex;
-}
-
 .preset-layout {
   display: grid;
   grid-template-columns: minmax(220px, 280px) minmax(0, 1fr);
@@ -4230,6 +4226,22 @@ label {
 .lora-editor,
 .test-result {
   padding: 14px;
+}
+
+/* Match the Dataset editor's control sizing (sc-2025 parity): larger inputs,
+   44px controls, a green primary Save. */
+.character-editor .control-grid input,
+.character-editor .control-grid select {
+  height: 44px;
+  font-size: 15px;
+}
+
+.character-editor .prompt-field textarea {
+  font-size: 15px;
+}
+
+.character-editor .detail-actions button {
+  height: 44px;
 }
 
 .character-reference-grid {
