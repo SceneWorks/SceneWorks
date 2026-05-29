@@ -1959,6 +1959,40 @@ describe("SceneWorks app shell", () => {
     expect(container.querySelector(".preview-modal img").getAttribute("src")).toContain("original.png");
   });
 
+  it("reports the scroll direction when navigating the FullscreenPreview", async () => {
+    const noop = () => {};
+    const onPreviewAsset = vi.fn();
+    const asset = { id: "asset-b", displayName: "Plate", type: "image", status: {}, file: { path: "b.png" } };
+    const previous = { id: "asset-a", displayName: "Prev", type: "image", status: {}, file: { path: "a.png" } };
+    const next = { id: "asset-c", displayName: "Next", type: "image", status: {}, file: { path: "c.png" } };
+
+    root = createRoot(container);
+    await act(async () => {
+      root.render(
+        <FullscreenPreview
+          asset={asset}
+          deleteAsset={noop}
+          nextAsset={next}
+          onClose={noop}
+          onPreviewAsset={onPreviewAsset}
+          previousAsset={previous}
+          purgeAsset={noop}
+          updateAssetStatus={noop}
+        />,
+      );
+    });
+
+    await act(async () => {
+      container.querySelector(".preview-nav-button.next").click();
+    });
+    expect(onPreviewAsset).toHaveBeenLastCalledWith(next, "next");
+
+    await act(async () => {
+      container.querySelector(".preview-nav-button.previous").click();
+    });
+    expect(onPreviewAsset).toHaveBeenLastCalledWith(previous, "previous");
+  });
+
   it("keeps in-progress picker selection across parent rerenders", async () => {
     const onChange = vi.fn();
     const assets = [
