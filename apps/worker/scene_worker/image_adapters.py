@@ -40,7 +40,9 @@ from .sampler_registry import apply_sampler, sampler_selection_from_advanced
 from .hf_cache import huggingface_cache_roots, huggingface_repo_cache_path
 from .lora_adapters import (
     LoraPipelineState,
+    adapter_network_type,
     apply_loras_to_pipeline,
+    lora_path,
     normalize_lora_specs,
     reject_loras_if_unsupported,
     reject_lokr_loras,
@@ -6415,6 +6417,27 @@ def _should_route_flux_to_mlx(payload: dict[str, Any]) -> bool:
     return MlxFluxAdapter()._sidecar_available()
 
 
+def _request_has_lokr_lora(payload: dict[str, Any]) -> bool:
+    """True if any LoRA in the request is a LoKr adapter. LoKr applies only on the
+    torch backends (the MLX merge math is LoRA-only), so the MLX routing gates
+    fall back to torch when this is true (epic 2193) — the same graceful fallback
+    a reference image triggers. Prefers the ``networkType`` recorded on the LoRA
+    (zero I/O) and falls back to reading the adapter's safetensors header."""
+
+    for lora in payload.get("loras") or []:
+        if not isinstance(lora, dict):
+            continue
+        recorded = lora.get("networkType") or (lora.get("compatibility") or {}).get("networkType")
+        network_type = str(recorded or "").strip().lower()
+        if not network_type:
+            resolved = lora_path(lora)
+            if resolved is not None:
+                network_type = adapter_network_type(resolved)
+        if network_type == "lokr":
+            return True
+    return False
+
+
 def _should_route_sdxl_to_mlx(payload: dict[str, Any]) -> bool:
     """Decide whether the SDXL auto-dispatch path should pick MlxSdxlAdapter
     (vendored mlx-examples in-proc) over SdxlDiffusersAdapter (torch). All
@@ -6434,8 +6457,12 @@ def _should_route_sdxl_to_mlx(payload: dict[str, Any]) -> bool:
       5. No referenceAssetId (no IP-Adapter in the MLX path).
       6. The vendored mlx_sd package + mlx itself must import (the
          requirements-mlx.txt install gate).
+      7. No LoKr LoRA in the request — LoKr is torch-only (epic 2193); a LoKr
+         job falls back to the torch path the same way a reference image does.
     """
     if os.getenv("SCENEWORKS_DISABLE_MLX_SDXL", "").strip().lower() in {"1", "true", "yes"}:
+        return False
+    if _request_has_lokr_lora(payload):
         return False
     if sys.platform != "darwin":
         return False
@@ -6477,6 +6504,9 @@ def _should_route_z_image_to_mlx(payload: dict[str, Any]) -> bool:
     if payload.get("mode") == "edit_image":
         return False
     if payload.get("referenceAssetId"):
+        return False
+    # LoKr is torch-only (epic 2193); fall back to the torch path for a LoKr job.
+    if _request_has_lokr_lora(payload):
         return False
     return MlxZImageAdapter()._sidecar_available()
 

@@ -366,6 +366,18 @@ pub(crate) async fn create_training_job(
     let file_name = format!("{}.safetensors", slugify_lora_id(&output_name));
     let job_id = format!("job_{}", Uuid::new_v4().simple());
     let requested_gpu = training_requested_gpu(&payload.config.advanced);
+    // The adapter's network parameterization (epic 2193). Recorded on the trained
+    // LoRA so generation can route LoKr off the MLX backend (which is LoRA-only)
+    // without opening the file — mirrors how `baseModel` gates Wan 5B/14B.
+    let network_type = payload
+        .config
+        .advanced
+        .get("networkType")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_ascii_lowercase)
+        .unwrap_or_else(|| "lora".to_owned());
 
     // Where the produced adapter is written. The target's default `outputScope`
     // (project) lives in the config's `advanced` bag: project outputs land in the
@@ -447,6 +459,7 @@ pub(crate) async fn create_training_job(
         "scope": output_scope,
         "family": target.family.clone(),
         "baseModel": target.base_model.clone(),
+        "networkType": network_type,
         "triggerWords": plan.output.trigger_words.clone(),
         "source": {
             "provider": "training",

@@ -2123,6 +2123,32 @@ def test_should_route_flux2_to_mlx_predicate(monkeypatch):
     assert _should_route_flux2_to_mlx({"model": "flux_dev"}) is False
 
 
+def test_request_has_lokr_lora_detection():
+    from scene_worker.image_adapters import _request_has_lokr_lora
+
+    # Recorded networkType (top-level, mirroring baseModel) or nested in
+    # compatibility — both are read with no file I/O (epic 2193).
+    assert _request_has_lokr_lora({"loras": [{"id": "a", "networkType": "lokr"}]}) is True
+    assert _request_has_lokr_lora({"loras": [{"id": "a", "compatibility": {"networkType": "LoKr"}}]}) is True
+    assert _request_has_lokr_lora({"loras": [{"id": "a", "networkType": "lora"}]}) is False
+    assert _request_has_lokr_lora({"loras": []}) is False
+    assert _request_has_lokr_lora({}) is False
+
+
+def test_should_route_sdxl_to_mlx_falls_back_for_lokr(monkeypatch):
+    from scene_worker.image_adapters import _should_route_sdxl_to_mlx
+
+    monkeypatch.delenv("SCENEWORKS_DISABLE_MLX_SDXL", raising=False)
+    monkeypatch.setattr("sys.platform", "darwin")
+    monkeypatch.setattr(MlxSdxlAdapter, "_mlx_sd_available", lambda: True)
+    model = next(iter(MlxSdxlAdapter._supported_models))
+
+    # A normal LoRA stays on MLX; a LoKr LoRA falls back to the torch path so it
+    # actually applies (MLX can't merge LoKr) instead of erroring.
+    assert _should_route_sdxl_to_mlx({"model": model, "loras": [{"id": "a", "networkType": "lora"}]}) is True
+    assert _should_route_sdxl_to_mlx({"model": model, "loras": [{"id": "a", "networkType": "lokr"}]}) is False
+
+
 def test_mlx_flux2_kv_allows_no_reference_txt2img(monkeypatch):
     # sc-2173: -kv is no longer reference-gated. Without a reference it falls
     # through to the txt2img path (the runner routes it to Flux2Klein) instead
