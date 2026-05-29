@@ -186,6 +186,12 @@ class TrainingRunConfig:
     training_adapter_repo: str | None = None
     training_adapter_version: str | None = None
     weight_noise_sigma: float = 0.0
+    # Adapter network parameterization. ``lora`` is the default; ``lokr`` builds a
+    # LyCORIS Kronecker-product adapter (peft.LoKrConfig). ``decompose_factor`` is
+    # the LoKr block-split knob (``-1`` = auto). Both live in the free-form
+    # ``advanced`` bag in the contract (gated per target by ``limits.networkTypes``).
+    network_type: str = "lora"
+    decompose_factor: int = -1
     advanced: dict[str, Any] = field(default_factory=dict)
 
 
@@ -262,6 +268,8 @@ def read_run_config(plan: dict[str, Any]) -> TrainingRunConfig:
         training_adapter_repo=_as_optional_str(advanced.get("trainingAdapterRepo")),
         training_adapter_version=_as_optional_str(advanced.get("trainingAdapterVersion")),
         weight_noise_sigma=max(0.0, _as_float(advanced.get("weightNoiseSigma"), 0.0)),
+        network_type=str(advanced.get("networkType") or "lora").strip().lower(),
+        decompose_factor=_as_int(advanced.get("decomposeFactor"), -1, minimum=-1),
         advanced=advanced,
     )
 
@@ -706,6 +714,63 @@ def build_optimizer(name: str, params: list[Any], learning_rate: float, weight_d
     return torch.optim.AdamW(params, lr=learning_rate, weight_decay=weight_decay)
 
 
+def build_peft_network_config(peft: Any, config: TrainingRunConfig) -> Any:
+    """Build the PEFT adapter config for the requested network type.
+
+    ``lora`` (the default) yields a standard low-rank ``LoraConfig``; ``lokr``
+    yields a LyCORIS Kronecker-product ``LoKrConfig`` (epic 2193). Both attach via
+    the same ``model.add_adapter(...)`` seam and save via ``get_peft_model_state_dict``
+    — only the on-disk key layout and inference loader differ. Per-target gating
+    (which backends accept ``lokr``) lives in the Rust contract's
+    ``limits.networkTypes``; this is the kernel-side constructor."""
+
+    target_modules = (
+        list(config.lora_target_modules)
+        if isinstance(config.lora_target_modules, (list, tuple))
+        else config.lora_target_modules
+    )
+    if (config.network_type or "lora").strip().lower() == "lokr":
+        return peft.LoKrConfig(
+            r=config.rank,
+            alpha=config.alpha,
+            decompose_factor=config.decompose_factor,
+            init_weights=True,
+            target_modules=target_modules,
+        )
+    return peft.LoraConfig(
+        r=config.rank,
+        lora_alpha=config.alpha,
+        init_lora_weights="gaussian",
+        target_modules=target_modules,
+    )
+
+
+def write_lokr_adapter(
+    state_dict: dict[str, Any], output_dir: str, file_name: str, *, decompose_factor: int
+) -> str:
+    """Write a LoKr adapter to safetensors with routing metadata.
+
+    diffusers' ``save_lora_weights``/``load_lora_weights`` only understand LoRA
+    (``lora_A``/``lora_B``) keys — LoKr emits ``lokr_w1``/``lokr_w2``/``lokr_t2``,
+    so the trainer serializes the raw ``get_peft_model_state_dict`` directly and
+    stamps ``networkType``/``decomposeFactor`` into the file metadata. The
+    inference loader (epic 2193) reads that metadata to route through PEFT
+    injection instead of ``load_lora_weights``."""
+
+    from safetensors.torch import save_file
+
+    os.makedirs(output_dir, exist_ok=True)
+    path = os.path.join(output_dir, file_name)
+    tensors = {key: value.detach().cpu().contiguous() for key, value in state_dict.items()}
+    metadata = {
+        "format": "pt",
+        "networkType": "lokr",
+        "decomposeFactor": str(int(decompose_factor)),
+    }
+    save_file(tensors, path, metadata=metadata)
+    return path
+
+
 # Learning-rate schedulers both backends honor. The flow-matching *noise*
 # scheduler (sigmoid/linear/weighted timestep sampling) is a separate concept,
 # configured via ``timestepType``/``timestepBias`` — see ``sample_training_timestep``.
@@ -996,14 +1061,9 @@ class _ZImageLoraBackend:
             text_encoder.requires_grad_(False)
 
         progress("loading_model", "loading_model", 0.16, "Attaching LoRA adapter to the transformer.")
-        lora_config = peft.LoraConfig(
-            r=config.rank,
-            lora_alpha=config.alpha,
-            init_lora_weights="gaussian",
-            target_modules=list(config.lora_target_modules)
-            if isinstance(config.lora_target_modules, (list, tuple))
-            else config.lora_target_modules,
-        )
+        self._network_type = config.network_type
+        self._decompose_factor = config.decompose_factor
+        lora_config = build_peft_network_config(peft, config)
         transformer.add_adapter(lora_config)
         self._activate_lora_adapter(transformer)
         if config.gradient_checkpointing:
@@ -1370,12 +1430,22 @@ class _ZImageLoraBackend:
 
         os.makedirs(output_dir, exist_ok=True)
         lora_state_dict = get_peft_model_state_dict(self._transformer)
-        type(self._pipeline).save_lora_weights(
-            output_dir,
-            transformer_lora_layers=lora_state_dict,
-            weight_name=file_name,
-            safe_serialization=True,
-        )
+        if getattr(self, "_network_type", "lora") == "lokr":
+            # LoKr keys (lokr_w1/lokr_w2) are not save_lora_weights-compatible;
+            # write raw with routing metadata (epic 2193).
+            write_lokr_adapter(
+                lora_state_dict,
+                output_dir,
+                file_name,
+                decompose_factor=getattr(self, "_decompose_factor", -1),
+            )
+        else:
+            type(self._pipeline).save_lora_weights(
+                output_dir,
+                transformer_lora_layers=lora_state_dict,
+                weight_name=file_name,
+                safe_serialization=True,
+            )
         lora_a_norm, lora_b_norm = self._lora_param_norms()
         emit_worker_event(
             "training_lora_weight_norm",
@@ -1527,14 +1597,9 @@ class _SdxlLoraBackend:
         )
 
         progress("loading_model", "loading_model", 0.16, "Attaching LoRA adapter to the U-Net.")
-        lora_config = peft.LoraConfig(
-            r=config.rank,
-            lora_alpha=config.alpha,
-            init_lora_weights="gaussian",
-            target_modules=list(config.lora_target_modules)
-            if isinstance(config.lora_target_modules, (list, tuple))
-            else config.lora_target_modules,
-        )
+        self._network_type = config.network_type
+        self._decompose_factor = config.decompose_factor
+        lora_config = build_peft_network_config(peft, config)
         unet.add_adapter(lora_config)
         self._activate_lora_adapter(unet)
         if config.gradient_checkpointing:
@@ -1836,12 +1901,22 @@ class _SdxlLoraBackend:
 
         os.makedirs(output_dir, exist_ok=True)
         lora_state_dict = get_peft_model_state_dict(self._unet)
-        type(self._pipeline).save_lora_weights(
-            output_dir,
-            unet_lora_layers=lora_state_dict,
-            weight_name=file_name,
-            safe_serialization=True,
-        )
+        if getattr(self, "_network_type", "lora") == "lokr":
+            # LoKr keys (lokr_w1/lokr_w2) are not save_lora_weights-compatible;
+            # write raw with routing metadata (epic 2193).
+            write_lokr_adapter(
+                lora_state_dict,
+                output_dir,
+                file_name,
+                decompose_factor=getattr(self, "_decompose_factor", -1),
+            )
+        else:
+            type(self._pipeline).save_lora_weights(
+                output_dir,
+                unet_lora_layers=lora_state_dict,
+                weight_name=file_name,
+                safe_serialization=True,
+            )
         lora_a_norm, lora_b_norm = self._lora_param_norms()
         emit_worker_event(
             "training_lora_weight_norm",

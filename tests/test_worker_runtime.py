@@ -120,6 +120,7 @@ from scene_worker.training_adapters import (
     apply_weight_noise,
     build_lr_scheduler,
     build_optimizer,
+    build_peft_network_config,
     bucket_resolution,
     create_training_kernel,
     dry_run_training_summary,
@@ -135,6 +136,7 @@ from scene_worker.training_adapters import (
     seeded_sample,
     training_adapter_weight_name,
     validate_training_plan,
+    write_lokr_adapter,
 )
 from scene_worker.video_adapters import (
     DiffusersVideoAdapter,
@@ -4693,6 +4695,104 @@ def test_build_optimizer_uses_rose(monkeypatch):
         "params": params,
         "kwargs": {"lr": 0.0005, "weight_decay": 0.01, "compute_dtype": "fp32"},
     }
+
+
+def _run_config_for_network(advanced=None):
+    plan = {"config": {"rank": 8, "alpha": 8, "advanced": advanced or {}}}
+    return read_run_config(plan)
+
+
+def test_read_run_config_defaults_network_type_to_lora():
+    config = _run_config_for_network()
+    assert config.network_type == "lora"
+    assert config.decompose_factor == -1
+
+
+def test_read_run_config_parses_lokr_network_and_factor():
+    config = _run_config_for_network({"networkType": "LoKr", "decomposeFactor": 8})
+    # networkType is normalized to lowercase so the trainer's equality check is stable.
+    assert config.network_type == "lokr"
+    assert config.decompose_factor == 8
+
+
+def test_build_peft_network_config_defaults_to_lora():
+    fake_peft = SimpleNamespace(
+        LoraConfig=lambda **kw: ("lora", kw),
+        LoKrConfig=lambda **kw: ("lokr", kw),
+    )
+    config = _run_config_for_network({"loraTargetModules": ["to_q", "to_v"]})
+    kind, kwargs = build_peft_network_config(fake_peft, config)
+    assert kind == "lora"
+    assert kwargs == {
+        "r": config.rank,
+        "lora_alpha": config.alpha,
+        "init_lora_weights": "gaussian",
+        "target_modules": ["to_q", "to_v"],
+    }
+
+
+def test_build_peft_network_config_builds_lokr_with_decompose_factor():
+    fake_peft = SimpleNamespace(
+        LoraConfig=lambda **kw: ("lora", kw),
+        LoKrConfig=lambda **kw: ("lokr", kw),
+    )
+    config = _run_config_for_network(
+        {"networkType": "lokr", "decomposeFactor": 16, "loraTargetModules": ["to_q"]}
+    )
+    kind, kwargs = build_peft_network_config(fake_peft, config)
+    assert kind == "lokr"
+    assert kwargs == {
+        "r": config.rank,
+        "alpha": config.alpha,
+        "decompose_factor": 16,
+        "init_weights": True,
+        "target_modules": ["to_q"],
+    }
+
+
+def test_write_lokr_adapter_stamps_metadata_and_serializes_cpu_tensors(monkeypatch, tmp_path):
+    captured = {}
+
+    def fake_save_file(tensors, path, metadata=None):
+        captured["tensors"] = tensors
+        captured["path"] = path
+        captured["metadata"] = metadata
+        Path(path).write_bytes(b"")
+
+    fake_module = SimpleNamespace(save_file=fake_save_file)
+    # Inject the parent package too so the function's `from safetensors.torch
+    # import save_file` never touches the filesystem regardless of install state.
+    monkeypatch.setitem(sys.modules, "safetensors", SimpleNamespace(torch=fake_module))
+    monkeypatch.setitem(sys.modules, "safetensors.torch", fake_module)
+
+    class FakeTensor:
+        def __init__(self):
+            self.moved = []
+
+        def detach(self):
+            self.moved.append("detach")
+            return self
+
+        def cpu(self):
+            self.moved.append("cpu")
+            return self
+
+        def contiguous(self):
+            self.moved.append("contiguous")
+            return self
+
+    state = {"blk.lokr_w1": FakeTensor(), "blk.lokr_w2": FakeTensor()}
+    path = write_lokr_adapter(state, str(tmp_path), "adapter.safetensors", decompose_factor=8)
+
+    assert path == str(tmp_path / "adapter.safetensors")
+    # Routing metadata is what the inference loader (epic 2193) keys off.
+    assert captured["metadata"] == {
+        "format": "pt",
+        "networkType": "lokr",
+        "decomposeFactor": "8",
+    }
+    assert set(captured["tensors"]) == {"blk.lokr_w1", "blk.lokr_w2"}
+    assert captured["tensors"]["blk.lokr_w1"].moved == ["detach", "cpu", "contiguous"]
 
 
 def test_lr_schedule_updates_converts_microsteps_to_optimizer_updates():
