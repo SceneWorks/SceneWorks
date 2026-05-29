@@ -1186,6 +1186,74 @@ async fn training_dataset_uploads_are_dataset_owned_not_assets() {
 }
 
 #[tokio::test]
+async fn asset_library_scope_excludes_character_studio_outputs() {
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let settings = test_settings(&temp_dir);
+    let app = create_app(settings).expect("app creates");
+
+    let (_, project) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/projects",
+        json!({ "name": "Library Scope Project" }),
+    )
+    .await;
+    let project_id = project["id"].as_str().expect("project id").to_owned();
+    let project_path = std::path::PathBuf::from(project["path"].as_str().unwrap());
+
+    // Write a normal Image Studio output and a Character Studio test output
+    // directly as sidecars (no explicit origin → derived on the first reindex,
+    // which the initial /assets call triggers because the table is empty).
+    let image_dir = project_path.join("assets/images");
+    for (id, mode) in [("img_studio_1", "text_to_image"), ("char_test_1", "character_image")] {
+        std::fs::write(image_dir.join(format!("{id}.png")), b"png-bytes").expect("media");
+        std::fs::write(
+            image_dir.join(format!("{id}.sceneworks.json")),
+            serde_json::to_string_pretty(&json!({
+                "id": id,
+                "type": "image",
+                "displayName": id,
+                "createdAt": "2026-05-23T00:00:00Z",
+                "file": {"path": format!("assets/images/{id}.png")},
+                "status": {"favorite": false, "rating": 0, "rejected": false, "trashed": false},
+                "recipe": {"mode": mode},
+            }))
+            .expect("json"),
+        )
+        .expect("sidecar");
+    }
+
+    // Default (all) scope returns both, each tagged with a derived origin.
+    let (status, all) = request(
+        app.clone(),
+        "GET",
+        &format!("/api/v1/projects/{project_id}/assets"),
+        Value::Null,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let all = all.as_array().expect("all list");
+    assert_eq!(all.len(), 2);
+    assert!(all
+        .iter()
+        .any(|asset| asset["id"] == "char_test_1" && asset["origin"] == "character_studio"));
+
+    // Library scope drops the Character Studio output.
+    let (status, library) = request(
+        app,
+        "GET",
+        &format!("/api/v1/projects/{project_id}/assets?scope=library"),
+        Value::Null,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let library = library.as_array().expect("library list");
+    assert_eq!(library.len(), 1);
+    assert_eq!(library[0]["id"], "img_studio_1");
+    assert_eq!(library[0]["origin"], "image_studio");
+}
+
+#[tokio::test]
 async fn create_training_job_resolves_plan_and_queues_lora_train() {
     let temp_dir = tempfile::tempdir().expect("temp dir creates");
     let settings = test_settings(&temp_dir);

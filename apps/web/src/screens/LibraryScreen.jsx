@@ -47,7 +47,14 @@ export function LibraryScreen() {
   const [showRejected, setShowRejected] = useState(false);
   const [assetMode, setAssetMode] = useState("assets");
   const [isImporting, setIsImporting] = useState(false);
-  const visibleAssets = foldUpscaledAssetVariants(assets.filter((asset) => {
+  // Asset Library hygiene (sc-2024): show only studio-generated and uploaded
+  // media. Character Studio test outputs (origin "character_studio") live under
+  // the character, not here. The backend also exposes `?scope=library`; we filter
+  // on the authoritative `origin` field client-side to reuse the shared asset
+  // feed instead of loading a second scoped copy. Dataset images never reach the
+  // Library — they are stored outside the indexed asset folders.
+  const libraryAssets = assets.filter((asset) => asset.origin !== "character_studio");
+  const visibleAssets = foldUpscaledAssetVariants(libraryAssets.filter((asset) => {
     if (typeFilter !== "all" && asset.type !== typeFilter) {
       return false;
     }
@@ -77,10 +84,10 @@ export function LibraryScreen() {
     event.target.value = "";
   }
 
-  const imageCount = assets.filter((asset) => asset.type === "image").length;
-  const videoCount = assets.filter((asset) => asset.type === "video").length;
-  const uploadCount = assets.filter((asset) => asset.type === "upload").length;
-  const availableTags = [...new Set(assets.flatMap((asset) => (Array.isArray(asset.tags) ? asset.tags : [])))].sort();
+  const imageCount = libraryAssets.filter((asset) => asset.type === "image").length;
+  const videoCount = libraryAssets.filter((asset) => asset.type === "video").length;
+  const uploadCount = libraryAssets.filter((asset) => asset.type === "upload").length;
+  const availableTags = [...new Set(libraryAssets.flatMap((asset) => (Array.isArray(asset.tags) ? asset.tags : [])))].sort();
 
   return (
     <section className="main-surface library-surface">
@@ -132,7 +139,7 @@ export function LibraryScreen() {
           </div>
           <div className="hero-stat">
             <span className="hero-stat-label">Assets</span>
-            <span className="hero-stat-value">{assets.length} total</span>
+            <span className="hero-stat-value">{libraryAssets.length} total</span>
           </div>
           <div className="hero-stat">
             <span className="hero-stat-label">Images</span>
