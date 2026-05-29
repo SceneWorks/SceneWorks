@@ -1557,6 +1557,10 @@ export function TrainingStudio({ mode = "training" } = {}) {
                       <h3>{active.title}</h3>
                     </div>
                     <div className="training-head-actions">
+                      <button className="secondary-action" disabled={loadingDatasets} onClick={onRefreshDatasets} type="button">
+                        <Icon.Search size={14} />
+                        {loadingDatasets ? "Refreshing" : "Refresh"}
+                      </button>
                       <CompactSelector
                         busyId={busyDatasetId}
                         createLabel="New dataset"
@@ -1572,10 +1576,6 @@ export function TrainingStudio({ mode = "training" } = {}) {
                         placeholder={activeDataset ? activeDataset.name : "New dataset"}
                         selectedId={selectedDatasetId}
                       />
-                      <button className="secondary-action" disabled={loadingDatasets} onClick={onRefreshDatasets} type="button">
-                        <Icon.Search size={14} />
-                        {loadingDatasets ? "Refreshing" : "Refresh"}
-                      </button>
                     </div>
                   </div>
                   {datasetsError ? <p className="inline-warning">{datasetsError}</p> : null}
@@ -1587,8 +1587,8 @@ export function TrainingStudio({ mode = "training" } = {}) {
                       <div className="empty-panel compact-panel">No training datasets yet — use “New” to start one.</div>
                     ) : null}
                     <div className="training-dataset-editor">
-                      <div className="training-dataset-form">
-                        <label>
+                      <div className="training-dataset-fields">
+                        <label className="field-name">
                           Dataset name
                           <input
                             onChange={(event) => setDraftName(event.target.value)}
@@ -1596,13 +1596,15 @@ export function TrainingStudio({ mode = "training" } = {}) {
                             value={draftName}
                           />
                         </label>
-                        <button className="primary-action training-add-images" onClick={() => setAddDialogOpen(true)} type="button">
+                        <span className="field-version">
+                          {dirty ? "Unsaved changes" : activeDataset ? `Version ${activeDataset.version}` : "Draft"}
+                        </span>
+                        <button className="primary-action field-add" onClick={() => setAddDialogOpen(true)} type="button">
                           <Icon.Plus size={14} />
                           Add images
                         </button>
-                      </div>
-                      <div className="training-dataset-toolbar">
-                        <label className="training-rename-field">
+
+                        <label className="field-prefix">
                           Name prefix
                           <input
                             onChange={(event) => setRenamePrefix(event.target.value)}
@@ -1611,7 +1613,7 @@ export function TrainingStudio({ mode = "training" } = {}) {
                           />
                         </label>
                         <button
-                          className="primary-action"
+                          className="primary-action field-apply"
                           disabled={!activeDataset?.id || renaming || !memberAssets.length}
                           onClick={applyOrderedNames}
                           type="button"
@@ -1620,7 +1622,7 @@ export function TrainingStudio({ mode = "training" } = {}) {
                           {renaming ? "Renaming…" : "Apply ordered names"}
                         </button>
                         <button
-                          className="primary-action training-caption-all"
+                          className="primary-action field-caption"
                           disabled={!memberAssets.length}
                           onClick={() => setCaptionDialog({ type: "all" })}
                           type="button"
@@ -1632,12 +1634,9 @@ export function TrainingStudio({ mode = "training" } = {}) {
                       <DatasetHealth
                         health={health}
                         action={
-                          <>
-                            <button className="primary-action" disabled={!canSave} onClick={saveDataset} type="button">
-                              {savingDataset ? "Saving" : activeDataset ? "Save dataset" : "Create dataset"}
-                            </button>
-                            <span>{dirty ? "Unsaved changes" : activeDataset ? `Version ${activeDataset.version}` : "Draft"}</span>
-                          </>
+                          <button className="primary-action" disabled={!canSave} onClick={saveDataset} type="button">
+                            {savingDataset ? "Saving" : activeDataset ? "Save dataset" : "Create dataset"}
+                          </button>
                         }
                       />
                       <div className="training-validity">
