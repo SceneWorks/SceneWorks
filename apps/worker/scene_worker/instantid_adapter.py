@@ -352,9 +352,9 @@ class InstantIDAdapter:
     @staticmethod
     def _face_restore_enabled(request: ImageRequest) -> bool:
         """Whether the full-body face-restoration pass runs (advanced.faceRestore,
-        default on). Off = the OpenPose+InstantID base image is used as-is (cleaner
+        default off). Off = the OpenPose+InstantID base image is used as-is (cleaner
         blend, but weaker identity at the small full-body face size)."""
-        value = request.advanced.get("faceRestore", True)
+        value = request.advanced.get("faceRestore", False)
         if isinstance(value, str):
             return value.strip().lower() not in ("false", "0", "no", "off", "")
         return bool(value)

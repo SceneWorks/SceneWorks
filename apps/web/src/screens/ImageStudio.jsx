@@ -247,7 +247,7 @@ export function ImageStudio() {
   // clear the override.
   const [stepsOverride, setStepsOverride] = useState(saved.steps ?? "");
   const [guidanceOverride, setGuidanceOverride] = useState(saved.guidanceScale ?? "");
-  const [faceRestore, setFaceRestore] = useState(true);
+  const [faceRestore, setFaceRestore] = useState(false);
   const { byId: poseById } = usePoseLibrary();
   const [upscaleEnabled, setUpscaleEnabled] = useState(saved.upscaleEnabled ?? false);
   const [upscaleFactor, setUpscaleFactor] = useState(saved.upscaleFactor ?? 2);
