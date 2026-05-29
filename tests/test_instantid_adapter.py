@@ -250,8 +250,8 @@ def test_openpose_scale_default_and_override():
 
 
 def test_face_restore_enabled_default_and_toggle():
-    # Defaults on; explicit booleans + string forms toggle the full-body restoration pass.
-    assert InstantIDAdapter._face_restore_enabled(SimpleNamespace(advanced={})) is True
+    # Defaults off; explicit booleans + string forms toggle the full-body restoration pass.
+    assert InstantIDAdapter._face_restore_enabled(SimpleNamespace(advanced={})) is False
     assert InstantIDAdapter._face_restore_enabled(SimpleNamespace(advanced={"faceRestore": False})) is False
     assert InstantIDAdapter._face_restore_enabled(SimpleNamespace(advanced={"faceRestore": True})) is True
     assert InstantIDAdapter._face_restore_enabled(SimpleNamespace(advanced={"faceRestore": "false"})) is False

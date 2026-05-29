@@ -758,7 +758,7 @@ export function CharacterPoseLibrary({
     ?? null;
   const { byId } = usePoseLibrary();
   const [selectedPoseIds, setSelectedPoseIds] = React.useState([]);
-  const [faceRestore, setFaceRestore] = React.useState(true);
+  const [faceRestore, setFaceRestore] = React.useState(false);
   const [referenceAssetId, setReferenceAssetId] = React.useState("");
   const [prompt, setPrompt] = React.useState("");
   const [submitting, setSubmitting] = React.useState(false);
