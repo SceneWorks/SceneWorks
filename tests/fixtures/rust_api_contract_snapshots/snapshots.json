@@ -30,6 +30,7 @@
       "metadata": {
         "characterReferences": []
       },
+      "origin": "upload",
       "projectId": "project_fixture",
       "recipe": {
         "adapter": "api-upload",
@@ -89,6 +90,7 @@
           }
         ]
       },
+      "origin": "upload",
       "projectId": "project_fixture",
       "recipe": {
         "adapter": "api-upload",
@@ -137,6 +139,7 @@
         "sourceAssetId": null,
         "sourceTimestamp": null
       },
+      "origin": "upload",
       "projectId": "project_fixture",
       "recipe": {
         "adapter": "api-upload",
@@ -199,6 +202,7 @@
         }
       ]
     },
+    "origin": "upload",
     "projectId": "project_fixture",
     "recipe": {
       "adapter": "api-upload",
@@ -245,6 +249,7 @@
     "metadata": {
       "characterReferences": []
     },
+    "origin": "upload",
     "projectId": "project_fixture",
     "recipe": {
       "adapter": "api-upload",
@@ -288,6 +293,7 @@
       "sourceAssetId": null,
       "sourceTimestamp": null
     },
+    "origin": "upload",
     "projectId": "project_fixture",
     "recipe": {
       "adapter": "api-upload",
@@ -333,6 +339,7 @@
       "sourceAssetId": null,
       "sourceTimestamp": null
     },
+    "origin": "upload",
     "projectId": "project_fixture",
     "recipe": {
       "adapter": "api-upload",
@@ -2233,6 +2240,7 @@
       "sourceAssetId": null,
       "sourceTimestamp": null
     },
+    "origin": "upload",
     "projectId": "project_fixture",
     "recipe": {
       "adapter": "api-upload",

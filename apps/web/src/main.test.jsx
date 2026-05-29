@@ -7266,6 +7266,58 @@ describe("SceneWorks app shell", () => {
     expect(updateAssetTags).toHaveBeenLastCalledWith(portrait, []);
   });
 
+  it("excludes Character Studio outputs from the Asset Library (sc-2024)", async () => {
+    const studioImage = {
+      id: "asset-studio",
+      projectId: "project-1",
+      type: "image",
+      displayName: "Studio Render",
+      origin: "image_studio",
+      recipe: { prompt: "studio render" },
+      status: { favorite: false, rating: 0, rejected: false, trashed: false },
+    };
+    const characterImage = {
+      id: "asset-character",
+      projectId: "project-1",
+      type: "image",
+      displayName: "Character Test",
+      origin: "character_studio",
+      recipe: { prompt: "character test" },
+      status: { favorite: false, rating: 0, rejected: false, trashed: false },
+    };
+    root = createRoot(container);
+    await act(async () => {
+      root.render(
+        withAppContext(
+          {
+            activeProject: { id: "project-1", name: "Scoped" },
+            assets: [studioImage, characterImage],
+            jobs: [],
+            imageModels: [],
+            createVqaJob: vi.fn(),
+            deleteAsset: () => {},
+            purgeAsset: () => {},
+            importAsset: () => {},
+            setPreviewAsset: () => {},
+            sendAssetToImage: () => {},
+            sendAssetToVideo: () => {},
+            selectedAsset: studioImage,
+            setSelectedAssetId: () => {},
+            setActiveView: () => {},
+            updateAssetStatus: () => {},
+          },
+          <LibraryScreen />,
+        ),
+      );
+    });
+    await settle();
+
+    const tiles = [...container.querySelectorAll(".asset-tile")];
+    expect(tiles).toHaveLength(1);
+    expect(tiles[0].textContent).toContain("Studio Render");
+    expect(container.textContent).not.toContain("Character Test");
+  });
+
   it("folds original and upscaled library variants into one representative tile", async () => {
     const setPreviewAsset = vi.fn();
     const original = {

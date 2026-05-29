@@ -29,6 +29,9 @@ pub(crate) struct AssetsQuery {
     /// (recipe.normalizedSettings.characterId) or referencing it
     /// (metadata.characterReferences[].characterId).
     pub(crate) character_id: Option<String>,
+    /// View scope (sc-2024). `library` excludes Character Studio test outputs;
+    /// anything else (the default) returns all assets.
+    pub(crate) scope: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]

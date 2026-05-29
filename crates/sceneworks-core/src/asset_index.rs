@@ -61,12 +61,60 @@ pub(crate) fn collect_sidecars(path: &Path, sidecars: &mut Vec<PathBuf>) -> Proj
     Ok(())
 }
 
+/// The studio / feature an asset originated from. Drives Asset Library hygiene
+/// (sc-2024): the Library shows only studio-generated and uploaded media, never
+/// Character Studio test outputs (those live under the character). Returns an
+/// explicit `origin` when the sidecar carries one, otherwise derives it from the
+/// recipe mode + asset type so legacy sidecars (written before the field existed)
+/// still classify correctly on read and on reindex.
+pub(crate) fn asset_origin(asset: &Value) -> String {
+    if let Some(origin) = asset.get("origin").and_then(Value::as_str) {
+        if !origin.is_empty() {
+            return origin.to_owned();
+        }
+    }
+    let mode = asset
+        .get("recipe")
+        .and_then(|recipe| recipe.get("mode"))
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let asset_type = asset
+        .get("type")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    derive_origin(mode, asset_type).to_owned()
+}
+
+/// Classify an asset's origin from its generation `mode` and media `type`.
+/// `character_image` (the Character Studio test mode) and `upload` (manual
+/// import) are mode-driven; everything else maps to the studio that produces
+/// that media type.
+pub(crate) fn derive_origin(mode: &str, asset_type: &str) -> &'static str {
+    match mode {
+        "character_image" => "character_studio",
+        "upload" => "upload",
+        _ => match asset_type {
+            "video" => "video_studio",
+            "document" => "document_studio",
+            _ => "image_studio",
+        },
+    }
+}
+
 pub(crate) fn normalize_asset(
     project_id: &str,
     project_path: &Path,
     sidecar_path: &Path,
 ) -> ProjectStoreResult<Value> {
     let mut asset = read_json(sidecar_path)?;
+    // Guarantee every API response carries an `origin`, even for legacy sidecars
+    // written before the field existed (sc-2024).
+    let origin = asset_origin(&asset);
+    if let Some(object) = asset.as_object_mut() {
+        object
+            .entry("origin".to_owned())
+            .or_insert_with(|| Value::String(origin));
+    }
     if let Some(path) = asset.pointer("/file/path").and_then(Value::as_str) {
         let normalized_path = path.replace('\\', "/");
         if let Some(object) = asset.as_object_mut() {
@@ -95,8 +143,8 @@ pub(crate) fn upsert_asset_row(
         "
         insert or replace into assets (
           id, type, display_name, file_path, generation_set_id, created_at,
-          favorite, rating, rejected, trashed, sidecar_path
-        ) values (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
+          favorite, rating, rejected, trashed, sidecar_path, origin
+        ) values (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
         ",
         params![
             required_str(asset, "id")?,
@@ -115,6 +163,7 @@ pub(crate) fn upsert_asset_row(
             optional_bool(status, "rejected").unwrap_or(false),
             optional_bool(status, "trashed").unwrap_or(false),
             sidecar_rel,
+            asset_origin(asset),
         ],
     )?;
     Ok(())
@@ -123,4 +172,56 @@ pub(crate) fn upsert_asset_row(
 fn required_str<'a>(asset: &'a Value, key: &str) -> ProjectStoreResult<&'a str> {
     optional_str(asset, key)
         .ok_or_else(|| ProjectStoreError::BadRequest(format!("Missing required field: {key}")))
+}
+
+#[cfg(test)]
+mod origin_tests {
+    use super::{asset_origin, derive_origin};
+    use serde_json::json;
+
+    #[test]
+    fn derives_character_studio_from_character_image_mode() {
+        assert_eq!(
+            derive_origin("character_image", "image"),
+            "character_studio"
+        );
+        // Mode wins over media type so a character test frame still classifies.
+        assert_eq!(
+            derive_origin("character_image", "video"),
+            "character_studio"
+        );
+    }
+
+    #[test]
+    fn derives_upload_from_upload_mode() {
+        assert_eq!(derive_origin("upload", "image"), "upload");
+    }
+
+    #[test]
+    fn derives_studio_origin_by_media_type() {
+        assert_eq!(derive_origin("text_to_image", "image"), "image_studio");
+        assert_eq!(derive_origin("image_to_video", "video"), "video_studio");
+        assert_eq!(derive_origin("interleave", "document"), "document_studio");
+    }
+
+    #[test]
+    fn asset_origin_prefers_explicit_field() {
+        let asset = json!({
+            "type": "image",
+            "origin": "character_studio",
+            "recipe": { "mode": "text_to_image" },
+        });
+        assert_eq!(asset_origin(&asset), "character_studio");
+    }
+
+    #[test]
+    fn asset_origin_derives_when_field_absent_or_empty() {
+        // Legacy sidecar: no origin field, classified by recipe mode.
+        let legacy = json!({ "type": "image", "recipe": { "mode": "character_image" } });
+        assert_eq!(asset_origin(&legacy), "character_studio");
+        // Empty origin falls back to derivation rather than returning "".
+        let empty =
+            json!({ "type": "video", "origin": "", "recipe": { "mode": "image_to_video" } });
+        assert_eq!(asset_origin(&empty), "video_studio");
+    }
 }

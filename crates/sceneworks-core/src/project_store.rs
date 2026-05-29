@@ -8,7 +8,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
 
 use crate::asset_index::{
-    asset_sidecars, normalize_asset, row_to_asset_record, upsert_asset_row, AssetRecord,
+    asset_origin, asset_sidecars, normalize_asset, row_to_asset_record, upsert_asset_row,
+    AssetRecord,
 };
 use crate::character_store::{
     apply_character_migrations, clear_character_tables, reindex_characters_on_connection,
@@ -143,6 +144,19 @@ pub struct TimelineFileDocument {
 pub struct AssetMutationResult {
     pub id: String,
     pub status: String,
+}
+
+/// Which assets a listing should include (sc-2024). `All` is the historical
+/// behaviour used by Image/Video studios, the Editor, and the per-character
+/// gallery. `Library` is the Asset Library view, which excludes Character Studio
+/// test outputs (`origin = character_studio`) so they live only under the
+/// character. Dataset images are already excluded — they are stored outside the
+/// indexed asset folders and never enter the assets table.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum AssetScope {
+    #[default]
+    All,
+    Library,
 }
 
 #[derive(Debug, Default, Clone, Deserialize)]
@@ -622,6 +636,7 @@ impl ProjectStore {
         project_id: &str,
         include_rejected: bool,
         include_trashed: bool,
+        scope: AssetScope,
     ) -> ProjectStoreResult<Vec<Value>> {
         let project_path = self.find_project_path(project_id)?;
         ensure_project_db_ready(&project_path)?;
@@ -636,15 +651,23 @@ impl ProjectStore {
         }
 
         let connection = connect_project_db(&project_path)?;
-        let mut statement = connection.prepare(
+        // The Library view hides Character Studio test outputs (sc-2024). Rows
+        // with a null origin (should not occur after the schema-bump reindex)
+        // fail open and stay visible.
+        let origin_filter = match scope {
+            AssetScope::All => "",
+            AssetScope::Library => " and (origin is null or origin != 'character_studio')",
+        };
+        let mut statement = connection.prepare(&format!(
             "
             select sidecar_path, file_path
               from assets
              where (?1 or rejected = 0)
                and (?2 or trashed = 0)
+               {origin_filter}
              order by created_at desc
-            ",
-        )?;
+            "
+        ))?;
         let rows = statement.query_map(params![include_rejected, include_trashed], |row| {
             Ok((
                 row.get::<_, Option<String>>(0)?,
@@ -1067,6 +1090,8 @@ impl ProjectStore {
             "type": media_type_for_mime(&content_type)?,
             "displayName": display_name,
             "createdAt": created_at,
+            // Manual imports are Library media in their own right (sc-2024).
+            "origin": "upload",
             "file": {
                 "path": media_rel,
                 "mimeType": content_type,
@@ -1456,7 +1481,7 @@ struct ReindexCounts {
 /// Bump whenever the project.db schema changes (new table, column, or index).
 /// `apply_project_migrations` only re-runs its DDL when `PRAGMA user_version`
 /// is behind this; forgetting to bump means an existing DB never gets the change.
-const PROJECT_SCHEMA_VERSION: i64 = 1;
+const PROJECT_SCHEMA_VERSION: i64 = 2;
 
 fn project_schema_version(connection: &Connection) -> ProjectStoreResult<i64> {
     Ok(connection.query_row("pragma user_version", [], |row| row.get(0))?)
@@ -1508,6 +1533,10 @@ pub fn apply_project_migrations(connection: &Connection) -> ProjectStoreResult<(
         ",
     )?;
     ensure_column(connection, "assets", "sidecar_path", "text")?;
+    // sc-2024: the originating studio (image_studio / video_studio /
+    // document_studio / character_studio / upload). Existing rows are backfilled
+    // by the reindex that `ensure_project_db_ready` runs on this version bump.
+    ensure_column(connection, "assets", "origin", "text")?;
     apply_character_migrations(connection)?;
     apply_training_dataset_migrations(connection)?;
     // Pragma assignment cannot be parameterized; the version is a trusted const.
@@ -1516,7 +1545,17 @@ pub fn apply_project_migrations(connection: &Connection) -> ProjectStoreResult<(
 }
 
 pub fn ensure_project_db_ready(project_path: &Path) -> ProjectStoreResult<()> {
-    apply_project_migrations(&connect_project_db(project_path)?)
+    let connection = connect_project_db(project_path)?;
+    let version_before = project_schema_version(&connection)?;
+    apply_project_migrations(&connection)?;
+    drop(connection);
+    // A schema bump can add derived columns (e.g. `origin`, sc-2024) that
+    // existing rows lack. Rebuild the index from sidecars once so those columns
+    // are backfilled; subsequent calls are no-ops (version already current).
+    if version_before < PROJECT_SCHEMA_VERSION {
+        reindex_project_path(project_path)?;
+    }
+    Ok(())
 }
 
 fn reindex_project_path(project_path: &Path) -> ProjectStoreResult<ReindexCounts> {
@@ -2218,6 +2257,12 @@ fn build_generated_asset_sidecar(
         "recipe": recipe,
         "lineage": lineage,
     });
+    // Record the originating studio so the Asset Library can exclude Character
+    // Studio test outputs (sc-2024). Derived from recipe mode + media type.
+    let origin = asset_origin(&asset);
+    if let Some(object) = asset.as_object_mut() {
+        object.insert("origin".to_owned(), Value::String(origin));
+    }
     if let Some(extra) = fact.get("extra") {
         if let Some(object) = asset.as_object_mut() {
             object.insert("extra".to_owned(), extra.clone());
@@ -2725,7 +2770,7 @@ fn move_or_copy_file(source: &Path, destination: &Path) -> ProjectStoreResult<()
 mod tests {
     use super::{
         build_generated_asset_sidecar, guess_mime_from_filename, is_safe_relative_path,
-        normalize_asset_tags, CharacterCreateInput, CharacterLookInput, ProjectStore,
+        normalize_asset_tags, AssetScope, CharacterCreateInput, CharacterLookInput, ProjectStore,
         PROJECT_FOLDERS,
     };
     use serde_json::{json, Value};
@@ -3110,11 +3155,72 @@ mod tests {
         assert_eq!(counts.assets, 1);
 
         let assets = store
-            .list_assets(&project.id, false, false)
+            .list_assets(&project.id, false, false, AssetScope::All)
             .expect("assets list");
         assert_eq!(assets.len(), 1);
         assert_eq!(assets[0]["id"], "doc_1");
         assert_eq!(assets[0]["type"], "document");
+        // The document asset carries a derived origin (sc-2024).
+        assert_eq!(assets[0]["origin"], "document_studio");
+    }
+
+    #[test]
+    fn library_scope_excludes_character_studio_outputs() {
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        let store = ProjectStore::new(temp_dir.path().join("data"), "test-version");
+        let project = store.create_project("Scoped").expect("project creates");
+        let project_path = std::path::PathBuf::from(&project.path);
+        let image_dir = project_path.join("assets/images");
+
+        // Two image asset sidecars written WITHOUT an explicit `origin` field, to
+        // exercise the derive-on-reindex backfill: a normal Image Studio output
+        // and a Character Studio test output (recipe.mode == "character_image").
+        let write_sidecar = |id: &str, mode: &str| {
+            std::fs::write(
+                image_dir.join(format!("{id}.png")),
+                b"not-a-real-png".as_slice(),
+            )
+            .expect("media writes");
+            std::fs::write(
+                image_dir.join(format!("{id}.sceneworks.json")),
+                serde_json::to_string_pretty(&json!({
+                    "id": id,
+                    "type": "image",
+                    "displayName": id,
+                    "createdAt": "2026-05-23T00:00:00Z",
+                    "file": {"path": format!("assets/images/{id}.png")},
+                    "status": {"favorite": false, "rating": 0, "rejected": false, "trashed": false},
+                    "recipe": {"mode": mode},
+                }))
+                .expect("json"),
+            )
+            .expect("sidecar writes");
+        };
+        write_sidecar("img_studio_1", "text_to_image");
+        write_sidecar("char_test_1", "character_image");
+
+        store.reindex_project(&project.id).expect("reindex works");
+
+        // All scope returns both, each with a derived origin.
+        let all = store
+            .list_assets(&project.id, false, false, AssetScope::All)
+            .expect("all list");
+        assert_eq!(all.len(), 2);
+        let origin_of = |id: &str| {
+            all.iter()
+                .find(|asset| asset["id"] == id)
+                .map(|asset| asset["origin"].as_str().unwrap_or_default().to_owned())
+                .unwrap_or_default()
+        };
+        assert_eq!(origin_of("img_studio_1"), "image_studio");
+        assert_eq!(origin_of("char_test_1"), "character_studio");
+
+        // Library scope drops the Character Studio output, keeps the studio image.
+        let library = store
+            .list_assets(&project.id, false, false, AssetScope::Library)
+            .expect("library list");
+        assert_eq!(library.len(), 1);
+        assert_eq!(library[0]["id"], "img_studio_1");
     }
 
     #[test]
