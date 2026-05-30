@@ -334,6 +334,26 @@ def test_gpu_worker_advertises_real_person_jobs_when_backends_installed(monkeypa
     assert "person_segment" in capabilities
 
 
+def test_gpu_worker_advertises_pose_detect_when_backend_installed(monkeypatch):
+    monkeypatch.setattr("scene_worker.runtime.torch_inference_backend_available", lambda: True)
+    monkeypatch.setattr("scene_worker.runtime.pose_detector_backend_available", lambda: True)
+    capabilities = worker_capabilities({"id": "gpu-0", "name": "GPU 0", "capabilities": ["placeholder", "gpu"]})
+    assert "pose_detect" in capabilities
+
+
+def test_gpu_worker_omits_pose_detect_without_backend(monkeypatch):
+    monkeypatch.setattr("scene_worker.runtime.torch_inference_backend_available", lambda: True)
+    monkeypatch.setattr("scene_worker.runtime.pose_detector_backend_available", lambda: False)
+    capabilities = worker_capabilities({"id": "gpu-0", "name": "GPU 0", "capabilities": ["placeholder", "gpu"]})
+    assert "pose_detect" not in capabilities
+
+
+def test_cpu_worker_never_advertises_pose_detect(monkeypatch):
+    monkeypatch.setattr("scene_worker.runtime.pose_detector_backend_available", lambda: True)
+    capabilities = worker_capabilities({"id": "cpu", "name": "CPU", "capabilities": ["placeholder", "cpu"]})
+    assert capabilities == ["cpu"]
+
+
 def test_gpu_worker_omits_person_jobs_without_detector_backend(monkeypatch):
     monkeypatch.setattr("scene_worker.runtime.torch_inference_backend_available", lambda: True)
     monkeypatch.setattr("scene_worker.runtime.detector_backend_available", lambda: False)
@@ -5402,6 +5422,7 @@ def test_worker_check_reports_inference_sidecar_capabilities(monkeypatch):
     monkeypatch.setattr("scene_worker.runtime.detector_backend_available", lambda: True)
     monkeypatch.setattr("scene_worker.runtime.tracker_backend_available", lambda: True)
     monkeypatch.setattr("scene_worker.runtime.segmenter_backend_available", lambda: True)
+    monkeypatch.setattr("scene_worker.runtime.pose_detector_backend_available", lambda: True)
     monkeypatch.setattr(
         "scene_worker.runtime.discover_gpu",
         lambda _gpu_id: {"id": "0", "name": "GPU 0", "capabilities": ["gpu"]},
@@ -5419,6 +5440,7 @@ def test_worker_check_reports_inference_sidecar_capabilities(monkeypatch):
         "person_replace",
         "person_detect",
         "person_track",
+        "pose_detect",
         "lora_train",
         "training_caption",
         # sc-1635: VQA + interleave are advertised and dispatched, so the check
