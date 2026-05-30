@@ -588,6 +588,13 @@ pub struct ProgressRequest {
     /// running-max treatment as peak_gpu_memory_pct (sc-2086).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub peak_gpu_load_pct: Option<ContractNumber>,
+    /// Runtime backend the worker actually executed this job on
+    /// ("mlx" / "mps" / "cuda" / "cpu"). Distinct from the worker's
+    /// device-architecture heuristic — the same Apple-Silicon worker can
+    /// serve both MLX and MPS-Diffusers jobs, and the WorkerProgressCard's
+    /// arch pill should reflect which one ran. First non-null value sticks.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub backend: Option<String>,
     #[serde(flatten)]
     pub extra: ExtraFields,
 }
@@ -631,6 +638,12 @@ pub struct JobSnapshot {
     /// Pair of peak_gpu_memory_pct.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub peak_gpu_load_pct: Option<ContractNumber>,
+    /// Runtime backend the worker actually used to execute the job
+    /// ("mlx" / "mps" / "cuda" / "cpu"). Surfaced by the WorkerProgressCard
+    /// arch pill so an MLX run and a Diffusers-on-MPS run on the same worker
+    /// read differently.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub backend: Option<String>,
     /// Human-readable job title derived server-side from job type + payload
     /// (sc-2087). The WorkerProgressCard reads `title` first and only falls
     /// back to client-side derivation when this is absent, so queue rows

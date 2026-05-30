@@ -155,10 +155,6 @@ function StatusBadge({ status }) {
 
 function HardwarePills({ device, gpuLabel, architecture }) {
   if (!device) return null;
-  // Apple Silicon / MLX runs against Unified Memory — the Mem meter reflects
-  // shared system memory, not dedicated VRAM. Worth surfacing so the meter
-  // number isn't misread as a discrete-VRAM figure.
-  const sharedMem = architecture === "mps" || architecture === "mlx";
   return (
     <div className="worker-progress-card__hw-info">
       <span className="worker-progress-card__pill device">{device}</span>
@@ -166,7 +162,6 @@ function HardwarePills({ device, gpuLabel, architecture }) {
       {architecture ? (
         <span className={`worker-progress-card__pill arch arch-${architecture}`}>{architecture}</span>
       ) : null}
-      {sharedMem ? <span className="worker-progress-card__hw-note">shared mem</span> : null}
     </div>
   );
 }
@@ -364,7 +359,18 @@ export function WorkerProgressCard({
     return findWorkerForJob(job, visibleWorkers ?? []);
   }, [job, workersById, visibleWorkers]);
 
-  const hardware = useMemo(() => deriveWorkerHardware(worker), [worker]);
+  // Architecture pill prefers the job's reported `backend` (the actual runtime
+  // — mlx vs mps vs cuda) when present; falls back to a heuristic on the
+  // worker's gpuName for legacy / pre-backend snapshots. This lets an MLX
+  // adapter run show "mlx" while a Diffusers-on-MPS run on the same worker
+  // shows "mps".
+  const hardware = useMemo(() => {
+    const derived = deriveWorkerHardware(worker);
+    if (job.backend) {
+      return { ...derived, architecture: job.backend };
+    }
+    return derived;
+  }, [worker, job.backend]);
   const meters = useMemo(() => pickMeters(job, worker), [job, worker]);
   const elapsedSeconds = useLiveJobElapsedSeconds(job);
 

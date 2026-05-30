@@ -213,6 +213,33 @@ def heartbeat(
     )
 
 
+def adapter_backend(adapter: object | None, settings: WorkerSettings) -> str:
+    """Resolve the runtime backend label the WorkerProgressCard's arch pill
+    should display for this job (sc-2086 follow-up).
+
+    The previous arch pill was a heuristic on the worker's gpu_name, which
+    couldn't tell an MLX run from a Diffusers-on-MPS run on the same Apple
+    Silicon worker. This walks the actual adapter that ran the job:
+
+      - Any adapter whose class starts with "Mlx" runs through Apple's MLX
+        runtime — that's mlx.
+      - settings.gpu_id == "mps" → torch on MPS (Diffusers / Wan torch path).
+      - settings.gpu_id == "cpu" → CPU-only path (utility jobs, prompt refine
+        falling back to CPU, etc.).
+      - Everything else (NVIDIA gpu ids like "gpu-0") → cuda.
+
+    Lets the card report what *actually* ran, not what the worker advertised.
+    """
+    if adapter is not None and type(adapter).__name__.startswith("Mlx"):
+        return "mlx"
+    gpu_id = getattr(settings, "gpu_id", "cpu")
+    if gpu_id == "mps":
+        return "mps"
+    if gpu_id == "cpu":
+        return "cpu"
+    return "cuda"
+
+
 def _sample_into_peaks(peaks: dict, settings: WorkerSettings) -> None:
     """Sample current GPU utilization and ratchet the running max into a
     per-job peaks dict (sc-2086).
@@ -242,7 +269,12 @@ def _sample_into_peaks(peaks: dict, settings: WorkerSettings) -> None:
         peaks["load"] = max(peaks.get("load", 0.0), min(100.0, float(load)))
 
 
-def track_job_peaks(payload: dict, peaks: dict, settings: WorkerSettings) -> None:
+def track_job_peaks(
+    payload: dict,
+    peaks: dict,
+    settings: WorkerSettings,
+    backend: str | None = None,
+) -> None:
     """Sample GPU utilization, ratchet the running max into `peaks`, and fold
     the peaks into a progress payload (sc-2086).
 
@@ -252,12 +284,19 @@ def track_job_peaks(payload: dict, peaks: dict, settings: WorkerSettings) -> Non
     run instead of whatever the last sample happened to be. The same dict is
     shared with `keep_job_alive` (via `run_blocking_job_step`) so peaks are
     captured both at progress() boundaries and during blocking work.
+
+    `backend` is the runtime label the WorkerProgressCard's arch pill shows
+    ("mlx" / "mps" / "cuda" / "cpu") — see `adapter_backend()`. Pass once per
+    progress call; the API coalesces first-non-null so subsequent calls are
+    idempotent and the value persists across the run.
     """
     _sample_into_peaks(peaks, settings)
     if peaks.get("memory"):
         payload["peakGpuMemoryPct"] = peaks["memory"]
     if peaks.get("load"):
         payload["peakGpuLoadPct"] = peaks["load"]
+    if backend is not None:
+        payload["backend"] = backend
 
 
 def resolve_loaded_models(source: LoadedModelsSource, *, job_id: str | None = None) -> list[str]:
@@ -740,7 +779,7 @@ def run_image_job(api: ApiClient, settings: WorkerSettings, job: dict, image_ada
         }
         if result is not None:
             payload["result"] = result
-        track_job_peaks(payload, peaks, settings)
+        track_job_peaks(payload, peaks, settings, backend=adapter_backend(adapter, settings))
         update_job(api, job_id, payload)
 
     try:
@@ -835,7 +874,7 @@ def run_vqa_job(api: ApiClient, settings: WorkerSettings, job: dict, image_adapt
         payload = {"status": status, "stage": stage, "progress": value, "message": message}
         if result is not None:
             payload["result"] = result
-        track_job_peaks(payload, peaks, settings)
+        track_job_peaks(payload, peaks, settings, backend=adapter_backend(adapter, settings))
         update_job(api, job_id, payload)
 
     try:
@@ -902,7 +941,7 @@ def run_interleave_job(api: ApiClient, settings: WorkerSettings, job: dict, imag
         payload = {"status": status, "stage": stage, "progress": value, "message": message}
         if result is not None:
             payload["result"] = result
-        track_job_peaks(payload, peaks, settings)
+        track_job_peaks(payload, peaks, settings, backend=adapter_backend(adapter, settings))
         update_job(api, job_id, payload)
 
     try:
@@ -978,7 +1017,7 @@ def run_video_job(api: ApiClient, settings: WorkerSettings, job: dict) -> None:
             "progress": value,
             "message": message,
         }
-        track_job_peaks(payload, peaks, settings)
+        track_job_peaks(payload, peaks, settings, backend=adapter_backend(adapter, settings))
         update_job(api, job_id, payload)
 
     try:
@@ -1094,7 +1133,7 @@ def run_person_job(api: ApiClient, settings: WorkerSettings, job: dict) -> None:
     def progress(status: str, stage: str, value: float, message: str) -> None:
         heartbeat(api, settings, "busy", job_id)
         payload = {"status": status, "stage": stage, "progress": value, "message": message}
-        track_job_peaks(payload, peaks, settings)
+        track_job_peaks(payload, peaks, settings, backend=adapter_backend(None, settings))
         update_job(api, job_id, payload)
 
     runner = run_person_detect if job_type == "person_detect" else run_person_track
@@ -1166,7 +1205,7 @@ def _run_lora_train_dry_run(api: ApiClient, settings: WorkerSettings, job: dict,
     def progress(status: str, stage: str, value: float, message: str) -> None:
         heartbeat(api, settings, "busy", job_id)
         update_payload = {"status": status, "stage": stage, "progress": value, "message": message}
-        track_job_peaks(update_payload, peaks, settings)
+        track_job_peaks(update_payload, peaks, settings, backend=adapter_backend(None, settings))
         update_job(api, job_id, update_payload)
 
     try:
@@ -1219,7 +1258,7 @@ def _run_lora_train_execution(api: ApiClient, settings: WorkerSettings, job: dic
         update_payload = {"status": status, "stage": stage, "progress": value, "message": message}
         if result is not None:
             update_payload["result"] = result
-        track_job_peaks(update_payload, peaks, settings)
+        track_job_peaks(update_payload, peaks, settings, backend=adapter_backend(trainer_holder["trainer"], settings))
         update_job(api, job_id, update_payload)
 
     try:
@@ -1300,7 +1339,7 @@ def run_training_caption_worker_job(api: ApiClient, settings: WorkerSettings, jo
     def progress(status: str, stage: str, value: float, message: str) -> None:
         heartbeat(api, settings, "busy", job_id)
         payload = {"status": status, "stage": stage, "progress": value, "message": message}
-        track_job_peaks(payload, peaks, settings)
+        track_job_peaks(payload, peaks, settings, backend=adapter_backend(None, settings))
         update_job(api, job_id, payload)
 
     try:
