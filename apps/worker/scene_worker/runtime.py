@@ -46,6 +46,7 @@ from .person_adapters import (
     segmenter_backend_available,
     tracker_backend_available,
 )
+from .pose_adapters import pose_detector_backend_available, run_pose_detect
 from .prompt_refine import PromptRefineError, PromptRefiner
 from .settings import WorkerSettings
 from .training_adapters import (
@@ -68,6 +69,11 @@ VIDEO_JOB_TYPES = ("video_generate", "video_extend", "video_bridge", "person_rep
 # person_detect_preview / person_track_preview capabilities. Keep in sync with
 # crates/sceneworks-core/src/contracts.rs::WorkerCapability and jobs_store::worker_supports_job.
 PERSON_JOB_TYPES = ("person_detect", "person_track")
+# DWPose whole-body keypoint detection for the Pose Library (epic 2282). onnxruntime
+# (rtmlib) like person_detect — advertised by the Python worker only when the backend
+# is installed; routed via requested_gpu (not in NON_GPU_JOB_TYPES). Keep in sync with
+# crates/sceneworks-core/src/contracts.rs::JobType / WorkerCapability.
+POSE_JOB_TYPES = ("pose_detect",)
 # Keep GPU-required job types in sync with
 # crates/sceneworks-core/src/jobs_store.rs::job_requires_gpu and
 # apps/web/src/screens/QueueScreen.jsx::gpuRequiredJobTypes.
@@ -108,6 +114,7 @@ PROMPT_REFINE_JOB_TYPES = ("prompt_refine",)
 ALL_JOB_TYPES = (
     SUPPORTED_JOB_TYPES
     + PERSON_JOB_TYPES
+    + POSE_JOB_TYPES
     + TRAINING_JOB_TYPES
     + CAPTION_JOB_TYPES
     + VQA_JOB_TYPES
@@ -165,6 +172,11 @@ def worker_capabilities(gpu: dict) -> list[str]:
             capabilities.add("person_track")
         if segmenter_backend_available():
             capabilities.add("person_segment")
+        # DWPose whole-body keypoints (Pose Library) — onnxruntime/rtmlib, advertised
+        # only when installed so the queue never routes a pose job to a worker that
+        # can't run it.
+        if pose_detector_backend_available():
+            capabilities.add("pose_detect")
     return sorted(capabilities)
 
 
@@ -1181,6 +1193,61 @@ def run_person_job(api: ApiClient, settings: WorkerSettings, job: dict) -> None:
             restart_worker_after_oom(settings, job_id)
 
 
+def run_pose_job(api: ApiClient, settings: WorkerSettings, job: dict) -> None:
+    """Run a pose_detect job: DWPose whole-body keypoints from one or more photos.
+
+    onnxruntime-backed (rtmlib), so no torch model is loaded — the worker advertises
+    pose_detect only when the backend is installed (worker_capabilities). Returns one
+    pose candidate per detected person plus a rendered skeleton preview per pose.
+    """
+    job_id = job["id"]
+    peaks: dict[str, float] = {}
+
+    def progress(status: str, stage: str, value: float, message: str) -> None:
+        heartbeat(api, settings, "busy", job_id)
+        payload = {"status": status, "stage": stage, "progress": value, "message": message}
+        track_job_peaks(payload, peaks, settings, backend=adapter_backend(None, settings))
+        update_job(api, job_id, payload)
+
+    try:
+        progress("preparing", "preparing", 0.06, "Preparing pose detection.")
+        result = run_blocking_job_step(
+            api,
+            settings,
+            job_id,
+            "busy",
+            lambda cancel: run_pose_detect(
+                settings,
+                job,
+                progress=progress,
+                cancel_requested=cancel,
+            ),
+            loaded_models=lambda: [],
+            peaks=peaks,
+        )
+        update_job(
+            api,
+            job_id,
+            {"status": "completed", "stage": "completed", "progress": 1,
+             "message": "Pose candidates detected.", "result": result},
+        )
+    except InterruptedError as exc:
+        update_job(
+            api,
+            job_id,
+            {"status": "canceled", "stage": "canceled", "progress": 1, "message": str(exc)},
+        )
+    except Exception as exc:
+        message, error = friendly_failure("Pose detection", exc)
+        update_job(
+            api,
+            job_id,
+            {"status": "failed", "stage": "failed", "progress": 1, "message": message, "error": error},
+        )
+    finally:
+        heartbeat(api, settings, "idle")
+
+
 def run_lora_train_job(api: ApiClient, settings: WorkerSettings, job: dict) -> None:
     """Run a lora_train job: validate the plan, then either report a dry-run
     summary or execute the real training kernel.
@@ -1511,6 +1578,8 @@ def run_worker_loop(settings: WorkerSettings) -> None:
                 run_video_job(api, settings, job)
             elif job["type"] in PERSON_JOB_TYPES:
                 run_person_job(api, settings, job)
+            elif job["type"] in POSE_JOB_TYPES:
+                run_pose_job(api, settings, job)
             elif job["type"] in TRAINING_JOB_TYPES:
                 run_lora_train_job(api, settings, job)
             elif job["type"] in CAPTION_JOB_TYPES:

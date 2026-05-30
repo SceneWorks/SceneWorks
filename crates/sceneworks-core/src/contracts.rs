@@ -199,6 +199,10 @@ string_enum! {
         PersonDetect => "person_detect",
         PersonTrack => "person_track",
         PersonReplace => "person_replace",
+        // Whole-body DWPose keypoint detection (photo -> body/hands/face) for the
+        // Pose Library (epic 2282). onnxruntime-backed like person_detect; advertised
+        // by the Python worker, routed via requested_gpu (not in NON_GPU_JOB_TYPES).
+        PoseDetect => "pose_detect",
         FrameExtract => "frame_extract",
         TimelineExport => "timeline_export",
         ModelDownload => "model_download",
@@ -276,6 +280,11 @@ string_enum! {
         PersonDetect => "person_detect",
         PersonTrack => "person_track",
         PersonReplace => "person_replace",
+        // Whole-body DWPose keypoint detection (Pose Library, epic 2282). Advertised
+        // only by the Python worker when the onnxruntime/rtmlib backend is installed
+        // (runtime.py, gated on pose_detector_backend_available); the Rust utility
+        // worker never emits it. See jobs_store::worker_supports_job.
+        PoseDetect => "pose_detect",
         // Procedural detection/tracking previews served by the Rust utility worker.
         // Real, model-backed PersonDetect/PersonTrack jobs are served by the Python
         // GPU worker (YOLO/ByteTrack/SAM2); these preview capabilities keep the CPU
