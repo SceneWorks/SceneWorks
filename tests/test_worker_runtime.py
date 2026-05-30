@@ -2500,6 +2500,75 @@ def test_mlx_flux2_rejects_unsupported_model():
         raise AssertionError("MlxFlux2Adapter must reject non-FLUX.2 models.")
 
 
+def test_mlx_flux2_pose_set_builds_per_iteration_skeleton_specs(tmp_path, monkeypatch):
+    """sc-2262: a character_image job with advanced.poses on FLUX.2-klein renders each
+    pose to a skeleton and passes per-iteration [reference, skeleton] image sets to the
+    sidecar (Flux2KleinEdit multi-image), with the pose prompt cue and a shared seed.
+    Pose takes precedence over angleSet (no 11-angle loop runs)."""
+    import numpy as _np
+    from scene_worker import image_adapters as ia
+    from scene_worker.character_studio_angles import POSE_SKELETON_PROMPT
+
+    adapter = ia.MlxFlux2Adapter()
+    monkeypatch.setattr(ia.MlxFlux2Adapter, "_sidecar_available", lambda self: True)
+    monkeypatch.setattr(ia, "find_asset_media_path", lambda project_path, asset_id: tmp_path / "ref.png")
+    # draw_bodypose needs cv2 (absent in the CI venv); stub to a tiny array that
+    # Image.fromarray can save. The real render is covered elsewhere.
+    monkeypatch.setattr(ia, "draw_bodypose", lambda w, h, kps: _np.zeros((h, w, 3), dtype=_np.uint8))
+
+    captured: dict = {}
+
+    def fake_run_sidecar(self, *, job_id, work_dir, label, total, spec, progress, cancel_requested):
+        captured["spec"] = spec
+        return [str(work_dir / f"out_{i}.png") for i in range(total)]
+
+    monkeypatch.setattr(ia.MlxFlux2Adapter, "_run_sidecar", fake_run_sidecar)
+
+    def fake_writer(self, *, image_count, image_at_index, raw_settings, **kwargs):
+        captured["raw_settings"] = raw_settings
+        return {"images": image_count}
+
+    monkeypatch.setattr(ia.ImageAssetWriter, "write_incremental_outputs", fake_writer)
+
+    kp = [[0.5, 0.1 + 0.04 * i] for i in range(18)]
+    job = {
+        "id": "job_flux2_pose",
+        "payload": {
+            "projectId": "p",
+            "mode": "character_image",
+            "model": "flux2_klein_9b",
+            "prompt": "the character",
+            "referenceAssetId": "ref-1",
+            "count": 1,
+            "width": 32,
+            "height": 32,
+            # angleSet also set to prove pose precedence (no angle loop).
+            "advanced": {"poses": [{"id": "sit_01", "keypoints": kp}, {"id": "stand_01", "keypoints": kp}], "angleSet": True},
+        },
+    }
+    adapter.generate(
+        settings=SimpleNamespace(gpu_id="cpu"),
+        job=job,
+        request=image_request_from_job(job),
+        project_path=tmp_path,
+        progress=lambda *a, **k: None,
+        cancel_requested=lambda: False,
+    )
+    spec = captured["spec"]
+    # One sidecar iteration per pose (2), not the 11-angle loop.
+    assert len(spec["seeds"]) == 2
+    assert spec["seeds"][0] == spec["seeds"][1]  # shared seed across the set
+    assert spec["prompts"] == [f"the character, {POSE_SKELETON_PROMPT}"] * 2
+    per_iter = spec["imagePathsPerIteration"]
+    assert len(per_iter) == 2
+    ref = str(tmp_path / "ref.png")
+    for entry in per_iter:
+        # [skeleton, reference] order per the sc-2003 spike's validated config.
+        assert "pose_skeleton_" in entry[0] and entry[0].endswith(".png")  # skeleton (pose)
+        assert entry[1] == ref  # reference (identity)
+    assert captured["raw_settings"].get("poseLibrary") is True
+
+
 def test_mlx_flux2_requires_sidecar_when_missing(monkeypatch):
     # When the sidecar venv is missing, generate() must surface an actionable
     # error rather than silently producing nothing.
@@ -9990,19 +10059,23 @@ def test_prompt_driven_angle_backbones_share_the_instantid_angle_pack():
         )
 
 
-def test_qwen_lightning_declares_pose_library_capability():
-    """sc-2256: Qwen-Lightning is the best-effort pose tier — its manifest must
-    advertise ui.poseLibrary so the Character Studio pose picker (poseModels
-    filter) includes it alongside the strict InstantID backbone."""
+def test_best_effort_backbones_declare_pose_library_capability():
+    """sc-2256 / sc-2262: the best-effort pose backbones must advertise
+    ui.poseLibrary so the Character Studio pose picker (poseModels filter)
+    includes them alongside the strict InstantID backbone."""
     manifest = _load_builtin_models_manifest()
     manifest_by_id = {model["id"]: model for model in manifest.get("models", [])}
     instantid = manifest_by_id.get("instantid_realvisxl", {})
     assert instantid.get("ui", {}).get("poseLibrary") is True, "Baseline pose backbone drifted."
-    qwen = manifest_by_id.get("qwen_image_edit_2511_lightning", {})
-    assert qwen.get("ui", {}).get("poseLibrary") is True, (
-        "qwen_image_edit_2511_lightning must declare ui.poseLibrary so the pose "
-        "picker offers the best-effort Qwen tier (sc-2256)."
-    )
+    for model_id, story in (
+        ("qwen_image_edit_2511_lightning", "sc-2256"),
+        ("flux2_klein_9b", "sc-2262"),
+    ):
+        entry = manifest_by_id.get(model_id, {})
+        assert entry.get("ui", {}).get("poseLibrary") is True, (
+            f"{model_id} must declare ui.poseLibrary so the pose picker offers its "
+            f"best-effort tier ({story})."
+        )
 
 
 def test_qwen_image_adapter_angleset_loop_uses_augmented_prompts(monkeypatch):

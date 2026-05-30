@@ -37,6 +37,10 @@ Spec keys:
     imagePaths: list[str] | None  (FLUX.2 edit mode only — list of reference
         image paths. Triggers Flux2KleinEdit dispatch; for FLUX.2-klein-9b-kv
         the KV cache auto-engages.)
+    imagePathsPerIteration: list[list[str]] | None  (best-effort pose tier,
+        sc-2262 — per-iteration reference sets parallel to ``seeds``; each entry
+        is the [reference, skeleton] list for one pose. Overrides ``imagePaths``
+        per iteration when present.)
     outDir: str (sidecar writes PNGs + result.json here)
 
 Validated 2026-05-28 against mflux 0.17.5 (sc-1969 FLUX spike, sc-1972 Qwen verify).
@@ -155,7 +159,19 @@ def main() -> int:
         quantize = int(quantize)
     loras = spec.get("loras") or []
     image_paths = [str(p) for p in (spec.get("imagePaths") or []) if p]
-    has_reference = bool(image_paths)
+    # Best-effort pose tier (sc-2262): optional per-iteration reference sets parallel
+    # to ``seeds`` — each entry is the [reference, skeleton] list for that pose. When
+    # set it overrides the shared ``imagePaths`` per iteration (mirrors the ``prompts``
+    # override). None / absent → the existing single shared-reference batch path.
+    image_paths_per_iter = spec.get("imagePathsPerIteration") or None
+    if image_paths_per_iter is not None:
+        if len(image_paths_per_iter) != len(seeds):
+            raise RuntimeError(
+                f"mlx_flux_runner: imagePathsPerIteration length ({len(image_paths_per_iter)}) "
+                f"must equal seeds list length ({len(seeds)})."
+            )
+        image_paths_per_iter = [[str(p) for p in (paths or []) if p] for paths in image_paths_per_iter]
+    has_reference = bool(image_paths) or bool(image_paths_per_iter and any(image_paths_per_iter))
     out_dir = Path(spec["outDir"])
     out_dir.mkdir(parents=True, exist_ok=True)
     result_path = out_dir / "result.json"
@@ -223,8 +239,10 @@ def main() -> int:
         }
         if family != "flux2":
             gen_kwargs["negative_prompt"] = negative_prompt
-        if family == "flux2" and has_reference:
-            gen_kwargs["image_paths"] = image_paths
+        # Per-iteration reference set (pose tier) overrides the shared list.
+        iter_image_paths = image_paths_per_iter[index] if image_paths_per_iter is not None else image_paths
+        if family == "flux2" and iter_image_paths:
+            gen_kwargs["image_paths"] = iter_image_paths
         result = model.generate_image(**gen_kwargs)
         path = out_dir / f"{filename_prefix}_{index:04d}.png"
         result.image.save(path, "PNG")

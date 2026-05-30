@@ -332,8 +332,7 @@ export const fallbackModels = [
       promptGuide: { title: "FLUX.2 [klein] 9B Prompt Guide", path: "/prompt-guides/flux2-klein.md" },
       variationStrength: { label: "Prompt strength", default: 4.0, min: 1.0, max: 10.0, step: 0.5 },
       // Multi-backbone angle set (sc-2003). MlxFlux2Adapter passes the per-
-      // angle augmented prompt through the sidecar runner. Pose library
-      // deferred to a follow-up PR.
+      // angle augmented prompt through the sidecar runner.
       viewAngles: [
         { id: "three_quarter_left", label: "Three-quarter left" },
         { id: "three_quarter_right", label: "Three-quarter right" },
@@ -347,6 +346,11 @@ export const fallbackModels = [
         { id: "down_right", label: "Down · right" },
         { id: "front", label: "Front" },
       ],
+      // Best-effort pose library (sc-2262): worker renders the selected pose as
+      // an OpenPose skeleton and feeds it as a second edit image alongside the
+      // reference through the MLX sidecar (Flux2KleinEdit multi-image). Strict
+      // InstantID pose-lock stays the higher-fidelity option.
+      poseLibrary: true,
     },
   },
   {
