@@ -6,6 +6,7 @@ behavior is validated by the sc-2009 spike + a real worker job, not here.
 """
 from __future__ import annotations
 
+import importlib
 from types import SimpleNamespace
 
 import pytest
@@ -43,6 +44,20 @@ _TEST_TARGET = {
 }
 
 _NOOP = lambda *args, **kwargs: None  # noqa: E731
+
+
+# The worker unit suite runs without torch installed; generate()/unload() do
+# `importlib.import_module("torch")`. Patch it to this stand-in (with gpu_id="cpu",
+# select_torch_device returns early and the cache-empty path is a guarded no-op).
+class _FakeTorch:
+    pass
+
+
+def _patch_torch_import(monkeypatch):
+    monkeypatch.setattr(
+        "scene_worker.instantid_adapter.importlib.import_module",
+        lambda name: _FakeTorch if name == "torch" else importlib.import_module(name),
+    )
 
 
 @pytest.fixture
@@ -277,6 +292,7 @@ def _generate_capturing_loras(monkeypatch, adapter, job):
     applied_state = LoraPipelineState(key="applied", adapter_names=("sw_test",))
 
     monkeypatch.setattr("importlib.util.find_spec", lambda name: object())  # extras present
+    _patch_torch_import(monkeypatch)
     monkeypatch.setattr(adapter, "_load_pipeline", lambda *a, **k: SimpleNamespace(tag="fakepipe"))
     monkeypatch.setattr("scene_worker.instantid_adapter.select_torch_device", lambda *a, **k: "cpu")
     monkeypatch.setattr("scene_worker.instantid_adapter.activate_torch_device", lambda *a, **k: None)
@@ -339,11 +355,12 @@ def test_generate_threads_previous_lora_state_across_jobs(instantid_model, monke
     assert calls2[0]["previous_state"] is applied_state
 
 
-def test_unload_resets_lora_state():
+def test_unload_resets_lora_state(monkeypatch):
+    _patch_torch_import(monkeypatch)  # unload() evaluates importlib.import_module("torch")
     adapter = InstantIDAdapter()
     adapter._pipe = SimpleNamespace(tag="fakepipe")
     adapter._loaded_lora_state = LoraPipelineState(key="applied", adapter_names=("sw_test",))
-    adapter._empty_cache = lambda *_a, **_k: None  # avoid importing torch
+    adapter._empty_cache = lambda *_a, **_k: None  # the cache-empty call itself is a no-op
     assert adapter.unload() is True
     # The merge belongs to the (now-discarded) pipe; the next pipe must start clean.
     assert adapter._loaded_lora_state == LoraPipelineState()
