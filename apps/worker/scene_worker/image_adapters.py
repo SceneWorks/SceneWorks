@@ -49,6 +49,7 @@ from .lora_adapters import (
     normalize_lora_specs,
     reject_loras_if_unsupported,
     reject_lokr_loras,
+    reject_lycoris_loras,
     validate_lora_compatibility,
 )
 from .settings import WorkerSettings
@@ -2466,8 +2467,9 @@ class MlxFluxAdapter:
             request.loras, model_family=model_target.get("family"), adapter_id=self.id, model_id=request.model
         )
         lora_specs = normalize_lora_specs(request.loras)
-        # The MLX backend can't apply LoKr (its merge math is LoRA-only); reject
-        # clearly rather than silently ignoring the adapter (epic 2193).
+        # The MLX backend doesn't YET apply LoKr (the Kronecker merge is unbuilt,
+        # not impossible — epic 2193: sc-2215/2216/2314); reject clearly for now
+        # rather than silently ignoring the adapter.
         reject_lokr_loras(lora_specs, self.id)
 
         if not self._sidecar_available():
@@ -2824,8 +2826,9 @@ class MlxQwenAdapter:
             request.loras, model_family=model_target.get("family"), adapter_id=self.id, model_id=request.model
         )
         lora_specs = normalize_lora_specs(request.loras)
-        # The MLX backend can't apply LoKr (its merge math is LoRA-only); reject
-        # clearly rather than silently ignoring the adapter (epic 2193).
+        # The MLX backend doesn't YET apply LoKr (the Kronecker merge is unbuilt,
+        # not impossible — epic 2193: sc-2215/2216/2314); reject clearly for now
+        # rather than silently ignoring the adapter.
         reject_lokr_loras(lora_specs, self.id)
 
         if not self._sidecar_available():
@@ -3114,29 +3117,52 @@ class MlxZImageAdapter:
         # Strict pose tier (sc-2257): advanced.poses is a list of {id, keypoints}.
         # Each pose renders to an OpenPose skeleton that conditions the ported
         # Z-Image Fun-Controlnet-Union branch (true pose lock, not best-effort).
-        # No reference is used — Z-Image has no IP-Adapter, so identity comes from
-        # the prompt; the skeleton supplies the pose.
+        #
+        # Identity is POSE-ONLY by default (identity from the prompt / a character
+        # LoRA — epic 2221). The sc-2328 reference img2img-init experiment is OPT-IN
+        # and off by default: the Fun-Controlnet-Union branch is trained to denoise
+        # the pose FROM NOISE, so seeding from a reference init fights the pose lock —
+        # on few-step Turbo it washes out pose adherence and bleeds the reference and
+        # skeleton together (validated as a mess, 2026-05-30). It only engages when the
+        # caller explicitly sets advanced.referenceStrength > 0. Resolved below.
         raw_poses = request.advanced.get("poses")
         pose_entries = [p for p in raw_poses if isinstance(p, dict)] if isinstance(raw_poses, list) else []
         pose_set = len(pose_entries) > 0
         if request.reference_asset_id and not pose_set:
-            # ZImageDiffusersAdapter itself has no reference path (sc-2005
-            # cleanup); raising here keeps the error surface honest if a
-            # caller manually targets MlxZImageAdapter with one. Pose requests
-            # may carry a character reference we can't consume — ignore it
-            # rather than reject (the skeleton drives the pose).
+            # A bare reference (no poses) has no home on the MLX backend: there is no
+            # IP-Adapter, and reference-only img2img with no skeleton is the best-effort
+            # tier we deliberately did NOT build (superseded by this unified path:
+            # sc-2263 → sc-2328). Reject clearly rather than silently ignore.
             raise RuntimeError(
                 f"{request.model} reference-image generation is not supported "
                 "on the MLX backend (Z-Image has no IP-Adapter weights upstream)."
             )
 
+        # Reference img2img-init identity (sc-2328) — OPT-IN, off by default (see the
+        # note above; the init disrupts the pose lock on few-step Turbo). Engages only
+        # when advanced.referenceStrength > 0 is explicitly requested, e.g. to sweep
+        # the init↔control tension. The reference is shared across the whole pose set
+        # (identity is constant; only the per-pose skeleton changes). Default / not
+        # requested → pose-only generation, the validated sc-2257 path.
+        reference_init_path: str | None = None
+        reference_strength: float | None = None
+        if pose_set and request.reference_asset_id and self._identity_init_requested(request):
+            reference_init_path = str(find_asset_media_path(project_path, request.reference_asset_id))
+            reference_strength = self._reference_strength(request)
+
         validate_lora_compatibility(
             request.loras, model_family=model_target.get("family"), adapter_id=self.id, model_id=request.model
         )
         lora_specs = normalize_lora_specs(request.loras)
-        # The MLX backend can't apply LoKr (its merge math is LoRA-only); reject
-        # clearly rather than silently ignoring the adapter (epic 2193).
-        reject_lokr_loras(lora_specs, self.id)
+        # MLX-native LoKr (sc-2216): the mflux fork's LoKrLoader reconstructs the
+        # Kronecker delta and applies SceneWorks peft-trained LoKr on the Z-Image
+        # transformer, so LoKr runs natively here — no torch fallback (Michael,
+        # 2026-05-30). LoRA and LoKr specs forward to the sidecar identically; mflux
+        # routes each file by its networkType metadata. Third-party LyCORIS (LoHa /
+        # kohya LoKr) is NOT reconstructable by that loader; the dispatcher routes it
+        # to torch, so this only fires on a forced MLX override — reject clearly
+        # instead of letting it silently no-op through the LoRA key-matcher.
+        reject_lycoris_loras(lora_specs, self.id)
 
         if not self._sidecar_available():
             raise RuntimeError(
@@ -3236,6 +3262,10 @@ class MlxZImageAdapter:
                     # lock strength. None → the plain text-to-image path.
                     "controlImagePaths": control_image_paths,
                     "controlScale": control_scale,
+                    # Identity img2img-init shared across the pose set (sc-2328);
+                    # None → pose-only (identity from the prompt).
+                    "imagePath": reference_init_path,
+                    "imageStrength": reference_strength,
                 },
                 progress=progress,
                 cancel_requested=cancel_requested,
@@ -3287,6 +3317,32 @@ class MlxZImageAdapter:
         except (TypeError, ValueError):
             return 0.9
         return max(0.0, min(2.0, value))
+
+    @staticmethod
+    def _identity_init_requested(request: ImageRequest) -> bool:
+        """Whether to apply the OPT-IN sc-2328 reference img2img-init. Off by default:
+        the init fights the Fun-Controlnet-Union pose lock on few-step Turbo (washed-out
+        pose + reference/skeleton bleed — validated 2026-05-30), so the default strict
+        tier is pose-only and identity comes from the prompt or a character LoRA (epic
+        2221). Engages only when advanced.referenceStrength is explicitly set > 0 (e.g.
+        to sweep the init↔control tension)."""
+        try:
+            return float(request.advanced.get("referenceStrength")) > 0
+        except (TypeError, ValueError):
+            return False
+
+    def _reference_strength(self, request: ImageRequest) -> float:
+        """img2img-init strength for the OPT-IN sc-2328 identity experiment (only read
+        when _identity_init_requested is true). mflux's image_strength is INVERTED from
+        diffusers — higher keeps MORE of the init (stronger identity, but the skeleton
+        control gets fewer denoising steps to repose), lower denoises more (freer repose,
+        identity drifts toward the prompt). Clamped to [0.05, 1.0]; the practical finding
+        is that no value holds BOTH identity and pose on 8-step Turbo (see sc-2328)."""
+        try:
+            value = float(request.advanced.get("referenceStrength", 0.5))
+        except (TypeError, ValueError):
+            return 0.5
+        return max(0.05, min(1.0, value))
 
     def _guidance_scale(self, request: ImageRequest, model_target: dict[str, Any]) -> float:
         # Z-Image-Turbo is guidance-distilled; mflux accepts guidance=None to
@@ -3518,8 +3574,9 @@ class MlxSdxlAdapter:
             request.loras, model_family=model_target.get("family"), adapter_id=self.id, model_id=request.model
         )
         lora_specs = normalize_lora_specs(request.loras)
-        # The MLX backend can't apply LoKr (its merge math is LoRA-only); the SDXL
-        # family can produce LoKr adapters, so reject them clearly here (epic 2193).
+        # The MLX backend doesn't YET apply LoKr (Kronecker merge unbuilt, not
+        # impossible — epic 2193: sc-2215); the SDXL family can produce LoKr
+        # adapters, so reject them clearly here for now.
         reject_lokr_loras(lora_specs, self.id)
 
         total = request.count
@@ -3832,8 +3889,9 @@ class MlxFlux2Adapter:
             request.loras, model_family=model_target.get("family"), adapter_id=self.id, model_id=request.model
         )
         lora_specs = normalize_lora_specs(request.loras)
-        # The MLX backend can't apply LoKr (its merge math is LoRA-only); reject
-        # clearly rather than silently ignoring the adapter (epic 2193).
+        # The MLX backend doesn't YET apply LoKr (the Kronecker merge is unbuilt,
+        # not impossible — epic 2193: sc-2215/2216/2314); reject clearly for now
+        # rather than silently ignoring the adapter.
         reject_lokr_loras(lora_specs, self.id)
 
         if not self._sidecar_available():
@@ -4166,6 +4224,19 @@ class KolorsDiffusersAdapter:
         identity), sharing one seed so wardrobe/hair stay consistent across the set."""
         progress("loading_model", "loading_model", 0.18, f"Loading {model_target['label']} (pose ControlNet).")
         pipe = self._load_pose_pipeline(settings, request, model_target, progress=progress, job_id=job["id"])
+        # Apply request.loras once on the pose pipe before the per-pose loop (sc-2251),
+        # so the character LoRA bootstrapping loop works on the strict pose tier too.
+        # The vendored pose pipeline inherits StableDiffusionXLLoraLoaderMixin and
+        # exposes .unet, so the shared path also routes LoKr via inject_lokr_adapter
+        # (sc-2252). Tracked under its own "pose" cache slot (distinct pipe object).
+        emit_worker_event(
+            "image_lora_apply_start",
+            jobId=job["id"],
+            adapter=self.id,
+            loraCount=len(request.loras),
+        )
+        self._apply_loras(pipe, request, lora_key="pose")
+        emit_worker_event("image_lora_apply_complete", jobId=job["id"], adapter=self.id)
         torch = importlib.import_module("torch")
         device = select_torch_device(torch, settings.gpu_id)
         total = len(pose_entries)
@@ -4742,8 +4813,10 @@ class KolorsDiffusersAdapter:
             raise InterruptedError("Image generation canceled by user.")
         return output.images[0].convert("RGB")
 
-    def _apply_loras(self, pipe: Any, request: ImageRequest) -> None:
-        key = "img2img" if request.mode == "edit_image" else "text"
+    def _apply_loras(self, pipe: Any, request: ImageRequest, *, lora_key: str | None = None) -> None:
+        # lora_key pins the cache slot when the pipe is neither the text nor img2img
+        # pipe (e.g. the separate pose ControlNet pipe — sc-2251); defaults to mode.
+        key = lora_key or ("img2img" if request.mode == "edit_image" else "text")
         model_target = MODEL_TARGETS.get(request.model, {})
         self._loaded_lora_states[key] = apply_loras_to_pipeline(
             pipe,
@@ -5153,8 +5226,10 @@ class SdxlDiffusersAdapter:
             raise InterruptedError("Image generation canceled by user.")
         return output.images[0].convert("RGB")
 
-    def _apply_loras(self, pipe: Any, request: ImageRequest) -> None:
-        key = "img2img" if request.mode == "edit_image" else "text"
+    def _apply_loras(self, pipe: Any, request: ImageRequest, *, lora_key: str | None = None) -> None:
+        # lora_key pins the cache slot when the pipe is neither the text nor img2img
+        # pipe (e.g. the separate pose ControlNet pipe — sc-2251); defaults to mode.
+        key = lora_key or ("img2img" if request.mode == "edit_image" else "text")
         model_target = MODEL_TARGETS.get(request.model, {})
         self._loaded_lora_states[key] = apply_loras_to_pipeline(
             pipe,
@@ -6947,12 +7022,14 @@ def _should_route_flux_to_mlx(payload: dict[str, Any]) -> bool:
 
 
 def _request_has_lokr_lora(payload: dict[str, Any]) -> bool:
-    """True if any LoRA in the request is a LoKr/LyCORIS adapter. These apply only
-    on the torch backends (the MLX merge math is LoRA-only), so the MLX routing
-    gates fall back to torch when this is true (epic 2193) — the same graceful
-    fallback a reference image triggers. Prefers the ``networkType`` recorded on
-    the LoRA (zero I/O) and otherwise classifies the adapter's safetensors header
-    (which also catches third-party LyCORIS files that carry no ``networkType``)."""
+    """True if any LoRA in the request is a LoKr/LyCORIS adapter. Used by MLX
+    routing gates that have NO native loader (SDXL, FLUX) to fall back to torch —
+    the same graceful fallback a reference image triggers (epic 2193). The Z-Image
+    gate uses the narrower ``_request_has_lycoris_lora`` instead, since its mflux
+    LoKrLoader applies peft LoKr natively (sc-2216) and only third-party LyCORIS
+    needs torch. Prefers the ``networkType`` recorded on the LoRA (zero I/O) and
+    otherwise classifies the adapter's safetensors header (which also catches
+    third-party LyCORIS files that carry no ``networkType``)."""
 
     for lora in payload.get("loras") or []:
         if not isinstance(lora, dict):
@@ -6964,6 +7041,30 @@ def _request_has_lokr_lora(payload: dict[str, Any]) -> bool:
         if not network_type:
             resolved = lora_path(lora)
             if resolved is not None and classify_adapter_network(resolved) in ("lokr", "lycoris"):
+                return True
+    return False
+
+
+def _request_has_lycoris_lora(payload: dict[str, Any]) -> bool:
+    """True if any LoRA is a third-party LyCORIS adapter (LoHa / kohya-format LoKr
+    WITHOUT our ``networkType=lokr`` stamp) — i.e. classified ``lycoris``, not
+    ``lokr``. The Z-Image MLX gate (sc-2216) falls back to torch for these (the
+    mflux LoKrLoader applies peft LoKr natively but not arbitrary LyCORIS) while
+    keeping SceneWorks-trained LoKr on MLX. Mirrors ``_request_has_lokr_lora``'s
+    recorded-then-header detection, but only counts the ``lycoris`` classification."""
+
+    for lora in payload.get("loras") or []:
+        if not isinstance(lora, dict):
+            continue
+        recorded = lora.get("networkType") or (lora.get("compatibility") or {}).get("networkType")
+        network_type = str(recorded or "").strip().lower()
+        if network_type == "lycoris":
+            return True
+        if network_type == "lokr":
+            continue  # SceneWorks peft LoKr applies on MLX (sc-2216) — never falls back.
+        if not network_type:
+            resolved = lora_path(lora)
+            if resolved is not None and classify_adapter_network(resolved) == "lycoris":
                 return True
     return False
 
@@ -7019,9 +7120,14 @@ def _should_route_z_image_to_mlx(payload: dict[str, Any]) -> bool:
       2. Platform == darwin.
       3. Model in MlxZImageAdapter._supported_models.
       4. mode != "edit_image".
-      5. No referenceAssetId (Z-Image has no reference path on either
-         backend; the flag is checked symmetrically with the other mflux
-         families).
+      5. No referenceAssetId — UNLESS the request carries advanced.poses. A
+         plain reference (no poses) has no Z-Image path on either backend, so it
+         falls to torch; but a POSE request must route here regardless of a
+         reference, because the strict Fun-Controlnet-Union pose tier (sc-2257)
+         exists ONLY on MLX (the torch ZImageDiffusersAdapter has no pose
+         ControlNet and would honour count while silently ignoring advanced.poses
+         → "1 of 1" for N poses). MLX consumes the reference as an identity
+         img2img-init (sc-2328) or ignores it (sc-2257).
       6. Sidecar venv exists.
     """
     if os.getenv("SCENEWORKS_DISABLE_MLX_FLUX", "").strip().lower() in {"1", "true", "yes"}:
@@ -7033,10 +7139,21 @@ def _should_route_z_image_to_mlx(payload: dict[str, Any]) -> bool:
         return False
     if payload.get("mode") == "edit_image":
         return False
-    if payload.get("referenceAssetId"):
+    # A pose request belongs on MLX even WITH a reference: the strict pose ControlNet
+    # (sc-2257) lives only here, so diverting reference+pose jobs to torch makes torch
+    # honour count (1) while dropping advanced.poses → "1 of 1" for N poses. The MLX
+    # strict pose path consumes the reference as an identity img2img-init (sc-2328) or
+    # ignores it (sc-2257). Only a plain reference (no poses) falls back to torch.
+    advanced = payload.get("advanced")
+    has_poses = isinstance(advanced, dict) and bool(advanced.get("poses"))
+    if payload.get("referenceAssetId") and not has_poses:
         return False
-    # LoKr is torch-only (epic 2193); fall back to the torch path for a LoKr job.
-    if _request_has_lokr_lora(payload):
+    # peft-trained LoKr runs natively on MLX for Z-Image (sc-2216: mflux LoKrLoader),
+    # so a LoKr job STAYS on the MLX path (Michael's preference) — no torch fallback.
+    # Only third-party LyCORIS (LoHa / kohya LoKr), which that loader can't apply,
+    # falls back to torch (where sc-2193 applies it). Other mflux-only families that
+    # lack any loader still gate on the broader _request_has_lokr_lora.
+    if _request_has_lycoris_lora(payload):
         return False
     return MlxZImageAdapter()._sidecar_available()
 
