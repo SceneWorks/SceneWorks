@@ -3068,10 +3068,20 @@ class MlxZImageAdapter:
                 f"{request.model} MLX adapter is text-to-image only. "
                 "Use SCENEWORKS_IMAGE_ADAPTER=z_image_diffusers for the torch path."
             )
-        if request.reference_asset_id:
+        # Strict pose tier (sc-2257): advanced.poses is a list of {id, keypoints}.
+        # Each pose renders to an OpenPose skeleton that conditions the ported
+        # Z-Image Fun-Controlnet-Union branch (true pose lock, not best-effort).
+        # No reference is used — Z-Image has no IP-Adapter, so identity comes from
+        # the prompt; the skeleton supplies the pose.
+        raw_poses = request.advanced.get("poses")
+        pose_entries = [p for p in raw_poses if isinstance(p, dict)] if isinstance(raw_poses, list) else []
+        pose_set = len(pose_entries) > 0
+        if request.reference_asset_id and not pose_set:
             # ZImageDiffusersAdapter itself has no reference path (sc-2005
             # cleanup); raising here keeps the error surface honest if a
-            # caller manually targets MlxZImageAdapter with one.
+            # caller manually targets MlxZImageAdapter with one. Pose requests
+            # may carry a character reference we can't consume — ignore it
+            # rather than reject (the skeleton drives the pose).
             raise RuntimeError(
                 f"{request.model} reference-image generation is not supported "
                 "on the MLX backend (Z-Image has no IP-Adapter weights upstream)."
@@ -3095,11 +3105,30 @@ class MlxZImageAdapter:
                 f"mflux installed (looked for {self._sidecar_python()})."
             )
 
-        total = request.count
         steps = self._num_inference_steps(request, model_target)
         guidance = self._guidance_scale(request, model_target)
         quantize = self._resolve_quantize(request)
-        seeds = [resolve_seed(request.seed, request.prompt, index, request.seeds) for index in range(total)]
+        if pose_set:
+            # One image per pose, sharing a seed so noise-derived attributes stay
+            # consistent across the set (mirrors the InstantID / Flux2 pose tiers);
+            # only the conditioned body pose changes.
+            #
+            # Strict ControlNet tier: the skeleton conditions the pose DIRECTLY, so
+            # the prompt must stay the plain character prompt. The
+            # augment_prompt_for_pose cue ("matching the OpenPose skeleton reference
+            # image") is for the best-effort multi-image tier (sc-2256, where the
+            # skeleton is a second prompt image) — adding it here makes Z-Image
+            # literally draw a skeleton in the scene and fights the pose lock.
+            total = len(pose_entries)
+            set_seed = resolve_seed(request.seed, request.prompt, 0, request.seeds)
+            seeds = [set_seed] * total
+            prompts = None
+            pose_keypoints = [normalize_keypoints(p.get("keypoints")) for p in pose_entries]
+        else:
+            total = request.count
+            seeds = [resolve_seed(request.seed, request.prompt, index, request.seeds) for index in range(total)]
+            prompts = None
+            pose_keypoints = None
 
         progress(
             "loading_model",
@@ -3109,6 +3138,28 @@ class MlxZImageAdapter:
         )
         work_dir = Path(tempfile.mkdtemp(prefix="mlx_z_image_sidecar_"))
         self._scratch_dir = work_dir
+        # Strict pose tier: render each pose's COCO-18 skeleton to a PNG in the
+        # sidecar work dir; the runner conditions ZImageControl on it. draw_bodypose
+        # runs in the main worker venv (cv2 present).
+        control_image_paths: list[str] | None = None
+        control_scale: float | None = None
+        if pose_set and pose_keypoints is not None:
+            control_scale = self._control_scale(request)
+            # The Fun-Controlnet-Union pose head is DWPose-trained; a hair-thin
+            # skeleton (the default stickwidth=4) at 1024² is a weak, partly
+            # out-of-distribution control signal that only steers under a vague
+            # prompt. A resolution-proportional stickwidth (~12px at 1024²) gives
+            # a strong in-distribution signal that locks the pose cleanly at
+            # controlScale 1.0 even under detailed character prompts (sc-2257
+            # validation: thin→arms-down, thick→clean T-pose lock).
+            stick = max(6, round(min(request.width, request.height) * 0.012))
+            control_image_paths = []
+            for index, keypoints in enumerate(pose_keypoints):
+                skeleton_path = work_dir / f"pose_skeleton_{index:04d}.png"
+                Image.fromarray(
+                    draw_bodypose(request.width, request.height, keypoints, stickwidth=stick)
+                ).save(skeleton_path, "PNG")
+                control_image_paths.append(str(skeleton_path))
         try:
             images = self._run_sidecar(
                 job_id=job["id"],
@@ -3120,6 +3171,8 @@ class MlxZImageAdapter:
                     "prompt": request.prompt,
                     "negativePrompt": request.negative_prompt or None,
                     "seeds": seeds,
+                    # Per-iteration pose-augmented prompts (None → top-level prompt).
+                    "prompts": prompts,
                     "height": request.height,
                     "width": request.width,
                     "numInferenceSteps": steps,
@@ -3129,6 +3182,10 @@ class MlxZImageAdapter:
                         {"path": lora.path, "weight": lora.weight, "name": lora.adapter_name}
                         for lora in lora_specs
                     ],
+                    # Strict pose ControlNet (sc-2257): per-iteration skeletons +
+                    # lock strength. None → the plain text-to-image path.
+                    "controlImagePaths": control_image_paths,
+                    "controlScale": control_scale,
                 },
                 progress=progress,
                 cancel_requested=cancel_requested,
@@ -3160,6 +3217,7 @@ class MlxZImageAdapter:
                     "mlxQuantize": quantize,
                     "sidecarVenv": self._sidecar_python(),
                     "realModelInference": True,
+                    **({"poseLibrary": True} if pose_set else {}),
                 },
                 settings=settings,
                 job_id=job["id"],
@@ -3169,6 +3227,16 @@ class MlxZImageAdapter:
 
     def _num_inference_steps(self, request: ImageRequest, model_target: dict[str, Any]) -> int:
         return safe_int(request.advanced.get("steps"), model_target["steps"], 1, 80)
+
+    def _control_scale(self, request: ImageRequest) -> float:
+        """Pose ControlNet lock strength (sc-2257). Fun-Controlnet-Union recommends
+        0.65–1.0; default 1.0 (clean pose lock, validated). Overridable via
+        advanced.controlScale, clamped to [0, 2]."""
+        try:
+            value = float(request.advanced.get("controlScale", 1.0))
+        except (TypeError, ValueError):
+            return 1.0
+        return max(0.0, min(2.0, value))
 
     def _guidance_scale(self, request: ImageRequest, model_target: dict[str, Any]) -> float:
         # Z-Image-Turbo is guidance-distilled; mflux accepts guidance=None to

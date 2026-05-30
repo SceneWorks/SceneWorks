@@ -36,6 +36,14 @@ export const fallbackModels = [
     ui: {
       description: "Fast local text-to-image target.",
       promptGuide: { title: "Z-Image-Turbo Prompt Guide", path: "/prompt-guides/z-image-turbo.md" },
+      // Strict pose tier (sc-2257): on the macOS MLX backend the worker renders
+      // the selected library pose to an OpenPose skeleton and conditions the
+      // ported Z-Image Fun-Controlnet-Union branch on it (true pose lock). The
+      // pose picker gates on this flag alone — no character_image needed.
+      poseLibrary: true,
+      // Strict ControlNet → expose a pose-lock-strength slider (advanced.controlScale).
+      // Best-effort tiers (Qwen/Flux2) have no strength control, so they omit this.
+      poseControlScale: true,
     },
   },
   {

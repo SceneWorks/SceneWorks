@@ -41,6 +41,14 @@ Spec keys:
         sc-2262 — per-iteration reference sets parallel to ``seeds``; each entry
         is the [reference, skeleton] list for one pose. Overrides ``imagePaths``
         per iteration when present.)
+    controlImagePaths: list[str] | None  (Z-Image strict pose ControlNet, sc-2257
+        — per-iteration rendered-skeleton paths parallel to ``seeds``. When present
+        (z_image_turbo only) the runner loads the ported ``ZImageControl`` variant
+        and conditions each image on its skeleton via the Fun-Controlnet-Union
+        branch. controlScale sets the lock strength (0.65–1.0).)
+    controlScale: float | None  (Z-Image ControlNet control_context_scale; default 1.0)
+    controlWeights: {"repo": str, "filename": str} | None  (HF repo + file for the
+        Fun-Controlnet-Union safetensors; the runner hf_hub_downloads + caches it)
     outDir: str (sidecar writes PNGs + result.json here)
 
 Validated 2026-05-28 against mflux 0.17.5 (sc-1969 FLUX spike, sc-1972 Qwen verify).
@@ -127,6 +135,112 @@ def _resolve_model_handle(model_id: str, has_reference: bool) -> tuple[type, obj
     raise RuntimeError(f"mlx_flux_runner: unsupported model id {model_id!r}.")
 
 
+# Z-Image Fun-Controlnet-Union (strict pose tier, sc-2257). Apache-2.0. The 8-step
+# distill matches Z-Image-Turbo's NFE budget. Used as the default when the spec
+# omits an explicit controlWeights block.
+_Z_IMAGE_CONTROL_REPO = "alibaba-pai/Z-Image-Turbo-Fun-Controlnet-Union-2.1"
+_Z_IMAGE_CONTROL_FILE = "Z-Image-Turbo-Fun-Controlnet-Union-2.1-8steps.safetensors"
+
+
+def _run_z_image_control(
+    *,
+    spec: dict,
+    model_id: str,
+    prompt: str,
+    prompts_override: list | None,
+    negative_prompt: str | None,
+    seeds: list[int],
+    height: int,
+    width: int,
+    steps: int,
+    guidance: float,
+    quantize: int | None,
+    loras: list,
+    control_image_paths: list[str],
+    out_dir: Path,
+    result_path: Path,
+) -> int:
+    """Z-Image strict pose ControlNet generation (sc-2257).
+
+    Loads the ported ``ZImageControl`` (base Z-Image-Turbo + Fun-Controlnet-Union)
+    and renders one image per iteration, each conditioned on its rendered skeleton.
+    Honours ``quantize`` (None / 8 / …): ZImageControlInitializer applies the base +
+    control weights at full precision before quantizing the whole transformer, so
+    the control branch quantizes from its real weights (Q8 ≈ halves transformer
+    memory vs bf16). Both validated on M5 Max (sc-2257).
+    """
+    if model_id != "z_image_turbo":
+        raise RuntimeError(
+            f"mlx_flux_runner: controlImagePaths is only supported for z_image_turbo, not {model_id!r}."
+        )
+    if len(control_image_paths) != len(seeds):
+        raise RuntimeError(
+            f"mlx_flux_runner: controlImagePaths length ({len(control_image_paths)}) "
+            f"must equal seeds list length ({len(seeds)})."
+        )
+
+    from huggingface_hub import hf_hub_download
+    from mflux.models.common.config.model_config import ModelConfig
+    from mflux.models.z_image.variants.z_image_control import ZImageControl
+
+    control_scale = float(spec.get("controlScale") or 1.0)
+    control_weights = spec.get("controlWeights") or {}
+    repo = str(control_weights.get("repo") or _Z_IMAGE_CONTROL_REPO)
+    filename = str(control_weights.get("filename") or _Z_IMAGE_CONTROL_FILE)
+    _log(f"resolving Z-Image ControlNet weights {repo}/{filename}")
+    cn_path = hf_hub_download(repo_id=repo, filename=filename)
+
+    lora_paths: list[str] = []
+    lora_scales: list[float] = []
+    for index, lora in enumerate(loras):
+        path = str(lora.get("path") or "")
+        if not path:
+            raise RuntimeError(f"mlx_flux_runner: LoRA #{index + 1} has no path.")
+        try:
+            scale = float(lora.get("weight", 1.0))
+        except (TypeError, ValueError):
+            scale = 1.0
+        lora_paths.append(path)
+        lora_scales.append(scale)
+
+    _log(
+        f"loading ZImageControl model={model_id} controlScale={control_scale} "
+        f"loras={len(lora_paths)} steps={steps} quantize={quantize}"
+    )
+    model = ZImageControl(
+        control_weights_path=cn_path,
+        quantize=quantize,
+        lora_paths=lora_paths or None,
+        lora_scales=lora_scales or None,
+        model_config=ModelConfig.z_image_turbo(),
+    )
+    _log("ZImageControl loaded; entering control generation loop")
+
+    images: list[str] = []
+    for index, seed in enumerate(seeds):
+        iter_prompt = prompts_override[index] if prompts_override else prompt
+        result = model.generate_image(
+            seed=int(seed),
+            prompt=iter_prompt,
+            control_image_path=control_image_paths[index],
+            control_context_scale=control_scale,
+            num_inference_steps=steps,
+            height=height,
+            width=width,
+            guidance=guidance,
+            negative_prompt=negative_prompt,
+        )
+        path = out_dir / f"mlx_z_image_control_{index:04d}.png"
+        result.image.save(path, "PNG")
+        images.append(str(path))
+        _log(f"generated control image {index + 1}/{len(seeds)} -> {path}")
+
+    payload = {"images": images}
+    result_path.write_text(json.dumps(payload), encoding="utf-8")
+    print(json.dumps(payload))
+    return 0
+
+
 def main() -> int:
     if len(sys.argv) != 2:
         print(json.dumps({"error": "mlx_flux_runner expects exactly one argument: the spec JSON path"}))
@@ -175,6 +289,29 @@ def main() -> int:
     out_dir = Path(spec["outDir"])
     out_dir.mkdir(parents=True, exist_ok=True)
     result_path = out_dir / "result.json"
+
+    # Z-Image strict pose ControlNet (sc-2257): per-iteration rendered skeletons
+    # condition the ported ZImageControl variant. Distinct dispatch from the
+    # generic loop below (different class + generate signature).
+    control_image_paths = [str(p) for p in (spec.get("controlImagePaths") or []) if p]
+    if control_image_paths:
+        return _run_z_image_control(
+            spec=spec,
+            model_id=model_id,
+            prompt=prompt,
+            prompts_override=prompts_override,
+            negative_prompt=negative_prompt,
+            seeds=seeds,
+            height=height,
+            width=width,
+            steps=steps,
+            guidance=guidance,
+            quantize=quantize,
+            loras=loras,
+            control_image_paths=control_image_paths,
+            out_dir=out_dir,
+            result_path=result_path,
+        )
 
     # Heavy imports deferred until the spec is valid: a bad spec fails cleanly
     # before mflux loads MLX + the multi-GB transformer.

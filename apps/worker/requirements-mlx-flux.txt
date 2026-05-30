@@ -25,8 +25,12 @@
 # mflux pulls its own torch, transformers, huggingface_hub, mlx, etc. — pin
 # only mflux here and let it resolve the rest.
 #
-# Temporarily pinned at michaeltrefry/mflux@claude/flux2-kv-cache (sc-2163,
-# upstream PR filipstrand/mflux#426) so MlxFlux2Adapter (sc-2164) can use the
-# FLUX.2-klein-9b-kv KV-cache optimisation (~2.4x faster multi-ref edit). Flip
-# back to a PyPI mflux>=0.18 pin once the upstream PR lands.
-mflux @ git+https://github.com/michaeltrefry/mflux.git@claude/flux2-kv-cache
+# Pinned at michaeltrefry/mflux@claude/sc2257-z-image-controlnet, which branches
+# from claude/flux2-kv-cache (sc-2163, upstream PR filipstrand/mflux#426 — keeps
+# the FLUX.2-klein-9b-kv KV-cache optimisation MlxFlux2Adapter (sc-2164) relies
+# on, ~2.4x faster multi-ref edit) and adds the VACE-style Z-Image
+# Fun-Controlnet-Union pose ControlNet port (sc-2257): ZImageControl /
+# ZImageControlTransformer, used by mlx_flux_runner's controlImagePaths path for
+# the strict Z-Image pose tier. Flip back to a PyPI mflux>=0.18 pin once both the
+# KV-cache PR and a Z-Image ControlNet land upstream.
+mflux @ git+https://github.com/michaeltrefry/mflux.git@claude/sc2257-z-image-controlnet
