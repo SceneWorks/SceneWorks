@@ -254,6 +254,26 @@ fn requirements_pulid_flux_path(app: &AppHandle) -> PathBuf {
         .join("requirements-pulid-flux.txt")
 }
 
+/// requirements-pose.txt location (DWPose whole-body pose detection: rtmlib + the
+/// onnxruntime shared with InstantID/PuLID): the bundled resource in a packaged
+/// app, or the repo copy during development. Optional — absent in older worker
+/// checkouts, in which case the `pose_detect` worker capability isn't advertised
+/// and the Pose Library Create tab's detect jobs block ("no active worker supports
+/// pose detect"). Installed on all platforms (DWPose uses the CoreML/CPU
+/// onnxruntime provider). Epic 2282 / sc-2285.
+fn requirements_pose_path(app: &AppHandle) -> PathBuf {
+    if let Ok(resources) = app.path().resource_dir() {
+        let bundled = resources.join("python-src").join("requirements-pose.txt");
+        if bundled.exists() {
+            return bundled;
+        }
+    }
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("..")
+        .join("worker")
+        .join("requirements-pose.txt")
+}
+
 /// requirements-lens.txt location (Microsoft Lens sidecar venv deps): the bundled
 /// resource in a packaged app, or the repo copy during development. Optional —
 /// absent in older worker checkouts, in which case Lens is unavailable.
@@ -579,6 +599,12 @@ async fn provision_venv(app: &AppHandle) -> Result<(), String> {
     let requirements_pulid_flux = requirements_pulid_flux_path(app);
     let requirements_pulid_flux_body =
         std::fs::read_to_string(&requirements_pulid_flux).unwrap_or_default();
+    // DWPose whole-body pose-detection extras (rtmlib + the onnxruntime shared with
+    // InstantID/PuLID). Optional: absent in older worker checkouts, in which case
+    // the `pose_detect` capability isn't advertised and Pose Library detect jobs
+    // stay blocked. Epic 2282 / sc-2285.
+    let requirements_pose = requirements_pose_path(app);
+    let requirements_pose_body = std::fs::read_to_string(&requirements_pose).unwrap_or_default();
     // Apple Silicon MLX video inference deps — macOS-only; empty body elsewhere so
     // the marker stays stable and the Windows/Linux PyTorch worker is untouched.
     #[cfg(target_os = "macos")]
@@ -589,7 +615,7 @@ async fn provision_venv(app: &AppHandle) -> Result<(), String> {
     let requirements_mlx_body = String::new();
     let marker = marker_path();
     let expected = format!(
-        "v{SETUP_VERSION}\n{requirements_body}\n# ltx\n{requirements_ltx_body}\n# mlx\n{requirements_mlx_body}\n# instantid\n{requirements_instantid_body}\n# pulid_flux\n{requirements_pulid_flux_body}"
+        "v{SETUP_VERSION}\n{requirements_body}\n# ltx\n{requirements_ltx_body}\n# mlx\n{requirements_mlx_body}\n# instantid\n{requirements_instantid_body}\n# pulid_flux\n{requirements_pulid_flux_body}\n# pose\n{requirements_pose_body}"
     );
 
     if python.exists() {
@@ -657,6 +683,12 @@ async fn provision_venv(app: &AppHandle) -> Result<(), String> {
     // insightface/einops/onnxruntime pins line up across InstantID + PuLID-FLUX.
     if requirements_pulid_flux.exists() {
         requirement_files.push(requirements_pulid_flux.clone());
+    }
+    // DWPose extras (sc-2285): rtmlib + the shared onnxruntime. Same single uv pass
+    // so the onnxruntime pin stays aligned with InstantID/PuLID. Without these the
+    // worker can't advertise `pose_detect` and Pose Library detect jobs block.
+    if requirements_pose.exists() {
+        requirement_files.push(requirements_pose.clone());
     }
     run_uv(app, pip_install_args(&python, &requirement_files)).await?;
 

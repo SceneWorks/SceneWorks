@@ -31,6 +31,11 @@ for (const file of [
   // insightface/onnxruntime). Installed into the main venv by setup.rs so the
   // pulid_flux adapter runs (sc-2012, epic 2003).
   "requirements-pulid-flux.txt",
+  // DWPose whole-body pose-detection extras (rtmlib + the onnxruntime shared with
+  // InstantID/PuLID). Installed into the main venv by setup.rs so the worker
+  // advertises the `pose_detect` capability — without it the Pose Library Create
+  // tab's detect jobs block ("no active worker supports pose detect"). Epic 2282.
+  "requirements-pose.txt",
 ]) {
   const src = join(workerDir, file);
   if (existsSync(src)) cpSync(src, join(outDir, file));
