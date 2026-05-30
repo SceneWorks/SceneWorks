@@ -411,7 +411,14 @@ export function CharacterStudio() {
               updateCharacterReference={updateCharacterReference}
             />
 
-            <CharacterAssets assets={assets} onPreview={onPreview} selectedCharacter={selectedCharacter} />
+            <CharacterAssets
+              assets={assets}
+              deleteAsset={deleteAsset}
+              onPreview={onPreview}
+              purgeAsset={purgeAsset}
+              selectedCharacter={selectedCharacter}
+              updateAssetStatus={updateAssetStatus}
+            />
 
             <CharacterAngleSet
               addCharacterReference={addCharacterReference}

@@ -635,12 +635,20 @@ export function CharacterAngleSet({
 // character (recipe.normalizedSettings.characterId) or referencing it
 // (metadata.characterReferences). Reads the full project asset list, so character outputs
 // persist beyond the transient "recent generations" window (sc-2076).
-export function CharacterAssets({ selectedCharacter, assets = [], onPreview }) {
+export function CharacterAssets({
+  selectedCharacter,
+  assets = [],
+  onPreview,
+  deleteAsset,
+  purgeAsset,
+  updateAssetStatus,
+}) {
+  const [viewMode, setViewMode] = React.useState("active");
   const characterId = selectedCharacter?.id;
   if (!selectedCharacter) {
     return null;
   }
-  const characterAssets = (assets ?? [])
+  const scopedAssets = (assets ?? [])
     .filter(
       (asset) =>
         (asset.type === "image" || asset.type === "frame") &&
@@ -648,32 +656,66 @@ export function CharacterAssets({ selectedCharacter, assets = [], onPreview }) {
           (asset.metadata?.characterReferences ?? []).some((ref) => ref.characterId === characterId)),
     )
     .sort((left, right) => new Date(right.createdAt ?? 0) - new Date(left.createdAt ?? 0));
+  // Discarded (status.trashed) images drop out of the main grid so they no
+  // longer hold their slots, but stay reachable through the Trashcan view for
+  // restore or permanent purge.
+  const activeAssets = scopedAssets.filter((asset) => !asset.status?.trashed);
+  const trashedAssets = scopedAssets.filter((asset) => asset.status?.trashed);
+  const showingTrash = viewMode === "trashed";
+  const visibleAssets = showingTrash ? trashedAssets : activeAssets;
   return (
     <section className="character-section">
       <div className="section-heading">
         <p className="eyebrow">Character assets</p>
         <h2>
           Generated for {selectedCharacter.name}
-          {characterAssets.length ? ` (${characterAssets.length})` : ""}
+          {activeAssets.length ? ` (${activeAssets.length})` : ""}
         </h2>
       </div>
-      {characterAssets.length ? (
+      <div className="segmented-control" role="group" aria-label="Character asset collection">
+        <button className={showingTrash ? "" : "active"} onClick={() => setViewMode("active")} type="button">
+          Images ({activeAssets.length})
+        </button>
+        <button className={showingTrash ? "active" : ""} onClick={() => setViewMode("trashed")} type="button">
+          Trashcan ({trashedAssets.length})
+        </button>
+      </div>
+      {visibleAssets.length ? (
         <div className="reference-thumb-row">
-          {characterAssets.map((asset) => (
-            <button
-              aria-label={`Preview ${asset.displayName ?? asset.id}`}
-              className="reference-thumb"
-              key={asset.id}
-              onClick={() => onPreview?.(asset)}
-              type="button"
-            >
-              <AssetMedia asset={asset} controls={false} />
-            </button>
+          {visibleAssets.map((asset) => (
+            <div className="character-asset-thumb" key={asset.id}>
+              <button
+                aria-label={`Preview ${asset.displayName ?? asset.id}`}
+                className="reference-thumb"
+                onClick={() => onPreview?.(asset)}
+                type="button"
+              >
+                <AssetMedia asset={asset} controls={false} />
+              </button>
+              <div className="character-asset-thumb-actions">
+                {showingTrash ? (
+                  <>
+                    <button onClick={() => updateAssetStatus?.(asset, { trashed: false })} type="button">
+                      Restore
+                    </button>
+                    <button onClick={() => purgeAsset?.(asset)} type="button">
+                      Purge
+                    </button>
+                  </>
+                ) : (
+                  <button onClick={() => deleteAsset?.(asset)} type="button">
+                    Discard
+                  </button>
+                )}
+              </div>
+            </div>
           ))}
         </div>
       ) : (
         <p className="muted">
-          No images yet. Angle sets, pose generations, character tests, and any character-image render collect here automatically.
+          {showingTrash
+            ? "Trashcan is empty — discarded images for this character will appear here."
+            : "No images yet. Angle sets, pose generations, character tests, and any character-image render collect here automatically."}
         </p>
       )}
     </section>
