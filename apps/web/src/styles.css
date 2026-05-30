@@ -1721,6 +1721,14 @@ label {
   cursor: pointer;
 }
 
+/* Pose Library "Create" tab body: a simple vertical stack (toolbar, source grid,
+   candidate grid). Image grids/cards reuse the shared .dataset-add-grid/-card. */
+.pose-create {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
 .pose-category {
   display: flex;
   flex-direction: column;

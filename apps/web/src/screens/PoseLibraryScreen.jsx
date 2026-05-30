@@ -231,17 +231,13 @@ function PoseCreatePanel({ hidden, categories, onSaved }) {
           </div>
 
           {sources.length ? (
-            <div className="pose-create-sources">
+            <div className="dataset-add-grid">
               {sources.map((asset) => (
-                <div className="pose-source-chip" key={asset.id}>
-                  <AssetThumbnail asset={asset} className="pose-source-thumb" />
+                <div className="dataset-add-card" key={asset.id}>
+                  <AssetThumbnail asset={asset} />
                   <span>{asset.displayName ?? asset.id}</span>
-                  <button
-                    aria-label={`Remove ${asset.displayName ?? asset.id}`}
-                    onClick={() => removeSource(asset.id)}
-                    type="button"
-                  >
-                    ×
+                  <button onClick={() => removeSource(asset.id)} type="button">
+                    Remove
                   </button>
                 </div>
               ))}
@@ -251,7 +247,7 @@ function PoseCreatePanel({ hidden, categories, onSaved }) {
           )}
 
           {phase === "review" && candidates.length ? (
-            <div className="pose-candidates">
+            <>
               <div className="toolbar">
                 <p className="eyebrow">
                   Review {candidates.length} candidate{candidates.length === 1 ? "" : "s"} — {keepCount} kept
@@ -265,22 +261,24 @@ function PoseCreatePanel({ hidden, categories, onSaved }) {
                   <option key={category} value={category} />
                 ))}
               </datalist>
-              <div className="pose-candidate-grid">
+              {/* Reuse the shared selectable-image grid (DatasetAddDialog convention):
+                  the skeleton <img> is bounded by `.dataset-add-card img`, and the
+                  `selected` ring marks candidates kept for saving. */}
+              <div className="dataset-add-grid">
                 {candidates.map((candidate) => (
                   <div
-                    className={candidate.keep ? "pose-candidate-card" : "pose-candidate-card discarded"}
+                    className={candidate.keep ? "dataset-add-card selected" : "dataset-add-card"}
                     key={candidate.key}
                   >
                     <img
                       alt={`Pose skeleton from ${candidate.sourceDisplayName}`}
-                      className="pose-candidate-preview"
                       src={`${API_BASE_URL}/api/v1/poses/preview/${encodeURIComponent(
                         candidate.jobId,
                       )}/${encodeURIComponent(candidate.skeletonFile)}`}
                     />
-                    <p className="muted">
+                    <span>
                       {candidate.sourceDisplayName} · {candidate.facing}
-                    </p>
+                    </span>
                     <label>
                       Category
                       <input
@@ -304,7 +302,7 @@ function PoseCreatePanel({ hidden, categories, onSaved }) {
                   </div>
                 ))}
               </div>
-            </div>
+            </>
           ) : null}
 
           {dialogOpen ? (
