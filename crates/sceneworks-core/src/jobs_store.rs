@@ -184,6 +184,12 @@ pub struct ProgressUpdate {
     /// Sampled GPU load percentage observed at this progress point (0..100).
     /// Same running-max semantics as peak_gpu_memory_pct.
     pub peak_gpu_load_pct: Option<f64>,
+    /// Runtime backend label the worker reports for this job
+    /// ("mlx" / "mps" / "cuda" / "cpu"). First non-null value sticks — once a
+    /// worker tells us which backend ran the job, subsequent status-only
+    /// progress updates can't accidentally clear it. Drives the
+    /// WorkerProgressCard arch pill.
+    pub backend: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -264,6 +270,10 @@ impl JobsStore {
         // along with progress so a completed row shows the peak the run reached.
         ensure_column(&transaction, "jobs", "peak_gpu_memory_pct", "real")?;
         ensure_column(&transaction, "jobs", "peak_gpu_load_pct", "real")?;
+        // Runtime backend label written by the worker ("mlx" / "mps" / "cuda"
+        // / "cpu"). First-non-null wins so the WorkerProgressCard's arch pill
+        // stays stable across the run.
+        ensure_column(&transaction, "jobs", "backend", "text")?;
         transaction.commit()?;
         Ok(())
     }
@@ -787,8 +797,9 @@ impl JobsStore {
                    peak_gpu_load_pct = case
                        when ?12 is null then peak_gpu_load_pct
                        else max(coalesce(peak_gpu_load_pct, 0), ?12)
-                   end
-             where id = ?13
+                   end,
+                   backend = coalesce(backend, ?13)
+             where id = ?14
             ",
             params![
                 update.status.as_str(),
@@ -803,6 +814,7 @@ impl JobsStore {
                 now,
                 peak_memory,
                 peak_load,
+                update.backend,
                 job_id,
             ],
         )?;
@@ -1012,6 +1024,7 @@ fn row_to_job(row: &Row<'_>) -> rusqlite::Result<JobSnapshot> {
     let eta_seconds: Option<f64> = row.get("eta_seconds")?;
     let peak_memory: Option<f64> = row.get("peak_gpu_memory_pct").ok().flatten();
     let peak_load: Option<f64> = row.get("peak_gpu_load_pct").ok().flatten();
+    let backend: Option<String> = row.get("backend").ok().flatten();
     let created_at: String = row.get("created_at")?;
     let started_at: Option<String> = row.get("started_at")?;
     let completed_at: Option<String> = row.get("completed_at")?;
@@ -1050,6 +1063,7 @@ fn row_to_job(row: &Row<'_>) -> rusqlite::Result<JobSnapshot> {
         last_heartbeat_at: row.get("last_heartbeat_at")?,
         peak_gpu_memory_pct: peak_memory.map(number_from_f64),
         peak_gpu_load_pct: peak_load.map(number_from_f64),
+        backend,
         title,
         extra: Default::default(),
     })

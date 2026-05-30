@@ -930,9 +930,11 @@ fn progress_payload(
         eta_seconds,
         // The Rust utility worker doesn't run GPU work, so it never reports
         // per-job peak GPU stats. The Python GPU worker (scene_worker) sets
-        // these (sc-2086).
+        // these (sc-2086). Same for `backend` — utility jobs run on the CPU
+        // worker which never advertises a GPU runtime.
         peak_gpu_memory_pct: None,
         peak_gpu_load_pct: None,
+        backend: Some("cpu".to_owned()),
         extra: BTreeMap::new(),
     }
 }

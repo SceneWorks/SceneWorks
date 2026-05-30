@@ -159,6 +159,7 @@ pub(crate) async fn update_job_progress(
                 eta_seconds,
                 peak_gpu_memory_pct,
                 peak_gpu_load_pct,
+                backend: payload.backend,
             },
         )
     })

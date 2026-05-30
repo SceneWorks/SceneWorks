@@ -84,6 +84,7 @@ fn job_lifecycle_create_claim_complete() {
                 eta_seconds: None,
                 peak_gpu_memory_pct: None,
                 peak_gpu_load_pct: None,
+                backend: None,
             },
         )
         .expect("progress updates");
@@ -119,6 +120,7 @@ fn progress_keeps_running_max_for_peak_gpu_meters() {
             eta_seconds: None,
             peak_gpu_memory_pct: memory,
             peak_gpu_load_pct: load,
+            backend: None,
         }
     }
 
@@ -211,6 +213,7 @@ fn progress_leaves_peaks_null_when_no_samples_arrive() {
         eta_seconds: None,
         peak_gpu_memory_pct: None,
         peak_gpu_load_pct: None,
+        backend: None,
     };
     for _ in 0..3 {
         store
@@ -654,6 +657,7 @@ fn training_progress_stages_persist_under_running_and_reject_unknown_status() {
                     eta_seconds: None,
                     peak_gpu_memory_pct: None,
                     peak_gpu_load_pct: None,
+                    backend: None,
                 },
             )
             .expect("running status with a training stage is accepted");
@@ -676,6 +680,7 @@ fn training_progress_stages_persist_under_running_and_reject_unknown_status() {
                 eta_seconds: None,
                 peak_gpu_memory_pct: None,
                 peak_gpu_load_pct: None,
+                backend: None,
             },
         )
         .expect_err("an unknown status is rejected");
@@ -1136,6 +1141,7 @@ fn invalid_progress_numbers_are_rejected() {
                 eta_seconds: None,
                 peak_gpu_memory_pct: None,
                 peak_gpu_load_pct: None,
+                backend: None,
             },
         ),
         Err(JobsStoreError::InvalidNumber(field)) if field == "progress"
