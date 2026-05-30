@@ -2569,6 +2569,73 @@ def test_mlx_flux2_pose_set_builds_per_iteration_skeleton_specs(tmp_path, monkey
     assert captured["raw_settings"].get("poseLibrary") is True
 
 
+def test_mlx_z_image_pose_set_builds_control_skeleton_specs(tmp_path, monkeypatch):
+    """sc-2257: a job with advanced.poses on z_image_turbo (MLX) renders each pose to a
+    skeleton and passes it as a per-iteration controlImagePaths entry + controlScale to
+    the sidecar (strict Fun-Controlnet-Union tier). Unlike the best-effort Qwen/Flux2
+    tiers, the prompt stays plain (the ControlNet drives the pose — the skeleton cue
+    would make Z-Image draw a skeleton), and no reference is used."""
+    import numpy as _np
+    from scene_worker import image_adapters as ia
+
+    adapter = ia.MlxZImageAdapter()
+    monkeypatch.setattr(ia.MlxZImageAdapter, "_sidecar_available", lambda self: True)
+    # draw_bodypose needs cv2 (absent in the CI venv); stub to a tiny array. The
+    # adapter passes a resolution-proportional stickwidth, so accept the kwarg.
+    monkeypatch.setattr(
+        ia, "draw_bodypose", lambda w, h, kps, stickwidth=4: _np.zeros((h, w, 3), dtype=_np.uint8)
+    )
+
+    captured: dict = {}
+
+    def fake_run_sidecar(self, *, job_id, work_dir, label, total, spec, progress, cancel_requested):
+        captured["spec"] = spec
+        return [str(work_dir / f"out_{i}.png") for i in range(total)]
+
+    monkeypatch.setattr(ia.MlxZImageAdapter, "_run_sidecar", fake_run_sidecar)
+
+    def fake_writer(self, *, image_count, image_at_index, raw_settings, **kwargs):
+        captured["raw_settings"] = raw_settings
+        return {"images": image_count}
+
+    monkeypatch.setattr(ia.ImageAssetWriter, "write_incremental_outputs", fake_writer)
+
+    kp = [[0.5, 0.1 + 0.04 * i] for i in range(18)]
+    job = {
+        "id": "job_z_image_pose",
+        "payload": {
+            "projectId": "p",
+            "mode": "character_image",
+            "model": "z_image_turbo",
+            "prompt": "the character",
+            "count": 1,
+            "width": 32,
+            "height": 32,
+            "advanced": {"poses": [{"id": "sit_01", "keypoints": kp}, {"id": "stand_01", "keypoints": kp}]},
+        },
+    }
+    adapter.generate(
+        settings=SimpleNamespace(gpu_id="cpu"),
+        job=job,
+        request=image_request_from_job(job),
+        project_path=tmp_path,
+        progress=lambda *a, **k: None,
+        cancel_requested=lambda: False,
+    )
+    spec = captured["spec"]
+    # One sidecar iteration per pose (2), shared seed across the set.
+    assert len(spec["seeds"]) == 2
+    assert spec["seeds"][0] == spec["seeds"][1]
+    # Strict tier: plain prompt (no skeleton cue), the ControlNet drives the pose.
+    assert spec["prompts"] is None
+    paths = spec["controlImagePaths"]
+    assert len(paths) == 2
+    for entry in paths:
+        assert "pose_skeleton_" in entry and entry.endswith(".png")
+    assert spec["controlScale"] == 1.0  # default lock strength
+    assert captured["raw_settings"].get("poseLibrary") is True
+
+
 def test_mlx_flux2_requires_sidecar_when_missing(monkeypatch):
     # When the sidecar venv is missing, generate() must surface an actionable
     # error rather than silently producing nothing.
