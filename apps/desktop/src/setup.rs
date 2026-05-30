@@ -916,6 +916,24 @@ fn spawn_api(app: &AppHandle) -> Result<(), String> {
         "SCENEWORKS_PYTHON",
         venv_python(&venv_dir()).to_string_lossy().to_string(),
     );
+    // FLUX.2-klein single-file fine-tune conversion (sc-2235) runs in the mlx-flux
+    // sidecar venv via the scene_worker converter script — point the in-process
+    // utility worker at both, mirroring how the Python image adapter resolves them.
+    command = command
+        .env(
+            "SCENEWORKS_MLX_FLUX_PYTHON",
+            venv_python(&mlx_flux_venv_dir())
+                .to_string_lossy()
+                .to_string(),
+        )
+        .env(
+            "SCENEWORKS_MLX_FLUX_CONVERT",
+            worker_src_dir(app)
+                .join("scene_worker")
+                .join("mlx_flux_convert.py")
+                .to_string_lossy()
+                .to_string(),
+        );
     let (mut events, child) = command
         .spawn()
         .map_err(|error| format!("spawn api: {error}"))?;

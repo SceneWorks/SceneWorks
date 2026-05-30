@@ -2109,6 +2109,66 @@ def test_flux2_dispatch_resolves_via_runtime_registry(monkeypatch):
         assert adapter.__class__.__name__ == "MlxFlux2Adapter", model
 
 
+def test_flux2_true_v2_targets_and_dispatch(monkeypatch):
+    # sc-2232: the converted community fine-tune rides MlxFlux2Adapter with
+    # undistilled defaults (24 steps / CFG 1.0) and a local-dir weight source.
+    from scene_worker.image_adapters import MlxFlux2Adapter
+
+    monkeypatch.delenv("SCENEWORKS_IMAGE_ADAPTER", raising=False)
+    target = MODEL_TARGETS["flux2_klein_9b_true_v2"]
+    assert target["adapter"] == "mlx_flux2"
+    assert target["family"] == "flux2-klein"
+    assert target["steps"] == 24 and target["guidanceScale"] == 1.0
+    assert target["supportsEdit"] and target["supportsTxt2Img"]
+    assert target["componentBaseRepo"] == "black-forest-labs/FLUX.2-klein-9B"
+    assert "flux2_klein_9b_true_v2" in MlxFlux2Adapter._supported_models
+    assert "flux2_klein_9b_true_v2" in MlxFlux2Adapter._local_dir_models
+
+    registry = {"mlx_flux2": MlxFlux2Adapter()}
+    adapter = create_image_adapter({"payload": {"model": "flux2_klein_9b_true_v2"}}, registry)
+    assert adapter is not None and adapter.__class__.__name__ == "MlxFlux2Adapter"
+
+
+def test_flux2_true_v2_local_model_dir_resolution(tmp_path):
+    # Local weights live at <data>/models/mlx/<id> (the model_convert output dir);
+    # None until the transformer is assembled so the runner errors clearly, and
+    # always None for the built-in repos (they load from ModelConfig).
+    from types import SimpleNamespace
+
+    from scene_worker.image_adapters import MlxFlux2Adapter
+
+    settings = SimpleNamespace(data_dir=tmp_path)
+    assert MlxFlux2Adapter._local_model_dir("flux2_klein_9b_true_v2", settings) is None
+    assert MlxFlux2Adapter._local_model_dir("flux2_klein_9b", settings) is None
+
+    converted = tmp_path / "models" / "mlx" / "flux2_klein_9b_true_v2"
+    (converted / "transformer").mkdir(parents=True)
+    resolved = MlxFlux2Adapter._local_model_dir("flux2_klein_9b_true_v2", settings)
+    assert resolved == str(converted)
+
+
+def test_flux2_true_v2_manifest_install_time_conversion():
+    # sc-2235: the entry must declare the install-time conversion contract the
+    # Rust convert job + adapter rely on.
+    import re
+
+    _, find_entry_block, find_mlx_block = _manifest_brace_walker()
+    block = find_entry_block("flux2_klein_9b_true_v2")
+    assert '"macOnly": true' in block
+    assert '"adapter": "mlx_flux2"' in block
+    # Only the bf16 single-file is pulled (not the whole 73 GB repo).
+    assert "Flux2-Klein-9B-True-v2-bf16.safetensors" in block
+    # Undistilled defaults differ from the 4-step distill.
+    assert re.search(r'"steps"\s*:\s*24', block)
+
+    mlx_block = find_mlx_block(block)
+    assert '"requiresConversion": true' in mlx_block
+    assert '"converter": "flux2_klein_diffusers"' in mlx_block
+    assert '"convertSourceRepo": "wikeeyang/Flux2-Klein-9B-True-V2"' in mlx_block
+    assert '"convertBaseRepo": "black-forest-labs/FLUX.2-klein-9B"' in mlx_block
+    assert re.search(r'"quantize"\s*:\s*8', mlx_block)
+
+
 def test_runtime_registry_covers_all_model_target_adapters():
     # sc-2203 guard: every adapter id a manifest model can dispatch to (the
     # `adapter` field in MODEL_TARGETS) must be a key in the runtime's

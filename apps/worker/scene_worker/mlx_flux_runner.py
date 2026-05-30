@@ -56,7 +56,7 @@ def _log(message: str) -> None:
     sys.stderr.flush()
 
 
-def _resolve_model_handle(model_id: str, has_reference: bool) -> tuple[type, object, str, str]:
+def _resolve_model_handle(model_id: str, has_reference: bool) -> tuple[type, object, str, str]:  # noqa: C901
     """Map a SceneWorks model id + edit-vs-t2i hint onto an mflux
     (class, ModelConfig, filename_prefix, family) tuple.
 
@@ -108,6 +108,18 @@ def _resolve_model_handle(model_id: str, has_reference: bool) -> tuple[type, obj
             return Flux2KleinEdit, ModelConfig.flux2_klein_9b_kv(), "mlx_flux2_klein_kv", "flux2"
         from mflux.models.flux2.variants.txt2img.flux2_klein import Flux2Klein
         return Flux2Klein, ModelConfig.flux2_klein_9b_kv(), "mlx_flux2_klein_kv", "flux2"
+    if model_id == "flux2_klein_9b_true_v2":
+        # Community full fine-tune of FLUX.2-klein-9B (wikeeyang). Same 9B
+        # architecture, so it reuses ModelConfig.flux2_klein_9b() for the arch
+        # overrides — but the WEIGHTS live in a locally-assembled diffusers dir
+        # produced by the install-time conversion job (sc-2235), threaded in via
+        # spec["modelPath"]. Undistilled line: caller sets steps ~24 / guidance
+        # 1.0 (vs the 4-step distill). Routes edit-vs-t2i exactly like the base.
+        if has_reference:
+            from mflux.models.flux2.variants.edit.flux2_klein_edit import Flux2KleinEdit
+            return Flux2KleinEdit, ModelConfig.flux2_klein_9b(), "mlx_flux2_klein_true_v2", "flux2"
+        from mflux.models.flux2.variants.txt2img.flux2_klein import Flux2Klein
+        return Flux2Klein, ModelConfig.flux2_klein_9b(), "mlx_flux2_klein_true_v2", "flux2"
     raise RuntimeError(f"mlx_flux_runner: unsupported model id {model_id!r}.")
 
 
@@ -169,8 +181,17 @@ def main() -> int:
         f"loading {model_cls.__name__} model={model_id} quantize={quantize} "
         f"loras={len(lora_paths)} steps={steps} guidance={guidance}"
     )
+    # Optional locally-assembled diffusers model dir (sc-2235). When present the
+    # weights load from this path instead of the mflux built-in repo for the
+    # ModelConfig — used by converted community fine-tunes (flux2_klein_9b_true_v2)
+    # whose weights aren't a built-in mflux repo. Absent for the built-in klein
+    # models, which resolve from ModelConfig.model_name as before.
+    model_path = spec.get("modelPath") or None
+    if model_path is not None:
+        _log(f"using local model_path={model_path}")
     model = model_cls(
         quantize=quantize,
+        model_path=model_path,
         lora_paths=lora_paths or None,
         lora_scales=lora_scales or None,
         model_config=model_config,

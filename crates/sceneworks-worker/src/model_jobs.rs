@@ -240,11 +240,72 @@ pub(crate) async fn run_model_convert_job(
         return Ok(());
     };
 
-    let python = std::env::var("SCENEWORKS_PYTHON")
-        .ok()
-        .map(|value| value.trim().to_owned())
-        .filter(|value| !value.is_empty())
-        .unwrap_or_else(|| "python3".to_owned());
+    // Converter discriminator (sc-2235). Absent => the default mlx-video Wan
+    // converter (existing behavior). "flux2_klein_diffusers" => convert a
+    // FLUX.2-klein single-file fine-tune into a diffusers dir via the mlx-flux
+    // sidecar venv, borrowing VAE/text-encoder/tokenizer from an installed base.
+    let converter = optional_payload_string(&job.payload, "converter")
+        .map(str::to_owned)
+        .unwrap_or_default();
+    let is_flux2_klein = converter == "flux2_klein_diffusers";
+
+    let (python, flux2_source_file, flux2_base_dir, flux2_script) = if is_flux2_klein {
+        let source_file_name = required_payload_string(&job.payload, "sourceFile")?.to_owned();
+        let base_repo = required_payload_string(&job.payload, "baseRepo")?.to_owned();
+        let source_file = checkpoint_dir.join(&source_file_name);
+        if !source_file.is_file() {
+            fail_job(
+                api,
+                &job.id,
+                "Converted-model source file is missing.",
+                Some(format!("Expected {source_file_name} in {source_repo}.")),
+            )
+            .await?;
+            return Ok(());
+        }
+        let Some(base_dir) = huggingface_snapshot_dir(&settings.data_dir, &base_repo) else {
+            fail_job(
+                api,
+                &job.id,
+                "Base FLUX.2-klein model is not installed.",
+                Some(format!(
+                    "Install {base_repo} before converting {model_id} — its VAE, text encoder, \
+                     and tokenizer are reused."
+                )),
+            )
+            .await?;
+            return Ok(());
+        };
+        let py = std::env::var("SCENEWORKS_MLX_FLUX_PYTHON")
+            .ok()
+            .map(|value| value.trim().to_owned())
+            .filter(|value| !value.is_empty())
+            .ok_or_else(|| {
+                WorkerError::InvalidPayload(
+                    "SCENEWORKS_MLX_FLUX_PYTHON is not set; the mlx-flux sidecar venv is required \
+                     to convert FLUX.2-klein fine-tunes."
+                        .to_owned(),
+                )
+            })?;
+        let script = std::env::var("SCENEWORKS_MLX_FLUX_CONVERT")
+            .ok()
+            .map(|value| value.trim().to_owned())
+            .filter(|value| !value.is_empty())
+            .ok_or_else(|| {
+                WorkerError::InvalidPayload(
+                    "SCENEWORKS_MLX_FLUX_CONVERT is not set; cannot locate mlx_flux_convert.py."
+                        .to_owned(),
+                )
+            })?;
+        (py, Some(source_file), Some(base_dir), Some(script))
+    } else {
+        let py = std::env::var("SCENEWORKS_PYTHON")
+            .ok()
+            .map(|value| value.trim().to_owned())
+            .filter(|value| !value.is_empty())
+            .unwrap_or_else(|| "python3".to_owned());
+        (py, None, None, None)
+    };
 
     // Convert into a unique temp sibling and only promote it on success, so a
     // canceled/failed conversion never leaves a partial directory that the catalog
@@ -285,27 +346,42 @@ pub(crate) async fn run_model_convert_job(
     .await?;
 
     let mut command = Command::new(&python);
-    command
-        .arg("-m")
-        .arg("mlx_video.convert_wan")
-        .arg("--checkpoint-dir")
-        .arg(&checkpoint_dir)
-        .arg("--output-dir")
-        .arg(&temp_dir)
-        .arg("--dtype")
-        .arg(&dtype)
-        .arg("--model-version")
-        .arg("auto");
-    if quantize_only {
-        command.arg("--quantize-only");
-    } else if quantize_bits.is_some() {
-        command.arg("--quantize");
-    }
-    if let Some(bits) = quantize_bits {
-        command.arg("--bits").arg(bits.to_string());
-    }
-    if let Some(group_size) = quantize_group_size {
-        command.arg("--group-size").arg(group_size.to_string());
+    if is_flux2_klein {
+        // Self-contained converter script in the scene_worker package, run by the
+        // mlx-flux sidecar python: --source-file <single-file> --base-dir <base
+        // klein snapshot> --out-dir <temp>. It validates the converted transformer
+        // against the base diffusers layout and assembles the borrowed components.
+        command
+            .arg(flux2_script.as_ref().expect("flux2 script resolved"))
+            .arg("--source-file")
+            .arg(flux2_source_file.as_ref().expect("flux2 source resolved"))
+            .arg("--base-dir")
+            .arg(flux2_base_dir.as_ref().expect("flux2 base resolved"))
+            .arg("--out-dir")
+            .arg(&temp_dir);
+    } else {
+        command
+            .arg("-m")
+            .arg("mlx_video.convert_wan")
+            .arg("--checkpoint-dir")
+            .arg(&checkpoint_dir)
+            .arg("--output-dir")
+            .arg(&temp_dir)
+            .arg("--dtype")
+            .arg(&dtype)
+            .arg("--model-version")
+            .arg("auto");
+        if quantize_only {
+            command.arg("--quantize-only");
+        } else if quantize_bits.is_some() {
+            command.arg("--quantize");
+        }
+        if let Some(bits) = quantize_bits {
+            command.arg("--bits").arg(bits.to_string());
+        }
+        if let Some(group_size) = quantize_group_size {
+            command.arg("--group-size").arg(group_size.to_string());
+        }
     }
     let mut child = command
         .stdout(Stdio::null())
