@@ -43,11 +43,13 @@ from .hf_cache import huggingface_cache_roots, huggingface_repo_cache_path
 from .lora_adapters import (
     LoraPipelineState,
     adapter_network_type,
+    classify_adapter_network,
     apply_loras_to_pipeline,
     lora_path,
     normalize_lora_specs,
     reject_loras_if_unsupported,
     reject_lokr_loras,
+    reject_lycoris_loras,
     validate_lora_compatibility,
 )
 from .settings import WorkerSettings
@@ -3136,10 +3138,14 @@ class MlxZImageAdapter:
         )
         lora_specs = normalize_lora_specs(request.loras)
         # MLX-native LoKr (sc-2216): the mflux fork's LoKrLoader reconstructs the
-        # Kronecker delta and applies it on the Z-Image transformer, so LoKr runs
-        # natively here — no torch fallback (Michael, 2026-05-30). LoRA and LoKr
-        # specs forward to the sidecar identically; mflux routes each file by its
-        # networkType metadata.
+        # Kronecker delta and applies SceneWorks peft-trained LoKr on the Z-Image
+        # transformer, so LoKr runs natively here — no torch fallback (Michael,
+        # 2026-05-30). LoRA and LoKr specs forward to the sidecar identically; mflux
+        # routes each file by its networkType metadata. Third-party LyCORIS (LoHa /
+        # kohya LoKr) is NOT reconstructable by that loader; the dispatcher routes it
+        # to torch, so this only fires on a forced MLX override — reject clearly
+        # instead of letting it silently no-op through the LoRA key-matcher.
+        reject_lycoris_loras(lora_specs, self.id)
 
         if not self._sidecar_available():
             raise RuntimeError(
@@ -6960,24 +6966,50 @@ def _should_route_flux_to_mlx(payload: dict[str, Any]) -> bool:
 
 
 def _request_has_lokr_lora(payload: dict[str, Any]) -> bool:
-    """True if any LoRA in the request is a LoKr adapter. LoKr applies on the torch
-    backends today; the MLX Kronecker merge is unbuilt (epic 2193, transitional —
-    sc-2215/2216/2314), so the MLX routing gates fall back to torch when this is
-    true — the same graceful fallback a reference image triggers. Prefers the
-    ``networkType`` recorded on the LoRA
-    (zero I/O) and falls back to reading the adapter's safetensors header."""
+    """True if any LoRA in the request is a LoKr/LyCORIS adapter. Used by MLX
+    routing gates that have NO native loader (SDXL, FLUX) to fall back to torch —
+    the same graceful fallback a reference image triggers (epic 2193). The Z-Image
+    gate uses the narrower ``_request_has_lycoris_lora`` instead, since its mflux
+    LoKrLoader applies peft LoKr natively (sc-2216) and only third-party LyCORIS
+    needs torch. Prefers the ``networkType`` recorded on the LoRA (zero I/O) and
+    otherwise classifies the adapter's safetensors header (which also catches
+    third-party LyCORIS files that carry no ``networkType``)."""
 
     for lora in payload.get("loras") or []:
         if not isinstance(lora, dict):
             continue
         recorded = lora.get("networkType") or (lora.get("compatibility") or {}).get("networkType")
         network_type = str(recorded or "").strip().lower()
+        if network_type in ("lokr", "lycoris"):
+            return True
         if not network_type:
             resolved = lora_path(lora)
-            if resolved is not None:
-                network_type = adapter_network_type(resolved)
-        if network_type == "lokr":
+            if resolved is not None and classify_adapter_network(resolved) in ("lokr", "lycoris"):
+                return True
+    return False
+
+
+def _request_has_lycoris_lora(payload: dict[str, Any]) -> bool:
+    """True if any LoRA is a third-party LyCORIS adapter (LoHa / kohya-format LoKr
+    WITHOUT our ``networkType=lokr`` stamp) — i.e. classified ``lycoris``, not
+    ``lokr``. The Z-Image MLX gate (sc-2216) falls back to torch for these (the
+    mflux LoKrLoader applies peft LoKr natively but not arbitrary LyCORIS) while
+    keeping SceneWorks-trained LoKr on MLX. Mirrors ``_request_has_lokr_lora``'s
+    recorded-then-header detection, but only counts the ``lycoris`` classification."""
+
+    for lora in payload.get("loras") or []:
+        if not isinstance(lora, dict):
+            continue
+        recorded = lora.get("networkType") or (lora.get("compatibility") or {}).get("networkType")
+        network_type = str(recorded or "").strip().lower()
+        if network_type == "lycoris":
             return True
+        if network_type == "lokr":
+            continue  # SceneWorks peft LoKr applies on MLX (sc-2216) — never falls back.
+        if not network_type:
+            resolved = lora_path(lora)
+            if resolved is not None and classify_adapter_network(resolved) == "lycoris":
+                return True
     return False
 
 
@@ -7048,10 +7080,13 @@ def _should_route_z_image_to_mlx(payload: dict[str, Any]) -> bool:
         return False
     if payload.get("referenceAssetId"):
         return False
-    # LoKr runs natively on MLX for Z-Image (sc-2216: mflux LoKrLoader), so a LoKr
-    # job STAYS on the MLX path rather than falling back to torch (Michael's
-    # preference). Other mflux-only families that lack the loader still gate on
-    # _request_has_lokr_lora in their own predicate.
+    # peft-trained LoKr runs natively on MLX for Z-Image (sc-2216: mflux LoKrLoader),
+    # so a LoKr job STAYS on the MLX path (Michael's preference) — no torch fallback.
+    # Only third-party LyCORIS (LoHa / kohya LoKr), which that loader can't apply,
+    # falls back to torch (where sc-2193 applies it). Other mflux-only families that
+    # lack any loader still gate on the broader _request_has_lokr_lora.
+    if _request_has_lycoris_lora(payload):
+        return False
     return MlxZImageAdapter()._sidecar_available()
 
 

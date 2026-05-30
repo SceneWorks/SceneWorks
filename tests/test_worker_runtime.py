@@ -2446,11 +2446,14 @@ def test_should_route_z_image_to_mlx_keeps_lokr_on_mlx(monkeypatch):
     monkeypatch.setattr(MlxZImageAdapter, "_sidecar_available", lambda self: True)
     model = next(iter(MlxZImageAdapter._supported_models))
 
-    # MLX-native LoKr (sc-2216): unlike the SDXL path above, a LoKr Z-Image job
+    # MLX-native LoKr (sc-2216): unlike the SDXL path above, a peft-LoKr Z-Image job
     # STAYS on MLX — the mflux LoKrLoader applies it natively, so there's no torch
     # fallback (Michael's preference: run LoKr on MLX, don't fall back).
     assert _should_route_z_image_to_mlx({"model": model, "loras": [{"id": "a", "networkType": "lora"}]}) is True
     assert _should_route_z_image_to_mlx({"model": model, "loras": [{"id": "a", "networkType": "lokr"}]}) is True
+    # Third-party LyCORIS (LoHa / kohya LoKr) the mflux loader can't reconstruct
+    # still falls back to torch, where sc-2193 applies it.
+    assert _should_route_z_image_to_mlx({"model": model, "loras": [{"id": "a", "networkType": "lycoris"}]}) is False
 
 
 def test_mlx_flux2_kv_allows_no_reference_txt2img(monkeypatch):
