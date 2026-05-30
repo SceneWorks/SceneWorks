@@ -67,5 +67,12 @@ try {
   await runDocker([...compose, "down", "--remove-orphans"]).catch((error) => {
     console.error(error.message);
   });
-  await rm(tempRoot, { recursive: true, force: true });
+  // Best-effort: the API runs as root in the container and may write root-owned
+  // files into the bind-mounted data dir (e.g. the reserved pose-library project
+  // created at startup), which the non-root host user can't remove. The health
+  // check above is the real assertion and CI runners are ephemeral, so a failed
+  // temp cleanup must not fail the smoke.
+  await rm(tempRoot, { recursive: true, force: true }).catch((error) => {
+    console.error(`temp cleanup skipped: ${error.message}`);
+  });
 }
