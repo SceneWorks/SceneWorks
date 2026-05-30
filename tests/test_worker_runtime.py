@@ -3888,6 +3888,39 @@ def test_kolors_pose_set_applies_loras_once_before_loop(tmp_path, monkeypatch):
     assert apply_calls[0]["lora_key"] == "pose"
 
 
+def test_kolors_pose_path_accepts_lokr_via_injection(monkeypatch, tmp_path):
+    """sc-2252: the Kolors strict pose tier must APPLY LoKr (not just plain LoRA) on its
+    torch pose pipe. _apply_loras(lora_key="pose") routes lokr_* through inject_lokr_adapter
+    into the pose pipe's UNet — never load_lora_weights — and tracks the merge under the
+    dedicated "pose" cache slot, distinct from the text/img2img bookkeeping."""
+    lokr_file = tmp_path / "char.safetensors"
+    lokr_file.write_bytes(b"x")
+    monkeypatch.setattr("scene_worker.lora_adapters.adapter_network_type", lambda path: "lokr")
+    injected: list[str] = []
+    monkeypatch.setattr(
+        "scene_worker.lora_adapters.inject_lokr_adapter",
+        lambda pipe, spec, *, adapter_id: injected.append(spec.adapter_name),
+    )
+    pipe = FakeLokrPipe()
+    adapter = KolorsDiffusersAdapter()
+    request = SimpleNamespace(
+        mode="character_image",
+        model="kolors",
+        loras=[{"id": "char", "installedPath": str(lokr_file), "weight": 0.7, "families": ["kolors"]}],
+    )
+
+    adapter._apply_loras(pipe, request, lora_key="pose")
+
+    # LoKr injects into the pose pipe's UNet denoiser; it never loads via load_lora_weights.
+    assert pipe.loaded == []
+    assert injected, "LoKr must inject into the pose pipe denoiser"
+    # Tracked under the dedicated pose slot — not the text/img2img slots.
+    pose_state = adapter._loaded_lora_states["pose"]
+    assert injected == list(pose_state.adapter_names)
+    assert "text" not in adapter._loaded_lora_states
+    assert "img2img" not in adapter._loaded_lora_states
+
+
 def test_create_image_adapter_routes_sdxl(monkeypatch):
     # Pin the auto-dispatch off the MLX path so this asserts the torch
     # fallback on every host (a developer Mac with the mlx-examples vendor
