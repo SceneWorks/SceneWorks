@@ -4165,6 +4165,19 @@ class KolorsDiffusersAdapter:
         identity), sharing one seed so wardrobe/hair stay consistent across the set."""
         progress("loading_model", "loading_model", 0.18, f"Loading {model_target['label']} (pose ControlNet).")
         pipe = self._load_pose_pipeline(settings, request, model_target, progress=progress, job_id=job["id"])
+        # Apply request.loras once on the pose pipe before the per-pose loop (sc-2251),
+        # so the character LoRA bootstrapping loop works on the strict pose tier too.
+        # The vendored pose pipeline inherits StableDiffusionXLLoraLoaderMixin and
+        # exposes .unet, so the shared path also routes LoKr via inject_lokr_adapter
+        # (sc-2252). Tracked under its own "pose" cache slot (distinct pipe object).
+        emit_worker_event(
+            "image_lora_apply_start",
+            jobId=job["id"],
+            adapter=self.id,
+            loraCount=len(request.loras),
+        )
+        self._apply_loras(pipe, request, lora_key="pose")
+        emit_worker_event("image_lora_apply_complete", jobId=job["id"], adapter=self.id)
         torch = importlib.import_module("torch")
         device = select_torch_device(torch, settings.gpu_id)
         total = len(pose_entries)
@@ -4732,8 +4745,10 @@ class KolorsDiffusersAdapter:
             raise InterruptedError("Image generation canceled by user.")
         return output.images[0].convert("RGB")
 
-    def _apply_loras(self, pipe: Any, request: ImageRequest) -> None:
-        key = "img2img" if request.mode == "edit_image" else "text"
+    def _apply_loras(self, pipe: Any, request: ImageRequest, *, lora_key: str | None = None) -> None:
+        # lora_key pins the cache slot when the pipe is neither the text nor img2img
+        # pipe (e.g. the separate pose ControlNet pipe — sc-2251); defaults to mode.
+        key = lora_key or ("img2img" if request.mode == "edit_image" else "text")
         model_target = MODEL_TARGETS.get(request.model, {})
         self._loaded_lora_states[key] = apply_loras_to_pipeline(
             pipe,
@@ -5143,8 +5158,10 @@ class SdxlDiffusersAdapter:
             raise InterruptedError("Image generation canceled by user.")
         return output.images[0].convert("RGB")
 
-    def _apply_loras(self, pipe: Any, request: ImageRequest) -> None:
-        key = "img2img" if request.mode == "edit_image" else "text"
+    def _apply_loras(self, pipe: Any, request: ImageRequest, *, lora_key: str | None = None) -> None:
+        # lora_key pins the cache slot when the pipe is neither the text nor img2img
+        # pipe (e.g. the separate pose ControlNet pipe — sc-2251); defaults to mode.
+        key = lora_key or ("img2img" if request.mode == "edit_image" else "text")
         model_target = MODEL_TARGETS.get(request.model, {})
         self._loaded_lora_states[key] = apply_loras_to_pipeline(
             pipe,

@@ -3831,6 +3831,63 @@ def test_kolors_pose_set_loops_poses_with_shared_seed(tmp_path, monkeypatch):
     assert captured["raw_settings"].get("controlNetPose") == "Kwai-Kolors/Kolors-ControlNet-Pose"
 
 
+def test_kolors_pose_set_applies_loras_once_before_loop(tmp_path, monkeypatch):
+    """sc-2251/sc-2252: the strict Kolors pose tier must apply request.loras exactly
+    once on the pose pipe BEFORE the per-pose loop (the same merge the T2I/img2img
+    path does), under its own "pose" cache slot — so the character-LoRA bootstrapping
+    loop works on pose generation. Guards the regression where _generate_pose_set
+    returned before the LoRA merge, silently ignoring request.loras (and LoKr)."""
+    from scene_worker import image_adapters as ia
+
+    monkeypatch.setattr(ia.KolorsDiffusersAdapter, "_load_pose_pipeline", lambda self, *a, **k: object())
+    monkeypatch.setattr(ia, "select_torch_device", lambda *a, **k: "cpu")
+    monkeypatch.setattr(ia, "gpu_memory_snapshot", lambda *a, **k: None)
+    monkeypatch.setattr(
+        "scene_worker.image_adapters.importlib.import_module",
+        lambda name: SimpleNamespace() if name == "torch" else importlib.import_module(name),
+    )
+
+    apply_calls: list[dict] = []
+
+    def fake_apply_loras(self, pipe, request, *, lora_key=None):
+        apply_calls.append({"loras": list(request.loras), "lora_key": lora_key})
+
+    monkeypatch.setattr(ia.KolorsDiffusersAdapter, "_apply_loras", fake_apply_loras)
+
+    def fake_run_pose(self, settings, pipe, request, seed, project_path, keypoints, cancel_requested=None):
+        from PIL import Image as _Image
+
+        assert apply_calls, "loras must be applied before the pose loop runs"
+        return _Image.new("RGB", (8, 8))
+
+    monkeypatch.setattr(ia.KolorsDiffusersAdapter, "_run_pose", fake_run_pose)
+
+    class _FakeWriter:
+        def write_incremental_outputs(self, *, image_count, image_at_index, **kwargs):
+            for index in range(image_count):
+                image_at_index(index)
+            return {"images": image_count}
+
+    monkeypatch.setattr(ia, "ImageAssetWriter", _FakeWriter)
+
+    kp = [[0.5, 0.1 + 0.04 * i] for i in range(18)]
+    loras = [{"id": "kelsie", "path": "/loras/kelsie.safetensors", "families": ["kolors"]}]
+    job = {"id": "job_kolors_pose_lora", "payload": {
+        "projectId": "p", "mode": "character_image", "model": "kolors", "prompt": "the character",
+        "referenceAssetId": "ref-1", "count": 1, "width": 64, "height": 64, "loras": loras,
+        "advanced": {"poses": [{"id": "sit_01", "keypoints": kp}, {"id": "stand_01", "keypoints": kp}]},
+    }}
+    KolorsDiffusersAdapter().generate(
+        settings=SimpleNamespace(gpu_id="cpu"), job=job, request=image_request_from_job(job),
+        project_path=tmp_path, progress=lambda *a, **k: None, cancel_requested=lambda: False,
+    )
+    # Applied exactly once (not once-per-pose), before the loop, under the dedicated
+    # "pose" cache slot so it never collides with the text/img2img pipe bookkeeping.
+    assert len(apply_calls) == 1
+    assert apply_calls[0]["loras"] == loras
+    assert apply_calls[0]["lora_key"] == "pose"
+
+
 def test_create_image_adapter_routes_sdxl(monkeypatch):
     # Pin the auto-dispatch off the MLX path so this asserts the torch
     # fallback on every host (a developer Mac with the mlx-examples vendor
