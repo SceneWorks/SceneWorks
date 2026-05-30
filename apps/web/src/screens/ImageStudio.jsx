@@ -303,6 +303,12 @@ export function ImageStudio() {
       return;
     }
     setMode(launchRequest.mode);
+    // Preselect the family-matched edit model resolved at launch time (App.jsx). It's
+    // edit-capable by construction, so the availableModels snap-to-first effect leaves
+    // it in place; when absent the snap falls back to the default edit model.
+    if (launchRequest.model) {
+      setModel(launchRequest.model);
+    }
     if (launchRequest.mode === "edit_image" && selectedAsset?.id) {
       setSourceAssetId(selectedAsset.id);
     }

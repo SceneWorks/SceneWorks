@@ -377,6 +377,7 @@ export function FullscreenPreview({
   deleteAsset,
   nextAsset,
   onClose,
+  onEditImage,
   onPreviewAsset,
   previousAsset,
   purgeAsset,
@@ -439,6 +440,11 @@ export function FullscreenPreview({
             </div>
           ) : null}
           <div className="preview-actions">
+            {onEditImage && asset.type === "image" ? (
+              <button onClick={() => onEditImage(asset)} type="button">
+                Edit
+              </button>
+            ) : null}
             <button onClick={() => updateAssetStatus(asset, { favorite: !asset.status?.favorite })} type="button">
               {asset.status?.favorite ? "Saved" : "Favorite"}
             </button>

@@ -1214,6 +1214,52 @@ export function App() {
     setActiveView("Image");
   }
 
+  // Resolve an edit-capable model whose family matches the image's generating model.
+  // Prefers the exact generating model when it can edit, then any same-family
+  // edit-capable model; returns null so Image Studio keeps its default edit model
+  // when nothing matches.
+  function editModelForAsset(asset) {
+    const sourceModelId = asset?.recipe?.model;
+    if (!sourceModelId) {
+      return null;
+    }
+    const canEdit = (item) => {
+      const caps = item?.capabilities ?? [];
+      return caps.includes("edit_image") || caps.includes("image_edit");
+    };
+    const sourceModel = imageModels.find((item) => item.id === sourceModelId);
+    if (sourceModel && canEdit(sourceModel)) {
+      return sourceModel.id;
+    }
+    const families = modelLoraFamilies(sourceModel ?? { family: sourceModelId });
+    if (families.length) {
+      const sibling = imageModels.find(
+        (item) => canEdit(item) && modelLoraFamilies(item).some((family) => families.includes(family)),
+      );
+      if (sibling) {
+        return sibling.id;
+      }
+    }
+    return null;
+  }
+
+  // "Edit" from the fullscreen preview: open Image Studio in edit mode with this
+  // image as the source, preselecting the family-matched edit model when possible.
+  function sendAssetToImageEdit(asset) {
+    if (!asset) {
+      return;
+    }
+    setSelectedAssetId(asset.id);
+    setStudioLaunch({
+      id: crypto.randomUUID(),
+      view: "Image",
+      assetId: asset.id,
+      mode: "edit_image",
+      model: editModelForAsset(asset),
+    });
+    setActiveView("Image");
+  }
+
   function sendAssetToVideo(asset, mode = null) {
     if (!asset) {
       return;
@@ -1670,6 +1716,7 @@ export function App() {
           }}
           nextAsset={previewNavigation.next}
           onClose={() => setPreviewAsset(null)}
+          onEditImage={sendAssetToImageEdit}
           onPreviewAsset={(asset, direction) => {
             if (direction) {
               previewDirectionRef.current = direction;
