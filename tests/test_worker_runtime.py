@@ -4275,7 +4275,7 @@ def test_kolors_pose_set_applies_loras_once_before_loop(tmp_path, monkeypatch):
 
     monkeypatch.setattr(ia.KolorsDiffusersAdapter, "_apply_loras", fake_apply_loras)
 
-    def fake_run_pose(self, settings, pipe, request, seed, project_path, keypoints, cancel_requested=None):
+    def fake_run_pose(self, settings, pipe, request, seed, project_path, keypoints, hands=None, face=None, cancel_requested=None):
         from PIL import Image as _Image
 
         assert apply_calls, "loras must be applied before the pose loop runs"
