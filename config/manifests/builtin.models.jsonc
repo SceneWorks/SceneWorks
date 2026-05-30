@@ -889,10 +889,13 @@
           { "id": "down_right", "label": "Down · right" },
           { "id": "front", "label": "Front" }
         ],
-        // NOTE: pose library deferred to a follow-up PR (same reason as
-        // qwen_image_edit_2511_lightning). The sc-2003 hardware spike
-        // validated the multi-image trick (image_paths=[skeleton, character])
-        // at sitting 0.54 / standing 0.36 ArcFace cosine.
+        // Best-effort pose library (sc-2262): no FLUX.2 pose ControlNet exists
+        // (sc-2250 spike), so the worker renders the selected library pose as an
+        // OpenPose skeleton and feeds it as a second edit image alongside the
+        // reference (Flux2KleinEdit image_paths=[reference, skeleton]) through the
+        // MLX sidecar. The sc-2003 hardware spike validated this multi-image trick
+        // at sitting 0.54 / standing 0.36 ArcFace cosine. Best-effort tier.
+        "poseLibrary": true,
         "promptGuide": {
           "title": "FLUX.2 [klein] 9B Prompt Guide",
           "path": "/prompt-guides/flux2-klein.md",

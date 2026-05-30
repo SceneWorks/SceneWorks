@@ -3723,8 +3723,25 @@ class MlxFlux2Adapter:
         # angles AND uniquely holds portrait framing at 90° profiles where
         # Qwen-Lightning reframes to full-body.
         is_character_image = request.mode == "character_image" and has_reference
-        angle_set = is_character_image and bool(request.advanced.get("angleSet"))
-        if angle_set:
+        # Best-effort pose tier (sc-2262): advanced.poses is a list of {id, keypoints}.
+        # Each pose renders to an OpenPose skeleton paired with the reference as a
+        # [skeleton, reference] multi-image set (Flux2KleinEdit accepts a list of
+        # image_paths) — identity from the reference, pose approximated from the
+        # skeleton + the pose prompt cue. No FLUX.2 pose ControlNet exists (sc-2250).
+        # Pose takes precedence over angleSet.
+        raw_poses = request.advanced.get("poses")
+        pose_entries = [p for p in raw_poses if isinstance(p, dict)] if isinstance(raw_poses, list) else []
+        pose_set = is_character_image and len(pose_entries) > 0
+        angle_set = is_character_image and bool(request.advanced.get("angleSet")) and not pose_set
+        pose_keypoints: list[Any] | None = None
+        if pose_set:
+            total = len(pose_entries)
+            angles = None
+            set_seed = resolve_seed(request.seed, request.prompt, 0, request.seeds)
+            seeds = [set_seed] * total
+            prompts = [augment_prompt_for_pose(request.prompt)] * total
+            pose_keypoints = [normalize_keypoints(p.get("keypoints")) for p in pose_entries]
+        elif angle_set:
             angles = list(CHARACTER_ANGLE_SET_ORDER)
             total = len(angles)
             set_seed = resolve_seed(request.seed, request.prompt, 0, request.seeds)
@@ -3750,6 +3767,20 @@ class MlxFlux2Adapter:
         )
         work_dir = Path(tempfile.mkdtemp(prefix="mlx_flux2_sidecar_"))
         self._scratch_dir = work_dir
+        # Best-effort pose tier: render each pose's skeleton to a PNG in the sidecar
+        # work dir and pair it with the reference as a per-iteration [reference,
+        # skeleton] set. draw_bodypose runs in the main worker venv (cv2 present).
+        image_paths_per_iter: list[list[str]] | None = None
+        if pose_set and pose_keypoints is not None:
+            image_paths_per_iter = []
+            for index, keypoints in enumerate(pose_keypoints):
+                skeleton_path = work_dir / f"pose_skeleton_{index:04d}.png"
+                Image.fromarray(draw_bodypose(request.width, request.height, keypoints)).save(
+                    skeleton_path, "PNG"
+                )
+                # Order [skeleton, reference] mirrors the sc-2003 spike's validated
+                # FLUX.2 multi-image config (image_paths=[skeleton, character]).
+                image_paths_per_iter.append([str(skeleton_path), reference_paths[0]])
         try:
             images = self._run_sidecar(
                 job_id=job["id"],
@@ -3774,6 +3805,9 @@ class MlxFlux2Adapter:
                         for lora in lora_specs
                     ],
                     "imagePaths": reference_paths or None,
+                    # Per-pose [reference, skeleton] sets (sc-2262); overrides
+                    # imagePaths per iteration. None for the plain reference path.
+                    "imagePathsPerIteration": image_paths_per_iter,
                     # Local diffusers dir for converted fine-tunes (sc-2235);
                     # None for built-in mflux repos (loaded from ModelConfig).
                     "modelPath": self._local_model_dir(request.model, settings),
@@ -3811,6 +3845,7 @@ class MlxFlux2Adapter:
                     "kvCacheEnabled": has_reference and request.model in self._kv_cache_models,
                     "realModelInference": True,
                     **({"angleSet": True} if angle_set else {}),
+                    **({"poseLibrary": True} if pose_set else {}),
                 },
                 settings=settings,
                 job_id=job["id"],
