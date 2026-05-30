@@ -25,6 +25,7 @@ from scene_worker.caption_adapters import (
 from scene_worker.image_adapters import (
     AuraSrUpscaler,
     ChromaDiffusersAdapter,
+    CHARACTER_ANGLE_SET_ORDER,
     FluxDiffusersAdapter,
     ImageAssetWriter,
     KolorsDiffusersAdapter,
@@ -830,6 +831,88 @@ def test_augment_prompt_for_pose_appends_skeleton_cue():
     # Empty base → just the cue (caller still gets a usable instruction).
     assert augment_prompt_for_pose("") == POSE_SKELETON_PROMPT
     assert augment_prompt_for_pose("  a woman.  ") == f"a woman, {POSE_SKELETON_PROMPT}"
+
+
+def test_qwen_character_image_angle_set_applies_loras_once_then_loops_angles(tmp_path, monkeypatch):
+    """sc-2225: a character_image + angleSet job on a diffusers backbone (Qwen) must
+    apply request.loras exactly once, BEFORE the per-angle loop, and emit one image per
+    canonical angle. Guards the regression that angle-set mode skips the LoRA merge."""
+
+    class FakeImage:
+        def convert(self, _mode):
+            return self
+
+    # The worker unit suite runs without torch installed; generate() does
+    # `importlib.import_module("torch")`, so stand in a fake. With gpu_id="cpu",
+    # select_torch_device returns early and never touches it.
+    class FakeTorch:
+        pass
+
+    adapter = QwenImageAdapter()
+    monkeypatch.setattr(
+        "scene_worker.image_adapters.importlib.import_module",
+        lambda name: FakeTorch if name == "torch" else importlib.import_module(name),
+    )
+    monkeypatch.setattr("scene_worker.image_adapters.gpu_memory_snapshot", lambda *a, **k: None)
+    monkeypatch.setattr(adapter, "_load_pipeline", lambda *a, **k: object())
+
+    apply_calls: list[list] = []
+    monkeypatch.setattr(adapter, "_apply_loras", lambda pipe, request: apply_calls.append(list(request.loras)))
+
+    run_overrides: list = []
+
+    # generate() always passes pose_skeleton (None for the angle path); accept it
+    # here so the fake matches the real _run_pipeline signature (sc-2256).
+    def fake_run(settings, pipe, request, seed, project_path, *, cancel_requested=None, prompt_override=None, pose_skeleton=None):
+        # The LoRA merge must already have happened before any angle is generated.
+        assert apply_calls, "loras must be applied before the angle loop runs"
+        assert pose_skeleton is None  # angle path is prompt-driven, no skeleton
+        run_overrides.append(prompt_override)
+        return FakeImage()
+
+    monkeypatch.setattr(adapter, "_run_pipeline", fake_run)
+
+    captured: dict = {}
+
+    def fake_writer(self, *, image_count, image_at_index, **kwargs):
+        captured["image_count"] = image_count
+        for index in range(image_count):
+            image_at_index(index)
+        return {"images": [], "count": image_count}
+
+    monkeypatch.setattr(ImageAssetWriter, "write_incremental_outputs", fake_writer)
+
+    loras = [{"id": "kelsie", "path": "/loras/kelsie.safetensors", "families": ["qwen-image"]}]
+    job = {
+        "id": "job-qwen-angle",
+        "payload": {
+            "projectId": "p",
+            "mode": "character_image",
+            "model": "qwen_image_edit_2511",
+            "prompt": "the character",
+            "referenceAssetId": "ref-1",
+            "count": 1,
+            "width": 16,
+            "height": 16,
+            "loras": loras,
+            "advanced": {"angleSet": True},
+        },
+    }
+    adapter.generate(
+        settings=SimpleNamespace(gpu_id="cpu"),
+        job=job,
+        request=image_request_from_job(job),
+        project_path=tmp_path,
+        progress=lambda *a, **k: None,
+        cancel_requested=lambda: False,
+    )
+
+    # Applied exactly once (per pipe, before the loop) with the requested loras.
+    assert apply_calls == [loras]
+    # One image per canonical angle, each with its own per-angle prompt augment.
+    assert captured["image_count"] == len(CHARACTER_ANGLE_SET_ORDER)
+    assert len(run_overrides) == len(CHARACTER_ANGLE_SET_ORDER)
+    assert len(set(run_overrides)) == len(CHARACTER_ANGLE_SET_ORDER)
 
 
 def test_filter_call_kwargs_preserves_none_for_accepted_parameters():
