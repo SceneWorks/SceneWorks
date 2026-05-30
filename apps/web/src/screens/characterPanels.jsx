@@ -904,9 +904,9 @@ export function CharacterPoseLibrary({
   const [selectedPoseIds, setSelectedPoseIds] = React.useState([]);
   const [faceRestore, setFaceRestore] = React.useState(false);
   // Strict ControlNet pose-lock strength (sc-2257). Only the strict tier
-  // (ui.poseControlScale) honours advanced.controlScale; default 1.0 locks
-  // cleanly, 0.65–1.0 is the model-card range, >~1.2 starts to degrade quality.
-  const [controlScale, setControlScale] = React.useState(1.0);
+  // (ui.poseControlScale) honours advanced.controlScale; default 0.9 matches the
+  // reference pipeline, 0.65–1.0 is the model-card range, >~1.2 degrades quality.
+  const [controlScale, setControlScale] = React.useState(0.9);
   const supportsControlScale = Boolean(activePoseModel?.ui?.poseControlScale);
   const [referenceAssetId, setReferenceAssetId] = React.useState("");
   const [prompt, setPrompt] = React.useState("");
@@ -964,7 +964,14 @@ export function CharacterPoseLibrary({
   }
 
   async function generate() {
-    const poses = selectedPoseIds.map((id) => byId[id]).filter(Boolean).map((pose) => ({ id: pose.id, keypoints: pose.keypoints }));
+    const poses = selectedPoseIds.map((id) => byId[id]).filter(Boolean).map((pose) => ({
+      id: pose.id,
+      keypoints: pose.keypoints,
+      // Forward DWPose hand/face keypoints when a pose carries them (sc-2257) — the
+      // strict Z-Image tier renders them for a firmer, more in-distribution lock.
+      ...(pose.hands ? { hands: pose.hands } : {}),
+      ...(pose.face ? { face: pose.face } : {}),
+    }));
     if (!referenceAssetId || !poses.length || submitting || !activePoseModel) {
       return;
     }
@@ -1073,8 +1080,9 @@ export function CharacterPoseLibrary({
             <span className="lora-weight-value">{controlScale.toFixed(2)}</span>
           </div>
           <p className="field-hint">
-            How hard the ControlNet locks the pose. 1.0 is a clean lock; lower (toward 0.65) loosens it for
-            more natural variation, higher (&gt;1.2) over-constrains and can degrade quality.
+            How hard the ControlNet locks the pose. 0.9 (the reference default) is a clean lock; lower
+            (toward 0.65) loosens it for more natural variation, higher (&gt;1.2) over-constrains and can
+            degrade quality.
           </p>
         </div>
       ) : null}

@@ -2580,10 +2580,11 @@ def test_mlx_z_image_pose_set_builds_control_skeleton_specs(tmp_path, monkeypatc
 
     adapter = ia.MlxZImageAdapter()
     monkeypatch.setattr(ia.MlxZImageAdapter, "_sidecar_available", lambda self: True)
-    # draw_bodypose needs cv2 (absent in the CI venv); stub to a tiny array. The
-    # adapter passes a resolution-proportional stickwidth, so accept the kwarg.
+    # draw_wholebody needs cv2 (absent in the CI venv); stub to a tiny array. The
+    # adapter passes hands/face + a resolution-proportional stickwidth, so accept
+    # those kwargs. The real render is covered in test_instantid_adapter.
     monkeypatch.setattr(
-        ia, "draw_bodypose", lambda w, h, kps, stickwidth=4: _np.zeros((h, w, 3), dtype=_np.uint8)
+        ia, "draw_wholebody", lambda w, h, kps, hands=None, face=None, stickwidth=4: _np.zeros((h, w, 3), dtype=_np.uint8)
     )
 
     captured: dict = {}
@@ -2632,7 +2633,7 @@ def test_mlx_z_image_pose_set_builds_control_skeleton_specs(tmp_path, monkeypatc
     assert len(paths) == 2
     for entry in paths:
         assert "pose_skeleton_" in entry and entry.endswith(".png")
-    assert spec["controlScale"] == 1.0  # default lock strength
+    assert spec["controlScale"] == 0.9  # default lock strength (reference default)
     assert captured["raw_settings"].get("poseLibrary") is True
 
 
