@@ -1,5 +1,10 @@
 import { useEffect, useState } from "react";
 
+// The reserved global project that holds user-created pose assets (epic 2282). Mirrors
+// crates/sceneworks-core::GLOBAL_POSES_PROJECT_ID. Hidden from the project switcher;
+// addressed directly by the Pose Library screen + the user-pose picker fetcher.
+export const GLOBAL_POSES_PROJECT_ID = "project_global_poses";
+
 // The pose library is the union of two sources:
 //  - BUILT-IN: the bundled OpenPose library (apps/web/public/poses/index.json) —
 //    normalized COCO-18 skeletons + preview thumbnails, shipped read-only, cached.
