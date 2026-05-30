@@ -3,10 +3,11 @@ use super::*;
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct CreatePosesRequest {
-    /// One curated pose candidate per item. Each carries `jobId` + `skeletonFile`
-    /// (the worker's cached `pose_detect` preview to copy), the chosen `category`
-    /// + free `tags`, and the `pose` keypoint metadata from the job result. Shape
-    /// is validated by `ProjectStore::create_pose_asset` (epic 2282, sc-2287).
+    /// One curated pose candidate per item. Each carries `jobId` plus
+    /// `skeletonFile` (the worker's cached `pose_detect` preview to copy), the
+    /// chosen `category`, free `tags`, and the `pose` keypoint metadata from the
+    /// job result. Shape is validated by `ProjectStore::create_pose_asset`
+    /// (epic 2282, sc-2287).
     pub(crate) poses: Vec<serde_json::Value>,
 }
 
