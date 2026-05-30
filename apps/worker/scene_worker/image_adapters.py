@@ -413,6 +413,27 @@ MODEL_TARGETS = {
         "repo": "black-forest-labs/FLUX.2-klein-9b-kv",
         "adapter": "mlx_flux2",
     },
+    "flux2_klein_9b_true_v2": {
+        "label": "FLUX.2 [klein] 9B True V2",
+        "family": "flux2-klein",
+        # Community full fine-tune of FLUX.2-klein-9B (wikeeyang) — improved
+        # realism + prompt adherence (sc-2220). Same 9B architecture; weights
+        # ship as a transformer-only single-file checkpoint converted at install
+        # into a local diffusers dir (sc-2235) and loaded via the runner's
+        # modelPath seam. This is the UNDISTILLED line, so unlike the 4-step
+        # distill it wants ~24 steps at guidance 1.0 (sc-2220 / V1 model card).
+        "supportsEdit": True,
+        "supportsTxt2Img": True,
+        "steps": 24,
+        "guidanceScale": 1.0,
+        # The wikeeyang source repo; the install-time convert job pulls the bf16
+        # single-file from here. The runtime weights load from the assembled
+        # local dir (see MlxFlux2Adapter._local_model_dir), not this repo.
+        "repo": "wikeeyang/Flux2-Klein-9B-True-V2",
+        "adapter": "mlx_flux2",
+        # Borrowed VAE/text-encoder/tokenizer come from this base klein install.
+        "componentBaseRepo": "black-forest-labs/FLUX.2-klein-9B",
+    },
     "kolors": {
         "label": "Kolors",
         "family": "kolors",
@@ -3567,13 +3588,28 @@ class MlxFlux2Adapter:
     """
 
     id = "mlx_flux2"
-    _supported_models = {"flux2_klein_9b", "flux2_klein_9b_kv"}
+    _supported_models = {"flux2_klein_9b", "flux2_klein_9b_kv", "flux2_klein_9b_true_v2"}
+    # Models whose weights load from a locally-assembled diffusers dir (produced
+    # by the install-time conversion job, sc-2235) rather than an mflux built-in
+    # repo. The adapter resolves the dir and threads it to the runner as modelPath.
+    _local_dir_models = {"flux2_klein_9b_true_v2"}
     # Models whose edit path uses the KV cache (engages only with a reference);
     # they still run plain txt2img without one (sc-2173).
     _kv_cache_models = {"flux2_klein_9b_kv"}
 
     def __init__(self) -> None:
         self._scratch_dir: Path | None = None
+
+    @classmethod
+    def _local_model_dir(cls, model_id: str, settings: WorkerSettings) -> str | None:
+        """Local assembled diffusers dir for converted fine-tunes (sc-2235), or
+        None for built-in mflux repos. Convention mirrors the model_convert job's
+        output dir (``<data_dir>/models/mlx/<model_id>``). Returns None if not yet
+        converted so the runner surfaces a clear missing-weights error."""
+        if model_id not in cls._local_dir_models:
+            return None
+        candidate = Path(settings.data_dir) / "models" / "mlx" / model_id
+        return str(candidate) if (candidate / "transformer").is_dir() else None
 
     def discard_temp_outputs(self, job_id: str | None = None) -> None:
         work_dir = self._scratch_dir
@@ -3703,6 +3739,9 @@ class MlxFlux2Adapter:
                         for lora in lora_specs
                     ],
                     "imagePaths": reference_paths or None,
+                    # Local diffusers dir for converted fine-tunes (sc-2235);
+                    # None for built-in mflux repos (loaded from ModelConfig).
+                    "modelPath": self._local_model_dir(request.model, settings),
                 },
                 progress=progress,
                 cancel_requested=cancel_requested,

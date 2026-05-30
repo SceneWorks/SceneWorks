@@ -204,6 +204,34 @@ pub(crate) async fn create_model_convert_job(
         Value::String(output_dir.display().to_string()),
     );
     job_payload.insert("dtype".to_owned(), Value::String("bfloat16".to_owned()));
+    // Optional converter discriminator + inputs (sc-2235). Default (absent) is the
+    // mlx-video Wan converter. A FLUX.2-klein community fine-tune declares
+    // `mlx.converter` + the single-file source + the base repo whose
+    // VAE/text-encoder/tokenizer are borrowed during assembly.
+    if let Some(converter) = mlx
+        .get("converter")
+        .and_then(Value::as_str)
+        .filter(|value| !value.trim().is_empty())
+    {
+        job_payload.insert("converter".to_owned(), Value::String(converter.to_owned()));
+    }
+    if let Some(source_file) = mlx
+        .get("convertSourceFile")
+        .and_then(Value::as_str)
+        .filter(|value| !value.trim().is_empty())
+    {
+        job_payload.insert(
+            "sourceFile".to_owned(),
+            Value::String(source_file.to_owned()),
+        );
+    }
+    if let Some(base_repo) = mlx
+        .get("convertBaseRepo")
+        .and_then(Value::as_str)
+        .filter(|value| !value.trim().is_empty())
+    {
+        job_payload.insert("baseRepo".to_owned(), Value::String(base_repo.to_owned()));
+    }
     if quantize_only {
         job_payload.insert("quantizeOnly".to_owned(), Value::Bool(true));
     }
@@ -1071,7 +1099,12 @@ pub(crate) fn mlx_catalog_status(
     {
         let model_id = model.get("id").and_then(Value::as_str).unwrap_or_default();
         let converted_dir = data_dir.join("models").join("mlx").join(model_id);
-        if converted_dir.join("config.json").is_file() {
+        // mlx-video converters write a top-level config.json; the FLUX.2-klein
+        // diffusers converter (sc-2235) writes a diffusers model_index.json. Either
+        // marks a finished local MLX artifact.
+        if converted_dir.join("config.json").is_file()
+            || converted_dir.join("model_index.json").is_file()
+        {
             return Some(MlxCatalogStatus {
                 install_state: "installed",
                 conversion_state: "converted",
