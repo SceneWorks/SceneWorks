@@ -2438,6 +2438,24 @@ def test_should_route_sdxl_to_mlx_falls_back_for_lokr(monkeypatch):
     assert _should_route_sdxl_to_mlx({"model": model, "loras": [{"id": "a", "networkType": "lokr"}]}) is False
 
 
+def test_should_route_z_image_to_mlx_keeps_lokr_on_mlx(monkeypatch):
+    from scene_worker.image_adapters import _should_route_z_image_to_mlx
+
+    monkeypatch.delenv("SCENEWORKS_DISABLE_MLX_FLUX", raising=False)
+    monkeypatch.setattr("sys.platform", "darwin")
+    monkeypatch.setattr(MlxZImageAdapter, "_sidecar_available", lambda self: True)
+    model = next(iter(MlxZImageAdapter._supported_models))
+
+    # MLX-native LoKr (sc-2216): unlike the SDXL path above, a peft-LoKr Z-Image job
+    # STAYS on MLX — the mflux LoKrLoader applies it natively, so there's no torch
+    # fallback (Michael's preference: run LoKr on MLX, don't fall back).
+    assert _should_route_z_image_to_mlx({"model": model, "loras": [{"id": "a", "networkType": "lora"}]}) is True
+    assert _should_route_z_image_to_mlx({"model": model, "loras": [{"id": "a", "networkType": "lokr"}]}) is True
+    # Third-party LyCORIS (LoHa / kohya LoKr) the mflux loader can't reconstruct
+    # still falls back to torch, where sc-2193 applies it.
+    assert _should_route_z_image_to_mlx({"model": model, "loras": [{"id": "a", "networkType": "lycoris"}]}) is False
+
+
 def test_mlx_flux2_kv_allows_no_reference_txt2img(monkeypatch):
     # sc-2173: -kv is no longer reference-gated. Without a reference it falls
     # through to the txt2img path (the runner routes it to Flux2Klein) instead
@@ -3829,6 +3847,96 @@ def test_kolors_pose_set_loops_poses_with_shared_seed(tmp_path, monkeypatch):
     assert calls[0]["seed"] == calls[1]["seed"]  # shared seed across the set
     assert captured["raw_settings"].get("poseLibrary") is True
     assert captured["raw_settings"].get("controlNetPose") == "Kwai-Kolors/Kolors-ControlNet-Pose"
+
+
+def test_kolors_pose_set_applies_loras_once_before_loop(tmp_path, monkeypatch):
+    """sc-2251/sc-2252: the strict Kolors pose tier must apply request.loras exactly
+    once on the pose pipe BEFORE the per-pose loop (the same merge the T2I/img2img
+    path does), under its own "pose" cache slot — so the character-LoRA bootstrapping
+    loop works on pose generation. Guards the regression where _generate_pose_set
+    returned before the LoRA merge, silently ignoring request.loras (and LoKr)."""
+    from scene_worker import image_adapters as ia
+
+    monkeypatch.setattr(ia.KolorsDiffusersAdapter, "_load_pose_pipeline", lambda self, *a, **k: object())
+    monkeypatch.setattr(ia, "select_torch_device", lambda *a, **k: "cpu")
+    monkeypatch.setattr(ia, "gpu_memory_snapshot", lambda *a, **k: None)
+    monkeypatch.setattr(
+        "scene_worker.image_adapters.importlib.import_module",
+        lambda name: SimpleNamespace() if name == "torch" else importlib.import_module(name),
+    )
+
+    apply_calls: list[dict] = []
+
+    def fake_apply_loras(self, pipe, request, *, lora_key=None):
+        apply_calls.append({"loras": list(request.loras), "lora_key": lora_key})
+
+    monkeypatch.setattr(ia.KolorsDiffusersAdapter, "_apply_loras", fake_apply_loras)
+
+    def fake_run_pose(self, settings, pipe, request, seed, project_path, keypoints, cancel_requested=None):
+        from PIL import Image as _Image
+
+        assert apply_calls, "loras must be applied before the pose loop runs"
+        return _Image.new("RGB", (8, 8))
+
+    monkeypatch.setattr(ia.KolorsDiffusersAdapter, "_run_pose", fake_run_pose)
+
+    class _FakeWriter:
+        def write_incremental_outputs(self, *, image_count, image_at_index, **kwargs):
+            for index in range(image_count):
+                image_at_index(index)
+            return {"images": image_count}
+
+    monkeypatch.setattr(ia, "ImageAssetWriter", _FakeWriter)
+
+    kp = [[0.5, 0.1 + 0.04 * i] for i in range(18)]
+    loras = [{"id": "kelsie", "path": "/loras/kelsie.safetensors", "families": ["kolors"]}]
+    job = {"id": "job_kolors_pose_lora", "payload": {
+        "projectId": "p", "mode": "character_image", "model": "kolors", "prompt": "the character",
+        "referenceAssetId": "ref-1", "count": 1, "width": 64, "height": 64, "loras": loras,
+        "advanced": {"poses": [{"id": "sit_01", "keypoints": kp}, {"id": "stand_01", "keypoints": kp}]},
+    }}
+    KolorsDiffusersAdapter().generate(
+        settings=SimpleNamespace(gpu_id="cpu"), job=job, request=image_request_from_job(job),
+        project_path=tmp_path, progress=lambda *a, **k: None, cancel_requested=lambda: False,
+    )
+    # Applied exactly once (not once-per-pose), before the loop, under the dedicated
+    # "pose" cache slot so it never collides with the text/img2img pipe bookkeeping.
+    assert len(apply_calls) == 1
+    assert apply_calls[0]["loras"] == loras
+    assert apply_calls[0]["lora_key"] == "pose"
+
+
+def test_kolors_pose_path_accepts_lokr_via_injection(monkeypatch, tmp_path):
+    """sc-2252: the Kolors strict pose tier must APPLY LoKr (not just plain LoRA) on its
+    torch pose pipe. _apply_loras(lora_key="pose") routes lokr_* through inject_lokr_adapter
+    into the pose pipe's UNet — never load_lora_weights — and tracks the merge under the
+    dedicated "pose" cache slot, distinct from the text/img2img bookkeeping."""
+    lokr_file = tmp_path / "char.safetensors"
+    lokr_file.write_bytes(b"x")
+    monkeypatch.setattr("scene_worker.lora_adapters.adapter_network_type", lambda path: "lokr")
+    injected: list[str] = []
+    monkeypatch.setattr(
+        "scene_worker.lora_adapters.inject_lokr_adapter",
+        lambda pipe, spec, *, adapter_id: injected.append(spec.adapter_name),
+    )
+    pipe = FakeLokrPipe()
+    adapter = KolorsDiffusersAdapter()
+    request = SimpleNamespace(
+        mode="character_image",
+        model="kolors",
+        loras=[{"id": "char", "installedPath": str(lokr_file), "weight": 0.7, "families": ["kolors"]}],
+    )
+
+    adapter._apply_loras(pipe, request, lora_key="pose")
+
+    # LoKr injects into the pose pipe's UNet denoiser; it never loads via load_lora_weights.
+    assert pipe.loaded == []
+    assert injected, "LoKr must inject into the pose pipe denoiser"
+    # Tracked under the dedicated pose slot — not the text/img2img slots.
+    pose_state = adapter._loaded_lora_states["pose"]
+    assert injected == list(pose_state.adapter_names)
+    assert "text" not in adapter._loaded_lora_states
+    assert "img2img" not in adapter._loaded_lora_states
 
 
 def test_create_image_adapter_routes_sdxl(monkeypatch):

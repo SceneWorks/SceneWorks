@@ -315,9 +315,13 @@ def classify_adapter_network(path: str | Path) -> str:
 
 
 def reject_lokr_loras(specs: list[LoraSpec], adapter_id: str) -> None:
-    """Guard for backends that cannot apply LoKr/LyCORIS (e.g. MLX, whose merge
-    math is LoRA-only). Raises a clear, short error rather than silently
-    mis-applying or letting diffusers dump thousands of unconsumed keys."""
+    """Transitional guard for backends that do not YET apply LoKr/LyCORIS adapters
+    (their MLX/mflux merge is unbuilt — not impossible; epic 2193 tracks it per
+    family, sc-2215/2216/2314, and Z-Image already applies peft-trained LoKr
+    natively via the mflux LoKrLoader). Raises a clear, short error rather than
+    silently mis-applying or letting diffusers dump thousands of unconsumed keys.
+    Backends with a partial loader (e.g. Z-Image: peft LoKr yes, third-party
+    LyCORIS no) use the narrower ``reject_lycoris_loras`` instead."""
 
     for spec in specs:
         kind = classify_adapter_network(spec.path)
@@ -327,6 +331,24 @@ def reject_lokr_loras(specs: list[LoraSpec], adapter_id: str) -> None:
                 f"{adapter_id} cannot apply the {label} adapter '{spec.id}'. "
                 f"{label} adapters require the torch generation backend; this "
                 "backend does not support them (epic 2193)."
+            )
+
+
+def reject_lycoris_loras(specs: list[LoraSpec], adapter_id: str) -> None:
+    """Reject only third-party LyCORIS (LoHa / kohya-format LoKr without our
+    ``networkType=lokr`` stamp), allowing SceneWorks peft-trained LoKr through.
+
+    For the MLX Z-Image backend (sc-2216) the mflux LoKrLoader applies peft LoKr
+    natively but cannot reconstruct arbitrary LyCORIS, so those route to torch (the
+    dispatcher's job) — this is the backstop for a forced MLX override, giving a
+    clear error instead of a silent no-op."""
+
+    for spec in specs:
+        if classify_adapter_network(spec.path) == "lycoris":
+            raise RuntimeError(
+                f"{adapter_id} cannot apply the LyCORIS (LoHa/LoKr) adapter '{spec.id}'. "
+                "Third-party LyCORIS adapters require the torch generation backend; the "
+                "MLX backend applies only SceneWorks-trained LoKr (epic 2193)."
             )
 
 
