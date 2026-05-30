@@ -416,7 +416,15 @@ export function App() {
   const [studioLaunch, setStudioLaunch] = useState(null);
   const [error, setError] = useState("");
   const [theme, setTheme] = useState(readStoredTheme);
-  const desktopThemeHydrated = useRef(false);
+  // Apply a theme and, on the desktop shell, persist it durably right away. The
+  // webview's localStorage is keyed to the API's per-launch random port, so it
+  // can't carry the choice across restarts; settings.json can.
+  const changeTheme = (next) => {
+    setTheme(next);
+    if (isDesktopShell) {
+      tauriInvoke("save_app_theme", { theme: next }).catch(() => {});
+    }
+  };
   const activeProjectRef = useRef(null);
   const activeViewRef = useRef(activeView);
   const localGenerationJobIdsRef = useRef(localGenerationJobIds);
@@ -683,9 +691,9 @@ export function App() {
     }
   }, [theme]);
 
-  // Desktop: localStorage is keyed to the API's per-launch random port, so it
-  // can't carry the theme across restarts (see isDesktopShell note). Seed from
-  // the durable setting on launch, then persist every change back to it.
+  // Desktop: seed the theme from the durable setting on launch (localStorage
+  // can't carry it across restarts — see changeTheme). Each toggle persists
+  // itself, so there's no separate save effect to race with this read.
   useEffect(() => {
     if (!isDesktopShell) {
       return;
@@ -698,23 +706,11 @@ export function App() {
           setTheme(stored);
         }
       })
-      .catch(() => {})
-      .finally(() => {
-        desktopThemeHydrated.current = true;
-      });
+      .catch(() => {});
     return () => {
       cancelled = true;
     };
   }, []);
-
-  useEffect(() => {
-    // Wait until the stored theme has loaded so the initial render doesn't
-    // overwrite it with the default before we've read it back.
-    if (!isDesktopShell || !desktopThemeHydrated.current) {
-      return;
-    }
-    tauriInvoke("save_app_theme", { theme }).catch(() => {});
-  }, [theme]);
 
   useEffect(() => {
     apiFetch("/api/v1/health", "")
@@ -1571,7 +1567,7 @@ export function App() {
           </button>
           <button
             className="icon-btn"
-            onClick={() => setTheme(theme === "light" ? "dark" : "light")}
+            onClick={() => changeTheme(theme === "light" ? "dark" : "light")}
             title={theme === "light" ? "Switch to dark mode" : "Switch to light mode"}
             type="button"
           >
