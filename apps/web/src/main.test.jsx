@@ -2761,15 +2761,97 @@ describe("SceneWorks app shell", () => {
     expect(container.querySelectorAll(".review-grid .review-card.trashed").length).toBe(0);
 
     // Switch to the Trashcan view and the discarded image becomes reachable.
-    const trashButton = [...container.querySelectorAll("button")].find((button) =>
+    // Scope to the Sample-outputs panel, since CharacterAssets also has a toggle.
+    const testPanel = container.querySelector(".test-character-panel");
+    const trashButton = [...testPanel.querySelectorAll("button")].find((button) =>
       button.textContent.includes("Trashcan (1)"),
     );
     expect(trashButton).toBeTruthy();
     await act(async () => {
       trashButton.click();
     });
-    expect(container.querySelectorAll(".review-grid .review-card.trashed").length).toBe(1);
-    expect([...container.querySelectorAll(".review-grid button")].some((button) => button.textContent === "Purge")).toBe(true);
+    expect(testPanel.querySelectorAll(".review-grid .review-card.trashed").length).toBe(1);
+    expect([...testPanel.querySelectorAll(".review-grid button")].some((button) => button.textContent === "Purge")).toBe(true);
+  });
+
+  it("hides discarded images from the Character assets grid and exposes Trashcan restore/purge", async () => {
+    const purgeAsset = vi.fn();
+    const updateAssetStatus = vi.fn();
+    const assets = [
+      { id: "img-active", type: "image", displayName: "keep", recipe: { normalizedSettings: { characterId: "char-1" } } },
+      {
+        id: "img-trashed",
+        type: "image",
+        displayName: "discarded",
+        status: { trashed: true },
+        recipe: { normalizedSettings: { characterId: "char-1" } },
+      },
+    ];
+    root = createRoot(container);
+    await act(async () => {
+      root.render(
+        withAppContext(
+          {
+            activeProject: { id: "project-1", name: "Noir" },
+            addCharacterReference: () => {},
+            archiveCharacter: () => {},
+            assets,
+            attachCharacterLora: () => {},
+            characters: [{ id: "char-1", name: "Mira", type: "person", references: [], approvedReferences: [], looks: [], loras: [] }],
+            createCharacter: () => {},
+            createCharacterLook: () => {},
+            createCharacterTestJob: () => {},
+            deleteAsset: () => {},
+            deleteCharacterLook: () => {},
+            detachCharacterLora: () => {},
+            imageModels: [],
+            latestImageAssets: assets,
+            loras: [],
+            setPreviewAsset: () => {},
+            sendCharacterToImage: () => {},
+            sendCharacterToVideo: () => {},
+            purgeAsset,
+            removeCharacterReference: () => {},
+            updateAssetStatus,
+            updateCharacter: () => {},
+            updateCharacterLook: () => {},
+            updateCharacterLora: () => {},
+            updateCharacterReference: () => {},
+          },
+          <CharacterStudio />,
+        ),
+      );
+    });
+
+    // The Character assets section renders thumbnails; the discarded one is hidden.
+    const findSection = () =>
+      [...container.querySelectorAll(".character-section")].find((section) =>
+        section.querySelector(".eyebrow")?.textContent === "Character assets",
+      );
+    const section = findSection();
+    expect(section).toBeTruthy();
+    expect(section.querySelectorAll(".character-asset-thumb").length).toBe(1);
+    // Heading count reflects active images only.
+    expect(section.querySelector("h2").textContent).toContain("(1)");
+
+    // Switch to the Trashcan and the discarded image surfaces with restore/purge.
+    const trashButton = [...section.querySelectorAll("button")].find((button) =>
+      button.textContent.includes("Trashcan (1)"),
+    );
+    expect(trashButton).toBeTruthy();
+    await act(async () => {
+      trashButton.click();
+    });
+    const trashSection = findSection();
+    expect(trashSection.querySelectorAll(".character-asset-thumb").length).toBe(1);
+    const restore = [...trashSection.querySelectorAll("button")].find((button) => button.textContent === "Restore");
+    const purge = [...trashSection.querySelectorAll("button")].find((button) => button.textContent === "Purge");
+    expect(restore).toBeTruthy();
+    expect(purge).toBeTruthy();
+    await act(async () => {
+      purge.click();
+    });
+    expect(purgeAsset).toHaveBeenCalledWith(expect.objectContaining({ id: "img-trashed" }));
   });
 
   it("launches reference-based generation from an approved character reference", async () => {
