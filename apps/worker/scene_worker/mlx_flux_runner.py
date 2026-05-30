@@ -154,6 +154,7 @@ def _run_z_image_control(
     width: int,
     steps: int,
     guidance: float,
+    quantize: int | None,
     loras: list,
     control_image_paths: list[str],
     out_dir: Path,
@@ -163,10 +164,10 @@ def _run_z_image_control(
 
     Loads the ported ``ZImageControl`` (base Z-Image-Turbo + Fun-Controlnet-Union)
     and renders one image per iteration, each conditioned on its rendered skeleton.
-    Runs bf16 (quantize forced None): the control branch is added to the transformer
-    after base quantization, so a quantized control branch would not accept the raw
-    bf16 Fun-Controlnet weights — Q8 control is a follow-up. bf16 peak fits the M5
-    Max envelope (validated sc-2257).
+    Honours ``quantize`` (None / 8 / …): ZImageControlInitializer applies the base +
+    control weights at full precision before quantizing the whole transformer, so
+    the control branch quantizes from its real weights (Q8 ≈ halves transformer
+    memory vs bf16). Both validated on M5 Max (sc-2257).
     """
     if model_id != "z_image_turbo":
         raise RuntimeError(
@@ -204,11 +205,11 @@ def _run_z_image_control(
 
     _log(
         f"loading ZImageControl model={model_id} controlScale={control_scale} "
-        f"loras={len(lora_paths)} steps={steps} (bf16)"
+        f"loras={len(lora_paths)} steps={steps} quantize={quantize}"
     )
     model = ZImageControl(
         control_weights_path=cn_path,
-        quantize=None,
+        quantize=quantize,
         lora_paths=lora_paths or None,
         lora_scales=lora_scales or None,
         model_config=ModelConfig.z_image_turbo(),
@@ -305,6 +306,7 @@ def main() -> int:
             width=width,
             steps=steps,
             guidance=guidance,
+            quantize=quantize,
             loras=loras,
             control_image_paths=control_image_paths,
             out_dir=out_dir,
