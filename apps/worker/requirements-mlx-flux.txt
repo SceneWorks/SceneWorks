@@ -25,12 +25,15 @@
 # mflux pulls its own torch, transformers, huggingface_hub, mlx, etc. — pin
 # only mflux here and let it resolve the rest.
 #
-# Pinned at michaeltrefry/mflux@claude/sc2257-z-image-controlnet, which branches
-# from claude/flux2-kv-cache (sc-2163, upstream PR filipstrand/mflux#426 — keeps
-# the FLUX.2-klein-9b-kv KV-cache optimisation MlxFlux2Adapter (sc-2164) relies
-# on, ~2.4x faster multi-ref edit) and adds the VACE-style Z-Image
-# Fun-Controlnet-Union pose ControlNet port (sc-2257): ZImageControl /
-# ZImageControlTransformer, used by mlx_flux_runner's controlImagePaths path for
-# the strict Z-Image pose tier. Flip back to a PyPI mflux>=0.18 pin once both the
-# KV-cache PR and a Z-Image ControlNet land upstream.
-mflux @ git+https://github.com/michaeltrefry/mflux.git@claude/sc2257-z-image-controlnet
+# Pinned at michaeltrefry/mflux@claude/mlx-lokr-inference, which branches from
+# claude/sc2257-z-image-controlnet (itself off claude/flux2-kv-cache, sc-2163,
+# upstream PR filipstrand/mflux#426 — keeps the FLUX.2-klein-9b-kv KV-cache
+# optimisation MlxFlux2Adapter (sc-2164) relies on, ~2.4x faster multi-ref edit;
+# plus the VACE-style Z-Image Fun-Controlnet-Union pose ControlNet port (sc-2257):
+# ZImageControl / ZImageControlTransformer, used by mlx_flux_runner's
+# controlImagePaths path for the strict Z-Image pose tier). The mlx-lokr-inference
+# tip adds MLX-native LoKr inference (epic 2193, sc-2216): LoKrLinear +
+# reconstruct_lokr_delta + LoKrLoader, so LoKr adapters apply natively on the
+# mflux Z-Image stack (no torch fallback). Flip back to a PyPI mflux>=0.18 pin
+# once the KV-cache PR, the Z-Image ControlNet, and LoKr land upstream.
+mflux @ git+https://github.com/michaeltrefry/mflux.git@claude/mlx-lokr-inference

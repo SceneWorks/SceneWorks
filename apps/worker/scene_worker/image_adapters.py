@@ -3135,10 +3135,11 @@ class MlxZImageAdapter:
             request.loras, model_family=model_target.get("family"), adapter_id=self.id, model_id=request.model
         )
         lora_specs = normalize_lora_specs(request.loras)
-        # The MLX backend doesn't YET apply LoKr (the Kronecker merge is unbuilt,
-        # not impossible — epic 2193: sc-2215/2216/2314); reject clearly for now
-        # rather than silently ignoring the adapter.
-        reject_lokr_loras(lora_specs, self.id)
+        # MLX-native LoKr (sc-2216): the mflux fork's LoKrLoader reconstructs the
+        # Kronecker delta and applies it on the Z-Image transformer, so LoKr runs
+        # natively here — no torch fallback (Michael, 2026-05-30). LoRA and LoKr
+        # specs forward to the sidecar identically; mflux routes each file by its
+        # networkType metadata.
 
         if not self._sidecar_available():
             raise RuntimeError(
@@ -7047,9 +7048,10 @@ def _should_route_z_image_to_mlx(payload: dict[str, Any]) -> bool:
         return False
     if payload.get("referenceAssetId"):
         return False
-    # LoKr is torch-only (epic 2193); fall back to the torch path for a LoKr job.
-    if _request_has_lokr_lora(payload):
-        return False
+    # LoKr runs natively on MLX for Z-Image (sc-2216: mflux LoKrLoader), so a LoKr
+    # job STAYS on the MLX path rather than falling back to torch (Michael's
+    # preference). Other mflux-only families that lack the loader still gate on
+    # _request_has_lokr_lora in their own predicate.
     return MlxZImageAdapter()._sidecar_available()
 
 
