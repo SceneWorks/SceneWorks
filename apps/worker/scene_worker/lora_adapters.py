@@ -263,8 +263,10 @@ def adapter_network_type(path: str | Path) -> str:
 
 
 def reject_lokr_loras(specs: list[LoraSpec], adapter_id: str) -> None:
-    """Guard for backends that cannot apply LoKr (e.g. MLX, whose merge math is
-    LoRA-only). Raises a clear error rather than silently mis-applying."""
+    """Transitional guard for backends that do not YET apply LoKr (the MLX/mflux
+    Kronecker merge is unbuilt, not impossible — epic 2193 tracks it per family:
+    sc-2215/2216/2314). Raises a clear error rather than silently mis-applying,
+    until the MLX loader lands."""
 
     for spec in specs:
         if adapter_network_type(spec.path) == "lokr":

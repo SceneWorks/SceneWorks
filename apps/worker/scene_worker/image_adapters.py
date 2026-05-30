@@ -2465,8 +2465,9 @@ class MlxFluxAdapter:
             request.loras, model_family=model_target.get("family"), adapter_id=self.id, model_id=request.model
         )
         lora_specs = normalize_lora_specs(request.loras)
-        # The MLX backend can't apply LoKr (its merge math is LoRA-only); reject
-        # clearly rather than silently ignoring the adapter (epic 2193).
+        # The MLX backend doesn't YET apply LoKr (the Kronecker merge is unbuilt,
+        # not impossible — epic 2193: sc-2215/2216/2314); reject clearly for now
+        # rather than silently ignoring the adapter.
         reject_lokr_loras(lora_specs, self.id)
 
         if not self._sidecar_available():
@@ -2823,8 +2824,9 @@ class MlxQwenAdapter:
             request.loras, model_family=model_target.get("family"), adapter_id=self.id, model_id=request.model
         )
         lora_specs = normalize_lora_specs(request.loras)
-        # The MLX backend can't apply LoKr (its merge math is LoRA-only); reject
-        # clearly rather than silently ignoring the adapter (epic 2193).
+        # The MLX backend doesn't YET apply LoKr (the Kronecker merge is unbuilt,
+        # not impossible — epic 2193: sc-2215/2216/2314); reject clearly for now
+        # rather than silently ignoring the adapter.
         reject_lokr_loras(lora_specs, self.id)
 
         if not self._sidecar_available():
@@ -3133,8 +3135,9 @@ class MlxZImageAdapter:
             request.loras, model_family=model_target.get("family"), adapter_id=self.id, model_id=request.model
         )
         lora_specs = normalize_lora_specs(request.loras)
-        # The MLX backend can't apply LoKr (its merge math is LoRA-only); reject
-        # clearly rather than silently ignoring the adapter (epic 2193).
+        # The MLX backend doesn't YET apply LoKr (the Kronecker merge is unbuilt,
+        # not impossible — epic 2193: sc-2215/2216/2314); reject clearly for now
+        # rather than silently ignoring the adapter.
         reject_lokr_loras(lora_specs, self.id)
 
         if not self._sidecar_available():
@@ -3517,8 +3520,9 @@ class MlxSdxlAdapter:
             request.loras, model_family=model_target.get("family"), adapter_id=self.id, model_id=request.model
         )
         lora_specs = normalize_lora_specs(request.loras)
-        # The MLX backend can't apply LoKr (its merge math is LoRA-only); the SDXL
-        # family can produce LoKr adapters, so reject them clearly here (epic 2193).
+        # The MLX backend doesn't YET apply LoKr (Kronecker merge unbuilt, not
+        # impossible — epic 2193: sc-2215); the SDXL family can produce LoKr
+        # adapters, so reject them clearly here for now.
         reject_lokr_loras(lora_specs, self.id)
 
         total = request.count
@@ -3831,8 +3835,9 @@ class MlxFlux2Adapter:
             request.loras, model_family=model_target.get("family"), adapter_id=self.id, model_id=request.model
         )
         lora_specs = normalize_lora_specs(request.loras)
-        # The MLX backend can't apply LoKr (its merge math is LoRA-only); reject
-        # clearly rather than silently ignoring the adapter (epic 2193).
+        # The MLX backend doesn't YET apply LoKr (the Kronecker merge is unbuilt,
+        # not impossible — epic 2193: sc-2215/2216/2314); reject clearly for now
+        # rather than silently ignoring the adapter.
         reject_lokr_loras(lora_specs, self.id)
 
         if not self._sidecar_available():
@@ -6954,10 +6959,11 @@ def _should_route_flux_to_mlx(payload: dict[str, Any]) -> bool:
 
 
 def _request_has_lokr_lora(payload: dict[str, Any]) -> bool:
-    """True if any LoRA in the request is a LoKr adapter. LoKr applies only on the
-    torch backends (the MLX merge math is LoRA-only), so the MLX routing gates
-    fall back to torch when this is true (epic 2193) — the same graceful fallback
-    a reference image triggers. Prefers the ``networkType`` recorded on the LoRA
+    """True if any LoRA in the request is a LoKr adapter. LoKr applies on the torch
+    backends today; the MLX Kronecker merge is unbuilt (epic 2193, transitional —
+    sc-2215/2216/2314), so the MLX routing gates fall back to torch when this is
+    true — the same graceful fallback a reference image triggers. Prefers the
+    ``networkType`` recorded on the LoRA
     (zero I/O) and falls back to reading the adapter's safetensors header."""
 
     for lora in payload.get("loras") or []:
