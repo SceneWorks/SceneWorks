@@ -756,7 +756,17 @@ def test_qwen_character_image_angle_set_applies_loras_once_then_loops_angles(tmp
         def convert(self, _mode):
             return self
 
+    # The worker unit suite runs without torch installed; generate() does
+    # `importlib.import_module("torch")`, so stand in a fake. With gpu_id="cpu",
+    # select_torch_device returns early and never touches it.
+    class FakeTorch:
+        pass
+
     adapter = QwenImageAdapter()
+    monkeypatch.setattr(
+        "scene_worker.image_adapters.importlib.import_module",
+        lambda name: FakeTorch if name == "torch" else importlib.import_module(name),
+    )
     monkeypatch.setattr("scene_worker.image_adapters.gpu_memory_snapshot", lambda *a, **k: None)
     monkeypatch.setattr(adapter, "_load_pipeline", lambda *a, **k: object())
 
