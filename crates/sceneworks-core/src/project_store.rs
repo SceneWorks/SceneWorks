@@ -41,6 +41,7 @@ pub const PROJECT_FOLDERS: &[&str] = &[
     "assets/frames",
     "assets/renders",
     "assets/documents",
+    "assets/poses",
     "characters",
     "generation-sets",
     "loras",
@@ -52,6 +53,14 @@ pub const PROJECT_FOLDERS: &[&str] = &[
     "trash",
     "cache",
 ];
+
+/// Reserved project that holds the GLOBAL pose library (epic 2282). User-created
+/// poses live here as ordinary `type:"pose"` assets so the existing asset store +
+/// Trashcan work unchanged; it is hidden from `list_projects` so it never appears in
+/// the project switcher. Built-in poses stay bundled in the web app (read-only).
+pub const GLOBAL_POSES_PROJECT_ID: &str = "project_global_poses";
+pub const GLOBAL_POSES_PROJECT_NAME: &str = "Pose Library";
+
 pub type ProjectStoreResult<T> = Result<T, ProjectStoreError>;
 
 #[derive(Debug)]
@@ -234,6 +243,11 @@ impl ProjectStore {
         self.ensure_data_dirs()?;
         let mut projects = Vec::new();
         for item in self.load_registry()? {
+            // The reserved global pose library is addressable by id but hidden from
+            // the project switcher (epic 2282).
+            if item.id.as_deref() == Some(GLOBAL_POSES_PROJECT_ID) {
+                continue;
+            }
             let Some(path) = item.path else {
                 continue;
             };
@@ -270,22 +284,34 @@ impl ProjectStore {
                 .join(format!("{slug}-{suffix}.sceneworks"));
         }
 
-        fs::create_dir_all(&project_path)?;
+        self.provision_project_locked(&project_id, name, &project_path)
+    }
+
+    /// Provision a project directory (folders + project file + db + registry entry)
+    /// for a known id/path. Caller must hold `self.lock`. Shared by `create_project`
+    /// (random id) and `ensure_global_poses_project` (fixed id).
+    fn provision_project_locked(
+        &self,
+        project_id: &str,
+        name: &str,
+        project_path: &Path,
+    ) -> ProjectStoreResult<ProjectSummary> {
+        fs::create_dir_all(project_path)?;
         for folder in PROJECT_FOLDERS {
             fs::create_dir_all(project_path.join(folder))?;
         }
-        write_project_file(&self.app_version, &project_path, &project_id, name)?;
-        apply_project_migrations(&connect_project_db(&project_path)?)?;
+        write_project_file(&self.app_version, project_path, project_id, name)?;
+        apply_project_migrations(&connect_project_db(project_path)?)?;
 
         let mut registry = self
             .load_registry()?
             .into_iter()
-            .filter(|item| item.id.as_deref() != Some(project_id.as_str()))
+            .filter(|item| item.id.as_deref() != Some(project_id))
             .collect::<Vec<_>>();
         registry.insert(
             0,
             RegistryItem {
-                id: Some(project_id),
+                id: Some(project_id.to_owned()),
                 name: Some(name.to_owned()),
                 path: Some(project_path.display().to_string()),
                 extra: Map::new(),
@@ -293,7 +319,23 @@ impl ProjectStore {
         );
         self.save_registry(&registry)?;
 
-        read_project_summary(&project_path)
+        read_project_summary(project_path)
+    }
+
+    /// Ensure the reserved global pose library project exists (idempotent), returning
+    /// its summary. Created lazily on first pose write/list (epic 2282, sc-2284).
+    pub fn ensure_global_poses_project(&self) -> ProjectStoreResult<ProjectSummary> {
+        let _guard = self.lock.lock();
+        self.ensure_data_dirs()?;
+        let project_path = self.projects_dir().join("global-poses.sceneworks");
+        if project_path.exists() {
+            return read_project_summary(&project_path);
+        }
+        self.provision_project_locked(
+            GLOBAL_POSES_PROJECT_ID,
+            GLOBAL_POSES_PROJECT_NAME,
+            &project_path,
+        )
     }
 
     pub fn get_project(&self, project_id: &str) -> ProjectStoreResult<ProjectSummary> {
@@ -2771,7 +2813,7 @@ mod tests {
     use super::{
         build_generated_asset_sidecar, guess_mime_from_filename, is_safe_relative_path,
         normalize_asset_tags, AssetScope, CharacterCreateInput, CharacterLookInput, ProjectStore,
-        PROJECT_FOLDERS,
+        GLOBAL_POSES_PROJECT_ID, PROJECT_FOLDERS,
     };
     use serde_json::{json, Value};
     use std::sync::Arc;
@@ -3047,6 +3089,41 @@ mod tests {
         assert!(std::path::Path::new(&project.path)
             .join("project.db")
             .exists());
+    }
+
+    #[test]
+    fn ensure_global_poses_project_is_idempotent_and_hidden() {
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        let store = ProjectStore::new(temp_dir.path().join("data"), "test-version");
+
+        store
+            .create_project("Visible Project")
+            .expect("project creates");
+
+        let poses = store
+            .ensure_global_poses_project()
+            .expect("poses project ensures");
+        assert_eq!(poses.id, GLOBAL_POSES_PROJECT_ID);
+        assert!(std::path::Path::new(&poses.path)
+            .join("assets/poses")
+            .exists());
+
+        // Idempotent: a second ensure returns the same project path, no duplicate.
+        let again = store
+            .ensure_global_poses_project()
+            .expect("ensure idempotent");
+        assert_eq!(again.path, poses.path);
+
+        // Hidden from the project switcher, but addressable directly by id.
+        let listed = store.list_projects().expect("list");
+        assert!(listed.iter().all(|p| p.id != GLOBAL_POSES_PROJECT_ID));
+        assert_eq!(
+            store
+                .get_project(GLOBAL_POSES_PROJECT_ID)
+                .expect("get reserved")
+                .id,
+            GLOBAL_POSES_PROJECT_ID
+        );
     }
 
     #[test]

@@ -9,7 +9,16 @@ from .utils import read_json
 
 
 ASSET_SIDECAR_PATTERN = "*.sceneworks.json"
-ASSET_FOLDERS = ("assets/images", "assets/videos", "assets/uploads", "assets/frames", "assets/renders", "trash")
+ASSET_FOLDERS = (
+    "assets/images",
+    "assets/videos",
+    "assets/uploads",
+    "assets/frames",
+    "assets/renders",
+    "assets/documents",
+    "assets/poses",
+    "trash",
+)
 
 
 def apply_project_migrations(connection: sqlite3.Connection) -> None:

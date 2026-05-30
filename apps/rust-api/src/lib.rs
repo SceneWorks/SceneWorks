@@ -424,6 +424,11 @@ pub fn create_app(settings: Settings) -> Result<Router, JobsStoreError> {
         settings.data_dir.clone(),
         settings.app_version.clone(),
     ));
+    // Reserved global pose library (epic 2282): created up front so its assets
+    // endpoint returns [] (not 404) before any pose is saved. Best-effort.
+    if let Err(error) = project_store.ensure_global_poses_project() {
+        eprintln!("SceneWorks API: could not ensure global pose library project: {error}");
+    }
     let state = AppState {
         settings,
         jobs_store,
