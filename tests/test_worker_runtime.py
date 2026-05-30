@@ -2703,11 +2703,13 @@ def test_mlx_z_image_pose_set_builds_control_skeleton_specs(tmp_path, monkeypatc
     assert spec["imageStrength"] is None
 
 
-def test_mlx_z_image_pose_set_with_reference_sends_identity_init(tmp_path, monkeypatch):
-    """sc-2328: a strict pose job that ALSO carries a character reference resolves the
-    reference to a local path and sends it as a single shared img2img-init (imagePath)
-    + imageStrength so the skeleton drives the pose while the reference seeds identity,
-    in one pass. The per-pose skeleton control is unchanged from sc-2257."""
+def test_mlx_z_image_pose_set_reference_identity_init_is_opt_in(tmp_path, monkeypatch):
+    """sc-2328: the reference img2img-init identity is OPT-IN, off by default. A strict
+    pose job carrying a reference but NO advanced.referenceStrength stays pose-only
+    (imagePath None) — the validated sc-2257 behaviour, because the init disrupts the
+    pose lock. Only when referenceStrength > 0 is explicitly set does the adapter
+    resolve the reference into a single shared img2img-init (imagePath + imageStrength).
+    The per-pose skeleton control is unchanged either way."""
     import numpy as _np
     from scene_worker import image_adapters as ia
 
@@ -2735,34 +2737,44 @@ def test_mlx_z_image_pose_set_with_reference_sends_identity_init(tmp_path, monke
     )
 
     kp = [[0.5, 0.1 + 0.04 * i] for i in range(18)]
-    job = {
-        "id": "job_z_image_pose_ref",
-        "payload": {
-            "projectId": "p",
-            "mode": "character_image",
-            "model": "z_image_turbo",
-            "prompt": "the character",
-            "count": 1,
-            "width": 32,
-            "height": 32,
-            "referenceAssetId": "asset_kelsie",
-            "advanced": {"poses": [{"id": "sit_01", "keypoints": kp}, {"id": "stand_01", "keypoints": kp}]},
-        },
-    }
-    adapter.generate(
-        settings=SimpleNamespace(gpu_id="cpu"),
-        job=job,
-        request=image_request_from_job(job),
-        project_path=tmp_path,
-        progress=lambda *a, **k: None,
-        cancel_requested=lambda: False,
-    )
-    spec = captured["spec"]
-    # Skeleton control still per-pose (identity is constant, only the pose changes).
+
+    def run(advanced):
+        captured.clear()
+        job = {
+            "id": "job_z_image_pose_ref",
+            "payload": {
+                "projectId": "p",
+                "mode": "character_image",
+                "model": "z_image_turbo",
+                "prompt": "the character",
+                "count": 1,
+                "width": 32,
+                "height": 32,
+                "referenceAssetId": "asset_kelsie",
+                "advanced": {"poses": [{"id": "sit_01", "keypoints": kp}, {"id": "stand_01", "keypoints": kp}], **advanced},
+            },
+        }
+        adapter.generate(
+            settings=SimpleNamespace(gpu_id="cpu"),
+            job=job,
+            request=image_request_from_job(job),
+            project_path=tmp_path,
+            progress=lambda *a, **k: None,
+            cancel_requested=lambda: False,
+        )
+        return captured["spec"]
+
+    # Default (no referenceStrength) → pose-only despite the reference being present.
+    spec = run({})
+    assert len(spec["controlImagePaths"]) == 2  # skeleton control still per-pose
+    assert spec["imagePath"] is None
+    assert spec["imageStrength"] is None
+
+    # Explicit opt-in → reference resolved as a single shared init at the chosen strength.
+    spec = run({"referenceStrength": 0.6})
     assert len(spec["controlImagePaths"]) == 2
-    # Single shared reference init across the whole set + default strength.
     assert spec["imagePath"] == str(ref_path)
-    assert spec["imageStrength"] == 0.5  # _reference_strength default (sc-2328)
+    assert spec["imageStrength"] == 0.6
 
 
 def test_mlx_z_image_reference_strength_default_override_and_clamp():

@@ -3118,11 +3118,13 @@ class MlxZImageAdapter:
         # Each pose renders to an OpenPose skeleton that conditions the ported
         # Z-Image Fun-Controlnet-Union branch (true pose lock, not best-effort).
         #
-        # Identity (sc-2328): when a pose request also carries a character reference,
-        # we feed it as the img2img INIT image so the skeleton drives the pose WHILE
-        # the reference seeds identity, in one pass. Z-Image has no IP-Adapter, so the
-        # img2img init is the only identity mechanism; without it identity comes from
-        # the prompt alone (the original pose-only sc-2257 behaviour). Resolved below.
+        # Identity is POSE-ONLY by default (identity from the prompt / a character
+        # LoRA — epic 2221). The sc-2328 reference img2img-init experiment is OPT-IN
+        # and off by default: the Fun-Controlnet-Union branch is trained to denoise
+        # the pose FROM NOISE, so seeding from a reference init fights the pose lock —
+        # on few-step Turbo it washes out pose adherence and bleeds the reference and
+        # skeleton together (validated as a mess, 2026-05-30). It only engages when the
+        # caller explicitly sets advanced.referenceStrength > 0. Resolved below.
         raw_poses = request.advanced.get("poses")
         pose_entries = [p for p in raw_poses if isinstance(p, dict)] if isinstance(raw_poses, list) else []
         pose_set = len(pose_entries) > 0
@@ -3136,13 +3138,15 @@ class MlxZImageAdapter:
                 "on the MLX backend (Z-Image has no IP-Adapter weights upstream)."
             )
 
-        # Resolve the character reference (if present) to a local path for the
-        # img2img identity init (sc-2328). One reference shared across the whole pose
-        # set — identity is constant; only the per-pose skeleton changes. None →
-        # pose-only generation (identity from the prompt), the prior sc-2257 path.
+        # Reference img2img-init identity (sc-2328) — OPT-IN, off by default (see the
+        # note above; the init disrupts the pose lock on few-step Turbo). Engages only
+        # when advanced.referenceStrength > 0 is explicitly requested, e.g. to sweep
+        # the init↔control tension. The reference is shared across the whole pose set
+        # (identity is constant; only the per-pose skeleton changes). Default / not
+        # requested → pose-only generation, the validated sc-2257 path.
         reference_init_path: str | None = None
         reference_strength: float | None = None
-        if pose_set and request.reference_asset_id:
+        if pose_set and request.reference_asset_id and self._identity_init_requested(request):
             reference_init_path = str(find_asset_media_path(project_path, request.reference_asset_id))
             reference_strength = self._reference_strength(request)
 
@@ -3314,15 +3318,26 @@ class MlxZImageAdapter:
             return 0.9
         return max(0.0, min(2.0, value))
 
+    @staticmethod
+    def _identity_init_requested(request: ImageRequest) -> bool:
+        """Whether to apply the OPT-IN sc-2328 reference img2img-init. Off by default:
+        the init fights the Fun-Controlnet-Union pose lock on few-step Turbo (washed-out
+        pose + reference/skeleton bleed — validated 2026-05-30), so the default strict
+        tier is pose-only and identity comes from the prompt or a character LoRA (epic
+        2221). Engages only when advanced.referenceStrength is explicitly set > 0 (e.g.
+        to sweep the init↔control tension)."""
+        try:
+            return float(request.advanced.get("referenceStrength")) > 0
+        except (TypeError, ValueError):
+            return False
+
     def _reference_strength(self, request: ImageRequest) -> float:
-        """img2img-init strength for the unified strict pose tier (sc-2328): how much
-        of the character reference to keep as the denoising init. mflux's image_strength
-        is INVERTED from diffusers — higher keeps MORE of the init (stronger identity,
-        but the skeleton control gets fewer denoising steps to repose), lower denoises
-        more (freer repose, identity drifts toward the prompt). Default 0.5 is a neutral
-        starting point pending the real-Mac sweep (sc-2328 E2E). Overridable via
-        advanced.referenceStrength; clamped to [0.05, 1.0] so a present reference always
-        seeds identity (strength 0 disables img2img entirely in mflux)."""
+        """img2img-init strength for the OPT-IN sc-2328 identity experiment (only read
+        when _identity_init_requested is true). mflux's image_strength is INVERTED from
+        diffusers — higher keeps MORE of the init (stronger identity, but the skeleton
+        control gets fewer denoising steps to repose), lower denoises more (freer repose,
+        identity drifts toward the prompt). Clamped to [0.05, 1.0]; the practical finding
+        is that no value holds BOTH identity and pose on 8-step Turbo (see sc-2328)."""
         try:
             value = float(request.advanced.get("referenceStrength", 0.5))
         except (TypeError, ValueError):
