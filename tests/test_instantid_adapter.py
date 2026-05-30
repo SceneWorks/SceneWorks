@@ -23,7 +23,10 @@ from scene_worker.instantid_adapter import (
 from scene_worker.lora_adapters import LoraPipelineState
 from scene_worker.openpose_skeleton import (
     draw_bodypose,
+    draw_wholebody,
     face_box_from_keypoints,
+    normalize_face,
+    normalize_hands,
     normalize_keypoints,
 )
 
@@ -236,6 +239,34 @@ def test_draw_bodypose_renders_colored():
     assert skel.any()  # not an all-black canvas
     # An all-empty skeleton stays black.
     assert not draw_bodypose(64, 96, [None] * 18).any()
+
+
+def test_normalize_hands_and_face():
+    # A [left, right] pair is preserved as two 21-point hands.
+    pair = normalize_hands([[[0.1, 0.1]] * 21, [[0.2, 0.2]] * 21])
+    assert pair is not None and len(pair) == 2 and len(pair[0]) == 21 and len(pair[1]) == 21
+    # A flat 42-point list splits into two 21-point hands.
+    flat = normalize_hands([[0.3, 0.3]] * 42)
+    assert flat is not None and len(flat) == 2 and len(flat[0]) == 21 and len(flat[1]) == 21
+    # Empty / None / non-list -> None.
+    assert normalize_hands(None) is None and normalize_hands([]) is None
+    # Face coerces to exactly 68 points (extra trimmed); None -> None.
+    assert len(normalize_face([[0.5, 0.4]] * 70)) == 68
+    assert normalize_face(None) is None and normalize_face([]) is None
+
+
+def test_draw_wholebody_adds_hands_and_face():
+    body = normalize_keypoints(_FRONT_KPS)
+    # Body-only path is byte-identical to draw_bodypose (InstantID/Qwen unaffected).
+    body_only = draw_wholebody(128, 192, body, stickwidth=4)
+    assert (body_only == draw_bodypose(128, 192, body, stickwidth=4)).all()
+    # Hands (off to the sides) + a face cluster (above the head) paint extra marks,
+    # including pure-white face dots that the body/hand palette never produces.
+    hands = [[[0.05, 0.5]] * 21, [[0.95, 0.5]] * 21]
+    face = [[0.5, 0.03]] * 68
+    whole = draw_wholebody(128, 192, body, hands=hands, face=face, stickwidth=4)
+    assert int((whole.sum(2) > 0).sum()) > int((body_only.sum(2) > 0).sum())
+    assert ((whole[:, :, 0] == 255) & (whole[:, :, 1] == 255) & (whole[:, :, 2] == 255)).any()
 
 
 def test_face_box_from_keypoints():

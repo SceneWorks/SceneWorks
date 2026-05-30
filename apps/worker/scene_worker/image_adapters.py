@@ -37,7 +37,7 @@ from .character_studio_angles import (
     augment_prompt_for_angle,
     augment_prompt_for_pose,
 )
-from .openpose_skeleton import draw_bodypose, normalize_keypoints
+from .openpose_skeleton import draw_bodypose, draw_wholebody, normalize_face, normalize_hands, normalize_keypoints
 from .sampler_registry import apply_sampler, sampler_selection_from_advanced
 from .hf_cache import huggingface_cache_roots, huggingface_repo_cache_path
 from .lora_adapters import (
@@ -3197,9 +3197,16 @@ class MlxZImageAdapter:
             stick = max(6, round(min(request.width, request.height) * 0.012))
             control_image_paths = []
             for index, keypoints in enumerate(pose_keypoints):
+                # The Fun-Controlnet-Union pose head is trained on full DWPose
+                # (body + hands + face). When a pose entry carries hand/face
+                # keypoints, render them too (more in-distribution → firmer lock);
+                # body-only entries render exactly as before.
+                entry = pose_entries[index]
+                hands = normalize_hands(entry.get("hands"))
+                face = normalize_face(entry.get("face"))
                 skeleton_path = work_dir / f"pose_skeleton_{index:04d}.png"
                 Image.fromarray(
-                    draw_bodypose(request.width, request.height, keypoints, stickwidth=stick)
+                    draw_wholebody(request.width, request.height, keypoints, hands=hands, face=face, stickwidth=stick)
                 ).save(skeleton_path, "PNG")
                 control_image_paths.append(str(skeleton_path))
         try:
@@ -3272,12 +3279,12 @@ class MlxZImageAdapter:
 
     def _control_scale(self, request: ImageRequest) -> float:
         """Pose ControlNet lock strength (sc-2257). Fun-Controlnet-Union recommends
-        0.65–1.0; default 1.0 (clean pose lock, validated). Overridable via
-        advanced.controlScale, clamped to [0, 2]."""
+        0.65–1.0; default 0.9 matches the VideoX-Fun reference's own default and
+        locks cleanly. Overridable via advanced.controlScale, clamped to [0, 2]."""
         try:
-            value = float(request.advanced.get("controlScale", 1.0))
+            value = float(request.advanced.get("controlScale", 0.9))
         except (TypeError, ValueError):
-            return 1.0
+            return 0.9
         return max(0.0, min(2.0, value))
 
     def _guidance_scale(self, request: ImageRequest, model_target: dict[str, Any]) -> float:
