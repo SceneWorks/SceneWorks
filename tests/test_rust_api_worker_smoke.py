@@ -12,6 +12,12 @@ from types import SimpleNamespace
 import httpx
 import pytest
 
+from scene_worker.image_adapters import (
+    CHARACTER_ANGLE_SET_ORDER,
+    ImageAssetWriter,
+    MODEL_TARGETS,
+    render_preview_image,
+)
 from scene_worker.runtime import (
     ApiClient,
     heartbeat,
@@ -248,6 +254,168 @@ def test_python_worker_completes_procedural_image_job_against_rust_api_binary(
     written = project_path / asset["file"]["path"]
     assert written.exists()
     assert written.suffix == ".png"
+
+
+class _RecordingImageAdapter:
+    """Records the ImageRequest the worker hands the adapter, then writes weightless
+    preview images so the job completes. Unlike the procedural adapter it does NOT
+    reject loras (that is the point — sc-2226 proves loras survive the API + worker
+    boundary into request.loras for character_image angle/pose sets)."""
+
+    id = "recording-e2e"
+
+    def __init__(self, sink: list[dict]) -> None:
+        self._sink = sink
+
+    def loaded_models(self) -> list[str]:
+        return []
+
+    def generate(self, *, settings, job, request, project_path, progress, cancel_requested):
+        self._sink.append(
+            {"mode": request.mode, "loras": list(request.loras), "advanced": dict(request.advanced)}
+        )
+        model_target = MODEL_TARGETS.get(request.model, MODEL_TARGETS["z_image_turbo"])
+        if request.advanced.get("angleSet"):
+            count = len(CHARACTER_ANGLE_SET_ORDER)
+        elif isinstance(request.advanced.get("poses"), list):
+            count = len(request.advanced["poses"])
+        else:
+            count = request.count
+        return ImageAssetWriter().write_incremental_outputs(
+            request=request,
+            project_path=project_path,
+            image_count=count,
+            image_at_index=lambda index: render_preview_image(request, model_target, index, index),
+            adapter_id=self.id,
+            progress=progress,
+            cancel_requested=cancel_requested,
+            raw_settings={**request.advanced, "recordingE2E": True},
+            settings=settings,
+            job_id=job["id"],
+        )
+
+
+@pytest.mark.e2e
+def test_character_image_angle_and_pose_sets_carry_loras_through_worker(rust_api, tmp_path, monkeypatch):
+    """sc-2226: a character_image angle set AND pose set, each carrying a `loras` array,
+    submitted through the Rust API binary and run by the in-process worker, deliver those
+    loras to the adapter as request.loras (the payload -> catalog-normalized -> worker ->
+    ImageRequest.loras boundary). z_image_turbo stands in as a weightless backbone; the
+    angle/pose LoRA path itself is unit-covered in sc-2224/2225."""
+    data_dir = tmp_path / "data"
+    data_dir.mkdir(exist_ok=True)
+
+    # The Rust API resolves a job's project through its own project store (for project
+    # LoRAs), so create the project via the API and mirror its path into recent-projects
+    # .json (how the in-process worker resolves the same project).
+    created_project = httpx.post(f"{rust_api}/api/v1/projects", json={"name": "Lora E2E"}, timeout=5)
+    created_project.raise_for_status()
+    project = created_project.json()
+    project_id = project["id"]
+    project_path = Path(project["path"])
+    (data_dir / "recent-projects.json").write_text(
+        json.dumps([{"id": project_id, "path": str(project_path)}]), encoding="utf-8"
+    )
+
+    # The Rust API rejects loras not present in the catalog (it hydrates + normalizes
+    # submitted specs against installed LoRAs). Seed one user LoRA whose family matches
+    # the z_image_turbo backbone so the submission validates and reaches the worker.
+    lora_id = "kelsie-zit"
+    lora_dir = data_dir / "loras" / lora_id
+    lora_dir.mkdir(parents=True, exist_ok=True)
+    (lora_dir / "kelsie.safetensors").write_bytes(_minimal_safetensors())
+    manifests = tmp_path / "config" / "manifests"
+    manifests.mkdir(parents=True, exist_ok=True)
+    # The lora compatibility check resolves the model + builtin loras from the catalog,
+    # which reads these manifests; copy the real ones so z_image_turbo (family z-image)
+    # is known. Size estimation is disabled by the rust_api fixture (no network).
+    for manifest_name in ("builtin.models.jsonc", "builtin.loras.jsonc"):
+        shutil.copy(ROOT / "config" / "manifests" / manifest_name, manifests / manifest_name)
+    (manifests / "user.loras.jsonc").write_text(
+        json.dumps(
+            {
+                "schemaVersion": 1,
+                "loras": [
+                    {
+                        "id": lora_id,
+                        "name": "Kelsie ZIT",
+                        "family": "z-image",
+                        "scope": "global",
+                        "files": ["kelsie.safetensors"],
+                        "source": {"path": f"loras/{lora_id}", "provider": "local", "repo": None},
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    monkeypatch.setenv("SCENEWORKS_API_URL", rust_api)
+    monkeypatch.setenv("SCENEWORKS_DATA_DIR", str(data_dir))
+    monkeypatch.setenv("SCENEWORKS_WORKER_ID", "lora-e2e-worker")
+    monkeypatch.setenv("SCENEWORKS_GPU_ID", "gpu-0")
+
+    # Inject a recording adapter (the procedural adapter rejects loras), so the worker's
+    # real dispatch path runs but no model weights are needed.
+    recorded: list[dict] = []
+    monkeypatch.setattr(
+        "scene_worker.runtime.create_image_adapter",
+        lambda job, image_adapters: _RecordingImageAdapter(recorded),
+    )
+
+    settings = WorkerSettings()
+    api = ApiClient(settings)
+    register_worker(
+        api,
+        settings,
+        {"id": "gpu-0", "name": "GPU 0", "capabilities": ["placeholder", "gpu", "image_generate"]},
+        loaded_models=[],
+    )
+
+    loras = [{"id": lora_id, "weight": 0.8}]
+    pose_keypoints = [[0.5, index / 18] for index in range(18)]
+    base = {
+        "projectId": project_id,
+        "mode": "character_image",
+        "model": "z_image_turbo",
+        "prompt": "the character",
+        "referenceAssetId": "ref-1",
+        "count": 1,
+        "width": 256,
+        "height": 256,
+        "requestedGpu": "gpu-0",
+        "loras": loras,
+    }
+    jobs = {
+        "angle": {**base, "advanced": {"angleSet": True, "ipAdapterScale": 0.8}},
+        "pose": {
+            **base,
+            "advanced": {"poses": [{"id": "standing_01", "keypoints": pose_keypoints}], "ipAdapterScale": 0.8},
+        },
+    }
+
+    for kind, body in jobs.items():
+        created = httpx.post(f"{rust_api}/api/v1/image/jobs", json=body, timeout=5)
+        assert created.status_code == 201, (kind, created.status_code, created.text)
+        job = created.json()
+
+        claimed = api.post("/api/v1/jobs/claim", {"workerId": settings.worker_id})["job"]
+        assert claimed["id"] == job["id"], kind
+        # The Rust API persisted + served the (normalized) loras on the claimed payload.
+        assert [lora["id"] for lora in claimed["payload"]["loras"]] == [lora_id], kind
+
+        run_image_job(api, settings, claimed, {})
+
+        completed = httpx.get(f"{rust_api}/api/v1/jobs/{job['id']}", timeout=5).json()
+        assert completed["status"] == "completed", (kind, completed)
+
+    # The adapter received request.loras for BOTH the angle set and the pose set.
+    assert len(recorded) == 2
+    assert all([lora["id"] for lora in entry["loras"]] == [lora_id] for entry in recorded)
+    angle_entry = next(entry for entry in recorded if entry["advanced"].get("angleSet"))
+    pose_entry = next(entry for entry in recorded if entry["advanced"].get("poses"))
+    assert angle_entry["loras"][0]["weight"] == 0.8
+    assert pose_entry["loras"][0]["weight"] == 0.8
 
 
 def test_rust_worker_claims_and_completes_lora_import_against_rust_api_binary(rust_api, tmp_path):
