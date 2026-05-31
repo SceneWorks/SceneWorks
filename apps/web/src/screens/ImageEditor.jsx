@@ -1,5 +1,7 @@
 import React, { useCallback, useEffect, useRef, useState } from "react";
 import { Stage, Layer, Image as KonvaImage, Rect, Transformer } from "react-konva";
+import { apiFetch } from "../api.js";
+import { terminalStatuses } from "../jobTypes.js";
 import { useAppContext } from "../context/AppContext.js";
 import { assetUrl, assetCanRenderAsImage } from "../components/assetMedia.jsx";
 import { DatasetAddDialog } from "../components/DatasetAddDialog.jsx";
@@ -10,13 +12,37 @@ const ZOOM_STEP = 1.2;
 const MIN_CROP_PX = 8;
 
 // Tools still to come in epic 2427 — rendered as an inert scaffold so the frame
-// (and the next slices' insertion points) are in place. Move + Crop are live.
+// (and the next slices' insertion points) are in place. Move + Crop + Upscale are live.
 const UPCOMING_TOOLS = [
-  { id: "upscale", label: "Upscale", story: "sc-2433" },
   { id: "edit", label: "AI Edit", story: "sc-2435" },
   { id: "detail", label: "Detail", story: "sc-2438" },
   { id: "color", label: "Color", story: "sc-2439" },
 ];
+
+// Upscale engines + their valid factors (sc-2433). Mirrors the engines the worker
+// supports (image_adapters.create_image_upscaler): Real-ESRGAN 2x/4x, AuraSR 4x.
+const UPSCALE_ENGINES = [
+  { key: "real-esrgan", label: "Real-ESRGAN", factors: [2, 4] },
+  { key: "aura-sr", label: "AuraSR", factors: [4] },
+];
+
+export function upscaleFactorsForEngine(engineKey) {
+  const found = UPSCALE_ENGINES.find((entry) => entry.key === engineKey);
+  return found ? found.factors : [2, 4];
+}
+
+// The `POST /api/v1/jobs` body for a standalone image_upscale job (sc-2431). The
+// worker reads sourceAssetId/factor/engine from the payload; displayName names the
+// result. Pure for unit testing.
+export function buildUpscaleJobBody({ project, requestedGpu, sourceAssetId, factor, engine, displayName }) {
+  return {
+    type: "image_upscale",
+    projectId: project.id,
+    projectName: project.name ?? null,
+    requestedGpu,
+    payload: { projectId: project.id, sourceAssetId, factor, engine, displayName },
+  };
+}
 
 // Predefined crop ratios (width / height). Rotate swaps to the transpose; 1:1 and
 // Freeform are unaffected.
@@ -88,7 +114,17 @@ function blobToImage(blob) {
 }
 
 export function ImageEditor() {
-  const { assets, characters, setPreviewAsset } = useAppContext();
+  const {
+    activeProject,
+    assets,
+    characters,
+    setPreviewAsset,
+    token,
+    requestedGpu,
+    jobs,
+    importAsset,
+    purgeAsset,
+  } = useAppContext();
 
   // The working-image session: the single bitmap every tool operates on, plus its
   // provenance. This state is the contract consumed by crop/upscale/save and the
@@ -103,6 +139,15 @@ export function ImageEditor() {
   const [ratioKey, setRatioKey] = useState("free");
   const [rotated, setRotated] = useState(false);
   const [cropRect, setCropRect] = useState(null); // image-pixel coords, or null
+
+  // Upscale tool (sc-2433): engine + factor for the in-flight request.
+  const [upscaleEngine, setUpscaleEngine] = useState("real-esrgan");
+  const [upscaleFactor, setUpscaleFactor] = useState(2);
+  // An in-flight AI op (upscale now; AI-edit / detail later) on the working image.
+  // The seam (sc-2432): stage the working bitmap as a scratch asset, run a worker
+  // job against it, load the result back, then purge the scratch + result so the
+  // session only persists on Save. { jobId, scratch (asset), source, label } | null.
+  const [aiOp, setAiOp] = useState(null);
 
   const containerRef = useRef(null);
   const objectUrlRef = useRef(null);
@@ -341,6 +386,106 @@ export function ImageEditor() {
     }
   }, [tool, cropRect]);
 
+  // ── AI ops on the working image (sc-2432 seam) ────────────────────────────
+  // Rasterize the current working image to a PNG File for upload.
+  const workingImageToFile = useCallback(() => {
+    return new Promise((resolve, reject) => {
+      if (!working) {
+        reject(new Error("No working image."));
+        return;
+      }
+      const canvas = document.createElement("canvas");
+      canvas.width = working.width;
+      canvas.height = working.height;
+      canvas.getContext("2d").drawImage(working.image, 0, 0);
+      const base = (working.source.name || "image").replace(/\.[^./\\]+$/, "");
+      canvas.toBlob((blob) => {
+        if (!blob) {
+          reject(new Error("Could not encode the working image."));
+          return;
+        }
+        resolve(new File([blob], `${base}.png`, { type: "image/png" }));
+      }, "image/png");
+    });
+  }, [working]);
+
+  // Stage the working image as a scratch asset, start a worker job against it, and
+  // track it. The watcher below loads the result back and purges scratch + result —
+  // intermediates never persist; only Save (sc-2434) lands a Library asset.
+  const runAiOp = useCallback(
+    async ({ buildBody, label }) => {
+      if (!working || aiOp || !activeProject) return;
+      setStatus({ loading: false, error: "" });
+      let scratch;
+      try {
+        const file = await workingImageToFile();
+        scratch = await importAsset(file, { throwOnError: true });
+      } catch (err) {
+        setStatus({ loading: false, error: `Could not stage image: ${err.message || err}` });
+        return;
+      }
+      try {
+        const job = await apiFetch("/api/v1/jobs", token, {
+          method: "POST",
+          body: JSON.stringify(buildBody(scratch)),
+        });
+        setAiOp({ jobId: job.id, scratch, source: working.source, label });
+        setTool("move");
+      } catch (err) {
+        purgeAsset(scratch).catch(() => {});
+        setStatus({ loading: false, error: `Could not start ${label}: ${err.message || err}` });
+      }
+    },
+    [working, aiOp, activeProject, workingImageToFile, importAsset, token, purgeAsset],
+  );
+
+  function runUpscale() {
+    const valid = upscaleFactorsForEngine(upscaleEngine);
+    const factor = valid.includes(upscaleFactor) ? upscaleFactor : valid[0];
+    runAiOp({
+      label: "upscale",
+      buildBody: (scratch) =>
+        buildUpscaleJobBody({
+          project: activeProject,
+          requestedGpu,
+          sourceAssetId: scratch.id,
+          factor,
+          engine: upscaleEngine,
+          displayName: working?.source?.name,
+        }),
+    });
+  }
+
+  // When the in-flight op's job terminates, load the result back into the working
+  // image (on success) and purge the ephemeral scratch + result assets.
+  useEffect(() => {
+    if (!aiOp?.jobId) return;
+    const job = jobs?.find((item) => item.id === aiOp.jobId);
+    if (!job || !terminalStatuses.has(job.status)) return;
+    const { scratch, source } = aiOp;
+    setAiOp(null); // stop tracking immediately so this can't re-enter on the next jobs tick
+    const resultAsset = job.status === "completed" ? job.result?.assets?.[0] ?? null : null;
+    (async () => {
+      try {
+        if (resultAsset) {
+          const res = await fetch(assetUrl(resultAsset));
+          if (!res.ok) throw new Error(`Failed to load result (${res.status})`);
+          const { image, objectUrl } = await blobToImage(await res.blob());
+          installWorkingImage(image, objectUrl, source);
+        } else {
+          setStatus({ loading: false, error: job.error ?? job.message ?? "The operation failed." });
+        }
+      } catch (err) {
+        setStatus({ loading: false, error: err.message || "The operation failed." });
+      } finally {
+        if (scratch) purgeAsset(scratch).catch(() => {});
+        if (resultAsset) purgeAsset(resultAsset).catch(() => {});
+      }
+    })();
+  }, [aiOp, jobs, installWorkingImage, purgeAsset]);
+
+  const activeAiJob = aiOp ? jobs?.find((item) => item.id === aiOp.jobId) : null;
+
   return (
     <section className="main-surface image-editor-surface">
       <div className="image-editor-bar">
@@ -469,11 +614,21 @@ export function ImageEditor() {
             </button>
             <button
               className={tool === "crop" ? "image-editor-tool active" : "image-editor-tool"}
+              disabled={!!aiOp}
               onClick={startCrop}
               title="Crop"
               type="button"
             >
               Crop
+            </button>
+            <button
+              className={tool === "upscale" ? "image-editor-tool active" : "image-editor-tool"}
+              disabled={!!aiOp}
+              onClick={() => setTool("upscale")}
+              title="Upscale"
+              type="button"
+            >
+              Upscale
             </button>
             {UPCOMING_TOOLS.map((upcoming) => (
               <button
@@ -521,6 +676,66 @@ export function ImageEditor() {
             <button onClick={cancelCrop} type="button">
               Cancel
             </button>
+          </div>
+        ) : null}
+
+        {tool === "upscale" && working ? (
+          <div className="image-editor-cropbar">
+            <div className="image-editor-ratios" role="group" aria-label="Upscale engine">
+              {UPSCALE_ENGINES.map((entry) => (
+                <button
+                  className={upscaleEngine === entry.key ? "active" : ""}
+                  key={entry.key}
+                  onClick={() => {
+                    setUpscaleEngine(entry.key);
+                    if (!entry.factors.includes(upscaleFactor)) setUpscaleFactor(entry.factors[0]);
+                  }}
+                  type="button"
+                >
+                  {entry.label}
+                </button>
+              ))}
+            </div>
+            <div className="image-editor-ratios" role="group" aria-label="Upscale factor">
+              {upscaleFactorsForEngine(upscaleEngine).map((value) => (
+                <button
+                  className={upscaleFactor === value ? "active" : ""}
+                  key={value}
+                  onClick={() => setUpscaleFactor(value)}
+                  type="button"
+                >
+                  {value}×
+                </button>
+              ))}
+            </div>
+            <span className="image-editor-cropdims">
+              {working.width * upscaleFactor} × {working.height * upscaleFactor}
+            </span>
+            <button className="primary" disabled={!!aiOp} onClick={runUpscale} type="button">
+              Upscale
+            </button>
+            <button onClick={() => setTool("move")} type="button">
+              Cancel
+            </button>
+          </div>
+        ) : null}
+
+        {aiOp ? (
+          <div className="image-editor-busy">
+            <div className="image-editor-busy-card">
+              <p className="image-editor-busy-title">
+                {aiOp.label === "upscale" ? "Upscaling…" : "Working…"}
+              </p>
+              <p className="image-editor-busy-msg">
+                {activeAiJob?.message ||
+                  (activeAiJob?.status === "queued" ? "Queued — waiting for a worker." : "Processing…")}
+              </p>
+              {typeof activeAiJob?.progress === "number" ? (
+                <div className="image-editor-busy-bar">
+                  <span style={{ width: `${Math.round(activeAiJob.progress * 100)}%` }} />
+                </div>
+              ) : null}
+            </div>
           </div>
         ) : null}
 
