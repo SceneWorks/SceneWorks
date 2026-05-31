@@ -310,6 +310,30 @@ describe("PoseLibraryScreen — Create tab", () => {
     });
   });
 
+  it("flags a candidate that duplicates an existing saved pose and starts it unkept", async () => {
+    const kps = Array.from({ length: 8 }, (_, i) => [0.5, 0.1 + 0.05 * i, 5.0]);
+    // The reserved project already holds a pose with these keypoints…
+    poseAssets = [poseAsset({ id: "asset_pose_existing", displayName: "Existing Pose", pose: { keypoints: kps } })];
+    // …and the detector returns a candidate with the same keypoints (same photo).
+    const source = completedJob.result.sources[0];
+    const job = {
+      ...completedJob,
+      result: { sources: [{ ...source, poses: [{ ...source.poses[0], keypoints: kps }] }] },
+    };
+    await render(makeContext({ jobs: [job] }));
+    await click(container.querySelector("#pose-library-tab-create"));
+    await click(byText("Add images"));
+    await click(byText("Asset Library"));
+    await click(byText("Photo"));
+    await click(exactBtn("Add 1"));
+    await click(exactBtn("Done"));
+    await click(byText("Generate poses"));
+
+    expect(container.textContent).toContain("Possible duplicate of Existing Pose");
+    // Duplicates start unkept → nothing queued to save.
+    expect(byText("Save 0 pose")).toBeTruthy();
+  });
+
   it("requires a workspace before creating poses", async () => {
     await render(makeContext({ activeProject: null }));
     await click(container.querySelector("#pose-library-tab-create"));

@@ -66,9 +66,55 @@ function buildCandidates(job) {
   return out;
 }
 
+// Two skeletons from the same photo are near-identical, so flag a new candidate as
+// a likely duplicate of an existing saved pose (or an earlier candidate in the same
+// batch) and start it unkept. Poses are square-canonical, so body keypoints compare
+// directly: mean per-point distance in normalized [0,1] space below DUPLICATE_DISTANCE
+// = "likely the same pose". Catches same-source / near-identical poses (this is not
+// translation/scale-invariant pose-shape matching).
+const DUPLICATE_DISTANCE = 0.03;
+
+function keypointDistance(a, b) {
+  if (!Array.isArray(a) || !Array.isArray(b)) return Infinity;
+  let sum = 0;
+  let count = 0;
+  const len = Math.min(a.length, b.length, 18);
+  for (let i = 0; i < len; i += 1) {
+    const pa = a[i];
+    const pb = b[i];
+    if (!pa || !pb || pa[0] == null || pb[0] == null) continue;
+    sum += Math.hypot(pa[0] - pb[0], pa[1] - pb[1]);
+    count += 1;
+  }
+  return count >= 8 ? sum / count : Infinity; // need enough shared points to trust it
+}
+
+// Annotate each built candidate with `duplicateOf` (the label of the closest match
+// within DUPLICATE_DISTANCE among existing saved poses + earlier candidates) and
+// start duplicates unkept so they aren't accidentally re-added.
+function annotateDuplicates(built, existingPoses) {
+  const existing = (existingPoses ?? [])
+    .filter((pose) => !pose.status?.trashed)
+    .map((pose) => ({ keypoints: pose.pose?.keypoints ?? [], label: pose.displayName || pose.id }));
+  return built.map((candidate, index) => {
+    const pool = [
+      ...existing,
+      ...built.slice(0, index).map((c) => ({ keypoints: c.pose.keypoints, label: c.sourceDisplayName })),
+    ];
+    let best = null;
+    for (const other of pool) {
+      const distance = keypointDistance(candidate.pose.keypoints, other.keypoints);
+      if (distance < DUPLICATE_DISTANCE && (!best || distance < best.distance)) {
+        best = { label: other.label, distance };
+      }
+    }
+    return { ...candidate, duplicateOf: best?.label ?? null, keep: !best };
+  });
+}
+
 // The "Create" tab body: pick photos (DatasetAddDialog), run DWPose, then review,
 // categorize, and save one whole-body pose per detected person to the store.
-function PoseCreatePanel({ hidden, categories, onSaved }) {
+function PoseCreatePanel({ hidden, categories, onSaved, existingPoses }) {
   const { token, activeProject, assets = [], characters = [], requestedGpu, jobs = [] } = useAppContext();
   const [dialogOpen, setDialogOpen] = useState(false);
   const [sources, setSources] = useState([]); // selected source asset records
@@ -149,6 +195,10 @@ function PoseCreatePanel({ hidden, categories, onSaved }) {
   // Revoke any object URLs on unmount (latest set via ref).
   const sourcesRef = useRef(sources);
   sourcesRef.current = sources;
+  // Snapshot the existing saved poses for duplicate detection without re-running the
+  // job-watch effect (which would reset the user's keep toggles) when they change.
+  const existingPosesRef = useRef(existingPoses);
+  existingPosesRef.current = existingPoses;
   useEffect(
     () => () => {
       for (const source of sourcesRef.current) if (source.objectUrl) URL.revokeObjectURL(source.objectUrl);
@@ -191,7 +241,7 @@ function PoseCreatePanel({ hidden, categories, onSaved }) {
     const job = jobs.find((item) => item.id === jobId);
     if (!job || !terminalStatuses.has(job.status)) return;
     if (job.status === "completed") {
-      const built = buildCandidates(job);
+      const built = annotateDuplicates(buildCandidates(job), existingPosesRef.current);
       setCandidates(built);
       setPhase("review");
       if (!built.length) setError("No people were detected in the selected images.");
@@ -317,6 +367,9 @@ function PoseCreatePanel({ hidden, categories, onSaved }) {
                     <span>
                       {candidate.sourceDisplayName} · {candidate.facing}
                     </span>
+                    {candidate.duplicateOf ? (
+                      <span className="inline-warning">Possible duplicate of {candidate.duplicateOf}</span>
+                    ) : null}
                     <label>
                       Category
                       <input
@@ -580,6 +633,7 @@ export function PoseLibraryScreen() {
 
       <PoseCreatePanel
         categories={categories.filter((category) => category !== UNCATEGORIZED)}
+        existingPoses={poses}
         hidden={activeTab !== "create"}
         onSaved={() => {
           setActiveTab("poses");
