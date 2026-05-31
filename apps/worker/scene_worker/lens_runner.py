@@ -91,16 +91,38 @@ def _inject_lokr(transformer, path: str, name: str) -> None:
     set_peft_model_state_dict(transformer, state, adapter_name=name)
 
 
+def _load_plain_lora(transformer, path: str, name: str) -> None:
+    """Load a plain LoRA onto the transformer, tolerant of the key-prefix layout.
+
+    The Lens training kernel (``save_lora_adapter``) writes *bare* module keys
+    (``transformer_blocks.0.attn.to_out.0.lora_A.weight``), but
+    ``load_lora_adapter`` defaults to a ``prefix='transformer'`` filter and only
+    *warns* — never raises — when that filter matches zero keys. So a single
+    default call silently registers nothing (``peft_config`` stays empty) and
+    generation falls back to the base model with the LoRA having no effect. Try
+    the bare-key layout first (our trainer's format), then the ``transformer.``
+    prefix for any externally-saved file, and confirm the adapter actually
+    registered each time — failing loudly only if neither layout matches
+    (sc-2218; surfaced by the first real-HW plain-LoRA round-trip)."""
+    for prefix in (None, "transformer"):
+        transformer.load_lora_adapter(path, adapter_name=name, prefix=prefix)
+        if name in (getattr(transformer, "peft_config", None) or {}):
+            return
+    raise ValueError(
+        f"Lens LoRA {path!r} matched no transformer modules under prefix=None or "
+        "'transformer'; the adapter may target a different architecture."
+    )
+
+
 def _apply_loras(transformer, loras) -> None:
     """Inject + scale trained `lens` LoRAs on the transformer (PeftAdapterMixin).
 
     Each ``loras`` entry is ``{"path", "weight", "name"}``, already resolved to a
-    concrete .safetensors file by the adapter. For a plain LoRA, ``save_lora_adapter``
-    (training kernel) and ``load_lora_adapter`` are the symmetric PeftAdapterMixin
-    pair; the ``prefix=None`` retry covers builds that saved the adapter without a
-    ``transformer.`` key prefix. A ``networkType=lokr`` adapter (epic 2193, sc-2218)
-    can't load that way, so it's rebuilt + injected via PEFT; either kind then scales
-    through ``set_adapters``.
+    concrete .safetensors file by the adapter. A plain LoRA loads via
+    ``_load_plain_lora`` (which reconciles the trainer's bare-key layout with
+    ``load_lora_adapter``'s prefix filter). A ``networkType=lokr`` adapter (epic
+    2193, sc-2218) can't load that way, so it's rebuilt + injected via PEFT;
+    either kind then scales through ``set_adapters``.
     """
     names: list[str] = []
     weights: list[float] = []
@@ -110,10 +132,7 @@ def _apply_loras(transformer, loras) -> None:
         if _adapter_network_type(path) == "lokr":
             _inject_lokr(transformer, path, name)
         else:
-            try:
-                transformer.load_lora_adapter(path, adapter_name=name)
-            except Exception:  # noqa: BLE001 - retry with no key prefix before failing
-                transformer.load_lora_adapter(path, adapter_name=name, prefix=None)
+            _load_plain_lora(transformer, path, name)
         names.append(name)
         try:
             weights.append(float(lora.get("weight", 1.0)))

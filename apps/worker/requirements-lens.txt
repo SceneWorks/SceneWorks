@@ -18,6 +18,11 @@ diffusers==0.38.0
 transformers>=5.8,<5.9
 huggingface_hub>=1,<2
 accelerate>=1.11
+# peft is the LoRA/LoKr adapter backend: lens_train_runner imports it directly,
+# lens_runner imports it for LoKr injection, and diffusers' load_lora_adapter
+# needs the PEFT backend present for the plain-LoRA path. Without it the entire
+# Lens LoRA/LoKr train+infer path crashes at import time (sc-2218 real-HW finding).
+peft>=0.19,<0.20
 safetensors>=0.8.0rc0,<0.9
 einops>=0.8,<0.9
 kernels>=0.14,<0.15
