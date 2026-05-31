@@ -5250,6 +5250,54 @@ label {
   font-variant-numeric: tabular-nums;
 }
 
+/* In-flight AI op (upscale, later edit/detail): a blocking overlay over the canvas. */
+.image-editor-busy {
+  position: absolute;
+  inset: 0;
+  z-index: 3;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(0, 0, 0, 0.35);
+}
+
+.image-editor-busy-card {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-width: 260px;
+  max-width: 80%;
+  padding: 16px 20px;
+  border: 1px solid var(--border);
+  border-radius: var(--r-md);
+  background: var(--surface);
+  box-shadow: 0 6px 24px rgba(0, 0, 0, 0.3);
+  text-align: center;
+}
+
+.image-editor-busy-title {
+  font-weight: 600;
+}
+
+.image-editor-busy-msg {
+  color: var(--text-muted);
+  font-size: 13px;
+}
+
+.image-editor-busy-bar {
+  height: 4px;
+  border-radius: 999px;
+  background: var(--surface-2);
+  overflow: hidden;
+}
+
+.image-editor-busy-bar span {
+  display: block;
+  height: 100%;
+  background: var(--accent);
+  transition: width 0.2s ease;
+}
+
 .timeline-create {
   padding: 12px;
   border: 1px solid var(--border);

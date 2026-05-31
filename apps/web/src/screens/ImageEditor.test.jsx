@@ -13,7 +13,13 @@ vi.mock("react-konva", async () => {
 });
 
 import { AppContext } from "../context/AppContext.js";
-import { ImageEditor, cropRatioForKey, centeredCropRect } from "./ImageEditor.jsx";
+import {
+  ImageEditor,
+  cropRatioForKey,
+  centeredCropRect,
+  upscaleFactorsForEngine,
+  buildUpscaleJobBody,
+} from "./ImageEditor.jsx";
 
 // These tests cover the non-canvas surface of the editor (empty state, the inert
 // tool scaffold, and the load affordances). The Konva <Stage> only mounts once a
@@ -26,6 +32,11 @@ function baseContext(overrides = {}) {
     assets: [],
     characters: [],
     setPreviewAsset: vi.fn(),
+    token: "",
+    requestedGpu: "auto",
+    jobs: [],
+    importAsset: vi.fn(),
+    purgeAsset: vi.fn(),
     ...overrides,
   };
 }
@@ -105,5 +116,37 @@ describe("crop geometry", () => {
     expect(wide.y).toBe(0);
     // Freeform → centered 80% box.
     expect(centeredCropRect(800, 600, null)).toEqual({ x: 80, y: 60, width: 640, height: 480 });
+  });
+});
+
+describe("upscale job", () => {
+  it("constrains factors per engine", () => {
+    expect(upscaleFactorsForEngine("real-esrgan")).toEqual([2, 4]);
+    expect(upscaleFactorsForEngine("aura-sr")).toEqual([4]);
+    expect(upscaleFactorsForEngine("unknown")).toEqual([2, 4]);
+  });
+
+  it("builds the image_upscale job body the worker expects (sourceAssetId/factor/engine)", () => {
+    const body = buildUpscaleJobBody({
+      project: { id: "project_1", name: "My Project" },
+      requestedGpu: "auto",
+      sourceAssetId: "asset_scratch",
+      factor: 4,
+      engine: "real-esrgan",
+      displayName: "shot.png",
+    });
+    expect(body).toEqual({
+      type: "image_upscale",
+      projectId: "project_1",
+      projectName: "My Project",
+      requestedGpu: "auto",
+      payload: {
+        projectId: "project_1",
+        sourceAssetId: "asset_scratch",
+        factor: 4,
+        engine: "real-esrgan",
+        displayName: "shot.png",
+      },
+    });
   });
 });
