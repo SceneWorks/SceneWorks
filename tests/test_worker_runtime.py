@@ -11219,6 +11219,10 @@ def test_best_effort_backbones_declare_pose_library_capability():
     for model_id, story in (
         ("qwen_image_edit_2511_lightning", "sc-2256"),
         ("flux2_klein_9b", "sc-2262"),
+        # The other two klein variants share the same mlx_flux2 best-effort pose
+        # path, so they're offered in the picker for output comparison too.
+        ("flux2_klein_9b_kv", "sc-2262"),
+        ("flux2_klein_9b_true_v2", "sc-2262"),
     ):
         entry = manifest_by_id.get(model_id, {})
         assert entry.get("ui", {}).get("poseLibrary") is True, (

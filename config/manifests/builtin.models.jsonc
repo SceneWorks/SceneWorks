@@ -1001,6 +1001,11 @@
           { "id": "down_right", "label": "Down · right" },
           { "id": "front", "label": "Front" }
         ],
+        // Best-effort pose library: same multi-image skeleton trick as the base
+        // 9B (sc-2262), routed through the shared mlx_flux2 adapter. Because the
+        // pose path is an edit-with-reference, the KV cache engages, so pose
+        // generation runs faster than the base 9B path. Best-effort tier.
+        "poseLibrary": true,
         "promptGuide": {
           "title": "FLUX.2 [klein] 9B Prompt Guide",
           "path": "/prompt-guides/flux2-klein.md",
@@ -1092,6 +1097,11 @@
           { "id": "down_right", "label": "Down · right" },
           { "id": "front", "label": "Front" }
         ],
+        // Best-effort pose library: same multi-image skeleton trick as the base
+        // 9B (sc-2262), routed through the shared mlx_flux2 adapter. This is the
+        // undistilled 24-step line, so pose generation is slower than the distill
+        // and requires the local conversion + base klein install. Best-effort tier.
+        "poseLibrary": true,
         "promptGuide": {
           "title": "FLUX.2 [klein] 9B Prompt Guide",
           "path": "/prompt-guides/flux2-klein.md",
