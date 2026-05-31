@@ -50,8 +50,10 @@ from scene_worker.image_adapters import (
     image_batch_progress,
     image_request_from_job,
     lens_resolution_for,
+    load_mask_image,
     load_reference_image,
     model_supports_edit,
+    model_supports_inpaint,
     pipeline_component_devices,
     require_inference_backend_for_gpu_worker,
     interleave_resolution_for,
@@ -373,6 +375,50 @@ def test_run_image_upscale_writes_single_child_asset(tmp_path, monkeypatch):
     # One generation set wrapping the single child asset.
     assert result["expectedCount"] == 1
     assert result["generationSet"]["id"] == result["generationSetId"]
+
+
+def test_image_request_threads_mask_asset_id(monkeypatch):
+    # sc-2476: an edit job can carry an inpaint mask alongside the source.
+    request = image_request_from_job(
+        {"payload": {"projectId": "p", "mode": "edit_image", "sourceAssetId": "asset_src",
+                     "maskAssetId": "asset_mask"}}
+    )
+    assert request.mask_asset_id == "asset_mask"
+    # Absent maskAssetId → None (whole-image edit).
+    plain = image_request_from_job({"payload": {"projectId": "p", "sourceAssetId": "asset_src"}})
+    assert plain.mask_asset_id is None
+
+
+def test_model_supports_inpaint_matrix():
+    # sc-2476: SDXL family honors a mask; instruction-edit / img2img-only models don't.
+    assert model_supports_inpaint("sdxl") is True
+    assert model_supports_inpaint("realvisxl") is True
+    assert model_supports_inpaint("qwen_image_edit_2511") is False
+    assert model_supports_inpaint("z_image_edit") is False
+    assert model_supports_inpaint("unknown_model") is False
+
+
+def test_load_mask_image_resolves_grayscale_and_aligns_to_output(tmp_path, monkeypatch):
+    # sc-2476: the mask resolves only through the project sidecar (no path escape) and
+    # is returned grayscale, resized to the output W×H so it aligns with the source.
+    mask = Image.new("RGB", (40, 30), "white")
+    mask_path = tmp_path / "mask.png"
+    mask.save(mask_path, "PNG")
+    monkeypatch.setattr(
+        "scene_worker.image_adapters.find_asset_media_path",
+        lambda project_path, asset_id: mask_path,
+    )
+    request = image_request_from_job(
+        {"payload": {"projectId": "p", "mode": "edit_image", "sourceAssetId": "asset_src",
+                     "maskAssetId": "asset_mask", "width": 512, "height": 256}}
+    )
+    loaded = load_mask_image(tmp_path, request)
+    assert loaded.mode == "L"
+    assert loaded.size == (512, 256)
+
+    # No mask id → explicit error (callers gate on mask_asset_id first).
+    with pytest.raises(RuntimeError, match="mask image asset"):
+        load_mask_image(tmp_path, image_request_from_job({"payload": {"projectId": "p"}}))
 
 
 def test_run_image_upscale_requires_source_asset(monkeypatch, tmp_path):
