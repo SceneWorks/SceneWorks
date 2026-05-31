@@ -144,6 +144,12 @@ function buildLocalJobStack(rememberedIds, jobs, activeProjectId, isGenerationJo
   return Array.from(byId.values()).sort(sortOldest).slice(-localJobStackLimit);
 }
 
+// Lazy-load the canvas editor so Konva (canvas-based, heavy) stays out of the
+// initial bundle and the jsdom test path — it only loads when the view is opened.
+const ImageEditor = React.lazy(() =>
+  import("./screens/ImageEditor.jsx").then((module) => ({ default: module.ImageEditor })),
+);
+
 const navSections = [
   {
     label: "Workspace",
@@ -155,7 +161,8 @@ const navSections = [
       { id: "Characters", icon: Icon.Character },
       { id: "Document", icon: Icon.Wand },
       { id: "Train", icon: Icon.Train },
-      { id: "Editor", icon: Icon.Editor },
+      { id: "ImageEditor", label: "Image Editor", icon: Icon.ImageEditor },
+      { id: "Editor", label: "Video Editor", icon: Icon.Editor },
     ],
   },
   {
@@ -185,7 +192,8 @@ const viewTitles = {
   Video: { title: "Video Studio", blurb: "Bring stills to life, or render new clips from scratch." },
   Document: { title: "Document Studio", blurb: "Generate interleaved text-image documents — guides, storyboards, tutorials." },
   Train: { title: "Training Studio", blurb: "Build datasets and prepare LoRA training plans." },
-  Editor: { title: "Editor", blurb: "Cut, sequence and export your timeline." },
+  Editor: { title: "Video Editor", blurb: "Cut, sequence and export your timeline." },
+  ImageEditor: { title: "Image Editor", blurb: "Crop, upscale and refine a single image on a canvas." },
   Characters: { title: "Characters", blurb: "Keep the same face across every shot." },
   Presets: { title: "Presets", blurb: "Save and share recurring generation setups." },
   Models: { title: "Models", blurb: "Download, import and manage local checkpoints." },
@@ -1738,6 +1746,12 @@ export function App() {
 
         {activeView === "Editor" ? (
           <EditorScreen />
+        ) : null}
+
+        {activeView === "ImageEditor" ? (
+          <React.Suspense fallback={<section className="main-surface">Loading editor…</section>}>
+            <ImageEditor key={activeProject?.id ?? "default"} />
+          </React.Suspense>
         ) : null}
 
         {activeView === "Characters" ? (

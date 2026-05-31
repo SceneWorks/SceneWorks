@@ -406,7 +406,7 @@ export function EditorScreen() {
     return (
       <section className="main-surface">
         <div className="section-heading">
-          <p className="eyebrow">Editor</p>
+          <p className="eyebrow">Video Editor</p>
           <h2>Create a project</h2>
         </div>
         <div className="empty-panel">Open a project before assembling a timeline.</div>
@@ -418,7 +418,7 @@ export function EditorScreen() {
     <section className="main-surface editor-surface">
       <div className="surface-header editor-header hero">
         <div className="section-heading">
-          <p className="eyebrow">Editor</p>
+          <p className="eyebrow">Video Editor</p>
           <h2>{activeTimeline?.name ?? "Timelines"}</h2>
           <p className="hero-blurb">
             Sequence clips on the timeline, scrub through the preview, and export when the cut feels right.

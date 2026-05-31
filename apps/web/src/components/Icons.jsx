@@ -22,6 +22,7 @@ function I({ d, fill = false, size = 18, ...rest }) {
 export const Icon = {
   Library: (p) => <I {...p} d="M4 5h6v14H4zM14 5h6v14h-6zM10 9h4M10 13h4M10 17h4" />,
   Image: (p) => <I {...p} d="M4 5h16v14H4zM4 16l5-5 4 4 3-3 4 4" />,
+  ImageEditor: (p) => <I {...p} d="M7 2v15a1 1 0 001 1h15M2 7h15a1 1 0 011 1v15" />,
   Video: (p) => <I {...p} d="M3 6h12v12H3zM15 9l6-3v12l-6-3z" />,
   Editor: (p) => <I {...p} d="M3 8h18M3 12h12M3 16h18M16 10l4 2-4 2z" />,
   Train: (p) => <I {...p} d="M5 19V5M12 19V5M19 19V5M3 9h4M10 15h4M17 11h4" />,
