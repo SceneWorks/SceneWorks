@@ -79,6 +79,10 @@ export function CharacterReferences({
   submitReference,
   updateCharacterReference,
 }) {
+  // Fullscreen preview stays bound to this character's reference images.
+  const referenceAssets = (selectedCharacter.references ?? [])
+    .map((reference) => reference.asset)
+    .filter(Boolean);
   return (
     <section className="character-section">
       <div className="section-heading">
@@ -103,7 +107,7 @@ export function CharacterReferences({
       <div className="character-reference-grid">
         {(selectedCharacter.references ?? []).map((reference) => (
           <article className={reference.approved ? "reference-card approved" : "reference-card"} key={reference.assetId}>
-            <button className="reference-media" onClick={() => reference.asset && onPreview(reference.asset)} type="button">
+            <button className="reference-media" onClick={() => reference.asset && onPreview(reference.asset, referenceAssets)} type="button">
               {reference.asset ? <AssetMedia asset={reference.asset} /> : <span>Missing asset</span>}
             </button>
             <div>
@@ -429,7 +433,7 @@ export function CharacterTest({
               <AssetCard
                 asset={asset}
                 deleteAsset={deleteAsset}
-                onPreview={onPreview}
+                onPreview={(previewed) => onPreview(previewed, characterAssets)}
                 purgeAsset={purgeAsset}
                 updateAssetStatus={updateAssetStatus}
               />
@@ -663,7 +667,7 @@ export function CharacterAngleSet({
               thumbnailsVariant="image-grid"
               thumbnailAssets={jobImageAssets(job, assets)}
               expectedThumbnailCount={angleCount}
-              onThumbnailClick={onPreview}
+              onThumbnailClick={(previewed) => onPreview?.(previewed, jobImageAssets(job, assets))}
               onCancel={onCancel}
               onRetry={onRetry}
               onDuplicate={onDuplicate}
@@ -680,7 +684,7 @@ export function CharacterAngleSet({
               aria-label={`Preview ${asset.displayName ?? asset.id}`}
               className="reference-thumb"
               key={asset.id}
-              onClick={() => onPreview?.(asset)}
+              onClick={() => onPreview?.(asset, characterImages)}
               type="button"
             >
               <AssetMedia asset={asset} controls={false} />
@@ -763,7 +767,7 @@ export function CharacterAssets({
               <button
                 aria-label={`Preview ${asset.displayName ?? asset.id}`}
                 className="reference-thumb"
-                onClick={() => onPreview?.(asset)}
+                onClick={() => onPreview?.(asset, visibleAssets)}
                 type="button"
               >
                 <AssetMedia asset={asset} controls={false} />
@@ -1127,7 +1131,7 @@ export function CharacterPoseLibrary({
               expectedThumbnailCount={
                 Array.isArray(job.payload?.advanced?.poses) ? job.payload.advanced.poses.length : selectedPoseIds.length
               }
-              onThumbnailClick={onPreview}
+              onThumbnailClick={(previewed) => onPreview?.(previewed, jobImageAssets(job, assets))}
               onCancel={onCancel}
               onRetry={onRetry}
               onDuplicate={onDuplicate}
@@ -1144,7 +1148,7 @@ export function CharacterPoseLibrary({
               aria-label={`Preview ${asset.displayName ?? asset.id}`}
               className="reference-thumb"
               key={asset.id}
-              onClick={() => onPreview?.(asset)}
+              onClick={() => onPreview?.(asset, characterImages)}
               type="button"
             >
               <AssetMedia asset={asset} controls={false} />

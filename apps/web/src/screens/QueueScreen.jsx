@@ -275,7 +275,7 @@ export function QueueScreen() {
                 job={enrichedJob}
                 thumbnailsVariant={variant}
                 thumbnailAssets={thumbnails}
-                onThumbnailClick={setPreviewAsset ?? undefined}
+                onThumbnailClick={setPreviewAsset ? (asset) => setPreviewAsset(asset, thumbnails) : undefined}
                 onCancel={(j) => jobAction(j, "cancel")}
                 onRetry={(j) => jobAction(j, "retry")}
                 onDuplicate={(j) => jobAction(j, "duplicate")}

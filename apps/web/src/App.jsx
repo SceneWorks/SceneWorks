@@ -26,7 +26,12 @@ import { useModelsAndLoras } from "./hooks/useModelsAndLoras.js";
 import { usePersonTracks } from "./hooks/usePersonTracks.js";
 import { useTimelines } from "./hooks/useTimelines.js";
 import { AppContext } from "./context/AppContext.js";
-import { dropUpscaledVariants, findFoldedAssetById, foldUpscaledAssetVariants } from "./assetVariants.js";
+import {
+  dropUpscaledVariants,
+  findFoldedAssetById,
+  foldUpscaledAssetVariants,
+  restrictFoldedToScope,
+} from "./assetVariants.js";
 import { buildWorkersById } from "./workers.js";
 
 // Desktop (Tauri) shell detection. The first-run setup wizard is desktop-only;
@@ -415,9 +420,36 @@ export function App() {
   const [jobPrompt, setJobPrompt] = useState("Placeholder generation");
   const [latestGenerationSetId, setLatestGenerationSetId] = useState(null);
   const [previewAsset, setPreviewAsset] = useState(null);
+  // The collection the fullscreen preview was launched from, as an ordered list
+  // of asset ids. Navigation (next/previous and the discard-advance) stays bound
+  // to this set so scrolling never escapes into the Library or another
+  // character's assets. `null` falls back to "all assets" for any legacy caller
+  // that opens the preview without a scope.
+  const [previewScopeIds, setPreviewScopeIds] = useState(null);
   // Which way the user last scrolled in the fullscreen preview, so discarding an
   // asset advances in that same direction.
   const previewDirectionRef = useRef("next");
+  // Open the fullscreen preview bound to the collection it was launched from.
+  // `scopeAssets` is the exact list the calling gallery rendered (folded or not);
+  // we snapshot its ids so navigation tracks the live asset state but never
+  // wanders outside that collection. Passing no scope clears it (global nav).
+  const openPreview = (asset, scopeAssets) => {
+    if (!asset) {
+      setPreviewScopeIds(null);
+      setPreviewAsset(null);
+      return;
+    }
+    setPreviewScopeIds(
+      Array.isArray(scopeAssets) && scopeAssets.length
+        ? scopeAssets.map((item) => item.id)
+        : null,
+    );
+    setPreviewAsset(asset);
+  };
+  const closePreview = () => {
+    setPreviewScopeIds(null);
+    setPreviewAsset(null);
+  };
   const [studioLaunch, setStudioLaunch] = useState(null);
   const [error, setError] = useState("");
   const [theme, setTheme] = useState(readStoredTheme);
@@ -565,19 +597,25 @@ export function App() {
     () => (previewAsset ? findFoldedAssetById(foldedPreviewAssets, previewAsset.id) ?? previewAsset : null),
     [foldedPreviewAssets, previewAsset],
   );
+  // The ordered, folded set the preview can navigate — restricted to the launch
+  // collection so scrolling never escapes into the Library or another character.
+  const previewScopeAssets = useMemo(
+    () => restrictFoldedToScope(foldedPreviewAssets, previewScopeIds),
+    [foldedPreviewAssets, previewScopeIds],
+  );
   const previewNavigation = useMemo(() => {
-    if (!previewedAsset || foldedPreviewAssets.length < 2) {
+    if (!previewedAsset || previewScopeAssets.length < 2) {
       return { previous: null, next: null };
     }
-    const currentIndex = foldedPreviewAssets.findIndex((asset) => asset.id === previewedAsset.id);
+    const currentIndex = previewScopeAssets.findIndex((asset) => asset.id === previewedAsset.id);
     if (currentIndex < 0) {
       return { previous: null, next: null };
     }
     return {
-      previous: currentIndex > 0 ? foldedPreviewAssets[currentIndex - 1] : null,
-      next: currentIndex < foldedPreviewAssets.length - 1 ? foldedPreviewAssets[currentIndex + 1] : null,
+      previous: currentIndex > 0 ? previewScopeAssets[currentIndex - 1] : null,
+      next: currentIndex < previewScopeAssets.length - 1 ? previewScopeAssets[currentIndex + 1] : null,
     };
-  }, [foldedPreviewAssets, previewedAsset]);
+  }, [previewScopeAssets, previewedAsset]);
   const latestAssets = useMemo(
     () => assets.filter((asset) => asset.generationSetId === latestGenerationSetId),
     [assets, latestGenerationSetId],
@@ -1422,7 +1460,7 @@ export function App() {
   const appContextValue = {
     activeProject,
     mediaAssets,
-    setPreviewAsset,
+    setPreviewAsset: openPreview,
     sendAssetToImage,
     sendAssetToVideo,
     activeTimeline,
@@ -1721,10 +1759,16 @@ export function App() {
             const target =
               previewDirectionRef.current === "previous" ? previous ?? next : next ?? previous;
             await deleteAsset(asset);
-            setPreviewAsset(target ?? null);
+            // Advance within the launch collection; close (and drop the scope)
+            // once it is exhausted.
+            if (target) {
+              setPreviewAsset(target);
+            } else {
+              closePreview();
+            }
           }}
           nextAsset={previewNavigation.next}
-          onClose={() => setPreviewAsset(null)}
+          onClose={closePreview}
           onEditImage={sendAssetToImageEdit}
           onPreviewAsset={(asset, direction) => {
             if (direction) {
@@ -1735,7 +1779,7 @@ export function App() {
           previousAsset={previewNavigation.previous}
           purgeAsset={async (asset) => {
             await purgeAsset(asset);
-            setPreviewAsset(null);
+            closePreview();
           }}
           updateAssetStatus={updateAssetStatus}
         />

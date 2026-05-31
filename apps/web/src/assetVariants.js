@@ -65,3 +65,24 @@ export function findFoldedAssetById(foldedAssets, assetId) {
       asset.variants?.upscaled?.id === assetId,
   );
 }
+
+// Restrict the fullscreen preview's navigable set to the collection it was
+// launched from. `scopeIds` is the ordered snapshot of asset ids the launching
+// gallery rendered; we resolve each against the live folded assets (so trashed/
+// purged items drop out and upscale variants stay folded) and keep the
+// collection's order. A null/empty scope means "everything" (legacy callers).
+export function restrictFoldedToScope(foldedAssets, scopeIds) {
+  if (!scopeIds) {
+    return foldedAssets;
+  }
+  const seen = new Set();
+  const scoped = [];
+  for (const id of scopeIds) {
+    const folded = findFoldedAssetById(foldedAssets, id);
+    if (folded && !seen.has(folded.id)) {
+      seen.add(folded.id);
+      scoped.push(folded);
+    }
+  }
+  return scoped;
+}

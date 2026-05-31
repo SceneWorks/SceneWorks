@@ -827,7 +827,7 @@ export function VideoStudio() {
                       job={job}
                       thumbnailsVariant="video-player"
                       thumbnailAssets={jobAssets}
-                      onThumbnailClick={onPreview}
+                      onThumbnailClick={(asset) => onPreview(asset, jobAssets)}
                       onCancel={onCancelJob}
                       onOpenQueue={onOpenQueue}
                     />
@@ -890,7 +890,7 @@ export function VideoStudio() {
                 </div>
                 <div className="recent-clips-strip">
                   {videoAssets.slice(0, 4).map((asset) => (
-                    <button className="tray-item" key={asset.id} onClick={() => onPreview(asset)} type="button">
+                    <button className="tray-item" key={asset.id} onClick={() => onPreview(asset, videoAssets.slice(0, 4))} type="button">
                       <AssetMedia asset={asset} />
                       <span>{asset.displayName}</span>
                     </button>
@@ -948,7 +948,7 @@ export function VideoStudio() {
                     asset={asset}
                     deleteAsset={deleteAsset}
                     key={asset.id}
-                    onPreview={onPreview}
+                    onPreview={(previewed) => onPreview(previewed, latestAssets.slice(1))}
                     purgeAsset={purgeAsset}
                     updateAssetStatus={updateAssetStatus}
                   />
