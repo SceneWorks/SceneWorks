@@ -1612,6 +1612,7 @@
       "count": 4,
       "height": 1024,
       "loras": [],
+      "maskAssetId": null,
       "mode": "text_to_image",
       "model": "base-model",
       "modelManifestEntry": {
@@ -1708,6 +1709,7 @@
       "count": 4,
       "height": 1024,
       "loras": [],
+      "maskAssetId": null,
       "mode": "text_to_image",
       "model": "base-model",
       "modelManifestEntry": {
@@ -1799,6 +1801,7 @@
         "count": 4,
         "height": 1024,
         "loras": [],
+        "maskAssetId": null,
         "mode": "text_to_image",
         "model": "base-model",
         "modelManifestEntry": {
@@ -1890,6 +1893,7 @@
       "count": 4,
       "height": 1024,
       "loras": [],
+      "maskAssetId": null,
       "mode": "text_to_image",
       "model": "base-model",
       "modelManifestEntry": {
@@ -2885,6 +2889,7 @@
       "count": 4,
       "height": 1024,
       "loras": [],
+      "maskAssetId": null,
       "mode": "text_to_image",
       "model": "base-model",
       "modelManifestEntry": {
