@@ -13,7 +13,7 @@ vi.mock("react-konva", async () => {
 });
 
 import { AppContext } from "../context/AppContext.js";
-import { ImageEditor } from "./ImageEditor.jsx";
+import { ImageEditor, cropRatioForKey, centeredCropRect } from "./ImageEditor.jsx";
 
 // These tests cover the non-canvas surface of the editor (empty state, the inert
 // tool scaffold, and the load affordances). The Konva <Stage> only mounts once a
@@ -70,7 +70,9 @@ describe("ImageEditor scaffold", () => {
 
     const tools = toolButtons(container);
     expect(tools.map((b) => b.textContent.trim())).toEqual(["Move", "Crop", "Upscale", "AI Edit", "Detail", "Color"]);
-    // Move is the active default; the rest are inert placeholders for later slices.
+    // Move is the active default. Without a loaded image Crop is gated off, and the
+    // remaining tools are inert placeholders for later slices — so all but Move are
+    // disabled here.
     expect(tools[0].disabled).toBe(false);
     expect(tools.slice(1).every((b) => b.disabled)).toBe(true);
   });
@@ -82,5 +84,29 @@ describe("ImageEditor scaffold", () => {
 
     await render(baseContext({ activeProject: { id: "project_1", name: "My Project" } }));
     expect(actionButton(container, "Open from project").disabled).toBe(false);
+  });
+});
+
+describe("crop geometry", () => {
+  it("resolves ratio keys, transposing only non-square ratios on rotate", () => {
+    expect(cropRatioForKey("free", false)).toBeNull();
+    expect(cropRatioForKey("1:1", false)).toBe(1);
+    expect(cropRatioForKey("1:1", true)).toBe(1); // square is unaffected by rotate
+    expect(cropRatioForKey("16:9", false)).toBeCloseTo(16 / 9);
+    expect(cropRatioForKey("16:9", true)).toBeCloseTo(9 / 16);
+    expect(cropRatioForKey("3:4", true)).toBeCloseTo(4 / 3);
+  });
+
+  it("centers the largest rect of the ratio that fits in the image", () => {
+    // Square in a landscape image → limited by height, centered horizontally.
+    expect(centeredCropRect(1000, 500, 1)).toEqual({ x: 250, y: 0, width: 500, height: 500 });
+    // 16:9 in a 1000×500 image → limited by height (562.5 > 500), centered.
+    const wide = centeredCropRect(1000, 500, 16 / 9);
+    expect(wide.height).toBe(500);
+    expect(wide.width).toBeCloseTo((500 * 16) / 9);
+    expect(wide.x).toBeCloseTo((1000 - (500 * 16) / 9) / 2);
+    expect(wide.y).toBe(0);
+    // Freeform → centered 80% box.
+    expect(centeredCropRect(800, 600, null)).toEqual({ x: 80, y: 60, width: 640, height: 480 });
   });
 });
