@@ -512,8 +512,10 @@ MODEL_TARGETS = {
         "label": "Stable Diffusion XL",
         "family": "sdxl",
         # Unified base checkpoint: StableDiffusionXLPipeline (T2I) +
-        # StableDiffusionXLImg2ImgPipeline (edit).
+        # StableDiffusionXLImg2ImgPipeline (edit) + StableDiffusionXLInpaintPipeline
+        # (masked edit when a maskAssetId is present — sc-2476).
         "supportsEdit": True,
+        "supportsInpaint": True,
         # Real CFG with negative prompt (not distilled): ~30 steps at guidance
         # 7.0, native 1024x1024. Two CLIP text encoders, so no max_seq_len knob.
         # Ships EulerDiscreteScheduler, which we keep (scheduler UI is epic 1753).
@@ -546,6 +548,7 @@ MODEL_TARGETS = {
         # face-identity engine on the same checkpoint (sc-2008 vs sc-2009).
         "family": "sdxl",
         "supportsEdit": True,
+        "supportsInpaint": True,
         # Real CFG with negative prompt: ~30 steps at guidance 7.0, native 1024.
         "steps": 30,
         "guidanceScale": 7.0,
@@ -662,6 +665,9 @@ class ImageRequest:
     advanced: dict[str, Any]
     model_manifest_entry: dict[str, Any]
     upscale: UpscaleRequest = field(default_factory=UpscaleRequest)
+    # Optional inpaint mask asset (sc-2476): white = edit region. Only honored by
+    # inpaint-capable adapters (SDXL family); others ignore it (whole-image edit).
+    mask_asset_id: str | None = None
 
 
 class ImageUpscaler(Protocol):
@@ -710,6 +716,7 @@ def image_request_from_job(job: dict[str, Any]) -> ImageRequest:
         character_look_id=payload.get("characterLookId"),
         source_asset_id=payload.get("sourceAssetId"),
         reference_asset_id=payload.get("referenceAssetId"),
+        mask_asset_id=payload.get("maskAssetId"),
         model_manifest_entry=(
             payload.get("modelManifestEntry") if isinstance(payload.get("modelManifestEntry"), dict) else {}
         ),
@@ -5671,7 +5678,16 @@ class SdxlDiffusersAdapter:
             # re-generation). It sizes the output from the source, so height/width
             # are dropped by filter_call_kwargs.
             kwargs["image"] = load_source_image(project_path, request)
-            kwargs["strength"] = float(request.advanced.get("strength", 0.6))
+            use_inpaint = bool(request.mask_asset_id) and model_supports_inpaint(request.model)
+            kwargs["strength"] = float(request.advanced.get("strength", 0.85 if use_inpaint else 0.6))
+            if use_inpaint:
+                # Masked inpaint (sc-2476): confine the edit to the white mask region;
+                # the pipeline preserves everything outside. Reuses the resident edit
+                # pipe's components (shared UNet/VAE/encoders → no reload, no extra
+                # VRAM, LoRA-merged UNet carries over). The inpaint pipeline keeps
+                # height/width (unlike img2img), and the mask is aligned to W×H.
+                kwargs["mask_image"] = load_mask_image(project_path, request)
+                pipe = self._as_inpaint_pipe(pipe)
         elif self._use_ip_adapter(request):
             # IP-Adapter conditions T2I on a reference image (style/identity). Vary
             # prompt/seed across the batch to get many images of the same subject.
@@ -5685,6 +5701,22 @@ class SdxlDiffusersAdapter:
         if cancel_requested is not None and cancel_requested():
             raise InterruptedError("Image generation canceled by user.")
         return output.images[0].convert("RGB")
+
+    @staticmethod
+    def _as_inpaint_pipe(pipe: Any) -> Any:
+        """Wrap the resident edit pipe in StableDiffusionXLInpaintPipeline for a masked
+        edit (sc-2476). Passing the loaded pipe's `components` reuses the same module
+        instances — no weight reload, no extra VRAM, and any merged LoRA on the shared
+        UNet carries over. The spike (sc-2475) confirmed the base SDXL 4-ch UNet runs
+        diffusers' legacy mask-blend inpaint cleanly on MPS."""
+        diffusers = importlib.import_module("diffusers")
+        inpaint_class = getattr(diffusers, "StableDiffusionXLInpaintPipeline", None)
+        if inpaint_class is None:
+            raise RuntimeError(
+                "The installed diffusers package does not expose "
+                "StableDiffusionXLInpaintPipeline; install diffusers >= 0.19."
+            )
+        return inpaint_class(**pipe.components)
 
     def _apply_loras(self, pipe: Any, request: ImageRequest, *, lora_key: str | None = None) -> None:
         # lora_key pins the cache slot when the pipe is neither the text nor img2img
@@ -7717,6 +7749,13 @@ def model_supports_edit(model_id: str) -> bool:
     return bool(MODEL_TARGETS.get(model_id, {}).get("supportsEdit"))
 
 
+def model_supports_inpaint(model_id: str) -> bool:
+    """Whether the model honors an inpaint mask (sc-2476). SDXL family only for now —
+    its adapter wraps the loaded pipe's components in StableDiffusionXLInpaintPipeline.
+    Non-inpaint models ignore maskAssetId and run the whole-image edit."""
+    return bool(MODEL_TARGETS.get(model_id, {}).get("supportsInpaint"))
+
+
 def resolve_seed(seed: int | None, prompt: str, index: int, seeds: list[int] | None = None) -> int:
     if seed is not None:
         return int(seed) + index
@@ -7891,6 +7930,21 @@ def load_source_image(project_path: Path, request: ImageRequest) -> Image.Image:
     except (OSError, Image.DecompressionBombError, Image.DecompressionBombWarning) as exc:
         raise RuntimeError(f"Source image could not be loaded safely: {source_path}") from exc
     return image.resize((request.width, request.height))
+
+
+def load_mask_image(project_path: Path, request: ImageRequest) -> Image.Image:
+    # Inpaint mask (sc-2476): grayscale, white = edit region. Resolved only through the
+    # project sidecar/DB (find_asset_media_path constrains to the project root) — no
+    # client path escape hatch, same guard as the source. Resized to the output W×H so
+    # it aligns pixel-for-pixel with the source `load_source_image` returns.
+    if not request.mask_asset_id:
+        raise RuntimeError("Inpaint requires a mask image asset.")
+    mask_path = find_asset_media_path(project_path, request.mask_asset_id)
+    try:
+        mask = Image.open(mask_path).convert("L")
+    except (OSError, Image.DecompressionBombError, Image.DecompressionBombWarning) as exc:
+        raise RuntimeError(f"Mask image could not be loaded safely: {mask_path}") from exc
+    return mask.resize((request.width, request.height))
 
 
 def load_reference_image(project_path: Path, reference_asset_id: str) -> Image.Image:

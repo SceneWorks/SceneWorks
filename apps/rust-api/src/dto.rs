@@ -393,6 +393,11 @@ pub(crate) struct ImageJobRequest {
     // "many images from one reference" flow. ip_adapter_scale rides in `advanced`.
     #[serde(default)]
     pub(crate) reference_asset_id: Option<String>,
+    // Optional inpaint mask asset (sc-2476): white = edit region. Honored only by
+    // inpaint-capable models (the `image_inpaint` capability, SDXL family); others
+    // ignore it and run the whole-image edit. Threaded to the worker payload as-is.
+    #[serde(default)]
+    pub(crate) mask_asset_id: Option<String>,
     #[serde(default = "default_requested_gpu")]
     pub(crate) requested_gpu: String,
     #[serde(default, skip_serializing_if = "ImageUpscaleRequest::is_disabled")]

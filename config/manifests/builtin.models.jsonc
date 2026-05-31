@@ -1336,7 +1336,8 @@
       "adapter": "sdxl_diffusers",
       // character_image: h94/IP-Adapter plus-face for Character Studio reference
       // (sc-2007 resemblance tier; faithful likeness belongs to InstantID — sc-2009).
-      "capabilities": ["text_to_image", "edit_image", "character_image", "style_variations"],
+      // image_inpaint: StableDiffusionXLInpaintPipeline masked edits (sc-2476).
+      "capabilities": ["text_to_image", "edit_image", "image_inpaint", "character_image", "style_variations"],
       "downloads": [
         {
           // Diffusers checkpoint: SDXL base 1.0 (UNet + dual CLIP text encoders
@@ -1418,9 +1419,9 @@
       "type": "image",
       "adapter": "sdxl_diffusers",
       // Photoreal SDXL finetune with the full SDXL feature set (t2i + edit +
-      // reference). Plain photoreal alternative to InstantID — IP-Adapter
-      // plus-face for resemblance, sdxl-family LoRA support.
-      "capabilities": ["text_to_image", "edit_image", "character_image", "style_variations"],
+      // reference + masked inpaint, sc-2476). Plain photoreal alternative to
+      // InstantID — IP-Adapter plus-face for resemblance, sdxl-family LoRA support.
+      "capabilities": ["text_to_image", "edit_image", "image_inpaint", "character_image", "style_variations"],
       "downloads": [
         {
           // Same checkpoint as the InstantID built-in below — single HF cache
