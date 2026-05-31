@@ -247,19 +247,24 @@ function ThumbnailGrid({ assets, variant, onThumbnailClick, isRunning, expectedC
         ) : null;
         const key = asset.id ?? `interim-${index}`;
         const isInterim = asset.__interim === true;
+        // Discarded (trashed-but-not-purged) assets stay in the catalog, so the
+        // resolved record carries the live status. Dim them so they read as
+        // "set aside" without hiding what the run produced.
+        const isDiscarded = asset.status?.trashed === true;
+        const cellClasses = `${cellClass}${isInterim ? " interim" : ""}${isDiscarded ? " discarded" : ""}`;
         return interactive ? (
           <button
             key={key}
-            className={`${cellClass}${isInterim ? " interim" : ""}`}
+            className={cellClasses}
             type="button"
             onClick={() => onThumbnailClick(asset)}
-            aria-label={asset.displayName ?? "Open asset"}
+            aria-label={`${asset.displayName ?? "Open asset"}${isDiscarded ? " (discarded)" : ""}`}
           >
             {inner}
             {label}
           </button>
         ) : (
-          <span key={key} className={`${cellClass}${isInterim ? " interim" : ""}`}>
+          <span key={key} className={cellClasses}>
             {inner}
             {label}
           </span>

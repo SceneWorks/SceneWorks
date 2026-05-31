@@ -457,4 +457,43 @@ describe("WorkerProgressCard thumbnails", () => {
     );
     expect(api.container.querySelector(".worker-progress-card__thumbnails")).toBeNull();
   });
+
+  it("dims discarded (trashed) thumbnails without hiding them", () => {
+    const discarded = { id: "a-3", type: "image", url: "/api/v1/files/a-3.png", status: { trashed: true } };
+    api = render(
+      <WorkerProgressCard
+        job={completedJob}
+        thumbnailsVariant="small-row"
+        thumbnailAssets={[imageAssets[0], discarded]}
+        onThumbnailClick={() => {}}
+      />,
+      makeContext([]),
+    );
+    const cells = api.container.querySelectorAll(".worker-progress-card__thumb-cell");
+    expect(cells).toHaveLength(2);
+    const dimmed = api.container.querySelectorAll(".worker-progress-card__thumb-cell.discarded");
+    expect(dimmed).toHaveLength(1);
+    expect(dimmed[0].getAttribute("aria-label")).toContain("(discarded)");
+  });
+
+  it("swaps a broken (purged) thumbnail for the deleted-asset placeholder", () => {
+    api = render(
+      <WorkerProgressCard
+        job={completedJob}
+        thumbnailsVariant="small-row"
+        thumbnailAssets={[imageAssets[0]]}
+      />,
+      makeContext([]),
+    );
+    const img = api.container.querySelector("img.worker-progress-card__thumb-media");
+    expect(img).not.toBeNull();
+    expect(api.container.querySelector(".asset-thumb-missing")).toBeNull();
+    act(() => {
+      img.dispatchEvent(new window.Event("error", { bubbles: false }));
+    });
+    expect(api.container.querySelector("img.worker-progress-card__thumb-media")).toBeNull();
+    const placeholder = api.container.querySelector(".asset-thumb-missing");
+    expect(placeholder).not.toBeNull();
+    expect(placeholder.getAttribute("aria-label")).toBe("Deleted asset");
+  });
 });

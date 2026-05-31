@@ -7216,11 +7216,44 @@ label {
   outline-offset: -1px;
 }
 
+/* Discarded (trashed-but-not-purged) outputs: faded so they read as set aside
+   while still showing what the run produced. Mirrors .review-card.rejected. */
+.worker-progress-card__thumb-cell.discarded .worker-progress-card__thumb-media {
+  opacity: 0.5;
+}
+
 .worker-progress-card__thumb-media {
   display: block;
   width: 100%;
   height: 100%;
   object-fit: cover;
+}
+
+/* Deleted-asset placeholder (AssetThumbnail.MissingMedia). Shown in place of a
+   thumbnail whose file is gone — e.g. a purged generation output. Fills its
+   cell so the slot is preserved rather than collapsing or showing a broken
+   image. */
+.asset-thumb-missing {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 100%;
+  height: 100%;
+  min-height: 24px;
+  background: var(--surface-2);
+  color: var(--danger);
+}
+
+.asset-thumb-missing svg {
+  width: 38%;
+  min-width: 14px;
+  max-width: 28px;
+  height: auto;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 2.4;
+  stroke-linecap: round;
+  opacity: 0.85;
 }
 
 .worker-progress-card__thumb-label {

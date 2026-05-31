@@ -31,6 +31,30 @@ export function posterUrl(asset) {
   return src.replace(/\.\w+$/, ".poster.jpg");
 }
 
+// Placeholder shown when an asset's underlying file can't be loaded — e.g. it
+// was purged from disk after the job ran, so the URL now 404s. Replaces the
+// browser's broken-image glyph with a clear "deleted" marker (a red X) so queue
+// thumbnails for purged outputs read as removed rather than broken.
+export function MissingMedia({ className = "" }) {
+  return (
+    <span className={`asset-thumb-missing ${className}`.trim()} role="img" aria-label="Deleted asset" title="Deleted">
+      <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+        <path d="M6 6l12 12M18 6L6 18" />
+      </svg>
+    </span>
+  );
+}
+
+// Image thumbnail that falls back to the deleted-asset placeholder once the
+// source fails to load (the file is gone), rather than leaving a broken image.
+function ImageThumb({ src, className }) {
+  const [failed, setFailed] = React.useState(false);
+  if (failed) {
+    return <MissingMedia className={className} />;
+  }
+  return <img alt="" className={className} src={src} onError={() => setFailed(true)} />;
+}
+
 export function AssetThumbnail({ asset, className = "" }) {
   if (!asset) {
     return null;
@@ -43,7 +67,7 @@ export function AssetThumbnail({ asset, className = "" }) {
     return <VideoPoster asset={asset} className={className} />;
   }
   if (assetCanRenderAsImage(asset)) {
-    return <img alt="" className={className} src={src} />;
+    return <ImageThumb src={src} className={className} />;
   }
   return <span className={className}>{asset.type ?? "asset"}</span>;
 }
@@ -51,8 +75,11 @@ export function AssetThumbnail({ asset, className = "" }) {
 function VideoPoster({ asset, className }) {
   const [failed, setFailed] = React.useState(false);
   const poster = posterUrl(asset);
-  if (!poster || failed) {
+  if (!poster) {
     return <span className={className}>{asset.type ?? "video"}</span>;
+  }
+  if (failed) {
+    return <MissingMedia className={className} />;
   }
   return <img alt="" className={className} src={poster} onError={() => setFailed(true)} />;
 }
