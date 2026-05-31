@@ -13,11 +13,39 @@ const MIN_CROP_PX = 8;
 
 // Tools still to come in epic 2427 — rendered as an inert scaffold so the frame
 // (and the next slices' insertion points) are in place. Move + Crop + Upscale +
-// Color are live.
-const UPCOMING_TOOLS = [
-  { id: "edit", label: "AI Edit", story: "sc-2435" },
-  { id: "detail", label: "Detail", story: "sc-2438" },
-];
+// Color + AI Edit are live.
+const UPCOMING_TOOLS = [{ id: "detail", label: "Detail", story: "sc-2438" }];
+
+// Models that can edit an existing image with a prompt — the manifest tags them
+// with an `edit_image`/`image_edit` capability (same filter the Image Studio uses).
+export function editCapableModels(imageModels) {
+  return (imageModels ?? []).filter((model) => {
+    const caps = model.capabilities ?? [];
+    return caps.includes("edit_image") || caps.includes("image_edit");
+  });
+}
+
+// The `POST /api/v1/image/jobs` body for an in-editor prompt edit (sc-2435). Reuses
+// the existing `mode:"edit_image"` flow: the working bitmap is staged as a scratch
+// asset (sc-2432) and referenced by `sourceAssetId`; the result is the new working
+// image at the same dimensions. Pure for unit testing.
+export function buildEditJobBody({ project, requestedGpu, sourceAssetId, model, prompt, seed, width, height }) {
+  return {
+    projectId: project.id,
+    projectName: project.name ?? null,
+    requestedGpu,
+    mode: "edit_image",
+    sourceAssetId,
+    model,
+    prompt,
+    negativePrompt: "",
+    width,
+    height,
+    seed: seed == null || seed === "" ? null : Number(seed),
+    count: 1,
+    advanced: {},
+  };
+}
 
 // Color-grade controls (sc-2439). Each is a normalized −1..1 slider where 0 is the
 // identity; `gradePixel` defines the math. Pure data so the panel + reset are trivial.
@@ -207,6 +235,7 @@ export function ImageEditor() {
     importAsset,
     purgeAsset,
     registerLeaveGuard,
+    imageModels,
   } = useAppContext();
 
   // The working-image session: the single bitmap every tool operates on, plus its
@@ -230,6 +259,20 @@ export function ImageEditor() {
   // Color grade (sc-2439): non-destructive −1..1 adjustments previewed live via a
   // Konva filter, baked into the working image on Apply.
   const [colorAdjust, setColorAdjust] = useState(IDENTITY_COLOR_ADJUST);
+
+  // AI prompt edit (sc-2435): an edit-capable model + instruction + optional seed,
+  // run against the working image through the existing edit_image flow.
+  const editModels = editCapableModels(imageModels);
+  const [editModel, setEditModel] = useState("");
+  const [editPrompt, setEditPrompt] = useState("");
+  const [editSeed, setEditSeed] = useState("");
+
+  // Default the edit-model selection to the first edit-capable model once the model
+  // list loads, and recover if the current pick stops being edit-capable.
+  useEffect(() => {
+    const caps = editCapableModels(imageModels);
+    if (caps.length && !caps.some((model) => model.id === editModel)) setEditModel(caps[0].id);
+  }, [imageModels, editModel]);
 
   // Save / export (sc-2434). `dirty` tracks edits not yet persisted to the Library;
   // `edits` is the ordered provenance chain; `savedAssetId` flags a completed Save
@@ -571,7 +614,7 @@ export function ImageEditor() {
   // track it. The watcher below loads the result back and purges scratch + result —
   // intermediates never persist; only Save (sc-2434) lands a Library asset.
   const runAiOp = useCallback(
-    async ({ buildBody, label, edit }) => {
+    async ({ buildBody, label, edit, endpoint = "/api/v1/jobs" }) => {
       if (!working || aiOp || !activeProject) return;
       setStatus({ loading: false, error: "" });
       let scratch;
@@ -583,10 +626,11 @@ export function ImageEditor() {
         return;
       }
       try {
-        const job = await apiFetch("/api/v1/jobs", token, {
+        const job = await apiFetch(endpoint, token, {
           method: "POST",
           body: JSON.stringify(buildBody(scratch)),
         });
+        if (!job?.id) throw new Error("The job was not created.");
         setAiOp({ jobId: job.id, scratch, source: working.source, label, edit });
         setTool("move");
       } catch (err) {
@@ -611,6 +655,27 @@ export function ImageEditor() {
           factor,
           engine: upscaleEngine,
           displayName: working?.source?.name,
+        }),
+    });
+  }
+
+  function runEdit() {
+    const prompt = editPrompt.trim();
+    if (!prompt || !editModel || !working) return;
+    runAiOp({
+      label: "edit",
+      endpoint: "/api/v1/image/jobs",
+      edit: { op: "edit", model: editModel, prompt },
+      buildBody: (scratch) =>
+        buildEditJobBody({
+          project: activeProject,
+          requestedGpu,
+          sourceAssetId: scratch.id,
+          model: editModel,
+          prompt,
+          seed: editSeed,
+          width: working.width,
+          height: working.height,
         }),
     });
   }
@@ -903,6 +968,15 @@ export function ImageEditor() {
             >
               Color
             </button>
+            <button
+              className={tool === "edit" ? "image-editor-tool active" : "image-editor-tool"}
+              disabled={!!aiOp}
+              onClick={() => setTool("edit")}
+              title="AI prompt edit"
+              type="button"
+            >
+              AI Edit
+            </button>
             {UPCOMING_TOOLS.map((upcoming) => (
               <button
                 className="image-editor-tool"
@@ -1023,11 +1097,60 @@ export function ImageEditor() {
           </div>
         ) : null}
 
+        {tool === "edit" && working ? (
+          <div className="image-editor-cropbar image-editor-editbar">
+            {editModels.length === 0 ? (
+              <span className="image-editor-cropdims">No edit-capable models installed</span>
+            ) : (
+              <>
+                <select
+                  aria-label="Edit model"
+                  className="image-editor-editmodel"
+                  onChange={(event) => setEditModel(event.target.value)}
+                  value={editModel}
+                >
+                  {editModels.map((model) => (
+                    <option key={model.id} value={model.id}>
+                      {model.label ?? model.id}
+                    </option>
+                  ))}
+                </select>
+                <input
+                  aria-label="Edit prompt"
+                  className="image-editor-editprompt"
+                  onChange={(event) => setEditPrompt(event.target.value)}
+                  onKeyDown={(event) => {
+                    if (event.key === "Enter" && editPrompt.trim() && !aiOp) runEdit();
+                  }}
+                  placeholder="Describe the edit…"
+                  type="text"
+                  value={editPrompt}
+                />
+                <input
+                  aria-label="Seed (optional)"
+                  className="image-editor-editseed"
+                  min={0}
+                  onChange={(event) => setEditSeed(event.target.value)}
+                  placeholder="Seed"
+                  type="number"
+                  value={editSeed}
+                />
+                <button className="primary" disabled={!editPrompt.trim() || !!aiOp} onClick={runEdit} type="button">
+                  Edit
+                </button>
+              </>
+            )}
+            <button onClick={() => setTool("move")} type="button">
+              Cancel
+            </button>
+          </div>
+        ) : null}
+
         {aiOp ? (
           <div className="image-editor-busy">
             <div className="image-editor-busy-card">
               <p className="image-editor-busy-title">
-                {aiOp.label === "upscale" ? "Upscaling…" : "Working…"}
+                {aiOp.label === "upscale" ? "Upscaling…" : aiOp.label === "edit" ? "Editing…" : "Working…"}
               </p>
               <p className="image-editor-busy-msg">
                 {activeAiJob?.message ||

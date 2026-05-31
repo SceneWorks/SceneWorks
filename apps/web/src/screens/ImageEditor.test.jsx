@@ -25,6 +25,8 @@ import {
   applyColorAdjustments,
   isIdentityAdjust,
   IDENTITY_COLOR_ADJUST,
+  editCapableModels,
+  buildEditJobBody,
 } from "./ImageEditor.jsx";
 
 // These tests cover the non-canvas surface of the editor (empty state, the inert
@@ -44,6 +46,7 @@ function baseContext(overrides = {}) {
     importAsset: vi.fn(),
     purgeAsset: vi.fn(),
     registerLeaveGuard: vi.fn(),
+    imageModels: [],
     ...overrides,
   };
 }
@@ -244,5 +247,62 @@ describe("color grade", () => {
     const untouched = new Uint8ClampedArray([10, 20, 30, 40]);
     applyColorAdjustments(untouched, IDENTITY_COLOR_ADJUST);
     expect([...untouched]).toEqual([10, 20, 30, 40]);
+  });
+});
+
+describe("AI prompt edit", () => {
+  it("filters models to those tagged edit_image / image_edit", () => {
+    const models = [
+      { id: "z_image_turbo", capabilities: ["text_to_image"] },
+      { id: "qwen_image_edit_2511", capabilities: ["text_to_image", "edit_image"] },
+      { id: "sdxl", capabilities: ["image_edit"] },
+      { id: "no_caps" },
+    ];
+    expect(editCapableModels(models).map((m) => m.id)).toEqual(["qwen_image_edit_2511", "sdxl"]);
+    expect(editCapableModels([])).toEqual([]);
+    expect(editCapableModels(undefined)).toEqual([]);
+  });
+
+  it("builds the edit_image job body the /api/v1/image/jobs endpoint expects", () => {
+    const body = buildEditJobBody({
+      project: { id: "project_1", name: "My Project" },
+      requestedGpu: "auto",
+      sourceAssetId: "asset_scratch",
+      model: "qwen_image_edit_2511",
+      prompt: "make it night",
+      seed: "42",
+      width: 768,
+      height: 1024,
+    });
+    expect(body).toEqual({
+      projectId: "project_1",
+      projectName: "My Project",
+      requestedGpu: "auto",
+      mode: "edit_image",
+      sourceAssetId: "asset_scratch",
+      model: "qwen_image_edit_2511",
+      prompt: "make it night",
+      negativePrompt: "",
+      width: 768,
+      height: 1024,
+      seed: 42,
+      count: 1,
+      advanced: {},
+    });
+  });
+
+  it("treats an empty/blank seed as null (random)", () => {
+    const base = {
+      project: { id: "p", name: "P" },
+      requestedGpu: "auto",
+      sourceAssetId: "a",
+      model: "m",
+      prompt: "x",
+      width: 10,
+      height: 10,
+    };
+    expect(buildEditJobBody({ ...base, seed: "" }).seed).toBeNull();
+    expect(buildEditJobBody({ ...base, seed: null }).seed).toBeNull();
+    expect(buildEditJobBody({ ...base, seed: 7 }).seed).toBe(7);
   });
 });
