@@ -5072,41 +5072,65 @@ label {
 
 /* ── Image Editor (epic 2427) ───────────────────────────────────────────── */
 .image-editor-surface {
-  gap: 14px;
-}
-
-.image-editor-header {
   display: flex;
-  align-items: flex-start;
-  justify-content: space-between;
-  gap: 16px;
-}
-
-.image-editor-actions {
-  display: flex;
-  gap: 8px;
-  flex-wrap: wrap;
-}
-
-.image-editor-notice {
-  margin: 0;
-}
-
-.image-editor-body {
-  display: grid;
-  grid-template-columns: auto minmax(0, 1fr);
-  gap: 12px;
+  flex-direction: column;
+  gap: 0;
   min-height: 0;
 }
 
+/* Full-bleed: drop the card chrome + workspace gutter so the canvas fills the
+   whole content area (the screen title already lives in the top page header). */
+.workspace > section.main-surface.image-editor-surface {
+  flex: 1 1 auto;
+  min-height: 0;
+  margin: 0;
+  padding: 0;
+  border: none;
+  border-radius: 0;
+  background: transparent;
+}
+
+/* Thin bar under the page header: image title + Open / Source. */
+.image-editor-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 8px 16px;
+  border-bottom: 1px solid var(--border);
+  background: var(--surface);
+}
+
+.image-editor-title {
+  font-weight: 600;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.image-editor-bar-actions {
+  display: flex;
+  flex-shrink: 0;
+  gap: 8px;
+}
+
+.image-editor-notice {
+  margin: 8px 16px 0;
+}
+
+/* The tool palette floats over the canvas on the right, like the zoom bar. */
 .image-editor-toolbar {
+  position: absolute;
+  top: 12px;
+  right: 12px;
   display: flex;
   flex-direction: column;
   gap: 6px;
   padding: 8px;
   border: 1px solid var(--border);
   border-radius: var(--r-md);
-  background: var(--surface-2);
+  background: var(--surface);
+  box-shadow: 0 2px 10px rgba(0, 0, 0, 0.18);
 }
 
 .image-editor-tool {
@@ -5121,9 +5145,10 @@ label {
 
 .image-editor-canvas-wrap {
   position: relative;
-  height: clamp(420px, calc(100vh - 240px), 1080px);
-  border: 1px solid var(--border);
-  border-radius: var(--r-md);
+  flex: 1 1 auto;
+  /* Fills the surface via flex; the floor keeps the canvas from collapsing if the
+     flex chain ever resolves to zero height (e.g. a 0-height ancestor). */
+  min-height: 420px;
   background: repeating-conic-gradient(var(--surface-2) 0% 25%, var(--surface) 0% 50%) 50% / 24px 24px;
   overflow: hidden;
 }

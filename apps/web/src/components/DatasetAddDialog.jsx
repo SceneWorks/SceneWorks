@@ -58,7 +58,21 @@ function CandidateGrid({ assets, selectedIds, onToggle, emptyLabel }) {
 // from the (scoped) Asset Library, or pull a character's images. The dataset
 // editor owns membership + import; this dialog only collects a selection or
 // hands files back via onImport.
-export function DatasetAddDialog({ assets = [], memberIds = [], characters = [], importing = false, onImport, onAdd, onClose }) {
+export function DatasetAddDialog({
+  assets = [],
+  memberIds = [],
+  characters = [],
+  importing = false,
+  onImport,
+  onAdd,
+  onClose,
+  title = "Add images to dataset",
+  eyebrow = "Add images",
+  confirmLabel = "Add",
+  fileAccept = "image/*,.txt,text/plain",
+  fileHint = "Drag images and caption .txt files here, or",
+  multiple = true,
+}) {
   const [tab, setTab] = useState("file");
   const [selectedIds, setSelectedIds] = useState([]);
   const [characterId, setCharacterId] = useState(characters[0]?.id ?? "");
@@ -88,7 +102,12 @@ export function DatasetAddDialog({ assets = [], memberIds = [], characters = [],
   );
 
   function toggle(id) {
-    setSelectedIds((ids) => (ids.includes(id) ? ids.filter((value) => value !== id) : [...ids, id]));
+    setSelectedIds((ids) => {
+      if (ids.includes(id)) {
+        return ids.filter((value) => value !== id);
+      }
+      return multiple ? [...ids, id] : [id];
+    });
   }
 
   function commit() {
@@ -118,8 +137,8 @@ export function DatasetAddDialog({ assets = [], memberIds = [], characters = [],
     <Modal className="dataset-add-modal" labelledBy="dataset-add-title" onClose={onClose}>
       <header className="dataset-add-head">
         <div>
-          <p className="eyebrow">Add images</p>
-          <h2 id="dataset-add-title">Add images to dataset</h2>
+          <p className="eyebrow">{eyebrow}</p>
+          <h2 id="dataset-add-title">{title}</h2>
         </div>
         <button className="modal-close" onClick={onClose} type="button">
           Close
@@ -151,12 +170,12 @@ export function DatasetAddDialog({ assets = [], memberIds = [], characters = [],
           }}
           onDrop={handleDrop}
         >
-          <p>Drag images and caption .txt files here, or</p>
+          <p>{fileHint}</p>
           <label className="file-upload-button">
             <input
-              accept="image/*,.txt,text/plain"
+              accept={fileAccept}
               disabled={importing}
-              multiple
+              multiple={multiple}
               onChange={(event) => {
                 onImport(event.target.files);
                 event.target.value = "";
@@ -207,7 +226,8 @@ export function DatasetAddDialog({ assets = [], memberIds = [], characters = [],
               Done
             </button>
             <button className="primary-action" disabled={!selectedIds.length} onClick={commit} type="button">
-              Add {selectedIds.length || ""}
+              {confirmLabel}
+              {multiple ? ` ${selectedIds.length || ""}` : ""}
             </button>
           </div>
         </footer>
