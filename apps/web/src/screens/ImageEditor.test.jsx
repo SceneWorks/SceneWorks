@@ -24,14 +24,15 @@ function baseContext(overrides = {}) {
   return {
     activeProject: null,
     assets: [],
+    characters: [],
     setPreviewAsset: vi.fn(),
     ...overrides,
   };
 }
 
 const toolButtons = (container) => [...container.querySelectorAll(".image-editor-tool")];
-const actionButton = (container, label) =>
-  [...container.querySelectorAll(".image-editor-actions button")].find((b) => b.textContent.trim() === label);
+const barButtons = (container) => [...container.querySelectorAll(".image-editor-bar-actions button")];
+const barButton = (container, label) => barButtons(container).find((b) => b.textContent.trim() === label);
 
 describe("ImageEditor scaffold", () => {
   let container;
@@ -61,29 +62,25 @@ describe("ImageEditor scaffold", () => {
     await act(async () => {});
   }
 
-  it("renders the empty state and inert tool scaffold without a working image", async () => {
+  it("renders the empty state with the tool palette hidden until an image loads", async () => {
     await render(baseContext());
 
     expect(container.textContent).toContain("Open an image to start editing");
-    // No working image → no Konva stage / view controls yet.
+    // No working image → no Konva stage, view controls, or floating tool palette.
     expect(container.querySelector(".image-editor-viewbar")).toBeNull();
-
-    const tools = toolButtons(container);
-    expect(tools.map((b) => b.textContent.trim())).toEqual(["Move", "Crop", "Upscale", "AI Edit", "Detail", "Color"]);
-    // Move is the active default. Without a loaded image Crop is gated off, and the
-    // remaining tools are inert placeholders for later slices — so all but Move are
-    // disabled here.
-    expect(tools[0].disabled).toBe(false);
-    expect(tools.slice(1).every((b) => b.disabled)).toBe(true);
+    expect(toolButtons(container)).toHaveLength(0);
   });
 
-  it("gates 'Open from project' on an active project but always offers upload", async () => {
+  it("offers a single always-enabled 'Open' action (source is chosen in the dialog)", async () => {
     await render(baseContext());
-    expect(actionButton(container, "Open from project").disabled).toBe(true);
-    expect(actionButton(container, "Upload image")).toBeTruthy();
+    expect(barButtons(container).map((b) => b.textContent.trim())).toEqual(["Open"]);
+    expect(barButton(container, "Open").disabled).toBe(false);
 
+    // Still a single, always-enabled Open with a project — there are no separate
+    // "Open from project" / "Upload" buttons; the dialog picks the source.
     await render(baseContext({ activeProject: { id: "project_1", name: "My Project" } }));
-    expect(actionButton(container, "Open from project").disabled).toBe(false);
+    expect(barButtons(container).map((b) => b.textContent.trim())).toEqual(["Open"]);
+    expect(barButton(container, "Open").disabled).toBe(false);
   });
 });
 

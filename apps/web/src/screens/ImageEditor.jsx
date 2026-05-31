@@ -2,7 +2,7 @@ import React, { useCallback, useEffect, useRef, useState } from "react";
 import { Stage, Layer, Image as KonvaImage, Rect, Transformer } from "react-konva";
 import { useAppContext } from "../context/AppContext.js";
 import { assetUrl, assetCanRenderAsImage } from "../components/assetMedia.jsx";
-import { AssetPickerModal } from "../components/AssetPicker.jsx";
+import { DatasetAddDialog } from "../components/DatasetAddDialog.jsx";
 
 const MIN_SCALE = 0.05;
 const MAX_SCALE = 16;
@@ -88,7 +88,7 @@ function blobToImage(blob) {
 }
 
 export function ImageEditor() {
-  const { activeProject, assets, setPreviewAsset } = useAppContext();
+  const { assets, characters, setPreviewAsset } = useAppContext();
 
   // The working-image session: the single bitmap every tool operates on, plus its
   // provenance. This state is the contract consumed by crop/upscale/save and the
@@ -105,7 +105,6 @@ export function ImageEditor() {
   const [cropRect, setCropRect] = useState(null); // image-pixel coords, or null
 
   const containerRef = useRef(null);
-  const fileInputRef = useRef(null);
   const objectUrlRef = useRef(null);
   const needsFitRef = useRef(false);
   const cropRectRef = useRef(null);
@@ -344,237 +343,227 @@ export function ImageEditor() {
 
   return (
     <section className="main-surface image-editor-surface">
-      <div className="surface-header image-editor-header">
-        <div className="section-heading">
-          <p className="eyebrow">Image Editor</p>
-          <h2>{working ? working.source.name : "Edit an image"}</h2>
-        </div>
-        <div className="image-editor-actions">
-          <button onClick={() => setPickerOpen(true)} type="button" disabled={!activeProject}>
-            Open from project
+      <div className="image-editor-bar">
+        <span className="image-editor-title" title={working ? working.source.name : undefined}>
+          {working ? working.source.name : "No image open"}
+        </span>
+        <div className="image-editor-bar-actions">
+          <button className="primary" onClick={() => setPickerOpen(true)} type="button">
+            Open
           </button>
-          <button className="primary" onClick={() => fileInputRef.current?.click()} type="button">
-            Upload image
-          </button>
-          {working ? (
+          {working && working.source.assetId ? (
             <button
-              onClick={() => working.source.assetId && setPreviewAsset?.(imageAssets.find((a) => a.id === working.source.assetId))}
+              onClick={() => setPreviewAsset?.(imageAssets.find((item) => item.id === working.source.assetId))}
+              title="Preview the source asset"
               type="button"
-              disabled={!working.source.assetId}
-              title={working.source.assetId ? "Preview the source asset" : "Uploaded image — not yet a project asset"}
             >
               Source
             </button>
           ) : null}
-          <input
-            accept="image/*"
-            hidden
-            onChange={(event) => {
-              const file = event.target.files?.[0];
-              if (file) openFile(file);
-              event.target.value = "";
-            }}
-            ref={fileInputRef}
-            type="file"
-          />
         </div>
       </div>
 
       {status.error ? <div className="notice notice-error image-editor-notice">{status.error}</div> : null}
 
-      <div className="image-editor-body">
-        <aside className="image-editor-toolbar" aria-label="Editor tools">
-          <button
-            className={tool === "move" ? "image-editor-tool active" : "image-editor-tool"}
-            onClick={cancelCrop}
-            title="Move / pan"
-            type="button"
+      <div
+        className="image-editor-canvas-wrap"
+        onDragOver={(event) => event.preventDefault()}
+        onDrop={handleDrop}
+        ref={containerRef}
+      >
+        {working && stageSize.width > 0 && stageSize.height > 0 ? (
+          <Stage
+            draggable={tool !== "crop"}
+            height={stageSize.height}
+            onDragEnd={(event) => {
+              if (event.target !== event.target.getStage()) return;
+              const stage = event.target.getStage();
+              setView((prev) => ({ ...prev, x: stage.x(), y: stage.y() }));
+            }}
+            onWheel={handleWheel}
+            scaleX={view.scale}
+            scaleY={view.scale}
+            width={stageSize.width}
+            x={view.x}
+            y={view.y}
           >
-            Move
-          </button>
-          <button
-            className={tool === "crop" ? "image-editor-tool active" : "image-editor-tool"}
-            disabled={!working}
-            onClick={startCrop}
-            title="Crop"
-            type="button"
-          >
-            Crop
-          </button>
-          {UPCOMING_TOOLS.map((upcoming) => (
+            <Layer>
+              <Rect
+                fill="#ffffff"
+                height={working.height}
+                shadowBlur={12}
+                shadowColor="rgba(0,0,0,0.35)"
+                width={working.width}
+                x={0}
+                y={0}
+              />
+              <KonvaImage height={working.height} image={working.image} width={working.width} x={0} y={0} />
+              {tool === "crop" && cropRect ? (
+                <>
+                  {cropOverlayRects(working.width, working.height, cropRect).map((rect, index) => (
+                    <Rect
+                      key={index}
+                      fill="rgba(0,0,0,0.55)"
+                      height={rect.height}
+                      listening={false}
+                      width={rect.width}
+                      x={rect.x}
+                      y={rect.y}
+                    />
+                  ))}
+                  <Rect
+                    draggable
+                    fill="rgba(255,255,255,0.01)"
+                    height={cropRect.height}
+                    onDragEnd={handleCropDragEnd}
+                    onTransformEnd={handleCropTransformEnd}
+                    ref={cropRectRef}
+                    stroke="#ffffff"
+                    strokeScaleEnabled={false}
+                    strokeWidth={2}
+                    width={cropRect.width}
+                    x={cropRect.x}
+                    y={cropRect.y}
+                  />
+                  <Transformer
+                    anchorSize={8}
+                    borderStroke="#ffffff"
+                    boundBoxFunc={(oldBox, newBox) =>
+                      newBox.width < MIN_CROP_PX || newBox.height < MIN_CROP_PX ? oldBox : newBox
+                    }
+                    enabledAnchors={
+                      ratioKey === "free"
+                        ? ["top-left", "top-center", "top-right", "middle-left", "middle-right", "bottom-left", "bottom-center", "bottom-right"]
+                        : ["top-left", "top-right", "bottom-left", "bottom-right"]
+                    }
+                    keepRatio={ratioKey !== "free"}
+                    ref={transformerRef}
+                    rotateEnabled={false}
+                  />
+                </>
+              ) : null}
+            </Layer>
+          </Stage>
+        ) : (
+          <div className="image-editor-empty">
+            {status.loading ? (
+              <p>Loading image…</p>
+            ) : (
+              <>
+                <p className="image-editor-empty-title">Open an image to start editing</p>
+                <p className="image-editor-empty-hint">Drag &amp; drop an image here, or click Open.</p>
+              </>
+            )}
+          </div>
+        )}
+
+        {working ? (
+          <aside className="image-editor-toolbar" aria-label="Editor tools">
             <button
-              className="image-editor-tool"
-              disabled
-              key={upcoming.id}
-              title={`${upcoming.label} — coming soon (${upcoming.story})`}
+              className={tool === "move" ? "image-editor-tool active" : "image-editor-tool"}
+              onClick={cancelCrop}
+              title="Move / pan"
               type="button"
             >
-              {upcoming.label}
+              Move
             </button>
-          ))}
-        </aside>
-
-        <div
-          className="image-editor-canvas-wrap"
-          onDragOver={(event) => event.preventDefault()}
-          onDrop={handleDrop}
-          ref={containerRef}
-        >
-          {working && stageSize.width > 0 && stageSize.height > 0 ? (
-            <Stage
-              draggable={tool !== "crop"}
-              height={stageSize.height}
-              onDragEnd={(event) => {
-                if (event.target !== event.target.getStage()) return;
-                const stage = event.target.getStage();
-                setView((prev) => ({ ...prev, x: stage.x(), y: stage.y() }));
-              }}
-              onWheel={handleWheel}
-              scaleX={view.scale}
-              scaleY={view.scale}
-              width={stageSize.width}
-              x={view.x}
-              y={view.y}
+            <button
+              className={tool === "crop" ? "image-editor-tool active" : "image-editor-tool"}
+              onClick={startCrop}
+              title="Crop"
+              type="button"
             >
-              <Layer>
-                <Rect
-                  fill="#ffffff"
-                  height={working.height}
-                  shadowBlur={12}
-                  shadowColor="rgba(0,0,0,0.35)"
-                  width={working.width}
-                  x={0}
-                  y={0}
-                />
-                <KonvaImage height={working.height} image={working.image} width={working.width} x={0} y={0} />
-                {tool === "crop" && cropRect ? (
-                  <>
-                    {cropOverlayRects(working.width, working.height, cropRect).map((rect, index) => (
-                      <Rect
-                        key={index}
-                        fill="rgba(0,0,0,0.55)"
-                        height={rect.height}
-                        listening={false}
-                        width={rect.width}
-                        x={rect.x}
-                        y={rect.y}
-                      />
-                    ))}
-                    <Rect
-                      draggable
-                      fill="rgba(255,255,255,0.01)"
-                      height={cropRect.height}
-                      onDragEnd={handleCropDragEnd}
-                      onTransformEnd={handleCropTransformEnd}
-                      ref={cropRectRef}
-                      stroke="#ffffff"
-                      strokeScaleEnabled={false}
-                      strokeWidth={2}
-                      width={cropRect.width}
-                      x={cropRect.x}
-                      y={cropRect.y}
-                    />
-                    <Transformer
-                      anchorSize={8}
-                      borderStroke="#ffffff"
-                      boundBoxFunc={(oldBox, newBox) =>
-                        newBox.width < MIN_CROP_PX || newBox.height < MIN_CROP_PX ? oldBox : newBox
-                      }
-                      enabledAnchors={
-                        ratioKey === "free"
-                          ? ["top-left", "top-center", "top-right", "middle-left", "middle-right", "bottom-left", "bottom-center", "bottom-right"]
-                          : ["top-left", "top-right", "bottom-left", "bottom-right"]
-                      }
-                      keepRatio={ratioKey !== "free"}
-                      ref={transformerRef}
-                      rotateEnabled={false}
-                    />
-                  </>
-                ) : null}
-              </Layer>
-            </Stage>
-          ) : (
-            <div className="image-editor-empty">
-              {status.loading ? (
-                <p>Loading image…</p>
-              ) : (
-                <>
-                  <p className="image-editor-empty-title">Open an image to start editing</p>
-                  <p className="image-editor-empty-hint">
-                    Drag &amp; drop an image here, upload a file, or open one from this project.
-                  </p>
-                </>
-              )}
-            </div>
-          )}
-
-          {tool === "crop" && cropRect ? (
-            <div className="image-editor-cropbar">
-              <div className="image-editor-ratios" role="group" aria-label="Crop ratio">
-                {CROP_RATIOS.map((entry) => (
-                  <button
-                    className={ratioKey === entry.key ? "active" : ""}
-                    key={entry.key}
-                    onClick={() => chooseRatio(entry.key)}
-                    type="button"
-                  >
-                    {entry.label}
-                  </button>
-                ))}
-              </div>
+              Crop
+            </button>
+            {UPCOMING_TOOLS.map((upcoming) => (
               <button
-                className={rotated ? "active" : ""}
-                disabled={ratioKey === "free" || ratioKey === "1:1"}
-                onClick={toggleRotate}
-                title="Rotate ratio (swap orientation)"
+                className="image-editor-tool"
+                disabled
+                key={upcoming.id}
+                title={`${upcoming.label} — coming soon (${upcoming.story})`}
                 type="button"
               >
-                ⟲ Rotate
+                {upcoming.label}
               </button>
-              <span className="image-editor-cropdims">
-                {Math.round(cropRect.width)} × {Math.round(cropRect.height)}
-              </span>
-              <button className="primary" onClick={applyCrop} type="button">
-                Apply
-              </button>
-              <button onClick={cancelCrop} type="button">
-                Cancel
-              </button>
-            </div>
-          ) : null}
+            ))}
+          </aside>
+        ) : null}
 
-          {working ? (
-            <div className="image-editor-viewbar">
-              <button onClick={() => zoomAtCenter(1 / ZOOM_STEP)} title="Zoom out" type="button">
-                −
-              </button>
-              <span className="image-editor-zoom">{Math.round(view.scale * 100)}%</span>
-              <button onClick={() => zoomAtCenter(ZOOM_STEP)} title="Zoom in" type="button">
-                +
-              </button>
-              <button onClick={fitToView} type="button">
-                Fit
-              </button>
-              <button onClick={actualSize} type="button">
-                100%
-              </button>
-              <span className="image-editor-dims">
-                {working.width} × {working.height}
-              </span>
+        {tool === "crop" && cropRect ? (
+          <div className="image-editor-cropbar">
+            <div className="image-editor-ratios" role="group" aria-label="Crop ratio">
+              {CROP_RATIOS.map((entry) => (
+                <button
+                  className={ratioKey === entry.key ? "active" : ""}
+                  key={entry.key}
+                  onClick={() => chooseRatio(entry.key)}
+                  type="button"
+                >
+                  {entry.label}
+                </button>
+              ))}
             </div>
-          ) : null}
-        </div>
+            <button
+              className={rotated ? "active" : ""}
+              disabled={ratioKey === "free" || ratioKey === "1:1"}
+              onClick={toggleRotate}
+              title="Rotate ratio (swap orientation)"
+              type="button"
+            >
+              ⟲ Rotate
+            </button>
+            <span className="image-editor-cropdims">
+              {Math.round(cropRect.width)} × {Math.round(cropRect.height)}
+            </span>
+            <button className="primary" onClick={applyCrop} type="button">
+              Apply
+            </button>
+            <button onClick={cancelCrop} type="button">
+              Cancel
+            </button>
+          </div>
+        ) : null}
+
+        {working ? (
+          <div className="image-editor-viewbar">
+            <button onClick={() => zoomAtCenter(1 / ZOOM_STEP)} title="Zoom out" type="button">
+              −
+            </button>
+            <span className="image-editor-zoom">{Math.round(view.scale * 100)}%</span>
+            <button onClick={() => zoomAtCenter(ZOOM_STEP)} title="Zoom in" type="button">
+              +
+            </button>
+            <button onClick={fitToView} type="button">
+              Fit
+            </button>
+            <button onClick={actualSize} type="button">
+              100%
+            </button>
+            <span className="image-editor-dims">
+              {working.width} × {working.height}
+            </span>
+          </div>
+        ) : null}
       </div>
 
       {pickerOpen ? (
-        <AssetPickerModal
-          assets={imageAssets}
-          initialSelectedIds={[]}
+        <DatasetAddDialog
+          assets={assets ?? []}
+          characters={characters ?? []}
+          confirmLabel="Open"
+          eyebrow="Open"
+          fileAccept="image/*"
+          fileHint="Drag an image here, or"
           multiple={false}
-          onCancel={() => setPickerOpen(false)}
-          onConfirm={(ids) => {
+          onAdd={(ids) => {
             setPickerOpen(false);
             if (ids[0]) openAsset(ids[0]);
+          }}
+          onClose={() => setPickerOpen(false)}
+          onImport={(files) => {
+            const file = files?.[0];
+            setPickerOpen(false);
+            if (file) openFile(file);
           }}
           title="Open image"
         />
