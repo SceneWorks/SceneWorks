@@ -5281,6 +5281,20 @@ label {
   color: var(--text-muted);
 }
 
+/* AI prompt-edit bar (sc-2435): model picker + prompt + seed inline. */
+.image-editor-editbar .image-editor-editprompt {
+  min-width: 260px;
+  flex: 1 1 260px;
+}
+
+.image-editor-editbar .image-editor-editseed {
+  width: 80px;
+}
+
+.image-editor-editbar .image-editor-editmodel {
+  max-width: 200px;
+}
+
 /* In-flight AI op (upscale, later edit/detail): a blocking overlay over the canvas. */
 .image-editor-busy {
   position: absolute;
