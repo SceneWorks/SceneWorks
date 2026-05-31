@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useRef, useState } from "react";
-import { Stage, Layer, Image as KonvaImage, Rect } from "react-konva";
+import { Stage, Layer, Image as KonvaImage, Rect, Transformer } from "react-konva";
 import { useAppContext } from "../context/AppContext.js";
 import { assetUrl, assetCanRenderAsImage } from "../components/assetMedia.jsx";
 import { AssetPickerModal } from "../components/AssetPicker.jsx";
@@ -7,21 +7,67 @@ import { AssetPickerModal } from "../components/AssetPicker.jsx";
 const MIN_SCALE = 0.05;
 const MAX_SCALE = 16;
 const ZOOM_STEP = 1.2;
-// Leave room for the page chrome (topbar + surface header) so the canvas grows
-// with the viewport without pushing the page into a scroll.
-const CANVAS_MIN_HEIGHT = 420;
+const MIN_CROP_PX = 8;
 
-// Tools that later stories in epic 2427 fill in. Rendered as an inert scaffold
-// here so the editor frame (and the next slices' insertion points) are in place.
+// Tools still to come in epic 2427 — rendered as an inert scaffold so the frame
+// (and the next slices' insertion points) are in place. Move + Crop are live.
 const UPCOMING_TOOLS = [
-  { id: "crop", label: "Crop", story: "sc-2430" },
   { id: "upscale", label: "Upscale", story: "sc-2433" },
   { id: "edit", label: "AI Edit", story: "sc-2435" },
   { id: "detail", label: "Detail", story: "sc-2438" },
   { id: "color", label: "Color", story: "sc-2439" },
 ];
 
+// Predefined crop ratios (width / height). Rotate swaps to the transpose; 1:1 and
+// Freeform are unaffected.
+const CROP_RATIOS = [
+  { key: "free", label: "Freeform", ratio: null },
+  { key: "1:1", label: "1:1", ratio: 1 },
+  { key: "3:4", label: "3:4", ratio: 3 / 4 },
+  { key: "5:7", label: "5:7", ratio: 5 / 7 },
+  { key: "8:10", label: "8:10", ratio: 8 / 10 },
+  { key: "16:9", label: "16:9", ratio: 16 / 9 },
+];
+
 const clamp = (value, min, max) => Math.min(max, Math.max(min, value));
+
+// Resolve a ratio key (+ rotate) to a concrete width/height ratio, or null for
+// freeform. Rotating transposes non-square ratios (3:4 → 4:3); 1:1 is a no-op.
+export function cropRatioForKey(key, rotated) {
+  const found = CROP_RATIOS.find((entry) => entry.key === key);
+  const base = found ? found.ratio : null;
+  if (base == null || base === 1) return base;
+  return rotated ? 1 / base : base;
+}
+
+// Largest rect of the given ratio that fits in the image, centered. Freeform
+// (null ratio) defaults to a centered 80% box. Returns image-pixel coords.
+export function centeredCropRect(imgW, imgH, ratio) {
+  if (ratio == null) {
+    const w = imgW * 0.8;
+    const h = imgH * 0.8;
+    return { x: (imgW - w) / 2, y: (imgH - h) / 2, width: w, height: h };
+  }
+  let w = imgW;
+  let h = w / ratio;
+  if (h > imgH) {
+    h = imgH;
+    w = h * ratio;
+  }
+  return { x: (imgW - w) / 2, y: (imgH - h) / 2, width: w, height: h };
+}
+
+// The four dim rectangles that mask everything outside the crop rect (image coords).
+function cropOverlayRects(imgW, imgH, rect) {
+  const right = rect.x + rect.width;
+  const bottom = rect.y + rect.height;
+  return [
+    { x: 0, y: 0, width: imgW, height: rect.y },
+    { x: 0, y: bottom, width: imgW, height: imgH - bottom },
+    { x: 0, y: rect.y, width: rect.x, height: rect.height },
+    { x: right, y: rect.y, width: imgW - right, height: rect.height },
+  ];
+}
 
 // Decode a blob into an HTMLImageElement via a same-origin object: URL. Asset
 // files are served cross-origin from the API in local dev, so loading the bytes
@@ -52,10 +98,18 @@ export function ImageEditor() {
   const [pickerOpen, setPickerOpen] = useState(false);
   const [view, setView] = useState({ scale: 1, x: 0, y: 0 });
 
+  // Crop tool (sc-2430): client-side, rasterized into a new working image on Apply.
+  const [tool, setTool] = useState("move");
+  const [ratioKey, setRatioKey] = useState("free");
+  const [rotated, setRotated] = useState(false);
+  const [cropRect, setCropRect] = useState(null); // image-pixel coords, or null
+
   const containerRef = useRef(null);
   const fileInputRef = useRef(null);
   const objectUrlRef = useRef(null);
   const needsFitRef = useRef(false);
+  const cropRectRef = useRef(null);
+  const transformerRef = useRef(null);
   const [stageSize, setStageSize] = useState({ width: 0, height: 0 });
 
   const imageAssets = (assets ?? []).filter(assetCanRenderAsImage);
@@ -106,6 +160,8 @@ export function ImageEditor() {
     if (objectUrlRef.current) URL.revokeObjectURL(objectUrlRef.current);
     objectUrlRef.current = objectUrl;
     needsFitRef.current = true;
+    setTool("move");
+    setCropRect(null);
     setWorking({
       image,
       width: image.naturalWidth,
@@ -200,6 +256,92 @@ export function ImageEditor() {
     });
   }
 
+  // ── Crop ────────────────────────────────────────────────────────────────
+  function startCrop() {
+    if (!working) return;
+    setTool("crop");
+    setCropRect(centeredCropRect(working.width, working.height, cropRatioForKey(ratioKey, rotated)));
+  }
+
+  function cancelCrop() {
+    setTool("move");
+    setCropRect(null);
+  }
+
+  function chooseRatio(key) {
+    setRatioKey(key);
+    if (working) setCropRect(centeredCropRect(working.width, working.height, cropRatioForKey(key, rotated)));
+  }
+
+  function toggleRotate() {
+    const next = !rotated;
+    setRotated(next);
+    if (working) setCropRect(centeredCropRect(working.width, working.height, cropRatioForKey(ratioKey, next)));
+  }
+
+  function clampCropToImage(rect) {
+    const width = clamp(rect.width, MIN_CROP_PX, working.width);
+    const height = clamp(rect.height, MIN_CROP_PX, working.height);
+    return {
+      width,
+      height,
+      x: clamp(rect.x, 0, working.width - width),
+      y: clamp(rect.y, 0, working.height - height),
+    };
+  }
+
+  function handleCropDragEnd() {
+    const node = cropRectRef.current;
+    if (!node) return;
+    const next = clampCropToImage({ ...cropRect, x: node.x(), y: node.y() });
+    node.position({ x: next.x, y: next.y });
+    setCropRect(next);
+  }
+
+  function handleCropTransformEnd() {
+    const node = cropRectRef.current;
+    if (!node) return;
+    const next = clampCropToImage({
+      x: node.x(),
+      y: node.y(),
+      width: node.width() * node.scaleX(),
+      height: node.height() * node.scaleY(),
+    });
+    node.scaleX(1);
+    node.scaleY(1);
+    node.setAttrs(next);
+    setCropRect(next);
+  }
+
+  // Apply: rasterize the selected region into a fresh working image. The source
+  // bitmap is blob-backed (never tainted), so reading pixels back is safe. The
+  // result keeps the same source provenance so lineage survives to Save (sc-2434).
+  const applyCrop = useCallback(async () => {
+    if (!working || !cropRect) return;
+    const sx = clamp(Math.round(cropRect.x), 0, working.width - 1);
+    const sy = clamp(Math.round(cropRect.y), 0, working.height - 1);
+    const sw = clamp(Math.round(cropRect.width), 1, working.width - sx);
+    const sh = clamp(Math.round(cropRect.height), 1, working.height - sy);
+    const canvas = document.createElement("canvas");
+    canvas.width = sw;
+    canvas.height = sh;
+    canvas.getContext("2d").drawImage(working.image, sx, sy, sw, sh, 0, 0, sw, sh);
+    const blob = await new Promise((resolve) => canvas.toBlob(resolve, "image/png"));
+    if (!blob) return;
+    const { image, objectUrl } = await blobToImage(blob);
+    installWorkingImage(image, objectUrl, working.source);
+  }, [working, cropRect, installWorkingImage]);
+
+  // Bind the transformer to the crop rect whenever crop mode is active.
+  useEffect(() => {
+    const transformer = transformerRef.current;
+    const node = cropRectRef.current;
+    if (tool === "crop" && transformer && node) {
+      transformer.nodes([node]);
+      transformer.getLayer()?.batchDraw();
+    }
+  }, [tool, cropRect]);
+
   return (
     <section className="main-surface image-editor-surface">
       <div className="surface-header image-editor-header">
@@ -242,18 +384,32 @@ export function ImageEditor() {
 
       <div className="image-editor-body">
         <aside className="image-editor-toolbar" aria-label="Editor tools">
-          <button className="image-editor-tool active" type="button" title="Move / pan (default)">
+          <button
+            className={tool === "move" ? "image-editor-tool active" : "image-editor-tool"}
+            onClick={cancelCrop}
+            title="Move / pan"
+            type="button"
+          >
             Move
           </button>
-          {UPCOMING_TOOLS.map((tool) => (
+          <button
+            className={tool === "crop" ? "image-editor-tool active" : "image-editor-tool"}
+            disabled={!working}
+            onClick={startCrop}
+            title="Crop"
+            type="button"
+          >
+            Crop
+          </button>
+          {UPCOMING_TOOLS.map((upcoming) => (
             <button
               className="image-editor-tool"
               disabled
-              key={tool.id}
-              title={`${tool.label} — coming soon (${tool.story})`}
+              key={upcoming.id}
+              title={`${upcoming.label} — coming soon (${upcoming.story})`}
               type="button"
             >
-              {tool.label}
+              {upcoming.label}
             </button>
           ))}
         </aside>
@@ -266,9 +422,10 @@ export function ImageEditor() {
         >
           {working && stageSize.width > 0 && stageSize.height > 0 ? (
             <Stage
-              draggable
+              draggable={tool !== "crop"}
               height={stageSize.height}
               onDragEnd={(event) => {
+                if (event.target !== event.target.getStage()) return;
                 const stage = event.target.getStage();
                 setView((prev) => ({ ...prev, x: stage.x(), y: stage.y() }));
               }}
@@ -290,6 +447,50 @@ export function ImageEditor() {
                   y={0}
                 />
                 <KonvaImage height={working.height} image={working.image} width={working.width} x={0} y={0} />
+                {tool === "crop" && cropRect ? (
+                  <>
+                    {cropOverlayRects(working.width, working.height, cropRect).map((rect, index) => (
+                      <Rect
+                        key={index}
+                        fill="rgba(0,0,0,0.55)"
+                        height={rect.height}
+                        listening={false}
+                        width={rect.width}
+                        x={rect.x}
+                        y={rect.y}
+                      />
+                    ))}
+                    <Rect
+                      draggable
+                      fill="rgba(255,255,255,0.01)"
+                      height={cropRect.height}
+                      onDragEnd={handleCropDragEnd}
+                      onTransformEnd={handleCropTransformEnd}
+                      ref={cropRectRef}
+                      stroke="#ffffff"
+                      strokeScaleEnabled={false}
+                      strokeWidth={2}
+                      width={cropRect.width}
+                      x={cropRect.x}
+                      y={cropRect.y}
+                    />
+                    <Transformer
+                      anchorSize={8}
+                      borderStroke="#ffffff"
+                      boundBoxFunc={(oldBox, newBox) =>
+                        newBox.width < MIN_CROP_PX || newBox.height < MIN_CROP_PX ? oldBox : newBox
+                      }
+                      enabledAnchors={
+                        ratioKey === "free"
+                          ? ["top-left", "top-center", "top-right", "middle-left", "middle-right", "bottom-left", "bottom-center", "bottom-right"]
+                          : ["top-left", "top-right", "bottom-left", "bottom-right"]
+                      }
+                      keepRatio={ratioKey !== "free"}
+                      ref={transformerRef}
+                      rotateEnabled={false}
+                    />
+                  </>
+                ) : null}
               </Layer>
             </Stage>
           ) : (
@@ -306,6 +507,41 @@ export function ImageEditor() {
               )}
             </div>
           )}
+
+          {tool === "crop" && cropRect ? (
+            <div className="image-editor-cropbar">
+              <div className="image-editor-ratios" role="group" aria-label="Crop ratio">
+                {CROP_RATIOS.map((entry) => (
+                  <button
+                    className={ratioKey === entry.key ? "active" : ""}
+                    key={entry.key}
+                    onClick={() => chooseRatio(entry.key)}
+                    type="button"
+                  >
+                    {entry.label}
+                  </button>
+                ))}
+              </div>
+              <button
+                className={rotated ? "active" : ""}
+                disabled={ratioKey === "free" || ratioKey === "1:1"}
+                onClick={toggleRotate}
+                title="Rotate ratio (swap orientation)"
+                type="button"
+              >
+                ⟲ Rotate
+              </button>
+              <span className="image-editor-cropdims">
+                {Math.round(cropRect.width)} × {Math.round(cropRect.height)}
+              </span>
+              <button className="primary" onClick={applyCrop} type="button">
+                Apply
+              </button>
+              <button onClick={cancelCrop} type="button">
+                Cancel
+              </button>
+            </div>
+          ) : null}
 
           {working ? (
             <div className="image-editor-viewbar">
