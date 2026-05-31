@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useMemo, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { API_BASE_URL, apiFetch, isAbortError } from "../api.js";
 import { AssetDetail, AssetGrid, FullscreenPreview, emptyTrash } from "../components/assetPanels.jsx";
 import { AssetThumbnail } from "../components/assetMedia.jsx";
@@ -66,18 +66,56 @@ function buildCandidates(job) {
   return out;
 }
 
+// Two skeletons from the same photo are near-identical, so flag a new candidate as
+// a likely duplicate of an existing saved pose (or an earlier candidate in the same
+// batch) and start it unkept. Poses are square-canonical, so body keypoints compare
+// directly: mean per-point distance in normalized [0,1] space below DUPLICATE_DISTANCE
+// = "likely the same pose". Catches same-source / near-identical poses (this is not
+// translation/scale-invariant pose-shape matching).
+const DUPLICATE_DISTANCE = 0.03;
+
+function keypointDistance(a, b) {
+  if (!Array.isArray(a) || !Array.isArray(b)) return Infinity;
+  let sum = 0;
+  let count = 0;
+  const len = Math.min(a.length, b.length, 18);
+  for (let i = 0; i < len; i += 1) {
+    const pa = a[i];
+    const pb = b[i];
+    if (!pa || !pb || pa[0] == null || pb[0] == null) continue;
+    sum += Math.hypot(pa[0] - pb[0], pa[1] - pb[1]);
+    count += 1;
+  }
+  return count >= 8 ? sum / count : Infinity; // need enough shared points to trust it
+}
+
+// Annotate each built candidate with `duplicateOf` (the label of the closest match
+// within DUPLICATE_DISTANCE among existing saved poses + earlier candidates) and
+// start duplicates unkept so they aren't accidentally re-added.
+function annotateDuplicates(built, existingPoses) {
+  const existing = (existingPoses ?? [])
+    .filter((pose) => !pose.status?.trashed)
+    .map((pose) => ({ keypoints: pose.pose?.keypoints ?? [], label: pose.displayName || pose.id }));
+  return built.map((candidate, index) => {
+    const pool = [
+      ...existing,
+      ...built.slice(0, index).map((c) => ({ keypoints: c.pose.keypoints, label: c.sourceDisplayName })),
+    ];
+    let best = null;
+    for (const other of pool) {
+      const distance = keypointDistance(candidate.pose.keypoints, other.keypoints);
+      if (distance < DUPLICATE_DISTANCE && (!best || distance < best.distance)) {
+        best = { label: other.label, distance };
+      }
+    }
+    return { ...candidate, duplicateOf: best?.label ?? null, keep: !best };
+  });
+}
+
 // The "Create" tab body: pick photos (DatasetAddDialog), run DWPose, then review,
 // categorize, and save one whole-body pose per detected person to the store.
-function PoseCreatePanel({ hidden, categories, onSaved }) {
-  const {
-    token,
-    activeProject,
-    assets = [],
-    characters = [],
-    importAsset,
-    requestedGpu,
-    jobs = [],
-  } = useAppContext();
+function PoseCreatePanel({ hidden, categories, onSaved, existingPoses }) {
+  const { token, activeProject, assets = [], characters = [], requestedGpu, jobs = [] } = useAppContext();
   const [dialogOpen, setDialogOpen] = useState(false);
   const [sources, setSources] = useState([]); // selected source asset records
   const [phase, setPhase] = useState("idle"); // idle | detecting | review
@@ -87,27 +125,37 @@ function PoseCreatePanel({ hidden, categories, onSaved }) {
   const [saving, setSaving] = useState(false);
   const [importing, setImporting] = useState(false);
 
-  const addSources = useCallback((records) => {
+  // Sources are normalized entries (deduped by `key`): either an asset-backed pick
+  // ({kind:"asset", asset, assetId}) or a transient File-Upload ({kind:"upload",
+  // path, objectUrl}).
+  const mergeSources = useCallback((entries) => {
     setSources((prev) => {
-      const seen = new Set(prev.map((asset) => asset.id));
-      return [...prev, ...records.filter((asset) => asset && !seen.has(asset.id))];
+      const seen = new Set(prev.map((source) => source.key));
+      return [...prev, ...entries.filter((source) => source && !seen.has(source.key))];
     });
   }, []);
 
-  // File tab: import each dropped/selected image into the active project (which
-  // gives the worker an on-disk asset to read), then treat it like any source.
+  // File tab: stage each image to the TRANSIENT pose-source area (NOT a workspace
+  // asset) — the worker reads it by path and deletes it after detection (epic 2282).
   const handleImport = useCallback(
     async (files) => {
-      if (!importAsset) return;
+      const images = Array.from(files).filter((file) => file.type?.startsWith("image/"));
+      if (!images.length) return;
       setImporting(true);
       try {
-        const imported = [];
-        for (const file of Array.from(files)) {
-          if (!file.type?.startsWith("image/")) continue; // pose detection needs images
-          const asset = await importAsset(file, { throwOnError: true });
-          if (asset) imported.push(asset);
-        }
-        addSources(imported);
+        const body = new FormData();
+        for (const file of images) body.append("file", file);
+        const result = await apiFetch("/api/v1/poses/sources", token, { method: "POST", body });
+        const staged = Array.isArray(result?.sources) ? result.sources : [];
+        mergeSources(
+          staged.map((src, index) => ({
+            key: src.path,
+            kind: "upload",
+            path: src.path,
+            displayName: src.displayName ?? images[index]?.name ?? "image",
+            objectUrl: images[index] ? URL.createObjectURL(images[index]) : undefined,
+          })),
+        );
         setError("");
       } catch (err) {
         setError(String(err?.message ?? err));
@@ -115,19 +163,48 @@ function PoseCreatePanel({ hidden, categories, onSaved }) {
         setImporting(false);
       }
     },
-    [importAsset, addSources],
+    [token, mergeSources],
   );
 
-  // Library / Character tabs: resolve the picked ids back to asset records.
+  // Library / Character tabs: resolve the picked ids to asset records.
   const handleAdd = useCallback(
     (selectedIds) => {
-      const records = selectedIds.map((id) => assets.find((asset) => asset.id === id)).filter(Boolean);
-      addSources(records);
+      mergeSources(
+        selectedIds
+          .map((id) => assets.find((asset) => asset.id === id))
+          .filter(Boolean)
+          .map((asset) => ({
+            key: asset.id,
+            kind: "asset",
+            asset,
+            assetId: asset.id,
+            displayName: asset.displayName ?? asset.id,
+          })),
+      );
     },
-    [assets, addSources],
+    [assets, mergeSources],
   );
 
-  const removeSource = (id) => setSources((prev) => prev.filter((asset) => asset.id !== id));
+  const removeSource = (key) =>
+    setSources((prev) => {
+      const target = prev.find((source) => source.key === key);
+      if (target?.objectUrl) URL.revokeObjectURL(target.objectUrl);
+      return prev.filter((source) => source.key !== key);
+    });
+
+  // Revoke any object URLs on unmount (latest set via ref).
+  const sourcesRef = useRef(sources);
+  sourcesRef.current = sources;
+  // Snapshot the existing saved poses for duplicate detection without re-running the
+  // job-watch effect (which would reset the user's keep toggles) when they change.
+  const existingPosesRef = useRef(existingPoses);
+  existingPosesRef.current = existingPoses;
+  useEffect(
+    () => () => {
+      for (const source of sourcesRef.current) if (source.objectUrl) URL.revokeObjectURL(source.objectUrl);
+    },
+    [],
+  );
 
   const generate = useCallback(async () => {
     if (!activeProject || !sources.length) return;
@@ -143,7 +220,11 @@ function PoseCreatePanel({ hidden, categories, onSaved }) {
           requestedGpu,
           payload: {
             projectId: activeProject.id,
-            sources: sources.map((asset) => ({ assetId: asset.id, displayName: asset.displayName })),
+            sources: sources.map((source) =>
+              source.kind === "upload"
+                ? { path: source.path, displayName: source.displayName, temp: true }
+                : { assetId: source.assetId, displayName: source.displayName },
+            ),
           },
         }),
       });
@@ -160,7 +241,7 @@ function PoseCreatePanel({ hidden, categories, onSaved }) {
     const job = jobs.find((item) => item.id === jobId);
     if (!job || !terminalStatuses.has(job.status)) return;
     if (job.status === "completed") {
-      const built = buildCandidates(job);
+      const built = annotateDuplicates(buildCandidates(job), existingPosesRef.current);
       setCandidates(built);
       setPhase("review");
       if (!built.length) setError("No people were detected in the selected images.");
@@ -195,7 +276,10 @@ function PoseCreatePanel({ hidden, categories, onSaved }) {
         pose: candidate.pose,
       }));
       await apiFetch("/api/v1/poses", token, { method: "POST", body: JSON.stringify({ poses }) });
-      setSources([]);
+      setSources((prev) => {
+        for (const source of prev) if (source.objectUrl) URL.revokeObjectURL(source.objectUrl);
+        return [];
+      });
       setCandidates([]);
       setPhase("idle");
       onSaved?.();
@@ -232,11 +316,15 @@ function PoseCreatePanel({ hidden, categories, onSaved }) {
 
           {sources.length ? (
             <div className="dataset-add-grid">
-              {sources.map((asset) => (
-                <div className="dataset-add-card" key={asset.id}>
-                  <AssetThumbnail asset={asset} />
-                  <span>{asset.displayName ?? asset.id}</span>
-                  <button onClick={() => removeSource(asset.id)} type="button">
+              {sources.map((source) => (
+                <div className="dataset-add-card" key={source.key}>
+                  {source.kind === "upload" ? (
+                    <img alt="" src={source.objectUrl} />
+                  ) : (
+                    <AssetThumbnail asset={source.asset} />
+                  )}
+                  <span>{source.displayName}</span>
+                  <button onClick={() => removeSource(source.key)} type="button">
                     Remove
                   </button>
                 </div>
@@ -279,6 +367,9 @@ function PoseCreatePanel({ hidden, categories, onSaved }) {
                     <span>
                       {candidate.sourceDisplayName} · {candidate.facing}
                     </span>
+                    {candidate.duplicateOf ? (
+                      <span className="inline-warning">Possible duplicate of {candidate.duplicateOf}</span>
+                    ) : null}
                     <label>
                       Category
                       <input
@@ -310,7 +401,7 @@ function PoseCreatePanel({ hidden, categories, onSaved }) {
               assets={assets}
               characters={characters}
               importing={importing}
-              memberIds={sources.map((asset) => asset.id)}
+              memberIds={sources.filter((source) => source.kind === "asset").map((source) => source.assetId)}
               onAdd={handleAdd}
               onClose={() => setDialogOpen(false)}
               onImport={handleImport}
@@ -542,6 +633,7 @@ export function PoseLibraryScreen() {
 
       <PoseCreatePanel
         categories={categories.filter((category) => category !== UNCATEGORIZED)}
+        existingPoses={poses}
         hidden={activeTab !== "create"}
         onSaved={() => {
           setActiveTab("poses");

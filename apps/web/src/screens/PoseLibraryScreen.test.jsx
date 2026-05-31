@@ -20,6 +20,9 @@ vi.mock("../api.js", async (importOriginal) => {
       if (method === "POST" && path === "/api/v1/jobs") {
         return { id: "job_pose_1", status: "queued" };
       }
+      if (method === "POST" && path === "/api/v1/poses/sources") {
+        return { sources: [{ path: "/data/cache/pose-uploads/upload-x.png", displayName: "photo.png" }] };
+      }
       return {};
     }),
   };
@@ -278,6 +281,57 @@ describe("PoseLibraryScreen — Create tab", () => {
     expect(body.type).toBe("pose_detect");
     expect(body.projectId).toBe("project_1");
     expect(body.payload.sources).toEqual([{ assetId: "asset_lib_1", displayName: "Photo" }]);
+  });
+
+  it("stages File-Upload sources as temporary uploads, not workspace assets", async () => {
+    window.URL.createObjectURL = () => "blob:test";
+    window.URL.revokeObjectURL = () => {};
+    await render();
+    await click(container.querySelector("#pose-library-tab-create"));
+    await click(byText("Add images"));
+    // File tab is the default; fire a change on its <input type=file> with an image.
+    const fileInput = container.querySelector('input[type="file"]');
+    const file = new File(["x"], "photo.png", { type: "image/png" });
+    Object.defineProperty(fileInput, "files", { value: [file], configurable: true });
+    await act(async () => {
+      fileInput.dispatchEvent(new window.Event("change", { bubbles: true }));
+    });
+
+    // Staged via the transient endpoint — NEVER imported as a workspace asset.
+    expect(apiCalls.some((c) => c.method === "POST" && c.path === "/api/v1/poses/sources")).toBe(true);
+    expect(apiCalls.some((c) => c.method === "POST" && c.path.includes("/assets"))).toBe(false);
+
+    // Generate forwards it as a temp path source (not an assetId).
+    await click(byText("Generate poses"));
+    const job = apiCalls.find((c) => c.method === "POST" && c.path === "/api/v1/jobs");
+    expect(JSON.parse(job.body).payload.sources[0]).toMatchObject({
+      path: "/data/cache/pose-uploads/upload-x.png",
+      temp: true,
+    });
+  });
+
+  it("flags a candidate that duplicates an existing saved pose and starts it unkept", async () => {
+    const kps = Array.from({ length: 8 }, (_, i) => [0.5, 0.1 + 0.05 * i, 5.0]);
+    // The reserved project already holds a pose with these keypoints…
+    poseAssets = [poseAsset({ id: "asset_pose_existing", displayName: "Existing Pose", pose: { keypoints: kps } })];
+    // …and the detector returns a candidate with the same keypoints (same photo).
+    const source = completedJob.result.sources[0];
+    const job = {
+      ...completedJob,
+      result: { sources: [{ ...source, poses: [{ ...source.poses[0], keypoints: kps }] }] },
+    };
+    await render(makeContext({ jobs: [job] }));
+    await click(container.querySelector("#pose-library-tab-create"));
+    await click(byText("Add images"));
+    await click(byText("Asset Library"));
+    await click(byText("Photo"));
+    await click(exactBtn("Add 1"));
+    await click(exactBtn("Done"));
+    await click(byText("Generate poses"));
+
+    expect(container.textContent).toContain("Possible duplicate of Existing Pose");
+    // Duplicates start unkept → nothing queued to save.
+    expect(byText("Save 0 pose")).toBeTruthy();
   });
 
   it("requires a workspace before creating poses", async () => {
