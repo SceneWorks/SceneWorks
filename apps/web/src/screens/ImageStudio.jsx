@@ -1097,7 +1097,7 @@ export function ImageStudio() {
                     thumbnailsVariant="image-grid"
                     thumbnailAssets={completedAssets}
                     expectedThumbnailCount={expectedCount}
-                    onThumbnailClick={onPreview}
+                    onThumbnailClick={(asset) => onPreview(asset, completedAssets)}
                     onCancel={onCancelJob}
                     onOpenQueue={onOpenQueue}
                   />
@@ -1113,7 +1113,7 @@ export function ImageStudio() {
                       asset={asset}
                       deleteAsset={deleteAsset}
                       key={asset.id}
-                      onPreview={onPreview}
+                      onPreview={(previewed) => onPreview(previewed, latestAssets)}
                       purgeAsset={purgeAsset}
                       updateAssetStatus={updateAssetStatus}
                     />

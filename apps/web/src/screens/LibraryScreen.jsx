@@ -23,7 +23,9 @@ export function LibraryScreen() {
     updateAssetStatus,
     updateAssetTags,
   } = useAppContext();
-  const onPreview = setPreviewAsset;
+  // Bind the fullscreen preview to the currently filtered library view so
+  // navigation stays inside the same type/tag/trash scope the user is browsing.
+  const onPreview = (asset) => setPreviewAsset(asset, visibleAssets);
   const onSendImage = (asset) => sendAssetToImage(asset);
   const onSendVideo = (asset) => sendAssetToVideo(asset);
   const onSendEditor = (asset) => {

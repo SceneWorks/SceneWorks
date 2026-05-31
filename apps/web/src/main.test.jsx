@@ -5,7 +5,7 @@ import { App, ErrorBoundary, eventUrl } from "./main.jsx";
 import { AssetPickerField } from "./components/AssetPicker.jsx";
 import { AssetDetail, FullscreenPreview } from "./components/assetPanels.jsx";
 import { liveElapsedSeconds } from "./formatting.js";
-import { dropUpscaledVariants, foldUpscaledAssetVariants } from "./assetVariants.js";
+import { dropUpscaledVariants, foldUpscaledAssetVariants, restrictFoldedToScope } from "./assetVariants.js";
 import { extractFamilies } from "./presetUtils.js";
 import { CharacterStudio } from "./screens/CharacterStudio.jsx";
 import { CharacterAssets, CharacterDatasets } from "./screens/characterPanels.jsx";
@@ -8297,6 +8297,9 @@ describe("SceneWorks app shell", () => {
           upscaled,
         },
       }),
+      // The library binds the preview to its currently filtered view so
+      // navigation can't escape into other collections.
+      expect.arrayContaining([expect.objectContaining({ id: "asset-upscaled" })]),
     );
   });
 
@@ -8320,6 +8323,36 @@ describe("SceneWorks app shell", () => {
       "asset-upscaled",
       "asset-other",
     ]);
+  });
+
+  it("binds fullscreen preview navigation to the launch collection", () => {
+    // The full project (what the old global navigation roamed across).
+    const folded = [
+      { id: "batch-1", type: "image" },
+      { id: "batch-2", type: "image" },
+      { id: "library-1", type: "image" },
+      { id: "character-1", type: "image" },
+    ];
+
+    // Launched from a two-image batch -> navigation stays on those two, in order,
+    // and never reaches the library/character assets.
+    expect(restrictFoldedToScope(folded, ["batch-1", "batch-2"]).map((asset) => asset.id)).toEqual([
+      "batch-1",
+      "batch-2",
+    ]);
+
+    // A scoped id that has since been discarded/purged drops out instead of
+    // leaking the neighbouring collection in to fill its slot.
+    expect(restrictFoldedToScope(folded, ["batch-1", "gone", "batch-2"]).map((asset) => asset.id)).toEqual([
+      "batch-1",
+      "batch-2",
+    ]);
+
+    // A folded scope id resolves through its variants, and no scope falls back to
+    // the full set (legacy callers).
+    const variant = { id: "up-1", type: "image", variants: { original: { id: "orig-1" }, upscaled: { id: "up-1" } } };
+    expect(restrictFoldedToScope([variant, folded[2]], ["orig-1"]).map((asset) => asset.id)).toEqual(["up-1"]);
+    expect(restrictFoldedToScope(folded, null)).toBe(folded);
   });
 
   it("shows discarded assets in Trashcan and exposes restore and purge actions", async () => {

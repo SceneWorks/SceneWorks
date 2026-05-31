@@ -1733,7 +1733,7 @@ export function TrainingStudio({ mode = "training" } = {}) {
                                 key={asset.id}
                               >
                                 <div className="training-caption-card-head">
-                                  <button className="training-caption-card-thumb" onClick={() => onPreview(asset)} type="button">
+                                  <button className="training-caption-card-thumb" onClick={() => onPreview(asset, memberAssets)} type="button">
                                     <AssetThumbnail asset={asset} />
                                   </button>
                                   <div className="training-caption-card-meta">

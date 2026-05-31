@@ -719,7 +719,7 @@ export function EditorScreen() {
             <div className="asset-bin-list">
               {[...mainAssets, ...stillAssets].slice(0, 18).map((asset) => (
                 <article className="bin-asset" key={asset.id}>
-                  <button onClick={() => onPreview(asset)} type="button">
+                  <button onClick={() => onPreview(asset, [...mainAssets, ...stillAssets].slice(0, 18))} type="button">
                     <AssetMedia asset={asset} />
                   </button>
                   <strong>{asset.displayName}</strong>
