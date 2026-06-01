@@ -1706,7 +1706,13 @@ struct ReindexCounts {
 /// Bump whenever the project.db schema changes (new table, column, or index).
 /// `apply_project_migrations` only re-runs its DDL when `PRAGMA user_version`
 /// is behind this; forgetting to bump means an existing DB never gets the change.
-const PROJECT_SCHEMA_VERSION: i64 = 2;
+///
+/// v3: sc-2022 added the `training_datasets.character_id` column to the migration
+/// but left this at 2, so any project.db already stamped at v2 hit the early-return
+/// gate and never got the column — the dataset list query then failed with
+/// "no such column: character_id". Bumping forces the idempotent migration to
+/// replay and add the column on existing databases.
+const PROJECT_SCHEMA_VERSION: i64 = 3;
 
 fn project_schema_version(connection: &Connection) -> ProjectStoreResult<i64> {
     Ok(connection.query_row("pragma user_version", [], |row| row.get(0))?)
@@ -2994,12 +3000,187 @@ fn move_or_copy_file(source: &Path, destination: &Path) -> ProjectStoreResult<()
 #[cfg(test)]
 mod tests {
     use super::{
-        build_generated_asset_sidecar, guess_mime_from_filename, is_safe_relative_path,
-        normalize_asset_tags, AssetScope, CharacterCreateInput, CharacterLookInput, ProjectStore,
-        ProjectStoreError, UploadAsset, GLOBAL_POSES_PROJECT_ID, PROJECT_FOLDERS,
+        apply_project_migrations, build_generated_asset_sidecar, guess_mime_from_filename,
+        is_safe_relative_path, normalize_asset_tags, AssetScope, CharacterCreateInput,
+        CharacterLookInput, ProjectStore, ProjectStoreError, UploadAsset, GLOBAL_POSES_PROJECT_ID,
+        PROJECT_FOLDERS, PROJECT_SCHEMA_VERSION,
     };
+    use rusqlite::Connection;
     use serde_json::{json, Value};
     use std::sync::Arc;
+
+    /// sc-2022 added `training_datasets.character_id` to the migration without
+    /// bumping `PROJECT_SCHEMA_VERSION`, so DBs already stamped at the prior
+    /// version (2) hit the early-return gate and never got the column — the
+    /// dataset list query failed with "no such column: character_id". This
+    /// pins that an old-version DB lacking the column receives it on the next
+    /// `apply_project_migrations` and can be queried.
+    #[test]
+    fn migrations_backfill_training_dataset_character_id_on_old_db() {
+        let connection = Connection::open_in_memory().expect("in-memory db");
+        // Reproduce the pre-character_id table shape and stamp the DB at the
+        // version it would have reached before sc-2022 landed.
+        connection
+            .execute_batch(
+                "
+                create table training_datasets (
+                  id text primary key,
+                  project_id text not null,
+                  name text not null,
+                  modality text not null,
+                  status text not null,
+                  version integer not null,
+                  item_count integer not null default 0,
+                  file_path text not null,
+                  created_at text not null,
+                  updated_at text not null
+                );
+                pragma user_version = 2;
+                ",
+            )
+            .expect("seed old schema");
+
+        let has_character_id = |conn: &Connection| {
+            let mut statement = conn
+                .prepare("pragma table_info(training_datasets)")
+                .expect("table_info");
+            let columns: Vec<String> = statement
+                .query_map([], |row| row.get::<_, String>("name"))
+                .expect("columns")
+                .filter_map(Result::ok)
+                .collect();
+            columns.iter().any(|name| name == "character_id")
+        };
+        assert!(
+            !has_character_id(&connection),
+            "precondition: old DB lacks character_id"
+        );
+
+        apply_project_migrations(&connection).expect("migration runs");
+
+        assert!(
+            has_character_id(&connection),
+            "migration must add character_id to a DB stamped at the prior version"
+        );
+        let stamped: i64 = connection
+            .query_row("pragma user_version", [], |row| row.get(0))
+            .expect("user_version");
+        assert_eq!(stamped, PROJECT_SCHEMA_VERSION);
+        // The exact list query that surfaced the bug now succeeds.
+        connection
+            .prepare(
+                "select id, project_id, name, modality, status, version, item_count, \
+                 created_at, updated_at, file_path, character_id \
+                 from training_datasets where project_id = ?1 \
+                 order by updated_at desc, name asc",
+            )
+            .expect("dataset list query prepares against migrated schema");
+    }
+
+    /// Deterministic fingerprint of the full project.db schema a fresh
+    /// `apply_project_migrations` produces: the stamped `user_version` plus every
+    /// user table's columns (name/type/notnull/default/pk in declaration order)
+    /// and every user-defined index. Used by the schema-drift guard below.
+    fn project_db_schema_fingerprint(connection: &Connection) -> String {
+        let mut lines = Vec::new();
+        let version: i64 = connection
+            .query_row("pragma user_version", [], |row| row.get(0))
+            .expect("user_version");
+        lines.push(format!("user_version={version}"));
+
+        let mut table_names = connection
+            .prepare(
+                "select name from sqlite_master where type = 'table' \
+                 and name not like 'sqlite_%' order by name",
+            )
+            .expect("table query");
+        let tables: Vec<String> = table_names
+            .query_map([], |row| row.get::<_, String>(0))
+            .expect("tables")
+            .filter_map(Result::ok)
+            .collect();
+        for table in &tables {
+            let mut columns = connection
+                .prepare(&format!("pragma table_info({table})"))
+                .expect("table_info");
+            let column_specs: Vec<String> = columns
+                .query_map([], |row| {
+                    let name: String = row.get("name")?;
+                    let ctype: String = row.get("type")?;
+                    let notnull: i64 = row.get("notnull")?;
+                    let default: Option<String> = row.get("dflt_value")?;
+                    let pk: i64 = row.get("pk")?;
+                    Ok(format!(
+                        "{name} {ctype} notnull={notnull} default={} pk={pk}",
+                        default.as_deref().unwrap_or("NULL")
+                    ))
+                })
+                .expect("columns")
+                .filter_map(Result::ok)
+                .collect();
+            lines.push(format!("table {table}: {}", column_specs.join(", ")));
+        }
+
+        let mut index_query = connection
+            .prepare(
+                "select name, tbl_name from sqlite_master where type = 'index' \
+                 and sql is not null and name not like 'sqlite_%' order by name",
+            )
+            .expect("index query");
+        let indexes: Vec<String> = index_query
+            .query_map([], |row| {
+                Ok(format!(
+                    "index {} on {}",
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?
+                ))
+            })
+            .expect("indexes")
+            .filter_map(Result::ok)
+            .collect();
+        lines.extend(indexes);
+
+        lines.join("\n")
+    }
+
+    /// The expected project.db schema, version included. Regenerate ONLY
+    /// alongside a deliberate schema change — and when you do, you MUST bump
+    /// `PROJECT_SCHEMA_VERSION` so the `user_version=` line below changes too.
+    const EXPECTED_PROJECT_DB_SCHEMA: &str = concat!(
+        "user_version=3\n",
+        "table assets: id TEXT notnull=0 default=NULL pk=1, type TEXT notnull=1 default=NULL pk=0, display_name TEXT notnull=1 default=NULL pk=0, file_path TEXT notnull=1 default=NULL pk=0, generation_set_id TEXT notnull=0 default=NULL pk=0, created_at TEXT notnull=1 default=NULL pk=0, favorite INTEGER notnull=1 default=0 pk=0, rating INTEGER notnull=1 default=0 pk=0, rejected INTEGER notnull=1 default=0 pk=0, trashed INTEGER notnull=1 default=0 pk=0, sidecar_path TEXT notnull=0 default=NULL pk=0, origin TEXT notnull=0 default=NULL pk=0\n",
+        "table character_looks: id TEXT notnull=0 default=NULL pk=1, character_id TEXT notnull=1 default=NULL pk=0, name TEXT notnull=1 default=NULL pk=0, description TEXT notnull=1 default='' pk=0, approved_reference_ids TEXT notnull=1 default='[]' pk=0, recipe_settings TEXT notnull=1 default='{}' pk=0, created_at TEXT notnull=1 default=NULL pk=0, updated_at TEXT notnull=1 default=NULL pk=0\n",
+        "table character_loras: id TEXT notnull=0 default=NULL pk=1, character_id TEXT notnull=1 default=NULL pk=0, lora_id TEXT notnull=0 default=NULL pk=0, name TEXT notnull=1 default=NULL pk=0, source_path TEXT notnull=0 default=NULL pk=0, project_path TEXT notnull=0 default=NULL pk=0, copied_into_project INTEGER notnull=1 default=0 pk=0, category TEXT notnull=1 default='character' pk=0, scope TEXT notnull=1 default='project' pk=0, trigger_words TEXT notnull=1 default='[]' pk=0, default_weight REAL notnull=1 default=1.0 pk=0, compatibility TEXT notnull=1 default='{}' pk=0, created_at TEXT notnull=1 default=NULL pk=0, updated_at TEXT notnull=1 default=NULL pk=0\n",
+        "table character_references: character_id TEXT notnull=1 default=NULL pk=1, asset_id TEXT notnull=1 default=NULL pk=2, approved INTEGER notnull=1 default=0 pk=0, role TEXT notnull=1 default='reference' pk=0, notes TEXT notnull=1 default='' pk=0, added_at TEXT notnull=1 default=NULL pk=0, approved_at TEXT notnull=0 default=NULL pk=0\n",
+        "table characters: id TEXT notnull=0 default=NULL pk=1, project_id TEXT notnull=1 default=NULL pk=0, name TEXT notnull=1 default=NULL pk=0, type TEXT notnull=1 default=NULL pk=0, description TEXT notnull=1 default='' pk=0, sidecar_path TEXT notnull=1 default=NULL pk=0, created_at TEXT notnull=1 default=NULL pk=0, updated_at TEXT notnull=1 default=NULL pk=0, archived INTEGER notnull=1 default=0 pk=0\n",
+        "table generation_sets: id TEXT notnull=0 default=NULL pk=1, mode TEXT notnull=1 default=NULL pk=0, model TEXT notnull=1 default=NULL pk=0, prompt TEXT notnull=1 default=NULL pk=0, created_at TEXT notnull=1 default=NULL pk=0, job_id TEXT notnull=0 default=NULL pk=0\n",
+        "table project_metadata: key TEXT notnull=0 default=NULL pk=1, value TEXT notnull=1 default=NULL pk=0\n",
+        "table timelines: id TEXT notnull=0 default=NULL pk=1, name TEXT notnull=1 default=NULL pk=0, file_path TEXT notnull=1 default=NULL pk=0, aspect_ratio TEXT notnull=1 default=NULL pk=0, width INTEGER notnull=1 default=NULL pk=0, height INTEGER notnull=1 default=NULL pk=0, fps INTEGER notnull=1 default=NULL pk=0, duration REAL notnull=1 default=0 pk=0, created_at TEXT notnull=1 default=NULL pk=0, updated_at TEXT notnull=1 default=NULL pk=0\n",
+        "table training_datasets: id TEXT notnull=0 default=NULL pk=1, project_id TEXT notnull=1 default=NULL pk=0, name TEXT notnull=1 default=NULL pk=0, modality TEXT notnull=1 default=NULL pk=0, status TEXT notnull=1 default=NULL pk=0, version INTEGER notnull=1 default=NULL pk=0, item_count INTEGER notnull=1 default=0 pk=0, character_id TEXT notnull=0 default=NULL pk=0, file_path TEXT notnull=1 default=NULL pk=0, created_at TEXT notnull=1 default=NULL pk=0, updated_at TEXT notnull=1 default=NULL pk=0\n",
+        "index idx_training_datasets_project_updated on training_datasets",
+    );
+
+    /// Guards the failure mode behind sc-2537: adding a column/table/index to the
+    /// migration without bumping `PROJECT_SCHEMA_VERSION` leaves existing DBs
+    /// (stamped at the old version) stuck behind the early-return gate, so they
+    /// never receive the change and crash on the next query. This pins the full
+    /// schema — including the stamped `user_version` — so any schema change makes
+    /// the test fail loudly and demand a matching version bump before it can pass.
+    #[test]
+    fn project_db_schema_matches_snapshot_and_forces_version_bump() {
+        let connection = Connection::open_in_memory().expect("in-memory db");
+        apply_project_migrations(&connection).expect("migration runs");
+        let actual = project_db_schema_fingerprint(&connection);
+        assert_eq!(
+            actual, EXPECTED_PROJECT_DB_SCHEMA,
+            "\n\nproject.db schema drift detected.\n\
+             If this change is intentional you MUST:\n  \
+             1. bump PROJECT_SCHEMA_VERSION (so existing DBs re-run the migration), and\n  \
+             2. replace EXPECTED_PROJECT_DB_SCHEMA with the actual schema below.\n\
+             Forgetting step 1 is exactly the sc-2537 bug.\n\n\
+             ----- actual schema -----\n{actual}\n-------------------------\n"
+        );
+    }
 
     #[test]
     fn normalize_asset_tags_trims_lowercases_and_deduplicates() {
