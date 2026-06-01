@@ -85,6 +85,7 @@ import {
 } from "./generationStudio.jsx";
 import { useAppContext } from "../context/AppContext.js";
 import { loadStudioSettings, useStudioSettingsWriter } from "../hooks/useStudioSettings.js";
+import { FitModeControl, effectiveFitMode } from "../components/FitModeControl.jsx";
 import {
   SAMPLER_LABELS,
   SCHEDULER_LABELS,
@@ -227,6 +228,8 @@ export function ImageStudio() {
   const [negativePrompt, setNegativePrompt] = useState(saved.negativePrompt ?? "");
   const [resolution, setResolution] = useState(saved.resolution ?? "1024x1024");
   const [sourceAssetId, setSourceAssetId] = useState(selectedAsset?.id ?? "");
+  // Edit fit mode (epic 2551): how the source is fitted to the output W×H. Never stretch.
+  const [fitMode, setFitMode] = useState(saved.fitMode ?? "crop");
   const [characterId, setCharacterId] = useState("");
   const [characterLookId, setCharacterLookId] = useState("");
   // Character reference (IP-Adapter / InstantID) — the approved reference image whose
@@ -370,6 +373,9 @@ export function ImageStudio() {
   // (controlnetConditioningScale); models without these keys (e.g. Kolors) keep the
   // single reference-strength slider at the global default.
   const identityStructure = selectedModel?.ui?.identityStructure;
+  // Whether the edit model can outpaint (generate the padded border) — only models that
+  // accept an inpaint mask (image_inpaint, SDXL family). Gates the Outpaint fit option.
+  const editInpaintCapable = (selectedModel?.capabilities ?? []).includes("image_inpaint");
   // Canonical head angles the model can render from a frontal reference (InstantID).
   const viewAngles = Array.isArray(selectedModel?.ui?.viewAngles) ? selectedModel.ui.viewAngles : null;
   // Whether the model supports the OpenPose pose library (InstantID).
@@ -612,6 +618,7 @@ export function ImageStudio() {
     seed,
     negativePrompt,
     resolution,
+    fitMode,
     ipAdapterScale,
     controlnetScale,
     trueCfgScale,
@@ -768,6 +775,9 @@ export function ImageStudio() {
         characterId: mode === "character_image" ? characterId || null : null,
         characterLookId: mode === "character_image" ? characterLookId || null : null,
         sourceAssetId: mode === "edit_image" ? sourceAssetId || null : null,
+        // Fit mode applies to edits only; coerced so a stale "outpaint" never reaches a
+        // non-inpaint model (epic 2551). Omitted for non-edit modes (worker default crop).
+        fitMode: mode === "edit_image" ? effectiveFitMode(fitMode, editInpaintCapable) : undefined,
         referenceAssetId: mode === "character_image" ? referenceAssetId || null : null,
         loras: selectedLoras.map((lora) => serializeLora(lora, { weight: effectiveLoraWeight(lora) })),
         ...(upscaleEnabled
@@ -916,14 +926,21 @@ export function ImageStudio() {
         {mode === "edit_image" || mode === "character_image" ? (
           <div className="studio-source-band">
             {mode === "edit_image" ? (
-              <AssetPickerField
-                assets={editImageAssets}
-                buttonLabel="Select image"
-                emptyLabel="No source image selected"
-                label="Source"
-                onChange={setSourceAssetId}
-                value={sourceAssetId}
-              />
+              <>
+                <AssetPickerField
+                  assets={editImageAssets}
+                  buttonLabel="Select image"
+                  emptyLabel="No source image selected"
+                  label="Source"
+                  onChange={setSourceAssetId}
+                  value={sourceAssetId}
+                />
+                <FitModeControl
+                  value={effectiveFitMode(fitMode, editInpaintCapable)}
+                  onChange={setFitMode}
+                  inpaintCapable={editInpaintCapable}
+                />
+              </>
             ) : null}
 
             {mode === "character_image" ? (

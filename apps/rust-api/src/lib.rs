@@ -1972,6 +1972,12 @@ fn default_style_preset() -> String {
     "cinematic".to_owned()
 }
 
+fn default_fit_mode() -> String {
+    // epic 2551: never stretch by default. "crop" covers the frame undistorted; the
+    // worker normalizes unknown values back to crop, so this is just the wire default.
+    "crop".to_owned()
+}
+
 fn default_video_mode() -> String {
     "image_to_video".to_owned()
 }

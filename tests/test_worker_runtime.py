@@ -44,6 +44,7 @@ from scene_worker.image_adapters import (
     create_image_adapter,
     create_image_upscaler,
     emit_worker_event,
+    fit_image,
     format_batch_running_message,
     gpu_memory_snapshot,
     huggingface_repo_cache_path,
@@ -52,9 +53,12 @@ from scene_worker.image_adapters import (
     lens_resolution_for,
     load_mask_image,
     load_reference_image,
+    load_source_image,
     model_supports_detail,
     model_supports_edit,
     model_supports_inpaint,
+    normalize_fit_mode,
+    outpaint_border_mask,
     pipeline_component_devices,
     require_inference_backend_for_gpu_worker,
     interleave_resolution_for,
@@ -421,6 +425,142 @@ def test_load_mask_image_resolves_grayscale_and_aligns_to_output(tmp_path, monke
     # No mask id → explicit error (callers gate on mask_asset_id first).
     with pytest.raises(RuntimeError, match="mask image asset"):
         load_mask_image(tmp_path, image_request_from_job({"payload": {"projectId": "p"}}))
+
+
+def test_normalize_fit_mode_defaults_to_crop():
+    # sc-2552: missing/unknown fit modes fall back to crop (never silently stretch).
+    assert normalize_fit_mode(None) == "crop"
+    assert normalize_fit_mode("") == "crop"
+    assert normalize_fit_mode("bogus") == "crop"
+    # Known modes pass through, case-insensitively.
+    assert normalize_fit_mode("crop") == "crop"
+    assert normalize_fit_mode("pad") == "pad"
+    assert normalize_fit_mode("outpaint") == "outpaint"
+    assert normalize_fit_mode("Stretch") == "stretch"
+    # Default on the request model is crop when fitMode is absent.
+    assert image_request_from_job({"payload": {"projectId": "p"}}).fit_mode == "crop"
+    assert (
+        image_request_from_job({"payload": {"projectId": "p", "fitMode": "pad"}}).fit_mode == "pad"
+    )
+
+
+def test_fit_image_crop_pad_stretch_geometry():
+    # sc-2552: a 2:1 source fitted to a 1:1 box. crop covers (no bars), pad letterboxes
+    # (neutral bars), stretch distorts. All return exactly the target size.
+    src = Image.new("RGB", (40, 20), (255, 0, 0))  # solid red, landscape 2:1
+
+    cropped = fit_image(src, 100, 100, "crop")
+    assert cropped.size == (100, 100)
+    # Cover scale (×5) fills the frame with red — no bars anywhere.
+    assert cropped.getpixel((50, 0)) == (255, 0, 0)
+    assert cropped.getpixel((50, 99)) == (255, 0, 0)
+
+    padded = fit_image(src, 100, 100, "pad")
+    assert padded.size == (100, 100)
+    # Contain scale (×2.5) → 100×50 centered; top/bottom rows are neutral bars.
+    assert padded.getpixel((50, 0)) == (0, 0, 0)
+    assert padded.getpixel((50, 99)) == (0, 0, 0)
+    assert padded.getpixel((50, 50)) == (255, 0, 0)
+
+    # outpaint shares pad geometry (the bars become the generate region downstream).
+    assert fit_image(src, 100, 100, "outpaint").getpixel((50, 0)) == (0, 0, 0)
+
+    stretched = fit_image(src, 100, 100, "stretch")
+    assert stretched.size == (100, 100)
+    assert stretched.getpixel((50, 0)) == (255, 0, 0)  # distorted to fill, no bars
+
+
+def test_load_source_image_honors_fit_mode_and_size_override(tmp_path, monkeypatch):
+    # sc-2552: the source is fitted per request.fit_mode; explicit width/height override
+    # the request dims (SenseNova snapped-bucket path).
+    src = Image.new("RGB", (40, 20), (255, 0, 0))
+    src_path = tmp_path / "src.png"
+    src.save(src_path, "PNG")
+    monkeypatch.setattr(
+        "scene_worker.image_adapters.find_asset_media_path",
+        lambda project_path, asset_id: src_path,
+    )
+    # Output dims go through the 256-floor clamp in image_request_from_job, so use 400².
+    pad_req = image_request_from_job(
+        {"payload": {"projectId": "p", "mode": "edit_image", "sourceAssetId": "asset_src",
+                     "fitMode": "pad", "width": 400, "height": 400}}
+    )
+    padded = load_source_image(tmp_path, pad_req)
+    assert padded.size == (400, 400)
+    assert padded.getpixel((200, 0)) == (0, 0, 0)  # letterbox bar
+    assert padded.getpixel((200, 200)) == (255, 0, 0)  # centered image
+
+    # Default (crop) covers the frame — no bars.
+    crop_req = image_request_from_job(
+        {"payload": {"projectId": "p", "mode": "edit_image", "sourceAssetId": "asset_src",
+                     "width": 400, "height": 400}}
+    )
+    assert load_source_image(tmp_path, crop_req).getpixel((200, 0)) == (255, 0, 0)
+
+    # Size override wins over the request dims (SenseNova snapped bucket); bypasses clamp.
+    assert load_source_image(tmp_path, crop_req, 64, 48).size == (64, 48)
+
+
+def test_load_mask_image_pad_keeps_bars_black(tmp_path, monkeypatch):
+    # sc-2552: a padded mask must keep the bars black (= keep), only the original
+    # region carries the user's white edit area, aligned with the padded source.
+    mask = Image.new("RGB", (40, 20), "white")
+    mask_path = tmp_path / "mask.png"
+    mask.save(mask_path, "PNG")
+    monkeypatch.setattr(
+        "scene_worker.image_adapters.find_asset_media_path",
+        lambda project_path, asset_id: mask_path,
+    )
+    request = image_request_from_job(
+        {"payload": {"projectId": "p", "mode": "edit_image", "sourceAssetId": "asset_src",
+                     "maskAssetId": "asset_mask", "fitMode": "pad", "width": 400, "height": 400}}
+    )
+    loaded = load_mask_image(tmp_path, request)
+    assert loaded.mode == "L"
+    assert loaded.size == (400, 400)
+    assert loaded.getpixel((200, 0)) == 0  # padded bar = keep
+    assert loaded.getpixel((200, 200)) == 255  # original region = edit
+
+
+def test_outpaint_border_mask_marks_bars_white_keeps_center_black():
+    # sc-2553: white = padded border to generate, black = centered source to keep,
+    # geometry matching fit_image(..., "pad").
+    src = Image.new("RGB", (40, 20), (255, 0, 0))  # 2:1 → top/bottom bars in a square box
+    mask = outpaint_border_mask(src, 400, 400)
+    assert mask.mode == "L"
+    assert mask.size == (400, 400)
+    assert mask.getpixel((200, 0)) == 255  # top bar = generate
+    assert mask.getpixel((200, 399)) == 255  # bottom bar = generate
+    assert mask.getpixel((200, 200)) == 0  # centered source = keep
+    # A source already matching the box aspect leaves nothing to generate (all keep).
+    flush = outpaint_border_mask(Image.new("RGB", (50, 50)), 400, 400)
+    assert flush.getpixel((0, 0)) == 0 and flush.getpixel((200, 200)) == 0
+
+
+def test_outpaint_border_mask_feather_softens_seam():
+    # sc-2553: a feather introduces intermediate (anti-aliased) values at the seam;
+    # the hard mask is strictly binary.
+    src = Image.new("RGB", (40, 20), (255, 0, 0))
+    hard = outpaint_border_mask(src, 400, 400, feather=0)
+    soft = outpaint_border_mask(src, 400, 400, feather=20)
+    column_hard = {hard.getpixel((200, y)) for y in range(400)}
+    assert column_hard <= {0, 255}  # binary
+    assert any(0 < soft.getpixel((200, y)) < 255 for y in range(400))  # gradient
+
+
+def test_outpaint_feather_default_override_and_clamp():
+    # sc-2553: feather defaults to ~1.5% of the short edge; advanced.outpaintFeather
+    # overrides, clamped to [0, 128], bad values fall back to the default.
+    base = {"projectId": "p", "mode": "edit_image", "sourceAssetId": "s",
+            "width": 1024, "height": 768}
+    default = round(768 * 0.015)
+    assert SdxlDiffusersAdapter._outpaint_feather(image_request_from_job({"payload": base})) == default
+    over = image_request_from_job({"payload": {**base, "advanced": {"outpaintFeather": 4}}})
+    assert SdxlDiffusersAdapter._outpaint_feather(over) == 4
+    huge = image_request_from_job({"payload": {**base, "advanced": {"outpaintFeather": 9999}}})
+    assert SdxlDiffusersAdapter._outpaint_feather(huge) == 128
+    bad = image_request_from_job({"payload": {**base, "advanced": {"outpaintFeather": "nope"}}})
+    assert SdxlDiffusersAdapter._outpaint_feather(bad) == default
 
 
 def test_run_image_upscale_requires_source_asset(monkeypatch, tmp_path):

@@ -18,7 +18,7 @@ from textwrap import wrap
 from typing import TYPE_CHECKING, Any, Callable, Iterable, Protocol, TypeVar
 from uuid import uuid4
 
-from PIL import Image, ImageDraw, ImageFont
+from PIL import Image, ImageChops, ImageDraw, ImageFilter, ImageFont
 
 from sceneworks_shared import (
     find_asset_sidecar_path,
@@ -675,6 +675,10 @@ class ImageRequest:
     # Optional inpaint mask asset (sc-2476): white = edit region. Only honored by
     # inpaint-capable adapters (SDXL family); others ignore it (whole-image edit).
     mask_asset_id: str | None = None
+    # How the source is fitted to the output W×H on an edit (epic 2551, sc-2552):
+    # "crop" (cover, DEFAULT), "pad" (letterbox), "outpaint" (pad + generate the
+    # border — sc-2553), "stretch" (legacy distort). Never UI-exposed as stretch.
+    fit_mode: str = "crop"
 
 
 class ImageUpscaler(Protocol):
@@ -701,6 +705,17 @@ def upscale_request_from_payload(payload: dict[str, Any]) -> UpscaleRequest:
     return UpscaleRequest(enabled=enabled, factor=factor, engine=engine)
 
 
+_FIT_MODES = ("crop", "pad", "outpaint", "stretch")
+
+
+def normalize_fit_mode(value: Any) -> str:
+    """Coerce a client-supplied fitMode to a known mode, defaulting to "crop"
+    (the never-distort default — epic 2551). Unknown/missing values fall back to
+    "crop" rather than silently stretching."""
+    mode = str(value or "").strip().lower()
+    return mode if mode in _FIT_MODES else "crop"
+
+
 def image_request_from_job(job: dict[str, Any]) -> ImageRequest:
     payload = job["payload"]
     return ImageRequest(
@@ -724,6 +739,7 @@ def image_request_from_job(job: dict[str, Any]) -> ImageRequest:
         source_asset_id=payload.get("sourceAssetId"),
         reference_asset_id=payload.get("referenceAssetId"),
         mask_asset_id=payload.get("maskAssetId"),
+        fit_mode=normalize_fit_mode(payload.get("fitMode")),
         model_manifest_entry=(
             payload.get("modelManifestEntry") if isinstance(payload.get("modelManifestEntry"), dict) else {}
         ),
@@ -5684,17 +5700,37 @@ class SdxlDiffusersAdapter:
             # controls how far the result moves from it (0 = unchanged, 1 = full
             # re-generation). It sizes the output from the source, so height/width
             # are dropped by filter_call_kwargs.
-            kwargs["image"] = load_source_image(project_path, request)
-            use_inpaint = bool(request.mask_asset_id) and model_supports_inpaint(request.model)
-            kwargs["strength"] = float(request.advanced.get("strength", 0.85 if use_inpaint else 0.6))
-            if use_inpaint:
-                # Masked inpaint (sc-2476): confine the edit to the white mask region;
-                # the pipeline preserves everything outside. Reuses the resident edit
-                # pipe's components (shared UNet/VAE/encoders → no reload, no extra
-                # VRAM, LoRA-merged UNet carries over). The inpaint pipeline keeps
-                # height/width (unlike img2img), and the mask is aligned to W×H.
-                kwargs["mask_image"] = load_mask_image(project_path, request)
+            inpaint_capable = model_supports_inpaint(request.model)
+            use_inpaint = bool(request.mask_asset_id) and inpaint_capable
+            # Outpaint (sc-2553): fit_mode "outpaint" pads the source onto the W×H
+            # canvas, then GENERATES the border via the inpaint pipe. Only inpaint-capable
+            # models (SDXL family) do this; elsewhere "outpaint" already degraded to pad
+            # geometry in fit_image, so the source is just letterboxed here.
+            outpaint = request.fit_mode == "outpaint" and inpaint_capable
+            kwargs["strength"] = float(
+                request.advanced.get("strength", 0.85 if (use_inpaint or outpaint) else 0.6)
+            )
+            if outpaint:
+                native = open_source_image(project_path, request)
+                kwargs["image"] = fit_image(native, request.width, request.height, "pad")
+                mask = outpaint_border_mask(
+                    native, request.width, request.height, self._outpaint_feather(request)
+                )
+                if request.mask_asset_id:
+                    # Union the user's edit region with the generated border (white wins).
+                    mask = ImageChops.lighter(mask, load_mask_image(project_path, request))
+                kwargs["mask_image"] = mask
                 pipe = self._as_inpaint_pipe(pipe)
+            else:
+                kwargs["image"] = load_source_image(project_path, request)
+                if use_inpaint:
+                    # Masked inpaint (sc-2476): confine the edit to the white mask region;
+                    # the pipeline preserves everything outside. Reuses the resident edit
+                    # pipe's components (shared UNet/VAE/encoders → no reload, no extra
+                    # VRAM, LoRA-merged UNet carries over). The inpaint pipeline keeps
+                    # height/width (unlike img2img), and the mask is aligned to W×H.
+                    kwargs["mask_image"] = load_mask_image(project_path, request)
+                    pipe = self._as_inpaint_pipe(pipe)
         elif self._use_ip_adapter(request):
             # IP-Adapter conditions T2I on a reference image (style/identity). Vary
             # prompt/seed across the batch to get many images of the same subject.
@@ -5708,6 +5744,19 @@ class SdxlDiffusersAdapter:
         if cancel_requested is not None and cancel_requested():
             raise InterruptedError("Image generation canceled by user.")
         return output.images[0].convert("RGB")
+
+    @staticmethod
+    def _outpaint_feather(request: ImageRequest) -> int:
+        """Seam feather (px) for outpaint (sc-2553). Defaults to ~1.5% of the short edge
+        so the generated border blends into the original; advanced.outpaintFeather
+        overrides (0 = hard edge). Clamped to [0, 128]."""
+        default = round(min(request.width, request.height) * 0.015)
+        raw = request.advanced.get("outpaintFeather", default)
+        try:
+            feather = int(raw)
+        except (TypeError, ValueError):
+            feather = default
+        return max(0, min(feather, 128))
 
     @staticmethod
     def _as_inpaint_pipe(pipe: Any) -> Any:
@@ -6641,7 +6690,9 @@ class SenseNovaU1Adapter:
         img_guidance_scale = self._image_guidance_scale(request, default=1.5 if is_character_image else 1.0)
         width, height = sensenova_resolution_for(request.width, request.height)
         if is_edit:
-            source_image = load_source_image(project_path, request)
+            # Fit the source to the SNAPPED bucket dims (not the raw request) so the
+            # edit canvas matches what the pipeline renders — avoids a secondary stretch.
+            source_image = load_source_image(project_path, request, width, height)
         elif is_character_image:
             # Reference is loaded at the requested W×H so the model can match the
             # output bucket directly (matches the edit path's resize behavior).
@@ -7932,25 +7983,106 @@ def select_torch_dtype(torch: Any, device: str, requested: Any) -> Any:
     return torch.bfloat16
 
 
-def load_source_image(project_path: Path, request: ImageRequest) -> Image.Image:
-    # Resolve only through the project sidecar/DB (find_asset_media_path constrains the
-    # result to the project root). No client-supplied path escape hatch: an arbitrary
-    # sourceImagePath would let an edit job read any file the worker can open.
+def _contain_box(src_w: int, src_h: int, width: int, height: int) -> tuple[int, int, int, int]:
+    """Where a `src_w`×`src_h` image lands when contained (long edge fits) and centered
+    in a `width`×`height` box: returns (new_w, new_h, left, top). Shared by the pad fit
+    and the outpaint border mask so the kept region and the source line up exactly."""
+    ratio = min(width / src_w, height / src_h)
+    new_w = max(1, round(src_w * ratio))
+    new_h = max(1, round(src_h * ratio))
+    return new_w, new_h, (width - new_w) // 2, (height - new_h) // 2
+
+
+def outpaint_border_mask(source: Image.Image, width: int, height: int, feather: int = 0) -> Image.Image:
+    """Inpaint mask for outpaint (sc-2553): white = the padded border to GENERATE,
+    black = the centered source rect to KEEP. Geometry matches `fit_image(..., "pad")`
+    so the mask aligns with the padded source. `feather` (px) softens the seam via a
+    gaussian blur, blending generated fill into the original."""
+    new_w, new_h, left, top = _contain_box(source.width, source.height, max(1, int(width)), max(1, int(height)))
+    mask = Image.new("L", (max(1, int(width)), max(1, int(height))), 255)
+    mask.paste(Image.new("L", (new_w, new_h), 0), (left, top))
+    if feather > 0:
+        mask = mask.filter(ImageFilter.GaussianBlur(radius=feather))
+    return mask
+
+
+def fit_image(image: Image.Image, width: int, height: int, mode: str) -> Image.Image:
+    """Resize `image` to exactly `width`×`height` honoring `mode` without distorting
+    it (epic 2551, sc-2552). Works for RGB sources and "L" masks alike:
+
+      - "crop"     : scale to COVER the frame (short edge fits), center-crop the
+                     overflow. No bars, no distortion, trims some edge content.
+      - "pad"      : scale to CONTAIN (long edge fits), center on a neutral canvas
+                     (letterbox). No distortion, nothing lost, neutral bars added.
+      - "outpaint" : same geometry as "pad" — the padded canvas is the inpaint base;
+                     the border mask + generation is built by the caller (sc-2553).
+      - "stretch"  : legacy non-aspect-preserving resize (never UI-exposed).
+
+    For "L" masks the pad fill is black (0 = keep), so a padded user mask never
+    accidentally marks the bars as an edit region.
+    """
+    width = max(1, int(width))
+    height = max(1, int(height))
+    if mode == "stretch":
+        return image.resize((width, height), Image.LANCZOS)
+    if mode == "crop":
+        ratio = max(width / image.width, height / image.height)
+        # ceil so the scaled image always fully covers the target before cropping.
+        new_w = max(width, math.ceil(image.width * ratio))
+        new_h = max(height, math.ceil(image.height * ratio))
+        resized = image.resize((new_w, new_h), Image.LANCZOS)
+        left = (new_w - width) // 2
+        top = (new_h - height) // 2
+        return resized.crop((left, top, left + width, top + height))
+    # "pad" / "outpaint": contain + center on a neutral canvas.
+    new_w, new_h, left, top = _contain_box(image.width, image.height, width, height)
+    resized = image.resize((new_w, new_h), Image.LANCZOS)
+    fill: int | tuple[int, int, int] = 0 if image.mode == "L" else (0, 0, 0)
+    canvas = Image.new(image.mode, (width, height), fill)
+    canvas.paste(resized, (left, top))
+    return canvas
+
+
+def open_source_image(project_path: Path, request: ImageRequest) -> Image.Image:
+    # Native-resolution source loader. Resolve only through the project sidecar/DB
+    # (find_asset_media_path constrains the result to the project root). No
+    # client-supplied path escape hatch: an arbitrary sourceImagePath would let an
+    # edit job read any file the worker can open. Callers fit it themselves (the
+    # outpaint path needs the native dims to build its border mask — sc-2553).
     if not request.source_asset_id:
         raise RuntimeError("Image edit jobs require a source image asset.")
     source_path = find_asset_media_path(project_path, request.source_asset_id)
     try:
-        image = Image.open(source_path).convert("RGB")
+        return Image.open(source_path).convert("RGB")
     except (OSError, Image.DecompressionBombError, Image.DecompressionBombWarning) as exc:
         raise RuntimeError(f"Source image could not be loaded safely: {source_path}") from exc
-    return image.resize((request.width, request.height))
 
 
-def load_mask_image(project_path: Path, request: ImageRequest) -> Image.Image:
+def load_source_image(
+    project_path: Path,
+    request: ImageRequest,
+    width: int | None = None,
+    height: int | None = None,
+) -> Image.Image:
+    # The source is fitted to the output W×H via request.fit_mode (epic 2551) — crop
+    # (default) / pad / outpaint / stretch — so off-aspect edits no longer distort.
+    # `width`/`height` override the request dims for adapters that render at a snapped
+    # resolution (e.g. SenseNova-U1 aspect buckets) so the source matches the canvas.
+    image = open_source_image(project_path, request)
+    return fit_image(image, width or request.width, height or request.height, request.fit_mode)
+
+
+def load_mask_image(
+    project_path: Path,
+    request: ImageRequest,
+    width: int | None = None,
+    height: int | None = None,
+) -> Image.Image:
     # Inpaint mask (sc-2476): grayscale, white = edit region. Resolved only through the
     # project sidecar/DB (find_asset_media_path constrains to the project root) — no
-    # client path escape hatch, same guard as the source. Resized to the output W×H so
-    # it aligns pixel-for-pixel with the source `load_source_image` returns.
+    # client path escape hatch, same guard as the source. Fitted with the SAME geometry
+    # as the source (request.fit_mode) so it aligns pixel-for-pixel with the image
+    # `load_source_image` returns; pad regions stay black (keep).
     if not request.mask_asset_id:
         raise RuntimeError("Inpaint requires a mask image asset.")
     mask_path = find_asset_media_path(project_path, request.mask_asset_id)
@@ -7958,7 +8090,7 @@ def load_mask_image(project_path: Path, request: ImageRequest) -> Image.Image:
         mask = Image.open(mask_path).convert("L")
     except (OSError, Image.DecompressionBombError, Image.DecompressionBombWarning) as exc:
         raise RuntimeError(f"Mask image could not be loaded safely: {mask_path}") from exc
-    return mask.resize((request.width, request.height))
+    return fit_image(mask, width or request.width, height or request.height, request.fit_mode)
 
 
 def load_reference_image(project_path: Path, reference_asset_id: str) -> Image.Image:

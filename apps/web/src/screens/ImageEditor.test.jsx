@@ -27,6 +27,8 @@ import {
   IDENTITY_COLOR_ADJUST,
   editCapableModels,
   buildEditJobBody,
+  editOutputDims,
+  editOutputAspectRatio,
   modelIsInpaintCapable,
   maskHasContent,
   detailCapableModels,
@@ -327,10 +329,44 @@ describe("AI prompt edit", () => {
       negativePrompt: "",
       width: 768,
       height: 1024,
+      fitMode: "crop",
       seed: 42,
       count: 1,
       advanced: {},
     });
+  });
+
+  it("threads a non-default fitMode (outpaint canvas-extend) into the body", () => {
+    const body = buildEditJobBody({
+      project: { id: "p", name: "P" },
+      requestedGpu: "auto",
+      sourceAssetId: "asset_scratch",
+      model: "sdxl",
+      prompt: "extend the scene",
+      seed: "",
+      width: 1820,
+      height: 1024,
+      fitMode: "outpaint",
+    });
+    expect(body.fitMode).toBe("outpaint");
+    expect(body.width).toBe(1820);
+  });
+
+  it("computes output dims for the canvas-extend control (match / extend / crop)", () => {
+    // Match canvas → working size unchanged, fit mode irrelevant.
+    expect(editOutputDims(1024, 1024, "match", "outpaint")).toEqual({ width: 1024, height: 1024 });
+    // 16:9 outpaint on a square → extend width, keep height at native (add side border).
+    expect(editOutputDims(1024, 1024, "16:9", "outpaint")).toEqual({ width: 1820, height: 1024 });
+    // 16:9 pad behaves the same geometry as outpaint (extend, then bars vs generate).
+    expect(editOutputDims(1024, 1024, "16:9", "pad")).toEqual({ width: 1820, height: 1024 });
+    // 16:9 crop on a square → shrink to the aspect inside the image (trim height).
+    expect(editOutputDims(1024, 1024, "16:9", "crop")).toEqual({ width: 1024, height: 576 });
+    // Portrait target on a square extends height.
+    expect(editOutputDims(1024, 1024, "9:16", "outpaint")).toEqual({ width: 1024, height: 1820 });
+    // Unknown aspect / zero dims fall back to the working size.
+    expect(editOutputDims(800, 600, "bogus", "pad")).toEqual({ width: 800, height: 600 });
+    expect(editOutputAspectRatio("1:1")).toBe(1);
+    expect(editOutputAspectRatio("match")).toBeNull();
   });
 
   it("treats an empty/blank seed as null (random)", () => {
