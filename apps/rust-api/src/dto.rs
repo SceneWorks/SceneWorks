@@ -398,6 +398,12 @@ pub(crate) struct ImageJobRequest {
     // ignore it and run the whole-image edit. Threaded to the worker payload as-is.
     #[serde(default)]
     pub(crate) mask_asset_id: Option<String>,
+    // How the source is fitted to the output W×H on an edit (epic 2551): "crop"
+    // (cover, default), "pad" (letterbox), "outpaint" (pad + generate the border —
+    // inpaint-capable models only), "stretch" (legacy). Threaded to the worker as-is;
+    // the worker normalizes unknown values back to crop.
+    #[serde(default = "default_fit_mode")]
+    pub(crate) fit_mode: String,
     #[serde(default = "default_requested_gpu")]
     pub(crate) requested_gpu: String,
     #[serde(default, skip_serializing_if = "ImageUpscaleRequest::is_disabled")]

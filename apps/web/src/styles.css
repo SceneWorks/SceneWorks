@@ -6367,6 +6367,13 @@ label {
   letter-spacing: 0.01em;
 }
 
+/* Edit fit-mode selector (epic 2551): caption above a segmented crop/pad/outpaint control. */
+.fit-mode-field {
+  display: grid;
+  gap: 8px;
+  min-width: 0;
+}
+
 .asset-picker-head button,
 .asset-picker-footer .detail-actions button {
   min-height: 32px;

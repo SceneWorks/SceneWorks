@@ -5,6 +5,7 @@ import { terminalStatuses } from "../jobTypes.js";
 import { useAppContext } from "../context/AppContext.js";
 import { assetUrl, assetCanRenderAsImage } from "../components/assetMedia.jsx";
 import { DatasetAddDialog } from "../components/DatasetAddDialog.jsx";
+import { FitModeControl, effectiveFitMode } from "../components/FitModeControl.jsx";
 
 const MIN_SCALE = 0.05;
 const MAX_SCALE = 16;
@@ -36,7 +37,18 @@ export function detailCapableModels(imageModels) {
 // the existing `mode:"edit_image"` flow: the working bitmap is staged as a scratch
 // asset (sc-2432) and referenced by `sourceAssetId`; the result is the new working
 // image at the same dimensions. Pure for unit testing.
-export function buildEditJobBody({ project, requestedGpu, sourceAssetId, maskAssetId, model, prompt, seed, width, height }) {
+export function buildEditJobBody({
+  project,
+  requestedGpu,
+  sourceAssetId,
+  maskAssetId,
+  model,
+  prompt,
+  seed,
+  width,
+  height,
+  fitMode = "crop",
+}) {
   const body = {
     projectId: project.id,
     projectName: project.name ?? null,
@@ -48,6 +60,9 @@ export function buildEditJobBody({ project, requestedGpu, sourceAssetId, maskAss
     negativePrompt: "",
     width,
     height,
+    // How the source is fitted to width×height (epic 2551). For canvas-extend outpaint
+    // the dims are the larger target aspect and the worker generates the new border.
+    fitMode,
     seed: seed == null || seed === "" ? null : Number(seed),
     count: 1,
     advanced: {},
@@ -56,6 +71,55 @@ export function buildEditJobBody({ project, requestedGpu, sourceAssetId, maskAss
   // region; the worker confines the edit to it. Omitted entirely otherwise.
   if (maskAssetId) body.maskAssetId = maskAssetId;
   return body;
+}
+
+// Output aspect presets for the editor's canvas-extend / outpaint control (sc-2556).
+// "match" keeps the working size, so the fit mode then has no border to act on.
+export const EDIT_OUTPUT_ASPECTS = [
+  { key: "match", label: "Match canvas", ratio: null },
+  { key: "1:1", label: "1:1", ratio: 1 },
+  { key: "16:9", label: "16:9", ratio: 16 / 9 },
+  { key: "9:16", label: "9:16", ratio: 9 / 16 },
+  { key: "4:3", label: "4:3", ratio: 4 / 3 },
+  { key: "3:4", label: "3:4", ratio: 3 / 4 },
+  { key: "3:2", label: "3:2", ratio: 3 / 2 },
+  { key: "2:3", label: "2:3", ratio: 2 / 3 },
+];
+
+export function editOutputAspectRatio(key) {
+  return EDIT_OUTPUT_ASPECTS.find((aspect) => aspect.key === key)?.ratio ?? null;
+}
+
+// Output W×H for an editor edit given the target aspect + fit mode, keeping the working
+// image at native scale (never upscales). "match"/unknown aspect → working size. crop =
+// largest target-aspect rect INSIDE the image (trim the overflow); pad/outpaint =
+// smallest target-aspect canvas CONTAINING the image (extend → border to fill). Pure.
+export function editOutputDims(workingW, workingH, aspectKey, fitMode) {
+  const ratio = editOutputAspectRatio(aspectKey);
+  if (!ratio || !workingW || !workingH) return { width: workingW, height: workingH };
+  const imageRatio = workingW / workingH;
+  let width;
+  let height;
+  if (fitMode === "crop") {
+    // Cover: shrink to the target aspect within the image (trim).
+    if (ratio >= imageRatio) {
+      width = workingW;
+      height = Math.round(workingW / ratio);
+    } else {
+      height = workingH;
+      width = Math.round(workingH * ratio);
+    }
+  } else {
+    // Pad / outpaint: extend to the target aspect around the image (add border).
+    if (ratio >= imageRatio) {
+      height = workingH;
+      width = Math.round(workingH * ratio);
+    } else {
+      width = workingW;
+      height = Math.round(workingW / ratio);
+    }
+  }
+  return { width: Math.max(1, width), height: Math.max(1, height) };
 }
 
 // Whether a model accepts an inpaint mask — the manifest tags it `image_inpaint`
@@ -308,6 +372,10 @@ export function ImageEditor() {
   const [editModel, setEditModel] = useState("");
   const [editPrompt, setEditPrompt] = useState("");
   const [editSeed, setEditSeed] = useState("");
+  // Canvas-extend / outpaint (sc-2556): target output aspect (default "match" = the
+  // working size) and how to fill it (crop trims, pad bars, outpaint generates).
+  const [editAspect, setEditAspect] = useState("match");
+  const [editFitMode, setEditFitMode] = useState("crop");
 
   // Detail enhance (sc-2438): tile-ControlNet refine over the working image. Backbone
   // (SDXL/RealVisXL) + strength (the "detail amount" — higher invents more texture) +
@@ -848,6 +916,11 @@ export function ImageEditor() {
   async function runEdit() {
     const prompt = editPrompt.trim();
     if (!prompt || !editModel || !working) return;
+    // Canvas-extend / outpaint (sc-2556): resolve the output W×H from the chosen aspect
+    // and fit mode (outpaint coerced away when the model can't inpaint). "match" keeps
+    // the working size, so the existing same-size edit behavior is unchanged.
+    const fitMode = effectiveFitMode(editFitMode, canMask);
+    const { width: outWidth, height: outHeight } = editOutputDims(working.width, working.height, editAspect, fitMode);
     // A painted mask is sent only for inpaint-capable models; otherwise it's a
     // whole-image edit (the mask stays as a local guide but isn't uploaded).
     const masked = canMask && maskHasContent(maskLines);
@@ -874,8 +947,9 @@ export function ImageEditor() {
           model: editModel,
           prompt,
           seed: editSeed,
-          width: working.width,
-          height: working.height,
+          width: outWidth,
+          height: outHeight,
+          fitMode,
         }),
     });
   }
@@ -1423,6 +1497,27 @@ export function ImageEditor() {
                   type="number"
                   value={editSeed}
                 />
+                <select
+                  aria-label="Output aspect"
+                  className="image-editor-editmodel"
+                  onChange={(event) => setEditAspect(event.target.value)}
+                  title="Output aspect — extend the canvas and fill the new area"
+                  value={editAspect}
+                >
+                  {EDIT_OUTPUT_ASPECTS.map((aspect) => (
+                    <option key={aspect.key} value={aspect.key}>
+                      {aspect.label}
+                    </option>
+                  ))}
+                </select>
+                {editAspect !== "match" ? (
+                  <FitModeControl
+                    value={effectiveFitMode(editFitMode, canMask)}
+                    onChange={setEditFitMode}
+                    inpaintCapable={canMask}
+                    label="Fill"
+                  />
+                ) : null}
                 {canMask ? (
                   <>
                     <button
