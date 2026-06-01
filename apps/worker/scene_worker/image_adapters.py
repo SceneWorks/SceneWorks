@@ -4377,8 +4377,11 @@ class MlxFlux2Adapter:
         # mflux's Flux2KleinEdit can read it directly. Two studios feed the same
         # single-reference edit path: Character Studio sends it as
         # referenceAssetId, while the Image Edit studio sends the source image as
-        # sourceAssetId (edit_image mode). No PIL round-trip: find_asset_media_path
-        # returns the project-scoped path and mflux's loader handles dtype/resize.
+        # sourceAssetId (edit_image mode). find_asset_media_path returns the
+        # project-scoped path and mflux's loader handles dtype/resize. The
+        # edit_image source is then re-fitted to the output W×H below (sc-2557) so
+        # off-aspect edits honor fit_mode instead of stretching; the Character
+        # Studio reference stays at native resolution.
         reference_paths: list[str] = []
         edit_source_id = request.source_asset_id if request.mode == "edit_image" else None
         ref_id = request.reference_asset_id or edit_source_id
@@ -4458,6 +4461,32 @@ class MlxFlux2Adapter:
         )
         work_dir = Path(tempfile.mkdtemp(prefix="mlx_flux2_sidecar_"))
         self._scratch_dir = work_dir
+        # Epic 2551 / sc-2557 — honor the request's fit_mode for Image Edits BEFORE
+        # the mflux sidecar. mflux's edit loader resizes the source to the requested
+        # W×H with a naive stretch, so an edit into a different aspect ratio would
+        # distort. mflux is frozen for the Rust port (epic 2337), so the fit can't
+        # live inside it; instead pre-process the source HERE — crop (default) / pad
+        # / outpaint — and hand the sidecar the fitted temp file (written into
+        # work_dir, so it is removed with the scratch dir in the finally). Only the
+        # Image Edit source is fitted: "stretch" keeps the legacy naive resize, and
+        # Character Studio's reference path (referenceAssetId) is a subject-variation
+        # flow left at native resolution. No MLX inpaint path exists, so outpaint
+        # degrades to pad geometry via fit_image (sc-2553).
+        if (
+            request.mode == "edit_image"
+            and edit_source_id
+            and not request.reference_asset_id
+            and request.fit_mode != "stretch"
+        ):
+            fitted_source = fit_image(
+                open_source_image(project_path, request),
+                request.width,
+                request.height,
+                request.fit_mode,
+            )
+            fitted_path = work_dir / "fitted_source.png"
+            fitted_source.save(fitted_path, "PNG")
+            reference_paths = [str(fitted_path)]
         # Best-effort pose tier: render each pose's skeleton to a PNG in the sidecar
         # work dir and pair it with the reference as a per-iteration [reference,
         # skeleton] set. draw_bodypose runs in the main worker venv (cv2 present).
