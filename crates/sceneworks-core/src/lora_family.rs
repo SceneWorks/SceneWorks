@@ -526,6 +526,53 @@ const SIGNATURES: &[BucketSignature] = &[
         ],
     },
     BucketSignature {
+        bucket: Bucket::MmDit,
+        // kohya / musubi-tuner / LyCORIS (lycoris-lora) Qwen-Image & Z-Image LoRAs
+        // flatten the dual-stream MMDiT module path into underscore-delimited keys
+        // behind a `lora_unet_` / `lora_transformer_` / `lycoris_` prefix, e.g.
+        // `lycoris_transformer_blocks_0_attn_add_k_proj.lokr_w1` or
+        // `lora_unet_transformer_blocks_0_img_mlp_net_0_proj.lora_down.weight`. The
+        // dotted MMDiT signature above can't see these (no `transformer.
+        // transformer_blocks.` segment). `_transformer_blocks_` (underscores on both
+        // sides) is the discriminator: Wan kohya uses `_blocks_`, SD/SDXL kohya use
+        // `_down_blocks_`/`_up_blocks_`/`_mid_block_`, and SDXL's nested
+        // `_transformer_blocks_` never carries the joint-attention `add_{q,k}_proj`
+        // or dual-stream `_img_mlp_`/`_txt_mlp_` that group two requires. Flux's
+        // single-stream keys are disqualified so a (double+single) Flux LoRA never
+        // lands here despite sharing `transformer_blocks` + `add_q_proj`.
+        require_all_of: &[
+            &["_transformer_blocks_"],
+            &[
+                "_img_mlp_",
+                "_txt_mlp_",
+                "add_q_proj",
+                "add_k_proj",
+                "to_added_q",
+                "to_added_k",
+            ],
+        ],
+        disqualifiers: &[
+            "single_transformer_blocks",
+            "single_blocks_",
+            ".attn1.",
+            ".attn2.",
+            "_attn1_",
+            "_attn2_",
+        ],
+        markers: &[
+            "_transformer_blocks_",
+            "_img_mlp_",
+            "_txt_mlp_",
+            "add_q_proj",
+            "add_k_proj",
+            "to_added_q",
+            "to_added_k",
+            "_attn_to_q",
+            "_attn_to_k",
+            "_attn_to_v",
+        ],
+    },
+    BucketSignature {
         bucket: Bucket::Sdxl,
         // SDXL ships two text encoders, so kohya-style LoRAs always carry
         // both `lora_te1_` and `lora_te2_` prefixes alongside `lora_unet_`.
@@ -628,17 +675,23 @@ fn max_transformer_block_index(keys: &[String]) -> Option<usize> {
 }
 
 fn parse_block_index(key: &str) -> Option<usize> {
-    let needle = "transformer_blocks.";
+    // Diffusers separates with dots (`transformer_blocks.<N>.`); kohya / LyCORIS
+    // flatten to underscores (`transformer_blocks_<N>_`). Accept either separator.
+    let needle = "transformer_blocks";
     let mut rest = key;
     while let Some(position) = rest.find(needle) {
-        let candidate = &rest[position + needle.len()..];
+        let after = &rest[position + needle.len()..];
+        let candidate = match after.as_bytes().first() {
+            Some(b'.' | b'_') => &after[1..],
+            _ => after,
+        };
         let digits: String = candidate.chars().take_while(char::is_ascii_digit).collect();
         if !digits.is_empty() {
             if let Ok(index) = digits.parse::<usize>() {
                 return Some(index);
             }
         }
-        rest = &candidate[digits.len()..];
+        rest = after;
     }
     None
 }
@@ -1185,6 +1238,66 @@ mod tests {
     #[test]
     fn low_mm_dit_block_count_is_inconclusive() {
         let keys = diffusers_double_stream_keys("transformer", 24);
+        let header = header_from_keys(&keys.iter().map(String::as_str).collect::<Vec<_>>());
+
+        assert!(detect_lora_family(&header).is_none());
+    }
+
+    /// kohya / musubi-tuner / LyCORIS export of a dual-stream MMDiT (Qwen-Image /
+    /// Z-Image) adapter: module paths flattened with underscores behind `prefix`,
+    /// carrying LoKr (`lokr_w1`/`lokr_w2`/`alpha`) tensors. Mirrors the real
+    /// lycoris-lora file shape from sc-2626.
+    fn lycoris_underscore_mmdit_keys(prefix: &str, block_count: usize) -> Vec<String> {
+        let mut keys = Vec::new();
+        for block in 0..block_count {
+            for module in [
+                "attn_to_q",
+                "attn_to_k",
+                "attn_to_v",
+                "attn_to_out_0",
+                "attn_add_q_proj",
+                "attn_add_k_proj",
+                "attn_add_v_proj",
+                "attn_to_add_out",
+                "img_mlp_net_0_proj",
+                "img_mlp_net_2",
+                "txt_mlp_net_0_proj",
+                "txt_mlp_net_2",
+            ] {
+                let base = format!("{prefix}_transformer_blocks_{block}_{module}");
+                keys.push(format!("{base}.lokr_w1"));
+                keys.push(format!("{base}.lokr_w2"));
+                keys.push(format!("{base}.alpha"));
+            }
+        }
+        keys
+    }
+
+    #[test]
+    fn detects_lycoris_underscore_qwen_image_lokr() {
+        // The real failing upload (sc-2626): a lycoris-lora-exported Qwen-Image LoKr
+        // whose keys carry the library's default `lycoris` prefix and underscore-
+        // flattened module paths — invisible to the dotted MMDiT signature.
+        let keys = lycoris_underscore_mmdit_keys("lycoris", 60);
+        let header = header_from_keys(&keys.iter().map(String::as_str).collect::<Vec<_>>());
+
+        assert_eq!(detect_lora_family(&header).as_deref(), Some("qwen-image"));
+    }
+
+    #[test]
+    fn detects_kohya_underscore_qwen_image() {
+        // kohya / musubi-tuner flatten with a `lora_unet` prefix instead.
+        let keys = lycoris_underscore_mmdit_keys("lora_unet", 60);
+        let header = header_from_keys(&keys.iter().map(String::as_str).collect::<Vec<_>>());
+
+        assert_eq!(detect_lora_family(&header).as_deref(), Some("qwen-image"));
+    }
+
+    #[test]
+    fn low_underscore_mm_dit_block_count_is_inconclusive() {
+        // Same conservative block-count gate as the dotted path: too few blocks to
+        // tell Qwen from Z-Image → inconclusive rather than a wrong guess.
+        let keys = lycoris_underscore_mmdit_keys("lycoris", 24);
         let header = header_from_keys(&keys.iter().map(String::as_str).collect::<Vec<_>>());
 
         assert!(detect_lora_family(&header).is_none());
