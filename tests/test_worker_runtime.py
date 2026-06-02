@@ -3430,6 +3430,93 @@ def test_mlx_flux2_pose_set_builds_per_iteration_skeleton_specs(tmp_path, monkey
     assert captured["raw_settings"].get("poseLibrary") is True
 
 
+def test_mlx_flux2_edit_pre_fits_source_to_output_aspect(tmp_path, monkeypatch):
+    """sc-2557: an edit_image job on FLUX.2-klein into a different aspect ratio
+    pre-processes the source to the output W×H honoring fit_mode (crop default /
+    pad) and hands the sidecar that fitted temp file instead of the raw asset — so
+    mflux's edit loader can no longer stretch. "stretch" keeps the legacy raw path,
+    and the fitted temp file is cleaned up with the scratch dir when the job ends."""
+    from scene_worker import image_adapters as ia
+
+    # A wide 200×100 source → editing into a 256² square would stretch if passed raw.
+    raw_source = tmp_path / "source.png"
+    Image.new("RGB", (200, 100), (10, 120, 200)).save(raw_source)
+    monkeypatch.setattr(ia, "find_asset_media_path", lambda project_path, asset_id: raw_source)
+    monkeypatch.setattr(ia.MlxFlux2Adapter, "_sidecar_available", lambda self: True)
+
+    captured: dict = {}
+
+    def fake_run_sidecar(self, *, job_id, work_dir, label, total, spec, progress, cancel_requested):
+        captured["spec"] = spec
+        captured["work_dir"] = work_dir
+        paths = spec["imagePaths"]
+        if paths:
+            # Record the on-disk size the sidecar would actually load.
+            with Image.open(paths[0]) as im:
+                captured["image_size"] = im.size
+
+        class _Stream:
+            def wait_for_image(self, index):
+                return str(work_dir / f"out_{index}.png")
+
+            def finish(self):
+                pass
+
+            def shutdown(self):
+                pass
+
+        return _Stream()
+
+    monkeypatch.setattr(ia.MlxFlux2Adapter, "_run_sidecar", fake_run_sidecar)
+    monkeypatch.setattr(
+        ia.ImageAssetWriter,
+        "write_incremental_outputs",
+        lambda self, *, image_count, image_at_index, raw_settings, **kwargs: {"images": image_count},
+    )
+
+    def run(fit_mode):
+        captured.clear()
+        job = {
+            "id": "job_flux2_edit",
+            "payload": {
+                "projectId": "p",
+                "mode": "edit_image",
+                "model": "flux2_klein_9b",
+                "prompt": "make it night",
+                "sourceAssetId": "src-1",
+                "count": 1,
+                "width": 256,
+                "height": 256,
+                "fitMode": fit_mode,
+            },
+        }
+        ia.MlxFlux2Adapter().generate(
+            settings=SimpleNamespace(gpu_id="cpu"),
+            job=job,
+            request=image_request_from_job(job),
+            project_path=tmp_path,
+            progress=lambda *a, **k: None,
+            cancel_requested=lambda: False,
+        )
+
+    # crop (default): the sidecar gets a fitted temp file at the exact output square,
+    # NOT the raw wide asset; the scratch dir (and the temp file in it) is then reaped.
+    run("crop")
+    assert captured["spec"]["imagePaths"][0] != str(raw_source)
+    assert captured["spec"]["imagePaths"][0].endswith("fitted_source.png")
+    assert captured["image_size"] == (256, 256)
+    assert not Path(captured["work_dir"]).exists()  # temp file cleaned up after the job
+
+    # pad: also fitted to the output square (letterbox bars), distinct temp file.
+    run("pad")
+    assert captured["spec"]["imagePaths"][0].endswith("fitted_source.png")
+    assert captured["image_size"] == (256, 256)
+
+    # stretch: legacy path — the raw asset is handed straight to the sidecar (no fit).
+    run("stretch")
+    assert captured["spec"]["imagePaths"] == [str(raw_source)]
+
+
 def test_mlx_z_image_pose_set_builds_control_skeleton_specs(tmp_path, monkeypatch):
     """sc-2257: a job with advanced.poses on z_image_turbo (MLX) renders each pose to a
     skeleton and passes it as a per-iteration controlImagePaths entry + controlScale to
