@@ -90,7 +90,10 @@ pub(crate) struct DownloadContext<'a> {
     pub(crate) settings: &'a Settings,
     pub(crate) job_id: &'a str,
     pub(crate) cancel_message: &'a str,
+    pub(crate) fresh_download: bool,
 }
+
+const AUTO_RESUME_ATTEMPTS: usize = 1;
 
 /// Download a single file to `dest` (resumable via HTTP Range), reporting transfer
 /// progress and rejecting a truncated response. `label` names the file in the
@@ -103,69 +106,152 @@ async fn download_file(
     label: &str,
     progress: &mut DownloadProgress<'_>,
 ) -> WorkerResult<()> {
-    let existing_bytes = existing_download_bytes(dest, expected_size).await?;
-    if expected_size.is_some_and(|size| existing_bytes == size) {
-        return Ok(());
-    }
-    let mut request = context.client.get(url);
-    if existing_bytes > 0 {
-        request = request.header(header::RANGE, format!("bytes={existing_bytes}-"));
-    }
-    let response = with_hf_auth(context.settings, request).send().await?;
-    let status = response.status();
-    if !status.is_success() {
-        return Err(WorkerError::Http(response.error_for_status().unwrap_err()));
-    }
-    let appending = existing_bytes > 0 && status == StatusCode::PARTIAL_CONTENT;
-    if existing_bytes > 0 && !appending {
-        progress.discard_started_bytes(existing_bytes);
-    }
-    let mut response = response;
-    let mut output = if appending {
-        tokio::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(dest)
-            .await?
-    } else {
-        tokio::fs::File::create(dest).await?
-    };
-    let mut interval = tokio::time::interval(progress.report_interval());
-    interval.set_missed_tick_behavior(MissedTickBehavior::Delay);
-    // A tokio interval's first tick is immediate; consume it so the first chunk
-    // doesn't spuriously fire a zero-byte progress report before any transfer.
-    interval.tick().await;
-    loop {
-        tokio::select! {
-            chunk = response.chunk() => {
-                let Some(chunk) = chunk? else {
-                    break;
-                };
-                output.write_all(&chunk).await?;
-                progress.record_transferred(u64::try_from(chunk.len()).unwrap_or(u64::MAX));
-            }
-            _ = interval.tick() => {
-                report_download_progress(context, progress).await?;
-            }
+    if context.fresh_download {
+        let removed_bytes = remove_incomplete_download(dest, expected_size).await?;
+        if removed_bytes > 0 {
+            progress.discard_started_bytes(removed_bytes);
         }
     }
-    output.flush().await?;
-    // A truncated transfer (e.g. the server closes the stream at what looks like a
-    // clean EOF) would otherwise be treated as success and the bad file only surface
-    // as an opaque load failure later. When the expected size is known, verify it and
-    // remove the partial so the next attempt re-downloads.
-    if let Some(expected) = expected_size {
-        let written = tokio::fs::metadata(dest).await?.len();
-        if written != expected {
-            let _ = tokio::fs::remove_file(dest).await;
-            return Err(WorkerError::InvalidPayload(format!(
-                "{label} download ended at {} but expected {}",
-                format_bytes(written),
-                format_bytes(expected)
+    let mut resume_attempts_remaining = if context.fresh_download {
+        0
+    } else {
+        AUTO_RESUME_ATTEMPTS
+    };
+    loop {
+        let existing_bytes = existing_download_bytes(dest, expected_size).await?;
+        if expected_size.is_some_and(|size| existing_bytes == size) {
+            return Ok(());
+        }
+        let mut request = context.client.get(url);
+        if existing_bytes > 0 {
+            request = request.header(header::RANGE, format!("bytes={existing_bytes}-"));
+        }
+        let response = with_hf_auth(context.settings, request).send().await?;
+        let status = response.status();
+        if status == StatusCode::RANGE_NOT_SATISFIABLE && existing_bytes > 0 {
+            if let Some(expected) = expected_size {
+                return Err(WorkerError::InvalidPayload(download_size_mismatch_message(
+                    label,
+                    existing_bytes,
+                    expected,
+                )));
+            }
+        }
+        if !status.is_success() {
+            return Err(WorkerError::Http(response.error_for_status().unwrap_err()));
+        }
+        let appending = existing_bytes > 0 && status == StatusCode::PARTIAL_CONTENT;
+        if existing_bytes > 0 && !appending {
+            progress.discard_started_bytes(existing_bytes);
+        }
+        let mut response = response;
+        let mut output = if appending {
+            tokio::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(dest)
+                .await?
+        } else {
+            tokio::fs::File::create(dest).await?
+        };
+        let mut interval = tokio::time::interval(progress.report_interval());
+        interval.set_missed_tick_behavior(MissedTickBehavior::Delay);
+        // A tokio interval's first tick is immediate; consume it so the first chunk
+        // doesn't spuriously fire a zero-byte progress report before any transfer.
+        interval.tick().await;
+        let mut transfer_error = None;
+        loop {
+            tokio::select! {
+                chunk = response.chunk() => {
+                    match chunk {
+                        Ok(Some(chunk)) => {
+                            output.write_all(&chunk).await?;
+                            progress.record_transferred(u64::try_from(chunk.len()).unwrap_or(u64::MAX));
+                        }
+                        Ok(None) => break,
+                        Err(error) => {
+                            transfer_error = Some(WorkerError::from(error));
+                            break;
+                        }
+                    }
+                }
+                _ = interval.tick() => {
+                    report_download_progress(context, progress).await?;
+                }
+            }
+        }
+        output.flush().await?;
+        if let Some(error) = transfer_error {
+            if let Some(expected) = expected_size {
+                let written = tokio::fs::metadata(dest).await?.len();
+                if written == expected {
+                    return Ok(());
+                }
+                if written < expected && resume_attempts_remaining > 0 {
+                    resume_attempts_remaining -= 1;
+                    continue;
+                }
+            }
+            return Err(error);
+        }
+        // A truncated transfer (e.g. the server closes the stream at what looks like a
+        // clean EOF) would otherwise be treated as success and the bad file only surface
+        // as an opaque load failure later. When the expected size is known, verify it.
+        // Short files are preserved so a later retry can resume them; overlong files are
+        // discarded because appending would only move them farther away from the target.
+        if let Some(expected) = expected_size {
+            let written = tokio::fs::metadata(dest).await?.len();
+            if written == expected {
+                return Ok(());
+            }
+            if written < expected && resume_attempts_remaining > 0 {
+                resume_attempts_remaining -= 1;
+                continue;
+            }
+            if written > expected {
+                let _ = tokio::fs::remove_file(dest).await;
+            }
+            return Err(WorkerError::InvalidPayload(download_size_mismatch_message(
+                label, written, expected,
             )));
         }
+        return Ok(());
     }
-    Ok(())
+}
+
+async fn remove_incomplete_download(path: &Path, expected_size: Option<u64>) -> WorkerResult<u64> {
+    let Ok(metadata) = tokio::fs::metadata(path).await else {
+        return Ok(0);
+    };
+    let existing_bytes = metadata.len();
+    if expected_size
+        .map(|expected| metadata.len() != expected)
+        .unwrap_or(true)
+    {
+        tokio::fs::remove_file(path).await?;
+        return Ok(existing_bytes);
+    }
+    Ok(0)
+}
+
+fn format_bytes_with_exact(value: u64) -> String {
+    format!("{} ({value} bytes)", format_bytes(value))
+}
+
+fn download_size_mismatch_message(label: &str, actual: u64, expected: u64) -> String {
+    let delta = actual.abs_diff(expected);
+    let direction = if actual < expected {
+        "missing"
+    } else {
+        "extra"
+    };
+    format!(
+        "{label} download ended at {} but expected {}; {} {}.",
+        format_bytes_with_exact(actual),
+        format_bytes_with_exact(expected),
+        format_bytes_with_exact(delta),
+        direction
+    )
 }
 
 /// Download a Hugging Face snapshot as a flat file tree under `target_dir`. Used by
@@ -488,10 +574,10 @@ pub(crate) async fn download_source_url(
     }
     output.flush().await?;
     if expected_bytes.is_some_and(|expected| progress.downloaded_bytes() != expected) {
-        return Err(WorkerError::InvalidPayload(format!(
-            "LoRA sourceUrl download ended at {} but expected {}",
-            format_bytes(progress.downloaded_bytes()),
-            format_bytes(expected_bytes.unwrap_or_default())
+        return Err(WorkerError::InvalidPayload(download_size_mismatch_message(
+            &format!("{source_label} sourceUrl"),
+            progress.downloaded_bytes(),
+            expected_bytes.unwrap_or_default(),
         )));
     }
     Ok(())

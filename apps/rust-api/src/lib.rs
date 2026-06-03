@@ -6,7 +6,7 @@ use std::path::{Path as FsPath, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use axum::body::Body;
+use axum::body::{to_bytes, Body};
 use axum::extract::rejection::JsonRejection;
 use axum::extract::{
     DefaultBodyLimit, FromRequest, Multipart, Path, Query, Request as AxumRequest, State,
@@ -22,10 +22,11 @@ use parking_lot::Mutex;
 use sceneworks_core::contracts::{
     ClaimRequest, ClaimResponse, ContractNumber, DuplicateJobRequest, ImageUpscaleRequest,
     JobCreateRequest, JobSnapshot, JobStatus, JobType, JsonObject, ProgressRequest, QueueSummary,
-    WorkerCapability, WorkerHeartbeatRequest, WorkerRegisterRequest, WorkerSnapshot, WorkerStatus,
+    RetryJobRequest, WorkerCapability, WorkerHeartbeatRequest, WorkerRegisterRequest,
+    WorkerSnapshot, WorkerStatus,
 };
 use sceneworks_core::jobs_store::{
-    CreateJob, DuplicateJob, JobsStore, JobsStoreError, ProgressUpdate, RegisterWorker,
+    CreateJob, DuplicateJob, JobsStore, JobsStoreError, ProgressUpdate, RegisterWorker, RetryJob,
     WorkerHeartbeat, JOB_STATUSES,
 };
 use sceneworks_core::lora_family::{

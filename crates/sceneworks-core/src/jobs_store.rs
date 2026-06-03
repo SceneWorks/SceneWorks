@@ -150,6 +150,11 @@ pub struct DuplicateJob {
 }
 
 #[derive(Debug, Clone)]
+pub struct RetryJob {
+    pub payload_changes: Map<String, Value>,
+}
+
+#[derive(Debug, Clone)]
 pub struct RegisterWorker {
     pub worker_id: String,
     pub gpu_id: String,
@@ -413,7 +418,7 @@ impl JobsStore {
         Ok(job)
     }
 
-    pub fn retry_job(&self, job_id: &str) -> JobsStoreResult<JobSnapshot> {
+    pub fn retry_job(&self, job_id: &str, request: RetryJob) -> JobsStoreResult<JobSnapshot> {
         let _guard = self.lock.lock();
         let mut connection = self.connect()?;
         let transaction = connection.transaction()?;
@@ -423,13 +428,15 @@ impl JobsStore {
                 max_attempts: MAX_JOB_ATTEMPTS,
             });
         }
+        let mut payload = job.payload;
+        payload.extend(request.payload_changes);
         let job = self.create_job_on_connection(
             &transaction,
             CreateJob {
                 job_type: job.job_type,
                 project_id: job.project_id,
                 project_name: job.project_name,
-                payload: job.payload,
+                payload,
                 requested_gpu: job.requested_gpu,
                 source_job_id: Some(job.id),
                 duplicate_of_job_id: None,

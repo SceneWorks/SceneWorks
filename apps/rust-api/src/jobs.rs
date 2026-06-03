@@ -88,14 +88,34 @@ pub(crate) async fn cancel_job(
 pub(crate) async fn retry_job(
     State(state): State<AppState>,
     Path(job_id): Path<String>,
+    request: AxumRequest,
 ) -> Result<(StatusCode, Json<JobSnapshot>), ApiError> {
+    let payload = retry_job_request_from_body(request).await?;
     let job = store_call(state.clone(), move |store, _timeout| {
-        store.retry_job(&job_id)
+        store.retry_job(
+            &job_id,
+            RetryJob {
+                payload_changes: payload.payload_changes,
+            },
+        )
     })
     .await?;
     publish(&state, "job.updated", &job);
     publish_queue(&state).await?;
     Ok((StatusCode::CREATED, Json(job)))
+}
+
+async fn retry_job_request_from_body(request: AxumRequest) -> Result<RetryJobRequest, ApiError> {
+    let bytes = to_bytes(request.into_body(), 1024 * 1024)
+        .await
+        .map_err(|error| {
+            ApiError::bad_request(format!("Unable to read retry request body: {error}"))
+        })?;
+    if bytes.iter().all(|byte| byte.is_ascii_whitespace()) {
+        return Ok(RetryJobRequest::default());
+    }
+    serde_json::from_slice::<RetryJobRequest>(&bytes)
+        .map_err(|error| ApiError::bad_request(format!("Invalid retry request body: {error}")))
 }
 
 pub(crate) async fn duplicate_job(

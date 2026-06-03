@@ -1455,10 +1455,13 @@ export function App() {
     }
   }
 
-  async function jobAction(job, action) {
+  async function jobAction(job, action, options = {}) {
     try {
       const path = action === "duplicate" ? `/api/v1/jobs/${job.id}/duplicate` : `/api/v1/jobs/${job.id}/${action}`;
-      const body = action === "duplicate" ? { payloadChanges: { duplicatedAt: new Date().toISOString() } } : {};
+      const body =
+        action === "duplicate"
+          ? { payloadChanges: { duplicatedAt: new Date().toISOString() } }
+          : (options.body ?? {});
       const updatedJob = await apiFetch(path, token, { method: "POST", body: JSON.stringify(body) });
       setJobs((items) => [updatedJob, ...items.filter((item) => item.id !== updatedJob.id)].sort(sortNewest));
       setError("");

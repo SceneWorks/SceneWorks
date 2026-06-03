@@ -21,6 +21,7 @@ pub(crate) async fn run_model_download_job(
     };
     let files = payload_string_array(&job.payload, "files");
     let revision = optional_payload_string(&job.payload, "revision").unwrap_or("main");
+    let fresh_download = optional_payload_string(&job.payload, "downloadAction") == Some("fresh");
     // The worker is the trust boundary (jobs API is unauthenticated for local use), so a
     // client-supplied targetDir must be constrained to app-managed data/models the same way
     // import jobs are, not used verbatim.
@@ -133,6 +134,7 @@ pub(crate) async fn run_model_download_job(
             settings,
             job_id: &job.id,
             cancel_message: "Model download canceled by user.",
+            fresh_download,
         },
         &repo_dir,
         revision,
@@ -553,6 +555,10 @@ pub(crate) async fn download_model_with_hf_cli(
     for pattern in files {
         command.arg("--include").arg(pattern);
     }
+    let fresh_download = optional_payload_string(&job.payload, "downloadAction") == Some("fresh");
+    if fresh_download {
+        command.arg("--force-download");
+    }
 
     let mut child = command.spawn().map_err(|error| {
         WorkerError::InvalidPayload(format!(
@@ -709,6 +715,7 @@ pub(crate) async fn run_lora_import_job(
                 settings,
                 job_id: &job.id,
                 cancel_message: "LoRA import canceled by user.",
+                fresh_download: false,
             },
             &target_dir,
             &snapshot,
@@ -750,6 +757,7 @@ pub(crate) async fn run_lora_import_job(
                 settings,
                 job_id: &job.id,
                 cancel_message: "LoRA import canceled by user.",
+                fresh_download: false,
             },
             source_url,
             &target_dir,
@@ -995,6 +1003,7 @@ pub(crate) async fn run_model_import_job(
                 settings,
                 job_id: &job.id,
                 cancel_message: "Model import canceled by user.",
+                fresh_download: false,
             },
             &target_dir,
             &snapshot,
@@ -1016,6 +1025,7 @@ pub(crate) async fn run_model_import_job(
                 settings,
                 job_id: &job.id,
                 cancel_message: "Model import canceled by user.",
+                fresh_download: false,
             },
             source_url,
             &target_dir,

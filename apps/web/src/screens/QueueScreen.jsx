@@ -277,7 +277,8 @@ export function QueueScreen() {
                 thumbnailAssets={thumbnails}
                 onThumbnailClick={setPreviewAsset ? (asset) => setPreviewAsset(asset, thumbnails) : undefined}
                 onCancel={(j) => jobAction(j, "cancel")}
-                onRetry={(j) => jobAction(j, "retry")}
+                onRetry={(j, payload) => jobAction(j, "retry", { body: payload ?? {} })}
+                onFreshRetry={(j, payload) => jobAction(j, "retry", { body: payload ?? {} })}
                 onDuplicate={(j) => jobAction(j, "duplicate")}
                 hideOpenQueue
               />

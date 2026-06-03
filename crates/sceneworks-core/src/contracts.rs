@@ -764,6 +764,15 @@ pub struct DuplicateJobRequest {
     pub extra: ExtraFields,
 }
 
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct RetryJobRequest {
+    #[serde(default)]
+    pub payload_changes: JsonObject,
+    #[serde(flatten)]
+    pub extra: ExtraFields,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SidecarPatterns {
