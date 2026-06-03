@@ -592,6 +592,7 @@ async fn lora_url_import_downloads_to_named_file() {
             settings: &settings,
             job_id: "job-1",
             cancel_message: "canceled",
+            fresh_download: false,
         },
         &format!("{source_url}/loras/style.safetensors"),
         &target_dir,
@@ -628,6 +629,7 @@ async fn lora_url_import_skips_existing_matching_file() {
             settings: &settings,
             job_id: "job-1",
             cancel_message: "canceled",
+            fresh_download: false,
         },
         &format!("{source_url}/loras/style.safetensors"),
         &target_dir,
@@ -676,6 +678,7 @@ async fn download_snapshot_rejects_truncated_file() {
             settings: &settings,
             job_id: "job-1",
             cancel_message: "canceled",
+            fresh_download: false,
         },
         &repo_dir,
         "main",
@@ -686,13 +689,113 @@ async fn download_snapshot_rejects_truncated_file() {
     .expect_err("truncated shard is rejected");
 
     assert!(error.to_string().contains("expected"));
-    // The partial blob is removed so a retry re-downloads, and the snapshot is
+    // The partial blob is preserved so a retry can resume it, and the snapshot is
     // never materialized over a corrupt blob.
-    assert!(!repo_dir
-        .join("blobs")
-        .join("etag-shard.safetensors")
-        .exists());
+    assert_eq!(
+        tokio::fs::read(repo_dir.join("blobs").join("etag-shard.safetensors"))
+            .await
+            .unwrap(),
+        b"trun"
+    );
     assert!(!repo_dir.join("snapshots").exists());
+}
+
+#[tokio::test]
+async fn download_snapshot_resumes_existing_partial_blob() {
+    let temp = tempdir().expect("tempdir creates");
+    let base_url = spawn_binary_stub(b"weights!!".to_vec()).await;
+    let mut settings = test_settings("http://127.0.0.1".to_owned(), None);
+    settings.api_url = base_url.clone();
+    let api = ApiClient::new(&settings);
+    let client = reqwest::Client::new();
+    let repo_dir = temp.path().join("models--owner--model");
+    let blob_path = repo_dir.join("blobs").join("etag-model.safetensors");
+    tokio::fs::create_dir_all(blob_path.parent().unwrap())
+        .await
+        .unwrap();
+    tokio::fs::write(&blob_path, b"weig").await.unwrap();
+
+    let snapshot = HuggingFaceSnapshot {
+        files: vec![SnapshotFile {
+            path: "model.safetensors".to_owned(),
+            size: Some(9),
+            download_url: format!("{base_url}/owner/model/resolve/main/model.safetensors"),
+        }],
+    };
+    let mut progress = DownloadProgress::new(
+        "owner/model",
+        4,
+        snapshot.total_bytes(),
+        Duration::from_secs(3600),
+    );
+
+    download_snapshot_into_cache(
+        &DownloadContext {
+            api: &api,
+            client: &client,
+            settings: &settings,
+            job_id: "job-1",
+            cancel_message: "canceled",
+            fresh_download: false,
+        },
+        &repo_dir,
+        "main",
+        &snapshot,
+        &mut progress,
+    )
+    .await
+    .expect("partial blob resumes");
+
+    assert_eq!(tokio::fs::read(&blob_path).await.unwrap(), b"weights!!");
+}
+
+#[tokio::test]
+async fn download_snapshot_fresh_retry_discards_partial_blob() {
+    let temp = tempdir().expect("tempdir creates");
+    let base_url = spawn_binary_stub(b"weights!!".to_vec()).await;
+    let mut settings = test_settings("http://127.0.0.1".to_owned(), None);
+    settings.api_url = base_url.clone();
+    let api = ApiClient::new(&settings);
+    let client = reqwest::Client::new();
+    let repo_dir = temp.path().join("models--owner--model");
+    let blob_path = repo_dir.join("blobs").join("etag-model.safetensors");
+    tokio::fs::create_dir_all(blob_path.parent().unwrap())
+        .await
+        .unwrap();
+    tokio::fs::write(&blob_path, b"bad").await.unwrap();
+
+    let snapshot = HuggingFaceSnapshot {
+        files: vec![SnapshotFile {
+            path: "model.safetensors".to_owned(),
+            size: Some(9),
+            download_url: format!("{base_url}/owner/model/resolve/main/model.safetensors"),
+        }],
+    };
+    let mut progress = DownloadProgress::new(
+        "owner/model",
+        3,
+        snapshot.total_bytes(),
+        Duration::from_secs(3600),
+    );
+
+    download_snapshot_into_cache(
+        &DownloadContext {
+            api: &api,
+            client: &client,
+            settings: &settings,
+            job_id: "job-1",
+            cancel_message: "canceled",
+            fresh_download: true,
+        },
+        &repo_dir,
+        "main",
+        &snapshot,
+        &mut progress,
+    )
+    .await
+    .expect("fresh retry redownloads from the beginning");
+
+    assert_eq!(tokio::fs::read(&blob_path).await.unwrap(), b"weights!!");
 }
 
 #[tokio::test]
@@ -726,6 +829,7 @@ async fn download_snapshot_writes_hugging_face_cache_layout() {
             settings: &settings,
             job_id: "job-1",
             cancel_message: "canceled",
+            fresh_download: false,
         },
         &repo_dir,
         "main",
@@ -810,6 +914,7 @@ async fn download_snapshot_into_cache_matches_real_huggingface_layout() {
             settings: &settings,
             job_id: "real",
             cancel_message: "canceled",
+            fresh_download: false,
         },
         &repo_dir,
         "main",
@@ -871,6 +976,7 @@ async fn lora_url_import_rejects_failed_and_oversized_downloads() {
             settings: &settings,
             job_id: "job-1",
             cancel_message: "canceled",
+            fresh_download: false,
         },
         &format!("{missing_url}/loras/missing.safetensors"),
         &temp.path().join("missing-target"),
@@ -890,6 +996,7 @@ async fn lora_url_import_rejects_failed_and_oversized_downloads() {
             settings: &settings,
             job_id: "job-1",
             cancel_message: "canceled",
+            fresh_download: false,
         },
         &format!("{large_url}/loras/large.safetensors"),
         &temp.path().join("large-target"),
@@ -916,6 +1023,7 @@ async fn lora_url_import_honors_midstream_cancel() {
             settings: &settings,
             job_id: "job-1",
             cancel_message: "LoRA import canceled by user.",
+            fresh_download: false,
         },
         &format!("{source_url}/loras/style.safetensors"),
         &temp.path().join("cancel-target"),
@@ -1018,6 +1126,7 @@ async fn source_url_follows_redirect_and_strips_auth_across_hosts() {
             settings: &settings,
             job_id: "job-1",
             cancel_message: "canceled",
+            fresh_download: false,
         },
         &format!("{download_base}/download/style.safetensors"),
         &target_dir,
@@ -1050,6 +1159,7 @@ async fn source_url_rejects_redirect_to_non_http_scheme() {
             settings: &settings,
             job_id: "job-1",
             cancel_message: "canceled",
+            fresh_download: false,
         },
         &format!("{download_base}/download/style.safetensors"),
         &temp.path().join("scheme-target"),
@@ -1077,6 +1187,7 @@ async fn source_url_rejects_excessive_redirects() {
             settings: &settings,
             job_id: "job-1",
             cancel_message: "canceled",
+            fresh_download: false,
         },
         &format!("{download_base}/download/style.safetensors"),
         &temp.path().join("loop-target"),
@@ -1569,6 +1680,29 @@ async fn binary_stub(State(state): State<BinaryStubState>, headers: HeaderMap) -
         response.headers_mut().insert(
             axum::http::header::CONTENT_RANGE,
             axum::http::HeaderValue::from_str(&format!("bytes */{length}"))
+                .expect("content range header"),
+        );
+        return response;
+    }
+    if let Some(start) = headers
+        .get(axum::http::header::RANGE)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.strip_prefix("bytes="))
+        .and_then(|value| value.strip_suffix('-'))
+        .and_then(|value| value.parse::<usize>().ok())
+        .filter(|start| *start < length)
+    {
+        let body = state.bytes[start..].to_vec();
+        let mut response = body.into_response();
+        *response.status_mut() = AxumStatusCode::PARTIAL_CONTENT;
+        response.headers_mut().insert(
+            axum::http::header::CONTENT_LENGTH,
+            axum::http::HeaderValue::from_str(&(length - start).to_string())
+                .expect("content length header"),
+        );
+        response.headers_mut().insert(
+            axum::http::header::CONTENT_RANGE,
+            axum::http::HeaderValue::from_str(&format!("bytes {start}-{}/{length}", length - 1))
                 .expect("content range header"),
         );
         return response;

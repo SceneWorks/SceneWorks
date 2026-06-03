@@ -6,7 +6,7 @@ use sceneworks_core::contracts::{
     JobStatus, JobType, ProgressStage, WorkerCapability, WorkerStatus, WorkerUtilizationSnapshot,
 };
 use sceneworks_core::jobs_store::{
-    CreateJob, DuplicateJob, JobsStore, JobsStoreError, ProgressUpdate, RegisterWorker,
+    CreateJob, DuplicateJob, JobsStore, JobsStoreError, ProgressUpdate, RegisterWorker, RetryJob,
     WorkerHeartbeat, MAX_JOB_ATTEMPTS,
 };
 use serde_json::{json, Map, Value};
@@ -1017,7 +1017,12 @@ fn retry_job_is_capped() {
         .expect("job creates");
 
     assert!(matches!(
-        store.retry_job(&job.id),
+        store.retry_job(
+            &job.id,
+            RetryJob {
+                payload_changes: Map::new(),
+            },
+        ),
         Err(JobsStoreError::RetryLimit {
             max_attempts: MAX_JOB_ATTEMPTS
         })
@@ -1039,11 +1044,33 @@ fn cancel_retry_and_duplicate_preserve_python_metadata_shapes() {
     assert!(canceled.completed_at.is_some());
     assert!(canceled.canceled_at.is_some());
 
-    let retry = store.retry_job(&canceled.id).expect("job retries");
+    let retry = store
+        .retry_job(
+            &canceled.id,
+            RetryJob {
+                payload_changes: Map::new(),
+            },
+        )
+        .expect("job retries");
     assert_eq!(retry.source_job_id.as_deref(), Some(canceled.id.as_str()));
     assert_eq!(retry.attempts, canceled.attempts + 1);
     assert_eq!(retry.duplicate_of_job_id, None);
     assert_eq!(retry.payload, canceled.payload);
+
+    let resume_retry = store
+        .retry_job(
+            &canceled.id,
+            RetryJob {
+                payload_changes: object(json!({ "downloadAction": "resume" })),
+            },
+        )
+        .expect("resume retry creates");
+    assert_eq!(
+        resume_retry.source_job_id.as_deref(),
+        Some(canceled.id.as_str())
+    );
+    assert_eq!(resume_retry.payload["prompt"], json!("mist over hills"));
+    assert_eq!(resume_retry.payload["downloadAction"], json!("resume"));
 
     let duplicate = store
         .duplicate_job(

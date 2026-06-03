@@ -345,6 +345,7 @@ export function WorkerProgressCard({
   job,
   onCancel,
   onRetry,
+  onFreshRetry,
   onDuplicate,
   onOpenQueue,
   hideOpenQueue = false,
@@ -381,9 +382,18 @@ export function WorkerProgressCard({
 
   const isTerminal = terminalStatuses.has(job.status);
   const attempts = job.attempts ?? 1;
+  const isModelDownload = job.type === "model_download";
   const canCancel = onCancel && !isTerminal && !job.cancelRequested;
-  const canRetry = onRetry && actionStatuses.has(job.status) && attempts < MAX_ATTEMPTS;
-  const canDuplicate = onDuplicate && actionStatuses.has(job.status) && attempts < MAX_ATTEMPTS;
+  const canRetryBase = actionStatuses.has(job.status) && attempts < MAX_ATTEMPTS;
+  const canRetry = onRetry && canRetryBase && !isModelDownload;
+  const canResumeDownload = onRetry && canRetryBase && isModelDownload && job.status !== "completed";
+  const canFreshDownload =
+    onFreshRetry &&
+    canRetryBase &&
+    isModelDownload &&
+    job.status !== "completed" &&
+    (attempts > 1 || ["resume", "fresh"].includes(job.payload?.downloadAction));
+  const canDuplicate = onDuplicate && canRetryBase && !isModelDownload;
   const showOpenQueue = !!onOpenQueue && !hideOpenQueue;
 
   const chipLabel = getJobTypeChip(job.type);
@@ -447,6 +457,24 @@ export function WorkerProgressCard({
             type="button"
           >
             {job.cancelRequested ? "Canceling…" : "Cancel"}
+          </button>
+        ) : null}
+        {canResumeDownload ? (
+          <button
+            className="secondary-action"
+            onClick={() => onRetry(job, { payloadChanges: { downloadAction: "resume" } })}
+            type="button"
+          >
+            Resume Download
+          </button>
+        ) : null}
+        {canFreshDownload ? (
+          <button
+            className="secondary-action"
+            onClick={() => onFreshRetry(job, { payloadChanges: { downloadAction: "fresh" } })}
+            type="button"
+          >
+            Retry Download
           </button>
         ) : null}
         {canRetry ? (

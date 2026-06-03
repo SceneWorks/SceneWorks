@@ -203,6 +203,8 @@ export function ModelManagerScreen() {
     presets: recipePresets = [],
   } = useAppContext();
   const onCancelJob = (job) => jobAction(job, "cancel");
+  const onResumeDownloadJob = (job, payload) => jobAction(job, "retry", { body: payload ?? {} });
+  const onFreshDownloadJob = (job, payload) => jobAction(job, "retry", { body: payload ?? {} });
   const onConvertModel = createModelConvertJob;
   const onDeleteLora = deleteLoraAction;
   const onDeleteModel = deleteModelAction;
@@ -562,7 +564,13 @@ export function ModelManagerScreen() {
           </div>
         </dl>
         {localDownloadJob ? (
-          <WorkerProgressCard job={localDownloadJob} onCancel={onCancelJob} onOpenQueue={onOpenQueue} />
+          <WorkerProgressCard
+            job={localDownloadJob}
+            onCancel={onCancelJob}
+            onRetry={onResumeDownloadJob}
+            onFreshRetry={onFreshDownloadJob}
+            onOpenQueue={onOpenQueue}
+          />
         ) : null}
         {mlxState ? (
           <div className="mlx-status">
@@ -597,13 +605,21 @@ export function ModelManagerScreen() {
           </div>
         ) : null}
         <div className="model-card-actions">
-          <button disabled={installed || !model.downloadable || Boolean(downloadJob)} onClick={() => onDownloadModel(model)} type="button">
+          <button
+            disabled={installed || !model.downloadable || Boolean(downloadJob)}
+            onClick={() =>
+              failedDownload
+                ? onResumeDownloadJob(localDownloadJob, { payloadChanges: { downloadAction: "resume" } })
+                : onDownloadModel(model)
+            }
+            type="button"
+          >
             {downloadJob
               ? downloadJob.status
               : installed
                 ? "Ready"
                 : failedDownload
-                  ? "Retry Download"
+                  ? "Resume Download"
                   : model.downloadSizeLabel
                     ? `Download ${downloadSize}`
                     : "Download"}

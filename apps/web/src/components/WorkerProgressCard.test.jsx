@@ -229,6 +229,49 @@ describe("WorkerProgressCard layout", () => {
     expect(labels).toEqual(["Cancel"]);
   });
 
+  it("uses resume-first actions for failed model downloads", () => {
+    const job = {
+      id: "j",
+      type: "model_download",
+      status: "failed",
+      progress: 0.7,
+      attempts: 1,
+      payload: { modelId: "realvisxl" },
+      error: "download ended early",
+    };
+    const onRetry = vi.fn();
+    const onFreshRetry = vi.fn();
+    api = render(
+      <WorkerProgressCard job={job} onRetry={onRetry} onFreshRetry={onFreshRetry} onDuplicate={vi.fn()} />,
+      makeContext([]),
+    );
+    let buttons = Array.from(api.container.querySelectorAll(".worker-progress-card__actions button"));
+    expect(buttons.map((button) => button.textContent)).toEqual(["Resume Download"]);
+    act(() => {
+      buttons[0].dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
+    });
+    expect(onRetry).toHaveBeenCalledWith(job, { payloadChanges: { downloadAction: "resume" } });
+    expect(onFreshRetry).not.toHaveBeenCalled();
+
+    api.cleanup();
+    const resumedJob = {
+      ...job,
+      id: "j2",
+      attempts: 2,
+      payload: { ...job.payload, downloadAction: "resume" },
+    };
+    api = render(
+      <WorkerProgressCard job={resumedJob} onRetry={onRetry} onFreshRetry={onFreshRetry} />,
+      makeContext([]),
+    );
+    buttons = Array.from(api.container.querySelectorAll(".worker-progress-card__actions button"));
+    expect(buttons.map((button) => button.textContent)).toEqual(["Resume Download", "Retry Download"]);
+    act(() => {
+      buttons[1].dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
+    });
+    expect(onFreshRetry).toHaveBeenCalledWith(resumedJob, { payloadChanges: { downloadAction: "fresh" } });
+  });
+
   it("hides View in Queue when hideOpenQueue is true", () => {
     const job = { id: "j", type: "image_generate", status: "running", progress: 0, attempts: 1, payload: {} };
     const onOpenQueue = vi.fn();
