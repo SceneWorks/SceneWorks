@@ -28,8 +28,8 @@ use super::media_jobs::{
     run_ffmpeg,
 };
 use super::model_jobs::{
-    check_downloaded_model_family, finalize_converted_dir, hf_cli_encoding_failure,
-    DownloadFamilyCheck, HF_CLI_UTF8_ENV,
+    check_downloaded_model_family, downloaded_model_detection_io_error_is_inconclusive,
+    finalize_converted_dir, hf_cli_encoding_failure, DownloadFamilyCheck, HF_CLI_UTF8_ENV,
 };
 use super::supervisor::{
     auto_worker_specs, child_environment, restart_exited_children_with_spawner,
@@ -40,8 +40,8 @@ use super::{
     fresh_asset_id, import_lora_source_file_as, import_lora_source_path, now_rfc3339,
     parse_credentials_env, resolve_model_convert_output, resolve_model_import_target,
     safe_download_dir, safe_project_path, value_f64, wan_moe_pair_filenames,
-    write_model_install_marker, CredentialScheme, JsonObject, Settings, WorkerCredential,
-    WorkerError, DEFAULT_MAX_LORA_URL_BYTES, DEFAULT_MAX_MODEL_URL_BYTES,
+    write_model_install_marker, CredentialScheme, JsonObject, SafetensorsHeaderError, Settings,
+    WorkerCredential, WorkerError, DEFAULT_MAX_LORA_URL_BYTES, DEFAULT_MAX_MODEL_URL_BYTES,
     DEFAULT_TRANSITION_DURATION_SECONDS, INSTALL_MARKER,
 };
 
@@ -91,6 +91,19 @@ fn hf_cli_environment_forces_python_utf8_output() {
     assert_eq!(env.get("PYTHONUTF8"), Some(&"1"));
     assert_eq!(env.get("PYTHONIOENCODING"), Some(&"utf-8"));
     assert_eq!(env.get("HF_HUB_DISABLE_PROGRESS_BARS"), Some(&"1"));
+}
+
+#[test]
+fn downloaded_model_windows_untrusted_mount_detection_is_inconclusive() {
+    let error = SafetensorsHeaderError::Io(std::io::Error::from_raw_os_error(448));
+
+    assert!(downloaded_model_detection_io_error_is_inconclusive(&error));
+    assert!(!downloaded_model_detection_io_error_is_inconclusive(
+        &SafetensorsHeaderError::InvalidHeader
+    ));
+    assert!(!downloaded_model_detection_io_error_is_inconclusive(
+        &SafetensorsHeaderError::Io(std::io::Error::from_raw_os_error(5))
+    ));
 }
 
 #[test]
