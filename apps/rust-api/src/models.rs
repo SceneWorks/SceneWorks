@@ -756,9 +756,7 @@ pub(crate) async fn model_catalog(state: &AppState) -> Result<Vec<Value>, ApiErr
                     .map(|health| health.missing_files.clone())
                     .unwrap_or_default();
                 let managed_installed = model_is_installed(&managed_path);
-                let installed_path = if cache_installed {
-                    cache_path.clone()
-                } else if cache_incomplete {
+                let installed_path = if cache_installed || cache_incomplete {
                     cache_path.clone()
                 } else {
                     Some(managed_path)
