@@ -1,0 +1,77 @@
+{
+  "reference": "/Users/michael/Datasets/Kelsie/kelsie_0073.png",
+  "results": [
+    {
+      "tag": "standard_30",
+      "method": "standard",
+      "sched": "euler",
+      "steps": 30,
+      "cfg": 5.0,
+      "seconds": 20.82,
+      "s_per_step": 0.694,
+      "arcface_cosine": 0.7814,
+      "face_detected": true,
+      "png": "/tmp/sc2758_instantid_accel/instantid__standard_30.png"
+    },
+    {
+      "tag": "lightning_8",
+      "method": "lightning",
+      "sched": "euler_trailing",
+      "steps": 8,
+      "cfg": 1.0,
+      "seconds": 4.68,
+      "s_per_step": 0.586,
+      "arcface_cosine": 0.7887,
+      "face_detected": true,
+      "png": "/tmp/sc2758_instantid_accel/instantid__lightning_8.png"
+    },
+    {
+      "tag": "lightning_4",
+      "method": "lightning",
+      "sched": "euler_trailing",
+      "steps": 4,
+      "cfg": 1.0,
+      "seconds": 2.01,
+      "s_per_step": 0.501,
+      "arcface_cosine": 0.7989,
+      "face_detected": true,
+      "png": "/tmp/sc2758_instantid_accel/instantid__lightning_4.png"
+    },
+    {
+      "tag": "hyper_8",
+      "method": "hyper",
+      "sched": "tcd",
+      "steps": 8,
+      "cfg": 1.0,
+      "seconds": 3.34,
+      "s_per_step": 0.417,
+      "arcface_cosine": 0.7933,
+      "face_detected": true,
+      "png": "/tmp/sc2758_instantid_accel/instantid__hyper_8.png"
+    },
+    {
+      "tag": "hyper_4",
+      "method": "hyper",
+      "sched": "tcd",
+      "steps": 4,
+      "cfg": 1.0,
+      "seconds": 1.98,
+      "s_per_step": 0.496,
+      "arcface_cosine": 0.8018,
+      "face_detected": true,
+      "png": "/tmp/sc2758_instantid_accel/instantid__hyper_4.png"
+    },
+    {
+      "tag": "lcm_8",
+      "method": "lcm",
+      "sched": "lcm",
+      "steps": 8,
+      "cfg": 1.0,
+      "seconds": 3.34,
+      "s_per_step": 0.418,
+      "arcface_cosine": 0.5517,
+      "face_detected": true,
+      "png": "/tmp/sc2758_instantid_accel/instantid__lcm_8.png"
+    }
+  ]
+}
