@@ -4454,6 +4454,106 @@ async fn downloadable_model_catalog_ignores_absent_optional_diffusers_components
 }
 
 #[tokio::test]
+async fn downloadable_model_catalog_treats_processor_components_as_weightless() {
+    // Qwen-Image-Edit-2511's model_index.json declares a `processor`
+    // (Qwen2VLProcessor) — a transformers preprocessing wrapper that carries no
+    // model weights and ships `preprocessor_config.json` instead of `config.json`.
+    // The health check must not demand `processor/config.json` + `processor/<weights>`
+    // (which the repo never contains), otherwise a fully-installed model is flagged
+    // incomplete forever and the "Fix" download can never satisfy it.
+    std::env::set_var("SCENEWORKS_DISABLE_MODEL_SIZE_ESTIMATE", "1");
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let config_dir = temp_dir.path().join("config/manifests");
+    std::fs::create_dir_all(&config_dir).expect("manifest dir creates");
+    std::fs::write(
+        config_dir.join("builtin.models.jsonc"),
+        r#"
+            {
+              "schemaVersion": 1,
+              "models": [{
+                "id": "qwen_image_edit_2511",
+                "name": "Qwen-Image-Edit-2511",
+                "type": "image",
+                "family": "qwen-image",
+                "downloads": [{ "provider": "huggingface", "repo": "Qwen/Qwen-Image-Edit-2511" }]
+              }]
+            }
+            "#,
+    )
+    .expect("builtin models writes");
+    for file in [
+        "user.models.jsonc",
+        "builtin.loras.jsonc",
+        "user.loras.jsonc",
+        "builtin.recipe-presets.jsonc",
+        "user.recipe-presets.jsonc",
+    ] {
+        let key = if file.contains("preset") {
+            "presets"
+        } else if file.contains("lora") {
+            "loras"
+        } else {
+            "models"
+        };
+        std::fs::write(
+            config_dir.join(file),
+            format!(r#"{{ "schemaVersion": 1, "{key}": [] }}"#),
+        )
+        .expect("empty manifest writes");
+    }
+    let cache_dir = temp_dir
+        .path()
+        .join("data/cache/huggingface/hub/models--Qwen--Qwen-Image-Edit-2511/snapshots/abc123");
+    std::fs::create_dir_all(&cache_dir).expect("hf cache creates");
+    std::fs::write(
+        cache_dir.join("model_index.json"),
+        r#"{
+          "_class_name": "QwenImageEditPlusPipeline",
+          "processor": ["transformers", "Qwen2VLProcessor"],
+          "scheduler": ["diffusers", "FlowMatchEulerDiscreteScheduler"],
+          "text_encoder": ["transformers", "Qwen2_5_VLForConditionalGeneration"],
+          "tokenizer": ["transformers", "Qwen2Tokenizer"],
+          "transformer": ["diffusers", "QwenImageTransformer2DModel"],
+          "vae": ["diffusers", "AutoencoderKLQwenImage"]
+        }"#,
+    )
+    .expect("model index writes");
+    // processor ships preprocessor_config.json + tokenizer files, but no
+    // config.json and no weights — exactly the real Qwen2VLProcessor layout.
+    for (dir, file) in [
+        ("processor", "preprocessor_config.json"),
+        ("scheduler", "scheduler_config.json"),
+        ("text_encoder", "config.json"),
+        ("tokenizer", "tokenizer_config.json"),
+        ("transformer", "config.json"),
+        ("vae", "config.json"),
+    ] {
+        let component_dir = cache_dir.join(dir);
+        std::fs::create_dir_all(&component_dir).expect("component dir creates");
+        std::fs::write(component_dir.join(file), "{}").expect("component config writes");
+    }
+    for dir in ["text_encoder", "transformer", "vae"] {
+        std::fs::write(
+            cache_dir
+                .join(dir)
+                .join("diffusion_pytorch_model.safetensors"),
+            "weights",
+        )
+        .expect("component weights write");
+    }
+
+    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+    let (status, models) = request(app, "GET", "/api/v1/models", Value::Null).await;
+
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(models[0]["id"], "qwen_image_edit_2511");
+    assert_eq!(models[0]["installState"], "installed");
+    assert_eq!(models[0]["cacheState"], "complete");
+    assert_eq!(models[0]["repairAvailable"], false);
+    assert_eq!(models[0]["missingRequiredFiles"], json!([]));
+}
+
+#[tokio::test]
 async fn model_download_job_forwards_catalog_family_for_worker_reconciliation() {
     // sc-1663: the download job must carry the catalog-declared family so the
     // worker can re-verify the downloaded weights match it (parity with import).

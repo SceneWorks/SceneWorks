@@ -1181,7 +1181,13 @@ fn required_diffusers_component_files(component: &str, class_name: &str) -> Vec<
     if class.contains("tokenizer") {
         return vec![format!("{component}/tokenizer_config.json")];
     }
-    if class.contains("featureextractor") || class.contains("imageprocessor") {
+    // Transformers preprocessing wrappers (feature extractors, image processors,
+    // and composite `*Processor` classes like Qwen2VLProcessor) carry no model
+    // weights and ship a `preprocessor_config.json` rather than a `config.json`.
+    // `contains("processor")` subsumes `imageprocessor` and also catches the
+    // composite processors that would otherwise fall through to the weight-bearing
+    // default and be reported as permanently missing config.json + weights.
+    if class.contains("featureextractor") || class.contains("processor") {
         return vec![format!("{component}/preprocessor_config.json")];
     }
     let component_dir = component.trim();
@@ -1198,7 +1204,7 @@ fn diffusers_component_requires_weights(component: &str, class_name: &str) -> bo
         || class.contains("scheduler")
         || class.contains("tokenizer")
         || class.contains("featureextractor")
-        || class.contains("imageprocessor"))
+        || class.contains("processor"))
 }
 
 fn diffusers_component_has_weight_file(snapshot: &FsPath, component: &str) -> bool {
