@@ -4223,6 +4223,37 @@ async fn downloadable_model_catalog_uses_huggingface_cache_install_state() {
         .path()
         .join("data/cache/huggingface/hub/models--owner--model/snapshots/abc123");
     std::fs::create_dir_all(&cache_dir).expect("hf cache creates");
+    std::fs::write(
+        cache_dir.join("model_index.json"),
+        r#"{
+          "_class_name": "StableDiffusionPipeline",
+          "scheduler": ["diffusers", "DDPMScheduler"],
+          "unet": ["diffusers", "UNet2DConditionModel"],
+          "vae": ["diffusers", "AutoencoderKL"],
+          "tokenizer": ["transformers", "CLIPTokenizer"]
+        }"#,
+    )
+    .expect("model index writes");
+    for (dir, file) in [
+        ("scheduler", "scheduler_config.json"),
+        ("unet", "config.json"),
+        ("vae", "config.json"),
+        ("tokenizer", "tokenizer_config.json"),
+    ] {
+        let component_dir = cache_dir.join(dir);
+        std::fs::create_dir_all(&component_dir).expect("component dir creates");
+        std::fs::write(component_dir.join(file), "{}").expect("component config writes");
+    }
+    std::fs::write(
+        cache_dir.join("unet/diffusion_pytorch_model.safetensors"),
+        "weights",
+    )
+    .expect("unet weights write");
+    std::fs::write(
+        cache_dir.join("vae/diffusion_pytorch_model.safetensors"),
+        "weights",
+    )
+    .expect("vae weights write");
 
     let app = create_app(test_settings(&temp_dir)).expect("app creates");
     let (status, models) = request(app, "GET", "/api/v1/models", Value::Null).await;
@@ -4231,9 +4262,98 @@ async fn downloadable_model_catalog_uses_huggingface_cache_install_state() {
     assert_eq!(models[0]["id"], "base_model");
     assert_eq!(models[0]["downloadable"], true);
     assert_eq!(models[0]["installState"], "installed");
+    assert_eq!(models[0]["cacheState"], "complete");
+    assert_eq!(models[0]["repairAvailable"], false);
     assert!(models[0]["installedPath"]
         .as_str()
         .is_some_and(|value| value.contains("models--owner--model")));
+}
+
+#[tokio::test]
+async fn downloadable_model_catalog_flags_incomplete_huggingface_snapshots() {
+    std::env::set_var("SCENEWORKS_DISABLE_MODEL_SIZE_ESTIMATE", "1");
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let config_dir = temp_dir.path().join("config/manifests");
+    std::fs::create_dir_all(&config_dir).expect("manifest dir creates");
+    std::fs::write(
+        config_dir.join("builtin.models.jsonc"),
+        r#"
+            {
+              "schemaVersion": 1,
+              "models": [{
+                "id": "sdxl",
+                "name": "SDXL",
+                "type": "image",
+                "family": "sdxl",
+                "downloads": [{ "provider": "huggingface", "repo": "owner/sdxl" }]
+              }]
+            }
+            "#,
+    )
+    .expect("builtin models writes");
+    for file in [
+        "user.models.jsonc",
+        "builtin.loras.jsonc",
+        "user.loras.jsonc",
+        "builtin.recipe-presets.jsonc",
+        "user.recipe-presets.jsonc",
+    ] {
+        let key = if file.contains("preset") {
+            "presets"
+        } else if file.contains("lora") {
+            "loras"
+        } else {
+            "models"
+        };
+        std::fs::write(
+            config_dir.join(file),
+            format!(r#"{{ "schemaVersion": 1, "{key}": [] }}"#),
+        )
+        .expect("empty manifest writes");
+    }
+    let cache_dir = temp_dir
+        .path()
+        .join("data/cache/huggingface/hub/models--owner--sdxl/snapshots/abc123");
+    std::fs::create_dir_all(&cache_dir).expect("hf cache creates");
+    std::fs::write(
+        cache_dir.join("model_index.json"),
+        r#"{
+          "_class_name": "StableDiffusionXLPipeline",
+          "scheduler": ["diffusers", "EulerDiscreteScheduler"],
+          "unet": ["diffusers", "UNet2DConditionModel"],
+          "vae": ["diffusers", "AutoencoderKL"]
+        }"#,
+    )
+    .expect("model index writes");
+    for (dir, file) in [
+        ("scheduler", "scheduler_config.json"),
+        ("unet", "config.json"),
+    ] {
+        let component_dir = cache_dir.join(dir);
+        std::fs::create_dir_all(&component_dir).expect("component dir creates");
+        std::fs::write(component_dir.join(file), "{}").expect("component config writes");
+    }
+    std::fs::write(
+        cache_dir.join("unet/diffusion_pytorch_model.safetensors"),
+        "weights",
+    )
+    .expect("unet weights write");
+
+    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+    let (status, models) = request(app, "GET", "/api/v1/models", Value::Null).await;
+
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(models[0]["id"], "sdxl");
+    assert_eq!(models[0]["installState"], "missing");
+    assert_eq!(models[0]["cacheState"], "incomplete");
+    assert_eq!(models[0]["repairAvailable"], true);
+    assert_eq!(
+        models[0]["missingRequiredFiles"],
+        json!(["vae/<weights>", "vae/config.json"])
+    );
+    assert!(models[0]["installedPath"]
+        .as_str()
+        .is_some_and(|value| value.contains("models--owner--sdxl")));
 }
 
 #[tokio::test]
