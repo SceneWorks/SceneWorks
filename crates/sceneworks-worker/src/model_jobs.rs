@@ -589,11 +589,12 @@ pub(crate) async fn download_model_with_hf_cli(
         }
     };
     let stderr = stderr_task.await.unwrap_or_default();
-    let cache_path = huggingface_repo_cache_path(&settings.data_dir, repo).ok_or_else(|| {
-        WorkerError::InvalidPayload(format!(
-            "Unable to resolve Hugging Face cache path for {repo}."
-        ))
-    })?;
+    let repo_cache_path =
+        huggingface_repo_cache_path(&settings.data_dir, repo).ok_or_else(|| {
+            WorkerError::InvalidPayload(format!(
+                "Unable to resolve Hugging Face cache path for {repo}."
+            ))
+        })?;
     if !status.success() {
         let stderr = String::from_utf8_lossy(&stderr);
         // Some Windows installs run the Python-based HF CLI with a legacy stdio
@@ -603,6 +604,8 @@ pub(crate) async fn download_model_with_hf_cli(
         if hf_cli_encoding_failure(&stderr)
             && huggingface_snapshot_dir(&settings.data_dir, repo).is_some()
         {
+            let cache_path =
+                huggingface_snapshot_dir(&settings.data_dir, repo).unwrap_or(repo_cache_path);
             write_model_install_marker(marker_dir, &job.payload, repo, &job.id).await?;
             return Ok(Some(cache_path));
         }
@@ -615,6 +618,7 @@ pub(crate) async fn download_model_with_hf_cli(
         return Err(WorkerError::InvalidPayload(message));
     }
 
+    let cache_path = huggingface_snapshot_dir(&settings.data_dir, repo).unwrap_or(repo_cache_path);
     write_model_install_marker(marker_dir, &job.payload, repo, &job.id).await?;
     Ok(Some(cache_path))
 }
@@ -923,6 +927,9 @@ pub(crate) fn check_downloaded_model_family(
 ) -> DownloadFamilyCheck {
     let detected = match detect_model_family(model_dir) {
         Ok(detected) => detected,
+        Err(error) if downloaded_model_detection_io_error_is_inconclusive(&error) => {
+            return DownloadFamilyCheck::Proceed;
+        }
         Err(error) => return DownloadFamilyCheck::DetectionFailed(error),
     };
     match reconcile_detected_family(supplied, detected) {
@@ -931,11 +938,29 @@ pub(crate) fn check_downloaded_model_family(
     }
 }
 
+pub(crate) fn downloaded_model_detection_io_error_is_inconclusive(
+    error: &SafetensorsHeaderError,
+) -> bool {
+    let SafetensorsHeaderError::Io(io_error) = error else {
+        return false;
+    };
+    // Hugging Face snapshots may contain symlinks/reparse points into `blobs`.
+    // On some Windows machines, opening those links fails with ERROR_UNTRUSTED_
+    // MOUNT_POINT (448). The download is already complete; this optional family
+    // check should become inconclusive rather than failing the model install.
+    io_error.raw_os_error() == Some(448)
+        || io_error
+            .to_string()
+            .to_ascii_lowercase()
+            .contains("untrusted mount point")
+}
+
 /// Enforce family parity with model import on a completed download: verify the
 /// downloaded weights match the catalog-declared family and fail the job on a
-/// confident mismatch (or an unreadable header). Returns `Ok(true)` when the
-/// download may complete, `Ok(false)` when the job was already failed and the
-/// caller should return.
+/// confident mismatch or a clearly invalid header. Windows cache-link traversal
+/// errors are treated as inconclusive because the download itself has completed.
+/// Returns `Ok(true)` when the download may complete, `Ok(false)` when the job was
+/// already failed and the caller should return.
 pub(crate) async fn reconcile_downloaded_model_family(
     api: &ApiClient,
     job: &JobSnapshot,
