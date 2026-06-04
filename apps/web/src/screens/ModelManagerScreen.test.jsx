@@ -343,7 +343,7 @@ describe("ModelManagerScreen type-grouped layout", () => {
     vi.restoreAllMocks();
   });
 
-  async function render({ models = [], loras = [] } = {}) {
+  async function render({ models = [], loras = [], createModelDownloadJob = () => {} } = {}) {
     const value = {
       activeProject: null,
       jobs: [],
@@ -354,7 +354,7 @@ describe("ModelManagerScreen type-grouped layout", () => {
       setActiveView: () => {},
       deleteLora: () => {},
       deleteModel: () => {},
-      createModelDownloadJob: () => {},
+      createModelDownloadJob,
       createModelConvertJob: () => {},
       createLoraImportJob: () => {},
       createModelImportJob: () => {},
@@ -400,6 +400,32 @@ describe("ModelManagerScreen type-grouped layout", () => {
     await render({ models: [MODELS[0]] });
     const chips = [...container.querySelectorAll(".model-capabilities .chip")].map((c) => c.textContent);
     expect(chips).toEqual(["Text to Image", "Style Variations"]);
+  });
+
+  it("offers a Fix action when a cached model is incomplete", async () => {
+    const createModelDownloadJob = vi.fn();
+    await render({
+      createModelDownloadJob,
+      models: [
+        {
+          ...MODELS[0],
+          cacheState: "incomplete",
+          repairAvailable: true,
+          missingRequiredFiles: ["vae/config.json"],
+          downloadable: true,
+        },
+      ],
+    });
+    expect(container.textContent).toContain("incomplete");
+    expect(container.textContent).toContain("vae/config.json");
+    const fixButton = [...container.querySelectorAll(".model-card-actions button")].find(
+      (button) => button.textContent === "Fix",
+    );
+    expect(fixButton).toBeTruthy();
+    await click(fixButton);
+    expect(createModelDownloadJob).toHaveBeenCalledWith(
+      expect.objectContaining({ id: "z_image_turbo" }),
+    );
   });
 
   it("groups LoRAs by family with a heading per family", async () => {

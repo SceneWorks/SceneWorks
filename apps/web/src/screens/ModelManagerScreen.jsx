@@ -506,6 +506,8 @@ export function ModelManagerScreen() {
     const downloadJobs = downloadJobsFor(model);
     const downloadJob = downloadJobs.find((job) => !terminalStatuses.has(job.status));
     const installed = model.installState === "installed";
+    const incomplete = model.cacheState === "incomplete" || model.repairAvailable;
+    const missingRequiredFiles = Array.isArray(model.missingRequiredFiles) ? model.missingRequiredFiles : [];
     const localDownloadJob = installed ? null : downloadJobs.find((job) => job.status !== "completed");
     const failedDownload = localDownloadJob && terminalStatuses.has(localDownloadJob.status);
     const downloadSize = downloadSizeText(model);
@@ -529,7 +531,9 @@ export function ModelManagerScreen() {
           <p className="eyebrow">{model.family ?? "unassociated"}</p>
           <h3>{model.name}</h3>
         </div>
-        <span className={installed ? "status-badge installed" : "status-badge"}>{installed ? "installed" : "missing"}</span>
+        <span className={installed ? "status-badge installed" : incomplete ? "status-badge warning" : "status-badge"}>
+          {installed ? "installed" : incomplete ? "incomplete" : "missing"}
+        </span>
         {unassociated ? (
           <span className="status-badge warning" title="Set this model's family in user.models.jsonc before using it for generation.">
             needs family
@@ -552,6 +556,12 @@ export function ModelManagerScreen() {
             present={credentialPresent}
             onOpenSettings={() => setActiveView("Settings")}
           />
+        ) : null}
+        {incomplete ? (
+          <p className="inline-warning">
+            Cached files are incomplete
+            {missingRequiredFiles.length ? `: ${missingRequiredFiles.slice(0, 3).join(", ")}${missingRequiredFiles.length > 3 ? "..." : ""}` : ""}.
+          </p>
         ) : null}
         <dl>
           <div>
@@ -620,7 +630,9 @@ export function ModelManagerScreen() {
                 ? "Ready"
                 : failedDownload
                   ? "Resume Download"
-                  : model.downloadSizeLabel
+                  : incomplete
+                    ? "Fix"
+                    : model.downloadSizeLabel
                     ? `Download ${downloadSize}`
                     : "Download"}
           </button>

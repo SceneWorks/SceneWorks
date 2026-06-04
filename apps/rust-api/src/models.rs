@@ -51,6 +51,31 @@ pub(crate) async fn list_models(
     Ok(Json(model_catalog(&state).await?))
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct HuggingFaceCacheHealth {
+    pub(crate) installed: bool,
+    pub(crate) incomplete: bool,
+    pub(crate) missing_files: Vec<String>,
+}
+
+impl HuggingFaceCacheHealth {
+    fn missing(missing_files: Vec<String>) -> Self {
+        Self {
+            installed: false,
+            incomplete: true,
+            missing_files,
+        }
+    }
+
+    fn installed() -> Self {
+        Self {
+            installed: true,
+            incomplete: false,
+            missing_files: Vec::new(),
+        }
+    }
+}
+
 pub(crate) async fn create_model_download_job(
     State(state): State<AppState>,
     Path(model_id): Path<String>,
@@ -710,7 +735,7 @@ pub(crate) async fn model_catalog(state: &AppState) -> Result<Vec<Value>, ApiErr
         let effective_download_size_bytes = download_size_bytes.or(fallback_size_bytes);
         let download_size_estimated =
             download_size_bytes.is_none() && fallback_size_bytes.is_some();
-        let (downloadable, installed_path, installed) =
+        let (downloadable, installed_path, installed, cache_incomplete, missing_required_files) =
             if let Some(download_context) = download_context {
                 let managed_path = state
                     .settings
@@ -719,12 +744,20 @@ pub(crate) async fn model_catalog(state: &AppState) -> Result<Vec<Value>, ApiErr
                     .join(safe_download_dir(&download_context.repo));
                 let cache_path =
                     huggingface_repo_cache_path(&state.settings.data_dir, &download_context.repo);
-                let cache_installed = cache_path
+                let cache_health = cache_path
                     .as_ref()
-                    .is_some_and(|path| huggingface_repo_cache_exists(path));
+                    .map(|path| huggingface_cache_health(path, &download_context.files));
+                let cache_installed = cache_health.as_ref().is_some_and(|health| health.installed);
+                let cache_incomplete = cache_health
+                    .as_ref()
+                    .is_some_and(|health| health.incomplete);
+                let missing_required_files = cache_health
+                    .as_ref()
+                    .map(|health| health.missing_files.clone())
+                    .unwrap_or_default();
                 let managed_installed = model_is_installed(&managed_path);
-                let installed_path = if cache_installed {
-                    cache_path
+                let installed_path = if cache_installed || cache_incomplete {
+                    cache_path.clone()
                 } else {
                     Some(managed_path)
                 };
@@ -732,14 +765,22 @@ pub(crate) async fn model_catalog(state: &AppState) -> Result<Vec<Value>, ApiErr
                     true,
                     installed_path.map(|path| path.display().to_string()),
                     managed_installed || cache_installed,
+                    cache_incomplete,
+                    missing_required_files,
                 )
             } else if let Some(installed_path) =
                 model_manifest_installed_path(model, &state.settings.data_dir)
             {
                 let installed = model_is_installed(&installed_path);
-                (false, Some(installed_path.display().to_string()), installed)
+                (
+                    false,
+                    Some(installed_path.display().to_string()),
+                    installed,
+                    false,
+                    Vec::new(),
+                )
             } else {
-                (false, None, false)
+                (false, None, false, false, Vec::new())
             };
         let object = model
             .as_object_mut()
@@ -771,6 +812,32 @@ pub(crate) async fn model_catalog(state: &AppState) -> Result<Vec<Value>, ApiErr
         object.insert(
             "installState".to_owned(),
             Value::String(if installed { "installed" } else { "missing" }.to_owned()),
+        );
+        object.insert(
+            "cacheState".to_owned(),
+            Value::String(
+                if installed {
+                    "complete"
+                } else if cache_incomplete {
+                    "incomplete"
+                } else {
+                    "missing"
+                }
+                .to_owned(),
+            ),
+        );
+        object.insert(
+            "missingRequiredFiles".to_owned(),
+            Value::Array(
+                missing_required_files
+                    .into_iter()
+                    .map(Value::String)
+                    .collect(),
+            ),
+        );
+        object.insert(
+            "repairAvailable".to_owned(),
+            Value::Bool(downloadable && cache_incomplete),
         );
         object.insert(
             "installedPath".to_owned(),
@@ -978,6 +1045,204 @@ pub(crate) fn model_download_context(model: &Value) -> Result<Option<DownloadCon
         files: string_array_field(&download, "files"),
         fallback_size_bytes: manifest_download_size_bytes(model, &download),
     }))
+}
+
+pub(crate) fn huggingface_cache_health(
+    repo_root: &FsPath,
+    files: &[String],
+) -> HuggingFaceCacheHealth {
+    if !huggingface_repo_cache_exists(repo_root) {
+        return HuggingFaceCacheHealth {
+            installed: false,
+            incomplete: false,
+            missing_files: Vec::new(),
+        };
+    }
+    let snapshots = huggingface_snapshot_dirs(repo_root);
+    if snapshots.is_empty() {
+        return HuggingFaceCacheHealth::missing(vec!["snapshots/<revision>".to_owned()]);
+    }
+    if !files.is_empty() {
+        return huggingface_filtered_cache_health(&snapshots, files);
+    }
+
+    let mut best_missing = Vec::new();
+    for snapshot in snapshots {
+        if snapshot.join("model_index.json").is_file() {
+            let health = diffusers_snapshot_health(&snapshot);
+            if health.installed {
+                return health;
+            }
+            if best_missing.is_empty() || health.missing_files.len() < best_missing.len() {
+                best_missing = health.missing_files;
+            }
+            continue;
+        }
+        if snapshot.join("config.json").is_file() || snapshot_has_payload_file(&snapshot) {
+            return HuggingFaceCacheHealth::installed();
+        }
+        if best_missing.is_empty() {
+            best_missing.push("model_index.json".to_owned());
+        }
+    }
+    HuggingFaceCacheHealth::missing(best_missing)
+}
+
+fn huggingface_filtered_cache_health(
+    snapshots: &[PathBuf],
+    files: &[String],
+) -> HuggingFaceCacheHealth {
+    let missing = files
+        .iter()
+        .filter(|pattern| {
+            !snapshots
+                .iter()
+                .any(|snapshot| snapshot_contains_pattern(snapshot, pattern))
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+    if missing.is_empty() {
+        HuggingFaceCacheHealth::installed()
+    } else {
+        HuggingFaceCacheHealth::missing(missing)
+    }
+}
+
+fn snapshot_contains_pattern(snapshot: &FsPath, pattern: &str) -> bool {
+    if pattern_contains_glob(pattern) {
+        return snapshot_files(snapshot)
+            .into_iter()
+            .any(|path| pattern_matches(pattern, &path));
+    }
+    snapshot.join(pattern).is_file()
+}
+
+fn pattern_contains_glob(pattern: &str) -> bool {
+    pattern
+        .chars()
+        .any(|character| matches!(character, '*' | '?' | '[' | ']'))
+}
+
+fn diffusers_snapshot_health(snapshot: &FsPath) -> HuggingFaceCacheHealth {
+    let model_index_path = snapshot.join("model_index.json");
+    let Ok(contents) = std::fs::read_to_string(&model_index_path) else {
+        return HuggingFaceCacheHealth::missing(vec!["model_index.json".to_owned()]);
+    };
+    let Ok(index) = serde_json::from_str::<Value>(&contents) else {
+        return HuggingFaceCacheHealth::missing(vec!["model_index.json".to_owned()]);
+    };
+    let Some(index) = index.as_object() else {
+        return HuggingFaceCacheHealth::missing(vec!["model_index.json".to_owned()]);
+    };
+
+    let mut missing = Vec::new();
+    for (component, spec) in index {
+        if component.starts_with('_') || spec.is_null() {
+            continue;
+        }
+        let class_name = spec
+            .as_array()
+            .and_then(|items| items.get(1))
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        for required in required_diffusers_component_files(component, class_name) {
+            if !snapshot.join(&required).is_file() {
+                missing.push(required);
+            }
+        }
+        if diffusers_component_requires_weights(component, class_name)
+            && !diffusers_component_has_weight_file(snapshot, component)
+        {
+            missing.push(format!("{component}/<weights>"));
+        }
+    }
+    if missing.is_empty() {
+        HuggingFaceCacheHealth::installed()
+    } else {
+        missing.sort();
+        missing.dedup();
+        HuggingFaceCacheHealth::missing(missing)
+    }
+}
+
+fn required_diffusers_component_files(component: &str, class_name: &str) -> Vec<String> {
+    let class = class_name.to_ascii_lowercase();
+    if component.contains("scheduler") || class.contains("scheduler") {
+        return vec![format!("{component}/scheduler_config.json")];
+    }
+    if class.contains("tokenizer") {
+        return vec![format!("{component}/tokenizer_config.json")];
+    }
+    if class.contains("featureextractor") || class.contains("imageprocessor") {
+        return vec![format!("{component}/preprocessor_config.json")];
+    }
+    let component_dir = component.trim();
+    if component_dir.is_empty() {
+        Vec::new()
+    } else {
+        vec![format!("{component_dir}/config.json")]
+    }
+}
+
+fn diffusers_component_requires_weights(component: &str, class_name: &str) -> bool {
+    let class = class_name.to_ascii_lowercase();
+    !(component.contains("scheduler")
+        || class.contains("scheduler")
+        || class.contains("tokenizer")
+        || class.contains("featureextractor")
+        || class.contains("imageprocessor"))
+}
+
+fn diffusers_component_has_weight_file(snapshot: &FsPath, component: &str) -> bool {
+    let component_dir = snapshot.join(component);
+    let Ok(entries) = std::fs::read_dir(component_dir) else {
+        return false;
+    };
+    entries.flatten().any(|entry| {
+        let path = entry.path();
+        let name = path
+            .file_name()
+            .and_then(|value| value.to_str())
+            .unwrap_or_default()
+            .to_ascii_lowercase();
+        path.is_file()
+            && (name.ends_with(".safetensors")
+                || name.ends_with(".bin")
+                || name.ends_with(".msgpack")
+                || name.ends_with(".gguf"))
+    })
+}
+
+fn snapshot_has_payload_file(snapshot: &FsPath) -> bool {
+    snapshot_files(snapshot).into_iter().any(|path| {
+        let lower = path.to_ascii_lowercase();
+        !lower.ends_with(".md")
+            && !lower.ends_with(".png")
+            && !lower.ends_with(".jpg")
+            && !lower.ends_with(".jpeg")
+            && !lower.ends_with(".gitattributes")
+    })
+}
+
+fn snapshot_files(snapshot: &FsPath) -> Vec<String> {
+    let mut output = Vec::new();
+    let mut stack = vec![snapshot.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                stack.push(path);
+            } else if path.is_file() {
+                if let Ok(relative) = path.strip_prefix(snapshot) {
+                    output.push(relative.to_string_lossy().replace('\\', "/"));
+                }
+            }
+        }
+    }
+    output
 }
 
 pub(crate) fn manifest_download_size_bytes(model: &Value, download: &Value) -> Option<u64> {

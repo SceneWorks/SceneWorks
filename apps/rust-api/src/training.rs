@@ -642,7 +642,7 @@ pub(crate) fn training_base_model_installed(data_dir: &FsPath, target: &Training
         .filter(|repo| !repo.is_empty())
     {
         if let Some(cache_path) = huggingface_repo_cache_path(data_dir, repo) {
-            if huggingface_repo_cache_exists(&cache_path) {
+            if models::huggingface_cache_health(&cache_path, &[]).installed {
                 return true;
             }
         }
