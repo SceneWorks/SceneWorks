@@ -2116,6 +2116,7 @@
   "model manifest response": [
     {
       "adapter": "z_image_diffusers",
+      "cacheState": "missing",
       "capabilities": [
         "text_to_image"
       ],
@@ -2158,9 +2159,11 @@
           "z-image"
         ]
       },
+      "missingRequiredFiles": [],
       "name": "User Model",
       "paths": {},
       "removable": true,
+      "repairAvailable": false,
       "type": "image",
       "ui": {
         "label": "User"
@@ -2168,6 +2171,7 @@
     },
     {
       "adapter": "z_image_diffusers",
+      "cacheState": "missing",
       "capabilities": [
         "text_to_image",
         "edit_image",
@@ -2194,9 +2198,11 @@
           "z-image"
         ]
       },
+      "missingRequiredFiles": [],
       "name": "Z-Image Turbo",
       "paths": {},
       "removable": false,
+      "repairAvailable": false,
       "type": "image",
       "ui": {
         "label": "Z-Image"
