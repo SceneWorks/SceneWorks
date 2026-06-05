@@ -1515,6 +1515,54 @@ fn flux_reference_job_stays_on_torch() {
 }
 
 #[test]
+fn qwen_txt2img_routes_to_mlx_but_pose_stays_on_torch() {
+    let store = store("mlx-routing-qwen");
+    register_gpu_worker(&store, "worker-torch", "mps", image_caps());
+    register_gpu_worker(&store, "worker-mlx", "mlx", image_caps());
+
+    // Plain qwen txt2img → MLX worker.
+    let txt2img = store
+        .create_job(image_job_with(
+            json!({ "model": "qwen_image", "prompt": "a red fox" }),
+            "auto",
+        ))
+        .expect("txt2img job creates");
+    assert!(store
+        .claim_next_job("worker-torch")
+        .expect("torch claim ok")
+        .is_none());
+    let claimed = store
+        .claim_next_job("worker-mlx")
+        .expect("mlx claim ok")
+        .expect("mlx claims qwen txt2img");
+    assert_eq!(claimed.id, txt2img.id);
+    assert_eq!(claimed.assigned_gpu.as_deref(), Some("mlx"));
+
+    // A strict-pose qwen job stays on the Python torch ControlNet path (sc-2291): the
+    // mlx worker refuses it, the torch worker claims it without deferral.
+    let pose = store
+        .create_job(image_job_with(
+            json!({
+                "model": "qwen_image",
+                "prompt": "a red fox",
+                "advanced": { "poses": [{ "id": "p1" }] }
+            }),
+            "auto",
+        ))
+        .expect("pose job creates");
+    assert!(store
+        .claim_next_job("worker-mlx")
+        .expect("mlx claim ok")
+        .is_none());
+    let claimed = store
+        .claim_next_job("worker-torch")
+        .expect("torch claim ok")
+        .expect("torch claims qwen pose job");
+    assert_eq!(claimed.id, pose.id);
+    assert_eq!(claimed.assigned_gpu.as_deref(), Some("mps"));
+}
+
+#[test]
 fn non_mlx_model_image_job_is_not_routed_to_mlx_worker() {
     let store = store("mlx-routing-non-mlx-model");
     register_gpu_worker(&store, "worker-torch", "mps", image_caps());
