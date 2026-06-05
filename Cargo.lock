@@ -2467,6 +2467,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "mlx-gen-ltx"
+version = "0.0.0"
+source = "git+https://github.com/michaeltrefry/mlx-gen?rev=d24c20e36e5259faf0e4642faab3d6a1e2f647c3#d24c20e36e5259faf0e4642faab3d6a1e2f647c3"
+dependencies = [
+ "inventory",
+ "mlx-gen",
+ "pmetal-mlx-rs",
+ "serde_json",
+]
+
+[[package]]
 name = "mlx-gen-qwen-image"
 version = "0.0.0"
 source = "git+https://github.com/michaeltrefry/mlx-gen?rev=d24c20e36e5259faf0e4642faab3d6a1e2f647c3#d24c20e36e5259faf0e4642faab3d6a1e2f647c3"
@@ -3946,6 +3957,7 @@ dependencies = [
  "mlx-gen",
  "mlx-gen-flux",
  "mlx-gen-flux2",
+ "mlx-gen-ltx",
  "mlx-gen-qwen-image",
  "mlx-gen-sdxl",
  "mlx-gen-wan",
