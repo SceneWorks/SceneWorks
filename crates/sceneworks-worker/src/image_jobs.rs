@@ -27,6 +27,8 @@ use mlx_gen::{
 #[cfg(target_os = "macos")]
 use mlx_gen_flux as _;
 #[cfg(target_os = "macos")]
+use mlx_gen_qwen_image as _;
+#[cfg(target_os = "macos")]
 use mlx_gen_z_image as _;
 
 /// The stub adapter id recorded on generated assets (matches the contract fixture
@@ -54,6 +56,9 @@ struct MlxModel {
     supports_guidance: bool,
     /// Default guidance when supported and the request omits it.
     default_guidance: f32,
+    /// Whether the variant accepts a negative prompt (true CFG). The guidance-distilled
+    /// variants do not — the engine rejects `negative_prompt` on them.
+    supports_negative_prompt: bool,
     /// The `adapter` id recorded on generated assets (the Python MLX adapter id).
     adapter_label: &'static str,
 }
@@ -67,6 +72,7 @@ const MLX_MODELS: &[MlxModel] = &[
         default_steps: 8,
         supports_guidance: false,
         default_guidance: 0.0,
+        supports_negative_prompt: false,
         adapter_label: "mlx_z_image",
     },
     MlxModel {
@@ -76,6 +82,7 @@ const MLX_MODELS: &[MlxModel] = &[
         default_steps: 4,
         supports_guidance: false,
         default_guidance: 0.0,
+        supports_negative_prompt: false,
         adapter_label: "mlx_flux",
     },
     MlxModel {
@@ -85,7 +92,21 @@ const MLX_MODELS: &[MlxModel] = &[
         default_steps: 28,
         supports_guidance: true,
         default_guidance: 3.5,
+        supports_negative_prompt: false,
         adapter_label: "mlx_flux",
+    },
+    MlxModel {
+        // Non-distilled true-CFG base: 20 steps + guidance 4.0 + negative prompt
+        // (Python MODEL_TARGETS / MlxQwenAdapter). mlx-gen's own default is 4 steps,
+        // so steps are passed explicitly. Edit + strict-pose ControlNet stay on torch.
+        sceneworks_id: "qwen_image",
+        engine_id: "qwen_image",
+        default_repo: "Qwen/Qwen-Image",
+        default_steps: 20,
+        supports_guidance: true,
+        default_guidance: 4.0,
+        supports_negative_prompt: true,
+        adapter_label: "mlx_qwen",
     },
 ];
 
@@ -613,6 +634,22 @@ fn resolve_guidance(request: &ImageRequest, model: &MlxModel) -> Option<f32> {
     Some(scale)
 }
 
+/// The negative prompt to pass to the engine. `None` for variants without true CFG
+/// (the engine rejects `negative_prompt` on the distilled families) and for an empty
+/// prompt (the true-CFG engines fall back to their own neutral negative).
+#[cfg(target_os = "macos")]
+fn resolve_negative_prompt(request: &ImageRequest, model: &MlxModel) -> Option<String> {
+    if !model.supports_negative_prompt {
+        return None;
+    }
+    let trimmed = request.negative_prompt.trim();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed.to_owned())
+    }
+}
+
 /// First non-empty of installedPath/sourcePath/path/source.path on a LoRA spec.
 #[cfg(target_os = "macos")]
 fn lora_path(lora: &Value) -> Option<PathBuf> {
@@ -769,11 +806,13 @@ fn mlx_generate_one(
     seed: i64,
     steps: u32,
     guidance: Option<f32>,
+    negative_prompt: Option<String>,
     cancel: &CancelFlag,
     on_progress: &mut dyn FnMut(Progress),
 ) -> WorkerResult<(u32, u32, Vec<u8>)> {
     let request = GenerationRequest {
         prompt: prompt.to_owned(),
+        negative_prompt,
         width,
         height,
         count: 1,
@@ -834,6 +873,7 @@ async fn generate_mlx_stream(
     let (quant, quant_bits) = resolve_quant(request);
     let steps = resolve_steps(request, model);
     let guidance = resolve_guidance(request, model);
+    let negative_prompt = resolve_negative_prompt(request, model);
     let adapters = resolve_adapters(request)?;
     let repo = model_repo(request, model);
     let raw_settings = mlx_raw_settings(request, &repo, steps, quant_bits, guidance);
@@ -874,6 +914,7 @@ async fn generate_mlx_stream(
                     seed,
                     steps,
                     guidance,
+                    negative_prompt.clone(),
                     &cancel,
                     &mut on_progress,
                 )?;
@@ -1189,7 +1230,42 @@ mod tests {
         );
         assert_eq!(mlx_model("flux_dev").unwrap().engine_id, "flux1_dev");
         assert_eq!(mlx_model("flux_dev").unwrap().adapter_label, "mlx_flux");
+        let qwen = mlx_model("qwen_image").unwrap();
+        assert_eq!(qwen.engine_id, "qwen_image");
+        assert_eq!(qwen.adapter_label, "mlx_qwen");
+        assert_eq!(qwen.default_steps, 20);
+        assert!(qwen.supports_guidance && qwen.supports_negative_prompt);
         assert!(mlx_model("sdxl").is_none());
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn resolve_negative_prompt_only_for_true_cfg_families() {
+        let qwen = mlx_model("qwen_image").unwrap();
+        let flux = mlx_model("flux_dev").unwrap();
+        // qwen (true CFG) passes a non-empty negative prompt; empty → None (fallback).
+        assert_eq!(
+            resolve_negative_prompt(
+                &request(json!({ "projectId": "p", "negativePrompt": "blurry" })),
+                qwen
+            ),
+            Some("blurry".to_owned())
+        );
+        assert_eq!(
+            resolve_negative_prompt(
+                &request(json!({ "projectId": "p", "negativePrompt": "  " })),
+                qwen
+            ),
+            None
+        );
+        // Non-true-CFG families never pass a negative prompt (the engine rejects it).
+        assert_eq!(
+            resolve_negative_prompt(
+                &request(json!({ "projectId": "p", "negativePrompt": "blurry" })),
+                flux
+            ),
+            None
+        );
     }
 
     #[cfg(target_os = "macos")]
@@ -1242,14 +1318,15 @@ mod tests {
         );
     }
 
-    /// The Z-Image + FLUX.1 providers linked into the worker self-registered via inventory.
+    /// The Z-Image + FLUX.1 + Qwen-Image providers linked into the worker
+    /// self-registered via inventory.
     #[cfg(target_os = "macos")]
     #[test]
     fn mlx_engine_registry_links_image_families() {
         let ids: Vec<&str> = mlx_gen::registry::generators()
             .map(|reg| (reg.descriptor)().id)
             .collect();
-        for id in ["z_image_turbo", "flux1_schnell", "flux1_dev"] {
+        for id in ["z_image_turbo", "flux1_schnell", "flux1_dev", "qwen_image"] {
             assert!(ids.contains(&id), "registry missing {id}");
         }
     }
@@ -1267,18 +1344,23 @@ mod tests {
 
     /// Load + generate one small image through the public mlx-gen path (test helper).
     #[cfg(target_os = "macos")]
-    fn smoke_generate_one(engine_id: &str, snapshot: std::path::PathBuf, guidance: Option<f32>) {
+    fn smoke_generate_one(
+        engine_id: &str,
+        snapshot: std::path::PathBuf,
+        guidance: Option<f32>,
+        negative_prompt: Option<String>,
+    ) {
         let generator =
             mlx_load(engine_id, snapshot, Some(mlx_gen::Quant::Q8), Vec::new()).unwrap();
         let cancel = mlx_gen::CancelFlag::new();
         let mut steps_seen = 0u32;
-        let steps = mlx_model(match engine_id {
+        // engine id → SceneWorks id (only flux differs; z-image/qwen are self-named).
+        let sceneworks_id = match engine_id {
             "flux1_schnell" => "flux_schnell",
             "flux1_dev" => "flux_dev",
-            _ => "z_image_turbo",
-        })
-        .unwrap()
-        .default_steps;
+            other => other,
+        };
+        let steps = mlx_model(sceneworks_id).unwrap().default_steps;
         let (w, h, pixels) = mlx_generate_one(
             generator.as_ref(),
             "a serene mountain lake at dawn",
@@ -1287,6 +1369,7 @@ mod tests {
             42,
             steps,
             guidance,
+            negative_prompt,
             &cancel,
             &mut |p| {
                 if let mlx_gen::Progress::Step { current, .. } = p {
@@ -1313,6 +1396,7 @@ mod tests {
             "z_image_turbo",
             hf_snapshot("models--Tongyi-MAI--Z-Image-Turbo"),
             None,
+            None,
         );
     }
 
@@ -1328,6 +1412,7 @@ mod tests {
             "flux1_schnell",
             hf_snapshot("models--black-forest-labs--FLUX.1-schnell"),
             None,
+            None,
         );
     }
 
@@ -1342,6 +1427,23 @@ mod tests {
             "flux1_dev",
             hf_snapshot("models--black-forest-labs--FLUX.1-dev"),
             Some(3.5),
+            None,
+        );
+    }
+
+    /// Real-weights smoke: load + generate one small Qwen-Image image (true CFG,
+    /// guidance 4.0 + a negative prompt). Needs the HF cache (`Qwen/Qwen-Image`) + a
+    /// Metal device; run on demand:
+    /// `cargo test -p sceneworks-worker --lib -- --ignored qwen_real_weights`.
+    #[cfg(target_os = "macos")]
+    #[test]
+    #[ignore = "needs real Qwen-Image weights + Metal device"]
+    fn qwen_real_weights_generates_one_image() {
+        smoke_generate_one(
+            "qwen_image",
+            hf_snapshot("models--Qwen--Qwen-Image"),
+            Some(4.0),
+            Some("blurry, low quality".to_owned()),
         );
     }
 

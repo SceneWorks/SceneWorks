@@ -1452,10 +1452,10 @@ fn active_gpu_job_exists(connection: &Connection, gpu_id: &str) -> JobsStoreResu
 
 /// Models the in-process Rust MLX worker generates today, by id. This set grows
 /// one family story at a time as each lands real generation in
-/// `sceneworks-worker::image_jobs` — sc-3022 Z-Image, sc-3023 FLUX.1 (live), then
-/// sc-3024 Qwen, sc-3025 FLUX.2, sc-3026 SDXL. A model id absent here is never
-/// routed to the mlx worker, so the Python torch path stays authoritative for it.
-const MLX_ROUTED_MODELS: &[&str] = &["z_image_turbo", "flux_schnell", "flux_dev"];
+/// `sceneworks-worker::image_jobs` — sc-3022 Z-Image, sc-3023 FLUX.1, sc-3024 Qwen
+/// (live), then sc-3025 FLUX.2, sc-3026 SDXL. A model id absent here is never routed
+/// to the mlx worker, so the Python torch path stays authoritative for it.
+const MLX_ROUTED_MODELS: &[&str] = &["z_image_turbo", "flux_schnell", "flux_dev", "qwen_image"];
 
 /// Epic 3018 routing — does this image job belong on the in-process Rust MLX
 /// worker (vs the Python torch worker)? This lifts the per-family Python
@@ -1482,11 +1482,41 @@ fn image_job_is_mlx_eligible(job: &JobSnapshot) -> bool {
     match model {
         "z_image_turbo" => z_image_mlx_eligible(&job.payload),
         "flux_schnell" | "flux_dev" => flux_mlx_eligible(&job.payload),
+        "qwen_image" => qwen_mlx_eligible(&job.payload),
         // Each family story adds its arm alongside real generation:
-        // sc-3024 qwen_image, sc-3025 flux2_klein_*, sc-3026 sdxl.
+        // sc-3025 flux2_klein_*, sc-3026 sdxl.
         // Until then a model in MLX_ROUTED_MODELS must have an arm.
         _ => false,
     }
+}
+
+/// Qwen-Image (sc-3024) MLX-routing conditions, ported from `_should_route_qwen_to_mlx`:
+/// text-to-image only. A reference (character/edit flow) and `edit_image` stay on the
+/// Python torch path; a strict pose set stays on torch too — the Qwen strict-pose tier
+/// is a diffusers `QwenImageControlNet` (sc-2291), which the MLX path has no equivalent
+/// for (it would silently drop the poses). A third-party LyCORIS LoRA also falls back
+/// to torch (engine + worker apply LoRA + peft LoKr, but not arbitrary LyCORIS).
+fn qwen_mlx_eligible(payload: &Map<String, Value>) -> bool {
+    if payload.get("mode").and_then(Value::as_str) == Some("edit_image") {
+        return false;
+    }
+    let has_reference = payload
+        .get("referenceAssetId")
+        .and_then(Value::as_str)
+        .is_some_and(|value| !value.trim().is_empty());
+    if has_reference {
+        return false;
+    }
+    let has_poses = payload
+        .get("advanced")
+        .and_then(Value::as_object)
+        .and_then(|advanced| advanced.get("poses"))
+        .and_then(Value::as_array)
+        .is_some_and(|poses| !poses.is_empty());
+    if has_poses {
+        return false;
+    }
+    !request_has_lycoris_lora(payload)
 }
 
 /// FLUX.1 (sc-3023) MLX-routing conditions, ported from `_should_route_flux_to_mlx`:
@@ -1825,7 +1855,9 @@ fn sort_json_value(value: &mut Value) {
 
 #[cfg(test)]
 mod mlx_routing_tests {
-    use super::{flux_mlx_eligible, request_has_lycoris_lora, z_image_mlx_eligible};
+    use super::{
+        flux_mlx_eligible, qwen_mlx_eligible, request_has_lycoris_lora, z_image_mlx_eligible,
+    };
     use serde_json::{json, Map, Value};
 
     fn object(value: Value) -> Map<String, Value> {
@@ -1911,6 +1943,32 @@ mod mlx_routing_tests {
         assert!(!flux_mlx_eligible(&object(json!({
             "referenceAssetId": "asset_1",
             "advanced": { "poses": [{ "id": "p1" }] }
+        }))));
+    }
+
+    #[test]
+    fn qwen_plain_txt2img_is_eligible() {
+        assert!(qwen_mlx_eligible(&object(json!({ "prompt": "a red fox" }))));
+        // A negative prompt + LoRA are fine on the MLX qwen path (true CFG + LoRA wired).
+        assert!(qwen_mlx_eligible(&object(json!({
+            "negativePrompt": "blurry",
+            "loras": [{ "networkType": "lokr" }]
+        }))));
+    }
+
+    #[test]
+    fn qwen_edit_reference_poses_and_lycoris_fall_back_to_torch() {
+        assert!(!qwen_mlx_eligible(&object(json!({ "mode": "edit_image" }))));
+        assert!(!qwen_mlx_eligible(&object(
+            json!({ "referenceAssetId": "asset_1" })
+        )));
+        // Strict pose ControlNet (sc-2291) is torch-only for Qwen — unlike Z-Image,
+        // a pose set does NOT keep it on MLX.
+        assert!(!qwen_mlx_eligible(&object(json!({
+            "advanced": { "poses": [{ "id": "p1" }] }
+        }))));
+        assert!(!qwen_mlx_eligible(&object(json!({
+            "loras": [{ "networkType": "lycoris" }]
         }))));
     }
 
