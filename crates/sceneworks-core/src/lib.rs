@@ -14,6 +14,7 @@ pub mod store_util;
 pub mod time;
 pub mod training;
 pub mod training_store;
+pub mod video_request;
 
 pub const API_PREFIX: &str = "/api/v1";
 pub const HEALTH_ROUTE: &str = "/health";

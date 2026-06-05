@@ -594,7 +594,7 @@ fn image_progress(
     }
 }
 
-fn backend_label(gpu_id: &str) -> &str {
+pub(crate) fn backend_label(gpu_id: &str) -> &str {
     if gpu_id.trim().is_empty() {
         "cpu"
     } else {

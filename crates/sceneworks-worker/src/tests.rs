@@ -423,18 +423,22 @@ fn rust_cpu_capabilities_do_not_claim_gpu_generation_jobs() {
         .any(|capability| capability.as_str() == "image_generate"));
 }
 
-/// The Apple-Silicon MLX GPU worker (epic 3018) advertises `image_generate` so the
-/// API routes generation to it, but it must NOT pick up CPU utility jobs (those stay
-/// on the CPU worker) — the inverse of the CPU-worker contract above.
+/// The Apple-Silicon MLX GPU worker (epic 3018) advertises `image_generate` +
+/// `video_generate` so the API routes generation to it, but it must NOT pick up CPU
+/// utility jobs (those stay on the CPU worker) — the inverse of the CPU-worker
+/// contract above. `video_generate` lands with the video runtime (sc-3033).
 #[cfg(target_os = "macos")]
 #[test]
-fn mlx_gpu_advertises_image_generate_only() {
+fn mlx_gpu_advertises_generation_capabilities_only() {
     let mlx = mlx_gpu();
     assert_eq!(mlx.id, "mlx");
     let capabilities = worker_capabilities_with_utility(&mlx, true);
     assert!(capabilities
         .iter()
         .any(|capability| capability.as_str() == "image_generate"));
+    assert!(capabilities
+        .iter()
+        .any(|capability| capability.as_str() == "video_generate"));
     assert!(capabilities
         .iter()
         .any(|capability| capability.as_str() == "gpu"));
