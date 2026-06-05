@@ -27,6 +27,8 @@ use mlx_gen::{
 #[cfg(target_os = "macos")]
 use mlx_gen_flux as _;
 #[cfg(target_os = "macos")]
+use mlx_gen_flux2 as _;
+#[cfg(target_os = "macos")]
 use mlx_gen_qwen_image as _;
 #[cfg(target_os = "macos")]
 use mlx_gen_z_image as _;
@@ -107,6 +109,48 @@ const MLX_MODELS: &[MlxModel] = &[
         default_guidance: 4.0,
         supports_negative_prompt: true,
         adapter_label: "mlx_qwen",
+    },
+    // FLUX.2-klein (sc-3025) — MLX-only family (no torch fallback). All three SceneWorks
+    // variants share the engine's single txt2img model `flux2_klein_9b` (edit + KV-cache
+    // are the separate `*_edit`/`*_kv_edit` engine models, story sc-3029); the variants
+    // differ only in their weights. Distilled klein runs guidance 1.0 (CFG-free) with no
+    // negative prompt; the engine accepts guidance but rejects a negative prompt.
+    MlxModel {
+        sceneworks_id: "flux2_klein_9b",
+        engine_id: "flux2_klein_9b",
+        default_repo: "black-forest-labs/FLUX.2-klein-9B",
+        default_steps: 4,
+        supports_guidance: true,
+        default_guidance: 1.0,
+        supports_negative_prompt: false,
+        adapter_label: "mlx_flux2",
+    },
+    MlxModel {
+        // Separately-distilled checkpoint, same architecture — its snapshot carries the
+        // full diffusers tree, so txt2img loads through the base `flux2_klein_9b` loader.
+        sceneworks_id: "flux2_klein_9b_kv",
+        engine_id: "flux2_klein_9b",
+        default_repo: "black-forest-labs/FLUX.2-klein-9b-kv",
+        default_steps: 4,
+        supports_guidance: true,
+        default_guidance: 1.0,
+        supports_negative_prompt: false,
+        adapter_label: "mlx_flux2",
+    },
+    MlxModel {
+        // wikeeyang community fine-tune (sc-2220/2235): UNDISTILLED, so 24 steps. Its raw
+        // repo is single-file (GGUF/safetensors) with no diffusers tree, so it loads from a
+        // locally-assembled converted dir via the `modelPath` seam (manifest `modelPath`),
+        // NOT the source repo below. The convert step is still Python (mlx_flux_convert.py)
+        // — a Rust converter is a cutover dependency tracked on the engine epic.
+        sceneworks_id: "flux2_klein_9b_true_v2",
+        engine_id: "flux2_klein_9b",
+        default_repo: "wikeeyang/Flux2-Klein-9B-True-V2",
+        default_steps: 24,
+        supports_guidance: true,
+        default_guidance: 1.0,
+        supports_negative_prompt: false,
+        adapter_label: "mlx_flux2",
     },
 ];
 
@@ -1235,6 +1279,24 @@ mod tests {
         assert_eq!(qwen.adapter_label, "mlx_qwen");
         assert_eq!(qwen.default_steps, 20);
         assert!(qwen.supports_guidance && qwen.supports_negative_prompt);
+        // All three FLUX.2-klein variants share the engine's single txt2img model.
+        for id in [
+            "flux2_klein_9b",
+            "flux2_klein_9b_kv",
+            "flux2_klein_9b_true_v2",
+        ] {
+            let m = mlx_model(id).unwrap();
+            assert_eq!(m.engine_id, "flux2_klein_9b");
+            assert_eq!(m.adapter_label, "mlx_flux2");
+            assert!(m.supports_guidance && !m.supports_negative_prompt);
+        }
+        // Distilled variants are 4-step; the undistilled true_v2 is 24-step.
+        assert_eq!(mlx_model("flux2_klein_9b").unwrap().default_steps, 4);
+        assert_eq!(mlx_model("flux2_klein_9b_kv").unwrap().default_steps, 4);
+        assert_eq!(
+            mlx_model("flux2_klein_9b_true_v2").unwrap().default_steps,
+            24
+        );
         assert!(mlx_model("sdxl").is_none());
     }
 
@@ -1326,7 +1388,13 @@ mod tests {
         let ids: Vec<&str> = mlx_gen::registry::generators()
             .map(|reg| (reg.descriptor)().id)
             .collect();
-        for id in ["z_image_turbo", "flux1_schnell", "flux1_dev", "qwen_image"] {
+        for id in [
+            "z_image_turbo",
+            "flux1_schnell",
+            "flux1_dev",
+            "qwen_image",
+            "flux2_klein_9b",
+        ] {
             assert!(ids.contains(&id), "registry missing {id}");
         }
     }
@@ -1343,24 +1411,26 @@ mod tests {
     }
 
     /// Load + generate one small image through the public mlx-gen path (test helper).
+    /// Keyed by SceneWorks model id — the engine id + step default come from the table,
+    /// so several SceneWorks ids can share one engine id (e.g. the FLUX.2 variants).
     #[cfg(target_os = "macos")]
     fn smoke_generate_one(
-        engine_id: &str,
+        sceneworks_id: &str,
         snapshot: std::path::PathBuf,
         guidance: Option<f32>,
         negative_prompt: Option<String>,
     ) {
-        let generator =
-            mlx_load(engine_id, snapshot, Some(mlx_gen::Quant::Q8), Vec::new()).unwrap();
+        let model = mlx_model(sceneworks_id).unwrap();
+        let generator = mlx_load(
+            model.engine_id,
+            snapshot,
+            Some(mlx_gen::Quant::Q8),
+            Vec::new(),
+        )
+        .unwrap();
         let cancel = mlx_gen::CancelFlag::new();
         let mut steps_seen = 0u32;
-        // engine id → SceneWorks id (only flux differs; z-image/qwen are self-named).
-        let sceneworks_id = match engine_id {
-            "flux1_schnell" => "flux_schnell",
-            "flux1_dev" => "flux_dev",
-            other => other,
-        };
-        let steps = mlx_model(sceneworks_id).unwrap().default_steps;
+        let steps = model.default_steps;
         let (w, h, pixels) = mlx_generate_one(
             generator.as_ref(),
             "a serene mountain lake at dawn",
@@ -1409,7 +1479,7 @@ mod tests {
     #[ignore = "needs real FLUX.1-schnell weights + Metal device"]
     fn flux_schnell_real_weights_generates_one_image() {
         smoke_generate_one(
-            "flux1_schnell",
+            "flux_schnell",
             hf_snapshot("models--black-forest-labs--FLUX.1-schnell"),
             None,
             None,
@@ -1424,7 +1494,7 @@ mod tests {
     #[ignore = "needs real FLUX.1-dev weights + Metal device"]
     fn flux_dev_real_weights_generates_one_image() {
         smoke_generate_one(
-            "flux1_dev",
+            "flux_dev",
             hf_snapshot("models--black-forest-labs--FLUX.1-dev"),
             Some(3.5),
             None,
@@ -1445,6 +1515,50 @@ mod tests {
             Some(4.0),
             Some("blurry, low quality".to_owned()),
         );
+    }
+
+    /// Real-weights smoke: FLUX.2-klein-9b (4-step distilled, guidance 1.0, no negative).
+    /// Needs the HF cache (`black-forest-labs/FLUX.2-klein-9B`) + a Metal device; run on
+    /// demand: `cargo test -p sceneworks-worker --lib -- --ignored flux2_klein_9b_real_weights`.
+    #[cfg(target_os = "macos")]
+    #[test]
+    #[ignore = "needs real FLUX.2-klein-9b weights + Metal device"]
+    fn flux2_klein_9b_real_weights_generates_one_image() {
+        smoke_generate_one(
+            "flux2_klein_9b",
+            hf_snapshot("models--black-forest-labs--FLUX.2-klein-9b"),
+            Some(1.0),
+            None,
+        );
+    }
+
+    /// Real-weights smoke: FLUX.2-klein-9b-kv txt2img (the separately-distilled checkpoint
+    /// loaded through the base txt2img loader). Needs the HF cache
+    /// (`black-forest-labs/FLUX.2-klein-9b-kv`) + a Metal device.
+    #[cfg(target_os = "macos")]
+    #[test]
+    #[ignore = "needs real FLUX.2-klein-9b-kv weights + Metal device"]
+    fn flux2_klein_9b_kv_real_weights_generates_one_image() {
+        smoke_generate_one(
+            "flux2_klein_9b_kv",
+            hf_snapshot("models--black-forest-labs--FLUX.2-klein-9b-kv"),
+            Some(1.0),
+            None,
+        );
+    }
+
+    /// Real-weights smoke: FLUX.2-klein-9b-true_v2 (wikeeyang undistilled fine-tune,
+    /// 24-step). Loads the locally-assembled converted diffusers dir under the SceneWorks
+    /// data dir (`models/mlx/flux2_klein_9b_true_v2`) via the modelPath seam — verifying
+    /// the converted-dir layout passthrough on the base `flux2_klein_9b` loader. Needs a
+    /// previously-converted dir + a Metal device.
+    #[cfg(target_os = "macos")]
+    #[test]
+    #[ignore = "needs a converted true_v2 dir + Metal device"]
+    fn flux2_klein_9b_true_v2_real_weights_generates_one_image() {
+        let dir = dirs_home()
+            .join("Library/Application Support/SceneWorks/data/models/mlx/flux2_klein_9b_true_v2");
+        smoke_generate_one("flux2_klein_9b_true_v2", dir, Some(1.0), None);
     }
 
     #[cfg(target_os = "macos")]

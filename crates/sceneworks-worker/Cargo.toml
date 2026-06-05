@@ -61,6 +61,9 @@ mlx-gen-z-image = { git = "https://github.com/michaeltrefry/mlx-gen", rev = "0e3
 mlx-gen-flux = { git = "https://github.com/michaeltrefry/mlx-gen", rev = "0e3ed60a550f7a948c06b97f95c9dd9fc6d59246" }
 # Qwen-Image provider (epic 3018, sc-3024). Self-registers `qwen_image`.
 mlx-gen-qwen-image = { git = "https://github.com/michaeltrefry/mlx-gen", rev = "0e3ed60a550f7a948c06b97f95c9dd9fc6d59246" }
+# FLUX.2-klein provider (epic 3018, sc-3025). Self-registers `flux2_klein_9b`
+# (txt2img) + `flux2_klein_9b_edit` + `flux2_klein_9b_kv_edit` (edit = sc-3029).
+mlx-gen-flux2 = { git = "https://github.com/michaeltrefry/mlx-gen", rev = "0e3ed60a550f7a948c06b97f95c9dd9fc6d59246" }
 
 [lints]
 workspace = true
