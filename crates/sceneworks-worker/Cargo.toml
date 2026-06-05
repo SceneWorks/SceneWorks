@@ -11,7 +11,9 @@ glob = "0.3"
 # PNG encoding for generated image assets (epic 3018, sc-3020). png-only keeps the
 # dependency small and cross-platform (the image-job pipeline + its tests run on every
 # platform; only real MLX inference is macOS-gated).
-image = { version = "0.25", default-features = false, features = ["png"] }
+# png to encode generated assets (sc-3020); jpeg/webp to decode reference/source
+# images for the FLUX.2 edit path (sc-3029) — uploads aren't only PNG.
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp"] }
 # CPU raster for DWPose skeleton rendering (epic 3018, sc-3028): filled polygons
 # (rotated-ellipse limbs), circles (joints/points), for the Z-Image strict-pose
 # ControlNet. Pure-Rust + cross-platform (the renderer + its tests run everywhere;

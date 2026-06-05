@@ -257,6 +257,19 @@ pub(crate) async fn run_image_generate_job(
         )
         .await?;
         true
+    } else if flux2_edit_available(&request, settings) {
+        // FLUX.2-klein edit/reference (mode edit_image or a reference) → edit variant.
+        generate_flux2_edit_stream(
+            api,
+            settings,
+            job,
+            &plan,
+            &project_path,
+            backend,
+            &mut asset_writes,
+        )
+        .await?;
+        true
     } else if mlx_available(&request, settings) {
         generate_mlx_stream(
             api,
@@ -1516,6 +1529,310 @@ async fn generate_zimage_control_stream(
 #[cfg(target_os = "macos")]
 const ZIMAGE_ADAPTER_LABEL: &str = "mlx_z_image";
 
+// ---------------------------------------------------------------------------
+// FLUX.2-klein edit / reference (macOS, sc-3029): the `flux2_klein_9b_edit` and
+// `flux2_klein_9b_kv_edit` variants. FLUX.2-klein is MLX-only (no torch), so this
+// is where its edit/reference jobs run. One output per requested count, each
+// conditioned on the shared reference image(s); the -kv variant auto-engages the
+// reference-K/V cache (~2.4× edit speedup).
+// ---------------------------------------------------------------------------
+
+/// The engine edit-variant id for a FLUX.2 SceneWorks model, or `None` if the model
+/// has no edit variant. The base 9b + true_v2 share `flux2_klein_9b_edit`; the -kv
+/// distill uses `flux2_klein_9b_kv_edit` (reference-K/V cache).
+#[cfg(target_os = "macos")]
+fn flux2_edit_engine_id(model: &str) -> Option<&'static str> {
+    match model {
+        "flux2_klein_9b" | "flux2_klein_9b_true_v2" => Some("flux2_klein_9b_edit"),
+        "flux2_klein_9b_kv" => Some("flux2_klein_9b_kv_edit"),
+        _ => None,
+    }
+}
+
+/// Reference asset ids for a FLUX.2 edit: the character-flow `referenceAssetId`, else
+/// the Image-Edit `sourceAssetId` (edit_image mode). Mirrors the Python
+/// `ref_id = referenceAssetId or (sourceAssetId if edit_image)`.
+#[cfg(target_os = "macos")]
+fn flux2_edit_reference_ids(request: &ImageRequest) -> Vec<String> {
+    if let Some(id) = request
+        .reference_asset_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|id| !id.is_empty())
+    {
+        return vec![id.to_owned()];
+    }
+    if request.mode == "edit_image" {
+        if let Some(id) = request
+            .source_asset_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|id| !id.is_empty())
+        {
+            return vec![id.to_owned()];
+        }
+    }
+    Vec::new()
+}
+
+/// True when this is a FLUX.2 edit job (a flux2 edit-capable model + ≥1 reference)
+/// whose base weights resolve — routed to the edit variant rather than txt2img.
+#[cfg(target_os = "macos")]
+fn flux2_edit_available(request: &ImageRequest, settings: &Settings) -> bool {
+    flux2_edit_engine_id(&request.model).is_some()
+        && !flux2_edit_reference_ids(request).is_empty()
+        && resolve_weights_dir(request, settings).is_some()
+}
+
+/// Resolve a reference/source asset id to an in-memory RGB8 image (the engine VAE-
+/// encodes + resizes it). Uses the indexed `ProjectStore::get_asset` → `file.path`.
+#[cfg(target_os = "macos")]
+fn load_reference_image(
+    data_dir: &Path,
+    project_id: &str,
+    asset_id: &str,
+    project_path: &Path,
+) -> WorkerResult<Image> {
+    let asset = ProjectStore::new(data_dir.to_path_buf(), "worker")
+        .get_asset(project_id, asset_id)
+        .map_err(|error| {
+            WorkerError::InvalidPayload(format!("reference asset {asset_id}: {error}"))
+        })?;
+    let rel = asset
+        .get("file")
+        .and_then(|file| file.get("path"))
+        .and_then(Value::as_str)
+        .filter(|path| !path.trim().is_empty())
+        .ok_or_else(|| {
+            WorkerError::InvalidPayload(format!("reference asset {asset_id} has no media path"))
+        })?;
+    let path = project_path.join(rel);
+    let decoded = image::open(&path)
+        .map_err(|error| {
+            WorkerError::InvalidPayload(format!("reference image {}: {error}", path.display()))
+        })?
+        .to_rgb8();
+    Ok(Image {
+        width: decoded.width(),
+        height: decoded.height(),
+        pixels: decoded.into_raw(),
+    })
+}
+
+/// One `Reference` (single) or one `MultiReference` (N) edit conditioning from the
+/// resolved reference images (cloned per output).
+#[cfg(target_os = "macos")]
+fn build_edit_conditioning(references: &[Image]) -> Vec<Conditioning> {
+    if references.len() == 1 {
+        vec![Conditioning::Reference {
+            image: references[0].clone(),
+            strength: None,
+        }]
+    } else {
+        vec![Conditioning::MultiReference {
+            images: references.to_vec(),
+        }]
+    }
+}
+
+/// Generate one FLUX.2 edit image conditioned on `conditioning` (the reference set).
+/// Distilled klein: guidance 1.0, no negative prompt.
+#[cfg(target_os = "macos")]
+#[allow(clippy::too_many_arguments)]
+fn flux2_edit_generate_one(
+    generator: &dyn Generator,
+    prompt: &str,
+    width: u32,
+    height: u32,
+    seed: i64,
+    steps: u32,
+    guidance: Option<f32>,
+    conditioning: Vec<Conditioning>,
+    cancel: &CancelFlag,
+    on_progress: &mut dyn FnMut(Progress),
+) -> WorkerResult<(u32, u32, Vec<u8>)> {
+    let request = GenerationRequest {
+        prompt: prompt.to_owned(),
+        width,
+        height,
+        count: 1,
+        seed: Some(seed as u64),
+        steps: Some(steps),
+        guidance,
+        conditioning,
+        cancel: cancel.clone(),
+        ..Default::default()
+    };
+    let output = generator
+        .generate(&request, on_progress)
+        .map_err(|error| WorkerError::InvalidPayload(format!("edit generation failed: {error}")))?;
+    match output {
+        GenerationOutput::Images(mut images) => {
+            let image = images.pop().ok_or_else(|| {
+                WorkerError::InvalidPayload("edit generator produced no image".to_owned())
+            })?;
+            Ok((image.width, image.height, image.pixels))
+        }
+        _ => Err(WorkerError::InvalidPayload(
+            "edit generator returned non-image output".to_owned(),
+        )),
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn flux2_edit_raw_settings(
+    request: &ImageRequest,
+    repo: &str,
+    engine_id: &str,
+    steps: u32,
+    quant_bits: Option<i64>,
+    guidance: Option<f32>,
+    reference_count: usize,
+) -> JsonObject {
+    let mut raw = request.advanced.clone();
+    raw.insert("realModelInference".to_owned(), Value::Bool(true));
+    raw.insert("repo".to_owned(), Value::String(repo.to_owned()));
+    raw.insert("numInferenceSteps".to_owned(), json!(steps));
+    raw.insert(
+        "guidanceScale".to_owned(),
+        guidance.map(|value| json!(value)).unwrap_or(Value::Null),
+    );
+    raw.insert(
+        "mlxQuantize".to_owned(),
+        quant_bits.map(|bits| json!(bits)).unwrap_or(Value::Null),
+    );
+    raw.insert("editEngine".to_owned(), Value::String(engine_id.to_owned()));
+    raw.insert("referenceCount".to_owned(), json!(reference_count));
+    raw
+}
+
+/// Real FLUX.2 edit generation: load the edit variant once, then `count` outputs each
+/// conditioned on the shared reference set. Mirrors [`generate_mlx_stream`]'s blocking-
+/// thread + streamed-events shape and reuses [`consume_gen_events`].
+#[cfg(target_os = "macos")]
+async fn generate_flux2_edit_stream(
+    api: &ApiClient,
+    settings: &Settings,
+    job: &JobSnapshot,
+    plan: &ImagePlan,
+    project_path: &Path,
+    backend: &str,
+    asset_writes: &mut Vec<Value>,
+) -> WorkerResult<()> {
+    let request = &plan.request;
+    let model = mlx_model(&request.model)
+        .ok_or_else(|| WorkerError::InvalidPayload("not an MLX-backed model".to_owned()))?;
+    let engine_id = flux2_edit_engine_id(&request.model)
+        .ok_or_else(|| WorkerError::InvalidPayload("not a FLUX.2 edit model".to_owned()))?;
+    let weights_dir = resolve_weights_dir(request, settings)
+        .ok_or_else(|| WorkerError::InvalidPayload("FLUX.2 weights not found".to_owned()))?;
+    let (quant, quant_bits) = resolve_quant(request);
+    let steps = resolve_steps(request, model);
+    let guidance = resolve_guidance(request, model);
+    let adapters = resolve_adapters(request)?;
+    let repo = model_repo(request, model);
+    let adapter_label = model.adapter_label;
+
+    // Resolve the reference image(s) on the async side (decode → Send Image moved in).
+    let reference_ids = flux2_edit_reference_ids(request);
+    let mut references = Vec::with_capacity(reference_ids.len());
+    for id in &reference_ids {
+        references.push(load_reference_image(
+            &settings.data_dir,
+            &request.project_id,
+            id,
+            project_path,
+        )?);
+    }
+    if references.is_empty() {
+        return Err(WorkerError::InvalidPayload(
+            "FLUX.2 edit requires a reference image".to_owned(),
+        ));
+    }
+    let raw_settings = flux2_edit_raw_settings(
+        request,
+        &repo,
+        engine_id,
+        steps,
+        quant_bits,
+        guidance,
+        references.len(),
+    );
+    let count = request.count as usize;
+    let seeds: Vec<i64> = (0..count)
+        .map(|index| resolve_seed(request, index))
+        .collect();
+
+    let cancel = CancelFlag::new();
+    let (tx, rx) = tokio::sync::mpsc::channel::<GenEvent>(64);
+
+    let blocking = {
+        let prompt = request.prompt.clone();
+        let (width, height) = (request.width, request.height);
+        let seeds = seeds.clone();
+        let cancel = cancel.clone();
+        tokio::task::spawn_blocking(move || -> WorkerResult<()> {
+            let generator = mlx_load(engine_id, weights_dir, quant, adapters)?;
+            for (index, seed) in seeds.into_iter().enumerate() {
+                let conditioning = build_edit_conditioning(&references);
+                let mut on_progress = |progress: Progress| {
+                    let event = match progress {
+                        Progress::Step { current, total } => GenEvent::Step {
+                            index,
+                            current,
+                            total,
+                        },
+                        Progress::Decoding => GenEvent::Decoding { index },
+                    };
+                    let _ = tx.blocking_send(event);
+                };
+                let (width, height, pixels) = flux2_edit_generate_one(
+                    generator.as_ref(),
+                    &prompt,
+                    width,
+                    height,
+                    seed,
+                    steps,
+                    guidance,
+                    conditioning,
+                    &cancel,
+                    &mut on_progress,
+                )?;
+                if tx
+                    .blocking_send(GenEvent::Image {
+                        index,
+                        seed,
+                        width,
+                        height,
+                        pixels,
+                    })
+                    .is_err()
+                {
+                    break; // receiver gone — stop generating.
+                }
+            }
+            Ok(())
+        })
+    };
+
+    consume_gen_events(
+        api,
+        settings,
+        job,
+        plan,
+        project_path,
+        backend,
+        adapter_label,
+        &raw_settings,
+        count,
+        rx,
+        cancel,
+        blocking,
+        asset_writes,
+    )
+    .await
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2167,6 +2484,116 @@ mod tests {
             8,
             control,
             0.9,
+            &cancel,
+            &mut |p| {
+                if let mlx_gen::Progress::Step { current, .. } = p {
+                    steps_seen = steps_seen.max(current);
+                }
+            },
+        )
+        .unwrap();
+        assert_eq!((w, h), (512, 512));
+        assert_eq!(pixels.len(), 512 * 512 * 3);
+        assert!(steps_seen >= 1, "expected denoise step progress");
+        assert!(pixels.windows(2).any(|w| w[0] != w[1]));
+    }
+
+    // --- FLUX.2 edit path (sc-3029) ---
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn flux2_edit_engine_id_maps_variants() {
+        assert_eq!(
+            flux2_edit_engine_id("flux2_klein_9b"),
+            Some("flux2_klein_9b_edit")
+        );
+        assert_eq!(
+            flux2_edit_engine_id("flux2_klein_9b_true_v2"),
+            Some("flux2_klein_9b_edit")
+        );
+        assert_eq!(
+            flux2_edit_engine_id("flux2_klein_9b_kv"),
+            Some("flux2_klein_9b_kv_edit")
+        );
+        assert_eq!(flux2_edit_engine_id("z_image_turbo"), None);
+        assert_eq!(flux2_edit_engine_id("sdxl"), None);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn flux2_edit_reference_ids_prefers_reference_then_source() {
+        // referenceAssetId (character flow) wins.
+        assert_eq!(
+            flux2_edit_reference_ids(&request(json!({
+                "projectId": "p", "referenceAssetId": "ref_1", "sourceAssetId": "src_1"
+            }))),
+            vec!["ref_1".to_owned()]
+        );
+        // sourceAssetId only in edit_image mode.
+        assert_eq!(
+            flux2_edit_reference_ids(&request(json!({
+                "projectId": "p", "mode": "edit_image", "sourceAssetId": "src_1"
+            }))),
+            vec!["src_1".to_owned()]
+        );
+        // sourceAssetId without edit_image mode is ignored (it's the txt2img path).
+        assert!(flux2_edit_reference_ids(&request(json!({
+            "projectId": "p", "sourceAssetId": "src_1"
+        })))
+        .is_empty());
+        assert!(flux2_edit_reference_ids(&request(json!({ "projectId": "p" }))).is_empty());
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn build_edit_conditioning_single_vs_multi() {
+        let img = |seed| mlx_gen::Image {
+            width: 8,
+            height: 8,
+            pixels: stub_rgb8(8, 8, seed),
+        };
+        match build_edit_conditioning(std::slice::from_ref(&img(1))).as_slice() {
+            [mlx_gen::Conditioning::Reference { .. }] => {}
+            other => panic!("expected one Reference, got {other:?}"),
+        }
+        match build_edit_conditioning(&[img(1), img(2)]).as_slice() {
+            [mlx_gen::Conditioning::MultiReference { images }] => assert_eq!(images.len(), 2),
+            other => panic!("expected MultiReference, got {other:?}"),
+        }
+    }
+
+    /// Real-weights smoke: FLUX.2-klein edit. Loads `flux2_klein_9b_edit` (base 9B
+    /// snapshot) and generates one image conditioned on a synthetic reference. Needs
+    /// the HF cache (`black-forest-labs/FLUX.2-klein-9B`) + a Metal device; run on
+    /// demand: `cargo test -p sceneworks-worker --lib -- --ignored flux2_edit_real_weights`.
+    #[cfg(target_os = "macos")]
+    #[test]
+    #[ignore = "needs real FLUX.2-klein-9b weights + Metal device"]
+    fn flux2_edit_real_weights_generates_one_image() {
+        let snapshot = hf_snapshot("models--black-forest-labs--FLUX.2-klein-9b");
+        let generator = mlx_load(
+            "flux2_klein_9b_edit",
+            snapshot,
+            Some(mlx_gen::Quant::Q8),
+            Vec::new(),
+        )
+        .unwrap();
+        let reference = mlx_gen::Image {
+            width: 512,
+            height: 512,
+            pixels: stub_rgb8(512, 512, 7),
+        };
+        let cancel = mlx_gen::CancelFlag::new();
+        let mut steps_seen = 0u32;
+        let (w, h, pixels) = flux2_edit_generate_one(
+            generator.as_ref(),
+            "make it a watercolor painting",
+            512,
+            512,
+            42,
+            4,
+            Some(1.0),
+            build_edit_conditioning(std::slice::from_ref(&reference)),
             &cancel,
             &mut |p| {
                 if let mlx_gen::Progress::Step { current, .. } = p {

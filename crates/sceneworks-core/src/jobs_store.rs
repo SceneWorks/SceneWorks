@@ -1522,22 +1522,11 @@ fn sdxl_mlx_eligible(payload: &Map<String, Value>) -> bool {
     !request_has_lycoris_lora(payload)
 }
 
-/// FLUX.2-klein (sc-3025) MLX-routing conditions. FLUX.2-klein is an **MLX-only**
-/// family (no torch backend), so this is not an MLX-vs-torch choice — it gates the
-/// *txt2img* surface this story delivers. `edit_image`, a reference (single or multi),
-/// and the KV-cache edit path stay out (story sc-3029). A third-party LyCORIS LoRA
-/// falls back to the procedural placeholder rather than erroring on the mlx worker.
+/// FLUX.2-klein MLX-routing conditions. FLUX.2-klein is an **MLX-only** family (no
+/// torch backend), so everything it does runs on MLX: txt2img (sc-3025) AND
+/// edit/reference + KV-cache + multi-reference (sc-3029). The only exclusion is a
+/// third-party LyCORIS LoRA neither the engine nor the worker can apply.
 fn flux2_mlx_eligible(payload: &Map<String, Value>) -> bool {
-    if payload.get("mode").and_then(Value::as_str) == Some("edit_image") {
-        return false;
-    }
-    let has_reference = payload
-        .get("referenceAssetId")
-        .and_then(Value::as_str)
-        .is_some_and(|value| !value.trim().is_empty());
-    if has_reference {
-        return false;
-    }
     !request_has_lycoris_lora(payload)
 }
 
@@ -2025,17 +2014,16 @@ mod mlx_routing_tests {
     }
 
     #[test]
-    fn flux2_plain_txt2img_is_eligible_edit_and_reference_are_not() {
+    fn flux2_txt2img_and_edit_are_eligible_lycoris_is_not() {
+        // FLUX.2 is MLX-only: txt2img (sc-3025) AND edit/reference (sc-3029) all route MLX.
         assert!(flux2_mlx_eligible(&object(
             json!({ "prompt": "a red fox" })
         )));
-        // edit + reference (single/multi) are sc-3029, not this story.
-        assert!(!flux2_mlx_eligible(&object(
-            json!({ "mode": "edit_image" })
-        )));
-        assert!(!flux2_mlx_eligible(&object(
+        assert!(flux2_mlx_eligible(&object(json!({ "mode": "edit_image" }))));
+        assert!(flux2_mlx_eligible(&object(
             json!({ "referenceAssetId": "asset_1" })
         )));
+        // Only a third-party LyCORIS LoRA (unapplicable on the MLX path) is excluded.
         assert!(!flux2_mlx_eligible(&object(json!({
             "loras": [{ "networkType": "lycoris" }]
         }))));
