@@ -44,6 +44,10 @@ use media_jobs::*;
 mod image_jobs;
 use image_jobs::*;
 mod downloads;
+// The DWPose skeleton rasterizer is consumed only by the macOS Z-Image strict-pose
+// control path; on other platforms it still builds + unit-tests (cross-platform
+// raster), but its items are otherwise unused — so allow dead_code off macOS.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 mod openpose_skeleton;
 use downloads::*;
 
