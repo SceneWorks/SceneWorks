@@ -1613,8 +1613,12 @@ fn resolve_zimage_identity_init(
         .map(str::trim)
         .filter(|id| !id.is_empty())
         .expect("zimage_identity_strength guarantees a non-empty referenceAssetId");
-    let image =
-        load_reference_image(&settings.data_dir, &request.project_id, asset_id, project_path)?;
+    let image = load_reference_image(
+        &settings.data_dir,
+        &request.project_id,
+        asset_id,
+        project_path,
+    )?;
     Ok(Some((image, strength)))
 }
 
@@ -3906,15 +3910,33 @@ mod tests {
         // the Python gate requires > 0); referenceStrength > 0 but no/blank asset (a bare
         // reference has no MLX home, so it falls back to pose-only rather than erroring).
         assert_eq!(with(json!({}), json!("ref_1")), None);
-        assert_eq!(with(json!({ "referenceStrength": 0.0 }), json!("ref_1")), None);
+        assert_eq!(
+            with(json!({ "referenceStrength": 0.0 }), json!("ref_1")),
+            None
+        );
         assert_eq!(with(json!({ "referenceStrength": 0.6 }), Value::Null), None);
-        assert_eq!(with(json!({ "referenceStrength": 0.6 }), json!("   ")), None);
+        assert_eq!(
+            with(json!({ "referenceStrength": 0.6 }), json!("   ")),
+            None
+        );
 
         // Engaged: strength forwarded verbatim (no inversion) and clamped to [0.05, 1.0].
-        approx(with(json!({ "referenceStrength": 0.6 }), json!("ref_1")), 0.6);
-        approx(with(json!({ "referenceStrength": "0.45" }), json!("ref_1")), 0.45);
-        assert_eq!(with(json!({ "referenceStrength": 1.8 }), json!("ref_1")), Some(1.0));
-        assert_eq!(with(json!({ "referenceStrength": 0.01 }), json!("ref_1")), Some(0.05));
+        approx(
+            with(json!({ "referenceStrength": 0.6 }), json!("ref_1")),
+            0.6,
+        );
+        approx(
+            with(json!({ "referenceStrength": "0.45" }), json!("ref_1")),
+            0.45,
+        );
+        assert_eq!(
+            with(json!({ "referenceStrength": 1.8 }), json!("ref_1")),
+            Some(1.0)
+        );
+        assert_eq!(
+            with(json!({ "referenceStrength": 0.01 }), json!("ref_1")),
+            Some(0.05)
+        );
     }
 
     /// Real-weights smoke: Z-Image strict-pose ControlNet. Loads the base
