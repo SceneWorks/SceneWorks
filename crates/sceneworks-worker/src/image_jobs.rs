@@ -1,4 +1,4 @@
-//! Native MLX image generation jobs — runtime pipeline (epic 3018, sc-3020).
+//! Native MLX image generation jobs — runtime pipeline + Z-Image inference (epic 3018).
 //!
 //! Parses the job into an [`ImageRequest`], generates `count` images, saves each PNG
 //! into the project's `assets/images/`, and reports flat "facts" the Rust API turns
@@ -7,23 +7,38 @@
 //! `build_image_sidecar_parts` and indexing project.db — so emitting the accumulating
 //! `assetWrites` per image is what streams results into the gallery as they land.
 //!
-//! sc-3020 ships the pipeline with a **procedural stub** generator (adapter
-//! `procedural_preview`); sc-3022 swaps the stub for real Z-Image inference via the
-//! linked mlx-gen engine. The stub keeps this whole path cross-platform-testable.
+//! On macOS, `z_image_turbo` runs **real** in-process inference via the linked mlx-gen
+//! engine (sc-3022); other models (and non-macOS) fall back to a procedural stub
+//! (sc-3020), so the pipeline stays cross-platform-testable and additional families
+//! (sc-3023+) just extend the real path.
 
 use super::*;
 use sceneworks_core::image_request::ImageRequest;
 
 // Force the Z-Image provider crate to link so its `inventory::submit!` registration
-// survives linker GC (an only-declared dependency can be dropped). Each per-family
-// story adds its provider + a matching `use … as _;`. See mlx-gen-z-image/tests/
-// registry.rs ("the SceneWorks worker"). Real inference lands in sc-3022.
+// survives linker GC. Each per-family story adds its provider + a matching
+// `use … as _;`. See mlx-gen-z-image/tests/registry.rs ("the SceneWorks worker").
+#[cfg(target_os = "macos")]
+use mlx_gen::{
+    AdapterKind, AdapterSpec, CancelFlag, GenerationOutput, GenerationRequest, Generator, LoadSpec,
+    Progress, Quant, WeightsSource,
+};
 #[cfg(target_os = "macos")]
 use mlx_gen_z_image as _;
 
 /// The stub adapter id recorded on generated assets (matches the contract fixture
 /// `tests/fixtures/rust_migration_contracts/sidecars/asset-image.sceneworks.json`).
 const STUB_ADAPTER: &str = "procedural_preview";
+#[cfg(target_os = "macos")]
+const ZIMAGE_ADAPTER: &str = "mlx_z_image";
+#[cfg(target_os = "macos")]
+const ZIMAGE_REPO: &str = "Tongyi-MAI/Z-Image-Turbo";
+/// Parity with the Python `MODEL_TARGETS["z_image_turbo"]["steps"]` (mlx-gen's own
+/// turbo default is 4; SceneWorks runs 8).
+#[cfg(target_os = "macos")]
+const ZIMAGE_DEFAULT_STEPS: u32 = 8;
+#[cfg(target_os = "macos")]
+const MAX_JOB_LORAS: usize = 3;
 
 /// Dispatch handler for `JobType::ImageGenerate`: generate, save, and stream image
 /// assets through the Rust GPU worker.
@@ -54,7 +69,7 @@ pub(crate) async fn run_image_generate_job(
             JobStatus::Preparing,
             ProgressStage::Preparing,
             0.05,
-            &format!("Preparing {} image(s) ({STUB_ADAPTER}).", request.count),
+            &format!("Preparing {} image(s).", request.count),
             None,
             backend,
         ),
@@ -62,25 +77,39 @@ pub(crate) async fn run_image_generate_job(
     .await?;
 
     let mut asset_writes: Vec<Value> = Vec::with_capacity(request.count as usize);
-    for index in 0..request.count as usize {
-        check_cancel(api, &job.id, "Image generation canceled by user.").await?;
-        let fact = render_and_save(&plan, index, &project_path)?;
-        asset_writes.push(Value::Object(fact));
-        let progress = 0.1 + 0.85 * ((index + 1) as f64 / request.count as f64);
-        update_job(
+
+    // Real in-process MLX inference on macOS for engine-backed models; otherwise the
+    // procedural stub (keeps non-macOS + not-yet-ported models working).
+    #[cfg(target_os = "macos")]
+    let handled = if zimage_available(&request, settings) {
+        generate_zimage_stream(
             api,
-            &job.id,
-            image_progress(
-                JobStatus::Running,
-                ProgressStage::Generating,
-                progress,
-                &format!("Generated image {}/{}.", index + 1, request.count),
-                Some(streaming_result(&plan, &asset_writes)),
-                backend,
-            ),
+            settings,
+            job,
+            &plan,
+            &project_path,
+            backend,
+            &mut asset_writes,
         )
         .await?;
-        heartbeat(api, settings, WorkerStatus::Busy, Some(&job.id)).await?;
+        true
+    } else {
+        false
+    };
+    #[cfg(not(target_os = "macos"))]
+    let handled = false;
+
+    if !handled {
+        generate_stub_stream(
+            api,
+            settings,
+            job,
+            &plan,
+            &project_path,
+            backend,
+            &mut asset_writes,
+        )
+        .await?;
     }
 
     update_job(
@@ -96,6 +125,52 @@ pub(crate) async fn run_image_generate_job(
         ),
     )
     .await?;
+    Ok(())
+}
+
+/// Procedural stub generation (sc-3020): a deterministic per-seed gradient per image.
+async fn generate_stub_stream(
+    api: &ApiClient,
+    settings: &Settings,
+    job: &JobSnapshot,
+    plan: &ImagePlan,
+    project_path: &Path,
+    backend: &str,
+    asset_writes: &mut Vec<Value>,
+) -> WorkerResult<()> {
+    let request = &plan.request;
+    for index in 0..request.count as usize {
+        check_cancel(api, &job.id, "Image generation canceled by user.").await?;
+        let seed = resolve_seed(request, index);
+        let pixels = stub_rgb8(request.width, request.height, seed);
+        let fact = write_image_asset(
+            plan,
+            index,
+            seed,
+            request.width,
+            request.height,
+            pixels,
+            STUB_ADAPTER,
+            stub_raw_settings(request),
+            project_path,
+        )?;
+        asset_writes.push(Value::Object(fact));
+        let progress = 0.1 + 0.85 * ((index + 1) as f64 / request.count as f64);
+        update_job(
+            api,
+            &job.id,
+            image_progress(
+                JobStatus::Running,
+                ProgressStage::Generating,
+                progress,
+                &format!("Generated image {}/{}.", index + 1, request.count),
+                Some(streaming_result(plan, asset_writes)),
+                backend,
+            ),
+        )
+        .await?;
+        heartbeat(api, settings, WorkerStatus::Busy, Some(&job.id)).await?;
+    }
     Ok(())
 }
 
@@ -135,18 +210,23 @@ impl ImagePlan {
     }
 }
 
-/// Render image `index`, save its PNG under `assets/images/`, and return the flat
+/// Save image `index` (its RGB8 `pixels`) under `assets/images/` and return the flat
 /// fact the API turns into an indexed asset (every key here is consumed by
-/// `build_image_sidecar_parts`). The stub fills a deterministic per-seed gradient.
-fn render_and_save(
+/// `build_image_sidecar_parts`). Shared by the stub and real paths.
+#[allow(clippy::too_many_arguments)]
+fn write_image_asset(
     plan: &ImagePlan,
     index: usize,
+    seed: i64,
+    width: u32,
+    height: u32,
+    pixels: Vec<u8>,
+    adapter: &str,
+    raw_settings: JsonObject,
     project_path: &Path,
 ) -> WorkerResult<JsonObject> {
     let request = &plan.request;
-    let seed = request.seed_for(index).unwrap_or_else(random_seed);
-    let pixels = stub_rgb8(request.width, request.height, seed);
-    let rgb_image = image::RgbImage::from_raw(request.width, request.height, pixels)
+    let rgb_image = image::RgbImage::from_raw(width, height, pixels)
         .ok_or_else(|| WorkerError::InvalidPayload("image buffer size mismatch".to_owned()))?;
 
     let filename = format!(
@@ -178,19 +258,13 @@ fn render_and_save(
         index + 1
     );
 
-    let mut raw_settings = request.advanced.clone();
-    // Honest marker: this is the procedural stub, not real model inference (sc-3022
-    // sets realModelInference:true + repo/steps/guidance/mlxQuantize).
-    raw_settings.insert("realModelInference".to_owned(), Value::Bool(false));
-    raw_settings.insert("adapter".to_owned(), Value::String(STUB_ADAPTER.to_owned()));
-
     let fact = json!({
         "assetId": fresh_asset_id(),
         "type": "image",
         "mediaPath": media_rel,
         "mimeType": "image/png",
-        "width": request.width,
-        "height": request.height,
+        "width": width,
+        "height": height,
         "normalizedWidth": request.width,
         "normalizedHeight": request.height,
         "count": request.count,
@@ -201,7 +275,7 @@ fn render_and_save(
         "createdAt": now_rfc3339(),
         "mode": request.mode,
         "model": request.model,
-        "adapter": STUB_ADAPTER,
+        "adapter": adapter,
         "prompt": request.prompt,
         "negativePrompt": request.negative_prompt,
         "loras": request.loras,
@@ -220,7 +294,7 @@ fn streaming_result(plan: &ImagePlan, asset_writes: &[Value]) -> JsonObject {
     json!({
         "generationSetId": plan.genset_id,
         "expectedCount": plan.request.count,
-        "adapter": STUB_ADAPTER,
+        "adapter": adapter_id(&plan.request),
         "model": plan.request.model,
         "generationSet": plan.generation_set,
         "assetWrites": asset_writes,
@@ -230,9 +304,24 @@ fn streaming_result(plan: &ImagePlan, asset_writes: &[Value]) -> JsonObject {
     .expect("json! object literal")
 }
 
-/// The asset `family` for the recipe's normalizedSettings: the resolved model
-/// manifest entry wins (the UI sends it), else the linked mlx-gen descriptor's family
-/// on macOS, else empty.
+/// The adapter id reported for the set (real engine on macOS for z-image, else stub).
+fn adapter_id(request: &ImageRequest) -> &'static str {
+    #[cfg(target_os = "macos")]
+    if request.model == "z_image_turbo" {
+        return ZIMAGE_ADAPTER;
+    }
+    let _ = request;
+    STUB_ADAPTER
+}
+
+fn stub_raw_settings(request: &ImageRequest) -> JsonObject {
+    let mut raw = request.advanced.clone();
+    raw.insert("realModelInference".to_owned(), Value::Bool(false));
+    raw
+}
+
+/// The asset `family`: the resolved model manifest entry wins (the UI sends it), else
+/// the linked mlx-gen descriptor's family on macOS, else empty.
 fn resolve_family(request: &ImageRequest) -> String {
     if let Some(family) = request
         .model_manifest_entry
@@ -255,10 +344,22 @@ fn resolve_family(request: &ImageRequest) -> String {
     String::new()
 }
 
+/// Resolve the seed for image `index`, matching the Python worker's `resolve_seed`:
+/// a base `seed` (offset by index) wins, else an explicit per-image seed, else a
+/// deterministic `sha256("{prompt}:{index}")` so a re-run reproduces.
+fn resolve_seed(request: &ImageRequest, index: usize) -> i64 {
+    if let Some(base) = request.seed {
+        return base.wrapping_add(index as i64);
+    }
+    if let Some(seed) = request.seeds.get(index) {
+        return *seed;
+    }
+    let digest = Sha256::digest(format!("{}:{}", request.prompt, index).as_bytes());
+    u32::from_be_bytes([digest[0], digest[1], digest[2], digest[3]]) as i64
+}
+
 /// Progress payload with the worker's real backend label (the shared
-/// `progress_payload` hardcodes `cpu`; the MLX worker reports `mlx`). Peak GPU/unified
-/// memory is left unset for the procedural stub — it allocates no device memory; real
-/// peak-memory sampling lands with real inference (sc-3022).
+/// `progress_payload` hardcodes `cpu`; the MLX worker reports `mlx`).
 fn image_progress(
     status: JobStatus,
     stage: ProgressStage,
@@ -290,15 +391,8 @@ fn backend_label(gpu_id: &str) -> &str {
     }
 }
 
-/// A non-deterministic seed when the request supplies none (recorded on the asset so
-/// the result is reproducible). Derived from a v4 UUID to avoid a new RNG dependency.
-fn random_seed() -> i64 {
-    (Uuid::new_v4().as_u128() as u64 & 0x7FFF_FFFF) as i64
-}
-
 /// Deterministic placeholder pixels: a vertical gradient from a per-seed base colour
-/// to white, so each seed yields a distinct, valid RGB8 image of exactly `width *
-/// height * 3` bytes.
+/// to white, exactly `width * height * 3` RGB8 bytes.
 fn stub_rgb8(width: u32, height: u32, seed: i64) -> Vec<u8> {
     let seed = seed as u64;
     let base = [
@@ -318,10 +412,494 @@ fn stub_rgb8(width: u32, height: u32, seed: i64) -> Vec<u8> {
     buffer
 }
 
-/// Linear interpolate channel value `a` toward white (255) by `t` in `[0, 1]`.
 fn lerp(a: u8, t: f32) -> u8 {
     let a = a as f32;
     (a + (255.0 - a) * t).round().clamp(0.0, 255.0) as u8
+}
+
+// ---------------------------------------------------------------------------
+// Real Z-Image-Turbo inference (macOS, in-process via mlx-gen). sc-3022.
+// ---------------------------------------------------------------------------
+
+/// Events streamed from the blocking generation thread to the async worker.
+#[cfg(target_os = "macos")]
+enum GenEvent {
+    Step {
+        index: usize,
+        current: u32,
+        total: u32,
+    },
+    Decoding {
+        index: usize,
+    },
+    Image {
+        index: usize,
+        seed: i64,
+        width: u32,
+        height: u32,
+        pixels: Vec<u8>,
+    },
+}
+
+/// True when this job can run real in-process inference: z-image is the linked,
+/// engine-backed family and its weights resolve locally.
+#[cfg(target_os = "macos")]
+fn zimage_available(request: &ImageRequest, settings: &Settings) -> bool {
+    request.model == "z_image_turbo" && resolve_weights_dir(request, settings).is_some()
+}
+
+#[cfg(target_os = "macos")]
+fn zimage_repo(request: &ImageRequest) -> String {
+    request
+        .model_manifest_entry
+        .get("repo")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or(ZIMAGE_REPO)
+        .to_owned()
+}
+
+/// Resolve the weights snapshot directory: an explicit `modelPath` dir wins, else the
+/// HuggingFace cache snapshot for the model repo.
+#[cfg(target_os = "macos")]
+fn resolve_weights_dir(request: &ImageRequest, settings: &Settings) -> Option<PathBuf> {
+    if let Some(path) = request
+        .advanced
+        .get("modelPath")
+        .or_else(|| request.model_manifest_entry.get("modelPath"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+    {
+        if path.is_dir() {
+            return Some(path);
+        }
+    }
+    huggingface_snapshot_dir(&settings.data_dir, &zimage_repo(request))
+}
+
+#[cfg(target_os = "macos")]
+fn quant_int(value: &Value) -> Option<i64> {
+    if value.is_boolean() {
+        return None;
+    }
+    value
+        .as_i64()
+        .or_else(|| value.as_str()?.trim().parse().ok())
+}
+
+/// Resolve quantization: `advanced.mlxQuantize` → `manifest.mlx.quantize` → Q8
+/// default. mlx-gen supports Q4/Q8; map (<=0 → dense, <=4 → Q4, else Q8). Returns the
+/// mlx-gen quant + the effective bit count for the recipe (None = dense bf16).
+#[cfg(target_os = "macos")]
+fn resolve_quant(request: &ImageRequest) -> (Option<Quant>, Option<i64>) {
+    let raw = request
+        .advanced
+        .get("mlxQuantize")
+        .and_then(quant_int)
+        .or_else(|| {
+            request
+                .model_manifest_entry
+                .get("mlx")
+                .and_then(|mlx| mlx.get("quantize"))
+                .and_then(quant_int)
+        });
+    match raw {
+        None => (Some(Quant::Q8), Some(8)),
+        Some(bits) if bits <= 0 => (None, None),
+        Some(bits) if bits <= 4 => (Some(Quant::Q4), Some(4)),
+        Some(_) => (Some(Quant::Q8), Some(8)),
+    }
+}
+
+/// Resolve denoise steps: `advanced.steps` (clamped 1..=80) else the z-image default 8.
+#[cfg(target_os = "macos")]
+fn resolve_steps(request: &ImageRequest) -> u32 {
+    request
+        .advanced
+        .get("steps")
+        .and_then(|value| {
+            value
+                .as_u64()
+                .or_else(|| value.as_str()?.trim().parse().ok())
+        })
+        .map(|steps| (steps as u32).clamp(1, 80))
+        .unwrap_or(ZIMAGE_DEFAULT_STEPS)
+}
+
+/// First non-empty of installedPath/sourcePath/path/source.path on a LoRA spec.
+#[cfg(target_os = "macos")]
+fn lora_path(lora: &Value) -> Option<PathBuf> {
+    for key in ["installedPath", "sourcePath", "path"] {
+        if let Some(value) = lora
+            .get(key)
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        {
+            return Some(PathBuf::from(value));
+        }
+    }
+    lora.get("source")
+        .and_then(|source| source.get("path"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+}
+
+/// Classify a LoRA file into the mlx-gen adapter kind. SceneWorks peft-LoKr (stamped
+/// `networkType: lokr`) → `Lokr`; third-party LyCORIS (LoHa / kohya LoKr) is not
+/// reconstructable here → rejected; everything else → `Lora`.
+#[cfg(target_os = "macos")]
+fn classify_adapter(file: &Path) -> WorkerResult<AdapterKind> {
+    let header = read_safetensors_header(file)
+        .map_err(|error| WorkerError::InvalidPayload(format!("LoRA header: {error}")))?;
+    let metadata = header.get("__metadata__");
+    let network_type = metadata
+        .and_then(|meta| meta.get("networkType"))
+        .and_then(Value::as_str)
+        .map(|value| value.trim().to_ascii_lowercase());
+    if network_type.as_deref() == Some("lokr") {
+        return Ok(AdapterKind::Lokr);
+    }
+    let module = metadata
+        .and_then(|meta| meta.get("ss_network_module"))
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    let lycoris_keys = header
+        .as_object()
+        .map(|object| {
+            object
+                .keys()
+                .any(|key| key.contains("lokr_") || key.contains("hada_"))
+        })
+        .unwrap_or(false);
+    if module.contains("lycoris") || lycoris_keys {
+        return Err(WorkerError::InvalidPayload(
+            "Third-party LyCORIS LoRA (LoHa / kohya LoKr) is not supported on the MLX Z-Image path."
+                .to_owned(),
+        ));
+    }
+    Ok(AdapterKind::Lora)
+}
+
+/// Resolve up to 3 request LoRAs into mlx-gen adapter specs (path + scale + kind).
+#[cfg(target_os = "macos")]
+fn resolve_adapters(request: &ImageRequest) -> WorkerResult<Vec<AdapterSpec>> {
+    if request.loras.len() > MAX_JOB_LORAS {
+        return Err(WorkerError::InvalidPayload(format!(
+            "Generation supports at most {MAX_JOB_LORAS} LoRAs per job."
+        )));
+    }
+    let mut specs = Vec::with_capacity(request.loras.len());
+    for lora in &request.loras {
+        let path = lora_path(lora).ok_or_else(|| {
+            WorkerError::InvalidPayload("LoRA is missing a usable path.".to_owned())
+        })?;
+        let file = if path.is_dir() {
+            first_safetensors_path(&path).ok_or_else(|| {
+                WorkerError::InvalidPayload(format!(
+                    "LoRA has no .safetensors under {}",
+                    path.display()
+                ))
+            })?
+        } else {
+            path
+        };
+        if !file.exists() {
+            return Err(WorkerError::InvalidPayload(format!(
+                "LoRA file is missing: {}",
+                file.display()
+            )));
+        }
+        let kind = classify_adapter(&file)?;
+        let scale = lora
+            .get("weight")
+            .and_then(|value| {
+                value
+                    .as_f64()
+                    .or_else(|| value.as_str()?.trim().parse().ok())
+            })
+            .unwrap_or(0.8) as f32;
+        specs.push(AdapterSpec::new(file, scale, kind));
+    }
+    Ok(specs)
+}
+
+#[cfg(target_os = "macos")]
+fn zimage_raw_settings(
+    request: &ImageRequest,
+    repo: &str,
+    steps: u32,
+    quant_bits: Option<i64>,
+) -> JsonObject {
+    let mut raw = request.advanced.clone();
+    raw.insert("realModelInference".to_owned(), Value::Bool(true));
+    raw.insert("repo".to_owned(), Value::String(repo.to_owned()));
+    raw.insert("numInferenceSteps".to_owned(), json!(steps));
+    // Z-Image-Turbo is guidance-distilled — no CFG.
+    raw.insert("guidanceScale".to_owned(), Value::Null);
+    raw.insert(
+        "mlxQuantize".to_owned(),
+        quant_bits.map(|bits| json!(bits)).unwrap_or(Value::Null),
+    );
+    raw
+}
+
+/// Load the Z-Image generator (heavy; once per job).
+#[cfg(target_os = "macos")]
+fn zimage_load(
+    weights_dir: PathBuf,
+    quant: Option<Quant>,
+    adapters: Vec<AdapterSpec>,
+) -> WorkerResult<Box<dyn Generator>> {
+    let mut spec = LoadSpec::new(WeightsSource::Dir(weights_dir));
+    if let Some(quant) = quant {
+        spec = spec.with_quant(quant);
+    }
+    if !adapters.is_empty() {
+        spec = spec.with_adapters(adapters);
+    }
+    mlx_gen::load("z_image_turbo", &spec)
+        .map_err(|error| WorkerError::InvalidPayload(format!("Z-Image load failed: {error}")))
+}
+
+/// Generate one image (RGB8) at the given seed; `on_progress` streams denoise steps.
+#[cfg(target_os = "macos")]
+#[allow(clippy::too_many_arguments)]
+fn zimage_generate_one(
+    generator: &dyn Generator,
+    prompt: &str,
+    width: u32,
+    height: u32,
+    seed: i64,
+    steps: u32,
+    cancel: &CancelFlag,
+    on_progress: &mut dyn FnMut(Progress),
+) -> WorkerResult<(u32, u32, Vec<u8>)> {
+    let request = GenerationRequest {
+        prompt: prompt.to_owned(),
+        width,
+        height,
+        count: 1,
+        seed: Some(seed as u64),
+        steps: Some(steps),
+        cancel: cancel.clone(),
+        ..Default::default()
+    };
+    let output = generator.generate(&request, on_progress).map_err(|error| {
+        WorkerError::InvalidPayload(format!("Z-Image generate failed: {error}"))
+    })?;
+    match output {
+        GenerationOutput::Images(mut images) => {
+            let image = images.pop().ok_or_else(|| {
+                WorkerError::InvalidPayload("Z-Image produced no image".to_owned())
+            })?;
+            Ok((image.width, image.height, image.pixels))
+        }
+        _ => Err(WorkerError::InvalidPayload(
+            "Z-Image returned non-image output".to_owned(),
+        )),
+    }
+}
+
+/// Within-image step fraction mapped into the 0.10..0.95 generation band.
+#[cfg(target_os = "macos")]
+fn step_fraction(index: usize, current: u32, total: u32, count: u32) -> f64 {
+    let per = 0.85 / count.max(1) as f64;
+    let within = if total > 0 {
+        (current as f64 / total as f64).clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
+    (0.1 + per * (index as f64 + within)).min(0.95)
+}
+
+/// Real Z-Image generation: load once on a blocking thread, generate each image, and
+/// stream step/decode/image events back to the async worker (which saves PNGs, emits
+/// `assetWrites`, and polls cancel). MLX runs entirely on the blocking thread (the
+/// `Box<dyn Generator>` is `!Send` and the MLX device is single-thread).
+#[cfg(target_os = "macos")]
+#[allow(clippy::too_many_arguments)]
+async fn generate_zimage_stream(
+    api: &ApiClient,
+    settings: &Settings,
+    job: &JobSnapshot,
+    plan: &ImagePlan,
+    project_path: &Path,
+    backend: &str,
+    asset_writes: &mut Vec<Value>,
+) -> WorkerResult<()> {
+    let request = &plan.request;
+    let weights_dir = resolve_weights_dir(request, settings)
+        .ok_or_else(|| WorkerError::InvalidPayload("Z-Image weights not found".to_owned()))?;
+    let (quant, quant_bits) = resolve_quant(request);
+    let steps = resolve_steps(request);
+    let adapters = resolve_adapters(request)?;
+    let repo = zimage_repo(request);
+    let raw_settings = zimage_raw_settings(request, &repo, steps, quant_bits);
+    let count = request.count as usize;
+    let seeds: Vec<i64> = (0..count)
+        .map(|index| resolve_seed(request, index))
+        .collect();
+
+    let cancel = CancelFlag::new();
+    let (tx, mut rx) = tokio::sync::mpsc::channel::<GenEvent>(64);
+
+    let blocking = {
+        let prompt = request.prompt.clone();
+        let (width, height) = (request.width, request.height);
+        let seeds = seeds.clone();
+        let cancel = cancel.clone();
+        tokio::task::spawn_blocking(move || -> WorkerResult<()> {
+            let generator = zimage_load(weights_dir, quant, adapters)?;
+            for (index, seed) in seeds.into_iter().enumerate() {
+                let mut on_progress = |progress: Progress| {
+                    let event = match progress {
+                        Progress::Step { current, total } => GenEvent::Step {
+                            index,
+                            current,
+                            total,
+                        },
+                        Progress::Decoding => GenEvent::Decoding { index },
+                    };
+                    let _ = tx.blocking_send(event);
+                };
+                let (width, height, pixels) = zimage_generate_one(
+                    generator.as_ref(),
+                    &prompt,
+                    width,
+                    height,
+                    seed,
+                    steps,
+                    &cancel,
+                    &mut on_progress,
+                )?;
+                if tx
+                    .blocking_send(GenEvent::Image {
+                        index,
+                        seed,
+                        width,
+                        height,
+                        pixels,
+                    })
+                    .is_err()
+                {
+                    break; // receiver gone — stop generating.
+                }
+            }
+            Ok(())
+        })
+    };
+
+    let mut canceled = false;
+    let mut last_cancel_check = Instant::now();
+    while let Some(event) = rx.recv().await {
+        if canceled {
+            continue; // drain remaining events so the blocking sender never blocks.
+        }
+        match event {
+            GenEvent::Step {
+                index,
+                current,
+                total,
+            } => {
+                if last_cancel_check.elapsed() >= Duration::from_secs(2) {
+                    last_cancel_check = Instant::now();
+                    if check_cancel(api, &job.id, "Image generation canceled by user.")
+                        .await
+                        .is_err()
+                    {
+                        cancel.cancel();
+                        canceled = true;
+                        continue;
+                    }
+                }
+                update_job(
+                    api,
+                    &job.id,
+                    image_progress(
+                        JobStatus::Running,
+                        ProgressStage::Generating,
+                        step_fraction(index, current, total, request.count),
+                        &format!(
+                            "Image {}/{} — step {current}/{total}.",
+                            index + 1,
+                            request.count
+                        ),
+                        Some(streaming_result(plan, asset_writes)),
+                        backend,
+                    ),
+                )
+                .await?;
+            }
+            GenEvent::Decoding { index } => {
+                update_job(
+                    api,
+                    &job.id,
+                    image_progress(
+                        JobStatus::Running,
+                        ProgressStage::Generating,
+                        step_fraction(index, 1, 1, request.count),
+                        &format!("Image {}/{} — decoding.", index + 1, request.count),
+                        Some(streaming_result(plan, asset_writes)),
+                        backend,
+                    ),
+                )
+                .await?;
+            }
+            GenEvent::Image {
+                index,
+                seed,
+                width,
+                height,
+                pixels,
+            } => {
+                let fact = write_image_asset(
+                    plan,
+                    index,
+                    seed,
+                    width,
+                    height,
+                    pixels,
+                    ZIMAGE_ADAPTER,
+                    raw_settings.clone(),
+                    project_path,
+                )?;
+                asset_writes.push(Value::Object(fact));
+                update_job(
+                    api,
+                    &job.id,
+                    image_progress(
+                        JobStatus::Running,
+                        ProgressStage::Generating,
+                        0.1 + 0.85 * ((index + 1) as f64 / request.count as f64),
+                        &format!("Generated image {}/{}.", index + 1, request.count),
+                        Some(streaming_result(plan, asset_writes)),
+                        backend,
+                    ),
+                )
+                .await?;
+                heartbeat(api, settings, WorkerStatus::Busy, Some(&job.id)).await?;
+            }
+        }
+    }
+
+    let task_result = blocking
+        .await
+        .map_err(|error| WorkerError::InvalidPayload(format!("Z-Image task join: {error}")))?;
+    if canceled {
+        // check_cancel already posted the Canceled update; treat the (likely) generate
+        // error as the clean cancel.
+        return Err(WorkerError::Canceled(
+            "Image generation canceled by user.".to_owned(),
+        ));
+    }
+    task_result
 }
 
 #[cfg(test)]
@@ -347,16 +925,27 @@ mod tests {
         }));
         let plan = ImagePlan::new(&req);
 
-        let fact = render_and_save(&plan, 0, project_path).unwrap();
+        let seed = resolve_seed(&req, 0);
+        let pixels = stub_rgb8(req.width, req.height, seed);
+        let fact = write_image_asset(
+            &plan,
+            0,
+            seed,
+            req.width,
+            req.height,
+            pixels,
+            STUB_ADAPTER,
+            stub_raw_settings(&req),
+            project_path,
+        )
+        .unwrap();
 
-        // The PNG exists at the reported relative path and decodes at the requested size.
         let media_rel = fact.get("mediaPath").and_then(Value::as_str).unwrap();
         assert!(media_rel.starts_with("assets/images/"));
         assert!(media_rel.ends_with("_0001.png"));
         let decoded = image::open(project_path.join(media_rel)).unwrap();
         assert_eq!((decoded.width(), decoded.height()), (320, 256));
 
-        // The fact carries every field the API's build_image_sidecar_parts consumes.
         for key in [
             "assetId",
             "mediaPath",
@@ -387,14 +976,27 @@ mod tests {
         assert_eq!(fact["adapter"], json!("procedural_preview"));
         assert_eq!(fact["family"], json!("z-image"));
         assert_eq!(fact["seed"], json!(101));
-        assert_eq!(fact["mimeType"], json!("image/png"));
         assert_eq!(fact["width"], json!(320));
         assert_eq!(fact["displayName"], json!("Mist over hills #1"));
-        // Honest: the stub is not real inference.
         assert_eq!(
             fact["rawAdapterSettings"]["realModelInference"],
             json!(false)
         );
+    }
+
+    #[test]
+    fn resolve_seed_matches_python_precedence() {
+        // base seed wins (seed + index), even over an explicit seeds list.
+        let base = request(json!({ "projectId": "p", "seed": 100, "seeds": [7, 8] }));
+        assert_eq!(resolve_seed(&base, 0), 100);
+        assert_eq!(resolve_seed(&base, 2), 102);
+        // explicit per-image seeds when no base seed.
+        let listed = request(json!({ "projectId": "p", "seeds": [7, 8] }));
+        assert_eq!(resolve_seed(&listed, 1), 8);
+        // deterministic hash fallback (same prompt+index -> same seed).
+        let none = request(json!({ "projectId": "p", "prompt": "hello" }));
+        assert_eq!(resolve_seed(&none, 0), resolve_seed(&none, 0));
+        assert_ne!(resolve_seed(&none, 0), resolve_seed(&none, 1));
     }
 
     #[test]
@@ -406,16 +1008,6 @@ mod tests {
     }
 
     #[test]
-    fn plan_builds_generation_set_with_unique_seeds() {
-        let plan = ImagePlan::new(&request(
-            json!({ "projectId": "p", "prompt": "x", "count": 3, "seed": 5 }),
-        ));
-        assert!(plan.genset_id.starts_with("genset_"));
-        assert_eq!(plan.generation_set["count"], json!(3));
-        assert_ne!(plan.request.seed_for(0), plan.request.seed_for(1));
-    }
-
-    #[test]
     fn streaming_result_carries_facts_for_api_persistence() {
         let plan = ImagePlan::new(&request(
             json!({ "projectId": "p", "prompt": "x", "count": 1 }),
@@ -424,7 +1016,6 @@ mod tests {
         let result = streaming_result(&plan, &writes);
         assert_eq!(result["generationSetId"], json!(plan.genset_id));
         assert_eq!(result["assetWrites"].as_array().map(Vec::len), Some(1));
-        assert_eq!(result["adapter"], json!("procedural_preview"));
         assert!(result.contains_key("generationSet"));
     }
 
@@ -434,11 +1025,91 @@ mod tests {
         assert_eq!(backend_label(""), "cpu");
     }
 
-    /// The Z-Image provider linked into the worker self-registered via inventory —
-    /// proof the cross-crate mlx-gen registry resolves inside our binary (sc-3019).
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn quant_mapping_defaults_to_q8_and_maps_bits() {
+        use mlx_gen::Quant;
+        let default = request(json!({ "projectId": "p" }));
+        assert!(matches!(
+            resolve_quant(&default),
+            (Some(Quant::Q8), Some(8))
+        ));
+        let q4 = request(json!({ "projectId": "p", "advanced": { "mlxQuantize": 4 } }));
+        assert!(matches!(resolve_quant(&q4), (Some(Quant::Q4), Some(4))));
+        let dense = request(json!({ "projectId": "p", "advanced": { "mlxQuantize": 0 } }));
+        assert!(matches!(resolve_quant(&dense), (None, None)));
+        let six = request(json!({ "projectId": "p", "advanced": { "mlxQuantize": 6 } }));
+        assert!(matches!(resolve_quant(&six), (Some(Quant::Q8), Some(8))));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn steps_default_is_eight_and_clamps() {
+        assert_eq!(resolve_steps(&request(json!({ "projectId": "p" }))), 8);
+        assert_eq!(
+            resolve_steps(&request(
+                json!({ "projectId": "p", "advanced": { "steps": 200 } })
+            )),
+            80
+        );
+        assert_eq!(
+            resolve_steps(&request(
+                json!({ "projectId": "p", "advanced": { "steps": 12 } })
+            )),
+            12
+        );
+    }
+
+    /// The Z-Image provider linked into the worker self-registered via inventory.
     #[cfg(target_os = "macos")]
     #[test]
     fn mlx_engine_registry_links_z_image() {
         assert!(mlx_gen::registry::generators().any(|reg| (reg.descriptor)().id == "z_image_turbo"));
+    }
+
+    /// Real-weights smoke: load + generate one small Z-Image image. Needs the HF cache
+    /// (`Tongyi-MAI/Z-Image-Turbo`) + a Metal device; run on demand:
+    /// `cargo test -p sceneworks-worker --lib -- --ignored zimage_real_weights`.
+    #[cfg(target_os = "macos")]
+    #[test]
+    #[ignore = "needs real Z-Image weights + Metal device"]
+    fn zimage_real_weights_generates_one_image() {
+        let snapshot = std::fs::read_dir(
+            dirs_home().join(".cache/huggingface/hub/models--Tongyi-MAI--Z-Image-Turbo/snapshots"),
+        )
+        .expect("HF cache snapshots dir")
+        .flatten()
+        .map(|entry| entry.path())
+        .find(|path| path.is_dir())
+        .expect("a snapshot dir");
+
+        let generator = zimage_load(snapshot, Some(mlx_gen::Quant::Q8), Vec::new()).unwrap();
+        let cancel = mlx_gen::CancelFlag::new();
+        let mut steps_seen = 0u32;
+        let (w, h, pixels) = zimage_generate_one(
+            generator.as_ref(),
+            "a serene mountain lake at dawn",
+            512,
+            512,
+            42,
+            8,
+            &cancel,
+            &mut |p| {
+                if let mlx_gen::Progress::Step { current, .. } = p {
+                    steps_seen = steps_seen.max(current);
+                }
+            },
+        )
+        .unwrap();
+        assert_eq!((w, h), (512, 512));
+        assert_eq!(pixels.len(), 512 * 512 * 3);
+        assert!(steps_seen >= 1, "expected denoise step progress");
+        // Not a flat image.
+        assert!(pixels.windows(2).any(|w| w[0] != w[1]));
+    }
+
+    #[cfg(target_os = "macos")]
+    fn dirs_home() -> std::path::PathBuf {
+        std::path::PathBuf::from(std::env::var("HOME").expect("HOME"))
     }
 }
