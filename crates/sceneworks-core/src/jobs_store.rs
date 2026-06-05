@@ -1452,10 +1452,18 @@ fn active_gpu_job_exists(connection: &Connection, gpu_id: &str) -> JobsStoreResu
 
 /// Models the in-process Rust MLX worker generates today, by id. This set grows
 /// one family story at a time as each lands real generation in
-/// `sceneworks-worker::image_jobs` — sc-3022 Z-Image, sc-3023 FLUX.1, sc-3024 Qwen
-/// (live), then sc-3025 FLUX.2, sc-3026 SDXL. A model id absent here is never routed
-/// to the mlx worker, so the Python torch path stays authoritative for it.
-const MLX_ROUTED_MODELS: &[&str] = &["z_image_turbo", "flux_schnell", "flux_dev", "qwen_image"];
+/// `sceneworks-worker::image_jobs` — sc-3022 Z-Image, sc-3023 FLUX.1, sc-3024 Qwen,
+/// sc-3025 FLUX.2 (live), then sc-3026 SDXL. A model id absent here is never routed to
+/// the mlx worker, so the Python torch path stays authoritative for it.
+const MLX_ROUTED_MODELS: &[&str] = &[
+    "z_image_turbo",
+    "flux_schnell",
+    "flux_dev",
+    "qwen_image",
+    "flux2_klein_9b",
+    "flux2_klein_9b_kv",
+    "flux2_klein_9b_true_v2",
+];
 
 /// Epic 3018 routing — does this image job belong on the in-process Rust MLX
 /// worker (vs the Python torch worker)? This lifts the per-family Python
@@ -1483,11 +1491,32 @@ fn image_job_is_mlx_eligible(job: &JobSnapshot) -> bool {
         "z_image_turbo" => z_image_mlx_eligible(&job.payload),
         "flux_schnell" | "flux_dev" => flux_mlx_eligible(&job.payload),
         "qwen_image" => qwen_mlx_eligible(&job.payload),
-        // Each family story adds its arm alongside real generation:
-        // sc-3025 flux2_klein_*, sc-3026 sdxl.
+        "flux2_klein_9b" | "flux2_klein_9b_kv" | "flux2_klein_9b_true_v2" => {
+            flux2_mlx_eligible(&job.payload)
+        }
+        // Each family story adds its arm alongside real generation: sc-3026 sdxl.
         // Until then a model in MLX_ROUTED_MODELS must have an arm.
         _ => false,
     }
+}
+
+/// FLUX.2-klein (sc-3025) MLX-routing conditions. FLUX.2-klein is an **MLX-only**
+/// family (no torch backend), so this is not an MLX-vs-torch choice — it gates the
+/// *txt2img* surface this story delivers. `edit_image`, a reference (single or multi),
+/// and the KV-cache edit path stay out (story sc-3029). A third-party LyCORIS LoRA
+/// falls back to the procedural placeholder rather than erroring on the mlx worker.
+fn flux2_mlx_eligible(payload: &Map<String, Value>) -> bool {
+    if payload.get("mode").and_then(Value::as_str) == Some("edit_image") {
+        return false;
+    }
+    let has_reference = payload
+        .get("referenceAssetId")
+        .and_then(Value::as_str)
+        .is_some_and(|value| !value.trim().is_empty());
+    if has_reference {
+        return false;
+    }
+    !request_has_lycoris_lora(payload)
 }
 
 /// Qwen-Image (sc-3024) MLX-routing conditions, ported from `_should_route_qwen_to_mlx`:
@@ -1856,7 +1885,8 @@ fn sort_json_value(value: &mut Value) {
 #[cfg(test)]
 mod mlx_routing_tests {
     use super::{
-        flux_mlx_eligible, qwen_mlx_eligible, request_has_lycoris_lora, z_image_mlx_eligible,
+        flux2_mlx_eligible, flux_mlx_eligible, qwen_mlx_eligible, request_has_lycoris_lora,
+        z_image_mlx_eligible,
     };
     use serde_json::{json, Map, Value};
 
@@ -1968,6 +1998,23 @@ mod mlx_routing_tests {
             "advanced": { "poses": [{ "id": "p1" }] }
         }))));
         assert!(!qwen_mlx_eligible(&object(json!({
+            "loras": [{ "networkType": "lycoris" }]
+        }))));
+    }
+
+    #[test]
+    fn flux2_plain_txt2img_is_eligible_edit_and_reference_are_not() {
+        assert!(flux2_mlx_eligible(&object(
+            json!({ "prompt": "a red fox" })
+        )));
+        // edit + reference (single/multi) are sc-3029, not this story.
+        assert!(!flux2_mlx_eligible(&object(
+            json!({ "mode": "edit_image" })
+        )));
+        assert!(!flux2_mlx_eligible(&object(
+            json!({ "referenceAssetId": "asset_1" })
+        )));
+        assert!(!flux2_mlx_eligible(&object(json!({
             "loras": [{ "networkType": "lycoris" }]
         }))));
     }

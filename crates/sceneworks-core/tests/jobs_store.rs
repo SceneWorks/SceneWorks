@@ -1563,6 +1563,59 @@ fn qwen_txt2img_routes_to_mlx_but_pose_stays_on_torch() {
 }
 
 #[test]
+fn flux2_klein_variants_route_to_mlx_worker() {
+    let store = store("mlx-routing-flux2");
+    register_gpu_worker(&store, "worker-torch", "mps", image_caps());
+    register_gpu_worker(&store, "worker-mlx", "mlx", image_caps());
+
+    // All three FLUX.2-klein txt2img variants (MLX-only family) route to the mlx worker.
+    for model in [
+        "flux2_klein_9b",
+        "flux2_klein_9b_kv",
+        "flux2_klein_9b_true_v2",
+    ] {
+        let job = store
+            .create_job(image_job_with(
+                json!({ "model": model, "prompt": "a red fox" }),
+                "auto",
+            ))
+            .unwrap_or_else(|_| panic!("{model} job creates"));
+        assert!(
+            store
+                .claim_next_job("worker-torch")
+                .expect("torch claim ok")
+                .is_none(),
+            "{model} should defer off the torch worker"
+        );
+        let claimed = store
+            .claim_next_job("worker-mlx")
+            .expect("mlx claim ok")
+            .unwrap_or_else(|| panic!("mlx claims {model}"));
+        assert_eq!(claimed.id, job.id);
+        assert_eq!(claimed.assigned_gpu.as_deref(), Some("mlx"));
+        // Completing the job returns the mlx worker to idle (the deferral only fires
+        // toward an *idle* mlx worker), so the next variant defers to it too.
+        store
+            .update_job_progress(
+                &claimed.id,
+                ProgressUpdate {
+                    status: JobStatus::Completed,
+                    stage: ProgressStage::Completed,
+                    progress: 1.0,
+                    message: "done".to_owned(),
+                    error: None,
+                    result: None,
+                    eta_seconds: None,
+                    peak_gpu_memory_pct: None,
+                    peak_gpu_load_pct: None,
+                    backend: None,
+                },
+            )
+            .expect("complete job");
+    }
+}
+
+#[test]
 fn non_mlx_model_image_job_is_not_routed_to_mlx_worker() {
     let store = store("mlx-routing-non-mlx-model");
     register_gpu_worker(&store, "worker-torch", "mps", image_caps());
