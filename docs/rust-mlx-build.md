@@ -31,8 +31,9 @@ for a slip:
 cargo test -p sceneworks-worker --test nax_guard -- --nocapture   # needs macOS >= 26.2
 ```
 
-The pin is **not forced**, so CI (and you, locally) can override it via the
-environment — GitHub's hosted macOS runners cap at SDK 15:
+The pin is **not forced**, so you (or a hosted-runner lane that cannot provide the
+26.2 SDK) can override it via the environment. This only buys a correctness build —
+the NAX fast path is not present:
 
 ```sh
 MACOSX_DEPLOYMENT_TARGET=15.0 cargo build -p sceneworks-worker   # correctness-only, no NAX
@@ -40,6 +41,37 @@ MACOSX_DEPLOYMENT_TARGET=15.0 cargo build -p sceneworks-worker   # correctness-o
 
 > Note: `mlx-sys`'s build.rs has no `rerun-if-env-changed`, so changing the
 > deployment target needs a clean rebuild of `pmetal-mlx-sys` to take effect.
+
+## CI: the self-hosted NAX runner
+
+The macOS lane (`.github/workflows/macos-mlx.yml`) runs on a **self-hosted macOS
+26.2+ runner**, not a GitHub-hosted one. GitHub's hosted macOS images top out well
+below macOS 26.2, so they can only build at a lowered deployment target and **cannot
+exercise NAX at all** — which defeats the purpose. A self-hosted 26.2+ runner builds
+at the workspace 26.2 pin and actually *runs* `nax_guard`, so CI guards the NAX fast
+path. It also keeps the heavy MLX build warm across runs.
+
+Register this machine (or a dedicated 26.2+ Mac) as the runner — it needs full Xcode +
+the Metal Toolchain + a Rust toolchain:
+
+```sh
+TOKEN=$(gh api -X POST repos/michaeltrefry/SceneWorks/actions/runners/registration-token --jq .token)
+mkdir actions-runner && cd actions-runner
+curl -fsSL -o runner.tar.gz https://github.com/actions/runner/releases/download/v2.334.0/actions-runner-osx-arm64-2.334.0.tar.gz
+tar xzf runner.tar.gz
+./config.sh --url https://github.com/michaeltrefry/SceneWorks --token "$TOKEN" --labels nax --name nax-macos
+./run.sh                       # foreground; or install as a launchd service:
+# ./svc.sh install && ./svc.sh start
+```
+
+The workflow's `runs-on: [self-hosted, macOS, ARM64, nax]` targets exactly that
+`nax` label, so an older self-hosted Mac never picks up the NAX-requiring job.
+
+> **Public-repo security:** this repo is public, and GitHub warns against self-hosted
+> runners on public repos because a fork PR can run arbitrary code on the runner. The
+> workflow's job-level `if:` restricts execution to same-repo branches (the epic's
+> story branches), and "Require approval for all external contributors' workflows"
+> should stay on in the repo Actions settings.
 
 ## Heavy-recompile mitigation (compile MLX once)
 
