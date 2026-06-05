@@ -18,6 +18,25 @@ pub(crate) struct FfmpegContext<'a> {
     cancel_message: &'a str,
 }
 
+impl<'a> FfmpegContext<'a> {
+    /// Build a context so callers in sibling modules (e.g. video generation,
+    /// `video_jobs`) can drive [`run_ffmpeg`] with the same periodic-heartbeat +
+    /// cooperative-cancel loop the in-module callers use.
+    pub(crate) fn new(
+        api: &'a ApiClient,
+        settings: &'a Settings,
+        job_id: &'a str,
+        cancel_message: &'a str,
+    ) -> Self {
+        Self {
+            api,
+            settings,
+            job_id,
+            cancel_message,
+        }
+    }
+}
+
 pub(crate) async fn run_frame_extract_job(
     api: &ApiClient,
     settings: &Settings,

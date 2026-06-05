@@ -150,18 +150,23 @@ pub(crate) fn cpu_gpu() -> DiscoveredGpu {
     }
 }
 
-/// The Apple-Silicon native MLX GPU worker (epic 3018): advertises `image_generate`,
-/// served in-process by the linked mlx-gen engine. `Gpu` (not `Cpu`) so the API's
-/// `worker_supports_job` lets GPU jobs route here; it deliberately does NOT carry the
-/// CPU utility capabilities, so downloads/imports/etc. still go to the CPU worker.
-/// Video + the remaining image capabilities are added as their stories land
-/// (sc-3022.. image, sc-3034.. video).
+/// The Apple-Silicon native MLX GPU worker (epic 3018): advertises `image_generate`
+/// and `video_generate`, served in-process by the linked mlx-gen engine. `Gpu` (not
+/// `Cpu`) so the API's `worker_supports_job` lets GPU jobs route here; it deliberately
+/// does NOT carry the CPU utility capabilities, so downloads/imports/etc. still go to
+/// the CPU worker. `video_generate` is claimed from the video runtime onward (sc-3033);
+/// the procedural stub backs models whose real MLX path is not yet linked (Wan sc-3034,
+/// LTX+audio sc-3035), and the API-side MLX-vs-Python routing is sc-3036.
 #[cfg(target_os = "macos")]
 pub(crate) fn mlx_gpu() -> DiscoveredGpu {
     DiscoveredGpu {
         id: "mlx".to_owned(),
         name: "Apple Silicon (MLX)".to_owned(),
-        capabilities: vec![WorkerCapability::Gpu, WorkerCapability::ImageGenerate],
+        capabilities: vec![
+            WorkerCapability::Gpu,
+            WorkerCapability::ImageGenerate,
+            WorkerCapability::VideoGenerate,
+        ],
         utilization: None,
     }
 }

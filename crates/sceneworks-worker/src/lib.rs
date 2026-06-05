@@ -43,6 +43,8 @@ mod media_jobs;
 use media_jobs::*;
 mod image_jobs;
 use image_jobs::*;
+mod video_jobs;
+use video_jobs::*;
 mod downloads;
 // The DWPose skeleton rasterizer is consumed only by the macOS Z-Image strict-pose
 // control path; on other platforms it still builds + unit-tests (cross-platform
@@ -463,6 +465,14 @@ async fn run_utility_job(
         JobType::ImageGenerate => run_image_generate_job(api, settings, &job)
             .await
             .map_err(|error| ("Image generation failed.", error)),
+        // Native MLX video generation, served in-process by the linked mlx-gen engine
+        // on the macOS Apple-Silicon GPU worker (epic 3018). sc-3033 ships the runtime
+        // + procedural stub; the real Wan (sc-3034) / LTX+audio (sc-3035) models link
+        // their provider crates. Off macOS the capability is never advertised, so this
+        // arm is unreachable there.
+        JobType::VideoGenerate => run_video_generate_job(api, settings, &job)
+            .await
+            .map_err(|error| ("Video generation failed.", error)),
         JobType::ModelDownload => run_model_download_job(api, settings, http_client, &job)
             .await
             .map_err(|error| ("Model download failed.", error)),
