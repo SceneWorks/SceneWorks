@@ -1118,6 +1118,7 @@ fn run_video_generation(
         quantize: input.quant,
         precision: Precision::Bf16,
         control: None,
+        ip_adapter: None,
         adapters: input.adapters,
     };
     let generator = mlx_gen::load(input.engine_id, &spec)
