@@ -1616,6 +1616,37 @@ fn flux2_klein_variants_route_to_mlx_worker() {
 }
 
 #[test]
+fn flux2_edit_reference_job_routes_to_mlx_worker() {
+    let store = store("mlx-routing-flux2-edit");
+    register_gpu_worker(&store, "worker-torch", "mps", image_caps());
+    register_gpu_worker(&store, "worker-mlx", "mlx", image_caps());
+
+    // FLUX.2 is MLX-only, so an edit/reference job (sc-3029) routes to the mlx worker
+    // (sc-3025 kept these on Python; the edit path now exists on Rust).
+    let job = store
+        .create_job(image_job_with(
+            json!({
+                "model": "flux2_klein_9b_kv",
+                "mode": "edit_image",
+                "prompt": "make it golden hour",
+                "sourceAssetId": "asset_1"
+            }),
+            "auto",
+        ))
+        .expect("job creates");
+    assert!(store
+        .claim_next_job("worker-torch")
+        .expect("torch claim ok")
+        .is_none());
+    let claimed = store
+        .claim_next_job("worker-mlx")
+        .expect("mlx claim ok")
+        .expect("mlx claims flux2 edit job");
+    assert_eq!(claimed.id, job.id);
+    assert_eq!(claimed.assigned_gpu.as_deref(), Some("mlx"));
+}
+
+#[test]
 fn sdxl_and_realvisxl_route_to_mlx_worker() {
     let store = store("mlx-routing-sdxl");
     register_gpu_worker(&store, "worker-torch", "mps", image_caps());
