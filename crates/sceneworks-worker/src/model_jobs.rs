@@ -184,12 +184,43 @@ pub(crate) async fn run_model_download_job(
     Ok(())
 }
 
+/// Native Rust/MLX FLUX.2-klein single-file → diffusers convert (sc-3136), replacing the
+/// retired Python `mlx_flux_convert.py` (sc-3032). Loads the wikeeyang single-file
+/// transformer, remaps it to the diffusers layout (fused-qkv 1→3 split + the load-bearing
+/// `norm_out` scale/shift swap), validates against the base, and assembles a local diffusers
+/// dir whose borrowed vae/text-encoder/tokenizer are absolute symlinks (so they survive the
+/// worker's temp→final atomic rename). Runs MLX, so macOS-only — other targets can't reach
+/// it (FLUX.2-klein is `macOnly` in the manifest).
+#[cfg(target_os = "macos")]
+fn convert_flux2_klein_diffusers(
+    source_file: &Path,
+    base_dir: &Path,
+    out_dir: &Path,
+) -> Result<(), String> {
+    mlx_gen_flux2::convert_and_assemble(source_file, base_dir, out_dir)
+        .map(|_| ())
+        .map_err(|error| error.to_string())
+}
+
+#[cfg(not(target_os = "macos"))]
+fn convert_flux2_klein_diffusers(
+    _source_file: &Path,
+    _base_dir: &Path,
+    _out_dir: &Path,
+) -> Result<(), String> {
+    Err(
+        "FLUX.2-klein conversion requires macOS (mlx-gen-flux2); this model is macOS-only."
+            .to_owned(),
+    )
+}
+
 /// Convert a model's native (diffusers) checkpoint into the local MLX format on
-/// macOS/Apple Silicon. The native checkpoint must already be downloaded into the
-/// Hugging Face cache (via a model_download job); this shells out to the venv's
-/// Python `mlx_video.convert_wan` tool, which is where MLX/torch live. The desktop
-/// shell points `SCENEWORKS_PYTHON` at the bundled interpreter (mirrors
-/// `SCENEWORKS_FFMPEG`); dev/server fall back to `python3` on PATH.
+/// macOS/Apple Silicon. The native checkpoint must already be downloaded into the Hugging
+/// Face cache (via a model_download job). Wan/LTX still shell out to the venv's Python
+/// `mlx_video.convert_wan` tool (the mlx-video stack owns that conversion until sc-3224 lands
+/// a Rust converter); the desktop shell points `SCENEWORKS_PYTHON` at the bundled interpreter
+/// (mirrors `SCENEWORKS_FFMPEG`), dev/server fall back to `python3`. FLUX.2-klein true_v2
+/// converts in-process via `convert_flux2_klein_diffusers` (sc-3136).
 ///
 /// Real conversion is exercised on Mac hardware in sc-1509; this wires the tracked
 /// job, progress, cancellation, and failure surfacing.
@@ -242,16 +273,18 @@ pub(crate) async fn run_model_convert_job(
         return Ok(());
     };
 
-    // Converter discriminator (sc-2235). Absent => the default mlx-video Wan
-    // converter (existing behavior). "flux2_klein_diffusers" => convert a
-    // FLUX.2-klein single-file fine-tune into a diffusers dir via the mlx-flux
-    // sidecar venv, borrowing VAE/text-encoder/tokenizer from an installed base.
+    // Converter discriminator (sc-2235). Absent => the default mlx-video Wan converter
+    // (a Python subprocess; the mlx-video stack still owns Wan/LTX weight conversion until
+    // a Rust converter lands — sc-3224). "flux2_klein_diffusers" => convert a FLUX.2-klein
+    // single-file fine-tune into a diffusers dir IN-PROCESS via
+    // mlx_gen_flux2::convert_and_assemble (sc-3136 — replaced the Python mlx_flux_convert.py
+    // sidecar at the sc-3032 cutover), borrowing VAE/text-encoder/tokenizer from a base klein.
     let converter = optional_payload_string(&job.payload, "converter")
         .map(str::to_owned)
         .unwrap_or_default();
     let is_flux2_klein = converter == "flux2_klein_diffusers";
 
-    let (python, flux2_source_file, flux2_base_dir, flux2_script) = if is_flux2_klein {
+    let (python, flux2_source_file, flux2_base_dir) = if is_flux2_klein {
         let source_file_name = required_payload_string(&job.payload, "sourceFile")?.to_owned();
         let base_repo = required_payload_string(&job.payload, "baseRepo")?.to_owned();
         let source_file = checkpoint_dir.join(&source_file_name);
@@ -278,35 +311,16 @@ pub(crate) async fn run_model_convert_job(
             .await?;
             return Ok(());
         };
-        let py = std::env::var("SCENEWORKS_MLX_FLUX_PYTHON")
-            .ok()
-            .map(|value| value.trim().to_owned())
-            .filter(|value| !value.is_empty())
-            .ok_or_else(|| {
-                WorkerError::InvalidPayload(
-                    "SCENEWORKS_MLX_FLUX_PYTHON is not set; the mlx-flux sidecar venv is required \
-                     to convert FLUX.2-klein fine-tunes."
-                        .to_owned(),
-                )
-            })?;
-        let script = std::env::var("SCENEWORKS_MLX_FLUX_CONVERT")
-            .ok()
-            .map(|value| value.trim().to_owned())
-            .filter(|value| !value.is_empty())
-            .ok_or_else(|| {
-                WorkerError::InvalidPayload(
-                    "SCENEWORKS_MLX_FLUX_CONVERT is not set; cannot locate mlx_flux_convert.py."
-                        .to_owned(),
-                )
-            })?;
-        (py, Some(source_file), Some(base_dir), Some(script))
+        // In-process Rust/MLX convert (sc-3136): no subprocess, no mlx-flux sidecar venv.
+        // The `python` slot is unused on this path.
+        (String::new(), Some(source_file), Some(base_dir))
     } else {
         let py = std::env::var("SCENEWORKS_PYTHON")
             .ok()
             .map(|value| value.trim().to_owned())
             .filter(|value| !value.is_empty())
             .unwrap_or_else(|| "python3".to_owned());
-        (py, None, None, None)
+        (py, None, None)
     };
 
     // Convert into a unique temp sibling and only promote it on success, so a
@@ -347,21 +361,37 @@ pub(crate) async fn run_model_convert_job(
     )
     .await?;
 
-    let mut command = Command::new(&python);
     if is_flux2_klein {
-        // Self-contained converter script in the scene_worker package, run by the
-        // mlx-flux sidecar python: --source-file <single-file> --base-dir <base
-        // klein snapshot> --out-dir <temp>. It validates the converted transformer
-        // against the base diffusers layout and assembles the borrowed components.
-        command
-            .arg(flux2_script.as_ref().expect("flux2 script resolved"))
-            .arg("--source-file")
-            .arg(flux2_source_file.as_ref().expect("flux2 source resolved"))
-            .arg("--base-dir")
-            .arg(flux2_base_dir.as_ref().expect("flux2 base resolved"))
-            .arg("--out-dir")
-            .arg(&temp_dir);
+        // Native Rust/MLX single-file → diffusers convert (mlx-gen-flux2, sc-3136) —
+        // replaces the retired Python mlx_flux_convert.py sidecar (sc-3032). The blocking
+        // MLX call isn't interruptible mid-run (~5s on real weights), so honor cancel up
+        // front; the borrowed vae/text-encoder/tokenizer are absolute symlinks that survive
+        // the temp→final atomic rename below.
+        check_cancel(api, &job.id, "MLX conversion canceled by user.").await?;
+        let source_file = flux2_source_file.expect("flux2 source resolved");
+        let base_dir = flux2_base_dir.expect("flux2 base resolved");
+        let temp = temp_dir.clone();
+        let outcome = tokio::task::spawn_blocking(move || {
+            convert_flux2_klein_diffusers(&source_file, &base_dir, &temp)
+        })
+        .await;
+        match outcome {
+            Ok(Ok(())) => {}
+            Ok(Err(detail)) => {
+                let _ = tokio::fs::remove_dir_all(&temp_dir).await;
+                return Err(WorkerError::InvalidPayload(format!(
+                    "FLUX.2-klein conversion failed. {detail}"
+                )));
+            }
+            Err(join_error) => {
+                let _ = tokio::fs::remove_dir_all(&temp_dir).await;
+                return Err(WorkerError::InvalidPayload(format!(
+                    "FLUX.2-klein conversion task panicked: {join_error}"
+                )));
+            }
+        }
     } else {
+        let mut command = Command::new(&python);
         command
             .arg("-m")
             .arg("mlx_video.convert_wan")
@@ -384,57 +414,57 @@ pub(crate) async fn run_model_convert_job(
         if let Some(group_size) = quantize_group_size {
             command.arg("--group-size").arg(group_size.to_string());
         }
-    }
-    let mut child = command
-        .stdout(Stdio::null())
-        .stderr(Stdio::piped())
-        .spawn()
-        .map_err(|error| {
-            WorkerError::InvalidPayload(format!(
-                "Failed to start MLX conversion ({python}). Ensure the worker venv has \
-                 mlx-video-with-audio installed: {error}"
-            ))
-        })?;
+        let mut child = command
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped())
+            .spawn()
+            .map_err(|error| {
+                WorkerError::InvalidPayload(format!(
+                    "Failed to start MLX conversion ({python}). Ensure the worker venv has \
+                     mlx-video-with-audio installed: {error}"
+                ))
+            })?;
 
-    let mut stderr = child.stderr.take();
-    let stderr_task = tokio::spawn(async move {
-        let mut bytes = Vec::new();
-        if let Some(stderr) = stderr.as_mut() {
-            let _ = stderr.read_to_end(&mut bytes).await;
-        }
-        bytes
-    });
+        let mut stderr = child.stderr.take();
+        let stderr_task = tokio::spawn(async move {
+            let mut bytes = Vec::new();
+            if let Some(stderr) = stderr.as_mut() {
+                let _ = stderr.read_to_end(&mut bytes).await;
+            }
+            bytes
+        });
 
-    let mut interval = tokio::time::interval(progress_report_interval(settings));
-    interval.set_missed_tick_behavior(MissedTickBehavior::Delay);
-    let status = loop {
-        tokio::select! {
-            status = child.wait() => break status?,
-            _ = interval.tick() => {
-                heartbeat(api, settings, WorkerStatus::Busy, Some(&job.id)).await?;
-                if let Err(error) =
-                    check_cancel(api, &job.id, "MLX conversion canceled by user.").await
-                {
-                    let _ = child.kill().await;
-                    let _ = child.wait().await;
-                    let _ = tokio::fs::remove_dir_all(&temp_dir).await;
-                    return Err(error);
+        let mut interval = tokio::time::interval(progress_report_interval(settings));
+        interval.set_missed_tick_behavior(MissedTickBehavior::Delay);
+        let status = loop {
+            tokio::select! {
+                status = child.wait() => break status?,
+                _ = interval.tick() => {
+                    heartbeat(api, settings, WorkerStatus::Busy, Some(&job.id)).await?;
+                    if let Err(error) =
+                        check_cancel(api, &job.id, "MLX conversion canceled by user.").await
+                    {
+                        let _ = child.kill().await;
+                        let _ = child.wait().await;
+                        let _ = tokio::fs::remove_dir_all(&temp_dir).await;
+                        return Err(error);
+                    }
                 }
             }
-        }
-    };
-    let stderr_bytes = stderr_task.await.unwrap_or_default();
+        };
+        let stderr_bytes = stderr_task.await.unwrap_or_default();
 
-    if !status.success() {
-        let _ = tokio::fs::remove_dir_all(&temp_dir).await;
-        let stderr_text = String::from_utf8_lossy(&stderr_bytes);
-        // Keep the tail (char-safe) so the job error surfaces the real failure.
-        let tail: String = stderr_text.trim().chars().rev().take(1200).collect();
-        let detail: String = tail.chars().rev().collect();
-        return Err(WorkerError::InvalidPayload(format!(
-            "MLX conversion failed (exit {}). {detail}",
-            status.code().unwrap_or(-1),
-        )));
+        if !status.success() {
+            let _ = tokio::fs::remove_dir_all(&temp_dir).await;
+            let stderr_text = String::from_utf8_lossy(&stderr_bytes);
+            // Keep the tail (char-safe) so the job error surfaces the real failure.
+            let tail: String = stderr_text.trim().chars().rev().take(1200).collect();
+            let detail: String = tail.chars().rev().collect();
+            return Err(WorkerError::InvalidPayload(format!(
+                "MLX conversion failed (exit {}). {detail}",
+                status.code().unwrap_or(-1),
+            )));
+        }
     }
 
     // Promote the completed conversion atomically; on any rename failure the partial
@@ -1203,4 +1233,72 @@ pub(crate) async fn run_model_import_job(
     )
     .await?;
     Ok(())
+}
+
+#[cfg(all(test, target_os = "macos"))]
+mod tests {
+    use super::*;
+
+    /// Resolve a HuggingFace cache snapshot dir for `models--<dir>` (test helper).
+    fn hf_snapshot(model_dir: &str) -> PathBuf {
+        let home = std::env::var("HOME").expect("HOME");
+        std::fs::read_dir(
+            Path::new(&home).join(format!(".cache/huggingface/hub/{model_dir}/snapshots")),
+        )
+        .expect("HF cache snapshots dir")
+        .flatten()
+        .map(|entry| entry.path())
+        .find(|path| path.is_dir())
+        .expect("a snapshot dir")
+    }
+
+    /// Real-weights smoke for the native Rust/MLX FLUX.2-klein true_v2 converter
+    /// (sc-3136 consumer cutover, sc-3032): runs the actual `convert_flux2_klein_diffusers`
+    /// wrapper used by `run_model_convert_job` on the cached wikeeyang bf16 single-file +
+    /// base klein-9B, and asserts the assembled diffusers dir is complete (real transformer
+    /// weights + config + model_index) with the borrowed components as resolvable symlinks.
+    /// Mirrors mlx-gen's `convert_real_weights` but exercises the SceneWorks call site.
+    /// Needs both repos in the HF cache (writes ~18 GB to the temp dir). Run with:
+    ///   cargo test -p sceneworks-worker --lib -- --ignored flux2_true_v2_rust_convert
+    #[test]
+    #[ignore]
+    fn flux2_true_v2_rust_convert_real_weights() {
+        let source = hf_snapshot("models--wikeeyang--Flux2-Klein-9B-True-V2")
+            .join("Flux2-Klein-9B-True-v2-bf16.safetensors");
+        let base = hf_snapshot("models--black-forest-labs--FLUX.2-klein-9B");
+        assert!(
+            source.is_file(),
+            "missing wikeeyang bf16 single-file: {}",
+            source.display()
+        );
+        assert!(
+            base.join("transformer").is_dir(),
+            "missing base klein transformer: {}",
+            base.display()
+        );
+
+        let out = std::env::temp_dir().join(format!("sw_true_v2_convert_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&out);
+
+        convert_flux2_klein_diffusers(&source, &base, &out).expect("native true_v2 convert");
+
+        // Transformer weights + config are written as real files (the remapped, base-validated
+        // diffusers transformer); model_index.json is copied.
+        assert!(out
+            .join("transformer/diffusion_pytorch_model.safetensors")
+            .is_file());
+        assert!(out.join("transformer/config.json").is_file());
+        assert!(out.join("model_index.json").is_file());
+        // vae / text_encoder / tokenizer / scheduler are absolute symlinks borrowed from the
+        // base install; `.exists()` follows the link, so a broken symlink fails here.
+        for sub in ["vae", "text_encoder", "tokenizer", "scheduler"] {
+            assert!(
+                out.join(sub).exists(),
+                "borrowed `{sub}` missing or broken symlink in {}",
+                out.display()
+            );
+        }
+
+        let _ = std::fs::remove_dir_all(&out);
+    }
 }
