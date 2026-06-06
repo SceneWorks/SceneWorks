@@ -180,9 +180,18 @@ seed (PSNR 42–51 dB, px>8 < 1.2%) — the new adapter reproduces the old one. 
 identical (same composition / wave / sun / foam, confirmed by eye + SSIM 0.985) but has looser pixel
 parity: the diff is **confined to high-frequency texture/edges** (water/foam bottom-half mean 8.1 vs
 smooth-sky top-half 3.7; the amplified diff shows only crest/foam/sun-ring edges, no content shift or
-color band). This matches the known z_image **VAE-decode precision sensitivity** called out in the
-mlx-gen goldens README — an artifact of independent fp VAE decode amplified in a very high-frequency
-image, not a content divergence.
+color band).
+
+**Cause — under investigation in [sc-3218](https://app.shortcut.com/trefry/story/3218); NOT simply VAE
+precision.** The prior art reframes it: **sc-3007** hit the same ~40% z_image px gap and root-caused
+it as a **schedule mismatch** (old empirical-mu shift ≈ 9.89 vs production static shift = 3.0, from
+**sc-2536**); once aligned, the Rust public `generate` path matches the mflux **fork golden** at
+**0.013% px>8**, and **sc-3012** confirmed the z_image VAE decode is *exact* to the golden. So
+Rust-vs-fork-golden ≈ 0.013% while this live Rust-vs-Python-**sidecar** A/B ≈ 26% — the divergence is
+almost certainly in the **live Python mflux sidecar** (likely a stale z_image schedule and/or MLX
+version predating sc-2536), not in the Rust port and not general VAE fp precision. If confirmed, the
+new Rust adapter is the *more correct* path (it matches the fork golden); the gap reflects the old
+path's known z_image schedule bug — reassuring for the cutover. sc-3218 tracks the root-cause.
 
 **SDXL note:** there is no old-MLX SDXL adapter to A/B against — the vendored `_vendor/mlx_sd` path was
 already retired in **sc-3060** (Python SDXL is torch-only now). SDXL parity rests on Phase A + Phase B
@@ -201,5 +210,9 @@ yet head-to-head pixel-A/B'd:
 
 ## Open items / follow-ups
 
+- **[sc-3218](https://app.shortcut.com/trefry/story/3218)** — root-cause the live z_image new-vs-old
+  A/B gap (prime suspect: schedule/MLX-version mismatch in the Python mflux sidecar, per
+  sc-2536/sc-3007, not VAE precision). Visual parity is fine; not a cutover blocker.
 - Δ3 (LTX i2v `imageConditioningStrength`) — thread it into the Rust LTX `Reference.strength` if the
   engine honors it for LTX; otherwise document as unsupported. Low priority.
+- Remaining head-to-head A/B surface (z-image strict-pose, FLUX.2 edit, video) — see Phase C.
