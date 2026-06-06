@@ -646,6 +646,10 @@ pub(crate) fn training_base_model_installed(data_dir: &FsPath, target: &Training
                 return true;
             }
         }
+        let managed = data_dir.join("models").join(safe_download_dir(repo));
+        if model_is_installed(&managed) {
+            return true;
+        }
     }
     let managed = data_dir
         .join("models")

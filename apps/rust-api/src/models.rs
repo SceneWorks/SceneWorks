@@ -816,10 +816,10 @@ pub(crate) async fn model_catalog(state: &AppState) -> Result<Vec<Value>, ApiErr
         object.insert(
             "cacheState".to_owned(),
             Value::String(
-                if installed {
-                    "complete"
-                } else if cache_incomplete {
+                if cache_incomplete {
                     "incomplete"
+                } else if installed {
+                    "complete"
                 } else {
                     "missing"
                 }
@@ -1068,7 +1068,7 @@ pub(crate) fn huggingface_cache_health(
 
     let mut best_missing = Vec::new();
     for snapshot in snapshots {
-        if snapshot.join("model_index.json").is_file() {
+        if path_is_readable_file(&snapshot.join("model_index.json")) {
             let health = diffusers_snapshot_health(&snapshot);
             if health.installed {
                 return health;
@@ -1078,7 +1078,9 @@ pub(crate) fn huggingface_cache_health(
             }
             continue;
         }
-        if snapshot.join("config.json").is_file() || snapshot_has_payload_file(&snapshot) {
+        if path_is_readable_file(&snapshot.join("config.json"))
+            || snapshot_has_payload_file(&snapshot)
+        {
             return HuggingFaceCacheHealth::installed();
         }
         if best_missing.is_empty() {
@@ -1114,7 +1116,7 @@ fn snapshot_contains_pattern(snapshot: &FsPath, pattern: &str) -> bool {
             .into_iter()
             .any(|path| pattern_matches(pattern, &path));
     }
-    snapshot.join(pattern).is_file()
+    path_is_readable_file(&snapshot.join(pattern))
 }
 
 fn pattern_contains_glob(pattern: &str) -> bool {
@@ -1157,7 +1159,7 @@ fn diffusers_snapshot_health(snapshot: &FsPath) -> HuggingFaceCacheHealth {
             // Weight-bearing components (unet, transformer, vae, text_encoder,
             // controlnet, …) reliably ship a `config.json` alongside their
             // weight files, so require both.
-            if !snapshot.join(format!("{component}/config.json")).is_file() {
+            if !path_is_readable_file(&snapshot.join(format!("{component}/config.json"))) {
                 missing.push(format!("{component}/config.json"));
             }
             if !diffusers_component_has_weight_file(snapshot, component) {
@@ -1202,7 +1204,11 @@ fn diffusers_component_requires_weights(component: &str, class_name: &str) -> bo
 /// names vary too much by class to enumerate reliably.
 fn diffusers_component_dir_nonempty(snapshot: &FsPath, component: &str) -> bool {
     std::fs::read_dir(snapshot.join(component))
-        .map(|entries| entries.flatten().any(|entry| entry.path().is_file()))
+        .map(|entries| {
+            entries
+                .flatten()
+                .any(|entry| path_is_readable_file(&entry.path()))
+        })
         .unwrap_or(false)
 }
 
@@ -1218,7 +1224,7 @@ fn diffusers_component_has_weight_file(snapshot: &FsPath, component: &str) -> bo
             .and_then(|value| value.to_str())
             .unwrap_or_default()
             .to_ascii_lowercase();
-        path.is_file()
+        path_is_readable_file(&path)
             && (name.ends_with(".safetensors")
                 || name.ends_with(".bin")
                 || name.ends_with(".msgpack")
@@ -1248,7 +1254,7 @@ fn snapshot_files(snapshot: &FsPath) -> Vec<String> {
             let path = entry.path();
             if path.is_dir() {
                 stack.push(path);
-            } else if path.is_file() {
+            } else if path_is_readable_file(&path) {
                 if let Ok(relative) = path.strip_prefix(snapshot) {
                     output.push(relative.to_string_lossy().replace('\\', "/"));
                 }
@@ -1256,6 +1262,19 @@ fn snapshot_files(snapshot: &FsPath) -> Vec<String> {
         }
     }
     output
+}
+
+fn path_is_readable_file(path: &FsPath) -> bool {
+    if std::fs::metadata(path).is_ok_and(|metadata| metadata.is_file()) {
+        return true;
+    }
+    let Ok(metadata) = std::fs::symlink_metadata(path) else {
+        return false;
+    };
+    if !metadata.file_type().is_symlink() {
+        return false;
+    }
+    std::fs::File::open(path).is_ok()
 }
 
 pub(crate) fn manifest_download_size_bytes(model: &Value, download: &Value) -> Option<u64> {

@@ -428,6 +428,32 @@ describe("ModelManagerScreen type-grouped layout", () => {
     );
   });
 
+  it("offers a Fix action when an installed model has an incomplete cache", async () => {
+    const createModelDownloadJob = vi.fn();
+    await render({
+      createModelDownloadJob,
+      models: [
+        {
+          ...MODELS[0],
+          installState: "installed",
+          cacheState: "incomplete",
+          repairAvailable: true,
+          missingRequiredFiles: ["model_index.json"],
+          downloadable: true,
+        },
+      ],
+    });
+    const fixButton = [...container.querySelectorAll(".model-card-actions button")].find(
+      (button) => button.textContent === "Fix",
+    );
+    expect(fixButton).toBeTruthy();
+    expect(fixButton.disabled).toBe(false);
+    await click(fixButton);
+    expect(createModelDownloadJob).toHaveBeenCalledWith(
+      expect.objectContaining({ id: "z_image_turbo" }),
+    );
+  });
+
   it("groups LoRAs by family with a heading per family", async () => {
     await render({
       models: MODELS,
