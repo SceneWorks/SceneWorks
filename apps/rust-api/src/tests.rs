@@ -1739,7 +1739,9 @@ async fn create_training_job_queues_real_run_when_not_dry_run() {
 /// Seeds the Z-Image-Turbo base model as installed (a managed-download
 /// marker) so a real training run clears the missing-model guardrail.
 fn seed_installed_base_model(data_dir: &std::path::Path) {
-    let model_dir = data_dir.join("models").join("z_image_turbo");
+    let model_dir = data_dir
+        .join("models")
+        .join(safe_download_dir("Tongyi-MAI/Z-Image-Turbo"));
     std::fs::create_dir_all(&model_dir).expect("model dir creates");
     std::fs::write(model_dir.join(".sceneworks-download-complete.json"), "{}")
         .expect("model marker writes");
@@ -4601,6 +4603,93 @@ fn single_model_manifest(config_dir: &std::path::Path, id: &str, repo: &str) {
         )
         .expect("empty manifest writes");
     }
+}
+
+#[tokio::test]
+async fn downloadable_model_catalog_reports_incomplete_cache_for_installed_managed_model() {
+    // A model can have SceneWorks' managed completion marker while its Hugging
+    // Face cache snapshot is partial. Keep those states independent so the UI
+    // can offer "Fix" instead of disabling the primary action as "Ready".
+    std::env::set_var("SCENEWORKS_DISABLE_MODEL_SIZE_ESTIMATE", "1");
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let repo = "owner/mixed";
+    single_model_manifest(
+        &temp_dir.path().join("config/manifests"),
+        "mixed_model",
+        repo,
+    );
+    let managed_dir = temp_dir
+        .path()
+        .join("data/models")
+        .join(safe_download_dir(repo));
+    std::fs::create_dir_all(&managed_dir).expect("managed dir creates");
+    std::fs::write(managed_dir.join(".sceneworks-download-complete.json"), "{}")
+        .expect("managed marker writes");
+    let cache_dir = temp_dir
+        .path()
+        .join("data/cache/huggingface/hub/models--owner--mixed/snapshots/abc123");
+    std::fs::create_dir_all(&cache_dir).expect("partial hf cache creates");
+
+    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+    let (status, models) = request(app, "GET", "/api/v1/models", Value::Null).await;
+
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(models[0]["installState"], "installed");
+    assert_eq!(models[0]["cacheState"], "incomplete");
+    assert_eq!(models[0]["repairAvailable"], true);
+    assert_eq!(
+        models[0]["missingRequiredFiles"],
+        json!(["model_index.json"])
+    );
+}
+
+#[test]
+fn huggingface_cache_health_accepts_readable_snapshot_symlinked_model_index() {
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let repo_root = temp_dir.path().join("models--owner--symlinked");
+    let snapshot = repo_root.join("snapshots/abc123");
+    let blobs = repo_root.join("blobs");
+    std::fs::create_dir_all(&snapshot).expect("snapshot creates");
+    std::fs::create_dir_all(&blobs).expect("blobs creates");
+    std::fs::create_dir_all(repo_root.join("refs")).expect("refs creates");
+    std::fs::write(repo_root.join("refs/main"), "abc123").expect("ref writes");
+    let blob_name = "model-index-blob";
+    std::fs::write(
+        blobs.join(blob_name),
+        r#"{ "_class_name": "EmptyPipeline" }"#,
+    )
+    .expect("blob writes");
+    let link = snapshot.join("model_index.json");
+    let relative_target = std::path::Path::new("..")
+        .join("..")
+        .join("blobs")
+        .join(blob_name);
+    if create_test_symlink_file(&relative_target, &link).is_err() {
+        std::fs::write(&link, r#"{ "_class_name": "EmptyPipeline" }"#)
+            .expect("fallback index writes");
+    }
+
+    let health = super::models::huggingface_cache_health(&repo_root, &[]);
+
+    assert!(health.installed);
+    assert!(!health.incomplete);
+    assert!(health.missing_files.is_empty());
+}
+
+#[cfg(windows)]
+fn create_test_symlink_file(
+    target: &std::path::Path,
+    link: &std::path::Path,
+) -> std::io::Result<()> {
+    std::os::windows::fs::symlink_file(target, link)
+}
+
+#[cfg(unix)]
+fn create_test_symlink_file(
+    target: &std::path::Path,
+    link: &std::path::Path,
+) -> std::io::Result<()> {
+    std::os::unix::fs::symlink(target, link)
 }
 
 #[tokio::test]

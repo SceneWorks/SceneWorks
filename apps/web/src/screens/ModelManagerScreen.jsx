@@ -531,8 +531,8 @@ export function ModelManagerScreen() {
           <p className="eyebrow">{model.family ?? "unassociated"}</p>
           <h3>{model.name}</h3>
         </div>
-        <span className={installed ? "status-badge installed" : incomplete ? "status-badge warning" : "status-badge"}>
-          {installed ? "installed" : incomplete ? "incomplete" : "missing"}
+        <span className={incomplete ? "status-badge warning" : installed ? "status-badge installed" : "status-badge"}>
+          {incomplete ? "incomplete" : installed ? "installed" : "missing"}
         </span>
         {unassociated ? (
           <span className="status-badge warning" title="Set this model's family in user.models.jsonc before using it for generation.">
@@ -616,7 +616,7 @@ export function ModelManagerScreen() {
         ) : null}
         <div className="model-card-actions">
           <button
-            disabled={installed || !model.downloadable || Boolean(downloadJob)}
+            disabled={(installed && !incomplete) || !model.downloadable || Boolean(downloadJob)}
             onClick={() =>
               failedDownload
                 ? onResumeDownloadJob(localDownloadJob, { payloadChanges: { downloadAction: "resume" } })
@@ -626,15 +626,15 @@ export function ModelManagerScreen() {
           >
             {downloadJob
               ? downloadJob.status
-              : installed
-                ? "Ready"
-                : failedDownload
+              : failedDownload
                   ? "Resume Download"
                   : incomplete
                     ? "Fix"
-                    : model.downloadSizeLabel
-                    ? `Download ${downloadSize}`
-                    : "Download"}
+                    : installed
+                      ? "Ready"
+                      : model.downloadSizeLabel
+                        ? `Download ${downloadSize}`
+                        : "Download"}
           </button>
           <button className="danger-action" disabled={!canDelete || deletingItem === deleteKey} onClick={() => deleteModel(model)} type="button">
             {model.removable === false ? "Protected" : deletingItem === deleteKey ? "Deleting" : "Delete"}
