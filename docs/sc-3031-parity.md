@@ -149,11 +149,55 @@ Perf bar: per-step time ≥ the Python MLX path with NAX on. The authoritative p
 CI lane (`tests/nax_guard.rs`, 16-bit SDPA correctness) — which confirms the shipped worker built NAX
 kernels at the 26.2 deployment target (no NAX → ~2.5× regression, so a green guard is the floor).
 
-## Phase C — spot output A/B vs the Python path ⏳
+## Phase C — head-to-head output A/B: new Rust adapter vs old Python adapter ✅ (base families)
 
-Numeric output parity is owned by the `mlx-gen` engine goldens (above). At the worker layer, a spot
-A/B on 1–2 representative models (Z-Image image, LTX A/V video) provides belt-and-suspenders that the
-integrated worker output is visually equivalent / not-worse than the legacy path. _Pending._
+The real parity test: generate the **same job** (matched model / prompt / seed / steps / quant / dims)
+through the **new Rust adapter path** and the **old Python `Mlx*Adapter`**, and diff the outputs.
+Engine goldens test the *engine*; Phase A is a static read; Phase B asserts only well-formedness —
+none is the actual head-to-head, so this is it.
+
+- **Rust side** drives the production resolvers + `mlx_load` + `mlx_generate_one` core (the same code
+  `generate_mlx_stream` runs) via the `sc3031_ab_dump_txt2img` harness (in
+  `crates/sceneworks-worker/src/image_jobs.rs`) → real PNG.
+- **Python side** runs the real `Mlx*Adapter.generate` (mflux sidecar) for the matched payload →
+  real PNG. Harness: `docs/sc-3031/ab_python.py`.
+- **Compare**: `docs/sc-3031/compare.py` (mean-abs, max-abs, px>8 fraction, PSNR, SSIM). Driver:
+  `docs/sc-3031/driver.sh`.
+
+**Run (M5 Max, 2026-06-05; matched seed 42, 512², count 1, default steps/quant per family):**
+
+| Model | mean‑abs | px>8 | PSNR | SSIM | verdict |
+|---|---|---|---|---|---|
+| flux_schnell | 0.34 | 0.1% | 50.8 dB | 0.9999 | ~identical |
+| flux_dev | 0.50 | 0.3% | 46.6 dB | 0.9998 | ~identical |
+| qwen_image | 0.87 | 0.6% | 43.6 dB | 0.9997 | ~identical |
+| flux2_klein_9b | 0.75 | 0.9% | 44.1 dB | 0.9997 | ~identical |
+| flux2_klein_9b_kv | 0.93 | 1.2% | 41.8 dB | 0.9994 | ~identical |
+| z_image_turbo | 5.88 | 25.9% | 27.6 dB | 0.985 | visually identical; see note |
+
+Five of the six base families are **near-pixel-identical** to the legacy Python adapter at the same
+seed (PSNR 42–51 dB, px>8 < 1.2%) — the new adapter reproduces the old one. **z_image** is visually
+identical (same composition / wave / sun / foam, confirmed by eye + SSIM 0.985) but has looser pixel
+parity: the diff is **confined to high-frequency texture/edges** (water/foam bottom-half mean 8.1 vs
+smooth-sky top-half 3.7; the amplified diff shows only crest/foam/sun-ring edges, no content shift or
+color band). This matches the known z_image **VAE-decode precision sensitivity** called out in the
+mlx-gen goldens README — an artifact of independent fp VAE decode amplified in a very high-frequency
+image, not a content divergence.
+
+**SDXL note:** there is no old-MLX SDXL adapter to A/B against — the vendored `_vendor/mlx_sd` path was
+already retired in **sc-3060** (Python SDXL is torch-only now). SDXL parity rests on Phase A + Phase B
++ the `mlx-gen-sdxl` engine goldens.
+
+### Remaining head-to-head surface (not yet A/B'd)
+
+Distinct new-adapter code paths still validated only by Phase B (functional E2E) + engine goldens, not
+yet head-to-head pixel-A/B'd:
+- **Z-Image strict-pose ControlNet** (`generate_zimage_control_stream` / `zimage_control_generate_one`)
+  — tractable (pose-only needs just `advanced.poses`, no reference asset).
+- **FLUX.2 edit / reference** (`generate_flux2_edit_stream`) — needs a matched reference asset on both
+  sides.
+- **Video** (Wan, LTX A/V) — the Python path is a *different engine* (`mlx-video-with-audio`), so this
+  is a quality/“not-worse” comparison, not pixel parity.
 
 ## Open items / follow-ups
 

@@ -3823,6 +3823,62 @@ mod tests {
         assert!(poses[0].face.is_some());
     }
 
+    /// sc-3031 A/B dump (NOT a CI test): generate ONE image through the **real new-adapter
+    /// path** — the production resolvers (`model_repo` / `resolve_steps` / `resolve_guidance` /
+    /// `resolve_negative_prompt` / `resolve_quant` / `resolve_adapters` / `resolve_weights_dir` /
+    /// `resolve_seed`) + the `mlx_load` + `mlx_generate_one` core that `generate_mlx_stream`
+    /// drives — and write it to `$SC3031_OUT` for head-to-head comparison against the Python
+    /// `Mlx*Adapter` output. Covers the txt2img families (z-image / flux / qwen / flux2 / sdxl).
+    /// Env: `SC3031_PAYLOAD` (job-payload JSON object), `SC3031_OUT` (.png path); set
+    /// `SCENEWORKS_DATA_DIR` + `HF_HOME` so weights resolve. Run:
+    /// `SC3031_PAYLOAD=… SC3031_OUT=… cargo test -p sceneworks-worker --lib -- --ignored --exact \
+    ///   image_jobs::tests::sc3031_ab_dump_txt2img`
+    #[cfg(target_os = "macos")]
+    #[ignore = "sc-3031 A/B dump harness: drive via SC3031_PAYLOAD + SC3031_OUT"]
+    #[test]
+    fn sc3031_ab_dump_txt2img() {
+        let payload: Value =
+            serde_json::from_str(&std::env::var("SC3031_PAYLOAD").expect("SC3031_PAYLOAD"))
+                .expect("SC3031_PAYLOAD is JSON");
+        let out = std::env::var("SC3031_OUT").expect("SC3031_OUT");
+        let req = request(payload);
+        let settings = Settings::from_env(); // honors SCENEWORKS_DATA_DIR + HF_HOME
+
+        let model = mlx_model(&req.model).expect("an MLX txt2img model id");
+        let _repo = model_repo(&req, model);
+        let steps = resolve_steps(&req, model);
+        let guidance = resolve_guidance(&req, model);
+        let negative = resolve_negative_prompt(&req, model);
+        let (quant, _bits) = resolve_quant(&req);
+        let weights = resolve_weights_dir(&req, &settings).expect("weights in HF cache");
+        let adapters = resolve_adapters(&req).expect("adapters");
+        let seed = resolve_seed(&req, 0);
+        let generator = mlx_load(model.engine_id, weights, quant, adapters).expect("load");
+
+        let cancel = CancelFlag::new();
+        let (w, h, pixels) = mlx_generate_one(
+            generator.as_ref(),
+            &req.prompt,
+            req.width,
+            req.height,
+            seed,
+            steps,
+            guidance,
+            negative,
+            &cancel,
+            &mut |_| {},
+        )
+        .expect("generate");
+        image::RgbImage::from_raw(w, h, pixels)
+            .expect("rgb buffer")
+            .save(&out)
+            .expect("save png");
+        eprintln!(
+            "sc3031 rust dump: model={} {w}x{h} seed={seed} steps={steps} guidance={guidance:?} -> {out}",
+            req.model
+        );
+    }
+
     /// Real-weights smoke: Z-Image strict-pose ControlNet. Loads the base
     /// `Tongyi-MAI/Z-Image-Turbo` snapshot + the cached Fun-Controlnet-Union checkpoint,
     /// renders a DWPose skeleton, and generates one pose image. Needs both in the HF
