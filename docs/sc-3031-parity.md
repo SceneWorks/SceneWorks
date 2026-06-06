@@ -118,13 +118,36 @@ Video (`…/video_jobs.rs`): `wan_5b_real_weights` (needs `SCENEWORKS_MLX_WAN5B_
 Not runnable E2E here: **Wan-14B** (T2V/I2V, ~133 GB bf16 peak — exceeds a safe worker budget on
 128 GB; covered by `mlx-gen-wan` engine goldens + the 5B integration smoke).
 
-| Model | smoke result | wall (load+gen) | peak RSS | notes |
-|---|---|---|---|---|
-| _to be filled by the Phase B run_ | | | | |
+**Run (M5 Max, 2026-06-05; debug build, serial `--test-threads=1`).** All 14 runnable smokes PASS —
+every MLX-native model generates correct-shaped output end-to-end through the integrated Rust worker
+on real weights:
 
-Perf bar: per-step time ≥ the Python MLX path with NAX on. NAX is guarded in CI by the `nax-worker`
-self-hosted lane (`tests/nax_guard.rs`, 16-bit SDPA correctness) — confirms the shipped worker built
-NAX kernels at the 26.2 deployment target.
+| Model / flow | result | wall (load+gen) | peak RSS |
+|---|---|---|---|
+| z_image_turbo (txt2img) | ✅ PASS | 6.8 s | 3.5 GB |
+| flux_schnell | ✅ PASS | 6.1 s | 2.9 GB |
+| flux_dev (28-step guided) | ✅ PASS | 28.7 s | 3.4 GB |
+| qwen_image (true-CFG + neg) | ✅ PASS | 37.0 s | 16.2 GB |
+| flux2_klein_9b | ✅ PASS | 6.5 s | 5.0 GB |
+| flux2_klein_9b_kv | ✅ PASS | 6.0 s | 5.3 GB |
+| flux2_klein_9b_true_v2 (24-step) | ✅ PASS | 23.8 s | 5.0 GB |
+| sdxl | ✅ PASS | 6.5 s | 2.0 GB |
+| realvisxl | ✅ PASS | 6.4 s | 2.1 GB |
+| z_image strict-pose ControlNet | ✅ PASS | 9.9 s | 4.5 GB |
+| flux2 edit (single reference) | ✅ PASS | 8.4 s | 6.5 GB |
+| flux2 best-effort pose tier | ✅ PASS | 10.9 s | 7.2 GB |
+| wan_2_2 TI2V-5B (T2V) | ✅ PASS | 4.7 s | 23.9 GB |
+| ltx_2_3 (T2V **+ synchronized audio**) | ✅ PASS | 12.7 s | 43.9 GB |
+
+Caveat: these are *functional* smokes at small res (256–512², few steps), debug build — wall-time is
+"it works + roughly this fast" (load-dominated for the small models), not a production-res benchmark.
+The wall-times track the per-family figures measured during bring-up (sc-3022–3035). Peak RSS is the
+test-process max-resident (unified memory on Apple Silicon, so it includes GPU allocations).
+
+Perf bar: per-step time ≥ the Python MLX path with NAX on. The authoritative per-step perf signal is
+`mlx-gen`'s per-crate `perf.rs` (compiled-vs-eager A/B on real checkpoints) plus the **`nax-worker`**
+CI lane (`tests/nax_guard.rs`, 16-bit SDPA correctness) — which confirms the shipped worker built NAX
+kernels at the 26.2 deployment target (no NAX → ~2.5× regression, so a green guard is the floor).
 
 ## Phase C — spot output A/B vs the Python path ⏳
 
