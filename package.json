@@ -3,6 +3,7 @@
   "private": true,
   "version": "0.2.0",
   "description": "Local AI image and video generation studio runtime skeleton.",
+  "license": "SEE LICENSE IN LICENSE",
   "scripts": {
     "dev": "docker compose up --build",
     "stack:up": "docker compose up --build",

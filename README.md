@@ -257,3 +257,22 @@ First-run installs CUDA torch wheels from `cu128` by default (override with
 | High-end | NVIDIA RTX PRO 6000 Blackwell (96 GB) | ✅ Validated | torch 2.8 `cu128`; Qwen image (~36 s incl. load), native LTX-2.3 text-to-video (~80 s for a 2 s clip), and timeline export verified end-to-end |
 | Other CUDA | RTX 30/40-series, etc. | ⏳ Untested | Expected to work via the `cu128` wheels with a recent driver; not yet validated |
 | CPU-only | — | ⚠️ Limited | No GPU inference; image/video generation unavailable |
+
+## Licensing
+
+SceneWorks is a non-commercial, **source-available** project. Its own source
+code is licensed under the [PolyForm Noncommercial License 1.0.0](LICENSE): you
+may use, modify, and share it freely for any **noncommercial** purpose, but
+commercial use is not granted. (This is a source-available license, not an
+OSI-approved "open source" license, because it restricts commercial use.) For
+commercial licensing, contact the copyright holder.
+
+**Model weights are not covered by this license.** SceneWorks downloads
+third-party model weights at runtime, and each model keeps its own license —
+some non-commercial (e.g. FLUX.1 [dev], FLUX.2 [klein] 9B), some permissive
+(Apache-2.0 / OpenRAIL). You are responsible for complying with each model's
+license when you download and use it; the SceneWorks license here applies only
+to SceneWorks' own code, not to the weights it runs.
+
+Bundled third-party source under `apps/*/scene_worker/_vendor/` is covered by
+its own `LICENSE` files (Apache-2.0 / MIT), retained alongside that code.
