@@ -60,6 +60,10 @@ mlx-rs = { package = "pmetal-mlx-rs", git = "https://github.com/michaeltrefry/ml
 # stories (sc-3022..3035) add their provider here; this scaffold links Z-Image
 # (sc-3022, next) to prove the cross-crate registry path end to end.
 [target.'cfg(target_os = "macos")'.dependencies]
+# Rev 4ea5d86 (mlx-gen main): the LoRA/LoKr trainer surface (epic 3039, PRs #142–147)
+# layered on top of the sc-3224 Wan/LTX converters (PR #140, rev 01bf6259) the base
+# branch pinned — 4ea5d86 is a strict superset, so it carries BOTH the converters and
+# the trainers in a single rev (and MLX still builds once with the unchanged mlx-rs pin).
 mlx-gen = { git = "https://github.com/michaeltrefry/mlx-gen", rev = "4ea5d8653b9cdc84997bc97dfdb0e5a0fa62fda4" }
 mlx-gen-z-image = { git = "https://github.com/michaeltrefry/mlx-gen", rev = "4ea5d8653b9cdc84997bc97dfdb0e5a0fa62fda4" }
 # FLUX.1 schnell/dev provider (epic 3018, sc-3023). Same git rev as mlx-gen so MLX
