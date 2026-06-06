@@ -155,11 +155,8 @@ from scene_worker.training_adapters import (
 from scene_worker.video_adapters import (
     DiffusersVideoAdapter,
     LtxPipelinesVideoAdapter,
-    MlxVideoAdapter,
     VIDEO_MODEL_TARGETS,
     VendorPatchDriftError,
-    _PENDING_LTX_LORAS,
-    _PENDING_LTX_LORA_PLAN,
     _require_patch_target,
     character_reference_images,
     create_video_adapter,
@@ -1784,226 +1781,6 @@ def test_unsupported_adapter_guard_rejects_loras(tmp_path):
 
     with pytest.raises(RuntimeError, match="does not support LoRA application"):
         reject_loras_if_unsupported([{"id": "style", "installedPath": str(first)}], "procedural_preview")
-
-
-def _mlx_video_job(model, mode, loras):
-    return {"id": "job", "payload": {"projectId": "proj", "model": model, "mode": mode, "loras": loras}}
-
-
-def test_mlx_adapter_rejects_incompatible_lora_family(tmp_path):
-    lora_file = tmp_path / "wan_style.safetensors"
-    lora_file.write_bytes(b"lora")
-    request = video_request_from_job(
-        _mlx_video_job("ltx_2_3", "text_to_video", [{"id": "wan_style", "installedPath": str(lora_file), "family": "wan-video"}])
-    )
-    with pytest.raises(RuntimeError, match="not compatible with model family ltx-video"):
-        MlxVideoAdapter().ensure_models(request)
-
-
-def test_mlx_condition_image_resolves_source_asset_from_file_path(tmp_path):
-    # Regression: MLX image_to_video jobs failed with "Image-to-video mode
-    # requires a source image asset." because the adapter read a non-existent
-    # top-level `mediaPath` sidecar key instead of the real nested `file.path`,
-    # so the source image never resolved. (MLX supports only text/image-to-video;
-    # first_last_frame is rejected in ensure_models, so there's no _last frame.)
-    project_path = tmp_path / "project"
-    (project_path / "assets" / "images").mkdir(parents=True)
-    image_rel = "assets/images/source.png"
-    Image.new("RGB", (16, 16), "teal").save(project_path / image_rel)
-    (project_path / "assets" / "images" / "source.sceneworks.json").write_text(
-        json.dumps({"id": "asset-source", "file": {"path": image_rel}}),
-        encoding="utf-8",
-    )
-    adapter = MlxVideoAdapter()
-
-    i2v_request = video_request_from_job(
-        {
-            "id": "job-i2v",
-            "payload": {
-                "projectId": "project-1",
-                "model": "ltx_2_3",
-                "mode": "image_to_video",
-                "sourceAssetId": "asset-source",
-            },
-        }
-    )
-    first_image = adapter._first_condition_image(project_path, i2v_request)
-    assert first_image is not None
-    assert first_image.mode == "RGB"
-    # Validation now passes instead of raising the source-image error.
-    adapter._validate_inputs(project_path, i2v_request, first_image, None)
-
-
-def test_mlx_wan_user_loras_resolved_to_path_strength_tuples(tmp_path):
-    lora_file = tmp_path / "wan_motion.safetensors"
-    lora_file.write_bytes(b"lora")
-    request = video_request_from_job(
-        _mlx_video_job(
-            "wan_2_2",
-            "text_to_video",
-            [{"id": "wan_motion", "installedPath": str(lora_file), "weight": 0.7, "family": "wan-video"}],
-        )
-    )
-    # A single-file LoRA has no low-noise sibling, so it applies to every expert
-    # via the shared `loras` list; high/low expert lists stay empty.
-    high, low, shared = MlxVideoAdapter()._wan_user_loras(request)
-    assert (high, low, shared) == ([], [], [(str(lora_file), 0.7)])
-
-
-def test_mlx_wan_moe_user_lora_routes_low_noise_to_low_expert(tmp_path):
-    # sc-1991: a Wan A14B MoE LoRA (high/low pair) must route its high half to the
-    # high-noise expert and its low half to the low-noise expert on MLX, mirroring
-    # the torch load_into_transformer_2 split. Previously the high half was applied
-    # to both experts and the low half dropped.
-    moe = tmp_path / "wan_moe"
-    moe.mkdir()
-    (moe / "char.high_noise.safetensors").write_bytes(b"lora")
-    (moe / "char.low_noise.safetensors").write_bytes(b"lora")
-    request = video_request_from_job(
-        _mlx_video_job(
-            "wan_2_2_t2v_14b",
-            "text_to_video",
-            [
-                {
-                    "id": "char",
-                    "installedPath": str(moe),
-                    "weight": 0.8,
-                    "family": "wan-video",
-                    "baseModel": "wan_2_2_t2v_14b",
-                }
-            ],
-        )
-    )
-    high, low, shared = MlxVideoAdapter()._wan_user_loras(request)
-    assert len(high) == 1 and high[0][0].endswith("char.high_noise.safetensors") and high[0][1] == 0.8
-    assert len(low) == 1 and low[0][0].endswith("char.low_noise.safetensors") and low[0][1] == 0.8
-    assert shared == []
-
-
-def test_mlx_local_dir_prefers_env_override_then_data_dir(tmp_path, monkeypatch):
-    adapter = MlxVideoAdapter()
-    adapter._settings = SimpleNamespace(data_dir=tmp_path)
-    monkeypatch.delenv("SCENEWORKS_MLX_WAN14B_T2V_DIR", raising=False)
-    # Nothing on disk -> no local dir.
-    assert adapter._local_mlx_dir("wan_2_2_t2v_14b", "SCENEWORKS_MLX_WAN14B_T2V_DIR") is None
-    # A converted dir under <data>/models/mlx/<model> counts once it has config.json.
-    data_dir = tmp_path / "models" / "mlx" / "wan_2_2_t2v_14b"
-    data_dir.mkdir(parents=True)
-    (data_dir / "config.json").write_text("{}")
-    assert adapter._local_mlx_dir("wan_2_2_t2v_14b", "SCENEWORKS_MLX_WAN14B_T2V_DIR") == str(data_dir)
-    # The env override takes precedence over the data dir.
-    override = tmp_path / "override"
-    override.mkdir()
-    (override / "config.json").write_text("{}")
-    monkeypatch.setenv("SCENEWORKS_MLX_WAN14B_T2V_DIR", str(override))
-    assert adapter._local_mlx_dir("wan_2_2_t2v_14b", "SCENEWORKS_MLX_WAN14B_T2V_DIR") == str(override)
-
-
-def test_mlx_ltx_stages_loras_in_contextvar_only_when_present(tmp_path, monkeypatch):
-    lora_file = tmp_path / "ltx_style.safetensors"
-    lora_file.write_bytes(b"lora")
-    adapter = MlxVideoAdapter()
-    monkeypatch.setattr("scene_worker.video_adapters._install_ltx_lora_patch", lambda: None)
-    monkeypatch.setattr(adapter, "_load_lora_map", lambda configs: {"transformer_blocks.0.attn": [("w", configs[0][1])]})
-    progress_calls: list[tuple] = []
-
-    def progress(*args, **kwargs):
-        progress_calls.append(args)
-
-    no_lora_request = video_request_from_job(_mlx_video_job("ltx_2_3", "text_to_video", []))
-    assert adapter._apply_ltx_loras(no_lora_request, progress) is None
-    assert _PENDING_LTX_LORAS.get() is None
-    assert progress_calls == []
-
-    lora_request = video_request_from_job(
-        _mlx_video_job(
-            "ltx_2_3",
-            "text_to_video",
-            [{"id": "ltx_style", "installedPath": str(lora_file), "weight": 0.6, "family": "ltx-video"}],
-        )
-    )
-    reset = adapter._apply_ltx_loras(lora_request, progress)
-    try:
-        assert reset is not None
-        ctxvar, token = reset
-        # A plain user LoRA is constant strength → merge map (not the per-pass plan).
-        assert ctxvar is _PENDING_LTX_LORAS
-        assert _PENDING_LTX_LORAS.get() == {"transformer_blocks.0.attn": [("w", 0.6)]}
-        assert _PENDING_LTX_LORA_PLAN.get() is None
-        assert progress_calls  # merge progress emitted
-    finally:
-        ctxvar.reset(token)
-    assert _PENDING_LTX_LORAS.get() is None
-
-
-def _eros_distill_job(advanced=None, loras=None):
-    entry = {
-        "mlx": {"autoDistillLora": {"stage1Strength": 1.0, "stage2Strength": 0.4}},
-        "resources": {
-            "distilledLora": {
-                "repo": "TenStrip/LTX2.3_Distilled_Lora_1.1_Experiments",
-                "file": "ltx-2.3-22b-distilled-lora-1.1_fro90_ceil72_condsafe.safetensors",
-            }
-        },
-    }
-    return {
-        "id": "job",
-        "payload": {
-            "projectId": "proj",
-            "model": "ltx_2_3_eros",
-            "mode": "text_to_video",
-            "loras": loras or [],
-            "advanced": advanced or {},
-            "modelManifestEntry": entry,
-        },
-    }
-
-
-def test_mlx_ltx_eros_auto_injects_distill_lora_per_pass(tmp_path, monkeypatch):
-    distill = tmp_path / "condsafe.safetensors"
-    distill.write_bytes(b"lora")
-    monkeypatch.setattr("scene_worker.video_adapters._install_ltx_lora_patch", lambda: None)
-    monkeypatch.setattr(
-        "scene_worker.video_adapters.huggingface_cached_resource_file",
-        lambda settings, repo, file_name: distill,
-    )
-    monkeypatch.setattr(
-        MlxVideoAdapter, "_load_lora_map", lambda self, configs: {path: [("w", strength)] for path, strength in configs}
-    )
-    adapter = MlxVideoAdapter()
-
-    # 10Eros auto-injects its manifest distill LoRA at per-pass strengths (1.0 base / 0.4 upscale).
-    specs = adapter._collect_ltx_lora_specs(video_request_from_job(_eros_distill_job()))
-    assert specs == [(str(distill), 1.0, 0.4)]
-
-    # Differing stage strengths route to the per-pass plan (LoRALinear wrappers + boundary drop).
-    reset = adapter._apply_ltx_loras(video_request_from_job(_eros_distill_job()), lambda *a, **k: None)
-    try:
-        ctxvar, token = reset
-        assert ctxvar is _PENDING_LTX_LORA_PLAN
-        plan = _PENDING_LTX_LORA_PLAN.get()
-        assert plan["stage1_map"] == {str(distill): [("w", 1.0)]}
-        assert plan["stage2_map"] == {str(distill): [("w", 0.4)]}
-        assert plan["wrappers"] == {}
-        assert _PENDING_LTX_LORAS.get() is None
-    finally:
-        ctxvar.reset(token)
-
-    # Opt-out and per-stage strength overrides.
-    assert adapter._resolve_distill_lora(video_request_from_job(_eros_distill_job(advanced={"useDistillLora": False}))) is None
-    override = _eros_distill_job(advanced={"distillStage1Strength": 0.8, "distillStage2Strength": 0.3})
-    assert adapter._collect_ltx_lora_specs(video_request_from_job(override)) == [(str(distill), 0.8, 0.3)]
-
-
-def test_mlx_ltx_eros_distill_missing_raises_actionable(tmp_path, monkeypatch):
-    monkeypatch.setattr(
-        "scene_worker.video_adapters.huggingface_cached_resource_file", lambda settings, repo, file_name: None
-    )
-    adapter = MlxVideoAdapter()
-    adapter._settings = SimpleNamespace(data_dir=tmp_path)
-    request = video_request_from_job(_eros_distill_job())
-    with pytest.raises(RuntimeError, match="requires its distill LoRA"):
-        adapter._resolve_distill_lora(request)
 
 
 def test_lora_compatibility_guard_rejects_mismatched_family_before_load(tmp_path):
@@ -8444,10 +8221,9 @@ def test_explicit_seed_uses_reproducible_ladder():
 
 def test_video_adapter_override_aliases_and_unknown_values(monkeypatch):
     monkeypatch.delenv("SCENEWORKS_VIDEO_ADAPTER", raising=False)
-    # Pin the non-MPS (CUDA/CI) routing so MLX eligibility on Apple Silicon doesn't
-    # shadow the alias assertions — ltx_2_3/wan route to MlxVideoAdapter on MPS
-    # (matches test_create_video_adapter_routes_svd_to_diffusers).
-    monkeypatch.setattr("scene_worker.video_adapters._mps_available", lambda: False)
+    # Epic 3018 cutover: the Python worker no longer routes video to MLX (Wan/LTX
+    # MLX-eligible jobs are claimed by the Rust GPU worker), so auto-dispatch always
+    # lands on the torch adapters by model target.
     assert create_video_adapter({"payload": {"model": "ltx_2_3"}}).__class__.__name__ == "LtxPipelinesVideoAdapter"
     assert create_video_adapter({"payload": {"model": "wan_2_2"}}).__class__.__name__ == "DiffusersVideoAdapter"
     assert create_video_adapter({"payload": {"model": "wan_2_2_t2v_14b"}}).__class__.__name__ == "DiffusersVideoAdapter"
@@ -8474,10 +8250,8 @@ def test_video_adapter_override_aliases_and_unknown_values(monkeypatch):
 
 def test_create_video_adapter_routes_svd_to_diffusers(monkeypatch):
     # SVD is a diffusers pipeline (not the native LTX stack), so it routes to the
-    # generic DiffusersVideoAdapter. Force the non-MPS path so MLX eligibility
-    # (which SVD is not part of) doesn't shadow the assertion on Apple Silicon.
+    # generic DiffusersVideoAdapter.
     monkeypatch.delenv("SCENEWORKS_VIDEO_ADAPTER", raising=False)
-    monkeypatch.setattr("scene_worker.video_adapters._mps_available", lambda: False)
     adapter = create_video_adapter({"payload": {"model": "svd", "mode": "image_to_video"}})
     assert adapter.__class__.__name__ == "DiffusersVideoAdapter"
 
@@ -8689,52 +8463,6 @@ def test_diffusers_wan_gguf_injects_high_and_low_experts(monkeypatch):
         adapter._inject_gguf_experts(SimpleNamespace(), {}, "repo", variant, "DT")
 
 
-def test_mlx_routing_is_mode_aware_on_mps(monkeypatch):
-    # On an MPS host the MLX adapter only handles text_to_video / image_to_video;
-    # every other mode must stay on the PyTorch path or it fails in ensure_models.
-    monkeypatch.delenv("SCENEWORKS_VIDEO_ADAPTER", raising=False)
-    monkeypatch.setattr("scene_worker.video_adapters._mps_available", lambda: True)
-
-    def adapter(model, mode):
-        return create_video_adapter({"payload": {"model": model, "mode": mode}}).__class__.__name__
-
-    # Supported MLX modes route to MLX.
-    assert adapter("ltx_2_3", "text_to_video") == "MlxVideoAdapter"
-    assert adapter("ltx_2_3", "image_to_video") == "MlxVideoAdapter"
-    assert adapter("wan_2_2", "image_to_video") == "MlxVideoAdapter"
-
-    # Unsupported modes fall through to the PyTorch adapters, not MLX.
-    assert adapter("ltx_2_3", "first_last_frame") == "LtxPipelinesVideoAdapter"
-    assert adapter("ltx_2_3", "extend_clip") == "LtxPipelinesVideoAdapter"
-    assert adapter("ltx_2_3", "video_bridge") == "LtxPipelinesVideoAdapter"
-    assert adapter("wan_2_2", "video_bridge") == "DiffusersVideoAdapter"
-    assert adapter("wan_2_2", "replace_person") == "DiffusersVideoAdapter"
-
-
-def test_wan_lokr_lora_falls_back_off_mlx_to_torch(monkeypatch):
-    # sc-2211 (video companion to sc-2209): the mlx-video LoRA loader merges plain
-    # B@A deltas and can't apply a LoKr (Kronecker) adapter, so a Wan job carrying one
-    # falls back to the diffusers torch path (which loads LoKr via PEFT injection). A
-    # plain LoRA stays on MLX. networkType is read with no file I/O (top-level or
-    # nested in compatibility), mirroring the image dispatch gate.
-    monkeypatch.delenv("SCENEWORKS_VIDEO_ADAPTER", raising=False)
-    monkeypatch.setattr("scene_worker.video_adapters._mps_available", lambda: True)
-
-    def adapter(model, loras):
-        job = {"payload": {"model": model, "mode": "image_to_video", "loras": loras}}
-        return create_video_adapter(job).__class__.__name__
-
-    # Plain LoRA (or none) stays on MLX; a LoKr LoRA diverts to the torch path.
-    assert adapter("wan_2_2", []) == "MlxVideoAdapter"
-    assert adapter("wan_2_2", [{"id": "a", "networkType": "lora"}]) == "MlxVideoAdapter"
-    assert adapter("wan_2_2", [{"id": "a", "networkType": "lokr"}]) == "DiffusersVideoAdapter"
-    assert adapter("wan_2_2", [{"id": "a", "compatibility": {"networkType": "lokr"}}]) == "DiffusersVideoAdapter"
-
-    # Scoped to the diffusers torch path: an LTX LoKr stays on MLX (the LTX torch path
-    # has no LoKr loader; native-MLX LoKr for LTX is sc-2214).
-    assert adapter("ltx_2_3", [{"id": "a", "networkType": "lokr"}]) == "MlxVideoAdapter"
-
-
 def test_video_pipeline_evicts_previous_pipeline_and_loaded_models():
     adapter = DiffusersVideoAdapter()
     adapter._pipeline = object()
@@ -8844,10 +8572,10 @@ def test_require_patch_target_allows_non_callable_when_not_required():
 
 
 def test_video_adapter_tracks_and_discards_temp_outputs(tmp_path):
-    # The temp registry now lives on the base VideoGenerationAdapter, so the MLX and
-    # Diffusers adapters (which extend the base directly) get force-cancel reaping too
-    # via the already-wired on_force_terminate hook (sc-1719).
-    adapter = MlxVideoAdapter()
+    # The temp registry lives on the base VideoGenerationAdapter, so the Diffusers
+    # adapter (which extends the base directly) gets force-cancel reaping too via the
+    # already-wired on_force_terminate hook (sc-1719).
+    adapter = DiffusersVideoAdapter()
     first = tmp_path / "a.tmp.mp4"
     second = tmp_path / "b.control.mp4"
     first.write_bytes(b"x")
@@ -8862,32 +8590,6 @@ def test_video_adapter_tracks_and_discards_temp_outputs(tmp_path):
     # Idempotent: the entry is popped, so a later cleanup after the force-cancel hook
     # is a harmless no-op.
     adapter.discard_temp_outputs("job-1")
-
-
-def test_mlx_cancel_reaps_temp_but_keeps_pipeline(tmp_path):
-    adapter = MlxVideoAdapter()
-    adapter._pipeline = object()
-    temp = tmp_path / "clip.tmp.mp4"
-    temp.write_bytes(b"x")
-    adapter.track_temp_output("job-2", temp)
-
-    adapter.cancel("job-2")
-
-    assert not temp.exists()  # temp reaped on cooperative cancel
-    assert adapter._pipeline is not None  # ...but the resident pipeline stays loaded
-
-
-def test_mlx_cleanup_reaps_temp_and_evicts_pipeline(tmp_path):
-    adapter = MlxVideoAdapter()
-    adapter._pipeline = object()
-    temp = tmp_path / "clip.tmp.mp4"
-    temp.write_bytes(b"x")
-    adapter.track_temp_output("job-3", temp)
-
-    adapter.cleanup("job-3")
-
-    assert not temp.exists()
-    assert adapter._pipeline is None
 
 
 def test_diffusers_cleanup_reaps_temp_outputs(tmp_path):
