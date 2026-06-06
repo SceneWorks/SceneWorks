@@ -436,11 +436,11 @@ MODEL_TARGETS = {
         "supportsTxt2Img": True,
         "steps": 24,
         "guidanceScale": 1.0,
-        # The wikeeyang source repo; the install-time convert job pulls the bf16
-        # single-file from here and assembles a local diffusers dir (sc-2235,
-        # mlx_flux_convert.py). The Rust `mlx` GPU worker loads those assembled
-        # weights via the modelPath seam (epic 3018 sc-3025; a native Rust
-        # single-file converter that retires mlx_flux_convert.py is sc-3136).
+        # The wikeeyang source repo; the install-time model_convert job pulls the
+        # bf16 single-file from here and assembles a local diffusers dir in-process
+        # via native Rust/MLX (mlx_gen_flux2::convert_and_assemble, sc-3136). The Rust
+        # `mlx` GPU worker then loads those assembled weights via the modelPath seam
+        # (epic 3018 sc-3025).
         "repo": "wikeeyang/Flux2-Klein-9B-True-V2",
         "adapter": "mlx_flux2",
         # Borrowed VAE/text-encoder/tokenizer come from this base klein install.

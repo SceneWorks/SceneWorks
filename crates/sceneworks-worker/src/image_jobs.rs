@@ -143,8 +143,8 @@ const MLX_MODELS: &[MlxModel] = &[
         // wikeeyang community fine-tune (sc-2220/2235): UNDISTILLED, so 24 steps. Its raw
         // repo is single-file (GGUF/safetensors) with no diffusers tree, so it loads from a
         // locally-assembled converted dir via the `modelPath` seam (manifest `modelPath`),
-        // NOT the source repo below. The convert step is still Python (mlx_flux_convert.py)
-        // — a Rust converter is a cutover dependency tracked on the engine epic.
+        // NOT the source repo below. The convert step is now native Rust/MLX
+        // (mlx_gen_flux2::convert_and_assemble, sc-3136; run by the model_convert job).
         sceneworks_id: "flux2_klein_9b_true_v2",
         engine_id: "flux2_klein_9b",
         default_repo: "wikeeyang/Flux2-Klein-9B-True-V2",
