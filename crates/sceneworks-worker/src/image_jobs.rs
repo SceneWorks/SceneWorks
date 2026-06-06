@@ -4017,7 +4017,9 @@ mod tests {
     /// `$SC3031_PAYLOAD`'s `advanced.poses` via the production `parse_poses` + `draw_wholebody`
     /// and write it to `$SC3031_OUT`, to compare the Rust skeleton renderer against the Python
     /// one for the same keypoints (separates skeleton-render parity from the engine/schedule).
-    /// CPU-only, instant (no weights / no Metal).
+    /// CPU-only, instant (no weights / no Metal). macOS-gated because it uses `parse_poses`
+    /// (part of the macOS strict-pose path); the Linux workspace-check lane configures that out.
+    #[cfg(target_os = "macos")]
     #[ignore = "sc-3031 skeleton-render dump: drive via SC3031_PAYLOAD + SC3031_OUT"]
     #[test]
     fn sc3031_dump_skeleton() {
