@@ -197,16 +197,28 @@ path's known z_image schedule bug — reassuring for the cutover. sc-3218 tracks
 already retired in **sc-3060** (Python SDXL is torch-only now). SDXL parity rests on Phase A + Phase B
 + the `mlx-gen-sdxl` engine goldens.
 
+### Z-Image strict-pose A/B — caught a real bug (sc-3219, fixed) ✅
+
+Head-to-head'd the control path too (Rust `sc3031_ab_dump_pose` vs Python `MlxZImageAdapter`
+strict-pose tier, same `advanced.poses`). This surfaced a **shippable defect in the Rust skeleton
+renderer** (`draw_bodypose`, from sc-3028): it drew the joint dots but **almost none of the limb
+bones** — `ellipse2poly`'s 0°/359° vertices round to the same pixel for a thin limb, so `fill_poly`'s
+`first == last` guard no-op'd the *entire* limb. Rendering the same keypoints through both:
+skeleton **px>8 3.6% → 0.5%, SSIM 0.19 → 0.95** after the fix. Filed **[sc-3219](https://app.shortcut.com/trefry/story/3219)**;
+fixed in `fill_poly` (de-dup + drop coincident tail) with a `draw_bodypose_fills_thin_limbs`
+regression test (the old `draw_wholebody_paints_a_skeleton_on_black` only checked dots existed).
+
+With the corrected skeleton, the Rust pose *image* composition realigned to the Python reference (the
+broken-skeleton render was the outlier). Residual pose-image pixel divergence is dominated by the
+all-grass high-frequency texture + the z_image engine diff ([sc-3218](https://app.shortcut.com/trefry/story/3218)),
+SSIM 0.78 → 0.84 — same root cause as z_image txt2img, not the skeleton.
+
 ### Remaining head-to-head surface (not yet A/B'd)
 
-Distinct new-adapter code paths still validated only by Phase B (functional E2E) + engine goldens, not
-yet head-to-head pixel-A/B'd:
-- **Z-Image strict-pose ControlNet** (`generate_zimage_control_stream` / `zimage_control_generate_one`)
-  — tractable (pose-only needs just `advanced.poses`, no reference asset).
 - **FLUX.2 edit / reference** (`generate_flux2_edit_stream`) — needs a matched reference asset on both
-  sides.
+  sides; base flux2 txt2img already A/B'd near-identical.
 - **Video** (Wan, LTX A/V) — the Python path is a *different engine* (`mlx-video-with-audio`), so this
-  is a quality/“not-worse” comparison, not pixel parity.
+  is a quality/“not-worse” comparison, not pixel parity (functional E2E covered in Phase B).
 
 ## Open items / follow-ups
 

@@ -3879,6 +3879,111 @@ mod tests {
         );
     }
 
+    /// sc-3031 A/B dump (pose): generate ONE strict-pose image through the **real new-adapter
+    /// path** — the production `resolve_control_weights` / `resolve_control_scale` / `parse_poses`
+    /// + `draw_wholebody` skeleton render + `zimage_control_load` / `zimage_control_generate_one`
+    /// core that `generate_zimage_control_stream` drives — and write it to `$SC3031_OUT` for
+    /// head-to-head comparison against the Python `MlxZImageAdapter` strict-pose tier (drive the
+    /// Python side with the SAME `advanced.poses` payload). Env: `SC3031_PAYLOAD` (must carry
+    /// `advanced.poses`), `SC3031_OUT`; set `SCENEWORKS_DATA_DIR` + `HF_HOME`.
+    #[cfg(target_os = "macos")]
+    #[ignore = "sc-3031 A/B dump harness (pose): drive via SC3031_PAYLOAD + SC3031_OUT"]
+    #[test]
+    fn sc3031_ab_dump_pose() {
+        let payload: Value =
+            serde_json::from_str(&std::env::var("SC3031_PAYLOAD").expect("SC3031_PAYLOAD"))
+                .expect("SC3031_PAYLOAD is JSON");
+        let out = std::env::var("SC3031_OUT").expect("SC3031_OUT");
+        let req = request(payload);
+        let settings = Settings::from_env();
+
+        let weights = resolve_weights_dir(&req, &settings).expect("z-image weights in HF cache");
+        let control_weights =
+            resolve_control_weights(&req, &settings).expect("Fun-Controlnet-Union weights");
+        let (quant, _bits) = resolve_quant(&req);
+        let zimage = mlx_model("z_image_turbo").expect("z-image model row");
+        let steps = resolve_steps(&req, zimage);
+        let control_scale = resolve_control_scale(&req);
+        let adapters = resolve_adapters(&req).expect("adapters");
+        let seed = resolve_seed(&req, 0);
+
+        let pose = parse_poses(&req)
+            .into_iter()
+            .next()
+            .expect("advanced.poses");
+        let (w, h) = (req.width, req.height);
+        let skeleton = crate::openpose_skeleton::draw_wholebody(
+            w,
+            h,
+            &pose.keypoints,
+            pose.hands.as_deref(),
+            pose.face.as_deref(),
+            crate::openpose_skeleton::body_stickwidth(w, h),
+        );
+        let control = Image {
+            width: w,
+            height: h,
+            pixels: skeleton.into_raw(),
+        };
+
+        let generator =
+            zimage_control_load(weights, control_weights, quant, adapters).expect("load");
+        let cancel = CancelFlag::new();
+        let (ow, oh, pixels) = zimage_control_generate_one(
+            generator.as_ref(),
+            &req.prompt,
+            w,
+            h,
+            seed,
+            steps,
+            control,
+            control_scale,
+            &cancel,
+            &mut |_| {},
+        )
+        .expect("generate");
+        image::RgbImage::from_raw(ow, oh, pixels)
+            .expect("rgb buffer")
+            .save(&out)
+            .expect("save png");
+        eprintln!(
+            "sc3031 rust pose dump: {ow}x{oh} seed={seed} steps={steps} control_scale={control_scale} -> {out}"
+        );
+    }
+
+    /// sc-3031 A/B (pose, no model): render JUST the control skeleton from
+    /// `$SC3031_PAYLOAD`'s `advanced.poses` via the production `parse_poses` + `draw_wholebody`
+    /// and write it to `$SC3031_OUT`, to compare the Rust skeleton renderer against the Python
+    /// one for the same keypoints (separates skeleton-render parity from the engine/schedule).
+    /// CPU-only, instant (no weights / no Metal).
+    #[ignore = "sc-3031 skeleton-render dump: drive via SC3031_PAYLOAD + SC3031_OUT"]
+    #[test]
+    fn sc3031_dump_skeleton() {
+        let payload: Value =
+            serde_json::from_str(&std::env::var("SC3031_PAYLOAD").expect("SC3031_PAYLOAD"))
+                .expect("SC3031_PAYLOAD is JSON");
+        let out = std::env::var("SC3031_OUT").expect("SC3031_OUT");
+        let req = request(payload);
+        let pose = parse_poses(&req)
+            .into_iter()
+            .next()
+            .expect("advanced.poses");
+        let (w, h) = (req.width, req.height);
+        let skeleton = crate::openpose_skeleton::draw_wholebody(
+            w,
+            h,
+            &pose.keypoints,
+            pose.hands.as_deref(),
+            pose.face.as_deref(),
+            crate::openpose_skeleton::body_stickwidth(w, h),
+        );
+        image::RgbImage::from_raw(w, h, skeleton.into_raw())
+            .expect("rgb buffer")
+            .save(&out)
+            .expect("save png");
+        eprintln!("sc3031 rust skeleton dump: {w}x{h} -> {out}");
+    }
+
     /// Real-weights smoke: Z-Image strict-pose ControlNet. Loads the base
     /// `Tongyi-MAI/Z-Image-Turbo` snapshot + the cached Fun-Controlnet-Union checkpoint,
     /// renders a DWPose skeleton, and generates one pose image. Needs both in the HF

@@ -207,13 +207,28 @@ fn ellipse2poly(cx: f32, cy: f32, ax: f32, ay: f32, angle_deg: f32) -> Vec<Point
         .collect()
 }
 
-/// Fill a convex polygon (`cv2.fillConvexPoly`). No-ops on a degenerate polygon
-/// (imageproc panics if the first and last points coincide / it is empty).
+/// Fill a convex polygon (`cv2.fillConvexPoly`). `imageproc::draw_polygon_mut` panics
+/// when the first and last vertices coincide, so we de-duplicate consecutive-equal
+/// vertices and drop a coincident tail before filling. This matters for the thin limb
+/// ellipses: `ellipse2poly` emits 360 vertices at 1° steps, and for a small minor axis
+/// (the stickwidth) the 0° and 359° vertices round to the SAME pixel — the previous
+/// `first == last` guard then silently no-op'd the *entire* limb, erasing nearly every
+/// skeleton bone (only an occasional limb whose sub-pixel rounding broke the tie
+/// survived). De-duping keeps the limb instead of dropping it (sc-3031 parity finding).
 fn fill_poly(canvas: &mut RgbImage, poly: &[Point<i32>], color: Rgb<u8>) {
-    if poly.len() < 3 || poly.first() == poly.last() {
+    let mut pts: Vec<Point<i32>> = Vec::with_capacity(poly.len());
+    for &p in poly {
+        if pts.last() != Some(&p) {
+            pts.push(p);
+        }
+    }
+    while pts.len() > 1 && pts.first() == pts.last() {
+        pts.pop();
+    }
+    if pts.len() < 3 {
         return;
     }
-    draw_polygon_mut(canvas, poly, color);
+    draw_polygon_mut(canvas, &pts, color);
 }
 
 /// A thick line as a filled rotated rectangle (`cv2.line` with `thickness`).
@@ -450,6 +465,27 @@ mod tests {
         assert!(
             img.pixels().any(|p| p.0 == [255, 0, 0]),
             "expected red nose joint"
+        );
+    }
+
+    #[test]
+    fn draw_bodypose_fills_thin_limbs() {
+        // Regression (sc-3031): a thin limb bone must render, not just the joint dots.
+        // `ellipse2poly` emits 360 vertices at 1° steps; for a small minor axis the 0°/359°
+        // vertices round to the same pixel, and the old `first == last` guard then no-op'd
+        // the whole limb — erasing nearly every skeleton bone. Place a LONG horizontal limb
+        // (neck→R-shoulder, LIMB_SEQ[0] = (1,2)) so its midpoint is far from either joint
+        // dot (radius = stickwidth): a colored pixel there can only come from the bone.
+        let mut kp = vec![None; 18];
+        kp[1] = Some((0.2, 0.5)); // neck
+        kp[2] = Some((0.8, 0.5)); // right shoulder
+        let img = draw_bodypose(128, 128, &kp, 6);
+        // Limb spans x≈26..102 at y=64; midpoint (64,64) is ~38px from each joint (dot
+        // radius 6), so it is bone-only.
+        assert_ne!(
+            img.get_pixel(64, 64).0,
+            [0, 0, 0],
+            "thin horizontal limb bone must be filled, not dropped as degenerate"
         );
     }
 
