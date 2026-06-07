@@ -1959,6 +1959,49 @@ describe("SceneWorks app shell", () => {
     expect(container.querySelector(".preview-modal img").getAttribute("src")).toContain("original.png");
   });
 
+  it("offers recipe reuse from FullscreenPreview image assets", async () => {
+    const noop = () => {};
+    const onUseRecipe = vi.fn();
+    const asset = {
+      id: "asset-recipe",
+      displayName: "Plate",
+      type: "image",
+      status: {},
+      file: { path: "assets/images/plate.png" },
+      generationSet: {
+        recipe: {
+          mode: "text_to_image",
+          model: "z_image_turbo",
+          prompt: "mist over a glass atrium",
+        },
+      },
+      recipe: { prompt: "asset fallback" },
+    };
+
+    root = createRoot(container);
+    await act(async () => {
+      root.render(
+        <FullscreenPreview
+          asset={asset}
+          deleteAsset={noop}
+          nextAsset={null}
+          onClose={noop}
+          onPreviewAsset={noop}
+          onUseRecipe={onUseRecipe}
+          previousAsset={null}
+          purgeAsset={noop}
+          updateAssetStatus={noop}
+        />,
+      );
+    });
+
+    await act(async () => {
+      [...container.querySelectorAll("button")].find((button) => button.textContent === "Use this recipe").click();
+    });
+
+    expect(onUseRecipe).toHaveBeenCalledWith(asset);
+  });
+
   it("reports the scroll direction when navigating the FullscreenPreview", async () => {
     const noop = () => {};
     const onPreviewAsset = vi.fn();
@@ -3608,6 +3651,129 @@ describe("SceneWorks app shell", () => {
 
     expect(container.textContent).toContain("Generate Image");
     expect(container.textContent).toContain("Running");
+  });
+
+  it("replays a library asset recipe through fullscreen preview into Image Studio", async () => {
+    const createdJobs = [];
+    const imagePayloads = [];
+    const generatedAsset = {
+      id: "asset-replay",
+      projectId: "project-1",
+      generationSetId: "genset-replay",
+      type: "image",
+      displayName: "Atrium still",
+      file: { path: "assets/images/atrium.png", mimeType: "image/png" },
+      status: { favorite: false, rating: 0, rejected: false, trashed: false },
+      generationSet: {
+        recipe: {
+          mode: "text_to_image",
+          model: "z_image_turbo",
+          prompt: "mist over a glass atrium",
+          negativePrompt: "flat lighting",
+          seed: 1234,
+          loras: [{ id: "ready_style", weight: 0.65 }],
+          normalizedSettings: { width: 1536, height: 1024, count: 3 },
+          rawAdapterSettings: { steps: 14, guidanceScale: 2.5 },
+        },
+      },
+      recipe: { prompt: "asset fallback prompt" },
+    };
+    global.fetch.mockImplementation((url, options = {}) => {
+      const path = new URL(url).pathname;
+      if (path.endsWith("/health")) {
+        return Promise.resolve(response({ status: "ok", authRequired: false }));
+      }
+      if (path.endsWith("/access")) {
+        return Promise.resolve(response({ authRequired: false }));
+      }
+      if (path.endsWith("/projects")) {
+        return Promise.resolve(response([{ id: "project-1", name: "Noir" }]));
+      }
+      if (path.endsWith("/assets")) {
+        return Promise.resolve(response([generatedAsset]));
+      }
+      if (path.endsWith("/models")) {
+        return Promise.resolve(
+          response([
+            {
+              id: "z_image_turbo",
+              name: "Z-Image",
+              type: "image",
+              family: "z-image",
+              limits: { resolutions: ["1024x1024", "1536x1024"] },
+            },
+          ]),
+        );
+      }
+      if (path.endsWith("/loras")) {
+        return Promise.resolve(response([{ id: "ready_style", name: "Ready Style", family: "z-image", scope: "global" }]));
+      }
+      if (path.endsWith("/image/jobs") && options.method === "POST") {
+        const payload = JSON.parse(options.body);
+        imagePayloads.push(payload);
+        const job = {
+          id: "image-job-replay",
+          type: "image_generate",
+          status: "queued",
+          stage: "queued",
+          progress: 0,
+          elapsedSeconds: 0,
+          projectId: "project-1",
+          projectName: "Noir",
+          requestedGpu: payload.requestedGpu,
+          payload,
+        };
+        createdJobs.unshift(job);
+        return Promise.resolve(response(job));
+      }
+      if (path.endsWith("/jobs")) {
+        return Promise.resolve(response(createdJobs));
+      }
+      return Promise.resolve(response([]));
+    });
+
+    root = createRoot(container);
+    await act(async () => {
+      root.render(<App />);
+    });
+    await settle();
+
+    await act(async () => {
+      [...container.querySelectorAll("button")].find((button) => button.textContent === "Assets").click();
+    });
+    await settle();
+    await act(async () => {
+      container.querySelector(".asset-tile").dispatchEvent(new MouseEvent("dblclick", { bubbles: true }));
+    });
+    await settle();
+    await act(async () => {
+      [...container.querySelectorAll("button")].find((button) => button.textContent === "Use this recipe").click();
+    });
+    await settle();
+    await act(async () => {
+      container.querySelector(".image-studio form").requestSubmit();
+    });
+    await settle();
+
+    expect(imagePayloads[0]).toMatchObject({
+      projectId: "project-1",
+      projectName: "Noir",
+      mode: "text_to_image",
+      model: "z_image_turbo",
+      prompt: "mist over a glass atrium",
+      negativePrompt: "flat lighting",
+      seed: 1234,
+      count: 3,
+      width: 1536,
+      height: 1024,
+      recipePresetId: null,
+      loras: [expect.objectContaining({ id: "ready_style", weight: 0.65 })],
+      advanced: expect.objectContaining({
+        resolution: "1536x1024",
+        steps: 14,
+        guidanceScale: 2.5,
+      }),
+    });
   });
 
   it("shows completed image batch items before the whole job finishes", async () => {
@@ -6143,6 +6309,94 @@ describe("SceneWorks app shell", () => {
         recipePresetId: "cinematic",
         loras: [],
         advanced: { resolution: "1280x720" },
+      }),
+    );
+  });
+
+  it("prefills Image Studio from a saved generation recipe launch", async () => {
+    const createImageJob = vi.fn();
+    root = createRoot(container);
+    await act(async () => {
+      root.render(
+        withImageStudioContext({
+          activeProject: { id: "project-1", name: "Noir" },
+          assets: [],
+          characters: [],
+          createImageJob,
+          deleteAsset: () => {},
+          gpuOptions: ["auto"],
+          imageModels: [
+            {
+              id: "z_image_turbo",
+              name: "Z-Image",
+              type: "image",
+              family: "z-image",
+              limits: {
+                resolutions: ["1024x1024", "1536x1024"],
+                samplers: ["default", "euler"],
+                schedulers: ["default", "shift"],
+              },
+            },
+          ],
+          latestAssets: [],
+          loras: [{ id: "ready_style", name: "Ready Style", family: "z-image", scope: "global" }],
+          launchRequest: {
+            id: "recipe-replay-1",
+            view: "Image",
+            recipe: {
+              mode: "text_to_image",
+              model: "z_image_turbo",
+              prompt: "mist over a glass atrium",
+              negativePrompt: "flat lighting",
+              seed: 1234,
+              loras: [{ id: "ready_style", weight: 0.65 }],
+              normalizedSettings: { width: 1536, height: 1024, count: 3 },
+              rawAdapterSettings: {
+                steps: 14,
+                guidanceScale: 2.5,
+                sampler: "euler",
+                scheduler: "shift",
+                schedulerShift: 2.2,
+              },
+            },
+          },
+          onPreview: () => {},
+          purgeAsset: () => {},
+          presets: [{ id: "cinematic", name: "Cinematic", model: "z_image_turbo", workflow: "text_to_image" }],
+          requestedGpu: "auto",
+          selectedAsset: null,
+          setRequestedGpu: () => {},
+          updateAssetStatus: () => {},
+        }),
+      );
+    });
+    await settle();
+
+    await act(async () => {
+      container.querySelector(".image-studio form").requestSubmit();
+    });
+    await settle();
+
+    expect(createImageJob).toHaveBeenCalledWith(
+      expect.objectContaining({
+        mode: "text_to_image",
+        model: "z_image_turbo",
+        prompt: "mist over a glass atrium",
+        negativePrompt: "flat lighting",
+        seed: 1234,
+        count: 3,
+        width: 1536,
+        height: 1024,
+        recipePresetId: null,
+        loras: [expect.objectContaining({ id: "ready_style", weight: 0.65 })],
+        advanced: expect.objectContaining({
+          resolution: "1536x1024",
+          steps: 14,
+          guidanceScale: 2.5,
+          sampler: "euler",
+          scheduler: "shift",
+          schedulerShift: 2.2,
+        }),
       }),
     );
   });

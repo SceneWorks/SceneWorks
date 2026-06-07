@@ -114,6 +114,37 @@ function formatResolutionLabel(value) {
   return height ? `${width} × ${height}` : value;
 }
 
+function finiteRecipeNumber(value) {
+  const number = Number(value);
+  return Number.isFinite(number) ? number : null;
+}
+
+function recipeResolution(recipe) {
+  const settings = recipe?.normalizedSettings ?? {};
+  const width = finiteRecipeNumber(settings.width);
+  const height = finiteRecipeNumber(settings.height);
+  if (width && height) {
+    return `${width}x${height}`;
+  }
+  const rawResolution = recipe?.rawAdapterSettings?.resolution;
+  return typeof rawResolution === "string" && rawResolution.includes("x") ? rawResolution : null;
+}
+
+function recipeMode(recipe) {
+  return IMAGE_MODES.includes(recipe?.mode) ? recipe.mode : "text_to_image";
+}
+
+function recipeLoraId(lora) {
+  return typeof lora === "string" ? lora : lora?.id ?? lora?.loraId;
+}
+
+function recipeLoraWeight(lora) {
+  if (typeof lora === "string") {
+    return undefined;
+  }
+  return finiteRecipeNumber(lora?.weight) ?? undefined;
+}
+
 function jobResultAssets(job, assets) {
   const catalogById = new Map(assets.map((asset) => [asset.id, asset]));
   const resultAssets = (job.result?.assets ?? []).filter((asset) => asset?.type === "image");
@@ -311,6 +342,9 @@ export function ImageStudio() {
 
   useEffect(() => {
     if (launchRequest?.view !== "Image") {
+      return;
+    }
+    if (launchRequest.recipe) {
       return;
     }
     if (launchRequest.characterId) {
@@ -512,6 +546,69 @@ export function ImageStudio() {
     trackedLocalJobs,
     initialPresetId: saved.selectedPresetId ?? null,
   });
+  useEffect(() => {
+    if (launchRequest?.view !== "Image" || !launchRequest.recipe) {
+      return;
+    }
+    const recipe = launchRequest.recipe;
+    const settings = recipe.normalizedSettings ?? {};
+    const rawSettings = recipe.rawAdapterSettings ?? {};
+    const nextMode = recipeMode(recipe);
+    const resolutionFromRecipe = recipeResolution(recipe);
+    const recipeLoras = Array.isArray(recipe.loras) ? recipe.loras : [];
+    const loraIds = recipeLoras.map(recipeLoraId).filter(Boolean);
+    const loraWeightMap = Object.fromEntries(
+      recipeLoras
+        .map((lora) => [recipeLoraId(lora), recipeLoraWeight(lora)])
+        .filter(([id, weight]) => id && weight !== undefined),
+    );
+
+    skipReferenceTuningReset.current = true;
+    setSelectedPresetId(noPresetId);
+    setMode(nextMode);
+    if (recipe.model) {
+      setModel(recipe.model);
+    }
+    setPrompt(String(recipe.prompt ?? ""));
+    promptEdited.current = true;
+    setNegativePrompt(String(recipe.negativePrompt ?? ""));
+    const seedValue = finiteRecipeNumber(recipe.seed);
+    setSeed(seedValue === null ? "" : String(seedValue));
+    const countValue = finiteRecipeNumber(settings.count);
+    if (countValue) {
+      setCount(countValue);
+    }
+    if (resolutionFromRecipe) {
+      setResolution(resolutionFromRecipe);
+    }
+    setSelectedLoraIds(loraIds);
+    setLoraWeights(loraWeightMap);
+    setStepsOverride(rawSettings.steps ?? rawSettings.numInferenceSteps ?? "");
+    setGuidanceOverride(rawSettings.guidanceScale ?? "");
+    setSampler(rawSettings.sampler ?? "default");
+    setScheduler(rawSettings.scheduler ?? "default");
+    setSchedulerShift(rawSettings.schedulerShift ?? rawSettings.timestepShift ?? 3.0);
+    setCharacterId(settings.characterId ?? "");
+    setCharacterLookId(settings.characterLookId ?? "");
+    setReferenceAssetId(rawSettings.referenceAssetId ?? launchRequest.referenceAssetId ?? "");
+    setIpAdapterScale(rawSettings.ipAdapterScale ?? settings.ipAdapterScale ?? ipAdapterScale);
+    setControlnetScale(rawSettings.controlnetConditioningScale ?? rawSettings.controlnetScale ?? settings.controlnetScale ?? controlnetScale);
+    setTrueCfgScale(rawSettings.trueCfgScale ?? settings.trueCfgScale ?? trueCfgScale);
+    setViewAngle(rawSettings.viewAngle ?? settings.viewAngle ?? "");
+    setSelectedPoseIds([]);
+    if (nextMode === "edit_image") {
+      setSourceAssetId(launchRequest.sourceAssetId ?? launchRequest.assetId ?? settings.sourceAssetId ?? "");
+      setFitMode(rawSettings.fitMode ?? settings.fitMode ?? "crop");
+    }
+    const upscale = rawSettings.upscale ?? settings.upscale;
+    setUpscaleEnabled(Boolean(upscale?.enabled));
+    if (upscale?.factor) {
+      setUpscaleFactor(upscale.factor);
+    }
+    if (upscale?.engine) {
+      handleUpscaleEngineChange(upscale.engine);
+    }
+  }, [launchRequest?.id]);
   const compatibleLoras = useMemo(() => loras.filter((lora) => {
     if (lora.presetManaged) {
       return false;

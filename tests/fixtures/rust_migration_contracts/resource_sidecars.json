@@ -44,7 +44,7 @@
     {
       "name": "generationSet",
       "path": "sidecars/generation-set.json",
-      "requiredTopLevelKeys": ["schemaVersion", "id", "projectId", "jobId", "mode", "model", "prompt", "negativePrompt", "count", "createdAt"]
+      "requiredTopLevelKeys": ["schemaVersion", "id", "projectId", "jobId", "mode", "model", "prompt", "negativePrompt", "count", "createdAt", "recipe"]
     },
     {
       "name": "recipe",

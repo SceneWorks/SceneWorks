@@ -1327,6 +1327,27 @@ export function App() {
     setActiveView("Image");
   }
 
+  function recipeForAsset(asset) {
+    return asset?.generationSet?.recipe ?? asset?.recipe ?? null;
+  }
+
+  function sendAssetRecipeToImage(asset) {
+    const recipe = recipeForAsset(asset);
+    if (!asset || !recipe) {
+      return;
+    }
+    setSelectedAssetId(asset.id);
+    closePreview();
+    setStudioLaunch({
+      id: crypto.randomUUID(),
+      view: "Image",
+      assetId: asset.id,
+      sourceAssetId: asset.lineage?.sourceAssetId ?? null,
+      recipe,
+    });
+    setActiveView("Image");
+  }
+
   function sendAssetToVideo(asset, mode = null) {
     if (!asset) {
       return;
@@ -1814,6 +1835,7 @@ export function App() {
             }
             setPreviewAsset(asset);
           }}
+          onUseRecipe={sendAssetRecipeToImage}
           previousAsset={previewNavigation.previous}
           purgeAsset={async (asset) => {
             await purgeAsset(asset);

@@ -225,7 +225,12 @@ pub(crate) async fn persist_reported_assets(
     let job_id_owned = job_id.to_owned();
     let built = project_call(state.clone(), move |store| {
         if let Some(generation_set) = generation_set.as_ref() {
-            store.write_generation_set(&project_id, &job_id_owned, generation_set)?;
+            store.write_generation_set(
+                &project_id,
+                &job_id_owned,
+                generation_set,
+                asset_writes.first(),
+            )?;
         }
         let mut built = Vec::with_capacity(asset_writes.len());
         for fact in &asset_writes {

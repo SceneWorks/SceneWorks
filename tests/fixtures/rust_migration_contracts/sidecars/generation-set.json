@@ -8,6 +8,22 @@
   "prompt": "mist over hills",
   "negativePrompt": "",
   "count": 4,
-  "createdAt": "2026-05-17T13:00:00Z"
+  "createdAt": "2026-05-17T13:00:00Z",
+  "recipe": {
+    "mode": "text_to_image",
+    "model": "z_image_turbo",
+    "adapter": "procedural_preview",
+    "prompt": "mist over hills",
+    "negativePrompt": "",
+    "seed": 101,
+    "loras": [],
+    "stylePreset": "cinematic",
+    "normalizedSettings": {
+      "width": 1024,
+      "height": 1024,
+      "count": 4,
+      "family": "z_image"
+    },
+    "rawAdapterSettings": {}
+  }
 }
-

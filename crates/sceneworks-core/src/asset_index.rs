@@ -127,6 +127,18 @@ pub(crate) fn normalize_asset(
             );
         }
     }
+    if let Some(generation_set_id) = asset.get("generationSetId").and_then(Value::as_str) {
+        let generation_set_path = project_path
+            .join("generation-sets")
+            .join(format!("{generation_set_id}.json"));
+        if generation_set_path.exists() {
+            if let Ok(generation_set) = read_json(&generation_set_path) {
+                if let Some(object) = asset.as_object_mut() {
+                    object.insert("generationSet".to_owned(), generation_set);
+                }
+            }
+        }
+    }
     let sidecar_rel = relative_string(project_path, sidecar_path)?;
     if let Some(object) = asset.as_object_mut() {
         object.insert("sidecarPath".to_owned(), Value::String(sidecar_rel));

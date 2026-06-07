@@ -914,6 +914,8 @@ pub struct GenerationSet {
     pub negative_prompt: String,
     pub count: u32,
     pub created_at: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recipe: Option<Recipe>,
     #[serde(flatten)]
     pub extra: ExtraFields,
 }
