@@ -1557,6 +1557,102 @@ fn mlx_eligible_image_job_falls_back_to_torch_when_no_mlx_worker() {
     assert_eq!(claimed.assigned_gpu.as_deref(), Some("cuda:0"));
 }
 
+// sc-3449 — claim_next_job_routed reports *why* an MLX-eligible job landed where it did.
+
+#[test]
+fn routing_decision_reports_fell_back_to_torch_with_no_mlx_worker() {
+    let store = store("route-decision-fallback");
+    // No mlx worker registered — the diagnostic case from the qwen-lightning report.
+    register_gpu_worker(&store, "worker-torch", "cuda:0", image_caps());
+    let job = store
+        .create_job(image_job_with(
+            json!({
+                "model": "qwen_image_edit_2511_lightning",
+                "mode": "edit_image",
+                "sourceAssetId": "asset_1",
+                "prompt": "p"
+            }),
+            "auto",
+        ))
+        .expect("job creates");
+
+    let (claimed, decision) = store
+        .claim_next_job_routed("worker-torch")
+        .expect("torch claim ok");
+    assert_eq!(claimed.expect("torch claims it").id, job.id);
+    let decision = decision.expect("routing decision present");
+    assert_eq!(decision.decision, "fell_back_to_torch");
+    assert_eq!(decision.reason, "no_idle_mlx_worker");
+    assert_eq!(decision.gpu_id, "cuda:0");
+    assert_eq!(
+        decision.model.as_deref(),
+        Some("qwen_image_edit_2511_lightning")
+    );
+}
+
+#[test]
+fn routing_decision_reports_deferred_to_mlx_for_torch_worker() {
+    let store = store("route-decision-defer");
+    register_gpu_worker(&store, "worker-torch", "mps", image_caps());
+    register_gpu_worker(&store, "worker-mlx", "mlx", image_caps());
+    store
+        .create_job(image_job_with(
+            json!({ "model": "z_image_turbo", "prompt": "p" }),
+            "auto",
+        ))
+        .expect("job creates");
+
+    let (claimed, decision) = store
+        .claim_next_job_routed("worker-torch")
+        .expect("torch claim ok");
+    assert!(claimed.is_none(), "torch defers to the idle mlx worker");
+    let decision = decision.expect("routing decision present");
+    assert_eq!(decision.decision, "deferred_to_mlx");
+    assert_eq!(decision.reason, "idle_mlx_available");
+}
+
+#[test]
+fn routing_decision_reports_claimed_by_mlx() {
+    let store = store("route-decision-mlx");
+    register_gpu_worker(&store, "worker-mlx", "mlx", image_caps());
+    let job = store
+        .create_job(image_job_with(
+            json!({ "model": "z_image_turbo", "prompt": "p" }),
+            "auto",
+        ))
+        .expect("job creates");
+
+    let (claimed, decision) = store
+        .claim_next_job_routed("worker-mlx")
+        .expect("mlx claim ok");
+    assert_eq!(claimed.expect("mlx claims it").id, job.id);
+    let decision = decision.expect("routing decision present");
+    assert_eq!(decision.decision, "claimed_by_mlx");
+    assert_eq!(decision.reason, "mlx_worker");
+    assert_eq!(decision.gpu_id, "mlx");
+}
+
+#[test]
+fn routing_decision_is_none_for_non_mlx_model() {
+    let store = store("route-decision-none");
+    register_gpu_worker(&store, "worker-torch", "mps", image_caps());
+    store
+        .create_job(image_job_with(
+            json!({ "model": "some_torch_only_model", "prompt": "p" }),
+            "auto",
+        ))
+        .expect("job creates");
+
+    let (claimed, decision) = store
+        .claim_next_job_routed("worker-torch")
+        .expect("torch claim ok");
+    assert!(claimed.is_some(), "torch claims the torch-only job");
+    assert!(
+        decision.is_none(),
+        "a non-MLX-eligible claim is routing-neutral (no event)"
+    );
+}
+
 #[test]
 fn explicit_gpu_image_job_is_not_deferred_to_mlx_worker() {
     let store = store("mlx-routing-explicit-gpu");
@@ -2434,4 +2530,104 @@ fn mlx_worker_claims_eligible_job_with_idle_mps_worker_present() {
         .expect("mlx worker should claim the flux2 t2i job");
     assert_eq!(claimed.id, job.id);
     assert_eq!(claimed.assigned_gpu.as_deref(), Some("mlx"));
+}
+
+/// sc-3448 — multiple workers claiming the same database concurrently must never
+/// surface `database is locked`, and every job must be claimed exactly once.
+///
+/// Each thread uses its *own* `JobsStore` on the *same* db file, so the per-instance
+/// `Mutex` no longer serializes them and claims genuinely race at the SQLite layer —
+/// the cross-process contention the `busy_timeout` + `BEGIN IMMEDIATE` fix targets.
+/// IMMEDIATE makes each claimer read the queued set only after holding the write lock,
+/// so two claimers can't both see one job as `queued` (the old DEFERRED path raced the
+/// read→write upgrade, which SQLite fails immediately as `database is locked`).
+#[test]
+fn concurrent_claims_never_lock_and_stay_exactly_once() {
+    use std::collections::HashSet;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::{Arc, Mutex as StdMutex};
+    use std::thread;
+    use std::time::Duration;
+
+    const WORKERS: usize = 4;
+    const JOBS: usize = 60;
+
+    let path = temp_db("concurrent-claim");
+    let primary = JobsStore::new(path.clone());
+    primary.initialize().expect("store initializes");
+
+    for w in 0..WORKERS {
+        primary
+            .register_worker(RegisterWorker {
+                worker_id: format!("worker-{w}"),
+                gpu_id: format!("gpu-{w}"),
+                gpu_name: Some(format!("GPU {w}")),
+                capabilities: vec![WorkerCapability::ImageGenerate],
+                loaded_models: Vec::new(),
+                utilization: None,
+            })
+            .expect("worker registers");
+    }
+    for j in 0..JOBS {
+        primary
+            .create_job(image_job(object(json!({ "prompt": format!("p{j}") }))))
+            .expect("job creates");
+    }
+
+    let claimed: Arc<StdMutex<Vec<String>>> = Arc::new(StdMutex::new(Vec::new()));
+    let errors: Arc<StdMutex<Vec<String>>> = Arc::new(StdMutex::new(Vec::new()));
+    let remaining = Arc::new(AtomicUsize::new(JOBS));
+
+    let mut handles = Vec::new();
+    for w in 0..WORKERS {
+        let path = path.clone();
+        let claimed = Arc::clone(&claimed);
+        let errors = Arc::clone(&errors);
+        let remaining = Arc::clone(&remaining);
+        handles.push(thread::spawn(move || {
+            let store = JobsStore::new(path);
+            let worker_id = format!("worker-{w}");
+            while remaining.load(Ordering::SeqCst) > 0 {
+                match store.claim_next_job(&worker_id) {
+                    Ok(Some(job)) => {
+                        claimed.lock().unwrap().push(job.id.clone());
+                        remaining.fetch_sub(1, Ordering::SeqCst);
+                        // Free the worker so it keeps claiming and the queue drains.
+                        if let Err(error) = store.update_job_progress(
+                            &job.id,
+                            ProgressUpdate {
+                                status: JobStatus::Completed,
+                                stage: ProgressStage::Completed,
+                                progress: 1.0,
+                                message: "done".to_owned(),
+                                error: None,
+                                result: None,
+                                eta_seconds: None,
+                                peak_gpu_memory_pct: None,
+                                peak_gpu_load_pct: None,
+                                backend: None,
+                            },
+                        ) {
+                            errors.lock().unwrap().push(error.to_string());
+                        }
+                    }
+                    Ok(None) => thread::sleep(Duration::from_millis(1)),
+                    Err(error) => errors.lock().unwrap().push(error.to_string()),
+                }
+            }
+        }));
+    }
+    for handle in handles {
+        handle.join().expect("claimer thread joins");
+    }
+
+    let errors = errors.lock().unwrap();
+    assert!(
+        errors.is_empty(),
+        "claims/updates must never error under contention; saw: {errors:?}"
+    );
+    let claimed = claimed.lock().unwrap();
+    let unique: HashSet<&String> = claimed.iter().collect();
+    assert_eq!(claimed.len(), JOBS, "every job claimed (count)");
+    assert_eq!(unique.len(), JOBS, "no job claimed twice");
 }

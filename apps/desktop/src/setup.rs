@@ -8,13 +8,45 @@
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Mutex;
+use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
+use sceneworks_core::session_log::{LogEntry, LogQuery, SessionLog};
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, Manager};
 use tauri_plugin_shell::process::{CommandChild, CommandEvent};
 use tauri_plugin_shell::ShellExt;
+
+/// Process-global in-app session log (sc-3451). Every captured sidecar line
+/// (api/worker/mlx-worker) is mirrored here as it's appended to disk, so the
+/// `get_session_logs` command can serve the current session's activity — the
+/// MLX routing decisions, claim contention and worker phases — without parsing
+/// the append-only files in `~/Library/Logs/SceneWorks/`. "Current session" =
+/// this desktop process's lifetime (the buffer is created on first capture).
+static SESSION_LOG: OnceLock<SessionLog> = OnceLock::new();
+
+pub fn session_log() -> &'static SessionLog {
+    SESSION_LOG.get_or_init(SessionLog::default)
+}
+
+/// Read back the current session's log entries for the in-app Logs screen
+/// (sc-3452). `after_seq` tails only new lines; the rest are filters.
+#[tauri::command]
+pub fn get_session_logs(
+    after_seq: Option<u64>,
+    limit: Option<usize>,
+    source: Option<String>,
+    level: Option<String>,
+    search: Option<String>,
+) -> Vec<LogEntry> {
+    session_log().query(&LogQuery {
+        after_seq,
+        limit,
+        source,
+        level,
+        search,
+    })
+}
 
 /// Bump to force a re-provision even if requirements.txt is unchanged.
 const SETUP_VERSION: &str = "3";
@@ -422,6 +454,13 @@ fn append_log(path: &Path, line: &str) {
         let _ = file.write_all(line.as_bytes());
         let _ = file.flush();
     }
+    // Mirror into the in-app session buffer (sc-3451), tagged by the log's file stem
+    // ("worker.log" -> "worker", "mlx-worker.log" -> "mlx-worker").
+    let source = path
+        .file_stem()
+        .and_then(|stem| stem.to_str())
+        .unwrap_or("app");
+    session_log().push_line(source, line);
 }
 
 /// Extract the port from the API's `listening on http://127.0.0.1:PORT` line.
@@ -854,6 +893,9 @@ fn spawn_api(app: &AppHandle) -> Result<(), String> {
                 let _ = file.write_all(entry.as_bytes());
                 let _ = file.flush();
             }
+            // Mirror the API sidecar's output into the in-app session buffer (sc-3451);
+            // this loop writes its own file handle so it doesn't go through append_log.
+            session_log().push_line("api", &entry);
         }
     });
     Ok(())

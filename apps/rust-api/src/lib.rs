@@ -27,7 +27,7 @@ use sceneworks_core::contracts::{
 };
 use sceneworks_core::jobs_store::{
     CreateJob, DuplicateJob, JobsStore, JobsStoreError, ProgressUpdate, RegisterWorker, RetryJob,
-    WorkerHeartbeat, JOB_STATUSES,
+    RouteDecision, WorkerHeartbeat, JOB_STATUSES,
 };
 use sceneworks_core::lora_family::{
     apply_model_manifest_defaults, detect_lora_family, detect_model_family, first_safetensors_path,
@@ -103,6 +103,8 @@ mod prompts;
 use prompts::*;
 mod poses;
 use poses::*;
+mod logs;
+use logs::*;
 
 const PUBLIC_PATHS: &[&str] = &[
     "/api/v1/health",
@@ -697,6 +699,7 @@ pub fn create_app(settings: Settings) -> Result<Router, JobsStoreError> {
         .route("/api/v1/jobs/:job_id/duplicate", post(duplicate_job))
         .route("/api/v1/jobs/:job_id/progress", post(update_job_progress))
         .route("/api/v1/queue", get(queue_summary))
+        .route("/api/v1/logs", get(list_logs))
         .route("/api/v1/workers", get(list_workers))
         .route(
             "/api/v1/capabilities/person",

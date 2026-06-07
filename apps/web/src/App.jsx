@@ -17,6 +17,7 @@ import { EditorScreen } from "./screens/EditorScreen.jsx";
 import { QueueScreen } from "./screens/QueueScreen.jsx";
 import { PresetManagerScreen } from "./screens/PresetManagerScreen.jsx";
 import { SettingsScreen } from "./screens/SettingsScreen.jsx";
+import { LogsScreen } from "./screens/LogsScreen.jsx";
 import { SetupWizard } from "./screens/SetupWizard.jsx";
 import { sortNewest, sortOldest, sortWorkers } from "./sorters.js";
 import { useCharacters } from "./hooks/useCharacters.js";
@@ -179,6 +180,7 @@ const navSections = [
     label: "System",
     items: [
       { id: "Queue", icon: Icon.Queue },
+      { id: "Logs", icon: Icon.Logs },
       { id: "Settings", icon: Icon.Sliders },
     ],
   },
@@ -198,6 +200,7 @@ const viewTitles = {
   Presets: { title: "Presets", blurb: "Save and share recurring generation setups." },
   Models: { title: "Models", blurb: "Download, import and manage local checkpoints." },
   Queue: { title: "Queue", blurb: "All running and recent jobs across workers." },
+  Logs: { title: "Logs", blurb: "This session's activity — routing decisions, worker phases and errors." },
   Settings: { title: "Settings", blurb: "Paths, service tokens, and detected GPU." },
 };
 
@@ -1803,6 +1806,7 @@ export function App() {
           <CharacterStudio key={activeProject?.id ?? "default"} />
         ) : null}
         {activeView === "Settings" ? <SettingsScreen /> : null}
+        {activeView === "Logs" ? <LogsScreen /> : null}
           </>
         )}
       </section>
