@@ -7654,3 +7654,117 @@ label {
   text-transform: uppercase;
   color: var(--text-muted);
 }
+
+/* In-app Logs screen (sc-3452). Session activity: routing decisions, worker
+   phases and errors, read from the desktop buffer or GET /api/v1/logs. */
+.logs-screen {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  min-height: 0;
+}
+.logs-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+}
+.logs-search {
+  flex: 1 1 200px;
+  min-width: 160px;
+}
+.logs-live {
+  margin-left: auto;
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+  background: var(--surface);
+  color: var(--success);
+  padding: 6px 12px;
+  font-weight: 600;
+  cursor: pointer;
+}
+.logs-live.paused {
+  color: var(--text-faint);
+}
+.logs-error {
+  border: 1px solid color-mix(in oklch, var(--danger) 35%, var(--border));
+  background: var(--danger-soft);
+  border-radius: var(--r-md);
+  padding: 10px 12px;
+  margin: 0;
+}
+.logs-list {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  border: 1px solid var(--border);
+  border-radius: var(--r-md);
+  background: var(--surface);
+  font-family: var(--font-mono);
+  font-size: 12.5px;
+}
+.logs-empty {
+  padding: 24px;
+  color: var(--text-faint);
+  text-align: center;
+}
+.logs-row {
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding: 4px 12px;
+  border-bottom: 1px solid color-mix(in oklch, var(--border) 50%, transparent);
+  cursor: pointer;
+}
+.logs-row:hover {
+  background: var(--surface-2);
+}
+.logs-row.highlighted {
+  background: color-mix(in oklch, var(--accent) 10%, transparent);
+}
+.logs-time {
+  color: var(--text-faint);
+  flex: 0 0 auto;
+}
+.logs-chip {
+  flex: 0 0 auto;
+  padding: 1px 7px;
+  border-radius: 999px;
+  font-size: 10.5px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.02em;
+  background: var(--surface-2);
+  color: var(--text-faint);
+}
+.logs-chip.source-mlx-worker {
+  background: color-mix(in oklch, var(--accent) 18%, transparent);
+  color: var(--accent);
+}
+.logs-chip.level-error {
+  background: var(--danger-soft);
+  color: var(--danger);
+}
+.logs-chip.level-warn {
+  background: color-mix(in oklch, oklch(0.75 0.15 75) 22%, transparent);
+  color: oklch(0.55 0.15 75);
+}
+.logs-row.level-error .logs-message {
+  color: var(--danger);
+}
+.logs-message {
+  flex: 1 1 280px;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+.logs-detail {
+  flex: 1 1 100%;
+  margin: 6px 0 2px;
+  padding: 8px 10px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+  overflow-x: auto;
+  white-space: pre;
+}

@@ -9,6 +9,7 @@ pub mod jobs_store;
 pub mod lora_family;
 pub mod lora_url;
 pub mod project_store;
+pub mod session_log;
 pub mod slug;
 pub mod store_util;
 pub mod time;

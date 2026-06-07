@@ -1,9 +1,12 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
+use std::time::Duration;
 
 use parking_lot::Mutex;
-use rusqlite::{params, params_from_iter, Connection, OptionalExtension, Row, ToSql};
+use rusqlite::{
+    params, params_from_iter, Connection, OptionalExtension, Row, ToSql, TransactionBehavior,
+};
 use serde::de::DeserializeOwned;
 use serde_json::{Map, Number, Value};
 
@@ -218,7 +221,7 @@ impl JobsStore {
     pub fn initialize(&self) -> JobsStoreResult<()> {
         let _guard = self.lock.lock();
         let mut connection = self.connect()?;
-        let transaction = connection.transaction()?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
         transaction.execute_batch(
             "
             create table if not exists jobs (
@@ -286,7 +289,7 @@ impl JobsStore {
     pub fn mark_interrupted_on_startup(&self) -> JobsStoreResult<Vec<JobSnapshot>> {
         let _guard = self.lock.lock();
         let mut connection = self.connect()?;
-        let transaction = connection.transaction()?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let interrupted = self.list_jobs_by_status_on_connection(&transaction, ACTIVE_STATUSES)?;
         let now = utc_now();
         transaction.execute(
@@ -314,7 +317,7 @@ impl JobsStore {
     pub fn create_job(&self, request: CreateJob) -> JobsStoreResult<JobSnapshot> {
         let _guard = self.lock.lock();
         let mut connection = self.connect()?;
-        let transaction = connection.transaction()?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let job = self.create_job_on_connection(&transaction, request, None)?;
         transaction.commit()?;
         Ok(job)
@@ -331,7 +334,7 @@ impl JobsStore {
     ) -> JobsStoreResult<JobSnapshot> {
         let _guard = self.lock.lock();
         let mut connection = self.connect()?;
-        let transaction = connection.transaction()?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let job = self.create_job_on_connection(&transaction, request, Some(id))?;
         transaction.commit()?;
         Ok(job)
@@ -378,7 +381,7 @@ impl JobsStore {
     pub fn cancel_job(&self, job_id: &str) -> JobsStoreResult<JobSnapshot> {
         let _guard = self.lock.lock();
         let mut connection = self.connect()?;
-        let transaction = connection.transaction()?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let job = self.get_job_on_connection(&transaction, job_id)?;
         if is_terminal_status(job.status.as_str()) {
             return Ok(job);
@@ -421,7 +424,7 @@ impl JobsStore {
     pub fn retry_job(&self, job_id: &str, request: RetryJob) -> JobsStoreResult<JobSnapshot> {
         let _guard = self.lock.lock();
         let mut connection = self.connect()?;
-        let transaction = connection.transaction()?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let job = self.get_job_on_connection(&transaction, job_id)?;
         if job.attempts >= MAX_JOB_ATTEMPTS {
             return Err(JobsStoreError::RetryLimit {
@@ -455,7 +458,7 @@ impl JobsStore {
     ) -> JobsStoreResult<JobSnapshot> {
         let _guard = self.lock.lock();
         let mut connection = self.connect()?;
-        let transaction = connection.transaction()?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let job = self.get_job_on_connection(&transaction, job_id)?;
         let mut payload = job.payload;
         payload.extend(request.payload_changes);
@@ -480,7 +483,7 @@ impl JobsStore {
     pub fn register_worker(&self, request: RegisterWorker) -> JobsStoreResult<WorkerSnapshot> {
         let _guard = self.lock.lock();
         let mut connection = self.connect()?;
-        let transaction = connection.transaction()?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let now = utc_now();
         transaction.execute(
             "
@@ -515,7 +518,7 @@ impl JobsStore {
     pub fn heartbeat_worker(&self, request: WorkerHeartbeat) -> JobsStoreResult<WorkerSnapshot> {
         let _guard = self.lock.lock();
         let mut connection = self.connect()?;
-        let transaction = connection.transaction()?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let worker = self.get_worker_on_connection(&transaction, &request.worker_id)?;
         let now = utc_now();
         if request.current_job_id.is_none() {
@@ -583,7 +586,7 @@ impl JobsStore {
     ) -> JobsStoreResult<StaleSweep> {
         let _guard = self.lock.lock();
         let mut connection = self.connect()?;
-        let transaction = connection.transaction()?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let now = now_unix_seconds();
         let timeout = i64::try_from(timeout_seconds.max(1)).unwrap_or(i64::MAX);
         let cutoff = format_unix_seconds(now.saturating_sub(timeout));
@@ -658,10 +661,30 @@ impl JobsStore {
     }
 
     pub fn claim_next_job(&self, worker_id: &str) -> JobsStoreResult<Option<JobSnapshot>> {
+        Ok(self.claim_next_job_routed(worker_id)?.0)
+    }
+
+    /// Like [`Self::claim_next_job`], but also reports the MLX↔torch routing decision
+    /// so the caller (the API claim handler) can log *why* a job landed where it did —
+    /// the single most useful line for diagnosing "MLX-eligible job ran on torch"
+    /// (sc-3449). A `None` decision means the claim was routing-neutral: no job was
+    /// available, an unrelated balancing deferral fired, or the job is one no `mlx`
+    /// worker would ever want.
+    pub fn claim_next_job_routed(
+        &self,
+        worker_id: &str,
+    ) -> JobsStoreResult<(Option<JobSnapshot>, Option<RouteDecision>)> {
         let _guard = self.lock.lock();
         let mut connection = self.connect()?;
-        let transaction = connection.transaction()?;
+        // BEGIN IMMEDIATE: take the write lock up front. The claim reads the worker, the
+        // active-gpu-job guard and the full queued set before deciding, then writes. A
+        // DEFERRED transaction holds only a read lock through those reads and tries to
+        // upgrade at the first UPDATE — and SQLite returns SQLITE_BUSY *immediately* on a
+        // lock upgrade (busy_timeout does not retry upgrades, to avoid deadlock), so two
+        // overlapping claims would race and one would fail. IMMEDIATE serializes claimers.
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let worker = self.get_worker_on_connection(&transaction, worker_id)?;
+        let worker_gpu_id = worker.gpu_id.clone();
         let has_active_gpu_job = transaction
             .query_row(
                 &format!(
@@ -703,23 +726,31 @@ impl JobsStore {
         // the scale lever if queues ever grow large enough for the full scan to matter.
         let queued = choose_claimable_job(queued_rows, &worker);
         let Some(queued) = queued else {
-            return Ok(None);
+            return Ok((None, None));
         };
         drop(statement);
         if should_defer_auto_gpu_claim(&transaction, &queued, &worker)? {
-            return Ok(None);
+            return Ok((None, None));
         }
         if should_defer_image_to_mlx_worker(&transaction, &queued, &worker)?
             || should_defer_video_to_mlx_worker(&transaction, &queued, &worker)?
             || should_defer_training_to_mlx_worker(&transaction, &queued, &worker)?
         {
-            return Ok(None);
+            // A non-mlx worker is yielding this MLX-eligible job to an idle mlx worker.
+            let decision = RouteDecision::new(
+                &queued,
+                &worker_gpu_id,
+                worker_id,
+                "deferred_to_mlx",
+                "idle_mlx_available",
+            );
+            return Ok((None, Some(decision)));
         }
 
         let assigned_gpu = if is_non_gpu_job_type(queued.job_type.as_str()) {
             "cpu".to_owned()
         } else {
-            worker.gpu_id
+            worker_gpu_id.clone()
         };
         let now = utc_now();
         transaction.execute(
@@ -742,7 +773,8 @@ impl JobsStore {
         )?;
         let job = self.get_job_on_connection(&transaction, &queued.id)?;
         transaction.commit()?;
-        Ok(Some(job))
+        let decision = route_decision_for_claim(&queued, &worker_gpu_id, worker_id);
+        Ok((Some(job), decision))
     }
 
     pub fn update_job_progress(
@@ -777,7 +809,7 @@ impl JobsStore {
 
         let _guard = self.lock.lock();
         let mut connection = self.connect()?;
-        let transaction = connection.transaction()?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let now = utc_now();
         let completed_at = is_terminal_status(update.status.as_str()).then_some(now.clone());
         let canceled_at = (update.status == JobStatus::Canceled).then_some(now.clone());
@@ -889,6 +921,14 @@ impl JobsStore {
             fs::create_dir_all(parent)?;
         }
         let connection = Connection::open(&self.db_path)?;
+        // Wait (instead of failing instantly) when another connection/process holds the
+        // database lock. rusqlite's default busy timeout is 0ms, so any cross-process
+        // overlap — e.g. a sidecar restart where the old process hasn't fully released the
+        // db, or a concurrent claim/heartbeat — surfaces as `database is locked` and the
+        // job loses its claim (MLX-eligible jobs then fall through to the torch worker).
+        // A 5s wait lets the holder finish; paired with BEGIN IMMEDIATE on write
+        // transactions (below), writers queue cleanly rather than deadlocking on lock upgrade.
+        connection.busy_timeout(Duration::from_millis(5000))?;
         match connection.pragma_update(None, "journal_mode", "wal") {
             Ok(()) => {}
             Err(_) => {
@@ -1437,6 +1477,95 @@ fn is_terminal_status(status: &str) -> bool {
 
 fn is_non_gpu_job_type(job_type: &str) -> bool {
     NON_GPU_JOB_TYPES.contains(&job_type)
+}
+
+/// The MLX↔torch routing decision for a single claim, emitted as a structured log
+/// event (`mlx_route_decision`) by the API so operators can see *why* a job ran where
+/// it did (sc-3449) — the line that answers "why did this MLX-eligible job run on torch?".
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct RouteDecision {
+    pub job_id: String,
+    pub job_type: String,
+    pub model: Option<String>,
+    pub requested_gpu: String,
+    pub worker_id: String,
+    pub gpu_id: String,
+    /// `deferred_to_mlx` | `claimed_by_mlx` | `fell_back_to_torch` | `explicit_gpu`.
+    pub decision: &'static str,
+    /// Machine-readable cause: `idle_mlx_available`, `mlx_worker`, `no_idle_mlx_worker`,
+    /// or `explicit_gpu`.
+    pub reason: &'static str,
+}
+
+impl RouteDecision {
+    fn new(
+        job: &JobSnapshot,
+        gpu_id: &str,
+        worker_id: &str,
+        decision: &'static str,
+        reason: &'static str,
+    ) -> Self {
+        Self {
+            job_id: job.id.clone(),
+            job_type: job.job_type.as_str().to_owned(),
+            model: job
+                .payload
+                .get("model")
+                .and_then(Value::as_str)
+                .map(str::to_owned),
+            requested_gpu: job.requested_gpu.clone(),
+            worker_id: worker_id.to_owned(),
+            gpu_id: gpu_id.to_owned(),
+            decision,
+            reason,
+        }
+    }
+}
+
+/// Classify a *successful* claim for routing observability. `None` means the claim was
+/// routing-neutral (the job is not MLX-eligible, so no `mlx` worker would have wanted
+/// it). When a non-`mlx` worker claims an MLX-eligible job, the reason distinguishes a
+/// user pinning a specific GPU (`explicit_gpu`) from the case the team cares about — no
+/// idle `mlx` worker was available to take it (`fell_back_to_torch`/`no_idle_mlx_worker`).
+/// The deferral path (a non-mlx worker yielding to an idle mlx worker) is reported
+/// separately inside `claim_next_job_routed` as `deferred_to_mlx`.
+fn route_decision_for_claim(
+    job: &JobSnapshot,
+    gpu_id: &str,
+    worker_id: &str,
+) -> Option<RouteDecision> {
+    let mlx_eligible = job_is_mlx_eligible(job)
+        || video_job_is_mlx_eligible(job)
+        || training_job_is_mlx_eligible(job);
+    if !mlx_eligible {
+        return None;
+    }
+    if gpu_id.eq_ignore_ascii_case("mlx") {
+        return Some(RouteDecision::new(
+            job,
+            gpu_id,
+            worker_id,
+            "claimed_by_mlx",
+            "mlx_worker",
+        ));
+    }
+    if job.requested_gpu == "auto" {
+        Some(RouteDecision::new(
+            job,
+            gpu_id,
+            worker_id,
+            "fell_back_to_torch",
+            "no_idle_mlx_worker",
+        ))
+    } else {
+        Some(RouteDecision::new(
+            job,
+            gpu_id,
+            worker_id,
+            "explicit_gpu",
+            "explicit_gpu",
+        ))
+    }
 }
 
 fn should_defer_auto_gpu_claim(

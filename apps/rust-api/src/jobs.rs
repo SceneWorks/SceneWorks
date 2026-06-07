@@ -48,11 +48,14 @@ pub(crate) async fn claim_job(
     State(state): State<AppState>,
     ApiJson(payload): ApiJson<ClaimRequest>,
 ) -> Result<Json<ClaimResponse>, ApiError> {
-    let response = store_call(state.clone(), move |store, timeout| {
+    let (response, decision) = store_call(state.clone(), move |store, timeout| {
         store.mark_stale_workers_interrupted(timeout)?;
-        store.claim_next_job(&payload.worker_id)
+        store.claim_next_job_routed(&payload.worker_id)
     })
     .await?;
+    if let Some(decision) = &decision {
+        emit_route_decision(decision);
+    }
     if let Some(job) = &response {
         publish(&state, "job.updated", job);
         publish_queue(&state).await?;
@@ -61,6 +64,27 @@ pub(crate) async fn claim_job(
         job: response,
         extra: Default::default(),
     }))
+}
+
+/// Emit the MLX↔torch routing decision as a structured JSON line on the API's stdout
+/// (sc-3449). The desktop wrapper captures this into `api.log` + the in-app Logs buffer,
+/// so an MLX-eligible job that lands on torch is explained at claim time rather than
+/// inferred from archaeology. Shape mirrors the worker's `emit_worker_event` events
+/// (`event` + `reportedAt` + payload).
+fn emit_route_decision(decision: &RouteDecision) {
+    let mut value = serde_json::to_value(decision).unwrap_or_else(|_| json!({}));
+    if let Some(object) = value.as_object_mut() {
+        object.insert(
+            "event".to_owned(),
+            Value::String("mlx_route_decision".to_owned()),
+        );
+        object.insert("reportedAt".to_owned(), Value::String(now_rfc3339()));
+    }
+    let line = value.to_string();
+    // Print for the desktop wrapper's stdout-capture buffer (sc-3451) + api.log, and
+    // record into the API's own buffer for the headless `GET /api/v1/logs` (sc-3453).
+    println!("{line}");
+    record_api_event(&line);
 }
 
 pub(crate) async fn get_job(

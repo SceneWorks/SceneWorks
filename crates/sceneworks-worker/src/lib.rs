@@ -321,6 +321,23 @@ fn emit_json(payload: Value) {
     println!("{payload}");
 }
 
+/// Emit a structured worker event as a JSON line on stdout, matching the Python
+/// worker's `emit_worker_event` shape (`{event, reportedAt, ...payload}`). Captured
+/// into mlx-worker.log + the in-app Logs buffer, giving the Rust MLX path the same
+/// per-generation visibility the torch path has (sc-3450). `payload` should be a JSON
+/// object; `event` and `reportedAt` are injected.
+// Only the macOS image-generation path emits these today; on other targets the
+// generation code is cfg'd out, so the helper would be dead code.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+fn emit_event(event: &str, payload: Value) {
+    let mut value = payload;
+    if let Some(object) = value.as_object_mut() {
+        object.insert("event".to_owned(), Value::String(event.to_owned()));
+        object.insert("reportedAt".to_owned(), Value::String(now_rfc3339()));
+    }
+    emit_json(value);
+}
+
 pub async fn run() -> WorkerResult<()> {
     // Host mode (no HF cache env set): default HF_HOME to the shared ~/.cache/
     // huggingface so downloads land in the OS cache rather than the private data
@@ -347,12 +364,35 @@ pub async fn run_worker_loop(settings: Settings) -> WorkerResult<()> {
     let api = ApiClient::new(&settings);
     let http_client = reqwest::Client::new();
     register_worker_with_retry(&api, &settings, &gpu).await?;
+    let mut lock_failures = 0_u32;
     loop {
         tokio::select! {
             result = poll_once(&api, &settings, &http_client) => {
-                if let Err(error) = result {
-                    eprintln!("rust_worker_poll_failed: {error}");
-                    tokio::time::sleep(Duration::from_secs(settings.poll_seconds.max(1))).await;
+                match result {
+                    Ok(()) => lock_failures = 0,
+                    Err(error) if is_database_locked(&error) => {
+                        // SQLite claim contention. With busy_timeout + BEGIN IMMEDIATE in the
+                        // store this should be rare, but back off (instead of hammering at the
+                        // flat poll interval) and make it visible so an MLX-eligible job lost to
+                        // lock contention is explained rather than silently retried into torch.
+                        lock_failures = lock_failures.saturating_add(1);
+                        let delay = retry_delay(settings.poll_seconds, lock_failures);
+                        emit_json(json!({
+                            "event": "claim_lock_contention",
+                            "workerId": settings.worker_id,
+                            "gpuId": settings.gpu_id,
+                            "consecutiveFailures": lock_failures,
+                            "retryInSeconds": delay,
+                            "error": error.to_string(),
+                            "reportedAt": now_rfc3339(),
+                        }));
+                        tokio::time::sleep(Duration::from_secs(delay)).await;
+                    }
+                    Err(error) => {
+                        lock_failures = 0;
+                        eprintln!("rust_worker_poll_failed: {error}");
+                        tokio::time::sleep(Duration::from_secs(settings.poll_seconds.max(1))).await;
+                    }
                 }
             }
             _ = shutdown_signal() => {
@@ -361,6 +401,16 @@ pub async fn run_worker_loop(settings: Settings) -> WorkerResult<()> {
             }
         }
     }
+}
+
+/// True when an error ultimately stems from SQLite reporting the jobs database as locked.
+/// The claim travels worker→API→store, so a lock surfaces as an `Api { detail }` whose
+/// message embeds the SQLite text; match on the rendered string rather than a typed variant.
+fn is_database_locked(error: &WorkerError) -> bool {
+    error
+        .to_string()
+        .to_ascii_lowercase()
+        .contains("database is locked")
 }
 
 async fn register_worker_with_retry(

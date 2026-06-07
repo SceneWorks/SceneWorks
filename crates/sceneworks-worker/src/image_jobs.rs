@@ -1197,6 +1197,25 @@ async fn consume_gen_events(
     let total_u32 = total as u32;
     let mut canceled = false;
     let mut last_cancel_check = Instant::now();
+    // Per-image inference lifecycle events (sc-3450), parity with the Python worker's
+    // `image_inference_start`/`image_inference_complete`. The first event for an index
+    // marks its start; `GenEvent::Image` marks completion. This is the single shared
+    // streaming seam, so every MLX image family reports the same phases on mlx-worker.log
+    // + the in-app Logs screen.
+    let mut started: std::collections::HashSet<usize> = std::collections::HashSet::new();
+    let mut mark_started = |index: usize| {
+        if started.insert(index) {
+            emit_event(
+                "image_inference_start",
+                json!({
+                    "jobId": job.id,
+                    "imageIndex": index,
+                    "imageCount": total,
+                    "backend": backend,
+                }),
+            );
+        }
+    };
     while let Some(event) = rx.recv().await {
         if canceled {
             continue; // drain remaining events so the blocking sender never blocks.
@@ -1207,6 +1226,7 @@ async fn consume_gen_events(
                 current,
                 total: step_total,
             } => {
+                mark_started(index);
                 if last_cancel_check.elapsed() >= Duration::from_secs(2) {
                     last_cancel_check = Instant::now();
                     if check_cancel(api, &job.id, "Image generation canceled by user.")
@@ -1233,6 +1253,7 @@ async fn consume_gen_events(
                 .await?;
             }
             GenEvent::Decoding { index } => {
+                mark_started(index);
                 update_job(
                     api,
                     &job.id,
@@ -1266,6 +1287,14 @@ async fn consume_gen_events(
                     project_path,
                 )?;
                 asset_writes.push(Value::Object(fact));
+                emit_event(
+                    "image_inference_complete",
+                    json!({
+                        "jobId": job.id,
+                        "imageIndex": index,
+                        "backend": backend,
+                    }),
+                );
                 update_job(
                     api,
                     &job.id,

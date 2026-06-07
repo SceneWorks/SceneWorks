@@ -17,6 +17,7 @@ fn main() {
         .manage(setup::Managed::default())
         .invoke_handler(tauri::generate_handler![
             setup::start_setup,
+            setup::get_session_logs,
             settings::get_app_settings,
             settings::get_storage_setup,
             settings::save_storage_setup,
