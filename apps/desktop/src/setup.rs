@@ -34,6 +34,10 @@ const LENS_TORCHVISION_SPEC: &str = "torchvision>=0.26,<0.27";
 pub struct Managed {
     pub api: Mutex<Option<CommandChild>>,
     pub worker: Mutex<Option<CommandChild>>,
+    /// The Apple-Silicon MLX GPU worker (sc-3289): the same `sceneworks-api`
+    /// binary re-launched in worker mode (`SCENEWORKS_WORKER_ONLY=1`,
+    /// `SCENEWORKS_GPU_ID=mlx`). Only populated on macOS.
+    pub mlx_worker: Mutex<Option<CommandChild>>,
     /// OS-assigned API port, discovered from the sidecar's startup line.
     api_port: Mutex<Option<u16>>,
     /// PIDs of the spawned sidecars, persisted to disk so an unclean exit
@@ -44,11 +48,15 @@ pub struct Managed {
     pub shutting_down: AtomicBool,
 }
 
-/// PIDs of the API + Python worker sidecars owned by this launch.
+/// PIDs of the API + Python worker + MLX worker sidecars owned by this launch.
 #[derive(Default, Clone, Serialize, Deserialize)]
 struct SidecarPids {
     api: Option<u32>,
     worker: Option<u32>,
+    /// The MLX GPU worker (sc-3289). `#[serde(default)]` so a pidfile written by
+    /// an older build (no such field) still deserializes for reaping.
+    #[serde(default)]
+    mlx_worker: Option<u32>,
 }
 
 #[derive(Clone, Serialize)]
@@ -110,18 +118,6 @@ fn lens_venv_dir() -> PathBuf {
     app_support_dir().join("python").join("lens-venv")
 }
 
-/// Separate MLX FLUX sidecar venv (mflux 0.17.x — its own torch/transformers/
-/// huggingface_hub stack), kept apart from the main venv for the same dep
-/// reason as Lens. MlxFluxAdapter runs its interpreter via
-/// SCENEWORKS_MLX_FLUX_PYTHON. mflux is Apple-MLX only, so `provision_mlx_flux_venv`
-/// runs only on darwin (this helper returns a valid path on every platform so the
-/// env var the worker reads is always defined — `MlxFluxAdapter._sidecar_available`
-/// existence-checks it at job time and a missing path simply falls back to the
-/// torch FluxDiffusersAdapter on Windows / Linux). sc-1970.
-fn mlx_flux_venv_dir() -> PathBuf {
-    app_support_dir().join("python").join("mlx-flux-venv")
-}
-
 pub fn venv_python(venv: &Path) -> PathBuf {
     if cfg!(target_os = "windows") {
         venv.join("Scripts").join("python.exe")
@@ -136,13 +132,6 @@ fn marker_path() -> PathBuf {
 
 fn lens_marker_path() -> PathBuf {
     app_support_dir().join("python").join(".lens-venv-marker")
-}
-
-#[cfg(target_os = "macos")]
-fn mlx_flux_marker_path() -> PathBuf {
-    app_support_dir()
-        .join("python")
-        .join(".mlx-flux-venv-marker")
 }
 
 /// Platform-appropriate logs directory (also used for the API/worker logs).
@@ -288,45 +277,6 @@ fn requirements_lens_path(app: &AppHandle) -> PathBuf {
         .join("..")
         .join("worker")
         .join("requirements-lens.txt")
-}
-
-/// requirements-mlx.txt location (Apple Silicon MLX video inference deps): the
-/// bundled resource in a packaged app, or the repo copy during development.
-/// Optional and macOS-only — installed by `provision_venv` only on darwin so the
-/// Windows/Linux PyTorch worker is unaffected.
-#[cfg(target_os = "macos")]
-fn requirements_mlx_path(app: &AppHandle) -> PathBuf {
-    if let Ok(resources) = app.path().resource_dir() {
-        let bundled = resources.join("python-src").join("requirements-mlx.txt");
-        if bundled.exists() {
-            return bundled;
-        }
-    }
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("..")
-        .join("worker")
-        .join("requirements-mlx.txt")
-}
-
-/// requirements-mlx-flux.txt location (mflux FLUX MLX image inference deps): the
-/// bundled resource in a packaged app, or the repo copy during development.
-/// macOS-only sidecar venv (mflux's transformers>=5 + huggingface_hub>=1 cannot
-/// coexist with the main worker venv's transformers 4.57 + huggingface_hub<1
-/// stack). sc-1970. Provisioned in the background by `provision_mlx_flux_venv`.
-#[cfg(target_os = "macos")]
-fn requirements_mlx_flux_path(app: &AppHandle) -> PathBuf {
-    if let Ok(resources) = app.path().resource_dir() {
-        let bundled = resources
-            .join("python-src")
-            .join("requirements-mlx-flux.txt");
-        if bundled.exists() {
-            return bundled;
-        }
-    }
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("..")
-        .join("worker")
-        .join("requirements-mlx-flux.txt")
 }
 
 /// Platform default workspace data directory, used when the user hasn't picked a
@@ -605,17 +555,9 @@ async fn provision_venv(app: &AppHandle) -> Result<(), String> {
     // stay blocked. Epic 2282 / sc-2285.
     let requirements_pose = requirements_pose_path(app);
     let requirements_pose_body = std::fs::read_to_string(&requirements_pose).unwrap_or_default();
-    // Apple Silicon MLX video inference deps — macOS-only; empty body elsewhere so
-    // the marker stays stable and the Windows/Linux PyTorch worker is untouched.
-    #[cfg(target_os = "macos")]
-    let requirements_mlx = requirements_mlx_path(app);
-    #[cfg(target_os = "macos")]
-    let requirements_mlx_body = std::fs::read_to_string(&requirements_mlx).unwrap_or_default();
-    #[cfg(not(target_os = "macos"))]
-    let requirements_mlx_body = String::new();
     let marker = marker_path();
     let expected = format!(
-        "v{SETUP_VERSION}\n{requirements_body}\n# ltx\n{requirements_ltx_body}\n# mlx\n{requirements_mlx_body}\n# instantid\n{requirements_instantid_body}\n# pulid_flux\n{requirements_pulid_flux_body}\n# pose\n{requirements_pose_body}"
+        "v{SETUP_VERSION}\n{requirements_body}\n# ltx\n{requirements_ltx_body}\n# instantid\n{requirements_instantid_body}\n# pulid_flux\n{requirements_pulid_flux_body}\n# pose\n{requirements_pose_body}"
     );
 
     if python.exists() {
@@ -665,12 +607,6 @@ async fn provision_venv(app: &AppHandle) -> Result<(), String> {
     let mut requirement_files = vec![requirements.clone()];
     if requirements_ltx.exists() {
         requirement_files.push(requirements_ltx.clone());
-    }
-    // MLX deps (Apple Silicon only): the native-MLX LTX/Wan video path. Resolved
-    // in the same uv pass so transformers/numpy stay on one ABI-compatible set.
-    #[cfg(target_os = "macos")]
-    if requirements_mlx.exists() {
-        requirement_files.push(requirements_mlx.clone());
     }
     // InstantID extras resolve cleanly alongside the pinned torch/diffusers stack
     // (validated on the torch 2.8 / diffusers 0.39 worker venv) — add them to the
@@ -800,83 +736,6 @@ async fn provision_lens_venv(app: &AppHandle) -> Result<(), String> {
     Ok(())
 }
 
-/// Provision the separate mflux FLUX MLX sidecar venv (mflux 0.17.x + its bundled
-/// torch/transformers/huggingface_hub stack). macOS-only — mflux is Apple MLX,
-/// and the dep stack conflicts with the main worker's transformers 4.57 +
-/// huggingface_hub<1 pins (held there for native LTX-2.3 / Wan / FluxDiffusersAdapter).
-/// Runs in the BACKGROUND after the app is up so the install never blocks launch.
-/// Idempotent via its own marker. Failures are non-fatal: the MLX FLUX backend
-/// stays unavailable (MlxFluxAdapter raises a clear error, dispatch falls back
-/// to FluxDiffusersAdapter on the torch path). Opt out with
-/// SCENEWORKS_DISABLE_MLX_FLUX=1.
-///
-/// sc-1970. Spike sc-1969 measured mflux bf16 ~30% faster per step than the
-/// torch FluxDiffusersAdapter, Q4/Q8 same speed with significant peak-memory
-/// reduction (~41.6 GB at Q4 vs ~65.8 GB at bf16 for 1024² 4-step schnell).
-#[cfg(target_os = "macos")]
-async fn provision_mlx_flux_venv(app: &AppHandle) -> Result<(), String> {
-    if std::env::var("SCENEWORKS_DISABLE_MLX_FLUX")
-        .map(|value| matches!(value.trim(), "1" | "true" | "yes"))
-        .unwrap_or(false)
-    {
-        return Ok(());
-    }
-    let requirements = requirements_mlx_flux_path(app);
-    if !requirements.exists() {
-        // Older worker checkout without the requirements file; the MLX FLUX
-        // backend stays off and the torch path remains the default on macOS.
-        return Ok(());
-    }
-    let body = std::fs::read_to_string(&requirements)
-        .map_err(|error| format!("read requirements-mlx-flux: {error}"))?;
-    let venv = mlx_flux_venv_dir();
-    let python = venv_python(&venv);
-    let marker = mlx_flux_marker_path();
-    let expected = format!("v{SETUP_VERSION}\n{body}");
-
-    if python.exists() {
-        if let Ok(found) = std::fs::read_to_string(&marker) {
-            if found == expected {
-                return Ok(());
-            }
-        }
-    }
-    if let Some(parent) = venv.parent() {
-        std::fs::create_dir_all(parent).map_err(|error| format!("create python dir: {error}"))?;
-    }
-    if !python.exists() {
-        run_uv(
-            app,
-            vec![
-                "venv".to_owned(),
-                "--clear".to_owned(),
-                "--python".to_owned(),
-                "3.12".to_owned(),
-                venv.to_string_lossy().into_owned(),
-            ],
-        )
-        .await?;
-    }
-    // mflux pulls its own torch (>=2.7), transformers (>=5), huggingface_hub
-    // (>=1.1.6), and mlx — so a single -r install is enough; no torch index
-    // override (Apple Silicon MPS wheels are on default PyPI).
-    run_uv(
-        app,
-        vec![
-            "pip".to_owned(),
-            "install".to_owned(),
-            "--python".to_owned(),
-            python.to_string_lossy().into_owned(),
-            "-r".to_owned(),
-            requirements.to_string_lossy().into_owned(),
-        ],
-    )
-    .await?;
-    std::fs::write(&marker, &expected)
-        .map_err(|error| format!("write mlx-flux marker: {error}"))?;
-    Ok(())
-}
-
 /// Resolve the ffmpeg binary bundled with the venv's imageio-ffmpeg, used by the
 /// API's in-process utility worker for timeline export / frame extraction. The
 /// desktop ships no system ffmpeg, so without this those jobs fail. Returns None
@@ -948,24 +807,9 @@ fn spawn_api(app: &AppHandle) -> Result<(), String> {
         "SCENEWORKS_PYTHON",
         venv_python(&venv_dir()).to_string_lossy().to_string(),
     );
-    // FLUX.2-klein single-file fine-tune conversion (sc-2235) runs in the mlx-flux
-    // sidecar venv via the scene_worker converter script — point the in-process
-    // utility worker at both, mirroring how the Python image adapter resolves them.
-    command = command
-        .env(
-            "SCENEWORKS_MLX_FLUX_PYTHON",
-            venv_python(&mlx_flux_venv_dir())
-                .to_string_lossy()
-                .to_string(),
-        )
-        .env(
-            "SCENEWORKS_MLX_FLUX_CONVERT",
-            worker_src_dir(app)
-                .join("scene_worker")
-                .join("mlx_flux_convert.py")
-                .to_string_lossy()
-                .to_string(),
-        );
+    // FLUX.2-klein true_v2 single-file conversion is now in-process Rust/MLX
+    // (mlx_gen_flux2::convert_and_assemble, sc-3136) — no sidecar venv / converter
+    // script, so no SCENEWORKS_MLX_FLUX_* env wiring.
     let (mut events, child) = command
         .spawn()
         .map_err(|error| format!("spawn api: {error}"))?;
@@ -1034,6 +878,15 @@ fn gate_window(app: AppHandle) {
                             let _ = window.navigate(url);
                         }
                     }
+                    #[cfg(target_os = "macos")]
+                    {
+                        supervise_worker(app.clone(), port);
+                        // Apple-Silicon MLX GPU worker (sc-3289): MLX-eligible
+                        // image/video jobs run here on the in-process Rust
+                        // mlx-gen engine instead of the Python torch/MPS path.
+                        supervise_mlx_worker(app, port);
+                    }
+                    #[cfg(not(target_os = "macos"))]
                     supervise_worker(app, port);
                     return;
                 }
@@ -1115,17 +968,6 @@ fn supervise_worker(app: AppHandle, api_port: u16) {
                 .env(
                     "SCENEWORKS_LENS_PYTHON",
                     venv_python(&lens_venv_dir()).to_string_lossy().to_string(),
-                )
-                // Point MlxFluxAdapter at the mflux sidecar venv interpreter.
-                // The adapter existence-checks it at job time so this is safe
-                // even while the venv is still provisioning in the background
-                // (and on Windows/Linux, where it never exists and dispatch
-                // falls back to the torch FluxDiffusersAdapter). sc-1970.
-                .env(
-                    "SCENEWORKS_MLX_FLUX_PYTHON",
-                    venv_python(&mlx_flux_venv_dir())
-                        .to_string_lossy()
-                        .to_string(),
                 )
                 .env(
                     "SCENEWORKS_DATA_DIR",
@@ -1209,6 +1051,146 @@ fn supervise_worker(app: AppHandle, api_port: u16) {
     });
 }
 
+/// Spawn and supervise the Apple-Silicon MLX GPU worker (sc-3289): the same
+/// `sceneworks-api` sidecar binary re-launched in worker mode
+/// (`SCENEWORKS_WORKER_ONLY=1`) with `SCENEWORKS_GPU_ID=mlx`, so MLX-eligible
+/// image/video jobs run on the in-process Rust mlx-gen engine instead of the
+/// Python torch/MPS path. A crash-isolated sibling of the API process; restarted
+/// with exponential backoff while the app is open. Output goes to mlx-worker.log.
+///
+/// Without this worker registered, `jobs_store::should_defer_image_to_mlx_worker`
+/// has nowhere to defer and the Python `mps` worker is the fallback — which is
+/// why image/video jobs reported MPS before this landed.
+#[cfg(target_os = "macos")]
+fn supervise_mlx_worker(app: AppHandle, api_port: u16) {
+    std::thread::spawn(move || {
+        let log_path = logs_dir().join("mlx-worker.log");
+        let api_url = format!("http://127.0.0.1:{api_port}");
+        // Match the API sidecar's HF cache root so the engine reads the same
+        // downloaded weights the catalog tracks.
+        let hf_home = huggingface_home().to_string_lossy().to_string();
+        // Unique per launch (distinct prefix from the Python `worker-local-*` and
+        // the in-process `rust-utility-worker`) so the three workers never collide
+        // in the shared jobs.db.
+        let worker_id = format!(
+            "mlx-worker-local-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|elapsed| elapsed.as_millis())
+                .unwrap_or_default()
+        );
+        let mut backoff = 1u64;
+        loop {
+            if app.state::<Managed>().shutting_down.load(Ordering::SeqCst) {
+                return;
+            }
+            let sidecar = match app.shell().sidecar("sceneworks-api") {
+                Ok(command) => command,
+                Err(error) => {
+                    append_log(
+                        &log_path,
+                        &format!("[desktop] mlx worker: locate sidecar failed: {error}\n"),
+                    );
+                    return;
+                }
+            };
+            let mut command = sidecar
+                // Dispatches `main` to `run_worker()` (HTTP API never starts).
+                .env("SCENEWORKS_WORKER_ONLY", "1")
+                .env("SCENEWORKS_GPU_ID", "mlx")
+                .env("SCENEWORKS_WORKER_ID", &worker_id)
+                .env("SCENEWORKS_API_URL", &api_url)
+                .env("HF_HOME", &hf_home)
+                // Parent-death watchdog (run_worker() honours this): a force-quit
+                // self-terminates the worker so its multi-GB MLX model isn't
+                // orphaned to launchd.
+                .env("SCENEWORKS_PARENT_PID", std::process::id().to_string())
+                .env(
+                    "SCENEWORKS_DATA_DIR",
+                    resolved_data_dir().to_string_lossy().to_string(),
+                )
+                .env(
+                    "SCENEWORKS_CONFIG_DIR",
+                    config_dir().to_string_lossy().to_string(),
+                );
+            // The worker muxes generated video with ffmpeg; the desktop ships no
+            // system ffmpeg, so point it at the bundled binary (as spawn_api does).
+            if let Some(ffmpeg) = resolve_bundled_ffmpeg() {
+                command = command.env("SCENEWORKS_FFMPEG", ffmpeg);
+            }
+            if let Some(token) = crate::settings::read_hf_token() {
+                command = command.env("HF_TOKEN", token);
+            }
+            if let Some(credentials) = crate::settings::credentials_env_json() {
+                command = command.env("SCENEWORKS_CREDENTIALS", credentials);
+            }
+            let spawned = command.spawn();
+            let (mut events, child) = match spawned {
+                Ok(pair) => pair,
+                Err(error) => {
+                    append_log(
+                        &log_path,
+                        &format!("[desktop] mlx worker spawn failed: {error}\n"),
+                    );
+                    std::thread::sleep(Duration::from_secs(backoff));
+                    backoff = (backoff * 2).min(30);
+                    continue;
+                }
+            };
+            record_mlx_worker_pid(&app, Some(child.pid()));
+            app.state::<Managed>()
+                .mlx_worker
+                .lock()
+                .expect("mlx worker lock")
+                .replace(child);
+            let started = Instant::now();
+            loop {
+                match tauri::async_runtime::block_on(events.recv()) {
+                    Some(CommandEvent::Stdout(bytes)) | Some(CommandEvent::Stderr(bytes)) => {
+                        append_log(&log_path, &String::from_utf8_lossy(&bytes));
+                    }
+                    Some(CommandEvent::Terminated(payload)) => {
+                        append_log(
+                            &log_path,
+                            &format!(
+                                "[desktop] mlx worker terminated: code={:?} signal={:?}\n",
+                                payload.code, payload.signal
+                            ),
+                        );
+                        break;
+                    }
+                    Some(CommandEvent::Error(error)) => {
+                        append_log(&log_path, &format!("[desktop] mlx worker error: {error}\n"));
+                        break;
+                    }
+                    None => break,
+                    _ => {}
+                }
+            }
+            let _ = app
+                .state::<Managed>()
+                .mlx_worker
+                .lock()
+                .expect("mlx worker lock")
+                .take();
+            record_mlx_worker_pid(&app, None);
+            if app.state::<Managed>().shutting_down.load(Ordering::SeqCst) {
+                return;
+            }
+            if started.elapsed() > Duration::from_secs(20) {
+                backoff = 1;
+            }
+            append_log(
+                &log_path,
+                &format!("[desktop] restarting mlx worker in {backoff}s\n"),
+            );
+            std::thread::sleep(Duration::from_secs(backoff));
+            backoff = (backoff * 2).min(30);
+        }
+    });
+}
+
 #[cfg(unix)]
 fn pid_alive(pid: u32) -> bool {
     nix::sys::signal::kill(nix::unistd::Pid::from_raw(pid as i32), None).is_ok()
@@ -1246,6 +1228,14 @@ fn record_worker_pid(app: &AppHandle, pid: Option<u32>) {
     let state = app.state::<Managed>();
     let mut pids = state.pids.lock().expect("pids lock");
     pids.worker = pid;
+    write_sidecar_pidfile(&pids);
+}
+
+#[cfg(target_os = "macos")]
+fn record_mlx_worker_pid(app: &AppHandle, pid: Option<u32>) {
+    let state = app.state::<Managed>();
+    let mut pids = state.pids.lock().expect("pids lock");
+    pids.mlx_worker = pid;
     write_sidecar_pidfile(&pids);
 }
 
@@ -1312,7 +1302,10 @@ pub fn reap_stale_sidecars() {
         return;
     };
     let pids: SidecarPids = serde_json::from_slice(&bytes).unwrap_or_default();
-    for pid in [pids.api, pids.worker].into_iter().flatten() {
+    for pid in [pids.api, pids.worker, pids.mlx_worker]
+        .into_iter()
+        .flatten()
+    {
         if is_our_sidecar(pid) {
             kill_pid(pid);
         }
@@ -1320,17 +1313,18 @@ pub fn reap_stale_sidecars() {
     let _ = std::fs::remove_file(&path);
 }
 
-/// Begin graceful shutdown: stop the Python worker then the API sidecar. On Unix
-/// this sends SIGTERM and waits up to the grace period before force-killing; on
-/// Windows it force-kills (CTRL_BREAK handling is a Windows-session refinement).
-/// Returns true if shutdown was initiated (caller should prevent the immediate
-/// exit), false if it was already in progress.
+/// Begin graceful shutdown: stop the Python + MLX workers then the API sidecar.
+/// On Unix this sends SIGTERM and waits up to the grace period before
+/// force-killing; on Windows it force-kills (CTRL_BREAK handling is a
+/// Windows-session refinement). Returns true if shutdown was initiated (caller
+/// should prevent the immediate exit), false if it was already in progress.
 pub fn begin_shutdown(app: &AppHandle) -> bool {
     let managed = app.state::<Managed>();
     if managed.shutting_down.swap(true, Ordering::SeqCst) {
         return false;
     }
     let worker = managed.worker.lock().expect("worker lock").take();
+    let mlx_worker = managed.mlx_worker.lock().expect("mlx worker lock").take();
     let api_child = managed.api.lock().expect("api lock").take();
     let handle = app.clone();
     std::thread::spawn(move || {
@@ -1342,9 +1336,10 @@ pub fn begin_shutdown(app: &AppHandle) -> bool {
                 .unwrap_or(10)
                 .clamp(1, 30);
             let worker_pid = worker.as_ref().map(CommandChild::pid);
+            let mlx_worker_pid = mlx_worker.as_ref().map(CommandChild::pid);
             let api_pid = api_child.as_ref().map(CommandChild::pid);
-            // SIGTERM the worker first, then the API.
-            for pid in [worker_pid, api_pid].into_iter().flatten() {
+            // SIGTERM the workers first, then the API.
+            for pid in [worker_pid, mlx_worker_pid, api_pid].into_iter().flatten() {
                 let _ = nix::sys::signal::kill(
                     nix::unistd::Pid::from_raw(pid as i32),
                     nix::sys::signal::Signal::SIGTERM,
@@ -1352,7 +1347,11 @@ pub fn begin_shutdown(app: &AppHandle) -> bool {
             }
             let deadline = Instant::now() + Duration::from_secs(grace);
             while Instant::now() < deadline {
-                if ![worker_pid, api_pid].into_iter().flatten().any(pid_alive) {
+                if ![worker_pid, mlx_worker_pid, api_pid]
+                    .into_iter()
+                    .flatten()
+                    .any(pid_alive)
+                {
                     break;
                 }
                 std::thread::sleep(Duration::from_millis(100));
@@ -1360,6 +1359,9 @@ pub fn begin_shutdown(app: &AppHandle) -> bool {
         }
         // Force-kill anything still alive.
         if let Some(child) = worker {
+            let _ = child.kill();
+        }
+        if let Some(child) = mlx_worker {
             let _ = child.kill();
         }
         if let Some(child) = api_child {
@@ -1413,23 +1415,6 @@ async fn run_startup(app: AppHandle) {
                 append_log(
                     &logs_dir().join("lens-setup.log"),
                     &format!("[desktop] lens venv provisioning failed: {error}\n"),
-                );
-            }
-        });
-    }
-    // Same pattern for the mflux FLUX MLX sidecar venv (macOS-only). mflux's
-    // transformers>=5 + huggingface_hub>=1 stack cannot coexist with the main
-    // worker venv's transformers 4.57 + huggingface_hub<1 pins. Non-fatal:
-    // failures mean MlxFluxAdapter stays unavailable and the worker keeps
-    // routing FLUX jobs to FluxDiffusersAdapter on the torch/MPS path. sc-1970.
-    #[cfg(target_os = "macos")]
-    {
-        let mlx_flux_app = app.clone();
-        tauri::async_runtime::spawn(async move {
-            if let Err(error) = provision_mlx_flux_venv(&mlx_flux_app).await {
-                append_log(
-                    &logs_dir().join("mlx-flux-setup.log"),
-                    &format!("[desktop] mlx-flux venv provisioning failed: {error}\n"),
                 );
             }
         });

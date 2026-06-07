@@ -709,6 +709,12 @@ impl JobsStore {
         if should_defer_auto_gpu_claim(&transaction, &queued, &worker)? {
             return Ok(None);
         }
+        if should_defer_image_to_mlx_worker(&transaction, &queued, &worker)?
+            || should_defer_video_to_mlx_worker(&transaction, &queued, &worker)?
+            || should_defer_training_to_mlx_worker(&transaction, &queued, &worker)?
+        {
+            return Ok(None);
+        }
 
         let assigned_gpu = if is_non_gpu_job_type(queued.job_type.as_str()) {
             "cpu".to_owned()
@@ -1444,6 +1450,17 @@ fn should_defer_auto_gpu_claim(
     {
         return Ok(false);
     }
+    // The in-process `mlx` worker is the designated home for the jobs it claims
+    // (a non-mlx worker defers MLX-eligible jobs to it via
+    // `should_defer_image_to_mlx_worker` & siblings). It must never hand one of
+    // those jobs to a "healthier" non-mlx GPU through this health-based dispatch:
+    // on Apple Silicon the `mlx` and `mps` workers share the same physical GPU,
+    // and that worker would only defer the job straight back, deadlocking it in
+    // the queue. Keeping the mlx worker out of the auto-GPU health comparison
+    // breaks that cycle regardless of whether it reports utilization.
+    if worker.gpu_id.eq_ignore_ascii_case("mlx") {
+        return Ok(false);
+    }
     let current_score = dispatch_score(job, worker);
     if !current_score.has_utilization {
         return Ok(false);
@@ -1473,6 +1490,92 @@ fn should_defer_auto_gpu_claim(
     Ok(false)
 }
 
+/// Epic 3018 routing — prefer the in-process MLX worker for MLX-eligible image
+/// jobs. A non-mlx GPU worker defers an `auto` `image_generate` job the mlx
+/// worker can run when an idle `mlx` worker exists, so the fast NAX path claims
+/// it. When no mlx worker is registered (Windows/Linux, or the mlx worker is
+/// down), nothing defers and the torch worker is the fallback — a job is never
+/// stuck. An explicit (non-`auto`) GPU choice is always honoured, never deferred.
+fn should_defer_image_to_mlx_worker(
+    connection: &Connection,
+    job: &JobSnapshot,
+    worker: &WorkerSnapshot,
+) -> JobsStoreResult<bool> {
+    if job.requested_gpu != "auto"
+        || worker.gpu_id.eq_ignore_ascii_case("mlx")
+        || !job_is_mlx_eligible(job)
+    {
+        return Ok(false);
+    }
+    idle_mlx_worker_can_claim(connection, job, worker)
+}
+
+/// Video sibling of [`should_defer_image_to_mlx_worker`] (sc-3036): a non-mlx GPU
+/// worker defers an `auto` MLX-eligible `video_generate` job when an idle `mlx`
+/// worker can run it. Same fallback guarantees — no mlx worker / explicit GPU →
+/// never deferred.
+fn should_defer_video_to_mlx_worker(
+    connection: &Connection,
+    job: &JobSnapshot,
+    worker: &WorkerSnapshot,
+) -> JobsStoreResult<bool> {
+    if job.requested_gpu != "auto"
+        || worker.gpu_id.eq_ignore_ascii_case("mlx")
+        || !video_job_is_mlx_eligible(job)
+    {
+        return Ok(false);
+    }
+    idle_mlx_worker_can_claim(connection, job, worker)
+}
+
+/// Training sibling of [`should_defer_image_to_mlx_worker`] (epic 3039): a non-mlx
+/// GPU worker defers an `auto` MLX-eligible `lora_train` job when an idle `mlx`
+/// worker can run it, so the native Rust trainer (`mlx_gen::load_trainer`) claims
+/// it. Same fallback guarantees — no mlx worker registered (Windows/Linux, or the
+/// mlx worker is down) → nothing defers and the Python torch trainer runs it; an
+/// explicit (non-`auto`) GPU choice is always honoured. The torch trainers stay
+/// the cross-platform path + the Mac fallback (sc-3049), so a job is never stuck.
+fn should_defer_training_to_mlx_worker(
+    connection: &Connection,
+    job: &JobSnapshot,
+    worker: &WorkerSnapshot,
+) -> JobsStoreResult<bool> {
+    if job.requested_gpu != "auto"
+        || worker.gpu_id.eq_ignore_ascii_case("mlx")
+        || !training_job_is_mlx_eligible(job)
+    {
+        return Ok(false);
+    }
+    idle_mlx_worker_can_claim(connection, job, worker)
+}
+
+/// Whether an idle `mlx` worker (other than `worker`) exists that supports `job`
+/// and has no active GPU job — the shared tail of the image/video MLX deferral.
+fn idle_mlx_worker_can_claim(
+    connection: &Connection,
+    job: &JobSnapshot,
+    worker: &WorkerSnapshot,
+) -> JobsStoreResult<bool> {
+    let mut statement = connection.prepare(
+        "
+        select * from workers
+         where id != ?1
+           and gpu_id = 'mlx'
+           and status = 'idle'
+         order by id
+        ",
+    )?;
+    let candidates = collect_workers(statement.query_map(params![worker.id], row_to_worker)?)?;
+    for candidate in candidates {
+        if worker_supports_job(&candidate, job)
+            && !active_gpu_job_exists(connection, &candidate.gpu_id)?
+        {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
 fn active_gpu_job_exists(connection: &Connection, gpu_id: &str) -> JobsStoreResult<bool> {
     Ok(connection
         .query_row(
@@ -1493,9 +1596,413 @@ fn active_gpu_job_exists(connection: &Connection, gpu_id: &str) -> JobsStoreResu
         .is_some())
 }
 
+/// Models the in-process Rust MLX worker generates today, by id. This set grows
+/// one family story at a time as each lands real generation in
+/// `sceneworks-worker::image_jobs` — sc-3022 Z-Image, sc-3023 FLUX.1, sc-3024 Qwen,
+/// sc-3025 FLUX.2, sc-3026 SDXL (live). A model id absent here is never routed to the
+/// mlx worker, so the Python torch path stays authoritative for it.
+const MLX_ROUTED_MODELS: &[&str] = &[
+    "z_image_turbo",
+    "flux_schnell",
+    "flux_dev",
+    "qwen_image",
+    "flux2_klein_9b",
+    "flux2_klein_9b_kv",
+    "flux2_klein_9b_true_v2",
+    "sdxl",
+    "realvisxl",
+];
+
+/// Epic 3018 routing — does this image job belong on the in-process Rust MLX
+/// worker (vs the Python torch worker)? This lifts the per-family Python
+/// `_should_route_*_to_mlx` decision (apps/worker/scene_worker/image_adapters.py)
+/// up to the API claim layer, minus the worker-local gates (platform / disable
+/// env / sidecar presence) — those are now expressed by whether an `mlx` worker
+/// is registered and idle (see `should_defer_image_to_mlx_worker`).
+///
+/// Routing-layer caveat: LyCORIS detection uses only the LoRA's *recorded*
+/// `networkType`. The Python predicate also sniffs the safetensors header, but
+/// the API has no access to the LoRA files; the mlx worker's own adapter
+/// classifier (`image_jobs::classify_adapter`, sc-3022) is the backstop for an
+/// unstamped third-party LyCORIS file that slips through.
+fn image_job_is_mlx_eligible(job: &JobSnapshot) -> bool {
+    if !matches!(job.job_type, JobType::ImageGenerate) {
+        return false;
+    }
+    let Some(model) = job.payload.get("model").and_then(Value::as_str) else {
+        return false;
+    };
+    if !MLX_ROUTED_MODELS.contains(&model) {
+        return false;
+    }
+    match model {
+        "z_image_turbo" => z_image_mlx_eligible(&job.payload),
+        "flux_schnell" | "flux_dev" => flux_mlx_eligible(&job.payload),
+        "qwen_image" => qwen_mlx_eligible(&job.payload),
+        "flux2_klein_9b" | "flux2_klein_9b_kv" | "flux2_klein_9b_true_v2" => {
+            flux2_mlx_eligible(&job.payload)
+        }
+        "sdxl" | "realvisxl" => sdxl_mlx_eligible(&job.payload),
+        // Every model in MLX_ROUTED_MODELS must have an arm.
+        _ => false,
+    }
+}
+
+/// Does this `image_detail` job belong on the in-process Rust MLX worker? sc-3060 (epic 3041)
+/// ports the tile-ControlNet detail refine onto the engine. Detail is SDXL-family only
+/// (`sdxl` / `realvisxl`, the detail-capable backbones; the payload defaults to `realvisxl`),
+/// and a third-party LyCORIS LoRA falls back to torch like every other SDXL shape. On
+/// Windows/Linux no `mlx` worker exists, so detail stays on the Python torch path.
+fn image_detail_mlx_eligible(job: &JobSnapshot) -> bool {
+    if !matches!(job.job_type, JobType::ImageDetail) {
+        return false;
+    }
+    let model = job
+        .payload
+        .get("model")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or("realvisxl");
+    matches!(model, "sdxl" | "realvisxl") && !request_has_lycoris_lora(&job.payload)
+}
+
+/// Whether the in-process MLX worker can serve this GPU job (image_generate or image_detail).
+fn job_is_mlx_eligible(job: &JobSnapshot) -> bool {
+    image_job_is_mlx_eligible(job) || image_detail_mlx_eligible(job)
+}
+
+/// SDXL MLX-routing conditions. sc-3026 brought txt2img + LoRA; sc-3060 (epic 3041) adds the
+/// advanced shapes the Rust `mlx-gen-sdxl` engine now handles — reference/IP-Adapter, img2img
+/// `edit_image`, masked inpaint, and outpaint — so they route to the in-process MLX worker on
+/// Mac instead of the Python torch `SdxlDiffusersAdapter`. The torch path stays authoritative
+/// on Windows/Linux (no `mlx` worker registered → nothing defers) and as the Mac fallback.
+/// A third-party LyCORIS LoRA still falls back to torch (the engine/worker apply LoRA + peft
+/// LoKr natively, but not arbitrary LyCORIS); unlike the old Python gate, peft LoKr stays on MLX.
+/// `image_detail` is a separate job type with its own routing (see `image_detail_mlx_eligible`).
+fn sdxl_mlx_eligible(payload: &Map<String, Value>) -> bool {
+    !request_has_lycoris_lora(payload)
+}
+
+/// FLUX.2-klein MLX-routing conditions. FLUX.2-klein is an **MLX-only** family (no
+/// torch backend), so everything it does runs on MLX: txt2img (sc-3025) AND
+/// edit/reference + KV-cache + multi-reference (sc-3029). The only exclusion is a
+/// third-party LyCORIS LoRA neither the engine nor the worker can apply.
+fn flux2_mlx_eligible(payload: &Map<String, Value>) -> bool {
+    !request_has_lycoris_lora(payload)
+}
+
+/// Qwen-Image (sc-3024) MLX-routing conditions, ported from `_should_route_qwen_to_mlx`:
+/// text-to-image only. A reference (character/edit flow) and `edit_image` stay on the
+/// Python torch path; a strict pose set stays on torch too — the Qwen strict-pose tier
+/// is a diffusers `QwenImageControlNet` (sc-2291), which the MLX path has no equivalent
+/// for (it would silently drop the poses). A third-party LyCORIS LoRA also falls back
+/// to torch (engine + worker apply LoRA + peft LoKr, but not arbitrary LyCORIS).
+fn qwen_mlx_eligible(payload: &Map<String, Value>) -> bool {
+    if payload.get("mode").and_then(Value::as_str) == Some("edit_image") {
+        return false;
+    }
+    let has_reference = payload
+        .get("referenceAssetId")
+        .and_then(Value::as_str)
+        .is_some_and(|value| !value.trim().is_empty());
+    if has_reference {
+        return false;
+    }
+    let has_poses = payload
+        .get("advanced")
+        .and_then(Value::as_object)
+        .and_then(|advanced| advanced.get("poses"))
+        .and_then(Value::as_array)
+        .is_some_and(|poses| !poses.is_empty());
+    if has_poses {
+        return false;
+    }
+    !request_has_lycoris_lora(payload)
+}
+
+/// FLUX.1 (sc-3023) MLX-routing conditions, ported from `_should_route_flux_to_mlx`:
+/// text-to-image only — FLUX.1 reference/IP-Adapter and `edit_image` stay on the
+/// Python torch path (`FluxDiffusersAdapter`). A third-party LyCORIS LoRA also falls
+/// back to torch: the engine + the worker's `classify_adapter` apply LoRA and peft
+/// LoKr natively, but not arbitrary LyCORIS (which the worker would reject).
+fn flux_mlx_eligible(payload: &Map<String, Value>) -> bool {
+    if payload.get("mode").and_then(Value::as_str) == Some("edit_image") {
+        return false;
+    }
+    let has_reference = payload
+        .get("referenceAssetId")
+        .and_then(Value::as_str)
+        .is_some_and(|value| !value.trim().is_empty());
+    if has_reference {
+        return false;
+    }
+    !request_has_lycoris_lora(payload)
+}
+
+/// Z-Image (sc-3022) MLX-routing conditions, ported from
+/// `_should_route_z_image_to_mlx`: text-to-image only; a reference asset is
+/// allowed only alongside a strict pose set (the Fun-ControlNet pose tier lives
+/// only on MLX — sc-2257/sc-2328, so a reference+pose job must NOT divert to
+/// torch, which would honour count while dropping the poses); a third-party
+/// LyCORIS LoRA falls back to torch while SceneWorks peft LoKr stays on MLX
+/// (sc-2216).
+fn z_image_mlx_eligible(payload: &Map<String, Value>) -> bool {
+    if payload.get("mode").and_then(Value::as_str) == Some("edit_image") {
+        return false;
+    }
+    let has_reference = payload
+        .get("referenceAssetId")
+        .and_then(Value::as_str)
+        .is_some_and(|value| !value.trim().is_empty());
+    let has_poses = payload
+        .get("advanced")
+        .and_then(Value::as_object)
+        .and_then(|advanced| advanced.get("poses"))
+        .and_then(Value::as_array)
+        .is_some_and(|poses| !poses.is_empty());
+    if has_reference && !has_poses {
+        return false;
+    }
+    !request_has_lycoris_lora(payload)
+}
+
+/// True when any LoRA in the request is a third-party LyCORIS adapter, by its
+/// *recorded* `networkType` (`networkType`, or `compatibility.networkType`). A
+/// `lokr` stamp is SceneWorks peft LoKr, which applies natively on the MLX
+/// Z-Image path (sc-2216) and does NOT force torch. Mirrors the worker's
+/// `_request_has_lycoris_lora` minus the safetensors-header sniff (the API has
+/// no file access — see `image_job_is_mlx_eligible`).
+fn request_has_lycoris_lora(payload: &Map<String, Value>) -> bool {
+    let Some(loras) = payload.get("loras").and_then(Value::as_array) else {
+        return false;
+    };
+    loras.iter().any(|lora| {
+        lora.as_object()
+            .and_then(|lora| {
+                lora.get("networkType").and_then(Value::as_str).or_else(|| {
+                    lora.get("compatibility")
+                        .and_then(Value::as_object)
+                        .and_then(|compat| compat.get("networkType"))
+                        .and_then(Value::as_str)
+                })
+            })
+            .is_some_and(|recorded| recorded.trim().eq_ignore_ascii_case("lycoris"))
+    })
+}
+
+/// Whether any request LoRA records `networkType == "lokr"` (SceneWorks peft LoKr).
+/// Sibling of [`request_has_lycoris_lora`]; used by the video routing to keep a
+/// LoKr-on-Wan job on the torch path (see [`video_job_is_mlx_eligible`]).
+fn request_has_lokr_lora(payload: &Map<String, Value>) -> bool {
+    let Some(loras) = payload.get("loras").and_then(Value::as_array) else {
+        return false;
+    };
+    loras.iter().any(|lora| {
+        lora.as_object()
+            .and_then(|lora| {
+                lora.get("networkType").and_then(Value::as_str).or_else(|| {
+                    lora.get("compatibility")
+                        .and_then(Value::as_object)
+                        .and_then(|compat| compat.get("networkType"))
+                        .and_then(Value::as_str)
+                })
+            })
+            .is_some_and(|recorded| recorded.trim().eq_ignore_ascii_case("lokr"))
+    })
+}
+
+/// Video models the in-process Rust MLX worker generates today (sc-3034 Wan2.2,
+/// sc-3035 LTX-2.3 + audio). Mirrors `MlxVideoAdapter._supported_models`. A model
+/// id absent here is never routed to the mlx worker — the Python torch path stays
+/// authoritative for it (and for SVD, which has no MLX crate).
+const VIDEO_MLX_ROUTED_MODELS: &[&str] = &[
+    "ltx_2_3",
+    "ltx_2_3_eros",
+    "wan_2_2",
+    "wan_2_2_t2v_14b",
+    "wan_2_2_i2v_14b",
+];
+
+/// Whether `model` is a Wan2.2 video family id (vs LTX).
+fn is_wan_video_model(model: &str) -> bool {
+    model.starts_with("wan")
+}
+
+/// Epic 3018 routing (sc-3036, the video sibling of [`image_job_is_mlx_eligible`]):
+/// does this video job belong on the in-process Rust MLX worker? Encodes today's
+/// Python `create_video_adapter` MLX-eligibility (video_adapters.py) at the claim
+/// layer, minus the worker-local gates (MPS presence / sidecar) — those are now
+/// expressed by whether an `mlx` worker is registered and idle (see
+/// [`should_defer_video_to_mlx_worker`]).
+///
+/// MLX covers **`text_to_video` + `image_to_video` on Wan/LTX only**. Everything
+/// else stays on the Python torch path: the advanced job types
+/// (`video_extend`/`video_bridge`/`person_replace`) and the advanced
+/// `video_generate` modes (`first_last_frame`/`replace_person`), SVD (no crate), a
+/// non-MLX model, a third-party LyCORIS LoRA (the mlx worker's `classify_adapter`
+/// rejects it), and **LoKr-on-Wan** (the diffusers-Wan path applies LoKr via PEFT;
+/// the mlx-video path can't — mirrors `create_video_adapter`). LoKr-on-LTX stays
+/// MLX (the torch LTX path has no LoKr loader; the Rust engine applies it natively).
+fn video_job_is_mlx_eligible(job: &JobSnapshot) -> bool {
+    // Only the base video_generate job type is MLX-eligible; the advanced job types
+    // (extend/bridge/person-replace) are torch-only.
+    if !matches!(job.job_type, JobType::VideoGenerate) {
+        return false;
+    }
+    let Some(model) = job.payload.get("model").and_then(Value::as_str) else {
+        return false;
+    };
+    if !VIDEO_MLX_ROUTED_MODELS.contains(&model) {
+        return false;
+    }
+    // Mode defaults to `image_to_video`, mirroring `video_request_from_job`.
+    let mode = job
+        .payload
+        .get("mode")
+        .and_then(Value::as_str)
+        .unwrap_or("image_to_video");
+    if !matches!(mode, "text_to_video" | "image_to_video") {
+        return false;
+    }
+    if request_has_lycoris_lora(&job.payload) {
+        return false;
+    }
+    if is_wan_video_model(model) && request_has_lokr_lora(&job.payload) {
+        return false;
+    }
+    true
+}
+
+/// SceneWorks training kernels with a native mlx-gen Rust trainer (epic 3039):
+/// the engine registers `z_image_turbo`/`sdxl`/`ltx_2_3`/`wan2_2_*` trainers, which
+/// the worker reaches via these SceneWorks kernel ids (the mlx worker maps kernel +
+/// base model → engine trainer id). `kolors_lora` (SDXL + ChatGLM3) and `lens_lora`
+/// (sidecar) have no mlx-gen crate, so they stay on the Python torch worker. A
+/// kernel absent here is never routed to the mlx worker.
+const MLX_ROUTED_TRAINING_KERNELS: &[&str] = &[
+    "z_image_lora",
+    "sdxl_lora",
+    "wan_lora",
+    "wan_moe_lora",
+    "ltx_mlx_lora",
+];
+
+/// Epic 3039 routing — does this `lora_train` job belong on the in-process Rust MLX
+/// worker (vs the Python torch worker)? The training sibling of
+/// [`image_job_is_mlx_eligible`]/[`video_job_is_mlx_eligible`]: the engine has a
+/// native trainer for the family. Both dry-run and real runs are eligible (the
+/// dry-run validates the same resolved plan). LoKr-on-Wan stays torch — the mlx Wan
+/// inference path can't load a Kronecker adapter, mirroring [`video_job_is_mlx_eligible`];
+/// LoKr on Z-Image/SDXL/LTX is fine (the Rust engine applies it natively).
+///
+/// The resolved plan is stamped into the job payload at submit (apps/rust-api
+/// training.rs) for both dry-run and real runs, so the kernel + network type are
+/// readable here without touching the dataset or weights.
+fn training_job_is_mlx_eligible(job: &JobSnapshot) -> bool {
+    if !matches!(job.job_type, JobType::LoraTrain) {
+        return false;
+    }
+    let Some(plan) = job.payload.get("plan").and_then(Value::as_object) else {
+        return false;
+    };
+    let kernel = plan
+        .get("target")
+        .and_then(Value::as_object)
+        .and_then(|target| target.get("kernel"))
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    if !MLX_ROUTED_TRAINING_KERNELS.contains(&kernel) {
+        return false;
+    }
+    // LoKr-on-Wan stays on the torch path (no Kronecker merge in the mlx Wan path).
+    if matches!(kernel, "wan_lora" | "wan_moe_lora") && training_plan_is_lokr(plan) {
+        return false;
+    }
+    true
+}
+
+/// Training kernels with NO non-Rust fallback — only the in-process Rust mlx worker
+/// can run them. `ltx_mlx_lora` was Apple-Silicon-only MLX-Python; epic 3039 (sc-3049)
+/// retired that Python trainer, leaving the native Rust LTX trainer as the sole path,
+/// so a non-mlx worker must refuse the job (leaving it queued for the mlx worker)
+/// rather than claim it and fail with "no training kernel". The torch families
+/// (z-image/sdxl/wan) keep their Python trainer as the Windows path + Mac fallback, so
+/// they are deliberately NOT listed here.
+const MLX_ONLY_TRAINING_KERNELS: &[&str] = &["ltx_mlx_lora"];
+
+/// Whether this `lora_train` job targets a kernel with no non-Rust fallback (see
+/// [`MLX_ONLY_TRAINING_KERNELS`]). Such a job can only run on the mlx worker.
+fn training_kernel_is_mlx_only(job: &JobSnapshot) -> bool {
+    if !matches!(job.job_type, JobType::LoraTrain) {
+        return false;
+    }
+    job.payload
+        .get("plan")
+        .and_then(Value::as_object)
+        .and_then(|plan| plan.get("target"))
+        .and_then(Value::as_object)
+        .and_then(|target| target.get("kernel"))
+        .and_then(Value::as_str)
+        .is_some_and(|kernel| MLX_ONLY_TRAINING_KERNELS.contains(&kernel))
+}
+
+/// Whether a resolved training plan requests a LoKr (Kronecker) adapter. The network
+/// type lives in the plan's `config.advanced.networkType` (SceneWorks training
+/// contract), distinct from a generation request's per-LoRA `networkType`.
+fn training_plan_is_lokr(plan: &Map<String, Value>) -> bool {
+    plan.get("config")
+        .and_then(Value::as_object)
+        .and_then(|config| config.get("advanced"))
+        .and_then(Value::as_object)
+        .and_then(|advanced| advanced.get("networkType"))
+        .and_then(Value::as_str)
+        .is_some_and(|value| value.trim().eq_ignore_ascii_case("lokr"))
+}
+
 fn worker_supports_job(worker: &WorkerSnapshot, job: &JobSnapshot) -> bool {
     if job_requires_gpu(&job.job_type) && worker.gpu_id.eq_ignore_ascii_case("cpu") {
         return false;
+    }
+    // Epic 3039 (sc-3049): a training kernel with no torch fallback (the retired Python
+    // MLX LTX trainer) runs only on the mlx worker — a non-mlx worker must refuse it
+    // (leaving it queued for the mlx worker) instead of claiming it and failing.
+    if !worker.gpu_id.eq_ignore_ascii_case("mlx") && training_kernel_is_mlx_only(job) {
+        return false;
+    }
+    // Epic 3018/3041 + sc-3036: the in-process MLX worker (gpu_id "mlx") serves a fixed
+    // set of model families. It must not claim a job that needs the torch path — a family
+    // not yet ported, an unsupported shape, or a third-party LyCORIS LoRA — those stay on
+    // the Python worker. Non-mlx workers are unaffected here; the *preference* to route
+    // eligible jobs to an idle mlx worker is a soft deferral in the claim path.
+    if worker.gpu_id.eq_ignore_ascii_case("mlx") {
+        // Image: sc-3026 txt2img/LoRA + sc-3060 reference/edit/inpaint/outpaint + image_detail.
+        if matches!(job.job_type, JobType::ImageGenerate | JobType::ImageDetail)
+            && !job_is_mlx_eligible(job)
+        {
+            return false;
+        }
+        // Video (sc-3036): the mlx worker claims only MLX-eligible `video_generate`
+        // jobs (Wan/LTX text_to_video / image_to_video). The advanced video job types
+        // (extend / bridge / person-replace) and torch-only `video_generate` cases
+        // (advanced modes, SVD, non-MLX model, LoKr-on-Wan) stay on the Python worker.
+        if matches!(
+            job.job_type,
+            JobType::VideoGenerate
+                | JobType::VideoExtend
+                | JobType::VideoBridge
+                | JobType::PersonReplace
+        ) && !video_job_is_mlx_eligible(job)
+        {
+            return false;
+        }
+        // Training (epic 3039): the mlx worker trains only the MLX-native families
+        // (z_image / sdxl / wan / ltx) via `mlx_gen::load_trainer`. `kolors_lora` +
+        // `lens_lora` (no mlx-gen crate) and LoKr-on-Wan stay on the Python torch
+        // worker. Applies to both dry-run and real runs.
+        if matches!(job.job_type, JobType::LoraTrain) && !training_job_is_mlx_eligible(job) {
+            return false;
+        }
     }
     let advertises = |capability: &str| {
         worker
@@ -1559,29 +2066,35 @@ struct DispatchScore {
 
 fn dispatch_score(job: &JobSnapshot, worker: &WorkerSnapshot) -> DispatchScore {
     let utilization = worker.utilization.as_ref();
-    let total = utilization
-        .and_then(|item| item.memory_total_mb)
-        .unwrap_or(0);
-    let used = utilization
-        .and_then(|item| item.memory_used_mb)
-        .unwrap_or(0);
+    let total = utilization.and_then(|item| item.memory_total_mb);
+    let used = utilization.and_then(|item| item.memory_used_mb);
+    let gpu_load = utilization.and_then(|item| item.gpu_load_percent);
+    // Derive free memory only from data the worker actually reported: an explicit
+    // free reading, or total-minus-used when both are present. A worker that
+    // reports no utilization at all must stay `has_utilization = false` so the
+    // auto-GPU dispatcher leaves it alone — the earlier `total.checked_sub(used)`
+    // with total/used defaulted to 0 yielded `Some(0)`, which scored a
+    // no-utilization worker as a real GPU with 0 MB free. That made the
+    // Apple-Silicon `mlx` worker (whose nvidia-smi probe finds nothing, so it
+    // never reports utilization) always look "worse" than the idle Python `mps`
+    // worker, so it deferred every MLX-eligible job to `mps` — which deferred the
+    // same job right back to `mlx` (`should_defer_image_to_mlx_worker`), leaving
+    // it queued on "Waiting for an available worker" forever (sc-3289 regression).
     let free = utilization
         .and_then(|item| item.memory_free_mb)
-        .or_else(|| total.checked_sub(used));
-    let memory_usage_percent = if total > 0 {
-        used as f64 / total as f64 * 100.0
-    } else {
-        0.0
+        .or_else(|| match (total, used) {
+            (Some(total), Some(used)) => total.checked_sub(used),
+            _ => None,
+        });
+    let memory_usage_percent = match (total, used) {
+        (Some(total), Some(used)) if total > 0 => used as f64 / total as f64 * 100.0,
+        _ => 0.0,
     };
     DispatchScore {
-        has_utilization: free.is_some()
-            || utilization.and_then(|item| item.gpu_load_percent).is_some()
-            || total > 0,
+        has_utilization: free.is_some() || gpu_load.is_some() || total.is_some(),
         free_memory_mb: free.unwrap_or(0) as f64,
         memory_usage_percent,
-        gpu_load_percent: utilization
-            .and_then(|item| item.gpu_load_percent)
-            .unwrap_or(0.0),
+        gpu_load_percent: gpu_load.unwrap_or(0.0),
         warm_model: job_matches_loaded_model(job, worker),
     }
 }
@@ -1741,5 +2254,193 @@ fn sort_json_value(value: &mut Value) {
             }
         }
         Value::Null | Value::Bool(_) | Value::Number(_) | Value::String(_) => {}
+    }
+}
+
+#[cfg(test)]
+mod mlx_routing_tests {
+    use super::{
+        flux2_mlx_eligible, flux_mlx_eligible, qwen_mlx_eligible, request_has_lycoris_lora,
+        sdxl_mlx_eligible, z_image_mlx_eligible,
+    };
+    use serde_json::{json, Map, Value};
+
+    fn object(value: Value) -> Map<String, Value> {
+        value.as_object().expect("test value is an object").clone()
+    }
+
+    #[test]
+    fn z_image_plain_txt2img_is_eligible() {
+        assert!(z_image_mlx_eligible(&object(
+            json!({ "prompt": "a misty fjord" })
+        )));
+        assert!(z_image_mlx_eligible(&Map::new()));
+    }
+
+    #[test]
+    fn z_image_edit_mode_is_not_eligible() {
+        assert!(!z_image_mlx_eligible(&object(
+            json!({ "mode": "edit_image" })
+        )));
+    }
+
+    #[test]
+    fn z_image_reference_without_poses_falls_back_to_torch() {
+        // A plain reference (no poses) has no Z-Image path on MLX → torch.
+        assert!(!z_image_mlx_eligible(&object(
+            json!({ "referenceAssetId": "asset_1" })
+        )));
+        // Empty/whitespace reference id is treated as absent → eligible.
+        assert!(z_image_mlx_eligible(&object(
+            json!({ "referenceAssetId": "   " })
+        )));
+    }
+
+    #[test]
+    fn z_image_reference_with_poses_stays_on_mlx() {
+        // The strict pose ControlNet tier lives only on MLX, so a reference+pose
+        // job must route to the mlx worker, not torch (which would drop the poses).
+        assert!(z_image_mlx_eligible(&object(json!({
+            "referenceAssetId": "asset_1",
+            "advanced": { "poses": [{ "id": "pose_1" }] }
+        }))));
+        // Poses present but empty array → not a pose request → reference falls back.
+        assert!(!z_image_mlx_eligible(&object(json!({
+            "referenceAssetId": "asset_1",
+            "advanced": { "poses": [] }
+        }))));
+    }
+
+    #[test]
+    fn z_image_third_party_lycoris_falls_back_but_lokr_stays() {
+        // SceneWorks peft LoKr applies natively on the MLX Z-Image path → eligible.
+        assert!(z_image_mlx_eligible(&object(json!({
+            "loras": [{ "path": "a.safetensors", "networkType": "lokr" }]
+        }))));
+        // Third-party LyCORIS has no native MLX loader → torch.
+        assert!(!z_image_mlx_eligible(&object(json!({
+            "loras": [{ "path": "b.safetensors", "networkType": "lycoris" }]
+        }))));
+    }
+
+    #[test]
+    fn flux_plain_txt2img_is_eligible() {
+        assert!(flux_mlx_eligible(&object(json!({ "prompt": "a red fox" }))));
+        assert!(flux_mlx_eligible(&Map::new()));
+        // A LoRA is fine on the MLX flux path (engine applies LoRA + peft LoKr).
+        assert!(flux_mlx_eligible(&object(json!({
+            "loras": [{ "path": "a.safetensors", "networkType": "lora" }]
+        }))));
+    }
+
+    #[test]
+    fn flux_edit_reference_and_lycoris_fall_back_to_torch() {
+        // edit_image, reference (IP-Adapter), and third-party LyCORIS all stay on Python.
+        assert!(!flux_mlx_eligible(&object(json!({ "mode": "edit_image" }))));
+        assert!(!flux_mlx_eligible(&object(
+            json!({ "referenceAssetId": "asset_1" })
+        )));
+        assert!(!flux_mlx_eligible(&object(json!({
+            "loras": [{ "networkType": "lycoris" }]
+        }))));
+        // Unlike Z-Image, a pose set does NOT rescue a reference: FLUX.1 has no MLX
+        // reference path here, so reference always falls back.
+        assert!(!flux_mlx_eligible(&object(json!({
+            "referenceAssetId": "asset_1",
+            "advanced": { "poses": [{ "id": "p1" }] }
+        }))));
+    }
+
+    #[test]
+    fn qwen_plain_txt2img_is_eligible() {
+        assert!(qwen_mlx_eligible(&object(json!({ "prompt": "a red fox" }))));
+        // A negative prompt + LoRA are fine on the MLX qwen path (true CFG + LoRA wired).
+        assert!(qwen_mlx_eligible(&object(json!({
+            "negativePrompt": "blurry",
+            "loras": [{ "networkType": "lokr" }]
+        }))));
+    }
+
+    #[test]
+    fn qwen_edit_reference_poses_and_lycoris_fall_back_to_torch() {
+        assert!(!qwen_mlx_eligible(&object(json!({ "mode": "edit_image" }))));
+        assert!(!qwen_mlx_eligible(&object(
+            json!({ "referenceAssetId": "asset_1" })
+        )));
+        // Strict pose ControlNet (sc-2291) is torch-only for Qwen — unlike Z-Image,
+        // a pose set does NOT keep it on MLX.
+        assert!(!qwen_mlx_eligible(&object(json!({
+            "advanced": { "poses": [{ "id": "p1" }] }
+        }))));
+        assert!(!qwen_mlx_eligible(&object(json!({
+            "loras": [{ "networkType": "lycoris" }]
+        }))));
+    }
+
+    #[test]
+    fn flux2_txt2img_and_edit_are_eligible_lycoris_is_not() {
+        // FLUX.2 is MLX-only: txt2img (sc-3025) AND edit/reference (sc-3029) all route MLX.
+        assert!(flux2_mlx_eligible(&object(
+            json!({ "prompt": "a red fox" })
+        )));
+        assert!(flux2_mlx_eligible(&object(json!({ "mode": "edit_image" }))));
+        assert!(flux2_mlx_eligible(&object(
+            json!({ "referenceAssetId": "asset_1" })
+        )));
+        // Only a third-party LyCORIS LoRA (unapplicable on the MLX path) is excluded.
+        assert!(!flux2_mlx_eligible(&object(json!({
+            "loras": [{ "networkType": "lycoris" }]
+        }))));
+    }
+
+    #[test]
+    fn sdxl_eligible_for_txt2img_edit_reference_lokr_but_not_lycoris() {
+        assert!(sdxl_mlx_eligible(&object(json!({ "prompt": "a red fox" }))));
+        // peft LoKr stays on MLX (the Rust SDXL path supports LoKr, unlike the old
+        // vendored path) — only third-party LyCORIS falls back to torch.
+        assert!(sdxl_mlx_eligible(&object(json!({
+            "loras": [{ "networkType": "lokr" }]
+        }))));
+        // sc-3060: the Rust engine now handles the advanced shapes, so edit_image
+        // (img2img / inpaint / outpaint) and reference/IP-Adapter route to MLX too.
+        assert!(sdxl_mlx_eligible(&object(json!({ "mode": "edit_image" }))));
+        assert!(sdxl_mlx_eligible(&object(
+            json!({ "referenceAssetId": "asset_1" })
+        )));
+        assert!(sdxl_mlx_eligible(&object(json!({
+            "mode": "edit_image",
+            "maskAssetId": "mask_1"
+        }))));
+        // A third-party LyCORIS LoRA still falls back to torch, even on an edit job.
+        assert!(!sdxl_mlx_eligible(&object(json!({
+            "loras": [{ "networkType": "lycoris" }]
+        }))));
+        assert!(!sdxl_mlx_eligible(&object(json!({
+            "mode": "edit_image",
+            "loras": [{ "networkType": "lycoris" }]
+        }))));
+    }
+
+    #[test]
+    fn lycoris_detection_reads_recorded_network_type_only() {
+        assert!(!request_has_lycoris_lora(&Map::new()));
+        assert!(!request_has_lycoris_lora(&object(json!({ "loras": [] }))));
+        // Recorded directly on the LoRA.
+        assert!(request_has_lycoris_lora(&object(json!({
+            "loras": [{ "networkType": "LyCORIS" }]
+        }))));
+        // Recorded under compatibility.networkType.
+        assert!(request_has_lycoris_lora(&object(json!({
+            "loras": [{ "compatibility": { "networkType": "lycoris" } }]
+        }))));
+        // lokr is SceneWorks peft LoKr, not third-party LyCORIS.
+        assert!(!request_has_lycoris_lora(&object(json!({
+            "loras": [{ "networkType": "lokr" }]
+        }))));
+        // No recorded type → the API can't sniff the header → treated as not-lycoris
+        // (the mlx worker's classify_adapter backstops an unstamped file).
+        assert!(!request_has_lycoris_lora(&object(json!({
+            "loras": [{ "path": "unstamped.safetensors" }]
+        }))));
     }
 }

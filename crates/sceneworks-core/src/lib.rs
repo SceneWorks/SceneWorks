@@ -4,6 +4,7 @@ pub mod character_store;
 pub mod contracts;
 pub mod credentials;
 pub mod hf_home;
+pub mod image_request;
 pub mod jobs_store;
 pub mod lora_family;
 pub mod lora_url;
@@ -13,6 +14,7 @@ pub mod store_util;
 pub mod time;
 pub mod training;
 pub mod training_store;
+pub mod video_request;
 
 pub const API_PREFIX: &str = "/api/v1";
 pub const HEALTH_ROUTE: &str = "/health";

@@ -41,7 +41,18 @@ mod model_jobs;
 use model_jobs::*;
 mod media_jobs;
 use media_jobs::*;
+mod image_jobs;
+use image_jobs::*;
+mod video_jobs;
+use video_jobs::*;
+mod training_jobs;
+use training_jobs::*;
 mod downloads;
+// The DWPose skeleton rasterizer is consumed only by the macOS Z-Image strict-pose
+// control path; on other platforms it still builds + unit-tests (cross-platform
+// raster), but its items are otherwise unused — so allow dead_code off macOS.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+mod openpose_skeleton;
 use downloads::*;
 
 const INSTALL_MARKER: &str = ".sceneworks-download-complete.json";
@@ -450,6 +461,34 @@ async fn run_utility_job(
         JobType::Placeholder => run_placeholder_job(api, settings, &job)
             .await
             .map_err(|error| ("Placeholder job failed.", error)),
+        // Native MLX image generation, served in-process by the linked mlx-gen
+        // engine on the macOS Apple-Silicon GPU worker (epic 3018). Off macOS the
+        // capability is never advertised, so this arm is unreachable there.
+        JobType::ImageGenerate => run_image_generate_job(api, settings, &job)
+            .await
+            .map_err(|error| ("Image generation failed.", error)),
+        // Native MLX tile-ControlNet detail refine (epic 3041, sc-3060), served in-process
+        // by the engine on the macOS Apple-Silicon GPU worker. Off macOS the capability is
+        // never advertised, so this arm is unreachable there (image_detail runs on torch).
+        JobType::ImageDetail => run_image_detail_job(api, settings, &job)
+            .await
+            .map_err(|error| ("Image detail enhancement failed.", error)),
+        // Native MLX video generation, served in-process by the linked mlx-gen engine
+        // on the macOS Apple-Silicon GPU worker (epic 3018). sc-3033 ships the runtime
+        // + procedural stub; the real Wan (sc-3034) / LTX+audio (sc-3035) models link
+        // their provider crates. Off macOS the capability is never advertised, so this
+        // arm is unreachable there.
+        JobType::VideoGenerate => run_video_generate_job(api, settings, &job)
+            .await
+            .map_err(|error| ("Video generation failed.", error)),
+        // Native MLX LoRA/LoKr training (epic 3039, sc-3043/3049), served in-process
+        // by the linked mlx-gen engine on the macOS Apple-Silicon GPU worker. The API
+        // routes only MLX-native families here (jobs_store::training_job_is_mlx_eligible);
+        // kolors/lens + LoKr-on-Wan stay on the Python torch worker, which is also the
+        // Windows/Linux path. Off macOS the execute capability is never advertised.
+        JobType::LoraTrain => run_lora_train_job(api, settings, &job)
+            .await
+            .map_err(|error| ("LoRA training failed.", error)),
         JobType::ModelDownload => run_model_download_job(api, settings, http_client, &job)
             .await
             .map_err(|error| ("Model download failed.", error)),

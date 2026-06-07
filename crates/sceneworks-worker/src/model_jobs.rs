@@ -184,15 +184,186 @@ pub(crate) async fn run_model_download_job(
     Ok(())
 }
 
-/// Convert a model's native (diffusers) checkpoint into the local MLX format on
-/// macOS/Apple Silicon. The native checkpoint must already be downloaded into the
-/// Hugging Face cache (via a model_download job); this shells out to the venv's
-/// Python `mlx_video.convert_wan` tool, which is where MLX/torch live. The desktop
-/// shell points `SCENEWORKS_PYTHON` at the bundled interpreter (mirrors
-/// `SCENEWORKS_FFMPEG`); dev/server fall back to `python3` on PATH.
+/// Native Rust/MLX FLUX.2-klein single-file → diffusers convert (sc-3136), replacing the
+/// retired Python `mlx_flux_convert.py` (sc-3032). Loads the wikeeyang single-file
+/// transformer, remaps it to the diffusers layout (fused-qkv 1→3 split + the load-bearing
+/// `norm_out` scale/shift swap), validates against the base, and assembles a local diffusers
+/// dir whose borrowed vae/text-encoder/tokenizer are absolute symlinks (so they survive the
+/// worker's temp→final atomic rename). Runs MLX, so macOS-only — other targets can't reach
+/// it (FLUX.2-klein is `macOnly` in the manifest).
+#[cfg(target_os = "macos")]
+fn convert_flux2_klein_diffusers(
+    source_file: &Path,
+    base_dir: &Path,
+    out_dir: &Path,
+) -> Result<(), String> {
+    mlx_gen_flux2::convert_and_assemble(source_file, base_dir, out_dir)
+        .map(|_| ())
+        .map_err(|error| error.to_string())
+}
+
+#[cfg(not(target_os = "macos"))]
+fn convert_flux2_klein_diffusers(
+    _source_file: &Path,
+    _base_dir: &Path,
+    _out_dir: &Path,
+) -> Result<(), String> {
+    Err(
+        "FLUX.2-klein conversion requires macOS (mlx-gen-flux2); this model is macOS-only."
+            .to_owned(),
+    )
+}
+
+/// Native Rust/MLX Wan2.2 weight converter (mlx-gen-wan, sc-3224 engine + sc-3240 cutover) —
+/// replaces the retired Python `mlx_video.convert_wan` subprocess. `kind` selects the family preset:
+/// `wan_ti2v_5b` (dense bf16, ignores `quant`), `wan_i2v_14b` / `wan_t2v_14b` (dual-expert MoE,
+/// optional Q4/Q8 via `quant = Some((bits, group_size))`). Reads the native checkpoint (transformer
+/// safetensors shards + the `.pth` T5/VAE) and writes the split MLX dir the loader consumes. The
+/// UMT5 `tokenizer.json` is copied separately by the caller (the converter does not emit it). Runs
+/// MLX, so macOS-only.
+#[cfg(target_os = "macos")]
+fn convert_wan_native(
+    kind: &str,
+    checkpoint_dir: &Path,
+    out_dir: &Path,
+    quant: Option<(i32, i32)>,
+) -> Result<(), String> {
+    use mlx_gen_wan::convert::{convert_i2v_14b, convert_t2v_14b, convert_ti2v_5b};
+    match kind {
+        "wan_ti2v_5b" => convert_ti2v_5b(checkpoint_dir, out_dir).map(|_| ()),
+        "wan_i2v_14b" => convert_i2v_14b(checkpoint_dir, out_dir, quant).map(|_| ()),
+        "wan_t2v_14b" => convert_t2v_14b(checkpoint_dir, out_dir, quant).map(|_| ()),
+        other => return Err(format!("Unknown Wan converter '{other}'.")),
+    }
+    .map_err(|error| error.to_string())
+}
+
+#[cfg(not(target_os = "macos"))]
+fn convert_wan_native(
+    _kind: &str,
+    _checkpoint_dir: &Path,
+    _out_dir: &Path,
+    _quant: Option<(i32, i32)>,
+) -> Result<(), String> {
+    Err("Wan2.2 MLX conversion requires macOS (mlx-gen-wan); the torch path serves other platforms."
+        .to_owned())
+}
+
+/// Native Rust/MLX LTX-2.3 weight converter (mlx-gen-ltx, sc-3224 engine + sc-3240 cutover). The LTX
+/// path was never actually routed through the Rust job before — only `convert_wan` was ever shelled.
+/// Splits the single-file checkpoint (`source_file`, e.g. eros `10Eros_v1_bf16.safetensors`),
+/// sanitizes + Q4/Q8-quantizes the transformer, merges the latent upsampler from `upscaler_dir` (the
+/// base `Lightricks/LTX-2.3` snapshot — the loader hard-requires `upsampler.safetensors`), and emits
+/// the split MLX dir. `bits` is the reference `python -m mlx_video.convert --quantize --q-bits <bits>`
+/// recipe (audio-inclusive). Runs MLX, so macOS-only.
+#[cfg(target_os = "macos")]
+fn convert_ltx_native(
+    source_file: &Path,
+    upscaler_dir: &Path,
+    out_dir: &Path,
+    bits: i32,
+) -> Result<(), String> {
+    let opts = mlx_gen_ltx::LtxConvertOpts::audio_quant(bits);
+    mlx_gen_ltx::convert_and_assemble(source_file, Some(upscaler_dir), out_dir, &opts)
+        .map(|_| ())
+        .map_err(|error| error.to_string())
+}
+
+#[cfg(not(target_os = "macos"))]
+fn convert_ltx_native(
+    _source_file: &Path,
+    _upscaler_dir: &Path,
+    _out_dir: &Path,
+    _bits: i32,
+) -> Result<(), String> {
+    Err("LTX-2.3 MLX conversion requires macOS (mlx-gen-ltx); the torch path serves other platforms."
+        .to_owned())
+}
+
+/// Copy the UMT5 `tokenizer.json` the Wan MLX loader requires (`<dir>/tokenizer.json`) into the
+/// converted dir. The native Wan checkpoints bundle it at `google/umt5-xxl/tokenizer.json`; the
+/// converter does not emit it (matching the reference `convert_wan`). Sync — runs inside the
+/// blocking convert task.
+fn copy_wan_umt5_tokenizer(checkpoint_dir: &Path, out_dir: &Path) -> Result<(), String> {
+    let src = checkpoint_dir
+        .join("google")
+        .join("umt5-xxl")
+        .join("tokenizer.json");
+    std::fs::copy(&src, out_dir.join("tokenizer.json"))
+        .map(|_| ())
+        .map_err(|error| format!("copy UMT5 tokenizer.json from {}: {error}", src.display()))
+}
+
+/// The base `Lightricks/LTX-2.3` latent upsampler the LTX loader hard-requires (emitted as
+/// `upsampler.safetensors` in the converted dir). Neither the eros nor the base single-file
+/// checkpoint bundles it, so the converter merges it from the base repo at convert time.
+const LTX_SPATIAL_UPSCALER_FILE: &str = "ltx-2.3-spatial-upscaler-x2-1.1.safetensors";
+
+/// Ensure the LTX-2.3 spatial upsampler `file` from `repo` is in the Hugging Face cache — fetching
+/// just that file on demand if missing — and return the repo's snapshot dir (the converter's
+/// `upscaler_dir`). Mirrors how the torch adapter pulls its spatial upscaler at generation time, so
+/// converting eros does not require a full ~157 GB base-LTX install. Returns `None` if the file
+/// cannot be obtained (HF CLI unavailable and not already cached) so the caller surfaces a clear
+/// failure. The fetch uses a scratch marker dir so its install marker never lands in the model tree.
+async fn ensure_ltx_upscaler_cached(
+    api: &ApiClient,
+    settings: &Settings,
+    job: &JobSnapshot,
+    repo: &str,
+    file: &str,
+) -> WorkerResult<Option<PathBuf>> {
+    if let Some(snapshot) = huggingface_snapshot_dir(&settings.data_dir, repo) {
+        if snapshot.join(file).exists() {
+            return Ok(Some(snapshot));
+        }
+    }
+    let scratch = settings
+        .data_dir
+        .join("cache")
+        .join(format!(".ltx-upscaler-fetch-{}", job.id));
+    tokio::fs::create_dir_all(&scratch).await?;
+    let files = vec![file.to_owned()];
+    let fetched =
+        download_model_with_hf_cli(api, settings, job, repo, "main", &files, &scratch).await?;
+    let _ = tokio::fs::remove_dir_all(&scratch).await;
+    let snapshot = match fetched {
+        Some(dir) => Some(dir),
+        None => huggingface_snapshot_dir(&settings.data_dir, repo),
+    };
+    Ok(snapshot.filter(|dir| dir.join(file).exists()))
+}
+
+/// Resolved native conversion plan for [`run_model_convert_job`] (sc-3240). The Python
+/// `mlx_video.convert_wan` subprocess (and its mlx-video venv) is gone — every convert-required
+/// model maps to exactly one native converter, keyed by the manifest `mlx.converter` discriminator.
+enum ConvertPlan {
+    /// FLUX.2-klein single-file fine-tune → diffusers dir (sc-3136), borrowing VAE/TE/tokenizer.
+    Flux2 {
+        source_file: PathBuf,
+        base_dir: PathBuf,
+    },
+    /// Native Wan2.2 → split MLX dir; `kind` ∈ {`wan_ti2v_5b`, `wan_i2v_14b`, `wan_t2v_14b`}.
+    Wan {
+        kind: String,
+        quant: Option<(i32, i32)>,
+    },
+    /// Single-file LTX-2.3 → split MLX dir; `upscaler_dir` carries the loader-required upsampler.
+    Ltx {
+        source_file: PathBuf,
+        upscaler_dir: PathBuf,
+        bits: i32,
+    },
+}
+
+/// Convert a model's native checkpoint into the local MLX format on macOS/Apple Silicon, fully
+/// in-process via the linked `mlx-gen-*` converters (epic 2337). The native checkpoint must already
+/// be downloaded into the Hugging Face cache (via a model_download job). The converter is selected by
+/// the manifest `mlx.converter` discriminator: `flux2_klein_diffusers` (sc-3136), `wan_ti2v_5b` /
+/// `wan_i2v_14b` / `wan_t2v_14b` (mlx-gen-wan), or `ltx_video` (mlx-gen-ltx). The Python
+/// `mlx_video.convert_wan` subprocess + `SCENEWORKS_PYTHON` wiring were retired here (sc-3240).
 ///
-/// Real conversion is exercised on Mac hardware in sc-1509; this wires the tracked
-/// job, progress, cancellation, and failure surfacing.
+/// Real conversion is exercised on Mac hardware via the `#[ignore]` real-weight tests below; this
+/// wires the tracked job, progress, cancellation, and failure surfacing.
 pub(crate) async fn run_model_convert_job(
     api: &ApiClient,
     settings: &Settings,
@@ -242,71 +413,146 @@ pub(crate) async fn run_model_convert_job(
         return Ok(());
     };
 
-    // Converter discriminator (sc-2235). Absent => the default mlx-video Wan
-    // converter (existing behavior). "flux2_klein_diffusers" => convert a
-    // FLUX.2-klein single-file fine-tune into a diffusers dir via the mlx-flux
-    // sidecar venv, borrowing VAE/text-encoder/tokenizer from an installed base.
+    // Converter discriminator (sc-2235 / sc-3224 / sc-3240). Every convert-required model now
+    // declares one in its manifest `mlx.converter`; there is NO Python fallback — the
+    // `mlx_video.convert_wan` subprocess and its mlx-video venv were retired at this cutover.
+    //   flux2_klein_diffusers          -> FLUX.2-klein single-file → diffusers dir (sc-3136)
+    //   wan_ti2v_5b/i2v_14b/t2v_14b    -> native Wan2.2 → split MLX dir (mlx-gen-wan)
+    //   ltx_video                      -> single-file LTX-2.3 → split MLX dir (mlx-gen-ltx)
     let converter = optional_payload_string(&job.payload, "converter")
         .map(str::to_owned)
         .unwrap_or_default();
-    let is_flux2_klein = converter == "flux2_klein_diffusers";
 
-    let (python, flux2_source_file, flux2_base_dir, flux2_script) = if is_flux2_klein {
-        let source_file_name = required_payload_string(&job.payload, "sourceFile")?.to_owned();
-        let base_repo = required_payload_string(&job.payload, "baseRepo")?.to_owned();
-        let source_file = checkpoint_dir.join(&source_file_name);
-        if !source_file.is_file() {
-            fail_job(
-                api,
-                &job.id,
-                "Converted-model source file is missing.",
-                Some(format!("Expected {source_file_name} in {source_repo}.")),
-            )
-            .await?;
-            return Ok(());
+    // Quantize-only (re-quantize a pre-converted turnkey bf16 MLX dir) was a capability of the
+    // Python `convert_wan --quantize-only` with no native equivalent; it is unreachable from the UI
+    // and superseded by native-conversion-with-quant. Surface it explicitly rather than silently
+    // promoting an unconverted dir.
+    if quantize_only {
+        fail_job(
+            api,
+            &job.id,
+            "Quantize-only MLX conversion is no longer supported.",
+            Some(
+                "In-place re-quantization of a pre-converted MLX model was removed with the Python \
+                 mlx-video converter (sc-3240). Convert the native checkpoint with quantization \
+                 instead."
+                    .to_owned(),
+            ),
+        )
+        .await?;
+        return Ok(());
+    }
+
+    // MLX quantization mapped 1:1 from the job payload (a request override or the manifest default
+    // the API forwards). bf16 Wan TI2V-5B ignores it; the A14B experts + LTX honor (bits,
+    // group_size) — group_size defaults to the reference 64 when only bits is set.
+    let quant =
+        quantize_bits.map(|bits| (bits as i32, quantize_group_size.map_or(64, |gs| gs as i32)));
+
+    let plan = match converter.as_str() {
+        "flux2_klein_diffusers" => {
+            let source_file_name = required_payload_string(&job.payload, "sourceFile")?.to_owned();
+            let base_repo = required_payload_string(&job.payload, "baseRepo")?.to_owned();
+            let source_file = checkpoint_dir.join(&source_file_name);
+            if !source_file.is_file() {
+                fail_job(
+                    api,
+                    &job.id,
+                    "Converted-model source file is missing.",
+                    Some(format!("Expected {source_file_name} in {source_repo}.")),
+                )
+                .await?;
+                return Ok(());
+            }
+            let Some(base_dir) = huggingface_snapshot_dir(&settings.data_dir, &base_repo) else {
+                fail_job(
+                    api,
+                    &job.id,
+                    "Base FLUX.2-klein model is not installed.",
+                    Some(format!(
+                        "Install {base_repo} before converting {model_id} — its VAE, text encoder, \
+                         and tokenizer are reused."
+                    )),
+                )
+                .await?;
+                return Ok(());
+            };
+            ConvertPlan::Flux2 {
+                source_file,
+                base_dir,
+            }
         }
-        let Some(base_dir) = huggingface_snapshot_dir(&settings.data_dir, &base_repo) else {
+        "wan_ti2v_5b" | "wan_i2v_14b" | "wan_t2v_14b" => ConvertPlan::Wan {
+            kind: converter.clone(),
+            quant,
+        },
+        "ltx_video" => {
+            let source_file_name = required_payload_string(&job.payload, "sourceFile")?.to_owned();
+            let source_file = checkpoint_dir.join(&source_file_name);
+            if !source_file.is_file() {
+                fail_job(
+                    api,
+                    &job.id,
+                    "LTX-2.3 source checkpoint file is missing.",
+                    Some(format!("Expected {source_file_name} in {source_repo}.")),
+                )
+                .await?;
+                return Ok(());
+            }
+            let upscaler_repo = required_payload_string(&job.payload, "baseRepo")?.to_owned();
+            let upscaler_file = optional_payload_string(&job.payload, "upscalerFile")
+                .filter(|value| !value.trim().is_empty())
+                .unwrap_or(LTX_SPATIAL_UPSCALER_FILE)
+                .to_owned();
+            let Some(upscaler_dir) =
+                ensure_ltx_upscaler_cached(api, settings, job, &upscaler_repo, &upscaler_file)
+                    .await?
+            else {
+                fail_job(
+                    api,
+                    &job.id,
+                    "LTX-2.3 spatial upscaler is unavailable.",
+                    Some(format!(
+                        "Could not obtain {upscaler_file} from {upscaler_repo}; install the base \
+                         LTX-2.3 model or check connectivity before converting {model_id}."
+                    )),
+                )
+                .await?;
+                return Ok(());
+            };
+            // Default to the reference Q4 recipe when the manifest/request specifies no bits.
+            let bits = quantize_bits.map_or(4, |bits| bits as i32);
+            ConvertPlan::Ltx {
+                source_file,
+                upscaler_dir,
+                bits,
+            }
+        }
+        "" => {
             fail_job(
                 api,
                 &job.id,
-                "Base FLUX.2-klein model is not installed.",
+                "No MLX converter is configured for this model.",
                 Some(format!(
-                    "Install {base_repo} before converting {model_id} — its VAE, text encoder, \
-                     and tokenizer are reused."
+                    "{model_id} sets mlx.requiresConversion but no mlx.converter; the Python \
+                     converter was retired (sc-3240)."
                 )),
             )
             .await?;
             return Ok(());
-        };
-        let py = std::env::var("SCENEWORKS_MLX_FLUX_PYTHON")
-            .ok()
-            .map(|value| value.trim().to_owned())
-            .filter(|value| !value.is_empty())
-            .ok_or_else(|| {
-                WorkerError::InvalidPayload(
-                    "SCENEWORKS_MLX_FLUX_PYTHON is not set; the mlx-flux sidecar venv is required \
-                     to convert FLUX.2-klein fine-tunes."
-                        .to_owned(),
-                )
-            })?;
-        let script = std::env::var("SCENEWORKS_MLX_FLUX_CONVERT")
-            .ok()
-            .map(|value| value.trim().to_owned())
-            .filter(|value| !value.is_empty())
-            .ok_or_else(|| {
-                WorkerError::InvalidPayload(
-                    "SCENEWORKS_MLX_FLUX_CONVERT is not set; cannot locate mlx_flux_convert.py."
-                        .to_owned(),
-                )
-            })?;
-        (py, Some(source_file), Some(base_dir), Some(script))
-    } else {
-        let py = std::env::var("SCENEWORKS_PYTHON")
-            .ok()
-            .map(|value| value.trim().to_owned())
-            .filter(|value| !value.is_empty())
-            .unwrap_or_else(|| "python3".to_owned());
-        (py, None, None, None)
+        }
+        other => {
+            fail_job(
+                api,
+                &job.id,
+                "Unknown MLX converter.",
+                Some(format!(
+                    "Unrecognized mlx.converter '{other}' for {model_id}."
+                )),
+            )
+            .await?;
+            return Ok(());
+        }
     };
 
     // Convert into a unique temp sibling and only promote it on success, so a
@@ -347,94 +593,56 @@ pub(crate) async fn run_model_convert_job(
     )
     .await?;
 
-    let mut command = Command::new(&python);
-    if is_flux2_klein {
-        // Self-contained converter script in the scene_worker package, run by the
-        // mlx-flux sidecar python: --source-file <single-file> --base-dir <base
-        // klein snapshot> --out-dir <temp>. It validates the converted transformer
-        // against the base diffusers layout and assembles the borrowed components.
-        command
-            .arg(flux2_script.as_ref().expect("flux2 script resolved"))
-            .arg("--source-file")
-            .arg(flux2_source_file.as_ref().expect("flux2 source resolved"))
-            .arg("--base-dir")
-            .arg(flux2_base_dir.as_ref().expect("flux2 base resolved"))
-            .arg("--out-dir")
-            .arg(&temp_dir);
-    } else {
-        command
-            .arg("-m")
-            .arg("mlx_video.convert_wan")
-            .arg("--checkpoint-dir")
-            .arg(&checkpoint_dir)
-            .arg("--output-dir")
-            .arg(&temp_dir)
-            .arg("--dtype")
-            .arg(&dtype)
-            .arg("--model-version")
-            .arg("auto");
-        if quantize_only {
-            command.arg("--quantize-only");
-        } else if quantize_bits.is_some() {
-            command.arg("--quantize");
+    // The native MLX converters are blocking and not interruptible mid-run (minutes on real
+    // weights), so honor cancel up front and run on a blocking thread. On any failure the partial
+    // temp dir is removed so it can never be promoted by the atomic rename below. The Flux2 path's
+    // borrowed vae/text-encoder/tokenizer are absolute symlinks that survive the rename.
+    check_cancel(api, &job.id, "MLX conversion canceled by user.").await?;
+    let temp = temp_dir.clone();
+    let outcome = match plan {
+        ConvertPlan::Flux2 {
+            source_file,
+            base_dir,
+        } => {
+            tokio::task::spawn_blocking(move || {
+                convert_flux2_klein_diffusers(&source_file, &base_dir, &temp)
+            })
+            .await
         }
-        if let Some(bits) = quantize_bits {
-            command.arg("--bits").arg(bits.to_string());
+        ConvertPlan::Wan { kind, quant } => {
+            let checkpoint = checkpoint_dir.clone();
+            tokio::task::spawn_blocking(move || {
+                convert_wan_native(&kind, &checkpoint, &temp, quant)?;
+                // The Wan loader reads `<dir>/tokenizer.json`, which the converter does not emit.
+                copy_wan_umt5_tokenizer(&checkpoint, &temp)
+            })
+            .await
         }
-        if let Some(group_size) = quantize_group_size {
-            command.arg("--group-size").arg(group_size.to_string());
-        }
-    }
-    let mut child = command
-        .stdout(Stdio::null())
-        .stderr(Stdio::piped())
-        .spawn()
-        .map_err(|error| {
-            WorkerError::InvalidPayload(format!(
-                "Failed to start MLX conversion ({python}). Ensure the worker venv has \
-                 mlx-video-with-audio installed: {error}"
-            ))
-        })?;
-
-    let mut stderr = child.stderr.take();
-    let stderr_task = tokio::spawn(async move {
-        let mut bytes = Vec::new();
-        if let Some(stderr) = stderr.as_mut() {
-            let _ = stderr.read_to_end(&mut bytes).await;
-        }
-        bytes
-    });
-
-    let mut interval = tokio::time::interval(progress_report_interval(settings));
-    interval.set_missed_tick_behavior(MissedTickBehavior::Delay);
-    let status = loop {
-        tokio::select! {
-            status = child.wait() => break status?,
-            _ = interval.tick() => {
-                heartbeat(api, settings, WorkerStatus::Busy, Some(&job.id)).await?;
-                if let Err(error) =
-                    check_cancel(api, &job.id, "MLX conversion canceled by user.").await
-                {
-                    let _ = child.kill().await;
-                    let _ = child.wait().await;
-                    let _ = tokio::fs::remove_dir_all(&temp_dir).await;
-                    return Err(error);
-                }
-            }
+        ConvertPlan::Ltx {
+            source_file,
+            upscaler_dir,
+            bits,
+        } => {
+            tokio::task::spawn_blocking(move || {
+                convert_ltx_native(&source_file, &upscaler_dir, &temp, bits)
+            })
+            .await
         }
     };
-    let stderr_bytes = stderr_task.await.unwrap_or_default();
-
-    if !status.success() {
-        let _ = tokio::fs::remove_dir_all(&temp_dir).await;
-        let stderr_text = String::from_utf8_lossy(&stderr_bytes);
-        // Keep the tail (char-safe) so the job error surfaces the real failure.
-        let tail: String = stderr_text.trim().chars().rev().take(1200).collect();
-        let detail: String = tail.chars().rev().collect();
-        return Err(WorkerError::InvalidPayload(format!(
-            "MLX conversion failed (exit {}). {detail}",
-            status.code().unwrap_or(-1),
-        )));
+    match outcome {
+        Ok(Ok(())) => {}
+        Ok(Err(detail)) => {
+            let _ = tokio::fs::remove_dir_all(&temp_dir).await;
+            return Err(WorkerError::InvalidPayload(format!(
+                "MLX conversion failed. {detail}"
+            )));
+        }
+        Err(join_error) => {
+            let _ = tokio::fs::remove_dir_all(&temp_dir).await;
+            return Err(WorkerError::InvalidPayload(format!(
+                "MLX conversion task panicked: {join_error}"
+            )));
+        }
     }
 
     // Promote the completed conversion atomically; on any rename failure the partial
@@ -1203,4 +1411,171 @@ pub(crate) async fn run_model_import_job(
     )
     .await?;
     Ok(())
+}
+
+#[cfg(all(test, target_os = "macos"))]
+mod tests {
+    use super::*;
+
+    /// Resolve a HuggingFace cache snapshot dir for `models--<dir>` (test helper).
+    fn hf_snapshot(model_dir: &str) -> PathBuf {
+        let home = std::env::var("HOME").expect("HOME");
+        std::fs::read_dir(
+            Path::new(&home).join(format!(".cache/huggingface/hub/{model_dir}/snapshots")),
+        )
+        .expect("HF cache snapshots dir")
+        .flatten()
+        .map(|entry| entry.path())
+        .find(|path| path.is_dir())
+        .expect("a snapshot dir")
+    }
+
+    /// Real-weights smoke for the native Rust/MLX FLUX.2-klein true_v2 converter
+    /// (sc-3136 consumer cutover, sc-3032): runs the actual `convert_flux2_klein_diffusers`
+    /// wrapper used by `run_model_convert_job` on the cached wikeeyang bf16 single-file +
+    /// base klein-9B, and asserts the assembled diffusers dir is complete (real transformer
+    /// weights + config + model_index) with the borrowed components as resolvable symlinks.
+    /// Mirrors mlx-gen's `convert_real_weights` but exercises the SceneWorks call site.
+    /// Needs both repos in the HF cache (writes ~18 GB to the temp dir). Run with:
+    ///   cargo test -p sceneworks-worker --lib -- --ignored flux2_true_v2_rust_convert
+    #[test]
+    #[ignore]
+    fn flux2_true_v2_rust_convert_real_weights() {
+        let source = hf_snapshot("models--wikeeyang--Flux2-Klein-9B-True-V2")
+            .join("Flux2-Klein-9B-True-v2-bf16.safetensors");
+        let base = hf_snapshot("models--black-forest-labs--FLUX.2-klein-9B");
+        assert!(
+            source.is_file(),
+            "missing wikeeyang bf16 single-file: {}",
+            source.display()
+        );
+        assert!(
+            base.join("transformer").is_dir(),
+            "missing base klein transformer: {}",
+            base.display()
+        );
+
+        let out = std::env::temp_dir().join(format!("sw_true_v2_convert_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&out);
+
+        convert_flux2_klein_diffusers(&source, &base, &out).expect("native true_v2 convert");
+
+        // Transformer weights + config are written as real files (the remapped, base-validated
+        // diffusers transformer); model_index.json is copied.
+        assert!(out
+            .join("transformer/diffusion_pytorch_model.safetensors")
+            .is_file());
+        assert!(out.join("transformer/config.json").is_file());
+        assert!(out.join("model_index.json").is_file());
+        // vae / text_encoder / tokenizer / scheduler are absolute symlinks borrowed from the
+        // base install; `.exists()` follows the link, so a broken symlink fails here.
+        for sub in ["vae", "text_encoder", "tokenizer", "scheduler"] {
+            assert!(
+                out.join(sub).exists(),
+                "borrowed `{sub}` missing or broken symlink in {}",
+                out.display()
+            );
+        }
+
+        let _ = std::fs::remove_dir_all(&out);
+    }
+
+    /// Real-weights smoke for the native Rust/MLX Wan2.2 TI2V-5B converter (sc-3224 engine +
+    /// sc-3240 cutover): runs the actual `convert_wan_native` + `copy_wan_umt5_tokenizer` used by
+    /// `run_model_convert_job` on the cached native checkpoint, and asserts the assembled MLX dir is
+    /// complete — including the UMT5 `tokenizer.json` the loader requires and the converter does NOT
+    /// emit (the SceneWorks install flow copies it). Needs the native repo in the HF cache. Run with:
+    ///   cargo test -p sceneworks-worker --lib -- --ignored wan_ti2v_5b_rust_convert
+    #[test]
+    #[ignore]
+    fn wan_ti2v_5b_rust_convert_real_weights() {
+        let checkpoint = hf_snapshot("models--Wan-AI--Wan2.2-TI2V-5B");
+        assert!(
+            checkpoint.join("Wan2.2_VAE.pth").is_file(),
+            "missing native Wan2.2 VAE .pth: {}",
+            checkpoint.display()
+        );
+        assert!(
+            checkpoint.join("google/umt5-xxl/tokenizer.json").is_file(),
+            "native checkpoint is missing the bundled UMT5 tokenizer.json: {}",
+            checkpoint.display()
+        );
+
+        let out = std::env::temp_dir().join(format!("sw_wan5b_convert_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&out);
+
+        convert_wan_native("wan_ti2v_5b", &checkpoint, &out, None)
+            .expect("native Wan TI2V-5B convert");
+        copy_wan_umt5_tokenizer(&checkpoint, &out).expect("copy UMT5 tokenizer");
+
+        for file in [
+            "model.safetensors",
+            "t5_encoder.safetensors",
+            "vae.safetensors",
+            "config.json",
+            // The loader-required tokenizer the converter does not emit (sc-3240).
+            "tokenizer.json",
+        ] {
+            assert!(
+                out.join(file).is_file(),
+                "converted Wan dir missing `{file}` in {}",
+                out.display()
+            );
+        }
+
+        let _ = std::fs::remove_dir_all(&out);
+    }
+
+    /// Real-weights smoke for the native Rust/MLX LTX-2.3 converter (sc-3224 engine + sc-3240
+    /// cutover) — the LTX path was never routed through the Rust job before. Runs the actual
+    /// `convert_ltx_native` used by `run_model_convert_job` on the cached eros single-file + the base
+    /// LTX-2.3 upscaler, and asserts the split MLX dir is complete, including the
+    /// `upsampler.safetensors` the loader hard-requires (merged from the base repo) and the
+    /// `split_model.json` Q4 quant manifest. Needs both repos in the HF cache. Run with:
+    ///   cargo test -p sceneworks-worker --lib -- --ignored ltx_eros_rust_convert
+    #[test]
+    #[ignore]
+    fn ltx_eros_rust_convert_real_weights() {
+        let source =
+            hf_snapshot("models--TenStrip--LTX2.3-10Eros").join("10Eros_v1_bf16.safetensors");
+        let upscaler_dir = hf_snapshot("models--Lightricks--LTX-2.3");
+        assert!(
+            source.is_file(),
+            "missing eros single-file checkpoint: {}",
+            source.display()
+        );
+        assert!(
+            upscaler_dir.join(LTX_SPATIAL_UPSCALER_FILE).is_file(),
+            "missing base LTX-2.3 spatial upscaler: {}",
+            upscaler_dir.display()
+        );
+
+        let out = std::env::temp_dir().join(format!("sw_ltx_eros_convert_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&out);
+
+        convert_ltx_native(&source, &upscaler_dir, &out, 4).expect("native LTX-2.3 eros convert");
+
+        for file in [
+            "transformer.safetensors",
+            "connector.safetensors",
+            // The loader-required latent upsampler, merged from the base LTX-2.3 repo (sc-3240).
+            "upsampler.safetensors",
+            "vae_decoder.safetensors",
+            "vae_encoder.safetensors",
+            "audio_vae.safetensors",
+            "vocoder.safetensors",
+            "config.json",
+            "embedded_config.json",
+            // The Q4 quant geometry the loader reads back (sc-2686).
+            "split_model.json",
+        ] {
+            assert!(
+                out.join(file).is_file(),
+                "converted LTX dir missing `{file}` in {}",
+                out.display()
+            );
+        }
+
+        let _ = std::fs::remove_dir_all(&out);
+    }
 }

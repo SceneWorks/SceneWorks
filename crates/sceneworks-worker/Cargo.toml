@@ -8,6 +8,17 @@ publish = false
 [dependencies]
 futures-util = "0.3"
 glob = "0.3"
+# PNG encoding for generated image assets (epic 3018, sc-3020). png-only keeps the
+# dependency small and cross-platform (the image-job pipeline + its tests run on every
+# platform; only real MLX inference is macOS-gated).
+# png to encode generated assets (sc-3020); jpeg/webp to decode reference/source
+# images for the FLUX.2 edit path (sc-3029) — uploads aren't only PNG.
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp"] }
+# CPU raster for DWPose skeleton rendering (epic 3018, sc-3028): filled polygons
+# (rotated-ellipse limbs), circles (joints/points), for the Z-Image strict-pose
+# ControlNet. Pure-Rust + cross-platform (the renderer + its tests run everywhere;
+# only the MLX control generation is macOS-gated). Pinned to the image 0.25 line.
+imageproc = { version = "0.25", default-features = false }
 nix = { version = "0.29", default-features = false, features = ["process", "signal"] }
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream"] }
 sceneworks-core = { path = "../sceneworks-core" }
@@ -21,6 +32,61 @@ uuid = { version = "1.11", features = ["v4"] }
 [dev-dependencies]
 axum = "0.7"
 tower = { version = "0.5", features = ["util"] }
+
+# macOS NAX-presence guard (tests/nax_guard.rs): exercises a 16-bit fused SDPA op
+# directly against mlx-rs to prove the workspace .cargo/config.toml deployment-target
+# pin is in effect. Pinned to the SAME rev mlx-gen uses so Cargo builds MLX once
+# (a different rev would compile pmetal-mlx-sys twice). mlx-gen itself is already a
+# (macOS) dependency above and is usable from integration tests as-is.
+[target.'cfg(target_os = "macos")'.dev-dependencies]
+mlx-rs = { package = "pmetal-mlx-rs", git = "https://github.com/michaeltrefry/mlx-rs", rev = "e59ffd88014340e6a49b26de95446b8b76a57932" }
+
+# Native MLX image+video inference engine (epic 2337), linked in-process so the
+# Rust GPU worker dispatches generation with no Python adapter/sidecar (epic 3018).
+# macOS-only: mlx-gen builds Apple MLX from source and is meaningless off Apple
+# Silicon. Git-pinned by SHA (the repo + its pmetal-mlx-rs fork are public, so this
+# resolves on Linux/Windows CI without creds and only *compiles* on macOS via the
+# target gate). The deployment-target build seam lives in /.cargo/config.toml.
+#
+# Local mlx-gen co-dev: point this at a sibling checkout via a workspace-root
+# [patch] (NOT committed — a path that is absent on CI breaks resolution):
+#   [patch."https://github.com/michaeltrefry/mlx-gen"]
+#   mlx-gen = { path = "../mlx-gen" }
+# `mlx-gen` is the core engine (load/registry/request types). Each model family
+# lives in its own provider crate that self-registers into the engine's link-time
+# `inventory` registry — the core does NOT depend on the providers, so a consumer
+# links the provider crates it serves and references each with `use … as _;`
+# (image_jobs.rs) to keep the linker from dropping the registration. Per-family
+# stories (sc-3022..3035) add their provider here; this scaffold links Z-Image
+# (sc-3022, next) to prove the cross-crate registry path end to end.
+[target.'cfg(target_os = "macos")'.dependencies]
+# Rev 4ea5d86 (mlx-gen main): the LoRA/LoKr trainer surface (epic 3039, PRs #142–147)
+# layered on top of the sc-3224 Wan/LTX converters (PR #140, rev 01bf6259) the base
+# branch pinned — 4ea5d86 is a strict superset, so it carries BOTH the converters and
+# the trainers in a single rev (and MLX still builds once with the unchanged mlx-rs pin).
+mlx-gen = { git = "https://github.com/michaeltrefry/mlx-gen", rev = "4ea5d8653b9cdc84997bc97dfdb0e5a0fa62fda4" }
+mlx-gen-z-image = { git = "https://github.com/michaeltrefry/mlx-gen", rev = "4ea5d8653b9cdc84997bc97dfdb0e5a0fa62fda4" }
+# FLUX.1 schnell/dev provider (epic 3018, sc-3023). Same git rev as mlx-gen so MLX
+# builds once; self-registers `flux1_schnell`/`flux1_dev` via inventory only when
+# linked + referenced (`use mlx_gen_flux as _;` in image_jobs.rs).
+mlx-gen-flux = { git = "https://github.com/michaeltrefry/mlx-gen", rev = "4ea5d8653b9cdc84997bc97dfdb0e5a0fa62fda4" }
+# Qwen-Image provider (epic 3018, sc-3024). Self-registers `qwen_image`.
+mlx-gen-qwen-image = { git = "https://github.com/michaeltrefry/mlx-gen", rev = "4ea5d8653b9cdc84997bc97dfdb0e5a0fa62fda4" }
+# FLUX.2-klein provider (epic 3018, sc-3025). Self-registers `flux2_klein_9b`
+# (txt2img) + `flux2_klein_9b_edit` + `flux2_klein_9b_kv_edit` (edit = sc-3029).
+mlx-gen-flux2 = { git = "https://github.com/michaeltrefry/mlx-gen", rev = "4ea5d8653b9cdc84997bc97dfdb0e5a0fa62fda4" }
+# SDXL provider (epic 3018, sc-3026). Self-registers `sdxl` (also serves the
+# `realvisxl` finetune — same arch). Replaces the in-process _vendor/mlx_sd path.
+mlx-gen-sdxl = { git = "https://github.com/michaeltrefry/mlx-gen", rev = "4ea5d8653b9cdc84997bc97dfdb0e5a0fa62fda4" }
+# Wan2.2 video provider (epic 3018, sc-3034). Self-registers `wan2_2_ti2v_5b`
+# (dense T2V/TI2V), `wan2_2_t2v_14b` + `wan2_2_i2v_14b` (dual-expert MoE) via
+# inventory when linked + referenced (`use mlx_gen_wan as _;` in video_jobs.rs).
+mlx-gen-wan = { git = "https://github.com/michaeltrefry/mlx-gen", rev = "4ea5d8653b9cdc84997bc97dfdb0e5a0fa62fda4" }
+# LTX-2.3 video provider (epic 3018, sc-3035). Self-registers `ltx_2_3` (T2V/I2V +
+# synchronized audio, 2-stage distilled). Linked + referenced (`use mlx_gen_ltx as _;`
+# in video_jobs.rs); the Gemma-3 text encoder is resolved by the engine (HF cache / env).
+# Same rev as the other mlx-gen crates (sc-3060 bump) so MLX + the shared core build once.
+mlx-gen-ltx = { git = "https://github.com/michaeltrefry/mlx-gen", rev = "4ea5d8653b9cdc84997bc97dfdb0e5a0fa62fda4" }
 
 [lints]
 workspace = true

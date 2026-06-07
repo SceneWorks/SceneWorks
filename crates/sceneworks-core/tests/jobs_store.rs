@@ -1373,3 +1373,1001 @@ fn create_job_with_id_uses_supplied_id() {
         JobType::LoraTrain
     );
 }
+
+// --- Epic 3018: MLX-vs-torch image-job routing (sc-3021) ---
+
+fn register_gpu_worker(
+    store: &JobsStore,
+    worker_id: &str,
+    gpu_id: &str,
+    capabilities: Vec<WorkerCapability>,
+) {
+    store
+        .register_worker(RegisterWorker {
+            worker_id: worker_id.to_owned(),
+            gpu_id: gpu_id.to_owned(),
+            gpu_name: None,
+            capabilities,
+            loaded_models: Vec::new(),
+            utilization: None,
+        })
+        .expect("worker registers");
+}
+
+fn image_caps() -> Vec<WorkerCapability> {
+    vec![WorkerCapability::Gpu, WorkerCapability::ImageGenerate]
+}
+
+fn image_job_with(payload: Value, requested_gpu: &str) -> CreateJob {
+    CreateJob {
+        job_type: JobType::ImageGenerate,
+        project_id: Some("project-1".to_owned()),
+        project_name: Some("Project 1".to_owned()),
+        payload: object(payload),
+        requested_gpu: requested_gpu.to_owned(),
+        source_job_id: None,
+        duplicate_of_job_id: None,
+        attempts: 1,
+    }
+}
+
+#[test]
+fn mlx_eligible_image_job_defers_from_torch_worker_to_idle_mlx_worker() {
+    let store = store("mlx-routing-defer");
+    register_gpu_worker(&store, "worker-torch", "mps", image_caps());
+    register_gpu_worker(&store, "worker-mlx", "mlx", image_caps());
+
+    let job = store
+        .create_job(image_job_with(
+            json!({ "model": "z_image_turbo", "prompt": "a misty fjord" }),
+            "auto",
+        ))
+        .expect("job creates");
+
+    // The torch worker defers the MLX-eligible job to the idle mlx worker.
+    assert!(store
+        .claim_next_job("worker-torch")
+        .expect("torch claim ok")
+        .is_none());
+    // The mlx worker claims it and runs it in-process.
+    let claimed = store
+        .claim_next_job("worker-mlx")
+        .expect("mlx claim ok")
+        .expect("mlx claims the job");
+    assert_eq!(claimed.id, job.id);
+    assert_eq!(claimed.assigned_gpu.as_deref(), Some("mlx"));
+}
+
+#[test]
+fn mlx_worker_excluded_from_torch_only_image_job() {
+    let store = store("mlx-routing-exclude");
+    register_gpu_worker(&store, "worker-mlx", "mlx", image_caps());
+
+    // edit_image on a Z-Image model is not a txt2img request → torch path only.
+    let job = store
+        .create_job(image_job_with(
+            json!({
+                "model": "z_image_turbo",
+                "mode": "edit_image",
+                "referenceAssetId": "asset_1"
+            }),
+            "auto",
+        ))
+        .expect("job creates");
+
+    // The mlx worker must not claim a torch-only image job.
+    assert!(store
+        .claim_next_job("worker-mlx")
+        .expect("mlx claim ok")
+        .is_none());
+
+    // A torch worker is the home for it.
+    register_gpu_worker(&store, "worker-torch", "mps", image_caps());
+    let claimed = store
+        .claim_next_job("worker-torch")
+        .expect("torch claim ok")
+        .expect("torch claims the job");
+    assert_eq!(claimed.id, job.id);
+    assert_eq!(claimed.assigned_gpu.as_deref(), Some("mps"));
+}
+
+#[test]
+fn mlx_eligible_image_job_falls_back_to_torch_when_no_mlx_worker() {
+    let store = store("mlx-routing-fallback");
+    // No mlx worker registered (Windows/Linux, or the mlx worker is down).
+    register_gpu_worker(&store, "worker-torch", "cuda:0", image_caps());
+
+    let job = store
+        .create_job(image_job_with(
+            json!({ "model": "z_image_turbo", "prompt": "a misty fjord" }),
+            "auto",
+        ))
+        .expect("job creates");
+
+    // With no idle mlx worker, nothing defers — the torch worker is the fallback.
+    let claimed = store
+        .claim_next_job("worker-torch")
+        .expect("torch claim ok")
+        .expect("torch claims the job");
+    assert_eq!(claimed.id, job.id);
+    assert_eq!(claimed.assigned_gpu.as_deref(), Some("cuda:0"));
+}
+
+#[test]
+fn explicit_gpu_image_job_is_not_deferred_to_mlx_worker() {
+    let store = store("mlx-routing-explicit-gpu");
+    register_gpu_worker(&store, "worker-torch", "mps", image_caps());
+    register_gpu_worker(&store, "worker-mlx", "mlx", image_caps());
+
+    // The user explicitly pinned this MLX-eligible job to the torch GPU; honour it.
+    let job = store
+        .create_job(image_job_with(
+            json!({ "model": "z_image_turbo", "prompt": "p" }),
+            "mps",
+        ))
+        .expect("job creates");
+
+    let claimed = store
+        .claim_next_job("worker-torch")
+        .expect("torch claim ok")
+        .expect("torch claims the explicit-gpu job");
+    assert_eq!(claimed.id, job.id);
+    assert_eq!(claimed.assigned_gpu.as_deref(), Some("mps"));
+}
+
+// --- Training routing (epic 3039, sc-3043/3049) ---
+
+fn training_caps() -> Vec<WorkerCapability> {
+    vec![
+        WorkerCapability::Gpu,
+        WorkerCapability::LoraTrain,
+        WorkerCapability::LoraTrainExecute,
+    ]
+}
+
+fn mlx_training_job(
+    kernel: &str,
+    base_model: &str,
+    network_type: &str,
+    dry_run: bool,
+    requested_gpu: &str,
+) -> CreateJob {
+    CreateJob {
+        job_type: JobType::LoraTrain,
+        project_id: Some("project-1".to_owned()),
+        project_name: Some("Project 1".to_owned()),
+        payload: object(json!({
+            "dryRun": dry_run,
+            "plan": {
+                "planVersion": 1,
+                "target": { "kernel": kernel, "baseModel": base_model },
+                "config": { "advanced": { "networkType": network_type } }
+            }
+        })),
+        requested_gpu: requested_gpu.to_owned(),
+        source_job_id: None,
+        duplicate_of_job_id: None,
+        attempts: 1,
+    }
+}
+
+#[test]
+fn mlx_eligible_training_job_defers_from_torch_worker_to_idle_mlx_worker() {
+    let store = store("mlx-training-defer");
+    register_gpu_worker(&store, "worker-torch", "mps", training_caps());
+    register_gpu_worker(&store, "worker-mlx", "mlx", training_caps());
+
+    let job = store
+        .create_job(mlx_training_job(
+            "z_image_lora",
+            "z_image_turbo",
+            "lora",
+            false,
+            "auto",
+        ))
+        .expect("job creates");
+
+    // The torch worker defers the MLX-native training job to the idle mlx worker.
+    assert!(store
+        .claim_next_job("worker-torch")
+        .expect("torch claim ok")
+        .is_none());
+    // The mlx worker claims it and trains in-process via mlx-gen.
+    let claimed = store
+        .claim_next_job("worker-mlx")
+        .expect("mlx claim ok")
+        .expect("mlx claims the training job");
+    assert_eq!(claimed.id, job.id);
+    assert_eq!(claimed.assigned_gpu.as_deref(), Some("mlx"));
+}
+
+#[test]
+fn mlx_worker_excluded_from_kolors_training_job() {
+    let store = store("mlx-training-kolors");
+    register_gpu_worker(&store, "worker-mlx", "mlx", training_caps());
+
+    // Kolors has no mlx-gen trainer crate → torch path only.
+    let job = store
+        .create_job(mlx_training_job(
+            "kolors_lora",
+            "kolors",
+            "lora",
+            false,
+            "auto",
+        ))
+        .expect("job creates");
+
+    // The mlx worker must not claim a torch-only training job.
+    assert!(store
+        .claim_next_job("worker-mlx")
+        .expect("mlx claim ok")
+        .is_none());
+
+    // A torch worker is the home for it.
+    register_gpu_worker(&store, "worker-torch", "mps", training_caps());
+    let claimed = store
+        .claim_next_job("worker-torch")
+        .expect("torch claim ok")
+        .expect("torch claims the kolors job");
+    assert_eq!(claimed.id, job.id);
+    assert_eq!(claimed.assigned_gpu.as_deref(), Some("mps"));
+}
+
+#[test]
+fn mlx_worker_excluded_from_lokr_wan_training_job() {
+    let store = store("mlx-training-lokr-wan");
+    register_gpu_worker(&store, "worker-mlx", "mlx", training_caps());
+
+    // LoKr-on-Wan has no Kronecker merge in the mlx Wan path → torch only.
+    let job = store
+        .create_job(mlx_training_job(
+            "wan_moe_lora",
+            "wan_2_2_t2v_14b",
+            "lokr",
+            false,
+            "auto",
+        ))
+        .expect("job creates");
+
+    assert!(store
+        .claim_next_job("worker-mlx")
+        .expect("mlx claim ok")
+        .is_none());
+
+    register_gpu_worker(&store, "worker-torch", "cuda:0", training_caps());
+    let claimed = store
+        .claim_next_job("worker-torch")
+        .expect("torch claim ok")
+        .expect("torch claims the LoKr-on-Wan job");
+    assert_eq!(claimed.id, job.id);
+}
+
+#[test]
+fn lokr_z_image_training_stays_mlx_eligible() {
+    let store = store("mlx-training-lokr-zimage");
+    register_gpu_worker(&store, "worker-torch", "mps", training_caps());
+    register_gpu_worker(&store, "worker-mlx", "mlx", training_caps());
+
+    // LoKr on Z-Image/SDXL/LTX is fine — the Rust engine applies it natively.
+    let job = store
+        .create_job(mlx_training_job(
+            "z_image_lora",
+            "z_image_turbo",
+            "lokr",
+            false,
+            "auto",
+        ))
+        .expect("job creates");
+
+    assert!(store
+        .claim_next_job("worker-torch")
+        .expect("torch claim ok")
+        .is_none());
+    let claimed = store
+        .claim_next_job("worker-mlx")
+        .expect("mlx claim ok")
+        .expect("mlx claims the LoKr Z-Image job");
+    assert_eq!(claimed.id, job.id);
+    assert_eq!(claimed.assigned_gpu.as_deref(), Some("mlx"));
+}
+
+#[test]
+fn mlx_eligible_training_falls_back_to_torch_when_no_mlx_worker() {
+    let store = store("mlx-training-fallback");
+    // No mlx worker (Windows/Linux, or it's down) — torch is the only path.
+    register_gpu_worker(&store, "worker-torch", "cuda:0", training_caps());
+
+    let job = store
+        .create_job(mlx_training_job("sdxl_lora", "sdxl", "lora", false, "auto"))
+        .expect("job creates");
+
+    let claimed = store
+        .claim_next_job("worker-torch")
+        .expect("torch claim ok")
+        .expect("torch claims the training job");
+    assert_eq!(claimed.id, job.id);
+    assert_eq!(claimed.assigned_gpu.as_deref(), Some("cuda:0"));
+}
+
+#[test]
+fn ltx_training_is_mlx_worker_only_with_no_torch_fallback() {
+    let store = store("mlx-training-ltx-only");
+    // sc-3049 retired the Python MLX LTX trainer, so `ltx_mlx_lora` has no torch
+    // fallback: a torch worker must NOT claim it — it stays queued for the mlx worker.
+    register_gpu_worker(&store, "worker-torch", "mps", training_caps());
+    let job = store
+        .create_job(mlx_training_job(
+            "ltx_mlx_lora",
+            "ltx_2_3",
+            "lora",
+            false,
+            "auto",
+        ))
+        .expect("job creates");
+
+    assert!(store
+        .claim_next_job("worker-torch")
+        .expect("torch claim ok")
+        .is_none());
+
+    // The mlx worker is the only home for it.
+    register_gpu_worker(&store, "worker-mlx", "mlx", training_caps());
+    let claimed = store
+        .claim_next_job("worker-mlx")
+        .expect("mlx claim ok")
+        .expect("mlx claims the LTX training job");
+    assert_eq!(claimed.id, job.id);
+    assert_eq!(claimed.assigned_gpu.as_deref(), Some("mlx"));
+}
+
+// --- Video routing (epic 3018, sc-3036) ---
+
+fn video_caps() -> Vec<WorkerCapability> {
+    vec![WorkerCapability::Gpu, WorkerCapability::VideoGenerate]
+}
+
+fn video_job_with(payload: Value, requested_gpu: &str) -> CreateJob {
+    CreateJob {
+        job_type: JobType::VideoGenerate,
+        project_id: Some("project-1".to_owned()),
+        project_name: Some("Project 1".to_owned()),
+        payload: object(payload),
+        requested_gpu: requested_gpu.to_owned(),
+        source_job_id: None,
+        duplicate_of_job_id: None,
+        attempts: 1,
+    }
+}
+
+#[test]
+fn mlx_eligible_video_job_defers_from_torch_worker_to_idle_mlx_worker() {
+    let store = store("mlx-video-routing-defer");
+    register_gpu_worker(&store, "worker-torch", "mps", video_caps());
+    register_gpu_worker(&store, "worker-mlx", "mlx", video_caps());
+
+    let job = store
+        .create_job(video_job_with(
+            json!({ "model": "wan_2_2", "mode": "text_to_video", "prompt": "a misty fjord" }),
+            "auto",
+        ))
+        .expect("job creates");
+
+    // The torch worker defers the MLX-eligible video job to the idle mlx worker.
+    assert!(store
+        .claim_next_job("worker-torch")
+        .expect("torch claim ok")
+        .is_none());
+    let claimed = store
+        .claim_next_job("worker-mlx")
+        .expect("mlx claim ok")
+        .expect("mlx claims the job");
+    assert_eq!(claimed.id, job.id);
+    assert_eq!(claimed.assigned_gpu.as_deref(), Some("mlx"));
+}
+
+#[test]
+fn mlx_worker_excluded_from_advanced_mode_video_job() {
+    let store = store("mlx-video-routing-exclude");
+    register_gpu_worker(&store, "worker-mlx", "mlx", video_caps());
+
+    // first_last_frame is an advanced mode — torch-only even on a Wan model (MLX
+    // covers only text_to_video / image_to_video).
+    let job = store
+        .create_job(video_job_with(
+            json!({ "model": "wan_2_2", "mode": "first_last_frame" }),
+            "auto",
+        ))
+        .expect("job creates");
+
+    assert!(store
+        .claim_next_job("worker-mlx")
+        .expect("mlx claim ok")
+        .is_none());
+
+    register_gpu_worker(&store, "worker-torch", "mps", video_caps());
+    let claimed = store
+        .claim_next_job("worker-torch")
+        .expect("torch claim ok")
+        .expect("torch claims the job");
+    assert_eq!(claimed.id, job.id);
+    assert_eq!(claimed.assigned_gpu.as_deref(), Some("mps"));
+}
+
+#[test]
+fn mlx_eligible_video_job_falls_back_to_torch_when_no_mlx_worker() {
+    let store = store("mlx-video-routing-fallback");
+    register_gpu_worker(&store, "worker-torch", "cuda:0", video_caps());
+
+    let job = store
+        .create_job(video_job_with(
+            json!({ "model": "ltx_2_3", "mode": "text_to_video", "prompt": "p" }),
+            "auto",
+        ))
+        .expect("job creates");
+
+    let claimed = store
+        .claim_next_job("worker-torch")
+        .expect("torch claim ok")
+        .expect("torch claims the job");
+    assert_eq!(claimed.id, job.id);
+    assert_eq!(claimed.assigned_gpu.as_deref(), Some("cuda:0"));
+}
+
+#[test]
+fn explicit_gpu_video_job_is_not_deferred_to_mlx_worker() {
+    let store = store("mlx-video-routing-explicit-gpu");
+    register_gpu_worker(&store, "worker-torch", "mps", video_caps());
+    register_gpu_worker(&store, "worker-mlx", "mlx", video_caps());
+
+    let job = store
+        .create_job(video_job_with(
+            json!({ "model": "wan_2_2", "mode": "text_to_video", "prompt": "p" }),
+            "mps",
+        ))
+        .expect("job creates");
+
+    let claimed = store
+        .claim_next_job("worker-torch")
+        .expect("torch claim ok")
+        .expect("torch claims the explicit-gpu job");
+    assert_eq!(claimed.id, job.id);
+    assert_eq!(claimed.assigned_gpu.as_deref(), Some("mps"));
+}
+
+#[test]
+fn lokr_on_wan_video_stays_on_torch() {
+    let store = store("mlx-video-lokr-wan");
+    register_gpu_worker(&store, "worker-mlx", "mlx", video_caps());
+
+    // LoKr-on-Wan → torch: the diffusers-Wan path applies LoKr via PEFT; the
+    // mlx-video path can't (mirrors create_video_adapter).
+    let job = store
+        .create_job(video_job_with(
+            json!({
+                "model": "wan_2_2_t2v_14b",
+                "mode": "text_to_video",
+                "loras": [{ "path": "a.safetensors", "networkType": "lokr" }]
+            }),
+            "auto",
+        ))
+        .expect("job creates");
+
+    assert!(store
+        .claim_next_job("worker-mlx")
+        .expect("mlx claim ok")
+        .is_none());
+
+    register_gpu_worker(&store, "worker-torch", "mps", video_caps());
+    let claimed = store
+        .claim_next_job("worker-torch")
+        .expect("torch claim ok")
+        .expect("torch claims the LoKr-on-Wan job");
+    assert_eq!(claimed.id, job.id);
+}
+
+#[test]
+fn lokr_on_ltx_video_routes_to_mlx_worker() {
+    let store = store("mlx-video-lokr-ltx");
+    register_gpu_worker(&store, "worker-torch", "mps", video_caps());
+    register_gpu_worker(&store, "worker-mlx", "mlx", video_caps());
+
+    // LoKr-on-LTX stays MLX: the torch LTX path has no LoKr loader; the Rust engine
+    // applies it natively.
+    let job = store
+        .create_job(video_job_with(
+            json!({
+                "model": "ltx_2_3",
+                "mode": "text_to_video",
+                "loras": [{ "path": "a.safetensors", "networkType": "lokr" }]
+            }),
+            "auto",
+        ))
+        .expect("job creates");
+
+    assert!(store
+        .claim_next_job("worker-torch")
+        .expect("torch claim ok")
+        .is_none());
+    let claimed = store
+        .claim_next_job("worker-mlx")
+        .expect("mlx claim ok")
+        .expect("mlx claims the LoKr-on-LTX job");
+    assert_eq!(claimed.id, job.id);
+    assert_eq!(claimed.assigned_gpu.as_deref(), Some("mlx"));
+}
+
+#[test]
+fn flux_schnell_txt2img_routes_to_mlx_worker() {
+    let store = store("mlx-routing-flux");
+    register_gpu_worker(&store, "worker-torch", "mps", image_caps());
+    register_gpu_worker(&store, "worker-mlx", "mlx", image_caps());
+
+    // FLUX.1 txt2img (sc-3023) is MLX-eligible → defers to the idle mlx worker.
+    let job = store
+        .create_job(image_job_with(
+            json!({ "model": "flux_schnell", "prompt": "a red fox" }),
+            "auto",
+        ))
+        .expect("job creates");
+    assert!(store
+        .claim_next_job("worker-torch")
+        .expect("torch claim ok")
+        .is_none());
+    let claimed = store
+        .claim_next_job("worker-mlx")
+        .expect("mlx claim ok")
+        .expect("mlx claims flux txt2img");
+    assert_eq!(claimed.id, job.id);
+    assert_eq!(claimed.assigned_gpu.as_deref(), Some("mlx"));
+}
+
+#[test]
+fn flux_reference_job_stays_on_torch() {
+    let store = store("mlx-routing-flux-reference");
+    register_gpu_worker(&store, "worker-mlx", "mlx", image_caps());
+
+    // FLUX.1 reference/IP-Adapter stays on the Python torch path → mlx refuses it.
+    let job = store
+        .create_job(image_job_with(
+            json!({ "model": "flux_dev", "prompt": "p", "referenceAssetId": "asset_1" }),
+            "auto",
+        ))
+        .expect("job creates");
+    assert!(store
+        .claim_next_job("worker-mlx")
+        .expect("mlx claim ok")
+        .is_none());
+
+    register_gpu_worker(&store, "worker-torch", "mps", image_caps());
+    let claimed = store
+        .claim_next_job("worker-torch")
+        .expect("torch claim ok")
+        .expect("torch claims flux reference job");
+    assert_eq!(claimed.id, job.id);
+    assert_eq!(claimed.assigned_gpu.as_deref(), Some("mps"));
+}
+
+#[test]
+fn qwen_txt2img_routes_to_mlx_but_pose_stays_on_torch() {
+    let store = store("mlx-routing-qwen");
+    register_gpu_worker(&store, "worker-torch", "mps", image_caps());
+    register_gpu_worker(&store, "worker-mlx", "mlx", image_caps());
+
+    // Plain qwen txt2img → MLX worker.
+    let txt2img = store
+        .create_job(image_job_with(
+            json!({ "model": "qwen_image", "prompt": "a red fox" }),
+            "auto",
+        ))
+        .expect("txt2img job creates");
+    assert!(store
+        .claim_next_job("worker-torch")
+        .expect("torch claim ok")
+        .is_none());
+    let claimed = store
+        .claim_next_job("worker-mlx")
+        .expect("mlx claim ok")
+        .expect("mlx claims qwen txt2img");
+    assert_eq!(claimed.id, txt2img.id);
+    assert_eq!(claimed.assigned_gpu.as_deref(), Some("mlx"));
+
+    // A strict-pose qwen job stays on the Python torch ControlNet path (sc-2291): the
+    // mlx worker refuses it, the torch worker claims it without deferral.
+    let pose = store
+        .create_job(image_job_with(
+            json!({
+                "model": "qwen_image",
+                "prompt": "a red fox",
+                "advanced": { "poses": [{ "id": "p1" }] }
+            }),
+            "auto",
+        ))
+        .expect("pose job creates");
+    assert!(store
+        .claim_next_job("worker-mlx")
+        .expect("mlx claim ok")
+        .is_none());
+    let claimed = store
+        .claim_next_job("worker-torch")
+        .expect("torch claim ok")
+        .expect("torch claims qwen pose job");
+    assert_eq!(claimed.id, pose.id);
+    assert_eq!(claimed.assigned_gpu.as_deref(), Some("mps"));
+}
+
+#[test]
+fn flux2_klein_variants_route_to_mlx_worker() {
+    let store = store("mlx-routing-flux2");
+    register_gpu_worker(&store, "worker-torch", "mps", image_caps());
+    register_gpu_worker(&store, "worker-mlx", "mlx", image_caps());
+
+    // All three FLUX.2-klein txt2img variants (MLX-only family) route to the mlx worker.
+    for model in [
+        "flux2_klein_9b",
+        "flux2_klein_9b_kv",
+        "flux2_klein_9b_true_v2",
+    ] {
+        let job = store
+            .create_job(image_job_with(
+                json!({ "model": model, "prompt": "a red fox" }),
+                "auto",
+            ))
+            .unwrap_or_else(|_| panic!("{model} job creates"));
+        assert!(
+            store
+                .claim_next_job("worker-torch")
+                .expect("torch claim ok")
+                .is_none(),
+            "{model} should defer off the torch worker"
+        );
+        let claimed = store
+            .claim_next_job("worker-mlx")
+            .expect("mlx claim ok")
+            .unwrap_or_else(|| panic!("mlx claims {model}"));
+        assert_eq!(claimed.id, job.id);
+        assert_eq!(claimed.assigned_gpu.as_deref(), Some("mlx"));
+        // Completing the job returns the mlx worker to idle (the deferral only fires
+        // toward an *idle* mlx worker), so the next variant defers to it too.
+        store
+            .update_job_progress(
+                &claimed.id,
+                ProgressUpdate {
+                    status: JobStatus::Completed,
+                    stage: ProgressStage::Completed,
+                    progress: 1.0,
+                    message: "done".to_owned(),
+                    error: None,
+                    result: None,
+                    eta_seconds: None,
+                    peak_gpu_memory_pct: None,
+                    peak_gpu_load_pct: None,
+                    backend: None,
+                },
+            )
+            .expect("complete job");
+    }
+}
+
+#[test]
+fn flux2_edit_reference_job_routes_to_mlx_worker() {
+    let store = store("mlx-routing-flux2-edit");
+    register_gpu_worker(&store, "worker-torch", "mps", image_caps());
+    register_gpu_worker(&store, "worker-mlx", "mlx", image_caps());
+
+    // FLUX.2 is MLX-only, so an edit/reference job (sc-3029) routes to the mlx worker
+    // (sc-3025 kept these on Python; the edit path now exists on Rust).
+    let job = store
+        .create_job(image_job_with(
+            json!({
+                "model": "flux2_klein_9b_kv",
+                "mode": "edit_image",
+                "prompt": "make it golden hour",
+                "sourceAssetId": "asset_1"
+            }),
+            "auto",
+        ))
+        .expect("job creates");
+    assert!(store
+        .claim_next_job("worker-torch")
+        .expect("torch claim ok")
+        .is_none());
+    let claimed = store
+        .claim_next_job("worker-mlx")
+        .expect("mlx claim ok")
+        .expect("mlx claims flux2 edit job");
+    assert_eq!(claimed.id, job.id);
+    assert_eq!(claimed.assigned_gpu.as_deref(), Some("mlx"));
+}
+
+#[test]
+fn sdxl_and_realvisxl_route_to_mlx_worker() {
+    let store = store("mlx-routing-sdxl");
+    register_gpu_worker(&store, "worker-torch", "mps", image_caps());
+    register_gpu_worker(&store, "worker-mlx", "mlx", image_caps());
+
+    for model in ["sdxl", "realvisxl"] {
+        let job = store
+            .create_job(image_job_with(
+                json!({ "model": model, "prompt": "a red fox" }),
+                "auto",
+            ))
+            .unwrap_or_else(|_| panic!("{model} job creates"));
+        assert!(
+            store
+                .claim_next_job("worker-torch")
+                .expect("torch claim ok")
+                .is_none(),
+            "{model} should defer off the torch worker"
+        );
+        let claimed = store
+            .claim_next_job("worker-mlx")
+            .expect("mlx claim ok")
+            .unwrap_or_else(|| panic!("mlx claims {model}"));
+        assert_eq!(claimed.id, job.id);
+        assert_eq!(claimed.assigned_gpu.as_deref(), Some("mlx"));
+        store
+            .update_job_progress(
+                &claimed.id,
+                ProgressUpdate {
+                    status: JobStatus::Completed,
+                    stage: ProgressStage::Completed,
+                    progress: 1.0,
+                    message: "done".to_owned(),
+                    error: None,
+                    result: None,
+                    eta_seconds: None,
+                    peak_gpu_memory_pct: None,
+                    peak_gpu_load_pct: None,
+                    backend: None,
+                },
+            )
+            .expect("complete job");
+    }
+
+    // sc-3060: SDXL reference/IP-Adapter + edit_image (inpaint/outpaint) now run on the Rust
+    // engine, so they route to the mlx worker (the torch worker defers).
+    for payload in [
+        json!({ "model": "sdxl", "prompt": "p", "referenceAssetId": "asset_1" }),
+        json!({ "model": "sdxl", "prompt": "p", "mode": "edit_image", "sourceAssetId": "src_1" }),
+        json!({ "model": "sdxl", "prompt": "p", "mode": "edit_image",
+                "sourceAssetId": "src_1", "maskAssetId": "mask_1" }),
+    ] {
+        let job = store
+            .create_job(image_job_with(payload, "auto"))
+            .expect("advanced job creates");
+        assert!(
+            store
+                .claim_next_job("worker-torch")
+                .expect("torch claim ok")
+                .is_none(),
+            "sdxl advanced should defer off the torch worker"
+        );
+        let claimed = store
+            .claim_next_job("worker-mlx")
+            .expect("mlx claim ok")
+            .expect("mlx claims sdxl advanced job");
+        assert_eq!(claimed.id, job.id);
+        assert_eq!(claimed.assigned_gpu.as_deref(), Some("mlx"));
+        store
+            .update_job_progress(
+                &claimed.id,
+                ProgressUpdate {
+                    status: JobStatus::Completed,
+                    stage: ProgressStage::Completed,
+                    progress: 1.0,
+                    message: "done".to_owned(),
+                    error: None,
+                    result: None,
+                    eta_seconds: None,
+                    peak_gpu_memory_pct: None,
+                    peak_gpu_load_pct: None,
+                    backend: None,
+                },
+            )
+            .expect("complete job");
+    }
+
+    // A third-party LyCORIS LoRA still keeps SDXL on the Python torch path.
+    let lycoris = store
+        .create_job(image_job_with(
+            json!({ "model": "sdxl", "prompt": "p", "loras": [{ "networkType": "lycoris" }] }),
+            "auto",
+        ))
+        .expect("lycoris job creates");
+    assert!(store
+        .claim_next_job("worker-mlx")
+        .expect("mlx claim ok")
+        .is_none());
+    let claimed = store
+        .claim_next_job("worker-torch")
+        .expect("torch claim ok")
+        .expect("torch claims sdxl lycoris job");
+    assert_eq!(claimed.id, lycoris.id);
+    assert_eq!(claimed.assigned_gpu.as_deref(), Some("mps"));
+}
+
+#[test]
+fn image_detail_routes_to_mlx_worker() {
+    // sc-3060: the tile-ControlNet detail refine (`image_detail`) now runs on the Rust
+    // engine for SDXL-family backbones, so it routes to the `mlx` worker (the torch worker
+    // defers); a third-party LyCORIS LoRA keeps it on torch.
+    let store = store("mlx-routing-detail");
+    let caps = vec![
+        WorkerCapability::Gpu,
+        WorkerCapability::ImageGenerate,
+        WorkerCapability::ImageDetail,
+    ];
+    register_gpu_worker(&store, "worker-torch", "mps", caps.clone());
+    register_gpu_worker(&store, "worker-mlx", "mlx", caps);
+
+    let detail_job = |payload: Value| CreateJob {
+        job_type: JobType::ImageDetail,
+        project_id: Some("project-1".to_owned()),
+        project_name: Some("Project 1".to_owned()),
+        payload: object(payload),
+        requested_gpu: "auto".to_owned(),
+        source_job_id: None,
+        duplicate_of_job_id: None,
+        attempts: 1,
+    };
+
+    for model in ["sdxl", "realvisxl"] {
+        let job = store
+            .create_job(detail_job(
+                json!({ "model": model, "sourceAssetId": "asset_src" }),
+            ))
+            .unwrap_or_else(|_| panic!("{model} detail job creates"));
+        assert!(
+            store
+                .claim_next_job("worker-torch")
+                .expect("torch claim ok")
+                .is_none(),
+            "{model} detail should defer off the torch worker"
+        );
+        let claimed = store
+            .claim_next_job("worker-mlx")
+            .expect("mlx claim ok")
+            .unwrap_or_else(|| panic!("mlx claims {model} detail"));
+        assert_eq!(claimed.id, job.id);
+        assert_eq!(claimed.assigned_gpu.as_deref(), Some("mlx"));
+        store
+            .update_job_progress(
+                &claimed.id,
+                ProgressUpdate {
+                    status: JobStatus::Completed,
+                    stage: ProgressStage::Completed,
+                    progress: 1.0,
+                    message: "done".to_owned(),
+                    error: None,
+                    result: None,
+                    eta_seconds: None,
+                    peak_gpu_memory_pct: None,
+                    peak_gpu_load_pct: None,
+                    backend: None,
+                },
+            )
+            .expect("complete detail job");
+    }
+
+    // LyCORIS detail job stays on the Python torch path.
+    let lycoris = store
+        .create_job(detail_job(json!({
+            "model": "realvisxl",
+            "sourceAssetId": "asset_src",
+            "loras": [{ "networkType": "lycoris" }]
+        })))
+        .expect("lycoris detail job creates");
+    assert!(store
+        .claim_next_job("worker-mlx")
+        .expect("mlx claim ok")
+        .is_none());
+    let claimed = store
+        .claim_next_job("worker-torch")
+        .expect("torch claim ok")
+        .expect("torch claims lycoris detail job");
+    assert_eq!(claimed.id, lycoris.id);
+    assert_eq!(claimed.assigned_gpu.as_deref(), Some("mps"));
+}
+
+#[test]
+fn non_mlx_model_image_job_is_not_routed_to_mlx_worker() {
+    let store = store("mlx-routing-non-mlx-model");
+    register_gpu_worker(&store, "worker-torch", "mps", image_caps());
+    register_gpu_worker(&store, "worker-mlx", "mlx", image_caps());
+
+    // A torch-only image model with no mlx-gen engine (e.g. kolors — InstantID/Kolors/
+    // PuLID/SenseNova have no MLX crate) stays on the Python path: the torch worker
+    // claims it without deferral, and the mlx worker would refuse it.
+    let job = store
+        .create_job(image_job_with(
+            json!({ "model": "kolors", "prompt": "p" }),
+            "auto",
+        ))
+        .expect("job creates");
+
+    let claimed = store
+        .claim_next_job("worker-torch")
+        .expect("torch claim ok")
+        .expect("torch claims the non-MLX-model job");
+    assert_eq!(claimed.id, job.id);
+    assert_eq!(claimed.assigned_gpu.as_deref(), Some("mps"));
+}
+
+#[test]
+fn mlx_worker_claims_eligible_job_with_idle_mps_worker_present() {
+    // Regression for the auto-GPU deferral deadlock (sc-3289): an Apple-Silicon
+    // mlx worker reports no utilization (the real `gpu_utilization("mlx")` probes
+    // nvidia-smi and finds nothing -> None), while an idle Python mps worker does
+    // report utilization. A queued auto MLX-eligible job (here flux2_klein_9b_kv
+    // text_to_image) must be claimed by the mlx worker; the mps worker must defer
+    // it. Before the fix, `dispatch_score` scored the no-utilization mlx worker as
+    // a GPU with 0 MB free, so `should_defer_auto_gpu_claim` made the mlx worker
+    // defer to the "healthier" mps worker, which deferred the same job back to the
+    // mlx worker -> the job sat on "Waiting for an available worker" forever.
+    let store = store("mlx-claims-with-mps-present");
+    store
+        .register_worker(RegisterWorker {
+            worker_id: "mlx-worker".to_owned(),
+            gpu_id: "mlx".to_owned(),
+            gpu_name: Some("Apple Silicon (MLX)".to_owned()),
+            capabilities: vec![
+                WorkerCapability::Gpu,
+                WorkerCapability::ImageGenerate,
+                WorkerCapability::ImageDetail,
+                WorkerCapability::VideoGenerate,
+                WorkerCapability::LoraTrain,
+                WorkerCapability::LoraTrainExecute,
+            ],
+            loaded_models: Vec::new(),
+            utilization: None,
+        })
+        .expect("mlx worker registers");
+    store
+        .register_worker(RegisterWorker {
+            worker_id: "mps-worker".to_owned(),
+            gpu_id: "mps".to_owned(),
+            gpu_name: Some("Apple GPU (unified)".to_owned()),
+            capabilities: vec![
+                WorkerCapability::Gpu,
+                WorkerCapability::ImageGenerate,
+                WorkerCapability::ImageEdit,
+                WorkerCapability::VideoGenerate,
+                WorkerCapability::LoraTrain,
+                WorkerCapability::LoraTrainExecute,
+            ],
+            loaded_models: Vec::new(),
+            utilization: Some(WorkerUtilizationSnapshot {
+                memory_total_mb: Some(131_072),
+                memory_used_mb: Some(1_318),
+                memory_free_mb: Some(129_754),
+                gpu_load_percent: Some(28.0),
+            }),
+        })
+        .expect("mps worker registers");
+
+    let job = store
+        .create_job(image_job(object(json!({
+            "model": "flux2_klein_9b_kv",
+            "mode": "text_to_image",
+            "loras": [],
+            "advanced": { "resolution": "1024x1024" },
+        }))))
+        .expect("job creates");
+
+    // The mps worker must defer (an idle mlx worker can run it).
+    assert!(
+        store
+            .claim_next_job("mps-worker")
+            .expect("mps claim ok")
+            .is_none(),
+        "mps worker should defer the flux2 job to the mlx worker"
+    );
+
+    // The mlx worker must claim it.
+    let claimed = store
+        .claim_next_job("mlx-worker")
+        .expect("mlx claim ok")
+        .expect("mlx worker should claim the flux2 t2i job");
+    assert_eq!(claimed.id, job.id);
+    assert_eq!(claimed.assigned_gpu.as_deref(), Some("mlx"));
+}
