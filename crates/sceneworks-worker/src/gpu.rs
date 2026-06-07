@@ -360,7 +360,8 @@ pub(crate) fn cpu_gpu() -> DiscoveredGpu {
 }
 
 /// The Apple-Silicon native MLX GPU worker (epic 3018): advertises `image_generate`,
-/// `image_detail` (tile-ControlNet refine, sc-3060), `video_generate`, and LoRA/LoKr
+/// `image_edit` (plain Image Edit, sc-3513), `image_detail` (tile-ControlNet refine,
+/// sc-3060), `video_generate`, and LoRA/LoKr
 /// `lora_train` + `lora_train_execute` (epic 3039), served in-process by the linked
 /// mlx-gen engine. `Gpu` (not
 /// `Cpu`) so the API's `worker_supports_job` lets GPU jobs route here; it deliberately
@@ -383,6 +384,13 @@ pub(crate) fn mlx_gpu() -> DiscoveredGpu {
         capabilities: vec![
             WorkerCapability::Gpu,
             WorkerCapability::ImageGenerate,
+            // Plain Image Edit (sc-3513): the `image_edit` job type
+            // (`mode=edit_image` + `sourceAssetId`, epic 2427) runs the same engine
+            // edit paths as the `character_image` reference flow — qwen/flux2/sdxl
+            // edit dispatched by payload model+mode in `run_image_generate_job`. The
+            // API only routes MLX-eligible edit models here (`image_job_is_mlx_eligible`);
+            // torch-only edit models stay on the Python worker.
+            WorkerCapability::ImageEdit,
             // Tile-ControlNet detail refine (epic 3041, sc-3060) — the SDXL-family
             // `image_detail` job runs in-process on the engine here too.
             WorkerCapability::ImageDetail,

@@ -9,7 +9,7 @@ use axum::http::{HeaderMap, StatusCode as AxumStatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
-use sceneworks_core::contracts::WorkerUtilizationSnapshot;
+use sceneworks_core::contracts::{JobSnapshot, WorkerUtilizationSnapshot};
 use serde_json::{json, Value};
 use tempfile::tempdir;
 
@@ -423,10 +423,11 @@ fn rust_cpu_capabilities_do_not_claim_gpu_generation_jobs() {
         .any(|capability| capability.as_str() == "image_generate"));
 }
 
-/// The Apple-Silicon MLX GPU worker (epic 3018) advertises `image_generate` +
-/// `video_generate` so the API routes generation to it, but it must NOT pick up CPU
-/// utility jobs (those stay on the CPU worker) — the inverse of the CPU-worker
-/// contract above. `video_generate` lands with the video runtime (sc-3033).
+/// The Apple-Silicon MLX GPU worker (epic 3018) advertises `image_generate`,
+/// `image_edit` (sc-3513), + `video_generate` so the API routes generation/editing to
+/// it, but it must NOT pick up CPU utility jobs (those stay on the CPU worker) — the
+/// inverse of the CPU-worker contract above. `video_generate` lands with the video
+/// runtime (sc-3033).
 #[cfg(target_os = "macos")]
 #[test]
 fn mlx_gpu_advertises_generation_capabilities_only() {
@@ -436,6 +437,11 @@ fn mlx_gpu_advertises_generation_capabilities_only() {
     assert!(capabilities
         .iter()
         .any(|capability| capability.as_str() == "image_generate"));
+    // Plain Image Edit (sc-3513): without this the API's worker_supports_job would
+    // reject an `image_edit` claim and the job would silently fall back to torch.
+    assert!(capabilities
+        .iter()
+        .any(|capability| capability.as_str() == "image_edit"));
     assert!(capabilities
         .iter()
         .any(|capability| capability.as_str() == "video_generate"));
@@ -458,6 +464,55 @@ fn mlx_gpu_advertises_generation_capabilities_only() {
             "MLX GPU worker should not advertise utility capability {utility}"
         );
     }
+}
+
+/// sc-3513: the worker's `JobType::ImageEdit` dispatch arm delegates to
+/// `run_image_generate_job` — the engine keys edits on payload model+mode, not job
+/// type. Feeding an `image_edit`-typed job into the handler proves it reaches the image
+/// pipeline (stopping at the payload's projectId guard) rather than the `run_utility_job`
+/// "unsupported job type" default — i.e. plain Image Edit is genuinely handled. The
+/// handler never reads `job_type`, so a missing projectId is its first stop (no network).
+#[tokio::test]
+async fn image_edit_job_dispatches_to_image_generate_handler() {
+    let settings = test_settings("http://127.0.0.1".to_owned(), None);
+    let api = ApiClient::new(&settings);
+    let job: JobSnapshot = serde_json::from_value(json!({
+        "id": "job-image-edit-1",
+        "type": "image_edit",
+        "status": "preparing",
+        "projectId": null,
+        "projectName": null,
+        "payload": { "model": "qwen_image_edit_2511", "mode": "edit_image" },
+        "result": {},
+        "requestedGpu": "auto",
+        "assignedGpu": null,
+        "workerId": null,
+        "progress": 0,
+        "stage": "preparing",
+        "message": "",
+        "error": null,
+        "etaSeconds": null,
+        "elapsedSeconds": null,
+        "attempts": 1,
+        "sourceJobId": null,
+        "duplicateOfJobId": null,
+        "cancelRequested": false,
+        "createdAt": "2026-06-07T00:00:00Z",
+        "updatedAt": "2026-06-07T00:00:00Z",
+        "startedAt": null,
+        "completedAt": null,
+        "canceledAt": null,
+        "lastHeartbeatAt": null
+    }))
+    .expect("image_edit job snapshot deserializes");
+
+    let error = super::image_jobs::run_image_generate_job(&api, &settings, &job)
+        .await
+        .expect_err("missing projectId is rejected by the image handler");
+    assert!(
+        matches!(&error, WorkerError::InvalidPayload(message) if message.contains("projectId")),
+        "expected a projectId payload error from the image handler, got {error:?}",
+    );
 }
 
 #[tokio::test]

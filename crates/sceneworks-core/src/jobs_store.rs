@@ -1759,7 +1759,16 @@ const MLX_ROUTED_MODELS: &[&str] = &[
 /// classifier (`image_jobs::classify_adapter`, sc-3022) is the backstop for an
 /// unstamped third-party LyCORIS file that slips through.
 fn image_job_is_mlx_eligible(job: &JobSnapshot) -> bool {
-    if !matches!(job.job_type, JobType::ImageGenerate) {
+    // Both `image_generate` (text-to-image / character_image / reference) and the
+    // distinct `image_edit` job type (Image Studio/Editor "plain Image Edit":
+    // `mode=edit_image` + `sourceAssetId`, epic 2427) route through the same
+    // per-model predicates. The engine dispatches on payload model+mode, not job
+    // type (`run_image_generate_job`), and the per-model arms below already gate
+    // `edit_image` (qwen/flux2/sdxl edit → eligible; torch-only edit models aren't
+    // in `MLX_ROUTED_MODELS` → torch). Without `image_edit` in this gate, plain
+    // Image Edit fell through to torch silently with no `mlx_route_decision`
+    // (sc-3513).
+    if !matches!(job.job_type, JobType::ImageGenerate | JobType::ImageEdit) {
         return false;
     }
     let Some(model) = job.payload.get("model").and_then(Value::as_str) else {
@@ -2141,9 +2150,14 @@ fn worker_supports_job(worker: &WorkerSnapshot, job: &JobSnapshot) -> bool {
     // the Python worker. Non-mlx workers are unaffected here; the *preference* to route
     // eligible jobs to an idle mlx worker is a soft deferral in the claim path.
     if worker.gpu_id.eq_ignore_ascii_case("mlx") {
-        // Image: sc-3026 txt2img/LoRA + sc-3060 reference/edit/inpaint/outpaint + image_detail.
-        if matches!(job.job_type, JobType::ImageGenerate | JobType::ImageDetail)
-            && !job_is_mlx_eligible(job)
+        // Image: sc-3026 txt2img/LoRA + sc-3060 reference/edit/inpaint/outpaint +
+        // image_detail + sc-3513 the `image_edit` job type (plain Image Edit). A
+        // torch-only edit model (z_image_edit/kolors/sensenova/lens/pulid/instantid)
+        // is not MLX-eligible, so the mlx worker refuses it and it stays on torch.
+        if matches!(
+            job.job_type,
+            JobType::ImageGenerate | JobType::ImageEdit | JobType::ImageDetail
+        ) && !job_is_mlx_eligible(job)
         {
             return false;
         }
