@@ -40,6 +40,7 @@ function baseContext(overrides = {}) {
     purgeAsset: vi.fn(),
     gpuOptions: [],
     imageModels: [Z_IMAGE],
+    importAsset: vi.fn(),
     latestImageAssets: [],
     recentImageAssets: [],
     studioLaunch: null,
@@ -68,6 +69,14 @@ function setInput(element, value) {
   const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, "value").set;
   setter.call(element, value);
   element.dispatchEvent(new window.Event("input", { bubbles: true }));
+}
+
+function setFileInput(element, files) {
+  Object.defineProperty(element, "files", {
+    configurable: true,
+    value: files,
+  });
+  element.dispatchEvent(new window.Event("change", { bubbles: true }));
 }
 
 const saveButton = (container) =>
@@ -147,5 +156,163 @@ describe("ImageStudio Save as Preset", () => {
 
     expect(context.createPreset).not.toHaveBeenCalled();
     expect(container.textContent).toContain("already exists");
+  });
+});
+
+describe("ImageStudio edit source picker", () => {
+  let container;
+  let root;
+
+  beforeEach(() => {
+    global.IS_REACT_ACT_ENVIRONMENT = true;
+    window.localStorage.clear();
+    container = document.createElement("div");
+    document.body.appendChild(container);
+    root = createRoot(container);
+  });
+
+  afterEach(async () => {
+    await act(async () => root.unmount());
+    container.remove();
+    vi.clearAllMocks();
+  });
+
+  async function render(context) {
+    await act(async () => {
+      root.render(
+        <AppContext.Provider value={context}>
+          <ImageStudio />
+        </AppContext.Provider>,
+      );
+    });
+    await act(async () => {});
+  }
+
+  async function openEditSourcePicker(context) {
+    await render(context);
+    await click([...container.querySelectorAll(".segmented-control button")].find((button) => button.textContent === "Edit"));
+    await click([...container.querySelectorAll(".asset-picker-head button")].find((button) => button.textContent === "Select image"));
+    return container.querySelector('[role="dialog"]');
+  }
+
+  it("limits Image Edit source selection to active project images and shows the requested source tabs", async () => {
+    const active = { id: "asset-active", projectId: "project_1", type: "image", displayName: "Active Plate", status: { trashed: false } };
+    const trashed = { id: "asset-trashed", projectId: "project_1", type: "image", displayName: "Discarded Plate", status: { trashed: true } };
+    const rejected = { id: "asset-rejected", projectId: "project_1", type: "image", displayName: "Rejected Plate", status: { rejected: true } };
+    const otherProject = { id: "asset-other", projectId: "project_2", type: "image", displayName: "Other Project Plate", status: {} };
+    const video = { id: "asset-video", projectId: "project_1", type: "video", displayName: "Video Clip", status: {} };
+
+    const dialog = await openEditSourcePicker(
+      baseContext({
+        assets: [active, trashed, rejected, otherProject, video],
+        imageModels: [{ ...Z_IMAGE, capabilities: ["edit_image"] }],
+        selectedAsset: null,
+      }),
+    );
+
+    const sourceTabs = [...dialog.querySelectorAll('[role="tab"]')].map((button) => button.textContent.trim());
+    expect(sourceTabs).toEqual(["Assets1", "File Upload", "Character0"]);
+    expect(dialog.textContent).toContain("Active Plate");
+    expect(dialog.textContent).not.toContain("Discarded Plate");
+    expect(dialog.textContent).not.toContain("Rejected Plate");
+    expect(dialog.textContent).not.toContain("Other Project Plate");
+    expect(dialog.textContent).not.toContain("Video Clip");
+    expect(dialog.textContent).not.toContain("Renders");
+  });
+
+  it("filters the Character source tab by project, character, and active status", async () => {
+    const mira = { id: "char-1", name: "Mira", approvedReferences: [{ assetId: "ref-mira" }] };
+    const echo = { id: "char-2", name: "Echo", approvedReferences: [] };
+    const assets = [
+      { id: "ref-mira", projectId: "project_1", type: "image", displayName: "Mira Reference", status: {} },
+      {
+        id: "mira-render",
+        projectId: "project_1",
+        type: "image",
+        displayName: "Mira Render",
+        recipe: { normalizedSettings: { characterId: "char-1" } },
+        status: {},
+      },
+      {
+        id: "mira-trash",
+        projectId: "project_1",
+        type: "image",
+        displayName: "Mira Discarded",
+        recipe: { normalizedSettings: { characterId: "char-1" } },
+        status: { trashed: true },
+      },
+      {
+        id: "echo-render",
+        projectId: "project_1",
+        type: "image",
+        displayName: "Echo Render",
+        recipe: { normalizedSettings: { characterId: "char-2" } },
+        status: {},
+      },
+      {
+        id: "mira-other-project",
+        projectId: "project_2",
+        type: "image",
+        displayName: "Mira Elsewhere",
+        recipe: { normalizedSettings: { characterId: "char-1" } },
+        status: {},
+      },
+    ];
+
+    const dialog = await openEditSourcePicker(
+      baseContext({
+        assets,
+        characters: [mira, echo],
+        imageModels: [{ ...Z_IMAGE, capabilities: ["edit_image"] }],
+        selectedAsset: null,
+      }),
+    );
+
+    await click([...dialog.querySelectorAll('[role="tab"]')].find((button) => button.textContent.includes("Character")));
+    expect(dialog.textContent).toContain("Mira Reference");
+    expect(dialog.textContent).toContain("Mira Render");
+    expect(dialog.textContent).not.toContain("Mira Discarded");
+    expect(dialog.textContent).not.toContain("Echo Render");
+    expect(dialog.textContent).not.toContain("Mira Elsewhere");
+
+    await act(async () => {
+      dialog.querySelector(".asset-picker-card").click();
+    });
+    await click([...dialog.querySelectorAll("button")].find((button) => button.textContent === "Use Selection"));
+
+    expect(container.textContent).toContain("Mira Reference");
+  });
+
+  it("imports a File Upload source and submits it as the edit source image", async () => {
+    const imported = {
+      id: "uploaded-source",
+      projectId: "project_1",
+      type: "image",
+      displayName: "uploaded.png",
+      status: {},
+    };
+    const importAsset = vi.fn(async () => imported);
+    const createImageJob = vi.fn(async () => ({ id: "job-1" }));
+
+    const dialog = await openEditSourcePicker(
+      baseContext({
+        assets: [],
+        createImageJob,
+        imageModels: [{ ...Z_IMAGE, capabilities: ["edit_image"] }],
+        importAsset,
+        selectedAsset: null,
+      }),
+    );
+
+    await click([...dialog.querySelectorAll('[role="tab"]')].find((button) => button.textContent === "File Upload"));
+    const file = new File(["image"], "source.png", { type: "image/png" });
+    await act(async () => setFileInput(dialog.querySelector('input[type="file"]'), [file]));
+    await act(async () => {});
+
+    expect(importAsset).toHaveBeenCalledWith(file, { throwOnError: true });
+    expect(container.querySelector('[role="dialog"]')).toBeNull();
+
+    await click([...container.querySelectorAll("button")].find((button) => button.textContent === "Generate"));
+    expect(createImageJob).toHaveBeenCalledWith(expect.objectContaining({ mode: "edit_image", sourceAssetId: "uploaded-source" }));
   });
 });

@@ -1,5 +1,5 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
-import { AssetPickerField } from "../components/AssetPicker.jsx";
+import { ImageEditSourcePickerField } from "../components/AssetPicker.jsx";
 import { AssetCard } from "../components/assetPanels.jsx";
 import { AssetMedia } from "../components/assetMedia.jsx";
 import { Icon } from "../components/Icons.jsx";
@@ -206,6 +206,7 @@ export function ImageStudio() {
     purgeAsset,
     gpuOptions,
     imageModels,
+    importAsset,
     latestImageAssets,
     recentImageAssets,
     studioLaunch,
@@ -313,8 +314,22 @@ export function ImageStudio() {
   const [presetSaveMessage, setPresetSaveMessage] = useState({ tone: "neutral", text: "" });
   const presetDefaultSnapshots = useRef({});
   const editImageAssets = useMemo(
-    () => assets.filter((asset) => asset.type === "image" || asset.type === "frame"),
-    [assets],
+    () =>
+      assets.filter(
+        (asset) =>
+          (asset.type === "image" || asset.type === "frame") &&
+          asset.projectId === activeProject?.id &&
+          !asset.status?.trashed &&
+          !asset.status?.rejected,
+      ),
+    [assets, activeProject?.id],
+  );
+  const selectedAssetEditableSourceId = useMemo(
+    () =>
+      selectedAsset?.id && editImageAssets.some((asset) => asset.id === selectedAsset.id)
+        ? selectedAsset.id
+        : "",
+    [editImageAssets, selectedAsset?.id],
   );
 
   function handleModeChange(nextMode) {
@@ -335,10 +350,10 @@ export function ImageStudio() {
   }
 
   useEffect(() => {
-    if (mode === "edit_image" && selectedAsset?.id) {
-      setSourceAssetId(selectedAsset.id);
+    if (mode === "edit_image" && selectedAssetEditableSourceId) {
+      setSourceAssetId(selectedAssetEditableSourceId);
     }
-  }, [mode, selectedAsset?.id]);
+  }, [mode, selectedAssetEditableSourceId]);
 
   useEffect(() => {
     if (launchRequest?.view !== "Image") {
@@ -366,10 +381,10 @@ export function ImageStudio() {
     if (launchRequest.model) {
       setModel(launchRequest.model);
     }
-    if (launchRequest.mode === "edit_image" && selectedAsset?.id) {
-      setSourceAssetId(selectedAsset.id);
+    if (launchRequest.mode === "edit_image" && selectedAssetEditableSourceId) {
+      setSourceAssetId(selectedAssetEditableSourceId);
     }
-  }, [launchRequest?.id, selectedAsset?.id]);
+  }, [launchRequest?.id, selectedAsset?.id, selectedAssetEditableSourceId]);
 
   const availableModels = useMemo(
     () =>
@@ -1024,12 +1039,15 @@ export function ImageStudio() {
           <div className="studio-source-band">
             {mode === "edit_image" ? (
               <>
-                <AssetPickerField
+                <ImageEditSourcePickerField
                   assets={editImageAssets}
                   buttonLabel="Select image"
+                  characters={characters}
                   emptyLabel="No source image selected"
-                  label="Source"
+                  importAsset={importAsset}
+                  label="Source image"
                   onChange={setSourceAssetId}
+                  projectId={activeProject?.id}
                   value={sourceAssetId}
                 />
                 <FitModeControl
