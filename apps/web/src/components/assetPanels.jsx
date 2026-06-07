@@ -379,6 +379,7 @@ export function FullscreenPreview({
   onClose,
   onEditImage,
   onPreviewAsset,
+  onUseRecipe,
   previousAsset,
   purgeAsset,
   updateAssetStatus,
@@ -440,6 +441,11 @@ export function FullscreenPreview({
             </div>
           ) : null}
           <div className="preview-actions">
+            {onUseRecipe && asset.type === "image" && (asset.generationSet?.recipe || asset.recipe) ? (
+              <button onClick={() => onUseRecipe(asset)} type="button">
+                Use this recipe
+              </button>
+            ) : null}
             {onEditImage && asset.type === "image" ? (
               <button onClick={() => onEditImage(asset)} type="button">
                 Edit
