@@ -1402,6 +1402,7 @@ impl ProjectStore {
         project_id: &str,
         job_id: &str,
         generation_set: &Value,
+        recipe_fact: Option<&Value>,
     ) -> ProjectStoreResult<()> {
         let (project_path, _project_guard) = self.lock_project(project_id)?;
         let id = generation_set
@@ -1423,6 +1424,19 @@ impl ProjectStore {
             "count": get("count"),
             "createdAt": get("createdAt"),
         });
+        let embedded_recipe = generation_set.get("recipe").cloned().or_else(|| {
+            recipe_fact.and_then(|fact| {
+                build_generated_asset_sidecar(project_id, job_id, id, fact)
+                    .get("recipe")
+                    .cloned()
+            })
+        });
+        let mut record = record;
+        if let Some(recipe) = embedded_recipe {
+            if let Some(object) = record.as_object_mut() {
+                object.insert("recipe".to_owned(), recipe);
+            }
+        }
         let dir = project_path.join("generation-sets");
         fs::create_dir_all(&dir)?;
         write_json(&dir.join(format!("{id}.json")), &record)?;
@@ -3292,6 +3306,64 @@ mod tests {
     }
 
     #[test]
+    fn write_generation_set_embeds_replayable_recipe_from_first_asset_fact() {
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        let store = ProjectStore::new(temp_dir.path().join("data"), "test-version");
+        let project = store.create_project("Fixture").expect("project creates");
+        let generation_set = json!({
+            "id": "genset_recipe",
+            "mode": "text_to_image",
+            "model": "z_image_turbo",
+            "prompt": "city",
+            "negativePrompt": "",
+            "count": 1,
+            "createdAt": "2026-05-25T00:00:00Z",
+        });
+        let fact = json!({
+            "assetId": "asset_abc",
+            "mediaPath": "assets/images/genset_recipe/city.png",
+            "mimeType": "image/png",
+            "width": 1280,
+            "height": 768,
+            "normalizedWidth": 1024,
+            "normalizedHeight": 768,
+            "count": 1,
+            "family": "z-image",
+            "seed": 42,
+            "displayName": "city #1",
+            "createdAt": "2026-05-25T00:00:00Z",
+            "mode": "text_to_image",
+            "model": "z_image_turbo",
+            "adapter": "z_image_diffusers",
+            "prompt": "city",
+            "negativePrompt": "",
+            "loras": [{"id": "style_lora", "weight": 0.8}],
+            "stylePreset": "none",
+            "rawAdapterSettings": {"steps": 8},
+        });
+
+        store
+            .write_generation_set(&project.id, "job-1", &generation_set, Some(&fact))
+            .expect("generation set writes");
+
+        let written: Value = serde_json::from_str(
+            &std::fs::read_to_string(
+                std::path::Path::new(&project.path).join("generation-sets/genset_recipe.json"),
+            )
+            .expect("generation set file exists"),
+        )
+        .expect("generation set json parses");
+        assert_eq!(written["recipe"]["adapter"], json!("z_image_diffusers"));
+        assert_eq!(written["recipe"]["seed"], json!(42));
+        assert_eq!(written["recipe"]["loras"][0]["id"], json!("style_lora"));
+        assert_eq!(
+            written["recipe"]["normalizedSettings"]["width"],
+            json!(1024)
+        );
+        assert_eq!(written["recipe"]["rawAdapterSettings"]["steps"], json!(8));
+    }
+
+    #[test]
     fn build_generated_asset_sidecar_derives_video_type_from_mime() {
         let fact = json!({
             "assetId": "asset_v",
@@ -3756,6 +3828,93 @@ mod tests {
         assert_eq!(assets[0]["type"], "document");
         // The document asset carries a derived origin (sc-2024).
         assert_eq!(assets[0]["origin"], "document_studio");
+    }
+
+    #[test]
+    fn asset_reads_include_generation_set_recipe_when_available() {
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        let store = ProjectStore::new(temp_dir.path().join("data"), "test-version");
+        let project = store.create_project("Recipes").expect("project creates");
+        let project_path = std::path::PathBuf::from(&project.path);
+        let image_dir = project_path.join("assets/images");
+        std::fs::write(image_dir.join("image.png"), b"image").expect("image writes");
+        std::fs::write(
+            image_dir.join("image.sceneworks.json"),
+            serde_json::to_string_pretty(&json!({
+                "id": "asset-1",
+                "type": "image",
+                "displayName": "Image",
+                "createdAt": "2026-06-07T00:00:00Z",
+                "generationSetId": "genset_recipe",
+                "file": {"path": "assets/images/image.png"},
+                "status": {"favorite": false, "rating": 0, "rejected": false, "trashed": false},
+                "recipe": {
+                    "mode": "text_to_image",
+                    "model": "z_image_turbo",
+                    "adapter": "z_image_diffusers",
+                    "prompt": "single asset",
+                    "negativePrompt": "",
+                    "seed": 7,
+                    "loras": [],
+                    "normalizedSettings": {},
+                    "rawAdapterSettings": {}
+                },
+                "lineage": {"parents": [], "sourceAssetId": Value::Null, "sourceTimestamp": Value::Null, "jobId": "job-1"}
+            }))
+            .expect("json"),
+        )
+        .expect("sidecar writes");
+        std::fs::write(
+            project_path.join("generation-sets/genset_recipe.json"),
+            serde_json::to_string_pretty(&json!({
+                "schemaVersion": 1,
+                "id": "genset_recipe",
+                "projectId": project.id,
+                "jobId": "job-1",
+                "mode": "text_to_image",
+                "model": "z_image_turbo",
+                "prompt": "batch prompt",
+                "negativePrompt": "",
+                "count": 4,
+                "createdAt": "2026-06-07T00:00:00Z",
+                "recipe": {
+                    "mode": "text_to_image",
+                    "model": "z_image_turbo",
+                    "adapter": "z_image_diffusers",
+                    "prompt": "batch prompt",
+                    "negativePrompt": "",
+                    "seed": 42,
+                    "loras": [{"id": "style_lora", "weight": 0.75}],
+                    "normalizedSettings": {"count": 4, "width": 1024, "height": 1024},
+                    "rawAdapterSettings": {"steps": 8}
+                }
+            }))
+            .expect("json"),
+        )
+        .expect("generation set writes");
+
+        store.reindex_project(&project.id).expect("reindex works");
+
+        let assets = store
+            .list_assets(&project.id, false, false, AssetScope::All)
+            .expect("assets list");
+        assert_eq!(
+            assets[0]["generationSet"]["recipe"]["prompt"],
+            "batch prompt"
+        );
+        assert_eq!(assets[0]["generationSet"]["recipe"]["seed"], json!(42));
+        assert_eq!(
+            assets[0]["generationSet"]["recipe"]["normalizedSettings"]["count"],
+            json!(4)
+        );
+
+        let detail = store
+            .get_asset(&project.id, "asset-1")
+            .expect("asset detail reads");
+        assert_eq!(
+            detail["generationSet"]["recipe"]["loras"][0]["id"],
+            "style_lora"
+        );
     }
 
     #[test]
