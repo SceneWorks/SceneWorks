@@ -1367,6 +1367,17 @@ fn should_defer_auto_gpu_claim(
     {
         return Ok(false);
     }
+    // The in-process `mlx` worker is the designated home for the jobs it claims
+    // (a non-mlx worker defers MLX-eligible jobs to it via
+    // `should_defer_image_to_mlx_worker` & siblings). It must never hand one of
+    // those jobs to a "healthier" non-mlx GPU through this health-based dispatch:
+    // on Apple Silicon the `mlx` and `mps` workers share the same physical GPU,
+    // and that worker would only defer the job straight back, deadlocking it in
+    // the queue. Keeping the mlx worker out of the auto-GPU health comparison
+    // breaks that cycle regardless of whether it reports utilization.
+    if worker.gpu_id.eq_ignore_ascii_case("mlx") {
+        return Ok(false);
+    }
     let current_score = dispatch_score(job, worker);
     if !current_score.has_utilization {
         return Ok(false);
@@ -1972,29 +1983,35 @@ struct DispatchScore {
 
 fn dispatch_score(job: &JobSnapshot, worker: &WorkerSnapshot) -> DispatchScore {
     let utilization = worker.utilization.as_ref();
-    let total = utilization
-        .and_then(|item| item.memory_total_mb)
-        .unwrap_or(0);
-    let used = utilization
-        .and_then(|item| item.memory_used_mb)
-        .unwrap_or(0);
+    let total = utilization.and_then(|item| item.memory_total_mb);
+    let used = utilization.and_then(|item| item.memory_used_mb);
+    let gpu_load = utilization.and_then(|item| item.gpu_load_percent);
+    // Derive free memory only from data the worker actually reported: an explicit
+    // free reading, or total-minus-used when both are present. A worker that
+    // reports no utilization at all must stay `has_utilization = false` so the
+    // auto-GPU dispatcher leaves it alone — the earlier `total.checked_sub(used)`
+    // with total/used defaulted to 0 yielded `Some(0)`, which scored a
+    // no-utilization worker as a real GPU with 0 MB free. That made the
+    // Apple-Silicon `mlx` worker (whose nvidia-smi probe finds nothing, so it
+    // never reports utilization) always look "worse" than the idle Python `mps`
+    // worker, so it deferred every MLX-eligible job to `mps` — which deferred the
+    // same job right back to `mlx` (`should_defer_image_to_mlx_worker`), leaving
+    // it queued on "Waiting for an available worker" forever (sc-3289 regression).
     let free = utilization
         .and_then(|item| item.memory_free_mb)
-        .or_else(|| total.checked_sub(used));
-    let memory_usage_percent = if total > 0 {
-        used as f64 / total as f64 * 100.0
-    } else {
-        0.0
+        .or_else(|| match (total, used) {
+            (Some(total), Some(used)) => total.checked_sub(used),
+            _ => None,
+        });
+    let memory_usage_percent = match (total, used) {
+        (Some(total), Some(used)) if total > 0 => used as f64 / total as f64 * 100.0,
+        _ => 0.0,
     };
     DispatchScore {
-        has_utilization: free.is_some()
-            || utilization.and_then(|item| item.gpu_load_percent).is_some()
-            || total > 0,
+        has_utilization: free.is_some() || gpu_load.is_some() || total.is_some(),
         free_memory_mb: free.unwrap_or(0) as f64,
         memory_usage_percent,
-        gpu_load_percent: utilization
-            .and_then(|item| item.gpu_load_percent)
-            .unwrap_or(0.0),
+        gpu_load_percent: gpu_load.unwrap_or(0.0),
         warm_model: job_matches_loaded_model(job, worker),
     }
 }

@@ -2240,3 +2240,82 @@ fn non_mlx_model_image_job_is_not_routed_to_mlx_worker() {
     assert_eq!(claimed.id, job.id);
     assert_eq!(claimed.assigned_gpu.as_deref(), Some("mps"));
 }
+
+#[test]
+fn mlx_worker_claims_eligible_job_with_idle_mps_worker_present() {
+    // Regression for the auto-GPU deferral deadlock (sc-3289): an Apple-Silicon
+    // mlx worker reports no utilization (the real `gpu_utilization("mlx")` probes
+    // nvidia-smi and finds nothing -> None), while an idle Python mps worker does
+    // report utilization. A queued auto MLX-eligible job (here flux2_klein_9b_kv
+    // text_to_image) must be claimed by the mlx worker; the mps worker must defer
+    // it. Before the fix, `dispatch_score` scored the no-utilization mlx worker as
+    // a GPU with 0 MB free, so `should_defer_auto_gpu_claim` made the mlx worker
+    // defer to the "healthier" mps worker, which deferred the same job back to the
+    // mlx worker -> the job sat on "Waiting for an available worker" forever.
+    let store = store("mlx-claims-with-mps-present");
+    store
+        .register_worker(RegisterWorker {
+            worker_id: "mlx-worker".to_owned(),
+            gpu_id: "mlx".to_owned(),
+            gpu_name: Some("Apple Silicon (MLX)".to_owned()),
+            capabilities: vec![
+                WorkerCapability::Gpu,
+                WorkerCapability::ImageGenerate,
+                WorkerCapability::ImageDetail,
+                WorkerCapability::VideoGenerate,
+                WorkerCapability::LoraTrain,
+                WorkerCapability::LoraTrainExecute,
+            ],
+            loaded_models: Vec::new(),
+            utilization: None,
+        })
+        .expect("mlx worker registers");
+    store
+        .register_worker(RegisterWorker {
+            worker_id: "mps-worker".to_owned(),
+            gpu_id: "mps".to_owned(),
+            gpu_name: Some("Apple GPU (unified)".to_owned()),
+            capabilities: vec![
+                WorkerCapability::Gpu,
+                WorkerCapability::ImageGenerate,
+                WorkerCapability::ImageEdit,
+                WorkerCapability::VideoGenerate,
+                WorkerCapability::LoraTrain,
+                WorkerCapability::LoraTrainExecute,
+            ],
+            loaded_models: Vec::new(),
+            utilization: Some(WorkerUtilizationSnapshot {
+                memory_total_mb: Some(131_072),
+                memory_used_mb: Some(1_318),
+                memory_free_mb: Some(129_754),
+                gpu_load_percent: Some(28.0),
+            }),
+        })
+        .expect("mps worker registers");
+
+    let job = store
+        .create_job(image_job(object(json!({
+            "model": "flux2_klein_9b_kv",
+            "mode": "text_to_image",
+            "loras": [],
+            "advanced": { "resolution": "1024x1024" },
+        }))))
+        .expect("job creates");
+
+    // The mps worker must defer (an idle mlx worker can run it).
+    assert!(
+        store
+            .claim_next_job("mps-worker")
+            .expect("mps claim ok")
+            .is_none(),
+        "mps worker should defer the flux2 job to the mlx worker"
+    );
+
+    // The mlx worker must claim it.
+    let claimed = store
+        .claim_next_job("mlx-worker")
+        .expect("mlx claim ok")
+        .expect("mlx worker should claim the flux2 t2i job");
+    assert_eq!(claimed.id, job.id);
+    assert_eq!(claimed.assigned_gpu.as_deref(), Some("mlx"));
+}
