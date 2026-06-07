@@ -1411,6 +1411,32 @@ fn image_job_with(payload: Value, requested_gpu: &str) -> CreateJob {
     }
 }
 
+/// Capabilities a real image GPU worker advertises once it also serves the distinct
+/// `image_edit` job type (sc-3513) — both the Python torch worker (`IMAGE_JOB_TYPES`)
+/// and the macOS mlx worker (`gpu::mlx_gpu`) carry `image_edit` alongside `image_generate`.
+fn image_edit_caps() -> Vec<WorkerCapability> {
+    vec![
+        WorkerCapability::Gpu,
+        WorkerCapability::ImageGenerate,
+        WorkerCapability::ImageEdit,
+    ]
+}
+
+/// A `JobType::ImageEdit` job — "plain Image Edit" (Image Studio/Editor, epic 2427),
+/// the sibling of [`image_job_with`] for the edit job type the bug missed (sc-3513).
+fn image_edit_job_with(payload: Value, requested_gpu: &str) -> CreateJob {
+    CreateJob {
+        job_type: JobType::ImageEdit,
+        project_id: Some("project-1".to_owned()),
+        project_name: Some("Project 1".to_owned()),
+        payload: object(payload),
+        requested_gpu: requested_gpu.to_owned(),
+        source_job_id: None,
+        duplicate_of_job_id: None,
+        attempts: 1,
+    }
+}
+
 #[test]
 fn mlx_eligible_image_job_defers_from_torch_worker_to_idle_mlx_worker() {
     let store = store("mlx-routing-defer");
@@ -1650,6 +1676,145 @@ fn routing_decision_is_none_for_non_mlx_model() {
     assert!(
         decision.is_none(),
         "a non-MLX-eligible claim is routing-neutral (no event)"
+    );
+}
+
+// --- sc-3513: the `image_edit` job type (plain Image Edit) routes to MLX too ---
+//
+// "Plain Image Edit" is submitted as JobType::ImageEdit (mode=edit_image + sourceAssetId),
+// a *distinct* job type from the character/reference flow (JobType::ImageGenerate). The
+// engine dispatches edits on payload model+mode, not job type, so the edit-capable families
+// (qwen/flux2/sdxl) must route to the in-process mlx worker exactly like the generate flow;
+// torch-only edit models stay on torch. Before sc-3513 the routing gate excluded every
+// non-ImageGenerate type, so these jobs ran on torch silently with no `mlx_route_decision`.
+
+#[test]
+fn qwen_image_edit_job_type_defers_to_mlx_worker() {
+    let store = store("mlx-routing-image-edit-qwen");
+    register_gpu_worker(&store, "worker-torch", "mps", image_edit_caps());
+    register_gpu_worker(&store, "worker-mlx", "mlx", image_edit_caps());
+
+    let job = store
+        .create_job(image_edit_job_with(
+            json!({
+                "model": "qwen_image_edit_2511_lightning",
+                "mode": "edit_image",
+                "sourceAssetId": "asset_1",
+                "prompt": "make it a watercolor painting"
+            }),
+            "auto",
+        ))
+        .expect("job creates");
+
+    // The torch worker defers the MLX-eligible edit to the idle mlx worker, which claims it.
+    assert!(store
+        .claim_next_job("worker-torch")
+        .expect("torch claim ok")
+        .is_none());
+    let claimed = store
+        .claim_next_job("worker-mlx")
+        .expect("mlx claim ok")
+        .expect("mlx claims the job");
+    assert_eq!(claimed.id, job.id);
+    assert_eq!(claimed.assigned_gpu.as_deref(), Some("mlx"));
+}
+
+#[test]
+fn sdxl_masked_image_edit_job_type_defers_to_mlx_worker() {
+    let store = store("mlx-routing-image-edit-sdxl-mask");
+    register_gpu_worker(&store, "worker-torch", "mps", image_edit_caps());
+    register_gpu_worker(&store, "worker-mlx", "mlx", image_edit_caps());
+
+    // A masked inpaint is an image_edit job carrying a maskAssetId. Only SDXL/RealVisXL
+    // are image_inpaint-capable, and sc-3060's advanced SDXL stream handles masked
+    // inpaint/outpaint on the engine — so the mask is honoured on MLX, not dropped.
+    let job = store
+        .create_job(image_edit_job_with(
+            json!({
+                "model": "sdxl",
+                "mode": "edit_image",
+                "sourceAssetId": "asset_1",
+                "maskAssetId": "asset_mask",
+                "prompt": "replace the sky"
+            }),
+            "auto",
+        ))
+        .expect("job creates");
+
+    assert!(store
+        .claim_next_job("worker-torch")
+        .expect("torch claim ok")
+        .is_none());
+    let claimed = store
+        .claim_next_job("worker-mlx")
+        .expect("mlx claim ok")
+        .expect("mlx claims the job");
+    assert_eq!(claimed.id, job.id);
+    assert_eq!(claimed.assigned_gpu.as_deref(), Some("mlx"));
+}
+
+#[test]
+fn routing_decision_reports_claimed_by_mlx_for_image_edit() {
+    let store = store("route-decision-image-edit-mlx");
+    register_gpu_worker(&store, "worker-mlx", "mlx", image_edit_caps());
+    let job = store
+        .create_job(image_edit_job_with(
+            json!({
+                "model": "flux2_klein_9b_true_v2",
+                "mode": "edit_image",
+                "sourceAssetId": "asset_1",
+                "prompt": "p"
+            }),
+            "auto",
+        ))
+        .expect("job creates");
+
+    // The fix makes the claim non-routing-neutral: an mlx_route_decision is now emitted.
+    let (claimed, decision) = store
+        .claim_next_job_routed("worker-mlx")
+        .expect("mlx claim ok");
+    assert_eq!(claimed.expect("mlx claims it").id, job.id);
+    let decision = decision.expect("routing decision present");
+    assert_eq!(decision.decision, "claimed_by_mlx");
+    assert_eq!(decision.reason, "mlx_worker");
+    assert_eq!(decision.gpu_id, "mlx");
+}
+
+#[test]
+fn torch_only_image_edit_model_stays_on_torch() {
+    let store = store("mlx-routing-image-edit-torch-only");
+    register_gpu_worker(&store, "worker-mlx", "mlx", image_edit_caps());
+
+    // z_image_edit is NOT in MLX_ROUTED_MODELS (only z_image_turbo is), so the edit stays
+    // on the Python torch path. The mlx worker must refuse it.
+    let job = store
+        .create_job(image_edit_job_with(
+            json!({
+                "model": "z_image_edit",
+                "mode": "edit_image",
+                "sourceAssetId": "asset_1",
+                "prompt": "p"
+            }),
+            "auto",
+        ))
+        .expect("job creates");
+
+    assert!(store
+        .claim_next_job("worker-mlx")
+        .expect("mlx claim ok")
+        .is_none());
+
+    // A torch worker is the home for it, and the claim is routing-neutral (no event).
+    register_gpu_worker(&store, "worker-torch", "mps", image_edit_caps());
+    let (claimed, decision) = store
+        .claim_next_job_routed("worker-torch")
+        .expect("torch claim ok");
+    let claimed = claimed.expect("torch claims it");
+    assert_eq!(claimed.id, job.id);
+    assert_eq!(claimed.assigned_gpu.as_deref(), Some("mps"));
+    assert!(
+        decision.is_none(),
+        "a torch-only edit model is routing-neutral (no mlx_route_decision)"
     );
 }
 

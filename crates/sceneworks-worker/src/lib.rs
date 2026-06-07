@@ -517,6 +517,14 @@ async fn run_utility_job(
         JobType::ImageGenerate => run_image_generate_job(api, settings, &job)
             .await
             .map_err(|error| ("Image generation failed.", error)),
+        // Plain Image Edit (sc-3513): the distinct `image_edit` job type (`mode=edit_image`
+        // + `sourceAssetId`, epic 2427) shares the generate handler — it dispatches on
+        // payload model+mode (qwen/flux2/sdxl edit streams), not job type. The API only
+        // routes MLX-eligible edit models here (jobs_store::image_job_is_mlx_eligible); off
+        // macOS the `image_edit` capability is never advertised, so this arm is unreachable.
+        JobType::ImageEdit => run_image_generate_job(api, settings, &job)
+            .await
+            .map_err(|error| ("Image edit failed.", error)),
         // Native MLX tile-ControlNet detail refine (epic 3041, sc-3060), served in-process
         // by the engine on the macOS Apple-Silicon GPU worker. Off macOS the capability is
         // never advertised, so this arm is unreachable there (image_detail runs on torch).
