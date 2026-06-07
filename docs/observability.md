@@ -71,10 +71,22 @@ Per-image lifecycle on the MLX path (parity with the Python worker), emitted fro
 shared streaming consumer (`image_jobs::consume_gen_events`): `jobId`, `imageIndex`,
 `imageCount`, `backend` (`mlx`). Confirms an MLX job is actually progressing image-by-image.
 
-> Not yet on the Rust path: `image_pipeline_load_start/complete`,
-> `image_distill_lora_fuse_start/complete`, `image_lora_apply_start/complete` — these run
-> inside the per-family blocking generation closures and need `jobId` threaded in
-> (tracked follow-up on sc-3450). The Python worker already emits them on the torch path.
+### Pipeline load — `image_pipeline_load_start` / `image_pipeline_load_complete` (Rust MLX worker, sc-3450)
+
+Brackets the engine load (`mlx_gen::load`) inside each per-family blocking generation
+closure (all five MLX image families): `jobId`, `engine` (the mlx-gen engine id, e.g.
+`qwen_image_edit`, `sdxl`, `z_image_turbo_control`), `adapterCount`. A `start` with **no
+matching `complete`** means the load failed (the job then errors). A long gap between the
+two is the signature of a cold-weight load — the prime suspect when an MLX job looks
+"stuck" before its first `image_inference_start`.
+
+> **No separate `image_distill_lora_fuse_*` / `image_lora_apply_*` events on the MLX path**
+> (the torch worker emits these as distinct phases). On MLX, `mlx_gen::load` is a single
+> atomic call that *also* fuses any distill LoRA and applies user LoRAs (`spec.with_adapters`),
+> so there is no separable fuse/apply step to bracket. The adapter total (distill + user) is
+> reported as `adapterCount` on the `image_pipeline_load_*` events instead — same diagnostic
+> information, accurate to the Rust engine's architecture, rather than fabricated
+> zero-duration sub-phase events.
 
 ## Diagnosing "MLX-eligible job ran on torch/MPS"
 

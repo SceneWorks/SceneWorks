@@ -1012,6 +1012,26 @@ fn mlx_load(
         .map_err(|error| WorkerError::InvalidPayload(format!("{engine_id} load failed: {error}")))
 }
 
+/// Emit an `image_pipeline_load_{start,complete}` event from inside a blocking
+/// generation closure (sc-3450), parity with the Python worker's pipeline-load
+/// events. On the MLX path `mlx_gen::load` is a single atomic call that also fuses
+/// any distill LoRA and applies user LoRAs (`spec.with_adapters`), so there is no
+/// separable fuse/apply step to bracket: the adapter total (`adapter_count` =
+/// distill + user) is reported here instead of via the torch worker's separate
+/// `image_distill_lora_fuse_*` / `image_lora_apply_*` sub-phase events. A `start`
+/// with no matching `complete` means the load failed (the error propagates via `?`).
+#[cfg(target_os = "macos")]
+fn emit_load_event(event: &str, job_id: &str, engine: &str, adapter_count: usize) {
+    emit_event(
+        event,
+        json!({
+            "jobId": job_id,
+            "engine": engine,
+            "adapterCount": adapter_count,
+        }),
+    );
+}
+
 /// Generate one image (RGB8) at the given seed; `on_progress` streams denoise steps.
 /// `guidance` is `None` for distilled variants (the engine rejects it on them).
 #[cfg(target_os = "macos")]
@@ -1110,8 +1130,22 @@ async fn generate_mlx_stream(
         let (width, height) = (request.width, request.height);
         let seeds = seeds.clone();
         let cancel = cancel.clone();
+        let job_id = job.id.clone();
         tokio::task::spawn_blocking(move || -> WorkerResult<()> {
+            let adapter_count = adapters.len();
+            emit_load_event(
+                "image_pipeline_load_start",
+                &job_id,
+                engine_id,
+                adapter_count,
+            );
             let generator = mlx_load(engine_id, weights_dir, quant, adapters)?;
+            emit_load_event(
+                "image_pipeline_load_complete",
+                &job_id,
+                engine_id,
+                adapter_count,
+            );
             for (index, seed) in seeds.into_iter().enumerate() {
                 let mut on_progress = |progress: Progress| {
                     let event = match progress {
@@ -1587,8 +1621,22 @@ async fn generate_zimage_control_stream(
         let (width, height) = (request.width, request.height);
         let cancel = cancel.clone();
         let stickwidth = crate::openpose_skeleton::body_stickwidth(width, height);
+        let job_id = job.id.clone();
         tokio::task::spawn_blocking(move || -> WorkerResult<()> {
+            let adapter_count = adapters.len();
+            emit_load_event(
+                "image_pipeline_load_start",
+                &job_id,
+                ZIMAGE_CONTROL_ENGINE_ID,
+                adapter_count,
+            );
             let generator = zimage_control_load(weights_dir, control_weights, quant, adapters)?;
+            emit_load_event(
+                "image_pipeline_load_complete",
+                &job_id,
+                ZIMAGE_CONTROL_ENGINE_ID,
+                adapter_count,
+            );
             let identity_init = identity_init.as_ref();
             for (index, pose) in poses.into_iter().enumerate() {
                 let skeleton = crate::openpose_skeleton::draw_wholebody(
@@ -2271,8 +2319,22 @@ async fn generate_flux2_edit_stream(
         let (width, height) = (request.width, request.height);
         let stickwidth = crate::openpose_skeleton::body_stickwidth(width, height);
         let cancel = cancel.clone();
+        let job_id = job.id.clone();
         tokio::task::spawn_blocking(move || -> WorkerResult<()> {
+            let adapter_count = adapters.len();
+            emit_load_event(
+                "image_pipeline_load_start",
+                &job_id,
+                engine_id,
+                adapter_count,
+            );
             let generator = mlx_load(engine_id, weights_dir, quant, adapters)?;
+            emit_load_event(
+                "image_pipeline_load_complete",
+                &job_id,
+                engine_id,
+                adapter_count,
+            );
             for (index, (seed, prompt)) in seeds.into_iter().zip(prompts).enumerate() {
                 // Pose tier: pair this pose's body-only skeleton (DWPose body, no
                 // hands/face — Python `draw_bodypose`) with the reference as a
@@ -2798,8 +2860,22 @@ async fn generate_qwen_edit_stream(
         let (width, height) = (request.width, request.height);
         let stickwidth = crate::openpose_skeleton::body_stickwidth(width, height);
         let cancel = cancel.clone();
+        let job_id = job.id.clone();
         tokio::task::spawn_blocking(move || -> WorkerResult<()> {
+            let adapter_count = adapters.len();
+            emit_load_event(
+                "image_pipeline_load_start",
+                &job_id,
+                engine_id,
+                adapter_count,
+            );
             let generator = mlx_load(engine_id, weights_dir, quant, adapters)?;
+            emit_load_event(
+                "image_pipeline_load_complete",
+                &job_id,
+                engine_id,
+                adapter_count,
+            );
             for (index, (seed, prompt)) in seeds.into_iter().zip(prompts).enumerate() {
                 // Pose tier: pair the reference with this pose's body-only skeleton (DWPose
                 // body, no hands/face — Python `draw_bodypose`) as a `[reference, skeleton]`
@@ -3317,8 +3393,17 @@ async fn generate_sdxl_advanced_stream(
         let prompt = request.prompt.clone();
         let negative_prompt = negative_prompt.clone();
         let cancel = cancel.clone();
+        let job_id = job.id.clone();
         tokio::task::spawn_blocking(move || -> WorkerResult<()> {
+            let adapter_count = adapters.len();
+            emit_load_event("image_pipeline_load_start", &job_id, "sdxl", adapter_count);
             let generator = sdxl_advanced_load(weights_dir, quant, adapters, ip_adapter_dir)?;
+            emit_load_event(
+                "image_pipeline_load_complete",
+                &job_id,
+                "sdxl",
+                adapter_count,
+            );
             for (index, seed) in seeds.into_iter().enumerate() {
                 let mut on_progress = |progress: Progress| {
                     let event = match progress {
