@@ -1,0 +1,119 @@
+# macOS Python-dependency inventory (epic 3482)
+
+The triage table the Python-eradication cutover burns down. Every row is something that, on
+**macOS**, still reaches the Python torch/MPS worker — i.e. the in-process Rust/MLX flow can't
+run it yet. When the list is empty, the Mac build can stop shipping a Python venv/sidecar
+(sc-3492 / sc-3493).
+
+> **This table is code-derived.** Its executable form is
+> [`mac_rust_supported(job)`](../crates/sceneworks-core/src/jobs_store.rs) (sc-3484) — the
+> inverse of the `*_mlx_eligible` predicates. The same routing constants are the source of
+> truth: `MLX_ROUTED_MODELS`, `VIDEO_MLX_ROUTED_MODELS`, `MLX_ROUTED_TRAINING_KERNELS`, and the
+> per-family `*_mlx_eligible` gates in `crates/sceneworks-core/src/jobs_store.rs`; the model
+> registry is `MODEL_TARGETS` (`apps/worker/scene_worker/image_adapters.py` /
+> `video_adapters.py`); training kernels are the builtin targets in
+> `crates/sceneworks-core/src/training.rs`. **Keep this file in sync when a surface flips** —
+> when a model lands in a `*_ROUTED_*` set or an `*_mlx_eligible` gate opens, move its row to
+> *Done* and delete the gap. A row here that no longer matches the predicates is a bug.
+
+**Status legend**
+
+- ✅ **Done** — runs in the Rust/MLX flow on Mac (here for context; not a gap).
+- 🔵 **Port-pending (epic NNNN)** — Michael's decision is *port*; tracked by the linked story/epic.
+- 🟠 **Drop-candidate** — leaning *drop* (UI-gate/hide on Mac); needs Michael's confirm.
+- ❓ **Triage** — surfaced by the code, no port-or-drop decision yet.
+
+Rollout reminder: the cutover is staged (epic 3482). The `mlx_unsupported` oracle ships
+**warn-only** by default, so flipping `SCENEWORKS_MLX_REQUIRED=1` on a Mac logs every row below
+without breaking anything; each surface flips to enforce only once it's ported (its epic
+completes) or dropped (UI-gated, sc-3486).
+
+---
+
+## 1. Torch-only image models
+
+Image models in `MODEL_TARGETS` that are **not** in `MLX_ROUTED_MODELS` → the Python torch
+adapter is authoritative on Mac. (`mac_rust_supported` → `epic 3061` by default; dispositions
+below are the per-model calls.)
+
+| Model id | Family | Status | Closing work |
+|---|---|---|---|
+| `kolors` | kolors | 🔵 Port-pending | epic 3061 (Kolors) |
+| `instantid_realvisxl` | sdxl (InstantID) | 🔵 Port-pending | epic 3061 (InstantID) |
+| `pulid_flux_dev` | flux (PuLID) | 🔵 Port-pending | epic 3061 (PuLID) |
+| `sensenova_u1_8b`, `sensenova_u1_8b_fast` | sensenova-u1 | 🟠 Drop-candidate | epic 3061 (SenseNova — likely drop) |
+| `lens`, `lens_turbo` | lens (Python sidecar `/opt/lens-venv`) | 🟠 Drop-candidate | epic 3061 (Lens) |
+| `chroma1_hd`, `chroma1_base`, `chroma1_flash` | chroma | ❓ Triage | **no epic yet** — surfaced by this audit; needs port-or-drop |
+| `z_image_edit` | z-image (edit) | ❓ Triage | **no epic yet** — Z-Image *edit* model is torch-only (txt2img `z_image_turbo` is ported) |
+
+> FLUX.2-**dev** is not in `MODEL_TARGETS` as a Mac target and is out of mlx-gen scope (likely
+> drop); third-party **LyCORIS** is a feature gap, see §2.
+
+## 2. Image feature gaps on MLX-routed families
+
+Models that ARE MLX-routed but fall back to torch for a specific feature (the `*_mlx_eligible`
+exclusions). `mac_rust_supported` names each precisely.
+
+| Feature | Affected models | Status | Closing work |
+|---|---|---|---|
+| Strict-pose ControlNet | `qwen_image` (+ `advanced.poses`) | 🔵 Port-pending | epic 3401 (Qwen ControlNet port) |
+| Reference / edit conditioning | base `qwen_image` (reference/`edit_image`) | 🔵 Port-pending | epic 3401 |
+| Reference / IP-Adapter / edit | `flux_schnell`, `flux_dev` | ❓ Triage | no epic — FLUX.1 reference/edit stays torch |
+| `edit_image` / reference-without-pose | `z_image_turbo` | ❓ Triage | no epic — Z-Image img2img-edit stays torch |
+| Third-party LyCORIS (LoHa / non-peft LoKr) | all families (`networkType=lycoris`) | 🟠 Drop-candidate | drop (engine applies LoRA + peft LoKr, not arbitrary LyCORIS) |
+
+## 3. Video
+
+`video_generate` `text_to_video`/`image_to_video` on `VIDEO_MLX_ROUTED_MODELS`
+(`ltx_2_3`, `ltx_2_3_eros`, `wan_2_2`, `wan_2_2_t2v_14b`, `wan_2_2_i2v_14b`) is ported. Gaps:
+
+| Surface | Status | Closing work |
+|---|---|---|
+| `svd` model (Stable Video Diffusion, `svd_video` adapter — no MLX crate) | 🔵 Port-pending | epic 3040 |
+| Advanced `video_generate` modes (`first_last_frame`, `replace_person`) | 🔵 Port-pending | epic 3040 |
+| Advanced job types `video_extend`, `video_bridge` | 🔵 Port-pending | epic 3040 |
+| `person_replace` job type (replace_person) | 🔵 Port-pending | epic 3040 (+ sc-3488 person track) |
+| LoKr-on-Wan (Kronecker adapter on Wan) | 🔵 Port-pending | epic 3040 (LoKr-on-LTX already MLX) |
+| Third-party LyCORIS on video | 🟠 Drop-candidate | drop |
+
+## 4. Training (`lora_train`)
+
+`MLX_ROUTED_TRAINING_KERNELS` = `z_image_lora`, `sdxl_lora`, `wan_lora`, `wan_moe_lora`,
+`ltx_mlx_lora` (the last is MLX-only). Gaps:
+
+| Kernel | Status | Closing work |
+|---|---|---|
+| `kolors_lora` (SDXL + ChatGLM3, no mlx-gen trainer) | 🔵 Port-pending | epic 3039 |
+| `lens_lora` (Python sidecar trainer) | 🟠 Drop-candidate | epic 3039 (follows Lens model disposition) |
+| LoKr-on-Wan (`wan_lora` / `wan_moe_lora` + `networkType=lokr`) | 🔵 Port-pending | epic 3039 |
+
+## 5. Non-model Python infrastructure
+
+Job types / sub-systems that run on the Python worker (onnxruntime / torch / mlx_video) with no
+in-process Rust path. Per Michael's 2026-06-07 decision, all four spikes are **port** (not drop).
+
+| Surface | Job type(s) | Python backend | Status | Closing work |
+|---|---|---|---|---|
+| DWPose pose detection (photo→skeleton) | `pose_detect` | onnxruntime (RTMPose) | 🔵 Port-pending | sc-3487 |
+| Person detect / track | `person_detect`, `person_track` | YOLO / SAM2 | 🔵 Port-pending | sc-3488 |
+| Image upscaler (standalone) | `image_upscale` | Real-ESRGAN / AuraSR (torch) | 🔵 Port-pending | sc-3489 |
+| Dataset captioning | `training_caption` | torch captioner | 🔵 Port-pending | sc-3490 |
+| Wan/LTX model conversion | `model_convert` (non-`flux2_klein_diffusers` converter) | `mlx_video.convert_*` (Python) | 🔵 Port-pending | sc-3491 (= sc-3224) |
+| Image understanding / interleave | `image_vqa`, `image_interleave` | torch | ❓ Triage | no epic — verify Mac reachability |
+
+## 6. Already ported — NOT gaps (context)
+
+Listed so a reviewer doesn't re-file these. All run in the Rust/MLX flow on Mac.
+
+- Image base families: `z_image_turbo`, `flux_schnell`, `flux_dev`, `qwen_image` (txt2img),
+  `qwen_image_edit{,_2509,_2511,_2511_lightning}`, `flux2_klein_9b{,_kv,_true_v2}`, `sdxl`,
+  `realvisxl` (epic 3018).
+- SDXL advanced shapes — reference/IP-Adapter, `edit_image`, masked inpaint, outpaint, and
+  tile-detail (`image_detail` on `sdxl`/`realvisxl`) — epic 3041 / sc-3060.
+- FLUX.2-klein single-file conversion in-process Rust (`flux2_klein_diffusers`, sc-3136).
+- Video `text_to_video`/`image_to_video` on Wan2.2 + LTX-2.3 (+ synchronized audio), epic 3018.
+- Training: `z_image_lora`, `sdxl_lora`, `wan_lora`, `wan_moe_lora`, `ltx_mlx_lora` (epic 3039).
+
+---
+
+_Maintained under epic 3482 (sc-3485). Update alongside any change to the routing predicates._
