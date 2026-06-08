@@ -399,6 +399,13 @@ pub(crate) fn mlx_gpu() -> DiscoveredGpu {
             // real execution, both served in-process by `mlx_gen::load_trainer`.
             WorkerCapability::LoraTrain,
             WorkerCapability::LoraTrainExecute,
+            // DWPose whole-body pose detection (epic 3482, sc-3487): RTMW via
+            // onnxruntime/CoreML, served in-process by `pose_jobs::run_pose_detect_job`.
+            // Replaces the Python rtmlib `pose_detect` path so the Pose Library
+            // "create from photo" flow + InstantID pose conditioning keep working on a
+            // Python-free Mac. The detector auto-provisions its onnx weights on first
+            // use (download-on-first-use parity with rtmlib).
+            WorkerCapability::PoseDetect,
         ],
         utilization: None,
     }

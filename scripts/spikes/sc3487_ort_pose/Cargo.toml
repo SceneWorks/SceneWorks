@@ -1,0 +1,30 @@
+# sc-3487 path-selection spike: run RTMW whole-body (DWPose) in Rust via `ort`
+# (onnxruntime) with the CoreML execution provider, and validate keypoint parity
+# vs the shipped Python rtmlib detector. Standalone crate (empty [workspace]) so it
+# does NOT join the SceneWorks workspace — keeps `ort` (which uses internal unsafe)
+# clear of the workspace `unsafe_code = "forbid"` lint and avoids lockfile churn.
+[package]
+name = "sc3487_ort_pose"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[workspace]
+
+[dependencies]
+# download-binaries: standalone-runnable (the doc's repro). The worker uses
+# `load-dynamic` + ORT_DYLIB_PATH instead (bundling); that path was validated here by
+# temporarily switching to load-dynamic and running against the staged wheel dylib.
+ort = { version = "=2.0.0-rc.12", features = ["coreml"] }
+image = "0.25"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+anyhow = "1"
+
+[[bin]]
+name = "probe"
+path = "src/probe.rs"
+
+[[bin]]
+name = "detect"
+path = "src/detect.rs"

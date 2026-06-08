@@ -60,6 +60,22 @@ mlx-rs = { package = "pmetal-mlx-rs", git = "https://github.com/michaeltrefry/ml
 # stories (sc-3022..3035) add their provider here; this scaffold links Z-Image
 # (sc-3022, next) to prove the cross-crate registry path end to end.
 [target.'cfg(target_os = "macos")'.dependencies]
+# DWPose whole-body pose detection in Rust (epic 3482, sc-3487): RTMW (yolox_m +
+# rtmw-dw-x-l) via onnxruntime with the CoreML execution provider, replacing the
+# Python rtmlib `pose_detect` path so the Pose Library "create from photo" flow +
+# InstantID pose conditioning keep working on a Python-free Mac. macOS-only (the
+# Python rtmlib path stays the Win/Linux backend); `download-binaries` pulls a
+# prebuilt onnxruntime that includes the CoreML EP. `zip` unpacks the openmmlab
+# weight bundles on first use (download-on-first-use parity with rtmlib). The spike
+# (docs/sc-3487/spike-findings.md) validated sub-pixel keypoint parity + matched
+# latency vs the shipped detector.
+# `load-dynamic` so the onnxruntime dylib is dlopen'd at runtime from
+# `ORT_DYLIB_PATH` (set by the desktop `setup.rs`, like SCENEWORKS_FFMPEG) — this is
+# robust under app-bundle relocation, unlike build-time linking + rpath.
+# `download-binaries` still fetches a CoreML-enabled onnxruntime at build time so the
+# desktop packager (build-sidecar.mjs) has a dylib to stage and dev runs work.
+ort = { version = "=2.0.0-rc.12", features = ["coreml", "load-dynamic", "download-binaries"] }
+zip = { version = "2", default-features = false, features = ["deflate"] }
 # Rev a93332e3 (mlx-gen main): carries the LoRA/LoKr trainer surface (epic 3039),
 # Wan/LTX converter stack, the Qwen modulation-LoRA routing fix (PR #160), and the
 # Wan-VACE provider (`wan_vace`) + per-request `control_scale` (epic 3040 sc-3388/3441/
