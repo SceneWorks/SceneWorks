@@ -26,8 +26,8 @@ use sceneworks_core::contracts::{
     WorkerSnapshot, WorkerStatus,
 };
 use sceneworks_core::jobs_store::{
-    CreateJob, DuplicateJob, JobsStore, JobsStoreError, ProgressUpdate, RegisterWorker, RetryJob,
-    RouteDecision, WorkerHeartbeat, JOB_STATUSES,
+    mac_rust_supported, CreateJob, DuplicateJob, JobsStore, JobsStoreError, ProgressUpdate,
+    RegisterWorker, RetryJob, RouteDecision, UnsupportedReason, WorkerHeartbeat, JOB_STATUSES,
 };
 use sceneworks_core::lora_family::{
     apply_model_manifest_defaults, detect_lora_family, detect_model_family, first_safetensors_path,
@@ -148,6 +148,22 @@ pub struct Settings {
     pub worker_timeout_seconds: u64,
     pub jobs_db_path: PathBuf,
     pub run_utility_inprocess: bool,
+    /// Epic 3482 — macOS "MLX-required" mode. When set (the desktop sets it on macOS,
+    /// where it spawns the in-process `mlx` worker), the MPS torch worker never claims an
+    /// MLX-eligible job: it defers unconditionally to the `mlx` worker, and a job no live
+    /// `mlx` worker takes within the grace window fails terminal with `mlx_unavailable`
+    /// instead of silently falling back to MPS (sc-3483). Absent on Windows/Linux/Docker
+    /// (no `mlx` worker) → today's behaviour unchanged. Ships default OFF (observe); the
+    /// final cutover (sc-3492) flips it on for the packaged Mac build.
+    pub mlx_required: bool,
+    /// Epic 3482 / sc-3484 — when MLX-required, what to do with a job the Rust/MLX flow can't
+    /// run (`mac_rust_supported` returns `Err`). **false = warn-only** (default): log a
+    /// structured `mlx_unsupported` gap event at claim time but still run the job on the
+    /// existing torch path, so flipping `mlx_required` on for observation materializes the gap
+    /// list without breaking anything. **true = enforce**: fail the job terminal with
+    /// `mlx_unsupported`. Read from `SCENEWORKS_MLX_UNSUPPORTED_MODE` (`enforce` vs anything
+    /// else). Irrelevant unless `mlx_required`.
+    pub mlx_enforce_unsupported: bool,
 }
 
 impl Settings {
@@ -185,6 +201,12 @@ impl Settings {
             jobs_db_path,
             run_utility_inprocess: std::env::var("SCENEWORKS_RUN_UTILITY_INPROCESS")
                 .map(|value| matches!(value.trim(), "1" | "true" | "TRUE" | "True"))
+                .unwrap_or(false),
+            mlx_required: std::env::var("SCENEWORKS_MLX_REQUIRED")
+                .map(|value| matches!(value.trim(), "1" | "true" | "TRUE" | "True"))
+                .unwrap_or(false),
+            mlx_enforce_unsupported: std::env::var("SCENEWORKS_MLX_UNSUPPORTED_MODE")
+                .map(|value| value.trim().eq_ignore_ascii_case("enforce"))
                 .unwrap_or(false),
         }
     }
