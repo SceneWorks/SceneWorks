@@ -2541,6 +2541,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "mlx-gen-joycaption"
+version = "0.0.0"
+source = "git+https://github.com/michaeltrefry/mlx-gen?rev=0806c88e618d5b84d474cd2ec5df5a06db1bca54#0806c88e618d5b84d474cd2ec5df5a06db1bca54"
+dependencies = [
+ "inventory",
+ "mlx-gen",
+ "pmetal-mlx-rs",
+]
+
+[[package]]
 name = "mlx-gen-ltx"
 version = "0.0.0"
 source = "git+https://github.com/michaeltrefry/mlx-gen?rev=0806c88e618d5b84d474cd2ec5df5a06db1bca54#0806c88e618d5b84d474cd2ec5df5a06db1bca54"
@@ -4161,6 +4171,7 @@ dependencies = [
  "mlx-gen",
  "mlx-gen-flux",
  "mlx-gen-flux2",
+ "mlx-gen-joycaption",
  "mlx-gen-ltx",
  "mlx-gen-qwen-image",
  "mlx-gen-sdxl",

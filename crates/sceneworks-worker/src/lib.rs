@@ -47,6 +47,8 @@ mod video_jobs;
 use video_jobs::*;
 mod training_jobs;
 use training_jobs::*;
+mod caption_jobs;
+use caption_jobs::*;
 mod downloads;
 // The DWPose skeleton rasterizer is consumed only by the macOS Z-Image strict-pose
 // control path; on other platforms it still builds + unit-tests (cross-platform
@@ -554,6 +556,12 @@ async fn run_utility_job(
         JobType::LoraTrain => run_lora_train_job(api, settings, &job)
             .await
             .map_err(|error| ("LoRA training failed.", error)),
+        // Native MLX JoyCaption dataset captioning (epic 3550, sc-3556). The API
+        // routes only `captioner=joy_caption` jobs here; Windows/Linux and
+        // explicit non-MLX GPU choices keep the Python torch captioner fallback.
+        JobType::TrainingCaption => run_training_caption_job(api, settings, &job)
+            .await
+            .map_err(|error| ("Training captioning failed.", error)),
         JobType::ModelDownload => run_model_download_job(api, settings, http_client, &job)
             .await
             .map_err(|error| ("Model download failed.", error)),
