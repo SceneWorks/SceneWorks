@@ -845,23 +845,7 @@ impl JobsStore {
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let worker = self.get_worker_on_connection(&transaction, worker_id)?;
         let worker_gpu_id = worker.gpu_id.clone();
-        let has_active_gpu_job = transaction
-            .query_row(
-                &format!(
-                    "
-                select id from jobs
-                 where assigned_gpu = ?1
-                   and status in ('preparing', 'downloading', 'loading_model', 'running', 'saving')
-                   and type not in ({})
-                 limit 1
-                ",
-                    non_gpu_job_types_sql()
-                ),
-                params![worker.gpu_id],
-                |_row| Ok(()),
-            )
-            .optional()?
-            .is_some();
+        let has_active_gpu_job = active_gpu_job_exists(&transaction, &worker.gpu_id)?;
 
         let mut statement = transaction.prepare(&format!(
             "
@@ -2549,6 +2533,25 @@ fn idle_mlx_worker_can_claim(
 }
 
 fn active_gpu_job_exists(connection: &Connection, gpu_id: &str) -> JobsStoreResult<bool> {
+    if is_apple_unified_gpu_id(gpu_id) {
+        return Ok(connection
+            .query_row(
+                &format!(
+                    "
+            select id from jobs
+             where lower(assigned_gpu) in ('mlx', 'mps')
+               and status in ('preparing', 'downloading', 'loading_model', 'running', 'saving')
+               and type not in ({})
+             limit 1
+            ",
+                    non_gpu_job_types_sql()
+                ),
+                [],
+                |_row| Ok(()),
+            )
+            .optional()?
+            .is_some());
+    }
     Ok(connection
         .query_row(
             &format!(
@@ -2566,6 +2569,10 @@ fn active_gpu_job_exists(connection: &Connection, gpu_id: &str) -> JobsStoreResu
         )
         .optional()?
         .is_some())
+}
+
+fn is_apple_unified_gpu_id(gpu_id: &str) -> bool {
+    gpu_id.eq_ignore_ascii_case("mlx") || gpu_id.eq_ignore_ascii_case("mps")
 }
 
 /// Models the in-process Rust MLX worker generates today, by id. This set grows

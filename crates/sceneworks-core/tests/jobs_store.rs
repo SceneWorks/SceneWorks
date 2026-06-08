@@ -1439,6 +1439,26 @@ fn image_edit_job_with(payload: Value, requested_gpu: &str) -> CreateJob {
     }
 }
 
+fn complete_job(store: &JobsStore, job_id: &str) {
+    store
+        .update_job_progress(
+            job_id,
+            ProgressUpdate {
+                status: JobStatus::Completed,
+                stage: ProgressStage::Completed,
+                progress: 1.0,
+                message: "Done".to_owned(),
+                error: None,
+                result: Some(Map::new()),
+                eta_seconds: None,
+                peak_gpu_memory_pct: None,
+                peak_gpu_load_pct: None,
+                backend: None,
+            },
+        )
+        .expect("job completes");
+}
+
 #[test]
 fn mlx_eligible_image_job_defers_from_torch_worker_to_idle_mlx_worker() {
     let store = store("mlx-routing-defer");
@@ -2271,6 +2291,112 @@ fn sdxl_masked_image_edit_job_type_defers_to_mlx_worker() {
         .expect("mlx claims the job");
     assert_eq!(claimed.id, job.id);
     assert_eq!(claimed.assigned_gpu.as_deref(), Some("mlx"));
+}
+
+#[test]
+fn active_mlx_image_edit_blocks_mps_image_edit_claim() {
+    let store = store("mlx-mps-shared-gpu-active-mlx");
+    register_gpu_worker(&store, "worker-mps", "mps", image_edit_caps());
+    register_gpu_worker(&store, "worker-mlx", "mlx", image_edit_caps());
+
+    let mlx_job = store
+        .create_job(image_edit_job_with(
+            json!({
+                "model": "qwen_image_edit_2511_lightning",
+                "mode": "edit_image",
+                "sourceAssetId": "asset_1",
+                "prompt": "make it a watercolor painting"
+            }),
+            "auto",
+        ))
+        .expect("mlx job creates");
+    let claimed_mlx = store
+        .claim_next_job("worker-mlx")
+        .expect("mlx claim ok")
+        .expect("mlx claims the first job");
+    assert_eq!(claimed_mlx.id, mlx_job.id);
+    assert_eq!(claimed_mlx.assigned_gpu.as_deref(), Some("mlx"));
+
+    let mps_job = store
+        .create_job(image_edit_job_with(
+            json!({
+                "model": "z_image_edit",
+                "mode": "edit_image",
+                "sourceAssetId": "asset_2",
+                "prompt": "p"
+            }),
+            "auto",
+        ))
+        .expect("mps job creates");
+
+    assert!(
+        store
+            .claim_next_job("worker-mps")
+            .expect("mps claim ok")
+            .is_none(),
+        "MPS must wait while the MLX worker is using the shared Apple GPU"
+    );
+
+    complete_job(&store, &claimed_mlx.id);
+    let claimed_mps = store
+        .claim_next_job("worker-mps")
+        .expect("mps claim ok")
+        .expect("mps claims once mlx completes");
+    assert_eq!(claimed_mps.id, mps_job.id);
+    assert_eq!(claimed_mps.assigned_gpu.as_deref(), Some("mps"));
+}
+
+#[test]
+fn active_mps_image_edit_blocks_mlx_image_edit_claim() {
+    let store = store("mlx-mps-shared-gpu-active-mps");
+    register_gpu_worker(&store, "worker-mps", "mps", image_edit_caps());
+    register_gpu_worker(&store, "worker-mlx", "mlx", image_edit_caps());
+
+    let mps_job = store
+        .create_job(image_edit_job_with(
+            json!({
+                "model": "z_image_edit",
+                "mode": "edit_image",
+                "sourceAssetId": "asset_1",
+                "prompt": "p"
+            }),
+            "auto",
+        ))
+        .expect("mps job creates");
+    let claimed_mps = store
+        .claim_next_job("worker-mps")
+        .expect("mps claim ok")
+        .expect("mps claims the first job");
+    assert_eq!(claimed_mps.id, mps_job.id);
+    assert_eq!(claimed_mps.assigned_gpu.as_deref(), Some("mps"));
+
+    let mlx_job = store
+        .create_job(image_edit_job_with(
+            json!({
+                "model": "qwen_image_edit_2511_lightning",
+                "mode": "edit_image",
+                "sourceAssetId": "asset_2",
+                "prompt": "make it a watercolor painting"
+            }),
+            "auto",
+        ))
+        .expect("mlx job creates");
+
+    assert!(
+        store
+            .claim_next_job("worker-mlx")
+            .expect("mlx claim ok")
+            .is_none(),
+        "MLX must wait while the MPS worker is using the shared Apple GPU"
+    );
+
+    complete_job(&store, &claimed_mps.id);
+    let claimed_mlx = store
+        .claim_next_job("worker-mlx")
+        .expect("mlx claim ok")
+        .expect("mlx claims once mps completes");
+    assert_eq!(claimed_mlx.id, mlx_job.id);
+    assert_eq!(claimed_mlx.assigned_gpu.as_deref(), Some("mlx"));
 }
 
 #[test]
