@@ -532,8 +532,11 @@ fn write_image_asset(
         plan.slug,
         index + 1
     );
-    let media_rel = format!("assets/images/{filename}");
+    let media_rel = format!("assets/images/{}/{filename}", plan.genset_id);
     let media_path = project_path.join(&media_rel);
+    if let Some(parent) = media_path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
     let temp_path = media_path.with_extension("tmp.png");
     rgb_image
         .save_with_format(&temp_path, image::ImageFormat::Png)
@@ -4057,7 +4060,7 @@ mod tests {
         .unwrap();
 
         let media_rel = fact.get("mediaPath").and_then(Value::as_str).unwrap();
-        assert!(media_rel.starts_with("assets/images/"));
+        assert!(media_rel.starts_with(&format!("assets/images/{}/", plan.genset_id)));
         assert!(media_rel.ends_with("_0001.png"));
         let decoded = image::open(project_path.join(media_rel)).unwrap();
         assert_eq!((decoded.width(), decoded.height()), (320, 256));
