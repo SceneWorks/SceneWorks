@@ -410,7 +410,43 @@ pub(crate) async fn run_person_detect(
     .await?;
     tokio::fs::rename(&temp_path, &media_path).await?;
 
-    let detections = candidate_people(1280, 720, source_asset_id, timestamp);
+    // Preview jobs (`preview: true`, claimed via the CPU worker's
+    // person_detect_preview capability) keep the procedural placeholder. Real
+    // jobs run the YOLO11 onnx detector (epic 3482, sc-3633) — model-backed,
+    // `personDetectionActive: true`, and erroring honestly when the detector
+    // can't run rather than silently degrading to boxes.
+    let is_preview = job
+        .payload
+        .get("preview")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let confidence = job
+        .payload
+        .get("advanced")
+        .and_then(|advanced| advanced.get("confidence"))
+        .or_else(|| job.payload.get("confidence"))
+        .map_or(0.25, |value| value_f64(value, 0.25))
+        .clamp(0.01, 1.0);
+    let (detections, detector_model, detector_adapter, detection_active, detector_meta) =
+        if is_preview {
+            (
+                candidate_people(1280, 720, source_asset_id, timestamp),
+                "procedural-person-detector".to_owned(),
+                "procedural_person_tracking",
+                false,
+                Value::Null,
+            )
+        } else {
+            let (boxes, device) =
+                run_yolo11_person_detect(settings, media_path.clone(), confidence).await?;
+            (
+                boxes,
+                "yolo11m".to_owned(),
+                "yolo11_ort",
+                true,
+                json!({ "backend": "ort", "device": device, "model": "yolo11m" }),
+            )
+        };
     let source_display_name = source_asset
         .get("displayName")
         .and_then(Value::as_str)
@@ -440,8 +476,8 @@ pub(crate) async fn run_person_detect(
         },
         "recipe": {
             "mode": "person_detect",
-            "model": "procedural-person-detector",
-            "adapter": "procedural_person_tracking",
+            "model": detector_model,
+            "adapter": detector_adapter,
             "prompt": "Detect selectable people in representative frame",
             "negativePrompt": "",
             "seed": 0,
@@ -450,7 +486,9 @@ pub(crate) async fn run_person_detect(
             "normalizedSettings": {
                 "sourceTimestamp": timestamp,
                 "detectionCount": detections.len(),
-                "personDetectionActive": false
+                "confidence": confidence,
+                "personDetectionActive": detection_active,
+                "detector": detector_meta
             },
             "rawAdapterSettings": { "sourcePath": source_rel }
         },
@@ -507,6 +545,10 @@ pub(crate) async fn run_person_detect(
     result.insert("sourceTimestamp".to_owned(), json!(timestamp));
     result.insert("detections".to_owned(), Value::Array(detections));
     result.insert(
+        "personDetectionActive".to_owned(),
+        Value::Bool(detection_active),
+    );
+    result.insert(
         "limits".to_owned(),
         json!({
             "maskStorage": "deferred",
@@ -514,6 +556,43 @@ pub(crate) async fn run_person_detect(
         }),
     );
     Ok(result)
+}
+
+/// Run the YOLO11 onnx person detector on a rendered frame, returning the
+/// normalized detection array (Python `run_person_detect` shape) + the device
+/// the model ran on. macOS-only: `ort`/CoreML is the Apple-Silicon backend
+/// (epic 3482, sc-3633); the Python Ultralytics path serves Windows/Linux.
+#[cfg(target_os = "macos")]
+async fn run_yolo11_person_detect(
+    settings: &Settings,
+    frame_path: PathBuf,
+    confidence: f64,
+) -> WorkerResult<(Vec<Value>, &'static str)> {
+    let onnx = crate::person_jobs::resolve_detector_onnx(settings).ok_or_else(|| {
+        WorkerError::InvalidPayload(
+            "Person detector weights (yolo11m.onnx) are not provisioned on this worker.".to_owned(),
+        )
+    })?;
+    let conf = confidence as f32;
+    let result = tokio::task::spawn_blocking(move || {
+        crate::person_jobs::detect_people_blocking(onnx, frame_path, conf)
+    })
+    .await
+    .map_err(|error| WorkerError::InvalidPayload(format!("person detect task: {error}")))??;
+    let boxes =
+        crate::person_jobs::detections_to_json(&result.detections, result.width, result.height);
+    Ok((boxes, result.device))
+}
+
+#[cfg(not(target_os = "macos"))]
+async fn run_yolo11_person_detect(
+    _settings: &Settings,
+    _frame_path: PathBuf,
+    _confidence: f64,
+) -> WorkerResult<(Vec<Value>, &'static str)> {
+    Err(WorkerError::InvalidPayload(
+        "Real person detection runs on the Python worker on this platform.".to_owned(),
+    ))
 }
 
 pub(crate) async fn run_person_track_job(
