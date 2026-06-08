@@ -3,12 +3,14 @@
 //! Ports the Python `scene_worker/person_adapters.py` `_UltralyticsDetector`
 //! (Ultralytics `yolo11m.pt`, COCO class 0) to Rust so the Replace-Person
 //! detection step runs on a Python-free Mac. Inference uses the `ort`
-//! (onnxruntime) + CoreML execution-provider scaffold proven by `pose_jobs.rs`
-//! (sc-3487): a process-wide cached `Session`, CoreML→CPU fallback, and all
-//! `ort` objects confined to a `spawn_blocking` closure.
+//! (onnxruntime) scaffold proven by `pose_jobs.rs` (sc-3487): a process-wide
+//! cached `Session` and all `ort` objects confined to a `spawn_blocking`
+//! closure. Unlike `pose_jobs`, this runs on the **CPU EP by default** — the
+//! CoreML EP hangs in `commit_from_file` on the Ultralytics YOLO11 export (see
+//! `Detector::load`); CoreML is opt-in via `SCENEWORKS_PERSON_DETECTOR_COREML=1`.
 //!
-//! macOS-only in practice: the CoreML EP only matters on Apple Silicon, and the
-//! Python Ultralytics path stays the Windows/Linux detector. The pure detector
+//! macOS-only in practice: it gates with `pose_jobs`, and the Python Ultralytics
+//! path stays the Windows/Linux detector. The pure detector
 //! math (letterbox / decode / NMS / box normalization) is unit-tested without
 //! the onnx weights; only the onnxruntime inference itself is gated.
 //!
@@ -306,17 +308,30 @@ fn build_session(path: &Path, coreml: bool) -> WorkerResult<Session> {
 }
 
 impl Detector {
+    /// Build the cached detector. Unlike `pose_jobs` (YOLOX), the CoreML EP
+    /// *hangs* indefinitely in `commit_from_file` on the Ultralytics YOLO11
+    /// export — it never returns an error, so a try-CoreML-then-fall-back is
+    /// unsafe (it would deadlock the job). The CPU EP runs YOLO11m fine and is
+    /// what the Python reference (onnxruntime `CPUExecutionProvider`) used; for
+    /// a single representative frame / 2-fps tracking it's well within budget.
+    /// CoreML stays opt-in via `SCENEWORKS_PERSON_DETECTOR_COREML=1` for future
+    /// investigation (export-opset / MLProgram tweaks); see sc-3633 notes.
     fn load(path: &Path) -> WorkerResult<Self> {
-        match build_session(path, true) {
-            Ok(session) => Ok(Self {
-                session,
-                device: "coreml",
-            }),
-            Err(_) => Ok(Self {
-                session: build_session(path, false)?,
-                device: "cpu",
-            }),
+        let try_coreml = std::env::var("SCENEWORKS_PERSON_DETECTOR_COREML")
+            .map(|value| value == "1" || value.eq_ignore_ascii_case("true"))
+            .unwrap_or(false);
+        if try_coreml {
+            if let Ok(session) = build_session(path, true) {
+                return Ok(Self {
+                    session,
+                    device: "coreml",
+                });
+            }
         }
+        Ok(Self {
+            session: build_session(path, false)?,
+            device: "cpu",
+        })
     }
 
     fn detect(&mut self, img: &RgbImage, conf: f32) -> WorkerResult<Vec<Detection>> {
