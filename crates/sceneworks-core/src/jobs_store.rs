@@ -2082,8 +2082,8 @@ pub fn mac_capabilities(platform: &str, mac_gating_active: bool) -> MacCapabilit
         "lycoris".to_owned(),
         MacFeatureSupport::unsupported(
             "third-party LyCORIS LoRA",
-            "the Rust engine/worker apply LoRA + peft LoKr, but not arbitrary third-party LyCORIS (LoHa / non-peft LoKr).",
-            "sc-3537",
+            "the Rust engine/worker apply LoRA + peft LoKr, but not arbitrary third-party LyCORIS (LoHa / non-peft LoKr) — port pending (sc-3537 spike GO).",
+            "epic 3641",
         ),
     );
     features.insert(
@@ -2177,8 +2177,8 @@ fn classify_image_gap(payload: &Map<String, Value>) -> UnsupportedReason {
         return UnsupportedReason::new(
             Some(model),
             "third-party LyCORIS LoRA",
-            "the Rust engine/worker apply LoRA + peft LoKr, but not arbitrary third-party LyCORIS (LoHa / non-peft LoKr) — port-or-drop spike.",
-            Some("sc-3537"),
+            "the Rust engine/worker apply LoRA + peft LoKr, but not arbitrary third-party LyCORIS (LoHa / non-peft LoKr) — port pending (sc-3537 spike GO).",
+            Some("epic 3641"),
         );
     }
     let is_edit = payload.get("mode").and_then(Value::as_str) == Some("edit_image");
@@ -2250,8 +2250,8 @@ fn classify_video_gap(payload: &Map<String, Value>) -> UnsupportedReason {
         return UnsupportedReason::new(
             Some(model),
             "third-party LyCORIS LoRA",
-            "the mlx-video path can't apply arbitrary third-party LyCORIS adapters — port-or-drop spike.",
-            Some("sc-3537"),
+            "the mlx-video path can't apply arbitrary third-party LyCORIS adapters yet — port pending (sc-3537 spike GO).",
+            Some("epic 3641"),
         );
     }
     if is_wan_video_model(model) && request_has_lokr_lora(payload) {
