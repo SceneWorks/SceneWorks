@@ -1793,15 +1793,13 @@ fn mac_rust_supported_names_torch_only_image_model_with_its_port_epic() {
 #[test]
 fn mac_rust_supported_names_qwen_strict_pose_and_lycoris() {
     let store = store("oracle-features");
-    // Strict-pose ControlNet on Qwen → epic 3401.
+    // Strict-pose ControlNet on Qwen is now Rust/MLX (epic 3401 / sc-3575).
     let pose = job_of(
         &store,
         JobType::ImageGenerate,
         json!({ "model": "qwen_image", "prompt": "p", "advanced": { "poses": [{ "x": 1 }] } }),
     );
-    let pose_reason = mac_rust_supported(&pose).unwrap_err();
-    assert!(pose_reason.feature.contains("strict-pose"));
-    assert_eq!(pose_reason.suggested_epic.as_deref(), Some("epic 3401"));
+    assert!(mac_rust_supported(&pose).is_ok());
     // Third-party LyCORIS on an otherwise-MLX family → port-or-drop viability spike.
     let lycoris = job_of(
         &store,
@@ -1954,9 +1952,8 @@ fn model_mac_support_hides_torch_only_models_keeps_mlx_models() {
 
 #[test]
 fn model_mac_support_feature_flags_mirror_routing_without_over_gating() {
-    // Base Qwen strict-pose ControlNet is torch-only → pose control disabled; Z-Image /
-    // SDXL pose is MLX (Fun-CN / engine) → enabled.
-    assert!(!model_mac_support("qwen_image", "image").features.pose);
+    // Base Qwen strict-pose ControlNet, Z-Image, and SDXL pose are MLX → enabled.
+    assert!(model_mac_support("qwen_image", "image").features.pose);
     assert!(model_mac_support("z_image_turbo", "image").features.pose);
     assert!(model_mac_support("sdxl", "image").features.pose);
     // FLUX.1 reference/edit stay torch (viability spikes) → those controls disabled.
@@ -2840,7 +2837,7 @@ fn flux_reference_job_stays_on_torch() {
 }
 
 #[test]
-fn qwen_txt2img_routes_to_mlx_but_pose_stays_on_torch() {
+fn qwen_txt2img_and_strict_pose_route_to_mlx() {
     let store = store("mlx-routing-qwen");
     register_gpu_worker(&store, "worker-torch", "mps", image_caps());
     register_gpu_worker(&store, "worker-mlx", "mlx", image_caps());
@@ -2862,9 +2859,25 @@ fn qwen_txt2img_routes_to_mlx_but_pose_stays_on_torch() {
         .expect("mlx claims qwen txt2img");
     assert_eq!(claimed.id, txt2img.id);
     assert_eq!(claimed.assigned_gpu.as_deref(), Some("mlx"));
+    store
+        .update_job_progress(
+            &claimed.id,
+            ProgressUpdate {
+                status: JobStatus::Completed,
+                stage: ProgressStage::Completed,
+                progress: 1.0,
+                message: "Done".to_owned(),
+                error: None,
+                result: Some(object(json!({ "assetIds": ["asset-qwen"] }))),
+                eta_seconds: None,
+                peak_gpu_memory_pct: None,
+                peak_gpu_load_pct: None,
+                backend: None,
+            },
+        )
+        .expect("txt2img job completes");
 
-    // A strict-pose qwen job stays on the Python torch ControlNet path (sc-2291): the
-    // mlx worker refuses it, the torch worker claims it without deferral.
+    // A strict-pose qwen job routes to the MLX ControlNet path (epic 3401 / sc-3575).
     let pose = store
         .create_job(image_job_with(
             json!({
@@ -2875,16 +2888,12 @@ fn qwen_txt2img_routes_to_mlx_but_pose_stays_on_torch() {
             "auto",
         ))
         .expect("pose job creates");
-    assert!(store
+    let claimed = store
         .claim_next_job("worker-mlx")
         .expect("mlx claim ok")
-        .is_none());
-    let claimed = store
-        .claim_next_job("worker-torch")
-        .expect("torch claim ok")
-        .expect("torch claims qwen pose job");
+        .expect("mlx claims qwen pose job");
     assert_eq!(claimed.id, pose.id);
-    assert_eq!(claimed.assigned_gpu.as_deref(), Some("mps"));
+    assert_eq!(claimed.assigned_gpu.as_deref(), Some("mlx"));
 }
 
 #[test]

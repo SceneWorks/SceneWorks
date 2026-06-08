@@ -1877,7 +1877,7 @@ pub struct ModelMacSupport {
 #[serde(rename_all = "camelCase")]
 pub struct ModelMacFeatures {
     /// Pose conditioning (the pose picker): a non-empty `advanced.poses`, alone or with a
-    /// reference. `false` for base `qwen_image` (strict-pose ControlNet is torch-only, epic 3401).
+    /// reference. Base `qwen_image` strict-pose uses the MLX ControlNet path (epic 3401).
     pub pose: bool,
     /// Reference / IP-Adapter / `character_image` identity conditioning (`referenceAssetId`).
     pub reference: bool,
@@ -2178,24 +2178,12 @@ fn classify_image_gap(payload: &Map<String, Value>) -> UnsupportedReason {
             Some("sc-3537"),
         );
     }
-    let has_poses = payload
-        .get("advanced")
-        .and_then(Value::as_object)
-        .and_then(|advanced| advanced.get("poses"))
-        .and_then(Value::as_array)
-        .is_some_and(|poses| !poses.is_empty());
     let is_edit = payload.get("mode").and_then(Value::as_str) == Some("edit_image");
     match model {
-        "qwen_image" if has_poses => UnsupportedReason::new(
-            Some(model),
-            "strict-pose ControlNet",
-            "Qwen strict-pose ControlNet (InstantX QwenImageControlNet) has no MLX port; the MLX path would silently drop the poses.",
-            Some("epic 3401"),
-        ),
         "qwen_image" => UnsupportedReason::new(
             Some(model),
             "reference / edit conditioning",
-            "base Qwen-Image reference / edit_image conditioning stays on the Python torch path.",
+            "base Qwen-Image reference / edit_image conditioning stays on the Python torch path unless it is the strict-pose ControlNet tier.",
             Some("epic 3401"),
         ),
         "flux_schnell" | "flux_dev" => UnsupportedReason::new(
@@ -2681,21 +2669,16 @@ fn flux2_mlx_eligible(payload: &Map<String, Value>) -> bool {
     !request_has_lycoris_lora(payload)
 }
 
-/// Qwen-Image (sc-3024) MLX-routing conditions, ported from `_should_route_qwen_to_mlx`:
-/// text-to-image only. A reference (character/edit flow) and `edit_image` stay on the
-/// Python torch path; a strict pose set stays on torch too — the Qwen strict-pose tier
-/// is a diffusers `QwenImageControlNet` (sc-2291), which the MLX path has no equivalent
-/// for (it would silently drop the poses). A third-party LyCORIS LoRA also falls back
-/// to torch (engine + worker apply LoRA + peft LoKr, but not arbitrary LyCORIS).
+/// Qwen-Image (sc-3024 / strict pose sc-3575) MLX-routing conditions: text-to-image,
+/// plus the base-Qwen strict pose tier (`advanced.poses`) handled by the `qwen_image_control`
+/// engine variant. A reference without poses (character/edit flow) and `edit_image` stay on
+/// the Python torch path. A third-party LyCORIS LoRA also falls back to torch (engine + worker
+/// apply LoRA + peft LoKr, but not arbitrary LyCORIS).
 fn qwen_mlx_eligible(payload: &Map<String, Value>) -> bool {
     if payload.get("mode").and_then(Value::as_str) == Some("edit_image") {
         return false;
     }
-    let has_reference = payload
-        .get("referenceAssetId")
-        .and_then(Value::as_str)
-        .is_some_and(|value| !value.trim().is_empty());
-    if has_reference {
+    if request_has_lycoris_lora(payload) {
         return false;
     }
     let has_poses = payload
@@ -2705,9 +2688,16 @@ fn qwen_mlx_eligible(payload: &Map<String, Value>) -> bool {
         .and_then(Value::as_array)
         .is_some_and(|poses| !poses.is_empty());
     if has_poses {
+        return true;
+    }
+    let has_reference = payload
+        .get("referenceAssetId")
+        .and_then(Value::as_str)
+        .is_some_and(|value| !value.trim().is_empty());
+    if has_reference {
         return false;
     }
-    !request_has_lycoris_lora(payload)
+    true
 }
 
 /// Qwen-Image-Edit (sc-3397/sc-3398) MLX-routing conditions. The `qwen_image_edit` /
@@ -2718,7 +2708,7 @@ fn qwen_mlx_eligible(payload: &Map<String, Value>) -> bool {
 /// / best-effort-pose / angle-set flows — all reference-conditioned). The lightning distill
 /// (sc-3398) shares the same gate (its sampler + distill-LoRA are worker-local). A
 /// third-party LyCORIS LoRA falls back to torch (engine + worker apply LoRA + peft LoKr, but
-/// not arbitrary LyCORIS); base-Qwen strict pose stays on torch until epic 3401 lands.
+/// not arbitrary LyCORIS).
 fn qwen_edit_mlx_eligible(payload: &Map<String, Value>) -> bool {
     if request_has_lycoris_lora(payload) {
         return false;
@@ -3401,14 +3391,18 @@ mod mlx_routing_tests {
     }
 
     #[test]
-    fn qwen_edit_reference_poses_and_lycoris_fall_back_to_torch() {
+    fn qwen_edit_reference_and_lycoris_fall_back_but_pose_routes_mlx() {
         assert!(!qwen_mlx_eligible(&object(json!({ "mode": "edit_image" }))));
         assert!(!qwen_mlx_eligible(&object(
             json!({ "referenceAssetId": "asset_1" })
         )));
-        // Strict pose ControlNet (sc-2291) is torch-only for Qwen — unlike Z-Image,
-        // a pose set does NOT keep it on MLX.
-        assert!(!qwen_mlx_eligible(&object(json!({
+        // Strict pose ControlNet (sc-2291 / sc-3575) routes to MLX, even if a reference is
+        // present; the strict-pose tier is pose-from-prompt and ignores the reference.
+        assert!(qwen_mlx_eligible(&object(json!({
+            "advanced": { "poses": [{ "id": "p1" }] }
+        }))));
+        assert!(qwen_mlx_eligible(&object(json!({
+            "referenceAssetId": "asset_1",
             "advanced": { "poses": [{ "id": "p1" }] }
         }))));
         assert!(!qwen_mlx_eligible(&object(json!({
