@@ -587,8 +587,10 @@ export function ImageStudio() {
     setPrompt(String(recipe.prompt ?? ""));
     promptEdited.current = true;
     setNegativePrompt(String(recipe.negativePrompt ?? ""));
-    const seedValue = finiteRecipeNumber(recipe.seed);
-    setSeed(seedValue === null ? "" : String(seedValue));
+    // Recipe replay restores the creative setup, but intentionally leaves Seed
+    // random so "Use this recipe" makes a close variation instead of a byte-for-byte
+    // rerun of the saved asset.
+    setSeed("");
     const countValue = finiteRecipeNumber(settings.count);
     if (countValue) {
       setCount(countValue);
