@@ -1893,7 +1893,8 @@ fn mac_rust_supported_convert_flux2_ok_else_python_gap() {
 #[test]
 fn mac_rust_supported_feature_gaps_point_at_their_spikes() {
     let store = store("oracle-feature-spikes");
-    // FLUX.1 reference/IP-Adapter → viability spike sc-3535.
+    // FLUX.1 reference (XLabs IP-Adapter) → spike sc-3535 (GO) resolved into the MLX port
+    // epic 3621; still a torch-fallback gap until that engine work lands.
     let flux_ref = job_of(
         &store,
         JobType::ImageGenerate,
@@ -1904,7 +1905,7 @@ fn mac_rust_supported_feature_gaps_point_at_their_spikes() {
             .unwrap_err()
             .suggested_epic
             .as_deref(),
-        Some("sc-3535")
+        Some("epic 3621")
     );
     // Z-Image reference without a pose set is now ported to MLX (sc-3536 spike → sc-3619):
     // the base engine's plain img2img-init path drives the reference identity natively, so

@@ -2191,9 +2191,9 @@ fn classify_image_gap(payload: &Map<String, Value>) -> UnsupportedReason {
         ),
         "flux_schnell" | "flux_dev" => UnsupportedReason::new(
             Some(model),
-            "reference / IP-Adapter / edit",
-            "FLUX.1 reference / IP-Adapter / edit_image conditioning stays on the Python torch path — viability spike.",
-            Some("sc-3535"),
+            "reference (XLabs IP-Adapter)",
+            "FLUX.1 reference is the XLabs IP-Adapter (not img2img-init); it stays on the Python torch path until the MLX port lands. (FLUX.1 edit_image has no torch path on any platform — a future Kontext capability, not an eradication gap; see sc-3535.)",
+            Some("epic 3621"),
         ),
         "z_image_turbo" if is_edit => UnsupportedReason::new(
             Some(model),
