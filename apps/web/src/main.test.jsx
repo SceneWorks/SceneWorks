@@ -3653,7 +3653,7 @@ describe("SceneWorks app shell", () => {
     expect(container.textContent).toContain("Running");
   });
 
-  it("replays a library asset recipe through fullscreen preview into Image Studio", async () => {
+  it("replays a library asset recipe through fullscreen preview into Image Studio with a random seed", async () => {
     const createdJobs = [];
     const imagePayloads = [];
     const generatedAsset = {
@@ -3762,7 +3762,7 @@ describe("SceneWorks app shell", () => {
       model: "z_image_turbo",
       prompt: "mist over a glass atrium",
       negativePrompt: "flat lighting",
-      seed: 1234,
+      seed: null,
       count: 3,
       width: 1536,
       height: 1024,
@@ -6313,7 +6313,7 @@ describe("SceneWorks app shell", () => {
     );
   });
 
-  it("prefills Image Studio from a saved generation recipe launch", async () => {
+  it("prefills Image Studio from a saved generation recipe launch without reusing the seed", async () => {
     const createImageJob = vi.fn();
     root = createRoot(container);
     await act(async () => {
@@ -6383,7 +6383,7 @@ describe("SceneWorks app shell", () => {
         model: "z_image_turbo",
         prompt: "mist over a glass atrium",
         negativePrompt: "flat lighting",
-        seed: 1234,
+        seed: null,
         count: 3,
         width: 1536,
         height: 1024,
