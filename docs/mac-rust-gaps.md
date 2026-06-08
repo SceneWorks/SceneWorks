@@ -76,10 +76,17 @@ dropped — no silent drops.**
 |---|---|---|---|
 | Strict-pose ControlNet | `qwen_image` (+ `advanced.poses`) | 🔵 Port-pending | epic 3401 (Qwen ControlNet port) |
 | Reference / edit conditioning | base `qwen_image` (reference/`edit_image`) | 🔵 Port-pending | epic 3401 |
-| Reference / IP-Adapter / edit | `flux_schnell`, `flux_dev` | 🔵 Viability spike | sc-3535 |
+| Reference (XLabs IP-Adapter) | `flux_schnell`, `flux_dev` | 🔵 Port (spike GO) | sc-3535 (spike) → **epic 3621** |
 | `edit_image` (img2img-edit) | `z_image_turbo` | 🔵 Port-pending | epic 3529 (folds into Z-Image-Edit port) |
 | reference-without-pose | `z_image_turbo` | 🟢 Ported (MLX) | sc-3536 (spike GO) → sc-3619 |
 | Third-party LyCORIS (LoHa / non-peft LoKr) | all families (`networkType=lycoris`) | 🔵 Port-or-drop spike | sc-3537 |
+
+> **FLUX.1 `edit_image` is not an eradication gap (sc-3535).** The torch `FluxDiffusersAdapter`
+> hard-rejects `edit_image` ("does not support image editing") — FLUX.1 has no edit path on *any*
+> platform, so it reaches no Python worker to retire. It's a universal product gap (a future
+> FLUX.1-Kontext capability), not a Mac-vs-torch gap, and is intentionally absent from this table.
+> Likewise, FLUX.1 reference = the **XLabs IP-Adapter** (not VAE img2img-init), which is why it
+> needs the engine port in epic 3621 rather than a gate-flip like Z-Image's sc-3619.
 
 ## 3. Video
 
