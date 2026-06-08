@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
@@ -8,7 +9,7 @@ use rusqlite::{
     params, params_from_iter, Connection, OptionalExtension, Row, ToSql, TransactionBehavior,
 };
 use serde::de::DeserializeOwned;
-use serde_json::{Map, Number, Value};
+use serde_json::{json, Map, Number, Value};
 
 use crate::contracts::{
     ContractNumber, JobSnapshot, JobStatus, JobType, ProgressStage, QueueSummary, WorkerCapability,
@@ -1711,7 +1712,7 @@ fn mlx_unavailable_error(job: &JobSnapshot, grace_seconds: u64) -> String {
 /// Why the Rust/MLX flow can't run a job on macOS (epic 3482 / sc-3484) — the inverse of the
 /// `*_mlx_eligible` predicates, extended across every job type. Feature-precise so the
 /// `mlx_unsupported` Logs event + the gap inventory name the exact surface to port or drop.
-#[derive(Debug, Clone, serde::Serialize)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct UnsupportedReason {
     /// Model id involved, when the gap is model-specific (e.g. "kolors", "qwen_image").
@@ -1783,7 +1784,7 @@ pub fn mac_rust_supported(job: &JobSnapshot) -> Result<(), UnsupportedReason> {
         // enforce-fail it (it would otherwise break a newer job type this build doesn't model).
         JobType::Unknown(_) => Ok(()),
 
-        JobType::ImageGenerate | JobType::ImageEdit => Err(classify_image_gap(job)),
+        JobType::ImageGenerate | JobType::ImageEdit => Err(classify_image_gap(&job.payload)),
 
         JobType::ImageDetail => Err(UnsupportedReason::new(
             model,
@@ -1799,7 +1800,7 @@ pub fn mac_rust_supported(job: &JobSnapshot) -> Result<(), UnsupportedReason> {
             Some("epic 3180"),
         )),
 
-        JobType::VideoGenerate => Err(classify_video_gap(job)),
+        JobType::VideoGenerate => Err(classify_video_gap(&job.payload)),
 
         JobType::VideoExtend | JobType::VideoBridge => Err(UnsupportedReason::new(
             model,
@@ -1836,9 +1837,9 @@ pub fn mac_rust_supported(job: &JobSnapshot) -> Result<(), UnsupportedReason> {
             Some("sc-3489"),
         )),
 
-        JobType::ModelConvert => classify_convert_gap(job),
+        JobType::ModelConvert => classify_convert_gap(&job.payload),
 
-        JobType::LoraTrain => Err(classify_training_gap(job)),
+        JobType::LoraTrain => Err(classify_training_gap(&job.payload)),
 
         JobType::TrainingCaption => Err(UnsupportedReason::new(
             None,
@@ -1846,6 +1847,295 @@ pub fn mac_rust_supported(job: &JobSnapshot) -> Result<(), UnsupportedReason> {
             "automatic dataset captioning runs on the Python torch captioner.",
             Some("sc-3490"),
         )),
+    }
+}
+
+/// The user-facing affordance prefix the Mac UI shows in place of a torch-only control
+/// (sc-3486). Centralised so the API, the web client, and the gap docs read identically.
+pub const MAC_NOT_AVAILABLE_LABEL: &str = "Not available on Mac (Rust/MLX only)";
+
+/// UI-facing per-model macOS support (sc-3486), derived from the same `*_mlx_eligible` routing
+/// predicates as the [`mac_rust_supported`] job oracle — one source of truth, so what the UI
+/// hides can never drift from what routing refuses. `supported` = at least one generation config
+/// for this model routes to the in-process Rust/MLX flow on macOS, so the model stays in the
+/// picker; `false` = a torch-only model the Mac UI hides/disables once gating is active (its
+/// `reason` names the porting epic). The per-feature flags use "available in *some* MLX config"
+/// semantics (they never over-gate a valid combination) so a control is disabled only when the
+/// model can't use it on MLX at all; residual config-specific dead ends are caught by the
+/// `mlx_unsupported` affordance at submit.
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ModelMacSupport {
+    pub supported: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason: Option<UnsupportedReason>,
+    pub features: ModelMacFeatures,
+}
+
+/// Per-feature macOS support for a model (sc-3486). Each flag mirrors the routing predicate for
+/// that feature with "eligible in at least one config" semantics; `false` → disable that control
+/// on Mac when gating is active. `video_modes` is populated only for video models.
+#[derive(Debug, Clone, Default, PartialEq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ModelMacFeatures {
+    /// Pose conditioning (the pose picker): a non-empty `advanced.poses`, alone or with a
+    /// reference. `false` for base `qwen_image` (strict-pose ControlNet is torch-only, epic 3401).
+    pub pose: bool,
+    /// Reference / IP-Adapter / `character_image` identity conditioning (`referenceAssetId`).
+    pub reference: bool,
+    /// img2img `edit_image` (`mode=edit_image` + a source/reference image).
+    pub edit: bool,
+    /// Third-party LyCORIS (LoHa / non-peft LoKr) adapters — never in the Rust flow yet (sc-3537).
+    pub lycoris: bool,
+    /// Video-only: which `video_generate` modes route to MLX. Empty for non-video models.
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub video_modes: BTreeMap<String, bool>,
+}
+
+/// Build a synthetic generation payload (`{ "model": ..., <entries> }`) for probing the routing
+/// predicates without a full [`JobSnapshot`] — the UI-gating sibling of how the oracle reads a
+/// real job's payload.
+fn probe_payload(model: &str, entries: &[(&str, Value)]) -> Map<String, Value> {
+    let mut payload = Map::new();
+    payload.insert("model".to_owned(), Value::String(model.to_owned()));
+    for (key, value) in entries {
+        payload.insert((*key).to_owned(), value.clone());
+    }
+    payload
+}
+
+/// UI gating support for a model id of the given catalog `model_type` ("image" / "video" / other).
+/// Non-image/video types (utility/infra: upscalers, captioners) are reported `supported` — their
+/// Python-only *actions* are gated by [`mac_capabilities`] at the job-type level, not by hiding
+/// the model from a picker. Same source of truth as [`mac_rust_supported`].
+pub fn model_mac_support(model_id: &str, model_type: &str) -> ModelMacSupport {
+    match model_type {
+        "image" => image_model_mac_support(model_id),
+        "video" => video_model_mac_support(model_id),
+        _ => ModelMacSupport {
+            supported: true,
+            reason: None,
+            features: ModelMacFeatures::default(),
+        },
+    }
+}
+
+fn image_model_mac_support(model: &str) -> ModelMacSupport {
+    if !MLX_ROUTED_MODELS.contains(&model) {
+        return ModelMacSupport {
+            supported: false,
+            reason: Some(classify_image_gap(&probe_payload(model, &[]))),
+            features: ModelMacFeatures::default(),
+        };
+    }
+    // "Available in some MLX config" probes — bias toward not-disabling so a valid combination
+    // (e.g. a Z-Image reference *with* a pose set) is never blocked. The residual config-only dead
+    // ends (a Z-Image reference *without* a pose) surface as the `mlx_unsupported` submit affordance.
+    let pose = image_request_mlx_eligible(
+        model,
+        &probe_payload(model, &[("advanced", json!({ "poses": [{}] }))]),
+    ) || image_request_mlx_eligible(
+        model,
+        &probe_payload(
+            model,
+            &[
+                ("mode", json!("character_image")),
+                ("referenceAssetId", json!("probe")),
+                ("advanced", json!({ "poses": [{}] })),
+            ],
+        ),
+    );
+    let reference = image_request_mlx_eligible(
+        model,
+        &probe_payload(model, &[("referenceAssetId", json!("probe"))]),
+    ) || image_request_mlx_eligible(
+        model,
+        &probe_payload(
+            model,
+            &[
+                ("mode", json!("character_image")),
+                ("referenceAssetId", json!("probe")),
+            ],
+        ),
+    ) || image_request_mlx_eligible(
+        model,
+        &probe_payload(
+            model,
+            &[
+                ("referenceAssetId", json!("probe")),
+                ("advanced", json!({ "poses": [{}] })),
+            ],
+        ),
+    );
+    let edit = image_request_mlx_eligible(
+        model,
+        &probe_payload(
+            model,
+            &[
+                ("mode", json!("edit_image")),
+                ("sourceAssetId", json!("probe")),
+            ],
+        ),
+    );
+    ModelMacSupport {
+        supported: true,
+        reason: None,
+        features: ModelMacFeatures {
+            pose,
+            reference,
+            edit,
+            lycoris: false,
+            video_modes: BTreeMap::new(),
+        },
+    }
+}
+
+/// The `video_generate` modes the UI offers, in display order, so the gating mirrors
+/// [`video_mode_is_mlx_eligible`] for every mode a Mac user could pick.
+const VIDEO_UI_MODES: &[&str] = &[
+    "text_to_video",
+    "image_to_video",
+    "first_last_frame",
+    "replace_person",
+];
+
+fn video_model_mac_support(model: &str) -> ModelMacSupport {
+    if !VIDEO_MLX_ROUTED_MODELS.contains(&model) {
+        return ModelMacSupport {
+            supported: false,
+            reason: Some(classify_video_gap(&probe_payload(model, &[]))),
+            features: ModelMacFeatures::default(),
+        };
+    }
+    let video_modes = VIDEO_UI_MODES
+        .iter()
+        .map(|mode| ((*mode).to_owned(), video_mode_is_mlx_eligible(model, mode)))
+        .collect();
+    ModelMacSupport {
+        supported: true,
+        reason: None,
+        features: ModelMacFeatures {
+            video_modes,
+            ..ModelMacFeatures::default()
+        },
+    }
+}
+
+/// macOS support for a non-model feature/sub-system (sc-3486): the infra job types that have no
+/// in-process Rust path. `supported=false` carries the `reason` (the same `UnsupportedReason` the
+/// `mlx_unsupported` event uses); when one of these is ported its flag flips to `true`.
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MacFeatureSupport {
+    pub supported: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason: Option<UnsupportedReason>,
+}
+
+impl MacFeatureSupport {
+    fn unsupported(feature: &str, detail: &str, suggested_epic: &str) -> Self {
+        Self {
+            supported: false,
+            reason: Some(UnsupportedReason::new(
+                None,
+                feature,
+                detail,
+                Some(suggested_epic),
+            )),
+        }
+    }
+}
+
+/// macOS training support (sc-3486): the kernels with a native mlx-gen Rust trainer, so the
+/// Training studio can disable a base model whose kernel only runs on the Python torch trainer.
+/// `lokr_on_wan_supported=false` mirrors the LoKr-on-Wan routing caveat.
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MacTrainingSupport {
+    pub supported_kernels: Vec<String>,
+    pub lokr_on_wan_supported: bool,
+}
+
+/// What the Mac UI needs to gate every non-model Python surface plus the master switch
+/// (sc-3486). `mac_gating_active` is the rollout flag (`SCENEWORKS_MLX_REQUIRED`): when `false`
+/// (Windows/Linux, or a Mac still in observe mode) the client applies no gating at all, so
+/// non-Mac pickers are untouched. The per-feature entries are facts about the Rust flow
+/// independent of the flag; the client only acts on them when `mac_gating_active`.
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MacCapabilities {
+    pub platform: String,
+    pub mac_gating_active: bool,
+    pub not_available_label: String,
+    pub features: BTreeMap<String, MacFeatureSupport>,
+    pub training: MacTrainingSupport,
+}
+
+/// Build the [`MacCapabilities`] surface for the given platform + gating flag. The feature set is
+/// the non-model half of `docs/mac-rust-gaps.md` §5 (infra) plus the global feature gaps; keep it
+/// in sync with the oracle's job-type arms.
+pub fn mac_capabilities(platform: &str, mac_gating_active: bool) -> MacCapabilities {
+    let mut features = BTreeMap::new();
+    features.insert(
+        "lycoris".to_owned(),
+        MacFeatureSupport::unsupported(
+            "third-party LyCORIS LoRA",
+            "the Rust engine/worker apply LoRA + peft LoKr, but not arbitrary third-party LyCORIS (LoHa / non-peft LoKr).",
+            "sc-3537",
+        ),
+    );
+    features.insert(
+        "imageUpscale".to_owned(),
+        MacFeatureSupport::unsupported(
+            "image_upscale (Real-ESRGAN)",
+            "standalone image upscaling runs on the Python torch Real-ESRGAN / AuraSR path.",
+            "sc-3489",
+        ),
+    );
+    features.insert(
+        "poseFromPhoto".to_owned(),
+        MacFeatureSupport::unsupported(
+            "DWPose pose detection",
+            "photo→skeleton pose detection runs on Python onnxruntime (DWPose).",
+            "sc-3487",
+        ),
+    );
+    features.insert(
+        "personDetect".to_owned(),
+        MacFeatureSupport::unsupported(
+            "person detect / track (YOLO/SAM2)",
+            "person detection/tracking runs on the Python onnxruntime/torch path.",
+            "sc-3488",
+        ),
+    );
+    features.insert(
+        "datasetCaptioning".to_owned(),
+        MacFeatureSupport::unsupported(
+            "dataset captioning",
+            "automatic dataset captioning runs on the Python torch captioner.",
+            "sc-3490",
+        ),
+    );
+    features.insert(
+        "advancedVideoModes".to_owned(),
+        MacFeatureSupport::unsupported(
+            "advanced video (extend / bridge / replace_person)",
+            "the advanced video job types and modes are torch-only.",
+            "epic 3040",
+        ),
+    );
+    MacCapabilities {
+        platform: platform.to_owned(),
+        mac_gating_active,
+        not_available_label: MAC_NOT_AVAILABLE_LABEL.to_owned(),
+        features,
+        training: MacTrainingSupport {
+            supported_kernels: MLX_ROUTED_TRAINING_KERNELS
+                .iter()
+                .map(|kernel| (*kernel).to_owned())
+                .collect(),
+            lokr_on_wan_supported: false,
+        },
     }
 }
 
@@ -1869,8 +2159,8 @@ fn torch_only_image_model_epic(model: &str) -> Option<&'static str> {
 /// Name the precise gap for an ineligible `image_generate` / `image_edit` job: a torch-only
 /// model, or a torch-only feature on an otherwise-MLX family. Mirrors the per-family
 /// `*_mlx_eligible` gates so the reason matches why routing refused it.
-fn classify_image_gap(job: &JobSnapshot) -> UnsupportedReason {
-    let Some(model) = job.payload.get("model").and_then(Value::as_str) else {
+fn classify_image_gap(payload: &Map<String, Value>) -> UnsupportedReason {
+    let Some(model) = payload.get("model").and_then(Value::as_str) else {
         return UnsupportedReason::new(None, "image generation", "no model specified.", None);
     };
     if !MLX_ROUTED_MODELS.contains(&model) {
@@ -1882,7 +2172,7 @@ fn classify_image_gap(job: &JobSnapshot) -> UnsupportedReason {
         };
         return UnsupportedReason::new(Some(model), "torch-only image model", detail, epic);
     }
-    if request_has_lycoris_lora(&job.payload) {
+    if request_has_lycoris_lora(payload) {
         return UnsupportedReason::new(
             Some(model),
             "third-party LyCORIS LoRA",
@@ -1890,14 +2180,13 @@ fn classify_image_gap(job: &JobSnapshot) -> UnsupportedReason {
             Some("sc-3537"),
         );
     }
-    let has_poses = job
-        .payload
+    let has_poses = payload
         .get("advanced")
         .and_then(Value::as_object)
         .and_then(|advanced| advanced.get("poses"))
         .and_then(Value::as_array)
         .is_some_and(|poses| !poses.is_empty());
-    let is_edit = job.payload.get("mode").and_then(Value::as_str) == Some("edit_image");
+    let is_edit = payload.get("mode").and_then(Value::as_str) == Some("edit_image");
     match model {
         "qwen_image" if has_poses => UnsupportedReason::new(
             Some(model),
@@ -1950,8 +2239,8 @@ fn classify_image_gap(job: &JobSnapshot) -> UnsupportedReason {
 
 /// Name the precise gap for an ineligible `video_generate` job: a torch-only model (incl. SVD),
 /// an advanced mode, a third-party LyCORIS, or LoKr-on-Wan. Mirrors `video_job_is_mlx_eligible`.
-fn classify_video_gap(job: &JobSnapshot) -> UnsupportedReason {
-    let Some(model) = job.payload.get("model").and_then(Value::as_str) else {
+fn classify_video_gap(payload: &Map<String, Value>) -> UnsupportedReason {
+    let Some(model) = payload.get("model").and_then(Value::as_str) else {
         return UnsupportedReason::new(None, "video generation", "no model specified.", None);
     };
     if !VIDEO_MLX_ROUTED_MODELS.contains(&model) {
@@ -1962,8 +2251,7 @@ fn classify_video_gap(job: &JobSnapshot) -> UnsupportedReason {
             Some("epic 3040"),
         );
     }
-    let mode = job
-        .payload
+    let mode = payload
         .get("mode")
         .and_then(Value::as_str)
         .unwrap_or("image_to_video");
@@ -1975,7 +2263,7 @@ fn classify_video_gap(job: &JobSnapshot) -> UnsupportedReason {
             Some("epic 3040"),
         );
     }
-    if request_has_lycoris_lora(&job.payload) {
+    if request_has_lycoris_lora(payload) {
         return UnsupportedReason::new(
             Some(model),
             "third-party LyCORIS LoRA",
@@ -1983,7 +2271,7 @@ fn classify_video_gap(job: &JobSnapshot) -> UnsupportedReason {
             Some("sc-3537"),
         );
     }
-    if is_wan_video_model(model) && request_has_lokr_lora(&job.payload) {
+    if is_wan_video_model(model) && request_has_lokr_lora(payload) {
         return UnsupportedReason::new(
             Some(model),
             "LoKr-on-Wan",
@@ -2001,9 +2289,8 @@ fn classify_video_gap(job: &JobSnapshot) -> UnsupportedReason {
 
 /// Name the precise gap for an ineligible `lora_train` job. Mirrors `training_job_is_mlx_eligible`:
 /// a kernel with no native mlx-gen Rust trainer, or LoKr-on-Wan.
-fn classify_training_gap(job: &JobSnapshot) -> UnsupportedReason {
-    let kernel = job
-        .payload
+fn classify_training_gap(payload: &Map<String, Value>) -> UnsupportedReason {
+    let kernel = payload
         .get("plan")
         .and_then(Value::as_object)
         .and_then(|plan| plan.get("target"))
@@ -2041,12 +2328,12 @@ fn classify_training_gap(job: &JobSnapshot) -> UnsupportedReason {
 /// `model_convert` is supported only for the in-process Rust FLUX.2-klein converter
 /// (`flux2_klein_diffusers`, sc-3136). The default/absent converter is the Python mlx-video
 /// Wan/LTX path (sc-3491 / sc-3224).
-fn classify_convert_gap(job: &JobSnapshot) -> Result<(), UnsupportedReason> {
-    if job.payload.get("converter").and_then(Value::as_str) == Some("flux2_klein_diffusers") {
+fn classify_convert_gap(payload: &Map<String, Value>) -> Result<(), UnsupportedReason> {
+    if payload.get("converter").and_then(Value::as_str) == Some("flux2_klein_diffusers") {
         return Ok(());
     }
     Err(UnsupportedReason::new(
-        job.payload.get("model").and_then(Value::as_str),
+        payload.get("model").and_then(Value::as_str),
         "Wan/LTX model conversion (mlx_video)",
         "installing a non-turnkey Wan/LTX checkpoint converts via the Python mlx_video path.",
         Some("sc-3491 / sc-3224"),
@@ -2325,21 +2612,28 @@ fn image_job_is_mlx_eligible(job: &JobSnapshot) -> bool {
     let Some(model) = job.payload.get("model").and_then(Value::as_str) else {
         return false;
     };
+    image_request_mlx_eligible(model, &job.payload)
+}
+
+/// Per-model image MLX-eligibility dispatch, factored out of [`image_job_is_mlx_eligible`] so the
+/// UI gating oracle ([`model_mac_support`], sc-3486) can probe the same per-family predicates with
+/// synthetic payloads — one dispatch table, no divergence between routing and what the UI hides.
+fn image_request_mlx_eligible(model: &str, payload: &Map<String, Value>) -> bool {
     if !MLX_ROUTED_MODELS.contains(&model) {
         return false;
     }
     match model {
-        "z_image_turbo" => z_image_mlx_eligible(&job.payload),
-        "flux_schnell" | "flux_dev" => flux_mlx_eligible(&job.payload),
-        "qwen_image" => qwen_mlx_eligible(&job.payload),
+        "z_image_turbo" => z_image_mlx_eligible(payload),
+        "flux_schnell" | "flux_dev" => flux_mlx_eligible(payload),
+        "qwen_image" => qwen_mlx_eligible(payload),
         "qwen_image_edit"
         | "qwen_image_edit_2509"
         | "qwen_image_edit_2511"
-        | "qwen_image_edit_2511_lightning" => qwen_edit_mlx_eligible(&job.payload),
+        | "qwen_image_edit_2511_lightning" => qwen_edit_mlx_eligible(payload),
         "flux2_klein_9b" | "flux2_klein_9b_kv" | "flux2_klein_9b_true_v2" => {
-            flux2_mlx_eligible(&job.payload)
+            flux2_mlx_eligible(payload)
         }
-        "sdxl" | "realvisxl" => sdxl_mlx_eligible(&job.payload),
+        "sdxl" | "realvisxl" => sdxl_mlx_eligible(payload),
         // Every model in MLX_ROUTED_MODELS must have an arm.
         _ => false,
     }

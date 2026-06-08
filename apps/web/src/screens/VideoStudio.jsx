@@ -81,6 +81,13 @@ import {
 } from "./generationStudio.jsx";
 import { ReplacePersonPanel, findReplacementModel } from "./ReplacePersonPanel.jsx";
 import { useAppContext } from "../context/AppContext.js";
+import {
+  DEFAULT_MAC_CAPABILITIES,
+  macAvailableModels,
+  macBlockedModels,
+  macFeatureBlock,
+  macVideoModeBlock,
+} from "../macGating.js";
 import { loadStudioSettings, useStudioSettingsWriter } from "../hooks/useStudioSettings.js";
 import { qualityChoices } from "../jobTypes.js";
 import {
@@ -134,6 +141,7 @@ export function VideoStudio() {
     setRequestedGpu,
     updateAssetStatus,
     videoModels,
+    macCapabilities = DEFAULT_MAC_CAPABILITIES,
   } = useAppContext();
   // Recent Assets (sc-2089) — 20 most recent video assets in the active
   // project. Falls back to the legacy single-generation list for test
@@ -171,6 +179,20 @@ export function VideoStudio() {
   const [showIncompatibleLoras, setShowIncompatibleLoras] = useState(saved.showIncompatibleLoras ?? false);
   const [model, setModel] = useState(saved.model ?? videoModels[0]?.id ?? ltxVideoModelId);
   const [guideOpen, setGuideOpen] = useState(false);
+  // Mac UI gating (sc-3486): hide torch-only video models (e.g. SVD) and snap off one if selected.
+  const macVideoModels = useMemo(
+    () => macAvailableModels(videoModels, macCapabilities),
+    [videoModels, macCapabilities],
+  );
+  const macHiddenVideoModels = useMemo(
+    () => macBlockedModels(videoModels, macCapabilities),
+    [videoModels, macCapabilities],
+  );
+  useEffect(() => {
+    if (macVideoModels.length && !macVideoModels.some((item) => item.id === model)) {
+      setModel(macVideoModels[0].id);
+    }
+  }, [macVideoModels, model]);
   const selectedModel = videoModels.find((item) => item.id === model) ?? videoModels[0];
   // Prompt guide for the selected model; fall back to the generic video guide
   // when a model declares none, so the button is always useful (sc-1817).
@@ -609,6 +631,13 @@ export function VideoStudio() {
     ["extend_clip", "Extend"],
     ["replace_person", "Replace person"],
   ];
+  // Mac UI gating (sc-3486): disable the video modes that run on the Python torch path —
+  // per-model FLF eligibility + the torch-only advanced modes (extend/bridge/replace).
+  const macAdvancedVideoBlock = macFeatureBlock(macCapabilities, "advancedVideoModes");
+  const macVideoModeBlockFor = (value) =>
+    value === "extend_clip"
+      ? macAdvancedVideoBlock
+      : macVideoModeBlock(selectedModel, macCapabilities, value);
   const matchingTracks = personTracks.filter((track) => track.sourceAssetId === sourceClipAssetId);
   const latestDetectionJob = jobs
     .filter(
@@ -774,16 +803,21 @@ export function VideoStudio() {
         <div className="surface-header hero studio-prompt-hero video-prompt-hero">
           <div className="prompt-hero-top">
             <div className="segmented-control mode-control" role="tablist" aria-label="Video mode">
-              {modeOptions.map(([value, label]) => (
-                <button
-                  className={mode === value ? "active" : ""}
-                  key={value}
-                  onClick={() => setMode(value)}
-                  type="button"
-                >
-                  {label}
-                </button>
-              ))}
+              {modeOptions.map(([value, label]) => {
+                const macBlock = macVideoModeBlockFor(value);
+                return (
+                  <button
+                    className={mode === value ? "active" : ""}
+                    key={value}
+                    onClick={() => setMode(value)}
+                    type="button"
+                    disabled={Boolean(macBlock)}
+                    title={macBlock ? macBlock.text : undefined}
+                  >
+                    {label}
+                  </button>
+                );
+              })}
             </div>
             <div className="prompt-hero-links">
               <button className="hero-link" onClick={() => setGuideOpen(true)} type="button">
@@ -1064,13 +1098,19 @@ export function VideoStudio() {
               <label>
                 Model
                 <select onChange={(event) => setModel(event.target.value)} value={model}>
-                  {videoModels.map((item) => (
+                  {(macVideoModels.length ? macVideoModels : videoModels).map((item) => (
                     <option key={item.id} value={item.id}>
                       {item.name}
                     </option>
                   ))}
                 </select>
               </label>
+              {macHiddenVideoModels.length ? (
+                <p className="mac-gating-note">
+                  {macHiddenVideoModels.length} model
+                  {macHiddenVideoModels.length === 1 ? "" : "s"} unavailable on Mac (Rust/MLX only).
+                </p>
+              ) : null}
 
               <div className="style-preset-strip">
                 <span className="style-preset-label">Style preset</span>

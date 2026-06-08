@@ -2448,6 +2448,92 @@ async fn timeline_routes_persist_and_create_worker_jobs() {
 }
 
 #[tokio::test]
+async fn models_catalog_carries_mac_support_and_capabilities_endpoint() {
+    // sc-3486: the catalog stamps per-model `macSupport`, and the capabilities endpoint
+    // carries the master switch (`macGatingActive` = mlx_required) + infra gating.
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let config_dir = temp_dir.path().join("config/manifests");
+    std::fs::create_dir_all(&config_dir).expect("manifest dir creates");
+    std::fs::write(
+        config_dir.join("builtin.models.jsonc"),
+        r#"
+        {
+          "schemaVersion": 1,
+          "models": [
+            { "id": "z_image_turbo", "name": "Z-Image-Turbo", "family": "z-image", "type": "image",
+              "adapter": "z_image_diffusers", "capabilities": ["text_to_image"], "downloads": [],
+              "paths": {}, "defaults": {}, "limits": {}, "loraCompatibility": { "families": [], "types": [] }, "ui": {} },
+            { "id": "kolors", "name": "Kolors", "family": "kolors", "type": "image",
+              "adapter": "kolors_diffusers", "capabilities": ["text_to_image"], "downloads": [],
+              "paths": {}, "defaults": {}, "limits": {}, "loraCompatibility": { "families": [], "types": [] }, "ui": {} },
+            { "id": "svd", "name": "SVD", "family": "svd", "type": "video",
+              "adapter": "svd_video", "capabilities": ["image_to_video"], "downloads": [],
+              "paths": {}, "defaults": {}, "limits": {}, "loraCompatibility": { "families": [], "types": [] }, "ui": {} }
+          ]
+        }
+        "#,
+    )
+    .expect("builtin models writes");
+
+    let mut settings = test_settings(&temp_dir);
+    settings.mlx_required = true;
+    let app = create_app(settings).expect("app creates");
+
+    let (status, models) = request(app.clone(), "GET", "/api/v1/models", Value::Null).await;
+    assert_eq!(status, StatusCode::OK);
+    let by_id = |id: &str| {
+        models
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|m| m["id"] == id)
+            .cloned()
+            .unwrap_or(Value::Null)
+    };
+    // Torch-only image model → unsupported on Mac, names its port epic.
+    let kolors = by_id("kolors");
+    assert_eq!(kolors["macSupport"]["supported"], false);
+    assert_eq!(kolors["macSupport"]["reason"]["suggestedEpic"], "epic 3532");
+    // MLX-routed family → supported, stays in the picker.
+    assert_eq!(by_id("z_image_turbo")["macSupport"]["supported"], true);
+    // Torch-only video model → unsupported.
+    assert_eq!(by_id("svd")["macSupport"]["supported"], false);
+
+    // Capabilities endpoint: gating active (mlx_required=true) + infra epics present.
+    let (status, caps) = request(app, "GET", "/api/v1/capabilities/mac", Value::Null).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(caps["macGatingActive"], true);
+    assert_eq!(
+        caps["notAvailableLabel"],
+        "Not available on Mac (Rust/MLX only)"
+    );
+    assert_eq!(
+        caps["features"]["imageUpscale"]["reason"]["suggestedEpic"],
+        "sc-3489"
+    );
+    assert_eq!(
+        caps["features"]["poseFromPhoto"]["reason"]["suggestedEpic"],
+        "sc-3487"
+    );
+    assert!(caps["training"]["supportedKernels"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|k| k == "z_image_lora"));
+}
+
+#[tokio::test]
+async fn capabilities_mac_is_inert_when_mlx_not_required() {
+    // The default (observe mode / Windows / Linux) reports gating inactive, so the client
+    // applies no gating at all.
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+    let (status, caps) = request(app, "GET", "/api/v1/capabilities/mac", Value::Null).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(caps["macGatingActive"], false);
+}
+
+#[tokio::test]
 async fn image_job_route_threads_upscale_contract_when_enabled() {
     let temp_dir = tempfile::tempdir().expect("temp dir creates");
     let config_dir = temp_dir.path().join("config/manifests");

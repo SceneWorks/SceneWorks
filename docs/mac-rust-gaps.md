@@ -29,6 +29,17 @@ Rollout reminder: the cutover is staged (epic 3482). The `mlx_unsupported` oracl
 without breaking anything; each surface flips to enforce only once it's ported (its epic
 completes) or dropped (UI-gated, sc-3486).
 
+> **UI gating (sc-3486).** The same oracle is surfaced to the web client so a Mac user never
+> reaches a `mlx_unsupported` error after submit. `GET /api/v1/models` stamps each model with
+> `macSupport { supported, reason, features { pose, reference, edit, lycoris, videoModes } }`
+> (`model_mac_support`), and `GET /api/v1/capabilities/mac` carries the master switch
+> (`macGatingActive` = `SCENEWORKS_MLX_REQUIRED`), the infra feature gaps below (§5), and the
+> supported training kernels (§4). The client (`apps/web/src/macGating.js`) hides torch-only
+> models from the studio pickers and disables the feature controls in this table — but only when
+> `macGatingActive`, so Windows/Linux (and an observe-mode Mac) are untouched. When a surface
+> here flips to *Done*, its `macSupport`/capability flag flips to supported automatically (same
+> predicates), and the UI stops gating it — no separate UI change needed.
+
 ---
 
 ## 1. Torch-only image models

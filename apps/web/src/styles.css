@@ -4853,6 +4853,15 @@ label {
   background: var(--warm-soft);
 }
 
+/* Mac UI gating affordance (sc-3486): the small "unavailable on Mac (Rust/MLX only)" note
+   shown under a gated picker/control. Muted so it reads as guidance, not an error. */
+.mac-gating-note {
+  margin: 6px 0 0;
+  font-size: 0.78rem;
+  line-height: 1.35;
+  color: var(--text-muted);
+}
+
 .inline-success {
   border-color: transparent;
   background: var(--accent-soft);

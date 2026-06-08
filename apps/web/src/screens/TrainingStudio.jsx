@@ -1,5 +1,6 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import { useAppContext } from "../context/AppContext.js";
+import { DEFAULT_MAC_CAPABILITIES, macTrainingKernelBlocked } from "../macGating.js";
 import { API_BASE_URL } from "../api.js";
 import { AssetThumbnail, assetCanRenderAsImage } from "../components/assetMedia.jsx";
 import { CompactSelector } from "../components/CompactSelector.jsx";
@@ -883,6 +884,7 @@ export function TrainingStudio({ mode = "training" } = {}) {
     trainingTargetsError = "",
     setActiveView,
     studioLaunch,
+    macCapabilities = DEFAULT_MAC_CAPABILITIES,
   } = useAppContext();
   const datasets = trainingDatasetsProjectId === activeProject?.id ? trainingDatasets : [];
   const datasetsError = trainingDatasetsError;
@@ -1019,10 +1021,20 @@ export function TrainingStudio({ mode = "training" } = {}) {
     (!activeDataset || dirty);
   const displayedCaptionPrompt = captionSettings.captionPrompt || buildJoyCaptionPrompt(captionSettings);
   const firstTarget = trainingTargets[0] ?? null;
+  // Mac UI gating (sc-3486): a target whose kernel has no native mlx-gen Rust trainer
+  // (kolors_lora / lens_lora) can't train on a gated Mac — disable it and snap off it.
+  const macTargetBlocked = (target) => macTrainingKernelBlocked(macCapabilities, target?.kernel);
   const selectedTarget = useMemo(
     () => trainingTargets.find((target) => target.id === selectedTargetId) ?? firstTarget,
     [firstTarget, selectedTargetId, trainingTargets],
   );
+  useEffect(() => {
+    if (selectedTarget && macTargetBlocked(selectedTarget)) {
+      const fallback = trainingTargets.find((target) => !macTargetBlocked(target));
+      if (fallback) setSelectedTargetId(fallback.id);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedTarget?.id, trainingTargets, macCapabilities]);
   const targetPresets = useMemo(
     () => presetsForTarget(trainingPresets, selectedTarget?.id),
     [selectedTarget?.id, trainingPresets],
@@ -1053,6 +1065,18 @@ export function TrainingStudio({ mode = "training" } = {}) {
   const networkTypeOptions = rangeOptions(selectedTarget?.limits, "networkTypes");
   const showNetworkType = networkTypeOptions.length > 1;
   const isLokrNetwork = asText(configDraft.networkType).trim() === "lokr";
+  // Mac UI gating (sc-3486): the mlx Wan trainer can't merge a Kronecker (LoKr) adapter, so
+  // disable the LoKr network type for Wan targets on a gated Mac (LoKr on Z-Image/SDXL/LTX is fine).
+  const macLokrOnWanBlocked =
+    Boolean(macCapabilities?.macGatingActive) &&
+    (selectedTarget?.kernel ?? "").startsWith("wan") &&
+    macCapabilities?.training?.lokrOnWanSupported === false;
+  useEffect(() => {
+    if (macLokrOnWanBlocked && isLokrNetwork) {
+      updateConfigDraft("networkType", "lora");
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [macLokrOnWanBlocked, isLokrNetwork]);
   const lrSchedulerLimitOptions = rangeOptions(selectedTarget?.limits, "lrSchedulers");
   const lrSchedulerSelectOptions = lrSchedulerLimitOptions.length ? lrSchedulerLimitOptions : lrSchedulerOptions;
   const visibleLrSchedulerOptions =
@@ -1893,11 +1917,15 @@ export function TrainingStudio({ mode = "training" } = {}) {
                         <label>
                           Target
                           <select onChange={(event) => setSelectedTargetId(event.target.value)} value={selectedTarget.id}>
-                            {trainingTargets.map((target) => (
-                              <option key={target.id} value={target.id}>
-                                {target.ui?.label ?? target.name}
-                              </option>
-                            ))}
+                            {trainingTargets.map((target) => {
+                              const blocked = macTargetBlocked(target);
+                              return (
+                                <option key={target.id} value={target.id} disabled={blocked}>
+                                  {target.ui?.label ?? target.name}
+                                  {blocked ? " — not on Mac (Rust/MLX only)" : ""}
+                                </option>
+                              );
+                            })}
                           </select>
                         </label>
                         <label>
@@ -2037,11 +2065,15 @@ export function TrainingStudio({ mode = "training" } = {}) {
                                 onChange={(event) => updateConfigDraft("networkType", event.target.value)}
                                 value={configDraft.networkType ?? "lora"}
                               >
-                                {networkTypeOptions.map((option) => (
-                                  <option key={option} value={option}>
-                                    {networkTypeLabel(option)}
-                                  </option>
-                                ))}
+                                {networkTypeOptions.map((option) => {
+                                  const blocked = option === "lokr" && macLokrOnWanBlocked;
+                                  return (
+                                    <option key={option} value={option} disabled={blocked}>
+                                      {networkTypeLabel(option)}
+                                      {blocked ? " — not on Mac (Rust/MLX only)" : ""}
+                                    </option>
+                                  );
+                                })}
                               </select>
                             </label>
                           ) : null}

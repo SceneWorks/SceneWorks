@@ -15,6 +15,7 @@ import { assetMatchesCharacter } from "../components/DatasetAddDialog.jsx";
 import { extractFamilies } from "../presetUtils.js";
 import { loadStudioSettings, useStudioSettingsWriter } from "../hooks/useStudioSettings.js";
 import { useAppContext } from "../context/AppContext.js";
+import { DEFAULT_MAC_CAPABILITIES, macAvailableModels } from "../macGating.js";
 
 const characterTypes = [
   ["person", "Person"],
@@ -75,8 +76,14 @@ export function CharacterStudio() {
     trainingDatasetsProjectId,
     createTrainingDataset,
     openDatasetInLibrary,
+    macCapabilities = DEFAULT_MAC_CAPABILITIES,
   } = useAppContext();
   const latestAssets = latestImageAssets;
+  // Mac UI gating (sc-3486): hide torch-only models from the angle/pose/test pickers.
+  const macImageModels = useMemo(
+    () => macAvailableModels(imageModels, macCapabilities),
+    [imageModels, macCapabilities],
+  );
   const onPreview = setPreviewAsset;
   // Job callbacks for character generation cards (Angle Set / Pose Library).
   // jobAction may be missing in test contexts that wrap CharacterStudio with a
@@ -188,12 +195,12 @@ export function CharacterStudio() {
   // single-image only (side-by-side concat is rendered literally, not
   // interpreted as a pose instruction).
   const angleModels = useMemo(
-    () => imageModels.filter((item) => Array.isArray(item.ui?.viewAngles) && item.ui.viewAngles.length > 0),
-    [imageModels],
+    () => macImageModels.filter((item) => Array.isArray(item.ui?.viewAngles) && item.ui.viewAngles.length > 0),
+    [macImageModels],
   );
   const poseModels = useMemo(
-    () => imageModels.filter((item) => item.ui?.poseLibrary),
-    [imageModels],
+    () => macImageModels.filter((item) => item.ui?.poseLibrary),
+    [macImageModels],
   );
   // Default selection: the first registered backbone (manifest order keeps
   // InstantID first so the existing strict tier remains the default).
@@ -228,10 +235,10 @@ export function CharacterStudio() {
   }, [selectedCharacter?.id, selectedCharacter?.updatedAt]);
 
   useEffect(() => {
-    if (!imageModels.some((item) => item.id === testModel)) {
-      setTestModel(imageModels[0]?.id ?? "z_image_turbo");
+    if (!macImageModels.some((item) => item.id === testModel)) {
+      setTestModel(macImageModels[0]?.id ?? "z_image_turbo");
     }
-  }, [imageModels, testModel]);
+  }, [macImageModels, testModel]);
 
   // Create a draft character straight from the selector's "+ New character"
   // item (sc-2025) — name and type are then edited in the detail form, mirroring

@@ -876,6 +876,23 @@ pub(crate) async fn model_catalog(state: &AppState) -> Result<Vec<Value>, ApiErr
                 credential_host.map(Value::String).unwrap_or(Value::Null),
             );
         }
+        // Mac UI gating (sc-3486): per-model Rust/MLX support so the web client can
+        // hide/disable a torch-only model in the pickers and disable the feature
+        // controls a supported model can't run on MLX. Computed from the same routing
+        // predicates as the `mac_rust_supported` oracle, and platform-independent (a
+        // fact about the Rust flow) — the client only acts on it when the capabilities
+        // endpoint reports `macGatingActive`, so non-Mac pickers are untouched.
+        let mac_support = {
+            let id = object.get("id").and_then(Value::as_str).unwrap_or_default();
+            let model_type = object
+                .get("type")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            model_mac_support(id, model_type)
+        };
+        if let Ok(mac_support) = serde_json::to_value(mac_support) {
+            object.insert("macSupport".to_owned(), mac_support);
+        }
         // macOS Model Manager: MLX availability + conversion status for models that
         // declare an `mlx` variant. Additive fields the web/Docker build ignores; the
         // probes are cheap and portable, so a const `cfg!` check gates them rather

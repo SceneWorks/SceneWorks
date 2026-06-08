@@ -7,8 +7,9 @@ use sceneworks_core::contracts::{
     WorkerUtilizationSnapshot,
 };
 use sceneworks_core::jobs_store::{
-    mac_rust_supported, CreateJob, DuplicateJob, JobsStore, JobsStoreError, ProgressUpdate,
-    RegisterWorker, RetryJob, WorkerHeartbeat, MAX_JOB_ATTEMPTS,
+    mac_capabilities, mac_rust_supported, model_mac_support, CreateJob, DuplicateJob, JobsStore,
+    JobsStoreError, ProgressUpdate, RegisterWorker, RetryJob, WorkerHeartbeat,
+    MAC_NOT_AVAILABLE_LABEL, MAX_JOB_ATTEMPTS,
 };
 use serde_json::{json, Map, Value};
 
@@ -1922,6 +1923,109 @@ fn mac_rust_supported_feature_gaps_point_at_their_spikes() {
             .as_deref(),
         Some("epic 3180")
     );
+}
+
+#[test]
+fn model_mac_support_hides_torch_only_models_keeps_mlx_models() {
+    // sc-3486: the picker-gating view of the same routing predicates. Torch-only image
+    // models are unsupported (hidden/disabled on Mac) and carry their port epic.
+    let kolors = model_mac_support("kolors", "image");
+    assert!(!kolors.supported);
+    assert_eq!(
+        kolors
+            .reason
+            .as_ref()
+            .and_then(|r| r.suggested_epic.as_deref()),
+        Some("epic 3532")
+    );
+    // An MLX-routed base family stays in the picker.
+    let z_image = model_mac_support("z_image_turbo", "image");
+    assert!(z_image.supported);
+    assert!(z_image.reason.is_none());
+    // Torch-only video model (SVD) is hidden; Wan/LTX stay.
+    assert!(!model_mac_support("svd", "video").supported);
+    assert!(model_mac_support("wan_2_2", "video").supported);
+    // Utility/infra models are never hidden by model-level gating (their actions are
+    // gated by mac_capabilities at the job-type level instead).
+    assert!(model_mac_support("real_esrgan", "utility").supported);
+}
+
+#[test]
+fn model_mac_support_feature_flags_mirror_routing_without_over_gating() {
+    // Base Qwen strict-pose ControlNet is torch-only → pose control disabled; Z-Image /
+    // SDXL pose is MLX (Fun-CN / engine) → enabled.
+    assert!(!model_mac_support("qwen_image", "image").features.pose);
+    assert!(model_mac_support("z_image_turbo", "image").features.pose);
+    assert!(model_mac_support("sdxl", "image").features.pose);
+    // FLUX.1 reference/edit stay torch (viability spikes) → those controls disabled.
+    let flux = model_mac_support("flux_dev", "image");
+    assert!(!flux.features.reference);
+    assert!(!flux.features.edit);
+    // SDXL + FLUX.2 do reference/edit on MLX (epic 3041 / MLX-only family) → enabled.
+    let sdxl = model_mac_support("sdxl", "image");
+    assert!(sdxl.features.reference);
+    assert!(sdxl.features.edit);
+    let flux2 = model_mac_support("flux2_klein_9b", "image");
+    assert!(flux2.features.reference);
+    assert!(flux2.features.edit);
+    // Qwen-Image-Edit conditions reference/edit on its modes → both enabled (no over-gate).
+    let qwen_edit = model_mac_support("qwen_image_edit_2511", "image");
+    assert!(qwen_edit.features.reference);
+    assert!(qwen_edit.features.edit);
+    // LyCORIS is never in the Rust flow yet, for every family.
+    assert!(!model_mac_support("sdxl", "image").features.lycoris);
+    // Video models expose per-mode eligibility; advanced modes are torch-only.
+    let wan = model_mac_support("wan_2_2", "video").features.video_modes;
+    assert_eq!(wan.get("text_to_video"), Some(&true));
+    assert_eq!(wan.get("image_to_video"), Some(&true));
+    assert_eq!(wan.get("first_last_frame"), Some(&true)); // Wan TI2V-5B FLF is MLX
+    assert_eq!(wan.get("replace_person"), Some(&false));
+    // The 14B Wan MoE engines have no FLF Keyframe path → torch.
+    assert_eq!(
+        model_mac_support("wan_2_2_t2v_14b", "video")
+            .features
+            .video_modes
+            .get("first_last_frame"),
+        Some(&false)
+    );
+}
+
+#[test]
+fn mac_capabilities_master_switch_and_infra_features() {
+    // On a non-Mac host (or a Mac still in observe mode) the gating is inert.
+    let inert = mac_capabilities("linux", false);
+    assert!(!inert.mac_gating_active);
+    assert_eq!(inert.platform, "linux");
+    assert_eq!(inert.not_available_label, MAC_NOT_AVAILABLE_LABEL);
+    // The infra surfaces all carry their port spike so the UI affordance can name it.
+    let mac = mac_capabilities("macos", true);
+    assert!(mac.mac_gating_active);
+    let epic = |key: &str| {
+        mac.features
+            .get(key)
+            .and_then(|f| f.reason.as_ref())
+            .and_then(|r| r.suggested_epic.as_deref())
+            .map(str::to_owned)
+    };
+    assert_eq!(epic("imageUpscale").as_deref(), Some("sc-3489"));
+    assert_eq!(epic("poseFromPhoto").as_deref(), Some("sc-3487"));
+    assert_eq!(epic("personDetect").as_deref(), Some("sc-3488"));
+    assert_eq!(epic("datasetCaptioning").as_deref(), Some("sc-3490"));
+    assert_eq!(epic("lycoris").as_deref(), Some("sc-3537"));
+    assert_eq!(epic("advancedVideoModes").as_deref(), Some("epic 3040"));
+    assert!(mac.features.values().all(|f| !f.supported));
+    // Training kernels with a native Rust trainer stay enabled; LoKr-on-Wan does not.
+    assert!(mac
+        .training
+        .supported_kernels
+        .iter()
+        .any(|k| k == "z_image_lora"));
+    assert!(mac
+        .training
+        .supported_kernels
+        .iter()
+        .any(|k| k == "sdxl_lora"));
+    assert!(!mac.training.lokr_on_wan_supported);
 }
 
 #[test]
