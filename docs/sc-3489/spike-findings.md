@@ -94,16 +94,16 @@ get it **without torch**. Resolution order in the port mirrors Python's
 3. on-disk cache (`<data_dir>/cache/upscale/`);
 4. download-on-first-use from a HF repo (parity with sc-3487's rtmlib weights).
 
-**Hosting:** the export is fully reproducible from the committed script, but the two
-ONNX files (~67 MB each, fp32) must live at a stable URL for step 4. Consistent with
-the manifest convention (every other model is *downloaded*, not bundled) and with
-sc-3487, the right home is a **SceneWorks-controlled HF repo** (e.g.
-`trefster/sceneworks-real-esrgan-onnx`). This needs a HF **write** token — the token
-in this environment is read-only (`HF_READ_TOKEN_MAC`). **Action for Michael:** create
-the repo (or grant a write token) so the production default download URL can be wired;
-until then the port is fully testable via the env override. fp16 export (~33 MB each)
-is a viable size optimisation — CoreML runs fp16 internally anyway — but is left as a
-follow-up to keep parity numbers clean.
+**Hosting (DONE):** the two ONNX files (~67 MB each, fp32) are hosted at the public
+SceneWorks-owned repo **[`SceneWorks/real-esrgan-onnx`](https://huggingface.co/SceneWorks/real-esrgan-onnx)**
+(reproducible from the committed export script; model card records source-weight
+provenance + sha256). The worker downloads on first use from
+`https://huggingface.co/SceneWorks/real-esrgan-onnx/resolve/main/real_esrgan_x{2,4}.onnx`
+(public, no auth), and the manifest carries the `onnx` resource per the normal
+convention. Verified end-to-end: a fresh-cache worker (no env override) downloaded the
+x4 ONNX (sha256 match) and produced the upscaled output. fp16 export (~33 MB each) is a
+viable size optimisation — CoreML runs fp16 internally anyway — left as a follow-up to
+keep parity numbers clean.
 
 ## AuraSR
 

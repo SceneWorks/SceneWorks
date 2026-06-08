@@ -2256,12 +2256,23 @@
             "x2": {
               "repo": "nateraw/real-esrgan",
               "file": "RealESRGAN_x2plus.pth",
-              "originalUrl": "https://github.com/xinntao/Real-ESRGAN/releases/download/v0.2.1/RealESRGAN_x2plus.pth"
+              "originalUrl": "https://github.com/xinntao/Real-ESRGAN/releases/download/v0.2.1/RealESRGAN_x2plus.pth",
+              // ONNX export for the Rust macOS upscaler (sc-3489): RRDBNet via
+              // onnxruntime/CoreML on a Python-free Mac. Reproducible from
+              // scripts/spikes/sc3489_export_reference.py.
+              "onnx": {
+                "repo": "SceneWorks/real-esrgan-onnx",
+                "file": "real_esrgan_x2.onnx"
+              }
             },
             "x4": {
               "repo": "nateraw/real-esrgan",
               "file": "RealESRGAN_x4plus.pth",
-              "originalUrl": "https://github.com/xinntao/Real-ESRGAN/releases/download/v0.1.0/RealESRGAN_x4plus.pth"
+              "originalUrl": "https://github.com/xinntao/Real-ESRGAN/releases/download/v0.1.0/RealESRGAN_x4plus.pth",
+              "onnx": {
+                "repo": "SceneWorks/real-esrgan-onnx",
+                "file": "real_esrgan_x4.onnx"
+              }
             }
           }
         }

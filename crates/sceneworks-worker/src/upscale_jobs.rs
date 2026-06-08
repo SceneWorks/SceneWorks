@@ -43,12 +43,11 @@ use sceneworks_core::project_store::ProjectStore;
 const TILE_SIZE: usize = 512;
 const TILE_PAD: usize = 16;
 
-/// Default HuggingFace repo hosting the pre-exported ONNX (reproducible from
-/// `scripts/spikes/sc3489_export_reference.py`). Downloaded on first use, parity with
-/// sc-3487's rtmlib weights. NOTE: until this SceneWorks-owned repo is populated (needs
-/// a HF *write* token — see `docs/sc-3489/spike-findings.md`), provision via the env
-/// override `SCENEWORKS_REALESRGAN_X{2,4}_ONNX`.
-const ONNX_REPO: &str = "trefster/sceneworks-real-esrgan-onnx";
+/// SceneWorks-owned HuggingFace repo hosting the pre-exported ONNX (reproducible from
+/// `scripts/spikes/sc3489_export_reference.py`). Public; downloaded on first use,
+/// parity with sc-3487's rtmlib weights. Overridable via the manifest `onnx` resource
+/// or the env pin `SCENEWORKS_REALESRGAN_X{2,4}_ONNX`.
+const ONNX_REPO: &str = "SceneWorks/real-esrgan-onnx";
 
 fn onnx_file(factor: u8) -> String {
     format!("real_esrgan_x{factor}.onnx")
