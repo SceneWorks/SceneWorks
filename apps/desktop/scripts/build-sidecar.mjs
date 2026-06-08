@@ -48,3 +48,15 @@ if (!exe) {
   chmodSync(dest, 0o755);
 }
 console.log(`build-sidecar: staged ${dest}`);
+
+// macOS: stage the CoreML onnxruntime dylib the Rust DWPose detector (sc-3487)
+// dlopens at runtime (via ORT_DYLIB_PATH, set in setup.rs). Bundled as a Tauri
+// resource (tauri.conf.json `resources` -> `onnxruntime/**/*`) so a packaged,
+// Python-free Mac can still detect poses. The worker links `ort` with
+// `load-dynamic`, so unlike build-time linking this needs no rpath surgery.
+if (triple.includes("apple-darwin")) {
+  const dylibDest = join(desktopDir, "onnxruntime", "libonnxruntime.dylib");
+  const py = process.env.PYTHON || "python3";
+  run(py, ["apps/desktop/scripts/stage-onnxruntime.py", dylibDest]);
+  console.log(`build-sidecar: staged ${dylibDest}`);
+}

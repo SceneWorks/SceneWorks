@@ -806,6 +806,41 @@ fn resolve_bundled_ffmpeg() -> Option<String> {
     Some(path)
 }
 
+/// Resolve the onnxruntime dynamic library the Rust worker's DWPose pose detector
+/// (`ort`, sc-3487) dlopens at runtime via `ORT_DYLIB_PATH` (the `load-dynamic`
+/// feature). Prefers the dylib bundled next to the app (staged by build-sidecar.mjs
+/// into the `onnxruntime` resource dir, so a packaged Python-free Mac still detects
+/// poses); falls back to the venv's onnxruntime (dev / pre-bundle), the same
+/// CoreML-enabled build the Python rtmlib path uses. macOS-only — pose detection on
+/// the Rust worker is macOS-only, so this returns None elsewhere.
+#[cfg(target_os = "macos")]
+fn resolve_bundled_onnxruntime(app: &AppHandle) -> Option<String> {
+    if let Ok(resources) = app.path().resource_dir() {
+        let bundled = resources.join("onnxruntime").join("libonnxruntime.dylib");
+        if bundled.exists() {
+            return Some(bundled.to_string_lossy().to_string());
+        }
+    }
+    // Dev / pre-bundle fallback: the venv's onnxruntime shared library.
+    let python = venv_python(&venv_dir());
+    if !python.exists() {
+        return None;
+    }
+    let output = std::process::Command::new(&python)
+        .args([
+            "-c",
+            "import onnxruntime,os,glob,sys;d=os.path.dirname(onnxruntime.__file__);\
+h=glob.glob(os.path.join(d,'capi','libonnxruntime*.dylib'));sys.stdout.write(h[0] if h else '')",
+        ])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let path = String::from_utf8_lossy(&output.stdout).trim().to_owned();
+    (!path.is_empty() && Path::new(&path).exists()).then_some(path)
+}
+
 /// Spawn the API sidecar, pipe its output to api.log, and return the chosen port.
 fn spawn_api(app: &AppHandle) -> Result<(), String> {
     let mut command = app
@@ -846,6 +881,12 @@ fn spawn_api(app: &AppHandle) -> Result<(), String> {
     // bundled binary since the desktop has no system ffmpeg on PATH.
     if let Some(ffmpeg) = resolve_bundled_ffmpeg() {
         command = command.env("SCENEWORKS_FFMPEG", ffmpeg);
+    }
+    // DWPose pose detection (sc-3487) loads onnxruntime dynamically; point `ort` at
+    // the bundled CoreML-enabled dylib so a packaged Python-free Mac can detect poses.
+    #[cfg(target_os = "macos")]
+    if let Some(ort_dylib) = resolve_bundled_onnxruntime(app) {
+        command = command.env("ORT_DYLIB_PATH", ort_dylib);
     }
     // MLX model conversion (model_convert jobs) shells out to the venv's Python
     // (mlx_video.convert_wan); point the in-process worker at the bundled interpreter.
@@ -1167,6 +1208,11 @@ fn supervise_mlx_worker(app: AppHandle, api_port: u16) {
             // system ffmpeg, so point it at the bundled binary (as spawn_api does).
             if let Some(ffmpeg) = resolve_bundled_ffmpeg() {
                 command = command.env("SCENEWORKS_FFMPEG", ffmpeg);
+            }
+            // This is the worker that advertises `pose_detect` (epic 3482, sc-3487);
+            // point `ort` at the bundled CoreML onnxruntime dylib it dlopens.
+            if let Some(ort_dylib) = resolve_bundled_onnxruntime(&app) {
+                command = command.env("ORT_DYLIB_PATH", ort_dylib);
             }
             if let Some(token) = crate::settings::read_hf_token() {
                 command = command.env("HF_TOKEN", token);

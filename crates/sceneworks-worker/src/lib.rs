@@ -53,7 +53,14 @@ mod downloads;
 // raster), but its items are otherwise unused — so allow dead_code off macOS.
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 mod openpose_skeleton;
+// DWPose pose detection via onnxruntime/CoreML (epic 3482, sc-3487). macOS-only:
+// the `ort` engine + CoreML EP only mean anything on Apple Silicon, and the Python
+// rtmlib path stays the Windows/Linux backend.
+#[cfg(target_os = "macos")]
+mod pose_jobs;
 use downloads::*;
+#[cfg(target_os = "macos")]
+use pose_jobs::*;
 
 const INSTALL_MARKER: &str = ".sceneworks-download-complete.json";
 const DEFAULT_API_URL: &str = "http://localhost:8000";
@@ -568,6 +575,14 @@ async fn run_utility_job(
         JobType::PersonDetect => run_person_detect_job(api, settings, &job)
             .await
             .map_err(|error| ("Person detection failed.", error)),
+        // DWPose whole-body pose detection (epic 3482, sc-3487): RTMW via
+        // onnxruntime/CoreML, replacing the Python rtmlib path on the macOS MLX
+        // worker. macOS-only; off macOS `PoseDetect` is never advertised by the Rust
+        // worker (the Python worker handles it), so this falls to the `_` arm there.
+        #[cfg(target_os = "macos")]
+        JobType::PoseDetect => run_pose_detect_job(api, settings, http_client, &job)
+            .await
+            .map_err(|error| ("Pose detection failed.", error)),
         JobType::PersonTrack => run_person_track_job(api, settings, &job)
             .await
             .map_err(|error| ("Person tracking failed.", error)),
