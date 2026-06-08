@@ -19,9 +19,10 @@ run it yet. When the list is empty, the Mac build can stop shipping a Python ven
 **Status legend**
 
 - ✅ **Done** — runs in the Rust/MLX flow on Mac (here for context; not a gap).
-- 🔵 **Port-pending (epic NNNN)** — Michael's decision is *port*; tracked by the linked story/epic.
-- 🟠 **Drop-candidate** — leaning *drop* (UI-gate/hide on Mac); needs Michael's confirm.
-- ❓ **Triage** — surfaced by the code, no port-or-drop decision yet.
+- 🔵 **Port-pending (epic/story NNNN)** — has a tracked porting epic or story; ported, dropped on Mac until then.
+- 🔵 **Viability / port-or-drop spike (sc-NNNN)** — a spike decides port-vs-drop (the outcome is Michael's call); the model/feature is gated on Mac until it resolves.
+
+**No row is a bare "drop".** Per policy (Michael, 2026-06-07): every model gets a porting epic; every feature gap gets at least a viability spike. A *drop* is only ever the **outcome of a spike**, never a default — so there is no "drop-candidate" or untriaged state here. A code-surfaced gap with no tracked work is a bug in this table.
 
 Rollout reminder: the cutover is staged (epic 3482). The `mlx_unsupported` oracle ships
 **warn-only** by default, so flipping `SCENEWORKS_MLX_REQUIRED=1` on a Mac logs every row below
@@ -56,16 +57,18 @@ Windows/Linux keep the torch path.** Nothing here is a permanent drop. `mac_rust
 ## 2. Image feature gaps on MLX-routed families
 
 Models that ARE MLX-routed but fall back to torch for a specific feature (the `*_mlx_eligible`
-exclusions). `mac_rust_supported` names each precisely.
+exclusions). `mac_rust_supported` names each precisely. **Policy: a feature gap on an
+already-ported model gets at least a viability spike (or an epic if large) before it's ported or
+dropped — no silent drops.**
 
 | Feature | Affected models | Status | Closing work |
 |---|---|---|---|
 | Strict-pose ControlNet | `qwen_image` (+ `advanced.poses`) | 🔵 Port-pending | epic 3401 (Qwen ControlNet port) |
 | Reference / edit conditioning | base `qwen_image` (reference/`edit_image`) | 🔵 Port-pending | epic 3401 |
-| Reference / IP-Adapter / edit | `flux_schnell`, `flux_dev` | ❓ Triage | no epic — FLUX.1 reference/edit stays torch |
+| Reference / IP-Adapter / edit | `flux_schnell`, `flux_dev` | 🔵 Viability spike | sc-3535 |
 | `edit_image` (img2img-edit) | `z_image_turbo` | 🔵 Port-pending | epic 3529 (folds into Z-Image-Edit port) |
-| reference-without-pose | `z_image_turbo` | ❓ Triage | no epic — reference-identity-only stays torch |
-| Third-party LyCORIS (LoHa / non-peft LoKr) | all families (`networkType=lycoris`) | 🟠 Drop-candidate | drop (engine applies LoRA + peft LoKr, not arbitrary LyCORIS) |
+| reference-without-pose | `z_image_turbo` | 🔵 Viability spike | sc-3536 |
+| Third-party LyCORIS (LoHa / non-peft LoKr) | all families (`networkType=lycoris`) | 🔵 Port-or-drop spike | sc-3537 |
 
 ## 3. Video
 
@@ -79,7 +82,7 @@ exclusions). `mac_rust_supported` names each precisely.
 | Advanced job types `video_extend`, `video_bridge` | 🔵 Port-pending | epic 3040 |
 | `person_replace` job type (replace_person) | 🔵 Port-pending | epic 3040 (+ sc-3488 person track) |
 | LoKr-on-Wan (Kronecker adapter on Wan) | 🔵 Port-pending | epic 3040 (LoKr-on-LTX already MLX) |
-| Third-party LyCORIS on video | 🟠 Drop-candidate | drop |
+| Third-party LyCORIS on video | 🔵 Port-or-drop spike | sc-3537 (shared image+video spike) |
 
 ## 4. Training (`lora_train`)
 
@@ -89,7 +92,7 @@ exclusions). `mac_rust_supported` names each precisely.
 | Kernel | Status | Closing work |
 |---|---|---|
 | `kolors_lora` (SDXL + ChatGLM3, no mlx-gen trainer) | 🔵 Port-pending | epic 3039 |
-| `lens_lora` (Python sidecar trainer) | 🟠 Drop-candidate | epic 3039 (follows Lens model disposition) |
+| `lens_lora` (Python sidecar trainer) | 🔵 Port-pending | epic 3039 (follows Lens model port, epic 3164) |
 | LoKr-on-Wan (`wan_lora` / `wan_moe_lora` + `networkType=lokr`) | 🔵 Port-pending | epic 3039 |
 
 ## 5. Non-model Python infrastructure
@@ -104,7 +107,7 @@ in-process Rust path. Per Michael's 2026-06-07 decision, all four spikes are **p
 | Image upscaler (standalone) | `image_upscale` | Real-ESRGAN / AuraSR (torch) | 🔵 Port-pending | sc-3489 |
 | Dataset captioning | `training_caption` | torch captioner | 🔵 Port-pending | sc-3490 |
 | Wan/LTX model conversion | `model_convert` (non-`flux2_klein_diffusers` converter) | `mlx_video.convert_*` (Python) | 🔵 Port-pending | sc-3491 (= sc-3224) |
-| Image understanding / interleave | `image_vqa`, `image_interleave` | torch | ❓ Triage | no epic — verify Mac reachability |
+| Image understanding / interleave | `image_vqa`, `image_interleave` | torch (SenseNova-U1) | 🔵 Port-pending | epic 3180 (SenseNova port — its understanding surface) |
 
 ## 6. Already ported — NOT gaps (context)
 

@@ -1795,8 +1795,8 @@ pub fn mac_rust_supported(job: &JobSnapshot) -> Result<(), UnsupportedReason> {
         JobType::ImageVqa | JobType::ImageInterleave => Err(UnsupportedReason::new(
             model,
             "image understanding / interleave",
-            "image VQA / interleaved generation has no Rust/MLX engine path.",
-            None,
+            "image VQA / interleaved generation is the SenseNova-U1 understanding surface; it lands with the SenseNova port.",
+            Some("epic 3180"),
         )),
 
         JobType::VideoGenerate => Err(classify_video_gap(job)),
@@ -1886,8 +1886,8 @@ fn classify_image_gap(job: &JobSnapshot) -> UnsupportedReason {
         return UnsupportedReason::new(
             Some(model),
             "third-party LyCORIS LoRA",
-            "the Rust engine/worker apply LoRA + peft LoKr, but not arbitrary third-party LyCORIS (LoHa / non-peft LoKr).",
-            Some("drop-candidate"),
+            "the Rust engine/worker apply LoRA + peft LoKr, but not arbitrary third-party LyCORIS (LoHa / non-peft LoKr) — port-or-drop spike.",
+            Some("sc-3537"),
         );
     }
     let has_poses = job
@@ -1914,8 +1914,8 @@ fn classify_image_gap(job: &JobSnapshot) -> UnsupportedReason {
         "flux_schnell" | "flux_dev" => UnsupportedReason::new(
             Some(model),
             "reference / IP-Adapter / edit",
-            "FLUX.1 reference / IP-Adapter / edit_image conditioning stays on the Python torch path.",
-            None,
+            "FLUX.1 reference / IP-Adapter / edit_image conditioning stays on the Python torch path — viability spike.",
+            Some("sc-3535"),
         ),
         "z_image_turbo" if is_edit => UnsupportedReason::new(
             Some(model),
@@ -1926,8 +1926,8 @@ fn classify_image_gap(job: &JobSnapshot) -> UnsupportedReason {
         "z_image_turbo" => UnsupportedReason::new(
             Some(model),
             "reference without a pose set",
-            "a Z-Image reference is only MLX-eligible alongside a strict pose set; reference-only stays on torch.",
-            None,
+            "a Z-Image reference is only MLX-eligible alongside a strict pose set; reference-only stays on torch — viability spike.",
+            Some("sc-3536"),
         ),
         "qwen_image_edit"
         | "qwen_image_edit_2509"
@@ -1979,8 +1979,8 @@ fn classify_video_gap(job: &JobSnapshot) -> UnsupportedReason {
         return UnsupportedReason::new(
             Some(model),
             "third-party LyCORIS LoRA",
-            "the mlx-video path can't apply arbitrary third-party LyCORIS adapters.",
-            Some("drop-candidate"),
+            "the mlx-video path can't apply arbitrary third-party LyCORIS adapters — port-or-drop spike.",
+            Some("sc-3537"),
         );
     }
     if is_wan_video_model(model) && request_has_lokr_lora(&job.payload) {

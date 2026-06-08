@@ -1801,7 +1801,7 @@ fn mac_rust_supported_names_qwen_strict_pose_and_lycoris() {
     let pose_reason = mac_rust_supported(&pose).unwrap_err();
     assert!(pose_reason.feature.contains("strict-pose"));
     assert_eq!(pose_reason.suggested_epic.as_deref(), Some("epic 3401"));
-    // Third-party LyCORIS on an otherwise-MLX family → drop-candidate.
+    // Third-party LyCORIS on an otherwise-MLX family → port-or-drop viability spike.
     let lycoris = job_of(
         &store,
         JobType::ImageGenerate,
@@ -1809,10 +1809,7 @@ fn mac_rust_supported_names_qwen_strict_pose_and_lycoris() {
     );
     let lycoris_reason = mac_rust_supported(&lycoris).unwrap_err();
     assert!(lycoris_reason.feature.contains("LyCORIS"));
-    assert_eq!(
-        lycoris_reason.suggested_epic.as_deref(),
-        Some("drop-candidate")
-    );
+    assert_eq!(lycoris_reason.suggested_epic.as_deref(), Some("sc-3537"));
 }
 
 #[test]
@@ -1880,6 +1877,50 @@ fn mac_rust_supported_convert_flux2_ok_else_python_gap() {
             .suggested_epic
             .as_deref(),
         Some("sc-3491 / sc-3224")
+    );
+}
+
+#[test]
+fn mac_rust_supported_feature_gaps_point_at_their_spikes() {
+    let store = store("oracle-feature-spikes");
+    // FLUX.1 reference/IP-Adapter → viability spike sc-3535.
+    let flux_ref = job_of(
+        &store,
+        JobType::ImageGenerate,
+        json!({ "model": "flux_dev", "prompt": "p", "referenceAssetId": "asset_1" }),
+    );
+    assert_eq!(
+        mac_rust_supported(&flux_ref)
+            .unwrap_err()
+            .suggested_epic
+            .as_deref(),
+        Some("sc-3535")
+    );
+    // Z-Image reference without a pose set → viability spike sc-3536.
+    let z_ref = job_of(
+        &store,
+        JobType::ImageGenerate,
+        json!({ "model": "z_image_turbo", "prompt": "p", "referenceAssetId": "asset_1" }),
+    );
+    assert_eq!(
+        mac_rust_supported(&z_ref)
+            .unwrap_err()
+            .suggested_epic
+            .as_deref(),
+        Some("sc-3536")
+    );
+    // Image understanding folds into the SenseNova port (epic 3180).
+    let vqa = job_of(
+        &store,
+        JobType::ImageVqa,
+        json!({ "model": "sensenova_u1_8b" }),
+    );
+    assert_eq!(
+        mac_rust_supported(&vqa)
+            .unwrap_err()
+            .suggested_epic
+            .as_deref(),
+        Some("epic 3180")
     );
 }
 
