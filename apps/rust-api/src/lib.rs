@@ -26,8 +26,8 @@ use sceneworks_core::contracts::{
     WorkerSnapshot, WorkerStatus,
 };
 use sceneworks_core::jobs_store::{
-    CreateJob, DuplicateJob, JobsStore, JobsStoreError, ProgressUpdate, RegisterWorker, RetryJob,
-    RouteDecision, WorkerHeartbeat, JOB_STATUSES,
+    mac_rust_supported, CreateJob, DuplicateJob, JobsStore, JobsStoreError, ProgressUpdate,
+    RegisterWorker, RetryJob, RouteDecision, UnsupportedReason, WorkerHeartbeat, JOB_STATUSES,
 };
 use sceneworks_core::lora_family::{
     apply_model_manifest_defaults, detect_lora_family, detect_model_family, first_safetensors_path,
@@ -156,6 +156,14 @@ pub struct Settings {
     /// (no `mlx` worker) → today's behaviour unchanged. Ships default OFF (observe); the
     /// final cutover (sc-3492) flips it on for the packaged Mac build.
     pub mlx_required: bool,
+    /// Epic 3482 / sc-3484 — when MLX-required, what to do with a job the Rust/MLX flow can't
+    /// run (`mac_rust_supported` returns `Err`). **false = warn-only** (default): log a
+    /// structured `mlx_unsupported` gap event at claim time but still run the job on the
+    /// existing torch path, so flipping `mlx_required` on for observation materializes the gap
+    /// list without breaking anything. **true = enforce**: fail the job terminal with
+    /// `mlx_unsupported`. Read from `SCENEWORKS_MLX_UNSUPPORTED_MODE` (`enforce` vs anything
+    /// else). Irrelevant unless `mlx_required`.
+    pub mlx_enforce_unsupported: bool,
 }
 
 impl Settings {
@@ -196,6 +204,9 @@ impl Settings {
                 .unwrap_or(false),
             mlx_required: std::env::var("SCENEWORKS_MLX_REQUIRED")
                 .map(|value| matches!(value.trim(), "1" | "true" | "TRUE" | "True"))
+                .unwrap_or(false),
+            mlx_enforce_unsupported: std::env::var("SCENEWORKS_MLX_UNSUPPORTED_MODE")
+                .map(|value| value.trim().eq_ignore_ascii_case("enforce"))
                 .unwrap_or(false),
         }
     }

@@ -195,6 +195,7 @@ fn test_settings(temp_dir: &tempfile::TempDir) -> Settings {
         jobs_db_path: temp_dir.path().join("jobs.db"),
         run_utility_inprocess: false,
         mlx_required: false,
+        mlx_enforce_unsupported: false,
     }
 }
 

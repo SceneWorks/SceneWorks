@@ -3,11 +3,12 @@ use std::path::PathBuf;
 
 use rusqlite::{params, Connection};
 use sceneworks_core::contracts::{
-    JobStatus, JobType, ProgressStage, WorkerCapability, WorkerStatus, WorkerUtilizationSnapshot,
+    JobSnapshot, JobStatus, JobType, ProgressStage, WorkerCapability, WorkerStatus,
+    WorkerUtilizationSnapshot,
 };
 use sceneworks_core::jobs_store::{
-    CreateJob, DuplicateJob, JobsStore, JobsStoreError, ProgressUpdate, RegisterWorker, RetryJob,
-    WorkerHeartbeat, MAX_JOB_ATTEMPTS,
+    mac_rust_supported, CreateJob, DuplicateJob, JobsStore, JobsStoreError, ProgressUpdate,
+    RegisterWorker, RetryJob, WorkerHeartbeat, MAX_JOB_ATTEMPTS,
 };
 use serde_json::{json, Map, Value};
 
@@ -1721,6 +1722,206 @@ fn mlx_required_still_lets_mps_claim_a_non_eligible_model() {
         .expect("MPS claims the non-eligible job");
     assert_eq!(claimed.id, job.id);
     assert_eq!(claimed.assigned_gpu.as_deref(), Some("mps"));
+}
+
+// epic 3482 / sc-3484 — mac_rust_supported oracle (the inverse of the eligibility predicates)
+// + the enforce sweep that fails unsupported jobs terminal with `mlx_unsupported`.
+
+fn job_of(store: &JobsStore, job_type: JobType, payload: Value) -> JobSnapshot {
+    store
+        .create_job(CreateJob {
+            job_type,
+            project_id: Some("project-1".to_owned()),
+            project_name: Some("Project 1".to_owned()),
+            payload: object(payload),
+            requested_gpu: "auto".to_owned(),
+            source_job_id: None,
+            duplicate_of_job_id: None,
+            attempts: 1,
+        })
+        .expect("job creates")
+}
+
+#[test]
+fn mac_rust_supported_accepts_eligible_and_mlx_agnostic_jobs() {
+    let store = store("oracle-ok");
+    // MLX-eligible generation → supported (consistent with routing by construction).
+    let eligible = job_of(
+        &store,
+        JobType::ImageGenerate,
+        json!({ "model": "z_image_turbo", "prompt": "p" }),
+    );
+    assert!(mac_rust_supported(&eligible).is_ok());
+    // MLX-agnostic job types run in-process with no Python torch dependency.
+    let download = job_of(&store, JobType::ModelDownload, json!({ "repo": "x/y" }));
+    assert!(mac_rust_supported(&download).is_ok());
+    let refine = job_of(&store, JobType::PromptRefine, json!({ "prompt": "p" }));
+    assert!(mac_rust_supported(&refine).is_ok());
+}
+
+#[test]
+fn mac_rust_supported_names_torch_only_image_model() {
+    let store = store("oracle-torch-model");
+    let job = job_of(
+        &store,
+        JobType::ImageGenerate,
+        json!({ "model": "kolors", "prompt": "p" }),
+    );
+    let reason = mac_rust_supported(&job).unwrap_err();
+    assert_eq!(reason.model.as_deref(), Some("kolors"));
+    assert_eq!(reason.suggested_epic.as_deref(), Some("epic 3061"));
+    assert!(reason.error_message().starts_with("mlx_unsupported:"));
+}
+
+#[test]
+fn mac_rust_supported_names_qwen_strict_pose_and_lycoris() {
+    let store = store("oracle-features");
+    // Strict-pose ControlNet on Qwen → epic 3401.
+    let pose = job_of(
+        &store,
+        JobType::ImageGenerate,
+        json!({ "model": "qwen_image", "prompt": "p", "advanced": { "poses": [{ "x": 1 }] } }),
+    );
+    let pose_reason = mac_rust_supported(&pose).unwrap_err();
+    assert!(pose_reason.feature.contains("strict-pose"));
+    assert_eq!(pose_reason.suggested_epic.as_deref(), Some("epic 3401"));
+    // Third-party LyCORIS on an otherwise-MLX family → drop-candidate.
+    let lycoris = job_of(
+        &store,
+        JobType::ImageGenerate,
+        json!({ "model": "sdxl", "prompt": "p", "loras": [{ "networkType": "lycoris" }] }),
+    );
+    let lycoris_reason = mac_rust_supported(&lycoris).unwrap_err();
+    assert!(lycoris_reason.feature.contains("LyCORIS"));
+    assert_eq!(
+        lycoris_reason.suggested_epic.as_deref(),
+        Some("drop-candidate")
+    );
+}
+
+#[test]
+fn mac_rust_supported_names_infra_job_types() {
+    let store = store("oracle-infra");
+    let cases = [
+        (JobType::ImageUpscale, "sc-3489"),
+        (JobType::PoseDetect, "sc-3487"),
+        (JobType::PersonDetect, "sc-3488"),
+        (JobType::TrainingCaption, "sc-3490"),
+    ];
+    for (job_type, epic) in cases {
+        let job = job_of(&store, job_type, json!({}));
+        let reason = mac_rust_supported(&job).unwrap_err();
+        assert_eq!(
+            reason.suggested_epic.as_deref(),
+            Some(epic),
+            "job type maps to {epic}"
+        );
+    }
+}
+
+#[test]
+fn mac_rust_supported_names_advanced_video_and_svd() {
+    let store = store("oracle-video");
+    // Advanced video job type.
+    let extend = job_of(&store, JobType::VideoExtend, json!({ "model": "wan_2_2" }));
+    assert_eq!(
+        mac_rust_supported(&extend)
+            .unwrap_err()
+            .suggested_epic
+            .as_deref(),
+        Some("epic 3040")
+    );
+    // Torch-only video model (e.g. SVD) on the base video_generate type.
+    let svd = job_of(
+        &store,
+        JobType::VideoGenerate,
+        json!({ "model": "svd", "mode": "image_to_video" }),
+    );
+    assert_eq!(
+        mac_rust_supported(&svd)
+            .unwrap_err()
+            .suggested_epic
+            .as_deref(),
+        Some("epic 3040")
+    );
+}
+
+#[test]
+fn mac_rust_supported_convert_flux2_ok_else_python_gap() {
+    let store = store("oracle-convert");
+    // The in-process Rust FLUX.2 converter is supported.
+    let flux2 = job_of(
+        &store,
+        JobType::ModelConvert,
+        json!({ "model": "flux2_klein_9b_true_v2", "converter": "flux2_klein_diffusers" }),
+    );
+    assert!(mac_rust_supported(&flux2).is_ok());
+    // The default/absent converter is the Python mlx-video Wan/LTX path → gap.
+    let wan = job_of(&store, JobType::ModelConvert, json!({ "model": "wan_2_2" }));
+    assert_eq!(
+        mac_rust_supported(&wan)
+            .unwrap_err()
+            .suggested_epic
+            .as_deref(),
+        Some("sc-3491 / sc-3224")
+    );
+}
+
+#[test]
+fn fail_unsupported_mlx_jobs_enforce_fails_only_unsupported() {
+    let store = store("oracle-enforce");
+    let unsupported = job_of(
+        &store,
+        JobType::ImageGenerate,
+        json!({ "model": "kolors", "prompt": "p" }),
+    );
+    let eligible = job_of(
+        &store,
+        JobType::ImageGenerate,
+        json!({ "model": "z_image_turbo", "prompt": "p" }),
+    );
+
+    let failed = store
+        .fail_unsupported_mlx_jobs(true, true)
+        .expect("sweep ok");
+    assert_eq!(failed.len(), 1, "only the unsupported job is failed");
+    assert_eq!(failed[0].0.id, unsupported.id);
+    assert_eq!(failed[0].0.status, JobStatus::Failed);
+    assert!(failed[0]
+        .0
+        .error
+        .as_deref()
+        .unwrap_or_default()
+        .contains("mlx_unsupported"));
+    // The eligible job is untouched — it's routing/`fail_stranded`'s concern, not this sweep's.
+    assert_eq!(
+        store.get_job(&eligible.id).expect("loads").status,
+        JobStatus::Queued
+    );
+}
+
+#[test]
+fn fail_unsupported_mlx_jobs_noop_when_warn_or_off() {
+    let store = store("oracle-warn-off");
+    let job = job_of(
+        &store,
+        JobType::ImageGenerate,
+        json!({ "model": "kolors", "prompt": "p" }),
+    );
+    // Warn-only (enforce=false): logged at claim time, never failed by the sweep.
+    assert!(store
+        .fail_unsupported_mlx_jobs(true, false)
+        .expect("ok")
+        .is_empty());
+    // Flag off (not mlx-required): never touches anything (Windows/Linux/Docker).
+    assert!(store
+        .fail_unsupported_mlx_jobs(false, true)
+        .expect("ok")
+        .is_empty());
+    assert_eq!(
+        store.get_job(&job.id).expect("loads").status,
+        JobStatus::Queued
+    );
 }
 
 // sc-3449 — claim_next_job_routed reports *why* an MLX-eligible job landed where it did.

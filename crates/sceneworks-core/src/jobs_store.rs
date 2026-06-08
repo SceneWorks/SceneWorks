@@ -761,6 +761,63 @@ impl JobsStore {
         Ok(failed)
     }
 
+    /// macOS "MLX-unsupported" enforce sweep (epic 3482 / sc-3484). When `mlx_required` AND
+    /// `enforce`, fails every queued job the Rust/MLX flow can't run (`mac_rust_supported`
+    /// returns `Err`) terminal with a feature-precise `mlx_unsupported` error — the forcing
+    /// function that turns "still on torch" into a loud, named failure instead of a silent
+    /// fallback. Unlike the stranded sweep there is no grace window: an unsupported job is
+    /// permanently unsupported until its surface is ported or dropped, so it fails immediately.
+    ///
+    /// Default mode is **warn** (`enforce == false`) → this is a no-op and the gap is logged
+    /// at claim time instead (the job still runs on torch), so flipping `mlx_required` on for
+    /// observation surfaces the gap list without breaking anything. Off (`!mlx_required`) →
+    /// immediate no-op, so Windows/Linux/Docker are unaffected. MLX-*eligible* jobs are
+    /// `Ok` here and handled by `fail_stranded_mlx_jobs`/routing — the two sweeps partition
+    /// the queue and never touch the same job. Returns `(job, reason)` pairs so the caller can
+    /// emit the structured event.
+    pub fn fail_unsupported_mlx_jobs(
+        &self,
+        mlx_required: bool,
+        enforce: bool,
+    ) -> JobsStoreResult<Vec<(JobSnapshot, UnsupportedReason)>> {
+        if !mlx_required || !enforce {
+            return Ok(Vec::new());
+        }
+        let _guard = self.lock.lock();
+        let mut connection = self.connect()?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let mut statement = transaction
+            .prepare("select * from jobs where status = 'queued' order by created_at asc")?;
+        let candidates = collect_jobs(statement.query_map([], row_to_job)?)?;
+        drop(statement);
+
+        let now_text = format_unix_seconds(now_unix_seconds());
+        let mut failed = Vec::new();
+        for job in candidates {
+            let Err(reason) = mac_rust_supported(&job) else {
+                continue;
+            };
+            transaction.execute(
+                "
+                update jobs
+                   set status = 'failed',
+                       stage = 'failed',
+                       message = 'Not supported by the Rust/MLX flow on macOS.',
+                       error = ?2,
+                       completed_at = ?1,
+                       updated_at = ?1,
+                       worker_id = null
+                 where id = ?3 and status = 'queued'
+                ",
+                params![now_text, reason.error_message(), job.id],
+            )?;
+            let updated = self.get_job_on_connection(&transaction, &job.id)?;
+            failed.push((updated, reason));
+        }
+        transaction.commit()?;
+        Ok(failed)
+    }
+
     pub fn claim_next_job(&self, worker_id: &str) -> JobsStoreResult<Option<JobSnapshot>> {
         Ok(self.claim_next_job_routed(worker_id, false)?.0)
     }
@@ -1649,6 +1706,333 @@ fn mlx_unavailable_error(job: &JobSnapshot, grace_seconds: u64) -> String {
          worker is running.",
         job_type = job.job_type.as_str()
     )
+}
+
+/// Why the Rust/MLX flow can't run a job on macOS (epic 3482 / sc-3484) — the inverse of the
+/// `*_mlx_eligible` predicates, extended across every job type. Feature-precise so the
+/// `mlx_unsupported` Logs event + the gap inventory name the exact surface to port or drop.
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UnsupportedReason {
+    /// Model id involved, when the gap is model-specific (e.g. "kolors", "qwen_image").
+    pub model: Option<String>,
+    /// The specific capability that isn't in the Rust/MLX flow (e.g. "strict-pose ControlNet",
+    /// "third-party LyCORIS LoRA", "image_upscale (Real-ESRGAN)").
+    pub feature: String,
+    /// Actionable human-readable explanation.
+    pub detail: String,
+    /// Closing story/epic ("epic 3401", "sc-3489"), `"drop-candidate"`, or `None` when not yet
+    /// triaged — the roadmap pointer. "where known" per the story.
+    pub suggested_epic: Option<String>,
+}
+
+impl UnsupportedReason {
+    fn new(model: Option<&str>, feature: &str, detail: &str, suggested_epic: Option<&str>) -> Self {
+        Self {
+            model: model.map(str::to_owned),
+            feature: feature.to_owned(),
+            detail: detail.to_owned(),
+            suggested_epic: suggested_epic.map(str::to_owned),
+        }
+    }
+
+    /// Terminal job error for an enforced `mlx_unsupported` failure (sc-3484): greppable
+    /// prefix, names feature + model + roadmap pointer.
+    pub fn error_message(&self) -> String {
+        let model = self
+            .model
+            .as_deref()
+            .map(|m| format!(" ({m})"))
+            .unwrap_or_default();
+        let pointer = self
+            .suggested_epic
+            .as_deref()
+            .map(|epic| format!(" [{epic}]"))
+            .unwrap_or_default();
+        format!(
+            "mlx_unsupported: {feature}{model} is not in the Rust/MLX flow on macOS — {detail}{pointer}",
+            feature = self.feature,
+            detail = self.detail,
+        )
+    }
+}
+
+/// macOS "can the Rust/MLX flow run this?" oracle (sc-3484). `Ok(())` = the in-process mlx
+/// worker — or an MLX-agnostic in-process path (downloads, ffmpeg, prompt refine) — runs it
+/// with no Python torch dependency. `Err` names the exact Python-torch gap. This is the epic's
+/// *forcing function*: under mlx-required **enforce** mode an `Err` job fails terminal with
+/// `mlx_unsupported`, and the set of `Err`s IS the port-or-drop roadmap. Consistent with
+/// routing by construction — anything `job_is_any_mlx_eligible` accepts is `Ok`.
+pub fn mac_rust_supported(job: &JobSnapshot) -> Result<(), UnsupportedReason> {
+    if job_is_any_mlx_eligible(job) {
+        return Ok(());
+    }
+    let model = job.payload.get("model").and_then(Value::as_str);
+    match job.job_type {
+        // MLX-agnostic job types: metadata/utility work, ffmpeg, and prompt refine run
+        // in-process on macOS with no Python torch dependency.
+        JobType::Placeholder
+        | JobType::ModelDownload
+        | JobType::ModelImport
+        | JobType::LoraImport
+        | JobType::FrameExtract
+        | JobType::TimelineExport
+        | JobType::PromptRefine => Ok(()),
+
+        // Forward-compat: an unrecognized job type isn't a known Python-torch gap, so don't
+        // enforce-fail it (it would otherwise break a newer job type this build doesn't model).
+        JobType::Unknown(_) => Ok(()),
+
+        JobType::ImageGenerate | JobType::ImageEdit => Err(classify_image_gap(job)),
+
+        JobType::ImageDetail => Err(UnsupportedReason::new(
+            model,
+            "non-SDXL tile-detail refine",
+            "image_detail is ported to MLX only for the SDXL/RealVisXL backbones (sc-3060); other models / third-party LyCORIS stay on the Python torch path.",
+            Some("epic 3041"),
+        )),
+
+        JobType::ImageVqa | JobType::ImageInterleave => Err(UnsupportedReason::new(
+            model,
+            "image understanding / interleave",
+            "image VQA / interleaved generation has no Rust/MLX engine path.",
+            None,
+        )),
+
+        JobType::VideoGenerate => Err(classify_video_gap(job)),
+
+        JobType::VideoExtend | JobType::VideoBridge => Err(UnsupportedReason::new(
+            model,
+            "advanced video (extend / bridge)",
+            "video_extend / video_bridge are torch-only advanced video modes.",
+            Some("epic 3040"),
+        )),
+
+        JobType::PersonReplace => Err(UnsupportedReason::new(
+            model,
+            "replace_person",
+            "person replacement is a torch-only advanced video mode (also depends on person detect/track).",
+            Some("epic 3040 (+ sc-3488)"),
+        )),
+
+        JobType::PersonDetect | JobType::PersonTrack => Err(UnsupportedReason::new(
+            None,
+            "person detect / track (YOLO/SAM2)",
+            "person detection/tracking runs on the Python onnxruntime/torch path.",
+            Some("sc-3488"),
+        )),
+
+        JobType::PoseDetect => Err(UnsupportedReason::new(
+            None,
+            "DWPose pose detection",
+            "photo→skeleton pose detection runs on Python onnxruntime (DWPose).",
+            Some("sc-3487"),
+        )),
+
+        JobType::ImageUpscale => Err(UnsupportedReason::new(
+            model,
+            "image_upscale (Real-ESRGAN)",
+            "standalone image upscaling runs on the Python torch Real-ESRGAN / AuraSR path.",
+            Some("sc-3489"),
+        )),
+
+        JobType::ModelConvert => classify_convert_gap(job),
+
+        JobType::LoraTrain => Err(classify_training_gap(job)),
+
+        JobType::TrainingCaption => Err(UnsupportedReason::new(
+            None,
+            "dataset captioning",
+            "automatic dataset captioning runs on the Python torch captioner.",
+            Some("sc-3490"),
+        )),
+    }
+}
+
+/// Name the precise gap for an ineligible `image_generate` / `image_edit` job: a torch-only
+/// model, or a torch-only feature on an otherwise-MLX family. Mirrors the per-family
+/// `*_mlx_eligible` gates so the reason matches why routing refused it.
+fn classify_image_gap(job: &JobSnapshot) -> UnsupportedReason {
+    let Some(model) = job.payload.get("model").and_then(Value::as_str) else {
+        return UnsupportedReason::new(None, "image generation", "no model specified.", None);
+    };
+    if !MLX_ROUTED_MODELS.contains(&model) {
+        return UnsupportedReason::new(
+            Some(model),
+            "torch-only image model",
+            "this model has no Rust/MLX engine; it runs on the Python torch path (InstantID / Kolors / PuLID / SenseNova / Lens / FLUX.2-dev family).",
+            Some("epic 3061"),
+        );
+    }
+    if request_has_lycoris_lora(&job.payload) {
+        return UnsupportedReason::new(
+            Some(model),
+            "third-party LyCORIS LoRA",
+            "the Rust engine/worker apply LoRA + peft LoKr, but not arbitrary third-party LyCORIS (LoHa / non-peft LoKr).",
+            Some("drop-candidate"),
+        );
+    }
+    let has_poses = job
+        .payload
+        .get("advanced")
+        .and_then(Value::as_object)
+        .and_then(|advanced| advanced.get("poses"))
+        .and_then(Value::as_array)
+        .is_some_and(|poses| !poses.is_empty());
+    let is_edit = job.payload.get("mode").and_then(Value::as_str) == Some("edit_image");
+    match model {
+        "qwen_image" if has_poses => UnsupportedReason::new(
+            Some(model),
+            "strict-pose ControlNet",
+            "Qwen strict-pose ControlNet (InstantX QwenImageControlNet) has no MLX port; the MLX path would silently drop the poses.",
+            Some("epic 3401"),
+        ),
+        "qwen_image" => UnsupportedReason::new(
+            Some(model),
+            "reference / edit conditioning",
+            "base Qwen-Image reference / edit_image conditioning stays on the Python torch path.",
+            Some("epic 3401"),
+        ),
+        "flux_schnell" | "flux_dev" => UnsupportedReason::new(
+            Some(model),
+            "reference / IP-Adapter / edit",
+            "FLUX.1 reference / IP-Adapter / edit_image conditioning stays on the Python torch path.",
+            None,
+        ),
+        "z_image_turbo" if is_edit => UnsupportedReason::new(
+            Some(model),
+            "edit_image",
+            "Z-Image img2img edit stays on the Python torch path.",
+            None,
+        ),
+        "z_image_turbo" => UnsupportedReason::new(
+            Some(model),
+            "reference without a pose set",
+            "a Z-Image reference is only MLX-eligible alongside a strict pose set; reference-only stays on torch.",
+            None,
+        ),
+        "qwen_image_edit"
+        | "qwen_image_edit_2509"
+        | "qwen_image_edit_2511"
+        | "qwen_image_edit_2511_lightning" => UnsupportedReason::new(
+            Some(model),
+            "edit without a reference/source image",
+            "the Qwen-Image-Edit model needs edit_image+sourceAssetId or character_image+referenceAssetId to route to MLX.",
+            None,
+        ),
+        // flux2 / sdxl / realvisxl only fall out via LyCORIS (handled above) — defensive.
+        _ => UnsupportedReason::new(
+            Some(model),
+            "unsupported configuration",
+            "this model/feature combination is not in the Rust/MLX flow.",
+            None,
+        ),
+    }
+}
+
+/// Name the precise gap for an ineligible `video_generate` job: a torch-only model (incl. SVD),
+/// an advanced mode, a third-party LyCORIS, or LoKr-on-Wan. Mirrors `video_job_is_mlx_eligible`.
+fn classify_video_gap(job: &JobSnapshot) -> UnsupportedReason {
+    let Some(model) = job.payload.get("model").and_then(Value::as_str) else {
+        return UnsupportedReason::new(None, "video generation", "no model specified.", None);
+    };
+    if !VIDEO_MLX_ROUTED_MODELS.contains(&model) {
+        return UnsupportedReason::new(
+            Some(model),
+            "torch-only video model (incl. SVD)",
+            "this video model has no Rust/MLX engine (e.g. SVD); it runs on the Python torch path.",
+            Some("epic 3040"),
+        );
+    }
+    let mode = job
+        .payload
+        .get("mode")
+        .and_then(Value::as_str)
+        .unwrap_or("image_to_video");
+    if !matches!(mode, "text_to_video" | "image_to_video") {
+        return UnsupportedReason::new(
+            Some(model),
+            "advanced video mode",
+            "advanced video_generate modes (first_last_frame / replace_person) are torch-only.",
+            Some("epic 3040"),
+        );
+    }
+    if request_has_lycoris_lora(&job.payload) {
+        return UnsupportedReason::new(
+            Some(model),
+            "third-party LyCORIS LoRA",
+            "the mlx-video path can't apply arbitrary third-party LyCORIS adapters.",
+            Some("drop-candidate"),
+        );
+    }
+    if is_wan_video_model(model) && request_has_lokr_lora(&job.payload) {
+        return UnsupportedReason::new(
+            Some(model),
+            "LoKr-on-Wan",
+            "the mlx Wan path can't merge a Kronecker (LoKr) adapter; LoKr-on-Wan stays on torch.",
+            Some("epic 3040"),
+        );
+    }
+    UnsupportedReason::new(
+        Some(model),
+        "unsupported video configuration",
+        "this video configuration is not in the Rust/MLX flow.",
+        None,
+    )
+}
+
+/// Name the precise gap for an ineligible `lora_train` job. Mirrors `training_job_is_mlx_eligible`:
+/// a kernel with no native mlx-gen Rust trainer, or LoKr-on-Wan.
+fn classify_training_gap(job: &JobSnapshot) -> UnsupportedReason {
+    let kernel = job
+        .payload
+        .get("plan")
+        .and_then(Value::as_object)
+        .and_then(|plan| plan.get("target"))
+        .and_then(Value::as_object)
+        .and_then(|target| target.get("kernel"))
+        .and_then(Value::as_str);
+    match kernel {
+        Some("kolors_lora") => UnsupportedReason::new(
+            None,
+            "Kolors LoRA training",
+            "the Kolors trainer (SDXL + ChatGLM3) has no mlx-gen Rust trainer.",
+            Some("epic 3039"),
+        ),
+        Some("lens_lora") => UnsupportedReason::new(
+            None,
+            "Lens LoRA training",
+            "the Lens trainer runs in a Python sidecar with no mlx-gen Rust trainer.",
+            Some("epic 3039"),
+        ),
+        Some("wan_lora") | Some("wan_moe_lora") => UnsupportedReason::new(
+            None,
+            "LoKr-on-Wan training",
+            "Wan LoKr training stays on torch (no Kronecker merge in the mlx Wan path).",
+            Some("epic 3039"),
+        ),
+        _ => UnsupportedReason::new(
+            None,
+            "LoRA/LoKr training",
+            "this training kernel has no native mlx-gen Rust trainer.",
+            Some("epic 3039"),
+        ),
+    }
+}
+
+/// `model_convert` is supported only for the in-process Rust FLUX.2-klein converter
+/// (`flux2_klein_diffusers`, sc-3136). The default/absent converter is the Python mlx-video
+/// Wan/LTX path (sc-3491 / sc-3224).
+fn classify_convert_gap(job: &JobSnapshot) -> Result<(), UnsupportedReason> {
+    if job.payload.get("converter").and_then(Value::as_str) == Some("flux2_klein_diffusers") {
+        return Ok(());
+    }
+    Err(UnsupportedReason::new(
+        job.payload.get("model").and_then(Value::as_str),
+        "Wan/LTX model conversion (mlx_video)",
+        "installing a non-turnkey Wan/LTX checkpoint converts via the Python mlx_video path.",
+        Some("sc-3491 / sc-3224"),
+    ))
 }
 
 /// Classify a *successful* claim for routing observability. `None` means the claim was
