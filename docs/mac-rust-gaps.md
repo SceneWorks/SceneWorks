@@ -102,7 +102,7 @@ in-process Rust path. Per Michael's 2026-06-07 decision, all four spikes are **p
 
 | Surface | Job type(s) | Python backend | Status | Closing work |
 |---|---|---|---|---|
-| DWPose pose detection (photo→skeleton) | `pose_detect` | onnxruntime (RTMPose) | 🔵 Port-pending | sc-3487 |
+| DWPose pose detection (photo→skeleton) | `pose_detect` | onnxruntime (RTMPose) | ✅ Ported (Rust `ort`/CoreML, macOS MLX worker) | sc-3487 |
 | Person detect / track | `person_detect`, `person_track` | YOLO / SAM2 | 🔵 Port-pending | sc-3488 |
 | Image upscaler (standalone) | `image_upscale` | Real-ESRGAN / AuraSR (torch) | 🔵 Port-pending | sc-3489 |
 | Dataset captioning | `training_caption` | torch captioner | 🔵 Port-pending | sc-3490 |

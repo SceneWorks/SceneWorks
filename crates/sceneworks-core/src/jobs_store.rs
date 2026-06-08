@@ -1822,12 +1822,10 @@ pub fn mac_rust_supported(job: &JobSnapshot) -> Result<(), UnsupportedReason> {
             Some("sc-3488"),
         )),
 
-        JobType::PoseDetect => Err(UnsupportedReason::new(
-            None,
-            "DWPose pose detection",
-            "photo→skeleton pose detection runs on Python onnxruntime (DWPose).",
-            Some("sc-3487"),
-        )),
+        // DWPose pose detection is now ported to the Rust worker (sc-3487): RTMW
+        // whole-body via `ort`/CoreML on the macOS MLX worker, so the Pose Library
+        // "create from photo" flow + InstantID pose conditioning run Python-free.
+        JobType::PoseDetect => Ok(()),
 
         JobType::ImageUpscale => Err(UnsupportedReason::new(
             model,

@@ -1817,7 +1817,6 @@ fn mac_rust_supported_names_infra_job_types() {
     let store = store("oracle-infra");
     let cases = [
         (JobType::ImageUpscale, "sc-3489"),
-        (JobType::PoseDetect, "sc-3487"),
         (JobType::PersonDetect, "sc-3488"),
         (JobType::TrainingCaption, "sc-3490"),
     ];
@@ -1830,6 +1829,9 @@ fn mac_rust_supported_names_infra_job_types() {
             "job type maps to {epic}"
         );
     }
+    // DWPose pose detection is ported to the Rust worker (sc-3487) → supported.
+    let pose = job_of(&store, JobType::PoseDetect, json!({}));
+    assert!(mac_rust_supported(&pose).is_ok());
 }
 
 #[test]
