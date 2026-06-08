@@ -895,6 +895,7 @@ impl JobsStore {
         if should_defer_image_to_mlx_worker(&transaction, &queued, &worker, mlx_required)?
             || should_defer_video_to_mlx_worker(&transaction, &queued, &worker, mlx_required)?
             || should_defer_training_to_mlx_worker(&transaction, &queued, &worker, mlx_required)?
+            || should_defer_caption_to_mlx_worker(&transaction, &queued, &worker, mlx_required)?
         {
             // A non-mlx worker is yielding this MLX-eligible job to an idle mlx worker.
             let decision = RouteDecision::new(
@@ -1687,7 +1688,10 @@ impl RouteDecision {
 /// observability (sc-3449) and to identify the jobs the macOS grace sweep must fail when
 /// no `mlx` worker is alive (sc-3483).
 fn job_is_any_mlx_eligible(job: &JobSnapshot) -> bool {
-    job_is_mlx_eligible(job) || video_job_is_mlx_eligible(job) || training_job_is_mlx_eligible(job)
+    job_is_mlx_eligible(job)
+        || video_job_is_mlx_eligible(job)
+        || training_job_is_mlx_eligible(job)
+        || caption_job_is_mlx_eligible(job)
 }
 
 /// Actionable terminal error for an MLX-eligible job stranded on macOS with no live `mlx`
@@ -1842,8 +1846,8 @@ pub fn mac_rust_supported(job: &JobSnapshot) -> Result<(), UnsupportedReason> {
         JobType::TrainingCaption => Err(UnsupportedReason::new(
             None,
             "dataset captioning",
-            "automatic dataset captioning runs on the Python torch captioner.",
-            Some("sc-3490"),
+            "this dataset captioning job is not in the Rust/MLX JoyCaption flow.",
+            Some("sc-3556"),
         )),
     }
 }
@@ -2108,11 +2112,10 @@ pub fn mac_capabilities(platform: &str, mac_gating_active: bool) -> MacCapabilit
     );
     features.insert(
         "datasetCaptioning".to_owned(),
-        MacFeatureSupport::unsupported(
-            "dataset captioning",
-            "automatic dataset captioning runs on the Python torch captioner.",
-            "sc-3490",
-        ),
+        MacFeatureSupport {
+            supported: true,
+            reason: None,
+        },
     );
     features.insert(
         "advancedVideoModes".to_owned(),
@@ -2493,6 +2496,28 @@ fn should_defer_training_to_mlx_worker(
         return Ok(false);
     }
     // macOS MLX-required (sc-3483): yield unconditionally, same as the image sibling.
+    if mlx_required {
+        return Ok(true);
+    }
+    if job.requested_gpu != "auto" {
+        return Ok(false);
+    }
+    idle_mlx_worker_can_claim(connection, job, worker)
+}
+
+/// Captioning sibling of [`should_defer_image_to_mlx_worker`] (sc-3556): a non-mlx
+/// GPU worker defers JoyCaption dataset-caption jobs to an idle mlx worker, so the
+/// native Rust captioner (`mlx_gen::load_captioner`) can run them. Windows/Linux and
+/// explicit non-auto GPU requests keep the existing Python torch captioner fallback.
+fn should_defer_caption_to_mlx_worker(
+    connection: &Connection,
+    job: &JobSnapshot,
+    worker: &WorkerSnapshot,
+    mlx_required: bool,
+) -> JobsStoreResult<bool> {
+    if worker.gpu_id.eq_ignore_ascii_case("mlx") || !caption_job_is_mlx_eligible(job) {
+        return Ok(false);
+    }
     if mlx_required {
         return Ok(true);
     }
@@ -2945,6 +2970,18 @@ fn training_job_is_mlx_eligible(job: &JobSnapshot) -> bool {
     true
 }
 
+/// sc-3556 routing: SceneWorks training caption jobs keep their public
+/// `captioner=joy_caption` contract while the macOS mlx worker serves them through
+/// mlx-gen's JoyCaption provider. Other/unknown captioners stay off the mlx worker.
+fn caption_job_is_mlx_eligible(job: &JobSnapshot) -> bool {
+    matches!(job.job_type, JobType::TrainingCaption)
+        && job
+            .payload
+            .get("captioner")
+            .and_then(Value::as_str)
+            .is_some_and(|value| value.trim() == "joy_caption")
+}
+
 /// Training kernels with NO non-Rust fallback — only the in-process Rust mlx worker
 /// can run them. `ltx_mlx_lora` was Apple-Silicon-only MLX-Python; epic 3039 (sc-3049)
 /// retired that Python trainer, leaving the native Rust LTX trainer as the sole path,
@@ -3029,6 +3066,12 @@ fn worker_supports_job(worker: &WorkerSnapshot, job: &JobSnapshot) -> bool {
         // `lens_lora` (no mlx-gen crate) and LoKr-on-Wan stay on the Python torch
         // worker. Applies to both dry-run and real runs.
         if matches!(job.job_type, JobType::LoraTrain) && !training_job_is_mlx_eligible(job) {
+            return false;
+        }
+        // Dataset captioning (sc-3556): the mlx worker claims only JoyCaption jobs
+        // backed by the mlx-gen provider. Any future non-JoyCaption captioner stays
+        // on the worker that advertises that capability.
+        if matches!(job.job_type, JobType::TrainingCaption) && !caption_job_is_mlx_eligible(job) {
             return false;
         }
     }

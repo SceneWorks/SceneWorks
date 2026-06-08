@@ -1817,7 +1817,6 @@ fn mac_rust_supported_names_infra_job_types() {
     let cases = [
         (JobType::ImageUpscale, "sc-3489"),
         (JobType::PersonDetect, "sc-3488"),
-        (JobType::TrainingCaption, "sc-3490"),
     ];
     for (job_type, epic) in cases {
         let job = job_of(&store, job_type, json!({}));
@@ -1831,6 +1830,16 @@ fn mac_rust_supported_names_infra_job_types() {
     // DWPose pose detection is ported to the Rust worker (sc-3487) → supported.
     let pose = job_of(&store, JobType::PoseDetect, json!({}));
     assert!(mac_rust_supported(&pose).is_ok());
+    // JoyCaption dataset captioning is ported to the Rust/MLX worker (sc-3556).
+    let caption = job_of(
+        &store,
+        JobType::TrainingCaption,
+        json!({ "captioner": "joy_caption" }),
+    );
+    assert!(mac_rust_supported(&caption).is_ok());
+    let unknown_caption = job_of(&store, JobType::TrainingCaption, json!({}));
+    let reason = mac_rust_supported(&unknown_caption).unwrap_err();
+    assert_eq!(reason.suggested_epic.as_deref(), Some("sc-3556"));
 }
 
 #[test]
@@ -1996,7 +2005,7 @@ fn mac_capabilities_master_switch_and_infra_features() {
     assert!(!inert.mac_gating_active);
     assert_eq!(inert.platform, "linux");
     assert_eq!(inert.not_available_label, MAC_NOT_AVAILABLE_LABEL);
-    // The infra surfaces all carry their port spike so the UI affordance can name it.
+    // Unsupported infra surfaces carry their port spike so the UI affordance can name it.
     let mac = mac_capabilities("macos", true);
     assert!(mac.mac_gating_active);
     let epic = |key: &str| {
@@ -2009,10 +2018,15 @@ fn mac_capabilities_master_switch_and_infra_features() {
     assert_eq!(epic("imageUpscale").as_deref(), Some("sc-3489"));
     assert_eq!(epic("poseFromPhoto").as_deref(), Some("sc-3487"));
     assert_eq!(epic("personDetect").as_deref(), Some("sc-3488"));
-    assert_eq!(epic("datasetCaptioning").as_deref(), Some("sc-3490"));
+    assert_eq!(epic("datasetCaptioning"), None);
     assert_eq!(epic("lycoris").as_deref(), Some("sc-3537"));
     assert_eq!(epic("advancedVideoModes").as_deref(), Some("epic 3040"));
-    assert!(mac.features.values().all(|f| !f.supported));
+    assert!(mac.features["datasetCaptioning"].supported);
+    assert!(mac
+        .features
+        .iter()
+        .filter(|(key, _)| key.as_str() != "datasetCaptioning")
+        .all(|(_, f)| !f.supported));
     // Training kernels with a native Rust trainer stay enabled; LoKr-on-Wan does not.
     assert!(mac
         .training
@@ -2375,6 +2389,92 @@ fn mlx_training_job(
         duplicate_of_job_id: None,
         attempts: 1,
     }
+}
+
+fn caption_caps() -> Vec<WorkerCapability> {
+    vec![WorkerCapability::Gpu, WorkerCapability::TrainingCaption]
+}
+
+fn joy_caption_job(requested_gpu: &str) -> CreateJob {
+    CreateJob {
+        job_type: JobType::TrainingCaption,
+        project_id: Some("project-1".to_owned()),
+        project_name: Some("Project 1".to_owned()),
+        payload: object(json!({
+            "provider": "training",
+            "kind": "training_caption",
+            "captioner": "joy_caption",
+            "modelNameOrPath": "fancyfeast/llama-joycaption-beta-one-hf-llava",
+            "projectId": "project-1",
+            "datasetId": "dataset-1",
+            "items": [{
+                "itemId": "item_0001",
+                "imagePath": "/tmp/item_0001.png",
+                "triggerWords": ["miraStyle"]
+            }]
+        })),
+        requested_gpu: requested_gpu.to_owned(),
+        source_job_id: None,
+        duplicate_of_job_id: None,
+        attempts: 1,
+    }
+}
+
+#[test]
+fn joy_caption_routes_to_idle_mlx_worker() {
+    let store = store("mlx-caption-routing");
+    register_gpu_worker(&store, "worker-torch", "mps", caption_caps());
+    register_gpu_worker(&store, "worker-mlx", "mlx", caption_caps());
+
+    let job = store
+        .create_job(joy_caption_job("auto"))
+        .expect("caption job creates");
+
+    assert!(store
+        .claim_next_job("worker-torch")
+        .expect("torch claim ok")
+        .is_none());
+    let claimed = store
+        .claim_next_job("worker-mlx")
+        .expect("mlx claim ok")
+        .expect("mlx claims joy caption");
+    assert_eq!(claimed.id, job.id);
+    assert_eq!(claimed.assigned_gpu.as_deref(), Some("mlx"));
+}
+
+#[test]
+fn joy_caption_falls_back_to_torch_when_no_mlx_worker() {
+    let store = store("mlx-caption-fallback");
+    register_gpu_worker(&store, "worker-torch", "cuda:0", caption_caps());
+
+    let job = store
+        .create_job(joy_caption_job("auto"))
+        .expect("caption job creates");
+
+    let claimed = store
+        .claim_next_job("worker-torch")
+        .expect("torch claim ok")
+        .expect("torch claims caption job");
+    assert_eq!(claimed.id, job.id);
+    assert_eq!(claimed.assigned_gpu.as_deref(), Some("cuda:0"));
+}
+
+#[test]
+fn explicit_gpu_joy_caption_is_not_deferred_to_mlx_worker() {
+    let store = store("mlx-caption-explicit-gpu");
+    register_gpu_worker(&store, "worker-torch", "mps", caption_caps());
+    register_gpu_worker(&store, "worker-mlx", "mlx", caption_caps());
+
+    let job = store
+        .create_job(joy_caption_job("mps"))
+        .expect("caption job creates");
+
+    let claimed = store
+        .claim_next_job("worker-torch")
+        .expect("torch claim ok")
+        .expect("torch claims explicit caption job");
+    assert_eq!(claimed.id, job.id);
+    assert_eq!(claimed.assigned_gpu.as_deref(), Some("mps"));
 }
 
 #[test]

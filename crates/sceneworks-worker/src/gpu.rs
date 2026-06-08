@@ -376,6 +376,10 @@ pub(crate) fn cpu_gpu() -> DiscoveredGpu {
 /// when its torch backend is present. The API gates which `lora_train` jobs reach
 /// here to the MLX-native families (`jobs_store::training_job_is_mlx_eligible`);
 /// `kolors`/`lens` and LoKr-on-Wan stay on the Python torch worker.
+///
+/// Dataset captioning (sc-3556): JoyCaption is linked through mlx-gen's captioner
+/// registry and runs in-process on this worker; the Python captioner remains the
+/// Windows/Linux and explicit non-MLX fallback.
 #[cfg(target_os = "macos")]
 pub(crate) fn mlx_gpu() -> DiscoveredGpu {
     DiscoveredGpu {
@@ -399,6 +403,7 @@ pub(crate) fn mlx_gpu() -> DiscoveredGpu {
             // real execution, both served in-process by `mlx_gen::load_trainer`.
             WorkerCapability::LoraTrain,
             WorkerCapability::LoraTrainExecute,
+            WorkerCapability::TrainingCaption,
             // DWPose whole-body pose detection (epic 3482, sc-3487): RTMW via
             // onnxruntime/CoreML, served in-process by `pose_jobs::run_pose_detect_job`.
             // Replaces the Python rtmlib `pose_detect` path so the Pose Library

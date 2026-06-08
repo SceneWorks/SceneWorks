@@ -77,11 +77,11 @@ mlx-rs = { package = "pmetal-mlx-rs", git = "https://github.com/michaeltrefry/ml
 ort = { version = "=2.0.0-rc.12", features = ["coreml", "load-dynamic", "download-binaries"] }
 zip = { version = "2", default-features = false, features = ["deflate"] }
 # Rev 0806c88e (mlx-gen main): carries Qwen-Image ControlNet strict pose (epic 3401),
-# the LoRA/LoKr trainer surface (epic 3039),
-# Wan/LTX converter stack, the Qwen modulation-LoRA routing fix (PR #160), and the
-# Wan-VACE provider (`wan_vace`) + per-request `control_scale` (epic 3040 sc-3388/3441/
-# 3467, the replace_person → VACE path) in one shared rev so MLX builds once with the
-# unchanged mlx-rs pin (e59ffd88, identical across the bump → no MLX rebuild).
+# the LoRA/LoKr trainer surface (epic 3039), Wan/LTX converter stack, the Qwen
+# modulation-LoRA routing fix (PR #160), the Wan-VACE provider (`wan_vace`) +
+# per-request `control_scale` (epic 3040 sc-3388/3441/3467), and the JoyCaption
+# captioner registry/provider (epic 3550) in one shared rev so MLX builds once with
+# the unchanged mlx-rs pin (e59ffd88, identical across the bump → no MLX rebuild).
 mlx-gen = { git = "https://github.com/michaeltrefry/mlx-gen", rev = "0806c88e618d5b84d474cd2ec5df5a06db1bca54" }
 mlx-gen-z-image = { git = "https://github.com/michaeltrefry/mlx-gen", rev = "0806c88e618d5b84d474cd2ec5df5a06db1bca54" }
 # FLUX.1 schnell/dev provider (epic 3018, sc-3023). Same git rev as mlx-gen so MLX
@@ -105,6 +105,10 @@ mlx-gen-wan = { git = "https://github.com/michaeltrefry/mlx-gen", rev = "0806c88
 # in video_jobs.rs); the Gemma-3 text encoder is resolved by the engine (HF cache / env).
 # Same rev as the other mlx-gen crates (sc-3060 bump) so MLX + the shared core build once.
 mlx-gen-ltx = { git = "https://github.com/michaeltrefry/mlx-gen", rev = "0806c88e618d5b84d474cd2ec5df5a06db1bca54" }
+# JoyCaption image-to-text provider (epic 3550, sc-3556). Self-registers
+# `fancyfeast/llama-joycaption-beta-one-hf-llava` into mlx-gen's captioner
+# registry for native dataset captioning on the macOS MLX worker.
+mlx-gen-joycaption = { git = "https://github.com/michaeltrefry/mlx-gen", rev = "0806c88e618d5b84d474cd2ec5df5a06db1bca54" }
 
 [lints]
 workspace = true

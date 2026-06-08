@@ -447,6 +447,9 @@ fn mlx_gpu_advertises_generation_capabilities_only() {
         .any(|capability| capability.as_str() == "video_generate"));
     assert!(capabilities
         .iter()
+        .any(|capability| capability.as_str() == "training_caption"));
+    assert!(capabilities
+        .iter()
         .any(|capability| capability.as_str() == "gpu"));
     // No CPU utility capabilities, even with utility jobs enabled — only the CPU
     // worker (which carries `Cpu`) gets those extended onto it.
