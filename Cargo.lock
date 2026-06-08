@@ -2510,7 +2510,7 @@ dependencies = [
 [[package]]
 name = "mlx-gen"
 version = "0.0.0"
-source = "git+https://github.com/michaeltrefry/mlx-gen?rev=0806c88e618d5b84d474cd2ec5df5a06db1bca54#0806c88e618d5b84d474cd2ec5df5a06db1bca54"
+source = "git+https://github.com/michaeltrefry/mlx-gen?rev=b85b07b5e62ddab38828e03e207b448a3fee9d4b#b85b07b5e62ddab38828e03e207b448a3fee9d4b"
 dependencies = [
  "inventory",
  "pmetal-mlx-rs",
@@ -2521,7 +2521,7 @@ dependencies = [
 [[package]]
 name = "mlx-gen-flux"
 version = "0.0.0"
-source = "git+https://github.com/michaeltrefry/mlx-gen?rev=0806c88e618d5b84d474cd2ec5df5a06db1bca54#0806c88e618d5b84d474cd2ec5df5a06db1bca54"
+source = "git+https://github.com/michaeltrefry/mlx-gen?rev=b85b07b5e62ddab38828e03e207b448a3fee9d4b#b85b07b5e62ddab38828e03e207b448a3fee9d4b"
 dependencies = [
  "inventory",
  "mlx-gen",
@@ -2532,7 +2532,7 @@ dependencies = [
 [[package]]
 name = "mlx-gen-flux2"
 version = "0.0.0"
-source = "git+https://github.com/michaeltrefry/mlx-gen?rev=0806c88e618d5b84d474cd2ec5df5a06db1bca54#0806c88e618d5b84d474cd2ec5df5a06db1bca54"
+source = "git+https://github.com/michaeltrefry/mlx-gen?rev=b85b07b5e62ddab38828e03e207b448a3fee9d4b#b85b07b5e62ddab38828e03e207b448a3fee9d4b"
 dependencies = [
  "inventory",
  "mlx-gen",
@@ -2543,7 +2543,7 @@ dependencies = [
 [[package]]
 name = "mlx-gen-joycaption"
 version = "0.0.0"
-source = "git+https://github.com/michaeltrefry/mlx-gen?rev=0806c88e618d5b84d474cd2ec5df5a06db1bca54#0806c88e618d5b84d474cd2ec5df5a06db1bca54"
+source = "git+https://github.com/michaeltrefry/mlx-gen?rev=b85b07b5e62ddab38828e03e207b448a3fee9d4b#b85b07b5e62ddab38828e03e207b448a3fee9d4b"
 dependencies = [
  "inventory",
  "mlx-gen",
@@ -2553,7 +2553,7 @@ dependencies = [
 [[package]]
 name = "mlx-gen-ltx"
 version = "0.0.0"
-source = "git+https://github.com/michaeltrefry/mlx-gen?rev=0806c88e618d5b84d474cd2ec5df5a06db1bca54#0806c88e618d5b84d474cd2ec5df5a06db1bca54"
+source = "git+https://github.com/michaeltrefry/mlx-gen?rev=b85b07b5e62ddab38828e03e207b448a3fee9d4b#b85b07b5e62ddab38828e03e207b448a3fee9d4b"
 dependencies = [
  "image",
  "inventory",
@@ -2565,7 +2565,7 @@ dependencies = [
 [[package]]
 name = "mlx-gen-qwen-image"
 version = "0.0.0"
-source = "git+https://github.com/michaeltrefry/mlx-gen?rev=0806c88e618d5b84d474cd2ec5df5a06db1bca54#0806c88e618d5b84d474cd2ec5df5a06db1bca54"
+source = "git+https://github.com/michaeltrefry/mlx-gen?rev=b85b07b5e62ddab38828e03e207b448a3fee9d4b#b85b07b5e62ddab38828e03e207b448a3fee9d4b"
 dependencies = [
  "inventory",
  "mlx-gen",
@@ -2575,7 +2575,7 @@ dependencies = [
 [[package]]
 name = "mlx-gen-sdxl"
 version = "0.0.0"
-source = "git+https://github.com/michaeltrefry/mlx-gen?rev=0806c88e618d5b84d474cd2ec5df5a06db1bca54#0806c88e618d5b84d474cd2ec5df5a06db1bca54"
+source = "git+https://github.com/michaeltrefry/mlx-gen?rev=b85b07b5e62ddab38828e03e207b448a3fee9d4b#b85b07b5e62ddab38828e03e207b448a3fee9d4b"
 dependencies = [
  "image",
  "inventory",
@@ -2588,7 +2588,7 @@ dependencies = [
 [[package]]
 name = "mlx-gen-wan"
 version = "0.0.0"
-source = "git+https://github.com/michaeltrefry/mlx-gen?rev=0806c88e618d5b84d474cd2ec5df5a06db1bca54#0806c88e618d5b84d474cd2ec5df5a06db1bca54"
+source = "git+https://github.com/michaeltrefry/mlx-gen?rev=b85b07b5e62ddab38828e03e207b448a3fee9d4b#b85b07b5e62ddab38828e03e207b448a3fee9d4b"
 dependencies = [
  "image",
  "inventory",
@@ -2602,7 +2602,7 @@ dependencies = [
 [[package]]
 name = "mlx-gen-z-image"
 version = "0.0.0"
-source = "git+https://github.com/michaeltrefry/mlx-gen?rev=0806c88e618d5b84d474cd2ec5df5a06db1bca54#0806c88e618d5b84d474cd2ec5df5a06db1bca54"
+source = "git+https://github.com/michaeltrefry/mlx-gen?rev=b85b07b5e62ddab38828e03e207b448a3fee9d4b#b85b07b5e62ddab38828e03e207b448a3fee9d4b"
 dependencies = [
  "image",
  "inventory",
@@ -2898,7 +2898,7 @@ version = "0.7.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "680998035259dcfcafe653688bf2aa6d3e2dc05e98be6ab46afb089dc84f1df8"
 dependencies = [
- "proc-macro-crate 1.3.1",
+ "proc-macro-crate 2.0.2",
  "proc-macro2",
  "quote",
  "syn 2.0.117",
