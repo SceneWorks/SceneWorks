@@ -84,6 +84,12 @@ import {
   useGenerationStudio,
 } from "./generationStudio.jsx";
 import { useAppContext } from "../context/AppContext.js";
+import {
+  DEFAULT_MAC_CAPABILITIES,
+  macAvailableModels,
+  macBlockedModels,
+  macModelFeatureBlock,
+} from "../macGating.js";
 import { loadStudioSettings, useStudioSettingsWriter } from "../hooks/useStudioSettings.js";
 import { FitModeControl, effectiveFitMode } from "../components/FitModeControl.jsx";
 import {
@@ -221,6 +227,7 @@ export function ImageStudio() {
     selectedAsset,
     setRequestedGpu,
     updateAssetStatus,
+    macCapabilities = DEFAULT_MAC_CAPABILITIES,
   } = useAppContext();
   // Recent Assets list (sc-2088). When the new context value is available, use
   // the bounded 20-most-recent list; fall back to the legacy single-generation
@@ -386,9 +393,19 @@ export function ImageStudio() {
     }
   }, [launchRequest?.id, selectedAsset?.id, selectedAssetEditableSourceId]);
 
+  // Mac UI gating (sc-3486): on a Mac in MLX-required mode, hide torch-only models from the
+  // picker so the user can't select something that would only error. Inert elsewhere.
+  const macImageModels = useMemo(
+    () => macAvailableModels(imageModels, macCapabilities),
+    [imageModels, macCapabilities],
+  );
+  const macHiddenImageModels = useMemo(
+    () => macBlockedModels(imageModels, macCapabilities),
+    [imageModels, macCapabilities],
+  );
   const availableModels = useMemo(
     () =>
-      imageModels.filter((item) => {
+      macImageModels.filter((item) => {
         const caps = item.capabilities ?? [];
         if (mode === "edit_image") {
           return caps.includes("edit_image") || caps.includes("image_edit");
@@ -400,7 +417,7 @@ export function ImageStudio() {
         }
         return item.type === "image";
       }),
-    [imageModels, mode],
+    [macImageModels, mode],
   );
   // When the mode change filters out the current model (e.g. Lens-Turbo is the
   // text default but isn't edit-capable), snap to the first available model so
@@ -429,6 +446,16 @@ export function ImageStudio() {
   const viewAngles = Array.isArray(selectedModel?.ui?.viewAngles) ? selectedModel.ui.viewAngles : null;
   // Whether the model supports the OpenPose pose library (InstantID).
   const poseLibrary = Boolean(selectedModel?.ui?.poseLibrary);
+  // Mac UI gating (sc-3486): disable the per-model feature controls the selected model can't run
+  // in the Rust/MLX flow on Mac, so the user never reaches a `mlx_unsupported` error after submit.
+  const macEditBlock = macModelFeatureBlock(selectedModel, macCapabilities, "edit");
+  const macReferenceBlock = macModelFeatureBlock(selectedModel, macCapabilities, "reference");
+  const macPoseBlock = macModelFeatureBlock(selectedModel, macCapabilities, "pose");
+  const macModeBlock = (value) => {
+    if (value === "edit_image") return macEditBlock;
+    if (value === "character_image" || value === "style_variations") return macReferenceBlock;
+    return null;
+  };
   // Variation slider spec (FLUX / Qwen). When declared, the model exposes a
   // trueCfgScale knob alongside (FLUX) or instead of (Qwen, via hideReferenceStrength)
   // the IP-Adapter reference-strength slider (sc-2017).
@@ -973,17 +1000,22 @@ export function ImageStudio() {
                 ["edit_image", "Edit"],
                 ["character_image", "With character"],
                 ["style_variations", "Variations"],
-              ].map(([value, label]) => (
-                <button
-                  className={mode === value ? "active" : ""}
-                  key={value}
-                  onClick={() => handleModeChange(value)}
-                  type="button"
-                >
-                  {value === "text_to_image" ? <Icon.Sparkle size={13} /> : null}
-                  {label}
-                </button>
-              ))}
+              ].map(([value, label]) => {
+                const macBlock = macModeBlock(value);
+                return (
+                  <button
+                    className={mode === value ? "active" : ""}
+                    key={value}
+                    onClick={() => handleModeChange(value)}
+                    type="button"
+                    disabled={Boolean(macBlock)}
+                    title={macBlock ? macBlock.text : undefined}
+                  >
+                    {value === "text_to_image" ? <Icon.Sparkle size={13} /> : null}
+                    {label}
+                  </button>
+                );
+              })}
             </div>
             <div className="prompt-hero-links">
               <button className="hero-link" onClick={() => setGuideOpen(true)} type="button">
@@ -1160,7 +1192,9 @@ export function ImageStudio() {
                           </select>
                         </label>
                       ) : null}
-                      {poseLibrary ? (
+                      {poseLibrary && macPoseBlock ? (
+                        <p className="mac-gating-note">{macPoseBlock.text}</p>
+                      ) : poseLibrary ? (
                         <details className="pose-library-details">
                           <summary>
                             Pose library{selectedPoseIds.length ? ` · ${selectedPoseIds.length} selected` : ""}
@@ -1268,13 +1302,20 @@ export function ImageStudio() {
             <label>
               Model
               <select onChange={(event) => setModel(event.target.value)} value={model}>
-                {(availableModels.length ? availableModels : imageModels).map((item) => (
+                {(availableModels.length ? availableModels : macImageModels).map((item) => (
                   <option key={item.id} value={item.id}>
                     {item.name}
                   </option>
                 ))}
               </select>
             </label>
+            {macHiddenImageModels.length ? (
+              <p className="mac-gating-note">
+                {macHiddenImageModels.length} model
+                {macHiddenImageModels.length === 1 ? "" : "s"} unavailable on Mac (Rust/MLX only) —
+                see Models for details.
+              </p>
+            ) : null}
 
             <div className="style-preset-strip">
               <span className="style-preset-label">Style preset</span>

@@ -4,6 +4,7 @@ import { AssetDetail, AssetGrid, FullscreenPreview, emptyTrash } from "../compon
 import { AssetThumbnail } from "../components/assetMedia.jsx";
 import { DatasetAddDialog } from "../components/DatasetAddDialog.jsx";
 import { useAppContext } from "../context/AppContext.js";
+import { DEFAULT_MAC_CAPABILITIES, macFeatureBlock } from "../macGating.js";
 import { terminalStatuses } from "../jobTypes.js";
 import { GLOBAL_POSES_PROJECT_ID } from "../poseLibrary.js";
 
@@ -414,7 +415,10 @@ function PoseCreatePanel({ hidden, categories, onSaved, existingPoses }) {
 }
 
 export function PoseLibraryScreen() {
-  const { token } = useAppContext();
+  const { token, macCapabilities = DEFAULT_MAC_CAPABILITIES } = useAppContext();
+  // Mac UI gating (sc-3486): photo→skeleton pose detection runs on Python onnxruntime (DWPose),
+  // with no in-process Rust path yet (sc-3487), so the Create tab is disabled on a gated Mac.
+  const macPoseDetectBlock = macFeatureBlock(macCapabilities, "poseFromPhoto");
   const [activeTab, setActiveTab] = useState("poses");
   const [poses, setPoses] = useState([]);
   const [loading, setLoading] = useState(true);
@@ -531,20 +535,25 @@ export function PoseLibraryScreen() {
           </p>
         </div>
         <div className="segmented-control" role="tablist" aria-label="Pose Library sections">
-          {TABS.map(([id, label]) => (
-            <button
-              aria-controls={`pose-library-panel-${id}`}
-              aria-selected={activeTab === id}
-              className={activeTab === id ? "active" : ""}
-              id={`pose-library-tab-${id}`}
-              key={id}
-              onClick={() => setActiveTab(id)}
-              role="tab"
-              type="button"
-            >
-              {label}
-            </button>
-          ))}
+          {TABS.map(([id, label]) => {
+            const macBlock = id === "create" ? macPoseDetectBlock : null;
+            return (
+              <button
+                aria-controls={`pose-library-panel-${id}`}
+                aria-selected={activeTab === id}
+                className={activeTab === id ? "active" : ""}
+                disabled={Boolean(macBlock)}
+                id={`pose-library-tab-${id}`}
+                key={id}
+                onClick={() => setActiveTab(id)}
+                role="tab"
+                title={macBlock ? macBlock.text : undefined}
+                type="button"
+              >
+                {label}
+              </button>
+            );
+          })}
         </div>
       </div>
 

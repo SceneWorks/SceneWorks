@@ -3,6 +3,7 @@ import { Stage, Layer, Image as KonvaImage, Line, Rect, Transformer } from "reac
 import { apiFetch } from "../api.js";
 import { terminalStatuses } from "../jobTypes.js";
 import { useAppContext } from "../context/AppContext.js";
+import { DEFAULT_MAC_CAPABILITIES, macFeatureBlock } from "../macGating.js";
 import { assetUrl, assetCanRenderAsImage } from "../components/assetMedia.jsx";
 import { DatasetAddDialog } from "../components/DatasetAddDialog.jsx";
 import { FitModeControl, effectiveFitMode } from "../components/FitModeControl.jsx";
@@ -342,7 +343,11 @@ export function ImageEditor() {
     purgeAsset,
     registerLeaveGuard,
     imageModels,
+    macCapabilities = DEFAULT_MAC_CAPABILITIES,
   } = useAppContext();
+  // Mac UI gating (sc-3486): the standalone upscaler runs on the Python torch Real-ESRGAN /
+  // AuraSR path (no in-process Rust path yet, sc-3489), so disable the tool on a gated Mac.
+  const macUpscaleBlock = macFeatureBlock(macCapabilities, "imageUpscale");
 
   // The working-image session: the single bitmap every tool operates on, plus its
   // provenance. This state is the contract consumed by crop/upscale/save and the
@@ -1250,9 +1255,9 @@ export function ImageEditor() {
             </button>
             <button
               className={tool === "upscale" ? "image-editor-tool active" : "image-editor-tool"}
-              disabled={!!aiOp}
+              disabled={!!aiOp || Boolean(macUpscaleBlock)}
               onClick={() => setTool("upscale")}
-              title="Upscale"
+              title={macUpscaleBlock ? macUpscaleBlock.text : "Upscale"}
               type="button"
             >
               Upscale

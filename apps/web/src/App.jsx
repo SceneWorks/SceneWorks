@@ -27,6 +27,7 @@ import { useModelsAndLoras } from "./hooks/useModelsAndLoras.js";
 import { usePersonTracks } from "./hooks/usePersonTracks.js";
 import { useTimelines } from "./hooks/useTimelines.js";
 import { AppContext } from "./context/AppContext.js";
+import { DEFAULT_MAC_CAPABILITIES } from "./macGating.js";
 import {
   dropUpscaledVariants,
   findFoldedAssetById,
@@ -420,6 +421,8 @@ export function App() {
   const [localGenerationJobIds, setLocalGenerationJobIds] = useState({ image: [], video: [], document: [] });
   const [workers, setWorkers] = useState([]);
   const [queueSummary, setQueueSummary] = useState(null);
+  // Mac UI gating (sc-3486): inert until the capabilities endpoint reports macGatingActive.
+  const [macCapabilities, setMacCapabilities] = useState(DEFAULT_MAC_CAPABILITIES);
   const [trainingTargets, setTrainingTargets] = useState({ schemaVersion: 1, targets: [] });
   const [trainingPresets, setTrainingPresets] = useState({ schemaVersion: 1, presets: [] });
   const [trainingTargetsError, setTrainingTargetsError] = useState("");
@@ -994,6 +997,10 @@ export function App() {
         fetchInitial("Training targets", "/api/v1/training/targets", { schemaVersion: 1, targets: [] }),
         fetchInitial("Training presets", "/api/v1/training/presets", { schemaVersion: 1, presets: [] }),
       ]);
+    // Mac UI gating (sc-3486): optional + non-fatal — a fetch failure leaves gating inert.
+    fetchInitial("Mac capabilities", "/api/v1/capabilities/mac", DEFAULT_MAC_CAPABILITIES, true)
+      .then((result) => setMacCapabilities(result.value ?? DEFAULT_MAC_CAPABILITIES))
+      .catch(() => {});
     const projectItems = projectsResult.value;
     setProjects(projectItems);
     setProjectsLoaded(true);
@@ -1575,6 +1582,8 @@ export function App() {
     imageModels,
     videoModels,
     models,
+    // Mac UI gating (sc-3486)
+    macCapabilities,
     loras,
     deleteLora,
     deleteModel,

@@ -26,8 +26,9 @@ use sceneworks_core::contracts::{
     WorkerSnapshot, WorkerStatus,
 };
 use sceneworks_core::jobs_store::{
-    mac_rust_supported, CreateJob, DuplicateJob, JobsStore, JobsStoreError, ProgressUpdate,
-    RegisterWorker, RetryJob, RouteDecision, UnsupportedReason, WorkerHeartbeat, JOB_STATUSES,
+    mac_capabilities, mac_rust_supported, model_mac_support, CreateJob, DuplicateJob, JobsStore,
+    JobsStoreError, MacCapabilities, ProgressUpdate, RegisterWorker, RetryJob, RouteDecision,
+    UnsupportedReason, WorkerHeartbeat, JOB_STATUSES,
 };
 use sceneworks_core::lora_family::{
     apply_model_manifest_defaults, detect_lora_family, detect_model_family, first_safetensors_path,
@@ -727,6 +728,7 @@ pub fn create_app(settings: Settings) -> Result<Router, JobsStoreError> {
             "/api/v1/capabilities/person",
             get(person_capability_readiness),
         )
+        .route("/api/v1/capabilities/mac", get(mac_capability_support))
         .route("/api/v1/workers/register", post(register_worker))
         .route(
             "/api/v1/workers/:worker_id/heartbeat",

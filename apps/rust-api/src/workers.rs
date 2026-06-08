@@ -61,6 +61,19 @@ pub(crate) async fn person_capability_readiness(
     ))
 }
 
+/// Mac UI gating capabilities (sc-3486): the master switch (`macGatingActive`, the
+/// `SCENEWORKS_MLX_REQUIRED` rollout flag) plus every non-model Python surface the web client
+/// disables on Mac (LyCORIS, upscale, pose-from-photo, person detect/track, captioning, advanced
+/// video, training kernels). Platform is the API host's OS, so a Docker/Windows/Linux client reads
+/// `macGatingActive=false` and applies no gating at all. Per-model support rides on
+/// `GET /api/v1/models` (`macSupport`); this endpoint carries the global/feature half.
+pub(crate) async fn mac_capability_support(State(state): State<AppState>) -> Json<MacCapabilities> {
+    Json(mac_capabilities(
+        std::env::consts::OS,
+        state.settings.mlx_required,
+    ))
+}
+
 pub(crate) async fn register_worker(
     State(state): State<AppState>,
     ApiJson(payload): ApiJson<WorkerRegisterRequest>,
