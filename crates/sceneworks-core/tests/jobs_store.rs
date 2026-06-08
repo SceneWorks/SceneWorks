@@ -1800,7 +1800,7 @@ fn mac_rust_supported_names_qwen_strict_pose_and_lycoris() {
         json!({ "model": "qwen_image", "prompt": "p", "advanced": { "poses": [{ "x": 1 }] } }),
     );
     assert!(mac_rust_supported(&pose).is_ok());
-    // Third-party LyCORIS on an otherwise-MLX family → port-or-drop viability spike.
+    // Third-party LyCORIS on an otherwise-MLX family → port pending (sc-3537 spike GO → epic 3641).
     let lycoris = job_of(
         &store,
         JobType::ImageGenerate,
@@ -1808,7 +1808,7 @@ fn mac_rust_supported_names_qwen_strict_pose_and_lycoris() {
     );
     let lycoris_reason = mac_rust_supported(&lycoris).unwrap_err();
     assert!(lycoris_reason.feature.contains("LyCORIS"));
-    assert_eq!(lycoris_reason.suggested_epic.as_deref(), Some("sc-3537"));
+    assert_eq!(lycoris_reason.suggested_epic.as_deref(), Some("epic 3641"));
 }
 
 #[test]
@@ -2026,7 +2026,7 @@ fn mac_capabilities_master_switch_and_infra_features() {
     assert_eq!(epic("poseFromPhoto").as_deref(), Some("sc-3487"));
     assert_eq!(epic("personDetect").as_deref(), Some("sc-3488"));
     assert_eq!(epic("datasetCaptioning"), None);
-    assert_eq!(epic("lycoris").as_deref(), Some("sc-3537"));
+    assert_eq!(epic("lycoris").as_deref(), Some("epic 3641"));
     assert_eq!(epic("advancedVideoModes").as_deref(), Some("epic 3040"));
     assert!(mac.features["datasetCaptioning"].supported);
     assert!(mac
