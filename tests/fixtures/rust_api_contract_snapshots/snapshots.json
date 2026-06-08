@@ -2159,6 +2159,21 @@
           "z-image"
         ]
       },
+      "macSupport": {
+        "features": {
+          "edit": false,
+          "lycoris": false,
+          "pose": false,
+          "reference": false
+        },
+        "reason": {
+          "detail": "this model has no Rust/MLX engine and no port epic yet \u2014 file a porting epic and drop it on Mac (epic 3482 policy).",
+          "feature": "torch-only image model",
+          "model": "base-model",
+          "suggestedEpic": null
+        },
+        "supported": false
+      },
       "missingRequiredFiles": [],
       "name": "User Model",
       "paths": {},
@@ -2197,6 +2212,15 @@
         "families": [
           "z-image"
         ]
+      },
+      "macSupport": {
+        "features": {
+          "edit": false,
+          "lycoris": false,
+          "pose": true,
+          "reference": true
+        },
+        "supported": true
       },
       "missingRequiredFiles": [],
       "name": "Z-Image Turbo",
