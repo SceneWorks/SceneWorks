@@ -2444,12 +2444,6 @@ def test_flux2_true_v2_manifest_install_time_conversion():
     assert "Flux2-Klein-9B-True-v2-bf16.safetensors" in block
     # Undistilled defaults differ from the 4-step distill.
     assert re.search(r'"steps"\s*:\s*24', block)
-    assert '"text_to_image"' in block
-    assert '"style_variations"' in block
-    assert '"character_image"' not in block
-    assert '"edit_image"' not in block
-    assert '"viewAngles"' not in block
-    assert '"poseLibrary"' not in block
 
     mlx_block = find_mlx_block(block)
     assert '"requiresConversion": true' in mlx_block
@@ -10008,9 +10002,10 @@ def test_best_effort_backbones_declare_pose_library_capability():
     for model_id, story in (
         ("qwen_image_edit_2511_lightning", "sc-2256"),
         ("flux2_klein_9b", "sc-2262"),
-        # The KV distill shares the same mlx_flux2 best-effort pose path, so it
-        # is offered in the picker for output comparison too.
+        # The other two klein variants share the same mlx_flux2 best-effort pose
+        # path, so they're offered in the picker for output comparison too.
         ("flux2_klein_9b_kv", "sc-2262"),
+        ("flux2_klein_9b_true_v2", "sc-2262"),
     ):
         entry = manifest_by_id.get(model_id, {})
         assert entry.get("ui", {}).get("poseLibrary") is True, (

@@ -335,10 +335,6 @@ pub(crate) async fn run_image_generate_job(
         )
         .await?;
         true
-    } else if flux2_true_v2_unsupported_reference_request(&request) {
-        return Err(WorkerError::InvalidPayload(
-            "FLUX.2 [klein] 9B True V2 currently supports text-to-image/style variations only. Reference editing, Character Studio angle sets, and pose-library generation require FLUX.2 [klein] 9B or 9B-KV until the True V2 edit loader is supported.".to_owned(),
-        ));
     } else if flux2_edit_available(&request, settings) {
         // FLUX.2-klein edit/reference (mode edit_image or a reference) → edit variant.
         generate_flux2_edit_stream(
@@ -2185,13 +2181,12 @@ fn fit_engine_image(source: Image, width: u32, height: u32, mode: &str) -> Worke
 // ---------------------------------------------------------------------------
 
 /// The engine edit-variant id for a FLUX.2 SceneWorks model, or `None` if the model
-/// has no edit variant. The base 9b uses `flux2_klein_9b_edit`; the -kv distill
-/// uses `flux2_klein_9b_kv_edit` (reference-K/V cache). True-V2 currently has
-/// only the txt2img converted-dir path wired.
+/// has no edit variant. The base 9b + true_v2 share `flux2_klein_9b_edit`; the -kv
+/// distill uses `flux2_klein_9b_kv_edit` (reference-K/V cache).
 #[cfg(target_os = "macos")]
 fn flux2_edit_engine_id(model: &str) -> Option<&'static str> {
     match model {
-        "flux2_klein_9b" => Some("flux2_klein_9b_edit"),
+        "flux2_klein_9b" | "flux2_klein_9b_true_v2" => Some("flux2_klein_9b_edit"),
         "flux2_klein_9b_kv" => Some("flux2_klein_9b_kv_edit"),
         _ => None,
     }
@@ -2230,22 +2225,6 @@ fn flux2_edit_available(request: &ImageRequest, settings: &Settings) -> bool {
     flux2_edit_engine_id(&request.model).is_some()
         && !flux2_edit_reference_ids(request).is_empty()
         && resolve_weights_dir(request, settings).is_some()
-}
-
-/// True-V2 currently has only the txt2img converted-dir path wired. Its converted
-/// directory can load through `flux2_klein_9b`, but not the edit/reference engine.
-#[cfg(target_os = "macos")]
-fn flux2_true_v2_unsupported_reference_request(request: &ImageRequest) -> bool {
-    if request.model != "flux2_klein_9b_true_v2" {
-        return false;
-    }
-    if matches!(request.mode.as_str(), "edit_image" | "character_image") {
-        return true;
-    }
-    if !flux2_edit_reference_ids(request).is_empty() {
-        return true;
-    }
-    advanced_flag(request, "angleSet") || !pose_entries(request).is_empty()
 }
 
 /// Resolve a reference/source asset id to an in-memory RGB8 image (the engine VAE-
@@ -5470,47 +5449,16 @@ mod tests {
             flux2_edit_engine_id("flux2_klein_9b"),
             Some("flux2_klein_9b_edit")
         );
-        assert_eq!(flux2_edit_engine_id("flux2_klein_9b_true_v2"), None);
+        assert_eq!(
+            flux2_edit_engine_id("flux2_klein_9b_true_v2"),
+            Some("flux2_klein_9b_edit")
+        );
         assert_eq!(
             flux2_edit_engine_id("flux2_klein_9b_kv"),
             Some("flux2_klein_9b_kv_edit")
         );
         assert_eq!(flux2_edit_engine_id("z_image_turbo"), None);
         assert_eq!(flux2_edit_engine_id("sdxl"), None);
-    }
-
-    #[cfg(target_os = "macos")]
-    #[test]
-    fn flux2_true_v2_rejects_reference_angle_and_pose_requests() {
-        let base = |payload: Value| {
-            let mut value = json!({
-                "projectId": "p",
-                "model": "flux2_klein_9b_true_v2",
-                "prompt": "a red fox"
-            });
-            value
-                .as_object_mut()
-                .unwrap()
-                .extend(payload.as_object().unwrap().clone());
-            request(value)
-        };
-        assert!(!flux2_true_v2_unsupported_reference_request(&base(json!(
-            {}
-        ))));
-        assert!(flux2_true_v2_unsupported_reference_request(&base(json!({
-            "mode": "character_image",
-            "referenceAssetId": "ref_1"
-        }))));
-        assert!(flux2_true_v2_unsupported_reference_request(&base(json!({
-            "mode": "edit_image",
-            "sourceAssetId": "src_1"
-        }))));
-        assert!(flux2_true_v2_unsupported_reference_request(&base(json!({
-            "advanced": { "angleSet": true }
-        }))));
-        assert!(flux2_true_v2_unsupported_reference_request(&base(json!({
-            "advanced": { "poses": [{ "id": "p1" }] }
-        }))));
     }
 
     #[cfg(target_os = "macos")]
