@@ -775,11 +775,27 @@ async fn provision_lens_venv(app: &AppHandle) -> Result<(), String> {
     Ok(())
 }
 
-/// Resolve the ffmpeg binary bundled with the venv's imageio-ffmpeg, used by the
-/// API's in-process utility worker for timeline export / frame extraction. The
-/// desktop ships no system ffmpeg, so without this those jobs fail. Returns None
-/// if the venv or imageio-ffmpeg isn't available yet.
-fn resolve_bundled_ffmpeg() -> Option<String> {
+/// Resolve the ffmpeg binary the Rust worker shells out to (frame sampling,
+/// frame extract, timeline export, video-gen audio mux — all via
+/// `media_jobs::run_ffmpeg`, which honors `SCENEWORKS_FFMPEG`). The desktop ships
+/// no system ffmpeg, so without this those jobs fail. Prefers the static ffmpeg
+/// bundled next to the app (staged by build-sidecar.mjs into the `ffmpeg` resource
+/// dir, so a packaged Python-free Mac still works — epic 3482, sc-3767); falls
+/// back to the venv's imageio-ffmpeg only in dev / pre-bundle. Returns None when
+/// neither is available (Windows/Linux desktop pre-bundle, or after the venv strip
+/// with no resource — caller then leaves `SCENEWORKS_FFMPEG` unset → PATH ffmpeg).
+fn resolve_bundled_ffmpeg(app: &AppHandle) -> Option<String> {
+    if let Ok(resources) = app.path().resource_dir() {
+        let bundled = resources.join("ffmpeg").join(if cfg!(windows) {
+            "ffmpeg.exe"
+        } else {
+            "ffmpeg"
+        });
+        if bundled.exists() {
+            return Some(bundled.to_string_lossy().to_string());
+        }
+    }
+    // Dev / pre-bundle fallback: the venv's imageio-ffmpeg binary.
     let python = venv_python(&venv_dir());
     if !python.exists() {
         return None;
@@ -877,9 +893,9 @@ fn spawn_api(app: &AppHandle) -> Result<(), String> {
     // the final cutover (sc-3492) flips it on for macOS at exactly this point —
     //     #[cfg(target_os = "macos")] { command = command.env("SCENEWORKS_MLX_REQUIRED", "1"); }
     // — once every Mac Python surface is ported or UI-gated.
-    // The in-process utility worker shells out to ffmpeg; point it at the venv's
-    // bundled binary since the desktop has no system ffmpeg on PATH.
-    if let Some(ffmpeg) = resolve_bundled_ffmpeg() {
+    // The in-process utility worker shells out to ffmpeg; point it at the bundled
+    // static binary (sc-3767) since the desktop has no system ffmpeg on PATH.
+    if let Some(ffmpeg) = resolve_bundled_ffmpeg(app) {
         command = command.env("SCENEWORKS_FFMPEG", ffmpeg);
     }
     // DWPose pose detection (sc-3487) loads onnxruntime dynamically; point `ort` at
@@ -1206,7 +1222,7 @@ fn supervise_mlx_worker(app: AppHandle, api_port: u16) {
                 );
             // The worker muxes generated video with ffmpeg; the desktop ships no
             // system ffmpeg, so point it at the bundled binary (as spawn_api does).
-            if let Some(ffmpeg) = resolve_bundled_ffmpeg() {
+            if let Some(ffmpeg) = resolve_bundled_ffmpeg(&app) {
                 command = command.env("SCENEWORKS_FFMPEG", ffmpeg);
             }
             // This is the worker that advertises `pose_detect` (epic 3482, sc-3487);

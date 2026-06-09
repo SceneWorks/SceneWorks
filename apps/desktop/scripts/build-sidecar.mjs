@@ -70,3 +70,27 @@ if (triple.includes("apple-darwin")) {
   );
   console.log(`build-sidecar: ${ortDir} placeholder (non-macOS, no DWPose dylib)`);
 }
+
+// The Rust worker shells out to ffmpeg (frame sampling, frame extract, timeline
+// export, video-gen audio mux) via SCENEWORKS_FFMPEG (set in setup.rs). The
+// desktop ships no system ffmpeg, and epic 3482 strips the Python venv it used to
+// borrow imageio-ffmpeg from — so we bundle a static ffmpeg as a Tauri resource
+// (tauri.conf.json `resources` -> `ffmpeg/**/*`). Like the onnxruntime dir above,
+// the `ffmpeg` dir must exist on EVERY platform (Tauri errors on an empty glob);
+// only macOS stages the real binary (Windows/Linux desktop + server/Docker use
+// PATH ffmpeg), other platforms ship a placeholder. GPLv3 — see
+// docs/sc-3767/ffmpeg-bundling.md.
+const ffmpegDir = join(desktopDir, "ffmpeg");
+mkdirSync(ffmpegDir, { recursive: true });
+if (triple.includes("apple-darwin")) {
+  const ffmpegDest = join(ffmpegDir, "ffmpeg");
+  const py = process.env.PYTHON || "python3";
+  run(py, ["apps/desktop/scripts/stage-ffmpeg.py", ffmpegDest]);
+  console.log(`build-sidecar: staged ${ffmpegDest}`);
+} else {
+  writeFileSync(
+    join(ffmpegDir, "README.txt"),
+    "Static ffmpeg is bundled on macOS only (sc-3767); Windows/Linux use PATH ffmpeg.\n",
+  );
+  console.log(`build-sidecar: ${ffmpegDir} placeholder (non-macOS, PATH ffmpeg)`);
+}
