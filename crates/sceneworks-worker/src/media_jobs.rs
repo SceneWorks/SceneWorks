@@ -759,14 +759,21 @@ async fn assemble_real_person_track(
     })
 }
 
-/// Segment each detected target frame with the native-MLX SAM2 segmenter, write the
-/// masks under `person-tracks/{track_id}/masks/frame_{index:06}.png`, set each frame's
-/// `mask` path, and roll the outcome up into a `maskState` (Python `segment_track`):
-/// `missing` (segmentation disabled), `degraded` (segmenter/weights unavailable or every
-/// frame failed → box-mask fallback at replacement time), `generated` (some frames
-/// segmented), `active` (all detected frames segmented). Frame ordering matches the
-/// assembly: frame `i` reads `frame_paths[i]` and the mask filename is 1-based (`i + 1`),
-/// matching the Python sidecar.
+/// Render dimensions of the sampled track frames (`render_frame_png` above), and therefore the
+/// size of the masks the SAM2 video predictor emits.
+#[cfg(target_os = "macos")]
+const TRACK_FRAME_SIZE: (u32, u32) = (1280, 720);
+
+/// Generate the selected person's track masks with the native-MLX SAM2 **video predictor**
+/// (sc-3715): prompt once on the first detected frame and propagate temporally-consistent masks
+/// across the `first..=last` detected span via the memory bank, so non-detected gap frames inside
+/// the span still get a mask (the "survives weak-detection frames" win). Masks are written under
+/// `person-tracks/{track_id}/masks/frame_{index:06}.png`, the frame's `mask` is set, and the
+/// outcome rolls up into a `maskState` (Python `segment_track`): `missing` (disabled / no detected
+/// frame), `degraded` (weights unavailable / propagation failed → box-mask fallback at replacement
+/// time), `generated` (some detected frames masked), `active` (all detected frames masked). The
+/// `generated`/`detected_total` rollup counts only detected frames, keeping the contract identical
+/// to the per-frame path; gap-frame masks are additive coverage.
 #[cfg(target_os = "macos")]
 #[allow(clippy::too_many_arguments)]
 async fn segment_assembly_frames(
@@ -782,10 +789,7 @@ async fn segment_assembly_frames(
     segment_enabled: bool,
 ) -> &'static str {
     let detected_total = frames.iter().filter(|frame| frame.detected).count();
-    if detected_total == 0 {
-        return "missing";
-    }
-    if !segment_enabled {
+    if detected_total == 0 || !segment_enabled {
         return "missing";
     }
 
@@ -803,60 +807,115 @@ async fn segment_assembly_frames(
         return "degraded";
     }
 
-    let mut generated = 0usize;
-    for (index, frame) in frames.iter().enumerate() {
-        if !frame.detected {
-            continue;
-        }
-        let Some(frame_path) = frame_paths.get(index) else {
-            continue;
-        };
-        if check_cancel(
-            api,
-            &job.id,
-            "Person tracking canceled during segmentation.",
-        )
-        .await
-        .is_err()
-        {
-            // Cancellation surfaces through the outer job poll; stop segmenting and keep
-            // whatever masks were already written.
-            break;
-        }
-        let rel = format!("person-tracks/{track_id}/masks/frame_{:06}.png", index + 1);
-        let out_path = project_path.join(&rel);
-        let weights_for_task = weights.clone();
-        let frame_for_task = frame_path.clone();
-        let box_norm = (
+    // The track spans first..=last detected frame. Propagate across that contiguous clip; frames
+    // outside it (before the person appears / after they leave) are left mask-less as before.
+    let Some(first) = frames.iter().position(|f| f.detected) else {
+        return "missing";
+    };
+    let last = frames.iter().rposition(|f| f.detected).unwrap_or(first);
+
+    // Clip frame paths + per-frame ByteTrack box anchors (None on the gap frames the predictor
+    // fills from memory). The shared sample index ties frame `i` ↔ `frame_paths[i]` ↔ mask `i + 1`.
+    if frame_paths.len() <= last {
+        return "degraded";
+    }
+    let mut clip_paths = Vec::with_capacity(last - first + 1);
+    let mut anchors = Vec::with_capacity(last - first + 1);
+    for (frame, path) in frames[first..=last].iter().zip(&frame_paths[first..=last]) {
+        clip_paths.push(path.clone());
+        anchors.push(frame.detected.then_some((
             frame.box_.x,
             frame.box_.y,
             frame.box_.width,
             frame.box_.height,
-        );
-        let out_for_task = out_path.clone();
-        let segmented = tokio::task::spawn_blocking(move || {
-            crate::person_segment::segment_person_blocking(
-                weights_for_task,
-                frame_for_task,
-                box_norm,
-                out_for_task,
-            )
+        )));
+    }
+
+    if check_cancel(
+        api,
+        &job.id,
+        "Person tracking canceled during segmentation.",
+    )
+    .await
+    .is_err()
+    {
+        return "degraded";
+    }
+
+    let weights_for_task = weights.clone();
+    let masks = match tokio::task::spawn_blocking(move || {
+        crate::person_segment::propagate_track_blocking(weights_for_task, clip_paths, anchors)
+    })
+    .await
+    {
+        Ok(Ok(masks)) => masks,
+        // Propagation failure degrades to box masks (handled by the replacement loader); a track
+        // that already located the person is never failed by the mask pass.
+        _ => return "degraded",
+    };
+
+    // Write every clip frame's non-empty mask (detected + gap) and set its sidecar `mask`. All the
+    // PNG encoding is blocking, so it runs in one `spawn_blocking`.
+    let pending: Vec<(usize, String, PathBuf, Vec<u8>)> = masks
+        .into_iter()
+        .enumerate()
+        .filter(|(_, pixels)| pixels.iter().any(|&p| p > 127))
+        .map(|(clip_idx, pixels)| {
+            let assembly_idx = first + clip_idx;
+            let rel = format!(
+                "person-tracks/{track_id}/masks/frame_{:06}.png",
+                assembly_idx + 1
+            );
+            let out_path = project_path.join(&rel);
+            (assembly_idx, rel, out_path, pixels)
         })
-        .await;
-        match segmented {
-            Ok(Ok(())) => {
-                if let Some(entry) = frames_json.get_mut(index) {
-                    entry["mask"] = Value::String(rel);
-                }
-                generated += 1;
-            }
-            // A single frame's failure is non-fatal (matches Python's per-frame `except:
-            // continue`); the frame keeps `mask: null` and falls back to a box mask.
-            _ => continue,
+        .collect();
+    let (width, height) = TRACK_FRAME_SIZE;
+    let written =
+        match tokio::task::spawn_blocking(move || write_track_mask_pngs(width, height, pending))
+            .await
+        {
+            Ok(written) => written,
+            Err(_) => return "degraded",
+        };
+
+    let mut generated = 0usize;
+    for (assembly_idx, rel) in written {
+        if let Some(entry) = frames_json.get_mut(assembly_idx) {
+            entry["mask"] = Value::String(rel);
+        }
+        if frames
+            .get(assembly_idx)
+            .map(|f| f.detected)
+            .unwrap_or(false)
+        {
+            generated += 1;
         }
     }
 
     crate::person_segment::rollup_mask_state(generated, detected_total)
+}
+
+/// Encode each `(assembly_idx, rel, out_path, pixels)` mask as an `L` (8-bit grayscale) PNG,
+/// returning the `(assembly_idx, rel)` of the frames that were written. A single frame's failure is
+/// non-fatal (matches Python's per-frame `except: continue`); it keeps `mask: null` and falls back
+/// to a box mask at replacement time.
+#[cfg(target_os = "macos")]
+fn write_track_mask_pngs(
+    width: u32,
+    height: u32,
+    pending: Vec<(usize, String, PathBuf, Vec<u8>)>,
+) -> Vec<(usize, String)> {
+    let mut written = Vec::with_capacity(pending.len());
+    for (assembly_idx, rel, out_path, pixels) in pending {
+        let Some(gray) = image::GrayImage::from_raw(width, height, pixels) else {
+            continue;
+        };
+        if gray.save(&out_path).is_ok() {
+            written.push((assembly_idx, rel));
+        }
+    }
+    written
 }
 
 #[cfg(not(target_os = "macos"))]
@@ -2332,78 +2391,85 @@ mod person_track_e2e_tests {
                 .count();
             assert!(detected_total > 0, "no detected target frames to segment");
 
-            // 3. Provision the real SAM2 weights and segment every detected frame, writing
-            //    masks under `person-tracks/{track_id}/masks/` (the production layout).
+            // 3. Provision the real SAM2 weights and propagate the person's mask across the
+            //    detected span with the video predictor (sc-3715), writing masks under
+            //    `person-tracks/{track_id}/masks/` (the production layout).
             let seg_weights = crate::person_segment::ensure_segmenter_weights(&settings, &http)
                 .await
                 .expect("sam2 weights provisioned");
-            let track_id = "track_e2e";
-            let masks_dir = project_path
-                .join("person-tracks")
-                .join(track_id)
-                .join("masks");
-            std::fs::create_dir_all(&masks_dir).expect("masks dir");
 
+            let first = assembly
+                .frames
+                .iter()
+                .position(|f| f.detected)
+                .expect("a detected frame exists");
+            let last = assembly
+                .frames
+                .iter()
+                .rposition(|f| f.detected)
+                .unwrap_or(first);
+            let mut clip_paths = Vec::new();
+            let mut anchors = Vec::new();
+            for (frame, path) in assembly.frames[first..=last]
+                .iter()
+                .zip(&frame_paths[first..=last])
+            {
+                clip_paths.push(path.clone());
+                anchors.push(frame.detected.then(|| {
+                    let b = &frame.box_;
+                    (b.x, b.y, b.width, b.height)
+                }));
+            }
+            let gap_frames = anchors.iter().filter(|a| a.is_none()).count();
+
+            let masks = tokio::task::spawn_blocking(move || {
+                crate::person_segment::propagate_track_blocking(seg_weights, clip_paths, anchors)
+            })
+            .await
+            .expect("propagate task joins")
+            .expect("sam2 propagation runs");
+            assert_eq!(masks.len(), last - first + 1, "one mask per clip frame");
+
+            // Every detected frame's propagated mask is non-empty (SAM2 actually tracked the
+            // person, not a blank map); count detected frames masked for the rollup.
             let mut generated = 0usize;
-            for (index, frame) in assembly.frames.iter().enumerate() {
-                if !frame.detected {
-                    continue;
-                }
-                let out_path = masks_dir.join(format!("frame_{:06}.png", index + 1));
-                let box_norm = (
-                    frame.box_.x,
-                    frame.box_.y,
-                    frame.box_.width,
-                    frame.box_.height,
-                );
-                let weights_for_task = seg_weights.clone();
-                let frame_for_task = frame_paths[index].clone();
-                let out_for_task = out_path.clone();
-                tokio::task::spawn_blocking(move || {
-                    crate::person_segment::segment_person_blocking(
-                        weights_for_task,
-                        frame_for_task,
-                        box_norm,
-                        out_for_task,
-                    )
-                })
-                .await
-                .expect("segment task joins")
-                .expect("sam2 segmentation runs");
-
-                // The mask is a real binary `L` PNG aligned to the 1280×720 frame with a
-                // non-empty foreground (SAM2 actually selected the person, not a blank map).
-                let mask = image::open(&out_path).expect("mask PNG opens").to_luma8();
+            for (clip_idx, pixels) in masks.iter().enumerate() {
+                let assembly_idx = first + clip_idx;
+                let foreground = pixels.iter().filter(|&&p| p > 127).count();
                 assert_eq!(
-                    (mask.width(), mask.height()),
-                    (1280, 720),
+                    pixels.len(),
+                    (1280 * 720) as usize,
                     "mask must match the rendered frame size"
                 );
-                let foreground = mask.pixels().filter(|pixel| pixel.0[0] > 127).count();
-                assert!(
-                    foreground > 0,
-                    "frame {index} mask has no foreground — SAM2 produced an empty mask"
-                );
-                generated += 1;
+                if assembly.frames[assembly_idx].detected {
+                    assert!(
+                        foreground > 0,
+                        "frame {assembly_idx} mask has no foreground — propagation lost the person"
+                    );
+                    generated += 1;
+                }
             }
 
-            // 4. The maskState rollup must report `active` — every detected frame segmented —
-            //    which is the success signal `run_person_track` writes to the sidecar.
+            // 4. The maskState rollup must report `active` — every detected frame masked — which
+            //    is the success signal `run_person_track` writes to the sidecar.
             let mask_state = crate::person_segment::rollup_mask_state(generated, detected_total);
             eprintln!(
-                "person-track E2E: sampled={} detected={} segmented={} maskState={}",
+                "person-track E2E: sampled={} detected={} span={}..={} gapFrames={} segmented={} maskState={}",
                 timestamps.len(),
                 detected_total,
+                first,
+                last,
+                gap_frames,
                 generated,
                 mask_state
             );
             assert_eq!(
                 generated, detected_total,
-                "every detected frame should segment"
+                "every detected frame should be masked by propagation"
             );
             assert_eq!(
                 mask_state, "active",
-                "all detected frames segmented → maskState=active"
+                "all detected frames masked → maskState=active"
             );
         });
 
