@@ -9,10 +9,11 @@
 //!
 //! The advanced-mode asset ids (`last_frame` / `source_clip` / `bridge_right_clip`
 //! / `person_track`) are parsed and carried so the asset fact + routing layer see
-//! them, but the MLX video path (Wan / LTX text-or-image→video) does not consume
-//! them — those modes (first_last_frame / extend_clip / video_bridge /
-//! replace_person) stay on the Python torch worker (epic 3018 scope boundary;
-//! the MLX-vs-Python routing decision is sc-3036).
+//! them. The MLX video path now consumes them for the cutover modes: `first_last_frame`
+//! (two keyframes, sc-3520) and `replace_person` (the `source_clip` + `person_track` +
+//! character refs → native Wan-VACE, sc-3521). `extend_clip` / `video_bridge` still stay
+//! on the Python torch worker for now (sc-3522). The MLX-vs-Python routing decision is
+//! sc-3036.
 
 use serde_json::Value;
 
