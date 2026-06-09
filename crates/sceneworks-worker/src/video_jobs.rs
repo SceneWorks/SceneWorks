@@ -1109,6 +1109,8 @@ struct VideoGenInput {
     motion_bucket_id: Option<f32>,
     noise_aug_strength: Option<f32>,
     decode_chunk_size: Option<u32>,
+    // SVD motion-conditioning fps, decoupled from the output `fps` (sc-3764); `None` elsewhere.
+    conditioning_fps: Option<u32>,
 }
 
 #[cfg(target_os = "macos")]
@@ -1137,6 +1139,7 @@ impl Default for VideoGenInput {
             motion_bucket_id: None,
             noise_aug_strength: None,
             decode_chunk_size: None,
+            conditioning_fps: None,
         }
     }
 }
@@ -1180,6 +1183,7 @@ fn run_video_generation(
         motion_bucket_id: input.motion_bucket_id,
         noise_aug_strength: input.noise_aug_strength,
         decode_chunk_size: input.decode_chunk_size,
+        conditioning_fps: input.conditioning_fps,
         cancel: cancel.clone(),
         ..Default::default()
     };
@@ -1633,11 +1637,11 @@ async fn generate_ltx(
 // The engine loads the stock diffusers fp16 snapshot directly (vae/ + unet/ + image_encoder/),
 // so there is no conversion step (unlike Wan/LTX).
 //
-// Divergence note: the engine uses one `fps` for BOTH the motion micro-conditioning
-// (`added_time_ids` = fps − 1) and the output mux. We pass the conditioning fps (manifest
-// `condFps`, default 7 — the value the model was trained on) so the MOTION is correct; the burst
-// therefore plays at that cadence. The torch path muxed the same 25-frame burst at the user's
-// playback `fps` instead — a cosmetic playback-speed difference, not a content one.
+// fps (sc-3764): the engine decouples the two cadences — the motion micro-conditioning fps
+// (`added_time_ids` = fps − 1) rides `conditioning_fps` (manifest `condFps`, default 7 — the value
+// the model was trained on, so MOTION stays correct), while the output/playback fps is the user's
+// `request.fps` (mirroring the torch `export_to_video(fps=request.fps)`). So the burst now plays at
+// the requested cadence with correct motion — full parity with the torch `svd_video` path.
 // ---------------------------------------------------------------------------
 
 /// Adapter id recorded on a real MLX SVD asset — matches the torch `svd_video` adapter id so the
@@ -1818,6 +1822,8 @@ fn svd_raw_settings(request: &VideoRequest) -> Value {
         "conditioningFps".to_owned(),
         json!(svd_i32(request, "conditioningFps", "condFps", 7, 1, 30)),
     );
+    // The output/playback cadence (decoupled from conditioningFps; sc-3764).
+    raw.insert("fps".to_owned(), json!(request.fps));
     raw.insert(
         "noiseAugStrength".to_owned(),
         json!(svd_f32(
@@ -1868,7 +1874,9 @@ async fn generate_svd(
         width: request.width,
         height: request.height,
         frames: svd_i32(request, "numFrames", "numFrames", 25, 1, 25) as u32,
-        fps: svd_i32(request, "conditioningFps", "condFps", 7, 1, 30) as u32,
+        // Output/playback cadence = the user's `fps` (mirrors the torch `export_to_video(fps=request.fps)`);
+        // the motion cadence rides `conditioning_fps` below (sc-3764).
+        fps: request.fps,
         steps: Some(svd_steps(request)),
         guidance: None,
         seed: resolve_video_seed(request) as u64,
@@ -1884,6 +1892,7 @@ async fn generate_svd(
         decode_chunk_size: Some(
             svd_i32(request, "decodeChunkSize", "decodeChunkSize", 8, 1, 64) as u32,
         ),
+        conditioning_fps: Some(svd_i32(request, "conditioningFps", "condFps", 7, 1, 30) as u32),
         ..VideoGenInput::default()
     };
     generate_video(api, settings, job, backend, input).await
@@ -2274,9 +2283,9 @@ mod tests {
 
     /// Real in-process SVD-XT image→video through the engine: load the stock diffusers snapshot,
     /// animate a synthetic reference image into a tiny clip, and assert the decode seam returns the
-    /// requested RGB8 frames at the conditioning fps with NO audio and streamed denoise progress.
-    /// Exercises the worker's `run_video_generation` path (with the sc-3523 motion knobs) end to end.
-    /// `#[ignore]` — the weights live outside CI; run manually where the checkpoint is cached.
+    /// requested RGB8 frames at the OUTPUT/playback fps (decoupled from the conditioning fps; sc-3764)
+    /// with NO audio and streamed denoise progress. Exercises the worker's `run_video_generation`
+    /// path (with the sc-3523 motion knobs) end to end. `#[ignore]` — the weights live outside CI.
     #[cfg(target_os = "macos")]
     #[ignore = "loads the real SVD-XT weights; run manually on a Mac with the checkpoint cached"]
     #[test]
@@ -2301,7 +2310,8 @@ mod tests {
             width: 256,
             height: 256,
             frames: 4,
-            fps: 7,
+            // Playback fps (24) distinct from the conditioning fps (7) to prove the decouple (sc-3764).
+            fps: 24,
             steps: Some(2),
             seed: 7,
             conditioning: vec![Conditioning::Reference {
@@ -2315,6 +2325,7 @@ mod tests {
             motion_bucket_id: Some(127.0),
             noise_aug_strength: Some(0.02),
             decode_chunk_size: Some(2),
+            conditioning_fps: Some(7),
             ..VideoGenInput::default()
         };
         let cancel = CancelFlag::new();
@@ -2327,7 +2338,10 @@ mod tests {
         let decoded =
             run_video_generation(input, &cancel, &mut on_progress).expect("svd i2v generation");
         assert_eq!(decoded.frames.len(), 4, "4 frames");
-        assert_eq!(decoded.fps, 7, "output fps = conditioning fps");
+        assert_eq!(
+            decoded.fps, 24,
+            "output fps follows the playback fps, not the conditioning fps (sc-3764)"
+        );
         assert!(decoded.audio.is_none(), "SVD emits no audio");
         assert!(steps > 0, "denoise progress streamed");
         assert!(decoded
