@@ -2496,8 +2496,8 @@ async fn models_catalog_carries_mac_support_and_capabilities_endpoint() {
     assert_eq!(kolors["macSupport"]["reason"]["suggestedEpic"], "epic 3532");
     // MLX-routed family → supported, stays in the picker.
     assert_eq!(by_id("z_image_turbo")["macSupport"]["supported"], true);
-    // Torch-only video model → unsupported.
-    assert_eq!(by_id("svd")["macSupport"]["supported"], false);
+    // SVD is now MLX-routed (sc-3523: `svd`→`svd_xt`, image→video only) → supported.
+    assert_eq!(by_id("svd")["macSupport"]["supported"], true);
 
     // Capabilities endpoint: gating active (mlx_required=true) + infra epics present.
     let (status, caps) = request(app, "GET", "/api/v1/capabilities/mac", Value::Null).await;
