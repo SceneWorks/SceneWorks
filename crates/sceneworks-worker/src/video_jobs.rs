@@ -38,6 +38,8 @@ use mlx_gen::{
 #[cfg(target_os = "macos")]
 use mlx_gen_ltx as _;
 #[cfg(target_os = "macos")]
+use mlx_gen_svd as _;
+#[cfg(target_os = "macos")]
 use mlx_gen_wan as _;
 #[cfg(target_os = "macos")]
 use sceneworks_core::character_store::CharacterStore;
@@ -183,6 +185,24 @@ pub(crate) async fn run_video_generate_job(
             .await?,
             LTX_ADAPTER,
             ltx_raw_settings(&request),
+            None,
+        )
+    } else if let Some(engine_id) =
+        svd_engine_id(&request.model).filter(|_| svd_available(&request, settings))
+    {
+        (
+            generate_svd(
+                api,
+                settings,
+                job,
+                &request,
+                &project_path,
+                engine_id,
+                backend,
+            )
+            .await?,
+            SVD_ADAPTER,
+            svd_raw_settings(&request),
             None,
         )
     } else {
@@ -1121,6 +1141,12 @@ struct VideoGenInput {
     use_uncensored_enhancer: bool,
     enhance_max_tokens: Option<u32>,
     enhance_temperature: Option<f32>,
+    // SVD-only micro-conditioning knobs (sc-3523); `None` on the other models.
+    motion_bucket_id: Option<f32>,
+    noise_aug_strength: Option<f32>,
+    decode_chunk_size: Option<u32>,
+    // SVD motion-conditioning fps, decoupled from the output `fps` (sc-3764); `None` elsewhere.
+    conditioning_fps: Option<u32>,
 }
 
 #[cfg(target_os = "macos")]
@@ -1147,6 +1173,10 @@ impl Default for VideoGenInput {
             use_uncensored_enhancer: false,
             enhance_max_tokens: None,
             enhance_temperature: None,
+            motion_bucket_id: None,
+            noise_aug_strength: None,
+            decode_chunk_size: None,
+            conditioning_fps: None,
         }
     }
 }
@@ -1188,6 +1218,10 @@ fn run_video_generation(
         use_uncensored_enhancer: input.use_uncensored_enhancer,
         enhance_max_tokens: input.enhance_max_tokens,
         enhance_temperature: input.enhance_temperature,
+        motion_bucket_id: input.motion_bucket_id,
+        noise_aug_strength: input.noise_aug_strength,
+        decode_chunk_size: input.decode_chunk_size,
+        conditioning_fps: input.conditioning_fps,
         cancel: cancel.clone(),
         ..Default::default()
     };
@@ -1949,6 +1983,277 @@ async fn generate_ltx(
         use_uncensored_enhancer: advanced_bool(request, "useUncensoredEnhancer"),
         enhance_max_tokens,
         enhance_temperature,
+        ..VideoGenInput::default()
+    };
+    generate_video(api, settings, job, backend, input).await
+}
+
+// ---------------------------------------------------------------------------
+// Real MLX Stable Video Diffusion (SVD-XT) generation (macOS, via mlx-gen-svd, sc-3523):
+// image→video ONLY — animates one source image into a fixed ~25-frame burst (no text prompt,
+// no audio) via the `motion_bucket_id` / `noise_aug_strength` / conditioning-fps
+// micro-conditioning. One engine model `svd_xt`. Source-of-truth = the torch
+// `DiffusersVideoAdapter` `svd_video` path (`StableVideoDiffusionPipeline`, video_adapters.py).
+// The engine loads the stock diffusers fp16 snapshot directly (vae/ + unet/ + image_encoder/),
+// so there is no conversion step (unlike Wan/LTX).
+//
+// fps (sc-3764): the engine decouples the two cadences — the motion micro-conditioning fps
+// (`added_time_ids` = fps − 1) rides `conditioning_fps` (manifest `condFps`, default 7 — the value
+// the model was trained on, so MOTION stays correct), while the output/playback fps is the user's
+// `request.fps` (mirroring the torch `export_to_video(fps=request.fps)`). So the burst now plays at
+// the requested cadence with correct motion — full parity with the torch `svd_video` path.
+// ---------------------------------------------------------------------------
+
+/// Adapter id recorded on a real MLX SVD asset — matches the torch `svd_video` adapter id so the
+/// asset sidecar reads identically across the two backends.
+#[cfg(target_os = "macos")]
+const SVD_ADAPTER: &str = "svd_video";
+
+/// The diffusers SVD-XT repo the engine loads directly (fp16 `vae/` + `unet/` + `image_encoder/`).
+#[cfg(target_os = "macos")]
+const SVD_REPO: &str = "stabilityai/stable-video-diffusion-img2vid-xt";
+
+/// SceneWorks model id → mlx-gen registry id for the SVD family (only `svd` → `svd_xt`), or `None`.
+#[cfg(target_os = "macos")]
+fn svd_engine_id(model: &str) -> Option<&'static str> {
+    (model == "svd").then_some("svd_xt")
+}
+
+/// Whether the linked SVD engine can serve this request now (image→video with resolvable weights).
+/// SVD is image-conditioned only, so a request without a `sourceAssetId` can never run on it.
+#[cfg(target_os = "macos")]
+fn svd_available(request: &VideoRequest, settings: &Settings) -> bool {
+    svd_engine_id(&request.model).is_some()
+        && request.source_asset_id.is_some()
+        && resolve_svd_model_dir(settings).is_ok()
+}
+
+/// Whether `dir` is a usable SVD-XT snapshot — each component subdir carries the safetensors the
+/// engine reads (preferring the on-disk `.fp16` variant, else the full-precision file).
+#[cfg(target_os = "macos")]
+fn svd_dir_is_complete(dir: &Path) -> bool {
+    let has = |sub: &str, stem: &str| {
+        dir.join(sub)
+            .join(format!("{stem}.fp16.safetensors"))
+            .is_file()
+            || dir.join(sub).join(format!("{stem}.safetensors")).is_file()
+    };
+    has("vae", "diffusion_pytorch_model")
+        && has("unet", "diffusion_pytorch_model")
+        && has("image_encoder", "model")
+}
+
+/// Resolve the SVD-XT snapshot dir: env override (`SCENEWORKS_MLX_SVD_DIR`) → the cached HF snapshot
+/// of [`SVD_REPO`]. Only a dir carrying the three component subdirs ([`svd_dir_is_complete`]) counts.
+#[cfg(target_os = "macos")]
+fn resolve_svd_model_dir(settings: &Settings) -> WorkerResult<PathBuf> {
+    if let Ok(override_dir) = std::env::var("SCENEWORKS_MLX_SVD_DIR") {
+        let path = PathBuf::from(override_dir.trim());
+        if svd_dir_is_complete(&path) {
+            return Ok(path);
+        }
+    }
+    if let Some(dir) = huggingface_snapshot_dir(&settings.data_dir, SVD_REPO) {
+        if svd_dir_is_complete(&dir) {
+            return Ok(dir);
+        }
+    }
+    Err(WorkerError::InvalidPayload(format!(
+        "svd: no complete SVD-XT weights found (expected vae/ + unet/ + image_encoder/ under the \
+         cached {SVD_REPO} snapshot, or set $SCENEWORKS_MLX_SVD_DIR)"
+    )))
+}
+
+/// Read an SVD integer knob: `advanced[adv_key]` → `modelManifestEntry[manifest_key]` → `default`,
+/// then clamp to `[min, max]`. Mirrors the torch `safe_int(advanced.get(adv_key),
+/// target.get(manifest_key, default), min, max)` (advanced overrides the manifest, which overrides
+/// the builtin default; the resolved value is clamped).
+#[cfg(target_os = "macos")]
+fn svd_i32(
+    request: &VideoRequest,
+    adv_key: &str,
+    manifest_key: &str,
+    default: i32,
+    min: i32,
+    max: i32,
+) -> i32 {
+    request
+        .advanced
+        .get(adv_key)
+        .or_else(|| request.model_manifest_entry.get(manifest_key))
+        .and_then(|v| v.as_i64().or_else(|| v.as_str()?.trim().parse().ok()))
+        .map(|v| v as i32)
+        .unwrap_or(default)
+        .clamp(min, max)
+}
+
+/// Read an SVD float knob: `advanced[adv_key]` → `modelManifestEntry[manifest_key]` → `default`
+/// (no clamp). Mirrors the torch `float(advanced.get(adv_key, target.get(manifest_key, default)))`.
+#[cfg(target_os = "macos")]
+fn svd_f32(request: &VideoRequest, adv_key: &str, manifest_key: &str, default: f32) -> f32 {
+    request
+        .advanced
+        .get(adv_key)
+        .or_else(|| request.model_manifest_entry.get(manifest_key))
+        .and_then(|v| v.as_f64().or_else(|| v.as_str()?.trim().parse().ok()))
+        .map(|v| v as f32)
+        .unwrap_or(default)
+}
+
+/// Inference steps for an SVD request: `advanced.steps` → `modelManifestEntry.steps[quality]` (else
+/// its `balanced`) → the builtin quality ladder (fast 15 / balanced 25 / best 30), clamped 1..=80.
+/// Mirrors the torch `_num_inference_steps` for the `svd_video` adapter.
+#[cfg(target_os = "macos")]
+fn svd_steps(request: &VideoRequest) -> u32 {
+    let builtin = match request.quality.as_str() {
+        "fast" => 15,
+        "best" => 30,
+        _ => 25,
+    };
+    let manifest_default = request
+        .model_manifest_entry
+        .get("steps")
+        .and_then(Value::as_object)
+        .and_then(|steps| {
+            steps
+                .get(&request.quality)
+                .or_else(|| steps.get("balanced"))
+        })
+        .and_then(Value::as_i64)
+        .map(|v| v as i32)
+        .unwrap_or(builtin);
+    request
+        .advanced
+        .get("steps")
+        .and_then(|v| v.as_i64().or_else(|| v.as_str()?.trim().parse().ok()))
+        .map(|v| v as i32)
+        .unwrap_or(manifest_default)
+        .clamp(1, 80) as u32
+}
+
+/// The single `Reference` conditioning image (image→video source). SVD is image-conditioned only,
+/// so a missing `sourceAssetId` is a hard error (the routing gate [`svd_available`] already
+/// requires it; this guards the direct-call path).
+#[cfg(target_os = "macos")]
+fn resolve_svd_conditioning(
+    settings: &Settings,
+    request: &VideoRequest,
+    project_path: &Path,
+) -> WorkerResult<Vec<Conditioning>> {
+    let asset_id = request.source_asset_id.as_deref().ok_or_else(|| {
+        WorkerError::InvalidPayload(
+            "svd image→video requires a source image (sourceAssetId).".to_owned(),
+        )
+    })?;
+    let image = load_reference_image(
+        &settings.data_dir,
+        &request.project_id,
+        asset_id,
+        project_path,
+    )?;
+    Ok(vec![Conditioning::Reference {
+        image,
+        strength: None,
+    }])
+}
+
+/// Raw-settings recorded on a real MLX SVD asset (the resolved knobs + real-inference markers).
+#[cfg(target_os = "macos")]
+fn svd_raw_settings(request: &VideoRequest) -> Value {
+    let mut raw = request.advanced.clone();
+    raw.insert("realModelInference".to_owned(), Value::Bool(true));
+    raw.insert("model".to_owned(), Value::String(request.model.clone()));
+    raw.insert(
+        "numFrames".to_owned(),
+        json!(svd_i32(request, "numFrames", "numFrames", 25, 1, 25)),
+    );
+    raw.insert(
+        "motionBucketId".to_owned(),
+        json!(svd_i32(
+            request,
+            "motionBucketId",
+            "motionBucketId",
+            127,
+            1,
+            255
+        )),
+    );
+    raw.insert(
+        "conditioningFps".to_owned(),
+        json!(svd_i32(request, "conditioningFps", "condFps", 7, 1, 30)),
+    );
+    // The output/playback cadence (decoupled from conditioningFps; sc-3764).
+    raw.insert("fps".to_owned(), json!(request.fps));
+    raw.insert(
+        "noiseAugStrength".to_owned(),
+        json!(svd_f32(
+            request,
+            "noiseAugStrength",
+            "noiseAugStrength",
+            0.02
+        )),
+    );
+    raw.insert(
+        "decodeChunkSize".to_owned(),
+        json!(svd_i32(
+            request,
+            "decodeChunkSize",
+            "decodeChunkSize",
+            8,
+            1,
+            64
+        )),
+    );
+    raw.insert("steps".to_owned(), json!(svd_steps(request)));
+    Value::Object(raw)
+}
+
+/// Resolve an SVD request into a [`VideoGenInput`] and run it (sc-3523). image→video only: no
+/// prompt / negative / guidance (the engine uses its frame-wise CFG ramp); `frames` is the
+/// model-fixed burst length (≤25); `fps` carries the motion-conditioning cadence (see the module
+/// note); `motion_bucket_id` / `noise_aug_strength` / `decode_chunk_size` drive the SVD knobs.
+#[cfg(target_os = "macos")]
+#[allow(clippy::too_many_arguments)]
+async fn generate_svd(
+    api: &ApiClient,
+    settings: &Settings,
+    job: &JobSnapshot,
+    request: &VideoRequest,
+    project_path: &Path,
+    engine_id: &'static str,
+    backend: &str,
+) -> WorkerResult<DecodedVideo> {
+    let input = VideoGenInput {
+        engine_id,
+        model_dir: resolve_svd_model_dir(settings)?,
+        quant: None,
+        adapters: Vec::new(),
+        conditioning: resolve_svd_conditioning(settings, request, project_path)?,
+        prompt: String::new(),
+        negative_prompt: None,
+        width: request.width,
+        height: request.height,
+        frames: svd_i32(request, "numFrames", "numFrames", 25, 1, 25) as u32,
+        // Output/playback cadence = the user's `fps` (mirrors the torch `export_to_video(fps=request.fps)`);
+        // the motion cadence rides `conditioning_fps` below (sc-3764).
+        fps: request.fps,
+        steps: Some(svd_steps(request)),
+        guidance: None,
+        seed: resolve_video_seed(request) as u64,
+        motion_bucket_id: Some(
+            svd_i32(request, "motionBucketId", "motionBucketId", 127, 1, 255) as f32,
+        ),
+        noise_aug_strength: Some(svd_f32(
+            request,
+            "noiseAugStrength",
+            "noiseAugStrength",
+            0.02,
+        )),
+        decode_chunk_size: Some(
+            svd_i32(request, "decodeChunkSize", "decodeChunkSize", 8, 1, 64) as u32,
+        ),
+        conditioning_fps: Some(svd_i32(request, "conditioningFps", "condFps", 7, 1, 30) as u32),
+        ..VideoGenInput::default()
     };
     generate_video(api, settings, job, backend, input).await
 }
@@ -2908,6 +3213,171 @@ mod tests {
         assert_eq!(ltx_engine_id("ltx_2_3_eros"), Some("ltx_2_3"));
         assert_eq!(ltx_engine_id("wan_2_2"), None);
         assert_eq!(ltx_engine_id("z_image_turbo"), None);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn svd_engine_id_maps_only_svd() {
+        assert_eq!(svd_engine_id("svd"), Some("svd_xt"));
+        assert_eq!(svd_engine_id("ltx_2_3"), None);
+        assert_eq!(svd_engine_id("wan_2_2"), None);
+        assert_eq!(svd_engine_id("svd_xt"), None);
+    }
+
+    /// SVD knobs resolve advanced → manifest entry → builtin default, then clamp; `conditioningFps`
+    /// reads the `condFps` manifest key. Mirrors the torch `svd_video` `_pipeline_kwargs` mapping.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn svd_knobs_resolve_advanced_over_manifest_over_default() {
+        // Bare request → builtin defaults.
+        let bare = request(json!({ "projectId": "p", "model": "svd", "sourceAssetId": "a" }));
+        assert_eq!(svd_i32(&bare, "numFrames", "numFrames", 25, 1, 25), 25);
+        assert_eq!(
+            svd_i32(&bare, "motionBucketId", "motionBucketId", 127, 1, 255),
+            127
+        );
+        assert_eq!(svd_i32(&bare, "conditioningFps", "condFps", 7, 1, 30), 7);
+        assert_eq!(
+            svd_i32(&bare, "decodeChunkSize", "decodeChunkSize", 8, 1, 64),
+            8
+        );
+        assert_eq!(
+            svd_f32(&bare, "noiseAugStrength", "noiseAugStrength", 0.02),
+            0.02
+        );
+        assert_eq!(svd_steps(&bare), 25); // balanced
+
+        // Manifest entry overrides the builtin default; advanced overrides the manifest.
+        let layered = request(json!({
+            "projectId": "p", "model": "svd", "sourceAssetId": "a", "quality": "fast",
+            "modelManifestEntry": {
+                "motionBucketId": 180, "condFps": 6, "noiseAugStrength": 0.1,
+                "steps": { "fast": 12, "balanced": 25, "best": 30 }
+            },
+            "advanced": { "motionBucketId": 200, "decodeChunkSize": "16" }
+        }));
+        // advanced wins for motionBucketId; manifest wins for condFps + noiseAug.
+        assert_eq!(
+            svd_i32(&layered, "motionBucketId", "motionBucketId", 127, 1, 255),
+            200
+        );
+        assert_eq!(svd_i32(&layered, "conditioningFps", "condFps", 7, 1, 30), 6);
+        assert_eq!(
+            svd_f32(&layered, "noiseAugStrength", "noiseAugStrength", 0.02),
+            0.1
+        );
+        // numeric string parses.
+        assert_eq!(
+            svd_i32(&layered, "decodeChunkSize", "decodeChunkSize", 8, 1, 64),
+            16
+        );
+        // steps from manifest's quality ladder (fast).
+        assert_eq!(svd_steps(&layered), 12);
+
+        // Out-of-range values clamp to the engine-safe bounds.
+        let extreme = request(json!({
+            "projectId": "p", "model": "svd", "sourceAssetId": "a",
+            "advanced": { "motionBucketId": 999, "numFrames": 99, "decodeChunkSize": 0 }
+        }));
+        assert_eq!(
+            svd_i32(&extreme, "motionBucketId", "motionBucketId", 127, 1, 255),
+            255
+        );
+        assert_eq!(svd_i32(&extreme, "numFrames", "numFrames", 25, 1, 25), 25);
+        assert_eq!(
+            svd_i32(&extreme, "decodeChunkSize", "decodeChunkSize", 8, 1, 64),
+            1
+        );
+    }
+
+    /// Locate the cached SVD-XT diffusers snapshot (the stock HF repo the engine loads directly), or
+    /// `None` if absent — `$SCENEWORKS_MLX_SVD_DIR` else the default HF hub cache.
+    #[cfg(target_os = "macos")]
+    fn svd_real_dir() -> Option<PathBuf> {
+        if let Ok(dir) = std::env::var("SCENEWORKS_MLX_SVD_DIR") {
+            let path = PathBuf::from(dir.trim());
+            if svd_dir_is_complete(&path) {
+                return Some(path);
+            }
+        }
+        let snaps = PathBuf::from(std::env::var("HOME").ok()?)
+            .join(".cache/huggingface/hub")
+            .join("models--stabilityai--stable-video-diffusion-img2vid-xt")
+            .join("snapshots");
+        std::fs::read_dir(&snaps)
+            .ok()?
+            .flatten()
+            .map(|entry| entry.path())
+            .find(|path| svd_dir_is_complete(path))
+    }
+
+    /// Real in-process SVD-XT image→video through the engine: load the stock diffusers snapshot,
+    /// animate a synthetic reference image into a tiny clip, and assert the decode seam returns the
+    /// requested RGB8 frames at the OUTPUT/playback fps (decoupled from the conditioning fps; sc-3764)
+    /// with NO audio and streamed denoise progress. Exercises the worker's `run_video_generation`
+    /// path (with the sc-3523 motion knobs) end to end. `#[ignore]` — the weights live outside CI.
+    #[cfg(target_os = "macos")]
+    #[ignore = "loads the real SVD-XT weights; run manually on a Mac with the checkpoint cached"]
+    #[test]
+    fn svd_real_weights_image_to_video() {
+        let Some(model_dir) = svd_real_dir() else {
+            eprintln!("skipping svd_real_weights_image_to_video: no SVD-XT checkpoint found");
+            return;
+        };
+        let (w, h) = (64u32, 64u32);
+        let mut pixels = vec![0u8; (w * h * 3) as usize];
+        for y in 0..h {
+            for x in 0..w {
+                let i = ((y * w + x) * 3) as usize;
+                pixels[i] = (x * 255 / w) as u8;
+                pixels[i + 1] = (y * 255 / h) as u8;
+                pixels[i + 2] = 128;
+            }
+        }
+        let input = VideoGenInput {
+            engine_id: "svd_xt",
+            model_dir,
+            width: 256,
+            height: 256,
+            frames: 4,
+            // Playback fps (24) distinct from the conditioning fps (7) to prove the decouple (sc-3764).
+            fps: 24,
+            steps: Some(2),
+            seed: 7,
+            conditioning: vec![Conditioning::Reference {
+                image: mlx_gen::Image {
+                    width: w,
+                    height: h,
+                    pixels,
+                },
+                strength: None,
+            }],
+            motion_bucket_id: Some(127.0),
+            noise_aug_strength: Some(0.02),
+            decode_chunk_size: Some(2),
+            conditioning_fps: Some(7),
+            ..VideoGenInput::default()
+        };
+        let cancel = CancelFlag::new();
+        let mut steps = 0u32;
+        let mut on_progress = |progress: Progress| {
+            if let Progress::Step { .. } = progress {
+                steps += 1;
+            }
+        };
+        let decoded =
+            run_video_generation(input, &cancel, &mut on_progress).expect("svd i2v generation");
+        assert_eq!(decoded.frames.len(), 4, "4 frames");
+        assert_eq!(
+            decoded.fps, 24,
+            "output fps follows the playback fps, not the conditioning fps (sc-3764)"
+        );
+        assert!(decoded.audio.is_none(), "SVD emits no audio");
+        assert!(steps > 0, "denoise progress streamed");
+        assert!(decoded
+            .frames
+            .iter()
+            .all(|f| f.pixels.len() == (f.width * f.height * 3) as usize));
     }
 
     /// `advanced.noAudio` maps to the engine's `video_mode = "no_audio"`; enhance flags

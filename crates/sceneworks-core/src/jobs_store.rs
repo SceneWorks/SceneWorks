@@ -2231,8 +2231,8 @@ fn classify_video_gap(payload: &Map<String, Value>) -> UnsupportedReason {
     if !VIDEO_MLX_ROUTED_MODELS.contains(&model) {
         return UnsupportedReason::new(
             Some(model),
-            "torch-only video model (incl. SVD)",
-            "this video model has no Rust/MLX engine (e.g. SVD); it runs on the Python torch path.",
+            "torch-only video model",
+            "this video model has no Rust/MLX engine; it runs on the Python torch path.",
             Some("epic 3040"),
         );
     }
@@ -2780,15 +2780,16 @@ fn z_image_mlx_eligible(payload: &Map<String, Value>) -> bool {
 }
 
 /// Video models the in-process Rust MLX worker generates today (sc-3034 Wan2.2,
-/// sc-3035 LTX-2.3 + audio). Mirrors `MlxVideoAdapter._supported_models`. A model
-/// id absent here is never routed to the mlx worker — the Python torch path stays
-/// authoritative for it (and for SVD, which has no MLX crate).
+/// sc-3035 LTX-2.3 + audio, sc-3523 SVD-XT image→video). Mirrors
+/// `MlxVideoAdapter._supported_models`. A model id absent here is never routed to the
+/// mlx worker — the Python torch path stays authoritative for it.
 const VIDEO_MLX_ROUTED_MODELS: &[&str] = &[
     "ltx_2_3",
     "ltx_2_3_eros",
     "wan_2_2",
     "wan_2_2_t2v_14b",
     "wan_2_2_i2v_14b",
+    "svd",
 ];
 
 /// Epic 3018 routing (sc-3036, the video sibling of [`image_job_is_mlx_eligible`]):
@@ -2798,14 +2799,14 @@ const VIDEO_MLX_ROUTED_MODELS: &[&str] = &[
 /// expressed by whether an `mlx` worker is registered and idle (see
 /// [`should_defer_video_to_mlx_worker`]).
 ///
-/// MLX covers `text_to_video` + `image_to_video` on Wan/LTX, plus `first_last_frame` on the
-/// FLF-capable engines (LTX + Wan TI2V-5B `wan_2_2`; sc-3520), the clip-conditioning modes
-/// `extend_clip` / `video_bridge` on the LTX IC-LoRA path (sc-3522, the `VideoExtend` /
-/// `VideoBridge` job types), and `replace_person` → native Wan-VACE (the `PersonReplace` job
-/// type, sc-3521 — see [`video_mode_is_mlx_eligible`]). Still on the Python torch path: SVD
-/// (svd_xt not linked in the worker yet), a non-MLX model, and extend/bridge on the Wan engines
-/// (no IC-LoRA keyframe-append path). **Third-party LyCORIS (LoHa / non-peft LoKr) and
-/// LoKr-on-Wan now run on MLX**
+/// MLX covers `text_to_video` + `image_to_video` on Wan/LTX, `image_to_video` on SVD
+/// (`svd`→`svd_xt`, image-conditioned only — sc-3523), `first_last_frame` on the FLF-capable
+/// engines (LTX + Wan TI2V-5B `wan_2_2`; sc-3520), the clip-conditioning modes `extend_clip` /
+/// `video_bridge` on the LTX IC-LoRA path (sc-3522, the `VideoExtend` / `VideoBridge` job types),
+/// and `replace_person` → native Wan-VACE (the `PersonReplace` job type, sc-3521 — see
+/// [`video_mode_is_mlx_eligible`]). Still on the Python torch path: a non-MLX model, and
+/// extend/bridge on the Wan engines (no IC-LoRA keyframe-append path).
+/// **Third-party LyCORIS (LoHa / non-peft LoKr) and LoKr-on-Wan now run on MLX**
 /// (epic 3641, sc-3671 + sc-3644): the Wan/LTX engine paths reconstruct + merge/residual the delta —
 /// the peft-LoKr-on-Wan merge has existed since sc-2393, and the old `create_video_adapter` torch
 /// gate was a routing caution, never an engine limit.
@@ -2850,16 +2851,21 @@ fn video_job_is_mlx_eligible(job: &JobSnapshot) -> bool {
     true
 }
 
-/// Which `video_generate` modes the in-process Rust MLX worker serves for `model`. Every
-/// routed model serves `text_to_video` + `image_to_video` (sc-3034/3035); `first_last_frame`
-/// is additionally MLX on the FLF-capable engines — LTX (`ltx_2_3`/`ltx_2_3_eros`, the
+/// Which `video_generate` modes the in-process Rust MLX worker serves for `model`. The Wan/LTX
+/// engines serve `text_to_video` + `image_to_video` (sc-3034/3035); `first_last_frame` is
+/// additionally MLX on the FLF-capable engines — LTX (`ltx_2_3`/`ltx_2_3_eros`, the
 /// reference-grounded `Keyframe` path, sc-3052) and Wan TI2V-5B (`wan_2_2`, the mask-blend
 /// multi-keyframe path, sc-3357). The 14B Wan MoE engines have no `Keyframe` path, so FLF on
-/// them stays torch. The clip-conditioning modes `extend_clip` / `video_bridge` are MLX on the
-/// **LTX** engines only (`ltx_2_3`/`ltx_2_3_eros`, the IC-LoRA keyframe-append path — sc-3522,
-/// engine `build_clips` sc-3052/3053); the Wan engines have no IC-LoRA path so they stay torch.
-/// `replace_person` is MLX on the replace-capable models (→ native Wan-VACE, sc-3521).
+/// them stays torch. **SVD (`svd`) is image-conditioned only** — it serves `image_to_video`
+/// exclusively (no text→video, sc-3523). The clip-conditioning modes `extend_clip` /
+/// `video_bridge` are MLX on the **LTX** engines only (`ltx_2_3`/`ltx_2_3_eros`, the IC-LoRA
+/// keyframe-append path — sc-3522, engine `build_clips` sc-3052/3053); the Wan engines have no
+/// IC-LoRA path so they stay torch. `replace_person` is MLX on the replace-capable models
+/// (→ native Wan-VACE, sc-3521).
 fn video_mode_is_mlx_eligible(model: &str, mode: &str) -> bool {
+    if model == "svd" {
+        return mode == "image_to_video";
+    }
     match mode {
         "text_to_video" | "image_to_video" => true,
         "first_last_frame" => matches!(model, "ltx_2_3" | "ltx_2_3_eros" | "wan_2_2"),
@@ -3546,10 +3552,25 @@ mod mlx_routing_tests {
 
     #[test]
     fn video_mode_eligibility_admits_flf_only_on_flf_capable_engines() {
-        // Base modes are MLX on every routed model.
+        // image_to_video is MLX on every routed model; text_to_video on every routed model
+        // EXCEPT SVD (image-conditioned only, sc-3523).
         for model in VIDEO_MLX_ROUTED_MODELS {
-            assert!(video_mode_is_mlx_eligible(model, "text_to_video"));
             assert!(video_mode_is_mlx_eligible(model, "image_to_video"));
+            assert_eq!(
+                video_mode_is_mlx_eligible(model, "text_to_video"),
+                *model != "svd",
+                "text_to_video eligibility for {model}"
+            );
+        }
+        // SVD serves image_to_video ONLY — no text_to_video, FLF, or anything else.
+        assert!(video_mode_is_mlx_eligible("svd", "image_to_video"));
+        for mode in [
+            "text_to_video",
+            "first_last_frame",
+            "replace_person",
+            "nonsense",
+        ] {
+            assert!(!video_mode_is_mlx_eligible("svd", mode));
         }
         // first_last_frame: MLX on LTX (base + eros) + Wan TI2V-5B (sc-3055 cutover).
         assert!(video_mode_is_mlx_eligible("ltx_2_3", "first_last_frame"));

@@ -1903,18 +1903,25 @@ fn mac_rust_supported_names_advanced_video_and_svd() {
         json!({ "model": "ltx_2_3_eros" }),
     );
     assert!(mac_rust_supported(&ltx_bridge).is_ok());
-    // Torch-only video model (e.g. SVD) on the base video_generate type.
+    // SVD image→video is now MLX-supported (sc-3523: `svd`→`svd_xt`, image-conditioned only).
     let svd = job_of(
         &store,
         JobType::VideoGenerate,
         json!({ "model": "svd", "mode": "image_to_video" }),
     );
-    assert_eq!(
-        mac_rust_supported(&svd)
-            .unwrap_err()
-            .suggested_epic
-            .as_deref(),
-        Some("epic 3040")
+    assert!(
+        mac_rust_supported(&svd).is_ok(),
+        "svd image_to_video should be MLX-supported (sc-3523)"
+    );
+    // SVD is image-conditioned only — text→video on it is not in the Rust/MLX flow.
+    let svd_text = job_of(
+        &store,
+        JobType::VideoGenerate,
+        json!({ "model": "svd", "mode": "text_to_video" }),
+    );
+    assert!(
+        mac_rust_supported(&svd_text).is_err(),
+        "svd text_to_video is not MLX-eligible (image-conditioned only)"
     );
 }
 
@@ -1998,9 +2005,11 @@ fn model_mac_support_hides_torch_only_models_keeps_mlx_models() {
     let z_image = model_mac_support("z_image_turbo", "image");
     assert!(z_image.supported);
     assert!(z_image.reason.is_none());
-    // Torch-only video model (SVD) is hidden; Wan/LTX stay.
-    assert!(!model_mac_support("svd", "video").supported);
+    // SVD is now MLX-routed (sc-3523, image→video only) so it stays in the picker, like Wan/LTX;
+    // a genuinely engine-less video model id is still hidden.
+    assert!(model_mac_support("svd", "video").supported);
     assert!(model_mac_support("wan_2_2", "video").supported);
+    assert!(!model_mac_support("some_torch_only_video", "video").supported);
     // Utility/infra models are never hidden by model-level gating (their actions are
     // gated by mac_capabilities at the job-type level instead).
     assert!(model_mac_support("real_esrgan", "utility").supported);
