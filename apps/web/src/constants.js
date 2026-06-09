@@ -291,7 +291,16 @@ export const fallbackModels = [
     // (sc-3857). These mirror the worker fallbacks (instantid_adapter.py
     // _guidance_scale 5.0 / _num_inference_steps 30) so the form shows the real
     // resolved default; leaving the field blank still defers to the worker.
-    defaults: { guidanceScale: 5.0, steps: 30 },
+    // sampler/scheduler default to "default" (model-native) so behaviour is
+    // unchanged until the user picks — e.g. DPM++ SDE + Karras for sharper,
+    // less-saturated RealVisXL output.
+    defaults: { guidanceScale: 5.0, steps: 30, sampler: "default", scheduler: "default" },
+    // SDXL/epsilon sampler menu (sc-3857). The worker registry routes this
+    // epsilon pipe to standard solvers; dpmpp_sde + karras == "DPM++ SDE Karras".
+    limits: {
+      samplers: ["default", "euler", "euler_a", "dpmpp", "dpmpp_sde", "unipc"],
+      schedulers: ["default", "karras", "exponential"],
+    },
     ui: {
       description: "Identity-preserving character generation — holds a person's face from a single reference image while the prompt drives scene, pose, and wardrobe. RealVisXL_V5.0 (photoreal SDXL, openrail++ commercial-OK) + InstantID ArcFace embedding & landmark ControlNet; faithful likeness with scene freedom (vs IP-Adapter resemblance only). Pick a character with an approved reference, then raise Variations. ~30 steps at guidance 5.0, ~22GB peak.",
       promptGuide: { title: "InstantID (RealVisXL) Prompt Guide", path: "/prompt-guides/instantid-realvisxl.md" },
