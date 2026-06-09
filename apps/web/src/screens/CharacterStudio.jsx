@@ -184,7 +184,7 @@ export function CharacterStudio() {
   //   instantid_realvisxl                 — landmark deterministic, highest
   //   qwen_image_edit_2511_lightning      — 0.62, prompt-driven fast tier
   //   flux2_klein_9b                      — 0.52, holds portrait at profiles
-  //   sensenova_u1_8b                     — 0.29, wardrobe-continuity tier
+  //   sensenova_u1_8b_fast                — 0.29, wardrobe-continuity tier
   //
   // Spike-validated pose backbones:
   //   instantid_realvisxl                 — OpenPose ControlNet strict

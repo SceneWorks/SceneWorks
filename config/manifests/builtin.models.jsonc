@@ -573,33 +573,6 @@
         // (the adapter raises the default vs the 1.0 edit baseline so the
         // reference subject pulls harder by default).
         "variationStrength": { "label": "Reference strength", "default": 1.5, "min": 0.5, "max": 4.0, "step": 0.1 },
-        // Multi-backbone angle set (sc-2003): SenseNova-U1 rotates the head per
-        // prompt and preserves the reference's wardrobe + tattoos + accessories
-        // most faithfully of any backbone in the picker. Hardware spike: mean
-        // ArcFace 0.29 across the 5 measured angles (vs Qwen-Lightning 0.62 and
-        // FLUX.2-klein 0.52) — pure-face cosine is lowest of the 4 angle-capable
-        // backbones, but the *overall character* (face + outfit + props) often
-        // reads as more consistent to a human. Best pick when wardrobe
-        // continuity matters more than strict face-geometry identity.
-        //
-        // NOT shipped for the pose library: it2i_generate is single-image only,
-        // and the side-by-side concat trick (which works on the multi-image-
-        // capable Qwen + FLUX.2-klein backbones) is rendered literally rather
-        // than interpreted as a pose instruction (ArcFace 0.06–0.22 in the
-        // hardware spike — sc-2003 follow-up).
-        "viewAngles": [
-          { "id": "three_quarter_left", "label": "Three-quarter left" },
-          { "id": "three_quarter_right", "label": "Three-quarter right" },
-          { "id": "left_profile", "label": "Left profile" },
-          { "id": "right_profile", "label": "Right profile" },
-          { "id": "up", "label": "Looking up" },
-          { "id": "down", "label": "Looking down" },
-          { "id": "up_left", "label": "Up · left" },
-          { "id": "up_right", "label": "Up · right" },
-          { "id": "down_left", "label": "Down · left" },
-          { "id": "down_right", "label": "Down · right" },
-          { "id": "front", "label": "Front" }
-        ],
         "promptGuide": {
           "title": "SenseNova-U1 8B Prompt Guide",
           "path": "/prompt-guides/sensenova-u1-8b.md",
@@ -666,6 +639,22 @@
         // Edit-style variation knob (imageGuidanceScale); see SenseNova-U1 8B
         // for context. The fast variant defaults match the base variant.
         "variationStrength": { "label": "Reference strength", "default": 1.5, "min": 0.5, "max": 4.0, "step": 0.1 },
+        // Multi-backbone angle set: same prompt-driven SenseNova turnaround path
+        // as the base model, but practical for MPS batch use via the 8-step
+        // distill LoRA.
+        "viewAngles": [
+          { "id": "three_quarter_left", "label": "Three-quarter left" },
+          { "id": "three_quarter_right", "label": "Three-quarter right" },
+          { "id": "left_profile", "label": "Left profile" },
+          { "id": "right_profile", "label": "Right profile" },
+          { "id": "up", "label": "Looking up" },
+          { "id": "down", "label": "Looking down" },
+          { "id": "up_left", "label": "Up · left" },
+          { "id": "up_right", "label": "Up · right" },
+          { "id": "down_left", "label": "Down · left" },
+          { "id": "down_right", "label": "Down · right" },
+          { "id": "front", "label": "Front" }
+        ],
         "promptGuide": {
           "title": "SenseNova-U1 8B Fast Prompt Guide",
           "path": "/prompt-guides/sensenova-u1-8b-fast.md",
@@ -1028,7 +1017,7 @@
       // pipeline — so it is converted at install (mlx.requiresConversion) into a
       // local diffusers dir that borrows the VAE/text-encoder/tokenizer from the
       // base FLUX.2-klein-9B install (mlx.convertBaseRepo). sc-2235.
-      "capabilities": ["text_to_image", "edit_image", "character_image", "style_variations"],
+      "capabilities": ["text_to_image", "style_variations"],
       "macOnly": true,
       "downloads": [
         {
@@ -1074,34 +1063,8 @@
       "licenseUrl": "https://huggingface.co/black-forest-labs/FLUX.2-klein-9B/blob/main/LICENSE.md",
       "ui": {
         "label": "FLUX.2 [klein] 9B True V2",
-        "description": "Community full fine-tune of FLUX.2 [klein] 9B (wikeeyang) tuned for stronger realism, texture, and prompt adherence, with cleaner reference editing. Runs on Apple Silicon via the same MLX path as the base klein. This is the undistilled line, so it uses ~24 steps at guidance 1.0 (slower than the 4-step distill, ~50 s/image at 1024² on an M5 Max). Requires the base FLUX.2 [klein] 9B to be installed (its VAE/text-encoder/tokenizer are reused) and is converted locally at install. Distributed under the FLUX Non-Commercial License.",
-        "recommendedFor": ["text_to_image", "character_image", "style_variations"],
-        "variationStrength": {
-          "label": "Prompt strength",
-          "default": 4.0,
-          "min": 1.0,
-          "max": 10.0,
-          "step": 0.5
-        },
-        // Shares the base 9B angle set (same mlx_flux2 adapter / flux2 augments).
-        "viewAngles": [
-          { "id": "three_quarter_left", "label": "Three-quarter left" },
-          { "id": "three_quarter_right", "label": "Three-quarter right" },
-          { "id": "left_profile", "label": "Left profile" },
-          { "id": "right_profile", "label": "Right profile" },
-          { "id": "up", "label": "Looking up" },
-          { "id": "down", "label": "Looking down" },
-          { "id": "up_left", "label": "Up · left" },
-          { "id": "up_right", "label": "Up · right" },
-          { "id": "down_left", "label": "Down · left" },
-          { "id": "down_right", "label": "Down · right" },
-          { "id": "front", "label": "Front" }
-        ],
-        // Best-effort pose library: same multi-image skeleton trick as the base
-        // 9B (sc-2262), routed through the shared mlx_flux2 adapter. This is the
-        // undistilled 24-step line, so pose generation is slower than the distill
-        // and requires the local conversion + base klein install. Best-effort tier.
-        "poseLibrary": true,
+        "description": "Community full fine-tune of FLUX.2 [klein] 9B (wikeeyang) tuned for stronger realism, texture, and prompt adherence. Runs on Apple Silicon via the same MLX txt2img path as the base klein. This is the undistilled line, so it uses ~24 steps at guidance 1.0 (slower than the 4-step distill, ~50 s/image at 1024² on an M5 Max). Requires the base FLUX.2 [klein] 9B to be installed (its VAE/text-encoder/tokenizer are reused) and is converted locally at install. Reference editing, Character Studio angle sets, and the pose library remain on the base/KV FLUX.2 [klein] variants until the True V2 edit loader is supported. Distributed under the FLUX Non-Commercial License.",
+        "recommendedFor": ["text_to_image", "style_variations"],
         "promptGuide": {
           "title": "FLUX.2 [klein] 9B Prompt Guide",
           "path": "/prompt-guides/flux2-klein.md",
