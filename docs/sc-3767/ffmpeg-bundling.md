@@ -52,16 +52,27 @@ it's an app resource, **we redistribute it**, which triggers GPLv3 §6:
 - **Corresponding source / written offer:** the exact source is FFmpeg 7.1 from
   <https://ffmpeg.org/releases/> (`ffmpeg-7.1.tar.xz`) built per the evermeet
   configuration above; evermeet publishes its build scripts at
-  <https://evermeet.cx/ffmpeg/>. Provide this as a written offer in the app's
-  third-party notices / About → Licenses.
+  <https://evermeet.cx/ffmpeg/>.
 - The `imageio-ffmpeg` *wrapper* (the Python package the wheel comes from) is
   BSD-2-Clause — relevant only as the delivery vehicle; it imposes no extra
   obligation on the binary.
 
-> **Action for packaging (tracked, not yet wired):** the desktop's third-party
-> license bundle / About screen must include the ffmpeg GPLv3 text + the written
-> offer above before the bundled-ffmpeg build ships to users. This doc is the
-> source of truth for that notice.
+### Compliance artifacts (shipped)
+
+The GPLv3 license text and the written source offer are **bundled next to the
+binary** so the distribution satisfies GPLv3 §6 ("accompany ... with ... a copy of
+this License" + the offer):
+
+- Source of truth (tracked): `apps/desktop/licenses/ffmpeg/COPYING.GPLv3` (the GNU
+  GPL v3 text) and `apps/desktop/licenses/ffmpeg/NOTICE.txt` (provenance + written
+  offer for source).
+- `build-sidecar.mjs` copies both into the staged `apps/desktop/ffmpeg/` resource
+  dir on macOS, so they ship inside the app bundle (`…/Resources/ffmpeg/`) right
+  beside the `ffmpeg` binary they cover.
+
+A reachable in-app About → Licenses screen (aggregating *all* third-party notices,
+not just ffmpeg) is a separate UX improvement tracked in **sc-3778** — it is not
+required for GPL compliance, which the bundled files above already satisfy.
 
 ## Cross-platform
 

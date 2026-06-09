@@ -1,0 +1,42 @@
+FFmpeg — license notice and written offer for source
+=====================================================
+
+SceneWorks bundles a static FFmpeg executable (macOS arm64) that the application
+invokes as a separate program to encode, mux, and sample video/audio. See the
+accompanying COPYING.GPLv3 for the full license text.
+
+License
+-------
+The bundled FFmpeg binary is licensed under the GNU General Public License,
+version 3 (GPLv3). It is a GPL-configured build (configured with --enable-gpl and
+GPL components including libx264 and libx265), which SceneWorks requires for H.264
+video output.
+
+SceneWorks itself is not a derivative work of FFmpeg: it calls FFmpeg only as a
+separate, independent executable over a command-line interface, at arm's length.
+The GPL applies to the bundled FFmpeg binary, which is distributed under its own
+terms as described here.
+
+Version & provenance
+--------------------
+- FFmpeg version: 7.1
+- Target: macOS arm64 (aarch64)
+- Delivery: the binary bundled in the imageio-ffmpeg 0.6.0 macOS arm64 wheel
+  (the imageio-ffmpeg wrapper is BSD-2-Clause; only the FFmpeg binary is GPLv3).
+- Upstream build: evermeet.cx (https://evermeet.cx/ffmpeg/).
+
+Written offer for corresponding source (GPLv3 section 6)
+--------------------------------------------------------
+The complete corresponding source code for the bundled FFmpeg is available:
+
+- FFmpeg 7.1 source: https://ffmpeg.org/releases/ffmpeg-7.1.tar.xz
+  (and the git tag n7.1 at https://git.ffmpeg.org/ffmpeg.git)
+- The exact build configuration is recorded in the binary itself
+  (run `ffmpeg -version`) and in this distribution's
+  docs/sc-3767/ffmpeg-bundling.md.
+- The evermeet.cx build scripts used to produce the macOS binary are published at
+  https://evermeet.cx/ffmpeg/.
+
+Upon request, and for at least three years, SceneWorks will provide the complete
+corresponding source for the bundled FFmpeg version on a physical medium or via
+download. Contact: michael@trefry.net.

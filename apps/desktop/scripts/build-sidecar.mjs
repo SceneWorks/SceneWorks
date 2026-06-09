@@ -87,6 +87,16 @@ if (triple.includes("apple-darwin")) {
   const py = process.env.PYTHON || "python3";
   run(py, ["apps/desktop/scripts/stage-ffmpeg.py", ffmpegDest]);
   console.log(`build-sidecar: staged ${ffmpegDest}`);
+  // The bundled ffmpeg is GPLv3 — ship its license text + written source offer
+  // next to the binary so the distribution satisfies GPLv3 §6 (sc-3767). Source
+  // of truth: apps/desktop/licenses/ffmpeg/ (tracked).
+  for (const name of ["COPYING.GPLv3", "NOTICE.txt"]) {
+    copyFileSync(
+      join(desktopDir, "licenses", "ffmpeg", name),
+      join(ffmpegDir, name),
+    );
+  }
+  console.log(`build-sidecar: staged ffmpeg GPLv3 license + written offer`);
 } else {
   writeFileSync(
     join(ffmpegDir, "README.txt"),
