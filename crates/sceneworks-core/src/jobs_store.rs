@@ -3598,12 +3598,13 @@ mod mlx_routing_tests {
             "wan_2_2_i2v_14b",
             "first_last_frame"
         ));
-        // extend_clip / video_bridge: MLX on the LTX IC-LoRA path only (sc-3522).
+        // extend_clip / video_bridge: MLX on the LTX IC-LoRA path (sc-3522) and Wan TI2V-5B
+        // (`wan_2_2`, single-frame boundary keyframe conditioning — sc-3357).
         for mode in ["extend_clip", "video_bridge"] {
             assert!(video_mode_is_mlx_eligible("ltx_2_3", mode));
             assert!(video_mode_is_mlx_eligible("ltx_2_3_eros", mode));
-            // No IC-LoRA keyframe-append path on the Wan engines → torch.
-            assert!(!video_mode_is_mlx_eligible("wan_2_2", mode));
+            assert!(video_mode_is_mlx_eligible("wan_2_2", mode));
+            // The 14B Wan MoE engines have no `Keyframe` path → torch.
             assert!(!video_mode_is_mlx_eligible("wan_2_2_t2v_14b", mode));
             assert!(!video_mode_is_mlx_eligible("wan_2_2_i2v_14b", mode));
         }
