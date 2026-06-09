@@ -65,6 +65,11 @@ mod pose_jobs;
 // Real-ESRGAN / AuraSR path stays the Windows/Linux backend.
 #[cfg(target_os = "macos")]
 mod upscale_jobs;
+// YOLO11 person detection via onnxruntime/CoreML (epic 3482, sc-3488/sc-3633).
+// macOS-only like pose_jobs: the `ort` engine + CoreML EP only mean anything on
+// Apple Silicon, and the Python Ultralytics path stays the Windows/Linux backend.
+#[cfg(target_os = "macos")]
+mod person_jobs;
 use downloads::*;
 #[cfg(target_os = "macos")]
 use pose_jobs::*;
