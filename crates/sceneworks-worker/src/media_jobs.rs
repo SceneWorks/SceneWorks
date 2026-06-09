@@ -601,12 +601,16 @@ async fn run_yolo11_person_detect(
 /// no frame at `duration` (the last decodable frame sits ~`1/fps` before it), and an
 /// `ffmpeg -ss duration` accurate seek then yields no output and fails the whole track.
 /// 0.2 s clears one frame for any clip ≥ 5 fps without meaningfully moving the sample.
+/// macOS-only, like its sole caller `assemble_real_person_track` (the Python Win/Linux
+/// path samples/extracts separately).
+#[cfg(target_os = "macos")]
 const FRAME_SEEK_GUARD_SECONDS: f64 = 0.2;
 
 /// Clamp a sample timestamp to a frame-extraction seek that always lands on a real frame:
 /// never past `duration - FRAME_SEEK_GUARD_SECONDS`. Only the final inclusive-end sample is
 /// affected; every interior sample passes through unchanged. The tracker still records the
 /// logical sample time — only the seek used to pull pixels is clamped.
+#[cfg(target_os = "macos")]
 pub(crate) fn frame_seek_timestamp(timestamp: f64, duration: f64) -> f64 {
     timestamp.min((duration - FRAME_SEEK_GUARD_SECONDS).max(0.0))
 }
@@ -2107,7 +2111,7 @@ pub(crate) async fn run_ffmpeg(
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, target_os = "macos"))]
 mod frame_seek_tests {
     use super::*;
     use crate::person_track::sample_timestamps;
