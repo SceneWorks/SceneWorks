@@ -160,30 +160,11 @@ export const fallbackModels = [
     capabilities: ["text_to_image", "edit_image", "character_image", "vqa", "interleave"],
     limits: { resolutions: ["2048x2048", "2720x1536", "2496x1664", "2368x1760", "1536x2720", "1664x2496", "1760x2368"] },
     ui: {
-      description: "Unified multimodal model (NEO-unify, ~16B); native text-to-image and instruction editing with strong text rendering and infographics. In Character Studio, drives a wardrobe-preserving reference flow — outfit + accessories + tattoos + hair color carry through to new scenes, but face geometry may drift. Pick InstantID or PuLID-FLUX for face-locked identity. Available in the angle-set picker (sc-2003) as the wardrobe-continuity tier — lowest pure-face ArcFace cosine (mean 0.29) but the most faithful preservation of tank + tattoo + accessories. NOT shown in the pose library — it2i_generate is single-image only. Heavy (~42GB bf16); CUDA or 96GB+ Apple Silicon.",
+      description: "Unified multimodal model (NEO-unify, ~16B); native text-to-image and instruction editing with strong text rendering and infographics. In Character Studio, drives a wardrobe-preserving reference flow — outfit + accessories + tattoos + hair color carry through to new scenes, but face geometry may drift. Pick InstantID or PuLID-FLUX for face-locked identity. Heavy (~42GB bf16); CUDA or 96GB+ Apple Silicon.",
       promptGuide: { title: "SenseNova-U1 8B Prompt Guide", path: "/prompt-guides/sensenova-u1-8b.md" },
       // Edit-style variation knob (imageGuidanceScale): higher = closer to the
       // reference, lower = more prompt-driven variation. Drives advanced.imageGuidanceScale.
       variationStrength: { label: "Reference strength", default: 1.5, min: 0.5, max: 4.0, step: 0.1 },
-      // Multi-backbone angle set (sc-2003): SenseNova rotates the head per
-      // prompt and uniquely preserves wardrobe + tattoos + accessories at the
-      // cost of face-geometry fidelity. Worker resolves the augment via
-      // SenseNovaU1Adapter._ANGLE_PROMPT_AUGMENTS. NOT pose-library-capable
-      // (it2i_generate is single-image only; side-by-side concat is rendered
-      // literally rather than interpreted as a pose instruction).
-      viewAngles: [
-        { id: "three_quarter_left", label: "Three-quarter left" },
-        { id: "three_quarter_right", label: "Three-quarter right" },
-        { id: "left_profile", label: "Left profile" },
-        { id: "right_profile", label: "Right profile" },
-        { id: "up", label: "Looking up" },
-        { id: "down", label: "Looking down" },
-        { id: "up_left", label: "Up · left" },
-        { id: "up_right", label: "Up · right" },
-        { id: "down_left", label: "Down · left" },
-        { id: "down_right", label: "Down · right" },
-        { id: "front", label: "Front" },
-      ],
     },
   },
   {
@@ -198,6 +179,19 @@ export const fallbackModels = [
       description: "8-step distilled SenseNova-U1; ~5-6x faster text-to-image, editing, and Character Studio reference (~50s/image on MPS) at a small quality trade-off. Same wardrobe-preserving reference tradeoff as the base 8B (carries outfit + accessories across new scenes; face may drift). Shares the base 8B weights; a ~0.4GB distill LoRA downloads automatically. Distilled editing is experimental — use the base model for max-quality reference work.",
       promptGuide: { title: "SenseNova-U1 8B Fast Prompt Guide", path: "/prompt-guides/sensenova-u1-8b-fast.md" },
       variationStrength: { label: "Reference strength", default: 1.5, min: 0.5, max: 4.0, step: 0.1 },
+      viewAngles: [
+        { id: "three_quarter_left", label: "Three-quarter left" },
+        { id: "three_quarter_right", label: "Three-quarter right" },
+        { id: "left_profile", label: "Left profile" },
+        { id: "right_profile", label: "Right profile" },
+        { id: "up", label: "Looking up" },
+        { id: "down", label: "Looking down" },
+        { id: "up_left", label: "Up · left" },
+        { id: "up_right", label: "Up · right" },
+        { id: "down_left", label: "Down · left" },
+        { id: "down_right", label: "Down · right" },
+        { id: "front", label: "Front" },
+      ],
     },
   },
   {

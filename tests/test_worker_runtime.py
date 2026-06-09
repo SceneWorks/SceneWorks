@@ -3898,6 +3898,105 @@ def test_sensenova_u1_image_guidance_scale_default_pulls_for_character_image():
     assert img_cfg(SimpleNamespace(advanced={"imageGuidanceScale": "x"}), default=1.5) == 1.5
 
 
+def test_sensenova_u1_angle_set_loops_augmented_prompts(tmp_path, monkeypatch):
+    """SenseNova angle sets must generate one image per canonical angle using
+    the per-angle prompt augment. The practical Character Studio picker exposes
+    the fast target, but both targets share this adapter path."""
+    from scene_worker import image_adapters as ia
+    from scene_worker.character_studio_angles import ANGLE_PROMPT_AUGMENTS
+
+    class FakeTorch:
+        pass
+
+    adapter = SenseNovaU1Adapter()
+    monkeypatch.setattr(
+        "scene_worker.image_adapters.importlib.import_module",
+        lambda name: FakeTorch if name == "torch" else importlib.import_module(name),
+    )
+    monkeypatch.setattr(ia, "require_inference_backend_for_gpu_worker", lambda *args, **kwargs: None)
+    monkeypatch.setattr(ia, "select_torch_device", lambda *args, **kwargs: "cpu")
+    monkeypatch.setattr(ia, "activate_torch_device", lambda *args, **kwargs: None)
+    monkeypatch.setattr(ia, "select_torch_dtype", lambda *args, **kwargs: "float32")
+    monkeypatch.setattr(ia, "gpu_memory_snapshot", lambda *args, **kwargs: None)
+    monkeypatch.setattr(ia, "load_reference_image", lambda *args, **kwargs: Image.new("RGB", (8, 8)))
+    monkeypatch.setattr(adapter, "_load_model", lambda *args, **kwargs: (object(), object()))
+
+    captured: list[dict[str, Any]] = []
+
+    def fake_run_edit(
+        torch,
+        model,
+        tokenizer,
+        prompt,
+        source_image,
+        width,
+        height,
+        steps,
+        guidance_scale,
+        img_guidance_scale,
+        timestep_shift,
+        seed,
+    ):
+        captured.append(
+            {
+                "prompt": prompt,
+                "sourceSize": source_image.size,
+                "steps": steps,
+                "guidanceScale": guidance_scale,
+                "seed": seed,
+            }
+        )
+        return Image.new("RGB", (8, 8))
+
+    monkeypatch.setattr(adapter, "_run_edit_inference", fake_run_edit)
+
+    writer_capture: dict[str, Any] = {}
+
+    def fake_writer(self, *, image_count, image_at_index, raw_settings, **kwargs):
+        writer_capture["image_count"] = image_count
+        writer_capture["raw_settings"] = raw_settings
+        for index in range(image_count):
+            image_at_index(index)
+        return {"images": [], "count": image_count}
+
+    monkeypatch.setattr(ImageAssetWriter, "write_incremental_outputs", fake_writer)
+
+    job = {
+        "id": "job-sensenova-angle",
+        "payload": {
+            "projectId": "p",
+            "mode": "character_image",
+            "model": "sensenova_u1_8b_fast",
+            "prompt": "the character",
+            "referenceAssetId": "ref-1",
+            "count": 1,
+            "seed": 42,
+            "width": 1024,
+            "height": 1024,
+            "advanced": {"angleSet": True},
+        },
+    }
+    adapter.generate(
+        settings=SimpleNamespace(gpu_id="cpu"),
+        job=job,
+        request=image_request_from_job(job),
+        project_path=tmp_path,
+        progress=lambda *a, **k: None,
+        cancel_requested=lambda: False,
+    )
+
+    assert writer_capture["image_count"] == len(CHARACTER_ANGLE_SET_ORDER)
+    assert writer_capture["raw_settings"]["angleSet"] is True
+    assert writer_capture["raw_settings"]["numInferenceSteps"] == 8
+    assert len(captured) == len(CHARACTER_ANGLE_SET_ORDER)
+    assert {entry["seed"] for entry in captured} == {42}
+    for entry, angle in zip(captured, CHARACTER_ANGLE_SET_ORDER):
+        assert ANGLE_PROMPT_AUGMENTS[angle] in entry["prompt"]
+        assert entry["sourceSize"] == (2048, 2048)
+        assert entry["steps"] == 8
+        assert entry["guidanceScale"] == 1.0
+
+
 def test_sensenova_u1_advertises_character_image_capability():
     """Both sensenova_u1 targets must advertise `character_image` in the builtin
     manifest now that the worker dispatches it through the it2i_generate path
@@ -3919,6 +4018,16 @@ def test_sensenova_u1_advertises_character_image_capability():
             f"{model_id} declares character_image but no ui.variationStrength; "
             f"the sc-2018 audit will fail (engine declaration missing)."
         )
+    base_angles = by_id["sensenova_u1_8b"].get("ui", {}).get("viewAngles") or []
+    assert base_angles == [], "The 50-step base model must not be advertised for Character Studio angle sets."
+    fast_angle_ids = {
+        angle["id"] for angle in by_id["sensenova_u1_8b_fast"].get("ui", {}).get("viewAngles") or []
+    }
+    assert fast_angle_ids == set(CHARACTER_ANGLE_SET_ORDER), (
+        "sensenova_u1_8b_fast must expose the canonical angle set in Character Studio; "
+        f"missing={set(CHARACTER_ANGLE_SET_ORDER) - fast_angle_ids}, "
+        f"extra={fast_angle_ids - set(CHARACTER_ANGLE_SET_ORDER)}"
+    )
 
 
 def test_sensenova_u1_vqa_strips_reasoning():
@@ -9865,11 +9974,11 @@ def test_prompt_driven_angle_backbones_share_the_instantid_angle_pack():
     )
     instantid_ids = {entry["id"] for entry in instantid_angles}
     assert len(instantid_ids) == 11, "Baseline angle pack drifted from 11 canonical angles."
-    # The four prompt-driven backbones we shipped in the picker matrix:
+    # The prompt-driven backbones we shipped in the picker matrix:
     for model_id in (
         "qwen_image_edit_2511_lightning",
         "flux2_klein_9b",
-        "sensenova_u1_8b",
+        "sensenova_u1_8b_fast",
     ):
         backbone = manifest_by_id.get(model_id) or {}
         view_angles = backbone.get("ui", {}).get("viewAngles") or []
