@@ -1801,7 +1801,9 @@ fn mac_rust_supported_names_torch_only_image_model_with_its_port_epic() {
         ("kolors", "epic 3532"),
         ("z_image_edit", "epic 3529"),
         ("instantid_realvisxl", "epic 3109"),
-        ("sensenova_u1_8b", "epic 3180"),
+        // SenseNova-U1 (sensenova_u1_8b[_fast]) was ported to MLX (epic 3180 / sc-3900): its image
+        // modes are now MLX-routed, so it is no longer a torch-only image model. Its VQA / interleave
+        // understanding surface (a separate job type) is still gap-classified to epic 3180 below.
         ("lens_turbo", "epic 3164"),
     ];
     for (model, epic) in cases {
@@ -3604,7 +3606,7 @@ fn non_mlx_model_image_job_is_not_routed_to_mlx_worker() {
     register_gpu_worker(&store, "worker-mlx", "mlx", image_caps());
 
     // A torch-only image model with no mlx-gen engine (e.g. kolors — InstantID/Kolors/
-    // PuLID/SenseNova have no MLX crate) stays on the Python path: the torch worker
+    // PuLID have no MLX crate) stays on the Python path: the torch worker
     // claims it without deferral, and the mlx worker would refuse it.
     let job = store
         .create_job(image_job_with(
