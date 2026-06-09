@@ -45,6 +45,12 @@ mod image_jobs;
 use image_jobs::*;
 mod video_jobs;
 use video_jobs::*;
+// Replace-person mask pipeline (epic 3040, sc-3521): cross-platform mask rasterization /
+// resample / stored-seg-mask load, so the mask-port-vs-Python parity test runs on the
+// Linux CI lane. Its masks are consumed only by the macOS Wan-VACE path in `video_jobs`,
+// so off macOS the items are otherwise unused (the parity tests still build + run).
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+mod person_replace;
 mod training_jobs;
 use training_jobs::*;
 mod caption_jobs;
@@ -568,6 +574,17 @@ async fn run_utility_job(
         JobType::VideoGenerate => run_video_generate_job(api, settings, &job)
             .await
             .map_err(|error| ("Video generation failed.", error)),
+        // replace_person → native Wan-VACE (epic 3040, sc-3521): the `PersonReplace` job
+        // type (and `video_generate` mode=`replace_person`) shares the video handler, which
+        // dispatches on `mode == "replace_person"` to the engine `wan_vace` provider — the
+        // native equivalent of the torch `WanVACEPipeline` path. The API routes only
+        // MLX-eligible replace_person jobs here (`jobs_store::video_job_is_mlx_eligible`);
+        // off macOS the `person_replace` capability is never advertised, so this arm only
+        // produces a real video on the macOS MLX worker (and the Python torch path serves
+        // Windows/Linux + non-VACE replacement).
+        JobType::PersonReplace => run_video_generate_job(api, settings, &job)
+            .await
+            .map_err(|error| ("Person replacement failed.", error)),
         // Native MLX LoRA/LoKr training (epic 3039, sc-3043/3049), served in-process
         // by the linked mlx-gen engine on the macOS Apple-Silicon GPU worker. The API
         // routes only MLX-native families here (jobs_store::training_job_is_mlx_eligible);

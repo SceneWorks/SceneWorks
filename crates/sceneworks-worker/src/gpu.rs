@@ -399,6 +399,13 @@ pub(crate) fn mlx_gpu() -> DiscoveredGpu {
             // `image_detail` job runs in-process on the engine here too.
             WorkerCapability::ImageDetail,
             WorkerCapability::VideoGenerate,
+            // replace_person → native Wan-VACE (epic 3040, sc-3521): the `PersonReplace`
+            // job builds the masked control inputs (source clip + onnx-track mask + character
+            // refs) and runs the engine `wan_vace` provider in-process — the native
+            // equivalent of the torch `WanVACEPipeline` path. The API routes only
+            // MLX-eligible replace_person jobs here; non-VACE replacement + Windows/Linux
+            // keep the Python torch path.
+            WorkerCapability::PersonReplace,
             // Native Rust LoRA/LoKr training (epic 3039): plan validation +
             // real execution, both served in-process by `mlx_gen::load_trainer`.
             WorkerCapability::LoraTrain,

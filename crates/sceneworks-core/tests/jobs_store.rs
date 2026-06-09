@@ -1840,7 +1840,14 @@ fn mac_rust_supported_names_infra_job_types() {
     assert!(mac_rust_supported(&person_detect).is_ok());
     let person_track = job_of(&store, JobType::PersonTrack, json!({}));
     assert!(mac_rust_supported(&person_track).is_ok());
-    // replace_person stays a tracked torch gap (the video-gen/inpaint half, epic 3040).
+    // replace_person → native Wan-VACE is supported on a replace-capable MLX video model
+    // (sc-3521); a replace_person job on a model with no MLX video engine stays a torch gap.
+    let replace_mlx = job_of(
+        &store,
+        JobType::PersonReplace,
+        json!({ "model": "wan_2_2", "mode": "replace_person" }),
+    );
+    assert!(mac_rust_supported(&replace_mlx).is_ok());
     let replace = job_of(&store, JobType::PersonReplace, json!({}));
     let replace_reason = mac_rust_supported(&replace).unwrap_err();
     assert!(replace_reason
@@ -2021,13 +2028,13 @@ fn model_mac_support_feature_flags_mirror_routing_without_over_gating() {
     assert!(qwen_edit.features.edit);
     // Third-party LyCORIS now applies on every MLX provider (epic 3641) → supported.
     assert!(model_mac_support("sdxl", "image").features.lycoris);
-    // Video models expose per-mode eligibility; advanced modes are torch-only.
+    // Video models expose per-mode eligibility; extend/bridge stay torch.
     let wan = model_mac_support("wan_2_2", "video").features.video_modes;
     assert_eq!(wan.get("text_to_video"), Some(&true));
     assert_eq!(wan.get("image_to_video"), Some(&true));
     assert_eq!(wan.get("first_last_frame"), Some(&true)); // Wan TI2V-5B FLF is MLX
-    assert_eq!(wan.get("replace_person"), Some(&false));
-    // The 14B Wan MoE engines have no FLF Keyframe path → torch.
+    assert_eq!(wan.get("replace_person"), Some(&true)); // → native Wan-VACE (sc-3521)
+                                                        // The 14B Wan MoE engines have no FLF Keyframe path → torch.
     assert_eq!(
         model_mac_support("wan_2_2_t2v_14b", "video")
             .features
@@ -2806,7 +2813,12 @@ fn ltx_training_is_mlx_worker_only_with_no_torch_fallback() {
 // --- Video routing (epic 3018, sc-3036) ---
 
 fn video_caps() -> Vec<WorkerCapability> {
-    vec![WorkerCapability::Gpu, WorkerCapability::VideoGenerate]
+    vec![
+        WorkerCapability::Gpu,
+        WorkerCapability::VideoGenerate,
+        // replace_person → Wan-VACE rides the `PersonReplace` job type (sc-3521).
+        WorkerCapability::PersonReplace,
+    ]
 }
 
 fn video_job_with(payload: Value, requested_gpu: &str) -> CreateJob {
@@ -2853,12 +2865,12 @@ fn mlx_worker_excluded_from_advanced_mode_video_job() {
     let store = store("mlx-video-routing-exclude");
     register_gpu_worker(&store, "worker-mlx", "mlx", video_caps());
 
-    // replace_person is an advanced mode that still rides the torch path at this point in
-    // the cutover (it routes to the Wan-VACE path in a later slice); the mlx worker must not
-    // claim it even on a Wan model. (first_last_frame is now MLX-eligible — see below.)
+    // extend_clip / video_bridge are advanced modes that still ride the torch path (sc-3522);
+    // the mlx worker must not claim them even on a Wan model. (first_last_frame and
+    // replace_person are now MLX-eligible — see below.)
     let job = store
         .create_job(video_job_with(
-            json!({ "model": "wan_2_2", "mode": "replace_person" }),
+            json!({ "model": "wan_2_2", "mode": "extend_clip" }),
             "auto",
         ))
         .expect("job creates");
@@ -2875,6 +2887,36 @@ fn mlx_worker_excluded_from_advanced_mode_video_job() {
         .expect("torch claims the job");
     assert_eq!(claimed.id, job.id);
     assert_eq!(claimed.assigned_gpu.as_deref(), Some("mps"));
+}
+
+#[test]
+fn replace_person_job_defers_from_torch_worker_to_idle_mlx_worker() {
+    // sc-3521 cutover: replace_person → native Wan-VACE is MLX-eligible on the replace-capable
+    // models, so a torch worker defers the `PersonReplace` job to an idle mlx worker.
+    let store = store("mlx-video-routing-replace");
+    register_gpu_worker(&store, "worker-torch", "mps", video_caps());
+    register_gpu_worker(&store, "worker-mlx", "mlx", video_caps());
+
+    let mut payload = video_job_with(
+        json!({
+            "model": "wan_2_2", "mode": "replace_person",
+            "sourceClipAssetId": "clip", "personTrackId": "track_1", "characterId": "char_1"
+        }),
+        "auto",
+    );
+    payload.job_type = JobType::PersonReplace;
+    let job = store.create_job(payload).expect("job creates");
+
+    assert!(store
+        .claim_next_job("worker-torch")
+        .expect("torch claim ok")
+        .is_none());
+    let claimed = store
+        .claim_next_job("worker-mlx")
+        .expect("mlx claim ok")
+        .expect("mlx claims the replace_person job");
+    assert_eq!(claimed.id, job.id);
+    assert_eq!(claimed.assigned_gpu.as_deref(), Some("mlx"));
 }
 
 #[test]
