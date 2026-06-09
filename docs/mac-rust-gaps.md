@@ -54,7 +54,6 @@ Windows/Linux keep the torch path.** Nothing here is a permanent drop. `mac_rust
 |---|---|---|---|
 | `kolors` | kolors (SDXL UNet + ChatGLM3) | 🔵 Port → drop-on-Mac until then | **epic 3532** |
 | `z_image_edit` | z-image (edit) | 🔵 Port → drop-on-Mac until then | **epic 3529** |
-| `instantid_realvisxl` | sdxl (InstantID) | 🔵 Port → drop-on-Mac until then | epic 3109 |
 | `pulid_flux_dev` | flux (PuLID) | 🔵 Port → drop-on-Mac until then | epic 3069 (engine done; owes SceneWorks routing) |
 | `sensenova_u1_8b`, `sensenova_u1_8b_fast` | sensenova-u1 | 🔵 Port → drop-on-Mac until then | epic 3180 |
 | `lens`, `lens_turbo` | lens (Python sidecar `/opt/lens-venv`) | 🔵 Port → drop-on-Mac until then | epic 3164 |
@@ -79,6 +78,7 @@ dropped — no silent drops.**
 | `edit_image` (img2img-edit) | `z_image_turbo` | 🔵 Port-pending | epic 3529 (folds into Z-Image-Edit port) |
 | reference-without-pose | `z_image_turbo` | 🟢 Ported (MLX) | sc-3536 (spike GO) → sc-3619 |
 | Third-party LyCORIS (LoHa / non-peft LoKr) | all families (`networkType=lycoris`) | 🟢 Ported (MLX) | sc-3537 (spike) → epic 3641 (sc-3642/3643/3671 engine + sc-3644 routing) |
+| InstantID (identity, 11-view angle set, pose-library mode, face-restore) | `instantid_realvisxl` (`character_image` + `referenceAssetId`) | 🟢 Ported (MLX) | epic 3109 (engine: #153 identity/angle, #193 pose+restore — sc-3117/3380) → sc-3345 (identity+angle integration) + sc-3381 (pose+restore integration). Torch path kept as off-Mac + Mac-fallback (Decision-A); venv strip is the final epic-3482 step. |
 
 > **FLUX.1 `edit_image` is not an eradication gap (sc-3535).** The torch `FluxDiffusersAdapter`
 > hard-rejects `edit_image` ("does not support image editing") — FLUX.1 has no edit path on *any*

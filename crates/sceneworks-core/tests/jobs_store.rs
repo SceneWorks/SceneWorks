@@ -1800,7 +1800,9 @@ fn mac_rust_supported_names_torch_only_image_model_with_its_port_epic() {
     let cases = [
         ("kolors", "epic 3532"),
         ("z_image_edit", "epic 3529"),
-        ("instantid_realvisxl", "epic 3109"),
+        // instantid_realvisxl is NO LONGER wholly torch-only (sc-3345: identity + angle set run on
+        // MLX); its remaining per-feature gaps are covered by
+        // `mac_rust_supported_instantid_identity_ok_but_pose_and_facerestore_gapped`.
         ("sensenova_u1_8b", "epic 3180"),
         ("lens_turbo", "epic 3164"),
     ];
@@ -1818,6 +1820,37 @@ fn mac_rust_supported_names_torch_only_image_model_with_its_port_epic() {
             "{model} → {epic}"
         );
         assert!(reason.error_message().starts_with("mlx_unsupported:"));
+    }
+}
+
+#[test]
+fn mac_rust_supported_instantid_full_surface_ok() {
+    let store = store("oracle-instantid");
+    // The full InstantID surface is native on Mac: identity (sc-3345), angle set (sc-3345),
+    // pose-library mode + face-restore (sc-3381, #193 engine). All character_image + reference
+    // shapes are supported.
+    for advanced in [
+        json!({}),
+        json!({ "angleSet": true }),
+        json!({ "poses": [{ "id": "a" }] }),
+        json!({ "faceRestore": true }),
+        json!({ "poses": [{ "id": "a" }], "faceRestore": true }),
+    ] {
+        let job = job_of(
+            &store,
+            JobType::ImageGenerate,
+            json!({
+                "model": "instantid_realvisxl",
+                "mode": "character_image",
+                "referenceAssetId": "asset_1",
+                "prompt": "p",
+                "advanced": advanced,
+            }),
+        );
+        assert!(
+            mac_rust_supported(&job).is_ok(),
+            "InstantID character_image should be MLX-supported"
+        );
     }
 }
 
@@ -3603,9 +3636,9 @@ fn non_mlx_model_image_job_is_not_routed_to_mlx_worker() {
     register_gpu_worker(&store, "worker-torch", "mps", image_caps());
     register_gpu_worker(&store, "worker-mlx", "mlx", image_caps());
 
-    // A torch-only image model with no mlx-gen engine (e.g. kolors — InstantID/Kolors/
-    // PuLID/SenseNova have no MLX crate) stays on the Python path: the torch worker
-    // claims it without deferral, and the mlx worker would refuse it.
+    // A torch-only image model with no mlx-gen engine (e.g. kolors — Kolors/PuLID/SenseNova
+    // have no MLX crate; InstantID is now ported, sc-3345) stays on the Python path: the torch
+    // worker claims it without deferral, and the mlx worker would refuse it.
     let job = store
         .create_job(image_job_with(
             json!({ "model": "kolors", "prompt": "p" }),
