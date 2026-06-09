@@ -4469,7 +4469,7 @@ label {
 
 .character-reference-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
+  grid-template-columns: repeat(auto-fill, minmax(min(190px, 100%), 1fr));
   gap: 12px;
 }
 
@@ -4477,6 +4477,7 @@ label {
   display: grid;
   gap: 10px;
   align-content: start;
+  min-width: 0;
 }
 
 .reference-card.approved {
@@ -4484,9 +4485,13 @@ label {
 }
 
 .reference-media {
+  position: relative;
   display: grid;
   place-items: center;
-  min-height: 136px;
+  width: 100%;
+  aspect-ratio: 1;
+  min-width: 0;
+  overflow: hidden;
   border: 0;
   background: var(--bg-2);
   padding: 0;
@@ -4496,10 +4501,23 @@ label {
 
 .reference-media img,
 .reference-media video {
+  position: absolute;
+  inset: 0;
+  display: block;
   width: 100%;
-  aspect-ratio: 1;
+  height: 100%;
   object-fit: cover;
   border-radius: var(--r-sm);
+}
+
+.reference-card > div:not(.review-actions) {
+  min-width: 0;
+}
+
+.reference-card strong,
+.reference-card span {
+  display: block;
+  overflow-wrap: anywhere;
 }
 
 .look-composer {
