@@ -142,6 +142,19 @@ mlx-gen-joycaption = { git = "https://github.com/michaeltrefry/mlx-gen", rev = "
 # masks in `run_person_track`. Same git rev + mlx-rs pin as the other mlx-gen crates so
 # MLX builds once.
 mlx-gen-sam2 = { git = "https://github.com/michaeltrefry/mlx-gen", rev = "a67e8ed41f372e502ceb2128a140f24f8252248e" }
+# Native MLX face-analysis stack (epic 3079) — SCRFD 5-pt detector + glintr100 ArcFace
+# (iresnet100) 512-d embedder. A plain utility crate (NOT a self-registering generation
+# provider) consumed by the InstantID provider below to detect the reference face + produce
+# the ArcFace embedding with zero Python (replaces insightface/onnxruntime on the Mac path).
+mlx-gen-face = { git = "https://github.com/michaeltrefry/mlx-gen", rev = "a67e8ed41f372e502ceb2128a140f24f8252248e" }
+# InstantID identity-preserving SDXL provider (epic 3109 engine / sc-3345 integration). A
+# bespoke API (`InstantId::load(InstantIdPaths{ sdxl_base, identitynet, ip_adapter })` →
+# `.with_face(scrfd, arcface)` → `generate`/`generate_angle`), NOT an inventory-registered
+# `Generator` — wired via a dedicated `generate_instantid_stream` in image_jobs.rs (parallel
+# to the sc-3060 SDXL-advanced path), not the MLX_MODELS table. Composes mlx-gen-sdxl (UNet +
+# IdentityNet ControlNet + IP-Adapter Resampler) with mlx-gen-face. Same git rev (already
+# contains PR #153 + the sc-3329 quant fix #155) + mlx-rs pin so MLX builds once.
+mlx-gen-instantid = { git = "https://github.com/michaeltrefry/mlx-gen", rev = "a67e8ed41f372e502ceb2128a140f24f8252248e" }
 
 [lints]
 workspace = true

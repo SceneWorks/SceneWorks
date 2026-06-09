@@ -37,6 +37,16 @@ use mlx_gen_qwen_image as _;
 use mlx_gen_sdxl as _;
 #[cfg(target_os = "macos")]
 use mlx_gen_z_image as _;
+// InstantID (sc-3345) is a bespoke provider, not an inventory-registered `Generator`, so it is
+// referenced by name (`InstantId::load`) rather than anchored with `as _;` — and the native face
+// stack it composes (`mlx-gen-face`, SCRFD + ArcFace) rides in transitively but is anchored here so
+// the direct dep the story adds is meaningful + survives any future unused-crate lint.
+#[cfg(target_os = "macos")]
+use mlx_gen::weights::Weights;
+#[cfg(target_os = "macos")]
+use mlx_gen_face as _;
+#[cfg(target_os = "macos")]
+use mlx_gen_instantid::{InstantId, InstantIdPaths, InstantIdRequest};
 
 /// The stub adapter id recorded on generated assets (matches the contract fixture
 /// `tests/fixtures/rust_migration_contracts/sidecars/asset-image.sceneworks.json`).
@@ -394,6 +404,23 @@ pub(crate) async fn run_image_generate_job(
         // Qwen-Image-Edit (mode edit_image / Character-Studio reference / best-effort
         // pose / angle set) → the engine's `qwen_image_edit` model (sc-3397).
         generate_qwen_edit_stream(
+            api,
+            settings,
+            job,
+            &plan,
+            &project_path,
+            backend,
+            &mut asset_writes,
+        )
+        .await?;
+        true
+    } else if instantid_available(&request, settings) {
+        // InstantID identity-preserving character image (sc-3345): single identity or the
+        // 11-view Character-Studio angle set, on RealVisXL + IdentityNet + the native face
+        // stack. Pose-library + faceRestore jobs are NOT eligible (kept on the torch
+        // adapter) — `instantid_available` gates them out so they fall through to the
+        // non-handled path and the torch worker claims them.
+        generate_instantid_stream(
             api,
             settings,
             job,
@@ -3109,7 +3136,9 @@ fn qwen_edit_available(request: &ImageRequest, settings: &Settings) -> bool {
 /// streams against it). Qwen edit reuses the shared [`flux2_grouping`] decision.
 #[cfg(target_os = "macos")]
 fn grouped_image_count(request: &ImageRequest, settings: &Settings) -> u32 {
-    if qwen_edit_available(request, settings) {
+    if instantid_available(request, settings) {
+        instantid_image_count(request)
+    } else if qwen_edit_available(request, settings) {
         match flux2_grouping(request) {
             Flux2Grouping::Angles => CHARACTER_ANGLE_SET_ORDER.len() as u32,
             Flux2Grouping::Poses(count) => count as u32,
@@ -3969,6 +3998,512 @@ async fn generate_sdxl_advanced_stream(
         project_path,
         backend,
         adapter_label,
+        &raw_settings,
+        total,
+        rx,
+        cancel,
+        blocking,
+        asset_writes,
+    )
+    .await
+}
+
+// ---------------------------------------------------------------------------
+// InstantID identity-preserving character image (macOS, epic 3109 engine / sc-3345
+// integration): the production `instantid_realvisxl` model — InstantID on RealVisXL +
+// the stock SDXL IdentityNet ControlNet + the native MLX face stack (SCRFD + ArcFace),
+// all in-process with zero Python. Two modes only (torch parity): a single-identity
+// `character_image` (the reference's natural head pose) and the 11-view Character-Studio
+// angle set. Pose-library mode (`advanced.poses`) + face-restore (`advanced.faceRestore`)
+// are NOT handled here — they stay on the torch `InstantIDAdapter` (engine sc-3117 /
+// sc-3380 not yet ported), gated out by `instantid_available` so the torch worker claims
+// them. fp16 only for now (the validated envelope); Q8/Q4 ride explicit `mlxQuantize`
+// (unvalidated at 1024², gated by sc-3329 follow-up). The provider is the bespoke
+// `mlx_gen_instantid::InstantId` (not an inventory `Generator`), so this is a dedicated
+// stream parallel to `generate_sdxl_advanced_stream`, not an MLX_MODELS row.
+// ---------------------------------------------------------------------------
+
+/// The SceneWorks model id for native InstantID (production = InstantID on RealVisXL_V5.0).
+#[cfg(target_os = "macos")]
+const INSTANTID_MODEL: &str = "instantid_realvisxl";
+/// SDXL base for InstantID when the manifest omits `repo` (the photoreal production base).
+#[cfg(target_os = "macos")]
+const INSTANTID_SDXL_REPO: &str = "SG161222/RealVisXL_V5.0";
+/// Stock InstantID checkpoint repo — the IdentityNet `ControlNetModel/` lives here.
+#[cfg(target_os = "macos")]
+const INSTANTID_CONTROLNET_REPO: &str = "InstantX/InstantID";
+/// Converted-weights bundle (download-on-first-use): the MLX `ip-adapter.safetensors`
+/// (`tools/convert_instantid.py`) + the native face stack `scrfd_10g.safetensors`
+/// (`convert_scrfd.py`) + `arcface_iresnet100.safetensors` (`convert_glintr100.py`). Public
+/// repo, mirroring the YOLO11 / SAM2 `SceneWorks/*-mlx` uploads (sc-3633 / sc-3707).
+#[cfg(target_os = "macos")]
+const INSTANTID_MLX_REPO: &str = "SceneWorks/instantid-mlx";
+#[cfg(target_os = "macos")]
+const INSTANTID_IP_ADAPTER_FILE: &str = "ip-adapter.safetensors";
+#[cfg(target_os = "macos")]
+const INSTANTID_SCRFD_FILE: &str = "scrfd_10g.safetensors";
+#[cfg(target_os = "macos")]
+const INSTANTID_ARCFACE_FILE: &str = "arcface_iresnet100.safetensors";
+/// The IdentityNet weight file inside `ControlNetModel/` (a stock diffusers SDXL ControlNet).
+#[cfg(target_os = "macos")]
+const INSTANTID_CONTROLNET_FILES: [&str; 2] =
+    ["config.json", "diffusion_pytorch_model.safetensors"];
+/// Torch-parity defaults (the `instantid_realvisxl` MODEL_TARGETS): RealVisXL is tuned for a
+/// low CFG; the engine's own `InstantIdRequest::default` guidance (5.0) is for base SDXL.
+#[cfg(target_os = "macos")]
+const INSTANTID_DEFAULT_STEPS: u32 = 30;
+#[cfg(target_os = "macos")]
+const INSTANTID_DEFAULT_GUIDANCE: f32 = 3.0;
+#[cfg(target_os = "macos")]
+const INSTANTID_IP_SCALE: f32 = 0.8;
+#[cfg(target_os = "macos")]
+const INSTANTID_CONTROLNET_SCALE: f32 = 0.8;
+
+/// True when this job carries a pose-library set (`advanced.poses`) — InstantID pose mode is
+/// torch-only (engine sc-3117 not ported), so these are excluded from the MLX path.
+#[cfg(target_os = "macos")]
+fn instantid_pose_set(request: &ImageRequest) -> bool {
+    !pose_entries(request).is_empty()
+}
+
+/// The 11-view Character-Studio angle set vs the single-identity path.
+#[cfg(target_os = "macos")]
+fn instantid_angle_set(request: &ImageRequest) -> bool {
+    advanced_flag(request, "angleSet")
+}
+
+/// Resolve the RealVisXL (SDXL) base snapshot for InstantID: an explicit `modelPath` dir
+/// (advanced or manifest) wins, else the HF cache snapshot for the manifest `repo` (default
+/// RealVisXL_V5.0). The big base is staged by the normal model-download flow; `None` here
+/// means it is not present, so the job is not MLX-runnable (falls through to torch).
+#[cfg(target_os = "macos")]
+fn resolve_instantid_sdxl_base(request: &ImageRequest, settings: &Settings) -> Option<PathBuf> {
+    if let Some(path) = request
+        .advanced
+        .get("modelPath")
+        .or_else(|| request.model_manifest_entry.get("modelPath"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+    {
+        if path.is_dir() {
+            return Some(path);
+        }
+    }
+    let repo = request
+        .model_manifest_entry
+        .get("repo")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or(INSTANTID_SDXL_REPO);
+    huggingface_snapshot_dir(&settings.data_dir, repo)
+}
+
+/// True when this is a native-MLX-eligible InstantID job: the production model in
+/// `character_image` mode with a reference face, NOT a pose set and NOT face-restore (both
+/// torch-only), whose SDXL base resolves locally. The pose/face-restore exclusions mirror the
+/// `jobs_store::instantid_mlx_eligible` routing predicate so the worker and the router agree.
+#[cfg(target_os = "macos")]
+fn instantid_available(request: &ImageRequest, settings: &Settings) -> bool {
+    request.model == INSTANTID_MODEL
+        && request.mode == "character_image"
+        && non_empty(&request.reference_asset_id)
+        && !instantid_pose_set(request)
+        && !advanced_flag(request, "faceRestore")
+        && resolve_instantid_sdxl_base(request, settings).is_some()
+}
+
+/// The number of images an InstantID job produces: 11 for an angle set, else `request.count`.
+#[cfg(target_os = "macos")]
+fn instantid_image_count(request: &ImageRequest) -> u32 {
+    if instantid_angle_set(request) {
+        CHARACTER_ANGLE_SET_ORDER.len() as u32
+    } else {
+        request.count
+    }
+}
+
+/// Resolve InstantID denoise steps: `advanced.steps` (clamped 1..=80) → manifest `steps` →
+/// the torch-parity default (30).
+#[cfg(target_os = "macos")]
+fn instantid_steps(request: &ImageRequest) -> u32 {
+    let parse = |value: &Value| {
+        value
+            .as_u64()
+            .or_else(|| value.as_str()?.trim().parse().ok())
+    };
+    request
+        .advanced
+        .get("steps")
+        .and_then(parse)
+        .or_else(|| request.model_manifest_entry.get("steps").and_then(parse))
+        .map(|steps| steps.clamp(1, 80) as u32)
+        .unwrap_or(INSTANTID_DEFAULT_STEPS)
+}
+
+/// Resolve InstantID guidance: `advanced.guidanceScale` → manifest `guidanceScale` → the
+/// RealVisXL-tuned default (3.0). Clamped to a sane CFG range.
+#[cfg(target_os = "macos")]
+fn instantid_guidance(request: &ImageRequest) -> f32 {
+    let manifest_default = request
+        .model_manifest_entry
+        .get("guidanceScale")
+        .and_then(|value| {
+            value
+                .as_f64()
+                .or_else(|| value.as_str()?.trim().parse().ok())
+        })
+        .map(|value| value as f32)
+        .unwrap_or(INSTANTID_DEFAULT_GUIDANCE);
+    advanced_f32(request, "guidanceScale", manifest_default, 0.0, 30.0)
+}
+
+/// Resolve InstantID quantization. **fp16 (dense) is the default** — the validated identity
+/// envelope (ArcFace-cosine 0.82 @1024²); Q8/Q4 only on an explicit `advanced.mlxQuantize` /
+/// manifest opt-in (identity drops to ~0.64 @512² and full-res quant is unvalidated). Returns
+/// the engine `bits` (`Some(4)`/`Some(8)`/`None`) + the recipe bit count.
+#[cfg(target_os = "macos")]
+fn instantid_quant(request: &ImageRequest) -> (Option<i32>, Option<i64>) {
+    let raw = request
+        .advanced
+        .get("mlxQuantize")
+        .and_then(quant_int)
+        .or_else(|| {
+            request
+                .model_manifest_entry
+                .get("mlx")
+                .and_then(|mlx| mlx.get("quantize"))
+                .and_then(quant_int)
+        });
+    match raw {
+        Some(bits) if bits > 0 && bits <= 4 => (Some(4), Some(4)),
+        Some(bits) if bits > 4 => (Some(8), Some(8)),
+        // None / 0 / negative → fp16 (the default + the validated InstantID envelope).
+        _ => (None, None),
+    }
+}
+
+/// Flat telemetry recorded on InstantID assets (parity with `mlx_raw_settings` + the torch
+/// `InstantIDAdapter` recipe keys).
+#[cfg(target_os = "macos")]
+#[allow(clippy::too_many_arguments)]
+fn instantid_raw_settings(
+    request: &ImageRequest,
+    repo: &str,
+    steps: u32,
+    quant_bits: Option<i64>,
+    guidance: f32,
+    ip_scale: f32,
+    controlnet_scale: f32,
+    angle_set: bool,
+) -> JsonObject {
+    let mut raw = request.advanced.clone();
+    raw.insert("realModelInference".to_owned(), Value::Bool(true));
+    raw.insert("repo".to_owned(), Value::String(repo.to_owned()));
+    raw.insert("numInferenceSteps".to_owned(), json!(steps));
+    raw.insert("guidanceScale".to_owned(), json!(guidance));
+    raw.insert(
+        "mlxQuantize".to_owned(),
+        quant_bits.map(|bits| json!(bits)).unwrap_or(Value::Null),
+    );
+    raw.insert("ipAdapterScale".to_owned(), json!(ip_scale));
+    raw.insert(
+        "controlnetConditioningScale".to_owned(),
+        json!(controlnet_scale),
+    );
+    raw.insert(
+        "instantIdEngine".to_owned(),
+        Value::String("mlx_instantid".to_owned()),
+    );
+    if angle_set {
+        raw.insert("angleSet".to_owned(), Value::Bool(true));
+    }
+    raw
+}
+
+/// Resolve a single InstantID weight file: return it if already present in `dir`, else
+/// download `url` into `dir` (atomic `.tmp` + rename, so a partial download is never mistaken
+/// for a complete one — same shape as `person_segment::ensure_segmenter_weights`).
+#[cfg(target_os = "macos")]
+async fn ensure_instantid_file(
+    client: &reqwest::Client,
+    dir: &Path,
+    name: &str,
+    url: &str,
+) -> WorkerResult<PathBuf> {
+    let target = dir.join(name);
+    if target.exists() {
+        return Ok(target);
+    }
+    tokio::fs::create_dir_all(dir).await?;
+    let bytes = client
+        .get(url)
+        .send()
+        .await?
+        .error_for_status()
+        .map_err(|error| {
+            WorkerError::InvalidPayload(format!(
+                "InstantID weight download failed ({url}): {error}"
+            ))
+        })?
+        .bytes()
+        .await?;
+    let tmp = target.with_extension("download.tmp");
+    tokio::fs::write(&tmp, &bytes).await?;
+    tokio::fs::rename(&tmp, &target).await?;
+    Ok(target)
+}
+
+/// Resolve all InstantID weight inputs, downloading the small converted bundle + the stock
+/// IdentityNet on first use. Returns `(identitynet_dir, ip_adapter, scrfd, arcface)` — all
+/// `Send` paths; the `!Send` MLX load happens on the blocking thread. Resolution order favours
+/// an env override / the HF cache before any network fetch.
+#[cfg(target_os = "macos")]
+async fn ensure_instantid_weights(
+    settings: &Settings,
+) -> WorkerResult<(WeightsSource, PathBuf, PathBuf, PathBuf)> {
+    let client = reqwest::Client::new();
+
+    // Converted bundle (ip-adapter + face stack): an env-pinned dir (pre-staged for local
+    // validation) wins, else the app cache (download missing files from SceneWorks/instantid-mlx).
+    let bundle_dir = std::env::var("SCENEWORKS_INSTANTID_WEIGHTS")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| settings.data_dir.join("cache").join("instantid-mlx"));
+    let base = format!("https://huggingface.co/{INSTANTID_MLX_REPO}/resolve/main");
+    let ip_adapter = ensure_instantid_file(
+        &client,
+        &bundle_dir,
+        INSTANTID_IP_ADAPTER_FILE,
+        &format!("{base}/{INSTANTID_IP_ADAPTER_FILE}"),
+    )
+    .await?;
+    let scrfd = ensure_instantid_file(
+        &client,
+        &bundle_dir,
+        INSTANTID_SCRFD_FILE,
+        &format!("{base}/{INSTANTID_SCRFD_FILE}"),
+    )
+    .await?;
+    let arcface = ensure_instantid_file(
+        &client,
+        &bundle_dir,
+        INSTANTID_ARCFACE_FILE,
+        &format!("{base}/{INSTANTID_ARCFACE_FILE}"),
+    )
+    .await?;
+
+    // IdentityNet (stock InstantX ControlNetModel): env override → HF cache snapshot →
+    // download the two files into the app cache.
+    if let Ok(dir) = std::env::var("SCENEWORKS_INSTANTID_CONTROLNET") {
+        let dir = PathBuf::from(dir);
+        if dir.is_dir() {
+            return Ok((WeightsSource::Dir(dir), ip_adapter, scrfd, arcface));
+        }
+    }
+    if let Some(snapshot) = huggingface_snapshot_dir(&settings.data_dir, INSTANTID_CONTROLNET_REPO)
+    {
+        let controlnet = snapshot.join("ControlNetModel");
+        if controlnet
+            .join("diffusion_pytorch_model.safetensors")
+            .exists()
+        {
+            return Ok((WeightsSource::Dir(controlnet), ip_adapter, scrfd, arcface));
+        }
+    }
+    let controlnet_dir = settings.data_dir.join("cache").join("instantid-controlnet");
+    let cn_base =
+        format!("https://huggingface.co/{INSTANTID_CONTROLNET_REPO}/resolve/main/ControlNetModel");
+    for file in INSTANTID_CONTROLNET_FILES {
+        ensure_instantid_file(&client, &controlnet_dir, file, &format!("{cn_base}/{file}")).await?;
+    }
+    Ok((
+        WeightsSource::Dir(controlnet_dir),
+        ip_adapter,
+        scrfd,
+        arcface,
+    ))
+}
+
+/// Real InstantID generation: resolve the reference + weights on the async side, then load the
+/// bespoke `InstantId` provider once + generate each image on the blocking thread (the MLX
+/// model is `!Send`). The engine `generate`/`generate_angle` expose neither a step-progress
+/// callback nor a `CancelFlag`, so streaming is per-image (no `Step`/`Decoding` events) and
+/// cancellation is honoured between images. Reuses [`consume_gen_events`] for the asset writes.
+#[cfg(target_os = "macos")]
+async fn generate_instantid_stream(
+    api: &ApiClient,
+    settings: &Settings,
+    job: &JobSnapshot,
+    plan: &ImagePlan,
+    project_path: &Path,
+    backend: &str,
+    asset_writes: &mut Vec<Value>,
+) -> WorkerResult<()> {
+    let request = &plan.request;
+    let sdxl_base = resolve_instantid_sdxl_base(request, settings).ok_or_else(|| {
+        WorkerError::InvalidPayload("InstantID base (RealVisXL) not found".to_owned())
+    })?;
+    let reference_id = request
+        .reference_asset_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|id| !id.is_empty())
+        .ok_or_else(|| {
+            WorkerError::InvalidPayload("InstantID requires a reference face image".to_owned())
+        })?;
+    let reference = load_reference_image(
+        &settings.data_dir,
+        &request.project_id,
+        reference_id,
+        project_path,
+    )?;
+
+    let (controlnet, ip_adapter, scrfd_path, arcface_path) =
+        ensure_instantid_weights(settings).await?;
+
+    let steps = instantid_steps(request);
+    let guidance = instantid_guidance(request);
+    let (quant_bits, recipe_bits) = instantid_quant(request);
+    let ip_scale = advanced_f32(request, "ipAdapterScale", INSTANTID_IP_SCALE, 0.0, 1.0);
+    let controlnet_scale = advanced_f32(
+        request,
+        "controlnetConditioningScale",
+        INSTANTID_CONTROLNET_SCALE,
+        0.0,
+        2.0,
+    );
+    let repo = request
+        .model_manifest_entry
+        .get("repo")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or(INSTANTID_SDXL_REPO)
+        .to_owned();
+    let angle_set = instantid_angle_set(request);
+    let raw_settings = instantid_raw_settings(
+        request,
+        &repo,
+        steps,
+        recipe_bits,
+        guidance,
+        ip_scale,
+        controlnet_scale,
+        angle_set,
+    );
+
+    // Per-image work items: (seed, prompt, optional canonical view angle). The angle set is a
+    // shared seed (only the head pose changes across the 11 views — noise-derived attributes
+    // stay constant); single identity is per-seed at the reference's natural pose.
+    let (width, height) = (request.width, request.height);
+    let work: Vec<(i64, String, Option<&'static str>)> = if angle_set {
+        let set_seed = resolve_seed(request, 0);
+        CHARACTER_ANGLE_SET_ORDER
+            .iter()
+            .map(|&angle| {
+                (
+                    set_seed,
+                    augment_prompt_for_angle(&request.prompt, angle),
+                    Some(angle),
+                )
+            })
+            .collect()
+    } else {
+        (0..request.count as usize)
+            .map(|index| (resolve_seed(request, index), request.prompt.clone(), None))
+            .collect()
+    };
+    let total = work.len();
+
+    let cancel = CancelFlag::new();
+    let (tx, rx) = tokio::sync::mpsc::channel::<GenEvent>(64);
+
+    let blocking = {
+        let negative_prompt = request.negative_prompt.clone();
+        let cancel = cancel.clone();
+        let job_id = job.id.clone();
+        tokio::task::spawn_blocking(move || -> WorkerResult<()> {
+            emit_load_event("image_pipeline_load_start", &job_id, "instantid", 0);
+            let paths = InstantIdPaths {
+                sdxl_base,
+                identitynet: controlnet,
+                ip_adapter,
+            };
+            let mut model = InstantId::load(&paths).map_err(|error| {
+                WorkerError::InvalidPayload(format!("InstantID load failed: {error}"))
+            })?;
+            if let Some(bits) = quant_bits {
+                model = model.quantize(bits).map_err(|error| {
+                    WorkerError::InvalidPayload(format!("InstantID quantize failed: {error}"))
+                })?;
+            }
+            let scrfd = Weights::from_file(&scrfd_path).map_err(|error| {
+                WorkerError::InvalidPayload(format!(
+                    "InstantID SCRFD weights {scrfd_path:?}: {error}"
+                ))
+            })?;
+            let arcface = Weights::from_file(&arcface_path).map_err(|error| {
+                WorkerError::InvalidPayload(format!(
+                    "InstantID ArcFace weights {arcface_path:?}: {error}"
+                ))
+            })?;
+            let model = model.with_face(&scrfd, &arcface).map_err(|error| {
+                WorkerError::InvalidPayload(format!("InstantID face stack: {error}"))
+            })?;
+            emit_load_event("image_pipeline_load_complete", &job_id, "instantid", 0);
+
+            for (index, (seed, prompt, angle)) in work.into_iter().enumerate() {
+                if cancel.is_cancelled() {
+                    break;
+                }
+                // Angle set uses a square canvas (the engine forces `req.height = req.width`
+                // for the canonical landmark pack — the sc-2009 kps-aspect rule); single
+                // identity keeps the requested W×H (the engine letterboxes the reference).
+                let req = InstantIdRequest {
+                    prompt,
+                    negative: negative_prompt.clone(),
+                    width,
+                    height,
+                    steps: steps as usize,
+                    guidance,
+                    ip_adapter_scale: ip_scale,
+                    controlnet_scale,
+                    seed: seed as u64,
+                };
+                let out = match angle {
+                    Some(angle) => model.generate_angle(&req, &reference, angle),
+                    None => model.generate(&req, &reference),
+                }
+                .map_err(|error| {
+                    WorkerError::InvalidPayload(format!("InstantID generation failed: {error}"))
+                })?;
+                if tx
+                    .blocking_send(GenEvent::Image {
+                        index,
+                        seed,
+                        width: out.width,
+                        height: out.height,
+                        pixels: out.pixels,
+                    })
+                    .is_err()
+                {
+                    break; // receiver gone — stop generating.
+                }
+            }
+            Ok(())
+        })
+    };
+
+    consume_gen_events(
+        api,
+        settings,
+        job,
+        plan,
+        project_path,
+        backend,
+        "mlx_instantid",
         &raw_settings,
         total,
         rx,
