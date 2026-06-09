@@ -571,9 +571,17 @@ async fn run_utility_job(
         // + procedural stub; the real Wan (sc-3034) / LTX+audio (sc-3035) models link
         // their provider crates. Off macOS the capability is never advertised, so this
         // arm is unreachable there.
-        JobType::VideoGenerate => run_video_generate_job(api, settings, &job)
-            .await
-            .map_err(|error| ("Video generation failed.", error)),
+        // The clip-conditioning advanced video modes (epic 3040, sc-3522) share the video
+        // generation handler — `run_video_generate_job` dispatches `extend_clip` /
+        // `video_bridge` by the request `mode` into the LTX IC-LoRA `VideoClip` path. The API
+        // only routes the LTX-eligible jobs here (`video_job_is_mlx_eligible`); off macOS the
+        // VideoExtend/VideoBridge capabilities are never advertised, so these arms are
+        // unreachable there (the procedural stub would otherwise ignore the conditioning).
+        JobType::VideoGenerate | JobType::VideoExtend | JobType::VideoBridge => {
+            run_video_generate_job(api, settings, &job)
+                .await
+                .map_err(|error| ("Video generation failed.", error))
+        }
         // replace_person → native Wan-VACE (epic 3040, sc-3521): the `PersonReplace` job
         // type (and `video_generate` mode=`replace_person`) shares the video handler, which
         // dispatches on `mode == "replace_person"` to the engine `wan_vace` provider — the
