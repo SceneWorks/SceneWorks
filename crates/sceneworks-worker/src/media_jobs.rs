@@ -619,13 +619,14 @@ async fn assemble_real_person_track(
     http_client: &reqwest::Client,
     job: &JobSnapshot,
     source_media_path: &std::path::Path,
-    selected_box: crate::person_track::NormalizedBox,
+    detection: &Value,
     selected_timestamp: f64,
     duration: f64,
     confidence: f64,
 ) -> WorkerResult<RealPersonTrack> {
     use crate::person_track as pt;
 
+    let selected_box = pt::NormalizedBox::from_json(detection.get("box").unwrap_or(&Value::Null));
     let weights = crate::person_jobs::ensure_detector_weights(settings, http_client).await?;
     let conf = confidence as f32;
     let timestamps = pt::sample_timestamps(duration);
@@ -718,7 +719,7 @@ async fn assemble_real_person_track(
     _http_client: &reqwest::Client,
     _job: &JobSnapshot,
     _source_media_path: &std::path::Path,
-    _selected_box: crate::person_track::NormalizedBox,
+    _detection: &Value,
     _selected_timestamp: f64,
     _duration: f64,
     _confidence: f64,
@@ -831,8 +832,6 @@ pub(crate) async fn run_person_track(
         .get("preview")
         .and_then(Value::as_bool)
         .unwrap_or(false);
-    let selected_box =
-        crate::person_track::NormalizedBox::from_json(detection.get("box").unwrap_or(&Value::Null));
     // The selection frame's source timestamp (recorded in the representative frame's lineage).
     let selected_timestamp = job
         .payload
@@ -896,7 +895,7 @@ pub(crate) async fn run_person_track(
             http_client,
             job,
             &source_media_path,
-            selected_box,
+            &detection,
             selected_timestamp,
             duration,
             confidence,

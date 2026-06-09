@@ -70,6 +70,7 @@ mod upscale_jobs;
 // Apple Silicon, and the Python Ultralytics path stays the Windows/Linux backend.
 #[cfg(target_os = "macos")]
 mod person_jobs;
+#[cfg(target_os = "macos")]
 mod person_track;
 use downloads::*;
 #[cfg(target_os = "macos")]
