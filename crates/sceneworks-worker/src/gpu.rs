@@ -404,10 +404,16 @@ pub(crate) fn mlx_gpu() -> DiscoveredGpu {
             // video_bridge run the LTX IC-LoRA keyframe-append path in-process. The API gates
             // these `video_extend` / `video_bridge` jobs to the LTX engines
             // (`jobs_store::video_job_is_mlx_eligible`); a Wan extend/bridge has no IC-LoRA
-            // path and stays on the Python torch worker, and `replace_person` (PersonReplace)
-            // is a separate Wan-VACE slice not advertised here.
+            // path and stays on the Python torch worker.
             WorkerCapability::VideoExtend,
             WorkerCapability::VideoBridge,
+            // replace_person → native Wan-VACE (epic 3040, sc-3521): the `PersonReplace`
+            // job builds the masked control inputs (source clip + onnx-track mask + character
+            // refs) and runs the engine `wan_vace` provider in-process — the native
+            // equivalent of the torch `WanVACEPipeline` path. The API routes only
+            // MLX-eligible replace_person jobs here; non-VACE replacement + Windows/Linux
+            // keep the Python torch path.
+            WorkerCapability::PersonReplace,
             // Native Rust LoRA/LoKr training (epic 3039): plan validation +
             // real execution, both served in-process by `mlx_gen::load_trainer`.
             WorkerCapability::LoraTrain,

@@ -33,7 +33,7 @@ use crate::image_jobs::{classify_adapter, load_reference_image, lora_path};
 #[cfg(target_os = "macos")]
 use mlx_gen::{
     AdapterKind, AdapterSpec, CancelFlag, Conditioning, GenerationOutput, GenerationRequest, Image,
-    LoadSpec, MoeExpert, Precision, Progress, Quant, WeightsSource,
+    LoadSpec, MoeExpert, Precision, Progress, Quant, ReplacementMode, WeightsSource,
 };
 #[cfg(target_os = "macos")]
 use mlx_gen_ltx as _;
@@ -41,6 +41,8 @@ use mlx_gen_ltx as _;
 use mlx_gen_svd as _;
 #[cfg(target_os = "macos")]
 use mlx_gen_wan as _;
+#[cfg(target_os = "macos")]
+use sceneworks_core::character_store::CharacterStore;
 #[cfg(target_os = "macos")]
 use sceneworks_core::video_request::{ltx_frame_count, wan_frame_count};
 #[cfg(target_os = "macos")]
@@ -134,8 +136,22 @@ pub(crate) async fn run_video_generate_job(
     .await?;
     // Generate: real MLX on macOS for Wan (sc-3034) / LTX+audio (sc-3035) models with
     // resolvable weights, else the procedural stub (non-macOS or missing weights = stub).
+    // replace_person (sc-3521) always routes to the native Wan-VACE provider regardless of the
+    // user-picked (replace-capable) model — the native equivalent of the torch `WanVACEPipeline`
+    // path. It errors clearly if the VACE snapshot is unprovisioned rather than degrading to the
+    // procedural stub (a stubbed person-replace would be meaningless). It also reports the honest
+    // `replacementStatus` the asset sidecar folds in (project_store::build_video_sidecar_parts).
     #[cfg(target_os = "macos")]
-    let (decoded, adapter, raw_settings) = if let Some(engine_id) =
+    let (decoded, adapter, raw_settings, replacement_status) = if request.mode == "replace_person" {
+        let (decoded, status) =
+            generate_wan_vace(api, settings, job, &request, &project_path, backend).await?;
+        (
+            decoded,
+            WAN_VACE_ADAPTER,
+            wan_vace_raw_settings(&request),
+            Some(status),
+        )
+    } else if let Some(engine_id) =
         wan_engine_id(&request.model).filter(|_| wan_available(&request, settings))
     {
         (
@@ -151,6 +167,7 @@ pub(crate) async fn run_video_generate_job(
             .await?,
             WAN_ADAPTER,
             wan_raw_settings(&request),
+            None,
         )
     } else if let Some(engine_id) =
         ltx_engine_id(&request.model).filter(|_| ltx_available(&request, settings))
@@ -168,6 +185,7 @@ pub(crate) async fn run_video_generate_job(
             .await?,
             LTX_ADAPTER,
             ltx_raw_settings(&request),
+            None,
         )
     } else if let Some(engine_id) =
         svd_engine_id(&request.model).filter(|_| svd_available(&request, settings))
@@ -185,19 +203,22 @@ pub(crate) async fn run_video_generate_job(
             .await?,
             SVD_ADAPTER,
             svd_raw_settings(&request),
+            None,
         )
     } else {
         (
             generate_stub_video(&request, seed),
             STUB_ADAPTER,
             stub_raw_settings(&request),
+            None,
         )
     };
     #[cfg(not(target_os = "macos"))]
-    let (decoded, adapter, raw_settings) = (
+    let (decoded, adapter, raw_settings, replacement_status) = (
         generate_stub_video(&request, seed),
         STUB_ADAPTER,
         stub_raw_settings(&request),
+        None::<Value>,
     );
     heartbeat(api, settings, WorkerStatus::Busy, Some(&job.id)).await?;
 
@@ -218,7 +239,7 @@ pub(crate) async fn run_video_generate_job(
     let ctx = FfmpegContext::new(api, settings, &job.id, CANCEL_MESSAGE);
     encode_media(&plan.media_path, decoded, Some(ctx)).await?;
 
-    let fact = video_asset_fact(&plan, seed, adapter, raw_settings);
+    let fact = video_asset_fact(&plan, seed, adapter, raw_settings, replacement_status);
     let result = streaming_result(&plan, &fact, adapter);
     update_job(
         api,
@@ -643,7 +664,13 @@ async fn write_poster_frame(media_path: &Path) {
 /// is consumed by the API's video sidecar builder). Mirrors `video_generation_result`.
 /// `adapter` is the generating adapter id (`procedural_video` stub / `mlx_wan` real)
 /// and `raw_settings` its recorded knobs.
-fn video_asset_fact(plan: &VideoPlan, seed: i64, adapter: &str, raw_settings: Value) -> Value {
+fn video_asset_fact(
+    plan: &VideoPlan,
+    seed: i64,
+    adapter: &str,
+    raw_settings: Value,
+    replacement_status: Option<Value>,
+) -> Value {
     let request = &plan.request;
     let title: String = request.prompt.chars().take(56).collect();
     let title = title.trim();
@@ -657,7 +684,7 @@ fn video_asset_fact(plan: &VideoPlan, seed: i64, adapter: &str, raw_settings: Va
         .get("timelineContext")
         .cloned()
         .unwrap_or_else(|| json!({}));
-    json!({
+    let mut fact = json!({
         "type": "video",
         "assetId": plan.asset_id,
         "mediaPath": plan.media_rel,
@@ -687,7 +714,13 @@ fn video_asset_fact(plan: &VideoPlan, seed: i64, adapter: &str, raw_settings: Va
         "personTrackId": request.person_track_id,
         "replacementMode": request.replacement_mode,
         "timelineContext": timeline_context,
-    })
+    });
+    // replace_person reports its honest mask/track provenance (mirrors the torch
+    // `video_generation_result` `replacementStatus` fold; sc-3521).
+    if let (Some(status), Some(object)) = (replacement_status, fact.as_object_mut()) {
+        object.insert("replacementStatus".to_owned(), status);
+    }
+    fact
 }
 
 fn stub_raw_settings(request: &VideoRequest) -> Value {
@@ -1099,6 +1132,9 @@ struct VideoGenInput {
     steps: Option<u32>,
     guidance: Option<f32>,
     seed: u64,
+    /// Per-request control-clip conditioning scale (Wan-VACE `conditioning_scale`, sc-3441 /
+    /// sc-3521); `None` ⇒ the engine default (1.0). Unused by the non-control paths.
+    control_scale: Option<f32>,
     // LTX-only knobs (sc-3035); left at defaults by Wan + the other models.
     video_mode: Option<String>,
     enhance_prompt: bool,
@@ -1131,6 +1167,7 @@ impl Default for VideoGenInput {
             steps: None,
             guidance: None,
             seed: 0,
+            control_scale: None,
             video_mode: None,
             enhance_prompt: false,
             use_uncensored_enhancer: false,
@@ -1175,6 +1212,7 @@ fn run_video_generation(
         guidance: input.guidance,
         seed: Some(input.seed),
         conditioning: input.conditioning,
+        control_scale: input.control_scale,
         video_mode: input.video_mode,
         enhance_prompt: input.enhance_prompt,
         use_uncensored_enhancer: input.use_uncensored_enhancer,
@@ -1939,6 +1977,7 @@ async fn generate_ltx(
         steps: None,
         guidance: None,
         seed: resolve_video_seed(request) as u64,
+        control_scale: None,
         video_mode,
         enhance_prompt: advanced_bool(request, "enhancePrompt"),
         use_uncensored_enhancer: advanced_bool(request, "useUncensoredEnhancer"),
@@ -2219,6 +2258,480 @@ async fn generate_svd(
     generate_video(api, settings, job, backend, input).await
 }
 
+// ---------------------------------------------------------------------------
+// Real MLX Wan-VACE replace_person generation (macOS, via mlx-gen-wan, sc-3521):
+// route the `replace_person` mode / `PersonReplace` job to the native `wan_vace`
+// provider — the equivalent of the torch `DiffusersVideoAdapter` `WanVACEPipeline`
+// path. The worker builds the masked-control inputs (source clip frames + the
+// onnx-track person mask + character refs) and the engine does the
+// masking/neutralization + denoise. Person detect/track/segment stays upstream.
+// ---------------------------------------------------------------------------
+
+/// Adapter id recorded on a real MLX Wan-VACE replace_person asset.
+#[cfg(target_os = "macos")]
+const WAN_VACE_ADAPTER: &str = "mlx_wan_vace";
+
+/// Letterbox pad colour for extracted source-clip frames — matches the Python `fit_frame`
+/// background (`0x12110f` = RGB 18,17,15) so the box masks (rasterized from the same
+/// normalized boxes at W×H) stay aligned with the control frames through the engine's
+/// identity-resize preprocess.
+#[cfg(target_os = "macos")]
+const FRAME_PAD_COLOR: &str = "0x12110f";
+
+/// Raw-settings recorded on a real Wan-VACE asset (`advanced` knobs + the real-inference
+/// markers; the engine id is `wan_vace`, not the user-picked replace-capable model).
+#[cfg(target_os = "macos")]
+fn wan_vace_raw_settings(request: &VideoRequest) -> Value {
+    let mut raw = request.advanced.clone();
+    raw.insert("realModelInference".to_owned(), Value::Bool(true));
+    raw.insert("model".to_owned(), Value::String("wan_vace".to_owned()));
+    raw.insert(
+        "frameCount".to_owned(),
+        json!(wan_frame_count(request.raw_frame_count())),
+    );
+    raw.insert("fps".to_owned(), json!(request.fps));
+    raw.insert(
+        "replacementMode".to_owned(),
+        Value::String(request.replacement_mode.clone()),
+    );
+    Value::Object(raw)
+}
+
+/// SceneWorks `replacementMode` string → engine [`ReplacementMode`] (default FaceOnly).
+#[cfg(target_os = "macos")]
+fn replacement_mode_from(value: &str) -> ReplacementMode {
+    match value {
+        "full_person_keep_outfit" => ReplacementMode::FullPersonKeepOutfit,
+        "full_person_replace_outfit" => ReplacementMode::FullPersonReplaceOutfit,
+        _ => ReplacementMode::FaceOnly,
+    }
+}
+
+/// Whether `dir` is a load-ready assembled Wan-VACE snapshot — the diffusers VACE
+/// `transformer/` plus the shared base-Wan UMT5/VAE/tokenizer that `mlx_gen::load("wan_vace")`
+/// reads (sc-3467 `assemble_wan_vace_snapshot` layout).
+#[cfg(target_os = "macos")]
+fn wan_vace_dir_is_complete(dir: &Path) -> bool {
+    dir.join("transformer").join("config.json").is_file()
+        && dir.join("t5_encoder.safetensors").is_file()
+        && dir.join("vae.safetensors").is_file()
+        && dir.join("tokenizer.json").is_file()
+}
+
+/// Resolve (assembling on first use) the converted Wan-VACE snapshot dir. Env override
+/// (`SCENEWORKS_MLX_WAN_VACE_DIR`) → the app-managed `<data>/models/mlx/wan_vace` → assemble
+/// it from the diffusers VACE transformer (HF `Wan-AI/Wan2.1-VACE-1.3B-diffusers`,
+/// `transformer/`) + a converted base-Wan 14B snapshot's shared UMT5/z16-VAE/tokenizer
+/// (sc-3467 `assemble_wan_vace_snapshot` — packaging, not conversion). Errors clearly when a
+/// component is missing rather than degrading to the stub.
+#[cfg(target_os = "macos")]
+fn resolve_wan_vace_model_dir(settings: &Settings) -> WorkerResult<PathBuf> {
+    if let Ok(override_dir) = std::env::var("SCENEWORKS_MLX_WAN_VACE_DIR") {
+        let path = PathBuf::from(override_dir.trim());
+        if wan_vace_dir_is_complete(&path) {
+            return Ok(path);
+        }
+    }
+    let out_dir = settings
+        .data_dir
+        .join("models")
+        .join("mlx")
+        .join("wan_vace");
+    if wan_vace_dir_is_complete(&out_dir) {
+        return Ok(out_dir);
+    }
+    // Assemble on first use: the VACE transformer is diffusers-layout (no conversion); the
+    // shared T5/VAE/tokenizer come from a converted base-Wan 14B snapshot (z16 VAE, shared
+    // with VACE since both are Wan2.1-based).
+    let vace_repo = "Wan-AI/Wan2.1-VACE-1.3B-diffusers";
+    let transformer_dir = huggingface_snapshot_dir(&settings.data_dir, vace_repo)
+        .map(|snapshot| snapshot.join("transformer"))
+        .filter(|dir| dir.join("config.json").is_file())
+        .ok_or_else(|| {
+            WorkerError::InvalidPayload(format!(
+                "replace_person: the Wan-VACE transformer ({vace_repo}) is not downloaded — \
+                 fetch it via the model manager."
+            ))
+        })?;
+    let base_wan = ["wan_2_2_t2v_14b", "wan_2_2_i2v_14b"]
+        .into_iter()
+        .find_map(|model| resolve_wan_model_dir(settings, model, model).ok())
+        .ok_or_else(|| {
+            WorkerError::InvalidPayload(
+                "replace_person: Wan-VACE needs a converted base-Wan 14B snapshot (its shared \
+                 UMT5 text encoder + z16 VAE + tokenizer). Convert/download wan_2_2_t2v_14b or \
+                 wan_2_2_i2v_14b first."
+                    .to_owned(),
+            )
+        })?;
+    mlx_gen_wan::convert::assemble_wan_vace_snapshot(&out_dir, &transformer_dir, &base_wan, true)
+        .map_err(|error| {
+        WorkerError::InvalidPayload(format!(
+            "replace_person: failed to assemble the Wan-VACE snapshot: {error}"
+        ))
+    })?;
+    Ok(out_dir)
+}
+
+/// Decode the source clip into exactly `count` RGB frames at `width × height` (letterboxed,
+/// `FRAME_PAD_COLOR`), evenly resampled across the clip — the new shared frame-extraction
+/// helper (Python `load_source_video_frames`; also the seam extend/bridge will reuse). The
+/// frames are the (un-neutralized) Wan-VACE control video; the engine masks them.
+#[cfg(target_os = "macos")]
+async fn load_source_video_frames(
+    api: &ApiClient,
+    settings: &Settings,
+    job: &JobSnapshot,
+    request: &VideoRequest,
+    project_path: &Path,
+    count: usize,
+) -> WorkerResult<Vec<Image>> {
+    let asset_id = request.source_clip_asset_id.as_deref().ok_or_else(|| {
+        WorkerError::InvalidPayload(
+            "replace_person requires a source clip (sourceClipAssetId).".to_owned(),
+        )
+    })?;
+    let asset = ProjectStore::new(settings.data_dir.clone(), "worker")
+        .get_asset(&request.project_id, asset_id)
+        .map_err(|error| WorkerError::InvalidPayload(format!("source clip {asset_id}: {error}")))?;
+    let rel = asset
+        .get("file")
+        .and_then(|file| file.get("path"))
+        .and_then(Value::as_str)
+        .filter(|path| !path.trim().is_empty())
+        .ok_or_else(|| {
+            WorkerError::InvalidPayload(format!("source clip {asset_id} has no media path"))
+        })?;
+    let media_path = project_path.join(rel);
+    if !tokio::fs::try_exists(&media_path).await? {
+        return Err(WorkerError::InvalidPayload(format!(
+            "source clip file is missing: {}",
+            media_path.display()
+        )));
+    }
+
+    let work_dir = std::env::temp_dir().join(format!("sw-replace-frames-{}", job.id));
+    tokio::fs::create_dir_all(&work_dir).await?;
+    let pattern = work_dir.join("src_%05d.png");
+    let filters = format!(
+        "scale={width}:{height}:force_original_aspect_ratio=decrease,\
+         pad={width}:{height}:(ow-iw)/2:(oh-ih)/2:color={FRAME_PAD_COLOR},format=rgb24",
+        width = request.width,
+        height = request.height,
+    );
+    let ctx = FfmpegContext::new(api, settings, &job.id, CANCEL_MESSAGE);
+    let extract = run_ffmpeg(
+        vec![
+            "ffmpeg".to_owned(),
+            "-nostdin".to_owned(),
+            "-y".to_owned(),
+            "-i".to_owned(),
+            media_path.display().to_string(),
+            "-vf".to_owned(),
+            filters,
+            "-start_number".to_owned(),
+            "0".to_owned(),
+            pattern.display().to_string(),
+        ],
+        Some(ctx),
+    )
+    .await;
+    let frames = match extract {
+        Ok(()) => select_extracted_frames(work_dir.clone(), count).await,
+        Err(error) => Err(error),
+    };
+    let _ = tokio::fs::remove_dir_all(&work_dir).await;
+    frames
+}
+
+/// Collect the extracted PNG frames in `work_dir`, resample them to `count` evenly-spaced
+/// indices (Python `evenly_spaced_indices` — the same arithmetic as the mask resample), and
+/// decode the selected frames to engine [`Image`]s. Blocking IO/decoding runs off the runtime.
+#[cfg(target_os = "macos")]
+async fn select_extracted_frames(work_dir: PathBuf, count: usize) -> WorkerResult<Vec<Image>> {
+    tokio::task::spawn_blocking(move || -> WorkerResult<Vec<Image>> {
+        let mut paths: Vec<PathBuf> = std::fs::read_dir(&work_dir)?
+            .filter_map(|entry| entry.ok().map(|e| e.path()))
+            .filter(|path| path.extension().and_then(|s| s.to_str()) == Some("png"))
+            .collect();
+        paths.sort();
+        if paths.is_empty() {
+            return Err(WorkerError::InvalidPayload(
+                "source clip produced no decodable frames".to_owned(),
+            ));
+        }
+        let indices = crate::person_replace::resample_indices(paths.len(), count);
+        indices
+            .into_iter()
+            .map(|index| {
+                let decoded = image::open(&paths[index])
+                    .map_err(|error| {
+                        WorkerError::InvalidPayload(format!(
+                            "source frame {}: {error}",
+                            paths[index].display()
+                        ))
+                    })?
+                    .to_rgb8();
+                Ok(Image {
+                    width: decoded.width(),
+                    height: decoded.height(),
+                    pixels: decoded.into_raw(),
+                })
+            })
+            .collect()
+    })
+    .await
+    .map_err(|error| WorkerError::InvalidPayload(format!("frame decode task: {error}")))?
+}
+
+/// The approved character reference images (≤4) for the replacement (Python
+/// `character_reference_images`): the selected look's `approvedReferenceIds`, else the
+/// character's approved `references`. Errors when none are readable (the torch
+/// `_validate_inputs` parity). The engine cover-fits each to the output size.
+#[cfg(target_os = "macos")]
+fn resolve_character_references(
+    settings: &Settings,
+    request: &VideoRequest,
+    project_path: &Path,
+) -> WorkerResult<Vec<Image>> {
+    let character_id = request.character_id.as_deref().ok_or_else(|| {
+        WorkerError::InvalidPayload("replace_person requires a character (characterId).".to_owned())
+    })?;
+    let character = CharacterStore::new(&settings.data_dir, project_path.to_path_buf())
+        .get_character(&request.project_id, character_id)
+        .map_err(|error| {
+            WorkerError::InvalidPayload(format!("character {character_id}: {error}"))
+        })?;
+    let mut ids: Vec<String> = Vec::new();
+    if let Some(look_id) = request.character_look_id.as_deref() {
+        if let Some(looks) = character.get("looks").and_then(Value::as_array) {
+            for look in looks {
+                if look.get("id").and_then(Value::as_str) == Some(look_id) {
+                    if let Some(approved) =
+                        look.get("approvedReferenceIds").and_then(Value::as_array)
+                    {
+                        ids.extend(approved.iter().filter_map(Value::as_str).map(str::to_owned));
+                    }
+                }
+            }
+        }
+    }
+    if ids.is_empty() {
+        if let Some(references) = character.get("references").and_then(Value::as_array) {
+            for reference in references {
+                if reference
+                    .get("approved")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false)
+                {
+                    if let Some(asset_id) = reference.get("assetId").and_then(Value::as_str) {
+                        ids.push(asset_id.to_owned());
+                    }
+                }
+            }
+        }
+    }
+    let mut images = Vec::new();
+    for asset_id in ids.into_iter().filter(|id| !id.is_empty()).take(4) {
+        if let Ok(image) = load_reference_image(
+            &settings.data_dir,
+            &request.project_id,
+            &asset_id,
+            project_path,
+        ) {
+            images.push(image);
+        }
+    }
+    if images.is_empty() {
+        return Err(WorkerError::InvalidPayload(
+            "Replace Person requires at least one approved character reference image.".to_owned(),
+        ));
+    }
+    Ok(images)
+}
+
+/// Convert an `image::RgbImage` (the rasterized mask) to an engine [`Image`].
+#[cfg(target_os = "macos")]
+fn rgb_image_to_engine(image: image::RgbImage) -> Image {
+    Image {
+        width: image.width(),
+        height: image.height(),
+        pixels: image.into_raw(),
+    }
+}
+
+/// Build the Wan-VACE conditioning: one [`Conditioning::ControlClip`] (source frames + the
+/// per-frame person mask; the engine neutralizes the masked region) plus one
+/// [`Conditioning::Reference`] per character reference image.
+#[cfg(target_os = "macos")]
+fn build_vace_conditioning(
+    frames: Vec<Image>,
+    masks: Vec<image::RgbImage>,
+    references: Vec<Image>,
+    masking_strength: f32,
+    mode: ReplacementMode,
+) -> WorkerResult<Vec<Conditioning>> {
+    if frames.len() != masks.len() {
+        return Err(WorkerError::InvalidPayload(format!(
+            "replace_person: control frames ({}) and masks ({}) length mismatch",
+            frames.len(),
+            masks.len()
+        )));
+    }
+    let mask_images: Vec<Image> = masks.into_iter().map(rgb_image_to_engine).collect();
+    let mut conditioning = Vec::with_capacity(1 + references.len());
+    conditioning.push(Conditioning::ControlClip {
+        frames,
+        mask: mask_images,
+        masking_strength,
+        start_frame: 0,
+        mode,
+    });
+    for image in references {
+        conditioning.push(Conditioning::Reference {
+            image,
+            strength: None,
+        });
+    }
+    Ok(conditioning)
+}
+
+/// The honest `replacementStatus` recorded on the asset fact (mirrors the torch
+/// `replacement_status`); the API folds it into the video sidecar's normalizedSettings.
+#[cfg(target_os = "macos")]
+fn replacement_status_value(
+    track: &Value,
+    track_id: &str,
+    mask_mode: &str,
+    masking_strength: f32,
+    reference_count: usize,
+    frame_count: usize,
+) -> Value {
+    let status = track.get("status").and_then(Value::as_object);
+    let person_tracking_active = status
+        .and_then(|s| s.get("personTrackingActive"))
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let mask_state = status
+        .and_then(|s| s.get("maskState"))
+        .and_then(Value::as_str)
+        .unwrap_or("missing")
+        .to_owned();
+    let corrections = track.get("corrections").and_then(Value::as_array);
+    let correction_count = corrections.map(|list| list.len()).unwrap_or(0);
+    let resolved_track_id = track.get("id").and_then(Value::as_str).unwrap_or(track_id);
+    json!({
+        "personDetectionActive": true,
+        "personTrackingActive": person_tracking_active,
+        "replacementActive": true,
+        "replacementAdapter": WAN_VACE_ADAPTER,
+        "maskMode": mask_mode,
+        "maskState": mask_state,
+        "maskingStrength": masking_strength,
+        "personTrackId": resolved_track_id,
+        "characterReferenceCount": reference_count,
+        "controlFrameCount": frame_count,
+        "usedCorrections": correction_count > 0,
+        "correctionCount": correction_count,
+    })
+}
+
+/// Resolve a replace_person request into a Wan-VACE generation: assemble/resolve the snapshot,
+/// extract the source-clip control frames, build the per-frame person mask from the saved
+/// track (corrections applied), load the character refs, run the engine, and return the decoded
+/// video plus the honest `replacementStatus`. Person detect/track/segment stays upstream.
+#[cfg(target_os = "macos")]
+async fn generate_wan_vace(
+    api: &ApiClient,
+    settings: &Settings,
+    job: &JobSnapshot,
+    request: &VideoRequest,
+    project_path: &Path,
+    backend: &str,
+) -> WorkerResult<(DecodedVideo, Value)> {
+    let model_dir = resolve_wan_vace_model_dir(settings)?;
+    let track_id = request.person_track_id.as_deref().ok_or_else(|| {
+        WorkerError::InvalidPayload(
+            "replace_person requires a person track (personTrackId).".to_owned(),
+        )
+    })?;
+    let track = ProjectStore::new(settings.data_dir.clone(), "worker")
+        .get_person_track(&request.project_id, track_id)
+        .map_err(|error| {
+            WorkerError::InvalidPayload(format!("person track {track_id}: {error}"))
+        })?;
+
+    // Source frames + masks must match in count and be `1 + 4·k` (one z16 VAE temporal chunk),
+    // which `wan_frame_count` guarantees — the engine `validate()` enforces it too.
+    let frame_count = wan_frame_count(request.raw_frame_count()) as usize;
+    let frames =
+        load_source_video_frames(api, settings, job, request, project_path, frame_count).await?;
+    let (masks, mask_mode) = crate::person_replace::person_track_masks(
+        project_path,
+        &track,
+        request.width,
+        request.height,
+        frames.len(),
+    )?;
+    let references = resolve_character_references(settings, request, project_path)?;
+    let reference_count = references.len();
+    let frame_total = frames.len();
+
+    let masking_strength = advanced_f32(request, "maskingStrength", 1.0);
+    let conditioning = build_vace_conditioning(
+        frames,
+        masks,
+        references,
+        masking_strength,
+        replacement_mode_from(&request.replacement_mode),
+    )?;
+
+    let negative_prompt = {
+        let trimmed = request.negative_prompt.trim();
+        (!trimmed.is_empty()).then(|| trimmed.to_owned())
+    };
+    let steps = request.advanced.get("steps").and_then(|value| {
+        value
+            .as_u64()
+            .or_else(|| value.as_str()?.trim().parse().ok())
+            .map(|value| value as u32)
+    });
+    let guidance = request.advanced.get("guidanceScale").and_then(|value| {
+        value
+            .as_f64()
+            .or_else(|| value.as_str()?.trim().parse().ok())
+            .map(|value| value as f32)
+    });
+    let input = VideoGenInput {
+        engine_id: "wan_vace",
+        model_dir,
+        quant: resolve_wan_quant(request),
+        adapters: Vec::new(),
+        conditioning,
+        prompt: request.prompt.clone(),
+        negative_prompt,
+        width: request.width,
+        height: request.height,
+        frames: frame_count as u32,
+        fps: request.fps,
+        steps,
+        guidance,
+        seed: resolve_video_seed(request) as u64,
+        control_scale: Some(advanced_f32(request, "conditioningScale", 1.0)),
+        ..VideoGenInput::default()
+    };
+    let decoded = generate_video(api, settings, job, backend, input).await?;
+    let status = replacement_status_value(
+        &track,
+        track_id,
+        mask_mode,
+        masking_strength,
+        reference_count,
+        frame_total,
+    );
+    Ok((decoded, status))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2361,7 +2874,13 @@ mod tests {
             "sourceAssetId": "asset_src", "personTrackId": "track_1"
         }));
         let plan = VideoPlan::new(&request, Path::new("/tmp/project"));
-        let fact = video_asset_fact(&plan, 42, "procedural_video", stub_raw_settings(&request));
+        let fact = video_asset_fact(
+            &plan,
+            42,
+            "procedural_video",
+            stub_raw_settings(&request),
+            None,
+        );
         assert_eq!(fact["type"], json!("video"));
         assert_eq!(fact["mimeType"], json!("video/mp4"));
         assert_eq!(fact["mediaPath"], json!(plan.media_rel));
@@ -2379,6 +2898,196 @@ mod tests {
         assert_eq!(result["adapter"], json!("procedural_video"));
         assert_eq!(result["assetWrites"].as_array().unwrap().len(), 1);
         assert_eq!(result["generationSet"]["count"], json!(1));
+    }
+
+    /// A replace_person asset fact carries the `replacementStatus` object the API folds into
+    /// the video sidecar (sc-3521); a non-replace fact omits it.
+    #[test]
+    fn asset_fact_embeds_replacement_status_when_present() {
+        let request = request(json!({
+            "projectId": "p", "model": "wan_2_2", "mode": "replace_person",
+            "prompt": "swap the hero", "personTrackId": "track_9"
+        }));
+        let plan = VideoPlan::new(&request, Path::new("/tmp/project"));
+        let status = json!({ "replacementActive": true, "maskMode": "segmentation" });
+        let fact = video_asset_fact(&plan, 7, "mlx_wan_vace", json!({}), Some(status));
+        assert_eq!(fact["replacementStatus"]["replacementActive"], json!(true));
+        assert_eq!(fact["replacementStatus"]["maskMode"], json!("segmentation"));
+        // Without a status the key is absent (the non-replace paths).
+        let bare = video_asset_fact(&plan, 7, "mlx_wan", json!({}), None);
+        assert!(bare.get("replacementStatus").is_none());
+    }
+
+    /// SceneWorks `replacementMode` strings → engine `ReplacementMode` (default FaceOnly).
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn replacement_mode_maps_the_three_granularities() {
+        assert_eq!(
+            replacement_mode_from("face_only"),
+            ReplacementMode::FaceOnly
+        );
+        assert_eq!(
+            replacement_mode_from("full_person_keep_outfit"),
+            ReplacementMode::FullPersonKeepOutfit
+        );
+        assert_eq!(
+            replacement_mode_from("full_person_replace_outfit"),
+            ReplacementMode::FullPersonReplaceOutfit
+        );
+        assert_eq!(replacement_mode_from("nonsense"), ReplacementMode::FaceOnly);
+    }
+
+    /// The Wan-VACE conditioning is one ControlClip (frames + per-frame mask) followed by one
+    /// Reference per character image; mismatched frame/mask counts fail clearly.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn vace_conditioning_builds_control_clip_plus_references() {
+        let frame = |v: u8| Image {
+            width: 2,
+            height: 2,
+            pixels: vec![v; 12],
+        };
+        let mask = || image::RgbImage::from_pixel(2, 2, image::Rgb([255, 255, 255]));
+        let conditioning = build_vace_conditioning(
+            vec![frame(10), frame(20)],
+            vec![mask(), mask()],
+            vec![frame(30)],
+            0.75,
+            ReplacementMode::FullPersonKeepOutfit,
+        )
+        .expect("conditioning builds");
+        assert_eq!(conditioning.len(), 2); // 1 ControlClip + 1 Reference
+        match &conditioning[0] {
+            Conditioning::ControlClip {
+                frames,
+                mask,
+                masking_strength,
+                start_frame,
+                mode,
+            } => {
+                assert_eq!(frames.len(), 2);
+                assert_eq!(mask.len(), 2);
+                assert_eq!(*masking_strength, 0.75);
+                assert_eq!(*start_frame, 0);
+                assert_eq!(*mode, ReplacementMode::FullPersonKeepOutfit);
+            }
+            other => panic!("expected ControlClip, got {other:?}"),
+        }
+        assert!(matches!(conditioning[1], Conditioning::Reference { .. }));
+        // A frame/mask count mismatch is rejected.
+        assert!(build_vace_conditioning(
+            vec![frame(1)],
+            vec![mask(), mask()],
+            Vec::new(),
+            1.0,
+            ReplacementMode::FaceOnly,
+        )
+        .is_err());
+    }
+
+    /// `replacement_status_value` reports the honest mask/track provenance the sidecar folds in.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn replacement_status_reads_track_and_counts() {
+        let track = json!({
+            "id": "track_42",
+            "status": { "maskState": "active", "personTrackingActive": true },
+            "corrections": [ { "frameIndex": 0 }, { "frameIndex": 3 } ]
+        });
+        // 0.5 is exactly representable as f32 so the JSON widen to f64 is exact.
+        let status = replacement_status_value(&track, "ignored", "segmentation", 0.5, 2, 81);
+        assert_eq!(status["personDetectionActive"], json!(true));
+        assert_eq!(status["personTrackingActive"], json!(true));
+        assert_eq!(status["replacementActive"], json!(true));
+        assert_eq!(status["replacementAdapter"], json!("mlx_wan_vace"));
+        assert_eq!(status["maskMode"], json!("segmentation"));
+        assert_eq!(status["maskState"], json!("active"));
+        assert_eq!(status["maskingStrength"], json!(0.5));
+        assert_eq!(status["personTrackId"], json!("track_42"));
+        assert_eq!(status["characterReferenceCount"], json!(2));
+        assert_eq!(status["controlFrameCount"], json!(81));
+        assert_eq!(status["usedCorrections"], json!(true));
+        assert_eq!(status["correctionCount"], json!(2));
+    }
+
+    /// An assembled Wan-VACE snapshot dir if one is present (env override or the app-managed
+    /// default), else `None` so the real-weight smoke skips.
+    #[cfg(target_os = "macos")]
+    fn wan_vace_dir() -> Option<PathBuf> {
+        if let Ok(dir) = std::env::var("SCENEWORKS_MLX_WAN_VACE_DIR") {
+            let path = PathBuf::from(dir.trim());
+            if wan_vace_dir_is_complete(&path) {
+                return Some(path);
+            }
+        }
+        let home = std::env::var("HOME").ok()?;
+        let path = PathBuf::from(home)
+            .join("Library/Application Support/SceneWorks/data/models/mlx/wan_vace");
+        wan_vace_dir_is_complete(&path).then_some(path)
+    }
+
+    /// Real in-process Wan-VACE replace_person through the engine: load the assembled snapshot
+    /// and denoise a tiny 5-frame clip from a synthetic control clip (gray frames + a centered
+    /// box mask) + one reference, asserting frames come back RGB8-sized with streamed progress.
+    /// `#[ignore]` — the weights live outside CI; run manually on a Mac where the snapshot is
+    /// assembled (the real-Mac GPU parity gate, sc-3521).
+    #[cfg(target_os = "macos")]
+    #[ignore = "loads the real Wan-VACE snapshot; run manually on a Mac with it assembled"]
+    #[test]
+    fn wan_vace_real_weights() {
+        let Some(model_dir) = wan_vace_dir() else {
+            eprintln!("skipping wan_vace_real_weights: no assembled wan_vace snapshot found");
+            return;
+        };
+        let (w, h) = (256u32, 256u32);
+        let gray = || Image {
+            width: w,
+            height: h,
+            pixels: vec![118u8; (w * h * 3) as usize],
+        };
+        let frames: Vec<Image> = (0..5).map(|_| gray()).collect();
+        let masks: Vec<image::RgbImage> = (0..5)
+            .map(|_| {
+                crate::person_replace::box_mask(
+                    Some(&json!({ "x": 0.3, "y": 0.2, "width": 0.4, "height": 0.6 })),
+                    w,
+                    h,
+                )
+            })
+            .collect();
+        let conditioning =
+            build_vace_conditioning(frames, masks, vec![gray()], 1.0, ReplacementMode::FaceOnly)
+                .expect("conditioning builds");
+        let input = VideoGenInput {
+            engine_id: "wan_vace",
+            model_dir,
+            conditioning,
+            prompt: "a person walking, cinematic".to_owned(),
+            width: w,
+            height: h,
+            frames: 5,
+            fps: 16,
+            steps: Some(8),
+            seed: 7,
+            control_scale: Some(1.0),
+            ..VideoGenInput::default()
+        };
+        let cancel = CancelFlag::new();
+        let mut steps = 0u32;
+        let mut on_progress = |progress: Progress| {
+            if let Progress::Step { .. } = progress {
+                steps += 1;
+            }
+        };
+        let decoded =
+            run_video_generation(input, &cancel, &mut on_progress).expect("VACE generation");
+        assert!(decoded.fps >= 1);
+        assert!(decoded.audio.is_none(), "Wan-VACE emits no audio");
+        assert!(steps > 0, "denoise progress streamed");
+        assert!(decoded
+            .frames
+            .iter()
+            .all(|f| f.pixels.len() == (f.width * f.height * 3) as usize));
     }
 
     /// Wan model-id → engine-id mapping + the family predicates that drive routing.
