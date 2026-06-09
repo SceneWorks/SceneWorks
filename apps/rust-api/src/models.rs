@@ -961,7 +961,40 @@ pub(crate) async fn resolve_model_manifest_entry(
             .find(|entry| entry.get("id").and_then(Value::as_str) == Some(model_id))
             .cloned()
     };
-    Ok(merge_model_manifest_entry(find(&builtin), find(&user)))
+    let mut entry = merge_model_manifest_entry(find(&builtin), find(&user));
+    inject_converted_model_path(&mut entry, &state.settings.data_dir);
+    Ok(entry)
+}
+
+/// Populate the `modelPath` seam for convert-at-install MLX models. The worker's
+/// `resolve_weights_dir` loads such a model from the locally-assembled converted
+/// dir via `modelManifestEntry.modelPath`, but nothing else writes that key — the
+/// raw source repo is a single safetensors file with no diffusers layout, so
+/// without this the worker falls back to it and fails with "No such file or
+/// directory" (e.g. flux2_klein_9b_true_v2). `mlx_catalog_status` is the single
+/// source of truth for whether the conversion has produced a usable local dir.
+/// No-op when the model needs no conversion, is not yet converted, or the manifest
+/// already pins an explicit `modelPath`.
+pub(crate) fn inject_converted_model_path(entry: &mut Value, data_dir: &FsPath) {
+    let Some(object) = entry.as_object_mut() else {
+        return;
+    };
+    let already_set = object
+        .get("modelPath")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .is_some_and(|value| !value.is_empty());
+    if already_set {
+        return;
+    }
+    if let Some(converted) =
+        mlx_catalog_status(object, data_dir).and_then(|status| status.converted_path)
+    {
+        object.insert(
+            "modelPath".to_owned(),
+            Value::String(converted.display().to_string()),
+        );
+    }
 }
 
 /// One-level-deep merge of the builtin and user manifest entries for a single

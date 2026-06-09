@@ -3,11 +3,11 @@ use super::events::{EventHub, EventMessage};
 use super::training::insufficient_disk_space;
 use super::workers::person_readiness_from_workers;
 use super::{
-    create_app, huggingface_repo_cache_path, inprocess_worker_gpu_id, lora_artifact_paths,
-    merge_model_manifest_entry, mlx_catalog_status, safe_download_dir, safe_repo_dir_name,
-    serialize_job_lora, strip_jsonc_comments, sweep_stale_lora_uploads_before, Settings,
-    WorkerCapability, WorkerSnapshot, WorkerStatus, API_MANAGED_MANIFEST_HEADER, EVENT_BUFFER_SIZE,
-    HEARTBEAT_SSE_DATA, HEARTBEAT_SSE_WIRE, TEST_MAX_LORA_UPLOAD_BYTES,
+    create_app, huggingface_repo_cache_path, inject_converted_model_path, inprocess_worker_gpu_id,
+    lora_artifact_paths, merge_model_manifest_entry, mlx_catalog_status, safe_download_dir,
+    safe_repo_dir_name, serialize_job_lora, strip_jsonc_comments, sweep_stale_lora_uploads_before,
+    Settings, WorkerCapability, WorkerSnapshot, WorkerStatus, API_MANAGED_MANIFEST_HEADER,
+    EVENT_BUFFER_SIZE, HEARTBEAT_SSE_DATA, HEARTBEAT_SSE_WIRE, TEST_MAX_LORA_UPLOAD_BYTES,
 };
 use axum::body::{to_bytes, Body};
 use axum::http::{Request, StatusCode};
@@ -253,6 +253,68 @@ fn mlx_catalog_status_reports_turnkey_and_conversion_states() {
     assert_eq!(status.install_state, "installed");
     assert_eq!(status.conversion_state, "converted");
     assert_eq!(status.converted_path.unwrap(), converted);
+}
+
+#[test]
+fn inject_converted_model_path_populates_modelpath_seam_once_converted() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let data_dir = temp.path().join("data");
+
+    // A convert-at-install model (e.g. flux2_klein_9b_true_v2) whose local MLX dir
+    // does not exist yet: leave `modelPath` unset so the worker reports the absent
+    // conversion rather than silently loading the wrong source repo.
+    let make_entry = || {
+        json!({
+            "id": "flux2_klein_9b_true_v2",
+            "mlx": {
+                "requiresConversion": true,
+                "converter": "flux2_klein_diffusers",
+                "convertSourceRepo": "wikeeyang/Flux2-Klein-9B-True-V2"
+            }
+        })
+    };
+    let mut entry = make_entry();
+    inject_converted_model_path(&mut entry, &data_dir);
+    assert!(
+        entry.get("modelPath").is_none(),
+        "modelPath must stay absent until the conversion has produced a local dir"
+    );
+
+    // Once the FLUX.2-klein converter has assembled the diffusers dir (marked by
+    // model_index.json), `modelPath` is injected so the worker's resolve_weights_dir
+    // loads the converted dir instead of falling back to the single-file source repo.
+    let converted = data_dir
+        .join("models")
+        .join("mlx")
+        .join("flux2_klein_9b_true_v2");
+    std::fs::create_dir_all(&converted).expect("create converted dir");
+    std::fs::write(converted.join("model_index.json"), "{}").expect("write model_index");
+    let mut entry = make_entry();
+    inject_converted_model_path(&mut entry, &data_dir);
+    assert_eq!(
+        entry.get("modelPath").and_then(Value::as_str),
+        Some(converted.display().to_string().as_str()),
+    );
+
+    // An explicit manifest `modelPath` is authoritative and never overwritten.
+    let mut pinned = make_entry();
+    pinned
+        .as_object_mut()
+        .unwrap()
+        .insert("modelPath".to_owned(), json!("/custom/path"));
+    inject_converted_model_path(&mut pinned, &data_dir);
+    assert_eq!(
+        pinned.get("modelPath").and_then(Value::as_str),
+        Some("/custom/path")
+    );
+
+    // A non-conversion model is untouched.
+    let mut turnkey = json!({
+        "id": "ltx_2_3",
+        "mlx": { "repo": "notapalindrome/ltx23-mlx-av-q4" }
+    });
+    inject_converted_model_path(&mut turnkey, &data_dir);
+    assert!(turnkey.get("modelPath").is_none());
 }
 
 fn write_test_safetensors(path: &std::path::Path) {
