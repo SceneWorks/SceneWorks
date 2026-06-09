@@ -219,9 +219,18 @@ export function VideoStudio() {
   const [ltxVideoCfg, setLtxVideoCfg] = useState(saved.videoCfgGuidanceScale ?? "");
   const [ltxVideoStg, setLtxVideoStg] = useState(saved.videoStgGuidanceScale ?? "");
   const [ltxVideoRescale, setLtxVideoRescale] = useState(saved.videoRescaleScale ?? "");
+  // Clip-conditioning strengths for the LTX IC-LoRA extend/bridge paths (sc-3522,
+  // sc-3755). The worker reads these from `advanced` (default 1.0 when absent):
+  // the source/left clip uses videoConditioningStrength, the bridge right clip
+  // uses bridgeRightVideoConditioningStrength.
+  const [videoConditioningStrength, setVideoConditioningStrength] = useState(saved.videoConditioningStrength ?? "");
+  const [bridgeRightVideoConditioningStrength, setBridgeRightVideoConditioningStrength] = useState(
+    saved.bridgeRightVideoConditioningStrength ?? "",
+  );
   const [sourceAssetId, setSourceAssetId] = useState(["image", "frame"].includes(selectedAsset?.type) ? selectedAsset.id : "");
   const [lastFrameAssetId, setLastFrameAssetId] = useState("");
   const [sourceClipAssetId, setSourceClipAssetId] = useState(selectedAsset?.type === "video" ? selectedAsset.id : "");
+  const [bridgeRightClipAssetId, setBridgeRightClipAssetId] = useState("");
   const [characterId, setCharacterId] = useState("");
   const [characterLookId, setCharacterLookId] = useState("");
   const [personTrackId, setPersonTrackId] = useState("");
@@ -250,7 +259,7 @@ export function VideoStudio() {
   // per-platform default (Q8_0 on MPS, Q4_K_M on CUDA).
   const quantVariants = Object.entries(selectedModel?.quantization?.variants ?? {});
   const supportsQuantization = quantVariants.length > 0;
-  const implementedMode = ["image_to_video", "text_to_video", "first_last_frame", "extend_clip", "replace_person"].includes(mode);
+  const implementedMode = ["image_to_video", "text_to_video", "first_last_frame", "extend_clip", "video_bridge", "replace_person"].includes(mode);
   const {
     availablePresets,
     selectedPreset,
@@ -612,6 +621,8 @@ export function VideoStudio() {
     videoCfgGuidanceScale: ltxVideoCfg,
     videoStgGuidanceScale: ltxVideoStg,
     videoRescaleScale: ltxVideoRescale,
+    videoConditioningStrength,
+    bridgeRightVideoConditioningStrength,
   });
 
   useEffect(() => {
@@ -629,13 +640,16 @@ export function VideoStudio() {
     ["text_to_video", "Text → Video"],
     ["first_last_frame", "First → Last"],
     ["extend_clip", "Extend"],
+    ["video_bridge", "Bridge"],
     ["replace_person", "Replace person"],
   ];
   // Mac UI gating (sc-3486): disable the video modes that run on the Python torch path —
   // per-model FLF eligibility + the torch-only advanced modes (extend/bridge/replace).
   const macAdvancedVideoBlock = macFeatureBlock(macCapabilities, "advancedVideoModes");
+  // extend_clip + video_bridge share the IC-LoRA clip-conditioning path (sc-3522): both are
+  // gated by the `advancedVideoModes` capability the same way (MLX-eligible on LTX only).
   const macVideoModeBlockFor = (value) =>
-    value === "extend_clip"
+    value === "extend_clip" || value === "video_bridge"
       ? macAdvancedVideoBlock
       : macVideoModeBlock(selectedModel, macCapabilities, value);
   const matchingTracks = personTracks.filter((track) => track.sourceAssetId === sourceClipAssetId);
@@ -659,6 +673,7 @@ export function VideoStudio() {
     (mode === "image_to_video" && sourceAssetId) ||
     (mode === "first_last_frame" && sourceAssetId && lastFrameAssetId) ||
     (mode === "extend_clip" && sourceClipAssetId) ||
+    (mode === "video_bridge" && sourceClipAssetId && bridgeRightClipAssetId) ||
     (mode === "replace_person" && sourceClipAssetId && personTrackId && characterId);
   // Don't let Replace Person queue a job the readiness endpoint says no live
   // worker can run — that would sit unclaimable instead of honoring the gate.
@@ -724,7 +739,10 @@ export function VideoStudio() {
         characterLookId: characterLookId || null,
         sourceAssetId: ["image_to_video", "first_last_frame"].includes(mode) ? sourceAssetId || null : null,
         lastFrameAssetId: mode === "first_last_frame" ? lastFrameAssetId || null : null,
-        sourceClipAssetId: ["extend_clip", "replace_person"].includes(mode) ? sourceClipAssetId || null : null,
+        sourceClipAssetId: ["extend_clip", "replace_person", "video_bridge"].includes(mode)
+          ? sourceClipAssetId || null
+          : null,
+        bridgeRightClipAssetId: mode === "video_bridge" ? bridgeRightClipAssetId || null : null,
         personTrackId: mode === "replace_person" ? personTrackId || null : null,
         replacementMode: mode === "replace_person" ? replacementMode : "face_only",
         loras: selectedLoras.map((lora) => serializeLora(lora, { weight: effectiveLoraWeight(lora) })),
@@ -761,6 +779,19 @@ export function VideoStudio() {
             : {}),
           ...(selectedModel?.adapter === "ltx_video" && ltxVideoRescale !== "" && Number.isFinite(Number(ltxVideoRescale))
             ? { videoRescaleScale: Number(ltxVideoRescale) }
+            : {}),
+          // LTX IC-LoRA clip-conditioning strengths (sc-3522, sc-3755). The worker
+          // reads these from `advanced`, defaulting to 1.0 when absent — extend uses
+          // the source-clip strength, bridge uses both left and right.
+          ...(["extend_clip", "video_bridge"].includes(mode) &&
+          videoConditioningStrength !== "" &&
+          Number.isFinite(Number(videoConditioningStrength))
+            ? { videoConditioningStrength: Number(videoConditioningStrength) }
+            : {}),
+          ...(mode === "video_bridge" &&
+          bridgeRightVideoConditioningStrength !== "" &&
+          Number.isFinite(Number(bridgeRightVideoConditioningStrength))
+            ? { bridgeRightVideoConditioningStrength: Number(bridgeRightVideoConditioningStrength) }
             : {}),
         },
       });
@@ -910,6 +941,27 @@ export function VideoStudio() {
                 onChange={setSourceClipAssetId}
                 value={sourceClipAssetId}
               />
+            ) : null}
+
+            {mode === "video_bridge" ? (
+              <>
+                <AssetPickerField
+                  assets={videoAssets}
+                  buttonLabel="Select clip"
+                  emptyLabel="No left clip selected"
+                  label="Left clip"
+                  onChange={setSourceClipAssetId}
+                  value={sourceClipAssetId}
+                />
+                <AssetPickerField
+                  assets={videoAssets}
+                  buttonLabel="Select clip"
+                  emptyLabel="No right clip selected"
+                  label="Right clip"
+                  onChange={setBridgeRightClipAssetId}
+                  value={bridgeRightClipAssetId}
+                />
+              </>
             ) : null}
 
             {mode === "replace_person" ? (
@@ -1326,6 +1378,36 @@ export function VideoStudio() {
                           value={ltxVideoRescale}
                         />
                       </label>
+                    </>
+                  ) : null}
+                  {["extend_clip", "video_bridge"].includes(mode) ? (
+                    <>
+                      <label>
+                        {mode === "video_bridge" ? "Left clip strength" : "Clip strength"}
+                        <input
+                          min="0"
+                          max="1"
+                          onChange={(event) => setVideoConditioningStrength(event.target.value)}
+                          placeholder="1.0"
+                          step="0.05"
+                          type="number"
+                          value={videoConditioningStrength}
+                        />
+                      </label>
+                      {mode === "video_bridge" ? (
+                        <label>
+                          Right clip strength
+                          <input
+                            min="0"
+                            max="1"
+                            onChange={(event) => setBridgeRightVideoConditioningStrength(event.target.value)}
+                            placeholder="1.0"
+                            step="0.05"
+                            type="number"
+                            value={bridgeRightVideoConditioningStrength}
+                          />
+                        </label>
+                      ) : null}
                     </>
                   ) : null}
                   {supportsQuantization ? (

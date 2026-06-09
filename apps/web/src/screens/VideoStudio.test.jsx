@@ -70,6 +70,15 @@ async function click(element) {
   });
 }
 
+async function doubleClick(element) {
+  await act(async () => {
+    element.dispatchEvent(new window.MouseEvent("dblclick", { bubbles: true }));
+  });
+}
+
+const buttonWithText = (root, text) =>
+  [...root.querySelectorAll("button")].find((b) => b.textContent.trim() === text);
+
 function setInput(element, value) {
   const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, "value").set;
   setter.call(element, value);
@@ -152,5 +161,88 @@ describe("VideoStudio Save as Preset", () => {
 
     expect(context.createPreset).not.toHaveBeenCalled();
     expect(container.textContent).toContain("already exists");
+  });
+});
+
+describe("VideoStudio video_bridge", () => {
+  let container;
+  let root;
+
+  // A bridge-capable video model with a non-LTX id so the IC-LoRA preset gate
+  // (requiresLtxIcLora, which keys on ltx_2_3) doesn't block submission here —
+  // this test exercises the new input wiring, not the LTX IC-LoRA requirement.
+  const BRIDGE_MODEL = {
+    id: "bridge_model",
+    name: "Bridge Model",
+    type: "video",
+    family: "ltx-video",
+    capabilities: ["image_to_video", "text_to_video", "extend_clip", "video_bridge"],
+    defaults: { duration: 6, resolution: "768x512", fps: 25 },
+    limits: {},
+    quantization: {},
+    loraCompatibility: {},
+    ui: {},
+  };
+
+  const leftClip = { id: "vid_left", type: "video", projectId: "project_1", displayName: "Left Clip" };
+  const rightClip = { id: "vid_right", type: "video", projectId: "project_1", displayName: "Right Clip" };
+
+  beforeEach(() => {
+    global.IS_REACT_ACT_ENVIRONMENT = true;
+    window.localStorage.clear();
+    container = document.createElement("div");
+    document.body.appendChild(container);
+    root = createRoot(container);
+  });
+
+  afterEach(async () => {
+    await act(async () => root.unmount());
+    container.remove();
+    vi.clearAllMocks();
+  });
+
+  async function render(context) {
+    await act(async () => {
+      root.render(
+        <AppContext.Provider value={context}>
+          <VideoStudio />
+        </AppContext.Provider>,
+      );
+    });
+    await act(async () => {});
+  }
+
+  it("submits both clip ids when bridging two clips", async () => {
+    const context = baseContext({
+      videoModels: [BRIDGE_MODEL],
+      assets: [leftClip, rightClip],
+      selectedAsset: leftClip,
+    });
+    await render(context);
+
+    // Switch to Bridge mode; the left clip is pre-filled from the selected asset.
+    const modeControl = container.querySelector(".mode-control");
+    await click(buttonWithText(modeControl, "Bridge"));
+
+    // Drive the right-clip picker (the only "Select clip" button; the left
+    // picker shows "Change" because it already has a value).
+    await click(buttonWithText(container, "Select clip"));
+    const modal = document.querySelector(".asset-picker-modal");
+    expect(modal).toBeTruthy();
+    const rightOption = [...modal.querySelectorAll('[role="option"]')].find((el) =>
+      el.textContent.includes("Right Clip"),
+    );
+    await doubleClick(rightOption);
+
+    // Render.
+    await click(buttonWithText(container, "Render clip"));
+
+    expect(context.createVideoJob).toHaveBeenCalledTimes(1);
+    const payload = context.createVideoJob.mock.calls[0][0];
+    expect(payload).toMatchObject({
+      mode: "video_bridge",
+      sourceClipAssetId: "vid_left",
+      bridgeRightClipAssetId: "vid_right",
+    });
   });
 });
