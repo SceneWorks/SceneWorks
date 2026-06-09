@@ -1495,13 +1495,22 @@
         "resolution": "1024x1024",
         "steps": 30,
         "guidanceScale": 5.0,
-        "count": 4
+        "count": 4,
+        // sc-3857: sampler/scheduler default to model-native (apply_sampler no-op)
+        // so behaviour is unchanged until the user picks from the menu below.
+        "sampler": "default",
+        "scheduler": "default"
       },
       "limits": {
         // Letterboxed to the output aspect before landmark detection, so any SDXL
         // bucket is safe (no face stretching — the sc-2009 kps-aspect fix).
         "resolutions": ["1024x1024", "1152x896", "896x1152", "1216x832", "832x1216", "1344x768", "768x1344"],
-        "count": [1, 2, 4]
+        "count": [1, 2, 4],
+        // sc-3857: SDXL/epsilon sampler menu. The worker registry routes this
+        // epsilon pipe to standard solvers; dpmpp_sde + karras == "DPM++ SDE
+        // Karras" (the RealVisXL-recommended, sharper/less-saturated combo).
+        "samplers": ["default", "euler", "euler_a", "dpmpp", "dpmpp_sde", "unipc"],
+        "schedulers": ["default", "karras", "exponential"]
       },
       "loraCompatibility": {
         // SDXL UNet, so sdxl-family LoRAs apply (per sc-1927 declare the real
@@ -1519,6 +1528,11 @@
         // controlnetConditioningScale (IdentityNet/landmark lock — the lever that
         // measurably trades pose freedom for face-geometry likeness, sc-2009 sweep).
         "referenceStrengthDefault": 0.8,
+        // sc-3857: per-model default negative prompt. Image Studio seeds this into
+        // an empty negative box on entering character mode (RealVisXL otherwise ran
+        // with NO negative there). Targets this model's failure modes — shiny/
+        // plastic skin and the over-saturated/over-contrasty look.
+        "defaultNegativePrompt": "plastic skin, airbrushed, oversaturated, overexposed, high contrast, cgi, 3d render, cartoon, anime, waxy, deformed, blurry, lowres",
         "identityStructure": {
           "label": "Identity structure",
           "default": 0.8,
