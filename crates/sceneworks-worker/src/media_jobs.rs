@@ -596,6 +596,21 @@ async fn run_yolo11_person_detect(
     ))
 }
 
+/// Seconds the final frame-extraction seek is held inside the clip. `sample_timestamps`
+/// is inclusive of both ends, so its last sample is exactly `duration` — but a video has
+/// no frame at `duration` (the last decodable frame sits ~`1/fps` before it), and an
+/// `ffmpeg -ss duration` accurate seek then yields no output and fails the whole track.
+/// 0.2 s clears one frame for any clip ≥ 5 fps without meaningfully moving the sample.
+const FRAME_SEEK_GUARD_SECONDS: f64 = 0.2;
+
+/// Clamp a sample timestamp to a frame-extraction seek that always lands on a real frame:
+/// never past `duration - FRAME_SEEK_GUARD_SECONDS`. Only the final inclusive-end sample is
+/// affected; every interior sample passes through unchanged. The tracker still records the
+/// logical sample time — only the seek used to pull pixels is clamped.
+pub(crate) fn frame_seek_timestamp(timestamp: f64, duration: f64) -> f64 {
+    timestamp.min((duration - FRAME_SEEK_GUARD_SECONDS).max(0.0))
+}
+
 /// The real (model-backed) outcome of `assemble_real_person_track`: the resampled track frames
 /// plus the metadata `run_person_track` folds into the sidecar.
 struct RealPersonTrack {
@@ -658,7 +673,7 @@ async fn assemble_real_person_track(
             "ffmpeg",
             source_media_path,
             &frame_path,
-            timestamp,
+            frame_seek_timestamp(timestamp, duration),
             1280,
             720,
             Some(ffmpeg_context),
@@ -2092,6 +2107,46 @@ pub(crate) async fn run_ffmpeg(
     }
 }
 
+#[cfg(test)]
+mod frame_seek_tests {
+    use super::*;
+    use crate::person_track::sample_timestamps;
+
+    #[test]
+    fn frame_seek_clamps_only_the_final_inclusive_end_sample() {
+        // sample_timestamps is inclusive of both ends → the last sample == duration, which
+        // is not a decodable frame. The seek clamp must pull exactly that sample inside the
+        // clip and leave every interior sample (and t=0) untouched.
+        let duration = 8.0;
+        let stamps = sample_timestamps(duration);
+        let last = *stamps.last().expect("non-empty");
+        assert_eq!(last, duration, "final sample sits on the inclusive end");
+
+        for &ts in &stamps {
+            let seek = frame_seek_timestamp(ts, duration);
+            assert!(
+                seek <= duration - FRAME_SEEK_GUARD_SECONDS + 1e-9,
+                "seek {seek} must stay a frame inside the {duration}s clip"
+            );
+            if ts < duration - FRAME_SEEK_GUARD_SECONDS {
+                assert_eq!(seek, ts, "interior samples pass through unchanged");
+            }
+        }
+        // The final sample is the one that gets clamped.
+        assert_eq!(
+            frame_seek_timestamp(last, duration),
+            duration - FRAME_SEEK_GUARD_SECONDS
+        );
+    }
+
+    #[test]
+    fn frame_seek_never_goes_negative_on_tiny_clips() {
+        // A clip shorter than the guard clamps to 0 rather than a negative seek.
+        assert_eq!(frame_seek_timestamp(0.1, 0.1), 0.0);
+        assert_eq!(frame_seek_timestamp(0.0, 0.0), 0.0);
+    }
+}
+
 /// Real-Mac end-to-end validation for the native-MLX Replace-Person pipeline
 /// (epic 3704 / sc-3709): a short person video → ffmpeg frame sampling → MLX YOLO11
 /// detect (sc-3633) → SORT/ByteTrack assembly (sc-3634) → MLX SAM2 segment (sc-3706/3709)
@@ -2173,9 +2228,17 @@ mod person_track_e2e_tests {
             let mut frame_paths: Vec<PathBuf> = Vec::with_capacity(timestamps.len());
             for (index, &timestamp) in timestamps.iter().enumerate() {
                 let frame_path = frames_dir.join(format!("frame_{index:04}.png"));
-                render_frame_png("ffmpeg", &video, &frame_path, timestamp, 1280, 720, None)
-                    .await
-                    .expect("ffmpeg renders the sample frame");
+                render_frame_png(
+                    "ffmpeg",
+                    &video,
+                    &frame_path,
+                    frame_seek_timestamp(timestamp, staged_duration()),
+                    1280,
+                    720,
+                    None,
+                )
+                .await
+                .expect("ffmpeg renders the sample frame");
                 let weights_for_frame = det_weights.clone();
                 let frame_for_task = frame_path.clone();
                 let result = tokio::task::spawn_blocking(move || {
@@ -2209,29 +2272,43 @@ mod person_track_e2e_tests {
                 frame_paths.push(frame_path);
             }
 
+            // Per-frame detection summary, so a failed lock is legible (e.g. a person who
+            // never clears the tracker's high-confidence threshold).
+            for (timestamp, boxes) in &per_frame {
+                let max_conf = boxes.iter().map(|b| b.1).fold(0.0_f64, f64::max);
+                eprintln!(
+                    "  t={timestamp:>6.3}s  detections={}  maxConf={max_conf:.3}",
+                    boxes.len()
+                );
+            }
             let total_detections: usize = per_frame.iter().map(|(_, boxes)| boxes.len()).sum();
             assert!(
                 total_detections > 0,
                 "YOLO11 found no people in any sampled frame — is the clip a person video?"
             );
 
-            // 2. Select the largest box in the first frame that has one (a stand-in for the
-            //    user's click) and run the SORT/ByteTrack assembly over the cadence.
-            let (selected_timestamp, selected_box) = per_frame
+            // 2. Select the single highest-confidence detection across all frames — the
+            //    clear, lockable person a user would click (robust to early low-confidence
+            //    false positives on textured scenes like waves). The tracker only confirms a
+            //    new identity from a high-confidence box, so the selection must be one.
+            let (selected_timestamp, selected_box, selected_conf) = per_frame
                 .iter()
-                .find(|(_, boxes)| !boxes.is_empty())
-                .map(|(timestamp, boxes)| {
-                    let largest = boxes
-                        .iter()
-                        .max_by(|a, b| {
-                            (a.0.width * a.0.height)
-                                .partial_cmp(&(b.0.width * b.0.height))
-                                .expect("box area is finite")
-                        })
-                        .expect("non-empty frame has a box");
-                    (*timestamp, largest.0)
+                .flat_map(|(timestamp, boxes)| boxes.iter().map(move |b| (*timestamp, b.0, b.1)))
+                .max_by(|a, b| {
+                    a.2.partial_cmp(&b.2)
+                        .expect("detection confidence is finite")
                 })
-                .expect("at least one frame has a detection");
+                .expect("at least one detection exists");
+            eprintln!(
+                "selection: t={selected_timestamp:.3}s conf={selected_conf:.3} \
+                 box=({:.3},{:.3},{:.3},{:.3})",
+                selected_box.x, selected_box.y, selected_box.width, selected_box.height
+            );
+            assert!(
+                selected_conf >= 0.5,
+                "best detection conf {selected_conf:.3} is below the tracker's high-confidence \
+                 floor (0.5) — the clip never yields a confidently-trackable person"
+            );
 
             let observations = crate::person_track::observe(per_frame);
             let assembly = crate::person_track::assemble_track(
