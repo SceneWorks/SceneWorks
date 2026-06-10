@@ -127,7 +127,7 @@ in-process Rust path. Per Michael's 2026-06-07 decision, all four spikes are **p
 | Image upscaler (standalone) | `image_upscale` | Real-ESRGAN / AuraSR (torch) | ✅ Ported (Real-ESRGAN via Rust `ort`/CoreML, macOS MLX worker; **AuraSR** engine stays on Python) | sc-3489 |
 | Dataset captioning | `training_caption` | JoyCaption MLX provider (Python torch fallback off-MLX) | ✅ Ported (macOS MLX worker) | sc-3556 |
 | Wan/LTX model conversion | `model_convert` (non-`flux2_klein_diffusers` converter) | `mlx_video.convert_*` (Python) | 🔵 Port-pending | sc-3491 (= sc-3224) |
-| Image understanding / interleave | `image_vqa`, `image_interleave` | torch (SenseNova-U1) | 🔵 Port-pending (engine done; worker wiring next) | epic 3180 / **sc-3905** (consumed via `T2iModel::vqa`/`interleave_gen` — the `Generator` registry emits Images/Video only; SenseNova image modes already ported, sc-3900) |
+| Image understanding / interleave | `image_vqa`, `image_interleave` | torch (SenseNova-U1) | ✅ Ported (macOS MLX worker, native `T2iModel`) | epic 3180 / sc-3905 (see §6) |
 
 ## 6. Already ported — NOT gaps (context)
 
@@ -142,7 +142,12 @@ Listed so a reviewer doesn't re-file these. All run in the Rust/MLX flow on Mac.
   (`edit_image` → Reference), and Character Studio (`character_image` → MultiReference, incl. the
   angle set), base + 8-step distill, Q4/Q8 (`mlx-gen-sensenova`, NEO-Unify; dual CFG: text via
   `guidance`, image via `true_cfg`). No ControlNet (strict pose stays torch), no user LoRA. epic
-  3180 / sc-3900. **VQA + Document Studio (interleave) are still pending — see §5 / sc-3905.**
+  3180 / sc-3900.
+- SenseNova-U1 understanding + Document Studio: `image_vqa` (image+question → text) and
+  `image_interleave` (prompt → ordered text + generated images → `InterleavedDocument`) — served
+  in-process via the concrete `T2iModel::{vqa, interleave_gen}` (the `Generator` registry emits
+  Images/Video only). Loads dense (no distill LoRA, no quant) for torch parity; the VQA decode is
+  bit-identical (no-think primed, sc-3905 engine fix). epic 3180 / sc-3905.
 - SDXL advanced shapes — reference/IP-Adapter, `edit_image`, masked inpaint, outpaint, and
   tile-detail (`image_detail` on `sdxl`/`realvisxl`) — epic 3041 / sc-3060.
 - Z-Image img2img-edit: `z_image_edit` + `z_image_turbo` `edit_image` mode (Turbo weights via the

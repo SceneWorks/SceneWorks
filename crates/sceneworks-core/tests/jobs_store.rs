@@ -1527,6 +1527,63 @@ fn qwen_edit_image_job_defers_to_mlx_worker() {
 }
 
 #[test]
+fn sensenova_understanding_jobs_defer_to_mlx_worker() {
+    // sc-3905: SenseNova-U1 VQA (`image_vqa`) + Document-Studio interleave (`image_interleave`)
+    // are served in-process via the concrete `T2iModel`. A worker that advertises the
+    // understanding capabilities defers an eligible job to the idle mlx worker, which claims it.
+    let understanding_caps = vec![
+        WorkerCapability::Gpu,
+        WorkerCapability::ImageVqa,
+        WorkerCapability::ImageInterleave,
+    ];
+    let cases = [
+        (
+            "vqa",
+            JobType::ImageVqa,
+            json!({ "model": "sensenova_u1_8b", "sourceAssetId": "asset_1", "question": "what is this?" }),
+        ),
+        (
+            "interleave",
+            JobType::ImageInterleave,
+            json!({ "model": "sensenova_u1_8b_fast", "prompt": "a short illustrated guide" }),
+        ),
+    ];
+    for (label, job_type, payload) in cases {
+        let store = store(&format!("mlx-routing-sensenova-{label}"));
+        register_gpu_worker(&store, "worker-torch", "mps", understanding_caps.clone());
+        register_gpu_worker(&store, "worker-mlx", "mlx", understanding_caps.clone());
+
+        let job = store
+            .create_job(CreateJob {
+                job_type,
+                project_id: Some("project-1".to_owned()),
+                project_name: Some("Project 1".to_owned()),
+                payload: object(payload),
+                requested_gpu: "auto".to_owned(),
+                source_job_id: None,
+                duplicate_of_job_id: None,
+                attempts: 1,
+            })
+            .expect("job creates");
+
+        // The torch worker defers it to the idle mlx worker, which claims it in-process.
+        assert!(
+            store
+                .claim_next_job("worker-torch")
+                .expect("torch claim ok")
+                .is_none(),
+            "{label}: torch worker should defer to the idle mlx worker"
+        );
+        let claimed = store
+            .claim_next_job("worker-mlx")
+            .expect("mlx claim ok")
+            .expect("mlx claims the job");
+        assert_eq!(claimed.id, job.id, "{label}");
+        assert_eq!(claimed.assigned_gpu.as_deref(), Some("mlx"), "{label}");
+    }
+}
+
+#[test]
 fn qwen_edit_lightning_image_job_defers_to_mlx_worker() {
     let store = store("mlx-routing-qwen-edit-lightning");
     register_gpu_worker(&store, "worker-torch", "mps", image_caps());
@@ -1811,9 +1868,9 @@ fn mac_rust_supported_names_torch_only_image_model_with_its_port_epic() {
         // instantid_realvisxl is NO LONGER wholly torch-only (sc-3345: identity + angle set run on
         // MLX); its remaining per-feature gaps are covered by
         // `mac_rust_supported_instantid_identity_ok_but_pose_and_facerestore_gapped`.
-        // SenseNova-U1 (sensenova_u1_8b[_fast]) was likewise ported to MLX (epic 3180 / sc-3900):
-        // its image modes are now MLX-routed, so it is no longer a torch-only image model. Its VQA /
-        // interleave understanding surface (a separate job type) is still gap-classified to epic 3180.
+        // SenseNova-U1 (sensenova_u1_8b[_fast]) was likewise ported to MLX (epic 3180 / sc-3900
+        // image modes, sc-3905 VQA + interleave): all of its surface is now MLX-routed, so it is no
+        // longer a torch-only image model (and its understanding job types are MLX-supported too).
         ("lens_turbo", "epic 3164"),
     ];
     for (model, epic) in cases {
@@ -2034,14 +2091,38 @@ fn mac_rust_supported_feature_gaps_point_at_their_spikes() {
         mac_rust_supported(&z_ref).is_ok(),
         "z-image reference-without-pose should be MLX-supported (sc-3619)"
     );
-    // Image understanding folds into the SenseNova port (epic 3180).
-    let vqa = job_of(
+    // Image understanding (VQA) + Document-Studio interleave are now ported to the Rust MLX worker
+    // for the SenseNova-U1 ids (epic 3180 / sc-3905, via the concrete `T2iModel`), so they are
+    // MLX-supported rather than a torch-fallback gap.
+    for (job_type, payload) in [
+        (
+            JobType::ImageVqa,
+            json!({ "model": "sensenova_u1_8b", "sourceAssetId": "asset_1", "question": "what is this?" }),
+        ),
+        (
+            JobType::ImageVqa,
+            json!({ "model": "sensenova_u1_8b_fast", "sourceAssetId": "asset_1", "question": "?" }),
+        ),
+        (
+            JobType::ImageInterleave,
+            json!({ "model": "sensenova_u1_8b", "prompt": "a tutorial" }),
+        ),
+    ] {
+        let job = job_of(&store, job_type, payload);
+        assert!(
+            mac_rust_supported(&job).is_ok(),
+            "SenseNova-U1 understanding/interleave should be MLX-supported (sc-3905)"
+        );
+    }
+    // A non-SenseNova understanding job has no in-process path and stays gap-classified to the
+    // SenseNova epic (the only model that serves these modes).
+    let other_vqa = job_of(
         &store,
         JobType::ImageVqa,
-        json!({ "model": "sensenova_u1_8b" }),
+        json!({ "model": "some_future_vlm" }),
     );
     assert_eq!(
-        mac_rust_supported(&vqa)
+        mac_rust_supported(&other_vqa)
             .unwrap_err()
             .suggested_epic
             .as_deref(),

@@ -607,13 +607,13 @@ async fn generate_stub_stream(
 }
 
 /// Per-job invariants shared across every image in the generation set.
-struct ImagePlan {
-    request: ImageRequest,
-    genset_id: String,
-    created_at: String,
-    family: String,
-    slug: String,
-    generation_set: Value,
+pub(crate) struct ImagePlan {
+    pub(crate) request: ImageRequest,
+    pub(crate) genset_id: String,
+    pub(crate) created_at: String,
+    pub(crate) family: String,
+    pub(crate) slug: String,
+    pub(crate) generation_set: Value,
     /// Number of images this job produces. Usually `request.count`, but a FLUX.2 angle
     /// set is 11 and a pose set is the pose count (sc-3030) — the generation set's
     /// `count`/`expectedCount` reflect this so the gallery streams against the real
@@ -631,7 +631,7 @@ impl ImagePlan {
     }
 
     /// Build a plan whose generation set reports `image_count` images (see the field).
-    fn with_count(request: &ImageRequest, image_count: u32) -> Self {
+    pub(crate) fn with_count(request: &ImageRequest, image_count: u32) -> Self {
         let genset_id = format!("genset_{}", Uuid::new_v4().simple());
         let created_at = now_rfc3339();
         let family = resolve_family(request);
@@ -661,7 +661,7 @@ impl ImagePlan {
 /// fact the API turns into an indexed asset (every key here is consumed by
 /// `build_image_sidecar_parts`). Shared by the stub and real paths.
 #[allow(clippy::too_many_arguments)]
-fn write_image_asset(
+pub(crate) fn write_image_asset(
     plan: &ImagePlan,
     index: usize,
     seed: i64,
@@ -798,7 +798,7 @@ fn resolve_family(request: &ImageRequest) -> String {
 /// Resolve the seed for image `index`, matching the Python worker's `resolve_seed`:
 /// a base `seed` (offset by index) wins, else an explicit per-image seed, else a
 /// deterministic `sha256("{prompt}:{index}")` so a re-run reproduces.
-fn resolve_seed(request: &ImageRequest, index: usize) -> i64 {
+pub(crate) fn resolve_seed(request: &ImageRequest, index: usize) -> i64 {
     if let Some(base) = request.seed {
         return base.wrapping_add(index as i64);
     }
@@ -811,7 +811,7 @@ fn resolve_seed(request: &ImageRequest, index: usize) -> i64 {
 
 /// Progress payload with the worker's real backend label (the shared
 /// `progress_payload` hardcodes `cpu`; the MLX worker reports `mlx`).
-fn image_progress(
+pub(crate) fn image_progress(
     status: JobStatus,
     stage: ProgressStage,
     progress: f64,
@@ -920,7 +920,7 @@ fn model_repo(request: &ImageRequest, model: &MlxModel) -> String {
 /// HuggingFace cache snapshot for the model repo. `None` when the model is not a known
 /// engine family or its snapshot is absent.
 #[cfg(target_os = "macos")]
-fn resolve_weights_dir(request: &ImageRequest, settings: &Settings) -> Option<PathBuf> {
+pub(crate) fn resolve_weights_dir(request: &ImageRequest, settings: &Settings) -> Option<PathBuf> {
     if let Some(path) = request
         .advanced
         .get("modelPath")
@@ -1279,7 +1279,7 @@ fn resolve_flux_ip_adapter_dir(settings: &Settings) -> WorkerResult<PathBuf> {
 /// `image_distill_lora_fuse_*` / `image_lora_apply_*` sub-phase events. A `start`
 /// with no matching `complete` means the load failed (the error propagates via `?`).
 #[cfg(target_os = "macos")]
-fn emit_load_event(event: &str, job_id: &str, engine: &str, adapter_count: usize) {
+pub(crate) fn emit_load_event(event: &str, job_id: &str, engine: &str, adapter_count: usize) {
     emit_event(
         event,
         json!({
