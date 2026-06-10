@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useCallback, useState } from "react";
 import { apiFetch, isAbortError } from "../api.js";
 import { sortNewest } from "../sorters.js";
 
@@ -28,31 +28,40 @@ export function useModelsAndLoras({
   const [models, setModels] = useState([]);
   const [loras, setLoras] = useState([]);
 
-  async function refreshLoras(projectId = activeProject?.id, { signal } = {}) {
-    try {
-      const query = projectId ? `?projectId=${encodeURIComponent(projectId)}` : "";
-      const items = await apiFetch(`/api/v1/loras${query}`, token, { signal });
-      setLoras(items);
+  // sc-4194: actions wrapped in useCallback so their identity is stable across App's
+  // SSE-driven re-renders, letting appContextValue memoize.
+  const refreshLoras = useCallback(
+    async (projectId = activeProject?.id, { signal } = {}) => {
+      try {
+        const query = projectId ? `?projectId=${encodeURIComponent(projectId)}` : "";
+        const items = await apiFetch(`/api/v1/loras${query}`, token, { signal });
+        setLoras(items);
+        setError("");
+      } catch (err) {
+        if (isAbortError(err)) return;
+        setError(err.message);
+      }
+    },
+    [token, activeProject, setError],
+  );
+
+  const deleteModel = useCallback(
+    async (model) => {
+      const result = await apiFetch(`/api/v1/models/${encodeURIComponent(model.id)}`, token, {
+        method: "DELETE",
+      });
+      if (result.removedManifestEntry) {
+        setModels((items) => items.filter((item) => item.id !== model.id));
+      }
       setError("");
-    } catch (err) {
-      if (isAbortError(err)) return;
-      setError(err.message);
-    }
-  }
+      await refreshData();
+      return result;
+    },
+    [token, setError, refreshData],
+  );
 
-  async function deleteModel(model) {
-    const result = await apiFetch(`/api/v1/models/${encodeURIComponent(model.id)}`, token, {
-      method: "DELETE",
-    });
-    if (result.removedManifestEntry) {
-      setModels((items) => items.filter((item) => item.id !== model.id));
-    }
-    setError("");
-    await refreshData();
-    return result;
-  }
-
-  async function deleteLora(lora) {
+  const deleteLora = useCallback(
+    async (lora) => {
     const params = new URLSearchParams();
     if (lora.scope) {
       params.set("scope", lora.scope);
@@ -70,9 +79,12 @@ export function useModelsAndLoras({
     setError("");
     await refreshDataWithLoraOverlay(activeProject?.id);
     return result;
-  }
+    },
+    [token, activeProject, setError, refreshDataWithLoraOverlay],
+  );
 
-  async function createModelImportJob(payload, options = {}) {
+  const createModelImportJob = useCallback(
+    async (payload, options = {}) => {
     const { file, ...metadata } = payload;
     if (file?.size > maxModelUploadBytes) {
       throw new Error(`Uploaded model file exceeds the ${uploadLimitLabel(maxModelUploadBytes)} limit`);
@@ -99,9 +111,12 @@ export function useModelsAndLoras({
     }
     setError("");
     return job;
-  }
+    },
+    [token, setJobs, setActiveView, setError],
+  );
 
-  async function createLoraImportJob(payload, options = {}) {
+  const createLoraImportJob = useCallback(
+    async (payload, options = {}) => {
     if (payload.scope === "project" && !activeProject) {
       throw new Error("Create or open a project first.");
     }
@@ -147,37 +162,45 @@ export function useModelsAndLoras({
     }
     setError("");
     return job;
-  }
+    },
+    [token, activeProject, setJobs, setActiveView, setError],
+  );
 
-  async function createModelDownloadJob(model) {
-    try {
-      const job = await apiFetch(`/api/v1/models/${model.id}/download`, token, {
-        method: "POST",
-        body: JSON.stringify({ requestedGpu: "auto" }),
-      });
-      setJobs((items) => [job, ...items.filter((item) => item.id !== job.id)].sort(sortNewest));
-      setError("");
-      return job;
-    } catch (err) {
-      setError(err.message);
-      return null;
-    }
-  }
+  const createModelDownloadJob = useCallback(
+    async (model) => {
+      try {
+        const job = await apiFetch(`/api/v1/models/${model.id}/download`, token, {
+          method: "POST",
+          body: JSON.stringify({ requestedGpu: "auto" }),
+        });
+        setJobs((items) => [job, ...items.filter((item) => item.id !== job.id)].sort(sortNewest));
+        setError("");
+        return job;
+      } catch (err) {
+        setError(err.message);
+        return null;
+      }
+    },
+    [token, setJobs, setError],
+  );
 
-  async function createModelConvertJob(model) {
-    try {
-      const job = await apiFetch(`/api/v1/models/${model.id}/convert`, token, {
-        method: "POST",
-        body: JSON.stringify({ requestedGpu: "auto" }),
-      });
-      setJobs((items) => [job, ...items.filter((item) => item.id !== job.id)].sort(sortNewest));
-      setError("");
-      return job;
-    } catch (err) {
-      setError(err.message);
-      return null;
-    }
-  }
+  const createModelConvertJob = useCallback(
+    async (model) => {
+      try {
+        const job = await apiFetch(`/api/v1/models/${model.id}/convert`, token, {
+          method: "POST",
+          body: JSON.stringify({ requestedGpu: "auto" }),
+        });
+        setJobs((items) => [job, ...items.filter((item) => item.id !== job.id)].sort(sortNewest));
+        setError("");
+        return job;
+      } catch (err) {
+        setError(err.message);
+        return null;
+      }
+    },
+    [token, setJobs, setError],
+  );
 
   return {
     models,

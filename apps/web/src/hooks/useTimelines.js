@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { apiFetch, isAbortError } from "../api.js";
 import { ensureItemVersionFields } from "../timeline.js";
 
@@ -39,27 +39,36 @@ export function useTimelines({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeProject?.id, selectedTimelineId, timelinesProjectId]);
 
-  async function refreshTimelines(projectId = activeProject?.id, { signal } = {}) {
-    if (!projectId) {
-      return;
-    }
-    try {
-      const items = await apiFetch(`/api/v1/projects/${projectId}/timelines`, token, { signal });
-      if (activeProjectRef.current?.id && activeProjectRef.current.id !== projectId) {
+  // sc-4194: the context-exposed actions (and refreshTimelines, on which they depend)
+  // are wrapped in useCallback so their identity is stable across App's SSE-driven
+  // re-renders, letting appContextValue memoize. The internal helpers below
+  // (loadTimeline, applyTimelineGenerationResult, enqueueTimelineGenerationApply) are
+  // not part of the context value, so they stay plain function declarations — keeping
+  // loadTimeline hoisted for the load-on-selection effect above.
+  const refreshTimelines = useCallback(
+    async (projectId = activeProject?.id, { signal } = {}) => {
+      if (!projectId) {
         return;
       }
-      setTimelines(items);
-      setTimelinesProjectId(projectId);
-      setSelectedTimelineId((current) => (items.some((item) => item.id === current) ? current : items[0]?.id ?? null));
-      if (!items.length) {
-        setActiveTimeline(null);
+      try {
+        const items = await apiFetch(`/api/v1/projects/${projectId}/timelines`, token, { signal });
+        if (activeProjectRef.current?.id && activeProjectRef.current.id !== projectId) {
+          return;
+        }
+        setTimelines(items);
+        setTimelinesProjectId(projectId);
+        setSelectedTimelineId((current) => (items.some((item) => item.id === current) ? current : items[0]?.id ?? null));
+        if (!items.length) {
+          setActiveTimeline(null);
+        }
+        setError("");
+      } catch (err) {
+        if (isAbortError(err)) return;
+        setError(err.message);
       }
-      setError("");
-    } catch (err) {
-      if (isAbortError(err)) return;
-      setError(err.message);
-    }
-  }
+    },
+    [token, activeProject, activeProjectRef, setError],
+  );
 
   async function loadTimeline(projectId, timelineId) {
     try {
@@ -74,87 +83,100 @@ export function useTimelines({
     }
   }
 
-  async function createTimeline(payload) {
-    if (!activeProject) {
-      setError("Create or open a project first.");
-      return null;
-    }
-    try {
-      const created = await apiFetch(`/api/v1/projects/${activeProject.id}/timelines`, token, {
-        method: "POST",
-        body: JSON.stringify(payload),
-      });
-      setTimelines((items) => [created, ...items.filter((item) => item.id !== created.id)]);
-      setTimelinesProjectId(activeProject.id);
-      setSelectedTimelineId(created.id);
-      setActiveTimeline(created);
-      setError("");
-      return created;
-    } catch (err) {
-      setError(err.message);
-      return null;
-    }
-  }
+  const createTimeline = useCallback(
+    async (payload) => {
+      if (!activeProject) {
+        setError("Create or open a project first.");
+        return null;
+      }
+      try {
+        const created = await apiFetch(`/api/v1/projects/${activeProject.id}/timelines`, token, {
+          method: "POST",
+          body: JSON.stringify(payload),
+        });
+        setTimelines((items) => [created, ...items.filter((item) => item.id !== created.id)]);
+        setTimelinesProjectId(activeProject.id);
+        setSelectedTimelineId(created.id);
+        setActiveTimeline(created);
+        setError("");
+        return created;
+      } catch (err) {
+        setError(err.message);
+        return null;
+      }
+    },
+    [token, activeProject, setError],
+  );
 
-  async function saveTimeline(timeline) {
-    if (!activeProject || !timeline) {
-      return null;
-    }
-    try {
-      const saved = await apiFetch(`/api/v1/projects/${activeProject.id}/timelines/${timeline.id}`, token, {
-        method: "PUT",
-        body: JSON.stringify({ timeline }),
-      });
-      setActiveTimeline(saved);
-      refreshTimelines(activeProject.id);
-      setError("");
-      return saved;
-    } catch (err) {
-      setError(err.message);
-      return null;
-    }
-  }
+  const saveTimeline = useCallback(
+    async (timeline) => {
+      if (!activeProject || !timeline) {
+        return null;
+      }
+      try {
+        const saved = await apiFetch(`/api/v1/projects/${activeProject.id}/timelines/${timeline.id}`, token, {
+          method: "PUT",
+          body: JSON.stringify({ timeline }),
+        });
+        setActiveTimeline(saved);
+        refreshTimelines(activeProject.id);
+        setError("");
+        return saved;
+      } catch (err) {
+        setError(err.message);
+        return null;
+      }
+    },
+    [token, activeProject, setError, refreshTimelines],
+  );
 
-  async function exportTimeline(timeline, options) {
-    if (!activeProject || !timeline) {
-      return;
-    }
-    const saved = await saveTimeline(timeline);
-    if (!saved) {
-      return;
-    }
-    try {
-      await apiFetch(`/api/v1/projects/${activeProject.id}/timelines/${saved.id}/exports`, token, {
-        method: "POST",
-        body: JSON.stringify({ ...options, requestedGpu }),
-      });
-      setActiveView("Queue");
-      setError("");
-    } catch (err) {
-      setError(err.message);
-    }
-  }
+  const exportTimeline = useCallback(
+    async (timeline, options) => {
+      if (!activeProject || !timeline) {
+        return;
+      }
+      const saved = await saveTimeline(timeline);
+      if (!saved) {
+        return;
+      }
+      try {
+        await apiFetch(`/api/v1/projects/${activeProject.id}/timelines/${saved.id}/exports`, token, {
+          method: "POST",
+          body: JSON.stringify({ ...options, requestedGpu }),
+        });
+        setActiveView("Queue");
+        setError("");
+      } catch (err) {
+        setError(err.message);
+      }
+    },
+    [token, activeProject, setError, requestedGpu, setActiveView, saveTimeline],
+  );
 
-  async function extractTimelineFrame({ timeline, item, playheadSeconds, intendedUse }) {
-    if (!activeProject || !timeline || !item) {
-      return null;
-    }
-    try {
-      const job = await apiFetch(`/api/v1/projects/${activeProject.id}/timelines/${timeline.id}/items/${item.id}/frames`, token, {
-        method: "POST",
-        body: JSON.stringify({ playheadSeconds, intendedUse, requestedGpu }),
-      });
-      setError("");
-      return job;
-    } catch (err) {
-      setError(err.message);
-      return null;
-    }
-  }
+  const extractTimelineFrame = useCallback(
+    async ({ timeline, item, playheadSeconds, intendedUse }) => {
+      if (!activeProject || !timeline || !item) {
+        return null;
+      }
+      try {
+        const job = await apiFetch(`/api/v1/projects/${activeProject.id}/timelines/${timeline.id}/items/${item.id}/frames`, token, {
+          method: "POST",
+          body: JSON.stringify({ playheadSeconds, intendedUse, requestedGpu }),
+        });
+        setError("");
+        return job;
+      } catch (err) {
+        setError(err.message);
+        return null;
+      }
+    },
+    [token, activeProject, setError, requestedGpu],
+  );
 
-  async function queueTimelineVideoJob(payload) {
-    return createVideoJob(payload, { navigateToQueue: false });
-  }
+  const queueTimelineVideoJob = useCallback(
+    async (payload) => createVideoJob(payload, { navigateToQueue: false }),
+    [createVideoJob],
+  );
 
   function applyTimelineGenerationResult(timeline, job) {
     const payload = job.payload ?? {};
