@@ -531,6 +531,20 @@ pub(crate) async fn run_image_generate_job(
     #[cfg(not(target_os = "macos"))]
     let handled = false;
 
+    // An MLX-routed model id whose weights/snapshot didn't resolve must fail
+    // loudly with a precise re-download error instead of completing the job
+    // with procedural stub output (sc-4176, epic 3482 "unsupported jobs error
+    // loudly"). `mlx_available` is the last dispatch arm, so reaching here
+    // with a known engine model means exactly that its weights are unusable.
+    // Model ids outside the engine families still stub (test models,
+    // not-yet-ported families, non-macOS lanes).
+    #[cfg(target_os = "macos")]
+    if !handled {
+        if let Some(gap) = mlx_weights_gap(&request, settings) {
+            return Err(WorkerError::InvalidPayload(gap));
+        }
+    }
+
     if !handled {
         generate_stub_stream(
             api,
@@ -897,6 +911,25 @@ enum GenEvent {
 
 /// True when this job can run real in-process inference: the model is a linked,
 /// engine-backed family and its weights resolve locally.
+/// Fail-loud gate for the stub fallback (sc-4176): Some(message) when the
+/// requested model id is a known MLX engine model but its weights snapshot
+/// can't be resolved (partially deleted HF cache, stale refs, missing
+/// modelPath). None when the model isn't engine-backed (the stub is its
+/// intended path) or the weights resolve.
+#[cfg(target_os = "macos")]
+pub(crate) fn mlx_weights_gap(request: &ImageRequest, settings: &Settings) -> Option<String> {
+    let model = mlx_model(&request.model)?;
+    if resolve_weights_dir(request, settings).is_some() {
+        return None;
+    }
+    Some(format!(
+        "{}: MLX weights not found or incomplete (Hugging Face repo {}). \
+         Re-download the model in Model Manager, then retry.",
+        request.model,
+        model_repo(request, model),
+    ))
+}
+
 #[cfg(target_os = "macos")]
 fn mlx_available(request: &ImageRequest, settings: &Settings) -> bool {
     mlx_model(&request.model).is_some() && resolve_weights_dir(request, settings).is_some()
@@ -4875,9 +4908,10 @@ async fn ensure_instantid_openpose(settings: &Settings) -> WorkerResult<WeightsS
 /// model is `!Send`). Three modes (torch parity): single identity (`generate`), the 11-view angle
 /// set (`generate_angle`), and the pose-library set (`generate_pose`, MultiControlNet IdentityNet
 /// with xinsir OpenPose — sc-3117). `advanced.faceRestore` adds the ADetailer-style re-render pass
-/// (`restore_face`, sc-3380) on each output. The engine `generate*` expose neither a step-progress
-/// callback nor a `CancelFlag`, so streaming is per-image (no `Step`/`Decoding` events) and
-/// cancellation is honoured between images. Reuses [`consume_gen_events`] for the asset writes.
+/// (`restore_face`, sc-3380) on each output. The engine `generate*` take the per-job `CancelFlag`
+/// (via `InstantIdRequest.cancel`) and a `Progress` callback (sc-4380/sc-4382), so streaming is
+/// per-step (`Step`/`Decoding` events) and cancellation is honoured mid-denoise — same contract
+/// as the registry families. Reuses [`consume_gen_events`] for the asset writes.
 #[cfg(target_os = "macos")]
 async fn generate_instantid_stream(
     api: &ApiClient,
@@ -5073,6 +5107,20 @@ async fn generate_instantid_stream(
                 if cancel.is_cancelled() {
                     break;
                 }
+                // Per-step progress → GenEvent::Step, so `consume_gen_events` streams step
+                // updates, fires `image_inference_start`, and polls the cancel API (sc-4382 —
+                // without Step events an InstantID job could never be cancelled).
+                let mut on_progress = |progress: Progress| {
+                    let event = match progress {
+                        Progress::Step { current, total } => GenEvent::Step {
+                            index,
+                            current,
+                            total,
+                        },
+                        Progress::Decoding => GenEvent::Decoding { index },
+                    };
+                    let _ = tx.blocking_send(event);
+                };
                 // Angle + pose sets use a square canvas (the engine forces `req.height =
                 // req.width` for the canonical landmark/skeleton — the sc-2009 kps-aspect rule);
                 // single identity keeps the requested W×H (the engine letterboxes the reference).
@@ -5087,14 +5135,9 @@ async fn generate_instantid_stream(
                     controlnet_scale,
                     openpose_scale,
                     seed: seed as u64,
-                    cancel: cancel.clone(), // sc-4380: cooperative per-step cancellation.
+                    cancel: cancel.clone(),
                 };
-                // No per-step progress is surfaced for InstantID (parity with pre-sc-4380
-                // behavior — progress is reported per-image via GenEvent below); the no-op
-                // satisfies the engine's on_progress contract. Cancellation is wired via
-                // `req.cancel` so an in-flight render bails promptly.
-                let mut on_progress = |_progress: mlx_gen::Progress| {};
-                let mut out = match &action {
+                let result = match &action {
                     InstantIdAction::Identity => model.generate(&req, &reference, &mut on_progress),
                     InstantIdAction::Angle(angle) => {
                         model.generate_angle(&req, &reference, angle, &mut on_progress)
@@ -5102,10 +5145,18 @@ async fn generate_instantid_stream(
                     InstantIdAction::Pose(keypoints) => {
                         model.generate_pose(&req, &reference, keypoints, &mut on_progress)
                     }
-                }
-                .map_err(|error| {
-                    WorkerError::InvalidPayload(format!("InstantID generation failed: {error}"))
-                })?;
+                };
+                let mut out = match result {
+                    Ok(out) => out,
+                    // A cancel tripped mid-denoise surfaces as the engine's cancelled error —
+                    // stop cleanly (consume_gen_events posts the Canceled update).
+                    Err(_) if cancel.is_cancelled() => break,
+                    Err(error) => {
+                        return Err(WorkerError::InvalidPayload(format!(
+                            "InstantID generation failed: {error}"
+                        )))
+                    }
+                };
                 // Optional ADetailer-style face-restore re-render (sc-3380), imposing the
                 // reference identity on the cropped face with the gender-neutral restore prompt.
                 if let Some(embedding) = &restore_embedding {
@@ -5120,15 +5171,18 @@ async fn generate_instantid_stream(
                         controlnet_scale,
                         openpose_scale,
                         seed: seed as u64,
-                        cancel: cancel.clone(), // sc-4380: cooperative per-step cancellation.
+                        cancel: cancel.clone(),
                     };
-                    out = model
-                        .restore_face(&restore_req, &out, embedding, &mut on_progress)
-                        .map_err(|error| {
-                            WorkerError::InvalidPayload(format!(
+                    out = match model.restore_face(&restore_req, &out, embedding, &mut on_progress)
+                    {
+                        Ok(out) => out,
+                        Err(_) if cancel.is_cancelled() => break,
+                        Err(error) => {
+                            return Err(WorkerError::InvalidPayload(format!(
                                 "InstantID face-restore failed: {error}"
-                            ))
-                        })?;
+                            )))
+                        }
+                    };
                 }
                 if tx
                     .blocking_send(GenEvent::Image {

@@ -1267,8 +1267,160 @@ class AuraSrUpscaler:
         return resource if isinstance(resource, dict) else {}
 
 
-class ZImageDiffusersAdapter:
+class DiffusersImageAdapterBase:
+    """Shared template for the six diffusers image adapters (sc-4188).
+
+    Owns the parts every family repeated verbatim: the LoRA-apply event pair,
+    the per-image inference event triple around an ``image_at_index`` closure,
+    the incremental asset writer call (always wired with ``settings``/``job_id``
+    so upscaler telemetry works on every family — five adapters had dropped
+    them), and the small step/repo/LoRA helpers. Families keep their own
+    pipeline caches, ``_load_pipeline``/``_run_pipeline`` choreography, guidance
+    defaults, and special modes (pose sets, IP-Adapter, references).
+    """
+
+    id: str
+    # The lora-state cache slot for edit_image requests ("edit" on Qwen, whose
+    # edit pipe is a distinct pipeline class; "img2img" elsewhere).
+    _edit_lora_key = "img2img"
+    # MODEL_TARGETS fallback when the request names an unknown model (legacy
+    # behavior: Z-Image and Qwen fell back to their flagship target).
+    _default_target_key: str | None = None
+
+    def _empty_cuda_cache(self, torch: Any) -> None:
+        # gc.collect() first: the pipeline we just dropped is held alive by its
+        # nn.Module reference cycles until the cyclic collector runs, so a bare
+        # empty_cache() would reclaim nothing on MPS.
+        release_inference_memory(torch)
+
+    def _forget_loaded_loras(self, key: str) -> None:
+        self._loaded_lora_states.pop(key, None)
+
+    def _fallback_model_target(self) -> dict[str, Any]:
+        return MODEL_TARGETS[self._default_target_key] if self._default_target_key else {}
+
+    def _repo_for_request(self, request: ImageRequest, model_target: dict[str, Any]) -> str:
+        return request.advanced.get("modelRepo") or model_target["repo"]
+
+    def _num_inference_steps(self, request: ImageRequest, model_target: dict[str, Any]) -> int:
+        return safe_int(request.advanced.get("steps"), model_target["steps"], 1, 80)
+
+    def _apply_loras(self, pipe: Any, request: ImageRequest, *, lora_key: str | None = None) -> None:
+        # lora_key pins the cache slot when the pipe is neither the text nor the
+        # edit pipe (e.g. a separate pose ControlNet pipe — sc-2251); defaults to mode.
+        # getattr: some callers (and test fakes) hand a minimal request that only
+        # carries model + loras; absent mode means the default text slot.
+        key = lora_key or (self._edit_lora_key if getattr(request, "mode", "") == "edit_image" else "text")
+        model_target = MODEL_TARGETS.get(request.model, self._fallback_model_target())
+        self._loaded_lora_states[key] = apply_loras_to_pipeline(
+            pipe,
+            request.loras,
+            adapter_id=self.id,
+            model_family=model_target.get("family"),
+            previous_state=self._loaded_lora_states.get(key),
+        )
+
+    def _apply_loras_with_events(
+        self, pipe: Any, request: ImageRequest, *, job_id: str, lora_key: str | None = None
+    ) -> None:
+        emit_worker_event(
+            "image_lora_apply_start",
+            jobId=job_id,
+            adapter=self.id,
+            loraCount=len(request.loras),
+        )
+        self._apply_loras(pipe, request, lora_key=lora_key)
+        emit_worker_event("image_lora_apply_complete", jobId=job_id, adapter=self.id)
+
+    def _generate_images(
+        self,
+        *,
+        settings: WorkerSettings,
+        job: dict[str, Any],
+        request: ImageRequest,
+        project_path: Path,
+        progress: ProgressCallback,
+        cancel_requested: CancelCallback,
+        label: str,
+        image_count: int,
+        run_one: Callable[[int, int], Image.Image],
+        raw_settings: dict[str, Any],
+        seed_for: Callable[[int], int] | None = None,
+        start_event_extra: Callable[[int], dict[str, Any]] | None = None,
+    ) -> dict[str, Any]:
+        """Generate ``image_count`` images via ``run_one(index, seed)``, emitting
+        the image_inference_start/failed/complete event triple per image, and
+        stream them through the incremental asset writer.
+
+        ``seed_for`` overrides per-index seed resolution (grouped sets share one
+        seed for attribute continuity); ``start_event_extra`` adds per-index
+        fields (viewAngle / poseId) to the start event.
+        """
+        torch = importlib.import_module("torch")
+        device = select_torch_device(torch, settings.gpu_id)
+
+        def image_at_index(index: int) -> Image.Image:
+            seed = (
+                seed_for(index)
+                if seed_for is not None
+                else resolve_seed(request.seed, request.prompt, index, request.seeds)
+            )
+            progress(
+                "running",
+                "generating",
+                image_batch_progress(index, image_count),
+                format_batch_running_message(label, index, image_count),
+            )
+            extra = start_event_extra(index) if start_event_extra is not None else {}
+            emit_worker_event(
+                "image_inference_start",
+                jobId=job["id"],
+                adapter=self.id,
+                model=request.model,
+                imageIndex=index,
+                imageCount=image_count,
+                **extra,
+                device=device,
+                gpuMemory=gpu_memory_snapshot(torch, device),
+            )
+            try:
+                image = run_one(index, seed)
+            except Exception as exc:
+                emit_worker_event(
+                    "image_inference_failed",
+                    jobId=job["id"],
+                    adapter=self.id,
+                    imageIndex=index,
+                    error=str(exc),
+                    errorType=exc.__class__.__name__,
+                )
+                raise
+            emit_worker_event(
+                "image_inference_complete",
+                jobId=job["id"],
+                adapter=self.id,
+                imageIndex=index,
+                gpuMemory=gpu_memory_snapshot(torch, device),
+            )
+            return image
+
+        return ImageAssetWriter().write_incremental_outputs(
+            request=request,
+            project_path=project_path,
+            image_count=image_count,
+            image_at_index=image_at_index,
+            adapter_id=self.id,
+            progress=progress,
+            cancel_requested=cancel_requested,
+            raw_settings=raw_settings,
+            settings=settings,
+            job_id=job["id"],
+        )
+
+
+class ZImageDiffusersAdapter(DiffusersImageAdapterBase):
     id = "z_image_diffusers"
+    _default_target_key = "z_image_turbo"
 
     def __init__(self) -> None:
         self._text_pipe: Any | None = None
@@ -1307,66 +1459,19 @@ class ZImageDiffusersAdapter:
 
         progress("loading_model", "loading_model", 0.18, f"Loading {model_target['label']}.")
         pipe = self._load_pipeline(settings, request, model_target, progress=progress, job_id=job["id"])
-        emit_worker_event(
-            "image_lora_apply_start",
-            jobId=job["id"],
-            adapter=self.id,
-            loraCount=len(request.loras),
-        )
-        self._apply_loras(pipe, request)
-        emit_worker_event("image_lora_apply_complete", jobId=job["id"], adapter=self.id)
-        total = request.count
-        torch = importlib.import_module("torch")
-        device = select_torch_device(torch, settings.gpu_id)
-        label = "Z-Image"
-
-        def image_at_index(index: int) -> Image.Image:
-            seed = resolve_seed(request.seed, request.prompt, index, request.seeds)
-            progress(
-                "running",
-                "generating",
-                image_batch_progress(index, total),
-                format_batch_running_message(label, index, total),
-            )
-            emit_worker_event(
-                "image_inference_start",
-                jobId=job["id"],
-                adapter=self.id,
-                model=request.model,
-                imageIndex=index,
-                imageCount=total,
-                device=device,
-                gpuMemory=gpu_memory_snapshot(torch, device),
-            )
-            try:
-                image = self._run_pipeline(settings, pipe, request, seed, project_path, cancel_requested=cancel_requested)
-            except Exception as exc:
-                emit_worker_event(
-                    "image_inference_failed",
-                    jobId=job["id"],
-                    adapter=self.id,
-                    imageIndex=index,
-                    error=str(exc),
-                    errorType=exc.__class__.__name__,
-                )
-                raise
-            emit_worker_event(
-                "image_inference_complete",
-                jobId=job["id"],
-                adapter=self.id,
-                imageIndex=index,
-                gpuMemory=gpu_memory_snapshot(torch, device),
-            )
-            return image
-
-        return ImageAssetWriter().write_incremental_outputs(
+        self._apply_loras_with_events(pipe, request, job_id=job["id"])
+        return self._generate_images(
+            settings=settings,
+            job=job,
             request=request,
             project_path=project_path,
-            image_count=total,
-            image_at_index=image_at_index,
-            adapter_id=self.id,
             progress=progress,
             cancel_requested=cancel_requested,
+            label="Z-Image",
+            image_count=request.count,
+            run_one=lambda index, seed: self._run_pipeline(
+                settings, pipe, request, seed, project_path, cancel_requested=cancel_requested
+            ),
             raw_settings={
                 **request.advanced,
                 "repo": model_target["repo"],
@@ -1374,8 +1479,6 @@ class ZImageDiffusersAdapter:
                 "guidanceScale": self._guidance_scale(request),
                 "realModelInference": True,
             },
-            settings=settings,
-            job_id=job["id"],
         )
 
     def _load_pipeline(
@@ -1499,12 +1602,6 @@ class ZImageDiffusersAdapter:
         self._loaded_lora_states.clear()
         self._empty_cuda_cache(torch)
 
-    def _empty_cuda_cache(self, torch: Any) -> None:
-        # gc.collect() first: the pipeline we just dropped is held alive by its
-        # nn.Module reference cycles until the cyclic collector runs, so a bare
-        # empty_cache() would reclaim nothing on MPS.
-        release_inference_memory(torch)
-
     def _run_pipeline(
         self,
         settings: WorkerSettings,
@@ -1543,23 +1640,6 @@ class ZImageDiffusersAdapter:
         image = output.images[0]
         return image.convert("RGB")
 
-    def _apply_loras(self, pipe: Any, request: ImageRequest) -> None:
-        key = "img2img" if request.mode == "edit_image" else "text"
-        model_target = MODEL_TARGETS.get(request.model, MODEL_TARGETS["z_image_turbo"])
-        self._loaded_lora_states[key] = apply_loras_to_pipeline(
-            pipe,
-            request.loras,
-            adapter_id=self.id,
-            model_family=model_target.get("family"),
-            previous_state=self._loaded_lora_states.get(key),
-        )
-
-    def _forget_loaded_loras(self, key: str) -> None:
-        self._loaded_lora_states.pop(key, None)
-
-    def _num_inference_steps(self, request: ImageRequest, model_target: dict[str, Any]) -> int:
-        return safe_int(request.advanced.get("steps"), model_target["steps"] + 1, 1, 80)
-
     def _guidance_scale(self, request: ImageRequest) -> float:
         model_target = MODEL_TARGETS.get(request.model, MODEL_TARGETS["z_image_turbo"])
         default = model_target.get("guidanceScale", 1.0)
@@ -1569,8 +1649,10 @@ class ZImageDiffusersAdapter:
             return default
 
 
-class QwenImageAdapter:
+class QwenImageAdapter(DiffusersImageAdapterBase):
     id = "qwen_image"
+    _edit_lora_key = "edit"
+    _default_target_key = "qwen_image"
 
     # sc-2160: all edit IDs route through QwenImageEditPlusPipeline now that the
     # legacy qwen_image_edit / qwen_image_edit_2509 IDs alias to the 2511 base
@@ -1663,16 +1745,7 @@ class QwenImageAdapter:
 
         progress("loading_model", "loading_model", 0.18, f"Loading {model_target['label']}.")
         pipe = self._load_pipeline(settings, request, model_target, progress=progress, job_id=job["id"])
-        emit_worker_event(
-            "image_lora_apply_start",
-            jobId=job["id"],
-            adapter=self.id,
-            loraCount=len(request.loras),
-        )
-        self._apply_loras(pipe, request)
-        emit_worker_event("image_lora_apply_complete", jobId=job["id"], adapter=self.id)
-        torch = importlib.import_module("torch")
-        device = select_torch_device(torch, settings.gpu_id)
+        self._apply_loras_with_events(pipe, request, job_id=job["id"])
         label = "Qwen Image"
         # sc-2003 multi-backbone angle set: when advanced.angleSet is set on a
         # character_image request, loop the 11 canonical angles in one job — one
@@ -1704,10 +1777,8 @@ class QwenImageAdapter:
             total = request.count
         set_seed = resolve_seed(request.seed, request.prompt, 0, request.seeds)
 
-        def image_at_index(index: int) -> Image.Image:
-            seed = set_seed if grouped else resolve_seed(request.seed, request.prompt, index, request.seeds)
+        def run_one(index: int, seed: int) -> Image.Image:
             angle = angles[index] if angle_set else None
-            pose_id = pose_entries[index].get("id") if pose_set else None
             pose_skeleton = None
             if pose_set:
                 pose_skeleton = Image.fromarray(
@@ -1716,62 +1787,32 @@ class QwenImageAdapter:
                 prompt_override = augment_prompt_for_pose(request.prompt)
             else:
                 prompt_override = augment_prompt_for_angle(request.prompt, angle) if angle else None
-            progress(
-                "running",
-                "generating",
-                image_batch_progress(index, total),
-                format_batch_running_message(label, index, total),
+            return self._run_pipeline(
+                settings,
+                pipe,
+                request,
+                seed,
+                project_path,
+                cancel_requested=cancel_requested,
+                prompt_override=prompt_override,
+                pose_skeleton=pose_skeleton,
             )
-            emit_worker_event(
-                "image_inference_start",
-                jobId=job["id"],
-                adapter=self.id,
-                model=request.model,
-                imageIndex=index,
-                imageCount=total,
-                viewAngle=angle,
-                poseId=pose_id,
-                device=device,
-                gpuMemory=gpu_memory_snapshot(torch, device),
-            )
-            try:
-                image = self._run_pipeline(
-                    settings,
-                    pipe,
-                    request,
-                    seed,
-                    project_path,
-                    cancel_requested=cancel_requested,
-                    prompt_override=prompt_override,
-                    pose_skeleton=pose_skeleton,
-                )
-            except Exception as exc:
-                emit_worker_event(
-                    "image_inference_failed",
-                    jobId=job["id"],
-                    adapter=self.id,
-                    imageIndex=index,
-                    error=str(exc),
-                    errorType=exc.__class__.__name__,
-                )
-                raise
-            emit_worker_event(
-                "image_inference_complete",
-                jobId=job["id"],
-                adapter=self.id,
-                imageIndex=index,
-                gpuMemory=gpu_memory_snapshot(torch, device),
-            )
-            return image
 
-        return ImageAssetWriter().write_incremental_outputs(
+        return self._generate_images(
+            settings=settings,
+            job=job,
             request=request,
             project_path=project_path,
-            image_count=total,
-            image_at_index=image_at_index,
-            adapter_id=self.id,
             progress=progress,
             cancel_requested=cancel_requested,
+            label=label,
+            image_count=total,
+            run_one=run_one,
+            seed_for=(lambda index: set_seed) if grouped else None,
+            start_event_extra=lambda index: {
+                "viewAngle": angles[index] if angle_set else None,
+                "poseId": pose_entries[index].get("id") if pose_set else None,
+            },
             raw_settings={
                 **request.advanced,
                 "repo": self._repo_for_request(request, model_target),
@@ -1781,8 +1822,6 @@ class QwenImageAdapter:
                 **({"angleSet": True} if angle_set else {}),
                 **({"poseLibrary": True} if pose_set else {}),
             },
-            settings=settings,
-            job_id=job["id"],
         )
 
     def _load_pipeline(
@@ -1905,11 +1944,6 @@ class QwenImageAdapter:
         self._loaded_model = request.model
         return pipe
 
-    def _empty_cuda_cache(self, torch: Any) -> None:
-        # gc.collect() first so the just-dropped pipeline is actually collected
-        # before empty_cache() asks the allocator to return its blocks.
-        release_inference_memory(torch)
-
     def _run_pipeline(
         self,
         settings: WorkerSettings,
@@ -2013,74 +2047,29 @@ class QwenImageAdapter:
         # so the character-LoRA bootstrapping loop supplies identity on the strict pose
         # tier. The CN pipeline exposes .transformer, so apply_loras_to_pipeline also
         # routes LoKr via inject_lokr_adapter. Tracked under its own "pose" cache slot.
-        emit_worker_event(
-            "image_lora_apply_start",
-            jobId=job["id"],
-            adapter=self.id,
-            loraCount=len(request.loras),
-        )
-        self._apply_loras(pipe, request, lora_key="pose")
-        emit_worker_event("image_lora_apply_complete", jobId=job["id"], adapter=self.id)
-        torch = importlib.import_module("torch")
-        device = select_torch_device(torch, settings.gpu_id)
+        self._apply_loras_with_events(pipe, request, job_id=job["id"], lora_key="pose")
         total = len(pose_entries)
         pose_keypoints = [normalize_keypoints(p.get("keypoints")) for p in pose_entries]
         pose_hands = [normalize_hands(p.get("hands")) for p in pose_entries]
         pose_faces = [normalize_face(p.get("face")) for p in pose_entries]
         set_seed = resolve_seed(request.seed, request.prompt, 0, request.seeds)
-        label = f"{model_target['label']} pose"
 
-        def image_at_index(index: int) -> Image.Image:
-            progress(
-                "running",
-                "generating",
-                image_batch_progress(index, total),
-                format_batch_running_message(label, index, total),
-            )
-            emit_worker_event(
-                "image_inference_start",
-                jobId=job["id"],
-                adapter=self.id,
-                model=request.model,
-                imageIndex=index,
-                imageCount=total,
-                poseId=pose_entries[index].get("id"),
-                device=device,
-                gpuMemory=gpu_memory_snapshot(torch, device),
-            )
-            try:
-                image = self._run_pose(
-                    settings, pipe, request, set_seed, project_path,
-                    pose_keypoints[index], pose_hands[index], pose_faces[index],
-                    cancel_requested=cancel_requested,
-                )
-            except Exception as exc:
-                emit_worker_event(
-                    "image_inference_failed",
-                    jobId=job["id"],
-                    adapter=self.id,
-                    imageIndex=index,
-                    error=str(exc),
-                    errorType=exc.__class__.__name__,
-                )
-                raise
-            emit_worker_event(
-                "image_inference_complete",
-                jobId=job["id"],
-                adapter=self.id,
-                imageIndex=index,
-                gpuMemory=gpu_memory_snapshot(torch, device),
-            )
-            return image
-
-        return ImageAssetWriter().write_incremental_outputs(
+        return self._generate_images(
+            settings=settings,
+            job=job,
             request=request,
             project_path=project_path,
-            image_count=total,
-            image_at_index=image_at_index,
-            adapter_id=self.id,
             progress=progress,
             cancel_requested=cancel_requested,
+            label=f"{model_target['label']} pose",
+            image_count=total,
+            run_one=lambda index, seed: self._run_pose(
+                settings, pipe, request, seed, project_path,
+                pose_keypoints[index], pose_hands[index], pose_faces[index],
+                cancel_requested=cancel_requested,
+            ),
+            seed_for=lambda index: set_seed,
+            start_event_extra=lambda index: {"poseId": pose_entries[index].get("id")},
             raw_settings={
                 **request.advanced,
                 "repo": self._repo_for_request(request, model_target),
@@ -2091,8 +2080,6 @@ class QwenImageAdapter:
                 "poseLibrary": True,
                 "realModelInference": True,
             },
-            settings=settings,
-            job_id=job["id"],
         )
 
     def _load_pose_pipeline(
@@ -2239,26 +2226,6 @@ class QwenImageAdapter:
             raise InterruptedError("Image generation canceled by user.")
         return output.images[0].convert("RGB")
 
-    def _apply_loras(self, pipe: Any, request: ImageRequest, lora_key: str | None = None) -> None:
-        key = lora_key or ("edit" if request.mode == "edit_image" else "text")
-        model_target = MODEL_TARGETS.get(request.model, MODEL_TARGETS["qwen_image"])
-        self._loaded_lora_states[key] = apply_loras_to_pipeline(
-            pipe,
-            request.loras,
-            adapter_id=self.id,
-            model_family=model_target.get("family"),
-            previous_state=self._loaded_lora_states.get(key),
-        )
-
-    def _forget_loaded_loras(self, key: str) -> None:
-        self._loaded_lora_states.pop(key, None)
-
-    def _repo_for_request(self, request: ImageRequest, model_target: dict[str, Any]) -> str:
-        return request.advanced.get("modelRepo") or model_target["repo"]
-
-    def _num_inference_steps(self, request: ImageRequest, model_target: dict[str, Any]) -> int:
-        return safe_int(request.advanced.get("steps"), model_target["steps"], 1, 80)
-
     def _guidance_scale(self, request: ImageRequest) -> float:
         # Default differs by target: text-to-image qwen_image uses 4.0; the Edit
         # / Edit-Plus pipelines (incl. Lightning distill) require 1.0 per the
@@ -2327,7 +2294,7 @@ class QwenImageAdapter:
         return max(1.0, min(10.0, self._true_cfg_scale_default(request)))
 
 
-class FluxDiffusersAdapter:
+class FluxDiffusersAdapter(DiffusersImageAdapterBase):
     """Black Forest Labs FLUX.1 [schnell] / [dev] text-to-image via diffusers.FluxPipeline.
 
     Mirrors ZImageDiffusersAdapter / QwenImageAdapter: HF-cache check, device/dtype
@@ -2390,67 +2357,19 @@ class FluxDiffusersAdapter:
 
         progress("loading_model", "loading_model", 0.18, f"Loading {model_target['label']}.")
         pipe = self._load_pipeline(settings, request, model_target, progress=progress, job_id=job["id"])
-        emit_worker_event(
-            "image_lora_apply_start",
-            jobId=job["id"],
-            adapter=self.id,
-            loraCount=len(request.loras),
-        )
-        self._apply_loras(pipe, request)
-        emit_worker_event("image_lora_apply_complete", jobId=job["id"], adapter=self.id)
-        torch = importlib.import_module("torch")
-        device = select_torch_device(torch, settings.gpu_id)
-        label = model_target["label"]
-
-        def image_at_index(index: int) -> Image.Image:
-            seed = resolve_seed(request.seed, request.prompt, index, request.seeds)
-            progress(
-                "running",
-                "generating",
-                image_batch_progress(index, request.count),
-                format_batch_running_message(label, index, request.count),
-            )
-            emit_worker_event(
-                "image_inference_start",
-                jobId=job["id"],
-                adapter=self.id,
-                model=request.model,
-                imageIndex=index,
-                imageCount=request.count,
-                device=device,
-                gpuMemory=gpu_memory_snapshot(torch, device),
-            )
-            try:
-                image = self._run_pipeline(
-                    settings, pipe, request, seed, project_path, cancel_requested=cancel_requested
-                )
-            except Exception as exc:
-                emit_worker_event(
-                    "image_inference_failed",
-                    jobId=job["id"],
-                    adapter=self.id,
-                    imageIndex=index,
-                    error=str(exc),
-                    errorType=exc.__class__.__name__,
-                )
-                raise
-            emit_worker_event(
-                "image_inference_complete",
-                jobId=job["id"],
-                adapter=self.id,
-                imageIndex=index,
-                gpuMemory=gpu_memory_snapshot(torch, device),
-            )
-            return image
-
-        return ImageAssetWriter().write_incremental_outputs(
+        self._apply_loras_with_events(pipe, request, job_id=job["id"])
+        return self._generate_images(
+            settings=settings,
+            job=job,
             request=request,
             project_path=project_path,
-            image_count=request.count,
-            image_at_index=image_at_index,
-            adapter_id=self.id,
             progress=progress,
             cancel_requested=cancel_requested,
+            label=model_target["label"],
+            image_count=request.count,
+            run_one=lambda index, seed: self._run_pipeline(
+                settings, pipe, request, seed, project_path, cancel_requested=cancel_requested
+            ),
             raw_settings={
                 **request.advanced,
                 "repo": self._repo_for_request(request, model_target),
@@ -2587,9 +2506,6 @@ class FluxDiffusersAdapter:
         self._loaded_model = request.model
         return pipe
 
-    def _empty_cuda_cache(self, torch: Any) -> None:
-        release_inference_memory(torch)
-
     def _run_pipeline(
         self,
         settings: WorkerSettings,
@@ -2634,25 +2550,6 @@ class FluxDiffusersAdapter:
             raise InterruptedError("Image generation canceled by user.")
         return output.images[0].convert("RGB")
 
-    def _apply_loras(self, pipe: Any, request: ImageRequest) -> None:
-        model_target = MODEL_TARGETS.get(request.model, {})
-        self._loaded_lora_states["text"] = apply_loras_to_pipeline(
-            pipe,
-            request.loras,
-            adapter_id=self.id,
-            model_family=model_target.get("family"),
-            previous_state=self._loaded_lora_states.get("text"),
-        )
-
-    def _forget_loaded_loras(self, key: str) -> None:
-        self._loaded_lora_states.pop(key, None)
-
-    def _repo_for_request(self, request: ImageRequest, model_target: dict[str, Any]) -> str:
-        return request.advanced.get("modelRepo") or model_target["repo"]
-
-    def _num_inference_steps(self, request: ImageRequest, model_target: dict[str, Any]) -> int:
-        return safe_int(request.advanced.get("steps"), model_target["steps"], 1, 80)
-
     def _guidance_scale(self, request: ImageRequest, model_target: dict[str, Any]) -> float:
         default = model_target.get("guidanceScale", 0.0)
         try:
@@ -2692,7 +2589,7 @@ class FluxDiffusersAdapter:
         return max(1.0, min(10.0, scale))
 
 
-class KolorsDiffusersAdapter:
+class KolorsDiffusersAdapter(DiffusersImageAdapterBase):
     """Kwai-Kolors Kolors text-to-image via diffusers.KolorsPipeline.
 
     Mirrors FluxDiffusersAdapter: HF-cache check, device/dtype selection, progress
@@ -2769,73 +2666,28 @@ class KolorsDiffusersAdapter:
         # The vendored pose pipeline inherits StableDiffusionXLLoraLoaderMixin and
         # exposes .unet, so the shared path also routes LoKr via inject_lokr_adapter
         # (sc-2252). Tracked under its own "pose" cache slot (distinct pipe object).
-        emit_worker_event(
-            "image_lora_apply_start",
-            jobId=job["id"],
-            adapter=self.id,
-            loraCount=len(request.loras),
-        )
-        self._apply_loras(pipe, request, lora_key="pose")
-        emit_worker_event("image_lora_apply_complete", jobId=job["id"], adapter=self.id)
-        torch = importlib.import_module("torch")
-        device = select_torch_device(torch, settings.gpu_id)
+        self._apply_loras_with_events(pipe, request, job_id=job["id"], lora_key="pose")
         total = len(pose_entries)
         pose_keypoints = [normalize_keypoints(p.get("keypoints")) for p in pose_entries]
         set_seed = resolve_seed(request.seed, request.prompt, 0, request.seeds)
-        label = f"{model_target['label']} pose"
 
-        def image_at_index(index: int) -> Image.Image:
-            progress(
-                "running",
-                "generating",
-                image_batch_progress(index, total),
-                format_batch_running_message(label, index, total),
-            )
-            emit_worker_event(
-                "image_inference_start",
-                jobId=job["id"],
-                adapter=self.id,
-                model=request.model,
-                imageIndex=index,
-                imageCount=total,
-                poseId=pose_entries[index].get("id"),
-                device=device,
-                gpuMemory=gpu_memory_snapshot(torch, device),
-            )
-            try:
-                image = self._run_pose(
-                    settings, pipe, request, set_seed, project_path, pose_keypoints[index],
-                    hands=normalize_hands(pose_entries[index].get("hands")),
-                    face=normalize_face(pose_entries[index].get("face")),
-                    cancel_requested=cancel_requested,
-                )
-            except Exception as exc:
-                emit_worker_event(
-                    "image_inference_failed",
-                    jobId=job["id"],
-                    adapter=self.id,
-                    imageIndex=index,
-                    error=str(exc),
-                    errorType=exc.__class__.__name__,
-                )
-                raise
-            emit_worker_event(
-                "image_inference_complete",
-                jobId=job["id"],
-                adapter=self.id,
-                imageIndex=index,
-                gpuMemory=gpu_memory_snapshot(torch, device),
-            )
-            return image
-
-        return ImageAssetWriter().write_incremental_outputs(
+        return self._generate_images(
+            settings=settings,
+            job=job,
             request=request,
             project_path=project_path,
-            image_count=total,
-            image_at_index=image_at_index,
-            adapter_id=self.id,
             progress=progress,
             cancel_requested=cancel_requested,
+            label=f"{model_target['label']} pose",
+            image_count=total,
+            run_one=lambda index, seed: self._run_pose(
+                settings, pipe, request, seed, project_path, pose_keypoints[index],
+                hands=normalize_hands(pose_entries[index].get("hands")),
+                face=normalize_face(pose_entries[index].get("face")),
+                cancel_requested=cancel_requested,
+            ),
+            seed_for=lambda index: set_seed,
+            start_event_extra=lambda index: {"poseId": pose_entries[index].get("id")},
             raw_settings={
                 **request.advanced,
                 "repo": self._repo_for_request(request, model_target),
@@ -3050,67 +2902,19 @@ class KolorsDiffusersAdapter:
         use_img2img = request.mode == "edit_image"
         progress("loading_model", "loading_model", 0.18, f"Loading {model_target['label']}.")
         pipe = self._load_pipeline(settings, request, model_target, progress=progress, job_id=job["id"])
-        emit_worker_event(
-            "image_lora_apply_start",
-            jobId=job["id"],
-            adapter=self.id,
-            loraCount=len(request.loras),
-        )
-        self._apply_loras(pipe, request)
-        emit_worker_event("image_lora_apply_complete", jobId=job["id"], adapter=self.id)
-        torch = importlib.import_module("torch")
-        device = select_torch_device(torch, settings.gpu_id)
-        label = f"{model_target['label']} edit" if use_img2img else model_target["label"]
-
-        def image_at_index(index: int) -> Image.Image:
-            seed = resolve_seed(request.seed, request.prompt, index, request.seeds)
-            progress(
-                "running",
-                "generating",
-                image_batch_progress(index, request.count),
-                format_batch_running_message(label, index, request.count),
-            )
-            emit_worker_event(
-                "image_inference_start",
-                jobId=job["id"],
-                adapter=self.id,
-                model=request.model,
-                imageIndex=index,
-                imageCount=request.count,
-                device=device,
-                gpuMemory=gpu_memory_snapshot(torch, device),
-            )
-            try:
-                image = self._run_pipeline(
-                    settings, pipe, request, seed, project_path, cancel_requested=cancel_requested
-                )
-            except Exception as exc:
-                emit_worker_event(
-                    "image_inference_failed",
-                    jobId=job["id"],
-                    adapter=self.id,
-                    imageIndex=index,
-                    error=str(exc),
-                    errorType=exc.__class__.__name__,
-                )
-                raise
-            emit_worker_event(
-                "image_inference_complete",
-                jobId=job["id"],
-                adapter=self.id,
-                imageIndex=index,
-                gpuMemory=gpu_memory_snapshot(torch, device),
-            )
-            return image
-
-        return ImageAssetWriter().write_incremental_outputs(
+        self._apply_loras_with_events(pipe, request, job_id=job["id"])
+        return self._generate_images(
+            settings=settings,
+            job=job,
             request=request,
             project_path=project_path,
-            image_count=request.count,
-            image_at_index=image_at_index,
-            adapter_id=self.id,
             progress=progress,
             cancel_requested=cancel_requested,
+            label=f"{model_target['label']} edit" if use_img2img else model_target["label"],
+            image_count=request.count,
+            run_one=lambda index, seed: self._run_pipeline(
+                settings, pipe, request, seed, project_path, cancel_requested=cancel_requested
+            ),
             raw_settings={
                 **request.advanced,
                 "repo": self._repo_for_request(request, model_target),
@@ -3305,9 +3109,6 @@ class KolorsDiffusersAdapter:
         self._loaded_lora_states.clear()
         self._empty_cuda_cache(torch)
 
-    def _empty_cuda_cache(self, torch: Any) -> None:
-        release_inference_memory(torch)
-
     def _run_pipeline(
         self,
         settings: WorkerSettings,
@@ -3353,28 +3154,6 @@ class KolorsDiffusersAdapter:
             raise InterruptedError("Image generation canceled by user.")
         return output.images[0].convert("RGB")
 
-    def _apply_loras(self, pipe: Any, request: ImageRequest, *, lora_key: str | None = None) -> None:
-        # lora_key pins the cache slot when the pipe is neither the text nor img2img
-        # pipe (e.g. the separate pose ControlNet pipe — sc-2251); defaults to mode.
-        key = lora_key or ("img2img" if request.mode == "edit_image" else "text")
-        model_target = MODEL_TARGETS.get(request.model, {})
-        self._loaded_lora_states[key] = apply_loras_to_pipeline(
-            pipe,
-            request.loras,
-            adapter_id=self.id,
-            model_family=model_target.get("family"),
-            previous_state=self._loaded_lora_states.get(key),
-        )
-
-    def _forget_loaded_loras(self, key: str) -> None:
-        self._loaded_lora_states.pop(key, None)
-
-    def _repo_for_request(self, request: ImageRequest, model_target: dict[str, Any]) -> str:
-        return request.advanced.get("modelRepo") or model_target["repo"]
-
-    def _num_inference_steps(self, request: ImageRequest, model_target: dict[str, Any]) -> int:
-        return safe_int(request.advanced.get("steps"), model_target["steps"], 1, 80)
-
     def _guidance_scale(self, request: ImageRequest, model_target: dict[str, Any]) -> float:
         default = model_target.get("guidanceScale", 5.0)
         try:
@@ -3400,7 +3179,7 @@ class KolorsDiffusersAdapter:
         return max(0.0, min(1.0, scale))
 
 
-class SdxlDiffusersAdapter:
+class SdxlDiffusersAdapter(DiffusersImageAdapterBase):
     """Stability AI Stable Diffusion XL base 1.0 via diffusers.StableDiffusionXLPipeline.
 
     Mirrors KolorsDiffusersAdapter (Kolors is built on the same SDXL UNet):
@@ -3469,67 +3248,19 @@ class SdxlDiffusersAdapter:
         use_img2img = request.mode == "edit_image"
         progress("loading_model", "loading_model", 0.18, f"Loading {model_target['label']}.")
         pipe = self._load_pipeline(settings, request, model_target, progress=progress, job_id=job["id"])
-        emit_worker_event(
-            "image_lora_apply_start",
-            jobId=job["id"],
-            adapter=self.id,
-            loraCount=len(request.loras),
-        )
-        self._apply_loras(pipe, request)
-        emit_worker_event("image_lora_apply_complete", jobId=job["id"], adapter=self.id)
-        torch = importlib.import_module("torch")
-        device = select_torch_device(torch, settings.gpu_id)
-        label = f"{model_target['label']} edit" if use_img2img else model_target["label"]
-
-        def image_at_index(index: int) -> Image.Image:
-            seed = resolve_seed(request.seed, request.prompt, index, request.seeds)
-            progress(
-                "running",
-                "generating",
-                image_batch_progress(index, request.count),
-                format_batch_running_message(label, index, request.count),
-            )
-            emit_worker_event(
-                "image_inference_start",
-                jobId=job["id"],
-                adapter=self.id,
-                model=request.model,
-                imageIndex=index,
-                imageCount=request.count,
-                device=device,
-                gpuMemory=gpu_memory_snapshot(torch, device),
-            )
-            try:
-                image = self._run_pipeline(
-                    settings, pipe, request, seed, project_path, cancel_requested=cancel_requested
-                )
-            except Exception as exc:
-                emit_worker_event(
-                    "image_inference_failed",
-                    jobId=job["id"],
-                    adapter=self.id,
-                    imageIndex=index,
-                    error=str(exc),
-                    errorType=exc.__class__.__name__,
-                )
-                raise
-            emit_worker_event(
-                "image_inference_complete",
-                jobId=job["id"],
-                adapter=self.id,
-                imageIndex=index,
-                gpuMemory=gpu_memory_snapshot(torch, device),
-            )
-            return image
-
-        return ImageAssetWriter().write_incremental_outputs(
+        self._apply_loras_with_events(pipe, request, job_id=job["id"])
+        return self._generate_images(
+            settings=settings,
+            job=job,
             request=request,
             project_path=project_path,
-            image_count=request.count,
-            image_at_index=image_at_index,
-            adapter_id=self.id,
             progress=progress,
             cancel_requested=cancel_requested,
+            label=f"{model_target['label']} edit" if use_img2img else model_target["label"],
+            image_count=request.count,
+            run_one=lambda index, seed: self._run_pipeline(
+                settings, pipe, request, seed, project_path, cancel_requested=cancel_requested
+            ),
             raw_settings={
                 **request.advanced,
                 "repo": self._repo_for_request(request, model_target),
@@ -3717,9 +3448,6 @@ class SdxlDiffusersAdapter:
         self._loaded_lora_states.clear()
         self._empty_cuda_cache(torch)
 
-    def _empty_cuda_cache(self, torch: Any) -> None:
-        release_inference_memory(torch)
-
     def _run_pipeline(
         self,
         settings: WorkerSettings,
@@ -3824,28 +3552,6 @@ class SdxlDiffusersAdapter:
             )
         return inpaint_class(**pipe.components)
 
-    def _apply_loras(self, pipe: Any, request: ImageRequest, *, lora_key: str | None = None) -> None:
-        # lora_key pins the cache slot when the pipe is neither the text nor img2img
-        # pipe (e.g. the separate pose ControlNet pipe — sc-2251); defaults to mode.
-        key = lora_key or ("img2img" if request.mode == "edit_image" else "text")
-        model_target = MODEL_TARGETS.get(request.model, {})
-        self._loaded_lora_states[key] = apply_loras_to_pipeline(
-            pipe,
-            request.loras,
-            adapter_id=self.id,
-            model_family=model_target.get("family"),
-            previous_state=self._loaded_lora_states.get(key),
-        )
-
-    def _forget_loaded_loras(self, key: str) -> None:
-        self._loaded_lora_states.pop(key, None)
-
-    def _repo_for_request(self, request: ImageRequest, model_target: dict[str, Any]) -> str:
-        return request.advanced.get("modelRepo") or model_target["repo"]
-
-    def _num_inference_steps(self, request: ImageRequest, model_target: dict[str, Any]) -> int:
-        return safe_int(request.advanced.get("steps"), model_target["steps"], 1, 80)
-
     def _guidance_scale(self, request: ImageRequest, model_target: dict[str, Any]) -> float:
         default = model_target.get("guidanceScale", 7.0)
         try:
@@ -3864,7 +3570,7 @@ class SdxlDiffusersAdapter:
         return max(0.0, min(1.0, scale))
 
 
-class ChromaDiffusersAdapter:
+class ChromaDiffusersAdapter(DiffusersImageAdapterBase):
     """Lodestones Chroma1-HD / Base / Flash text-to-image via diffusers.ChromaPipeline.
 
     Near-clone of FluxDiffusersAdapter (Chroma1 is FLUX.1-schnell-derived and runs
@@ -3921,65 +3627,19 @@ class ChromaDiffusersAdapter:
 
         progress("loading_model", "loading_model", 0.18, f"Loading {model_target['label']}.")
         pipe = self._load_pipeline(settings, request, model_target, progress=progress, job_id=job["id"])
-        emit_worker_event(
-            "image_lora_apply_start",
-            jobId=job["id"],
-            adapter=self.id,
-            loraCount=len(request.loras),
-        )
-        self._apply_loras(pipe, request)
-        emit_worker_event("image_lora_apply_complete", jobId=job["id"], adapter=self.id)
-        torch = importlib.import_module("torch")
-        device = select_torch_device(torch, settings.gpu_id)
-        label = model_target["label"]
-
-        def image_at_index(index: int) -> Image.Image:
-            seed = resolve_seed(request.seed, request.prompt, index, request.seeds)
-            progress(
-                "running",
-                "generating",
-                image_batch_progress(index, request.count),
-                format_batch_running_message(label, index, request.count),
-            )
-            emit_worker_event(
-                "image_inference_start",
-                jobId=job["id"],
-                adapter=self.id,
-                model=request.model,
-                imageIndex=index,
-                imageCount=request.count,
-                device=device,
-                gpuMemory=gpu_memory_snapshot(torch, device),
-            )
-            try:
-                image = self._run_pipeline(settings, pipe, request, seed, cancel_requested=cancel_requested)
-            except Exception as exc:
-                emit_worker_event(
-                    "image_inference_failed",
-                    jobId=job["id"],
-                    adapter=self.id,
-                    imageIndex=index,
-                    error=str(exc),
-                    errorType=exc.__class__.__name__,
-                )
-                raise
-            emit_worker_event(
-                "image_inference_complete",
-                jobId=job["id"],
-                adapter=self.id,
-                imageIndex=index,
-                gpuMemory=gpu_memory_snapshot(torch, device),
-            )
-            return image
-
-        return ImageAssetWriter().write_incremental_outputs(
+        self._apply_loras_with_events(pipe, request, job_id=job["id"])
+        return self._generate_images(
+            settings=settings,
+            job=job,
             request=request,
             project_path=project_path,
-            image_count=request.count,
-            image_at_index=image_at_index,
-            adapter_id=self.id,
             progress=progress,
             cancel_requested=cancel_requested,
+            label=model_target["label"],
+            image_count=request.count,
+            run_one=lambda index, seed: self._run_pipeline(
+                settings, pipe, request, seed, cancel_requested=cancel_requested
+            ),
             raw_settings={
                 **request.advanced,
                 "repo": self._repo_for_request(request, model_target),
@@ -4129,25 +3789,6 @@ class ChromaDiffusersAdapter:
         if cancel_requested is not None and cancel_requested():
             raise InterruptedError("Image generation canceled by user.")
         return output.images[0].convert("RGB")
-
-    def _apply_loras(self, pipe: Any, request: ImageRequest) -> None:
-        model_target = MODEL_TARGETS.get(request.model, {})
-        self._loaded_lora_states["text"] = apply_loras_to_pipeline(
-            pipe,
-            request.loras,
-            adapter_id=self.id,
-            model_family=model_target.get("family"),
-            previous_state=self._loaded_lora_states.get("text"),
-        )
-
-    def _forget_loaded_loras(self, key: str) -> None:
-        self._loaded_lora_states.pop(key, None)
-
-    def _repo_for_request(self, request: ImageRequest, model_target: dict[str, Any]) -> str:
-        return request.advanced.get("modelRepo") or model_target["repo"]
-
-    def _num_inference_steps(self, request: ImageRequest, model_target: dict[str, Any]) -> int:
-        return safe_int(request.advanced.get("steps"), model_target["steps"], 1, 80)
 
     def _guidance_scale(self, request: ImageRequest, model_target: dict[str, Any]) -> float:
         default = model_target.get("guidanceScale", 3.0)
