@@ -15,7 +15,7 @@ use axum::http::{header, HeaderMap, HeaderName, HeaderValue, Method, Request, St
 use axum::middleware::{self, Next};
 use axum::response::sse::{Event, Sse};
 use axum::response::{IntoResponse, Response};
-use axum::routing::{delete, get, patch, post};
+use axum::routing::{delete, get, patch, post, put};
 use axum::{Json, Router};
 use futures_util::future::join_all;
 use parking_lot::Mutex;
@@ -104,6 +104,8 @@ mod prompts;
 use prompts::*;
 mod poses;
 use poses::*;
+mod keypoints;
+use keypoints::*;
 mod logs;
 use logs::*;
 
@@ -482,6 +484,7 @@ pub fn create_app(settings: Settings) -> Result<Router, JobsStoreError> {
     }
     let _ = sweep_stale_lora_uploads(&settings.data_dir);
     let _ = sweep_stale_pose_uploads(&settings.data_dir);
+    let _ = sweep_stale_keypoint_uploads(&settings.data_dir);
     let jobs_store = Arc::new(JobsStore::new(&settings.jobs_db_path));
     jobs_store.initialize()?;
     let interrupted_jobs_on_startup = jobs_store.mark_interrupted_on_startup()?.len();
@@ -493,6 +496,11 @@ pub fn create_app(settings: Settings) -> Result<Router, JobsStoreError> {
     // endpoint returns [] (not 404) before any pose is saved. Best-effort.
     if let Err(error) = project_store.ensure_global_poses_project() {
         eprintln!("SceneWorks API: could not ensure global pose library project: {error}");
+    }
+    // Reserved global Key Point Library (epic 4422): created up front so its assets +
+    // collections endpoints return seeded data before any preset is saved. Best-effort.
+    if let Err(error) = project_store.ensure_global_keypoints_project() {
+        eprintln!("SceneWorks API: could not ensure global keypoint library project: {error}");
     }
     let state = AppState {
         settings,
@@ -666,6 +674,21 @@ pub fn create_app(settings: Settings) -> Result<Router, JobsStoreError> {
         .route(
             "/api/v1/poses/preview/:job_id/:file_name",
             get(get_pose_preview),
+        )
+        .route("/api/v1/keypoints", post(create_keypoint))
+        .route("/api/v1/keypoints/sources", post(create_keypoint_sources))
+        .route("/api/v1/keypoints/presets", get(list_keypoint_presets))
+        .route(
+            "/api/v1/keypoints/collections",
+            get(list_keypoint_collections).post(upsert_keypoint_collection),
+        )
+        .route(
+            "/api/v1/keypoints/collections/:collection_id",
+            delete(delete_keypoint_collection),
+        )
+        .route(
+            "/api/v1/keypoints/collections/:collection_id/default",
+            put(set_default_keypoint_collection),
         )
         .route(
             "/api/v1/credentials",
