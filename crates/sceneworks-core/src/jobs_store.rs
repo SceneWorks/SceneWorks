@@ -2157,7 +2157,8 @@ fn torch_only_image_model_epic(model: &str) -> Option<&'static str> {
         "kolors" => Some("epic 3532"),
         "instantid_realvisxl" => Some("epic 3109"),
         "pulid_flux_dev" => Some("epic 3069"),
-        "z_image_edit" => Some("epic 3529"),
+        // z_image_edit was ported to MLX (epic 3529 / sc-3923) — it is now in
+        // `MLX_ROUTED_MODELS`, so it never reaches this torch-only gap classifier.
         m if m.starts_with("sensenova") => Some("epic 3180"),
         m if m.starts_with("lens") => Some("epic 3164"),
         // Chroma (chroma1_*) was ported to MLX (epic 3531 / sc-3843) — it is now in
@@ -2184,7 +2185,6 @@ fn classify_image_gap(payload: &Map<String, Value>) -> UnsupportedReason {
     }
     // Third-party LyCORIS (LoHa / non-peft LoKr) now applies on every MLX provider (epic 3641,
     // sc-3642/3643/3671), so it is no longer an image gap.
-    let is_edit = payload.get("mode").and_then(Value::as_str) == Some("edit_image");
     match model {
         "qwen_image" => UnsupportedReason::new(
             Some(model),
@@ -2197,12 +2197,6 @@ fn classify_image_gap(payload: &Map<String, Value>) -> UnsupportedReason {
             "reference (XLabs IP-Adapter)",
             "FLUX.1 reference is the XLabs IP-Adapter (not img2img-init); it stays on the Python torch path until the MLX port lands. (FLUX.1 edit_image has no torch path on any platform — a future Kontext capability, not an eradication gap; see sc-3535.)",
             Some("epic 3621"),
-        ),
-        "z_image_turbo" if is_edit => UnsupportedReason::new(
-            Some(model),
-            "edit_image",
-            "Z-Image img2img edit stays on the Python torch path (folds into the Z-Image-Edit port).",
-            Some("epic 3529"),
         ),
         "qwen_image_edit"
         | "qwen_image_edit_2509"
@@ -2588,6 +2582,7 @@ fn is_apple_unified_gpu_id(gpu_id: &str) -> bool {
 /// mlx worker, so the Python torch path stays authoritative for it.
 const MLX_ROUTED_MODELS: &[&str] = &[
     "z_image_turbo",
+    "z_image_edit",
     "flux_schnell",
     "flux_dev",
     "qwen_image",
@@ -2644,7 +2639,7 @@ fn image_request_mlx_eligible(model: &str, payload: &Map<String, Value>) -> bool
         return false;
     }
     match model {
-        "z_image_turbo" => z_image_mlx_eligible(payload),
+        "z_image_turbo" | "z_image_edit" => z_image_mlx_eligible(payload),
         "flux_schnell" | "flux_dev" => flux_mlx_eligible(payload),
         "qwen_image" => qwen_mlx_eligible(payload),
         "qwen_image_edit"
@@ -2776,13 +2771,22 @@ fn flux_mlx_eligible(payload: &Map<String, Value>) -> bool {
 /// Z-Image (sc-3022) MLX-routing conditions, ported from
 /// `_should_route_z_image_to_mlx`: text-to-image, reference-identity img2img-init
 /// (sc-3619 — `referenceAssetId` without a pose set, the plain img2img path the
-/// base engine already supports), and reference+pose (the Fun-ControlNet pose tier
+/// base engine already supports), reference+pose (the Fun-ControlNet pose tier
 /// lives only on MLX — sc-2257/sc-2328, so a reference+pose job must NOT divert to
-/// torch, which would honour count while dropping the poses). `edit_image`
-/// img2img-edit stays on torch (epic 3529). Third-party LyCORIS now applies on the core MLX loader
-/// (epic 3641), so only `edit_image` keeps a Z-Image job off MLX.
+/// torch, which would honour count while dropping the poses), and `edit_image`
+/// img2img-edit (epic 3529 — the engine's `Conditioning::Reference` img2img path with a
+/// `sourceAssetId` init, shared by `z_image_turbo` edit_image mode and the `z_image_edit`
+/// model, both on Turbo weights). An `edit_image` without a source asset has nothing to
+/// edit, so it stays off MLX. Third-party LyCORIS now applies on the core MLX loader
+/// (epic 3641), so a LoRA never forces torch.
 fn z_image_mlx_eligible(payload: &Map<String, Value>) -> bool {
-    payload.get("mode").and_then(Value::as_str) != Some("edit_image")
+    if payload.get("mode").and_then(Value::as_str) == Some("edit_image") {
+        return payload
+            .get("sourceAssetId")
+            .and_then(Value::as_str)
+            .is_some_and(|id| !id.trim().is_empty());
+    }
+    true
 }
 
 /// Chroma (epic 3531, sc-3843) MLX-routing conditions. Chroma is **text-to-image only**
@@ -3043,8 +3047,9 @@ fn worker_supports_job(worker: &WorkerSnapshot, job: &JobSnapshot) -> bool {
     if worker.gpu_id.eq_ignore_ascii_case("mlx") {
         // Image: sc-3026 txt2img/LoRA + sc-3060 reference/edit/inpaint/outpaint +
         // image_detail + sc-3513 the `image_edit` job type (plain Image Edit). A
-        // torch-only edit model (z_image_edit/kolors/sensenova/lens/pulid/instantid)
-        // is not MLX-eligible, so the mlx worker refuses it and it stays on torch.
+        // torch-only edit model (kolors/sensenova/lens/pulid/instantid) is not
+        // MLX-eligible, so the mlx worker refuses it and it stays on torch.
+        // (z_image_edit was ported to MLX, epic 3529 / sc-3923.)
         if matches!(
             job.job_type,
             JobType::ImageGenerate | JobType::ImageEdit | JobType::ImageDetail
@@ -3365,10 +3370,25 @@ mod mlx_routing_tests {
     }
 
     #[test]
-    fn z_image_edit_mode_is_not_eligible() {
+    fn z_image_edit_mode_with_source_is_eligible() {
+        // epic 3529: img2img-edit (sourceAssetId) now routes to MLX via the engine's
+        // `Conditioning::Reference` img2img path.
+        assert!(z_image_mlx_eligible(&object(json!({
+            "mode": "edit_image",
+            "sourceAssetId": "asset_1"
+        }))));
+    }
+
+    #[test]
+    fn z_image_edit_mode_without_source_is_not_eligible() {
+        // An edit with nothing to edit (no/blank sourceAssetId) stays off MLX.
         assert!(!z_image_mlx_eligible(&object(
             json!({ "mode": "edit_image" })
         )));
+        assert!(!z_image_mlx_eligible(&object(json!({
+            "mode": "edit_image",
+            "sourceAssetId": "   "
+        }))));
     }
 
     #[test]

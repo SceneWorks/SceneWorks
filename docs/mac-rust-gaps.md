@@ -53,7 +53,6 @@ Windows/Linux keep the torch path.** Nothing here is a permanent drop. `mac_rust
 | Model id | Family | Mac disposition | Porting epic |
 |---|---|---|---|
 | `kolors` | kolors (SDXL UNet + ChatGLM3) | 🔵 Port → drop-on-Mac until then | **epic 3532** |
-| `z_image_edit` | z-image (edit) | 🔵 Port → drop-on-Mac until then | **epic 3529** |
 | `instantid_realvisxl` | sdxl (InstantID) | 🔵 Port → drop-on-Mac until then | epic 3109 |
 | `pulid_flux_dev` | flux (PuLID) | 🔵 Port → drop-on-Mac until then | epic 3069 (engine done; owes SceneWorks routing) |
 | `sensenova_u1_8b`, `sensenova_u1_8b_fast` | sensenova-u1 | 🔵 Port → drop-on-Mac until then | epic 3180 |
@@ -76,7 +75,7 @@ dropped — no silent drops.**
 | Strict-pose ControlNet | `qwen_image` (+ `advanced.poses`) | 🔵 Port-pending | epic 3401 (Qwen ControlNet port) |
 | Reference / edit conditioning | base `qwen_image` (reference/`edit_image`) | 🔵 Port-pending | epic 3401 |
 | Reference (XLabs IP-Adapter) | `flux_schnell`, `flux_dev` | 🟢 Ported (MLX) | sc-3535 (spike) → epic 3621 (sc-3622–3625) |
-| `edit_image` (img2img-edit) | `z_image_turbo` | 🔵 Port-pending | epic 3529 (folds into Z-Image-Edit port) |
+| `edit_image` (img2img-edit) | `z_image_turbo`, `z_image_edit` | 🟢 Ported (MLX) | epic 3529 / sc-3923 (engine `Conditioning::Reference` img2img; Turbo weights) |
 | reference-without-pose | `z_image_turbo` | 🟢 Ported (MLX) | sc-3536 (spike GO) → sc-3619 |
 | Third-party LyCORIS (LoHa / non-peft LoKr) | all families (`networkType=lycoris`) | 🟢 Ported (MLX) | sc-3537 (spike) → epic 3641 (sc-3642/3643/3671 engine + sc-3644 routing) |
 
@@ -142,6 +141,8 @@ Listed so a reviewer doesn't re-file these. All run in the Rust/MLX flow on Mac.
   DiT, T5-only true-CFG; `mlx-gen-chroma`) — epic 3531 / sc-3843.
 - SDXL advanced shapes — reference/IP-Adapter, `edit_image`, masked inpaint, outpaint, and
   tile-detail (`image_detail` on `sdxl`/`realvisxl`) — epic 3041 / sc-3060.
+- Z-Image img2img-edit: `z_image_edit` + `z_image_turbo` `edit_image` mode (Turbo weights via the
+  engine's `Conditioning::Reference` img2img path; `sourceAssetId` + `strength`) — epic 3529 / sc-3923.
 - FLUX.2-klein single-file conversion in-process Rust (`flux2_klein_diffusers`, sc-3136).
 - Video `text_to_video`/`image_to_video` on Wan2.2 + LTX-2.3 (+ synchronized audio), epic 3018.
 - Advanced video — `first_last_frame`, `extend_clip`, `video_bridge`, `replace_person` (→ native

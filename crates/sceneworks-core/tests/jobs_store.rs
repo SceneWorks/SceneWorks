@@ -1797,9 +1797,9 @@ fn mac_rust_supported_names_torch_only_image_model_with_its_port_epic() {
     let store = store("oracle-torch-model");
     // Each torch-only model points at its dedicated MLX-porting epic (epic 3482 policy),
     // not the generic done feasibility epic.
+    // (z_image_edit was ported to MLX, epic 3529 / sc-3923 — no longer torch-only.)
     let cases = [
         ("kolors", "epic 3532"),
-        ("z_image_edit", "epic 3529"),
         ("instantid_realvisxl", "epic 3109"),
         ("sensenova_u1_8b", "epic 3180"),
         ("lens_turbo", "epic 3164"),
@@ -2046,11 +2046,15 @@ fn model_mac_support_feature_flags_mirror_routing_without_over_gating() {
     assert!(model_mac_support("qwen_image", "image").features.pose);
     assert!(model_mac_support("z_image_turbo", "image").features.pose);
     assert!(model_mac_support("sdxl", "image").features.pose);
-    // Z-Image reference-identity (no pose) is ported to MLX (sc-3619) → the reference control
-    // is enabled; edit_image still stays torch (epic 3529).
+    // Z-Image reference-identity (no pose) is ported to MLX (sc-3619) → reference enabled;
+    // img2img-edit is now ported too (epic 3529 / sc-3923) → edit enabled.
     let z_image = model_mac_support("z_image_turbo", "image");
     assert!(z_image.features.reference);
-    assert!(!z_image.features.edit);
+    assert!(z_image.features.edit);
+    // The dedicated z_image_edit model is supported on Mac with edit enabled (no dead-end).
+    let z_image_edit = model_mac_support("z_image_edit", "image");
+    assert!(z_image_edit.supported);
+    assert!(z_image_edit.features.edit);
     // FLUX.1 reference (XLabs IP-Adapter) is ported to MLX (epic 3621) → reference enabled on
     // both variants; edit_image stays off (no FLUX.1 edit on any platform — future Kontext).
     let flux = model_mac_support("flux_dev", "image");
@@ -2403,10 +2407,12 @@ fn active_mlx_image_edit_blocks_mps_image_edit_claim() {
     assert_eq!(claimed_mlx.id, mlx_job.id);
     assert_eq!(claimed_mlx.assigned_gpu.as_deref(), Some("mlx"));
 
+    // A torch-only edit model (kolors) is the MPS job — it stays on the torch worker, so it
+    // exercises the shared-GPU exclusion without being soft-deferred to the idle mlx worker.
     let mps_job = store
         .create_job(image_edit_job_with(
             json!({
-                "model": "z_image_edit",
+                "model": "kolors",
                 "mode": "edit_image",
                 "sourceAssetId": "asset_2",
                 "prompt": "p"
@@ -2438,10 +2444,11 @@ fn active_mps_image_edit_blocks_mlx_image_edit_claim() {
     register_gpu_worker(&store, "worker-mps", "mps", image_edit_caps());
     register_gpu_worker(&store, "worker-mlx", "mlx", image_edit_caps());
 
+    // A torch-only edit model (kolors) is the MPS job (it isn't soft-deferred to the mlx worker).
     let mps_job = store
         .create_job(image_edit_job_with(
             json!({
-                "model": "z_image_edit",
+                "model": "kolors",
                 "mode": "edit_image",
                 "sourceAssetId": "asset_1",
                 "prompt": "p"
@@ -2517,12 +2524,13 @@ fn torch_only_image_edit_model_stays_on_torch() {
     let store = store("mlx-routing-image-edit-torch-only");
     register_gpu_worker(&store, "worker-mlx", "mlx", image_edit_caps());
 
-    // z_image_edit is NOT in MLX_ROUTED_MODELS (only z_image_turbo is), so the edit stays
-    // on the Python torch path. The mlx worker must refuse it.
+    // kolors is NOT in MLX_ROUTED_MODELS, so its edit stays on the Python torch path. The
+    // mlx worker must refuse it. (z_image_edit was ported to MLX — epic 3529 / sc-3923 — so
+    // it is no longer a valid torch-only example; see `z_image_edit_routes_to_mlx`.)
     let job = store
         .create_job(image_edit_job_with(
             json!({
-                "model": "z_image_edit",
+                "model": "kolors",
                 "mode": "edit_image",
                 "sourceAssetId": "asset_1",
                 "prompt": "p"
@@ -2548,6 +2556,35 @@ fn torch_only_image_edit_model_stays_on_torch() {
         decision.is_none(),
         "a torch-only edit model is routing-neutral (no mlx_route_decision)"
     );
+}
+
+#[test]
+fn z_image_edit_routes_to_mlx() {
+    // epic 3529 / sc-3923: z_image_edit (and z_image_turbo edit_image) img2img-edit now runs
+    // on the in-process Rust MLX worker — the engine's `Conditioning::Reference` img2img path.
+    for model in ["z_image_edit", "z_image_turbo"] {
+        let store = store(&format!("mlx-routing-z-image-edit-{model}"));
+        register_gpu_worker(&store, "worker-mlx", "mlx", image_edit_caps());
+        let job = store
+            .create_job(image_edit_job_with(
+                json!({
+                    "model": model,
+                    "mode": "edit_image",
+                    "sourceAssetId": "asset_1",
+                    "prompt": "make it a watercolor painting"
+                }),
+                "auto",
+            ))
+            .expect("job creates");
+
+        let (claimed, decision) = store
+            .claim_next_job_routed("worker-mlx", false)
+            .expect("mlx claim ok");
+        assert_eq!(claimed.expect("mlx claims it").id, job.id, "{model}");
+        let decision = decision.expect("routing decision present");
+        assert_eq!(decision.decision, "claimed_by_mlx", "{model}");
+        assert_eq!(decision.gpu_id, "mlx", "{model}");
+    }
 }
 
 #[test]

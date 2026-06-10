@@ -82,6 +82,21 @@ const MLX_MODELS: &[MlxModel] = &[
         supports_negative_prompt: false,
         adapter_label: "mlx_z_image",
     },
+    // Z-Image-Edit (epic 3529) — img2img/edit. No dedicated Edit checkpoint exists yet, so
+    // (like the Python `MODEL_TARGETS` row) it runs the **Turbo weights** through the engine's
+    // img2img path (`Conditioning::Reference` — VAE-encode the source + denoise from
+    // `init_time_step(steps, strength)`), so it shares the `z_image_turbo` engine model. The
+    // `z_image_turbo` `edit_image` mode resolves to the same img2img call (`resolve_zimage_edit_init`).
+    MlxModel {
+        sceneworks_id: "z_image_edit",
+        engine_id: "z_image_turbo",
+        default_repo: "Tongyi-MAI/Z-Image-Turbo",
+        default_steps: 8,
+        supports_guidance: false,
+        default_guidance: 0.0,
+        supports_negative_prompt: false,
+        adapter_label: "mlx_z_image",
+    },
     MlxModel {
         sceneworks_id: "flux_schnell",
         engine_id: "flux1_schnell",
@@ -1314,12 +1329,17 @@ async fn generate_mlx_stream(
         Option<(Image, f32)>,
         Option<PathBuf>,
         Option<f32>,
-    ) = if request.model == "z_image_turbo" {
-        (
-            resolve_zimage_identity_init(request, settings, project_path)?,
-            None,
-            None,
-        )
+    ) = if matches!(request.model.as_str(), "z_image_turbo" | "z_image_edit") {
+        // Z-Image base path: `edit_image` → img2img-edit (sourceAssetId + strength, epic 3529);
+        // otherwise the identity-init reference (referenceAssetId + referenceStrength, sc-3619).
+        // Both feed the engine's single `Reference` conditioning; only the source + strength
+        // keying differs. The strict-pose ControlNet tier diverts earlier (zimage_control_available).
+        let init = if request.mode == "edit_image" {
+            resolve_zimage_edit_init(request, settings, project_path)?
+        } else {
+            resolve_zimage_identity_init(request, settings, project_path)?
+        };
+        (init, None, None)
     } else if is_flux_model(&request.model) && has_reference && request.mode != "edit_image" {
         let reference_id = request
             .reference_asset_id
@@ -2007,6 +2027,47 @@ fn resolve_zimage_identity_init(
         asset_id,
         project_path,
     )?;
+    Ok(Some((image, strength)))
+}
+
+/// Resolve the Z-Image Image-Edit img2img init for `mode == "edit_image"` (epic 3529):
+/// `Some((source, strength))` decoding `sourceAssetId` and pre-fitting it to the output W×H
+/// (crop/pad/outpaint via [`should_fit_edit_source`]/[`fit_engine_image`] — never stretch an
+/// off-aspect source); `None` when not an edit job or no source asset (the caller then falls
+/// back to the identity-init reference path / plain txt2img). `strength` is the torch
+/// `ZImageImg2ImgPipeline` knob (`advanced.strength`, default 0.6) forwarded verbatim to the
+/// engine — its `init_time_step(steps, strength)` matches the diffusers img2img start step.
+/// Both `z_image_edit` and `z_image_turbo` (mode `edit_image`) drive this one path (same
+/// Turbo-weights img2img call in torch).
+#[cfg(target_os = "macos")]
+fn resolve_zimage_edit_init(
+    request: &ImageRequest,
+    settings: &Settings,
+    project_path: &Path,
+) -> WorkerResult<Option<(Image, f32)>> {
+    if request.mode != "edit_image" {
+        return Ok(None);
+    }
+    let Some(asset_id) = request
+        .source_asset_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|id| !id.is_empty())
+    else {
+        return Ok(None);
+    };
+    let source = load_reference_image(
+        &settings.data_dir,
+        &request.project_id,
+        asset_id,
+        project_path,
+    )?;
+    let image = if should_fit_edit_source(request) {
+        fit_engine_image(source, request.width, request.height, &request.fit_mode)?
+    } else {
+        source
+    };
+    let strength = advanced_f32(request, "strength", 0.6, 0.05, 1.0);
     Ok(Some((image, strength)))
 }
 
