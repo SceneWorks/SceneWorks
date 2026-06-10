@@ -1,6 +1,9 @@
 import React, { useEffect, useMemo, useState } from "react";
+import { Icon } from "../components/Icons.jsx";
 import { terminalStatuses } from "../jobTypes.js";
 import {
+  loraMatchesModel,
+  loraWeight,
   noPresetId,
   presetLoraDetails as buildPresetLoraDetails,
   presetMatchesModel,
@@ -95,9 +98,21 @@ export function useGenerationStudio({
   latestAssets,
   trackedLocalJobs,
   initialPresetId = null,
+  // sc-4196: LoRA selection state + validation, formerly duplicated in both studios.
+  // Seeded from the persisted studio snapshot; advancedOpen/setAdvancedOpen are the
+  // studio's own advanced-panel toggle (the hook auto-opens it when an incompatible
+  // LoRA is selected so the blocking warning is visible).
+  advancedOpen = false,
+  setAdvancedOpen = () => {},
+  initialSelectedLoraIds = [],
+  initialLoraWeights = {},
+  initialShowIncompatibleLoras = false,
 }) {
   const [selectedPresetId, setSelectedPresetId] = useState(initialPresetId);
   const [resultFallbackTick, setResultFallbackTick] = useState(0);
+  const [selectedLoraIds, setSelectedLoraIds] = useState(initialSelectedLoraIds);
+  const [loraWeights, setLoraWeights] = useState(initialLoraWeights);
+  const [showIncompatibleLoras, setShowIncompatibleLoras] = useState(initialShowIncompatibleLoras);
 
   // Snap the model back into range when the catalog changes out from under it.
   useEffect(() => {
@@ -189,6 +204,77 @@ export function useGenerationStudio({
     [assets, latestAssets, trackedLocalJobs, resultFallbackTick],
   );
 
+  // ---- LoRA selection (sc-4196: shared by Image + Video studios) ----
+  const compatibleLoras = useMemo(() => loras.filter((lora) => {
+    if (lora.presetManaged) {
+      return false;
+    }
+    if (lora.installState === "missing") {
+      return false;
+    }
+    if (showIncompatibleLoras) {
+      return true;
+    }
+    return loraMatchesModel(lora, selectedModel);
+  }), [loras, selectedModel, showIncompatibleLoras]);
+  const compatibleLoraKey = useMemo(() => compatibleLoras.map((lora) => lora.id).join("|"), [compatibleLoras]);
+  const selectedLoras = selectedLoraIds.map((id) => compatibleLoras.find((lora) => lora.id === id)).filter(Boolean);
+  const userSelectedLoraCount = selectedLoras.filter((lora) => lora.scope !== "builtin").length;
+  const selectedLoraValidationResult = useMemo(() => {
+    const incompatible = selectedLoras.filter((lora) => !loraMatchesModel(lora, selectedModel)).map((lora) => lora.name ?? lora.id);
+    return {
+      incompatible,
+      ok: incompatible.length === 0,
+    };
+  }, [selectedLoras, selectedModel]);
+  const hasPendingCompatibleLoras = Boolean(selectedModel) && loras.some((lora) => lora.installState === "missing" && loraMatchesModel(lora, selectedModel));
+  const loraEmptyMessage = !selectedModel
+    ? "No model selected"
+    : hasPendingCompatibleLoras
+      ? "No installed compatible LoRAs. Imports appear after the Queue completes."
+      : showIncompatibleLoras
+        ? "No installed LoRAs in the library."
+        : `No installed LoRAs match ${selectedModel.name ?? selectedModel.id}.`;
+
+  // Drop selections that fall out of the compatible set (model/filter change).
+  useEffect(() => {
+    setSelectedLoraIds((ids) => ids.filter((id) => compatibleLoras.some((lora) => lora.id === id)));
+  }, [compatibleLoraKey]);
+  // Auto-open the advanced panel when an incompatible LoRA is selected so the
+  // generate-blocking warning is visible.
+  useEffect(() => {
+    if (selectedLoraValidationResult.incompatible.length && !advancedOpen) {
+      setAdvancedOpen(true);
+    }
+  }, [advancedOpen, selectedLoraValidationResult.incompatible.length]);
+
+  function toggleLora(lora) {
+    setSelectedLoraIds((ids) => {
+      if (ids.includes(lora.id)) {
+        return ids.filter((id) => id !== lora.id);
+      }
+      const selected = ids.map((id) => compatibleLoras.find((item) => item.id === id)).filter(Boolean);
+      const userCount = selected.filter((item) => item.scope !== "builtin").length;
+      if (lora.scope !== "builtin" && userCount >= 2) {
+        return ids;
+      }
+      return [...ids, lora.id];
+    });
+  }
+
+  // Per-LoRA strength: the override map falls back to the LoRA's default weight.
+  // Order of application is intentionally not exposed — the worker combines
+  // adapters additively (set_adapters / dequant-to-bf16 merge), so order has no
+  // effect on output.
+  function effectiveLoraWeight(lora) {
+    const override = loraWeights[lora.id];
+    return Number.isFinite(override) ? override : loraWeight(lora);
+  }
+
+  function setLoraWeight(id, value) {
+    setLoraWeights((current) => ({ ...current, [id]: value }));
+  }
+
   return {
     availablePresets,
     selectedPreset,
@@ -198,7 +284,180 @@ export function useGenerationStudio({
     presetLoraDetails,
     presetValidationResult,
     localJobs,
+    // LoRA selection bundle (sc-4196).
+    selectedLoraIds,
+    setSelectedLoraIds,
+    loraWeights,
+    setLoraWeights,
+    showIncompatibleLoras,
+    setShowIncompatibleLoras,
+    compatibleLoras,
+    selectedLoras,
+    userSelectedLoraCount,
+    selectedLoraValidationResult,
+    loraEmptyMessage,
+    toggleLora,
+    effectiveLoraWeight,
+    setLoraWeight,
   };
+}
+
+// The LoRA picker shared by both studios (sc-4196): the compatible-LoRA checklist
+// with per-LoRA weight sliders, the "Show incompatible" toggle, and the empty state.
+// All state lives in useGenerationStudio; this is a pure presentation of its bundle.
+export function LoraPickerSection({
+  selectedModel,
+  selectedLoras,
+  selectedLoraIds,
+  compatibleLoras,
+  userSelectedLoraCount,
+  showIncompatibleLoras,
+  setShowIncompatibleLoras,
+  toggleLora,
+  effectiveLoraWeight,
+  setLoraWeight,
+  loraEmptyMessage,
+}) {
+  return (
+    <section className="lora-picker" aria-label="LoRA selection">
+      <div>
+        <strong>LoRAs</strong>
+        <span>{selectedLoras.length ? `${selectedLoras.length} selected` : selectedModel ? "Installed and compatible" : "Choose a model"}</span>
+      </div>
+      <label className="checkline">
+        <input
+          checked={showIncompatibleLoras}
+          onChange={(event) => setShowIncompatibleLoras(event.target.checked)}
+          type="checkbox"
+        />
+        Show incompatible
+      </label>
+      {compatibleLoras.length ? (
+        <div className="lora-choice-list">
+          {compatibleLoras.map((lora) => {
+            const checked = selectedLoraIds.includes(lora.id);
+            const userLimitReached = lora.scope !== "builtin" && !checked && userSelectedLoraCount >= 2;
+            const weight = effectiveLoraWeight(lora);
+            return (
+              <div className="lora-choice-item" key={lora.id}>
+                <label className={checked ? "lora-choice active" : "lora-choice"}>
+                  <input
+                    checked={checked}
+                    disabled={userLimitReached}
+                    onChange={() => toggleLora(lora)}
+                    type="checkbox"
+                  />
+                  <span>
+                    <strong>{lora.name ?? lora.id}</strong>
+                    <small>
+                      {lora.scope ?? "global"} {lora.family ? `| ${lora.family}` : ""}
+                    </small>
+                  </span>
+                </label>
+                {checked ? (
+                  <div className="lora-weight-row">
+                    <span>Weight</span>
+                    <input
+                      aria-label={`${lora.name ?? lora.id} weight`}
+                      max="2"
+                      min="0"
+                      onChange={(event) => setLoraWeight(lora.id, Number(event.target.value))}
+                      step="0.05"
+                      type="range"
+                      value={weight}
+                    />
+                    <span className="lora-weight-value">{weight.toFixed(2)}</span>
+                  </div>
+                ) : null}
+              </div>
+            );
+          })}
+        </div>
+      ) : (
+        <div className="empty-panel compact-panel">{loraEmptyMessage}</div>
+      )}
+    </section>
+  );
+}
+
+// The "Save as Preset" panel shared by both studios (sc-4196): name field, save
+// button, project/global scope segment, and the inline save message. The actual
+// save handler differs per studio (different payloads), so it's passed as onSave.
+export function SavePresetPanel({
+  presetName,
+  setPresetName,
+  savingPreset,
+  presetSaveMessage,
+  setPresetSaveMessage,
+  onSave,
+  presetScope,
+  setPresetScope,
+  activeProject,
+  // Video studio gates saving to a subset of modes; pass an extra disable + a
+  // tooltip explaining why. Image studio omits both (always saveable).
+  saveDisabled = false,
+  saveTitle = undefined,
+}) {
+  return (
+    <div className="save-preset">
+      <div className="save-preset-row">
+        <input
+          aria-label="Preset name"
+          className="save-preset-name"
+          disabled={savingPreset}
+          onChange={(event) => {
+            setPresetName(event.target.value);
+            if (presetSaveMessage.text) {
+              setPresetSaveMessage({ tone: "neutral", text: "" });
+            }
+          }}
+          onKeyDown={(event) => {
+            if (event.key === "Enter") {
+              event.preventDefault();
+              onSave();
+            }
+          }}
+          placeholder="Name this setup…"
+          value={presetName}
+        />
+        <button
+          className="save-preset-btn"
+          disabled={savingPreset || !presetName.trim() || saveDisabled}
+          onClick={onSave}
+          title={saveTitle}
+          type="button"
+        >
+          <Icon.Preset size={14} /> {savingPreset ? "Saving…" : "Save as Preset"}
+        </button>
+      </div>
+      <div className="save-preset-scope scope-segment" role="radiogroup" aria-label="Preset scope">
+        <button
+          aria-checked={presetScope === "project"}
+          className={presetScope === "project" ? "active" : ""}
+          disabled={!activeProject}
+          onClick={() => setPresetScope("project")}
+          role="radio"
+          type="button"
+        >
+          <Icon.Folder size={13} /> This project
+        </button>
+        <button
+          aria-checked={presetScope === "global"}
+          className={presetScope === "global" ? "active" : ""}
+          onClick={() => setPresetScope("global")}
+          role="radio"
+          type="button"
+        >
+          <Icon.Stars size={13} /> All projects
+        </button>
+      </div>
+      {presetSaveMessage.text ? (
+        <p className={presetSaveMessage.tone === "success" ? "inline-success" : "inline-warning"}>
+          {presetSaveMessage.text}
+        </p>
+      ) : null}
+    </div>
+  );
 }
 
 // The "what this preset adds" strip shown under the preset picker in both studios.

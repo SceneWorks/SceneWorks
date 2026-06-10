@@ -65,8 +65,6 @@ import {
   clearPresetDefault,
   finiteNumberOrUndefined,
   loraLooksLikeIcLora,
-  loraMatchesModel,
-  loraWeight,
   noPresetId,
   presetNameTaken,
   rememberPresetDefault,
@@ -74,9 +72,11 @@ import {
   slugifyPresetId,
 } from "../presetUtils.js";
 import {
+  LoraPickerSection,
   onPromptKeyDown,
   PresetGuidanceStrip,
   PresetValidationWarnings,
+  SavePresetPanel,
   useGenerationStudio,
 } from "./generationStudio.jsx";
 import { ReplacePersonPanel, findReplacementModel } from "./ReplacePersonPanel.jsx";
@@ -173,9 +173,6 @@ export function VideoStudio() {
   const [precision, setPrecision] = useState(saved.precision ?? "fp8");
   const [quantization, setQuantization] = useState(saved.quantization ?? "auto");
   const [advancedOpen, setAdvancedOpen] = useState(saved.advancedOpen ?? false);
-  const [selectedLoraIds, setSelectedLoraIds] = useState(saved.selectedLoraIds ?? []);
-  const [loraWeights, setLoraWeights] = useState(saved.loraWeights ?? {});
-  const [showIncompatibleLoras, setShowIncompatibleLoras] = useState(saved.showIncompatibleLoras ?? false);
   const [model, setModel] = useState(saved.model ?? videoModels[0]?.id ?? ltxVideoModelId);
   const [guideOpen, setGuideOpen] = useState(false);
   // Mac UI gating (sc-3486): hide torch-only video models (e.g. SVD) and snap off one if selected.
@@ -268,6 +265,20 @@ export function VideoStudio() {
     presetLoraDetails,
     presetValidationResult,
     localJobs,
+    selectedLoraIds,
+    setSelectedLoraIds,
+    loraWeights,
+    setLoraWeights,
+    showIncompatibleLoras,
+    setShowIncompatibleLoras,
+    compatibleLoras,
+    selectedLoras,
+    userSelectedLoraCount,
+    selectedLoraValidationResult,
+    loraEmptyMessage,
+    toggleLora,
+    effectiveLoraWeight,
+    setLoraWeight,
   } = useGenerationStudio({
     mode,
     presets,
@@ -285,6 +296,11 @@ export function VideoStudio() {
     latestAssets,
     trackedLocalJobs,
     initialPresetId: saved.selectedPresetId ?? null,
+    advancedOpen,
+    setAdvancedOpen,
+    initialSelectedLoraIds: saved.selectedLoraIds ?? [],
+    initialLoraWeights: saved.loraWeights ?? {},
+    initialShowIncompatibleLoras: saved.showIncompatibleLoras ?? false,
   });
   // Sampler / scheduler menus declared by the model. Video Wan torch
   // declares the full menu; sealed paths (LTX native, MLX) drop to
@@ -313,69 +329,6 @@ export function VideoStudio() {
   }, [schedulerOptions, scheduler, selectedModel]);
   const requiresLtxIcLora = selectedModel?.id === ltxVideoModelId && ltxIcLoraRequiredModes.has(mode);
   const hasLtxIcLora = presetLoraDetails.some((lora) => !lora.missing && loraLooksLikeIcLora(lora));
-  const compatibleLoras = useMemo(() => loras.filter((lora) => {
-    if (lora.presetManaged) {
-      return false;
-    }
-    if (lora.installState === "missing") {
-      return false;
-    }
-    if (showIncompatibleLoras) {
-      return true;
-    }
-    return loraMatchesModel(lora, selectedModel);
-  }), [loras, selectedModel, showIncompatibleLoras]);
-  const compatibleLoraKey = useMemo(() => compatibleLoras.map((lora) => lora.id).join("|"), [compatibleLoras]);
-  const selectedLoras = selectedLoraIds.map((id) => compatibleLoras.find((lora) => lora.id === id)).filter(Boolean);
-  const userSelectedLoraCount = selectedLoras.filter((lora) => lora.scope !== "builtin").length;
-  const selectedLoraValidationResult = useMemo(() => {
-    const incompatible = selectedLoras.filter((lora) => !loraMatchesModel(lora, selectedModel)).map((lora) => lora.name ?? lora.id);
-    return {
-      incompatible,
-      ok: incompatible.length === 0,
-    };
-  }, [selectedLoras, selectedModel]);
-  const hasPendingCompatibleLoras = Boolean(selectedModel) && loras.some((lora) => lora.installState === "missing" && loraMatchesModel(lora, selectedModel));
-  const loraEmptyMessage = !selectedModel
-    ? "No model selected"
-    : hasPendingCompatibleLoras
-      ? "No installed compatible LoRAs. Imports appear after the Queue completes."
-      : showIncompatibleLoras
-        ? "No installed LoRAs in the library."
-        : `No installed LoRAs match ${selectedModel.name ?? selectedModel.id}.`;
-
-  useEffect(() => {
-    setSelectedLoraIds((ids) => ids.filter((id) => compatibleLoras.some((lora) => lora.id === id)));
-  }, [compatibleLoraKey]);
-
-  useEffect(() => {
-    if (selectedLoraValidationResult.incompatible.length && !advancedOpen) {
-      setAdvancedOpen(true);
-    }
-  }, [advancedOpen, selectedLoraValidationResult.incompatible.length]);
-
-  function toggleLora(lora) {
-    setSelectedLoraIds((ids) => {
-      if (ids.includes(lora.id)) {
-        return ids.filter((id) => id !== lora.id);
-      }
-      const selected = ids.map((id) => compatibleLoras.find((item) => item.id === id)).filter(Boolean);
-      const userCount = selected.filter((item) => item.scope !== "builtin").length;
-      if (lora.scope !== "builtin" && userCount >= 2) {
-        return ids;
-      }
-      return [...ids, lora.id];
-    });
-  }
-
-  // Per-LoRA strength: the override map falls back to the LoRA's default weight.
-  // Order of application is intentionally not exposed — the worker combines
-  // adapters additively (set_adapters / dequant-to-bf16 merge), so order has no
-  // effect on output.
-  function effectiveLoraWeight(lora) {
-    const override = loraWeights[lora.id];
-    return Number.isFinite(override) ? override : loraWeight(lora);
-  }
 
   // Snapshot the current working config into a named recipe preset in the
   // workspace library. Captures the literal prompt + every visible knob + the
@@ -448,10 +401,6 @@ export function VideoStudio() {
     } finally {
       setSavingPreset(false);
     }
-  }
-
-  function setLoraWeight(id, value) {
-    setLoraWeights((current) => ({ ...current, [id]: value }));
   }
 
   useEffect(() => {
@@ -1183,64 +1132,19 @@ export function VideoStudio() {
                 </div>
               </div>
 
-              <div className="save-preset">
-                <div className="save-preset-row">
-                  <input
-                    aria-label="Preset name"
-                    className="save-preset-name"
-                    disabled={savingPreset}
-                    onChange={(event) => {
-                      setPresetName(event.target.value);
-                      if (presetSaveMessage.text) {
-                        setPresetSaveMessage({ tone: "neutral", text: "" });
-                      }
-                    }}
-                    onKeyDown={(event) => {
-                      if (event.key === "Enter") {
-                        event.preventDefault();
-                        handleSaveAsPreset();
-                      }
-                    }}
-                    placeholder="Name this setup…"
-                    value={presetName}
-                  />
-                  <button
-                    className="save-preset-btn"
-                    disabled={savingPreset || !presetName.trim() || !VIDEO_PRESET_MODES.includes(mode)}
-                    onClick={handleSaveAsPreset}
-                    title={VIDEO_PRESET_MODES.includes(mode) ? undefined : "Presets are available in Image→Video, Text→Video, or First/Last mode."}
-                    type="button"
-                  >
-                    <Icon.Preset size={14} /> {savingPreset ? "Saving…" : "Save as Preset"}
-                  </button>
-                </div>
-                <div className="save-preset-scope scope-segment" role="radiogroup" aria-label="Preset scope">
-                  <button
-                    aria-checked={presetScope === "project"}
-                    className={presetScope === "project" ? "active" : ""}
-                    disabled={!activeProject}
-                    onClick={() => setPresetScope("project")}
-                    role="radio"
-                    type="button"
-                  >
-                    <Icon.Folder size={13} /> This project
-                  </button>
-                  <button
-                    aria-checked={presetScope === "global"}
-                    className={presetScope === "global" ? "active" : ""}
-                    onClick={() => setPresetScope("global")}
-                    role="radio"
-                    type="button"
-                  >
-                    <Icon.Stars size={13} /> All projects
-                  </button>
-                </div>
-                {presetSaveMessage.text ? (
-                  <p className={presetSaveMessage.tone === "success" ? "inline-success" : "inline-warning"}>
-                    {presetSaveMessage.text}
-                  </p>
-                ) : null}
-              </div>
+              <SavePresetPanel
+                presetName={presetName}
+                setPresetName={setPresetName}
+                savingPreset={savingPreset}
+                presetSaveMessage={presetSaveMessage}
+                setPresetSaveMessage={setPresetSaveMessage}
+                onSave={handleSaveAsPreset}
+                presetScope={presetScope}
+                setPresetScope={setPresetScope}
+                activeProject={activeProject}
+                saveDisabled={!VIDEO_PRESET_MODES.includes(mode)}
+                saveTitle={VIDEO_PRESET_MODES.includes(mode) ? undefined : "Presets are available in Image→Video, Text→Video, or First/Last mode."}
+              />
 
               <label>
                 Quality
@@ -1523,64 +1427,19 @@ export function VideoStudio() {
                     Negative prompt
                     <textarea onChange={(event) => setNegativePrompt(event.target.value)} value={negativePrompt} />
                   </label>
-                  <section className="lora-picker" aria-label="LoRA selection">
-                    <div>
-                      <strong>LoRAs</strong>
-                      <span>{selectedLoras.length ? `${selectedLoras.length} selected` : selectedModel ? "Installed and compatible" : "Choose a model"}</span>
-                    </div>
-                    <label className="checkline">
-                      <input
-                        checked={showIncompatibleLoras}
-                        onChange={(event) => setShowIncompatibleLoras(event.target.checked)}
-                        type="checkbox"
-                      />
-                      Show incompatible
-                    </label>
-                    {compatibleLoras.length ? (
-                      <div className="lora-choice-list">
-                        {compatibleLoras.map((lora) => {
-                          const checked = selectedLoraIds.includes(lora.id);
-                          const userLimitReached = lora.scope !== "builtin" && !checked && userSelectedLoraCount >= 2;
-                          const weight = effectiveLoraWeight(lora);
-                          return (
-                            <div className="lora-choice-item" key={lora.id}>
-                              <label className={checked ? "lora-choice active" : "lora-choice"}>
-                                <input
-                                  checked={checked}
-                                  disabled={userLimitReached}
-                                  onChange={() => toggleLora(lora)}
-                                  type="checkbox"
-                                />
-                                <span>
-                                  <strong>{lora.name ?? lora.id}</strong>
-                                  <small>
-                                    {lora.scope ?? "global"} {lora.family ? `| ${lora.family}` : ""}
-                                  </small>
-                                </span>
-                              </label>
-                              {checked ? (
-                                <div className="lora-weight-row">
-                                  <span>Weight</span>
-                                  <input
-                                    aria-label={`${lora.name ?? lora.id} weight`}
-                                    max="2"
-                                    min="0"
-                                    onChange={(event) => setLoraWeight(lora.id, Number(event.target.value))}
-                                    step="0.05"
-                                    type="range"
-                                    value={weight}
-                                  />
-                                  <span className="lora-weight-value">{weight.toFixed(2)}</span>
-                                </div>
-                              ) : null}
-                            </div>
-                          );
-                        })}
-                      </div>
-                    ) : (
-                      <div className="empty-panel compact-panel">{loraEmptyMessage}</div>
-                    )}
-                  </section>
+                  <LoraPickerSection
+                    selectedModel={selectedModel}
+                    selectedLoras={selectedLoras}
+                    selectedLoraIds={selectedLoraIds}
+                    compatibleLoras={compatibleLoras}
+                    userSelectedLoraCount={userSelectedLoraCount}
+                    showIncompatibleLoras={showIncompatibleLoras}
+                    setShowIncompatibleLoras={setShowIncompatibleLoras}
+                    toggleLora={toggleLora}
+                    effectiveLoraWeight={effectiveLoraWeight}
+                    setLoraWeight={setLoraWeight}
+                    loraEmptyMessage={loraEmptyMessage}
+                  />
                   {characterId ? (
                     <div className="guidance-strip">
                       <strong>Character reference</strong>
