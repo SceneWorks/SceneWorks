@@ -2220,6 +2220,139 @@ const CHARACTER_ANGLE_SET_ORDER: [&str; 11] = [
     "down_right",
 ];
 
+/// The validated default 5-point landmark presets for the InstantID angle set (sc-4424,
+/// epic 4422), normalized to a square `0.0..=1.0` and index-aligned with
+/// [`CHARACTER_ANGLE_SET_ORDER`]. The worker now OWNS these presets and passes them to the
+/// engine via `generate_with_kps`, replacing the engine's hardcoded `VIEW_ANGLE_KPS` table —
+/// so framing changes (and future user-defined presets) need no engine change. Tuned for
+/// LoRA-training coverage: head-and-shoulders fills the frame, shoulders retained (the prior
+/// engine pack rendered the face small + low, wasting ~half the frame). Derived + validated in
+/// `docs/sc-4422-kps-experiment/`.
+#[cfg(target_os = "macos")]
+const INSTANTID_ANGLE_KPS: [(&str, [(f32, f32); 5]); 11] = [
+    (
+        "front",
+        [
+            (0.4033, 0.3420),
+            (0.5938, 0.3393),
+            (0.5014, 0.4317),
+            (0.4298, 0.5353),
+            (0.5771, 0.5334),
+        ],
+    ),
+    (
+        "three_quarter_left",
+        [
+            (0.3973, 0.3380),
+            (0.5057, 0.3432),
+            (0.3734, 0.4268),
+            (0.4024, 0.5330),
+            (0.4785, 0.5357),
+        ],
+    ),
+    (
+        "three_quarter_right",
+        [
+            (0.4867, 0.3434),
+            (0.6117, 0.3379),
+            (0.6241, 0.4225),
+            (0.5249, 0.5366),
+            (0.6149, 0.5322),
+        ],
+    ),
+    (
+        "left_profile",
+        [
+            (0.3022, 0.3339),
+            (0.3421, 0.3474),
+            (0.2381, 0.4301),
+            (0.3020, 0.5304),
+            (0.3200, 0.5384),
+        ],
+    ),
+    (
+        "right_profile",
+        [
+            (0.6591, 0.3487),
+            (0.7145, 0.3325),
+            (0.7786, 0.4309),
+            (0.6893, 0.5397),
+            (0.7235, 0.5290),
+        ],
+    ),
+    (
+        "up",
+        [
+            (0.3973, 0.3404),
+            (0.6069, 0.3408),
+            (0.5036, 0.3826),
+            (0.4155, 0.5343),
+            (0.5919, 0.5344),
+        ],
+    ),
+    (
+        "down",
+        [
+            (0.4024, 0.4030),
+            (0.6046, 0.3982),
+            (0.5075, 0.5214),
+            (0.4272, 0.5957),
+            (0.5807, 0.5930),
+        ],
+    ),
+    (
+        "up_left",
+        [
+            (0.4025, 0.3298),
+            (0.5575, 0.3461),
+            (0.4018, 0.3944),
+            (0.3686, 0.5243),
+            (0.4840, 0.5391),
+        ],
+    ),
+    (
+        "up_right",
+        [
+            (0.4607, 0.3508),
+            (0.6113, 0.3305),
+            (0.6086, 0.4063),
+            (0.5228, 0.5431),
+            (0.6368, 0.5257),
+        ],
+    ),
+    (
+        "down_left",
+        [
+            (0.3677, 0.4103),
+            (0.5168, 0.3910),
+            (0.3988, 0.5100),
+            (0.4260, 0.6021),
+            (0.5312, 0.5866),
+        ],
+    ),
+    (
+        "down_right",
+        [
+            (0.4793, 0.3987),
+            (0.6326, 0.4026),
+            (0.6159, 0.4961),
+            (0.4945, 0.5928),
+            (0.6096, 0.5959),
+        ],
+    ),
+];
+
+/// The default kps preset for a canonical angle name, or the `front` preset if an unknown name
+/// slips through (callers iterate [`CHARACTER_ANGLE_SET_ORDER`], so the fallback is unreachable
+/// in practice — it just keeps the lookup total).
+#[cfg(target_os = "macos")]
+fn instantid_angle_kps(angle: &str) -> [(f32, f32); 5] {
+    INSTANTID_ANGLE_KPS
+        .iter()
+        .find(|(name, _)| *name == angle)
+        .map_or(INSTANTID_ANGLE_KPS[0].1, |(_, kps)| *kps)
+}
+
 /// The per-angle continuation clause appended to the user's prompt (parity with
 /// `character_studio_angles.ANGLE_PROMPT_AUGMENTS`). Unknown angle → empty.
 #[cfg(target_os = "macos")]
@@ -4572,7 +4705,8 @@ const INSTANTID_FACE_RESTORE_SIDE: u32 = 1024;
 enum InstantIdMode {
     /// `count` images at the reference's natural head pose (engine `generate`, W×H letterboxed).
     Identity,
-    /// The 11-view Character-Studio set, shared seed (engine `generate_angle`, square).
+    /// The 11-view Character-Studio set, shared seed (engine `generate_with_kps` from the
+    /// worker-owned [`INSTANTID_ANGLE_KPS`] presets, square).
     AngleSet,
     /// `n` pose-library poses, shared seed — MultiControlNet IdentityNet + OpenPose (engine
     /// `generate_pose`, square).
@@ -4605,8 +4739,10 @@ fn instantid_mode(request: &ImageRequest) -> InstantIdMode {
 enum InstantIdAction {
     /// `generate` — the reference's natural head pose, W×H letterboxed.
     Identity,
-    /// `generate_angle` — a canonical Character-Studio view (square).
-    Angle(&'static str),
+    /// `generate_with_kps` — a Character-Studio view from worker-owned landmark presets (square).
+    /// Carries the normalized 5-point kps directly (sc-4424) rather than an angle name, so the
+    /// worker owns the framing presets and arbitrary/user-defined kps flow through the same path.
+    Angle([(f32, f32); 5]),
     /// `generate_pose` — MultiControlNet IdentityNet + OpenPose on these COCO-18 keypoints (square).
     Pose(Vec<BodyPoint>),
 }
@@ -4906,10 +5042,11 @@ async fn ensure_instantid_openpose(settings: &Settings) -> WorkerResult<WeightsS
 /// Real InstantID generation: resolve the reference + weights on the async side, then load the
 /// bespoke `InstantId` provider once + generate each image on the blocking thread (the MLX
 /// model is `!Send`). Three modes (torch parity): single identity (`generate`), the 11-view angle
-/// set (`generate_angle`), and the pose-library set (`generate_pose`, MultiControlNet IdentityNet
-/// with xinsir OpenPose — sc-3117). `advanced.faceRestore` adds the ADetailer-style re-render pass
-/// (`restore_face`, sc-3380) on each output. The engine `generate*` take the per-job `CancelFlag`
-/// (via `InstantIdRequest.cancel`) and a `Progress` callback (sc-4380/sc-4382), so streaming is
+/// set (`generate_with_kps` from the worker-owned [`INSTANTID_ANGLE_KPS`] presets — sc-4424), and
+/// the pose-library set (`generate_pose`, MultiControlNet IdentityNet with xinsir OpenPose —
+/// sc-3117). `advanced.faceRestore` adds the ADetailer-style re-render pass (`restore_face`,
+/// sc-3380) on each output. The engine `generate*` take the per-job `CancelFlag` (via
+/// `InstantIdRequest.cancel`) and a `Progress` callback (sc-4380/sc-4382), so streaming is
 /// per-step (`Step`/`Decoding` events) and cancellation is honoured mid-denoise — same contract
 /// as the registry families. Reuses [`consume_gen_events`] for the asset writes.
 #[cfg(target_os = "macos")]
@@ -5020,7 +5157,7 @@ async fn generate_instantid_stream(
                     (
                         set_seed,
                         augment_prompt_for_angle(&request.prompt, angle),
-                        InstantIdAction::Angle(angle),
+                        InstantIdAction::Angle(instantid_angle_kps(angle)),
                     )
                 })
                 .collect()
@@ -5139,8 +5276,8 @@ async fn generate_instantid_stream(
                 };
                 let result = match &action {
                     InstantIdAction::Identity => model.generate(&req, &reference, &mut on_progress),
-                    InstantIdAction::Angle(angle) => {
-                        model.generate_angle(&req, &reference, angle, &mut on_progress)
+                    InstantIdAction::Angle(kps) => {
+                        model.generate_with_kps(&req, &reference, kps, &mut on_progress)
                     }
                     InstantIdAction::Pose(keypoints) => {
                         model.generate_pose(&req, &reference, keypoints, &mut on_progress)
