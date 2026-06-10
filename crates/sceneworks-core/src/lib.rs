@@ -1,3 +1,4 @@
+pub mod angle_kps;
 pub mod app_paths;
 pub mod asset_index;
 pub mod character_store;

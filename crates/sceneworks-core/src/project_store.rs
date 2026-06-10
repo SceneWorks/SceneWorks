@@ -61,6 +61,16 @@ pub const PROJECT_FOLDERS: &[&str] = &[
 pub const GLOBAL_POSES_PROJECT_ID: &str = "project_global_poses";
 pub const GLOBAL_POSES_PROJECT_NAME: &str = "Pose Library";
 
+/// Reserved project that holds the GLOBAL Key Point Library (epic 4422, sc-4434). User-created
+/// face-angle presets live here as ordinary `type:"keypoint"` assets (kps + the retained source
+/// image), and the user's angle-set collections live in a `keypoint-collections.json` sidecar.
+/// Hidden from `list_projects` like the pose library. The built-in 11 angle presets stay in
+/// [`crate::angle_kps`] (virtual, always-present, protected — never stored here).
+pub const GLOBAL_KEYPOINTS_PROJECT_ID: &str = "project_global_keypoints";
+pub const GLOBAL_KEYPOINTS_PROJECT_NAME: &str = "Key Point Library";
+/// The user angle-set collections store, relative to the global keypoints project.
+const KEYPOINT_COLLECTIONS_FILE: &str = "keypoint-collections.json";
+
 pub type ProjectStoreResult<T> = Result<T, ProjectStoreError>;
 
 #[derive(Debug)]
@@ -250,9 +260,12 @@ impl ProjectStore {
         self.ensure_data_dirs()?;
         let mut projects = Vec::new();
         for item in self.load_registry()? {
-            // The reserved global pose library is addressable by id but hidden from
-            // the project switcher (epic 2282).
-            if item.id.as_deref() == Some(GLOBAL_POSES_PROJECT_ID) {
+            // The reserved global pose + keypoint libraries are addressable by id but
+            // hidden from the project switcher (epic 2282 / epic 4422).
+            if matches!(
+                item.id.as_deref(),
+                Some(GLOBAL_POSES_PROJECT_ID) | Some(GLOBAL_KEYPOINTS_PROJECT_ID)
+            ) {
                 continue;
             }
             let Some(path) = item.path else {
@@ -341,6 +354,22 @@ impl ProjectStore {
         self.provision_project_locked(
             GLOBAL_POSES_PROJECT_ID,
             GLOBAL_POSES_PROJECT_NAME,
+            &project_path,
+        )
+    }
+
+    /// Ensure the reserved global Key Point Library project exists (idempotent), returning its
+    /// summary. Created lazily on first preset/collection write (epic 4422, sc-4434).
+    pub fn ensure_global_keypoints_project(&self) -> ProjectStoreResult<ProjectSummary> {
+        let _guard = self.lock.lock();
+        self.ensure_data_dirs()?;
+        let project_path = self.projects_dir().join("global-keypoints.sceneworks");
+        if project_path.exists() {
+            return read_project_summary(&project_path);
+        }
+        self.provision_project_locked(
+            GLOBAL_KEYPOINTS_PROJECT_ID,
+            GLOBAL_KEYPOINTS_PROJECT_NAME,
             &project_path,
         )
     }
@@ -1393,6 +1422,314 @@ impl ProjectStore {
         write_json(&sidecar_path, &asset)?;
         index_asset(&project_path, &asset, Some(&sidecar_path))?;
         normalize_asset(GLOBAL_POSES_PROJECT_ID, &project_path, &sidecar_path)
+    }
+
+    // ---- Key Point Library (epic 4422, sc-4434) -----------------------------------------
+
+    /// Guard a staged source-image path under the keypoint-uploads cache (mirrors
+    /// [`Self::pose_preview_path`]) so a save can't copy an arbitrary file into the library.
+    fn keypoint_upload_path(&self, path: &str) -> ProjectStoreResult<PathBuf> {
+        let cache_root = self.data_dir.join("cache").join("keypoint-uploads");
+        let canonical_root = fs::canonicalize(&cache_root).map_err(|_| {
+            ProjectStoreError::NotFound("Key Point upload cache is unavailable".to_owned())
+        })?;
+        let canonical = fs::canonicalize(path).map_err(|_| {
+            ProjectStoreError::NotFound("Key Point source image not found".to_owned())
+        })?;
+        if !canonical.starts_with(&canonical_root) || !canonical.is_file() {
+            return Err(ProjectStoreError::BadRequest(
+                "Key Point source path is invalid".to_owned(),
+            ));
+        }
+        Ok(canonical)
+    }
+
+    /// Persist a user keypoint preset: the 5-point kps + the retained source image (copied from
+    /// a staged upload into the library). Built-in presets are NOT stored here — they live in
+    /// [`crate::angle_kps`] (virtual, protected). Spec:
+    /// `{ name, kps[[x,y]×5], sourceUploadPath, sourceAssetId? }`.
+    pub fn create_keypoint_asset(&self, spec: &Value) -> ProjectStoreResult<Value> {
+        let name = spec
+            .get("name")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .ok_or_else(|| ProjectStoreError::BadRequest("keypoint spec missing name".to_owned()))?
+            .to_owned();
+        let kps = parse_normalized_kps(spec.get("kps"))?;
+        let upload_path = spec
+            .get("sourceUploadPath")
+            .and_then(Value::as_str)
+            .ok_or_else(|| {
+                ProjectStoreError::BadRequest("keypoint spec missing sourceUploadPath".to_owned())
+            })?;
+        let canonical_source = self.keypoint_upload_path(upload_path)?;
+
+        self.ensure_global_keypoints_project()?;
+        let (project_path, _project_guard) = self.lock_project(GLOBAL_KEYPOINTS_PROJECT_ID)?;
+
+        let asset_id = format!("asset_{}", random_hex(16)?);
+        let created_at = utc_now();
+        let dir = project_path.join("assets").join("keypoints");
+        fs::create_dir_all(&dir)?;
+        let ext = canonical_source
+            .extension()
+            .and_then(|value| value.to_str())
+            .map(str::to_ascii_lowercase)
+            .filter(|value| matches!(value.as_str(), "png" | "jpg" | "jpeg" | "webp"))
+            .unwrap_or_else(|| "png".to_owned());
+        let media_path = dir.join(format!("{asset_id}.{ext}"));
+        fs::copy(&canonical_source, &media_path)?;
+        let media_rel = relative_string(&project_path, &media_path)?;
+        let mime = match ext.as_str() {
+            "jpg" | "jpeg" => "image/jpeg",
+            "webp" => "image/webp",
+            _ => "image/png",
+        };
+
+        let source_asset_id = spec
+            .get("sourceAssetId")
+            .and_then(Value::as_str)
+            .map(str::to_owned);
+        let parents = source_asset_id
+            .clone()
+            .map(|id| vec![Value::String(id)])
+            .unwrap_or_default();
+
+        let asset = json!({
+            "schemaVersion": 1,
+            "id": asset_id,
+            "projectId": GLOBAL_KEYPOINTS_PROJECT_ID,
+            "generationSetId": Value::Null,
+            "type": "keypoint",
+            "displayName": name,
+            "createdAt": created_at,
+            "origin": "keypoint_library",
+            "tags": Vec::<Value>::new(),
+            "file": {
+                "path": media_rel,
+                "mimeType": mime,
+                "width": spec.get("sourceWidth").cloned().unwrap_or(Value::Null),
+                "height": spec.get("sourceHeight").cloned().unwrap_or(Value::Null),
+                "duration": Value::Null,
+                "fps": Value::Null
+            },
+            "status": { "favorite": false, "rating": 0, "rejected": false, "trashed": false },
+            "recipe": {
+                "mode": "upload",
+                "model": "scrfd",
+                "adapter": "api-upload",
+                "prompt": name,
+                "negativePrompt": "",
+                "seed": 0,
+                "loras": [],
+                "stylePreset": "none",
+                "normalizedSettings": {},
+                "rawAdapterSettings": { "detector": "scrfd" }
+            },
+            "lineage": {
+                "parents": parents,
+                "sourceAssetId": source_asset_id,
+                "sourceTimestamp": Value::Null,
+                "jobId": Value::Null
+            },
+            "keypoint": {
+                "kps": kps,
+                "builtin": false
+            }
+        });
+        let sidecar_path = media_path.with_extension("sceneworks.json");
+        write_json(&sidecar_path, &asset)?;
+        index_asset(&project_path, &asset, Some(&sidecar_path))?;
+        normalize_asset(GLOBAL_KEYPOINTS_PROJECT_ID, &project_path, &sidecar_path)
+    }
+
+    /// All keypoint presets: the built-in 11 (from [`crate::angle_kps`]) followed by the user's
+    /// stored `type:"keypoint"` assets, each as a `{ id, name, kps, builtin, sourceImageRef }`
+    /// record. The single read the Key Point Library renders from.
+    pub fn list_keypoint_presets(&self) -> ProjectStoreResult<Vec<Value>> {
+        let mut presets = crate::angle_kps::builtin_preset_records();
+        presets.extend(self.list_user_keypoint_presets()?);
+        Ok(presets)
+    }
+
+    fn list_user_keypoint_presets(&self) -> ProjectStoreResult<Vec<Value>> {
+        self.ensure_global_keypoints_project()?;
+        let assets =
+            self.list_assets(GLOBAL_KEYPOINTS_PROJECT_ID, false, false, AssetScope::All)?;
+        Ok(assets
+            .iter()
+            .filter(|asset| asset.get("type").and_then(Value::as_str) == Some("keypoint"))
+            .map(keypoint_asset_to_preset)
+            .collect())
+    }
+
+    /// The set of preset ids a collection may reference: the built-in ids + the user's stored
+    /// keypoint asset ids.
+    fn known_preset_ids(&self) -> ProjectStoreResult<std::collections::HashSet<String>> {
+        let mut ids: std::collections::HashSet<String> = crate::angle_kps::BUILTIN_ANGLE_SET_ORDER
+            .iter()
+            .map(|angle| crate::angle_kps::builtin_preset_id(angle))
+            .collect();
+        for preset in self.list_user_keypoint_presets()? {
+            if let Some(id) = preset.get("id").and_then(Value::as_str) {
+                ids.insert(id.to_owned());
+            }
+        }
+        Ok(ids)
+    }
+
+    /// All angle-set collections: the virtual built-in default (the 11 in order) followed by the
+    /// user's collections. The built-in's `isDefault` is true unless a user collection claims it.
+    pub fn list_keypoint_collections(&self) -> ProjectStoreResult<Vec<Value>> {
+        self.ensure_global_keypoints_project()?;
+        let project_path = self.find_project_path(GLOBAL_KEYPOINTS_PROJECT_ID)?;
+        let user = read_user_collections(&project_path)?;
+        let any_user_default = user
+            .iter()
+            .any(|collection| collection.get("isDefault").and_then(Value::as_bool) == Some(true));
+        let mut builtin = crate::angle_kps::builtin_default_collection();
+        builtin["isDefault"] = Value::Bool(!any_user_default);
+        let mut all = vec![builtin];
+        all.extend(user);
+        Ok(all)
+    }
+
+    /// Create or update a user angle-set collection: `{ id?, name, orderedPresetIds[], isDefault? }`.
+    /// Validates every referenced preset exists; marking it default clears the flag on the others
+    /// (and on the built-in, which then reports `isDefault:false`).
+    pub fn upsert_keypoint_collection(&self, spec: &Value) -> ProjectStoreResult<Value> {
+        let name = spec
+            .get("name")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .ok_or_else(|| ProjectStoreError::BadRequest("collection missing name".to_owned()))?
+            .to_owned();
+        let ordered = spec
+            .get("orderedPresetIds")
+            .and_then(Value::as_array)
+            .filter(|values| !values.is_empty())
+            .ok_or_else(|| {
+                ProjectStoreError::BadRequest(
+                    "collection needs a non-empty orderedPresetIds".to_owned(),
+                )
+            })?;
+        let ordered_ids: Vec<String> = ordered
+            .iter()
+            .filter_map(Value::as_str)
+            .map(str::to_owned)
+            .collect();
+        if ordered_ids.len() != ordered.len() {
+            return Err(ProjectStoreError::BadRequest(
+                "orderedPresetIds must be strings".to_owned(),
+            ));
+        }
+        let known = self.known_preset_ids()?;
+        for id in &ordered_ids {
+            if !known.contains(id) {
+                return Err(ProjectStoreError::BadRequest(format!(
+                    "collection references unknown preset id {id}"
+                )));
+            }
+        }
+        let requested_id = spec
+            .get("id")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty());
+        if requested_id == Some(crate::angle_kps::BUILTIN_DEFAULT_COLLECTION_ID) {
+            return Err(ProjectStoreError::BadRequest(
+                "the built-in default collection is read-only".to_owned(),
+            ));
+        }
+        let id = match requested_id {
+            Some(value) if is_safe_id(value) => value.to_owned(),
+            Some(_) => {
+                return Err(ProjectStoreError::BadRequest(
+                    "invalid collection id".to_owned(),
+                ))
+            }
+            None => format!("kpc_{}", random_hex(8)?),
+        };
+        let make_default = spec.get("isDefault").and_then(Value::as_bool) == Some(true);
+
+        self.ensure_global_keypoints_project()?;
+        let (project_path, _project_guard) = self.lock_project(GLOBAL_KEYPOINTS_PROJECT_ID)?;
+        let mut collections = read_user_collections(&project_path)?;
+        let record = json!({
+            "id": id,
+            "name": name,
+            "orderedPresetIds": ordered_ids,
+            "isDefault": make_default,
+            "builtin": false,
+        });
+        match collections
+            .iter_mut()
+            .find(|collection| collection.get("id").and_then(Value::as_str) == Some(id.as_str()))
+        {
+            Some(existing) => *existing = record.clone(),
+            None => collections.push(record.clone()),
+        }
+        if make_default {
+            for collection in collections.iter_mut() {
+                if collection.get("id").and_then(Value::as_str) != Some(id.as_str()) {
+                    collection["isDefault"] = Value::Bool(false);
+                }
+            }
+        }
+        write_user_collections(&project_path, &collections)?;
+        Ok(record)
+    }
+
+    /// Mark one collection the default (clearing the others). Passing the built-in id clears all
+    /// user defaults so the built-in default becomes effective again.
+    pub fn set_default_keypoint_collection(&self, id: &str) -> ProjectStoreResult<Vec<Value>> {
+        self.ensure_global_keypoints_project()?;
+        {
+            let (project_path, _project_guard) = self.lock_project(GLOBAL_KEYPOINTS_PROJECT_ID)?;
+            let mut collections = read_user_collections(&project_path)?;
+            if id == crate::angle_kps::BUILTIN_DEFAULT_COLLECTION_ID {
+                for collection in collections.iter_mut() {
+                    collection["isDefault"] = Value::Bool(false);
+                }
+            } else {
+                if !collections
+                    .iter()
+                    .any(|collection| collection.get("id").and_then(Value::as_str) == Some(id))
+                {
+                    return Err(ProjectStoreError::NotFound(format!(
+                        "collection {id} not found"
+                    )));
+                }
+                for collection in collections.iter_mut() {
+                    let is_target = collection.get("id").and_then(Value::as_str) == Some(id);
+                    collection["isDefault"] = Value::Bool(is_target);
+                }
+            }
+            write_user_collections(&project_path, &collections)?;
+        }
+        self.list_keypoint_collections()
+    }
+
+    /// Delete a user collection. The built-in default collection cannot be deleted.
+    pub fn delete_keypoint_collection(&self, id: &str) -> ProjectStoreResult<()> {
+        if id == crate::angle_kps::BUILTIN_DEFAULT_COLLECTION_ID {
+            return Err(ProjectStoreError::BadRequest(
+                "the built-in default collection cannot be deleted".to_owned(),
+            ));
+        }
+        self.ensure_global_keypoints_project()?;
+        let (project_path, _project_guard) = self.lock_project(GLOBAL_KEYPOINTS_PROJECT_ID)?;
+        let mut collections = read_user_collections(&project_path)?;
+        let before = collections.len();
+        collections.retain(|collection| collection.get("id").and_then(Value::as_str) != Some(id));
+        if collections.len() == before {
+            return Err(ProjectStoreError::NotFound(format!(
+                "collection {id} not found"
+            )));
+        }
+        write_user_collections(&project_path, &collections)
     }
 
     /// Write the generation-set JSON for a job from the worker-reported facts.
@@ -2687,6 +3024,88 @@ fn build_document_sidecar_parts(job_id: &str, fact: &Value) -> (Value, Value, Va
     (file, recipe, lineage)
 }
 
+/// Parse + validate the 5-point normalized kps from a spec into a JSON `[[x,y]×5]` array.
+fn parse_normalized_kps(value: Option<&Value>) -> ProjectStoreResult<Vec<Value>> {
+    let points = value.and_then(Value::as_array).ok_or_else(|| {
+        ProjectStoreError::BadRequest("keypoint spec missing kps array".to_owned())
+    })?;
+    if points.len() != 5 {
+        return Err(ProjectStoreError::BadRequest(format!(
+            "keypoint kps must have 5 points, got {}",
+            points.len()
+        )));
+    }
+    let mut out = Vec::with_capacity(5);
+    for point in points {
+        let pair = point
+            .as_array()
+            .filter(|values| values.len() == 2)
+            .ok_or_else(|| {
+                ProjectStoreError::BadRequest("each kps point must be [x, y]".to_owned())
+            })?;
+        let x = pair[0]
+            .as_f64()
+            .ok_or_else(|| ProjectStoreError::BadRequest("kps x must be a number".to_owned()))?;
+        let y = pair[1]
+            .as_f64()
+            .ok_or_else(|| ProjectStoreError::BadRequest("kps y must be a number".to_owned()))?;
+        if !(0.0..=1.0).contains(&x) || !(0.0..=1.0).contains(&y) {
+            return Err(ProjectStoreError::BadRequest(
+                "kps must be normalized to [0,1]".to_owned(),
+            ));
+        }
+        out.push(json!([x, y]));
+    }
+    Ok(out)
+}
+
+/// Map a stored `type:"keypoint"` asset → a Key Point Library preset record.
+fn keypoint_asset_to_preset(asset: &Value) -> Value {
+    json!({
+        "id": asset.get("id").cloned().unwrap_or(Value::Null),
+        "name": asset.get("displayName").cloned().unwrap_or(Value::Null),
+        "kps": asset
+            .get("keypoint")
+            .and_then(|keypoint| keypoint.get("kps"))
+            .cloned()
+            .unwrap_or(Value::Null),
+        "builtin": false,
+        "sourceImageRef": asset
+            .get("file")
+            .and_then(|file| file.get("path"))
+            .cloned()
+            .unwrap_or(Value::Null),
+        "sourceAssetId": asset
+            .get("lineage")
+            .and_then(|lineage| lineage.get("sourceAssetId"))
+            .cloned()
+            .unwrap_or(Value::Null),
+    })
+}
+
+/// Read the user angle-set collections (`keypoint-collections.json`) → `[]` when absent.
+fn read_user_collections(project_path: &Path) -> ProjectStoreResult<Vec<Value>> {
+    let path = project_path.join(KEYPOINT_COLLECTIONS_FILE);
+    if !path.exists() {
+        return Ok(Vec::new());
+    }
+    let document = read_json(&path)?;
+    Ok(document
+        .get("collections")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default())
+}
+
+/// Persist the user angle-set collections sidecar.
+fn write_user_collections(project_path: &Path, collections: &[Value]) -> ProjectStoreResult<()> {
+    let path = project_path.join(KEYPOINT_COLLECTIONS_FILE);
+    write_json(
+        &path,
+        &json!({ "schemaVersion": 1, "collections": collections }),
+    )
+}
+
 fn index_asset(
     project_path: &Path,
     asset: &Value,
@@ -3016,8 +3435,9 @@ mod tests {
     use super::{
         apply_project_migrations, build_generated_asset_sidecar, guess_mime_from_filename,
         is_safe_relative_path, normalize_asset_tags, AssetScope, CharacterCreateInput,
-        CharacterLookInput, ProjectStore, ProjectStoreError, UploadAsset, GLOBAL_POSES_PROJECT_ID,
-        PROJECT_FOLDERS, PROJECT_SCHEMA_VERSION,
+        CharacterLookInput, ProjectStore, ProjectStoreError, UploadAsset,
+        GLOBAL_KEYPOINTS_PROJECT_ID, GLOBAL_POSES_PROJECT_ID, PROJECT_FOLDERS,
+        PROJECT_SCHEMA_VERSION,
     };
     use rusqlite::Connection;
     use serde_json::{json, Value};
@@ -3713,6 +4133,171 @@ mod tests {
             .create_pose_asset(&spec)
             .expect_err("traversal rejected");
         assert!(matches!(err, ProjectStoreError::BadRequest(_)));
+    }
+
+    // ---- Key Point Library (sc-4434) ---------------------------------------------------
+
+    fn stage_kps_upload(data_dir: &std::path::Path, name: &str) -> String {
+        let dir = data_dir.join("cache").join("keypoint-uploads");
+        std::fs::create_dir_all(&dir).expect("uploads dir");
+        let path = dir.join(name);
+        std::fs::write(&path, b"\x89PNG\r\n\x1a\n fake png bytes").expect("staged image");
+        path.to_string_lossy().into_owned()
+    }
+
+    fn front_kps() -> serde_json::Value {
+        json!([
+            [0.40, 0.34],
+            [0.59, 0.34],
+            [0.50, 0.43],
+            [0.43, 0.53],
+            [0.58, 0.53]
+        ])
+    }
+
+    #[test]
+    fn create_keypoint_asset_persists_with_source_image() {
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        let data_dir = temp_dir.path().join("data");
+        let store = ProjectStore::new(&data_dir, "test-version");
+        let upload = stage_kps_upload(&data_dir, "upload-abc.png");
+
+        let asset = store
+            .create_keypoint_asset(&json!({
+                "name": "My Front",
+                "kps": front_kps(),
+                "sourceUploadPath": upload,
+            }))
+            .expect("preset persists");
+        assert_eq!(asset["type"], "keypoint");
+        assert_eq!(asset["displayName"], "My Front");
+        assert_eq!(asset["keypoint"]["builtin"], false);
+        assert_eq!(asset["keypoint"]["kps"].as_array().unwrap().len(), 5);
+        // The source image was copied into the library.
+        let media_rel = asset["file"]["path"].as_str().expect("media path");
+        let project_path = store
+            .find_project_path(GLOBAL_KEYPOINTS_PROJECT_ID)
+            .expect("project");
+        assert!(
+            project_path.join(media_rel).exists(),
+            "source image retained"
+        );
+
+        // list_keypoint_presets = the 11 built-ins + this user preset.
+        let presets = store.list_keypoint_presets().expect("list");
+        assert_eq!(presets.len(), 12);
+        assert_eq!(presets[0]["id"], "builtin_front");
+        assert!(presets[0]["builtin"].as_bool().unwrap());
+        let user = presets.last().unwrap();
+        assert_eq!(user["name"], "My Front");
+        assert_eq!(user["builtin"], false);
+        assert!(user["sourceImageRef"].as_str().is_some());
+    }
+
+    #[test]
+    fn create_keypoint_asset_rejects_bad_inputs() {
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        let data_dir = temp_dir.path().join("data");
+        let store = ProjectStore::new(&data_dir, "test-version");
+        let upload = stage_kps_upload(&data_dir, "upload-xyz.png");
+
+        // Wrong kps arity.
+        assert!(matches!(
+            store.create_keypoint_asset(&json!({
+                "name": "Bad", "kps": [[0.1, 0.1]], "sourceUploadPath": &upload
+            })),
+            Err(ProjectStoreError::BadRequest(_))
+        ));
+        // Out-of-range kps.
+        assert!(matches!(
+            store.create_keypoint_asset(&json!({
+                "name": "Bad",
+                "kps": [[1.4, 0.1], [0.5, 0.5], [0.5, 0.5], [0.5, 0.5], [0.5, 0.5]],
+                "sourceUploadPath": &upload
+            })),
+            Err(ProjectStoreError::BadRequest(_))
+        ));
+        // Path traversal outside the uploads cache.
+        std::fs::write(data_dir.join("secret.png"), b"secret").expect("secret");
+        assert!(store
+            .create_keypoint_asset(&json!({
+                "name": "Evil", "kps": front_kps(),
+                "sourceUploadPath": data_dir.join("cache/keypoint-uploads/../../secret.png").to_string_lossy()
+            }))
+            .is_err());
+    }
+
+    #[test]
+    fn keypoint_collections_default_to_builtin_then_user() {
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        let data_dir = temp_dir.path().join("data");
+        let store = ProjectStore::new(&data_dir, "test-version");
+
+        // Fresh: only the built-in default collection, and it is the default.
+        let collections = store.list_keypoint_collections().expect("list");
+        assert_eq!(collections.len(), 1);
+        assert_eq!(
+            collections[0]["id"],
+            crate::angle_kps::BUILTIN_DEFAULT_COLLECTION_ID
+        );
+        assert_eq!(collections[0]["isDefault"], true);
+        assert_eq!(
+            collections[0]["orderedPresetIds"].as_array().unwrap().len(),
+            11
+        );
+
+        // Create a user collection from a subset of built-ins, mark it default.
+        let created = store
+            .upsert_keypoint_collection(&json!({
+                "name": "Just profiles",
+                "orderedPresetIds": ["builtin_left_profile", "builtin_right_profile"],
+                "isDefault": true,
+            }))
+            .expect("upsert");
+        let collection_id = created["id"].as_str().unwrap().to_owned();
+
+        let collections = store.list_keypoint_collections().expect("list");
+        assert_eq!(collections.len(), 2);
+        // Built-in default now yields to the user's default.
+        assert_eq!(collections[0]["isDefault"], false);
+        assert_eq!(collections[1]["isDefault"], true);
+        assert_eq!(collections[1]["name"], "Just profiles");
+
+        // Referencing an unknown preset is rejected.
+        assert!(matches!(
+            store.upsert_keypoint_collection(&json!({
+                "name": "Bad", "orderedPresetIds": ["builtin_nope"]
+            })),
+            Err(ProjectStoreError::BadRequest(_))
+        ));
+
+        // Reset default back to the built-in.
+        let collections = store
+            .set_default_keypoint_collection(crate::angle_kps::BUILTIN_DEFAULT_COLLECTION_ID)
+            .expect("set default");
+        assert_eq!(collections[0]["isDefault"], true);
+        assert_eq!(collections[1]["isDefault"], false);
+
+        // Delete the user collection; the built-in cannot be deleted.
+        assert!(store
+            .delete_keypoint_collection(crate::angle_kps::BUILTIN_DEFAULT_COLLECTION_ID)
+            .is_err());
+        store
+            .delete_keypoint_collection(&collection_id)
+            .expect("delete user collection");
+        assert_eq!(store.list_keypoint_collections().expect("list").len(), 1);
+    }
+
+    #[test]
+    fn keypoint_library_hidden_from_project_switcher() {
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        let data_dir = temp_dir.path().join("data");
+        let store = ProjectStore::new(&data_dir, "test-version");
+        store.ensure_global_keypoints_project().expect("ensure");
+        let visible = store.list_projects().expect("list projects");
+        assert!(visible
+            .iter()
+            .all(|project| project.id != GLOBAL_KEYPOINTS_PROJECT_ID));
     }
 
     #[test]

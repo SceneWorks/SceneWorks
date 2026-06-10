@@ -2203,154 +2203,20 @@ const ZIMAGE_ADAPTER_LABEL: &str = "mlx_z_image";
 // ports of `character_studio_angles.py` + the `MlxFlux2Adapter` / `fit_image` paths.
 // ---------------------------------------------------------------------------
 
-/// The 11 canonical Character-Studio angles, in order (parity with
-/// `character_studio_angles.CHARACTER_ANGLE_SET_ORDER`).
+/// The 11 canonical Character-Studio angles, in order. Re-exported from the canonical
+/// [`sceneworks_core::angle_kps`] source of truth (the same table the Key Point Library serves
+/// as its built-in presets — sc-4434) so the worker and the library can never drift.
 #[cfg(target_os = "macos")]
-const CHARACTER_ANGLE_SET_ORDER: [&str; 11] = [
-    "front",
-    "three_quarter_left",
-    "three_quarter_right",
-    "left_profile",
-    "right_profile",
-    "up",
-    "down",
-    "up_left",
-    "up_right",
-    "down_left",
-    "down_right",
-];
-
-/// The validated default 5-point landmark presets for the InstantID angle set (sc-4424,
-/// epic 4422), normalized to a square `0.0..=1.0` and index-aligned with
-/// [`CHARACTER_ANGLE_SET_ORDER`]. The worker now OWNS these presets and passes them to the
-/// engine via `generate_with_kps`, replacing the engine's hardcoded `VIEW_ANGLE_KPS` table —
-/// so framing changes (and future user-defined presets) need no engine change. Tuned for
-/// LoRA-training coverage: head-and-shoulders fills the frame, shoulders retained (the prior
-/// engine pack rendered the face small + low, wasting ~half the frame). Derived + validated in
-/// `docs/sc-4422-kps-experiment/`.
-#[cfg(target_os = "macos")]
-const INSTANTID_ANGLE_KPS: [(&str, [(f32, f32); 5]); 11] = [
-    (
-        "front",
-        [
-            (0.4033, 0.3420),
-            (0.5938, 0.3393),
-            (0.5014, 0.4317),
-            (0.4298, 0.5353),
-            (0.5771, 0.5334),
-        ],
-    ),
-    (
-        "three_quarter_left",
-        [
-            (0.3973, 0.3380),
-            (0.5057, 0.3432),
-            (0.3734, 0.4268),
-            (0.4024, 0.5330),
-            (0.4785, 0.5357),
-        ],
-    ),
-    (
-        "three_quarter_right",
-        [
-            (0.4867, 0.3434),
-            (0.6117, 0.3379),
-            (0.6241, 0.4225),
-            (0.5249, 0.5366),
-            (0.6149, 0.5322),
-        ],
-    ),
-    (
-        "left_profile",
-        [
-            (0.3022, 0.3339),
-            (0.3421, 0.3474),
-            (0.2381, 0.4301),
-            (0.3020, 0.5304),
-            (0.3200, 0.5384),
-        ],
-    ),
-    (
-        "right_profile",
-        [
-            (0.6591, 0.3487),
-            (0.7145, 0.3325),
-            (0.7786, 0.4309),
-            (0.6893, 0.5397),
-            (0.7235, 0.5290),
-        ],
-    ),
-    (
-        "up",
-        [
-            (0.3973, 0.3404),
-            (0.6069, 0.3408),
-            (0.5036, 0.3826),
-            (0.4155, 0.5343),
-            (0.5919, 0.5344),
-        ],
-    ),
-    (
-        "down",
-        [
-            (0.4024, 0.4030),
-            (0.6046, 0.3982),
-            (0.5075, 0.5214),
-            (0.4272, 0.5957),
-            (0.5807, 0.5930),
-        ],
-    ),
-    (
-        "up_left",
-        [
-            (0.4025, 0.3298),
-            (0.5575, 0.3461),
-            (0.4018, 0.3944),
-            (0.3686, 0.5243),
-            (0.4840, 0.5391),
-        ],
-    ),
-    (
-        "up_right",
-        [
-            (0.4607, 0.3508),
-            (0.6113, 0.3305),
-            (0.6086, 0.4063),
-            (0.5228, 0.5431),
-            (0.6368, 0.5257),
-        ],
-    ),
-    (
-        "down_left",
-        [
-            (0.3677, 0.4103),
-            (0.5168, 0.3910),
-            (0.3988, 0.5100),
-            (0.4260, 0.6021),
-            (0.5312, 0.5866),
-        ],
-    ),
-    (
-        "down_right",
-        [
-            (0.4793, 0.3987),
-            (0.6326, 0.4026),
-            (0.6159, 0.4961),
-            (0.4945, 0.5928),
-            (0.6096, 0.5959),
-        ],
-    ),
-];
+const CHARACTER_ANGLE_SET_ORDER: [&str; 11] = sceneworks_core::angle_kps::BUILTIN_ANGLE_SET_ORDER;
 
 /// The default kps preset for a canonical angle name, or the `front` preset if an unknown name
 /// slips through (callers iterate [`CHARACTER_ANGLE_SET_ORDER`], so the fallback is unreachable
-/// in practice — it just keeps the lookup total).
+/// in practice — it just keeps the lookup total). Reads the canonical
+/// [`sceneworks_core::angle_kps`] table (sc-4424 presets, now the library built-ins — sc-4434).
 #[cfg(target_os = "macos")]
 fn instantid_angle_kps(angle: &str) -> [(f32, f32); 5] {
-    INSTANTID_ANGLE_KPS
-        .iter()
-        .find(|(name, _)| *name == angle)
-        .map_or(INSTANTID_ANGLE_KPS[0].1, |(_, kps)| *kps)
+    sceneworks_core::angle_kps::angle_kps(angle)
+        .unwrap_or(sceneworks_core::angle_kps::BUILTIN_ANGLE_KPS[0].1)
 }
 
 /// The per-angle continuation clause appended to the user's prompt (parity with
