@@ -251,6 +251,13 @@ pub(crate) async fn run_video_generate_job(
             None,
         )
     } else {
+        // An MLX-routed video model whose snapshot didn't resolve must fail
+        // loudly with the resolver's precise error instead of completing with
+        // procedural stub output (sc-4176, epic 3482 "unsupported jobs error
+        // loudly"). replace_person above already follows this rule; the stub
+        // remains only for ids outside the engine families (test models,
+        // not-yet-ported families).
+        ensure_video_engine_weights(&request, settings)?;
         (
             generate_stub_video(&request, seed),
             STUB_ADAPTER,
@@ -873,6 +880,33 @@ fn wan_engine_id(model: &str) -> Option<&'static str> {
 /// Whether the linked Wan engine can serve this request now: a Wan model id with
 /// resolvable on-disk weights. Off macOS / non-Wan / weights-absent → the stub
 /// (mirrors the image `mlx_available` weights gate).
+/// Fail-loud gate for the stub fallback (sc-4176): when the requested model id
+/// maps to an MLX video engine family (Wan/LTX/SVD) but its weights/snapshot
+/// can't be resolved, surface the resolver's precise re-download error instead
+/// of silently degrading the job to procedural stub output. Non-engine model
+/// ids pass through (the stub is their intended path).
+#[cfg(target_os = "macos")]
+pub(crate) fn ensure_video_engine_weights(
+    request: &VideoRequest,
+    settings: &Settings,
+) -> WorkerResult<()> {
+    if let Some(engine_id) = wan_engine_id(&request.model) {
+        resolve_wan_model_dir(settings, &request.model, engine_id)?;
+    }
+    if ltx_engine_id(&request.model).is_some() {
+        resolve_ltx_model_dir(settings, request)?;
+    }
+    if svd_engine_id(&request.model).is_some() {
+        if request.source_asset_id.is_none() {
+            return Err(WorkerError::InvalidPayload(
+                "SVD image-to-video requires a source image asset.".to_owned(),
+            ));
+        }
+        resolve_svd_model_dir(settings)?;
+    }
+    Ok(())
+}
+
 #[cfg(target_os = "macos")]
 fn wan_available(request: &VideoRequest, settings: &Settings) -> bool {
     match wan_engine_id(&request.model) {

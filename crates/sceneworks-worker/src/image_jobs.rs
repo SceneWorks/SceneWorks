@@ -531,6 +531,20 @@ pub(crate) async fn run_image_generate_job(
     #[cfg(not(target_os = "macos"))]
     let handled = false;
 
+    // An MLX-routed model id whose weights/snapshot didn't resolve must fail
+    // loudly with a precise re-download error instead of completing the job
+    // with procedural stub output (sc-4176, epic 3482 "unsupported jobs error
+    // loudly"). `mlx_available` is the last dispatch arm, so reaching here
+    // with a known engine model means exactly that its weights are unusable.
+    // Model ids outside the engine families still stub (test models,
+    // not-yet-ported families, non-macOS lanes).
+    #[cfg(target_os = "macos")]
+    if !handled {
+        if let Some(gap) = mlx_weights_gap(&request, settings) {
+            return Err(WorkerError::InvalidPayload(gap));
+        }
+    }
+
     if !handled {
         generate_stub_stream(
             api,
@@ -897,6 +911,25 @@ enum GenEvent {
 
 /// True when this job can run real in-process inference: the model is a linked,
 /// engine-backed family and its weights resolve locally.
+/// Fail-loud gate for the stub fallback (sc-4176): Some(message) when the
+/// requested model id is a known MLX engine model but its weights snapshot
+/// can't be resolved (partially deleted HF cache, stale refs, missing
+/// modelPath). None when the model isn't engine-backed (the stub is its
+/// intended path) or the weights resolve.
+#[cfg(target_os = "macos")]
+pub(crate) fn mlx_weights_gap(request: &ImageRequest, settings: &Settings) -> Option<String> {
+    let model = mlx_model(&request.model)?;
+    if resolve_weights_dir(request, settings).is_some() {
+        return None;
+    }
+    Some(format!(
+        "{}: MLX weights not found or incomplete (Hugging Face repo {}). \
+         Re-download the model in Model Manager, then retry.",
+        request.model,
+        model_repo(request, model),
+    ))
+}
+
 #[cfg(target_os = "macos")]
 fn mlx_available(request: &ImageRequest, settings: &Settings) -> bool {
     mlx_model(&request.model).is_some() && resolve_weights_dir(request, settings).is_some()

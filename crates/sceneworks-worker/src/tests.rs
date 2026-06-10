@@ -2085,3 +2085,81 @@ async fn cancel_poll_continues_when_no_cancel_requested() {
     .await;
     assert!(!canceled);
 }
+
+/// sc-4176 — on macOS an MLX-routed model whose weights don't resolve must
+/// fail loudly with a precise re-download error instead of silently completing
+/// with procedural stub output; non-engine model ids keep the stub path.
+#[cfg(target_os = "macos")]
+mod stub_fallback_gate {
+    use super::*;
+    use crate::image_jobs::mlx_weights_gap;
+    use crate::video_jobs::ensure_video_engine_weights;
+    use sceneworks_core::image_request::ImageRequest;
+    use sceneworks_core::video_request::VideoRequest;
+    use serde_json::Map;
+
+    fn settings_with_empty_data_dir() -> (tempfile::TempDir, Settings) {
+        let dir = tempdir().expect("tempdir");
+        let mut settings = test_settings("http://127.0.0.1:1".to_owned(), None);
+        settings.data_dir = dir.path().to_path_buf();
+        (dir, settings)
+    }
+
+    fn object(value: serde_json::Value) -> Map<String, serde_json::Value> {
+        value.as_object().expect("object").clone()
+    }
+
+    #[test]
+    fn image_engine_model_without_weights_is_a_precise_error_not_a_stub() {
+        let (_dir, settings) = settings_with_empty_data_dir();
+        let request = ImageRequest::from_payload(&object(json!({ "model": "z_image_turbo" })));
+        let gap = mlx_weights_gap(&request, &settings).expect("missing weights flagged");
+        assert!(gap.contains("z_image_turbo"), "{gap}");
+        assert!(gap.contains("Re-download"), "{gap}");
+    }
+
+    #[test]
+    fn image_non_engine_model_keeps_the_stub_path() {
+        let (_dir, settings) = settings_with_empty_data_dir();
+        let request = ImageRequest::from_payload(&object(json!({ "model": "base-model" })));
+        assert_eq!(mlx_weights_gap(&request, &settings), None);
+    }
+
+    #[test]
+    fn image_explicit_model_path_resolves_and_passes_the_gate() {
+        let (dir, settings) = settings_with_empty_data_dir();
+        let request = ImageRequest::from_payload(&object(json!({
+            "model": "z_image_turbo",
+            "advanced": { "modelPath": dir.path().to_string_lossy() },
+        })));
+        assert_eq!(mlx_weights_gap(&request, &settings), None);
+    }
+
+    #[test]
+    fn video_engine_model_without_weights_is_a_precise_error_not_a_stub() {
+        let (_dir, settings) = settings_with_empty_data_dir();
+        let request = VideoRequest::from_payload(&object(json!({ "model": "wan_2_2_i2v_14b" })));
+        let error = ensure_video_engine_weights(&request, &settings)
+            .expect_err("missing Wan weights flagged");
+        assert!(
+            error.to_string().contains("no MLX weights found"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn video_svd_without_source_asset_is_an_invalid_payload_error() {
+        let (_dir, settings) = settings_with_empty_data_dir();
+        let request = VideoRequest::from_payload(&object(json!({ "model": "svd" })));
+        let error = ensure_video_engine_weights(&request, &settings)
+            .expect_err("svd without a source image flagged");
+        assert!(error.to_string().contains("source image"), "{error}");
+    }
+
+    #[test]
+    fn video_non_engine_model_keeps_the_stub_path() {
+        let (_dir, settings) = settings_with_empty_data_dir();
+        let request = VideoRequest::from_payload(&object(json!({ "model": "stub-model" })));
+        ensure_video_engine_weights(&request, &settings).expect("non-engine model passes");
+    }
+}
