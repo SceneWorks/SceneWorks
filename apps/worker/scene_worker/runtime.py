@@ -146,6 +146,9 @@ class ApiClient:
         if settings.access_token:
             headers["X-SceneWorks-Token"] = settings.access_token
         self.client = httpx.Client(base_url=settings.api_url, headers=headers, timeout=20)
+        # Stamped onto every progress report so the server can reject writes
+        # from a worker that no longer owns the job (sc-4172).
+        self.worker_id = settings.worker_id
 
     def post(self, path: str, payload: dict) -> dict:
         response = self.client.post(path, json=payload)
@@ -359,6 +362,13 @@ def heartbeat_with_loaded_models(
 
 
 def update_job(api: ApiClient, job_id: str, payload: dict[str, Any]) -> dict:
+    # Identify the reporting worker; the server 409s if this worker no longer
+    # owns the job (swept stale / canceled / reclaimed), which raises
+    # httpx.HTTPStatusError here and aborts the local handling — i.e. the
+    # worker abandons the job instead of resurrecting it (sc-4172).
+    worker_id = getattr(api, "worker_id", None)
+    if worker_id:
+        payload.setdefault("workerId", worker_id)
     job = api.post(f"/api/v1/jobs/{job_id}/progress", payload)
     emit({"event": "job_progress", "jobId": job_id, "status": job["status"], "stage": job["stage"]})
     return job

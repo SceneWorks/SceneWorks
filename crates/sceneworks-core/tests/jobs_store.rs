@@ -87,6 +87,7 @@ fn job_lifecycle_create_claim_complete() {
                 peak_gpu_memory_pct: None,
                 peak_gpu_load_pct: None,
                 backend: None,
+                worker_id: None,
             },
         )
         .expect("progress updates");
@@ -123,6 +124,7 @@ fn progress_keeps_running_max_for_peak_gpu_meters() {
             peak_gpu_memory_pct: memory,
             peak_gpu_load_pct: load,
             backend: None,
+            worker_id: None,
         }
     }
 
@@ -216,6 +218,7 @@ fn progress_leaves_peaks_null_when_no_samples_arrive() {
         peak_gpu_memory_pct: None,
         peak_gpu_load_pct: None,
         backend: None,
+        worker_id: None,
     };
     for _ in 0..3 {
         store
@@ -660,6 +663,7 @@ fn training_progress_stages_persist_under_running_and_reject_unknown_status() {
                     peak_gpu_memory_pct: None,
                     peak_gpu_load_pct: None,
                     backend: None,
+                    worker_id: None,
                 },
             )
             .expect("running status with a training stage is accepted");
@@ -683,6 +687,7 @@ fn training_progress_stages_persist_under_running_and_reject_unknown_status() {
                 peak_gpu_memory_pct: None,
                 peak_gpu_load_pct: None,
                 backend: None,
+                worker_id: None,
             },
         )
         .expect_err("an unknown status is rejected");
@@ -720,6 +725,7 @@ fn training_progress_merges_latest_sample_batches_into_history() {
                     peak_gpu_memory_pct: None,
                     peak_gpu_load_pct: None,
                     backend: None,
+                    worker_id: None,
                 },
             )
             .expect("sample progress updates");
@@ -1223,6 +1229,7 @@ fn invalid_progress_numbers_are_rejected() {
                 peak_gpu_memory_pct: None,
                 peak_gpu_load_pct: None,
                 backend: None,
+                worker_id: None,
             },
         ),
         Err(JobsStoreError::InvalidNumber(field)) if field == "progress"
@@ -1454,6 +1461,7 @@ fn complete_job(store: &JobsStore, job_id: &str) {
                 peak_gpu_memory_pct: None,
                 peak_gpu_load_pct: None,
                 backend: None,
+                worker_id: None,
             },
         )
         .expect("job completes");
@@ -3380,6 +3388,7 @@ fn qwen_txt2img_and_strict_pose_route_to_mlx() {
                 peak_gpu_memory_pct: None,
                 peak_gpu_load_pct: None,
                 backend: None,
+                worker_id: None,
             },
         )
         .expect("txt2img job completes");
@@ -3450,6 +3459,7 @@ fn flux2_klein_variants_route_to_mlx_worker() {
                     peak_gpu_memory_pct: None,
                     peak_gpu_load_pct: None,
                     backend: None,
+                    worker_id: None,
                 },
             )
             .expect("complete job");
@@ -3527,6 +3537,7 @@ fn sdxl_and_realvisxl_route_to_mlx_worker() {
                     peak_gpu_memory_pct: None,
                     peak_gpu_load_pct: None,
                     backend: None,
+                    worker_id: None,
                 },
             )
             .expect("complete job");
@@ -3570,6 +3581,7 @@ fn sdxl_and_realvisxl_route_to_mlx_worker() {
                     peak_gpu_memory_pct: None,
                     peak_gpu_load_pct: None,
                     backend: None,
+                    worker_id: None,
                 },
             )
             .expect("complete job");
@@ -3648,6 +3660,7 @@ fn image_detail_routes_to_mlx_worker() {
                     peak_gpu_memory_pct: None,
                     peak_gpu_load_pct: None,
                     backend: None,
+                    worker_id: None,
                 },
             )
             .expect("complete detail job");
@@ -3846,6 +3859,7 @@ fn concurrent_claims_never_lock_and_stay_exactly_once() {
                                 peak_gpu_memory_pct: None,
                                 peak_gpu_load_pct: None,
                                 backend: None,
+                                worker_id: None,
                             },
                         ) {
                             errors.lock().unwrap().push(error.to_string());
@@ -3870,4 +3884,148 @@ fn concurrent_claims_never_lock_and_stay_exactly_once() {
     let unique: HashSet<&String> = claimed.iter().collect();
     assert_eq!(claimed.len(), JOBS, "every job claimed (count)");
     assert_eq!(unique.len(), JOBS, "no job claimed twice");
+}
+
+/// sc-4172 — a zombie worker's late progress report must not resurrect a job
+/// the stale sweep marked `interrupted`; terminal statuses are immutable except
+/// for an idempotent re-report of the same terminal status.
+#[test]
+fn progress_cannot_resurrect_terminal_jobs() {
+    fn report(status: JobStatus, stage: ProgressStage, worker_id: Option<&str>) -> ProgressUpdate {
+        ProgressUpdate {
+            status,
+            stage,
+            progress: 0.9,
+            message: "late report".to_owned(),
+            error: None,
+            result: None,
+            eta_seconds: None,
+            peak_gpu_memory_pct: None,
+            peak_gpu_load_pct: None,
+            backend: None,
+            worker_id: worker_id.map(str::to_owned),
+        }
+    }
+
+    let store = store("terminal-immutable");
+    register_image_worker(&store);
+    let created = store
+        .create_job(image_job(Map::new()))
+        .expect("job creates");
+    store
+        .claim_next_job("worker-1")
+        .expect("claim succeeds")
+        .expect("job claimed");
+
+    // Age the worker out and sweep its job to interrupted (worker_id cleared).
+    let connection = Connection::open(store.db_path()).expect("db opens");
+    connection
+        .execute(
+            "update workers set last_seen_at = '2000-01-01T00:00:00Z' where id = ?1",
+            params!["worker-1"],
+        )
+        .expect("worker timestamp updates");
+    store
+        .mark_stale_workers_interrupted(1)
+        .expect("sweep succeeds");
+
+    // The zombie's "running" report must be rejected, not resurrect the job.
+    let error = store
+        .update_job_progress(
+            &created.id,
+            report(JobStatus::Running, ProgressStage::Running, Some("worker-1")),
+        )
+        .expect_err("terminal job rejects an active-status report");
+    assert!(matches!(
+        error,
+        JobsStoreError::TerminalJobImmutable { ref status, .. } if status == "interrupted"
+    ));
+
+    // Its late "completed" report must not flip the terminal status either.
+    let error = store
+        .update_job_progress(
+            &created.id,
+            report(
+                JobStatus::Completed,
+                ProgressStage::Completed,
+                Some("worker-1"),
+            ),
+        )
+        .expect_err("terminal job rejects a different terminal status");
+    assert!(matches!(error, JobsStoreError::TerminalJobImmutable { .. }));
+
+    // An idempotent re-report of the same terminal status is a no-op success
+    // (e.g. a worker retrying its own "canceled" POST).
+    let job = store
+        .update_job_progress(
+            &created.id,
+            report(
+                JobStatus::Interrupted,
+                ProgressStage::Interrupted,
+                Some("worker-1"),
+            ),
+        )
+        .expect("same-terminal re-report succeeds");
+    assert_eq!(job.status, JobStatus::Interrupted);
+    assert_eq!(
+        job.message, "Job was interrupted after its worker stopped sending heartbeats.",
+        "no-op re-report must not rewrite the row"
+    );
+
+    let job = store.get_job(&created.id).expect("job loads");
+    assert_eq!(job.status, JobStatus::Interrupted);
+    assert_eq!(job.worker_id, None);
+}
+
+/// sc-4172 — a progress report that names a worker other than the job's owner
+/// is rejected; the owner's reports (and legacy reports with no worker id)
+/// still land.
+#[test]
+fn progress_from_non_owner_worker_is_rejected() {
+    fn running(worker_id: Option<&str>) -> ProgressUpdate {
+        ProgressUpdate {
+            status: JobStatus::Running,
+            stage: ProgressStage::Running,
+            progress: 0.5,
+            message: "running".to_owned(),
+            error: None,
+            result: None,
+            eta_seconds: None,
+            peak_gpu_memory_pct: None,
+            peak_gpu_load_pct: None,
+            backend: None,
+            worker_id: worker_id.map(str::to_owned),
+        }
+    }
+
+    let store = store("non-owner-progress");
+    register_image_worker(&store);
+    let created = store
+        .create_job(image_job(Map::new()))
+        .expect("job creates");
+    store
+        .claim_next_job("worker-1")
+        .expect("claim succeeds")
+        .expect("job claimed");
+
+    let error = store
+        .update_job_progress(&created.id, running(Some("worker-2")))
+        .expect_err("non-owner report is rejected");
+    assert!(matches!(error, JobsStoreError::NotJobOwner { .. }));
+    let job = store.get_job(&created.id).expect("job loads");
+    assert_eq!(
+        job.status,
+        JobStatus::Preparing,
+        "rejected write must not land"
+    );
+
+    let job = store
+        .update_job_progress(&created.id, running(Some("worker-1")))
+        .expect("owner report lands");
+    assert_eq!(job.status, JobStatus::Running);
+
+    let job = store
+        .update_job_progress(&created.id, running(None))
+        .expect("legacy report without a worker id still lands");
+    assert_eq!(job.status, JobStatus::Running);
 }

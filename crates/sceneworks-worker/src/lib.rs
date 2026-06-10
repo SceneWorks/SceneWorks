@@ -810,8 +810,13 @@ async fn check_cancel(api: &ApiClient, job_id: &str, message: &str) -> WorkerRes
 async fn update_job(
     api: &ApiClient,
     job_id: &str,
-    payload: ProgressRequest,
+    mut payload: ProgressRequest,
 ) -> WorkerResult<JobSnapshot> {
+    // Stamp the reporting worker so the server can reject the write if this
+    // worker no longer owns the job (swept stale / canceled / reclaimed). The
+    // resulting 409 propagates as WorkerError::Api and aborts the local job
+    // handling — i.e. the worker abandons the job (sc-4172).
+    payload.worker_id = Some(api.worker_id.clone());
     api.post_json(&format!("/api/v1/jobs/{job_id}/progress"), &payload)
         .await
 }
@@ -1110,6 +1115,8 @@ fn progress_payload(
         peak_gpu_memory_pct: None,
         peak_gpu_load_pct: None,
         backend: Some("cpu".to_owned()),
+        // Stamped by update_job before posting (sc-4172).
+        worker_id: None,
         extra: BTreeMap::new(),
     }
 }

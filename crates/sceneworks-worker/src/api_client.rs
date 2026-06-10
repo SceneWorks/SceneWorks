@@ -5,6 +5,9 @@ pub(crate) struct ApiClient {
     client: reqwest::Client,
     api_url: String,
     access_token: Option<String>,
+    /// This worker's id, stamped onto every progress report so the server can
+    /// reject writes from a worker that no longer owns the job (sc-4172).
+    pub(crate) worker_id: String,
 }
 
 impl ApiClient {
@@ -13,6 +16,7 @@ impl ApiClient {
             client: reqwest::Client::new(),
             api_url: settings.api_url.trim_end_matches('/').to_owned(),
             access_token: settings.access_token.clone(),
+            worker_id: settings.worker_id.clone(),
         }
     }
 

@@ -2145,6 +2145,20 @@ impl From<JobsStoreError> for ApiError {
                 status: StatusCode::BAD_REQUEST,
                 detail: format!("Job retry limit reached after {max_attempts} attempts."),
             },
+            // 409 tells the worker its report lost a race with cancel/sweep/
+            // reclaim: abandon the job instead of retrying (sc-4172).
+            JobsStoreError::TerminalJobImmutable { job_id, status } => Self {
+                status: StatusCode::CONFLICT,
+                detail: format!(
+                    "Job {job_id} is already {status}; terminal jobs cannot be updated."
+                ),
+            },
+            JobsStoreError::NotJobOwner { job_id } => Self {
+                status: StatusCode::CONFLICT,
+                detail: format!(
+                    "Progress rejected: the reporting worker no longer owns job {job_id}."
+                ),
+            },
             other => Self::internal(other.to_string()),
         }
     }
