@@ -78,6 +78,10 @@ zip = { version = "2", default-features = false, features = ["deflate"] }
 # Chroma CFG (sc-3950 #233), Z-Image steps validation (sc-3941 #231), Qwen attention split
 # (sc-4004 #230), and the workspace-deps refactor (sc-3976 #212). The mlx-rs pin is unchanged
 # (e59ffd88) so MLX core rebuilds nothing.
+# On top of rev b9b9aba (mlx-gen main, merged PR #200, epic 3180 / sc-3905): primes the empty
+# `<think></think>` block in `T2iModel::vqa` (matching the reference `chat(think=False)` + the
+# no-think interleave path) so the VQA answer isn't consumed by a chain-of-thought — required for
+# the SceneWorks VQA cutover (sc-3905).
 # On top of rev 72214e3 (mlx-gen main, merged PR #199, epic 3180): adds the native-MLX SenseNova-U1 family
 # crate `mlx-gen-sensenova` (NEO-Unify — a dense dual-path Qwen3-MoT AR LLM + flow-matching image
 # generator + NEO ViT; sc-3181..sc-3194). Two registered ids: `sensenova_u1_8b` (base, 50 NFE /

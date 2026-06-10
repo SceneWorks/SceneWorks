@@ -86,7 +86,22 @@ pub enum JobsStoreError {
     InvalidStatus(String),
     InvalidNumber(String),
     InvalidRequestedGpu(String),
-    RetryLimit { max_attempts: u32 },
+    RetryLimit {
+        max_attempts: u32,
+    },
+    /// A progress report tried to change a job that already reached a terminal
+    /// status. Terminal jobs are immutable; only an idempotent re-report of the
+    /// same terminal status succeeds (sc-4172).
+    TerminalJobImmutable {
+        job_id: String,
+        status: String,
+    },
+    /// A progress report came from a worker that no longer owns the job — the
+    /// job was swept/canceled (worker_id cleared) or reclaimed. The worker
+    /// should abandon the job (sc-4172).
+    NotJobOwner {
+        job_id: String,
+    },
 }
 
 impl std::fmt::Display for JobsStoreError {
@@ -103,6 +118,18 @@ impl std::fmt::Display for JobsStoreError {
                 write!(
                     formatter,
                     "Job retry limit reached after {max_attempts} attempts."
+                )
+            }
+            Self::TerminalJobImmutable { job_id, status } => {
+                write!(
+                    formatter,
+                    "Job {job_id} is already {status}; terminal jobs cannot be updated."
+                )
+            }
+            Self::NotJobOwner { job_id } => {
+                write!(
+                    formatter,
+                    "Progress rejected: the reporting worker no longer owns job {job_id}."
                 )
             }
         }
@@ -199,6 +226,12 @@ pub struct ProgressUpdate {
     /// progress updates can't accidentally clear it. Drives the
     /// WorkerProgressCard arch pill.
     pub backend: Option<String>,
+    /// Id of the worker reporting this progress. When set, the store rejects
+    /// the update unless the job's `worker_id` still matches — a zombie worker
+    /// whose job was swept to `interrupted` (worker_id cleared) or reclaimed by
+    /// another worker can no longer resurrect or corrupt it (sc-4172). `None`
+    /// keeps legacy trusted-caller behavior.
+    pub worker_id: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -880,6 +913,12 @@ impl JobsStore {
             || should_defer_video_to_mlx_worker(&transaction, &queued, &worker, mlx_required)?
             || should_defer_training_to_mlx_worker(&transaction, &queued, &worker, mlx_required)?
             || should_defer_caption_to_mlx_worker(&transaction, &queued, &worker, mlx_required)?
+            || should_defer_understanding_to_mlx_worker(
+                &transaction,
+                &queued,
+                &worker,
+                mlx_required,
+            )?
         {
             // A non-mlx worker is yielding this MLX-eligible job to an idle mlx worker.
             let decision = RouteDecision::new(
@@ -955,6 +994,30 @@ impl JobsStore {
         let _guard = self.lock.lock();
         let mut connection = self.connect()?;
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        // Guard against zombie-worker writes (sc-4172): a worker that went
+        // silent long enough for the stale sweep to mark its job `interrupted`
+        // (or whose job the user canceled) must not resurrect it with a late
+        // progress report — that's exactly the failure mode the heartbeat
+        // machinery exists to handle.
+        let current = self.get_job_on_connection(&transaction, job_id)?;
+        if is_terminal_status(current.status.as_str()) {
+            // Idempotent re-report of the same terminal status (e.g. a retried
+            // "canceled" POST) succeeds without touching the row.
+            if current.status == update.status {
+                return Ok(current);
+            }
+            return Err(JobsStoreError::TerminalJobImmutable {
+                job_id: job_id.to_owned(),
+                status: current.status.as_str().to_owned(),
+            });
+        }
+        if let Some(reporter) = update.worker_id.as_deref() {
+            if current.worker_id.as_deref() != Some(reporter) {
+                return Err(JobsStoreError::NotJobOwner {
+                    job_id: job_id.to_owned(),
+                });
+            }
+        }
         let now = utc_now();
         let completed_at = is_terminal_status(update.status.as_str()).then_some(now.clone());
         let canceled_at = (update.status == JobStatus::Canceled).then_some(now.clone());
@@ -1676,6 +1739,7 @@ fn job_is_any_mlx_eligible(job: &JobSnapshot) -> bool {
         || video_job_is_mlx_eligible(job)
         || training_job_is_mlx_eligible(job)
         || caption_job_is_mlx_eligible(job)
+        || understanding_job_is_mlx_eligible(job)
 }
 
 /// Actionable terminal error for an MLX-eligible job stranded on macOS with no live `mlx`
@@ -1781,10 +1845,14 @@ pub fn mac_rust_supported(job: &JobSnapshot) -> Result<(), UnsupportedReason> {
             Some("epic 3041"),
         )),
 
+        // SenseNova-U1 VQA + Document-Studio interleave are ported to the Rust MLX worker
+        // (sc-3905, via the concrete `T2iModel` — the `Generator` contract can't express
+        // text / text+image output); eligible jobs early-return `Ok` above. This arm is
+        // reached only for an understanding job on a model with no in-process path.
         JobType::ImageVqa | JobType::ImageInterleave => Err(UnsupportedReason::new(
             model,
-            "image understanding / interleave",
-            "image VQA / interleaved generation is the SenseNova-U1 understanding surface; it lands with the SenseNova port.",
+            "image understanding / interleave on this model",
+            "image VQA / interleaved generation runs on MLX for the SenseNova-U1 model (sensenova_u1_8b[_fast]); other models have no in-process understanding path and stay on the Python torch path.",
             Some("epic 3180"),
         )),
 
@@ -2540,6 +2608,29 @@ fn should_defer_caption_to_mlx_worker(
     idle_mlx_worker_can_claim(connection, job, worker)
 }
 
+/// Understanding sibling of [`should_defer_image_to_mlx_worker`] (sc-3905): a non-mlx GPU worker
+/// defers an `auto` MLX-eligible SenseNova-U1 `image_vqa` / `image_interleave` job to an idle mlx
+/// worker, so the in-process `T2iModel` (`vqa` / `interleave_gen`) claims it. Windows/Linux and
+/// explicit non-auto GPU requests keep the Python torch SenseNova path.
+fn should_defer_understanding_to_mlx_worker(
+    connection: &Connection,
+    job: &JobSnapshot,
+    worker: &WorkerSnapshot,
+    mlx_required: bool,
+) -> JobsStoreResult<bool> {
+    if worker.gpu_id.eq_ignore_ascii_case("mlx") || !understanding_job_is_mlx_eligible(job) {
+        return Ok(false);
+    }
+    // macOS MLX-required (sc-3483): yield unconditionally, same as the image sibling.
+    if mlx_required {
+        return Ok(true);
+    }
+    if job.requested_gpu != "auto" {
+        return Ok(false);
+    }
+    idle_mlx_worker_can_claim(connection, job, worker)
+}
+
 /// Whether an idle `mlx` worker (other than `worker`) exists that supports `job`
 /// and has no active GPU job — the shared tail of the image/video MLX deferral.
 fn idle_mlx_worker_can_claim(
@@ -2723,6 +2814,28 @@ fn image_detail_mlx_eligible(job: &JobSnapshot) -> bool {
 /// Whether the in-process MLX worker can serve this GPU job (image_generate or image_detail).
 fn job_is_mlx_eligible(job: &JobSnapshot) -> bool {
     image_job_is_mlx_eligible(job) || image_detail_mlx_eligible(job)
+}
+
+/// Epic 3180 / sc-3905 routing — does this understanding job (`image_vqa` / `image_interleave`)
+/// belong on the in-process Rust MLX worker on macOS? These two modes are SenseNova-U1's
+/// understanding/interleave surface, served via the concrete `T2iModel` (`vqa` / `interleave_gen`)
+/// because the `Generator` contract emits Images/Video only. SenseNova-U1 is the only model with an
+/// in-process understanding path, so eligibility = a SenseNova-U1 id (the worker handler validates
+/// the per-mode request: VQA needs a source image + question; interleave needs a prompt). Other
+/// models on these job types have no MLX path and stay on the Python torch worker.
+fn understanding_job_is_mlx_eligible(job: &JobSnapshot) -> bool {
+    if !matches!(job.job_type, JobType::ImageVqa | JobType::ImageInterleave) {
+        return false;
+    }
+    // The understanding job types are SenseNova-specific; a missing model defaults to the base id.
+    let model = job
+        .payload
+        .get("model")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or("sensenova_u1_8b");
+    matches!(model, "sensenova_u1_8b" | "sensenova_u1_8b_fast")
 }
 
 /// SDXL MLX-routing conditions. sc-3026 brought txt2img + LoRA; sc-3060 (epic 3041) adds the
@@ -3187,6 +3300,15 @@ fn worker_supports_job(worker: &WorkerSnapshot, job: &JobSnapshot) -> bool {
         // via `ort`/CoreML. `aura-sr` has no Rust path, so the mlx worker refuses it and
         // it stays on the Python torch worker.
         if matches!(job.job_type, JobType::ImageUpscale) && !upscale_job_is_mlx_eligible(job) {
+            return false;
+        }
+        // SenseNova-U1 understanding (sc-3905): the mlx worker serves `image_vqa` /
+        // `image_interleave` only for the SenseNova-U1 ids (the sole in-process understanding
+        // path). A non-SenseNova understanding job is not MLX-eligible, so the mlx worker
+        // refuses it and it stays on the Python torch worker.
+        if matches!(job.job_type, JobType::ImageVqa | JobType::ImageInterleave)
+            && !understanding_job_is_mlx_eligible(job)
+        {
             return false;
         }
     }

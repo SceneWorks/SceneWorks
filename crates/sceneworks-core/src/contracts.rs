@@ -626,6 +626,12 @@ pub struct ProgressRequest {
     /// arch pill should reflect which one ran. First non-null value sticks.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub backend: Option<String>,
+    /// Id of the worker reporting this progress. When present, the server
+    /// rejects the report with 409 unless the job's `worker_id` still matches —
+    /// so a zombie worker whose job was swept to `interrupted` or reclaimed
+    /// can't resurrect it (sc-4172). Omitted = legacy trusted caller.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub worker_id: Option<String>,
     #[serde(flatten)]
     pub extra: ExtraFields,
 }
