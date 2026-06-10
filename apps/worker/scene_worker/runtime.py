@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from contextlib import contextmanager
+from dataclasses import dataclass
 import ctypes
 from ctypes import wintypes
 import json
@@ -796,33 +797,140 @@ def should_skip_claim_low_vram(settings: WorkerSettings) -> bool:
     return True
 
 
+@dataclass
+class JobStep:
+    """What a job-type handler hands the shared scaffold after its pre-steps:
+    the blocking adapter callable (progress already bound), the completion
+    message (a string, or a callable on the result for dynamic messages), and
+    an optional filesystem-only hook for the cancel backstop's hard stop."""
+
+    runner: Callable[[CancelCallback], dict]
+    completion: str | Callable[[dict], str]
+    on_force_terminate: Callable[[], None] | None = None
+
+
+def run_job_scaffold(
+    api: ApiClient,
+    settings: WorkerSettings,
+    job: dict,
+    *,
+    kind_label: str,
+    setup: Callable[[Callable[..., None]], JobStep],
+    loaded_models: Callable[[], list[str]] | None = None,
+    backend_source: Any = None,
+    oom_restart: bool = True,
+    on_oom: Callable[[], None] | None = None,
+    on_canceled: Callable[[], None] | None = None,
+    on_failure_cleanup: Callable[[], None] | None = None,
+    finally_release: Callable[[], None] | None = None,
+    idle_loaded_models: Callable[[], list[str]] | None = None,
+) -> None:
+    """The one cancel/complete/fail/restart template every run_*_job shares
+    (sc-4185) — previously ten ~70-line copies that drifted independently.
+
+    ``setup(progress)`` runs the handler's pre-steps (request parsing, model
+    resolution, staged progress messages) and returns the :class:`JobStep` to
+    execute under ``run_blocking_job_step``. Exceptions in setup hit the same
+    canceled/failed handlers as the blocking work, matching the old inlined
+    behavior.
+
+    Knobs (each preserves one handler's documented divergence):
+    - ``loaded_models``: busy heartbeats carry the adapter's resident models.
+    - ``backend_source``: adapter (or callable resolving one) for the sc-2086
+      peak meters' backend label.
+    - ``oom_restart``: restart the child via the supervisor on CUDA OOM —
+      everything except pose/upscale/detail (no torch context worth recycling
+      or a deliberate release-only policy).
+    - ``on_oom``: extra OOM handling inside the failure handler
+      (upscale/detail release the activation pool instead of restarting).
+    - ``on_canceled``: ran before reporting Canceled (video tells the adapter).
+    - ``on_failure_cleanup``: ran in ``finally`` only when the job failed —
+      after the except block exits, because while the handler runs the active
+      exception's traceback still references the (possibly OOM) tensors, so
+      cleanup inside the handler would reclaim nothing (video adapters).
+    - ``finally_release``: always ran in ``finally`` before the idle heartbeat
+      (the image family returns the activation pool to the OS).
+    - ``idle_loaded_models``: the final idle heartbeat's resident-model list.
+    """
+    job_id = job["id"]
+    needs_oom_restart = False
+    job_failed = False
+    peaks: dict[str, float] = {}
+
+    def progress(status: str, stage: str, value: float, message: str, result: dict[str, Any] | None = None) -> None:
+        if loaded_models is not None:
+            heartbeat_with_loaded_models(api, settings, "busy", job_id, loaded_models)
+        else:
+            heartbeat(api, settings, "busy", job_id)
+        payload = {"status": status, "stage": stage, "progress": value, "message": message}
+        if result is not None:
+            payload["result"] = result
+        source = backend_source() if callable(backend_source) else backend_source
+        track_job_peaks(payload, peaks, settings, backend=adapter_backend(source, settings))
+        update_job(api, job_id, payload)
+
+    try:
+        step = setup(progress)
+        result = run_blocking_job_step(
+            api,
+            settings,
+            job_id,
+            "busy",
+            step.runner,
+            loaded_models=loaded_models if loaded_models is not None else (lambda: []),
+            on_force_terminate=step.on_force_terminate,
+            peaks=peaks,
+        )
+        completion = step.completion(result) if callable(step.completion) else step.completion
+        update_job(
+            api,
+            job_id,
+            {
+                "status": "completed",
+                "stage": "completed",
+                "progress": 1,
+                "message": completion,
+                "result": result,
+            },
+        )
+    except InterruptedError as exc:
+        if on_canceled is not None:
+            on_canceled()
+        update_job(api, job_id, {"status": "canceled", "stage": "canceled", "progress": 1, "message": str(exc)})
+    except Exception as exc:
+        job_failed = True
+        needs_oom_restart = is_cuda_oom(exc)
+        message, error = friendly_failure(kind_label, exc)
+        update_job(
+            api,
+            job_id,
+            {"status": "failed", "stage": "failed", "progress": 1, "message": message, "error": error},
+        )
+        if needs_oom_restart and on_oom is not None:
+            on_oom()
+    finally:
+        if job_failed and on_failure_cleanup is not None:
+            on_failure_cleanup()
+        if finally_release is not None:
+            finally_release()
+        if idle_loaded_models is not None:
+            heartbeat(api, settings, "idle", loaded_models=idle_loaded_models())
+        else:
+            heartbeat(api, settings, "idle")
+        # A CUDA OOM can leave the allocator/context unable to reclaim VRAM in
+        # place; restart the child so the supervisor gives it a fresh context.
+        if needs_oom_restart and oom_restart:
+            restart_worker_after_oom(settings, job_id)
+
+
 def run_image_job(api: ApiClient, settings: WorkerSettings, job: dict, image_adapters: dict[str, object]) -> None:
     job_id = job["id"]
     adapter = create_image_adapter(job, image_adapters)
     # Free any other family's resident model before this one loads, so only one
     # image model stays resident at a time.
     evict_other_image_adapters(image_adapters, getattr(adapter, "id", ""))
-    needs_oom_restart = False
 
-    def adapter_loaded_models() -> list[str]:
-        return loaded_models_from_adapter(adapter, job_id=job_id)
-
-    peaks: dict[str, float] = {}
-
-    def progress(status: str, stage: str, value: float, message: str, result: dict[str, Any] | None = None) -> None:
-        heartbeat_with_loaded_models(api, settings, "busy", job_id, adapter_loaded_models)
-        payload = {
-            "status": status,
-            "stage": stage,
-            "progress": value,
-            "message": message,
-        }
-        if result is not None:
-            payload["result"] = result
-        track_job_peaks(payload, peaks, settings, backend=adapter_backend(adapter, settings))
-        update_job(api, job_id, payload)
-
-    try:
+    def setup(progress):
         progress("preparing", "preparing", 0.08, "Preparing Image Studio request.")
         progress("loading_model", "loading_model", 0.16, "Resolving image adapter target.")
         # Resolve the request + project path once per job (sc-1678); the adapter, the
@@ -834,12 +942,8 @@ def run_image_job(api: ApiClient, settings: WorkerSettings, job: dict, image_ada
         # if the cancel backstop force-kills the worker — os._exit skips the adapter's
         # own finally (sc-1719). Filesystem-only; no-op for adapters without one.
         discard_scratch = getattr(adapter, "discard_temp_outputs", None)
-        result = run_blocking_job_step(
-            api,
-            settings,
-            job_id,
-            "busy",
-            lambda cancel: adapter.generate(
+        return JobStep(
+            runner=lambda cancel: adapter.generate(
                 settings=settings,
                 job=job,
                 request=request,
@@ -847,54 +951,24 @@ def run_image_job(api: ApiClient, settings: WorkerSettings, job: dict, image_ada
                 progress=progress,
                 cancel_requested=cancel,
             ),
-            loaded_models=adapter_loaded_models,
+            completion="Image generation assets saved.",
             on_force_terminate=(lambda: discard_scratch(job_id)) if callable(discard_scratch) else None,
-            peaks=peaks,
         )
-        update_job(
-            api,
-            job_id,
-            {
-                "status": "completed",
-                "stage": "completed",
-                "progress": 1,
-                "message": "Image generation assets saved.",
-                "result": result,
-            },
-        )
-    except InterruptedError as exc:
-        update_job(
-            api,
-            job_id,
-            {
-                "status": "canceled",
-                "stage": "canceled",
-                "progress": 1,
-                "message": str(exc),
-            },
-        )
-    except Exception as exc:
-        needs_oom_restart = is_cuda_oom(exc)
-        message, error = friendly_failure("Image generation", exc)
-        update_job(
-            api,
-            job_id,
-            {
-                "status": "failed",
-                "stage": "failed",
-                "progress": 1,
-                "message": message,
-                "error": error,
-            },
-        )
-    finally:
+
+    run_job_scaffold(
+        api,
+        settings,
+        job,
+        kind_label="Image generation",
+        setup=setup,
+        loaded_models=lambda: loaded_models_from_adapter(adapter, job_id=job_id),
+        backend_source=adapter,
         # Return the (potentially tens of GB) generation activation pool to the OS
         # so an idle worker doesn't sit at peak memory. Cached models stay resident
         # for fast reuse; the just-finished job's tensors are already unreferenced.
-        release_image_worker_memory()
-        heartbeat(api, settings, "idle", loaded_models=loaded_models_from_adapters(image_adapters))
-        if needs_oom_restart:
-            restart_worker_after_oom(settings, job_id)
+        finally_release=release_image_worker_memory,
+        idle_loaded_models=lambda: loaded_models_from_adapters(image_adapters),
+    )
 
 
 def run_vqa_job(api: ApiClient, settings: WorkerSettings, job: dict, image_adapters: dict[str, object]) -> None:
@@ -902,66 +976,30 @@ def run_vqa_job(api: ApiClient, settings: WorkerSettings, job: dict, image_adapt
     adapter = image_adapters["sensenova_u1"]
     # Free any other family's resident model before this one loads.
     evict_other_image_adapters(image_adapters, getattr(adapter, "id", ""))
-    needs_oom_restart = False
 
-    def adapter_loaded_models() -> list[str]:
-        return loaded_models_from_adapter(adapter, job_id=job_id)
-
-    peaks: dict[str, float] = {}
-
-    def progress(status: str, stage: str, value: float, message: str, result: dict[str, Any] | None = None) -> None:
-        heartbeat_with_loaded_models(api, settings, "busy", job_id, adapter_loaded_models)
-        payload = {"status": status, "stage": stage, "progress": value, "message": message}
-        if result is not None:
-            payload["result"] = result
-        track_job_peaks(payload, peaks, settings, backend=adapter_backend(adapter, settings))
-        update_job(api, job_id, payload)
-
-    try:
+    def setup(progress):
         progress("preparing", "preparing", 0.08, "Preparing visual question.")
-        result = run_blocking_job_step(
-            api,
-            settings,
-            job_id,
-            "busy",
-            lambda cancel: adapter.answer_question(
+        return JobStep(
+            runner=lambda cancel: adapter.answer_question(
                 settings=settings,
                 job=job,
                 progress=progress,
                 cancel_requested=cancel,
             ),
-            loaded_models=adapter_loaded_models,
-            peaks=peaks,
+            completion="Answer ready.",
         )
-        update_job(
-            api,
-            job_id,
-            {
-                "status": "completed",
-                "stage": "completed",
-                "progress": 1,
-                "message": "Answer ready.",
-                "result": result,
-            },
-        )
-    except InterruptedError as exc:
-        update_job(api, job_id, {"status": "canceled", "stage": "canceled", "progress": 1, "message": str(exc)})
-    except Exception as exc:
-        needs_oom_restart = is_cuda_oom(exc)
-        message, error = friendly_failure("Visual question answering", exc)
-        update_job(
-            api,
-            job_id,
-            {"status": "failed", "stage": "failed", "progress": 1, "message": message, "error": error},
-        )
-    finally:
-        # Return the (potentially tens of GB) generation activation pool to the OS
-        # so an idle worker doesn't sit at peak memory. Cached models stay resident
-        # for fast reuse; the just-finished job's tensors are already unreferenced.
-        release_image_worker_memory()
-        heartbeat(api, settings, "idle", loaded_models=loaded_models_from_adapters(image_adapters))
-        if needs_oom_restart:
-            restart_worker_after_oom(settings, job_id)
+
+    run_job_scaffold(
+        api,
+        settings,
+        job,
+        kind_label="Visual question answering",
+        setup=setup,
+        loaded_models=lambda: loaded_models_from_adapter(adapter, job_id=job_id),
+        backend_source=adapter,
+        finally_release=release_image_worker_memory,
+        idle_loaded_models=lambda: loaded_models_from_adapters(image_adapters),
+    )
 
 
 def run_interleave_job(api: ApiClient, settings: WorkerSettings, job: dict, image_adapters: dict[str, object]) -> None:
@@ -969,34 +1007,16 @@ def run_interleave_job(api: ApiClient, settings: WorkerSettings, job: dict, imag
     adapter = image_adapters["sensenova_u1"]
     # Free any other family's resident model before this one loads.
     evict_other_image_adapters(image_adapters, getattr(adapter, "id", ""))
-    needs_oom_restart = False
 
-    def adapter_loaded_models() -> list[str]:
-        return loaded_models_from_adapter(adapter, job_id=job_id)
-
-    peaks: dict[str, float] = {}
-
-    def progress(status: str, stage: str, value: float, message: str, result: dict[str, Any] | None = None) -> None:
-        heartbeat_with_loaded_models(api, settings, "busy", job_id, adapter_loaded_models)
-        payload = {"status": status, "stage": stage, "progress": value, "message": message}
-        if result is not None:
-            payload["result"] = result
-        track_job_peaks(payload, peaks, settings, backend=adapter_backend(adapter, settings))
-        update_job(api, job_id, payload)
-
-    try:
+    def setup(progress):
         progress("preparing", "preparing", 0.08, "Preparing interleaved document.")
         # Resolve the request + project path once per job (sc-1678); generate_interleaved
         # threads them into input-image loading, the asset writer, and the document write
         # instead of re-scanning recent-projects.json at each step.
         request = image_request_from_job(job)
         project_path = find_project_path(settings.data_dir / "recent-projects.json", request.project_id)
-        result = run_blocking_job_step(
-            api,
-            settings,
-            job_id,
-            "busy",
-            lambda cancel: adapter.generate_interleaved(
+        return JobStep(
+            runner=lambda cancel: adapter.generate_interleaved(
                 settings=settings,
                 job=job,
                 request=request,
@@ -1004,63 +1024,30 @@ def run_interleave_job(api: ApiClient, settings: WorkerSettings, job: dict, imag
                 progress=progress,
                 cancel_requested=cancel,
             ),
-            loaded_models=adapter_loaded_models,
-            peaks=peaks,
+            completion="Interleaved document ready.",
         )
-        update_job(
-            api,
-            job_id,
-            {
-                "status": "completed",
-                "stage": "completed",
-                "progress": 1,
-                "message": "Interleaved document ready.",
-                "result": result,
-            },
-        )
-    except InterruptedError as exc:
-        update_job(api, job_id, {"status": "canceled", "stage": "canceled", "progress": 1, "message": str(exc)})
-    except Exception as exc:
-        needs_oom_restart = is_cuda_oom(exc)
-        message, error = friendly_failure("Interleaved generation", exc)
-        update_job(
-            api,
-            job_id,
-            {"status": "failed", "stage": "failed", "progress": 1, "message": message, "error": error},
-        )
-    finally:
-        # Return the (potentially tens of GB) generation activation pool to the OS
-        # so an idle worker doesn't sit at peak memory. Cached models stay resident
-        # for fast reuse; the just-finished job's tensors are already unreferenced.
-        release_image_worker_memory()
-        heartbeat(api, settings, "idle", loaded_models=loaded_models_from_adapters(image_adapters))
-        if needs_oom_restart:
-            restart_worker_after_oom(settings, job_id)
+
+    run_job_scaffold(
+        api,
+        settings,
+        job,
+        kind_label="Interleaved generation",
+        setup=setup,
+        loaded_models=lambda: loaded_models_from_adapter(adapter, job_id=job_id),
+        backend_source=adapter,
+        finally_release=release_image_worker_memory,
+        idle_loaded_models=lambda: loaded_models_from_adapters(image_adapters),
+    )
 
 
 def run_video_job(api: ApiClient, settings: WorkerSettings, job: dict) -> None:
     job_id = job["id"]
     adapter = create_video_adapter(job)
-    job_failed = False
-    needs_oom_restart = False
 
     def adapter_loaded_models() -> list[str]:
         return loaded_models_from_adapter(adapter, job_id=job_id)
 
-    peaks: dict[str, float] = {}
-
-    def progress(status: str, stage: str, value: float, message: str) -> None:
-        heartbeat_with_loaded_models(api, settings, "busy", job_id, adapter_loaded_models)
-        payload = {
-            "status": status,
-            "stage": stage,
-            "progress": value,
-            "message": message,
-        }
-        track_job_peaks(payload, peaks, settings, backend=adapter_backend(adapter, settings))
-        update_job(api, job_id, payload)
-
-    try:
+    def setup(progress):
         progress("preparing", "preparing", 0.06, "Preparing Video Studio request.")
         request = adapter.prepare(settings=settings, job=job)
         progress("loading_model", "loading_model", 0.14, "Resolving video adapter target.")
@@ -1077,81 +1064,33 @@ def run_video_job(api: ApiClient, settings: WorkerSettings, job: dict) -> None:
             if estimated_frames
             else "Estimated video generation requirements."
         )
-        progress(
-            "running",
-            "estimating",
-            0.18,
-            estimate_message,
-        )
-        result = run_blocking_job_step(
-            api,
-            settings,
-            job_id,
-            "busy",
-            lambda cancel: adapter.run(
+        progress("running", "estimating", 0.18, estimate_message)
+        return JobStep(
+            runner=lambda cancel: adapter.run(
                 settings=settings,
                 job=job,
                 request=request,
                 progress=progress,
                 cancel_requested=cancel,
             ),
-            loaded_models=adapter_loaded_models,
+            completion="Video generation asset saved.",
             # Reap the job's partial .tmp.mp4/.control.mp4 outputs if the hard-stop
             # backstop force-kills the worker (os._exit skips adapter cleanup).
             on_force_terminate=lambda: adapter.discard_temp_outputs(job_id),
-            peaks=peaks,
         )
-        update_job(
-            api,
-            job_id,
-            {
-                "status": "completed",
-                "stage": "completed",
-                "progress": 1,
-                "message": "Video generation asset saved.",
-                "result": result,
-            },
-        )
-    except InterruptedError as exc:
-        adapter.cancel(job_id)
-        update_job(
-            api,
-            job_id,
-            {
-                "status": "canceled",
-                "stage": "canceled",
-                "progress": 1,
-                "message": str(exc),
-            },
-        )
-    except Exception as exc:
-        job_failed = True
-        needs_oom_restart = is_cuda_oom(exc)
-        message, error = friendly_failure("Video generation", exc)
-        update_job(
-            api,
-            job_id,
-            {
-                "status": "failed",
-                "stage": "failed",
-                "progress": 1,
-                "message": message,
-                "error": error,
-            },
-        )
-    finally:
-        # Free GPU memory only after the except block exits: while the handler
-        # runs, the interpreter keeps the active exception (and its traceback)
-        # alive, and that traceback references the OOM tensors — so an
-        # empty_cache() inside the handler reclaims nothing and the memory stays
-        # held until the worker restarts.
-        if job_failed:
-            adapter.cleanup(job_id)
-        heartbeat(api, settings, "idle", loaded_models=adapter_loaded_models())
-        # A CUDA OOM can leave the allocator/context unable to reclaim VRAM in
-        # place; restart the child so the supervisor gives it a fresh context.
-        if needs_oom_restart:
-            restart_worker_after_oom(settings, job_id)
+
+    run_job_scaffold(
+        api,
+        settings,
+        job,
+        kind_label="Video generation",
+        setup=setup,
+        loaded_models=adapter_loaded_models,
+        backend_source=adapter,
+        on_canceled=lambda: adapter.cancel(job_id),
+        on_failure_cleanup=lambda: adapter.cleanup(job_id),
+        idle_loaded_models=adapter_loaded_models,
+    )
 
 
 # The supported training plan version and shared plan validation/summary helpers
@@ -1165,60 +1104,29 @@ def run_person_job(api: ApiClient, settings: WorkerSettings, job: dict) -> None:
     SAM2 masks) instead of the Rust procedural placeholders, so completed jobs
     report active detection/tracking metadata and content-derived results.
     """
-    job_id = job["id"]
     job_type = job["type"]
-    needs_oom_restart = False
-    peaks: dict[str, float] = {}
-
-    def progress(status: str, stage: str, value: float, message: str) -> None:
-        heartbeat(api, settings, "busy", job_id)
-        payload = {"status": status, "stage": stage, "progress": value, "message": message}
-        track_job_peaks(payload, peaks, settings, backend=adapter_backend(None, settings))
-        update_job(api, job_id, payload)
-
     runner = run_person_detect if job_type == "person_detect" else run_person_track
     done_message = "Person candidates detected." if job_type == "person_detect" else "Reusable person track saved."
 
-    try:
+    def setup(progress):
         progress("preparing", "preparing", 0.06, "Preparing person analysis.")
-        result = run_blocking_job_step(
-            api,
-            settings,
-            job_id,
-            "busy",
-            lambda cancel: runner(
+        return JobStep(
+            runner=lambda cancel: runner(
                 settings,
                 job,
                 progress=progress,
                 cancel_requested=cancel,
             ),
-            loaded_models=lambda: [],
-            peaks=peaks,
+            completion=done_message,
         )
-        update_job(
-            api,
-            job_id,
-            {"status": "completed", "stage": "completed", "progress": 1, "message": done_message, "result": result},
-        )
-    except InterruptedError as exc:
-        update_job(
-            api,
-            job_id,
-            {"status": "canceled", "stage": "canceled", "progress": 1, "message": str(exc)},
-        )
-    except Exception as exc:
-        needs_oom_restart = is_cuda_oom(exc)
-        kind = "Person detection" if job_type == "person_detect" else "Person tracking"
-        message, error = friendly_failure(kind, exc)
-        update_job(
-            api,
-            job_id,
-            {"status": "failed", "stage": "failed", "progress": 1, "message": message, "error": error},
-        )
-    finally:
-        heartbeat(api, settings, "idle")
-        if needs_oom_restart:
-            restart_worker_after_oom(settings, job_id)
+
+    run_job_scaffold(
+        api,
+        settings,
+        job,
+        kind_label="Person detection" if job_type == "person_detect" else "Person tracking",
+        setup=setup,
+    )
 
 
 def run_pose_job(api: ApiClient, settings: WorkerSettings, job: dict) -> None:
@@ -1228,52 +1136,28 @@ def run_pose_job(api: ApiClient, settings: WorkerSettings, job: dict) -> None:
     pose_detect only when the backend is installed (worker_capabilities). Returns one
     pose candidate per detected person plus a rendered skeleton preview per pose.
     """
-    job_id = job["id"]
-    peaks: dict[str, float] = {}
 
-    def progress(status: str, stage: str, value: float, message: str) -> None:
-        heartbeat(api, settings, "busy", job_id)
-        payload = {"status": status, "stage": stage, "progress": value, "message": message}
-        track_job_peaks(payload, peaks, settings, backend=adapter_backend(None, settings))
-        update_job(api, job_id, payload)
-
-    try:
+    def setup(progress):
         progress("preparing", "preparing", 0.06, "Preparing pose detection.")
-        result = run_blocking_job_step(
-            api,
-            settings,
-            job_id,
-            "busy",
-            lambda cancel: run_pose_detect(
+        return JobStep(
+            runner=lambda cancel: run_pose_detect(
                 settings,
                 job,
                 progress=progress,
                 cancel_requested=cancel,
             ),
-            loaded_models=lambda: [],
-            peaks=peaks,
+            completion="Pose candidates detected.",
         )
-        update_job(
-            api,
-            job_id,
-            {"status": "completed", "stage": "completed", "progress": 1,
-             "message": "Pose candidates detected.", "result": result},
-        )
-    except InterruptedError as exc:
-        update_job(
-            api,
-            job_id,
-            {"status": "canceled", "stage": "canceled", "progress": 1, "message": str(exc)},
-        )
-    except Exception as exc:
-        message, error = friendly_failure("Pose detection", exc)
-        update_job(
-            api,
-            job_id,
-            {"status": "failed", "stage": "failed", "progress": 1, "message": message, "error": error},
-        )
-    finally:
-        heartbeat(api, settings, "idle")
+
+    run_job_scaffold(
+        api,
+        settings,
+        job,
+        kind_label="Pose detection",
+        setup=setup,
+        # onnxruntime path: no torch CUDA context worth recycling on OOM.
+        oom_restart=False,
+    )
 
 
 def run_upscale_job(api: ApiClient, settings: WorkerSettings, job: dict) -> None:
@@ -1283,58 +1167,34 @@ def run_upscale_job(api: ApiClient, settings: WorkerSettings, job: dict) -> None
     advertises image_upscale only when the inference backend is installed
     (worker_capabilities). Writes one child asset with lineage to the source.
     """
-    job_id = job["id"]
-    peaks: dict[str, float] = {}
 
-    def progress(status: str, stage: str, value: float, message: str) -> None:
-        heartbeat(api, settings, "busy", job_id)
-        payload = {"status": status, "stage": stage, "progress": value, "message": message}
-        track_job_peaks(payload, peaks, settings, backend=adapter_backend(None, settings))
-        update_job(api, job_id, payload)
-
-    try:
+    def setup(progress):
         progress("preparing", "preparing", 0.06, "Preparing image upscale.")
         project_id = str(job.get("payload", {}).get("projectId") or "")
         project_path = find_project_path(settings.data_dir / "recent-projects.json", project_id)
-        result = run_blocking_job_step(
-            api,
-            settings,
-            job_id,
-            "busy",
-            lambda cancel: run_image_upscale(
+        return JobStep(
+            runner=lambda cancel: run_image_upscale(
                 settings,
                 job,
                 project_path=project_path,
                 progress=progress,
                 cancel_requested=cancel,
             ),
-            loaded_models=lambda: [],
-            peaks=peaks,
+            completion="Upscaled image saved.",
         )
-        update_job(
-            api,
-            job_id,
-            {"status": "completed", "stage": "completed", "progress": 1,
-             "message": "Upscaled image saved.", "result": result},
-        )
-    except InterruptedError as exc:
-        update_job(
-            api,
-            job_id,
-            {"status": "canceled", "stage": "canceled", "progress": 1, "message": str(exc)},
-        )
-    except Exception as exc:
-        needs_oom_restart = is_cuda_oom(exc)
-        message, error = friendly_failure("Image upscale", exc)
-        update_job(
-            api,
-            job_id,
-            {"status": "failed", "stage": "failed", "progress": 1, "message": message, "error": error},
-        )
-        if needs_oom_restart:
-            release_image_worker_memory()
-    finally:
-        heartbeat(api, settings, "idle")
+
+    run_job_scaffold(
+        api,
+        settings,
+        job,
+        kind_label="Image upscale",
+        setup=setup,
+        # On OOM, release the activation pool instead of restarting the child:
+        # the lazily-loaded upscale engine is the only resident and dropping the
+        # pool reclaims it without losing the worker's other cached state.
+        oom_restart=False,
+        on_oom=release_image_worker_memory,
+    )
 
 
 def run_detail_job(api: ApiClient, settings: WorkerSettings, job: dict) -> None:
@@ -1345,58 +1205,32 @@ def run_detail_job(api: ApiClient, settings: WorkerSettings, job: dict) -> None:
     inference backend is installed (worker_capabilities). Writes one child asset with
     lineage to the source. Mirrors run_upscale_job (sc-2431); composes after it.
     """
-    job_id = job["id"]
-    peaks: dict[str, float] = {}
 
-    def progress(status: str, stage: str, value: float, message: str) -> None:
-        heartbeat(api, settings, "busy", job_id)
-        payload = {"status": status, "stage": stage, "progress": value, "message": message}
-        track_job_peaks(payload, peaks, settings, backend=adapter_backend(None, settings))
-        update_job(api, job_id, payload)
-
-    try:
+    def setup(progress):
         progress("preparing", "preparing", 0.06, "Preparing detail enhancement.")
         project_id = str(job.get("payload", {}).get("projectId") or "")
         project_path = find_project_path(settings.data_dir / "recent-projects.json", project_id)
-        result = run_blocking_job_step(
-            api,
-            settings,
-            job_id,
-            "busy",
-            lambda cancel: run_image_detail(
+        return JobStep(
+            runner=lambda cancel: run_image_detail(
                 settings,
                 job,
                 project_path=project_path,
                 progress=progress,
                 cancel_requested=cancel,
             ),
-            loaded_models=lambda: [],
-            peaks=peaks,
+            completion="Detail-enhanced image saved.",
         )
-        update_job(
-            api,
-            job_id,
-            {"status": "completed", "stage": "completed", "progress": 1,
-             "message": "Detail-enhanced image saved.", "result": result},
-        )
-    except InterruptedError as exc:
-        update_job(
-            api,
-            job_id,
-            {"status": "canceled", "stage": "canceled", "progress": 1, "message": str(exc)},
-        )
-    except Exception as exc:
-        needs_oom_restart = is_cuda_oom(exc)
-        message, error = friendly_failure("Detail enhancement", exc)
-        update_job(
-            api,
-            job_id,
-            {"status": "failed", "stage": "failed", "progress": 1, "message": message, "error": error},
-        )
-        if needs_oom_restart:
-            release_image_worker_memory()
-    finally:
-        heartbeat(api, settings, "idle")
+
+    run_job_scaffold(
+        api,
+        settings,
+        job,
+        kind_label="Detail enhancement",
+        setup=setup,
+        # Same OOM policy as run_upscale_job: release the pool, keep the child.
+        oom_restart=False,
+        on_oom=release_image_worker_memory,
+    )
 
 
 def run_lora_train_job(api: ApiClient, settings: WorkerSettings, job: dict) -> None:
@@ -1461,25 +1295,13 @@ def _run_lora_train_dry_run(api: ApiClient, settings: WorkerSettings, job: dict,
 
 
 def _run_lora_train_execution(api: ApiClient, settings: WorkerSettings, job: dict, payload: dict) -> None:
-    job_id = job["id"]
     trainer_holder: dict[str, Any] = {"trainer": None}
-    needs_oom_restart = False
 
     def trainer_loaded_models() -> list[str]:
         trainer = trainer_holder["trainer"]
         return trainer.loaded_models() if trainer is not None else []
 
-    peaks: dict[str, float] = {}
-
-    def progress(status: str, stage: str, value: float, message: str, result: dict | None = None) -> None:
-        heartbeat_with_loaded_models(api, settings, "busy", job_id, trainer_loaded_models)
-        update_payload = {"status": status, "stage": stage, "progress": value, "message": message}
-        if result is not None:
-            update_payload["result"] = result
-        track_job_peaks(update_payload, peaks, settings, backend=adapter_backend(trainer_holder["trainer"], settings))
-        update_job(api, job_id, update_payload)
-
-    try:
+    def setup(progress):
         plan = payload.get("plan")
         if not isinstance(plan, dict):
             raise ValueError("Training job payload is missing a resolved plan.")
@@ -1490,118 +1312,51 @@ def _run_lora_train_execution(api: ApiClient, settings: WorkerSettings, job: dic
         # force-kills the worker (os._exit skips train()'s finally) — sc-1719.
         # Filesystem-only; no-op for kernels without a scratch dir.
         discard_scratch = getattr(trainer, "discard_temp_outputs", None)
-        result = run_blocking_job_step(
-            api,
-            settings,
-            job_id,
-            "busy",
-            lambda cancel: trainer.train(
+        return JobStep(
+            runner=lambda cancel: trainer.train(
                 settings=settings,
                 plan=plan,
                 progress=progress,
                 cancel_requested=cancel,
             ),
-            loaded_models=trainer_loaded_models,
-            on_force_terminate=(lambda: discard_scratch(job_id)) if callable(discard_scratch) else None,
-            peaks=peaks,
+            completion=lambda result: f"Trained LoRA saved as {result.get('fileName')}.",
+            on_force_terminate=(lambda: discard_scratch(job["id"])) if callable(discard_scratch) else None,
         )
-        update_job(
-            api,
-            job_id,
-            {
-                "status": "completed",
-                "stage": "completed",
-                "progress": 1,
-                "message": f"Trained LoRA saved as {result.get('fileName')}.",
-                "result": result,
-            },
-        )
-    except InterruptedError as exc:
-        update_job(
-            api,
-            job_id,
-            {
-                "status": "canceled",
-                "stage": "canceled",
-                "progress": 1,
-                "message": str(exc),
-            },
-        )
-    except Exception as exc:
-        needs_oom_restart = is_cuda_oom(exc)
-        message, error = friendly_failure("LoRA training", exc)
-        update_job(
-            api,
-            job_id,
-            {
-                "status": "failed",
-                "stage": "failed",
-                "progress": 1,
-                "message": message,
-                "error": error,
-            },
-        )
-    finally:
-        heartbeat(api, settings, "idle")
-        # A CUDA OOM can leave the allocator/context unable to reclaim VRAM in
-        # place; restart the child so the supervisor gives it a fresh context.
-        if needs_oom_restart:
-            restart_worker_after_oom(settings, job_id)
+
+    run_job_scaffold(
+        api,
+        settings,
+        job,
+        kind_label="LoRA training",
+        setup=setup,
+        loaded_models=trainer_loaded_models,
+        backend_source=lambda: trainer_holder["trainer"],
+    )
 
 
 def run_training_caption_worker_job(api: ApiClient, settings: WorkerSettings, job: dict) -> None:
-    job_id = job["id"]
-    needs_oom_restart = False
-    peaks: dict[str, float] = {}
-
-    def progress(status: str, stage: str, value: float, message: str) -> None:
-        heartbeat(api, settings, "busy", job_id)
-        payload = {"status": status, "stage": stage, "progress": value, "message": message}
-        track_job_peaks(payload, peaks, settings, backend=adapter_backend(None, settings))
-        update_job(api, job_id, payload)
-
-    try:
+    def setup(progress):
         progress("preparing", "preparing", 0.04, "Preparing training caption job.")
-        result = run_blocking_job_step(
-            api,
-            settings,
-            job_id,
-            "busy",
-            lambda cancel: run_training_caption_job(
+        return JobStep(
+            runner=lambda cancel: run_training_caption_job(
                 api=api,
                 settings=settings,
                 job=job,
                 progress=progress,
                 cancel_requested=cancel,
             ),
-            loaded_models=lambda: [],
-            peaks=peaks,
+            completion=lambda result: (
+                f"Created captions for {result.get('captionedItemCount', 0)} training item(s)."
+            ),
         )
-        update_job(
-            api,
-            job_id,
-            {
-                "status": "completed",
-                "stage": "completed",
-                "progress": 1,
-                "message": f"Created captions for {result.get('captionedItemCount', 0)} training item(s).",
-                "result": result,
-            },
-        )
-    except InterruptedError as exc:
-        update_job(api, job_id, {"status": "canceled", "stage": "canceled", "progress": 1, "message": str(exc)})
-    except Exception as exc:
-        needs_oom_restart = is_cuda_oom(exc)
-        message, error = friendly_failure("Training captioning", exc)
-        update_job(
-            api,
-            job_id,
-            {"status": "failed", "stage": "failed", "progress": 1, "message": message, "error": error},
-        )
-    finally:
-        heartbeat(api, settings, "idle")
-        if needs_oom_restart:
-            restart_worker_after_oom(settings, job_id)
+
+    run_job_scaffold(
+        api,
+        settings,
+        job,
+        kind_label="Training captioning",
+        setup=setup,
+    )
 
 
 def run_prompt_refine_job(api: ApiClient, settings: WorkerSettings, job: dict) -> None:
