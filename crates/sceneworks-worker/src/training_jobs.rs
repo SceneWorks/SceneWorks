@@ -221,6 +221,8 @@ fn training_progress(
         peak_gpu_memory_pct: None,
         peak_gpu_load_pct: None,
         backend: Some(backend.to_owned()),
+        // Stamped by update_job before posting (sc-4172).
+        worker_id: None,
         extra: BTreeMap::new(),
     }
 }

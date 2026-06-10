@@ -86,7 +86,22 @@ pub enum JobsStoreError {
     InvalidStatus(String),
     InvalidNumber(String),
     InvalidRequestedGpu(String),
-    RetryLimit { max_attempts: u32 },
+    RetryLimit {
+        max_attempts: u32,
+    },
+    /// A progress report tried to change a job that already reached a terminal
+    /// status. Terminal jobs are immutable; only an idempotent re-report of the
+    /// same terminal status succeeds (sc-4172).
+    TerminalJobImmutable {
+        job_id: String,
+        status: String,
+    },
+    /// A progress report came from a worker that no longer owns the job — the
+    /// job was swept/canceled (worker_id cleared) or reclaimed. The worker
+    /// should abandon the job (sc-4172).
+    NotJobOwner {
+        job_id: String,
+    },
 }
 
 impl std::fmt::Display for JobsStoreError {
@@ -103,6 +118,18 @@ impl std::fmt::Display for JobsStoreError {
                 write!(
                     formatter,
                     "Job retry limit reached after {max_attempts} attempts."
+                )
+            }
+            Self::TerminalJobImmutable { job_id, status } => {
+                write!(
+                    formatter,
+                    "Job {job_id} is already {status}; terminal jobs cannot be updated."
+                )
+            }
+            Self::NotJobOwner { job_id } => {
+                write!(
+                    formatter,
+                    "Progress rejected: the reporting worker no longer owns job {job_id}."
                 )
             }
         }
@@ -199,6 +226,12 @@ pub struct ProgressUpdate {
     /// progress updates can't accidentally clear it. Drives the
     /// WorkerProgressCard arch pill.
     pub backend: Option<String>,
+    /// Id of the worker reporting this progress. When set, the store rejects
+    /// the update unless the job's `worker_id` still matches — a zombie worker
+    /// whose job was swept to `interrupted` (worker_id cleared) or reclaimed by
+    /// another worker can no longer resurrect or corrupt it (sc-4172). `None`
+    /// keeps legacy trusted-caller behavior.
+    pub worker_id: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -955,6 +988,30 @@ impl JobsStore {
         let _guard = self.lock.lock();
         let mut connection = self.connect()?;
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        // Guard against zombie-worker writes (sc-4172): a worker that went
+        // silent long enough for the stale sweep to mark its job `interrupted`
+        // (or whose job the user canceled) must not resurrect it with a late
+        // progress report — that's exactly the failure mode the heartbeat
+        // machinery exists to handle.
+        let current = self.get_job_on_connection(&transaction, job_id)?;
+        if is_terminal_status(current.status.as_str()) {
+            // Idempotent re-report of the same terminal status (e.g. a retried
+            // "canceled" POST) succeeds without touching the row.
+            if current.status == update.status {
+                return Ok(current);
+            }
+            return Err(JobsStoreError::TerminalJobImmutable {
+                job_id: job_id.to_owned(),
+                status: current.status.as_str().to_owned(),
+            });
+        }
+        if let Some(reporter) = update.worker_id.as_deref() {
+            if current.worker_id.as_deref() != Some(reporter) {
+                return Err(JobsStoreError::NotJobOwner {
+                    job_id: job_id.to_owned(),
+                });
+            }
+        }
         let now = utc_now();
         let completed_at = is_terminal_status(update.status.as_str()).then_some(now.clone());
         let canceled_at = (update.status == JobStatus::Canceled).then_some(now.clone());
