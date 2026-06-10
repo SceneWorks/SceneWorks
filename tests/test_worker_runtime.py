@@ -1394,7 +1394,9 @@ def test_qwen_character_image_angle_set_applies_loras_once_then_loops_angles(tmp
     monkeypatch.setattr(adapter, "_load_pipeline", lambda *a, **k: object())
 
     apply_calls: list[list] = []
-    monkeypatch.setattr(adapter, "_apply_loras", lambda pipe, request: apply_calls.append(list(request.loras)))
+    monkeypatch.setattr(
+        adapter, "_apply_loras", lambda pipe, request, lora_key=None: apply_calls.append(list(request.loras))
+    )
 
     run_overrides: list = []
 
@@ -3532,6 +3534,56 @@ def test_sdxl_guidance_scale_uses_per_model_default_and_override():
     assert adapter._guidance_scale(SimpleNamespace(advanced={"guidanceScale": 5.0}), sdxl) == 5.0
     # Unparseable override falls back to the per-model default.
     assert adapter._guidance_scale(SimpleNamespace(advanced={"guidanceScale": "x"}), sdxl) == 7.0
+
+
+def test_zimage_num_inference_steps_matches_manifest_default():
+    # sc-4188 drift fix: ZImage defaulted to model_target["steps"] + 1 (9) with
+    # no rationale while every other adapter — and the MLX engine path — uses
+    # the manifest value unmodified (8).
+    from scene_worker.image_adapters import ZImageDiffusersAdapter
+
+    adapter = ZImageDiffusersAdapter()
+    target = MODEL_TARGETS["z_image_turbo"]
+    assert adapter._num_inference_steps(SimpleNamespace(advanced={}), target) == target["steps"] == 8
+    assert adapter._num_inference_steps(SimpleNamespace(advanced={"steps": 12}), target) == 12
+
+
+def test_generate_images_always_wires_upscaler_telemetry(monkeypatch):
+    # sc-4188 drift fix: five adapters dropped settings=/job_id= from the
+    # incremental writer call, silently disabling upscaler telemetry/job-id
+    # wiring. The shared _generate_images passes them unconditionally.
+    from scene_worker.image_adapters import FluxDiffusersAdapter, ImageAssetWriter
+
+    captured: dict = {}
+
+    def fake_writer(self, **kwargs):
+        captured.update(kwargs)
+        return {"images": []}
+
+    monkeypatch.setattr(ImageAssetWriter, "write_incremental_outputs", fake_writer)
+    fake_torch = SimpleNamespace(backends=SimpleNamespace(mps=SimpleNamespace(is_available=lambda: False)),
+                                 cuda=SimpleNamespace(is_available=lambda: False))
+    monkeypatch.setattr(
+        "scene_worker.image_adapters.importlib.import_module",
+        lambda name: fake_torch if name == "torch" else importlib.import_module(name),
+    )
+    adapter = FluxDiffusersAdapter()
+    settings = SimpleNamespace(gpu_id="cpu")
+    request = SimpleNamespace(model="flux_schnell", seed=1, seeds=[], prompt="p", advanced={})
+    adapter._generate_images(
+        settings=settings,
+        job={"id": "job-telemetry"},
+        request=request,
+        project_path=Path("."),
+        progress=lambda *a, **k: None,
+        cancel_requested=lambda: False,
+        label="FLUX.1",
+        image_count=1,
+        run_one=lambda index, seed: FakeImage(),
+        raw_settings={"realModelInference": True},
+    )
+    assert captured["settings"] is settings
+    assert captured["job_id"] == "job-telemetry"
 
 
 def test_sdxl_num_inference_steps_default_and_override():
