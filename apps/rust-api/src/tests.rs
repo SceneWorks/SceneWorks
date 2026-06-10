@@ -6198,7 +6198,22 @@ fn model_download_size_helpers_match_contract_shapes() {
     let mut cache = super::ModelSizeCache::default();
     let key = ("owner/model".to_owned(), vec!["*.safetensors".to_owned()]);
     cache.insert(key.clone(), 300);
-    assert_eq!(cache.get(&key), Some(300));
+    assert_eq!(cache.get(&key), Some(Some(300)));
+    // sc-4169: failed estimates are negative-cached — `Some(None)` tells the
+    // caller to skip the network — and expire after the TTL (a cache miss).
+    let failed = ("owner/offline".to_owned(), vec!["*.safetensors".to_owned()]);
+    cache.insert_failure(failed.clone());
+    assert_eq!(cache.get(&failed), Some(None));
+    cache.insert_failure_expiring_at(failed.clone(), std::time::Instant::now());
+    assert_eq!(
+        cache.get(&failed),
+        None,
+        "expired negative entry must be a miss"
+    );
+    // A later successful estimate replaces a cached failure.
+    cache.insert_failure(failed.clone());
+    cache.insert(failed.clone(), 700);
+    assert_eq!(cache.get(&failed), Some(Some(700)));
     assert!(super::allow_pattern_matches(
         "model-7.safetensors",
         &["model-[0-9].safetensors".to_owned()]
