@@ -399,6 +399,15 @@ pub(crate) fn mlx_gpu() -> DiscoveredGpu {
             // Tile-ControlNet detail refine (epic 3041, sc-3060) — the SDXL-family
             // `image_detail` job runs in-process on the engine here too.
             WorkerCapability::ImageDetail,
+            // SenseNova-U1 understanding + Document Studio (epic 3180, sc-3905): visual
+            // question answering (`image_vqa`) and interleaved text-image generation
+            // (`image_interleave`) run in-process via the concrete `T2iModel` (the modes the
+            // `Generator` contract can't express). The API routes these here only for the
+            // SenseNova-U1 ids (`jobs_store::understanding_job_is_mlx_eligible`); off macOS the
+            // capabilities are never advertised, so the Python torch worker serves them on
+            // Windows/Linux.
+            WorkerCapability::ImageVqa,
+            WorkerCapability::ImageInterleave,
             WorkerCapability::VideoGenerate,
             // Clip-conditioning advanced video modes (epic 3040, sc-3522): extend_clip /
             // video_bridge run the LTX IC-LoRA keyframe-append path in-process. The API gates

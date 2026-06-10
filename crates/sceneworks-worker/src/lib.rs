@@ -43,6 +43,12 @@ mod media_jobs;
 use media_jobs::*;
 mod image_jobs;
 use image_jobs::*;
+// SenseNova-U1 understanding + interleave jobs (epic 3180, sc-3905 — Path B). VQA + Document
+// Studio (interleave) consume the concrete `T2iModel` directly (the `Generator` contract emits
+// Images/Video only). The handlers are compiled cross-platform (with non-macOS error stubs); the
+// real in-process MLX work is macOS-gated inside the module.
+mod sensenova_jobs;
+use sensenova_jobs::*;
 mod video_jobs;
 use video_jobs::*;
 // Replace-person mask pipeline (epic 3040, sc-3521): cross-platform mask rasterization /
@@ -566,6 +572,18 @@ async fn run_utility_job(
         JobType::ImageDetail => run_image_detail_job(api, settings, &job)
             .await
             .map_err(|error| ("Image detail enhancement failed.", error)),
+        // SenseNova-U1 visual question answering + Document Studio interleave (epic 3180,
+        // sc-3905). These bypass the `Generator` registry and call the concrete `T2iModel`
+        // directly (text / text+images output the `GenerationOutput` contract can't express).
+        // The API routes them here only on Mac (`understanding_job_is_mlx_eligible`); off macOS
+        // the `image_vqa`/`image_interleave` capabilities are never advertised, so these arms
+        // are unreachable there (the Python torch worker serves them on Windows/Linux).
+        JobType::ImageVqa => run_vqa_job(api, settings, &job)
+            .await
+            .map_err(|error| ("Visual question answering failed.", error)),
+        JobType::ImageInterleave => run_interleave_job(api, settings, &job)
+            .await
+            .map_err(|error| ("Interleaved generation failed.", error)),
         // Native MLX video generation, served in-process by the linked mlx-gen engine
         // on the macOS Apple-Silicon GPU worker (epic 3018). sc-3033 ships the runtime
         // + procedural stub; the real Wan (sc-3034) / LTX+audio (sc-3035) models link
