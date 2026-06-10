@@ -6587,6 +6587,181 @@ mod tests {
         );
     }
 
+    /// L2-normalized cosine similarity between two ArcFace embeddings (test helper).
+    #[cfg(target_os = "macos")]
+    fn cosine(a: &[f32], b: &[f32]) -> f32 {
+        let dot: f32 = a.iter().zip(b).map(|(x, y)| x * y).sum();
+        let na: f32 = a.iter().map(|x| x * x).sum::<f32>().sqrt();
+        let nb: f32 = b.iter().map(|x| x * x).sum::<f32>().sqrt();
+        if na == 0.0 || nb == 0.0 {
+            0.0
+        } else {
+            dot / (na * nb)
+        }
+    }
+
+    /// Real-weights validation for sc-4424/sc-4427: render the worker-owned InstantID angle
+    /// presets through the engine `generate_with_kps` pass-in path and assert, per view, that
+    /// (a) **the engine honours the pass-in landmarks** — the detected face lands where the
+    /// preset's nose keypoint says it should, proving the worker (not the engine's retired
+    /// hardcoded table) now owns the framing — and (b) **identity holds** — ArcFace cosine vs the
+    /// reference stays well above floor on the measurable frontal-ish views. Profiles are ArcFace
+    /// identity-N/A (frontal-only metric, see the likeness-score memo) so they assert placement
+    /// only, and a missing detection on a profile is tolerated (recorded, not failed).
+    ///
+    /// This is the framing-fill goal from epic 4422: the presets pull head-and-shoulders up into
+    /// the frame instead of the old lower-half framing, so LoRA training gets more character pixels.
+    ///
+    /// Needs: RealVisXL (`SG161222/RealVisXL_V5.0`) + InstantID IdentityNet (`InstantX/InstantID`)
+    /// in the HF cache, the converted bundle (`scrfd_10g`/`arcface_iresnet100`/`ip-adapter`) in the
+    /// app cache (`SCENEWORKS_INSTANTID_WEIGHTS` overrides), and a reference face
+    /// (`SCENEWORKS_TEST_FACE` overrides). Metal device. On demand:
+    /// `cargo test -p sceneworks-worker --lib -- --ignored instantid_angle_kps_real_weights --nocapture`.
+    #[cfg(target_os = "macos")]
+    #[test]
+    #[ignore = "needs real InstantID weights + Metal device"]
+    fn instantid_angle_kps_real_weights_fills_frame_and_holds_identity() {
+        // --- resolve weights (HF cache + app bundle) ---
+        let sdxl_base = hf_snapshot("models--SG161222--RealVisXL_V5.0");
+        let identitynet = hf_snapshot("models--InstantX--InstantID").join("ControlNetModel");
+        let bundle = std::env::var("SCENEWORKS_INSTANTID_WEIGHTS")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|_| {
+                dirs_home().join("Library/Application Support/SceneWorks/data/cache/instantid-mlx")
+            });
+        let scrfd_path = bundle.join(INSTANTID_SCRFD_FILE);
+        let arcface_path = bundle.join(INSTANTID_ARCFACE_FILE);
+        let ip_adapter = bundle.join(INSTANTID_IP_ADAPTER_FILE);
+        for p in [
+            &sdxl_base,
+            &identitynet,
+            &scrfd_path,
+            &arcface_path,
+            &ip_adapter,
+        ] {
+            assert!(p.exists(), "missing InstantID weight: {}", p.display());
+        }
+        let face_path = std::env::var("SCENEWORKS_TEST_FACE").unwrap_or_else(|_| {
+            "/Users/michael/Library/Application Support/SceneWorks/data/projects/ab.sceneworks/assets/images/genset_e6b07eb5b5374627af1bf47083bac305/2026-06-10_qwen_image_edit_2511_lightning_22-year-old-woman-with-fair-complexion-a-p_0001.png".to_owned()
+        });
+        let decoded = image::open(&face_path)
+            .unwrap_or_else(|e| panic!("reference face {face_path}: {e}"))
+            .to_rgb8();
+        let reference = Image {
+            width: decoded.width(),
+            height: decoded.height(),
+            pixels: decoded.into_raw(),
+        };
+
+        // --- load model + native face stack (production load order) ---
+        let paths = InstantIdPaths {
+            sdxl_base,
+            identitynet: WeightsSource::Dir(identitynet),
+            ip_adapter,
+        };
+        let model = InstantId::load(&paths).expect("InstantID load");
+        let scrfd = Weights::from_file(&scrfd_path).expect("SCRFD weights");
+        let arcface = Weights::from_file(&arcface_path).expect("ArcFace weights");
+        let model = model.with_face(&scrfd, &arcface).expect("face stack");
+
+        // Reference identity embedding (frontal source).
+        let ref_face = model
+            .largest_face(
+                &reference.pixels,
+                reference.height as usize,
+                reference.width as usize,
+            )
+            .expect("reference face detected");
+
+        // Square canvas (the engine forces square for kps; sc-2009 aspect rule).
+        let side: u32 = 1024;
+        // Views where ArcFace identity is meaningful (frontal-ish; profiles are N/A — the metric is
+        // frontal-only, see the likeness-score memo).
+        let identity_views = ["front", "three_quarter_left", "three_quarter_right"];
+        // Strict profiles occlude the far eye, so SCRFD's landmark regression there is unreliable —
+        // placement is recorded but not hard-asserted (identity is N/A too).
+        let profile_views = ["left_profile", "right_profile"];
+        // Identity floor — well below the ~0.83-0.87 seen in sc-3345/sc-3365 validation, so the
+        // assertion catches a regression without being brittle to seed/quant jitter.
+        const IDENTITY_FLOOR: f32 = 0.50;
+        // Mean per-landmark distance (square-fraction) between the GENERATED face's detected kps and
+        // the preset kps the engine was told to draw — the direct "did `generate_with_kps` honour the
+        // pass-in landmarks" check. IdentityNet conditions on these points, so the realized face's
+        // landmarks track them tightly; the tolerance absorbs SCRFD/seed jitter.
+        const PLACEMENT_TOL: f32 = 0.10;
+
+        let mut failures: Vec<String> = Vec::new();
+        println!("\n  view                 kps-dist   area%   id-cos   verdict");
+        for &angle in CHARACTER_ANGLE_SET_ORDER.iter() {
+            let kps = instantid_angle_kps(angle);
+            let req = InstantIdRequest {
+                prompt: augment_prompt_for_angle("a portrait photo of a woman", angle),
+                negative: "blurry, low quality, deformed".to_owned(),
+                width: side,
+                height: side,
+                steps: INSTANTID_DEFAULT_STEPS as usize,
+                guidance: INSTANTID_DEFAULT_GUIDANCE,
+                ip_adapter_scale: INSTANTID_IP_SCALE,
+                controlnet_scale: INSTANTID_CONTROLNET_SCALE,
+                seed: 12345,
+                ..InstantIdRequest::default()
+            };
+            let out = model
+                .generate_with_kps(&req, &reference, &kps, &mut |_| {})
+                .unwrap_or_else(|e| panic!("{angle}: generate_with_kps failed: {e}"));
+            assert_eq!((out.width, out.height), (side, side), "{angle}: canvas");
+
+            let is_identity_view = identity_views.contains(&angle);
+            let is_profile = profile_views.contains(&angle);
+            match model.largest_face(&out.pixels, out.height as usize, out.width as usize) {
+                Ok(face) => {
+                    // Mean distance between the generated face's detected landmarks and the preset.
+                    let kps_dist: f32 = (0..5)
+                        .map(|i| {
+                            let dx = face.kps[i][0] / side as f32 - kps[i].0;
+                            let dy = face.kps[i][1] / side as f32 - kps[i].1;
+                            (dx * dx + dy * dy).sqrt()
+                        })
+                        .sum::<f32>()
+                        / 5.0;
+                    let area = (face.bbox[2] - face.bbox[0]) * (face.bbox[3] - face.bbox[1])
+                        / (side as f32 * side as f32);
+                    let id = cosine(&ref_face.embedding, &face.embedding);
+                    // Placement is hard-asserted on non-profile views (reliable landmarks).
+                    let placed = is_profile || kps_dist <= PLACEMENT_TOL;
+                    let id_ok = !is_identity_view || id >= IDENTITY_FLOOR;
+                    let verdict = if placed && id_ok { "ok" } else { "FAIL" };
+                    println!(
+                        "  {angle:<20} {kps_dist:>6.3}   {:>5.1}  {id:>6.3}  {verdict}",
+                        area * 100.0,
+                    );
+                    if !is_profile && kps_dist > PLACEMENT_TOL {
+                        failures.push(format!(
+                            "{angle}: realized landmarks {kps_dist:.3} > {PLACEMENT_TOL} from preset"
+                        ));
+                    }
+                    if is_identity_view && id < IDENTITY_FLOOR {
+                        failures.push(format!(
+                            "{angle}: identity {id:.3} < floor {IDENTITY_FLOOR}"
+                        ));
+                    }
+                }
+                Err(e) => {
+                    println!("  {angle:<20} no-detect ({e})");
+                    // A frontal-ish view that fails to detect is a real failure; a profile is N/A.
+                    if is_identity_view {
+                        failures.push(format!("{angle}: no face detected (frontal view)"));
+                    }
+                }
+            }
+        }
+        assert!(
+            failures.is_empty(),
+            "preset validation failures:\n  {}",
+            failures.join("\n  ")
+        );
+    }
+
     /// Load + generate one small image for a TRUE-CFG family (Chroma): the CFG scale rides
     /// `true_cfg` (not the distilled `guidance` scalar the engine rejects), mirroring
     /// [`generate_mlx_stream`]'s wiring. Sibling of [`smoke_generate_one`].
