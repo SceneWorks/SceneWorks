@@ -467,7 +467,8 @@ export function App() {
   // `scopeAssets` is the exact list the calling gallery rendered (folded or not);
   // we snapshot its ids so navigation tracks the live asset state but never
   // wanders outside that collection. Passing no scope clears it (global nav).
-  const openPreview = (asset, scopeAssets) => {
+  // sc-4194: useCallback so the context-exposed setPreviewAsset identity is stable.
+  const openPreview = useCallback((asset, scopeAssets) => {
     if (!asset) {
       setPreviewScopeIds(null);
       setPreviewAsset(null);
@@ -479,7 +480,7 @@ export function App() {
         : null,
     );
     setPreviewAsset(asset);
-  };
+  }, []);
   const closePreview = () => {
     setPreviewScopeIds(null);
     setPreviewAsset(null);
@@ -529,6 +530,39 @@ export function App() {
     if (guard && !guard()) return; // guard returned false → user cancelled the leave
     setActiveView(viewId);
   }, []);
+
+  // sc-4194: defined here (above the data hooks) because useTimelines takes it as a
+  // dependency; a stable identity keeps the timeline hook's queue action stable too.
+  const createVideoJob = useCallback(
+    async (payload, options = {}) => {
+      const { navigateToQueue = false } = options;
+      if (!activeProject) {
+        setError("Create or open a project first.");
+        return null;
+      }
+      try {
+        const job = await apiFetch("/api/v1/video/jobs", token, {
+          method: "POST",
+          body: JSON.stringify({
+            ...payload,
+            projectId: activeProject.id,
+            projectName: activeProject.name,
+            requestedGpu,
+          }),
+        });
+        if (navigateToQueue) {
+          setActiveView("Queue");
+        }
+        setJobs((items) => [job, ...items.filter((item) => item.id !== job.id)].sort(sortNewest));
+        setError("");
+        return job;
+      } catch (err) {
+        setError(err.message);
+        return null;
+      }
+    },
+    [token, activeProject, requestedGpu],
+  );
 
   const {
     characters,
@@ -1145,135 +1179,150 @@ export function App() {
     }
   }
 
-  async function createPlaceholderJob(event) {
-    event.preventDefault();
-    try {
-      await apiFetch("/api/v1/jobs", token, {
-        method: "POST",
-        body: JSON.stringify({
-          type: "placeholder",
-          projectId: activeProject?.id ?? null,
-          projectName: activeProject?.name ?? null,
-          requestedGpu,
-          payload: {
-            prompt: jobPrompt,
-            createdFrom: activeView,
-          },
-        }),
-      });
-      setActiveView("Queue");
-      setError("");
-    } catch (err) {
-      setError(err.message);
-    }
-  }
+  const createPlaceholderJob = useCallback(
+    async (event) => {
+      event.preventDefault();
+      try {
+        await apiFetch("/api/v1/jobs", token, {
+          method: "POST",
+          body: JSON.stringify({
+            type: "placeholder",
+            projectId: activeProject?.id ?? null,
+            projectName: activeProject?.name ?? null,
+            requestedGpu,
+            payload: {
+              prompt: jobPrompt,
+              createdFrom: activeView,
+            },
+          }),
+        });
+        setActiveView("Queue");
+        setError("");
+      } catch (err) {
+        setError(err.message);
+      }
+    },
+    [token, activeProject, requestedGpu, jobPrompt, activeView],
+  );
 
-  async function createImageJob(payload) {
-    if (!activeProject) {
-      setError("Create or open a project first.");
-      return null;
-    }
-    try {
-      const job = await apiFetch("/api/v1/image/jobs", token, {
-        method: "POST",
-        body: JSON.stringify({
-          ...payload,
-          projectId: activeProject.id,
-          projectName: activeProject.name,
-          requestedGpu,
-        }),
-      });
-      setJobs((items) => [job, ...items.filter((item) => item.id !== job.id)].sort(sortNewest));
-      setError("");
-      return job;
-    } catch (err) {
-      setError(err.message);
-      return null;
-    }
-  }
+  const createImageJob = useCallback(
+    async (payload) => {
+      if (!activeProject) {
+        setError("Create or open a project first.");
+        return null;
+      }
+      try {
+        const job = await apiFetch("/api/v1/image/jobs", token, {
+          method: "POST",
+          body: JSON.stringify({
+            ...payload,
+            projectId: activeProject.id,
+            projectName: activeProject.name,
+            requestedGpu,
+          }),
+        });
+        setJobs((items) => [job, ...items.filter((item) => item.id !== job.id)].sort(sortNewest));
+        setError("");
+        return job;
+      } catch (err) {
+        setError(err.message);
+        return null;
+      }
+    },
+    [token, activeProject, requestedGpu],
+  );
 
   // Refine a prompt via the prompt_refine worker job: POST creates the job, then
   // poll until it reaches a terminal state and return the rewritten prompt. Project-
   // independent (no activeProject gate); throws on failure so the studio can surface
   // the message inline without clobbering the original prompt.
-  async function refinePrompt({ prompt, modelId, workflow, guide }) {
-    const created = await apiFetch("/api/v1/prompts/refine", token, {
-      method: "POST",
-      body: JSON.stringify({ prompt, modelId, workflow, guide }),
-    });
-    const jobId = created?.id;
-    if (!jobId) {
-      throw new Error("Could not start prompt refinement.");
-    }
-    const deadline = Date.now() + 120000;
-    while (Date.now() < deadline) {
-      await new Promise((resolve) => setTimeout(resolve, 1000));
-      const job = await apiFetch(`/api/v1/jobs/${jobId}`, token);
-      if (job.status === "completed") {
-        const refined = job.result?.refinedPrompt;
-        if (!refined) {
-          throw new Error("Refinement returned an empty prompt.");
+  const refinePrompt = useCallback(
+    async ({ prompt, modelId, workflow, guide }) => {
+      const created = await apiFetch("/api/v1/prompts/refine", token, {
+        method: "POST",
+        body: JSON.stringify({ prompt, modelId, workflow, guide }),
+      });
+      const jobId = created?.id;
+      if (!jobId) {
+        throw new Error("Could not start prompt refinement.");
+      }
+      const deadline = Date.now() + 120000;
+      while (Date.now() < deadline) {
+        await new Promise((resolve) => setTimeout(resolve, 1000));
+        const job = await apiFetch(`/api/v1/jobs/${jobId}`, token);
+        if (job.status === "completed") {
+          const refined = job.result?.refinedPrompt;
+          if (!refined) {
+            throw new Error("Refinement returned an empty prompt.");
+          }
+          return refined;
         }
-        return refined;
+        if (job.status === "failed" || job.status === "canceled" || job.status === "interrupted") {
+          throw new Error(job.message || job.error || "Prompt refinement failed.");
+        }
       }
-      if (job.status === "failed" || job.status === "canceled" || job.status === "interrupted") {
-        throw new Error(job.message || job.error || "Prompt refinement failed.");
+      throw new Error("Prompt refinement timed out. Is the refinement runtime running?");
+    },
+    [token],
+  );
+
+  const createVqaJob = useCallback(
+    async (asset, question, maxNewTokens) => {
+      if (!activeProject) {
+        setError("Create or open a project first.");
+        return null;
       }
-    }
-    throw new Error("Prompt refinement timed out. Is the refinement runtime running?");
-  }
+      try {
+        const job = await apiFetch("/api/v1/image/vqa/jobs", token, {
+          method: "POST",
+          body: JSON.stringify({
+            projectId: activeProject.id,
+            projectName: activeProject.name,
+            sourceAssetId: asset.id,
+            question,
+            maxNewTokens,
+            requestedGpu,
+          }),
+        });
+        setJobs((items) => [job, ...items.filter((item) => item.id !== job.id)].sort(sortNewest));
+        setError("");
+        return job;
+      } catch (err) {
+        setError(err.message);
+        return null;
+      }
+    },
+    [token, activeProject, requestedGpu],
+  );
 
-  async function createVqaJob(asset, question, maxNewTokens) {
-    if (!activeProject) {
-      setError("Create or open a project first.");
-      return null;
-    }
-    try {
-      const job = await apiFetch("/api/v1/image/vqa/jobs", token, {
-        method: "POST",
-        body: JSON.stringify({
-          projectId: activeProject.id,
-          projectName: activeProject.name,
-          sourceAssetId: asset.id,
-          question,
-          maxNewTokens,
-          requestedGpu,
-        }),
-      });
-      setJobs((items) => [job, ...items.filter((item) => item.id !== job.id)].sort(sortNewest));
-      setError("");
-      return job;
-    } catch (err) {
-      setError(err.message);
-      return null;
-    }
-  }
+  const createInterleaveJob = useCallback(
+    async (payload) => {
+      if (!activeProject) {
+        setError("Create or open a project first.");
+        return null;
+      }
+      try {
+        const job = await apiFetch("/api/v1/image/interleave/jobs", token, {
+          method: "POST",
+          body: JSON.stringify({
+            ...payload,
+            projectId: activeProject.id,
+            projectName: activeProject.name,
+            requestedGpu,
+          }),
+        });
+        setJobs((items) => [job, ...items.filter((item) => item.id !== job.id)].sort(sortNewest));
+        setError("");
+        return job;
+      } catch (err) {
+        setError(err.message);
+        return null;
+      }
+    },
+    [token, activeProject, requestedGpu],
+  );
 
-  async function createInterleaveJob(payload) {
-    if (!activeProject) {
-      setError("Create or open a project first.");
-      return null;
-    }
-    try {
-      const job = await apiFetch("/api/v1/image/interleave/jobs", token, {
-        method: "POST",
-        body: JSON.stringify({
-          ...payload,
-          projectId: activeProject.id,
-          projectName: activeProject.name,
-          requestedGpu,
-        }),
-      });
-      setJobs((items) => [job, ...items.filter((item) => item.id !== job.id)].sort(sortNewest));
-      setError("");
-      return job;
-    } catch (err) {
-      setError(err.message);
-      return null;
-    }
-  }
-
-  function rememberLocalGenerationJob(kind, job) {
+  const rememberLocalGenerationJob = useCallback((kind, job) => {
     if (!job?.id) {
       return;
     }
@@ -1283,7 +1332,7 @@ export function App() {
       // runs stack in the studio instead of the latest run evicting the previous one.
       [kind]: [job.id, ...current[kind].filter((id) => id !== job.id)].slice(0, localJobStackLimit),
     }));
-  }
+  }, []);
 
   function hasVisibleLocalFailure(job) {
     const active = activeViewRef.current;
@@ -1300,35 +1349,7 @@ export function App() {
     return active === "Models" && job.type === "model_download";
   }
 
-  async function createVideoJob(payload, options = {}) {
-    const { navigateToQueue = false } = options;
-    if (!activeProject) {
-      setError("Create or open a project first.");
-      return null;
-    }
-    try {
-      const job = await apiFetch("/api/v1/video/jobs", token, {
-        method: "POST",
-        body: JSON.stringify({
-          ...payload,
-          projectId: activeProject.id,
-          projectName: activeProject.name,
-          requestedGpu,
-        }),
-      });
-      if (navigateToQueue) {
-        setActiveView("Queue");
-      }
-      setJobs((items) => [job, ...items.filter((item) => item.id !== job.id)].sort(sortNewest));
-      setError("");
-      return job;
-    } catch (err) {
-      setError(err.message);
-      return null;
-    }
-  }
-
-  function sendAssetToImage(asset, mode = null) {
+  const sendAssetToImage = useCallback((asset, mode = null) => {
     if (!asset) {
       return;
     }
@@ -1337,7 +1358,7 @@ export function App() {
       setStudioLaunch({ id: crypto.randomUUID(), view: "Image", assetId: asset.id, mode });
     }
     setActiveView("Image");
-  }
+  }, []);
 
   // "Edit" from the fullscreen preview: open Image Studio in edit mode with this
   // image as the source, preselecting the family-matched edit model when possible.
@@ -1377,7 +1398,7 @@ export function App() {
     setActiveView("Image");
   }
 
-  function sendAssetToVideo(asset, mode = null) {
+  const sendAssetToVideo = useCallback((asset, mode = null) => {
     if (!asset) {
       return;
     }
@@ -1386,9 +1407,9 @@ export function App() {
       setStudioLaunch({ id: crypto.randomUUID(), view: "Video", assetId: asset.id, mode });
     }
     setActiveView("Video");
-  }
+  }, []);
 
-  function sendCharacterToImage(character, lookId = null, referenceAssetId = null) {
+  const sendCharacterToImage = useCallback((character, lookId = null, referenceAssetId = null) => {
     if (!character) {
       return;
     }
@@ -1401,124 +1422,142 @@ export function App() {
       mode: "character_image",
     });
     setActiveView("Image");
-  }
+  }, []);
 
-  function sendCharacterToVideo(character, lookId = null) {
+  const sendCharacterToVideo = useCallback((character, lookId = null) => {
     if (!character) {
       return;
     }
     setStudioLaunch({ id: crypto.randomUUID(), view: "Video", characterId: character.id, lookId, mode: "text_to_video" });
     setActiveView("Video");
-  }
+  }, []);
 
   // sc-2022: open a specific dataset in the Dataset editor (Character Studio's
   // "Open" action on an associated dataset). The editor consumes studioLaunch.
-  function openDatasetInLibrary(datasetId) {
+  const openDatasetInLibrary = useCallback((datasetId) => {
     if (!datasetId) {
       return;
     }
     setStudioLaunch({ id: crypto.randomUUID(), view: "LibraryDataSets", datasetId });
     setActiveView("LibraryDataSets");
-  }
+  }, []);
 
-  async function updateAssetStatus(asset, changes) {
-    try {
-      const updated = await apiFetch(`/api/v1/projects/${asset.projectId}/assets/${asset.id}/status`, token, {
-        method: "PATCH",
-        body: JSON.stringify(changes),
-      });
-      setAssets((items) => items.map((item) => (item.id === updated.id ? updated : item)));
-      setError("");
-    } catch (err) {
-      setError(err.message);
-    }
-  }
-
-  async function updateAssetTags(asset, tags) {
-    try {
-      const updated = await apiFetch(`/api/v1/projects/${asset.projectId}/assets/${asset.id}/tags`, token, {
-        method: "PATCH",
-        body: JSON.stringify({ tags }),
-      });
-      setAssets((items) => items.map((item) => (item.id === updated.id ? updated : item)));
-      setError("");
-    } catch (err) {
-      setError(err.message);
-    }
-  }
-
-  async function deleteAsset(asset) {
-    try {
-      await apiFetch(`/api/v1/projects/${asset.projectId}/assets/${asset.id}`, token, { method: "DELETE" });
-      setAssets((items) =>
-        items.map((item) =>
-          item.id === asset.id ? { ...item, status: { ...item.status, trashed: true } } : item,
-        ),
-      );
-      setError("");
-    } catch (err) {
-      setError(err.message);
-    }
-  }
-
-  async function purgeAsset(asset) {
-    try {
-      await apiFetch(`/api/v1/projects/${asset.projectId}/assets/${asset.id}/purge`, token, { method: "DELETE" });
-      setAssets((items) => items.filter((item) => item.id !== asset.id));
-      setSelectedAssetId((current) => (current === asset.id ? null : current));
-      setError("");
-    } catch (err) {
-      setError(err.message);
-    }
-  }
-
-  async function importAsset(file, options = {}) {
-    if (!activeProject || !file) {
-      const error = new Error("Create or open a project first.");
-      if (options.throwOnError) {
-        throw error;
+  const updateAssetStatus = useCallback(
+    async (asset, changes) => {
+      try {
+        const updated = await apiFetch(`/api/v1/projects/${asset.projectId}/assets/${asset.id}/status`, token, {
+          method: "PATCH",
+          body: JSON.stringify(changes),
+        });
+        setAssets((items) => items.map((item) => (item.id === updated.id ? updated : item)));
+        setError("");
+      } catch (err) {
+        setError(err.message);
       }
-      setError(error.message);
-      return;
-    }
-    const body = new FormData();
-    body.append("file", file);
-    // Optional lineage for derived imports (Image Editor Save, sc-2434): link the
-    // new asset to the source it was opened from + record the edit-chain provenance.
-    if (options.sourceAssetId) body.append("sourceAssetId", options.sourceAssetId);
-    if (options.provenance) body.append("provenance", JSON.stringify(options.provenance));
-    try {
-      const imported = await apiFetch(`/api/v1/projects/${activeProject.id}/assets`, token, {
-        method: "POST",
-        body,
-      });
-      setAssets((items) => [imported, ...items.filter((item) => item.id !== imported.id)]);
-      setSelectedAssetId(imported.id);
-      setError("");
-      return imported;
-    } catch (err) {
-      if (options.throwOnError) {
-        throw err;
-      }
-      setError(err.message);
-      return null;
-    }
-  }
+    },
+    [token],
+  );
 
-  async function jobAction(job, action, options = {}) {
-    try {
-      const path = action === "duplicate" ? `/api/v1/jobs/${job.id}/duplicate` : `/api/v1/jobs/${job.id}/${action}`;
-      const body =
-        action === "duplicate"
-          ? { payloadChanges: { duplicatedAt: new Date().toISOString() } }
-          : (options.body ?? {});
-      const updatedJob = await apiFetch(path, token, { method: "POST", body: JSON.stringify(body) });
-      setJobs((items) => [updatedJob, ...items.filter((item) => item.id !== updatedJob.id)].sort(sortNewest));
-      setError("");
-    } catch (err) {
-      setError(err.message);
-    }
-  }
+  const updateAssetTags = useCallback(
+    async (asset, tags) => {
+      try {
+        const updated = await apiFetch(`/api/v1/projects/${asset.projectId}/assets/${asset.id}/tags`, token, {
+          method: "PATCH",
+          body: JSON.stringify({ tags }),
+        });
+        setAssets((items) => items.map((item) => (item.id === updated.id ? updated : item)));
+        setError("");
+      } catch (err) {
+        setError(err.message);
+      }
+    },
+    [token],
+  );
+
+  const deleteAsset = useCallback(
+    async (asset) => {
+      try {
+        await apiFetch(`/api/v1/projects/${asset.projectId}/assets/${asset.id}`, token, { method: "DELETE" });
+        setAssets((items) =>
+          items.map((item) =>
+            item.id === asset.id ? { ...item, status: { ...item.status, trashed: true } } : item,
+          ),
+        );
+        setError("");
+      } catch (err) {
+        setError(err.message);
+      }
+    },
+    [token],
+  );
+
+  const purgeAsset = useCallback(
+    async (asset) => {
+      try {
+        await apiFetch(`/api/v1/projects/${asset.projectId}/assets/${asset.id}/purge`, token, { method: "DELETE" });
+        setAssets((items) => items.filter((item) => item.id !== asset.id));
+        setSelectedAssetId((current) => (current === asset.id ? null : current));
+        setError("");
+      } catch (err) {
+        setError(err.message);
+      }
+    },
+    [token],
+  );
+
+  const importAsset = useCallback(
+    async (file, options = {}) => {
+      if (!activeProject || !file) {
+        const error = new Error("Create or open a project first.");
+        if (options.throwOnError) {
+          throw error;
+        }
+        setError(error.message);
+        return;
+      }
+      const body = new FormData();
+      body.append("file", file);
+      // Optional lineage for derived imports (Image Editor Save, sc-2434): link the
+      // new asset to the source it was opened from + record the edit-chain provenance.
+      if (options.sourceAssetId) body.append("sourceAssetId", options.sourceAssetId);
+      if (options.provenance) body.append("provenance", JSON.stringify(options.provenance));
+      try {
+        const imported = await apiFetch(`/api/v1/projects/${activeProject.id}/assets`, token, {
+          method: "POST",
+          body,
+        });
+        setAssets((items) => [imported, ...items.filter((item) => item.id !== imported.id)]);
+        setSelectedAssetId(imported.id);
+        setError("");
+        return imported;
+      } catch (err) {
+        if (options.throwOnError) {
+          throw err;
+        }
+        setError(err.message);
+        return null;
+      }
+    },
+    [token, activeProject],
+  );
+
+  const jobAction = useCallback(
+    async (job, action, options = {}) => {
+      try {
+        const path = action === "duplicate" ? `/api/v1/jobs/${job.id}/duplicate` : `/api/v1/jobs/${job.id}/${action}`;
+        const body =
+          action === "duplicate"
+            ? { payloadChanges: { duplicatedAt: new Date().toISOString() } }
+            : (options.body ?? {});
+        const updatedJob = await apiFetch(path, token, { method: "POST", body: JSON.stringify(body) });
+        setJobs((items) => [updatedJob, ...items.filter((item) => item.id !== updatedJob.id)].sort(sortNewest));
+        setError("");
+      } catch (err) {
+        setError(err.message);
+      }
+    },
+    [token],
+  );
 
   const titleInfo = viewTitles[activeView] ?? { title: activeView, blurb: "" };
   // Activity dots only — counts live in the topbar so nav button textContent stays clean.
@@ -1538,7 +1577,13 @@ export function App() {
   // sc-1651 Phase B: shared primitives screens read via useAppContext() instead of
   // drilled props. Screens build any screen-specific wrappers from these (e.g. a
   // send-to-studio action with a mode). Grown one screen at a time as screens convert.
-  const appContextValue = {
+  // sc-4194: memoized so the provider value only changes identity when one of its
+  // entries actually changes, instead of being a fresh ~120-key literal on every App
+  // render (SSE job/worker/queue ticks re-render App continuously). The actions above
+  // and the data-hook actions are useCallback-stable, so this holds across renders
+  // that don't change data. NOTE: this dependency array must mirror the object below —
+  // every value referenced here is a dependency.
+  const appContextValue = useMemo(() => ({
     activeProject,
     mediaAssets,
     setPreviewAsset: openPreview,
@@ -1663,7 +1708,31 @@ export function App() {
     sendCharacterToImage,
     sendCharacterToVideo,
     openDatasetInLibrary,
-  };
+  }), [
+    activeProject, mediaAssets, openPreview, sendAssetToImage, sendAssetToVideo,
+    activeTimeline, timelines, selectedTimelineId, setSelectedTimelineId, setActiveTimeline,
+    createTimeline, saveTimeline, exportTimeline, extractTimelineFrame, queueTimelineVideoJob,
+    assets, selectedAsset, setSelectedAssetId, deleteAsset, purgeAsset, importAsset,
+    updateAssetStatus, updateAssetTags, latestImageAssets,
+    jobs, jobAction, createVqaJob, createInterleaveJob, createPlaceholderJob, filteredJobs,
+    jobPrompt, setJobPrompt, projectFilter, setProjectFilter, projects, visibleWorkers, workersById,
+    createVideoJob, createImageJob, refinePrompt, latestVideoAssets, recentImageAssets,
+    recentVideoAssets, videoLocalJobs, imageLocalJobs, documentLocalJobs, studioLaunch,
+    rememberLocalGenerationJob, personTracks, personReadiness, createPersonDetectionJob,
+    createPersonTrackJob, saveTrackCorrections, imageModels, videoModels, models, macCapabilities,
+    loras, deleteLora, deleteModel, createModelDownloadJob, createModelConvertJob,
+    createLoraImportJob, createModelImportJob, gpuOptions, requestedGpu, setRequestedGpu,
+    presets, createPreset, updatePreset, deletePreset, duplicatePreset, token, authenticated,
+    trainingDatasets, trainingDatasetsProjectId, trainingDatasetsError, loadingTrainingDatasets,
+    refreshTrainingDatasets, loadTrainingDataset, createTrainingDataset, uploadTrainingDatasetItem,
+    updateTrainingDataset, batchRenameTrainingDataset, writeTrainingDatasetCaptionSidecars,
+    createTrainingDatasetCaptionJob, createTrainingJob, trainingPresets, trainingPresetsError,
+    trainingTargets, trainingTargetsError, setActiveView, registerLeaveGuard, characters,
+    createCharacter, updateCharacter, archiveCharacter, addCharacterReference, updateCharacterReference,
+    removeCharacterReference, createCharacterLook, updateCharacterLook, deleteCharacterLook,
+    attachCharacterLora, updateCharacterLora, detachCharacterLora, createCharacterTestJob,
+    sendCharacterToImage, sendCharacterToVideo, openDatasetInLibrary,
+  ]);
 
   return (
     <AppContext.Provider value={appContextValue}>
