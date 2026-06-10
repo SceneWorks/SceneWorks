@@ -2215,7 +2215,7 @@
       },
       "macSupport": {
         "features": {
-          "edit": false,
+          "edit": true,
           "lycoris": true,
           "pose": true,
           "reference": true
