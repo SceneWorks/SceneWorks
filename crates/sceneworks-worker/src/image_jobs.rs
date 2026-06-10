@@ -4876,9 +4876,10 @@ async fn ensure_instantid_openpose(settings: &Settings) -> WorkerResult<WeightsS
 /// model is `!Send`). Three modes (torch parity): single identity (`generate`), the 11-view angle
 /// set (`generate_angle`), and the pose-library set (`generate_pose`, MultiControlNet IdentityNet
 /// with xinsir OpenPose — sc-3117). `advanced.faceRestore` adds the ADetailer-style re-render pass
-/// (`restore_face`, sc-3380) on each output. The engine `generate*` expose neither a step-progress
-/// callback nor a `CancelFlag`, so streaming is per-image (no `Step`/`Decoding` events) and
-/// cancellation is honoured between images. Reuses [`consume_gen_events`] for the asset writes.
+/// (`restore_face`, sc-3380) on each output. The engine `generate*` take the per-job `CancelFlag`
+/// (via `InstantIdRequest.cancel`) and a `Progress` callback (sc-4380/sc-4382), so streaming is
+/// per-step (`Step`/`Decoding` events) and cancellation is honoured mid-denoise — same contract
+/// as the registry families. Reuses [`consume_gen_events`] for the asset writes.
 #[cfg(target_os = "macos")]
 async fn generate_instantid_stream(
     api: &ApiClient,
@@ -5074,6 +5075,20 @@ async fn generate_instantid_stream(
                 if cancel.is_cancelled() {
                     break;
                 }
+                // Per-step progress → GenEvent::Step, so `consume_gen_events` streams step
+                // updates, fires `image_inference_start`, and polls the cancel API (sc-4382 —
+                // without Step events an InstantID job could never be cancelled).
+                let mut on_progress = |progress: Progress| {
+                    let event = match progress {
+                        Progress::Step { current, total } => GenEvent::Step {
+                            index,
+                            current,
+                            total,
+                        },
+                        Progress::Decoding => GenEvent::Decoding { index },
+                    };
+                    let _ = tx.blocking_send(event);
+                };
                 // Angle + pose sets use a square canvas (the engine forces `req.height =
                 // req.width` for the canonical landmark/skeleton — the sc-2009 kps-aspect rule);
                 // single identity keeps the requested W×H (the engine letterboxes the reference).
@@ -5088,17 +5103,28 @@ async fn generate_instantid_stream(
                     controlnet_scale,
                     openpose_scale,
                     seed: seed as u64,
+                    cancel: cancel.clone(),
                 };
-                let mut out = match &action {
-                    InstantIdAction::Identity => model.generate(&req, &reference),
-                    InstantIdAction::Angle(angle) => model.generate_angle(&req, &reference, angle),
-                    InstantIdAction::Pose(keypoints) => {
-                        model.generate_pose(&req, &reference, keypoints)
+                let result = match &action {
+                    InstantIdAction::Identity => model.generate(&req, &reference, &mut on_progress),
+                    InstantIdAction::Angle(angle) => {
+                        model.generate_angle(&req, &reference, angle, &mut on_progress)
                     }
-                }
-                .map_err(|error| {
-                    WorkerError::InvalidPayload(format!("InstantID generation failed: {error}"))
-                })?;
+                    InstantIdAction::Pose(keypoints) => {
+                        model.generate_pose(&req, &reference, keypoints, &mut on_progress)
+                    }
+                };
+                let mut out = match result {
+                    Ok(out) => out,
+                    // A cancel tripped mid-denoise surfaces as the engine's cancelled error —
+                    // stop cleanly (consume_gen_events posts the Canceled update).
+                    Err(_) if cancel.is_cancelled() => break,
+                    Err(error) => {
+                        return Err(WorkerError::InvalidPayload(format!(
+                            "InstantID generation failed: {error}"
+                        )))
+                    }
+                };
                 // Optional ADetailer-style face-restore re-render (sc-3380), imposing the
                 // reference identity on the cropped face with the gender-neutral restore prompt.
                 if let Some(embedding) = &restore_embedding {
@@ -5113,14 +5139,18 @@ async fn generate_instantid_stream(
                         controlnet_scale,
                         openpose_scale,
                         seed: seed as u64,
+                        cancel: cancel.clone(),
                     };
-                    out = model
-                        .restore_face(&restore_req, &out, embedding)
-                        .map_err(|error| {
-                            WorkerError::InvalidPayload(format!(
+                    out = match model.restore_face(&restore_req, &out, embedding, &mut on_progress)
+                    {
+                        Ok(out) => out,
+                        Err(_) if cancel.is_cancelled() => break,
+                        Err(error) => {
+                            return Err(WorkerError::InvalidPayload(format!(
                                 "InstantID face-restore failed: {error}"
-                            ))
-                        })?;
+                            )))
+                        }
+                    };
                 }
                 if tx
                     .blocking_send(GenEvent::Image {
