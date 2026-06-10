@@ -258,6 +258,10 @@ def test_gpu_worker_advertises_generation_capabilities(monkeypatch):
 
 def test_gpu_worker_without_cuda_torch_does_not_claim_generation_jobs(monkeypatch):
     monkeypatch.setattr("scene_worker.runtime.torch_inference_backend_available", lambda: False)
+    # kps_extract is torch-independent (InsightFace SCRFD), so it is advertised whenever
+    # that backend is installed — force it off here so this torch-gating assertion stays
+    # deterministic whether or not insightface is present in the env (sc-4433).
+    monkeypatch.setattr("scene_worker.runtime.kps_extractor_backend_available", lambda: False)
     capabilities = worker_capabilities({"id": "gpu-0", "name": "GPU 0", "capabilities": ["placeholder", "gpu", "nvidia"]})
 
     # lora_train dry-run validation needs no inference backend, so it is
@@ -282,6 +286,10 @@ def test_cpu_worker_does_not_advertise_lora_train():
 
 def test_python_worker_only_advertises_inference_job_capabilities(monkeypatch):
     monkeypatch.setattr("scene_worker.runtime.torch_inference_backend_available", lambda: True)
+    # Detection backends (pose/kps) are advertised only when their optional deps are
+    # installed; force kps off so this torch-inference list stays deterministic whether
+    # or not insightface/cv2 happen to be present in the test env (sc-4433).
+    monkeypatch.setattr("scene_worker.runtime.kps_extractor_backend_available", lambda: False)
     capabilities = worker_capabilities({"id": "gpu-0", "name": "GPU 0", "capabilities": ["placeholder", "gpu"]})
     job_capabilities = [capability for capability in capabilities if capability != "gpu"]
 
@@ -708,6 +716,20 @@ def test_gpu_worker_omits_pose_detect_without_backend(monkeypatch):
     monkeypatch.setattr("scene_worker.runtime.pose_detector_backend_available", lambda: False)
     capabilities = worker_capabilities({"id": "gpu-0", "name": "GPU 0", "capabilities": ["placeholder", "gpu"]})
     assert "pose_detect" not in capabilities
+
+
+def test_gpu_worker_advertises_kps_extract_when_backend_installed(monkeypatch):
+    monkeypatch.setattr("scene_worker.runtime.torch_inference_backend_available", lambda: True)
+    monkeypatch.setattr("scene_worker.runtime.kps_extractor_backend_available", lambda: True)
+    capabilities = worker_capabilities({"id": "gpu-0", "name": "GPU 0", "capabilities": ["placeholder", "gpu"]})
+    assert "kps_extract" in capabilities
+
+
+def test_gpu_worker_omits_kps_extract_without_backend(monkeypatch):
+    monkeypatch.setattr("scene_worker.runtime.torch_inference_backend_available", lambda: True)
+    monkeypatch.setattr("scene_worker.runtime.kps_extractor_backend_available", lambda: False)
+    capabilities = worker_capabilities({"id": "gpu-0", "name": "GPU 0", "capabilities": ["placeholder", "gpu"]})
+    assert "kps_extract" not in capabilities
 
 
 def test_cpu_worker_never_advertises_pose_detect(monkeypatch):
@@ -4982,6 +5004,7 @@ def test_worker_check_reports_inference_sidecar_capabilities(monkeypatch):
     monkeypatch.setattr("scene_worker.runtime.tracker_backend_available", lambda: True)
     monkeypatch.setattr("scene_worker.runtime.segmenter_backend_available", lambda: True)
     monkeypatch.setattr("scene_worker.runtime.pose_detector_backend_available", lambda: True)
+    monkeypatch.setattr("scene_worker.runtime.kps_extractor_backend_available", lambda: True)
     monkeypatch.setattr(
         "scene_worker.runtime.discover_gpu",
         lambda _gpu_id: {"id": "0", "name": "GPU 0", "capabilities": ["gpu"]},
@@ -5000,6 +5023,8 @@ def test_worker_check_reports_inference_sidecar_capabilities(monkeypatch):
         "person_detect",
         "person_track",
         "pose_detect",
+        # sc-4433: SCRFD 5-point landmark extraction (Key Point Library).
+        "kps_extract",
         "lora_train",
         "training_caption",
         # sc-1635: VQA + interleave are advertised and dispatched, so the check

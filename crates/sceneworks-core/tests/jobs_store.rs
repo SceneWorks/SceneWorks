@@ -1968,6 +1968,9 @@ fn mac_rust_supported_names_infra_job_types() {
     // DWPose pose detection is ported to the Rust worker (sc-3487) → supported.
     let pose = job_of(&store, JobType::PoseDetect, json!({}));
     assert!(mac_rust_supported(&pose).is_ok());
+    // SCRFD kps extraction is native-MLX on the Rust worker (sc-4433) → supported.
+    let kps = job_of(&store, JobType::KpsExtract, json!({}));
+    assert!(mac_rust_supported(&kps).is_ok());
     // Real-ESRGAN upscaling is ported to the Rust worker (sc-3489): the default engine
     // (real-esrgan) is supported; the AuraSR engine stays a tracked Mac gap.
     let upscale = job_of(&store, JobType::ImageUpscale, json!({}));

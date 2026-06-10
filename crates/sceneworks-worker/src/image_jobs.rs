@@ -4941,6 +4941,27 @@ async fn ensure_instantid_file(
     Ok(target)
 }
 
+/// Resolve only the SCRFD detector weights (`scrfd_10g.safetensors`) from the same converted
+/// bundle InstantID uses — for the standalone kps-extraction capability (sc-4433), which needs
+/// face detection but neither ArcFace nor the SDXL/IdentityNet stack. Shares the env override
+/// (`SCENEWORKS_INSTANTID_WEIGHTS`) + app cache + download-on-first-use with
+/// [`ensure_instantid_weights`], so a prior InstantID run leaves it already cached.
+#[cfg(target_os = "macos")]
+pub(crate) async fn ensure_scrfd_weights(settings: &Settings) -> WorkerResult<PathBuf> {
+    let client = reqwest::Client::new();
+    let bundle_dir = std::env::var("SCENEWORKS_INSTANTID_WEIGHTS")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| settings.data_dir.join("cache").join("instantid-mlx"));
+    let base = format!("https://huggingface.co/{INSTANTID_MLX_REPO}/resolve/main");
+    ensure_instantid_file(
+        &client,
+        &bundle_dir,
+        INSTANTID_SCRFD_FILE,
+        &format!("{base}/{INSTANTID_SCRFD_FILE}"),
+    )
+    .await
+}
+
 /// Resolve all InstantID weight inputs, downloading the small converted bundle + the stock
 /// IdentityNet on first use. Returns `(identitynet_dir, ip_adapter, scrfd, arcface)` — all
 /// `Send` paths; the `!Send` MLX load happens on the blocking thread. Resolution order favours

@@ -72,6 +72,12 @@ mod openpose_skeleton;
 // rtmlib path stays the Windows/Linux backend.
 #[cfg(target_os = "macos")]
 mod pose_jobs;
+// SCRFD 5-point face-landmark extraction (epic 4422, sc-4433): native-MLX SCRFD
+// in-process (the InstantID face-stack detector) for the Key Point Library
+// "extract kps from this image" capability. macOS-only; the Python InsightFace
+// path stays the Windows/Linux backend.
+#[cfg(target_os = "macos")]
+mod kps_jobs;
 // Real-ESRGAN image upscaling (epic 3482, sc-3489): RRDBNet x2/x4 via `ort`/CoreML,
 // reusing the same bundled onnxruntime sc-3487 ships. macOS-only; the Python torch
 // Real-ESRGAN / AuraSR path stays the Windows/Linux backend.
@@ -91,6 +97,8 @@ mod person_track;
 #[cfg(target_os = "macos")]
 mod person_segment;
 use downloads::*;
+#[cfg(target_os = "macos")]
+use kps_jobs::*;
 #[cfg(target_os = "macos")]
 use pose_jobs::*;
 #[cfg(target_os = "macos")]
@@ -654,6 +662,14 @@ async fn run_utility_job(
         JobType::PoseDetect => run_pose_detect_job(api, settings, http_client, &job)
             .await
             .map_err(|error| ("Pose detection failed.", error)),
+        // SCRFD 5-point landmark extraction (epic 4422, sc-4433): native-MLX SCRFD
+        // in-process for the Key Point Library. macOS-only; off macOS `KpsExtract` is
+        // never advertised by the Rust worker (the Python InsightFace path handles it),
+        // so this falls to the `_` arm there.
+        #[cfg(target_os = "macos")]
+        JobType::KpsExtract => run_kps_extract_job(api, settings, &job)
+            .await
+            .map_err(|error| ("Keypoint extraction failed.", error)),
         // Real-ESRGAN image upscaling (epic 3482, sc-3489): RRDBNet x2/x4 via
         // onnxruntime/CoreML, served in-process by `upscale_jobs::run_image_upscale_job`.
         // Replaces the Python torch Real-ESRGAN path so the Image Editor upscale tool

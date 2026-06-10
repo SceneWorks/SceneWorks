@@ -46,6 +46,7 @@ from .person_adapters import (
     segmenter_backend_available,
     tracker_backend_available,
 )
+from .kps_extract_adapters import kps_extractor_backend_available, run_kps_extract
 from .pose_adapters import pose_detector_backend_available, run_pose_detect
 from .prompt_refine import PromptRefineError, PromptRefiner
 from .settings import WorkerSettings
@@ -74,6 +75,12 @@ PERSON_JOB_TYPES = ("person_detect", "person_track")
 # is installed; routed via requested_gpu (not in NON_GPU_JOB_TYPES). Keep in sync with
 # crates/sceneworks-core/src/contracts.rs::JobType / WorkerCapability.
 POSE_JOB_TYPES = ("pose_detect",)
+# SCRFD 5-point face-landmark extraction for the Key Point Library (epic 4422, sc-4433).
+# InsightFace (antelopev2 SCRFD) like the InstantID face stack — advertised by the Python
+# worker only when the backend is installed; routed via requested_gpu (not in
+# NON_GPU_JOB_TYPES). The macOS Rust worker serves it natively (native-MLX SCRFD). Keep in
+# sync with crates/sceneworks-core/src/contracts.rs::JobType / WorkerCapability.
+KPS_EXTRACT_JOB_TYPES = ("kps_extract",)
 # Keep GPU-required job types in sync with
 # crates/sceneworks-core/src/jobs_store.rs::job_requires_gpu and
 # apps/web/src/screens/QueueScreen.jsx::gpuRequiredJobTypes.
@@ -127,6 +134,7 @@ ALL_JOB_TYPES = (
     SUPPORTED_JOB_TYPES
     + PERSON_JOB_TYPES
     + POSE_JOB_TYPES
+    + KPS_EXTRACT_JOB_TYPES
     + TRAINING_JOB_TYPES
     + CAPTION_JOB_TYPES
     + VQA_JOB_TYPES
@@ -199,6 +207,11 @@ def worker_capabilities(gpu: dict) -> list[str]:
         # can't run it.
         if pose_detector_backend_available():
             capabilities.add("pose_detect")
+        # SCRFD 5-point landmark extraction (Key Point Library) — InsightFace, advertised
+        # only when installed so the queue never routes a kps_extract job to a worker that
+        # can't run it (sc-4433).
+        if kps_extractor_backend_available():
+            capabilities.add("kps_extract")
     return sorted(capabilities)
 
 
@@ -1160,6 +1173,40 @@ def run_pose_job(api: ApiClient, settings: WorkerSettings, job: dict) -> None:
     )
 
 
+def run_kps_extract_job(api: ApiClient, settings: WorkerSettings, job: dict) -> None:
+    """Run a kps_extract job: SCRFD 5-point face landmarks from one image (Key Point
+    Library, sc-4433).
+
+    InsightFace-backed (antelopev2 SCRFD), so no torch model is loaded — the worker
+    advertises kps_extract only when the backend is installed (worker_capabilities).
+    Returns the largest face's normalized landmarks, or an explicit ``detected: false``
+    result when no face is found. The macOS Rust worker serves this natively (native-MLX
+    SCRFD); this is the Windows/Linux path.
+    """
+
+    def setup(progress):
+        progress("preparing", "preparing", 0.06, "Preparing face detector.")
+        return JobStep(
+            runner=lambda cancel: run_kps_extract(
+                settings,
+                job,
+                progress=progress,
+                cancel_requested=cancel,
+            ),
+            completion="Face landmarks extracted.",
+        )
+
+    run_job_scaffold(
+        api,
+        settings,
+        job,
+        kind_label="Keypoint extraction",
+        setup=setup,
+        # onnxruntime path: no torch CUDA context worth recycling on OOM.
+        oom_restart=False,
+    )
+
+
 def run_upscale_job(api: ApiClient, settings: WorkerSettings, job: dict) -> None:
     """Run an image_upscale job: Real-ESRGAN / AuraSR on one existing asset.
 
@@ -1483,6 +1530,8 @@ def run_worker_loop(settings: WorkerSettings) -> None:
                 run_person_job(api, settings, job)
             elif job["type"] in POSE_JOB_TYPES:
                 run_pose_job(api, settings, job)
+            elif job["type"] in KPS_EXTRACT_JOB_TYPES:
+                run_kps_extract_job(api, settings, job)
             elif job["type"] in TRAINING_JOB_TYPES:
                 run_lora_train_job(api, settings, job)
             elif job["type"] in CAPTION_JOB_TYPES:

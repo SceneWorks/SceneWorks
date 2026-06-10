@@ -1894,6 +1894,12 @@ pub fn mac_rust_supported(job: &JobSnapshot) -> Result<(), UnsupportedReason> {
         // "create from photo" flow + InstantID pose conditioning run Python-free.
         JobType::PoseDetect => Ok(()),
 
+        // SCRFD 5-point landmark extraction is native-MLX on the Rust worker (sc-4433,
+        // epic 4422): the same SCRFD detector the InstantID face stack already runs
+        // in-process, so the Key Point Library "extract kps from this image" flow is
+        // Python-free on Mac.
+        JobType::KpsExtract => Ok(()),
+
         // Real-ESRGAN image upscaling is now ported to the Rust worker (sc-3489):
         // RRDBNet x2/x4 via `ort`/CoreML on the macOS MLX worker, so the Image Editor
         // upscale tool runs Python-free. `aura-sr` (a separate GAN upscaler, no clean
