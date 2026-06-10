@@ -460,6 +460,9 @@ fn caption_job_options(payload: &JsonObject) -> CaptionJobOptions {
                 .and_then(Value::as_u64)
                 .and_then(|value| u32::try_from(value).ok())
                 .unwrap_or(256),
+            // None → engine draws a fresh per-call seed (prior behavior); honor an explicit
+            // `seed` option for reproducible captions.
+            seed: options.get("seed").and_then(Value::as_u64),
         },
     }
 }

@@ -5087,12 +5087,20 @@ async fn generate_instantid_stream(
                     controlnet_scale,
                     openpose_scale,
                     seed: seed as u64,
+                    cancel: cancel.clone(), // sc-4380: cooperative per-step cancellation.
                 };
+                // No per-step progress is surfaced for InstantID (parity with pre-sc-4380
+                // behavior — progress is reported per-image via GenEvent below); the no-op
+                // satisfies the engine's on_progress contract. Cancellation is wired via
+                // `req.cancel` so an in-flight render bails promptly.
+                let mut on_progress = |_progress: mlx_gen::Progress| {};
                 let mut out = match &action {
-                    InstantIdAction::Identity => model.generate(&req, &reference),
-                    InstantIdAction::Angle(angle) => model.generate_angle(&req, &reference, angle),
+                    InstantIdAction::Identity => model.generate(&req, &reference, &mut on_progress),
+                    InstantIdAction::Angle(angle) => {
+                        model.generate_angle(&req, &reference, angle, &mut on_progress)
+                    }
                     InstantIdAction::Pose(keypoints) => {
-                        model.generate_pose(&req, &reference, keypoints)
+                        model.generate_pose(&req, &reference, keypoints, &mut on_progress)
                     }
                 }
                 .map_err(|error| {
@@ -5112,9 +5120,10 @@ async fn generate_instantid_stream(
                         controlnet_scale,
                         openpose_scale,
                         seed: seed as u64,
+                        cancel: cancel.clone(), // sc-4380: cooperative per-step cancellation.
                     };
                     out = model
-                        .restore_face(&restore_req, &out, embedding)
+                        .restore_face(&restore_req, &out, embedding, &mut on_progress)
                         .map_err(|error| {
                             WorkerError::InvalidPayload(format!(
                                 "InstantID face-restore failed: {error}"
