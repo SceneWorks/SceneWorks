@@ -4,27 +4,76 @@ use sceneworks_core::credentials::normalize_host;
 
 const ALLOWED_MODEL_TYPES: &[&str] = &["image", "video", "utility"];
 const MODEL_SIZE_CACHE_LIMIT: usize = 64;
+// Failed estimates (offline, rate-limited, or size-less repo metadata) are
+// negative-cached so a huggingface.co outage costs one 8s timeout per repo per
+// TTL window instead of one per catalog load (sc-4169).
+const MODEL_SIZE_NEGATIVE_TTL: Duration = Duration::from_secs(300);
 
 #[derive(Debug, Default)]
 pub(crate) struct ModelSizeCache {
-    entries: HashMap<ModelSizeCacheKey, u64>,
+    entries: HashMap<ModelSizeCacheKey, CachedSizeEstimate>,
     order: VecDeque<ModelSizeCacheKey>,
 }
 
 type ModelSizeCacheKey = (String, Vec<String>);
 
+#[derive(Debug, Clone, Copy)]
+struct CachedSizeEstimate {
+    size_bytes: Option<u64>,
+    expires_at: Option<std::time::Instant>,
+}
+
 impl ModelSizeCache {
-    pub(crate) fn get(&mut self, key: &ModelSizeCacheKey) -> Option<u64> {
-        if self.entries.contains_key(key) {
+    /// `Some(Some(bytes))` = cached estimate, `Some(None)` = cached failure
+    /// (skip the network until the TTL lapses), `None` = cache miss.
+    pub(crate) fn get(&mut self, key: &ModelSizeCacheKey) -> Option<Option<u64>> {
+        if let Some(entry) = self.entries.get(key).copied() {
+            if entry
+                .expires_at
+                .is_some_and(|expires_at| std::time::Instant::now() >= expires_at)
+            {
+                self.entries.remove(key);
+                self.order.retain(|existing| existing != key);
+                return None;
+            }
             self.touch(key);
+            return Some(entry.size_bytes);
         }
-        self.entries.get(key).copied()
+        None
     }
 
     pub(crate) fn insert(&mut self, key: ModelSizeCacheKey, value: u64) {
+        self.insert_entry(
+            key,
+            CachedSizeEstimate {
+                size_bytes: Some(value),
+                expires_at: None,
+            },
+        );
+    }
+
+    pub(crate) fn insert_failure(&mut self, key: ModelSizeCacheKey) {
+        self.insert_failure_expiring_at(key, std::time::Instant::now() + MODEL_SIZE_NEGATIVE_TTL);
+    }
+
+    pub(crate) fn insert_failure_expiring_at(
+        &mut self,
+        key: ModelSizeCacheKey,
+        expires_at: std::time::Instant,
+    ) {
+        self.insert_entry(
+            key,
+            CachedSizeEstimate {
+                size_bytes: None,
+                expires_at: Some(expires_at),
+            },
+        );
+    }
+
+    fn insert_entry(&mut self, key: ModelSizeCacheKey, entry: CachedSizeEstimate) {
         self.order.retain(|existing| existing != &key);
         self.order.push_back(key.clone());
-        self.entries.insert(key, value);
+        self.entries.insert(key, entry);
         while self.order.len() > MODEL_SIZE_CACHE_LIMIT {
             if let Some(oldest) = self.order.pop_front() {
                 self.entries.remove(&oldest);
@@ -48,7 +97,7 @@ pub(crate) struct DownloadContext {
 pub(crate) async fn list_models(
     State(state): State<AppState>,
 ) -> Result<Json<Vec<Value>>, ApiError> {
-    Ok(Json(model_catalog(&state).await?))
+    Ok(Json(model_catalog_sized(&state).await?))
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -700,7 +749,26 @@ pub(crate) fn max_model_upload_bytes() -> usize {
     MAX_MODEL_UPLOAD_BYTES
 }
 
+/// Catalog without live Hugging Face size estimation: download sizes fall back to
+/// manifest metadata only. This is the right call for job validation, LoRA/preset
+/// CRUD, download/convert job creation, and delete — none of which read the
+/// byte-accurate download size — so an unreachable huggingface.co can't stall
+/// those paths (sc-4169).
 pub(crate) async fn model_catalog(state: &AppState) -> Result<Vec<Value>, ApiError> {
+    model_catalog_inner(state, false).await
+}
+
+/// Catalog with live Hugging Face download-size estimates (negative-cached on
+/// failure). Reserved for `GET /models`, the one surface that displays
+/// download sizes.
+pub(crate) async fn model_catalog_sized(state: &AppState) -> Result<Vec<Value>, ApiError> {
+    model_catalog_inner(state, true).await
+}
+
+async fn model_catalog_inner(
+    state: &AppState,
+    estimate_sizes: bool,
+) -> Result<Vec<Value>, ApiError> {
     let manifest_dir = state.settings.config_dir.join("manifests");
     let builtin =
         load_manifest_entries(state, &manifest_dir.join("builtin.models.jsonc"), "models").await?;
@@ -724,10 +792,10 @@ pub(crate) async fn model_catalog(state: &AppState) -> Result<Vec<Value>, ApiErr
         .collect::<Result<Vec<_>, _>>()?;
     let download_size_bytes = join_all(download_contexts.iter().map(|context| async move {
         match context {
-            Some(context) => {
+            Some(context) if estimate_sizes => {
                 estimate_huggingface_download_size(state, &context.repo, &context.files).await
             }
-            None => None,
+            _ => None,
         }
     }))
     .await;
@@ -1384,7 +1452,7 @@ pub(crate) async fn estimate_huggingface_download_size(
     }
     let cache_key = (repo.to_owned(), files.to_vec());
     if let Some(cached) = state.model_size_cache.lock().get(&cache_key) {
-        return Some(cached);
+        return cached;
     }
     let url = format!(
         "https://huggingface.co/api/models/{}?blobs=true",
@@ -1392,8 +1460,9 @@ pub(crate) async fn estimate_huggingface_download_size(
     );
     let estimate =
         estimate_huggingface_download_size_uncached(&state.http_client, &url, files).await;
-    if let Some(estimate) = estimate {
-        state.model_size_cache.lock().insert(cache_key, estimate);
+    match estimate {
+        Some(estimate) => state.model_size_cache.lock().insert(cache_key, estimate),
+        None => state.model_size_cache.lock().insert_failure(cache_key),
     }
     estimate
 }
