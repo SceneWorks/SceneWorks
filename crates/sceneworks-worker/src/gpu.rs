@@ -435,6 +435,12 @@ pub(crate) fn mlx_gpu() -> DiscoveredGpu {
             // Python-free Mac. The detector auto-provisions its onnx weights on first
             // use (download-on-first-use parity with rtmlib).
             WorkerCapability::PoseDetect,
+            // SCRFD 5-point face-landmark extraction (epic 4422, sc-4433): native-MLX
+            // SCRFD in-process (`kps_jobs::run_kps_extract_job`, the InstantID face-stack
+            // detector) for the Key Point Library "extract kps from this image" flow,
+            // Python-free on Mac. Reuses the InstantID `scrfd_10g` bundle (cached on
+            // first InstantID/extraction use).
+            WorkerCapability::KpsExtract,
             // Real-ESRGAN image upscaling (epic 3482, sc-3489): RRDBNet x2/x4 via
             // onnxruntime/CoreML, served in-process by `upscale_jobs::run_image_upscale_job`.
             // Replaces the Python torch Real-ESRGAN path so the Image Editor upscale tool

@@ -203,6 +203,13 @@ string_enum! {
         // Pose Library (epic 2282). onnxruntime-backed like person_detect; advertised
         // by the Python worker, routed via requested_gpu (not in NON_GPU_JOB_TYPES).
         PoseDetect => "pose_detect",
+        // SCRFD 5-point face-landmark extraction from one image (Key Point Library,
+        // epic 4422 / sc-4433): photo -> normalized [left_eye, right_eye, nose,
+        // mouth_left, mouth_right] in square-canvas [0,1], consumable as an InstantID
+        // angle/framing preset (pass-in kps via generate_with_kps). Native-MLX SCRFD on
+        // the Rust worker (zero-Python, epic 3482); InsightFace on the Python worker.
+        // GPU-routed like pose_detect (not in NON_GPU_JOB_TYPES).
+        KpsExtract => "kps_extract",
         // Standalone upscale of an existing image asset (Image Editor, epic 2427).
         // Torch-backed (Real-ESRGAN / AuraSR), GPU-required like generation; reuses
         // the upscale engines that previously only ran as a generation post-step.
@@ -294,6 +301,12 @@ string_enum! {
         // (runtime.py, gated on pose_detector_backend_available); the Rust utility
         // worker never emits it. See jobs_store::worker_supports_job.
         PoseDetect => "pose_detect",
+        // SCRFD 5-point face-landmark extraction (Key Point Library, epic 4422 /
+        // sc-4433). Advertised by the macOS Rust/MLX worker (native SCRFD, zero-Python)
+        // and by the Python worker when the InsightFace backend is installed
+        // (runtime.py, gated on kps_extractor_backend_available). See
+        // jobs_store::worker_supports_job.
+        KpsExtract => "kps_extract",
         // Procedural detection/tracking previews served by the Rust utility worker.
         // Real, model-backed PersonDetect/PersonTrack jobs are served by the Python
         // GPU worker (YOLO/ByteTrack/SAM2); these preview capabilities keep the CPU
