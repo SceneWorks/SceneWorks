@@ -14,9 +14,9 @@
 //! the onnxruntime inference is gated.
 //!
 //! Engine scope: only `engine=real-esrgan` (the default) is served here. `aura-sr`
-//! (a separate GAN upscaler, no clean ONNX export) stays a tracked Mac gap and is
-//! refused by the routing oracle (`upscale_job_is_mlx_eligible`) so it keeps falling
-//! to the Python worker.
+//! (a 617M-param torch-only GigaGAN) was dropped on Mac after the sc-3668 port-or-drop
+//! spike — it is refused by the routing oracle (`upscale_job_is_mlx_eligible`) and hidden
+//! in the Mac UI, so it only runs on the Python worker on Windows/Linux.
 //!
 //! Tiling parity (matched to `upscalers.py:_run_tiled`):
 //!  - tile grid `tile_slices(w,h,512)`; per-tile crop padded by `tile_pad=16`
@@ -378,10 +378,10 @@ pub(crate) async fn run_image_upscale_job(
         engine.as_str(),
         "real-esrgan" | "realesrgan" | "real_esrgan"
     ) {
-        // aura-sr (and any future engine) stays a torch/Mac gap — the routing oracle
-        // refuses it for the mlx worker, so this is a defensive guard only.
+        // aura-sr was dropped on Mac (sc-3668) and any future engine stays a torch/Mac gap —
+        // the routing oracle refuses it for the mlx worker, so this is a defensive guard only.
         return Err(WorkerError::InvalidPayload(format!(
-            "Rust upscaler supports only engine=real-esrgan (got {engine}); aura-sr stays on the Python path (sc-3489 follow-up)."
+            "Rust upscaler supports only engine=real-esrgan (got {engine}); aura-sr is dropped on Mac, available on Windows/Linux (sc-3668)."
         )));
     }
     let engine_id = "real-esrgan"; // matches image_adapters RealESRGANUpscaler.id

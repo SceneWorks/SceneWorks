@@ -8,6 +8,7 @@ import {
   macModelFeatureBlock,
   macReasonText,
   macTrainingKernelBlocked,
+  macUpscaleEngineBlocked,
   macVideoModeBlock,
 } from "./macGating.js";
 
@@ -19,6 +20,11 @@ const gating = {
     imageUpscale: {
       supported: false,
       reason: { feature: "image_upscale (Real-ESRGAN)", detail: "torch path.", suggestedEpic: "sc-3489" },
+    },
+    // AuraSR engine dropped on Mac (sc-3668); Real-ESRGAN stays the Mac upscaler.
+    imageUpscaleAuraSr: {
+      supported: false,
+      reason: { feature: "image_upscale (AuraSR)", detail: "dropped on Mac.", suggestedEpic: "sc-3668" },
     },
     // LyCORIS is ported to MLX (epic 3641) → no longer a capability feature entry.
   },
@@ -65,6 +71,13 @@ describe("macGating helpers", () => {
     expect(block?.text).toContain("sc-3489");
     // LyCORIS is ported (epic 3641) → not a capability feature, so never blocked.
     expect(macFeatureBlock(gating, "lycoris")).toBeNull();
+  });
+
+  it("drops the AuraSR upscale engine on a gated Mac, keeps Real-ESRGAN (sc-3668)", () => {
+    expect(macUpscaleEngineBlocked(gating, "aura-sr")).toBe(true);
+    expect(macUpscaleEngineBlocked(gating, "real-esrgan")).toBe(false);
+    // Inert on Windows/Linux / observe mode — the engine picker is untouched.
+    expect(macUpscaleEngineBlocked(DEFAULT_MAC_CAPABILITIES, "aura-sr")).toBe(false);
   });
 
   it("blocks a training kernel without a native Rust trainer", () => {

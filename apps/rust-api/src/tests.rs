@@ -2773,9 +2773,15 @@ async fn models_catalog_carries_mac_support_and_capabilities_endpoint() {
         caps["notAvailableLabel"],
         "Not available on Mac (Rust/MLX only)"
     );
-    // Real-ESRGAN upscaling is ported to the Rust worker (sc-3489) → supported, no reason.
+    // Real-ESRGAN upscaling is ported to the Rust worker (sc-3489) → tool supported, no reason.
     assert_eq!(caps["features"]["imageUpscale"]["supported"], true);
     assert_eq!(caps["features"]["imageUpscale"]["reason"], Value::Null);
+    // The AuraSR engine is dropped on Mac (sc-3668) → its per-engine feature is unsupported.
+    assert_eq!(caps["features"]["imageUpscaleAuraSr"]["supported"], false);
+    assert_eq!(
+        caps["features"]["imageUpscaleAuraSr"]["reason"]["suggestedEpic"],
+        "sc-3668"
+    );
     // DWPose pose detection is ported to the Rust worker (sc-3487) → supported (sc-4206).
     assert_eq!(caps["features"]["poseFromPhoto"]["supported"], true);
     assert_eq!(caps["features"]["poseFromPhoto"]["reason"], Value::Null);

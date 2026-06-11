@@ -104,6 +104,15 @@ export function macFeatureBlock(caps, key) {
   return null;
 }
 
+// Whether a specific image_upscale engine is dropped on Mac (sc-3668). AuraSR is a
+// torch-only GigaGAN dropped on Mac; Real-ESRGAN is the Mac upscaler. Engine ids match the
+// worker (real-esrgan / aura-sr). Only acts under active gating; a no-op (false) on
+// Windows/Linux and in observe mode, so the engine picker is untouched there.
+export function macUpscaleEngineBlocked(caps, engine) {
+  if (engine !== "aura-sr") return false;
+  return Boolean(macFeatureBlock(caps, "imageUpscaleAuraSr"));
+}
+
 // Whether a training kernel has no native Rust trainer (so its base model is gated in Training).
 export function macTrainingKernelBlocked(caps, kernel) {
   if (!macGatingActive(caps) || !kernel) return false;

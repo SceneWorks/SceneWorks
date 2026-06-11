@@ -2047,7 +2047,7 @@ fn mac_rust_supported_names_infra_job_types() {
     let kps = job_of(&store, JobType::KpsExtract, json!({}));
     assert!(mac_rust_supported(&kps).is_ok());
     // Real-ESRGAN upscaling is ported to the Rust worker (sc-3489): the default engine
-    // (real-esrgan) is supported; the AuraSR engine stays a tracked Mac gap.
+    // (real-esrgan) is supported; the AuraSR engine is dropped on Mac (sc-3668).
     let upscale = job_of(&store, JobType::ImageUpscale, json!({}));
     assert!(mac_rust_supported(&upscale).is_ok());
     let aura = job_of(
@@ -2057,7 +2057,7 @@ fn mac_rust_supported_names_infra_job_types() {
     );
     let aura_reason = mac_rust_supported(&aura).unwrap_err();
     assert!(aura_reason.feature.contains("AuraSR"));
-    assert_eq!(aura_reason.suggested_epic.as_deref(), Some("sc-3489"));
+    assert_eq!(aura_reason.suggested_epic.as_deref(), Some("sc-3668"));
     // JoyCaption dataset captioning is ported to the Rust/MLX worker (sc-3556).
     let caption = job_of(
         &store,
@@ -2325,9 +2325,13 @@ fn mac_capabilities_master_switch_and_infra_features() {
             .and_then(|r| r.suggested_epic.as_deref())
             .map(str::to_owned)
     };
-    // Real-ESRGAN upscaling is ported (sc-3489) → supported, no reason/epic.
+    // Real-ESRGAN upscaling is ported (sc-3489) → the tool is supported, no reason/epic.
     assert_eq!(epic("imageUpscale"), None);
     assert!(mac.features["imageUpscale"].supported);
+    // The AuraSR engine is dropped on Mac (sc-3668) → its per-engine feature is unsupported
+    // and names the spike; this must agree with the AuraSR arm of `mac_rust_supported`.
+    assert!(!mac.features["imageUpscaleAuraSr"].supported);
+    assert_eq!(epic("imageUpscaleAuraSr"), Some("sc-3668".to_owned()));
     // DWPose pose detection is ported (sc-3487) → supported, no reason/epic (sc-4206).
     assert_eq!(epic("poseFromPhoto"), None);
     assert!(mac.features["poseFromPhoto"].supported);
