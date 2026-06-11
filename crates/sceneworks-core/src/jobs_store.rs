@@ -1069,7 +1069,9 @@ impl JobsStore {
             .map(|value| value.clamp(0.0, 100.0));
         let mut result = update.result;
         if let Some(result) = result.as_mut() {
-            merge_training_sample_history(&transaction, job_id, result)?;
+            // Reuse the result we already read above (same transaction/row) rather
+            // than re-selecting result_json each update (sc-4274 / F-CORE-14).
+            merge_training_sample_history(Some(&current.result), result);
         }
         transaction.execute(
             "
@@ -1547,11 +1549,14 @@ fn loads_object(value: Option<&str>) -> Map<String, Value> {
         .unwrap_or_default()
 }
 
+/// Merge accumulated `trainingSamples` history into an incoming progress
+/// result. `existing_result` is the job's current result, which
+/// `update_job_progress` has already read in the same transaction — so this no
+/// longer re-`select`s `result_json` per update (sc-4274 / F-CORE-14).
 fn merge_training_sample_history(
-    connection: &Connection,
-    job_id: &str,
+    existing_result: Option<&Map<String, Value>>,
     incoming: &mut Map<String, Value>,
-) -> JobsStoreResult<()> {
+) {
     let has_training_samples = incoming
         .get("trainingSamples")
         .and_then(Value::as_array)
@@ -1561,20 +1566,16 @@ fn merge_training_sample_history(
         .and_then(Value::as_array)
         .is_some();
     if !has_training_samples && !has_latest_training_samples {
-        return Ok(());
+        return;
     }
 
-    let existing_json: Option<String> = connection
-        .query_row(
-            "select result_json from jobs where id = ?1",
-            params![job_id],
-            |row| row.get(0),
-        )
-        .optional()?;
-    let existing = loads_object(existing_json.as_deref());
     let mut samples = Vec::new();
     let mut seen = std::collections::HashSet::new();
-    append_training_samples(&mut samples, &mut seen, existing.get("trainingSamples"));
+    append_training_samples(
+        &mut samples,
+        &mut seen,
+        existing_result.and_then(|result| result.get("trainingSamples")),
+    );
     append_training_samples(&mut samples, &mut seen, incoming.get("trainingSamples"));
     append_training_samples(
         &mut samples,
@@ -1585,7 +1586,6 @@ fn merge_training_sample_history(
     if !samples.is_empty() {
         incoming.insert("trainingSamples".to_owned(), Value::Array(samples));
     }
-    Ok(())
 }
 
 fn append_training_samples(
