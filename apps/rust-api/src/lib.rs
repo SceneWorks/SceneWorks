@@ -500,6 +500,15 @@ async fn shutdown_signal() {
 }
 
 pub fn create_app(settings: Settings) -> Result<Router, JobsStoreError> {
+    Ok(create_app_with_state(settings)?.0)
+}
+
+// Like create_app but also returns a clone of the AppState (the same Arc-shared
+// stores + event hub the router uses), so tests can subscribe to the event hub and
+// assert on what the handlers publish (sc-4203).
+pub(crate) fn create_app_with_state(
+    settings: Settings,
+) -> Result<(Router, AppState), JobsStoreError> {
     let _ = std::fs::create_dir_all(&settings.data_dir);
     let _ = std::fs::create_dir_all(&settings.config_dir);
     if let Some(jobs_db_parent) = settings.jobs_db_path.parent() {
@@ -538,8 +547,9 @@ pub fn create_app(settings: Settings) -> Result<Router, JobsStoreError> {
         interrupted_jobs_on_startup,
     };
     let cors = cors_layer(&state.settings);
+    let returned_state = state.clone();
 
-    Ok(Router::new()
+    let router = Router::new()
         .route("/api/v1/health", get(health))
         .route("/api/v1/access", get(access))
         .route("/api/v1/auth/verify", post(verify_access))
@@ -784,7 +794,8 @@ pub fn create_app(settings: Settings) -> Result<Router, JobsStoreError> {
         .with_state(state.clone())
         .layer(DefaultBodyLimit::max(MAX_UPLOAD_BYTES))
         .layer(middleware::from_fn_with_state(state, access_control))
-        .layer(cors))
+        .layer(cors);
+    Ok((router, returned_state))
 }
 
 async fn health(State(state): State<AppState>) -> Json<HealthResponse> {

@@ -264,8 +264,11 @@ pub(crate) async fn update_job_progress(
     if let Some(result_obj) = result.as_mut() {
         persist_reported_assets(&state, &job_id, result_obj).await?;
     }
-    let job = store_call(state.clone(), move |store, _timeout| {
-        store.update_job_progress(
+    let (job, status_changed) = store_call(state.clone(), move |store, _timeout| {
+        // Read the prior status in the same blocking round-trip so we can tell a
+        // pure progress tick (status unchanged) from a real queue transition.
+        let previous_status = store.get_job(&job_id).map(|job| job.status).ok();
+        let job = store.update_job_progress(
             &job_id,
             ProgressUpdate {
                 status: payload.status,
@@ -280,11 +283,21 @@ pub(crate) async fn update_job_progress(
                 backend: payload.backend,
                 worker_id: payload.worker_id,
             },
-        )
+        )?;
+        let status_changed = previous_status.as_ref() != Some(&job.status);
+        Ok::<(JobSnapshot, bool), JobsStoreError>((job, status_changed))
     })
     .await?;
     publish(&state, "job.updated", &job);
-    publish_queue(&state).await?;
+    // sc-4203 (F-API-5): workers POST progress per inference step. The queue summary
+    // is a full SQLite aggregation plus a stale-worker sweep, serialized and
+    // broadcast to every SSE subscriber — but the queue composition only changes when
+    // a job's status transitions (queued/running/terminal), not on a percentage tick.
+    // Skip the refresh on pure ticks; the stale sweep still runs on worker heartbeats
+    // and on every status transition.
+    if status_changed {
+        publish_queue(&state).await?;
+    }
     Ok(Json(job))
 }
 
