@@ -10,6 +10,21 @@ pub(crate) struct SupervisedChild {
     pub(crate) spec: WorkerSpec,
     pub(crate) process: Child,
     pub(crate) restart_attempt: u32,
+    /// When the current process was (re)spawned, so a child that ran healthily
+    /// for a while resets its restart backoff instead of ratcheting it up forever
+    /// (sc-4282 / F-MLXW-20).
+    pub(crate) spawned_at: Instant,
+}
+
+/// A child that stayed alive at least this long before exiting is treated as
+/// having had a healthy run, so its restart-backoff counter resets rather than
+/// saturating upward across rare, widely-spaced crashes (sc-4282 / F-MLXW-20).
+const HEALTHY_UPTIME_RESET: Duration = Duration::from_secs(300);
+
+/// Whether a child's `uptime` (time since its last spawn) was long enough to
+/// count as a healthy run and reset the restart backoff.
+fn backoff_resets_after_healthy_uptime(uptime: Duration) -> bool {
+    uptime >= HEALTHY_UPTIME_RESET
 }
 
 pub(crate) async fn supervise_auto_workers(settings: Settings) -> WorkerResult<()> {
@@ -38,6 +53,7 @@ pub(crate) async fn supervise_children(
                 spec,
                 process,
                 restart_attempt: 0,
+                spawned_at: Instant::now(),
             },
         );
     }
@@ -75,6 +91,12 @@ where
     let mut exited = Vec::new();
     for (worker_id, child) in children.iter_mut() {
         if let Some(status) = child.process.try_wait()? {
+            // A child that ran healthily for a while before exiting starts its
+            // backoff fresh, so rare widely-spaced crashes don't ratchet the delay
+            // up to the cap forever (sc-4282 / F-MLXW-20).
+            if backoff_resets_after_healthy_uptime(child.spawned_at.elapsed()) {
+                child.restart_attempt = 0;
+            }
             // Advance the attempt once here so the logged ETA and the actual
             // backoff below both read the same stored value.
             child.restart_attempt = child.restart_attempt.saturating_add(1);
@@ -105,6 +127,7 @@ where
         }
         let process = spawner(settings, &child.spec)?;
         child.process = process;
+        child.spawned_at = Instant::now();
         children.insert(child.spec.worker_id.clone(), child);
     }
     Ok(())
@@ -221,5 +244,25 @@ pub(crate) fn utility_worker_id(base_worker_id: &str, index: usize) -> String {
         cpu_id
     } else {
         format!("{cpu_id}-{index}")
+    }
+}
+
+#[cfg(test)]
+mod backoff_tests {
+    use super::{backoff_resets_after_healthy_uptime, HEALTHY_UPTIME_RESET};
+    use std::time::Duration;
+
+    /// sc-4282 / F-MLXW-20: the backoff resets only once a child has been up for
+    /// at least the healthy-uptime threshold.
+    #[test]
+    fn backoff_resets_only_after_the_healthy_uptime_threshold() {
+        assert!(!backoff_resets_after_healthy_uptime(Duration::from_secs(0)));
+        assert!(!backoff_resets_after_healthy_uptime(
+            HEALTHY_UPTIME_RESET - Duration::from_secs(1)
+        ));
+        assert!(backoff_resets_after_healthy_uptime(HEALTHY_UPTIME_RESET));
+        assert!(backoff_resets_after_healthy_uptime(
+            HEALTHY_UPTIME_RESET + Duration::from_secs(60)
+        ));
     }
 }
