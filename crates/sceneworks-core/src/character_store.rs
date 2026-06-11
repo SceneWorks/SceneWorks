@@ -443,6 +443,38 @@ impl<'a> CharacterStore<'a> {
         hydrate_character(project_id, &self.project_path, character)
     }
 
+    pub fn remove_asset_references(&self, asset_id: &str) -> ProjectStoreResult<u32> {
+        validate_required_text(asset_id, "assetId")?;
+        let mut connection = connect_project_db(&self.project_path)?;
+        let transaction = connection.transaction()?;
+        let mut changed_count = 0;
+
+        for sidecar_path in character_sidecars(&self.project_path)? {
+            let Ok(mut character) = read_json(&sidecar_path) else {
+                continue;
+            };
+            if !remove_asset_references_from_character(&mut character, asset_id)? {
+                continue;
+            }
+            value_object_mut(&mut character, "Character sidecar")?
+                .insert("updatedAt".to_owned(), Value::String(utc_now()));
+            write_character_json(&sidecar_path, &character)?;
+            index_character_sidecar_on_connection(
+                &transaction,
+                &self.project_path,
+                &sidecar_path,
+                &character,
+            )?;
+            changed_count += 1;
+        }
+
+        if changed_count > 0 {
+            store_character_index_fingerprint(&transaction, &self.project_path)?;
+        }
+        transaction.commit()?;
+        Ok(changed_count)
+    }
+
     pub fn create_look(
         &self,
         project_id: &str,
@@ -1125,9 +1157,19 @@ fn update_asset_character_link(
     remove: bool,
 ) -> ProjectStoreResult<()> {
     let asset_id = required_str(reference, "assetId")?;
-    let sidecar_path =
+    let Some(sidecar_path) =
         find_asset_sidecar_path_on_connection(connection, project_path, asset_id)?
-            .ok_or_else(|| ProjectStoreError::NotFound("Reference asset not found".to_owned()))?;
+    else {
+        if remove {
+            return Ok(());
+        }
+        return Err(ProjectStoreError::NotFound(
+            "Reference asset not found".to_owned(),
+        ));
+    };
+    if remove && !sidecar_path.exists() {
+        return Ok(());
+    }
     let mut asset = read_json(&sidecar_path)?;
     let metadata = value_object_mut(&mut asset, "Asset sidecar")?
         .entry("metadata".to_owned())
@@ -1155,6 +1197,44 @@ fn update_asset_character_link(
     metadata.insert("characterReferences".to_owned(), Value::Array(links));
     write_json(&sidecar_path, &asset)?;
     index_asset_on_connection(connection, project_path, &asset, Some(&sidecar_path))
+}
+
+fn remove_asset_references_from_character(
+    character: &mut Value,
+    asset_id: &str,
+) -> ProjectStoreResult<bool> {
+    let object = value_object_mut(character, "Character sidecar")?;
+    let mut changed = false;
+
+    if let Some(references) = object.get_mut("references") {
+        let references = references.as_array_mut().ok_or_else(|| {
+            ProjectStoreError::BadRequest("Character references must be an array".to_owned())
+        })?;
+        let before = references.len();
+        references.retain(|item| item.get("assetId").and_then(Value::as_str) != Some(asset_id));
+        changed |= references.len() != before;
+    }
+
+    if let Some(looks) = object.get_mut("looks") {
+        let looks = looks.as_array_mut().ok_or_else(|| {
+            ProjectStoreError::BadRequest("Character looks must be an array".to_owned())
+        })?;
+        for look in looks {
+            let Some(reference_ids) = look.get_mut("approvedReferenceIds") else {
+                continue;
+            };
+            let reference_ids = reference_ids.as_array_mut().ok_or_else(|| {
+                ProjectStoreError::BadRequest(
+                    "Character look approvedReferenceIds must be an array".to_owned(),
+                )
+            })?;
+            let before = reference_ids.len();
+            reference_ids.retain(|item| item.as_str() != Some(asset_id));
+            changed |= reference_ids.len() != before;
+        }
+    }
+
+    Ok(changed)
 }
 
 /// Thin DB-prep wrapper over the shared resolver in `asset_index` (sc-4272).

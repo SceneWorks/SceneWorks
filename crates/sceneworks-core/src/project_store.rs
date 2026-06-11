@@ -2030,6 +2030,8 @@ impl ProjectStore {
                 .and_then(Value::as_str)
                 .unwrap_or_default(),
         );
+        CharacterStore::new(&self.data_dir, project_path.clone())
+            .remove_asset_references(asset_id)?;
         if media_path.exists() && media_path.is_file() {
             fs::remove_file(media_path)?;
         }
