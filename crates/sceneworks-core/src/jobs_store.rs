@@ -1203,9 +1203,22 @@ impl JobsStore {
         connection.busy_timeout(Duration::from_millis(5000))?;
         match connection.pragma_update(None, "journal_mode", "wal") {
             Ok(()) => {}
-            Err(_) => {
-                remove_sqlite_sidecars(&self.db_path);
-                connection.pragma_update(None, "journal_mode", "delete")?;
+            Err(error) => {
+                // WAL almost always succeeds. When it can't be set, do NOT delete
+                // the `-wal`/`-shm` sidecars: they may belong to a live connection
+                // in another process, and removing them can corrupt that
+                // connection's view. Nor do we silently force `delete` mode — the
+                // 5s busy_timeout reasoning above assumes WAL lets writers queue,
+                // so a silent drop to rollback-journal would change concurrency
+                // semantics for the rest of the process with no signal. Leave the
+                // connection in whatever mode it opened with and warn loudly
+                // instead (sc-4275 / F-CORE-16).
+                eprintln!(
+                    "WARNING: SceneWorks could not enable SQLite WAL mode for {} ({error}); \
+                     continuing in the default rollback-journal mode. Cross-process write \
+                     concurrency will be more serialized than usual.",
+                    self.db_path.display()
+                );
             }
         }
         connection.pragma_update(None, "foreign_keys", "on")?;
@@ -1704,19 +1717,6 @@ fn days_from_civil(year: i32, month: u32, day: u32) -> i64 {
     let day_of_year = (153 * month_prime + 2) / 5 + day - 1;
     let day_of_era = year_of_era * 365 + year_of_era / 4 - year_of_era / 100 + day_of_year;
     era * 146_097 + day_of_era - 719_468
-}
-
-fn remove_sqlite_sidecars(db_path: &Path) {
-    for suffix in ["-wal", "-shm"] {
-        let sidecar = db_path.with_file_name(format!(
-            "{}{suffix}",
-            db_path
-                .file_name()
-                .and_then(|name| name.to_str())
-                .unwrap_or_default()
-        ));
-        let _ = fs::remove_file(sidecar);
-    }
 }
 
 fn is_active_status(status: &str) -> bool {
