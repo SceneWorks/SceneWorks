@@ -1687,6 +1687,54 @@ fn backdate_job_created_at(store: &JobsStore, job_id: &str) {
         .expect("job created_at backdates");
 }
 
+/// sc-4208 / F-CORE-4: `queue_summary` must derive per-status counts and the
+/// active-jobs list from the WHOLE table, not from a newest-500 cap. Before the
+/// fix, once a project exceeded 500 jobs the counts silently undercounted and an
+/// old still-queued job could fall out of the newest-500 window and vanish from
+/// `active_jobs` entirely.
+#[test]
+fn queue_summary_counts_and_active_jobs_ignore_500_row_cap() {
+    let store = store("queue-summary-cap");
+
+    // One old queued job, backdated so it is the OLDEST row by created_at —
+    // exactly the row a newest-500 window would evict first.
+    let old_queued = store
+        .create_job(image_job(object(json!({ "prompt": "oldest queued" }))))
+        .expect("old job creates");
+    backdate_job_created_at(&store, &old_queued.id);
+
+    // 501 newer jobs so the table exceeds the 500-row cap; mark them completed
+    // via raw SQL so the newest-500 window is entirely terminal.
+    for i in 0..501 {
+        store
+            .create_job(image_job(object(
+                json!({ "prompt": format!("completed {i}") }),
+            )))
+            .expect("job creates");
+    }
+    let connection = Connection::open(store.db_path()).expect("db opens");
+    let updated = connection
+        .execute(
+            "update jobs set status = 'completed' where id != ?1",
+            params![old_queued.id],
+        )
+        .expect("bulk completes newer jobs");
+    assert_eq!(updated, 501, "exactly the newer jobs are completed");
+
+    let summary = store.queue_summary().expect("summary computes");
+
+    // Counts come from `group by` over all 502 rows, not a 500-row sample.
+    assert_eq!(
+        summary.counts.get(&JobStatus::Completed).copied(),
+        Some(501)
+    );
+    assert_eq!(summary.counts.get(&JobStatus::Queued).copied(), Some(1));
+
+    // The old queued job survives in active_jobs despite 501 newer terminal rows.
+    assert_eq!(summary.active_jobs.len(), 1);
+    assert_eq!(summary.active_jobs[0].id, old_queued.id);
+}
+
 #[test]
 fn mlx_required_defers_eligible_job_even_with_no_idle_mlx_worker() {
     let store = store("mlx-required-defer");
