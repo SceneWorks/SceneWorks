@@ -2356,6 +2356,12 @@ fn mac_capabilities_master_switch_and_infra_features() {
         .supported_kernels
         .iter()
         .any(|k| k == "sdxl_lora"));
+    // Kolors gained a native Rust trainer (sc-4568) and is now advertised (sc-4732).
+    assert!(mac
+        .training
+        .supported_kernels
+        .iter()
+        .any(|k| k == "kolors_lora"));
     assert!(!mac.training.lokr_on_wan_supported);
 }
 
@@ -2965,11 +2971,13 @@ fn mlx_eligible_training_job_defers_from_torch_worker_to_idle_mlx_worker() {
 }
 
 #[test]
-fn mlx_worker_excluded_from_kolors_training_job() {
+fn mlx_eligible_kolors_training_job_defers_from_torch_worker_to_idle_mlx_worker() {
     let store = store("mlx-training-kolors");
+    register_gpu_worker(&store, "worker-torch", "mps", training_caps());
     register_gpu_worker(&store, "worker-mlx", "mlx", training_caps());
 
-    // Kolors has no mlx-gen trainer crate → torch path only.
+    // Kolors gained a native mlx-gen Rust trainer (sc-4568) and routes to the mlx
+    // worker (sc-4732), exactly like the other MLX-native training families.
     let job = store
         .create_job(mlx_training_job(
             "kolors_lora",
@@ -2980,20 +2988,49 @@ fn mlx_worker_excluded_from_kolors_training_job() {
         ))
         .expect("job creates");
 
-    // The mlx worker must not claim a torch-only training job.
+    // The torch worker defers the now-MLX-native kolors training job to the idle mlx worker.
     assert!(store
-        .claim_next_job("worker-mlx")
-        .expect("mlx claim ok")
-        .is_none());
-
-    // A torch worker is the home for it.
-    register_gpu_worker(&store, "worker-torch", "mps", training_caps());
-    let claimed = store
         .claim_next_job("worker-torch")
         .expect("torch claim ok")
-        .expect("torch claims the kolors job");
+        .is_none());
+    // The mlx worker claims it and trains in-process via mlx-gen's KolorsTrainer.
+    let claimed = store
+        .claim_next_job("worker-mlx")
+        .expect("mlx claim ok")
+        .expect("mlx claims the kolors training job");
     assert_eq!(claimed.id, job.id);
-    assert_eq!(claimed.assigned_gpu.as_deref(), Some("mps"));
+    assert_eq!(claimed.assigned_gpu.as_deref(), Some("mlx"));
+}
+
+#[test]
+fn kolors_lokr_training_job_also_routes_to_the_mlx_worker() {
+    // Unlike LoKr-on-Wan (no Kronecker merge in the mlx Wan path), the Kolors trainer
+    // supports LoKr (descriptor.supports_lokr = true, sc-4568), so a LoKr kolors job is
+    // MLX-eligible too.
+    let store = store("mlx-training-kolors-lokr");
+    register_gpu_worker(&store, "worker-torch", "mps", training_caps());
+    register_gpu_worker(&store, "worker-mlx", "mlx", training_caps());
+
+    let job = store
+        .create_job(mlx_training_job(
+            "kolors_lora",
+            "kolors",
+            "lokr",
+            false,
+            "auto",
+        ))
+        .expect("job creates");
+
+    assert!(store
+        .claim_next_job("worker-torch")
+        .expect("torch claim ok")
+        .is_none());
+    let claimed = store
+        .claim_next_job("worker-mlx")
+        .expect("mlx claim ok")
+        .expect("mlx claims the kolors lokr training job");
+    assert_eq!(claimed.id, job.id);
+    assert_eq!(claimed.assigned_gpu.as_deref(), Some("mlx"));
 }
 
 #[test]

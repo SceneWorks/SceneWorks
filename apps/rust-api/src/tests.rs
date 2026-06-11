@@ -2781,6 +2781,12 @@ async fn models_catalog_carries_mac_support_and_capabilities_endpoint() {
         .unwrap()
         .iter()
         .any(|k| k == "z_image_lora"));
+    // Kolors training cut over to the native Rust trainer (sc-4732).
+    assert!(caps["training"]["supportedKernels"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|k| k == "kolors_lora"));
 }
 
 #[tokio::test]

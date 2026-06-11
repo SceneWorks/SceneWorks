@@ -2427,12 +2427,8 @@ fn classify_training_gap(payload: &Map<String, Value>) -> UnsupportedReason {
         .and_then(|target| target.get("kernel"))
         .and_then(Value::as_str);
     match kernel {
-        Some("kolors_lora") => UnsupportedReason::new(
-            None,
-            "Kolors LoRA training",
-            "the Kolors trainer (SDXL + ChatGLM3) has no mlx-gen Rust trainer.",
-            Some("epic 3039"),
-        ),
+        // `kolors_lora` is no longer a gap — it has a native mlx-gen Rust trainer (sc-4568)
+        // and routes to the mlx worker (sc-4732); it never reaches this classifier.
         Some("lens_lora") => UnsupportedReason::new(
             None,
             "Lens LoRA training",
@@ -3192,14 +3188,16 @@ fn video_mode_is_mlx_eligible(model: &str, mode: &str) -> bool {
 }
 
 /// SceneWorks training kernels with a native mlx-gen Rust trainer (epic 3039):
-/// the engine registers `z_image_turbo`/`sdxl`/`ltx_2_3`/`wan2_2_*` trainers, which
-/// the worker reaches via these SceneWorks kernel ids (the mlx worker maps kernel +
-/// base model → engine trainer id). `kolors_lora` (SDXL + ChatGLM3) and `lens_lora`
-/// (sidecar) have no mlx-gen crate, so they stay on the Python torch worker. A
-/// kernel absent here is never routed to the mlx worker.
+/// the engine registers `z_image_turbo`/`sdxl`/`kolors`/`ltx_2_3`/`wan2_2_*` trainers,
+/// which the worker reaches via these SceneWorks kernel ids (the mlx worker maps the
+/// kernel and base model onto an engine trainer id). `kolors_lora` (SDXL U-Net plus
+/// ChatGLM3) gained a native trainer in sc-4568, cut over here in sc-4732. `lens_lora`
+/// (sidecar) has no mlx-gen crate, so it stays on the Python torch worker. A kernel
+/// absent here is never routed to the mlx worker.
 const MLX_ROUTED_TRAINING_KERNELS: &[&str] = &[
     "z_image_lora",
     "sdxl_lora",
+    "kolors_lora",
     "wan_lora",
     "wan_moe_lora",
     "ltx_mlx_lora",
@@ -3357,9 +3355,9 @@ fn worker_supports_job(worker: &WorkerSnapshot, job: &JobSnapshot) -> bool {
             return false;
         }
         // Training (epic 3039): the mlx worker trains only the MLX-native families
-        // (z_image / sdxl / wan / ltx) via `mlx_gen::load_trainer`. `kolors_lora` +
-        // `lens_lora` (no mlx-gen crate) and LoKr-on-Wan stay on the Python torch
-        // worker. Applies to both dry-run and real runs.
+        // (z_image / sdxl / kolors / wan / ltx) via `mlx_gen::load_trainer`. `lens_lora`
+        // (sidecar, no mlx-gen crate) and LoKr-on-Wan stay on the Python torch worker.
+        // Applies to both dry-run and real runs.
         if matches!(job.job_type, JobType::LoraTrain) && !training_job_is_mlx_eligible(job) {
             return false;
         }
