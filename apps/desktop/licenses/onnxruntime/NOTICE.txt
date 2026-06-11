@@ -1,0 +1,22 @@
+ONNX Runtime — license notice
+==============================
+
+SceneWorks bundles the ONNX Runtime dynamic library (macOS arm64) and loads it
+at runtime for the in-app DWPose pose detector (sc-3487). See the accompanying
+LICENSE for the full MIT license text.
+
+License
+-------
+ONNX Runtime is licensed under the MIT License, Copyright (c) Microsoft
+Corporation. The MIT license requires that the copyright notice and permission
+notice (LICENSE) be included with the distribution; this notice and the
+accompanying LICENSE satisfy that requirement.
+
+Version & provenance
+--------------------
+- ONNX Runtime version: 1.26.0
+- Target: macOS arm64 (aarch64)
+- Component: the CoreML-enabled `libonnxruntime.<ver>.dylib`
+- Delivery: extracted from the official `onnxruntime` macOS arm64 PyPI wheel
+  (pinned in apps/desktop/scripts/stage-onnxruntime.py).
+- Upstream: https://github.com/microsoft/onnxruntime (https://onnxruntime.ai/).

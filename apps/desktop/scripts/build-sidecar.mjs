@@ -63,6 +63,18 @@ if (triple.includes("apple-darwin")) {
   const py = process.env.PYTHON || "python3";
   run(py, ["apps/desktop/scripts/stage-onnxruntime.py", dylibDest]);
   console.log(`build-sidecar: staged ${dylibDest}`);
+  // onnxruntime is MIT — ship its license text + notice next to the dylib so the
+  // MIT "include the copyright + permission notice" requirement is satisfied at
+  // the distribution level (mirrors the ffmpeg GPLv3 §6 staging below). Source of
+  // truth: apps/desktop/licenses/onnxruntime/ (tracked); also surfaced in the
+  // in-app About → Licenses screen (sc-3778).
+  for (const name of ["LICENSE", "NOTICE.txt"]) {
+    copyFileSync(
+      join(desktopDir, "licenses", "onnxruntime", name),
+      join(ortDir, name),
+    );
+  }
+  console.log(`build-sidecar: staged onnxruntime MIT license + notice`);
 } else {
   writeFileSync(
     join(ortDir, "README.txt"),

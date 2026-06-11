@@ -19,6 +19,7 @@ import { QueueScreen } from "./screens/QueueScreen.jsx";
 import { PresetManagerScreen } from "./screens/PresetManagerScreen.jsx";
 import { SettingsScreen } from "./screens/SettingsScreen.jsx";
 import { LogsScreen } from "./screens/LogsScreen.jsx";
+import { LicensesScreen } from "./screens/LicensesScreen.jsx";
 import { SetupWizard } from "./screens/SetupWizard.jsx";
 import { editModelForAsset } from "./presetUtils.js";
 import { sortNewest, sortOldest, sortWorkers } from "./sorters.js";
@@ -189,6 +190,7 @@ const navSections = [
       { id: "Queue", icon: Icon.Queue },
       { id: "Logs", icon: Icon.Logs },
       { id: "Settings", icon: Icon.Sliders },
+      { id: "Licenses", icon: Icon.Info },
     ],
   },
 ];
@@ -213,6 +215,10 @@ const viewTitles = {
   Queue: { title: "Queue", blurb: "All running and recent jobs across workers." },
   Logs: { title: "Logs", blurb: "This session's activity — routing decisions, worker phases and errors." },
   Settings: { title: "Settings", blurb: "Paths, service tokens, and detected GPU." },
+  Licenses: {
+    title: "Licenses",
+    blurb: "Third-party components bundled with SceneWorks and their license notices.",
+  },
 };
 
 function readStoredTheme() {
@@ -1948,6 +1954,7 @@ export function App() {
         ) : null}
         {activeView === "Settings" ? <SettingsScreen /> : null}
         {activeView === "Logs" ? <LogsScreen /> : null}
+        {activeView === "Licenses" ? <LicensesScreen /> : null}
           </>
         )}
       </section>

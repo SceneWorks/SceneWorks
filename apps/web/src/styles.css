@@ -8050,3 +8050,112 @@ label {
   overflow-x: auto;
   white-space: pre;
 }
+
+/* About → Licenses (sc-3778): aggregated third-party notices. Master list of
+   bundled components on the left, selected component's facts + full license text
+   on the right. */
+.licenses-screen {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  min-height: 0;
+}
+.licenses-intro {
+  margin: 0;
+  color: var(--text-faint);
+  font-size: 13px;
+  max-width: 70ch;
+}
+.licenses-layout {
+  display: grid;
+  grid-template-columns: minmax(180px, 240px) 1fr;
+  gap: 16px;
+  flex: 1 1 auto;
+  min-height: 0;
+}
+.licenses-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-height: 0;
+  overflow-y: auto;
+}
+.licenses-item {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  text-align: left;
+  padding: 8px 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--r-md);
+  background: var(--surface);
+  cursor: pointer;
+}
+.licenses-item:hover {
+  background: var(--surface-2);
+}
+.licenses-item.active {
+  border-color: var(--accent);
+  background: color-mix(in oklch, var(--accent) 10%, transparent);
+}
+.licenses-item-name {
+  font-weight: 600;
+}
+.licenses-item-meta {
+  font-size: 11.5px;
+  color: var(--text-faint);
+}
+.licenses-detail {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  min-height: 0;
+}
+.licenses-detail-head h3 {
+  margin: 0 0 8px;
+}
+.licenses-facts {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 2px 12px;
+  margin: 0;
+  font-size: 13px;
+}
+.licenses-facts dt {
+  color: var(--text-faint);
+}
+.licenses-facts dd {
+  margin: 0;
+  word-break: break-word;
+}
+.licenses-usage {
+  margin: 8px 0 0;
+  color: var(--text-faint);
+  font-size: 13px;
+  max-width: 70ch;
+}
+.licenses-text {
+  flex: 1 1 auto;
+  min-height: 0;
+  margin: 0;
+  padding: 12px 14px;
+  overflow: auto;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: var(--r-md);
+  font-family: var(--font-mono);
+  font-size: 12px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+.licenses-empty {
+  padding: 24px;
+  color: var(--text-faint);
+  text-align: center;
+}
+@media (max-width: 720px) {
+  .licenses-layout {
+    grid-template-columns: 1fr;
+  }
+}
