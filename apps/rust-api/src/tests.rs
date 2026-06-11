@@ -3,12 +3,12 @@ use super::events::{EventHub, EventMessage};
 use super::training::{insufficient_disk_space, resolve_base_model_path};
 use super::workers::person_readiness_from_workers;
 use super::{
-    create_app, huggingface_repo_cache_path, inject_converted_model_path, inprocess_worker_gpu_id,
-    lora_artifact_paths, merge_model_manifest_entry, mlx_catalog_status, safe_download_dir,
-    safe_repo_dir_name, serialize_job_lora, should_warn_open_bind, strip_jsonc_comments,
-    sweep_stale_lora_uploads_before, Settings, WorkerCapability, WorkerSnapshot, WorkerStatus,
-    API_MANAGED_MANIFEST_HEADER, DEFAULT_API_HOST, EVENT_BUFFER_SIZE, HEARTBEAT_SSE_DATA,
-    HEARTBEAT_SSE_WIRE, TEST_MAX_LORA_UPLOAD_BYTES,
+    create_app, create_app_with_state, huggingface_repo_cache_path, inject_converted_model_path,
+    inprocess_worker_gpu_id, lora_artifact_paths, merge_model_manifest_entry, mlx_catalog_status,
+    safe_download_dir, safe_repo_dir_name, serialize_job_lora, should_warn_open_bind,
+    strip_jsonc_comments, sweep_stale_lora_uploads_before, Settings, WorkerCapability,
+    WorkerSnapshot, WorkerStatus, API_MANAGED_MANIFEST_HEADER, DEFAULT_API_HOST, EVENT_BUFFER_SIZE,
+    HEARTBEAT_SSE_DATA, HEARTBEAT_SSE_WIRE, TEST_MAX_LORA_UPLOAD_BYTES,
 };
 use axum::body::{to_bytes, Body};
 use axum::http::{Request, StatusCode};
@@ -633,6 +633,107 @@ async fn worker_can_register_claim_and_complete_job_through_http() {
     assert_eq!(status, StatusCode::OK);
     assert_eq!(queue["counts"]["completed"], 1);
     assert_eq!(queue["workers"][0]["status"], "idle");
+}
+
+#[tokio::test]
+async fn progress_ticks_only_republish_queue_on_status_change() {
+    // sc-4203 (F-API-5): a pure progress tick (status unchanged) must not trigger the
+    // full queue-summary recompute + queue.updated broadcast; a status transition must.
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let (app, state) = create_app_with_state(test_settings(&temp_dir)).expect("app creates");
+
+    request(
+        app.clone(),
+        "POST",
+        "/api/v1/workers/register",
+        json!({
+            "workerId": "worker-1",
+            "gpuId": "gpu-0",
+            "gpuName": "GPU 0",
+            "capabilities": ["image_generate"],
+            "loadedModels": []
+        }),
+    )
+    .await;
+    let (_, created) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/jobs",
+        json!({
+            "type": "image_generate",
+            "projectId": "project-1",
+            "projectName": "Project 1",
+            "payload": { "prompt": "mist" },
+            "requestedGpu": "auto"
+        }),
+    )
+    .await;
+    let job_id = created["id"].as_str().expect("job id is string").to_owned();
+    request(
+        app.clone(),
+        "POST",
+        "/api/v1/jobs/claim",
+        json!({ "workerId": "worker-1" }),
+    )
+    .await;
+    // Move the job into `running` (a transition from `preparing`).
+    request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/jobs/{job_id}/progress"),
+        json!({ "status": "running", "stage": "running", "progress": 0.2, "message": "step" }),
+    )
+    .await;
+
+    // Subscribe AFTER the transition so we only observe the next ticks' events.
+    let mut events = state.events.subscribe();
+
+    // A pure progress tick (running -> running): job.updated, but NOT queue.updated.
+    request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/jobs/{job_id}/progress"),
+        json!({ "status": "running", "stage": "running", "progress": 0.6, "message": "step" }),
+    )
+    .await;
+    let tick_events = drain_event_names(&mut events).await;
+    assert!(
+        tick_events.iter().any(|name| name == "job.updated"),
+        "a progress tick still emits job.updated: {tick_events:?}"
+    );
+    assert!(
+        !tick_events.iter().any(|name| name == "queue.updated"),
+        "a pure progress tick must not republish the queue: {tick_events:?}"
+    );
+
+    // A status transition (running -> completed) republishes the queue.
+    request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/jobs/{job_id}/progress"),
+        json!({ "status": "completed", "stage": "completed", "progress": 1, "message": "done" }),
+    )
+    .await;
+    let done_events = drain_event_names(&mut events).await;
+    assert!(
+        done_events.iter().any(|name| name == "queue.updated"),
+        "a status transition must republish the queue: {done_events:?}"
+    );
+}
+
+// Collect the event names currently buffered for a subscriber, stopping after a brief
+// quiet period (handlers publish synchronously before the request future resolves, so
+// everything is already buffered by the time we drain).
+async fn drain_event_names(
+    events: &mut tokio_stream::wrappers::ReceiverStream<EventMessage>,
+) -> Vec<String> {
+    let mut names = Vec::new();
+    while let Ok(Some(message)) =
+        tokio::time::timeout(Duration::from_millis(150), events.next()).await
+    {
+        names.push(message.event);
+    }
+    names
 }
 
 #[tokio::test]
