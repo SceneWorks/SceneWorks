@@ -17,9 +17,12 @@ const requiredPaths = [
   "crates/sceneworks-core/src/lib.rs",
   "Cargo.toml",
   "rust-toolchain.toml",
-  "packages/schemas/project.schema.json",
+  "packages/schemas/model-manifest.schema.json",
+  "packages/schemas/lora-manifest.schema.json",
+  "packages/schemas/recipe-preset.schema.json",
   "config/manifests/builtin.models.jsonc",
   "config/manifests/builtin.loras.jsonc",
+  "config/manifests/builtin.recipe-presets.jsonc",
   "data/projects/.gitkeep",
   "data/models/.gitkeep",
   "data/loras/.gitkeep",
@@ -28,6 +31,33 @@ const requiredPaths = [
   "docker/rust.Dockerfile",
   "docker/web.Dockerfile",
   "docker/worker.Dockerfile",
+];
+
+const manifestSchemaPaths = [
+  "packages/schemas/model-manifest.schema.json",
+  "packages/schemas/lora-manifest.schema.json",
+  "packages/schemas/recipe-preset.schema.json",
+];
+
+const manifestPaths = [
+  "config/manifests/builtin.models.jsonc",
+  "config/manifests/builtin.loras.jsonc",
+  "config/manifests/builtin.recipe-presets.jsonc",
+];
+
+const manifestSchemaPairs = [
+  {
+    manifestPath: "config/manifests/builtin.models.jsonc",
+    schemaPath: "packages/schemas/model-manifest.schema.json",
+  },
+  {
+    manifestPath: "config/manifests/builtin.loras.jsonc",
+    schemaPath: "packages/schemas/lora-manifest.schema.json",
+  },
+  {
+    manifestPath: "config/manifests/builtin.recipe-presets.jsonc",
+    schemaPath: "packages/schemas/recipe-preset.schema.json",
+  },
 ];
 
 async function assertReadable(relativePath) {
@@ -85,9 +115,72 @@ function stripJsoncComments(body) {
   return result;
 }
 
+async function readJsonc(relativePath) {
+  return JSON.parse(stripJsoncComments(await readFile(path.join(root, relativePath), "utf8")));
+}
+
+async function assertManifestSchemasParse() {
+  for (const schemaPath of manifestSchemaPaths) {
+    const schema = JSON.parse(await readFile(path.join(root, schemaPath), "utf8"));
+    if (schema.$schema !== "https://json-schema.org/draft/2020-12/schema") {
+      throw new Error(`${schemaPath} must declare JSON Schema draft 2020-12`);
+    }
+    if (!schema.$id?.startsWith("https://sceneworks.local/schemas/")) {
+      throw new Error(`${schemaPath} must declare a sceneworks.local schema id`);
+    }
+  }
+}
+
+async function assertManifestSchemaReferences() {
+  for (const manifestPath of manifestPaths) {
+    const manifest = await readJsonc(manifestPath);
+    if (typeof manifest.$schema !== "string") {
+      throw new Error(`${manifestPath} must declare a local $schema path`);
+    }
+    if (!manifest.$schema.startsWith("../../packages/schemas/")) {
+      throw new Error(`${manifestPath} must reference packages/schemas, got ${manifest.$schema}`);
+    }
+    await assertReadable(path.normalize(path.join(path.dirname(manifestPath), manifest.$schema)));
+  }
+}
+
+function assertJsonType(relativePath, key, value, expectedType) {
+  if (expectedType === "integer") {
+    if (!Number.isInteger(value)) {
+      throw new Error(`${relativePath} ${key} must be an integer`);
+    }
+    return;
+  }
+  if (expectedType === "array") {
+    if (!Array.isArray(value)) {
+      throw new Error(`${relativePath} ${key} must be an array`);
+    }
+    return;
+  }
+  if (typeof value !== expectedType) {
+    throw new Error(`${relativePath} ${key} must be a ${expectedType}`);
+  }
+}
+
+async function assertManifestRootsMatchSchemas() {
+  for (const { manifestPath, schemaPath } of manifestSchemaPairs) {
+    const manifest = await readJsonc(manifestPath);
+    const schema = JSON.parse(await readFile(path.join(root, schemaPath), "utf8"));
+    for (const key of schema.required ?? []) {
+      if (!(key in manifest)) {
+        throw new Error(`${manifestPath} is missing required schema field ${key}`);
+      }
+      const expectedType = schema.properties?.[key]?.type;
+      if (typeof expectedType === "string") {
+        assertJsonType(manifestPath, key, manifest[key], expectedType);
+      }
+    }
+  }
+}
+
 async function assertBuiltinPromptGuides() {
   const manifestPath = "config/manifests/builtin.models.jsonc";
-  const manifest = JSON.parse(stripJsoncComments(await readFile(path.join(root, manifestPath), "utf8")));
+  const manifest = await readJsonc(manifestPath);
   for (const model of manifest.models ?? []) {
     const guide = model.ui?.promptGuide;
     if (!guide?.title || !guide?.path) {
@@ -111,7 +204,7 @@ async function assertCharacterImageTuningSurface() {
   // The engine-wiring half of the sc-2018 guard lives in pytest because the
   // scaffold can't see worker MODEL_TARGETS without parsing Python.
   const manifestPath = "config/manifests/builtin.models.jsonc";
-  const manifest = JSON.parse(stripJsoncComments(await readFile(path.join(root, manifestPath), "utf8")));
+  const manifest = await readJsonc(manifestPath);
   const unbalanced = [];
   for (const model of manifest.models ?? []) {
     const ui = model.ui ?? {};
@@ -143,6 +236,9 @@ await assertContains("docker-compose.yml", "/sceneworks/data/cache/jobs.db");
 await assertContains(".env.example", "SCENEWORKS_RUST_WORKER_GPU_ID=cpu");
 await assertContains("docker/rust.Dockerfile", "sceneworks-rust-api");
 await assertContains("README.md", "SCENEWORKS_ACCESS_TOKEN");
+await assertManifestSchemasParse();
+await assertManifestSchemaReferences();
+await assertManifestRootsMatchSchemas();
 await assertBuiltinPromptGuides();
 await assertCharacterImageTuningSurface();
 

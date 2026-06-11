@@ -229,7 +229,7 @@ apps/
 crates/
   sceneworks-core/ Shared Rust contract/domain helpers
 packages/
-  schemas/   Shared schema placeholders
+  schemas/   Manifest JSON schemas
   shared/    Cross-app Python helpers for JSON, project lookup, and project DB indexing
 config/
   manifests/ Built-in and user model/LoRA manifests
