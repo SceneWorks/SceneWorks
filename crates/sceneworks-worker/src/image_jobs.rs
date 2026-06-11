@@ -928,6 +928,101 @@ enum GenEvent {
     },
 }
 
+#[cfg(target_os = "macos")]
+type GeneratedImage = (i64, u32, u32, Vec<u8>);
+
+#[cfg(target_os = "macos")]
+fn send_gen_progress(tx: &tokio::sync::mpsc::Sender<GenEvent>, index: usize, progress: Progress) {
+    let event = match progress {
+        Progress::Step { current, total } => GenEvent::Step {
+            index,
+            current,
+            total,
+        },
+        Progress::Decoding => GenEvent::Decoding { index },
+    };
+    let _ = tx.blocking_send(event);
+}
+
+#[cfg(target_os = "macos")]
+fn send_generated_image(
+    tx: &tokio::sync::mpsc::Sender<GenEvent>,
+    index: usize,
+    image: GeneratedImage,
+) -> bool {
+    let (seed, width, height, pixels) = image;
+    tx.blocking_send(GenEvent::Image {
+        index,
+        seed,
+        width,
+        height,
+        pixels,
+    })
+    .is_ok()
+}
+
+#[cfg(target_os = "macos")]
+fn drive_gen_items<I, Item, F>(
+    tx: tokio::sync::mpsc::Sender<GenEvent>,
+    items: I,
+    mut generate: F,
+) -> WorkerResult<()>
+where
+    I: IntoIterator<Item = Item>,
+    F: FnMut(usize, Item, &mut dyn FnMut(Progress)) -> WorkerResult<Option<GeneratedImage>>,
+{
+    for (index, item) in items.into_iter().enumerate() {
+        let mut on_progress = |progress| send_gen_progress(&tx, index, progress);
+        let Some(image) = generate(index, item, &mut on_progress)? else {
+            break;
+        };
+        if !send_generated_image(&tx, index, image) {
+            break;
+        }
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+fn start_gen_stream<G, L, D>(
+    job_id: String,
+    engine_id: &'static str,
+    adapter_count: usize,
+    load: L,
+    drive: D,
+) -> (
+    CancelFlag,
+    tokio::sync::mpsc::Receiver<GenEvent>,
+    tokio::task::JoinHandle<WorkerResult<()>>,
+)
+where
+    L: FnOnce() -> WorkerResult<G> + Send + 'static,
+    D: FnOnce(G, tokio::sync::mpsc::Sender<GenEvent>, CancelFlag) -> WorkerResult<()>
+        + Send
+        + 'static,
+{
+    let cancel = CancelFlag::new();
+    let (tx, rx) = tokio::sync::mpsc::channel::<GenEvent>(64);
+    let blocking_cancel = cancel.clone();
+    let blocking = tokio::task::spawn_blocking(move || -> WorkerResult<()> {
+        emit_load_event(
+            "image_pipeline_load_start",
+            &job_id,
+            engine_id,
+            adapter_count,
+        );
+        let generator = load()?;
+        emit_load_event(
+            "image_pipeline_load_complete",
+            &job_id,
+            engine_id,
+            adapter_count,
+        );
+        drive(generator, tx, blocking_cancel)
+    });
+    (cancel, rx, blocking)
+}
+
 /// True when this job can run real in-process inference: the model is a linked,
 /// engine-backed family and its weights resolve locally.
 /// Fail-loud gate for the stub fallback (sc-4176): Some(message) when the
@@ -1527,45 +1622,17 @@ async fn generate_mlx_stream(
     // distilled families, which carry CFG (if any) through `guidance` instead.
     let true_cfg = flux_true_cfg.or(model_true_cfg);
 
-    let cancel = CancelFlag::new();
-    let (tx, rx) = tokio::sync::mpsc::channel::<GenEvent>(64);
-
-    let blocking = {
-        let prompt = request.prompt.clone();
-        let (width, height) = (request.width, request.height);
-        let seeds = seeds.clone();
-        let cancel = cancel.clone();
-        let job_id = job.id.clone();
-        // `identity_init` + `flux_ip_dir` + `true_cfg` are moved into the closure (the `move`
-        // captures them by value).
-        tokio::task::spawn_blocking(move || -> WorkerResult<()> {
-            let adapter_count = adapters.len();
-            emit_load_event(
-                "image_pipeline_load_start",
-                &job_id,
-                engine_id,
-                adapter_count,
-            );
-            let generator = mlx_load_with_ip(engine_id, weights_dir, quant, adapters, flux_ip_dir)?;
-            emit_load_event(
-                "image_pipeline_load_complete",
-                &job_id,
-                engine_id,
-                adapter_count,
-            );
-            for (index, seed) in seeds.into_iter().enumerate() {
-                let mut on_progress = |progress: Progress| {
-                    let event = match progress {
-                        Progress::Step { current, total } => GenEvent::Step {
-                            index,
-                            current,
-                            total,
-                        },
-                        Progress::Decoding => GenEvent::Decoding { index },
-                    };
-                    let _ = tx.blocking_send(event);
-                };
-                let (width, height, pixels) = mlx_generate_one(
+    let prompt = request.prompt.clone();
+    let (width, height) = (request.width, request.height);
+    let adapter_count = adapters.len();
+    let (cancel, rx, blocking) = start_gen_stream(
+        job.id.clone(),
+        engine_id,
+        adapter_count,
+        move || mlx_load_with_ip(engine_id, weights_dir, quant, adapters, flux_ip_dir),
+        move |generator, tx, cancel| {
+            drive_gen_items(tx, seeds, move |_index, seed, on_progress| {
+                let (out_w, out_h, pixels) = mlx_generate_one(
                     generator.as_ref(),
                     &prompt,
                     width,
@@ -1577,24 +1644,12 @@ async fn generate_mlx_stream(
                     identity_init.as_ref(),
                     true_cfg,
                     &cancel,
-                    &mut on_progress,
+                    on_progress,
                 )?;
-                if tx
-                    .blocking_send(GenEvent::Image {
-                        index,
-                        seed,
-                        width,
-                        height,
-                        pixels,
-                    })
-                    .is_err()
-                {
-                    break; // receiver gone — stop generating.
-                }
-            }
-            Ok(())
-        })
-    };
+                Ok(Some((seed, out_w, out_h, pixels)))
+            })
+        },
+    );
 
     consume_gen_events(
         api,
@@ -2054,32 +2109,18 @@ async fn generate_zimage_control_stream(
     // wardrobe, lighting) stay constant while only the pose changes (Python parity).
     let seed = resolve_seed(request, 0);
 
-    let cancel = CancelFlag::new();
-    let (tx, rx) = tokio::sync::mpsc::channel::<GenEvent>(64);
-
-    let blocking = {
-        let prompt = request.prompt.clone();
-        let (width, height) = (request.width, request.height);
-        let cancel = cancel.clone();
-        let stickwidth = crate::openpose_skeleton::body_stickwidth(width, height);
-        let job_id = job.id.clone();
-        tokio::task::spawn_blocking(move || -> WorkerResult<()> {
-            let adapter_count = adapters.len();
-            emit_load_event(
-                "image_pipeline_load_start",
-                &job_id,
-                ZIMAGE_CONTROL_ENGINE_ID,
-                adapter_count,
-            );
-            let generator = zimage_control_load(weights_dir, control_weights, quant, adapters)?;
-            emit_load_event(
-                "image_pipeline_load_complete",
-                &job_id,
-                ZIMAGE_CONTROL_ENGINE_ID,
-                adapter_count,
-            );
+    let prompt = request.prompt.clone();
+    let (width, height) = (request.width, request.height);
+    let stickwidth = crate::openpose_skeleton::body_stickwidth(width, height);
+    let adapter_count = adapters.len();
+    let (cancel, rx, blocking) = start_gen_stream(
+        job.id.clone(),
+        ZIMAGE_CONTROL_ENGINE_ID,
+        adapter_count,
+        move || zimage_control_load(weights_dir, control_weights, quant, adapters),
+        move |generator, tx, cancel| {
             let identity_init = identity_init.as_ref();
-            for (index, pose) in poses.into_iter().enumerate() {
+            drive_gen_items(tx, poses, move |_index, pose, on_progress| {
                 let skeleton = crate::openpose_skeleton::draw_wholebody(
                     width,
                     height,
@@ -2093,18 +2134,7 @@ async fn generate_zimage_control_stream(
                     height,
                     pixels: skeleton.into_raw(),
                 };
-                let mut on_progress = |progress: Progress| {
-                    let event = match progress {
-                        Progress::Step { current, total } => GenEvent::Step {
-                            index,
-                            current,
-                            total,
-                        },
-                        Progress::Decoding => GenEvent::Decoding { index },
-                    };
-                    let _ = tx.blocking_send(event);
-                };
-                let (width, height, pixels) = zimage_control_generate_one(
+                let (out_w, out_h, pixels) = zimage_control_generate_one(
                     generator.as_ref(),
                     &prompt,
                     width,
@@ -2115,24 +2145,12 @@ async fn generate_zimage_control_stream(
                     control_scale,
                     identity_init,
                     &cancel,
-                    &mut on_progress,
+                    on_progress,
                 )?;
-                if tx
-                    .blocking_send(GenEvent::Image {
-                        index,
-                        seed,
-                        width,
-                        height,
-                        pixels,
-                    })
-                    .is_err()
-                {
-                    break; // receiver gone — stop generating.
-                }
-            }
-            Ok(())
-        })
-    };
+                Ok(Some((seed, out_w, out_h, pixels)))
+            })
+        },
+    );
 
     consume_gen_events(
         api,
@@ -2774,95 +2792,62 @@ async fn generate_flux2_edit_stream(
         Flux2Grouping::Plain => {}
     }
 
-    let cancel = CancelFlag::new();
-    let (tx, rx) = tokio::sync::mpsc::channel::<GenEvent>(64);
-
-    let blocking = {
-        let (width, height) = (request.width, request.height);
-        let stickwidth = crate::openpose_skeleton::body_stickwidth(width, height);
-        let cancel = cancel.clone();
-        let job_id = job.id.clone();
-        tokio::task::spawn_blocking(move || -> WorkerResult<()> {
-            let adapter_count = adapters.len();
-            emit_load_event(
-                "image_pipeline_load_start",
-                &job_id,
-                engine_id,
-                adapter_count,
-            );
-            let generator = mlx_load(engine_id, weights_dir, quant, adapters)?;
-            emit_load_event(
-                "image_pipeline_load_complete",
-                &job_id,
-                engine_id,
-                adapter_count,
-            );
-            for (index, (seed, prompt)) in seeds.into_iter().zip(prompts).enumerate() {
-                // Pose tier: pair this pose's body-only skeleton (DWPose body, no
-                // hands/face — Python `draw_bodypose`) with the reference as a
-                // `[skeleton, reference]` multi-image set; else the plain reference set.
-                let conditioning = match &pose_keypoints {
-                    Some(keypoints) => {
-                        let skeleton = crate::openpose_skeleton::draw_wholebody(
-                            width,
-                            height,
-                            &keypoints[index],
-                            None,
-                            None,
-                            stickwidth,
-                        );
-                        vec![Conditioning::MultiReference {
-                            images: vec![
-                                Image {
-                                    width,
-                                    height,
-                                    pixels: skeleton.into_raw(),
-                                },
-                                references[0].clone(),
-                            ],
-                        }]
-                    }
-                    None => build_edit_conditioning(&references),
-                };
-                let mut on_progress = |progress: Progress| {
-                    let event = match progress {
-                        Progress::Step { current, total } => GenEvent::Step {
-                            index,
-                            current,
-                            total,
-                        },
-                        Progress::Decoding => GenEvent::Decoding { index },
+    let (width, height) = (request.width, request.height);
+    let stickwidth = crate::openpose_skeleton::body_stickwidth(width, height);
+    let adapter_count = adapters.len();
+    let (cancel, rx, blocking) = start_gen_stream(
+        job.id.clone(),
+        engine_id,
+        adapter_count,
+        move || mlx_load(engine_id, weights_dir, quant, adapters),
+        move |generator, tx, cancel| {
+            drive_gen_items(
+                tx,
+                seeds.into_iter().zip(prompts),
+                move |index, (seed, prompt), on_progress| {
+                    // Pose tier: pair this pose's body-only skeleton (DWPose body, no
+                    // hands/face — Python `draw_bodypose`) with the reference as a
+                    // `[skeleton, reference]` multi-image set; else the plain reference set.
+                    let conditioning = match &pose_keypoints {
+                        Some(keypoints) => {
+                            let skeleton = crate::openpose_skeleton::draw_wholebody(
+                                width,
+                                height,
+                                &keypoints[index],
+                                None,
+                                None,
+                                stickwidth,
+                            );
+                            vec![Conditioning::MultiReference {
+                                images: vec![
+                                    Image {
+                                        width,
+                                        height,
+                                        pixels: skeleton.into_raw(),
+                                    },
+                                    references[0].clone(),
+                                ],
+                            }]
+                        }
+                        None => build_edit_conditioning(&references),
                     };
-                    let _ = tx.blocking_send(event);
-                };
-                let (out_w, out_h, pixels) = flux2_edit_generate_one(
-                    generator.as_ref(),
-                    &prompt,
-                    width,
-                    height,
-                    seed,
-                    steps,
-                    guidance,
-                    conditioning,
-                    &cancel,
-                    &mut on_progress,
-                )?;
-                if tx
-                    .blocking_send(GenEvent::Image {
-                        index,
+                    let (out_w, out_h, pixels) = flux2_edit_generate_one(
+                        generator.as_ref(),
+                        &prompt,
+                        width,
+                        height,
                         seed,
-                        width: out_w,
-                        height: out_h,
-                        pixels,
-                    })
-                    .is_err()
-                {
-                    break; // receiver gone — stop generating.
-                }
-            }
-            Ok(())
-        })
-    };
+                        steps,
+                        guidance,
+                        conditioning,
+                        &cancel,
+                        on_progress,
+                    )?;
+                    Ok(Some((seed, out_w, out_h, pixels)))
+                },
+            )
+        },
+    );
 
     consume_gen_events(
         api,
@@ -3057,31 +3042,17 @@ async fn generate_qwen_control_stream(
     );
     let seed = resolve_seed(request, 0);
 
-    let cancel = CancelFlag::new();
-    let (tx, rx) = tokio::sync::mpsc::channel::<GenEvent>(64);
-
-    let blocking = {
-        let prompt = request.prompt.clone();
-        let (width, height) = (request.width, request.height);
-        let cancel = cancel.clone();
-        let stickwidth = crate::openpose_skeleton::body_stickwidth(width, height);
-        let job_id = job.id.clone();
-        tokio::task::spawn_blocking(move || -> WorkerResult<()> {
-            let adapter_count = adapters.len();
-            emit_load_event(
-                "image_pipeline_load_start",
-                &job_id,
-                QWEN_CONTROL_ENGINE_ID,
-                adapter_count,
-            );
-            let generator = qwen_control_load(weights_dir, control_weights, quant, adapters)?;
-            emit_load_event(
-                "image_pipeline_load_complete",
-                &job_id,
-                QWEN_CONTROL_ENGINE_ID,
-                adapter_count,
-            );
-            for (index, pose) in poses.into_iter().enumerate() {
+    let prompt = request.prompt.clone();
+    let (width, height) = (request.width, request.height);
+    let stickwidth = crate::openpose_skeleton::body_stickwidth(width, height);
+    let adapter_count = adapters.len();
+    let (cancel, rx, blocking) = start_gen_stream(
+        job.id.clone(),
+        QWEN_CONTROL_ENGINE_ID,
+        adapter_count,
+        move || qwen_control_load(weights_dir, control_weights, quant, adapters),
+        move |generator, tx, cancel| {
+            drive_gen_items(tx, poses, move |_index, pose, on_progress| {
                 let skeleton = crate::openpose_skeleton::draw_wholebody(
                     width,
                     height,
@@ -3095,18 +3066,7 @@ async fn generate_qwen_control_stream(
                     height,
                     pixels: skeleton.into_raw(),
                 };
-                let mut on_progress = |progress: Progress| {
-                    let event = match progress {
-                        Progress::Step { current, total } => GenEvent::Step {
-                            index,
-                            current,
-                            total,
-                        },
-                        Progress::Decoding => GenEvent::Decoding { index },
-                    };
-                    let _ = tx.blocking_send(event);
-                };
-                let (width, height, pixels) = qwen_control_generate_one(
+                let (out_w, out_h, pixels) = qwen_control_generate_one(
                     generator.as_ref(),
                     &prompt,
                     negative_prompt.clone(),
@@ -3118,24 +3078,12 @@ async fn generate_qwen_control_stream(
                     control,
                     control_scale,
                     &cancel,
-                    &mut on_progress,
+                    on_progress,
                 )?;
-                if tx
-                    .blocking_send(GenEvent::Image {
-                        index,
-                        seed,
-                        width,
-                        height,
-                        pixels,
-                    })
-                    .is_err()
-                {
-                    break; // receiver gone — stop generating.
-                }
-            }
-            Ok(())
-        })
-    };
+                Ok(Some((seed, out_w, out_h, pixels)))
+            })
+        },
+    );
 
     consume_gen_events(
         api,
@@ -3597,98 +3545,65 @@ async fn generate_qwen_edit_stream(
         );
     }
 
-    let cancel = CancelFlag::new();
-    let (tx, rx) = tokio::sync::mpsc::channel::<GenEvent>(64);
-
-    let blocking = {
-        let (width, height) = (request.width, request.height);
-        let stickwidth = crate::openpose_skeleton::body_stickwidth(width, height);
-        let cancel = cancel.clone();
-        let job_id = job.id.clone();
-        tokio::task::spawn_blocking(move || -> WorkerResult<()> {
-            let adapter_count = adapters.len();
-            emit_load_event(
-                "image_pipeline_load_start",
-                &job_id,
-                engine_id,
-                adapter_count,
-            );
-            let generator = mlx_load(engine_id, weights_dir, quant, adapters)?;
-            emit_load_event(
-                "image_pipeline_load_complete",
-                &job_id,
-                engine_id,
-                adapter_count,
-            );
-            for (index, (seed, prompt)) in seeds.into_iter().zip(prompts).enumerate() {
-                // Pose tier: pair the reference with this pose's body-only skeleton (DWPose
-                // body, no hands/face — Python `draw_bodypose`) as a `[reference, skeleton]`
-                // multi-image set. Reference FIRST: the engine VL-encodes references[0] for
-                // the prompt embeds (identity), the skeleton is added dual-latent geometry.
-                let conditioning = match &pose_keypoints {
-                    Some(keypoints) => {
-                        let skeleton = crate::openpose_skeleton::draw_wholebody(
-                            width,
-                            height,
-                            &keypoints[index],
-                            None,
-                            None,
-                            stickwidth,
-                        );
-                        vec![Conditioning::MultiReference {
-                            images: vec![
-                                references[0].clone(),
-                                Image {
-                                    width,
-                                    height,
-                                    pixels: skeleton.into_raw(),
-                                },
-                            ],
-                        }]
-                    }
-                    None => build_edit_conditioning(&references),
-                };
-                let mut on_progress = |progress: Progress| {
-                    let event = match progress {
-                        Progress::Step { current, total } => GenEvent::Step {
-                            index,
-                            current,
-                            total,
-                        },
-                        Progress::Decoding => GenEvent::Decoding { index },
+    let (width, height) = (request.width, request.height);
+    let stickwidth = crate::openpose_skeleton::body_stickwidth(width, height);
+    let adapter_count = adapters.len();
+    let (cancel, rx, blocking) = start_gen_stream(
+        job.id.clone(),
+        engine_id,
+        adapter_count,
+        move || mlx_load(engine_id, weights_dir, quant, adapters),
+        move |generator, tx, cancel| {
+            drive_gen_items(
+                tx,
+                seeds.into_iter().zip(prompts),
+                move |index, (seed, prompt), on_progress| {
+                    // Pose tier: pair the reference with this pose's body-only skeleton (DWPose
+                    // body, no hands/face — Python `draw_bodypose`) as a `[reference, skeleton]`
+                    // multi-image set. Reference FIRST: the engine VL-encodes references[0] for
+                    // the prompt embeds (identity), the skeleton is added dual-latent geometry.
+                    let conditioning = match &pose_keypoints {
+                        Some(keypoints) => {
+                            let skeleton = crate::openpose_skeleton::draw_wholebody(
+                                width,
+                                height,
+                                &keypoints[index],
+                                None,
+                                None,
+                                stickwidth,
+                            );
+                            vec![Conditioning::MultiReference {
+                                images: vec![
+                                    references[0].clone(),
+                                    Image {
+                                        width,
+                                        height,
+                                        pixels: skeleton.into_raw(),
+                                    },
+                                ],
+                            }]
+                        }
+                        None => build_edit_conditioning(&references),
                     };
-                    let _ = tx.blocking_send(event);
-                };
-                let (out_w, out_h, pixels) = qwen_edit_generate_one(
-                    generator.as_ref(),
-                    &prompt,
-                    negative_prompt.clone(),
-                    width,
-                    height,
-                    seed,
-                    steps,
-                    guidance,
-                    sampler,
-                    conditioning,
-                    &cancel,
-                    &mut on_progress,
-                )?;
-                if tx
-                    .blocking_send(GenEvent::Image {
-                        index,
+                    let (out_w, out_h, pixels) = qwen_edit_generate_one(
+                        generator.as_ref(),
+                        &prompt,
+                        negative_prompt.clone(),
+                        width,
+                        height,
                         seed,
-                        width: out_w,
-                        height: out_h,
-                        pixels,
-                    })
-                    .is_err()
-                {
-                    break; // receiver gone — stop generating.
-                }
-            }
-            Ok(())
-        })
-    };
+                        steps,
+                        guidance,
+                        sampler,
+                        conditioning,
+                        &cancel,
+                        on_progress,
+                    )?;
+                    Ok(Some((seed, out_w, out_h, pixels)))
+                },
+            )
+        },
+    );
 
     consume_gen_events(
         api,
@@ -3975,58 +3890,35 @@ async fn generate_sensenova_edit_stream(
         raw_settings.insert("angleSet".to_owned(), Value::Bool(true));
     }
 
-    let cancel = CancelFlag::new();
-    let (tx, rx) = tokio::sync::mpsc::channel::<GenEvent>(64);
-
-    let blocking = {
-        let cancel = cancel.clone();
-        let job_id = job.id.clone();
-        tokio::task::spawn_blocking(move || -> WorkerResult<()> {
-            emit_load_event("image_pipeline_load_start", &job_id, engine_id, 0);
-            let generator = mlx_load(engine_id, weights_dir, quant, Vec::new())?;
-            emit_load_event("image_pipeline_load_complete", &job_id, engine_id, 0);
-            for (index, (seed, prompt)) in seeds.into_iter().zip(prompts).enumerate() {
-                let mut on_progress = |progress: Progress| {
-                    let event = match progress {
-                        Progress::Step { current, total } => GenEvent::Step {
-                            index,
-                            current,
-                            total,
-                        },
-                        Progress::Decoding => GenEvent::Decoding { index },
-                    };
-                    let _ = tx.blocking_send(event);
-                };
-                let (w, h, pixels) = sensenova_edit_generate_one(
-                    generator.as_ref(),
-                    &prompt,
-                    out_w,
-                    out_h,
-                    seed,
-                    steps,
-                    guidance,
-                    img_cfg,
-                    timestep_shift,
-                    conditioning.clone(),
-                    &cancel,
-                    &mut on_progress,
-                )?;
-                if tx
-                    .blocking_send(GenEvent::Image {
-                        index,
+    let (cancel, rx, blocking) = start_gen_stream(
+        job.id.clone(),
+        engine_id,
+        0,
+        move || mlx_load(engine_id, weights_dir, quant, Vec::new()),
+        move |generator, tx, cancel| {
+            drive_gen_items(
+                tx,
+                seeds.into_iter().zip(prompts),
+                move |_index, (seed, prompt), on_progress| {
+                    let (w, h, pixels) = sensenova_edit_generate_one(
+                        generator.as_ref(),
+                        &prompt,
+                        out_w,
+                        out_h,
                         seed,
-                        width: w,
-                        height: h,
-                        pixels,
-                    })
-                    .is_err()
-                {
-                    break; // receiver gone — stop generating.
-                }
-            }
-            Ok(())
-        })
-    };
+                        steps,
+                        guidance,
+                        img_cfg,
+                        timestep_shift,
+                        conditioning.clone(),
+                        &cancel,
+                        on_progress,
+                    )?;
+                    Ok(Some((seed, w, h, pixels)))
+                },
+            )
+        },
+    );
 
     consume_gen_events(
         api,
@@ -4461,36 +4353,16 @@ async fn generate_sdxl_advanced_stream(
         .collect();
     let total = seeds.len();
 
-    let cancel = CancelFlag::new();
-    let (tx, rx) = tokio::sync::mpsc::channel::<GenEvent>(64);
-
-    let blocking = {
-        let prompt = request.prompt.clone();
-        let negative_prompt = negative_prompt.clone();
-        let cancel = cancel.clone();
-        let job_id = job.id.clone();
-        tokio::task::spawn_blocking(move || -> WorkerResult<()> {
-            let adapter_count = adapters.len();
-            emit_load_event("image_pipeline_load_start", &job_id, "sdxl", adapter_count);
-            let generator = sdxl_advanced_load(weights_dir, quant, adapters, ip_adapter_dir)?;
-            emit_load_event(
-                "image_pipeline_load_complete",
-                &job_id,
-                "sdxl",
-                adapter_count,
-            );
-            for (index, seed) in seeds.into_iter().enumerate() {
-                let mut on_progress = |progress: Progress| {
-                    let event = match progress {
-                        Progress::Step { current, total } => GenEvent::Step {
-                            index,
-                            current,
-                            total,
-                        },
-                        Progress::Decoding => GenEvent::Decoding { index },
-                    };
-                    let _ = tx.blocking_send(event);
-                };
+    let prompt = request.prompt.clone();
+    let negative_prompt = negative_prompt.clone();
+    let adapter_count = adapters.len();
+    let (cancel, rx, blocking) = start_gen_stream(
+        job.id.clone(),
+        "sdxl",
+        adapter_count,
+        move || sdxl_advanced_load(weights_dir, quant, adapters, ip_adapter_dir),
+        move |generator, tx, cancel| {
+            drive_gen_items(tx, seeds, move |_index, seed, on_progress| {
                 let (out_w, out_h, pixels) = sdxl_advanced_generate_one(
                     generator.as_ref(),
                     &prompt,
@@ -4502,24 +4374,12 @@ async fn generate_sdxl_advanced_stream(
                     guidance,
                     conditioning.clone(),
                     &cancel,
-                    &mut on_progress,
+                    on_progress,
                 )?;
-                if tx
-                    .blocking_send(GenEvent::Image {
-                        index,
-                        seed,
-                        width: out_w,
-                        height: out_h,
-                        pixels,
-                    })
-                    .is_err()
-                {
-                    break; // receiver gone — stop generating.
-                }
-            }
-            Ok(())
-        })
-    };
+                Ok(Some((seed, out_w, out_h, pixels)))
+            })
+        },
+    );
 
     consume_gen_events(
         api,
@@ -5192,15 +5052,12 @@ async fn generate_instantid_stream(
     };
     let total = work.len();
 
-    let cancel = CancelFlag::new();
-    let (tx, rx) = tokio::sync::mpsc::channel::<GenEvent>(64);
-
-    let blocking = {
-        let negative_prompt = request.negative_prompt.clone();
-        let cancel = cancel.clone();
-        let job_id = job.id.clone();
-        tokio::task::spawn_blocking(move || -> WorkerResult<()> {
-            emit_load_event("image_pipeline_load_start", &job_id, "instantid", 0);
+    let negative_prompt = request.negative_prompt.clone();
+    let (cancel, rx, blocking) = start_gen_stream(
+        job.id.clone(),
+        "instantid",
+        0,
+        move || {
             let paths = InstantIdPaths {
                 sdxl_base,
                 identitynet: controlnet,
@@ -5253,70 +5110,27 @@ async fn generate_instantid_stream(
             } else {
                 None
             };
-            emit_load_event("image_pipeline_load_complete", &job_id, "instantid", 0);
-
-            for (index, (seed, prompt, action)) in work.into_iter().enumerate() {
-                if cancel.is_cancelled() {
-                    break;
-                }
-                // Per-step progress → GenEvent::Step, so `consume_gen_events` streams step
-                // updates, fires `image_inference_start`, and polls the cancel API (sc-4382 —
-                // without Step events an InstantID job could never be cancelled).
-                let mut on_progress = |progress: Progress| {
-                    let event = match progress {
-                        Progress::Step { current, total } => GenEvent::Step {
-                            index,
-                            current,
-                            total,
-                        },
-                        Progress::Decoding => GenEvent::Decoding { index },
-                    };
-                    let _ = tx.blocking_send(event);
-                };
-                // Angle + pose sets use a square canvas (the engine forces `req.height =
-                // req.width` for the canonical landmark/skeleton — the sc-2009 kps-aspect rule);
-                // single identity keeps the requested W×H (the engine letterboxes the reference).
-                let req = InstantIdRequest {
-                    prompt,
-                    negative: negative_prompt.clone(),
-                    width,
-                    height,
-                    steps: steps as usize,
-                    guidance,
-                    ip_adapter_scale: ip_scale,
-                    controlnet_scale,
-                    openpose_scale,
-                    seed: seed as u64,
-                    cancel: cancel.clone(),
-                };
-                let result = match &action {
-                    InstantIdAction::Identity => model.generate(&req, &reference, &mut on_progress),
-                    InstantIdAction::Angle(kps) => {
-                        model.generate_with_kps(&req, &reference, kps, &mut on_progress)
+            Ok((model, reference, restore_embedding))
+        },
+        move |(model, reference, restore_embedding), tx, cancel| {
+            drive_gen_items(
+                tx,
+                work,
+                move |_index, (seed, prompt, action), on_progress| {
+                    if cancel.is_cancelled() {
+                        return Ok(None);
                     }
-                    InstantIdAction::Pose(keypoints) => {
-                        model.generate_pose(&req, &reference, keypoints, &mut on_progress)
-                    }
-                };
-                let mut out = match result {
-                    Ok(out) => out,
-                    // A cancel tripped mid-denoise surfaces as the engine's cancelled error —
-                    // stop cleanly (consume_gen_events posts the Canceled update).
-                    Err(_) if cancel.is_cancelled() => break,
-                    Err(error) => {
-                        return Err(WorkerError::Engine(format!(
-                            "InstantID generation failed: {error}"
-                        )));
-                    }
-                };
-                // Optional ADetailer-style face-restore re-render (sc-3380), imposing the
-                // reference identity on the cropped face with the gender-neutral restore prompt.
-                if let Some(embedding) = &restore_embedding {
-                    let restore_req = InstantIdRequest {
-                        prompt: FACE_RESTORE_PROMPT.to_owned(),
+                    // Per-step progress → GenEvent::Step, so `consume_gen_events` streams step
+                    // updates, fires `image_inference_start`, and polls the cancel API (sc-4382 —
+                    // without Step events an InstantID job could never be cancelled).
+                    // Angle + pose sets use a square canvas (the engine forces `req.height =
+                    // req.width` for the canonical landmark/skeleton — the sc-2009 kps-aspect rule);
+                    // single identity keeps the requested W×H (the engine letterboxes the reference).
+                    let req = InstantIdRequest {
+                        prompt,
                         negative: negative_prompt.clone(),
-                        width: INSTANTID_FACE_RESTORE_SIDE,
-                        height: INSTANTID_FACE_RESTORE_SIDE,
+                        width,
+                        height,
                         steps: steps as usize,
                         guidance,
                         ip_adapter_scale: ip_scale,
@@ -5325,33 +5139,64 @@ async fn generate_instantid_stream(
                         seed: seed as u64,
                         cancel: cancel.clone(),
                     };
-                    out = match model.restore_face(&restore_req, &out, embedding, &mut on_progress)
-                    {
-                        Ok(out) => out,
-                        Err(_) if cancel.is_cancelled() => break,
-                        Err(error) => {
-                            return Err(WorkerError::InvalidPayload(format!(
-                                "InstantID face-restore failed: {error}"
-                            )))
+                    let result = match &action {
+                        InstantIdAction::Identity => {
+                            model.generate(&req, &reference, &mut *on_progress)
+                        }
+                        InstantIdAction::Angle(kps) => {
+                            model.generate_with_kps(&req, &reference, kps, &mut *on_progress)
+                        }
+                        InstantIdAction::Pose(keypoints) => {
+                            model.generate_pose(&req, &reference, keypoints, &mut *on_progress)
                         }
                     };
-                }
-                if tx
-                    .blocking_send(GenEvent::Image {
-                        index,
-                        seed,
-                        width: out.width,
-                        height: out.height,
-                        pixels: out.pixels,
-                    })
-                    .is_err()
-                {
-                    break; // receiver gone — stop generating.
-                }
-            }
-            Ok(())
-        })
-    };
+                    let mut out = match result {
+                        Ok(out) => out,
+                        // A cancel tripped mid-denoise surfaces as the engine's cancelled error —
+                        // stop cleanly (consume_gen_events posts the Canceled update).
+                        Err(_) if cancel.is_cancelled() => return Ok(None),
+                        Err(error) => {
+                            return Err(WorkerError::Engine(format!(
+                                "InstantID generation failed: {error}"
+                            )));
+                        }
+                    };
+                    // Optional ADetailer-style face-restore re-render (sc-3380), imposing the
+                    // reference identity on the cropped face with the gender-neutral restore prompt.
+                    if let Some(embedding) = &restore_embedding {
+                        let restore_req = InstantIdRequest {
+                            prompt: FACE_RESTORE_PROMPT.to_owned(),
+                            negative: negative_prompt.clone(),
+                            width: INSTANTID_FACE_RESTORE_SIDE,
+                            height: INSTANTID_FACE_RESTORE_SIDE,
+                            steps: steps as usize,
+                            guidance,
+                            ip_adapter_scale: ip_scale,
+                            controlnet_scale,
+                            openpose_scale,
+                            seed: seed as u64,
+                            cancel: cancel.clone(),
+                        };
+                        out = match model.restore_face(
+                            &restore_req,
+                            &out,
+                            embedding,
+                            &mut *on_progress,
+                        ) {
+                            Ok(out) => out,
+                            Err(_) if cancel.is_cancelled() => return Ok(None),
+                            Err(error) => {
+                                return Err(WorkerError::InvalidPayload(format!(
+                                    "InstantID face-restore failed: {error}"
+                                )))
+                            }
+                        };
+                    }
+                    Ok(Some((seed, out.width, out.height, out.pixels)))
+                },
+            )
+        },
+    );
 
     consume_gen_events(
         api,
