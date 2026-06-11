@@ -1,0 +1,34 @@
+{
+  "_comment": "Source of truth for the in-app About → Licenses screen (sc-3778). License text lives alongside each entry in this directory; build-sidecar.mjs also stages these files next to the corresponding binaries in the packaged app. The `description` below is shown to end users — keep it user-facing.",
+  "description": "SceneWorks bundles the following third-party components. Their license notices and any written offers are reproduced below.",
+  "components": [
+    {
+      "id": "ffmpeg",
+      "name": "FFmpeg",
+      "version": "7.1",
+      "publisher": "The FFmpeg developers",
+      "license": "GPL-3.0-or-later",
+      "homepage": "https://ffmpeg.org/",
+      "platforms": ["macos"],
+      "usage": "Bundled static binary (macOS arm64), invoked as a separate program for video/audio encode, mux, frame sampling and timeline export.",
+      "documents": [
+        { "label": "Notice & written offer for source", "key": "ffmpeg-notice" },
+        { "label": "GNU General Public License v3", "key": "ffmpeg-gpl" }
+      ]
+    },
+    {
+      "id": "onnxruntime",
+      "name": "ONNX Runtime",
+      "version": "1.26.0",
+      "publisher": "Microsoft Corporation",
+      "license": "MIT",
+      "homepage": "https://onnxruntime.ai/",
+      "platforms": ["macos"],
+      "usage": "Bundled CoreML dynamic library (macOS arm64), loaded at runtime for the in-app DWPose pose detector.",
+      "documents": [
+        { "label": "Notice", "key": "onnxruntime-notice" },
+        { "label": "MIT License", "key": "onnxruntime-license" }
+      ]
+    }
+  ]
+}
