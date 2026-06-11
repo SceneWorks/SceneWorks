@@ -1968,72 +1968,74 @@ pub(crate) async fn mux_segments(
 pub(crate) async fn mux_with_crossfades(
     ffmpeg: &str,
     segments: &[TimelineSegment],
-    tmp_path: &Path,
+    _tmp_path: &Path,
     output_path: &Path,
     context: Option<FfmpegContext<'_>>,
 ) -> WorkerResult<()> {
-    let Some(first) = segments.first() else {
+    run_ffmpeg(
+        mux_with_crossfades_args(ffmpeg, segments, output_path)?,
+        context,
+    )
+    .await
+}
+
+pub(crate) fn mux_with_crossfades_args(
+    ffmpeg: &str,
+    segments: &[TimelineSegment],
+    output_path: &Path,
+) -> WorkerResult<Vec<String>> {
+    if segments.is_empty() {
         return Err(WorkerError::InvalidPayload(
             "Timeline has no rendered segments to mux.".to_owned(),
         ));
-    };
-    let mut current = first.path.clone();
-    let mut current_duration = first.duration;
+    }
+    let (filter, output_label) = crossfade_filter_complex(segments);
+    let mut args = vec![ffmpeg.to_owned(), "-y".to_owned()];
+    for segment in segments {
+        args.push("-i".to_owned());
+        args.push(segment.path.display().to_string());
+    }
+    args.extend([
+        "-filter_complex".to_owned(),
+        filter,
+        "-map".to_owned(),
+        format!("[{output_label}]"),
+        output_path.display().to_string(),
+    ]);
+    Ok(args)
+}
+
+fn crossfade_filter_complex(segments: &[TimelineSegment]) -> (String, String) {
+    let mut filters = Vec::with_capacity(segments.len() * 2);
+    for (index, _) in segments.iter().enumerate() {
+        filters.push(format!(
+            "[{index}:v]settb=AVTB,setpts=PTS-STARTPTS,format=yuv420p[v{index}]"
+        ));
+    }
+
+    let mut current_label = "v0".to_owned();
+    let mut current_duration = segments
+        .first()
+        .map(|segment| segment.duration)
+        .unwrap_or(0.0);
     for (index, segment) in segments.iter().enumerate().skip(1) {
-        let merged = tmp_path.join(format!("xfade_{index:04}.mp4"));
+        let next_label = format!("mix{index}");
         if segment.transition.as_deref() == Some("crossfade") {
             let duration = crossfade_duration(segment.transition_duration);
             let offset = (current_duration - duration).max(0.0);
-            run_ffmpeg(
-                vec![
-                    ffmpeg.to_owned(),
-                    "-y".to_owned(),
-                    "-i".to_owned(),
-                    current.display().to_string(),
-                    "-i".to_owned(),
-                    segment.path.display().to_string(),
-                    "-filter_complex".to_owned(),
-                    format!(
-                    "[0:v][1:v]xfade=transition=fade:duration={duration:.3}:offset={offset:.3},format=yuv420p[v]"
-                ),
-                    "-map".to_owned(),
-                    "[v]".to_owned(),
-                    merged.display().to_string(),
-                ],
-                context,
-            )
-            .await?;
+            filters.push(format!(
+                "[{current_label}][v{index}]xfade=transition=fade:duration={duration:.3}:offset={offset:.3},format=yuv420p[{next_label}]"
+            ));
             current_duration += segment.duration - duration;
         } else {
-            let list_path = tmp_path.join(format!("concat_{index:04}.txt"));
-            tokio::fs::write(
-                &list_path,
-                concat_file_contents([&current, &segment.path].into_iter()),
-            )
-            .await?;
-            run_ffmpeg(
-                vec![
-                    ffmpeg.to_owned(),
-                    "-y".to_owned(),
-                    "-f".to_owned(),
-                    "concat".to_owned(),
-                    "-safe".to_owned(),
-                    "0".to_owned(),
-                    "-i".to_owned(),
-                    list_path.display().to_string(),
-                    "-c".to_owned(),
-                    "copy".to_owned(),
-                    merged.display().to_string(),
-                ],
-                context,
-            )
-            .await?;
+            filters.push(format!(
+                "[{current_label}][v{index}]concat=n=2:v=1:a=0,format=yuv420p[{next_label}]"
+            ));
             current_duration += segment.duration;
         }
-        current = merged;
+        current_label = next_label;
     }
-    tokio::fs::rename(current, output_path).await?;
-    Ok(())
+    (filters.join(";"), current_label)
 }
 
 pub(crate) fn crossfade_duration(duration: f64) -> f64 {
@@ -2520,5 +2522,65 @@ mod person_track_e2e_tests {
         });
 
         let _ = std::fs::remove_dir_all(&scratch);
+    }
+}
+
+#[cfg(test)]
+mod crossfade_mux_tests {
+    use super::*;
+
+    fn segment(
+        path: &str,
+        duration: f64,
+        transition: Option<&str>,
+        transition_duration: f64,
+    ) -> TimelineSegment {
+        TimelineSegment {
+            path: PathBuf::from(path),
+            duration,
+            transition: transition.map(str::to_owned),
+            transition_duration,
+        }
+    }
+
+    #[test]
+    fn crossfade_mux_builds_one_filter_graph_for_all_segments() {
+        let segments = vec![
+            segment("a.mp4", 2.0, None, 0.5),
+            segment("b.mp4", 3.0, Some("crossfade"), 0.5),
+            segment("c.mp4", 4.0, None, 0.5),
+        ];
+
+        let args = mux_with_crossfades_args("ffmpeg", &segments, Path::new("out.mp4")).unwrap();
+        let filter_index = args
+            .iter()
+            .position(|arg| arg == "-filter_complex")
+            .expect("filter_complex present")
+            + 1;
+        let filter = &args[filter_index];
+
+        assert_eq!(args.iter().filter(|arg| arg.as_str() == "-i").count(), 3);
+        assert_eq!(
+            args.iter()
+                .filter(|arg| arg.as_str() == "-filter_complex")
+                .count(),
+            1
+        );
+        assert!(filter.contains("[v0][v1]xfade=transition=fade:duration=0.500:offset=1.500"));
+        assert!(filter.contains("[mix1][v2]concat=n=2:v=1:a=0"));
+        assert!(args.windows(2).any(|pair| pair == ["-map", "[mix2]"]));
+        assert!(!args.iter().any(|arg| arg.contains("xfade_")));
+        assert!(!args.iter().any(|arg| arg.contains("concat_")));
+    }
+
+    #[test]
+    fn crossfade_mux_rejects_empty_segments() {
+        let error = mux_with_crossfades_args("ffmpeg", &[], Path::new("out.mp4"))
+            .expect_err("empty timeline rejects");
+
+        assert!(matches!(error, WorkerError::InvalidPayload(_)));
+        assert!(error
+            .to_string()
+            .contains("Timeline has no rendered segments"));
     }
 }
