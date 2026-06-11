@@ -21,7 +21,7 @@
 use std::path::PathBuf;
 use std::sync::{Mutex, OnceLock};
 
-use crate::downloads::ensure_cached_file;
+use crate::downloads::{ensure_hf_cached_file, DownloadContext};
 use mlx_gen::weights::Weights;
 use mlx_gen_sam2::{Sam2ModelSize, Sam2VideoPredictor};
 
@@ -30,12 +30,10 @@ use crate::{Settings, WorkerError, WorkerResult};
 /// The production SAM2 size (matches the spike + the `SceneWorks/sam2-mlx` upload).
 const SEG_FILE: &str = "sam2.1_hiera_large.safetensors";
 
-/// Download-on-first-use source: the converted MLX SAM2 weights owned by SceneWorks
+/// Download-on-first-use repo: the converted MLX SAM2 weights owned by SceneWorks
 /// (sc-3707, uploaded from the official Meta `.pt` via `tools/convert_sam2_to_mlx.py`;
-/// bit-identical to the avbiswas reference). Public repo, so no credentials are needed —
-/// same shape as the YOLO11 detector weights (`person_jobs::DET_URL`).
-const SEG_URL: &str =
-    "https://huggingface.co/SceneWorks/sam2-mlx/resolve/main/sam2.1_hiera_large.safetensors";
+/// bit-identical to the avbiswas reference).
+const SEG_REPO: &str = "SceneWorks/sam2-mlx";
 
 /// The SAM2 video predictor is loaded once and cached process-wide (weights load is the
 /// expensive part; the per-clip tracking state is built fresh each call). Holds `None` until
@@ -71,11 +69,10 @@ pub(crate) fn resolve_segmenter_weights(settings: &Settings) -> Option<PathBuf> 
 }
 
 /// Resolve the SAM2 weights, downloading them from HuggingFace on first use (into the
-/// app cache). Mirrors `person_jobs::ensure_detector_weights` — atomic `.tmp` + rename
-/// so a partial download is never mistaken for a complete one.
+/// app cache) with streaming progress/cancel and size-aware resume.
 pub(crate) async fn ensure_segmenter_weights(
     settings: &Settings,
-    http_client: &reqwest::Client,
+    context: &DownloadContext<'_>,
 ) -> WorkerResult<PathBuf> {
     if let Some(path) = resolve_segmenter_weights(settings) {
         return Ok(path);
@@ -85,7 +82,7 @@ pub(crate) async fn ensure_segmenter_weights(
         .join("cache")
         .join("person-segment")
         .join(SEG_FILE);
-    ensure_cached_file(http_client, SEG_URL, &target).await
+    ensure_hf_cached_file(context, SEG_REPO, "main", SEG_FILE, &target).await
 }
 
 /// Scale a normalized `(x, y, width, height)` box to a pixel-space `[x1, y1, x2, y2]`

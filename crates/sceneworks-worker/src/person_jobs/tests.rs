@@ -8,6 +8,7 @@ use super::*;
 use mlx_gen::weights::Weights;
 use mlx_rs::Array;
 use std::path::PathBuf;
+use tokio::io::AsyncWriteExt;
 
 #[test]
 fn letterbox_centers_pad_on_the_short_axis() {
@@ -506,9 +507,9 @@ fn yolo11_matches_ultralytics_reference_on_photo() {
     }
 }
 
-/// Provisioning parity: download the fused weights from the public HuggingFace URL
-/// (`DET_URL`) into a throwaway dir, then prove a fresh download loads and detects the 4
-/// reference people. Validates the URL + that the hosted artifact is the right weights.
+/// Provisioning parity: stream the fused weights from the public HuggingFace URL
+/// into a throwaway dir, then prove a fresh download loads and detects the 4 reference
+/// people. Validates the URL + that the hosted artifact is the right weights.
 /// Ignored by default (network); run with the people.jpg fixture staged:
 ///   cargo test -p sceneworks-worker person_jobs -- --ignored --nocapture
 #[test]
@@ -526,17 +527,19 @@ fn yolo11_downloads_and_detects_from_huggingface() {
     let rt = tokio::runtime::Runtime::new().unwrap();
     rt.block_on(async {
         let client = reqwest::Client::new();
-        let bytes = client
-            .get(DET_URL)
+        let url = format!("https://huggingface.co/{DET_REPO}/resolve/main/{DET_FILE}");
+        let mut response = client
+            .get(url)
             .send()
             .await
             .expect("GET weights")
             .error_for_status()
-            .expect("200 OK")
-            .bytes()
-            .await
-            .expect("body");
-        tokio::fs::write(&target, &bytes).await.unwrap();
+            .expect("200 OK");
+        let mut output = tokio::fs::File::create(&target).await.unwrap();
+        while let Some(chunk) = response.chunk().await.expect("stream chunk") {
+            output.write_all(&chunk).await.unwrap();
+        }
+        output.flush().await.unwrap();
     });
     eprintln!(
         "downloaded {} bytes → {}",

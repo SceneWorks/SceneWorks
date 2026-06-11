@@ -34,7 +34,7 @@
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 
-use crate::downloads::ensure_cached_file;
+use crate::downloads::{ensure_hf_cached_file, DownloadContext};
 use image::RgbImage;
 use serde_json::{json, Value};
 
@@ -62,12 +62,8 @@ const PAD_VALUE: f32 = 114.0;
 const NMS_IOU: f32 = 0.7;
 /// The fused MLX-layout detector weights in the app cache / model dir.
 const DET_FILE: &str = "yolo11m_fused_mlx.safetensors";
-/// HuggingFace download URL for the fused weights (download-on-first-use, slice 4 /
-/// sc-3636). Public repo, so no credentials are needed — same shape as the DWPose
-/// openmmlab bundles (`pose_jobs`).
-const DET_URL: &str =
-    "https://huggingface.co/SceneWorks/yolo11m-person-detect-mlx/resolve/main/yolo11m_fused_mlx.safetensors";
-
+/// Hugging Face repo for the fused MLX detector weights.
+const DET_REPO: &str = "SceneWorks/yolo11m-person-detect-mlx";
 // ---------------------------------------------------------------------------
 // pure detector math (unit-tested without weights)
 // ---------------------------------------------------------------------------
@@ -756,11 +752,10 @@ pub(crate) fn resolve_detector_weights(settings: &Settings) -> Option<PathBuf> {
 }
 
 /// Resolve the fused MLX detector weights, downloading them from HuggingFace on first
-/// use (into the app cache). Mirrors `pose_jobs::ensure_one` — atomic `.tmp` + rename so
-/// a partial download is never mistaken for a complete one.
+/// use (into the app cache) with streaming progress/cancel and size-aware resume.
 pub(crate) async fn ensure_detector_weights(
     settings: &Settings,
-    http_client: &reqwest::Client,
+    context: &DownloadContext<'_>,
 ) -> WorkerResult<PathBuf> {
     if let Some(path) = resolve_detector_weights(settings) {
         return Ok(path);
@@ -770,7 +765,7 @@ pub(crate) async fn ensure_detector_weights(
         .join("cache")
         .join("person-detect")
         .join(DET_FILE);
-    ensure_cached_file(http_client, DET_URL, &target).await
+    ensure_hf_cached_file(context, DET_REPO, "main", DET_FILE, &target).await
 }
 
 #[cfg(test)]

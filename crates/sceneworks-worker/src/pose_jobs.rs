@@ -24,7 +24,7 @@
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 
-use crate::downloads::fetch_bytes;
+use crate::downloads::{ensure_cached_file, DownloadContext};
 use image::RgbImage;
 use ort::execution_providers::CoreMLExecutionProvider;
 use ort::session::Session;
@@ -528,16 +528,26 @@ fn detect_batch(
 /// `<data_dir>/cache/dwpose/`, then rtmlib's own cache (dev machines), else download
 /// + unzip the openmmlab bundle into the app cache.
 async fn ensure_weights(
+    api: &ApiClient,
     settings: &Settings,
     http_client: &reqwest::Client,
+    job: &JobSnapshot,
 ) -> WorkerResult<(PathBuf, PathBuf)> {
     let cache = settings.data_dir.join("cache").join("dwpose");
+    let download_context = DownloadContext {
+        api,
+        client: http_client,
+        settings,
+        job_id: &job.id,
+        cancel_message: "Pose detection canceled while fetching DWPose weights.",
+        fresh_download: false,
+    };
     let det = ensure_one(
         "SCENEWORKS_DWPOSE_DET",
         DET_FILE,
         DET_URL,
         &cache,
-        http_client,
+        &download_context,
     )
     .await?;
     let pose = ensure_one(
@@ -545,7 +555,7 @@ async fn ensure_weights(
         POSE_FILE,
         POSE_URL,
         &cache,
-        http_client,
+        &download_context,
     )
     .await?;
     Ok((det, pose))
@@ -556,7 +566,7 @@ async fn ensure_one(
     file: &str,
     url: &str,
     cache: &Path,
-    http_client: &reqwest::Client,
+    context: &DownloadContext<'_>,
 ) -> WorkerResult<PathBuf> {
     if let Ok(pinned) = std::env::var(env_key) {
         let path = PathBuf::from(pinned);
@@ -578,18 +588,26 @@ async fn ensure_one(
         }
     }
     tokio::fs::create_dir_all(cache).await?;
-    let bytes = fetch_bytes(http_client, url).await?;
+    let zip_path = target.with_extension("zip");
+    ensure_cached_file(
+        context,
+        url,
+        &zip_path,
+        &format!("DWPose {file} bundle"),
+        None,
+    )
+    .await?;
     // The openmmlab bundle is a .zip containing a single .onnx; extract it.
     let target_clone = target.clone();
     let file_owned = file.to_owned();
-    tokio::task::spawn_blocking(move || extract_onnx(&bytes, &file_owned, &target_clone))
+    tokio::task::spawn_blocking(move || extract_onnx(&zip_path, &file_owned, &target_clone))
         .await
         .map_err(|error| task_join_error("weight extract task", error))??;
     Ok(target)
 }
 
-fn extract_onnx(zip_bytes: &[u8], file: &str, target: &Path) -> WorkerResult<()> {
-    let reader = std::io::Cursor::new(zip_bytes);
+fn extract_onnx(zip_path: &Path, file: &str, target: &Path) -> WorkerResult<()> {
+    let reader = std::fs::File::open(zip_path)?;
     let mut archive = zip::ZipArchive::new(reader)
         .map_err(|e| WorkerError::InvalidPayload(format!("dwpose zip: {e}")))?;
     for i in 0..archive.len() {
@@ -782,7 +800,7 @@ pub(crate) async fn run_pose_detect_job(
         ),
     )
     .await?;
-    let (det_path, pose_path) = ensure_weights(settings, http_client).await?;
+    let (det_path, pose_path) = ensure_weights(api, settings, http_client, job).await?;
 
     update_job(
         api,

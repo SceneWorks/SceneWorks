@@ -439,9 +439,15 @@ pub(crate) async fn run_person_detect(
                 Value::Null,
             )
         } else {
-            let (boxes, device) =
-                run_yolo11_person_detect(settings, http_client, media_path.clone(), confidence)
-                    .await?;
+            let (boxes, device) = run_yolo11_person_detect(
+                api,
+                settings,
+                http_client,
+                job,
+                media_path.clone(),
+                confidence,
+            )
+            .await?;
             (
                 boxes,
                 "yolo11m".to_owned(),
@@ -567,12 +573,22 @@ pub(crate) async fn run_person_detect(
 /// (epic 3482, sc-3633); the Python Ultralytics path serves Windows/Linux.
 #[cfg(target_os = "macos")]
 async fn run_yolo11_person_detect(
+    api: &ApiClient,
     settings: &Settings,
     http_client: &reqwest::Client,
+    job: &JobSnapshot,
     frame_path: PathBuf,
     confidence: f64,
 ) -> WorkerResult<(Vec<Value>, &'static str)> {
-    let weights = crate::person_jobs::ensure_detector_weights(settings, http_client).await?;
+    let download_context = DownloadContext {
+        api,
+        client: http_client,
+        settings,
+        job_id: &job.id,
+        cancel_message: "Person detection canceled while fetching detector weights.",
+        fresh_download: false,
+    };
+    let weights = crate::person_jobs::ensure_detector_weights(settings, &download_context).await?;
     let conf = confidence as f32;
     let result = tokio::task::spawn_blocking(move || {
         crate::person_jobs::detect_people_blocking(weights, frame_path, conf)
@@ -586,8 +602,10 @@ async fn run_yolo11_person_detect(
 
 #[cfg(not(target_os = "macos"))]
 async fn run_yolo11_person_detect(
+    _api: &ApiClient,
     _settings: &Settings,
     _http_client: &reqwest::Client,
+    _job: &JobSnapshot,
     _frame_path: PathBuf,
     _confidence: f64,
 ) -> WorkerResult<(Vec<Value>, &'static str)> {
@@ -650,7 +668,15 @@ async fn assemble_real_person_track(
     use crate::person_track as pt;
 
     let selected_box = pt::NormalizedBox::from_json(detection.get("box").unwrap_or(&Value::Null));
-    let weights = crate::person_jobs::ensure_detector_weights(settings, http_client).await?;
+    let download_context = DownloadContext {
+        api,
+        client: http_client,
+        settings,
+        job_id: &job.id,
+        cancel_message: "Person tracking canceled while fetching detector weights.",
+        fresh_download: false,
+    };
+    let weights = crate::person_jobs::ensure_detector_weights(settings, &download_context).await?;
     let conf = confidence as f32;
     let timestamps = pt::sample_timestamps(duration);
 
@@ -739,7 +765,7 @@ async fn assemble_real_person_track(
         &mut frames_json,
         segment_enabled,
     )
-    .await;
+    .await?;
     let _ = tokio::fs::remove_dir_all(&work_dir).await;
 
     Ok(RealPersonTrack {
@@ -785,37 +811,46 @@ async fn segment_assembly_frames(
     frame_paths: &[PathBuf],
     frames_json: &mut [Value],
     segment_enabled: bool,
-) -> &'static str {
+) -> WorkerResult<&'static str> {
     let detected_total = frames.iter().filter(|frame| frame.detected).count();
     if detected_total == 0 || !segment_enabled {
-        return "missing";
+        return Ok("missing");
     }
 
     // Resolve/download the SAM2 weights once; any failure degrades to box masks.
-    let weights = match crate::person_segment::ensure_segmenter_weights(settings, http_client).await
-    {
-        Ok(path) => path,
-        Err(_) => return "degraded",
+    let download_context = DownloadContext {
+        api,
+        client: http_client,
+        settings,
+        job_id: &job.id,
+        cancel_message: "Person segmentation canceled while fetching SAM2 weights.",
+        fresh_download: false,
     };
+    let weights =
+        match crate::person_segment::ensure_segmenter_weights(settings, &download_context).await {
+            Ok(path) => path,
+            Err(WorkerError::Canceled(message)) => return Err(WorkerError::Canceled(message)),
+            Err(_) => return Ok("degraded"),
+        };
     let masks_dir = project_path
         .join("person-tracks")
         .join(track_id)
         .join("masks");
     if tokio::fs::create_dir_all(&masks_dir).await.is_err() {
-        return "degraded";
+        return Ok("degraded");
     }
 
     // The track spans first..=last detected frame. Propagate across that contiguous clip; frames
     // outside it (before the person appears / after they leave) are left mask-less as before.
     let Some(first) = frames.iter().position(|f| f.detected) else {
-        return "missing";
+        return Ok("missing");
     };
     let last = frames.iter().rposition(|f| f.detected).unwrap_or(first);
 
     // Clip frame paths + per-frame ByteTrack box anchors (None on the gap frames the predictor
     // fills from memory). The shared sample index ties frame `i` ↔ `frame_paths[i]` ↔ mask `i + 1`.
     if frame_paths.len() <= last {
-        return "degraded";
+        return Ok("degraded");
     }
     let mut clip_paths = Vec::with_capacity(last - first + 1);
     let mut anchors = Vec::with_capacity(last - first + 1);
@@ -829,16 +864,12 @@ async fn segment_assembly_frames(
         )));
     }
 
-    if check_cancel(
+    check_cancel(
         api,
         &job.id,
         "Person tracking canceled during segmentation.",
     )
-    .await
-    .is_err()
-    {
-        return "degraded";
-    }
+    .await?;
 
     let weights_for_task = weights.clone();
     let masks = match tokio::task::spawn_blocking(move || {
@@ -849,7 +880,7 @@ async fn segment_assembly_frames(
         Ok(Ok(masks)) => masks,
         // Propagation failure degrades to box masks (handled by the replacement loader); a track
         // that already located the person is never failed by the mask pass.
-        _ => return "degraded",
+        _ => return Ok("degraded"),
     };
 
     // Write every clip frame's non-empty mask (detected + gap) and set its sidecar `mask`. All the
@@ -874,7 +905,7 @@ async fn segment_assembly_frames(
             .await
         {
             Ok(written) => written,
-            Err(_) => return "degraded",
+            Err(_) => return Ok("degraded"),
         };
 
     let mut generated = 0usize;
@@ -891,7 +922,10 @@ async fn segment_assembly_frames(
         }
     }
 
-    crate::person_segment::rollup_mask_state(generated, detected_total)
+    Ok(crate::person_segment::rollup_mask_state(
+        generated,
+        detected_total,
+    ))
 }
 
 /// Encode each `(assembly_idx, rel, out_path, pixels)` mask as an `L` (8-bit grayscale) PNG,
@@ -2280,12 +2314,23 @@ mod person_track_e2e_tests {
         let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
         rt.block_on(async {
             let http = reqwest::Client::new();
+            let api = ApiClient::new(&settings);
+            let job_id = "person-track-e2e";
+            let download_context = DownloadContext {
+                api: &api,
+                client: &http,
+                settings: &settings,
+                job_id,
+                cancel_message: "person track e2e canceled while fetching weights",
+                fresh_download: false,
+            };
 
             // 1. Provision the real detector weights (download-on-first-use), then sample +
             //    detect each frame exactly as `assemble_real_person_track` does.
-            let det_weights = crate::person_jobs::ensure_detector_weights(&settings, &http)
-                .await
-                .expect("yolo11 weights provisioned");
+            let det_weights =
+                crate::person_jobs::ensure_detector_weights(&settings, &download_context)
+                    .await
+                    .expect("yolo11 weights provisioned");
             let mut per_frame: Vec<(f64, Vec<(crate::person_track::NormalizedBox, f64)>)> =
                 Vec::with_capacity(timestamps.len());
             let mut frame_paths: Vec<PathBuf> = Vec::with_capacity(timestamps.len());
@@ -2394,9 +2439,10 @@ mod person_track_e2e_tests {
             // 3. Provision the real SAM2 weights and propagate the person's mask across the
             //    detected span with the video predictor (sc-3715), writing masks under
             //    `person-tracks/{track_id}/masks/` (the production layout).
-            let seg_weights = crate::person_segment::ensure_segmenter_weights(&settings, &http)
-                .await
-                .expect("sam2 weights provisioned");
+            let seg_weights =
+                crate::person_segment::ensure_segmenter_weights(&settings, &download_context)
+                    .await
+                    .expect("sam2 weights provisioned");
 
             let first = assembly
                 .frames

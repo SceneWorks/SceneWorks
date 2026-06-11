@@ -1,45 +1,96 @@
 use super::*;
 use std::net::SocketAddr;
 
-/// GET `url` into memory via the shared HTTP client, with a clear error on a
-/// non-success status. The common fetch behind the worker's download-on-first-use
-/// weight fetchers (sc-4283 / F-MLXW-22) — one place to later add streaming /
-/// size-limits / integrity verification (F-MLXW-21) instead of the former four
-/// hand-rolled copies.
-#[cfg(target_os = "macos")]
-pub(crate) async fn fetch_bytes(http_client: &reqwest::Client, url: &str) -> WorkerResult<Vec<u8>> {
-    Ok(http_client
-        .get(url)
-        .send()
-        .await?
-        .error_for_status()
-        .map_err(|error| WorkerError::Engine(format!("weight download failed ({url}): {error}")))?
-        .bytes()
-        .await?
-        .to_vec())
-}
-
-/// Download `url` to `target` on first use: return it if already present, else GET
-/// into a sibling `.download.tmp` then atomically rename into place, so a partial
-/// download is never mistaken for a complete file. Creates `target`'s parent dir.
-/// Replaces the four bespoke GET→tmp→rename copies (sc-4283 / F-MLXW-22).
+/// Download `url` to `target` on first use. Existing complete files are reused;
+/// partial files resume with HTTP Range when the caller can provide `expected_size`.
+/// The transfer shares model-download progress/cancel plumbing instead of buffering
+/// the response body in memory.
 #[cfg(target_os = "macos")]
 pub(crate) async fn ensure_cached_file(
-    http_client: &reqwest::Client,
+    context: &DownloadContext<'_>,
     url: &str,
     target: &Path,
+    label: &str,
+    expected_size: Option<u64>,
 ) -> WorkerResult<PathBuf> {
-    if target.exists() {
+    let expected_size = match expected_size {
+        Some(size) => Some(size),
+        None => remote_content_length(context.client, url).await?,
+    };
+    if let Ok(metadata) = tokio::fs::metadata(target).await {
+        if expected_size
+            .map(|expected| metadata.len() == expected)
+            .unwrap_or(true)
+        {
+            return Ok(target.to_path_buf());
+        }
+    }
+    if expected_size.is_none() && target.exists() {
         return Ok(target.to_path_buf());
     }
     if let Some(parent) = target.parent() {
         tokio::fs::create_dir_all(parent).await?;
     }
-    let bytes = fetch_bytes(http_client, url).await?;
-    let tmp = target.with_extension("download.tmp");
-    tokio::fs::write(&tmp, &bytes).await?;
-    tokio::fs::rename(&tmp, target).await?;
+    let started_bytes = existing_download_bytes(target, expected_size).await?;
+    let mut progress = DownloadProgress::new(
+        label,
+        started_bytes,
+        expected_size,
+        progress_report_interval(context.settings),
+    );
+    download_file(context, url, target, expected_size, label, &mut progress).await?;
     Ok(target.to_path_buf())
+}
+
+#[cfg(target_os = "macos")]
+async fn remote_content_length(client: &reqwest::Client, url: &str) -> WorkerResult<Option<u64>> {
+    let response = match client.head(url).send().await {
+        Ok(response) => response,
+        Err(_) => return Ok(None),
+    };
+    if response.status().is_success() {
+        Ok(response.content_length().filter(|value| *value > 0))
+    } else {
+        Ok(None)
+    }
+}
+
+/// Resolve a single Hugging Face file and stream it into an app cache target with
+/// size-aware resume/progress. This is for first-use runtime weights that are not
+/// installed through the full model-download flow.
+#[cfg(target_os = "macos")]
+pub(crate) async fn ensure_hf_cached_file(
+    context: &DownloadContext<'_>,
+    repo: &str,
+    revision: &str,
+    file: &str,
+    target: &Path,
+) -> WorkerResult<PathBuf> {
+    let snapshot = HuggingFaceSnapshot::resolve(
+        context.client,
+        context.settings,
+        repo,
+        revision,
+        &[file.to_owned()],
+    )
+    .await?;
+    let Some(snapshot_file) = snapshot
+        .files
+        .into_iter()
+        .find(|candidate| candidate.path == file)
+    else {
+        return Err(WorkerError::InvalidPayload(format!(
+            "Hugging Face file {file} not found in {repo}."
+        )));
+    };
+    ensure_cached_file(
+        context,
+        &snapshot_file.download_url,
+        target,
+        &snapshot_file.path,
+        snapshot_file.size,
+    )
+    .await
 }
 
 #[derive(Debug, Clone)]
@@ -929,7 +980,11 @@ pub fn download_progress_payload(
 
 #[cfg(all(test, target_os = "macos"))]
 mod ensure_cached_file_tests {
-    use super::ensure_cached_file;
+    use super::{ensure_cached_file, DownloadContext};
+    use crate::{
+        ApiClient, Settings, DEFAULT_HUGGINGFACE_BASE_URL, DEFAULT_MAX_LORA_URL_BYTES,
+        DEFAULT_MAX_MODEL_URL_BYTES,
+    };
 
     /// sc-4283 / F-MLXW-22: when the target already exists, `ensure_cached_file`
     /// returns it without any network access (the cache-hit short-circuit shared
@@ -947,10 +1002,43 @@ mod ensure_cached_file_tests {
             .expect("seed target");
 
         let client = reqwest::Client::new();
-        let resolved =
-            ensure_cached_file(&client, "http://invalid.invalid/should-not-fetch", &target)
-                .await
-                .expect("cache hit returns without downloading");
+        let settings = Settings {
+            api_url: "http://127.0.0.1:1".to_owned(),
+            access_token: None,
+            data_dir: dir.path().join("data"),
+            config_dir: dir.path().join("config"),
+            worker_id: "test-worker".to_owned(),
+            gpu_id: "cpu".to_owned(),
+            is_child_worker: false,
+            poll_seconds: 1,
+            heartbeat_seconds: 5,
+            shutdown_timeout_seconds: 1,
+            huggingface_base_url: DEFAULT_HUGGINGFACE_BASE_URL.to_owned(),
+            huggingface_token: None,
+            credentials: Vec::new(),
+            max_lora_url_bytes: DEFAULT_MAX_LORA_URL_BYTES,
+            max_model_url_bytes: DEFAULT_MAX_MODEL_URL_BYTES,
+            allow_private_lora_urls: false,
+            utility_workers: 1,
+        };
+        let api = ApiClient::new(&settings);
+        let context = DownloadContext {
+            api: &api,
+            client: &client,
+            settings: &settings,
+            job_id: "job-1",
+            cancel_message: "canceled",
+            fresh_download: false,
+        };
+        let resolved = ensure_cached_file(
+            &context,
+            "http://invalid.invalid/should-not-fetch",
+            &target,
+            "test weights",
+            Some(12),
+        )
+        .await
+        .expect("cache hit returns without downloading");
         assert_eq!(resolved, target);
         // Content untouched (no overwrite).
         assert_eq!(
