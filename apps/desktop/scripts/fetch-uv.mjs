@@ -1,8 +1,9 @@
 #!/usr/bin/env node
 // Fetches the `uv` binary for the host target triple and stages it as a Tauri
 // sidecar (binaries/uv-<triple>) so the packaged app can bootstrap the Python
-// venv on first run (sc-1348). Pinned for reproducibility; cached after first
-// fetch. Wired into the tauri.conf.json beforeBuildCommand.
+// venv on first run (sc-1348). Pinned for reproducibility; cached only when
+// the staged sidecar metadata matches this script's pinned version. Wired into
+// the tauri.conf.json beforeBuildCommand.
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import {
@@ -13,6 +14,7 @@ import {
   readdirSync,
   rmSync,
   readFileSync,
+  writeFileSync,
 } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -55,17 +57,44 @@ if (!triple) {
 const isWindows = triple.includes("windows");
 const exe = isWindows ? ".exe" : "";
 const dest = join(outDir, `uv-${triple}${exe}`);
-
-if (existsSync(dest)) {
-  console.log(`fetch-uv: ${dest} already present (cached)`);
-  process.exit(0);
-}
-
 const asset = isWindows ? `uv-${triple}.zip` : `uv-${triple}.tar.gz`;
 const expectedSha256 = UV_SHA256[asset];
 if (!expectedSha256) {
   console.error(`fetch-uv: no pinned SHA-256 for ${asset}`);
   process.exit(1);
+}
+const metadataPath = `${dest}.json`;
+const expectedMetadata = {
+  version: UV_VERSION,
+  asset,
+  sha256: expectedSha256,
+};
+
+function readJson(path) {
+  try {
+    return JSON.parse(readFileSync(path, "utf8"));
+  } catch {
+    return null;
+  }
+}
+
+function isCurrentCachedUv(metadata) {
+  return (
+    metadata?.version === expectedMetadata.version &&
+    metadata?.asset === expectedMetadata.asset &&
+    metadata?.sha256 === expectedMetadata.sha256
+  );
+}
+
+if (existsSync(dest)) {
+  const metadata = readJson(metadataPath);
+  if (isCurrentCachedUv(metadata)) {
+    console.log(`fetch-uv: ${dest} already present for uv ${UV_VERSION} (cached)`);
+    process.exit(0);
+  }
+  console.log(`fetch-uv: ${dest} cache metadata is missing or stale; refetching uv ${UV_VERSION}`);
+  rmSync(dest, { force: true });
+  rmSync(metadataPath, { force: true });
 }
 const url = `https://github.com/astral-sh/uv/releases/download/${UV_VERSION}/${asset}`;
 const work = join(tmpdir(), `uv-fetch-${process.pid}`);
@@ -124,5 +153,6 @@ if (!src) {
 mkdirSync(outDir, { recursive: true });
 copyFileSync(src, dest);
 if (!isWindows) chmodSync(dest, 0o755);
+writeFileSync(metadataPath, `${JSON.stringify(expectedMetadata, null, 2)}\n`);
 rmSync(work, { recursive: true, force: true });
 console.log(`fetch-uv: staged ${dest}`);
