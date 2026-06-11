@@ -1,3 +1,4 @@
+# syntax=docker/dockerfile:1.7
 # Shared multi-target build for the Rust API and Rust worker images. The builder
 # stage (base image, workspace COPYs, cargo build) was previously copy-pasted
 # between docker/rust-api.Dockerfile and docker/rust-worker.Dockerfile, differing
@@ -14,14 +15,41 @@ ARG BIN
 WORKDIR /app
 
 COPY Cargo.toml Cargo.lock rust-toolchain.toml rustfmt.toml ./
+COPY crates/sceneworks-core/Cargo.toml ./crates/sceneworks-core/Cargo.toml
+COPY crates/sceneworks-worker/Cargo.toml ./crates/sceneworks-worker/Cargo.toml
+COPY apps/rust-api/Cargo.toml ./apps/rust-api/Cargo.toml
+COPY apps/rust-worker/Cargo.toml ./apps/rust-worker/Cargo.toml
+COPY apps/desktop/Cargo.toml ./apps/desktop/Cargo.toml
+
+RUN mkdir -p \
+      apps/desktop/src \
+      apps/rust-api/src \
+      apps/rust-worker/src \
+      crates/sceneworks-core/src \
+      crates/sceneworks-worker/src \
+    && printf 'fn main() {}\n' > apps/desktop/src/main.rs \
+    && printf 'fn main() {}\n' > apps/rust-api/src/main.rs \
+    && printf 'fn main() {}\n' > apps/rust-worker/src/main.rs \
+    && touch crates/sceneworks-core/src/lib.rs crates/sceneworks-worker/src/lib.rs
+
+RUN --mount=type=cache,target=/usr/local/cargo/registry \
+    --mount=type=cache,target=/usr/local/cargo/git \
+    cargo fetch --locked
+
 COPY crates ./crates
 COPY apps/rust-api ./apps/rust-api
 COPY apps/rust-worker ./apps/rust-worker
 # Copied purely to satisfy workspace membership (the desktop crate is in the
 # workspace but is not built into either image).
-COPY apps/desktop ./apps/desktop
+COPY apps/desktop/Cargo.toml ./apps/desktop/Cargo.toml
+COPY apps/desktop/build.rs ./apps/desktop/build.rs
 
-RUN cargo build -p "${BIN}" --release
+RUN --mount=type=cache,target=/usr/local/cargo/registry \
+    --mount=type=cache,target=/usr/local/cargo/git \
+    --mount=type=cache,target=/app/target \
+    cargo build -p "${BIN}" --release \
+    && mkdir -p /out \
+    && cp "target/release/${BIN}" "/out/${BIN}"
 
 # --- Rust API runtime ---------------------------------------------------------
 FROM debian:bookworm-slim AS rust-api
@@ -30,7 +58,7 @@ RUN apt-get update \
     && apt-get install -y --no-install-recommends ca-certificates curl \
     && rm -rf /var/lib/apt/lists/*
 
-COPY --from=builder /app/target/release/sceneworks-rust-api /usr/local/bin/sceneworks-rust-api
+COPY --from=builder /out/sceneworks-rust-api /usr/local/bin/sceneworks-rust-api
 
 CMD ["sceneworks-rust-api"]
 
@@ -47,6 +75,6 @@ RUN python3 -m venv /opt/hf-cli \
 
 ENV PATH="/opt/hf-cli/bin:${PATH}"
 
-COPY --from=builder /app/target/release/sceneworks-rust-worker /usr/local/bin/sceneworks-rust-worker
+COPY --from=builder /out/sceneworks-rust-worker /usr/local/bin/sceneworks-rust-worker
 
 CMD ["sceneworks-rust-worker"]
