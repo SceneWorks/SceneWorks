@@ -49,6 +49,7 @@ pub fn get_session_logs(
 }
 
 /// Bump to force a re-provision even if requirements.txt is unchanged.
+#[cfg(not(target_os = "macos"))]
 const SETUP_VERSION: &str = "3";
 const HEALTH_TIMEOUT: Duration = Duration::from_secs(30);
 
@@ -58,7 +59,9 @@ const HEALTH_TIMEOUT: Duration = Duration::from_secs(30);
 /// torchvision MUST match the CUDA torch build or diffusers 0.38's Flux.2 VAE
 /// import fails with "operator torchvision::nms does not exist". Mirrors the
 /// Docker /opt/lens-venv.
+#[cfg(not(target_os = "macos"))]
 const LENS_TORCH_SPEC: &str = "torch>=2.11,<2.12";
+#[cfg(not(target_os = "macos"))]
 const LENS_TORCHVISION_SPEC: &str = "torchvision>=0.26,<0.27";
 
 /// Process handles + run guards shared across the app.
@@ -146,6 +149,7 @@ pub fn venv_dir() -> PathBuf {
 /// Separate Lens sidecar venv (torch 2.11 / transformers 5.8 / diffusers 0.38),
 /// kept apart from the main venv whose transformers 4.x stack native LTX-2.3
 /// requires. LensTurboAdapter runs its interpreter via SCENEWORKS_LENS_PYTHON.
+#[cfg(not(target_os = "macos"))]
 fn lens_venv_dir() -> PathBuf {
     app_support_dir().join("python").join("lens-venv")
 }
@@ -158,10 +162,12 @@ pub fn venv_python(venv: &Path) -> PathBuf {
     }
 }
 
+#[cfg(not(target_os = "macos"))]
 fn marker_path() -> PathBuf {
     app_support_dir().join("python").join(".venv-marker")
 }
 
+#[cfg(not(target_os = "macos"))]
 fn lens_marker_path() -> PathBuf {
     app_support_dir().join("python").join(".lens-venv-marker")
 }
@@ -197,6 +203,7 @@ pub fn logs_dir() -> PathBuf {
 
 /// requirements.txt location: an explicit override (testing / custom installs),
 /// the bundled resource in a packaged app, or the repo copy during development.
+#[cfg(not(target_os = "macos"))]
 fn requirements_path(app: &AppHandle) -> PathBuf {
     if let Ok(override_path) = std::env::var("SCENEWORKS_DESKTOP_REQUIREMENTS") {
         let trimmed = override_path.trim();
@@ -219,6 +226,7 @@ fn requirements_path(app: &AppHandle) -> PathBuf {
 /// requirements-ltx.txt location (native LTX pipelines deps): the bundled
 /// resource in a packaged app, or the repo copy during development. Optional —
 /// absent in older worker checkouts, in which case LTX video is unavailable.
+#[cfg(not(target_os = "macos"))]
 fn requirements_ltx_path(app: &AppHandle) -> PathBuf {
     if let Ok(resources) = app.path().resource_dir() {
         let bundled = resources.join("python-src").join("requirements-ltx.txt");
@@ -238,6 +246,7 @@ fn requirements_ltx_path(app: &AppHandle) -> PathBuf {
 /// checkouts, in which case the InstantID character model is unavailable. Installed
 /// on all platforms (face analysis uses the CPU onnxruntime provider; the SDXL
 /// pipeline runs on CUDA or MPS like the other image adapters).
+#[cfg(not(target_os = "macos"))]
 fn requirements_instantid_path(app: &AppHandle) -> PathBuf {
     if let Ok(resources) = app.path().resource_dir() {
         let bundled = resources
@@ -260,6 +269,7 @@ fn requirements_instantid_path(app: &AppHandle) -> PathBuf {
 /// PuLID-FLUX character model stays unavailable (the adapter reports a clear
 /// error). Installed on all platforms (face analysis uses the CPU onnxruntime
 /// provider; the FLUX DiT runs on CUDA or MPS like the other image adapters).
+#[cfg(not(target_os = "macos"))]
 fn requirements_pulid_flux_path(app: &AppHandle) -> PathBuf {
     if let Ok(resources) = app.path().resource_dir() {
         let bundled = resources
@@ -282,6 +292,7 @@ fn requirements_pulid_flux_path(app: &AppHandle) -> PathBuf {
 /// and the Pose Library Create tab's detect jobs block ("no active worker supports
 /// pose detect"). Installed on all platforms (DWPose uses the CoreML/CPU
 /// onnxruntime provider). Epic 2282 / sc-2285.
+#[cfg(not(target_os = "macos"))]
 fn requirements_pose_path(app: &AppHandle) -> PathBuf {
     if let Ok(resources) = app.path().resource_dir() {
         let bundled = resources.join("python-src").join("requirements-pose.txt");
@@ -298,6 +309,7 @@ fn requirements_pose_path(app: &AppHandle) -> PathBuf {
 /// requirements-lens.txt location (Microsoft Lens sidecar venv deps): the bundled
 /// resource in a packaged app, or the repo copy during development. Optional —
 /// absent in older worker checkouts, in which case Lens is unavailable.
+#[cfg(not(target_os = "macos"))]
 fn requirements_lens_path(app: &AppHandle) -> PathBuf {
     if let Ok(resources) = app.path().resource_dir() {
         let bundled = resources.join("python-src").join("requirements-lens.txt");
@@ -512,6 +524,7 @@ fn health_is_sceneworks(port: u16) -> bool {
 
 /// Run the bundled `uv` with the given args, streaming output to setup-status
 /// log events. Returns Err with a message on a non-zero exit.
+#[cfg(not(target_os = "macos"))]
 async fn run_uv(app: &AppHandle, args: Vec<String>) -> Result<(), String> {
     let (mut events, _child) = app
         .shell()
@@ -548,6 +561,7 @@ async fn run_uv(app: &AppHandle, args: Vec<String>) -> Result<(), String> {
 /// wheels (other packages still come from PyPI); macOS torch wheels include MPS
 /// by default. All requirement files are installed in one pass so torch and its
 /// companions (e.g. torchaudio) resolve to a single, ABI-compatible version set.
+#[cfg(not(target_os = "macos"))]
 fn pip_install_args(python: &Path, requirement_files: &[PathBuf]) -> Vec<String> {
     #[cfg_attr(not(target_os = "windows"), allow(unused_mut))]
     let mut args = vec![
@@ -571,6 +585,7 @@ fn pip_install_args(python: &Path, requirement_files: &[PathBuf]) -> Vec<String>
 }
 
 /// Provision the venv if missing or stale (requirements / setup version changed).
+#[cfg(not(target_os = "macos"))]
 async fn provision_venv(app: &AppHandle) -> Result<(), String> {
     let venv = venv_dir();
     let python = venv_python(&venv);
@@ -686,6 +701,7 @@ async fn provision_venv(app: &AppHandle) -> Result<(), String> {
 /// the cu128 stack. Idempotent via its own marker. Failures are non-fatal: Lens
 /// stays unavailable (LensTurboAdapter reports a clear error) while the rest of the
 /// app works. Opt out with SCENEWORKS_DISABLE_LENS=1.
+#[cfg(not(target_os = "macos"))]
 async fn provision_lens_venv(app: &AppHandle) -> Result<(), String> {
     if std::env::var("SCENEWORKS_DISABLE_LENS")
         .map(|value| matches!(value.trim(), "1" | "true" | "yes"))
@@ -914,12 +930,6 @@ fn spawn_api(app: &AppHandle) -> Result<(), String> {
     if let Some(ort_dylib) = resolve_bundled_onnxruntime(app) {
         command = command.env("ORT_DYLIB_PATH", ort_dylib);
     }
-    // MLX model conversion (model_convert jobs) shells out to the venv's Python
-    // (mlx_video.convert_wan); point the in-process worker at the bundled interpreter.
-    command = command.env(
-        "SCENEWORKS_PYTHON",
-        venv_python(&venv_dir()).to_string_lossy().to_string(),
-    );
     // FLUX.2-klein true_v2 single-file conversion is now in-process Rust/MLX
     // (mlx_gen_flux2::convert_and_assemble, sc-3136) — no sidecar venv / converter
     // script, so no SCENEWORKS_MLX_FLUX_* env wiring.
@@ -1516,6 +1526,11 @@ async fn run_startup(app: AppHandle) {
         emit(&app, "error", format!("Setup failed: {error}"), true);
         return;
     }
+    // macOS is MLX-only (epic 3482, sc-3492/sc-3493): no Python venv is bundled or
+    // bootstrapped — skip provisioning entirely so first run starts straight on the
+    // Rust/MLX engine. Windows/Linux/Docker provision the uv-managed venv the Python
+    // torch worker needs.
+    #[cfg(not(target_os = "macos"))]
     if let Err(error) = provision_venv(&app).await {
         emit(&app, "error", format!("Setup failed: {error}"), true);
         return;
@@ -1536,11 +1551,12 @@ async fn run_startup(app: AppHandle) {
         return;
     }
     gate_window(app.clone());
-    // Provision the Lens sidecar venv in the background so its large torch download
-    // never blocks startup; Lens becomes usable once it finishes, while the rest of
-    // the app (incl. LTX/Z-Image/Qwen) is available immediately. macOS pulls MPS
-    // wheels, Windows/Linux pull cu128. Non-fatal: failures only mean Lens stays
-    // unavailable.
+    // Provision the Lens sidecar venv (torch) in the background on Windows/Linux so its
+    // large download never blocks startup; Lens becomes usable once it finishes, while
+    // the rest of the app is available immediately. Non-fatal: failures only mean Lens
+    // stays unavailable. Skipped on macOS (epic 3482, sc-3493): Lens ran in the Python
+    // torch worker the MLX-only Mac no longer spawns, and no torch venv is bundled there.
+    #[cfg(not(target_os = "macos"))]
     {
         let lens_app = app.clone();
         tauri::async_runtime::spawn(async move {
