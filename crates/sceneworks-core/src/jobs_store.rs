@@ -79,6 +79,22 @@ fn active_statuses_sql() -> &'static str {
             .join(", ")
     })
 }
+
+/// The terminal statuses as a quoted SQL list for `status not in (...)` filters,
+/// derived once from [`TERMINAL_STATUSES`] — same anti-drift rationale as
+/// [`active_statuses_sql`]. Used to select the non-terminal (still in-flight,
+/// including `queued`) jobs for the queue summary. Values are crate constants,
+/// never user input, so direct interpolation is safe.
+fn terminal_statuses_sql() -> &'static str {
+    static SQL: OnceLock<String> = OnceLock::new();
+    SQL.get_or_init(|| {
+        TERMINAL_STATUSES
+            .iter()
+            .map(|status| format!("'{status}'"))
+            .collect::<Vec<_>>()
+            .join(", ")
+    })
+}
 const DISPATCH_MEMORY_NOT_WORSE_TOLERANCE_MB: f64 = 512.0;
 const DISPATCH_MEMORY_RELIEF_THRESHOLD_MB: f64 = 1024.0;
 const DISPATCH_LOW_MEMORY_THRESHOLD_MB: f64 = 2048.0;
@@ -1124,21 +1140,46 @@ impl JobsStore {
     }
 
     pub fn queue_summary(&self) -> JobsStoreResult<QueueSummary> {
-        let jobs = self.list_jobs(None, None, 500)?;
+        // list_workers takes the store lock itself, so resolve it before we take
+        // the lock below to avoid a nested (potential self-deadlock) acquisition.
         let workers = self.list_workers()?;
+        let _guard = self.lock.lock();
+        let connection = self.connect()?;
+
+        // Per-status counts over the WHOLE table — never a capped/newest-N sample.
+        // Filtering an already-capped list silently undercounts once a project
+        // exceeds the cap (sc-4208 / F-CORE-4). Seed every known status at 0 so
+        // the map shape is stable for callers regardless of what rows exist.
         let mut counts = JOB_STATUSES
             .iter()
-            .map(|status| (parse_string_enum::<JobStatus>(status), 0))
+            .map(|status| (parse_string_enum::<JobStatus>(status), 0u32))
             .collect::<std::collections::BTreeMap<_, _>>();
-        for job in &jobs {
-            *counts.entry(job.status.clone()).or_insert(0) += 1;
+        let mut statement =
+            connection.prepare("select status, count(*) from jobs group by status")?;
+        let rows = statement.query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+        })?;
+        for row in rows {
+            let (status, count) = row?;
+            // Writes are constrained to JOB_STATUSES so the seeded entry exists;
+            // or_insert keeps an unexpected value counted rather than dropped.
+            *counts
+                .entry(parse_string_enum::<JobStatus>(&status))
+                .or_insert(0) += u32::try_from(count).unwrap_or(u32::MAX);
         }
+
+        // Active (non-terminal, includes `queued`) jobs come from a dedicated
+        // uncapped query so an old still-queued/running job can't fall out of the
+        // newest-N window and become invisible to the operator.
+        let mut statement = connection.prepare(&format!(
+            "select * from jobs where status not in ({terminal}) order by created_at desc",
+            terminal = terminal_statuses_sql()
+        ))?;
+        let active_jobs = collect_jobs(statement.query_map([], row_to_job)?)?;
+
         Ok(QueueSummary {
             counts,
-            active_jobs: jobs
-                .into_iter()
-                .filter(|job| !is_terminal_status(job.status.as_str()))
-                .collect(),
+            active_jobs,
             workers,
             max_job_attempts: MAX_JOB_ATTEMPTS,
             extra: Default::default(),
