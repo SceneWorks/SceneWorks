@@ -39,6 +39,8 @@ use uuid::Uuid;
 #[cfg(target_os = "macos")]
 mod advanced;
 mod api_client;
+#[cfg(target_os = "macos")]
+mod generator_cache;
 use api_client::*;
 mod gpu;
 use gpu::*;

@@ -32,8 +32,9 @@ use crate::media_jobs::{run_ffmpeg, FfmpegContext};
 use crate::image_jobs::{classify_adapter, load_reference_image, lora_path};
 #[cfg(target_os = "macos")]
 use mlx_gen::{
-    AdapterKind, AdapterSpec, CancelFlag, Conditioning, GenerationOutput, GenerationRequest, Image,
-    LoadSpec, MoeExpert, Precision, Progress, Quant, ReplacementMode, WeightsSource,
+    AdapterKind, AdapterSpec, CancelFlag, Conditioning, GenerationOutput, GenerationRequest,
+    Generator, Image, LoadSpec, MoeExpert, Precision, Progress, Quant, ReplacementMode,
+    WeightsSource,
 };
 #[cfg(target_os = "macos")]
 use mlx_gen_ltx as _;
@@ -1489,28 +1490,30 @@ impl Default for VideoGenInput {
     }
 }
 
-/// Load a video model and run one generation to a [`DecodedVideo`] (RGB8 frames + fps +
-/// optional audio), streaming denoise progress via `on_progress` and honoring `cancel`.
-/// Synchronous + blocking (the `Box<dyn Generator>` is `!Send`); the caller runs it on a
-/// blocking thread. The engine fills the audio track (LTX) or leaves it `None` (Wan).
 #[cfg(target_os = "macos")]
-fn run_video_generation(
-    input: VideoGenInput,
-    cancel: &CancelFlag,
-    on_progress: &mut dyn FnMut(Progress),
-) -> WorkerResult<DecodedVideo> {
-    let spec = LoadSpec {
-        weights: WeightsSource::Dir(input.model_dir),
+fn video_load_spec(input: &VideoGenInput) -> LoadSpec {
+    LoadSpec {
+        weights: WeightsSource::Dir(input.model_dir.clone()),
         quantize: input.quant,
         precision: Precision::Bf16,
         control: None,
         // MultiControlNet (sc-3378) is image-only; video providers ignore it.
         extra_controls: Vec::new(),
         ip_adapter: None,
-        adapters: input.adapters,
-    };
-    let generator = mlx_gen::load(input.engine_id, &spec)
-        .map_err(|error| WorkerError::Engine(format!("video load failed: {error}")))?;
+        adapters: input.adapters.clone(),
+    }
+}
+
+/// Run one generation to a [`DecodedVideo`] (RGB8 frames + fps + optional audio) against an already
+/// loaded video generator, streaming denoise progress via `on_progress` and honoring `cancel`.
+/// The engine fills the audio track (LTX) or leaves it `None` (Wan).
+#[cfg(target_os = "macos")]
+fn run_loaded_video_generation(
+    generator: &dyn Generator,
+    input: VideoGenInput,
+    cancel: &CancelFlag,
+    on_progress: &mut dyn FnMut(Progress),
+) -> WorkerResult<DecodedVideo> {
     let req = GenerationRequest {
         prompt: input.prompt,
         negative_prompt: input.negative_prompt,
@@ -1561,6 +1564,32 @@ fn run_video_generation(
     }
 }
 
+#[cfg(all(target_os = "macos", test))]
+fn load_video_generation_for_tests(input: &VideoGenInput) -> WorkerResult<Box<dyn Generator>> {
+    let spec = LoadSpec {
+        weights: WeightsSource::Dir(input.model_dir.clone()),
+        quantize: input.quant,
+        precision: Precision::Bf16,
+        control: None,
+        // MultiControlNet (sc-3378) is image-only; video providers ignore it.
+        extra_controls: Vec::new(),
+        ip_adapter: None,
+        adapters: input.adapters.clone(),
+    };
+    mlx_gen::load(input.engine_id, &spec)
+        .map_err(|error| WorkerError::Engine(format!("video load failed: {error}")))
+}
+
+#[cfg(all(target_os = "macos", test))]
+fn run_video_generation(
+    input: VideoGenInput,
+    cancel: &CancelFlag,
+    on_progress: &mut dyn FnMut(Progress),
+) -> WorkerResult<DecodedVideo> {
+    let generator = load_video_generation_for_tests(&input)?;
+    run_loaded_video_generation(generator.as_ref(), input, cancel, on_progress)
+}
+
 /// Drive a `run_video_generation` on a blocking thread, forwarding its streamed denoise
 /// progress to the async worker (Generating stage ~0.25..0.58) + polling cancel ~every 2s.
 /// The shared blocking + mpsc + cancel plumbing for Wan and LTX.
@@ -1576,11 +1605,21 @@ async fn generate_video(
     let (tx, mut rx) = tokio::sync::mpsc::channel::<Progress>(64);
     let blocking = {
         let cancel = cancel.clone();
-        tokio::task::spawn_blocking(move || -> WorkerResult<DecodedVideo> {
-            let mut on_progress = |progress: Progress| {
-                let _ = tx.blocking_send(progress);
-            };
-            run_video_generation(input, &cancel, &mut on_progress)
+        let spec = video_load_spec(&input);
+        let engine_id = input.engine_id;
+        tokio::spawn(async move {
+            crate::generator_cache::with_cached_generator(
+                engine_id,
+                spec,
+                "video load failed",
+                move |generator| {
+                    let mut on_progress = |progress: Progress| {
+                        let _ = tx.blocking_send(progress);
+                    };
+                    run_loaded_video_generation(generator, input, &cancel, &mut on_progress)
+                },
+            )
+            .await
         })
     };
 
