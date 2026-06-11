@@ -1026,6 +1026,53 @@ where
     (cancel, rx, blocking)
 }
 
+#[cfg(target_os = "macos")]
+fn start_cached_gen_stream<D>(
+    job_id: String,
+    engine_id: &'static str,
+    adapter_count: usize,
+    spec: LoadSpec,
+    load_error_context: String,
+    drive: D,
+) -> (
+    CancelFlag,
+    tokio::sync::mpsc::Receiver<GenEvent>,
+    tokio::task::JoinHandle<WorkerResult<()>>,
+)
+where
+    D: FnOnce(&dyn Generator, tokio::sync::mpsc::Sender<GenEvent>, CancelFlag) -> WorkerResult<()>
+        + Send
+        + 'static,
+{
+    let cancel = CancelFlag::new();
+    let (tx, rx) = tokio::sync::mpsc::channel::<GenEvent>(64);
+    let blocking_cancel = cancel.clone();
+    let blocking = tokio::spawn(async move {
+        emit_load_event(
+            "image_pipeline_load_start",
+            &job_id,
+            engine_id,
+            adapter_count,
+        );
+        crate::generator_cache::with_cached_generator(
+            engine_id,
+            spec,
+            load_error_context,
+            move |generator| {
+                emit_load_event(
+                    "image_pipeline_load_complete",
+                    &job_id,
+                    engine_id,
+                    adapter_count,
+                );
+                drive(generator, tx, blocking_cancel)
+            },
+        )
+        .await
+    });
+    (cancel, rx, blocking)
+}
+
 /// True when this job can run real in-process inference: the model is a linked,
 /// engine-backed family and its weights resolve locally.
 /// Fail-loud gate for the stub fallback (sc-4176): Some(message) when the
@@ -1392,7 +1439,7 @@ fn mlx_raw_settings(
 }
 
 /// Load the generator for `engine_id` (heavy; once per job).
-#[cfg(target_os = "macos")]
+#[cfg(all(target_os = "macos", test))]
 fn mlx_load(
     engine_id: &str,
     weights_dir: PathBuf,
@@ -1402,17 +1449,13 @@ fn mlx_load(
     mlx_load_with_ip(engine_id, weights_dir, quant, adapters, None)
 }
 
-/// As [`mlx_load`], but optionally installing an IP-Adapter from `ip_adapter_dir`
-/// (`LoadSpec::with_ip_adapter`). Used by the FLUX.1 XLabs IP-Adapter reference path
-/// (epic 3621): the engine then treats a `Conditioning::Reference` as the image prompt.
 #[cfg(target_os = "macos")]
-fn mlx_load_with_ip(
-    engine_id: &str,
+fn mlx_load_spec(
     weights_dir: PathBuf,
     quant: Option<Quant>,
     adapters: Vec<AdapterSpec>,
     ip_adapter_dir: Option<PathBuf>,
-) -> WorkerResult<Box<dyn Generator>> {
+) -> LoadSpec {
     let mut spec = LoadSpec::new(WeightsSource::Dir(weights_dir));
     if let Some(quant) = quant {
         spec = spec.with_quant(quant);
@@ -1423,6 +1466,21 @@ fn mlx_load_with_ip(
     if let Some(dir) = ip_adapter_dir {
         spec = spec.with_ip_adapter(WeightsSource::Dir(dir));
     }
+    spec
+}
+
+/// As [`mlx_load`], but optionally installing an IP-Adapter from `ip_adapter_dir`
+/// (`LoadSpec::with_ip_adapter`). Used by the FLUX.1 XLabs IP-Adapter reference path
+/// (epic 3621): the engine then treats a `Conditioning::Reference` as the image prompt.
+#[cfg(all(target_os = "macos", test))]
+fn mlx_load_with_ip(
+    engine_id: &str,
+    weights_dir: PathBuf,
+    quant: Option<Quant>,
+    adapters: Vec<AdapterSpec>,
+    ip_adapter_dir: Option<PathBuf>,
+) -> WorkerResult<Box<dyn Generator>> {
+    let spec = mlx_load_spec(weights_dir, quant, adapters, ip_adapter_dir);
     mlx_gen::load(engine_id, &spec)
         .map_err(|error| WorkerError::Engine(format!("{engine_id} load failed: {error}")))
 }
@@ -1693,15 +1751,17 @@ async fn generate_mlx_stream(
     let prompt = request.prompt.clone();
     let (width, height) = (request.width, request.height);
     let adapter_count = adapters.len();
-    let (cancel, rx, blocking) = start_gen_stream(
+    let spec = mlx_load_spec(weights_dir, quant, adapters, flux_ip_dir);
+    let (cancel, rx, blocking) = start_cached_gen_stream(
         job.id.clone(),
         engine_id,
         adapter_count,
-        move || mlx_load_with_ip(engine_id, weights_dir, quant, adapters, flux_ip_dir),
+        spec,
+        format!("{engine_id} load failed"),
         move |generator, tx, cancel| {
             drive_gen_items(tx, seeds, move |_index, seed, on_progress| {
                 let (out_w, out_h, pixels) = mlx_generate_one(
-                    generator.as_ref(),
+                    generator,
                     &prompt,
                     width,
                     height,
@@ -2029,12 +2089,12 @@ fn parse_poses(request: &ImageRequest) -> Vec<PoseInput> {
 
 /// Load the Z-Image Fun-Controlnet-Union generator (base snapshot + control overlay).
 #[cfg(target_os = "macos")]
-fn zimage_control_load(
+fn zimage_control_spec(
     weights_dir: PathBuf,
     control_weights: PathBuf,
     quant: Option<Quant>,
     adapters: Vec<AdapterSpec>,
-) -> WorkerResult<Box<dyn Generator>> {
+) -> LoadSpec {
     let mut spec = LoadSpec::new(WeightsSource::Dir(weights_dir))
         .with_control(WeightsSource::File(control_weights));
     if let Some(quant) = quant {
@@ -2043,6 +2103,17 @@ fn zimage_control_load(
     if !adapters.is_empty() {
         spec = spec.with_adapters(adapters);
     }
+    spec
+}
+
+#[cfg(all(target_os = "macos", test))]
+fn zimage_control_load(
+    weights_dir: PathBuf,
+    control_weights: PathBuf,
+    quant: Option<Quant>,
+    adapters: Vec<AdapterSpec>,
+) -> WorkerResult<Box<dyn Generator>> {
+    let spec = zimage_control_spec(weights_dir, control_weights, quant, adapters);
     mlx_gen::load(ZIMAGE_CONTROL_ENGINE_ID, &spec)
         .map_err(|error| WorkerError::Engine(format!("Z-Image control load failed: {error}")))
 }
@@ -2181,11 +2252,13 @@ async fn generate_zimage_control_stream(
     let (width, height) = (request.width, request.height);
     let stickwidth = crate::openpose_skeleton::body_stickwidth(width, height);
     let adapter_count = adapters.len();
-    let (cancel, rx, blocking) = start_gen_stream(
+    let spec = zimage_control_spec(weights_dir, control_weights, quant, adapters);
+    let (cancel, rx, blocking) = start_cached_gen_stream(
         job.id.clone(),
         ZIMAGE_CONTROL_ENGINE_ID,
         adapter_count,
-        move || zimage_control_load(weights_dir, control_weights, quant, adapters),
+        spec,
+        "Z-Image control load failed".to_owned(),
         move |generator, tx, cancel| {
             let identity_init = identity_init.as_ref();
             drive_gen_items(tx, poses, move |_index, pose, on_progress| {
@@ -2203,7 +2276,7 @@ async fn generate_zimage_control_stream(
                     pixels: skeleton.into_raw(),
                 };
                 let (out_w, out_h, pixels) = zimage_control_generate_one(
-                    generator.as_ref(),
+                    generator,
                     &prompt,
                     width,
                     height,
@@ -2846,11 +2919,13 @@ async fn generate_flux2_edit_stream(
     let (width, height) = (request.width, request.height);
     let stickwidth = crate::openpose_skeleton::body_stickwidth(width, height);
     let adapter_count = adapters.len();
-    let (cancel, rx, blocking) = start_gen_stream(
+    let spec = mlx_load_spec(weights_dir, quant, adapters, None);
+    let (cancel, rx, blocking) = start_cached_gen_stream(
         job.id.clone(),
         engine_id,
         adapter_count,
-        move || mlx_load(engine_id, weights_dir, quant, adapters),
+        spec,
+        format!("{engine_id} load failed"),
         move |generator, tx, cancel| {
             drive_gen_items(
                 tx,
@@ -2883,7 +2958,7 @@ async fn generate_flux2_edit_stream(
                         None => build_edit_conditioning(&references),
                     };
                     let (out_w, out_h, pixels) = flux2_edit_generate_one(
-                        generator.as_ref(),
+                        generator,
                         &prompt,
                         width,
                         height,
@@ -2952,12 +3027,12 @@ fn resolve_qwen_control_weights(request: &ImageRequest, settings: &Settings) -> 
 
 /// Load the Qwen-Image ControlNet-Union generator (base snapshot + InstantX control overlay).
 #[cfg(target_os = "macos")]
-fn qwen_control_load(
+fn qwen_control_spec(
     weights_dir: PathBuf,
     control_weights: PathBuf,
     quant: Option<Quant>,
     adapters: Vec<AdapterSpec>,
-) -> WorkerResult<Box<dyn Generator>> {
+) -> LoadSpec {
     let mut spec = LoadSpec::new(WeightsSource::Dir(weights_dir))
         .with_control(WeightsSource::File(control_weights));
     if let Some(quant) = quant {
@@ -2966,6 +3041,17 @@ fn qwen_control_load(
     if !adapters.is_empty() {
         spec = spec.with_adapters(adapters);
     }
+    spec
+}
+
+#[cfg(all(target_os = "macos", test))]
+fn qwen_control_load(
+    weights_dir: PathBuf,
+    control_weights: PathBuf,
+    quant: Option<Quant>,
+    adapters: Vec<AdapterSpec>,
+) -> WorkerResult<Box<dyn Generator>> {
+    let spec = qwen_control_spec(weights_dir, control_weights, quant, adapters);
     mlx_gen::load(QWEN_CONTROL_ENGINE_ID, &spec).map_err(|error| {
         WorkerError::Engine(format!("Qwen strict-pose control load failed: {error}"))
     })
@@ -3097,11 +3183,13 @@ async fn generate_qwen_control_stream(
     let (width, height) = (request.width, request.height);
     let stickwidth = crate::openpose_skeleton::body_stickwidth(width, height);
     let adapter_count = adapters.len();
-    let (cancel, rx, blocking) = start_gen_stream(
+    let spec = qwen_control_spec(weights_dir, control_weights, quant, adapters);
+    let (cancel, rx, blocking) = start_cached_gen_stream(
         job.id.clone(),
         QWEN_CONTROL_ENGINE_ID,
         adapter_count,
-        move || qwen_control_load(weights_dir, control_weights, quant, adapters),
+        spec,
+        "Qwen strict-pose control load failed".to_owned(),
         move |generator, tx, cancel| {
             drive_gen_items(tx, poses, move |_index, pose, on_progress| {
                 let skeleton = crate::openpose_skeleton::draw_wholebody(
@@ -3118,7 +3206,7 @@ async fn generate_qwen_control_stream(
                     pixels: skeleton.into_raw(),
                 };
                 let (out_w, out_h, pixels) = qwen_control_generate_one(
-                    generator.as_ref(),
+                    generator,
                     &prompt,
                     negative_prompt.clone(),
                     width,
@@ -3572,11 +3660,13 @@ async fn generate_qwen_edit_stream(
     let (width, height) = (request.width, request.height);
     let stickwidth = crate::openpose_skeleton::body_stickwidth(width, height);
     let adapter_count = adapters.len();
-    let (cancel, rx, blocking) = start_gen_stream(
+    let spec = mlx_load_spec(weights_dir, quant, adapters, None);
+    let (cancel, rx, blocking) = start_cached_gen_stream(
         job.id.clone(),
         engine_id,
         adapter_count,
-        move || mlx_load(engine_id, weights_dir, quant, adapters),
+        spec,
+        format!("{engine_id} load failed"),
         move |generator, tx, cancel| {
             drive_gen_items(
                 tx,
@@ -3610,7 +3700,7 @@ async fn generate_qwen_edit_stream(
                         None => build_edit_conditioning(&references),
                     };
                     let (out_w, out_h, pixels) = qwen_edit_generate_one(
-                        generator.as_ref(),
+                        generator,
                         &prompt,
                         negative_prompt.clone(),
                         width,
@@ -3914,18 +4004,20 @@ async fn generate_sensenova_edit_stream(
         raw_settings.insert("angleSet".to_owned(), Value::Bool(true));
     }
 
-    let (cancel, rx, blocking) = start_gen_stream(
+    let spec = mlx_load_spec(weights_dir, quant, Vec::new(), None);
+    let (cancel, rx, blocking) = start_cached_gen_stream(
         job.id.clone(),
         engine_id,
         0,
-        move || mlx_load(engine_id, weights_dir, quant, Vec::new()),
+        spec,
+        format!("{engine_id} load failed"),
         move |generator, tx, cancel| {
             drive_gen_items(
                 tx,
                 seeds.into_iter().zip(prompts),
                 move |_index, (seed, prompt), on_progress| {
                     let (w, h, pixels) = sensenova_edit_generate_one(
-                        generator.as_ref(),
+                        generator,
                         &prompt,
                         out_w,
                         out_h,
@@ -4092,16 +4184,16 @@ fn engine_image_to_rgb(image: Image) -> WorkerResult<image::RgbImage> {
         .ok_or_else(|| WorkerError::InvalidPayload("image buffer size mismatch".to_owned()))
 }
 
-/// Load the SDXL generator for an advanced job. `ip_adapter_dir` (Some only in IP mode) adds
-/// the decoupled cross-attn weights at load — the engine then treats a `Reference` as the
-/// image prompt rather than an img2img init. Loaded per job (no persistent cache).
+/// Build the SDXL generator spec for an advanced job. `ip_adapter_dir` (Some only in IP mode)
+/// adds the decoupled cross-attn weights at load — the engine then treats a `Reference` as the
+/// image prompt rather than an img2img init.
 #[cfg(target_os = "macos")]
-fn sdxl_advanced_load(
+fn sdxl_advanced_spec(
     weights_dir: PathBuf,
     quant: Option<Quant>,
     adapters: Vec<AdapterSpec>,
     ip_adapter_dir: Option<PathBuf>,
-) -> WorkerResult<Box<dyn Generator>> {
+) -> LoadSpec {
     let mut spec = LoadSpec::new(WeightsSource::Dir(weights_dir));
     if let Some(quant) = quant {
         spec = spec.with_quant(quant);
@@ -4112,8 +4204,7 @@ fn sdxl_advanced_load(
     if !adapters.is_empty() {
         spec = spec.with_adapters(adapters);
     }
-    mlx_gen::load("sdxl", &spec)
-        .map_err(|error| WorkerError::Engine(format!("sdxl advanced load failed: {error}")))
+    spec
 }
 
 /// Generate one SDXL image conditioned on `conditioning` (Reference[/Mask]). SDXL is true-CFG
@@ -4380,15 +4471,17 @@ async fn generate_sdxl_advanced_stream(
     let prompt = request.prompt.clone();
     let negative_prompt = negative_prompt.clone();
     let adapter_count = adapters.len();
-    let (cancel, rx, blocking) = start_gen_stream(
+    let spec = sdxl_advanced_spec(weights_dir, quant, adapters, ip_adapter_dir);
+    let (cancel, rx, blocking) = start_cached_gen_stream(
         job.id.clone(),
         "sdxl",
         adapter_count,
-        move || sdxl_advanced_load(weights_dir, quant, adapters, ip_adapter_dir),
+        spec,
+        "sdxl advanced load failed".to_owned(),
         move |generator, tx, cancel| {
             drive_gen_items(tx, seeds, move |_index, seed, on_progress| {
                 let (out_w, out_h, pixels) = sdxl_advanced_generate_one(
-                    generator.as_ref(),
+                    generator,
                     &prompt,
                     negative_prompt.clone(),
                     width,
@@ -5324,20 +5417,15 @@ fn detail_feather(tile_w: u32, tile_h: u32, overlap: u32) -> Vec<f32> {
     out
 }
 
-/// Load the SDXL generator with the tile ControlNet overlay (per job, no cache).
+/// Build the SDXL generator spec with the tile ControlNet overlay.
 #[cfg(target_os = "macos")]
-fn detail_load(
-    weights_dir: PathBuf,
-    control_file: PathBuf,
-    quant: Option<Quant>,
-) -> WorkerResult<Box<dyn Generator>> {
+fn detail_spec(weights_dir: PathBuf, control_file: PathBuf, quant: Option<Quant>) -> LoadSpec {
     let mut spec = LoadSpec::new(WeightsSource::Dir(weights_dir))
         .with_control(WeightsSource::File(control_file));
     if let Some(quant) = quant {
         spec = spec.with_quant(quant);
     }
-    mlx_gen::load("sdxl", &spec)
-        .map_err(|error| WorkerError::Engine(format!("sdxl detail load failed: {error}")))
+    spec
 }
 
 /// Refine one tile (already sized to engine-valid `eng_w`×`eng_h`): img2img on the tile
@@ -5673,18 +5761,20 @@ pub(crate) async fn run_image_detail_job(
     let blocking = {
         let params_ref = params.clone();
         let cancel = cancel.clone();
-        tokio::task::spawn_blocking(move || -> WorkerResult<(image::RgbImage, usize)> {
-            let generator = detail_load(weights_dir, control_file, quant)?;
-            let mut on_tile = |done: usize, total: usize| {
-                let _ = tx.blocking_send((done, total));
-            };
-            refine_tiled_detail(
-                generator.as_ref(),
-                &source,
-                &params_ref,
-                &cancel,
-                &mut on_tile,
+        let spec = detail_spec(weights_dir, control_file, quant);
+        tokio::spawn(async move {
+            crate::generator_cache::with_cached_generator(
+                "sdxl",
+                spec,
+                "sdxl detail load failed",
+                move |generator| {
+                    let mut on_tile = |done: usize, total: usize| {
+                        let _ = tx.blocking_send((done, total));
+                    };
+                    refine_tiled_detail(generator, &source, &params_ref, &cancel, &mut on_tile)
+                },
             )
+            .await
         })
     };
 
