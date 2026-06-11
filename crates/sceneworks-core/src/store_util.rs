@@ -5,6 +5,7 @@ use std::path::Path;
 use std::sync::OnceLock;
 
 use parking_lot::{ReentrantMutex, ReentrantMutexGuard};
+use rusqlite::Connection;
 use serde::Serialize;
 use serde_json::Value;
 
@@ -154,11 +155,70 @@ where
         .expect("string enum deserialization is infallible")
 }
 
+/// Idempotent additive migration: add `column` (`column definition`) to `table`
+/// if `pragma table_info` doesn't already list it.
+///
+/// Hoisted from three near-identical per-store copies that had drifted on how
+/// they read the PRAGMA column name — one used the positional index `1`, the
+/// others the `"name"` accessor. This standardizes on the by-name accessor
+/// (sc-4271 / F-CORE-11). Returns the raw `rusqlite::Error` so each store's `?`
+/// maps it into its own error type.
+pub(crate) fn ensure_column(
+    connection: &Connection,
+    table: &str,
+    column: &str,
+    definition: &str,
+) -> rusqlite::Result<()> {
+    let mut statement = connection.prepare(&format!("pragma table_info({table})"))?;
+    let exists = statement
+        .query_map([], |row| row.get::<_, String>("name"))?
+        .collect::<Result<Vec<_>, _>>()?
+        .iter()
+        .any(|existing| existing == column);
+    if !exists {
+        connection.execute(
+            &format!("alter table {table} add column {column} {definition}"),
+            [],
+        )?;
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{atomic_write, lock_project_files, parse_string_enum, random_hex};
+    use super::{atomic_write, ensure_column, lock_project_files, parse_string_enum, random_hex};
     use crate::contracts::JobStatus;
+    use rusqlite::Connection;
     use std::collections::HashSet;
+
+    /// sc-4271 / F-CORE-11: the hoisted `ensure_column` adds a missing column and
+    /// is a no-op when it already exists (the three per-store copies it replaced
+    /// disagreed on the PRAGMA accessor; this is the single by-name version).
+    #[test]
+    fn ensure_column_adds_missing_column_and_is_idempotent() {
+        let connection = Connection::open_in_memory().expect("in-memory db");
+        connection
+            .execute("create table widgets (id text primary key)", [])
+            .expect("seed table");
+
+        let has_color = |conn: &Connection| {
+            let mut statement = conn.prepare("pragma table_info(widgets)").expect("pragma");
+            let columns: Vec<String> = statement
+                .query_map([], |row| row.get::<_, String>("name"))
+                .expect("columns")
+                .filter_map(Result::ok)
+                .collect();
+            columns.iter().any(|name| name == "color")
+        };
+        assert!(!has_color(&connection), "precondition: no color column");
+
+        ensure_column(&connection, "widgets", "color", "text").expect("adds column");
+        assert!(has_color(&connection), "column added");
+
+        // Second call is a no-op (would error if it re-ran the ALTER).
+        ensure_column(&connection, "widgets", "color", "text").expect("idempotent");
+        assert!(has_color(&connection));
+    }
 
     /// sc-4269 / F-CORE-9: the `StringEnum` bound makes `parse_string_enum`
     /// infallible — a value never written by the app (or a hand-edited DB row)
