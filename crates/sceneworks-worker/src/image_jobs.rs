@@ -1620,11 +1620,24 @@ async fn consume_gen_events(
             );
         }
     };
-    while let Some(event) = rx.recv().await {
-        if canceled {
-            continue; // drain remaining events so the blocking sender never blocks.
-        }
-        match event {
+    // Heartbeat + cancel-poll on a fixed interval, not only when the blocking
+    // thread emits an event. The cold model-load phase (multi-GB load + quantize)
+    // emits nothing, so without an interval arm the worker reports no Busy
+    // heartbeat and honors no cancel until the first denoise step — long enough
+    // for the API's staleness check to think it died (sc-4276 / F-MLXW-12;
+    // mirrors the caption-job select!-with-interval).
+    let mut interval = tokio::time::interval(progress_report_interval(settings));
+    interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    loop {
+        tokio::select! {
+            maybe_event = rx.recv() => {
+                let Some(event) = maybe_event else {
+                    break;
+                };
+                if canceled {
+                    continue; // drain remaining events so the blocking sender never blocks.
+                }
+                match event {
             GenEvent::Step {
                 index,
                 current,
@@ -1710,6 +1723,18 @@ async fn consume_gen_events(
                 )
                 .await?;
                 heartbeat(api, settings, WorkerStatus::Busy, Some(&job.id)).await?;
+            }
+                }
+            }
+            _ = interval.tick() => {
+                heartbeat(api, settings, WorkerStatus::Busy, Some(&job.id)).await?;
+                if !canceled && last_cancel_check.elapsed() >= Duration::from_secs(2) {
+                    last_cancel_check = Instant::now();
+                    if cancel_requested(api, &job.id, "Image generation canceled by user.").await {
+                        cancel.cancel();
+                        canceled = true;
+                    }
+                }
             }
         }
     }
