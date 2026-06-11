@@ -1,3 +1,5 @@
 # SceneWorks Schemas
 
-Shared JSON schema contracts live here so the API, worker, and web app can agree on project, asset, recipe, recipe preset, job, model, LoRA, character, person track, and timeline shapes.
+Manifest JSON schemas live here for the built-in model, LoRA, and recipe-preset catalogs under `config/manifests/`.
+
+Sidecar and job payload contracts are enforced by the Rust domain types plus the fixtures in `tests/fixtures/rust_migration_contracts/`; keep those fixtures and their tests as the source of truth instead of adding unused schemas here.
