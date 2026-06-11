@@ -517,6 +517,8 @@ pub(crate) fn create_app_with_state(
     let _ = sweep_stale_lora_uploads(&settings.data_dir);
     let _ = sweep_stale_pose_uploads(&settings.data_dir);
     let _ = sweep_stale_keypoint_uploads(&settings.data_dir);
+    // sc-4204 (F-API-6): asset-import temp files (cache/uploads) had no startup sweep.
+    let _ = sweep_stale_asset_uploads(&settings.data_dir);
     let jobs_store = Arc::new(JobsStore::new(&settings.jobs_db_path));
     jobs_store.initialize()?;
     let interrupted_jobs_on_startup = jobs_store.mark_interrupted_on_startup()?.len();
