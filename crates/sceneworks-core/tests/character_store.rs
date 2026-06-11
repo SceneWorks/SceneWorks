@@ -260,6 +260,175 @@ fn references_sync_asset_metadata_and_character_reference_table() {
 }
 
 #[test]
+fn remove_character_reference_tolerates_purged_asset_record() {
+    let temp_dir = tempfile::tempdir().expect("temp dir");
+    let store = ProjectStore::new(temp_dir.path().join("data"), "test-version");
+    let project = store
+        .create_project("Stale References")
+        .expect("project creates");
+    let project_path = PathBuf::from(&project.path);
+    let source = temp_dir.path().join("reference.png");
+    fs::write(&source, b"png-bytes").expect("source writes");
+    let asset = store
+        .import_asset(
+            &project.id,
+            UploadAsset {
+                filename: "reference.png".to_owned(),
+                content_type: Some("image/png".to_owned()),
+                source_path: source,
+                source_asset_id: None,
+                provenance: None,
+            },
+        )
+        .expect("asset imports");
+    let asset_id = asset["id"].as_str().expect("asset id").to_owned();
+    let character = store
+        .create_character(
+            &project.id,
+            CharacterCreateInput {
+                name: "Mira".to_owned(),
+                character_type: "person".to_owned(),
+                description: String::new(),
+            },
+        )
+        .expect("character creates");
+    let character_id = character["id"].as_str().expect("character id").to_owned();
+
+    store
+        .add_character_reference(
+            &project.id,
+            &character_id,
+            CharacterReferenceInput {
+                asset_id: asset_id.clone(),
+                approved: true,
+                role: "reference".to_owned(),
+                notes: String::new(),
+            },
+        )
+        .expect("reference adds");
+
+    let sidecar_path = project_path.join(
+        asset["sidecarPath"]
+            .as_str()
+            .expect("sidecar path")
+            .replace('/', std::path::MAIN_SEPARATOR_STR),
+    );
+    fs::remove_file(&sidecar_path).expect("asset sidecar removed");
+    let connection = Connection::open(project_path.join("project.db")).expect("db opens");
+    connection
+        .execute("delete from assets where id = ?1", params![asset_id])
+        .expect("asset index row removed");
+
+    let updated = store
+        .remove_character_reference(&project.id, &character_id, &asset_id)
+        .expect("stale reference removes");
+    assert!(updated["references"]
+        .as_array()
+        .expect("references")
+        .is_empty());
+
+    let remaining: i64 = connection
+        .query_row(
+            "select count(*) from character_references where character_id = ?1 and asset_id = ?2",
+            params![character_id, asset_id],
+            |row| row.get(0),
+        )
+        .expect("reference count reads");
+    assert_eq!(remaining, 0);
+}
+
+#[test]
+fn purge_asset_removes_character_references_and_look_ids() {
+    let temp_dir = tempfile::tempdir().expect("temp dir");
+    let store = ProjectStore::new(temp_dir.path().join("data"), "test-version");
+    let project = store
+        .create_project("Purge References")
+        .expect("project creates");
+    let project_path = PathBuf::from(&project.path);
+    let source = temp_dir.path().join("reference.png");
+    fs::write(&source, b"png-bytes").expect("source writes");
+    let asset = store
+        .import_asset(
+            &project.id,
+            UploadAsset {
+                filename: "reference.png".to_owned(),
+                content_type: Some("image/png".to_owned()),
+                source_path: source,
+                source_asset_id: None,
+                provenance: None,
+            },
+        )
+        .expect("asset imports");
+    let asset_id = asset["id"].as_str().expect("asset id").to_owned();
+    let character = store
+        .create_character(
+            &project.id,
+            CharacterCreateInput {
+                name: "Mira".to_owned(),
+                character_type: "person".to_owned(),
+                description: String::new(),
+            },
+        )
+        .expect("character creates");
+    let character_id = character["id"].as_str().expect("character id").to_owned();
+
+    store
+        .add_character_reference(
+            &project.id,
+            &character_id,
+            CharacterReferenceInput {
+                asset_id: asset_id.clone(),
+                approved: true,
+                role: "reference".to_owned(),
+                notes: String::new(),
+            },
+        )
+        .expect("reference adds");
+    store
+        .create_character_look(
+            &project.id,
+            &character_id,
+            CharacterLookInput {
+                name: "Hero".to_owned(),
+                description: String::new(),
+                approved_reference_ids: vec![asset_id.clone()],
+                recipe_settings: Map::new(),
+            },
+        )
+        .expect("look creates");
+
+    store
+        .purge_asset(&project.id, &asset_id)
+        .expect("asset purges");
+
+    let character = store
+        .get_character(&project.id, &character_id)
+        .expect("character reads");
+    assert!(character["references"]
+        .as_array()
+        .expect("references")
+        .is_empty());
+    assert!(character["approvedReferences"]
+        .as_array()
+        .expect("approved references")
+        .is_empty());
+    assert!(character["looks"][0]["approvedReferenceIds"]
+        .as_array()
+        .expect("look reference ids")
+        .is_empty());
+
+    let connection = Connection::open(project_path.join("project.db")).expect("db opens");
+    let remaining: i64 = connection
+        .query_row(
+            "select count(*) from character_references where character_id = ?1 and asset_id = ?2",
+            params![character_id, asset_id],
+            |row| row.get(0),
+        )
+        .expect("reference count reads");
+    assert_eq!(remaining, 0);
+}
+
+#[test]
 fn looks_loras_and_reindex_are_persisted() {
     let temp_dir = tempfile::tempdir().expect("temp dir");
     let store = ProjectStore::new(temp_dir.path().join("data"), "test-version");
