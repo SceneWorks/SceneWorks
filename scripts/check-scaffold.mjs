@@ -25,7 +25,7 @@ const requiredPaths = [
   "data/loras/.gitkeep",
   "data/cache/.gitkeep",
   "docker-compose.yml",
-  "docker/rust-api.Dockerfile",
+  "docker/rust.Dockerfile",
   "docker/web.Dockerfile",
   "docker/worker.Dockerfile",
 ];
@@ -137,11 +137,11 @@ await assertContains("Cargo.toml", "apps/rust-api");
 await assertContains("Cargo.toml", "apps/desktop");
 await assertContains("crates/sceneworks-core/src/lib.rs", "/api/v1/health");
 await assertContains("docker-compose.yml", "NVIDIA_VISIBLE_DEVICES");
-await assertContains("docker-compose.yml", "dockerfile: docker/rust-api.Dockerfile");
+await assertContains("docker-compose.yml", "dockerfile: docker/rust.Dockerfile");
 await assertContains("docker-compose.yml", "SCENEWORKS_RUST_WORKER_GPU_ID:-cpu");
 await assertContains("docker-compose.yml", "/sceneworks/data/cache/jobs.db");
 await assertContains(".env.example", "SCENEWORKS_RUST_WORKER_GPU_ID=cpu");
-await assertContains("docker/rust-api.Dockerfile", "sceneworks-rust-api");
+await assertContains("docker/rust.Dockerfile", "sceneworks-rust-api");
 await assertContains("README.md", "SCENEWORKS_ACCESS_TOKEN");
 await assertBuiltinPromptGuides();
 await assertCharacterImageTuningSurface();
