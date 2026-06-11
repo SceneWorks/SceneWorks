@@ -543,6 +543,7 @@ async fn supervisor_restarts_exited_children_with_backoff_state() {
             spec,
             process: exited,
             restart_attempt: 0,
+            spawned_at: std::time::Instant::now(),
         },
     )]);
     let mut spawns = 0_u32;
@@ -564,6 +565,56 @@ async fn supervisor_restarts_exited_children_with_backoff_state() {
         .try_wait()
         .expect("child status checks")
         .is_none());
+    let _ = child.process.start_kill();
+    let _ = child.process.wait().await;
+}
+
+/// sc-4282 / F-MLXW-20: a child that ran healthily past the reset threshold
+/// before exiting starts its restart backoff fresh, rather than carrying a
+/// counter that has saturated upward over many widely-spaced crashes.
+#[tokio::test]
+async fn supervisor_resets_backoff_after_a_healthy_run() {
+    let settings = test_settings("http://127.0.0.1".to_owned(), None);
+    let spec = WorkerSpec {
+        worker_id: "worker-gpu-auto-0".to_owned(),
+        gpu_id: "0".to_owned(),
+    };
+    let mut exited = spawn_exit_child();
+    for _ in 0..20 {
+        if exited.try_wait().expect("child status checks").is_some() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+
+    // The counter has ratcheted up over time, but this run stayed alive well past
+    // the healthy-uptime threshold (spawned > 6 minutes ago).
+    let mut children = HashMap::from([(
+        spec.worker_id.clone(),
+        SupervisedChild {
+            spec,
+            process: exited,
+            restart_attempt: 7,
+            spawned_at: std::time::Instant::now()
+                .checked_sub(Duration::from_secs(360))
+                .expect("monotonic clock backdates 6 minutes"),
+        },
+    )]);
+
+    restart_exited_children_with_spawner(&settings, &mut children, |_settings, _spec| {
+        Ok(spawn_sleep_child())
+    })
+    .await
+    .expect("child restarts");
+
+    let child = children
+        .get_mut("worker-gpu-auto-0")
+        .expect("restarted child is tracked");
+    // Reset to 0 on the healthy run, then advanced once for this restart.
+    assert_eq!(
+        child.restart_attempt, 1,
+        "a healthy run resets the backoff counter"
+    );
     let _ = child.process.start_kill();
     let _ = child.process.wait().await;
 }
