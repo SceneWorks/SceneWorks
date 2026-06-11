@@ -9,7 +9,7 @@ use serde_json::{json, Map, Value};
 use crate::asset_index::{asset_sidecars, normalize_asset, row_to_asset_record, upsert_asset_row};
 use crate::project_store::{apply_project_migrations, ProjectStoreError, ProjectStoreResult};
 use crate::store_util::{
-    atomic_write, optional_bool, optional_f64, optional_str, random_hex, read_json,
+    atomic_write, is_safe_id, optional_bool, optional_f64, optional_str, random_hex, read_json,
     relative_string, write_json,
 };
 use crate::time::utc_now;
@@ -765,7 +765,7 @@ pub fn reindex_characters_on_connection(
 
 pub fn write_character_sidecar(project_path: &Path, character: &Value) -> ProjectStoreResult<()> {
     let character_id = required_str(character, "id")?.to_owned();
-    write_character_json(&character_file(project_path, &character_id), character)
+    write_character_json(&character_file(project_path, &character_id)?, character)
 }
 
 fn ensure_character_index(project_path: &Path) -> ProjectStoreResult<()> {
@@ -833,7 +833,7 @@ fn index_character_on_connection(
     project_path: &Path,
     character: &Value,
 ) -> ProjectStoreResult<()> {
-    let sidecar_path = character_file(project_path, required_str(character, "id")?);
+    let sidecar_path = character_file(project_path, required_str(character, "id")?)?;
     index_character_sidecar_on_connection(connection, project_path, &sidecar_path, character)
 }
 
@@ -1005,14 +1005,23 @@ fn character_sidecars(project_path: &Path) -> ProjectStoreResult<Vec<PathBuf>> {
     Ok(sidecars)
 }
 
-fn character_file(project_path: &Path, character_id: &str) -> PathBuf {
-    project_path
+/// Resolve the on-disk sidecar path for a character id. The id is charset-checked
+/// before it is joined into the path so a crafted sidecar (e.g. from an imported
+/// project) carrying `"id": "../../x"` can't make reindex/get/purge read, write,
+/// or delete files outside the `characters/` directory (sc-4211 / F-CORE-7).
+fn character_file(project_path: &Path, character_id: &str) -> ProjectStoreResult<PathBuf> {
+    if !is_safe_id(character_id) {
+        return Err(ProjectStoreError::BadRequest(
+            "Invalid character id".to_owned(),
+        ));
+    }
+    Ok(project_path
         .join("characters")
-        .join(format!("{character_id}.sceneworks.character.json"))
+        .join(format!("{character_id}.sceneworks.character.json")))
 }
 
 fn find_character_file(project_path: &Path, character_id: &str) -> ProjectStoreResult<PathBuf> {
-    let path = character_file(project_path, character_id);
+    let path = character_file(project_path, character_id)?;
     if path.exists() {
         return Ok(path);
     }
@@ -1215,6 +1224,11 @@ fn copy_lora_into_project(
     character_id: &str,
     source_path: Option<&str>,
 ) -> ProjectStoreResult<(Option<String>, bool)> {
+    if !is_safe_id(character_id) {
+        return Err(ProjectStoreError::BadRequest(
+            "Invalid character id".to_owned(),
+        ));
+    }
     let Some(source_path) = source_path.filter(|value| !value.trim().is_empty()) else {
         return Ok((None, false));
     };

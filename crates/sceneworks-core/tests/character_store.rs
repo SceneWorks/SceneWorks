@@ -44,6 +44,31 @@ fn character_sidecar_writer_byte_matches_fixture() {
     assert_eq!(actual, expected);
 }
 
+/// sc-4211 / F-CORE-7: a character id is joined into
+/// `characters/<id>.sceneworks.character.json`, so a crafted character carrying a
+/// traversal id must be rejected before any path use rather than letting the
+/// sidecar write escape the project's `characters/` directory.
+#[test]
+fn character_sidecar_writer_rejects_path_traversal_id() {
+    let temp_dir = tempfile::tempdir().expect("temp dir");
+    let outside = temp_dir.path().join("outside.sceneworks.character.json");
+    let character = json!({
+        "schemaVersion": 1,
+        "id": "../../outside",
+        "projectId": "project_fixture",
+        "name": "Evil",
+        "type": "person",
+    });
+
+    let err =
+        write_character_sidecar(temp_dir.path(), &character).expect_err("traversal id is rejected");
+    assert!(
+        format!("{err:?}").contains("Invalid character id"),
+        "got {err:?}"
+    );
+    assert!(!outside.exists(), "no file written outside characters/");
+}
+
 #[test]
 fn character_sidecar_writer_preserves_string_newlines_as_json_escapes() {
     let temp_dir = tempfile::tempdir().expect("temp dir");
