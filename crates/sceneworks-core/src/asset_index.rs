@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -102,10 +103,37 @@ pub(crate) fn derive_origin(mode: &str, asset_type: &str) -> &'static str {
     }
 }
 
+/// Caches generation-set JSON by id within a single batch normalize so each
+/// `generation-sets/<id>.json` is read+parsed at most once instead of once per
+/// asset in the set. `None` records a missing/unreadable set so it isn't probed
+/// again. Sized for a `list_assets` call; single-asset GETs use a throwaway one
+/// (sc-4270 / F-CORE-10).
+#[derive(Default)]
+pub(crate) struct GenerationSetCache {
+    entries: HashMap<String, Option<Value>>,
+}
+
 pub(crate) fn normalize_asset(
     project_id: &str,
     project_path: &Path,
     sidecar_path: &Path,
+) -> ProjectStoreResult<Value> {
+    normalize_asset_cached(
+        project_id,
+        project_path,
+        sidecar_path,
+        &mut GenerationSetCache::default(),
+    )
+}
+
+/// Like [`normalize_asset`] but resolves the embedded `generationSet` through a
+/// caller-owned [`GenerationSetCache`], so a batch listing reads each
+/// generation-set file once rather than once per asset (sc-4270 / F-CORE-10).
+pub(crate) fn normalize_asset_cached(
+    project_id: &str,
+    project_path: &Path,
+    sidecar_path: &Path,
+    generation_sets: &mut GenerationSetCache,
 ) -> ProjectStoreResult<Value> {
     let mut asset = read_json(sidecar_path)?;
     // Guarantee every API response carries an `origin`, even for legacy sidecars
@@ -128,14 +156,18 @@ pub(crate) fn normalize_asset(
         }
     }
     if let Some(generation_set_id) = asset.get("generationSetId").and_then(Value::as_str) {
-        let generation_set_path = project_path
-            .join("generation-sets")
-            .join(format!("{generation_set_id}.json"));
-        if generation_set_path.exists() {
-            if let Ok(generation_set) = read_json(&generation_set_path) {
-                if let Some(object) = asset.as_object_mut() {
-                    object.insert("generationSet".to_owned(), generation_set);
-                }
+        let cached = generation_sets
+            .entries
+            .entry(generation_set_id.to_owned())
+            .or_insert_with(|| {
+                let generation_set_path = project_path
+                    .join("generation-sets")
+                    .join(format!("{generation_set_id}.json"));
+                read_json(&generation_set_path).ok()
+            });
+        if let Some(generation_set) = cached.clone() {
+            if let Some(object) = asset.as_object_mut() {
+                object.insert("generationSet".to_owned(), generation_set);
             }
         }
     }
