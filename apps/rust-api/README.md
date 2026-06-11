@@ -1,7 +1,7 @@
 # SceneWorks Rust API
 
 This binary is the SceneWorks backend API. Docker Compose runs it as the `api`
-service with `docker/rust-api.Dockerfile`.
+service with `docker/rust.Dockerfile (target rust-api)`.
 
 The API uses these compose contracts:
 

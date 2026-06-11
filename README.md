@@ -16,7 +16,7 @@ Diffusers/PyTorch image and video inference adapters:
 - API: http://localhost:8000/api/v1/health
 
 `GET /api/v1/health` reports `runtime: "rust"`. The Rust API image is built
-from `docker/rust-api.Dockerfile`; `SCENEWORKS_RUST_WORKER_GPU_ID=cpu` is the
+from `docker/rust.Dockerfile (target rust-api)`; `SCENEWORKS_RUST_WORKER_GPU_ID=cpu` is the
 default utility worker mode.
 
 ```powershell
