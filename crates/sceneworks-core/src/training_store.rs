@@ -7,8 +7,8 @@ use serde_json::Value;
 
 use crate::project_store::{apply_project_migrations, ProjectStoreError, ProjectStoreResult};
 use crate::store_util::{
-    atomic_write, is_safe_id, is_safe_relative_path, parse_string_enum, random_hex, read_json,
-    relative_string, write_json,
+    atomic_write, ensure_column, is_safe_id, is_safe_relative_path, parse_string_enum, random_hex,
+    read_json, relative_string, write_json,
 };
 use crate::time::utc_now;
 use crate::training::{
@@ -1075,16 +1075,8 @@ fn ensure_training_dataset_column(
     column: &str,
     definition: &str,
 ) -> ProjectStoreResult<()> {
-    let mut statement = connection.prepare("pragma table_info(training_datasets)")?;
-    let columns = statement
-        .query_map([], |row| row.get::<_, String>("name"))?
-        .collect::<Result<Vec<_>, _>>()?;
-    if !columns.iter().any(|existing| existing == column) {
-        connection.execute(
-            &format!("alter table training_datasets add column {column} {definition}"),
-            [],
-        )?;
-    }
+    // Thin fixed-table wrapper over the shared store_util helper (sc-4271).
+    ensure_column(connection, "training_datasets", column, definition)?;
     Ok(())
 }
 

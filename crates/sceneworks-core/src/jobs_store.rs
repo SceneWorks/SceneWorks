@@ -15,7 +15,7 @@ use crate::contracts::{
     ContractNumber, JobSnapshot, JobStatus, JobType, ProgressStage, QueueSummary, WorkerCapability,
     WorkerSnapshot, WorkerStatus, WorkerUtilizationSnapshot,
 };
-use crate::store_util::parse_string_enum;
+use crate::store_util::{ensure_column, parse_string_enum};
 use crate::time::{format_unix_seconds, now_unix_seconds, utc_now};
 
 pub const ACTIVE_STATUSES: &[&str] = &[
@@ -1717,25 +1717,6 @@ fn remove_sqlite_sidecars(db_path: &Path) {
         ));
         let _ = fs::remove_file(sidecar);
     }
-}
-
-fn ensure_column(
-    connection: &Connection,
-    table: &str,
-    column: &str,
-    definition: &str,
-) -> JobsStoreResult<()> {
-    let mut statement = connection.prepare(&format!("pragma table_info({table})"))?;
-    let columns = statement
-        .query_map([], |row| row.get::<_, String>("name"))?
-        .collect::<Result<Vec<_>, _>>()?;
-    if !columns.iter().any(|existing| existing == column) {
-        connection.execute(
-            &format!("alter table {table} add column {column} {definition}"),
-            [],
-        )?;
-    }
-    Ok(())
 }
 
 fn is_active_status(status: &str) -> bool {

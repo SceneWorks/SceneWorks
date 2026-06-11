@@ -22,8 +22,8 @@ pub use crate::character_store::{
 };
 use crate::slug::slugify;
 use crate::store_util::{
-    is_safe_id, is_safe_relative_path, lock_project_files, optional_f64, optional_str,
-    optional_u64, random_hex, read_json, relative_string, write_json,
+    ensure_column, is_safe_id, is_safe_relative_path, lock_project_files, optional_f64,
+    optional_str, optional_u64, random_hex, read_json, relative_string, write_json,
 };
 use crate::time::utc_now;
 use crate::training::TrainingDataset;
@@ -2880,25 +2880,6 @@ fn write_project_file(
 fn connect_project_db(project_path: &Path) -> ProjectStoreResult<Connection> {
     fs::create_dir_all(project_path)?;
     Ok(Connection::open(project_path.join("project.db"))?)
-}
-
-fn ensure_column(
-    connection: &Connection,
-    table: &str,
-    column: &str,
-    definition: &str,
-) -> ProjectStoreResult<()> {
-    let mut statement = connection.prepare(&format!("pragma table_info({table})"))?;
-    let columns = statement
-        .query_map([], |row| row.get::<_, String>(1))?
-        .collect::<Result<Vec<_>, _>>()?;
-    if !columns.iter().any(|existing| existing == column) {
-        connection.execute(
-            &format!("alter table {table} add column {column} {definition}"),
-            [],
-        )?;
-    }
-    Ok(())
 }
 
 /// Assemble the on-disk asset sidecar from the worker-reported flat facts. Rust
