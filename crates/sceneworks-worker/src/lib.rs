@@ -1319,7 +1319,17 @@ fn resolve_training_output_dir(
 ) -> WorkerResult<PathBuf> {
     let path = normalize_app_managed_path(settings, output_dir, label)?;
     let data_dir = normalized_data_dir(settings)?;
-    let allowed_roots = [data_dir.join("loras"), data_dir.join("models")];
+    // Global-scope outputs land in `<data>/loras` (or `<data>/models` for full
+    // fine-tunes); project-scope outputs — the default — land in the owning
+    // project's tree, `<data>/projects/<slug>.sceneworks/loras/<lora_id>`, which
+    // `resolve_training_output_location` computes API-side from trusted inputs.
+    // All three stay inside the app data dir, so allow the projects tree too
+    // rather than rejecting every project-scoped run.
+    let allowed_roots = [
+        data_dir.join("loras"),
+        data_dir.join("models"),
+        data_dir.join("projects"),
+    ];
     ensure_path_under(path, &allowed_roots, label)
 }
 
