@@ -1582,10 +1582,21 @@ async fn generate_video(
 
     let mut canceled = false;
     let mut last_cancel = Instant::now();
-    while let Some(progress) = rx.recv().await {
-        if canceled {
-            continue; // drain so the blocking sender never blocks.
-        }
+    // Interval arm so the cold model-load phase (mlx_gen::load emits no progress)
+    // still heartbeats and polls cancel, instead of looking dead to the API's
+    // staleness check until the first denoise step (sc-4276 / F-MLXW-12; mirrors
+    // the caption-job select!-with-interval).
+    let mut interval = tokio::time::interval(crate::progress_report_interval(settings));
+    interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    loop {
+        tokio::select! {
+            maybe_progress = rx.recv() => {
+                let Some(progress) = maybe_progress else {
+                    break;
+                };
+                if canceled {
+                    continue; // drain so the blocking sender never blocks.
+                }
         if last_cancel.elapsed() >= Duration::from_secs(2) {
             last_cancel = Instant::now();
             if cancel_requested(api, &job.id, CANCEL_MESSAGE).await {
@@ -1615,6 +1626,18 @@ async fn generate_video(
             ),
         )
         .await?;
+            }
+            _ = interval.tick() => {
+                heartbeat(api, settings, WorkerStatus::Busy, Some(&job.id)).await?;
+                if !canceled && last_cancel.elapsed() >= Duration::from_secs(2) {
+                    last_cancel = Instant::now();
+                    if cancel_requested(api, &job.id, CANCEL_MESSAGE).await {
+                        cancel.cancel();
+                        canceled = true;
+                    }
+                }
+            }
+        }
     }
 
     let result = blocking
