@@ -2,105 +2,50 @@ import React, { useEffect, useMemo, useRef, useState } from "react";
 import { useAppContext } from "../context/AppContext.js";
 import { DEFAULT_MAC_CAPABILITIES, macTrainingKernelBlocked } from "../macGating.js";
 import { API_BASE_URL } from "../api.js";
-import { AssetThumbnail, assetCanRenderAsImage } from "../components/assetMedia.jsx";
-import { CompactSelector } from "../components/CompactSelector.jsx";
-import { DatasetAddDialog } from "../components/DatasetAddDialog.jsx";
-import { DatasetCaptionDialog } from "../components/DatasetCaptionDialog.jsx";
+import { assetCanRenderAsImage } from "../components/assetMedia.jsx";
 import { Icon } from "../components/Icons.jsx";
 import { WorkerProgressCard } from "../components/WorkerProgressCard.jsx";
 import { terminalStatuses } from "../constants.js";
 import {
   buildJoyCaptionPrompt,
   defaultCaptionSettings,
-  joyCaptionExtraOptions,
-  joyCaptionLengths,
   joyCaptionModel,
-  joyCaptionTypes,
 } from "../training/joyCaptionPrompts.js";
+import { asText, boundedNumber, integerFromDraft } from "../training/drafts.js";
+import {
+  captionDraftsFromDataset,
+  datasetHealth,
+  datasetItemSelectionKey,
+  datasetOwnedAssets,
+  datasetPayload,
+  imageAssetName,
+  normalizeDatasetAssetIds,
+  summarizeDatasets,
+} from "../training/datasetHelpers.js";
+import {
+  configDraftFromTarget,
+  configFieldLabels,
+  configValidation,
+  defaultGpuOptions,
+  defaultOptimizerOptions,
+  defaultPresetForTarget,
+  lrSchedulerOptions,
+  presetsForTarget,
+  rangeOptions,
+  samplePromptsFromTrigger,
+  trainingAdapterVersionOptions,
+  trainingConfigSnapshot,
+} from "../training/trainingConfig.js";
+import { ConfigureJobPanel } from "./training/ConfigureJobPanel.jsx";
+import { DatasetEditorPanel } from "./training/DatasetEditorPanel.jsx";
+
+// Re-exported for callers/tests that import the pure config builders from the
+// screen; the implementations now live in ../training/trainingConfig.js (sc-4199).
+export { configDraftFromTarget, trainingConfigSnapshot };
 
 const trainingTabs = [
   { id: "configure", label: "Configure Job", title: "Configure training job", status: "Queue dry run" },
 ];
-const defaultGpuOptions = ["auto"];
-const defaultOptimizerOptions = ["adamw8bit", "adamw", "adam", "prodigyopt", "rose"];
-const timestepTypeOptions = ["sigmoid", "linear", "weighted"];
-const timestepBiasOptions = ["balanced", "high_noise", "low_noise"];
-const lossTypeOptions = ["mse", "mae"];
-// Learning-rate schedulers the worker actually honors (constant holds the LR
-// fixed; linear/cosine decay it over the run). Distinct from the timestep/noise
-// scheduler above. The target's `limits.lrSchedulers` overrides this fallback.
-const lrSchedulerOptions = ["constant", "linear", "cosine"];
-const optimizerLabels = {
-  adam: "Adam",
-  adamw: "AdamW",
-  adamw8bit: "AdamW 8-bit",
-  prodigy: "Prodigy",
-  prodigyopt: "Prodigy",
-  rose: "Rose",
-};
-// Adapter network parameterization. `lora` is the universal default; `lokr`
-// (LyCORIS Kronecker) is offered only on targets whose `limits.networkTypes`
-// advertise it (epic 2193).
-const networkTypeLabels = {
-  lora: "LoRA",
-  lokr: "LoKr (LyCORIS Kronecker)",
-};
-// Versions of the ostris de-distill training adapter (Z-Image-Turbo only). The
-// worker maps these to the matching repo file; legacy "v2-default" normalizes to v2.
-const trainingAdapterVersionOptions = ["v1", "v2"];
-const trainingAdapterVersionLabels = {
-  v1: "v1 — stable (smaller)",
-  v2: "v2 — experimental (heavier de-distill)",
-};
-const configFieldLabels = {
-  outputName: "LoRA name",
-  triggerWord: "Trigger phrase",
-  outputScope: "Output scope",
-  qualityPreset: "Quality preset",
-  requestedGpu: "Requested GPU",
-  rank: "Rank",
-  alpha: "Alpha",
-  networkType: "Network type",
-  decomposeFactor: "LoKr factor",
-  optimizer: "Optimizer",
-  learningRate: "Learning rate",
-  weightDecay: "Weight decay",
-  lrScheduler: "LR scheduler",
-  lrWarmupSteps: "LR warmup steps",
-  steps: "Steps",
-  timestepType: "Timestep type",
-  timestepBias: "Timestep bias",
-  lossType: "Loss type",
-  trainingAdapterVersion: "De-distill adapter",
-  gradientCheckpointing: "Gradient checkpointing",
-  resolution: "Resolution",
-  precision: "Precision",
-  saveEvery: "Checkpoint cadence",
-  sampleEvery: "Sample cadence",
-  sampleSteps: "Sample steps",
-  sampleGuidanceScale: "Guidance scale",
-  batchSize: "Batch size",
-  gradientAccumulation: "Gradient accumulation",
-  seed: "Seed",
-};
-
-function datasetItemCount(dataset) {
-  const value = Number(dataset.itemCount ?? dataset.items?.length ?? 0);
-  return Number.isFinite(value) ? value : 0;
-}
-
-function summarizeDatasets(datasets) {
-  return datasets.reduce((summary, dataset) => ({ items: summary.items + datasetItemCount(dataset) }), { items: 0 });
-}
-
-function imageAssetName(asset) {
-  const path = asset?.file?.path ?? asset?.path ?? asset?.displayName ?? asset?.id ?? "asset";
-  return String(path).replaceAll("\\", "/").split("/").pop() || "asset";
-}
-
-function captionText(item) {
-  return String(item?.caption?.text ?? "").trim();
-}
 
 const IMPORT_IMAGE_EXTENSIONS = new Set(["png", "jpg", "jpeg", "webp", "bmp", "gif", "tif", "tiff"]);
 
@@ -155,31 +100,6 @@ function orderedName(index, prefix) {
   return `${safeSlug(prefix, "item")}_${String(index + 1).padStart(4, "0")}`;
 }
 
-// Human label for the detected caption source (sc-2025) — read-only on the card.
-function captionSourceLabel(source) {
-  if (source === "imported") {
-    return "Imported";
-  }
-  if (source === "auto") {
-    return "Auto";
-  }
-  return "Manual";
-}
-
-// Caption edit state keyed by selection id (sc-2025): the single source of
-// truth for the unified caption cards, seeded from the saved dataset items and
-// updated as the user edits or imports captions.
-function captionDraftsFromDataset(dataset) {
-  const map = {};
-  (dataset?.items ?? []).forEach((item, index) => {
-    map[datasetItemSelectionKey(dataset, item, index)] = {
-      text: item.caption?.text ?? "",
-      source: item.caption?.source ?? "manual",
-    };
-  });
-  return map;
-}
-
 // Map a member to its saved dataset item id so a single-image Re-Caption can
 // target it after a save. The member's id IS its selection key, so match the
 // saved item that resolves to the same key (asset id for library/character
@@ -194,355 +114,8 @@ function resolveSavedItemId(dataset, member) {
   return items.find((item) => (item.displayName ?? imageAssetName(item)) === name)?.id ?? null;
 }
 
-function datasetItemSelectionKey(dataset, item, index = 0) {
-  return item?.assetId || `dataset-item:${dataset?.id ?? "draft"}:${item?.id ?? index}`;
-}
 
-function datasetItemProjectPath(dataset, item) {
-  const path = String(item?.path ?? "").replaceAll("\\", "/");
-  if (!dataset?.id || !path) {
-    return "";
-  }
-  return `training/datasets/${dataset.id}/${path}`;
-}
 
-function datasetOwnedAssets(dataset, projectId, catalogAssets = []) {
-  const catalogIds = new Set(catalogAssets.map((asset) => asset.id));
-  return (dataset?.items ?? [])
-    .map((item, index) => {
-      if (item.assetId && catalogIds.has(item.assetId)) {
-        return null;
-      }
-      const path = datasetItemProjectPath(dataset, item);
-      if (!path) {
-        return null;
-      }
-      const id = datasetItemSelectionKey(dataset, item, index);
-      return {
-        id,
-        assetId: item.assetId ?? null,
-        datasetOwned: true,
-        projectId,
-        type: "image",
-        displayName: item.displayName ?? imageAssetName(item),
-        file: {
-          path,
-          mimeType: `image/${String(path).split(".").pop() || "png"}`,
-          width: item.width ?? null,
-          height: item.height ?? null,
-        },
-      };
-    })
-    .filter(Boolean);
-}
-
-function normalizeDatasetAssetIds(dataset, catalogAssets = []) {
-  const catalogIds = new Set(catalogAssets.map((asset) => asset.id));
-  return (dataset?.items ?? [])
-    .map((item, index) => {
-      if (item.assetId && catalogIds.has(item.assetId)) {
-        return item.assetId;
-      }
-      return datasetItemSelectionKey(dataset, item, index);
-    })
-    .filter(Boolean);
-}
-
-function datasetHealth({ activeDataset, imageAssets, selectedAssetIds }) {
-  const assetsById = new Map(imageAssets.map((asset) => [asset.id, asset]));
-  const selectedAssets = selectedAssetIds.map((id) => assetsById.get(id)).filter(Boolean);
-  const missingAssets = selectedAssetIds.filter((id) => !assetsById.has(id)).length;
-  const disabledItems = selectedAssets.filter((asset) => asset.status?.rejected || asset.status?.trashed).length + missingAssets;
-  const names = selectedAssets.map((asset) => imageAssetName(asset).toLowerCase());
-  const duplicateFilenames = names.filter((name, index) => names.indexOf(name) !== index).length;
-  const captionsByAssetId = new Map(
-    (activeDataset?.items ?? []).map((item, index) => [datasetItemSelectionKey(activeDataset, item, index), captionText(item)]),
-  );
-  const missingCaptions = selectedAssetIds.filter((id) => !captionsByAssetId.get(id)).length;
-  const valid = selectedAssetIds.length > 0 && disabledItems === 0;
-
-  return {
-    disabledItems,
-    duplicateFilenames,
-    itemCount: selectedAssetIds.length,
-    missingCaptions,
-    valid,
-  };
-}
-
-function datasetPayload({ activeDataset, assetsById, associatedCharacterId, captionDraftById = {}, name, selectedAssetIds }) {
-  const itemsByAssetId = new Map(
-    (activeDataset?.items ?? []).map((item, index) => [datasetItemSelectionKey(activeDataset, item, index), item]),
-  );
-  return {
-    name: name.trim(),
-    modality: "image",
-    // sc-2022: associate the dataset with a character when one is set (created
-    // from a character's images, or images imported from the Character tab).
-    ...(associatedCharacterId ? { characterId: associatedCharacterId } : {}),
-    items: selectedAssetIds
-      .map((selectionId) => {
-        const asset = assetsById.get(selectionId);
-        if (!asset) {
-          return null;
-        }
-        const previous = itemsByAssetId.get(selectionId);
-        const draft = captionDraftById[selectionId];
-        let caption;
-        if (draft && (String(draft.text ?? "").length || draft.source)) {
-          caption = {
-            text: draft.text ?? "",
-            source: draft.source ?? "manual",
-            triggerWords: previous?.caption?.triggerWords ?? [],
-          };
-        } else if (previous?.caption) {
-          caption = {
-            text: previous.caption.text ?? "",
-            source: previous.caption.source ?? "manual",
-            triggerWords: previous.caption.triggerWords ?? [],
-          };
-        }
-        const source = asset.datasetOwned || asset.datasetOnly ? { path: asset.file?.path } : { assetId: asset.id };
-        return {
-          ...source,
-          displayName: asset.displayName ?? imageAssetName(asset),
-          caption,
-        };
-      })
-      .filter(Boolean),
-  };
-}
-
-function asText(value) {
-  return value === null || value === undefined ? "" : String(value);
-}
-
-// Normalize a training-adapter version to the worker's canonical token. Mirrors
-// the worker's substring match so legacy "v2-default" shows as "v2" in the select.
-function normalizeTrainingAdapterVersion(value) {
-  const token = asText(value).trim();
-  const lower = token.toLowerCase();
-  if (lower.includes("v1")) return "v1";
-  if (lower.includes("v2")) return "v2";
-  return token;
-}
-
-function numericDraft(value) {
-  return value === null || value === undefined ? "" : String(value);
-}
-
-function numberFromDraft(value) {
-  const trimmed = String(value ?? "").trim();
-  if (!trimmed) {
-    return null;
-  }
-  const number = Number(trimmed);
-  return Number.isFinite(number) ? number : null;
-}
-
-function boundedNumber(value, fallback, min, max) {
-  const number = Number(value);
-  if (!Number.isFinite(number)) {
-    return fallback;
-  }
-  return Math.min(max, Math.max(min, number));
-}
-
-function integerFromDraft(value, fallback, min, max) {
-  return Math.round(boundedNumber(value, fallback, min, max));
-}
-
-function compactObject(object) {
-  return Object.fromEntries(
-    Object.entries(object).filter(([, value]) => value !== "" && value !== null && value !== undefined),
-  );
-}
-
-function rangeOptions(limits, key) {
-  return Array.isArray(limits?.[key]) ? limits[key] : [];
-}
-
-function optimizerLabel(value) {
-  return optimizerLabels[value] ?? value;
-}
-
-function networkTypeLabel(value) {
-  return networkTypeLabels[value] ?? value;
-}
-
-function optionLabel(value) {
-  return String(value ?? "")
-    .split("_")
-    .filter(Boolean)
-    .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
-    .join(" ");
-}
-
-function presetSortValue(preset) {
-  const order = Number(preset?.ui?.order);
-  return Number.isFinite(order) ? order : 999;
-}
-
-function presetsForTarget(presets, targetId) {
-  return (presets ?? [])
-    .filter((preset) => preset.targetId === targetId)
-    .slice()
-    .sort((left, right) => presetSortValue(left) - presetSortValue(right) || left.name.localeCompare(right.name));
-}
-
-function defaultPresetForTarget(presets, targetId) {
-  const targetPresets = presetsForTarget(presets, targetId);
-  return targetPresets.find((preset) => preset.ui?.default) ?? targetPresets[0] ?? null;
-}
-
-export function configDraftFromTarget(target, dataset, gpuOptions, triggerPhrase = "", preset = null, previousDraft = {}) {
-  const defaults = preset?.config ?? target?.defaults ?? {};
-  const advanced = defaults.advanced ?? {};
-  const firstGpu = gpuOptions[0] ?? "";
-  const requestedGpu = asText(advanced.requestedGpu || firstGpu);
-  const outputLabel = outputKindLabel(target);
-  return {
-    outputName: previousDraft.outputName ?? (dataset?.name ? `${dataset.name} ${outputLabel}` : ""),
-    triggerWord: triggerPhrase || asText(defaults.triggerWord),
-    outputScope: asText(advanced.outputScope),
-    qualityPreset: asText(advanced.qualityPreset),
-    requestedGpu: gpuOptions.includes(requestedGpu) ? requestedGpu : firstGpu,
-    rank: numericDraft(defaults.rank),
-    alpha: numericDraft(defaults.alpha),
-    networkType: asText(advanced.networkType || "lora"),
-    // LoKr block-decomposition factor; -1 = auto. Only consumed when networkType
-    // is lokr (the worker ignores it otherwise).
-    decomposeFactor: numericDraft(advanced.decomposeFactor ?? -1),
-    optimizer: asText(defaults.optimizer),
-    learningRate: numericDraft(defaults.learningRate),
-    weightDecay: numericDraft(advanced.weightDecay),
-    lrScheduler: asText(advanced.lrScheduler || "constant"),
-    lrWarmupSteps: numericDraft(advanced.lrWarmupSteps),
-    steps: numericDraft(defaults.steps),
-    timestepType: asText(advanced.timestepType || "sigmoid"),
-    timestepBias: asText(advanced.timestepBias || "balanced"),
-    lossType: asText(advanced.lossType || "mse"),
-    trainingAdapterRepo: asText(advanced.trainingAdapterRepo),
-    trainingAdapterVersion: normalizeTrainingAdapterVersion(advanced.trainingAdapterVersion),
-    gradientCheckpointing: advanced.gradientCheckpointing !== false,
-    resolution: numericDraft(defaults.resolution),
-    precision: asText(advanced.mixedPrecision),
-    saveEvery: numericDraft(defaults.saveEvery),
-    sampleEvery: numericDraft(advanced.sampleEvery),
-    sampleSteps: numericDraft(advanced.sampleSteps),
-    sampleGuidanceScale: numericDraft(advanced.sampleGuidanceScale),
-    batchSize: numericDraft(defaults.batchSize),
-    gradientAccumulation: numericDraft(defaults.gradientAccumulation),
-    seed: numericDraft(defaults.seed),
-  };
-}
-
-function configValidation({ activeDataset, configDraft, selectedTarget }) {
-  const warnings = [];
-  if (!selectedTarget) {
-    warnings.push("Select a training target");
-  }
-  if (!activeDataset?.id) {
-    warnings.push("Select a saved dataset");
-  }
-  if (!configDraft.outputName?.trim()) {
-    warnings.push(`Name the ${outputKindLabel(selectedTarget)} output`);
-  }
-  if (!configDraft.triggerWord?.trim()) {
-    warnings.push("Add a trigger phrase");
-  }
-  for (const [field, label] of [
-    ["rank", "Rank"],
-    ["alpha", "Alpha"],
-    ["learningRate", "Learning rate"],
-    ["steps", "Steps"],
-    ["resolution", "Resolution"],
-    ["batchSize", "Batch size"],
-    ["gradientAccumulation", "Gradient accumulation"],
-    ["saveEvery", "Checkpoint cadence"],
-  ]) {
-    const value = numberFromDraft(configDraft[field]);
-    if (!value || value <= 0) {
-      warnings.push(`${label} must be greater than zero`);
-    }
-  }
-  return warnings;
-}
-
-function outputKindLabel(target) {
-  const kind = String(target?.outputKind ?? "output").toLowerCase();
-  if (kind === "lora") {
-    return "LoRA";
-  }
-  return kind.replaceAll("_", " ");
-}
-
-function samplePromptsFromTrigger(triggerWord) {
-  const trigger = String(triggerWord ?? "").trim() || "the trained subject";
-  return [
-    `${trigger}, studio portrait, soft key light, detailed face`,
-    `${trigger}, full body fashion editorial photo, natural pose`,
-    `${trigger}, cinematic outdoor portrait, golden hour`,
-    `${trigger}, close-up character portrait, dramatic rim light`,
-  ];
-}
-
-export function trainingConfigSnapshot({ activeDataset, configDraft, selectedPreset, selectedTarget, dryRun = true }) {
-  const defaults = selectedTarget?.defaults ?? {};
-  const networkType = asText(configDraft.networkType).trim() || "lora";
-  const advanced = compactObject({
-    ...(defaults.advanced ?? {}),
-    networkType,
-    // LoKr factor only matters for lokr; omit it otherwise so lora jobs stay clean.
-    decomposeFactor: networkType === "lokr" ? numberFromDraft(configDraft.decomposeFactor) : undefined,
-    weightDecay: numberFromDraft(configDraft.weightDecay),
-    lrScheduler: asText(configDraft.lrScheduler).trim() || "constant",
-    lrWarmupSteps: numberFromDraft(configDraft.lrWarmupSteps),
-    timestepType: asText(configDraft.timestepType).trim(),
-    timestepBias: asText(configDraft.timestepBias).trim(),
-    lossType: asText(configDraft.lossType).trim(),
-    // Preset-only advanced keys (the submit spreads target defaults, not the
-    // preset), so carry the de-distill adapter through explicitly — the worker
-    // only fuses it when config.advanced.trainingAdapterRepo is present.
-    trainingAdapterRepo: asText(configDraft.trainingAdapterRepo).trim(),
-    trainingAdapterVersion: asText(configDraft.trainingAdapterVersion).trim(),
-    gradientCheckpointing: Boolean(configDraft.gradientCheckpointing),
-    mixedPrecision: asText(configDraft.precision).trim(),
-    sampleEvery: numberFromDraft(configDraft.sampleEvery),
-    sampleSteps: numberFromDraft(configDraft.sampleSteps),
-    sampleGuidanceScale: numberFromDraft(configDraft.sampleGuidanceScale),
-    samplePrompts: samplePromptsFromTrigger(configDraft.triggerWord),
-    qualityPreset: configDraft.qualityPreset,
-    outputScope: configDraft.outputScope,
-    requestedGpu: configDraft.requestedGpu,
-  });
-  return {
-    targetId: selectedTarget.id,
-    datasetId: activeDataset.id,
-    datasetVersion: activeDataset.version,
-    outputName: configDraft.outputName.trim(),
-    dryRun,
-    outputScope: configDraft.outputScope,
-    qualityPreset: configDraft.qualityPreset,
-    requestedGpu: configDraft.requestedGpu,
-    presetId: selectedPreset?.id,
-    presetVersion: selectedPreset?.version,
-    config: {
-      rank: numberFromDraft(configDraft.rank),
-      alpha: numberFromDraft(configDraft.alpha),
-      learningRate: numberFromDraft(configDraft.learningRate),
-      steps: numberFromDraft(configDraft.steps),
-      batchSize: numberFromDraft(configDraft.batchSize),
-      gradientAccumulation: numberFromDraft(configDraft.gradientAccumulation),
-      resolution: numberFromDraft(configDraft.resolution),
-      saveEvery: numberFromDraft(configDraft.saveEvery),
-      seed: numberFromDraft(configDraft.seed),
-      optimizer: asText(configDraft.optimizer).trim(),
-      triggerWord: asText(configDraft.triggerWord).trim(),
-      advanced,
-    },
-  };
-}
 
 function trainingCaptionJobPayload(settings) {
   const captionPrompt = String(settings.captionPrompt || buildJoyCaptionPrompt(settings)).trim();
@@ -563,27 +136,6 @@ function trainingCaptionJobPayload(settings) {
       lowVram: Boolean(settings.lowVram),
     },
   };
-}
-
-
-function DatasetHealth({ health, action }) {
-  return (
-    <div className="training-health-grid" aria-label="Dataset health">
-      <div>
-        <strong>{health.itemCount}</strong>
-        <span>Items</span>
-      </div>
-      <div className={health.missingCaptions ? "needs-attention" : ""}>
-        <strong>{health.missingCaptions}</strong>
-        <span>Missing captions</span>
-      </div>
-      <div className={health.duplicateFilenames ? "needs-attention" : ""}>
-        <strong>{health.duplicateFilenames}</strong>
-        <span>Duplicate filenames</span>
-      </div>
-      {action ? <div className="training-health-action">{action}</div> : null}
-    </div>
-  );
 }
 
 // Convert a training-sample record into an asset-shaped object that AssetThumbnail
@@ -1536,585 +1088,101 @@ export function TrainingStudio({ mode = "training" } = {}) {
               role="tabpanel"
             >
               {datasetLibraryMode || activeTab === "dataset" ? (
-                <>
-                  <div className="training-panel-head">
-                    <div>
-                      <p className="eyebrow">Dataset</p>
-                      <h3>{active.title}</h3>
-                    </div>
-                    <div className="training-head-actions">
-                      <button className="secondary-action" disabled={loadingDatasets} onClick={onRefreshDatasets} type="button">
-                        <Icon.Search size={14} />
-                        {loadingDatasets ? "Refreshing" : "Refresh"}
-                      </button>
-                      <CompactSelector
-                        busyId={busyDatasetId}
-                        createLabel="New dataset"
-                        getSubtitle={(dataset) => {
-                          const count = datasetItemCount(dataset);
-                          return `${count} item${count === 1 ? "" : "s"}`;
-                        }}
-                        getThumbAsset={datasetThumbAsset}
-                        items={datasets}
-                        label="Select dataset"
-                        onCreate={startNewDataset}
-                        onSelect={(dataset) => openDataset(dataset.id)}
-                        placeholder={activeDataset ? activeDataset.name : "New dataset"}
-                        selectedId={selectedDatasetId}
-                      />
-                    </div>
-                  </div>
-                  {datasetsError ? <p className="inline-warning">{datasetsError}</p> : null}
-                  {datasetError ? <p className="inline-warning">{datasetError}</p> : null}
-                  {datasetMessage ? <p className="inline-success">{datasetMessage}</p> : null}
-                  <div className="training-dataset-workspace">
-                    {loadingDatasets ? <div className="empty-panel compact-panel">Loading training datasets</div> : null}
-                    {!loadingDatasets && datasets.length === 0 ? (
-                      <div className="empty-panel compact-panel">No training datasets yet — use “New” to start one.</div>
-                    ) : null}
-                    <div className="training-dataset-editor">
-                      <div className="training-dataset-fields">
-                        <label className="field-name">
-                          Dataset name
-                          <input
-                            onChange={(event) => setDraftName(event.target.value)}
-                            placeholder="Character portrait set"
-                            value={draftName}
-                          />
-                        </label>
-                        <span className="field-version">
-                          {dirty ? "Unsaved changes" : activeDataset ? `Version ${activeDataset.version}` : "Draft"}
-                        </span>
-                        <button className="primary-action field-add" onClick={() => setAddDialogOpen(true)} type="button">
-                          <Icon.Plus size={14} />
-                          Add images
-                        </button>
-
-                        <label className="field-prefix">
-                          Name prefix
-                          <input
-                            onChange={(event) => setRenamePrefix(event.target.value)}
-                            placeholder="item"
-                            value={renamePrefix}
-                          />
-                        </label>
-                        <button
-                          className="primary-action field-apply"
-                          disabled={!activeDataset?.id || renaming || !memberAssets.length}
-                          onClick={applyOrderedNames}
-                          type="button"
-                        >
-                          <Icon.Sliders size={14} />
-                          {renaming ? "Renaming…" : "Apply ordered names"}
-                        </button>
-                        <button
-                          className="primary-action field-caption"
-                          disabled={!memberAssets.length}
-                          onClick={() => setCaptionDialog({ type: "all" })}
-                          type="button"
-                        >
-                          <Icon.Sliders size={14} />
-                          Caption all
-                        </button>
-                      </div>
-                      <DatasetHealth
-                        health={health}
-                        action={
-                          <button className="primary-action" disabled={!canSave} onClick={saveDataset} type="button">
-                            {savingDataset ? "Saving" : activeDataset ? "Save dataset" : "Create dataset"}
-                          </button>
-                        }
-                      />
-                      <div className="training-validity">
-                        <span className={health.valid ? "training-valid-dot valid" : "training-valid-dot"} />
-                        <span>{health.valid ? "Dataset is ready for downstream steps" : "Add image assets to build this dataset"}</span>
-                      </div>
-                      {unavailableAssetIds.length ? (
-                        <div className="training-unavailable-list" aria-label="Unavailable dataset items">
-                          {unavailableAssetIds.map((assetId) => (
-                            <div className="training-unavailable-item" key={assetId}>
-                              <div>
-                                <strong>{assetId}</strong>
-                                <span>Asset is no longer available</span>
-                              </div>
-                              <button className="secondary-action" onClick={() => removeUnavailableAsset(assetId)} type="button">
-                                Remove
-                              </button>
-                            </div>
-                          ))}
-                        </div>
-                      ) : null}
-                      <div className="training-caption-grid" aria-label="Dataset images and captions">
-                        {memberAssets.length ? (
-                          memberAssets.map((asset) => {
-                            const disabled = asset.status?.rejected || asset.status?.trashed;
-                            const draft = captionDraftById[asset.id] ?? {};
-                            const source = draft.source ?? "manual";
-                            const name = asset.displayName ?? imageAssetName(asset);
-                            return (
-                              <article
-                                className={["training-caption-card", disabled ? "disabled" : ""].filter(Boolean).join(" ")}
-                                key={asset.id}
-                              >
-                                <div className="training-caption-card-head">
-                                  <button className="training-caption-card-thumb" onClick={() => onPreview(asset, memberAssets)} type="button">
-                                    <AssetThumbnail asset={asset} />
-                                  </button>
-                                  <div className="training-caption-card-meta">
-                                    <strong title={name}>{name}</strong>
-                                    <span className={`training-caption-source source-${source}`}>{captionSourceLabel(source)}</span>
-                                    {disabled ? (
-                                      <span className="training-asset-badge">{asset.status?.trashed ? "Trashed" : "Rejected"}</span>
-                                    ) : null}
-                                  </div>
-                                </div>
-                                <textarea
-                                  aria-label={`Caption for ${name}`}
-                                  className="training-caption-card-text"
-                                  onChange={(event) => updateCaption(asset.id, event.target.value)}
-                                  placeholder="Describe this image…"
-                                  rows={3}
-                                  value={draft.text ?? ""}
-                                />
-                                <div className="training-caption-card-actions">
-                                  <button
-                                    aria-label={`Remove ${name}`}
-                                    className="secondary-action"
-                                    onClick={() => removeUnavailableAsset(asset.id)}
-                                    type="button"
-                                  >
-                                    Remove
-                                  </button>
-                                  <button
-                                    aria-label={`Re-caption ${name}`}
-                                    className="secondary-action"
-                                    disabled={captioning}
-                                    onClick={() => setCaptionDialog({ type: "item", member: asset })}
-                                    type="button"
-                                  >
-                                    Re-Caption
-                                  </button>
-                                </div>
-                              </article>
-                            );
-                          })
-                        ) : (
-                          <div className="empty-panel compact-panel">No images yet — use “Add images” to build this dataset.</div>
-                        )}
-                      </div>
-                      {addDialogOpen ? (
-                        <DatasetAddDialog
-                          assets={imageAssets}
-                          characters={characters}
-                          importing={importingAssets}
-                          memberIds={selectedAssetIds}
-                          onAdd={addAssets}
-                          onClose={() => setAddDialogOpen(false)}
-                          onImport={handleImport}
-                        />
-                      ) : null}
-                      {captionDialog ? (
-                        <DatasetCaptionDialog
-                          captionLengths={joyCaptionLengths}
-                          captionTypes={joyCaptionTypes}
-                          extraOptions={joyCaptionExtraOptions}
-                          gpuOptions={gpuOptions}
-                          onChange={updateCaptionSetting}
-                          onClose={() => setCaptionDialog(null)}
-                          onRun={runCaptionJob}
-                          onToggleExtra={toggleCaptionExtraOption}
-                          promptValue={displayedCaptionPrompt}
-                          running={captioning}
-                          scope={
-                            captionDialog.type === "item"
-                              ? {
-                                  type: "item",
-                                  name: captionDialog.member.displayName ?? imageAssetName(captionDialog.member),
-                                }
-                              : { type: "all" }
-                          }
-                          settings={captionSettings}
-                        />
-                      ) : null}
-                    </div>
-                  </div>
-                </>
+                <DatasetEditorPanel
+                  active={active}
+                  loadingDatasets={loadingDatasets}
+                  onRefreshDatasets={onRefreshDatasets}
+                  busyDatasetId={busyDatasetId}
+                  datasetThumbAsset={datasetThumbAsset}
+                  datasets={datasets}
+                  startNewDataset={startNewDataset}
+                  openDataset={openDataset}
+                  activeDataset={activeDataset}
+                  selectedDatasetId={selectedDatasetId}
+                  datasetsError={datasetsError}
+                  datasetError={datasetError}
+                  datasetMessage={datasetMessage}
+                  draftName={draftName}
+                  setDraftName={setDraftName}
+                  dirty={dirty}
+                  setAddDialogOpen={setAddDialogOpen}
+                  renamePrefix={renamePrefix}
+                  setRenamePrefix={setRenamePrefix}
+                  renaming={renaming}
+                  memberAssets={memberAssets}
+                  applyOrderedNames={applyOrderedNames}
+                  setCaptionDialog={setCaptionDialog}
+                  health={health}
+                  canSave={canSave}
+                  saveDataset={saveDataset}
+                  savingDataset={savingDataset}
+                  unavailableAssetIds={unavailableAssetIds}
+                  removeUnavailableAsset={removeUnavailableAsset}
+                  captionDraftById={captionDraftById}
+                  onPreview={onPreview}
+                  updateCaption={updateCaption}
+                  captioning={captioning}
+                  addDialogOpen={addDialogOpen}
+                  imageAssets={imageAssets}
+                  characters={characters}
+                  importingAssets={importingAssets}
+                  selectedAssetIds={selectedAssetIds}
+                  addAssets={addAssets}
+                  handleImport={handleImport}
+                  captionDialog={captionDialog}
+                  gpuOptions={gpuOptions}
+                  updateCaptionSetting={updateCaptionSetting}
+                  runCaptionJob={runCaptionJob}
+                  toggleCaptionExtraOption={toggleCaptionExtraOption}
+                  displayedCaptionPrompt={displayedCaptionPrompt}
+                  captionSettings={captionSettings}
+                />
               ) : null}
 
               {activeTab === "configure" ? (
-                <>
-                  <div className="training-panel-head">
-                    <div>
-                      <p className="eyebrow">Configure Job</p>
-                      <h3>{active.title}</h3>
-                    </div>
-                    <div className="training-head-actions">
-                      <button className="secondary-action" onClick={() => setActiveView?.("LibraryDataSets")} type="button">
-                        <Icon.Library size={14} />
-                        Data Sets
-                      </button>
-                      <span className="training-status-pill">{configReady ? "Ready" : "Needs input"}</span>
-                    </div>
-                  </div>
-                  {trainingTargetsError ? <p className="inline-warning">{trainingTargetsError}</p> : null}
-                  {trainingPresetsError ? <p className="inline-warning">{trainingPresetsError}</p> : null}
-                  {configError ? <p className="inline-warning">{configError}</p> : null}
-                  {configMessage ? <p className="inline-success">{configMessage}</p> : null}
-                  {!selectedTarget ? (
-                    <div className="empty-panel compact-panel">Training target registry unavailable</div>
-                  ) : (
-                    <div className="training-config-form" aria-label="Training job configuration">
-                      <div className="training-config-grid">
-                        <label>
-                          Target
-                          <select onChange={(event) => setSelectedTargetId(event.target.value)} value={selectedTarget.id}>
-                            {trainingTargets.map((target) => {
-                              const blocked = macTargetBlocked(target);
-                              return (
-                                <option key={target.id} value={target.id} disabled={blocked}>
-                                  {target.ui?.label ?? target.name}
-                                  {blocked ? " — not on Mac (Rust/MLX only)" : ""}
-                                </option>
-                              );
-                            })}
-                          </select>
-                        </label>
-                        <label>
-                          Preset
-                          <select onChange={(event) => updateSelectedPreset(event.target.value)} value={selectedPreset?.id ?? ""}>
-                            {targetPresets.length ? null : <option value="">Target defaults</option>}
-                            {targetPresets.map((preset) => (
-                              <option key={preset.id} value={preset.id}>
-                                {preset.name}
-                              </option>
-                            ))}
-                          </select>
-                        </label>
-                        <label>
-                          Base model
-                          <input disabled readOnly value={selectedTarget.baseModel ?? ""} />
-                        </label>
-                        <label>
-                          Dataset
-                          <select onChange={(event) => openDataset(event.target.value)} value={activeDataset?.id ?? ""}>
-                            <option value="">Select a saved dataset</option>
-                            {datasets.map((dataset) => (
-                              <option key={dataset.id} value={dataset.id}>
-                                {dataset.name ?? dataset.id}
-                              </option>
-                            ))}
-                          </select>
-                        </label>
-                        <label>
-                          LoRA name
-                          <input onChange={(event) => updateConfigDraft("outputName", event.target.value)} value={configDraft.outputName ?? ""} />
-                        </label>
-                        <label>
-                          Trigger phrase
-                          <input onChange={(event) => updateConfigDraft("triggerWord", event.target.value)} value={configDraft.triggerWord ?? ""} />
-                        </label>
-                        <label>
-                          Output scope
-                          <select onChange={(event) => updateConfigDraft("outputScope", event.target.value)} value={configDraft.outputScope ?? ""}>
-                            {outputScopes.length ? null : <option value={configDraft.outputScope ?? ""}>{configDraft.outputScope || "Default"}</option>}
-                            {outputScopes.map((scope) => (
-                              <option key={scope} value={scope}>
-                                {scope}
-                              </option>
-                            ))}
-                          </select>
-                        </label>
-                        <label>
-                          Quality preset
-                          <select
-                            onChange={(event) => updateConfigDraft("qualityPreset", event.target.value)}
-                            value={configDraft.qualityPreset ?? ""}
-                          >
-                            {visibleQualityPresets.length ? null : (
-                              <option value={configDraft.qualityPreset ?? ""}>{configDraft.qualityPreset || "Default"}</option>
-                            )}
-                            {visibleQualityPresets.map((preset) => (
-                              <option key={preset} value={preset}>
-                                {preset}
-                              </option>
-                            ))}
-                          </select>
-                        </label>
-                        <label>
-                          Requested GPU
-                          <select onChange={(event) => updateConfigDraft("requestedGpu", event.target.value)} value={configDraft.requestedGpu ?? ""}>
-                            {gpuOptions.map((gpu) => (
-                              <option key={gpu} value={gpu}>
-                                {gpu === "auto" ? "Auto" : `GPU ${gpu}`}
-                              </option>
-                            ))}
-                          </select>
-                        </label>
-                        <label>
-                          Sample cadence
-                          <input
-                            onChange={(event) => updateConfigDraft("sampleEvery", event.target.value)}
-                            type="number"
-                            value={configDraft.sampleEvery ?? ""}
-                          />
-                        </label>
-                        <label>
-                          Sample steps
-                          <input
-                            onChange={(event) => updateConfigDraft("sampleSteps", event.target.value)}
-                            type="number"
-                            value={configDraft.sampleSteps ?? ""}
-                          />
-                        </label>
-                        <label>
-                          Guidance scale
-                          <input
-                            onChange={(event) => updateConfigDraft("sampleGuidanceScale", event.target.value)}
-                            step="0.1"
-                            type="number"
-                            value={configDraft.sampleGuidanceScale ?? ""}
-                          />
-                        </label>
-                      </div>
-
-                      {selectedPreset ? (
-                        <div className="training-preset-summary" aria-label="Preset values">
-                          <span>{selectedPreset.name}</span>
-                          <span>Rank {configDraft.rank || "-"}</span>
-                          <span>LR {configDraft.learningRate || "-"}</span>
-                          <span>{optimizerLabel(configDraft.optimizer)}</span>
-                          <span>{configDraft.steps || "-"} steps</span>
-                          <span>{configDraft.resolution || "-"}px</span>
-                          {customizedConfigLabels.length ? (
-                            <span>Customized: {customizedConfigLabels.join(", ")}</span>
-                          ) : null}
-                        </div>
-                      ) : null}
-
-                      <details
-                        className="training-advanced-panel"
-                        onToggle={(event) => setShowAdvancedConfig(event.currentTarget.open)}
-                        open={showAdvancedConfig}
-                      >
-                        <summary>
-                          <Icon.Sliders size={14} />
-                          Advanced
-                        </summary>
-                        <div className="training-advanced-grid">
-                          <label>
-                            Rank
-                            <input onChange={(event) => updateConfigDraft("rank", event.target.value)} type="number" value={configDraft.rank ?? ""} />
-                          </label>
-                          <label>
-                            Alpha
-                            <input onChange={(event) => updateConfigDraft("alpha", event.target.value)} type="number" value={configDraft.alpha ?? ""} />
-                          </label>
-                          {showNetworkType ? (
-                            <label title="Adapter parameterization. LoRA is the standard low-rank adapter; LoKr (LyCORIS Kronecker) trains a much smaller, often more expressive adapter (torch backends only).">
-                              Network type
-                              <select
-                                onChange={(event) => updateConfigDraft("networkType", event.target.value)}
-                                value={configDraft.networkType ?? "lora"}
-                              >
-                                {networkTypeOptions.map((option) => {
-                                  const blocked = option === "lokr" && macLokrOnWanBlocked;
-                                  return (
-                                    <option key={option} value={option} disabled={blocked}>
-                                      {networkTypeLabel(option)}
-                                      {blocked ? " — not on Mac (Rust/MLX only)" : ""}
-                                    </option>
-                                  );
-                                })}
-                              </select>
-                            </label>
-                          ) : null}
-                          {showNetworkType && isLokrNetwork ? (
-                            <label title="LoKr block-decomposition factor. -1 lets LyCORIS pick the largest factor automatically; larger values trade adapter size for capacity.">
-                              LoKr factor
-                              <input
-                                min="-1"
-                                onChange={(event) => updateConfigDraft("decomposeFactor", event.target.value)}
-                                step="1"
-                                type="number"
-                                value={configDraft.decomposeFactor ?? ""}
-                              />
-                            </label>
-                          ) : null}
-                          <label>
-                            Optimizer
-                            <select onChange={(event) => updateConfigDraft("optimizer", event.target.value)} value={configDraft.optimizer ?? ""}>
-                              {visibleOptimizerOptions.map((optimizer) => (
-                                <option key={optimizer} value={optimizer}>
-                                  {optimizerLabel(optimizer)}
-                                </option>
-                              ))}
-                            </select>
-                          </label>
-                          <label>
-                            Learning rate
-                            <input
-                              onChange={(event) => updateConfigDraft("learningRate", event.target.value)}
-                              step="0.00001"
-                              type="number"
-                              value={configDraft.learningRate ?? ""}
-                            />
-                          </label>
-                          <label>
-                            Weight decay
-                            <input
-                              onChange={(event) => updateConfigDraft("weightDecay", event.target.value)}
-                              step="0.00001"
-                              type="number"
-                              value={configDraft.weightDecay ?? ""}
-                            />
-                          </label>
-                          <label>
-                            Steps
-                            <input onChange={(event) => updateConfigDraft("steps", event.target.value)} type="number" value={configDraft.steps ?? ""} />
-                          </label>
-                          <label>
-                            Timestep type
-                            <select onChange={(event) => updateConfigDraft("timestepType", event.target.value)} value={configDraft.timestepType ?? ""}>
-                              {timestepTypeOptions.map((option) => (
-                                <option key={option} value={option}>
-                                  {optionLabel(option)}
-                                </option>
-                              ))}
-                            </select>
-                          </label>
-                          <label>
-                            Timestep bias
-                            <select onChange={(event) => updateConfigDraft("timestepBias", event.target.value)} value={configDraft.timestepBias ?? ""}>
-                              {timestepBiasOptions.map((option) => (
-                                <option key={option} value={option}>
-                                  {optionLabel(option)}
-                                </option>
-                              ))}
-                            </select>
-                          </label>
-                          <label>
-                            Loss type
-                            <select onChange={(event) => updateConfigDraft("lossType", event.target.value)} value={configDraft.lossType ?? ""}>
-                              {lossTypeOptions.map((option) => (
-                                <option key={option} value={option}>
-                                  {option === "mse" ? "Mean Squared Error" : optionLabel(option)}
-                                </option>
-                              ))}
-                            </select>
-                          </label>
-                          <label title="Learning-rate scheduler (not the timestep/noise scheduler). Constant holds the LR fixed for the whole run; linear and cosine decay it toward zero over the run.">
-                            LR scheduler
-                            <select onChange={(event) => updateConfigDraft("lrScheduler", event.target.value)} value={configDraft.lrScheduler ?? ""}>
-                              {visibleLrSchedulerOptions.map((option) => (
-                                <option key={option} value={option}>
-                                  {optionLabel(option)}
-                                </option>
-                              ))}
-                            </select>
-                          </label>
-                          <label title="Optional linear warmup: number of steps to ramp the LR up from zero before the scheduler body runs. 0 disables warmup.">
-                            LR warmup steps
-                            <input
-                              min="0"
-                              onChange={(event) => updateConfigDraft("lrWarmupSteps", event.target.value)}
-                              type="number"
-                              value={configDraft.lrWarmupSteps ?? ""}
-                            />
-                          </label>
-                          {showTrainingAdapter ? (
-                            <label title="ostris de-distill adapter for the step-distilled Z-Image-Turbo base. Fused in for training, removed at inference. v1 is stable; v2 is a heavier, experimental de-distill.">
-                              De-distill adapter
-                              <select
-                                onChange={(event) => updateConfigDraft("trainingAdapterVersion", event.target.value)}
-                                value={configDraft.trainingAdapterVersion ?? ""}
-                              >
-                                {visibleTrainingAdapterVersions.map((version) => (
-                                  <option key={version} value={version}>
-                                    {trainingAdapterVersionLabels[version] ?? version}
-                                  </option>
-                                ))}
-                              </select>
-                            </label>
-                          ) : null}
-                          <label>
-                            Resolution
-                            <select onChange={(event) => updateConfigDraft("resolution", event.target.value)} value={configDraft.resolution ?? ""}>
-                              {visibleResolutionOptions.length ? null : <option value={configDraft.resolution ?? ""}>{configDraft.resolution ?? ""}</option>}
-                              {visibleResolutionOptions.map((resolution) => (
-                                <option key={resolution} value={resolution}>
-                                  {resolution}
-                                </option>
-                              ))}
-                            </select>
-                          </label>
-                          <label>
-                            Precision
-                            <input onChange={(event) => updateConfigDraft("precision", event.target.value)} value={configDraft.precision ?? ""} />
-                          </label>
-                          <label className="training-checkbox-field">
-                            <input
-                              checked={Boolean(configDraft.gradientCheckpointing)}
-                              onChange={(event) => updateConfigDraft("gradientCheckpointing", event.target.checked)}
-                              type="checkbox"
-                            />
-                            Gradient checkpointing
-                          </label>
-                          <label>
-                            Checkpoint cadence
-                            <input
-                              onChange={(event) => updateConfigDraft("saveEvery", event.target.value)}
-                              type="number"
-                              value={configDraft.saveEvery ?? ""}
-                            />
-                          </label>
-                        </div>
-                      </details>
-
-                      {configWarnings.length ? (
-                        <div className="training-config-warnings" aria-label="Configuration warnings">
-                          {configWarnings.map((warning) => (
-                            <span key={warning}>{warning}</span>
-                          ))}
-                        </div>
-                      ) : null}
-
-                      <div className="training-config-actions">
-                        <label className="training-run-mode">
-                          <span>Run mode</span>
-                          <select
-                            aria-label="Training run mode"
-                            disabled={submittingJob}
-                            onChange={(event) => setTrainingRunMode(event.target.value)}
-                            value={trainingRunMode}
-                          >
-                            <option value="dry_run">Validate (dry run)</option>
-                            <option value="real">Run training (beta)</option>
-                          </select>
-                        </label>
-                        <button className="secondary-action" onClick={resetConfigDefaults} type="button">
-                          Reset defaults
-                        </button>
-                        <button
-                          className="primary-action"
-                          disabled={!configReady || submittingJob}
-                          onClick={submitTrainingJob}
-                          type="button"
-                        >
-                          {submittingJob
-                            ? "Queuing"
-                            : trainingRunMode === "dry_run"
-                              ? "Queue dry-run job"
-                              : "Start training"}
-                        </button>
-                      </div>
-                      {configSnapshot ? <pre className="training-config-snapshot">{JSON.stringify(configSnapshot, null, 2)}</pre> : null}
-                    </div>
-                  )}
-                  <p className="view-copy">
-                    A dry run validates the Rust-resolved training plan and dataset on a GPU worker without training. Run training
-                    (beta) hands the same plan to the worker's Z-Image LoRA kernel to produce a real .safetensors adapter.
-                  </p>
-                </>
+                <ConfigureJobPanel
+                  active={active}
+                  setActiveView={setActiveView}
+                  configReady={configReady}
+                  trainingTargetsError={trainingTargetsError}
+                  trainingPresetsError={trainingPresetsError}
+                  configError={configError}
+                  configMessage={configMessage}
+                  selectedTarget={selectedTarget}
+                  setSelectedTargetId={setSelectedTargetId}
+                  trainingTargets={trainingTargets}
+                  macTargetBlocked={macTargetBlocked}
+                  updateSelectedPreset={updateSelectedPreset}
+                  selectedPreset={selectedPreset}
+                  targetPresets={targetPresets}
+                  openDataset={openDataset}
+                  activeDataset={activeDataset}
+                  datasets={datasets}
+                  updateConfigDraft={updateConfigDraft}
+                  configDraft={configDraft}
+                  outputScopes={outputScopes}
+                  visibleQualityPresets={visibleQualityPresets}
+                  gpuOptions={gpuOptions}
+                  customizedConfigLabels={customizedConfigLabels}
+                  showAdvancedConfig={showAdvancedConfig}
+                  setShowAdvancedConfig={setShowAdvancedConfig}
+                  showNetworkType={showNetworkType}
+                  networkTypeOptions={networkTypeOptions}
+                  macLokrOnWanBlocked={macLokrOnWanBlocked}
+                  isLokrNetwork={isLokrNetwork}
+                  visibleOptimizerOptions={visibleOptimizerOptions}
+                  visibleLrSchedulerOptions={visibleLrSchedulerOptions}
+                  showTrainingAdapter={showTrainingAdapter}
+                  visibleTrainingAdapterVersions={visibleTrainingAdapterVersions}
+                  visibleResolutionOptions={visibleResolutionOptions}
+                  configWarnings={configWarnings}
+                  trainingRunMode={trainingRunMode}
+                  submittingJob={submittingJob}
+                  setTrainingRunMode={setTrainingRunMode}
+                  resetConfigDefaults={resetConfigDefaults}
+                  submitTrainingJob={submitTrainingJob}
+                  configSnapshot={configSnapshot}
+                />
               ) : null}
             </section>
           </>
