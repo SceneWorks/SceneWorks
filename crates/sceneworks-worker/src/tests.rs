@@ -1974,12 +1974,12 @@ async fn ffmpeg_runner_surfaces_bounded_stderr_from_failing_process() {
         .expect_err("non-zero process returns an error");
 
     match error {
-        WorkerError::InvalidPayload(message) => {
+        WorkerError::Engine(message) => {
             assert!(message.contains("ffmpeg-line-30"));
             assert!(!message.contains("ffmpeg-line-1"));
             assert!(message.len() <= 2000);
         }
-        other => panic!("expected InvalidPayload, got {other:?}"),
+        other => panic!("expected Engine, got {other:?}"),
     }
 }
 

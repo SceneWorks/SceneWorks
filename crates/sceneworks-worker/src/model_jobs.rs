@@ -710,15 +710,13 @@ pub(crate) async fn run_model_convert_job(
         Ok(Ok(())) => {}
         Ok(Err(detail)) => {
             let _ = tokio::fs::remove_dir_all(&temp_dir).await;
-            return Err(WorkerError::InvalidPayload(format!(
+            return Err(WorkerError::Engine(format!(
                 "MLX conversion failed. {detail}"
             )));
         }
         Err(join_error) => {
             let _ = tokio::fs::remove_dir_all(&temp_dir).await;
-            return Err(WorkerError::InvalidPayload(format!(
-                "MLX conversion task panicked: {join_error}"
-            )));
+            return Err(task_join_error("MLX conversion task", join_error));
         }
     }
 
@@ -848,7 +846,7 @@ pub(crate) async fn download_model_with_hf_cli(
     }
 
     let mut child = command.spawn().map_err(|error| {
-        WorkerError::InvalidPayload(format!(
+        WorkerError::Engine(format!(
             "Failed to start Hugging Face CLI. Falling back to direct downloads is only possible when the CLI is absent, not when it fails to launch: {error}"
         ))
     })?;
@@ -874,7 +872,9 @@ pub(crate) async fn download_model_with_hf_cli(
             }
         }
     };
-    let stderr = stderr_task.await.unwrap_or_default();
+    let stderr = stderr_task
+        .await
+        .map_err(|error| task_join_error("Hugging Face CLI stderr reader task", error))?;
     let repo_cache_path =
         huggingface_repo_cache_path(&settings.data_dir, repo).ok_or_else(|| {
             WorkerError::InvalidPayload(format!(
@@ -901,7 +901,7 @@ pub(crate) async fn download_model_with_hf_cli(
         } else {
             format!("Hugging Face CLI download failed:\n{detail}")
         };
-        return Err(WorkerError::InvalidPayload(message));
+        return Err(WorkerError::Engine(message));
     }
 
     let cache_path = huggingface_snapshot_dir(&settings.data_dir, repo).unwrap_or(repo_cache_path);

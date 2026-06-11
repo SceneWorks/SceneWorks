@@ -27,7 +27,8 @@ use serde_json::{json, Value};
 
 use crate::image_jobs::{ensure_scrfd_weights, load_reference_image};
 use crate::{
-    heartbeat, progress_payload, update_job, ApiClient, Settings, WorkerError, WorkerResult,
+    heartbeat, progress_payload, task_join_error, update_job, ApiClient, Settings, WorkerError,
+    WorkerResult,
 };
 use sceneworks_core::contracts::{JobSnapshot, JobStatus, JsonObject, ProgressStage, WorkerStatus};
 use sceneworks_core::project_store::ProjectStore;
@@ -117,16 +118,15 @@ impl KpsExtraction {
 /// Load SCRFD + detect the largest face's landmarks in `image`, normalized to the square
 /// preset space. Runs the `!Send` MLX work; call inside `spawn_blocking`.
 fn detect_largest_kps(scrfd_path: &Path, image: &Image) -> WorkerResult<KpsExtraction> {
-    let weights = Weights::from_file(scrfd_path).map_err(|error| {
-        WorkerError::InvalidPayload(format!("SCRFD weights {scrfd_path:?}: {error}"))
-    })?;
+    let weights = Weights::from_file(scrfd_path)
+        .map_err(|error| WorkerError::Engine(format!("SCRFD weights {scrfd_path:?}: {error}")))?;
     let scrfd = Scrfd::from_weights(&weights)
-        .map_err(|error| WorkerError::InvalidPayload(format!("SCRFD load: {error}")))?;
+        .map_err(|error| WorkerError::Engine(format!("SCRFD load: {error}")))?;
     let (blob, det_scale) =
         detector_blob(&image.pixels, image.height as usize, image.width as usize);
     let dets = scrfd
         .detect(&blob, det_scale, DET_THRESH, NMS_THRESH)
-        .map_err(|error| WorkerError::InvalidPayload(format!("SCRFD detect: {error}")))?;
+        .map_err(|error| WorkerError::Engine(format!("SCRFD detect: {error}")))?;
 
     let (w, h) = (image.width, image.height);
     let largest = dets.into_iter().max_by(|a, b| {
@@ -258,7 +258,7 @@ pub(crate) async fn run_kps_extract_job(
 
     let extraction = tokio::task::spawn_blocking(move || detect_largest_kps(&scrfd_path, &image))
         .await
-        .map_err(|e| WorkerError::InvalidPayload(format!("kps extraction task: {e}")))??;
+        .map_err(|error| task_join_error("kps extraction task", error))??;
 
     let message = if extraction.detected {
         "Face landmarks extracted."

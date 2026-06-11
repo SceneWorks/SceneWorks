@@ -34,8 +34,8 @@ use ort::value::Tensor;
 use serde_json::{json, Value};
 
 use crate::{
-    fresh_asset_id, heartbeat, now_rfc3339, progress_payload, update_job, ApiClient, Settings,
-    WorkerError, WorkerResult,
+    fresh_asset_id, heartbeat, now_rfc3339, progress_payload, task_join_error, update_job,
+    ApiClient, Settings, WorkerError, WorkerResult,
 };
 use sceneworks_core::contracts::{JobSnapshot, JobStatus, JsonObject, ProgressStage, WorkerStatus};
 use sceneworks_core::project_store::ProjectStore;
@@ -129,7 +129,7 @@ struct Upscaler {
 static UPSCALERS: OnceLock<Mutex<HashMap<u8, Upscaler>>> = OnceLock::new();
 
 fn ort_err<R>(e: ort::Error<R>) -> WorkerError {
-    WorkerError::InvalidPayload(format!("onnxruntime: {e}"))
+    WorkerError::Engine(format!("onnxruntime: {e}"))
 }
 
 fn build_session(path: &Path, coreml: bool) -> WorkerResult<Session> {
@@ -447,7 +447,7 @@ pub(crate) async fn run_image_upscale_job(
     let upscaled =
         tokio::task::spawn_blocking(move || upscale_blocking(onnx_path, factor, source_image))
             .await
-            .map_err(|e| WorkerError::InvalidPayload(format!("upscale task: {e}")))??;
+            .map_err(|error| task_join_error("upscale task", error))??;
     let (out_w, out_h) = (upscaled.width(), upscaled.height());
 
     // write exactly one child asset with lineage back to the source (mirrors

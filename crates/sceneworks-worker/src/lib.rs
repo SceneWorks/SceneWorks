@@ -299,6 +299,7 @@ pub enum WorkerError {
     ProjectStore(ProjectStoreError),
     Api { status: StatusCode, detail: String },
     InvalidPayload(String),
+    Engine(String),
     Canceled(String),
 }
 
@@ -311,6 +312,7 @@ impl fmt::Display for WorkerError {
             Self::ProjectStore(error) => write!(formatter, "{error}"),
             Self::Api { status, detail } => write!(formatter, "API {status}: {detail}"),
             Self::InvalidPayload(detail) => formatter.write_str(detail),
+            Self::Engine(detail) => formatter.write_str(detail),
             Self::Canceled(detail) => formatter.write_str(detail),
         }
     }
@@ -340,6 +342,10 @@ impl From<ProjectStoreError> for WorkerError {
     fn from(value: ProjectStoreError) -> Self {
         Self::ProjectStore(value)
     }
+}
+
+fn task_join_error(label: &str, error: tokio::task::JoinError) -> WorkerError {
+    WorkerError::Io(std::io::Error::other(format!("{label}: {error}")))
 }
 
 pub type WorkerResult<T> = Result<T, WorkerError>;

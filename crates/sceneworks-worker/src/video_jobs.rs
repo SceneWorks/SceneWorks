@@ -1510,7 +1510,7 @@ fn run_video_generation(
         adapters: input.adapters,
     };
     let generator = mlx_gen::load(input.engine_id, &spec)
-        .map_err(|error| WorkerError::InvalidPayload(format!("video load failed: {error}")))?;
+        .map_err(|error| WorkerError::Engine(format!("video load failed: {error}")))?;
     let req = GenerationRequest {
         prompt: input.prompt,
         negative_prompt: input.negative_prompt,
@@ -1535,9 +1535,9 @@ fn run_video_generation(
         cancel: cancel.clone(),
         ..Default::default()
     };
-    let output = generator.generate(&req, on_progress).map_err(|error| {
-        WorkerError::InvalidPayload(format!("video generation failed: {error}"))
-    })?;
+    let output = generator
+        .generate(&req, on_progress)
+        .map_err(|error| WorkerError::Engine(format!("video generation failed: {error}")))?;
     match output {
         GenerationOutput::Video { frames, fps, audio } => Ok(DecodedVideo {
             frames: frames
@@ -1555,7 +1555,7 @@ fn run_video_generation(
                 channels: track.channels,
             }),
         }),
-        GenerationOutput::Images(_) => Err(WorkerError::InvalidPayload(
+        GenerationOutput::Images(_) => Err(WorkerError::Engine(
             "video model returned images, expected video frames".to_owned(),
         )),
     }
@@ -1646,7 +1646,7 @@ async fn generate_video(
 
     let result = blocking
         .await
-        .map_err(|error| WorkerError::InvalidPayload(format!("video task join: {error}")))?;
+        .map_err(|error| task_join_error("video task join", error))?;
     if canceled {
         return Err(WorkerError::Canceled(CANCEL_MESSAGE.to_owned()));
     }
@@ -2777,7 +2777,7 @@ async fn select_extracted_frames(work_dir: PathBuf, count: usize) -> WorkerResul
             .collect()
     })
     .await
-    .map_err(|error| WorkerError::InvalidPayload(format!("frame decode task: {error}")))?
+    .map_err(|error| task_join_error("frame decode task", error))?
 }
 
 /// The approved character reference images (≤4) for the replacement (Python
@@ -3166,7 +3166,7 @@ async fn select_anchor_frames(
         selected.iter().map(|path| decode_png_image(path)).collect()
     })
     .await
-    .map_err(|error| WorkerError::InvalidPayload(format!("frame decode task: {error}")))?
+    .map_err(|error| task_join_error("frame decode task", error))?
 }
 
 /// Decode one RGB PNG into an engine [`Image`] (shared by the resample + anchor frame selectors).

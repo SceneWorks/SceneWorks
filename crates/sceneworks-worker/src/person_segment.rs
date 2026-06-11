@@ -204,10 +204,9 @@ pub(crate) fn propagate_track_blocking(
     });
     if guard.is_none() {
         let weights = Weights::from_file(&weights_path)
-            .map_err(|e| WorkerError::InvalidPayload(format!("sam2 weights load: {e}")))?;
-        let predictor =
-            Sam2VideoPredictor::from_weights_for_size(&weights, Sam2ModelSize::Large)
-                .map_err(|e| WorkerError::InvalidPayload(format!("sam2 predictor build: {e}")))?;
+            .map_err(|e| WorkerError::Engine(format!("sam2 weights load: {e}")))?;
+        let predictor = Sam2VideoPredictor::from_weights_for_size(&weights, Sam2ModelSize::Large)
+            .map_err(|e| WorkerError::Engine(format!("sam2 predictor build: {e}")))?;
         *guard = Some(predictor);
     }
     let predictor = guard.as_ref().expect("predictor loaded");
@@ -215,7 +214,7 @@ pub(crate) fn propagate_track_blocking(
     let run = |seeds: &[(usize, BoxNorm)]| -> WorkerResult<Vec<Vec<u8>>> {
         let mut state = predictor
             .init_state_from_frames(&frame_refs, height, width)
-            .map_err(|e| WorkerError::InvalidPayload(format!("sam2 init_state: {e}")))?;
+            .map_err(|e| WorkerError::Engine(format!("sam2 init_state: {e}")))?;
         for &(idx, box_norm) in seeds {
             predictor
                 .add_new_box(
@@ -223,17 +222,17 @@ pub(crate) fn propagate_track_blocking(
                     idx as i32,
                     box_norm_to_pixels(box_norm, width, height),
                 )
-                .map_err(|e| WorkerError::InvalidPayload(format!("sam2 add_box: {e}")))?;
+                .map_err(|e| WorkerError::Engine(format!("sam2 add_box: {e}")))?;
         }
         let masks = predictor
             .propagate(&mut state)
-            .map_err(|e| WorkerError::InvalidPayload(format!("sam2 propagate: {e}")))?;
+            .map_err(|e| WorkerError::Engine(format!("sam2 propagate: {e}")))?;
         // `propagate` yields the prompt frame onward in order; build a dense per-clip-frame vec.
         let mut out = vec![Vec::new(); clip_frame_paths.len()];
         for (frame_idx, low) in &masks {
             let mask = predictor
                 .mask_to_video_res(&state, low)
-                .map_err(|e| WorkerError::InvalidPayload(format!("sam2 mask resize: {e}")))?;
+                .map_err(|e| WorkerError::Engine(format!("sam2 mask resize: {e}")))?;
             out[*frame_idx as usize] = mask.as_slice::<u8>().to_vec();
         }
         Ok(out)

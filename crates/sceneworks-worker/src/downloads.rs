@@ -13,9 +13,7 @@ pub(crate) async fn fetch_bytes(http_client: &reqwest::Client, url: &str) -> Wor
         .send()
         .await?
         .error_for_status()
-        .map_err(|error| {
-            WorkerError::InvalidPayload(format!("weight download failed ({url}): {error}"))
-        })?
+        .map_err(|error| WorkerError::Engine(format!("weight download failed ({url}): {error}")))?
         .bytes()
         .await?
         .to_vec())

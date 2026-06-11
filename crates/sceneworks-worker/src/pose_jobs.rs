@@ -33,8 +33,8 @@ use serde_json::{json, Value};
 
 use crate::openpose_skeleton::{body_stickwidth, draw_wholebody, Keypoint};
 use crate::{
-    heartbeat, optional_payload_string, progress_payload, update_job, ApiClient, Settings,
-    WorkerError, WorkerResult,
+    heartbeat, optional_payload_string, progress_payload, task_join_error, update_job, ApiClient,
+    Settings, WorkerError, WorkerResult,
 };
 use sceneworks_core::contracts::{JobSnapshot, JobStatus, JsonObject, ProgressStage, WorkerStatus};
 use sceneworks_core::project_store::ProjectStore;
@@ -395,7 +395,7 @@ fn build_session(path: &Path, coreml: bool) -> WorkerResult<Session> {
 }
 
 fn ort_err<R>(e: ort::Error<R>) -> WorkerError {
-    WorkerError::InvalidPayload(format!("onnxruntime: {e}"))
+    WorkerError::Engine(format!("onnxruntime: {e}"))
 }
 
 /// Run a single CHW float input; returns each f32 output as (shape, data), skipping
@@ -584,7 +584,7 @@ async fn ensure_one(
     let file_owned = file.to_owned();
     tokio::task::spawn_blocking(move || extract_onnx(&bytes, &file_owned, &target_clone))
         .await
-        .map_err(|e| WorkerError::InvalidPayload(format!("weight extract task: {e}")))??;
+        .map_err(|error| task_join_error("weight extract task", error))??;
     Ok(target)
 }
 
@@ -802,7 +802,7 @@ pub(crate) async fn run_pose_detect_job(
     let (raw, device) =
         tokio::task::spawn_blocking(move || detect_batch(det_path, pose_path, image_paths))
             .await
-            .map_err(|e| WorkerError::InvalidPayload(format!("pose detection task: {e}")))??;
+            .map_err(|error| task_join_error("pose detection task", error))??;
 
     let out_dir = settings
         .data_dir
