@@ -88,6 +88,7 @@ import {
   macAvailableModels,
   macBlockedModels,
   macModelFeatureBlock,
+  macUpscaleEngineBlocked,
 } from "../macGating.js";
 import { loadStudioSettings, useStudioSettingsWriter } from "../hooks/useStudioSettings.js";
 import { FitModeControl, effectiveFitMode } from "../components/FitModeControl.jsx";
@@ -356,6 +357,19 @@ export function ImageStudio() {
       setUpscaleFactor(option.factors[0]);
     }
   }
+
+  // Engines offered in the picker; AuraSR is dropped on a gated Mac (sc-3668).
+  const availableUpscaleEngines = UPSCALE_ENGINES.filter(
+    (engine) => !macUpscaleEngineBlocked(macCapabilities, engine.id),
+  );
+  // If a restored/saved engine is gated out (e.g. AuraSR on a Mac), fall back to the default
+  // real-esrgan engine so the user never submits an aura-sr job that the Mac would refuse.
+  useEffect(() => {
+    if (!macUpscaleEngineBlocked(macCapabilities, upscaleEngine)) return;
+    setUpscaleEngine("real-esrgan");
+    const factors = UPSCALE_ENGINES.find((engine) => engine.id === "real-esrgan")?.factors ?? [2, 4];
+    if (!factors.includes(upscaleFactor)) setUpscaleFactor(factors[0]);
+  }, [macCapabilities, upscaleEngine, upscaleFactor]);
 
   useEffect(() => {
     if (mode === "edit_image" && selectedAssetEditableSourceId) {
@@ -1462,7 +1476,7 @@ export function ImageStudio() {
                 <label>
                   Engine
                   <select disabled={!upscaleEnabled} onChange={(event) => handleUpscaleEngineChange(event.target.value)} value={upscaleEngine}>
-                    {UPSCALE_ENGINES.map((engine) => (
+                    {availableUpscaleEngines.map((engine) => (
                       <option key={engine.id} value={engine.id}>
                         {engine.label}
                       </option>

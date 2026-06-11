@@ -3,7 +3,7 @@ import { Stage, Layer, Image as KonvaImage, Line, Rect, Transformer } from "reac
 import { apiFetch } from "../api.js";
 import { terminalStatuses } from "../jobTypes.js";
 import { useAppContext } from "../context/AppContext.js";
-import { DEFAULT_MAC_CAPABILITIES, macFeatureBlock } from "../macGating.js";
+import { DEFAULT_MAC_CAPABILITIES, macFeatureBlock, macUpscaleEngineBlocked } from "../macGating.js";
 import { assetUrl, assetCanRenderAsImage } from "../components/assetMedia.jsx";
 import { DatasetAddDialog } from "../components/DatasetAddDialog.jsx";
 import { FitModeControl, effectiveFitMode } from "../components/FitModeControl.jsx";
@@ -345,8 +345,9 @@ export function ImageEditor() {
     imageModels,
     macCapabilities = DEFAULT_MAC_CAPABILITIES,
   } = useAppContext();
-  // Mac UI gating (sc-3486): the standalone upscaler runs on the Python torch Real-ESRGAN /
-  // AuraSR path (no in-process Rust path yet, sc-3489), so disable the tool on a gated Mac.
+  // Mac UI gating (sc-3486): the upscale tool itself runs in-process on Rust (Real-ESRGAN,
+  // sc-3489), so it is available on a gated Mac — this block is a defensive guard that stays
+  // null. The second engine (AuraSR) is dropped on Mac (sc-3668) and gated per-engine below.
   const macUpscaleBlock = macFeatureBlock(macCapabilities, "imageUpscale");
 
   // The working-image session: the single bitmap every tool operates on, plus its
@@ -366,6 +367,20 @@ export function ImageEditor() {
   // Upscale tool (sc-2433): engine + factor for the in-flight request.
   const [upscaleEngine, setUpscaleEngine] = useState("real-esrgan");
   const [upscaleFactor, setUpscaleFactor] = useState(2);
+  // Engines offered in the picker; AuraSR is dropped on a gated Mac (sc-3668).
+  const availableUpscaleEngines = UPSCALE_ENGINES.filter(
+    (entry) => !macUpscaleEngineBlocked(macCapabilities, entry.key),
+  );
+  // If the selected engine got gated out (e.g. AuraSR on a Mac), fall back to the default
+  // real-esrgan engine (the guaranteed-available Mac upscaler) so the tool stays usable.
+  useEffect(() => {
+    if (macUpscaleEngineBlocked(macCapabilities, upscaleEngine)) {
+      setUpscaleEngine("real-esrgan");
+      if (!upscaleFactorsForEngine("real-esrgan").includes(upscaleFactor)) {
+        setUpscaleFactor(upscaleFactorsForEngine("real-esrgan")[0]);
+      }
+    }
+  }, [macCapabilities, upscaleEngine, upscaleFactor]);
 
   // Color grade (sc-2439): non-destructive −1..1 adjustments previewed live via a
   // Konva filter, baked into the working image on Apply.
@@ -1341,7 +1356,7 @@ export function ImageEditor() {
         {tool === "upscale" && working ? (
           <div className="image-editor-cropbar">
             <div className="image-editor-ratios" role="group" aria-label="Upscale engine">
-              {UPSCALE_ENGINES.map((entry) => (
+              {availableUpscaleEngines.map((entry) => (
                 <button
                   className={upscaleEngine === entry.key ? "active" : ""}
                   key={entry.key}

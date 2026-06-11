@@ -1944,10 +1944,12 @@ pub fn mac_rust_supported(job: &JobSnapshot) -> Result<(), UnsupportedReason> {
         // Python-free on Mac.
         JobType::KpsExtract => Ok(()),
 
-        // Real-ESRGAN image upscaling is now ported to the Rust worker (sc-3489):
-        // RRDBNet x2/x4 via `ort`/CoreML on the macOS MLX worker, so the Image Editor
-        // upscale tool runs Python-free. `aura-sr` (a separate GAN upscaler, no clean
-        // ONNX export) is not ported and stays a tracked Mac gap on the Python path.
+        // Real-ESRGAN image upscaling is ported to the Rust worker (sc-3489), so the
+        // Image Editor upscale tool runs Python-free. The second engine, `aura-sr` (a
+        // 617M-param torch-only GigaGAN), was DROPPED on Mac after the sc-3668 port-or-drop
+        // spike (no viable Rust path; only a marginal, ~35-50x-slower quality difference vs
+        // Real-ESRGAN x4). The Mac UI hides the AuraSR engine option, so this Err is now a
+        // defensive submit-time guard; AuraSR stays available on Windows/Linux.
         JobType::ImageUpscale => {
             if upscale_job_is_mlx_eligible(job) {
                 Ok(())
@@ -1955,8 +1957,8 @@ pub fn mac_rust_supported(job: &JobSnapshot) -> Result<(), UnsupportedReason> {
                 Err(UnsupportedReason::new(
                     model,
                     "image_upscale (AuraSR)",
-                    "the Rust upscaler runs Real-ESRGAN; the AuraSR engine stays on the Python torch path.",
-                    Some("sc-3489"),
+                    "the Rust upscaler runs Real-ESRGAN; the AuraSR engine is dropped on Mac (available on Windows/Linux).",
+                    Some("sc-3668"),
                 ))
             }
         }
@@ -2215,14 +2217,31 @@ pub fn mac_capabilities(platform: &str, mac_gating_active: bool) -> MacCapabilit
     // core loader sc-3642/3643 + SDXL/Wan/LTX sc-3671), so it is no longer a Mac feature gap — the
     // per-model `features.lycoris` flag is `true` and the web LyCORIS upload control is un-gated.
     features.insert(
-        // Real-ESRGAN image upscaling is ported to the Rust worker (sc-3489) via
-        // `ort`/CoreML, so the Image Editor upscale tool works on a Python-free Mac.
-        // (`aura-sr` stays on the Python path, but the default engine is real-esrgan,
-        // so the tool itself is available.)
+        // Real-ESRGAN image upscaling is ported to the Rust worker (sc-3489), so the
+        // Image Editor upscale tool works on a Python-free Mac. The tool stays available;
+        // only the second engine (AuraSR) is dropped, gated per-engine below.
         "imageUpscale".to_owned(),
         MacFeatureSupport {
             supported: true,
             reason: None,
+        },
+    );
+    features.insert(
+        // The AuraSR upscale engine (`engine=aura-sr`) is dropped on Mac (sc-3668,
+        // port-or-drop spike): it is a 617M-param torch-only GigaGAN with no viable Rust
+        // path and only a marginal, ~35-50x-slower quality difference vs the already-ported
+        // Real-ESRGAN x4. The Mac UI hides this engine option so a user never reaches the
+        // `mlx_unsupported` error; it stays available on Windows/Linux. This must agree with
+        // the AuraSR arm of `mac_rust_supported` (what the UI hides == what routing refuses).
+        "imageUpscaleAuraSr".to_owned(),
+        MacFeatureSupport {
+            supported: false,
+            reason: Some(UnsupportedReason::new(
+                None,
+                "image_upscale (AuraSR)",
+                "AuraSR is a torch-only GAN upscaler, dropped on Mac; Real-ESRGAN x4 is the Mac upscaler (it stays available on Windows/Linux).",
+                Some("sc-3668"),
+            )),
         },
     );
     features.insert(
@@ -3252,10 +3271,10 @@ fn caption_job_is_mlx_eligible(job: &JobSnapshot) -> bool {
 }
 
 /// Whether an `image_upscale` job runs on the Rust/MLX path (epic 3482, sc-3489): the
-/// Real-ESRGAN (RRDBNet) engine — the default — is ported to the Rust worker via
-/// `ort`/CoreML. `aura-sr` (a separate GAN upscaler, no clean ONNX export) stays on the
-/// Python torch worker, so the mlx worker must refuse it. Engine defaults to
-/// `real-esrgan` when absent (mirrors `run_image_upscale`).
+/// Real-ESRGAN (RRDBNet) engine — the default — is ported to the Rust worker. `aura-sr`
+/// (a 617M-param torch-only GigaGAN) was dropped on Mac after the sc-3668 port-or-drop
+/// spike, so the mlx worker refuses it (it runs on the Python worker on Windows/Linux).
+/// Engine defaults to `real-esrgan` when absent (mirrors `run_image_upscale`).
 fn upscale_job_is_mlx_eligible(job: &JobSnapshot) -> bool {
     if !matches!(job.job_type, JobType::ImageUpscale) {
         return false;
