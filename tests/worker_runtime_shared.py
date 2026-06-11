@@ -80,12 +80,10 @@ from scene_worker.image_adapters import (
 )
 
 from scene_worker.upscalers import (
-    AuraSRUpscaler,
     RealESRGANUpscaler,
     TileSlice,
     UpscaleJob,
     _load_state_dict,
-    create_upscaler_engine,
     tile_slices,
 )
 
