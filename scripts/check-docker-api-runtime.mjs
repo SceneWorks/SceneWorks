@@ -20,6 +20,15 @@ const env = {
   SCENEWORKS_CONFIG_BIND: path.resolve("config"),
   SCENEWORKS_DISABLE_MODEL_SIZE_ESTIMATE:
     process.env.SCENEWORKS_DISABLE_MODEL_SIZE_ESTIMATE || "1",
+  // Run the container as this (host) user so the api isn't root and the files it
+  // seeds into the bind-mounted data dir stay owned by the runner (sc-4285 /
+  // F-INFRA-10), matching the compose `user:` default.
+  ...(typeof process.getuid === "function"
+    ? {
+        SCENEWORKS_UID: String(process.getuid()),
+        SCENEWORKS_GID: String(process.getgid()),
+      }
+    : {}),
 };
 
 function runDocker(args) {
