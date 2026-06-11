@@ -388,11 +388,16 @@ pub(crate) async fn run_image_generate_job(
     let project_path = PathBuf::from(project.path);
     tokio::fs::create_dir_all(project_path.join("assets").join("images")).await?;
 
-    // A FLUX.2 angle set produces 11 images and a pose set one per pose, regardless of
-    // the requested `count` (sc-3030) — bake the real total into the plan so the
-    // generation set + streamed `expectedCount` match what lands in the gallery.
+    // Resolve the MLX dispatch branch once, then bake that branch's real total into
+    // the plan so the generation set + streamed `expectedCount` match what lands in
+    // the gallery.
     #[cfg(target_os = "macos")]
-    let plan = ImagePlan::with_count(&request, grouped_image_count(&request, settings));
+    let route = resolve_image_route(&request, settings);
+    #[cfg(target_os = "macos")]
+    let plan = ImagePlan::with_count(
+        &request,
+        route.map_or(request.count, |route| route.image_count(&request, settings)),
+    );
     #[cfg(not(target_os = "macos"))]
     let plan = ImagePlan::with_count(&request, request.count);
 
@@ -431,118 +436,116 @@ pub(crate) async fn run_image_generate_job(
     // Real in-process MLX inference on macOS for engine-backed models; otherwise the
     // procedural stub (keeps non-macOS + not-yet-ported models working).
     #[cfg(target_os = "macos")]
-    let handled = if zimage_control_available(&request, settings) {
-        // Z-Image strict-pose (advanced.poses) → Fun-Controlnet-Union, one image per pose.
-        generate_zimage_control_stream(
-            api,
-            settings,
-            job,
-            &plan,
-            &project_path,
-            backend,
-            &mut asset_writes,
-        )
-        .await?;
-        true
-    } else if qwen_control_available(&request, settings) {
-        // Qwen strict-pose (advanced.poses) → InstantX ControlNet-Union, one image per pose.
-        generate_qwen_control_stream(
-            api,
-            settings,
-            job,
-            &plan,
-            &project_path,
-            backend,
-            &mut asset_writes,
-        )
-        .await?;
-        true
-    } else if flux2_edit_available(&request, settings) {
-        // FLUX.2-klein edit/reference (mode edit_image or a reference) → edit variant.
-        generate_flux2_edit_stream(
-            api,
-            settings,
-            job,
-            &plan,
-            &project_path,
-            backend,
-            &mut asset_writes,
-        )
-        .await?;
-        true
-    } else if qwen_edit_available(&request, settings) {
-        // Qwen-Image-Edit (mode edit_image / Character-Studio reference / best-effort
-        // pose / angle set) → the engine's `qwen_image_edit` model (sc-3397).
-        generate_qwen_edit_stream(
-            api,
-            settings,
-            job,
-            &plan,
-            &project_path,
-            backend,
-            &mut asset_writes,
-        )
-        .await?;
-        true
-    } else if instantid_available(&request, settings) {
-        // InstantID identity-preserving character image (sc-3345): single identity or the
-        // 11-view Character-Studio angle set, on RealVisXL + IdentityNet + the native face
-        // stack. Pose-library + faceRestore jobs are NOT eligible (kept on the torch
-        // adapter) — `instantid_available` gates them out so they fall through to the
-        // non-handled path and the torch worker claims them.
-        generate_instantid_stream(
-            api,
-            settings,
-            job,
-            &plan,
-            &project_path,
-            backend,
-            &mut asset_writes,
-        )
-        .await?;
-        true
-    } else if sdxl_advanced_available(&request, settings) {
-        // SDXL reference (IP-Adapter) / img2img edit / inpaint / outpaint (epic 3041,
-        // sc-3060) → the engine's advanced conditioning paths. Plain SDXL txt2img + LoRA
-        // stays on the base `mlx_available` path below.
-        generate_sdxl_advanced_stream(
-            api,
-            settings,
-            job,
-            &plan,
-            &project_path,
-            backend,
-            &mut asset_writes,
-        )
-        .await?;
-        true
-    } else if sensenova_edit_available(&request, settings) {
-        // SenseNova-U1 instruction edit (edit_image → Reference) + Character Studio
-        // (character_image → MultiReference, incl. the angle set) on the unified
-        // `sensenova_u1_8b` / `_fast` ids (sc-3900). Plain SenseNova T2I (no reference)
-        // falls through to the base `mlx_available` path below.
-        generate_sensenova_edit_stream(
-            api,
-            settings,
-            job,
-            &plan,
-            &project_path,
-            backend,
-            &mut asset_writes,
-        )
-        .await?;
-        true
-    } else if mlx_available(&request, settings) {
-        generate_mlx_stream(
-            api,
-            settings,
-            job,
-            &plan,
-            &project_path,
-            backend,
-            &mut asset_writes,
-        )
-        .await?;
+    let handled = if let Some(route) = route {
+        match route {
+            ImageRoute::ZImageControl => {
+                // Z-Image strict-pose (advanced.poses) → Fun-Controlnet-Union, one image per pose.
+                generate_zimage_control_stream(
+                    api,
+                    settings,
+                    job,
+                    &plan,
+                    &project_path,
+                    backend,
+                    &mut asset_writes,
+                )
+                .await?;
+            }
+            ImageRoute::QwenControl => {
+                // Qwen strict-pose (advanced.poses) → InstantX ControlNet-Union, one image per pose.
+                generate_qwen_control_stream(
+                    api,
+                    settings,
+                    job,
+                    &plan,
+                    &project_path,
+                    backend,
+                    &mut asset_writes,
+                )
+                .await?;
+            }
+            ImageRoute::Flux2Edit => {
+                // FLUX.2-klein edit/reference (mode edit_image or a reference) → edit variant.
+                generate_flux2_edit_stream(
+                    api,
+                    settings,
+                    job,
+                    &plan,
+                    &project_path,
+                    backend,
+                    &mut asset_writes,
+                )
+                .await?;
+            }
+            ImageRoute::QwenEdit => {
+                // Qwen-Image-Edit (mode edit_image / Character-Studio reference / best-effort
+                // pose / angle set) → the engine's `qwen_image_edit` model (sc-3397).
+                generate_qwen_edit_stream(
+                    api,
+                    settings,
+                    job,
+                    &plan,
+                    &project_path,
+                    backend,
+                    &mut asset_writes,
+                )
+                .await?;
+            }
+            ImageRoute::InstantId => {
+                // InstantID identity-preserving character image (sc-3345): single identity or
+                // grouped angle/pose sets, on RealVisXL + IdentityNet + the native face stack.
+                generate_instantid_stream(
+                    api,
+                    settings,
+                    job,
+                    &plan,
+                    &project_path,
+                    backend,
+                    &mut asset_writes,
+                )
+                .await?;
+            }
+            ImageRoute::SdxlAdvanced => {
+                // SDXL reference (IP-Adapter) / img2img edit / inpaint / outpaint (epic 3041,
+                // sc-3060) → the engine's advanced conditioning paths.
+                generate_sdxl_advanced_stream(
+                    api,
+                    settings,
+                    job,
+                    &plan,
+                    &project_path,
+                    backend,
+                    &mut asset_writes,
+                )
+                .await?;
+            }
+            ImageRoute::SensenovaEdit => {
+                // SenseNova-U1 instruction edit + Character Studio on the unified
+                // `sensenova_u1_8b` / `_fast` ids (sc-3900).
+                generate_sensenova_edit_stream(
+                    api,
+                    settings,
+                    job,
+                    &plan,
+                    &project_path,
+                    backend,
+                    &mut asset_writes,
+                )
+                .await?;
+            }
+            ImageRoute::Mlx => {
+                generate_mlx_stream(
+                    api,
+                    settings,
+                    job,
+                    &plan,
+                    &project_path,
+                    backend,
+                    &mut asset_writes,
+                )
+                .await?;
+            }
+        }
         true
     } else {
         false
@@ -1050,6 +1053,71 @@ pub(crate) fn mlx_weights_gap(request: &ImageRequest, settings: &Settings) -> Op
 fn mlx_available(request: &ImageRequest, settings: &Settings) -> bool {
     mlx_model(&request.model).is_some()
         && matches!(resolve_weights_dir(request, settings), Ok(Some(_)))
+}
+
+#[cfg(target_os = "macos")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ImageRoute {
+    ZImageControl,
+    QwenControl,
+    Flux2Edit,
+    QwenEdit,
+    InstantId,
+    SdxlAdvanced,
+    SensenovaEdit,
+    Mlx,
+}
+
+#[cfg(target_os = "macos")]
+fn resolve_image_route(request: &ImageRequest, settings: &Settings) -> Option<ImageRoute> {
+    if zimage_control_available(request, settings) {
+        Some(ImageRoute::ZImageControl)
+    } else if qwen_control_available(request, settings) {
+        Some(ImageRoute::QwenControl)
+    } else if flux2_edit_available(request, settings) {
+        Some(ImageRoute::Flux2Edit)
+    } else if qwen_edit_available(request, settings) {
+        Some(ImageRoute::QwenEdit)
+    } else if instantid_available(request, settings) {
+        Some(ImageRoute::InstantId)
+    } else if sdxl_advanced_available(request, settings) {
+        Some(ImageRoute::SdxlAdvanced)
+    } else if sensenova_edit_available(request, settings) {
+        Some(ImageRoute::SensenovaEdit)
+    } else if mlx_available(request, settings) {
+        Some(ImageRoute::Mlx)
+    } else {
+        None
+    }
+}
+
+#[cfg(target_os = "macos")]
+impl ImageRoute {
+    fn image_count(self, request: &ImageRequest, settings: &Settings) -> u32 {
+        match self {
+            ImageRoute::ZImageControl | ImageRoute::QwenControl => {
+                pose_entries(request).len() as u32
+            }
+            ImageRoute::Flux2Edit | ImageRoute::QwenEdit => grouped_edit_image_count(request),
+            ImageRoute::InstantId => instantid_image_count(request, settings),
+            ImageRoute::SensenovaEdit => match flux2_grouping(request) {
+                Flux2Grouping::Angles => CHARACTER_ANGLE_SET_ORDER.len() as u32,
+                // SenseNova has no strict-pose (ControlNet) path; pose jobs are excluded
+                // upstream, so any residual grouping preserves the requested image count.
+                Flux2Grouping::Poses(_) | Flux2Grouping::Plain => request.count,
+            },
+            ImageRoute::SdxlAdvanced | ImageRoute::Mlx => request.count,
+        }
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn grouped_edit_image_count(request: &ImageRequest) -> u32 {
+    match flux2_grouping(request) {
+        Flux2Grouping::Angles => CHARACTER_ANGLE_SET_ORDER.len() as u32,
+        Flux2Grouping::Poses(count) => count as u32,
+        Flux2Grouping::Plain => request.count,
+    }
 }
 
 /// The HuggingFace repo for the model: the manifest entry's `repo` wins, else the
@@ -2399,23 +2467,6 @@ fn flux2_grouping(request: &ImageRequest) -> Flux2Grouping {
     Flux2Grouping::Plain
 }
 
-/// The number of images a FLUX.2 edit job produces: 11 for an angle set, `n` for a
-/// pose set, else the request count. `request.count` for any non-FLUX.2-edit job.
-/// Threaded into [`ImagePlan`] so the generation set's `count`/`expectedCount` match
-/// what is actually generated (the UI streams against it).
-#[cfg(target_os = "macos")]
-fn flux2_image_count(request: &ImageRequest, settings: &Settings) -> u32 {
-    if flux2_edit_available(request, settings) {
-        match flux2_grouping(request) {
-            Flux2Grouping::Angles => CHARACTER_ANGLE_SET_ORDER.len() as u32,
-            Flux2Grouping::Poses(count) => count as u32,
-            Flux2Grouping::Plain => request.count,
-        }
-    } else {
-        request.count
-    }
-}
-
 /// True when the FLUX.2 Image-Edit source should be pre-fitted to W×H (parity with the
 /// `MlxFlux2Adapter` fit gate): `edit_image` mode, a source asset, no character
 /// `referenceAssetId`, and a non-`stretch` fit mode. The Character-Studio reference
@@ -3268,33 +3319,6 @@ fn qwen_edit_available(request: &ImageRequest, settings: &Settings) -> bool {
     qwen_edit_engine_id(&request.model).is_some()
         && !qwen_edit_reference_ids(request).is_empty()
         && matches!(resolve_weights_dir(request, settings), Ok(Some(_)))
-}
-
-/// The number of images this image_generate job produces, accounting for grouped edit
-/// sets (Character-Studio angle set = 11, best-effort pose set = n) on either edit
-/// family; otherwise `request.count`. Threaded into [`ImagePlan`] so the generation
-/// set's `count`/`expectedCount` match what actually lands in the gallery (the UI
-/// streams against it). Qwen edit reuses the shared [`flux2_grouping`] decision.
-#[cfg(target_os = "macos")]
-fn grouped_image_count(request: &ImageRequest, settings: &Settings) -> u32 {
-    if instantid_available(request, settings) {
-        instantid_image_count(request, settings)
-    } else if qwen_edit_available(request, settings) {
-        match flux2_grouping(request) {
-            Flux2Grouping::Angles => CHARACTER_ANGLE_SET_ORDER.len() as u32,
-            Flux2Grouping::Poses(count) => count as u32,
-            Flux2Grouping::Plain => request.count,
-        }
-    } else if sensenova_edit_available(request, settings) {
-        match flux2_grouping(request) {
-            Flux2Grouping::Angles => CHARACTER_ANGLE_SET_ORDER.len() as u32,
-            // SenseNova has no strict-pose (ControlNet) path — pose sets are excluded upstream by
-            // `sensenova_mlx_eligible`, so any residual grouping is the plain per-image count.
-            Flux2Grouping::Poses(_) | Flux2Grouping::Plain => request.count,
-        }
-    } else {
-        flux2_image_count(request, settings)
-    }
 }
 
 /// Resolve the Qwen edit true-CFG guidance. The engine's `guidance` IS the true CFG
@@ -7375,6 +7399,89 @@ mod tests {
             "advanced": { "angleSet": true }
         }));
         assert!(matches!(flux2_grouping(&edit), Flux2Grouping::Plain));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn image_route_count_follows_dispatch_order() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut settings = Settings::from_env();
+        settings.data_dir = dir.path().to_path_buf();
+        let model_path = dir.path().to_string_lossy().to_string();
+
+        let zimage_pose = request(json!({
+            "projectId": "p", "model": "z_image_turbo", "count": 7,
+            "advanced": { "modelPath": model_path.clone(), "poses": [{ "id": "a" }, { "id": "b" }] }
+        }));
+        let route = resolve_image_route(&zimage_pose, &settings).unwrap();
+        assert_eq!(route, ImageRoute::ZImageControl);
+        assert_eq!(route.image_count(&zimage_pose, &settings), 2);
+
+        let qwen_pose = request(json!({
+            "projectId": "p", "model": "qwen_image", "mode": "character_image", "count": 5,
+            "advanced": { "modelPath": model_path.clone(), "poses": [{ "id": "a" }, { "id": "b" }, { "id": "c" }] }
+        }));
+        let route = resolve_image_route(&qwen_pose, &settings).unwrap();
+        assert_eq!(route, ImageRoute::QwenControl);
+        assert_eq!(route.image_count(&qwen_pose, &settings), 3);
+
+        let flux2_angle = request(json!({
+            "projectId": "p", "model": "flux2_klein_9b", "mode": "character_image",
+            "referenceAssetId": "ref", "count": 2,
+            "advanced": { "modelPath": model_path.clone(), "angleSet": true }
+        }));
+        let route = resolve_image_route(&flux2_angle, &settings).unwrap();
+        assert_eq!(route, ImageRoute::Flux2Edit);
+        assert_eq!(
+            route.image_count(&flux2_angle, &settings),
+            CHARACTER_ANGLE_SET_ORDER.len() as u32
+        );
+
+        let qwen_edit_pose = request(json!({
+            "projectId": "p", "model": "qwen_image_edit_2511", "mode": "character_image",
+            "referenceAssetId": "ref", "count": 2,
+            "advanced": { "modelPath": model_path.clone(), "poses": [{ "id": "a" }, { "id": "b" }] }
+        }));
+        let route = resolve_image_route(&qwen_edit_pose, &settings).unwrap();
+        assert_eq!(route, ImageRoute::QwenEdit);
+        assert_eq!(route.image_count(&qwen_edit_pose, &settings), 2);
+
+        let instantid_angle = request(json!({
+            "projectId": "p", "model": "instantid_realvisxl", "mode": "character_image",
+            "referenceAssetId": "ref", "count": 2,
+            "advanced": { "modelPath": model_path.clone(), "angleSet": true }
+        }));
+        let route = resolve_image_route(&instantid_angle, &settings).unwrap();
+        assert_eq!(route, ImageRoute::InstantId);
+        assert_eq!(route.image_count(&instantid_angle, &settings), 11);
+
+        let sdxl_ip = request(json!({
+            "projectId": "p", "model": "sdxl", "referenceAssetId": "ref", "count": 4,
+            "advanced": { "modelPath": model_path.clone() }
+        }));
+        let route = resolve_image_route(&sdxl_ip, &settings).unwrap();
+        assert_eq!(route, ImageRoute::SdxlAdvanced);
+        assert_eq!(route.image_count(&sdxl_ip, &settings), 4);
+
+        let sensenova_angle = request(json!({
+            "projectId": "p", "model": "sensenova_u1_8b", "mode": "character_image",
+            "referenceAssetId": "ref", "count": 2,
+            "advanced": { "modelPath": model_path.clone(), "angleSet": true }
+        }));
+        let route = resolve_image_route(&sensenova_angle, &settings).unwrap();
+        assert_eq!(route, ImageRoute::SensenovaEdit);
+        assert_eq!(
+            route.image_count(&sensenova_angle, &settings),
+            CHARACTER_ANGLE_SET_ORDER.len() as u32
+        );
+
+        let plain_mlx = request(json!({
+            "projectId": "p", "model": "z_image_turbo", "count": 6,
+            "advanced": { "modelPath": model_path.clone() }
+        }));
+        let route = resolve_image_route(&plain_mlx, &settings).unwrap();
+        assert_eq!(route, ImageRoute::Mlx);
+        assert_eq!(route.image_count(&plain_mlx, &settings), 6);
     }
 
     #[cfg(target_os = "macos")]
