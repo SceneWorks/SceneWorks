@@ -177,13 +177,11 @@ pub(crate) async fn run_vqa_job(
                 max_new_tokens,
                 Sampler::Greedy,
             )
-            .map_err(|error| {
-                WorkerError::InvalidPayload(format!("SenseNova VQA failed: {error}"))
-            })?;
+            .map_err(|error| WorkerError::Engine(format!("SenseNova VQA failed: {error}")))?;
         Ok(strip_reasoning(&answer))
     })
     .await
-    .map_err(|error| WorkerError::InvalidPayload(format!("VQA task join: {error}")))??;
+    .map_err(|error| task_join_error("VQA task join", error))??;
 
     let result = json!({
         "answer": answer,
@@ -411,7 +409,7 @@ pub(crate) async fn run_interleave_job(
                     None,
                 )
                 .map_err(|error| {
-                    WorkerError::InvalidPayload(format!("SenseNova interleave failed: {error}"))
+                    WorkerError::Engine(format!("SenseNova interleave failed: {error}"))
                 })?;
             // The generated images are model-space [-1,1] `[1,3,H,W]` arrays — decode each to RGB8
             // exactly as the `Generator` image path does (`decoded_to_image`).
@@ -424,7 +422,7 @@ pub(crate) async fn run_interleave_job(
             Ok((out.text, decoded))
         })
         .await
-        .map_err(|error| WorkerError::InvalidPayload(format!("interleave task join: {error}")))??;
+        .map_err(|error| task_join_error("interleave task join", error))??;
 
     update_job(
         api,

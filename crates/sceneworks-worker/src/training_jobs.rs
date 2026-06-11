@@ -451,7 +451,7 @@ async fn run_training_execution(
             let mut trainer =
                 mlx_gen::load_trainer(engine_id, &LoadSpec::new(WeightsSource::Dir(weights_dir)))
                     .map_err(|error| {
-                    WorkerError::InvalidPayload(format!("{engine_id} trainer load failed: {error}"))
+                    WorkerError::Engine(format!("{engine_id} trainer load failed: {error}"))
                 })?;
             let request = TrainingRequest {
                 items,
@@ -469,9 +469,9 @@ async fn run_training_execution(
             let mut on_progress = |progress: TrainingProgress| {
                 let _ = tx.blocking_send(TrainEvent::Progress(progress));
             };
-            let output = trainer.train(&request, &mut on_progress).map_err(|error| {
-                WorkerError::InvalidPayload(format!("training failed: {error}"))
-            })?;
+            let output = trainer
+                .train(&request, &mut on_progress)
+                .map_err(|error| WorkerError::Engine(format!("training failed: {error}")))?;
             let _ = tx.blocking_send(TrainEvent::Done(output));
             Ok(())
         })
@@ -562,7 +562,7 @@ async fn consume_training_events(
 
     let task_result = blocking
         .await
-        .map_err(|error| WorkerError::InvalidPayload(format!("training task join: {error}")))?;
+        .map_err(|error| task_join_error("training task join", error))?;
     if canceled {
         // check_cancel already posted the Canceled update; treat the engine's
         // early return as the clean cancel.

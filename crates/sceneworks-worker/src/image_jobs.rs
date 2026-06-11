@@ -1261,7 +1261,7 @@ fn mlx_load_with_ip(
         spec = spec.with_ip_adapter(WeightsSource::Dir(dir));
     }
     mlx_gen::load(engine_id, &spec)
-        .map_err(|error| WorkerError::InvalidPayload(format!("{engine_id} load failed: {error}")))
+        .map_err(|error| WorkerError::Engine(format!("{engine_id} load failed: {error}")))
 }
 
 /// XLabs FLUX IP-Adapter repos (epic 3621). The torch `flux_dev` path already declares +
@@ -1397,15 +1397,15 @@ fn mlx_generate_one(
     };
     let output = generator
         .generate(&request, on_progress)
-        .map_err(|error| WorkerError::InvalidPayload(format!("generation failed: {error}")))?;
+        .map_err(|error| WorkerError::Engine(format!("generation failed: {error}")))?;
     match output {
         GenerationOutput::Images(mut images) => {
-            let image = images.pop().ok_or_else(|| {
-                WorkerError::InvalidPayload("generator produced no image".to_owned())
-            })?;
+            let image = images
+                .pop()
+                .ok_or_else(|| WorkerError::Engine("generator produced no image".to_owned()))?;
             Ok((image.width, image.height, image.pixels))
         }
-        _ => Err(WorkerError::InvalidPayload(
+        _ => Err(WorkerError::Engine(
             "generator returned non-image output".to_owned(),
         )),
     }
@@ -1780,7 +1780,7 @@ async fn consume_gen_events(
 
     let task_result = blocking
         .await
-        .map_err(|error| WorkerError::InvalidPayload(format!("generation task join: {error}")))?;
+        .map_err(|error| task_join_error("generation task join", error))?;
     if canceled {
         // check_cancel already posted the Canceled update; treat the (likely) generate
         // error as the clean cancel.
@@ -1920,9 +1920,8 @@ fn zimage_control_load(
     if !adapters.is_empty() {
         spec = spec.with_adapters(adapters);
     }
-    mlx_gen::load(ZIMAGE_CONTROL_ENGINE_ID, &spec).map_err(|error| {
-        WorkerError::InvalidPayload(format!("Z-Image control load failed: {error}"))
-    })
+    mlx_gen::load(ZIMAGE_CONTROL_ENGINE_ID, &spec)
+        .map_err(|error| WorkerError::Engine(format!("Z-Image control load failed: {error}")))
 }
 
 /// Generate one strict-pose image: the `control` skeleton drives the Fun-Controlnet-Union
@@ -1969,17 +1968,17 @@ fn zimage_control_generate_one(
         cancel: cancel.clone(),
         ..Default::default()
     };
-    let output = generator.generate(&request, on_progress).map_err(|error| {
-        WorkerError::InvalidPayload(format!("control generation failed: {error}"))
-    })?;
+    let output = generator
+        .generate(&request, on_progress)
+        .map_err(|error| WorkerError::Engine(format!("control generation failed: {error}")))?;
     match output {
         GenerationOutput::Images(mut images) => {
             let image = images.pop().ok_or_else(|| {
-                WorkerError::InvalidPayload("control generator produced no image".to_owned())
+                WorkerError::Engine("control generator produced no image".to_owned())
             })?;
             Ok((image.width, image.height, image.pixels))
         }
-        _ => Err(WorkerError::InvalidPayload(
+        _ => Err(WorkerError::Engine(
             "control generator returned non-image output".to_owned(),
         )),
     }
@@ -2618,15 +2617,15 @@ fn flux2_edit_generate_one(
     };
     let output = generator
         .generate(&request, on_progress)
-        .map_err(|error| WorkerError::InvalidPayload(format!("edit generation failed: {error}")))?;
+        .map_err(|error| WorkerError::Engine(format!("edit generation failed: {error}")))?;
     match output {
         GenerationOutput::Images(mut images) => {
             let image = images.pop().ok_or_else(|| {
-                WorkerError::InvalidPayload("edit generator produced no image".to_owned())
+                WorkerError::Engine("edit generator produced no image".to_owned())
             })?;
             Ok((image.width, image.height, image.pixels))
         }
-        _ => Err(WorkerError::InvalidPayload(
+        _ => Err(WorkerError::Engine(
             "edit generator returned non-image output".to_owned(),
         )),
     }
@@ -2932,7 +2931,7 @@ fn qwen_control_load(
         spec = spec.with_adapters(adapters);
     }
     mlx_gen::load(QWEN_CONTROL_ENGINE_ID, &spec).map_err(|error| {
-        WorkerError::InvalidPayload(format!("Qwen strict-pose control load failed: {error}"))
+        WorkerError::Engine(format!("Qwen strict-pose control load failed: {error}"))
     })
 }
 
@@ -2972,18 +2971,16 @@ fn qwen_control_generate_one(
         ..Default::default()
     };
     let output = generator.generate(&request, on_progress).map_err(|error| {
-        WorkerError::InvalidPayload(format!("Qwen strict-pose generation failed: {error}"))
+        WorkerError::Engine(format!("Qwen strict-pose generation failed: {error}"))
     })?;
     match output {
         GenerationOutput::Images(mut images) => {
             let image = images.pop().ok_or_else(|| {
-                WorkerError::InvalidPayload(
-                    "Qwen strict-pose generator produced no image".to_owned(),
-                )
+                WorkerError::Engine("Qwen strict-pose generator produced no image".to_owned())
             })?;
             Ok((image.width, image.height, image.pixels))
         }
-        _ => Err(WorkerError::InvalidPayload(
+        _ => Err(WorkerError::Engine(
             "Qwen strict-pose generator returned non-image output".to_owned(),
         )),
     }
@@ -3441,15 +3438,15 @@ fn qwen_edit_generate_one(
     };
     let output = generator
         .generate(&request, on_progress)
-        .map_err(|error| WorkerError::InvalidPayload(format!("edit generation failed: {error}")))?;
+        .map_err(|error| WorkerError::Engine(format!("edit generation failed: {error}")))?;
     match output {
         GenerationOutput::Images(mut images) => {
             let image = images.pop().ok_or_else(|| {
-                WorkerError::InvalidPayload("edit generator produced no image".to_owned())
+                WorkerError::Engine("edit generator produced no image".to_owned())
             })?;
             Ok((image.width, image.height, image.pixels))
         }
-        _ => Err(WorkerError::InvalidPayload(
+        _ => Err(WorkerError::Engine(
             "edit generator returned non-image output".to_owned(),
         )),
     }
@@ -3862,16 +3859,16 @@ fn sensenova_edit_generate_one(
         ..Default::default()
     };
     let output = generator.generate(&request, on_progress).map_err(|error| {
-        WorkerError::InvalidPayload(format!("SenseNova edit generation failed: {error}"))
+        WorkerError::Engine(format!("SenseNova edit generation failed: {error}"))
     })?;
     match output {
         GenerationOutput::Images(mut images) => {
             let image = images.pop().ok_or_else(|| {
-                WorkerError::InvalidPayload("SenseNova edit produced no image".to_owned())
+                WorkerError::Engine("SenseNova edit produced no image".to_owned())
             })?;
             Ok((image.width, image.height, image.pixels))
         }
-        _ => Err(WorkerError::InvalidPayload(
+        _ => Err(WorkerError::Engine(
             "SenseNova edit returned non-image output".to_owned(),
         )),
     }
@@ -4200,7 +4197,7 @@ fn sdxl_advanced_load(
         spec = spec.with_adapters(adapters);
     }
     mlx_gen::load("sdxl", &spec)
-        .map_err(|error| WorkerError::InvalidPayload(format!("sdxl advanced load failed: {error}")))
+        .map_err(|error| WorkerError::Engine(format!("sdxl advanced load failed: {error}")))
 }
 
 /// Generate one SDXL image conditioned on `conditioning` (Reference[/Mask]). SDXL is true-CFG
@@ -4235,16 +4232,16 @@ fn sdxl_advanced_generate_one(
         ..Default::default()
     };
     let output = generator.generate(&request, on_progress).map_err(|error| {
-        WorkerError::InvalidPayload(format!("sdxl advanced generation failed: {error}"))
+        WorkerError::Engine(format!("sdxl advanced generation failed: {error}"))
     })?;
     match output {
         GenerationOutput::Images(mut images) => {
-            let image = images.pop().ok_or_else(|| {
-                WorkerError::InvalidPayload("sdxl advanced produced no image".to_owned())
-            })?;
+            let image = images
+                .pop()
+                .ok_or_else(|| WorkerError::Engine("sdxl advanced produced no image".to_owned()))?;
             Ok((image.width, image.height, image.pixels))
         }
-        _ => Err(WorkerError::InvalidPayload(
+        _ => Err(WorkerError::Engine(
             "sdxl advanced returned non-image output".to_owned(),
         )),
     }
@@ -4430,7 +4427,7 @@ async fn generate_sdxl_advanced_stream(
                     load_mask_asset_image(settings, &request.project_id, mask_id, project_path)?;
                 let user_mask = fit_engine_image(user_mask, width, height, "pad")?;
                 mask = mlx_gen::image::union_masks(&mask, &user_mask).map_err(|error| {
-                    WorkerError::InvalidPayload(format!("outpaint mask union failed: {error}"))
+                    WorkerError::Engine(format!("outpaint mask union failed: {error}"))
                 })?;
             }
             let strength = advanced::f32_clamped(
@@ -5172,36 +5169,33 @@ async fn generate_instantid_stream(
                 identitynet: controlnet,
                 ip_adapter,
             };
-            let model = InstantId::load(&paths).map_err(|error| {
-                WorkerError::InvalidPayload(format!("InstantID load failed: {error}"))
-            })?;
+            let model = InstantId::load(&paths)
+                .map_err(|error| WorkerError::Engine(format!("InstantID load failed: {error}")))?;
             // Attach OpenPose (pose mode) BEFORE quantize so it quantizes with the stack; quantize
             // before with_face (the engine's documented order).
             let model = match &openpose {
                 Some(source) => model.with_openpose(source).map_err(|error| {
-                    WorkerError::InvalidPayload(format!("InstantID OpenPose load failed: {error}"))
+                    WorkerError::Engine(format!("InstantID OpenPose load failed: {error}"))
                 })?,
                 None => model,
             };
             let model = match quant_bits {
                 Some(bits) => model.quantize(bits).map_err(|error| {
-                    WorkerError::InvalidPayload(format!("InstantID quantize failed: {error}"))
+                    WorkerError::Engine(format!("InstantID quantize failed: {error}"))
                 })?,
                 None => model,
             };
             let scrfd = Weights::from_file(&scrfd_path).map_err(|error| {
-                WorkerError::InvalidPayload(format!(
-                    "InstantID SCRFD weights {scrfd_path:?}: {error}"
-                ))
+                WorkerError::Engine(format!("InstantID SCRFD weights {scrfd_path:?}: {error}"))
             })?;
             let arcface = Weights::from_file(&arcface_path).map_err(|error| {
-                WorkerError::InvalidPayload(format!(
+                WorkerError::Engine(format!(
                     "InstantID ArcFace weights {arcface_path:?}: {error}"
                 ))
             })?;
-            let model = model.with_face(&scrfd, &arcface).map_err(|error| {
-                WorkerError::InvalidPayload(format!("InstantID face stack: {error}"))
-            })?;
+            let model = model
+                .with_face(&scrfd, &arcface)
+                .map_err(|error| WorkerError::Engine(format!("InstantID face stack: {error}")))?;
             // Face-restore needs the reference identity embedding (imposed on the re-rendered
             // crop). Detect it once on the raw reference.
             let restore_embedding = if face_restore {
@@ -5273,9 +5267,9 @@ async fn generate_instantid_stream(
                     // stop cleanly (consume_gen_events posts the Canceled update).
                     Err(_) if cancel.is_cancelled() => break,
                     Err(error) => {
-                        return Err(WorkerError::InvalidPayload(format!(
+                        return Err(WorkerError::Engine(format!(
                             "InstantID generation failed: {error}"
-                        )))
+                        )));
                     }
                 };
                 // Optional ADetailer-style face-restore re-render (sc-3380), imposing the
@@ -5437,7 +5431,7 @@ fn detail_load(
         spec = spec.with_quant(quant);
     }
     mlx_gen::load("sdxl", &spec)
-        .map_err(|error| WorkerError::InvalidPayload(format!("sdxl detail load failed: {error}")))
+        .map_err(|error| WorkerError::Engine(format!("sdxl detail load failed: {error}")))
 }
 
 /// Refine one tile (already sized to engine-valid `eng_w`×`eng_h`): img2img on the tile
@@ -5479,13 +5473,13 @@ fn detail_refine_tile(
     };
     let output = generator
         .generate(&request, &mut noop)
-        .map_err(|error| WorkerError::InvalidPayload(format!("detail tile failed: {error}")))?;
+        .map_err(|error| WorkerError::Engine(format!("detail tile failed: {error}")))?;
     match output {
         GenerationOutput::Images(mut images) => Ok(images
             .pop()
-            .ok_or_else(|| WorkerError::InvalidPayload("detail tile produced no image".to_owned()))?
+            .ok_or_else(|| WorkerError::Engine("detail tile produced no image".to_owned()))?
             .pixels),
-        _ => Err(WorkerError::InvalidPayload(
+        _ => Err(WorkerError::Engine(
             "detail tile returned non-image output".to_owned(),
         )),
     }
@@ -5814,7 +5808,7 @@ pub(crate) async fn run_image_detail_job(
 
     let (refined, tiles) = blocking
         .await
-        .map_err(|error| WorkerError::InvalidPayload(format!("detail task join: {error}")))??;
+        .map_err(|error| task_join_error("detail task join", error))??;
     let (out_w, out_h) = (refined.width(), refined.height());
     let media_path = project_path.join(&media_rel);
     let temp_path = media_path.with_extension("tmp.png");

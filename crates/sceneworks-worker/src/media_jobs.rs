@@ -578,7 +578,7 @@ async fn run_yolo11_person_detect(
         crate::person_jobs::detect_people_blocking(weights, frame_path, conf)
     })
     .await
-    .map_err(|error| WorkerError::InvalidPayload(format!("person detect task: {error}")))??;
+    .map_err(|error| task_join_error("person detect task", error))??;
     let boxes =
         crate::person_jobs::detections_to_json(&result.detections, result.width, result.height);
     Ok((boxes, result.device))
@@ -689,9 +689,7 @@ async fn assemble_real_person_track(
             crate::person_jobs::detect_people_blocking(weights_for_frame, frame_for_task, conf)
         })
         .await
-        .map_err(|error| {
-            WorkerError::InvalidPayload(format!("person track detect task: {error}"))
-        })??;
+        .map_err(|error| task_join_error("person track detect task", error))??;
         device = result.device;
         let boxes = result
             .detections
@@ -2121,7 +2119,7 @@ pub(crate) async fn run_ffmpeg(
         .stderr(Stdio::piped())
         .spawn()
         .map_err(|error| {
-            WorkerError::InvalidPayload(format!(
+            WorkerError::Engine(format!(
                 "Failed to start FFmpeg. Ensure ffmpeg is installed and on PATH: {error}"
             ))
         })?;
@@ -2155,18 +2153,20 @@ pub(crate) async fn run_ffmpeg(
         child.wait().await?
     };
 
-    let stderr = stderr_task.await.unwrap_or_default();
+    let stderr = stderr_task
+        .await
+        .map_err(|error| task_join_error("ffmpeg stderr reader task", error))?;
     if status.success() {
         return Ok(());
     }
     let stderr = String::from_utf8_lossy(&stderr);
     let bounded = bounded_tail(&stderr, 10, 2000);
     if bounded.trim().is_empty() {
-        Err(WorkerError::InvalidPayload(
+        Err(WorkerError::Engine(
             "FFmpeg command failed without stderr output.".to_owned(),
         ))
     } else {
-        Err(WorkerError::InvalidPayload(bounded))
+        Err(WorkerError::Engine(bounded))
     }
 }
 

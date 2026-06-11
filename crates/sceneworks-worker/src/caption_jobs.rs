@@ -135,9 +135,7 @@ pub(crate) async fn run_training_caption_job(
             JOY_CAPTION_MODEL,
             &LoadSpec::new(WeightsSource::Dir(weights_dir)),
         )
-        .map_err(|error| {
-            WorkerError::InvalidPayload(format!("JoyCaption MLX load failed: {error}"))
-        })?;
+        .map_err(|error| WorkerError::Engine(format!("JoyCaption MLX load failed: {error}")))?;
         emit_event(
             "caption_pipeline_load_complete",
             json!({
@@ -172,9 +170,7 @@ pub(crate) async fn run_training_caption_job(
             let output = captioner
                 .caption(&request, &mut on_progress)
                 .map_err(|error| {
-                    WorkerError::InvalidPayload(format!(
-                        "JoyCaption MLX generation failed: {error}"
-                    ))
+                    WorkerError::Engine(format!("JoyCaption MLX generation failed: {error}"))
                 })?;
             let text = mlx_gen::caption::joycaption::apply_trigger_words(
                 &output.text,
@@ -252,9 +248,9 @@ pub(crate) async fn run_training_caption_job(
         }
     }
 
-    blocking.await.map_err(|error| {
-        WorkerError::InvalidPayload(format!("caption task panicked: {error}"))
-    })??;
+    blocking
+        .await
+        .map_err(|error| task_join_error("caption task join", error))??;
 
     update_job(
         api,
