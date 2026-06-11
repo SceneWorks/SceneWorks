@@ -491,9 +491,11 @@ pub(crate) fn worker_capabilities_with_utility(
             WorkerCapability::ModelConvert,
             WorkerCapability::LoraImport,
             // Procedural detection/tracking is a preview only. Real, model-backed
-            // PersonDetect/PersonTrack run on the Python GPU worker; advertising the
-            // preview capabilities here keeps the CPU placeholder claimable solely
-            // for explicit `preview: true` jobs (jobs_store::worker_supports_job).
+            // PersonDetect/PersonTrack run on the macOS MLX worker (native
+            // YOLO11/SAM2, epic 3482) or the Python GPU worker on Windows/Linux;
+            // advertising the preview capabilities here keeps the CPU placeholder
+            // claimable solely for explicit `preview: true` jobs
+            // (jobs_store::worker_supports_job).
             WorkerCapability::PersonDetectPreview,
             WorkerCapability::PersonTrackPreview,
         ]);
