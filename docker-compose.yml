@@ -1,9 +1,17 @@
 services:
   api:
+    # Run as the invoking host user (not root) so bind-mounted files stay
+    # host-owned and a compromised payload can't act as root over the mounts
+    # (sc-4285 / F-INFRA-10). Defaults to 1000:1000; override via SCENEWORKS_UID /
+    # SCENEWORKS_GID (the rust-api Docker smoke + dev docs set these).
+    user: "${SCENEWORKS_UID:-1000}:${SCENEWORKS_GID:-1000}"
     restart: unless-stopped
     build:
       context: .
-      dockerfile: docker/rust-api.Dockerfile
+      dockerfile: docker/rust.Dockerfile
+      target: rust-api
+      args:
+        BIN: sceneworks-rust-api
     environment:
       SCENEWORKS_API_HOST: ${SCENEWORKS_API_HOST:-0.0.0.0}
       SCENEWORKS_API_PORT: ${SCENEWORKS_API_PORT:-8010}
@@ -30,6 +38,8 @@ services:
       start_period: 10s
 
   worker:
+    # Run as the invoking host user, not root (sc-4285 / F-INFRA-10).
+    user: "${SCENEWORKS_UID:-1000}:${SCENEWORKS_GID:-1000}"
     build:
       context: .
       dockerfile: docker/worker.Dockerfile
@@ -84,9 +94,14 @@ services:
               capabilities: [gpu]
 
   rust-worker:
+    # Run as the invoking host user, not root (sc-4285 / F-INFRA-10).
+    user: "${SCENEWORKS_UID:-1000}:${SCENEWORKS_GID:-1000}"
     build:
       context: .
-      dockerfile: docker/rust-worker.Dockerfile
+      dockerfile: docker/rust.Dockerfile
+      target: rust-worker
+      args:
+        BIN: sceneworks-rust-worker
     restart: unless-stopped
     environment:
       SCENEWORKS_API_URL: http://api:${SCENEWORKS_API_PORT:-8010}

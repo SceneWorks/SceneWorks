@@ -805,6 +805,7 @@ pub(crate) async fn download_model_with_hf_cli(
     if settings.huggingface_base_url.trim_end_matches('/') != DEFAULT_HUGGINGFACE_BASE_URL {
         return Ok(None);
     }
+    validate_hf_cli_download_inputs(repo, revision, files)?;
     let cache_dir = huggingface_hub_cache_dir(&settings.data_dir);
     tokio::fs::create_dir_all(&cache_dir).await?;
     update_job(
@@ -906,6 +907,127 @@ pub(crate) async fn download_model_with_hf_cli(
     let cache_path = huggingface_snapshot_dir(&settings.data_dir, repo).unwrap_or(repo_cache_path);
     write_model_install_marker(marker_dir, &job.payload, repo, &job.id).await?;
     Ok(Some(cache_path))
+}
+
+pub(crate) fn validate_hf_cli_download_inputs(
+    repo: &str,
+    revision: &str,
+    files: &[String],
+) -> WorkerResult<()> {
+    validate_hf_repo_id(repo)?;
+    validate_hf_revision(revision)?;
+    for pattern in files {
+        validate_hf_include_pattern(pattern)?;
+    }
+    Ok(())
+}
+
+fn validate_hf_repo_id(repo: &str) -> WorkerResult<()> {
+    let parts = safe_hf_path_parts(repo, "Hugging Face repo")?;
+    if parts.len() > 2 {
+        return Err(WorkerError::InvalidPayload(
+            "Hugging Face repo must be `name` or `namespace/name`.".to_owned(),
+        ));
+    }
+    for part in parts {
+        if !part.chars().all(|character| {
+            character.is_ascii_alphanumeric() || matches!(character, '_' | '-' | '.')
+        }) {
+            return Err(WorkerError::InvalidPayload(format!(
+                "Invalid Hugging Face repo `{repo}`: only letters, numbers, `.`, `_`, `-`, and one `/` separator are allowed."
+            )));
+        }
+        if part.starts_with('-')
+            || part.starts_with('.')
+            || part.ends_with('-')
+            || part.ends_with('.')
+        {
+            return Err(WorkerError::InvalidPayload(format!(
+                "Invalid Hugging Face repo `{repo}`: path components cannot start or end with `-` or `.`."
+            )));
+        }
+        if part.contains("--") || part.contains("..") {
+            return Err(WorkerError::InvalidPayload(format!(
+                "Invalid Hugging Face repo `{repo}`: path components cannot contain `--` or `..`."
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn validate_hf_revision(revision: &str) -> WorkerResult<()> {
+    let parts = safe_hf_path_parts(revision, "Hugging Face revision")?;
+    if !revision.chars().all(|character| {
+        character.is_ascii_alphanumeric() || matches!(character, '_' | '-' | '.' | '/')
+    }) {
+        return Err(WorkerError::InvalidPayload(format!(
+            "Invalid Hugging Face revision `{revision}`: only letters, numbers, `.`, `_`, `-`, and `/` are allowed."
+        )));
+    }
+    for part in parts {
+        if part == "." || part == ".." {
+            return Err(WorkerError::InvalidPayload(format!(
+                "Invalid Hugging Face revision `{revision}`: traversal components are not allowed."
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn validate_hf_include_pattern(pattern: &str) -> WorkerResult<()> {
+    let _parts = safe_hf_path_parts(pattern, "Hugging Face include pattern")?;
+    if pattern.starts_with('/') || pattern.contains('\\') {
+        return Err(WorkerError::InvalidPayload(format!(
+            "Invalid Hugging Face include pattern `{pattern}`: absolute paths and backslashes are not allowed."
+        )));
+    }
+    if pattern.split('/').any(|part| part == "." || part == "..") {
+        return Err(WorkerError::InvalidPayload(format!(
+            "Invalid Hugging Face include pattern `{pattern}`: traversal components are not allowed."
+        )));
+    }
+    if !pattern.chars().all(|character| {
+        character.is_ascii_alphanumeric()
+            || matches!(
+                character,
+                '_' | '-' | '.' | '/' | '*' | '?' | '[' | ']' | '{' | '}' | ',' | '!'
+            )
+    }) {
+        return Err(WorkerError::InvalidPayload(format!(
+            "Invalid Hugging Face include pattern `{pattern}`: unsupported characters are not allowed."
+        )));
+    }
+    Ok(())
+}
+
+fn safe_hf_path_parts<'a>(value: &'a str, label: &str) -> WorkerResult<Vec<&'a str>> {
+    if value.is_empty() {
+        return Err(WorkerError::InvalidPayload(format!(
+            "{label} cannot be empty."
+        )));
+    }
+    if value.starts_with('-') {
+        return Err(WorkerError::InvalidPayload(format!(
+            "{label} cannot start with `-`."
+        )));
+    }
+    if value.chars().any(char::is_control) {
+        return Err(WorkerError::InvalidPayload(format!(
+            "{label} cannot contain control characters."
+        )));
+    }
+    if value.starts_with('/') || value.contains('\\') {
+        return Err(WorkerError::InvalidPayload(format!(
+            "{label} must be a relative Hugging Face identifier."
+        )));
+    }
+    let parts: Vec<_> = value.split('/').collect();
+    if parts.iter().any(|part| part.is_empty()) {
+        return Err(WorkerError::InvalidPayload(format!(
+            "{label} cannot contain empty path components."
+        )));
+    }
+    Ok(parts)
 }
 
 pub(crate) const HF_CLI_UTF8_ENV: [(&str, &str); 3] = [

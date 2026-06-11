@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::process::Stdio as StdStdio;
 use std::time::Duration;
@@ -15,9 +16,9 @@ use tempfile::tempdir;
 
 use super::api_client::ApiClient;
 use super::downloads::{
-    credential_for_host, download_lora_source_url, download_progress_payload,
-    download_snapshot_into_cache, DownloadContext, DownloadProgress, HuggingFaceSnapshot,
-    SnapshotFile,
+    build_source_url_client, credential_for_host, download_lora_source_url,
+    download_progress_payload, download_snapshot_into_cache, DownloadContext, DownloadProgress,
+    HuggingFaceSnapshot, SnapshotFile,
 };
 #[cfg(target_os = "macos")]
 use super::gpu::mlx_gpu;
@@ -32,7 +33,8 @@ use super::media_jobs::{
 use super::model_jobs::{
     check_downloaded_model_family, downloaded_model_detection_io_error_is_inconclusive,
     finalize_converted_dir, hf_cli_encoding_failure, kolors_tokenizer_overlay_dest,
-    overlay_kolors_tokenizer, DownloadFamilyCheck, HF_CLI_UTF8_ENV,
+    overlay_kolors_tokenizer, validate_hf_cli_download_inputs, DownloadFamilyCheck,
+    HF_CLI_UTF8_ENV,
 };
 use super::supervisor::{
     auto_worker_specs, child_environment, restart_exited_children_with_spawner,
@@ -94,6 +96,65 @@ fn hf_cli_environment_forces_python_utf8_output() {
     assert_eq!(env.get("PYTHONUTF8"), Some(&"1"));
     assert_eq!(env.get("PYTHONIOENCODING"), Some(&"utf-8"));
     assert_eq!(env.get("HF_HUB_DISABLE_PROGRESS_BARS"), Some(&"1"));
+}
+
+#[test]
+fn hf_cli_download_inputs_accept_catalog_values() {
+    validate_hf_cli_download_inputs(
+        "black-forest-labs/FLUX.1-dev",
+        "refs/pr/12",
+        &[
+            "*.safetensors".to_owned(),
+            "text_encoder/model-00001-of-00002.safetensors".to_owned(),
+            "tokenizer/{config,merges}.json".to_owned(),
+        ],
+    )
+    .expect("catalog HF values are accepted");
+}
+
+#[test]
+fn hf_cli_download_inputs_reject_option_injection() {
+    for repo in ["--local-dir=/Users/me/.ssh", "owner/--local-dir=/tmp/out"] {
+        let error = validate_hf_cli_download_inputs(repo, "main", &["*.safetensors".to_owned()])
+            .expect_err("malicious repo rejected");
+        assert!(matches!(error, WorkerError::InvalidPayload(_)));
+    }
+
+    let error = validate_hf_cli_download_inputs(
+        "owner/model",
+        "--local-dir=/tmp/out",
+        &["*.safetensors".to_owned()],
+    )
+    .expect_err("malicious revision rejected");
+    assert!(matches!(error, WorkerError::InvalidPayload(_)));
+
+    let error = validate_hf_cli_download_inputs(
+        "owner/model",
+        "main",
+        &["--local-dir=/tmp/out".to_owned()],
+    )
+    .expect_err("malicious include pattern rejected");
+    assert!(matches!(error, WorkerError::InvalidPayload(_)));
+}
+
+#[test]
+fn hf_cli_download_inputs_reject_traversal_and_absolute_patterns() {
+    for pattern in [
+        "../model.safetensors",
+        "nested/../../model.safetensors",
+        "/tmp/model.bin",
+    ] {
+        let error = validate_hf_cli_download_inputs("owner/model", "main", &[pattern.to_owned()])
+            .expect_err("unsafe include pattern rejected");
+        assert!(matches!(error, WorkerError::InvalidPayload(_)));
+    }
+
+    for revision in ["../main", "refs/heads/../main"] {
+        let error =
+            validate_hf_cli_download_inputs("owner/model", revision, &["*.safetensors".to_owned()])
+                .expect_err("unsafe revision rejected");
+        assert!(matches!(error, WorkerError::InvalidPayload(_)));
+    }
 }
 
 #[test]
@@ -544,6 +605,7 @@ async fn supervisor_restarts_exited_children_with_backoff_state() {
             spec,
             process: exited,
             restart_attempt: 0,
+            spawned_at: std::time::Instant::now(),
         },
     )]);
     let mut spawns = 0_u32;
@@ -565,6 +627,56 @@ async fn supervisor_restarts_exited_children_with_backoff_state() {
         .try_wait()
         .expect("child status checks")
         .is_none());
+    let _ = child.process.start_kill();
+    let _ = child.process.wait().await;
+}
+
+/// sc-4282 / F-MLXW-20: a child that ran healthily past the reset threshold
+/// before exiting starts its restart backoff fresh, rather than carrying a
+/// counter that has saturated upward over many widely-spaced crashes.
+#[tokio::test]
+async fn supervisor_resets_backoff_after_a_healthy_run() {
+    let settings = test_settings("http://127.0.0.1".to_owned(), None);
+    let spec = WorkerSpec {
+        worker_id: "worker-gpu-auto-0".to_owned(),
+        gpu_id: "0".to_owned(),
+    };
+    let mut exited = spawn_exit_child();
+    for _ in 0..20 {
+        if exited.try_wait().expect("child status checks").is_some() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+
+    // The counter has ratcheted up over time, but this run stayed alive well past
+    // the healthy-uptime threshold (spawned > 6 minutes ago).
+    let mut children = HashMap::from([(
+        spec.worker_id.clone(),
+        SupervisedChild {
+            spec,
+            process: exited,
+            restart_attempt: 7,
+            spawned_at: std::time::Instant::now()
+                .checked_sub(Duration::from_secs(360))
+                .expect("monotonic clock backdates 6 minutes"),
+        },
+    )]);
+
+    restart_exited_children_with_spawner(&settings, &mut children, |_settings, _spec| {
+        Ok(spawn_sleep_child())
+    })
+    .await
+    .expect("child restarts");
+
+    let child = children
+        .get_mut("worker-gpu-auto-0")
+        .expect("restarted child is tracked");
+    // Reset to 0 on the healthy run, then advanced once for this restart.
+    assert_eq!(
+        child.restart_attempt, 1,
+        "a healthy run resets the backoff counter"
+    );
     let _ = child.process.start_kill();
     let _ = child.process.wait().await;
 }
@@ -1415,6 +1527,49 @@ async fn source_url_follows_redirect_and_strips_auth_across_hosts() {
             .unwrap(),
         b"civitai-lora"
     );
+}
+
+#[tokio::test]
+async fn source_url_client_pins_dns_to_validated_address() {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("listener binds");
+    let address = listener.local_addr().expect("listener has address");
+    let state = BinaryStubState {
+        bytes: b"weights!!".to_vec(),
+        status: AxumStatusCode::OK,
+        cancel_requested: false,
+    };
+    let app = Router::new()
+        .route("/file/style.safetensors", get(binary_stub))
+        .with_state(state);
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.expect("stub serves");
+    });
+
+    let url = reqwest::Url::parse(&format!(
+        "http://rebind.test:{}/file/style.safetensors",
+        address.port()
+    ))
+    .expect("test URL parses");
+    let validated = [SocketAddr::new(
+        "127.0.0.1".parse().unwrap(),
+        address.port(),
+    )];
+    let client = build_source_url_client(&url, Some(&validated)).expect("client builds");
+
+    let bytes = client
+        .get(url)
+        .send()
+        .await
+        .expect("request uses pinned address")
+        .error_for_status()
+        .expect("stub response is successful")
+        .bytes()
+        .await
+        .expect("response body reads");
+
+    assert_eq!(bytes.as_ref(), b"weights!!");
 }
 
 #[tokio::test]

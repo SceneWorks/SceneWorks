@@ -1,4 +1,48 @@
 use super::*;
+use std::net::SocketAddr;
+
+/// GET `url` into memory via the shared HTTP client, with a clear error on a
+/// non-success status. The common fetch behind the worker's download-on-first-use
+/// weight fetchers (sc-4283 / F-MLXW-22) — one place to later add streaming /
+/// size-limits / integrity verification (F-MLXW-21) instead of the former four
+/// hand-rolled copies.
+#[cfg(target_os = "macos")]
+pub(crate) async fn fetch_bytes(http_client: &reqwest::Client, url: &str) -> WorkerResult<Vec<u8>> {
+    Ok(http_client
+        .get(url)
+        .send()
+        .await?
+        .error_for_status()
+        .map_err(|error| {
+            WorkerError::InvalidPayload(format!("weight download failed ({url}): {error}"))
+        })?
+        .bytes()
+        .await?
+        .to_vec())
+}
+
+/// Download `url` to `target` on first use: return it if already present, else GET
+/// into a sibling `.download.tmp` then atomically rename into place, so a partial
+/// download is never mistaken for a complete file. Creates `target`'s parent dir.
+/// Replaces the four bespoke GET→tmp→rename copies (sc-4283 / F-MLXW-22).
+#[cfg(target_os = "macos")]
+pub(crate) async fn ensure_cached_file(
+    http_client: &reqwest::Client,
+    url: &str,
+    target: &Path,
+) -> WorkerResult<PathBuf> {
+    if target.exists() {
+        return Ok(target.to_path_buf());
+    }
+    if let Some(parent) = target.parent() {
+        tokio::fs::create_dir_all(parent).await?;
+    }
+    let bytes = fetch_bytes(http_client, url).await?;
+    let tmp = target.with_extension("download.tmp");
+    tokio::fs::write(&tmp, &bytes).await?;
+    tokio::fs::rename(&tmp, target).await?;
+    Ok(target.to_path_buf())
+}
 
 #[derive(Debug, Clone)]
 pub(crate) struct SnapshotFile {
@@ -457,14 +501,10 @@ pub(crate) async fn download_source_url(
     let url =
         parse_lora_source_url_with_private(source_url, context.settings.allow_private_lora_urls)
             .map_err(|error| WorkerError::InvalidPayload(error.message().to_owned()))?;
-    validate_lora_url_dns(context.settings, &url).await?;
     let file_name = lora_source_url_file_name(source_url)
         .map_err(|error| WorkerError::InvalidPayload(error.message().to_owned()))?;
     tokio::fs::create_dir_all(target_dir).await?;
     let target_path = target_dir.join(file_name);
-    let client = reqwest::Client::builder()
-        .redirect(reqwest::redirect::Policy::none())
-        .build()?;
 
     // Attach a stored credential matching the source host. Bearer tokens ride an
     // Authorization header (dropped on cross-host redirects below); query tokens
@@ -483,6 +523,7 @@ pub(crate) async fn download_source_url(
         _ => None,
     };
 
+    let client = source_url_client_for_request(context.settings, &request_url).await?;
     let total_bytes = lora_source_content_length(&client, &request_url, bearer).await?;
     if total_bytes.is_some_and(|total| total > max_bytes) {
         return Err(WorkerError::InvalidPayload(format!(
@@ -496,7 +537,6 @@ pub(crate) async fn download_source_url(
     }
     let range_header = (existing_bytes > 0).then(|| format!("bytes={existing_bytes}-"));
     let mut response = send_source_url_with_redirects(
-        &client,
         context.settings,
         &request_url,
         bearer,
@@ -604,13 +644,13 @@ pub(crate) fn credential_for_host<'a>(
 
 /// GET `initial_url`, manually following up to `MAX_SOURCE_URL_REDIRECTS` hops
 /// (the download client uses `Policy::none()` so we control each hop). Every
-/// redirect target is re-validated for SSRF (scheme + host/DNS) before being
-/// fetched, and the bearer `Authorization` header is dropped on any cross-host
-/// hop so a token never leaks to a CDN. Returns the final non-redirect response
-/// without `error_for_status`, so the caller can still inspect
+/// redirect target is re-validated for SSRF (scheme + host/DNS), then fetched
+/// with a client pinned to the validated socket addresses. The bearer
+/// `Authorization` header is dropped on any cross-host hop so a token never
+/// leaks to a CDN. Returns the final non-redirect response without
+/// `error_for_status`, so the caller can still inspect
 /// `RANGE_NOT_SATISFIABLE`.
 async fn send_source_url_with_redirects(
-    client: &reqwest::Client,
     settings: &Settings,
     initial_url: &str,
     bearer: Option<&str>,
@@ -622,6 +662,7 @@ async fn send_source_url_with_redirects(
         .and_then(|url| url.host_str().map(str::to_ascii_lowercase));
     let mut bearer = bearer.map(str::to_owned);
     for _ in 0..=MAX_SOURCE_URL_REDIRECTS {
+        let client = source_url_client_for_request(settings, &current_url).await?;
         let mut request = client.get(&current_url);
         if let Some(token) = &bearer {
             request = request.bearer_auth(token);
@@ -652,8 +693,6 @@ async fn send_source_url_with_redirects(
                 "sourceUrl redirect must use http or https".to_owned(),
             ));
         }
-        // Re-run SSRF validation against the redirect target before following it.
-        validate_lora_url_dns(settings, &next).await?;
         let next_host = next.host_str().map(str::to_ascii_lowercase);
         if next_host != current_host {
             // Cross-host redirect: never carry the bearer token to a new origin.
@@ -665,6 +704,34 @@ async fn send_source_url_with_redirects(
     Err(WorkerError::InvalidPayload(
         "sourceUrl exceeded the redirect limit".to_owned(),
     ))
+}
+
+async fn source_url_client_for_request(
+    settings: &Settings,
+    request_url: &str,
+) -> WorkerResult<reqwest::Client> {
+    let url = reqwest::Url::parse(request_url)
+        .map_err(|_| WorkerError::InvalidPayload("sourceUrl was invalid".to_owned()))?;
+    source_url_client_for_url(settings, &url).await
+}
+
+async fn source_url_client_for_url(
+    settings: &Settings,
+    url: &reqwest::Url,
+) -> WorkerResult<reqwest::Client> {
+    let validated_addrs = validate_lora_url_dns(settings, url).await?;
+    build_source_url_client(url, validated_addrs.as_deref())
+}
+
+pub(crate) fn build_source_url_client(
+    url: &reqwest::Url,
+    validated_addrs: Option<&[SocketAddr]>,
+) -> WorkerResult<reqwest::Client> {
+    let mut builder = reqwest::Client::builder().redirect(reqwest::redirect::Policy::none());
+    if let (Some(host), Some(addrs)) = (url.host_str(), validated_addrs) {
+        builder = builder.resolve_to_addrs(host, addrs);
+    }
+    Ok(builder.build()?)
 }
 
 pub(crate) async fn lora_source_content_length(
@@ -707,33 +774,33 @@ pub(crate) fn content_range_total(value: &str) -> Option<u64> {
 pub(crate) async fn validate_lora_url_dns(
     settings: &Settings,
     url: &reqwest::Url,
-) -> WorkerResult<()> {
+) -> WorkerResult<Option<Vec<SocketAddr>>> {
     if settings.allow_private_lora_urls {
-        return Ok(());
+        return Ok(None);
     }
     let Some(host) = url.host_str() else {
         return Err(WorkerError::InvalidPayload(
             "LoRA sourceUrl host is not allowed".to_owned(),
         ));
     };
+    let port = url.port_or_known_default().unwrap_or(443);
     if let Ok(address) = host.parse::<IpAddr>() {
         validate_public_ip(address)
             .map_err(|error| WorkerError::InvalidPayload(error.message().to_owned()))?;
-        return Ok(());
+        return Ok(Some(vec![SocketAddr::new(address, port)]));
     }
-    let port = url.port_or_known_default().unwrap_or(443);
-    let mut resolved_any = false;
+    let mut addrs = Vec::new();
     for address in tokio::net::lookup_host((host, port)).await? {
-        resolved_any = true;
         validate_public_ip(address.ip())
             .map_err(|error| WorkerError::InvalidPayload(error.message().to_owned()))?;
+        addrs.push(address);
     }
-    if resolved_any {
-        Ok(())
-    } else {
+    if addrs.is_empty() {
         Err(WorkerError::InvalidPayload(
             "LoRA sourceUrl host did not resolve".to_owned(),
         ))
+    } else {
+        Ok(Some(addrs))
     }
 }
 
@@ -860,4 +927,37 @@ pub fn download_progress_payload(
         None,
         eta_seconds,
     )
+}
+
+#[cfg(all(test, target_os = "macos"))]
+mod ensure_cached_file_tests {
+    use super::ensure_cached_file;
+
+    /// sc-4283 / F-MLXW-22: when the target already exists, `ensure_cached_file`
+    /// returns it without any network access (the cache-hit short-circuit shared
+    /// by all the download-on-first-use weight fetchers). A bogus URL proves no
+    /// request is made.
+    #[tokio::test]
+    async fn returns_existing_target_without_downloading() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let target = dir.path().join("weights").join("model.safetensors");
+        tokio::fs::create_dir_all(target.parent().unwrap())
+            .await
+            .expect("parent dir");
+        tokio::fs::write(&target, b"already here")
+            .await
+            .expect("seed target");
+
+        let client = reqwest::Client::new();
+        let resolved =
+            ensure_cached_file(&client, "http://invalid.invalid/should-not-fetch", &target)
+                .await
+                .expect("cache hit returns without downloading");
+        assert_eq!(resolved, target);
+        // Content untouched (no overwrite).
+        assert_eq!(
+            tokio::fs::read(&target).await.expect("read"),
+            b"already here"
+        );
+    }
 }
