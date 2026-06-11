@@ -976,6 +976,40 @@ mod tests {
         assert!(error.to_string().contains("Training outputDir"));
     }
 
+    /// Project-scoped training (the default) writes to the owning project's tree,
+    /// `<data>/projects/<slug>.sceneworks/loras/<lora_id>`, which is under the app
+    /// data dir but not under `<data>/loras` or `<data>/models`. The worker must
+    /// accept it (regression for the "Training outputDir must be inside an
+    /// app-managed directory" failure on project-scoped runs).
+    #[test]
+    fn validate_accepts_project_scoped_output_dir() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let settings = test_settings(dir.path());
+        let dataset_root = dir.path().join("datasets").join("ds-1");
+        std::fs::create_dir_all(&dataset_root).expect("dataset root");
+        let image = dataset_root.join("image.png");
+        std::fs::write(&image, b"png").expect("image");
+        let mut value = plan_json(
+            dir.path(),
+            "z_image_lora",
+            "z_image_turbo",
+            "lora",
+            &[&image.display().to_string()],
+        );
+        value["output"]["outputDir"] = json!(dir
+            .path()
+            .join("projects")
+            .join("my-character.sceneworks")
+            .join("loras")
+            .join("lora-1")
+            .display()
+            .to_string());
+        assert!(
+            validate_training_plan(&settings, &parse(value)).is_ok(),
+            "project-scoped output dir should validate"
+        );
+    }
+
     #[test]
     fn dry_run_summary_carries_plan_facts() {
         let dir = tempfile::tempdir().expect("tempdir");
