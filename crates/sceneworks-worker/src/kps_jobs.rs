@@ -239,7 +239,7 @@ pub(crate) async fn run_kps_extract_job(
     .await?;
 
     let image = load_source_image(settings, job)?;
-    let scrfd_path = ensure_scrfd_weights(settings).await?;
+    let scrfd_path = ensure_scrfd_weights(api, settings, job).await?;
 
     update_job(
         api,

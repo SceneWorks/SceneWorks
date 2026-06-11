@@ -4862,12 +4862,12 @@ fn instantid_raw_settings(
 /// for a complete one — same shape as `person_segment::ensure_segmenter_weights`).
 #[cfg(target_os = "macos")]
 async fn ensure_instantid_file(
-    client: &reqwest::Client,
+    context: &DownloadContext<'_>,
+    repo: &str,
     dir: &Path,
     name: &str,
-    url: &str,
 ) -> WorkerResult<PathBuf> {
-    ensure_cached_file(client, url, &dir.join(name)).await
+    ensure_hf_cached_file(context, repo, "main", name, &dir.join(name)).await
 }
 
 /// Resolve only the SCRFD detector weights (`scrfd_10g.safetensors`) from the same converted
@@ -4876,17 +4876,28 @@ async fn ensure_instantid_file(
 /// (`SCENEWORKS_INSTANTID_WEIGHTS`) + app cache + download-on-first-use with
 /// [`ensure_instantid_weights`], so a prior InstantID run leaves it already cached.
 #[cfg(target_os = "macos")]
-pub(crate) async fn ensure_scrfd_weights(settings: &Settings) -> WorkerResult<PathBuf> {
+pub(crate) async fn ensure_scrfd_weights(
+    api: &ApiClient,
+    settings: &Settings,
+    job: &JobSnapshot,
+) -> WorkerResult<PathBuf> {
     let client = reqwest::Client::new();
+    let context = DownloadContext {
+        api,
+        client: &client,
+        settings,
+        job_id: &job.id,
+        cancel_message: "KPS extraction canceled while fetching SCRFD weights.",
+        fresh_download: false,
+    };
     let bundle_dir = std::env::var("SCENEWORKS_INSTANTID_WEIGHTS")
         .map(PathBuf::from)
         .unwrap_or_else(|_| settings.data_dir.join("cache").join("instantid-mlx"));
-    let base = format!("https://huggingface.co/{INSTANTID_MLX_REPO}/resolve/main");
     ensure_instantid_file(
-        &client,
+        &context,
+        INSTANTID_MLX_REPO,
         &bundle_dir,
         INSTANTID_SCRFD_FILE,
-        &format!("{base}/{INSTANTID_SCRFD_FILE}"),
     )
     .await
 }
@@ -4897,35 +4908,44 @@ pub(crate) async fn ensure_scrfd_weights(settings: &Settings) -> WorkerResult<Pa
 /// an env override / the HF cache before any network fetch.
 #[cfg(target_os = "macos")]
 async fn ensure_instantid_weights(
+    api: &ApiClient,
     settings: &Settings,
+    job: &JobSnapshot,
 ) -> WorkerResult<(WeightsSource, PathBuf, PathBuf, PathBuf)> {
     let client = reqwest::Client::new();
+    let context = DownloadContext {
+        api,
+        client: &client,
+        settings,
+        job_id: &job.id,
+        cancel_message: "InstantID generation canceled while fetching weights.",
+        fresh_download: false,
+    };
 
     // Converted bundle (ip-adapter + face stack): an env-pinned dir (pre-staged for local
     // validation) wins, else the app cache (download missing files from SceneWorks/instantid-mlx).
     let bundle_dir = std::env::var("SCENEWORKS_INSTANTID_WEIGHTS")
         .map(PathBuf::from)
         .unwrap_or_else(|_| settings.data_dir.join("cache").join("instantid-mlx"));
-    let base = format!("https://huggingface.co/{INSTANTID_MLX_REPO}/resolve/main");
     let ip_adapter = ensure_instantid_file(
-        &client,
+        &context,
+        INSTANTID_MLX_REPO,
         &bundle_dir,
         INSTANTID_IP_ADAPTER_FILE,
-        &format!("{base}/{INSTANTID_IP_ADAPTER_FILE}"),
     )
     .await?;
     let scrfd = ensure_instantid_file(
-        &client,
+        &context,
+        INSTANTID_MLX_REPO,
         &bundle_dir,
         INSTANTID_SCRFD_FILE,
-        &format!("{base}/{INSTANTID_SCRFD_FILE}"),
     )
     .await?;
     let arcface = ensure_instantid_file(
-        &client,
+        &context,
+        INSTANTID_MLX_REPO,
         &bundle_dir,
         INSTANTID_ARCFACE_FILE,
-        &format!("{base}/{INSTANTID_ARCFACE_FILE}"),
     )
     .await?;
 
@@ -4948,10 +4968,16 @@ async fn ensure_instantid_weights(
         }
     }
     let controlnet_dir = settings.data_dir.join("cache").join("instantid-controlnet");
-    let cn_base =
-        format!("https://huggingface.co/{INSTANTID_CONTROLNET_REPO}/resolve/main/ControlNetModel");
     for file in INSTANTID_CONTROLNET_FILES {
-        ensure_instantid_file(&client, &controlnet_dir, file, &format!("{cn_base}/{file}")).await?;
+        let source = format!("ControlNetModel/{file}");
+        ensure_hf_cached_file(
+            &context,
+            INSTANTID_CONTROLNET_REPO,
+            "main",
+            &source,
+            &controlnet_dir.join(file),
+        )
+        .await?;
     }
     Ok((
         WeightsSource::Dir(controlnet_dir),
@@ -4965,7 +4991,11 @@ async fn ensure_instantid_weights(
 /// (`SCENEWORKS_INSTANTID_OPENPOSE`) → HF cache snapshot → download the two files on first use. A
 /// stock diffusers SDXL ControlNet (loads via `with_openpose`/`load_controlnet`, no conversion).
 #[cfg(target_os = "macos")]
-async fn ensure_instantid_openpose(settings: &Settings) -> WorkerResult<WeightsSource> {
+async fn ensure_instantid_openpose(
+    api: &ApiClient,
+    settings: &Settings,
+    job: &JobSnapshot,
+) -> WorkerResult<WeightsSource> {
     if let Ok(dir) = std::env::var("SCENEWORKS_INSTANTID_OPENPOSE") {
         let dir = PathBuf::from(dir);
         if dir.is_dir() {
@@ -4981,10 +5011,17 @@ async fn ensure_instantid_openpose(settings: &Settings) -> WorkerResult<WeightsS
         }
     }
     let client = reqwest::Client::new();
+    let context = DownloadContext {
+        api,
+        client: &client,
+        settings,
+        job_id: &job.id,
+        cancel_message: "InstantID generation canceled while fetching OpenPose weights.",
+        fresh_download: false,
+    };
     let dir = settings.data_dir.join("cache").join("instantid-openpose");
-    let base = format!("https://huggingface.co/{INSTANTID_OPENPOSE_REPO}/resolve/main");
     for file in INSTANTID_CONTROLNET_FILES {
-        ensure_instantid_file(&client, &dir, file, &format!("{base}/{file}")).await?;
+        ensure_instantid_file(&context, INSTANTID_OPENPOSE_REPO, &dir, file).await?;
     }
     Ok(WeightsSource::Dir(dir))
 }
@@ -5029,7 +5066,7 @@ async fn generate_instantid_stream(
     )?;
 
     let (controlnet, ip_adapter, scrfd_path, arcface_path) =
-        ensure_instantid_weights(settings).await?;
+        ensure_instantid_weights(api, settings, job).await?;
 
     let steps = instantid_steps(request);
     let guidance = instantid_guidance(request);
@@ -5070,7 +5107,7 @@ async fn generate_instantid_stream(
     // Load the xinsir OpenPose ControlNet only for pose mode (it is the MultiControlNet second
     // branch; identity/angle modes don't need it).
     let openpose = if pose_set {
-        Some(ensure_instantid_openpose(settings).await?)
+        Some(ensure_instantid_openpose(api, settings, job).await?)
     } else {
         None
     };

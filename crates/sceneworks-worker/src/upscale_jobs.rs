@@ -27,6 +27,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 
+use crate::downloads::{ensure_hf_cached_file, DownloadContext};
 use image::RgbImage;
 use ort::execution_providers::CoreMLExecutionProvider;
 use ort::session::Session;
@@ -230,8 +231,10 @@ fn upscale_blocking(onnx_path: PathBuf, factor: u8, img: RgbImage) -> WorkerResu
 /// app cache `<data_dir>/cache/upscale/`, then a manifest `onnx` resource if the job
 /// carried one, else download from the default HF repo.
 async fn ensure_onnx(
+    api: &ApiClient,
     settings: &Settings,
     http_client: &reqwest::Client,
+    job: &JobSnapshot,
     factor: u8,
     manifest_entry: &Value,
 ) -> WorkerResult<PathBuf> {
@@ -256,25 +259,26 @@ async fn ensure_onnx(
     // manifest resource: resources.imageUpscalers.real-esrgan.x{factor}.onnx -> {repo,file}
     let (repo, file) = manifest_onnx_resource(manifest_entry, factor)
         .unwrap_or_else(|| (ONNX_REPO.to_owned(), onnx_file(factor)));
-    let url = format!("https://huggingface.co/{repo}/resolve/main/{file}");
 
     tokio::fs::create_dir_all(&cache).await?;
-    let bytes = http_client
-        .get(&url)
-        .send()
-        .await?
-        .error_for_status()
-        .map_err(|e| {
-            WorkerError::InvalidPayload(format!(
-                "Real-ESRGAN ONNX download failed ({url}): {e}. Set SCENEWORKS_REALESRGAN_X{factor}_ONNX to a local export, or populate the {ONNX_REPO} HF repo."
-            ))
-        })?
-        .bytes()
-        .await?;
-    let tmp = target.with_extension("onnx.tmp");
-    tokio::fs::write(&tmp, &bytes).await?;
-    tokio::fs::rename(&tmp, &target).await?;
-    Ok(target)
+    let context = DownloadContext {
+        api,
+        client: http_client,
+        settings,
+        job_id: &job.id,
+        cancel_message: "Image upscale canceled while fetching Real-ESRGAN weights.",
+        fresh_download: false,
+    };
+    ensure_hf_cached_file(&context, &repo, "main", &file, &target)
+        .await
+        .map_err(|error| match error {
+            WorkerError::InvalidPayload(detail) => WorkerError::InvalidPayload(format!(
+                "Real-ESRGAN ONNX download failed ({repo}/{file}): {detail}. Set SCENEWORKS_REALESRGAN_X{factor}_ONNX to a local export, or populate the {ONNX_REPO} HF repo."
+            )),
+            other => WorkerError::Engine(format!(
+                "Real-ESRGAN ONNX download failed ({repo}/{file}): {other}. Set SCENEWORKS_REALESRGAN_X{factor}_ONNX to a local export, or populate the {ONNX_REPO} HF repo."
+            )),
+        })
 }
 
 /// Pull a `{repo,file}` ONNX resource out of a job's `modelManifestEntry` if present:
@@ -428,7 +432,7 @@ pub(crate) async fn run_image_upscale_job(
         ),
     )
     .await?;
-    let onnx_path = ensure_onnx(settings, http_client, factor, &manifest_entry).await?;
+    let onnx_path = ensure_onnx(api, settings, http_client, job, factor, &manifest_entry).await?;
 
     update_job(
         api,
