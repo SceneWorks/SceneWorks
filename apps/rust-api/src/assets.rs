@@ -75,41 +75,54 @@ pub(crate) async fn import_asset(
     let mut file: Option<(String, Option<String>, PathBuf)> = None;
     let mut source_asset_id: Option<String> = None;
     let mut provenance: Option<serde_json::Value> = None;
-    while let Some(field) = multipart
-        .next_field()
-        .await
-        .map_err(|error| ApiError::bad_request(error.to_string()))?
-    {
-        match field.name() {
-            Some("file") => {
-                let filename = field.file_name().unwrap_or("upload").to_owned();
-                let content_type = field.content_type().map(str::to_owned);
-                let temp_path = write_upload_field_to_temp_file(&state, field).await?;
-                file = Some((filename, content_type, temp_path));
-            }
-            Some("sourceAssetId") => {
-                let value = field
-                    .text()
-                    .await
-                    .map_err(|error| ApiError::bad_request(error.to_string()))?;
-                let value = value.trim();
-                if !value.is_empty() {
-                    source_asset_id = Some(value.to_owned());
+    // sc-4204 (F-API-6): the `file` field can be staged to a temp file before a later
+    // field errors (e.g. invalid `provenance` JSON, or a truncated multipart stream).
+    // Collect inside a fallible block so a staged temp file is removed before we bail.
+    let collect_result = async {
+        while let Some(field) = multipart
+            .next_field()
+            .await
+            .map_err(|error| ApiError::bad_request(error.to_string()))?
+        {
+            match field.name() {
+                Some("file") => {
+                    let filename = field.file_name().unwrap_or("upload").to_owned();
+                    let content_type = field.content_type().map(str::to_owned);
+                    let temp_path = write_upload_field_to_temp_file(&state, field).await?;
+                    file = Some((filename, content_type, temp_path));
                 }
-            }
-            Some("provenance") => {
-                let value = field
-                    .text()
-                    .await
-                    .map_err(|error| ApiError::bad_request(error.to_string()))?;
-                if !value.trim().is_empty() {
-                    provenance = Some(serde_json::from_str(&value).map_err(|error| {
-                        ApiError::bad_request(format!("Invalid provenance JSON: {error}"))
-                    })?);
+                Some("sourceAssetId") => {
+                    let value = field
+                        .text()
+                        .await
+                        .map_err(|error| ApiError::bad_request(error.to_string()))?;
+                    let value = value.trim();
+                    if !value.is_empty() {
+                        source_asset_id = Some(value.to_owned());
+                    }
                 }
+                Some("provenance") => {
+                    let value = field
+                        .text()
+                        .await
+                        .map_err(|error| ApiError::bad_request(error.to_string()))?;
+                    if !value.trim().is_empty() {
+                        provenance = Some(serde_json::from_str(&value).map_err(|error| {
+                            ApiError::bad_request(format!("Invalid provenance JSON: {error}"))
+                        })?);
+                    }
+                }
+                _ => {}
             }
-            _ => {}
         }
+        Ok::<(), ApiError>(())
+    }
+    .await;
+    if let Err(error) = collect_result {
+        if let Some((_, _, temp_path)) = file.as_ref() {
+            let _ = tokio::fs::remove_file(temp_path).await;
+        }
+        return Err(error);
     }
 
     let (filename, content_type, temp_path) =
@@ -141,6 +154,47 @@ pub(crate) async fn write_upload_field_to_temp_file(
     write_upload_field_to_dir(state, field, "uploads").await
 }
 
+/// Remove stale asset-import temp uploads (`<data_dir>/cache/uploads/upload-*`) at
+/// startup — the backstop for aborted or errored imports whose error path didn't
+/// clean up (sc-4204). Mirrors `sweep_stale_pose_uploads` / `sweep_stale_lora_uploads`.
+pub(crate) fn sweep_stale_asset_uploads(data_dir: &FsPath) -> std::io::Result<usize> {
+    sweep_stale_asset_uploads_before(
+        data_dir,
+        SystemTime::now() - Duration::from_secs(STALE_LORA_UPLOAD_SECONDS),
+    )
+}
+
+pub(crate) fn sweep_stale_asset_uploads_before(
+    data_dir: &FsPath,
+    cutoff: SystemTime,
+) -> std::io::Result<usize> {
+    let upload_root = data_dir.join("cache").join("uploads");
+    let entries = match std::fs::read_dir(upload_root) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(0),
+        Err(error) => return Err(error),
+    };
+    let mut removed = 0usize;
+    for entry in entries {
+        let entry = entry?;
+        let filename = entry.file_name();
+        if !filename.to_string_lossy().starts_with("upload-") {
+            continue;
+        }
+        let modified = entry.metadata()?.modified().unwrap_or(UNIX_EPOCH);
+        if modified <= cutoff {
+            let path = entry.path();
+            let _ = if entry.file_type()?.is_dir() {
+                std::fs::remove_dir_all(&path)
+            } else {
+                std::fs::remove_file(&path)
+            };
+            removed += 1;
+        }
+    }
+    Ok(removed)
+}
+
 /// Stream a multipart field to a unique temp file under `<data_dir>/cache/<subdir>`,
 /// enforcing the upload size cap. Callers own the returned path (move it into place
 /// or delete it). `subdir` lets transient flows isolate their staging area (e.g.
@@ -158,24 +212,34 @@ pub(crate) async fn write_upload_field_to_dir(
     let mut file = tokio::fs::File::create(&temp_path)
         .await
         .map_err(|error| ApiError::internal(error.to_string()))?;
+    // sc-4204 (F-API-6): clean up the temp file on EVERY error path (chunk read,
+    // write, flush, or size cap), not just the size cap — an aborted or malformed
+    // multi-gigabyte upload otherwise leaks as an orphaned upload-*.tmp. Mirrors
+    // write_lora_upload_field_to_staged_file.
     let mut uploaded_bytes = 0usize;
-    while let Some(chunk) = field
-        .chunk()
-        .await
-        .map_err(|error| ApiError::bad_request(error.to_string()))?
-    {
-        uploaded_bytes = uploaded_bytes.saturating_add(chunk.len());
-        if uploaded_bytes > MAX_UPLOAD_BYTES {
-            let _ = tokio::fs::remove_file(&temp_path).await;
-            return Err(ApiError::payload_too_large("Uploaded file is too large"));
-        }
-        file.write_all(&chunk)
+    let write_result = async {
+        while let Some(chunk) = field
+            .chunk()
             .await
-            .map_err(|error| ApiError::internal(error.to_string()))?;
+            .map_err(|error| ApiError::bad_request(error.to_string()))?
+        {
+            uploaded_bytes = uploaded_bytes.saturating_add(chunk.len());
+            if uploaded_bytes > MAX_UPLOAD_BYTES {
+                return Err(ApiError::payload_too_large("Uploaded file is too large"));
+            }
+            file.write_all(&chunk)
+                .await
+                .map_err(|error| ApiError::internal(error.to_string()))?;
+        }
+        file.flush()
+            .await
+            .map_err(|error| ApiError::internal(error.to_string()))
     }
-    file.flush()
-        .await
-        .map_err(|error| ApiError::internal(error.to_string()))?;
+    .await;
+    if let Err(error) = write_result {
+        let _ = tokio::fs::remove_file(&temp_path).await;
+        return Err(error);
+    }
     Ok(temp_path)
 }
 

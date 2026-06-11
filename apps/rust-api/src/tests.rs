@@ -6,9 +6,10 @@ use super::{
     create_app, create_app_with_state, huggingface_repo_cache_path, inject_converted_model_path,
     inprocess_worker_gpu_id, lora_artifact_paths, merge_model_manifest_entry, mlx_catalog_status,
     safe_download_dir, safe_repo_dir_name, serialize_job_lora, should_warn_open_bind,
-    strip_jsonc_comments, sweep_stale_lora_uploads_before, Settings, WorkerCapability,
-    WorkerSnapshot, WorkerStatus, API_MANAGED_MANIFEST_HEADER, DEFAULT_API_HOST, EVENT_BUFFER_SIZE,
-    HEARTBEAT_SSE_DATA, HEARTBEAT_SSE_WIRE, TEST_MAX_LORA_UPLOAD_BYTES,
+    strip_jsonc_comments, sweep_stale_asset_uploads_before, sweep_stale_lora_uploads_before,
+    Settings, WorkerCapability, WorkerSnapshot, WorkerStatus, API_MANAGED_MANIFEST_HEADER,
+    DEFAULT_API_HOST, EVENT_BUFFER_SIZE, HEARTBEAT_SSE_DATA, HEARTBEAT_SSE_WIRE,
+    TEST_MAX_LORA_UPLOAD_BYTES,
 };
 use axum::body::{to_bytes, Body};
 use axum::http::{Request, StatusCode};
@@ -563,6 +564,87 @@ fn stale_lora_upload_sweep_removes_only_upload_dirs_before_cutoff() {
     assert!(!expired.exists());
     assert!(!fresh.exists());
     assert!(unrelated.exists());
+}
+
+#[test]
+fn stale_asset_upload_sweep_removes_only_upload_tmp_before_cutoff() {
+    // sc-4204 (F-API-6): cache/uploads now has a startup-sweep backstop.
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let upload_root = temp_dir.path().join("data/cache/uploads");
+    std::fs::create_dir_all(&upload_root).expect("upload root creates");
+    let expired = upload_root.join("upload-expired.tmp");
+    let fresh = upload_root.join("upload-fresh.tmp");
+    let unrelated = upload_root.join("keep-me.txt");
+    std::fs::write(&expired, b"x").expect("expired writes");
+    std::fs::write(&fresh, b"y").expect("fresh writes");
+    std::fs::write(&unrelated, b"z").expect("unrelated writes");
+
+    let removed = sweep_stale_asset_uploads_before(
+        &temp_dir.path().join("data"),
+        SystemTime::now() + Duration::from_secs(1),
+    )
+    .expect("asset uploads sweep");
+
+    assert_eq!(removed, 2);
+    assert!(!expired.exists());
+    assert!(!fresh.exists());
+    assert!(unrelated.exists(), "non upload-* files are left alone");
+}
+
+#[tokio::test]
+async fn import_asset_removes_staged_temp_file_when_a_later_field_errors() {
+    // sc-4204 (F-API-6): the `file` field is staged to cache/uploads before a later
+    // field is parsed; an invalid `provenance` JSON must not leave an orphan tmp.
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let settings = test_settings(&temp_dir);
+    let data_dir = settings.data_dir.clone();
+    let app = create_app(settings).expect("app creates");
+
+    let boundary = "SCENEWORKS_IMPORT_BOUNDARY";
+    let mut body = Vec::new();
+    // `file` first so it is staged, then an invalid `provenance` that errors.
+    body.extend_from_slice(format!("--{boundary}\r\n").as_bytes());
+    body.extend_from_slice(
+        b"Content-Disposition: form-data; name=\"file\"; filename=\"x.png\"\r\n",
+    );
+    body.extend_from_slice(b"Content-Type: image/png\r\n\r\n");
+    body.extend_from_slice(b"\x89PNG\r\n\x1a\n payload bytes");
+    body.extend_from_slice(format!("\r\n--{boundary}\r\n").as_bytes());
+    body.extend_from_slice(b"Content-Disposition: form-data; name=\"provenance\"\r\n\r\n");
+    body.extend_from_slice(b"{not valid json");
+    body.extend_from_slice(format!("\r\n--{boundary}--\r\n").as_bytes());
+
+    let (status, _, response) = request_raw(
+        app,
+        "POST",
+        "/api/v1/projects/project-1/assets",
+        body,
+        &[(
+            "content-type",
+            &format!("multipart/form-data; boundary={boundary}"),
+        )],
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    let value: Value = serde_json::from_slice(&response).expect("json body parses");
+    assert!(value["detail"]
+        .as_str()
+        .is_some_and(|detail| detail.contains("Invalid provenance JSON")));
+
+    // No orphaned temp file should remain under cache/uploads.
+    let upload_root = data_dir.join("cache").join("uploads");
+    let leaked: Vec<_> = std::fs::read_dir(&upload_root)
+        .map(|entries| {
+            entries
+                .filter_map(Result::ok)
+                .filter(|entry| entry.file_name().to_string_lossy().starts_with("upload-"))
+                .collect()
+        })
+        .unwrap_or_default();
+    assert!(
+        leaked.is_empty(),
+        "staged upload temp file leaked on error: {leaked:?}"
+    );
 }
 
 #[tokio::test]
