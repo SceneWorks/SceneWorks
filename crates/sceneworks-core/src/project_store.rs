@@ -1257,6 +1257,11 @@ impl ProjectStore {
         let asset_id = fact.get("assetId").and_then(Value::as_str).ok_or_else(|| {
             ProjectStoreError::BadRequest("generated asset fact missing assetId".to_owned())
         })?;
+        // The asset id comes from the worker's result fact and is joined into the
+        // recipe path below, so charset-check it before path use (sc-4211 / F-CORE-7).
+        if !is_safe_id(asset_id) {
+            return Err(ProjectStoreError::BadRequest("Invalid asset id".to_owned()));
+        }
         let asset = build_generated_asset_sidecar(project_id, job_id, generation_set_id, fact);
         let media_path = project_path.join(media_rel);
         let sidecar_path = media_path.with_extension("sceneworks.json");
@@ -2132,6 +2137,14 @@ impl ProjectStore {
         project_path: &Path,
         asset_id: &str,
     ) -> ProjectStoreResult<PathBuf> {
+        // Charset-check before any path use. This is the chokepoint every
+        // asset-mutating method (get/update/delete/purge) hits first, so a
+        // crafted-sidecar id like `../../x` is rejected before `delete_asset`/
+        // `purge_asset` join it into a `trash/<asset_id>` dir or `remove_dir_all`
+        // it (sc-4211 / F-CORE-7).
+        if !is_safe_id(asset_id) {
+            return Err(ProjectStoreError::BadRequest("Invalid asset id".to_owned()));
+        }
         find_asset_sidecar_path(project_path, asset_id)?
             .ok_or_else(|| ProjectStoreError::NotFound("Asset not found".to_owned()))
     }
@@ -4271,6 +4284,38 @@ mod tests {
             .create_pose_asset(&spec)
             .expect_err("traversal rejected");
         assert!(matches!(err, ProjectStoreError::BadRequest(_)));
+    }
+
+    /// sc-4211 / F-CORE-7: asset ids are joined into `trash/<id>` and recipe
+    /// paths, so the asset-sidecar chokepoint must reject a traversal id before
+    /// any path use. Without it, `delete_asset`/`purge_asset` could create or
+    /// `remove_dir_all` directories outside the project's trash folder.
+    #[test]
+    fn asset_methods_reject_path_traversal_ids() {
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        let store = ProjectStore::new(temp_dir.path().join("data"), "test-version");
+        let project = store.create_project("Assets").expect("project creates");
+
+        // A real sidecar outside the project that traversal would try to reach.
+        let outside = temp_dir.path().join("outside");
+        std::fs::create_dir_all(&outside).expect("outside dir");
+        std::fs::write(outside.join("victim.txt"), b"do not touch").expect("victim writes");
+
+        let evil = "../../../outside/victim";
+        assert!(matches!(
+            store.get_asset(&project.id, evil),
+            Err(ProjectStoreError::BadRequest(_))
+        ));
+        assert!(matches!(
+            store.delete_asset(&project.id, evil),
+            Err(ProjectStoreError::BadRequest(_))
+        ));
+        assert!(matches!(
+            store.purge_asset(&project.id, evil),
+            Err(ProjectStoreError::BadRequest(_))
+        ));
+        // The traversal target is untouched.
+        assert!(outside.join("victim.txt").exists());
     }
 
     // ---- Key Point Library (sc-4434) ---------------------------------------------------
