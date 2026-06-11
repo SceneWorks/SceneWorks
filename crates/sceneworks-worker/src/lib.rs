@@ -1234,6 +1234,29 @@ fn normalize_app_managed_path(
     ensure_path_under(path, &[data_dir], label)
 }
 
+/// The training base model is a read-only weights source the rust-api resolves
+/// (`resolve_base_model_path`) from either the app data dir *or* the shared
+/// Hugging Face hub cache — the default `HF_HOME` the desktop injects points the
+/// cache at `~/.cache/huggingface`, outside `data_dir`. Unlike output dirs and
+/// dataset roots (write targets, confined to `data_dir`), the base model may
+/// legitimately live in that cache, so it is allowed under either root. Without
+/// this, training an HF-cache-resident base model (e.g. z_image_turbo) fails the
+/// data-dir-only check even though the install/resolve gates accepted it.
+fn normalize_base_model_path(
+    settings: &Settings,
+    raw_path: &str,
+    label: &str,
+) -> WorkerResult<PathBuf> {
+    let raw_path = raw_path.trim();
+    if raw_path.is_empty() {
+        return Err(WorkerError::InvalidPayload(format!("{label} is required.")));
+    }
+    let data_dir = normalized_data_dir(settings)?;
+    let hf_cache = normalize_absolute_path(&huggingface_hub_cache_dir(&settings.data_dir))?;
+    let path = normalize_absolute_path(Path::new(raw_path))?;
+    ensure_path_under(path, &[data_dir, hf_cache], label)
+}
+
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 fn looks_like_huggingface_repo(value: &str) -> bool {
     let value = value.trim();

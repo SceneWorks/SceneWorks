@@ -89,7 +89,7 @@ fn validate_training_plan(settings: &Settings, plan: &TrainingPlan) -> WorkerRes
             "Training plan dataset has no items to train on.".to_owned(),
         ));
     }
-    normalize_app_managed_path(
+    normalize_base_model_path(
         settings,
         &plan.target.base_model_path,
         "Training baseModelPath",
@@ -181,7 +181,7 @@ async fn run_training_dry_run(
 /// The dry-run completion summary (keys mirror the Python `dry_run_training_summary`
 /// so the Training Studio reads an identical shape regardless of which worker runs it).
 fn dry_run_summary(settings: &Settings, plan: &TrainingPlan) -> JsonObject {
-    let base_model_installed = normalize_app_managed_path(
+    let base_model_installed = normalize_base_model_path(
         settings,
         &plan.target.base_model_path,
         "Training baseModelPath",
@@ -906,6 +906,55 @@ mod tests {
         let error = validate_training_plan(&settings, &parse(value))
             .expect_err("outside base model rejected");
         assert!(error.to_string().contains("Training baseModelPath"));
+    }
+
+    /// The base model is a read-only weights source the rust-api resolves from the
+    /// shared Hugging Face hub cache, which the desktop points outside `data_dir`
+    /// via `HF_HOME`. Such a path must be accepted even though it is not under the
+    /// app data dir (regression for the z_image_turbo "must be inside an
+    /// app-managed directory" training failure). Serialized so the `HF_HUB_CACHE`
+    /// mutation can't race other env-reading tests.
+    #[test]
+    fn validate_accepts_base_model_in_hf_cache_outside_data_dir() {
+        static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        let _guard = ENV_LOCK.lock().expect("env lock");
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let hf_cache = tempfile::tempdir().expect("hf cache tempdir");
+        let settings = test_settings(dir.path());
+        let dataset_root = dir.path().join("datasets").join("ds-1");
+        std::fs::create_dir_all(&dataset_root).expect("dataset root");
+        let image = dataset_root.join("image.png");
+        std::fs::write(&image, b"png").expect("image");
+
+        // The base model lives under the HF hub cache (outside data_dir), exactly
+        // as `resolve_base_model_path` returns for an HF-cache-resident model.
+        let base_model = hf_cache
+            .path()
+            .join("models--Tongyi-MAI--Z-Image-Turbo")
+            .join("snapshots")
+            .join("abc123");
+        let mut value = plan_json(
+            dir.path(),
+            "z_image_lora",
+            "z_image_turbo",
+            "lora",
+            &[&image.display().to_string()],
+        );
+        value["target"]["baseModelPath"] = json!(base_model.display().to_string());
+
+        let prior = std::env::var("HF_HUB_CACHE").ok();
+        std::env::set_var("HF_HUB_CACHE", hf_cache.path());
+        let result = validate_training_plan(&settings, &parse(value));
+        match prior {
+            Some(value) => std::env::set_var("HF_HUB_CACHE", value),
+            None => std::env::remove_var("HF_HUB_CACHE"),
+        }
+
+        assert!(
+            result.is_ok(),
+            "HF-cache base model should validate: {result:?}"
+        );
     }
 
     #[test]
