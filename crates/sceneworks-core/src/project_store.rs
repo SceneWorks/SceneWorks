@@ -8,8 +8,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
 
 use crate::asset_index::{
-    asset_origin, asset_sidecars, normalize_asset, row_to_asset_record, upsert_asset_row,
-    AssetRecord,
+    asset_origin, asset_sidecars, normalize_asset, normalize_asset_cached, row_to_asset_record,
+    upsert_asset_row, AssetRecord, GenerationSetCache,
 };
 use crate::character_store::{
     apply_character_migrations, clear_character_tables, reindex_characters_on_connection,
@@ -763,7 +763,11 @@ impl ProjectStore {
                 row.get::<_, Option<String>>(1)?,
             ))
         })?;
-        let mut seen_asset_ids = Vec::new();
+        // HashSet dedup (was an O(n²) Vec linear scan) and a per-call
+        // generation-set cache so a set's JSON is read once, not once per asset
+        // in it (sc-4270 / F-CORE-10).
+        let mut seen_asset_ids = std::collections::HashSet::new();
+        let mut generation_sets = GenerationSetCache::default();
         let mut assets = Vec::new();
         for row in rows {
             let (sidecar_rel, file_rel) = row?;
@@ -782,7 +786,12 @@ impl ProjectStore {
                 if !sidecar_path.exists() {
                     continue;
                 }
-                let Ok(asset) = normalize_asset(project_id, &project_path, &sidecar_path) else {
+                let Ok(asset) = normalize_asset_cached(
+                    project_id,
+                    &project_path,
+                    &sidecar_path,
+                    &mut generation_sets,
+                ) else {
                     continue;
                 };
                 let asset_id = asset
@@ -790,10 +799,9 @@ impl ProjectStore {
                     .and_then(Value::as_str)
                     .unwrap_or_default()
                     .to_owned();
-                if seen_asset_ids.iter().any(|seen| seen == &asset_id) {
+                if !seen_asset_ids.insert(asset_id) {
                     break;
                 }
-                seen_asset_ids.push(asset_id);
                 assets.push(asset);
                 break;
             }
@@ -3932,6 +3940,77 @@ mod tests {
             json!(1024)
         );
         assert_eq!(written["recipe"]["rawAdapterSettings"]["steps"], json!(8));
+    }
+
+    /// sc-4270 / F-CORE-10: list_assets resolves the embedded `generationSet`
+    /// through a per-call cache (read once per set, not once per asset). Two
+    /// assets sharing a set must each still carry the full, correct set — proving
+    /// the cache doesn't drop or corrupt the shared value, and that dedup keeps
+    /// both distinct assets.
+    #[test]
+    fn list_assets_embeds_shared_generation_set_for_each_asset() {
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        let store = ProjectStore::new(temp_dir.path().join("data"), "test-version");
+        let project = store.create_project("Gallery").expect("project creates");
+
+        let generation_set = json!({
+            "id": "genset_shared",
+            "mode": "text_to_image",
+            "model": "z_image_turbo",
+            "prompt": "city",
+            "count": 2,
+            "createdAt": "2026-05-25T00:00:00Z",
+        });
+        let make_fact = |asset_id: &str, name: &str| {
+            json!({
+                "assetId": asset_id,
+                "mediaPath": format!("assets/images/genset_shared/{asset_id}.png"),
+                "mimeType": "image/png",
+                "displayName": name,
+                "createdAt": "2026-05-25T00:00:00Z",
+                "mode": "text_to_image",
+                "model": "z_image_turbo",
+                "adapter": "z_image_diffusers",
+                "prompt": "city",
+            })
+        };
+
+        store
+            .write_generation_set(
+                &project.id,
+                "job-1",
+                &generation_set,
+                Some(&make_fact("asset_one", "city #1")),
+            )
+            .expect("generation set writes");
+        store
+            .persist_generated_asset(
+                &project.id,
+                "job-1",
+                "genset_shared",
+                &make_fact("asset_one", "city #1"),
+            )
+            .expect("asset one persists");
+        store
+            .persist_generated_asset(
+                &project.id,
+                "job-1",
+                "genset_shared",
+                &make_fact("asset_two", "city #2"),
+            )
+            .expect("asset two persists");
+
+        let assets = store
+            .list_assets(&project.id, false, false, AssetScope::All)
+            .expect("list");
+        assert_eq!(assets.len(), 2, "both distinct assets are listed (deduped)");
+        for asset in &assets {
+            assert_eq!(
+                asset["generationSet"]["id"],
+                json!("genset_shared"),
+                "each asset embeds the shared generation set"
+            );
+        }
     }
 
     #[test]
