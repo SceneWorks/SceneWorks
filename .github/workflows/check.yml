@@ -33,12 +33,15 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+          cache: "pip"
+          cache-dependency-path: ".github/workflows/check.yml"
       - uses: actions/setup-node@v4
         with:
           node-version: "20"
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy,rustfmt
+      - uses: Swatinem/rust-cache@v2
       - name: Install contract test dependencies
         run: |
           python -m pip install --upgrade pip
