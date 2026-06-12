@@ -98,7 +98,13 @@ PKG="${1:-sceneworks-worker}"
 # Flatten the tree (`--prefix none`), strip the ` (*)` dedupe marker cargo appends to repeated
 # nodes, keep only the contract crate, and unique-sort. Each unique (version + source) line is one
 # distinct resolution; two revs differ in the `#<rev>` source fragment.
-cargo tree -p "$PKG" --target all --prefix none 2>/dev/null \
+#
+# `--color never` overrides CI's `CARGO_TERM_COLOR=always` (which would otherwise wrap the ` (*)`
+# marker in ANSI codes so the `(*)$` strip misses it and a deduped node looks "distinct" — a false
+# skew). The ESC-strip sed is a portable backstop (works on BSD + GNU sed).
+esc=$(printf '\033')
+cargo tree -p "$PKG" --target all --color never --prefix none 2>/dev/null \
+  | sed "s/${esc}\\[[0-9;]*m//g" \
   | sed 's/ (\*)$//' \
   | grep -E "^${CRATE} v" \
   | sort -u \
