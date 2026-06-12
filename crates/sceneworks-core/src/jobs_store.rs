@@ -2402,7 +2402,9 @@ fn torch_only_image_model_epic(model: &str) -> Option<&'static str> {
         // now in `MLX_ROUTED_MODELS`, so it never reaches this torch-only classifier. Its
         // remaining gaps (pose-library mode, face-restore) are named per-feature in
         // `classify_image_gap`, not as a whole-model gap.
-        "pulid_flux_dev" => Some("epic 3069"),
+        // PuLID-FLUX (pulid_flux_dev) was ported to MLX (epic 3069 engine / sc-3344) — it is now in
+        // `MLX_ROUTED_MODELS`, so it never reaches this torch-only classifier. A reference-less /
+        // non-character job has no PuLID path and is named per-feature in `classify_image_gap`.
         // z_image_edit was ported to MLX (epic 3529 / sc-3923) — it is now in
         // `MLX_ROUTED_MODELS`, so it never reaches this torch-only gap classifier.
         m if m.starts_with("lens") => Some("epic 3164"),
@@ -2483,6 +2485,15 @@ fn classify_image_gap(payload: &Map<String, Value>) -> UnsupportedReason {
             Some(model),
             "InstantID without a character reference",
             "InstantID runs on MLX for character_image with a referenceAssetId (single identity, the 11-view angle set, pose-library mode, and face-restore); a non-character / reference-less job has no InstantID path.",
+            None,
+        ),
+        // PuLID-FLUX (sc-3344): runs on MLX only for character_image with a referenceAssetId (the
+        // face it injects). A non-character / reference-less job has no PuLID path. Mirrors
+        // `pulid_flux_mlx_eligible`.
+        "pulid_flux_dev" => UnsupportedReason::new(
+            Some(model),
+            "PuLID-FLUX without a character reference",
+            "PuLID-FLUX runs on MLX for character_image with a referenceAssetId (the reference face drives the identity injection); a non-character / reference-less job has no PuLID-FLUX path.",
             None,
         ),
         // Kolors (sc-3875): plain T2I runs on MLX; the advanced conditioning modes — img2img
@@ -2938,6 +2949,9 @@ const MLX_ROUTED_MODELS: &[&str] = &[
     // OUT by `instantid_mlx_eligible` and stay on the torch `InstantIDAdapter` (engine sc-3117 /
     // sc-3380 not ported).
     "instantid_realvisxl",
+    // PuLID-FLUX on FLUX.1-dev (sc-3344): the native `mlx-gen-pulid` registry generator serves
+    // `character_image` with a reference face. Mirrors `pulid_flux_mlx_eligible`.
+    "pulid_flux_dev",
     "chroma1_hd",
     "chroma1_base",
     "chroma1_flash",
@@ -2999,6 +3013,7 @@ fn image_request_mlx_eligible(model: &str, payload: &Map<String, Value>) -> bool
         }
         "sdxl" | "realvisxl" => sdxl_mlx_eligible(payload),
         "instantid_realvisxl" => instantid_mlx_eligible(payload),
+        "pulid_flux_dev" => pulid_flux_mlx_eligible(payload),
         "chroma1_hd" | "chroma1_base" | "chroma1_flash" => chroma_mlx_eligible(payload),
         "sensenova_u1_8b" | "sensenova_u1_8b_fast" => sensenova_mlx_eligible(payload),
         "kolors" => kolors_mlx_eligible(payload),
@@ -3073,6 +3088,25 @@ fn sdxl_mlx_eligible(_payload: &Map<String, Value>) -> bool {
 /// `character_image` job with a reference face routes to MLX; only a non-character / reference-less
 /// job stays off. Mirrors the worker's `instantid_available` gate so the router and worker agree.
 fn instantid_mlx_eligible(payload: &Map<String, Value>) -> bool {
+    if payload.get("mode").and_then(Value::as_str) != Some("character_image") {
+        return false;
+    }
+    payload
+        .get("referenceAssetId")
+        .and_then(Value::as_str)
+        .is_some_and(|value| !value.trim().is_empty())
+}
+
+/// PuLID-FLUX (`pulid_flux_dev`) MLX-routing conditions (sc-3344). The native `mlx-gen-pulid`
+/// registry generator serves the single surface PuLID-FLUX has: a `character_image` job with a
+/// reference face (no plain text-to-image, no `edit_image` — the engine requires the face it
+/// injects). Mirrors the worker's `pulid_flux_available` gate so the router and worker agree, and
+/// mirrors `instantid_mlx_eligible` (its face-identity sibling). The "person-type vs non-face"
+/// split is the upstream model-id choice — a person character selects `pulid_flux_dev`; a
+/// non-person reference selects `flux_dev` + the native XLabs IP-Adapter (epic 3621) — so no
+/// separate fall-through gate is needed here. PuLID has no user-LoRA path (`supports_lora=false`),
+/// and the torch path ignored LoRAs too, so a LoRA never changes eligibility.
+fn pulid_flux_mlx_eligible(payload: &Map<String, Value>) -> bool {
     if payload.get("mode").and_then(Value::as_str) != Some("character_image") {
         return false;
     }

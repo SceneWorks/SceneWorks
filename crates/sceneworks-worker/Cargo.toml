@@ -287,6 +287,17 @@ mlx-gen-instantid = { git = "https://github.com/michaeltrefry/mlx-gen", rev = "6
 # Same git rev + mlx-rs pin as the other mlx-gen crates so MLX builds once. (The inference-side
 # routing cutover is sc-3875; this dep is added now for the trainer registration.)
 mlx-gen-kolors = { git = "https://github.com/michaeltrefry/mlx-gen", rev = "6c0f904ec72fd0d5f5b2fffef2d0461e8d29f3f7" }
+# PuLID-FLUX face-identity provider (epic 3069 engine / sc-3344 integration). UNLIKE InstantID this
+# IS an inventory-registered `Generator` (engine id `pulid_flux`): EVA02-CLIP-L-336 tower → IDFormer
+# → 20× PerceiverAttentionCA injected into FLUX.1-dev via a generic `DitImageInjector` seam. The
+# worker reaches it through the registry (`gen_core::load("pulid_flux")` → `.generate`), so it must
+# force-link the crate (`use mlx_gen_pulid as _;` in image_jobs.rs) or the linker drops the
+# `ModelRegistration`. Reference face → `Conditioning::Reference{ strength = id_weight }`;
+# `timestepToStartCfg` → `GenerationRequest.timestep_to_start_cfg`. Composes mlx-gen-flux (FLUX.1-dev
+# backbone) + mlx-gen-face (the same SCRFD/ArcFace stack InstantID uses, plus BiSeNet parsing). The
+# PuLID adapter + EVA + face weights are fed via the engine's env-var seam from the worker cache
+# (see `image_jobs/pulid.rs`). Same git rev + mlx-rs pin as the other mlx-gen crates.
+mlx-gen-pulid = { git = "https://github.com/michaeltrefry/mlx-gen", rev = "6c0f904ec72fd0d5f5b2fffef2d0461e8d29f3f7" }
 
 # candle (Windows/CUDA) generative backend (epic 3672, sc-3675) — the Windows sibling of the macOS
 # mlx provider crates above. `candle-gen-sdxl` self-registers `sdxl` into the SAME gen_core inventory

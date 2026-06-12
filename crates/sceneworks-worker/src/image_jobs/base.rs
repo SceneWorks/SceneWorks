@@ -12,6 +12,7 @@ enum ImageRoute {
     Flux2Edit,
     QwenEdit,
     InstantId,
+    PulidFlux,
     SdxlAdvanced,
     SensenovaEdit,
     Mlx,
@@ -29,6 +30,8 @@ fn resolve_image_route(request: &ImageRequest, settings: &Settings) -> Option<Im
         Some(ImageRoute::QwenEdit)
     } else if instantid_available(request, settings) {
         Some(ImageRoute::InstantId)
+    } else if pulid_flux_available(request, settings) {
+        Some(ImageRoute::PulidFlux)
     } else if sdxl_advanced_available(request, settings) {
         Some(ImageRoute::SdxlAdvanced)
     } else if sensenova_edit_available(request, settings) {
@@ -55,7 +58,9 @@ impl ImageRoute {
                 // upstream, so any residual grouping preserves the requested image count.
                 Flux2Grouping::Poses(_) | Flux2Grouping::Plain => request.count,
             },
-            ImageRoute::SdxlAdvanced | ImageRoute::Mlx => request.count,
+            // PuLID-FLUX is one identity image per seed (no angle/pose grouping) — like the base
+            // MLX + SDXL-advanced paths, the effective count is the requested count.
+            ImageRoute::PulidFlux | ImageRoute::SdxlAdvanced | ImageRoute::Mlx => request.count,
         }
     }
 }

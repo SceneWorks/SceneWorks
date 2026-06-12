@@ -455,7 +455,10 @@ fn adapter_id_reports_per_family_mlx_label() {
         adapter_id(&request(json!({ "model": "kolors" }))),
         "mlx_kolors"
     );
-    // A torch-only model with no mlx-gen engine records the procedural stub adapter.
+    // PuLID-FLUX (sc-3344) is MLX-routed but via a BESPOKE route (not the MODEL_TABLE registry
+    // families), so `adapter_id` — which only resolves MODEL_TABLE rows — reports the stub label;
+    // the real per-asset label (`mlx_pulid_flux`) is applied in `generate_pulid_flux_stream` via
+    // `consume_gen_events`. Same shape as the InstantID bespoke route.
     assert_eq!(
         adapter_id(&request(json!({ "model": "pulid_flux_dev" }))),
         "procedural_preview"
@@ -1689,6 +1692,17 @@ fn image_route_count_follows_dispatch_order() {
     let route = resolve_image_route(&instantid_angle, &settings).unwrap();
     assert_eq!(route, ImageRoute::InstantId);
     assert_eq!(route.image_count(&instantid_angle, &settings), 11);
+
+    // PuLID-FLUX (sc-3344): character_image + reference on the FLUX.1-dev base → one identity image
+    // per requested count (no angle/pose grouping).
+    let pulid = request(json!({
+        "projectId": "p", "model": "pulid_flux_dev", "mode": "character_image",
+        "referenceAssetId": "ref", "count": 3,
+        "advanced": { "modelPath": model_path.clone() }
+    }));
+    let route = resolve_image_route(&pulid, &settings).unwrap();
+    assert_eq!(route, ImageRoute::PulidFlux);
+    assert_eq!(route.image_count(&pulid, &settings), 3);
 
     let sdxl_ip = request(json!({
         "projectId": "p", "model": "sdxl", "referenceAssetId": "ref", "count": 4,
