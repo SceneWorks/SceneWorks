@@ -26,12 +26,11 @@ for (const file of [
   // InstantID face-identity extras (insightface/onnxruntime/onnx/peft/einops);
   // installed into the main venv by setup.rs so the instantid_sdxl adapter runs.
   "requirements-instantid.txt",
-  // PuLID-FLUX face-identity extras (timm/facexlib/ftfy + shared
-  // insightface/onnxruntime). Installed into the main venv by setup.rs so the
-  // pulid_flux adapter runs (sc-2012, epic 2003).
-  "requirements-pulid-flux.txt",
+  // PuLID-FLUX (sc-2012) was retired to the native mlx-gen `pulid_flux` worker
+  // target (sc-3344) — its torch extras (requirements-pulid-flux.txt) + vendored
+  // stack are gone, so there is nothing to stage here.
   // DWPose whole-body pose-detection extras (rtmlib + the onnxruntime shared with
-  // InstantID/PuLID). Installed into the main venv by setup.rs so the worker
+  // InstantID). Installed into the main venv by setup.rs so the worker
   // advertises the `pose_detect` capability — without it the Pose Library Create
   // tab's detect jobs block ("no active worker supports pose detect"). Epic 2282.
   "requirements-pose.txt",

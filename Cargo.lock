@@ -3153,6 +3153,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "mlx-gen-pulid"
+version = "0.0.0"
+source = "git+https://github.com/michaeltrefry/mlx-gen?rev=95cd5c692b974ecaafa57c0af437f085b052e260#95cd5c692b974ecaafa57c0af437f085b052e260"
+dependencies = [
+ "inventory",
+ "mlx-gen",
+ "mlx-gen-face",
+ "mlx-gen-flux",
+ "pmetal-mlx-rs",
+]
+
+[[package]]
 name = "mlx-gen-qwen-image"
 version = "0.0.0"
 source = "git+https://github.com/michaeltrefry/mlx-gen?rev=95cd5c692b974ecaafa57c0af437f085b052e260#95cd5c692b974ecaafa57c0af437f085b052e260"
@@ -3530,7 +3542,7 @@ version = "0.7.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "680998035259dcfcafe653688bf2aa6d3e2dc05e98be6ab46afb089dc84f1df8"
 dependencies = [
- "proc-macro-crate 1.3.1",
+ "proc-macro-crate 2.0.2",
  "proc-macro2",
  "quote",
  "syn 2.0.117",
@@ -4924,6 +4936,7 @@ dependencies = [
  "mlx-gen-joycaption",
  "mlx-gen-kolors",
  "mlx-gen-ltx",
+ "mlx-gen-pulid",
  "mlx-gen-qwen-image",
  "mlx-gen-sam2",
  "mlx-gen-sdxl",

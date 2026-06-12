@@ -375,6 +375,143 @@ fn sensenova_it2i_real_weights_generates_one_image() {
     assert!(pixels.windows(2).any(|w| w[0] != w[1]));
 }
 
+/// sc-3344 parity gate (worker path): drive the native `pulid_flux` registry generator through the
+/// SAME load seam the worker uses (`load_engine` → `gen_core::load("pulid_flux")` with the engine's
+/// env-var weight resolution filled from local caches) and confirm it produces an identity-preserving
+/// render. Validates the actual cutover integration — the env-var seam + `Conditioning::Reference {
+/// strength = idWeight }` mapping — not just the engine. Asserts ArcFace cosine softly (the engine
+/// envelope is ≈0.68 @512²/20-step, scaling to the torch sc-2012 baseline ≈0.80 @1024²/30-step).
+///
+/// Weights: FLUX.1-dev + guozinan/PuLID in the HF cache; the converted EVA + face stack
+/// (`eva02_clip_l_336`/`scrfd_10g`/`arcface_iresnet100`/`bisenet_parsing`) in a bundle dir
+/// (`SCENEWORKS_PULID_WEIGHTS` overrides, default the mlx-gen `tools/golden`); a reference face
+/// (`SCENEWORKS_TEST_FACE` overrides). Metal device. On demand:
+/// `cargo test -p sceneworks-worker --lib -- --ignored pulid_flux_real_weights --nocapture`.
+#[cfg(target_os = "macos")]
+#[test]
+#[ignore = "needs FLUX.1-dev + PuLID + converted EVA/face weights + Metal device"]
+fn pulid_flux_real_weights_holds_identity() {
+    let flux_base = hf_snapshot("models--black-forest-labs--FLUX.1-dev");
+    let pulid_adapter = hf_snapshot("models--guozinan--PuLID").join(PULID_ADAPTER_FILE);
+    let bundle = std::env::var("SCENEWORKS_PULID_WEIGHTS")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|_| dirs_home().join("Repos/mlx-gen/tools/golden"));
+    let eva = bundle.join(PULID_EVA_FILE);
+    let scrfd = bundle.join(INSTANTID_SCRFD_FILE);
+    let arcface = bundle.join(INSTANTID_ARCFACE_FILE);
+    let bisenet = bundle.join(PULID_BISENET_FILE);
+    for p in [&pulid_adapter, &eva, &scrfd, &arcface, &bisenet] {
+        assert!(p.exists(), "missing PuLID weight: {}", p.display());
+    }
+    // Fill the engine's env-var weight seam from the local caches (exactly what
+    // `generate_pulid_flux_stream` does before the cached load).
+    std::env::set_var("PULID_FLUX_WEIGHTS", &pulid_adapter);
+    std::env::set_var("PULID_EVA_WEIGHTS", &eva);
+    std::env::set_var("PULID_FACE_WEIGHTS_DIR", &bundle);
+
+    // Reference face: a portrait PNG (`SCENEWORKS_TEST_FACE`) if present, else the real face image
+    // embedded in the face-align golden (`<bundle>/face_align_goldens.safetensors`, the same
+    // reference the engine e2e uses — always present alongside the converted weights).
+    let reference = match std::env::var("SCENEWORKS_TEST_FACE")
+        .ok()
+        .filter(|p| std::path::Path::new(p).exists())
+    {
+        Some(face_path) => {
+            let decoded = image::open(&face_path)
+                .unwrap_or_else(|e| panic!("reference face {face_path}: {e}"))
+                .to_rgb8();
+            gen_core::Image {
+                width: decoded.width(),
+                height: decoded.height(),
+                pixels: decoded.into_raw(),
+            }
+        }
+        None => {
+            let g = Weights::from_file(bundle.join("face_align_goldens.safetensors"))
+                .expect("face_align_goldens.safetensors in the bundle (reference face)");
+            let a = g.require("image").unwrap();
+            let sh = a.shape();
+            let pixels: Vec<u8> = a
+                .try_as_slice::<i32>()
+                .unwrap()
+                .iter()
+                .map(|&v| v as u8)
+                .collect();
+            gen_core::Image {
+                width: sh[1] as u32,
+                height: sh[0] as u32,
+                pixels,
+            }
+        }
+    };
+
+    // Reference ArcFace embedding (native face stack — detection + embedder only, no parser).
+    let face = mlx_gen_face::FaceAnalysis::load(
+        &Weights::from_file(&scrfd).unwrap(),
+        &Weights::from_file(&arcface).unwrap(),
+    )
+    .unwrap();
+    let ref_faces = face
+        .analyze(
+            &reference.pixels,
+            reference.height as usize,
+            reference.width as usize,
+        )
+        .unwrap();
+    let ref_emb = ref_faces
+        .first()
+        .expect("a face in the reference image")
+        .embedding
+        .clone();
+
+    // Load via the worker's registry seam at the production default quant (Q8 — near-lossless for
+    // PuLID identity per engine sc-3076, the manifest `mlx.quantize`) + generate with the worker's
+    // request mapping. The PuLID conditioning (EVA/IDFormer/CA) stays f32 regardless of quant.
+    let generator = load_engine(
+        "pulid_flux",
+        flux_base,
+        Some(gen_core::Quant::Q8),
+        Vec::new(),
+        None,
+    )
+    .unwrap();
+    let cancel = gen_core::CancelFlag::new();
+    let req = gen_core::GenerationRequest {
+        prompt: "a portrait photo of a person, headshot, looking at the camera".to_owned(),
+        width: 512,
+        height: 512,
+        count: 1,
+        seed: Some(42),
+        steps: Some(20),
+        guidance: Some(4.0),
+        true_cfg: None,
+        timestep_to_start_cfg: Some(4),
+        conditioning: vec![gen_core::Conditioning::Reference {
+            image: reference.clone(),
+            strength: Some(1.0),
+        }],
+        cancel: cancel.clone(),
+        ..Default::default()
+    };
+    let out = generator.generate(&req, &mut |_| {}).unwrap();
+    let image = match out {
+        gen_core::GenerationOutput::Images(mut v) => v.remove(0),
+        other => panic!("expected an image, got {other:?}"),
+    };
+    assert_eq!((image.width, image.height), (512, 512));
+
+    let gen_faces = face
+        .analyze(&image.pixels, image.height as usize, image.width as usize)
+        .unwrap();
+    let gf = gen_faces.first().expect("a face in the generated image");
+    let cos = cosine(&gf.embedding, &ref_emb);
+    println!(
+        "PuLID-FLUX worker-path ArcFace cosine(generated, reference) = {cos:.4} \
+         (engine ≈0.68 @512²/20-step → torch ≈0.80 @1024²/30-step)"
+    );
+    assert!(cos > 0.3, "identity not transferred (cosine {cos:.4})");
+}
+
 #[cfg(target_os = "macos")]
 #[test]
 fn resolve_negative_prompt_only_for_true_cfg_families() {
@@ -455,7 +592,10 @@ fn adapter_id_reports_per_family_mlx_label() {
         adapter_id(&request(json!({ "model": "kolors" }))),
         "mlx_kolors"
     );
-    // A torch-only model with no mlx-gen engine records the procedural stub adapter.
+    // PuLID-FLUX (sc-3344) is MLX-routed but via a BESPOKE route (not the MODEL_TABLE registry
+    // families), so `adapter_id` — which only resolves MODEL_TABLE rows — reports the stub label;
+    // the real per-asset label (`mlx_pulid_flux`) is applied in `generate_pulid_flux_stream` via
+    // `consume_gen_events`. Same shape as the InstantID bespoke route.
     assert_eq!(
         adapter_id(&request(json!({ "model": "pulid_flux_dev" }))),
         "procedural_preview"
@@ -1881,6 +2021,17 @@ fn image_route_count_follows_dispatch_order() {
     let route = resolve_image_route(&instantid_angle, &settings).unwrap();
     assert_eq!(route, ImageRoute::InstantId);
     assert_eq!(route.image_count(&instantid_angle, &settings), 11);
+
+    // PuLID-FLUX (sc-3344): character_image + reference on the FLUX.1-dev base → one identity image
+    // per requested count (no angle/pose grouping).
+    let pulid = request(json!({
+        "projectId": "p", "model": "pulid_flux_dev", "mode": "character_image",
+        "referenceAssetId": "ref", "count": 3,
+        "advanced": { "modelPath": model_path.clone() }
+    }));
+    let route = resolve_image_route(&pulid, &settings).unwrap();
+    assert_eq!(route, ImageRoute::PulidFlux);
+    assert_eq!(route.image_count(&pulid, &settings), 3);
 
     let sdxl_ip = request(json!({
         "projectId": "p", "model": "sdxl", "referenceAssetId": "ref", "count": 4,

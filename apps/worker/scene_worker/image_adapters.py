@@ -58,12 +58,11 @@ from .settings import WorkerSettings
 from .upscalers import RealESRGANUpscaler, UpscaleJob
 
 if TYPE_CHECKING:
-    # instantid_adapter and pulid_flux_adapter both import from this module, so
-    # they can only be referenced for typing (their runtime instances are created
-    # in runtime.py and passed in via the adapters dict; create_image_adapter
-    # lazily imports each on the no-dict path).
+    # instantid_adapter imports from this module, so it can only be referenced for
+    # typing (its runtime instance is created in runtime.py and passed in via the
+    # adapters dict; create_image_adapter lazily imports it on the no-dict path).
+    # PuLID-FLUX was retired to the native mlx-gen `pulid_flux` worker (sc-3344).
     from .instantid_adapter import InstantIDAdapter
-    from .pulid_flux_adapter import PuLIDFluxAdapter
 
 
 Image.MAX_IMAGE_PIXELS = 64_000_000
@@ -623,30 +622,28 @@ MODEL_TARGETS = {
         "label": "PuLID-FLUX (FLUX.1 [dev])",
         # FLUX-family backbone so it shares FLUX LoRA gating + the family-aware
         # preset matcher; Character Studio reference only — no plain text-to-image
-        # or edit_image (the adapter requires a reference and a detectable face).
+        # or edit_image (the engine requires a reference and a detectable face).
         "family": "flux",
         "supportsEdit": False,
-        # sc-2012 spike defaults (PuLID "photoreal" preset): 30 steps at guidance
-        # 4.0, T5 max_seq_len 128, id_weight=1.0 (the adapter knob) and
-        # timestep_to_start_cfg=4. The spike measured 0.8016 ArcFace cosine vs the
-        # Kelsie reference at these settings on MPS bf16 / 1024×1024 (~127 s/image,
-        # ~85 GB peak unified memory). FLUX.1-dev NC license — same posture as
-        # the base flux_dev built-in (already NC + gated).
+        # sc-2012 production defaults (PuLID "photoreal" preset), carried to the
+        # native engine (sc-3344): 30 steps at guidance 4.0, id_weight=1.0,
+        # timestep_to_start_cfg=4. FLUX.1-dev NC license — same posture as the
+        # base flux_dev built-in.
         "steps": 30,
         "guidanceScale": 4.0,
-        "maxSequenceLength": 128,
         "repo": "black-forest-labs/FLUX.1-dev",
+        # MLX-only after sc-3344: the torch `PuLIDFluxAdapter` + vendored
+        # `_vendor/pulid_flux` were retired. The native `mlx-gen-pulid` engine on
+        # the Rust GPU worker is the only path (the sentinel adapter id routes a
+        # stray Python-worker job to a loud error in create_image_adapter, mirroring
+        # FLUX.2-klein).
         "adapter": "pulid_flux",
-        # PuLID-FLUX adapter weights (the IDFormer + PerceiverAttention cross-attn
-        # blocks injected into FLUX's DiT). bflConfig keys the BFL flow loader's
-        # config dict in flux/util.py — only "flux-dev" is wired through today.
-        "pulidFlux": {
-            "repo": "guozinan/PuLID",
-            "weight": "pulid_flux_v0.9.1.safetensors",
-            "version": "v0.9.1",
-            "bflConfig": "flux-dev",
-            "maxSequenceLength": 128,
-        },
+        # Face-ID backbone marker for the cross-backbone `character_image` wiring
+        # guard (test_*_advertise_character_image): PuLID-FLUX is reference-driven
+        # identity, not an edit-style `ui.variationStrength` backbone, so it declares
+        # an engine block like InstantID's `instantId`. The native wiring lives in the
+        # Rust worker + the manifest `mlx` block — this carries NO torch weight config.
+        "pulidFlux": {"engine": "mlx-gen-pulid"},
     },
 }
 
@@ -5110,7 +5107,6 @@ def create_image_adapter(
     | SdxlDiffusersAdapter
     | ChromaDiffusersAdapter
     | "InstantIDAdapter"
-    | "PuLIDFluxAdapter"
 ):
     payload = job.get("payload", {})
     requested = os.getenv("SCENEWORKS_IMAGE_ADAPTER", payload.get("adapter", "")).strip()
@@ -5118,8 +5114,9 @@ def create_image_adapter(
         requested = ""
     if requested in {"procedural", "procedural_preview"}:
         return adapters.get("procedural_preview") if adapters else ProceduralImageAdapter()
-    # InstantID + PuLID-FLUX live in their own modules (each imports from this
-    # one), so match by string id and lazily import on the no-adapters-dict path.
+    # InstantID lives in its own module (it imports from this one), so match by
+    # string id and lazily import on the no-adapters-dict path. (PuLID-FLUX was
+    # retired to the native mlx-gen `pulid_flux` worker target — sc-3344.)
     if requested and requested not in {
         ZImageDiffusersAdapter.id,
         QwenImageAdapter.id,
@@ -5130,7 +5127,6 @@ def create_image_adapter(
         SdxlDiffusersAdapter.id,
         ChromaDiffusersAdapter.id,
         "instantid_sdxl",
-        "pulid_flux",
     }:
         raise RuntimeError(f"Unsupported SCENEWORKS_IMAGE_ADAPTER value: {requested}.")
     if requested == ZImageDiffusersAdapter.id:
@@ -5151,8 +5147,6 @@ def create_image_adapter(
         return adapters.get("chroma_diffusers") if adapters else ChromaDiffusersAdapter()
     if requested == "instantid_sdxl":
         return _instantid_adapter(adapters)
-    if requested == "pulid_flux":
-        return _pulid_flux_adapter(adapters)
     model_target = MODEL_TARGETS.get(payload.get("model", "z_image_turbo"), {})
     if model_target.get("adapter") == ZImageDiffusersAdapter.id:
         # Z-Image on Mac (z_image_turbo, strict pose, identity init) is claimed by the
@@ -5187,6 +5181,18 @@ def create_image_adapter(
             "FLUX.2-klein requires the Rust MLX GPU worker (mlx-gen-flux2); the Python "
             "worker has no FLUX.2 adapter after the epic 3018 cutover (sc-3032)."
         )
+    if model_target.get("adapter") == "pulid_flux":
+        # PuLID-FLUX is MLX-only after the sc-3344 cutover: the torch `PuLIDFluxAdapter` +
+        # vendored `_vendor/pulid_flux` were retired (it was MPS-validated / 64 GB-gated and
+        # never had a Windows/Linux path). The native `mlx-gen-pulid` engine on the Rust `mlx`
+        # GPU worker claims these `character_image` jobs via the API routing layer; the frontend
+        # hides the model off-Mac (the engine descriptor is `mac_only`). If a PuLID-FLUX job ever
+        # reaches the Python worker, fail loudly rather than silently render the procedural
+        # placeholder (mirrors the FLUX.2-klein arm above).
+        raise RuntimeError(
+            "PuLID-FLUX requires the Rust MLX GPU worker (mlx-gen-pulid); the Python worker "
+            "has no PuLID-FLUX adapter after the sc-3344 cutover."
+        )
     if model_target.get("adapter") == SdxlDiffusersAdapter.id:
         # SDXL runs on the Python torch path here. On Mac the MLX-eligible SDXL shapes
         # (txt2img / edit / inpaint / outpaint / reference) are claimed by the Rust `mlx`
@@ -5199,8 +5205,6 @@ def create_image_adapter(
         return adapters.get("chroma_diffusers") if adapters else ChromaDiffusersAdapter()
     if model_target.get("adapter") == "instantid_sdxl":
         return _instantid_adapter(adapters)
-    if model_target.get("adapter") == "pulid_flux":
-        return _pulid_flux_adapter(adapters)
     return adapters.get("procedural_preview") if adapters else ProceduralImageAdapter()
 
 
@@ -5261,18 +5265,6 @@ def _instantid_adapter(adapters: dict[str, object] | None) -> "InstantIDAdapter"
     from .instantid_adapter import InstantIDAdapter
 
     return InstantIDAdapter()
-
-
-def _pulid_flux_adapter(adapters: dict[str, object] | None) -> "PuLIDFluxAdapter":
-    """Resolve the registered PuLID-FLUX adapter, or lazily construct one when no
-    runtime adapters dict is supplied (tests / direct calls). Kept separate for
-    the same import-cycle reason as `_instantid_adapter` (pulid_flux_adapter
-    imports from here)."""
-    if adapters and "pulid_flux" in adapters:
-        return adapters["pulid_flux"]
-    from .pulid_flux_adapter import PuLIDFluxAdapter
-
-    return PuLIDFluxAdapter()
 
 
 def model_supports_edit(model_id: str) -> bool:

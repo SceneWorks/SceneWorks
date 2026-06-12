@@ -46,6 +46,13 @@ use mlx_gen_flux as _;
 use mlx_gen_flux2 as _;
 #[cfg(target_os = "macos")]
 use mlx_gen_kolors as _;
+// PuLID-FLUX (sc-3344) IS an inventory-registered `Generator` (engine id `pulid_flux`), unlike the
+// bespoke InstantID provider below — so it is force-linked here like the other registry families
+// (its `ModelRegistration` is otherwise dropped by linker GC) and reached via `gen_core::load`. The
+// reference-face + idWeight/timestepToStartCfg mapping + weight provisioning live in the dedicated
+// `generate_pulid_flux_stream` (image_jobs/pulid.rs), not the generic MODEL_TABLE path.
+#[cfg(target_os = "macos")]
+use mlx_gen_pulid as _;
 #[cfg(target_os = "macos")]
 use mlx_gen_qwen_image as _;
 #[cfg(target_os = "macos")]
@@ -229,6 +236,20 @@ pub(crate) async fn run_image_generate_job(
                 // InstantID identity-preserving character image (sc-3345): single identity or
                 // grouped angle/pose sets, on RealVisXL + IdentityNet + the native face stack.
                 generate_instantid_stream(
+                    api,
+                    settings,
+                    job,
+                    &plan,
+                    &project_path,
+                    backend,
+                    &mut asset_writes,
+                )
+                .await?;
+            }
+            ImageRoute::PulidFlux => {
+                // PuLID-FLUX face-identity character image (sc-3344): FLUX.1-dev backbone +
+                // EVA/IDFormer/CA injection via the native face stack, one image per seed.
+                generate_pulid_flux_stream(
                     api,
                     settings,
                     job,
@@ -708,6 +729,9 @@ include!("image_jobs/kolors.rs");
 #[cfg(target_os = "macos")]
 // InstantID native routing.
 include!("image_jobs/instantid.rs");
+#[cfg(target_os = "macos")]
+// PuLID-FLUX native routing.
+include!("image_jobs/pulid.rs");
 #[cfg(target_os = "macos")]
 // image detail tile-ControlNet routing.
 include!("image_jobs/detail.rs");

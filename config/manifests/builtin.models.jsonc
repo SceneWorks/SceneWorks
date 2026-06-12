@@ -1619,13 +1619,19 @@
         // principle (FLUX DiT is bucket-agnostic) but were not run in the spike;
         // limit until follow-up A/B widens it.
         "resolutions": ["1024x1024"],
-        "count": [1, 2, 4],
-        // PuLID-FLUX loads FLUX-dev (~24GB) + T5-XXL (~9.5GB) + EVA-CLIP-L
-        // (~1.6GB) + AE/CLIP + PuLID adapter — measured 85.3 GB peak unified
-        // memory on MPS bf16 (sc-2012). A 64 GB Mac is feasible but tight; 36 GB
-        // is not feasible at 1024² without offload (deferred to a follow-up).
-        // minMemoryGb gates the model out of the picker on hosts below the bar.
-        "minMemoryGb": 64
+        "count": [1, 2, 4]
+      },
+      // Native MLX path (sc-3344): PuLID-FLUX runs on the Rust `mlx-gen-pulid` engine — the
+      // FLUX.1-dev backbone + the f32 EVA/IDFormer/CA conditioning — retiring the torch MPS path
+      // that drove the old 64 GB gate (an 85.3 GB peak on MPS bf16, sc-2012). Q8 is the default:
+      // near-lossless for identity (engine sc-3076 — Q8 ArcFace 0.6841 ≈ bf16 0.68; the conditioning
+      // stays f32 either way) and far lighter. minMemoryGb mirrors the native `flux_dev` sibling
+      // (42, a measured Q8 FLUX.1-dev gate) plus the ~1.6 GB f32 EVA tower + CA overhead. Q4
+      // (`advanced.mlxQuantize: 4`) drops the backbone to ~6.5 GB for tighter hosts; dense bf16
+      // (`mlxQuantize: 0`) is the sc-2012-exact identity at a higher floor.
+      "mlx": {
+        "minMemoryGb": 44,
+        "quantize": 8
       },
       "loraCompatibility": {
         // FLUX-family backbone, so flux LoRAs apply (sc-1927: declare a real
