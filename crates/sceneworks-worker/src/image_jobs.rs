@@ -191,6 +191,20 @@ pub(crate) async fn run_image_generate_job(
                 )
                 .await?;
             }
+            ImageRoute::KolorsControl => {
+                // Kolors strict-pose (advanced.poses + a reference) → the combined pose ControlNet
+                // + IP-Adapter identity + img2img pass (sc-4766 / engine sc-5012), one image per pose.
+                generate_kolors_control_stream(
+                    api,
+                    settings,
+                    job,
+                    &plan,
+                    &project_path,
+                    backend,
+                    &mut asset_writes,
+                )
+                .await?;
+            }
             ImageRoute::Flux2Edit => {
                 // FLUX.2-klein edit/reference (mode edit_image or a reference) → edit variant.
                 generate_flux2_edit_stream(
@@ -709,6 +723,9 @@ include!("image_jobs/sensenova.rs");
 #[cfg(target_os = "macos")]
 // SDXL advanced routing.
 include!("image_jobs/sdxl.rs");
+#[cfg(target_os = "macos")]
+// Kolors advanced conditioning (img2img + IP-Adapter-Plus reference).
+include!("image_jobs/kolors.rs");
 #[cfg(target_os = "macos")]
 // InstantID native routing.
 include!("image_jobs/instantid.rs");

@@ -2496,33 +2496,9 @@ fn classify_image_gap(payload: &Map<String, Value>) -> UnsupportedReason {
             "PuLID-FLUX runs on MLX for character_image with a referenceAssetId (the reference face drives the identity injection); a non-character / reference-less job has no PuLID-FLUX path.",
             None,
         ),
-        // Kolors (sc-3875): plain T2I runs on MLX; the advanced conditioning modes — img2img
-        // (`edit_image`), the IP-Adapter-Plus reference, and the strict-pose ControlNet tier —
-        // are not yet wired in the Rust worker and stay on the torch `KolorsDiffusersAdapter`
-        // (dropped on Mac under the gating flag) until their epic-3090 cutover slices land.
-        "kolors" => {
-            let has_poses = payload
-                .get("advanced")
-                .and_then(Value::as_object)
-                .and_then(|advanced| advanced.get("poses"))
-                .and_then(Value::as_array)
-                .is_some_and(|poses| !poses.is_empty());
-            if has_poses {
-                UnsupportedReason::new(
-                    Some(model),
-                    "strict pose (ControlNet)",
-                    "Kolors ControlNet-pose is not yet wired in the Rust worker; it stays on the Python torch path until its cutover slice lands.",
-                    Some("epic 3090"),
-                )
-            } else {
-                UnsupportedReason::new(
-                    Some(model),
-                    "img2img / reference (IP-Adapter)",
-                    "Kolors img2img (edit_image) and the IP-Adapter-Plus reference are not yet wired in the Rust worker; they stay on the Python torch path until their cutover slices land.",
-                    Some("epic 3090"),
-                )
-            }
-        }
+        // Kolors (epic 3090) runs its full surface on MLX now — T2I (sc-3875), img2img (sc-4765),
+        // the IP-Adapter-Plus reference (sc-4767) and the strict-pose tier (sc-4766 / engine sc-5012)
+        // — so a kolors job is never gap-classified; any residual falls to the defensive arm below.
         // flux2 / sdxl / realvisxl only fall out via LyCORIS (handled above) — defensive.
         _ => UnsupportedReason::new(
             Some(model),
@@ -2957,8 +2933,9 @@ const MLX_ROUTED_MODELS: &[&str] = &[
     "chroma1_flash",
     "sensenova_u1_8b",
     "sensenova_u1_8b_fast",
-    // Kolors (sc-3875): plain T2I is wired to the Rust `kolors` engine model; the advanced
-    // conditioning modes stay torch via `kolors_mlx_eligible` until later epic-3090 slices.
+    // Kolors (epic 3090): the full surface runs on the Rust `kolors` engine model — T2I (sc-3875),
+    // img2img (sc-4765), the IP-Adapter-Plus reference (sc-4767) and the strict-pose tier (sc-4766 /
+    // engine sc-5012, the combined pose-ControlNet + IP-Adapter-identity + img2img pass).
     "kolors",
 ];
 
@@ -3258,35 +3235,17 @@ fn sensenova_mlx_eligible(payload: &Map<String, Value>) -> bool {
     }
 }
 
-/// Kolors (sc-3875, epic 3090) MLX-routing conditions. The engine `kolors` model (an SDXL-family
-/// U-Net under a ChatGLM3-6B encoder) supports the full surface — img2img / ControlNet-pose /
-/// IP-Adapter-Plus / Q8/Q4 / LoRA/LoKr — but the SceneWorks worker has wired only the **plain T2I**
-/// base path so far (the `kolors` row in `MlxModel`s + `generate_mlx_stream`). So this gate admits
-/// T2I only; the advanced conditioning modes (`edit_image` img2img, a reference IP-Adapter image,
-/// the strict-pose `advanced.poses` tier) stay on the torch `KolorsDiffusersAdapter` until their
-/// dedicated worker streams land (subsequent epic-3090 cutover slices — see [`classify_image_gap`]).
-/// Third-party LyCORIS / peft LoKr apply on the SDXL-family loader (epic 3641), so a LoRA never
-/// forces torch.
-fn kolors_mlx_eligible(payload: &Map<String, Value>) -> bool {
-    let has_poses = payload
-        .get("advanced")
-        .and_then(Value::as_object)
-        .and_then(|advanced| advanced.get("poses"))
-        .and_then(Value::as_array)
-        .is_some_and(|poses| !poses.is_empty());
-    let has_reference = payload
-        .get("referenceAssetId")
-        .and_then(Value::as_str)
-        .is_some_and(|value| !value.trim().is_empty());
-    let has_source = payload
-        .get("sourceAssetId")
-        .and_then(Value::as_str)
-        .is_some_and(|value| !value.trim().is_empty());
-    if has_poses || has_reference || has_source {
-        return false;
-    }
-    // Only plain text-to-image (no edit_image conditioning) routes to MLX in this slice.
-    payload.get("mode").and_then(Value::as_str) != Some("edit_image")
+/// Kolors (epic 3090) MLX-routing conditions. The engine `kolors` model (an SDXL-family U-Net under
+/// a ChatGLM3-6B encoder) now runs the **full surface** on the in-process Rust worker: plain T2I
+/// (sc-3875), img2img (`edit_image` + `sourceAssetId`, sc-4765), the IP-Adapter-Plus reference
+/// (`referenceAssetId`, sc-4767) — all via the base `Reference` path — and the strict-pose tier
+/// (`advanced.poses` + a reference, the combined pose-ControlNet + IP-Adapter-identity + img2img pass:
+/// engine sc-5012 + the worker `generate_kolors_control_stream`, sc-4766). A pose set without a
+/// reference is not the pose tier (torch `_pose_entries` ignores it) and falls through to the base
+/// path as plain T2I — same as torch — so every Kolors job is MLX-eligible. Third-party LyCORIS / peft
+/// LoKr apply on the SDXL-family loader (epic 3641), so a LoRA never forces torch.
+fn kolors_mlx_eligible(_payload: &Map<String, Value>) -> bool {
+    true
 }
 
 /// Video models the in-process Rust MLX worker generates today (sc-3034 Wan2.2,
