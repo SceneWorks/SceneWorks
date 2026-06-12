@@ -3184,6 +3184,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "mlx-gen-sam3"
+version = "0.0.0"
+source = "git+https://github.com/michaeltrefry/mlx-gen?rev=95cd5c692b974ecaafa57c0af437f085b052e260#95cd5c692b974ecaafa57c0af437f085b052e260"
+dependencies = [
+ "mlx-gen",
+ "pmetal-mlx-rs",
+]
+
+[[package]]
 name = "mlx-gen-sdxl"
 version = "0.0.0"
 source = "git+https://github.com/michaeltrefry/mlx-gen?rev=95cd5c692b974ecaafa57c0af437f085b052e260#95cd5c692b974ecaafa57c0af437f085b052e260"
@@ -4939,6 +4948,7 @@ dependencies = [
  "mlx-gen-pulid",
  "mlx-gen-qwen-image",
  "mlx-gen-sam2",
+ "mlx-gen-sam3",
  "mlx-gen-sdxl",
  "mlx-gen-sensenova",
  "mlx-gen-svd",
