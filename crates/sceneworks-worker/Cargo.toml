@@ -96,10 +96,14 @@ zip = { version = "2", default-features = false, features = ["deflate"] }
 # Rev 95cd5c6 (mlx-gen main, merged PR #403, epic 3090 / sc-5012): adds the combined
 # Kolors ControlNet-pose + IP-Adapter + img2img pass (`Kolors::denoise_controlnet_ip_latents` /
 # `generate_controlnet_ip` + the relaxed registry validate guard), unblocking the Kolors strict-pose
-# worker cutover (sc-4766). Bundles the intervening main merges since 8355152 (#398 SAM3 video PCS,
-# #400 SAM3 geometry/exemplar encoder, #401, #402 SAM3 quant+API) — none touched by the worker's
-# image path. ⚠️ mlx-rs moved b6e4e56 → 44929a0 across these (mlx-gen main's internal pin); the direct
-# `mlx-rs` pin below moves in lockstep or the worker links two incompatible `Array`/`Error` types.
+# worker cutover (sc-4766). Sits directly on top of `6c0f904` (the worker's prior pin from sc-5009 /
+# SceneWorks #629, mlx-gen #401 — the recoverable Metal command-buffer error fix that bumped the
+# mlx-rs fork pin to 44929a0); #403 is the only mlx-gen commit added vs 6c0f904, and it touches no
+# mlx-rs/engine ABI, so the worker just gains the kolors combined pass. Bundles the earlier main
+# merges since 8355152 too (#398 SAM3 video PCS, #400 SAM3 geometry/exemplar encoder, #401, #402 SAM3
+# quant+API) — none touched by the worker's image path. ⚠️ mlx-rs is 44929a0 (introduced by 6c0f904 /
+# sc-5009, not changed by #403); the direct `mlx-rs` pin below MUST stay in lockstep with mlx-gen
+# main's internal pin or the worker links two incompatible `Array`/`Error` types.
 # On top of:
 # Rev 8355152 (mlx-gen, PR #385, epic 3720 / sc-4906): adds `backend: &'static str` to
 # TrainerDescriptor/CaptionerDescriptor/TransformDescriptor (mirroring `ModelDescriptor.backend`),
@@ -208,8 +212,9 @@ mlx-gen = { git = "https://github.com/michaeltrefry/mlx-gen", rev = "95cd5c692b9
 # not cover: CSP channel splits, depthwise convs, SPPF max-pool, the C2PSA attention,
 # and the DFL/anchor decode. Pinned to the SAME rev mlx-gen uses so MLX builds once
 # (a different rev would compile pmetal-mlx-sys twice). Also exercised by the NAX
-# guard test (tests/nax_guard.rs). Tracks mlx-gen main's internal mlx-rs pin, last moved
-# b6e4e56 → 44929a0 alongside the mlx-gen 8355152 → 95cd5c6 bump (epic 3090 / sc-5012, PR #403).
+# guard test (tests/nax_guard.rs). Tracks mlx-gen main's internal mlx-rs pin: 44929a0, introduced by
+# mlx-gen 6c0f904 (sc-5009 / SceneWorks #629, the recoverable Metal command-buffer fix) and inherited
+# unchanged by the 95cd5c6 (sc-5012) bump above — kept in lockstep with mlx-gen's internal pin.
 mlx-rs = { package = "pmetal-mlx-rs", git = "https://github.com/michaeltrefry/mlx-rs", rev = "44929a001ab8a8837403a71c65cf064224de0cdc" }
 mlx-gen-z-image = { git = "https://github.com/michaeltrefry/mlx-gen", rev = "95cd5c692b974ecaafa57c0af437f085b052e260" }
 # FLUX.1 schnell/dev provider (epic 3018, sc-3023). Same git rev as mlx-gen so MLX
