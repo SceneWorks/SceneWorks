@@ -262,31 +262,12 @@ fn requirements_instantid_path(app: &AppHandle) -> PathBuf {
         .join("requirements-instantid.txt")
 }
 
-/// requirements-pulid-flux.txt location (PuLID-FLUX face-identity extras:
-/// timm/facexlib/ftfy/einops + the insightface/onnxruntime pair shared with
-/// InstantID): the bundled resource in a packaged app, or the repo copy during
-/// development. Optional — absent in older worker checkouts, in which case the
-/// PuLID-FLUX character model stays unavailable (the adapter reports a clear
-/// error). Installed on all platforms (face analysis uses the CPU onnxruntime
-/// provider; the FLUX DiT runs on CUDA or MPS like the other image adapters).
-#[cfg(not(target_os = "macos"))]
-fn requirements_pulid_flux_path(app: &AppHandle) -> PathBuf {
-    if let Ok(resources) = app.path().resource_dir() {
-        let bundled = resources
-            .join("python-src")
-            .join("requirements-pulid-flux.txt");
-        if bundled.exists() {
-            return bundled;
-        }
-    }
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("..")
-        .join("worker")
-        .join("requirements-pulid-flux.txt")
-}
+// PuLID-FLUX (sc-2012) was retired to the native mlx-gen `pulid_flux` worker target
+// (sc-3344): its torch extras (requirements-pulid-flux.txt) + vendored stack were
+// removed, so there is no requirements-pulid-flux.txt to resolve or provision here.
 
 /// requirements-pose.txt location (DWPose whole-body pose detection: rtmlib + the
-/// onnxruntime shared with InstantID/PuLID): the bundled resource in a packaged
+/// onnxruntime shared with InstantID): the bundled resource in a packaged
 /// app, or the repo copy during development. Optional — absent in older worker
 /// checkouts, in which case the `pose_detect` worker capability isn't advertised
 /// and the Pose Library Create tab's detect jobs block ("no active worker supports
@@ -602,22 +583,17 @@ async fn provision_venv(app: &AppHandle) -> Result<(), String> {
     let requirements_instantid = requirements_instantid_path(app);
     let requirements_instantid_body =
         std::fs::read_to_string(&requirements_instantid).unwrap_or_default();
-    // PuLID-FLUX face-identity extras (timm/facexlib/ftfy/einops + shared
-    // insightface/onnxruntime). Optional: absent in older worker checkouts, in
-    // which case the PuLID-FLUX character model stays unavailable (the adapter
-    // reports a clear error).
-    let requirements_pulid_flux = requirements_pulid_flux_path(app);
-    let requirements_pulid_flux_body =
-        std::fs::read_to_string(&requirements_pulid_flux).unwrap_or_default();
+    // PuLID-FLUX (sc-2012) retired to the native mlx-gen `pulid_flux` worker (sc-3344) — no
+    // torch extras to read or install.
     // DWPose whole-body pose-detection extras (rtmlib + the onnxruntime shared with
-    // InstantID/PuLID). Optional: absent in older worker checkouts, in which case
+    // InstantID). Optional: absent in older worker checkouts, in which case
     // the `pose_detect` capability isn't advertised and Pose Library detect jobs
     // stay blocked. Epic 2282 / sc-2285.
     let requirements_pose = requirements_pose_path(app);
     let requirements_pose_body = std::fs::read_to_string(&requirements_pose).unwrap_or_default();
     let marker = marker_path();
     let expected = format!(
-        "v{SETUP_VERSION}\n{requirements_body}\n# ltx\n{requirements_ltx_body}\n# instantid\n{requirements_instantid_body}\n# pulid_flux\n{requirements_pulid_flux_body}\n# pose\n{requirements_pose_body}"
+        "v{SETUP_VERSION}\n{requirements_body}\n# ltx\n{requirements_ltx_body}\n# instantid\n{requirements_instantid_body}\n# pose\n{requirements_pose_body}"
     );
 
     if python.exists() {
@@ -674,14 +650,8 @@ async fn provision_venv(app: &AppHandle) -> Result<(), String> {
     if requirements_instantid.exists() {
         requirement_files.push(requirements_instantid.clone());
     }
-    // PuLID-FLUX extras (sc-2012): timm/facexlib/ftfy plus shared
-    // insightface/onnxruntime. Resolves cleanly in the same uv pass; the shared
-    // insightface/einops/onnxruntime pins line up across InstantID + PuLID-FLUX.
-    if requirements_pulid_flux.exists() {
-        requirement_files.push(requirements_pulid_flux.clone());
-    }
     // DWPose extras (sc-2285): rtmlib + the shared onnxruntime. Same single uv pass
-    // so the onnxruntime pin stays aligned with InstantID/PuLID. Without these the
+    // so the onnxruntime pin stays aligned with InstantID. Without these the
     // worker can't advertise `pose_detect` and Pose Library detect jobs block.
     if requirements_pose.exists() {
         requirement_files.push(requirements_pose.clone());
