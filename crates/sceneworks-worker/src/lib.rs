@@ -39,7 +39,12 @@ use uuid::Uuid;
 #[cfg(target_os = "macos")]
 mod advanced;
 mod api_client;
-#[cfg(target_os = "macos")]
+// Backend-neutral generator load/run cache (epic 3720, sc-3724). Typed entirely against
+// `gen_core::*` (no tensor types leak), so it links on ALL targets — the production load seam
+// (`with_cached_generator`) is reached only from the macOS image/video paths, but the all-targets
+// stub test exercises the load→progress→cancel→output contract with no backend linked. Off macOS
+// the production caller is cfg'd out, so allow dead_code there (the engines.rs precedent).
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 mod generator_cache;
 use api_client::*;
 // Backend-neutral engine dispatch table + registry-derived capability advertisement
