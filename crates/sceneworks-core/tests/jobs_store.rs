@@ -2271,13 +2271,14 @@ fn model_mac_support_hides_torch_only_models_keeps_mlx_models() {
             .and_then(|r| r.suggested_epic.as_deref()),
         Some("epic 3069")
     );
-    // Kolors base T2I is MLX-routed now (sc-3875), so it stays in the picker as a supported model
-    // whose advanced conditioning features are individually gated off.
+    // Kolors runs its full surface on MLX (epic 3090): T2I (sc-3875), img2img (sc-4765), the
+    // IP-Adapter-Plus reference (sc-4767) and the strict-pose tier (sc-4766 / engine sc-5012), so all
+    // three advanced features are enabled.
     let kolors = model_mac_support("kolors", "image");
     assert!(kolors.supported);
-    assert!(!kolors.features.edit);
-    assert!(!kolors.features.pose);
-    assert!(!kolors.features.reference);
+    assert!(kolors.features.edit);
+    assert!(kolors.features.pose);
+    assert!(kolors.features.reference);
     // An MLX-routed base family stays in the picker.
     let z_image = model_mac_support("z_image_turbo", "image");
     assert!(z_image.supported);
@@ -2679,15 +2680,15 @@ fn active_mlx_image_edit_blocks_mps_image_edit_claim() {
     assert_eq!(claimed_mlx.id, mlx_job.id);
     assert_eq!(claimed_mlx.assigned_gpu.as_deref(), Some("mlx"));
 
-    // A kolors edit_image job is the MPS job: kolors base T2I is MLX-routed (sc-3875) but its
-    // img2img/edit path is not yet wired to MLX (`kolors_mlx_eligible` rejects edit_image), so it
-    // stays on the torch worker, exercising the shared-GPU exclusion without being soft-deferred.
+    // A PuLID job is the MPS job: PuLID is torch-only on Mac (epic 3069, not in MLX_ROUTED_MODELS),
+    // so it stays on the torch worker — exercising the shared-GPU exclusion without being
+    // soft-deferred. (Kolors is fully MLX now — epic 3090 — so it's no longer a torch example.)
     let mps_job = store
-        .create_job(image_edit_job_with(
+        .create_job(image_job_with(
             json!({
-                "model": "kolors",
-                "mode": "edit_image",
-                "sourceAssetId": "asset_2",
+                "model": "pulid_flux_dev",
+                "mode": "character_image",
+                "referenceAssetId": "asset_2",
                 "prompt": "p"
             }),
             "auto",
@@ -2717,14 +2718,14 @@ fn active_mps_image_edit_blocks_mlx_image_edit_claim() {
     register_gpu_worker(&store, "worker-mps", "mps", image_edit_caps());
     register_gpu_worker(&store, "worker-mlx", "mlx", image_edit_caps());
 
-    // A kolors edit_image job is the MPS job (kolors img2img isn't wired to MLX yet, so it isn't
-    // soft-deferred to the mlx worker).
+    // A PuLID job is the MPS job (PuLID is torch-only on Mac — epic 3069 — so it isn't soft-deferred
+    // to the mlx worker).
     let mps_job = store
-        .create_job(image_edit_job_with(
+        .create_job(image_job_with(
             json!({
-                "model": "kolors",
-                "mode": "edit_image",
-                "sourceAssetId": "asset_1",
+                "model": "pulid_flux_dev",
+                "mode": "character_image",
+                "referenceAssetId": "asset_1",
                 "prompt": "p"
             }),
             "auto",
@@ -2794,20 +2795,19 @@ fn routing_decision_reports_claimed_by_mlx_for_image_edit() {
 }
 
 #[test]
-fn torch_only_image_edit_model_stays_on_torch() {
-    let store = store("mlx-routing-image-edit-torch-only");
+fn torch_only_image_model_stays_on_torch() {
+    let store = store("mlx-routing-image-torch-only");
     register_gpu_worker(&store, "worker-mlx", "mlx", image_edit_caps());
 
-    // kolors base T2I is MLX-routed (sc-3875), but its edit/img2img path is not yet wired to MLX
-    // (`kolors_mlx_eligible` rejects edit_image), so a kolors edit stays on the Python torch path
-    // and the mlx worker must refuse it. (z_image_edit WAS ported to MLX — epic 3529 / sc-3923 — so
-    // it is no longer a valid torch-only example; see `z_image_edit_routes_to_mlx`.)
+    // PuLID is torch-only on Mac (epic 3069, not in MLX_ROUTED_MODELS), so it stays on the Python
+    // torch path and the mlx worker must refuse it. (Every ported image family — incl. Kolors' full
+    // surface, epic 3090 — is MLX now, so a torch-only example must come from an unported model.)
     let job = store
-        .create_job(image_edit_job_with(
+        .create_job(image_job_with(
             json!({
-                "model": "kolors",
-                "mode": "edit_image",
-                "sourceAssetId": "asset_1",
+                "model": "pulid_flux_dev",
+                "mode": "character_image",
+                "referenceAssetId": "asset_1",
                 "prompt": "p"
             }),
             "auto",
@@ -2829,7 +2829,7 @@ fn torch_only_image_edit_model_stays_on_torch() {
     assert_eq!(claimed.assigned_gpu.as_deref(), Some("mps"));
     assert!(
         decision.is_none(),
-        "a torch-only edit model is routing-neutral (no mlx_route_decision)"
+        "a torch-only image model is routing-neutral (no mlx_route_decision)"
     );
 }
 
@@ -3611,6 +3611,55 @@ fn kolors_txt2img_routes_to_mlx_worker() {
         .expect("mlx claims kolors txt2img");
     assert_eq!(claimed.id, job.id);
     assert_eq!(claimed.assigned_gpu.as_deref(), Some("mlx"));
+}
+
+#[test]
+fn kolors_advanced_modes_route_to_mlx() {
+    // epic 3090: kolors runs its full surface on MLX — img2img (sc-4765, `edit_image` +
+    // `sourceAssetId`), the IP-Adapter-Plus reference (sc-4767, `referenceAssetId`) and the
+    // strict-pose tier (sc-4766 / engine sc-5012, `advanced.poses` + a reference) — all defer to the
+    // idle mlx worker.
+    for (index, payload) in [
+        json!({
+            "model": "kolors",
+            "mode": "edit_image",
+            "sourceAssetId": "asset_1",
+            "prompt": "p"
+        }),
+        json!({
+            "model": "kolors",
+            "mode": "character_image",
+            "referenceAssetId": "asset_1",
+            "prompt": "p"
+        }),
+        json!({
+            "model": "kolors",
+            "mode": "character_image",
+            "referenceAssetId": "asset_1",
+            "advanced": { "poses": [{ "keypoints": [] }] },
+            "prompt": "p"
+        }),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let store = store(&format!("mlx-routing-kolors-advanced-{index}"));
+        register_gpu_worker(&store, "worker-torch", "mps", image_edit_caps());
+        register_gpu_worker(&store, "worker-mlx", "mlx", image_edit_caps());
+        let job = store
+            .create_job(image_edit_job_with(payload, "auto"))
+            .expect("job creates");
+        assert!(store
+            .claim_next_job("worker-torch")
+            .expect("torch claim ok")
+            .is_none());
+        let claimed = store
+            .claim_next_job("worker-mlx")
+            .expect("mlx claim ok")
+            .expect("mlx claims kolors advanced job");
+        assert_eq!(claimed.id, job.id);
+        assert_eq!(claimed.assigned_gpu.as_deref(), Some("mlx"));
+    }
 }
 
 #[test]

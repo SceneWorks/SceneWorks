@@ -9,6 +9,7 @@ fn mlx_available(request: &ImageRequest, settings: &Settings) -> bool {
 enum ImageRoute {
     ZImageControl,
     QwenControl,
+    KolorsControl,
     Flux2Edit,
     QwenEdit,
     InstantId,
@@ -23,6 +24,8 @@ fn resolve_image_route(request: &ImageRequest, settings: &Settings) -> Option<Im
         Some(ImageRoute::ZImageControl)
     } else if qwen_control_available(request, settings) {
         Some(ImageRoute::QwenControl)
+    } else if kolors_control_available(request, settings) {
+        Some(ImageRoute::KolorsControl)
     } else if flux2_edit_available(request, settings) {
         Some(ImageRoute::Flux2Edit)
     } else if qwen_edit_available(request, settings) {
@@ -44,9 +47,9 @@ fn resolve_image_route(request: &ImageRequest, settings: &Settings) -> Option<Im
 impl ImageRoute {
     fn image_count(self, request: &ImageRequest, settings: &Settings) -> u32 {
         match self {
-            ImageRoute::ZImageControl | ImageRoute::QwenControl => {
-                pose_entries(request).len() as u32
-            }
+            ImageRoute::ZImageControl
+            | ImageRoute::QwenControl
+            | ImageRoute::KolorsControl => pose_entries(request).len() as u32,
             ImageRoute::Flux2Edit | ImageRoute::QwenEdit => grouped_edit_image_count(request),
             ImageRoute::InstantId => instantid_image_count(request, settings),
             ImageRoute::SensenovaEdit => match flux2_grouping(request) {
@@ -584,10 +587,12 @@ async fn generate_stream(
         .map(|index| resolve_seed(request, index))
         .collect();
     // Reference conditioning for the base MLX path, resolved once (constant across the set):
-    //  • Z-Image reference-identity img2img-init (sc-3619), and
+    //  • Z-Image reference-identity img2img-init (sc-3619),
     //  • FLUX.1 XLabs IP-Adapter (epic 3621 — both schnell + dev; `strength = ipAdapterScale`, plus
-    //    real CFG via `trueCfgScale` on dev). Qwen/SDXL reference divert to their own advanced
-    //    branches before reaching here.
+    //    real CFG via `trueCfgScale` on dev), and
+    //  • Kolors img2img (sc-4765, `edit_image` + `sourceAssetId`) + the IP-Adapter-Plus reference
+    //    (sc-4767, `referenceAssetId` → image prompt at `ipAdapterScale`). Qwen/SDXL reference
+    //    divert to their own advanced branches before reaching here.
     let has_reference = request
         .reference_asset_id
         .as_deref()
@@ -637,6 +642,19 @@ async fn generate_stream(
             )
         });
         (Some((image, scale)), Some(ip_dir), true_cfg)
+    } else if request.model == "kolors" && request.mode == "edit_image" {
+        // Kolors img2img (sc-4765): `sourceAssetId` + `strength` → the engine's `Reference`
+        // (img2img init, no IP-Adapter loaded). Kolors carries CFG through `guidance` + negative
+        // prompt (resolved above), not `true_cfg`.
+        let init = resolve_kolors_edit_init(request, settings, project_path)?;
+        (init, None, None)
+    } else if request.model == "kolors" && has_reference {
+        // Kolors IP-Adapter-Plus reference (sc-4767): `referenceAssetId` → the IP image prompt at
+        // `ipAdapterScale`. `with_ip_adapter` makes the engine treat the `Reference` as the image
+        // prompt (decoupled cross-attn) rather than an img2img init.
+        let (image, scale) = resolve_kolors_ip_reference(request, settings, project_path)?;
+        let ip_dir = resolve_kolors_ip_adapter_dir(settings)?;
+        (Some((image, scale)), Some(ip_dir), None)
     } else {
         (None, None, None)
     };
