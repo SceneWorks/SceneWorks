@@ -638,6 +638,12 @@ MODEL_TARGETS = {
         # stray Python-worker job to a loud error in create_image_adapter, mirroring
         # FLUX.2-klein).
         "adapter": "pulid_flux",
+        # Face-ID backbone marker for the cross-backbone `character_image` wiring
+        # guard (test_*_advertise_character_image): PuLID-FLUX is reference-driven
+        # identity, not an edit-style `ui.variationStrength` backbone, so it declares
+        # an engine block like InstantID's `instantId`. The native wiring lives in the
+        # Rust worker + the manifest `mlx` block — this carries NO torch weight config.
+        "pulidFlux": {"engine": "mlx-gen-pulid"},
     },
 }
 

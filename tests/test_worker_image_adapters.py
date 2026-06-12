@@ -1055,9 +1055,9 @@ def test_runtime_registry_covers_all_model_target_adapters():
     #
     # Epic 3018 cutover (sc-3032): the MLX adapter ids are the exception — the
     # Python MLX adapters were deleted, so MLX-eligible models are claimed by the
-    # Rust `mlx` GPU worker and never dispatch to a Python adapter (FLUX.2-klein,
-    # the only MLX-only family, makes create_image_adapter raise). They must NOT
-    # be registered on the Python worker.
+    # Rust `mlx` GPU worker and never dispatch to a Python adapter (FLUX.2-klein
+    # and PuLID-FLUX, the MLX-only families, make create_image_adapter raise). They
+    # must NOT be registered on the Python worker.
     import re
     from pathlib import Path
 
@@ -1065,7 +1065,9 @@ def test_runtime_registry_covers_all_model_target_adapters():
     from scene_worker.image_adapters import MODEL_TARGETS
 
     # MLX adapter ids the Python worker no longer owns (Rust `mlx` worker claims them).
-    rust_mlx_only = {"mlx_flux", "mlx_qwen", "mlx_z_image", "mlx_flux2"}
+    # `pulid_flux` joined post-sc-3344: the torch PuLIDFluxAdapter was retired, so its
+    # MODEL_TARGETS sentinel adapter id is MLX-only (create_image_adapter raises on it).
+    rust_mlx_only = {"mlx_flux", "mlx_qwen", "mlx_z_image", "mlx_flux2", "pulid_flux"}
 
     src = Path(runtime.__file__).read_text(encoding="utf-8")
     block = src.split("image_adapters: dict[str, object] = {", 1)[1].split("}", 1)[0]
