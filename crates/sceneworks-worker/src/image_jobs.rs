@@ -69,6 +69,18 @@ use mlx_gen_z_image as _;
 // actually USED at runtime is the separate `backend_candle_enabled` setting, not this link anchor.
 #[cfg(all(target_os = "windows", feature = "backend-candle"))]
 use candle_gen_sdxl as _;
+// The four candle image families wired in sc-5096 (epic 5095). Same force-link anchor pattern as the
+// SDXL crate above + the mlx providers: each self-registers its engine id (`z_image_turbo` /
+// `flux1_schnell` + `flux1_dev` / `flux2_klein_9b` / `qwen_image`) into the shared gen_core inventory
+// registry, and the `as _;` keeps the MSVC release linker from GC-ing the `inventory::submit!`.
+#[cfg(all(target_os = "windows", feature = "backend-candle"))]
+use candle_gen_flux as _;
+#[cfg(all(target_os = "windows", feature = "backend-candle"))]
+use candle_gen_flux2 as _;
+#[cfg(all(target_os = "windows", feature = "backend-candle"))]
+use candle_gen_qwen_image as _;
+#[cfg(all(target_os = "windows", feature = "backend-candle"))]
+use candle_gen_z_image as _;
 // CARVE-OUT(epic 3720): backend-specific; absorbed by FaceEmbedder in Phase 3.
 // InstantID (sc-3345) is a bespoke provider, not an inventory-registered `Generator`, so it is
 // referenced by name (`InstantId::load`) rather than anchored with `as _;` — and the native face
@@ -99,8 +111,13 @@ const MAX_JOB_LORAS: usize = 3;
 // The engine dispatch table + its `ModelRow`/`mlx_model` join moved to the all-targets
 // `engines` module (sc-3723); the two descriptor-duplicating flags it used to carry
 // (`supports_guidance`/`supports_negative_prompt`) are now read from the linked gen_core
-// descriptor via `ResolvedModel`. The lookup stays macOS-gated (every caller is).
-#[cfg(target_os = "macos")]
+// descriptor via `ResolvedModel`. Shared by the macOS MLX path and the Windows candle lane
+// (sc-5096) — the join is backend-neutral, so `generate_candle_stream` resolves repo/steps/guidance
+// through the same `mlx_model` lookup the MLX path uses.
+#[cfg(any(
+    target_os = "macos",
+    all(target_os = "windows", feature = "backend-candle")
+))]
 use crate::engines::{mlx_model, ResolvedModel};
 /// Dispatch handler for `JobType::ImageGenerate`: generate, save, and stream image
 /// assets through the Rust GPU worker.
@@ -581,14 +598,14 @@ fn adapter_id(request: &ImageRequest) -> &'static str {
     if let Some(model) = mlx_model(&request.model) {
         return model.adapter_label();
     }
-    // Windows/CUDA candle lane (sc-3678): report the candle adapter for the SDXL family so the
-    // generation-set fact matches the per-asset `adapter` the candle path already writes, instead
-    // of falling through to the procedural-stub label. Routing (`worker_supports_job`) only lets
-    // candle-eligible SDXL txt2img jobs reach this worker, so `is_candle_engine` here implies the
+    // Windows/CUDA candle lane (sc-3678, per-engine in sc-5096): report the candle adapter for the
+    // wired family so the generation-set fact matches the per-asset `adapter` the candle path writes,
+    // instead of falling through to the procedural-stub label. Routing (`worker_supports_job`) only
+    // lets candle-eligible txt2img jobs reach this worker, so `is_candle_engine` here implies the
     // candle path ran.
     #[cfg(all(target_os = "windows", feature = "backend-candle"))]
     if is_candle_engine(&request.model) {
-        return CANDLE_ADAPTER;
+        return candle_adapter_label(&request.model);
     }
     let _ = request;
     STUB_ADAPTER

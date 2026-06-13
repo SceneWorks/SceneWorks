@@ -409,8 +409,7 @@ dependencies = [
 [[package]]
 name = "candle-core"
 version = "0.10.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6bd9895436c1ba5dc1037a19935d084b838db066ff4e15ef7dded020b7c12a4a"
+source = "git+https://github.com/huggingface/candle?rev=65ecb58c11d2244a7e60c71bdcdb19b15b0a4343#65ecb58c11d2244a7e60c71bdcdb19b15b0a4343"
 dependencies = [
  "byteorder",
  "candle-kernels",
@@ -419,6 +418,7 @@ dependencies = [
  "float8",
  "gemm 0.19.0",
  "half",
+ "libc",
  "libm",
  "memmap2",
  "num-traits",
@@ -430,13 +430,13 @@ dependencies = [
  "thiserror 2.0.18",
  "tokenizers 0.22.2",
  "yoke 0.8.2",
- "zip 7.2.0",
+ "zip 8.6.0",
 ]
 
 [[package]]
 name = "candle-gen"
 version = "0.0.0"
-source = "git+https://github.com/michaeltrefry/candle-gen?rev=f5abb03325658ee17c9981f205805686469a7758#f5abb03325658ee17c9981f205805686469a7758"
+source = "git+https://github.com/michaeltrefry/candle-gen?rev=5ba7d8b6b2ec575b430d93cfaed07106506bfeba#5ba7d8b6b2ec575b430d93cfaed07106506bfeba"
 dependencies = [
  "candle-core",
  "candle-nn",
@@ -445,9 +445,51 @@ dependencies = [
 ]
 
 [[package]]
+name = "candle-gen-flux"
+version = "0.0.0"
+source = "git+https://github.com/michaeltrefry/candle-gen?rev=5ba7d8b6b2ec575b430d93cfaed07106506bfeba#5ba7d8b6b2ec575b430d93cfaed07106506bfeba"
+dependencies = [
+ "candle-gen",
+ "candle-transformers",
+ "inventory",
+ "rand 0.9.4",
+ "rand_distr 0.5.1",
+ "serde_json",
+ "tokenizers 0.22.2",
+]
+
+[[package]]
+name = "candle-gen-flux2"
+version = "0.0.0"
+source = "git+https://github.com/michaeltrefry/candle-gen?rev=5ba7d8b6b2ec575b430d93cfaed07106506bfeba#5ba7d8b6b2ec575b430d93cfaed07106506bfeba"
+dependencies = [
+ "candle-gen",
+ "candle-transformers",
+ "inventory",
+ "rand 0.9.4",
+ "rand_distr 0.5.1",
+ "serde_json",
+ "tokenizers 0.22.2",
+]
+
+[[package]]
+name = "candle-gen-qwen-image"
+version = "0.0.0"
+source = "git+https://github.com/michaeltrefry/candle-gen?rev=5ba7d8b6b2ec575b430d93cfaed07106506bfeba#5ba7d8b6b2ec575b430d93cfaed07106506bfeba"
+dependencies = [
+ "candle-gen",
+ "candle-transformers",
+ "inventory",
+ "rand 0.9.4",
+ "rand_distr 0.5.1",
+ "serde_json",
+ "tokenizers 0.22.2",
+]
+
+[[package]]
 name = "candle-gen-sdxl"
 version = "0.0.0"
-source = "git+https://github.com/michaeltrefry/candle-gen?rev=f5abb03325658ee17c9981f205805686469a7758#f5abb03325658ee17c9981f205805686469a7758"
+source = "git+https://github.com/michaeltrefry/candle-gen?rev=5ba7d8b6b2ec575b430d93cfaed07106506bfeba#5ba7d8b6b2ec575b430d93cfaed07106506bfeba"
 dependencies = [
  "candle-gen",
  "candle-transformers",
@@ -459,10 +501,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "candle-gen-z-image"
+version = "0.0.0"
+source = "git+https://github.com/michaeltrefry/candle-gen?rev=5ba7d8b6b2ec575b430d93cfaed07106506bfeba#5ba7d8b6b2ec575b430d93cfaed07106506bfeba"
+dependencies = [
+ "candle-gen",
+ "candle-transformers",
+ "inventory",
+ "rand 0.9.4",
+ "rand_distr 0.5.1",
+ "tokenizers 0.22.2",
+]
+
+[[package]]
 name = "candle-kernels"
 version = "0.10.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "742e2ac226b777134436e9e692f44e77c278b8a7abb1554dc10e44dc911b349f"
+source = "git+https://github.com/huggingface/candle?rev=65ecb58c11d2244a7e60c71bdcdb19b15b0a4343#65ecb58c11d2244a7e60c71bdcdb19b15b0a4343"
 dependencies = [
  "cudaforge",
 ]
@@ -470,8 +524,7 @@ dependencies = [
 [[package]]
 name = "candle-nn"
 version = "0.10.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a9317a09d6530b758990ed7f625ac69ff43653bc9ee28b0464644ad1169ada87"
+source = "git+https://github.com/huggingface/candle?rev=65ecb58c11d2244a7e60c71bdcdb19b15b0a4343#65ecb58c11d2244a7e60c71bdcdb19b15b0a4343"
 dependencies = [
  "candle-core",
  "half",
@@ -486,8 +539,7 @@ dependencies = [
 [[package]]
 name = "candle-transformers"
 version = "0.10.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f59d08c89e9f4af9c464e2f3a8e16199e7cc601e6f34538c2cfbb42b623b1783"
+source = "git+https://github.com/huggingface/candle?rev=65ecb58c11d2244a7e60c71bdcdb19b15b0a4343#65ecb58c11d2244a7e60c71bdcdb19b15b0a4343"
 dependencies = [
  "byteorder",
  "candle-core",
@@ -505,8 +557,7 @@ dependencies = [
 [[package]]
 name = "candle-ug"
 version = "0.10.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ca0fc3167cbc99c8ec1be618cb620aa21dca95038f118c3579a79370e3dc5f77"
+source = "git+https://github.com/huggingface/candle?rev=65ecb58c11d2244a7e60c71bdcdb19b15b0a4343#65ecb58c11d2244a7e60c71bdcdb19b15b0a4343"
 dependencies = [
  "ug",
  "ug-cuda",
@@ -1392,9 +1443,9 @@ checksum = "7360491ce676a36bf9bb3c56c1aa791658183a54d2744120f27285738d90465a"
 
 [[package]]
 name = "fancy-regex"
-version = "0.17.0"
+version = "0.18.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "72cf461f865c862bb7dc573f643dd6a2b6842f7c30b07882b56bd148cc2761b8"
+checksum = "e1e1dacd0d2082dfcf1351c4bdd566bbe89a2b263235a2b50058f1e130a47277"
 dependencies = [
  "bit-set",
  "regex-automata",
@@ -4921,7 +4972,11 @@ name = "sceneworks-worker"
 version = "0.2.0"
 dependencies = [
  "axum",
+ "candle-gen-flux",
+ "candle-gen-flux2",
+ "candle-gen-qwen-image",
  "candle-gen-sdxl",
+ "candle-gen-z-image",
  "futures-util",
  "glob",
  "image",
@@ -7907,18 +7962,6 @@ dependencies = [
  "memchr",
  "thiserror 2.0.18",
  "zopfli",
-]
-
-[[package]]
-name = "zip"
-version = "7.2.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c42e33efc22a0650c311c2ef19115ce232583abbe80850bc8b66509ebef02de0"
-dependencies = [
- "crc32fast",
- "indexmap 2.14.0",
- "memchr",
- "typed-path",
 ]
 
 [[package]]
