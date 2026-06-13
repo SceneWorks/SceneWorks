@@ -126,8 +126,9 @@ zip = { version = "2", default-features = false, features = ["deflate"] }
 # (none of #416–#426 touch the mlx-rs/engine ABI), so the direct `mlx-rs` pin below is unchanged and
 # MLX rebuilds only the new `mlx-gen-seedvr2` crate. gen-core is byte-identical to `e9c569c` EXCEPT the
 # additive `softness` field, so the default `check-gen-core-skew.sh` gate stays green (one rev); the
-# Windows `backend-candle` lane needs a matching candle-gen gen-core re-pin to this rev (sc-5228, the
-# sc-5176/sc-5035 pattern). On top of:
+# Windows `backend-candle` lane's matching candle-gen gen-core re-pin to this rev landed in sc-5228
+# (candle-gen PR #33 — see the candle-gen dep block below), so that lane also resolves a single rev.
+# On top of:
 # Rev e9c569c (mlx-gen main, merged PR #415, epic 3164 / sc-5148): adds the native-MLX Lens
 # LoRA/LoKr TRAINING kernel (`mlx-gen-lens/src/training.rs`, `LensTrainer` registered under `lens`),
 # unblocking the worker `lens_lora` training cutover (sc-5180 — the training sibling of sc-5105's
@@ -401,26 +402,34 @@ mlx-gen-seedvr2 = { git = "https://github.com/michaeltrefry/mlx-gen", rev = "1a9
 # this worker's MLX pin (bumped by sc-5180 / mlx-gen-lens). That re-pin is the key: without it the
 # `--features backend-candle` graph resolved TWO gen-core revs (worker mlx-gen `e9c569c2` vs candle-gen
 # `95cd5c6`) -> the inventory skew trap. With `8a3974a` the candle lane resolves EXACTLY ONE
-# `sceneworks-gen-core` (`e9c569c2`, == the mlx-gen pin) again. ALL candle deps below MUST share this rev.
+# `sceneworks-gen-core` (`e9c569c2`, == the mlx-gen pin) again.
+#
+# sc-5228 bumps `8a3974a` -> `c032f16` (candle-gen main, PR #33): re-pins candle-gen's
+# `sceneworks-gen-core` `e9c569c2` -> `1a97909` to MATCH this worker's MLX pin after sc-4816 (#647)
+# bumped it `e9c569c2` -> `1a97909` (mlx-gen #422, the SeedVR2 `softness` field). Same skew-trap reason:
+# without it the `--features backend-candle` graph resolved worker `1a97909` vs candle-gen `e9c569c2`;
+# with `c032f16` the candle lane resolves EXACTLY ONE `sceneworks-gen-core` (`1a97909`, == the mlx-gen
+# pin) again, and this also LINKS candle-gen's Wan2.2 14B T2V/I2V providers (sc-5174, candle-gen #23)
+# that the sc-5175 worker wiring routes to. ALL candle deps below MUST share this rev.
 [target.'cfg(target_os = "windows")'.dependencies]
-candle-gen-sdxl = { git = "https://github.com/michaeltrefry/candle-gen", rev = "8a3974acebd6d6d394b8bfeb91c0bdb01093c27a", features = ["cuda"], optional = true }
+candle-gen-sdxl = { git = "https://github.com/michaeltrefry/candle-gen", rev = "c032f16acdee5559664e41a8e65ffa238645a57a", features = ["cuda"], optional = true }
 # Candle image providers (sc-5096) -- Windows/CUDA siblings of the mlx-gen image crates above. Each
 # self-registers its engine id into the shared gen_core inventory registry; force-linked in
 # `image_jobs.rs` (`use candle_gen_<x> as _;`) so the MSVC release linker keeps the registration.
 # Same git rev as `candle-gen-sdxl` so candle builds once and the gen-core pin stays single.
-candle-gen-z-image = { git = "https://github.com/michaeltrefry/candle-gen", rev = "8a3974acebd6d6d394b8bfeb91c0bdb01093c27a", features = ["cuda"], optional = true }
-candle-gen-flux = { git = "https://github.com/michaeltrefry/candle-gen", rev = "8a3974acebd6d6d394b8bfeb91c0bdb01093c27a", features = ["cuda"], optional = true }
-candle-gen-flux2 = { git = "https://github.com/michaeltrefry/candle-gen", rev = "8a3974acebd6d6d394b8bfeb91c0bdb01093c27a", features = ["cuda"], optional = true }
-candle-gen-qwen-image = { git = "https://github.com/michaeltrefry/candle-gen", rev = "8a3974acebd6d6d394b8bfeb91c0bdb01093c27a", features = ["cuda"], optional = true }
+candle-gen-z-image = { git = "https://github.com/michaeltrefry/candle-gen", rev = "c032f16acdee5559664e41a8e65ffa238645a57a", features = ["cuda"], optional = true }
+candle-gen-flux = { git = "https://github.com/michaeltrefry/candle-gen", rev = "c032f16acdee5559664e41a8e65ffa238645a57a", features = ["cuda"], optional = true }
+candle-gen-flux2 = { git = "https://github.com/michaeltrefry/candle-gen", rev = "c032f16acdee5559664e41a8e65ffa238645a57a", features = ["cuda"], optional = true }
+candle-gen-qwen-image = { git = "https://github.com/michaeltrefry/candle-gen", rev = "c032f16acdee5559664e41a8e65ffa238645a57a", features = ["cuda"], optional = true }
 # Candle VIDEO providers (sc-5097) — Windows/CUDA siblings of mlx-gen-wan / mlx-gen-ltx. wan registers
 # `wan2_2_ti2v_5b`; ltx registers `ltx_2_3_distilled` (txt2video first slice — no conditioning/audio/
 # LoRA/quant). Force-linked in video_jobs.rs (`use candle_gen_<x> as _;`). Same rev as the others.
-candle-gen-wan = { git = "https://github.com/michaeltrefry/candle-gen", rev = "8a3974acebd6d6d394b8bfeb91c0bdb01093c27a", features = ["cuda"], optional = true }
-candle-gen-ltx = { git = "https://github.com/michaeltrefry/candle-gen", rev = "8a3974acebd6d6d394b8bfeb91c0bdb01093c27a", features = ["cuda"], optional = true }
+candle-gen-wan = { git = "https://github.com/michaeltrefry/candle-gen", rev = "c032f16acdee5559664e41a8e65ffa238645a57a", features = ["cuda"], optional = true }
+candle-gen-ltx = { git = "https://github.com/michaeltrefry/candle-gen", rev = "c032f16acdee5559664e41a8e65ffa238645a57a", features = ["cuda"], optional = true }
 # Candle JoyCaption captioner (sc-5098) — Windows/CUDA sibling of mlx-gen-joycaption. Registers the
 # captioner id `fancyfeast/llama-joycaption-beta-one-hf-llava` (image->text). Force-linked in
 # caption_jobs.rs (`use candle_gen_joycaption as _;`). Same rev as the others.
-candle-gen-joycaption = { git = "https://github.com/michaeltrefry/candle-gen", rev = "8a3974acebd6d6d394b8bfeb91c0bdb01093c27a", features = ["cuda"], optional = true }
+candle-gen-joycaption = { git = "https://github.com/michaeltrefry/candle-gen", rev = "c032f16acdee5559664e41a8e65ffa238645a57a", features = ["cuda"], optional = true }
 
 [lints]
 workspace = true
