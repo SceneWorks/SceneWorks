@@ -436,18 +436,22 @@ dependencies = [
 [[package]]
 name = "candle-gen"
 version = "0.0.0"
-source = "git+https://github.com/michaeltrefry/candle-gen?rev=8a3974acebd6d6d394b8bfeb91c0bdb01093c27a#8a3974acebd6d6d394b8bfeb91c0bdb01093c27a"
+source = "git+https://github.com/michaeltrefry/candle-gen?rev=c032f16acdee5559664e41a8e65ffa238645a57a#c032f16acdee5559664e41a8e65ffa238645a57a"
 dependencies = [
  "candle-core",
  "candle-nn",
- "sceneworks-gen-core 0.1.0 (git+https://github.com/michaeltrefry/mlx-gen?rev=e9c569c211b77fb9061aa3968dfd03bd02804109)",
+ "image",
+ "rand 0.9.4",
+ "rand_distr 0.5.1",
+ "safetensors 0.7.0",
+ "sceneworks-gen-core",
  "thiserror 2.0.18",
 ]
 
 [[package]]
 name = "candle-gen-flux"
 version = "0.0.0"
-source = "git+https://github.com/michaeltrefry/candle-gen?rev=8a3974acebd6d6d394b8bfeb91c0bdb01093c27a#8a3974acebd6d6d394b8bfeb91c0bdb01093c27a"
+source = "git+https://github.com/michaeltrefry/candle-gen?rev=c032f16acdee5559664e41a8e65ffa238645a57a#c032f16acdee5559664e41a8e65ffa238645a57a"
 dependencies = [
  "candle-gen",
  "candle-transformers",
@@ -461,7 +465,7 @@ dependencies = [
 [[package]]
 name = "candle-gen-flux2"
 version = "0.0.0"
-source = "git+https://github.com/michaeltrefry/candle-gen?rev=8a3974acebd6d6d394b8bfeb91c0bdb01093c27a#8a3974acebd6d6d394b8bfeb91c0bdb01093c27a"
+source = "git+https://github.com/michaeltrefry/candle-gen?rev=c032f16acdee5559664e41a8e65ffa238645a57a#c032f16acdee5559664e41a8e65ffa238645a57a"
 dependencies = [
  "candle-gen",
  "candle-transformers",
@@ -475,7 +479,7 @@ dependencies = [
 [[package]]
 name = "candle-gen-joycaption"
 version = "0.0.0"
-source = "git+https://github.com/michaeltrefry/candle-gen?rev=8a3974acebd6d6d394b8bfeb91c0bdb01093c27a#8a3974acebd6d6d394b8bfeb91c0bdb01093c27a"
+source = "git+https://github.com/michaeltrefry/candle-gen?rev=c032f16acdee5559664e41a8e65ffa238645a57a#c032f16acdee5559664e41a8e65ffa238645a57a"
 dependencies = [
  "candle-gen",
  "inventory",
@@ -486,7 +490,7 @@ dependencies = [
 [[package]]
 name = "candle-gen-ltx"
 version = "0.0.0"
-source = "git+https://github.com/michaeltrefry/candle-gen?rev=8a3974acebd6d6d394b8bfeb91c0bdb01093c27a#8a3974acebd6d6d394b8bfeb91c0bdb01093c27a"
+source = "git+https://github.com/michaeltrefry/candle-gen?rev=c032f16acdee5559664e41a8e65ffa238645a57a#c032f16acdee5559664e41a8e65ffa238645a57a"
 dependencies = [
  "candle-gen",
  "inventory",
@@ -498,7 +502,7 @@ dependencies = [
 [[package]]
 name = "candle-gen-qwen-image"
 version = "0.0.0"
-source = "git+https://github.com/michaeltrefry/candle-gen?rev=8a3974acebd6d6d394b8bfeb91c0bdb01093c27a#8a3974acebd6d6d394b8bfeb91c0bdb01093c27a"
+source = "git+https://github.com/michaeltrefry/candle-gen?rev=c032f16acdee5559664e41a8e65ffa238645a57a#c032f16acdee5559664e41a8e65ffa238645a57a"
 dependencies = [
  "candle-gen",
  "candle-transformers",
@@ -512,21 +516,25 @@ dependencies = [
 [[package]]
 name = "candle-gen-sdxl"
 version = "0.0.0"
-source = "git+https://github.com/michaeltrefry/candle-gen?rev=8a3974acebd6d6d394b8bfeb91c0bdb01093c27a#8a3974acebd6d6d394b8bfeb91c0bdb01093c27a"
+source = "git+https://github.com/michaeltrefry/candle-gen?rev=c032f16acdee5559664e41a8e65ffa238645a57a#c032f16acdee5559664e41a8e65ffa238645a57a"
 dependencies = [
+ "candle-core",
  "candle-gen",
+ "candle-nn",
  "candle-transformers",
  "hf-hub",
  "inventory",
  "rand 0.9.4",
  "rand_distr 0.5.1",
+ "safetensors 0.7.0",
  "tokenizers 0.22.2",
+ "tracing",
 ]
 
 [[package]]
 name = "candle-gen-wan"
 version = "0.0.0"
-source = "git+https://github.com/michaeltrefry/candle-gen?rev=8a3974acebd6d6d394b8bfeb91c0bdb01093c27a#8a3974acebd6d6d394b8bfeb91c0bdb01093c27a"
+source = "git+https://github.com/michaeltrefry/candle-gen?rev=c032f16acdee5559664e41a8e65ffa238645a57a#c032f16acdee5559664e41a8e65ffa238645a57a"
 dependencies = [
  "candle-gen",
  "inventory",
@@ -538,13 +546,16 @@ dependencies = [
 [[package]]
 name = "candle-gen-z-image"
 version = "0.0.0"
-source = "git+https://github.com/michaeltrefry/candle-gen?rev=8a3974acebd6d6d394b8bfeb91c0bdb01093c27a#8a3974acebd6d6d394b8bfeb91c0bdb01093c27a"
+source = "git+https://github.com/michaeltrefry/candle-gen?rev=c032f16acdee5559664e41a8e65ffa238645a57a#c032f16acdee5559664e41a8e65ffa238645a57a"
 dependencies = [
+ "candle-core",
  "candle-gen",
+ "candle-nn",
  "candle-transformers",
  "inventory",
  "rand 0.9.4",
  "rand_distr 0.5.1",
+ "safetensors 0.7.0",
  "tokenizers 0.22.2",
 ]
 
@@ -3146,7 +3157,7 @@ source = "git+https://github.com/michaeltrefry/mlx-gen?rev=1a97909902c73ff8cc02e
 dependencies = [
  "inventory",
  "pmetal-mlx-rs",
- "sceneworks-gen-core 0.1.0 (git+https://github.com/michaeltrefry/mlx-gen?rev=1a97909902c73ff8cc02e94c689bd1e86d9e8280)",
+ "sceneworks-gen-core",
  "thiserror 2.0.18",
  "tokenizers 0.21.4",
 ]
@@ -4993,17 +5004,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "sceneworks-gen-core"
-version = "0.1.0"
-source = "git+https://github.com/michaeltrefry/mlx-gen?rev=e9c569c211b77fb9061aa3968dfd03bd02804109#e9c569c211b77fb9061aa3968dfd03bd02804109"
-dependencies = [
- "inventory",
- "safetensors 0.4.5",
- "thiserror 2.0.18",
- "tokenizers 0.21.4",
-]
-
-[[package]]
 name = "sceneworks-rust-api"
 version = "0.2.0"
 dependencies = [
@@ -5080,7 +5080,7 @@ dependencies = [
  "pmetal-mlx-rs",
  "reqwest 0.12.28",
  "sceneworks-core",
- "sceneworks-gen-core 0.1.0 (git+https://github.com/michaeltrefry/mlx-gen?rev=1a97909902c73ff8cc02e94c689bd1e86d9e8280)",
+ "sceneworks-gen-core",
  "serde",
  "serde_json",
  "sha2",
