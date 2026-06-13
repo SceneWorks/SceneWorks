@@ -4390,6 +4390,18 @@ mod tests {
             Some("on") | Some("") | None => None,
             Some(other) => other.parse().ok(),
         };
+        // Optional MLX memory-limit override (GB): lowers `get_memory_limit()` so the z48 vae22
+        // decode tile planner (`auto_tiling_budgeted`) picks SMALLER tiles — to test whether a
+        // smaller decode working-set is faster than the default "largest tile under budget" (sc-5089).
+        let mem_limit_gb = env_u32("WAN_TIMING_MEM_LIMIT_GB", 0);
+        if mem_limit_gb > 0 {
+            let prev = mlx_rs::memory::set_memory_limit((mem_limit_gb as usize) * 1024 * 1024 * 1024);
+            eprintln!(
+                "WAN5B_TIMING mem_limit set to {mem_limit_gb} GB (was {:.0} GB)",
+                prev as f64 / (1024.0 * 1024.0 * 1024.0)
+            );
+        }
+        mlx_rs::memory::reset_peak_memory();
         let input = VideoGenInput {
             engine_id: "wan2_2_ti2v_5b",
             model_dir,
@@ -4408,6 +4420,7 @@ mod tests {
         let mut first_step: Option<Instant> = None;
         let mut last_step: Option<Instant> = None;
         let mut decode_at: Option<Instant> = None;
+        let mut dit_peak_bytes: Option<usize> = None;
         let mut on_progress = |progress: Progress| match progress {
             Progress::Step { .. } => {
                 let now = Instant::now();
@@ -4416,22 +4429,29 @@ mod tests {
             }
             Progress::Decoding => {
                 decode_at.get_or_insert(Instant::now());
+                // Peak so far = the DiT-denoise peak (the VAE decode is the *next* stage).
+                dit_peak_bytes.get_or_insert(mlx_rs::memory::get_peak_memory());
             }
         };
         let decoded =
             run_video_generation(input, &cancel, &mut on_progress).expect("5B generation");
         let end = Instant::now();
+        let total_peak_bytes = mlx_rs::memory::get_peak_memory();
+        let gib = |b: usize| b as f64 / (1024.0 * 1024.0 * 1024.0);
         let secs = |a: Instant, b: Instant| b.duration_since(a).as_secs_f64();
         let fs = first_step.unwrap_or(start);
         let dec = decode_at.or(last_step).unwrap_or(end);
         eprintln!(
             "WAN5B_TIMING {width}x{height} frames={frames} steps={steps} cfg={} => \
-             total={:.1}s load={:.1}s dit={:.1}s vae={:.1}s out_frames={}",
+             total={:.1}s load={:.1}s dit={:.1}s vae={:.1}s | peak_dit={:.0}GB peak_total={:.0}GB \
+             out_frames={}",
             guidance.map_or_else(|| "5.0(default)".to_owned(), |g| format!("{g}")),
             secs(start, end),
             secs(start, fs),
             secs(fs, dec),
             secs(dec, end),
+            gib(dit_peak_bytes.unwrap_or(0)),
+            gib(total_peak_bytes),
             decoded.frames.len(),
         );
     }
