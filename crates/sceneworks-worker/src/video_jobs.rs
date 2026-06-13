@@ -4395,7 +4395,8 @@ mod tests {
         // smaller decode working-set is faster than the default "largest tile under budget" (sc-5089).
         let mem_limit_gb = env_u32("WAN_TIMING_MEM_LIMIT_GB", 0);
         if mem_limit_gb > 0 {
-            let prev = mlx_rs::memory::set_memory_limit((mem_limit_gb as usize) * 1024 * 1024 * 1024);
+            let prev =
+                mlx_rs::memory::set_memory_limit((mem_limit_gb as usize) * 1024 * 1024 * 1024);
             eprintln!(
                 "WAN5B_TIMING mem_limit set to {mem_limit_gb} GB (was {:.0} GB)",
                 prev as f64 / (1024.0 * 1024.0 * 1024.0)
