@@ -1,29 +1,49 @@
-//! Native MLX dataset captioning (epic 3550, sc-3556).
+//! Native dataset captioning (epic 3550, sc-3556 MLX; epic 5095 sc-5098 candle).
 //!
 //! SceneWorks keeps the existing `training_caption` job contract and result shape,
-//! but the macOS `mlx` worker can now serve `captioner=joy_caption` in-process via
-//! mlx-gen's JoyCaption provider. The Python torch captioner remains the
-//! Windows/Linux path and the explicit non-MLX fallback.
+//! but the in-process Rust worker can serve `captioner=joy_caption` through the
+//! backend-neutral `gen_core::load_captioner` seam: the macOS `mlx` worker via mlx-gen's
+//! JoyCaption provider, and the Windows/CUDA candle worker via candle-gen-joycaption
+//! (`--features backend-candle`). `cfg(target_os)` only decides which provider crate registers the
+//! captioner; the job flow below is identical. The Python torch captioner remains the explicit
+//! non-MLX/non-candle fallback (and the default Windows/Linux path).
 
 use super::*;
 
-#[cfg(target_os = "macos")]
+#[cfg(any(
+    target_os = "macos",
+    all(target_os = "windows", feature = "backend-candle")
+))]
 const JOY_CAPTION_MODEL: &str = "fancyfeast/llama-joycaption-beta-one-hf-llava";
-#[cfg(target_os = "macos")]
+#[cfg(any(
+    target_os = "macos",
+    all(target_os = "windows", feature = "backend-candle")
+))]
 const CANCEL_MESSAGE: &str = "Training captioning canceled by user.";
 
 // epic 3720 (sc-3724): the backend-neutral captioner contract types come from `gen_core`; the
 // `as _;` provider link below stays mlx-gen-specific (it registers the JoyCaption captioner into
 // the registry).
-#[cfg(target_os = "macos")]
+#[cfg(any(
+    target_os = "macos",
+    all(target_os = "windows", feature = "backend-candle")
+))]
 use gen_core::{
     CancelFlag, CaptionOptions, CaptionRequest, CaptionSampling, Image, LoadSpec, Progress,
     WeightsSource,
 };
 #[cfg(target_os = "macos")]
 use mlx_gen_joycaption as _;
+// Candle JoyCaption captioner force-link anchor (sc-5098): keeps its `inventory::submit!` captioner
+// registration (`fancyfeast/llama-joycaption-beta-one-hf-llava`, backend `candle`) from being dropped
+// by the MSVC release linker. Mirrors the mlx anchor above.
+#[cfg(all(target_os = "windows", feature = "backend-candle"))]
+use candle_gen_joycaption as _;
 
-#[cfg(target_os = "macos")]
+#[cfg(any(
+    target_os = "macos",
+    all(target_os = "windows", feature = "backend-candle")
+))]
 #[derive(Clone, Debug)]
 struct CaptionItem {
     item_id: String,
@@ -31,14 +51,20 @@ struct CaptionItem {
     trigger_words: Vec<String>,
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(
+    target_os = "macos",
+    all(target_os = "windows", feature = "backend-candle")
+))]
 #[derive(Clone, Debug)]
 struct CaptionJobOptions {
     options: CaptionOptions,
     sampling: CaptionSampling,
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(
+    target_os = "macos",
+    all(target_os = "windows", feature = "backend-candle")
+))]
 #[derive(Debug)]
 enum CaptionEvent {
     Step {
@@ -54,7 +80,10 @@ enum CaptionEvent {
     },
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(
+    target_os = "macos",
+    all(target_os = "windows", feature = "backend-candle")
+))]
 pub(crate) async fn run_training_caption_job(
     api: &ApiClient,
     settings: &Settings,
@@ -175,11 +204,10 @@ pub(crate) async fn run_training_caption_job(
                 .map_err(|error| {
                     WorkerError::Engine(format!("JoyCaption MLX generation failed: {error}"))
                 })?;
-            // epic 3720: JoyCaption trigger-word string helper stays mlx-gen-local until lifted to gen_core::caption.
-            let text = mlx_gen::caption::joycaption::apply_trigger_words(
-                &output.text,
-                &item.trigger_words,
-            );
+            // Prepend any missing trigger words to the caption. Backend-neutral worker-local helper
+            // (sc-5098) — the same logic mlx-gen + candle-gen each ship locally — so the shared path
+            // names no backend-specific symbol.
+            let text = apply_trigger_words(&output.text, &item.trigger_words);
             tx.blocking_send(CaptionEvent::Captioned {
                 index,
                 item_id: item.item_id,
@@ -300,19 +328,26 @@ pub(crate) async fn run_training_caption_job(
     Ok(())
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(not(any(
+    target_os = "macos",
+    all(target_os = "windows", feature = "backend-candle")
+)))]
 pub(crate) async fn run_training_caption_job(
     _api: &ApiClient,
     _settings: &Settings,
     _job: &JobSnapshot,
 ) -> WorkerResult<()> {
     Err(WorkerError::InvalidPayload(
-        "The Rust JoyCaption worker is macOS/MLX-only; use the Python torch captioner on this platform."
+        "The in-process JoyCaption worker needs the macOS MLX backend or the Windows candle backend; \
+         use the Python torch captioner on this platform."
             .to_owned(),
     ))
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(
+    target_os = "macos",
+    all(target_os = "windows", feature = "backend-candle")
+))]
 fn caption_progress(
     status: JobStatus,
     stage: ProgressStage,
@@ -338,7 +373,10 @@ fn caption_progress(
     }
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(
+    target_os = "macos",
+    all(target_os = "windows", feature = "backend-candle")
+))]
 fn caption_result(
     model_name_or_path: &str,
     dataset_id: &str,
@@ -368,7 +406,10 @@ fn caption_result(
     result
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(
+    target_os = "macos",
+    all(target_os = "windows", feature = "backend-candle")
+))]
 fn caption_items(settings: &Settings, payload: &JsonObject) -> WorkerResult<Vec<CaptionItem>> {
     let dataset_root = payload
         .get("datasetRoot")
@@ -439,7 +480,10 @@ fn caption_items(settings: &Settings, payload: &JsonObject) -> WorkerResult<Vec<
         .collect()
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(
+    target_os = "macos",
+    all(target_os = "windows", feature = "backend-candle")
+))]
 fn caption_job_options(payload: &JsonObject) -> CaptionJobOptions {
     let options = payload
         .get("options")
@@ -483,7 +527,10 @@ fn caption_job_options(payload: &JsonObject) -> CaptionJobOptions {
     }
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(
+    target_os = "macos",
+    all(target_os = "windows", feature = "backend-candle")
+))]
 fn option_string(options: &JsonObject, key: &str, default: &str) -> String {
     options
         .get(key)
@@ -492,7 +539,10 @@ fn option_string(options: &JsonObject, key: &str, default: &str) -> String {
         .to_owned()
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(
+    target_os = "macos",
+    all(target_os = "windows", feature = "backend-candle")
+))]
 fn resolve_caption_weights_dir(
     settings: &Settings,
     model_name_or_path: &str,
@@ -500,7 +550,10 @@ fn resolve_caption_weights_dir(
     resolve_app_managed_model_dir(settings, model_name_or_path, "JoyCaption model path")
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(
+    target_os = "macos",
+    all(target_os = "windows", feature = "backend-candle")
+))]
 fn load_caption_image(path: &Path) -> WorkerResult<Image> {
     let decoded = image::open(path)
         .map_err(|error| {
@@ -514,7 +567,10 @@ fn load_caption_image(path: &Path) -> WorkerResult<Image> {
     })
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(
+    target_os = "macos",
+    all(target_os = "windows", feature = "backend-candle")
+))]
 fn caption_step_progress(index: usize, current: u32, total: u32, item_count: usize) -> f64 {
     let item_count = item_count.max(1) as f64;
     let within = if total > 0 {
@@ -525,7 +581,39 @@ fn caption_step_progress(index: usize, current: u32, total: u32, item_count: usi
     (0.12 + 0.76 * ((index as f64 + within) / item_count)).min(0.9)
 }
 
-#[cfg(all(test, target_os = "macos"))]
+/// Prepend the trigger words that are not already present (case-insensitive substring) to the
+/// captioner's text, comma-joined, with the cleaned caption last. Backend-neutral copy of the
+/// identical helper both `mlx-gen` and `candle-gen` ship locally (the comment in the engines noted it
+/// should be lifted out of the provider) — keeping it here means the shared caption path names no
+/// backend-specific symbol (sc-5098). Matches the engine behavior 1:1, including the empty-caption
+/// case (just the missing trigger words).
+#[cfg(any(
+    target_os = "macos",
+    all(target_os = "windows", feature = "backend-candle")
+))]
+fn apply_trigger_words(caption: &str, trigger_words: &[String]) -> String {
+    let cleaned = caption.split_whitespace().collect::<Vec<_>>().join(" ");
+    let lower_caption = cleaned.to_lowercase();
+    let mut parts: Vec<String> = trigger_words
+        .iter()
+        .map(|word| word.trim())
+        .filter(|word| !word.is_empty())
+        .filter(|word| !lower_caption.contains(&word.to_lowercase()))
+        .map(ToOwned::to_owned)
+        .collect();
+    if !cleaned.is_empty() {
+        parts.push(cleaned);
+    }
+    parts.join(", ")
+}
+
+#[cfg(all(
+    test,
+    any(
+        target_os = "macos",
+        all(target_os = "windows", feature = "backend-candle")
+    )
+))]
 mod tests {
     use super::*;
 
@@ -578,6 +666,20 @@ mod tests {
         assert_eq!(options.sampling.temperature, 0.5);
         assert_eq!(options.sampling.top_p, 0.8);
         assert_eq!(options.sampling.max_new_tokens, 128);
+    }
+
+    #[test]
+    fn apply_trigger_words_prepends_only_missing() {
+        let triggers = vec!["mika_token".to_owned(), "hat".to_owned()];
+        // "hat" already appears in the caption → dropped; "mika_token" prepended.
+        assert_eq!(
+            apply_trigger_words("A portrait of Mika wearing a hat.", &triggers),
+            "mika_token, A portrait of Mika wearing a hat."
+        );
+        // Empty/whitespace caption → just the (whitespace-normalized) trigger words.
+        assert_eq!(apply_trigger_words("   ", &triggers), "mika_token, hat");
+        // No triggers → the cleaned caption unchanged.
+        assert_eq!(apply_trigger_words("  a  cat ", &[]), "a cat");
     }
 
     #[test]

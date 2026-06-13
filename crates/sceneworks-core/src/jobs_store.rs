@@ -3728,6 +3728,12 @@ fn worker_supports_job(worker: &WorkerSnapshot, job: &JobSnapshot) -> bool {
         {
             return false;
         }
+        // Dataset captioning (sc-5098): the candle worker serves only JoyCaption (the candle
+        // captioner provider). A non-`joy_caption` caption job stays on the Python torch worker.
+        // Eligibility is backend-neutral (captioner == joy_caption), so reuse the mlx gate.
+        if matches!(job.job_type, JobType::TrainingCaption) && !caption_job_is_mlx_eligible(job) {
+            return false;
+        }
     }
     let advertises = |capability: &str| {
         worker
@@ -4314,6 +4320,48 @@ mod candle_routing_tests {
             &video_generate_job(
                 json!({ "model": "wan_2_2", "mode": "image_to_video", "sourceAssetId": "a" })
             )
+        ));
+    }
+
+    // ---- Candle caption lane (sc-5098) ----
+
+    /// A queued `training_caption` job carrying `payload`.
+    fn caption_job(payload: Value) -> JobSnapshot {
+        serde_json::from_value(json!({
+            "id": "job_c",
+            "type": "training_caption",
+            "status": "queued",
+            "payload": payload,
+            "result": {},
+            "requestedGpu": "auto",
+            "progress": 0,
+            "stage": "queued",
+            "message": "",
+            "attempts": 1,
+            "cancelRequested": false,
+            "createdAt": "2026-06-13T00:00:00Z",
+            "updatedAt": "2026-06-13T00:00:00Z",
+        }))
+        .expect("valid JobSnapshot")
+    }
+
+    #[test]
+    fn candle_worker_claims_joycaption_but_refuses_other_captioners() {
+        let candle = gpu_worker(&["gpu", "training_caption", "candle"]);
+        // Claims a JoyCaption job.
+        assert!(worker_supports_job(
+            &candle,
+            &caption_job(json!({ "captioner": "joy_caption", "datasetId": "ds_1" }))
+        ));
+        // Refuses a non-JoyCaption captioner → falls back to the Python torch worker.
+        assert!(!worker_supports_job(
+            &candle,
+            &caption_job(json!({ "captioner": "blip2", "datasetId": "ds_1" }))
+        ));
+        let torch = gpu_worker(&["gpu", "training_caption"]);
+        assert!(worker_supports_job(
+            &torch,
+            &caption_job(json!({ "captioner": "blip2", "datasetId": "ds_1" }))
         ));
     }
 }
