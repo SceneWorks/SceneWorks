@@ -300,13 +300,24 @@ pub(crate) const TRAINER_IDS: &[&str] = &[
 /// view the image path reads. The row supplies the worker-side defaults; the descriptor
 /// supplies the capability surface (`supports_guidance` / `supports_negative_prompt` /
 /// `backend`) so a row can never drift from the engine's own advertisement (sc-3723).
-#[cfg(target_os = "macos")]
+///
+/// Compiled on the macOS MLX path AND the Windows candle lane (sc-5096): the join is purely
+/// backend-neutral (`MODEL_TABLE` row + whichever provider crate registered the engine id), so the
+/// candle `generate_candle_stream` reuses it exactly like the MLX `generate_stream` — `cfg(target_os)`
+/// only decides which provider crate registered the descriptor, not how it is resolved.
+#[cfg(any(
+    target_os = "macos",
+    all(target_os = "windows", feature = "backend-candle")
+))]
 pub(crate) struct ResolvedModel {
     pub row: &'static ModelRow,
     pub descriptor: gen_core::ModelDescriptor,
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(
+    target_os = "macos",
+    all(target_os = "windows", feature = "backend-candle")
+))]
 impl ResolvedModel {
     pub fn engine_id(&self) -> &'static str {
         self.row.engine_id
@@ -320,6 +331,13 @@ impl ResolvedModel {
     pub fn default_guidance(&self) -> f32 {
         self.row.default_guidance
     }
+    // The MLX adapter label (`mlx_<family>`). The candle lane reports `candle_<family>` via the free
+    // `image_jobs::candle_adapter_label` instead, so this accessor is MLX-path-only — silence the
+    // dead-code lint on the candle-only build where the macOS dispatch is cfg'd out.
+    #[cfg_attr(
+        all(target_os = "windows", feature = "backend-candle"),
+        allow(dead_code)
+    )]
     pub fn adapter_label(&self) -> &'static str {
         self.row.adapter_label
     }
@@ -341,7 +359,14 @@ impl ResolvedModel {
 /// The engine-backed family for a SceneWorks model id, if any — the row joined with its
 /// linked gen_core descriptor. `None` when the id is not in [`MODEL_TABLE`] or no provider
 /// crate registered its engine id (keeps the existing fail-loud-when-not-MLX behavior).
-#[cfg(target_os = "macos")]
+///
+/// Backend-neutral despite the `mlx_` name (sc-5096): on the Windows candle lane the registry holds
+/// the candle descriptors, so this resolves the candle engine for `request.model` the same way it
+/// resolves the MLX engine on macOS — the candle `generate_candle_stream` calls it directly.
+#[cfg(any(
+    target_os = "macos",
+    all(target_os = "windows", feature = "backend-candle")
+))]
 pub(crate) fn mlx_model(sceneworks_id: &str) -> Option<ResolvedModel> {
     let row = MODEL_TABLE
         .iter()

@@ -74,7 +74,18 @@ inventory = "0.3"
 # candle Windows CI lane (sc-3676) builds with `--features backend-candle`. Linking the crate does
 # NOT enable it at runtime — that is the separate `backend_candle_enabled` setting, read by
 # `engines::registry_capabilities`. Two-level gating: build feature + runtime setting.
-backend-candle = ["dep:candle-gen-sdxl"]
+# sc-5096 (epic 5095) widens the lane beyond SDXL: the four candle image generators
+# (z-image, flux, flux2, qwen-image) are pulled in here too (each with its `cuda` feature) so the
+# Windows/CUDA worker links + force-links their `inventory::submit!` registrations. Their engine ids
+# (`z_image_turbo` / `flux1_schnell` / `flux1_dev` / `flux2_klein_9b` / `qwen_image`) already have
+# `MODEL_TABLE` rows, so `engines::registry_capabilities` advertises them with no further change.
+backend-candle = [
+    "dep:candle-gen-sdxl",
+    "dep:candle-gen-z-image",
+    "dep:candle-gen-flux",
+    "dep:candle-gen-flux2",
+    "dep:candle-gen-qwen-image",
+]
 
 [target.'cfg(target_os = "macos")'.dependencies]
 # DWPose whole-body pose detection in Rust (epic 3482, sc-3487): RTMW (yolox_m +
@@ -319,8 +330,22 @@ mlx-gen-pulid = { git = "https://github.com/michaeltrefry/mlx-gen", rev = "95cd5
 # `sceneworks-gen-core` and the gen_core inventory registry no longer splits. This rev also carries
 # `set_flash_attn` (candle-gen `5143dd9`, sc-3674), which the `image_jobs/base.rs` call depends on;
 # the prior `5d7071a` pin predated it and broke the `backend-candle` compile.
+#
+# sc-5096 (epic 5095) bumps the pin `f5abb03` -> `5ba7d8b` (candle-gen main, PR #17): adds the
+# z-image / flux / flux2 / qwen-image image providers AND the wan / ltx video + joycaption captioner
+# providers (the latter three wired by sc-5097/sc-5098). `5ba7d8b` still pins `sceneworks-gen-core`
+# at `95cd5c6` (the SAME rev this worker pins), so the skew gate (`--features backend-candle`) stays
+# green: one gen-core resolution, one inventory registry. ALL candle deps below MUST share this rev.
 [target.'cfg(target_os = "windows")'.dependencies]
-candle-gen-sdxl = { git = "https://github.com/michaeltrefry/candle-gen", rev = "f5abb03325658ee17c9981f205805686469a7758", features = ["cuda"], optional = true }
+candle-gen-sdxl = { git = "https://github.com/michaeltrefry/candle-gen", rev = "5ba7d8b6b2ec575b430d93cfaed07106506bfeba", features = ["cuda"], optional = true }
+# Candle image providers (sc-5096) -- Windows/CUDA siblings of the mlx-gen image crates above. Each
+# self-registers its engine id into the shared gen_core inventory registry; force-linked in
+# `image_jobs.rs` (`use candle_gen_<x> as _;`) so the MSVC release linker keeps the registration.
+# Same git rev as `candle-gen-sdxl` so candle builds once and the gen-core pin stays single.
+candle-gen-z-image = { git = "https://github.com/michaeltrefry/candle-gen", rev = "5ba7d8b6b2ec575b430d93cfaed07106506bfeba", features = ["cuda"], optional = true }
+candle-gen-flux = { git = "https://github.com/michaeltrefry/candle-gen", rev = "5ba7d8b6b2ec575b430d93cfaed07106506bfeba", features = ["cuda"], optional = true }
+candle-gen-flux2 = { git = "https://github.com/michaeltrefry/candle-gen", rev = "5ba7d8b6b2ec575b430d93cfaed07106506bfeba", features = ["cuda"], optional = true }
+candle-gen-qwen-image = { git = "https://github.com/michaeltrefry/candle-gen", rev = "5ba7d8b6b2ec575b430d93cfaed07106506bfeba", features = ["cuda"], optional = true }
 
 [lints]
 workspace = true

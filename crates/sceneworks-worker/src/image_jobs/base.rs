@@ -78,8 +78,11 @@ fn grouped_edit_image_count(request: &ImageRequest) -> u32 {
 }
 
 /// The HuggingFace repo for the model: the manifest entry's `repo` wins, else the
-/// family default.
-#[cfg(target_os = "macos")]
+/// family default. Shared by the MLX path and the candle lane (sc-5096).
+#[cfg(any(
+    target_os = "macos",
+    all(target_os = "windows", feature = "backend-candle")
+))]
 fn model_repo(request: &ImageRequest, model: &ResolvedModel) -> String {
     request
         .model_manifest_entry
@@ -154,7 +157,11 @@ fn resolve_quant(request: &ImageRequest) -> (Option<Quant>, Option<i64>) {
 }
 
 /// Resolve denoise steps: `advanced.steps` (clamped 1..=80) else the family default.
-#[cfg(target_os = "macos")]
+/// Shared by the MLX path and the candle lane (sc-5096).
+#[cfg(any(
+    target_os = "macos",
+    all(target_os = "windows", feature = "backend-candle")
+))]
 fn resolve_steps(request: &ImageRequest, model: &ResolvedModel) -> u32 {
     request
         .advanced
@@ -171,7 +178,13 @@ fn resolve_steps(request: &ImageRequest, model: &ResolvedModel) -> u32 {
 /// Resolve the guidance scale. Distilled variants (z-image-turbo, flux schnell) take
 /// no guidance — the engine rejects `Some(_)` on them — so this returns `None`. For a
 /// guided variant (flux dev) it is `advanced.guidanceScale` else the family default.
-#[cfg(target_os = "macos")]
+/// Shared by the MLX path and the candle lane (sc-5096); the descriptor's `supports_guidance` is the
+/// candle descriptor on the Windows lane, so a distilled candle family (z-image, flux schnell) still
+/// gets `None` and a guided one (flux dev, flux2, qwen, sdxl) gets the scale.
+#[cfg(any(
+    target_os = "macos",
+    all(target_os = "windows", feature = "backend-candle")
+))]
 fn resolve_guidance(request: &ImageRequest, model: &ResolvedModel) -> Option<f32> {
     if !model.supports_guidance() {
         return None;
@@ -195,7 +208,10 @@ fn resolve_guidance(request: &ImageRequest, model: &ResolvedModel) -> Option<f32
 /// guidance-distilled families (`z_image_turbo`, `flux_schnell`) are `false`/`false` (no CFG at
 /// all), and the `guidance`-scalar families (qwen / sdxl / flux2 …) are `true`/*. For a true-CFG
 /// family the worker forwards `advanced.guidanceScale` as `true_cfg`, not `guidance`.
-#[cfg(target_os = "macos")]
+#[cfg(any(
+    target_os = "macos",
+    all(target_os = "windows", feature = "backend-candle")
+))]
 fn uses_true_cfg(model: &ResolvedModel) -> bool {
     !model.supports_guidance() && model.supports_negative_prompt()
 }
@@ -203,7 +219,11 @@ fn uses_true_cfg(model: &ResolvedModel) -> bool {
 /// Resolve the true-CFG scale for a true-CFG family (Chroma). `None` for every other family
 /// (their CFG, if any, flows through [`resolve_guidance`]). The scale is `advanced.guidanceScale`
 /// (the same user knob) else the family default — forwarded to the engine as `GenerationRequest.true_cfg`.
-#[cfg(target_os = "macos")]
+/// Shared by the MLX path and the candle lane (sc-5096).
+#[cfg(any(
+    target_os = "macos",
+    all(target_os = "windows", feature = "backend-candle")
+))]
 fn resolve_true_cfg(request: &ImageRequest, model: &ResolvedModel) -> Option<f32> {
     if !uses_true_cfg(model) {
         return None;
@@ -224,7 +244,12 @@ fn resolve_true_cfg(request: &ImageRequest, model: &ResolvedModel) -> Option<f32
 /// The negative prompt to pass to the engine. `None` for variants without true CFG
 /// (the engine rejects `negative_prompt` on the distilled families) and for an empty
 /// prompt (the true-CFG engines fall back to their own neutral negative).
-#[cfg(target_os = "macos")]
+/// Shared by the MLX path and the candle lane (sc-5096); on the Windows lane `supports_negative_prompt`
+/// is the candle descriptor, so distilled candle families (z-image, flux schnell) get `None`.
+#[cfg(any(
+    target_os = "macos",
+    all(target_os = "windows", feature = "backend-candle")
+))]
 fn resolve_negative_prompt(request: &ImageRequest, model: &ResolvedModel) -> Option<String> {
     if !model.supports_negative_prompt() {
         return None;
@@ -717,19 +742,54 @@ async fn generate_stream(
     .await
 }
 
-/// Whether `model` is served by the candle (Windows/CUDA) backend (sc-3675): the SDXL family only
-/// (`realvisxl` shares the candle `"sdxl"` engine). A tiny routing match — candle registers one engine.
+/// Whether `model` is served by the candle (Windows/CUDA) backend's **txt2img** lane. SDXL/RealVisXL
+/// (sc-3675) plus the four image families wired in sc-5096 — z-image, flux schnell/dev, flux2-klein,
+/// qwen-image. `realvisxl` shares the candle `"sdxl"` engine via a weights swap; every other id maps
+/// 1:1 to its `MODEL_TABLE` engine id. Edit/control/reference shapes and the non-base weight variants
+/// stay on the Python torch worker (the router's `image_request_candle_eligible` enforces the same
+/// boundary), so this gate is intentionally the base-id set only.
 #[cfg(all(target_os = "windows", feature = "backend-candle"))]
 fn is_candle_engine(model: &str) -> bool {
-    matches!(model, "sdxl" | "realvisxl")
+    matches!(
+        model,
+        "sdxl"
+            | "realvisxl"
+            | "z_image_turbo"
+            | "flux_schnell"
+            | "flux_dev"
+            | "flux2_klein_9b"
+            | "qwen_image"
+    )
 }
 
-/// Windows/CUDA candle execution path (sc-3675, epic 3672). The macOS dispatch is MLX-bound; candle
-/// is a narrow **txt2img-only** lane, so this is a trimmed sibling of [`generate_stream`] that drives
-/// the SAME neutral streaming harness (`start_cached_gen_stream` → `generate_one` →
-/// `consume_gen_events`) against the registry-resolved candle generator (`gen_core::load("sdxl", …)`).
-/// No reference/img2img/LoRA — the descriptor advertises none, so those never route here. Reached
-/// only when `backend_candle_enabled` (default off → production routing unchanged until parity).
+/// The per-asset `adapter` id recorded for a candle image engine (`candle_<family>`), the candle
+/// sibling of the `MODEL_TABLE` `mlx_<family>` labels. Used both per-asset (`generate_candle_stream`)
+/// and at the generation-set level (`adapter_id`) so the sidecar + result agree on the backend.
+/// (sc-5099 extends this same labeling to the video + caption engines.)
+#[cfg(all(target_os = "windows", feature = "backend-candle"))]
+fn candle_adapter_label(model: &str) -> &'static str {
+    match model {
+        "z_image_turbo" => "candle_z_image",
+        "flux_schnell" | "flux_dev" => "candle_flux",
+        "flux2_klein_9b" => "candle_flux2",
+        "qwen_image" => "candle_qwen",
+        // sdxl / realvisxl share the candle "sdxl" engine.
+        _ => CANDLE_ADAPTER,
+    }
+}
+
+/// Windows/CUDA candle execution path (sc-3675 SDXL, generalized in sc-5096). The macOS dispatch is
+/// MLX-bound; candle is a narrow **txt2img-only** lane, so this is a trimmed sibling of
+/// [`generate_stream`] that drives the SAME neutral streaming harness (`start_cached_gen_stream` →
+/// `generate_one` → `consume_gen_events`) against the registry-resolved candle generator.
+///
+/// Backend-neutral resolution (sc-5096): the per-engine repo / steps / guidance / negative prompt all
+/// come from the shared [`mlx_model`] join (`MODEL_TABLE` row + the linked candle descriptor), exactly
+/// like the MLX path — so adding the four image families needs no new dispatch logic, just their
+/// provider crates linked. Quant + adapters are always empty (the candle descriptors advertise
+/// neither). No reference/img2img/control — those shapes fall back to the Python worker upstream
+/// (`image_request_candle_eligible`). Reached only when `backend_candle_enabled` (default off →
+/// production routing unchanged until parity).
 #[cfg(all(target_os = "windows", feature = "backend-candle"))]
 async fn generate_candle_stream(
     api: &ApiClient,
@@ -741,65 +801,69 @@ async fn generate_candle_stream(
     asset_writes: &mut Vec<Value>,
 ) -> WorkerResult<()> {
     let request = &plan.request;
-    let adapter_label = CANDLE_ADAPTER;
-    // Report the tensor backend ("candle"), not the gpu-id device label (`_device_backend`), on the
-    // streamed progress + inference events (sc-3678) — parity with the macOS path's
-    // `model.backend()` override, so the worker log + the UI architecture pill clearly attribute the
-    // run to Candle.
-    let backend = "candle";
-    // realvisxl shares the candle "sdxl" engine + a weights swap (sc-3677 verifies its layout).
-    let repo = match request.model.as_str() {
-        "realvisxl" => "SG161222/RealVisXL_V5.0",
-        _ => "stabilityai/stable-diffusion-xl-base-1.0",
+    let adapter_label = candle_adapter_label(&request.model);
+    // Join the MODEL_TABLE row with the linked candle descriptor (same resolver the MLX path uses).
+    // `None` means the candle provider crate for this id wasn't linked/registered — fail loud rather
+    // than silently stubbing.
+    let model = mlx_model(&request.model).ok_or_else(|| {
+        WorkerError::Engine(format!(
+            "candle backend not linked for model {} (no registered generator)",
+            request.model
+        ))
+    })?;
+    let engine_id = model.engine_id();
+    // Report the descriptor's tensor backend ("candle"), not the gpu-id device label
+    // (`_device_backend`), on the streamed progress + inference events (sc-3678) — parity with the
+    // macOS path's `model.backend()` override, so the worker log + the UI architecture pill clearly
+    // attribute the run to Candle.
+    let backend = if model.backend().is_empty() {
+        "candle"
+    } else {
+        model.backend()
     };
-    let weights_dir = huggingface_snapshot_dir(&settings.data_dir, repo).ok_or_else(|| {
-        WorkerError::InvalidPayload(format!("candle sdxl weights snapshot not found for {repo}"))
+    let repo = model_repo(request, &model);
+    let weights_dir = huggingface_snapshot_dir(&settings.data_dir, &repo).ok_or_else(|| {
+        WorkerError::InvalidPayload(format!("candle weights snapshot not found for {repo}"))
     })?;
 
-    // SDXL production defaults (the candle descriptor's wired surface): 30 steps, CFG 7.0.
-    let steps = request
-        .advanced
-        .get("steps")
-        .and_then(|v| v.as_u64().or_else(|| v.as_str()?.trim().parse().ok()))
-        .map(|s| (s as u32).clamp(1, 80))
-        .unwrap_or(30);
-    let guidance = Some(
-        request
-            .advanced
-            .get("guidanceScale")
-            .and_then(|v| v.as_f64().or_else(|| v.as_str()?.trim().parse().ok()))
-            .map(|g| g as f32)
-            .unwrap_or(7.0),
-    );
-    let negative_prompt = {
-        let trimmed = request.negative_prompt.trim();
-        (!trimmed.is_empty()).then(|| trimmed.to_owned())
-    };
+    // Descriptor-derived denoise/guidance surface (distilled families → no guidance/negative; guided
+    // families → the scale + negative prompt). Identical to the MLX path; quant + LoRA are omitted.
+    let steps = resolve_steps(request, &model);
+    let guidance = resolve_guidance(request, &model);
+    let true_cfg = resolve_true_cfg(request, &model);
+    let negative_prompt = resolve_negative_prompt(request, &model);
 
-    // Per-payload flash-attention (sc-3674): the UI Advanced toggle sends `advanced.flashAttn`
+    // Per-payload flash/accel-attention (sc-3674): the UI Advanced toggle sends `advanced.flashAttn`
     // (default on). Process-global toggle, set before the generator loads (the candle pipeline reads
-    // it at load) — race-free because the worker runs image jobs sequentially. No effect unless the
-    // crate was built `--features flash-attn` (it is, on the Windows CUDA worker).
+    // it at load) — race-free because the worker runs image jobs sequentially. The providers expose
+    // the runtime knob under different names (SDXL `set_flash_attn`, Z-Image `set_accel_attn`); the
+    // diffusion-transformer families (flux/flux2/qwen) bake it via the build feature with no runtime
+    // toggle. No effect unless the crate was built with its flash/accel feature.
     let flash_attn = request
         .advanced
         .get("flashAttn")
         .and_then(|v| v.as_bool())
         .unwrap_or(true);
-    candle_gen_sdxl::set_flash_attn(flash_attn);
+    match request.model.as_str() {
+        "sdxl" | "realvisxl" => candle_gen_sdxl::set_flash_attn(flash_attn),
+        "z_image_turbo" => candle_gen_z_image::set_accel_attn(flash_attn),
+        _ => {}
+    }
 
     let count = request.count as usize;
     let seeds: Vec<i64> = (0..count).map(|index| resolve_seed(request, index)).collect();
     let prompt = request.prompt.clone();
     let (width, height) = (request.width, request.height);
-    let raw_settings = mlx_raw_settings(request, repo, steps, None, guidance);
+    // Record the effective CFG knob (guidance for guided families, else true_cfg) in the recipe.
+    let raw_settings = mlx_raw_settings(request, &repo, steps, None, guidance.or(true_cfg));
     let spec = load_spec(weights_dir, None, Vec::new(), None);
 
     let (cancel, rx, blocking) = start_cached_gen_stream(
         job.id.clone(),
-        "sdxl",
+        engine_id,
         0,
         spec,
-        "candle sdxl load failed".to_owned(),
+        format!("candle {engine_id} load failed"),
         move |generator, tx, cancel| {
             drive_gen_items(tx, seeds, move |_index, seed, on_progress| {
                 let (out_w, out_h, pixels) = generate_one(
@@ -812,7 +876,7 @@ async fn generate_candle_stream(
                     guidance,
                     negative_prompt.clone(),
                     None,
-                    None,
+                    true_cfg,
                     &cancel,
                     on_progress,
                 )?;

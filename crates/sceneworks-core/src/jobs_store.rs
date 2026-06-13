@@ -3058,11 +3058,22 @@ fn sdxl_mlx_eligible(_payload: &Map<String, Value>) -> bool {
     true
 }
 
-/// The models the candle (Windows/CUDA) SDXL lane can serve (epic 3672, sc-3678). Mirrors the
-/// worker's `image_jobs::is_candle_engine`: the SDXL family only — `realvisxl` shares the candle
-/// `"sdxl"` engine via a weights swap. Deliberately narrow: candle is a gated txt2img-only lane,
-/// and everything outside it falls back to the Python torch worker.
-const CANDLE_ROUTED_MODELS: &[&str] = &["sdxl", "realvisxl"];
+/// The models the candle (Windows/CUDA) lane can serve (epic 3672 sc-3678 for SDXL; epic 5095
+/// sc-5096 adds the four image families). Mirrors the worker's `image_jobs::is_candle_engine`:
+/// SDXL/RealVisXL (`realvisxl` shares the candle `"sdxl"` engine via a weights swap), plus
+/// z-image-turbo, FLUX.1 schnell/dev, FLUX.2-klein-9B, and Qwen-Image — the base **txt2img** ids
+/// only. Deliberately narrow: candle is a gated txt2img-only lane, so every conditioning shape AND
+/// every non-base weight variant (e.g. `flux2_klein_9b_kv`, `qwen_image_edit`) falls back to the
+/// Python torch worker.
+const CANDLE_ROUTED_MODELS: &[&str] = &[
+    "sdxl",
+    "realvisxl",
+    "z_image_turbo",
+    "flux_schnell",
+    "flux_dev",
+    "flux2_klein_9b",
+    "qwen_image",
+];
 
 /// Whether `worker` is the candle (Windows/CUDA) SDXL worker — identified by the `candle` marker
 /// capability it self-advertises (`gpu::with_candle_capabilities`), mirroring the `nvidia` marker
@@ -3983,7 +3994,8 @@ mod candle_routing_tests {
     const TORCH_CAPS: &[&str] = &["gpu", "image_generate", "image_edit", "image_detail"];
 
     #[test]
-    fn sdxl_and_realvisxl_plain_txt2img_are_candle_eligible() {
+    fn candle_routed_models_plain_txt2img_are_eligible() {
+        // SDXL/RealVisXL (sc-3678) + the four image families wired in sc-5096 — every base txt2img id.
         for model in CANDLE_ROUTED_MODELS {
             assert!(
                 image_request_candle_eligible(model, &object(json!({ "prompt": "a red fox" }))),
@@ -3993,17 +4005,48 @@ mod candle_routing_tests {
     }
 
     #[test]
-    fn non_sdxl_families_are_never_candle_eligible() {
+    fn non_candle_families_and_variants_are_never_candle_eligible() {
+        // Families with no candle provider (chroma/kolors/sensenova) AND the non-base weight/shape
+        // variants of wired families (edit ids, the kv distill) all stay on the Python torch worker.
         for model in [
-            "flux_dev",
-            "qwen_image",
-            "z_image_turbo",
             "chroma1_hd",
             "kolors",
+            "sensenova_u1_8b",
+            "z_image_edit",
+            "qwen_image_edit",
+            "flux2_klein_9b_kv",
         ] {
             assert!(
                 !image_request_candle_eligible(model, &object(json!({ "prompt": "p" }))),
                 "{model} must fall back to the Python worker"
+            );
+        }
+    }
+
+    #[test]
+    fn new_candle_families_conditioning_shapes_fall_back_to_torch() {
+        // The four sc-5096 families are txt2img-only on candle: any conditioning shape defers to torch
+        // (the worker advertises none of these, so this is the no-silently-dropped-control boundary).
+        let cases = [
+            (
+                "z_image_turbo",
+                json!({ "mode": "edit_image", "sourceAssetId": "a" }),
+            ),
+            ("flux_dev", json!({ "referenceAssetId": "a" })),
+            ("flux_schnell", json!({ "loras": [{ "name": "x" }] })),
+            (
+                "qwen_image",
+                json!({ "advanced": { "poses": [{ "id": "pose_1" }] } }),
+            ),
+            (
+                "flux2_klein_9b",
+                json!({ "mode": "edit_image", "sourceAssetId": "a" }),
+            ),
+        ];
+        for (model, payload) in cases {
+            assert!(
+                !image_request_candle_eligible(model, &object(payload.clone())),
+                "{model} conditioning shape must fall back to torch: {payload}"
             );
         }
     }
@@ -4038,21 +4081,36 @@ mod candle_routing_tests {
     }
 
     #[test]
-    fn candle_worker_claims_sdxl_txt2img_but_refuses_unsupported_shapes() {
+    fn candle_worker_claims_txt2img_but_refuses_unsupported_shapes() {
         let candle = gpu_worker(CANDLE_CAPS);
-        // Claims the lane.
-        assert!(worker_supports_job(
-            &candle,
-            &image_generate_job(json!({ "model": "sdxl", "prompt": "a red fox" }))
-        ));
-        assert!(worker_supports_job(
-            &candle,
-            &image_generate_job(json!({ "model": "realvisxl", "prompt": "p" }))
-        ));
-        // Refuses a non-SDXL family and an SDXL img2img — both defer to torch.
+        // Claims the lane — SDXL plus the sc-5096 image families, all plain txt2img.
+        for model in [
+            "sdxl",
+            "realvisxl",
+            "z_image_turbo",
+            "flux_dev",
+            "qwen_image",
+        ] {
+            assert!(
+                worker_supports_job(
+                    &candle,
+                    &image_generate_job(json!({ "model": model, "prompt": "a red fox" }))
+                ),
+                "candle worker should claim {model} plain txt2img"
+            );
+        }
+        // Refuses a family with no candle provider, and a conditioning shape on a wired family —
+        // both defer to torch.
         assert!(!worker_supports_job(
             &candle,
-            &image_generate_job(json!({ "model": "flux_dev", "prompt": "p" }))
+            &image_generate_job(json!({ "model": "chroma1_hd", "prompt": "p" }))
+        ));
+        assert!(!worker_supports_job(
+            &candle,
+            &image_generate_job(json!({
+                "model": "qwen_image",
+                "advanced": { "poses": [{ "id": "pose_1" }] }
+            }))
         ));
         assert!(!worker_supports_job(
             &candle,
@@ -4069,9 +4127,17 @@ mod candle_routing_tests {
         // The co-resident Python torch worker (no `candle` marker) is ungated here: it claims the
         // shapes the candle worker refused, so nothing is stranded.
         let torch = gpu_worker(TORCH_CAPS);
+        // A family with no candle provider, and a conditioning shape on a wired family.
         assert!(worker_supports_job(
             &torch,
-            &image_generate_job(json!({ "model": "flux_dev", "prompt": "p" }))
+            &image_generate_job(json!({ "model": "chroma1_hd", "prompt": "p" }))
+        ));
+        assert!(worker_supports_job(
+            &torch,
+            &image_generate_job(json!({
+                "model": "qwen_image",
+                "advanced": { "poses": [{ "id": "pose_1" }] }
+            }))
         ));
         assert!(worker_supports_job(
             &torch,
