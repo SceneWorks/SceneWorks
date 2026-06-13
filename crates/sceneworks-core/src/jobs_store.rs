@@ -4028,11 +4028,20 @@ mod candle_routing_tests {
         // The four sc-5096 families are txt2img-only on candle: any conditioning shape defers to torch
         // (the worker advertises none of these, so this is the no-silently-dropped-control boundary).
         let cases = [
-            ("z_image_turbo", json!({ "mode": "edit_image", "sourceAssetId": "a" })),
+            (
+                "z_image_turbo",
+                json!({ "mode": "edit_image", "sourceAssetId": "a" }),
+            ),
             ("flux_dev", json!({ "referenceAssetId": "a" })),
             ("flux_schnell", json!({ "loras": [{ "name": "x" }] })),
-            ("qwen_image", json!({ "advanced": { "poses": [{ "id": "pose_1" }] } })),
-            ("flux2_klein_9b", json!({ "mode": "edit_image", "sourceAssetId": "a" })),
+            (
+                "qwen_image",
+                json!({ "advanced": { "poses": [{ "id": "pose_1" }] } }),
+            ),
+            (
+                "flux2_klein_9b",
+                json!({ "mode": "edit_image", "sourceAssetId": "a" }),
+            ),
         ];
         for (model, payload) in cases {
             assert!(
@@ -4075,7 +4084,13 @@ mod candle_routing_tests {
     fn candle_worker_claims_txt2img_but_refuses_unsupported_shapes() {
         let candle = gpu_worker(CANDLE_CAPS);
         // Claims the lane — SDXL plus the sc-5096 image families, all plain txt2img.
-        for model in ["sdxl", "realvisxl", "z_image_turbo", "flux_dev", "qwen_image"] {
+        for model in [
+            "sdxl",
+            "realvisxl",
+            "z_image_turbo",
+            "flux_dev",
+            "qwen_image",
+        ] {
             assert!(
                 worker_supports_job(
                     &candle,
