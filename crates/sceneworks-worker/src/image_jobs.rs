@@ -100,6 +100,14 @@ use candle_gen_qwen_image as _;
 // shared gen_core inventory; the `as _;` keeps the MSVC release linker from GC-ing the registrations.
 #[cfg(all(target_os = "windows", feature = "backend-candle"))]
 use candle_gen_chroma as _;
+// Candle Kolors (sc-5576, epic 3692): the `kolors` T2I id self-registers into the shared gen_core
+// inventory; `as _;` keeps the MSVC release linker from GC-ing the registration.
+#[cfg(all(target_os = "windows", feature = "backend-candle"))]
+use candle_gen_kolors as _;
+// Candle SenseNova-U1 (sc-5576, epic 3692): `sensenova_u1_8b` + `sensenova_u1_8b_fast` self-register
+// into the shared gen_core inventory; force-linked so the registrations survive linker GC.
+#[cfg(all(target_os = "windows", feature = "backend-candle"))]
+use candle_gen_sensenova as _;
 #[cfg(all(target_os = "windows", feature = "backend-candle"))]
 use candle_gen_z_image as _;
 // Lens / Lens-Turbo (epic 5107 engine / sc-5126 cutover) — the candle Windows/CUDA sibling of the

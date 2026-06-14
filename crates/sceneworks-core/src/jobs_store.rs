@@ -3127,10 +3127,12 @@ fn sdxl_mlx_eligible(_payload: &Map<String, Value>) -> bool {
 }
 
 /// The models the candle (Windows/CUDA) lane can serve (epic 3672 sc-3678 for SDXL; epic 5095
-/// sc-5096 adds the four image families; sc-5126 adds Lens / Lens-Turbo). Mirrors the worker's
+/// sc-5096 adds the four image families; sc-5126 adds Lens / Lens-Turbo; sc-5484 + sc-5576 add Chroma,
+/// Kolors, and SenseNova-U1). Mirrors the worker's
 /// `image_jobs::is_candle_engine`: SDXL/RealVisXL (`realvisxl` shares the candle `"sdxl"` engine via a
-/// weights swap), plus z-image-turbo, FLUX.1 schnell/dev, FLUX.2-klein-9B, Qwen-Image, and
-/// `lens`/`lens_turbo` — the base **txt2img** ids only. Deliberately narrow: candle is a gated
+/// weights swap), plus z-image-turbo, FLUX.1 schnell/dev, FLUX.2-klein-9B, Qwen-Image,
+/// `lens`/`lens_turbo`, `chroma1_hd`/`_base`/`_flash`, `kolors`, and `sensenova_u1_8b`/`_fast` —
+/// the base **txt2img** ids only. Deliberately narrow: candle is a gated
 /// txt2img-only lane, so every conditioning shape AND every non-base weight variant (e.g.
 /// `flux2_klein_9b_kv`, `qwen_image_edit`) falls back to the Python torch worker. Lens is pure T2I
 /// (no conditioning at all) but — unlike the others — DOES advertise quant + LoRA/LoKr, so it is also
@@ -3145,6 +3147,16 @@ const CANDLE_ROUTED_MODELS: &[&str] = &[
     "qwen_image",
     "lens",
     "lens_turbo",
+    // epic 3692 candle image families. Chroma's worker lane (#658) shipped without this router half, so
+    // chroma jobs never reached the candle worker — added here with Kolors + SenseNova-U1 (sc-5576). All
+    // pure **txt2img** on candle: their edit / IP-reference / pose-control / VQA shapes are rejected
+    // below (`image_request_candle_eligible`) and fall back to the Python torch worker.
+    "chroma1_hd",
+    "chroma1_base",
+    "chroma1_flash",
+    "kolors",
+    "sensenova_u1_8b",
+    "sensenova_u1_8b_fast",
 ];
 
 /// The candle image families that advertise on-the-fly Q4/Q8 quant AND LoRA/LoKr adapters — Lens /
@@ -4305,12 +4317,11 @@ mod candle_routing_tests {
 
     #[test]
     fn non_candle_families_and_variants_are_never_candle_eligible() {
-        // Families with no candle provider (chroma/kolors/sensenova) AND the non-base weight/shape
+        // A family with no candle provider at all (`bernini_image`) AND the non-base weight/shape
         // variants of wired families (edit ids, the kv distill) all stay on the Python torch worker.
+        // (chroma / kolors / sensenova ARE candle-routed now — sc-5484 / sc-5576 — for txt2img.)
         for model in [
-            "chroma1_hd",
-            "kolors",
-            "sensenova_u1_8b",
+            "bernini_image",
             "z_image_edit",
             "qwen_image_edit",
             "flux2_klein_9b_kv",
@@ -4324,7 +4335,7 @@ mod candle_routing_tests {
 
     #[test]
     fn new_candle_families_conditioning_shapes_fall_back_to_torch() {
-        // The four sc-5096 families are txt2img-only on candle: any conditioning shape defers to torch
+        // Every candle image family is txt2img-only on candle: any conditioning shape defers to torch
         // (the worker advertises none of these, so this is the no-silently-dropped-control boundary).
         let cases = [
             (
@@ -4341,6 +4352,26 @@ mod candle_routing_tests {
                 "flux2_klein_9b",
                 json!({ "mode": "edit_image", "sourceAssetId": "a" }),
             ),
+            // sc-5484 / sc-5576: Chroma / Kolors / SenseNova-U1 are pure T2I on candle. Their MLX-only
+            // conditioning shapes (Kolors edit / IP-reference / pose-control; SenseNova edit) defer.
+            (
+                "chroma1_hd",
+                json!({ "mode": "edit_image", "sourceAssetId": "a" }),
+            ),
+            (
+                "kolors",
+                json!({ "mode": "edit_image", "sourceAssetId": "a" }),
+            ),
+            ("kolors", json!({ "referenceAssetId": "a" })),
+            (
+                "kolors",
+                json!({ "advanced": { "poses": [{ "id": "pose_1" }] } }),
+            ),
+            (
+                "sensenova_u1_8b",
+                json!({ "mode": "edit_image", "sourceAssetId": "a" }),
+            ),
+            ("sensenova_u1_8b_fast", json!({ "referenceAssetId": "a" })),
         ];
         for (model, payload) in cases {
             assert!(
@@ -4459,13 +4490,17 @@ mod candle_routing_tests {
     #[test]
     fn candle_worker_claims_txt2img_but_refuses_unsupported_shapes() {
         let candle = gpu_worker(CANDLE_CAPS);
-        // Claims the lane — SDXL plus the sc-5096 image families, all plain txt2img.
+        // Claims the lane — SDXL plus every wired candle image family, all plain txt2img.
         for model in [
             "sdxl",
             "realvisxl",
             "z_image_turbo",
             "flux_dev",
             "qwen_image",
+            "chroma1_hd",
+            "kolors",
+            "sensenova_u1_8b",
+            "sensenova_u1_8b_fast",
         ] {
             assert!(
                 worker_supports_job(
@@ -4479,7 +4514,15 @@ mod candle_routing_tests {
         // both defer to torch.
         assert!(!worker_supports_job(
             &candle,
-            &image_generate_job(json!({ "model": "chroma1_hd", "prompt": "p" }))
+            &image_generate_job(json!({ "model": "bernini_image", "prompt": "p" }))
+        ));
+        assert!(!worker_supports_job(
+            &candle,
+            &image_generate_job(json!({
+                "model": "kolors",
+                "mode": "edit_image",
+                "sourceAssetId": "asset_1"
+            }))
         ));
         assert!(!worker_supports_job(
             &candle,
@@ -4506,7 +4549,15 @@ mod candle_routing_tests {
         // A family with no candle provider, and a conditioning shape on a wired family.
         assert!(worker_supports_job(
             &torch,
-            &image_generate_job(json!({ "model": "chroma1_hd", "prompt": "p" }))
+            &image_generate_job(json!({ "model": "bernini_image", "prompt": "p" }))
+        ));
+        assert!(worker_supports_job(
+            &torch,
+            &image_generate_job(json!({
+                "model": "kolors",
+                "mode": "edit_image",
+                "sourceAssetId": "asset_1"
+            }))
         ));
         assert!(worker_supports_job(
             &torch,
