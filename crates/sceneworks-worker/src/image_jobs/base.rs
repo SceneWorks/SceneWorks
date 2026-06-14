@@ -847,6 +847,9 @@ fn is_candle_engine(model: &str) -> bool {
             | "chroma1_flash"
             | "lens"
             | "lens_turbo"
+            | "kolors"
+            | "sensenova_u1_8b"
+            | "sensenova_u1_8b_fast"
     )
 }
 
@@ -863,6 +866,8 @@ fn candle_adapter_label(model: &str) -> &'static str {
         "qwen_image" => "candle_qwen",
         "chroma1_hd" | "chroma1_base" | "chroma1_flash" => "candle_chroma",
         "lens" | "lens_turbo" => "candle_lens",
+        "kolors" => "candle_kolors",
+        "sensenova_u1_8b" | "sensenova_u1_8b_fast" => "candle_sensenova",
         // sdxl / realvisxl share the candle "sdxl" engine.
         _ => CANDLE_ADAPTER,
     }
@@ -1232,6 +1237,12 @@ mod candle_label_tests {
         assert_eq!(candle_adapter_label("chroma1_flash"), "candle_chroma");
         assert_eq!(candle_adapter_label("lens"), "candle_lens");
         assert_eq!(candle_adapter_label("lens_turbo"), "candle_lens");
+        assert_eq!(candle_adapter_label("kolors"), "candle_kolors");
+        assert_eq!(candle_adapter_label("sensenova_u1_8b"), "candle_sensenova");
+        assert_eq!(
+            candle_adapter_label("sensenova_u1_8b_fast"),
+            "candle_sensenova"
+        );
         assert_eq!(candle_adapter_label("sdxl"), "candle_sdxl");
         assert_eq!(candle_adapter_label("realvisxl"), "candle_sdxl");
         // Every wired engine carries a `candle_`-prefixed label, distinct from the `mlx_` labels.
@@ -1246,6 +1257,9 @@ mod candle_label_tests {
             "chroma1_flash",
             "lens",
             "lens_turbo",
+            "kolors",
+            "sensenova_u1_8b",
+            "sensenova_u1_8b_fast",
             "sdxl",
             "realvisxl",
         ] {
@@ -1268,12 +1282,16 @@ mod candle_label_tests {
             "chroma1_flash",
             "lens",
             "lens_turbo",
+            "kolors",
+            "sensenova_u1_8b",
+            "sensenova_u1_8b_fast",
         ] {
             assert!(is_candle_engine(model), "{model} should be a candle engine");
         }
         // Non-candle families + non-base variants (edit ids, the kv distill) are not in the lane.
+        // (kolors / sensenova ARE candle engines now — sc-5576 — for their base txt2img shape.)
         for model in [
-            "kolors",
+            "bernini_image",
             "z_image_edit",
             "qwen_image_edit",
             "flux2_klein_9b_kv",
