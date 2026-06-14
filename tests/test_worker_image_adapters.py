@@ -1026,10 +1026,12 @@ def test_runtime_registry_covers_all_model_target_adapters():
     from scene_worker import runtime
     from scene_worker.image_adapters import MODEL_TARGETS
 
-    # MLX adapter ids the Python worker no longer owns (Rust `mlx` worker claims them).
-    # `pulid_flux` joined post-sc-3344: the torch PuLIDFluxAdapter was retired, so its
-    # MODEL_TARGETS sentinel adapter id is MLX-only (create_image_adapter raises on it).
-    rust_mlx_only = {"mlx_flux", "mlx_qwen", "mlx_z_image", "mlx_flux2", "pulid_flux"}
+    # Adapter ids the Python worker no longer owns — claimed by a Rust NATIVE worker (MLX on Mac
+    # and/or candle on Windows/CUDA), so create_image_adapter raises on them rather than dispatching
+    # to a Python adapter. `pulid_flux` joined post-sc-3344 (torch PuLIDFluxAdapter retired);
+    # `lens_turbo` joined post-sc-5126 (Lens inference sidecar retired — MLX on Mac, candle off-Mac).
+    # Their MODEL_TARGETS rows keep the `adapter` id as the sentinel create_image_adapter raises on.
+    rust_native_only = {"mlx_flux", "mlx_qwen", "mlx_z_image", "mlx_flux2", "pulid_flux", "lens_turbo"}
 
     src = Path(runtime.__file__).read_text(encoding="utf-8")
     block = src.split("image_adapters: dict[str, object] = {", 1)[1].split("}", 1)[0]
@@ -1038,12 +1040,12 @@ def test_runtime_registry_covers_all_model_target_adapters():
     needed = {
         target["adapter"]
         for target in MODEL_TARGETS.values()
-        if target.get("adapter") and target["adapter"] not in rust_mlx_only
+        if target.get("adapter") and target["adapter"] not in rust_native_only
     }
     missing = needed - registered
     assert not missing, f"adapter ids in MODEL_TARGETS not registered in runtime: {sorted(missing)}"
-    # The MLX adapters are intentionally absent from the Python registry post-cutover.
-    assert not (registered & rust_mlx_only)
+    # The native-worker adapters are intentionally absent from the Python registry post-cutover.
+    assert not (registered & rust_native_only)
 
 def test_flux2_klein_manifest_entries_present():
     # Both flux2_klein_9b and flux2_klein_9b_kv must be present in the
