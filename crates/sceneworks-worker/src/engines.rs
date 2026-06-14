@@ -513,6 +513,17 @@ pub(crate) fn registry_capabilities(
     }) {
         push(Cap::TrainingCaption, &mut caps);
     }
+    // Prompt-refinement TextLlm (sc-5500 contract / sc-5525 cutover): the candle prompt-refine
+    // provider registers a `TextLlm` under id `prompt_refine`. Advertise `prompt_refine` when its
+    // backend is enabled — off-Mac this is the candle Llama-3.2-3B path. There is NO mlx twin
+    // (greenfield), so the macOS `mlx` worker never lights this up; the Python torch `PromptRefiner`
+    // stays the fallback there + on the candle-less Desktop installer (sc-5525 keeps it).
+    if gen_core::registry::textllms().any(|r| {
+        let d = (r.descriptor)();
+        backends.contains(&d.backend) && d.id == "prompt_refine"
+    }) {
+        push(Cap::PromptRefine, &mut caps);
+    }
     caps
 }
 
@@ -592,6 +603,26 @@ mod tests {
         gen_core::registry::ModelRegistration { descriptor: stub_unknown_descriptor, load: stub_unknown_load }
     }
 
+    // A candle-backed TextLlm stub under id `prompt_refine`: proves the prompt-refine TextLlm
+    // derivation lights up `prompt_refine` purely from a registered descriptor with `backend =
+    // "candle"` (sc-5525), exactly like the generator/captioner derivations above.
+    fn stub_textllm_descriptor() -> gen_core::TextLlmDescriptor {
+        gen_core::TextLlmDescriptor {
+            id: "prompt_refine",
+            family: "llama",
+            backend: "candle",
+            capabilities: gen_core::TextLlmCapabilities::default(),
+        }
+    }
+    fn stub_textllm_load(
+        _spec: &gen_core::LoadSpec,
+    ) -> gen_core::Result<Box<dyn gen_core::TextLlm>> {
+        unimplemented!("registry-derivation test stub never loads")
+    }
+    inventory::submit! {
+        gen_core::registry::TextLlmRegistration { descriptor: stub_textllm_descriptor, load: stub_textllm_load }
+    }
+
     #[test]
     fn mlx_enabled_advertises_image_generate_from_registry() {
         let caps = registry_capabilities(&settings_with_backends(true, false));
@@ -622,6 +653,25 @@ mod tests {
         // candle disabled ⇒ that descriptor contributes nothing.
         let off = registry_capabilities(&settings_with_backends(false, false));
         assert!(!off.contains(&Cap::ImageGenerate));
+    }
+
+    #[test]
+    fn candle_textllm_lights_up_prompt_refine() {
+        // candle enabled ⇒ the candle `prompt_refine` TextLlm stub derives the PromptRefine cap.
+        let on = registry_capabilities(&settings_with_backends(false, true));
+        assert!(
+            on.contains(&Cap::PromptRefine),
+            "an enabled candle backend should derive prompt_refine from its TextLlm descriptor"
+        );
+        // mlx-only ⇒ the candle TextLlm is filtered out, and there is no mlx prompt_refine twin.
+        let mlx_only = registry_capabilities(&settings_with_backends(true, false));
+        assert!(
+            !mlx_only.contains(&Cap::PromptRefine),
+            "prompt_refine has no mlx twin, so an mlx-only worker must not advertise it"
+        );
+        // both off ⇒ nothing.
+        let off = registry_capabilities(&settings_with_backends(false, false));
+        assert!(!off.contains(&Cap::PromptRefine));
     }
 
     // Off-macOS the registry holds ONLY these three stubs (no real provider crate is linked), so

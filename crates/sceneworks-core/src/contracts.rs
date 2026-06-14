@@ -374,10 +374,12 @@ string_enum! {
         // so a real run only routes to a worker that can actually train. See
         // jobs_store::worker_supports_job and apps/worker/scene_worker/runtime.py.
         LoraTrainExecute => "lora_train_execute",
-        // Prompt refinement (LLM rewrite of a user prompt). A lightweight, non-GPU
-        // job advertised by the Python worker (it only needs an OpenAI-compatible
-        // endpoint, not an inference backend); the Rust utility worker never emits
-        // it. See jobs_store::NON_GPU_JOB_TYPES and apps/worker/scene_worker/runtime.py.
+        // Prompt refinement (LLM rewrite of a user prompt) by a small in-process instruction LLM
+        // (Llama-3.2-3B-Instruct). The Python worker advertises it via the torch `PromptRefiner` (the
+        // Mac + default-installer fallback); the Windows/CUDA candle worker advertises it via the
+        // native `TextLlm` provider (`gen_core::load_textllm`, zero torch — sc-5525), derived in
+        // engines::registry_capabilities when `backend_candle_enabled`. Routed by capability match.
+        // See apps/worker/scene_worker/runtime.py and crates/sceneworks-worker/src/prompt_refine_jobs.rs.
         PromptRefine => "prompt_refine",
     }
 }
