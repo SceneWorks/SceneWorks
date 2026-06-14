@@ -554,6 +554,37 @@ async fn run_training_execution(
     .await
 }
 
+/// First-detection handling for the in-loop training cancel poller (sc-5516): trip the engine
+/// `CancelFlag` and post a NON-terminal "Cancelling…" update (indeterminate progress bar —
+/// `running` + fraction 0.0 renders the "Working" animation, not a backward jump). The terminal
+/// `Canceled` is posted only after the blocking training actually stops (see
+/// `consume_training_events`), so the worker row — and therefore the next queued job — is not freed
+/// until the GPU is genuinely idle, and the UI honestly shows "Cancelling…" until completion.
+/// Best-effort: a failed status update here is non-fatal because the post-run terminal write is
+/// what ultimately frees the worker. Mirrors the image path's `begin_image_cancel` (sc-5515).
+#[cfg(target_os = "macos")]
+pub(crate) async fn begin_training_cancel(
+    api: &ApiClient,
+    job_id: &str,
+    cancel: &CancelFlag,
+    backend: &str,
+) {
+    cancel.cancel();
+    let _ = update_job(
+        api,
+        job_id,
+        training_progress(
+            JobStatus::Running,
+            ProgressStage::Training,
+            0.0,
+            "Cancelling — finishing the current step…",
+            None,
+            backend,
+        ),
+    )
+    .await;
+}
+
 /// Consume training events from the blocking thread: stream staged progress, poll
 /// cancel ~every 2s (draining after a cancel so the blocking sender never blocks),
 /// and on the final `Done` event report completion with the result the UI shows.
@@ -585,8 +616,8 @@ async fn consume_training_events(
                     && last_cancel_check.elapsed() >= Duration::from_secs(2)
                 {
                     last_cancel_check = Instant::now();
-                    if cancel_requested(api, &job.id, "LoRA training canceled by user.").await {
-                        cancel.cancel();
+                    if cancel_requested_peek(api, &job.id).await {
+                        begin_training_cancel(api, &job.id, &cancel, backend).await;
                         canceled = true;
                         continue;
                     }
@@ -627,11 +658,26 @@ async fn consume_training_events(
         .await
         .map_err(|error| task_join_error("training task join", error))?;
     if canceled {
-        // check_cancel already posted the Canceled update; treat the engine's
-        // early return as the clean cancel.
-        return Err(WorkerError::Canceled(
-            "LoRA training canceled by user.".to_owned(),
-        ));
+        // Training has actually stopped now, so post the TERMINAL Canceled here (not at the
+        // earlier cancel poll, which only tripped the flag + showed "Cancelling…"). This terminal
+        // write is what frees the worker row (`jobs_store::update_job_progress`), so it lands as
+        // the worker returns to its claim loop — the next queued job waits only until the GPU is
+        // genuinely free (sc-5516; mirrors the image path sc-5515).
+        let message = "LoRA training canceled by user.";
+        update_job(
+            api,
+            &job.id,
+            training_progress(
+                JobStatus::Canceled,
+                ProgressStage::Canceled,
+                1.0,
+                message,
+                None,
+                backend,
+            ),
+        )
+        .await?;
+        return Err(WorkerError::Canceled(message.to_owned()));
     }
     task_result
 }

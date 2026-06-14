@@ -41,13 +41,13 @@ use super::supervisor::{
     utility_worker_specs, SupervisedChild, WorkerSpec,
 };
 use super::{
-    allow_pattern_matches, bounded_tail, cancel_requested, cancel_requested_peek,
-    cleanup_uploaded_import_source, copy_lora_source, fresh_asset_id, import_lora_source_file_as,
-    import_lora_source_path, now_rfc3339, parse_credentials_env, resolve_model_convert_output,
-    resolve_model_import_target, safe_download_dir, safe_project_path, value_f64,
-    wan_moe_pair_filenames, write_model_install_marker, CredentialScheme, JsonObject,
-    SafetensorsHeaderError, Settings, WorkerCredential, WorkerError, DEFAULT_MAX_LORA_URL_BYTES,
-    DEFAULT_MAX_MODEL_URL_BYTES, DEFAULT_TRANSITION_DURATION_SECONDS, INSTALL_MARKER,
+    allow_pattern_matches, bounded_tail, cancel_requested_peek, cleanup_uploaded_import_source,
+    copy_lora_source, fresh_asset_id, import_lora_source_file_as, import_lora_source_path,
+    now_rfc3339, parse_credentials_env, resolve_model_convert_output, resolve_model_import_target,
+    safe_download_dir, safe_project_path, value_f64, wan_moe_pair_filenames,
+    write_model_install_marker, CredentialScheme, JsonObject, SafetensorsHeaderError, Settings,
+    WorkerCredential, WorkerError, DEFAULT_MAX_LORA_URL_BYTES, DEFAULT_MAX_MODEL_URL_BYTES,
+    DEFAULT_TRANSITION_DURATION_SECONDS, INSTALL_MARKER,
 };
 
 fn write_safetensors_with_keys(path: &std::path::Path, keys: &[String]) {
@@ -2468,66 +2468,6 @@ async fn spawn_cancel_poll_stub(state: CancelPollStubState) -> String {
     format!("http://{address}")
 }
 
-async fn cancel_poll_with(state: CancelPollStubState) -> bool {
-    let base_url = spawn_cancel_poll_stub(state).await;
-    let mut settings = test_settings(base_url.clone(), None);
-    settings.api_url = base_url;
-    let api = ApiClient::new(&settings);
-    cancel_requested(&api, "job-1", "canceled by user").await
-}
-
-#[tokio::test]
-async fn cancel_poll_tolerates_transient_get_errors() {
-    let canceled = cancel_poll_with(CancelPollStubState {
-        get_status: AxumStatusCode::INTERNAL_SERVER_ERROR,
-        cancel_requested: false,
-        post_status: AxumStatusCode::OK,
-    })
-    .await;
-    assert!(
-        !canceled,
-        "a transient GET failure must not read as a user cancel"
-    );
-}
-
-#[tokio::test]
-async fn cancel_poll_cancels_on_confirmed_user_cancel() {
-    let canceled = cancel_poll_with(CancelPollStubState {
-        get_status: AxumStatusCode::OK,
-        cancel_requested: true,
-        post_status: AxumStatusCode::OK,
-    })
-    .await;
-    assert!(canceled, "a confirmed cancel request must cancel the run");
-}
-
-#[tokio::test]
-async fn cancel_poll_retries_when_cancel_ack_post_fails() {
-    // cancel_requested=true but the Canceled-status POST fails: don't treat it
-    // as canceled yet — the next 2s poll retries the acknowledgement.
-    let canceled = cancel_poll_with(CancelPollStubState {
-        get_status: AxumStatusCode::OK,
-        cancel_requested: true,
-        post_status: AxumStatusCode::INTERNAL_SERVER_ERROR,
-    })
-    .await;
-    assert!(
-        !canceled,
-        "a failed cancel acknowledgement must be retried, not assumed"
-    );
-}
-
-#[tokio::test]
-async fn cancel_poll_continues_when_no_cancel_requested() {
-    let canceled = cancel_poll_with(CancelPollStubState {
-        get_status: AxumStatusCode::OK,
-        cancel_requested: false,
-        post_status: AxumStatusCode::OK,
-    })
-    .await;
-    assert!(!canceled);
-}
-
 /// sc-5515 — the in-loop image cancel poller uses a CHECK-ONLY peek that reads
 /// `cancel_requested` without posting any terminal status. The terminal Canceled
 /// is posted by `consume_gen_events` only after the blocking generation actually
@@ -2565,6 +2505,120 @@ async fn cancel_peek_tolerates_transient_get_errors() {
     assert!(
         !cancel_peek_with(AxumStatusCode::INTERNAL_SERVER_ERROR, true).await,
         "a transient GET failure must not read as a user cancel"
+    );
+}
+
+// sc-5516 — the in-loop video/training/detail cancel pollers DEFER the terminal `Canceled`
+// to actual-stop: at acknowledgement they only trip the engine flag and post a NON-terminal
+// "Cancelling…" update (so the worker row isn't freed while the in-flight step is still
+// running). This stub captures every progress POST body so a test can assert the
+// acknowledgement status is `running`, not the terminal `canceled`.
+#[cfg(any(
+    target_os = "macos",
+    all(target_os = "windows", feature = "backend-candle")
+))]
+async fn spawn_progress_capture_stub() -> (String, std::sync::Arc<std::sync::Mutex<Vec<Value>>>) {
+    use std::sync::{Arc, Mutex};
+    type Posts = Arc<Mutex<Vec<Value>>>;
+    async fn job_route(axum::extract::Path(job_id): axum::extract::Path<String>) -> Response {
+        Json(job_snapshot_json(&job_id, true)).into_response()
+    }
+    async fn progress_route(
+        State(posts): State<Posts>,
+        axum::extract::Path(job_id): axum::extract::Path<String>,
+        Json(body): Json<Value>,
+    ) -> Response {
+        posts.lock().expect("posts lock").push(body);
+        Json(job_snapshot_json(&job_id, true)).into_response()
+    }
+    let posts: Posts = Arc::new(Mutex::new(Vec::new()));
+    let app = Router::new()
+        .route("/api/v1/jobs/:job_id", get(job_route))
+        .route("/api/v1/jobs/:job_id/progress", post(progress_route))
+        .with_state(posts.clone());
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("listener binds");
+    let address = listener.local_addr().expect("listener has address");
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.expect("stub serves");
+    });
+    (format!("http://{address}"), posts)
+}
+
+/// sc-5516 — `begin_video_cancel` trips the engine cancel flag and posts the
+/// cancel acknowledgement as a NON-terminal `running` "Cancelling…" update. The
+/// terminal `Canceled` (which frees the worker row) is posted by `generate_video`
+/// only after the blocking generation actually stops, so the next queued job waits
+/// until the GPU is genuinely free.
+#[cfg(any(
+    target_os = "macos",
+    all(target_os = "windows", feature = "backend-candle")
+))]
+#[tokio::test]
+async fn begin_video_cancel_trips_flag_and_stays_non_terminal() {
+    let (base_url, posts) = spawn_progress_capture_stub().await;
+    let mut settings = test_settings(base_url.clone(), None);
+    settings.api_url = base_url;
+    let api = ApiClient::new(&settings);
+    let cancel = gen_core::CancelFlag::new();
+    crate::video_jobs::begin_video_cancel(&api, "job-1", &cancel, "mlx").await;
+    assert!(
+        cancel.is_cancelled(),
+        "begin_video_cancel must trip the engine cancel flag"
+    );
+    let posts = posts.lock().expect("posts lock");
+    assert_eq!(
+        posts.len(),
+        1,
+        "exactly one acknowledgement update is posted"
+    );
+    assert_eq!(
+        posts[0]["status"], "running",
+        "the cancel acknowledgement must stay NON-terminal — the terminal Canceled is \
+         deferred to actual-stop (sc-5516)"
+    );
+    assert!(
+        posts[0]["message"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("Cancelling"),
+        "the acknowledgement message should read as Cancelling…"
+    );
+}
+
+/// sc-5516 — the training sibling of the above: `begin_training_cancel` trips the
+/// flag and acknowledges with a NON-terminal `running` update; the terminal
+/// `Canceled` is posted by `consume_training_events` after training stops.
+#[cfg(target_os = "macos")]
+#[tokio::test]
+async fn begin_training_cancel_trips_flag_and_stays_non_terminal() {
+    let (base_url, posts) = spawn_progress_capture_stub().await;
+    let mut settings = test_settings(base_url.clone(), None);
+    settings.api_url = base_url;
+    let api = ApiClient::new(&settings);
+    let cancel = gen_core::CancelFlag::new();
+    crate::training_jobs::begin_training_cancel(&api, "job-1", &cancel, "mlx").await;
+    assert!(
+        cancel.is_cancelled(),
+        "begin_training_cancel must trip the engine cancel flag"
+    );
+    let posts = posts.lock().expect("posts lock");
+    assert_eq!(
+        posts.len(),
+        1,
+        "exactly one acknowledgement update is posted"
+    );
+    assert_eq!(
+        posts[0]["status"], "running",
+        "the cancel acknowledgement must stay NON-terminal (sc-5516)"
+    );
+    assert!(
+        posts[0]["message"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("Cancelling"),
+        "the acknowledgement message should read as Cancelling…"
     );
 }
 
