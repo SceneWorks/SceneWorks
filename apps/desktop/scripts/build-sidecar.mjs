@@ -37,7 +37,31 @@ const exe = triple.includes("windows") ? ".exe" : "";
 // truth for the embedded build). Empty VITE_API_BASE_URL makes the embedded UI
 // talk to its own origin (the API serves it), so it works on the dynamic port
 // with no CORS.
-run(npmCmd, ["run", "api:build:embedded"], { VITE_API_BASE_URL: "" });
+//
+// Opt-in candle (Windows/CUDA) backend (sc-5559): set SCENEWORKS_DESKTOP_CANDLE=1
+// to compile the sidecar with `--features embed-web,backend-candle` so the
+// desktop's Rust worker runs candle for its eligible surface. CUDA-only (product
+// decision: no CPU/AMD); requires the build box to have the CUDA Toolkit 12.9 +
+// VS2022 BuildTools MSVC 14.44 toolset on PATH (run from its vcvars64 — CUDA 12.9
+// rejects VS2026's 14.51). Default OFF keeps the plain build intact for boxes
+// without the CUDA toolkit (windows-latest CI, macOS — candle is Windows-gated).
+const candle =
+  process.platform === "win32" && process.env.SCENEWORKS_DESKTOP_CANDLE === "1";
+if (candle) {
+  // CUDA_COMPUTE_CAP=80 builds `compute_80` PTX the driver JITs forward to sm_120
+  // (Blackwell) — one binary covers Ampere→Blackwell (per sc-3676). Honor an
+  // explicit override (e.g. a single-arch dev build) if the env already set it.
+  const candleEnv = { VITE_API_BASE_URL: "" };
+  if (!process.env.CUDA_COMPUTE_CAP) {
+    candleEnv.CUDA_COMPUTE_CAP = "80";
+  }
+  console.log(
+    `build-sidecar: candle backend ON (CUDA_COMPUTE_CAP=${process.env.CUDA_COMPUTE_CAP ?? "80"})`,
+  );
+  run(npmCmd, ["run", "api:build:embedded:candle"], candleEnv);
+} else {
+  run(npmCmd, ["run", "api:build:embedded"], { VITE_API_BASE_URL: "" });
+}
 
 const src = join(repoRoot, "target", "release", `sceneworks-rust-api${exe}`);
 const outDir = join(desktopDir, "binaries");
