@@ -2012,13 +2012,14 @@ pub fn mac_rust_supported(job: &JobSnapshot) -> Result<(), UnsupportedReason> {
             Some("epic 3040"),
         )),
 
-        // replace_person → native Wan-VACE is MLX-eligible on the replace-capable models
-        // (handled by the early `job_is_any_mlx_eligible` Ok above, sc-3521). This arm is only
-        // reached for a replace_person job on a model with no MLX video engine — that stays torch.
+        // replace_person → native Wan-VACE (the replace-capable models) or native SCAIL-2
+        // (scail2_14b, sc-5452) is MLX-eligible (handled by the early `job_is_any_mlx_eligible` Ok
+        // above). This arm is only reached for a replace_person job on a model with no MLX video
+        // engine — that stays torch.
         JobType::PersonReplace => Err(UnsupportedReason::new(
             model,
             "replace_person",
-            "person replacement runs on native Wan-VACE only for the replace-capable MLX video models; this model has no MLX video engine, so it stays on the Python torch path.",
+            "person replacement runs on native Wan-VACE (the replace-capable MLX video models) or native SCAIL-2 (scail2_14b); this model has no MLX video engine, so it stays on the Python torch path.",
             Some("epic 3040"),
         )),
 
@@ -3704,13 +3705,14 @@ fn video_mode_is_mlx_eligible(model: &str, mode: &str) -> bool {
                 | "ads2v"
         );
     }
-    // SCAIL-2 (epic 5439 / sc-5448) is a Wan2.1-14B I2V character-animation engine: a reference
-    // character image + a driving video → an animated clip. It serves the standalone
-    // `animate_character` mode (the worker paints the color-coded masks from native SAM3). It has no
-    // classic text/image-to-video; cross-identity `replace_person` reuses the same engine but is wired
-    // separately (sc-5452), so it is not admitted here yet.
+    // SCAIL-2 (epic 5439) is a Wan2.1-14B I2V character-animation engine: a reference character
+    // image + a driving video → an animated clip. It serves the standalone `animate_character` mode
+    // (sc-5448, the worker paints the color-coded masks from native SAM3) AND cross-identity
+    // `replace_person` (sc-5452, the integrated backend behind the YOLO11 → ByteTrack → SAM3
+    // person-track pipeline). Both run the same engine; `replace_person` flips the engine
+    // `replace_flag`. It has no classic text/image-to-video.
     if model == "scail2_14b" {
-        return mode == "animate_character";
+        return matches!(mode, "animate_character" | "replace_person");
     }
     match mode {
         "text_to_video" | "image_to_video" => true,
@@ -5310,20 +5312,21 @@ mod mlx_routing_tests {
                 );
             }
         }
-        // SCAIL-2 (sc-5448) serves ONLY the standalone character-animation mode (the worker paints
-        // its masks from native SAM3). No text/image-to-video; cross-identity replace_person is wired
-        // separately (sc-5452), so it is not admitted here yet.
-        assert!(
-            video_mode_is_mlx_eligible("scail2_14b", "animate_character"),
-            "scail2 should serve animate_character"
-        );
+        // SCAIL-2 serves the standalone character-animation mode (sc-5448, the worker paints its
+        // masks from native SAM3) AND cross-identity replace_person (sc-5452, the integrated backend
+        // behind the person-track pipeline). No text/image-to-video.
+        for mode in ["animate_character", "replace_person"] {
+            assert!(
+                video_mode_is_mlx_eligible("scail2_14b", mode),
+                "scail2 should serve {mode}"
+            );
+        }
         for mode in [
             "text_to_video",
             "image_to_video",
             "first_last_frame",
             "extend_clip",
             "video_bridge",
-            "replace_person",
             "video_to_video",
             "nonsense",
         ] {

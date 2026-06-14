@@ -2444,8 +2444,10 @@
     // Distributed the SceneWorks/*-mlx turnkey way: the converted bf16 snapshot is
     // published as `SceneWorks/scail2-mlx`, downloaded on first use (engine quantizes
     // Q4 at load). This entry covers the standalone `animate_character` mode (sc-5447 /
-    // sc-5448). Cross-identity `replace_person` is the SAME engine with replace_flag=true,
-    // wired under sc-5452; LoRA refinement under sc-5451 — not declared until wired.
+    // sc-5448) AND cross-identity `replace_person` (sc-5452 — the SAME engine with
+    // replace_flag=true, offered as the higher-quality backend behind the existing
+    // person-track replacement pipeline). LoRA refinement under sc-5451 — not declared
+    // until wired.
     {
       "id": "scail2_14b",
       "name": "SCAIL-2",
@@ -2453,7 +2455,8 @@
       "type": "video",
       "adapter": "scail2",
       "capabilities": [
-        "animate_character"
+        "animate_character",
+        "replace_person"
       ],
       "downloads": [
         {

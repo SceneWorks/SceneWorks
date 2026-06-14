@@ -14,6 +14,7 @@
 //! **black**, used by sc-5452).
 
 use gen_core::Image;
+use image::RgbImage;
 
 use crate::person_segment_sam3::AllPersonMasks;
 use crate::{WorkerError, WorkerResult};
@@ -123,6 +124,41 @@ pub(crate) fn paint_reference_mask(masks: &AllPersonMasks, bg: [u8; 3]) -> Worke
     })
 }
 
+/// Convert the **existing** person-track binary masks into SCAIL-2's color-coded driving masks for
+/// the integrated `replace_person` path (sc-5452). Each input is one grayscale
+/// `image::RgbImage` per driving frame as produced by `person_replace::person_track_masks` (the
+/// YOLO11 → ByteTrack → SAM3 track, corrections applied; white = the tracked person to regenerate).
+/// The tracked person is painted blue — person 0, so it pairs with the blue reference identity — and
+/// everything else is the solid `bg`. Cross-identity replacement keeps the **driving** clip's world,
+/// so the worker passes [`BG_WHITE`]. The grayscale mask is binarized at the engine's 0.5 midpoint
+/// (red channel ≥ 128 = the person). One color mask per frame, same order and pixel size as input.
+///
+/// This is the integrated counterpart to [`paint_driving_masks`]: that one paints *several* people
+/// from a fresh native-SAM3 pass (the standalone `animate_character` flow); this one paints the
+/// *single* already-tracked person SceneWorks selected for replacement.
+pub(crate) fn paint_track_driving_masks(binary: &[RgbImage], bg: [u8; 3]) -> Vec<Image> {
+    binary
+        .iter()
+        .map(|mask| {
+            let (w, h) = (mask.width() as usize, mask.height() as usize);
+            let mut px = filled(w, h, bg);
+            for (i, pixel) in mask.pixels().enumerate() {
+                if pixel.0[0] >= 128 {
+                    let o = i * 3;
+                    if o + 3 <= px.len() {
+                        px[o..o + 3].copy_from_slice(&PALETTE[0]);
+                    }
+                }
+            }
+            Image {
+                width: mask.width(),
+                height: mask.height(),
+                pixels: px,
+            }
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -212,5 +248,38 @@ mod tests {
             height: 1,
         };
         assert!(paint_reference_mask(&masks, BG_WHITE).is_err());
+    }
+
+    #[test]
+    fn track_driving_paints_tracked_person_blue_on_bg() {
+        // A 3-px grayscale track mask: white (tracked person) at px1, black (bg) at px0/px2; one
+        // intermediate value (200) at... only px1 here. Replacement uses a white background.
+        let mask = RgbImage::from_fn(3, 1, |x, _| {
+            if x == 1 {
+                image::Rgb([255, 255, 255])
+            } else {
+                image::Rgb([0, 0, 0])
+            }
+        });
+        let out = paint_track_driving_masks(std::slice::from_ref(&mask), BG_WHITE);
+        assert_eq!(out.len(), 1);
+        assert_eq!(&out[0].pixels[0..3], &BG_WHITE, "bg pixel stays white");
+        assert_eq!(&out[0].pixels[3..6], &PALETTE[0], "tracked person → blue");
+        assert_eq!(&out[0].pixels[6..9], &BG_WHITE, "bg pixel stays white");
+    }
+
+    #[test]
+    fn track_driving_binarizes_at_midpoint() {
+        // Bilinear-resize artifacts produce intermediate grays; ≥128 is the person, <128 is bg.
+        let mask = RgbImage::from_fn(2, 1, |x, _| {
+            if x == 0 {
+                image::Rgb([127, 127, 127])
+            } else {
+                image::Rgb([128, 128, 128])
+            }
+        });
+        let out = paint_track_driving_masks(std::slice::from_ref(&mask), BG_WHITE);
+        assert_eq!(&out[0].pixels[0..3], &BG_WHITE, "127 < 128 → bg");
+        assert_eq!(&out[0].pixels[3..6], &PALETTE[0], "128 ≥ 128 → person");
     }
 }
