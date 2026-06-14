@@ -228,6 +228,9 @@ pub fn model_adapter_for_family(family: &str) -> Option<&'static str> {
         // adapter. This label is recorded in recipe/lineage only; on Mac the job is
         // MLX-routed by engine id, never instantiated through a Torch adapter.
         "bernini" => Some("bernini"),
+        // SCAIL-2 (epic 5439) is likewise macOS-only native MLX (engine id
+        // "scail2_14b"); no Torch/diffusers adapter. Lineage label only.
+        "scail2" => Some("scail2"),
         _ => None,
     }
 }
@@ -293,6 +296,16 @@ pub fn model_capabilities_for_type_and_family(model_type: &str, family: &str) ->
             "multi_video_to_video",
             "ads2v",
         ],
+        // SCAIL-2 (epic 5439) is a Wan2.1-14B I2V end-to-end character-animation
+        // engine: a reference character image + a driving video → an animated clip.
+        // Its engine descriptor is `Modality::Video` with conditioning
+        // `[Reference, Mask, MultiReference, ControlClip]`. The standalone
+        // `animate_character` mode is wired in sc-5448 (the worker paints the
+        // color-coded masks from native SAM3). Cross-identity `replace_person` is the
+        // same engine with replace_flag=true (sc-5452); LoRA is sc-5451 — neither is
+        // declared until wired. Multi-character (paired ref+mask) awaits the engine
+        // request-contract extension.
+        ("video", "scail2") => vec!["animate_character"],
         _ => Vec::new(),
     }
 }
