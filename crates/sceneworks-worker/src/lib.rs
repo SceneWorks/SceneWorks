@@ -911,19 +911,23 @@ async fn check_cancel(api: &ApiClient, job_id: &str, message: &str) -> WorkerRes
     Ok(())
 }
 
-/// In-band cancel poll for long-running generation/training loops. Returns
-/// true only when the user actually requested cancellation (check_cancel's
-/// `WorkerError::Canceled`). Any other failure — a transient HTTP/API hiccup on
-/// the GET, or a failed Canceled-status POST — is tolerated and retried on the
-/// next poll instead of being misread as a user cancel that aborts a
-/// multi-minute run and strands the job in Running (sc-4174).
-// In-band polling call sites are inside macOS-gated generation paths; the
-// helper itself stays unit-tested on every platform.
+/// Check-only cancel poll (sc-5515): returns `true` when the user requested
+/// cancellation, WITHOUT posting any status. Unlike [`check_cancel`] this never
+/// writes the terminal `Canceled`. In-loop generation/training pollers that sit in
+/// front of a long, un-interruptible compute use this so the job stays non-terminal
+/// ("Cancelling…") until the in-flight work actually stops; they post the terminal
+/// `Canceled` themselves only once it does (sc-5515 image, sc-5516 video/training/detail).
+/// Posting terminal at acknowledgement time frees the worker row
+/// (`jobs_store::update_job_progress`) while the worker process is still busy, so
+/// the next queued job is told a worker is free that isn't — deferring the
+/// terminal write to actual-stop keeps the two in sync. Transient GET failures are
+/// tolerated (read as "not canceled", retried on the next poll) so an API hiccup
+/// never aborts a multi-minute run by being misread as a user cancel (sc-4174).
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
-async fn cancel_requested(api: &ApiClient, job_id: &str, message: &str) -> bool {
-    match check_cancel(api, job_id, message).await {
-        Ok(()) => false,
-        Err(WorkerError::Canceled(_)) => true,
+async fn cancel_requested_peek(api: &ApiClient, job_id: &str) -> bool {
+    let outcome: WorkerResult<JobSnapshot> = api.get_json(&format!("/api/v1/jobs/{job_id}")).await;
+    match outcome {
+        Ok(job) => job.cancel_requested,
         Err(error) => {
             eprintln!("cancel_poll_failed jobId={job_id}: {error}; retrying on the next poll");
             false

@@ -421,11 +421,34 @@ pub(crate) async fn run_image_detail_job(
     };
 
     let mut last_cancel_check = Instant::now();
+    let mut canceled = false;
     while let Some((done, total)) = rx.recv().await {
+        if canceled {
+            continue; // drain so the blocking sender never blocks; terminal posts after stop.
+        }
         if last_cancel_check.elapsed() >= Duration::from_secs(2) {
             last_cancel_check = Instant::now();
-            if cancel_requested(api, &job.id, "Detail enhancement canceled by user.").await {
+            if cancel_requested_peek(api, &job.id).await {
+                // Trip the engine flag and show a NON-terminal "Cancelling…" (indeterminate bar);
+                // the terminal Canceled is deferred to after the blocking refinement actually
+                // stops so the worker row isn't freed while it's still grinding the current tile
+                // (sc-5516; mirrors the image path sc-5515). Best-effort update.
                 cancel.cancel();
+                let _ = update_job(
+                    api,
+                    &job.id,
+                    image_progress(
+                        JobStatus::Running,
+                        ProgressStage::Generating,
+                        0.0,
+                        "Cancelling — finishing the current tile…",
+                        None,
+                        backend,
+                    ),
+                )
+                .await;
+                canceled = true;
+                continue;
             }
         }
         update_job(
@@ -444,9 +467,31 @@ pub(crate) async fn run_image_detail_job(
         heartbeat(api, settings, WorkerStatus::Busy, Some(&job.id)).await?;
     }
 
-    let (refined, tiles) = blocking
+    let join = blocking
         .await
-        .map_err(|error| task_join_error("detail task join", error))??;
+        .map_err(|error| task_join_error("detail task join", error))?;
+    if canceled {
+        // Refinement has actually stopped now — post the TERMINAL Canceled here. This terminal
+        // write frees the worker row (`jobs_store::update_job_progress`) exactly as the worker
+        // returns to its claim loop, so the next queued job waits only until the GPU is genuinely
+        // free (sc-5516). The engine's own early return (`join`) is discarded as the clean cancel.
+        let message = "Detail enhancement canceled by user.";
+        update_job(
+            api,
+            &job.id,
+            image_progress(
+                JobStatus::Canceled,
+                ProgressStage::Canceled,
+                1.0,
+                message,
+                None,
+                backend,
+            ),
+        )
+        .await?;
+        return Err(WorkerError::Canceled(message.to_owned()));
+    }
+    let (refined, tiles) = join?;
     let (out_w, out_h) = (refined.width(), refined.height());
     let media_path = project_path.join(&media_rel);
     let temp_path = media_path.with_extension("tmp.png");

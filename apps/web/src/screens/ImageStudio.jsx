@@ -443,7 +443,15 @@ export function ImageStudio() {
           // character's identity from one reference; gate the picker to them.
           return caps.includes("character_image");
         }
-        return item.type === "image";
+        if (mode === "style_variations") {
+          return caps.includes("style_variations");
+        }
+        // text_to_image: only models that declare a real sourceless T2I path (sc-5549).
+        // Without this gate the Text tab leaked edit-only models (run a degraded
+        // sourceless edit) and reference-only identity models (MLX-ineligible without a
+        // reference → strand on "Waiting for an available worker"); both classes lack
+        // text_to_image. Mirrors the per-capability gating the other three modes use.
+        return caps.includes("text_to_image");
       }),
     [macImageModels, mode],
   );

@@ -2250,6 +2250,40 @@ fn parse_stall_timeout(raw: Option<String>) -> Duration {
         .unwrap_or(VIDEO_STALL_TIMEOUT)
 }
 
+/// First-detection handling for the in-loop video cancel poller (sc-5516): trip the engine
+/// `CancelFlag` and post a NON-terminal "Cancelling…" update (indeterminate progress bar —
+/// `running` + fraction 0.0 renders the "Working" animation, not a backward jump). The terminal
+/// `Canceled` is posted only after the blocking generation actually stops (see `generate_video`),
+/// so the worker row — and therefore the next queued job — is not freed until the GPU is genuinely
+/// idle, and the UI honestly shows "Cancelling…" until completion. Best-effort: a failed status
+/// update here is non-fatal because the post-run terminal write is what ultimately frees the
+/// worker. Mirrors the image path's `begin_image_cancel` (sc-5515).
+#[cfg(any(
+    target_os = "macos",
+    all(target_os = "windows", feature = "backend-candle")
+))]
+pub(crate) async fn begin_video_cancel(
+    api: &ApiClient,
+    job_id: &str,
+    cancel: &CancelFlag,
+    backend: &str,
+) {
+    cancel.cancel();
+    let _ = update_job(
+        api,
+        job_id,
+        video_progress(
+            JobStatus::Running,
+            ProgressStage::Generating,
+            0.0,
+            "Cancelling — finishing the current step…",
+            None,
+            backend,
+        ),
+    )
+    .await;
+}
+
 /// Drive a `run_video_generation` on a blocking thread, forwarding its streamed denoise
 /// progress to the async worker (Generating stage ~0.25..0.58) + polling cancel ~every 2s.
 /// The shared blocking + mpsc + cancel plumbing for Wan and LTX. A forward-progress watchdog
@@ -2320,8 +2354,8 @@ async fn generate_video(
                 }
         if last_cancel.elapsed() >= Duration::from_secs(2) {
             last_cancel = Instant::now();
-            if cancel_requested(api, &job.id, CANCEL_MESSAGE).await {
-                cancel.cancel();
+            if cancel_requested_peek(api, &job.id).await {
+                begin_video_cancel(api, &job.id, &cancel, backend).await;
                 canceled = true;
                 continue;
             }
@@ -2352,8 +2386,8 @@ async fn generate_video(
                 heartbeat(api, settings, WorkerStatus::Busy, Some(&job.id)).await?;
                 if !canceled && last_cancel.elapsed() >= Duration::from_secs(2) {
                     last_cancel = Instant::now();
-                    if cancel_requested(api, &job.id, CANCEL_MESSAGE).await {
-                        cancel.cancel();
+                    if cancel_requested_peek(api, &job.id).await {
+                        begin_video_cancel(api, &job.id, &cancel, backend).await;
                         canceled = true;
                     }
                 }
@@ -2411,6 +2445,25 @@ async fn generate_video(
         )));
     }
     if canceled {
+        // Reached only on a genuine user cancel — the stall/abandon watchdog returns above.
+        // Generation has actually stopped now, so post the TERMINAL Canceled here (not at the
+        // earlier cancel poll, which only tripped the flag + showed "Cancelling…"). This terminal
+        // write is what frees the worker row (`jobs_store::update_job_progress`), so it lands as
+        // the worker returns to its claim loop — the next queued job waits only until the GPU is
+        // genuinely free (sc-5516; mirrors the image path sc-5515).
+        update_job(
+            api,
+            &job.id,
+            video_progress(
+                JobStatus::Canceled,
+                ProgressStage::Canceled,
+                1.0,
+                CANCEL_MESSAGE,
+                None,
+                backend,
+            ),
+        )
+        .await?;
         return Err(WorkerError::Canceled(CANCEL_MESSAGE.to_owned()));
     }
     result

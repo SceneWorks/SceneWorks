@@ -842,6 +842,9 @@ fn is_candle_engine(model: &str) -> bool {
             | "flux_dev"
             | "flux2_klein_9b"
             | "qwen_image"
+            | "chroma1_hd"
+            | "chroma1_base"
+            | "chroma1_flash"
             | "lens"
             | "lens_turbo"
     )
@@ -858,6 +861,7 @@ fn candle_adapter_label(model: &str) -> &'static str {
         "flux_schnell" | "flux_dev" => "candle_flux",
         "flux2_klein_9b" => "candle_flux2",
         "qwen_image" => "candle_qwen",
+        "chroma1_hd" | "chroma1_base" | "chroma1_flash" => "candle_chroma",
         "lens" | "lens_turbo" => "candle_lens",
         // sdxl / realvisxl share the candle "sdxl" engine.
         _ => CANDLE_ADAPTER,
@@ -1078,8 +1082,11 @@ async fn consume_gen_events(
                 mark_started(index);
                 if last_cancel_check.elapsed() >= Duration::from_secs(2) {
                     last_cancel_check = Instant::now();
-                    if cancel_requested(api, &job.id, "Image generation canceled by user.").await {
-                        cancel.cancel();
+                    if cancel_requested_peek(api, &job.id).await {
+                        // Trip the flag + show "Cancelling…", but stay non-terminal until the
+                        // in-flight image actually stops (terminal Canceled posted after the
+                        // blocking run returns) — sc-5515.
+                        begin_image_cancel(api, &job.id, &cancel, plan, asset_writes, backend).await;
                         canceled = true;
                         continue;
                     }
@@ -1162,8 +1169,8 @@ async fn consume_gen_events(
                 heartbeat(api, settings, WorkerStatus::Busy, Some(&job.id)).await?;
                 if !canceled && last_cancel_check.elapsed() >= Duration::from_secs(2) {
                     last_cancel_check = Instant::now();
-                    if cancel_requested(api, &job.id, "Image generation canceled by user.").await {
-                        cancel.cancel();
+                    if cancel_requested_peek(api, &job.id).await {
+                        begin_image_cancel(api, &job.id, &cancel, plan, asset_writes, backend).await;
                         canceled = true;
                     }
                 }
@@ -1175,11 +1182,28 @@ async fn consume_gen_events(
         .await
         .map_err(|error| task_join_error("generation task join", error))?;
     if canceled {
-        // check_cancel already posted the Canceled update; treat the (likely) generate
-        // error as the clean cancel.
-        return Err(WorkerError::Canceled(
-            "Image generation canceled by user.".to_owned(),
-        ));
+        // The generation has now actually stopped, so post the TERMINAL Canceled here
+        // (not at the earlier cancel poll, which only tripped the flag + showed
+        // "Cancelling…"). This terminal write is what frees the worker row
+        // (`jobs_store::update_job_progress`), so it lands exactly as the worker process
+        // returns to its claim loop — the next queued job waits only until the GPU is
+        // genuinely free, and the UI shows "Cancelling…" until completion (sc-5515).
+        // result=None lets `coalesce` keep any partial images already streamed.
+        let message = "Image generation canceled by user.";
+        update_job(
+            api,
+            &job.id,
+            image_progress(
+                JobStatus::Canceled,
+                ProgressStage::Canceled,
+                1.0,
+                message,
+                None,
+                backend,
+            ),
+        )
+        .await?;
+        return Err(WorkerError::Canceled(message.to_owned()));
     }
     task_result
 }
@@ -1203,6 +1227,9 @@ mod candle_label_tests {
         assert_eq!(candle_adapter_label("flux_dev"), "candle_flux");
         assert_eq!(candle_adapter_label("flux2_klein_9b"), "candle_flux2");
         assert_eq!(candle_adapter_label("qwen_image"), "candle_qwen");
+        assert_eq!(candle_adapter_label("chroma1_hd"), "candle_chroma");
+        assert_eq!(candle_adapter_label("chroma1_base"), "candle_chroma");
+        assert_eq!(candle_adapter_label("chroma1_flash"), "candle_chroma");
         assert_eq!(candle_adapter_label("lens"), "candle_lens");
         assert_eq!(candle_adapter_label("lens_turbo"), "candle_lens");
         assert_eq!(candle_adapter_label("sdxl"), "candle_sdxl");
@@ -1214,6 +1241,9 @@ mod candle_label_tests {
             "flux_dev",
             "flux2_klein_9b",
             "qwen_image",
+            "chroma1_hd",
+            "chroma1_base",
+            "chroma1_flash",
             "lens",
             "lens_turbo",
             "sdxl",
@@ -1233,6 +1263,9 @@ mod candle_label_tests {
             "flux_dev",
             "flux2_klein_9b",
             "qwen_image",
+            "chroma1_hd",
+            "chroma1_base",
+            "chroma1_flash",
             "lens",
             "lens_turbo",
         ] {
@@ -1240,7 +1273,6 @@ mod candle_label_tests {
         }
         // Non-candle families + non-base variants (edit ids, the kv distill) are not in the lane.
         for model in [
-            "chroma1_hd",
             "kolors",
             "z_image_edit",
             "qwen_image_edit",
