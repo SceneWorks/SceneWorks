@@ -96,6 +96,10 @@ use candle_gen_flux as _;
 use candle_gen_flux2 as _;
 #[cfg(all(target_os = "windows", feature = "backend-candle"))]
 use candle_gen_qwen_image as _;
+// Candle Chroma (sc-5484, epic 3692): chroma1_hd / chroma1_base / chroma1_flash self-register into the
+// shared gen_core inventory; the `as _;` keeps the MSVC release linker from GC-ing the registrations.
+#[cfg(all(target_os = "windows", feature = "backend-candle"))]
+use candle_gen_chroma as _;
 #[cfg(all(target_os = "windows", feature = "backend-candle"))]
 use candle_gen_z_image as _;
 // Lens / Lens-Turbo (epic 5107 engine / sc-5126 cutover) — the candle Windows/CUDA sibling of the

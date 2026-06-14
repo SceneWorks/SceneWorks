@@ -842,6 +842,9 @@ fn is_candle_engine(model: &str) -> bool {
             | "flux_dev"
             | "flux2_klein_9b"
             | "qwen_image"
+            | "chroma1_hd"
+            | "chroma1_base"
+            | "chroma1_flash"
             | "lens"
             | "lens_turbo"
     )
@@ -858,6 +861,7 @@ fn candle_adapter_label(model: &str) -> &'static str {
         "flux_schnell" | "flux_dev" => "candle_flux",
         "flux2_klein_9b" => "candle_flux2",
         "qwen_image" => "candle_qwen",
+        "chroma1_hd" | "chroma1_base" | "chroma1_flash" => "candle_chroma",
         "lens" | "lens_turbo" => "candle_lens",
         // sdxl / realvisxl share the candle "sdxl" engine.
         _ => CANDLE_ADAPTER,
@@ -1203,6 +1207,9 @@ mod candle_label_tests {
         assert_eq!(candle_adapter_label("flux_dev"), "candle_flux");
         assert_eq!(candle_adapter_label("flux2_klein_9b"), "candle_flux2");
         assert_eq!(candle_adapter_label("qwen_image"), "candle_qwen");
+        assert_eq!(candle_adapter_label("chroma1_hd"), "candle_chroma");
+        assert_eq!(candle_adapter_label("chroma1_base"), "candle_chroma");
+        assert_eq!(candle_adapter_label("chroma1_flash"), "candle_chroma");
         assert_eq!(candle_adapter_label("lens"), "candle_lens");
         assert_eq!(candle_adapter_label("lens_turbo"), "candle_lens");
         assert_eq!(candle_adapter_label("sdxl"), "candle_sdxl");
@@ -1214,6 +1221,9 @@ mod candle_label_tests {
             "flux_dev",
             "flux2_klein_9b",
             "qwen_image",
+            "chroma1_hd",
+            "chroma1_base",
+            "chroma1_flash",
             "lens",
             "lens_turbo",
             "sdxl",
@@ -1233,6 +1243,9 @@ mod candle_label_tests {
             "flux_dev",
             "flux2_klein_9b",
             "qwen_image",
+            "chroma1_hd",
+            "chroma1_base",
+            "chroma1_flash",
             "lens",
             "lens_turbo",
         ] {
@@ -1240,7 +1253,6 @@ mod candle_label_tests {
         }
         // Non-candle families + non-base variants (edit ids, the kv distill) are not in the lane.
         for model in [
-            "chroma1_hd",
             "kolors",
             "z_image_edit",
             "qwen_image_edit",
