@@ -437,3 +437,67 @@ describe("ImageStudio edit source picker", () => {
     expect(createImageJob).toHaveBeenCalledWith(expect.objectContaining({ mode: "edit_image", sourceAssetId: "uploaded-source" }));
   });
 });
+
+describe("ImageStudio model picker capability gating", () => {
+  let container;
+  let root;
+
+  beforeEach(() => {
+    global.IS_REACT_ACT_ENVIRONMENT = true;
+    window.localStorage.clear();
+    container = document.createElement("div");
+    document.body.appendChild(container);
+    root = createRoot(container);
+  });
+
+  afterEach(async () => {
+    await act(async () => root.unmount());
+    container.remove();
+    vi.clearAllMocks();
+  });
+
+  async function render(context) {
+    await act(async () => {
+      root.render(
+        <AppContext.Provider value={context}>
+          <ImageStudio />
+        </AppContext.Provider>,
+      );
+    });
+    await act(async () => {});
+  }
+
+  // One model per capability class so each mode's picker can be checked in isolation.
+  const T2I = { ...Z_IMAGE, id: "t2i_only", name: "T2I Only", capabilities: ["text_to_image"] };
+  const VARIATIONS = {
+    ...Z_IMAGE,
+    id: "variations_model",
+    name: "Variations Model",
+    capabilities: ["text_to_image", "style_variations"],
+  };
+  const EDIT_ONLY = { ...Z_IMAGE, id: "edit_only", name: "Edit Only", capabilities: ["edit_image", "image_to_image"] };
+  const CHARACTER_ONLY = { ...Z_IMAGE, id: "character_only", name: "Character Only", capabilities: ["character_image"] };
+
+  const modelOptionValues = () => [...field(container, "Model").options].map((option) => option.value);
+
+  it("Text tab lists only text_to_image models, excluding edit-only and character-only (sc-5549)", async () => {
+    await render(baseContext({ imageModels: [EDIT_ONLY, T2I, VARIATIONS, CHARACTER_ONLY] }));
+
+    const options = modelOptionValues();
+    expect(options).toContain("t2i_only");
+    expect(options).toContain("variations_model"); // declares text_to_image
+    expect(options).not.toContain("edit_only");
+    expect(options).not.toContain("character_only");
+  });
+
+  it("Variations tab lists only style_variations models (sc-5549)", async () => {
+    await render(baseContext({ imageModels: [EDIT_ONLY, T2I, VARIATIONS, CHARACTER_ONLY] }));
+    await click([...container.querySelectorAll(".segmented-control button")].find((button) => button.textContent === "Variations"));
+
+    const options = modelOptionValues();
+    expect(options).toContain("variations_model");
+    expect(options).not.toContain("t2i_only"); // text_to_image but no style_variations
+    expect(options).not.toContain("edit_only");
+    expect(options).not.toContain("character_only");
+  });
+});
