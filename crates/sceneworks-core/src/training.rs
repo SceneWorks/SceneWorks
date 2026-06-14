@@ -1123,7 +1123,10 @@ fn ltx_video_lora_target() -> TrainingTarget {
         output_kind: TrainingOutputKind::Lora,
         family: "ltx-video".to_owned(),
         base_model: "ltx_2_3".to_owned(),
-        base_model_repo: Some("notapalindrome/ltx23-mlx-av-q4".to_owned()),
+        // Mirrors the generation load path (sc-5608): the turnkey SceneWorks LTX-2.3 MLX bundle,
+        // replacing the third-party notapalindrome mirror. Informational here — the MLX kernel loads
+        // the base from `base_model_path` (the app-managed dir), not this repo.
+        base_model_repo: Some("SceneWorks/ltx-2.3-mlx".to_owned()),
         kernel: "ltx_mlx_lora".to_owned(),
         defaults: TrainingConfig {
             rank: 32,

@@ -3501,10 +3501,12 @@ fn ltx_available(request: &VideoRequest, settings: &Settings) -> bool {
     ltx_engine_id(&request.model).is_some() && resolve_ltx_model_dir(settings, request).is_ok()
 }
 
-/// The converted A/V repo the engine's LTX path consumes (the one it replaces); the Q4
-/// base checkpoint with the full audio+I2V component set.
+/// The turnkey SceneWorks LTX-2.3 MLX bundle (sc-5608, epic 5594; replaces the third-party
+/// `notapalindrome/ltx23-mlx-av-q4` + `mlx-community/gemma-3-12b-it-bf16` mirrors). One repo with
+/// the LTX `q4/` (default) + `q8/` (opt-in) checkpoint subdirs — each the full audio+I2V component
+/// set — plus the bundled `gemma/` text encoder the engine reads via `$LTX_GEMMA_DIR`.
 #[cfg(target_os = "macos")]
-const LTX_TURNKEY_REPO: &str = "notapalindrome/ltx23-mlx-av-q4";
+const LTX_BUNDLE_REPO: &str = "SceneWorks/ltx-2.3-mlx";
 
 /// Whether `dir` is a converted LTX snapshot **complete for the current engine** — it must
 /// carry the audio `vocoder` + I2V `vae_encoder` + single `upsampler`/`vae_decoder` the
@@ -3525,11 +3527,27 @@ fn ltx_dir_is_complete(dir: &Path) -> bool {
     .all(|file| dir.join(file).is_file())
 }
 
+/// Pick the engine-complete `q4/`/`q8/` checkpoint subdir of a SceneWorks LTX bundle `root`,
+/// preferring the requested quant (sc-5608). Returns the first **complete** ([`ltx_dir_is_complete`])
+/// subdir — so a partially-downloaded bundle falls through rather than half-loading — or `None`.
+#[cfg(target_os = "macos")]
+fn ltx_bundle_subdir(root: &Path, wants_q8: bool) -> Option<PathBuf> {
+    let order: &[&str] = if wants_q8 {
+        &["q8", "q4"]
+    } else {
+        &["q4", "q8"]
+    };
+    order
+        .iter()
+        .map(|sub| root.join(sub))
+        .find(|dir| ltx_dir_is_complete(dir))
+}
+
 /// Resolve the converted LTX MLX snapshot dir. Env override (`SCENEWORKS_MLX_LTX_DIR` /
-/// `…_EROS_DIR`) → `<data>/models/mlx/<candidate>` → (base only) the turnkey HF snapshot
-/// [`LTX_TURNKEY_REPO`]. Only a dir **complete for the current engine**
-/// ([`ltx_dir_is_complete`]) counts, so a stale local conversion is skipped. For the base
-/// model the Q4 checkpoint is the default (`mlxQuantize: 8` prefers the Q8 one); the engine
+/// `…_EROS_DIR`) → `<data>/models/mlx/<candidate>` → (base only) the turnkey SceneWorks bundle
+/// [`LTX_BUNDLE_REPO`], descending into its `q4/`/`q8/` subdir. Only a dir **complete for the
+/// current engine** ([`ltx_dir_is_complete`]) counts, so a stale local conversion is skipped. For
+/// the base model the Q4 checkpoint is the default (`mlxQuantize: 8` prefers the Q8 one); the engine
 /// reads the actual bits from `split_model.json`, so this only picks *which* dir to load.
 #[cfg(target_os = "macos")]
 fn resolve_ltx_model_dir(settings: &Settings, request: &VideoRequest) -> WorkerResult<PathBuf> {
@@ -3564,20 +3582,48 @@ fn resolve_ltx_model_dir(settings: &Settings, request: &VideoRequest) -> WorkerR
             return Ok(dir);
         }
     }
-    // Turnkey converted A/V snapshot for the base model (the repo the engine replaces).
+    // Turnkey SceneWorks bundle for the base model (sc-5608): one repo with `q4/` + `q8/` LTX
+    // subdirs (+ a bundled `gemma/` the engine reads via $LTX_GEMMA_DIR). Pick the quant subdir;
+    // the engine reads the actual bits from split_model.json, so this only selects which to load.
     if !eros {
-        if let Some(dir) = huggingface_snapshot_dir(&settings.data_dir, LTX_TURNKEY_REPO) {
-            if ltx_dir_is_complete(&dir) {
+        if let Some(root) = huggingface_snapshot_dir(&settings.data_dir, LTX_BUNDLE_REPO) {
+            if let Some(dir) = ltx_bundle_subdir(&root, wants_q8) {
                 return Ok(dir);
             }
         }
     }
     Err(WorkerError::InvalidPayload(format!(
         "{}: no complete converted LTX MLX weights found under {} (expected one of {candidates:?} \
-         with the audio vocoder + i2v vae_encoder; or the turnkey {LTX_TURNKEY_REPO}; or set ${env})",
+         with the audio vocoder + i2v vae_encoder; or the turnkey {LTX_BUNDLE_REPO} q4/ or q8/ \
+         subdir; or set ${env})",
         request.model,
         settings.data_dir.join("models").join("mlx").display(),
     )))
+}
+
+/// The Gemma-3 text encoder bundled beside a resolved LTX dir, if present: `<parent>/gemma`
+/// (sc-5608). The SceneWorks bundle ships it as a sibling of the `q4/`/`q8/` checkpoint dir; a
+/// local/legacy conversion has none (→ the engine falls back to the HF-cache gemma snapshot).
+#[cfg(target_os = "macos")]
+fn bundled_ltx_gemma_dir(model_dir: &Path) -> Option<PathBuf> {
+    let gemma = model_dir.parent()?.join("gemma");
+    gemma.is_dir().then_some(gemma)
+}
+
+/// Point the engine at the Gemma-3 text encoder bundled beside the resolved LTX dir (sc-5608).
+/// Setting `$LTX_GEMMA_DIR` (the var [`mlx-gen-ltx`'s `resolve_gemma_dir`] honors on every OS) makes
+/// a fresh install self-contained — no separate `mlx-community/gemma` download. Best-effort +
+/// non-destructive: honors an explicit operator `$LTX_GEMMA_DIR`, and skips when no bundled `gemma/`
+/// sibling exists ([`bundled_ltx_gemma_dir`]). The worker runs video jobs sequentially, so the env
+/// set is race-free.
+#[cfg(target_os = "macos")]
+fn ensure_bundled_ltx_gemma_dir(model_dir: &Path) {
+    if std::env::var_os("LTX_GEMMA_DIR").is_some() {
+        return; // honor an explicit operator override.
+    }
+    if let Some(gemma) = bundled_ltx_gemma_dir(model_dir) {
+        std::env::set_var("LTX_GEMMA_DIR", gemma);
+    }
 }
 
 /// User LoRAs for an LTX generation (sc-3035): each at a uniform per-pass strength
@@ -4048,9 +4094,13 @@ async fn generate_ltx(
         }
         _ => resolve_ltx_conditioning(settings, request, project_path)?,
     };
+    let model_dir = resolve_ltx_model_dir(settings, request)?;
+    // When the resolved dir is the SceneWorks bundle subdir, its sibling `gemma/` is the text
+    // encoder — point the engine at it (sc-5608) before load. No-op for legacy/local conversions.
+    ensure_bundled_ltx_gemma_dir(&model_dir);
     let input = VideoGenInput {
         engine_id,
-        model_dir: resolve_ltx_model_dir(settings, request)?,
+        model_dir,
         quant: None,
         adapters: resolve_ltx_adapters(request)?,
         conditioning,
@@ -6758,6 +6808,64 @@ mod tests {
         assert_eq!(ltx_engine_id("z_image_turbo"), None);
     }
 
+    /// SceneWorks bundle resolution (sc-5608): `ltx_bundle_subdir` picks the requested quant subdir,
+    /// prefers a complete one over an incomplete sibling, and `bundled_ltx_gemma_dir` finds `gemma/`.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn ltx_bundle_subdir_picks_quant_and_finds_gemma() {
+        fn write_complete_ltx_dir(dir: &Path) {
+            std::fs::create_dir_all(dir).unwrap();
+            for file in [
+                "connector.safetensors",
+                "transformer.safetensors",
+                "upsampler.safetensors",
+                "vae_decoder.safetensors",
+                "vae_encoder.safetensors",
+                "audio_vae.safetensors",
+                "vocoder.safetensors",
+            ] {
+                std::fs::write(dir.join(file), b"x").unwrap();
+            }
+        }
+        let root = std::env::temp_dir().join(format!("sw_ltx_bundle_{}", Uuid::new_v4().simple()));
+        let (q4, q8) = (root.join("q4"), root.join("q8"));
+        write_complete_ltx_dir(&q4);
+        write_complete_ltx_dir(&q8);
+        std::fs::create_dir_all(root.join("gemma")).unwrap();
+
+        // Default prefers q4; mlxQuantize: 8 prefers q8.
+        assert_eq!(
+            ltx_bundle_subdir(&root, false).as_deref(),
+            Some(q4.as_path())
+        );
+        assert_eq!(
+            ltx_bundle_subdir(&root, true).as_deref(),
+            Some(q8.as_path())
+        );
+
+        // The gemma encoder is found as a sibling of the loaded quant dir.
+        assert_eq!(
+            bundled_ltx_gemma_dir(&q4).as_deref(),
+            Some(root.join("gemma").as_path())
+        );
+
+        // An incomplete preferred subdir falls back to the complete sibling.
+        std::fs::remove_file(q8.join("vocoder.safetensors")).unwrap();
+        assert_eq!(
+            ltx_bundle_subdir(&root, true).as_deref(),
+            Some(q4.as_path())
+        );
+
+        // No complete subdir → None; no gemma sibling → None.
+        let bare = std::env::temp_dir().join(format!("sw_ltx_bare_{}", Uuid::new_v4().simple()));
+        std::fs::create_dir_all(bare.join("q4")).unwrap();
+        assert!(ltx_bundle_subdir(&bare, false).is_none());
+        assert!(bundled_ltx_gemma_dir(&bare.join("q4")).is_none());
+
+        let _ = std::fs::remove_dir_all(&root);
+        let _ = std::fs::remove_dir_all(&bare);
+    }
+
     #[cfg(target_os = "macos")]
     #[test]
     fn svd_engine_id_maps_only_svd() {
@@ -7323,9 +7431,9 @@ mod tests {
     }
 
     /// An LTX-2.3 snapshot **complete for the current engine** ([`ltx_dir_is_complete`]),
-    /// else `None` so the smoke skips. Checks `$SCENEWORKS_MLX_LTX_DIR`, the app-managed
-    /// `<data>/models/mlx/*` dirs (which predate the audio+i2v layout, so usually skip), and
-    /// the turnkey HF-cache snapshot ([`LTX_TURNKEY_REPO`], `notapalindrome/ltx23-mlx-av-q4`).
+    /// else `None` so the smoke skips. Checks `$SCENEWORKS_MLX_LTX_DIR`, the turnkey SceneWorks
+    /// bundle's `q4/`/`q8/` subdirs in the HF cache ([`LTX_BUNDLE_REPO`], `SceneWorks/ltx-2.3-mlx`),
+    /// and the app-managed `<data>/models/mlx/*` dirs (which predate the audio+i2v layout, so skip).
     #[cfg(target_os = "macos")]
     fn ltx_complete_dir() -> Option<PathBuf> {
         let mut candidates: Vec<PathBuf> = Vec::new();
@@ -7334,11 +7442,15 @@ mod tests {
         }
         if let Ok(home) = std::env::var("HOME") {
             let hub = PathBuf::from(&home).join(".cache/huggingface/hub");
+            // The turnkey SceneWorks bundle: each snapshot carries `q4/` + `q8/` checkpoint subdirs.
             let snapshots = hub
-                .join("models--notapalindrome--ltx23-mlx-av-q4")
+                .join("models--SceneWorks--ltx-2.3-mlx")
                 .join("snapshots");
             if let Ok(entries) = std::fs::read_dir(&snapshots) {
-                candidates.extend(entries.flatten().map(|e| e.path()).filter(|p| p.is_dir()));
+                for snapshot in entries.flatten().map(|e| e.path()).filter(|p| p.is_dir()) {
+                    candidates.push(snapshot.join("q4"));
+                    candidates.push(snapshot.join("q8"));
+                }
             }
             let base =
                 PathBuf::from(home).join("Library/Application Support/SceneWorks/data/models/mlx");
@@ -7367,6 +7479,9 @@ mod tests {
             eprintln!("skipping ltx_real_weights_with_audio: no complete LTX snapshot found");
             return;
         };
+        // The bundle ships gemma beside the q4/q8 dir; point the engine at it (matches the worker
+        // path) so the smoke needs no separate mlx-community/gemma snapshot in the HF cache.
+        ensure_bundled_ltx_gemma_dir(&model_dir);
         let input = VideoGenInput {
             engine_id: "ltx_2_3",
             model_dir,

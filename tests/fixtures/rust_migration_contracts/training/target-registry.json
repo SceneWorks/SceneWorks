@@ -405,7 +405,7 @@
       "outputKind": "lora",
       "family": "ltx-video",
       "baseModel": "ltx_2_3",
-      "baseModelRepo": "notapalindrome/ltx23-mlx-av-q4",
+      "baseModelRepo": "SceneWorks/ltx-2.3-mlx",
       "kernel": "ltx_mlx_lora",
       "defaults": {
         "rank": 32,

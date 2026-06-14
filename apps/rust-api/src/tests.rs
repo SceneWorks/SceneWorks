@@ -229,15 +229,15 @@ fn mlx_catalog_status_reports_turnkey_and_conversion_states() {
     // Turnkey model, repo not cached -> missing / ready.
     let ltx = json!({
         "id": "ltx_2_3",
-        "mlx": { "minMemoryGb": 31, "repo": "notapalindrome/ltx23-mlx-av-q4" }
+        "mlx": { "minMemoryGb": 31, "repo": "SceneWorks/ltx-2.3-mlx" }
     });
     let status = mlx_catalog_status(ltx.as_object().unwrap(), &data_dir).expect("ltx status");
     assert_eq!(status.install_state, "missing");
     assert_eq!(status.conversion_state, "ready");
 
     // Turnkey model with the repo cached -> installed / ready.
-    let repo_dir = huggingface_repo_cache_path(&data_dir, "notapalindrome/ltx23-mlx-av-q4")
-        .expect("repo cache path");
+    let repo_dir =
+        huggingface_repo_cache_path(&data_dir, "SceneWorks/ltx-2.3-mlx").expect("repo cache path");
     std::fs::create_dir_all(repo_dir.join("snapshots")).expect("create snapshots");
     let status = mlx_catalog_status(ltx.as_object().unwrap(), &data_dir).expect("ltx status");
     assert_eq!(status.install_state, "installed");
@@ -329,7 +329,7 @@ fn inject_converted_model_path_populates_modelpath_seam_once_converted() {
     // A non-conversion model is untouched.
     let mut turnkey = json!({
         "id": "ltx_2_3",
-        "mlx": { "repo": "notapalindrome/ltx23-mlx-av-q4" }
+        "mlx": { "repo": "SceneWorks/ltx-2.3-mlx" }
     });
     inject_converted_model_path(&mut turnkey, &data_dir);
     assert!(turnkey.get("modelPath").is_none());
