@@ -21,6 +21,7 @@
     "desktop:check": "cargo clippy -p sceneworks-desktop --all-targets -- -D warnings",
     "web:build": "npm --prefix apps/web run build",
     "api:build:embedded": "npm run web:build && cargo build -p sceneworks-rust-api --release --features embed-web",
+    "api:build:embedded:candle": "npm run web:build && cargo build -p sceneworks-rust-api --release --features embed-web,backend-candle",
     "tauri:dev": "npm --prefix apps/desktop run dev",
     "tauri:build": "npm --prefix apps/desktop run build"
   },
