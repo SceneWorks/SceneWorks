@@ -56,6 +56,20 @@ fn with_candle_capabilities(mut gpu: DiscoveredGpu, settings: &Settings) -> Disc
                     gpu.capabilities.push(capability);
                 }
             }
+            // SenseNova-U1 VQA + Document-Studio interleave (sc-5501) run off the `Generator`
+            // registry via the concrete candle `T2iModel::{vqa, interleave_gen}` (their text /
+            // text+image output the neutral contract can't express), so they are NOT in
+            // `registry_capabilities`. Advertise them explicitly — the candle SenseNova provider is
+            // force-linked under `backend-candle`, and the routing gate confines them to the
+            // SenseNova-U1 ids (`understanding_job_is_mlx_eligible`).
+            for capability in [
+                WorkerCapability::ImageVqa,
+                WorkerCapability::ImageInterleave,
+            ] {
+                if !gpu.capabilities.contains(&capability) {
+                    gpu.capabilities.push(capability);
+                }
+            }
             // The lane marker the routing gate keys off (mirrors the existing `nvidia` marker).
             gpu.capabilities
                 .push(WorkerCapability::Unknown("candle".to_owned()));

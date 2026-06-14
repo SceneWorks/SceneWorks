@@ -106,8 +106,9 @@ fn model_repo(request: &ImageRequest, model: &ResolvedModel) -> String {
 
 /// Resolve the weights snapshot directory: an explicit `modelPath` dir wins, else the
 /// HuggingFace cache snapshot for the model repo. `None` when the model is not a known
-/// engine family or its snapshot is absent.
-#[cfg(target_os = "macos")]
+/// engine family or its snapshot is absent. Available on the candle lane too (sc-5501): the
+/// off-Mac SenseNova-U1 VQA / interleave handlers resolve their snapshot through it.
+#[cfg(any(target_os = "macos", feature = "backend-candle"))]
 pub(crate) fn resolve_weights_dir(
     request: &ImageRequest,
     settings: &Settings,

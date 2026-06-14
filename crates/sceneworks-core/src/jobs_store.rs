@@ -3986,6 +3986,16 @@ fn worker_supports_job(worker: &WorkerSnapshot, job: &JobSnapshot) -> bool {
         if matches!(job.job_type, JobType::TrainingCaption) && !caption_job_is_mlx_eligible(job) {
             return false;
         }
+        // SenseNova-U1 understanding (sc-5501): the candle worker serves `image_vqa` /
+        // `image_interleave` only for the SenseNova-U1 ids (via the concrete candle `T2iModel::{vqa,
+        // interleave_gen}` — the off-Mac sibling of the MLX understanding path). Eligibility is
+        // backend-neutral (the model is SenseNova-U1), so reuse the understanding gate; a
+        // non-SenseNova understanding job stays on the Python torch worker.
+        if matches!(job.job_type, JobType::ImageVqa | JobType::ImageInterleave)
+            && !understanding_job_is_mlx_eligible(job)
+        {
+            return false;
+        }
     }
     let advertises = |capability: &str| {
         worker
@@ -4882,6 +4892,55 @@ mod candle_routing_tests {
         assert!(worker_supports_job(
             &torch,
             &caption_job(json!({ "captioner": "blip2", "datasetId": "ds_1" }))
+        ));
+    }
+
+    /// sc-5501: the candle worker claims SenseNova-U1 `image_vqa` / `image_interleave` (served off-Mac
+    /// by the concrete candle `T2iModel::{vqa, interleave_gen}`) but refuses other models, which stay
+    /// on the Python torch worker.
+    #[test]
+    fn candle_worker_claims_sensenova_understanding_but_refuses_other_models() {
+        let candle = gpu_worker(&["gpu", "image_vqa", "image_interleave", "candle"]);
+        let understanding_job = |job_type: &str, payload: Value| -> JobSnapshot {
+            serde_json::from_value(json!({
+                "id": "job_u",
+                "type": job_type,
+                "status": "queued",
+                "payload": payload,
+                "result": {},
+                "requestedGpu": "auto",
+                "progress": 0,
+                "stage": "queued",
+                "message": "",
+                "attempts": 1,
+                "cancelRequested": false,
+                "createdAt": "2026-06-14T00:00:00Z",
+                "updatedAt": "2026-06-14T00:00:00Z",
+            }))
+            .expect("valid JobSnapshot")
+        };
+        // Claims SenseNova-U1 VQA + interleave (base + `_fast` ids).
+        assert!(worker_supports_job(
+            &candle,
+            &understanding_job(
+                "image_vqa",
+                json!({ "model": "sensenova_u1_8b", "question": "what is this?", "sourceAssetId": "a1" })
+            )
+        ));
+        assert!(worker_supports_job(
+            &candle,
+            &understanding_job(
+                "image_interleave",
+                json!({ "model": "sensenova_u1_8b_fast", "prompt": "a short illustrated story" })
+            )
+        ));
+        // Refuses a non-SenseNova understanding job → falls back to the Python torch worker.
+        assert!(!worker_supports_job(
+            &candle,
+            &understanding_job(
+                "image_vqa",
+                json!({ "model": "some_other_vlm", "question": "?", "sourceAssetId": "a1" })
+            )
         ));
     }
 }
