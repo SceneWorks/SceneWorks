@@ -3111,12 +3111,14 @@ fn sdxl_mlx_eligible(_payload: &Map<String, Value>) -> bool {
 }
 
 /// The models the candle (Windows/CUDA) lane can serve (epic 3672 sc-3678 for SDXL; epic 5095
-/// sc-5096 adds the four image families). Mirrors the worker's `image_jobs::is_candle_engine`:
-/// SDXL/RealVisXL (`realvisxl` shares the candle `"sdxl"` engine via a weights swap), plus
-/// z-image-turbo, FLUX.1 schnell/dev, FLUX.2-klein-9B, and Qwen-Image — the base **txt2img** ids
-/// only. Deliberately narrow: candle is a gated txt2img-only lane, so every conditioning shape AND
-/// every non-base weight variant (e.g. `flux2_klein_9b_kv`, `qwen_image_edit`) falls back to the
-/// Python torch worker.
+/// sc-5096 adds the four image families; sc-5126 adds Lens / Lens-Turbo). Mirrors the worker's
+/// `image_jobs::is_candle_engine`: SDXL/RealVisXL (`realvisxl` shares the candle `"sdxl"` engine via a
+/// weights swap), plus z-image-turbo, FLUX.1 schnell/dev, FLUX.2-klein-9B, Qwen-Image, and
+/// `lens`/`lens_turbo` — the base **txt2img** ids only. Deliberately narrow: candle is a gated
+/// txt2img-only lane, so every conditioning shape AND every non-base weight variant (e.g.
+/// `flux2_klein_9b_kv`, `qwen_image_edit`) falls back to the Python torch worker. Lens is pure T2I
+/// (no conditioning at all) but — unlike the others — DOES advertise quant + LoRA/LoKr, so it is also
+/// listed in [`CANDLE_QUANT_LORA_MODELS`] below to exempt it from the quant/LoRA → torch fallbacks.
 const CANDLE_ROUTED_MODELS: &[&str] = &[
     "sdxl",
     "realvisxl",
@@ -3125,7 +3127,16 @@ const CANDLE_ROUTED_MODELS: &[&str] = &[
     "flux_dev",
     "flux2_klein_9b",
     "qwen_image",
+    "lens",
+    "lens_turbo",
 ];
+
+/// The candle image families that advertise on-the-fly Q4/Q8 quant AND LoRA/LoKr adapters — Lens /
+/// Lens-Turbo (sc-5126), the first such candle family. For these a LoRA or an explicit quant request
+/// does NOT force the job to the Python torch worker: the candle `generate_candle_stream` maps both
+/// into the `LoadSpec` (descriptor-gated, see `ResolvedModel::supports_quant`/`supports_adapters`).
+/// Every other candle family advertises neither, so a LoRA/quant request there still defers to torch.
+const CANDLE_QUANT_LORA_MODELS: &[&str] = &["lens", "lens_turbo"];
 
 /// Whether `worker` is the candle (Windows/CUDA) SDXL worker — identified by the `candle` marker
 /// capability it self-advertises (`gpu::with_candle_capabilities`), mirroring the `nvidia` marker
@@ -3174,18 +3185,23 @@ fn image_request_candle_eligible(model: &str, payload: &Map<String, Value>) -> b
             .and_then(Value::as_str)
             .is_some_and(|value| !value.trim().is_empty())
     };
-    // Any conditioning asset (img2img source, IP-Adapter reference, or inpaint mask) → torch.
+    // Any conditioning asset (img2img source, IP-Adapter reference, or inpaint mask) → torch. Applies
+    // to EVERY candle family including Lens (pure T2I — no conditioning shapes in the Lens port).
     if has_nonempty_id("sourceAssetId")
         || has_nonempty_id("referenceAssetId")
         || has_nonempty_id("maskAssetId")
     {
         return false;
     }
-    // LoRAs are not in the candle lane (the descriptor advertises none).
-    if payload
-        .get("loras")
-        .and_then(Value::as_array)
-        .is_some_and(|loras| !loras.is_empty())
+    // Lens / Lens-Turbo advertise Q4/Q8 + LoRA/LoKr, so a quant request or a LoRA stays on the candle
+    // lane for them; every other candle family advertises neither and defers those to torch.
+    let supports_quant_lora = CANDLE_QUANT_LORA_MODELS.contains(&model);
+    // LoRAs: not in the candle lane unless the family advertises adapters (Lens).
+    if !supports_quant_lora
+        && payload
+            .get("loras")
+            .and_then(Value::as_array)
+            .is_some_and(|loras| !loras.is_empty())
     {
         return false;
     }
@@ -3199,10 +3215,11 @@ fn image_request_candle_eligible(model: &str, payload: &Map<String, Value>) -> b
     if has_poses {
         return false;
     }
-    // On-the-fly quantization (`advanced.mlxQuantize` > 0) → torch. The candle providers advertise
-    // `supported_quants: &[]` (dense bf16/fp16 only), so an explicit quant request can't be honored
-    // here — route it to Python rather than silently running dense (sc-5099, no dropped controls).
-    if candle_request_wants_quant(payload) {
+    // On-the-fly quantization (`advanced.mlxQuantize` > 0) → torch UNLESS the family advertises quant.
+    // The sc-3675/sc-5096 candle providers advertise `supported_quants: &[]` (dense bf16/fp16 only), so
+    // an explicit quant request can't be honored — route to Python rather than silently running dense
+    // (sc-5099). Lens advertises Q4/Q8, so its quant request stays here (sc-5126).
+    if !supports_quant_lora && candle_request_wants_quant(payload) {
         return false;
     }
     true
@@ -4309,6 +4326,56 @@ mod candle_routing_tests {
             "sdxl",
             &object(json!({ "advanced": { "steps": 30 } }))
         ));
+    }
+
+    #[test]
+    fn lens_quant_and_lora_stay_on_the_candle_lane() {
+        // sc-5126: Lens / Lens-Turbo advertise Q4/Q8 + LoRA/LoKr, so — UNLIKE the sc-3675/sc-5096
+        // families — a quant request or a LoRA does NOT defer to torch; the candle lane maps both into
+        // the LoadSpec.
+        for model in ["lens", "lens_turbo"] {
+            assert!(
+                image_request_candle_eligible(
+                    model,
+                    &object(json!({ "advanced": { "mlxQuantize": 8 } }))
+                ),
+                "{model} Q8 request should stay on candle"
+            );
+            assert!(
+                image_request_candle_eligible(
+                    model,
+                    &object(json!({ "advanced": { "mlxQuantize": 4 } }))
+                ),
+                "{model} Q4 request should stay on candle"
+            );
+            assert!(
+                image_request_candle_eligible(
+                    model,
+                    &object(json!({ "loras": [{ "name": "x", "path": "/x.safetensors" }] }))
+                ),
+                "{model} with a LoRA should stay on candle"
+            );
+        }
+    }
+
+    #[test]
+    fn lens_conditioning_shapes_fall_back_to_torch() {
+        // Lens is pure T2I (the port has no img2img/edit/reference/ControlNet), so every conditioning
+        // shape still defers to the Python worker — quant/LoRA being allowed does not widen this.
+        let cases = [
+            json!({ "mode": "edit_image", "sourceAssetId": "a" }),
+            json!({ "referenceAssetId": "a" }),
+            json!({ "maskAssetId": "m" }),
+            json!({ "advanced": { "poses": [{ "id": "pose_1" }] } }),
+        ];
+        for model in ["lens", "lens_turbo"] {
+            for case in &cases {
+                assert!(
+                    !image_request_candle_eligible(model, &object(case.clone())),
+                    "{model} conditioning shape must fall back to torch: {case}"
+                );
+            }
+        }
     }
 
     #[test]
