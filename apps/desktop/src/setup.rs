@@ -849,6 +849,25 @@ h=glob.glob(os.path.join(d,'capi','libonnxruntime*.dylib'));sys.stdout.write(h[0
     (!path.is_empty() && Path::new(&path).exists()).then_some(path)
 }
 
+/// Resolve the bundled CUDA runtime redistributable DLL directory (sc-5560). The
+/// candle (Windows/CUDA) worker links cudarc with dynamic-linking, which
+/// `LoadLibrary`s cudart/cublas/cublasLt/curand/nvrtc by name at runtime; bundling
+/// them (staged by build-sidecar.mjs into the `cuda` resource dir on the Windows
+/// candle build) lets a clean NVIDIA machine run without a CUDA Toolkit install.
+/// `spawn_api` prepends this dir to the sidecar's PATH so the loader finds them.
+/// Returns None on a plain build — the placeholder dir ships only a README, no DLL,
+/// so a non-candle desktop leaves PATH untouched. Windows-only (candle is Windows-
+/// gated); the bundled driver-side CUDA (nvcuda.dll) is NOT shipped — it comes with
+/// the user's NVIDIA display driver (>= 576.02).
+#[cfg(target_os = "windows")]
+fn resolve_bundled_cuda_dir(app: &AppHandle) -> Option<std::path::PathBuf> {
+    let resources = app.path().resource_dir().ok()?;
+    let dir = resources.join("cuda");
+    // Probe for a real redist DLL; the placeholder (non-candle) build ships only a
+    // README, so this stays None there and the candle DLLs gate themselves.
+    dir.join("cudart64_12.dll").exists().then_some(dir)
+}
+
 /// Spawn the API sidecar, pipe its output to api.log, and return the chosen port.
 fn spawn_api(app: &AppHandle) -> Result<(), String> {
     let mut command = app
@@ -899,6 +918,19 @@ fn spawn_api(app: &AppHandle) -> Result<(), String> {
     #[cfg(target_os = "macos")]
     if let Some(ort_dylib) = resolve_bundled_onnxruntime(app) {
         command = command.env("ORT_DYLIB_PATH", ort_dylib);
+    }
+    // The candle (Windows/CUDA) worker's cudarc dynamic-linking `LoadLibrary`s the
+    // CUDA runtime DLLs by name; prepend the bundled redist dir to the sidecar's
+    // PATH so they resolve without a CUDA Toolkit on the machine (sc-5560). No-op on
+    // a plain build — the resolver returns None when only the placeholder is staged.
+    #[cfg(target_os = "windows")]
+    if let Some(cuda_dir) = resolve_bundled_cuda_dir(app) {
+        let existing = std::env::var_os("PATH").unwrap_or_default();
+        let mut paths = vec![cuda_dir];
+        paths.extend(std::env::split_paths(&existing));
+        if let Ok(joined) = std::env::join_paths(paths) {
+            command = command.env("PATH", joined);
+        }
     }
     // FLUX.2-klein true_v2 single-file conversion is now in-process Rust/MLX
     // (mlx_gen_flux2::convert_and_assemble, sc-3136) — no sidecar venv / converter

@@ -34,7 +34,7 @@ for (const name of ["sceneworks-api", "uv"]) {
   console.log(`stage-test-sidecars: staged ${path}`);
 }
 
-for (const dir of ["python-src", "onnxruntime", "ffmpeg"]) {
+for (const dir of ["python-src", "onnxruntime", "ffmpeg", "cuda"]) {
   const path = join(desktopDir, dir);
   mkdirSync(path, { recursive: true });
   writeFileSync(
