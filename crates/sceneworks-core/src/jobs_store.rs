@@ -1961,8 +1961,10 @@ pub fn mac_rust_supported(job: &JobSnapshot) -> Result<(), UnsupportedReason> {
     }
     let model = job.payload.get("model").and_then(Value::as_str);
     match job.job_type {
-        // MLX-agnostic job types: metadata/utility work, ffmpeg, and prompt refine run
-        // in-process on macOS with no Python torch dependency.
+        // In-process macOS job types with no Python torch dependency: MLX-agnostic metadata/utility
+        // work + ffmpeg, plus prompt refine — now served by the native MLX `prompt_refine` TextLlm
+        // provider (sc-5552, the mlx twin of the candle sc-5525 cutover), so the worker advertises +
+        // claims it and this `Ok` is backed by a real capability (no longer the pre-sc-5552 strand).
         JobType::Placeholder
         | JobType::ModelDownload
         | JobType::ModelImport

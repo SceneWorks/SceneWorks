@@ -1,11 +1,12 @@
-//! Native candle prompt refinement (epic 5095, sc-5525).
+//! Native prompt refinement (epic 5095): candle on Windows/CUDA (sc-5525) + MLX on macOS (sc-5552).
 //!
-//! Routes the `prompt_refine` job to the candle `TextLlm` provider (Llama-3.2-3B-Instruct,
-//! `backend="candle"`) on the Windows/CUDA worker, through the backend-neutral `gen_core::load_textllm`
-//! seam (the sc-5500 contract). There is NO mlx twin (greenfield), so this is candle-only off-Mac; the
-//! Python torch `PromptRefiner` (`apps/worker/scene_worker/prompt_refine.py`) stays the fallback for
-//! the Mac path and the default, candle-less Desktop installer until the candle provider is the default
-//! everywhere off-Mac (the physical deletion of `prompt_refine.py` waits on that — see sc-5525).
+//! Routes the `prompt_refine` job to a native `TextLlm` provider (Llama-3.2-3B-Instruct) through the
+//! backend-neutral `gen_core::load_textllm` seam (the sc-5500 contract): the candle provider
+//! (`backend="candle"`, `candle-gen-prompt-refine`) on the Windows candle build, and the MLX twin
+//! (`backend="mlx"`, `mlx-gen-prompt-refine`) on macOS. The Python torch `PromptRefiner`
+//! (`apps/worker/scene_worker/prompt_refine.py`) stays the fallback only on platforms with neither
+//! native provider (e.g. the candle-less Desktop installer); its physical deletion waits on the candle
+//! provider being the default everywhere off-Mac (see sc-5525).
 //!
 //! The `TextLlm` contract is generic (`system` + `prompt` + sampling → text), so the
 //! prompt-refinement PRODUCT logic that lived in `prompt_refine.py` moves here caller-side: the
@@ -17,32 +18,56 @@
 
 use super::*;
 
-// Candle prompt-refine provider force-link anchor (sc-5525): keeps its `inventory::submit!` `TextLlm`
-// registration (id `prompt_refine`, backend `candle`) from being dropped by the MSVC release linker.
-// Mirrors the `candle_gen_joycaption` anchor in caption_jobs.rs.
+// Prompt-refine provider force-link anchors: keep each backend's `inventory::submit!` `TextLlm`
+// registration (id `prompt_refine`) from being dropped by the release linker. sc-5552 adds the native
+// MLX twin (`mlx_gen_prompt_refine`, backend `mlx`) alongside sc-5525's candle anchor; mirrors the
+// dual JoyCaption anchors in caption_jobs.rs.
 #[cfg(all(target_os = "windows", feature = "backend-candle"))]
 use candle_gen_prompt_refine as _;
+#[cfg(target_os = "macos")]
+use mlx_gen_prompt_refine as _;
 
-// The registry id the candle provider registers under (`candle_gen_prompt_refine::prompt::
-// PROMPT_REFINE_ID`); kept as a local literal so the shared dispatch names no backend-specific symbol.
-#[cfg(all(target_os = "windows", feature = "backend-candle"))]
+// The registry id both providers register under (`prompt::PROMPT_REFINE_ID`); kept as a local literal
+// so the shared dispatch names no backend-specific symbol. `gen_core::load_textllm` resolves the MLX
+// twin on macOS and the candle provider on the Windows candle build.
+#[cfg(any(
+    target_os = "macos",
+    all(target_os = "windows", feature = "backend-candle")
+))]
 const PROMPT_REFINE_ENGINE_ID: &str = "prompt_refine";
 // Default refinement checkpoint — the small abliterated Llama-3.2-3B instruction model, parity with
 // the Python `DEFAULT_REFINE_MODEL`. Overridable per-job via `payload.model`.
-#[cfg(all(target_os = "windows", feature = "backend-candle"))]
+#[cfg(any(
+    target_os = "macos",
+    all(target_os = "windows", feature = "backend-candle")
+))]
 const DEFAULT_REFINE_MODEL: &str = "huihui-ai/Llama-3.2-3B-Instruct-abliterated";
-#[cfg(all(target_os = "windows", feature = "backend-candle"))]
+#[cfg(any(
+    target_os = "macos",
+    all(target_os = "windows", feature = "backend-candle")
+))]
 const CANCEL_MESSAGE: &str = "Prompt refinement canceled by user.";
+// Architecture-pill label for the streamed progress (mirrors the candle image/video paths): the MLX
+// twin on macOS, candle on the Windows candle build.
+#[cfg(target_os = "macos")]
+const REFINE_BACKEND: &str = "mlx";
+#[cfg(all(target_os = "windows", feature = "backend-candle"))]
+const REFINE_BACKEND: &str = "candle";
 
 // ----------------------------------------------------------------------------------------------
-// Product logic (pure, platform-independent) — ported from `prompt_refine.py` so the candle worker
-// owns the prompt assembly + reply cleanup the generic `TextLlm` contract does not. Compiled in the
-// default `cargo test` gate (so the unit tests below run on every lane) and on the candle build.
+// Product logic (pure, platform-independent) — ported from `prompt_refine.py` so the native worker
+// (candle + MLX) owns the prompt assembly + reply cleanup the generic `TextLlm` contract does not.
+// Compiled in the default `cargo test` gate (so the unit tests below run on every lane) and on the
+// macOS + candle builds.
 // ----------------------------------------------------------------------------------------------
 
 /// The base rewrite rules with the `{medium}` placeholders filled (`image` / `video`). Verbatim port
 /// of the Python `_BASE_RULES.format(medium=…)`.
-#[cfg(any(test, all(target_os = "windows", feature = "backend-candle")))]
+#[cfg(any(
+    test,
+    target_os = "macos",
+    all(target_os = "windows", feature = "backend-candle")
+))]
 fn base_rules(medium: &str) -> String {
     [
         format!("You are a prompt rewriter for a generative {medium} model."),
@@ -77,7 +102,11 @@ fn base_rules(medium: &str) -> String {
 
 /// Build the `system` message for the refiner: the rewrite rules (medium chosen from the workflow)
 /// plus the model's prompt guide when one is supplied. Port of the Python `build_system_prompt`.
-#[cfg(any(test, all(target_os = "windows", feature = "backend-candle")))]
+#[cfg(any(
+    test,
+    target_os = "macos",
+    all(target_os = "windows", feature = "backend-candle")
+))]
 fn build_refine_system_prompt(guide: Option<&str>, workflow: Option<&str>) -> String {
     let medium = if workflow
         .map(|w| w.trim().eq_ignore_ascii_case("video"))
@@ -99,7 +128,11 @@ fn build_refine_system_prompt(guide: Option<&str>, workflow: Option<&str>) -> St
 /// Strip `<think>…</think>` reasoning blocks, a wrapping code fence, and matching surrounding quotes
 /// from the model reply. Port of the Python `clean_output` (regex-free: the tags are ASCII, matched
 /// case-insensitively without lowercasing the whole — Unicode-safe — string).
-#[cfg(any(test, all(target_os = "windows", feature = "backend-candle")))]
+#[cfg(any(
+    test,
+    target_os = "macos",
+    all(target_os = "windows", feature = "backend-candle")
+))]
 fn clean_refine_output(text: &str) -> String {
     let mut text = strip_think_blocks(text.trim()).trim().to_owned();
     // An orphan closing tag (no matching open): keep only what follows the last one.
@@ -130,7 +163,11 @@ fn clean_refine_output(text: &str) -> String {
 
 /// Remove every `<think>…</think>` pair (case-insensitive, spanning newlines). An unmatched open tag
 /// leaves the remainder untouched — matching the Python non-greedy regex, which simply does not match.
-#[cfg(any(test, all(target_os = "windows", feature = "backend-candle")))]
+#[cfg(any(
+    test,
+    target_os = "macos",
+    all(target_os = "windows", feature = "backend-candle")
+))]
 fn strip_think_blocks(input: &str) -> String {
     const OPEN: &str = "<think>";
     const CLOSE: &str = "</think>";
@@ -159,7 +196,11 @@ fn strip_think_blocks(input: &str) -> String {
 
 /// Byte offset of the first case-insensitive occurrence of an ASCII `needle`. Offsets land on ASCII
 /// tag boundaries, so callers can slice safely even when the surrounding text is Unicode.
-#[cfg(any(test, all(target_os = "windows", feature = "backend-candle")))]
+#[cfg(any(
+    test,
+    target_os = "macos",
+    all(target_os = "windows", feature = "backend-candle")
+))]
 fn first_ci(haystack: &str, needle: &str) -> Option<usize> {
     let (h, n) = (haystack.as_bytes(), needle.as_bytes());
     if n.is_empty() || n.len() > h.len() {
@@ -169,7 +210,11 @@ fn first_ci(haystack: &str, needle: &str) -> Option<usize> {
 }
 
 /// Byte offset of the last case-insensitive occurrence of an ASCII `needle`.
-#[cfg(any(test, all(target_os = "windows", feature = "backend-candle")))]
+#[cfg(any(
+    test,
+    target_os = "macos",
+    all(target_os = "windows", feature = "backend-candle")
+))]
 fn last_ci(haystack: &str, needle: &str) -> Option<usize> {
     let (h, n) = (haystack.as_bytes(), needle.as_bytes());
     if n.is_empty() || n.len() > h.len() {
@@ -181,10 +226,15 @@ fn last_ci(haystack: &str, needle: &str) -> Option<usize> {
 }
 
 // ----------------------------------------------------------------------------------------------
-// Job handler (candle-only — there is no mlx twin).
+// Job handler — native MLX on macOS (sc-5552) and candle on the Windows candle build (sc-5525). The
+// body is backend-agnostic: `gen_core::load_textllm("prompt_refine", …)` resolves whichever provider
+// is force-linked above. The Python torch `PromptRefiner` remains the fallback on other platforms.
 // ----------------------------------------------------------------------------------------------
 
-#[cfg(all(target_os = "windows", feature = "backend-candle"))]
+#[cfg(any(
+    target_os = "macos",
+    all(target_os = "windows", feature = "backend-candle")
+))]
 pub(crate) async fn run_prompt_refine_job(
     api: &ApiClient,
     settings: &Settings,
@@ -230,9 +280,9 @@ pub(crate) async fn run_prompt_refine_job(
 
     let system = build_refine_system_prompt(guide.as_deref(), workflow.as_deref());
     let weights_dir = resolve_app_managed_model_dir(settings, &model, "prompt-refine model path")?;
-    // Attribute the run to Candle on the streamed progress + UI architecture pill (mirrors the candle
-    // image/video paths), not the gpu-id device label.
-    let backend = "candle";
+    // Attribute the run to the active backend (MLX on macOS, candle off-Mac) on the streamed progress
+    // + UI architecture pill (mirrors the image/video paths), not the gpu-id device label.
+    let backend = REFINE_BACKEND;
 
     heartbeat(api, settings, WorkerStatus::Busy, Some(&job.id)).await?;
     update_job(
@@ -265,9 +315,7 @@ pub(crate) async fn run_prompt_refine_job(
             PROMPT_REFINE_ENGINE_ID,
             &LoadSpec::new(WeightsSource::Dir(weights_dir)),
         )
-        .map_err(|error| {
-            WorkerError::Engine(format!("candle prompt-refine load failed: {error}"))
-        })?;
+        .map_err(|error| WorkerError::Engine(format!("prompt-refine load failed: {error}")))?;
         emit_event(
             "prompt_refine_load_complete",
             json!({ "jobId": job_id, "engine": engine_label }),
@@ -294,7 +342,7 @@ pub(crate) async fn run_prompt_refine_job(
         let output = refiner
             .generate(&request, &mut on_progress)
             .map_err(|error| {
-                WorkerError::Engine(format!("candle prompt-refine generation failed: {error}"))
+                WorkerError::Engine(format!("prompt-refine generation failed: {error}"))
             })?;
         Ok(output.text)
     });
@@ -364,24 +412,30 @@ pub(crate) async fn run_prompt_refine_job(
     Ok(())
 }
 
-/// Off the Windows candle build there is no native prompt-refine provider (no mlx twin), so the
-/// capability is never advertised and this arm is unreachable in practice — the Python torch
-/// `PromptRefiner` serves `prompt_refine`. Kept so the `run_utility_job` dispatch compiles on all
-/// targets.
-#[cfg(not(all(target_os = "windows", feature = "backend-candle")))]
+/// On platforms with no native prompt-refine provider (neither the macOS MLX twin nor the Windows
+/// candle build — e.g. Linux, or the candle-less Desktop installer), the capability is never
+/// advertised and this arm is unreachable in practice — the Python torch `PromptRefiner` serves
+/// `prompt_refine`. Kept so the `run_utility_job` dispatch compiles on all targets.
+#[cfg(not(any(
+    target_os = "macos",
+    all(target_os = "windows", feature = "backend-candle")
+)))]
 pub(crate) async fn run_prompt_refine_job(
     _api: &ApiClient,
     _settings: &Settings,
     _job: &JobSnapshot,
 ) -> WorkerResult<()> {
     Err(WorkerError::InvalidPayload(
-        "Native prompt refinement needs the Windows candle backend; use the Python torch prompt \
-         refiner on this platform."
+        "Native prompt refinement needs the macOS MLX worker or the Windows candle backend; use the \
+         Python torch prompt refiner on this platform."
             .to_owned(),
     ))
 }
 
-#[cfg(all(target_os = "windows", feature = "backend-candle"))]
+#[cfg(any(
+    target_os = "macos",
+    all(target_os = "windows", feature = "backend-candle")
+))]
 fn refine_progress(
     status: JobStatus,
     stage: ProgressStage,
@@ -408,7 +462,10 @@ fn refine_progress(
 }
 
 /// The `prompt_refine` result payload, parity with the Python `run_prompt_refine_job`.
-#[cfg(all(target_os = "windows", feature = "backend-candle"))]
+#[cfg(any(
+    target_os = "macos",
+    all(target_os = "windows", feature = "backend-candle")
+))]
 fn refine_result(original_prompt: &str, refined_prompt: &str) -> JsonObject {
     let mut result = JsonObject::new();
     result.insert("originalPrompt".to_owned(), json!(original_prompt));
