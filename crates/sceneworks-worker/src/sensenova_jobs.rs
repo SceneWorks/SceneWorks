@@ -9,33 +9,35 @@
 //!   ordered text + generated images, persisted as image assets plus an
 //!   [`InterleavedDocument`](sceneworks_core::contracts::InterleavedDocument) `document` asset.
 //!
-//! Path A (sc-3900) routes the image-producing modes through the `Generator` registry and bumped
-//! the `mlx-gen` pin + force-linked `mlx_gen_sensenova`; this module reuses that dependency. The
-//! `Generator` crate has no public `SenseNova` constructor, so the worker assembles a concrete
-//! `T2iModel` here (replicating the engine's private `load_inner`) from the public re-exports.
+//! Each backend assembles its own concrete `T2iModel` from the provider's public re-exports (the
+//! `Generator` crate has no public constructor): macOS drives `mlx_gen_sensenova::T2iModel`; the
+//! candle (Windows/CUDA) lane drives `candle_gen_sensenova::T2iModel` via `load_understanding`
+//! (sc-5501), retiring the off-Mac Python torch VQA/interleave path. The handler shape, request
+//! parsing, and document assembly are shared and backend-neutral.
 //!
 //! Parity: VQA mirrors the Python `SenseNovaU1Adapter.answer_question`; interleave mirrors
-//! `generate_interleaved` / `_write_interleaved_document` byte-for-byte (request fields, the
-//! interleave resolution buckets + think/no-think system protocol, and the response/asset shapes).
-//! The understanding + generation model loads dense (no distill LoRA, no quantization) exactly as
-//! the torch adapter does (`_load_model(distill_lora=None)`), keeping the VQA decode bit-identical.
+//! `generate_interleaved` / `_write_interleaved_document` (request fields, the interleave resolution
+//! buckets + think/no-think system protocol, and the response/asset shapes). The understanding +
+//! generation model loads dense (no distill LoRA, no quantization) exactly as the torch adapter does
+//! (`_load_model(distill_lora=None)`) — the full base model.
 //!
-//! Off macOS the in-process engine is unavailable and the `image_vqa` / `image_interleave`
-//! capabilities are never advertised by this worker, so the handlers are unreachable stubs that
-//! error loudly (the Python torch worker serves these modes on Windows/Linux).
+//! When neither the MLX nor the candle engine is linked (a non-macOS build with `backend-candle`
+//! off), the `image_vqa` / `image_interleave` capabilities are not advertised and the handlers are
+//! stubs that error loudly (the Python torch worker serves these modes there).
 
 use super::*;
-// Only the macOS handlers parse an `ImageRequest`; the non-macOS stubs don't.
-#[cfg(target_os = "macos")]
+// The macOS (MLX) and candle (Windows/CUDA) handlers parse an `ImageRequest`; the torch-defer stub
+// doesn't.
+#[cfg(any(target_os = "macos", feature = "backend-candle"))]
 use sceneworks_core::image_request::ImageRequest;
 
 // CARVE-OUT(epic 3720): backend-specific; absorbed by TextLlm in Phase 5.
-// VQA + Document-Studio interleave bypass the `Generator` registry and drive the concrete
-// `mlx_gen_sensenova::T2iModel` directly (text / text+images output the neutral `GenerationOutput`
-// contract can't express). The whole module stays mlx-gen-typed — `Image`, `TextTokenizer`,
-// `resize_bicubic_u8`, and `decoded_to_image` (which operates on a backend tensor and MUST stay
-// mlx-gen-local) are kept on the `mlx_gen::` paths to protect byte-identical VQA/interleave
-// decode — until the understanding path is lifted onto a neutral TextLlm contract.
+// VQA + Document-Studio interleave bypass the `Generator` registry and drive the concrete unified
+// `T2iModel` directly (text / text+images output the neutral `GenerationOutput` contract can't
+// express). macOS drives `mlx_gen_sensenova::T2iModel`; off-Mac the candle (Windows/CUDA) lane drives
+// `candle_gen_sensenova::T2iModel` (the sibling carve-outs, sc-5501) — retiring the off-Mac torch
+// VQA/interleave path. Each lane keeps its own engine-typed imports; the document-assembly +
+// request-parsing helpers below are backend-neutral and shared.
 #[cfg(target_os = "macos")]
 use mlx_gen::image::{decoded_to_image, resize_bicubic_u8};
 #[cfg(target_os = "macos")]
@@ -52,10 +54,26 @@ use mlx_rs::ops::divide;
 #[cfg(target_os = "macos")]
 use mlx_rs::Array;
 
-/// The adapter id recorded on the generated assets + the interleaved document (the MLX SenseNova
-/// path, matching the `adapter_label` the sc-3900 image rows use).
+// Candle (Windows/CUDA) understanding path (sc-5501). `Image` is the neutral `gen_core::Image`
+// (`load_reference_image`'s return); the source-image preprocessing + tensor construction live in
+// `image_to_chw01_candle` (the `image` crate's resampler + `candle_gen::candle_core`).
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+use candle_gen::candle_core::{DType, Device, Tensor};
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+use candle_gen_sensenova::{
+    load_understanding, smart_resize, tensor_to_image, Sampler, T2iOptions, INTERLEAVE_RESOLUTIONS,
+    INTERLEAVE_SYSTEM_MESSAGE,
+};
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+use gen_core::Image;
+
+/// The adapter id recorded on the generated assets + the interleaved document, matching the
+/// per-backend `adapter_label` the image rows use: `mlx_sensenova` on macOS, `candle_sensenova` on
+/// the candle lane (sc-5576).
 #[cfg(target_os = "macos")]
 const SENSENOVA_ADAPTER: &str = "mlx_sensenova";
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+const SENSENOVA_ADAPTER: &str = "candle_sensenova";
 
 // ===========================================================================
 // VQA (image_vqa)
@@ -217,16 +235,169 @@ pub(crate) async fn run_vqa_job(
     Ok(())
 }
 
-/// Off macOS the in-process engine is unavailable; `image_vqa` is served by the Python torch
-/// worker (the `mlx` worker — the only one advertising this capability — is macOS-only).
-#[cfg(not(target_os = "macos"))]
+/// Candle (Windows/CUDA) VQA — the off-Mac sibling of the macOS MLX handler (sc-5501). Builds the
+/// dense candle `T2iModel` via `load_understanding` and calls `T2iModel::vqa`, retiring the Python
+/// torch `image_vqa` path off-Mac. Same request fields + `{answer, question, sourceAssetId, model,
+/// realModelInference}` result, no asset write.
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+pub(crate) async fn run_vqa_job(
+    api: &ApiClient,
+    settings: &Settings,
+    job: &JobSnapshot,
+) -> WorkerResult<()> {
+    let request = ImageRequest::from_payload(&job.payload);
+    if request.project_id.trim().is_empty() {
+        return Err(WorkerError::InvalidPayload(
+            "Missing payload.projectId".to_owned(),
+        ));
+    }
+    let model_id = if request.model.trim().is_empty() {
+        "sensenova_u1_8b".to_owned()
+    } else {
+        request.model.clone()
+    };
+    let question = job
+        .payload
+        .get("question")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| {
+            WorkerError::InvalidPayload("Visual question answering requires a question.".to_owned())
+        })?
+        .to_owned();
+    let source_asset_id = job
+        .payload
+        .get("sourceAssetId")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| {
+            WorkerError::InvalidPayload(
+                "Visual question answering requires a source image asset.".to_owned(),
+            )
+        })?
+        .to_owned();
+
+    let max_new_tokens = payload_int(&job.payload, "maxNewTokens", 256, 16, 2048) as usize;
+    let max_image_pixels = payload_int(
+        &job.payload,
+        "maxImagePixels",
+        768 * 768,
+        256 * 256,
+        2048 * 2048,
+    );
+
+    let weights_dir = resolve_weights_dir(&request, settings)?
+        .ok_or_else(|| WorkerError::InvalidPayload("SenseNova-U1 weights not found".to_owned()))?;
+
+    let project =
+        ProjectStore::new(settings.data_dir.clone(), "worker").get_project(&request.project_id)?;
+    let project_path = PathBuf::from(project.path);
+    let backend = backend_label(&settings.gpu_id).to_owned();
+
+    heartbeat(api, settings, WorkerStatus::Busy, Some(&job.id)).await?;
+    update_job(
+        api,
+        &job.id,
+        image_progress(
+            JobStatus::Preparing,
+            ProgressStage::Preparing,
+            0.08,
+            "Preparing visual question.",
+            None,
+            &backend,
+        ),
+    )
+    .await?;
+
+    let source = load_reference_image(
+        &settings.data_dir,
+        &request.project_id,
+        &source_asset_id,
+        &project_path,
+    )?;
+
+    update_job(
+        api,
+        &job.id,
+        image_progress(
+            JobStatus::Running,
+            ProgressStage::Generating,
+            0.6,
+            "Analyzing image.",
+            None,
+            &backend,
+        ),
+    )
+    .await?;
+
+    let job_id = job.id.clone();
+    let question_for_vqa = question.clone();
+    let answer = tokio::task::spawn_blocking(move || -> WorkerResult<String> {
+        emit_load_event("image_pipeline_load_start", &job_id, "sensenova_u1_8b", 0);
+        let (model, tokenizer) = load_understanding(&weights_dir)
+            .map_err(|error| WorkerError::Engine(format!("SenseNova-U1 load: {error}")))?;
+        emit_load_event(
+            "image_pipeline_load_complete",
+            &job_id,
+            "sensenova_u1_8b",
+            0,
+        );
+        // ImageNet-normalized inside `vqa`; pass [3,H,W] in [0,1], 32-aligned, within the
+        // understanding pixel budget (default 768², min 256²).
+        let pixel_values = image_to_chw01_candle(&source, 256 * 256, max_image_pixels)?;
+        let answer = model
+            .vqa(
+                &tokenizer,
+                &question_for_vqa,
+                std::slice::from_ref(&pixel_values),
+                max_new_tokens,
+                Sampler::Greedy,
+            )
+            .map_err(|error| WorkerError::Engine(format!("SenseNova VQA failed: {error}")))?;
+        Ok(strip_reasoning(&answer))
+    })
+    .await
+    .map_err(|error| task_join_error("VQA task join", error))??;
+
+    let result = json!({
+        "answer": answer,
+        "question": question,
+        "sourceAssetId": source_asset_id,
+        "model": model_id,
+        "realModelInference": true,
+    })
+    .as_object()
+    .cloned()
+    .expect("json! object literal");
+
+    update_job(
+        api,
+        &job.id,
+        image_progress(
+            JobStatus::Completed,
+            ProgressStage::Completed,
+            1.0,
+            "Answer ready.",
+            Some(result),
+            &backend,
+        ),
+    )
+    .await?;
+    Ok(())
+}
+
+/// Off macOS without the candle backend the in-process engine is unavailable; `image_vqa` is served
+/// by the Python torch worker (macOS runs the MLX engine; Windows/CUDA runs candle when enabled).
+#[cfg(all(not(target_os = "macos"), not(feature = "backend-candle")))]
 pub(crate) async fn run_vqa_job(
     _api: &ApiClient,
     _settings: &Settings,
     _job: &JobSnapshot,
 ) -> WorkerResult<()> {
     Err(WorkerError::InvalidPayload(
-        "image_vqa runs on the macOS MLX worker or the Python torch worker, not this Rust worker"
+        "image_vqa runs on the macOS MLX worker, the candle (Windows/CUDA) worker, or the Python torch worker, not this Rust worker"
             .to_owned(),
     ))
 }
@@ -481,16 +652,254 @@ pub(crate) async fn run_interleave_job(
     Ok(())
 }
 
-/// Off macOS the in-process engine is unavailable; `image_interleave` is served by the Python torch
-/// worker (the `mlx` worker — the only one advertising this capability — is macOS-only).
-#[cfg(not(target_os = "macos"))]
+/// Candle (Windows/CUDA) interleave — the off-Mac sibling of the macOS MLX handler (sc-5501). Builds
+/// the dense candle `T2iModel` via `load_understanding` and calls `T2iModel::interleave_gen`,
+/// retiring the Python torch `image_interleave` path off-Mac. Same request fields, resolution
+/// buckets, think/no-think protocol, and `document` asset shape (the assembly is the shared
+/// `write_interleaved_document`).
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+pub(crate) async fn run_interleave_job(
+    api: &ApiClient,
+    settings: &Settings,
+    job: &JobSnapshot,
+) -> WorkerResult<()> {
+    let request = ImageRequest::from_payload(&job.payload);
+    if request.project_id.trim().is_empty() {
+        return Err(WorkerError::InvalidPayload(
+            "Missing payload.projectId".to_owned(),
+        ));
+    }
+    let prompt = request.prompt.trim().to_owned();
+    if prompt.is_empty() {
+        return Err(WorkerError::InvalidPayload(
+            "Interleaved generation requires a prompt.".to_owned(),
+        ));
+    }
+    let model_id = if request.model.trim().is_empty() {
+        "sensenova_u1_8b".to_owned()
+    } else {
+        request.model.clone()
+    };
+    let advanced = &request.advanced;
+
+    let max_images = advanced_int(advanced, "maxImages", 6, 1, 10) as usize;
+    let req_width = payload_int(&job.payload, "width", 2048, 256, 4096);
+    let req_height = payload_int(&job.payload, "height", 1152, 256, 4096);
+    let (width, height) = interleave_resolution_snap(req_width, req_height);
+
+    let source_asset_ids: Vec<String> = job
+        .payload
+        .get("sourceAssetIds")
+        .and_then(Value::as_array)
+        .map(|values| {
+            values
+                .iter()
+                .filter_map(Value::as_str)
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(str::to_owned)
+                .collect()
+        })
+        .unwrap_or_default();
+
+    let steps = advanced_int(advanced, "numInferenceSteps", 50, 1, 100) as usize;
+    let cfg_scale = advanced_float(advanced, "guidanceScale", 4.0);
+    let img_cfg_scale = advanced_float(advanced, "imageGuidanceScale", 1.0);
+    let timestep_shift = advanced_float(advanced, "timestepShift", 3.0);
+    let max_new_tokens = advanced_int(advanced, "maxNewTokens", 2048, 64, 8192) as usize;
+    let think_mode = advanced
+        .get("thinkMode")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let system_message = advanced
+        .get("systemMessage")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_owned)
+        .unwrap_or_else(|| INTERLEAVE_SYSTEM_MESSAGE.to_owned());
+    let seed = resolve_seed(&request, 0);
+
+    let weights_dir = resolve_weights_dir(&request, settings)?
+        .ok_or_else(|| WorkerError::InvalidPayload("SenseNova-U1 weights not found".to_owned()))?;
+
+    let project =
+        ProjectStore::new(settings.data_dir.clone(), "worker").get_project(&request.project_id)?;
+    let project_path = PathBuf::from(project.path);
+    tokio::fs::create_dir_all(project_path.join("assets").join("documents")).await?;
+    tokio::fs::create_dir_all(project_path.join("assets").join("images")).await?;
+    let backend = backend_label(&settings.gpu_id).to_owned();
+
+    heartbeat(api, settings, WorkerStatus::Busy, Some(&job.id)).await?;
+    update_job(
+        api,
+        &job.id,
+        image_progress(
+            JobStatus::Preparing,
+            ProgressStage::Preparing,
+            0.08,
+            "Preparing interleaved document.",
+            None,
+            &backend,
+        ),
+    )
+    .await?;
+
+    let mut input_images = Vec::with_capacity(source_asset_ids.len());
+    for asset_id in &source_asset_ids {
+        input_images.push(load_reference_image(
+            &settings.data_dir,
+            &request.project_id,
+            asset_id,
+            &project_path,
+        )?);
+    }
+
+    match check_cancel(api, &job.id, "Interleaved generation canceled by user.").await {
+        Ok(()) => {}
+        Err(WorkerError::Canceled(_)) => return Ok(()),
+        Err(other) => return Err(other),
+    }
+
+    update_job(
+        api,
+        &job.id,
+        image_progress(
+            JobStatus::Running,
+            ProgressStage::Generating,
+            0.45,
+            "Composing interleaved document.",
+            None,
+            &backend,
+        ),
+    )
+    .await?;
+    heartbeat(api, settings, WorkerStatus::Busy, Some(&job.id)).await?;
+
+    let job_id = job.id.clone();
+    let prompt_for_gen = prompt.clone();
+    let (generated_text, images) =
+        tokio::task::spawn_blocking(move || -> WorkerResult<(String, Vec<Image>)> {
+            emit_load_event("image_pipeline_load_start", &job_id, "sensenova_u1_8b", 0);
+            let (model, tokenizer) = load_understanding(&weights_dir)
+                .map_err(|error| WorkerError::Engine(format!("SenseNova-U1 load: {error}")))?;
+            emit_load_event(
+                "image_pipeline_load_complete",
+                &job_id,
+                "sensenova_u1_8b",
+                0,
+            );
+
+            // Source images: [3,H,W] in [0,1], 32-aligned. Bounds mirror the torch
+            // `interleave_gen` (`load_image_native` min 512², max min(2048², 4096²/n)).
+            let n = input_images.len().max(1) as i64;
+            let max_pixels = (2048 * 2048).min((4096 * 4096) / n);
+            let mut input_arrays = Vec::with_capacity(input_images.len());
+            for image in &input_images {
+                input_arrays.push(image_to_chw01_candle(image, 512 * 512, max_pixels)?);
+            }
+
+            let opts = T2iOptions {
+                cfg_scale,
+                img_cfg_scale,
+                num_steps: steps,
+                timestep_shift,
+                seed: seed as u64,
+                think_mode,
+                ..Default::default()
+            };
+            // The rollout is a single uninterruptible pass (like the macOS handler); cancel is
+            // checked before launch. Pass an un-tripped flag the engine polls between text tokens /
+            // denoise steps.
+            let cancel = gen_core::CancelFlag::new();
+            let out = model
+                .interleave_gen(
+                    &tokenizer,
+                    &prompt_for_gen,
+                    &input_arrays,
+                    width as usize,
+                    height as usize,
+                    &opts,
+                    &system_message,
+                    max_new_tokens,
+                    max_images,
+                    &cancel,
+                )
+                .map_err(|error| {
+                    WorkerError::Engine(format!("SenseNova interleave failed: {error}"))
+                })?;
+            // The generated images are model-space [-1,1] `[1,3,H,W]` tensors — decode each to RGB8.
+            let mut decoded = Vec::with_capacity(out.images.len());
+            for image in &out.images {
+                decoded.push(tensor_to_image(image).map_err(|error| {
+                    WorkerError::InvalidPayload(format!("SenseNova interleave decode: {error}"))
+                })?);
+            }
+            Ok((out.text, decoded))
+        })
+        .await
+        .map_err(|error| task_join_error("interleave task join", error))??;
+
+    update_job(
+        api,
+        &job.id,
+        image_progress(
+            JobStatus::Saving,
+            ProgressStage::Saving,
+            0.9,
+            "Saving interleaved document.",
+            None,
+            &backend,
+        ),
+    )
+    .await?;
+
+    let result = write_interleaved_document(
+        &request,
+        job,
+        &project_path,
+        &prompt,
+        &model_id,
+        seed,
+        max_images,
+        width,
+        height,
+        steps,
+        cfg_scale,
+        img_cfg_scale,
+        timestep_shift,
+        max_new_tokens,
+        think_mode,
+        &generated_text,
+        images,
+    )?;
+
+    update_job(
+        api,
+        &job.id,
+        image_progress(
+            JobStatus::Completed,
+            ProgressStage::Completed,
+            1.0,
+            "Interleaved document ready.",
+            Some(result),
+            &backend,
+        ),
+    )
+    .await?;
+    Ok(())
+}
+
+/// Off macOS without the candle backend the in-process engine is unavailable; `image_interleave` is
+/// served by the Python torch worker (macOS runs MLX; Windows/CUDA runs candle when enabled).
+#[cfg(all(not(target_os = "macos"), not(feature = "backend-candle")))]
 pub(crate) async fn run_interleave_job(
     _api: &ApiClient,
     _settings: &Settings,
     _job: &JobSnapshot,
 ) -> WorkerResult<()> {
     Err(WorkerError::InvalidPayload(
-        "image_interleave runs on the macOS MLX worker or the Python torch worker, not this Rust worker"
+        "image_interleave runs on the macOS MLX worker, the candle (Windows/CUDA) worker, or the Python torch worker, not this Rust worker"
             .to_owned(),
     ))
 }
@@ -501,7 +910,7 @@ pub(crate) async fn run_interleave_job(
 // `document` asset fact. Mirrors the Python `_write_interleaved_document` / `_build_interleaved_segments`.
 // ---------------------------------------------------------------------------
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", feature = "backend-candle"))]
 #[allow(clippy::too_many_arguments)]
 fn write_interleaved_document(
     request: &ImageRequest,
@@ -645,7 +1054,7 @@ fn write_interleaved_document(
 /// Split the model output on its inline `<image>` markers and slot the generated image assets in
 /// order: text[0], image[0], text[1], image[1], …. Mirrors the Python `_build_interleaved_segments`
 /// (reads each image fact's `assetId` + `mediaPath`).
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", feature = "backend-candle"))]
 fn build_interleaved_segments(generated_text: &str, image_writes: &[Value]) -> Vec<Value> {
     let mut segments = Vec::new();
     for (index, part) in generated_text.split("<image>").enumerate() {
@@ -709,8 +1118,43 @@ fn image_to_chw01(img: &Image, min_pixels: i64, max_pixels: i64) -> WorkerResult
         .map_err(|error| WorkerError::InvalidPayload(format!("image normalize: {error}")))
 }
 
+/// Candle sibling of [`image_to_chw01`] (sc-5501): decode an [`Image`] (RGB8 HWC) to a `[3,H,W]` f32
+/// candle `Tensor` in `[0,1]`, smart-resized (Lanczos3, the worker's house resampler) to a 32-aligned
+/// bucket within `[min_pixels, max_pixels]`. The understanding `T2iModel::{vqa, interleave_gen}`
+/// ImageNet-normalize internally, so this stays in `[0,1]`. Built on **CPU**; the engine relocates it
+/// to the model's device (candle treats each `new_cuda(0)` handle as distinct, so building it on the
+/// worker's own device handle would mismatch the model's).
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+fn image_to_chw01_candle(img: &Image, min_pixels: i64, max_pixels: i64) -> WorkerResult<Tensor> {
+    let (out_h, out_w) = smart_resize(
+        img.height as i32,
+        img.width as i32,
+        32,
+        min_pixels,
+        max_pixels,
+    );
+    let rgb =
+        image::RgbImage::from_raw(img.width, img.height, img.pixels.clone()).ok_or_else(|| {
+            WorkerError::InvalidPayload("reference image buffer size mismatch".to_owned())
+        })?;
+    let resized = image::imageops::resize(
+        &rgb,
+        out_w as u32,
+        out_h as u32,
+        image::imageops::FilterType::Lanczos3,
+    );
+    let (rw, rh) = (resized.width() as usize, resized.height() as usize);
+    // [H,W,3] u8 -> [3,H,W] f32 in [0,1], on CPU (the engine moves it to the model device).
+    let hwc = Tensor::from_vec(resized.into_raw(), (rh, rw, 3), &Device::Cpu)
+        .and_then(|tensor| tensor.to_dtype(DType::F32))
+        .map_err(|error| WorkerError::Engine(format!("image tensor: {error}")))?;
+    hwc.permute((2, 0, 1))
+        .and_then(|chw| chw / 255.0)
+        .map_err(|error| WorkerError::Engine(format!("image normalize: {error}")))
+}
+
 /// The SenseNova-U1 repo (manifest `repo` else the default), for the document telemetry.
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", feature = "backend-candle"))]
 fn model_repo_for(request: &ImageRequest) -> String {
     request
         .model_manifest_entry
@@ -725,7 +1169,7 @@ fn model_repo_for(request: &ImageRequest) -> String {
 /// Snap a requested W×H to the nearest interleave bucket by aspect ratio in log-space (ties resolve
 /// to the first bucket). Mirrors the Python `snap_to_aspect_bucket` over the same
 /// `INTERLEAVE_RESOLUTIONS` table (priority order).
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", feature = "backend-candle"))]
 fn interleave_resolution_snap(width: i64, height: i64) -> (i32, i32) {
     let target = (width.max(1) as f64 / height.max(1) as f64).ln();
     let mut best = INTERLEAVE_RESOLUTIONS[0].1;
@@ -744,7 +1188,7 @@ fn interleave_resolution_snap(width: i64, height: i64) -> (i32, i32) {
 /// blocks and any dangling/unclosed one (reasoning truncated by `max_new_tokens`). Mirrors the
 /// Python `SenseNovaU1Adapter._strip_reasoning`. Used by the macOS VQA handler; also unit-tested
 /// cross-platform (it is pure string logic), so it compiles under `test` off macOS too.
-#[cfg(any(target_os = "macos", test))]
+#[cfg(any(target_os = "macos", test, feature = "backend-candle"))]
 fn strip_reasoning(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
     let mut rest = text;
@@ -767,7 +1211,7 @@ fn strip_reasoning(text: &str) -> String {
 
 /// `safe_int` over a top-level payload field: parse (int / float / numeric string) else `default`,
 /// then clamp to `[lo, hi]`. Used by the macOS handlers; also unit-tested cross-platform.
-#[cfg(any(target_os = "macos", test))]
+#[cfg(any(target_os = "macos", test, feature = "backend-candle"))]
 fn payload_int(payload: &JsonObject, key: &str, default: i64, lo: i64, hi: i64) -> i64 {
     payload
         .get(key)
@@ -777,13 +1221,13 @@ fn payload_int(payload: &JsonObject, key: &str, default: i64, lo: i64, hi: i64) 
 }
 
 /// `safe_int` over an `advanced` field (same parse/clamp as [`payload_int`]).
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", feature = "backend-candle"))]
 fn advanced_int(advanced: &JsonObject, key: &str, default: i64, lo: i64, hi: i64) -> i64 {
     payload_int(advanced, key, default, lo, hi)
 }
 
 /// `_advanced_float`: parse an `advanced` field as f32 else `default`.
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", feature = "backend-candle"))]
 fn advanced_float(advanced: &JsonObject, key: &str, default: f32) -> f32 {
     advanced
         .get(key)
@@ -796,7 +1240,7 @@ fn advanced_float(advanced: &JsonObject, key: &str, default: f32) -> f32 {
         .unwrap_or(default)
 }
 
-#[cfg(any(target_os = "macos", test))]
+#[cfg(any(target_os = "macos", test, feature = "backend-candle"))]
 fn json_to_i64(value: &Value) -> Option<i64> {
     value
         .as_i64()
