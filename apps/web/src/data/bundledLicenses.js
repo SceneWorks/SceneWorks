@@ -12,6 +12,7 @@ import ffmpegNotice from "../../../desktop/licenses/ffmpeg/NOTICE.txt?raw";
 import ffmpegGpl from "../../../desktop/licenses/ffmpeg/COPYING.GPLv3?raw";
 import onnxruntimeNotice from "../../../desktop/licenses/onnxruntime/NOTICE.txt?raw";
 import onnxruntimeLicense from "../../../desktop/licenses/onnxruntime/LICENSE?raw";
+import cudaNotice from "../../../desktop/licenses/cuda/NOTICE.txt?raw";
 
 // Maps a manifest document `key` to its imported text. New components: add the
 // files under apps/desktop/licenses/<id>/, list them in manifest.json, and wire
@@ -21,6 +22,7 @@ const DOCUMENT_TEXT = {
   "ffmpeg-gpl": ffmpegGpl,
   "onnxruntime-notice": onnxruntimeNotice,
   "onnxruntime-license": onnxruntimeLicense,
+  "cuda-notice": cudaNotice,
 };
 
 // Resolve each component's document keys to its actual text once, at module load.

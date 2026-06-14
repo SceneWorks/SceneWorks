@@ -29,6 +29,19 @@
         { "label": "Notice", "key": "onnxruntime-notice" },
         { "label": "MIT License", "key": "onnxruntime-license" }
       ]
+    },
+    {
+      "id": "cuda",
+      "name": "NVIDIA CUDA Runtime Libraries",
+      "version": "12.9",
+      "publisher": "NVIDIA Corporation",
+      "license": "NVIDIA CUDA Toolkit EULA",
+      "homepage": "https://developer.nvidia.com/cuda-toolkit",
+      "platforms": ["windows"],
+      "usage": "Bundled CUDA runtime redistributable DLLs (cudart, cuBLAS, cuBLAS Lt, cuRAND, NVRTC), loaded at runtime by the native candle (CUDA) generation backend. Requires an NVIDIA GPU and display driver 576.02 or newer.",
+      "documents": [
+        { "label": "Notice & CUDA EULA reference", "key": "cuda-notice" }
+      ]
     }
   ]
 }

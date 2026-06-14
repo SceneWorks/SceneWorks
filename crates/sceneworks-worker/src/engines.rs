@@ -513,11 +513,13 @@ pub(crate) fn registry_capabilities(
     }) {
         push(Cap::TrainingCaption, &mut caps);
     }
-    // Prompt-refinement TextLlm (sc-5500 contract / sc-5525 cutover): the candle prompt-refine
-    // provider registers a `TextLlm` under id `prompt_refine`. Advertise `prompt_refine` when its
-    // backend is enabled — off-Mac this is the candle Llama-3.2-3B path. There is NO mlx twin
-    // (greenfield), so the macOS `mlx` worker never lights this up; the Python torch `PromptRefiner`
-    // stays the fallback there + on the candle-less Desktop installer (sc-5525 keeps it).
+    // Prompt-refinement TextLlm (sc-5500 contract / sc-5525 candle cutover / sc-5552 mlx twin): a
+    // prompt-refine provider registers a `TextLlm` under id `prompt_refine`. Advertise `prompt_refine`
+    // when its backend is enabled — the native MLX Llama-3.2-3B path on macOS (sc-5552) and the candle
+    // Llama-3.2-3B path on the Windows candle build (sc-5525). The Python torch `PromptRefiner` stays
+    // the fallback on platforms with neither (e.g. the candle-less Desktop installer). The derivation
+    // is backend-agnostic, so no change here was needed to light up the mlx twin — only force-linking
+    // `mlx_gen_prompt_refine` in prompt_refine_jobs.rs.
     if gen_core::registry::textllms().any(|r| {
         let d = (r.descriptor)();
         backends.contains(&d.backend) && d.id == "prompt_refine"
@@ -663,15 +665,35 @@ mod tests {
             on.contains(&Cap::PromptRefine),
             "an enabled candle backend should derive prompt_refine from its TextLlm descriptor"
         );
-        // mlx-only ⇒ the candle TextLlm is filtered out, and there is no mlx prompt_refine twin.
+        // both off ⇒ nothing (neither the candle stub nor — on macOS — the real mlx twin is enabled).
+        let off = registry_capabilities(&settings_with_backends(false, false));
+        assert!(!off.contains(&Cap::PromptRefine));
+    }
+
+    // Off-macOS no real mlx prompt_refine provider is linked (only the candle stub above), so an
+    // mlx-only worker must not advertise prompt_refine.
+    #[cfg(not(target_os = "macos"))]
+    #[test]
+    fn mlx_only_does_not_advertise_prompt_refine_without_the_mlx_twin() {
         let mlx_only = registry_capabilities(&settings_with_backends(true, false));
         assert!(
             !mlx_only.contains(&Cap::PromptRefine),
-            "prompt_refine has no mlx twin, so an mlx-only worker must not advertise it"
+            "off-macOS there is no mlx prompt_refine provider, so an mlx-only worker must not \
+             advertise it"
         );
-        // both off ⇒ nothing.
-        let off = registry_capabilities(&settings_with_backends(false, false));
-        assert!(!off.contains(&Cap::PromptRefine));
+    }
+
+    // On macOS the native mlx prompt_refine provider (sc-5552, force-linked in prompt_refine_jobs.rs)
+    // is in the registry, so an mlx-only worker DOES advertise prompt_refine — the MLX twin of the
+    // candle path (sc-5525).
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn mlx_only_advertises_prompt_refine_via_the_mlx_twin() {
+        let mlx_only = registry_capabilities(&settings_with_backends(true, false));
+        assert!(
+            mlx_only.contains(&Cap::PromptRefine),
+            "the sc-5552 mlx prompt_refine twin should light up prompt_refine on an mlx-only worker"
+        );
     }
 
     // Off-macOS the registry holds ONLY these three stubs (no real provider crate is linked), so

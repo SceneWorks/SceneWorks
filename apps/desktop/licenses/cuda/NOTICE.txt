@@ -1,0 +1,34 @@
+NVIDIA CUDA Runtime Redistributable Libraries
+=============================================
+
+SceneWorks (Windows) bundles the following NVIDIA CUDA runtime redistributable
+libraries so the native candle (CUDA) generation backend runs on a machine that
+does NOT have the CUDA Toolkit installed:
+
+  cudart64_12.dll            CUDA Runtime
+  cublas64_12.dll            cuBLAS
+  cublasLt64_12.dll          cuBLAS Lt
+  curand64_10.dll            cuRAND
+  nvrtc64_120_0.dll          NVRTC (runtime kernel compilation)
+  nvrtc-builtins64_129.dll   NVRTC built-ins
+
+These files are part of the NVIDIA CUDA Toolkit 12.9 and are redistributed under
+the NVIDIA CUDA Toolkit End User License Agreement, which permits redistribution
+of the runtime libraries enumerated in its "Attachment A".
+
+  CUDA EULA: https://docs.nvidia.com/cuda/eula/index.html
+
+Copyright (c) NVIDIA Corporation. All rights reserved.
+
+Runtime requirements
+--------------------
+- An NVIDIA (CUDA-capable) GPU. SceneWorks generation on Windows is CUDA-only:
+  there is no CPU or AMD/ROCm fallback (the 3B-14B models cannot run on CPU).
+- NVIDIA display driver >= 576.02 — the minimum that supports the CUDA 12.9
+  runtime and forward-JIT-compiles the bundled compute_80 PTX onto newer
+  architectures (through Blackwell / sm_120).
+
+The CUDA driver itself (nvcuda.dll) ships with the NVIDIA display driver and is
+NOT bundled here. Install or update the driver from:
+
+  https://www.nvidia.com/Download/index.aspx

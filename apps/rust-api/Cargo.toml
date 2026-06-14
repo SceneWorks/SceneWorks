@@ -35,6 +35,15 @@ nix = { version = "0.29", default-features = false, features = ["signal"] }
 # release pipeline runs `npm --prefix apps/web run build` then enables this.
 [features]
 embed-web = ["dep:rust-embed", "dep:mime_guess"]
+# Opt-in passthrough to sceneworks-worker's candle (Windows/CUDA) backend so the
+# desktop sidecar (this binary) can be built candle-enabled — `--features
+# embed-web,backend-candle`. Off by default: the plain desktop/server build (no
+# CUDA toolkit, windows-latest CI, macOS) resolves WITHOUT candle/cudarc/nvcc,
+# exactly as sceneworks-worker keeps it out of its default set. Linking does NOT
+# enable candle at runtime — that is the `backend_candle_enabled` setting (sc-5561).
+# See crates/sceneworks-worker/Cargo.toml's `backend-candle` for the providers it
+# pulls. (sc-5559)
+backend-candle = ["sceneworks-worker/backend-candle"]
 
 [dev-dependencies]
 tempfile = "3.13"

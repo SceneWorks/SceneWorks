@@ -28,7 +28,12 @@
     "active": true,
     "targets": "all",
     "externalBin": ["binaries/sceneworks-api", "binaries/uv"],
-    "resources": ["python-src/**/*", "onnxruntime/**/*", "ffmpeg/**/*"],
+    "resources": [
+      "python-src/**/*",
+      "onnxruntime/**/*",
+      "ffmpeg/**/*",
+      "cuda/**/*"
+    ],
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",

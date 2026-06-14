@@ -3,7 +3,14 @@
 // as a Tauri sidecar named for the host target triple. Wired as the
 // tauri.conf.json `beforeBuildCommand` so `tauri build` is self-contained.
 import { execFileSync, execSync } from "node:child_process";
-import { copyFileSync, mkdirSync, chmodSync, writeFileSync } from "node:fs";
+import {
+  copyFileSync,
+  mkdirSync,
+  chmodSync,
+  writeFileSync,
+  existsSync,
+  readdirSync,
+} from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import process from "node:process";
@@ -37,7 +44,31 @@ const exe = triple.includes("windows") ? ".exe" : "";
 // truth for the embedded build). Empty VITE_API_BASE_URL makes the embedded UI
 // talk to its own origin (the API serves it), so it works on the dynamic port
 // with no CORS.
-run(npmCmd, ["run", "api:build:embedded"], { VITE_API_BASE_URL: "" });
+//
+// Opt-in candle (Windows/CUDA) backend (sc-5559): set SCENEWORKS_DESKTOP_CANDLE=1
+// to compile the sidecar with `--features embed-web,backend-candle` so the
+// desktop's Rust worker runs candle for its eligible surface. CUDA-only (product
+// decision: no CPU/AMD); requires the build box to have the CUDA Toolkit 12.9 +
+// VS2022 BuildTools MSVC 14.44 toolset on PATH (run from its vcvars64 — CUDA 12.9
+// rejects VS2026's 14.51). Default OFF keeps the plain build intact for boxes
+// without the CUDA toolkit (windows-latest CI, macOS — candle is Windows-gated).
+const candle =
+  process.platform === "win32" && process.env.SCENEWORKS_DESKTOP_CANDLE === "1";
+if (candle) {
+  // CUDA_COMPUTE_CAP=80 builds `compute_80` PTX the driver JITs forward to sm_120
+  // (Blackwell) — one binary covers Ampere→Blackwell (per sc-3676). Honor an
+  // explicit override (e.g. a single-arch dev build) if the env already set it.
+  const candleEnv = { VITE_API_BASE_URL: "" };
+  if (!process.env.CUDA_COMPUTE_CAP) {
+    candleEnv.CUDA_COMPUTE_CAP = "80";
+  }
+  console.log(
+    `build-sidecar: candle backend ON (CUDA_COMPUTE_CAP=${process.env.CUDA_COMPUTE_CAP ?? "80"})`,
+  );
+  run(npmCmd, ["run", "api:build:embedded:candle"], candleEnv);
+} else {
+  run(npmCmd, ["run", "api:build:embedded"], { VITE_API_BASE_URL: "" });
+}
 
 const src = join(repoRoot, "target", "release", `sceneworks-rust-api${exe}`);
 const outDir = join(desktopDir, "binaries");
@@ -115,4 +146,70 @@ if (triple.includes("apple-darwin")) {
     "Static ffmpeg is bundled on macOS only (sc-3767); Windows/Linux use PATH ffmpeg.\n",
   );
   console.log(`build-sidecar: ${ffmpegDir} placeholder (non-macOS, PATH ffmpeg)`);
+}
+
+// The candle (Windows/CUDA) worker links cudarc with dynamic-linking, which
+// LoadLibrary's the CUDA runtime redist DLLs by name at runtime. Bundle them as a
+// Tauri resource (tauri.conf.json `resources` -> `cuda/**/*`) so a clean NVIDIA
+// machine (driver >= 576.02, no CUDA toolkit) runs the candle worker; setup.rs
+// prepends this dir to the sidecar's PATH so the loader finds them (sc-5560). Like
+// the onnxruntime/ffmpeg dirs above, `cuda` must exist on EVERY platform (Tauri
+// errors on an empty glob); only the Windows candle build (SCENEWORKS_DESKTOP_CANDLE
+// =1, set above) stages the real DLLs — every other build ships a placeholder.
+const cudaDir = join(desktopDir, "cuda");
+mkdirSync(cudaDir, { recursive: true });
+if (candle) {
+  // Resolve the CUDA Toolkit bin dir the redist DLLs are copied from (same
+  // CUDA_PATH the cargo build linked against); default to the 12.9 install path.
+  const cudaBin = join(
+    process.env.CUDA_PATH ??
+      "C:\\Program Files\\NVIDIA GPU Computing Toolkit\\CUDA\\v12.9",
+    "bin",
+  );
+  // Match by prefix so a minor CUDA point-release (different version suffix) still
+  // resolves; the regexes exclude variants like `nvrtc64_120_0.alt.dll`.
+  const dllPatterns = [
+    /^cudart64_\d+\.dll$/,
+    /^cublas64_\d+\.dll$/,
+    /^cublasLt64_\d+\.dll$/,
+    /^curand64_\d+\.dll$/,
+    /^nvrtc64_\d+_\d+\.dll$/,
+    /^nvrtc-builtins64_\d+\.dll$/,
+  ];
+  if (!existsSync(cudaBin)) {
+    console.error(
+      `build-sidecar: CUDA bin dir not found: ${cudaBin} (set CUDA_PATH to the CUDA 12.9 install for the candle bundle)`,
+    );
+    process.exit(1);
+  }
+  const binFiles = readdirSync(cudaBin);
+  const staged = [];
+  for (const re of dllPatterns) {
+    const match = binFiles.find((f) => re.test(f));
+    if (!match) {
+      console.error(
+        `build-sidecar: no CUDA redist DLL matching ${re} in ${cudaBin}`,
+      );
+      process.exit(1);
+    }
+    copyFileSync(join(cudaBin, match), join(cudaDir, match));
+    staged.push(match);
+  }
+  // NVIDIA CUDA redistributables ship under the CUDA EULA — stage the tracked
+  // notice (CUDA EULA reference + min-driver/NVIDIA requirement) next to the DLLs,
+  // mirroring the ffmpeg/onnxruntime license staging above. Same source of truth as
+  // the in-app About -> Licenses screen (apps/desktop/licenses/cuda/NOTICE.txt).
+  copyFileSync(
+    join(desktopDir, "licenses", "cuda", "NOTICE.txt"),
+    join(cudaDir, "NOTICE.txt"),
+  );
+  console.log(
+    `build-sidecar: staged ${staged.length} CUDA redist DLLs from ${cudaBin}: ${staged.join(", ")}`,
+  );
+} else {
+  writeFileSync(
+    join(cudaDir, "README.txt"),
+    "CUDA runtime redist DLLs are bundled only on the Windows candle build (SCENEWORKS_DESKTOP_CANDLE=1, sc-5560).\n",
+  );
+  console.log(`build-sidecar: ${cudaDir} placeholder (no candle / non-Windows)`);
 }
