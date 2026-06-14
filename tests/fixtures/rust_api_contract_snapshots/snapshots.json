@@ -2615,6 +2615,7 @@
       "projectName": "Parity Project",
       "prompt": "hero walks through rain",
       "quality": "balanced",
+      "referenceAssetIds": [],
       "replacementMode": "face_only",
       "seed": null,
       "sourceAssetId": null,
