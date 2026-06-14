@@ -107,10 +107,13 @@ describe("macGating helpers", () => {
     expect(macTrainingKernelBlocked(gating, "z_image_lora")).toBe(false);
   });
 
-  it("blocks a torch-only video mode by per-model eligibility", () => {
+  it("blocks an MLX-unsupported video mode by per-model eligibility", () => {
     const video = { id: "wan_2_2", macSupport: { features: { videoModes: { image_to_video: true, replace_person: false } } } };
     expect(macVideoModeBlock(video, gating, "image_to_video")).toBeNull();
-    expect(macVideoModeBlock(video, gating, "replace_person")?.blocked).toBe(true);
+    const block = macVideoModeBlock(video, gating, "replace_person");
+    expect(block?.blocked).toBe(true);
+    // The message must not claim "torch-only" — on Mac the runtime is MLX-only (epic 3482).
+    expect(block?.text).not.toMatch(/torch/i);
   });
 
   it("gates the clip-conditioning modes per-model (sc-3773 / sc-3357)", () => {
