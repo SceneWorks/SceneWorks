@@ -299,13 +299,14 @@ pub fn model_capabilities_for_type_and_family(model_type: &str, family: &str) ->
         // SCAIL-2 (epic 5439) is a Wan2.1-14B I2V end-to-end character-animation
         // engine: a reference character image + a driving video → an animated clip.
         // Its engine descriptor is `Modality::Video` with conditioning
-        // `[Reference, Mask, MultiReference, ControlClip]`. The standalone
-        // `animate_character` mode is wired in sc-5448 (the worker paints the
-        // color-coded masks from native SAM3). Cross-identity `replace_person` is the
-        // same engine with replace_flag=true (sc-5452); LoRA is sc-5451 — neither is
-        // declared until wired. Multi-character (paired ref+mask) awaits the engine
-        // request-contract extension.
-        ("video", "scail2") => vec!["animate_character"],
+        // `[Reference, Mask, MultiReference, ControlClip]`. It serves the standalone
+        // `animate_character` mode (sc-5448, the worker paints the color-coded masks
+        // from native SAM3) and cross-identity `replace_person` (sc-5452, the same
+        // engine with replace_flag=true, as the higher-quality backend behind the
+        // existing person-track replacement pipeline). LoRA is sc-5451 — not declared
+        // until wired. Multi-character (paired ref+mask) awaits the engine
+        // request-contract extension (sc-5583).
+        ("video", "scail2") => vec!["animate_character", "replace_person"],
         _ => Vec::new(),
     }
 }

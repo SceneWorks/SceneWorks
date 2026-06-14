@@ -186,14 +186,41 @@ pub(crate) async fn run_video_generate_job(
     // `replacementStatus` the asset sidecar folds in (project_store::build_video_sidecar_parts).
     #[cfg(target_os = "macos")]
     let (decoded, adapter, raw_settings, replacement_status) = if request.mode == "replace_person" {
-        let (decoded, status) =
-            generate_wan_vace(api, settings, job, &request, &project_path, backend).await?;
-        (
-            decoded,
-            WAN_VACE_ADAPTER,
-            wan_vace_raw_settings(&request),
-            Some(status),
-        )
+        // sc-5452: SCAIL-2 is a higher-quality cross-identity replacement backend behind the same
+        // YOLO11 → ByteTrack → SAM3 person-track pipeline. A `scail2_14b` person-replace job routes
+        // to SCAIL-2 (the tracked person's masks + the character reference → the engine's
+        // replacement conditioning, `replace_flag = true`); every other replace-capable model keeps
+        // native Wan-VACE (sc-3521). Routed by model id, not weight availability: like the Wan-VACE
+        // path, `generate_scail2_replace` resolves-or-errors loudly if the snapshot is unprovisioned
+        // (a person-replace must never silently degrade to a different backend or the stub). Both
+        // report the honest `replacementStatus` the asset sidecar folds in.
+        if let Some(engine_id) = scail2_engine_id(&request.model) {
+            let (decoded, status) = generate_scail2_replace(
+                api,
+                settings,
+                job,
+                &request,
+                &project_path,
+                engine_id,
+                backend,
+            )
+            .await?;
+            (
+                decoded,
+                SCAIL2_ADAPTER,
+                scail2_raw_settings(&request),
+                Some(status),
+            )
+        } else {
+            let (decoded, status) =
+                generate_wan_vace(api, settings, job, &request, &project_path, backend).await?;
+            (
+                decoded,
+                WAN_VACE_ADAPTER,
+                wan_vace_raw_settings(&request),
+                Some(status),
+            )
+        }
     } else if matches!(request.mode.as_str(), "extend_clip" | "video_bridge")
         && wan_engine_id(&request.model) == Some("wan2_2_ti2v_5b")
         && wan_available(&request, settings)
@@ -3281,6 +3308,166 @@ async fn generate_scail2(
     generate_video(api, settings, job, backend, input).await
 }
 
+/// Resolve a `replace_person` request into SCAIL-2 cross-identity replacement conditioning (sc-5452,
+/// the **integrated** surface). Unlike the standalone `animate_character` path
+/// ([`resolve_scail2_conditioning`], which segments a fresh driving clip), this reuses the masks
+/// SceneWorks already computed: the saved person track (native YOLO11 → ByteTrack → SAM3,
+/// corrections applied) supplies the per-frame driving masks, and the character's approved reference
+/// image is the identity. Driving frames come from the source clip exactly as the Wan-VACE backend
+/// loads them ([`load_source_video_frames`]), so the resampled track masks stay frame-aligned 1:1.
+/// Replacement keeps the **driving** clip's world (driving mask bg white, reference mask bg black);
+/// `video_mode = "replacement"` flips the engine `replace_flag`. SCAIL-2 is a full-character model —
+/// it replaces the whole tracked person, so the face_only/full_person `replacementMode` knob and
+/// `maskingStrength` are inert (the engine reads only the color masks). Multi-character (the extra
+/// references) awaits the engine request-contract extension (sc-5583), so only the first reference
+/// is used. Returns the conditioning plus the honest `replacementStatus` for the asset sidecar.
+#[cfg(target_os = "macos")]
+async fn resolve_scail2_replace_conditioning(
+    api: &ApiClient,
+    settings: &Settings,
+    job: &JobSnapshot,
+    request: &VideoRequest,
+    project_path: &Path,
+) -> WorkerResult<(Vec<Conditioning>, Value)> {
+    let track_id = request.person_track_id.as_deref().ok_or_else(|| {
+        WorkerError::InvalidPayload(
+            "replace_person requires a person track (personTrackId).".to_owned(),
+        )
+    })?;
+    let track = ProjectStore::new(settings.data_dir.clone(), "worker")
+        .get_person_track(&request.project_id, track_id)
+        .map_err(|error| {
+            WorkerError::InvalidPayload(format!("person track {track_id}: {error}"))
+        })?;
+
+    // Driving frames + their per-frame binary person masks — the same source the Wan-VACE backend
+    // consumes, loaded identically so the resampled masks align 1:1 with the frames.
+    let frame_count = wan_frame_count(request.raw_frame_count()) as usize;
+    let driving =
+        load_source_video_frames(api, settings, job, request, project_path, frame_count).await?;
+    let frame_total = driving.len();
+    let (binary_masks, mask_mode) = crate::person_replace::person_track_masks(
+        project_path,
+        &track,
+        request.width,
+        request.height,
+        frame_total,
+    )?;
+    // The tracked person → blue (person 0); replacement keeps the driving's world → white bg.
+    let driving_masks = crate::scail2_masks::paint_track_driving_masks(
+        &binary_masks,
+        crate::scail2_masks::BG_WHITE,
+    );
+
+    // The character identity: the first approved reference image (multi-ref = sc-5583).
+    let references = resolve_character_references(settings, request, project_path)?;
+    let reference_count = references.len();
+    let reference = references.into_iter().next().ok_or_else(|| {
+        WorkerError::InvalidPayload(
+            "Replace Person requires at least one approved character reference image.".to_owned(),
+        )
+    })?;
+
+    // The reference color mask: a fresh native-SAM3 pass on the reference image → the primary person
+    // painted blue on a black background (replacement discards the reference's surrounding world).
+    let client = reqwest::Client::new();
+    let context = crate::downloads::DownloadContext {
+        api,
+        client: &client,
+        settings,
+        job_id: &job.id,
+        cancel_message: "SCAIL-2 canceled while fetching the SAM3 segmenter weights.",
+        fresh_download: false,
+    };
+    let (sam_model, sam_tokenizer) =
+        crate::person_segment_sam3::ensure_segmenter_weights(settings, &context).await?;
+    let ref_rgb =
+        image::RgbImage::from_raw(reference.width, reference.height, reference.pixels.clone())
+            .ok_or_else(|| {
+                WorkerError::InvalidPayload("scail2 reference image is malformed".into())
+            })?;
+    let ref_mask = tokio::task::spawn_blocking(move || -> WorkerResult<Image> {
+        let masks = crate::person_segment_sam3::segment_all_persons_in_memory(
+            &sam_model,
+            &sam_tokenizer,
+            std::slice::from_ref(&ref_rgb),
+        )?;
+        crate::scail2_masks::paint_reference_mask(&masks, crate::scail2_masks::BG_BLACK)
+    })
+    .await
+    .map_err(|error| WorkerError::Io(std::io::Error::other(error)))??;
+
+    let conditioning = vec![
+        Conditioning::Reference {
+            image: reference,
+            strength: None,
+        },
+        Conditioning::Mask { image: ref_mask },
+        Conditioning::ControlClip {
+            frames: driving,
+            mask: driving_masks,
+            // masking_strength / start_frame / mode are inert for SCAIL-2 (it reads only the color
+            // masks); carried at neutral defaults for the shared ControlClip contract.
+            masking_strength: 1.0,
+            start_frame: 0,
+            mode: ReplacementMode::default(),
+        },
+    ];
+    // maskingStrength is recorded as 1.0 — SCAIL-2 always does a full-character replacement, so the
+    // Wan-VACE partial-mask knob does not apply.
+    let status = replacement_status_value(
+        &track,
+        track_id,
+        mask_mode,
+        1.0,
+        reference_count,
+        frame_total,
+        SCAIL2_ADAPTER,
+    );
+    Ok((conditioning, status))
+}
+
+/// Real MLX SCAIL-2 cross-identity replacement (epic 5439 / sc-5452): the integrated backend behind
+/// the existing `replace_person` pipeline. Builds the replacement conditioning from the saved person
+/// track + character reference ([`resolve_scail2_replace_conditioning`]) and runs the shared
+/// `generate_video` path with `video_mode = "replacement"` (engine `replace_flag = true`). Returns
+/// the decoded video plus the honest `replacementStatus` (adapter `mlx_scail2`). Mirrors
+/// [`generate_wan_vace`]'s return shape so the dispatch folds the status identically.
+#[cfg(target_os = "macos")]
+async fn generate_scail2_replace(
+    api: &ApiClient,
+    settings: &Settings,
+    job: &JobSnapshot,
+    request: &VideoRequest,
+    project_path: &Path,
+    engine_id: &'static str,
+    backend: &str,
+) -> WorkerResult<(DecodedVideo, Value)> {
+    let negative_prompt = {
+        let trimmed = request.negative_prompt.trim();
+        (!trimmed.is_empty()).then(|| trimmed.to_owned())
+    };
+    let (conditioning, status) =
+        resolve_scail2_replace_conditioning(api, settings, job, request, project_path).await?;
+    let input = VideoGenInput {
+        engine_id,
+        model_dir: resolve_scail2_model_dir(settings)?,
+        quant: resolve_scail2_quant(request),
+        conditioning,
+        prompt: request.prompt.clone(),
+        negative_prompt,
+        width: request.width,
+        height: request.height,
+        frames: wan_frame_count(request.raw_frame_count()),
+        fps: request.fps,
+        seed: resolve_video_seed(request) as u64,
+        video_mode: Some(scail2_engine_video_mode(&request.mode).to_owned()),
+        ..VideoGenInput::default()
+    };
+    let decoded = generate_video(api, settings, job, backend, input).await?;
+    Ok((decoded, status))
+}
+
 // ---------------------------------------------------------------------------
 // Real MLX LTX-2.3 generation (macOS, via mlx-gen-ltx, sc-3035): T2V/I2V with
 // SYNCHRONIZED AUDIO (the 2-stage distilled A/V pipeline; CFG forced 1.0). One
@@ -4484,6 +4671,7 @@ fn replacement_status_value(
     masking_strength: f32,
     reference_count: usize,
     frame_count: usize,
+    adapter: &str,
 ) -> Value {
     let status = track.get("status").and_then(Value::as_object);
     let person_tracking_active = status
@@ -4502,7 +4690,7 @@ fn replacement_status_value(
         "personDetectionActive": true,
         "personTrackingActive": person_tracking_active,
         "replacementActive": true,
-        "replacementAdapter": WAN_VACE_ADAPTER,
+        "replacementAdapter": adapter,
         "maskMode": mask_mode,
         "maskState": mask_state,
         "maskingStrength": masking_strength,
@@ -4606,6 +4794,7 @@ async fn generate_wan_vace(
         masking_strength,
         reference_count,
         frame_total,
+        WAN_VACE_ADAPTER,
     );
     Ok((decoded, status))
 }
@@ -5204,6 +5393,30 @@ mod tests {
         assert_eq!(replacement_mode_from("nonsense"), ReplacementMode::FaceOnly);
     }
 
+    /// SCAIL-2 maps the SceneWorks video mode to the engine `video_mode` task: cross-identity
+    /// `replace_person` → "replacement" (engine flips `replace_flag`), everything else (standalone
+    /// `animate_character`) → "animation" (sc-5448 / sc-5452).
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn scail2_mode_maps_replacement_vs_animation() {
+        assert_eq!(scail2_engine_video_mode("replace_person"), "replacement");
+        assert_eq!(scail2_engine_video_mode("animate_character"), "animation");
+        assert_eq!(scail2_engine_video_mode("text_to_video"), "animation");
+    }
+
+    /// The replacement status records the actual engine adapter, so a SCAIL-2-backed person-replace
+    /// (sc-5452) reports `mlx_scail2` (not the Wan-VACE default).
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn replacement_status_records_scail2_adapter() {
+        let track = json!({ "id": "trk_1", "status": { "maskState": "active" } });
+        let status =
+            replacement_status_value(&track, "trk_1", "segmentation", 1.0, 1, 81, SCAIL2_ADAPTER);
+        assert_eq!(status["replacementAdapter"], json!("mlx_scail2"));
+        assert_eq!(status["replacementActive"], json!(true));
+        assert_eq!(status["controlFrameCount"], json!(81));
+    }
+
     /// The Wan-VACE conditioning is one ControlClip (frames + per-frame mask) followed by one
     /// Reference per character image; mismatched frame/mask counts fail clearly.
     #[cfg(target_os = "macos")]
@@ -5385,7 +5598,15 @@ mod tests {
             "corrections": [ { "frameIndex": 0 }, { "frameIndex": 3 } ]
         });
         // 0.5 is exactly representable as f32 so the JSON widen to f64 is exact.
-        let status = replacement_status_value(&track, "ignored", "segmentation", 0.5, 2, 81);
+        let status = replacement_status_value(
+            &track,
+            "ignored",
+            "segmentation",
+            0.5,
+            2,
+            81,
+            WAN_VACE_ADAPTER,
+        );
         assert_eq!(status["personDetectionActive"], json!(true));
         assert_eq!(status["personTrackingActive"], json!(true));
         assert_eq!(status["replacementActive"], json!(true));
