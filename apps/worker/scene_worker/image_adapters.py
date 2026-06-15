@@ -505,8 +505,8 @@ MODEL_TARGETS = {
         "label": "Chroma1-Flash",
         "family": "chroma",
         "supportsEdit": False,
-        # CFG baked: ~8 steps, guidance 1.0 (CFG off, negative prompt ignored).
-        "steps": 8,
+        # CFG baked: Heun at ~12 steps, guidance 1.0 (CFG off, negative prompt ignored).
+        "steps": 12,
         "guidanceScale": 1.0,
         "maxSequenceLength": 512,
         "repo": "lodestones/Chroma1-Flash",

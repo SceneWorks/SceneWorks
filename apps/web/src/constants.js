@@ -254,8 +254,14 @@ export const fallbackModels = [
     name: "Chroma1-Flash",
     type: "image",
     capabilities: ["text_to_image", "style_variations"],
+    defaults: { resolution: "768x768", steps: 12, guidanceScale: 1.0, sampler: "heun", scheduler: "default" },
+    limits: {
+      resolutions: ["768x768", "1024x1024", "1280x720", "720x1280"],
+      samplers: ["default", "euler", "heun"],
+      schedulers: ["default"],
+    },
     ui: {
-      description: "Chroma1-Flash — fast CFG-baked text-to-image, Apache-2.0 (commercial-safe). FLUX.1-schnell-derived 8.9B + T5-XXL; ~8-step generation, CFG disabled (guidance 1.0, no negative prompt). Large-VRAM GPU.",
+      description: "Chroma1-Flash — fast CFG-baked text-to-image, Apache-2.0 (commercial-safe). FLUX.1-schnell-derived 8.9B + T5-XXL; Heun ~12-step generation, CFG disabled (guidance 1.0, no negative prompt). Large-VRAM GPU.",
       promptGuide: { title: "Chroma1-Flash Prompt Guide", path: "/prompt-guides/chroma1-flash.md" },
     },
   },

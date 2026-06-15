@@ -6,7 +6,7 @@ Fast drafts and rapid iteration. Chroma1-Flash is the CFG-baked, low-step varian
 
 ## Choosing A Chroma1 Variant
 
-- **Chroma1-Flash** — fastest (~8 steps, CFG baked, **no negative prompt**). Use it for quick drafts and iteration.
+- **Chroma1-Flash** — fastest (~12 Heun steps, CFG baked, **no negative prompt**). Use it for quick drafts and iteration.
 - **Chroma1-HD** — the high-resolution tune with real CFG + negative prompt (~40 steps). Use it for finished images.
 - **Chroma1-Base** — the neutral foundation (real CFG, ~40 steps); the recommended base for finetuning.
 
@@ -18,7 +18,7 @@ Chroma was trained on rich natural-language captions (T5-XXL text encoder, no CL
 
 `subject + setting + visual details + style + composition + lighting + any text`
 
-Flash bakes CFG (guidance 1.0), so it does **not** use a negative prompt — put everything you want into the positive prompt. Recommended default: **~8 steps** with a Heun-friendly schedule.
+Flash bakes CFG (guidance 1.0), so it does **not** use a negative prompt — put everything you want into the positive prompt. Recommended default: **768x768, ~12 steps** with the Heun sampler.
 
 ## Build The Prompt
 
@@ -67,7 +67,7 @@ Chroma renders legible text — quote the exact words and describe the medium:
 ## Tips
 
 - Keep the prompt descriptive and positive; at guidance 1.0 there is no negative prompt.
-- ~8 steps is the sweet spot — more steps rarely help Flash. Heun / DPM++ SDE samplers do well at low step counts.
+- 768x768 at 12 Heun steps is the default quality/speed balance; 1024x1024 or 16-20 steps can improve some images at a higher render cost.
 - Use Flash to explore composition quickly, then re-render the keeper on Chroma1-HD for maximum quality.
 
 ## Example Prompts
