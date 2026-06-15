@@ -760,9 +760,12 @@ impl JobsStore {
         let now = utc_now();
         let worker_ids = [worker_id.to_owned()];
         let active_jobs = self.active_jobs_for_workers(&transaction, &worker_ids)?;
-        let error = signal_failure_error(signal);
         let mut failed = None;
         if let Some(job) = active_jobs.into_iter().next() {
+            // Tailor the OOM/signal hint to the dead job's kind so the guidance is
+            // actionable (sc-5567): an image-batch SIGKILL points at count/resolution,
+            // not the training-only gradient-checkpointing remediation.
+            let error = signal_failure_error(signal, Some(&job.job_type));
             transaction.execute(
                 &format!(
                     "
@@ -1877,16 +1880,17 @@ fn mlx_unavailable_error(job: &JobSnapshot, grace_seconds: u64) -> String {
 }
 
 /// Human, actionable terminal error attributing a worker's death to its
-/// terminating signal (sc-4881). Signal 9 (the common first-step OOM SIGKILL from
-/// sc-4874) carries the gradient-checkpointing remediation hint; other uncatchable
-/// deaths (SIGABRT GPU/Metal abort, SIGSEGV) name themselves so the job card and
-/// System → Logs show a real cause instead of a frozen progress bar.
-fn signal_failure_error(signal: i32) -> String {
+/// terminating signal (sc-4881). Signal 9 (an uncatchable SIGKILL — almost always an
+/// OS memory-pressure OOM kill) carries a remediation hint tailored to the dead job's
+/// kind (sc-5567): training points at gradient checkpointing (the sc-4874 first-step
+/// OOM), image/video generation at the knobs that actually shrink the working set
+/// (batch count, resolution, frame count). Other uncatchable deaths (SIGABRT GPU/Metal
+/// abort, SIGSEGV) name themselves so the job card and System → Logs show a real cause
+/// instead of a frozen progress bar. `job_type` is the failed job's kind when one was
+/// active (`None` when the worker died idle).
+fn signal_failure_error(signal: i32, job_type: Option<&JobType>) -> String {
     let hint = match signal {
-        9 => {
-            ", likely out-of-memory during the first training step \
-              — enable Gradient Checkpointing or reduce resolution"
-        }
+        9 => oom_remediation_hint(job_type),
         6 => ", likely a GPU/Metal command-buffer abort or assertion",
         11 => " (segmentation fault)",
         _ => "",
@@ -1894,6 +1898,39 @@ fn signal_failure_error(signal: i32) -> String {
     match signal_name(signal) {
         Some(name) => format!("Worker terminated by signal {signal} ({name}){hint}."),
         None => format!("Worker terminated by signal {signal}{hint}."),
+    }
+}
+
+/// Signal-9 (SIGKILL/OOM) remediation hint keyed to the dead job's kind so the guidance
+/// is actionable rather than training-centric (sc-5567). The `_` arm covers the long tail
+/// of non-generation job types (and is required anyway — `JobType` is `#[non_exhaustive]`).
+fn oom_remediation_hint(job_type: Option<&JobType>) -> &'static str {
+    match job_type {
+        // LoRA training: the sc-4874 first-training-step OOM — gradient checkpointing is
+        // the real lever; resolution is secondary.
+        Some(JobType::LoraTrain) => {
+            ", likely out-of-memory during the first training step \
+             — enable Gradient Checkpointing or reduce resolution"
+        }
+        // Video generation/edit: working set scales with resolution AND frame count.
+        Some(
+            JobType::VideoGenerate
+            | JobType::VideoExtend
+            | JobType::VideoBridge
+            | JobType::VideoUpscale
+            | JobType::PersonReplace,
+        ) => ", likely out-of-memory — reduce the resolution, frame count, or batch count",
+        // Image generation/edit: a multi-image batch stacks per-image working set — count
+        // is the first knob, then resolution (sc-5567).
+        Some(
+            JobType::ImageGenerate
+            | JobType::ImageEdit
+            | JobType::ImageUpscale
+            | JobType::ImageDetail
+            | JobType::ImageVqa
+            | JobType::ImageInterleave,
+        ) => ", likely out-of-memory — reduce the image count or resolution",
+        _ => ", likely out-of-memory — reduce the resolution or batch count",
     }
 }
 
@@ -4335,6 +4372,68 @@ mod active_statuses_sql_tests {
                 "active status {status:?} missing from SQL list"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod signal_failure_error_tests {
+    //! sc-4881 signal attribution + sc-5567 job-kind-aware OOM remediation: a signal-9
+    //! (SIGKILL/OOM) death must give guidance that fits the dead job — count/resolution
+    //! for an image batch, frames for video, gradient checkpointing only for training —
+    //! and non-OOM uncatchable deaths must keep naming their real cause.
+    use super::{signal_failure_error, JobType};
+
+    #[test]
+    fn signal_9_image_batch_points_at_count_not_gradient_checkpointing() {
+        let msg = signal_failure_error(9, Some(&JobType::ImageGenerate));
+        assert!(msg.contains("signal 9 (SIGKILL)"), "{msg}");
+        assert!(msg.contains("out-of-memory"), "{msg}");
+        assert!(msg.contains("image count or resolution"), "{msg}");
+        // The old training-only hint must NOT leak onto an image batch (the sc-5567 bug).
+        assert!(!msg.contains("Gradient Checkpointing"), "{msg}");
+        assert!(!msg.contains("training step"), "{msg}");
+    }
+
+    #[test]
+    fn signal_9_training_keeps_gradient_checkpointing_hint() {
+        let msg = signal_failure_error(9, Some(&JobType::LoraTrain));
+        assert!(msg.contains("Gradient Checkpointing"), "{msg}");
+        assert!(msg.contains("training step"), "{msg}");
+    }
+
+    #[test]
+    fn signal_9_video_points_at_frame_count() {
+        let msg = signal_failure_error(9, Some(&JobType::VideoGenerate));
+        assert!(msg.contains("out-of-memory"), "{msg}");
+        assert!(msg.contains("frame count"), "{msg}");
+        assert!(!msg.contains("Gradient Checkpointing"), "{msg}");
+    }
+
+    #[test]
+    fn signal_9_unknown_and_idle_fall_back_to_generic_oom() {
+        // No active job (worker died idle) and an unmapped job kind both get the generic
+        // OOM hint rather than a misleading training/image/video-specific one.
+        for job_type in [None, Some(&JobType::Unknown("future".to_owned()))] {
+            let msg = signal_failure_error(9, job_type);
+            assert!(msg.contains("out-of-memory"), "{msg}");
+            assert!(!msg.contains("Gradient Checkpointing"), "{msg}");
+            assert!(!msg.contains("image count"), "{msg}");
+            assert!(!msg.contains("frame count"), "{msg}");
+        }
+    }
+
+    #[test]
+    fn non_oom_signals_keep_their_own_cause_regardless_of_job_kind() {
+        // SIGABRT / SIGSEGV are not OOM, so the job kind must not turn them into one.
+        let abort = signal_failure_error(6, Some(&JobType::ImageGenerate));
+        assert!(abort.contains("signal 6 (SIGABRT)"), "{abort}");
+        assert!(abort.contains("GPU/Metal command-buffer abort"), "{abort}");
+        assert!(!abort.contains("out-of-memory"), "{abort}");
+
+        let segv = signal_failure_error(11, Some(&JobType::LoraTrain));
+        assert!(segv.contains("signal 11 (SIGSEGV)"), "{segv}");
+        assert!(segv.contains("segmentation fault"), "{segv}");
+        assert!(!segv.contains("Gradient Checkpointing"), "{segv}");
     }
 }
 
