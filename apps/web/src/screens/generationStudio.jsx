@@ -137,12 +137,13 @@ export function useGenerationStudio({
     () => presets.filter((preset) => presetMatchesWorkflow(preset, mode) && presetMatchesModel(preset, selectedModel, models)),
     [mode, presets, selectedModel?.id, models],
   );
+  // sc-5875: presets are opt-in. With no explicit selection (fresh screen / None),
+  // resolve to no preset so an unchosen preset's LoRA/resolution/prompt are never
+  // silently applied. The dropdown's "None" and the applied config stay in agreement.
   const selectedPreset =
-    selectedPresetId === noPresetId
-      ? null
-      : selectedPresetId
-        ? availablePresets.find((preset) => preset.id === selectedPresetId) ?? null
-        : availablePresets[0] ?? null;
+    selectedPresetId && selectedPresetId !== noPresetId
+      ? availablePresets.find((preset) => preset.id === selectedPresetId) ?? null
+      : null;
   const presetPromptParts = buildPresetPromptParts(selectedPreset);
   const presetLoraDetails = buildPresetLoraDetails(selectedPreset, loras);
   const presetValidationResult = useMemo(
