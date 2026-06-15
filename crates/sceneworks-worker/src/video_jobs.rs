@@ -206,9 +206,10 @@ pub(crate) async fn run_video_generate_job(
             )
             .await?;
             (
+                // The replace_person path doesn't resolve user LoRAs (sc-5452), so no lightning recipe.
                 decoded,
                 SCAIL2_ADAPTER,
-                scail2_raw_settings(&request),
+                scail2_raw_settings(&request, false),
                 Some(status),
             )
         } else {
@@ -362,7 +363,14 @@ pub(crate) async fn run_video_generate_job(
             )
             .await?,
             SCAIL2_ADAPTER,
-            scail2_raw_settings(&request),
+            // Best-effort lightning detection for the asset's effective-recipe record (the adapter
+            // file is already resolved by generate_scail2 above; re-reading its header is cheap).
+            scail2_raw_settings(
+                &request,
+                scail2_adapters_have_lightning(
+                    &resolve_scail2_adapters(&request).unwrap_or_default(),
+                ),
+            ),
             None,
         )
     } else {
@@ -1777,7 +1785,8 @@ fn resolve_wan_vace_adapters(request: &VideoRequest) -> WorkerResult<Vec<Adapter
 /// over the (Q4/Q8) base; `classify_adapter` tags SceneWorks peft LoKr as `Lokr` and everything else
 /// (incl. third-party LyCORIS) as `Lora`. This carries both a user-selected SCAIL-2 LoRA and the
 /// bundled Bias-Aware DPO quality LoRA (both surface through `request.loras`). A lightx2v diff-patch
-/// "lightning" LoRA is rejected by the engine today (sc-5684).
+/// "lightning" LoRA installs via the engine's in-place diff-patch merge (sc-5684); selecting it makes
+/// the worker apply the step-distill recipe (`scail2_sampling`, sc-5700).
 #[cfg(target_os = "macos")]
 fn resolve_scail2_adapters(request: &VideoRequest) -> WorkerResult<Vec<AdapterSpec>> {
     if request.loras.len() > MAX_JOB_LORAS {
@@ -2117,6 +2126,48 @@ fn wan_sampling(engine_id: &str, request: &VideoRequest) -> (Option<u32>, Option
     (steps, guidance)
 }
 
+/// The lightx2v lightning step-distill recipe (sc-5684 / sc-5700): 8 steps, CFG off, scheduler shift 1.
+#[cfg(target_os = "macos")]
+const SCAIL2_LIGHTNING_STEPS: u32 = 8;
+#[cfg(target_os = "macos")]
+const SCAIL2_LIGHTNING_GUIDANCE: f32 = 1.0;
+#[cfg(target_os = "macos")]
+const SCAIL2_LIGHTNING_SHIFT: f32 = 1.0;
+
+/// SCAIL-2 sampling recipe `(steps, guidance, scheduler_shift)`. When a lightx2v diff-patch
+/// "lightning" LoRA is selected (`lightning`), apply the step-distill recipe so the toggle yields the
+/// ~10× fewer-DiT-passes speedup: CFG off (guidance 1.0 → the engine short-circuits to a single DiT
+/// forward per step) and scheduler shift 1.0 are the lightning invariants (forced), and the step count
+/// defaults to 8 but honors an explicit user `advanced.steps` override. Without a lightning LoRA, return
+/// all-`None` so the engine's quality defaults (40 steps, guide 5.0, shift 5.0) stand exactly as before
+/// — this path is unchanged. The chosen knobs are recorded as `effective*` in [`scail2_raw_settings`]
+/// so what actually ran is inspectable on the asset (mirrors [`wan_raw_settings`]).
+#[cfg(target_os = "macos")]
+fn scail2_sampling(
+    request: &VideoRequest,
+    lightning: bool,
+) -> (Option<u32>, Option<f32>, Option<f32>) {
+    if !lightning {
+        return (None, None, None);
+    }
+    (
+        advanced_opt_u32(request, "steps").or(Some(SCAIL2_LIGHTNING_STEPS)),
+        Some(SCAIL2_LIGHTNING_GUIDANCE),
+        Some(SCAIL2_LIGHTNING_SHIFT),
+    )
+}
+
+/// `true` if any resolved adapter is a lightx2v diff-patch ("lightning") LoRA — the engine's own
+/// detector (a file carrying full-rank `.diff`/`.diff_b` tensors), so the recipe keys off the actual
+/// format, not a catalog id or filename. A file that can't be read is treated as non-lightning (the
+/// engine surfaces the real load error downstream).
+#[cfg(target_os = "macos")]
+fn scail2_adapters_have_lightning(adapters: &[AdapterSpec]) -> bool {
+    adapters
+        .iter()
+        .any(|a| mlx_gen_scail2::has_diff_patch_keys(&a.path).unwrap_or(false))
+}
+
 /// The resolved inputs for one video generation (engine load + request build), shared by
 /// Wan (sc-3034) and LTX (sc-3035) — split out so the engine call is unit-testable on real
 /// weights without the API/job plumbing. The LTX-only knobs (`video_mode` no_audio,
@@ -2139,6 +2190,9 @@ struct VideoGenInput {
     fps: u32,
     steps: Option<u32>,
     guidance: Option<f32>,
+    /// Flow-matching scheduler shift (`req.scheduler_shift`); `None` ⇒ the engine default. Set by the
+    /// SCAIL-2 lightning recipe (shift 1.0, sc-5700); the other models leave it at the engine default.
+    scheduler_shift: Option<f32>,
     seed: u64,
     /// Per-request control-clip conditioning scale (Wan-VACE `conditioning_scale`, sc-3441 /
     /// sc-3521); `None` ⇒ the engine default (1.0). Unused by the non-control paths.
@@ -2179,6 +2233,7 @@ impl Default for VideoGenInput {
             fps: 0,
             steps: None,
             guidance: None,
+            scheduler_shift: None,
             seed: 0,
             control_scale: None,
             video_mode: None,
@@ -2234,6 +2289,7 @@ fn run_loaded_video_generation(
         fps: Some(input.fps),
         steps: input.steps,
         guidance: input.guidance,
+        scheduler_shift: input.scheduler_shift,
         seed: Some(input.seed),
         conditioning: input.conditioning,
         control_scale: input.control_scale,
@@ -3161,9 +3217,12 @@ fn resolve_scail2_quant(request: &VideoRequest) -> Option<Quant> {
     }
 }
 
-/// Raw-settings recorded on a real MLX SCAIL-2 asset (mirrors `bernini_raw_settings`).
+/// Raw-settings recorded on a real MLX SCAIL-2 asset (mirrors `bernini_raw_settings`). When the
+/// lightx2v lightning LoRA is applied (`lightning`, sc-5700), records the effective step-distill recipe
+/// the worker dispatched — so the chosen steps/CFG/shift is inspectable on the asset, not silent
+/// (mirrors `wan_raw_settings`).
 #[cfg(target_os = "macos")]
-fn scail2_raw_settings(request: &VideoRequest) -> Value {
+fn scail2_raw_settings(request: &VideoRequest, lightning: bool) -> Value {
     let mut raw = request.advanced.clone();
     raw.insert("realModelInference".to_owned(), Value::Bool(true));
     raw.insert("model".to_owned(), Value::String(request.model.clone()));
@@ -3174,6 +3233,19 @@ fn scail2_raw_settings(request: &VideoRequest) -> Value {
         "scail2Task".to_owned(),
         Value::String(scail2_engine_video_mode(&request.mode).to_owned()),
     );
+    if lightning {
+        let (steps, guidance, shift) = scail2_sampling(request, true);
+        raw.insert("scail2Lightning".to_owned(), Value::Bool(true));
+        if let Some(steps) = steps {
+            raw.insert("effectiveSteps".to_owned(), json!(steps));
+        }
+        if let Some(guidance) = guidance {
+            raw.insert("effectiveGuidanceScale".to_owned(), json!(guidance));
+        }
+        if let Some(shift) = shift {
+            raw.insert("effectiveSchedulerShift".to_owned(), json!(shift));
+        }
+    }
     Value::Object(raw)
 }
 
@@ -3333,6 +3405,12 @@ async fn generate_scail2(
     };
     let conditioning =
         resolve_scail2_conditioning(api, settings, job, request, project_path).await?;
+    // Selecting a lightx2v diff-patch "lightning" LoRA flips the worker to the step-distill recipe
+    // (8 steps, CFG off, shift 1.0) so the toggle yields the speedup; otherwise steps/guidance/shift
+    // stay `None` and the engine's quality defaults stand (sc-5700).
+    let adapters = resolve_scail2_adapters(request)?;
+    let (steps, guidance, scheduler_shift) =
+        scail2_sampling(request, scail2_adapters_have_lightning(&adapters));
     let input = VideoGenInput {
         engine_id,
         model_dir: resolve_scail2_model_dir(settings)?,
@@ -3344,9 +3422,12 @@ async fn generate_scail2(
         height: request.height,
         frames: wan_frame_count(request.raw_frame_count()),
         fps: request.fps,
+        steps,
+        guidance,
+        scheduler_shift,
         seed: resolve_video_seed(request) as u64,
         video_mode: Some(scail2_engine_video_mode(&request.mode).to_owned()),
-        adapters: resolve_scail2_adapters(request)?,
+        adapters,
         ..VideoGenInput::default()
     };
     generate_video(api, settings, job, backend, input).await
@@ -6301,7 +6382,7 @@ mod tests {
                 "fps": 16,
                 "advanced": { "mlxQuantize": 4, "userKnob": "keep-me" }
             }));
-            let raw = scail2_raw_settings(&req);
+            let raw = scail2_raw_settings(&req, false);
             (raw, req)
         };
         let (raw, req) = raw_for("animate_character");
@@ -6312,9 +6393,49 @@ mod tests {
         assert_eq!(raw["frameCount"], json!(req.frame_count()));
         assert_eq!(raw["scail2Task"], json!("animation"));
         assert_eq!(raw["userKnob"], json!("keep-me"));
+        // No lightning LoRA ⇒ no effective-recipe override recorded (engine quality defaults stand).
+        assert!(raw.get("scail2Lightning").is_none());
+        assert!(raw.get("effectiveSteps").is_none());
         // replace_person resolves to the replacement task (flips the engine replace_flag).
         let (raw_replace, _) = raw_for("replace_person");
         assert_eq!(raw_replace["scail2Task"], json!("replacement"));
+    }
+
+    /// The lightx2v lightning toggle (sc-5700): selecting a diff-patch LoRA applies the step-distill
+    /// recipe — 8 steps, CFG off (guidance 1.0), scheduler shift 1.0 — with an explicit user step
+    /// count still honored, and the effective recipe is recorded on the asset. Without lightning the
+    /// sampling is all-`None` (the engine's quality defaults stand, unchanged).
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn scail2_lightning_recipe_overrides_sampling_and_records() {
+        let req = request(json!({
+            "projectId": "p", "model": "scail2_14b", "mode": "animate_character",
+            "duration": 5, "fps": 16, "advanced": {}
+        }));
+        // Non-lightning: untouched (engine defaults).
+        assert_eq!(scail2_sampling(&req, false), (None, None, None));
+        // Lightning: CFG off + shift 1.0 forced, steps default 8.
+        assert_eq!(
+            scail2_sampling(&req, true),
+            (Some(8), Some(1.0), Some(1.0)),
+            "lightning applies the 8-step CFG-off recipe"
+        );
+        // An explicit user step count is honored; CFG/shift stay forced.
+        let req_steps = request(json!({
+            "projectId": "p", "model": "scail2_14b", "mode": "animate_character",
+            "duration": 5, "fps": 16, "advanced": { "steps": 4 }
+        }));
+        assert_eq!(
+            scail2_sampling(&req_steps, true),
+            (Some(4), Some(1.0), Some(1.0))
+        );
+        // The effective recipe is recorded for observability when lightning is active.
+        let raw = scail2_raw_settings(&req, true);
+        let raw = raw.as_object().unwrap();
+        assert_eq!(raw["scail2Lightning"], json!(true));
+        assert_eq!(raw["effectiveSteps"], json!(8));
+        assert_eq!(raw["effectiveGuidanceScale"], json!(1.0));
+        assert_eq!(raw["effectiveSchedulerShift"], json!(1.0));
     }
 
     /// SCAIL-2 conditioning resolution fails loudly BEFORE any IO when its required media is missing
