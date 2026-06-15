@@ -3272,6 +3272,14 @@ fn image_job_is_candle_eligible(job: &JobSnapshot) -> bool {
     if model == "kolors" && kolors_ipadapter_candle_eligible(&job.payload) {
         return true;
     }
+    // FLUX XLabs IP-Adapter reference conditioning (sc-5872, epic 5480): a `flux_dev`/`flux_schnell`
+    // model with a reference image is the same bespoke candle lane (`generate_candle_flux_ipadapter_\
+    // stream`), NOT txt2img — branch it out before the gate (which rejects `referenceAssetId`). Pure IP
+    // only; img2img/edit shapes stay on torch (sc-5487). Mirrors the worker's `flux_ipadapter_available`.
+    if matches!(model, "flux_dev" | "flux_schnell") && flux_ipadapter_candle_eligible(&job.payload)
+    {
+        return true;
+    }
     image_request_candle_eligible(model, &job.payload)
 }
 
@@ -3559,6 +3567,26 @@ fn sdxl_ipadapter_candle_eligible(payload: &Map<String, Value>) -> bool {
 /// agree on the lane boundary. Candle-only — the macOS Kolors IP path is the registry `Reference` route,
 /// not a separate candle-eligible gate.
 fn kolors_ipadapter_candle_eligible(payload: &Map<String, Value>) -> bool {
+    if payload.get("mode").and_then(Value::as_str) == Some("edit_image") {
+        return false;
+    }
+    let non_empty = |key: &str| {
+        payload
+            .get(key)
+            .and_then(Value::as_str)
+            .is_some_and(|value| !value.trim().is_empty())
+    };
+    non_empty("referenceAssetId") && !non_empty("sourceAssetId") && !non_empty("maskAssetId")
+}
+
+/// FLUX XLabs IP-Adapter candle-routing conditions (sc-5872, epic 5480). The candle `IpAdapterFlux`
+/// provider serves PURE reference (image-prompt) conditioning on the `flux_dev`/`flux_schnell` families
+/// — the same payload shape as the SDXL/Kolors IP lanes: a `referenceAssetId` with NO img2img source /
+/// inpaint mask and NOT an `edit_image` (those advanced FLUX shapes are sc-5487, still torch). Mirrors
+/// the worker's `flux_ipadapter_available` gate (minus the local weight-resolve check) so the router and
+/// worker agree on the lane boundary. Candle-only — the macOS FLUX IP path is the registry `Reference`
+/// route (epic 3621), not a separate candle-eligible gate.
+fn flux_ipadapter_candle_eligible(payload: &Map<String, Value>) -> bool {
     if payload.get("mode").and_then(Value::as_str) == Some("edit_image") {
         return false;
     }
@@ -5362,6 +5390,32 @@ mod candle_routing_tests {
         }))));
         assert!(!kolors_ipadapter_candle_eligible(&object(json!({
             "model": "kolors", "referenceAssetId": "a", "maskAssetId": "m"
+        }))));
+    }
+
+    #[test]
+    fn flux_ipadapter_reference_jobs_route_to_candle() {
+        // A pure FLUX reference (XLabs IP-Adapter) job routes to the candle lane (sc-5872) via the
+        // bespoke branch, NOT the txt2img `image_request_candle_eligible` gate (which rejects
+        // `referenceAssetId`). Both variants.
+        for model in ["flux_dev", "flux_schnell"] {
+            let payload = json!({ "model": model, "referenceAssetId": "asset_1" });
+            assert!(flux_ipadapter_candle_eligible(&object(payload.clone())));
+            assert!(image_job_is_candle_eligible(&image_generate_job(payload)));
+        }
+        // No reference → plain txt2img routes via the txt2img gate instead.
+        assert!(!flux_ipadapter_candle_eligible(&object(
+            json!({ "model": "flux_dev" })
+        )));
+        // img2img / inpaint / edit shapes are NOT this lane (those are sc-5487, still torch).
+        assert!(!flux_ipadapter_candle_eligible(&object(json!({
+            "model": "flux_dev", "mode": "edit_image", "referenceAssetId": "a", "sourceAssetId": "s"
+        }))));
+        assert!(!flux_ipadapter_candle_eligible(&object(json!({
+            "model": "flux_dev", "referenceAssetId": "a", "sourceAssetId": "s"
+        }))));
+        assert!(!flux_ipadapter_candle_eligible(&object(json!({
+            "model": "flux_schnell", "referenceAssetId": "a", "maskAssetId": "m"
         }))));
     }
 }
