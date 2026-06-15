@@ -13,6 +13,15 @@ import ffmpegGpl from "../../../desktop/licenses/ffmpeg/COPYING.GPLv3?raw";
 import onnxruntimeNotice from "../../../desktop/licenses/onnxruntime/NOTICE.txt?raw";
 import onnxruntimeLicense from "../../../desktop/licenses/onnxruntime/LICENSE?raw";
 import cudaNotice from "../../../desktop/licenses/cuda/NOTICE.txt?raw";
+// Re-hosted AI model weights (sc-5604). Upstream license text reproduced so the
+// redistribution attribution travels with the app. The three Wan2.2 models are
+// each redistributed under Apache-2.0; the LTX-2.3 bundle carries two restricted
+// licenses (LTX-2 Community License + Google Gemma Terms).
+import wanTi2v5bApache from "../../../desktop/licenses/wan2.2-ti2v-5b/Apache-2.0.txt?raw";
+import wanI2vA14bApache from "../../../desktop/licenses/wan2.2-i2v-a14b/Apache-2.0.txt?raw";
+import wanT2vA14bApache from "../../../desktop/licenses/wan2.2-t2v-a14b/Apache-2.0.txt?raw";
+import ltxLicense from "../../../desktop/licenses/ltx-2.3/LTX-2-Community-License.txt?raw";
+import ltxGemma from "../../../desktop/licenses/ltx-2.3/Gemma-Terms.txt?raw";
 
 // Maps a manifest document `key` to its imported text. New components: add the
 // files under apps/desktop/licenses/<id>/, list them in manifest.json, and wire
@@ -23,6 +32,11 @@ const DOCUMENT_TEXT = {
   "onnxruntime-notice": onnxruntimeNotice,
   "onnxruntime-license": onnxruntimeLicense,
   "cuda-notice": cudaNotice,
+  "wan2.2-ti2v-5b-apache": wanTi2v5bApache,
+  "wan2.2-i2v-a14b-apache": wanI2vA14bApache,
+  "wan2.2-t2v-a14b-apache": wanT2vA14bApache,
+  "ltx-2.3-license": ltxLicense,
+  "ltx-2.3-gemma": ltxGemma,
 };
 
 // Resolve each component's document keys to its actual text once, at module load.
