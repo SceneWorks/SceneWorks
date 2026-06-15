@@ -84,7 +84,10 @@ use candle_gen_ltx as _;
 use candle_gen_svd as _;
 #[cfg(all(target_os = "windows", feature = "backend-candle"))]
 use candle_gen_wan as _;
-#[cfg(any(target_os = "macos", all(target_os = "windows", feature = "backend-candle")))]
+#[cfg(any(
+    target_os = "macos",
+    all(target_os = "windows", feature = "backend-candle")
+))]
 use sceneworks_core::character_store::CharacterStore;
 // Frame-count stride coercion (Wan needs frames ≡ 1 mod 4; LTX snaps to 8k+1) — used by the MLX path
 // and the candle entry (sc-5097).
@@ -1909,7 +1912,10 @@ fn resolve_wan_conditioning(
 }
 
 /// Which boundary frame of a source clip to extract for Wan-native clip conditioning (sc-3357).
-#[cfg(any(target_os = "macos", all(target_os = "windows", feature = "backend-candle")))]
+#[cfg(any(
+    target_os = "macos",
+    all(target_os = "windows", feature = "backend-candle")
+))]
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum ClipFramePosition {
     /// The clip's first decoded frame (the right-side clip's head for `video_bridge`).
