@@ -66,12 +66,13 @@ describe("RefinePromptControl", () => {
     await settle();
 
     // Sent the prompt + model + workflow + fetched guide; original not yet applied.
-    expect(refinePrompt).toHaveBeenCalledWith({
+    expect(refinePrompt).toHaveBeenCalledWith(expect.objectContaining({
       prompt: "neon street",
       modelId: "z_image_turbo",
       workflow: "image",
       guide: "# Guide\n\nWrite vividly.",
-    });
+      signal: expect.any(AbortSignal),
+    }));
     expect(onApply).not.toHaveBeenCalled();
     expect(container.querySelector(".refine-review-text").textContent).toBe("A vivid neon street at midnight, cinematic.");
 
@@ -128,7 +129,13 @@ describe("RefinePromptControl", () => {
     });
     await settle();
 
-    expect(refinePrompt).toHaveBeenCalledWith({ prompt: "dog", modelId: "z", workflow: "video", guide: "" });
+    expect(refinePrompt).toHaveBeenCalledWith(expect.objectContaining({
+      prompt: "dog",
+      modelId: "z",
+      workflow: "video",
+      guide: "",
+      signal: expect.any(AbortSignal),
+    }));
     expect(container.querySelector(".refine-review-text").textContent).toBe("rewritten");
   });
 

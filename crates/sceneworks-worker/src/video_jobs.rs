@@ -2578,16 +2578,13 @@ async fn generate_video(
         // leaks until the worker is restarted by the supervisor.
         eprintln!(
             "rust_worker_video_abandoned: job={} engine={log_engine_id} did not respond to \
-             cancellation within {}s — abandoning the wedged task",
+             cancellation within {}s — exiting the worker so the supervisor can recover the \
+             wedged GPU task",
             job.id,
             VIDEO_STALL_GRACE.as_secs()
         );
         blocking.abort();
-        return Err(WorkerError::Engine(format!(
-            "Video generation stalled: no progress for {}s and the GPU job did not respond to \
-             cancellation. The job was abandoned; the worker may need to restart to free the GPU.",
-            stall_timeout.as_secs()
-        )));
+        std::process::exit(70);
     }
     let result = blocking
         .await

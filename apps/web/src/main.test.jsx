@@ -9587,12 +9587,13 @@ describe("refine my prompt (sc-2041)", () => {
     });
     await settle();
 
-    expect(refinePrompt).toHaveBeenCalledWith({
+    expect(refinePrompt).toHaveBeenCalledWith(expect.objectContaining({
       prompt: "A cinematic frame of a neon street at midnight",
       modelId: "z_image_turbo",
       workflow: "image",
       guide: "# Guide\n\nWrite vividly.",
-    });
+      signal: expect.any(AbortSignal),
+    }));
     expect(container.querySelector(".refine-review-text").textContent).toBe("A cinematic neon street at midnight, rain-slick.");
     // Original prompt unchanged until the user applies.
     expect(container.querySelector(".prompt-input").value).toBe("A cinematic frame of a neon street at midnight");

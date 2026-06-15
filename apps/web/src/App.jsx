@@ -85,6 +85,32 @@ function isInterleaveJob(job) {
   return job.type === "image_interleave";
 }
 
+function parseSseJson(event, label) {
+  try {
+    return JSON.parse(event.data);
+  } catch (err) {
+    console.warn(`Ignoring malformed ${label} SSE event`, err);
+    return null;
+  }
+}
+
+function abortableDelay(ms, signal) {
+  if (signal?.aborted) {
+    return Promise.reject(new DOMException("Aborted", "AbortError"));
+  }
+  return new Promise((resolve, reject) => {
+    const timer = window.setTimeout(resolve, ms);
+    signal?.addEventListener(
+      "abort",
+      () => {
+        window.clearTimeout(timer);
+        reject(new DOMException("Aborted", "AbortError"));
+      },
+      { once: true },
+    );
+  });
+}
+
 // sc-4198: notice kind for a job-failure banner. LoRA import/train failures get
 // their own kind so the matching job's later completion dismisses exactly that
 // banner (replacing the old "lora import:"/"lora training:" startsWith protocol);
@@ -540,6 +566,15 @@ export function App() {
   const activeViewRef = useRef(activeView);
   const localGenerationJobIdsRef = useRef(localGenerationJobIds);
   const generatedAssetRefreshesRef = useRef(new Map());
+  const refreshDataRef = useRef(null);
+  const refreshAssetsRef = useRef(null);
+  const refreshCharactersRef = useRef(null);
+  const refreshLorasRef = useRef(null);
+  const refreshPresetsRef = useRef(null);
+  const refreshTrainingDatasetsRef = useRef(null);
+  const refreshPersonTracksRef = useRef(null);
+  const refreshTimelinesRef = useRef(null);
+  const refreshDataWithLoraOverlayRef = useRef(null);
   // A screen (the Image Editor, sc-2434) can register a guard that runs before a
   // user-initiated navigation leaves it — e.g. to confirm discarding unsaved edits.
   // Programmatic setActiveView calls (post-generation hops) deliberately bypass it.
@@ -916,7 +951,7 @@ export function App() {
     if (!authenticated) {
       return;
     }
-    refreshData();
+    refreshDataRef.current?.();
   }, [authenticated, token]);
 
   useEffect(() => {
@@ -939,13 +974,13 @@ export function App() {
     // loads so a slow response can't overwrite the newly-selected project's data.
     const controller = new AbortController();
     const { signal } = controller;
-    refreshAssets(activeProject.id, { signal });
-    refreshCharacters(activeProject.id, { signal });
-    refreshLoras(activeProject.id, { signal });
-    refreshPresets(activeProject.id, { signal });
-    refreshTrainingDatasets(activeProject.id, { signal });
-    refreshPersonTracks(activeProject.id, { signal });
-    refreshTimelines(activeProject.id, { signal });
+    refreshAssetsRef.current?.(activeProject.id, { signal });
+    refreshCharactersRef.current?.(activeProject.id, { signal });
+    refreshLorasRef.current?.(activeProject.id, { signal });
+    refreshPresetsRef.current?.(activeProject.id, { signal });
+    refreshTrainingDatasetsRef.current?.(activeProject.id, { signal });
+    refreshPersonTracksRef.current?.(activeProject.id, { signal });
+    refreshTimelinesRef.current?.(activeProject.id, { signal });
     return () => controller.abort();
   }, [activeProject?.id, authenticated, token]);
 
@@ -960,7 +995,10 @@ export function App() {
     let closed = false;
 
     function handleJobUpdated(event) {
-      const job = JSON.parse(event.data);
+      const job = parseSseJson(event, "job");
+      if (!job) {
+        return;
+      }
       const hasGeneratedAssets = Boolean(job.result?.generationSetId || job.result?.assetIds?.length || job.result?.assets?.length);
       const resultAssetCount = generatedResultAssetCount(job);
       const generationSetId = job.result?.generationSetId ?? "";
@@ -981,31 +1019,31 @@ export function App() {
           generationSetId: generationSetId || previousRefresh.generationSetId,
         });
         if (shouldRefreshGeneratedAssets) {
-          refreshAssets(job.projectId);
+          refreshAssetsRef.current?.(job.projectId);
         }
       }
       if (job.status === "completed" && hasGeneratedAssets) {
         enqueueTimelineGenerationApply(job);
       }
       if (job.status === "completed" && job.projectId && job.type === "person_track") {
-        refreshPersonTracks(job.projectId);
+        refreshPersonTracksRef.current?.(job.projectId);
       }
       if (job.status === "completed" && job.projectId && job.type === "person_detect") {
-        refreshAssets(job.projectId);
+        refreshAssetsRef.current?.(job.projectId);
       }
       if (job.status === "completed" && job.type === "model_download") {
-        refreshData();
+        refreshDataRef.current?.();
       }
       if (job.status === "completed" && job.type === "lora_import") {
         dismissNoticeKind("lora-import");
-        refreshDataWithLoraOverlay(job.projectId ?? activeProjectRef.current?.id);
+        refreshDataWithLoraOverlayRef.current?.(job.projectId ?? activeProjectRef.current?.id);
       }
       if (job.status === "completed" && job.type === "lora_train" && job.payload?.dryRun === false) {
         if (job.result?.loraRegistered === false) {
           pushNotice("lora-train", `lora training: ${job.result?.loraRegistrationError ?? "Completed training but could not register the LoRA."}`);
         } else {
           dismissNoticeKind("lora-train");
-          refreshDataWithLoraOverlay(job.projectId ?? activeProjectRef.current?.id);
+          refreshDataWithLoraOverlayRef.current?.(job.projectId ?? activeProjectRef.current?.id);
         }
       }
       if (job.status === "failed" && !hasVisibleLocalFailure(job)) {
@@ -1014,12 +1052,18 @@ export function App() {
     }
 
     function handleWorkerUpdated(event) {
-      const worker = JSON.parse(event.data);
+      const worker = parseSseJson(event, "worker");
+      if (!worker) {
+        return;
+      }
       setWorkers((items) => [worker, ...items.filter((item) => item.id !== worker.id)].sort(sortWorkers));
     }
 
     function handleQueueUpdated(event) {
-      const summary = JSON.parse(event.data);
+      const summary = parseSseJson(event, "queue");
+      if (!summary) {
+        return;
+      }
       setQueueSummary(summary);
       if (Array.isArray(summary.workers)) {
         setWorkers(summary.workers.sort(sortWorkers));
@@ -1166,6 +1210,16 @@ export function App() {
       .catch(() => {});
   }
 
+  refreshDataRef.current = refreshData;
+  refreshAssetsRef.current = refreshAssets;
+  refreshCharactersRef.current = refreshCharacters;
+  refreshLorasRef.current = refreshLoras;
+  refreshPresetsRef.current = refreshPresets;
+  refreshTrainingDatasetsRef.current = refreshTrainingDatasets;
+  refreshPersonTracksRef.current = refreshPersonTracks;
+  refreshTimelinesRef.current = refreshTimelines;
+  refreshDataWithLoraOverlayRef.current = refreshDataWithLoraOverlay;
+
 
   function saveToken(event) {
     event.preventDefault();
@@ -1294,9 +1348,10 @@ export function App() {
   // independent (no activeProject gate); throws on failure so the studio can surface
   // the message inline without clobbering the original prompt.
   const refinePrompt = useCallback(
-    async ({ prompt, modelId, workflow, guide }) => {
+    async ({ prompt, modelId, workflow, guide, signal }) => {
       const created = await apiFetch("/api/v1/prompts/refine", token, {
         method: "POST",
+        signal,
         body: JSON.stringify({ prompt, modelId, workflow, guide }),
       });
       const jobId = created?.id;
@@ -1305,8 +1360,8 @@ export function App() {
       }
       const deadline = Date.now() + 120000;
       while (Date.now() < deadline) {
-        await new Promise((resolve) => setTimeout(resolve, 1000));
-        const job = await apiFetch(`/api/v1/jobs/${jobId}`, token);
+        await abortableDelay(1000, signal);
+        const job = await apiFetch(`/api/v1/jobs/${jobId}`, token, { signal });
         if (job.status === "completed") {
           const refined = job.result?.refinedPrompt;
           if (!refined) {

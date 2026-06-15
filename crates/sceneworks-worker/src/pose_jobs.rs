@@ -489,7 +489,11 @@ fn detect_batch(
     images: Vec<Option<PathBuf>>,
 ) -> WorkerResult<(Vec<Option<RawSource>>, &'static str)> {
     let cell = DETECTOR.get_or_init(|| Mutex::new(None));
-    let mut guard = cell.lock().expect("pose detector mutex poisoned");
+    let mut guard = cell.lock().unwrap_or_else(|poisoned| {
+        let mut guard = poisoned.into_inner();
+        *guard = None;
+        guard
+    });
     if guard.is_none() {
         *guard = Some(Detector::load(&det_path, &pose_path)?);
     }

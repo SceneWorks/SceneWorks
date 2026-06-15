@@ -1,6 +1,7 @@
 use std::collections::BTreeSet;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use parking_lot::{Mutex, ReentrantMutexGuard};
 use rusqlite::{params, Connection, OptionalExtension};
@@ -2880,7 +2881,9 @@ fn write_project_file(
 
 fn connect_project_db(project_path: &Path) -> ProjectStoreResult<Connection> {
     fs::create_dir_all(project_path)?;
-    Ok(Connection::open(project_path.join("project.db"))?)
+    let connection = Connection::open(project_path.join("project.db"))?;
+    connection.busy_timeout(Duration::from_millis(5000))?;
+    Ok(connection)
 }
 
 /// Assemble the on-disk asset sidecar from the worker-reported flat facts. Rust

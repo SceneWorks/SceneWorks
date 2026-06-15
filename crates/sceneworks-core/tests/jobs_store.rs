@@ -1028,6 +1028,37 @@ fn idle_heartbeat_interrupts_previous_heartbeated_job() {
 }
 
 #[test]
+fn startup_interrupt_returns_post_update_job_snapshots() {
+    let store = store("startup-interrupt-post-update");
+    register_image_worker(&store);
+    let created = store
+        .create_job(image_job(Map::new()))
+        .expect("job creates");
+    let claimed = store
+        .claim_next_job("worker-1")
+        .expect("claim succeeds")
+        .expect("job claimed");
+    assert_eq!(claimed.id, created.id);
+    assert_eq!(claimed.status, JobStatus::Preparing);
+
+    let interrupted = store
+        .mark_interrupted_on_startup()
+        .expect("startup interrupt succeeds");
+    let persisted = store.get_job(&created.id).expect("job loads");
+    let worker = store.get_worker("worker-1").expect("worker loads");
+
+    assert_eq!(interrupted.len(), 1);
+    assert_eq!(interrupted[0].id, created.id);
+    assert_eq!(interrupted[0].status, JobStatus::Interrupted);
+    assert_eq!(interrupted[0].stage, ProgressStage::Interrupted);
+    assert_eq!(interrupted[0].worker_id, None);
+    assert_eq!(persisted.status, JobStatus::Interrupted);
+    assert_eq!(persisted.stage, ProgressStage::Interrupted);
+    assert_eq!(worker.status, WorkerStatus::Offline);
+    assert_eq!(worker.current_job_id, None);
+}
+
+#[test]
 fn signal_death_fails_active_job_with_attributed_error() {
     // sc-4881: a worker hard-killed by SIGKILL/OOM can't report its own death, so
     // the supervisor attributes it. The worker's active job must become a real
