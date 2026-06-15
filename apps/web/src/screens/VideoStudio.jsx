@@ -635,8 +635,9 @@ export function VideoStudio() {
   }, [mode, personTracks, personTrackId, sourceClipAssetId]);
 
   const modeOptions = [
-    ["image_to_video", "Image → Video"],
+    // Text→Video first, mirroring Image Studio (Text → Image first) and the default mode (sc-5716).
     ["text_to_video", "Text → Video"],
+    ["image_to_video", "Image → Video"],
     ["first_last_frame", "First → Last"],
     ["extend_clip", "Extend"],
     ["video_bridge", "Bridge"],

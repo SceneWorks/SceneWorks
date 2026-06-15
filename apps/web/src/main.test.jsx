@@ -6502,6 +6502,11 @@ describe("SceneWorks app shell", () => {
       );
     });
 
+    // sc-5875: presets are opt-in — select it explicitly before its defaults apply.
+    await act(async () => {
+      [...container.querySelectorAll(".preset-chip")].find((chip) => chip.textContent.trim() === "Cinematic").click();
+    });
+
     expect(container.textContent).toContain("Cinematic");
     expect(container.textContent).toContain("Balanced cinematic color, contrast, and detail.");
     expect(container.textContent).toContain("Adds: cinematic lighting");
@@ -6699,6 +6704,15 @@ describe("SceneWorks app shell", () => {
     expect(railLabels).toEqual(expect.arrayContaining(["Model", "Variations", "Aspect"]));
     expect(container.querySelector(".prompt-input")).not.toBeNull();
     expect(container.querySelector(".preset-chips").textContent).toContain("None");
+    // sc-5875: a fresh studio defaults to None, so the preset's count (2) is NOT
+    // auto-applied — Variations shows the studio default (4) until a preset is picked.
+    expect(field(container, "Variations").value).toBe("4");
+
+    // Selecting the preset applies its defaults (count 2).
+    await act(async () => {
+      [...container.querySelectorAll(".preset-chip")].find((chip) => chip.textContent.trim() === "Cinematic").click();
+    });
+    await settle();
     expect(field(container, "Variations").value).toBe("2");
     expect(field(container, "GPU")).toBeUndefined();
     expect(container.textContent).not.toContain("LoRAs");
@@ -7446,6 +7460,11 @@ describe("SceneWorks app shell", () => {
       );
     });
 
+    // sc-5875: presets are opt-in — select it explicitly to exercise the managed-LoRA mismatch block.
+    await act(async () => {
+      [...container.querySelectorAll(".preset-chip")].find((chip) => chip.textContent.trim() === "Cinematic").click();
+    });
+
     const generate = [...container.querySelectorAll("button")].find((button) => button.textContent === "Generate");
     expect(container.textContent).toContain("Preset cannot run with Z-Image");
     expect(container.textContent).toContain("qwen_detail");
@@ -7527,6 +7546,12 @@ describe("SceneWorks app shell", () => {
     // to that tab to exercise the managed-LoRA mismatch surface.
     await act(async () => {
       [...container.querySelectorAll("button")].find((button) => button.textContent === "Image → Video").click();
+    });
+    await settle();
+
+    // sc-5875: presets are opt-in — select it explicitly to exercise the managed-LoRA mismatch block.
+    await act(async () => {
+      [...container.querySelectorAll(".preset-chip")].find((chip) => chip.textContent.trim() === "Dream Motion").click();
     });
     await settle();
 
@@ -7793,6 +7818,12 @@ describe("SceneWorks app shell", () => {
     expect(container.textContent).toContain("Qwen Detail");
     expect(container.textContent).not.toContain("Cinematic");
 
+    // sc-5875: presets are opt-in — select the Qwen preset; the model must stay on Qwen.
+    await act(async () => {
+      [...container.querySelectorAll(".preset-chip")].find((chip) => chip.textContent.trim() === "Qwen Detail").click();
+    });
+    await settle();
+
     await act(async () => {
       [...container.querySelectorAll("button")].find((button) => button.textContent === "Generate").click();
     });
@@ -8015,6 +8046,12 @@ describe("SceneWorks app shell", () => {
     // Video Studio opens on Text→Video (sc-5716); this preset targets image_to_video.
     await act(async () => {
       [...container.querySelectorAll("button")].find((button) => button.textContent === "Image → Video").click();
+    });
+    await settle();
+
+    // sc-5875: presets are opt-in — select it explicitly before its defaults apply.
+    await act(async () => {
+      [...container.querySelectorAll(".preset-chip")].find((chip) => chip.textContent.trim() === "Dream Motion").click();
     });
     await settle();
 
