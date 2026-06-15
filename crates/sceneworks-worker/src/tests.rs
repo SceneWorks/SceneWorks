@@ -43,11 +43,12 @@ use super::supervisor::{
 use super::{
     allow_pattern_matches, bounded_tail, cancel_requested_peek, cleanup_uploaded_import_source,
     copy_lora_source, fresh_asset_id, import_lora_source_file_as, import_lora_source_path,
-    now_rfc3339, parse_credentials_env, resolve_model_convert_output, resolve_model_import_target,
-    safe_download_dir, safe_project_path, value_f64, wan_moe_pair_filenames,
-    write_model_install_marker, CredentialScheme, JsonObject, SafetensorsHeaderError, Settings,
-    WorkerCredential, WorkerError, DEFAULT_MAX_LORA_URL_BYTES, DEFAULT_MAX_MODEL_URL_BYTES,
-    DEFAULT_TRANSITION_DURATION_SECONDS, INSTALL_MARKER,
+    normalize_app_managed_cache_path, now_rfc3339, parse_credentials_env,
+    resolve_model_convert_output, resolve_model_import_target, safe_download_dir,
+    safe_project_path, value_f64, wan_moe_pair_filenames, write_model_install_marker,
+    CredentialScheme, JsonObject, SafetensorsHeaderError, Settings, WorkerCredential, WorkerError,
+    DEFAULT_MAX_LORA_URL_BYTES, DEFAULT_MAX_MODEL_URL_BYTES, DEFAULT_TRANSITION_DURATION_SECONDS,
+    INSTALL_MARKER,
 };
 
 fn write_safetensors_with_keys(path: &std::path::Path, keys: &[String]) {
@@ -149,10 +150,58 @@ fn hf_cli_download_inputs_reject_traversal_and_absolute_patterns() {
         assert!(matches!(error, WorkerError::InvalidPayload(_)));
     }
 
-    for revision in ["../main", "refs/heads/../main"] {
+    for revision in ["../main", "refs/heads/../main", "/refs/main"] {
         let error =
             validate_hf_cli_download_inputs("owner/model", revision, &["*.safetensors".to_owned()])
                 .expect_err("unsafe revision rejected");
+        assert!(matches!(error, WorkerError::InvalidPayload(_)));
+    }
+}
+
+#[test]
+fn app_managed_cache_path_rejects_escape_and_symlink_escape() {
+    let temp = tempdir().expect("temp dir");
+    let mut settings = Settings::from_env();
+    settings.data_dir = temp.path().join("data");
+    let uploads = settings.data_dir.join("cache").join("pose-uploads");
+    std::fs::create_dir_all(&uploads).expect("uploads dir");
+    let staged = uploads.join("upload.png");
+    std::fs::write(&staged, b"image").expect("staged file");
+
+    let accepted = normalize_app_managed_cache_path(
+        &settings,
+        staged.to_str().unwrap(),
+        "pose-uploads",
+        "sourcePath",
+    )
+    .expect("staged path accepted");
+    assert_eq!(
+        accepted,
+        staged.canonicalize().expect("canonical staged path")
+    );
+
+    let outside = temp.path().join("outside.png");
+    std::fs::write(&outside, b"not staged").expect("outside file");
+    let error = normalize_app_managed_cache_path(
+        &settings,
+        outside.to_str().unwrap(),
+        "pose-uploads",
+        "sourcePath",
+    )
+    .expect_err("outside path rejected");
+    assert!(matches!(error, WorkerError::InvalidPayload(_)));
+
+    #[cfg(unix)]
+    {
+        let link = uploads.join("link.png");
+        std::os::unix::fs::symlink(&outside, &link).expect("symlink");
+        let error = normalize_app_managed_cache_path(
+            &settings,
+            link.to_str().unwrap(),
+            "pose-uploads",
+            "sourcePath",
+        )
+        .expect_err("symlink escape rejected");
         assert!(matches!(error, WorkerError::InvalidPayload(_)));
     }
 }
@@ -874,7 +923,9 @@ async fn lora_file_and_directory_import_preserve_copy_semantics() {
 #[tokio::test]
 async fn uploaded_lora_source_cleanup_removes_staged_file_and_parent() {
     let temp = tempdir().expect("tempdir creates");
-    let upload_dir = temp.path().join("upload-1");
+    let mut settings = test_settings("http://127.0.0.1:9".to_owned(), None);
+    settings.data_dir = temp.path().join("data");
+    let upload_dir = settings.data_dir.join("cache/lora-uploads/upload-1");
     tokio::fs::create_dir_all(&upload_dir).await.unwrap();
     let source_file = upload_dir.join("detail.safetensors");
     tokio::fs::write(&source_file, b"lora").await.unwrap();
@@ -885,10 +936,34 @@ async fn uploaded_lora_source_cleanup_removes_staged_file_and_parent() {
     );
     payload.insert("uploadedSourcePath".to_owned(), json!(true));
 
-    cleanup_uploaded_import_source(&payload).await.unwrap();
+    cleanup_uploaded_import_source(&settings, &payload)
+        .await
+        .unwrap();
 
     assert!(!source_file.exists());
     assert!(!upload_dir.exists());
+}
+
+#[tokio::test]
+async fn uploaded_lora_source_cleanup_rejects_paths_outside_upload_cache() {
+    let temp = tempdir().expect("tempdir creates");
+    let mut settings = test_settings("http://127.0.0.1:9".to_owned(), None);
+    settings.data_dir = temp.path().join("data");
+    let outside_file = temp.path().join("outside.safetensors");
+    tokio::fs::write(&outside_file, b"lora").await.unwrap();
+    let mut payload = serde_json::Map::new();
+    payload.insert(
+        "sourcePath".to_owned(),
+        json!(outside_file.display().to_string()),
+    );
+    payload.insert("uploadedSourcePath".to_owned(), json!(true));
+
+    let error = cleanup_uploaded_import_source(&settings, &payload)
+        .await
+        .expect_err("outside path is rejected");
+
+    assert!(matches!(error, WorkerError::InvalidPayload(_)));
+    assert!(outside_file.exists());
 }
 
 #[tokio::test]
@@ -2081,6 +2156,38 @@ fn model_destinations_are_constrained_to_data_models() {
     let convert_error = resolve_model_convert_output(&settings, &traversal)
         .expect_err("convert output escaping data/models is rejected");
     assert!(convert_error.to_string().contains("data/models"));
+}
+
+#[cfg(unix)]
+#[test]
+fn lora_paths_resolve_symlinks_before_root_check() {
+    let temp = tempdir().expect("tempdir creates");
+    let data_dir = temp.path().join("data");
+    let lora_dir = data_dir.join("loras");
+    let outside_dir = temp.path().join("outside");
+    std::fs::create_dir_all(&lora_dir).expect("lora dir creates");
+    std::fs::create_dir_all(&outside_dir).expect("outside dir creates");
+
+    let mut settings = test_settings("http://127.0.0.1".to_owned(), None);
+    settings.data_dir = data_dir.clone();
+
+    let safe = lora_dir.join("safe.safetensors");
+    std::fs::write(&safe, b"safe").expect("safe lora writes");
+    let normalized =
+        super::normalize_app_managed_lora_path(&settings, &safe).expect("safe lora accepted");
+    assert_eq!(
+        normalized,
+        safe.canonicalize().expect("safe lora canonicalizes")
+    );
+
+    let outside = outside_dir.join("escape.safetensors");
+    std::fs::write(&outside, b"outside").expect("outside lora writes");
+    let link = lora_dir.join("escape-link.safetensors");
+    std::os::unix::fs::symlink(&outside, &link).expect("symlink creates");
+
+    let error = super::normalize_app_managed_lora_path(&settings, &link)
+        .expect_err("symlink target outside managed roots rejects");
+    assert!(error.to_string().contains("LoRA path must be inside"));
 }
 
 #[tokio::test]

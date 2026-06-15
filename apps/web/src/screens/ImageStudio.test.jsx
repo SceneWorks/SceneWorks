@@ -477,8 +477,38 @@ describe("ImageStudio model picker capability gating", () => {
   };
   const EDIT_ONLY = { ...Z_IMAGE, id: "edit_only", name: "Edit Only", capabilities: ["edit_image", "image_to_image"] };
   const CHARACTER_ONLY = { ...Z_IMAGE, id: "character_only", name: "Character Only", capabilities: ["character_image"] };
+  const MAC_CAPS = {
+    macGatingActive: true,
+    platform: "darwin",
+    notAvailableLabel: "Not available on Mac (Rust/MLX only)",
+    features: {},
+    training: { supportedKernels: [], lokrOnWanSupported: false },
+  };
+  const LENS_TURBO = {
+    ...Z_IMAGE,
+    id: "lens_turbo",
+    name: "Lens-Turbo",
+    capabilities: ["text_to_image"],
+    macSupport: { supported: true, features: { edit: false, reference: false } },
+  };
+  const QWEN_EDIT = {
+    ...Z_IMAGE,
+    id: "qwen_image_edit",
+    name: "Qwen Image Edit",
+    capabilities: ["edit_image"],
+    macSupport: { supported: true, features: { edit: true, reference: false } },
+  };
+  const TORCH_ONLY_EDIT = {
+    ...Z_IMAGE,
+    id: "torch_only_edit",
+    name: "Torch-only Edit",
+    capabilities: ["edit_image"],
+    macSupport: { supported: true, features: { edit: false, reference: false } },
+  };
 
   const modelOptionValues = () => [...field(container, "Model").options].map((option) => option.value);
+  const modeButton = (label) =>
+    [...container.querySelectorAll(".segmented-control button")].find((button) => button.textContent === label);
 
   it("Text tab lists only text_to_image models, excluding edit-only and character-only (sc-5549)", async () => {
     await render(baseContext({ imageModels: [EDIT_ONLY, T2I, VARIATIONS, CHARACTER_ONLY] }));
@@ -499,5 +529,36 @@ describe("ImageStudio model picker capability gating", () => {
     expect(options).not.toContain("t2i_only"); // text_to_image but no style_variations
     expect(options).not.toContain("edit_only");
     expect(options).not.toContain("character_only");
+  });
+
+  it("enables the Mac Edit tab when any available model supports edit mode (sc-5589)", async () => {
+    await render(
+      baseContext({
+        imageModels: [LENS_TURBO, TORCH_ONLY_EDIT, QWEN_EDIT],
+        macCapabilities: MAC_CAPS,
+      }),
+    );
+
+    expect(field(container, "Model").value).toBe("lens_turbo");
+    expect(modeButton("Edit").disabled).toBe(false);
+
+    await click(modeButton("Edit"));
+    await act(async () => {});
+
+    expect(modeButton("Edit").className).toContain("active");
+    expect(field(container, "Model").value).toBe("qwen_image_edit");
+    expect(modelOptionValues()).toEqual(["qwen_image_edit"]);
+  });
+
+  it("disables the Mac Edit tab when no available model supports edit mode", async () => {
+    await render(
+      baseContext({
+        imageModels: [LENS_TURBO, TORCH_ONLY_EDIT],
+        macCapabilities: MAC_CAPS,
+      }),
+    );
+
+    expect(modeButton("Edit").disabled).toBe(true);
+    expect(modeButton("Edit").title).toBe("No available Mac model supports this mode.");
   });
 });

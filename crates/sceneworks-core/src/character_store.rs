@@ -1,6 +1,6 @@
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::time::UNIX_EPOCH;
+use std::time::{Duration, UNIX_EPOCH};
 
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
@@ -1016,6 +1016,7 @@ fn purge_character_on_connection(
 fn connect_project_db(project_path: &Path) -> ProjectStoreResult<Connection> {
     fs::create_dir_all(project_path)?;
     let connection = Connection::open(project_path.join("project.db"))?;
+    connection.busy_timeout(Duration::from_millis(5000))?;
     apply_project_migrations(&connection)?;
     Ok(connection)
 }

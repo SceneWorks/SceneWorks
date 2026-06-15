@@ -54,6 +54,9 @@ pub(crate) async fn ensure_cached_file(
     all(target_os = "windows", feature = "backend-candle")
 ))]
 async fn remote_content_length(client: &reqwest::Client, url: &str) -> WorkerResult<Option<u64>> {
+    // `url` is built from trusted operator/runtime configuration
+    // (`Settings::huggingface_base_url`) plus validated HF path pieces. User-provided source URLs
+    // use the separate `download_source_url` path with SSRF checks.
     let response = match client.head(url).send().await {
         Ok(response) => response,
         Err(_) => return Ok(None),
@@ -184,6 +187,8 @@ pub(crate) fn snapshot_file_from_entry(
         download_url: format!(
             "{base_url}/{}/resolve/{}/{}",
             quote_path(repo),
+            // Revisions are pre-validated by `model_jobs::validate_hf_revision`;
+            // quote_path is the direct-download path's final URL-segment guard.
             quote_path(revision),
             quote_path(path)
         ),
@@ -370,7 +375,7 @@ pub(crate) async fn download_snapshot(
 ) -> WorkerResult<()> {
     tokio::fs::create_dir_all(target_dir).await?;
     for file in &snapshot.files {
-        check_cancel(context.api, context.job_id, context.cancel_message).await?;
+        check_download_cancel(context).await?;
         let target_path = safe_join(target_dir, &file.path)?;
         if let Some(parent) = target_path.parent() {
             tokio::fs::create_dir_all(parent).await?;
@@ -414,7 +419,7 @@ pub(crate) async fn download_snapshot_into_cache(
     let mut placements: Vec<(String, String)> = Vec::with_capacity(snapshot.files.len());
 
     for file in &snapshot.files {
-        check_cancel(context.api, context.job_id, context.cancel_message).await?;
+        check_download_cancel(context).await?;
         let head = with_hf_auth(context.settings, meta_client.head(&file.download_url))
             .send()
             .await?;
@@ -601,6 +606,7 @@ pub(crate) async fn download_source_url(
     let mut response = send_source_url_with_redirects(
         context.settings,
         &request_url,
+        &client,
         bearer,
         range_header.as_deref(),
     )
@@ -659,7 +665,7 @@ pub(crate) async fn download_source_url(
                 let Some(chunk) = chunk? else {
                     break;
                 };
-                check_cancel(context.api, context.job_id, context.cancel_message).await?;
+                check_download_cancel(context).await?;
                 output.write_all(&chunk).await?;
                 progress.record_transferred(u64::try_from(chunk.len()).unwrap_or(u64::MAX));
                 if progress.downloaded_bytes() > max_bytes {
@@ -715,6 +721,7 @@ pub(crate) fn credential_for_host<'a>(
 async fn send_source_url_with_redirects(
     settings: &Settings,
     initial_url: &str,
+    initial_client: &reqwest::Client,
     bearer: Option<&str>,
     range_header: Option<&str>,
 ) -> WorkerResult<reqwest::Response> {
@@ -723,8 +730,8 @@ async fn send_source_url_with_redirects(
         .ok()
         .and_then(|url| url.host_str().map(str::to_ascii_lowercase));
     let mut bearer = bearer.map(str::to_owned);
+    let mut client = initial_client.clone();
     for _ in 0..=MAX_SOURCE_URL_REDIRECTS {
-        let client = source_url_client_for_request(settings, &current_url).await?;
         let mut request = client.get(&current_url);
         if let Some(token) = &bearer {
             request = request.bearer_auth(token);
@@ -762,6 +769,7 @@ async fn send_source_url_with_redirects(
         }
         current_host = next_host;
         current_url = next.to_string();
+        client = source_url_client_for_url(settings, &next).await?;
     }
     Err(WorkerError::InvalidPayload(
         "sourceUrl exceeded the redirect limit".to_owned(),
@@ -878,7 +886,15 @@ pub(crate) async fn report_download_progress(
     )
     .await?;
     update_job(context.api, context.job_id, progress.payload()).await?;
-    check_cancel(context.api, context.job_id, context.cancel_message).await
+    check_download_cancel(context).await
+}
+
+async fn check_download_cancel(context: &DownloadContext<'_>) -> WorkerResult<()> {
+    if cancel_requested_peek(context.api, context.job_id).await {
+        mark_job_canceled(context.api, context.job_id, context.cancel_message).await?;
+        return Err(WorkerError::Canceled(context.cancel_message.to_owned()));
+    }
+    Ok(())
 }
 
 pub(crate) struct DownloadProgress<'a> {

@@ -358,6 +358,10 @@ impl JobsStore {
         let mut connection = self.connect()?;
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let interrupted = self.list_jobs_by_status_on_connection(&transaction, ACTIVE_STATUSES)?;
+        let interrupted_ids = interrupted
+            .iter()
+            .map(|job| job.id.clone())
+            .collect::<Vec<_>>();
         let now = utc_now();
         transaction.execute(
             &format!(
@@ -380,8 +384,12 @@ impl JobsStore {
             "update workers set status = 'offline', current_job_id = null where status != 'offline'",
             [],
         )?;
+        let updated_jobs = interrupted_ids
+            .iter()
+            .map(|job_id| self.get_job_on_connection(&transaction, job_id))
+            .collect::<JobsStoreResult<Vec<_>>>()?;
         transaction.commit()?;
-        Ok(interrupted)
+        Ok(updated_jobs)
     }
 
     pub fn create_job(&self, request: CreateJob) -> JobsStoreResult<JobSnapshot> {
@@ -752,9 +760,12 @@ impl JobsStore {
         let now = utc_now();
         let worker_ids = [worker_id.to_owned()];
         let active_jobs = self.active_jobs_for_workers(&transaction, &worker_ids)?;
-        let error = signal_failure_error(signal);
         let mut failed = None;
         if let Some(job) = active_jobs.into_iter().next() {
+            // Tailor the OOM/signal hint to the dead job's kind so the guidance is
+            // actionable (sc-5567): an image-batch SIGKILL points at count/resolution,
+            // not the training-only gradient-checkpointing remediation.
+            let error = signal_failure_error(signal, Some(&job.job_type));
             transaction.execute(
                 &format!(
                     "
@@ -1108,8 +1119,10 @@ impl JobsStore {
                 status: current.status.as_str().to_owned(),
             });
         }
-        if let Some(reporter) = update.worker_id.as_deref() {
-            if current.worker_id.as_deref() != Some(reporter) {
+        match (update.worker_id.as_deref(), current.worker_id.as_deref()) {
+            (Some(reporter), Some(owner)) if reporter == owner => {}
+            (None, None) => {}
+            _ => {
                 return Err(JobsStoreError::NotJobOwner {
                     job_id: job_id.to_owned(),
                 });
@@ -1867,16 +1880,17 @@ fn mlx_unavailable_error(job: &JobSnapshot, grace_seconds: u64) -> String {
 }
 
 /// Human, actionable terminal error attributing a worker's death to its
-/// terminating signal (sc-4881). Signal 9 (the common first-step OOM SIGKILL from
-/// sc-4874) carries the gradient-checkpointing remediation hint; other uncatchable
-/// deaths (SIGABRT GPU/Metal abort, SIGSEGV) name themselves so the job card and
-/// System → Logs show a real cause instead of a frozen progress bar.
-fn signal_failure_error(signal: i32) -> String {
+/// terminating signal (sc-4881). Signal 9 (an uncatchable SIGKILL — almost always an
+/// OS memory-pressure OOM kill) carries a remediation hint tailored to the dead job's
+/// kind (sc-5567): training points at gradient checkpointing (the sc-4874 first-step
+/// OOM), image/video generation at the knobs that actually shrink the working set
+/// (batch count, resolution, frame count). Other uncatchable deaths (SIGABRT GPU/Metal
+/// abort, SIGSEGV) name themselves so the job card and System → Logs show a real cause
+/// instead of a frozen progress bar. `job_type` is the failed job's kind when one was
+/// active (`None` when the worker died idle).
+fn signal_failure_error(signal: i32, job_type: Option<&JobType>) -> String {
     let hint = match signal {
-        9 => {
-            ", likely out-of-memory during the first training step \
-              — enable Gradient Checkpointing or reduce resolution"
-        }
+        9 => oom_remediation_hint(job_type),
         6 => ", likely a GPU/Metal command-buffer abort or assertion",
         11 => " (segmentation fault)",
         _ => "",
@@ -1884,6 +1898,39 @@ fn signal_failure_error(signal: i32) -> String {
     match signal_name(signal) {
         Some(name) => format!("Worker terminated by signal {signal} ({name}){hint}."),
         None => format!("Worker terminated by signal {signal}{hint}."),
+    }
+}
+
+/// Signal-9 (SIGKILL/OOM) remediation hint keyed to the dead job's kind so the guidance
+/// is actionable rather than training-centric (sc-5567). The `_` arm covers the long tail
+/// of non-generation job types (and is required anyway — `JobType` is `#[non_exhaustive]`).
+fn oom_remediation_hint(job_type: Option<&JobType>) -> &'static str {
+    match job_type {
+        // LoRA training: the sc-4874 first-training-step OOM — gradient checkpointing is
+        // the real lever; resolution is secondary.
+        Some(JobType::LoraTrain) => {
+            ", likely out-of-memory during the first training step \
+             — enable Gradient Checkpointing or reduce resolution"
+        }
+        // Video generation/edit: working set scales with resolution AND frame count.
+        Some(
+            JobType::VideoGenerate
+            | JobType::VideoExtend
+            | JobType::VideoBridge
+            | JobType::VideoUpscale
+            | JobType::PersonReplace,
+        ) => ", likely out-of-memory — reduce the resolution, frame count, or batch count",
+        // Image generation/edit: a multi-image batch stacks per-image working set — count
+        // is the first knob, then resolution (sc-5567).
+        Some(
+            JobType::ImageGenerate
+            | JobType::ImageEdit
+            | JobType::ImageUpscale
+            | JobType::ImageDetail
+            | JobType::ImageVqa
+            | JobType::ImageInterleave,
+        ) => ", likely out-of-memory — reduce the image count or resolution",
+        _ => ", likely out-of-memory — reduce the resolution or batch count",
     }
 }
 
@@ -3210,6 +3257,14 @@ fn image_job_is_candle_eligible(job: &JobSnapshot) -> bool {
     if model == "instantid_realvisxl" {
         return instantid_candle_eligible(&job.payload);
     }
+    // SDXL IP-Adapter-Plus reference conditioning (sc-5488, epic 5480): an sdxl-family model with a
+    // reference image is a bespoke candle lane (`generate_candle_sdxl_ipadapter_stream`), NOT txt2img —
+    // the `image_request_candle_eligible` gate below rejects `referenceAssetId`. Branch it out first
+    // (pure IP only; img2img/inpaint/edit shapes stay on torch — those are sc-5487). Mirrors the
+    // worker's `sdxl_ipadapter_available` gate.
+    if matches!(model, "sdxl" | "realvisxl") && sdxl_ipadapter_candle_eligible(&job.payload) {
+        return true;
+    }
     image_request_candle_eligible(model, &job.payload)
 }
 
@@ -3401,6 +3456,26 @@ fn instantid_mlx_eligible(payload: &Map<String, Value>) -> bool {
 /// Mirrors the candle worker's `instantid_available` gate so the router and worker agree.
 fn instantid_candle_eligible(payload: &Map<String, Value>) -> bool {
     instantid_mlx_eligible(payload)
+}
+
+/// SDXL IP-Adapter-Plus candle-routing conditions (sc-5488, epic 5480). The candle `IpAdapterSdxl`
+/// provider serves PURE reference (image-prompt) conditioning on the sdxl family: a `referenceAssetId`
+/// with NO img2img source / inpaint mask and NOT an `edit_image` (those advanced SDXL shapes are
+/// sc-5487, still torch). Mirrors the worker's `sdxl_ipadapter_available` gate (minus the local
+/// weight-resolve check) so the router and worker agree on the lane boundary. Candle-only — there is no
+/// MLX `IpAdapterSdxl` (the MLX SDXL IP path is the registry `SdxlSubMode::Ip`), so this has no
+/// `*_mlx_eligible` sibling.
+fn sdxl_ipadapter_candle_eligible(payload: &Map<String, Value>) -> bool {
+    if payload.get("mode").and_then(Value::as_str) == Some("edit_image") {
+        return false;
+    }
+    let non_empty = |key: &str| {
+        payload
+            .get(key)
+            .and_then(Value::as_str)
+            .is_some_and(|value| !value.trim().is_empty())
+    };
+    non_empty("referenceAssetId") && !non_empty("sourceAssetId") && !non_empty("maskAssetId")
 }
 
 /// PuLID-FLUX (`pulid_flux_dev`) MLX-routing conditions (sc-3344). The native `mlx-gen-pulid`
@@ -4307,6 +4382,68 @@ mod active_statuses_sql_tests {
 }
 
 #[cfg(test)]
+mod signal_failure_error_tests {
+    //! sc-4881 signal attribution + sc-5567 job-kind-aware OOM remediation: a signal-9
+    //! (SIGKILL/OOM) death must give guidance that fits the dead job — count/resolution
+    //! for an image batch, frames for video, gradient checkpointing only for training —
+    //! and non-OOM uncatchable deaths must keep naming their real cause.
+    use super::{signal_failure_error, JobType};
+
+    #[test]
+    fn signal_9_image_batch_points_at_count_not_gradient_checkpointing() {
+        let msg = signal_failure_error(9, Some(&JobType::ImageGenerate));
+        assert!(msg.contains("signal 9 (SIGKILL)"), "{msg}");
+        assert!(msg.contains("out-of-memory"), "{msg}");
+        assert!(msg.contains("image count or resolution"), "{msg}");
+        // The old training-only hint must NOT leak onto an image batch (the sc-5567 bug).
+        assert!(!msg.contains("Gradient Checkpointing"), "{msg}");
+        assert!(!msg.contains("training step"), "{msg}");
+    }
+
+    #[test]
+    fn signal_9_training_keeps_gradient_checkpointing_hint() {
+        let msg = signal_failure_error(9, Some(&JobType::LoraTrain));
+        assert!(msg.contains("Gradient Checkpointing"), "{msg}");
+        assert!(msg.contains("training step"), "{msg}");
+    }
+
+    #[test]
+    fn signal_9_video_points_at_frame_count() {
+        let msg = signal_failure_error(9, Some(&JobType::VideoGenerate));
+        assert!(msg.contains("out-of-memory"), "{msg}");
+        assert!(msg.contains("frame count"), "{msg}");
+        assert!(!msg.contains("Gradient Checkpointing"), "{msg}");
+    }
+
+    #[test]
+    fn signal_9_unknown_and_idle_fall_back_to_generic_oom() {
+        // No active job (worker died idle) and an unmapped job kind both get the generic
+        // OOM hint rather than a misleading training/image/video-specific one.
+        for job_type in [None, Some(&JobType::Unknown("future".to_owned()))] {
+            let msg = signal_failure_error(9, job_type);
+            assert!(msg.contains("out-of-memory"), "{msg}");
+            assert!(!msg.contains("Gradient Checkpointing"), "{msg}");
+            assert!(!msg.contains("image count"), "{msg}");
+            assert!(!msg.contains("frame count"), "{msg}");
+        }
+    }
+
+    #[test]
+    fn non_oom_signals_keep_their_own_cause_regardless_of_job_kind() {
+        // SIGABRT / SIGSEGV are not OOM, so the job kind must not turn them into one.
+        let abort = signal_failure_error(6, Some(&JobType::ImageGenerate));
+        assert!(abort.contains("signal 6 (SIGABRT)"), "{abort}");
+        assert!(abort.contains("GPU/Metal command-buffer abort"), "{abort}");
+        assert!(!abort.contains("out-of-memory"), "{abort}");
+
+        let segv = signal_failure_error(11, Some(&JobType::LoraTrain));
+        assert!(segv.contains("signal 11 (SIGSEGV)"), "{segv}");
+        assert!(segv.contains("segmentation fault"), "{segv}");
+        assert!(!segv.contains("Gradient Checkpointing"), "{segv}");
+    }
+}
+
+#[cfg(test)]
 mod candle_routing_tests {
     //! Candle (Windows/CUDA) SDXL lane routing (epic 3672, sc-3678): the candle worker serves a
     //! gated, narrow SDXL/RealVisXL **txt2img-only** lane and must defer every other shape to the
@@ -5018,6 +5155,32 @@ mod candle_routing_tests {
             "model": "instantid_realvisxl",
             "mode": "text_to_image",
             "referenceAssetId": "asset_1"
+        }))));
+    }
+
+    #[test]
+    fn sdxl_ipadapter_reference_jobs_route_to_candle() {
+        // A pure SDXL/RealVisXL reference (IP-Adapter) job routes to the candle lane (sc-5488) via the
+        // bespoke branch, NOT the txt2img `image_request_candle_eligible` gate (which rejects
+        // `referenceAssetId`).
+        for model in ["sdxl", "realvisxl"] {
+            let payload = json!({ "model": model, "referenceAssetId": "asset_1" });
+            assert!(sdxl_ipadapter_candle_eligible(&object(payload.clone())));
+            assert!(image_job_is_candle_eligible(&image_generate_job(payload)));
+        }
+        // No reference → not an IP-Adapter job (plain txt2img routes via the txt2img gate instead).
+        assert!(!sdxl_ipadapter_candle_eligible(&object(
+            json!({ "model": "sdxl" })
+        )));
+        // img2img / inpaint / edit shapes are NOT this lane (those are sc-5487, still torch).
+        assert!(!sdxl_ipadapter_candle_eligible(&object(json!({
+            "model": "sdxl", "mode": "edit_image", "referenceAssetId": "a", "sourceAssetId": "s"
+        }))));
+        assert!(!sdxl_ipadapter_candle_eligible(&object(json!({
+            "model": "sdxl", "referenceAssetId": "a", "sourceAssetId": "s"
+        }))));
+        assert!(!sdxl_ipadapter_candle_eligible(&object(json!({
+            "model": "sdxl", "referenceAssetId": "a", "maskAssetId": "m"
         }))));
     }
 }

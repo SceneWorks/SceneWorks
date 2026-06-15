@@ -386,6 +386,115 @@ fn sensenova_it2i_real_weights_generates_one_image() {
     assert!(pixels.windows(2).any(|w| w[0] != w[1]));
 }
 
+/// Real-weights regression for sc-5567: a SenseNova-U1 **8B Fast** count=2 batch was
+/// OOM-killed (SIGKILL) on image 1 because nothing released MLX's freed-buffer cache
+/// between batch images, so image 0's retained working set stacked on top of the dense
+/// weights and crossed the unified-memory ceiling. This loads the distilled `_fast`
+/// engine once (production shape: load-once + per-image), generates two images with the
+/// production [`release_gen_cache_between_items`] call between them, and asserts the seam
+/// actually frees the cache without evicting the live weights — and that image 1 then
+/// completes. The OOM itself is a process-level SIGKILL a test can't catch, so we prove
+/// the *mechanism* (cache released, weights retained) plus the peak readout. Run under
+/// `/usr/bin/time -l` on a Mac (peak is wired Metal memory, not in `ps` RSS) to compare
+/// count=1 vs count=2 footprint:
+/// `cargo test -p sceneworks-worker --lib -- --ignored sensenova_fast_batch_releases_cache --nocapture`.
+#[cfg(target_os = "macos")]
+#[test]
+#[ignore = "needs real SenseNova-U1-8B-MoT weights (~35GB) + the _fast distill LoRA + a Metal device"]
+fn sensenova_fast_batch_releases_cache_between_images() {
+    let snapshot = hf_snapshot("models--sensenova--SenseNova-U1-8B-MoT");
+    let generator = load_engine(
+        mlx_model("sensenova_u1_8b_fast").unwrap().engine_id(),
+        snapshot,
+        Some(gen_core::Quant::Q8), // production default (resolve_quant)
+        Vec::new(),
+        None,
+    )
+    .unwrap();
+    // The committed smoke runs at 512² for speed; set `SC5567_DIM` (e.g. 2048) to
+    // reproduce the production-resolution footprint the user OOM'd at — the retained
+    // per-image cache scales with the activation working set, so the release matters
+    // far more there.
+    let dim: u32 = std::env::var("SC5567_DIM")
+        .ok()
+        .and_then(|v| v.trim().parse().ok())
+        .unwrap_or(512);
+    let reference = gen_core::Image {
+        width: dim,
+        height: dim,
+        pixels: stub_rgb8(dim, dim, 7),
+    };
+    let conditioning = build_edit_conditioning(std::slice::from_ref(&reference));
+    let cancel = gen_core::CancelFlag::new();
+
+    let gib = |bytes: usize| bytes as f64 / (1024.0 * 1024.0 * 1024.0);
+    let gen_one = |seed: i64| {
+        sensenova_edit_generate_one(
+            generator.as_ref(),
+            "make it a watercolor painting",
+            dim,
+            dim,
+            seed,
+            8,         // _fast: 8-step distill
+            Some(1.0), // _fast text CFG
+            1.0,       // image CFG
+            3.0,       // timestep shift
+            conditioning.clone(),
+            &cancel,
+            &mut |_| {},
+        )
+        .unwrap()
+    };
+
+    mlx_rs::memory::reset_peak_memory();
+
+    // Image 0 — succeeds today (the bug was image 1).
+    let (w0, h0, px0) = gen_one(42);
+    assert_eq!((w0, h0), (dim, dim));
+    assert_eq!(px0.len() as u32, dim * dim * 3);
+
+    // After image 0 returns, its transient arrays are dropped → they sit in MLX's
+    // freed-buffer cache; the only live arrays are the model weights.
+    let cache_before = mlx_rs::memory::get_cache_memory();
+    let active_before = mlx_rs::memory::get_active_memory();
+
+    // The production between-images release (the fix).
+    release_gen_cache_between_items();
+
+    let cache_after = mlx_rs::memory::get_cache_memory();
+    let active_after = mlx_rs::memory::get_active_memory();
+    eprintln!(
+        "sc-5567 release: cache {:.2}->{:.2} GiB, active {:.2}->{:.2} GiB, peak {:.2} GiB",
+        gib(cache_before),
+        gib(cache_after),
+        gib(active_before),
+        gib(active_after),
+        gib(mlx_rs::memory::get_peak_memory()),
+    );
+
+    // The seam returns retained buffers to the OS...
+    assert!(
+        cache_after < cache_before || cache_before == 0,
+        "clear_cache should shrink the freed-buffer cache ({cache_before} -> {cache_after} bytes)"
+    );
+    // ...without evicting the live model weights (the whole point — image 1 must reuse them).
+    assert!(
+        active_after as f64 >= active_before as f64 * 0.8,
+        "live weights must survive the cache release ({active_before} -> {active_after} bytes)"
+    );
+
+    // Image 1 — the image that OOM-killed the worker pre-fix. Completing proves the
+    // count=2 batch path is sound once the cache is released between images.
+    let (w1, h1, px1) = gen_one(43);
+    assert_eq!((w1, h1), (dim, dim));
+    assert_eq!(px1.len() as u32, dim * dim * 3);
+    assert!(px1.windows(2).any(|w| w[0] != w[1]));
+    eprintln!(
+        "sc-5567 count=2 OK: peak footprint {:.2} GiB",
+        gib(mlx_rs::memory::get_peak_memory())
+    );
+}
+
 /// Bernini still-image companion (epic 4699 / sc-5424) pure mapping: the SceneWorks image mode →
 /// engine task string and the Q4-default quant resolver. Runs in CI on Mac (no weights).
 #[cfg(target_os = "macos")]
@@ -1694,7 +1803,7 @@ fn sc3031_ab_dump_txt2img() {
     let weights = resolve_weights_dir(&req, &settings)
         .expect("weights resolve")
         .expect("weights in HF cache");
-    let adapters = resolve_adapters(&req).expect("adapters");
+    let adapters = resolve_adapters(&req, &settings).expect("adapters");
     let seed = resolve_seed(&req, 0);
     let generator = load_engine(model.engine_id(), weights, quant, adapters, None).expect("load");
 
@@ -1751,7 +1860,7 @@ fn sc3031_ab_dump_pose() {
     let zimage = mlx_model("z_image_turbo").expect("z-image model row");
     let steps = resolve_steps(&req, &zimage);
     let control_scale = resolve_control_scale(&req);
-    let adapters = resolve_adapters(&req).expect("adapters");
+    let adapters = resolve_adapters(&req, &settings).expect("adapters");
     let seed = resolve_seed(&req, 0);
 
     let pose = parse_poses(&req)

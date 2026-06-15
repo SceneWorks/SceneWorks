@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from "react";
+import React, { useEffect, useRef, useState } from "react";
 import { Icon } from "./Icons.jsx";
 
 // Humanize a byte count to a "7.2 GB" label; null when the size is unknown.
@@ -44,6 +44,7 @@ export function RefinePromptControl({
   const [refined, setRefined] = useState("");
   const [error, setError] = useState("");
   const [downloadRequested, setDownloadRequested] = useState(false);
+  const refineControllerRef = useRef(null);
 
   const trimmed = (prompt ?? "").trim();
   const busy = status === "loading";
@@ -62,7 +63,18 @@ export function RefinePromptControl({
     }
   }, [installState, downloadRequested]);
 
+  useEffect(
+    () => () => {
+      refineControllerRef.current?.abort();
+    },
+    [],
+  );
+
   async function handleRefine() {
+    refineControllerRef.current?.abort();
+    const controller = new AbortController();
+    refineControllerRef.current = controller;
+    const { signal } = controller;
     setStatus("loading");
     setError("");
     try {
@@ -71,18 +83,31 @@ export function RefinePromptControl({
       let guide = "";
       if (guidePath) {
         try {
-          const response = await fetch(guidePath);
+          const response = await fetch(guidePath, { signal });
           if (response.ok) guide = await response.text();
-        } catch {
+        } catch (err) {
+          if (err?.name === "AbortError") {
+            return;
+          }
           guide = "";
         }
       }
-      const result = await refinePrompt({ prompt: trimmed, modelId, workflow, guide });
+      const result = await refinePrompt({ prompt: trimmed, modelId, workflow, guide, signal });
+      if (signal.aborted) {
+        return;
+      }
       setRefined(result);
       setStatus("review");
     } catch (err) {
+      if (err?.name === "AbortError") {
+        return;
+      }
       setError(err?.message || "Prompt refinement failed.");
       setStatus("error");
+    } finally {
+      if (refineControllerRef.current === controller) {
+        refineControllerRef.current = null;
+      }
     }
   }
 

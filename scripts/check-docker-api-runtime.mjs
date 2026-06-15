@@ -18,6 +18,9 @@ const env = {
   SCENEWORKS_API_PORT: port,
   SCENEWORKS_DATA_BIND: tempData,
   SCENEWORKS_CONFIG_BIND: path.resolve("config"),
+  // This smoke intentionally exercises the Docker API container's wider in-container
+  // bind through a host-loopback published port, without provisioning auth.
+  SCENEWORKS_ALLOW_OPEN_BIND: "1",
   SCENEWORKS_DISABLE_MODEL_SIZE_ESTIMATE:
     process.env.SCENEWORKS_DISABLE_MODEL_SIZE_ESTIMATE || "1",
   // Run the container as this (host) user so the api isn't root and the files it

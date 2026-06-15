@@ -163,6 +163,19 @@ fn round_to_16_rounds_up_floored_at_16() {
 }
 
 #[test]
+fn upscale_target_dimensions_are_bounded_before_allocation() {
+    validate_upscale_target_dimensions(8192, 8192).expect("8k square accepted");
+    assert!(matches!(
+        validate_upscale_target_dimensions(8193, 1024),
+        Err(WorkerError::InvalidPayload(_))
+    ));
+    assert!(matches!(
+        validate_upscale_target_dimensions(8192, 8193),
+        Err(WorkerError::InvalidPayload(_))
+    ));
+}
+
+#[test]
 fn manifest_seedvr2_resource_extracts_overrides_and_defaults() {
     let entry = json!({
         "resources": {
@@ -229,13 +242,13 @@ async fn seedvr2_upscale_real_weight_smoke() {
     for (x, y, pixel) in img.enumerate_pixels_mut() {
         *pixel = Rgb([(x * 5) as u8, (y * 7) as u8, ((x + y) * 3 % 256) as u8]);
     }
-    let faithful = run_seedvr2_upscale(dir.clone(), &img, 2, 0.0, 7)
+    let faithful = run_seedvr2_upscale(dir.clone(), img.clone(), 2, 0.0, 7, CancelFlag::new())
         .await
         .expect("seedvr2 upscale (softness 0)");
     assert_eq!((faithful.width(), faithful.height()), (96, 64));
 
     // The softness request field must reach the engine: a heavily-softened run changes the result.
-    let softened = run_seedvr2_upscale(dir, &img, 2, 0.8, 7)
+    let softened = run_seedvr2_upscale(dir, img, 2, 0.8, 7, CancelFlag::new())
         .await
         .expect("seedvr2 upscale (softness 0.8)");
     assert_eq!((softened.width(), softened.height()), (96, 64));

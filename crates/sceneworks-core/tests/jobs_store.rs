@@ -87,7 +87,7 @@ fn job_lifecycle_create_claim_complete() {
                 peak_gpu_memory_pct: None,
                 peak_gpu_load_pct: None,
                 backend: None,
-                worker_id: None,
+                worker_id: Some("worker-1".to_owned()),
             },
         )
         .expect("progress updates");
@@ -124,7 +124,7 @@ fn progress_keeps_running_max_for_peak_gpu_meters() {
             peak_gpu_memory_pct: memory,
             peak_gpu_load_pct: load,
             backend: None,
-            worker_id: None,
+            worker_id: Some("worker-1".to_owned()),
         }
     }
 
@@ -218,7 +218,7 @@ fn progress_leaves_peaks_null_when_no_samples_arrive() {
         peak_gpu_memory_pct: None,
         peak_gpu_load_pct: None,
         backend: None,
-        worker_id: None,
+        worker_id: Some("worker-1".to_owned()),
     };
     for _ in 0..3 {
         store
@@ -1028,11 +1028,44 @@ fn idle_heartbeat_interrupts_previous_heartbeated_job() {
 }
 
 #[test]
+fn startup_interrupt_returns_post_update_job_snapshots() {
+    let store = store("startup-interrupt-post-update");
+    register_image_worker(&store);
+    let created = store
+        .create_job(image_job(Map::new()))
+        .expect("job creates");
+    let claimed = store
+        .claim_next_job("worker-1")
+        .expect("claim succeeds")
+        .expect("job claimed");
+    assert_eq!(claimed.id, created.id);
+    assert_eq!(claimed.status, JobStatus::Preparing);
+
+    let interrupted = store
+        .mark_interrupted_on_startup()
+        .expect("startup interrupt succeeds");
+    let persisted = store.get_job(&created.id).expect("job loads");
+    let worker = store.get_worker("worker-1").expect("worker loads");
+
+    assert_eq!(interrupted.len(), 1);
+    assert_eq!(interrupted[0].id, created.id);
+    assert_eq!(interrupted[0].status, JobStatus::Interrupted);
+    assert_eq!(interrupted[0].stage, ProgressStage::Interrupted);
+    assert_eq!(interrupted[0].worker_id, None);
+    assert_eq!(persisted.status, JobStatus::Interrupted);
+    assert_eq!(persisted.stage, ProgressStage::Interrupted);
+    assert_eq!(worker.status, WorkerStatus::Offline);
+    assert_eq!(worker.current_job_id, None);
+}
+
+#[test]
 fn signal_death_fails_active_job_with_attributed_error() {
     // sc-4881: a worker hard-killed by SIGKILL/OOM can't report its own death, so
     // the supervisor attributes it. The worker's active job must become a real
     // FAILURE (with an actionable, signal-attributed error), not a heartbeat-sweep
-    // `interrupted` that reads as a frozen progress bar.
+    // `interrupted` that reads as a frozen progress bar. sc-5567: the remediation
+    // must fit the dead job's kind — an image job points at count/resolution, NOT the
+    // training-only gradient-checkpointing hint.
     let store = store("signal-death-fails-job");
     register_image_worker(&store);
     let created = store
@@ -1054,8 +1087,15 @@ fn signal_death_fails_active_job_with_attributed_error() {
     assert_eq!(failed.worker_id, None);
     let error = failed.error.clone().unwrap_or_default();
     assert!(
-        error.contains("signal 9 (SIGKILL)") && error.contains("Gradient Checkpointing"),
-        "error should attribute the OOM SIGKILL and surface the remediation, got {error:?}"
+        error.contains("signal 9 (SIGKILL)")
+            && error.contains("out-of-memory")
+            && error.contains("image count or resolution"),
+        "error should attribute the OOM SIGKILL and give image-job remediation, got {error:?}"
+    );
+    // sc-5567: the training-only hint must not leak onto an image job.
+    assert!(
+        !error.contains("Gradient Checkpointing"),
+        "image-job OOM must not surface the training gradient-checkpointing hint, got {error:?}"
     );
 
     // The worker is released so the UI never shows it pinned to the dead job.
@@ -1497,6 +1537,7 @@ fn image_edit_job_with(payload: Value, requested_gpu: &str) -> CreateJob {
 }
 
 fn complete_job(store: &JobsStore, job_id: &str) {
+    let worker_id = store.get_job(job_id).expect("job loads").worker_id;
     store
         .update_job_progress(
             job_id,
@@ -1511,7 +1552,7 @@ fn complete_job(store: &JobsStore, job_id: &str) {
                 peak_gpu_memory_pct: None,
                 peak_gpu_load_pct: None,
                 backend: None,
-                worker_id: None,
+                worker_id,
             },
         )
         .expect("job completes");
@@ -3864,7 +3905,7 @@ fn qwen_txt2img_and_strict_pose_route_to_mlx() {
                 peak_gpu_memory_pct: None,
                 peak_gpu_load_pct: None,
                 backend: None,
-                worker_id: None,
+                worker_id: Some("worker-mlx".to_owned()),
             },
         )
         .expect("txt2img job completes");
@@ -3935,7 +3976,7 @@ fn flux2_klein_variants_route_to_mlx_worker() {
                     peak_gpu_memory_pct: None,
                     peak_gpu_load_pct: None,
                     backend: None,
-                    worker_id: None,
+                    worker_id: Some("worker-mlx".to_owned()),
                 },
             )
             .expect("complete job");
@@ -4013,7 +4054,7 @@ fn sdxl_and_realvisxl_route_to_mlx_worker() {
                     peak_gpu_memory_pct: None,
                     peak_gpu_load_pct: None,
                     backend: None,
-                    worker_id: None,
+                    worker_id: Some("worker-mlx".to_owned()),
                 },
             )
             .expect("complete job");
@@ -4057,7 +4098,7 @@ fn sdxl_and_realvisxl_route_to_mlx_worker() {
                     peak_gpu_memory_pct: None,
                     peak_gpu_load_pct: None,
                     backend: None,
-                    worker_id: None,
+                    worker_id: Some("worker-mlx".to_owned()),
                 },
             )
             .expect("complete job");
@@ -4136,7 +4177,7 @@ fn image_detail_routes_to_mlx_worker() {
                     peak_gpu_memory_pct: None,
                     peak_gpu_load_pct: None,
                     backend: None,
-                    worker_id: None,
+                    worker_id: Some("worker-mlx".to_owned()),
                 },
             )
             .expect("complete detail job");
@@ -4335,7 +4376,7 @@ fn concurrent_claims_never_lock_and_stay_exactly_once() {
                                 peak_gpu_memory_pct: None,
                                 peak_gpu_load_pct: None,
                                 backend: None,
-                                worker_id: None,
+                                worker_id: Some(worker_id.clone()),
                             },
                         ) {
                             errors.lock().unwrap().push(error.to_string());
@@ -4453,9 +4494,7 @@ fn progress_cannot_resurrect_terminal_jobs() {
     assert_eq!(job.worker_id, None);
 }
 
-/// sc-4172 — a progress report that names a worker other than the job's owner
-/// is rejected; the owner's reports (and legacy reports with no worker id)
-/// still land.
+/// sc-4172 / sc-5751 — progress reports must name the claimed job's owner.
 #[test]
 fn progress_from_non_owner_worker_is_rejected() {
     fn running(worker_id: Option<&str>) -> ProgressUpdate {
@@ -4500,8 +4539,8 @@ fn progress_from_non_owner_worker_is_rejected() {
         .expect("owner report lands");
     assert_eq!(job.status, JobStatus::Running);
 
-    let job = store
+    let error = store
         .update_job_progress(&created.id, running(None))
-        .expect("legacy report without a worker id still lands");
-    assert_eq!(job.status, JobStatus::Running);
+        .expect_err("ownerless report on an owned job is rejected");
+    assert!(matches!(error, JobsStoreError::NotJobOwner { .. }));
 }

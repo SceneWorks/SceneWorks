@@ -63,9 +63,30 @@ where
         if !send_generated_image(&tx, index, image) {
             break;
         }
+        // Return image N's retained Metal buffer cache to the system before image N+1
+        // allocates, so a multi-image batch doesn't stack each image's transient working
+        // set on top of the already-resident model weights and cross the unified-memory
+        // ceiling — an OS memory-pressure SIGKILL (Jetsam) that the dense SenseNova-U1 8B
+        // family hits first (sc-5567). Frees only freed/retained buffers; the cached
+        // generator's live weight arrays are untouched.
+        release_gen_cache_between_items();
     }
     Ok(())
 }
+
+/// Release MLX's freed-buffer cache between batch images so peak memory doesn't carry
+/// forward across a `drive_gen_items` loop (sc-5567). `clear_cache()` returns only the
+/// retained-for-reuse buffers to the OS — live arrays (the cached model weights) are not
+/// touched — so the one-time reallocation cost on the next image is negligible against a
+/// tens-of-seconds generation, and far cheaper than an OOM kill. No-op off macOS: the
+/// Windows/CUDA candle lane shares this loop but has no `mlx_rs` dependency.
+#[cfg(target_os = "macos")]
+fn release_gen_cache_between_items() {
+    mlx_rs::memory::clear_cache();
+}
+
+#[cfg(not(target_os = "macos"))]
+fn release_gen_cache_between_items() {}
 
 // Shared by the macOS MLX paths and the Windows/CUDA candle InstantID lane (sc-5491): both load a
 // `!Send` engine on the blocking thread and stream per-item events back. `G` is the loaded model

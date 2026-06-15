@@ -3,6 +3,7 @@ import { createRoot } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { App, ErrorBoundary, eventUrl } from "./main.jsx";
 import { AssetPickerField } from "./components/AssetPicker.jsx";
+import { assetUrl } from "./components/assetMedia.jsx";
 import { AssetDetail, FullscreenPreview } from "./components/assetPanels.jsx";
 import { liveElapsedSeconds } from "./formatting.js";
 import { dropUpscaledVariants, foldUpscaledAssetVariants, restrictFoldedToScope } from "./assetVariants.js";
@@ -395,6 +396,17 @@ describe("SceneWorks app shell", () => {
     });
     container.remove();
     vi.restoreAllMocks();
+  });
+
+  it("encodes fallback asset file path segments", () => {
+    const url = assetUrl({
+      projectId: "project-1",
+      file: { path: "assets\\images/final image #1?.png" },
+    });
+
+    expect(url).toBe(
+      "http://localhost:8000/api/v1/projects/project-1/files/assets/images/final%20image%20%231%3F.png",
+    );
   });
 
   it("shows a fallback instead of a blank screen when rendering fails", async () => {
@@ -7511,6 +7523,13 @@ describe("SceneWorks app shell", () => {
       );
     });
 
+    // Video Studio opens on Text→Video (sc-5716); this preset targets image_to_video, so switch
+    // to that tab to exercise the managed-LoRA mismatch surface.
+    await act(async () => {
+      [...container.querySelectorAll("button")].find((button) => button.textContent === "Image → Video").click();
+    });
+    await settle();
+
     const generate = [...container.querySelectorAll("button")].find((button) => button.textContent === "Render clip");
     expect(container.textContent).toContain("Preset cannot run with LTX");
     expect(container.textContent).toContain("wan_motion");
@@ -7648,6 +7667,13 @@ describe("SceneWorks app shell", () => {
         ),
       );
     });
+
+    // Video Studio opens on Text→Video (sc-5716); this LTX model is image_to_video-only, so switch
+    // to that tab before exercising the LoRA picker + submit.
+    await act(async () => {
+      [...container.querySelectorAll("button")].find((button) => button.textContent === "Image → Video").click();
+    });
+    await settle();
 
     await act(async () => {
       [...container.querySelectorAll("button")].find((button) => button.textContent === "Advanced").click();
@@ -7986,6 +8012,12 @@ describe("SceneWorks app shell", () => {
     });
     await settle();
 
+    // Video Studio opens on Text→Video (sc-5716); this preset targets image_to_video.
+    await act(async () => {
+      [...container.querySelectorAll("button")].find((button) => button.textContent === "Image → Video").click();
+    });
+    await settle();
+
     expect(container.textContent).toContain("Dream Motion");
     expect(container.textContent).toContain("Soft camera motion.");
     expect(container.textContent).toContain("Adds: smooth camera motion");
@@ -8064,6 +8096,12 @@ describe("SceneWorks app shell", () => {
     });
     await settle();
 
+    // Video Studio opens on Text→Video (sc-5716); SVD is image_to_video-only, so switch tabs.
+    await act(async () => {
+      [...container.querySelectorAll("button")].find((button) => button.textContent === "Image → Video").click();
+    });
+    await settle();
+
     // The prompt field advertises that no prompt is needed for promptless models.
     const promptField = container.querySelector("textarea[aria-label='Prompt']");
     expect(promptField.placeholder).toContain("No prompt needed");
@@ -8128,6 +8166,13 @@ describe("SceneWorks app shell", () => {
           <VideoStudio />,
         ),
       );
+    });
+    await settle();
+
+    // Video Studio opens on Text→Video (sc-5716); enter Image→Video to filter the image_to_video
+    // presets, then the test walks Text→Video and a model switch as before.
+    await act(async () => {
+      [...container.querySelectorAll("button")].find((button) => button.textContent === "Image → Video").click();
     });
     await settle();
 
@@ -8208,6 +8253,13 @@ describe("SceneWorks app shell", () => {
           <VideoStudio />,
         ),
       );
+    });
+    await settle();
+
+    // Video Studio opens on Text→Video (sc-5716); these presets target image_to_video /
+    // first_last_frame, so enter Image→Video to surface them.
+    await act(async () => {
+      [...container.querySelectorAll("button")].find((button) => button.textContent === "Image → Video").click();
     });
     await settle();
 
@@ -9135,17 +9187,18 @@ describe("SceneWorks app shell", () => {
 
     // Submitting composes an interleave job with prompt, model, size, and max images.
     await changeField(container.querySelector("textarea"), "An illustrated guide to brewing tea");
+    await changeField(container.querySelector("input[type='number']"), "999");
     const submit = [...container.querySelectorAll("button")].find((button) =>
       button.textContent.includes("Compose document"),
     );
     await act(async () => {
-      submit.click();
+      submit.closest("form").dispatchEvent(new window.Event("submit", { bubbles: true, cancelable: true }));
     });
     expect(createInterleaveJob).toHaveBeenCalledTimes(1);
     const payload = createInterleaveJob.mock.calls[0][0];
     expect(payload.prompt).toBe("An illustrated guide to brewing tea");
     expect(payload.model).toBe("sensenova_u1_8b");
-    expect(payload.maxImages).toBe(6);
+    expect(payload.maxImages).toBe(10);
     expect(payload.width).toBe(2048);
     expect(payload.height).toBe(1152);
     // Unedited system prompt is not sent (worker uses its own default).
@@ -9587,12 +9640,13 @@ describe("refine my prompt (sc-2041)", () => {
     });
     await settle();
 
-    expect(refinePrompt).toHaveBeenCalledWith({
+    expect(refinePrompt).toHaveBeenCalledWith(expect.objectContaining({
       prompt: "A cinematic frame of a neon street at midnight",
       modelId: "z_image_turbo",
       workflow: "image",
       guide: "# Guide\n\nWrite vividly.",
-    });
+      signal: expect.any(AbortSignal),
+    }));
     expect(container.querySelector(".refine-review-text").textContent).toBe("A cinematic neon street at midnight, rain-slick.");
     // Original prompt unchanged until the user applies.
     expect(container.querySelector(".prompt-input").value).toBe("A cinematic frame of a neon street at midnight");

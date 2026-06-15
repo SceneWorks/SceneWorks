@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useState } from "react";
 import { Icon } from "../components/Icons.jsx";
 import { terminalStatuses } from "../jobTypes.js";
 import {
@@ -25,6 +25,10 @@ export function onPromptKeyDown(event) {
 function jobCreatedMs(job) {
   const parsed = Date.parse(job?.createdAt ?? "");
   return Number.isFinite(parsed) ? parsed : 0;
+}
+
+function completedAnchorMs(job) {
+  return Date.parse(job.completedAt ?? job.updatedAt ?? "");
 }
 
 // Pick the runs that belong in a studio's live stack from the tracked set, shared
@@ -119,7 +123,7 @@ export function useGenerationStudio({
     if (!models.some((item) => item.id === model)) {
       setModel(models[0]?.id ?? fallbackModelId);
     }
-  }, [models, model]);
+  }, [models, model, setModel, fallbackModelId]);
 
   // Drop a character selection that's no longer in the catalog.
   useEffect(() => {
@@ -127,7 +131,7 @@ export function useGenerationStudio({
       setCharacterId("");
       setCharacterLookId("");
     }
-  }, [characters, characterId]);
+  }, [characters, characterId, setCharacterId, setCharacterLookId]);
 
   const availablePresets = useMemo(
     () => presets.filter((preset) => presetMatchesWorkflow(preset, mode) && presetMatchesModel(preset, selectedModel, models)),
@@ -157,22 +161,18 @@ export function useGenerationStudio({
     }
   }, [availablePresets, selectedPresetId, selectedPreset]);
 
-  function resultVisible(job) {
+  const resultVisible = useCallback((job) => {
     if (job.result?.generationSetId) {
       return latestAssets.some((asset) => asset.generationSetId === job.result.generationSetId);
     }
     const assetIds = job.result?.assetIds ?? [];
     return assetIds.length > 0 && assetIds.every((id) => assets.some((asset) => asset.id === id));
-  }
+  }, [assets, latestAssets]);
 
-  function completedAnchorMs(job) {
-    return Date.parse(job.completedAt ?? job.updatedAt ?? "");
-  }
-
-  function completedWaitExpired(job, nowMs = Date.now()) {
+  const completedWaitExpired = useCallback((job, nowMs = Date.now()) => {
     const anchorMs = completedAnchorMs(job);
     return Number.isFinite(anchorMs) && nowMs - anchorMs > completedResultFallbackMs;
-  }
+  }, []);
 
   // A completed job's assets can lag its SSE result by a beat; keep the progress
   // card until the asset renders or the fallback window expires, re-checking on a
@@ -194,14 +194,14 @@ export function useGenerationStudio({
     );
     const timer = window.setTimeout(() => setResultFallbackTick((value) => value + 1), nextDelay + 50);
     return () => window.clearTimeout(timer);
-  }, [assets, latestAssets, trackedLocalJobs, resultFallbackTick]);
+  }, [trackedLocalJobs, resultVisible, completedWaitExpired, resultFallbackTick]);
 
   // The visible stack (see selectStackedJobs). A lone completed run collapses once
   // its batch renders in the latest-batch grid or the SSE-lag window expires, so a
   // stale progress card never lingers.
   const localJobs = useMemo(
     () => selectStackedJobs(trackedLocalJobs, (job) => resultVisible(job) || completedWaitExpired(job)),
-    [assets, latestAssets, trackedLocalJobs, resultFallbackTick],
+    [trackedLocalJobs, resultVisible, completedWaitExpired, resultFallbackTick],
   );
 
   // ---- LoRA selection (sc-4196: shared by Image + Video studios) ----

@@ -79,13 +79,14 @@ import {
   SavePresetPanel,
   useGenerationStudio,
 } from "./generationStudio.jsx";
-import { ReplacePersonPanel, findReplacementModel } from "./ReplacePersonPanel.jsx";
+import { ReplacePersonPanel } from "./ReplacePersonPanel.jsx";
 import { useAppContext } from "../context/AppContext.js";
 import { PROMPT_REFINE_MODEL_ID } from "../constants.js";
 import {
   DEFAULT_MAC_CAPABILITIES,
   macAvailableModels,
   macBlockedModels,
+  macGatingActive,
   macVideoModeBlock,
 } from "../macGating.js";
 import { loadStudioSettings, useStudioSettingsWriter } from "../hooks/useStudioSettings.js";
@@ -176,7 +177,9 @@ export function VideoStudio() {
   const [motion, setMotion] = useState(saved.motion ?? "slow push-in");
   const imageAssets = assets.filter((asset) => asset.type === "image" || asset.type === "frame");
   const videoAssets = assets.filter((asset) => asset.type === "video");
-  const [mode, setMode] = useState(saved.mode ?? "image_to_video");
+  // Open on Text→Video for parity with Image Studio's Text→Image default and the
+  // launch-request fallback below (sc-5716); the prior image_to_video default was the odd one out.
+  const [mode, setMode] = useState(saved.mode ?? "text_to_video");
   const [prompt, setPrompt] = useState(saved.prompt ?? "Camera slowly pushes in while the scene comes alive");
   const [quality, setQuality] = useState(saved.quality ?? "balanced");
   const [ltxPipeline, setLtxPipeline] = useState(saved.ltxPipeline ?? "auto");
@@ -201,6 +204,16 @@ export function VideoStudio() {
     }
   }, [macVideoModels, model]);
   const selectedModel = videoModels.find((item) => item.id === model) ?? videoModels[0];
+  // Models gated on the selected tab, not tabs on the selected model (sc-5716). A model "serves" a
+  // mode when it declares the capability AND, under active Mac gating, that mode is MLX-routed for
+  // it (`macVideoModeBlock` is a no-op off-Mac, so there this is pure capability). The mode tabs,
+  // the model picker, and the snap-on-mode-switch effect all derive from this so the user is never
+  // trapped on a mode whose model can't serve the others.
+  const macGating = macGatingActive(macCapabilities);
+  const baseVideoModels = macVideoModels.length ? macVideoModels : videoModels;
+  const modelServesMode = (item, value) =>
+    Boolean(item?.capabilities?.includes(value)) && !macVideoModeBlock(item, macCapabilities, value);
+  const modelsForMode = (value) => baseVideoModels.filter((item) => modelServesMode(item, value));
   // Prompt guide for the selected model; fall back to the generic video guide
   // when a model declares none, so the button is always useful (sc-1817).
   const promptGuide = selectedModel?.ui?.promptGuide ?? {
@@ -504,28 +517,23 @@ export function VideoStudio() {
     if (match) setResolution(match);
   }, [i2vSourceAssetId, mode, selectedModel?.id, assets]);
 
+  // Models are gated on the selected tab (sc-5716): when the active mode isn't served by the current
+  // model, snap to the first model that serves it so the user can always leave a mode. Generalizes
+  // the old per-mode snaps (replace_person → first replace-capable model; animate_character →
+  // scail2_14b) to every mode, including the Bernini editing/reference modes. A no-op when the
+  // current model already serves the mode (e.g. an LTX image_to_video → text_to_video switch) or
+  // when no model serves it (a reduced catalog) — there's nothing to snap to.
   useEffect(() => {
-    if (mode !== "replace_person" || supportsMode) {
+    if (modelServesMode(selectedModel, mode)) {
       return;
     }
-    const replacementModel = findReplacementModel(videoModels);
-    if (replacementModel) {
-      setModel(replacementModel.id);
+    const fallback = modelsForMode(mode)[0];
+    if (fallback && fallback.id !== model) {
+      setModel(fallback.id);
     }
-  }, [mode, supportsMode, videoModels]);
-
-  // SCAIL-2 character animation (sc-5449): like replace_person, animate_character runs only on the
-  // model that advertises the capability (scail2_14b). Auto-switch to it when the user picks the
-  // mode on a model that can't serve it, so the mode is usable without first hunting for the model.
-  useEffect(() => {
-    if (mode !== "animate_character" || supportsMode) {
-      return;
-    }
-    const animateModel = videoModels.find((item) => item.capabilities?.includes("animate_character"));
-    if (animateModel) {
-      setModel(animateModel.id);
-    }
-  }, [mode, supportsMode, videoModels]);
+    // modelServesMode / modelsForMode close over videoModels + macCapabilities, captured below.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [mode, model, selectedModel, videoModels, macCapabilities]);
 
   // When restoring a snapshot, the saved length/fps/quality/resolution/negativePrompt
   // already reflect the user's last state — skip the one preset-default pass that fires
@@ -647,12 +655,14 @@ export function VideoStudio() {
     // capabilities include it (today: scail2_14b); the same per-model gating as the others.
     ["animate_character", "Animate character"],
   ];
-  // Mac UI gating (sc-3486, sc-3773): every video mode is disabled per-model via the selected
-  // model's `macSupport.features.videoModes` — FLF on the non-Keyframe Wan MoE engines,
-  // replace_person on non-replace models, and the LTX IC-LoRA clip-conditioning modes
-  // (extend_clip / video_bridge) on non-LTX models. On LTX, extend/bridge stay enabled because
-  // the in-process Rust worker serves them, so the old coarse global flag is gone.
-  const macVideoModeBlockFor = (value) => macVideoModeBlock(selectedModel, macCapabilities, value);
+  // Mac UI gating (sc-3486, sc-3773, sc-5716): mode tabs are gated at the MODE level, not on the
+  // selected model. A tab is disabled only under active Mac gating when NO available model serves
+  // the mode (mode-level availability across `macVideoModels`) — never on the selected model's
+  // `videoModes`, which used to trap the user on replace_person / animate_character with no way
+  // back. Off-Mac `macGating` is false so tabs are never disabled here. The active tab is always
+  // left enabled so a reduced catalog can't strand you on a disabled tab. `macVideoModeBlock` still
+  // gates the in-mode model picker + submit (via `modelsForMode` / `supportsMode`).
+  const macModeTabBlocked = (value) => macGating && modelsForMode(value).length === 0;
   const matchingTracks = personTracks.filter((track) => track.sourceAssetId === sourceClipAssetId);
   const latestDetectionJob = jobs
     .filter(
@@ -869,15 +879,17 @@ export function VideoStudio() {
           <div className="prompt-hero-top">
             <div className="segmented-control mode-control" role="tablist" aria-label="Video mode">
               {modeOptions.map(([value, label]) => {
-                const macBlock = macVideoModeBlockFor(value);
+                // Disabled only when no available model serves this mode on Mac — and never the
+                // active tab, so the user can always switch away (sc-5716).
+                const blocked = value !== mode && macModeTabBlocked(value);
                 return (
                   <button
                     className={mode === value ? "active" : ""}
                     key={value}
                     onClick={() => setMode(value)}
                     type="button"
-                    disabled={Boolean(macBlock)}
-                    title={macBlock ? macBlock.text : undefined}
+                    disabled={blocked}
+                    title={blocked ? "No installed model supports this mode on macOS." : undefined}
                   >
                     {label}
                   </button>
@@ -1261,7 +1273,10 @@ export function VideoStudio() {
               <label>
                 Model
                 <select onChange={(event) => setModel(event.target.value)} value={model}>
-                  {(macVideoModels.length ? macVideoModels : videoModels).map((item) => (
+                  {/* Models gated on the selected tab (sc-5716): show only models that serve the
+                      active mode, falling back to the full available list if none do (a reduced
+                      catalog) so the picker is never empty. */}
+                  {(modelsForMode(mode).length ? modelsForMode(mode) : baseVideoModels).map((item) => (
                     <option key={item.id} value={item.id}>
                       {item.name}
                     </option>

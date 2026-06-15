@@ -779,7 +779,7 @@ async fn run_utility_job(
         }
     };
     if matches!(job.job_type, JobType::LoraImport | JobType::ModelImport) {
-        let _ = cleanup_uploaded_import_source(&job.payload).await;
+        let _ = cleanup_uploaded_import_source(settings, &job.payload).await;
     }
     if let Err((message, error)) = result {
         match error {
@@ -903,22 +903,27 @@ async fn fail_job(
 async fn check_cancel(api: &ApiClient, job_id: &str, message: &str) -> WorkerResult<()> {
     let job: JobSnapshot = api.get_json(&format!("/api/v1/jobs/{job_id}")).await?;
     if job.cancel_requested {
-        update_job(
-            api,
-            job_id,
-            progress_payload(
-                JobStatus::Canceled,
-                ProgressStage::Canceled,
-                1.0,
-                message,
-                None,
-                None,
-                None,
-            ),
-        )
-        .await?;
+        mark_job_canceled(api, job_id, message).await?;
         return Err(WorkerError::Canceled(message.to_owned()));
     }
+    Ok(())
+}
+
+async fn mark_job_canceled(api: &ApiClient, job_id: &str, message: &str) -> WorkerResult<()> {
+    update_job(
+        api,
+        job_id,
+        progress_payload(
+            JobStatus::Canceled,
+            ProgressStage::Canceled,
+            1.0,
+            message,
+            None,
+            None,
+            None,
+        ),
+    )
+    .await?;
     Ok(())
 }
 
@@ -1238,17 +1243,30 @@ fn payload_bool(payload: &JsonObject, field: &str) -> bool {
     payload.get(field).and_then(Value::as_bool).unwrap_or(false)
 }
 
-async fn cleanup_uploaded_import_source(payload: &JsonObject) -> WorkerResult<()> {
+async fn cleanup_uploaded_import_source(
+    settings: &Settings,
+    payload: &JsonObject,
+) -> WorkerResult<()> {
     if !payload_bool(payload, "uploadedSourcePath") {
         return Ok(());
     }
     let Some(source_path) = optional_payload_string(payload, "sourcePath") else {
         return Ok(());
     };
-    let source_path = PathBuf::from(source_path);
+    let source_path = normalize_absolute_path(Path::new(source_path))?;
+    let allowed_roots = [
+        normalize_absolute_path(&settings.data_dir.join("cache").join("lora-uploads"))?,
+        normalize_absolute_path(&settings.data_dir.join("cache").join("model-uploads"))?,
+    ];
+    let source_path = ensure_path_under(source_path, &allowed_roots, "Uploaded sourcePath")?;
     let _ = tokio::fs::remove_file(&source_path).await;
     if let Some(parent) = source_path.parent() {
-        let _ = tokio::fs::remove_dir(parent).await;
+        if allowed_roots
+            .iter()
+            .any(|root| parent.starts_with(root) && parent != root)
+        {
+            let _ = tokio::fs::remove_dir(parent).await;
+        }
     }
     Ok(())
 }
@@ -1310,6 +1328,25 @@ fn normalize_app_managed_path(
     ensure_path_under(path, &[data_dir], label)
 }
 
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+pub(crate) fn normalize_app_managed_cache_path(
+    settings: &Settings,
+    raw_path: &str,
+    cache_dir: &str,
+    label: &str,
+) -> WorkerResult<PathBuf> {
+    let raw_path = raw_path.trim();
+    if raw_path.is_empty() {
+        return Err(WorkerError::InvalidPayload(format!("{label} is required.")));
+    }
+    let root = settings.data_dir.join("cache").join(cache_dir);
+    let normalized_root = normalize_absolute_path(&root)?;
+    let canonical_root = normalize_existing_or_absolute(&root)?;
+    let normalized = normalize_absolute_path(Path::new(raw_path))?;
+    let resolved = normalize_existing_or_absolute(&normalized)?;
+    ensure_path_under(resolved, &[normalized_root, canonical_root], label)
+}
+
 /// A model's weights are a read-only source the rust-api resolves (e.g.
 /// `resolve_base_model_path`) from either the app data dir *or* the shared
 /// Hugging Face hub cache — the default `HF_HOME` the desktop injects points the
@@ -1332,6 +1369,42 @@ fn normalize_app_managed_model_path(
     let hf_cache = normalize_absolute_path(&huggingface_hub_cache_dir(&settings.data_dir))?;
     let path = normalize_absolute_path(Path::new(raw_path))?;
     ensure_path_under(path, &[data_dir, hf_cache], label)
+}
+
+/// Confine a LoRA adapter path taken from a job payload to an app-managed root
+/// (sc-5723 / WKA-002). The path arrives untrusted (`installedPath`/`sourcePath`/
+/// `path`/`source.path` on a LoRA spec) and is loaded as adapter weights, so —
+/// like every other on-disk model input — it must resolve under the app data dir
+/// or the shared Hugging Face hub cache (installed LoRAs live in `<data>/loras` or
+/// a project tree under `<data>`; HF-cached adapters live in the hub cache).
+/// Without this a crafted payload could point a LoRA at any `.safetensors` on the
+/// host, giving the worker an arbitrary-file read primitive across the API boundary.
+/// Mirrors `normalize_app_managed_model_path` (model weights share the same roots).
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+pub(crate) fn normalize_app_managed_lora_path(
+    settings: &Settings,
+    path: &Path,
+) -> WorkerResult<PathBuf> {
+    let data_dir = normalized_data_dir(settings)?;
+    let canonical_data_dir = normalize_existing_or_absolute(&settings.data_dir)?;
+    let hf_cache = normalize_absolute_path(&huggingface_hub_cache_dir(&settings.data_dir))?;
+    let canonical_hf_cache =
+        normalize_existing_or_absolute(&huggingface_hub_cache_dir(&settings.data_dir))?;
+    let normalized = normalize_absolute_path(path)?;
+    let resolved = normalize_existing_or_absolute(&normalized)?;
+    ensure_path_under(
+        resolved,
+        &[data_dir, canonical_data_dir, hf_cache, canonical_hf_cache],
+        "LoRA path",
+    )
+}
+
+fn normalize_existing_or_absolute(path: &Path) -> WorkerResult<PathBuf> {
+    match std::fs::canonicalize(path) {
+        Ok(canonical) => normalize_absolute_path(&canonical),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => normalize_absolute_path(path),
+        Err(error) => Err(error.into()),
+    }
 }
 
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))]

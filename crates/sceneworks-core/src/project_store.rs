@@ -1,6 +1,7 @@
 use std::collections::BTreeSet;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use parking_lot::{Mutex, ReentrantMutexGuard};
 use rusqlite::{params, Connection, OptionalExtension};
@@ -1262,6 +1263,16 @@ impl ProjectStore {
             .ok_or_else(|| {
                 ProjectStoreError::BadRequest("generated asset fact missing mediaPath".to_owned())
             })?;
+        // mediaPath comes from the worker result fact and is joined into the project
+        // path below for sidecar/dir writes; reject traversal/absolute paths before any
+        // create_dir_all/write so the worker->API boundary can't write outside the
+        // project root (sc-5721 / CORE-002->F). Mirrors the is_safe_relative_path guard
+        // used at every other path-from-outside site in this store.
+        if !is_safe_relative_path(media_rel) {
+            return Err(ProjectStoreError::BadRequest(
+                "Invalid media path".to_owned(),
+            ));
+        }
         let asset_id = fact.get("assetId").and_then(Value::as_str).ok_or_else(|| {
             ProjectStoreError::BadRequest("generated asset fact missing assetId".to_owned())
         })?;
@@ -1975,6 +1986,11 @@ impl ProjectStore {
             .and_then(Value::as_str)
             .unwrap_or_default()
             .to_owned();
+        if !media_rel.is_empty() && !is_safe_relative_path(&media_rel) {
+            return Err(ProjectStoreError::BadRequest(
+                "Asset media path must be project-relative".to_owned(),
+            ));
+        }
         let media_path = project_path.join(&media_rel);
         let status = asset
             .as_object_mut()
@@ -2790,10 +2806,21 @@ fn find_timeline_file(project_path: &Path, timeline_id: &str) -> ProjectStoreRes
         )
         .optional()?;
     if let Some(indexed_path) = indexed_path.as_deref() {
-        let path = project_path.join(indexed_path);
-        if path.exists() {
+        let path = if is_safe_relative_path(indexed_path) {
+            Some(project_path.join(indexed_path))
+        } else {
+            None
+        };
+        if let Some(path) = path.filter(|path| path.exists()) {
+            let project_root = project_path.canonicalize()?;
+            let canonical = path.canonicalize()?;
+            if !canonical.starts_with(&project_root) {
+                return Err(ProjectStoreError::BadRequest(
+                    "Timeline file path must stay inside the project".to_owned(),
+                ));
+            }
             return Ok(TimelineFile {
-                path,
+                path: canonical,
                 relative_path: indexed_path.to_owned(),
             });
         }
@@ -2880,7 +2907,9 @@ fn write_project_file(
 
 fn connect_project_db(project_path: &Path) -> ProjectStoreResult<Connection> {
     fs::create_dir_all(project_path)?;
-    Ok(Connection::open(project_path.join("project.db"))?)
+    let connection = Connection::open(project_path.join("project.db"))?;
+    connection.busy_timeout(Duration::from_millis(5000))?;
+    Ok(connection)
 }
 
 /// Assemble the on-disk asset sidecar from the worker-reported flat facts. Rust
@@ -3528,11 +3557,11 @@ fn move_or_copy_file(source: &Path, destination: &Path) -> ProjectStoreResult<()
 #[cfg(test)]
 mod tests {
     use super::{
-        apply_project_migrations, build_generated_asset_sidecar, guess_mime_from_filename,
-        is_safe_relative_path, normalize_asset_tags, sniff_image_format, AssetScope,
-        CharacterCreateInput, CharacterLookInput, ProjectStore, ProjectStoreError, UploadAsset,
-        GLOBAL_KEYPOINTS_PROJECT_ID, GLOBAL_POSES_PROJECT_ID, PROJECT_FOLDERS,
-        PROJECT_SCHEMA_VERSION,
+        apply_project_migrations, build_generated_asset_sidecar, find_timeline_file,
+        guess_mime_from_filename, index_timeline, is_safe_relative_path, normalize_asset_tags,
+        sniff_image_format, AssetScope, CharacterCreateInput, CharacterLookInput, ProjectStore,
+        ProjectStoreError, UploadAsset, GLOBAL_KEYPOINTS_PROJECT_ID, GLOBAL_POSES_PROJECT_ID,
+        PROJECT_FOLDERS, PROJECT_SCHEMA_VERSION,
     };
     use rusqlite::Connection;
     use serde_json::{json, Value};
@@ -3818,6 +3847,78 @@ mod tests {
             json!(false)
         );
         assert_eq!(asset["lineage"]["jobId"], json!("job-1"));
+    }
+
+    /// sc-5721 (CORE-002→F): `persist_generated_asset` joins the worker-supplied
+    /// `mediaPath` into the project tree and `create_dir_all`/`write`s a sidecar there,
+    /// so a traversal or absolute path must be rejected before any filesystem write —
+    /// the worker→API boundary must not write outside the project root. A normal
+    /// relative path is still accepted.
+    #[test]
+    fn persist_generated_asset_rejects_unsafe_media_path() {
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        let store = ProjectStore::new(temp_dir.path().join("data"), "test-version");
+        let project = store.create_project("Boundary").expect("project creates");
+
+        let fact_with = |media_path: &str| {
+            json!({
+                "assetId": "asset_safe1",
+                "mediaPath": media_path,
+                "mimeType": "image/png",
+                "width": 64,
+                "height": 64,
+                "model": "z_image_turbo",
+                "adapter": "z_image_diffusers",
+                "prompt": "x",
+                "loras": [],
+            })
+        };
+
+        for unsafe_path in [
+            "../../../../tmp/escape.png",
+            "/etc/passwd",
+            "assets/../../escape.png",
+        ] {
+            let result = store.persist_generated_asset(
+                &project.id,
+                "job-1",
+                "genset_x",
+                &fact_with(unsafe_path),
+            );
+            assert!(
+                matches!(result, Err(ProjectStoreError::BadRequest(_))),
+                "expected {unsafe_path:?} to be rejected, got {result:?}"
+            );
+        }
+
+        // A normal project-relative path is still accepted and written under the project.
+        let safe_fact = json!({
+            "assetId": "asset_safe1",
+            "mediaPath": "assets/images/genset_x/asset_safe1.png",
+            "mimeType": "image/png",
+            "width": 64,
+            "height": 64,
+            "normalizedWidth": 64,
+            "normalizedHeight": 64,
+            "count": 1,
+            "family": "z-image",
+            "seed": 1,
+            "index": 0,
+            "displayName": "safe #1",
+            "createdAt": "2026-06-15T00:00:00Z",
+            "mode": "text_to_image",
+            "model": "z_image_turbo",
+            "adapter": "z_image_diffusers",
+            "prompt": "x",
+            "negativePrompt": "",
+            "loras": [],
+            "stylePreset": "none",
+            "rawAdapterSettings": {"steps": 8},
+        });
+        let safe = store
+            .persist_generated_asset(&project.id, "job-1", "genset_x", &safe_fact)
+            .expect("safe media path persists");
+        assert_eq!(safe["id"], json!("asset_safe1"));
     }
 
     #[test]
@@ -4331,6 +4432,74 @@ mod tests {
         ));
         // The traversal target is untouched.
         assert!(outside.join("victim.txt").exists());
+    }
+
+    #[test]
+    fn delete_asset_rejects_unsafe_sidecar_media_path() {
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        let store = ProjectStore::new(temp_dir.path().join("data"), "test-version");
+        let project = store.create_project("Assets").expect("project creates");
+        let project_path = std::path::PathBuf::from(&project.path);
+        let image_dir = project_path.join("assets/images");
+        let outside = temp_dir.path().join("outside.png");
+        std::fs::write(&outside, b"outside").expect("outside media writes");
+        std::fs::write(
+            image_dir.join("unsafe.sceneworks.json"),
+            serde_json::to_string_pretty(&json!({
+                "id": "asset-unsafe",
+                "type": "image",
+                "displayName": "Unsafe",
+                "createdAt": "2026-06-15T00:00:00Z",
+                "file": {"path": outside.to_string_lossy()},
+                "status": {"favorite": false, "rating": 0, "rejected": false, "trashed": false}
+            }))
+            .expect("json"),
+        )
+        .expect("sidecar writes");
+
+        let error = store
+            .delete_asset(&project.id, "asset-unsafe")
+            .expect_err("unsafe media path rejected");
+        assert!(matches!(error, ProjectStoreError::BadRequest(_)));
+        assert!(outside.exists(), "delete must not move outside media");
+    }
+
+    #[test]
+    fn find_timeline_file_ignores_unsafe_indexed_path() {
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        let store = ProjectStore::new(temp_dir.path().join("data"), "test-version");
+        let project = store.create_project("Timeline").expect("project creates");
+        let project_path = std::path::PathBuf::from(&project.path);
+        let timeline = json!({
+            "id": "timeline-1",
+            "name": "Main",
+            "aspectRatio": "16:9",
+            "width": 1280,
+            "height": 720,
+            "fps": 30,
+            "duration": 0.0,
+            "createdAt": "2026-06-15T00:00:00Z",
+            "updatedAt": "2026-06-15T00:00:00Z"
+        });
+        let safe_path = project_path
+            .join("timelines")
+            .join("main.sceneworks.timeline.json");
+        std::fs::write(
+            &safe_path,
+            serde_json::to_string_pretty(&timeline).expect("json"),
+        )
+        .expect("timeline writes");
+        index_timeline(&project_path, &timeline, "../outside.timeline.json").expect("index writes");
+
+        let found = find_timeline_file(&project_path, "timeline-1").expect("timeline found");
+        assert_eq!(
+            found.path.canonicalize().expect("canonical found path"),
+            safe_path.canonicalize().expect("canonical safe path")
+        );
+        assert_eq!(
+            found.relative_path,
+            "timelines/main.sceneworks.timeline.json"
+        );
     }
 
     // ---- Key Point Library (sc-4434) ---------------------------------------------------

@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useRef, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { ImageEditSourcePickerField } from "../components/AssetPicker.jsx";
 import { AssetCard } from "../components/assetPanels.jsx";
 import { AssetMedia } from "../components/assetMedia.jsx";
@@ -88,6 +88,7 @@ import {
   DEFAULT_MAC_CAPABILITIES,
   macAvailableModels,
   macBlockedModels,
+  macGatingActive,
   macModelFeatureBlock,
   macUpscaleEngineBlocked,
 } from "../macGating.js";
@@ -441,38 +442,47 @@ export function ImageStudio() {
     () => macBlockedModels(imageModels, macCapabilities),
     [imageModels, macCapabilities],
   );
-  const availableModels = useMemo(
-    () =>
-      macImageModels.filter((item) => {
-        const caps = item.capabilities ?? [];
-        if (mode === "edit_image") {
-          return caps.includes("edit_image") || caps.includes("image_edit");
-        }
-        if (mode === "character_image") {
-          // Only models with a reference-image (IP-Adapter) engine can preserve a
-          // character's identity from one reference; gate the picker to them.
-          return caps.includes("character_image");
-        }
-        if (mode === "style_variations") {
-          return caps.includes("style_variations");
-        }
-        // text_to_image: only models that declare a real sourceless T2I path (sc-5549).
-        // Without this gate the Text tab leaked edit-only models (run a degraded
-        // sourceless edit) and reference-only identity models (MLX-ineligible without a
-        // reference → strand on "Waiting for an available worker"); both classes lack
-        // text_to_image. Mirrors the per-capability gating the other three modes use.
-        return caps.includes("text_to_image");
-      }),
-    [macImageModels, mode],
+  const macGating = macGatingActive(macCapabilities);
+  const imageModelServesMode = useCallback((item, value) => {
+    const caps = item?.capabilities ?? [];
+    if (value === "edit_image") {
+      return (
+        (caps.includes("edit_image") || caps.includes("image_edit")) &&
+        !macModelFeatureBlock(item, macCapabilities, "edit")
+      );
+    }
+    if (value === "character_image") {
+      // Only models with a reference-image (IP-Adapter) engine can preserve a
+      // character's identity from one reference; gate the picker to them.
+      return caps.includes("character_image") && !macModelFeatureBlock(item, macCapabilities, "reference");
+    }
+    if (value === "style_variations") {
+      return caps.includes("style_variations") && !macModelFeatureBlock(item, macCapabilities, "reference");
+    }
+    // text_to_image: only models that declare a real sourceless T2I path (sc-5549).
+    // Without this gate the Text tab leaked edit-only models (run a degraded
+    // sourceless edit) and reference-only identity models (MLX-ineligible without a
+    // reference → strand on "Waiting for an available worker"); both classes lack
+    // text_to_image. Mirrors the per-capability gating the other three modes use.
+    return caps.includes("text_to_image");
+  }, [macCapabilities]);
+  const modelsForMode = useCallback(
+    (value) => macImageModels.filter((item) => imageModelServesMode(item, value)),
+    [imageModelServesMode, macImageModels],
   );
+  const availableModels = useMemo(
+    () => modelsForMode(mode),
+    [mode, modelsForMode],
+  );
+  const pickerModels = mode === "text_to_image" && availableModels.length === 0 ? macImageModels : availableModels;
   // When the mode change filters out the current model (e.g. Lens-Turbo is the
   // text default but isn't edit-capable), snap to the first available model so
   // the dropdown's displayed option matches the value actually submitted.
   useEffect(() => {
-    if (availableModels.length && !availableModels.some((item) => item.id === model)) {
-      setModel(availableModels[0].id);
+    if (pickerModels.length && !pickerModels.some((item) => item.id === model)) {
+      setModel(pickerModels[0].id);
     }
-  }, [availableModels, model]);
+  }, [pickerModels, model]);
   const selectedModel = imageModels.find((item) => item.id === model);
   // Prompt guide for the selected model; fall back to the generic image guide
   // when a model declares none, so the button is always useful (sc-1817).
@@ -497,10 +507,17 @@ export function ImageStudio() {
   const macEditBlock = macModelFeatureBlock(selectedModel, macCapabilities, "edit");
   const macReferenceBlock = macModelFeatureBlock(selectedModel, macCapabilities, "reference");
   const macPoseBlock = macModelFeatureBlock(selectedModel, macCapabilities, "pose");
-  const macModeBlock = (value) => {
-    if (value === "edit_image") return macEditBlock;
-    if (value === "character_image" || value === "style_variations") return macReferenceBlock;
+  const macActiveModeBlock = (() => {
+    if (mode === "edit_image") return macEditBlock;
+    if (mode === "character_image" || mode === "style_variations") return macReferenceBlock;
     return null;
+  })();
+  const macModeTabBlock = (value) => {
+    if (!macGating || value === mode || modelsForMode(value).length) return null;
+    return {
+      blocked: true,
+      text: "No available Mac model supports this mode.",
+    };
   };
   // Variation slider spec (FLUX / Qwen). When declared, the model exposes a
   // trueCfgScale knob alongside (FLUX) or instead of (Qwen, via hideReferenceStrength)
@@ -1027,6 +1044,7 @@ export function ImageStudio() {
     !activeProject ||
     !prompt.trim() ||
     (mode === "character_image" && !characterId) ||
+    Boolean(macActiveModeBlock) ||
     !presetValidationResult.ok ||
     !selectedLoraValidationResult.ok;
 
@@ -1042,7 +1060,7 @@ export function ImageStudio() {
                 ["character_image", "With character"],
                 ["style_variations", "Variations"],
               ].map(([value, label]) => {
-                const macBlock = macModeBlock(value);
+                const macBlock = macModeTabBlock(value);
                 return (
                   <button
                     className={mode === value ? "active" : ""}
@@ -1345,13 +1363,14 @@ export function ImageStudio() {
             <label>
               Model
               <select onChange={(event) => setModel(event.target.value)} value={model}>
-                {(availableModels.length ? availableModels : macImageModels).map((item) => (
+                {pickerModels.map((item) => (
                   <option key={item.id} value={item.id}>
                     {item.name}
                   </option>
                 ))}
               </select>
             </label>
+            {macActiveModeBlock ? <p className="mac-gating-note">{macActiveModeBlock.text}</p> : null}
             {macHiddenImageModels.length ? (
               <p className="mac-gating-note">
                 {macHiddenImageModels.length} model
