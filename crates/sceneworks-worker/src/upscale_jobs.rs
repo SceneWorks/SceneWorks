@@ -37,7 +37,8 @@ use std::sync::{Mutex, OnceLock};
 use crate::downloads::{ensure_hf_cached_file, DownloadContext};
 use crate::generator_cache::with_cached_generator;
 use gen_core::{
-    Conditioning, GenerationOutput, GenerationRequest, Image as GenImage, LoadSpec, WeightsSource,
+    CancelFlag, Conditioning, GenerationOutput, GenerationRequest, Image as GenImage, LoadSpec,
+    WeightsSource,
 };
 use image::RgbImage;
 use ort::execution_providers::CoreMLExecutionProvider;
@@ -46,14 +47,16 @@ use ort::value::Tensor;
 use serde_json::{json, Value};
 
 use crate::{
-    fresh_asset_id, heartbeat, now_rfc3339, progress_payload, task_join_error, update_job,
-    ApiClient, Settings, WorkerError, WorkerResult,
+    cancel_requested_peek, fresh_asset_id, heartbeat, mark_job_canceled, now_rfc3339,
+    progress_payload, progress_report_interval, task_join_error, update_job, ApiClient, Settings,
+    WorkerError, WorkerResult,
 };
 use sceneworks_core::contracts::{JobSnapshot, JobStatus, JsonObject, ProgressStage, WorkerStatus};
 use sceneworks_core::project_store::ProjectStore;
 
 const TILE_SIZE: usize = 512;
 const TILE_PAD: usize = 16;
+const CANCEL_MESSAGE: &str = "Image upscale canceled by user.";
 
 /// SceneWorks-owned HuggingFace repo hosting the pre-exported ONNX (reproducible from
 /// `scripts/spikes/sc3489_export_reference.py`). Public; downloaded on first use,
@@ -172,11 +175,19 @@ impl Upscaler {
 
     /// Tiled x`factor` upscale of one RGB image → an upscaled RGB image. Tiling +
     /// crop/place is a verbatim port of `upscalers.py:_run_tiled`.
-    fn upscale(&mut self, img: &RgbImage, factor: usize) -> WorkerResult<RgbImage> {
+    fn upscale(
+        &mut self,
+        img: &RgbImage,
+        factor: usize,
+        cancel: &CancelFlag,
+    ) -> WorkerResult<RgbImage> {
         let (w, h) = (img.width() as usize, img.height() as usize);
         let (ow, oh) = (w * factor, h * factor);
         let mut output = vec![0u8; ow * oh * 3];
         for tl in tile_slices(w, h, TILE_SIZE) {
+            if cancel.is_cancelled() {
+                return Err(WorkerError::Canceled(CANCEL_MESSAGE.to_owned()));
+            }
             let cx0 = tl.x0.saturating_sub(TILE_PAD);
             let cy0 = tl.y0.saturating_sub(TILE_PAD);
             let cx1 = (tl.x1 + TILE_PAD).min(w);
@@ -214,7 +225,12 @@ impl Upscaler {
 /// Blocking upscale: load+cache the factor's session (amortising the CoreML graph
 /// compile across a batch), run it. All `ort` objects live inside this closure and
 /// never cross an await (mirrors `pose_jobs::detect_batch`).
-fn upscale_blocking(onnx_path: PathBuf, factor: u8, img: RgbImage) -> WorkerResult<RgbImage> {
+fn upscale_blocking(
+    onnx_path: PathBuf,
+    factor: u8,
+    img: RgbImage,
+    cancel: CancelFlag,
+) -> WorkerResult<RgbImage> {
     use std::collections::hash_map::Entry;
     let cell = UPSCALERS.get_or_init(|| Mutex::new(HashMap::new()));
     // Recover from a poisoned lock rather than panicking every subsequent job: if a
@@ -230,7 +246,7 @@ fn upscale_blocking(onnx_path: PathBuf, factor: u8, img: RgbImage) -> WorkerResu
         Entry::Occupied(e) => e.into_mut(),
         Entry::Vacant(e) => e.insert(Upscaler::load(&onnx_path)?),
     };
-    upscaler.upscale(&img, factor as usize)
+    upscaler.upscale(&img, factor as usize, &cancel)
 }
 
 // ---------------------------------------------------------------------------
@@ -424,10 +440,11 @@ async fn ensure_seedvr2_checkpoint(
 /// (0..1) is the optional `--softness` pre-blur; `seed` makes the generative result reproducible.
 async fn run_seedvr2_upscale(
     dir: PathBuf,
-    source: &RgbImage,
+    source: RgbImage,
     factor: u8,
     softness: f32,
     seed: u64,
+    cancel: CancelFlag,
 ) -> WorkerResult<RgbImage> {
     let (src_w, src_h) = (source.width(), source.height());
     let target_w = round_to_16(src_w.saturating_mul(u32::from(factor)));
@@ -453,6 +470,7 @@ async fn run_seedvr2_upscale(
                     image,
                     strength: None,
                 }],
+                cancel: cancel.clone(),
                 ..Default::default()
             };
             let output = generator
@@ -477,6 +495,54 @@ async fn run_seedvr2_upscale(
         },
     )
     .await
+}
+
+async fn run_upscale_with_heartbeat<R>(
+    api: &ApiClient,
+    settings: &Settings,
+    job_id: &str,
+    cancel: CancelFlag,
+    mut task: tokio::task::JoinHandle<WorkerResult<R>>,
+) -> WorkerResult<R>
+where
+    R: Send + 'static,
+{
+    let mut canceled = false;
+    let mut interval = tokio::time::interval(progress_report_interval(settings));
+    interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    loop {
+        tokio::select! {
+            result = &mut task => {
+                let value = result.map_err(|error| task_join_error("upscale task", error))??;
+                if canceled {
+                    mark_job_canceled(api, job_id, CANCEL_MESSAGE).await?;
+                    return Err(WorkerError::Canceled(CANCEL_MESSAGE.to_owned()));
+                }
+                return Ok(value);
+            }
+            _ = interval.tick() => {
+                heartbeat(api, settings, WorkerStatus::Busy, Some(job_id)).await?;
+                if !canceled && cancel_requested_peek(api, job_id).await {
+                    cancel.cancel();
+                    canceled = true;
+                    update_job(
+                        api,
+                        job_id,
+                        progress_payload(
+                            JobStatus::Running,
+                            ProgressStage::Running,
+                            0.45,
+                            "Canceling image upscale.",
+                            None,
+                            None,
+                            None,
+                        ),
+                    )
+                    .await?;
+                }
+            }
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -638,7 +704,18 @@ pub(crate) async fn run_image_upscale_job(
             ),
         )
         .await?;
-        run_seedvr2_upscale(dir, &source_image, factor, softness, seed).await?
+        let cancel = CancelFlag::new();
+        let seed_source = source_image.clone();
+        run_upscale_with_heartbeat(
+            api,
+            settings,
+            &job.id,
+            cancel.clone(),
+            tokio::spawn(async move {
+                run_seedvr2_upscale(dir, seed_source, factor, softness, seed, cancel).await
+            }),
+        )
+        .await?
     } else {
         update_job(
             api,
@@ -671,9 +748,17 @@ pub(crate) async fn run_image_upscale_job(
             ),
         )
         .await?;
-        tokio::task::spawn_blocking(move || upscale_blocking(onnx_path, factor, source_image))
-            .await
-            .map_err(|error| task_join_error("upscale task", error))??
+        let cancel = CancelFlag::new();
+        run_upscale_with_heartbeat(
+            api,
+            settings,
+            &job.id,
+            cancel.clone(),
+            tokio::task::spawn_blocking(move || {
+                upscale_blocking(onnx_path, factor, source_image, cancel)
+            }),
+        )
+        .await?
     };
     let (out_w, out_h) = (upscaled.width(), upscaled.height());
 

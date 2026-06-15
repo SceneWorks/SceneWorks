@@ -2240,10 +2240,11 @@ pub(crate) async fn run_ffmpeg(
                 status = child.wait() => break status?,
                 _ = interval.tick() => {
                     heartbeat(context.api, context.settings, WorkerStatus::Busy, Some(context.job_id)).await?;
-                    if let Err(error) = check_cancel(context.api, context.job_id, context.cancel_message).await {
+                    if cancel_requested_peek(context.api, context.job_id).await {
                         let _ = child.kill().await;
                         let _ = child.wait().await;
-                        return Err(error);
+                        mark_job_canceled(context.api, context.job_id, context.cancel_message).await?;
+                        return Err(WorkerError::Canceled(context.cancel_message.to_owned()));
                     }
                 }
             }

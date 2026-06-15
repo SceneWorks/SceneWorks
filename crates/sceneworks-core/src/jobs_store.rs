@@ -358,6 +358,10 @@ impl JobsStore {
         let mut connection = self.connect()?;
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let interrupted = self.list_jobs_by_status_on_connection(&transaction, ACTIVE_STATUSES)?;
+        let interrupted_ids = interrupted
+            .iter()
+            .map(|job| job.id.clone())
+            .collect::<Vec<_>>();
         let now = utc_now();
         transaction.execute(
             &format!(
@@ -380,8 +384,12 @@ impl JobsStore {
             "update workers set status = 'offline', current_job_id = null where status != 'offline'",
             [],
         )?;
+        let updated_jobs = interrupted_ids
+            .iter()
+            .map(|job_id| self.get_job_on_connection(&transaction, job_id))
+            .collect::<JobsStoreResult<Vec<_>>>()?;
         transaction.commit()?;
-        Ok(interrupted)
+        Ok(updated_jobs)
     }
 
     pub fn create_job(&self, request: CreateJob) -> JobsStoreResult<JobSnapshot> {

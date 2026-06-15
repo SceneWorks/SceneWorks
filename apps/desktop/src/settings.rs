@@ -366,7 +366,7 @@ pub async fn choose_data_dir(app: AppHandle) -> Option<String> {
 
 #[tauri::command]
 pub fn reveal_in_os(path: String) -> Result<(), String> {
-    let target = PathBuf::from(&path);
+    let target = validate_reveal_target(&path)?;
     let result = if cfg!(target_os = "macos") {
         Command::new("open").arg("-R").arg(&target).status()
     } else if cfg!(target_os = "windows") {
@@ -378,6 +378,38 @@ pub fn reveal_in_os(path: String) -> Result<(), String> {
         Command::new("xdg-open").arg(dir).status()
     };
     result.map(|_| ()).map_err(|error| error.to_string())
+}
+
+fn validate_reveal_target(path: &str) -> Result<PathBuf, String> {
+    let target = path.trim();
+    if target.is_empty() {
+        return Err("A path is required.".to_owned());
+    }
+    let target = std::fs::canonicalize(target).map_err(|error| error.to_string())?;
+    let settings = load_settings_migrated();
+    let roots = [
+        settings
+            .data_dir
+            .as_deref()
+            .map(PathBuf::from)
+            .unwrap_or_else(default_data_dir),
+        settings
+            .hf_home
+            .as_deref()
+            .map(PathBuf::from)
+            .unwrap_or_else(shared_huggingface_home),
+    ];
+    let roots = roots
+        .iter()
+        .filter_map(|root| std::fs::canonicalize(root).ok())
+        .collect::<Vec<_>>();
+    if roots.iter().any(|root| target.starts_with(root)) {
+        return Ok(target);
+    }
+    Err(
+        "Can only reveal files inside the SceneWorks data directory or Hugging Face cache."
+            .to_owned(),
+    )
 }
 
 /// Enumerate stored credentials for the Settings screen: host, label, scheme, and

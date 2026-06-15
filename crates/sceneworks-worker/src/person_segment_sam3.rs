@@ -212,7 +212,11 @@ fn select_object(outputs: &[VideoFrameOutput], anchors: &[Option<BoxNorm>]) -> O
     // Deterministic tie-break on the object id (BTree-like) so repeated runs agree.
     score
         .into_iter()
-        .max_by(|a, b| a.1.partial_cmp(&b.1).unwrap().then(b.0.cmp(&a.0)))
+        .max_by(|a, b| {
+            a.1.partial_cmp(&b.1)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then(b.0.cmp(&a.0))
+        })
         .map(|(oid, _)| oid)
 }
 

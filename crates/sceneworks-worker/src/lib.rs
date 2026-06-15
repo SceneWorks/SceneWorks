@@ -779,7 +779,7 @@ async fn run_utility_job(
         }
     };
     if matches!(job.job_type, JobType::LoraImport | JobType::ModelImport) {
-        let _ = cleanup_uploaded_import_source(&job.payload).await;
+        let _ = cleanup_uploaded_import_source(settings, &job.payload).await;
     }
     if let Err((message, error)) = result {
         match error {
@@ -903,22 +903,27 @@ async fn fail_job(
 async fn check_cancel(api: &ApiClient, job_id: &str, message: &str) -> WorkerResult<()> {
     let job: JobSnapshot = api.get_json(&format!("/api/v1/jobs/{job_id}")).await?;
     if job.cancel_requested {
-        update_job(
-            api,
-            job_id,
-            progress_payload(
-                JobStatus::Canceled,
-                ProgressStage::Canceled,
-                1.0,
-                message,
-                None,
-                None,
-                None,
-            ),
-        )
-        .await?;
+        mark_job_canceled(api, job_id, message).await?;
         return Err(WorkerError::Canceled(message.to_owned()));
     }
+    Ok(())
+}
+
+async fn mark_job_canceled(api: &ApiClient, job_id: &str, message: &str) -> WorkerResult<()> {
+    update_job(
+        api,
+        job_id,
+        progress_payload(
+            JobStatus::Canceled,
+            ProgressStage::Canceled,
+            1.0,
+            message,
+            None,
+            None,
+            None,
+        ),
+    )
+    .await?;
     Ok(())
 }
 
@@ -1238,17 +1243,30 @@ fn payload_bool(payload: &JsonObject, field: &str) -> bool {
     payload.get(field).and_then(Value::as_bool).unwrap_or(false)
 }
 
-async fn cleanup_uploaded_import_source(payload: &JsonObject) -> WorkerResult<()> {
+async fn cleanup_uploaded_import_source(
+    settings: &Settings,
+    payload: &JsonObject,
+) -> WorkerResult<()> {
     if !payload_bool(payload, "uploadedSourcePath") {
         return Ok(());
     }
     let Some(source_path) = optional_payload_string(payload, "sourcePath") else {
         return Ok(());
     };
-    let source_path = PathBuf::from(source_path);
+    let source_path = normalize_absolute_path(Path::new(source_path))?;
+    let allowed_roots = [
+        normalize_absolute_path(&settings.data_dir.join("cache").join("lora-uploads"))?,
+        normalize_absolute_path(&settings.data_dir.join("cache").join("model-uploads"))?,
+    ];
+    let source_path = ensure_path_under(source_path, &allowed_roots, "Uploaded sourcePath")?;
     let _ = tokio::fs::remove_file(&source_path).await;
     if let Some(parent) = source_path.parent() {
-        let _ = tokio::fs::remove_dir(parent).await;
+        if allowed_roots
+            .iter()
+            .any(|root| parent.starts_with(root) && parent != root)
+        {
+            let _ = tokio::fs::remove_dir(parent).await;
+        }
     }
     Ok(())
 }

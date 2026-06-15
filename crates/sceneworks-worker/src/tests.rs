@@ -874,7 +874,9 @@ async fn lora_file_and_directory_import_preserve_copy_semantics() {
 #[tokio::test]
 async fn uploaded_lora_source_cleanup_removes_staged_file_and_parent() {
     let temp = tempdir().expect("tempdir creates");
-    let upload_dir = temp.path().join("upload-1");
+    let mut settings = test_settings("http://127.0.0.1:9".to_owned(), None);
+    settings.data_dir = temp.path().join("data");
+    let upload_dir = settings.data_dir.join("cache/lora-uploads/upload-1");
     tokio::fs::create_dir_all(&upload_dir).await.unwrap();
     let source_file = upload_dir.join("detail.safetensors");
     tokio::fs::write(&source_file, b"lora").await.unwrap();
@@ -885,10 +887,34 @@ async fn uploaded_lora_source_cleanup_removes_staged_file_and_parent() {
     );
     payload.insert("uploadedSourcePath".to_owned(), json!(true));
 
-    cleanup_uploaded_import_source(&payload).await.unwrap();
+    cleanup_uploaded_import_source(&settings, &payload)
+        .await
+        .unwrap();
 
     assert!(!source_file.exists());
     assert!(!upload_dir.exists());
+}
+
+#[tokio::test]
+async fn uploaded_lora_source_cleanup_rejects_paths_outside_upload_cache() {
+    let temp = tempdir().expect("tempdir creates");
+    let mut settings = test_settings("http://127.0.0.1:9".to_owned(), None);
+    settings.data_dir = temp.path().join("data");
+    let outside_file = temp.path().join("outside.safetensors");
+    tokio::fs::write(&outside_file, b"lora").await.unwrap();
+    let mut payload = serde_json::Map::new();
+    payload.insert(
+        "sourcePath".to_owned(),
+        json!(outside_file.display().to_string()),
+    );
+    payload.insert("uploadedSourcePath".to_owned(), json!(true));
+
+    let error = cleanup_uploaded_import_source(&settings, &payload)
+        .await
+        .expect_err("outside path is rejected");
+
+    assert!(matches!(error, WorkerError::InvalidPayload(_)));
+    assert!(outside_file.exists());
 }
 
 #[tokio::test]
