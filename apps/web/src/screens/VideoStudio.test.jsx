@@ -118,7 +118,7 @@ describe("VideoStudio Save as Preset", () => {
     await act(async () => {});
   }
 
-  it("snapshots the video config into an image_to_video preset without the seed", async () => {
+  it("snapshots the video config into a text_to_video preset without the seed", async () => {
     const context = baseContext();
     await render(context);
 
@@ -129,11 +129,12 @@ describe("VideoStudio Save as Preset", () => {
 
     expect(context.createPreset).toHaveBeenCalledTimes(1);
     const payload = context.createPreset.mock.calls[0][0];
+    // Video Studio now opens on Text→Video (sc-5716), matching Image Studio's Text→Image default.
     expect(payload).toMatchObject({
       id: "push_in",
       name: "Push In",
       scope: "project",
-      workflow: "image_to_video",
+      workflow: "text_to_video",
       model: "ltx_2_3",
     });
     expect(payload.defaults.prompt).toBe("Camera slowly pushes in while the scene comes alive");
@@ -628,5 +629,163 @@ describe("VideoStudio SCAIL-2 character animation + replacement backend", () => 
       el.textContent.includes("Replacement engine"),
     );
     expect(engineLabel).toBeFalsy();
+  });
+});
+
+// sc-5716: under active Mac gating, mode tabs must be gated on mode availability (does any model
+// serve it), not on the selected model — otherwise switching to a model-specific mode (Replace
+// person / Animate character) snapped to a model whose other modes were disabled and trapped the
+// user. These render the studio in MLX-required mode with per-model `macSupport.features.videoModes`.
+describe("VideoStudio Mac mode gating (sc-5716)", () => {
+  let container;
+  let root;
+
+  // Every UI mode, so each Mac model can declare an explicit per-mode boolean (mirrors the API's
+  // `macSupport.features.videoModes`, populated for every VIDEO_UI_MODE on a Mac-routed model).
+  const ALL_VIDEO_MODES = [
+    "image_to_video",
+    "text_to_video",
+    "first_last_frame",
+    "extend_clip",
+    "video_bridge",
+    "replace_person",
+    "video_to_video",
+    "reference_to_video",
+    "reference_video_to_video",
+    "multi_video_to_video",
+    "ads2v",
+    "animate_character",
+  ];
+
+  // A Mac-routed model: `capabilities` = the modes it serves, and `macSupport.features.videoModes`
+  // sets those true and every other mode false (the MLX-eligibility the API computes per model).
+  const macModel = (id, name, served) => ({
+    id,
+    name,
+    type: "video",
+    family: id,
+    capabilities: served,
+    defaults: { duration: 5, resolution: "832x480", fps: 16 },
+    limits: { durations: [3, 4, 5], fps: [16], resolutions: ["832x480", "480x832"] },
+    quantization: {},
+    loraCompatibility: {},
+    ui: {},
+    macSupport: {
+      supported: true,
+      features: {
+        videoModes: Object.fromEntries(ALL_VIDEO_MODES.map((m) => [m, served.includes(m)])),
+      },
+    },
+  });
+
+  const MAC_CAPS = {
+    macGatingActive: true,
+    platform: "darwin",
+    notAvailableLabel: "Not available on Mac (Rust/MLX only)",
+    features: {},
+    training: { supportedKernels: [], lokrOnWanSupported: false },
+  };
+
+  // Wan serves t2v / i2v / replace; SCAIL-2 serves only animate_character + replace (the trap model).
+  const WAN = macModel("wan_2_2", "Wan 2.2", ["image_to_video", "text_to_video", "replace_person"]);
+  const SCAIL2 = macModel("scail2_14b", "SCAIL-2", ["animate_character", "replace_person"]);
+
+  const clip = { id: "vid_src", type: "video", projectId: "project_1", displayName: "Driving Clip" };
+
+  beforeEach(() => {
+    global.IS_REACT_ACT_ENVIRONMENT = true;
+    window.localStorage.clear();
+    container = document.createElement("div");
+    document.body.appendChild(container);
+    root = createRoot(container);
+  });
+
+  afterEach(async () => {
+    await act(async () => root.unmount());
+    container.remove();
+    vi.clearAllMocks();
+  });
+
+  async function render(context) {
+    await act(async () => {
+      root.render(
+        <AppContext.Provider value={context}>
+          <VideoStudio />
+        </AppContext.Provider>,
+      );
+    });
+    await act(async () => {});
+  }
+
+  const modeButton = (label) => buttonWithText(container.querySelector(".mode-control"), label);
+  const modelSelect = () =>
+    [...container.querySelectorAll(".render-rail label")]
+      .find((el) => el.textContent.trim().startsWith("Model"))
+      ?.querySelector("select");
+
+  it("does not trap the user after switching to a model-specific mode", async () => {
+    const context = baseContext({
+      videoModels: [WAN, SCAIL2],
+      assets: [clip],
+      macCapabilities: MAC_CAPS,
+    });
+    await render(context);
+
+    // Opens on Text→Video, served by Wan — the picker reflects the selected model.
+    expect(modelSelect().value).toBe("wan_2_2");
+
+    // Switch to Animate character → snaps the model to SCAIL-2 (the only model that serves it).
+    await click(modeButton("Animate character"));
+    expect(modelSelect().value).toBe("scail2_14b");
+
+    // The bug: with SCAIL-2 selected, every other tab used to be disabled with no way back.
+    // Now Text→Video / Image→Video stay enabled because Wan serves them.
+    expect(modeButton("Text → Video").disabled).toBe(false);
+    expect(modeButton("Image → Video").disabled).toBe(false);
+
+    // And leaving the mode snaps back to a model that serves the target mode.
+    await click(modeButton("Text → Video"));
+    expect(modeButton("Text → Video").className).toContain("active");
+    expect(modelSelect().value).toBe("wan_2_2");
+  });
+
+  it("disables a mode tab only when no available model serves it", async () => {
+    const context = baseContext({
+      videoModels: [SCAIL2],
+      assets: [clip],
+      macCapabilities: MAC_CAPS,
+    });
+    await render(context);
+
+    // Only SCAIL-2 is installed (animate_character + replace_person). Enter animate_character so it
+    // isn't the active tab being checked, then assert the unserved modes are disabled.
+    await click(modeButton("Animate character"));
+    expect(modeButton("Animate character").disabled).toBe(false);
+    expect(modeButton("Replace person").disabled).toBe(false);
+    expect(modeButton("Text → Video").disabled).toBe(true);
+    expect(modeButton("Image → Video").disabled).toBe(true);
+    expect(modeButton("Video → Video").disabled).toBe(true);
+  });
+
+  it("filters the model picker to models that serve the active mode", async () => {
+    const context = baseContext({
+      videoModels: [WAN, SCAIL2],
+      assets: [clip],
+      macCapabilities: MAC_CAPS,
+    });
+    await render(context);
+
+    // Text→Video: only Wan serves it.
+    expect([...modelSelect().options].map((o) => o.value)).toEqual(["wan_2_2"]);
+
+    // Animate character: only SCAIL-2 serves it.
+    await click(modeButton("Animate character"));
+    expect([...modelSelect().options].map((o) => o.value)).toEqual(["scail2_14b"]);
+
+    // Replace person: both backends serve it.
+    await click(modeButton("Replace person"));
+    expect([...modelSelect().options].map((o) => o.value)).toEqual(
+      expect.arrayContaining(["wan_2_2", "scail2_14b"]),
+    );
   });
 });

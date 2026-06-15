@@ -7511,6 +7511,13 @@ describe("SceneWorks app shell", () => {
       );
     });
 
+    // Video Studio opens on Text→Video (sc-5716); this preset targets image_to_video, so switch
+    // to that tab to exercise the managed-LoRA mismatch surface.
+    await act(async () => {
+      [...container.querySelectorAll("button")].find((button) => button.textContent === "Image → Video").click();
+    });
+    await settle();
+
     const generate = [...container.querySelectorAll("button")].find((button) => button.textContent === "Render clip");
     expect(container.textContent).toContain("Preset cannot run with LTX");
     expect(container.textContent).toContain("wan_motion");
@@ -7648,6 +7655,13 @@ describe("SceneWorks app shell", () => {
         ),
       );
     });
+
+    // Video Studio opens on Text→Video (sc-5716); this LTX model is image_to_video-only, so switch
+    // to that tab before exercising the LoRA picker + submit.
+    await act(async () => {
+      [...container.querySelectorAll("button")].find((button) => button.textContent === "Image → Video").click();
+    });
+    await settle();
 
     await act(async () => {
       [...container.querySelectorAll("button")].find((button) => button.textContent === "Advanced").click();
@@ -7986,6 +8000,12 @@ describe("SceneWorks app shell", () => {
     });
     await settle();
 
+    // Video Studio opens on Text→Video (sc-5716); this preset targets image_to_video.
+    await act(async () => {
+      [...container.querySelectorAll("button")].find((button) => button.textContent === "Image → Video").click();
+    });
+    await settle();
+
     expect(container.textContent).toContain("Dream Motion");
     expect(container.textContent).toContain("Soft camera motion.");
     expect(container.textContent).toContain("Adds: smooth camera motion");
@@ -8064,6 +8084,12 @@ describe("SceneWorks app shell", () => {
     });
     await settle();
 
+    // Video Studio opens on Text→Video (sc-5716); SVD is image_to_video-only, so switch tabs.
+    await act(async () => {
+      [...container.querySelectorAll("button")].find((button) => button.textContent === "Image → Video").click();
+    });
+    await settle();
+
     // The prompt field advertises that no prompt is needed for promptless models.
     const promptField = container.querySelector("textarea[aria-label='Prompt']");
     expect(promptField.placeholder).toContain("No prompt needed");
@@ -8128,6 +8154,13 @@ describe("SceneWorks app shell", () => {
           <VideoStudio />,
         ),
       );
+    });
+    await settle();
+
+    // Video Studio opens on Text→Video (sc-5716); enter Image→Video to filter the image_to_video
+    // presets, then the test walks Text→Video and a model switch as before.
+    await act(async () => {
+      [...container.querySelectorAll("button")].find((button) => button.textContent === "Image → Video").click();
     });
     await settle();
 
@@ -8208,6 +8241,13 @@ describe("SceneWorks app shell", () => {
           <VideoStudio />,
         ),
       );
+    });
+    await settle();
+
+    // Video Studio opens on Text→Video (sc-5716); these presets target image_to_video /
+    // first_last_frame, so enter Image→Video to surface them.
+    await act(async () => {
+      [...container.querySelectorAll("button")].find((button) => button.textContent === "Image → Video").click();
     });
     await settle();
 
