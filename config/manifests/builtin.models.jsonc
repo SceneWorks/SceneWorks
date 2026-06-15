@@ -2479,9 +2479,9 @@
     // ViT-H/14 image tower; packed-token conditioning with auto-generated color-coded
     // segmentation masks (the worker paints them from native SAM3 — no user masks).
     // macOS-only native MLX (mlx-gen-scail2, engine id "scail2_14b"); no Torch path.
-    // Distributed the SceneWorks/*-mlx turnkey way: the converted bf16 snapshot is
-    // published as `SceneWorks/scail2-mlx`, downloaded on first use (engine quantizes
-    // Q4 at load). This entry covers the standalone `animate_character` mode (sc-5447 /
+    // Distributed the SceneWorks/*-mlx turnkey way: a pre-quantized Q4 snapshot is
+    // published as `SceneWorks/scail2-mlx` (sc-5445), downloaded on first use. This entry
+    // covers the standalone `animate_character` mode (sc-5447 /
     // sc-5448) AND cross-identity `replace_person` (sc-5452 — the SAME engine with
     // replace_flag=true, offered as the higher-quality backend behind the existing
     // person-track replacement pipeline). LoRA refinement under sc-5451 — not declared
@@ -2502,12 +2502,12 @@
           "repo": "SceneWorks/scail2-mlx",
           "files": [],
           "platforms": ["macos"],
-          // Pre-converted MLX snapshot (bf16 DiT + stock Wan2.1 VAE / umt5-xxl +
-          // open-CLIP ViT-H/14 visual tower). PROVISIONAL size: the published repo
-          // still carries the redundant raw torch pickles (~15 GB) alongside the
-          // loadable safetensors; sc-5445 prunes them at ship-time, dropping this to
-          // ~34 GB. Self-contained — no Wan base needed at runtime. Q4 default at load.
-          "estimatedSizeBytes": 48440000000
+          // Pre-converted, pre-quantized MLX snapshot: Q4-packed DiT (~8.9 GB) + stock
+          // Wan2.1 VAE / umt5-xxl + open-CLIP ViT-H/14 visual tower + Bias-Aware DPO LoRA.
+          // Self-contained — no Wan base needed at runtime. Size MEASURED from the HF tree
+          // after sc-5445 shipped the lean Q4 repo (the redundant raw torch pickles —
+          // ~14.4 GB — were pruned; the loaders use only the safetensors).
+          "estimatedSizeBytes": 25241936201
         }
       ],
       "paths": {
