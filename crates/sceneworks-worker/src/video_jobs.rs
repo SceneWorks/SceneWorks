@@ -1770,6 +1770,39 @@ fn resolve_wan_vace_adapters(request: &VideoRequest) -> WorkerResult<Vec<Adapter
     Ok(specs)
 }
 
+/// Build the adapter specs for a SCAIL-2 generation (sc-5451 inference LoRA path, mlx-gen #462).
+/// SCAIL-2 is a single **dense** Wan2.1-14B-I2V transformer — like Wan-VACE, no Lightning distill and
+/// no MoE high/low experts — so every LoRA is applied shared with `moe_expert: None`. The engine
+/// installs a standard `lora_down/up` (PEFT/diffusers/kohya/LoKr) adapter as a forward-time residual
+/// over the (Q4/Q8) base; `classify_adapter` tags SceneWorks peft LoKr as `Lokr` and everything else
+/// (incl. third-party LyCORIS) as `Lora`. This carries both a user-selected SCAIL-2 LoRA and the
+/// bundled Bias-Aware DPO quality LoRA (both surface through `request.loras`). A lightx2v diff-patch
+/// "lightning" LoRA is rejected by the engine today (sc-5684).
+#[cfg(target_os = "macos")]
+fn resolve_scail2_adapters(request: &VideoRequest) -> WorkerResult<Vec<AdapterSpec>> {
+    if request.loras.len() > MAX_JOB_LORAS {
+        return Err(WorkerError::InvalidPayload(format!(
+            "Generation supports at most {MAX_JOB_LORAS} LoRAs per job."
+        )));
+    }
+    let mut specs: Vec<AdapterSpec> = Vec::new();
+    for lora in &request.loras {
+        let path = lora_path(lora).ok_or_else(|| {
+            WorkerError::InvalidPayload("LoRA is missing a usable path.".to_owned())
+        })?;
+        let file = resolve_lora_file(path)?;
+        let kind = classify_adapter(&file)?;
+        specs.push(AdapterSpec {
+            path: file,
+            scale: lora_scale(lora),
+            kind,
+            pass_scales: None,
+            moe_expert: None,
+        });
+    }
+    Ok(specs)
+}
+
 /// The first-frame conditioning for a Wan generation: required for I2V-14B, optional for
 /// the TI2V-5B (present → image-conditioned mask-blend, absent → pure T2V), and ignored
 /// by the T2V-14B (text-only). Loads `source_asset_id` to an in-memory RGB8 image.
@@ -3279,8 +3312,10 @@ async fn resolve_scail2_conditioning(
 /// Real MLX SCAIL-2 generation (epic 5439 / sc-5448): build the `VideoGenInput` and run the shared
 /// `generate_video` path. The SceneWorks mode resolves to the engine `video_mode` task
 /// ([`scail2_engine_video_mode`]) and the source media into the SAM3-painted conditioning
-/// ([`resolve_scail2_conditioning`]). No LoRA (the engine reports `supports_lora=false`, sc-5451);
-/// steps/guidance stay at the engine defaults. Frame count uses the Wan 1-mod-4 stride coercion (the
+/// ([`resolve_scail2_conditioning`]). A user-selected SCAIL-2 LoRA and the bundled Bias-Aware DPO
+/// quality LoRA install as forward-time residuals over the Q4 base ([`resolve_scail2_adapters`],
+/// sc-5451 / mlx-gen #462); steps/guidance stay at the engine defaults. Frame count uses the Wan
+/// 1-mod-4 stride coercion (the
 /// renderer is Wan2.1); the engine stitches > 81-frame clips into overlapping segments internally.
 #[cfg(target_os = "macos")]
 async fn generate_scail2(
@@ -3311,6 +3346,7 @@ async fn generate_scail2(
         fps: request.fps,
         seed: resolve_video_seed(request) as u64,
         video_mode: Some(scail2_engine_video_mode(&request.mode).to_owned()),
+        adapters: resolve_scail2_adapters(request)?,
         ..VideoGenInput::default()
     };
     generate_video(api, settings, job, backend, input).await
@@ -3527,6 +3563,18 @@ fn ltx_dir_is_complete(dir: &Path) -> bool {
     .all(|file| dir.join(file).is_file())
 }
 
+/// Whether the request opts into the higher-quality Q8 LTX checkpoint (`advanced.mlxQuantize: 8`,
+/// accepted as int or string). The default is Q4 (sc-5608).
+#[cfg(target_os = "macos")]
+fn ltx_wants_q8(request: &VideoRequest) -> bool {
+    request
+        .advanced
+        .get("mlxQuantize")
+        .and_then(|v| v.as_i64().or_else(|| v.as_str()?.trim().parse().ok()))
+        .map(|bits| bits >= 8)
+        .unwrap_or(false)
+}
+
 /// Pick the engine-complete `q4/`/`q8/` checkpoint subdir of a SceneWorks LTX bundle `root`,
 /// preferring the requested quant (sc-5608). Returns the first **complete** ([`ltx_dir_is_complete`])
 /// subdir — so a partially-downloaded bundle falls through rather than half-loading — or `None`.
@@ -3563,12 +3611,7 @@ fn resolve_ltx_model_dir(settings: &Settings, request: &VideoRequest) -> WorkerR
             return Ok(path);
         }
     }
-    let wants_q8 = request
-        .advanced
-        .get("mlxQuantize")
-        .and_then(|v| v.as_i64().or_else(|| v.as_str()?.trim().parse().ok()))
-        .map(|bits| bits >= 8)
-        .unwrap_or(false);
+    let wants_q8 = ltx_wants_q8(request);
     let candidates: &[&str] = if eros {
         &["ltx_2_3_eros"]
     } else if wants_q8 {
@@ -3624,6 +3667,50 @@ fn ensure_bundled_ltx_gemma_dir(model_dir: &Path) {
     if let Some(gemma) = bundled_ltx_gemma_dir(model_dir) {
         std::env::set_var("LTX_GEMMA_DIR", gemma);
     }
+}
+
+/// On-demand fetch of the bundle's `q8/` subdir (sc-5679). The macOS default download is lean
+/// (`q4/` + `gemma/`); when a job opts into Q8 ([`ltx_wants_q8`]) and the bundle's `q8/` isn't already
+/// complete, pull just `q8/*` from [`LTX_BUNDLE_REPO`] into the HF cache so [`resolve_ltx_model_dir`]
+/// can load it. Base model only (eros has its own single-dir conversion). No-op when Q8 isn't
+/// requested, the bundle snapshot isn't downloaded yet (resolve surfaces the clear "download the
+/// bundle" error), or `q8/` is already present. Fails loud on a real download error — fast, before
+/// any compute; a missing `hf` CLI leaves `q8/` absent so resolve gracefully falls back to Q4.
+/// Mirrors the eros [`ensure_ltx_upscaler_cached`] on-demand fetch.
+#[cfg(target_os = "macos")]
+async fn ensure_ltx_q8_present(
+    api: &ApiClient,
+    settings: &Settings,
+    job: &JobSnapshot,
+    request: &VideoRequest,
+) -> WorkerResult<()> {
+    if request.model == "ltx_2_3_eros" || !ltx_wants_q8(request) {
+        return Ok(());
+    }
+    let Some(root) = huggingface_snapshot_dir(&settings.data_dir, LTX_BUNDLE_REPO) else {
+        return Ok(());
+    };
+    if ltx_dir_is_complete(&root.join("q8")) {
+        return Ok(());
+    }
+    let scratch = settings
+        .data_dir
+        .join("cache")
+        .join(format!(".ltx-q8-fetch-{}", job.id));
+    tokio::fs::create_dir_all(&scratch).await?;
+    let files = vec!["q8/*".to_owned()];
+    let result = crate::model_jobs::download_model_with_hf_cli(
+        api,
+        settings,
+        job,
+        LTX_BUNDLE_REPO,
+        "main",
+        &files,
+        &scratch,
+    )
+    .await;
+    let _ = tokio::fs::remove_dir_all(&scratch).await;
+    result.map(|_| ())
 }
 
 /// User LoRAs for an LTX generation (sc-3035): each at a uniform per-pass strength
@@ -4094,6 +4181,9 @@ async fn generate_ltx(
         }
         _ => resolve_ltx_conditioning(settings, request, project_path)?,
     };
+    // The macOS default download is lean (q4 + gemma); a Q8 job fetches the bundle's q8/ on demand
+    // before resolving (sc-5679). No-op unless Q8 is requested and q8/ is absent.
+    ensure_ltx_q8_present(api, settings, job, request).await?;
     let model_dir = resolve_ltx_model_dir(settings, request)?;
     // When the resolved dir is the SceneWorks bundle subdir, its sibling `gemma/` is the text
     // encoder — point the engine at it (sc-5608) before load. No-op for legacy/local conversions.
@@ -6636,6 +6726,49 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// SCAIL-2 is single-dense like Wan-VACE (sc-5451/sc-5686): each user LoRA/LoKr (and the bundled
+    /// Bias-Aware DPO LoRA, which arrives the same way) resolves to one shared spec with
+    /// `moe_expert: None` and no `pass_scales`, the kind set by the file's metadata, scale from
+    /// `weight`; over the per-job cap is a clear payload error.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn scail2_adapters_are_single_dense() {
+        let dir = std::env::temp_dir().join(format!("sw_scail2_lora_{}", Uuid::new_v4().simple()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let plain = dir.join("dpo.safetensors");
+        let lokr = dir.join("char.safetensors");
+        write_lora_fixture(&plain, None);
+        write_lora_fixture(&lokr, Some("lokr"));
+
+        let req = request(json!({
+            "projectId": "p",
+            "loras": [
+                { "path": plain.to_string_lossy(), "weight": 1.0 },
+                { "path": lokr.to_string_lossy(), "weight": 0.7 },
+            ],
+        }));
+        let specs = resolve_scail2_adapters(&req).expect("resolve scail2 adapters");
+        assert_eq!(specs.len(), 2);
+        assert_eq!(specs[0].path, plain);
+        assert_eq!(specs[0].kind, AdapterKind::Lora);
+        assert!((specs[0].scale - 1.0).abs() < 1e-6);
+        assert!(specs[0].moe_expert.is_none(), "SCAIL-2 is single-dense");
+        assert!(specs[0].pass_scales.is_none());
+        assert_eq!(specs[1].kind, AdapterKind::Lokr);
+        assert!((specs[1].scale - 0.7).abs() < 1e-6);
+        assert!(specs[1].moe_expert.is_none());
+
+        let many: Vec<Value> = (0..MAX_JOB_LORAS + 1)
+            .map(|_| json!({ "path": plain.to_string_lossy() }))
+            .collect();
+        let over = request(json!({ "projectId": "p", "loras": many }));
+        assert!(matches!(
+            resolve_scail2_adapters(&over),
+            Err(WorkerError::InvalidPayload(_))
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// A locally-converted Wan2.2 TI2V-5B dir if one is present (env override or the
     /// app-managed default), else `None` so the real-weight smoke skips.
     #[cfg(target_os = "macos")]
@@ -6864,6 +6997,22 @@ mod tests {
 
         let _ = std::fs::remove_dir_all(&root);
         let _ = std::fs::remove_dir_all(&bare);
+    }
+
+    /// Q8 opt-in detection (sc-5679): `advanced.mlxQuantize: 8` (int or string) → true; absent / Q4
+    /// → false. Drives both the resolve quant preference and the on-demand q8 fetch.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn ltx_wants_q8_reads_mlx_quantize() {
+        let with = |adv: Value| {
+            request(json!({ "projectId": "p", "model": "ltx_2_3", "prompt": "x", "advanced": adv }))
+        };
+        assert!(ltx_wants_q8(&with(json!({ "mlxQuantize": 8 }))));
+        assert!(ltx_wants_q8(&with(json!({ "mlxQuantize": "8" }))));
+        assert!(!ltx_wants_q8(&with(json!({ "mlxQuantize": 4 }))));
+        assert!(!ltx_wants_q8(&request(
+            json!({ "projectId": "p", "model": "ltx_2_3", "prompt": "x" })
+        )));
     }
 
     #[cfg(target_os = "macos")]
