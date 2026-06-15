@@ -4825,12 +4825,13 @@ mod candle_routing_tests {
     fn non_candle_video_models_and_conditioned_shapes_fall_back() {
         // Models with no candle video provider stay on torch even for text_to_video (`ltx_2_3_eros`
         // is still torch-only; SVD now has a candle provider but is image→video, covered below).
-        for model in ["ltx_2_3_eros"] {
-            assert!(
-                !video_request_candle_eligible(model, &object(json!({ "mode": "text_to_video" }))),
-                "{model} must fall back to the Python worker"
-            );
-        }
+        assert!(
+            !video_request_candle_eligible(
+                "ltx_2_3_eros",
+                &object(json!({ "mode": "text_to_video" }))
+            ),
+            "ltx_2_3_eros must fall back to the Python worker"
+        );
         // A txt2video model in any conditioned shape (default/i2v mode, a source, or a LoRA) → torch.
         let cases = [
             json!({ "prompt": "p" }), // no mode → defaults to i2v
