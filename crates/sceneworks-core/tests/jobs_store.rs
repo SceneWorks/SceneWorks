@@ -1063,7 +1063,9 @@ fn signal_death_fails_active_job_with_attributed_error() {
     // sc-4881: a worker hard-killed by SIGKILL/OOM can't report its own death, so
     // the supervisor attributes it. The worker's active job must become a real
     // FAILURE (with an actionable, signal-attributed error), not a heartbeat-sweep
-    // `interrupted` that reads as a frozen progress bar.
+    // `interrupted` that reads as a frozen progress bar. sc-5567: the remediation
+    // must fit the dead job's kind — an image job points at count/resolution, NOT the
+    // training-only gradient-checkpointing hint.
     let store = store("signal-death-fails-job");
     register_image_worker(&store);
     let created = store
@@ -1085,8 +1087,15 @@ fn signal_death_fails_active_job_with_attributed_error() {
     assert_eq!(failed.worker_id, None);
     let error = failed.error.clone().unwrap_or_default();
     assert!(
-        error.contains("signal 9 (SIGKILL)") && error.contains("Gradient Checkpointing"),
-        "error should attribute the OOM SIGKILL and surface the remediation, got {error:?}"
+        error.contains("signal 9 (SIGKILL)")
+            && error.contains("out-of-memory")
+            && error.contains("image count or resolution"),
+        "error should attribute the OOM SIGKILL and give image-job remediation, got {error:?}"
+    );
+    // sc-5567: the training-only hint must not leak onto an image job.
+    assert!(
+        !error.contains("Gradient Checkpointing"),
+        "image-job OOM must not surface the training gradient-checkpointing hint, got {error:?}"
     );
 
     // The worker is released so the UI never shows it pinned to the dead job.
