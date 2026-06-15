@@ -292,42 +292,6 @@ fn convert_flux2_klein_diffusers(
     )
 }
 
-/// Native Rust/MLX Wan2.2 weight converter (mlx-gen-wan, sc-3224 engine + sc-3240 cutover) —
-/// replaces the retired Python `mlx_video.convert_wan` subprocess. `kind` selects the family preset:
-/// `wan_ti2v_5b` (dense bf16, ignores `quant`), `wan_i2v_14b` / `wan_t2v_14b` (dual-expert MoE,
-/// optional Q4/Q8 via `quant = Some((bits, group_size))`). Reads the native checkpoint (transformer
-/// safetensors shards + the `.pth` T5/VAE) and writes the split MLX dir the loader consumes. The
-/// UMT5 `tokenizer.json` is copied separately by the caller (the converter does not emit it). Runs
-/// MLX, so macOS-only.
-#[cfg(target_os = "macos")]
-fn convert_wan_native(
-    kind: &str,
-    checkpoint_dir: &Path,
-    out_dir: &Path,
-    quant: Option<(i32, i32)>,
-) -> Result<(), String> {
-    // CARVE-OUT(epic 3720): backend-specific weight converter; not a registry contract.
-    use mlx_gen_wan::convert::{convert_i2v_14b, convert_t2v_14b, convert_ti2v_5b};
-    match kind {
-        "wan_ti2v_5b" => convert_ti2v_5b(checkpoint_dir, out_dir).map(|_| ()),
-        "wan_i2v_14b" => convert_i2v_14b(checkpoint_dir, out_dir, quant).map(|_| ()),
-        "wan_t2v_14b" => convert_t2v_14b(checkpoint_dir, out_dir, quant).map(|_| ()),
-        other => return Err(format!("Unknown Wan converter '{other}'.")),
-    }
-    .map_err(|error| error.to_string())
-}
-
-#[cfg(not(target_os = "macos"))]
-fn convert_wan_native(
-    _kind: &str,
-    _checkpoint_dir: &Path,
-    _out_dir: &Path,
-    _quant: Option<(i32, i32)>,
-) -> Result<(), String> {
-    Err("Wan2.2 MLX conversion requires macOS (mlx-gen-wan); the torch path serves other platforms."
-        .to_owned())
-}
-
 /// Native Rust/MLX LTX-2.3 weight converter (mlx-gen-ltx, sc-3224 engine + sc-3240 cutover). The LTX
 /// path was never actually routed through the Rust job before — only `convert_wan` was ever shelled.
 /// Splits the single-file checkpoint (`source_file`, e.g. eros `10Eros_v1_bf16.safetensors`),
@@ -358,20 +322,6 @@ fn convert_ltx_native(
 ) -> Result<(), String> {
     Err("LTX-2.3 MLX conversion requires macOS (mlx-gen-ltx); the torch path serves other platforms."
         .to_owned())
-}
-
-/// Copy the UMT5 `tokenizer.json` the Wan MLX loader requires (`<dir>/tokenizer.json`) into the
-/// converted dir. The native Wan checkpoints bundle it at `google/umt5-xxl/tokenizer.json`; the
-/// converter does not emit it (matching the reference `convert_wan`). Sync — runs inside the
-/// blocking convert task.
-fn copy_wan_umt5_tokenizer(checkpoint_dir: &Path, out_dir: &Path) -> Result<(), String> {
-    let src = checkpoint_dir
-        .join("google")
-        .join("umt5-xxl")
-        .join("tokenizer.json");
-    std::fs::copy(&src, out_dir.join("tokenizer.json"))
-        .map(|_| ())
-        .map_err(|error| format!("copy UMT5 tokenizer.json from {}: {error}", src.display()))
 }
 
 /// The base `Lightricks/LTX-2.3` latent upsampler the LTX loader hard-requires (emitted as
@@ -422,11 +372,6 @@ enum ConvertPlan {
         source_file: PathBuf,
         base_dir: PathBuf,
     },
-    /// Native Wan2.2 → split MLX dir; `kind` ∈ {`wan_ti2v_5b`, `wan_i2v_14b`, `wan_t2v_14b`}.
-    Wan {
-        kind: String,
-        quant: Option<(i32, i32)>,
-    },
     /// Single-file LTX-2.3 → split MLX dir; `upscaler_dir` carries the loader-required upsampler.
     Ltx {
         source_file: PathBuf,
@@ -438,9 +383,11 @@ enum ConvertPlan {
 /// Convert a model's native checkpoint into the local MLX format on macOS/Apple Silicon, fully
 /// in-process via the linked `mlx-gen-*` converters (epic 2337). The native checkpoint must already
 /// be downloaded into the Hugging Face cache (via a model_download job). The converter is selected by
-/// the manifest `mlx.converter` discriminator: `flux2_klein_diffusers` (sc-3136), `wan_ti2v_5b` /
-/// `wan_i2v_14b` / `wan_t2v_14b` (mlx-gen-wan), or `ltx_video` (mlx-gen-ltx). The Python
-/// `mlx_video.convert_wan` subprocess + `SCENEWORKS_PYTHON` wiring were retired here (sc-3240).
+/// the manifest `mlx.converter` discriminator: `flux2_klein_diffusers` (sc-3136) or `ltx_video`
+/// (mlx-gen-ltx) — the only models that still install via in-app conversion. The Python
+/// `mlx_video.convert_wan` subprocess + `SCENEWORKS_PYTHON` wiring were retired here (sc-3240); the
+/// Wan2.2 converters were decommissioned once those models flipped to pre-converted SceneWorks
+/// downloads (sc-5603, epic 5594).
 ///
 /// Real conversion is exercised on Mac hardware via the `#[ignore]` real-weight tests below; this
 /// wires the tracked job, progress, cancellation, and failure surfacing.
@@ -458,10 +405,10 @@ pub(crate) async fn run_model_convert_job(
         .to_owned();
     // Optional MLX quantization. `quantizeOnly` quantizes an already-converted bf16
     // MLX dir (turnkey models); otherwise quantization rides on the native->MLX
-    // conversion. `bits`/`group-size` are validated by the convert tool's choices.
+    // conversion. `bits` is validated by the convert tool's choices (LTX honors it; the
+    // FLUX.2-klein converter is bf16-only and ignores it).
     let quantize_only = payload_bool(&job.payload, "quantizeOnly");
     let quantize_bits = job.payload.get("quantizeBits").and_then(Value::as_u64);
-    let quantize_group_size = job.payload.get("quantizeGroupSize").and_then(Value::as_u64);
 
     heartbeat(api, settings, WorkerStatus::Busy, Some(&job.id)).await?;
     update_job(
@@ -497,7 +444,6 @@ pub(crate) async fn run_model_convert_job(
     // declares one in its manifest `mlx.converter`; there is NO Python fallback — the
     // `mlx_video.convert_wan` subprocess and its mlx-video venv were retired at this cutover.
     //   flux2_klein_diffusers          -> FLUX.2-klein single-file → diffusers dir (sc-3136)
-    //   wan_ti2v_5b/i2v_14b/t2v_14b    -> native Wan2.2 → split MLX dir (mlx-gen-wan)
     //   ltx_video                      -> single-file LTX-2.3 → split MLX dir (mlx-gen-ltx)
     let converter = optional_payload_string(&job.payload, "converter")
         .map(str::to_owned)
@@ -522,12 +468,6 @@ pub(crate) async fn run_model_convert_job(
         .await?;
         return Ok(());
     }
-
-    // MLX quantization mapped 1:1 from the job payload (a request override or the manifest default
-    // the API forwards). bf16 Wan TI2V-5B ignores it; the A14B experts + LTX honor (bits,
-    // group_size) — group_size defaults to the reference 64 when only bits is set.
-    let quant =
-        quantize_bits.map(|bits| (bits as i32, quantize_group_size.map_or(64, |gs| gs as i32)));
 
     let plan = match converter.as_str() {
         "flux2_klein_diffusers" => {
@@ -562,10 +502,6 @@ pub(crate) async fn run_model_convert_job(
                 base_dir,
             }
         }
-        "wan_ti2v_5b" | "wan_i2v_14b" | "wan_t2v_14b" => ConvertPlan::Wan {
-            kind: converter.clone(),
-            quant,
-        },
         "ltx_video" => {
             let source_file_name = required_payload_string(&job.payload, "sourceFile")?.to_owned();
             let source_file = checkpoint_dir.join(&source_file_name);
@@ -686,15 +622,6 @@ pub(crate) async fn run_model_convert_job(
         } => {
             tokio::task::spawn_blocking(move || {
                 convert_flux2_klein_diffusers(&source_file, &base_dir, &temp)
-            })
-            .await
-        }
-        ConvertPlan::Wan { kind, quant } => {
-            let checkpoint = checkpoint_dir.clone();
-            tokio::task::spawn_blocking(move || {
-                convert_wan_native(&kind, &checkpoint, &temp, quant)?;
-                // The Wan loader reads `<dir>/tokenizer.json`, which the converter does not emit.
-                copy_wan_umt5_tokenizer(&checkpoint, &temp)
             })
             .await
         }
@@ -1680,93 +1607,6 @@ mod tests {
         }
 
         let _ = std::fs::remove_dir_all(&out);
-    }
-
-    /// Real-weights smoke for the native Rust/MLX Wan2.2 TI2V-5B converter (sc-3224 engine +
-    /// sc-3240 cutover): runs the actual `convert_wan_native` + `copy_wan_umt5_tokenizer` used by
-    /// `run_model_convert_job` on the cached native checkpoint, and asserts the assembled MLX dir is
-    /// complete — including the UMT5 `tokenizer.json` the loader requires and the converter does NOT
-    /// emit (the SceneWorks install flow copies it). Needs the native repo in the HF cache. Run with:
-    ///   cargo test -p sceneworks-worker --lib -- --ignored wan_ti2v_5b_rust_convert
-    #[test]
-    #[ignore]
-    fn wan_ti2v_5b_rust_convert_real_weights() {
-        let checkpoint = hf_snapshot("models--Wan-AI--Wan2.2-TI2V-5B");
-        assert!(
-            checkpoint.join("Wan2.2_VAE.pth").is_file(),
-            "missing native Wan2.2 VAE .pth: {}",
-            checkpoint.display()
-        );
-        assert!(
-            checkpoint.join("google/umt5-xxl/tokenizer.json").is_file(),
-            "native checkpoint is missing the bundled UMT5 tokenizer.json: {}",
-            checkpoint.display()
-        );
-
-        let out = std::env::temp_dir().join(format!("sw_wan5b_convert_{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&out);
-
-        convert_wan_native("wan_ti2v_5b", &checkpoint, &out, None)
-            .expect("native Wan TI2V-5B convert");
-        copy_wan_umt5_tokenizer(&checkpoint, &out).expect("copy UMT5 tokenizer");
-
-        for file in [
-            "model.safetensors",
-            "t5_encoder.safetensors",
-            "vae.safetensors",
-            "config.json",
-            // The loader-required tokenizer the converter does not emit (sc-3240).
-            "tokenizer.json",
-        ] {
-            assert!(
-                out.join(file).is_file(),
-                "converted Wan dir missing `{file}` in {}",
-                out.display()
-            );
-        }
-
-        let _ = std::fs::remove_dir_all(&out);
-    }
-
-    /// One-shot real-weight conversion harness for re-hosting (epic 5594). Runs the SAME
-    /// `convert_wan_native` + `copy_wan_umt5_tokenizer` as `run_model_convert_job`, writing the
-    /// assembled MLX dir to `SW_CONVERT_OUT` (a real, persistent dir — NOT a temp dir — so the
-    /// artifact survives for upload). Env-driven so it is not machine-specific. Dense bf16
-    /// (quant=None), matching the manifest default for the A14B Wan models. Run e.g.:
-    ///   SW_CONVERT_KIND=wan_i2v_14b SW_CONVERT_SRC=models--Wan-AI--Wan2.2-I2V-A14B \
-    ///   SW_CONVERT_OUT="$HOME/Library/Application Support/SceneWorks/data/models/mlx/wan_2_2_i2v_14b" \
-    ///   cargo test -p sceneworks-worker --lib -- --ignored --nocapture oneshot_convert_wan_to_data_dir
-    #[test]
-    #[ignore]
-    fn oneshot_convert_wan_to_data_dir() {
-        let kind = std::env::var("SW_CONVERT_KIND").expect("SW_CONVERT_KIND");
-        let src = std::env::var("SW_CONVERT_SRC").expect("SW_CONVERT_SRC");
-        let out = PathBuf::from(std::env::var("SW_CONVERT_OUT").expect("SW_CONVERT_OUT"));
-        let checkpoint = hf_snapshot(&src);
-        eprintln!(
-            "[oneshot] converting {kind} from {} -> {}",
-            checkpoint.display(),
-            out.display()
-        );
-        let _ = std::fs::remove_dir_all(&out);
-        convert_wan_native(&kind, &checkpoint, &out, None).expect("native Wan convert");
-        copy_wan_umt5_tokenizer(&checkpoint, &out).expect("copy UMT5 tokenizer");
-
-        let mut biggest = 0u64;
-        for entry in std::fs::read_dir(&out).expect("read out").flatten() {
-            let len = entry.metadata().map(|m| m.len()).unwrap_or(0);
-            biggest = biggest.max(len);
-            eprintln!("  {} ({len} bytes)", entry.file_name().to_string_lossy());
-        }
-        assert!(out.join("config.json").is_file(), "missing config.json");
-        assert!(
-            out.join("tokenizer.json").is_file(),
-            "missing tokenizer.json"
-        );
-        assert!(
-            biggest > 1_000_000_000,
-            "no multi-GB weight shard written — conversion produced a stub"
-        );
     }
 
     /// Real-weights smoke for the native Rust/MLX LTX-2.3 converter (sc-3224 engine + sc-3240
