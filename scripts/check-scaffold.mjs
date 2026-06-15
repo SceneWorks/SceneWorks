@@ -233,6 +233,7 @@ await assertContains("docker-compose.yml", "NVIDIA_VISIBLE_DEVICES");
 await assertContains("docker-compose.yml", "dockerfile: docker/rust.Dockerfile");
 await assertContains("docker-compose.yml", "SCENEWORKS_RUST_WORKER_GPU_ID:-cpu");
 await assertContains("docker-compose.yml", "/sceneworks/data/cache/jobs.db");
+await assertContains("docker-compose.yml", "SCENEWORKS_ALLOW_OPEN_BIND");
 await assertContains(".env.example", "SCENEWORKS_RUST_WORKER_GPU_ID=cpu");
 await assertContains("docker/rust.Dockerfile", "sceneworks-rust-api");
 await assertContains("README.md", "SCENEWORKS_ACCESS_TOKEN");
