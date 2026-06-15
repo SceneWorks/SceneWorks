@@ -164,6 +164,14 @@ use candle_gen_sdxl::{IpAdapterSdxl, IpAdapterSdxlPaths, IpAdapterSdxlRequest};
 // (`image_jobs/kolors_ipadapter.rs`) drives.
 #[cfg(all(target_os = "windows", feature = "backend-candle"))]
 use candle_gen_kolors::{IpAdapterKolors, IpAdapterKolorsPaths, IpAdapterKolorsRequest};
+// FLUX XLabs IP-Adapter reference provider (sc-5872, epic 5480) — the candle (Windows/CUDA) FLUX sibling
+// of the SDXL/Kolors IP lanes, living in `candle-gen-flux` (the forked FLUX DiT with the per-double-block
+// XLabs seam + the pooled CLIP-ViT-L image encoder). Candle-only: macOS keeps the MLX FLUX XLabs IP path
+// (epic 3621, the registry `Reference` route). `candle_gen_flux` is already force-link anchored above (the
+// registered txt2img `flux1_*`); this is the named-type import the bespoke reference route
+// (`image_jobs/flux_ipadapter.rs`) drives.
+#[cfg(all(target_os = "windows", feature = "backend-candle"))]
+use candle_gen_flux::{IpAdapterFlux, IpAdapterFluxPaths, IpAdapterFluxRequest};
 
 /// The stub adapter id recorded on generated assets (matches the contract fixture
 /// `tests/fixtures/rust_migration_contracts/sidecars/asset-image.sceneworks.json`).
@@ -472,6 +480,22 @@ pub(crate) async fn run_image_generate_job(
         // because `kolors` IS a candle txt2img id, so without this a reference job would be caught by
         // the txt2img branch and silently drop the reference (the SDXL IP reasoning, for Kolors).
         generate_candle_kolors_ipadapter_stream(
+            api,
+            settings,
+            job,
+            &plan,
+            &project_path,
+            backend,
+            &mut asset_writes,
+        )
+        .await?;
+        true
+    } else if settings.backend_candle_enabled && flux_ipadapter_available(&request, settings) {
+        // FLUX XLabs IP-Adapter reference conditioning (sc-5872) — checked BEFORE `is_candle_engine`
+        // because `flux_dev`/`flux_schnell` ARE candle txt2img ids, so without this a reference job
+        // would be caught by the txt2img branch and silently drop the reference (the SDXL/Kolors IP
+        // reasoning, for FLUX).
+        generate_candle_flux_ipadapter_stream(
             api,
             settings,
             job,
@@ -967,6 +991,11 @@ include!("image_jobs/sdxl_ipadapter.rs");
 // is a bespoke provider, so this is candle-exclusive.
 #[cfg(all(target_os = "windows", feature = "backend-candle"))]
 include!("image_jobs/kolors_ipadapter.rs");
+// FLUX XLabs IP-Adapter reference conditioning — the Windows/CUDA candle lane ONLY (sc-5872). macOS keeps
+// the MLX FLUX XLabs IP path (epic 3621, the registry `Reference` route); the candle `IpAdapterFlux` is a
+// bespoke provider, so this is candle-exclusive.
+#[cfg(all(target_os = "windows", feature = "backend-candle"))]
+include!("image_jobs/flux_ipadapter.rs");
 #[cfg(target_os = "macos")]
 // PuLID-FLUX native routing.
 include!("image_jobs/pulid.rs");
