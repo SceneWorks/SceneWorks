@@ -5,7 +5,14 @@ use std::net::SocketAddr;
 /// partial files resume with HTTP Range when the caller can provide `expected_size`.
 /// The transfer shares model-download progress/cancel plumbing instead of buffering
 /// the response body in memory.
-#[cfg(target_os = "macos")]
+// Shared by the macOS MLX runtime-weight downloads AND the candle InstantID lane (sc-5491): the
+// off-Mac InstantID provider stages its SCRFD/ArcFace/IP-Adapter/ControlNet files via this same
+// download-on-first-use path, so it broadened from macOS-only. (All helpers it calls — download_file,
+// DownloadProgress, DownloadContext, HuggingFaceSnapshot — already build on every platform.)
+#[cfg(any(
+    target_os = "macos",
+    all(target_os = "windows", feature = "backend-candle")
+))]
 pub(crate) async fn ensure_cached_file(
     context: &DownloadContext<'_>,
     url: &str,
@@ -42,7 +49,10 @@ pub(crate) async fn ensure_cached_file(
     Ok(target.to_path_buf())
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(
+    target_os = "macos",
+    all(target_os = "windows", feature = "backend-candle")
+))]
 async fn remote_content_length(client: &reqwest::Client, url: &str) -> WorkerResult<Option<u64>> {
     let response = match client.head(url).send().await {
         Ok(response) => response,
@@ -58,7 +68,10 @@ async fn remote_content_length(client: &reqwest::Client, url: &str) -> WorkerRes
 /// Resolve a single Hugging Face file and stream it into an app cache target with
 /// size-aware resume/progress. This is for first-use runtime weights that are not
 /// installed through the full model-download flow.
-#[cfg(target_os = "macos")]
+#[cfg(any(
+    target_os = "macos",
+    all(target_os = "windows", feature = "backend-candle")
+))]
 pub(crate) async fn ensure_hf_cached_file(
     context: &DownloadContext<'_>,
     repo: &str,

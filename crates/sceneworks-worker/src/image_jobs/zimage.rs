@@ -4,15 +4,8 @@ const ZIMAGE_CONTROL_ENGINE_ID: &str = "z_image_turbo_control";
 const ZIMAGE_CONTROL_REPO: &str = "alibaba-pai/Z-Image-Turbo-Fun-Controlnet-Union-2.1";
 const ZIMAGE_CONTROL_FILE: &str = "Z-Image-Turbo-Fun-Controlnet-Union-2.1-8steps.safetensors";
 
-/// The object-shaped `advanced.poses` entries (the strict-pose tier; empty otherwise).
-fn pose_entries(request: &ImageRequest) -> Vec<&Value> {
-    request
-        .advanced
-        .get("poses")
-        .and_then(Value::as_array)
-        .map(|poses| poses.iter().filter(|pose| pose.is_object()).collect())
-        .unwrap_or_default()
-}
+// `pose_entries` / `parse_poses` / `PoseInput` moved to `base.rs` (shared by the candle InstantID
+// lane, sc-5491); still in scope here via the shared `image_jobs` module.
 
 /// True when this is a Z-Image strict-pose job (z-image + ≥1 pose) whose base weights
 /// resolve — routed to the Fun-Controlnet-Union control path rather than plain txt2img.
@@ -73,27 +66,7 @@ fn resolve_control_scale(request: &ImageRequest) -> f32 {
         .clamp(0.0, 2.0)
 }
 
-/// A pose's parsed keypoints, ready for [`crate::openpose_skeleton::draw_wholebody`].
-struct PoseInput {
-    keypoints: Vec<crate::openpose_skeleton::Keypoint>,
-    hands: Option<Vec<crate::openpose_skeleton::Hand>>,
-    face: Option<Vec<crate::openpose_skeleton::Keypoint>>,
-}
-
-fn parse_poses(request: &ImageRequest) -> Vec<PoseInput> {
-    use crate::openpose_skeleton::{normalize_face, normalize_hands, normalize_keypoints};
-    pose_entries(request)
-        .into_iter()
-        .map(|entry| PoseInput {
-            keypoints: entry
-                .get("keypoints")
-                .map(normalize_keypoints)
-                .unwrap_or_else(|| vec![None; 18]),
-            hands: entry.get("hands").and_then(normalize_hands),
-            face: entry.get("face").and_then(normalize_face),
-        })
-        .collect()
-}
+// `PoseInput` + `parse_poses` moved to `base.rs` (shared by the candle InstantID lane, sc-5491).
 
 /// Load the Z-Image Fun-Controlnet-Union generator (base snapshot + control overlay).
 fn zimage_control_spec(
@@ -430,63 +403,9 @@ const ZIMAGE_ADAPTER_LABEL: &str = "mlx_z_image";
 /// as its built-in presets — sc-4434) so the worker and the library can never drift.
 const CHARACTER_ANGLE_SET_ORDER: [&str; 11] = sceneworks_core::angle_kps::BUILTIN_ANGLE_SET_ORDER;
 
-/// The per-angle continuation clause appended to the user's prompt (parity with
-/// `character_studio_angles.ANGLE_PROMPT_AUGMENTS`). Unknown angle → empty.
-fn angle_prompt_augment(angle: &str) -> &'static str {
-    match angle {
-        "front" => {
-            "frontal portrait, looking directly at the camera, head and shoulders, neutral expression"
-        }
-        "three_quarter_left" => {
-            "three-quarter left profile, head turned slightly to the left, three-quarter view"
-        }
-        "three_quarter_right" => {
-            "three-quarter right profile, head turned slightly to the right, three-quarter view"
-        }
-        "left_profile" => {
-            "full left profile, head turned 90 degrees to the left, side view of the head"
-        }
-        "right_profile" => {
-            "full right profile, head turned 90 degrees to the right, side view of the head"
-        }
-        "up" => "looking up, head tilted slightly upward toward the sky",
-        "down" => "looking down, head tilted slightly downward toward the floor",
-        "up_left" => {
-            "looking up and to the left, head tilted slightly upward and turned slightly to the left"
-        }
-        "up_right" => {
-            "looking up and to the right, head tilted slightly upward and turned slightly to the right"
-        }
-        "down_left" => {
-            "looking down and to the left, head tilted slightly downward and turned slightly to the left"
-        }
-        "down_right" => {
-            "looking down and to the right, head tilted slightly downward and turned slightly to the right"
-        }
-        _ => "",
-    }
-}
-
-/// Strip the user's base prompt for augmentation: trim whitespace, then trailing
-/// `,`/`.`/`;` — exactly Python's `(base or "").strip().rstrip(",.;")` (which can
-/// leave a trailing space, e.g. `"a . "` → `"a "`).
-fn strip_base_prompt(base: &str) -> &str {
-    base.trim().trim_end_matches([',', '.', ';'])
-}
-
-/// Append the per-angle clause to the user's base prompt (parity with
-/// `augment_prompt_for_angle`). Empty base + unknown angle → empty string.
-fn augment_prompt_for_angle(base: &str, angle: &str) -> String {
-    let augment = angle_prompt_augment(angle);
-    let base = strip_base_prompt(base);
-    if !base.is_empty() && !augment.is_empty() {
-        format!("{base}, {augment}")
-    } else if !augment.is_empty() {
-        augment.to_owned()
-    } else {
-        base.to_owned()
-    }
-}
+// `angle_prompt_augment` / `strip_base_prompt` / `augment_prompt_for_angle` moved to `base.rs`
+// (shared by the candle InstantID angle-set lane, sc-5491); still in scope here (same module) for
+// `augment_prompt_for_pose` below + the Z-Image angle routing.
 
 /// The pose-skeleton instruction appended to the prompt for the best-effort pose tier
 /// (parity with `character_studio_angles.POSE_SKELETON_PROMPT`).

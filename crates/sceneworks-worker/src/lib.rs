@@ -33,10 +33,16 @@ use tokio::process::{Child, Command};
 use tokio::time::MissedTickBehavior;
 use uuid::Uuid;
 
-// Shared `advanced` knob accessors (sc-4281). Every caller (image/video MLX job
-// paths) is macOS-gated, so the module is too — otherwise its accessors would be
-// uncalled (dead_code) on the Linux/Windows builds.
-#[cfg(target_os = "macos")]
+// Shared `advanced` knob accessors (sc-4281). The MLX image/video job paths are macOS-gated; the
+// candle InstantID lane (sc-5491) is the first off-Mac caller, so the module also compiles on the
+// Windows candle build. The candle lane calls only a subset (`flag`/`str`/`f32_clamped`), so allow
+// dead_code there (the rest are MLX-only) — same pattern as `openpose_skeleton`. On a non-candle
+// Windows/Linux build it stays excluded, so its accessors are never uncalled-dead there.
+#[cfg(any(
+    target_os = "macos",
+    all(target_os = "windows", feature = "backend-candle")
+))]
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 mod advanced;
 mod api_client;
 // Backend-neutral generator load/run cache (epic 3720, sc-3724). Typed entirely against
