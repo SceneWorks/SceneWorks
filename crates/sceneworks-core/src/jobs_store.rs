@@ -3200,6 +3200,16 @@ fn image_job_is_candle_eligible(job: &JobSnapshot) -> bool {
     let Some(model) = job.payload.get("model").and_then(Value::as_str) else {
         return false;
     };
+    // InstantID (sc-5491, epic 5480): the candle `candle-gen-instantid` provider serves the SAME
+    // identity-preserving surface as the MLX path (single-identity character_image, the angle set,
+    // pose-library mode, face-restore) — a bespoke `generate_instantid_stream` lane, NOT the
+    // txt2img-only `image_request_candle_eligible` gate (which rejects `referenceAssetId`, which
+    // InstantID requires). Branch it out before that gate. Retires the Python `_vendor/instantid`
+    // off-Mac; the candle worker only advertises the `candle` marker when the backend is enabled, so a
+    // candle-disabled box still falls these jobs back to the Python torch worker unchanged.
+    if model == "instantid_realvisxl" {
+        return instantid_candle_eligible(&job.payload);
+    }
     image_request_candle_eligible(model, &job.payload)
 }
 
@@ -3376,6 +3386,15 @@ fn instantid_mlx_eligible(payload: &Map<String, Value>) -> bool {
         .get("referenceAssetId")
         .and_then(Value::as_str)
         .is_some_and(|value| !value.trim().is_empty())
+}
+
+/// InstantID candle-routing conditions (sc-5491, epic 5480). The candle `candle-gen-instantid`
+/// provider is the off-Mac sibling of `mlx-gen-instantid` and serves the IDENTICAL surface (single
+/// identity, the angle set, pose-library mode, face-restore via `generate_pose` / `restore_face`), so
+/// the gate is the same as [`instantid_mlx_eligible`]: a `character_image` job with a reference face.
+/// Mirrors the candle worker's `instantid_available` gate so the router and worker agree.
+fn instantid_candle_eligible(payload: &Map<String, Value>) -> bool {
+    instantid_mlx_eligible(payload)
 }
 
 /// PuLID-FLUX (`pulid_flux_dev`) MLX-routing conditions (sc-3344). The native `mlx-gen-pulid`
@@ -4944,6 +4963,42 @@ mod candle_routing_tests {
                 json!({ "model": "some_other_vlm", "question": "?", "sourceAssetId": "a1" })
             )
         ));
+    }
+
+    #[test]
+    fn instantid_character_jobs_route_to_candle_off_mac() {
+        // The candle InstantID provider (sc-5491) serves the SAME surface as the MLX path off-Mac, so
+        // every character_image + referenceAssetId shape is candle-eligible — via the bespoke
+        // `image_job_is_candle_eligible` branch, NOT the txt2img-only `image_request_candle_eligible`
+        // gate (which rejects `referenceAssetId`, which InstantID requires).
+        for advanced in [
+            json!({}),
+            json!({ "angleSet": true }),
+            json!({ "poses": [{ "id": "a" }] }),
+            json!({ "faceRestore": true }),
+            json!({ "poses": [{ "id": "a" }], "faceRestore": true }),
+        ] {
+            let payload = json!({
+                "model": "instantid_realvisxl",
+                "mode": "character_image",
+                "referenceAssetId": "asset_1",
+                "advanced": advanced,
+            });
+            assert!(instantid_candle_eligible(&object(payload.clone())));
+            assert!(image_job_is_candle_eligible(&image_generate_job(payload)));
+        }
+
+        // No reference face → not candle-eligible (mirrors the MLX gate).
+        assert!(!image_job_is_candle_eligible(&image_generate_job(json!({
+            "model": "instantid_realvisxl",
+            "mode": "character_image"
+        }))));
+        // Non-character mode → not candle-eligible (InstantID is a character flow).
+        assert!(!image_job_is_candle_eligible(&image_generate_job(json!({
+            "model": "instantid_realvisxl",
+            "mode": "text_to_image",
+            "referenceAssetId": "asset_1"
+        }))));
     }
 }
 

@@ -647,6 +647,142 @@ pub(crate) fn load_reference_image(
     })
 }
 
+// ---------------------------------------------------------------------------
+// Shared pose + angle-prompt helpers. Used by the macOS Z-Image strict-pose control path
+// (`zimage.rs`) AND the InstantID lane (`instantid.rs`) on BOTH backends — the candle InstantID
+// provider (sc-5491) needs them off-Mac, so they live here in the shared include rather than in the
+// macOS-only `zimage.rs` (same reason `load_reference_image` does). All `include!`d image-job files
+// share one module, so moving these here keeps them visible to `zimage.rs` on macOS unchanged.
+// ---------------------------------------------------------------------------
+
+/// True for a present, non-blank optional asset id (the conditioning-asset presence test shared by
+/// the SDXL advanced sub-mode, PuLID, and InstantID gates). Moved here from the macOS-only `sdxl.rs`
+/// so the candle InstantID lane (sc-5491) can use it off-Mac.
+#[cfg(any(
+    target_os = "macos",
+    all(target_os = "windows", feature = "backend-candle")
+))]
+fn non_empty(value: &Option<String>) -> bool {
+    value.as_deref().is_some_and(|id| !id.trim().is_empty())
+}
+
+/// The object-shaped `advanced.poses` entries (the strict-pose tier; empty otherwise).
+#[cfg(any(
+    target_os = "macos",
+    all(target_os = "windows", feature = "backend-candle")
+))]
+fn pose_entries(request: &ImageRequest) -> Vec<&Value> {
+    request
+        .advanced
+        .get("poses")
+        .and_then(Value::as_array)
+        .map(|poses| poses.iter().filter(|pose| pose.is_object()).collect())
+        .unwrap_or_default()
+}
+
+/// A pose's parsed keypoints, ready for [`crate::openpose_skeleton::draw_wholebody`].
+// The candle InstantID pose lane reads only `keypoints` (→ OpenPose body skeleton); `hands`/`face` are
+// the Z-Image whole-body strict-pose path's (macOS), so allow them dead off-Mac.
+#[cfg(any(
+    target_os = "macos",
+    all(target_os = "windows", feature = "backend-candle")
+))]
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+struct PoseInput {
+    keypoints: Vec<crate::openpose_skeleton::Keypoint>,
+    hands: Option<Vec<crate::openpose_skeleton::Hand>>,
+    face: Option<Vec<crate::openpose_skeleton::Keypoint>>,
+}
+
+#[cfg(any(
+    target_os = "macos",
+    all(target_os = "windows", feature = "backend-candle")
+))]
+fn parse_poses(request: &ImageRequest) -> Vec<PoseInput> {
+    use crate::openpose_skeleton::{normalize_face, normalize_hands, normalize_keypoints};
+    pose_entries(request)
+        .into_iter()
+        .map(|entry| PoseInput {
+            keypoints: entry
+                .get("keypoints")
+                .map(normalize_keypoints)
+                .unwrap_or_else(|| vec![None; 18]),
+            hands: entry.get("hands").and_then(normalize_hands),
+            face: entry.get("face").and_then(normalize_face),
+        })
+        .collect()
+}
+
+/// The per-angle continuation clause appended to the user's prompt (parity with
+/// `character_studio_angles.ANGLE_PROMPT_AUGMENTS`). Unknown angle → empty.
+#[cfg(any(
+    target_os = "macos",
+    all(target_os = "windows", feature = "backend-candle")
+))]
+fn angle_prompt_augment(angle: &str) -> &'static str {
+    match angle {
+        "front" => {
+            "frontal portrait, looking directly at the camera, head and shoulders, neutral expression"
+        }
+        "three_quarter_left" => {
+            "three-quarter left profile, head turned slightly to the left, three-quarter view"
+        }
+        "three_quarter_right" => {
+            "three-quarter right profile, head turned slightly to the right, three-quarter view"
+        }
+        "left_profile" => {
+            "full left profile, head turned 90 degrees to the left, side view of the head"
+        }
+        "right_profile" => {
+            "full right profile, head turned 90 degrees to the right, side view of the head"
+        }
+        "up" => "looking up, head tilted slightly upward toward the sky",
+        "down" => "looking down, head tilted slightly downward toward the floor",
+        "up_left" => {
+            "looking up and to the left, head tilted slightly upward and turned slightly to the left"
+        }
+        "up_right" => {
+            "looking up and to the right, head tilted slightly upward and turned slightly to the right"
+        }
+        "down_left" => {
+            "looking down and to the left, head tilted slightly downward and turned slightly to the left"
+        }
+        "down_right" => {
+            "looking down and to the right, head tilted slightly downward and turned slightly to the right"
+        }
+        _ => "",
+    }
+}
+
+/// Strip the user's base prompt for augmentation: trim whitespace, then trailing
+/// `,`/`.`/`;` — exactly Python's `(base or "").strip().rstrip(",.;")` (which can
+/// leave a trailing space, e.g. `"a . "` → `"a "`).
+#[cfg(any(
+    target_os = "macos",
+    all(target_os = "windows", feature = "backend-candle")
+))]
+fn strip_base_prompt(base: &str) -> &str {
+    base.trim().trim_end_matches([',', '.', ';'])
+}
+
+/// Append the per-angle clause to the user's base prompt (parity with
+/// `augment_prompt_for_angle`). Empty base + unknown angle → empty string.
+#[cfg(any(
+    target_os = "macos",
+    all(target_os = "windows", feature = "backend-candle")
+))]
+fn augment_prompt_for_angle(base: &str, angle: &str) -> String {
+    let augment = angle_prompt_augment(angle);
+    let base = strip_base_prompt(base);
+    if !base.is_empty() && !augment.is_empty() {
+        format!("{base}, {augment}")
+    } else if !augment.is_empty() {
+        augment.to_owned()
+    } else {
+        base.to_owned()
+    }
+}
+
 /// Real MLX generation: load once on a blocking thread, generate each image, and
 /// stream step/decode/image events back to the async worker (which saves PNGs, emits
 /// `assetWrites`, and polls cancel). MLX runs entirely on the blocking thread (the

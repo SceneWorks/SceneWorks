@@ -28,6 +28,13 @@ const INSTANTID_OPENPOSE_REPO: &str = "xinsir/controlnet-openpose-sdxl-1.0";
 const INSTANTID_OPENPOSE_SCALE: f32 = 0.7;
 /// The face-restore re-render side (the engine's production crop size, sc-3380).
 const INSTANTID_FACE_RESTORE_SIDE: u32 = 1024;
+/// The adapter/engine id recorded on InstantID assets + telemetry, selected by backend: the native
+/// MLX provider on macOS, the candle (Windows/CUDA) provider off-Mac (sc-5491). Distinguishes the two
+/// lanes in the asset sidecar + the `instantIdEngine` raw-settings key.
+#[cfg(target_os = "macos")]
+const INSTANTID_ENGINE: &str = "mlx_instantid";
+#[cfg(all(target_os = "windows", feature = "backend-candle"))]
+const INSTANTID_ENGINE: &str = "candle_instantid";
 
 /// How an InstantID character job batches its iterations (torch-parity precedence: a pose set
 /// wins over an angle set, which wins over plain identity — `instantid_adapter.py:655`).
@@ -264,7 +271,7 @@ fn instantid_raw_settings(
     );
     raw.insert(
         "instantIdEngine".to_owned(),
-        Value::String("mlx_instantid".to_owned()),
+        Value::String(INSTANTID_ENGINE.to_owned()),
     );
     if angle_set {
         raw.insert("angleSet".to_owned(), Value::Bool(true));
@@ -289,6 +296,9 @@ async fn ensure_instantid_file(
 /// face detection but neither ArcFace nor the SDXL/IdentityNet stack. Shares the env override
 /// (`SCENEWORKS_INSTANTID_WEIGHTS`) + app cache + download-on-first-use with
 /// [`ensure_instantid_weights`], so a prior InstantID run leaves it already cached.
+// The standalone kps-extraction capability is a macOS path; the candle lane only loads SCRFD via the
+// InstantID face stack (`with_face`), so this helper is unused off-Mac — allow it dead there.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 pub(crate) async fn ensure_scrfd_weights(
     api: &ApiClient,
     settings: &Settings,
@@ -481,6 +491,15 @@ async fn generate_instantid_stream(
     let steps = instantid_steps(request);
     let guidance = instantid_guidance(request);
     let (quant_bits, recipe_bits) = instantid_quant(request);
+    // The candle InstantID stack runs dense f16 — there is no quantized path. Ignore the MLX quant
+    // knob entirely on this lane: don't apply it (the `quantize` step in the load closure is macOS-
+    // only) and don't record it as applied (`recipe_bits` -> None). `let _` consumes the otherwise-
+    // unused `quant_bits`.
+    #[cfg(all(target_os = "windows", feature = "backend-candle"))]
+    let recipe_bits: Option<i64> = {
+        let _ = (quant_bits, recipe_bits);
+        None
+    };
     let ip_scale = advanced::f32_clamped(
         &request.advanced,
         "ipAdapterScale",
@@ -616,53 +635,88 @@ async fn generate_instantid_stream(
             let model = InstantId::load(&paths)
                 .map_err(|error| WorkerError::Engine(format!("InstantID load failed: {error}")))?;
             // Attach OpenPose (pose mode) BEFORE quantize so it quantizes with the stack; quantize
-            // before with_face (the engine's documented order).
+            // before with_face (the engine's documented order). `with_openpose` is backend-neutral
+            // (both engines take `&WeightsSource` and consume+return `self`).
             let model = match &openpose {
                 Some(source) => model.with_openpose(source).map_err(|error| {
                     WorkerError::Engine(format!("InstantID OpenPose load failed: {error}"))
                 })?,
                 None => model,
             };
+            // Quantization is an MLX-only knob — the candle InstantID stack runs dense f16 and has no
+            // `quantize` method (the candle lane already forced `quant_bits` out, above).
+            #[cfg(target_os = "macos")]
             let model = match quant_bits {
                 Some(bits) => model.quantize(bits).map_err(|error| {
                     WorkerError::Engine(format!("InstantID quantize failed: {error}"))
                 })?,
                 None => model,
             };
-            let scrfd = Weights::from_file(&scrfd_path).map_err(|error| {
-                WorkerError::Engine(format!("InstantID SCRFD weights {scrfd_path:?}: {error}"))
-            })?;
-            let arcface = Weights::from_file(&arcface_path).map_err(|error| {
-                WorkerError::Engine(format!(
-                    "InstantID ArcFace weights {arcface_path:?}: {error}"
-                ))
-            })?;
-            let model = model
-                .with_face(&scrfd, &arcface)
-                .map_err(|error| WorkerError::Engine(format!("InstantID face stack: {error}")))?;
-            // Face-restore needs the reference identity embedding (imposed on the re-rendered
-            // crop). Detect it once on the raw reference.
+            // Attach the SCRFD + ArcFace face stack. The MLX engine loads the two weight files
+            // explicitly; the candle FaceEmbedder (sc-5490) loads the pair from THEIR DIRECTORY by the
+            // canonical `scrfd_10g.safetensors` + `arcface_iresnet100.safetensors` names (exactly what
+            // `ensure_instantid_weights` stages), so it takes the dir, not the two paths.
+            #[cfg(target_os = "macos")]
+            let model = {
+                let scrfd = Weights::from_file(&scrfd_path).map_err(|error| {
+                    WorkerError::Engine(format!("InstantID SCRFD weights {scrfd_path:?}: {error}"))
+                })?;
+                let arcface = Weights::from_file(&arcface_path).map_err(|error| {
+                    WorkerError::Engine(format!(
+                        "InstantID ArcFace weights {arcface_path:?}: {error}"
+                    ))
+                })?;
+                model
+                    .with_face(&scrfd, &arcface)
+                    .map_err(|error| WorkerError::Engine(format!("InstantID face stack: {error}")))?
+            };
+            #[cfg(all(target_os = "windows", feature = "backend-candle"))]
+            let model = {
+                let face_dir = scrfd_path.parent().unwrap_or(scrfd_path.as_path());
+                // `arcface_path` is staged in the same dir; `with_face(dir)` resolves it by name.
+                let _ = &arcface_path;
+                model
+                    .with_face(face_dir)
+                    .map_err(|error| WorkerError::Engine(format!("InstantID face stack: {error}")))?
+            };
+            // Face-restore needs the reference identity embedding (imposed on the re-rendered crop).
+            // Detect it once on the raw reference. The candle `largest_face` takes the neutral
+            // `gen_core::Image`; the MLX engine takes raw RGB bytes + dims.
             let restore_embedding = if face_restore {
-                Some(
-                    model
-                        .largest_face(
-                            &reference.pixels,
-                            reference.height as usize,
-                            reference.width as usize,
-                        )
-                        .map_err(|error| {
-                            WorkerError::InvalidPayload(format!(
-                                "InstantID face-restore reference: {error}"
-                            ))
-                        })?
-                        .embedding,
-                )
+                #[cfg(target_os = "macos")]
+                let embedding = model
+                    .largest_face(
+                        &reference.pixels,
+                        reference.height as usize,
+                        reference.width as usize,
+                    )
+                    .map_err(|error| {
+                        WorkerError::InvalidPayload(format!(
+                            "InstantID face-restore reference: {error}"
+                        ))
+                    })?
+                    .embedding;
+                #[cfg(all(target_os = "windows", feature = "backend-candle"))]
+                let embedding = model
+                    .largest_face(&reference)
+                    .map_err(|error| {
+                        WorkerError::InvalidPayload(format!(
+                            "InstantID face-restore reference: {error}"
+                        ))
+                    })?
+                    .embedding;
+                Some(embedding)
             } else {
                 None
             };
             Ok((model, reference, restore_embedding))
         },
         move |(model, reference, restore_embedding), tx, cancel| {
+            // The candle `generate*` / `restore_face` take `&mut self` (each call sets the face IP
+            // tokens on the UNet before the denoise), so the per-item closure mutates `model`; the MLX
+            // engine's are `&self`. Bind `mut` for the candle lane and allow the unused-mut on macOS.
+            #[allow(unused_mut)]
+            let mut model = model;
             drive_gen_items(
                 tx,
                 work,
@@ -755,7 +809,7 @@ async fn generate_instantid_stream(
         plan,
         project_path,
         backend,
-        "mlx_instantid",
+        INSTANTID_ENGINE,
         &raw_settings,
         total,
         rx,

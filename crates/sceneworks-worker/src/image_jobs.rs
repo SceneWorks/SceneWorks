@@ -132,6 +132,21 @@ use mlx_gen_face as _;
 use mlx_gen_instantid::{
     BodyPoint, InstantId, InstantIdPaths, InstantIdRequest, FACE_RESTORE_PROMPT,
 };
+// The Windows/CUDA sibling: the candle InstantID provider (sc-5491, epic 5480), retiring the Python
+// `_vendor/instantid` off-Mac. Same bespoke by-name reference (`InstantId::load`), NOT inventory-
+// registered — so no `as _;` force-link anchor (unlike the registered candle families above). The
+// SCRFD + ArcFace FaceEmbedder the model composes (`candle-gen-face`, sc-5490) rides in transitively
+// via `candle-gen-instantid` and is used directly (not through the registry), so it needs no direct
+// worker dep. The candle `with_face` loads the face pair from THEIR DIRECTORY, so there is no
+// `Weights::from_file` import on this lane (the MLX `Weights` loader above stays macOS-only).
+// `InstantIdPaths`/`InstantIdRequest`/`BodyPoint` resolve to the candle crate's types, but the
+// conditioning types they carry (`WeightsSource`, `Image`, `CancelFlag`, `Progress`) are the SHARED
+// `gen_core` contract — the single-rev skew gate (sc-4482) is what makes the worker's `gen_core::Image`
+// the exact type `InstantId::generate` consumes.
+#[cfg(all(target_os = "windows", feature = "backend-candle"))]
+use candle_gen_instantid::{
+    BodyPoint, InstantId, InstantIdPaths, InstantIdRequest, FACE_RESTORE_PROMPT,
+};
 
 /// The stub adapter id recorded on generated assets (matches the contract fixture
 /// `tests/fixtures/rust_migration_contracts/sidecars/asset-image.sceneworks.json`).
@@ -188,7 +203,23 @@ pub(crate) async fn run_image_generate_job(
         &request,
         route.map_or(request.count, |route| route.image_count(&request, settings)),
     );
-    #[cfg(not(target_os = "macos"))]
+    // Windows/CUDA candle lane: an InstantID angle/pose set produces N images (the active angle
+    // collection's length, or the pose count), not `request.count` — bake the real total into the plan
+    // so the generation set + streamed `expectedCount` match (sc-5491, mirroring the macOS route's
+    // `image_count`). Any other candle job stays `request.count`.
+    #[cfg(all(target_os = "windows", feature = "backend-candle"))]
+    let plan = {
+        let count = if settings.backend_candle_enabled && instantid_available(&request, settings) {
+            instantid_image_count(&request, settings)
+        } else {
+            request.count
+        };
+        ImagePlan::with_count(&request, count)
+    };
+    #[cfg(all(
+        not(target_os = "macos"),
+        not(all(target_os = "windows", feature = "backend-candle"))
+    ))]
     let plan = ImagePlan::with_count(&request, request.count);
 
     // Pre-flight LoRA family-compat guardrail (sc-3027): reject an incompatible LoRA
@@ -387,8 +418,24 @@ pub(crate) async fn run_image_generate_job(
     // backend enabled we run `generate_candle_stream` (same neutral assetWrites/progress/cancellation
     // harness). Gated on `backend_candle_enabled` (default off) so production routing is unchanged
     // until parity is accepted — otherwise it stubs exactly like before.
+    // InstantID (sc-5491, epic 5480) is the exception to "txt2img-only": the candle InstantID provider
+    // gets its own bespoke path (`generate_instantid_stream`, the off-Mac sibling of the macOS
+    // `ImageRoute::InstantId` arm) — checked first since `instantid_realvisxl` is not an inventory
+    // `is_candle_engine` id.
     #[cfg(all(target_os = "windows", feature = "backend-candle"))]
-    let handled = if settings.backend_candle_enabled && is_candle_engine(&request.model) {
+    let handled = if settings.backend_candle_enabled && instantid_available(&request, settings) {
+        generate_instantid_stream(
+            api,
+            settings,
+            job,
+            &plan,
+            &project_path,
+            backend,
+            &mut asset_writes,
+        )
+        .await?;
+        true
+    } else if settings.backend_candle_enabled && is_candle_engine(&request.model) {
         generate_candle_stream(
             api,
             settings,
@@ -855,8 +902,13 @@ include!("image_jobs/sdxl.rs");
 #[cfg(target_os = "macos")]
 // Kolors advanced conditioning (img2img + IP-Adapter-Plus reference).
 include!("image_jobs/kolors.rs");
-#[cfg(target_os = "macos")]
-// InstantID native routing.
+// InstantID native routing — macOS (MLX) + the Windows/CUDA candle lane (sc-5491). The two engines'
+// `InstantId` APIs differ only at the load boundary (with_face dir-vs-Weights, quantize, largest_face
+// signature), cfg-split inside; the per-item generate/restore loop is backend-neutral over `gen_core`.
+#[cfg(any(
+    target_os = "macos",
+    all(target_os = "windows", feature = "backend-candle")
+))]
 include!("image_jobs/instantid.rs");
 #[cfg(target_os = "macos")]
 // PuLID-FLUX native routing.

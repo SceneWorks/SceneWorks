@@ -22,9 +22,8 @@ enum SdxlSubMode {
     Outpaint,
 }
 
-fn non_empty(value: &Option<String>) -> bool {
-    value.as_deref().is_some_and(|id| !id.trim().is_empty())
-}
+// `non_empty` moved to `base.rs` (shared by the candle InstantID lane, sc-5491); still in scope
+// here via the shared `image_jobs` module.
 
 /// The engine-backed SDXL family row for a model id (`sdxl` / `realvisxl`), if any.
 fn sdxl_engine_model(model: &str) -> Option<ResolvedModel> {

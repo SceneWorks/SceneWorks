@@ -67,7 +67,14 @@ where
     Ok(())
 }
 
-#[cfg(target_os = "macos")]
+// Shared by the macOS MLX paths and the Windows/CUDA candle InstantID lane (sc-5491): both load a
+// `!Send` engine on the blocking thread and stream per-item events back. `G` is the loaded model
+// (MLX `Box<dyn Generator>` or candle `InstantId`) — created and consumed inside the one
+// `spawn_blocking`, so it never needs to be `Send`.
+#[cfg(any(
+    target_os = "macos",
+    all(target_os = "windows", feature = "backend-candle")
+))]
 fn start_gen_stream<G, L, D>(
     job_id: String,
     engine_id: &'static str,
