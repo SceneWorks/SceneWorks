@@ -229,7 +229,7 @@ describe("ImageStudio advanced model defaults", () => {
             family: "qwen-image",
             capabilities: ["text_to_image"],
             defaults: {
-              resolution: "1024x1024",
+              resolution: "1536x1024",
               sampler: "unipc",
               scheduler: "shift",
               schedulerShift: 4.2,
@@ -270,7 +270,7 @@ describe("ImageStudio advanced model defaults", () => {
     const payload = createImageJob.mock.calls[0][0];
     expect(payload.model).toBe("qwen_image");
     expect(payload.advanced).toMatchObject({
-      resolution: "1024x1024",
+      resolution: "1536x1024",
       sampler: "unipc",
       scheduler: "shift",
       schedulerShift: 4.2,

@@ -228,14 +228,14 @@ pub(crate) const MODEL_TABLE: &[ModelRow] = &[
         default_guidance: 3.0,
         adapter_label: "mlx_chroma",
     },
-    // Flash is the few-step distilled checkpoint: ~8 steps, CFG baked toward 1.0 (single forward —
+    // Flash is the few-step distilled checkpoint: ~12 Heun steps, CFG baked toward 1.0 (single forward —
     // the negative prompt is effectively inert at true_cfg≈1). It shares the true-CFG descriptor,
     // so `true_cfg` still carries the scale (default 1.0).
     ModelRow {
         sceneworks_id: "chroma1_flash",
         engine_id: "chroma1_flash",
         default_repo: "lodestones/Chroma1-Flash",
-        default_steps: 8,
+        default_steps: 12,
         default_guidance: 1.0,
         adapter_label: "mlx_chroma",
     },

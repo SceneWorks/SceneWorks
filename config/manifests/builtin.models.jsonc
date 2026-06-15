@@ -1225,14 +1225,19 @@
         "model": "${HF_CACHE}/lodestones/Chroma1-Flash"
       },
       "defaults": {
-        // CFG baked: ~8 steps, guidance 1.0 (CFG off, negative prompt ignored).
-        "resolution": "1024x1024",
-        "steps": 8,
+        // CFG baked: Heun at ~12 steps, guidance 1.0 (CFG off, negative prompt ignored).
+        // 768² is the quality/speed sweet spot for Flash; use HD/Base for polished 1024² renders.
+        "resolution": "768x768",
+        "steps": 12,
         "guidanceScale": 1.0,
+        "sampler": "heun",
+        "scheduler": "default",
         "count": 4
       },
       "limits": {
         "resolutions": ["768x768", "1024x1024", "1280x720", "720x1280"],
+        "samplers": ["default", "euler", "heun"],
+        "schedulers": ["default"],
         "count": [1, 2, 4]
       },
       "loraCompatibility": {
@@ -1244,7 +1249,7 @@
       },
       "ui": {
         "label": "Chroma1-Flash",
-        "description": "Lodestones Chroma1-Flash — fast CFG-baked text-to-image, Apache-2.0 (commercial-safe). FLUX.1-schnell-derived 8.9B transformer + T5-XXL text encoder (no CLIP); ~8-step generation with CFG disabled (guidance 1.0, negative prompt ignored). Needs a large-VRAM GPU.",
+        "description": "Lodestones Chroma1-Flash — fast CFG-baked text-to-image, Apache-2.0 (commercial-safe). FLUX.1-schnell-derived 8.9B transformer + T5-XXL text encoder (no CLIP); Heun ~12-step generation with CFG disabled (guidance 1.0, negative prompt ignored). Needs a large-VRAM GPU.",
         "recommendedFor": ["text_to_image", "style_variations"],
         "promptGuide": {
           "title": "Chroma1-Flash Prompt Guide",

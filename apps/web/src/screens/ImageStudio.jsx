@@ -117,6 +117,15 @@ function preferredOption(defaultValue, options) {
   return options.includes(defaultValue) ? defaultValue : options[0] ?? "default";
 }
 
+function preferredResolution(model, options) {
+  const modelDefault = model?.defaults?.resolution;
+  return options.includes(modelDefault)
+    ? modelDefault
+    : options.includes("1024x1024")
+      ? "1024x1024"
+      : options[0];
+}
+
 const UPSCALE_ENGINES = [
   { id: "real-esrgan", label: "Real-ESRGAN", factors: [2, 4] },
   // SeedVR2: native-MLX one-step diffusion upscaler (Mac-only, epic 4811 / sc-4815) with a
@@ -617,9 +626,10 @@ export function ImageStudio() {
     setSampler(preferredOption(samplerDefaultFromModel(selectedModel), samplerOptions));
     setScheduler(preferredOption(schedulerDefaultFromModel(selectedModel), schedulerOptions));
     setSchedulerShift(schedulerShiftDefaultFromModel(selectedModel));
+    setResolution(preferredResolution(selectedModel, resolutionOptions));
     setStepsOverride("");
     setGuidanceOverride("");
-  }, [model, samplerOptions, schedulerOptions, selectedModel]);
+  }, [model, resolutionOptions, samplerOptions, schedulerOptions, selectedModel]);
   // Snap the sampler / scheduler back to the model's declared default when the
   // current value is no longer in the menu (e.g. user switched to a sealed
   // model whose only option is "default"). Mirrors the resolution-snap effect.
@@ -642,14 +652,8 @@ export function ImageStudio() {
     if (resolutionOptions.includes(resolution)) {
       return;
     }
-    const modelDefault = selectedModel?.defaults?.resolution;
-    const preferred = resolutionOptions.includes(modelDefault)
-      ? modelDefault
-      : resolutionOptions.includes("1024x1024")
-        ? "1024x1024"
-        : resolutionOptions[0];
-    setResolution(preferred);
-  }, [resolutionOptions, resolution, selectedModel?.defaults?.resolution]);
+    setResolution(preferredResolution(selectedModel, resolutionOptions));
+  }, [resolutionOptions, resolution, selectedModel]);
   const {
     availablePresets,
     selectedPreset,

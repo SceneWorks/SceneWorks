@@ -555,6 +555,9 @@ fn generate_one(
     negative_prompt: Option<String>,
     reference: Option<&(Image, f32)>,
     true_cfg: Option<f32>,
+    sampler: Option<&str>,
+    scheduler: Option<&str>,
+    scheduler_shift: Option<f32>,
     cancel: &CancelFlag,
     on_progress: &mut dyn FnMut(Progress),
 ) -> WorkerResult<(u32, u32, Vec<u8>)> {
@@ -575,6 +578,9 @@ fn generate_one(
         steps: Some(steps),
         guidance,
         true_cfg,
+        sampler: sampler.map(str::to_owned),
+        scheduler: scheduler.map(str::to_owned),
+        scheduler_shift,
         conditioning,
         cancel: cancel.clone(),
         ..Default::default()
@@ -817,6 +823,30 @@ async fn generate_stream(
     let (quant, quant_bits) = resolve_quant(request);
     let steps = resolve_steps(request, &model);
     let guidance = resolve_guidance(request, &model);
+    let sampler = request
+        .advanced
+        .get("sampler")
+        .and_then(|value| value.as_str())
+        .map(str::trim)
+        .filter(|value| !value.is_empty() && *value != "default")
+        .map(str::to_owned);
+    let scheduler = request
+        .advanced
+        .get("scheduler")
+        .and_then(|value| value.as_str())
+        .map(str::trim)
+        .filter(|value| !value.is_empty() && *value != "default")
+        .map(str::to_owned);
+    let scheduler_shift = request
+        .advanced
+        .get("schedulerShift")
+        .or_else(|| request.advanced.get("timestepShift"))
+        .and_then(|value| {
+            value
+                .as_f64()
+                .or_else(|| value.as_str()?.trim().parse().ok())
+        })
+        .map(|value| value as f32);
     // True-CFG families (Chroma) carry the CFG scale in `true_cfg`, not `guidance` (which their
     // engine rejects); `None` for every other family. The recipe records the effective CFG knob.
     let model_true_cfg = resolve_true_cfg(request, &model);
@@ -936,6 +966,9 @@ async fn generate_stream(
                     negative_prompt.clone(),
                     identity_init.as_ref(),
                     true_cfg,
+                    sampler.as_deref(),
+                    scheduler.as_deref(),
+                    scheduler_shift,
                     &cancel,
                     on_progress,
                 )?;
