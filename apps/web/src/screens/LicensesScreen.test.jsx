@@ -54,6 +54,39 @@ describe("LicensesScreen", () => {
     expect(container.querySelector(".licenses-text").textContent).toContain("MIT License");
   });
 
+  it("lists the re-hosted AI models with their upstream license text", async () => {
+    await render();
+    // A Wan2.2 model is redistributed under Apache-2.0.
+    const wan = [...container.querySelectorAll(".licenses-item")].find((b) =>
+      b.textContent.includes("Wan2.2-TI2V-5B"),
+    );
+    expect(wan).toBeTruthy();
+    await act(async () => wan.click());
+    expect(container.textContent).toContain("Wan-AI / Alibaba Tongyi Lab");
+    expect(container.querySelector(".licenses-text").textContent).toContain(
+      "Apache License",
+    );
+  });
+
+  it("surfaces both LTX-2 and Gemma notices for the LTX bundle", async () => {
+    await render();
+    const ltx = [...container.querySelectorAll(".licenses-item")].find((b) =>
+      b.textContent.includes("LTX-2.3"),
+    );
+    expect(ltx).toBeTruthy();
+    await act(async () => ltx.click());
+    expect(container.querySelector(".licenses-text").textContent).toContain(
+      "LTX-2 Community License Agreement",
+    );
+    const gemmaTab = [...container.querySelectorAll(".segmented-control button")].find((b) =>
+      b.textContent.includes("Gemma"),
+    );
+    await act(async () => gemmaTab.click());
+    expect(container.querySelector(".licenses-text").textContent).toContain(
+      "Gemma Prohibited Use Policy",
+    );
+  });
+
   it("switches between a component's license documents", async () => {
     await render();
     // ffmpeg has two docs (notice + GPL text); pick the GPL tab.

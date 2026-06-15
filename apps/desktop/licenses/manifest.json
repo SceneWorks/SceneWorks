@@ -1,6 +1,6 @@
 {
-  "_comment": "Source of truth for the in-app About → Licenses screen (sc-3778). License text lives alongside each entry in this directory; build-sidecar.mjs also stages these files next to the corresponding binaries in the packaged app. The `description` below is shown to end users — keep it user-facing.",
-  "description": "SceneWorks bundles the following third-party components. Their license notices and any written offers are reproduced below.",
+  "_comment": "Source of truth for the in-app About → Licenses screen (sc-3778). License text lives alongside each entry in this directory; build-sidecar.mjs stages the bundled-binary files (ffmpeg/onnxruntime/cuda) next to the corresponding binaries in the packaged app. Model entries (sc-5604) are notice-only — they record the upstream license + attribution for AI model weights SceneWorks re-hosts on its Hugging Face org and downloads at runtime; they are not staged as binaries. The `description` below is shown to end users — keep it user-facing.",
+  "description": "SceneWorks bundles the third-party binaries listed below, and redistributes the AI model weights listed below — downloaded on first use from the SceneWorks model repository on Hugging Face. The upstream attributions, license notices, and any written offers are reproduced here.",
   "components": [
     {
       "id": "ffmpeg",
@@ -41,6 +41,55 @@
       "usage": "Bundled CUDA runtime redistributable DLLs (cudart, cuBLAS, cuBLAS Lt, cuRAND, NVRTC), loaded at runtime by the native candle (CUDA) generation backend. Requires an NVIDIA GPU and display driver 576.02 or newer.",
       "documents": [
         { "label": "Notice & CUDA EULA reference", "key": "cuda-notice" }
+      ]
+    },
+    {
+      "id": "wan2.2-ti2v-5b",
+      "name": "Wan2.2-TI2V-5B (MLX)",
+      "publisher": "Wan-AI / Alibaba Tongyi Lab",
+      "license": "Apache-2.0",
+      "homepage": "https://huggingface.co/Wan-AI/Wan2.2-TI2V-5B",
+      "platforms": ["macos"],
+      "usage": "Text/image-to-video model. On Apple Silicon, SceneWorks downloads on first use a converted MLX copy of the upstream Apache-2.0 weights, re-hosted at SceneWorks/wan2.2-ti2v-5b-mlx. Redistributed with attribution as permitted by Apache-2.0.",
+      "documents": [
+        { "label": "Apache License 2.0", "key": "wan2.2-ti2v-5b-apache" }
+      ]
+    },
+    {
+      "id": "wan2.2-i2v-a14b",
+      "name": "Wan2.2-I2V-A14B (MLX)",
+      "publisher": "Wan-AI / Alibaba Tongyi Lab",
+      "license": "Apache-2.0",
+      "homepage": "https://huggingface.co/Wan-AI/Wan2.2-I2V-A14B",
+      "platforms": ["macos"],
+      "usage": "Image-to-video mixture-of-experts model. On Apple Silicon, SceneWorks downloads on first use a converted MLX copy of the upstream Apache-2.0 weights, re-hosted at SceneWorks/wan2.2-i2v-a14b-mlx. Redistributed with attribution as permitted by Apache-2.0.",
+      "documents": [
+        { "label": "Apache License 2.0", "key": "wan2.2-i2v-a14b-apache" }
+      ]
+    },
+    {
+      "id": "wan2.2-t2v-a14b",
+      "name": "Wan2.2-T2V-A14B (MLX)",
+      "publisher": "Wan-AI / Alibaba Tongyi Lab",
+      "license": "Apache-2.0",
+      "homepage": "https://huggingface.co/Wan-AI/Wan2.2-T2V-A14B",
+      "platforms": ["macos"],
+      "usage": "Text-to-video mixture-of-experts model. On Apple Silicon, SceneWorks downloads on first use a converted MLX copy of the upstream Apache-2.0 weights, re-hosted at SceneWorks/wan2.2-t2v-a14b-mlx. Redistributed with attribution as permitted by Apache-2.0.",
+      "documents": [
+        { "label": "Apache License 2.0", "key": "wan2.2-t2v-a14b-apache" }
+      ]
+    },
+    {
+      "id": "ltx-2.3",
+      "name": "LTX-2.3 + Gemma-3-12B (MLX)",
+      "publisher": "Lightricks (LTX-2.3) · Google (Gemma-3)",
+      "license": "LTX-2 Community License · Gemma Terms",
+      "homepage": "https://huggingface.co/Lightricks/LTX-2.3",
+      "platforms": ["macos"],
+      "usage": "Text/image-to-video model with audio. On Apple Silicon, SceneWorks downloads on first use a converted MLX bundle re-hosted at SceneWorks/ltx-2.3-mlx, containing the LTX-2.3 video weights (LTX-2 Community License) plus a Gemma-3-12B text encoder (Google Gemma Terms of Use). These are restricted licenses, not permissive — both notices below apply.",
+      "documents": [
+        { "label": "LTX-2 Community License", "key": "ltx-2.3-license" },
+        { "label": "Google Gemma Terms", "key": "ltx-2.3-gemma" }
       ]
     }
   ]
