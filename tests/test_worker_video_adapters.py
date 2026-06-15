@@ -1041,6 +1041,7 @@ def test_native_ltx_mocked_run_writes_scene_video_asset(monkeypatch, tmp_path):
     project_path = tmp_path / "project"
     data_dir.mkdir()
     project_path.mkdir()
+    monkeypatch.setenv("SCENEWORKS_DATA_DIR", str(data_dir))
     (data_dir / "recent-projects.json").write_text(
         json.dumps([{"id": "project-1", "path": str(project_path)}]),
         encoding="utf-8",
@@ -1090,6 +1091,7 @@ def test_native_ltx_text_to_video_uses_ltx_pipeline_and_writes_mp4(monkeypatch, 
     project_path = tmp_path / "project"
     data_dir.mkdir()
     project_path.mkdir()
+    monkeypatch.setenv("SCENEWORKS_DATA_DIR", str(data_dir))
     (data_dir / "recent-projects.json").write_text(
         json.dumps([{"id": "project-1", "path": str(project_path)}]),
         encoding="utf-8",
@@ -1262,6 +1264,7 @@ def test_native_ltx_image_to_video_passes_source_image_conditioning(monkeypatch,
     project_path = tmp_path / "project"
     data_dir.mkdir()
     project_path.mkdir()
+    monkeypatch.setenv("SCENEWORKS_DATA_DIR", str(data_dir))
     (data_dir / "recent-projects.json").write_text(
         json.dumps([{"id": "project-1", "path": str(project_path)}]),
         encoding="utf-8",
@@ -1275,7 +1278,9 @@ def test_native_ltx_image_to_video_passes_source_image_conditioning(monkeypatch,
     )
     checkpoint, spatial, lora, gemma = write_native_ltx_resource_files(tmp_path)
     manifest_entry = write_native_ltx_manifest(config_dir, checkpoint=checkpoint, spatial=spatial, lora=lora, gemma=gemma)
-    ic_lora = tmp_path / "identity-control.safetensors"
+    lora_dir = data_dir / "loras"
+    lora_dir.mkdir()
+    ic_lora = lora_dir / "identity-control.safetensors"
     ic_lora.write_bytes(b"ic-lora")
     calls = {"run": None, "encode": None}
 
@@ -1390,6 +1395,7 @@ def test_native_ltx_image_to_video_falls_back_without_ic_lora(monkeypatch, tmp_p
     project_path = tmp_path / "project"
     data_dir.mkdir()
     project_path.mkdir()
+    monkeypatch.setenv("SCENEWORKS_DATA_DIR", str(data_dir))
     (data_dir / "recent-projects.json").write_text(
         json.dumps([{"id": "project-1", "path": str(project_path)}]),
         encoding="utf-8",
@@ -1403,7 +1409,9 @@ def test_native_ltx_image_to_video_falls_back_without_ic_lora(monkeypatch, tmp_p
     )
     checkpoint, spatial, lora, gemma = write_native_ltx_resource_files(tmp_path)
     manifest_entry = write_native_ltx_manifest(config_dir, checkpoint=checkpoint, spatial=spatial, lora=lora, gemma=gemma)
-    style_lora = tmp_path / "cinematic-style.safetensors"
+    lora_dir = data_dir / "loras"
+    lora_dir.mkdir()
+    style_lora = lora_dir / "cinematic-style.safetensors"
     style_lora.write_bytes(b"style-lora")
     calls = {"init": None, "run": None}
 
@@ -1517,6 +1525,7 @@ def test_native_ltx_extend_clip_uses_ic_lora_video_conditioning(monkeypatch, tmp
     project_path = tmp_path / "project"
     data_dir.mkdir()
     project_path.mkdir()
+    monkeypatch.setenv("SCENEWORKS_DATA_DIR", str(data_dir))
     (data_dir / "recent-projects.json").write_text(
         json.dumps([{"id": "project-1", "path": str(project_path)}]),
         encoding="utf-8",
@@ -1530,7 +1539,9 @@ def test_native_ltx_extend_clip_uses_ic_lora_video_conditioning(monkeypatch, tmp
     )
     checkpoint, spatial, lora, gemma = write_native_ltx_resource_files(tmp_path)
     manifest_entry = write_native_ltx_manifest(config_dir, checkpoint=checkpoint, spatial=spatial, lora=lora, gemma=gemma)
-    ic_lora = tmp_path / "identity-control.safetensors"
+    lora_dir = data_dir / "loras"
+    lora_dir.mkdir()
+    ic_lora = lora_dir / "identity-control.safetensors"
     ic_lora.write_bytes(b"ic-lora")
     calls = {"init": None, "run": None, "encode": None}
 

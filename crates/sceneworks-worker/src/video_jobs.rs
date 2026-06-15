@@ -6844,7 +6844,7 @@ mod tests {
         };
         let specs = resolve_wan_vace_adapters(&settings, &req).expect("resolve vace adapters");
         assert_eq!(specs.len(), 2);
-        assert_eq!(specs[0].path, plain);
+        assert_eq!(specs[0].path, plain.canonicalize().unwrap());
         assert_eq!(specs[0].kind, AdapterKind::Lora);
         assert!((specs[0].scale - 0.5).abs() < 1e-6);
         assert!(specs[0].moe_expert.is_none(), "VACE is single-dense");
@@ -6931,7 +6931,7 @@ mod tests {
         };
         let specs = resolve_scail2_adapters(&settings, &req).expect("resolve scail2 adapters");
         assert_eq!(specs.len(), 2);
-        assert_eq!(specs[0].path, plain);
+        assert_eq!(specs[0].path, plain.canonicalize().unwrap());
         assert_eq!(specs[0].kind, AdapterKind::Lora);
         assert!((specs[0].scale - 1.0).abs() < 1e-6);
         assert!(specs[0].moe_expert.is_none(), "SCAIL-2 is single-dense");
