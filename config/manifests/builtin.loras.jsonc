@@ -78,6 +78,29 @@
         "repo": "SceneWorks/scail2-dpo-lora",
         "file": "scail2-dpo-lora.safetensors"
       }
+    },
+    {
+      // SCAIL-2 lightx2v lightning SPEED toggle (sc-5684 / sc-5700). The cross-architecture
+      // step-distill ("lightning") LoRA from lightx2v's Wan2.1-I2V-14B repo (Apache-2.0): a hybrid
+      // diff-patch file (full-rank .diff/.diff_b on the norms/biases/head + low-rank lora_down/up on
+      // the dim-5120 projections). The engine installs it via an in-place dense merge that handles
+      // the diff patches and deliberately skips the cross-arch in_dim-36 `patch_embedding` (mlx-gen
+      // #465); selecting it makes the worker auto-apply the step-distill recipe — 8 steps, CFG off
+      // (guidance 1.0), scheduler shift 1.0 — for ~10× fewer DiT passes (minutes → near-sub-minute).
+      // Referenced directly from lightx2v's HF repo (no re-host); downloaded on demand. Requires the
+      // DENSE bf16 snapshot (the in-place merge can't fold into pre-quantized weights) — the published
+      // SceneWorks/scail2-mlx snapshot is bf16 + load-time Q4, which satisfies this.
+      "id": "scail2_lightning",
+      "name": "SCAIL-2 Lightning (8-step, fast)",
+      "family": "scail2",
+      "triggerWords": [],
+      "compatibility": { "families": ["scail2"] },
+      "defaultWeight": 1.0,
+      "source": {
+        "provider": "huggingface",
+        "repo": "lightx2v/Wan2.1-I2V-14B-480P-StepDistill-CfgDistill-Lightx2v",
+        "file": "loras/Wan21_I2V_14B_lightx2v_cfg_step_distill_lora_rank64.safetensors"
+      }
     }
   ]
 }
