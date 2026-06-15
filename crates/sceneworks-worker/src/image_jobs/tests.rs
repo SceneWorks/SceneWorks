@@ -983,6 +983,9 @@ fn smoke_generate_one(
         negative_prompt,
         None,
         None,
+        None,
+        None,
+        None,
         &cancel,
         &mut |p| {
             if let gen_core::Progress::Step { current, .. } = p {
@@ -1153,6 +1156,9 @@ fn lens_turbo_real_weights_bucket_resolution() {
         None,
         None,
         None,
+        None,
+        None,
+        None,
         &cancel,
         &mut |_p| {},
     )
@@ -1258,6 +1264,9 @@ fn kolors_real_weights_img2img_generates_one_image() {
         Some("blurry, low quality".to_owned()),
         Some(&(source, 0.6)),
         None,
+        None,
+        None,
+        None,
         &cancel,
         &mut |p| {
             if let gen_core::Progress::Step { current, .. } = p {
@@ -1303,6 +1312,9 @@ fn kolors_real_weights_ip_adapter_generates_one_image() {
         Some(5.0),
         Some("blurry, low quality".to_owned()),
         Some(&(reference, 0.6)),
+        None,
+        None,
+        None,
         None,
         &cancel,
         &mut |p| {
@@ -1632,6 +1644,9 @@ fn smoke_generate_one_true_cfg(
         negative_prompt,
         None,
         true_cfg,
+        None,
+        None,
+        None,
         &cancel,
         &mut |p| {
             if let gen_core::Progress::Step { current, .. } = p {
@@ -1817,6 +1832,9 @@ fn sc3031_ab_dump_txt2img() {
         steps,
         guidance,
         negative,
+        None,
+        None,
+        None,
         None,
         None,
         &cancel,
