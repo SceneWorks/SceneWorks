@@ -488,6 +488,14 @@ async fn generate_instantid_stream(
     let (controlnet, ip_adapter, scrfd_path, arcface_path) =
         ensure_instantid_weights(api, settings, job).await?;
 
+    // User style/character LoRAs (sc-6038). InstantID is a stock SDXL (RealVisXL) UNet, so SDXL
+    // adapters apply on top of IdentityNet + the identity IP-Adapter — and the manifest advertises
+    // `families:[sdxl]`, so the picker offers them. Resolved + path-confined exactly like every other
+    // SDXL-family path (base.rs/sdxl.rs); merged onto the UNet by the engine `InstantIdPaths.adapters`
+    // seam. Shared across all three modes (identity / angle set / pose) since they share the one load.
+    let adapters = resolve_adapters(request, settings)?;
+    let adapter_count = adapters.len();
+
     let steps = instantid_steps(request);
     let guidance = instantid_guidance(request);
     let (quant_bits, recipe_bits) = instantid_quant(request);
@@ -558,6 +566,11 @@ async fn generate_instantid_stream(
     if face_restore {
         raw_settings.insert("faceRestore".to_owned(), Value::Bool(true));
     }
+    // Record how many user LoRAs were merged onto the SDXL UNet (sc-6038) so the asset sidecar shows
+    // the adapters were applied (they previously rode the request but were silently dropped).
+    if adapter_count > 0 {
+        raw_settings.insert("appliedLoraCount".to_owned(), json!(adapter_count));
+    }
     // Record which collection + ordered presets produced the set, so each asset (by index) maps
     // back to the preset that rendered it (sc-4450).
     if let Some((collection_id, presets)) = &angle_collection {
@@ -625,19 +638,17 @@ async fn generate_instantid_stream(
     let (cancel, rx, blocking) = start_gen_stream(
         job.id.clone(),
         "instantid",
-        0,
+        adapter_count,
         move || {
             let paths = InstantIdPaths {
                 sdxl_base,
                 identitynet: controlnet,
                 ip_adapter,
-                // sc-6038 added a required `adapters` (user LoRA/LoKr) field to the CANDLE
-                // `InstantIdPaths` (candle-gen #86); the macOS mlx `InstantIdPaths` (worker mlx pin
-                // 3714e7b) does not carry it yet, so cfg the field to the candle build to keep BOTH
-                // backends compiling. Empty = no LoRA (the current behavior); populating it from the
-                // request is the candle InstantID-LoRA worker wiring, which is sc-6038's own follow-up.
-                #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
-                adapters: Vec::new(),
+                // User LoRA/LoKr adapters (sc-6038), resolved above and merged onto the SDXL UNet by
+                // both engine lanes (mlx-gen #477 / candle-gen #86 both carry the field; worker mlx
+                // pin now 19d5522, candle pin c98609f). Populated for BOTH backends — superseding the
+                // earlier candle-only `Vec::new()` stopgap from #730.
+                adapters,
             };
             let model = InstantId::load(&paths)
                 .map_err(|error| WorkerError::Engine(format!("InstantID load failed: {error}")))?;
