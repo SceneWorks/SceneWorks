@@ -127,6 +127,10 @@ use the `ffmpeg` found on `PATH`. To download from gated/authenticated repos
 (e.g. gated Hugging Face models, Civit.ai), add a token in the app — see
 [Service Credentials](#service-credentials-api-tokens) below.
 
+For the full per-job-kind breakdown of which worker (Python torch vs Rust MLX)
+handles each job type — and the routing rules that decide — see the
+[Worker Capability Matrix](crates/sceneworks-worker/ARCHITECTURE.md).
+
 ## Local Access Control
 
 Local-only development is open by default. To require a simple pairing token for LAN or shared-machine use, copy `.env.example` to `.env` and set:
