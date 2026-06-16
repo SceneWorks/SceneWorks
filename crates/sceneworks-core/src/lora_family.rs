@@ -836,11 +836,14 @@ pub const MAX_JOB_LORAS: usize = 3;
 /// (Python `EXTRA_COMPATIBLE_LORA_FAMILIES`). Chroma is FLUX.1-derived and shares
 /// Flux's block layout, so Flux LoRAs load on Chroma (one-directional). FLUX.2
 /// [klein]'s model family is `flux2-klein` but klein LoRAs are detected/declared
-/// as `flux2`, so a klein model must accept `flux2` LoRAs.
+/// as `flux2`, so a klein model must accept `flux2` LoRAs. FLUX.2-dev's family is
+/// `flux2-dev` (a separate model — Mistral3 TE + 48/48 DiT) but it shares the FLUX.2
+/// transformer layout, so dev LoRAs are likewise detected/declared as `flux2` (epic 5914;
+/// dev LoRA application is validated in sc-5920).
 fn extra_compatible_lora_families(normalized_family: &str) -> &'static [&'static str] {
     match normalized_family {
         "chroma" => &["flux"],
-        "flux2-klein" => &["flux2"],
+        "flux2-klein" | "flux2-dev" => &["flux2"],
         _ => &[],
     }
 }

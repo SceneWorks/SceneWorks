@@ -208,6 +208,16 @@ fn mlx_model_table_maps_known_families() {
         mlx_model("flux2_klein_9b_true_v2").unwrap().default_steps(),
         24
     );
+    // FLUX.2-dev (epic 5914): its OWN engine model (not a klein weight variant), embedded
+    // distilled guidance (guidance scalar, no negative prompt — like klein but ~28 steps /
+    // guidance 4.0). Shares the `mlx_flux2` adapter.
+    let dev = mlx_model("flux2_dev").unwrap();
+    assert_eq!(dev.engine_id(), "flux2_dev");
+    assert_eq!(dev.adapter_label(), "mlx_flux2");
+    assert_eq!(dev.default_repo(), "black-forest-labs/FLUX.2-dev");
+    assert_eq!(dev.default_steps(), 28);
+    assert_eq!(dev.default_guidance(), 4.0);
+    assert!(dev.supports_guidance() && !dev.supports_negative_prompt());
     // SDXL + the realvisxl finetune share the single `sdxl` engine model (real CFG).
     for id in ["sdxl", "realvisxl"] {
         let m = mlx_model(id).unwrap();
@@ -1180,6 +1190,26 @@ fn flux2_klein_9b_true_v2_real_weights_generates_one_image() {
     let dir = dirs_home()
         .join("Library/Application Support/SceneWorks/data/models/mlx/flux2_klein_9b_true_v2");
     smoke_generate_one("flux2_klein_9b_true_v2", dir, Some(1.0), None);
+}
+
+/// Real-weights smoke (sc-5921 / sc-5923 boundary): FLUX.2-dev (embedded guidance, ~28-step).
+/// Loads the install-time pre-quantized Q4 dir under the SceneWorks data dir
+/// (`models/mlx/flux2_dev`, assembled by the `flux2_dev_quant` convert job) via the
+/// `flux2_dev` engine id — proving the worker's `mlx_gen_flux2` force-link reaches the dev
+/// loader and that the packed snapshot loads + generates (the Q8 LoadSpec hint is a no-op on
+/// the already-packed weights). Needs a previously-converted dir + a 128 GB Metal device.
+/// `SCENEWORKS_FLUX2_DEV_DIR` overrides the dir. Run on demand:
+/// `cargo test -p sceneworks-worker --lib -- --ignored flux2_dev_real_weights`.
+#[cfg(target_os = "macos")]
+#[test]
+#[ignore = "needs a converted FLUX.2-dev Q4 dir + 128 GB Metal device"]
+fn flux2_dev_real_weights_generates_one_image() {
+    let dir = std::env::var("SCENEWORKS_FLUX2_DEV_DIR")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|_| {
+            dirs_home().join("Library/Application Support/SceneWorks/data/models/mlx/flux2_dev")
+        });
+    smoke_generate_one("flux2_dev", dir, Some(4.0), None);
 }
 
 /// Real-weights smoke: SDXL base (real CFG, guidance 7.0 + a negative prompt,

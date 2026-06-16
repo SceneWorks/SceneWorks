@@ -664,6 +664,9 @@ fn model_table_rows_resolve_and_flags_match_descriptor() {
         ("flux2_klein_9b", true, false),
         ("flux2_klein_9b_kv", true, false),
         ("flux2_klein_9b_true_v2", true, false),
+        // FLUX.2-dev (epic 5914 / sc-5921): its own `flux2_dev` engine id, embedded distilled
+        // guidance (supports_guidance=true) with no negative prompt / true-CFG.
+        ("flux2_dev", true, false),
         ("sdxl", true, true),
         ("realvisxl", true, true),
         ("kolors", true, true),
