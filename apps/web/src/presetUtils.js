@@ -21,7 +21,7 @@ export function clearPresetDefault(setter, snapshots, key) {
 }
 
 export const defaultModesByWorkflow = {
-  text_to_image: ["text_to_image", "character_image", "style_variations"],
+  text_to_image: ["text_to_image", "character_image"],
   edit_image: ["edit_image"],
   image_to_video: ["image_to_video"],
   text_to_video: ["text_to_video"],
@@ -32,7 +32,6 @@ export const modeLabels = {
   text_to_image: "Text",
   edit_image: "Edit",
   character_image: "Character",
-  style_variations: "Variations",
   image_to_video: "Image Video",
   text_to_video: "Text Video",
   first_last_frame: "First/Last",
@@ -322,8 +321,8 @@ export function slugifyPresetId(value) {
 }
 
 // Map an active studio mode to the recipe workflow it persists under. Inverts
-// defaultModesByWorkflow, so character_image / style_variations both fold into
-// text_to_image (the only workflow whose modes include them).
+// defaultModesByWorkflow, so character_image folds into text_to_image (the only
+// workflow whose modes include it).
 export function workflowForMode(mode) {
   for (const [workflow, modes] of Object.entries(defaultModesByWorkflow)) {
     if (modes.includes(mode)) {

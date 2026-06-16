@@ -161,8 +161,15 @@ function recipeResolution(recipe) {
   return typeof rawResolution === "string" && rawResolution.includes("x") ? rawResolution : null;
 }
 
+// Fold any mode the tabs no longer expose (a legacy `style_variations` snapshot,
+// an unknown value) back to text_to_image so a restored studio never lands on a
+// missing tab. style_variations was a no-op duplicate of text_to_image (sc-5950).
+function normalizeImageMode(mode) {
+  return IMAGE_MODES.includes(mode) ? mode : "text_to_image";
+}
+
 function recipeMode(recipe) {
-  return IMAGE_MODES.includes(recipe?.mode) ? recipe.mode : "text_to_image";
+  return normalizeImageMode(recipe?.mode);
 }
 
 function recipeLoraId(lora) {
@@ -284,7 +291,7 @@ export function ImageStudio() {
   const saved = useMemo(() => loadStudioSettings("image", activeProject?.id ?? null), [activeProject?.id]);
   const [sceneSuggestions] = useState(() => pickSuggestions(4));
   const [characterSuggestions] = useState(() => pickSuggestions(4, CHARACTER_SUGGESTION_POOL));
-  const [mode, setMode] = useState(saved.mode ?? "text_to_image");
+  const [mode, setMode] = useState(() => normalizeImageMode(saved.mode));
   const [prompt, setPrompt] = useState(saved.prompt ?? "A cinematic frame of a neon street at midnight");
   // True once the user types or picks a suggestion, so the character-mode default
   // prompt never clobbers their own wording. A restored prompt counts as edited so
@@ -468,9 +475,6 @@ export function ImageStudio() {
       // character's identity from one reference; gate the picker to them.
       return caps.includes("character_image") && !macModelFeatureBlock(item, macCapabilities, "reference");
     }
-    if (value === "style_variations") {
-      return caps.includes("style_variations") && !macModelFeatureBlock(item, macCapabilities, "reference");
-    }
     // text_to_image: only models that declare a real sourceless T2I path (sc-5549).
     // Without this gate the Text tab leaked edit-only models (run a degraded
     // sourceless edit) and reference-only identity models (MLX-ineligible without a
@@ -534,7 +538,7 @@ export function ImageStudio() {
   const macPoseBlock = macModelFeatureBlock(selectedModel, macCapabilities, "pose");
   const macActiveModeBlock = (() => {
     if (mode === "edit_image") return macEditBlock;
-    if (mode === "character_image" || mode === "style_variations") return macReferenceBlock;
+    if (mode === "character_image") return macReferenceBlock;
     return null;
   })();
   const macModeTabBlock = (value) => {
@@ -1089,7 +1093,6 @@ export function ImageStudio() {
                 ["text_to_image", "Text"],
                 ["edit_image", "Edit"],
                 ["character_image", "With character"],
-                ["style_variations", "Variations"],
               ].map(([value, label]) => {
                 const macBlock = macModeTabBlock(value);
                 return (

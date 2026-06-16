@@ -8418,7 +8418,7 @@ describe("SceneWorks app shell", () => {
         name: "Soft Morning",
         scope: "global",
         loras: [{ id: "global_detail", weight: 0.35 }],
-        modes: ["text_to_image", "character_image", "style_variations"],
+        modes: ["text_to_image", "character_image"],
       }),
     );
     expect(container.textContent).toContain("Ready");
