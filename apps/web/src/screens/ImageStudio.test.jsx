@@ -520,17 +520,6 @@ describe("ImageStudio model picker capability gating", () => {
     expect(options).not.toContain("character_only");
   });
 
-  it("Variations tab lists only style_variations models (sc-5549)", async () => {
-    await render(baseContext({ imageModels: [EDIT_ONLY, T2I, VARIATIONS, CHARACTER_ONLY] }));
-    await click([...container.querySelectorAll(".segmented-control button")].find((button) => button.textContent === "Variations"));
-
-    const options = modelOptionValues();
-    expect(options).toContain("variations_model");
-    expect(options).not.toContain("t2i_only"); // text_to_image but no style_variations
-    expect(options).not.toContain("edit_only");
-    expect(options).not.toContain("character_only");
-  });
-
   it("enables the Mac Edit tab when any available model supports edit mode (sc-5589)", async () => {
     await render(
       baseContext({

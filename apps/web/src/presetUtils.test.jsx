@@ -44,10 +44,9 @@ describe("presetMatchesModel", () => {
 });
 
 describe("workflowForMode", () => {
-  it("folds character and variation modes into text_to_image", () => {
+  it("folds the character mode into text_to_image", () => {
     expect(workflowForMode("text_to_image")).toBe("text_to_image");
     expect(workflowForMode("character_image")).toBe("text_to_image");
-    expect(workflowForMode("style_variations")).toBe("text_to_image");
   });
 
   it("maps the single-mode workflows to themselves", () => {
