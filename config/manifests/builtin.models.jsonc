@@ -564,8 +564,13 @@
         "schedulers": ["shift"]
       },
       "loraCompatibility": {
-        // An 8-step distill LoRA exists upstream but is not wired yet.
-        "families": [],
+        // SenseNova-U1 is an 8B MoT autoregressive image model with no diffusion-LoRA merge path,
+        // so no user LoRAs apply. Declare the model's own family rather than [] (sc-6038): an empty
+        // list matches EVERY LoRA in the picker (loraMatchesModel returns true when the model has no
+        // families) while the worker drops them all (sensenova.rs loads Vec::new()) — a silent
+        // ignore. No LoRA declares `sensenova-u1`, so the picker correctly offers none. (An 8-step
+        // distill LoRA exists upstream but is not wired.)
+        "families": ["sensenova-u1"],
         "types": []
       },
       "ui": {
@@ -634,8 +639,11 @@
         "schedulers": ["shift"]
       },
       "loraCompatibility": {
-        // The distill LoRA is baked into this variant; user LoRAs are not wired.
-        "families": [],
+        // No user-LoRA path (MoT autoregressive; the distill LoRA is baked into this variant).
+        // Declare the model's own family rather than [] (sc-6038): an empty list matches every LoRA
+        // in the picker but the worker drops them — no LoRA declares `sensenova-u1`, so none are
+        // offered.
+        "families": ["sensenova-u1"],
         "types": []
       },
       "ui": {
