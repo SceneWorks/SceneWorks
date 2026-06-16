@@ -180,12 +180,19 @@ export function CharacterStudio() {
     () => datasetsForProject.filter((dataset) => dataset.characterId === selectedCharacter?.id),
     [datasetsForProject, selectedCharacter?.id],
   );
-  const characterImageAssetIds = useMemo(
+  // This character's image/frame assets (generated for it, generated referencing
+  // it, or attached as references). sc-6042: this is the pool the Reference picker
+  // selects from — the character's own assets, not the whole project library.
+  const characterReferenceCandidates = useMemo(
     () =>
       selectedCharacter
-        ? imageAssets.filter((asset) => assetMatchesCharacter(asset, selectedCharacter.id, selectedCharacter)).map((asset) => asset.id)
+        ? imageAssets.filter((asset) => assetMatchesCharacter(asset, selectedCharacter.id, selectedCharacter))
         : [],
     [imageAssets, selectedCharacter?.id],
+  );
+  const characterImageAssetIds = useMemo(
+    () => characterReferenceCandidates.map((asset) => asset.id),
+    [characterReferenceCandidates],
   );
   // Thumbnail for the compact selector (sc-2025): a character's first approved
   // reference image, falling back to any reference. Null → placeholder tile.
@@ -523,7 +530,7 @@ export function CharacterStudio() {
               </div>
 
               <CharacterReferences
-                imageAssets={imageAssets}
+                referenceCandidates={characterReferenceCandidates}
                 onGenerateFromReference={(assetId) => onSendImage(selectedCharacter, testLookId || null, assetId)}
                 onPreview={onPreview}
                 referenceMessage={referenceMessage}
@@ -572,9 +579,12 @@ export function CharacterStudio() {
               role="tabpanel"
             >
               <CharacterAssets
+                addCharacterReference={addCharacterReference}
                 assets={assets}
                 deleteAsset={deleteAsset}
+                importAsset={importAsset}
                 onPreview={onPreview}
+                projectId={activeProject?.id}
                 purgeAsset={purgeAsset}
                 selectedCharacter={selectedCharacter}
                 updateAssetStatus={updateAssetStatus}
