@@ -3321,6 +3321,15 @@ fn image_job_is_candle_eligible(job: &JobSnapshot) -> bool {
     if model == "z_image_turbo" && zimage_control_candle_eligible(&job.payload) {
         return true;
     }
+    // PuLID-FLUX face identity (sc-5492, epic 5480): `pulid_flux_dev` is a distinct model id (not a
+    // candle txt2img id), so the `image_request_candle_eligible` gate below would reject it; the candle
+    // `candle-gen-pulid` provider serves it via a bespoke `generate_candle_pulid_stream` lane (the
+    // off-Mac sibling of the macOS `pulid_flux` registry route). Branch it out, returning eligibility
+    // directly — a non-character / reference-less job returns false → falls back to torch/MLX. Mirrors
+    // the worker's `pulid_candle_available`.
+    if model == "pulid_flux_dev" {
+        return pulid_flux_candle_eligible(&job.payload);
+    }
     image_request_candle_eligible(model, &job.payload)
 }
 
@@ -3581,6 +3590,16 @@ fn instantid_mlx_eligible(payload: &Map<String, Value>) -> bool {
 /// Mirrors the candle worker's `instantid_available` gate so the router and worker agree.
 fn instantid_candle_eligible(payload: &Map<String, Value>) -> bool {
     instantid_mlx_eligible(payload)
+}
+
+/// PuLID-FLUX candle-routing conditions (sc-5492, epic 5480). The candle `candle-gen-pulid` provider is
+/// the off-Mac sibling of `mlx-gen-pulid` and serves the IDENTICAL surface (a `character_image` job with
+/// a reference face → the PuLID identity injection on FLUX.1-dev), so the gate is the same as
+/// [`pulid_flux_mlx_eligible`]. Mirrors the candle worker's `pulid_candle_available` gate so the router
+/// and worker agree. `pulid_flux_dev` is a distinct model id (not `flux_dev`), so this never collides
+/// with the FLUX XLabs IP-Adapter lane.
+fn pulid_flux_candle_eligible(payload: &Map<String, Value>) -> bool {
+    pulid_flux_mlx_eligible(payload)
 }
 
 /// SDXL IP-Adapter-Plus candle-routing conditions (sc-5488, epic 5480). The candle `IpAdapterSdxl`
@@ -5706,6 +5725,34 @@ mod candle_routing_tests {
         }))));
         assert!(!flux_ipadapter_candle_eligible(&object(json!({
             "model": "flux_schnell", "referenceAssetId": "a", "maskAssetId": "m"
+        }))));
+    }
+
+    #[test]
+    fn pulid_flux_character_jobs_route_to_candle_off_mac() {
+        // The candle PuLID-FLUX provider (sc-5492) serves the SAME surface as the MLX path off-Mac, so
+        // a `pulid_flux_dev` character_image + referenceAssetId job is candle-eligible via the bespoke
+        // `image_job_is_candle_eligible` branch, NOT the txt2img-only `image_request_candle_eligible`
+        // gate (which rejects `referenceAssetId`, which PuLID requires). The distinct `pulid_flux_dev`
+        // model id cleanly disambiguates it from the FLUX XLabs IP-Adapter lane (`flux_dev`).
+        let payload = json!({
+            "model": "pulid_flux_dev",
+            "mode": "character_image",
+            "referenceAssetId": "asset_1",
+        });
+        assert!(pulid_flux_candle_eligible(&object(payload.clone())));
+        assert!(image_job_is_candle_eligible(&image_generate_job(payload)));
+
+        // No reference face → not candle-eligible (mirrors the MLX gate).
+        assert!(!image_job_is_candle_eligible(&image_generate_job(json!({
+            "model": "pulid_flux_dev",
+            "mode": "character_image"
+        }))));
+        // Non-character mode → not candle-eligible (PuLID is a character flow).
+        assert!(!image_job_is_candle_eligible(&image_generate_job(json!({
+            "model": "pulid_flux_dev",
+            "mode": "text_to_image",
+            "referenceAssetId": "asset_1"
         }))));
     }
 

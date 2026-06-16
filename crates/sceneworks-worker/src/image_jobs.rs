@@ -195,6 +195,15 @@ use candle_gen_kolors::{KolorsControl, KolorsControlPaths, KolorsControlRequest}
 // drives.
 #[cfg(all(target_os = "windows", feature = "backend-candle"))]
 use candle_gen_z_image::{ZImageControl, ZImageControlPaths, ZImageControlRequest};
+// PuLID-FLUX face-identity provider (sc-5492, epic 5480) — the candle (Windows/CUDA) sibling of the
+// macOS `pulid_flux` registry generator, living in `candle-gen-pulid` (the EVA02-CLIP tower + IDFormer
+// + the 20 PerceiverAttentionCA modules injected into the forked FLUX DiT via the post-block
+// `DitImageInjector` seam, composing the gen-core FaceEmbedder + the BiSeNet `face_features_image`).
+// Candle-only: macOS keeps the inventory-registered `pulid_flux` MLX generator; the candle `PulidFlux`
+// is a bespoke provider referenced BY NAME (like `InstantId`), so no `as _;` anchor is needed — this is
+// the named-type import the bespoke route (`image_jobs/pulid_candle.rs`) drives.
+#[cfg(all(target_os = "windows", feature = "backend-candle"))]
+use candle_gen_pulid::{PulidFlux, PulidFluxPaths, PulidFluxRequest};
 
 /// The stub adapter id recorded on generated assets (matches the contract fixture
 /// `tests/fixtures/rust_migration_contracts/sidecars/asset-image.sceneworks.json`).
@@ -519,6 +528,23 @@ pub(crate) async fn run_image_generate_job(
         // would be caught by the txt2img branch and silently drop the reference (the SDXL/Kolors IP
         // reasoning, for FLUX).
         generate_candle_flux_ipadapter_stream(
+            api,
+            settings,
+            job,
+            &plan,
+            &project_path,
+            backend,
+            &mut asset_writes,
+        )
+        .await?;
+        true
+    } else if settings.backend_candle_enabled && pulid_candle_available(&request, settings) {
+        // PuLID-FLUX face identity (sc-5492) — `pulid_flux_dev` is its OWN model id (not a candle
+        // txt2img id), so it would never be caught by the `is_candle_engine` branch below; routed here
+        // (grouped with the reference/identity lanes) to the bespoke candle `PulidFlux` stream. The
+        // distinct model id cleanly disambiguates it from the FLUX XLabs IP-Adapter lane above (both
+        // condition on a reference image, but that lane is `flux_dev`/`flux_schnell`).
+        generate_candle_pulid_stream(
             api,
             settings,
             job,
@@ -1098,6 +1124,11 @@ include!("image_jobs/kolors_control.rs");
 // MLX `z_image_turbo_control` registry generator; the candle `ZImageControl` is a bespoke provider.
 #[cfg(all(target_os = "windows", feature = "backend-candle"))]
 include!("image_jobs/zimage_control.rs");
+// PuLID-FLUX face identity — the Windows/CUDA candle lane ONLY (sc-5492). macOS keeps the
+// inventory-registered `pulid_flux` MLX generator (image_jobs/pulid.rs); the candle `PulidFlux` is a
+// bespoke provider, so this file is candle-gated and distinct from the macOS route.
+#[cfg(all(target_os = "windows", feature = "backend-candle"))]
+include!("image_jobs/pulid_candle.rs");
 #[cfg(target_os = "macos")]
 // PuLID-FLUX native routing.
 include!("image_jobs/pulid.rs");
