@@ -1108,6 +1108,77 @@
       }
     },
     {
+      "id": "flux2_dev",
+      "name": "FLUX.2 [dev]",
+      "family": "flux2-dev",
+      "type": "image",
+      // FLUX.2 [dev] (epic 5914) — the guidance-distilled 32B flagship, a SEPARATE
+      // model from klein: a Mistral3 text encoder (vs klein's Qwen3) + a 48/48/15360
+      // DiT, ported natively to mlx-gen (sc-5915/5916/5917/2365). MLX-only (no torch
+      // backend), Mac-only. T2I-only for now — the Pixtral edit/reference path is
+      // sc-5918/5919/5922. Shares the `mlx_flux2` adapter + the `flux2` engine.
+      "adapter": "mlx_flux2",
+      "capabilities": ["text_to_image"],
+      "macOnly": true,
+      "downloads": [
+        {
+          // Gated repo (FLUX [dev] Non-Commercial License v2.0). The repo ships BOTH
+          // the BFL single-file (flux2-dev.safetensors / ae.safetensors, ~60 GB) AND
+          // the diffusers tree; the native loader/converter reads ONLY the diffusers
+          // subdirs, so include just those (+ model_index.json) and skip the redundant
+          // ~60 GB single-file. ~113 GiB downloaded.
+          "provider": "huggingface",
+          "repo": "black-forest-labs/FLUX.2-dev",
+          "files": ["model_index.json", "transformer/*", "text_encoder/*", "vae/*", "tokenizer/*"],
+          "estimatedSizeBytes": 112823015150
+        }
+      ],
+      "defaults": {
+        // Guidance-distilled (embedded scalar, NOT true-CFG): ~28 steps (24–50 ok) at
+        // guidance 4.0 — the FLUX.1-dev pattern, no negative prompt. (sc-2365.)
+        "resolution": "1024x1024",
+        "steps": 28,
+        "guidanceScale": 4.0,
+        "count": 1
+      },
+      "limits": {
+        "resolutions": ["768x768", "1024x1024", "1280x720", "720x1280"],
+        "count": [1, 2]
+      },
+      // 32B DiT + ~24B Mistral TE. In-app Q4 *load* of the dense bf16 snapshot peaks
+      // ~105 GB (> the 128 GB ceiling), so the snapshot is pre-quantized to Q4 ON DISK
+      // by the install-time convert job (mlx.requiresConversion + the `flux2_dev_quant`
+      // converter, sc-5917): the offline quantize peaks ~34.5 GB. The worker then loads
+      // the packed dir (load `.quantize()` is a no-op on already-packed weights). Q4
+      // weights floor ~30 GB but generate is activation-bound — 1024²/28 peaks ~74 GB
+      // (sc-2365) — so minMemoryGb 96 (128 GB Macs only). The convert pre-quantizes
+      // transformer + text_encoder and symlinks the (identical-to-klein) VAE +
+      // tokenizer + model_index.json from the gated source snapshot.
+      "mlx": {
+        "minMemoryGb": 96,
+        "quantize": 4,
+        "requiresConversion": true,
+        "converter": "flux2_dev_quant",
+        "convertSourceRepo": "black-forest-labs/FLUX.2-dev"
+      },
+      "gated": true,
+      "credentialHost": "huggingface.co",
+      "licenseUrl": "https://huggingface.co/black-forest-labs/FLUX.2-dev",
+      "ui": {
+        "label": "FLUX.2 [dev]",
+        "description": "Black Forest Labs FLUX.2 [dev] — the 32B guidance-distilled flagship text-to-image model, ported natively to MLX (Apple Silicon only). A larger, higher-fidelity sibling of FLUX.2 [klein] with a Mistral-3 text encoder and a 48-layer flow transformer; runs ~28 steps at guidance 4.0. Pre-quantized to Q4 at install (the dense weights are too large to quantize in memory) and needs a 128 GB Mac (~74 GB peak at 1024²). Distributed under the FLUX [dev] Non-Commercial License (gated): accept the license at huggingface.co/black-forest-labs/FLUX.2-dev and add a Hugging Face token under Settings → Service credentials before downloading. Reference editing and LoRAs are coming separately.",
+        "recommendedFor": ["text_to_image"],
+        "promptGuide": {
+          "title": "FLUX.2 [dev] Prompt Guide",
+          "path": "/prompt-guides/flux2-dev.md",
+          "sources": [
+            { "label": "FLUX.2 [dev] model card", "url": "https://huggingface.co/black-forest-labs/FLUX.2-dev" },
+            { "label": "FLUX.2 announcement", "url": "https://bfl.ai/blog/flux-2" }
+          ]
+        }
+      }
+    },
+    {
       "id": "chroma1_hd",
       "name": "Chroma1-HD",
       "family": "chroma",

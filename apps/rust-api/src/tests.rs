@@ -349,6 +349,35 @@ fn inject_converted_model_path_populates_modelpath_seam_once_converted() {
     });
     inject_converted_model_path(&mut turnkey, &data_dir);
     assert!(turnkey.get("modelPath").is_none());
+
+    // FLUX.2-dev (sc-5921) converts to a packed Q4 dir whose top level is SUBDIRS
+    // (transformer/ + text_encoder/, each with its own config.json) plus a symlinked
+    // model_index.json — there is NO top-level config.json. The catalog's "converted"
+    // detection keys on the top-level model_index.json, so the modelPath seam is still
+    // injected for dev's subdir layout.
+    let dev_entry = || {
+        json!({
+            "id": "flux2_dev",
+            "mlx": {
+                "requiresConversion": true,
+                "converter": "flux2_dev_quant",
+                "convertSourceRepo": "black-forest-labs/FLUX.2-dev"
+            }
+        })
+    };
+    let dev_converted = data_dir.join("models").join("mlx").join("flux2_dev");
+    std::fs::create_dir_all(dev_converted.join("transformer")).expect("create dev transformer");
+    std::fs::write(dev_converted.join("transformer").join("config.json"), "{}")
+        .expect("write dev transformer config");
+    // No top-level config.json — only the model_index.json marker.
+    std::fs::write(dev_converted.join("model_index.json"), "{}").expect("write dev model_index");
+    let mut entry = dev_entry();
+    inject_converted_model_path(&mut entry, &data_dir);
+    assert_eq!(
+        entry.get("modelPath").and_then(Value::as_str),
+        Some(dev_converted.display().to_string().as_str()),
+        "dev's subdir layout is detected via its top-level model_index.json marker"
+    );
 }
 
 fn write_test_safetensors(path: &std::path::Path) {

@@ -2252,13 +2252,20 @@ fn mac_rust_supported_names_advanced_video_and_svd() {
 #[test]
 fn mac_rust_supported_convert_flux2_ok_else_python_gap() {
     let store = store("oracle-convert");
-    // The in-process Rust FLUX.2 converter is supported.
+    // The in-process Rust FLUX.2 converters are supported.
     let flux2 = job_of(
         &store,
         JobType::ModelConvert,
         json!({ "model": "flux2_klein_9b_true_v2", "converter": "flux2_klein_diffusers" }),
     );
     assert!(mac_rust_supported(&flux2).is_ok());
+    // FLUX.2-dev pre-quantization (sc-5921) is likewise an in-process Rust/MLX convert.
+    let flux2_dev = job_of(
+        &store,
+        JobType::ModelConvert,
+        json!({ "model": "flux2_dev", "converter": "flux2_dev_quant" }),
+    );
+    assert!(mac_rust_supported(&flux2_dev).is_ok());
     // The default/absent converter is the Python mlx-video Wan/LTX path → gap.
     let wan = job_of(&store, JobType::ModelConvert, json!({ "model": "wan_2_2" }));
     assert_eq!(
@@ -3935,11 +3942,13 @@ fn flux2_klein_variants_route_to_mlx_worker() {
     register_gpu_worker(&store, "worker-torch", "mps", image_caps());
     register_gpu_worker(&store, "worker-mlx", "mlx", image_caps());
 
-    // All three FLUX.2-klein txt2img variants (MLX-only family) route to the mlx worker.
+    // All three FLUX.2-klein txt2img variants + FLUX.2-dev (MLX-only family) route to the mlx
+    // worker (dev is txt2img-only today — epic 5914 / sc-5921).
     for model in [
         "flux2_klein_9b",
         "flux2_klein_9b_kv",
         "flux2_klein_9b_true_v2",
+        "flux2_dev",
     ] {
         let job = store
             .create_job(image_job_with(

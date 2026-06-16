@@ -456,6 +456,69 @@ fn convert_ltx_native(
         .to_owned())
 }
 
+/// Native Rust/MLX FLUX.2-dev pre-quantization convert (sc-5921, epic 5914). FLUX.2-dev is too large
+/// to quantize in memory at load — the dense bf16 snapshot (60 GB DiT + 45 GB Mistral TE) peaks
+/// ~105 GB > the 128 GB ceiling — so the install-time convert pre-quantizes the DiT + text encoder to
+/// Q`bits` **on disk** (offline peak ~34.5 GB; MLX mmap-streams the source, sc-5917) and assembles a
+/// packed snapshot: real packed `transformer/` + `text_encoder/` dirs (each one safetensors + a
+/// `quantization` manifest in config.json) plus the unchanged VAE + tokenizer + `model_index.json`
+/// symlinked from the gated source (the VAE is byte-identical to klein's). The worker then loads the
+/// packed dir via the `modelPath` seam; the load-time `.quantize()` is a no-op on already-packed
+/// weights. Absolute symlinks survive the worker's temp→final atomic rename, and `model_index.json`
+/// doubles as the catalog's "converted" marker (`mlx_catalog_status` looks for a top-level
+/// config.json/model_index.json). Runs MLX, so macOS-only.
+#[cfg(target_os = "macos")]
+fn convert_flux2_dev_prequant(
+    source_dir: &Path,
+    out_dir: &Path,
+    bits: i32,
+    group_size: i32,
+) -> Result<(), String> {
+    // CARVE-OUT(epic 3720): backend-specific weight converter; not a registry contract.
+    std::fs::create_dir_all(out_dir).map_err(|error| error.to_string())?;
+    mlx_gen_flux2::quantize_flux2_dit(
+        &source_dir.join("transformer"),
+        &out_dir.join("transformer"),
+        bits,
+        group_size,
+    )
+    .map_err(|error| format!("quantize FLUX.2-dev transformer: {error}"))?;
+    mlx_gen_flux2::quantize_flux2_text_encoder_dir(
+        &source_dir.join("text_encoder"),
+        &out_dir.join("text_encoder"),
+        bits,
+        group_size,
+    )
+    .map_err(|error| format!("quantize FLUX.2-dev text encoder: {error}"))?;
+    for sub in ["vae", "tokenizer", "model_index.json"] {
+        let src = source_dir.join(sub);
+        if !src.exists() {
+            return Err(format!(
+                "FLUX.2-dev source is missing `{sub}` — expected the gated diffusers snapshot of \
+                 black-forest-labs/FLUX.2-dev (transformer/ text_encoder/ vae/ tokenizer/ \
+                 model_index.json)."
+            ));
+        }
+        let canonical = std::fs::canonicalize(&src).map_err(|error| error.to_string())?;
+        std::os::unix::fs::symlink(&canonical, out_dir.join(sub))
+            .map_err(|error| error.to_string())?;
+    }
+    Ok(())
+}
+
+#[cfg(not(target_os = "macos"))]
+fn convert_flux2_dev_prequant(
+    _source_dir: &Path,
+    _out_dir: &Path,
+    _bits: i32,
+    _group_size: i32,
+) -> Result<(), String> {
+    Err(
+        "FLUX.2-dev conversion requires macOS (mlx-gen-flux2); this model is macOS-only."
+            .to_owned(),
+    )
+}
+
 /// The base `Lightricks/LTX-2.3` latent upsampler the LTX loader hard-requires (emitted as
 /// `upsampler.safetensors` in the converted dir). Neither the eros nor the base single-file
 /// checkpoint bundles it, so the converter merges it from the base repo at convert time.
@@ -510,13 +573,21 @@ enum ConvertPlan {
         upscaler_dir: PathBuf,
         bits: i32,
     },
+    /// FLUX.2-dev gated diffusers snapshot → packed Q`bits` dir (sc-5921): pre-quantize the DiT +
+    /// Mistral text encoder on disk, symlink the unchanged VAE/tokenizer/model_index.json.
+    Flux2Dev {
+        source_dir: PathBuf,
+        bits: i32,
+        group_size: i32,
+    },
 }
 
 /// Convert a model's native checkpoint into the local MLX format on macOS/Apple Silicon, fully
 /// in-process via the linked `mlx-gen-*` converters (epic 2337). The native checkpoint must already
 /// be downloaded into the Hugging Face cache (via a model_download job). The converter is selected by
-/// the manifest `mlx.converter` discriminator: `flux2_klein_diffusers` (sc-3136) or `ltx_video`
-/// (mlx-gen-ltx) — the only models that still install via in-app conversion. The Python
+/// the manifest `mlx.converter` discriminator: `flux2_klein_diffusers` (sc-3136), `ltx_video`
+/// (mlx-gen-ltx), or `flux2_dev_quant` (FLUX.2-dev pre-quantization, sc-5921) — the models that
+/// install via in-app conversion. The Python
 /// `mlx_video.convert_wan` subprocess + `SCENEWORKS_PYTHON` wiring were retired here (sc-3240); the
 /// Wan2.2 converters were decommissioned once those models flipped to pre-converted SceneWorks
 /// downloads (sc-5603, epic 5594).
@@ -577,6 +648,7 @@ pub(crate) async fn run_model_convert_job(
     // `mlx_video.convert_wan` subprocess and its mlx-video venv were retired at this cutover.
     //   flux2_klein_diffusers          -> FLUX.2-klein single-file → diffusers dir (sc-3136)
     //   ltx_video                      -> single-file LTX-2.3 → split MLX dir (mlx-gen-ltx)
+    //   flux2_dev_quant                -> FLUX.2-dev diffusers snapshot → packed Q4 dir (sc-5921)
     let converter = optional_payload_string(&job.payload, "converter")
         .map(str::to_owned)
         .unwrap_or_default();
@@ -676,6 +748,23 @@ pub(crate) async fn run_model_convert_job(
                 bits,
             }
         }
+        "flux2_dev_quant" => {
+            // FLUX.2-dev is self-contained (its own VAE/tokenizer/TE in the snapshot), so the whole
+            // gated diffusers snapshot dir is the convert source — no single source file, no base
+            // repo. Q4 is mandatory (in-app Q4 load of the dense bf16 would peak ~105 GB), so default
+            // to Q4 / group-size 64 when the request omits them.
+            let bits = quantize_bits.map_or(4, |bits| bits as i32);
+            let group_size = job
+                .payload
+                .get("quantizeGroupSize")
+                .and_then(Value::as_u64)
+                .map_or(64, |group| group as i32);
+            ConvertPlan::Flux2Dev {
+                source_dir: checkpoint_dir.clone(),
+                bits,
+                group_size,
+            }
+        }
         "" => {
             fail_job(
                 api,
@@ -764,6 +853,16 @@ pub(crate) async fn run_model_convert_job(
         } => {
             tokio::task::spawn_blocking(move || {
                 convert_ltx_native(&source_file, &upscaler_dir, &temp, bits)
+            })
+            .await
+        }
+        ConvertPlan::Flux2Dev {
+            source_dir,
+            bits,
+            group_size,
+        } => {
+            tokio::task::spawn_blocking(move || {
+                convert_flux2_dev_prequant(&source_dir, &temp, bits, group_size)
             })
             .await
         }

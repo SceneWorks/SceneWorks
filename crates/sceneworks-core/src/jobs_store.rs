@@ -2700,7 +2700,10 @@ fn classify_training_gap(payload: &Map<String, Value>) -> UnsupportedReason {
 /// (`flux2_klein_diffusers`, sc-3136). The default/absent converter is the Python mlx-video
 /// Wan/LTX path (sc-3491 / sc-3224).
 fn classify_convert_gap(payload: &Map<String, Value>) -> Result<(), UnsupportedReason> {
-    if payload.get("converter").and_then(Value::as_str) == Some("flux2_klein_diffusers") {
+    if matches!(
+        payload.get("converter").and_then(Value::as_str),
+        Some("flux2_klein_diffusers") | Some("flux2_dev_quant")
+    ) {
         return Ok(());
     }
     Err(UnsupportedReason::new(
@@ -3034,6 +3037,8 @@ const MLX_ROUTED_MODELS: &[&str] = &[
     "flux2_klein_9b",
     "flux2_klein_9b_kv",
     "flux2_klein_9b_true_v2",
+    // FLUX.2-dev (epic 5914) — MLX-only flagship, txt2img today (edit = sc-5919).
+    "flux2_dev",
     "sdxl",
     "realvisxl",
     // InstantID on RealVisXL (sc-3345): single-identity + the 11-view angle set route to the
@@ -3115,7 +3120,7 @@ fn image_request_mlx_eligible(model: &str, payload: &Map<String, Value>) -> bool
         | "qwen_image_edit_2509"
         | "qwen_image_edit_2511"
         | "qwen_image_edit_2511_lightning" => qwen_edit_mlx_eligible(payload),
-        "flux2_klein_9b" | "flux2_klein_9b_kv" | "flux2_klein_9b_true_v2" => {
+        "flux2_klein_9b" | "flux2_klein_9b_kv" | "flux2_klein_9b_true_v2" | "flux2_dev" => {
             flux2_mlx_eligible(payload)
         }
         "sdxl" | "realvisxl" => sdxl_mlx_eligible(payload),
@@ -3755,9 +3760,11 @@ fn pulid_flux_mlx_eligible(payload: &Map<String, Value>) -> bool {
         .is_some_and(|value| !value.trim().is_empty())
 }
 
-/// FLUX.2-klein MLX-routing conditions. FLUX.2-klein is an **MLX-only** family (no torch backend),
-/// so everything it does runs on MLX: txt2img (sc-3025), edit/reference + KV-cache + multi-reference
-/// (sc-3029), and — since epic 3641 (sc-3642/3643) — third-party LyCORIS via the core loader.
+/// FLUX.2 MLX-routing conditions, shared by klein and dev. FLUX.2 is an **MLX-only** family (no torch
+/// backend), so everything it does runs on MLX: klein txt2img (sc-3025), edit/reference + KV-cache +
+/// multi-reference (sc-3029), third-party LyCORIS via the core loader (epic 3641), and FLUX.2-dev
+/// txt2img (epic 5914 — dev's manifest advertises `text_to_image` only, so its edit/character modes
+/// are never offered until the Pixtral path lands in sc-5919).
 fn flux2_mlx_eligible(_payload: &Map<String, Value>) -> bool {
     true
 }
