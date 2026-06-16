@@ -11,7 +11,7 @@ use std::net::SocketAddr;
 // DownloadProgress, DownloadContext, HuggingFaceSnapshot — already build on every platform.)
 #[cfg(any(
     target_os = "macos",
-    all(target_os = "windows", feature = "backend-candle")
+    all(not(target_os = "macos"), feature = "backend-candle")
 ))]
 pub(crate) async fn ensure_cached_file(
     context: &DownloadContext<'_>,
@@ -51,7 +51,7 @@ pub(crate) async fn ensure_cached_file(
 
 #[cfg(any(
     target_os = "macos",
-    all(target_os = "windows", feature = "backend-candle")
+    all(not(target_os = "macos"), feature = "backend-candle")
 ))]
 async fn remote_content_length(client: &reqwest::Client, url: &str) -> WorkerResult<Option<u64>> {
     // `url` is built from trusted operator/runtime configuration
@@ -73,7 +73,7 @@ async fn remote_content_length(client: &reqwest::Client, url: &str) -> WorkerRes
 /// installed through the full model-download flow.
 #[cfg(any(
     target_os = "macos",
-    all(target_os = "windows", feature = "backend-candle")
+    all(not(target_os = "macos"), feature = "backend-candle")
 ))]
 pub(crate) async fn ensure_hf_cached_file(
     context: &DownloadContext<'_>,

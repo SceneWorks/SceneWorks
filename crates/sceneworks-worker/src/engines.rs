@@ -371,7 +371,7 @@ pub(crate) const TRAINER_IDS: &[&str] = &[
 /// only decides which provider crate registered the descriptor, not how it is resolved.
 #[cfg(any(
     target_os = "macos",
-    all(target_os = "windows", feature = "backend-candle")
+    all(not(target_os = "macos"), feature = "backend-candle")
 ))]
 pub(crate) struct ResolvedModel {
     pub row: &'static ModelRow,
@@ -380,7 +380,7 @@ pub(crate) struct ResolvedModel {
 
 #[cfg(any(
     target_os = "macos",
-    all(target_os = "windows", feature = "backend-candle")
+    all(not(target_os = "macos"), feature = "backend-candle")
 ))]
 impl ResolvedModel {
     pub fn engine_id(&self) -> &'static str {
@@ -399,7 +399,7 @@ impl ResolvedModel {
     // `image_jobs::candle_adapter_label` instead, so this accessor is MLX-path-only — silence the
     // dead-code lint on the candle-only build where the macOS dispatch is cfg'd out.
     #[cfg_attr(
-        all(target_os = "windows", feature = "backend-candle"),
+        all(not(target_os = "macos"), feature = "backend-candle"),
         allow(dead_code)
     )]
     pub fn adapter_label(&self) -> &'static str {
@@ -418,14 +418,14 @@ impl ResolvedModel {
     /// candle SDXL / sc-5096 families advertise none (dense only); Lens advertises Q4/Q8 (sc-5126).
     /// Candle-lane-only: the MLX path always resolves quant unconditionally, so this gate is unused
     /// on macOS.
-    #[cfg(all(target_os = "windows", feature = "backend-candle"))]
+    #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
     pub fn supports_quant(&self) -> bool {
         !self.descriptor.capabilities.supported_quants.is_empty()
     }
     /// Whether the engine accepts LoRA/LoKr adapters (descriptor-derived). Lens is the first candle
     /// family to advertise either (sc-5126); the others advertise neither. Candle-lane-only for the
     /// same reason as [`Self::supports_quant`].
-    #[cfg(all(target_os = "windows", feature = "backend-candle"))]
+    #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
     pub fn supports_adapters(&self) -> bool {
         self.descriptor.capabilities.supports_lora || self.descriptor.capabilities.supports_lokr
     }
@@ -444,7 +444,7 @@ impl ResolvedModel {
 /// resolves the MLX engine on macOS — the candle `generate_candle_stream` calls it directly.
 #[cfg(any(
     target_os = "macos",
-    all(target_os = "windows", feature = "backend-candle")
+    all(not(target_os = "macos"), feature = "backend-candle")
 ))]
 pub(crate) fn mlx_model(sceneworks_id: &str) -> Option<ResolvedModel> {
     let row = MODEL_TABLE

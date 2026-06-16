@@ -113,10 +113,11 @@ export function macFeatureBlock(caps, key) {
 //   * `aura-sr` — a torch-only GigaGAN DROPPED on Mac (sc-3668). Hidden only under active Mac
 //     gating; available on Windows/Linux. Real-ESRGAN is the cross-platform default.
 //   * `seedvr2` — the one-step diffusion upscaler (epic 4811 / sc-4815), the INVERSE of AuraSR:
-//     backed by native MLX on Mac and the Candle CUDA port on Windows (sc-5928); Linux candle
-//     enablement is sc-5160. Gated off the platform-intrinsic `imageUpscaleSeedvr2` capability (true
-//     on macOS + Windows, in any mode), so it is hidden pre-load and on Linux and shown on Mac +
-//     Windows — independent of the gating switch.
+//     backed by native MLX on Mac and the Candle CUDA/NVIDIA port on Windows (sc-5928) + Linux
+//     (sc-5160 — candle is CPU+CUDA cross-platform, so Linux rides the Windows port). Gated off the
+//     platform-intrinsic `imageUpscaleSeedvr2` capability (true on macOS + Windows + Linux, in any
+//     mode), so it is hidden only pre-load (no caps yet) and shown on every GPU platform —
+//     independent of the gating switch.
 export function macUpscaleEngineBlocked(caps, engine) {
   if (engine === "seedvr2") {
     return caps?.features?.imageUpscaleSeedvr2?.supported !== true;

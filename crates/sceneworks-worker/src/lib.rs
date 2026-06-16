@@ -40,7 +40,7 @@ use uuid::Uuid;
 // Windows/Linux build it stays excluded, so its accessors are never uncalled-dead there.
 #[cfg(any(
     target_os = "macos",
-    all(target_os = "windows", feature = "backend-candle")
+    all(not(target_os = "macos"), feature = "backend-candle")
 ))]
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 mod advanced;
@@ -119,7 +119,7 @@ mod kps_jobs;
 // Windows/Linux backend), while the SeedVR2 path is backend-neutral (`gen_core::load("seedvr2")`).
 #[cfg(any(
     target_os = "macos",
-    all(target_os = "windows", feature = "backend-candle")
+    all(not(target_os = "macos"), feature = "backend-candle")
 ))]
 mod upscale_jobs;
 // YOLO11 person detection via onnxruntime/CoreML (epic 3482, sc-3488/sc-3633).
@@ -152,7 +152,7 @@ use kps_jobs::*;
 use pose_jobs::*;
 #[cfg(any(
     target_os = "macos",
-    all(target_os = "windows", feature = "backend-candle")
+    all(not(target_os = "macos"), feature = "backend-candle")
 ))]
 use upscale_jobs::*;
 
@@ -765,7 +765,7 @@ async fn run_utility_job(
         // refuses `engine=seedvr2` on torch and `engine=real-esrgan`/`aura-sr` on the candle worker.
         #[cfg(any(
             target_os = "macos",
-            all(target_os = "windows", feature = "backend-candle")
+            all(not(target_os = "macos"), feature = "backend-candle")
         ))]
         JobType::ImageUpscale => run_image_upscale_job(api, settings, http_client, &job)
             .await
@@ -777,7 +777,7 @@ async fn run_utility_job(
         // (no torch path), so it falls to the `_` arm and the routing oracle reports it unsupported.
         #[cfg(any(
             target_os = "macos",
-            all(target_os = "windows", feature = "backend-candle")
+            all(not(target_os = "macos"), feature = "backend-candle")
         ))]
         JobType::VideoUpscale => run_video_upscale_job(api, settings, &job)
             .await

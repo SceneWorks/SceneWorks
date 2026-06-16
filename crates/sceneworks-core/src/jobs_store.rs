@@ -2402,9 +2402,10 @@ pub fn mac_capabilities(platform: &str, mac_gating_active: bool) -> MacCapabilit
     // accept the legacy `"darwin"` alias defensively. Drives the platform-intrinsic engine flags
     // (e.g. `imageUpscaleSeedvr2`, which is Mac-only) rather than the gating-rollout flag.
     let is_mac = matches!(platform, "macos" | "darwin");
-    // SeedVR2 has a backend on Mac (native MLX) and Windows (the candle CUDA port, sc-5928); Linux
-    // candle enablement is sc-5160. Drives the platform-intrinsic `imageUpscaleSeedvr2` flag.
-    let seedvr2_supported = is_mac || matches!(platform, "windows");
+    // SeedVR2 has a backend on Mac (native MLX) and on Windows + Linux (the candle CUDA/NVIDIA port:
+    // Windows sc-5928, Linux sc-5160 — candle is CPU+CUDA cross-platform so Linux rides the Windows
+    // port). Drives the platform-intrinsic `imageUpscaleSeedvr2` flag.
+    let seedvr2_supported = is_mac || matches!(platform, "windows" | "linux");
     let mut features = BTreeMap::new();
     // Third-party LyCORIS (LoHa / non-peft LoKr) now applies on every MLX provider (epic 3641:
     // core loader sc-3642/3643 + SDXL/Wan/LTX sc-3671), so it is no longer a Mac feature gap — the
@@ -2439,24 +2440,25 @@ pub fn mac_capabilities(platform: &str, mac_gating_active: bool) -> MacCapabilit
     );
     features.insert(
         // SeedVR2 (`engine=seedvr2`) is the one-step diffusion super-resolution upscaler — native MLX
-        // on Mac (epic 4811 / sc-4815, in-process `mlx-gen-seedvr2`) and the candle CUDA port on
-        // Windows (sc-5928 / epic 5482, `candle-gen-seedvr2`). Both back the same `engine=seedvr2`
-        // image upscale + the net-new `video_upscale`. This flag is platform-intrinsic (a backend
-        // exists, regardless of the gating rollout flag) so the web upscale picker offers SeedVR2 on
-        // Mac AND Windows and hides it only where there is no backend yet. Linux candle enablement is
-        // sc-5160 — until then SeedVR2 stays hidden on Linux (contrast AuraSR, which the UI hides only
-        // under active gating). Must agree with the routing oracle (mlx OR candle claims seedvr2; a
-        // plain torch worker refuses it).
+        // on Mac (epic 4811 / sc-4815, in-process `mlx-gen-seedvr2`) and the candle CUDA/NVIDIA port on
+        // Windows (sc-5928) + Linux (sc-5160) (epic 5482, `candle-gen-seedvr2`). Both back the same
+        // `engine=seedvr2` image upscale + the net-new `video_upscale`. This flag is platform-intrinsic
+        // (a backend exists, regardless of the gating rollout flag) so the web upscale picker offers
+        // SeedVR2 on every platform that has a backend (Mac, Windows, Linux) and hides it only where
+        // there is none (contrast AuraSR, which the UI hides only under active gating). Must agree with
+        // the routing oracle (mlx OR candle claims seedvr2; a plain torch worker refuses it).
         "imageUpscaleSeedvr2".to_owned(),
         MacFeatureSupport {
             supported: seedvr2_supported,
             reason: if seedvr2_supported {
                 None
             } else {
+                // Unreachable on the three platforms that build a SeedVR2 backend (mac/windows/linux);
+                // kept for any future platform that has neither MLX nor the candle CUDA/NVIDIA port.
                 Some(UnsupportedReason::new(
                     None,
                     "image_upscale (SeedVR2)",
-                    "SeedVR2 runs on Mac (native MLX) and Windows (the candle CUDA backend); Linux candle enablement is in progress.",
+                    "SeedVR2 runs on Mac (native MLX) and Windows/Linux (the candle CUDA/NVIDIA backend); this platform has no SeedVR2 backend.",
                     Some("sc-5160"),
                 ))
             },

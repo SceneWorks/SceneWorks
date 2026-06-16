@@ -12,12 +12,12 @@ use super::*;
 
 #[cfg(any(
     target_os = "macos",
-    all(target_os = "windows", feature = "backend-candle")
+    all(not(target_os = "macos"), feature = "backend-candle")
 ))]
 const JOY_CAPTION_MODEL: &str = "fancyfeast/llama-joycaption-beta-one-hf-llava";
 #[cfg(any(
     target_os = "macos",
-    all(target_os = "windows", feature = "backend-candle")
+    all(not(target_os = "macos"), feature = "backend-candle")
 ))]
 const CANCEL_MESSAGE: &str = "Training captioning canceled by user.";
 
@@ -26,7 +26,7 @@ const CANCEL_MESSAGE: &str = "Training captioning canceled by user.";
 // the registry).
 #[cfg(any(
     target_os = "macos",
-    all(target_os = "windows", feature = "backend-candle")
+    all(not(target_os = "macos"), feature = "backend-candle")
 ))]
 use gen_core::{
     CancelFlag, CaptionOptions, CaptionRequest, CaptionSampling, Image, LoadSpec, Progress,
@@ -37,12 +37,12 @@ use mlx_gen_joycaption as _;
 // Candle JoyCaption captioner force-link anchor (sc-5098): keeps its `inventory::submit!` captioner
 // registration (`fancyfeast/llama-joycaption-beta-one-hf-llava`, backend `candle`) from being dropped
 // by the MSVC release linker. Mirrors the mlx anchor above.
-#[cfg(all(target_os = "windows", feature = "backend-candle"))]
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 use candle_gen_joycaption as _;
 
 #[cfg(any(
     target_os = "macos",
-    all(target_os = "windows", feature = "backend-candle")
+    all(not(target_os = "macos"), feature = "backend-candle")
 ))]
 #[derive(Clone, Debug)]
 struct CaptionItem {
@@ -53,7 +53,7 @@ struct CaptionItem {
 
 #[cfg(any(
     target_os = "macos",
-    all(target_os = "windows", feature = "backend-candle")
+    all(not(target_os = "macos"), feature = "backend-candle")
 ))]
 #[derive(Clone, Debug)]
 struct CaptionJobOptions {
@@ -63,7 +63,7 @@ struct CaptionJobOptions {
 
 #[cfg(any(
     target_os = "macos",
-    all(target_os = "windows", feature = "backend-candle")
+    all(not(target_os = "macos"), feature = "backend-candle")
 ))]
 #[derive(Debug)]
 enum CaptionEvent {
@@ -82,7 +82,7 @@ enum CaptionEvent {
 
 #[cfg(any(
     target_os = "macos",
-    all(target_os = "windows", feature = "backend-candle")
+    all(not(target_os = "macos"), feature = "backend-candle")
 ))]
 pub(crate) async fn run_training_caption_job(
     api: &ApiClient,
@@ -330,7 +330,7 @@ pub(crate) async fn run_training_caption_job(
 
 #[cfg(not(any(
     target_os = "macos",
-    all(target_os = "windows", feature = "backend-candle")
+    all(not(target_os = "macos"), feature = "backend-candle")
 )))]
 pub(crate) async fn run_training_caption_job(
     _api: &ApiClient,
@@ -346,7 +346,7 @@ pub(crate) async fn run_training_caption_job(
 
 #[cfg(any(
     target_os = "macos",
-    all(target_os = "windows", feature = "backend-candle")
+    all(not(target_os = "macos"), feature = "backend-candle")
 ))]
 fn caption_progress(
     status: JobStatus,
@@ -375,7 +375,7 @@ fn caption_progress(
 
 #[cfg(any(
     target_os = "macos",
-    all(target_os = "windows", feature = "backend-candle")
+    all(not(target_os = "macos"), feature = "backend-candle")
 ))]
 fn caption_result(
     model_name_or_path: &str,
@@ -408,7 +408,7 @@ fn caption_result(
 
 #[cfg(any(
     target_os = "macos",
-    all(target_os = "windows", feature = "backend-candle")
+    all(not(target_os = "macos"), feature = "backend-candle")
 ))]
 fn caption_items(settings: &Settings, payload: &JsonObject) -> WorkerResult<Vec<CaptionItem>> {
     let dataset_root = payload
@@ -482,7 +482,7 @@ fn caption_items(settings: &Settings, payload: &JsonObject) -> WorkerResult<Vec<
 
 #[cfg(any(
     target_os = "macos",
-    all(target_os = "windows", feature = "backend-candle")
+    all(not(target_os = "macos"), feature = "backend-candle")
 ))]
 fn caption_job_options(payload: &JsonObject) -> CaptionJobOptions {
     let options = payload
@@ -529,7 +529,7 @@ fn caption_job_options(payload: &JsonObject) -> CaptionJobOptions {
 
 #[cfg(any(
     target_os = "macos",
-    all(target_os = "windows", feature = "backend-candle")
+    all(not(target_os = "macos"), feature = "backend-candle")
 ))]
 fn option_string(options: &JsonObject, key: &str, default: &str) -> String {
     options
@@ -541,7 +541,7 @@ fn option_string(options: &JsonObject, key: &str, default: &str) -> String {
 
 #[cfg(any(
     target_os = "macos",
-    all(target_os = "windows", feature = "backend-candle")
+    all(not(target_os = "macos"), feature = "backend-candle")
 ))]
 fn resolve_caption_weights_dir(
     settings: &Settings,
@@ -552,7 +552,7 @@ fn resolve_caption_weights_dir(
 
 #[cfg(any(
     target_os = "macos",
-    all(target_os = "windows", feature = "backend-candle")
+    all(not(target_os = "macos"), feature = "backend-candle")
 ))]
 fn load_caption_image(path: &Path) -> WorkerResult<Image> {
     let decoded = image::open(path)
@@ -569,7 +569,7 @@ fn load_caption_image(path: &Path) -> WorkerResult<Image> {
 
 #[cfg(any(
     target_os = "macos",
-    all(target_os = "windows", feature = "backend-candle")
+    all(not(target_os = "macos"), feature = "backend-candle")
 ))]
 fn caption_step_progress(index: usize, current: u32, total: u32, item_count: usize) -> f64 {
     let item_count = item_count.max(1) as f64;
@@ -589,7 +589,7 @@ fn caption_step_progress(index: usize, current: u32, total: u32, item_count: usi
 /// case (just the missing trigger words).
 #[cfg(any(
     target_os = "macos",
-    all(target_os = "windows", feature = "backend-candle")
+    all(not(target_os = "macos"), feature = "backend-candle")
 ))]
 fn apply_trigger_words(caption: &str, trigger_words: &[String]) -> String {
     let cleaned = caption.split_whitespace().collect::<Vec<_>>().join(" ");
@@ -611,7 +611,7 @@ fn apply_trigger_words(caption: &str, trigger_words: &[String]) -> String {
     test,
     any(
         target_os = "macos",
-        all(target_os = "windows", feature = "backend-candle")
+        all(not(target_os = "macos"), feature = "backend-candle")
     )
 ))]
 mod tests {
