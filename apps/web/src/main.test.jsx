@@ -2,7 +2,7 @@ import React, { act } from "react";
 import { createRoot } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { App, ErrorBoundary, eventUrl } from "./main.jsx";
-import { AssetPickerField } from "./components/AssetPicker.jsx";
+import { AssetPickerField, CharacterImportDialog } from "./components/AssetPicker.jsx";
 import { assetUrl } from "./components/assetMedia.jsx";
 import { AssetDetail, FullscreenPreview } from "./components/assetPanels.jsx";
 import { liveElapsedSeconds } from "./formatting.js";
@@ -2176,6 +2176,109 @@ describe("SceneWorks app shell", () => {
     expect(container.textContent).toContain("Beta");
   });
 
+  it("drops the category tabs when showCategories is false (sc-6042 reference picker)", async () => {
+    const onChange = vi.fn();
+    const assets = [
+      { id: "image-alpha", type: "image", displayName: "Alpha" },
+      { id: "clip-gamma", type: "video", displayName: "Gamma", file: { mimeType: "video/mp4" } },
+    ];
+
+    root = createRoot(container);
+    await act(async () => {
+      root.render(
+        <AssetPickerField assets={assets} label="Reference assets" multiple onChange={onChange} showCategories={false} values={[]} />,
+      );
+    });
+    await act(async () => {
+      [...container.querySelectorAll("button")].find((button) => button.textContent === "Select").click();
+    });
+
+    // No "Asset category" segmented control, but the scoped grid still renders.
+    expect(container.querySelector('[aria-label="Asset category"]')).toBeNull();
+    expect(container.textContent).not.toContain("Renders");
+    expect(container.querySelectorAll(".asset-picker-card")).toHaveLength(2);
+  });
+
+  const characterImportAssets = () => [
+    { id: "p-img1", type: "image", projectId: "project-1", displayName: "Project Image 1" },
+    { id: "p-img2", type: "image", projectId: "project-1", displayName: "Project Image 2" },
+    { id: "p-vid1", type: "video", projectId: "project-1", displayName: "Project Video 1", file: { mimeType: "video/mp4" } },
+    // Already in the character library → excluded from the Images tab.
+    { id: "c-img", type: "image", projectId: "project-1", displayName: "Already linked", recipe: { normalizedSettings: { characterId: "char-1" } } },
+    // Different project → excluded everywhere.
+    { id: "x-img", type: "image", projectId: "project-2", displayName: "Other project" },
+  ];
+
+  function renderCharacterImport(overrides = {}) {
+    const props = {
+      assets: characterImportAssets(),
+      character: { id: "char-1", name: "Mira", references: [] },
+      characterId: "char-1",
+      characterName: "Mira",
+      importAsset: vi.fn(async () => ({ id: "uploaded-1", type: "image", projectId: "project-1", displayName: "Fresh" })),
+      onClose: vi.fn(),
+      onImport: vi.fn(async () => {}),
+      projectId: "project-1",
+      ...overrides,
+    };
+    root = createRoot(container);
+    return { props };
+  }
+
+  it("imports the selected project images into the character library (sc-6042)", async () => {
+    const { props } = renderCharacterImport();
+    await act(async () => {
+      root.render(<CharacterImportDialog {...props} />);
+    });
+
+    // Three tabs, all multi-select; Images excludes already-linked + other-project.
+    expect([...container.querySelectorAll('[role="tab"]')].map((tab) => tab.textContent.replace(/\d+/g, ""))).toEqual([
+      "Images",
+      "Videos",
+      "Upload",
+    ]);
+    const cards = [...container.querySelectorAll(".asset-picker-card")];
+    expect(cards).toHaveLength(2);
+    await act(async () => {
+      cards[0].click();
+      cards[1].click();
+    });
+    await act(async () => {
+      [...container.querySelectorAll("button")].find((button) => button.textContent.startsWith("Import")).click();
+    });
+    expect(props.onImport).toHaveBeenCalledWith(["p-img1", "p-img2"]);
+    expect(props.onClose).toHaveBeenCalled();
+  });
+
+  it("lists project videos and uploads local files into the character library (sc-6042)", async () => {
+    const { props } = renderCharacterImport();
+    await act(async () => {
+      root.render(<CharacterImportDialog {...props} />);
+    });
+
+    // Videos tab lists only project videos.
+    await act(async () => {
+      [...container.querySelectorAll('[role="tab"]')].find((tab) => tab.textContent.startsWith("Videos")).click();
+    });
+    expect(container.querySelectorAll(".asset-picker-card")).toHaveLength(1);
+    expect(container.querySelector('[title="p-vid1"]')).not.toBeNull();
+
+    // Upload tab accepts local image + video files, then imports + attaches them.
+    await act(async () => {
+      [...container.querySelectorAll('[role="tab"]')].find((tab) => tab.textContent === "Upload").click();
+    });
+    const fileInput = container.querySelector('input[type="file"]');
+    expect(fileInput.getAttribute("accept")).toBe("image/*,video/*");
+    expect(fileInput.multiple).toBe(true);
+    const file = new File(["x"], "ref.png", { type: "image/png" });
+    await act(async () => {
+      Object.defineProperty(fileInput, "files", { value: [file], configurable: true });
+      fileInput.dispatchEvent(new window.Event("change", { bubbles: true }));
+    });
+    expect(props.importAsset).toHaveBeenCalledTimes(1);
+    expect(props.onImport).toHaveBeenCalledWith(["uploaded-1"]);
+  });
+
   it("keeps unsaved character reference selections when a multi-add partially fails", async () => {
     const addCharacterReference = vi.fn(async (_characterId, reference) => {
       if (reference.assetId === "image-beta") {
@@ -2183,9 +2286,11 @@ describe("SceneWorks app shell", () => {
       }
       return {};
     });
+    // sc-6042: the reference picker is scoped to this character's assets, so the
+    // candidates must already belong to char-1 (here: generated for it).
     const assets = [
-      { id: "image-alpha", type: "image", displayName: "Alpha" },
-      { id: "image-beta", type: "image", displayName: "Beta" },
+      { id: "image-alpha", type: "image", displayName: "Alpha", recipe: { normalizedSettings: { characterId: "char-1" } } },
+      { id: "image-beta", type: "image", displayName: "Beta", recipe: { normalizedSettings: { characterId: "char-1" } } },
     ];
 
     root = createRoot(container);
@@ -3050,6 +3155,32 @@ describe("SceneWorks app shell", () => {
       previewButtons[0].click();
     });
     expect(onPreview).toHaveBeenCalled();
+  });
+
+  it("opens the Import dialog from the Character Assets page (sc-6042)", async () => {
+    const selectedCharacter = { id: "char-1", name: "Mira", references: [] };
+    const assets = [{ id: "p-img1", type: "image", projectId: "project-1", displayName: "Project Image 1" }];
+    root = createRoot(container);
+    await act(async () => {
+      root.render(
+        <CharacterAssets
+          addCharacterReference={vi.fn(async () => ({}))}
+          assets={assets}
+          importAsset={vi.fn()}
+          onPreview={vi.fn()}
+          projectId="project-1"
+          selectedCharacter={selectedCharacter}
+        />,
+      );
+    });
+
+    const importButton = [...container.querySelectorAll("button")].find((button) => button.textContent === "Import");
+    expect(importButton).toBeTruthy();
+    await act(async () => {
+      importButton.click();
+    });
+    expect(container.textContent).toContain("Import to Mira");
+    expect(container.querySelector('[title="p-img1"]')).not.toBeNull();
   });
 
   it("lists a character's associated datasets and opens one (sc-2022)", async () => {

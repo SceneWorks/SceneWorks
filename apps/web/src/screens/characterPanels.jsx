@@ -1,5 +1,5 @@
 import React from "react";
-import { AssetPickerField } from "../components/AssetPicker.jsx";
+import { AssetPickerField, CharacterImportDialog } from "../components/AssetPicker.jsx";
 import { AssetCard, emptyTrash } from "../components/assetPanels.jsx";
 import { AssetMedia } from "../components/assetMedia.jsx";
 import { WorkerProgressCard } from "../components/WorkerProgressCard.jsx";
@@ -83,7 +83,7 @@ function summarizeCompatibility(item) {
 }
 
 export function CharacterReferences({
-  imageAssets,
+  referenceCandidates,
   onGenerateFromReference,
   onPreview,
   referenceMessage,
@@ -105,13 +105,17 @@ export function CharacterReferences({
         <h2>Approved set</h2>
       </div>
       <form className="inline-create asset-reference-create" onSubmit={submitReference}>
+        {/* sc-6042: scoped to this character's assets (no category tabs). Import
+            project/uploaded media into the character on the Assets tab to grow
+            this set. */}
         <AssetPickerField
-          assets={imageAssets}
+          assets={referenceCandidates}
           buttonLabel="Add image or frame"
           emptyLabel="No references selected"
           label="Reference assets"
           multiple
           onChange={setReferenceAssetIds}
+          showCategories={false}
           values={referenceAssetIds}
         />
         <button disabled={!referenceAssetIds.length} type="submit">
@@ -792,13 +796,30 @@ export function CharacterAngleSet({ angleModel, angleModels, ...props }) {
 export function CharacterAssets({
   selectedCharacter,
   assets = [],
+  projectId,
+  importAsset,
+  addCharacterReference,
   onPreview,
   deleteAsset,
   purgeAsset,
   updateAssetStatus,
 }) {
   const [viewMode, setViewMode] = React.useState("active");
+  const [importOpen, setImportOpen] = React.useState(false);
   const characterId = selectedCharacter?.id;
+  // sc-6042: attach project-selected or freshly-uploaded assets to this character.
+  // addCharacterReference is the canonical asset↔character link (it writes both the
+  // character's references[] and the asset's metadata.characterReferences), so the
+  // imports immediately surface in this gallery and the reference picker. Added
+  // unapproved so they're library members, not auto-promoted identity references.
+  async function importAssetIds(assetIds) {
+    if (!characterId || !addCharacterReference) {
+      return;
+    }
+    for (const assetId of assetIds) {
+      await addCharacterReference(characterId, { assetId, approved: false, role: "import" });
+    }
+  }
   if (!selectedCharacter) {
     return null;
   }
@@ -844,6 +865,16 @@ export function CharacterAssets({
             Trashcan ({trashedAssets.length})
           </button>
         </div>
+        {/* sc-6042: bring Project assets or local files into this character's
+            library so they become selectable in the Reference picker. */}
+        <button
+          className="secondary-action character-import-button"
+          disabled={!characterId}
+          onClick={() => setImportOpen(true)}
+          type="button"
+        >
+          Import
+        </button>
         {showingTrash ? (
           <button
             className="danger-action empty-trash-button"
@@ -855,6 +886,18 @@ export function CharacterAssets({
           </button>
         ) : null}
       </div>
+      {importOpen ? (
+        <CharacterImportDialog
+          assets={assets}
+          character={selectedCharacter}
+          characterId={characterId}
+          characterName={selectedCharacter.name}
+          importAsset={importAsset}
+          onClose={() => setImportOpen(false)}
+          onImport={importAssetIds}
+          projectId={projectId}
+        />
+      ) : null}
       {visibleAssets.length ? (
         <div className="reference-thumb-row">
           {visibleAssets.map((asset) => (
