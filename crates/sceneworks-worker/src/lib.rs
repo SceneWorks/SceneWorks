@@ -45,6 +45,10 @@ use uuid::Uuid;
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 mod advanced;
 mod api_client;
+// Lazy, on-demand download-credential pull from the macOS desktop credential socket
+// (sc-5891). Compiles on all targets; the socket I/O is `cfg(unix)` and inert unless
+// the desktop injects `SCENEWORKS_CRED_IPC_*`, so server/Docker/Windows are unaffected.
+mod credentials_ipc;
 // Backend-neutral generator load/run cache (epic 3720, sc-3724). Typed entirely against
 // `gen_core::*` (no tensor types leak), so it links on ALL targets — the production load seam
 // (`with_cached_generator`) is reached only from the macOS image/video paths, but the all-targets
@@ -1842,8 +1846,14 @@ async fn existing_download_bytes(path: &Path, expected_size: Option<u64>) -> Wor
     Ok(existing)
 }
 
-fn with_hf_auth(settings: &Settings, request: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
-    match &settings.huggingface_token {
+async fn with_hf_auth(
+    settings: &Settings,
+    request: reqwest::RequestBuilder,
+) -> reqwest::RequestBuilder {
+    // Resolves the HF token lazily: the env `HF_TOKEN` (server/Docker/Windows) or,
+    // on the macOS desktop, a one-time pull of the recorded `huggingface.co`
+    // credential from the desktop socket (sc-5891). `None` ⇒ unauthenticated.
+    match credentials_ipc::resolve_hf_token(settings).await {
         Some(token) => request.bearer_auth(token),
         None => request,
     }
