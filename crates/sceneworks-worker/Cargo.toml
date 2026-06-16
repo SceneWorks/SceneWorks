@@ -114,8 +114,11 @@ sceneworks-core = { path = "../sceneworks-core" }
 # below is re-pinned in LOCKSTEP to candle-gen 7daadce (#86) — which itself re-pins gen-core 154af37 ->
 # aeb471b — so `--features backend-candle --target all` resolves the single rev aeb471b again (closing the
 # sc-5905 skew). candle-gen 7daadce = the candle InstantID LoRA seam (`load_instantid_unet_with_adapters`)
-# + that gen-core re-pin. NB: both engine pins point at the PR branch commits pre-merge; flip to the merge
-# commits once mlx-gen #477 / candle-gen #86 land.
+# + that gen-core re-pin. Both #477 and #86 are MERGED (merge commits, 2026-06-16), so aeb471b + 7daadce
+# are now ancestors of their repos' `main` (permanently fetchable). KEEP these exact revs — do NOT flip to
+# the merge-commit HEADs: candle-gen's internal gen-core is pinned at aeb471b, so moving mlx-gen to the
+# newer main HEAD would resolve TWO gen-core revs under `--features backend-candle` again. Pinning the
+# precise pre-merge tips also keeps the delta minimal (154af37 + exactly the sc-6038 change, no main drift).
 sceneworks-gen-core = { git = "https://github.com/michaeltrefry/mlx-gen", rev = "aeb471bdb79efa8c23573e7ae43d34d30acac3b4" }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
