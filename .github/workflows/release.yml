@@ -1,0 +1,74 @@
+name: Release (desktop)
+
+# SCAFFOLD / STARTING POINT — sc-5930. Builds, signs, notarizes, staples, and
+# publishes a DRAFT GitHub Release of the macOS desktop app when a `v*` tag is
+# pushed. Only runs on a version tag or manual dispatch — never on push/PR.
+#
+# NOT YET WIRED: a tag push will fail at the signing/notarization step until the
+# following are available on the self-hosted `nax` runner (or as repo secrets):
+#   APPLE_SIGNING_IDENTITY  e.g. "Developer ID Application: Michael Trefry (R2526H7YN9)"
+#   APPLE_API_ISSUER        App Store Connect API issuer UUID
+#   APPLE_API_KEY           App Store Connect API key id
+#   APPLE_API_KEY_PATH      path to the .p8 key on the runner (or write from a secret)
+# The Developer ID cert is ALREADY in the nax runner's login keychain, so the
+# base64 APPLE_CERTIFICATE -> temp-keychain import that ephemeral runners need is
+# NOT required here. Build prerequisites on the runner (root npm deps for the
+# embedded web/api build invoked by tauri.conf beforeBuildCommand, Rust toolchain)
+# still need validation. Verify end-to-end with a throwaway tag (e.g. v0.0.0-rc.1)
+# before relying on this. See sc-5930.
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write # create releases + upload assets
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  macos:
+    # Self-hosted macOS 26.2 runner: GitHub-hosted images can't build at that
+    # deployment target (see macos-mlx.yml). Same-repo only — never run fork code.
+    if: ${{ github.repository == 'michaeltrefry/SceneWorks' }}
+    runs-on: [self-hosted, macOS, ARM64, nax]
+    env:
+      APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+      APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
+      APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
+      APPLE_API_KEY_PATH: ${{ secrets.APPLE_API_KEY_PATH }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      # Build the signed + notarized .app + DMG and create a DRAFT release with the
+      # asset attached. tauri-action runs the tauri.conf beforeBuildCommand, which
+      # stages the sidecar + web UI and applies the nested-binary pre-signing from
+      # PR #715.
+      - name: Build, sign, notarize & draft-release
+        uses: tauri-apps/tauri-action@v0
+        with:
+          projectPath: apps/desktop
+          tagName: ${{ github.ref_name }}
+          releaseName: SceneWorks ${{ github.ref_name }}
+          releaseDraft: true
+          # TODO(sc-5930): wire the release body / changelog source.
+
+      # tauri-action staples the .app but not the wrapping .dmg, and uploads the
+      # un-stapled DMG. Staple the DMG (shared script) and replace the release asset
+      # so the downloaded file verifies offline.
+      - name: Staple the DMG and replace the release asset
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          node apps/desktop/scripts/staple-dmg.mjs
+          shopt -s nullglob
+          dmgs=(target/release/bundle/dmg/*.dmg)
+          gh release upload "${{ github.ref_name }}" "${dmgs[0]}" --clobber
