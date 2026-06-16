@@ -79,6 +79,12 @@ pub struct Managed {
     /// alongside the Python torch worker (Wave A). Only populated on the Windows
     /// candle build.
     pub candle_worker: Mutex<Option<CommandChild>>,
+    /// On-demand keychain credential socket served to the MLX worker (sc-5891).
+    /// Started once before the worker spawns; the worker pulls a host's secret from
+    /// it the first time a download needs auth, so the keychain is read lazily
+    /// instead of eagerly at launch. macOS-only.
+    #[cfg(target_os = "macos")]
+    pub cred_ipc: Mutex<Option<crate::cred_ipc::CredIpc>>,
     /// OS-assigned API port, discovered from the sidecar's startup line.
     api_port: Mutex<Option<u16>>,
     /// PIDs of the spawned sidecars, persisted to disk so an unclean exit
@@ -1026,6 +1032,11 @@ fn gate_window(app: AppHandle) {
                         // MLX-eligible image/video jobs on the in-process Rust mlx-gen
                         // engine. Any MLX-ineligible job fails `mlx_unsupported` /
                         // `mlx_unavailable` (never MPS) per `Settings.mlx_required`.
+                        //
+                        // Start the on-demand credential socket first (sc-5891) so the
+                        // worker can pull a recorded keychain secret lazily at download
+                        // time instead of us reading it eagerly here at launch.
+                        ensure_cred_ipc(&app);
                         supervise_mlx_worker(app, port);
                     }
                     #[cfg(not(target_os = "macos"))]
@@ -1210,6 +1221,52 @@ fn supervise_worker(app: AppHandle, api_port: u16) {
     });
 }
 
+/// Start the on-demand credential socket (sc-5891) once and stash it in `Managed`.
+/// The MLX worker is handed its socket path + token at spawn and pulls a recorded
+/// keychain secret from it the first time a download needs auth — so the keychain is
+/// read lazily, not eagerly at launch. Idempotent; a start failure is logged and the
+/// worker simply gets no credentials (a gated download then fails with an auth error
+/// rather than the app prompting at launch).
+#[cfg(target_os = "macos")]
+fn ensure_cred_ipc(app: &AppHandle) {
+    let managed = app.state::<Managed>();
+    let mut slot = managed.cred_ipc.lock().expect("cred_ipc lock");
+    if slot.is_some() {
+        return;
+    }
+    let socket = app_support_dir().join("cred-ipc.sock");
+    match crate::cred_ipc::start(socket) {
+        Some(handle) => *slot = Some(handle),
+        None => append_log(
+            &logs_dir().join("mlx-worker.log"),
+            "[desktop] credential socket failed to start; gated downloads will need a re-entered token\n",
+        ),
+    }
+}
+
+/// Drop a host's cached secret from the credential socket (sc-5891) so a later pull
+/// re-reads the keychain. Called when the user updates or removes a credential, so a
+/// revoked/changed token stops being served without an app restart. No-op off macOS
+/// (no socket there).
+pub fn invalidate_credential_cache(app: &AppHandle, host: &str) {
+    #[cfg(target_os = "macos")]
+    {
+        if let Some(ipc) = app
+            .state::<Managed>()
+            .cred_ipc
+            .lock()
+            .expect("cred_ipc lock")
+            .as_ref()
+        {
+            ipc.invalidate(host);
+        }
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = (app, host);
+    }
+}
+
 /// Spawn and supervise the Apple-Silicon MLX GPU worker (sc-3289): the same
 /// `sceneworks-api` sidecar binary re-launched in worker mode
 /// (`SCENEWORKS_WORKER_ONLY=1`) with `SCENEWORKS_GPU_ID=mlx`, so MLX-eligible
@@ -1283,11 +1340,27 @@ fn supervise_mlx_worker(app: AppHandle, api_port: u16) {
             if let Some(ort_dylib) = resolve_bundled_onnxruntime(&app) {
                 command = command.env("ORT_DYLIB_PATH", ort_dylib);
             }
-            if let Some(token) = crate::settings::read_hf_token() {
-                command = command.env("HF_TOKEN", token);
-            }
-            if let Some(credentials) = crate::settings::credentials_env_json() {
-                command = command.env("SCENEWORKS_CREDENTIALS", credentials);
+            // Lazy credentials (sc-5891): instead of reading the keychain here and
+            // injecting HF_TOKEN/SCENEWORKS_CREDENTIALS (which prompted at launch),
+            // hand the worker the credential socket + token + the NON-secret list of
+            // recorded hosts. The worker pulls a secret only when a download for a
+            // recorded host needs it, so nothing-recorded ⇒ no socket call ⇒ no
+            // keychain touch. Credential changes still take effect on worker restart.
+            {
+                let managed = app.state::<Managed>();
+                let guard = managed.cred_ipc.lock().expect("cred_ipc lock");
+                if let Some(ipc) = guard.as_ref() {
+                    command = command
+                        .env(
+                            "SCENEWORKS_CRED_IPC_SOCKET",
+                            ipc.socket.to_string_lossy().to_string(),
+                        )
+                        .env("SCENEWORKS_CRED_IPC_TOKEN", &ipc.token);
+                    let hosts = crate::settings::recorded_credential_hosts().join(",");
+                    if !hosts.is_empty() {
+                        command = command.env("SCENEWORKS_CREDENTIAL_HOSTS", hosts);
+                    }
+                }
             }
             let spawned = command.spawn();
             let (mut events, child) = match spawned {

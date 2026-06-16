@@ -12,8 +12,11 @@ use tauri_plugin_dialog::DialogExt;
 use crate::setup::{app_support_dir, default_data_dir, shared_huggingface_home, Managed};
 
 const KEYRING_SERVICE: &str = "SceneWorks";
-/// Pre-migration account that held the single Hugging Face token. Kept only for
-/// one-time migration into the host-keyed store (and as a read fallback).
+/// Pre-migration account that held the single Hugging Face token. Retained only so
+/// `delete_credential` can also clear it when the user removes Hugging Face — it is
+/// never *read* on a startup/spawn path, because probing it unconditionally is an
+/// unguarded keychain touch (and macOS prompt) on installs that have no token
+/// recorded (sc-5891).
 const HF_TOKEN_ACCOUNT: &str = "huggingface_token";
 /// Host of the migrated Hugging Face credential.
 const HF_HOST: &str = "huggingface.co";
@@ -104,6 +107,9 @@ fn remove_credential_meta(settings: &mut AppSettings, host: &str) -> bool {
     settings.credentials.len() != before
 }
 
+// Gates the eager-push HF read below; on macOS that path is replaced by the lazy
+// credential socket (sc-5891), so this is only reached off macOS (and in tests).
+#[cfg_attr(target_os = "macos", allow(dead_code))]
 fn hf_credential_recorded(settings: &AppSettings) -> bool {
     settings
         .credentials
@@ -111,46 +117,17 @@ fn hf_credential_recorded(settings: &AppSettings) -> bool {
         .any(|entry| entry.host == HF_HOST)
 }
 
-/// One-time move of the legacy single HF token into the host-keyed store as a
-/// `huggingface.co` credential. Idempotent: a no-op once a `huggingface.co`
-/// credential is recorded. Returns true when it migrated so the caller persists.
-fn migrate_legacy_hf_token(settings: &mut AppSettings) -> bool {
-    if hf_credential_recorded(settings) {
-        return false;
-    }
-    let Some(token) = keyring::Entry::new(KEYRING_SERVICE, HF_TOKEN_ACCOUNT)
-        .ok()
-        .and_then(|entry| entry.get_password().ok())
-        .map(|token| token.trim().to_owned())
-        .filter(|token| !token.is_empty())
-    else {
-        return false;
-    };
-    match keyring::Entry::new(KEYRING_SERVICE, &cred_account(HF_HOST)) {
-        Ok(entry) if entry.set_password(&token).is_ok() => {}
-        _ => return false,
-    }
-    // Drop the legacy entry so the token isn't stored twice; best-effort.
-    if let Ok(legacy) = keyring::Entry::new(KEYRING_SERVICE, HF_TOKEN_ACCOUNT) {
-        let _ = legacy.delete_credential();
-    }
-    settings.credentials.push(CredentialMeta {
-        host: HF_HOST.to_owned(),
-        label: "Hugging Face".to_owned(),
-        scheme: CredentialScheme::Bearer,
-    });
-    true
-}
-
-/// Load settings, running the one-time HF-token migration and persisting it if it
-/// fired.
-fn load_settings_migrated() -> AppSettings {
-    let mut settings = load_settings();
-    if migrate_legacy_hf_token(&mut settings) {
-        let _ = save_settings(&settings);
-    }
-    settings
-}
+// NOTE (sc-5891): there used to be a startup `migrate_legacy_hf_token` here that
+// moved the pre-host-keyed single token (`huggingface_token` account) into the
+// `cred:huggingface.co` store. It had to probe the legacy keychain entry to do so,
+// and the only signal that such a token might exist *is* the keychain itself — the
+// pre-migration `settings.json` recorded nothing about it. That unconditional probe
+// is exactly the unguarded keychain touch (and macOS password prompt) this story
+// removes, so the startup auto-migration is gone: a fresh/no-token install must
+// never touch the keychain. Any install that launched a build after the host-keyed
+// store landed already auto-migrated (the migration was idempotent and ran at
+// startup); the rare install that skipped every such build can re-add its Hugging
+// Face token once in Settings.
 
 #[derive(Default, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -198,24 +175,64 @@ fn save_settings(settings: &AppSettings) -> Result<(), String> {
     std::fs::write(&path, body).map_err(|error| error.to_string())
 }
 
-/// Hugging Face token for injecting `HF_TOKEN` into the worker. Prefers the
-/// host-keyed `huggingface.co` credential, falling back to the pre-migration
-/// `huggingface_token` account so a not-yet-migrated install still authenticates.
+/// Hugging Face token for injecting `HF_TOKEN` into the worker, from the host-keyed
+/// `huggingface.co` credential. Gated on the non-secret `settings.json` metadata
+/// first: if no `huggingface.co` credential is recorded, returns `None` *without
+/// constructing a `keyring::Entry` or calling `get_password()`*, so a no-token
+/// install never touches the OS keychain (and never triggers a macOS password
+/// prompt). The pre-migration `huggingface_token` fallback was removed for the same
+/// reason — it probed the keychain unconditionally (sc-5891).
+///
+/// macOS no longer uses this eager push at all — the MLX worker pulls credentials
+/// lazily from the desktop credential socket (`cred_ipc`) — so it's compiled but
+/// uncalled there (the Python/candle spawn sites on other platforms still use it).
+#[cfg_attr(target_os = "macos", allow(dead_code))]
 pub fn read_hf_token() -> Option<String> {
-    read_credential_secret(HF_HOST).or_else(|| {
-        keyring::Entry::new(KEYRING_SERVICE, HF_TOKEN_ACCOUNT)
-            .ok()
-            .and_then(|entry| entry.get_password().ok())
-            .map(|token| token.trim().to_owned())
-            .filter(|token| !token.is_empty())
-    })
+    if !hf_credential_recorded(&load_settings()) {
+        return None;
+    }
+    read_credential_secret(HF_HOST)
+}
+
+/// The non-secret hosts that have a credential recorded, handed to the MLX worker so
+/// it knows which hosts it may request from the credential socket (sc-5891). Reads
+/// `settings.json` metadata only — no keychain access — so an empty list (nothing
+/// recorded) keeps the worker from ever asking, hence no keychain touch.
+#[cfg(target_os = "macos")]
+pub fn recorded_credential_hosts() -> Vec<String> {
+    load_settings()
+        .credentials
+        .into_iter()
+        .map(|meta| meta.host)
+        .collect()
+}
+
+/// The secret token + scheme for a single recorded host, for the on-demand
+/// credential socket to serve when a worker download actually needs it (sc-5891).
+/// Gated on the non-secret `settings.json` metadata: if the host isn't recorded this
+/// returns `None` without reading the keychain. This is the single *lazy* keychain
+/// read that replaces the eager spawn-time reads on macOS.
+#[cfg(target_os = "macos")]
+pub fn resolve_credential_secret(host: &str) -> Option<(String, CredentialScheme)> {
+    let host = host.trim().to_ascii_lowercase();
+    let settings = load_settings();
+    let meta = settings
+        .credentials
+        .iter()
+        .find(|entry| entry.host == host)?;
+    let token = read_credential_secret(&host)?;
+    Some((token, meta.scheme))
 }
 
 /// All stored credentials serialized as the worker's `SCENEWORKS_CREDENTIALS` JSON
 /// map (`{ host: { token, scheme } }`), reading each secret from the keychain.
 /// `None` when no credentials are stored. Injected into the worker at spawn.
+///
+/// macOS uses the lazy credential socket (`cred_ipc`) instead, so this is compiled
+/// but uncalled there (the Python/candle spawn sites on other platforms use it).
+#[cfg_attr(target_os = "macos", allow(dead_code))]
 pub fn credentials_env_json() -> Option<String> {
-    let settings = load_settings_migrated();
+    let settings = load_settings();
     let mut map = serde_json::Map::new();
     for meta in &settings.credentials {
         if let Some(token) = read_credential_secret(&meta.host) {
@@ -386,7 +403,7 @@ fn validate_reveal_target(path: &str) -> Result<PathBuf, String> {
         return Err("A path is required.".to_owned());
     }
     let target = std::fs::canonicalize(target).map_err(|error| error.to_string())?;
-    let settings = load_settings_migrated();
+    let settings = load_settings();
     let roots = [
         settings
             .data_dir
@@ -416,7 +433,7 @@ fn validate_reveal_target(path: &str) -> Result<PathBuf, String> {
 /// whether the secret is present in the keychain. Never returns the token itself.
 #[tauri::command]
 pub fn list_credentials() -> Vec<CredentialStatus> {
-    load_settings_migrated()
+    load_settings()
         .credentials
         .into_iter()
         .map(|meta| {
@@ -435,6 +452,7 @@ pub fn list_credentials() -> Vec<CredentialStatus> {
 /// non-secret metadata. The token is write-only — it is never read back to the UI.
 #[tauri::command]
 pub fn set_credential(
+    app: AppHandle,
     host: String,
     label: String,
     scheme: CredentialScheme,
@@ -464,18 +482,21 @@ pub fn set_credential(
     upsert_credential_meta(
         &mut settings,
         CredentialMeta {
-            host,
+            host: host.clone(),
             label,
             scheme,
         },
     );
     save_settings(&settings)?;
+    // Drop any cached secret for this host so the worker pulls the new token on its
+    // next download without an app restart (sc-5891).
+    crate::setup::invalidate_credential_cache(&app, &host);
     Ok(list_credentials())
 }
 
 /// Remove a host's credential from the keychain and drop its metadata.
 #[tauri::command]
-pub fn delete_credential(host: String) -> Result<Vec<CredentialStatus>, String> {
+pub fn delete_credential(app: AppHandle, host: String) -> Result<Vec<CredentialStatus>, String> {
     let host = normalize_host(&host);
     if let Ok(entry) = keyring::Entry::new(KEYRING_SERVICE, &cred_account(&host)) {
         match entry.delete_credential() {
@@ -493,6 +514,9 @@ pub fn delete_credential(host: String) -> Result<Vec<CredentialStatus>, String> 
     let mut settings = load_settings();
     remove_credential_meta(&mut settings, &host);
     save_settings(&settings)?;
+    // Drop the cached secret so a revoked credential stops being served by the
+    // credential socket without an app restart (sc-5891).
+    crate::setup::invalidate_credential_cache(&app, &host);
     Ok(list_credentials())
 }
 
@@ -635,19 +659,17 @@ mod tests {
         assert!(!remove_credential_meta(&mut settings, HF_HOST));
     }
 
+    /// sc-5891: the spawn-time credential gate must short-circuit on the non-secret
+    /// metadata before any `keyring::Entry`/`get_password()` is constructed, so a
+    /// no-credential install never touches the OS keychain. `hf_credential_recorded`
+    /// is that gate for `read_hf_token`; an empty `credentials` list is likewise the
+    /// gate for `credentials_env_json` (its loop body — the only `read_credential_secret`
+    /// site — never runs). This headless test asserts the gate predicate without
+    /// touching the keychain (which `read_hf_token` itself would, once past the gate).
     #[test]
-    fn migration_is_skipped_once_hf_is_recorded() {
-        let mut settings = AppSettings::default();
-        upsert_credential_meta(
-            &mut settings,
-            CredentialMeta {
-                host: HF_HOST.to_owned(),
-                label: "Hugging Face".to_owned(),
-                scheme: CredentialScheme::Bearer,
-            },
-        );
-        // With HF already recorded, migration short-circuits before any keychain
-        // access, so this is safe to run in a headless test.
-        assert!(!migrate_legacy_hf_token(&mut settings));
+    fn no_recorded_credential_means_no_keychain_gate() {
+        let settings = AppSettings::default();
+        assert!(!hf_credential_recorded(&settings));
+        assert!(settings.credentials.is_empty());
     }
 }

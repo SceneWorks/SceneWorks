@@ -1,6 +1,10 @@
 // Hide the extra console window on Windows in release builds.
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+// On-demand keychain credential socket for the MLX worker (sc-5891). macOS-only:
+// it replaces the eager spawn-time keychain reads that prompted at every launch.
+#[cfg(target_os = "macos")]
+mod cred_ipc;
 mod settings;
 mod setup;
 

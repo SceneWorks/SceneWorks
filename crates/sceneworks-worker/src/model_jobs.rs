@@ -764,7 +764,10 @@ pub(crate) async fn download_model_with_hf_cli(
         .stdout(Stdio::null())
         .stderr(Stdio::piped());
     configure_hf_cli_environment(&mut command);
-    if let Some(token) = &settings.huggingface_token {
+    // Resolve the HF token lazily (env, or a one-time pull of the recorded
+    // `huggingface.co` keychain credential from the desktop socket on macOS) so the
+    // keychain is read only when a download actually needs it (sc-5891).
+    if let Some(token) = crate::credentials_ipc::resolve_hf_token(settings).await {
         command.env("HF_TOKEN", token);
     }
     for pattern in files {

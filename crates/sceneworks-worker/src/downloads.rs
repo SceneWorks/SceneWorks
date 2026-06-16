@@ -136,6 +136,7 @@ impl HuggingFaceSnapshot {
             quote_path(revision)
         );
         let payload = with_hf_auth(settings, client.get(tree_url))
+            .await
             .send()
             .await?
             .error_for_status()?
@@ -237,7 +238,7 @@ async fn download_file(
         if existing_bytes > 0 {
             request = request.header(header::RANGE, format!("bytes={existing_bytes}-"));
         }
-        let response = with_hf_auth(context.settings, request).send().await?;
+        let response = with_hf_auth(context.settings, request).await.send().await?;
         let status = response.status();
         if status == StatusCode::RANGE_NOT_SATISFIABLE && existing_bytes > 0 {
             if let Some(expected) = expected_size {
@@ -421,6 +422,7 @@ pub(crate) async fn download_snapshot_into_cache(
     for file in &snapshot.files {
         check_download_cancel(context).await?;
         let head = with_hf_auth(context.settings, meta_client.head(&file.download_url))
+            .await
             .send()
             .await?;
         if commit.is_none() {
@@ -575,9 +577,15 @@ pub(crate) async fn download_source_url(
 
     // Attach a stored credential matching the source host. Bearer tokens ride an
     // Authorization header (dropped on cross-host redirects below); query tokens
-    // are baked into the request URL and never carried onto a redirect target.
-    let credential = credential_for_host(context.settings, url.host_str().unwrap_or_default());
-    let request_url = match credential {
+    // are baked into the request URL and never carried onto a redirect target. The
+    // secret is resolved lazily (env/file-store, or the macOS desktop socket on
+    // first use) so a no-credential install never touches the keychain (sc-5891).
+    let credential = crate::credentials_ipc::resolve_credential_for_host(
+        context.settings,
+        url.host_str().unwrap_or_default(),
+    )
+    .await;
+    let request_url = match &credential {
         Some(cred) if cred.scheme == CredentialScheme::Query => {
             let mut authed = url.clone();
             authed.query_pairs_mut().append_pair("token", &cred.token);
@@ -585,7 +593,7 @@ pub(crate) async fn download_source_url(
         }
         _ => source_url.to_owned(),
     };
-    let bearer = match credential {
+    let bearer = match &credential {
         Some(cred) if cred.scheme == CredentialScheme::Bearer => Some(cred.token.as_str()),
         _ => None,
     };
