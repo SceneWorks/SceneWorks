@@ -3280,6 +3280,14 @@ fn image_job_is_candle_eligible(job: &JobSnapshot) -> bool {
     {
         return true;
     }
+    // Qwen-Image strict-pose ControlNet (sc-5489, epic 5480): `qwen_image` + `advanced.poses` is a
+    // bespoke candle lane (`generate_candle_qwen_control_stream`), NOT txt2img — the
+    // `image_request_candle_eligible` gate below DEFERS any `advanced.poses` job to torch. Branch it out
+    // first so `qwen_image` pose jobs reach candle, while the other families' pose jobs (z_image /
+    // kolors / sdxl) stay on torch until their slices land. Mirrors the worker's `qwen_control_available`.
+    if model == "qwen_image" && qwen_control_candle_eligible(&job.payload) {
+        return true;
+    }
     image_request_candle_eligible(model, &job.payload)
 }
 
@@ -3597,6 +3605,25 @@ fn flux_ipadapter_candle_eligible(payload: &Map<String, Value>) -> bool {
             .is_some_and(|value| !value.trim().is_empty())
     };
     non_empty("referenceAssetId") && !non_empty("sourceAssetId") && !non_empty("maskAssetId")
+}
+
+/// Qwen-Image strict-pose ControlNet candle-routing conditions (sc-5489, epic 5480). The candle
+/// `QwenControl` provider serves `qwen_image` + a non-empty object `advanced.poses` (one image per pose,
+/// each conditioned on a DWPose skeleton), NOT an `edit_image`. A `referenceAssetId`, if present, is
+/// ignored (identity comes from a character LoRA on the base, mirroring the MLX/torch
+/// `QwenImageControlNetPipeline`). Mirrors the worker's `qwen_control_available` gate (minus the local
+/// weight-resolve check) so the router and worker agree. Candle-only — the macOS path is the registry
+/// `qwen_image_control` generator, not a separate candle-eligible gate.
+fn qwen_control_candle_eligible(payload: &Map<String, Value>) -> bool {
+    if payload.get("mode").and_then(Value::as_str) == Some("edit_image") {
+        return false;
+    }
+    payload
+        .get("advanced")
+        .and_then(Value::as_object)
+        .and_then(|advanced| advanced.get("poses"))
+        .and_then(Value::as_array)
+        .is_some_and(|poses| !poses.is_empty())
 }
 
 /// PuLID-FLUX (`pulid_flux_dev`) MLX-routing conditions (sc-3344). The native `mlx-gen-pulid`
@@ -4837,10 +4864,23 @@ mod candle_routing_tests {
                 "sourceAssetId": "asset_1"
             }))
         ));
+        // sc-5489: `qwen_image` + `advanced.poses` IS now a candle lane (the bespoke strict-pose
+        // ControlNet route), so the candle worker claims it (was deferred to torch before this slice).
+        assert!(
+            worker_supports_job(
+                &candle,
+                &image_generate_job(json!({
+                    "model": "qwen_image",
+                    "advanced": { "poses": [{ "id": "pose_1" }] }
+                }))
+            ),
+            "candle worker should claim qwen_image strict-pose (sc-5489)"
+        );
+        // A DIFFERENT family's pose job still defers to torch (its slice hasn't landed).
         assert!(!worker_supports_job(
             &candle,
             &image_generate_job(json!({
-                "model": "qwen_image",
+                "model": "z_image_turbo",
                 "advanced": { "poses": [{ "id": "pose_1" }] }
             }))
         ));
@@ -5416,6 +5456,32 @@ mod candle_routing_tests {
         }))));
         assert!(!flux_ipadapter_candle_eligible(&object(json!({
             "model": "flux_schnell", "referenceAssetId": "a", "maskAssetId": "m"
+        }))));
+    }
+
+    #[test]
+    fn qwen_control_pose_jobs_route_to_candle() {
+        // qwen_image + advanced.poses routes to the candle strict-pose lane (sc-5489) via the bespoke
+        // branch, NOT the txt2img gate (which DEFERS any advanced.poses job to torch).
+        let payload =
+            json!({ "model": "qwen_image", "advanced": { "poses": [{ "keypoints": [] }] } });
+        assert!(qwen_control_candle_eligible(&object(payload.clone())));
+        assert!(image_job_is_candle_eligible(&image_generate_job(payload)));
+        // No poses (or empty) → plain txt2img routes via the txt2img gate instead.
+        assert!(!qwen_control_candle_eligible(&object(
+            json!({ "model": "qwen_image" })
+        )));
+        assert!(!qwen_control_candle_eligible(&object(json!({
+            "model": "qwen_image", "advanced": { "poses": [] }
+        }))));
+        // edit_image with poses is NOT this lane.
+        assert!(!qwen_control_candle_eligible(&object(json!({
+            "model": "qwen_image", "mode": "edit_image", "advanced": { "poses": [{}] }
+        }))));
+        // A DIFFERENT model with poses still defers to torch (z_image/kolors/sdxl slices not landed) —
+        // the qwen branch is specific; the txt2img gate's has_poses deferral still applies to them.
+        assert!(!image_job_is_candle_eligible(&image_generate_job(json!({
+            "model": "z_image_turbo", "advanced": { "poses": [{}] }
         }))));
     }
 }
