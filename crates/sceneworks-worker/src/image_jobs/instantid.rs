@@ -33,7 +33,7 @@ const INSTANTID_FACE_RESTORE_SIDE: u32 = 1024;
 /// lanes in the asset sidecar + the `instantIdEngine` raw-settings key.
 #[cfg(target_os = "macos")]
 const INSTANTID_ENGINE: &str = "mlx_instantid";
-#[cfg(all(target_os = "windows", feature = "backend-candle"))]
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 const INSTANTID_ENGINE: &str = "candle_instantid";
 
 /// How an InstantID character job batches its iterations (torch-parity precedence: a pose set
@@ -495,7 +495,7 @@ async fn generate_instantid_stream(
     // knob entirely on this lane: don't apply it (the `quantize` step in the load closure is macOS-
     // only) and don't record it as applied (`recipe_bits` -> None). `let _` consumes the otherwise-
     // unused `quant_bits`.
-    #[cfg(all(target_os = "windows", feature = "backend-candle"))]
+    #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
     let recipe_bits: Option<i64> = {
         let _ = (quant_bits, recipe_bits);
         None
@@ -670,7 +670,7 @@ async fn generate_instantid_stream(
                     .with_face(&scrfd, &arcface)
                     .map_err(|error| WorkerError::Engine(format!("InstantID face stack: {error}")))?
             };
-            #[cfg(all(target_os = "windows", feature = "backend-candle"))]
+            #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
             let model = {
                 let face_dir = scrfd_path.parent().unwrap_or(scrfd_path.as_path());
                 // `arcface_path` is staged in the same dir; `with_face(dir)` resolves it by name.
@@ -696,7 +696,7 @@ async fn generate_instantid_stream(
                         ))
                     })?
                     .embedding;
-                #[cfg(all(target_os = "windows", feature = "backend-candle"))]
+                #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
                 let embedding = model
                     .largest_face(&reference)
                     .map_err(|error| {

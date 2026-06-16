@@ -1,0 +1,86 @@
+name: Server Candle (Linux/NVIDIA)
+
+# Compile-checks + builds the candle (Linux/NVIDIA) server with `--features
+# backend-candle` (epic 4811 / epic 5482, sc-5160). Candle is CPU+CUDA cross-
+# platform, so the Linux server "rides the Windows candle port": the same provider
+# crates desktop-candle-windows.yml builds on Windows/CUDA also build here on
+# Linux/NVIDIA — including the SeedVR2 upscaler (image_upscale + video_upscale),
+# the sc-5160 deliverable. This is the standing Linux-compile validation for the
+# candle-gated worker/server code (the default Linux `parity` job and the Docker
+# image build both build WITHOUT backend-candle, so the candle paths — the
+# crates/sceneworks-worker caption/image/video/upscale/engines/gpu modules under
+# `#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]` — are
+# otherwise only ever validated by hand on the dev box, and there is no Linux GPU
+# box in the dev loop).
+#
+# Manual `workflow_dispatch` only, like the Windows lane (sc-3676/sc-5562): a candle
+# build (nvcc compiles every provider's CUDA kernels) is heavy and there is no
+# standing self-hosted GPU runner. Compilation does NOT need a GPU (nvcc + the host
+# gcc suffice); only running the binary would. Trigger it from the Actions tab
+# before merging candle changes that should hold on Linux as well as Windows.
+
+on:
+  workflow_dispatch:
+
+concurrency:
+  group: server-candle-linux-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-candle:
+    runs-on: ubuntu-22.04
+    env:
+      # compute_80 PTX the driver JITs forward to sm_120 — one binary covers
+      # Ampere->Blackwell (mirrors the Windows lane / build-sidecar.mjs default).
+      CUDA_COMPUTE_CAP: "80"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      # Install the CUDA 12.9 Toolkit (nvcc + cudart/cublas/curand/nvrtc dev libs)
+      # the candle `cuda` feature links against. Sets CUDA_PATH for the build.
+      # `--toolkit` skips the (GPU-less runner) driver install — we only compile.
+      - name: Install CUDA Toolkit 12.9
+        uses: Jimver/cuda-toolkit@v0.2.21
+        with:
+          cuda: "12.9.1"
+          method: "network"
+          linux-local-args: '["--toolkit"]'
+      # The candle-gen single-rev invariant the default skew gate is blind to: with
+      # `--features backend-candle` the optional candle-gen providers are pulled, so
+      # a candle-gen pin that resolves a different gen-core rev would split the
+      # inventory registry => runtime "engine not found" (sc-4482). `--target all`
+      # also resolves the macOS-only mlx-gen transitive gen-core.
+      - name: Guard against gen-core version skew (candle)
+        run: |
+          bash scripts/check-gen-core-skew.sh --self-test
+          bash scripts/check-gen-core-skew.sh sceneworks-worker --features backend-candle
+          bash scripts/check-gen-core-skew.sh sceneworks-rust-api --features embed-web,backend-candle
+      # Lint the candle-gated code so it can't silently rot between hand-builds. The
+      # worker carries all the `#[cfg(feature = "backend-candle")]` paths; checking
+      # it alone (no embed-web) avoids a web build for the rot guard. This is the
+      # core "does the candle worker code compile on Linux" gate.
+      - name: Clippy candle-gated code
+        run: cargo clippy -p sceneworks-worker --features backend-candle -- -D warnings
+      - name: Install web dependencies
+        run: npm ci --prefix apps/web
+      # `embed-web` bakes apps/web/dist into the binary (rust-embed), so build the
+      # web bundle first — mirrors build-sidecar.mjs on the Windows lane.
+      - name: Build web assets
+        run: npm run build --prefix apps/web
+      # The faithful "build the candle Linux server" step: the rust-api binary with
+      # the embedded web bundle + the candle backend — nvcc compiles every provider's
+      # CUDA kernels and the full link exercises the real Linux/NVIDIA candle wiring.
+      - name: Build candle server (rust-api, embed-web + backend-candle)
+        run: cargo build -p sceneworks-rust-api --release --features embed-web,backend-candle
+      - name: Upload candle server artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: sceneworks-api-candle-linux
+          path: target/release/sceneworks-rust-api
+          if-no-files-found: error

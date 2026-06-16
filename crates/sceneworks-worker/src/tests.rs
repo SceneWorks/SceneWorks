@@ -2633,7 +2633,7 @@ async fn cancel_peek_tolerates_transient_get_errors() {
 // acknowledgement status is `running`, not the terminal `canceled`.
 #[cfg(any(
     target_os = "macos",
-    all(target_os = "windows", feature = "backend-candle")
+    all(not(target_os = "macos"), feature = "backend-candle")
 ))]
 async fn spawn_progress_capture_stub() -> (String, std::sync::Arc<std::sync::Mutex<Vec<Value>>>) {
     use std::sync::{Arc, Mutex};
@@ -2671,7 +2671,7 @@ async fn spawn_progress_capture_stub() -> (String, std::sync::Arc<std::sync::Mut
 /// until the GPU is genuinely free.
 #[cfg(any(
     target_os = "macos",
-    all(target_os = "windows", feature = "backend-candle")
+    all(not(target_os = "macos"), feature = "backend-candle")
 ))]
 #[tokio::test]
 async fn begin_video_cancel_trips_flag_and_stays_non_terminal() {

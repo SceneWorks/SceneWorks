@@ -2589,19 +2589,13 @@ fn mac_capabilities_master_switch_and_infra_features() {
             )
         })
         .all(|(_, f)| !f.supported));
-    // SeedVR2 has a backend on Mac (native MLX) + Windows (candle CUDA, sc-5928); Linux candle
-    // enablement is sc-5160. On the inert Linux host the capability is unsupported and names sc-5160,
-    // so the web picker hides it there.
-    assert!(!inert.features["imageUpscaleSeedvr2"].supported);
-    assert_eq!(
-        inert.features["imageUpscaleSeedvr2"]
-            .reason
-            .as_ref()
-            .and_then(|r| r.suggested_epic.as_deref()),
-        Some("sc-5160")
-    );
-    // Windows now carries the candle SeedVR2 backend (sc-5928): the capability is platform-true there
-    // too (not just Mac), so the web picker offers `engine=seedvr2` on Windows.
+    // SeedVR2 now has a backend on every GPU platform: native MLX on Mac, and the candle CUDA/NVIDIA
+    // port on Windows (sc-5928) + Linux (sc-5160 — candle is CPU+CUDA cross-platform, so Linux rides
+    // the Windows port). On the (inert-gated) Linux host the capability is platform-true with no
+    // reason, so the web picker offers `engine=seedvr2` there too.
+    assert!(inert.features["imageUpscaleSeedvr2"].supported);
+    assert!(inert.features["imageUpscaleSeedvr2"].reason.is_none());
+    // Windows carries the same candle SeedVR2 backend (sc-5928): platform-true there too (not just Mac).
     let windows = mac_capabilities("windows", false);
     assert!(windows.features["imageUpscaleSeedvr2"].supported);
     assert!(windows.features["imageUpscaleSeedvr2"].reason.is_none());

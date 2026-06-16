@@ -143,8 +143,10 @@ inventory = "0.3"
 # (sc-3022, next) to prove the cross-crate registry path end to end.
 
 [features]
-# Off by default. Opt-in build flag for the candle (Windows/CUDA) generative backend (epic 3672,
-# sc-3675): pulls the optional `candle-gen-sdxl` provider (built with its `cuda` feature). Kept OUT
+# Off by default. Opt-in build flag for the candle (Windows/CUDA + Linux/NVIDIA, sc-5160) generative
+# backend (epic 3672, sc-3675): pulls the optional `candle-gen-sdxl` provider (built with its `cuda`
+# feature). The candle providers are declared under `cfg(not(target_os = "macos"))` below, so this
+# feature lights them up on both Windows and Linux (Mac uses the mlx providers). Kept OUT
 # of the default set so the Desktop (Windows) installer build (desktop-windows.yml, windows-latest,
 # no CUDA toolkit) and every non-CUDA build resolve WITHOUT candle / cudarc / nvcc. The dedicated
 # candle Windows CI lane (sc-3676) builds with `--features backend-candle`. Linking the crate does
@@ -729,7 +731,18 @@ mlx-gen-scail2 = { git = "https://github.com/michaeltrefry/mlx-gen", rev = "154a
 # `advanced.poses` lane routes onto (image_jobs/zimage_control.rs). #79 is SOURCE-ONLY off `f459ab9` (its
 # parent), so 864aa0c still resolves gen-core `32fdb34` == this worker's mlx-gen pin (single gen-core rev,
 # no skew). With this all three candle strict-pose families (qwen / kolors / z_image) are wired.
-[target.'cfg(target_os = "windows")'.dependencies]
+#
+# sc-5160 (epic 4811 / epic 5482) widens this dependency table's target gate from `target_os = "windows"`
+# to `not(target_os = "macos")` so the candle backend builds on Linux/NVIDIA as well as Windows/CUDA —
+# candle is CPU+CUDA cross-platform, so Linux "rides the Windows port" (the SeedVR2 upscaler is the
+# validated deliverable; the rest of the candle suite compiles for Linux too). This mirrors the macOS mlx
+# table above (`cfg(target_os = "macos")`) — candle is simply the non-Apple GPU backend — and matches the
+# `#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]` convention the worker's candle-gated
+# code already uses (sensenova_jobs.rs, sc-5501). The deps stay `optional` behind `backend-candle`, so the
+# plain Linux/Windows torch build (no CUDA toolkit) still resolves WITHOUT candle/cudarc/nvcc, exactly as
+# before. Standing Linux-compile validation is the new manual `desktop-candle-linux` CI lane (the Linux
+# sibling of `desktop-candle-windows.yml`); the gen-core single-rev invariant is unchanged (same pins).
+[target.'cfg(not(target_os = "macos"))'.dependencies]
 candle-gen-sdxl = { git = "https://github.com/michaeltrefry/candle-gen", rev = "b005cf72b57af42a27fc2c7965b0df9ea0ca73d1", features = ["cuda"], optional = true }
 # Candle image providers (sc-5096) -- Windows/CUDA siblings of the mlx-gen image crates above. Each
 # self-registers its engine id into the shared gen_core inventory registry; force-linked in
@@ -814,8 +827,8 @@ candle-gen-instantid = { git = "https://github.com/michaeltrefry/candle-gen", re
 # candle-gen provider above, so `--features backend-candle` still resolves ONE candle-gen / gen-core
 # build (the sc-4482 skew gate stays single-rev — this rev pins gen-core 154af37, matching mlx-gen).
 candle-gen-pulid = { git = "https://github.com/michaeltrefry/candle-gen", rev = "b005cf72b57af42a27fc2c7965b0df9ea0ca73d1", features = ["cuda"], optional = true }
-# Candle SeedVR2 one-step diffusion super-resolution upscaler (sc-5928, epic 4811 / epic 5482) — the
-# Windows/CUDA sibling of `mlx-gen-seedvr2`. Self-registers the upscaler ids `seedvr2` / `seedvr2_3b` /
+# Candle SeedVR2 one-step diffusion super-resolution upscaler (sc-5928 Windows / sc-5160 Linux, epic 4811
+# / epic 5482) — the Windows/CUDA + Linux/NVIDIA sibling of `mlx-gen-seedvr2`. Self-registers the upscaler ids `seedvr2` / `seedvr2_3b` /
 # `seedvr2_7b` (`Modality::Both`: image upscale via Reference + video upscale via VideoClip; int8/int4
 # quant + the 7B variant from sc-5927) into the shared gen_core inventory. The worker reaches it via
 # `gen_core::load("seedvr2")` / `"seedvr2_3b"` from `upscale_jobs::run_seedvr2_upscale` (image) and

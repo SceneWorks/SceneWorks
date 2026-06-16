@@ -43,11 +43,11 @@ pub(crate) async fn discover_gpu(settings: &Settings) -> DiscoveredGpu {
 /// All-targets signature so `discover_gpu` is uniform; a no-op everywhere except the Windows candle
 /// build with `backend_candle_enabled`, so production routing is unchanged until the lane is on.
 #[cfg_attr(
-    not(all(target_os = "windows", feature = "backend-candle")),
+    not(all(not(target_os = "macos"), feature = "backend-candle")),
     allow(unused_mut, unused_variables)
 )]
 fn with_candle_capabilities(mut gpu: DiscoveredGpu, settings: &Settings) -> DiscoveredGpu {
-    #[cfg(all(target_os = "windows", feature = "backend-candle"))]
+    #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
     if settings.backend_candle_enabled && gpu.capabilities.contains(&WorkerCapability::Gpu) {
         let derived = crate::engines::registry_capabilities(settings);
         if !derived.is_empty() {

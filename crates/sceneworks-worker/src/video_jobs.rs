@@ -41,7 +41,7 @@ use crate::image_jobs::{classify_adapter, load_reference_image, lora_path};
 // video engine, not which contract types this module names.
 #[cfg(any(
     target_os = "macos",
-    all(target_os = "windows", feature = "backend-candle")
+    all(not(target_os = "macos"), feature = "backend-candle")
 ))]
 use gen_core::{
     AdapterSpec, CancelFlag, Conditioning, GenerationOutput, GenerationRequest, Generator,
@@ -54,7 +54,7 @@ use gen_core::{AdapterKind, MoeExpert};
 // lane (sc-5494), so they are available on both the macos and windows+backend-candle builds.
 #[cfg(any(
     target_os = "macos",
-    all(target_os = "windows", feature = "backend-candle")
+    all(not(target_os = "macos"), feature = "backend-candle")
 ))]
 use gen_core::{Image, ReplacementMode};
 #[cfg(target_os = "macos")]
@@ -78,33 +78,33 @@ use mlx_gen_scail2 as _;
 // Candle (Windows/CUDA) video providers (sc-5097; sc-5493 adds svd) — force-link anchors so their
 // `inventory::submit!` registrations (`wan2_2_ti2v_5b` / `ltx_2_3_distilled` / `svd_xt`) survive the
 // MSVC release linker, mirroring the image providers in image_jobs.rs.
-#[cfg(all(target_os = "windows", feature = "backend-candle"))]
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 use candle_gen_ltx as _;
-#[cfg(all(target_os = "windows", feature = "backend-candle"))]
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 use candle_gen_svd as _;
-#[cfg(all(target_os = "windows", feature = "backend-candle"))]
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 use candle_gen_wan as _;
 // Candle SeedVR2 video upscaler (sc-5928, epic 4811 / epic 5482) — the Windows/CUDA sibling of the
 // Mac `mlx_gen_seedvr2` anchor above. Self-registers `seedvr2_3b` (+ `seedvr2` / `seedvr2_7b`) into
 // the shared gen_core inventory; the `video_upscale` path reaches it via `gen_core::load` from
 // `run_video_upscale_job`. Force-linked so the MSVC release linker keeps the `inventory::submit!`.
-#[cfg(all(target_os = "windows", feature = "backend-candle"))]
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 use candle_gen_seedvr2 as _;
 #[cfg(any(
     target_os = "macos",
-    all(target_os = "windows", feature = "backend-candle")
+    all(not(target_os = "macos"), feature = "backend-candle")
 ))]
 use sceneworks_core::character_store::CharacterStore;
 // Frame-count stride coercion (Wan needs frames ≡ 1 mod 4; LTX snaps to 8k+1) — used by the MLX path
 // and the candle entry (sc-5097).
 #[cfg(any(
     target_os = "macos",
-    all(target_os = "windows", feature = "backend-candle")
+    all(not(target_os = "macos"), feature = "backend-candle")
 ))]
 use sceneworks_core::video_request::{ltx_frame_count, wan_frame_count};
 #[cfg(any(
     target_os = "macos",
-    all(target_os = "windows", feature = "backend-candle")
+    all(not(target_os = "macos"), feature = "backend-candle")
 ))]
 use std::time::{Duration, Instant};
 
@@ -409,7 +409,7 @@ pub(crate) async fn run_video_generate_job(
     // candle lane doesn't serve stubs exactly as before. Gated on `backend_candle_enabled` (default
     // off → routing unchanged until parity). Conditioning shapes never reach here — the router's
     // `video_job_is_candle_eligible` confines the candle worker to txt2video.
-    #[cfg(all(target_os = "windows", feature = "backend-candle"))]
+    #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
     let (decoded, adapter, raw_settings, replacement_status) = if settings.backend_candle_enabled
         && request.mode == "replace_person"
     {
@@ -459,7 +459,7 @@ pub(crate) async fn run_video_generate_job(
     };
     #[cfg(not(any(
         target_os = "macos",
-        all(target_os = "windows", feature = "backend-candle")
+        all(not(target_os = "macos"), feature = "backend-candle")
     )))]
     let (decoded, adapter, raw_settings, replacement_status) = (
         generate_stub_video(&request, seed),
@@ -1046,35 +1046,35 @@ fn video_progress(
 // constants/helpers are backend-neutral (gen_core + ffmpeg + the shared streaming driver).
 #[cfg(any(
     target_os = "macos",
-    all(target_os = "windows", feature = "backend-candle")
+    all(not(target_os = "macos"), feature = "backend-candle")
 ))]
 const SEEDVR2_REPO: &str = "numz/SeedVR2_comfyUI";
 #[cfg(any(
     target_os = "macos",
-    all(target_os = "windows", feature = "backend-candle")
+    all(not(target_os = "macos"), feature = "backend-candle")
 ))]
 const SEEDVR2_VAE_FILE: &str = "ema_vae_fp16.safetensors";
 #[cfg(any(
     target_os = "macos",
-    all(target_os = "windows", feature = "backend-candle")
+    all(not(target_os = "macos"), feature = "backend-candle")
 ))]
 const SEEDVR2_DIT_3B_FILE: &str = "seedvr2_ema_3b_fp16.safetensors";
 /// The engine registry id wired for video upscale (3B; 7B = sc-5197 / sc-5927).
 #[cfg(any(
     target_os = "macos",
-    all(target_os = "windows", feature = "backend-candle")
+    all(not(target_os = "macos"), feature = "backend-candle")
 ))]
 const SEEDVR2_ENGINE_ID: &str = "seedvr2_3b";
 /// Adapter id recorded on the result asset for provenance (mirrors the other `mlx_*` video adapters;
 /// SeedVR2 itself takes no LoRA — this is metadata only).
 #[cfg(any(
     target_os = "macos",
-    all(target_os = "windows", feature = "backend-candle")
+    all(not(target_os = "macos"), feature = "backend-candle")
 ))]
 const SEEDVR2_ADAPTER: &str = "mlx_seedvr2";
 #[cfg(any(
     target_os = "macos",
-    all(target_os = "windows", feature = "backend-candle")
+    all(not(target_os = "macos"), feature = "backend-candle")
 ))]
 const SEEDVR2_CANCEL_MESSAGE: &str = "Video upscale canceled by user.";
 
@@ -1082,7 +1082,7 @@ const SEEDVR2_CANCEL_MESSAGE: &str = "Video upscale canceled by user.";
 /// requirement), rounding to nearest and clamping to the engine's `[16, 4096]` size range.
 #[cfg(any(
     target_os = "macos",
-    all(target_os = "windows", feature = "backend-candle")
+    all(not(target_os = "macos"), feature = "backend-candle")
 ))]
 fn snap_seedvr2_dim(value: u32) -> u32 {
     let rounded = value.saturating_add(8) / 16 * 16;
@@ -1093,7 +1093,7 @@ fn snap_seedvr2_dim(value: u32) -> u32 {
 /// components — same guard as `upscale_jobs::resolve_source`).
 #[cfg(any(
     target_os = "macos",
-    all(target_os = "windows", feature = "backend-candle")
+    all(not(target_os = "macos"), feature = "backend-candle")
 ))]
 fn safe_join(project_path: &Path, rel: &str) -> Option<PathBuf> {
     let mut path = project_path.to_path_buf();
@@ -1111,7 +1111,7 @@ fn safe_join(project_path: &Path, rel: &str) -> Option<PathBuf> {
 /// the dir to hand the engine as `WeightsSource::Dir`.
 #[cfg(any(
     target_os = "macos",
-    all(target_os = "windows", feature = "backend-candle")
+    all(not(target_os = "macos"), feature = "backend-candle")
 ))]
 async fn ensure_seedvr2_weights(
     api: &ApiClient,
@@ -1148,7 +1148,7 @@ async fn ensure_seedvr2_weights(
 /// temp dir, then loads them in order. `-fps_mode passthrough` keeps the exact source frame count.
 #[cfg(any(
     target_os = "macos",
-    all(target_os = "windows", feature = "backend-candle")
+    all(not(target_os = "macos"), feature = "backend-candle")
 ))]
 async fn decode_seedvr2_source_frames(
     api: &ApiClient,
@@ -1215,7 +1215,7 @@ async fn decode_seedvr2_source_frames(
 /// and stream a single upscaled video asset.
 #[cfg(any(
     target_os = "macos",
-    all(target_os = "windows", feature = "backend-candle")
+    all(not(target_os = "macos"), feature = "backend-candle")
 ))]
 pub(crate) async fn run_video_upscale_job(
     api: &ApiClient,
@@ -1957,7 +1957,7 @@ fn resolve_wan_conditioning(
 /// Which boundary frame of a source clip to extract for Wan-native clip conditioning (sc-3357).
 #[cfg(any(
     target_os = "macos",
-    all(target_os = "windows", feature = "backend-candle")
+    all(not(target_os = "macos"), feature = "backend-candle")
 ))]
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum ClipFramePosition {
@@ -2182,7 +2182,7 @@ const WAN5B_INTERIM_STEPS: u32 = 20;
 /// Shared by the MLX path and the candle video lane (sc-5097).
 #[cfg(any(
     target_os = "macos",
-    all(target_os = "windows", feature = "backend-candle")
+    all(not(target_os = "macos"), feature = "backend-candle")
 ))]
 fn advanced_opt_u32(request: &VideoRequest, key: &str) -> Option<u32> {
     request.advanced.get(key).and_then(|value| {
@@ -2197,7 +2197,7 @@ fn advanced_opt_u32(request: &VideoRequest, key: &str) -> Option<u32> {
 /// Shared by the MLX path and the candle video lane (sc-5097).
 #[cfg(any(
     target_os = "macos",
-    all(target_os = "windows", feature = "backend-candle")
+    all(not(target_os = "macos"), feature = "backend-candle")
 ))]
 fn advanced_opt_f32(request: &VideoRequest, key: &str) -> Option<f32> {
     request.advanced.get(key).and_then(|value| {
@@ -2273,7 +2273,7 @@ fn scail2_adapters_have_lightning(adapters: &[AdapterSpec]) -> bool {
 /// prompt-enhance) default off for Wan; the Wan-only `moe_expert` rides on `adapters`.
 #[cfg(any(
     target_os = "macos",
-    all(target_os = "windows", feature = "backend-candle")
+    all(not(target_os = "macos"), feature = "backend-candle")
 ))]
 struct VideoGenInput {
     engine_id: &'static str,
@@ -2314,7 +2314,7 @@ struct VideoGenInput {
 
 #[cfg(any(
     target_os = "macos",
-    all(target_os = "windows", feature = "backend-candle")
+    all(not(target_os = "macos"), feature = "backend-candle")
 ))]
 impl Default for VideoGenInput {
     fn default() -> Self {
@@ -2351,7 +2351,7 @@ impl Default for VideoGenInput {
 
 #[cfg(any(
     target_os = "macos",
-    all(target_os = "windows", feature = "backend-candle")
+    all(not(target_os = "macos"), feature = "backend-candle")
 ))]
 fn video_load_spec(input: &VideoGenInput) -> LoadSpec {
     LoadSpec {
@@ -2371,7 +2371,7 @@ fn video_load_spec(input: &VideoGenInput) -> LoadSpec {
 /// The engine fills the audio track (LTX) or leaves it `None` (Wan).
 #[cfg(any(
     target_os = "macos",
-    all(target_os = "windows", feature = "backend-candle")
+    all(not(target_os = "macos"), feature = "backend-candle")
 ))]
 fn run_loaded_video_generation(
     generator: &dyn Generator,
@@ -2465,7 +2465,7 @@ fn run_video_generation(
 /// unusually large/slow model or disk.
 #[cfg(any(
     target_os = "macos",
-    all(target_os = "windows", feature = "backend-candle")
+    all(not(target_os = "macos"), feature = "backend-candle")
 ))]
 const VIDEO_STALL_TIMEOUT: Duration = Duration::from_secs(600);
 
@@ -2476,7 +2476,7 @@ const VIDEO_STALL_TIMEOUT: Duration = Duration::from_secs(600);
 /// itself re-hanging on the join.
 #[cfg(any(
     target_os = "macos",
-    all(target_os = "windows", feature = "backend-candle")
+    all(not(target_os = "macos"), feature = "backend-candle")
 ))]
 const VIDEO_STALL_GRACE: Duration = Duration::from_secs(60);
 
@@ -2484,7 +2484,7 @@ const VIDEO_STALL_GRACE: Duration = Duration::from_secs(60);
 /// integer number of seconds) when set, else [`VIDEO_STALL_TIMEOUT`].
 #[cfg(any(
     target_os = "macos",
-    all(target_os = "windows", feature = "backend-candle")
+    all(not(target_os = "macos"), feature = "backend-candle")
 ))]
 fn video_stall_timeout() -> Duration {
     parse_stall_timeout(std::env::var("SCENEWORKS_VIDEO_STALL_SECS").ok())
@@ -2494,7 +2494,7 @@ fn video_stall_timeout() -> Duration {
 /// falling back to [`VIDEO_STALL_TIMEOUT`] when unset, blank, non-numeric, or zero.
 #[cfg(any(
     target_os = "macos",
-    all(target_os = "windows", feature = "backend-candle")
+    all(not(target_os = "macos"), feature = "backend-candle")
 ))]
 fn parse_stall_timeout(raw: Option<String>) -> Duration {
     raw.and_then(|raw| raw.trim().parse::<u64>().ok())
@@ -2513,7 +2513,7 @@ fn parse_stall_timeout(raw: Option<String>) -> Duration {
 /// worker. Mirrors the image path's `begin_image_cancel` (sc-5515).
 #[cfg(any(
     target_os = "macos",
-    all(target_os = "windows", feature = "backend-candle")
+    all(not(target_os = "macos"), feature = "backend-candle")
 ))]
 pub(crate) async fn begin_video_cancel(
     api: &ApiClient,
@@ -2543,7 +2543,7 @@ pub(crate) async fn begin_video_cancel(
 /// ([`video_stall_timeout`]) fails a wedged job loudly rather than letting it look alive forever.
 #[cfg(any(
     target_os = "macos",
-    all(target_os = "windows", feature = "backend-candle")
+    all(not(target_os = "macos"), feature = "backend-candle")
 ))]
 async fn generate_video(
     api: &ApiClient,
@@ -2730,41 +2730,41 @@ async fn generate_video(
 
 /// Per-asset adapter ids for the candle video engines (`candle_<family>`), the candle siblings of
 /// the MLX `mlx_wan` / `mlx_ltx` labels (sc-5097).
-#[cfg(all(target_os = "windows", feature = "backend-candle"))]
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 const CANDLE_WAN_ADAPTER: &str = "candle_wan";
-#[cfg(all(target_os = "windows", feature = "backend-candle"))]
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 const CANDLE_LTX_ADAPTER: &str = "candle_ltx";
-#[cfg(all(target_os = "windows", feature = "backend-candle"))]
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 const CANDLE_SVD_ADAPTER: &str = "candle_svd";
 
 /// Default HuggingFace repos the candle video providers load (overridable via the manifest `repo`).
 /// The candle wan providers read a Wan2.2 diffusers snapshot — the TI2V-5B, or the T2V-A14B /
 /// I2V-A14B 14B MoE (sc-5175); ltx reads the LTX-2.3 checkpoint plus a separate Gemma-3-12B encoder
 /// snapshot (`LTX_GEMMA_DIR`).
-#[cfg(all(target_os = "windows", feature = "backend-candle"))]
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 const CANDLE_WAN_5B_REPO: &str = "Wan-AI/Wan2.2-TI2V-5B-Diffusers";
-#[cfg(all(target_os = "windows", feature = "backend-candle"))]
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 const CANDLE_WAN_T2V_14B_REPO: &str = "Wan-AI/Wan2.2-T2V-A14B-Diffusers";
-#[cfg(all(target_os = "windows", feature = "backend-candle"))]
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 const CANDLE_WAN_I2V_14B_REPO: &str = "Wan-AI/Wan2.2-I2V-A14B-Diffusers";
-#[cfg(all(target_os = "windows", feature = "backend-candle"))]
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 const CANDLE_LTX_REPO: &str = "Lightricks/LTX-2.3";
 // The `ltx_2_3_eros` weights repo (sc-5495): a full dense LTX-2.3 fine-tune (the candle provider
 // loads its `10Eros_v1_bf16.safetensors` like the base; same architecture, same Gemma encoder).
-#[cfg(all(target_os = "windows", feature = "backend-candle"))]
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 const CANDLE_LTX_EROS_REPO: &str = "TenStrip/LTX2.3-10Eros";
-#[cfg(all(target_os = "windows", feature = "backend-candle"))]
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 const CANDLE_LTX_GEMMA_REPO: &str = "google/gemma-3-12b-it";
 
 /// Per-asset adapter id for the candle Wan-VACE controllable-video lane (sc-5494) — the candle sibling
 /// of the MLX `mlx_wan_vace` label.
-#[cfg(all(target_os = "windows", feature = "backend-candle"))]
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 const CANDLE_WAN_VACE_ADAPTER: &str = "candle_wan_vace";
 
 /// The diffusers Wan2.1-VACE-14B snapshot the candle `wan_vace` provider reads (`transformer/` +
 /// `text_encoder/` + `vae/` + `tokenizer/`). Overridable via `SCENEWORKS_CANDLE_WAN_VACE_DIR`. The 14B
 /// repo matches the provider's `WanVaceConfig::vace_14b` dims (dim 5120, 40 layers).
-#[cfg(all(target_os = "windows", feature = "backend-candle"))]
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 const CANDLE_WAN_VACE_REPO: &str = "Wan-AI/Wan2.1-VACE-14B-diffusers";
 
 /// SceneWorks video model id → candle registry engine id, or `None` for an id the candle video lane
@@ -2773,7 +2773,7 @@ const CANDLE_WAN_VACE_REPO: &str = "Wan-AI/Wan2.1-VACE-14B-diffusers";
 /// (sc-5174 / sc-5175): `wan_2_2_t2v_14b` (text→video) and `wan_2_2_i2v_14b` (image→video), plus `svd`
 /// (image→video, sc-5493 / epic 5481). `ltx_2_3_eros` (sc-5495) maps to the same `ltx_2_3_distilled`
 /// engine as the base — it's a full dense LTX-2.3 fine-tune — differing only in the weights repo.
-#[cfg(all(target_os = "windows", feature = "backend-candle"))]
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 fn candle_video_engine_id(model: &str) -> Option<&'static str> {
     match model {
         "wan_2_2" => Some("wan2_2_ti2v_5b"),
@@ -2789,12 +2789,12 @@ fn candle_video_engine_id(model: &str) -> Option<&'static str> {
 }
 
 /// Whether `model` is served by the candle video lane (sc-5097).
-#[cfg(all(target_os = "windows", feature = "backend-candle"))]
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 fn is_candle_video_engine(model: &str) -> bool {
     candle_video_engine_id(model).is_some()
 }
 
-#[cfg(all(target_os = "windows", feature = "backend-candle"))]
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 fn candle_video_adapter_label(engine_id: &str) -> &'static str {
     match engine_id {
         "ltx_2_3_distilled" => CANDLE_LTX_ADAPTER,
@@ -2805,7 +2805,7 @@ fn candle_video_adapter_label(engine_id: &str) -> &'static str {
 
 /// The candle default weights repo for a video engine id (the per-variant Wan2.2 diffusers snapshot,
 /// or the LTX-2.3 checkpoint). Used when the manifest entry omits `repo`.
-#[cfg(all(target_os = "windows", feature = "backend-candle"))]
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 fn candle_video_default_repo(engine_id: &str) -> &'static str {
     match engine_id {
         "ltx_2_3_distilled" => CANDLE_LTX_REPO,
@@ -2820,7 +2820,7 @@ fn candle_video_default_repo(engine_id: &str) -> &'static str {
 /// The candle weights repo for a video engine: the manifest `repo` wins, else `ltx_2_3_eros` selects
 /// its own fine-tune repo (it shares the `ltx_2_3_distilled` engine id with the base), else the candle
 /// default repo for the engine.
-#[cfg(all(target_os = "windows", feature = "backend-candle"))]
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 fn candle_video_repo(request: &VideoRequest, engine_id: &str) -> String {
     request
         .model_manifest_entry
@@ -2840,7 +2840,7 @@ fn candle_video_repo(request: &VideoRequest, engine_id: &str) -> String {
 
 /// Resolve the candle weights snapshot dir for `repo`. Errors loudly (no procedural-stub fallback)
 /// when the snapshot is absent, so a missing model surfaces a re-download error.
-#[cfg(all(target_os = "windows", feature = "backend-candle"))]
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 fn candle_video_snapshot_dir(settings: &Settings, repo: &str) -> WorkerResult<PathBuf> {
     huggingface_snapshot_dir(&settings.data_dir, repo).ok_or_else(|| {
         WorkerError::InvalidPayload(format!(
@@ -2854,7 +2854,7 @@ fn candle_video_snapshot_dir(settings: &Settings, repo: &str) -> WorkerResult<Pa
 /// Gemma snapshot isn't in the HF cache we leave `LTX_GEMMA_DIR` unset so the provider tries its
 /// `<root>/text_encoder` fallback and emits its own clear "set LTX_GEMMA_DIR …" error. The worker runs
 /// video jobs sequentially, so the process-global env set is race-free.
-#[cfg(all(target_os = "windows", feature = "backend-candle"))]
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 fn ensure_ltx_gemma_dir(settings: &Settings) {
     if std::env::var_os("LTX_GEMMA_DIR").is_some() {
         return; // honor an explicit operator override.
@@ -2866,7 +2866,7 @@ fn ensure_ltx_gemma_dir(settings: &Settings) {
 
 /// Raw-settings recorded on a candle video asset (mirrors `wan_raw_settings`, trimmed to the
 /// txt2video surface): the request `advanced` knobs plus the real-inference markers.
-#[cfg(all(target_os = "windows", feature = "backend-candle"))]
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 fn candle_video_raw_settings(request: &VideoRequest, repo: &str) -> Value {
     let mut raw = request.advanced.clone();
     raw.insert("realModelInference".to_owned(), Value::Bool(true));
@@ -2885,7 +2885,7 @@ fn candle_video_raw_settings(request: &VideoRequest, repo: &str) -> Value {
 /// Every other candle video engine (5B, T2V-14B, ltx) is txt2video-only, so this returns an empty set.
 /// The router's `video_request_candle_eligible` already guarantees the i2v shape carries a source and
 /// the txt2video ids do not, but the source is required here too so a mis-routed job fails clearly.
-#[cfg(all(target_os = "windows", feature = "backend-candle"))]
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 fn resolve_candle_video_conditioning(
     settings: &Settings,
     request: &VideoRequest,
@@ -2923,7 +2923,7 @@ fn resolve_candle_video_conditioning(
 /// Resolves the engine + weights, provisions the LTX Gemma encoder, resolves any i2v source-image
 /// conditioning, builds a `VideoGenInput`, and runs it through the shared [`generate_video`] streaming
 /// driver. Returns the decoded clip + the candle adapter label.
-#[cfg(all(target_os = "windows", feature = "backend-candle"))]
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 async fn generate_candle_video(
     api: &ApiClient,
     settings: &Settings,
@@ -3028,7 +3028,7 @@ async fn generate_candle_video(
 /// Resolve the candle Wan-VACE diffusers snapshot dir (sc-5494): `SCENEWORKS_CANDLE_WAN_VACE_DIR`
 /// override (when it holds a `transformer/config.json`), else the HF [`CANDLE_WAN_VACE_REPO`] snapshot.
 /// Errors loudly when absent (no stub fallback — a missing VACE checkpoint surfaces a re-download error).
-#[cfg(all(target_os = "windows", feature = "backend-candle"))]
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 fn resolve_candle_wan_vace_model_dir(settings: &Settings) -> WorkerResult<PathBuf> {
     if let Ok(dir) = std::env::var("SCENEWORKS_CANDLE_WAN_VACE_DIR") {
         let path = PathBuf::from(dir.trim());
@@ -3045,7 +3045,7 @@ fn resolve_candle_wan_vace_model_dir(settings: &Settings) -> WorkerResult<PathBu
 /// `wan_vace` engine. Person detect/track/segment stays upstream (the masks are pre-saved); the
 /// conditioning builders are shared with the MLX path. No quant / LoRA (the candle VACE provider rejects
 /// them). Returns the decoded clip + the honest `replacementStatus`.
-#[cfg(all(target_os = "windows", feature = "backend-candle"))]
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 async fn generate_candle_wan_vace(
     api: &ApiClient,
     settings: &Settings,
@@ -3125,7 +3125,7 @@ async fn generate_candle_wan_vace(
 /// [`generate_wan_vace_extend_bridge`]. Loads the real source-clip anchor frames (the left clip's tail
 /// for extend; both clips' boundaries for bridge), builds the source-at-kept-positions + generated-span
 /// ControlClip, and runs the `wan_vace` engine. No reference images, no quant / LoRA.
-#[cfg(all(target_os = "windows", feature = "backend-candle"))]
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 async fn generate_candle_wan_vace_extend_bridge(
     api: &ApiClient,
     settings: &Settings,
@@ -4383,7 +4383,7 @@ fn build_video_clip_conditioning(
 /// Rust equivalent of the torch `source_asset_media_path`).
 #[cfg(any(
     target_os = "macos",
-    all(target_os = "windows", feature = "backend-candle")
+    all(not(target_os = "macos"), feature = "backend-candle")
 ))]
 fn resolve_clip_media_path(
     settings: &Settings,
@@ -4684,7 +4684,7 @@ const SVD_ADAPTER: &str = "svd_video";
 /// Shared by the MLX (macOS) lane and the candle (Windows/CUDA) lane (sc-5493).
 #[cfg(any(
     target_os = "macos",
-    all(target_os = "windows", feature = "backend-candle")
+    all(not(target_os = "macos"), feature = "backend-candle")
 ))]
 const SVD_REPO: &str = "stabilityai/stable-video-diffusion-img2vid-xt";
 
@@ -4745,7 +4745,7 @@ fn resolve_svd_model_dir(settings: &Settings) -> WorkerResult<PathBuf> {
 /// the builtin default; the resolved value is clamped).
 #[cfg(any(
     target_os = "macos",
-    all(target_os = "windows", feature = "backend-candle")
+    all(not(target_os = "macos"), feature = "backend-candle")
 ))]
 fn svd_i32(
     request: &VideoRequest,
@@ -4769,7 +4769,7 @@ fn svd_i32(
 /// (no clamp). Mirrors the torch `float(advanced.get(adv_key, target.get(manifest_key, default)))`.
 #[cfg(any(
     target_os = "macos",
-    all(target_os = "windows", feature = "backend-candle")
+    all(not(target_os = "macos"), feature = "backend-candle")
 ))]
 fn svd_f32(request: &VideoRequest, adv_key: &str, manifest_key: &str, default: f32) -> f32 {
     request
@@ -4786,7 +4786,7 @@ fn svd_f32(request: &VideoRequest, adv_key: &str, manifest_key: &str, default: f
 /// Mirrors the torch `_num_inference_steps` for the `svd_video` adapter.
 #[cfg(any(
     target_os = "macos",
-    all(target_os = "windows", feature = "backend-candle")
+    all(not(target_os = "macos"), feature = "backend-candle")
 ))]
 fn svd_steps(request: &VideoRequest) -> u32 {
     let builtin = match request.quality.as_str() {
@@ -4845,7 +4845,7 @@ fn resolve_svd_conditioning(
 /// the MLX (macOS) and candle (Windows/CUDA, sc-5493) lanes.
 #[cfg(any(
     target_os = "macos",
-    all(target_os = "windows", feature = "backend-candle")
+    all(not(target_os = "macos"), feature = "backend-candle")
 ))]
 fn svd_raw_settings(request: &VideoRequest) -> Value {
     let mut raw = request.advanced.clone();
@@ -4965,7 +4965,7 @@ const WAN_VACE_ADAPTER: &str = "mlx_wan_vace";
 /// identity-resize preprocess.
 #[cfg(any(
     target_os = "macos",
-    all(target_os = "windows", feature = "backend-candle")
+    all(not(target_os = "macos"), feature = "backend-candle")
 ))]
 const FRAME_PAD_COLOR: &str = "0x12110f";
 
@@ -4973,7 +4973,7 @@ const FRAME_PAD_COLOR: &str = "0x12110f";
 /// markers; the engine id is `wan_vace`, not the user-picked replace-capable model).
 #[cfg(any(
     target_os = "macos",
-    all(target_os = "windows", feature = "backend-candle")
+    all(not(target_os = "macos"), feature = "backend-candle")
 ))]
 fn wan_vace_raw_settings(request: &VideoRequest) -> Value {
     let mut raw = request.advanced.clone();
@@ -4994,7 +4994,7 @@ fn wan_vace_raw_settings(request: &VideoRequest) -> Value {
 /// SceneWorks `replacementMode` string → engine [`ReplacementMode`] (default FaceOnly).
 #[cfg(any(
     target_os = "macos",
-    all(target_os = "windows", feature = "backend-candle")
+    all(not(target_os = "macos"), feature = "backend-candle")
 ))]
 fn replacement_mode_from(value: &str) -> ReplacementMode {
     match value {
@@ -5077,7 +5077,7 @@ fn resolve_wan_vace_model_dir(settings: &Settings) -> WorkerResult<PathBuf> {
 /// frames are the (un-neutralized) Wan-VACE control video; the engine masks them.
 #[cfg(any(
     target_os = "macos",
-    all(target_os = "windows", feature = "backend-candle")
+    all(not(target_os = "macos"), feature = "backend-candle")
 ))]
 async fn load_source_video_frames(
     api: &ApiClient,
@@ -5150,7 +5150,7 @@ async fn load_source_video_frames(
 /// decode the selected frames to engine [`Image`]s. Blocking IO/decoding runs off the runtime.
 #[cfg(any(
     target_os = "macos",
-    all(target_os = "windows", feature = "backend-candle")
+    all(not(target_os = "macos"), feature = "backend-candle")
 ))]
 async fn select_extracted_frames(work_dir: PathBuf, count: usize) -> WorkerResult<Vec<Image>> {
     tokio::task::spawn_blocking(move || -> WorkerResult<Vec<Image>> {
@@ -5180,7 +5180,7 @@ async fn select_extracted_frames(work_dir: PathBuf, count: usize) -> WorkerResul
 /// `_validate_inputs` parity). The engine cover-fits each to the output size.
 #[cfg(any(
     target_os = "macos",
-    all(target_os = "windows", feature = "backend-candle")
+    all(not(target_os = "macos"), feature = "backend-candle")
 ))]
 fn resolve_character_references(
     settings: &Settings,
@@ -5246,7 +5246,7 @@ fn resolve_character_references(
 /// Convert an `image::RgbImage` (the rasterized mask) to an engine [`Image`].
 #[cfg(any(
     target_os = "macos",
-    all(target_os = "windows", feature = "backend-candle")
+    all(not(target_os = "macos"), feature = "backend-candle")
 ))]
 fn rgb_image_to_engine(image: image::RgbImage) -> Image {
     Image {
@@ -5261,7 +5261,7 @@ fn rgb_image_to_engine(image: image::RgbImage) -> Image {
 /// [`Conditioning::Reference`] per character reference image.
 #[cfg(any(
     target_os = "macos",
-    all(target_os = "windows", feature = "backend-candle")
+    all(not(target_os = "macos"), feature = "backend-candle")
 ))]
 fn build_vace_conditioning(
     frames: Vec<Image>,
@@ -5299,7 +5299,7 @@ fn build_vace_conditioning(
 /// `replacement_status`); the API folds it into the video sidecar's normalizedSettings.
 #[cfg(any(
     target_os = "macos",
-    all(target_os = "windows", feature = "backend-candle")
+    all(not(target_os = "macos"), feature = "backend-candle")
 ))]
 fn replacement_status_value(
     track: &Value,
@@ -5455,7 +5455,7 @@ async fn generate_wan_vace(
 /// freely from the kept frames + prompt, never biased toward a frozen filler image.
 #[cfg(any(
     target_os = "macos",
-    all(target_os = "windows", feature = "backend-candle")
+    all(not(target_os = "macos"), feature = "backend-candle")
 ))]
 fn neutral_control_frame(width: u32, height: u32) -> Image {
     Image {
@@ -5469,7 +5469,7 @@ fn neutral_control_frame(width: u32, height: u32) -> Image {
 /// 0.5), matching the `image::RgbImage` form `person_track_masks` produces for replace_person.
 #[cfg(any(
     target_os = "macos",
-    all(target_os = "windows", feature = "backend-candle")
+    all(not(target_os = "macos"), feature = "backend-candle")
 ))]
 fn solid_mask(width: u32, height: u32, value: u8) -> image::RgbImage {
     image::RgbImage::from_pixel(width, height, image::Rgb([value, value, value]))
@@ -5481,7 +5481,7 @@ fn solid_mask(width: u32, height: u32, value: u8) -> image::RgbImage {
 /// is clamped so at least 5 frames (one z16 chunk) are left to generate.
 #[cfg(any(
     target_os = "macos",
-    all(target_os = "windows", feature = "backend-candle")
+    all(not(target_os = "macos"), feature = "backend-candle")
 ))]
 fn extend_anchor_frames(request: &VideoRequest, frame_count: usize) -> usize {
     let per_side = if request.mode == "video_bridge" { 2 } else { 1 };
@@ -5507,7 +5507,7 @@ fn extend_anchor_frames(request: &VideoRequest, frame_count: usize) -> usize {
 /// clip's actual motion velocity at the boundary. Decodes only the kept subset (`decode_png_image`).
 #[cfg(any(
     target_os = "macos",
-    all(target_os = "windows", feature = "backend-candle")
+    all(not(target_os = "macos"), feature = "backend-candle")
 ))]
 #[allow(clippy::too_many_arguments)]
 async fn load_clip_anchor_frames(
@@ -5563,7 +5563,7 @@ async fn load_clip_anchor_frames(
 /// [`Image`]s, preserving temporal order. Fewer available than `count` ⇒ all of them (short clip).
 #[cfg(any(
     target_os = "macos",
-    all(target_os = "windows", feature = "backend-candle")
+    all(not(target_os = "macos"), feature = "backend-candle")
 ))]
 async fn select_anchor_frames(
     work_dir: PathBuf,
@@ -5595,7 +5595,7 @@ async fn select_anchor_frames(
 /// Decode one RGB PNG into an engine [`Image`] (shared by the resample + anchor frame selectors).
 #[cfg(any(
     target_os = "macos",
-    all(target_os = "windows", feature = "backend-candle")
+    all(not(target_os = "macos"), feature = "backend-candle")
 ))]
 fn decode_png_image(path: &Path) -> WorkerResult<Image> {
     let decoded = image::open(path)
@@ -5619,7 +5619,7 @@ fn decode_png_image(path: &Path) -> WorkerResult<Image> {
 /// shared [`Conditioning::ControlClip`] contract), so they take the neutral defaults.
 #[cfg(any(
     target_os = "macos",
-    all(target_os = "windows", feature = "backend-candle")
+    all(not(target_os = "macos"), feature = "backend-candle")
 ))]
 fn build_extend_bridge_vace_conditioning(
     request: &VideoRequest,
@@ -5694,7 +5694,7 @@ fn build_extend_bridge_vace_conditioning(
 /// no `replacementMode` (these modes are not person-replacement).
 #[cfg(any(
     target_os = "macos",
-    all(target_os = "windows", feature = "backend-candle")
+    all(not(target_os = "macos"), feature = "backend-candle")
 ))]
 fn wan_vace_extend_raw_settings(request: &VideoRequest) -> Value {
     let mut raw = request.advanced.clone();
@@ -8315,7 +8315,7 @@ mod tests {
 }
 
 // Candle video lane labeling + engine-mapping unit tests (sc-5099). Windows/candle-gated; pure maps.
-#[cfg(all(test, target_os = "windows", feature = "backend-candle"))]
+#[cfg(all(test, not(target_os = "macos"), feature = "backend-candle"))]
 mod candle_video_label_tests {
     use super::*;
 

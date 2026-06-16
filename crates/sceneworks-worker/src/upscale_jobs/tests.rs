@@ -6,7 +6,7 @@ use super::*;
 // real-weight smoke (Mac MLX + the Windows/CUDA candle lane).
 #[cfg(any(
     target_os = "macos",
-    all(target_os = "windows", feature = "backend-candle")
+    all(not(target_os = "macos"), feature = "backend-candle")
 ))]
 use image::{Rgb, RgbImage};
 use serde_json::json;
@@ -224,7 +224,7 @@ fn manifest_seedvr2_resource_extracts_overrides_and_defaults() {
 /// so the smoke below can run on real weights without a download. `None` ⇒ skip.
 #[cfg(any(
     target_os = "macos",
-    all(target_os = "windows", feature = "backend-candle")
+    all(not(target_os = "macos"), feature = "backend-candle")
 ))]
 fn cached_seedvr2_checkpoint() -> Option<std::path::PathBuf> {
     if let Ok(pinned) = std::env::var("SCENEWORKS_SEEDVR2_CHECKPOINT") {
@@ -250,7 +250,7 @@ fn cached_seedvr2_checkpoint() -> Option<std::path::PathBuf> {
 /// `cargo test -p sceneworks-worker --features backend-candle -- --ignored seedvr2_upscale_real_weight_smoke`.
 #[cfg(any(
     target_os = "macos",
-    all(target_os = "windows", feature = "backend-candle")
+    all(not(target_os = "macos"), feature = "backend-candle")
 ))]
 #[tokio::test]
 #[ignore = "real-weight: needs the cached numz/SeedVR2_comfyUI checkpoint (~7 GB) + the seedvr2 backend (MLX on Mac / candle on Windows)"]

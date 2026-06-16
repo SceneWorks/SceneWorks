@@ -94,7 +94,7 @@ fn release_gen_cache_between_items() {}
 // `spawn_blocking`, so it never needs to be `Send`.
 #[cfg(any(
     target_os = "macos",
-    all(target_os = "windows", feature = "backend-candle")
+    all(not(target_os = "macos"), feature = "backend-candle")
 ))]
 fn start_gen_stream<G, L, D>(
     job_id: String,
