@@ -4,29 +4,63 @@ pub(crate) async fn list_assets(
     State(state): State<AppState>,
     Path(project_id): Path<String>,
     Query(query): Query<AssetsQuery>,
-) -> Result<Json<Vec<serde_json::Value>>, ApiError> {
+) -> Result<Json<serde_json::Value>, ApiError> {
     let character_id = query.character_id.clone();
     let scope = match query.scope.as_deref() {
         Some("library") => sceneworks_core::project_store::AssetScope::Library,
         _ => sceneworks_core::project_store::AssetScope::All,
     };
-    let assets = project_call(state, move |store| {
-        store.list_assets(
+    let mut include_rejected = query.include_rejected.unwrap_or(false);
+    let mut include_trashed = query.include_trashed.unwrap_or(false);
+    let status = match query
+        .status
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        Some("active") => sceneworks_core::project_store::AssetStatusFilter::Active,
+        Some("rejected") => sceneworks_core::project_store::AssetStatusFilter::Rejected,
+        Some("trashed") => sceneworks_core::project_store::AssetStatusFilter::Trashed,
+        Some("all") => {
+            include_rejected = true;
+            include_trashed = true;
+            sceneworks_core::project_store::AssetStatusFilter::All
+        }
+        Some(_) => return Err(ApiError::bad_request("Unsupported asset status filter")),
+        None => sceneworks_core::project_store::AssetStatusFilter::All,
+    };
+    let paged = query.limit.is_some() || query.cursor.is_some();
+    let page = project_call(state, move |store| {
+        store.list_assets_page(
             &project_id,
-            query.include_rejected.unwrap_or(false),
-            query.include_trashed.unwrap_or(false),
-            scope,
+            sceneworks_core::project_store::AssetListQuery {
+                include_rejected,
+                include_trashed,
+                scope,
+                asset_type: query.asset_type,
+                status,
+                limit: query.limit,
+                cursor: query.cursor,
+            },
         )
     })
     .await?;
-    let assets = match character_id {
-        Some(character_id) if !character_id.is_empty() => assets
+    let items = match character_id {
+        Some(character_id) if !character_id.is_empty() => page
+            .items
             .into_iter()
             .filter(|asset| asset_matches_character(asset, &character_id))
             .collect(),
-        _ => assets,
+        _ => page.items,
     };
-    Ok(Json(assets))
+    if paged {
+        Ok(Json(serde_json::json!({
+            "items": items,
+            "nextCursor": page.next_cursor,
+        })))
+    } else {
+        Ok(Json(serde_json::Value::Array(items)))
+    }
 }
 
 /// An asset belongs to a character when it was generated in association with it

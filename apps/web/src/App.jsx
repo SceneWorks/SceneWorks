@@ -38,6 +38,19 @@ const AUTH_CHECKING = "checking";
 const AUTH_LOCKED = "locked";
 const AUTH_VERIFYING = "verifying";
 const AUTH_AUTHENTICATED = "authenticated";
+const DEFAULT_ASSET_PAGE_LIMIT = 200;
+
+function mergeAssetsById(current, incoming) {
+  const merged = new Map(current.map((asset) => [asset.id, asset]));
+  for (const asset of incoming) {
+    merged.set(asset.id, asset);
+  }
+  return [...merged.values()].sort((a, b) => (b.createdAt ?? "").localeCompare(a.createdAt ?? ""));
+}
+
+function assetItems(response) {
+  return Array.isArray(response) ? response : response?.items ?? [];
+}
 
 function isActiveWorker(worker) {
   return worker.status !== "offline";
@@ -411,6 +424,7 @@ export function App() {
   const [trainingTargetsError, setTrainingTargetsError] = useState("");
   const [trainingPresetsError, setTrainingPresetsError] = useState("");
   const [assets, setAssets] = useState([]);
+  const discardedAssetsLoadedForProjectRef = useRef(null);
   const [selectedAssetId, setSelectedAssetId] = useState(null);
   const [projectFilter, setProjectFilter] = useState("all");
   const [requestedGpu, setRequestedGpu] = useState("auto");
@@ -953,6 +967,7 @@ export function App() {
   useEffect(() => {
     if (!activeProject || !authenticated) {
       setAssets([]);
+      discardedAssetsLoadedForProjectRef.current = null;
       setCharacters([]);
       setPersonTracks([]);
       setTimelines([]);
@@ -979,6 +994,15 @@ export function App() {
     refreshTimelinesRef.current?.(activeProject.id, { signal });
     return () => controller.abort();
   }, [activeProject?.id, authenticated, token]);
+
+  useEffect(() => {
+    if (!activeProject || !authenticated || activeView !== "Library") {
+      return undefined;
+    }
+    const controller = new AbortController();
+    refreshDiscardedAssets(activeProject.id, { signal: controller.signal });
+    return () => controller.abort();
+  }, [activeProject?.id, activeView, authenticated, token]);
 
   useEffect(() => {
     if (!authenticated) {
@@ -1185,15 +1209,44 @@ export function App() {
     );
   }
 
+  async function fetchAssetPage(projectId, params, { signal } = {}) {
+    const search = new URLSearchParams();
+    Object.entries(params).forEach(([key, value]) => {
+      if (value !== undefined && value !== null && value !== "") {
+        search.set(key, String(value));
+      }
+    });
+    return assetItems(await apiFetch(`/api/v1/projects/${projectId}/assets?${search.toString()}`, token, { signal }));
+  }
+
   async function refreshAssets(projectId = activeProject?.id, { signal } = {}) {
     if (!projectId) {
       return;
     }
     try {
-      const items = await apiFetch(`/api/v1/projects/${projectId}/assets?includeRejected=true&includeTrashed=true`, token, { signal });
+      discardedAssetsLoadedForProjectRef.current = null;
+      const items = await fetchAssetPage(projectId, { status: "active", limit: DEFAULT_ASSET_PAGE_LIMIT }, { signal });
       setAssets(items);
-      const defaultAsset = items.find((asset) => !asset.status?.trashed && !asset.status?.rejected) ?? items[0] ?? null;
+      const defaultAsset = items[0] ?? null;
       setSelectedAssetId((current) => current ?? defaultAsset?.id ?? null);
+      setError("");
+    } catch (err) {
+      if (isAbortError(err)) return;
+      setError(err.message);
+    }
+  }
+
+  async function refreshDiscardedAssets(projectId = activeProject?.id, { signal } = {}) {
+    if (!projectId || discardedAssetsLoadedForProjectRef.current === projectId) {
+      return;
+    }
+    try {
+      const [trashed, rejected] = await Promise.all([
+        fetchAssetPage(projectId, { status: "trashed", limit: DEFAULT_ASSET_PAGE_LIMIT }, { signal }),
+        fetchAssetPage(projectId, { status: "rejected", limit: DEFAULT_ASSET_PAGE_LIMIT }, { signal }),
+      ]);
+      setAssets((items) => mergeAssetsById(items, [...trashed, ...rejected]));
+      discardedAssetsLoadedForProjectRef.current = projectId;
       setError("");
     } catch (err) {
       if (isAbortError(err)) return;

@@ -1729,6 +1729,118 @@ async fn asset_library_scope_excludes_character_studio_outputs() {
 }
 
 #[tokio::test]
+async fn asset_list_supports_bounded_pagination_and_filters() {
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+
+    let (_, project) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/projects",
+        json!({ "name": "Paged Assets" }),
+    )
+    .await;
+    let project_id = project["id"].as_str().expect("project id").to_owned();
+
+    let (_, active) = request_multipart_upload(
+        app.clone(),
+        &format!("/api/v1/projects/{project_id}/assets"),
+        "Active.png",
+        "image/png",
+        b"active",
+    )
+    .await;
+    let (_, rejected) = request_multipart_upload(
+        app.clone(),
+        &format!("/api/v1/projects/{project_id}/assets"),
+        "Rejected.png",
+        "image/png",
+        b"rejected",
+    )
+    .await;
+    let (_, trashed) = request_multipart_upload(
+        app.clone(),
+        &format!("/api/v1/projects/{project_id}/assets"),
+        "Trashed.png",
+        "image/png",
+        b"trashed",
+    )
+    .await;
+    let rejected_id = rejected["id"].as_str().expect("rejected id").to_owned();
+    let trashed_id = trashed["id"].as_str().expect("trashed id").to_owned();
+
+    let (status, _) = request(
+        app.clone(),
+        "PATCH",
+        &format!("/api/v1/projects/{project_id}/assets/{rejected_id}/status"),
+        json!({ "rejected": true }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let (status, _) = request(
+        app.clone(),
+        "DELETE",
+        &format!("/api/v1/projects/{project_id}/assets/{trashed_id}"),
+        Value::Null,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    let (status, default_assets) = request(
+        app.clone(),
+        "GET",
+        &format!("/api/v1/projects/{project_id}/assets"),
+        Value::Null,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let default_assets = default_assets.as_array().expect("default array response");
+    assert_eq!(default_assets.len(), 1);
+    assert_eq!(default_assets[0]["id"], active["id"]);
+
+    let (status, page) = request(
+        app.clone(),
+        "GET",
+        &format!("/api/v1/projects/{project_id}/assets?limit=1&type=image"),
+        Value::Null,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(page["items"].as_array().expect("paged items").len(), 1);
+    assert!(page.get("nextCursor").is_some());
+
+    let (status, all_page) = request(
+        app.clone(),
+        "GET",
+        &format!("/api/v1/projects/{project_id}/assets?status=all&limit=20"),
+        Value::Null,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(all_page["items"].as_array().expect("all items").len(), 3);
+
+    let (status, rejected_page) = request(
+        app.clone(),
+        "GET",
+        &format!("/api/v1/projects/{project_id}/assets?status=rejected&limit=20"),
+        Value::Null,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(rejected_page["items"][0]["id"], rejected_id);
+
+    let (status, trashed_page) = request(
+        app,
+        "GET",
+        &format!("/api/v1/projects/{project_id}/assets?status=trashed&limit=20"),
+        Value::Null,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(trashed_page["items"][0]["id"], trashed_id);
+}
+
+#[tokio::test]
 async fn create_training_job_resolves_plan_and_queues_lora_train() {
     let temp_dir = tempfile::tempdir().expect("temp dir creates");
     let settings = test_settings(&temp_dir);

@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use parking_lot::{Mutex, ReentrantMutexGuard};
-use rusqlite::{params, Connection, OptionalExtension};
+use rusqlite::{params, params_from_iter, Connection, OptionalExtension, ToSql};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
 
@@ -188,6 +188,46 @@ pub enum AssetScope {
     #[default]
     All,
     Library,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum AssetStatusFilter {
+    #[default]
+    Active,
+    Rejected,
+    Trashed,
+    All,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AssetListQuery {
+    pub include_rejected: bool,
+    pub include_trashed: bool,
+    pub scope: AssetScope,
+    pub asset_type: Option<String>,
+    pub status: AssetStatusFilter,
+    pub limit: Option<u32>,
+    pub cursor: Option<String>,
+}
+
+impl Default for AssetListQuery {
+    fn default() -> Self {
+        Self {
+            include_rejected: false,
+            include_trashed: false,
+            scope: AssetScope::All,
+            asset_type: None,
+            status: AssetStatusFilter::Active,
+            limit: None,
+            cursor: None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct AssetListPage {
+    pub items: Vec<Value>,
+    pub next_cursor: Option<String>,
 }
 
 #[derive(Debug, Default, Clone, Deserialize)]
@@ -739,6 +779,25 @@ impl ProjectStore {
         include_trashed: bool,
         scope: AssetScope,
     ) -> ProjectStoreResult<Vec<Value>> {
+        Ok(self
+            .list_assets_page(
+                project_id,
+                AssetListQuery {
+                    include_rejected,
+                    include_trashed,
+                    scope,
+                    status: AssetStatusFilter::All,
+                    ..AssetListQuery::default()
+                },
+            )?
+            .items)
+    }
+
+    pub fn list_assets_page(
+        &self,
+        project_id: &str,
+        query: AssetListQuery,
+    ) -> ProjectStoreResult<AssetListPage> {
         let project_path = self.find_project_path(project_id)?;
         ensure_project_db_ready(&project_path)?;
         let total = {
@@ -761,24 +820,61 @@ impl ProjectStore {
         }
 
         let connection = connect_project_db(&project_path)?;
-        // The Library view hides Character Studio test outputs (sc-2024). Rows
-        // with a null origin (should not occur after the schema-bump reindex)
-        // fail open and stay visible.
-        let origin_filter = match scope {
-            AssetScope::All => "",
-            AssetScope::Library => " and (origin is null or origin != 'character_studio')",
-        };
-        let mut statement = connection.prepare(&format!(
+        let limit = query.limit.map(|value| value.clamp(1, 500));
+        let offset = query
+            .cursor
+            .as_deref()
+            .and_then(|value| value.parse::<u32>().ok())
+            .unwrap_or(0);
+        let mut sql = String::from(
             "
             select sidecar_path, file_path
               from assets
-             where (?1 or rejected = 0)
-               and (?2 or trashed = 0)
-               {origin_filter}
-             order by created_at desc
-            "
-        ))?;
-        let rows = statement.query_map(params![include_rejected, include_trashed], |row| {
+             where 1 = 1
+            ",
+        );
+        let mut bindings: Vec<Box<dyn ToSql>> = Vec::new();
+        match query.status {
+            AssetStatusFilter::Active => {
+                sql.push_str(" and rejected = 0 and trashed = 0");
+            }
+            AssetStatusFilter::Rejected => {
+                sql.push_str(" and rejected = 1 and trashed = 0");
+            }
+            AssetStatusFilter::Trashed => {
+                sql.push_str(" and trashed = 1");
+            }
+            AssetStatusFilter::All => {
+                if !query.include_rejected {
+                    sql.push_str(" and rejected = 0");
+                }
+                if !query.include_trashed {
+                    sql.push_str(" and trashed = 0");
+                }
+            }
+        }
+        if matches!(query.scope, AssetScope::Library) {
+            // The Library view hides Character Studio test outputs (sc-2024).
+            // Rows with a null origin fail open and stay visible.
+            sql.push_str(" and (origin is null or origin != 'character_studio')");
+        }
+        if let Some(asset_type) = query
+            .asset_type
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        {
+            sql.push_str(" and type = ?");
+            bindings.push(Box::new(asset_type.to_owned()));
+        }
+        sql.push_str(" order by created_at desc, id desc");
+        if let Some(limit) = limit {
+            sql.push_str(" limit ? offset ?");
+            bindings.push(Box::new(limit.saturating_add(1)));
+            bindings.push(Box::new(offset));
+        }
+        let mut statement = connection.prepare(&sql)?;
+        let rows = statement.query_map(params_from_iter(bindings.iter()), |row| {
             Ok((
                 row.get::<_, Option<String>>(0)?,
                 row.get::<_, Option<String>>(1)?,
@@ -790,7 +886,12 @@ impl ProjectStore {
         let mut seen_asset_ids = std::collections::HashSet::new();
         let mut generation_sets = GenerationSetCache::default();
         let mut assets = Vec::new();
+        let mut row_count = 0_u32;
         for row in rows {
+            row_count = row_count.saturating_add(1);
+            if limit.is_some_and(|limit| row_count > limit) {
+                continue;
+            }
             let (sidecar_rel, file_rel) = row?;
             let mut candidates = Vec::new();
             if let Some(sidecar_rel) = sidecar_rel {
@@ -827,7 +928,13 @@ impl ProjectStore {
                 break;
             }
         }
-        Ok(assets)
+        let next_cursor = limit
+            .filter(|limit| row_count > *limit)
+            .map(|limit| offset.saturating_add(limit).to_string());
+        Ok(AssetListPage {
+            items: assets,
+            next_cursor,
+        })
     }
 
     pub fn list_characters(
@@ -3664,10 +3771,10 @@ mod tests {
     use super::{
         apply_project_migrations, build_generated_asset_sidecar, connect_project_db,
         find_timeline_file, guess_mime_from_filename, index_timeline, is_safe_relative_path,
-        normalize_asset_tags, sniff_image_format, AssetScope, CharacterCreateInput,
-        CharacterLookInput, ProjectStore, ProjectStoreError, UploadAsset,
-        GLOBAL_KEYPOINTS_PROJECT_ID, GLOBAL_POSES_PROJECT_ID, PROJECT_FOLDERS,
-        PROJECT_SCHEMA_VERSION,
+        normalize_asset_tags, sniff_image_format, AssetListQuery, AssetScope,
+        AssetStatusFilter, AssetStatusPatch, CharacterCreateInput, CharacterLookInput,
+        ProjectStore, ProjectStoreError, UploadAsset, GLOBAL_KEYPOINTS_PROJECT_ID,
+        GLOBAL_POSES_PROJECT_ID, PROJECT_FOLDERS, PROJECT_SCHEMA_VERSION,
     };
     use rusqlite::Connection;
     use serde_json::{json, Value};
@@ -4154,6 +4261,129 @@ mod tests {
                 "each asset embeds the shared generation set"
             );
         }
+    }
+
+    #[test]
+    fn list_assets_page_applies_limit_cursor_status_and_type_filters() {
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        let store = ProjectStore::new(temp_dir.path().join("data"), "test-version");
+        let project = store.create_project("Gallery").expect("project creates");
+
+        let persist = |asset_id: &str, asset_type: &str, created_at: &str| {
+            let extension = if asset_type == "video" { "mp4" } else { "png" };
+            let mime_type = if asset_type == "video" {
+                "video/mp4"
+            } else {
+                "image/png"
+            };
+            let folder = if asset_type == "video" {
+                "assets/videos"
+            } else {
+                "assets/images"
+            };
+            let fact = json!({
+                "assetId": asset_id,
+                "mediaPath": format!("{folder}/{asset_id}.{extension}"),
+                "mimeType": mime_type,
+                "displayName": asset_id,
+                "createdAt": created_at,
+                "mode": "text_to_image",
+                "model": "z_image_turbo",
+                "adapter": "z_image_diffusers",
+                "prompt": "city",
+            });
+            store
+                .persist_generated_asset(&project.id, "job-1", "genset_page", &fact)
+                .expect("asset persists");
+        };
+
+        persist("asset_old", "image", "2026-05-25T00:00:00Z");
+        persist("asset_new", "image", "2026-05-27T00:00:00Z");
+        persist("asset_video", "video", "2026-05-26T00:00:00Z");
+        persist("asset_rejected", "image", "2026-05-28T00:00:00Z");
+        persist("asset_trashed", "image", "2026-05-29T00:00:00Z");
+        store
+            .update_asset_status(
+                &project.id,
+                "asset_rejected",
+                AssetStatusPatch {
+                    rejected: Some(true),
+                    ..AssetStatusPatch::default()
+                },
+            )
+            .expect("rejects asset");
+        store
+            .update_asset_status(
+                &project.id,
+                "asset_trashed",
+                AssetStatusPatch {
+                    trashed: Some(true),
+                    ..AssetStatusPatch::default()
+                },
+            )
+            .expect("trashes asset");
+
+        let first_page = store
+            .list_assets_page(
+                &project.id,
+                AssetListQuery {
+                    status: AssetStatusFilter::Active,
+                    limit: Some(2),
+                    ..AssetListQuery::default()
+                },
+            )
+            .expect("first page lists");
+        assert_eq!(
+            first_page
+                .items
+                .iter()
+                .map(|asset| asset["id"].as_str().unwrap())
+                .collect::<Vec<_>>(),
+            vec!["asset_new", "asset_video"]
+        );
+        assert_eq!(first_page.next_cursor.as_deref(), Some("2"));
+
+        let second_page = store
+            .list_assets_page(
+                &project.id,
+                AssetListQuery {
+                    status: AssetStatusFilter::Active,
+                    limit: Some(2),
+                    cursor: first_page.next_cursor,
+                    ..AssetListQuery::default()
+                },
+            )
+            .expect("second page lists");
+        assert_eq!(second_page.items.len(), 1);
+        assert_eq!(second_page.items[0]["id"], json!("asset_old"));
+        assert_eq!(second_page.next_cursor, None);
+
+        let rejected = store
+            .list_assets_page(
+                &project.id,
+                AssetListQuery {
+                    status: AssetStatusFilter::Rejected,
+                    limit: Some(10),
+                    ..AssetListQuery::default()
+                },
+            )
+            .expect("rejected page lists");
+        assert_eq!(rejected.items.len(), 1);
+        assert_eq!(rejected.items[0]["id"], json!("asset_rejected"));
+
+        let videos = store
+            .list_assets_page(
+                &project.id,
+                AssetListQuery {
+                    status: AssetStatusFilter::Active,
+                    asset_type: Some("video".to_owned()),
+                    limit: Some(10),
+                    ..AssetListQuery::default()
+                },
+            )
+            .expect("video page lists");
+        assert_eq!(videos.items.len(), 1);
+        assert_eq!(videos.items[0]["id"], json!("asset_video"));
     }
 
     /// V-4: a pre-migration project surfaces an EMPTY `assets` table even though

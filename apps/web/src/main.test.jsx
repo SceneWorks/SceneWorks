@@ -606,6 +606,22 @@ describe("SceneWorks app shell", () => {
     expect(container.textContent).toContain("Queue");
   });
 
+  it("loads project assets through bounded active and lazy discarded queries", async () => {
+    root = createRoot(container);
+    await act(async () => {
+      root.render(<App />);
+    });
+    await settle();
+
+    const assetUrls = global.fetch.mock.calls
+      .map(([url]) => new URL(url))
+      .filter((url) => url.pathname === "/api/v1/projects/project-default/assets");
+    expect(assetUrls.some((url) => url.searchParams.get("status") === "active" && url.searchParams.get("limit") === "200")).toBe(true);
+    expect(assetUrls.some((url) => url.searchParams.get("status") === "trashed" && url.searchParams.get("limit") === "200")).toBe(true);
+    expect(assetUrls.some((url) => url.searchParams.get("status") === "rejected" && url.searchParams.get("limit") === "200")).toBe(true);
+    expect(assetUrls.some((url) => url.searchParams.get("includeRejected") === "true" && url.searchParams.get("includeTrashed") === "true")).toBe(false);
+  });
+
   // sc-4193 regression (F-WEB-3): the queueCounts memo reads queueSummary, so a
   // queue.updated SSE event (which changes queueSummary but NOT jobs) must refresh
   // the topbar "Queue N" chip. Before the fix the memo's deps were [jobs] only, so
