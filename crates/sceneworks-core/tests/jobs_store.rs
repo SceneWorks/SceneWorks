@@ -4029,7 +4029,9 @@ fn sdxl_and_realvisxl_route_to_mlx_worker() {
     register_gpu_worker(&store, "worker-torch", "mps", image_caps());
     register_gpu_worker(&store, "worker-mlx", "mlx", image_caps());
 
-    for model in ["sdxl", "realvisxl"] {
+    // `realvisxl_lightning` (sc-6075) is a txt2img-only few-step sibling on the same `sdxl`
+    // engine, so a plain text-to-image job routes to MLX just like the base ids.
+    for model in ["sdxl", "realvisxl", "realvisxl_lightning"] {
         let job = store
             .create_job(image_job_with(
                 json!({ "model": model, "prompt": "a red fox" }),
@@ -4126,6 +4128,55 @@ fn sdxl_and_realvisxl_route_to_mlx_worker() {
         .expect("mlx claims sdxl lycoris job");
     assert_eq!(claimed.id, lycoris.id);
     assert_eq!(claimed.assigned_gpu.as_deref(), Some("mlx"));
+}
+
+#[test]
+fn realvisxl_lightning_reference_falls_back_off_mlx() {
+    // sc-6075: RealVisXL Lightning is txt2img-only — the engine's few-step `lightning` sampler
+    // rejects reference/img2img conditioning. A reference or edit_image job is therefore NOT
+    // MLX-eligible (`realvisxl_lightning_mlx_eligible`), so the torch worker claims it directly
+    // instead of deferring to the mlx worker (the txt2img case is covered above).
+    let store = store("mlx-routing-realvisxl-lightning");
+    register_gpu_worker(&store, "worker-torch", "mps", image_caps());
+    register_gpu_worker(&store, "worker-mlx", "mlx", image_caps());
+
+    for payload in [
+        json!({ "model": "realvisxl_lightning", "prompt": "p", "referenceAssetId": "asset_1" }),
+        json!({ "model": "realvisxl_lightning", "prompt": "p", "mode": "edit_image",
+                "sourceAssetId": "src_1" }),
+    ] {
+        let job = store
+            .create_job(image_job_with(payload, "auto"))
+            .expect("lightning conditioned job creates");
+        let claimed = store
+            .claim_next_job("worker-torch")
+            .expect("torch claim ok")
+            .expect("torch claims the txt2img-only-gated lightning job");
+        assert_eq!(claimed.id, job.id);
+        assert_ne!(
+            claimed.assigned_gpu.as_deref(),
+            Some("mlx"),
+            "txt2img-only lightning conditioning must not route to the mlx worker"
+        );
+        store
+            .update_job_progress(
+                &claimed.id,
+                ProgressUpdate {
+                    status: JobStatus::Completed,
+                    stage: ProgressStage::Completed,
+                    progress: 1.0,
+                    message: "done".to_owned(),
+                    error: None,
+                    result: None,
+                    eta_seconds: None,
+                    peak_gpu_memory_pct: None,
+                    peak_gpu_load_pct: None,
+                    backend: None,
+                    worker_id: Some("worker-torch".to_owned()),
+                },
+            )
+            .expect("complete job");
+    }
 }
 
 #[test]

@@ -3048,6 +3048,10 @@ const MLX_ROUTED_MODELS: &[&str] = &[
     "flux2_dev",
     "sdxl",
     "realvisxl",
+    // RealVisXL Lightning (sc-6075): standalone few-step distilled SDXL checkpoint on the shared
+    // `sdxl` engine. txt2img only — the engine's `lightning` accel sampler rejects reference/img2img
+    // conditioning (`realvisxl_lightning_mlx_eligible`), so edit/reference shapes fall back to torch.
+    "realvisxl_lightning",
     // InstantID on RealVisXL (sc-3345): single-identity + the 11-view angle set route to the
     // native `mlx-gen-instantid` provider. Pose-library + face-restore InstantID jobs are gated
     // OUT by `instantid_mlx_eligible` and stay on the torch `InstantIDAdapter` (engine sc-3117 /
@@ -3131,6 +3135,7 @@ fn image_request_mlx_eligible(model: &str, payload: &Map<String, Value>) -> bool
             flux2_mlx_eligible(payload)
         }
         "sdxl" | "realvisxl" => sdxl_mlx_eligible(payload),
+        "realvisxl_lightning" => realvisxl_lightning_mlx_eligible(payload),
         "instantid_realvisxl" => instantid_mlx_eligible(payload),
         "pulid_flux_dev" => pulid_flux_mlx_eligible(payload),
         "chroma1_hd" | "chroma1_base" | "chroma1_flash" => chroma_mlx_eligible(payload),
@@ -3200,6 +3205,27 @@ fn understanding_job_is_mlx_eligible(job: &JobSnapshot) -> bool {
 /// `image_detail` is a separate job type with its own routing (see `image_detail_mlx_eligible`).
 fn sdxl_mlx_eligible(_payload: &Map<String, Value>) -> bool {
     true
+}
+
+/// RealVisXL Lightning MLX-routing (sc-6075). The standalone distilled checkpoint runs through the
+/// `sdxl` engine on its few-step `lightning` (Euler-trailing) sampler, which the engine restricts to
+/// **txt2img** (it rejects an img2img/reference init — `mlx-gen-sdxl` "acceleration sampler is
+/// txt2img-only"). So only a plain text-to-image job is MLX-eligible here; any `edit_image`, source,
+/// reference, or mask conditioning falls back to the torch worker (or is hidden by the manifest's
+/// txt2img-only `capabilities`). LoRAs + quant are fine on the SDXL path, so they don't gate.
+fn realvisxl_lightning_mlx_eligible(payload: &Map<String, Value>) -> bool {
+    if payload.get("mode").and_then(Value::as_str) == Some("edit_image") {
+        return false;
+    }
+    let has_nonempty_id = |key: &str| {
+        payload
+            .get(key)
+            .and_then(Value::as_str)
+            .is_some_and(|value| !value.trim().is_empty())
+    };
+    !(has_nonempty_id("sourceAssetId")
+        || has_nonempty_id("referenceAssetId")
+        || has_nonempty_id("maskAssetId"))
 }
 
 /// The models the candle (Windows/CUDA) lane can serve (epic 3672 sc-3678 for SDXL; epic 5095

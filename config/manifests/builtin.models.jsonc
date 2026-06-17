@@ -1595,6 +1595,93 @@
       }
     },
     {
+      "id": "realvisxl_lightning",
+      "name": "RealVisXL Lightning (fast photoreal SDXL)",
+      "family": "sdxl",
+      "type": "image",
+      "adapter": "sdxl_diffusers",
+      // Few-step distilled sibling of RealVisXL_V5.0 (sc-6075). A STANDALONE checkpoint
+      // (NOT a LoRA) — the SDXL-Lightning distillation is baked into the weights, so it
+      // renders photoreal images in ~5 steps with CFG off, ~6x faster than the 30-step
+      // base. Same SDXL UNet / dual-CLIP / VAE, so it runs on the shared `sdxl` engine;
+      // the worker pins the engine's `lightning` (Euler-trailing) few-step sampler — no
+      // acceleration LoRA, since the distillation lives in the checkpoint itself. txt2img
+      // ONLY: the few-step accel sampler is engine-incompatible with img2img / reference /
+      // mask conditioning, so edit / inpaint / reference / detail stay on the 30-step base
+      // `realvisxl`. openrail++ (commercial use OK, ungated), same license as the base.
+      "capabilities": ["text_to_image", "style_variations"],
+      // Mac-only for now: the few-step path runs on the Rust mlx-gen `sdxl` engine's
+      // `lightning` (Euler-trailing) sampler. The Windows torch + candle few-step SDXL
+      // schedulers aren't wired yet (epic 2755, sc-2760/sc-2761), so a non-Mac host would
+      // render this distilled checkpoint at the wrong (30-step) schedule. Hide it off-Mac
+      // until that lands rather than ship a degraded result; the base `realvisxl` (30-step)
+      // stays available on every platform.
+      "macOnly": true,
+      "downloads": [
+        {
+          // Distilled checkpoint, distinct weights from RealVisXL_V5.0. openrail++, ungated,
+          // download-on-demand (not Recommended/auto-download). The repo is ~41 GB — it bundles
+          // fp16 AND fp32 diffusers component variants PLUS two redundant root single-file
+          // checkpoints (`*_fp16.safetensors` ~6.6 GB, `*_fp32.safetensors` ~13 GB). The mlx-gen
+          // `sdxl` loader reads only the **fp16 diffusers components** (it prefers
+          // `<comp>/*.fp16.safetensors`), so scope the pull to those + the tiny configs/tokenizers
+          // = ~6.9 GB. An empty `files` would fetch the whole 41 GB repo (allow_pattern_matches
+          // empty == match-all). Globs use `glob::Pattern` (require_literal_separator=false), so
+          // `*/*.fp16.safetensors` requires a subdir (skips the root single-files) and matches the
+          // fp16 stem (skips the fp32 + sharded variants).
+          "provider": "huggingface",
+          "repo": "SG161222/RealVisXL_V5.0_Lightning",
+          "files": [
+            "model_index.json",
+            "scheduler/*",
+            "tokenizer/*",
+            "tokenizer_2/*",
+            "*/config.json",
+            "*/*.fp16.safetensors"
+          ],
+          "estimatedSizeBytes": 6940000000
+        }
+      ],
+      "paths": {
+        "model": "${HF_CACHE}/SG161222/RealVisXL_V5.0_Lightning"
+      },
+      "defaults": {
+        // Model-card Lightning defaults: ~5 steps, guidance 1.0 (CFG off — the distilled
+        // checkpoint is trained CFG-free, which also halves per-step UNet work; the negative
+        // prompt is inert until guidance > 1.0). Raise toward 2.0 to re-enable real CFG +
+        // the negative prompt at ~2x cost. Native 1024x1024.
+        "resolution": "1024x1024",
+        "steps": 5,
+        "guidanceScale": 1.0,
+        "count": 4
+      },
+      "limits": {
+        // Native 1024x1024 plus the canonical SDXL aspect-ratio buckets.
+        "resolutions": ["1024x1024", "1152x896", "896x1152", "1216x832", "832x1216", "1344x768", "768x1344"],
+        "count": [1, 2, 4]
+      },
+      "loraCompatibility": {
+        // SDXL UNet, so sdxl-family LoRAs apply on top of the distilled base (per sc-1927
+        // declare the real family rather than an empty list, which would match every LoRA).
+        "families": ["sdxl"],
+        "types": ["style", "enhance", "character"]
+      },
+      "ui": {
+        "label": "RealVisXL Lightning (fast photoreal SDXL)",
+        "description": "Few-step distilled RealVisXL — photoreal SDXL at ~5 steps, roughly 6x faster than the 30-step base. A standalone SDXL-Lightning checkpoint (openrail++, commercial-OK, ungated) tuned for the same photoreal look as RealVisXL_V5.0. Runs CFG-free by default (the negative prompt is inert unless you raise guidance toward 2.0). Text-to-image only; for edits, reference identity, masked inpaint, or detail-refine use the standard RealVisXL. Accepts sdxl-family LoRAs.",
+        "recommendedFor": ["text_to_image", "style_variations"],
+        "promptGuide": {
+          "title": "RealVisXL Lightning Prompt Guide",
+          "path": "/prompt-guides/realvisxl-lightning.md",
+          "sources": [
+            { "label": "RealVisXL_V5.0_Lightning model card", "url": "https://huggingface.co/SG161222/RealVisXL_V5.0_Lightning" },
+            { "label": "SDXL-Lightning (distillation method)", "url": "https://huggingface.co/ByteDance/SDXL-Lightning" },
+            { "label": "SDXL technical report", "url": "https://arxiv.org/abs/2307.01952" }
+          ]
+        }
+      }
+    },
+    {
       "id": "instantid_realvisxl",
       "recommended": true,
       "name": "InstantID (RealVisXL)",

@@ -837,6 +837,17 @@ async fn generate_stream(
         .map(str::trim)
         .filter(|value| !value.is_empty() && *value != "default")
         .map(str::to_owned);
+    // RealVisXL Lightning (sc-6075): a standalone few-step *distilled checkpoint* (the
+    // SDXL-Lightning distillation is baked into the weights — no acceleration LoRA). It must run
+    // on the engine's `lightning` (Euler-trailing) few-step schedule, not the 30-step
+    // `euler_ancestral` default, so the schedule matches the checkpoint regardless of the UI
+    // payload — mirrors the qwen `*_lightning` sampler forcing. The engine then applies the
+    // CFG-off, few-step recipe (steps/guidance come from the manifest defaults via the model row).
+    let sampler = if request.model == "realvisxl_lightning" {
+        Some("lightning".to_owned())
+    } else {
+        sampler
+    };
     let scheduler = request
         .advanced
         .get("scheduler")
