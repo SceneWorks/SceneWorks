@@ -186,7 +186,10 @@ export function CharacterStudio() {
   // sc-2022: datasets the dataset backend reports as owned by this character,
   // and the character's own images (same match the Dataset editor's Character
   // tab uses) that a new dataset would be seeded from.
-  const datasetsForProject = trainingDatasetsProjectId === activeProject?.id ? trainingDatasets : [];
+  const datasetsForProject = useMemo(
+    () => (trainingDatasetsProjectId === activeProject?.id ? trainingDatasets : []),
+    [activeProject?.id, trainingDatasets, trainingDatasetsProjectId],
+  );
   const characterDatasets = useMemo(
     () => datasetsForProject.filter((dataset) => dataset.characterId === selectedCharacter?.id),
     [datasetsForProject, selectedCharacter?.id],
@@ -199,7 +202,7 @@ export function CharacterStudio() {
       selectedCharacter
         ? imageAssets.filter((asset) => assetMatchesCharacter(asset, selectedCharacter.id, selectedCharacter))
         : [],
-    [imageAssets, selectedCharacter?.id],
+    [imageAssets, selectedCharacter],
   );
   const characterImageAssetIds = useMemo(
     () => characterReferenceCandidates.map((asset) => asset.id),
@@ -273,7 +276,7 @@ export function CharacterStudio() {
     if (testLookId && !selectedCharacter.looks?.some((look) => look.id === testLookId)) {
       setTestLookId("");
     }
-  }, [selectedCharacter?.id, selectedCharacter?.updatedAt]);
+  }, [selectedCharacter, testLookId]);
 
   useEffect(() => {
     if (!macImageModels.some((item) => item.id === testModel)) {

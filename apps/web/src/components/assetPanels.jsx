@@ -24,7 +24,6 @@ export async function emptyTrash(trashedAssets, purgeAsset) {
     return;
   }
   for (const asset of items) {
-    // eslint-disable-next-line no-await-in-loop -- sequential keeps state updates predictable
     await purgeAsset(asset);
   }
 }
@@ -522,7 +521,7 @@ export function FullscreenPreview({
   const [variantMode, setVariantMode] = React.useState("upscaled");
   React.useEffect(() => {
     setVariantMode(asset.variants?.upscaled ? "upscaled" : "original");
-  }, [asset.id, asset.variants?.upscaled?.id]);
+  }, [asset.id, asset.variants?.upscaled]);
   const displayedAsset = hasUpscaleVariants ? asset.variants[variantMode] : asset;
 
   return (

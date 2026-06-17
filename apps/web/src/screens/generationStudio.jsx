@@ -135,7 +135,7 @@ export function useGenerationStudio({
 
   const availablePresets = useMemo(
     () => presets.filter((preset) => presetMatchesWorkflow(preset, mode) && presetMatchesModel(preset, selectedModel, models)),
-    [mode, presets, selectedModel?.id, models],
+    [mode, presets, selectedModel, models],
   );
   // sc-5875: presets are opt-in. With no explicit selection (fresh screen / None),
   // resolve to no preset so an unchosen preset's LoRA/resolution/prompt are never
@@ -202,7 +202,7 @@ export function useGenerationStudio({
   // stale progress card never lingers.
   const localJobs = useMemo(
     () => selectStackedJobs(trackedLocalJobs, (job) => resultVisible(job) || completedWaitExpired(job)),
-    [trackedLocalJobs, resultVisible, completedWaitExpired, resultFallbackTick],
+    [trackedLocalJobs, resultVisible, completedWaitExpired],
   );
 
   // ---- LoRA selection (sc-4196: shared by Image + Video studios) ----
@@ -240,14 +240,14 @@ export function useGenerationStudio({
   // Drop selections that fall out of the compatible set (model/filter change).
   useEffect(() => {
     setSelectedLoraIds((ids) => ids.filter((id) => compatibleLoras.some((lora) => lora.id === id)));
-  }, [compatibleLoraKey]);
+  }, [compatibleLoras, compatibleLoraKey, setSelectedLoraIds]);
   // Auto-open the advanced panel when an incompatible LoRA is selected so the
   // generate-blocking warning is visible.
   useEffect(() => {
     if (selectedLoraValidationResult.incompatible.length && !advancedOpen) {
       setAdvancedOpen(true);
     }
-  }, [advancedOpen, selectedLoraValidationResult.incompatible.length]);
+  }, [advancedOpen, selectedLoraValidationResult.incompatible.length, setAdvancedOpen]);
 
   function toggleLora(lora) {
     setSelectedLoraIds((ids) => {

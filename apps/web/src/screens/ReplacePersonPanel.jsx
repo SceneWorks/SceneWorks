@@ -92,7 +92,7 @@ function PersonTrackCorrections({ track, sourceClip, saveTrackCorrections }) {
     }
     setDrafts(seeded);
     setFrameIndex((current) => (current < frames.length ? current : 0));
-  }, [track?.id, correctionsSignature, frames.length]);
+  }, [track?.id, track?.corrections, correctionsSignature, frames.length]);
 
   useEffect(() => {
     const video = videoRef.current;

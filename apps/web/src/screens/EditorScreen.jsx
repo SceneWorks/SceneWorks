@@ -74,7 +74,7 @@ export function EditorScreen() {
     }
     setIsPlaying(false);
     setTimelineNotice("");
-  }, [selectedItem?.id]);
+  }, [selectedItem]);
 
   useEffect(() => {
     const video = previewVideoRef.current;
@@ -87,7 +87,7 @@ export function EditorScreen() {
       return;
     }
     video.pause();
-  }, [isPlaying, selectedAsset?.id]);
+  }, [isPlaying, selectedAsset]);
 
   // Keep the global keydown listener mounted once and read live editor state
   // through a ref, so undo/redo/delete don't re-bind window on every history

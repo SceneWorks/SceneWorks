@@ -507,9 +507,10 @@ function CharacterGenerationPanel({
   // sc-2003: multi-backbone picker. `models` is the full list of capable backbones
   // (manifest order); `model` is the resolved default (kept for back-compat with the
   // pre-picker callers). The local state below tracks the user's pick.
-  const availableModels = Array.isArray(models) && models.length > 0
-    ? models
-    : (model ? [model] : []);
+  const availableModels = React.useMemo(
+    () => (Array.isArray(models) && models.length > 0 ? models : (model ? [model] : [])),
+    [model, models],
+  );
   const [selectedModelId, setSelectedModelId] = React.useState(
     model?.id ?? availableModels[0]?.id ?? "",
   );
@@ -539,7 +540,7 @@ function CharacterGenerationPanel({
   React.useEffect(() => {
     setPrompt(mode.seedPrompt(selectedCharacter));
     setStatus("");
-  }, [characterId, selectedCharacter?.name, selectedCharacter?.description]);
+  }, [characterId, mode, selectedCharacter]);
   // Reset the picker selection when the available models change (e.g. a new
   // manifest load) so a stale id doesn't lock the panel.
   React.useEffect(() => {

@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useRef, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { pickClosestResolution } from "../resolutionMatch.js";
 import { AssetPickerField } from "../components/AssetPicker.jsx";
 import { FitModeControl, effectiveFitMode } from "../components/FitModeControl.jsx";
@@ -214,9 +214,14 @@ export function VideoStudio() {
   // trapped on a mode whose model can't serve the others.
   const macGating = macGatingActive(macCapabilities);
   const baseVideoModels = macVideoModels.length ? macVideoModels : videoModels;
-  const modelServesMode = (item, value) =>
-    Boolean(item?.capabilities?.includes(value)) && !macVideoModeBlock(item, macCapabilities, value);
-  const modelsForMode = (value) => baseVideoModels.filter((item) => modelServesMode(item, value));
+  const modelServesMode = useCallback(
+    (item, value) => Boolean(item?.capabilities?.includes(value)) && !macVideoModeBlock(item, macCapabilities, value),
+    [macCapabilities],
+  );
+  const modelsForMode = useCallback(
+    (value) => baseVideoModels.filter((item) => modelServesMode(item, value)),
+    [baseVideoModels, modelServesMode],
+  );
   // Model-availability gate (sc-5947): when the user has no mac-available video model at all,
   // show recommended video-model downloads instead of the studio. `ready` matches the picker
   // (which falls back to all baseVideoModels); offers come from the full catalog via
@@ -495,7 +500,15 @@ export function VideoStudio() {
     if (selectedAsset?.type === "image" || selectedAsset?.type === "frame") {
       setSourceAssetId(selectedAsset.id);
     }
-  }, [launchRequest?.id, selectedAsset?.id, selectedAsset?.type]);
+  }, [
+    launchRequest?.assetId,
+    launchRequest?.characterId,
+    launchRequest?.lookId,
+    launchRequest?.mode,
+    launchRequest?.view,
+    selectedAsset?.id,
+    selectedAsset?.type,
+  ]);
 
   useEffect(() => {
     if (!selectedModel) {
@@ -513,7 +526,7 @@ export function VideoStudio() {
       const options = selectedModel.limits?.fps ?? [24, 25, 30];
       return options.includes(Number(current)) ? current : selectedModel.defaults?.fps ?? options[0];
     });
-  }, [selectedModel?.id]);
+  }, [selectedModel]);
 
   // I2V: when the user picks a source image (or first/last frame) after mount,
   // snap resolution to whichever option in the model's list best matches the
@@ -535,7 +548,7 @@ export function VideoStudio() {
     if (!width || !height) return;
     const match = pickClosestResolution(width, height, selectedModel?.limits?.resolutions);
     if (match) setResolution(match);
-  }, [i2vSourceAssetId, mode, selectedModel?.id, assets]);
+  }, [i2vSourceAssetId, mode, selectedModel?.limits?.resolutions, assets]);
 
   // Models are gated on the selected tab (sc-5716): when the active mode isn't served by the current
   // model, snap to the first model that serves it so the user can always leave a mode. Generalizes
@@ -551,9 +564,7 @@ export function VideoStudio() {
     if (fallback && fallback.id !== model) {
       setModel(fallback.id);
     }
-    // modelServesMode / modelsForMode close over videoModels + macCapabilities, captured below.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [mode, model, selectedModel, videoModels, macCapabilities]);
+  }, [mode, model, modelServesMode, modelsForMode, selectedModel]);
 
   // When restoring a snapshot, the saved length/fps/quality/resolution/negativePrompt
   // already reflect the user's last state — skip the one preset-default pass that fires
@@ -568,27 +579,30 @@ export function VideoStudio() {
   // working and full-snapshot presets restore the prompt, cfg, sampler, and the
   // native LTX guidance knobs. The model is intentionally absent — presets never
   // switch the model.
-  const presetDefaultFields = [
-    ["prompt", setPrompt],
-    ["negativePrompt", setNegativePrompt],
-    ["resolution", setResolution],
-    ["duration", setDuration],
-    ["fps", setFps],
-    ["quality", setQuality],
-    ["guidanceScale", setGuidanceOverride],
-    ["steps", setStepsOverride],
-    ["sampler", setSampler],
-    ["scheduler", setScheduler],
-    ["schedulerShift", setSchedulerShift],
-    ["precision", setPrecision],
-    ["quantization", setQuantization],
-    ["ltxPipeline", setLtxPipeline],
-    ["distilledVariant", setDistilledVariant],
-    ["motion", setMotion],
-    ["videoCfgGuidanceScale", setLtxVideoCfg],
-    ["videoStgGuidanceScale", setLtxVideoStg],
-    ["videoRescaleScale", setLtxVideoRescale],
-  ];
+  const presetDefaultFields = useMemo(
+    () => [
+      ["prompt", setPrompt],
+      ["negativePrompt", setNegativePrompt],
+      ["resolution", setResolution],
+      ["duration", setDuration],
+      ["fps", setFps],
+      ["quality", setQuality],
+      ["guidanceScale", setGuidanceOverride],
+      ["steps", setStepsOverride],
+      ["sampler", setSampler],
+      ["scheduler", setScheduler],
+      ["schedulerShift", setSchedulerShift],
+      ["precision", setPrecision],
+      ["quantization", setQuantization],
+      ["ltxPipeline", setLtxPipeline],
+      ["distilledVariant", setDistilledVariant],
+      ["motion", setMotion],
+      ["videoCfgGuidanceScale", setLtxVideoCfg],
+      ["videoStgGuidanceScale", setLtxVideoStg],
+      ["videoRescaleScale", setLtxVideoRescale],
+    ],
+    [],
+  );
   useEffect(() => {
     if (skipPresetDefaultsOnHydrate.current && selectedPreset) {
       skipPresetDefaultsOnHydrate.current = false;
@@ -610,7 +624,7 @@ export function VideoStudio() {
     if (VIDEO_PRESET_MODES.includes(defaults.mode)) {
       setMode(defaults.mode);
     }
-  }, [selectedPreset?.id]);
+  }, [presetDefaultFields, selectedPreset]);
 
   useStudioSettingsWriter("video", activeProject?.id ?? null, {
     motion,

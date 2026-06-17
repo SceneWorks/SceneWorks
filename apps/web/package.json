@@ -7,7 +7,7 @@
     "dev": "vite --host 0.0.0.0",
     "build": "vite build",
     "preview": "vite preview --host 0.0.0.0",
-    "lint": "eslint src",
+    "lint": "eslint src --max-warnings=0",
     "test": "vitest run --environment jsdom"
   },
   "dependencies": {

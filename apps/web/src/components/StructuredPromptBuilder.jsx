@@ -146,13 +146,16 @@ export default function StructuredPromptBuilder({
   // JSON editor buffer — seeded on entering JSON mode, then user-controlled.
   const [jsonDraft, setJsonDraft] = useState(() => prettyCaption(caption));
   const [jsonError, setJsonError] = useState(null);
+  const captionRef = useRef(caption);
+  useEffect(() => {
+    captionRef.current = caption;
+  }, [caption]);
   useEffect(() => {
     if (mode === "json") {
-      setJsonDraft(prettyCaption(caption));
+      // Re-seed only on mode entry; after that the JSON textarea owns its draft.
+      setJsonDraft(prettyCaption(captionRef.current));
       setJsonError(null);
     }
-    // Only re-seed when switching into JSON mode, not on every caption keystroke.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [mode]);
 
   // ----- immutable caption updates -----

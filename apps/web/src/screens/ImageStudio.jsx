@@ -491,7 +491,18 @@ export function ImageStudio() {
     if (launchRequest.mode === "edit_image" && selectedAssetEditableSourceId) {
       setSourceAssetId(selectedAssetEditableSourceId);
     }
-  }, [launchRequest?.id, selectedAsset?.id, selectedAssetEditableSourceId]);
+  }, [
+    launchRequest?.assetId,
+    launchRequest?.characterId,
+    launchRequest?.lookId,
+    launchRequest?.mode,
+    launchRequest?.model,
+    launchRequest?.recipe,
+    launchRequest?.referenceAssetId,
+    launchRequest?.view,
+    selectedAsset?.id,
+    selectedAssetEditableSourceId,
+  ]);
 
   // Mac UI gating (sc-3486): on a Mac in MLX-required mode, hide torch-only models from the
   // picker so the user can't select something that would only error. Inert elsewhere.
@@ -639,7 +650,7 @@ export function ImageStudio() {
     setTrueCfgScale(typeof ui.variationStrength?.default === "number" ? ui.variationStrength.default : 4.0);
     setViewAngle("");
     setSelectedPoseIds([]);
-  }, [model]);
+  }, [imageModels, model]);
   // Approved reference images for the selected character (the IP-Adapter identity
   // source). Resolve the full asset from the catalog so thumbnails render even when
   // the character payload only carries assetIds.
@@ -687,8 +698,7 @@ export function ImageStudio() {
     if (typeof ui.defaultNegativePrompt === "string" && ui.defaultNegativePrompt) {
       setNegativePrompt(ui.defaultNegativePrompt);
     }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [mode, model]);
+  }, [imageModels, mode, model, negativePrompt]);
   const resolutionOptions = useMemo(
     () =>
       selectedModel?.limits?.resolutions?.length
@@ -856,9 +866,9 @@ export function ImageStudio() {
     setCharacterId(settings.characterId ?? "");
     setCharacterLookId(settings.characterLookId ?? "");
     setReferenceAssetId(rawSettings.referenceAssetId ?? launchRequest.referenceAssetId ?? "");
-    setIpAdapterScale(rawSettings.ipAdapterScale ?? settings.ipAdapterScale ?? ipAdapterScale);
-    setControlnetScale(rawSettings.controlnetConditioningScale ?? rawSettings.controlnetScale ?? settings.controlnetScale ?? controlnetScale);
-    setTrueCfgScale(rawSettings.trueCfgScale ?? settings.trueCfgScale ?? trueCfgScale);
+    setIpAdapterScale((current) => rawSettings.ipAdapterScale ?? settings.ipAdapterScale ?? current);
+    setControlnetScale((current) => rawSettings.controlnetConditioningScale ?? rawSettings.controlnetScale ?? settings.controlnetScale ?? current);
+    setTrueCfgScale((current) => rawSettings.trueCfgScale ?? settings.trueCfgScale ?? current);
     setViewAngle(rawSettings.viewAngle ?? settings.viewAngle ?? "");
     setSelectedPoseIds([]);
     if (nextMode === "edit_image") {
@@ -871,12 +881,26 @@ export function ImageStudio() {
       setUpscaleFactor(upscale.factor);
     }
     if (upscale?.engine) {
-      handleUpscaleEngineChange(upscale.engine);
+      setUpscaleEngine(upscale.engine);
+      setUpscaleFactor((current) => {
+        const option = UPSCALE_ENGINES.find((candidate) => candidate.id === upscale.engine);
+        return option && !option.factors.includes(current) ? option.factors[0] : current;
+      });
     }
     if (typeof upscale?.softness === "number") {
       setUpscaleSoftness(upscale.softness);
     }
-  }, [launchRequest?.id]);
+  }, [
+    launchRequest?.assetId,
+    launchRequest?.id,
+    launchRequest?.recipe,
+    launchRequest?.referenceAssetId,
+    launchRequest?.sourceAssetId,
+    launchRequest?.view,
+    setLoraWeights,
+    setSelectedLoraIds,
+    setSelectedPresetId,
+  ]);
   const [width, height] = resolution.split("x").map((value) => Number(value));
 
   // Magic-prompt expansion (sc-5997): expand the plain-text idea into an editable caption via the
@@ -915,25 +939,28 @@ export function ImageStudio() {
   // presets (which only stored count/resolution/negativePrompt) keep working and
   // full-snapshot presets restore the prompt, cfg, sampler, reference + upscale
   // knobs. The model is intentionally absent — presets never switch the model.
-  const presetDefaultFields = [
-    ["prompt", setPrompt],
-    ["negativePrompt", setNegativePrompt],
-    ["resolution", setResolution],
-    ["count", setCount],
-    ["guidanceScale", setGuidanceOverride],
-    ["steps", setStepsOverride],
-    ["sampler", setSampler],
-    ["scheduler", setScheduler],
-    ["schedulerShift", setSchedulerShift],
-    ["ipAdapterScale", setIpAdapterScale],
-    ["controlnetScale", setControlnetScale],
-    ["trueCfgScale", setTrueCfgScale],
-    ["viewAngle", setViewAngle],
-    ["upscaleEnabled", setUpscaleEnabled],
-    ["upscaleFactor", setUpscaleFactor],
-    ["upscaleEngine", setUpscaleEngine],
-    ["upscaleSoftness", setUpscaleSoftness],
-  ];
+  const presetDefaultFields = useMemo(
+    () => [
+      ["prompt", setPrompt],
+      ["negativePrompt", setNegativePrompt],
+      ["resolution", setResolution],
+      ["count", setCount],
+      ["guidanceScale", setGuidanceOverride],
+      ["steps", setStepsOverride],
+      ["sampler", setSampler],
+      ["scheduler", setScheduler],
+      ["schedulerShift", setSchedulerShift],
+      ["ipAdapterScale", setIpAdapterScale],
+      ["controlnetScale", setControlnetScale],
+      ["trueCfgScale", setTrueCfgScale],
+      ["viewAngle", setViewAngle],
+      ["upscaleEnabled", setUpscaleEnabled],
+      ["upscaleFactor", setUpscaleFactor],
+      ["upscaleEngine", setUpscaleEngine],
+      ["upscaleSoftness", setUpscaleSoftness],
+    ],
+    [],
+  );
   useEffect(() => {
     if (skipPresetDefaultsOnHydrate.current && selectedPreset) {
       skipPresetDefaultsOnHydrate.current = false;
@@ -961,7 +988,7 @@ export function ImageStudio() {
     if (IMAGE_MODES.includes(defaults.mode)) {
       setMode(defaults.mode);
     }
-  }, [selectedPreset?.id]);
+  }, [presetDefaultFields, selectedPreset]);
 
   useStudioSettingsWriter("image", activeProject?.id ?? null, {
     mode,

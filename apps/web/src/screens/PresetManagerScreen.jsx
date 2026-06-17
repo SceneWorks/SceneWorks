@@ -162,12 +162,12 @@ export function PresetManagerScreen() {
     if (selectedPreset && !presets.some((preset) => preset.id === selectedPreset.id)) {
       setSelectedPresetId(presets.find((preset) => preset.scope !== "builtin")?.id ?? "");
     }
-  }, [presets, selectedPreset?.id]);
+  }, [presets, selectedPreset]);
 
   useEffect(() => {
     setForm(formFromPreset(selectedPreset, modelOptions(models, selectedPreset?.workflow ?? "text_to_image")[0]?.id ?? models[0]?.id));
     setMessage({ tone: "neutral", text: "" });
-  }, [selectedPreset?.id, models]);
+  }, [selectedPreset, models]);
 
   useEffect(() => {
     if (!availableModels.length) {

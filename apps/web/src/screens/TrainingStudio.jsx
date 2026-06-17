@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useRef, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useAppContext } from "../context/AppContext.js";
 import { ModelAvailabilityGate } from "../components/ModelAvailabilityGate.jsx";
 import { downloadOffersFor } from "../modelEligibility.js";
@@ -303,7 +303,10 @@ export function TrainingStudio({ mode = "training" } = {}) {
     createModelDownloadJob,
     macCapabilities = DEFAULT_MAC_CAPABILITIES,
   } = useAppContext();
-  const datasets = trainingDatasetsProjectId === activeProject?.id ? trainingDatasets : [];
+  const datasets = useMemo(
+    () => (trainingDatasetsProjectId === activeProject?.id ? trainingDatasets : []),
+    [activeProject?.id, trainingDatasets, trainingDatasetsProjectId],
+  );
   const datasetsError = trainingDatasetsError;
   const loadingDatasets = loadingTrainingDatasets;
   const onPreview = setPreviewAsset;
@@ -314,8 +317,14 @@ export function TrainingStudio({ mode = "training" } = {}) {
   const updateDataset = updateTrainingDataset;
   const batchRenameDataset = batchRenameTrainingDataset;
   const createCaptionJob = createTrainingDatasetCaptionJob;
-  const trainingPresets = trainingPresetsCatalog?.presets ?? [];
-  const trainingTargets = trainingTargetsCatalog?.targets ?? [];
+  const trainingPresets = useMemo(
+    () => trainingPresetsCatalog?.presets ?? [],
+    [trainingPresetsCatalog?.presets],
+  );
+  const trainingTargets = useMemo(
+    () => trainingTargetsCatalog?.targets ?? [],
+    [trainingTargetsCatalog?.targets],
+  );
   const workflowTabs = datasetLibraryMode ? [] : trainingTabs;
   const [activeTab, setActiveTab] = useState(datasetLibraryMode ? "dataset" : "configure");
   const [activeDataset, setActiveDataset] = useState(null);
@@ -359,6 +368,7 @@ export function TrainingStudio({ mode = "training" } = {}) {
   // the plan to the worker's Z-Image LoRA kernel. Default to the safe dry run.
   const [trainingRunMode, setTrainingRunMode] = useState("dry_run");
   const configBasisRef = useRef("");
+  const openDatasetRef = useRef(null);
   const tabRefs = useRef({});
 
   const activeIndex = workflowTabs.findIndex((tab) => tab.id === activeTab);
@@ -459,13 +469,19 @@ export function TrainingStudio({ mode = "training" } = {}) {
   const firstTarget = trainingTargets[0] ?? null;
   // Mac UI gating (sc-3486): a target whose kernel has no native mlx-gen Rust trainer
   // (kolors_lora / lens_lora) can't train on a gated Mac — disable it and snap off it.
-  const macTargetBlocked = (target) => macTrainingKernelBlocked(macCapabilities, target?.kernel);
+  const macTargetBlocked = useCallback(
+    (target) => macTrainingKernelBlocked(macCapabilities, target?.kernel),
+    [macCapabilities],
+  );
   // Model-availability gate (sc-5947): training needs a trainable target whose base model is
   // downloaded. A target's base counts as missing only when it's present in the catalog AND
   // installState === "missing" (so a thin test context with no `models` stays ready, and a real
   // install reads the true state). Only gated when targets exist but every trainable base is
   // missing — a target-registry error keeps its own "registry unavailable" message.
-  const usableTrainingTargets = trainingTargets.filter((target) => !macTargetBlocked(target));
+  const usableTrainingTargets = useMemo(
+    () => trainingTargets.filter((target) => !macTargetBlocked(target)),
+    [macTargetBlocked, trainingTargets],
+  );
   const trainingBaseMissing = (target) => {
     const base = models.find((item) => item.id === target?.baseModel);
     return Boolean(base) && base.installState === "missing";
@@ -473,11 +489,13 @@ export function TrainingStudio({ mode = "training" } = {}) {
   const trainingReady =
     usableTrainingTargets.length === 0 ||
     usableTrainingTargets.some((target) => !trainingBaseMissing(target));
-  const trainingBaseIds = new Set(usableTrainingTargets.map((target) => target.baseModel).filter(Boolean));
+  const trainingBaseIds = useMemo(
+    () => new Set(usableTrainingTargets.map((target) => target.baseModel).filter(Boolean)),
+    [usableTrainingTargets],
+  );
   const trainingOffers = useMemo(
     () => downloadOffersFor(models, (item) => trainingBaseIds.has(item.id), macCapabilities),
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-    [models, macCapabilities, [...trainingBaseIds].join("|")],
+    [models, macCapabilities, trainingBaseIds],
   );
   const trainingDownloadJobs = useMemo(
     () => (jobs ?? []).filter((job) => job.type === "model_download"),
@@ -492,8 +510,7 @@ export function TrainingStudio({ mode = "training" } = {}) {
       const fallback = trainingTargets.find((target) => !macTargetBlocked(target));
       if (fallback) setSelectedTargetId(fallback.id);
     }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [selectedTarget?.id, trainingTargets, macCapabilities]);
+  }, [macTargetBlocked, selectedTarget, trainingTargets]);
   const targetPresets = useMemo(
     () => presetsForTarget(trainingPresets, selectedTarget?.id),
     [selectedTarget?.id, trainingPresets],
@@ -532,9 +549,12 @@ export function TrainingStudio({ mode = "training" } = {}) {
     macCapabilities?.training?.lokrOnWanSupported === false;
   useEffect(() => {
     if (macLokrOnWanBlocked && isLokrNetwork) {
-      updateConfigDraft("networkType", "lora");
+      setConfigMessage("");
+      setConfigError("");
+      setConfigSnapshot(null);
+      setCustomizedConfigFields((current) => new Set([...current, "networkType"]));
+      setConfigDraft((current) => ({ ...current, networkType: "lora" }));
     }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [macLokrOnWanBlocked, isLokrNetwork]);
   const lrSchedulerLimitOptions = rangeOptions(selectedTarget?.limits, "lrSchedulers");
   const lrSchedulerSelectOptions = lrSchedulerLimitOptions.length ? lrSchedulerLimitOptions : lrSchedulerOptions;
@@ -595,9 +615,9 @@ export function TrainingStudio({ mode = "training" } = {}) {
       return;
     }
     if (studioLaunch.datasetId !== selectedDatasetId) {
-      openDataset(studioLaunch.datasetId);
+      openDatasetRef.current?.(studioLaunch.datasetId);
     }
-  }, [datasetLibraryMode, studioLaunch?.id]);
+  }, [datasetLibraryMode, selectedDatasetId, studioLaunch?.datasetId, studioLaunch?.id, studioLaunch?.view]);
 
   useEffect(() => {
     const datasetTriggerPhrase = triggerPhraseFromText(activeDataset?.name);
@@ -636,7 +656,7 @@ export function TrainingStudio({ mode = "training" } = {}) {
     setConfigMessage("");
     setConfigError("");
     setConfigTriggerFollowsCaptions(true);
-  }, [activeDataset?.id, selectedTarget?.id, trainingPresets]);
+  }, [activeDataset, gpuOptions, selectedTarget, trainingPresets]);
 
   useEffect(() => {
     if (!configTriggerFollowsCaptions) {
@@ -650,7 +670,7 @@ export function TrainingStudio({ mode = "training" } = {}) {
       return { ...current, triggerWord: nextTriggerPhrase };
     });
     setConfigSnapshot(null);
-  }, [captionTriggerWords, configTriggerFollowsCaptions, selectedTarget?.id]);
+  }, [captionTriggerWords, configTriggerFollowsCaptions, selectedTarget?.defaults?.triggerWord]);
 
   useEffect(() => {
     setConfigDraft((current) => {
@@ -665,7 +685,7 @@ export function TrainingStudio({ mode = "training" } = {}) {
       }
       return { ...current, requestedGpu: gpuOptions[0] ?? "" };
     });
-  }, [gpuOptionsKey]);
+  }, [gpuOptions, gpuOptionsKey]);
 
   function focusTab(index) {
     if (!workflowTabs.length) {
@@ -720,6 +740,8 @@ export function TrainingStudio({ mode = "training" } = {}) {
       setBusyDatasetId("");
     }
   }
+
+  openDatasetRef.current = openDataset;
 
   // Drops a member (or an unavailable/orphaned id) from the dataset selection.
   function removeUnavailableAsset(assetId) {

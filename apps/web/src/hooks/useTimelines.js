@@ -27,6 +27,22 @@ export function useTimelines({
   const selectedTimelineIdRef = useRef(null);
   const timelineApplyQueueRef = useRef(Promise.resolve());
 
+  const loadTimeline = useCallback(
+    async (projectId, timelineId) => {
+      try {
+        const timeline = await apiFetch(`/api/v1/projects/${projectId}/timelines/${timelineId}`, token);
+        if (activeProjectRef.current?.id !== projectId || selectedTimelineIdRef.current !== timelineId) {
+          return;
+        }
+        setActiveTimeline(timeline);
+        setError("");
+      } catch (err) {
+        setError(err.message);
+      }
+    },
+    [activeProjectRef, setError, token],
+  );
+
   useEffect(() => {
     selectedTimelineIdRef.current = selectedTimelineId;
   }, [selectedTimelineId]);
@@ -36,8 +52,7 @@ export function useTimelines({
       return;
     }
     loadTimeline(activeProject.id, selectedTimelineId);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [activeProject?.id, selectedTimelineId, timelinesProjectId]);
+  }, [activeProject, loadTimeline, selectedTimelineId, timelinesProjectId]);
 
   // sc-4194: the context-exposed actions (and refreshTimelines, on which they depend)
   // are wrapped in useCallback so their identity is stable across App's SSE-driven
@@ -69,19 +84,6 @@ export function useTimelines({
     },
     [token, activeProject, activeProjectRef, setError],
   );
-
-  async function loadTimeline(projectId, timelineId) {
-    try {
-      const timeline = await apiFetch(`/api/v1/projects/${projectId}/timelines/${timelineId}`, token);
-      if (activeProjectRef.current?.id !== projectId || selectedTimelineIdRef.current !== timelineId) {
-        return;
-      }
-      setActiveTimeline(timeline);
-      setError("");
-    } catch (err) {
-      setError(err.message);
-    }
-  }
 
   const createTimeline = useCallback(
     async (payload) => {

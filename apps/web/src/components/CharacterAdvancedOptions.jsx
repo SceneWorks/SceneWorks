@@ -65,8 +65,7 @@ export function useCharacterAdvancedOptions(model, { defaultNegativePrompt = "" 
     setSampler(samplerDefaultFromModel(model));
     setScheduler(schedulerDefaultFromModel(model));
     setSchedulerShift(schedulerShiftDefaultFromModel(model));
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [modelId]);
+  }, [identityStructureDefault, model, modelId, referenceStrengthDefault]);
 
   // Re-seed the editable negative prompt with the curated baseline when it changes
   // (e.g. switching character/panel). The user edits from that starting point.

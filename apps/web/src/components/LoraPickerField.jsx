@@ -16,7 +16,6 @@ export function useLoraSelection(loras, model) {
     () => (Array.isArray(loras) ? loras.filter((lora) => loraMatchesModel(lora, model)) : []),
     [loras, model],
   );
-  const compatibleKey = compatibleLoras.map((lora) => lora.id).join("|");
   const [selectedLoraIds, setSelectedLoraIds] = React.useState([]);
   const [weights, setWeights] = React.useState({});
 
@@ -24,8 +23,7 @@ export function useLoraSelection(loras, model) {
   // another family must not ride along into the payload). Mirrors ImageStudio.
   React.useEffect(() => {
     setSelectedLoraIds((ids) => ids.filter((id) => compatibleLoras.some((lora) => lora.id === id)));
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [compatibleKey]);
+  }, [compatibleLoras]);
 
   const weightFor = React.useCallback(
     (lora) => {

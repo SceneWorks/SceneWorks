@@ -554,6 +554,8 @@ export function App() {
   const refreshTrainingDatasetsRef = useRef(null);
   const refreshPersonTracksRef = useRef(null);
   const refreshTimelinesRef = useRef(null);
+  const refreshDiscardedAssetsRef = useRef(null);
+  const enqueueTimelineGenerationApplyRef = useRef(null);
   const refreshDataWithLoraOverlayRef = useRef(null);
   // A screen (the Image Editor, sc-2434) can register a guard that runs before a
   // user-initiated navigation leaves it — e.g. to confirm discarding unsaved edits.
@@ -602,7 +604,7 @@ export function App() {
         return null;
       }
     },
-    [token, activeProject, requestedGpu],
+    [token, activeProject, requestedGpu, setError],
   );
 
   const {
@@ -993,14 +995,29 @@ export function App() {
     refreshPersonTracksRef.current?.(activeProject.id, { signal });
     refreshTimelinesRef.current?.(activeProject.id, { signal });
     return () => controller.abort();
-  }, [activeProject?.id, authenticated, token]);
+  }, [
+    activeProject,
+    authenticated,
+    token,
+    setActiveTimeline,
+    setCharacters,
+    setPersonTracks,
+    setPresets,
+    setSelectedTimelineId,
+    setTimelines,
+    setTimelinesProjectId,
+    setTrainingDatasets,
+    setTrainingDatasetsError,
+    setTrainingDatasetsProjectId,
+  ]);
 
   useEffect(() => {
-    if (!activeProject || !authenticated || activeView !== "Library") {
+    const projectId = activeProject?.id;
+    if (!projectId || !authenticated || activeView !== "Library") {
       return undefined;
     }
     const controller = new AbortController();
-    refreshDiscardedAssets(activeProject.id, { signal: controller.signal });
+    refreshDiscardedAssetsRef.current?.(projectId, { signal: controller.signal });
     return () => controller.abort();
   }, [activeProject?.id, activeView, authenticated, token]);
 
@@ -1043,7 +1060,7 @@ export function App() {
         }
       }
       if (job.status === "completed" && hasGeneratedAssets) {
-        enqueueTimelineGenerationApply(job);
+        enqueueTimelineGenerationApplyRef.current?.(job);
       }
       if (job.status === "completed" && job.projectId && job.type === "person_track") {
         refreshPersonTracksRef.current?.(job.projectId);
@@ -1144,7 +1161,7 @@ export function App() {
       }
       events?.close();
     };
-  }, [access?.authRequired, authenticated, token]);
+  }, [access?.authRequired, authenticated, token, dismissNoticeKind, pushNotice, setError]);
 
   async function refreshData() {
     const fetchInitial = async (label, path, fallback, optional = false) => {
@@ -1272,6 +1289,8 @@ export function App() {
   refreshTrainingDatasetsRef.current = refreshTrainingDatasets;
   refreshPersonTracksRef.current = refreshPersonTracks;
   refreshTimelinesRef.current = refreshTimelines;
+  refreshDiscardedAssetsRef.current = refreshDiscardedAssets;
+  enqueueTimelineGenerationApplyRef.current = enqueueTimelineGenerationApply;
   refreshDataWithLoraOverlayRef.current = refreshDataWithLoraOverlay;
 
 
@@ -1334,7 +1353,7 @@ export function App() {
         setError(err.message);
       }
     },
-    [token, activeProject, requestedGpu, jobPrompt, activeView],
+    [token, activeProject, requestedGpu, jobPrompt, activeView, setError],
   );
 
   const createImageJob = useCallback(
@@ -1361,7 +1380,7 @@ export function App() {
         return null;
       }
     },
-    [token, activeProject, requestedGpu],
+    [token, activeProject, requestedGpu, setError],
   );
 
   // Standalone video upscale (epic 4811 / sc-4816): the net-new `video_upscale` job runs
@@ -1392,7 +1411,7 @@ export function App() {
         return null;
       }
     },
-    [token, activeProject, requestedGpu],
+    [token, activeProject, requestedGpu, setError],
   );
 
   // Refine a prompt via the prompt_refine worker job: POST creates the job, then
@@ -1491,7 +1510,7 @@ export function App() {
         return null;
       }
     },
-    [token, activeProject, requestedGpu],
+    [token, activeProject, requestedGpu, setError],
   );
 
   const createInterleaveJob = useCallback(
@@ -1518,7 +1537,7 @@ export function App() {
         return null;
       }
     },
-    [token, activeProject, requestedGpu],
+    [token, activeProject, requestedGpu, setError],
   );
 
   const rememberLocalGenerationJob = useCallback((kind, job) => {
@@ -1654,7 +1673,7 @@ export function App() {
         setError(err.message);
       }
     },
-    [token],
+    [token, setError],
   );
 
   const updateAssetTags = useCallback(
@@ -1670,7 +1689,7 @@ export function App() {
         setError(err.message);
       }
     },
-    [token],
+    [token, setError],
   );
 
   const deleteAsset = useCallback(
@@ -1687,7 +1706,7 @@ export function App() {
         setError(err.message);
       }
     },
-    [token],
+    [token, setError],
   );
 
   const purgeAsset = useCallback(
@@ -1701,7 +1720,7 @@ export function App() {
         setError(err.message);
       }
     },
-    [token],
+    [token, setError],
   );
 
   const importAsset = useCallback(
@@ -1737,7 +1756,7 @@ export function App() {
         return null;
       }
     },
-    [token, activeProject],
+    [token, activeProject, setError],
   );
 
   const jobAction = useCallback(
@@ -1755,7 +1774,7 @@ export function App() {
         setError(err.message);
       }
     },
-    [token],
+    [token, setError],
   );
 
   const titleInfo = getViewTitle(activeView);

@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from "react";
+import React, { useEffect, useMemo, useState } from "react";
 import { WorkerProgressCard } from "../components/WorkerProgressCard.jsx";
 import { terminalStatuses } from "../constants.js";
 import { hasPresentCredential, loadCredentials } from "../credentials.js";
@@ -251,8 +251,10 @@ export function ModelManagerScreen() {
   // FLUX.2 [klein] has family "flux2-klein" yet accepts "flux2" LoRAs. The import
   // validator + generation-time matcher both key off loraCompatibility.families,
   // so the dropdown must too, or the user picks a family the backend rejects.
-  const families = Array.from(new Set(models.flatMap((model) => modelLoraFamilies(model)).filter(Boolean))).sort();
-  const familiesKey = families.join("|");
+  const families = useMemo(
+    () => Array.from(new Set(models.flatMap((model) => modelLoraFamilies(model)).filter(Boolean))).sort(),
+    [models],
+  );
   const [familyFilter, setFamilyFilter] = useState("all");
   const [importingLora, setImportingLora] = useState(false);
   const [importMessage, setImportMessage] = useState({ tone: "neutral", text: "" });
@@ -302,11 +304,11 @@ export function ModelManagerScreen() {
     if (familyFilter !== "all" && !families.includes(familyFilter)) {
       setFamilyFilter("all");
     }
-  }, [familiesKey, familyFilter]);
+  }, [families, familyFilter]);
 
   useEffect(() => {
     setImportForm((current) => (current.family && !families.includes(current.family) ? { ...current, family: "" } : current));
-  }, [familiesKey]);
+  }, [families]);
 
   // The base model + low-noise slot only apply to wan-video imports; clear them
   // when the family changes away so a stale baseModel can't ride along.
