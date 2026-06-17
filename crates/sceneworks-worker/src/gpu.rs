@@ -70,14 +70,15 @@ fn with_candle_capabilities(mut gpu: DiscoveredGpu, settings: &Settings) -> Disc
                     gpu.capabilities.push(capability);
                 }
             }
-            // SeedVR2 image + video upscaling (sc-5928, epic 4811 / epic 5482): the candle SeedVR2
-            // provider (`candle-gen-seedvr2`, force-linked under backend-candle) serves `image_upscale`
-            // AND the net-new `video_upscale` via `gen_core::load("seedvr2")` — the Windows/CUDA sibling
-            // of the Mac mlx-gen-seedvr2 path. These are job-type capabilities (not a generation
+            // Image + video upscaling (sc-5928 SeedVR2 + sc-5499 Real-ESRGAN, epic 4811 / epic 5482):
+            // off-Mac the candle worker serves `image_upscale` for BOTH Real-ESRGAN (`ort`/CUDA in
+            // `upscale_jobs`, the off-Mac sibling of the Mac CoreML path — sc-5499) and SeedVR2
+            // (`candle-gen-seedvr2`, force-linked under backend-candle, via `gen_core::load("seedvr2")`),
+            // AND the net-new SeedVR2 `video_upscale`. These are job-type capabilities (not a generation
             // modality), so they aren't in `registry_capabilities`; advertise them explicitly. The
-            // routing gate confines the candle worker to the SeedVR2 engine ids
-            // (`upscale_job_is_candle_eligible` / `video_upscale_job_is_candle_eligible`); Real-ESRGAN /
-            // AuraSR have no candle path and stay on the Python torch worker.
+            // routing gate (`upscale_job_is_candle_eligible` / `video_upscale_job_is_candle_eligible`)
+            // admits Real-ESRGAN + SeedVR2; only `aura-sr` has no candle path (dropped as an offered
+            // engine, sc-3668 / sc-5499) and runs on the Python torch worker until Phase 7.
             for capability in [
                 WorkerCapability::ImageUpscale,
                 WorkerCapability::VideoUpscale,
@@ -96,6 +97,36 @@ fn with_candle_capabilities(mut gpu: DiscoveredGpu, settings: &Settings) -> Disc
             // retired wholesale in Phase 7, epic 5483).
             if !gpu.capabilities.contains(&WorkerCapability::KpsExtract) {
                 gpu.capabilities.push(WorkerCapability::KpsExtract);
+            }
+            // DWPose whole-body pose detection (sc-5496, epic 5482): the off-Mac sibling of the macOS
+            // `ort`/CoreML path (sc-3487) — the same RTMW detector via `pose_jobs::run_pose_detect_job`
+            // with the CUDA execution provider, serving `pose_detect` for the Pose Library "create from
+            // photo" flow + InstantID pose conditioning. A job-type capability (not a generation modality),
+            // so it isn't in `registry_capabilities`; advertise it explicitly. Like kps_extract — and
+            // unlike SeedVR2 — the Python rtmlib path CAN serve pose_detect, so there's NO torch-refusal
+            // gate: the candle worker claims it Python-free, with the co-resident torch worker as a
+            // fallback (the Python rtmlib path is retired wholesale in Phase 7, epic 5483).
+            if !gpu.capabilities.contains(&WorkerCapability::PoseDetect) {
+                gpu.capabilities.push(WorkerCapability::PoseDetect);
+            }
+            // YOLO11 person detection + selected-person ByteTrack tracking (sc-5498, epic 5482):
+            // the off-Mac sibling of the macOS native-MLX path (sc-3633/sc-3634) — `yolo11m.onnx`
+            // via `ort`/CUDA in `person_jobs` + the pure-Rust SORT/ByteTrack in `person_track`,
+            // serving `person_detect` (Replace-Person candidate boxes) + `person_track` (the
+            // reusable selected-person track). Job-type capabilities (not generation modalities),
+            // so they aren't in `registry_capabilities`; advertise them explicitly. Like
+            // kps_extract / pose_detect — and unlike SeedVR2 — the Python Ultralytics path CAN
+            // serve them, so there's NO torch-refusal gate: the candle worker claims them
+            // Python-free, with the co-resident torch worker as a fallback (retired wholesale in
+            // Phase 7, epic 5483). Person *segmentation* (SAM masks) is NOT ported off-Mac yet
+            // (epic 3792, sc-5062), so candle person tracks are box-only (`maskState = "missing"`).
+            for capability in [
+                WorkerCapability::PersonDetect,
+                WorkerCapability::PersonTrack,
+            ] {
+                if !gpu.capabilities.contains(&capability) {
+                    gpu.capabilities.push(capability);
+                }
             }
             // The lane marker the routing gate keys off (mirrors the existing `nvidia` marker).
             gpu.capabilities
@@ -244,6 +275,15 @@ async fn sysctl_memsize_mb() -> Option<u64> {
             .map(|bytes| bytes / (1024 * 1024)),
         _ => None,
     }
+}
+
+/// Total unified memory in GB (`sysctl hw.memsize`), for per-job memory-budget guards such as the
+/// FLUX.2-dev multi-reference edit footprint check (sc-6124). `None` if the probe fails (the guard
+/// then no-ops rather than blocking a possibly-fine job). macOS-only — its sole caller, the FLUX.2
+/// edit path (`image_jobs/flux2.rs`), is itself `#[cfg(target_os = "macos")]`.
+#[cfg(target_os = "macos")]
+pub(crate) async fn total_unified_memory_gb() -> Option<f64> {
+    sysctl_memsize_mb().await.map(|mb| mb as f64 / 1024.0)
 }
 
 /// Numeric `PerformanceStatistics` from the `IOAccelerator` IOKit node, via

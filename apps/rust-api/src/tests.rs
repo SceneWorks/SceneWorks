@@ -394,19 +394,27 @@ fn test_safetensors_bytes() -> Vec<u8> {
 }
 
 fn test_safetensors_bytes_with_keys(tensor_keys: &[String]) -> Vec<u8> {
+    const TENSOR_DATA_END: u64 = 32768;
     let mut object = serde_json::Map::new();
     object.insert("__metadata__".to_owned(), json!({"format": "pt"}));
+    let mut data_end = 0_u64;
     for key in tensor_keys {
         object.insert(
             key.clone(),
-            json!({"dtype": "F16", "shape": [16, 1024], "data_offsets": [0, 32768]}),
+            json!({"dtype": "F16", "shape": [16, 1024], "data_offsets": [0, TENSOR_DATA_END]}),
         );
+        data_end = data_end.max(TENSOR_DATA_END);
     }
     let header = serde_json::to_vec(&Value::Object(object)).expect("header serializes");
     let mut bytes = Vec::new();
     bytes.extend_from_slice(&(header.len() as u64).to_le_bytes());
     bytes.extend_from_slice(&header);
-    bytes.extend_from_slice(b"tensor-bytes");
+    // The data section must hold every tensor the header declares — otherwise the
+    // file is rejected as incomplete (sc-6072). Pad to the largest declared
+    // `data_offsets` end; empty-key fixtures keep a few bytes so the file is a
+    // non-empty but still complete safetensors.
+    let data_len = usize::try_from(data_end.max(12)).expect("data length fits usize");
+    bytes.resize(bytes.len() + data_len, 0);
     bytes
 }
 
@@ -2823,11 +2831,12 @@ async fn models_catalog_carries_mac_support_and_capabilities_endpoint() {
     // Real-ESRGAN upscaling is ported to the Rust worker (sc-3489) → tool supported, no reason.
     assert_eq!(caps["features"]["imageUpscale"]["supported"], true);
     assert_eq!(caps["features"]["imageUpscale"]["reason"], Value::Null);
-    // The AuraSR engine is dropped on Mac (sc-3668) → its per-engine feature is unsupported.
+    // The AuraSR engine is dropped on Mac (sc-3668) AND off-Mac as an offered engine (sc-5499) → its
+    // per-engine feature is unsupported on every platform and names the drop.
     assert_eq!(caps["features"]["imageUpscaleAuraSr"]["supported"], false);
     assert_eq!(
         caps["features"]["imageUpscaleAuraSr"]["reason"]["suggestedEpic"],
-        "sc-3668"
+        "sc-5499"
     );
     // DWPose pose detection is ported to the Rust worker (sc-3487) → supported (sc-4206).
     assert_eq!(caps["features"]["poseFromPhoto"]["supported"], true);

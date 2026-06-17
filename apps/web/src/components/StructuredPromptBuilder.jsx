@@ -19,11 +19,11 @@ import {
   ELEMENT_PALETTE_MAX,
   makeObjElement,
   makeTextElement,
-  normalizeHexColor,
   orderCaption,
   parseCaption,
   STYLE_PALETTE_MAX,
 } from "../ideogramCaption.js";
+import PaletteEditor from "./PaletteEditor.jsx";
 
 const MODES = [
   ["form", "Builder"],
@@ -45,40 +45,6 @@ function getComposition(caption) {
 function getElements(caption) {
   const els = getComposition(caption).elements;
   return Array.isArray(els) ? els : [];
-}
-
-// A palette field: comma/space-separated #RRGGBB. Keeps its own text buffer so
-// the user can type freely; commits the normalized, valid colors on blur.
-function PaletteField({ value, onChange, max, label }) {
-  const [text, setText] = useState(() => (Array.isArray(value) ? value.join(", ") : ""));
-  // Re-seed from props only when the committed value actually changes (e.g. an
-  // external edit or a JSON-mode apply), not on every keystroke.
-  useEffect(() => {
-    setText(Array.isArray(value) ? value.join(", ") : "");
-  }, [value]);
-
-  function commit() {
-    const tokens = text.split(/[\s,]+/).map((t) => t.trim()).filter(Boolean);
-    const colors = [];
-    for (const token of tokens) {
-      const normalized = normalizeHexColor(token);
-      if (normalized && !colors.includes(normalized)) colors.push(normalized);
-    }
-    onChange(colors.length ? colors.slice(0, max) : null);
-  }
-
-  return (
-    <label className="structured-field structured-palette">
-      <span>{label}</span>
-      <input
-        type="text"
-        placeholder={`#RRGGBB, #RRGGBB … (max ${max})`}
-        value={text}
-        onChange={(e) => setText(e.target.value)}
-        onBlur={commit}
-      />
-    </label>
-  );
 }
 
 // Four integer inputs for a [ymin, xmin, ymax, xmax] box (0–1000). The visual
@@ -122,9 +88,46 @@ export default function StructuredPromptBuilder({
   onModeChange,
   plainText,
   onPlainTextChange,
+  onMagicExpand,
+  magicModelMissing = false,
+  onDownloadMagicModel,
 }) {
   const composition = getComposition(caption);
   const elements = getElements(caption);
+
+  // Magic-prompt expansion (sc-5997): plain idea -> populated, editable caption.
+  const [magicBusy, setMagicBusy] = useState(false);
+  const [magicError, setMagicError] = useState("");
+  const [magicDownloadRequested, setMagicDownloadRequested] = useState(false);
+  const magicModelNeeded =
+    magicModelMissing || /not cached|not installed|snapshot is not/i.test(magicError);
+
+  async function handleMagicExpand() {
+    if (typeof onMagicExpand !== "function" || !plainText.trim() || magicBusy) return;
+    setMagicBusy(true);
+    setMagicError("");
+    try {
+      const next = await onMagicExpand(plainText.trim());
+      if (next) {
+        onCaptionChange(next);
+        onModeChange("form"); // drop the user into the editable builder
+      }
+    } catch (e) {
+      setMagicError(e?.message || "Magic-prompt failed.");
+    } finally {
+      setMagicBusy(false);
+    }
+  }
+
+  async function handleDownloadMagicModel() {
+    if (typeof onDownloadMagicModel !== "function") return;
+    try {
+      const job = await onDownloadMagicModel();
+      if (job) setMagicDownloadRequested(true);
+    } catch (e) {
+      setMagicError(e?.message || "Could not start the model download.");
+    }
+  }
 
   // Stable React keys for the repeatable element rows so child field state stays
   // aligned with its element across add/remove (elements carry no id of their
@@ -270,9 +273,45 @@ export default function StructuredPromptBuilder({
           />
           <p className="structured-hint">
             Ideogram 4 was trained on structured captions — plain text produces a coherent but
-            prompt-agnostic image. Use the Builder for accurate adherence, or expand this into a
+            prompt-agnostic image. Use the Builder for accurate adherence, or expand this idea into a
             caption with magic-prompt.
           </p>
+          {typeof onMagicExpand === "function" ? (
+            <div className="structured-magic">
+              <button
+                type="button"
+                className="secondary-action"
+                disabled={!plainText.trim() || magicBusy}
+                onClick={handleMagicExpand}
+              >
+                {magicBusy ? "Expanding…" : "✨ Expand to caption"}
+              </button>
+              {magicError && magicModelNeeded ? (
+                <div className="structured-magic-missing" role="alert">
+                  {magicDownloadRequested ? (
+                    <p className="structured-hint">
+                      Downloading the prompt-refiner model… track it on the Models screen, then try again.
+                    </p>
+                  ) : (
+                    <>
+                      <p className="structured-error">The prompt-refiner model isn’t installed yet.</p>
+                      {typeof onDownloadMagicModel === "function" ? (
+                        <button type="button" className="secondary-action" onClick={handleDownloadMagicModel}>
+                          Download prompt-refiner model
+                        </button>
+                      ) : (
+                        <p className="structured-hint">Open the Models screen to download it.</p>
+                      )}
+                    </>
+                  )}
+                </div>
+              ) : magicError ? (
+                <p className="structured-error" role="alert">
+                  {magicError}
+                </p>
+              ) : null}
+            </div>
+          ) : null}
         </div>
       ) : null}
 
@@ -342,7 +381,7 @@ export default function StructuredPromptBuilder({
                   <span>Medium</span>
                   <input type="text" placeholder="photograph, oil painting" value={style.medium ?? ""} onChange={(e) => setStyleField("medium", e.target.value)} />
                 </label>
-                <PaletteField
+                <PaletteEditor
                   label={`Color palette (max ${STYLE_PALETTE_MAX})`}
                   value={style.color_palette}
                   max={STYLE_PALETTE_MAX}
@@ -420,7 +459,7 @@ export default function StructuredPromptBuilder({
                     + Bounding box
                   </button>
                 )}
-                <PaletteField
+                <PaletteEditor
                   label={`Palette (max ${ELEMENT_PALETTE_MAX})`}
                   value={el.color_palette}
                   max={ELEMENT_PALETTE_MAX}

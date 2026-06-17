@@ -2104,8 +2104,9 @@ pub fn mac_rust_supported(job: &JobSnapshot) -> Result<(), UnsupportedReason> {
         // `mlx-gen-seedvr2`, so the upscale tool runs Python-free. The AuraSR engine (`aura-sr`,
         // a 617M-param torch-only GigaGAN) was DROPPED on Mac after the sc-3668 port-or-drop
         // spike (no viable Rust path; only a marginal, ~35-50x-slower quality difference vs
-        // Real-ESRGAN x4). The Mac UI hides the AuraSR engine option, so this Err is now a
-        // defensive submit-time guard; AuraSR stays available on Windows/Linux.
+        // Real-ESRGAN x4) and is now dropped as an offered engine off-Mac too (sc-5499 — the
+        // Python torch backend that served it is retired in Phase 7). The UI hides the AuraSR
+        // engine option on every platform, so this Err is a defensive submit-time guard.
         JobType::ImageUpscale => {
             if upscale_job_is_mlx_eligible(job) {
                 Ok(())
@@ -2113,8 +2114,8 @@ pub fn mac_rust_supported(job: &JobSnapshot) -> Result<(), UnsupportedReason> {
                 Err(UnsupportedReason::new(
                     model,
                     "image_upscale (AuraSR)",
-                    "the Rust upscaler runs Real-ESRGAN; the AuraSR engine is dropped on Mac (available on Windows/Linux).",
-                    Some("sc-3668"),
+                    "the Rust upscaler runs Real-ESRGAN (+ SeedVR2); the AuraSR engine is dropped as an offered engine (sc-3668 / sc-5499).",
+                    Some("sc-5499"),
                 ))
             }
         }
@@ -2421,20 +2422,24 @@ pub fn mac_capabilities(platform: &str, mac_gating_active: bool) -> MacCapabilit
         },
     );
     features.insert(
-        // The AuraSR upscale engine (`engine=aura-sr`) is dropped on Mac (sc-3668,
-        // port-or-drop spike): it is a 617M-param torch-only GigaGAN with no viable Rust
-        // path and only a marginal, ~35-50x-slower quality difference vs the already-ported
-        // Real-ESRGAN x4. The Mac UI hides this engine option so a user never reaches the
-        // `mlx_unsupported` error; it stays available on Windows/Linux. This must agree with
-        // the AuraSR arm of `mac_rust_supported` (what the UI hides == what routing refuses).
+        // The AuraSR upscale engine (`engine=aura-sr`) is dropped on Mac (sc-3668, port-or-drop
+        // spike): it is a 617M-param torch-only GigaGAN with no viable Rust path and only a marginal,
+        // ~35-50x-slower quality difference vs the already-ported Real-ESRGAN x4. As of sc-5499 it is
+        // also dropped as an OFFERED engine off-Mac — there is no native (MLX/candle) path and the
+        // Python torch backend that served it on Windows/Linux is retired in Phase 7 (epic 5483), so
+        // exposing it would point users at a path about to disappear. `supported: false` on every
+        // platform (platform-intrinsic, like `imageUpscaleSeedvr2`), so the UI hides the engine
+        // everywhere. Must agree with the AuraSR arm of `mac_rust_supported` (UI-hidden == routing
+        // refuses): the native MLX/candle workers refuse it; only the (transitional) torch worker runs
+        // an explicitly-submitted aura-sr job until Phase 7.
         "imageUpscaleAuraSr".to_owned(),
         MacFeatureSupport {
             supported: false,
             reason: Some(UnsupportedReason::new(
                 None,
                 "image_upscale (AuraSR)",
-                "AuraSR is a torch-only GAN upscaler, dropped on Mac; Real-ESRGAN x4 is the Mac upscaler (it stays available on Windows/Linux).",
-                Some("sc-3668"),
+                "AuraSR is a torch-only GAN upscaler, dropped as an offered engine on all platforms (sc-3668 / sc-5499); Real-ESRGAN is the cross-platform upscaler (SeedVR2 the high-fidelity option).",
+                Some("sc-5499"),
             )),
         },
     );
@@ -3323,6 +3328,19 @@ fn image_job_is_candle_eligible(job: &JobSnapshot) -> bool {
     {
         return true;
     }
+    // Qwen-Image-Edit reference / dual-latent edit (sc-5487, epic 5480): a non-lightning Qwen-Image-Edit
+    // `edit_image` job with a source image is the bespoke candle `QwenEdit` lane
+    // (`generate_candle_qwen_edit_stream`), NOT txt2img — and `qwen_image_edit*` are not candle txt2img
+    // ids (the gate below only knows `qwen_image`), so they would fall through to torch. Branch it out
+    // first. Off-Mac this was a torch fallback. The `-2511_lightning` distill needs a LoRA the candle
+    // provider lacks, so it is excluded (stays MLX/torch). Mirrors the worker's `qwen_edit_candle_available`.
+    if matches!(
+        model,
+        "qwen_image_edit" | "qwen_image_edit_2509" | "qwen_image_edit_2511"
+    ) && qwen_edit_candle_eligible(&job.payload)
+    {
+        return true;
+    }
     // SDXL IP-Adapter-Plus reference conditioning (sc-5488, epic 5480): an sdxl-family model with a
     // reference image is a bespoke candle lane (`generate_candle_sdxl_ipadapter_stream`), NOT txt2img —
     // the `image_request_candle_eligible` gate below rejects `referenceAssetId`. Branch it out first
@@ -3676,6 +3694,22 @@ fn sdxl_edit_candle_eligible(payload: &Map<String, Value>) -> bool {
 /// worker's `flux2_edit_candle_available` gate (minus the local weight-resolve check) so the router and
 /// worker agree. Candle-only — macOS keeps the MLX `flux2_klein_9b_edit` registry path.
 fn flux2_edit_candle_eligible(payload: &Map<String, Value>) -> bool {
+    if payload.get("mode").and_then(Value::as_str) != Some("edit_image") {
+        return false;
+    }
+    payload
+        .get("sourceAssetId")
+        .and_then(Value::as_str)
+        .is_some_and(|value| !value.trim().is_empty())
+}
+
+/// Qwen-Image-Edit candle-routing conditions (sc-5487, epic 5480). The candle `QwenEdit` provider
+/// serves `edit_image` mode with a `sourceAssetId` on the non-lightning Qwen-Image-Edit family —
+/// dual-latent reference editing (no mask / inpaint / outpaint; that masked shape is the SDXL edit
+/// lane's). Same payload predicate as `flux2_edit_candle_eligible`, gated to the qwen-edit family by the
+/// caller. Mirrors the worker's `qwen_edit_candle_available` gate (minus the local weight-resolve check)
+/// so the router and worker agree. Candle-only — macOS keeps the MLX `qwen_image_edit` registry path.
+fn qwen_edit_candle_eligible(payload: &Map<String, Value>) -> bool {
     if payload.get("mode").and_then(Value::as_str) != Some("edit_image") {
         return false;
     }
@@ -4318,12 +4352,16 @@ fn upscale_job_requests_seedvr2(job: &JobSnapshot) -> bool {
             .is_some_and(|engine| engine.trim().eq_ignore_ascii_case("seedvr2"))
 }
 
-/// Whether an `image_upscale` job is candle-eligible (sc-5928, epic 4811 / epic 5482): the candle
-/// SeedVR2 provider (`candle-gen-seedvr2`) serves `engine=seedvr2` off-Mac. Unlike the mlx gate, the
-/// default (`real-esrgan`) engine is NOT candle-eligible — only an explicit SeedVR2 request routes to
-/// the candle worker; Real-ESRGAN / AuraSR have no candle path and stay on the Python torch worker.
+/// Whether an `image_upscale` job is candle-eligible (sc-5928 SeedVR2 + sc-5499 Real-ESRGAN, epic
+/// 4811 / epic 5482): the candle worker serves **Real-ESRGAN** (`ort`/CUDA, the off-Mac sibling of
+/// the Mac CoreML path — sc-5499) AND **SeedVR2** (`candle-gen-seedvr2`, sc-5928) off-Mac. This now
+/// mirrors `upscale_job_is_mlx_eligible` exactly (the default `real-esrgan` engine + `seedvr2`);
+/// `aura-sr` was dropped as an offered engine (sc-3668 Mac / sc-5499 off-Mac) so it has no candle
+/// path — a candle worker refuses it (it runs only on the Python torch worker until Phase 7). Note
+/// Real-ESRGAN keeps its torch path as a co-resident fallback (the torch worker is NOT refused it,
+/// unlike SeedVR2), so a Real-ESRGAN job may run on whichever worker claims it first.
 fn upscale_job_is_candle_eligible(job: &JobSnapshot) -> bool {
-    upscale_job_requests_seedvr2(job)
+    upscale_job_is_mlx_eligible(job)
 }
 
 /// Whether a `video_upscale` job is candle-eligible (sc-5928, epic 4811 / epic 5482): the candle
@@ -4513,10 +4551,10 @@ fn worker_supports_job(worker: &WorkerSnapshot, job: &JobSnapshot) -> bool {
         {
             return false;
         }
-        // Image upscale (sc-5928, epic 4811 / epic 5482): the candle worker serves SeedVR2 image
-        // upscaling (`candle-gen-seedvr2`, the Windows/CUDA sibling of mlx-gen-seedvr2). Real-ESRGAN
-        // (the default engine) / AuraSR have no candle path, so a non-SeedVR2 engine is refused and
-        // stays on the Python torch worker.
+        // Image upscale (sc-5928 SeedVR2 + sc-5499 Real-ESRGAN, epic 4811 / epic 5482): the candle
+        // worker serves Real-ESRGAN (`ort`/CUDA, sc-5499) AND SeedVR2 (`candle-gen-seedvr2`, the
+        // Windows/CUDA sibling of mlx-gen-seedvr2). Only `aura-sr` has no candle path — it is refused
+        // and runs on the Python torch worker until Phase 7.
         if matches!(job.job_type, JobType::ImageUpscale) && !upscale_job_is_candle_eligible(job) {
             return false;
         }
@@ -5232,6 +5270,38 @@ mod candle_routing_tests {
             "mode": "edit_image",
             "sourceAssetId": "asset_1"
         }))));
+        // sc-5487: a Qwen-Image-Edit edit (`edit_image` + a source) is now the candle `QwenEdit` lane
+        // (dual-latent reference editing). Off-Mac this was a torch fallback; the candle worker CLAIMS
+        // it for the non-lightning variants (all map to the single edit engine model).
+        for model in [
+            "qwen_image_edit",
+            "qwen_image_edit_2509",
+            "qwen_image_edit_2511",
+        ] {
+            assert!(
+                worker_supports_job(
+                    &candle,
+                    &image_generate_job(json!({
+                        "model": model,
+                        "mode": "edit_image",
+                        "sourceAssetId": "asset_1"
+                    }))
+                ),
+                "candle worker should claim {model} edit (sc-5487)"
+            );
+        }
+        // The -2511_lightning distill needs the 4-step LoRA the candle provider lacks → NOT claimed by
+        // candle; it stays on the MLX/torch path.
+        assert!(!image_job_is_candle_eligible(&image_generate_job(json!({
+            "model": "qwen_image_edit_2511_lightning",
+            "mode": "edit_image",
+            "sourceAssetId": "asset_1"
+        }))));
+        // A Qwen-Image-Edit job with no source image is not the edit lane → not claimed (would defer).
+        assert!(!image_job_is_candle_eligible(&image_generate_job(json!({
+            "model": "qwen_image_edit",
+            "mode": "edit_image"
+        }))));
     }
 
     #[test]
@@ -5704,23 +5774,30 @@ mod candle_routing_tests {
         .expect("valid JobSnapshot")
     }
 
-    /// sc-5928: the candle worker claims `engine=seedvr2` image upscale (the candle-gen-seedvr2
-    /// provider) but refuses Real-ESRGAN (the default), which stays on the Python torch worker.
+    /// sc-5499 + sc-5928: the candle worker claims both off-Mac image upscalers — Real-ESRGAN
+    /// (`ort`/CUDA, sc-5499, incl. the default engine) and SeedVR2 (`candle-gen-seedvr2`, sc-5928).
+    /// Only `aura-sr` (an offered engine dropped on every platform, sc-3668 / sc-5499) has no candle
+    /// path → refused (it runs only on the Python torch worker until Phase 7).
     #[test]
-    fn candle_worker_claims_seedvr2_image_upscale_refuses_real_esrgan() {
+    fn candle_worker_claims_real_esrgan_and_seedvr2_image_upscale_refuses_aura_sr() {
         let candle = gpu_worker(&["gpu", "image_upscale", "candle"]);
         assert!(worker_supports_job(
             &candle,
             &image_upscale_job(json!({ "sourceAssetId": "a", "engine": "seedvr2" }))
         ));
-        // Real-ESRGAN (the default engine) has no candle path → refused → stays on the torch worker.
-        assert!(!worker_supports_job(
+        // Real-ESRGAN (incl. the default engine) now has a candle path (the off-Mac ort/CUDA upscaler).
+        assert!(worker_supports_job(
             &candle,
             &image_upscale_job(json!({ "sourceAssetId": "a", "engine": "real-esrgan" }))
         ));
-        assert!(!worker_supports_job(
+        assert!(worker_supports_job(
             &candle,
             &image_upscale_job(json!({ "sourceAssetId": "a" })) // default = real-esrgan
+        ));
+        // AuraSR is dropped as an offered engine → no candle path → refused.
+        assert!(!worker_supports_job(
+            &candle,
+            &image_upscale_job(json!({ "sourceAssetId": "a", "engine": "aura-sr" }))
         ));
     }
 
@@ -5807,6 +5884,138 @@ mod candle_routing_tests {
         assert!(
             !worker_supports_job(&no_cap, &kps_extract_job(payload)),
             "a worker not advertising kps_extract refuses it"
+        );
+    }
+
+    // ---- Candle pose_detect (DWPose) lane (sc-5496, epic 5482) ----
+
+    /// A queued `pose_detect` job carrying `payload`.
+    fn pose_detect_job(payload: Value) -> JobSnapshot {
+        serde_json::from_value(json!({
+            "id": "job_pose",
+            "type": "pose_detect",
+            "status": "queued",
+            "payload": payload,
+            "result": {},
+            "requestedGpu": "auto",
+            "progress": 0,
+            "stage": "queued",
+            "message": "",
+            "attempts": 1,
+            "cancelRequested": false,
+            "createdAt": "2026-06-16T00:00:00Z",
+            "updatedAt": "2026-06-16T00:00:00Z",
+        }))
+        .expect("valid JobSnapshot")
+    }
+
+    /// sc-5496: the candle worker advertises `pose_detect` (the DWPose RTMW detector via the `ort` CUDA
+    /// EP) and claims a pose_detect job — the off-Mac sibling of the macOS `ort`/CoreML path. Like
+    /// kps_extract (and unlike SeedVR2), the Python rtmlib path CAN serve pose_detect, so there is NO
+    /// torch-refusal gate: a co-resident torch worker that advertises the capability still claims it (the
+    /// candle worker just runs it Python-free when it polls first; the Python path is retired wholesale in
+    /// Phase 7, epic 5483). A worker that never advertises the capability (e.g. a candle-disabled box)
+    /// refuses it.
+    #[test]
+    fn candle_worker_claims_pose_detect_no_torch_refusal() {
+        let payload = json!({ "sources": [{ "assetId": "a" }], "projectId": "p" });
+        let candle = gpu_worker(&["gpu", "pose_detect", "candle"]);
+        assert!(
+            worker_supports_job(&candle, &pose_detect_job(payload.clone())),
+            "candle worker should claim pose_detect"
+        );
+        let torch = gpu_worker(&["gpu", "pose_detect"]);
+        assert!(
+            worker_supports_job(&torch, &pose_detect_job(payload.clone())),
+            "torch worker still claims pose_detect (no refusal — it has the rtmlib path)"
+        );
+        let no_cap = gpu_worker(&["gpu", "image_generate", "candle"]);
+        assert!(
+            !worker_supports_job(&no_cap, &pose_detect_job(payload)),
+            "a worker not advertising pose_detect refuses it"
+        );
+    }
+
+    // ---- Candle person detect/track lane (sc-5498) ----
+
+    /// A queued real (non-preview) `person_detect` job carrying `payload`.
+    fn person_detect_job(payload: Value) -> JobSnapshot {
+        serde_json::from_value(json!({
+            "id": "job_person_detect",
+            "type": "person_detect",
+            "status": "queued",
+            "payload": payload,
+            "result": {},
+            "requestedGpu": "auto",
+            "progress": 0,
+            "stage": "queued",
+            "message": "",
+            "attempts": 1,
+            "cancelRequested": false,
+            "createdAt": "2026-06-16T00:00:00Z",
+            "updatedAt": "2026-06-16T00:00:00Z",
+        }))
+        .expect("valid JobSnapshot")
+    }
+
+    /// A queued real (non-preview) `person_track` job carrying `payload`.
+    fn person_track_job(payload: Value) -> JobSnapshot {
+        serde_json::from_value(json!({
+            "id": "job_person_track",
+            "type": "person_track",
+            "status": "queued",
+            "payload": payload,
+            "result": {},
+            "requestedGpu": "auto",
+            "progress": 0,
+            "stage": "queued",
+            "message": "",
+            "attempts": 1,
+            "cancelRequested": false,
+            "createdAt": "2026-06-16T00:00:00Z",
+            "updatedAt": "2026-06-16T00:00:00Z",
+        }))
+        .expect("valid JobSnapshot")
+    }
+
+    /// sc-5498: the candle worker advertises `person_detect` + `person_track` (YOLO11 via the `ort`
+    /// CUDA EP + the pure-Rust ByteTrack) and claims both — the off-Mac sibling of the macOS
+    /// native-MLX path (sc-3633/sc-3634). Like kps_extract / pose_detect (and unlike SeedVR2), the
+    /// Python Ultralytics path CAN serve them, so there is NO torch-refusal gate: a co-resident
+    /// torch worker that advertises the capability still claims it (the candle worker just runs it
+    /// Python-free when it polls first; the Python path is retired wholesale in Phase 7, epic 5483).
+    /// A worker that never advertises the capability refuses the job. (These are the real,
+    /// non-preview jobs; the procedural `preview: true` path keys off the separate
+    /// `person_detect_preview` / `person_track_preview` capabilities.)
+    #[test]
+    fn candle_worker_claims_person_detect_and_track_no_torch_refusal() {
+        let payload = json!({ "projectId": "p", "sourceAssetId": "a" });
+        let candle = gpu_worker(&["gpu", "person_detect", "person_track", "candle"]);
+        assert!(
+            worker_supports_job(&candle, &person_detect_job(payload.clone())),
+            "candle worker should claim person_detect"
+        );
+        assert!(
+            worker_supports_job(&candle, &person_track_job(payload.clone())),
+            "candle worker should claim person_track"
+        );
+        let torch = gpu_worker(&["gpu", "person_detect", "person_track"]);
+        assert!(
+            worker_supports_job(&torch, &person_detect_job(payload.clone())),
+            "torch worker still claims person_detect (no refusal — it has the Ultralytics path)"
+        );
+        assert!(
+            worker_supports_job(&torch, &person_track_job(payload.clone())),
+            "torch worker still claims person_track (no refusal — it has the Ultralytics path)"
+        );
+        let no_cap = gpu_worker(&["gpu", "image_generate", "candle"]);
+        assert!(
+            !worker_supports_job(&no_cap, &person_detect_job(payload.clone())),
+            "a worker not advertising person_detect refuses it"
+        );
+        assert!(
+            !worker_supports_job(&no_cap, &person_track_job(payload)),
+            "a worker not advertising person_track refuses it"
         );
     }
 

@@ -2354,6 +2354,47 @@ fn flux2_edit_engine_id_maps_variants() {
     assert_eq!(flux2_edit_engine_id("sdxl"), None);
 }
 
+// ---- sc-6124: FLUX.2-dev multi-reference edit memory guard -----------------------------------
+
+#[cfg(target_os = "macos")]
+#[test]
+fn flux2_dev_edit_peak_gb_tracks_sc5923_measurements() {
+    // sc-5923 worker-layer peaks (Q4, 1024², /usr/bin/time -l): single-ref ~81, 2-ref ~104 GB.
+    let single = flux2_dev_edit_peak_gb(1, 1024, 1024);
+    let double = flux2_dev_edit_peak_gb(2, 1024, 1024);
+    assert!(
+        (single - 81.0).abs() < 2.0,
+        "single-reference estimate {single} GB ≉ measured ~81"
+    );
+    assert!(
+        (double - 104.0).abs() < 2.0,
+        "two-reference estimate {double} GB ≉ measured ~104"
+    );
+    // Monotonic in both reference count and resolution.
+    assert!(double > single);
+    assert!(flux2_dev_edit_peak_gb(2, 768, 768) < double);
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn flux2_dev_edit_memory_guard_gates_multiref_on_small_machines() {
+    // Single reference / txt2img always pass — covered by the declared minMemoryGb — even on a
+    // small machine, and regardless of the RAM probe.
+    assert!(flux2_dev_edit_memory_guard(1, 1024, 1024, Some(64.0)).is_ok());
+    assert!(flux2_dev_edit_memory_guard(0, 1024, 1024, Some(64.0)).is_ok());
+    // Two references at 1024² (~104 GB peak): fits a 128 GB Mac, rejected on a 96 GB one.
+    assert!(flux2_dev_edit_memory_guard(2, 1024, 1024, Some(128.0)).is_ok());
+    let err = flux2_dev_edit_memory_guard(2, 1024, 1024, Some(96.0)).unwrap_err();
+    assert!(
+        matches!(&err, WorkerError::InvalidPayload(msg) if msg.contains("multi-reference")),
+        "expected an actionable multi-reference rejection, got {err:?}"
+    );
+    // Dropping to 768² brings the two-reference edit (~74 GB) back under a 96 GB budget.
+    assert!(flux2_dev_edit_memory_guard(2, 768, 768, Some(96.0)).is_ok());
+    // A failed RAM probe is lenient (don't block a possibly-fine job).
+    assert!(flux2_dev_edit_memory_guard(2, 1024, 1024, None).is_ok());
+}
+
 // ---- sc-6055: FLUX.2-dev strict-pose (flux2_dev_control) -------------------------------------
 
 #[cfg(target_os = "macos")]
@@ -2729,6 +2770,45 @@ fn write_min_lora(path: &std::path::Path) {
     let mut buffer = (header_bytes.len() as u64).to_le_bytes().to_vec();
     buffer.extend_from_slice(&header_bytes);
     std::fs::write(path, buffer).unwrap();
+}
+
+/// A valid safetensors header that declares tensor data the file doesn't actually
+/// contain — i.e. a truncated/interrupted download (sc-6072).
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+fn write_truncated_lora(path: &std::path::Path) {
+    let header = json!({
+        "__metadata__": { "format": "pt" },
+        "lora.down.weight": { "dtype": "F16", "shape": [16, 16], "data_offsets": [0, 512] },
+    });
+    let header_bytes = serde_json::to_vec(&header).unwrap();
+    let mut buffer = (header_bytes.len() as u64).to_le_bytes().to_vec();
+    buffer.extend_from_slice(&header_bytes);
+    // Declared 512 bytes of tensor data, but write none — the file is short.
+    std::fs::write(path, buffer).unwrap();
+}
+
+/// sc-6072: a truncated LoRA is rejected at adapter-classification time (the
+/// generation path's last gate before the engine) instead of reaching the MLX
+/// loader and surfacing the opaque "invalid data offsets" error.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+#[test]
+fn classify_adapter_rejects_truncated_safetensors() {
+    let dir = tempfile::tempdir().unwrap();
+    let lora_file = dir.path().join("truncated.safetensors");
+    write_truncated_lora(&lora_file);
+
+    let error = classify_adapter(&lora_file).expect_err("truncated LoRA must be rejected");
+    let message = error.to_string().to_ascii_lowercase();
+    assert!(
+        message.contains("incomplete") || message.contains("truncated"),
+        "error should name the incompleteness, got: {error}"
+    );
 }
 
 /// sc-6038: InstantID is a stock SDXL (RealVisXL) UNet, so a user-selected SDXL LoRA must resolve

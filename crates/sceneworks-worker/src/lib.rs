@@ -97,15 +97,32 @@ mod prompt_refine_jobs;
 use prompt_refine_jobs::*;
 mod downloads;
 // The DWPose skeleton rasterizer is consumed only by the macOS Z-Image strict-pose
-// control path; on other platforms it still builds + unit-tests (cross-platform
-// raster), but its items are otherwise unused — so allow dead_code off macOS.
-#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+// control path; on Mac AND the off-Mac candle DWPose lane (sc-5496) it backs the
+// `pose_jobs` skeleton render; on a candle-disabled box off Mac it still builds +
+// unit-tests (cross-platform raster) but its items are otherwise unused — so allow
+// dead_code only there.
+#[cfg_attr(
+    all(not(target_os = "macos"), not(feature = "backend-candle")),
+    allow(dead_code)
+)]
 mod openpose_skeleton;
-// DWPose pose detection via onnxruntime/CoreML (epic 3482, sc-3487). macOS-only:
-// the `ort` engine + CoreML EP only mean anything on Apple Silicon, and the Python
-// rtmlib path stays the Windows/Linux backend.
-#[cfg(target_os = "macos")]
+// DWPose pose detection via onnxruntime (epic 3482, sc-3487). On Mac the CoreML EP +
+// on the off-Mac candle GPU-worker lane the CUDA EP (sc-5496, epic 5482) run the same
+// RTMW detector in-process; on a candle-disabled box the Python rtmlib path stays the
+// Windows/Linux backend.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
 mod pose_jobs;
+// CUDA execution-provider dependency preloading for the off-Mac candle `ort` paths
+// (sc-6209, epic 5482): `ort::ep::cuda::preload_dylibs` dlopens the CUDA-12 runtime +
+// cuDNN-9 DLLs the onnxruntime CUDA EP needs, so it engages the GPU regardless of PATH
+// (the Mac CoreML path needs no equivalent). Shared by pose_jobs (DWPose, sc-5496) +
+// person_jobs (YOLO, sc-5498), and Real-ESRGAN (sc-5499) next — gated to the candle GPU
+// lane only.
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+mod ort_cuda;
 // SCRFD 5-point face-landmark extraction (epic 4422, sc-4433): native-MLX SCRFD on Mac, plus the
 // candle SCRFD/ArcFace stack on the Windows/Linux candle lane (sc-5497, epic 5482) — the same
 // InstantID face-stack detector reused in-process for the Key Point Library "extract kps from this
@@ -126,12 +143,21 @@ mod kps_jobs;
     all(not(target_os = "macos"), feature = "backend-candle")
 ))]
 mod upscale_jobs;
-// YOLO11 person detection via onnxruntime/CoreML (epic 3482, sc-3488/sc-3633).
-// macOS-only like pose_jobs: the `ort` engine + CoreML EP only mean anything on
-// Apple Silicon, and the Python Ultralytics path stays the Windows/Linux backend.
-#[cfg(target_os = "macos")]
+// YOLO11 person detection + selected-person ByteTrack tracking (epic 3482, sc-3488/sc-3633;
+// off-Mac candle lane sc-5498, epic 5482). Native-MLX YOLO11m on Mac, `ort`/CUDA on the off-Mac
+// candle GPU-worker lane (the pure-Rust ByteTrack in `person_track` is backend-neutral). So both
+// modules compile on Mac AND the candle lane; on a candle-disabled box the Python Ultralytics
+// path stays the Windows/Linux backend. Person *segmentation* (SAM masks) stays Mac-only
+// (`person_segment*` below) — off-Mac tracks are box-only; a candle SAM backport is epic 3792.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
 mod person_jobs;
-#[cfg(target_os = "macos")]
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
 mod person_track;
 // Native-MLX SAM2 person segmentation (epic 3704, sc-3709): the `mlx-gen-sam2`
 // box-prompt segmenter generates per-frame masks in `run_person_track`. macOS-only
@@ -155,7 +181,10 @@ use downloads::*;
     all(not(target_os = "macos"), feature = "backend-candle")
 ))]
 use kps_jobs::*;
-#[cfg(target_os = "macos")]
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
 use pose_jobs::*;
 #[cfg(any(
     target_os = "macos",
@@ -748,11 +777,16 @@ async fn run_utility_job(
         JobType::PersonDetect => run_person_detect_job(api, settings, http_client, &job)
             .await
             .map_err(|error| ("Person detection failed.", error)),
-        // DWPose whole-body pose detection (epic 3482, sc-3487): RTMW via
-        // onnxruntime/CoreML, replacing the Python rtmlib path on the macOS MLX
-        // worker. macOS-only; off macOS `PoseDetect` is never advertised by the Rust
-        // worker (the Python worker handles it), so this falls to the `_` arm there.
-        #[cfg(target_os = "macos")]
+        // DWPose whole-body pose detection (epic 3482, sc-3487 Mac / sc-5496 off-Mac):
+        // RTMW via onnxruntime, replacing the Python rtmlib path — CoreML EP on the
+        // macOS MLX worker, CUDA EP on the off-Mac candle GPU worker. Available on Mac
+        // AND the candle lane; on a candle-disabled box `PoseDetect` is never advertised
+        // by the Rust worker (the Python worker handles it), so this falls to the `_`
+        // arm there.
+        #[cfg(any(
+            target_os = "macos",
+            all(not(target_os = "macos"), feature = "backend-candle")
+        ))]
         JobType::PoseDetect => run_pose_detect_job(api, settings, http_client, &job)
             .await
             .map_err(|error| ("Pose detection failed.", error)),

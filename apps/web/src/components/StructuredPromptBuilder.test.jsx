@@ -16,11 +16,6 @@ function click(el) {
   el.dispatchEvent(new MouseEvent("click", { bubbles: true }));
 }
 
-function blur(el) {
-  // React 18 delegates onBlur via the bubbling `focusout` event.
-  el.dispatchEvent(new Event("focusout", { bubbles: true }));
-}
-
 describe("StructuredPromptBuilder", () => {
   let container;
   let root;
@@ -28,10 +23,10 @@ describe("StructuredPromptBuilder", () => {
 
   // Stateful wrapper so we can drive the controlled component and read back the
   // caption it builds.
-  function Harness({ initialMode = "form", initialCaption }) {
+  function Harness({ initialMode = "form", initialCaption, initialPlain = "", onMagicExpand, magicModelMissing = false, onDownloadMagicModel }) {
     const [caption, setCaption] = useState(initialCaption ?? emptyCaption());
     const [mode, setMode] = useState(initialMode);
-    const [plain, setPlain] = useState("");
+    const [plain, setPlain] = useState(initialPlain);
     const validation = validateCaption(caption, { plainText: plain });
     snap = { caption, mode, plain, validation };
     return (
@@ -43,8 +38,19 @@ describe("StructuredPromptBuilder", () => {
         onModeChange={setMode}
         plainText={plain}
         onPlainTextChange={setPlain}
+        onMagicExpand={onMagicExpand}
+        magicModelMissing={magicModelMissing}
+        onDownloadMagicModel={onDownloadMagicModel}
       />
     );
+  }
+
+  // Click + let an async handler's promise chain + state updates settle.
+  async function clickAndSettle(el) {
+    await act(async () => {
+      click(el);
+      await new Promise((r) => setTimeout(r, 0));
+    });
   }
 
   beforeEach(() => {
@@ -96,16 +102,34 @@ describe("StructuredPromptBuilder", () => {
     );
   });
 
-  it("commits a normalized palette on blur (lowercase -> uppercase, dedup)", async () => {
+  it("adds normalized swatches to an element via the palette editor", async () => {
     await mount();
     await act(async () => setValue(byPlaceholder("The scene behind"), "bg"));
     await act(async () => click(buttonByText("+ Object")));
-    const palette = byPlaceholder("#RRGGBB");
-    await act(async () => setValue(palette, "#ff0000, #00ff00 #ff0000"));
-    await act(async () => blur(palette));
+    const hex = container.querySelector('input[aria-label="Hex color"]');
+    await act(async () => setValue(hex, "#ff0000"));
+    await act(async () => click(buttonByText("Add")));
+    await act(async () => setValue(hex, "#00ff00"));
+    await act(async () => click(buttonByText("Add")));
 
     const el = snap.caption.compositional_deconstruction.elements[0];
     expect(el.color_palette).toEqual(["#FF0000", "#00FF00"]);
+  });
+
+  it("round-trips an overall/document palette into the caption JSON (sc-5996)", async () => {
+    await mount();
+    await act(async () => setValue(byPlaceholder("The scene behind"), "a calm studio"));
+    // Enable style so the document-level palette is available (the schema only
+    // allows an overall palette inside a style block with a discriminator).
+    await act(async () => click(container.querySelector('.structured-checkline input[type="checkbox"]')));
+    await act(async () => setValue(byPlaceholder("telephoto"), "studio strobe, eye-level"));
+    const hex = container.querySelector('input[aria-label="Hex color"]');
+    await act(async () => setValue(hex, "#0A2540"));
+    await act(async () => click(buttonByText("Add")));
+
+    expect(snap.validation.ok).toBe(true);
+    expect(snap.caption.style_description.color_palette).toEqual(["#0A2540"]);
+    expect(serializeCaption(snap.caption)).toContain('"color_palette": ["#0A2540"]');
   });
 
   it("shows the live ordered-JSON preview and applies raw-JSON edits", async () => {
@@ -140,6 +164,56 @@ describe("StructuredPromptBuilder", () => {
     );
     await act(async () => click(jsonTab));
     expect(snap.mode).toBe("json");
+  });
+
+  it("expands a plain idea into the editable builder via magic-prompt (sc-5997)", async () => {
+    const expanded = {
+      high_level_description: "a red fox",
+      compositional_deconstruction: { background: "snow", elements: [{ type: "obj", desc: "a red fox" }] },
+    };
+    const onMagicExpand = vi.fn(async () => expanded);
+    await mount({ initialMode: "plain", initialPlain: "a red fox in the snow", onMagicExpand });
+    await clickAndSettle(buttonByText("✨ Expand to caption"));
+
+    expect(onMagicExpand).toHaveBeenCalledWith("a red fox in the snow");
+    expect(snap.mode).toBe("form"); // dropped into the builder
+    expect(snap.caption).toEqual(expanded);
+  });
+
+  it("surfaces a magic-prompt error and stays on plain text", async () => {
+    const onMagicExpand = vi.fn(async () => {
+      throw new Error("expansion blew up");
+    });
+    await mount({ initialMode: "plain", initialPlain: "an idea", onMagicExpand });
+    await clickAndSettle(buttonByText("✨ Expand to caption"));
+
+    expect(container.querySelector(".structured-error")?.textContent).toContain("expansion blew up");
+    expect(snap.mode).toBe("plain");
+  });
+
+  it("offers a model download when the magic model is missing", async () => {
+    const onMagicExpand = vi.fn(async () => {
+      throw new Error("snapshot is not cached");
+    });
+    const onDownloadMagicModel = vi.fn(async () => ({ id: "job1" }));
+    await mount({
+      initialMode: "plain",
+      initialPlain: "an idea",
+      onMagicExpand,
+      magicModelMissing: true,
+      onDownloadMagicModel,
+    });
+    await clickAndSettle(buttonByText("✨ Expand to caption"));
+
+    const download = buttonByText("Download prompt-refiner model");
+    expect(download).toBeTruthy();
+    await clickAndSettle(download);
+    expect(onDownloadMagicModel).toHaveBeenCalled();
+  });
+
+  it("hides the magic-prompt button when no expander is provided", async () => {
+    await mount({ initialMode: "plain", initialPlain: "an idea" });
+    expect(buttonByText("✨ Expand to caption")).toBeFalsy();
   });
 
   it("reports blocking validation errors in the preview (out-of-range bbox)", async () => {
