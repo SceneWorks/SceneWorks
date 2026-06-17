@@ -15,8 +15,10 @@ use crate::contracts::JsonObject;
 const DEFAULT_MODEL: &str = "z_image_turbo";
 const DEFAULT_MODE: &str = "text_to_image";
 const DEFAULT_STYLE_PRESET: &str = "cinematic";
-const DEFAULT_FIT_MODE: &str = "crop";
-const FIT_MODES: [&str; 4] = ["crop", "pad", "outpaint", "stretch"];
+/// Default fit mode (epic 2551): never distort, cover the frame. Shared with the
+/// video request (sc-6139) so image- and video-conditioned sources normalize identically.
+pub(crate) const DEFAULT_FIT_MODE: &str = "crop";
+pub(crate) const FIT_MODES: [&str; 4] = ["crop", "pad", "outpaint", "stretch"];
 
 /// A typed image-generation request, parsed from a job payload.
 #[derive(Debug, Clone, PartialEq)]
@@ -176,7 +178,7 @@ fn object_or_empty(payload: &JsonObject, key: &str) -> JsonObject {
         .unwrap_or_default()
 }
 
-fn normalize_fit_mode(value: Option<&str>) -> String {
+pub(crate) fn normalize_fit_mode(value: Option<&str>) -> String {
     let normalized = value
         .unwrap_or(DEFAULT_FIT_MODE)
         .trim()

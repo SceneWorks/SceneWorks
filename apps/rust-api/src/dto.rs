@@ -517,6 +517,13 @@ pub(crate) struct VideoJobRequest {
     pub(crate) replacement_mode: String,
     #[serde(default)]
     pub(crate) source_asset_id: Option<String>,
+    // How the starting image is fitted to the output W×H for the image-conditioned
+    // modes (image_to_video / first_last_frame), mirroring Image Studio Edit (sc-6139):
+    // "crop" (cover, default) or "pad" (letterbox) — never distort. Threaded to the
+    // worker as-is; the worker normalizes unknown values back to crop. Outpaint is
+    // inpaint-only and not offered for video.
+    #[serde(default = "default_fit_mode")]
+    pub(crate) fit_mode: String,
     #[serde(default)]
     pub(crate) last_frame_asset_id: Option<String>,
     #[serde(default)]
@@ -586,6 +593,11 @@ pub(crate) struct ModelImportRequest {
     pub(crate) files: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) family: Option<String>,
+    /// Optional caller-supplied SHA-256 of the imported file. When present, the worker
+    /// verifies the downloaded file against it and fails on a mismatch (sc-6137). HF
+    /// repo imports are verified automatically from HF's own per-file digests.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) expected_sha256: Option<String>,
     #[serde(default, skip_deserializing, skip_serializing_if = "bool_is_false")]
     pub(crate) uploaded_source_path: bool,
 }
@@ -611,6 +623,11 @@ pub(crate) struct LoraImportRequest {
     /// the manifest entry so the loader's base-model gating can match it (sc-1955).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) base_model: Option<String>,
+    /// Optional caller-supplied SHA-256 of the imported file. When present, the worker
+    /// verifies the downloaded file against it and fails on a mismatch (sc-6137). HF
+    /// repo imports are verified automatically from HF's own per-file digests.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) expected_sha256: Option<String>,
     #[serde(default = "default_lora_scope")]
     pub(crate) scope: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]

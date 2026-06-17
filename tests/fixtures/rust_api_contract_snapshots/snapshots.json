@@ -2602,6 +2602,7 @@
       "characterId": "character_fixture",
       "characterLookId": null,
       "duration": 6,
+      "fitMode": "crop",
       "fps": 25,
       "height": 512,
       "lastFrameAssetId": null,
