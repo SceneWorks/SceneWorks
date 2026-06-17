@@ -205,6 +205,20 @@ pub(crate) const MODEL_TABLE: &[ModelRow] = &[
         default_guidance: 7.0,
         adapter_label: "mlx_sdxl",
     },
+    // RealVisXL Lightning (sc-6075) — standalone few-step *distilled* sibling of RealVisXL_V5.0.
+    // Same SDXL arch, so it shares the `sdxl` engine via a weights swap; differs only in the
+    // distilled checkpoint + the few-step recipe: ~5 steps at guidance 1.0 (CFG off). The
+    // distillation is baked into the checkpoint (no acceleration LoRA), and the worker pins the
+    // engine's `lightning` Euler-trailing sampler for this id (see `generate_stream`). txt2img only
+    // (the accel sampler is engine-incompatible with reference/img2img conditioning).
+    ModelRow {
+        sceneworks_id: "realvisxl_lightning",
+        engine_id: "sdxl",
+        default_repo: "SG161222/RealVisXL_V5.0_Lightning",
+        default_steps: 5,
+        default_guidance: 1.0,
+        adapter_label: "mlx_sdxl",
+    },
     // Kolors (epic 3090, sc-3875) — Kwai-Kolors SDXL-architecture U-Net + ChatGLM3-6B text
     // encoder + SDXL VAE, EulerDiscrete sampler. Real CFG (negative prompt + guidance 5.0).
     // Python `MODEL_TARGETS` / `KolorsDiffusersAdapter` parity: 25 steps, guidance 5.0. The engine
