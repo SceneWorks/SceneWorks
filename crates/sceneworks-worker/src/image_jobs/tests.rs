@@ -3683,9 +3683,8 @@ fn flux_ip_reference_worker_e2e() {
 // ─────────────────────────────────────────────────────────────────────────────
 
 /// Ideogram 4 resolves to its own engine + the V4_QUALITY_48 defaults, and quant resolution
-/// returns the generic Q8 default — the *effective* quant is Q4, supplied by the packed `q4/`
-/// subdir (see `ideogram_subdir_*`), so the Q8 spec is inert (the packed weights auto-detect on
-/// load). Runs in CI on Mac (no weights).
+/// returns Q4 — the manifest declares `mlx.quantize: 4` to match the packed `q4/` default subdir
+/// the model runs (sc-6237), so the recorded recipe quant is honest. Runs in CI on Mac (no weights).
 #[cfg(target_os = "macos")]
 #[test]
 fn ideogram_engine_defaults_and_quant_resolution() {
@@ -3694,17 +3693,21 @@ fn ideogram_engine_defaults_and_quant_resolution() {
     assert_eq!(model.adapter_label(), "mlx_ideogram");
     assert_eq!(model.default_steps(), 48); // V4_QUALITY_48 preset
 
+    // The catalog entry carries `mlx.quantize: 4` so the resolved quant matches the packed q4/
+    // default the model actually runs (sc-6237) — without it, resolve_quant would record the
+    // generic Q8 in the recipe.
     let req = |advanced: Value| {
-        request(
-            json!({ "projectId": "p", "model": "ideogram_4", "prompt": "p", "advanced": advanced }),
-        )
+        request(json!({
+            "projectId": "p", "model": "ideogram_4", "prompt": "p", "advanced": advanced,
+            "modelManifestEntry": { "mlx": { "quantize": 4 } },
+        }))
     };
     // Asymmetric-CFG guidance 7.0 from the model row.
     assert_eq!(resolve_guidance(&req(json!({})), &model), Some(7.0));
-    // resolve_quant: generic Q8 default; mlxQuantize selects Q4 / Q8 / bf16-dense.
+    // Default → Q4 (manifest packed default); advanced.mlxQuantize overrides to Q8 / bf16-dense.
     assert!(matches!(
         resolve_quant(&req(json!({}))),
-        (Some(Quant::Q8), Some(8))
+        (Some(Quant::Q4), Some(4))
     ));
     assert!(matches!(
         resolve_quant(&req(json!({ "mlxQuantize": 8 }))),
@@ -3783,13 +3786,17 @@ fn ideogram_raw_settings_records_recipe_and_structured_prompt() {
     let req = request(json!({
         "projectId": "p", "model": "ideogram_4", "prompt": "{}",
         "advanced": { "structuredPrompt": structured.clone() },
+        "modelManifestEntry": { "mlx": { "quantize": 4 } },
     }));
-    let raw = mlx_raw_settings(&req, "SceneWorks/ideogram-4-mlx", 48, Some(8), Some(7.0));
+    // Resolve the quant the real path would (manifest packed default → Q4, sc-6237), then record it.
+    let (_quant, quant_bits) = resolve_quant(&req);
+    let raw = mlx_raw_settings(&req, "SceneWorks/ideogram-4-mlx", 48, quant_bits, Some(7.0));
     assert_eq!(raw.get("realModelInference"), Some(&json!(true)));
     assert_eq!(raw.get("repo"), Some(&json!("SceneWorks/ideogram-4-mlx")));
     assert_eq!(raw.get("numInferenceSteps"), Some(&json!(48)));
     assert_eq!(raw.get("guidanceScale").and_then(Value::as_f64), Some(7.0));
-    assert_eq!(raw.get("mlxQuantize"), Some(&json!(8)));
+    // The recipe records the *effective* q4 — not the old generic Q8 (sc-6237).
+    assert_eq!(raw.get("mlxQuantize"), Some(&json!(4)));
     // sc-6147: the structured-prompt blob survives into rawAdapterSettings unchanged, so
     // "Use this recipe" can rehydrate the structured builder.
     assert_eq!(raw.get("structuredPrompt"), Some(&structured));
@@ -3849,14 +3856,18 @@ fn ideogram_4_real_weights_generates_caption_and_plain_images() {
     let res = env_u32("IDEOGRAM4_SMOKE_RES", 512);
 
     let model = mlx_model("ideogram_4").unwrap();
-    let req =
-        request(json!({ "projectId": "p", "model": "ideogram_4", "prompt": "p", "advanced": {} }));
-    // Q8 spec over the packed q4 weights — the exact production path (resolve_quant is generic).
+    let req = request(json!({
+        "projectId": "p", "model": "ideogram_4", "prompt": "p", "advanced": {},
+        "modelManifestEntry": { "mlx": { "quantize": 4 } },
+    }));
+    // Q4 spec matching the packed q4 weights — the exact production path (sc-6237).
     let (quant, _bits) = resolve_quant(&req);
     let guidance = resolve_guidance(&req, &model); // 7.0
 
     let generator = load_engine("ideogram_4", dir, quant, Vec::new(), None).unwrap();
     let cancel = gen_core::CancelFlag::new();
+    // No caption-upsampling for the smoke (sc-6135 is FLUX.2-dev-only; inert for Ideogram).
+    let enhance = PromptEnhance::default();
 
     // A valid Ideogram caption (required compositional_deconstruction + a high-level description),
     // and the plain-text fallback the same scene reads as.
@@ -3879,10 +3890,7 @@ fn ideogram_4_real_weights_generates_caption_and_plain_images() {
             None,
             None,
             None,
-            // sc-6135 added `generate_one`'s `enhance` param but this ideogram_4 real-weight test
-            // (cfg(macos)+ignore) missed the update — pre-existing macOS-test-compile straggler, fixed
-            // here so the worker lib test target builds (unrelated to sc-6211).
-            &PromptEnhance::default(),
+            &enhance,
             &cancel,
             &mut |p| {
                 if let gen_core::Progress::Step { current, .. } = p {
