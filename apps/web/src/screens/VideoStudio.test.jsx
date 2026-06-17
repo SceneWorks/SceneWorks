@@ -1,5 +1,6 @@
 import React, { act } from "react";
 import { createRoot } from "react-dom/client";
+import { readFileSync } from "node:fs";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 vi.mock("../api.js", async (importOriginal) => {
@@ -12,6 +13,18 @@ vi.mock("../api.js", async (importOriginal) => {
 
 import { AppContext } from "../context/AppContext.js";
 import { VideoStudio } from "./VideoStudio.jsx";
+
+const animateCharacterApiPayload = JSON.parse(
+  readFileSync(
+    "../../tests/fixtures/ui_api_contracts/video_studio_animate_character_payload.json",
+    "utf8",
+  ),
+);
+const animateCharacterStudioPayload = Object.fromEntries(
+  Object.entries(animateCharacterApiPayload).filter(
+    ([key]) => !["projectId", "projectName", "requestedGpu"].includes(key),
+  ),
+);
 
 const LTX = {
   id: "ltx_2_3",
@@ -666,12 +679,7 @@ describe("VideoStudio SCAIL-2 character animation + replacement backend", () => 
 
     expect(context.createVideoJob).toHaveBeenCalledTimes(1);
     const payload = context.createVideoJob.mock.calls[0][0];
-    expect(payload).toMatchObject({
-      mode: "animate_character",
-      model: "scail2_14b",
-      sourceClipAssetId: "vid_src",
-    });
-    expect(payload.referenceAssetIds).toEqual(["img_ref_a"]);
+    expect(payload).toMatchObject(animateCharacterStudioPayload);
   });
 
   it("offers SCAIL-2 as a replacement engine when 2+ backends can replace", async () => {

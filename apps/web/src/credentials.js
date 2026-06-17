@@ -1,4 +1,5 @@
 import { apiFetch } from "./api.js";
+import { trustedDesktopInvoke } from "./desktopTrust.js";
 
 // Service-credential transport shared by the Settings screen (where users manage
 // tokens) and the Models screen (which checks token presence for gated models).
@@ -32,7 +33,10 @@ export async function loadCredentials() {
 // Returns the updated, redacted credential list (both transports yield it).
 export async function saveCredential({ host, label, scheme, token }) {
   if (credentialsIsDesktop) {
-    return (await invoke("set_credential", { host, label, scheme, token })) ?? loadCredentials();
+    return (
+      (await trustedDesktopInvoke("set_credential", { host, label, scheme, token })) ??
+      loadCredentials()
+    );
   }
   return apiFetch("/api/v1/credentials", serverToken(), {
     method: "PUT",
@@ -42,7 +46,7 @@ export async function saveCredential({ host, label, scheme, token }) {
 
 export async function removeCredentialRequest(host) {
   if (credentialsIsDesktop) {
-    return (await invoke("delete_credential", { host })) ?? loadCredentials();
+    return (await trustedDesktopInvoke("delete_credential", { host })) ?? loadCredentials();
   }
   return apiFetch(`/api/v1/credentials/${encodeURIComponent(host)}`, serverToken(), {
     method: "DELETE",

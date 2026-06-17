@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-get-desktop-trust-nonce"
+description = "Enables the get_desktop_trust_nonce command without any pre-configured scope."
+commands.allow = ["get_desktop_trust_nonce"]
+
+[[permission]]
+identifier = "deny-get-desktop-trust-nonce"
+description = "Denies the get_desktop_trust_nonce command without any pre-configured scope."
+commands.deny = ["get_desktop_trust_nonce"]

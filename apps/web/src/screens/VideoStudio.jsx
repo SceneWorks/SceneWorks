@@ -82,6 +82,14 @@ import {
 } from "./generationStudio.jsx";
 import { ReplacePersonPanel } from "./ReplacePersonPanel.jsx";
 import { useAppContext } from "../context/AppContext.js";
+import {
+  selectGpuOptions,
+  selectJobs,
+  selectPersonReadiness,
+  selectVideoLocalJobs,
+  useJobActions,
+  useJobsSelector,
+} from "../context/JobsContext.jsx";
 import { ModelAvailabilityGate } from "../components/ModelAvailabilityGate.jsx";
 import { downloadOffersFor, videoModelUsable } from "../modelEligibility.js";
 import { PROMPT_REFINE_MODEL_ID } from "../constants.js";
@@ -126,20 +134,14 @@ export function VideoStudio() {
     createModelDownloadJob,
     deleteAsset,
     purgeAsset,
-    gpuOptions,
     latestVideoAssets,
     recentVideoAssets,
     studioLaunch,
     loras = [],
-    jobs = [],
-    videoLocalJobs = [],
-    jobAction,
-    rememberLocalGenerationJob,
     setActiveView,
     setSelectedAssetId,
     setPreviewAsset,
     personTracks = [],
-    personReadiness = {},
     presets = [],
     requestedGpu,
     saveTrackCorrections,
@@ -150,6 +152,11 @@ export function VideoStudio() {
     models = [],
     macCapabilities = DEFAULT_MAC_CAPABILITIES,
   } = useAppContext();
+  const jobs = useJobsSelector(selectJobs);
+  const videoLocalJobs = useJobsSelector(selectVideoLocalJobs);
+  const gpuOptions = useJobsSelector(selectGpuOptions);
+  const personReadiness = useJobsSelector(selectPersonReadiness);
+  const { jobAction, rememberLocalGenerationJob } = useJobActions();
   // Prompt-refinement model catalog entry (sc-5605) — drives the "download the
   // refinement model" affordance in RefinePromptControl when Refine fails because the
   // model isn't provisioned on the native worker.

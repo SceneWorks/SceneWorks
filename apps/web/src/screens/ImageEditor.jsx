@@ -3,6 +3,7 @@ import { Stage, Layer, Image as KonvaImage, Line, Rect, Transformer } from "reac
 import { apiFetch } from "../api.js";
 import { terminalStatuses } from "../jobTypes.js";
 import { useAppContext } from "../context/AppContext.js";
+import { selectJobs, useJobsSelector } from "../context/JobsContext.jsx";
 import { DEFAULT_MAC_CAPABILITIES, macFeatureBlock, macUpscaleEngineBlocked } from "../macGating.js";
 import { assetUrl, assetCanRenderAsImage } from "../components/assetMedia.jsx";
 import { DatasetAddDialog } from "../components/DatasetAddDialog.jsx";
@@ -352,13 +353,13 @@ export function ImageEditor() {
     setPreviewAsset,
     token,
     requestedGpu,
-    jobs,
     importAsset,
     purgeAsset,
     registerLeaveGuard,
     imageModels,
     macCapabilities = DEFAULT_MAC_CAPABILITIES,
   } = useAppContext();
+  const jobs = useJobsSelector(selectJobs);
   // Mac UI gating (sc-3486): the upscale tool itself runs in-process on Rust (Real-ESRGAN,
   // sc-3489), so it is available on a gated Mac — this block is a defensive guard that stays
   // null. The second engine (AuraSR) is dropped on Mac (sc-3668) and gated per-engine below.

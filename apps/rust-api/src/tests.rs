@@ -18,6 +18,10 @@ use std::time::{Duration, SystemTime};
 use tokio_stream::StreamExt;
 use tower::ServiceExt;
 
+const VIDEO_STUDIO_ANIMATE_CHARACTER_PAYLOAD: &str = include_str!(
+    "../../../tests/fixtures/ui_api_contracts/video_studio_animate_character_payload.json"
+);
+
 #[test]
 fn default_api_host_is_loopback() {
     // sc-4201 (F-API-1): an out-of-the-box bind must not expose the API to the LAN.
@@ -3174,7 +3178,72 @@ async fn image_and_video_job_routes_normalize_payloads() {
 }
 
 #[tokio::test]
-async fn bernini_video_modes_validate_required_media() {
+async fn image_edit_jobs_require_source_or_references_and_preserve_plural_references() {
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+
+    for invalid_request in [
+        json!({
+            "projectId": "project-1",
+            "mode": "edit_image",
+            "prompt": "make it dusk"
+        }),
+        json!({
+            "projectId": "project-1",
+            "mode": "edit_image",
+            "prompt": "make it dusk",
+            "sourceAssetId": "  ",
+            "referenceAssetIds": []
+        }),
+    ] {
+        let (status, error) =
+            request(app.clone(), "POST", "/api/v1/image/jobs", invalid_request).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(
+            error["detail"],
+            "edit_image requires sourceAssetId or referenceAssetIds"
+        );
+    }
+
+    let (status, multi_ref_job) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/image/jobs",
+        json!({
+            "projectId": "project-1",
+            "mode": "edit_image",
+            "prompt": "combine the references",
+            "count": 1,
+            "seed": 42,
+            "referenceAssetIds": ["ref-a", "ref-b"]
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    assert_eq!(multi_ref_job["type"], "image_edit");
+    assert_eq!(
+        multi_ref_job["payload"]["referenceAssetIds"],
+        json!(["ref-a", "ref-b"])
+    );
+
+    let job_id = multi_ref_job["id"].as_str().expect("job id").to_owned();
+    let (status, queued_jobs) =
+        request(app, "GET", "/api/v1/jobs?status=queued", Value::Null).await;
+    assert_eq!(status, StatusCode::OK);
+    let queued_job = queued_jobs
+        .as_array()
+        .expect("queued jobs array")
+        .iter()
+        .find(|job| job["id"].as_str() == Some(&job_id))
+        .expect("multi-reference edit job is queued");
+    assert_eq!(
+        queued_job["payload"]["referenceAssetIds"],
+        json!(["ref-a", "ref-b"])
+    );
+}
+
+#[tokio::test]
+async fn video_modes_validate_required_media() {
     let temp_dir = tempfile::tempdir().expect("temp dir creates");
     let app = create_app(test_settings(&temp_dir)).expect("app creates");
     request(
@@ -3184,6 +3253,65 @@ async fn bernini_video_modes_validate_required_media() {
         json!({ "name": "Bernini" }),
     )
     .await;
+
+    let animate_character_payload: Value =
+        serde_json::from_str(VIDEO_STUDIO_ANIMATE_CHARACTER_PAYLOAD)
+            .expect("shared Video Studio animate_character contract fixture parses");
+
+    // animate_character needs BOTH a driving clip and a reference character image.
+    for (field, invalid_value, expected_detail) in [
+        (
+            "sourceClipAssetId",
+            None,
+            "Animate Character requires a driving video.",
+        ),
+        (
+            "sourceClipAssetId",
+            Some(json!("  ")),
+            "Animate Character requires a driving video.",
+        ),
+        (
+            "referenceAssetIds",
+            Some(json!([])),
+            "Animate Character requires a reference character image.",
+        ),
+    ] {
+        let mut payload = animate_character_payload.clone();
+        let object = payload.as_object_mut().expect("fixture is an object");
+        if let Some(value) = invalid_value {
+            object.insert(field.to_owned(), value);
+        } else {
+            object.remove(field);
+        }
+        let (status, error) = request(app.clone(), "POST", "/api/v1/video/jobs", payload).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{field}");
+        assert_eq!(error["detail"], expected_detail, "{field}");
+    }
+
+    // The UI-submitted SCAIL-2 contract fixture is accepted at the API boundary and
+    // preserves the media fields the worker routes on.
+    let (status, animate_character_job) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/video/jobs",
+        animate_character_payload.clone(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    assert_eq!(animate_character_job["type"], "video_generate");
+    assert_eq!(
+        animate_character_job["payload"]["mode"],
+        "animate_character"
+    );
+    assert_eq!(animate_character_job["payload"]["model"], "scail2_14b");
+    assert_eq!(
+        animate_character_job["payload"]["sourceClipAssetId"],
+        animate_character_payload["sourceClipAssetId"]
+    );
+    assert_eq!(
+        animate_character_job["payload"]["referenceAssetIds"],
+        animate_character_payload["referenceAssetIds"]
+    );
 
     // video_to_video without a source clip is rejected.
     let (status, _) = request(

@@ -92,6 +92,13 @@ import {
   useGenerationStudio,
 } from "./generationStudio.jsx";
 import { useAppContext } from "../context/AppContext.js";
+import {
+  selectGpuOptions,
+  selectImageLocalJobs,
+  selectJobs,
+  useJobActions,
+  useJobsSelector,
+} from "../context/JobsContext.jsx";
 import { ModelAvailabilityGate } from "../components/ModelAvailabilityGate.jsx";
 import { downloadOffersFor, imageModelUsable } from "../modelEligibility.js";
 import { PROMPT_REFINE_MODEL_ID } from "../constants.js";
@@ -265,18 +272,13 @@ export function ImageStudio() {
     createModelDownloadJob,
     deleteAsset,
     purgeAsset,
-    gpuOptions,
     imageModels,
     models = [],
-    jobs = [],
     importAsset,
     latestImageAssets,
     recentImageAssets,
     studioLaunch,
-    imageLocalJobs = [],
     loras = [],
-    jobAction,
-    rememberLocalGenerationJob,
     setActiveView,
     setPreviewAsset,
     presets = [],
@@ -286,6 +288,10 @@ export function ImageStudio() {
     updateAssetStatus,
     macCapabilities = DEFAULT_MAC_CAPABILITIES,
   } = useAppContext();
+  const jobs = useJobsSelector(selectJobs);
+  const imageLocalJobs = useJobsSelector(selectImageLocalJobs);
+  const gpuOptions = useJobsSelector(selectGpuOptions);
+  const { jobAction, rememberLocalGenerationJob } = useJobActions();
   // Prompt-refinement model catalog entry (sc-5605) — drives the "download the
   // refinement model" affordance in RefinePromptControl when Refine fails because the
   // model isn't provisioned on the native worker.
@@ -590,6 +596,19 @@ export function ImageStudio() {
   // multi-select reference picker (plural `referenceAssetIds`) instead of the single source picker.
   // FLUX.2-dev only (its DiT sequence-gated chunking keeps the multi-reference edit under 96 GB).
   const multiReference = Boolean(selectedModel?.ui?.multiReference);
+  const usableReferenceAssetIds = useMemo(
+    () => referenceAssetIds.filter((id) => String(id ?? "").trim()),
+    [referenceAssetIds],
+  );
+  const editInputMissingMessage = useMemo(() => {
+    if (mode !== "edit_image") {
+      return "";
+    }
+    if (multiReference) {
+      return usableReferenceAssetIds.length ? "" : "Select at least one reference image before generating.";
+    }
+    return String(sourceAssetId ?? "").trim() ? "" : "Select a source image before generating.";
+  }, [mode, multiReference, sourceAssetId, usableReferenceAssetIds]);
   // Mac UI gating (sc-3486): disable the per-model feature controls the selected model can't run
   // in the Rust/MLX flow on Mac, so the user never reaches a `mlx_unsupported` error after submit.
   const macEditBlock = macModelFeatureBlock(selectedModel, macCapabilities, "edit");
@@ -1112,6 +1131,9 @@ export function ImageStudio() {
     if (submitting) {
       return;
     }
+    if (editInputMissingMessage) {
+      return;
+    }
     setSubmitting(true);
     try {
       // Pose library: when poses are selected, the job emits one image per pose
@@ -1142,7 +1164,7 @@ export function ImageStudio() {
         // Only sent in edit_image mode for a multiReference model; the worker routes a non-empty list
         // to Conditioning::MultiReference (one image ⇒ a normal single-reference edit).
         referenceAssetIds:
-          mode === "edit_image" && multiReference && referenceAssetIds.length ? referenceAssetIds : undefined,
+          mode === "edit_image" && multiReference && usableReferenceAssetIds.length ? usableReferenceAssetIds : undefined,
         // Fit mode applies to edits only; coerced so a stale "outpaint" never reaches a
         // non-inpaint model (epic 2551). Omitted for non-edit modes (worker default crop).
         fitMode: mode === "edit_image" ? effectiveFitMode(fitMode, editInpaintCapable) : undefined,
@@ -1238,6 +1260,7 @@ export function ImageStudio() {
     // Structured models gate on a valid, non-empty caption; everyone else on a
     // non-empty prompt. (Plain-text fallback falls through to the prompt check.)
     (structuredActive ? !captionValidation?.ok || !captionHasContent : !prompt.trim()) ||
+    Boolean(editInputMissingMessage) ||
     (mode === "character_image" && !characterId) ||
     Boolean(macActiveModeBlock) ||
     !presetValidationResult.ok ||
@@ -1392,6 +1415,7 @@ export function ImageStudio() {
                   onChange={setFitMode}
                   inpaintCapable={editInpaintCapable}
                 />
+                {editInputMissingMessage ? <p className="inline-warning">{editInputMissingMessage}</p> : null}
               </>
             ) : null}
 

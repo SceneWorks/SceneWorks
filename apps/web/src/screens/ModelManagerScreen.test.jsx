@@ -66,6 +66,8 @@ describe("ModelManagerScreen gated-model notice", () => {
     setActiveView = vi.fn();
     invoke = vi.fn(async (command) => {
       switch (command) {
+        case "get_desktop_trust_nonce":
+          return "test-trust-nonce";
         case "get_gpu_info":
           return { platform: "windows", devices: [] };
         case "list_credentials":

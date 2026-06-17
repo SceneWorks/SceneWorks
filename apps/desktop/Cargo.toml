@@ -13,6 +13,7 @@ publish = false
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
+getrandom = "0.3"
 keyring = { version = "3", features = ["apple-native", "windows-native", "sync-secret-service"] }
 # In-app session log buffer (sc-3451): shared LogEntry/SessionLog types.
 sceneworks-core = { path = "../../crates/sceneworks-core" }

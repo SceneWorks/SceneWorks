@@ -1,5 +1,6 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useAppContext } from "../context/AppContext.js";
+import { selectGpuOptions, selectJobs, useJobsSelector } from "../context/JobsContext.jsx";
 import { ModelAvailabilityGate } from "../components/ModelAvailabilityGate.jsx";
 import { downloadOffersFor } from "../modelEligibility.js";
 import { DEFAULT_MAC_CAPABILITIES, macTrainingKernelBlocked } from "../macGating.js";
@@ -28,7 +29,6 @@ import {
   configDraftFromTarget,
   configFieldLabels,
   configValidation,
-  defaultGpuOptions,
   defaultOptimizerOptions,
   defaultPresetForTarget,
   lrSchedulerOptions,
@@ -277,8 +277,6 @@ export function TrainingStudio({ mode = "training" } = {}) {
     authenticated = true,
     assets = [],
     characters = [],
-    gpuOptions = defaultGpuOptions,
-    jobs = [],
     setPreviewAsset,
     importAsset: importAssetRaw,
     trainingDatasets = [],
@@ -303,6 +301,8 @@ export function TrainingStudio({ mode = "training" } = {}) {
     createModelDownloadJob,
     macCapabilities = DEFAULT_MAC_CAPABILITIES,
   } = useAppContext();
+  const gpuOptions = useJobsSelector(selectGpuOptions);
+  const jobs = useJobsSelector(selectJobs);
   const datasets = useMemo(
     () => (trainingDatasetsProjectId === activeProject?.id ? trainingDatasets : []),
     [activeProject?.id, trainingDatasets, trainingDatasetsProjectId],

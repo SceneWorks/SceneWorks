@@ -3551,6 +3551,19 @@ label {
   font-size: 13px;
 }
 
+.library-load-state {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--gap-2);
+  align-items: center;
+  font-size: 13px;
+}
+
+.asset-load-note {
+  margin: 0;
+  color: var(--text-muted);
+}
+
 .asset-tile,
 .review-card,
 .asset-detail,

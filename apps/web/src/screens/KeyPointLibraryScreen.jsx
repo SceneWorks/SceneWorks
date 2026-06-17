@@ -1,6 +1,7 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { apiFetch } from "../api.js";
 import { useAppContext } from "../context/AppContext.js";
+import { selectJobs, useJobsSelector } from "../context/JobsContext.jsx";
 import { terminalStatuses } from "../jobTypes.js";
 import { KpsOverlay } from "../components/KpsOverlay.jsx";
 import { DatasetAddDialog } from "../components/DatasetAddDialog.jsx";
@@ -117,7 +118,8 @@ function KeypointLibraryPanel({ hidden, presets, loading, error, onDelete }) {
 // (asset picks are re-fetched and staged the same as an upload), and the saved preset retains
 // its own copy of the source image.
 function KeypointCapturePanel({ hidden, onSaved }) {
-  const { token, requestedGpu, jobs = [], assets = [], characters = [] } = useAppContext();
+  const { token, requestedGpu, assets = [], characters = [] } = useAppContext();
+  const jobs = useJobsSelector(selectJobs);
   const [source, setSource] = useState(null); // { path, displayName, previewUrl, sourceAssetId? }
   const [phase, setPhase] = useState("idle"); // idle | extracting | review
   const [jobId, setJobId] = useState(null);

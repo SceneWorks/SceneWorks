@@ -15,6 +15,7 @@ import { assetMatchesCharacter } from "../components/DatasetAddDialog.jsx";
 import { extractFamilies } from "../presetUtils.js";
 import { loadStudioSettings, useStudioSettingsWriter } from "../hooks/useStudioSettings.js";
 import { useAppContext } from "../context/AppContext.js";
+import { selectImageLocalJobs, selectJobs, useJobActions, useJobsSelector } from "../context/JobsContext.jsx";
 import { ModelAvailabilityGate } from "../components/ModelAvailabilityGate.jsx";
 import { angleModelUsable, downloadOffersFor, poseModelUsable } from "../modelEligibility.js";
 import { DEFAULT_MAC_CAPABILITIES, macAvailableModels } from "../macGating.js";
@@ -64,15 +65,11 @@ export function CharacterStudio() {
     createImageJob,
     createModelDownloadJob,
     importAsset,
-    imageLocalJobs,
-    jobAction,
-    rememberLocalGenerationJob,
     setActiveView,
     deleteAsset,
     purgeAsset,
     imageModels,
     models = [],
-    jobs = [],
     latestImageAssets,
     loras,
     setPreviewAsset,
@@ -85,6 +82,9 @@ export function CharacterStudio() {
     openDatasetInLibrary,
     macCapabilities = DEFAULT_MAC_CAPABILITIES,
   } = useAppContext();
+  const jobs = useJobsSelector(selectJobs);
+  const imageLocalJobs = useJobsSelector(selectImageLocalJobs);
+  const { jobAction, rememberLocalGenerationJob } = useJobActions();
   const latestAssets = latestImageAssets;
   // Mac UI gating (sc-3486): hide torch-only models from the angle/pose/test pickers.
   const macImageModels = useMemo(

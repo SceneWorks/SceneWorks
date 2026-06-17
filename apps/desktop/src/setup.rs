@@ -13,7 +13,7 @@ use std::time::{Duration, Instant};
 
 use sceneworks_core::session_log::{LogEntry, LogQuery, SessionLog};
 use serde::{Deserialize, Serialize};
-use tauri::{AppHandle, Emitter, Manager};
+use tauri::{AppHandle, Emitter, Manager, Url, WebviewWindow};
 use tauri_plugin_shell::process::{CommandChild, CommandEvent};
 use tauri_plugin_shell::ShellExt;
 
@@ -52,6 +52,24 @@ pub fn get_session_logs(
 #[cfg(not(target_os = "macos"))]
 const SETUP_VERSION: &str = "3";
 const HEALTH_TIMEOUT: Duration = Duration::from_secs(30);
+const TRUST_NONCE_BYTES: usize = 32;
+const TRUSTED_SIDECAR_PERMISSIONS: &[&str] = &[
+    "core:default",
+    "allow-get-desktop-trust-nonce",
+    "allow-get-session-logs",
+    "allow-get-app-settings",
+    "allow-get-storage-setup",
+    "allow-complete-setup",
+    "allow-reset-setup",
+    "allow-choose-data-dir",
+    "allow-set-data-dir",
+    "allow-reveal-in-os",
+    "allow-list-credentials",
+    "allow-set-credential",
+    "allow-delete-credential",
+    "allow-restart-worker",
+    "allow-get-gpu-info",
+];
 
 /// Lens sidecar venv torch stack. Same versions on every platform; only the
 /// install index differs (see `provision_lens_venv`): macOS pulls the default
@@ -87,6 +105,10 @@ pub struct Managed {
     pub cred_ipc: Mutex<Option<crate::cred_ipc::CredIpc>>,
     /// OS-assigned API port, discovered from the sidecar's startup line.
     api_port: Mutex<Option<u16>>,
+    /// Exact API-served UI origin trusted after the sidecar health gate passes.
+    trusted_ui_origin: Mutex<Option<String>>,
+    /// Per-launch secret that sensitive remote commands must echo back.
+    trust_nonce: Mutex<Option<String>>,
     /// PIDs of the spawned sidecars, persisted to disk so an unclean exit
     /// (crash/force-quit) doesn't leave them orphaned — the next launch reaps
     /// any survivors before spawning fresh ones.
@@ -517,6 +539,130 @@ fn health_is_sceneworks(port: u16) -> bool {
     ok_status
         && response.contains("\"service\":\"sceneworks-api\"")
         && response.contains("\"runtime\":\"rust\"")
+}
+
+fn random_hex(bytes_len: usize) -> Result<String, String> {
+    let mut bytes = vec![0_u8; bytes_len];
+    getrandom::fill(&mut bytes).map_err(|error| format!("generate trust nonce: {error}"))?;
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut encoded = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        encoded.push(HEX[(byte >> 4) as usize] as char);
+        encoded.push(HEX[(byte & 0x0f) as usize] as char);
+    }
+    Ok(encoded)
+}
+
+fn ensure_trust_nonce(app: &AppHandle) -> Result<String, String> {
+    let state = app.state::<Managed>();
+    let mut nonce = state.trust_nonce.lock().expect("trust nonce lock");
+    if let Some(existing) = nonce.as_ref() {
+        return Ok(existing.clone());
+    }
+    let generated = random_hex(TRUST_NONCE_BYTES)?;
+    *nonce = Some(generated.clone());
+    Ok(generated)
+}
+
+fn origin_for_url(url: &Url) -> Option<String> {
+    let host = url.host_str()?;
+    let port = url.port_or_known_default()?;
+    Some(format!("{}://{}:{port}", url.scheme(), host))
+}
+
+fn url_matches_trusted_origin(url: &Url, trusted_origin: &str) -> bool {
+    origin_for_url(url).as_deref() == Some(trusted_origin)
+}
+
+fn validate_trusted_command_context(
+    current_url: &Url,
+    trusted_origin: Option<&str>,
+    expected_nonce: Option<&str>,
+    supplied_nonce: &str,
+) -> Result<(), String> {
+    let trusted_origin =
+        trusted_origin.ok_or_else(|| "Trusted desktop UI origin is not established.".to_owned())?;
+    if !url_matches_trusted_origin(current_url, trusted_origin) {
+        return Err("Command is only available to the verified SceneWorks UI.".to_owned());
+    }
+    let expected_nonce = expected_nonce
+        .ok_or_else(|| "Desktop command trust nonce is not established.".to_owned())?;
+    if supplied_nonce != expected_nonce {
+        return Err("Invalid desktop command trust nonce.".to_owned());
+    }
+    Ok(())
+}
+
+fn current_webview_url(webview: &WebviewWindow) -> Result<Url, String> {
+    webview
+        .url()
+        .map_err(|error| format!("read webview URL: {error}"))
+}
+
+pub fn require_trusted_webview(app: &AppHandle, webview: &WebviewWindow) -> Result<(), String> {
+    let current_url = current_webview_url(webview)?;
+    let trusted_origin = app
+        .state::<Managed>()
+        .trusted_ui_origin
+        .lock()
+        .expect("trusted UI origin lock")
+        .clone()
+        .ok_or_else(|| "Trusted desktop UI origin is not established.".to_owned())?;
+    if url_matches_trusted_origin(&current_url, &trusted_origin) {
+        Ok(())
+    } else {
+        Err("Command is only available to the verified SceneWorks UI.".to_owned())
+    }
+}
+
+pub fn require_trusted_nonce(
+    app: &AppHandle,
+    webview: &WebviewWindow,
+    supplied_nonce: &str,
+) -> Result<(), String> {
+    let current_url = current_webview_url(webview)?;
+    let state = app.state::<Managed>();
+    let trusted_origin = state
+        .trusted_ui_origin
+        .lock()
+        .expect("trusted UI origin lock")
+        .clone();
+    let expected_nonce = state.trust_nonce.lock().expect("trust nonce lock").clone();
+    validate_trusted_command_context(
+        &current_url,
+        trusted_origin.as_deref(),
+        expected_nonce.as_deref(),
+        supplied_nonce,
+    )
+}
+
+fn install_trusted_sidecar_capability(app: &AppHandle, port: u16) -> Result<String, String> {
+    let origin = format!("http://127.0.0.1:{port}");
+    ensure_trust_nonce(app)?;
+    let mut capability = tauri::ipc::CapabilityBuilder::new(format!("trusted-sidecar-{port}"))
+        .local(false)
+        .window("main")
+        .remote(origin.clone());
+    for permission in TRUSTED_SIDECAR_PERMISSIONS {
+        capability = capability.permission(*permission);
+    }
+    app.add_capability(capability)
+        .map_err(|error| format!("install trusted sidecar capability: {error}"))?;
+    app.state::<Managed>()
+        .trusted_ui_origin
+        .lock()
+        .expect("trusted UI origin lock")
+        .replace(origin.clone());
+    Ok(origin)
+}
+
+/// App-issued nonce for steady-state desktop commands. The command itself is only
+/// granted to the exact sidecar origin after `health_is_sceneworks` passes; this
+/// returns the per-launch nonce that sensitive commands must echo back.
+#[tauri::command]
+pub fn get_desktop_trust_nonce(app: AppHandle, webview: WebviewWindow) -> Result<String, String> {
+    require_trusted_webview(&app, &webview)?;
+    ensure_trust_nonce(&app)
 }
 
 /// Run the bundled `uv` with the given args, streaming output to setup-status
@@ -1036,7 +1182,14 @@ fn gate_window(app: AppHandle) {
                 .expect("api port lock");
             if let Some(port) = port {
                 if health_is_sceneworks(port) {
-                    if let Ok(url) = format!("http://127.0.0.1:{port}").parse() {
+                    let origin = match install_trusted_sidecar_capability(&app, port) {
+                        Ok(origin) => origin,
+                        Err(error) => {
+                            emit(&app, "error", error, true);
+                            return;
+                        }
+                    };
+                    if let Ok(url) = origin.parse() {
                         if let Some(window) = app.get_webview_window("main") {
                             let _ = window.navigate(url);
                         }
@@ -1972,6 +2125,58 @@ pub async fn start_setup(app: AppHandle) {
     app.state::<Managed>()
         .running
         .store(false, Ordering::SeqCst);
+}
+
+#[cfg(test)]
+mod trust_tests {
+    use super::{origin_for_url, validate_trusted_command_context};
+    use tauri::Url;
+
+    #[test]
+    fn trusted_origin_matches_sidecar_routes_but_not_other_ports() {
+        let sidecar: Url = "http://127.0.0.1:49152/projects/abc?tab=models"
+            .parse()
+            .unwrap();
+        assert_eq!(
+            origin_for_url(&sidecar).as_deref(),
+            Some("http://127.0.0.1:49152")
+        );
+        assert!(validate_trusted_command_context(
+            &sidecar,
+            Some("http://127.0.0.1:49152"),
+            Some("nonce"),
+            "nonce",
+        )
+        .is_ok());
+
+        let other_port: Url = "http://127.0.0.1:49153/projects/abc".parse().unwrap();
+        assert!(validate_trusted_command_context(
+            &other_port,
+            Some("http://127.0.0.1:49152"),
+            Some("nonce"),
+            "nonce",
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn trusted_context_rejects_missing_or_invalid_nonce() {
+        let sidecar: Url = "http://127.0.0.1:49152/".parse().unwrap();
+        assert!(validate_trusted_command_context(
+            &sidecar,
+            Some("http://127.0.0.1:49152"),
+            Some("nonce"),
+            "wrong",
+        )
+        .is_err());
+        assert!(validate_trusted_command_context(
+            &sidecar,
+            Some("http://127.0.0.1:49152"),
+            None,
+            "nonce",
+        )
+        .is_err());
+    }
 }
 
 #[cfg(all(test, target_os = "windows"))]

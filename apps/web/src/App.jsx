@@ -1,12 +1,12 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { apiFetch, eventUrl, isAbortError } from "./api.js";
+import { apiFetch, isAbortError } from "./api.js";
 import { Icon } from "./components/Icons.jsx";
 import { Logo } from "./components/Logo.jsx";
 import { StatusDot } from "./components/StatusDot.jsx";
 import { PreviewOverlay } from "./components/PreviewOverlay.jsx";
-import { fallbackModels, terminalStatuses } from "./constants.js";
+import { fallbackModels } from "./constants.js";
 import { editModelForAsset } from "./presetUtils.js";
-import { sortNewest, sortOldest, sortWorkers } from "./sorters.js";
+import { sortNewest } from "./sorters.js";
 import { useCharacters } from "./hooks/useCharacters.js";
 import { usePresets } from "./hooks/usePresets.js";
 import { useTraining } from "./hooks/useTraining.js";
@@ -26,13 +26,23 @@ import {
   RouteFallback,
 } from "./routes.jsx";
 import { persistUiMode, readStoredUiMode } from "./uiMode.js";
+import { trustedDesktopInvoke } from "./desktopTrust.js";
+import {
+  JobsEventBridge,
+  JobsProvider,
+  selectGpuOptions,
+  selectJobs,
+  selectQueueCounts,
+  selectVisibleWorkers,
+  useJobsSelector,
+} from "./context/JobsContext.jsx";
+import { createJobsStore } from "./jobs/jobStore.js";
 import {
   dropUpscaledVariants,
   findFoldedAssetById,
   foldUpscaledAssetVariants,
   restrictFoldedToScope,
 } from "./assetVariants.js";
-import { buildWorkersById } from "./workers.js";
 
 // Desktop (Tauri) shell detection. The first-run setup wizard is desktop-only;
 // web/Docker keep the existing first-run project gate. Tauri commands persist the
@@ -46,10 +56,20 @@ const AUTH_LOCKED = "locked";
 const AUTH_VERIFYING = "verifying";
 const AUTH_AUTHENTICATED = "authenticated";
 const DEFAULT_ASSET_PAGE_LIMIT = 200;
+const ASSET_STATUS_KEYS = ["active", "trashed", "rejected"];
 
 const SetupWizard = React.lazy(() =>
   import("./screens/SetupWizard.jsx").then((module) => ({ default: module.SetupWizard })),
 );
+
+class AssetPageFetchError extends Error {
+  constructor(pageNumber, cause) {
+    super(`page ${pageNumber}: ${cause.message}`);
+    this.name = "AssetPageFetchError";
+    this.pageNumber = pageNumber;
+    this.cause = cause;
+  }
+}
 
 function mergeAssetsById(current, incoming) {
   const merged = new Map(current.map((asset) => [asset.id, asset]));
@@ -59,55 +79,53 @@ function mergeAssetsById(current, incoming) {
   return [...merged.values()].sort((a, b) => (b.createdAt ?? "").localeCompare(a.createdAt ?? ""));
 }
 
+function replaceActiveProjectAssets(current, incoming, projectId) {
+  const discardedFromProject = current.filter(
+    (asset) => asset.projectId === projectId && (asset.status?.trashed || asset.status?.rejected),
+  );
+  return mergeAssetsById(discardedFromProject, incoming);
+}
+
 function assetItems(response) {
   return Array.isArray(response) ? response : response?.items ?? [];
 }
 
-function isActiveWorker(worker) {
-  return worker.status !== "offline";
+function normalizeAssetPage(response) {
+  const rawCursor = Array.isArray(response) ? null : response?.nextCursor;
+  return {
+    items: assetItems(response),
+    nextCursor: rawCursor === undefined || rawCursor === null || rawCursor === "" ? null : String(rawCursor),
+  };
 }
 
-function hasCapability(worker, capability) {
-  return Array.isArray(worker.capabilities) && worker.capabilities.includes(capability);
+function createAssetPaginationStatus() {
+  return Object.fromEntries(
+    ASSET_STATUS_KEYS.map((status) => [
+      status,
+      {
+        loading: false,
+        loaded: false,
+        error: "",
+        itemCount: 0,
+        pageCount: 0,
+        nextCursor: null,
+      },
+    ]),
+  );
 }
 
-function isPlaceholderOnlyGpuWorker(worker) {
-  if (!hasCapability(worker, "gpu")) {
-    return false;
+function assetStatusLabel(status) {
+  if (status === "trashed") {
+    return "trashed assets";
   }
-  const capabilities = Array.isArray(worker.capabilities) ? worker.capabilities : [];
-  return capabilities.every((capability) => ["placeholder", "gpu", "nvidia"].includes(capability));
-}
-
-function isSelectableGpuWorker(worker) {
-  return worker.gpuId && worker.gpuId !== "cpu" && hasCapability(worker, "gpu") && !isPlaceholderOnlyGpuWorker(worker);
-}
-
-function failedJobNotice(job) {
-  const label = String(job.type ?? "job").replaceAll("_", " ");
-  const detail = job.error || job.message || "Failed without additional worker detail.";
-  return `${label}: ${detail}`;
-}
-
-function isImageGenerationJob(job) {
-  return ["image_generate", "image_edit"].includes(job.type);
-}
-
-function isVideoGenerationJob(job) {
-  return ["video_generate", "video_extend", "video_bridge"].includes(job.type);
-}
-
-function isInterleaveJob(job) {
-  return job.type === "image_interleave";
-}
-
-function parseSseJson(event, label) {
-  try {
-    return JSON.parse(event.data);
-  } catch (err) {
-    console.warn(`Ignoring malformed ${label} SSE event`, err);
-    return null;
+  if (status === "rejected") {
+    return "rejected assets";
   }
+  return "active assets";
+}
+
+function assetStatusLoadError(status, err) {
+  return `Could not load all ${assetStatusLabel(status)} (${err.message}).`;
 }
 
 function abortableDelay(ms, signal) {
@@ -125,73 +143,6 @@ function abortableDelay(ms, signal) {
       { once: true },
     );
   });
-}
-
-// sc-4198: notice kind for a job-failure banner. LoRA import/train failures get
-// their own kind so the matching job's later completion dismisses exactly that
-// banner (replacing the old "lora import:"/"lora training:" startsWith protocol);
-// everything else is a general error.
-function noticeKindForJob(job) {
-  if (job?.type === "lora_import") return "lora-import";
-  if (job?.type === "lora_train") return "lora-train";
-  return "general";
-}
-
-function jobFreshnessMs(job) {
-  const timestamp = job?.updatedAt ?? job?.completedAt ?? job?.canceledAt ?? job?.startedAt ?? job?.createdAt;
-  const parsed = Date.parse(timestamp ?? "");
-  return Number.isFinite(parsed) ? parsed : 0;
-}
-
-function mergeFreshJobs(currentJobs, serverJobs) {
-  const merged = new Map();
-  for (const job of serverJobs) {
-    merged.set(job.id, job);
-  }
-  for (const current of currentJobs) {
-    const server = merged.get(current.id);
-    if (!server || jobFreshnessMs(current) > jobFreshnessMs(server)) {
-      merged.set(current.id, current);
-    }
-  }
-  return [...merged.values()].sort(sortNewest);
-}
-
-function generatedResultAssetCount(job) {
-  if (Array.isArray(job.result?.assetIds)) {
-    return job.result.assetIds.length;
-  }
-  if (Array.isArray(job.result?.assets)) {
-    return job.result.assets.length;
-  }
-  return 0;
-}
-
-// Studios stack every running and queued run (plus the most recent finished run
-// until its successor starts), so a new submission no longer evicts the prior
-// progress card. Capped so a long session can't grow the visible stack unbounded.
-const localJobStackLimit = 25;
-
-// Build a studio's local-job stack: the runs it explicitly remembered plus any
-// still-active generation jobs for the open project, de-duped and ordered
-// oldest-first (running run on top, queued runs following in execution order),
-// keeping only the most recent `localJobStackLimit` entries.
-function buildLocalJobStack(rememberedIds, jobs, activeProjectId, isGenerationJob) {
-  const remembered = rememberedIds.map((id) => jobs.find((job) => job.id === id)).filter(Boolean);
-  const projectJobs = jobs.filter(
-    (job) =>
-      activeProjectId &&
-      job.projectId === activeProjectId &&
-      isGenerationJob(job) &&
-      !terminalStatuses.has(job.status),
-  );
-  const byId = new Map();
-  [...remembered, ...projectJobs].forEach((job) => {
-    if (job?.id && !byId.has(job.id)) {
-      byId.set(job.id, job);
-    }
-  });
-  return Array.from(byId.values()).sort(sortOldest).slice(-localJobStackLimit);
 }
 
 function readStoredTheme() {
@@ -407,6 +358,44 @@ function FirstRunProjectGate({ onCreate, disabled }) {
   );
 }
 
+function QueueNavPulse() {
+  const queueCounts = useJobsSelector(selectQueueCounts);
+  return queueCounts.active > 0 ? <span aria-hidden="true" className="nav-pulse" /> : null;
+}
+
+function WorkerStatusPill() {
+  const visibleWorkers = useJobsSelector(selectVisibleWorkers);
+  return (
+    <span className="status-pill">
+      <span className={visibleWorkers.length ? "dot" : "dot idle"} />
+      {visibleWorkers.length ? `${visibleWorkers.length} worker${visibleWorkers.length === 1 ? "" : "s"}` : "No workers"}
+    </span>
+  );
+}
+
+function GpuStatusPill() {
+  const gpuOptions = useJobsSelector(selectGpuOptions);
+  return (
+    <span className="status-pill">
+      {gpuOptions.length > 1 ? `${gpuOptions.length - 1} GPU slot${gpuOptions.length === 2 ? "" : "s"}` : "GPU auto"}
+    </span>
+  );
+}
+
+function QueueChip({ onClick }) {
+  const queueCounts = useJobsSelector(selectQueueCounts);
+  return (
+    <button className="queue-chip" onClick={onClick} type="button">
+      Queue {queueCounts.active}
+    </button>
+  );
+}
+
+function SetupWizardWithJobs(props) {
+  const jobs = useJobsSelector(selectJobs);
+  return <SetupWizard jobs={jobs} {...props} />;
+}
+
 export function App() {
   const [health, setHealth] = useState(null);
   const [access, setAccess] = useState(null);
@@ -425,10 +414,8 @@ export function App() {
   const [activeProject, setActiveProject] = useState(null);
   const [uiMode, setUiMode] = useState(readStoredUiMode);
   const [activeView, setActiveView] = useState(() => getInitialViewForMode(readStoredUiMode()));
-  const [jobs, setJobs] = useState([]);
-  const [localGenerationJobIds, setLocalGenerationJobIds] = useState({ image: [], video: [], document: [] });
-  const [workers, setWorkers] = useState([]);
-  const [queueSummary, setQueueSummary] = useState(null);
+  const [jobsStore] = useState(() => createJobsStore());
+  const jobStoreActions = jobsStore.actions;
   // Mac UI gating (sc-3486): inert until the capabilities endpoint reports macGatingActive.
   const [macCapabilities, setMacCapabilities] = useState(DEFAULT_MAC_CAPABILITIES);
   const [trainingTargets, setTrainingTargets] = useState({ schemaVersion: 1, targets: [] });
@@ -436,11 +423,10 @@ export function App() {
   const [trainingTargetsError, setTrainingTargetsError] = useState("");
   const [trainingPresetsError, setTrainingPresetsError] = useState("");
   const [assets, setAssets] = useState([]);
+  const [assetPaginationStatus, setAssetPaginationStatus] = useState(createAssetPaginationStatus);
   const discardedAssetsLoadedForProjectRef = useRef(null);
   const [selectedAssetId, setSelectedAssetId] = useState(null);
-  const [projectFilter, setProjectFilter] = useState("all");
   const [requestedGpu, setRequestedGpu] = useState("auto");
-  const [jobPrompt, setJobPrompt] = useState("Placeholder generation");
   const [latestGenerationSetId, setLatestGenerationSetId] = useState(null);
   const [previewAsset, setPreviewAsset] = useState(null);
   // The collection the fullscreen preview was launched from, as an ordered list
@@ -561,8 +547,6 @@ export function App() {
   }, []);
   const activeProjectRef = useRef(null);
   const activeViewRef = useRef(activeView);
-  const localGenerationJobIdsRef = useRef(localGenerationJobIds);
-  const generatedAssetRefreshesRef = useRef(new Map());
   const refreshDataRef = useRef(null);
   const refreshAssetsRef = useRef(null);
   const refreshCharactersRef = useRef(null);
@@ -613,7 +597,7 @@ export function App() {
         if (navigateToQueue) {
           setActiveView("Queue");
         }
-        setJobs((items) => [job, ...items.filter((item) => item.id !== job.id)].sort(sortNewest));
+        jobStoreActions.upsertJob(job);
         setError("");
         return job;
       } catch (err) {
@@ -621,7 +605,7 @@ export function App() {
         return null;
       }
     },
-    [token, activeProject, requestedGpu, setError],
+    [token, activeProject, requestedGpu, setError, jobStoreActions],
   );
 
   const {
@@ -672,7 +656,7 @@ export function App() {
     writeTrainingDatasetCaptionSidecars,
     createTrainingDatasetCaptionJob,
     createTrainingJob,
-  } = useTraining({ token, activeProject, setError, setJobs });
+  } = useTraining({ token, activeProject, setError, setJobs: jobStoreActions.setJobs });
 
   const {
     models,
@@ -691,7 +675,7 @@ export function App() {
     token,
     activeProject,
     setError,
-    setJobs,
+    setJobs: jobStoreActions.setJobs,
     setActiveView,
     refreshData,
     refreshDataWithLoraOverlay,
@@ -804,69 +788,6 @@ export function App() {
         .slice(0, 20),
     [assets, activeProject?.id],
   );
-  const imageLocalJobs = useMemo(
-    () => buildLocalJobStack(localGenerationJobIds.image, jobs, activeProject?.id, isImageGenerationJob),
-    [activeProject?.id, jobs, localGenerationJobIds.image],
-  );
-  const videoLocalJobs = useMemo(
-    () => buildLocalJobStack(localGenerationJobIds.video, jobs, activeProject?.id, isVideoGenerationJob),
-    [activeProject?.id, jobs, localGenerationJobIds.video],
-  );
-  const documentLocalJobs = useMemo(
-    () => buildLocalJobStack(localGenerationJobIds.document, jobs, activeProject?.id, isInterleaveJob),
-    [activeProject?.id, jobs, localGenerationJobIds.document],
-  );
-  const queueCounts = useMemo(() => {
-    if (queueSummary?.counts) {
-      return {
-        ...queueSummary.counts,
-        active: queueSummary.activeJobs?.length ?? jobs.filter((job) => !terminalStatuses.has(job.status)).length,
-      };
-    }
-    return jobs.reduce(
-      (counts, job) => {
-        counts[job.status] = (counts[job.status] ?? 0) + 1;
-        if (!terminalStatuses.has(job.status)) {
-          counts.active += 1;
-        }
-        return counts;
-      },
-      { active: 0 },
-    );
-  }, [jobs, queueSummary]);
-  const filteredJobs = useMemo(() => {
-    if (projectFilter === "all") {
-      return jobs;
-    }
-    return jobs.filter((job) => job.projectId === projectFilter);
-  }, [jobs, projectFilter]);
-  const visibleWorkers = useMemo(
-    () => workers.filter((worker) => isActiveWorker(worker) && !isPlaceholderOnlyGpuWorker(worker)),
-    [workers],
-  );
-  // O(1) lookup by worker.id so every WorkerProgressCard consumer reads live
-  // worker state without rebuilding the map per screen (sc-2082).
-  const workersById = useMemo(() => buildWorkersById(workers), [workers]);
-  // Person-workflow readiness, derived from the live (non-offline) workers so it
-  // tracks SSE worker registration/offline transitions instantly. Mirrors the
-  // server's GET /api/v1/capabilities/person (person_readiness_from_workers); the
-  // worker SSE handlers keep `workers` current, so this never goes stale.
-  const personReadiness = useMemo(() => {
-    const live = workers.filter((worker) => worker.status !== "offline");
-    const ready = (capability) => live.some((worker) => (worker.capabilities ?? []).includes(capability));
-    return {
-      detect: { capability: "person_detect", ready: ready("person_detect") },
-      track: { capability: "person_track", ready: ready("person_track") },
-      segment: { capability: "person_segment", ready: ready("person_segment") },
-      replace: { capability: "person_replace", ready: ready("person_replace") },
-      detectPreview: { capability: "person_detect_preview", ready: ready("person_detect_preview") },
-      trackPreview: { capability: "person_track_preview", ready: ready("person_track_preview") },
-    };
-  }, [workers]);
-  const gpuOptions = useMemo(() => {
-    const ids = visibleWorkers.filter(isSelectableGpuWorker).map((worker) => worker.gpuId);
-    return ["auto", ...Array.from(new Set(ids))];
-  }, [visibleWorkers]);
   const mediaAssets = useMemo(
     () => assets.filter((asset) => ["image", "video", "upload", "frame", "render", "document"].includes(asset.type)),
     [assets],
@@ -881,11 +802,8 @@ export function App() {
 
   useEffect(() => {
     activeProjectRef.current = activeProject;
-  }, [activeProject]);
-
-  useEffect(() => {
-    localGenerationJobIdsRef.current = localGenerationJobIds;
-  }, [localGenerationJobIds]);
+    jobStoreActions.setActiveProjectId(activeProject?.id ?? null);
+  }, [activeProject, jobStoreActions]);
 
   useEffect(() => {
     if (typeof document === "undefined") {
@@ -989,6 +907,7 @@ export function App() {
   useEffect(() => {
     if (!activeProject || !authenticated) {
       setAssets([]);
+      setAssetPaginationStatus(createAssetPaginationStatus());
       discardedAssetsLoadedForProjectRef.current = null;
       setCharacters([]);
       setPersonTracks([]);
@@ -1041,148 +960,6 @@ export function App() {
     return () => controller.abort();
   }, [activeProject?.id, activeView, authenticated, token]);
 
-  useEffect(() => {
-    if (!authenticated) {
-      return undefined;
-    }
-
-    let events = null;
-    let reconnectTimer = null;
-    let reconnectAttempt = 0;
-    let closed = false;
-
-    function handleJobUpdated(event) {
-      const job = parseSseJson(event, "job");
-      if (!job) {
-        return;
-      }
-      const hasGeneratedAssets = Boolean(job.result?.generationSetId || job.result?.assetIds?.length || job.result?.assets?.length);
-      const resultAssetCount = generatedResultAssetCount(job);
-      const generationSetId = job.result?.generationSetId ?? "";
-      const refreshKey = job.id ?? generationSetId;
-      const previousRefresh = generatedAssetRefreshesRef.current.get(refreshKey) ?? { assetCount: 0, generationSetId: "" };
-      const shouldRefreshGeneratedAssets =
-        Boolean(job.projectId) &&
-        hasGeneratedAssets &&
-        (resultAssetCount > previousRefresh.assetCount ||
-          (resultAssetCount === 0 && generationSetId && generationSetId !== previousRefresh.generationSetId));
-      setJobs((items) => [job, ...items.filter((item) => item.id !== job.id)].sort(sortNewest));
-      if (hasGeneratedAssets) {
-        if (job.result?.generationSetId) {
-          setLatestGenerationSetId(job.result.generationSetId);
-        }
-        generatedAssetRefreshesRef.current.set(refreshKey, {
-          assetCount: Math.max(resultAssetCount, previousRefresh.assetCount),
-          generationSetId: generationSetId || previousRefresh.generationSetId,
-        });
-        if (shouldRefreshGeneratedAssets) {
-          refreshAssetsRef.current?.(job.projectId);
-        }
-      }
-      if (job.status === "completed" && hasGeneratedAssets) {
-        enqueueTimelineGenerationApplyRef.current?.(job);
-      }
-      if (job.status === "completed" && job.projectId && job.type === "person_track") {
-        refreshPersonTracksRef.current?.(job.projectId);
-      }
-      if (job.status === "completed" && job.projectId && job.type === "person_detect") {
-        refreshAssetsRef.current?.(job.projectId);
-      }
-      if (job.status === "completed" && job.type === "model_download") {
-        refreshDataRef.current?.();
-      }
-      // A completed built-in LoRA download (sc-5944) flips the catalog entry to
-      // installed; refresh models+loras so the Models row and any Studio gate update.
-      if (job.status === "completed" && job.type === "lora_download") {
-        refreshDataWithLoraOverlayRef.current?.(job.projectId ?? activeProjectRef.current?.id);
-      }
-      if (job.status === "completed" && job.type === "lora_import") {
-        dismissNoticeKind("lora-import");
-        refreshDataWithLoraOverlayRef.current?.(job.projectId ?? activeProjectRef.current?.id);
-      }
-      if (job.status === "completed" && job.type === "lora_train" && job.payload?.dryRun === false) {
-        if (job.result?.loraRegistered === false) {
-          pushNotice("lora-train", `lora training: ${job.result?.loraRegistrationError ?? "Completed training but could not register the LoRA."}`);
-        } else {
-          dismissNoticeKind("lora-train");
-          refreshDataWithLoraOverlayRef.current?.(job.projectId ?? activeProjectRef.current?.id);
-        }
-      }
-      if (job.status === "failed" && !hasVisibleLocalFailure(job)) {
-        pushNotice(noticeKindForJob(job), failedJobNotice(job));
-      }
-    }
-
-    function handleWorkerUpdated(event) {
-      const worker = parseSseJson(event, "worker");
-      if (!worker) {
-        return;
-      }
-      setWorkers((items) => [worker, ...items.filter((item) => item.id !== worker.id)].sort(sortWorkers));
-    }
-
-    function handleQueueUpdated(event) {
-      const summary = parseSseJson(event, "queue");
-      if (!summary) {
-        return;
-      }
-      setQueueSummary(summary);
-      if (Array.isArray(summary.workers)) {
-        setWorkers(summary.workers.sort(sortWorkers));
-      }
-    }
-
-    async function connect() {
-      let ticket = "";
-      try {
-        if (access?.authRequired) {
-          const response = await apiFetch("/api/v1/jobs/events/ticket", token, { method: "POST" });
-          ticket = response.ticket;
-        }
-      } catch (err) {
-        setError(err.message);
-        if (!closed) {
-          const delay = Math.min(30000, 1000 * 2 ** reconnectAttempt);
-          reconnectAttempt += 1;
-          reconnectTimer = window.setTimeout(connect, delay);
-        }
-        return;
-      }
-
-      if (closed) {
-        return;
-      }
-
-      const source = new EventSource(eventUrl("/api/v1/jobs/events", ticket));
-      events = source;
-      source.addEventListener("job.updated", handleJobUpdated);
-      source.addEventListener("worker.updated", handleWorkerUpdated);
-      source.addEventListener("queue.updated", handleQueueUpdated);
-      source.onopen = () => {
-        reconnectAttempt = 0;
-      };
-      source.onerror = () => {
-        source.close();
-        if (closed) {
-          return;
-        }
-        const delay = Math.min(30000, 1000 * 2 ** reconnectAttempt);
-        reconnectAttempt += 1;
-        reconnectTimer = window.setTimeout(connect, delay);
-      };
-    }
-
-    connect();
-
-    return () => {
-      closed = true;
-      if (reconnectTimer) {
-        window.clearTimeout(reconnectTimer);
-      }
-      events?.close();
-    };
-  }, [access?.authRequired, authenticated, token, dismissNoticeKind, pushNotice, setError]);
-
   async function refreshData() {
     const fetchInitial = async (label, path, fallback, optional = false) => {
       try {
@@ -1219,9 +996,9 @@ export function App() {
     setProjects(projectItems);
     setProjectsLoaded(true);
     setActiveProject((current) => current ?? projectItems[0] ?? null);
-    setJobs((current) => mergeFreshJobs(current, jobsResult.value));
-    setWorkers(workersResult.value.sort(sortWorkers));
-    setQueueSummary(null);
+    jobStoreActions.mergeServerJobs(jobsResult.value);
+    jobStoreActions.setWorkers(workersResult.value);
+    jobStoreActions.setQueueSummary(null);
     setModels(modelsResult.value);
     setLoras(lorasResult.value);
     setPresets(presetsResult.value);
@@ -1253,19 +1030,130 @@ export function App() {
         search.set(key, String(value));
       }
     });
-    return assetItems(await apiFetch(`/api/v1/projects/${projectId}/assets?${search.toString()}`, token, { signal }));
+    return normalizeAssetPage(await apiFetch(`/api/v1/projects/${projectId}/assets?${search.toString()}`, token, { signal }));
   }
 
-  async function refreshAssets(projectId = activeProject?.id, { signal } = {}) {
+  async function fetchAllAssetPages(projectId, params, { signal, onPage } = {}) {
+    const { cursor: initialCursor = null, ...baseParams } = params;
+    const seenCursors = new Set();
+    let cursor = initialCursor;
+    let pageNumber = 1;
+    let items = [];
+
+    while (true) {
+      let page;
+      try {
+        page = await fetchAssetPage(projectId, { ...baseParams, cursor }, { signal });
+      } catch (err) {
+        if (isAbortError(err)) {
+          throw err;
+        }
+        throw new AssetPageFetchError(pageNumber, err);
+      }
+
+      items = mergeAssetsById(items, page.items);
+      onPage?.({
+        items,
+        nextCursor: page.nextCursor,
+        pageCount: pageNumber,
+      });
+
+      if (!page.nextCursor) {
+        return { items, pageCount: pageNumber, nextCursor: null };
+      }
+      if (seenCursors.has(page.nextCursor)) {
+        throw new AssetPageFetchError(pageNumber + 1, new Error(`asset cursor repeated: ${page.nextCursor}`));
+      }
+      seenCursors.add(page.nextCursor);
+      cursor = page.nextCursor;
+      pageNumber += 1;
+    }
+  }
+
+  async function loadAssetsForStatus(projectId, status, { signal, replace = false } = {}) {
+    setAssetPaginationStatus((current) => ({
+      ...current,
+      [status]: {
+        ...current[status],
+        loading: true,
+        loaded: false,
+        error: "",
+        itemCount: 0,
+        pageCount: 0,
+        nextCursor: null,
+      },
+    }));
+    try {
+      const result = await fetchAllAssetPages(
+        projectId,
+        { status, limit: DEFAULT_ASSET_PAGE_LIMIT },
+        {
+          signal,
+          onPage: ({ items, nextCursor, pageCount }) => {
+            setAssets((current) =>
+              replace && pageCount === 1 ? replaceActiveProjectAssets(current, items, projectId) : mergeAssetsById(current, items),
+            );
+            if (status === "active" && pageCount === 1) {
+              const defaultAsset = items[0] ?? null;
+              setSelectedAssetId((current) => current ?? defaultAsset?.id ?? null);
+            }
+            setAssetPaginationStatus((current) => ({
+              ...current,
+              [status]: {
+                ...current[status],
+                loading: Boolean(nextCursor),
+                loaded: !nextCursor,
+                error: "",
+                itemCount: items.length,
+                pageCount,
+                nextCursor,
+              },
+            }));
+          },
+        },
+      );
+      setAssetPaginationStatus((current) => ({
+        ...current,
+        [status]: {
+          ...current[status],
+          loading: false,
+          loaded: true,
+          error: "",
+          itemCount: result.items.length,
+          pageCount: result.pageCount,
+          nextCursor: result.nextCursor,
+        },
+      }));
+      return result;
+    } catch (err) {
+      if (isAbortError(err)) {
+        throw err;
+      }
+      const message = assetStatusLoadError(status, err);
+      setAssetPaginationStatus((current) => ({
+        ...current,
+        [status]: {
+          ...current[status],
+          loading: false,
+          loaded: false,
+          error: message,
+        },
+      }));
+      throw new Error(message);
+    }
+  }
+
+  async function refreshAssets(projectId = activeProject?.id, { signal, mode = "replace" } = {}) {
     if (!projectId) {
       return;
     }
     try {
-      discardedAssetsLoadedForProjectRef.current = null;
-      const items = await fetchAssetPage(projectId, { status: "active", limit: DEFAULT_ASSET_PAGE_LIMIT }, { signal });
-      setAssets(items);
-      const defaultAsset = items[0] ?? null;
-      setSelectedAssetId((current) => current ?? defaultAsset?.id ?? null);
+      if (mode === "replace") {
+        discardedAssetsLoadedForProjectRef.current = null;
+        setAssets([]);
+        setAssetPaginationStatus(createAssetPaginationStatus());
+      }
+      await loadAssetsForStatus(projectId, "active", { signal, replace: mode === "replace" });
       setError("");
     } catch (err) {
       if (isAbortError(err)) return;
@@ -1277,18 +1165,20 @@ export function App() {
     if (!projectId || discardedAssetsLoadedForProjectRef.current === projectId) {
       return;
     }
-    try {
-      const [trashed, rejected] = await Promise.all([
-        fetchAssetPage(projectId, { status: "trashed", limit: DEFAULT_ASSET_PAGE_LIMIT }, { signal }),
-        fetchAssetPage(projectId, { status: "rejected", limit: DEFAULT_ASSET_PAGE_LIMIT }, { signal }),
-      ]);
-      setAssets((items) => mergeAssetsById(items, [...trashed, ...rejected]));
+    const results = await Promise.allSettled([
+      loadAssetsForStatus(projectId, "trashed", { signal }),
+      loadAssetsForStatus(projectId, "rejected", { signal }),
+    ]);
+    const failures = results.filter((result) => result.status === "rejected").map((result) => result.reason);
+    if (failures.some(isAbortError)) {
+      return;
+    }
+    if (!failures.length) {
       discardedAssetsLoadedForProjectRef.current = projectId;
       setError("");
-    } catch (err) {
-      if (isAbortError(err)) return;
-      setError(err.message);
+      return;
     }
+    setError(failures.map((err) => err.message).join("; "));
   }
 
   function refreshDataWithLoraOverlay(projectId = activeProjectRef.current?.id) {
@@ -1321,7 +1211,7 @@ export function App() {
 
   async function completeSetupWizard() {
     try {
-      await tauriInvoke("complete_setup");
+      await trustedDesktopInvoke("complete_setup");
     } catch {
       // Persisting the marker failed; still dismiss the wizard so the user isn't
       // trapped. Worst case it re-appears next launch.
@@ -1362,7 +1252,7 @@ export function App() {
             projectName: activeProject?.name ?? null,
             requestedGpu,
             payload: {
-              prompt: jobPrompt,
+              prompt: jobsStore.getSnapshot().jobPrompt,
               createdFrom: activeView,
             },
           }),
@@ -1373,7 +1263,7 @@ export function App() {
         setError(err.message);
       }
     },
-    [token, activeProject, requestedGpu, jobPrompt, activeView, setError],
+    [token, activeProject, requestedGpu, activeView, setError, jobsStore],
   );
 
   const createImageJob = useCallback(
@@ -1392,7 +1282,7 @@ export function App() {
             requestedGpu,
           }),
         });
-        setJobs((items) => [job, ...items.filter((item) => item.id !== job.id)].sort(sortNewest));
+        jobStoreActions.upsertJob(job);
         setError("");
         return job;
       } catch (err) {
@@ -1400,7 +1290,7 @@ export function App() {
         return null;
       }
     },
-    [token, activeProject, requestedGpu, setError],
+    [token, activeProject, requestedGpu, setError, jobStoreActions],
   );
 
   // Standalone video upscale (epic 4811 / sc-4816): the net-new `video_upscale` job runs
@@ -1423,7 +1313,7 @@ export function App() {
             payload: { ...payload, projectId: activeProject.id },
           }),
         });
-        setJobs((items) => [job, ...items.filter((item) => item.id !== job.id)].sort(sortNewest));
+        jobStoreActions.upsertJob(job);
         setError("");
         return job;
       } catch (err) {
@@ -1431,7 +1321,7 @@ export function App() {
         return null;
       }
     },
-    [token, activeProject, requestedGpu, setError],
+    [token, activeProject, requestedGpu, setError, jobStoreActions],
   );
 
   // Refine a prompt via the prompt_refine worker job: POST creates the job, then
@@ -1522,7 +1412,7 @@ export function App() {
             requestedGpu,
           }),
         });
-        setJobs((items) => [job, ...items.filter((item) => item.id !== job.id)].sort(sortNewest));
+        jobStoreActions.upsertJob(job);
         setError("");
         return job;
       } catch (err) {
@@ -1530,7 +1420,7 @@ export function App() {
         return null;
       }
     },
-    [token, activeProject, requestedGpu, setError],
+    [token, activeProject, requestedGpu, setError, jobStoreActions],
   );
 
   const createInterleaveJob = useCallback(
@@ -1549,7 +1439,7 @@ export function App() {
             requestedGpu,
           }),
         });
-        setJobs((items) => [job, ...items.filter((item) => item.id !== job.id)].sort(sortNewest));
+        jobStoreActions.upsertJob(job);
         setError("");
         return job;
       } catch (err) {
@@ -1557,35 +1447,8 @@ export function App() {
         return null;
       }
     },
-    [token, activeProject, requestedGpu, setError],
+    [token, activeProject, requestedGpu, setError, jobStoreActions],
   );
-
-  const rememberLocalGenerationJob = useCallback((kind, job) => {
-    if (!job?.id) {
-      return;
-    }
-    setLocalGenerationJobIds((current) => ({
-      ...current,
-      // Remember every submitted run (newest first, capped) so running and queued
-      // runs stack in the studio instead of the latest run evicting the previous one.
-      [kind]: [job.id, ...current[kind].filter((id) => id !== job.id)].slice(0, localJobStackLimit),
-    }));
-  }, []);
-
-  function hasVisibleLocalFailure(job) {
-    const active = activeViewRef.current;
-    const localIds = localGenerationJobIdsRef.current;
-    if (active === "Image" && localIds.image.includes(job.id)) {
-      return true;
-    }
-    if (active === "Video" && localIds.video.includes(job.id)) {
-      return true;
-    }
-    if (active === "Document" && localIds.document.includes(job.id)) {
-      return true;
-    }
-    return active === "Models" && job.type === "model_download";
-  }
 
   const sendAssetToImage = useCallback((asset, mode = null) => {
     if (!asset) {
@@ -1788,13 +1651,13 @@ export function App() {
             ? { payloadChanges: { duplicatedAt: new Date().toISOString() } }
             : (options.body ?? {});
         const updatedJob = await apiFetch(path, token, { method: "POST", body: JSON.stringify(body) });
-        setJobs((items) => [updatedJob, ...items.filter((item) => item.id !== updatedJob.id)].sort(sortNewest));
+        jobStoreActions.upsertJob(updatedJob);
         setError("");
       } catch (err) {
         setError(err.message);
       }
     },
-    [token, setError],
+    [token, setError, jobStoreActions],
   );
 
   const titleInfo = getViewTitle(activeView);
@@ -1802,7 +1665,6 @@ export function App() {
   // Activity dots only — counts live in the topbar so nav button textContent stays clean.
   const activeIndicators = {
     Editor: timelines.length > 0,
-    Queue: queueCounts.active > 0,
   };
   // First-run gate: until at least one workspace exists, replace the studio area
   // with a create prompt so navigation never lands on dead, project-scoped controls.
@@ -1813,15 +1675,19 @@ export function App() {
   // desktop — hold the studio/gate back briefly to avoid a flash.
   const setupGateLoading = isDesktopShell && setupCompleted === null;
   const showSetupWizard = isDesktopShell && setupCompleted === false && authenticated;
+  const jobRuntimeActions = useMemo(
+    () => ({
+      createPlaceholderJob,
+      jobAction,
+    }),
+    [createPlaceholderJob, jobAction],
+  );
 
   // sc-1651 Phase B: shared primitives screens read via useAppContext() instead of
   // drilled props. Screens build any screen-specific wrappers from these (e.g. a
   // send-to-studio action with a mode). Grown one screen at a time as screens convert.
-  // sc-4194: memoized so the provider value only changes identity when one of its
-  // entries actually changes, instead of being a fresh ~120-key literal on every App
-  // render (SSE job/worker/queue ticks re-render App continuously). The actions above
-  // and the data-hook actions are useCallback-stable, so this holds across renders
-  // that don't change data. NOTE: this dependency array must mirror the object below —
+  // Jobs/workers/queue live in JobsProvider so SSE ticks don't invalidate this
+  // shell-level provider. NOTE: this dependency array must mirror the object below —
   // every value referenced here is a dependency.
   const appContextValue = useMemo(() => ({
     activeProject,
@@ -1841,6 +1707,7 @@ export function App() {
     queueTimelineVideoJob,
     // Assets / library (sc-1651 Phase B batch 1)
     assets,
+    assetPaginationStatus,
     selectedAsset,
     setSelectedAssetId,
     deleteAsset,
@@ -1849,21 +1716,10 @@ export function App() {
     updateAssetStatus,
     updateAssetTags,
     latestImageAssets,
-    // Jobs / queue
-    jobs,
-    jobAction,
+    // Job creation actions that depend on the active project/session.
     createVqaJob,
     createInterleaveJob,
-    // Queue screen (sc-1651 Phase B batch 2)
-    createPlaceholderJob,
-    filteredJobs,
-    jobPrompt,
-    setJobPrompt,
-    projectFilter,
-    setProjectFilter,
     projects,
-    visibleWorkers,
-    workersById,
     // Generation studios (sc-1651 Phase B batch 3)
     createVideoJob,
     createVideoUpscaleJob,
@@ -1873,14 +1729,9 @@ export function App() {
     latestVideoAssets,
     recentImageAssets,
     recentVideoAssets,
-    videoLocalJobs,
-    imageLocalJobs,
-    documentLocalJobs,
     studioLaunch,
-    rememberLocalGenerationJob,
     // Person tracks (Video Studio + Replace Person)
     personTracks,
-    personReadiness,
     createPersonDetectionJob,
     createPersonTrackJob,
     saveTrackCorrections,
@@ -1898,7 +1749,6 @@ export function App() {
     createModelConvertJob,
     createLoraImportJob,
     createModelImportJob,
-    gpuOptions,
     requestedGpu,
     setRequestedGpu,
     // Presets
@@ -1959,16 +1809,15 @@ export function App() {
     activeProject, mediaAssets, openPreview, sendAssetToImage, sendAssetToVideo,
     activeTimeline, timelines, selectedTimelineId, setSelectedTimelineId, setActiveTimeline,
     createTimeline, saveTimeline, exportTimeline, extractTimelineFrame, queueTimelineVideoJob,
-    assets, selectedAsset, setSelectedAssetId, deleteAsset, purgeAsset, importAsset,
+    assets, assetPaginationStatus, selectedAsset, setSelectedAssetId, deleteAsset, purgeAsset, importAsset,
     updateAssetStatus, updateAssetTags, latestImageAssets,
-    jobs, jobAction, createVqaJob, createInterleaveJob, createPlaceholderJob, filteredJobs,
-    jobPrompt, setJobPrompt, projectFilter, setProjectFilter, projects, visibleWorkers, workersById,
+    createVqaJob, createInterleaveJob, projects,
     createVideoJob, createVideoUpscaleJob, createImageJob, refinePrompt, magicPrompt, latestVideoAssets, recentImageAssets,
-    recentVideoAssets, videoLocalJobs, imageLocalJobs, documentLocalJobs, studioLaunch,
-    rememberLocalGenerationJob, personTracks, personReadiness, createPersonDetectionJob,
+    recentVideoAssets, studioLaunch,
+    personTracks, createPersonDetectionJob,
     createPersonTrackJob, saveTrackCorrections, imageModels, videoModels, models, macCapabilities,
     loras, deleteLora, deleteModel, createModelDownloadJob, createLoraDownloadJob, createModelConvertJob,
-    createLoraImportJob, createModelImportJob, gpuOptions, requestedGpu, setRequestedGpu,
+    createLoraImportJob, createModelImportJob, requestedGpu, setRequestedGpu,
     presets, createPreset, updatePreset, deletePreset, duplicatePreset, token, authenticated,
     trainingDatasets, trainingDatasetsProjectId, trainingDatasetsError, loadingTrainingDatasets,
     refreshTrainingDatasets, loadTrainingDataset, createTrainingDataset, uploadTrainingDatasetItem,
@@ -2006,6 +1855,23 @@ export function App() {
   ]);
 
   return (
+    <JobsProvider actions={jobRuntimeActions} store={jobsStore}>
+    <JobsEventBridge
+      accessAuthRequired={access?.authRequired}
+      activeProjectRef={activeProjectRef}
+      activeViewRef={activeViewRef}
+      authenticated={authenticated}
+      dismissNoticeKind={dismissNoticeKind}
+      enqueueTimelineGenerationApplyRef={enqueueTimelineGenerationApplyRef}
+      pushNotice={pushNotice}
+      refreshAssetsRef={refreshAssetsRef}
+      refreshDataRef={refreshDataRef}
+      refreshDataWithLoraOverlayRef={refreshDataWithLoraOverlayRef}
+      refreshPersonTracksRef={refreshPersonTracksRef}
+      setError={setError}
+      setLatestGenerationSetId={setLatestGenerationSetId}
+      token={token}
+    />
     <AppContext.Provider value={appContextValue}>
     <PreviewContext.Provider value={previewContextValue}>
     <main className="app">
@@ -2046,7 +1912,7 @@ export function App() {
                   >
                     <IconComponent />
                     <span className="nav-label">{label}</span>
-                    {active ? <span aria-hidden="true" className="nav-pulse" /> : null}
+                    {item.id === "Queue" ? <QueueNavPulse /> : active ? <span aria-hidden="true" className="nav-pulse" /> : null}
                   </button>
                 );
               })}
@@ -2068,16 +1934,9 @@ export function App() {
               <StatusDot ok={health?.status === "ok"} />
               {health?.status === "ok" ? "API ready" : "API offline"}
             </span>
-            <span className="status-pill">
-              <span className={visibleWorkers.length ? "dot" : "dot idle"} />
-              {visibleWorkers.length ? `${visibleWorkers.length} worker${visibleWorkers.length === 1 ? "" : "s"}` : "No workers"}
-            </span>
-            <span className="status-pill">
-              {gpuOptions.length > 1 ? `${gpuOptions.length - 1} GPU slot${gpuOptions.length === 2 ? "" : "s"}` : "GPU auto"}
-            </span>
-            <button className="queue-chip" onClick={() => setActiveView("Queue")} type="button">
-              Queue {queueCounts.active}
-            </button>
+            <WorkerStatusPill />
+            <GpuStatusPill />
+            <QueueChip onClick={() => setActiveView("Queue")} />
           </div>
           <button className="icon-btn" title="Notifications" type="button">
             <Icon.Bell />
@@ -2133,8 +1992,7 @@ export function App() {
 
         {showAuthUnlock ? null : showSetupWizard ? (
           <React.Suspense fallback={<RouteFallback label="Loading setup…" />}>
-            <SetupWizard
-              jobs={jobs}
+            <SetupWizardWithJobs
               models={models}
               onComplete={completeSetupWizard}
               onCreateProject={createProject}
@@ -2157,5 +2015,6 @@ export function App() {
     </main>
     </PreviewContext.Provider>
     </AppContext.Provider>
+    </JobsProvider>
   );
 }

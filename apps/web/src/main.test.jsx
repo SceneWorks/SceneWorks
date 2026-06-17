@@ -666,20 +666,293 @@ describe("SceneWorks app shell", () => {
     expect(container.textContent).toContain("Assets");
   });
 
-  it("loads project assets through bounded active and lazy discarded queries", async () => {
+  it("loads project assets through cursor pages and exposes assets beyond the first API page", async () => {
+    const activePageOne = Array.from({ length: 200 }, (_, index) => ({
+      id: `asset-active-${index + 1}`,
+      projectId: "project-default",
+      type: "image",
+      displayName: `Active Frame ${index + 1}`,
+      file: { path: `assets/images/active-${index + 1}.png`, mimeType: "image/png" },
+      status: { favorite: false, rejected: false, trashed: false },
+      createdAt: new Date(Date.UTC(2026, 5, 17, 12, -index)).toISOString(),
+    }));
+    const oldActive = {
+      id: "asset-active-201",
+      projectId: "project-default",
+      type: "image",
+      displayName: "Very Old Active",
+      file: { path: "assets/images/active-201.png", mimeType: "image/png" },
+      status: { favorite: false, rejected: false, trashed: false },
+      createdAt: "2026-06-16T00:00:00.000Z",
+    };
+    const trashedPageOne = {
+      id: "asset-trash-1",
+      projectId: "project-default",
+      type: "image",
+      displayName: "Trashed Frame 1",
+      status: { trashed: true },
+      createdAt: "2026-06-15T00:00:00.000Z",
+    };
+    const oldTrashed = {
+      id: "asset-trash-2",
+      projectId: "project-default",
+      type: "image",
+      displayName: "Old Trashed Frame",
+      status: { trashed: true },
+      createdAt: "2026-06-14T00:00:00.000Z",
+    };
+    const rejectedPageOne = {
+      id: "asset-rejected-1",
+      projectId: "project-default",
+      type: "image",
+      displayName: "Rejected Frame 1",
+      status: { rejected: true },
+      createdAt: "2026-06-13T00:00:00.000Z",
+    };
+    const oldRejected = {
+      id: "asset-rejected-2",
+      projectId: "project-default",
+      type: "image",
+      displayName: "Old Rejected Frame",
+      status: { rejected: true },
+      createdAt: "2026-06-12T00:00:00.000Z",
+    };
+    global.fetch.mockImplementation((url) => {
+      const parsed = new URL(url);
+      const path = parsed.pathname;
+      if (path.endsWith("/health")) {
+        return Promise.resolve(response({ status: "ok", authRequired: false }));
+      }
+      if (path.endsWith("/access")) {
+        return Promise.resolve(response({ authRequired: false }));
+      }
+      if (path.endsWith("/jobs/events/ticket")) {
+        return Promise.resolve(response({ ticket: "stream-ticket" }));
+      }
+      if (path.endsWith("/projects")) {
+        return Promise.resolve(response([{ id: "project-default", name: "Default Project" }]));
+      }
+      if (path.endsWith("/projects/project-default/assets")) {
+        const status = parsed.searchParams.get("status");
+        const cursor = parsed.searchParams.get("cursor");
+        if (status === "active") {
+          return Promise.resolve(
+            response(cursor === "active-page-2" ? { items: [oldActive], nextCursor: null } : { items: activePageOne, nextCursor: "active-page-2" }),
+          );
+        }
+        if (status === "trashed") {
+          return Promise.resolve(
+            response(cursor === "trashed-page-2" ? { items: [oldTrashed], nextCursor: null } : { items: [trashedPageOne], nextCursor: "trashed-page-2" }),
+          );
+        }
+        if (status === "rejected") {
+          return Promise.resolve(
+            response(cursor === "rejected-page-2" ? { items: [oldRejected], nextCursor: null } : { items: [rejectedPageOne], nextCursor: "rejected-page-2" }),
+          );
+        }
+      }
+      return Promise.resolve(response([]));
+    });
+
     root = createRoot(container);
     await act(async () => {
       root.render(<App />);
     });
     await settle();
 
+    await waitUntil(() => {
+      const activeUrls = global.fetch.mock.calls
+        .map(([url]) => new URL(url))
+        .filter((url) => url.pathname === "/api/v1/projects/project-default/assets" && url.searchParams.get("status") === "active");
+      expect(activeUrls.some((url) => url.searchParams.get("limit") === "200" && url.searchParams.get("cursor") === "active-page-2")).toBe(true);
+    });
+
+    await act(async () => {
+      [...container.querySelectorAll("button")].find((button) => button.textContent === "Assets").click();
+    });
+    await settle();
+
+    await waitUntil(() => {
+      const assetUrls = global.fetch.mock.calls
+        .map(([url]) => new URL(url))
+        .filter((url) => url.pathname === "/api/v1/projects/project-default/assets");
+      expect(assetUrls.some((url) => url.searchParams.get("status") === "trashed" && url.searchParams.get("cursor") === "trashed-page-2")).toBe(true);
+      expect(assetUrls.some((url) => url.searchParams.get("status") === "rejected" && url.searchParams.get("cursor") === "rejected-page-2")).toBe(true);
+    });
+
+    expect(container.textContent).toContain("Showing 1-48 of 201");
+    for (let index = 0; index < 4; index += 1) {
+      await act(async () => {
+        [...container.querySelectorAll(".asset-grid-pagination button")].find((button) => button.textContent === "Next").click();
+      });
+    }
+    expect(container.textContent).toContain("Very Old Active");
+
+    await act(async () => {
+      [...container.querySelectorAll("button")].find((button) => button.textContent === "Trashcan").click();
+    });
+    expect(container.textContent).toContain("Old Trashed Frame");
+
     const assetUrls = global.fetch.mock.calls
       .map(([url]) => new URL(url))
       .filter((url) => url.pathname === "/api/v1/projects/project-default/assets");
-    expect(assetUrls.some((url) => url.searchParams.get("status") === "active" && url.searchParams.get("limit") === "200")).toBe(true);
-    expect(assetUrls.some((url) => url.searchParams.get("status") === "trashed" && url.searchParams.get("limit") === "200")).toBe(true);
-    expect(assetUrls.some((url) => url.searchParams.get("status") === "rejected" && url.searchParams.get("limit") === "200")).toBe(true);
     expect(assetUrls.some((url) => url.searchParams.get("includeRejected") === "true" && url.searchParams.get("includeTrashed") === "true")).toBe(false);
+  });
+
+  it("merges generated-asset refreshes without replacing the loaded catalog", async () => {
+    const recentAsset = {
+      id: "asset-recent",
+      projectId: "project-default",
+      type: "image",
+      displayName: "Recent Active",
+      file: { path: "assets/images/recent.png", mimeType: "image/png" },
+      status: { trashed: false, rejected: false },
+      createdAt: "2026-06-17T12:00:00.000Z",
+    };
+    const olderAsset = {
+      id: "asset-older",
+      projectId: "project-default",
+      type: "image",
+      displayName: "Older Active",
+      file: { path: "assets/images/older.png", mimeType: "image/png" },
+      status: { trashed: false, rejected: false },
+      createdAt: "2026-06-16T12:00:00.000Z",
+    };
+    const generatedAsset = {
+      id: "asset-generated",
+      projectId: "project-default",
+      generationSetId: "gen-fresh",
+      type: "image",
+      displayName: "Fresh Generated",
+      file: { path: "assets/images/generated.png", mimeType: "image/png" },
+      status: { trashed: false, rejected: false },
+      createdAt: "2026-06-17T13:00:00.000Z",
+    };
+    let generatedRefresh = false;
+    global.fetch.mockImplementation((url) => {
+      const parsed = new URL(url);
+      const path = parsed.pathname;
+      if (path.endsWith("/health")) {
+        return Promise.resolve(response({ status: "ok", authRequired: false }));
+      }
+      if (path.endsWith("/access")) {
+        return Promise.resolve(response({ authRequired: false }));
+      }
+      if (path.endsWith("/jobs/events/ticket")) {
+        return Promise.resolve(response({ ticket: "stream-ticket" }));
+      }
+      if (path.endsWith("/projects")) {
+        return Promise.resolve(response([{ id: "project-default", name: "Default Project" }]));
+      }
+      if (path.endsWith("/projects/project-default/assets")) {
+        const status = parsed.searchParams.get("status");
+        const cursor = parsed.searchParams.get("cursor");
+        if (status === "active" && generatedRefresh) {
+          return Promise.resolve(response({ items: [generatedAsset], nextCursor: null }));
+        }
+        if (status === "active") {
+          return Promise.resolve(
+            response(cursor === "older-page" ? { items: [olderAsset], nextCursor: null } : { items: [recentAsset], nextCursor: "older-page" }),
+          );
+        }
+        return Promise.resolve(response({ items: [], nextCursor: null }));
+      }
+      return Promise.resolve(response([]));
+    });
+
+    root = createRoot(container);
+    await act(async () => {
+      root.render(<App />);
+    });
+    await settle();
+    await waitUntil(() => {
+      expect(global.fetch.mock.calls.some(([url]) => new URL(url).searchParams.get("cursor") === "older-page")).toBe(true);
+      expect(FakeEventSource.instances).toHaveLength(1);
+    });
+
+    await act(async () => {
+      [...container.querySelectorAll("button")].find((button) => button.textContent === "Assets").click();
+    });
+    await settle();
+    expect(container.textContent).toContain("Recent Active");
+    expect(container.textContent).toContain("Older Active");
+
+    generatedRefresh = true;
+    await act(async () => {
+      FakeEventSource.instances[0].listeners["job.updated"]({
+        data: JSON.stringify({
+          id: "job-generated",
+          type: "image_generate",
+          status: "completed",
+          projectId: "project-default",
+          result: { generationSetId: "gen-fresh", assetIds: ["asset-generated"] },
+        }),
+      });
+    });
+    await settle();
+
+    await waitUntil(() => {
+      expect(container.textContent).toContain("Fresh Generated");
+    });
+    expect(container.textContent).toContain("Recent Active");
+    expect(container.textContent).toContain("Older Active");
+  });
+
+  it("keeps loaded assets visible and reports a later page failure", async () => {
+    const firstPageAsset = {
+      id: "asset-first-page",
+      projectId: "project-default",
+      type: "image",
+      displayName: "First Page Asset",
+      file: { path: "assets/images/first-page.png", mimeType: "image/png" },
+      status: { trashed: false, rejected: false },
+      createdAt: "2026-06-17T12:00:00.000Z",
+    };
+    global.fetch.mockImplementation((url) => {
+      const parsed = new URL(url);
+      const path = parsed.pathname;
+      if (path.endsWith("/health")) {
+        return Promise.resolve(response({ status: "ok", authRequired: false }));
+      }
+      if (path.endsWith("/access")) {
+        return Promise.resolve(response({ authRequired: false }));
+      }
+      if (path.endsWith("/jobs/events/ticket")) {
+        return Promise.resolve(response({ ticket: "stream-ticket" }));
+      }
+      if (path.endsWith("/projects")) {
+        return Promise.resolve(response([{ id: "project-default", name: "Default Project" }]));
+      }
+      if (path.endsWith("/projects/project-default/assets")) {
+        const status = parsed.searchParams.get("status");
+        const cursor = parsed.searchParams.get("cursor");
+        if (status === "active" && cursor === "broken-page") {
+          return Promise.resolve(errorResponse(500, "Cursor failed"));
+        }
+        if (status === "active") {
+          return Promise.resolve(response({ items: [firstPageAsset], nextCursor: "broken-page" }));
+        }
+        return Promise.resolve(response({ items: [], nextCursor: null }));
+      }
+      return Promise.resolve(response([]));
+    });
+
+    root = createRoot(container);
+    await act(async () => {
+      root.render(<App />);
+    });
+    await settle();
+    await waitUntil(() => {
+      expect(container.textContent).toContain("Could not load all active assets (page 2: Cursor failed).");
+    });
+
+    await act(async () => {
+      [...container.querySelectorAll("button")].find((button) => button.textContent === "Assets").click();
+    });
+    await settle();
+
+    expect(container.textContent).toContain("First Page Asset");
+    expect(container.textContent).toContain("Could not load all active assets (page 2: Cursor failed).");
   });
 
   // sc-4193 regression (F-WEB-3): the queueCounts memo reads queueSummary, so a

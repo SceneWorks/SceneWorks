@@ -1810,6 +1810,23 @@ fn validate_image_job(payload: &ImageJobRequest) -> Result<(), ApiError> {
     if !(1..=8).contains(&payload.count) {
         return Err(ApiError::bad_request("count must be between 1 and 8"));
     }
+    if payload
+        .reference_asset_ids
+        .iter()
+        .any(|id| id.trim().is_empty())
+    {
+        return Err(ApiError::bad_request(
+            "referenceAssetIds must not contain blank ids",
+        ));
+    }
+    if payload.mode == "edit_image"
+        && option_str_is_empty(payload.source_asset_id.as_deref())
+        && payload.reference_asset_ids.is_empty()
+    {
+        return Err(ApiError::bad_request(
+            "edit_image requires sourceAssetId or referenceAssetIds",
+        ));
+    }
     validate_dimension(payload.width, "width", MAX_IMAGE_DIMENSION)?;
     validate_dimension(payload.height, "height", MAX_IMAGE_DIMENSION)?;
     if payload.upscale.enabled {
@@ -1861,6 +1878,8 @@ fn validate_video_job(payload: &VideoJobRequest) -> Result<(), ApiError> {
         // and ads2v (source video + reference video + reference images).
         "multi_video_to_video",
         "ads2v",
+        // SCAIL-2 character animation (sc-5449): driving clip + reference character.
+        "animate_character",
     ]
     .contains(&payload.mode.as_str())
     {
@@ -1967,6 +1986,12 @@ fn validate_video_job(payload: &VideoJobRequest) -> Result<(), ApiError> {
         "ads2v" if payload.reference_asset_ids.is_empty() => Err(ApiError::bad_request(
             "Source + Reference Video requires at least one reference image.",
         )),
+        "animate_character" if option_str_is_empty(payload.source_clip_asset_id.as_deref()) => Err(
+            ApiError::bad_request("Animate Character requires a driving video."),
+        ),
+        "animate_character" if payload.reference_asset_ids.is_empty() => Err(
+            ApiError::bad_request("Animate Character requires a reference character image."),
+        ),
         _ => Ok(()),
     }
 }

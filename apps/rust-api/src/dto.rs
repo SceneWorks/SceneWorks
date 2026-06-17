@@ -404,6 +404,10 @@ pub(crate) struct ImageJobRequest {
     // "many images from one reference" flow. ip_adapter_scale rides in `advanced`.
     #[serde(default)]
     pub(crate) reference_asset_id: Option<String>,
+    // Multi-reference edit images (sc-6211). The Image Studio sends the plural
+    // UI-shaped field for edit models that condition on 1+ reference images.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub(crate) reference_asset_ids: Vec<String>,
     // Optional inpaint mask asset (sc-2476): white = edit region. Honored only by
     // inpaint-capable models (the `image_inpaint` capability, SDXL family); others
     // ignore it and run the whole-image edit. Threaded to the worker payload as-is.

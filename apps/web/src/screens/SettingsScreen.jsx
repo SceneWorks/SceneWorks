@@ -6,6 +6,7 @@ import {
   removeCredentialRequest,
   saveCredential,
 } from "../credentials.js";
+import { trustedDesktopInvoke } from "../desktopTrust.js";
 
 // The data-dir / GPU / worker / wizard controls are desktop-only (backed by Tauri
 // commands in the shell). Service credentials work in both deployments and route
@@ -28,7 +29,7 @@ export function SettingsScreen({ uiMode = "advanced", onUiModeChange } = {}) {
       if (isDesktop) {
         const [loadedSettings, gpuInfo, storedCredentials] = await Promise.all([
           invoke("get_app_settings"),
-          invoke("get_gpu_info"),
+          trustedDesktopInvoke("get_gpu_info"),
           invoke("list_credentials"),
         ]);
         setSettings(loadedSettings);
@@ -67,7 +68,7 @@ export function SettingsScreen({ uiMode = "advanced", onUiModeChange } = {}) {
 
   async function revealDataDir() {
     if (settings?.dataDir) {
-      await invoke("reveal_in_os", { path: settings.dataDir });
+      await trustedDesktopInvoke("reveal_in_os", { path: settings.dataDir });
     }
   }
 
@@ -102,7 +103,7 @@ export function SettingsScreen({ uiMode = "advanced", onUiModeChange } = {}) {
 
   async function restartWorker() {
     try {
-      await invoke("restart_worker");
+      await trustedDesktopInvoke("restart_worker");
       setStatus("Restarting the inference worker…");
     } catch (error) {
       setStatus(String(error));
@@ -111,7 +112,7 @@ export function SettingsScreen({ uiMode = "advanced", onUiModeChange } = {}) {
 
   async function rerunSetupWizard() {
     try {
-      await invoke("reset_setup");
+      await trustedDesktopInvoke("reset_setup");
       window.location.reload();
     } catch (error) {
       setStatus(String(error));

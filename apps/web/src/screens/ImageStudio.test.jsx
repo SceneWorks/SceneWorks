@@ -317,6 +317,9 @@ describe("ImageStudio edit source picker", () => {
     return container.querySelector('[role="dialog"]');
   }
 
+  const generateButton = () =>
+    [...container.querySelectorAll("button")].find((button) => button.textContent === "Generate");
+
   it("limits Image Edit source selection to active project images and shows the requested source tabs", async () => {
     const active = { id: "asset-active", projectId: "project_1", type: "image", displayName: "Active Plate", status: { trashed: false } };
     const trashed = { id: "asset-trashed", projectId: "project_1", type: "image", displayName: "Discarded Plate", status: { trashed: true } };
@@ -438,6 +441,33 @@ describe("ImageStudio edit source picker", () => {
     expect(createImageJob).toHaveBeenCalledWith(expect.objectContaining({ mode: "edit_image", sourceAssetId: "uploaded-source" }));
   });
 
+  it("blocks edit generation until a source image is selected", async () => {
+    const source = { id: "source-a", projectId: "project_1", type: "image", displayName: "Source A", status: {} };
+    const createImageJob = vi.fn(async () => ({ id: "job-1" }));
+
+    await render(
+      baseContext({
+        assets: [source],
+        createImageJob,
+        imageModels: [{ ...Z_IMAGE, capabilities: ["edit_image"] }],
+        selectedAsset: null,
+      }),
+    );
+    await click([...container.querySelectorAll(".segmented-control button")].find((button) => button.textContent === "Edit"));
+
+    expect(generateButton().disabled).toBe(true);
+    expect(container.textContent).toContain("Select a source image before generating.");
+
+    await click([...container.querySelectorAll(".asset-picker-head button")].find((button) => button.textContent === "Select image"));
+    const dialog = container.querySelector('[role="dialog"]');
+    await click(dialog.querySelector(".asset-picker-card"));
+    await click([...dialog.querySelectorAll("button")].find((button) => button.textContent === "Use Selection"));
+
+    expect(generateButton().disabled).toBe(false);
+    await click(generateButton());
+    expect(createImageJob).toHaveBeenCalledWith(expect.objectContaining({ mode: "edit_image", sourceAssetId: "source-a" }));
+  });
+
   it("uses the multi-image reference picker for a multiReference model and submits referenceAssetIds (sc-6211)", async () => {
     const refA = { id: "ref-a", projectId: "project_1", type: "image", displayName: "Ref A", status: {} };
     const refB = { id: "ref-b", projectId: "project_1", type: "image", displayName: "Ref B", status: {} };
@@ -460,6 +490,9 @@ describe("ImageStudio edit source picker", () => {
     );
     await click([...container.querySelectorAll(".segmented-control button")].find((button) => button.textContent === "Edit"));
 
+    expect(generateButton().disabled).toBe(true);
+    expect(container.textContent).toContain("Select at least one reference image before generating.");
+
     // The multi-image picker ("Select images") replaces the single source picker ("Select image").
     const headButtons = () => [...container.querySelectorAll(".asset-picker-head button")];
     expect(headButtons().some((button) => button.textContent === "Select images")).toBe(true);
@@ -472,7 +505,8 @@ describe("ImageStudio edit source picker", () => {
     await click(cards[1]);
     await click([...dialog.querySelectorAll("button")].find((button) => button.textContent === "Use Selection"));
 
-    await click([...container.querySelectorAll("button")].find((button) => button.textContent === "Generate"));
+    expect(generateButton().disabled).toBe(false);
+    await click(generateButton());
     const payload = createImageJob.mock.calls[0][0];
     expect(payload.mode).toBe("edit_image");
     expect(payload.referenceAssetIds).toEqual(["ref-a", "ref-b"]);

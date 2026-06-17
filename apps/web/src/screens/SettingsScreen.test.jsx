@@ -34,6 +34,8 @@ describe("SettingsScreen service credentials", () => {
       switch (command) {
         case "get_app_settings":
           return {};
+        case "get_desktop_trust_nonce":
+          return "test-trust-nonce";
         case "get_gpu_info":
           return { platform: "windows", devices: [] };
         case "list_credentials":
@@ -106,6 +108,7 @@ describe("SettingsScreen service credentials", () => {
       label: "Civit.ai",
       scheme: "query",
       token: "key123",
+      trustNonce: "test-trust-nonce",
     });
     expect(container.textContent).toContain("Civit.ai");
     expect(container.textContent).toContain("civitai.com");
@@ -116,7 +119,10 @@ describe("SettingsScreen service credentials", () => {
     credentials = [{ host: "civitai.com", label: "Civit.ai", scheme: "query", present: true }];
     await render();
     await click(container.querySelector(".settings-credential button"));
-    expect(invoke).toHaveBeenCalledWith("delete_credential", { host: "civitai.com" });
+    expect(invoke).toHaveBeenCalledWith("delete_credential", {
+      host: "civitai.com",
+      trustNonce: "test-trust-nonce",
+    });
   });
 });
 

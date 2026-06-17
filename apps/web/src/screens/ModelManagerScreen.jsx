@@ -2,8 +2,10 @@ import React, { useEffect, useMemo, useState } from "react";
 import { WorkerProgressCard } from "../components/WorkerProgressCard.jsx";
 import { terminalStatuses } from "../constants.js";
 import { hasPresentCredential, loadCredentials } from "../credentials.js";
+import { trustedDesktopInvoke } from "../desktopTrust.js";
 import { extractFamilies, modelLoraFamilies, presetLoraId, presetLoras } from "../presetUtils.js";
 import { useAppContext } from "../context/AppContext.js";
+import { selectJobs, useJobActions, useJobsSelector } from "../context/JobsContext.jsx";
 import { DEFAULT_MAC_CAPABILITIES, macModelBlock } from "../macGating.js";
 
 // Wan A14B is a two-expert mixture; its LoRAs come as a high/low-noise pair. These
@@ -218,10 +220,8 @@ function deleteResultText(result, name) {
 export function ModelManagerScreen() {
   const {
     activeProject,
-    jobs,
     loras,
     models,
-    jobAction,
     setActiveView,
     deleteLora: deleteLoraAction,
     deleteModel: deleteModelAction,
@@ -233,6 +233,8 @@ export function ModelManagerScreen() {
     presets: recipePresets = [],
     macCapabilities = DEFAULT_MAC_CAPABILITIES,
   } = useAppContext();
+  const jobs = useJobsSelector(selectJobs);
+  const { jobAction } = useJobActions();
   // Third-party LyCORIS now applies on every MLX provider (epic 3641), so the LyCORIS upload is no
   // longer Mac-gated.
   const onCancelJob = (job) => jobAction(job, "cancel");
@@ -325,8 +327,7 @@ export function ModelManagerScreen() {
       return undefined;
     }
     let cancelled = false;
-    window.__TAURI__.core
-      .invoke("get_gpu_info")
+    trustedDesktopInvoke("get_gpu_info")
       .then((info) => {
         if (!cancelled && info && typeof info.unifiedMemoryMb === "number") {
           setUnifiedMemoryGb(info.unifiedMemoryMb / 1024);

@@ -3,12 +3,13 @@ import { foldUpscaledAssetVariants } from "../assetVariants.js";
 import { AssetDetail, AssetGrid, emptyTrash } from "../components/assetPanels.jsx";
 import { terminalStatuses } from "../constants.js";
 import { useAppContext } from "../context/AppContext.js";
+import { selectJobs, useJobsSelector } from "../context/JobsContext.jsx";
 
 export function LibraryScreen() {
   const {
     activeProject,
     assets,
-    jobs = [],
+    assetPaginationStatus = {},
     imageModels = [],
     createVqaJob,
     deleteAsset,
@@ -25,6 +26,7 @@ export function LibraryScreen() {
     updateAssetStatus,
     updateAssetTags,
   } = useAppContext();
+  const jobs = useJobsSelector(selectJobs);
   // Bind the fullscreen preview to the currently filtered library view so
   // navigation stays inside the same type/tag/trash scope the user is browsing.
   const onPreview = (asset) => setPreviewAsset(asset, visibleAssets);
@@ -116,6 +118,30 @@ export function LibraryScreen() {
   const videoCount = libraryAssets.filter((asset) => asset.type === "video").length;
   const uploadCount = libraryAssets.filter((asset) => asset.type === "upload").length;
   const availableTags = [...new Set(libraryAssets.flatMap((asset) => (Array.isArray(asset.tags) ? asset.tags : [])))].sort();
+  const activeLoad = assetPaginationStatus.active ?? {};
+  const trashedLoad = assetPaginationStatus.trashed ?? {};
+  const rejectedLoad = assetPaginationStatus.rejected ?? {};
+  const discardedLoading = trashedLoad.loading || rejectedLoad.loading;
+  const discardedLoadedCount = (trashedLoad.itemCount ?? 0) + (rejectedLoad.itemCount ?? 0);
+  const assetLoadMessages = [
+    activeLoad.loading
+      ? {
+          key: "active-loading",
+          tone: "loading",
+          text: activeLoad.itemCount ? `Loading more active assets (${activeLoad.itemCount} loaded)...` : "Loading active assets...",
+        }
+      : null,
+    discardedLoading
+      ? {
+          key: "discarded-loading",
+          tone: "loading",
+          text: discardedLoadedCount ? `Loading discarded assets (${discardedLoadedCount} loaded)...` : "Loading discarded assets...",
+        }
+      : null,
+    activeLoad.error ? { key: "active-error", tone: "error", text: activeLoad.error } : null,
+    trashedLoad.error ? { key: "trashed-error", tone: "error", text: trashedLoad.error } : null,
+    rejectedLoad.error ? { key: "rejected-error", tone: "error", text: rejectedLoad.error } : null,
+  ].filter(Boolean);
 
   return (
     <section className="main-surface library-surface">
@@ -188,6 +214,15 @@ export function LibraryScreen() {
             <span className="hero-stat-value">{videoCount + uploadCount}</span>
           </div>
         </div>
+        {assetLoadMessages.length ? (
+          <div className="library-load-state" aria-live="polite">
+            {assetLoadMessages.map((message) => (
+              <p className={message.tone === "error" ? "inline-warning" : "asset-load-note"} key={message.key}>
+                {message.text}
+              </p>
+            ))}
+          </div>
+        ) : null}
       </div>
 
       <div className="library-layout">

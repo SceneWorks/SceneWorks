@@ -4,6 +4,7 @@ import { AssetDetail, AssetGrid, FullscreenPreview, emptyTrash } from "../compon
 import { AssetThumbnail } from "../components/assetMedia.jsx";
 import { DatasetAddDialog } from "../components/DatasetAddDialog.jsx";
 import { useAppContext } from "../context/AppContext.js";
+import { selectJobs, useJobsSelector } from "../context/JobsContext.jsx";
 import { DEFAULT_MAC_CAPABILITIES, macFeatureBlock } from "../macGating.js";
 import { terminalStatuses } from "../jobTypes.js";
 import { GLOBAL_POSES_PROJECT_ID } from "../poseLibrary.js";
@@ -116,7 +117,8 @@ function annotateDuplicates(built, existingPoses) {
 // The "Create" tab body: pick photos (DatasetAddDialog), run DWPose, then review,
 // categorize, and save one whole-body pose per detected person to the store.
 function PoseCreatePanel({ hidden, categories, onSaved, existingPoses }) {
-  const { token, activeProject, assets = [], characters = [], requestedGpu, jobs = [] } = useAppContext();
+  const { token, activeProject, assets = [], characters = [], requestedGpu } = useAppContext();
+  const jobs = useJobsSelector(selectJobs);
   const [dialogOpen, setDialogOpen] = useState(false);
   const [sources, setSources] = useState([]); // selected source asset records
   const [phase, setPhase] = useState("idle"); // idle | detecting | review

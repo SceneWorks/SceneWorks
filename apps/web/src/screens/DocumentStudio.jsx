@@ -9,6 +9,13 @@ import {
   INTERLEAVE_RESOLUTION_OPTIONS,
 } from "../constants.js";
 import { useAppContext } from "../context/AppContext.js";
+import {
+  selectDocumentLocalJobs,
+  selectGpuOptions,
+  selectJobs,
+  useJobActions,
+  useJobsSelector,
+} from "../context/JobsContext.jsx";
 import { DEFAULT_MAC_CAPABILITIES } from "../macGating.js";
 import { documentModelUsable, downloadOffersFor } from "../modelEligibility.js";
 import { selectStackedJobs } from "./generationStudio.jsx";
@@ -44,18 +51,17 @@ export function DocumentStudio() {
     assets,
     createInterleaveJob,
     createModelDownloadJob,
-    documentLocalJobs = [],
-    gpuOptions,
     imageModels,
-    jobs = [],
-    jobAction,
     macCapabilities = DEFAULT_MAC_CAPABILITIES,
     models = [],
-    rememberLocalGenerationJob,
     setActiveView,
     requestedGpu,
     setRequestedGpu,
   } = useAppContext();
+  const jobs = useJobsSelector(selectJobs);
+  const documentLocalJobs = useJobsSelector(selectDocumentLocalJobs);
+  const gpuOptions = useJobsSelector(selectGpuOptions);
+  const { jobAction, rememberLocalGenerationJob } = useJobActions();
   const onCancelJob = (job) => jobAction(job, "cancel");
   const onOpenQueue = () => setActiveView("Queue");
   const interleaveModels = useMemo(

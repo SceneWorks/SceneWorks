@@ -5161,6 +5161,7 @@ dependencies = [
 name = "sceneworks-desktop"
 version = "0.2.0"
 dependencies = [
+ "getrandom 0.3.4",
  "keyring",
  "nix",
  "sceneworks-core",

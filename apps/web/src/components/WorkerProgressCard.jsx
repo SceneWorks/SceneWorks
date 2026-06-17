@@ -1,7 +1,7 @@
 import React, { useEffect, useMemo, useState } from "react";
 import { actionStatuses, terminalStatuses } from "../jobTypes.js";
 import { formatSeconds, liveElapsedSeconds, percent } from "../formatting.js";
-import { useAppContext } from "../context/AppContext.js";
+import { selectVisibleWorkers, selectWorkersById, useJobsSelector } from "../context/JobsContext.jsx";
 import { deriveWorkerHardware, findWorkerForJob, liveMeters } from "../workers.js";
 import { AssetMedia, AssetThumbnail, assetUrl, posterUrl } from "./assetMedia.jsx";
 
@@ -391,7 +391,8 @@ export function WorkerProgressCard({
   expectedThumbnailCount,
   onThumbnailClick,
 }) {
-  const { workersById, visibleWorkers } = useAppContext();
+  const workersById = useJobsSelector(selectWorkersById);
+  const visibleWorkers = useJobsSelector(selectVisibleWorkers);
   const worker = useMemo(() => {
     if (job.workerId && workersById?.get) {
       const direct = workersById.get(job.workerId);

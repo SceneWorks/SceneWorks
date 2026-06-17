@@ -6,7 +6,7 @@ use std::path::PathBuf;
 use std::process::Command;
 
 use serde::{Deserialize, Serialize};
-use tauri::{AppHandle, Manager};
+use tauri::{AppHandle, Manager, WebviewWindow};
 use tauri_plugin_dialog::DialogExt;
 
 use crate::setup::{app_support_dir, default_data_dir, shared_huggingface_home, Managed};
@@ -331,7 +331,12 @@ pub fn save_storage_setup(data_dir: String, hf_home: String) -> Result<AppSettin
 /// Mark the in-app setup wizard (Steps 2-3) complete so the studio shows on
 /// subsequent loads.
 #[tauri::command]
-pub fn complete_setup() -> Result<(), String> {
+pub fn complete_setup(
+    app: AppHandle,
+    webview: WebviewWindow,
+    trust_nonce: String,
+) -> Result<(), String> {
+    crate::setup::require_trusted_nonce(&app, &webview, &trust_nonce)?;
     let mut settings = load_settings();
     settings.setup_completed = true;
     save_settings(&settings)
@@ -341,7 +346,12 @@ pub fn complete_setup() -> Result<(), String> {
 /// setup wizard). Storage configuration is left in place — relocating the data
 /// dir is a separate, restart-bound action handled by the data-directory control.
 #[tauri::command]
-pub fn reset_setup() -> Result<(), String> {
+pub fn reset_setup(
+    app: AppHandle,
+    webview: WebviewWindow,
+    trust_nonce: String,
+) -> Result<(), String> {
+    crate::setup::require_trusted_nonce(&app, &webview, &trust_nonce)?;
     let mut settings = load_settings();
     settings.setup_completed = false;
     save_settings(&settings)
@@ -382,7 +392,13 @@ pub async fn choose_data_dir(app: AppHandle) -> Option<String> {
 }
 
 #[tauri::command]
-pub fn reveal_in_os(path: String) -> Result<(), String> {
+pub fn reveal_in_os(
+    app: AppHandle,
+    webview: WebviewWindow,
+    path: String,
+    trust_nonce: String,
+) -> Result<(), String> {
+    crate::setup::require_trusted_nonce(&app, &webview, &trust_nonce)?;
     let target = validate_reveal_target(&path)?;
     let result = if cfg!(target_os = "macos") {
         Command::new("open").arg("-R").arg(&target).status()
@@ -431,8 +447,7 @@ fn validate_reveal_target(path: &str) -> Result<PathBuf, String> {
 
 /// Enumerate stored credentials for the Settings screen: host, label, scheme, and
 /// whether the secret is present in the keychain. Never returns the token itself.
-#[tauri::command]
-pub fn list_credentials() -> Vec<CredentialStatus> {
+fn credential_statuses() -> Vec<CredentialStatus> {
     load_settings()
         .credentials
         .into_iter()
@@ -448,16 +463,28 @@ pub fn list_credentials() -> Vec<CredentialStatus> {
         .collect()
 }
 
+#[tauri::command]
+pub fn list_credentials(
+    app: AppHandle,
+    webview: WebviewWindow,
+) -> Result<Vec<CredentialStatus>, String> {
+    crate::setup::require_trusted_webview(&app, &webview)?;
+    Ok(credential_statuses())
+}
+
 /// Save (or overwrite) the token for a host in the OS keychain and record its
 /// non-secret metadata. The token is write-only — it is never read back to the UI.
 #[tauri::command]
 pub fn set_credential(
     app: AppHandle,
+    webview: WebviewWindow,
     host: String,
     label: String,
     scheme: CredentialScheme,
     token: String,
+    trust_nonce: String,
 ) -> Result<Vec<CredentialStatus>, String> {
+    crate::setup::require_trusted_nonce(&app, &webview, &trust_nonce)?;
     let host = normalize_host(&host);
     if host.is_empty() {
         return Err("A host is required (e.g. huggingface.co).".to_owned());
@@ -491,12 +518,18 @@ pub fn set_credential(
     // Drop any cached secret for this host so the worker pulls the new token on its
     // next download without an app restart (sc-5891).
     crate::setup::invalidate_credential_cache(&app, &host);
-    Ok(list_credentials())
+    Ok(credential_statuses())
 }
 
 /// Remove a host's credential from the keychain and drop its metadata.
 #[tauri::command]
-pub fn delete_credential(app: AppHandle, host: String) -> Result<Vec<CredentialStatus>, String> {
+pub fn delete_credential(
+    app: AppHandle,
+    webview: WebviewWindow,
+    host: String,
+    trust_nonce: String,
+) -> Result<Vec<CredentialStatus>, String> {
+    crate::setup::require_trusted_nonce(&app, &webview, &trust_nonce)?;
     let host = normalize_host(&host);
     if let Ok(entry) = keyring::Entry::new(KEYRING_SERVICE, &cred_account(&host)) {
         match entry.delete_credential() {
@@ -517,11 +550,16 @@ pub fn delete_credential(app: AppHandle, host: String) -> Result<Vec<CredentialS
     // Drop the cached secret so a revoked credential stops being served by the
     // credential socket without an app restart (sc-5891).
     crate::setup::invalidate_credential_cache(&app, &host);
-    Ok(list_credentials())
+    Ok(credential_statuses())
 }
 
 #[tauri::command]
-pub fn restart_worker(app: AppHandle) {
+pub fn restart_worker(
+    app: AppHandle,
+    webview: WebviewWindow,
+    trust_nonce: String,
+) -> Result<(), String> {
+    crate::setup::require_trusted_nonce(&app, &webview, &trust_nonce)?;
     // Kill the current worker child; the supervisor restarts it.
     if let Some(child) = app
         .state::<Managed>()
@@ -532,10 +570,16 @@ pub fn restart_worker(app: AppHandle) {
     {
         let _ = child.kill();
     }
+    Ok(())
 }
 
 #[tauri::command]
-pub fn get_gpu_info() -> GpuInfo {
+pub fn get_gpu_info(
+    app: AppHandle,
+    webview: WebviewWindow,
+    trust_nonce: String,
+) -> Result<GpuInfo, String> {
+    crate::setup::require_trusted_nonce(&app, &webview, &trust_nonce)?;
     #[cfg(target_os = "macos")]
     {
         let mut devices = Vec::new();
@@ -552,12 +596,12 @@ pub fn get_gpu_info() -> GpuInfo {
         let wired_limit_mb = run_capture("sysctl", &["-n", "iogpu.wired_limit_mb"])
             .and_then(|value| value.parse::<u64>().ok())
             .filter(|value| *value > 0);
-        GpuInfo {
+        Ok(GpuInfo {
             platform: "macos".to_owned(),
             devices,
             unified_memory_mb,
             wired_limit_mb,
-        }
+        })
     }
     #[cfg(target_os = "windows")]
     {
@@ -578,24 +622,24 @@ pub fn get_gpu_info() -> GpuInfo {
                 }
             }
         }
-        GpuInfo {
+        Ok(GpuInfo {
             platform: "windows".to_owned(),
             devices,
             unified_memory_mb: None,
             wired_limit_mb: None,
-        }
+        })
     }
     #[cfg(all(unix, not(target_os = "macos")))]
     {
         let devices = run_capture("nvidia-smi", &["--query-gpu=name", "--format=csv,noheader"])
             .map(|output| output.lines().map(str::to_owned).collect())
             .unwrap_or_default();
-        GpuInfo {
+        Ok(GpuInfo {
             platform: "linux".to_owned(),
             devices,
             unified_memory_mb: None,
             wired_limit_mb: None,
-        }
+        })
     }
 }
 

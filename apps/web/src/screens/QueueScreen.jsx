@@ -3,6 +3,16 @@ import { WorkerProgressCard } from "../components/WorkerProgressCard.jsx";
 import { terminalStatuses } from "../constants.js";
 import { GPU_REQUIRED_JOB_TYPES, NON_GPU_JOB_TYPES } from "../jobTypes.js";
 import { useAppContext } from "../context/AppContext.js";
+import {
+  selectFilteredJobs,
+  selectGpuOptions,
+  selectJobPrompt,
+  selectJobs,
+  selectProjectFilter,
+  selectVisibleWorkers,
+  useJobActions,
+  useJobsSelector,
+} from "../context/JobsContext.jsx";
 
 function formatJobType(type) {
   return String(type ?? "job").replaceAll("_", " ");
@@ -185,21 +195,18 @@ export function QueueScreen() {
   const {
     activeProject,
     assets = [],
-    createPlaceholderJob,
-    filteredJobs,
-    gpuOptions,
-    jobAction,
-    jobs = filteredJobs,
-    jobPrompt,
-    projectFilter,
     projects,
     requestedGpu,
-    setJobPrompt,
-    setProjectFilter,
     setPreviewAsset,
     setRequestedGpu,
-    visibleWorkers,
   } = useAppContext();
+  const { createPlaceholderJob, jobAction, setJobPrompt, setProjectFilter } = useJobActions();
+  const filteredJobs = useJobsSelector(selectFilteredJobs);
+  const gpuOptions = useJobsSelector(selectGpuOptions);
+  const jobs = useJobsSelector(selectJobs);
+  const jobPrompt = useJobsSelector(selectJobPrompt);
+  const projectFilter = useJobsSelector(selectProjectFilter);
+  const visibleWorkers = useJobsSelector(selectVisibleWorkers);
   const createJob = createPlaceholderJob;
   const workers = visibleWorkers;
   // Prefer the shared index from context (sc-2082); fall back for legacy
