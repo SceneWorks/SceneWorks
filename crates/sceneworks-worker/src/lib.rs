@@ -115,6 +115,14 @@ mod openpose_skeleton;
     all(not(target_os = "macos"), feature = "backend-candle")
 ))]
 mod pose_jobs;
+// CUDA execution-provider dependency preloading for the off-Mac candle `ort` paths
+// (sc-6209, epic 5482): `ort::ep::cuda::preload_dylibs` dlopens the CUDA-12 runtime +
+// cuDNN-9 DLLs the onnxruntime CUDA EP needs, so it engages the GPU regardless of PATH
+// (the Mac CoreML path needs no equivalent). Shared by pose_jobs (DWPose, sc-5496) +
+// person_jobs (YOLO, sc-5498), and Real-ESRGAN (sc-5499) next — gated to the candle GPU
+// lane only.
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+mod ort_cuda;
 // SCRFD 5-point face-landmark extraction (epic 4422, sc-4433): native-MLX SCRFD on Mac, plus the
 // candle SCRFD/ArcFace stack on the Windows/Linux candle lane (sc-5497, epic 5482) — the same
 // InstantID face-stack detector reused in-process for the Key Point Library "extract kps from this
