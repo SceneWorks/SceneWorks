@@ -82,24 +82,27 @@ describe("macGating helpers", () => {
     expect(macUpscaleEngineBlocked(DEFAULT_MAC_CAPABILITIES, "aura-sr")).toBe(false);
   });
 
-  it("offers SeedVR2 only where the capability confirms support — Mac-only (epic 4811 / sc-4815)", () => {
+  it("offers SeedVR2 wherever the capability confirms a backend — Mac + Windows + Linux (epic 4811 / sc-5928 / sc-5160)", () => {
     // Supported on Mac (the capability is true) → shown.
     expect(macUpscaleEngineBlocked(gating, "seedvr2")).toBe(false);
-    // Pre-load (no features) and on Windows/Linux (capability absent/false) → hidden, even though
-    // gating is inert there. This is the INVERSE of AuraSR's gating.
+    // Pre-load (no features) → hidden until the capability endpoint responds. INVERSE of AuraSR.
     expect(macUpscaleEngineBlocked(DEFAULT_MAC_CAPABILITIES, "seedvr2")).toBe(true);
+    // Windows has the candle CUDA backend (sc-5928): the capability is true → shown.
     const windows = {
       ...DEFAULT_MAC_CAPABILITIES,
       platform: "windows",
-      features: {
-        imageUpscaleSeedvr2: {
-          supported: false,
-          reason: { feature: "image_upscale (SeedVR2)", detail: "Mac-only.", suggestedEpic: "sc-5157" },
-        },
-      },
+      features: { imageUpscaleSeedvr2: { supported: true } },
     };
-    expect(macUpscaleEngineBlocked(windows, "seedvr2")).toBe(true);
+    expect(macUpscaleEngineBlocked(windows, "seedvr2")).toBe(false);
     expect(macUpscaleEngineBlocked(windows, "real-esrgan")).toBe(false);
+    // Linux now has the same candle CUDA/NVIDIA backend (sc-5160 — candle is cross-platform, so Linux
+    // rides the Windows port): the capability is true → shown there too.
+    const linux = {
+      ...DEFAULT_MAC_CAPABILITIES,
+      platform: "linux",
+      features: { imageUpscaleSeedvr2: { supported: true } },
+    };
+    expect(macUpscaleEngineBlocked(linux, "seedvr2")).toBe(false);
   });
 
   it("blocks a training kernel without a native Rust trainer", () => {

@@ -1,21 +1,24 @@
 name: Release (desktop)
 
-# SCAFFOLD / STARTING POINT — sc-5930. Builds, signs, notarizes, staples, and
-# publishes a DRAFT GitHub Release of the macOS desktop app when a `v*` tag is
-# pushed. Only runs on a version tag or manual dispatch — never on push/PR.
+# Builds, signs, notarizes, staples, and publishes a DRAFT GitHub Release of the
+# macOS desktop app when a `v*` tag is pushed (or via manual dispatch). Mirrors the
+# local release flow (`npm run release:mac`): `tauri build` signs + notarizes the
+# .app via the APPLE_* env (from repo secrets), then staple-dmg.mjs staples the DMG.
 #
-# NOT YET WIRED: a tag push will fail at the signing/notarization step until the
-# following are available on the self-hosted `nax` runner (or as repo secrets):
-#   APPLE_SIGNING_IDENTITY  e.g. "Developer ID Application: Michael Trefry (R2526H7YN9)"
+# Runs on the self-hosted `nax` runner — GitHub-hosted images can't build at the
+# macOS 26.2 deployment target (see macos-mlx.yml). The Developer ID cert lives in
+# that runner's login keychain, so `codesign` uses it directly and no base64
+# APPLE_CERTIFICATE import is needed. Required repo secrets:
+#   APPLE_SIGNING_IDENTITY  "Developer ID Application: … (TEAMID)"
 #   APPLE_API_ISSUER        App Store Connect API issuer UUID
 #   APPLE_API_KEY           App Store Connect API key id
-#   APPLE_API_KEY_PATH      path to the .p8 key on the runner (or write from a secret)
-# The Developer ID cert is ALREADY in the nax runner's login keychain, so the
-# base64 APPLE_CERTIFICATE -> temp-keychain import that ephemeral runners need is
-# NOT required here. Build prerequisites on the runner (root npm deps for the
-# embedded web/api build invoked by tauri.conf beforeBuildCommand, Rust toolchain)
-# still need validation. Verify end-to-end with a throwaway tag (e.g. v0.0.0-rc.1)
-# before relying on this. See sc-5930.
+#   APPLE_API_KEY_PATH      path to the .p8 ON the runner (valid because the runner
+#                           is the signing Mac; a cloud runner would instead store
+#                           the .p8 contents as a secret and write it to a temp file)
+#
+# Tag/dispatch only — never push/PR. NOTE: `codesign` needs the login keychain
+# unlocked in the runner's session; verify end-to-end with a throwaway tag (e.g.
+# v0.0.0-rc.1) before relying on this. See sc-5930.
 
 on:
   push:
@@ -31,8 +34,7 @@ concurrency:
 
 jobs:
   macos:
-    # Self-hosted macOS 26.2 runner: GitHub-hosted images can't build at that
-    # deployment target (see macos-mlx.yml). Same-repo only — never run fork code.
+    # Self-hosted macOS 26.2 runner; same-repo only — never run fork code.
     if: ${{ github.repository == 'michaeltrefry/SceneWorks' }}
     runs-on: [self-hosted, macOS, ARM64, nax]
     env:
@@ -41,34 +43,52 @@ jobs:
       APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
       APPLE_API_KEY_PATH: ${{ secrets.APPLE_API_KEY_PATH }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v5
         with:
           node-version: "20"
 
-      # Build the signed + notarized .app + DMG and create a DRAFT release with the
-      # asset attached. tauri-action runs the tauri.conf beforeBuildCommand, which
-      # stages the sidecar + web UI and applies the nested-binary pre-signing from
-      # PR #715.
-      - name: Build, sign, notarize & draft-release
-        uses: tauri-apps/tauri-action@v0
-        with:
-          projectPath: apps/desktop
-          tagName: ${{ github.ref_name }}
-          releaseName: SceneWorks ${{ github.ref_name }}
-          releaseDraft: true
-          # TODO(sc-5930): wire the release body / changelog source.
+      # Install JS deps for the two packages the desktop build needs: apps/web (the
+      # embedded UI, built by the tauri.conf beforeBuildCommand → api:build:embedded
+      # → web:build) and apps/desktop (the @tauri-apps/cli that `tauri build` runs).
+      # The repo root has no JS deps — it only orchestrates.
+      - name: Install web + desktop JS deps
+        run: |
+          npm ci --prefix apps/web
+          npm ci --prefix apps/desktop
 
-      # tauri-action staples the .app but not the wrapping .dmg, and uploads the
-      # un-stapled DMG. Staple the DMG (shared script) and replace the release asset
-      # so the downloaded file verifies offline.
-      - name: Staple the DMG and replace the release asset
+      # `tauri build` runs the beforeBuildCommand (sidecar + web/api + the nested
+      # binary pre-signing from #715) and, because the APPLE_* env is set, signs +
+      # notarizes + staples the .app. This is the heavy MLX-from-source build; the
+      # nax runner keeps it warm.
+      - name: Build, sign & notarize the desktop bundle
+        run: npm run build --prefix apps/desktop
+
+      # Tauri staples the .app but not the wrapping .dmg — staple the DMG so the
+      # downloaded artifact verifies offline (shared script; same as `release:mac`).
+      - name: Staple the DMG
+        run: node apps/desktop/scripts/staple-dmg.mjs
+
+      # Create a DRAFT release with the already-stapled DMG attached (review before
+      # publishing). The body is a fixed install blurb followed by auto-generated
+      # notes (--generate-notes appends a changelog of merged PRs since the last
+      # release). Tags with a pre-release suffix (e.g. v1.2.3-rc.1) are marked
+      # prerelease. The tag name goes through an env var, not inline `${{ }}`, to
+      # avoid script-injection from the ref.
+      - name: Draft GitHub Release with the stapled DMG
         shell: bash
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ github.ref_name }}
         run: |
-          node apps/desktop/scripts/staple-dmg.mjs
           shopt -s nullglob
           dmgs=(target/release/bundle/dmg/*.dmg)
-          gh release upload "${{ github.ref_name }}" "${dmgs[0]}" --clobber
+          if [ ${#dmgs[@]} -eq 0 ]; then
+            echo "No DMG produced under target/release/bundle/dmg/" >&2
+            exit 1
+          fi
+          args=(--draft --generate-notes --title "SceneWorks $TAG"
+                --notes "Signed & notarized macOS build (Apple Silicon, macOS 26.2+). Open the DMG and drag SceneWorks to Applications.")
+          case "$TAG" in *-*) args+=(--prerelease) ;; esac
+          gh release create "$TAG" "${args[@]}" "${dmgs[0]}"

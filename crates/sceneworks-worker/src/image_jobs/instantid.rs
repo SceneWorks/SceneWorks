@@ -33,7 +33,7 @@ const INSTANTID_FACE_RESTORE_SIDE: u32 = 1024;
 /// lanes in the asset sidecar + the `instantIdEngine` raw-settings key.
 #[cfg(target_os = "macos")]
 const INSTANTID_ENGINE: &str = "mlx_instantid";
-#[cfg(all(target_os = "windows", feature = "backend-candle"))]
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 const INSTANTID_ENGINE: &str = "candle_instantid";
 
 /// How an InstantID character job batches its iterations (torch-parity precedence: a pose set
@@ -488,6 +488,14 @@ async fn generate_instantid_stream(
     let (controlnet, ip_adapter, scrfd_path, arcface_path) =
         ensure_instantid_weights(api, settings, job).await?;
 
+    // User style/character LoRAs (sc-6038). InstantID is a stock SDXL (RealVisXL) UNet, so SDXL
+    // adapters apply on top of IdentityNet + the identity IP-Adapter — and the manifest advertises
+    // `families:[sdxl]`, so the picker offers them. Resolved + path-confined exactly like every other
+    // SDXL-family path (base.rs/sdxl.rs); merged onto the UNet by the engine `InstantIdPaths.adapters`
+    // seam. Shared across all three modes (identity / angle set / pose) since they share the one load.
+    let adapters = resolve_adapters(request, settings)?;
+    let adapter_count = adapters.len();
+
     let steps = instantid_steps(request);
     let guidance = instantid_guidance(request);
     let (quant_bits, recipe_bits) = instantid_quant(request);
@@ -495,7 +503,7 @@ async fn generate_instantid_stream(
     // knob entirely on this lane: don't apply it (the `quantize` step in the load closure is macOS-
     // only) and don't record it as applied (`recipe_bits` -> None). `let _` consumes the otherwise-
     // unused `quant_bits`.
-    #[cfg(all(target_os = "windows", feature = "backend-candle"))]
+    #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
     let recipe_bits: Option<i64> = {
         let _ = (quant_bits, recipe_bits);
         None
@@ -557,6 +565,11 @@ async fn generate_instantid_stream(
     }
     if face_restore {
         raw_settings.insert("faceRestore".to_owned(), Value::Bool(true));
+    }
+    // Record how many user LoRAs were merged onto the SDXL UNet (sc-6038) so the asset sidecar shows
+    // the adapters were applied (they previously rode the request but were silently dropped).
+    if adapter_count > 0 {
+        raw_settings.insert("appliedLoraCount".to_owned(), json!(adapter_count));
     }
     // Record which collection + ordered presets produced the set, so each asset (by index) maps
     // back to the preset that rendered it (sc-4450).
@@ -625,12 +638,17 @@ async fn generate_instantid_stream(
     let (cancel, rx, blocking) = start_gen_stream(
         job.id.clone(),
         "instantid",
-        0,
+        adapter_count,
         move || {
             let paths = InstantIdPaths {
                 sdxl_base,
                 identitynet: controlnet,
                 ip_adapter,
+                // User LoRA/LoKr adapters (sc-6038), resolved above and merged onto the SDXL UNet by
+                // both engine lanes (mlx-gen #477 / candle-gen #86 both carry the field; worker mlx
+                // pin now 19d5522, candle pin c98609f). Populated for BOTH backends — superseding the
+                // earlier candle-only `Vec::new()` stopgap from #730.
+                adapters,
             };
             let model = InstantId::load(&paths)
                 .map_err(|error| WorkerError::Engine(format!("InstantID load failed: {error}")))?;
@@ -666,18 +684,18 @@ async fn generate_instantid_stream(
                         "InstantID ArcFace weights {arcface_path:?}: {error}"
                     ))
                 })?;
-                model
-                    .with_face(&scrfd, &arcface)
-                    .map_err(|error| WorkerError::Engine(format!("InstantID face stack: {error}")))?
+                model.with_face(&scrfd, &arcface).map_err(|error| {
+                    WorkerError::Engine(format!("InstantID face stack: {error}"))
+                })?
             };
-            #[cfg(all(target_os = "windows", feature = "backend-candle"))]
+            #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
             let model = {
                 let face_dir = scrfd_path.parent().unwrap_or(scrfd_path.as_path());
                 // `arcface_path` is staged in the same dir; `with_face(dir)` resolves it by name.
                 let _ = &arcface_path;
-                model
-                    .with_face(face_dir)
-                    .map_err(|error| WorkerError::Engine(format!("InstantID face stack: {error}")))?
+                model.with_face(face_dir).map_err(|error| {
+                    WorkerError::Engine(format!("InstantID face stack: {error}"))
+                })?
             };
             // Face-restore needs the reference identity embedding (imposed on the re-rendered crop).
             // Detect it once on the raw reference. The candle `largest_face` takes the neutral
@@ -696,7 +714,7 @@ async fn generate_instantid_stream(
                         ))
                     })?
                     .embedding;
-                #[cfg(all(target_os = "windows", feature = "backend-candle"))]
+                #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
                 let embedding = model
                     .largest_face(&reference)
                     .map_err(|error| {

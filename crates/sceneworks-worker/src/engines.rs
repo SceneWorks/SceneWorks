@@ -169,6 +169,21 @@ pub(crate) const MODEL_TABLE: &[ModelRow] = &[
         default_guidance: 1.0,
         adapter_label: "mlx_flux2",
     },
+    // FLUX.2-dev (epic 5914) — the guidance-distilled 32B flagship. A SEPARATE engine
+    // model `flux2_dev` (Mistral3 TE + 48/48/15360 DiT), NOT a klein weight variant, so it
+    // maps to its own engine id. Embedded distilled guidance (FLUX.1-dev pattern, NOT
+    // true-CFG): the descriptor advertises `supports_guidance` but not negative prompt, so
+    // the engine takes the guidance scalar (default 4.0) over ~28 steps. Loaded from a
+    // pre-quantized Q4 dir assembled by the install-time `flux2_dev_quant` convert job
+    // (sc-5917 / sc-5921) — in-app Q4 load of the dense bf16 snapshot would peak ~105 GB.
+    ModelRow {
+        sceneworks_id: "flux2_dev",
+        engine_id: "flux2_dev",
+        default_repo: "black-forest-labs/FLUX.2-dev",
+        default_steps: 28,
+        default_guidance: 4.0,
+        adapter_label: "mlx_flux2",
+    },
     // SDXL (sc-3026) — U-Net, real CFG (negative prompt + guidance 7.0), 30 steps.
     // `sdxl` and the `realvisxl` finetune share the engine's single `sdxl` model
     // (identical arch), differing only in weights. Replaces the in-process
@@ -356,7 +371,7 @@ pub(crate) const TRAINER_IDS: &[&str] = &[
 /// only decides which provider crate registered the descriptor, not how it is resolved.
 #[cfg(any(
     target_os = "macos",
-    all(target_os = "windows", feature = "backend-candle")
+    all(not(target_os = "macos"), feature = "backend-candle")
 ))]
 pub(crate) struct ResolvedModel {
     pub row: &'static ModelRow,
@@ -365,7 +380,7 @@ pub(crate) struct ResolvedModel {
 
 #[cfg(any(
     target_os = "macos",
-    all(target_os = "windows", feature = "backend-candle")
+    all(not(target_os = "macos"), feature = "backend-candle")
 ))]
 impl ResolvedModel {
     pub fn engine_id(&self) -> &'static str {
@@ -384,7 +399,7 @@ impl ResolvedModel {
     // `image_jobs::candle_adapter_label` instead, so this accessor is MLX-path-only — silence the
     // dead-code lint on the candle-only build where the macOS dispatch is cfg'd out.
     #[cfg_attr(
-        all(target_os = "windows", feature = "backend-candle"),
+        all(not(target_os = "macos"), feature = "backend-candle"),
         allow(dead_code)
     )]
     pub fn adapter_label(&self) -> &'static str {
@@ -403,14 +418,14 @@ impl ResolvedModel {
     /// candle SDXL / sc-5096 families advertise none (dense only); Lens advertises Q4/Q8 (sc-5126).
     /// Candle-lane-only: the MLX path always resolves quant unconditionally, so this gate is unused
     /// on macOS.
-    #[cfg(all(target_os = "windows", feature = "backend-candle"))]
+    #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
     pub fn supports_quant(&self) -> bool {
         !self.descriptor.capabilities.supported_quants.is_empty()
     }
     /// Whether the engine accepts LoRA/LoKr adapters (descriptor-derived). Lens is the first candle
     /// family to advertise either (sc-5126); the others advertise neither. Candle-lane-only for the
     /// same reason as [`Self::supports_quant`].
-    #[cfg(all(target_os = "windows", feature = "backend-candle"))]
+    #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
     pub fn supports_adapters(&self) -> bool {
         self.descriptor.capabilities.supports_lora || self.descriptor.capabilities.supports_lokr
     }
@@ -429,7 +444,7 @@ impl ResolvedModel {
 /// resolves the MLX engine on macOS — the candle `generate_candle_stream` calls it directly.
 #[cfg(any(
     target_os = "macos",
-    all(target_os = "windows", feature = "backend-candle")
+    all(not(target_os = "macos"), feature = "backend-candle")
 ))]
 pub(crate) fn mlx_model(sceneworks_id: &str) -> Option<ResolvedModel> {
     let row = MODEL_TABLE

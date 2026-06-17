@@ -564,8 +564,13 @@
         "schedulers": ["shift"]
       },
       "loraCompatibility": {
-        // An 8-step distill LoRA exists upstream but is not wired yet.
-        "families": [],
+        // SenseNova-U1 is an 8B MoT autoregressive image model with no diffusion-LoRA merge path,
+        // so no user LoRAs apply. Declare the model's own family rather than [] (sc-6038): an empty
+        // list matches EVERY LoRA in the picker (loraMatchesModel returns true when the model has no
+        // families) while the worker drops them all (sensenova.rs loads Vec::new()) — a silent
+        // ignore. No LoRA declares `sensenova-u1`, so the picker correctly offers none. (An 8-step
+        // distill LoRA exists upstream but is not wired.)
+        "families": ["sensenova-u1"],
         "types": []
       },
       "ui": {
@@ -634,8 +639,11 @@
         "schedulers": ["shift"]
       },
       "loraCompatibility": {
-        // The distill LoRA is baked into this variant; user LoRAs are not wired.
-        "families": [],
+        // No user-LoRA path (MoT autoregressive; the distill LoRA is baked into this variant).
+        // Declare the model's own family rather than [] (sc-6038): an empty list matches every LoRA
+        // in the picker but the worker drops them — no LoRA declares `sensenova-u1`, so none are
+        // offered.
+        "families": ["sensenova-u1"],
         "types": []
       },
       "ui": {
@@ -1188,6 +1196,119 @@
           "sources": [
             { "label": "Flux2-Klein-9B-True-V2 model card", "url": "https://huggingface.co/wikeeyang/Flux2-Klein-9B-True-V2" },
             { "label": "FLUX.2 [klein] 9B model card", "url": "https://huggingface.co/black-forest-labs/FLUX.2-klein-9B" }
+          ]
+        }
+      }
+    },
+    {
+      "id": "flux2_dev",
+      "name": "FLUX.2 [dev]",
+      "family": "flux2-dev",
+      "type": "image",
+      // FLUX.2 [dev] (epic 5914) — the guidance-distilled 32B flagship, a SEPARATE
+      // model from klein: a Mistral3 text encoder (vs klein's Qwen3) + a 48/48/15360
+      // DiT, ported natively to mlx-gen (sc-5915/5916/5917/2365). MLX-only (no torch
+      // backend), Mac-only. Shares the `mlx_flux2` adapter + the `flux2` engine.
+      // Image edit + reference (sc-5919/5922): reference image(s) condition via the
+      // DiT token concat through the `flux2_dev_edit` variant — the same surface as
+      // klein. Pose library is best-effort (skeleton-as-edit-image, like klein); the
+      // real FLUX.2-dev pose ControlNet is sc-2292.
+      "adapter": "mlx_flux2",
+      "capabilities": ["text_to_image", "edit_image", "character_image", "style_variations"],
+      "macOnly": true,
+      "downloads": [
+        {
+          // Gated repo (FLUX [dev] Non-Commercial License v2.0). The repo ships BOTH
+          // the BFL single-file (flux2-dev.safetensors / ae.safetensors, ~60 GB) AND
+          // the diffusers tree; the native loader/converter reads ONLY the diffusers
+          // subdirs, so include just those (+ model_index.json) and skip the redundant
+          // ~60 GB single-file. ~113 GiB downloaded.
+          "provider": "huggingface",
+          "repo": "black-forest-labs/FLUX.2-dev",
+          "files": ["model_index.json", "transformer/*", "text_encoder/*", "vae/*", "tokenizer/*"],
+          "estimatedSizeBytes": 112823015150
+        }
+      ],
+      "defaults": {
+        // Guidance-distilled (embedded scalar, NOT true-CFG): ~28 steps (24–50 ok) at
+        // guidance 4.0 — the FLUX.1-dev pattern, no negative prompt. (sc-2365.)
+        "resolution": "1024x1024",
+        "steps": 28,
+        "guidanceScale": 4.0,
+        "count": 1
+      },
+      "limits": {
+        "resolutions": ["768x768", "1024x1024", "1280x720", "720x1280"],
+        "count": [1, 2]
+      },
+      // 32B DiT + ~24B Mistral TE. In-app Q4 *load* of the dense bf16 snapshot peaks
+      // ~105 GB (> the 128 GB ceiling), so the snapshot is pre-quantized to Q4 ON DISK
+      // by the install-time convert job (mlx.requiresConversion + the `flux2_dev_quant`
+      // converter, sc-5917): the offline quantize peaks ~34.5 GB. The worker then loads
+      // the packed dir (load `.quantize()` is a no-op on already-packed weights). Q4
+      // weights floor ~30 GB but generate is activation-bound — 1024²/28 peaks ~74 GB
+      // (sc-2365) — so minMemoryGb 96 (128 GB Macs only). The convert pre-quantizes
+      // transformer + text_encoder and symlinks the (identical-to-klein) VAE +
+      // tokenizer + model_index.json from the gated source snapshot.
+      "mlx": {
+        "minMemoryGb": 96,
+        "quantize": 4,
+        "requiresConversion": true,
+        "converter": "flux2_dev_quant",
+        "convertSourceRepo": "black-forest-labs/FLUX.2-dev"
+      },
+      "gated": true,
+      "credentialHost": "huggingface.co",
+      "licenseUrl": "https://huggingface.co/black-forest-labs/FLUX.2-dev",
+      "ui": {
+        "label": "FLUX.2 [dev]",
+        "description": "Black Forest Labs FLUX.2 [dev] — the 32B guidance-distilled flagship text-to-image + reference-editing model, ported natively to MLX (Apple Silicon only). A larger, higher-fidelity sibling of FLUX.2 [klein] with a Mistral-3 text encoder and a 48-layer flow transformer; runs ~28 steps at guidance 4.0. Supports reference editing — drop in a source or character image and the model conditions on it (single + multi-image), the same surface as FLUX.2 [klein]. Pre-quantized to Q4 at install (the dense weights are too large to quantize in memory) and needs a 128 GB Mac (~74 GB peak at 1024²; reference editing adds the reference tokens on top, so expect higher peaks and slower renders than klein). Distributed under the FLUX [dev] Non-Commercial License (gated): accept the license at huggingface.co/black-forest-labs/FLUX.2-dev and add a Hugging Face token under Settings → Service credentials before downloading. LoRAs are coming separately.",
+        "recommendedFor": ["text_to_image", "character_image", "style_variations"],
+        // Embedded-guidance edit knob: maps to the dev guidance scale (default 4.0,
+        // 1–10), the same "Prompt strength" surface as the klein edit variants
+        // (mlx_flux2 adapter). The reference is concatenated structurally (not a
+        // strength blend), so this knob steers prompt adherence, not blend weight.
+        "variationStrength": {
+          "label": "Prompt strength",
+          "default": 4.0,
+          "min": 1.0,
+          "max": 10.0,
+          "step": 0.5
+        },
+        // Shares the FLUX.2-klein angle set (same mlx_flux2 adapter + flux2 prompt
+        // augments): per-angle prompt over a shared seed + the reference image.
+        "viewAngles": [
+          { "id": "three_quarter_left", "label": "Three-quarter left" },
+          { "id": "three_quarter_right", "label": "Three-quarter right" },
+          { "id": "left_profile", "label": "Left profile" },
+          { "id": "right_profile", "label": "Right profile" },
+          { "id": "up", "label": "Looking up" },
+          { "id": "down", "label": "Looking down" },
+          { "id": "up_left", "label": "Up · left" },
+          { "id": "up_right", "label": "Up · right" },
+          { "id": "down_left", "label": "Down · left" },
+          { "id": "down_right", "label": "Down · right" },
+          { "id": "front", "label": "Front" }
+        ],
+        // Strict pose tier (sc-2292 engine + sc-6055 wiring): on the macOS MLX backend
+        // the worker renders the selected library pose to an OpenPose skeleton and
+        // conditions the ported FLUX.2-dev Fun-Controlnet-Union branch on it (true pose
+        // lock via the `flux2_dev_control` registry generator, one image per pose), not
+        // the best-effort `MultiReference [skeleton, reference]` edit tier. The control
+        // checkpoint (`alibaba-pai/FLUX.2-dev-Fun-Controlnet-Union`, ~8 GB) is fetched on
+        // the first pose job. A pose job with NO reference is pure pose; a reference is an
+        // opt-in img2img-init (advanced.referenceStrength). Surfaces dev in the Character
+        // Studio pose picker (character_image not required — poseLibrary gates the picker).
+        "poseLibrary": true,
+        // Strict ControlNet → expose the pose-lock-strength slider (advanced.controlScale;
+        // the dev Fun-Controlnet-Union README recommends 0.65–0.80, worker default 0.75).
+        "poseControlScale": true,
+        "promptGuide": {
+          "title": "FLUX.2 [dev] Prompt Guide",
+          "path": "/prompt-guides/flux2-dev.md",
+          "sources": [
+            { "label": "FLUX.2 [dev] model card", "url": "https://huggingface.co/black-forest-labs/FLUX.2-dev" },
+            { "label": "FLUX.2 announcement", "url": "https://bfl.ai/blog/flux-2" }
           ]
         }
       }

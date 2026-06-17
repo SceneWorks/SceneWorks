@@ -22,7 +22,7 @@ use super::*;
 // registration (id `prompt_refine`) from being dropped by the release linker. sc-5552 adds the native
 // MLX twin (`mlx_gen_prompt_refine`, backend `mlx`) alongside sc-5525's candle anchor; mirrors the
 // dual JoyCaption anchors in caption_jobs.rs.
-#[cfg(all(target_os = "windows", feature = "backend-candle"))]
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 use candle_gen_prompt_refine as _;
 #[cfg(target_os = "macos")]
 use mlx_gen_prompt_refine as _;
@@ -32,26 +32,26 @@ use mlx_gen_prompt_refine as _;
 // twin on macOS and the candle provider on the Windows candle build.
 #[cfg(any(
     target_os = "macos",
-    all(target_os = "windows", feature = "backend-candle")
+    all(not(target_os = "macos"), feature = "backend-candle")
 ))]
 const PROMPT_REFINE_ENGINE_ID: &str = "prompt_refine";
 // Default refinement checkpoint — the small abliterated Llama-3.2-3B instruction model, parity with
 // the Python `DEFAULT_REFINE_MODEL`. Overridable per-job via `payload.model`.
 #[cfg(any(
     target_os = "macos",
-    all(target_os = "windows", feature = "backend-candle")
+    all(not(target_os = "macos"), feature = "backend-candle")
 ))]
 const DEFAULT_REFINE_MODEL: &str = "huihui-ai/Llama-3.2-3B-Instruct-abliterated";
 #[cfg(any(
     target_os = "macos",
-    all(target_os = "windows", feature = "backend-candle")
+    all(not(target_os = "macos"), feature = "backend-candle")
 ))]
 const CANCEL_MESSAGE: &str = "Prompt refinement canceled by user.";
 // Architecture-pill label for the streamed progress (mirrors the candle image/video paths): the MLX
 // twin on macOS, candle on the Windows candle build.
 #[cfg(target_os = "macos")]
 const REFINE_BACKEND: &str = "mlx";
-#[cfg(all(target_os = "windows", feature = "backend-candle"))]
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 const REFINE_BACKEND: &str = "candle";
 
 // ----------------------------------------------------------------------------------------------
@@ -66,7 +66,7 @@ const REFINE_BACKEND: &str = "candle";
 #[cfg(any(
     test,
     target_os = "macos",
-    all(target_os = "windows", feature = "backend-candle")
+    all(not(target_os = "macos"), feature = "backend-candle")
 ))]
 fn base_rules(medium: &str) -> String {
     [
@@ -105,7 +105,7 @@ fn base_rules(medium: &str) -> String {
 #[cfg(any(
     test,
     target_os = "macos",
-    all(target_os = "windows", feature = "backend-candle")
+    all(not(target_os = "macos"), feature = "backend-candle")
 ))]
 fn build_refine_system_prompt(guide: Option<&str>, workflow: Option<&str>) -> String {
     let medium = if workflow
@@ -131,7 +131,7 @@ fn build_refine_system_prompt(guide: Option<&str>, workflow: Option<&str>) -> St
 #[cfg(any(
     test,
     target_os = "macos",
-    all(target_os = "windows", feature = "backend-candle")
+    all(not(target_os = "macos"), feature = "backend-candle")
 ))]
 fn clean_refine_output(text: &str) -> String {
     let mut text = strip_think_blocks(text.trim()).trim().to_owned();
@@ -166,7 +166,7 @@ fn clean_refine_output(text: &str) -> String {
 #[cfg(any(
     test,
     target_os = "macos",
-    all(target_os = "windows", feature = "backend-candle")
+    all(not(target_os = "macos"), feature = "backend-candle")
 ))]
 fn strip_think_blocks(input: &str) -> String {
     const OPEN: &str = "<think>";
@@ -199,7 +199,7 @@ fn strip_think_blocks(input: &str) -> String {
 #[cfg(any(
     test,
     target_os = "macos",
-    all(target_os = "windows", feature = "backend-candle")
+    all(not(target_os = "macos"), feature = "backend-candle")
 ))]
 fn first_ci(haystack: &str, needle: &str) -> Option<usize> {
     let (h, n) = (haystack.as_bytes(), needle.as_bytes());
@@ -213,7 +213,7 @@ fn first_ci(haystack: &str, needle: &str) -> Option<usize> {
 #[cfg(any(
     test,
     target_os = "macos",
-    all(target_os = "windows", feature = "backend-candle")
+    all(not(target_os = "macos"), feature = "backend-candle")
 ))]
 fn last_ci(haystack: &str, needle: &str) -> Option<usize> {
     let (h, n) = (haystack.as_bytes(), needle.as_bytes());
@@ -233,7 +233,7 @@ fn last_ci(haystack: &str, needle: &str) -> Option<usize> {
 
 #[cfg(any(
     target_os = "macos",
-    all(target_os = "windows", feature = "backend-candle")
+    all(not(target_os = "macos"), feature = "backend-candle")
 ))]
 pub(crate) async fn run_prompt_refine_job(
     api: &ApiClient,
@@ -418,7 +418,7 @@ pub(crate) async fn run_prompt_refine_job(
 /// `prompt_refine`. Kept so the `run_utility_job` dispatch compiles on all targets.
 #[cfg(not(any(
     target_os = "macos",
-    all(target_os = "windows", feature = "backend-candle")
+    all(not(target_os = "macos"), feature = "backend-candle")
 )))]
 pub(crate) async fn run_prompt_refine_job(
     _api: &ApiClient,
@@ -434,7 +434,7 @@ pub(crate) async fn run_prompt_refine_job(
 
 #[cfg(any(
     target_os = "macos",
-    all(target_os = "windows", feature = "backend-candle")
+    all(not(target_os = "macos"), feature = "backend-candle")
 ))]
 fn refine_progress(
     status: JobStatus,
@@ -464,7 +464,7 @@ fn refine_progress(
 /// The `prompt_refine` result payload, parity with the Python `run_prompt_refine_job`.
 #[cfg(any(
     target_os = "macos",
-    all(target_os = "windows", feature = "backend-candle")
+    all(not(target_os = "macos"), feature = "backend-candle")
 ))]
 fn refine_result(original_prompt: &str, refined_prompt: &str) -> JsonObject {
     let mut result = JsonObject::new();

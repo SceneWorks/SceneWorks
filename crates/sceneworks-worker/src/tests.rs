@@ -664,6 +664,9 @@ fn model_table_rows_resolve_and_flags_match_descriptor() {
         ("flux2_klein_9b", true, false),
         ("flux2_klein_9b_kv", true, false),
         ("flux2_klein_9b_true_v2", true, false),
+        // FLUX.2-dev (epic 5914 / sc-5921): its own `flux2_dev` engine id, embedded distilled
+        // guidance (supports_guidance=true) with no negative prompt / true-CFG.
+        ("flux2_dev", true, false),
         ("sdxl", true, true),
         ("realvisxl", true, true),
         ("kolors", true, true),
@@ -2630,7 +2633,7 @@ async fn cancel_peek_tolerates_transient_get_errors() {
 // acknowledgement status is `running`, not the terminal `canceled`.
 #[cfg(any(
     target_os = "macos",
-    all(target_os = "windows", feature = "backend-candle")
+    all(not(target_os = "macos"), feature = "backend-candle")
 ))]
 async fn spawn_progress_capture_stub() -> (String, std::sync::Arc<std::sync::Mutex<Vec<Value>>>) {
     use std::sync::{Arc, Mutex};
@@ -2668,7 +2671,7 @@ async fn spawn_progress_capture_stub() -> (String, std::sync::Arc<std::sync::Mut
 /// until the GPU is genuinely free.
 #[cfg(any(
     target_os = "macos",
-    all(target_os = "windows", feature = "backend-candle")
+    all(not(target_os = "macos"), feature = "backend-candle")
 ))]
 #[tokio::test]
 async fn begin_video_cancel_trips_flag_and_stays_non_terminal() {

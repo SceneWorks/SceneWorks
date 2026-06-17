@@ -208,6 +208,16 @@ fn mlx_model_table_maps_known_families() {
         mlx_model("flux2_klein_9b_true_v2").unwrap().default_steps(),
         24
     );
+    // FLUX.2-dev (epic 5914): its OWN engine model (not a klein weight variant), embedded
+    // distilled guidance (guidance scalar, no negative prompt — like klein but ~28 steps /
+    // guidance 4.0). Shares the `mlx_flux2` adapter.
+    let dev = mlx_model("flux2_dev").unwrap();
+    assert_eq!(dev.engine_id(), "flux2_dev");
+    assert_eq!(dev.adapter_label(), "mlx_flux2");
+    assert_eq!(dev.default_repo(), "black-forest-labs/FLUX.2-dev");
+    assert_eq!(dev.default_steps(), 28);
+    assert_eq!(dev.default_guidance(), 4.0);
+    assert!(dev.supports_guidance() && !dev.supports_negative_prompt());
     // SDXL + the realvisxl finetune share the single `sdxl` engine model (real CFG).
     for id in ["sdxl", "realvisxl"] {
         let m = mlx_model(id).unwrap();
@@ -1182,6 +1192,26 @@ fn flux2_klein_9b_true_v2_real_weights_generates_one_image() {
     smoke_generate_one("flux2_klein_9b_true_v2", dir, Some(1.0), None);
 }
 
+/// Real-weights smoke (sc-5921 / sc-5923 boundary): FLUX.2-dev (embedded guidance, ~28-step).
+/// Loads the install-time pre-quantized Q4 dir under the SceneWorks data dir
+/// (`models/mlx/flux2_dev`, assembled by the `flux2_dev_quant` convert job) via the
+/// `flux2_dev` engine id — proving the worker's `mlx_gen_flux2` force-link reaches the dev
+/// loader and that the packed snapshot loads + generates (the Q8 LoadSpec hint is a no-op on
+/// the already-packed weights). Needs a previously-converted dir + a 128 GB Metal device.
+/// `SCENEWORKS_FLUX2_DEV_DIR` overrides the dir. Run on demand:
+/// `cargo test -p sceneworks-worker --lib -- --ignored flux2_dev_real_weights`.
+#[cfg(target_os = "macos")]
+#[test]
+#[ignore = "needs a converted FLUX.2-dev Q4 dir + 128 GB Metal device"]
+fn flux2_dev_real_weights_generates_one_image() {
+    let dir = std::env::var("SCENEWORKS_FLUX2_DEV_DIR")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|_| {
+            dirs_home().join("Library/Application Support/SceneWorks/data/models/mlx/flux2_dev")
+        });
+    smoke_generate_one("flux2_dev", dir, Some(4.0), None);
+}
+
 /// Real-weights smoke: SDXL base (real CFG, guidance 7.0 + a negative prompt,
 /// 30-step, Q8). Verifies the engine's SDXL quant default works (the Python
 /// vendored path had no quant). Needs the HF cache
@@ -1507,6 +1537,7 @@ fn instantid_angle_kps_real_weights_fills_frame_and_holds_identity() {
         sdxl_base,
         identitynet: WeightsSource::Dir(identitynet),
         ip_adapter,
+        adapters: Vec::new(),
     };
     let model = InstantId::load(&paths).expect("InstantID load");
     let scrfd = Weights::from_file(&scrfd_path).expect("SCRFD weights");
@@ -2198,8 +2229,208 @@ fn flux2_edit_engine_id_maps_variants() {
         flux2_edit_engine_id("flux2_klein_9b_kv"),
         Some("flux2_klein_9b_kv_edit")
     );
+    // FLUX.2-dev edit (sc-5922): the dev model routes to the `flux2_dev_edit` variant.
+    assert_eq!(flux2_edit_engine_id("flux2_dev"), Some("flux2_dev_edit"));
     assert_eq!(flux2_edit_engine_id("z_image_turbo"), None);
     assert_eq!(flux2_edit_engine_id("sdxl"), None);
+}
+
+// ---- sc-6055: FLUX.2-dev strict-pose (flux2_dev_control) -------------------------------------
+
+#[cfg(target_os = "macos")]
+#[test]
+fn flux2_control_scale_defaults_and_clamps() {
+    // README-recommended dev default (0.65–0.80 mid-point), distinct from Z-Image's 0.9.
+    assert_eq!(
+        flux2_control_scale(&request(json!({ "projectId": "p" }))),
+        0.75
+    );
+    assert_eq!(
+        flux2_control_scale(&request(
+            json!({ "projectId": "p", "advanced": { "controlScale": 0.7 } })
+        )),
+        0.7
+    );
+    // Clamp to [0, 2].
+    assert_eq!(
+        flux2_control_scale(&request(
+            json!({ "projectId": "p", "advanced": { "controlScale": 5.0 } })
+        )),
+        2.0
+    );
+    assert_eq!(
+        flux2_control_scale(&request(
+            json!({ "projectId": "p", "advanced": { "controlScale": -1.0 } })
+        )),
+        0.0
+    );
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn flux2_control_repo_file_defaults_and_overrides() {
+    let (repo, file) = flux2_control_repo_file(&request(json!({ "projectId": "p" })));
+    assert_eq!(repo, FLUX2_CONTROL_REPO);
+    assert_eq!(file, FLUX2_CONTROL_FILE);
+    // `advanced.controlWeights` overrides repo + filename (parity with the Z-Image resolver).
+    let (repo, file) = flux2_control_repo_file(&request(json!({
+        "projectId": "p",
+        "advanced": { "controlWeights": { "repo": "me/custom", "filename": "x.safetensors" } }
+    })));
+    assert_eq!(repo, "me/custom");
+    assert_eq!(file, "x.safetensors");
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn flux2_control_raw_settings_records_control_recipe() {
+    let req = request(json!({
+        "projectId": "p", "model": "flux2_dev",
+        "advanced": { "poses": [{ "id": "pose_1" }], "controlScale": 0.5 }
+    }));
+    // 0.5 is exactly representable in f32 (the `control_scale` arg is f32), so json! round-trips it.
+    let raw = flux2_control_raw_settings(
+        &req,
+        "black-forest-labs/FLUX.2-dev",
+        28,
+        Some(4),
+        Some(4.0),
+        0.5,
+        1,
+    );
+    assert_eq!(
+        raw.get("controlEngine").and_then(Value::as_str),
+        Some(FLUX2_DEV_CONTROL_ENGINE_ID)
+    );
+    assert_eq!(raw.get("controlScale"), Some(&json!(0.5)));
+    assert_eq!(raw.get("poseCount"), Some(&json!(1)));
+    // dev keeps its embedded guidance (NOT distilled like Z-Image, which nulls guidance).
+    assert_eq!(raw.get("guidanceScale"), Some(&json!(4.0)));
+    assert_eq!(raw.get("mlxQuantize"), Some(&json!(4)));
+    assert_eq!(raw.get("realModelInference"), Some(&json!(true)));
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn flux2_identity_strength_gates_on_strength_and_asset() {
+    // Off by default (no referenceStrength) — the pose-only tier.
+    assert_eq!(
+        flux2_identity_strength(&request(
+            json!({ "projectId": "p", "referenceAssetId": "r" })
+        )),
+        None
+    );
+    // referenceStrength set but no asset → None.
+    assert_eq!(
+        flux2_identity_strength(&request(
+            json!({ "projectId": "p", "advanced": { "referenceStrength": 0.5 } })
+        )),
+        None
+    );
+    // Both present → clamped strength (the opt-in img2img-init).
+    assert_eq!(
+        flux2_identity_strength(&request(json!({
+            "projectId": "p", "referenceAssetId": "r", "advanced": { "referenceStrength": 0.5 }
+        }))),
+        Some(0.5)
+    );
+    // Clamp to [0.05, 1.0].
+    assert_eq!(
+        flux2_identity_strength(&request(json!({
+            "projectId": "p", "referenceAssetId": "r", "advanced": { "referenceStrength": 2.0 }
+        }))),
+        Some(1.0)
+    );
+}
+
+/// Real-weights smoke: FLUX.2-dev strict-pose Fun-Controlnet-Union (sc-6055; engine sc-2292). Loads
+/// the converted Q4 dev snapshot (`models/mlx/flux2_dev`, assembled by the `flux2_dev_quant` convert
+/// job) + the cached Fun-Controlnet-Union `-2602` checkpoint, renders a DWPose skeleton, and generates
+/// one pose image through `flux2_dev_control`. Needs both + a Metal device; run on demand:
+/// `cargo test -p sceneworks-worker --lib -- --ignored flux2_dev_control_real_weights`.
+#[cfg(target_os = "macos")]
+#[test]
+#[ignore = "needs converted FLUX.2-dev + Fun-Controlnet-Union weights + Metal device"]
+fn flux2_dev_control_real_weights_generates_one_pose() {
+    let base = std::env::var("SCENEWORKS_FLUX2_DEV_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| {
+            dirs_home().join("Library/Application Support/SceneWorks/data/models/mlx/flux2_dev")
+        });
+    let control = std::fs::read_dir(dirs_home().join(
+        ".cache/huggingface/hub/models--alibaba-pai--FLUX.2-dev-Fun-Controlnet-Union/snapshots",
+    ))
+    .expect("control snapshots dir")
+    .flatten()
+    .map(|entry| entry.path())
+    .find(|path| path.is_dir())
+    .map(|dir| dir.join(FLUX2_CONTROL_FILE))
+    .filter(|path| path.exists())
+    .expect("control weights file");
+
+    let generator =
+        flux2_control_load(base, control, Some(gen_core::Quant::Q4), Vec::new()).unwrap();
+
+    // A minimal standing skeleton at 512².
+    let kp = crate::openpose_skeleton::normalize_keypoints(&json!([
+        [0.5, 0.2],
+        [0.5, 0.35],
+        [0.42, 0.35],
+        [0.40, 0.5],
+        [0.40, 0.65],
+        [0.58, 0.35],
+        [0.60, 0.5],
+        [0.60, 0.65],
+        [0.45, 0.6],
+        [0.45, 0.8],
+        [0.45, 0.95],
+        [0.55, 0.6],
+        [0.55, 0.8],
+        [0.55, 0.95],
+        [0.48, 0.18],
+        [0.52, 0.18],
+        [0.46, 0.2],
+        [0.54, 0.2]
+    ]));
+    let skeleton = crate::openpose_skeleton::draw_wholebody(
+        512,
+        512,
+        &kp,
+        None,
+        None,
+        crate::openpose_skeleton::body_stickwidth(512, 512),
+    );
+    let control = gen_core::Image {
+        width: 512,
+        height: 512,
+        pixels: skeleton.into_raw(),
+    };
+
+    let cancel = gen_core::CancelFlag::new();
+    let mut steps_seen = 0u32;
+    let (w, h, pixels) = flux2_control_generate_one(
+        generator.as_ref(),
+        "a person standing in a meadow, photorealistic",
+        512,
+        512,
+        42,
+        8,
+        Some(4.0), // dev embedded guidance
+        control,
+        0.75,
+        None,
+        &cancel,
+        &mut |p| {
+            if let gen_core::Progress::Step { current, .. } = p {
+                steps_seen = steps_seen.max(current);
+            }
+        },
+    )
+    .unwrap();
+    assert_eq!((w, h), (512, 512));
+    assert_eq!(pixels.len(), 512 * 512 * 3);
+    assert!(steps_seen >= 1, "expected denoise step progress");
+    assert!(pixels.windows(2).any(|w| w[0] != w[1]));
 }
 
 #[cfg(target_os = "macos")]
@@ -2365,6 +2596,64 @@ fn flux2_grouping_poses_over_angles_over_plain() {
         "advanced": { "angleSet": true }
     }));
     assert!(matches!(flux2_grouping(&edit), Flux2Grouping::Plain));
+}
+
+/// Minimal valid safetensors (8-byte LE header length + JSON header). No `networkType`, so
+/// `classify_adapter` reports `Lora`; the resolver only reads the header, so empty tensors are fine.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+fn write_min_lora(path: &std::path::Path) {
+    let header = json!({ "__metadata__": { "format": "pt" } });
+    let header_bytes = serde_json::to_vec(&header).unwrap();
+    let mut buffer = (header_bytes.len() as u64).to_le_bytes().to_vec();
+    buffer.extend_from_slice(&header_bytes);
+    std::fs::write(path, buffer).unwrap();
+}
+
+/// sc-6038: InstantID is a stock SDXL (RealVisXL) UNet, so a user-selected SDXL LoRA must resolve
+/// into a non-empty adapter set — the worker now feeds these into `InstantIdPaths.adapters` (they
+/// were previously dropped: `instantid.rs` never called `resolve_adapters`). Guards the worker half
+/// of the fix; the engine merge is covered by mlx-gen #477 / candle-gen #86 + the real-weight smoke.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+#[test]
+fn instantid_resolves_user_loras_into_adapters() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut settings = Settings::from_env();
+    settings.data_dir = dir.path().to_path_buf();
+
+    // A real (tiny, valid) safetensors LoRA under the app-managed data dir — both the path
+    // containment guard and the header classification in `resolve_adapters` run against it.
+    let lora_file = dir.path().join("style.safetensors");
+    write_min_lora(&lora_file);
+
+    let req = request(json!({
+        "projectId": "p", "model": "instantid_realvisxl", "mode": "character_image",
+        "prompt": "portrait", "referenceAssetId": "ref-1",
+        "loras": [{ "path": lora_file.to_string_lossy(), "weight": 0.65 }],
+        "modelManifestEntry": { "family": "instantid" }
+    }));
+
+    let adapters = resolve_adapters(&req, &settings).expect("resolve adapters");
+    assert_eq!(
+        adapters.len(),
+        1,
+        "the selected SDXL LoRA must resolve to one InstantID adapter (not silently dropped)"
+    );
+    assert_eq!(
+        adapters[0].scale, 0.65,
+        "the per-LoRA weight carries through"
+    );
+    assert!(matches!(adapters[0].kind, AdapterKind::Lora));
+    assert_eq!(
+        adapters[0].path.file_name().and_then(|n| n.to_str()),
+        Some("style.safetensors"),
+        "the confined LoRA path resolves to the on-disk file"
+    );
 }
 
 #[cfg(target_os = "macos")]

@@ -2402,6 +2402,10 @@ pub fn mac_capabilities(platform: &str, mac_gating_active: bool) -> MacCapabilit
     // accept the legacy `"darwin"` alias defensively. Drives the platform-intrinsic engine flags
     // (e.g. `imageUpscaleSeedvr2`, which is Mac-only) rather than the gating-rollout flag.
     let is_mac = matches!(platform, "macos" | "darwin");
+    // SeedVR2 has a backend on Mac (native MLX) and on Windows + Linux (the candle CUDA/NVIDIA port:
+    // Windows sc-5928, Linux sc-5160 — candle is CPU+CUDA cross-platform so Linux rides the Windows
+    // port). Drives the platform-intrinsic `imageUpscaleSeedvr2` flag.
+    let seedvr2_supported = is_mac || matches!(platform, "windows" | "linux");
     let mut features = BTreeMap::new();
     // Third-party LyCORIS (LoHa / non-peft LoKr) now applies on every MLX provider (epic 3641:
     // core loader sc-3642/3643 + SDXL/Wan/LTX sc-3671), so it is no longer a Mac feature gap — the
@@ -2435,24 +2439,27 @@ pub fn mac_capabilities(platform: &str, mac_gating_active: bool) -> MacCapabilit
         },
     );
     features.insert(
-        // SeedVR2 (`engine=seedvr2`) is the native-MLX one-step diffusion upscaler (epic 4811 /
-        // sc-4815) — the INVERSE of AuraSR: it is supported on Mac (in-process `mlx-gen-seedvr2`)
-        // and NOT yet available on Windows/Linux, where the backend is a separate Candle port
-        // (sc-5157). This flag is platform-intrinsic (true only on Mac, regardless of the gating
-        // rollout flag) so the web upscale picker can offer SeedVR2 on Mac and hide it elsewhere —
-        // contrast the other entries here, which describe Mac torch-only gaps the UI hides only
-        // under active gating.
+        // SeedVR2 (`engine=seedvr2`) is the one-step diffusion super-resolution upscaler — native MLX
+        // on Mac (epic 4811 / sc-4815, in-process `mlx-gen-seedvr2`) and the candle CUDA/NVIDIA port on
+        // Windows (sc-5928) + Linux (sc-5160) (epic 5482, `candle-gen-seedvr2`). Both back the same
+        // `engine=seedvr2` image upscale + the net-new `video_upscale`. This flag is platform-intrinsic
+        // (a backend exists, regardless of the gating rollout flag) so the web upscale picker offers
+        // SeedVR2 on every platform that has a backend (Mac, Windows, Linux) and hides it only where
+        // there is none (contrast AuraSR, which the UI hides only under active gating). Must agree with
+        // the routing oracle (mlx OR candle claims seedvr2; a plain torch worker refuses it).
         "imageUpscaleSeedvr2".to_owned(),
         MacFeatureSupport {
-            supported: is_mac,
-            reason: if is_mac {
+            supported: seedvr2_supported,
+            reason: if seedvr2_supported {
                 None
             } else {
+                // Unreachable on the three platforms that build a SeedVR2 backend (mac/windows/linux);
+                // kept for any future platform that has neither MLX nor the candle CUDA/NVIDIA port.
                 Some(UnsupportedReason::new(
                     None,
                     "image_upscale (SeedVR2)",
-                    "SeedVR2 is a Mac-only native-MLX upscaler; Windows/Linux support is a separate Candle backend port.",
-                    Some("sc-5157"),
+                    "SeedVR2 runs on Mac (native MLX) and Windows/Linux (the candle CUDA/NVIDIA backend); this platform has no SeedVR2 backend.",
+                    Some("sc-5160"),
                 ))
             },
         },
@@ -2700,7 +2707,10 @@ fn classify_training_gap(payload: &Map<String, Value>) -> UnsupportedReason {
 /// (`flux2_klein_diffusers`, sc-3136). The default/absent converter is the Python mlx-video
 /// Wan/LTX path (sc-3491 / sc-3224).
 fn classify_convert_gap(payload: &Map<String, Value>) -> Result<(), UnsupportedReason> {
-    if payload.get("converter").and_then(Value::as_str) == Some("flux2_klein_diffusers") {
+    if matches!(
+        payload.get("converter").and_then(Value::as_str),
+        Some("flux2_klein_diffusers") | Some("flux2_dev_quant")
+    ) {
         return Ok(());
     }
     Err(UnsupportedReason::new(
@@ -3034,6 +3044,8 @@ const MLX_ROUTED_MODELS: &[&str] = &[
     "flux2_klein_9b",
     "flux2_klein_9b_kv",
     "flux2_klein_9b_true_v2",
+    // FLUX.2-dev (epic 5914) — MLX-only flagship, txt2img today (edit = sc-5919).
+    "flux2_dev",
     "sdxl",
     "realvisxl",
     // InstantID on RealVisXL (sc-3345): single-identity + the 11-view angle set route to the
@@ -3115,7 +3127,7 @@ fn image_request_mlx_eligible(model: &str, payload: &Map<String, Value>) -> bool
         | "qwen_image_edit_2509"
         | "qwen_image_edit_2511"
         | "qwen_image_edit_2511_lightning" => qwen_edit_mlx_eligible(payload),
-        "flux2_klein_9b" | "flux2_klein_9b_kv" | "flux2_klein_9b_true_v2" => {
+        "flux2_klein_9b" | "flux2_klein_9b_kv" | "flux2_klein_9b_true_v2" | "flux2_dev" => {
             flux2_mlx_eligible(payload)
         }
         "sdxl" | "realvisxl" => sdxl_mlx_eligible(payload),
@@ -3267,11 +3279,19 @@ fn image_job_is_candle_eligible(job: &JobSnapshot) -> bool {
     if model == "instantid_realvisxl" {
         return instantid_candle_eligible(&job.payload);
     }
+    // SDXL img2img / inpaint / outpaint edit (sc-5487, epic 5480): an sdxl-family `edit_image` job with
+    // a source image is the bespoke candle `SdxlEdit` lane (`generate_candle_sdxl_edit_stream`), NOT
+    // txt2img — the `image_request_candle_eligible` gate below rejects the whole `edit_image` family.
+    // Branch it out first (disjoint from the IP-Adapter lane below, which is reference-only and not
+    // `edit_image`). Mirrors the worker's `sdxl_edit_candle_available` gate.
+    if matches!(model, "sdxl" | "realvisxl") && sdxl_edit_candle_eligible(&job.payload) {
+        return true;
+    }
     // SDXL IP-Adapter-Plus reference conditioning (sc-5488, epic 5480): an sdxl-family model with a
     // reference image is a bespoke candle lane (`generate_candle_sdxl_ipadapter_stream`), NOT txt2img —
     // the `image_request_candle_eligible` gate below rejects `referenceAssetId`. Branch it out first
-    // (pure IP only; img2img/inpaint/edit shapes stay on torch — those are sc-5487). Mirrors the
-    // worker's `sdxl_ipadapter_available` gate.
+    // (pure IP only; img2img/inpaint/edit shapes are the SDXL edit lane above). Mirrors the worker's
+    // `sdxl_ipadapter_available` gate.
     if matches!(model, "sdxl" | "realvisxl") && sdxl_ipadapter_candle_eligible(&job.payload) {
         return true;
     }
@@ -3315,6 +3335,15 @@ fn image_job_is_candle_eligible(job: &JobSnapshot) -> bool {
     // `zimage_control_available`. With this all three control families (qwen / kolors / z_image) are wired.
     if model == "z_image_turbo" && zimage_control_candle_eligible(&job.payload) {
         return true;
+    }
+    // PuLID-FLUX face identity (sc-5492, epic 5480): `pulid_flux_dev` is a distinct model id (not a
+    // candle txt2img id), so the `image_request_candle_eligible` gate below would reject it; the candle
+    // `candle-gen-pulid` provider serves it via a bespoke `generate_candle_pulid_stream` lane (the
+    // off-Mac sibling of the macOS `pulid_flux` registry route). Branch it out, returning eligibility
+    // directly — a non-character / reference-less job returns false → falls back to torch/MLX. Mirrors
+    // the worker's `pulid_candle_available`.
+    if model == "pulid_flux_dev" {
+        return pulid_flux_candle_eligible(&job.payload);
     }
     image_request_candle_eligible(model, &job.payload)
 }
@@ -3578,10 +3607,36 @@ fn instantid_candle_eligible(payload: &Map<String, Value>) -> bool {
     instantid_mlx_eligible(payload)
 }
 
+/// PuLID-FLUX candle-routing conditions (sc-5492, epic 5480). The candle `candle-gen-pulid` provider is
+/// the off-Mac sibling of `mlx-gen-pulid` and serves the IDENTICAL surface (a `character_image` job with
+/// a reference face → the PuLID identity injection on FLUX.1-dev), so the gate is the same as
+/// [`pulid_flux_mlx_eligible`]. Mirrors the candle worker's `pulid_candle_available` gate so the router
+/// and worker agree. `pulid_flux_dev` is a distinct model id (not `flux_dev`), so this never collides
+/// with the FLUX XLabs IP-Adapter lane.
+fn pulid_flux_candle_eligible(payload: &Map<String, Value>) -> bool {
+    pulid_flux_mlx_eligible(payload)
+}
+
+/// SDXL img2img / inpaint / outpaint candle-routing conditions (sc-5487, epic 5480). The candle
+/// `SdxlEdit` provider serves `edit_image` mode with a `sourceAssetId` on the sdxl family: img2img (no
+/// mask), inpaint (+ `maskAssetId`), and outpaint (`fit_mode == "outpaint"`) all route to the one lane.
+/// Disjoint from the IP-Adapter lane (which is `referenceAssetId` and NOT `edit_image`). Mirrors the
+/// worker's `sdxl_edit_candle_available` gate (minus the local weight-resolve check) so the router and
+/// worker agree. Candle-only — macOS keeps the MLX `SdxlSubMode::{Edit,Inpaint,Outpaint}` path.
+fn sdxl_edit_candle_eligible(payload: &Map<String, Value>) -> bool {
+    if payload.get("mode").and_then(Value::as_str) != Some("edit_image") {
+        return false;
+    }
+    payload
+        .get("sourceAssetId")
+        .and_then(Value::as_str)
+        .is_some_and(|value| !value.trim().is_empty())
+}
+
 /// SDXL IP-Adapter-Plus candle-routing conditions (sc-5488, epic 5480). The candle `IpAdapterSdxl`
 /// provider serves PURE reference (image-prompt) conditioning on the sdxl family: a `referenceAssetId`
-/// with NO img2img source / inpaint mask and NOT an `edit_image` (those advanced SDXL shapes are
-/// sc-5487, still torch). Mirrors the worker's `sdxl_ipadapter_available` gate (minus the local
+/// with NO img2img source / inpaint mask and NOT an `edit_image` (that advanced SDXL shape is the
+/// sc-5487 `SdxlEdit` lane). Mirrors the worker's `sdxl_ipadapter_available` gate (minus the local
 /// weight-resolve check) so the router and worker agree on the lane boundary. Candle-only — there is no
 /// MLX `IpAdapterSdxl` (the MLX SDXL IP path is the registry `SdxlSubMode::Ip`), so this has no
 /// `*_mlx_eligible` sibling.
@@ -3755,9 +3810,11 @@ fn pulid_flux_mlx_eligible(payload: &Map<String, Value>) -> bool {
         .is_some_and(|value| !value.trim().is_empty())
 }
 
-/// FLUX.2-klein MLX-routing conditions. FLUX.2-klein is an **MLX-only** family (no torch backend),
-/// so everything it does runs on MLX: txt2img (sc-3025), edit/reference + KV-cache + multi-reference
-/// (sc-3029), and — since epic 3641 (sc-3642/3643) — third-party LyCORIS via the core loader.
+/// FLUX.2 MLX-routing conditions, shared by klein and dev. FLUX.2 is an **MLX-only** family (no torch
+/// backend), so everything it does runs on MLX: klein txt2img (sc-3025), edit/reference + KV-cache +
+/// multi-reference (sc-3029), third-party LyCORIS via the core loader (epic 3641), and FLUX.2-dev
+/// txt2img (epic 5914 — dev's manifest advertises `text_to_image` only, so its edit/character modes
+/// are never offered until the Pixtral path lands in sc-5919).
 fn flux2_mlx_eligible(_payload: &Map<String, Value>) -> bool {
     true
 }
@@ -4196,6 +4253,35 @@ fn video_upscale_job_is_mlx_eligible(job: &JobSnapshot) -> bool {
     matches!(engine.as_str(), "" | "seedvr2" | "seedvr2_3b")
 }
 
+/// Whether an `image_upscale` job explicitly requests the SeedVR2 engine (`engine=seedvr2`, the id the
+/// web sends and the worker accepts). SeedVR2 has no torch backend — it runs on MLX (Mac) or candle
+/// (Windows/Linux) — so this also drives the torch worker's refusal (the inverse of the AuraSR gate).
+/// The image default engine is Real-ESRGAN, so an absent engine is NOT SeedVR2.
+fn upscale_job_requests_seedvr2(job: &JobSnapshot) -> bool {
+    matches!(job.job_type, JobType::ImageUpscale)
+        && job
+            .payload
+            .get("engine")
+            .and_then(Value::as_str)
+            .is_some_and(|engine| engine.trim().eq_ignore_ascii_case("seedvr2"))
+}
+
+/// Whether an `image_upscale` job is candle-eligible (sc-5928, epic 4811 / epic 5482): the candle
+/// SeedVR2 provider (`candle-gen-seedvr2`) serves `engine=seedvr2` off-Mac. Unlike the mlx gate, the
+/// default (`real-esrgan`) engine is NOT candle-eligible — only an explicit SeedVR2 request routes to
+/// the candle worker; Real-ESRGAN / AuraSR have no candle path and stay on the Python torch worker.
+fn upscale_job_is_candle_eligible(job: &JobSnapshot) -> bool {
+    upscale_job_requests_seedvr2(job)
+}
+
+/// Whether a `video_upscale` job is candle-eligible (sc-5928, epic 4811 / epic 5482): the candle
+/// SeedVR2 provider is the off-Mac video upscaler. Mirrors `video_upscale_job_is_mlx_eligible`
+/// exactly (same engine set the worker's `run_video_upscale_job` accepts) — the engine defaults to
+/// `seedvr2` when the payload omits it.
+fn video_upscale_job_is_candle_eligible(job: &JobSnapshot) -> bool {
+    video_upscale_job_is_mlx_eligible(job)
+}
+
 /// Training kernels with NO non-Rust fallback — only the in-process Rust mlx worker
 /// can run them. `ltx_mlx_lora` was Apple-Silicon-only MLX-Python; epic 3039 (sc-3049)
 /// retired that Python trainer, leaving the native Rust LTX trainer as the sole path,
@@ -4375,6 +4461,32 @@ fn worker_supports_job(worker: &WorkerSnapshot, job: &JobSnapshot) -> bool {
         {
             return false;
         }
+        // Image upscale (sc-5928, epic 4811 / epic 5482): the candle worker serves SeedVR2 image
+        // upscaling (`candle-gen-seedvr2`, the Windows/CUDA sibling of mlx-gen-seedvr2). Real-ESRGAN
+        // (the default engine) / AuraSR have no candle path, so a non-SeedVR2 engine is refused and
+        // stays on the Python torch worker.
+        if matches!(job.job_type, JobType::ImageUpscale) && !upscale_job_is_candle_eligible(job) {
+            return false;
+        }
+        // Video upscale (sc-5928): the candle worker serves the net-new SeedVR2 video upscaler. A
+        // non-SeedVR2 engine is refused (no other video-upscale backend exists off-Mac).
+        if matches!(job.job_type, JobType::VideoUpscale)
+            && !video_upscale_job_is_candle_eligible(job)
+        {
+            return false;
+        }
+    }
+    // SeedVR2 upscaling has NO torch backend — it runs on the native MLX worker (Mac) or the candle
+    // worker (Windows/Linux). A plain torch GPU/CPU worker (neither `mlx` nor candle) must refuse a
+    // SeedVR2 `image_upscale` job so it stays queued for the mlx/candle worker instead of being
+    // claimed and failing with "no generator registered". This is the inverse of the AuraSR gate
+    // (torch-only → mlx/candle refuse it). `video_upscale` is candle/mlx-only by capability (a torch
+    // worker never advertises it), so it needs no torch guard here.
+    if !worker.gpu_id.eq_ignore_ascii_case("mlx")
+        && !worker_is_candle(worker)
+        && upscale_job_requests_seedvr2(job)
+    {
+        return false;
     }
     let advertises = |capability: &str| {
         worker
@@ -5041,8 +5153,9 @@ mod candle_routing_tests {
                 "advanced": { "poses": [{ "id": "pose_1" }] }
             }))
         ));
-        // …but a plain SDXL edit (img2img) still declines on candle → torch (real edit route, sc-5487).
-        assert!(!worker_supports_job(
+        // sc-5487: a plain SDXL edit (img2img: `edit_image` + a source) is now a candle lane (the
+        // bespoke `SdxlEdit` route), so the candle worker CLAIMS it — it no longer declines → torch.
+        assert!(worker_supports_job(
             &candle,
             &image_generate_job(json!({
                 "model": "sdxl",
@@ -5500,6 +5613,86 @@ mod candle_routing_tests {
         .is_err());
     }
 
+    // ---- Candle SeedVR2 upscale lane (sc-5928) ----
+
+    /// A queued `image_upscale` job carrying `payload`.
+    fn image_upscale_job(payload: Value) -> JobSnapshot {
+        serde_json::from_value(json!({
+            "id": "job_iu",
+            "type": "image_upscale",
+            "status": "queued",
+            "payload": payload,
+            "result": {},
+            "requestedGpu": "auto",
+            "progress": 0,
+            "stage": "queued",
+            "message": "",
+            "attempts": 1,
+            "cancelRequested": false,
+            "createdAt": "2026-06-16T00:00:00Z",
+            "updatedAt": "2026-06-16T00:00:00Z",
+        }))
+        .expect("valid JobSnapshot")
+    }
+
+    /// sc-5928: the candle worker claims `engine=seedvr2` image upscale (the candle-gen-seedvr2
+    /// provider) but refuses Real-ESRGAN (the default), which stays on the Python torch worker.
+    #[test]
+    fn candle_worker_claims_seedvr2_image_upscale_refuses_real_esrgan() {
+        let candle = gpu_worker(&["gpu", "image_upscale", "candle"]);
+        assert!(worker_supports_job(
+            &candle,
+            &image_upscale_job(json!({ "sourceAssetId": "a", "engine": "seedvr2" }))
+        ));
+        // Real-ESRGAN (the default engine) has no candle path → refused → stays on the torch worker.
+        assert!(!worker_supports_job(
+            &candle,
+            &image_upscale_job(json!({ "sourceAssetId": "a", "engine": "real-esrgan" }))
+        ));
+        assert!(!worker_supports_job(
+            &candle,
+            &image_upscale_job(json!({ "sourceAssetId": "a" })) // default = real-esrgan
+        ));
+    }
+
+    /// sc-5928: the candle worker claims the net-new SeedVR2 `video_upscale` (default/seedvr2 ids) and
+    /// refuses other engines, exactly like the mlx worker (the engine set is shared).
+    #[test]
+    fn candle_worker_claims_seedvr2_video_upscale_and_refuses_other_engines() {
+        let candle = gpu_worker(&["gpu", "video_upscale", "candle"]);
+        for engine in [json!("seedvr2"), json!("seedvr2_3b"), Value::Null] {
+            let payload = if engine.is_null() {
+                json!({ "sourceAssetId": "a" })
+            } else {
+                json!({ "sourceAssetId": "a", "engine": engine })
+            };
+            assert!(
+                worker_supports_job(&candle, &video_upscale_job(payload.clone())),
+                "candle should claim video_upscale for {payload}"
+            );
+        }
+        assert!(!worker_supports_job(
+            &candle,
+            &video_upscale_job(json!({ "sourceAssetId": "a", "engine": "aura-sr" }))
+        ));
+    }
+
+    /// sc-5928: SeedVR2 has no torch backend, so a plain torch GPU worker (neither `mlx` nor candle)
+    /// REFUSES a `seedvr2` image upscale — it stays queued for the mlx/candle worker instead of being
+    /// claimed and failing. Real-ESRGAN (the torch engine) is still claimed. The inverse of AuraSR.
+    #[test]
+    fn torch_worker_refuses_seedvr2_image_upscale_but_claims_real_esrgan() {
+        let torch = gpu_worker(&["gpu", "image_upscale"]); // no candle marker, gpu_id != "mlx"
+        assert!(!worker_supports_job(
+            &torch,
+            &image_upscale_job(json!({ "sourceAssetId": "a", "engine": "seedvr2" }))
+        ));
+        assert!(worker_supports_job(
+            &torch,
+            &image_upscale_job(json!({ "sourceAssetId": "a", "engine": "real-esrgan" }))
+        ));
+    }
+
     // ---- Candle caption lane (sc-5098) ----
 
     /// A queued `training_caption` job carrying `payload`.
@@ -5654,6 +5847,43 @@ mod candle_routing_tests {
     }
 
     #[test]
+    fn sdxl_edit_jobs_route_to_candle() {
+        // SDXL/RealVisXL img2img / inpaint / outpaint edit jobs (sc-5487) route to the bespoke candle
+        // `SdxlEdit` lane via the new branch, NOT the txt2img `image_request_candle_eligible` gate
+        // (which rejects the whole `edit_image` family).
+        for model in ["sdxl", "realvisxl"] {
+            // img2img (source, no mask).
+            let img2img = json!({ "model": model, "mode": "edit_image", "sourceAssetId": "src_1" });
+            assert!(sdxl_edit_candle_eligible(&object(img2img.clone())));
+            assert!(image_job_is_candle_eligible(&image_generate_job(img2img)));
+            // inpaint (source + mask).
+            let inpaint = json!({
+                "model": model, "mode": "edit_image", "sourceAssetId": "src_1", "maskAssetId": "m_1"
+            });
+            assert!(sdxl_edit_candle_eligible(&object(inpaint.clone())));
+            assert!(image_job_is_candle_eligible(&image_generate_job(inpaint)));
+            // outpaint (source + fitMode outpaint).
+            let outpaint = json!({
+                "model": model, "mode": "edit_image", "sourceAssetId": "src_1", "fitMode": "outpaint"
+            });
+            assert!(sdxl_edit_candle_eligible(&object(outpaint.clone())));
+            assert!(image_job_is_candle_eligible(&image_generate_job(outpaint)));
+        }
+        // `edit_image` WITHOUT a source → not this lane (nothing to edit).
+        assert!(!sdxl_edit_candle_eligible(&object(json!({
+            "model": "sdxl", "mode": "edit_image"
+        }))));
+        // A reference (IP-Adapter) job is NOT the edit lane (no source, not `edit_image`) — it's sc-5488.
+        assert!(!sdxl_edit_candle_eligible(&object(json!({
+            "model": "sdxl", "referenceAssetId": "a"
+        }))));
+        // A plain txt2img sdxl job → not the edit lane.
+        assert!(!sdxl_edit_candle_eligible(&object(
+            json!({ "model": "sdxl" })
+        )));
+    }
+
+    #[test]
     fn kolors_ipadapter_reference_jobs_route_to_candle() {
         // A pure Kolors reference (IP-Adapter) job routes to the candle lane (sc-5488) via the bespoke
         // branch, NOT the txt2img `image_request_candle_eligible` gate (which rejects `referenceAssetId`).
@@ -5699,6 +5929,34 @@ mod candle_routing_tests {
         }))));
         assert!(!flux_ipadapter_candle_eligible(&object(json!({
             "model": "flux_schnell", "referenceAssetId": "a", "maskAssetId": "m"
+        }))));
+    }
+
+    #[test]
+    fn pulid_flux_character_jobs_route_to_candle_off_mac() {
+        // The candle PuLID-FLUX provider (sc-5492) serves the SAME surface as the MLX path off-Mac, so
+        // a `pulid_flux_dev` character_image + referenceAssetId job is candle-eligible via the bespoke
+        // `image_job_is_candle_eligible` branch, NOT the txt2img-only `image_request_candle_eligible`
+        // gate (which rejects `referenceAssetId`, which PuLID requires). The distinct `pulid_flux_dev`
+        // model id cleanly disambiguates it from the FLUX XLabs IP-Adapter lane (`flux_dev`).
+        let payload = json!({
+            "model": "pulid_flux_dev",
+            "mode": "character_image",
+            "referenceAssetId": "asset_1",
+        });
+        assert!(pulid_flux_candle_eligible(&object(payload.clone())));
+        assert!(image_job_is_candle_eligible(&image_generate_job(payload)));
+
+        // No reference face → not candle-eligible (mirrors the MLX gate).
+        assert!(!image_job_is_candle_eligible(&image_generate_job(json!({
+            "model": "pulid_flux_dev",
+            "mode": "character_image"
+        }))));
+        // Non-character mode → not candle-eligible (PuLID is a character flow).
+        assert!(!image_job_is_candle_eligible(&image_generate_job(json!({
+            "model": "pulid_flux_dev",
+            "mode": "text_to_image",
+            "referenceAssetId": "asset_1"
         }))));
     }
 

@@ -2252,13 +2252,20 @@ fn mac_rust_supported_names_advanced_video_and_svd() {
 #[test]
 fn mac_rust_supported_convert_flux2_ok_else_python_gap() {
     let store = store("oracle-convert");
-    // The in-process Rust FLUX.2 converter is supported.
+    // The in-process Rust FLUX.2 converters are supported.
     let flux2 = job_of(
         &store,
         JobType::ModelConvert,
         json!({ "model": "flux2_klein_9b_true_v2", "converter": "flux2_klein_diffusers" }),
     );
     assert!(mac_rust_supported(&flux2).is_ok());
+    // FLUX.2-dev pre-quantization (sc-5921) is likewise an in-process Rust/MLX convert.
+    let flux2_dev = job_of(
+        &store,
+        JobType::ModelConvert,
+        json!({ "model": "flux2_dev", "converter": "flux2_dev_quant" }),
+    );
+    assert!(mac_rust_supported(&flux2_dev).is_ok());
     // The default/absent converter is the Python mlx-video Wan/LTX path → gap.
     let wan = job_of(&store, JobType::ModelConvert, json!({ "model": "wan_2_2" }));
     assert_eq!(
@@ -2582,16 +2589,16 @@ fn mac_capabilities_master_switch_and_infra_features() {
             )
         })
         .all(|(_, f)| !f.supported));
-    // SeedVR2 is Mac-only (epic 4811 R6): on a non-Mac host the capability is unsupported and
-    // names the Windows/Linux Candle backend port (sc-5157), so the web picker hides it there.
-    assert!(!inert.features["imageUpscaleSeedvr2"].supported);
-    assert_eq!(
-        inert.features["imageUpscaleSeedvr2"]
-            .reason
-            .as_ref()
-            .and_then(|r| r.suggested_epic.as_deref()),
-        Some("sc-5157")
-    );
+    // SeedVR2 now has a backend on every GPU platform: native MLX on Mac, and the candle CUDA/NVIDIA
+    // port on Windows (sc-5928) + Linux (sc-5160 — candle is CPU+CUDA cross-platform, so Linux rides
+    // the Windows port). On the (inert-gated) Linux host the capability is platform-true with no
+    // reason, so the web picker offers `engine=seedvr2` there too.
+    assert!(inert.features["imageUpscaleSeedvr2"].supported);
+    assert!(inert.features["imageUpscaleSeedvr2"].reason.is_none());
+    // Windows carries the same candle SeedVR2 backend (sc-5928): platform-true there too (not just Mac).
+    let windows = mac_capabilities("windows", false);
+    assert!(windows.features["imageUpscaleSeedvr2"].supported);
+    assert!(windows.features["imageUpscaleSeedvr2"].reason.is_none());
     // Training kernels with a native Rust trainer stay enabled; LoKr-on-Wan does not.
     assert!(mac
         .training
@@ -3935,11 +3942,13 @@ fn flux2_klein_variants_route_to_mlx_worker() {
     register_gpu_worker(&store, "worker-torch", "mps", image_caps());
     register_gpu_worker(&store, "worker-mlx", "mlx", image_caps());
 
-    // All three FLUX.2-klein txt2img variants (MLX-only family) route to the mlx worker.
+    // All three FLUX.2-klein txt2img variants + FLUX.2-dev (MLX-only family) route to the mlx
+    // worker (dev is txt2img-only today — epic 5914 / sc-5921).
     for model in [
         "flux2_klein_9b",
         "flux2_klein_9b_kv",
         "flux2_klein_9b_true_v2",
+        "flux2_dev",
     ] {
         let job = store
             .create_job(image_job_with(

@@ -10,6 +10,7 @@ enum ImageRoute {
     ZImageControl,
     QwenControl,
     KolorsControl,
+    Flux2DevControl,
     Flux2Edit,
     QwenEdit,
     InstantId,
@@ -28,6 +29,11 @@ fn resolve_image_route(request: &ImageRequest, settings: &Settings) -> Option<Im
         Some(ImageRoute::QwenControl)
     } else if kolors_control_available(request, settings) {
         Some(ImageRoute::KolorsControl)
+    } else if flux2_dev_control_available(request, settings) {
+        // FLUX.2-dev strict pose (advanced.poses) → Fun-Controlnet-Union. Wins over the edit/
+        // best-effort pose tier below (`flux2_edit_available` needs a reference; a flux2_dev pose
+        // job is the real ControlNet path, with the reference an opt-in img2img-init).
+        Some(ImageRoute::Flux2DevControl)
     } else if flux2_edit_available(request, settings) {
         Some(ImageRoute::Flux2Edit)
     } else if qwen_edit_available(request, settings) {
@@ -59,7 +65,8 @@ impl ImageRoute {
         match self {
             ImageRoute::ZImageControl
             | ImageRoute::QwenControl
-            | ImageRoute::KolorsControl => pose_entries(request).len() as u32,
+            | ImageRoute::KolorsControl
+            | ImageRoute::Flux2DevControl => pose_entries(request).len() as u32,
             ImageRoute::Flux2Edit | ImageRoute::QwenEdit => grouped_edit_image_count(request),
             ImageRoute::InstantId => instantid_image_count(request, settings),
             ImageRoute::SensenovaEdit => match flux2_grouping(request) {
@@ -91,7 +98,7 @@ fn grouped_edit_image_count(request: &ImageRequest) -> u32 {
 /// family default. Shared by the MLX path and the candle lane (sc-5096).
 #[cfg(any(
     target_os = "macos",
-    all(target_os = "windows", feature = "backend-candle")
+    all(not(target_os = "macos"), feature = "backend-candle")
 ))]
 fn model_repo(request: &ImageRequest, model: &ResolvedModel) -> String {
     request
@@ -135,7 +142,7 @@ pub(crate) fn resolve_weights_dir(
 
 #[cfg(any(
     target_os = "macos",
-    all(target_os = "windows", feature = "backend-candle")
+    all(not(target_os = "macos"), feature = "backend-candle")
 ))]
 fn quant_int(value: &Value) -> Option<i64> {
     if value.is_boolean() {
@@ -156,7 +163,7 @@ fn quant_int(value: &Value) -> Option<i64> {
 /// the sc-3675/sc-5096 candle families advertise no quant and never reach this resolver (stay dense).
 #[cfg(any(
     target_os = "macos",
-    all(target_os = "windows", feature = "backend-candle")
+    all(not(target_os = "macos"), feature = "backend-candle")
 ))]
 fn resolve_quant(request: &ImageRequest) -> (Option<Quant>, Option<i64>) {
     let raw = request
@@ -182,7 +189,7 @@ fn resolve_quant(request: &ImageRequest) -> (Option<Quant>, Option<i64>) {
 /// Shared by the MLX path and the candle lane (sc-5096).
 #[cfg(any(
     target_os = "macos",
-    all(target_os = "windows", feature = "backend-candle")
+    all(not(target_os = "macos"), feature = "backend-candle")
 ))]
 fn resolve_steps(request: &ImageRequest, model: &ResolvedModel) -> u32 {
     request
@@ -205,7 +212,7 @@ fn resolve_steps(request: &ImageRequest, model: &ResolvedModel) -> u32 {
 /// gets `None` and a guided one (flux dev, flux2, qwen, sdxl) gets the scale.
 #[cfg(any(
     target_os = "macos",
-    all(target_os = "windows", feature = "backend-candle")
+    all(not(target_os = "macos"), feature = "backend-candle")
 ))]
 fn resolve_guidance(request: &ImageRequest, model: &ResolvedModel) -> Option<f32> {
     if !model.supports_guidance() {
@@ -232,7 +239,7 @@ fn resolve_guidance(request: &ImageRequest, model: &ResolvedModel) -> Option<f32
 /// family the worker forwards `advanced.guidanceScale` as `true_cfg`, not `guidance`.
 #[cfg(any(
     target_os = "macos",
-    all(target_os = "windows", feature = "backend-candle")
+    all(not(target_os = "macos"), feature = "backend-candle")
 ))]
 fn uses_true_cfg(model: &ResolvedModel) -> bool {
     !model.supports_guidance() && model.supports_negative_prompt()
@@ -244,7 +251,7 @@ fn uses_true_cfg(model: &ResolvedModel) -> bool {
 /// Shared by the MLX path and the candle lane (sc-5096).
 #[cfg(any(
     target_os = "macos",
-    all(target_os = "windows", feature = "backend-candle")
+    all(not(target_os = "macos"), feature = "backend-candle")
 ))]
 fn resolve_true_cfg(request: &ImageRequest, model: &ResolvedModel) -> Option<f32> {
     if !uses_true_cfg(model) {
@@ -270,7 +277,7 @@ fn resolve_true_cfg(request: &ImageRequest, model: &ResolvedModel) -> Option<f32
 /// is the candle descriptor, so distilled candle families (z-image, flux schnell) get `None`.
 #[cfg(any(
     target_os = "macos",
-    all(target_os = "windows", feature = "backend-candle")
+    all(not(target_os = "macos"), feature = "backend-candle")
 ))]
 fn resolve_negative_prompt(request: &ImageRequest, model: &ResolvedModel) -> Option<String> {
     if !model.supports_negative_prompt() {
@@ -288,7 +295,7 @@ fn resolve_negative_prompt(request: &ImageRequest, model: &ResolvedModel) -> Opt
 /// Shared by the MLX path and the candle Lens lane (sc-5126).
 #[cfg(any(
     target_os = "macos",
-    all(target_os = "windows", feature = "backend-candle")
+    all(not(target_os = "macos"), feature = "backend-candle")
 ))]
 pub(crate) fn lora_path(lora: &Value) -> Option<PathBuf> {
     for key in ["installedPath", "sourcePath", "path"] {
@@ -323,7 +330,7 @@ pub(crate) fn lora_path(lora: &Value) -> Option<PathBuf> {
 /// it surfaces the mismatch loudly), so the same `networkType: lokr` classification feeds both lanes.
 #[cfg(any(
     target_os = "macos",
-    all(target_os = "windows", feature = "backend-candle")
+    all(not(target_os = "macos"), feature = "backend-candle")
 ))]
 pub(crate) fn classify_adapter(file: &Path) -> WorkerResult<AdapterKind> {
     let header = read_safetensors_header(file)
@@ -343,7 +350,7 @@ pub(crate) fn classify_adapter(file: &Path) -> WorkerResult<AdapterKind> {
 /// Shared by the MLX path and the candle Lens lane (sc-5126).
 #[cfg(any(
     target_os = "macos",
-    all(target_os = "windows", feature = "backend-candle")
+    all(not(target_os = "macos"), feature = "backend-candle")
 ))]
 fn resolve_adapters(request: &ImageRequest, settings: &Settings) -> WorkerResult<Vec<AdapterSpec>> {
     if request.loras.len() > MAX_JOB_LORAS {
@@ -618,7 +625,7 @@ fn step_fraction(index: usize, current: u32, total: u32, count: u32) -> f64 {
 /// rather than in a macOS-only include.
 #[cfg(any(
     target_os = "macos",
-    all(target_os = "windows", feature = "backend-candle")
+    all(not(target_os = "macos"), feature = "backend-candle")
 ))]
 pub(crate) fn load_reference_image(
     data_dir: &Path,
@@ -669,7 +676,7 @@ pub(crate) fn load_reference_image(
 /// so the candle InstantID lane (sc-5491) can use it off-Mac.
 #[cfg(any(
     target_os = "macos",
-    all(target_os = "windows", feature = "backend-candle")
+    all(not(target_os = "macos"), feature = "backend-candle")
 ))]
 fn non_empty(value: &Option<String>) -> bool {
     value.as_deref().is_some_and(|id| !id.trim().is_empty())
@@ -678,7 +685,7 @@ fn non_empty(value: &Option<String>) -> bool {
 /// The object-shaped `advanced.poses` entries (the strict-pose tier; empty otherwise).
 #[cfg(any(
     target_os = "macos",
-    all(target_os = "windows", feature = "backend-candle")
+    all(not(target_os = "macos"), feature = "backend-candle")
 ))]
 fn pose_entries(request: &ImageRequest) -> Vec<&Value> {
     request
@@ -694,7 +701,7 @@ fn pose_entries(request: &ImageRequest) -> Vec<&Value> {
 // the Z-Image whole-body strict-pose path's (macOS), so allow them dead off-Mac.
 #[cfg(any(
     target_os = "macos",
-    all(target_os = "windows", feature = "backend-candle")
+    all(not(target_os = "macos"), feature = "backend-candle")
 ))]
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 struct PoseInput {
@@ -705,7 +712,7 @@ struct PoseInput {
 
 #[cfg(any(
     target_os = "macos",
-    all(target_os = "windows", feature = "backend-candle")
+    all(not(target_os = "macos"), feature = "backend-candle")
 ))]
 fn parse_poses(request: &ImageRequest) -> Vec<PoseInput> {
     use crate::openpose_skeleton::{normalize_face, normalize_hands, normalize_keypoints};
@@ -726,7 +733,7 @@ fn parse_poses(request: &ImageRequest) -> Vec<PoseInput> {
 /// `character_studio_angles.ANGLE_PROMPT_AUGMENTS`). Unknown angle → empty.
 #[cfg(any(
     target_os = "macos",
-    all(target_os = "windows", feature = "backend-candle")
+    all(not(target_os = "macos"), feature = "backend-candle")
 ))]
 fn angle_prompt_augment(angle: &str) -> &'static str {
     match angle {
@@ -768,7 +775,7 @@ fn angle_prompt_augment(angle: &str) -> &'static str {
 /// leave a trailing space, e.g. `"a . "` → `"a "`).
 #[cfg(any(
     target_os = "macos",
-    all(target_os = "windows", feature = "backend-candle")
+    all(not(target_os = "macos"), feature = "backend-candle")
 ))]
 fn strip_base_prompt(base: &str) -> &str {
     base.trim().trim_end_matches([',', '.', ';'])
@@ -778,7 +785,7 @@ fn strip_base_prompt(base: &str) -> &str {
 /// `augment_prompt_for_angle`). Empty base + unknown angle → empty string.
 #[cfg(any(
     target_os = "macos",
-    all(target_os = "windows", feature = "backend-candle")
+    all(not(target_os = "macos"), feature = "backend-candle")
 ))]
 fn augment_prompt_for_angle(base: &str, angle: &str) -> String {
     let augment = angle_prompt_augment(angle);
@@ -1004,7 +1011,7 @@ async fn generate_stream(
 /// this gate is intentionally the base-id set only. Lens is pure T2I (no conditioning), so it joins
 /// the lane with no new dispatch shape — only quant + adapters, which `generate_candle_stream`
 /// resolves from the descriptor.
-#[cfg(all(target_os = "windows", feature = "backend-candle"))]
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 fn is_candle_engine(model: &str) -> bool {
     matches!(
         model,
@@ -1030,7 +1037,7 @@ fn is_candle_engine(model: &str) -> bool {
 /// sibling of the `MODEL_TABLE` `mlx_<family>` labels. Used both per-asset (`generate_candle_stream`)
 /// and at the generation-set level (`adapter_id`) so the sidecar + result agree on the backend.
 /// (sc-5099 extends this same labeling to the video + caption engines.)
-#[cfg(all(target_os = "windows", feature = "backend-candle"))]
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 fn candle_adapter_label(model: &str) -> &'static str {
     match model {
         "z_image_turbo" => "candle_z_image",
@@ -1060,7 +1067,7 @@ fn candle_adapter_label(model: &str) -> &'static str {
 /// adapter-free exactly as before. No reference/img2img/control — those shapes fall back to the Python
 /// worker upstream (`image_request_candle_eligible`). Reached only when `backend_candle_enabled`
 /// (default off → production routing unchanged until parity).
-#[cfg(all(target_os = "windows", feature = "backend-candle"))]
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 async fn generate_candle_stream(
     api: &ApiClient,
     settings: &Settings,
@@ -1400,7 +1407,7 @@ async fn consume_gen_events(
 
 // Candle image lane labeling + engine-gate unit tests (sc-5099). Windows/candle-gated (the functions
 // only exist on that build); pure string maps, no GPU.
-#[cfg(all(test, target_os = "windows", feature = "backend-candle"))]
+#[cfg(all(test, not(target_os = "macos"), feature = "backend-candle"))]
 mod candle_label_tests {
     use super::*;
 

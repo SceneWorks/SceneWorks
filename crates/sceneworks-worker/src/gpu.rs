@@ -43,11 +43,11 @@ pub(crate) async fn discover_gpu(settings: &Settings) -> DiscoveredGpu {
 /// All-targets signature so `discover_gpu` is uniform; a no-op everywhere except the Windows candle
 /// build with `backend_candle_enabled`, so production routing is unchanged until the lane is on.
 #[cfg_attr(
-    not(all(target_os = "windows", feature = "backend-candle")),
+    not(all(not(target_os = "macos"), feature = "backend-candle")),
     allow(unused_mut, unused_variables)
 )]
 fn with_candle_capabilities(mut gpu: DiscoveredGpu, settings: &Settings) -> DiscoveredGpu {
-    #[cfg(all(target_os = "windows", feature = "backend-candle"))]
+    #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
     if settings.backend_candle_enabled && gpu.capabilities.contains(&WorkerCapability::Gpu) {
         let derived = crate::engines::registry_capabilities(settings);
         if !derived.is_empty() {
@@ -65,6 +65,22 @@ fn with_candle_capabilities(mut gpu: DiscoveredGpu, settings: &Settings) -> Disc
             for capability in [
                 WorkerCapability::ImageVqa,
                 WorkerCapability::ImageInterleave,
+            ] {
+                if !gpu.capabilities.contains(&capability) {
+                    gpu.capabilities.push(capability);
+                }
+            }
+            // SeedVR2 image + video upscaling (sc-5928, epic 4811 / epic 5482): the candle SeedVR2
+            // provider (`candle-gen-seedvr2`, force-linked under backend-candle) serves `image_upscale`
+            // AND the net-new `video_upscale` via `gen_core::load("seedvr2")` — the Windows/CUDA sibling
+            // of the Mac mlx-gen-seedvr2 path. These are job-type capabilities (not a generation
+            // modality), so they aren't in `registry_capabilities`; advertise them explicitly. The
+            // routing gate confines the candle worker to the SeedVR2 engine ids
+            // (`upscale_job_is_candle_eligible` / `video_upscale_job_is_candle_eligible`); Real-ESRGAN /
+            // AuraSR have no candle path and stay on the Python torch worker.
+            for capability in [
+                WorkerCapability::ImageUpscale,
+                WorkerCapability::VideoUpscale,
             ] {
                 if !gpu.capabilities.contains(&capability) {
                     gpu.capabilities.push(capability);
