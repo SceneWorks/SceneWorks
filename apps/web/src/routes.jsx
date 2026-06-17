@@ -28,6 +28,7 @@ const LogsScreen = lazyScreen(() => import("./screens/LogsScreen.jsx"), "LogsScr
 const LicensesScreen = lazyScreen(() => import("./screens/LicensesScreen.jsx"), "LicensesScreen");
 const MakePicture = lazyScreen(() => import("./screens/simple/MakePicture.jsx"), "MakePicture");
 const MakeVideo = lazyScreen(() => import("./screens/simple/MakeVideo.jsx"), "MakeVideo");
+const MyCreations = lazyScreen(() => import("./screens/simple/MyCreations.jsx"), "MyCreations");
 
 export function RouteFallback({ label = "Loading view…" } = {}) {
   return <section className="main-surface">{label}</section>;
@@ -81,7 +82,7 @@ export const simpleNavSections = [
   {
     label: "Yours",
     items: [
-      { id: "Library", label: "My creations", icon: Icon.Library },
+      { id: "MyCreations", label: "My creations", icon: Icon.Library },
       { id: "Queue", label: "In progress", icon: Icon.Queue },
       { id: "Settings", icon: Icon.Sliders },
     ],
@@ -98,6 +99,11 @@ const viewRegistry = {
     title: "Make a video",
     blurb: "Start from a description or bring a picture to life.",
     render: ({ activeProjectId } = {}) => <MakeVideo key={activeProjectId ?? "default"} />,
+  },
+  MyCreations: {
+    title: "My creations",
+    blurb: "Everything you've made in this workspace.",
+    render: ({ activeProjectId } = {}) => <MyCreations key={activeProjectId ?? "default"} />,
   },
   Library: {
     title: "Assets",
