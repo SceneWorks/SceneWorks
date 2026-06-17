@@ -243,34 +243,75 @@ function CharacterAssetLinker({ asset, characters = [], onMoveToCharacter }) {
   );
 }
 
+const ASSET_GRID_PAGE_SIZE = 48;
+
 export function AssetGrid({ assets, onPreview, selectedAsset, setSelectedAssetId }) {
+  const [pageIndex, setPageIndex] = React.useState(0);
+  const assetIdsKey = React.useMemo(() => assets.map((asset) => asset.id).join("\u001f"), [assets]);
+  const pageCount = Math.max(1, Math.ceil(assets.length / ASSET_GRID_PAGE_SIZE));
+  const safePageIndex = Math.min(pageIndex, pageCount - 1);
+  const pageStart = safePageIndex * ASSET_GRID_PAGE_SIZE;
+  const pageEnd = Math.min(pageStart + ASSET_GRID_PAGE_SIZE, assets.length);
+  const pageAssets = assets.slice(pageStart, pageEnd);
+
+  React.useEffect(() => {
+    setPageIndex(0);
+  }, [assetIdsKey]);
+
+  React.useEffect(() => {
+    if (pageIndex >= pageCount) {
+      setPageIndex(pageCount - 1);
+    }
+  }, [pageCount, pageIndex]);
+
   if (!assets.length) {
     return <div className="empty-panel">No assets in this view</div>;
   }
 
   return (
-    <div className="asset-grid">
-      {assets.map((asset) => (
-        <button
-          className={selectedAsset?.id === asset.id ? "asset-tile active" : "asset-tile"}
-          key={asset.id}
-          onClick={() => setSelectedAssetId(asset.id)}
-          onDoubleClick={() => onPreview(asset)}
-          type="button"
-        >
-          <AssetMedia asset={asset} />
-          <strong>{asset.displayName}</strong>
-          {Array.isArray(asset.tags) && asset.tags.length ? (
-            <div className="asset-tile-tags">
-              {asset.tags.map((tag) => (
-                <span className="asset-tag compact" key={tag}>
-                  {tag}
-                </span>
-              ))}
-            </div>
-          ) : null}
-        </button>
-      ))}
+    <div className="asset-grid-shell">
+      {pageCount > 1 ? (
+        <div className="asset-grid-pagination" aria-label="Asset pages">
+          <span>
+            Showing {pageStart + 1}-{pageEnd} of {assets.length}
+          </span>
+          <div className="segmented-control compact-segment">
+            <button disabled={safePageIndex === 0} onClick={() => setPageIndex((page) => Math.max(0, page - 1))} type="button">
+              Previous
+            </button>
+            <button
+              disabled={safePageIndex >= pageCount - 1}
+              onClick={() => setPageIndex((page) => Math.min(pageCount - 1, page + 1))}
+              type="button"
+            >
+              Next
+            </button>
+          </div>
+        </div>
+      ) : null}
+      <div className="asset-grid">
+        {pageAssets.map((asset) => (
+          <button
+            className={selectedAsset?.id === asset.id ? "asset-tile active" : "asset-tile"}
+            key={asset.id}
+            onClick={() => setSelectedAssetId(asset.id)}
+            onDoubleClick={() => onPreview(asset)}
+            type="button"
+          >
+            <AssetMedia asset={asset} />
+            <strong>{asset.displayName}</strong>
+            {Array.isArray(asset.tags) && asset.tags.length ? (
+              <div className="asset-tile-tags">
+                {asset.tags.map((tag) => (
+                  <span className="asset-tag compact" key={tag}>
+                    {tag}
+                  </span>
+                ))}
+              </div>
+            ) : null}
+          </button>
+        ))}
+      </div>
     </div>
   );
 }

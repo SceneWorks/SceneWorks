@@ -3489,6 +3489,20 @@ label {
   gap: var(--gap-3);
 }
 
+.asset-grid-shell {
+  display: grid;
+  gap: var(--gap-3);
+}
+
+.asset-grid-pagination {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--gap-2);
+  color: var(--text-muted);
+  font-size: 13px;
+}
+
 .asset-tile,
 .review-card,
 .asset-detail,

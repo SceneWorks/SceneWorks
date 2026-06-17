@@ -4,7 +4,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { App, ErrorBoundary, eventUrl } from "./main.jsx";
 import { AssetPickerField, CharacterImportDialog } from "./components/AssetPicker.jsx";
 import { assetUrl } from "./components/assetMedia.jsx";
-import { AssetDetail, FullscreenPreview } from "./components/assetPanels.jsx";
+import { AssetDetail, AssetGrid, FullscreenPreview } from "./components/assetPanels.jsx";
 import { liveElapsedSeconds } from "./formatting.js";
 import { dropUpscaledVariants, foldUpscaledAssetVariants, restrictFoldedToScope } from "./assetVariants.js";
 import { extractFamilies } from "./presetUtils.js";
@@ -9392,6 +9392,117 @@ describe("SceneWorks app shell", () => {
     expect(tiles).toHaveLength(1);
     expect(tiles[0].textContent).toContain("Studio Render");
     expect(container.textContent).not.toContain("Character Test");
+  });
+
+  it("bounds AssetGrid tile rendering while preserving selection across pages", async () => {
+    const assets = Array.from({ length: 55 }, (_, index) => ({
+      id: `asset-${index + 1}`,
+      projectId: "project-1",
+      type: "image",
+      displayName: `Frame ${index + 1}`,
+      file: { path: `assets/images/frame-${index + 1}.png`, mimeType: "image/png" },
+      status: { favorite: false, rating: 0, rejected: false, trashed: false },
+    }));
+    const onPreview = vi.fn();
+
+    function GridHarness() {
+      const [selectedId, setSelectedId] = React.useState(assets[0].id);
+      const selected = assets.find((asset) => asset.id === selectedId) ?? null;
+      return <AssetGrid assets={assets} onPreview={onPreview} selectedAsset={selected} setSelectedAssetId={setSelectedId} />;
+    }
+
+    root = createRoot(container);
+    await act(async () => {
+      root.render(<GridHarness />);
+    });
+
+    expect(container.querySelectorAll(".asset-tile")).toHaveLength(48);
+    expect(container.textContent).toContain("Showing 1-48 of 55");
+    expect(container.textContent).toContain("Frame 1");
+    expect(container.textContent).not.toContain("Frame 49");
+
+    await act(async () => {
+      [...container.querySelectorAll("button")].find((button) => button.textContent === "Next").click();
+    });
+
+    const secondPageTiles = [...container.querySelectorAll(".asset-tile")];
+    expect(secondPageTiles).toHaveLength(7);
+    expect(container.textContent).toContain("Showing 49-55 of 55");
+    expect(secondPageTiles[0].textContent).toContain("Frame 49");
+
+    await act(async () => {
+      secondPageTiles[0].click();
+    });
+    expect(secondPageTiles[0].className).toContain("active");
+
+    await act(async () => {
+      secondPageTiles[0].dispatchEvent(new MouseEvent("dblclick", { bubbles: true }));
+    });
+    expect(onPreview).toHaveBeenCalledWith(expect.objectContaining({ id: "asset-49" }));
+  });
+
+  it("previews a later Asset Library page within the full filtered scope", async () => {
+    const setPreviewAsset = vi.fn();
+    const assets = Array.from({ length: 55 }, (_, index) => ({
+      id: `library-${index + 1}`,
+      projectId: "project-1",
+      type: "image",
+      displayName: `Library Frame ${index + 1}`,
+      tags: ["sequence"],
+      file: { path: `assets/images/library-${index + 1}.png`, mimeType: "image/png" },
+      recipe: { prompt: `frame ${index + 1}` },
+      status: { favorite: false, rating: 0, rejected: false, trashed: false },
+    }));
+
+    root = createRoot(container);
+    await act(async () => {
+      root.render(
+        withAppContext(
+          {
+            activeProject: { id: "project-1", name: "Large Library" },
+            assets,
+            jobs: [],
+            imageModels: [],
+            createVqaJob: vi.fn(),
+            deleteAsset: () => {},
+            purgeAsset: () => {},
+            importAsset: () => {},
+            setPreviewAsset,
+            sendAssetToImage: () => {},
+            sendAssetToVideo: () => {},
+            selectedAsset: assets[0],
+            setSelectedAssetId: () => {},
+            setActiveView: () => {},
+            updateAssetStatus: () => {},
+            updateAssetTags: () => {},
+          },
+          <LibraryScreen />,
+        ),
+      );
+    });
+    await settle();
+
+    expect(container.querySelectorAll(".asset-tile")).toHaveLength(48);
+
+    await act(async () => {
+      [...container.querySelectorAll("button")].find((button) => button.textContent === "Next").click();
+    });
+
+    const pageTwoTiles = [...container.querySelectorAll(".asset-tile")];
+    expect(pageTwoTiles).toHaveLength(7);
+    await act(async () => {
+      pageTwoTiles[2].dispatchEvent(new MouseEvent("dblclick", { bubbles: true }));
+    });
+
+    expect(setPreviewAsset).toHaveBeenCalledWith(
+      expect.objectContaining({ id: "library-51" }),
+      expect.arrayContaining([
+        expect.objectContaining({ id: "library-1" }),
+        expect.objectContaining({ id: "library-51" }),
+        expect.objectContaining({ id: "library-55" }),
+      ]),
+    );
+    expect(setPreviewAsset.mock.calls[0][1]).toHaveLength(55);
   });
 
   it("folds original and upscaled library variants into one representative tile", async () => {
