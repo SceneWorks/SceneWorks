@@ -10,8 +10,13 @@ import {
   SHAPES,
   COUNT_OPTIONS,
   UPSCALE_OPTIONS,
+  DETAIL_LEVELS,
+  CREATIVITY_LEVELS,
   FALLBACK_RESOLUTIONS,
   composePrompt,
+  modelUsesGuidance,
+  resolveCreativityGuidance,
+  resolveDetailSteps,
 } from "./simpleDefaults.js";
 
 // Snap a friendly shape to the closest resolution the chosen model actually
@@ -38,6 +43,8 @@ export function MakePicture() {
   const [lookId, setLookId] = useState(null);
   const [shapeId, setShapeId] = useState("square");
   const [count, setCount] = useState(4);
+  const [detailId, setDetailId] = useState("standard");
+  const [creativityId, setCreativityId] = useState("balanced");
   const [upscaleId, setUpscaleId] = useState("off");
   const [submitting, setSubmitting] = useState(false);
   const [describing, setDescribing] = useState(false);
@@ -46,6 +53,7 @@ export function MakePicture() {
   const looks = useLookExemplars();
   const model = imageModels[0] ?? null;
   const modelId = model?.id ?? "z_image_turbo";
+  const usesGuidance = useMemo(() => modelUsesGuidance(model), [model]);
   const look = useMemo(() => LOOKS.find((entry) => entry.id === lookId) ?? null, [lookId]);
   const shape = useMemo(() => SHAPES.find((entry) => entry.id === shapeId) ?? SHAPES[0], [shapeId]);
   const upscale = useMemo(() => UPSCALE_OPTIONS.find((entry) => entry.id === upscaleId) ?? UPSCALE_OPTIONS[0], [upscaleId]);
@@ -61,6 +69,8 @@ export function MakePicture() {
     setSubmitting(true);
     setNotice("");
     const dims = resolveDims(model, shape);
+    const steps = resolveDetailSteps(model, detailId);
+    const guidanceScale = resolveCreativityGuidance(model, creativityId);
     const payload = {
       mode: "text_to_image",
       prompt: composePrompt(prompt, look),
@@ -71,7 +81,12 @@ export function MakePicture() {
       height: dims.height,
       recipePresetId: look?.presetId ?? null,
       loras: [],
-      advanced: { resolution: dims.resolution },
+      // Omit steps/guidance when null so the worker keeps the model's own default.
+      advanced: {
+        resolution: dims.resolution,
+        ...(steps != null ? { steps } : {}),
+        ...(guidanceScale != null ? { guidanceScale } : {}),
+      },
     };
     if (upscale.factor) {
       payload.upscale = { enabled: true, factor: upscale.factor };
@@ -192,6 +207,28 @@ export function MakePicture() {
                   ))}
                 </select>
               </label>
+              <label>
+                Detail
+                <select value={detailId} onChange={(event) => setDetailId(event.target.value)}>
+                  {DETAIL_LEVELS.map((entry) => (
+                    <option key={entry.id} value={entry.id}>
+                      {entry.label}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              {usesGuidance ? (
+                <label>
+                  Creativity
+                  <select value={creativityId} onChange={(event) => setCreativityId(event.target.value)}>
+                    {CREATIVITY_LEVELS.map((entry) => (
+                      <option key={entry.id} value={entry.id}>
+                        {entry.label}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+              ) : null}
               <label>
                 Make it sharper
                 <select value={upscaleId} onChange={(event) => setUpscaleId(event.target.value)}>
