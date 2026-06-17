@@ -2090,8 +2090,10 @@ async fn resolve_wan_clip_conditioning(
     build_wan_boundary_conditioning(request, left_frame, right_frame)
 }
 
-/// Decode a single boundary frame (first or last) of a source clip into an [`Image`], scaled to the
-/// output `width`×`height` (sc-3357, the Wan boundary-keyframe conditioning input). The last frame
+/// Decode a single boundary frame (first or last) of a source clip into an [`Image`], fit to the
+/// output `width`×`height` by contain+pad (letterbox, `FRAME_PAD_COLOR`) so a clip whose aspect
+/// differs from the output is not distorted — sc-6229, matching the `load_source_video_frames`
+/// recipe (sc-3357, the Wan boundary-keyframe conditioning input). The last frame
 /// uses ffmpeg `-sseof` to seek near the end + `-update 1` so each decoded frame overwrites the lone
 /// output, leaving the final frame; the first frame is a plain `-frames:v 1`. Extracted via the
 /// shared [`run_ffmpeg`] (binary resolution + heartbeat/cancel), then loaded off the async runtime.
@@ -2125,7 +2127,12 @@ async fn extract_clip_boundary_frame(
     args.push("-i".to_owned());
     args.push(clip_path.display().to_string());
     args.push("-vf".to_owned());
-    args.push(format!("scale={width}:{height}"));
+    // Contain+pad (letterbox) to the output dims so a source clip whose aspect differs from the
+    // requested W×H is not stretched (sc-6229); reuses the `FRAME_PAD_COLOR` recipe.
+    args.push(format!(
+        "scale={width}:{height}:force_original_aspect_ratio=decrease,\
+         pad={width}:{height}:(ow-iw)/2:(oh-ih)/2:color={FRAME_PAD_COLOR},format=rgb24"
+    ));
     if position == ClipFramePosition::Last {
         args.push("-update".to_owned());
         args.push("1".to_owned());
@@ -4463,8 +4470,10 @@ fn resolve_clip_media_path(
 /// Decode the first `count` frames of a source clip into [`Image`]s for in-context conditioning.
 /// Mirrors the torch reference `decode_video_by_frame(starting_frame=0, frame_cap=num_frames)` /
 /// `video_preprocess` (ltx_pipelines): **sequential** frames from the start at the clip's native
-/// cadence (no fps resample), scaled to the output `width`×`height` (the engine `build_clips`
-/// LANCZOS-downsizes each frame to stage-1 half-res, so this only bounds memory). `count` is the
+/// cadence (no fps resample), fit to the output `width`×`height` by contain+pad (letterbox,
+/// `FRAME_PAD_COLOR`) so a clip whose aspect differs from the output is not distorted (sc-6229;
+/// the engine `build_clips` LANCZOS-downsizes each frame to stage-1 half-res, so this only bounds
+/// memory). `count` is the
 /// generation's snapped frame count (`8k+1`); a clip shorter than `count` yields fewer frames,
 /// which the engine VAE encode accepts. Extracted via the shared [`run_ffmpeg`] (binary
 /// resolution + heartbeat/cancel), then loaded off the async runtime.
@@ -4496,10 +4505,14 @@ async fn extract_clip_frames(
             "-y".to_owned(),
             "-i".to_owned(),
             clip_path.display().to_string(),
-            // Plain scale (stretch) to the output dims — matches the engine's LANCZOS resize
-            // model (it re-resizes to stage-1 half-res); bounds the extracted frame footprint.
+            // Contain+pad (letterbox) to the output dims so a clip whose aspect differs from the
+            // requested W×H is not stretched (sc-6229); reuses the `FRAME_PAD_COLOR` recipe. The
+            // engine re-resizes to stage-1 half-res, so this only bounds the extracted footprint.
             "-vf".to_owned(),
-            format!("scale={width}:{height}"),
+            format!(
+                "scale={width}:{height}:force_original_aspect_ratio=decrease,\
+                 pad={width}:{height}:(ow-iw)/2:(oh-ih)/2:color={FRAME_PAD_COLOR},format=rgb24"
+            ),
             // First `count` decoded frames, sequential from the start at native cadence.
             "-frames:v".to_owned(),
             count.to_string(),
