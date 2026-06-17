@@ -517,6 +517,13 @@ pub(crate) struct VideoJobRequest {
     pub(crate) replacement_mode: String,
     #[serde(default)]
     pub(crate) source_asset_id: Option<String>,
+    // How the starting image is fitted to the output W×H for the image-conditioned
+    // modes (image_to_video / first_last_frame), mirroring Image Studio Edit (sc-6139):
+    // "crop" (cover, default) or "pad" (letterbox) — never distort. Threaded to the
+    // worker as-is; the worker normalizes unknown values back to crop. Outpaint is
+    // inpaint-only and not offered for video.
+    #[serde(default = "default_fit_mode")]
+    pub(crate) fit_mode: String,
     #[serde(default)]
     pub(crate) last_frame_asset_id: Option<String>,
     #[serde(default)]

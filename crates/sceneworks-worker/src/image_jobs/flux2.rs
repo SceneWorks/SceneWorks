@@ -88,7 +88,14 @@ fn fit_rgb(source: &image::RgbImage, width: u32, height: u32, mode: &str) -> ima
 }
 
 /// Fit an engine [`Image`] (RGB8) to `width`×`height` by `mode` via [`fit_rgb`].
-fn fit_engine_image(source: Image, width: u32, height: u32, mode: &str) -> WorkerResult<Image> {
+/// `pub(crate)` so the video I2V resolve paths (`video_jobs.rs`, sc-6139) can pre-fit a
+/// starting image to the output dims with the same crop/pad geometry as the image-edit lane.
+pub(crate) fn fit_engine_image(
+    source: Image,
+    width: u32,
+    height: u32,
+    mode: &str,
+) -> WorkerResult<Image> {
     let rgb =
         image::RgbImage::from_raw(source.width, source.height, source.pixels).ok_or_else(|| {
             WorkerError::InvalidPayload("edit source buffer size mismatch".to_owned())

@@ -1942,6 +1942,15 @@ fn resolve_wan_conditioning(
                 asset_id,
                 project_path,
             )?;
+            // Pre-fit to the output W×H by the chosen crop/pad mode (sc-6139) — see
+            // `resolve_ltx_conditioning`; without it the provider VAE-encodes a stretched
+            // first frame into its channel-concat `y`.
+            let image = crate::image_jobs::fit_engine_image(
+                image,
+                request.width,
+                request.height,
+                &request.fit_mode,
+            )?;
             Ok(vec![Conditioning::Reference {
                 image,
                 strength: None,
@@ -2912,6 +2921,15 @@ fn resolve_candle_video_conditioning(
         &request.project_id,
         asset_id,
         project_path,
+    )?;
+    // Pre-fit the source to the output W×H by the chosen crop/pad mode (sc-6139), the
+    // same as the macOS LTX/Wan paths, so the Windows/CUDA candle I2V engine conditions
+    // on an undistorted frame instead of an internal stretch.
+    let image = crate::image_jobs::fit_engine_image(
+        image,
+        request.width,
+        request.height,
+        &request.fit_mode,
     )?;
     Ok(vec![Conditioning::Reference {
         image,
@@ -4198,6 +4216,16 @@ fn resolve_ltx_conditioning(
                 asset_id,
                 project_path,
             )?;
+            // Pre-fit the starting image to the output W×H by the chosen crop/pad mode
+            // (sc-6139) — without this the engine resizes it internally = stretch. Reuses
+            // the image-edit lane's helper; a pre-fit-to-exact-dims reference is a no-op
+            // for any further internal resize.
+            let image = crate::image_jobs::fit_engine_image(
+                image,
+                request.width,
+                request.height,
+                &request.fit_mode,
+            )?;
             Ok(vec![Conditioning::Reference {
                 image,
                 strength: None,
@@ -4243,6 +4271,21 @@ fn resolve_keyframe_conditioning(
         &request.project_id,
         last_id,
         project_path,
+    )?;
+    // Fit both keyframes to the output W×H by the chosen crop/pad mode (sc-6139) so a
+    // square first/last frame letterboxes (pad) or fills+trims (crop) into an off-aspect
+    // clip instead of the engine stretching each internally.
+    let first = crate::image_jobs::fit_engine_image(
+        first,
+        request.width,
+        request.height,
+        &request.fit_mode,
+    )?;
+    let last = crate::image_jobs::fit_engine_image(
+        last,
+        request.width,
+        request.height,
+        &request.fit_mode,
     )?;
     Ok(vec![
         Conditioning::Keyframe {

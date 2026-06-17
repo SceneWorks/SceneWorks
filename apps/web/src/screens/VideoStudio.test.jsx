@@ -248,6 +248,83 @@ describe("VideoStudio video_bridge", () => {
   });
 });
 
+describe("VideoStudio fit mode (sc-6139)", () => {
+  let container;
+  let root;
+
+  const source = { id: "img_src", type: "image", projectId: "project_1", displayName: "Source" };
+
+  beforeEach(() => {
+    global.IS_REACT_ACT_ENVIRONMENT = true;
+    window.localStorage.clear();
+    container = document.createElement("div");
+    document.body.appendChild(container);
+    root = createRoot(container);
+  });
+
+  afterEach(async () => {
+    await act(async () => root.unmount());
+    container.remove();
+    vi.clearAllMocks();
+  });
+
+  async function render(context) {
+    await act(async () => {
+      root.render(
+        <AppContext.Provider value={context}>
+          <VideoStudio />
+        </AppContext.Provider>,
+      );
+    });
+    await act(async () => {});
+  }
+
+  const modeButton = (label) => buttonWithText(container.querySelector(".mode-control"), label);
+  const fitField = () => container.querySelector(".fit-mode-field");
+  const fitButton = (label) => fitField() && buttonWithText(fitField(), label);
+
+  it("offers Crop/Pad only (no Outpaint) in the image-conditioned modes", async () => {
+    const context = baseContext({ assets: [source], selectedAsset: source });
+    await render(context);
+
+    // Default Text → Video has no starting image, so no fit control.
+    expect(fitField()).toBeFalsy();
+
+    await click(modeButton("Image → Video"));
+    expect([...fitField().querySelectorAll("button")].map((b) => b.textContent.trim())).toEqual([
+      "Crop",
+      "Pad",
+    ]);
+
+    await click(modeButton("First → Last"));
+    expect(fitField()).toBeTruthy();
+    expect(fitButton("Outpaint")).toBeFalsy();
+  });
+
+  it("threads the chosen fitMode into the image_to_video payload (default crop)", async () => {
+    const context = baseContext({ assets: [source], selectedAsset: source });
+    await render(context);
+    await click(modeButton("Image → Video"));
+
+    // Default selection is crop.
+    await click(buttonWithText(container, "Render clip"));
+    expect(context.createVideoJob.mock.calls[0][0].fitMode).toBe("crop");
+
+    // Choosing Pad threads through on the next submit.
+    await click(fitButton("Pad"));
+    await click(buttonWithText(container, "Render clip"));
+    expect(context.createVideoJob.mock.calls[1][0].fitMode).toBe("pad");
+  });
+
+  it("omits fitMode for non-image-conditioned modes", async () => {
+    const context = baseContext({ assets: [source], selectedAsset: source });
+    await render(context);
+    // Text → Video is the default mode; it carries no starting image to fit.
+    await click(buttonWithText(container, "Render clip"));
+    expect(context.createVideoJob.mock.calls[0][0].fitMode).toBeUndefined();
+  });
+});
+
 describe("VideoStudio Bernini task modes", () => {
   let container;
   let root;

@@ -51,6 +51,12 @@ pub struct VideoRequest {
     pub character_look_id: Option<String>,
     /// Image→video conditioning source (consumed by the MLX I2V path).
     pub source_asset_id: Option<String>,
+    /// How the starting image is fitted to the output `width`×`height` before
+    /// conditioning — one of crop/pad/outpaint/stretch, default crop (sc-6139).
+    /// Mirrors `ImageRequest::fit_mode`; the I2V / first-last resolve paths pass it
+    /// to the same `fit_engine_image` helper the image-edit lane uses so a square
+    /// source no longer silently stretches into an off-aspect output.
+    pub fit_mode: String,
     // --- Advanced-mode fields: parsed + carried, but Python-routed (sc-3036). ---
     pub person_track_id: Option<String>,
     pub replacement_mode: String,
@@ -100,6 +106,9 @@ impl VideoRequest {
             character_id: optional_id(payload, "characterId"),
             character_look_id: optional_id(payload, "characterLookId"),
             source_asset_id: optional_id(payload, "sourceAssetId"),
+            fit_mode: crate::image_request::normalize_fit_mode(
+                payload.get("fitMode").and_then(Value::as_str),
+            ),
             person_track_id: optional_id(payload, "personTrackId"),
             replacement_mode: string_or(payload, "replacementMode", DEFAULT_REPLACEMENT_MODE),
             last_frame_asset_id: optional_id(payload, "lastFrameAssetId"),
@@ -301,6 +310,28 @@ mod tests {
         assert!(request.loras.is_empty());
         assert!(request.advanced.is_empty());
         assert!(request.source_asset_id.is_none());
+        // sc-6139: starting-image fit defaults to crop (never stretch), like images.
+        assert_eq!(request.fit_mode, "crop");
+    }
+
+    #[test]
+    fn normalizes_fit_mode_like_images() {
+        let pad = VideoRequest::from_payload(&payload(json!({
+            "projectId": "p", "mode": "image_to_video", "fitMode": "pad"
+        })));
+        assert_eq!(pad.fit_mode, "pad");
+
+        // Case-insensitive, same normalizer as ImageRequest.
+        let stretch = VideoRequest::from_payload(&payload(json!({
+            "projectId": "p", "fitMode": "Stretch"
+        })));
+        assert_eq!(stretch.fit_mode, "stretch");
+
+        // Unknown / blank coerce back to the crop default.
+        let bogus = VideoRequest::from_payload(&payload(json!({
+            "projectId": "p", "fitMode": "nonsense"
+        })));
+        assert_eq!(bogus.fit_mode, "crop");
     }
 
     #[test]

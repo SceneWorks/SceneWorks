@@ -1,6 +1,7 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import { pickClosestResolution } from "../resolutionMatch.js";
 import { AssetPickerField } from "../components/AssetPicker.jsx";
+import { FitModeControl, effectiveFitMode } from "../components/FitModeControl.jsx";
 import { AssetCard } from "../components/assetPanels.jsx";
 import { AssetMedia, assetCanRenderAsVideo } from "../components/assetMedia.jsx";
 import { Icon } from "../components/Icons.jsx";
@@ -263,6 +264,10 @@ export function VideoStudio() {
     saved.bridgeRightVideoConditioningStrength ?? "",
   );
   const [sourceAssetId, setSourceAssetId] = useState(["image", "frame"].includes(selectedAsset?.type) ? selectedAsset.id : "");
+  // How the starting image is fitted to the output resolution for the image-conditioned
+  // modes (sc-6139), mirroring Image Studio Edit. Crop/Pad only — video has no inpaint
+  // mask, so Outpaint is hidden (`inpaintCapable={false}`). Default crop = fill, not stretch.
+  const [fitMode, setFitMode] = useState(saved.fitMode ?? "crop");
   const [lastFrameAssetId, setLastFrameAssetId] = useState("");
   const [sourceClipAssetId, setSourceClipAssetId] = useState(selectedAsset?.type === "video" ? selectedAsset.id : "");
   const [bridgeRightClipAssetId, setBridgeRightClipAssetId] = useState("");
@@ -637,6 +642,7 @@ export function VideoStudio() {
     videoRescaleScale: ltxVideoRescale,
     videoConditioningStrength,
     bridgeRightVideoConditioningStrength,
+    fitMode,
   });
 
   useEffect(() => {
@@ -775,6 +781,12 @@ export function VideoStudio() {
         characterId: characterId || null,
         characterLookId: characterLookId || null,
         sourceAssetId: ["image_to_video", "first_last_frame"].includes(mode) ? sourceAssetId || null : null,
+        // Crop/Pad fit for the starting image (sc-6139) — only the image-conditioned
+        // modes carry it; `effectiveFitMode(_, false)` coerces any stale outpaint back to
+        // crop (video has no inpaint mask). Other modes omit it (DTO defaults to crop).
+        fitMode: ["image_to_video", "first_last_frame"].includes(mode)
+          ? effectiveFitMode(fitMode, false)
+          : undefined,
         lastFrameAssetId: mode === "first_last_frame" ? lastFrameAssetId || null : null,
         sourceClipAssetId: [
           "extend_clip",
@@ -1004,6 +1016,14 @@ export function VideoStudio() {
                 label="Last frame"
                 onChange={setLastFrameAssetId}
                 value={lastFrameAssetId}
+              />
+            ) : null}
+
+            {mode === "image_to_video" || mode === "first_last_frame" ? (
+              <FitModeControl
+                value={effectiveFitMode(fitMode, false)}
+                onChange={setFitMode}
+                inpaintCapable={false}
               />
             ) : null}
 
