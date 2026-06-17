@@ -214,6 +214,23 @@ async function settle() {
   });
 }
 
+async function waitUntil(assertion, attempts = 20) {
+  let lastError;
+  for (let index = 0; index < attempts; index += 1) {
+    try {
+      assertion();
+      return;
+    } catch (error) {
+      lastError = error;
+      await act(async () => {
+        await new Promise((resolve) => window.setTimeout(resolve, 0));
+      });
+      await settle();
+    }
+  }
+  throw lastError;
+}
+
 function field(container, labelText) {
   const label = [...container.querySelectorAll("label")].find((item) => item.childNodes[0]?.textContent.trim() === labelText);
   return label?.querySelector("input, select, textarea");
@@ -606,6 +623,49 @@ describe("SceneWorks app shell", () => {
     expect(container.textContent).toContain("Queue");
   });
 
+  it("keeps simple mode hidden unless it is explicitly enabled before startup", async () => {
+    root = createRoot(container);
+    await act(async () => {
+      root.render(<App />);
+    });
+    await settle();
+
+    expect(navLabels(container, "Workflow")).toEqual([]);
+    expect(navLabels(container, "Workspace")).toContain("Image");
+
+    await act(async () => {
+      root.unmount();
+    });
+    container.remove();
+    container = document.createElement("div");
+    document.body.appendChild(container);
+    window.localStorage.setItem("sceneworks-ui-mode", "simple");
+    root = createRoot(container);
+    await act(async () => {
+      root.render(<App />);
+    });
+    await settle();
+
+    expect(window.localStorage.getItem("sceneworks-ui-mode")).toBe("simple");
+    expect(navLabels(container, "Workflow")).toEqual(["Create", "Assets", "Queue", "Settings"]);
+    expect(navLabels(container, "Workspace")).toEqual([]);
+    expect(container.textContent).not.toContain("Training Studio");
+  });
+
+  it("falls back to advanced navigation when the stored mode is unsupported", async () => {
+    window.localStorage.setItem("sceneworks-ui-mode", "compact");
+    root = createRoot(container);
+    await act(async () => {
+      root.render(<App />);
+    });
+    await settle();
+
+    expect(navLabels(container, "Workflow")).toEqual([]);
+    expect(navLabels(container, "Workspace")).toContain("Image");
+    expect(navLabels(container, "Library")).toContain("Models");
+    expect(container.textContent).toContain("Assets");
+  });
+
   it("loads project assets through bounded active and lazy discarded queries", async () => {
     root = createRoot(container);
     await act(async () => {
@@ -678,13 +738,13 @@ describe("SceneWorks app shell", () => {
       root.render(<App />);
     });
     await settle();
+    await settle();
 
     await act(async () => {
       [...container.querySelectorAll("button")].find((button) => button.textContent === "Logs").click();
     });
     await settle();
-
-    expect(logsTokens.length).toBeGreaterThan(0);
+    await waitUntil(() => expect(logsTokens.length).toBeGreaterThan(0));
     expect(logsTokens.every((value) => value === "pair-tok-123")).toBe(true);
   });
 

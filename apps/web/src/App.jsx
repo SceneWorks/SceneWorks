@@ -17,7 +17,15 @@ import { AppContext } from "./context/AppContext.js";
 import { PreviewContext } from "./context/PreviewContext.js";
 import { DEFAULT_MAC_CAPABILITIES } from "./macGating.js";
 import { ACCENTS, DEFAULT_ACCENT, isAccentId } from "./accents.js";
-import { getViewTitle, navSections, renderActiveView, RouteFallback } from "./routes.jsx";
+import {
+  coerceViewForMode,
+  getInitialViewForMode,
+  getNavigationSections,
+  getViewTitle,
+  renderActiveView,
+  RouteFallback,
+} from "./routes.jsx";
+import { persistUiMode, readStoredUiMode } from "./uiMode.js";
 import {
   dropUpscaledVariants,
   findFoldedAssetById,
@@ -415,7 +423,8 @@ export function App() {
   // true = no wizard needed (web, or already completed), false = show the wizard.
   const [setupCompleted, setSetupCompleted] = useState(isDesktopShell ? null : true);
   const [activeProject, setActiveProject] = useState(null);
-  const [activeView, setActiveView] = useState("Library");
+  const [uiMode, setUiMode] = useState(readStoredUiMode);
+  const [activeView, setActiveView] = useState(() => getInitialViewForMode(readStoredUiMode()));
   const [jobs, setJobs] = useState([]);
   const [localGenerationJobIds, setLocalGenerationJobIds] = useState({ image: [], video: [], document: [] });
   const [workers, setWorkers] = useState([]);
@@ -545,6 +554,11 @@ export function App() {
       body: JSON.stringify({ accent: next }),
     }).catch(() => {});
   };
+  const changeUiMode = useCallback((next) => {
+    const normalized = persistUiMode(next);
+    setUiMode(normalized);
+    setActiveView((viewId) => coerceViewForMode(viewId, normalized));
+  }, []);
   const activeProjectRef = useRef(null);
   const activeViewRef = useRef(activeView);
   const localGenerationJobIdsRef = useRef(localGenerationJobIds);
@@ -861,6 +875,9 @@ export function App() {
   useEffect(() => {
     activeViewRef.current = activeView;
   }, [activeView]);
+  useEffect(() => {
+    setActiveView((viewId) => coerceViewForMode(viewId, uiMode));
+  }, [uiMode]);
 
   useEffect(() => {
     activeProjectRef.current = activeProject;
@@ -1781,6 +1798,7 @@ export function App() {
   );
 
   const titleInfo = getViewTitle(activeView);
+  const visibleNavSections = useMemo(() => getNavigationSections(uiMode), [uiMode]);
   // Activity dots only — counts live in the topbar so nav button textContent stays clean.
   const activeIndicators = {
     Editor: timelines.length > 0,
@@ -1935,6 +1953,8 @@ export function App() {
     sendCharacterToImage,
     sendCharacterToVideo,
     openDatasetInLibrary,
+    uiMode,
+    setUiMode: changeUiMode,
   }), [
     activeProject, mediaAssets, openPreview, sendAssetToImage, sendAssetToVideo,
     activeTimeline, timelines, selectedTimelineId, setSelectedTimelineId, setActiveTimeline,
@@ -1960,6 +1980,7 @@ export function App() {
     removeCharacterReference, createCharacterLook, updateCharacterLook, deleteCharacterLook,
     attachCharacterLora, updateCharacterLora, detachCharacterLora, createCharacterTestJob,
     sendCharacterToImage, sendCharacterToVideo, openDatasetInLibrary,
+    uiMode, changeUiMode,
   ]);
   const previewContextValue = useMemo(() => ({
     previewedAsset,
@@ -2007,7 +2028,7 @@ export function App() {
           projects={projects}
         />
 
-        {navSections.map((section) => (
+        {visibleNavSections.map((section) => (
           <div className="sidebar-section" key={section.label}>
             <div className="sidebar-section-title">{section.label}</div>
             <nav className="nav-list">
@@ -2124,7 +2145,11 @@ export function App() {
         ) : setupGateLoading ? null : needsFirstProject ? (
           <FirstRunProjectGate disabled={!authenticated} onCreate={createProject} />
         ) : (
-          renderActiveView(activeView, { activeProjectId: activeProject?.id })
+          renderActiveView(activeView, {
+            activeProjectId: activeProject?.id,
+            uiMode,
+            onUiModeChange: changeUiMode,
+          })
         )}
       </section>
 

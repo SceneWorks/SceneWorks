@@ -26,6 +26,7 @@ const PresetManagerScreen = lazyScreen(() => import("./screens/PresetManagerScre
 const SettingsScreen = lazyScreen(() => import("./screens/SettingsScreen.jsx"), "SettingsScreen");
 const LogsScreen = lazyScreen(() => import("./screens/LogsScreen.jsx"), "LogsScreen");
 const LicensesScreen = lazyScreen(() => import("./screens/LicensesScreen.jsx"), "LicensesScreen");
+const SimpleWorkflowScreen = lazyScreen(() => import("./screens/SimpleWorkflowScreen.jsx"), "SimpleWorkflowScreen");
 
 export function RouteFallback({ label = "Loading view…" } = {}) {
   return <section className="main-surface">{label}</section>;
@@ -68,7 +69,24 @@ export const navSections = [
   },
 ];
 
+export const simpleNavSections = [
+  {
+    label: "Workflow",
+    items: [
+      { id: "SimpleWorkflow", label: "Create", icon: Icon.Sparkle },
+      { id: "Library", label: "Assets", icon: Icon.Library },
+      { id: "Queue", icon: Icon.Queue },
+      { id: "Settings", icon: Icon.Sliders },
+    ],
+  },
+];
+
 const viewRegistry = {
+  SimpleWorkflow: {
+    title: "Create",
+    blurb: "A minimal starting point for common workflows.",
+    render: () => <SimpleWorkflowScreen />,
+  },
   Library: {
     title: "Assets",
     blurb: "Browse stills and clips across all your projects.",
@@ -147,7 +165,7 @@ const viewRegistry = {
   Settings: {
     title: "Settings",
     blurb: "Paths, service tokens, and detected GPU.",
-    render: () => <SettingsScreen />,
+    render: ({ uiMode, onUiModeChange } = {}) => <SettingsScreen uiMode={uiMode} onUiModeChange={onUiModeChange} />,
   },
   Licenses: {
     title: "Licenses",
@@ -155,6 +173,25 @@ const viewRegistry = {
     render: () => <LicensesScreen />,
   },
 };
+
+const simpleVisibleViews = new Set(simpleNavSections.flatMap((section) => section.items.map((item) => item.id)));
+const advancedVisibleViews = new Set(navSections.flatMap((section) => section.items.map((item) => item.id)));
+
+export function getNavigationSections(uiMode) {
+  return uiMode === "simple" ? simpleNavSections : navSections;
+}
+
+export function isViewVisibleInMode(viewId, uiMode) {
+  return uiMode === "simple" ? simpleVisibleViews.has(viewId) : advancedVisibleViews.has(viewId);
+}
+
+export function getInitialViewForMode(uiMode) {
+  return uiMode === "simple" ? "SimpleWorkflow" : "Library";
+}
+
+export function coerceViewForMode(viewId, uiMode) {
+  return isViewVisibleInMode(viewId, uiMode) ? viewId : getInitialViewForMode(uiMode);
+}
 
 export function getViewTitle(viewId) {
   return viewRegistry[viewId] ?? { title: viewId, blurb: "" };

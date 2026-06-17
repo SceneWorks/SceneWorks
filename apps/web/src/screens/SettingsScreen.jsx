@@ -13,7 +13,7 @@ import {
 // on the server). The remaining commands here are desktop-only Tauri invokes.
 const invoke = (command, args) => window.__TAURI__.core.invoke(command, args);
 
-export function SettingsScreen() {
+export function SettingsScreen({ uiMode = "advanced", onUiModeChange } = {}) {
   const [settings, setSettings] = useState(null);
   const [gpu, setGpu] = useState(null);
   const [credentials, setCredentials] = useState([]);
@@ -123,6 +123,33 @@ export function SettingsScreen() {
   return (
     <div className="settings-screen">
       {status ? <p className="settings-status">{status}</p> : null}
+
+      {onUiModeChange ? (
+        <section className="settings-card">
+          <h3>Interface mode</h3>
+          <p className="settings-muted">
+            Simple mode opens a streamlined Create view and keeps the advanced studios available from that workflow.
+          </p>
+          <div className="settings-actions" role="group" aria-label="Interface mode">
+            <button
+              className={uiMode === "simple" ? "active" : ""}
+              type="button"
+              aria-pressed={uiMode === "simple"}
+              onClick={() => onUiModeChange("simple")}
+            >
+              Simple
+            </button>
+            <button
+              className={uiMode === "advanced" ? "active" : ""}
+              type="button"
+              aria-pressed={uiMode === "advanced"}
+              onClick={() => onUiModeChange("advanced")}
+            >
+              Advanced
+            </button>
+          </div>
+        </section>
+      ) : null}
 
       {isDesktop ? (
         <section className="settings-card">
