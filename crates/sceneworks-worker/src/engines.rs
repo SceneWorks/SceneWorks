@@ -43,6 +43,17 @@ pub(crate) const MODEL_TABLE: &[ModelRow] = &[
         default_guidance: 0.0,
         adapter_label: "mlx_z_image",
     },
+    // Ideogram 4 (epic 4725) — native MLX, gated. Structured JSON-caption text-to-image; the
+    // turnkey ships packed q4/ (default) + q8/ subdirs (resolve_ideogram_model_dir picks one).
+    // V4_QUALITY_48 preset default (48 steps); asymmetric-CFG guidance 7.0.
+    ModelRow {
+        sceneworks_id: "ideogram_4",
+        engine_id: "ideogram_4",
+        default_repo: "SceneWorks/ideogram-4-mlx",
+        default_steps: 48,
+        default_guidance: 7.0,
+        adapter_label: "mlx_ideogram",
+    },
     // Z-Image-Edit (epic 3529) — img2img/edit. No dedicated Edit checkpoint exists yet, so
     // (like the Python `MODEL_TARGETS` row) it runs the **Turbo weights** through the engine's
     // img2img path (`Conditioning::Reference` — VAE-encode the source + denoise from

@@ -134,10 +134,41 @@ pub(crate) fn resolve_weights_dir(
     let Some(model) = mlx_model(&request.model) else {
         return Ok(None);
     };
-    Ok(huggingface_snapshot_dir(
-        &settings.data_dir,
-        &model_repo(request, &model),
-    ))
+    let snapshot = huggingface_snapshot_dir(&settings.data_dir, &model_repo(request, &model));
+    // Ideogram 4 ships a turnkey with packed `q4/` (default) + `q8/` self-contained subdirs; point
+    // the engine at the chosen quant's subdir rather than the repo root (epic 4725 / sc-5992),
+    // mirroring the LTX bundle pattern. The packed weights auto-detect their quant on load.
+    if request.model == "ideogram_4" {
+        return Ok(snapshot.map(|root| ideogram_model_subdir(&root, request)));
+    }
+    Ok(snapshot)
+}
+
+/// Pick the engine-complete packed subdir of an Ideogram 4 turnkey `root`: `q8/` when the request
+/// opts into Q8 (`advanced.mlxQuantize: 8`) AND it is downloaded, else the default `q4/`. Falls back
+/// to `root` if neither subdir is present (a partially-downloaded bundle surfaces as a load error
+/// rather than a silent half-load). On-demand `q8/` download is a follow-up; `q4/` is the manifest
+/// default.
+fn ideogram_model_subdir(root: &Path, request: &ImageRequest) -> PathBuf {
+    let wants_q8 = request
+        .advanced
+        .get("mlxQuantize")
+        .and_then(|v| v.as_i64().or_else(|| v.as_str()?.trim().parse().ok()))
+        .is_some_and(|bits| bits > 4);
+    let present = |name: &str| -> Option<PathBuf> {
+        let dir = root.join(name);
+        dir.join("transformer/model.safetensors")
+            .is_file()
+            .then_some(dir)
+    };
+    if wants_q8 {
+        if let Some(dir) = present("q8") {
+            return dir;
+        }
+    }
+    present("q4")
+        .or_else(|| present("q8"))
+        .unwrap_or_else(|| root.to_path_buf())
 }
 
 #[cfg(any(
