@@ -819,6 +819,7 @@ fn preprocess_nchw(img: &RgbImage) -> (Vec<f32>, Letterbox) {
     (chw, lb)
 }
 
+#[cfg(not(target_os = "macos"))]
 fn ort_err<R>(e: ort::Error<R>) -> WorkerError {
     WorkerError::Engine(format!("onnxruntime: {e}"))
 }
