@@ -26,13 +26,19 @@ A caption has up to three top-level sections:
 
 ### Style
 
-`style_description` keys, in order:
+`style_description` carries exactly one of **`photo`** (e.g. "telephoto, shallow depth of field, eye-level") or **`art_style`** (e.g. "watercolor illustration"), and the two use a slightly different key order:
+
+- **Photo captions:** `aesthetics`, `lighting`, `photo`, `medium`, `color_palette`
+- **Non-photo captions:** `aesthetics`, `lighting`, `medium`, `art_style`, `color_palette`
+
+Where:
 
 - `aesthetics` — mood/feel (e.g. "serene, warm, naturalistic")
 - `lighting` — (e.g. "golden hour, soft backlight, long shadows")
-- exactly one of **`photo`** (e.g. "telephoto, shallow depth of field, eye-level") **or `art_style`** (e.g. "watercolor illustration")
 - `medium` — (e.g. "photograph", "oil painting")
 - `color_palette` (optional) — up to 16 uppercase `#RRGGBB` colors
+
+SceneWorks emits these in the correct order for you; the distinction matters only if you paste raw JSON.
 
 ### Composition & layout
 
