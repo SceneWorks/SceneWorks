@@ -3633,3 +3633,232 @@ fn flux_ip_reference_worker_e2e() {
     }
     println!("[worker-e2e] OK: staged dir contract + flux_dev load + dev true_cfg=4 reference render — var={var:.1} mean={mean:.1} diff-vs-txt2img={diff}px");
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Ideogram 4 (epic 4725, sc-6000): worker-path validation. CI-safe mapping/lineage
+// unit tests + a real-weight #[ignore] smoke through the registry load seam for
+// both a structured JSON caption and a plain-text prompt.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Ideogram 4 resolves to its own engine + the V4_QUALITY_48 defaults, and quant resolution
+/// returns the generic Q8 default — the *effective* quant is Q4, supplied by the packed `q4/`
+/// subdir (see `ideogram_subdir_*`), so the Q8 spec is inert (the packed weights auto-detect on
+/// load). Runs in CI on Mac (no weights).
+#[cfg(target_os = "macos")]
+#[test]
+fn ideogram_engine_defaults_and_quant_resolution() {
+    let model = mlx_model("ideogram_4").expect("ideogram_4 in MODEL_TABLE");
+    assert_eq!(model.engine_id(), "ideogram_4");
+    assert_eq!(model.adapter_label(), "mlx_ideogram");
+    assert_eq!(model.default_steps(), 48); // V4_QUALITY_48 preset
+
+    let req = |advanced: Value| {
+        request(
+            json!({ "projectId": "p", "model": "ideogram_4", "prompt": "p", "advanced": advanced }),
+        )
+    };
+    // Asymmetric-CFG guidance 7.0 from the model row.
+    assert_eq!(resolve_guidance(&req(json!({})), &model), Some(7.0));
+    // resolve_quant: generic Q8 default; mlxQuantize selects Q4 / Q8 / bf16-dense.
+    assert!(matches!(
+        resolve_quant(&req(json!({}))),
+        (Some(Quant::Q8), Some(8))
+    ));
+    assert!(matches!(
+        resolve_quant(&req(json!({ "mlxQuantize": 8 }))),
+        (Some(Quant::Q8), Some(8))
+    ));
+    assert!(matches!(
+        resolve_quant(&req(json!({ "mlxQuantize": 4 }))),
+        (Some(Quant::Q4), Some(4))
+    ));
+    assert!(matches!(
+        resolve_quant(&req(json!({ "mlxQuantize": 0 }))),
+        (None, None)
+    ));
+}
+
+/// `ideogram_model_subdir` picks the packed `q4/` subdir by default and `q8/` only when the request
+/// opts in (`mlxQuantize > 4`) AND q8 is downloaded, falling back to q4 (then the root, so a
+/// half-downloaded bundle surfaces as a load error rather than a silent half-load). This is the
+/// *effective* quant selection — the q4 default is why resolve_quant's generic Q8 is inert.
+#[cfg(target_os = "macos")]
+#[test]
+fn ideogram_subdir_prefers_q4_and_opts_into_q8() {
+    let root = tempfile::tempdir().unwrap();
+    let touch = |sub: &str| {
+        let dir = root.path().join(sub).join("transformer");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("model.safetensors"), b"stub").unwrap();
+    };
+    let req = |advanced: Value| {
+        request(
+            json!({ "projectId": "p", "model": "ideogram_4", "prompt": "p", "advanced": advanced }),
+        )
+    };
+    // Neither subdir present → root.
+    assert_eq!(
+        ideogram_model_subdir(root.path(), &req(json!({}))),
+        root.path()
+    );
+    // q4 only → q4, even when q8 is requested but absent.
+    touch("q4");
+    assert_eq!(
+        ideogram_model_subdir(root.path(), &req(json!({}))),
+        root.path().join("q4")
+    );
+    assert_eq!(
+        ideogram_model_subdir(root.path(), &req(json!({ "mlxQuantize": 8 }))),
+        root.path().join("q4"),
+        "q8 opt-in falls back to q4 when q8 absent",
+    );
+    // Both present → q4 by default, q8 only on opt-in.
+    touch("q8");
+    assert_eq!(
+        ideogram_model_subdir(root.path(), &req(json!({}))),
+        root.path().join("q4")
+    );
+    assert_eq!(
+        ideogram_model_subdir(root.path(), &req(json!({ "mlxQuantize": 8 }))),
+        root.path().join("q8"),
+    );
+}
+
+/// Raw-settings lineage: the Ideogram recipe records the real-inference flag, repo, resolved
+/// steps/guidance/quant, AND the sc-6147 structured-prompt blob passes through verbatim
+/// (`mlx_raw_settings` clones `advanced`, so the asset recipe can rehydrate the builder).
+#[cfg(target_os = "macos")]
+#[test]
+fn ideogram_raw_settings_records_recipe_and_structured_prompt() {
+    let structured = json!({
+        "version": 1,
+        "intent": "a red fox in the snow",
+        "caption": { "compositional_deconstruction": { "background": "snow", "elements": [] } },
+        "magicPromptBackend": "prompt_refine",
+        "edited": false,
+        "runtimePrompt": "{}",
+    });
+    let req = request(json!({
+        "projectId": "p", "model": "ideogram_4", "prompt": "{}",
+        "advanced": { "structuredPrompt": structured.clone() },
+    }));
+    let raw = mlx_raw_settings(&req, "SceneWorks/ideogram-4-mlx", 48, Some(8), Some(7.0));
+    assert_eq!(raw.get("realModelInference"), Some(&json!(true)));
+    assert_eq!(raw.get("repo"), Some(&json!("SceneWorks/ideogram-4-mlx")));
+    assert_eq!(raw.get("numInferenceSteps"), Some(&json!(48)));
+    assert_eq!(raw.get("guidanceScale").and_then(Value::as_f64), Some(7.0));
+    assert_eq!(raw.get("mlxQuantize"), Some(&json!(8)));
+    // sc-6147: the structured-prompt blob survives into rawAdapterSettings unchanged, so
+    // "Use this recipe" can rehydrate the structured builder.
+    assert_eq!(raw.get("structuredPrompt"), Some(&structured));
+}
+
+/// Resolve the Ideogram 4 turnkey's packed `q4/` subdir for the real-weight smoke: env override →
+/// the cached public-but-gated `SceneWorks/ideogram-4-mlx` snapshot. `None` ⇒ skip (weights live
+/// outside CI).
+#[cfg(target_os = "macos")]
+fn ideogram_dir() -> Option<std::path::PathBuf> {
+    use std::path::PathBuf;
+    let has_transformer = |dir: &Path| dir.join("transformer/model.safetensors").is_file();
+    if let Ok(dir) = std::env::var("SCENEWORKS_MLX_IDEOGRAM_DIR") {
+        let path = PathBuf::from(dir.trim());
+        if has_transformer(&path) {
+            return Some(path);
+        }
+        let q4 = path.join("q4");
+        if has_transformer(&q4) {
+            return Some(q4);
+        }
+    }
+    let snaps =
+        dirs_home().join(".cache/huggingface/hub/models--SceneWorks--ideogram-4-mlx/snapshots");
+    std::fs::read_dir(&snaps)
+        .ok()?
+        .flatten()
+        .map(|entry| entry.path().join("q4"))
+        .find(|q4| has_transformer(q4))
+}
+
+/// Real-weights smoke (sc-6000): drive Ideogram 4 through the SAME `load_engine` →
+/// `gen_core::load("ideogram_4")` seam the worker uses (proving the `mlx_gen_ideogram` force-link
+/// survives in the worker binary), with the resolve_quant Q8 spec over the packed q4/ weights —
+/// exactly the production load. Generates from BOTH a structured JSON caption and a plain-text
+/// prompt on one load, asserting each returns a non-constant RGB8 image with denoise progress.
+/// Steps default low (env `IDEOGRAM4_SMOKE_STEPS` / `IDEOGRAM4_SMOKE_RES`): this checks mechanics,
+/// not quality (Ideogram undercooks below ~50 steps — see epic notes). Run on demand:
+/// `cargo test -p sceneworks-worker --lib -- --ignored ideogram_4_real_weights --nocapture`.
+#[cfg(target_os = "macos")]
+#[ignore = "loads the real Ideogram 4 snapshot; run manually on a Mac with SceneWorks/ideogram-4-mlx cached"]
+#[test]
+fn ideogram_4_real_weights_generates_caption_and_plain_images() {
+    let Some(dir) = ideogram_dir() else {
+        eprintln!(
+            "skipping ideogram_4_real_weights: no SceneWorks/ideogram-4-mlx q4 snapshot found"
+        );
+        return;
+    };
+    let env_u32 = |key: &str, default: u32| {
+        std::env::var(key)
+            .ok()
+            .and_then(|v| v.trim().parse().ok())
+            .unwrap_or(default)
+    };
+    let steps = env_u32("IDEOGRAM4_SMOKE_STEPS", 8);
+    let res = env_u32("IDEOGRAM4_SMOKE_RES", 512);
+
+    let model = mlx_model("ideogram_4").unwrap();
+    let req =
+        request(json!({ "projectId": "p", "model": "ideogram_4", "prompt": "p", "advanced": {} }));
+    // Q8 spec over the packed q4 weights — the exact production path (resolve_quant is generic).
+    let (quant, _bits) = resolve_quant(&req);
+    let guidance = resolve_guidance(&req, &model); // 7.0
+
+    let generator = load_engine("ideogram_4", dir, quant, Vec::new(), None).unwrap();
+    let cancel = gen_core::CancelFlag::new();
+
+    // A valid Ideogram caption (required compositional_deconstruction + a high-level description),
+    // and the plain-text fallback the same scene reads as.
+    const CAPTION_JSON: &str = "{\"high_level_description\": \"A photograph of a red fox sitting in a snowy forest at golden hour.\", \"compositional_deconstruction\": {\"background\": \"A snowy pine forest at golden hour.\", \"elements\": [{\"type\": \"obj\", \"bbox\": [250, 320, 950, 760], \"desc\": \"A red fox sitting upright in the snow, facing the camera.\"}]}}";
+    const PLAIN_TEXT: &str = "a red fox sitting in a snowy forest at golden hour";
+
+    for (label, prompt) in [("json_caption", CAPTION_JSON), ("plain_text", PLAIN_TEXT)] {
+        let mut steps_seen = 0u32;
+        let (w, h, pixels) = generate_one(
+            generator.as_ref(),
+            prompt,
+            res,
+            res,
+            42,
+            steps,
+            guidance,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            &cancel,
+            &mut |p| {
+                if let gen_core::Progress::Step { current, .. } = p {
+                    steps_seen = steps_seen.max(current);
+                }
+            },
+        )
+        .unwrap_or_else(|error| panic!("ideogram {label} generation failed: {error}"));
+        assert_eq!(
+            pixels.len(),
+            (w * h * 3) as usize,
+            "{label}: RGB8-sized buffer"
+        );
+        assert!(
+            w == res && h == res,
+            "{label}: output matches requested {res}²"
+        );
+        assert!(steps_seen >= 1, "{label}: expected denoise step progress");
+        assert!(
+            pixels.windows(2).any(|x| x[0] != x[1]),
+            "{label}: non-constant image"
+        );
+        eprintln!("ideogram {label}: {w}x{h} RGB8, {steps_seen} steps observed");
+    }
+}
