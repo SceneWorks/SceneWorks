@@ -813,6 +813,91 @@
       }
     },
     {
+      "id": "ideogram_4",
+      "name": "Ideogram 4",
+      "family": "ideogram",
+      "type": "image",
+      // Ideogram 4: 9.3B single-stream flow-matching DiT (asymmetric CFG — two DiTs) +
+      // Qwen3-VL-8B text encoder, native MLX only (no torch backend), so hidden off-Mac via
+      // macOnly. Dispatched through the engines::MODEL_TABLE / gen_core registry id `ideogram_4`
+      // (adapter label below is the asset stamp, mirrors mlx_<family>). Epic 4725.
+      "adapter": "mlx_ideogram",
+      "capabilities": ["text_to_image"],
+      "macOnly": true,
+      // Ideogram 4 was trained on STRUCTURED JSON CAPTIONS, not free text — plain text is
+      // out-of-distribution (coherent but prompt-agnostic). SceneWorks builds the JSON caption
+      // (high-level description + style + compositional deconstruction with 0-1000 bounding boxes
+      // and color palettes) from the prompt UI; this flag drives that structured prompt-builder
+      // surface (sc-5993+). A magic-prompt expander bridges plain text. (sc-4727)
+      "structuredPrompt": true,
+      "downloads": [
+        {
+          // Pre-converted MLX turnkey on the SceneWorks HF org (epic 4725 / sc-5990): one repo with
+          // packed `q4/` (default, ~15.4 GB) + `q8/` (~28.7 GB, opt-in via advanced mlxQuantize: 8)
+          // subdirs, each a self-contained snapshot (2 DiTs + Qwen3-VL TE + VAE + tokenizer). The
+          // worker (resolve_ideogram_model_dir, image_jobs) picks the quant subdir and fetches q8/
+          // on demand. Gated non-commercial license; macOS-only download.
+          "provider": "huggingface",
+          "repo": "SceneWorks/ideogram-4-mlx",
+          "files": ["q4/*"],
+          "platforms": ["macos"],
+          "estimatedSizeBytes": 15400562623
+        }
+      ],
+      "paths": {
+        "model": "${HF_CACHE}/SceneWorks/ideogram-4-mlx"
+      },
+      "defaults": {
+        // Reference default is 128 steps; the V4_QUALITY_48 preset (48 steps) is the SceneWorks
+        // default — renders cleanly at a fraction of the two-DiT cost. Guidance 7.0 (asymmetric CFG).
+        "resolution": "1024x1024",
+        "steps": 48,
+        "guidanceScale": 7.0,
+        "count": 1,
+        "sampler": "default",
+        "scheduler": "default"
+      },
+      "limits": {
+        // 256-2048, multiples of 16, aspect up to 6:1. Logit-normal flow schedule — single sampler.
+        "resolutions": ["1024x1024", "768x1024", "1024x768", "1280x720", "720x1280"],
+        "count": [1, 2, 4],
+        "samplers": ["default"],
+        "schedulers": ["default"]
+      },
+      "loraCompatibility": {
+        "families": ["ideogram"],
+        "types": ["style", "enhance"]
+      },
+      // Pre-quantized turnkey (q4/ default, q8/ opt-in via advanced mlxQuantize: 8); the worker
+      // resolve_ideogram_model_dir picks the subdir. Q4 measured peak ~28 GB @1024² (64 GB @2048²);
+      // packed, so NO bf16 load transient. minMemoryGb covers the 1024² default + headroom; the
+      // 2048²/6:1 ceiling wants ~96 GB (advanced high-res on smaller Macs is capped UI-side).
+      "mlx": {
+        "minMemoryGb": 48,
+        "repo": "SceneWorks/ideogram-4-mlx"
+      },
+      // Ideogram Non-Commercial Model Agreement (gated): accept the license at the source repo and
+      // add a Hugging Face token under Settings → Service credentials before downloading. NOTE: the
+      // SceneWorks turnkey repo is currently PRIVATE; the end-user credential/access path for a
+      // private gated repo is tracked in sc-5999 (license/gating UI + credential flow).
+      "gated": true,
+      "credentialHost": "huggingface.co",
+      "licenseUrl": "https://huggingface.co/ideogram-ai/ideogram-4-fp8",
+      "ui": {
+        "label": "Ideogram 4",
+        "description": "Ideogram 4 — 9.3B flow-matching text-to-image with structured JSON-caption prompting (bounding-box layout + color palettes), MLX-only (Apple Silicon). Pre-quantized Q4 (~15 GB, default) / Q8. Distributed under the Ideogram Non-Commercial Model Agreement (gated): accept the license at huggingface.co/ideogram-ai/ideogram-4-fp8 and add a Hugging Face token under Settings → Service credentials before downloading. Trained on JSON captions — SceneWorks builds the caption from your prompt.",
+        "recommendedFor": ["text_to_image"],
+        "promptGuide": {
+          "title": "Ideogram 4 Prompt Guide",
+          "path": "/prompt-guides/ideogram-4.md",
+          "sources": [
+            { "label": "Ideogram 4 model card", "url": "https://huggingface.co/ideogram-ai/ideogram-4-fp8" },
+            { "label": "Ideogram 4 blog post", "url": "https://ideogram.ai/blog/ideogram-4.0/" }
+          ]
+        }
+      }
+    },
+    {
       "id": "flux2_klein_9b",
       "name": "FLUX.2 [klein] 9B",
       "family": "flux2-klein",
