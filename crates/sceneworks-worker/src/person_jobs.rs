@@ -834,6 +834,12 @@ fn ort_err<R>(e: ort::Error<R>) -> WorkerError {
 fn build_session(path: &Path, accel: bool) -> WorkerResult<Session> {
     let mut b = Session::builder().map_err(ort_err)?;
     if accel {
+        // Preload the CUDA-12 runtime + cuDNN-9 DLLs the onnxruntime CUDA provider needs
+        // before registering the EP — with the Python/torch stack retired off-Mac nothing
+        // else puts them on the loader path, so without this the CUDA EP can't initialise
+        // and YOLO falls back to CPU (sc-6209). Shared helper (once per process, also used
+        // by `pose_jobs`); best-effort, see `ort_cuda`.
+        crate::ort_cuda::preload_cuda_dylibs();
         b = b
             .with_execution_providers([CUDAExecutionProvider::default().build().error_on_failure()])
             .map_err(ort_err)?;

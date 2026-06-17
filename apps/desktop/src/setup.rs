@@ -865,6 +865,23 @@ h=glob.glob(os.path.join(d,'capi','libonnxruntime*.dylib'));sys.stdout.write(h[0
     (!path.is_empty() && Path::new(&path).exists()).then_some(path)
 }
 
+/// Resolve the bundled CUDA-enabled onnxruntime DLL the candle worker's `ort` paths
+/// (DWPose pose_detect sc-5496, + YOLO/Real-ESRGAN next, epic 5482) dlopen at runtime
+/// via `ORT_DYLIB_PATH` (the `load-dynamic` feature). The Windows/CUDA analogue of the
+/// macOS CoreML resolver above: the onnxruntime-gpu DLLs are staged by build-sidecar.mjs
+/// into the `onnxruntime` resource dir on the Windows candle build (with the matching
+/// CUDA-12 runtime + cuDNN-9 in the `cuda` resource dir). Returns None on a plain build —
+/// the placeholder dir ships only a README, so a non-candle desktop leaves `ort` on its
+/// CPU fallback. Windows-only (the candle GPU worker is Windows-gated here).
+#[cfg(target_os = "windows")]
+fn resolve_bundled_onnxruntime(app: &AppHandle) -> Option<String> {
+    let resources = app.path().resource_dir().ok()?;
+    let bundled = resources.join("onnxruntime").join("onnxruntime.dll");
+    bundled
+        .exists()
+        .then(|| bundled.to_string_lossy().to_string())
+}
+
 /// Resolve the bundled CUDA runtime redistributable DLL directory (sc-5560). The
 /// candle (Windows/CUDA) worker links cudarc with dynamic-linking, which
 /// `LoadLibrary`s cudart/cublas/cublasLt/curand/nvrtc by name at runtime; bundling
@@ -1505,10 +1522,26 @@ fn supervise_candle_worker(app: AppHandle, api_port: u16) {
             // without a CUDA Toolkit on the machine (sc-5560).
             if let Some(cuda_dir) = resolve_bundled_cuda_dir(&app) {
                 let existing = std::env::var_os("PATH").unwrap_or_default();
-                let mut paths = vec![cuda_dir];
+                let mut paths = vec![cuda_dir.clone()];
                 paths.extend(std::env::split_paths(&existing));
                 if let Ok(joined) = std::env::join_paths(paths) {
                     command = command.env("PATH", joined);
+                }
+                // The candle worker's `ort` (onnxruntime) paths — DWPose pose_detect
+                // (sc-5496), then YOLO / Real-ESRGAN (sc-5498/5499, epic 5482) — point
+                // `ort` at the bundled CUDA-enabled onnxruntime and tell the worker where
+                // the CUDA-12 runtime + cuDNN-9 DLLs live, so its CUDA execution provider
+                // engages instead of falling back to CPU. The off-Mac analogue of the
+                // macOS CoreML `ORT_DYLIB_PATH` wiring. The `cuda` resource dir holds the
+                // version-matched CUDA-12 runtime + cuDNN-9 (staged by build-sidecar.mjs);
+                // `ort_cuda::preload_cuda_dylibs` preloads them + puts the dir on the
+                // loader search path so cuDNN's lazily-loaded sub-engine DLLs resolve.
+                if let Some(ort_dylib) = resolve_bundled_onnxruntime(&app) {
+                    let cuda = cuda_dir.to_string_lossy().to_string();
+                    command = command
+                        .env("ORT_DYLIB_PATH", ort_dylib)
+                        .env("SCENEWORKS_ORT_CUDA_DIR", &cuda)
+                        .env("SCENEWORKS_ORT_CUDNN_DIR", &cuda);
                 }
             }
             // The worker muxes generated video with ffmpeg; point it at the bundled

@@ -413,6 +413,12 @@ fn build_session(path: &Path, accel: bool) -> WorkerResult<Session> {
         }
         #[cfg(not(target_os = "macos"))]
         {
+            // Preload the CUDA-12 runtime + cuDNN-9 DLLs the loaded onnxruntime-gpu's
+            // CUDA provider depends on, before registering the EP — with the Python/torch
+            // stack retired off-Mac nothing else puts them on the loader path, so without
+            // this the CUDA EP can't initialise and we fall back to CPU (sc-5496). Shared
+            // helper (once per process); best-effort, see `ort_cuda`.
+            crate::ort_cuda::preload_cuda_dylibs();
             // `error_on_failure` so a CUDA provider that can't initialise (no GPU, or a
             // cuDNN/CUDA mismatch in the loaded onnxruntime) surfaces as an error here —
             // `Detector::load` then falls back to a CPU session and reports `device =

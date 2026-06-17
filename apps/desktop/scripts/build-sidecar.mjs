@@ -145,12 +145,36 @@ if (triple.includes("apple-darwin")) {
     );
   }
   console.log(`build-sidecar: staged onnxruntime MIT license + notice`);
+} else if (candle) {
+  // Windows candle build: stage a CUDA-enabled onnxruntime + its CUDA-12 deps so the
+  // candle worker's `ort` paths (DWPose sc-5496, then YOLO / Real-ESRGAN sc-5498/5499,
+  // epic 5482) run on the GPU instead of the onnxruntime CPU EP. The off-Mac analogue of
+  // the macOS CoreML dylib staging above. onnxruntime's DLLs land in `onnxruntime/`;
+  // cuDNN/cuFFT/nvJitLink/nvRTC land in `cuda/` (cudart/cublas/cublasLt/curand come from
+  // the toolkit copy in the cuda block below). setup.rs points ORT_DYLIB_PATH at the
+  // staged onnxruntime.dll + SCENEWORKS_ORT_CUDA_DIR/CUDNN_DIR at the cuda dir.
+  const py = process.env.PYTHON || "python";
+  run(py, [
+    "apps/desktop/scripts/stage-onnxruntime-cuda.py",
+    ortDir,
+    join(desktopDir, "cuda"),
+  ]);
+  // onnxruntime is MIT — ship its license + notice next to the DLLs (as the mac path does).
+  for (const name of ["LICENSE", "NOTICE.txt"]) {
+    copyFileSync(
+      join(desktopDir, "licenses", "onnxruntime", name),
+      join(ortDir, name),
+    );
+  }
+  console.log(
+    `build-sidecar: staged CUDA-enabled onnxruntime into ${ortDir} + CUDA deps into cuda/`,
+  );
 } else {
   writeFileSync(
     join(ortDir, "README.txt"),
-    "onnxruntime CoreML dylib is bundled on macOS only (Rust DWPose detector, sc-3487).\n",
+    "onnxruntime is bundled on macOS (CoreML) and the Windows candle build (CUDA) only; this build uses neither (sc-3487 / sc-5496).\n",
   );
-  console.log(`build-sidecar: ${ortDir} placeholder (non-macOS, no DWPose dylib)`);
+  console.log(`build-sidecar: ${ortDir} placeholder (no DWPose onnxruntime)`);
 }
 
 // The Rust worker shells out to ffmpeg (frame sampling, frame extract, timeline
