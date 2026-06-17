@@ -16,6 +16,15 @@ const sourceImageTabs = [
   ["character", "Character"],
 ];
 
+// sc-6042: Character Assets "Import" dialog tabs. Images/Videos pick from the
+// Project library; Upload brings files in from the local computer. All three add
+// the chosen media to the character's asset library.
+const characterImportTabs = [
+  ["images", "Images"],
+  ["videos", "Videos"],
+  ["upload", "Upload"],
+];
+
 function compactDate(value) {
   if (!value) {
     return "No date";
@@ -130,6 +139,15 @@ function activeProjectImageAsset(asset, projectId) {
   return (
     projectMatches(asset, projectId) &&
     (assetCanRenderAsImage(asset) || asset?.type === "frame") &&
+    !asset?.status?.trashed &&
+    !asset?.status?.rejected
+  );
+}
+
+function activeProjectVideoAsset(asset, projectId) {
+  return (
+    projectMatches(asset, projectId) &&
+    assetCanRenderAsVideo(asset) &&
     !asset?.status?.trashed &&
     !asset?.status?.rejected
   );
@@ -445,6 +463,11 @@ export function AssetPickerField({
   changeLabel = "Change",
   multiple = false,
   onChange,
+  // showCategories=false drops the All/Images/Video/Uploads/Renders segmented
+  // control and renders just a scoped multi-select grid (sc-6042). Used by the
+  // character reference picker, which is already scoped to one character's
+  // assets, so the category tabs were redundant/empty noise there.
+  showCategories = true,
   value = "",
   values = [],
 }) {
@@ -473,6 +496,7 @@ export function AssetPickerField({
           multiple={multiple}
           onCancel={() => setOpen(false)}
           onConfirm={confirm}
+          showCategories={showCategories}
           title={label}
         />
       ) : null}
@@ -480,7 +504,15 @@ export function AssetPickerField({
   );
 }
 
-export function AssetPickerModal({ assets, initialSelectedIds, multiple = false, onCancel, onConfirm, title = "Select assets" }) {
+export function AssetPickerModal({
+  assets,
+  initialSelectedIds,
+  multiple = false,
+  onCancel,
+  onConfirm,
+  showCategories = true,
+  title = "Select assets",
+}) {
   const [category, setCategory] = useState("all");
   const [query, setQuery] = useState("");
   const [selectedIds, setSelectedIds] = useState(() => normalizeSelection(initialSelectedIds, assets, multiple));
@@ -495,10 +527,13 @@ export function AssetPickerModal({ assets, initialSelectedIds, multiple = false,
 
   const searchIndex = useMemo(() => assetSearchIndex(assets), [assets]);
 
+  // With the category control hidden the grid is unfiltered (the caller already
+  // scoped `assets`), so pin the active category to "all".
+  const activeCategory = showCategories ? category : "all";
   const visibleAssets = useMemo(() => {
     const needle = query.trim().toLowerCase();
-    return assets.filter((asset) => categoryMatches(asset, category) && (!needle || searchIndex.get(asset.id)?.includes(needle)));
-  }, [assets, category, query, searchIndex]);
+    return assets.filter((asset) => categoryMatches(asset, activeCategory) && (!needle || searchIndex.get(asset.id)?.includes(needle)));
+  }, [assets, activeCategory, query, searchIndex]);
 
   function toggleAsset(asset) {
     setSelectedIds((ids) => {
@@ -522,13 +557,15 @@ export function AssetPickerModal({ assets, initialSelectedIds, multiple = false,
         </header>
 
         <div className="asset-picker-toolbar">
-          <div className="segmented-control compact-segment" role="tablist" aria-label="Asset category">
-            {categoryOptions.map(([key, label]) => (
-              <button className={category === key ? "active" : ""} key={key} onClick={() => setCategory(key)} type="button">
-                {label} <span>{categoryCounts[key]}</span>
-              </button>
-            ))}
-          </div>
+          {showCategories ? (
+            <div className="segmented-control compact-segment" role="tablist" aria-label="Asset category">
+              {categoryOptions.map(([key, label]) => (
+                <button className={category === key ? "active" : ""} key={key} onClick={() => setCategory(key)} type="button">
+                  {label} <span>{categoryCounts[key]}</span>
+                </button>
+              ))}
+            </div>
+          ) : null}
           <input
             aria-label="Search assets"
             onChange={(event) => setQuery(event.target.value)}
@@ -579,6 +616,237 @@ export function AssetPickerModal({ assets, initialSelectedIds, multiple = false,
             </button>
           </div>
         </footer>
+    </Modal>
+  );
+}
+
+// sc-6042: Import media into a character's asset library. Three tabs, all
+// multi-select: Images and Videos pull from the Project asset library (of the
+// matching type, excluding media already in this character's library); Upload
+// brings file(s) in from the local computer. Project selections are attached via
+// onImport(assetIds); uploads are imported into the project first (importAsset)
+// then handed to the same onImport so both paths converge on one "attach" step.
+export function CharacterImportDialog({
+  assets = [],
+  projectId,
+  characterId,
+  character,
+  characterName,
+  importAsset,
+  onImport,
+  onClose,
+}) {
+  const [tab, setTab] = useState("images");
+  const [query, setQuery] = useState("");
+  const [selectedIds, setSelectedIds] = useState([]);
+  const [dragActive, setDragActive] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+
+  const imageCandidates = useMemo(
+    () =>
+      assets.filter(
+        (asset) => activeProjectImageAsset(asset, projectId) && !assetMatchesCharacter(asset, characterId, character),
+      ),
+    [assets, projectId, characterId, character],
+  );
+  const videoCandidates = useMemo(
+    () =>
+      assets.filter(
+        (asset) => activeProjectVideoAsset(asset, projectId) && !assetMatchesCharacter(asset, characterId, character),
+      ),
+    [assets, projectId, characterId, character],
+  );
+
+  const tabAssets = tab === "videos" ? videoCandidates : imageCandidates;
+  const searchIndex = useMemo(() => assetSearchIndex(tabAssets), [tabAssets]);
+  const visibleAssets = useMemo(() => filterPickerAssets(tabAssets, query, searchIndex), [tabAssets, query, searchIndex]);
+
+  function toggleAsset(id) {
+    setSelectedIds((ids) => (ids.includes(id) ? ids.filter((value) => value !== id) : [...ids, id]));
+  }
+
+  function switchTab(next) {
+    setTab(next);
+    setQuery("");
+    setSelectedIds([]);
+    setError("");
+  }
+
+  async function attach(assetIds) {
+    await onImport(assetIds);
+    onClose();
+  }
+
+  async function commitSelection() {
+    if (!selectedIds.length || busy) {
+      return;
+    }
+    setBusy(true);
+    setError("");
+    try {
+      await attach(selectedIds);
+    } catch (err) {
+      setError(err?.message ?? "Could not import the selection.");
+      setBusy(false);
+    }
+  }
+
+  async function handleUploadFiles(fileList) {
+    const files = Array.from(fileList ?? []);
+    if (!files.length || busy) {
+      return;
+    }
+    if (!importAsset) {
+      setError("File upload is unavailable in this context.");
+      return;
+    }
+    setBusy(true);
+    setError("");
+    try {
+      const importedIds = [];
+      for (const file of files) {
+        const imported = await importAsset(file, { throwOnError: true });
+        if (imported?.id) {
+          importedIds.push(imported.id);
+        }
+      }
+      if (importedIds.length) {
+        await attach(importedIds);
+      } else {
+        setError("Upload failed — try another file.");
+        setBusy(false);
+      }
+    } catch (err) {
+      setError(err?.message ?? "Upload failed — try another file.");
+      setBusy(false);
+    }
+  }
+
+  function handleDrop(event) {
+    event.preventDefault();
+    setDragActive(false);
+    handleUploadFiles(event.dataTransfer?.files);
+  }
+
+  function renderGrid(emptyLabel) {
+    return (
+      <div aria-multiselectable className="asset-picker-grid" role="listbox">
+        {visibleAssets.map((asset) => {
+          const selected = selectedIds.includes(asset.id);
+          const status = statusLabel(asset);
+          return (
+            <button
+              aria-selected={selected}
+              className={selected ? "asset-picker-card selected" : "asset-picker-card"}
+              key={asset.id}
+              onClick={() => toggleAsset(asset.id)}
+              role="option"
+              type="button"
+            >
+              <AssetThumbnail asset={asset} />
+              <span className="asset-picker-card-copy">
+                <strong>{titleFor(asset)}</strong>
+                <small>
+                  {typeLabel(asset)} | {sourceLabel(asset)}
+                </small>
+                <small title={asset.id}>
+                  {compactDate(asset.createdAt ?? asset.updatedAt)} | ID {assetIdentity(asset)}
+                  {status ? ` | ${status}` : ""}
+                </small>
+              </span>
+            </button>
+          );
+        })}
+        {visibleAssets.length ? null : <div className="empty-panel compact-panel">{emptyLabel}</div>}
+      </div>
+    );
+  }
+
+  return (
+    <Modal className="asset-picker-modal character-import-modal" labelledBy="character-import-title" onClose={onClose}>
+      <header className="asset-picker-modal-head">
+        <div>
+          <p className="eyebrow">Character assets</p>
+          <h2 id="character-import-title">Import to {characterName || "character"}</h2>
+        </div>
+        <button className="modal-close" onClick={onClose} type="button">
+          Close
+        </button>
+      </header>
+
+      <div className="asset-picker-toolbar">
+        <div className="segmented-control compact-segment" role="tablist" aria-label="Import source">
+          {characterImportTabs.map(([key, label]) => (
+            <button
+              aria-selected={tab === key}
+              className={tab === key ? "active" : ""}
+              key={key}
+              onClick={() => switchTab(key)}
+              role="tab"
+              type="button"
+            >
+              {label}
+              {key === "images" ? <span>{imageCandidates.length}</span> : null}
+              {key === "videos" ? <span>{videoCandidates.length}</span> : null}
+            </button>
+          ))}
+        </div>
+        {tab === "upload" ? null : (
+          <input
+            aria-label="Search project assets"
+            onChange={(event) => setQuery(event.target.value)}
+            placeholder="Search project assets"
+            value={query}
+          />
+        )}
+      </div>
+
+      {tab === "images" ? renderGrid("No project images to import") : null}
+      {tab === "videos" ? renderGrid("No project videos to import") : null}
+
+      {tab === "upload" ? (
+        <div
+          className={dragActive ? "dataset-add-dropzone active" : "dataset-add-dropzone"}
+          onDragLeave={() => setDragActive(false)}
+          onDragOver={(event) => {
+            event.preventDefault();
+            setDragActive(true);
+          }}
+          onDrop={handleDrop}
+        >
+          <p>{busy ? "Importing…" : "Drop images or videos here, or"}</p>
+          <label className="file-upload-button">
+            <input
+              accept="image/*,video/*"
+              disabled={busy}
+              multiple
+              onChange={(event) => {
+                handleUploadFiles(event.target.files);
+                event.target.value = "";
+              }}
+              type="file"
+            />
+            {busy ? "Importing" : "Browse files"}
+          </label>
+        </div>
+      ) : null}
+
+      {error ? <p className="inline-warning">{error}</p> : null}
+
+      {tab === "upload" ? null : (
+        <footer className="asset-picker-footer">
+          <span>{selectedIds.length ? `${selectedIds.length} selected` : "No selection"}</span>
+          <div className="detail-actions">
+            <button onClick={onClose} type="button">
+              Cancel
+            </button>
+            <button className="primary-action" disabled={!selectedIds.length || busy} onClick={commitSelection} type="button">
+              {busy ? "Importing…" : `Import ${selectedIds.length || ""}`.trim()}
+            </button>
+          </div>
+        </footer>
+      )}
     </Modal>
   );
 }

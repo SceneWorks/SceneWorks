@@ -1537,8 +1537,6 @@ fn instantid_angle_kps_real_weights_fills_frame_and_holds_identity() {
         sdxl_base,
         identitynet: WeightsSource::Dir(identitynet),
         ip_adapter,
-        // sc-6038 added the user-LoRA `adapters` field on both backends; empty = no LoRA (this
-        // InstantID smoke does not exercise style/character adapters).
         adapters: Vec::new(),
     };
     let model = InstantId::load(&paths).expect("InstantID load");
@@ -2598,6 +2596,64 @@ fn flux2_grouping_poses_over_angles_over_plain() {
         "advanced": { "angleSet": true }
     }));
     assert!(matches!(flux2_grouping(&edit), Flux2Grouping::Plain));
+}
+
+/// Minimal valid safetensors (8-byte LE header length + JSON header). No `networkType`, so
+/// `classify_adapter` reports `Lora`; the resolver only reads the header, so empty tensors are fine.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+fn write_min_lora(path: &std::path::Path) {
+    let header = json!({ "__metadata__": { "format": "pt" } });
+    let header_bytes = serde_json::to_vec(&header).unwrap();
+    let mut buffer = (header_bytes.len() as u64).to_le_bytes().to_vec();
+    buffer.extend_from_slice(&header_bytes);
+    std::fs::write(path, buffer).unwrap();
+}
+
+/// sc-6038: InstantID is a stock SDXL (RealVisXL) UNet, so a user-selected SDXL LoRA must resolve
+/// into a non-empty adapter set — the worker now feeds these into `InstantIdPaths.adapters` (they
+/// were previously dropped: `instantid.rs` never called `resolve_adapters`). Guards the worker half
+/// of the fix; the engine merge is covered by mlx-gen #477 / candle-gen #86 + the real-weight smoke.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+#[test]
+fn instantid_resolves_user_loras_into_adapters() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut settings = Settings::from_env();
+    settings.data_dir = dir.path().to_path_buf();
+
+    // A real (tiny, valid) safetensors LoRA under the app-managed data dir — both the path
+    // containment guard and the header classification in `resolve_adapters` run against it.
+    let lora_file = dir.path().join("style.safetensors");
+    write_min_lora(&lora_file);
+
+    let req = request(json!({
+        "projectId": "p", "model": "instantid_realvisxl", "mode": "character_image",
+        "prompt": "portrait", "referenceAssetId": "ref-1",
+        "loras": [{ "path": lora_file.to_string_lossy(), "weight": 0.65 }],
+        "modelManifestEntry": { "family": "instantid" }
+    }));
+
+    let adapters = resolve_adapters(&req, &settings).expect("resolve adapters");
+    assert_eq!(
+        adapters.len(),
+        1,
+        "the selected SDXL LoRA must resolve to one InstantID adapter (not silently dropped)"
+    );
+    assert_eq!(
+        adapters[0].scale, 0.65,
+        "the per-LoRA weight carries through"
+    );
+    assert!(matches!(adapters[0].kind, AdapterKind::Lora));
+    assert_eq!(
+        adapters[0].path.file_name().and_then(|n| n.to_str()),
+        Some("style.safetensors"),
+        "the confined LoRA path resolves to the on-disk file"
+    );
 }
 
 #[cfg(target_os = "macos")]

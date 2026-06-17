@@ -1760,6 +1760,11 @@ label {
   font-size: 12px;
 }
 
+/* sc-6042: Import button trails the Media/Trashcan toggle, pushed to the row end. */
+.character-import-button {
+  margin-left: auto;
+}
+
 /* Pose library picker (multi-select OpenPose gallery) */
 .pose-library {
   display: flex;
