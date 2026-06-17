@@ -46,6 +46,9 @@ use mlx_gen_chroma as _;
 use mlx_gen_flux as _;
 #[cfg(target_os = "macos")]
 use mlx_gen_flux2 as _;
+// Ideogram 4 (epic 4725) — force-link so `inventory::submit!` registers `ideogram_4`.
+#[cfg(target_os = "macos")]
+use mlx_gen_ideogram as _;
 #[cfg(target_os = "macos")]
 use mlx_gen_kolors as _;
 // Lens / Lens-Turbo (epic 3164 engine / sc-5105) — an inventory-registered `Generator` under the ids
