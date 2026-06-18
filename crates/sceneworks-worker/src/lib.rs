@@ -529,9 +529,10 @@ pub async fn run_worker_loop(settings: Settings) -> WorkerResult<()> {
     let http_client = reqwest::Client::new();
     register_worker_with_retry(&api, &settings, &gpu).await?;
     let mut lock_failures = 0_u32;
+    let mut idle_heartbeat = IdleHeartbeat::new(progress_report_interval(&settings));
     loop {
         tokio::select! {
-            result = poll_once(&api, &settings, &http_client) => {
+            result = poll_once(&api, &settings, &http_client, &mut idle_heartbeat) => {
                 match result {
                     Ok(()) => lock_failures = 0,
                     Err(error) if is_database_locked(&error) => {
@@ -607,8 +608,12 @@ async fn poll_once(
     api: &ApiClient,
     settings: &Settings,
     http_client: &reqwest::Client,
+    idle_heartbeat: &mut IdleHeartbeat,
 ) -> WorkerResult<()> {
-    heartbeat(api, settings, WorkerStatus::Idle, None).await?;
+    if idle_heartbeat.should_send() {
+        heartbeat(api, settings, WorkerStatus::Idle, None).await?;
+        idle_heartbeat.mark_sent();
+    }
     let claim: ClaimResponse = api
         .post_json(
             "/api/v1/jobs/claim",
@@ -623,7 +628,34 @@ async fn poll_once(
         return Ok(());
     };
     run_utility_job(api, settings, http_client, job).await;
+    idle_heartbeat.mark_due();
     Ok(())
+}
+
+struct IdleHeartbeat {
+    interval: Duration,
+    next_due: Instant,
+}
+
+impl IdleHeartbeat {
+    fn new(interval: Duration) -> Self {
+        Self {
+            interval,
+            next_due: Instant::now(),
+        }
+    }
+
+    fn should_send(&self) -> bool {
+        Instant::now() >= self.next_due
+    }
+
+    fn mark_sent(&mut self) {
+        self.next_due = Instant::now() + self.interval;
+    }
+
+    fn mark_due(&mut self) {
+        self.next_due = Instant::now();
+    }
 }
 
 async fn register_worker(
