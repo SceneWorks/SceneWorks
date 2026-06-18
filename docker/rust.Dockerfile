@@ -43,6 +43,10 @@ COPY apps/rust-worker ./apps/rust-worker
 # workspace but is not built into either image).
 COPY apps/desktop/Cargo.toml ./apps/desktop/Cargo.toml
 COPY apps/desktop/build.rs ./apps/desktop/build.rs
+# The builtin catalog: `sceneworks-core` embeds these manifests via `include_str!`
+# so the API can seed an empty config dir, which means they must exist in the
+# build context (not just the runtime bind mount) or the compile can't read them.
+COPY config ./config
 
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/usr/local/cargo/git \

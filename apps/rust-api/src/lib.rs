@@ -308,6 +308,22 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
         );
     }
     let settings = Settings::from_env();
+    // A populated builtin catalog is mandatory — model->file resolution depends on
+    // it. The desktop wrapper and the Compose bind mount normally provide it; seed
+    // any missing manifests here so launching the API binary directly works too,
+    // and fail loudly rather than serving an empty catalog if seeding can't finish.
+    // Seed-if-missing (not overwrite) keeps an explicit config dir — a repo
+    // checkout or a Compose bind mount — authoritative; see `builtin_manifests`.
+    if let Err(error) = sceneworks_core::builtin_manifests::seed_builtin_manifests(
+        &settings.config_dir,
+        sceneworks_core::builtin_manifests::SeedMode::IfMissing,
+    ) {
+        return Err(format!(
+            "failed to seed builtin manifests into {}: {error}",
+            settings.config_dir.join("manifests").display()
+        )
+        .into());
+    }
     let address: SocketAddr = format!("{}:{}", settings.host, settings.port).parse()?;
     // sc-4201 (F-API-1) / sc-5720 (API-001): a non-loopback bind with no access token
     // serves every endpoint — file reads, credential writes, job creation, large
