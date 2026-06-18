@@ -1291,11 +1291,12 @@ impl JobsStore {
                 // semantics for the rest of the process with no signal. Leave the
                 // connection in whatever mode it opened with and warn loudly
                 // instead (sc-4275 / F-CORE-16).
-                eprintln!(
-                    "WARNING: SceneWorks could not enable SQLite WAL mode for {} ({error}); \
-                     continuing in the default rollback-journal mode. Cross-process write \
-                     concurrency will be more serialized than usual.",
-                    self.db_path.display()
+                tracing::warn!(
+                    event = "sqlite_wal_enable_failed",
+                    dbPath = %self.db_path.display(),
+                    error = %error,
+                    "could not enable SQLite WAL mode; continuing in the default rollback-journal \
+                     mode — cross-process write concurrency will be more serialized than usual"
                 );
             }
         }

@@ -2665,11 +2665,12 @@ async fn generate_video(
                 // If no progress has arrived for `stall_timeout`, request engine cancel and start
                 // the abandon countdown.
                 if !canceled && last_progress.elapsed() >= stall_timeout {
-                    eprintln!(
-                        "rust_worker_video_stalled: job={} engine={log_engine_id} no progress \
-                         for {}s — requesting cancel",
-                        job.id,
-                        stall_timeout.as_secs()
+                    tracing::warn!(
+                        event = "rust_worker_video_stalled",
+                        jobId = %job.id,
+                        engine = %log_engine_id,
+                        stallSeconds = stall_timeout.as_secs(),
+                        "no progress within the stall window — requesting engine cancel"
                     );
                     cancel.cancel();
                     canceled = true;
@@ -2691,12 +2692,13 @@ async fn generate_video(
         // Detach the still-running blocking task instead of awaiting it — awaiting would re-hang
         // the very failure path this watchdog exists to break. The thread (and the GPU it holds)
         // leaks until the worker is restarted by the supervisor.
-        eprintln!(
-            "rust_worker_video_abandoned: job={} engine={log_engine_id} did not respond to \
-             cancellation within {}s — exiting the worker so the supervisor can recover the \
-             wedged GPU task",
-            job.id,
-            VIDEO_STALL_GRACE.as_secs()
+        tracing::error!(
+            event = "rust_worker_video_abandoned",
+            jobId = %job.id,
+            engine = %log_engine_id,
+            graceSeconds = VIDEO_STALL_GRACE.as_secs(),
+            "engine did not respond to cancellation within the grace window — exiting the worker \
+             so the supervisor can recover the wedged GPU task"
         );
         blocking.abort();
         std::process::exit(70);
