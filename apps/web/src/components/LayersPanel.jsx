@@ -1,4 +1,5 @@
 import React, { useRef, useState } from "react";
+import { BLEND_MODES } from "../imageLayers.js";
 
 // The layers panel (sc-6118, Workstream E of epic 6087): the user-facing control
 // surface for the sc-6117 raster layer stack. Presentational — it reflects the
@@ -17,6 +18,7 @@ export function LayersPanel({
   onSelect,
   onToggleVisible,
   onSetOpacity,
+  onSetBlend,
   onRename,
   onReorder,
   onAdd,
@@ -161,6 +163,19 @@ export function LayersPanel({
                   />
                   <span className="image-editor-layer-opacity-val">{pct}%</span>
                 </label>
+                <select
+                  className="image-editor-layer-blend"
+                  value={layer.blendMode || "source-over"}
+                  aria-label={`${layer.name} blend mode`}
+                  onClick={(event) => event.stopPropagation()}
+                  onChange={(event) => onSetBlend(layer.id, event.target.value)}
+                >
+                  {BLEND_MODES.map((mode) => (
+                    <option key={mode.value} value={mode.value}>
+                      {mode.label}
+                    </option>
+                  ))}
+                </select>
               </span>
               <span className="image-editor-layer-ops">
                 <button

@@ -6116,6 +6116,12 @@ details[open] > summary.lora-scope-group-heading::before,
   text-align: right;
 }
 
+.image-editor-layer-blend {
+  width: 100%;
+  font-size: 11px;
+  padding: 1px 4px;
+}
+
 .image-editor-layer-ops {
   display: grid;
   grid-template-columns: auto auto;

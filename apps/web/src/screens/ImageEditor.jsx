@@ -14,6 +14,7 @@ import {
   compositeLayersToCanvas,
   createLayer,
   duplicateLayer,
+  identityTransform,
   layerById,
   moveLayer,
   removeLayer,
@@ -949,7 +950,8 @@ export function ImageEditor() {
   const layerIdRef = useRef(0);
   const cropRectRef = useRef(null);
   const transformerRef = useRef(null);
-  const imageNodeRef = useRef(null); // Konva image node — cached for color-grade filtering
+  const layerTransformerRef = useRef(null); // Konva transformer bound to the active layer (sc-6120)
+  const imageNodeRef = useRef(null); // Konva image node — cached for color-grade filtering + transform
   const [stageSize, setStageSize] = useState({ width: 0, height: 0 });
 
   // Undo/redo (sc-6106): a bounded snapshot history over the working-image session.
@@ -1164,11 +1166,18 @@ export function ImageEditor() {
           for (const layer of live?.layers ?? []) {
             if (!reused.has(layer.id) && layer.objectUrl) URL.revokeObjectURL(layer.objectUrl);
           }
-          // Reset the per-bitmap overlays (the snapshot's overlay state is re-applied
-          // by applyHistoryAux below); refit only when the document size changed (a
-          // pure opacity/visibility/reorder undo keeps the current pan/zoom).
-          resetEditorOverlays();
-          if (!live || live.width !== snap.width || live.height !== snap.height) needsFitRef.current = true;
+          // A true PIXEL change = dims changed, a layer added/removed, or a layer's
+          // blob differs. Metadata-only undos (opacity / visibility / blend / transform
+          // / reorder — same id→blob set, same dims) keep the current tool, mask, boxes
+          // and view; only a pixel change resets the per-bitmap overlays + refits.
+          const dimsChanged = !live || live.width !== snap.width || live.height !== snap.height;
+          const liveBlobs = new Map((live?.layers ?? []).map((layer) => [layer.id, layer.blob]));
+          const bitmapChanged =
+            dimsChanged ||
+            liveBlobs.size !== snap.layers.length ||
+            snap.layers.some((sl) => liveBlobs.get(sl.id) !== sl.blob);
+          if (bitmapChanged) resetEditorOverlays();
+          if (dimsChanged) needsFitRef.current = true;
           const nextWorking = {
             width: snap.width,
             height: snap.height,
@@ -1513,6 +1522,17 @@ export function ImageEditor() {
     }
   }, [tool, cropRect]);
 
+  // Bind the layer transformer to the ACTIVE layer's node whenever the Transform
+  // tool is active (sc-6120); re-bind when the active layer changes. `working` in
+  // the deps covers an active-layer switch (imageNodeRef reattaches to the new node).
+  useEffect(() => {
+    const transformer = layerTransformerRef.current;
+    if (!transformer) return;
+    const node = tool === "transform" ? imageNodeRef.current : null;
+    transformer.nodes(node ? [node] : []);
+    transformer.getLayer()?.batchDraw();
+  }, [tool, working]);
+
   // ── Color grade (sc-2439) ─────────────────────────────────────────────────
   function startColorGrade() {
     if (!working) return;
@@ -1657,6 +1677,49 @@ export function ImageEditor() {
         createLayer({ id: nextLayerId(), name: `Layer ${prev.layers.length + 1}`, image, objectUrl, blob }),
       ),
     );
+    setDirty(true);
+  }
+
+  // Per-layer blend mode (sc-6120): metadata only — the layer's <KonvaImage> node +
+  // the flatten compositor both apply it via globalCompositeOperation.
+  function setLayerBlend(id, blendMode) {
+    if (!workingRef.current) return;
+    checkpoint();
+    setWorking((prev) => setLayerProps(prev, id, { blendMode }));
+    setDirty(true);
+  }
+
+  // ── Per-layer transform (sc-6120) ─────────────────────────────────────────
+  // The Transform tool binds a Konva Transformer to the ACTIVE layer's node. The
+  // node renders from `layer.transform` (x/y/scale/rotation); on drag/transform end
+  // we read the node back into the layer's transform metadata. The bitmap is never
+  // resampled — the transform is baked only at flatten time (compositeLayersToCanvas
+  // already honors it, matching the live node 1:1).
+  function startTransform() {
+    if (working) setTool("transform");
+  }
+
+  function commitActiveLayerTransform() {
+    const node = imageNodeRef.current;
+    const layer = activeLayerOf(workingRef.current);
+    if (!node || !layer) return;
+    const transform = {
+      x: node.x(),
+      y: node.y(),
+      scaleX: node.scaleX(),
+      scaleY: node.scaleY(),
+      rotation: node.rotation(),
+    };
+    checkpoint();
+    setWorking((prev) => setLayerProps(prev, layer.id, { transform }));
+    setDirty(true);
+  }
+
+  function resetActiveLayerTransform() {
+    const layer = activeLayerOf(workingRef.current);
+    if (!layer) return;
+    checkpoint();
+    setWorking((prev) => setLayerProps(prev, layer.id, { transform: identityTransform() }));
     setDirty(true);
   }
 
@@ -2435,7 +2498,7 @@ export function ImageEditor() {
       >
         {working && stageSize.width > 0 && stageSize.height > 0 ? (
           <Stage
-            draggable={tool !== "crop" && tool !== "boxes" && !maskMode}
+            draggable={tool !== "crop" && tool !== "boxes" && tool !== "transform" && !maskMode}
             height={stageSize.height}
             onDragEnd={(event) => {
               if (event.target !== event.target.getStage()) return;
@@ -2489,9 +2552,16 @@ export function ImageEditor() {
                     x={t.x}
                     y={t.y}
                     {...(isActive ? { colorAdjust, filters: [konvaColorFilter], ref: imageNodeRef } : {})}
+                    {...(isActive && tool === "transform"
+                      ? { draggable: true, onDragEnd: commitActiveLayerTransform, onTransformEnd: commitActiveLayerTransform }
+                      : {})}
                   />
                 );
               })}
+              {tool === "transform" ? (
+                // Per-layer transform (sc-6120): move / scale / rotate the active layer.
+                <Transformer anchorSize={8} borderStroke="#ffffff" ref={layerTransformerRef} rotateEnabled />
+              ) : null}
               {tool === "crop" && cropRect ? (
                 <>
                   {cropOverlayRects(working.width, working.height, cropRect).map((rect, index) => (
@@ -2653,6 +2723,7 @@ export function ImageEditor() {
             onSelect={selectLayer}
             onToggleVisible={toggleLayerVisible}
             onSetOpacity={changeLayerOpacity}
+            onSetBlend={setLayerBlend}
             onRename={renameLayer}
             onReorder={reorderLayer}
             onAdd={addBlankLayer}
@@ -2670,6 +2741,15 @@ export function ImageEditor() {
               type="button"
             >
               Move
+            </button>
+            <button
+              className={tool === "transform" ? "image-editor-tool active" : "image-editor-tool"}
+              disabled={!!aiOp}
+              onClick={startTransform}
+              title="Transform the active layer (move / scale / rotate)"
+              type="button"
+            >
+              Transform
             </button>
             <button
               className={tool === "crop" ? "image-editor-tool active" : "image-editor-tool"}
@@ -2770,6 +2850,20 @@ export function ImageEditor() {
             </button>
             <button onClick={cancelCrop} type="button">
               Cancel
+            </button>
+          </div>
+        ) : null}
+
+        {tool === "transform" && working ? (
+          <div className="image-editor-cropbar">
+            <span className="image-editor-cropdims">
+              Drag, scale or rotate <strong>{activeLayerOf(working)?.name}</strong> on the canvas
+            </span>
+            <button onClick={resetActiveLayerTransform} type="button">
+              Reset transform
+            </button>
+            <button onClick={() => setTool("move")} type="button">
+              Done
             </button>
           </div>
         ) : null}

@@ -13,6 +13,7 @@ const noopHandlers = () => ({
   onSelect: vi.fn(),
   onToggleVisible: vi.fn(),
   onSetOpacity: vi.fn(),
+  onSetBlend: vi.fn(),
   onRename: vi.fn(),
   onReorder: vi.fn(),
   onAdd: vi.fn(),
@@ -161,6 +162,23 @@ describe("LayersPanel (sc-6118)", () => {
     expect(bg.querySelector('[aria-label="Move layer down"]').disabled).toBe(true);
     await act(() => bg.querySelector('[aria-label="Move layer up"]').click());
     expect(h.onReorder).toHaveBeenCalledWith("a", 1);
+  });
+
+  it("the blend dropdown reflects the layer and changes its blend mode", async () => {
+    const h = noopHandlers();
+    const layers = stack();
+    layers[1].blendMode = "multiply"; // Sky
+    await act(() => root.render(<LayersPanel layers={layers} activeLayerId="b" {...h} />));
+    const select = rowByName("Sky").querySelector(".image-editor-layer-blend");
+    expect(select.value).toBe("multiply");
+    // Background defaults to Normal when unset.
+    expect(rowByName("Background").querySelector(".image-editor-layer-blend").value).toBe("source-over");
+    await act(() => {
+      const setter = Object.getOwnPropertyDescriptor(window.HTMLSelectElement.prototype, "value").set;
+      setter.call(select, "screen");
+      select.dispatchEvent(new Event("change", { bubbles: true }));
+    });
+    expect(h.onSetBlend).toHaveBeenCalledWith("b", "screen");
   });
 
   it("busy disables structural ops (add / reorder / duplicate / delete)", async () => {
