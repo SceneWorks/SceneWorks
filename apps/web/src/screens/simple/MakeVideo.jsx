@@ -16,8 +16,8 @@ import {
   VIDEO_MOTIONS,
   QUALITY_CHOICES,
   FALLBACK_VIDEO_RESOLUTIONS,
-  FALLBACK_DURATIONS,
   composePrompt,
+  videoDurations,
 } from "./simpleDefaults.js";
 
 // Snap a friendly shape to the closest resolution the video model supports.
@@ -68,15 +68,14 @@ export function MakeVideo() {
   const look = useMemo(() => LOOKS.find((entry) => entry.id === lookId) ?? null, [lookId]);
   const shape = useMemo(() => SHAPES.find((entry) => entry.id === shapeId) ?? SHAPES[0], [shapeId]);
 
-  // Length options come from the selected model (lengths vary per model); fall
-  // back only when a model declares none. Clamp the chosen value to the current
-  // model's options so switching models can't leave an unsupported length set.
-  const durations = model?.limits?.durations?.length ? model.limits.durations : FALLBACK_DURATIONS;
-  const modelDuration = model?.defaults?.duration ?? durations[0];
-  const duration =
-    durationValue != null && durations.some((value) => Number(value) === Number(durationValue))
-      ? durationValue
-      : modelDuration;
+  // Length options come from the selected model (lengths vary per model), capped
+  // at the model's recommended max for Simple. Clamp the chosen value to those
+  // options so switching models can't leave an unsupported/over-long length set.
+  const durations = videoDurations(model);
+  const preferredDuration = durationValue ?? model?.defaults?.duration;
+  const duration = durations.some((value) => Number(value) === Number(preferredDuration))
+    ? preferredDuration
+    : durations[durations.length - 1];
   const fps = model?.defaults?.fps ?? model?.limits?.fps?.[0] ?? 25;
 
   // Only stills make sense as a first frame.

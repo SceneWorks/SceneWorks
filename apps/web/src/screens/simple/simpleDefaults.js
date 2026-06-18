@@ -59,6 +59,19 @@ export const FALLBACK_VIDEO_RESOLUTIONS = ["1280x720", "768x1280", "768x768"];
 // Video Studio fallback. Real models drive the length options per-model.
 export const FALLBACK_DURATIONS = [4, 6, 8, 10];
 
+// Length options for a video model. Lengths are per-model (limits.durations);
+// Simple additionally caps at the model's `recommendedMaxDuration` so it never
+// offers lengths the model can technically reach (hardMaxDuration) but tends to
+// do poorly — Advanced still exposes the full range. Falls back to the shared
+// list only when the model declares no durations.
+export function videoDurations(model) {
+  const all = model?.limits?.durations?.length ? model.limits.durations : FALLBACK_DURATIONS;
+  const cap = Number(model?.limits?.recommendedMaxDuration);
+  if (!Number.isFinite(cap) || cap <= 0) return all;
+  const capped = all.filter((value) => Number(value) <= cap);
+  return capped.length ? capped : all;
+}
+
 // "Creativity" → guidance scale (CFG). Higher CFG follows the prompt more
 // literally; lower lets the model roam. Only meaningful for models that use
 // guidance at all — distilled/turbo models default to 0 and ignore it, so the
