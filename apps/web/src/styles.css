@@ -8796,6 +8796,18 @@ details[open] > summary.lora-scope-group-heading::before,
   --bg: oklch(0.985 0.008 85);
   --sw-aurora: linear-gradient(105deg, var(--accent-strong) 0%, var(--warm) 100%);
 }
+/* Dark theme: the light block warms --bg toward paper, which otherwise wins over
+   [data-theme="dark"] (equal specificity, later in the file) and leaves a light
+   page + header behind dark cards. Restore a warm-tinted dark canvas so the
+   atelier identity survives without the light/dark mismatch. */
+[data-ui-mode="simple"][data-theme="dark"] {
+  --bg: oklch(0.165 0.012 85);
+}
+/* --paper (cream) has no dark variant and also drives the dark wordmark/logo, so
+   don't override it globally — just give the New-character "+" a dark surface. */
+[data-ui-mode="simple"][data-theme="dark"] .sw-plus {
+  background: var(--surface-2);
+}
 
 .sw-make {
   padding: 28px 32px;
@@ -9771,4 +9783,30 @@ details[open] > summary.lora-scope-group-heading::before,
   .sw-look-pending {
     animation: none;
   }
+}
+
+/* More-options field + "Make my default" pin */
+.sw-advf {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.sw-mkdefault {
+  align-self: flex-start;
+  border: none;
+  background: none;
+  padding: 0;
+  font-family: var(--font-ui);
+  font-size: 11.5px;
+  font-weight: 700;
+  color: var(--accent-strong);
+  cursor: pointer;
+}
+.sw-mkdefault:hover {
+  text-decoration: underline;
+}
+.sw-mkdefault[disabled] {
+  color: var(--text-faint);
+  cursor: default;
+  text-decoration: none;
 }

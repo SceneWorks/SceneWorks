@@ -60,7 +60,7 @@ function findButton(label) {
 function baseContext(overrides = {}) {
   return {
     activeProject: { id: "proj-1", name: "Proj" },
-    imageModels: [{ id: "z_image_turbo" }],
+    imageModels: [{ id: "z_image_turbo", capabilities: ["text_to_image"] }],
     createImageJob: vi.fn(async () => ({ id: "job_photo" })),
     jobs: [],
     recentImageAssets: [],
