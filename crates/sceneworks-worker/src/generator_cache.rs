@@ -1,6 +1,7 @@
 use std::path::PathBuf;
 use std::sync::{mpsc, OnceLock};
 use std::thread;
+use std::time::Duration;
 
 use gen_core::{
     AdapterKind, AdapterSpec, Generator, LoadSpec, MoeExpert, Precision, Quant, WeightsSource,
@@ -10,6 +11,9 @@ use tokio::sync::oneshot;
 use crate::{WorkerError, WorkerResult};
 
 type GeneratorJob = Box<dyn FnOnce(&mut GeneratorCache) + Send + 'static>;
+
+const GENERATOR_CACHE_IDLE_SECONDS_ENV: &str = "SCENEWORKS_GENERATOR_CACHE_IDLE_SECONDS";
+const DEFAULT_GENERATOR_CACHE_IDLE_SECONDS: u64 = 300;
 
 static GENERATOR_WORKER: OnceLock<mpsc::Sender<GeneratorJob>> = OnceLock::new();
 
@@ -97,11 +101,9 @@ impl GeneratorCache {
         Self { entry: None }
     }
 
-    /// Drop the resident generator so the next job reloads from scratch. Called after a contained
-    /// panic (sc-6067): MLX/Metal state after a mid-op abort is suspect, so the cached generator
-    /// must not be reused.
-    fn evict(&mut self) {
-        self.entry = None;
+    /// Drop the resident generator so the next job reloads from scratch.
+    fn evict(&mut self) -> Option<GeneratorCacheKey> {
+        self.entry.take().map(|entry| entry.key)
     }
 
     fn with_generator<R>(
@@ -133,27 +135,95 @@ impl GeneratorCache {
 fn generator_worker() -> &'static mpsc::Sender<GeneratorJob> {
     GENERATOR_WORKER.get_or_init(|| {
         let (tx, rx) = mpsc::channel::<GeneratorJob>();
+        let idle_timeout = generator_cache_idle_timeout_from_env();
         thread::Builder::new()
             .name("sceneworks-mlx-generator-cache".to_owned())
             .spawn(move || {
-                let mut cache = GeneratorCache::new();
-                while let Ok(job) = rx.recv() {
-                    // Backstop: contain any panic that escapes a job's own guard so this single
-                    // shared cache thread can never die and poison every later generation (sc-6067).
-                    // A job normally catches its own panic, replies with a clean error, and evicts;
-                    // this catches anything it misses. On a contained panic the cache is reset
-                    // because post-abort MLX/Metal state is suspect.
-                    if std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| job(&mut cache)))
-                        .is_err()
-                    {
-                        cache.evict();
-                    }
-                }
+                run_generator_cache_worker(rx, idle_timeout);
             })
             .expect("start MLX generator cache worker");
         tx
     })
 }
+
+fn run_generator_cache_worker(rx: mpsc::Receiver<GeneratorJob>, idle_timeout: Option<Duration>) {
+    let mut cache = GeneratorCache::new();
+    loop {
+        let job = match recv_generator_job(&rx, idle_timeout) {
+            GeneratorWorkerEvent::Job(job) => job,
+            GeneratorWorkerEvent::IdleTimeout => {
+                if let Some(key) = cache.evict() {
+                    release_backend_cache_after_evict();
+                    eprintln!(
+                        "mlx_generator_cache_idle_evicted: engine={} idleSeconds={}",
+                        key.engine_id,
+                        idle_timeout.map_or(0, |timeout| timeout.as_secs())
+                    );
+                }
+                continue;
+            }
+            GeneratorWorkerEvent::Disconnected => break,
+        };
+        // Backstop: contain any panic that escapes a job's own guard so this single
+        // shared cache thread can never die and poison every later generation (sc-6067).
+        // A job normally catches its own panic, replies with a clean error, and evicts;
+        // this catches anything it misses. On a contained panic the cache is reset
+        // because post-abort MLX/Metal state is suspect.
+        if std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| job(&mut cache))).is_err()
+            && cache.evict().is_some()
+        {
+            release_backend_cache_after_evict();
+        }
+    }
+}
+
+enum GeneratorWorkerEvent {
+    Job(GeneratorJob),
+    IdleTimeout,
+    Disconnected,
+}
+
+fn recv_generator_job(
+    rx: &mpsc::Receiver<GeneratorJob>,
+    idle_timeout: Option<Duration>,
+) -> GeneratorWorkerEvent {
+    match idle_timeout {
+        Some(timeout) => match rx.recv_timeout(timeout) {
+            Ok(job) => GeneratorWorkerEvent::Job(job),
+            Err(mpsc::RecvTimeoutError::Timeout) => GeneratorWorkerEvent::IdleTimeout,
+            Err(mpsc::RecvTimeoutError::Disconnected) => GeneratorWorkerEvent::Disconnected,
+        },
+        None => match rx.recv() {
+            Ok(job) => GeneratorWorkerEvent::Job(job),
+            Err(_) => GeneratorWorkerEvent::Disconnected,
+        },
+    }
+}
+
+fn generator_cache_idle_timeout_from_env() -> Option<Duration> {
+    generator_cache_idle_timeout(
+        std::env::var(GENERATOR_CACHE_IDLE_SECONDS_ENV)
+            .ok()
+            .as_deref(),
+    )
+}
+
+fn generator_cache_idle_timeout(raw: Option<&str>) -> Option<Duration> {
+    let seconds = raw
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .and_then(|value| value.parse::<u64>().ok())
+        .unwrap_or(DEFAULT_GENERATOR_CACHE_IDLE_SECONDS);
+    (seconds > 0).then(|| Duration::from_secs(seconds))
+}
+
+#[cfg(all(target_os = "macos", not(test)))]
+fn release_backend_cache_after_evict() {
+    mlx_rs::memory::clear_cache();
+}
+
+#[cfg(any(not(target_os = "macos"), test))]
+fn release_backend_cache_after_evict() {}
 
 /// Best-effort human-readable text from a caught panic payload — the `&str`/`String` a `panic!`
 /// produces. mlx-rs `.unwrap()`/`.expect()` panics carry their formatted message as a `String`
@@ -190,7 +260,9 @@ where
         })) {
             Ok(result) => result,
             Err(panic) => {
-                cache.evict();
+                if cache.evict().is_some() {
+                    release_backend_cache_after_evict();
+                }
                 Err(WorkerError::Engine(format!(
                     "MLX generation panicked and was contained (the engine likely ran out of \
                      memory; the cached generator was reset): {}",
@@ -311,6 +383,113 @@ mod tests {
 
     inventory::submit! {
         gen_core::registry::ModelRegistration { descriptor: stub_descriptor, load: stub_load }
+    }
+
+    fn stub_cache_key() -> GeneratorCacheKey {
+        let spec = LoadSpec::new(WeightsSource::Dir(PathBuf::from("/models/stub")));
+        GeneratorCacheKey::from_load_spec("sc3724_stub", &spec)
+    }
+
+    fn stub_cache_entry() -> GeneratorCacheEntry {
+        GeneratorCacheEntry {
+            key: stub_cache_key(),
+            generator: Box::new(StubGenerator {
+                descriptor: stub_descriptor(),
+            }),
+        }
+    }
+
+    #[test]
+    fn generator_cache_idle_timeout_defaults_parses_and_disables() {
+        assert_eq!(
+            generator_cache_idle_timeout(None),
+            Some(Duration::from_secs(DEFAULT_GENERATOR_CACHE_IDLE_SECONDS))
+        );
+        assert_eq!(
+            generator_cache_idle_timeout(Some("")),
+            Some(Duration::from_secs(DEFAULT_GENERATOR_CACHE_IDLE_SECONDS))
+        );
+        assert_eq!(
+            generator_cache_idle_timeout(Some("not-a-number")),
+            Some(Duration::from_secs(DEFAULT_GENERATOR_CACHE_IDLE_SECONDS))
+        );
+        assert_eq!(generator_cache_idle_timeout(Some("0")), None);
+        assert_eq!(
+            generator_cache_idle_timeout(Some("42")),
+            Some(Duration::from_secs(42))
+        );
+    }
+
+    #[test]
+    fn cache_worker_evicts_resident_generator_after_idle_timeout() {
+        let (tx, rx) = mpsc::channel::<GeneratorJob>();
+        let worker = thread::spawn(move || {
+            run_generator_cache_worker(rx, Some(Duration::from_millis(20)));
+        });
+        let (seed_tx, seed_rx) = mpsc::channel();
+        tx.send(Box::new(move |cache: &mut GeneratorCache| {
+            cache.entry = Some(stub_cache_entry());
+            seed_tx.send(()).expect("ack cache seed");
+        }))
+        .expect("seed cache entry");
+        seed_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("cache seed ack");
+
+        thread::sleep(Duration::from_millis(80));
+
+        let (reply_tx, reply_rx) = mpsc::channel();
+        tx.send(Box::new(move |cache: &mut GeneratorCache| {
+            reply_tx
+                .send(cache.entry.is_none())
+                .expect("send cache state");
+        }))
+        .expect("check cache state");
+
+        assert!(
+            reply_rx
+                .recv_timeout(Duration::from_secs(1))
+                .expect("cache state reply"),
+            "expected idle timeout to evict the resident generator"
+        );
+        drop(tx);
+        worker.join().expect("cache worker exits");
+    }
+
+    #[test]
+    fn cache_worker_keeps_resident_generator_when_idle_eviction_disabled() {
+        let (tx, rx) = mpsc::channel::<GeneratorJob>();
+        let worker = thread::spawn(move || {
+            run_generator_cache_worker(rx, None);
+        });
+        let (seed_tx, seed_rx) = mpsc::channel();
+        tx.send(Box::new(move |cache: &mut GeneratorCache| {
+            cache.entry = Some(stub_cache_entry());
+            seed_tx.send(()).expect("ack cache seed");
+        }))
+        .expect("seed cache entry");
+        seed_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("cache seed ack");
+
+        thread::sleep(Duration::from_millis(80));
+
+        let (reply_tx, reply_rx) = mpsc::channel();
+        tx.send(Box::new(move |cache: &mut GeneratorCache| {
+            reply_tx
+                .send(cache.entry.is_some())
+                .expect("send cache state");
+        }))
+        .expect("check cache state");
+
+        assert!(
+            reply_rx
+                .recv_timeout(Duration::from_secs(1))
+                .expect("cache state reply"),
+            "expected disabled idle timeout to keep the resident generator"
+        );
+        drop(tx);
+        worker.join().expect("cache worker exits");
     }
 
     // load → progress → asset: drive the production cache seam end to end with a backend-neutral
