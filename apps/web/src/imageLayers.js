@@ -22,6 +22,29 @@
 
 export const DEFAULT_BLEND_MODE = "source-over";
 
+// The blend modes offered per layer (sc-6120). Each `value` is a canvas / Konva
+// `globalCompositeOperation` token, so the live render (the layer's <KonvaImage>
+// node) and the flatten (compositeLayersToCanvas) apply them identically. "Normal"
+// is the default source-over.
+export const BLEND_MODES = [
+  { value: "source-over", label: "Normal" },
+  { value: "multiply", label: "Multiply" },
+  { value: "screen", label: "Screen" },
+  { value: "overlay", label: "Overlay" },
+  { value: "darken", label: "Darken" },
+  { value: "lighten", label: "Lighten" },
+  { value: "color-dodge", label: "Color Dodge" },
+  { value: "color-burn", label: "Color Burn" },
+  { value: "hard-light", label: "Hard Light" },
+  { value: "soft-light", label: "Soft Light" },
+  { value: "difference", label: "Difference" },
+  { value: "exclusion", label: "Exclusion" },
+  { value: "hue", label: "Hue" },
+  { value: "saturation", label: "Saturation" },
+  { value: "color", label: "Color" },
+  { value: "luminosity", label: "Luminosity" },
+];
+
 // Identity transform for a layer that sits 1:1 over the document (the only kind
 // sc-6117 produces; non-identity transforms arrive with sc-6120, but the model +
 // compositor honor the fields now so the stack is forward-complete).

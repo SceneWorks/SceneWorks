@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  BLEND_MODES,
   DEFAULT_BLEND_MODE,
   identityTransform,
   createLayer,
@@ -25,6 +26,19 @@ const fakeImage = (w = 100, h = 80) => ({ naturalWidth: w, naturalHeight: h });
 
 const liveLayer = (id, overrides = {}) =>
   createLayer({ id, image: fakeImage(), objectUrl: `blob:${id}`, blob: { id }, ...overrides });
+
+describe("blend modes (sc-6120)", () => {
+  it("leads with Normal=source-over and exposes the common canvas blend tokens", () => {
+    expect(BLEND_MODES[0]).toEqual({ value: "source-over", label: "Normal" });
+    const values = BLEND_MODES.map((m) => m.value);
+    expect(values).toContain("multiply");
+    expect(values).toContain("screen");
+    expect(values).toContain("overlay");
+    // Every entry has a non-empty token + label, and tokens are unique.
+    expect(BLEND_MODES.every((m) => m.value && m.label)).toBe(true);
+    expect(new Set(values).size).toBe(values.length);
+  });
+});
 
 describe("layer model — creation + degenerate single-layer document (sc-6117)", () => {
   it("createLayer fills defaults and clamps opacity", () => {
