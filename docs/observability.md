@@ -38,6 +38,18 @@ So desktop sidecars and headless servers both emit JSON (what the ring buffer an
 log ingestion want), while a terminal stays readable. Force either with
 `SCENEWORKS_LOG_FORMAT=json` / `=pretty`.
 
+All of SceneWorks' own operational output — startup/lifecycle lines, the structured
+event vocabulary below, and the error/warn paths — goes through `tracing`, so in JSON
+mode every SceneWorks line is one JSON object. (Plain `println!`/`eprintln!` remain
+only in `#[test]`/E2E code, which never runs in a server/Docker process.) Two
+non-structured lines can still appear and are deliberately tolerated rather than
+forced into JSON: a linked backend / third-party library writing its own line to
+stdout/stderr, and the Rust runtime's terminal `Error: …` line when a process exits
+with a fatal error (kept as-is so the non-zero exit code still drives the
+supervisor's crash attribution). The ring-buffer ingestion handles both — a line
+that isn't a JSON object is kept verbatim and level-inferred — so a stray line is
+surfaced, not dropped.
+
 **Filtering (`RUST_LOG`).** Honored via `EnvFilter`; the default when unset is
 `info,sceneworks=debug`.
 

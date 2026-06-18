@@ -128,9 +128,12 @@ pub(crate) fn preload_cuda_dylibs() {
         let cuda_dir = resolve_cuda_dir();
         let cudnn_dir = resolve_cudnn_dir(cuda_dir.as_ref());
         if cuda_dir.is_none() && cudnn_dir.is_none() {
-            eprintln!(
-                "[ort-cuda] no CUDA/cuDNN dir resolved (set {CUDA_DIR_ENV}/{CUDNN_DIR_ENV}); \
-                 relying on PATH for the onnxruntime CUDA provider's dependencies"
+            tracing::warn!(
+                event = "ort_cuda_no_dependency_dir",
+                cudaDirEnv = CUDA_DIR_ENV,
+                cudnnDirEnv = CUDNN_DIR_ENV,
+                "no CUDA/cuDNN dir resolved; relying on PATH for the onnxruntime CUDA provider's \
+                 dependencies"
             );
             return;
         }
@@ -145,16 +148,21 @@ pub(crate) fn preload_cuda_dylibs() {
             prepend_dll_search_path(&dirs);
         }
         match ort::ep::cuda::preload_dylibs(cuda_dir.as_deref(), cudnn_dir.as_deref()) {
-            Ok(()) => eprintln!(
-                "[ort-cuda] preloaded CUDA EP dependencies (cuda={:?}, cudnn={:?})",
-                cuda_dir, cudnn_dir
+            Ok(()) => tracing::info!(
+                event = "ort_cuda_preloaded",
+                cuda = ?cuda_dir,
+                cudnn = ?cudnn_dir,
+                "preloaded CUDA EP dependencies"
             ),
             // Non-fatal: the CUDA EP may still initialise from PATH; if it can't, the
             // `.error_on_failure()` registration falls the detector back to CPU honestly.
-            Err(error) => eprintln!(
-                "[ort-cuda] CUDA EP dependency preload failed (cuda={:?}, cudnn={:?}): {error} \
-                 — the onnxruntime CUDA provider will fall back to PATH/CPU",
-                cuda_dir, cudnn_dir
+            Err(error) => tracing::warn!(
+                event = "ort_cuda_preload_failed",
+                cuda = ?cuda_dir,
+                cudnn = ?cudnn_dir,
+                error = %error,
+                "CUDA EP dependency preload failed — the onnxruntime CUDA provider will fall back \
+                 to PATH/CPU"
             ),
         }
     });

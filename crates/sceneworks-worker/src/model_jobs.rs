@@ -1452,9 +1452,11 @@ pub(crate) async fn run_lora_import_job(
         }
         (None, Some(detected)) => Some(detected),
         (Some(supplied), None) => {
-            eprintln!(
-                "LoRA import job {}: architecture detection inconclusive; accepting supplied family {supplied}",
-                job.id
+            tracing::info!(
+                event = "lora_import_architecture_inconclusive",
+                jobId = %job.id,
+                family = %supplied,
+                "LoRA import: architecture detection inconclusive; accepting supplied family"
             );
             Some(supplied)
         }

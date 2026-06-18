@@ -531,10 +531,11 @@ pub async fn run_worker_loop(settings: Settings) -> WorkerResult<()> {
     // sc-4482 (epic 3720): log the resolved backend-neutral gen-core contract version at startup
     // so a pin skew that slips past the CI guard (`scripts/check-gen-core-skew.sh`) is
     // diagnosable from one log line. One shared contract version backs every linked backend.
-    println!(
-        "rust_worker gen-core contract version {} (gpu_id={})",
-        gen_core::VERSION,
-        settings.gpu_id
+    tracing::info!(
+        event = "gen_core_contract_version",
+        version = %gen_core::VERSION,
+        gpuId = %settings.gpu_id,
+        "rust_worker gen-core contract version"
     );
     let gpu = discover_gpu(&settings).await;
     let api = ApiClient::new(&settings);
@@ -1311,9 +1312,11 @@ async fn directory_size(path: &Path) -> u64 {
                 // so far", not a failure — don't log it at error level. Only surface genuine I/O
                 // problems (permissions, etc.).
                 if error.kind() != std::io::ErrorKind::NotFound {
-                    eprintln!(
-                        "rust_worker_directory_size_failed: path={} error={error}",
-                        path.display()
+                    tracing::warn!(
+                        event = "rust_worker_directory_size_failed",
+                        path = %path.display(),
+                        error = %error,
+                        "failed to read a directory while sizing a download"
                     );
                 }
                 continue;

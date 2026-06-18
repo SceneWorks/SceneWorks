@@ -453,9 +453,10 @@ fn spawn_inprocess_utility_worker(port: u16) -> InProcessUtilityWorker {
     worker_settings.gpu_id =
         inprocess_worker_gpu_id(std::env::var("SCENEWORKS_RUST_WORKER_GPU_ID").ok());
     let grace = Duration::from_secs(worker_settings.shutdown_timeout_seconds.max(1));
-    println!(
-        "SceneWorks utility worker running in-process (loopback {})",
-        worker_settings.api_url
+    tracing::info!(
+        event = "utility_worker_inprocess",
+        apiUrl = %worker_settings.api_url,
+        "SceneWorks utility worker running in-process (loopback)"
     );
     let handle =
         tokio::spawn(async move { sceneworks_worker::run_worker_loop(worker_settings).await });
