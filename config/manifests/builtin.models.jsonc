@@ -830,7 +830,12 @@
       // macOnly. Dispatched through the engines::MODEL_TABLE / gen_core registry id `ideogram_4`
       // (adapter label below is the asset stamp, mirrors mlx_<family>). Epic 4725.
       "adapter": "mlx_ideogram",
-      "capabilities": ["text_to_image"],
+      // text_to_image + img2img/Remix edit + mask inpaint/outpaint (sc-6303): the native engine's
+      // edit path VAE-encodes the source and denoises from a strength-derived step; `image_inpaint`
+      // additionally drives the Image Studio Outpaint fit option (a generated border mask). The
+      // worker's `resolve_ideogram_edit` (base MLX path) builds the source `Reference` + optional
+      // `Conditioning::Mask`; the Edit tab gates on `edit_image` + `macSupport.features.edit`.
+      "capabilities": ["text_to_image", "edit_image", "image_inpaint"],
       "macOnly": true,
       // Ideogram 4 was trained on STRUCTURED JSON CAPTIONS, not free text — plain text is
       // out-of-distribution (coherent but prompt-agnostic). SceneWorks builds the JSON caption
@@ -922,7 +927,9 @@
       // mode" — NOT `recommended` until structured-caption adherence + the safety-placeholder path
       // are re-validated under no-CFG. Dispatched through engines::MODEL_TABLE id `ideogram_4_turbo`.
       "adapter": "mlx_ideogram",
-      "capabilities": ["text_to_image"],
+      // Same edit surface as the base (sc-6303): the shared denoise serves img2img/Remix + mask
+      // inpaint/outpaint in the CFG-free turbo path too (only the initial latent + start step differ).
+      "capabilities": ["text_to_image", "edit_image", "image_inpaint"],
       "macOnly": true,
       // Same structured JSON-caption prompt surface as the base model (turbo distills the base, so
       // the caption contract is identical).
