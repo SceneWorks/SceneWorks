@@ -297,6 +297,51 @@ fn json_rejection_response(rejection: JsonRejection) -> Response {
         .into_response()
 }
 
+// Builtin model / LoRA / recipe-preset catalogs the API reads from
+// `config_dir/manifests`. Docker bind-mounts these and the desktop wrapper seeds
+// them at launch, but running the rust-api binary directly (standalone / dev)
+// has neither — which left an empty catalog (Model Manager empty, model->file
+// resolution broken) while the server still started silently. Embed the
+// canonical repo copies at compile time so a populated catalog is an invariant
+// of the API itself, regardless of how it's launched.
+const BUILTIN_MANIFESTS: &[(&str, &str)] = &[
+    (
+        "builtin.models.jsonc",
+        include_str!("../../../config/manifests/builtin.models.jsonc"),
+    ),
+    (
+        "builtin.loras.jsonc",
+        include_str!("../../../config/manifests/builtin.loras.jsonc"),
+    ),
+    (
+        "builtin.recipe-presets.jsonc",
+        include_str!("../../../config/manifests/builtin.recipe-presets.jsonc"),
+    ),
+];
+
+// Write any missing builtin manifest into `config_dir/manifests`. Seed-if-missing
+// (not overwrite): an explicit config dir — a repo checkout or a Compose bind
+// mount — stays authoritative, so we only fill gaps and never clobber a copy the
+// operator is editing. Each file is written atomically (temp + rename) so a crash
+// can't leave a truncated manifest that parses to an empty catalog.
+fn seed_builtin_manifests_if_missing(config_dir: &FsPath) -> std::io::Result<()> {
+    let dir = config_dir.join("manifests");
+    std::fs::create_dir_all(&dir)?;
+    for &(name, contents) in BUILTIN_MANIFESTS {
+        let target = dir.join(name);
+        if target.exists() {
+            continue;
+        }
+        let temp = dir.join(format!("{name}.tmp"));
+        std::fs::write(&temp, contents)?;
+        if let Err(error) = std::fs::rename(&temp, &target) {
+            let _ = std::fs::remove_file(&temp);
+            return Err(error);
+        }
+    }
+    Ok(())
+}
+
 pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
     // Host mode (no HF cache env set): default HF_HOME to the shared ~/.cache/
     // huggingface so the catalog and downloads agree on the OS cache rather than
@@ -308,6 +353,17 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
         );
     }
     let settings = Settings::from_env();
+    // A populated builtin catalog is mandatory — model->file resolution depends on
+    // it. The desktop wrapper and the Compose bind mount normally provide it; seed
+    // any missing manifests here so launching the API binary directly works too,
+    // and fail loudly rather than serving an empty catalog if seeding can't finish.
+    if let Err(error) = seed_builtin_manifests_if_missing(&settings.config_dir) {
+        return Err(format!(
+            "failed to seed builtin manifests into {}: {error}",
+            settings.config_dir.join("manifests").display()
+        )
+        .into());
+    }
     let address: SocketAddr = format!("{}:{}", settings.host, settings.port).parse()?;
     // sc-4201 (F-API-1) / sc-5720 (API-001): a non-loopback bind with no access token
     // serves every endpoint — file reads, credential writes, job creation, large
