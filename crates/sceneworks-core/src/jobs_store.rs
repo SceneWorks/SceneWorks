@@ -3094,6 +3094,10 @@ const MLX_ROUTED_MODELS: &[&str] = &[
     // `edit_image`/reference off MLX (edit/remix is net-new engine work, sc-6303). Mirrors
     // `ideogram_mlx_eligible`.
     "ideogram_4",
+    // Ideogram 4 Turbo (mlx-gen #488): the few-step CFG-free single-DiT variant on the same
+    // `mlx-gen-ideogram` engine (id `ideogram_4_turbo`). Text-to-image only, same surface as the
+    // base id — shares `ideogram_mlx_eligible`. macOS-only (no torch backend).
+    "ideogram_4_turbo",
 ];
 
 /// Epic 3018 routing — does this image job belong on the in-process Rust MLX
@@ -3154,7 +3158,7 @@ fn image_request_mlx_eligible(model: &str, payload: &Map<String, Value>) -> bool
         "kolors" => kolors_mlx_eligible(payload),
         "lens" | "lens_turbo" => lens_mlx_eligible(payload),
         "bernini_image" => bernini_image_mlx_eligible(payload),
-        "ideogram_4" => ideogram_mlx_eligible(payload),
+        "ideogram_4" | "ideogram_4_turbo" => ideogram_mlx_eligible(payload),
         // Every model in MLX_ROUTED_MODELS must have an arm.
         _ => false,
     }
@@ -6693,6 +6697,30 @@ mod mlx_routing_tests {
         let support = model_mac_support("ideogram_4", "image");
         assert!(support.supported, "ideogram_4 must be Mac-supported");
         assert!(!support.features.edit, "ideogram_4 is T2I-only, no edit");
+    }
+
+    #[test]
+    fn ideogram_4_turbo_text_to_image_routes_to_mlx_and_is_mac_supported() {
+        // mlx-gen #488: the turbo variant shares the T2I-only `ideogram_mlx_eligible` predicate, so
+        // (like the base id) it must route to the in-process MLX worker for text-to-image AND be
+        // `macSupport.supported` so the opt-in "Ideogram 4 Turbo" model reaches the Text → Image
+        // picker. (The reported "no way to use it" symptom = a model absent from MLX_ROUTED_MODELS
+        // is `supported:false` → `macModelBlock` hides it.)
+        assert!(image_request_mlx_eligible(
+            "ideogram_4_turbo",
+            &object(json!({ "prompt": "a neon city skyline" }))
+        ));
+        assert!(image_request_mlx_eligible("ideogram_4_turbo", &Map::new()));
+        assert!(!image_request_mlx_eligible(
+            "ideogram_4_turbo",
+            &object(json!({ "mode": "edit_image", "sourceAssetId": "asset_1" }))
+        ));
+        let support = model_mac_support("ideogram_4_turbo", "image");
+        assert!(support.supported, "ideogram_4_turbo must be Mac-supported");
+        assert!(
+            !support.features.edit,
+            "ideogram_4_turbo is T2I-only, no edit"
+        );
     }
 
     #[test]
