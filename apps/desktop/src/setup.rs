@@ -370,45 +370,21 @@ fn huggingface_home() -> PathBuf {
     shared_huggingface_home()
 }
 
-/// Builtin model/LoRA/recipe-preset catalogs the rust-api reads from
-/// `config_dir/manifests`. In the server stack these ship in the repo's
-/// `config/`, but the desktop must provide them itself or Model Manager is empty
-/// and the native LTX/Wan adapters can't map model resources to files. Embedded
-/// at compile time from the canonical repo copies.
-const BUILTIN_MANIFESTS: &[(&str, &str)] = &[
-    (
-        "builtin.models.jsonc",
-        include_str!("../../../config/manifests/builtin.models.jsonc"),
-    ),
-    (
-        "builtin.loras.jsonc",
-        include_str!("../../../config/manifests/builtin.loras.jsonc"),
-    ),
-    (
-        "builtin.recipe-presets.jsonc",
-        include_str!("../../../config/manifests/builtin.recipe-presets.jsonc"),
-    ),
-];
-
-/// Write the builtin manifests into `config_dir/manifests`, overwriting on every
-/// launch so they track the app version. User customizations live in the
-/// separate `user.*.jsonc` files, which this never touches. Each file is written
-/// atomically (temp + rename) so a crash or partial write can't leave a
-/// truncated manifest that parses to an empty/broken catalog. Returns an error
-/// if any required manifest can't be installed — the catalog is mandatory, so
-/// the caller aborts setup rather than starting with missing model mappings.
+/// Seed the builtin model/LoRA/recipe-preset catalogs into the desktop's
+/// `config_dir/manifests`, overwriting on every launch so they track the app
+/// version. The server stack ships these in the repo's `config/`, but the desktop
+/// must provide them itself or Model Manager is empty and the native LTX/Wan
+/// adapters can't map model resources to files. User customizations live in the
+/// separate `user.*.jsonc` files, which seeding never touches. Delegates to the
+/// shared `sceneworks_core` seeder (same embedded copies the rust-api uses);
+/// returns an error if any required manifest can't be installed so the caller
+/// aborts setup rather than starting with missing model mappings.
 fn seed_builtin_manifests() -> Result<(), String> {
-    let dir = config_dir().join("manifests");
-    std::fs::create_dir_all(&dir).map_err(|error| format!("create manifests dir: {error}"))?;
-    for (name, contents) in BUILTIN_MANIFESTS {
-        let temp = dir.join(format!("{name}.tmp"));
-        std::fs::write(&temp, contents).map_err(|error| format!("write {name}: {error}"))?;
-        std::fs::rename(&temp, dir.join(name)).map_err(|error| {
-            let _ = std::fs::remove_file(&temp);
-            format!("install {name}: {error}")
-        })?;
-    }
-    Ok(())
+    sceneworks_core::builtin_manifests::seed_builtin_manifests(
+        &config_dir(),
+        sceneworks_core::builtin_manifests::SeedMode::Overwrite,
+    )
+    .map_err(|error| error.to_string())
 }
 
 /// Data directory: the settings override if set, otherwise the platform default.
