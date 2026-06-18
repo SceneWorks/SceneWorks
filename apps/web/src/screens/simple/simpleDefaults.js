@@ -1,4 +1,4 @@
-import { guidanceDefaultFromModel, stepsDefaultFromModel } from "../../samplerOptions.js";
+import { guidanceDefaultFromModel } from "../../samplerOptions.js";
 
 // Smart-default data for Simple mode's "Make a picture" surface. Keeping the
 // data here (not in the screen) makes the proxy → engine mappings auditable and
@@ -27,7 +27,7 @@ export const SHAPES = [
 
 export const COUNT_OPTIONS = [1, 2, 4];
 
-// "Make it sharper" → the createImageJob `upscale` payload (off = omit entirely).
+// "Make it bigger" → the createImageJob `upscale` payload (off = omit entirely).
 export const UPSCALE_OPTIONS = [
   { id: "off", label: "Off", factor: null },
   { id: "x2", label: "2× larger", factor: 2 },
@@ -57,19 +57,6 @@ export const QUALITY_CHOICES = [
 export const FALLBACK_VIDEO_RESOLUTIONS = ["1280x720", "768x1280", "768x768"];
 export const FALLBACK_DURATIONS = [4, 6, 8];
 
-// "Detail" → engine inference steps, as a multiplier over the model's own
-// default. Anchoring on the model default keeps it safe across families (a turbo
-// model defaults to ~8 steps, a base model ~20-50); "Standard" sends nothing so
-// the worker uses its default. The worker accepts 1-80 steps.
-export const DETAIL_LEVELS = [
-  { id: "standard", label: "Standard", stepsMul: 1 },
-  { id: "high", label: "More detail", stepsMul: 1.4 },
-  { id: "max", label: "Maximum", stepsMul: 1.85 },
-];
-const STEPS_MIN = 1;
-const STEPS_MAX = 80;
-const STEPS_FALLBACK = 20;
-
 // "Creativity" → guidance scale (CFG). Higher CFG follows the prompt more
 // literally; lower lets the model roam. Only meaningful for models that use
 // guidance at all — distilled/turbo models default to 0 and ignore it, so the
@@ -81,14 +68,6 @@ export const CREATIVITY_LEVELS = [
 ];
 const GUIDANCE_MIN = 1;
 const GUIDANCE_MAX = 12;
-
-// Number to emit for advanced.steps, or null to omit (= use the model default).
-export function resolveDetailSteps(model, levelId) {
-  const level = DETAIL_LEVELS.find((entry) => entry.id === levelId);
-  if (!level || level.stepsMul === 1) return null;
-  const base = stepsDefaultFromModel(model) ?? STEPS_FALLBACK;
-  return Math.min(STEPS_MAX, Math.max(STEPS_MIN, Math.round(base * level.stepsMul)));
-}
 
 // True only when the model actually honors guidance (default > 0).
 export function modelUsesGuidance(model) {

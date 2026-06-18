@@ -12,13 +12,11 @@ import {
   SHAPES,
   COUNT_OPTIONS,
   UPSCALE_OPTIONS,
-  DETAIL_LEVELS,
   CREATIVITY_LEVELS,
   FALLBACK_RESOLUTIONS,
   composePrompt,
   modelUsesGuidance,
   resolveCreativityGuidance,
-  resolveDetailSteps,
 } from "./simpleDefaults.js";
 
 // Snap a friendly shape to the closest resolution the chosen model actually
@@ -61,7 +59,6 @@ export function MakePicture() {
   const [shapeId, setShapeId] = useState("square");
   // Each control seeds from the user's saved default (if any), else the built-in.
   const [count, setCount] = useState(() => Number(readPref("count")) || 4);
-  const [detailId, setDetailId] = useState(() => readPref("detail") || "standard");
   const [creativityId, setCreativityId] = useState(() => readPref("creativity") || "balanced");
   const [upscaleId, setUpscaleId] = useState(() => readPref("upscale") || "off");
   const [submitting, setSubmitting] = useState(false);
@@ -71,7 +68,6 @@ export function MakePicture() {
   // "Make my default" persistence for the plain dropdowns (the model has its own).
   const [savedDefaults, setSavedDefaults] = useState(() => ({
     count: readPref("count"),
-    detail: readPref("detail"),
     creativity: readPref("creativity"),
     upscale: readPref("upscale"),
   }));
@@ -99,7 +95,6 @@ export function MakePicture() {
     setSubmitting(true);
     setNotice("");
     const dims = resolveDims(model, shape);
-    const steps = resolveDetailSteps(model, detailId);
     const guidanceScale = resolveCreativityGuidance(model, creativityId);
     const payload = {
       mode: "text_to_image",
@@ -111,10 +106,9 @@ export function MakePicture() {
       height: dims.height,
       recipePresetId: look?.presetId ?? null,
       loras: [],
-      // Omit steps/guidance when null so the worker keeps the model's own default.
+      // Omit guidance when null so the worker keeps the model's own default.
       advanced: {
         resolution: dims.resolution,
-        ...(steps != null ? { steps } : {}),
         ...(guidanceScale != null ? { guidanceScale } : {}),
       },
     };
@@ -247,15 +241,6 @@ export function MakePicture() {
                   ))}
                 </select>
               </AdvField>
-              <AdvField label="Detail" isDefault={isFieldDefault("detail", detailId)} onMakeDefault={() => saveDefault("detail", detailId)}>
-                <select value={detailId} onChange={(event) => setDetailId(event.target.value)}>
-                  {DETAIL_LEVELS.map((entry) => (
-                    <option key={entry.id} value={entry.id}>
-                      {entry.label}
-                    </option>
-                  ))}
-                </select>
-              </AdvField>
               {usesGuidance ? (
                 <AdvField label="Creativity" isDefault={isFieldDefault("creativity", creativityId)} onMakeDefault={() => saveDefault("creativity", creativityId)}>
                   <select value={creativityId} onChange={(event) => setCreativityId(event.target.value)}>
@@ -267,7 +252,7 @@ export function MakePicture() {
                   </select>
                 </AdvField>
               ) : null}
-              <AdvField label="Make it sharper" isDefault={isFieldDefault("upscale", upscaleId)} onMakeDefault={() => saveDefault("upscale", upscaleId)}>
+              <AdvField label="Make it bigger" isDefault={isFieldDefault("upscale", upscaleId)} onMakeDefault={() => saveDefault("upscale", upscaleId)}>
                 <select value={upscaleId} onChange={(event) => setUpscaleId(event.target.value)}>
                   {UPSCALE_OPTIONS.map((entry) => (
                     <option key={entry.id} value={entry.id}>
