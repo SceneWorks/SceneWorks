@@ -85,6 +85,9 @@ and run each worker with `SCENEWORKS_API_URL=http://localhost:8000`. In Docker
 Compose, workers are wired to the `api` service automatically. The
 Compose `worker` service is the Python inference worker and the `rust-worker`
 service is the Rust utility worker; both use the same HTTP contract.
+To clean up host-mode SceneWorks API/worker processes launched from this
+checkout, run `npm run dev:stop`; preview the matches first with
+`npm run dev:stop:dry-run`.
 The `sceneworks-rust-worker` binary handles CPU utility jobs for model downloads,
 LoRA imports, FFmpeg frame extraction, and timeline MP4 exports. The Rust worker
 defaults to `SCENEWORKS_GPU_ID=cpu` and does not duplicate the Python inference

@@ -8,6 +8,8 @@
     "dev": "docker compose up --build",
     "stack:up": "docker compose up --build",
     "stack:down": "docker compose down",
+    "dev:stop": "node scripts/stop-sceneworks-dev.mjs",
+    "dev:stop:dry-run": "node scripts/stop-sceneworks-dev.mjs --dry-run",
     "check": "node scripts/check-scaffold.mjs",
     "check:compose": "node scripts/check-compose-config.mjs",
     "check:health": "node scripts/check-health.mjs",
