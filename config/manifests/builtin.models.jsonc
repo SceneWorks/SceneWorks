@@ -931,9 +931,14 @@
         {
           // Same repo as `ideogram_4`; the q4/ subdir now also carries `turbo_lora.safetensors`
           // (~0.85 GB) the engine installs at load. Q8 opt-in via advanced mlxQuantize: 8.
+          // `turbo_lora.safetensors` is listed EXPLICITLY (not just covered by the `q4/*` glob) so
+          // the cache-health check verifies that exact file: a user who downloaded base Ideogram 4
+          // BEFORE the LoRA was published shares this repo's snapshot, and a coarse `q4/*` glob is
+          // already satisfied by the base files — so the missing LoRA would never flag "incomplete"
+          // / show the Fix button. The specific path makes the check exact (apps/rust-api models.rs).
           "provider": "huggingface",
           "repo": "SceneWorks/ideogram-4-mlx",
-          "files": ["q4/*"],
+          "files": ["q4/*", "q4/turbo_lora.safetensors"],
           "platforms": ["macos"],
           "estimatedSizeBytes": 16247340792
         }
