@@ -646,23 +646,51 @@ async fn register_worker(
     .await
 }
 
+/// Post a worker heartbeat. A transport-level failure (`WorkerError::Http`: the API
+/// is briefly unreachable — a restart, a transient network blip) is logged and
+/// swallowed rather than propagated: a running job must not be torn down for
+/// telemetry we can simply resend. The next heartbeat (≤15s) refreshes the worker's
+/// `last_seen` well inside the API's stale-sweep window (default 90s), so a brief
+/// outage no longer false-positives a live job to `interrupted`; a sustained outage
+/// (> the timeout) still lets the sweep fire — the API stays the authority on
+/// declaring a worker gone. A non-transport error (the API answered and rejected
+/// the heartbeat, e.g. the worker is no longer registered) is a real signal and is
+/// still propagated. (sc-6320)
 async fn heartbeat(
     api: &ApiClient,
     settings: &Settings,
     status: WorkerStatus,
     current_job_id: Option<&str>,
-) -> WorkerResult<WorkerSnapshot> {
-    api.post_json(
-        &format!("/api/v1/workers/{}/heartbeat", settings.worker_id),
-        &WorkerHeartbeatRequest {
-            status,
-            current_job_id: current_job_id.map(str::to_owned),
-            loaded_models: Vec::new(),
-            utilization: gpu_utilization(&settings.gpu_id).await,
-            extra: BTreeMap::new(),
-        },
-    )
-    .await
+) -> WorkerResult<()> {
+    // Capture the label before `status` is moved into the request, for the log line.
+    let status_label = status.as_str().to_owned();
+    let outcome: WorkerResult<WorkerSnapshot> = api
+        .post_json(
+            &format!("/api/v1/workers/{}/heartbeat", settings.worker_id),
+            &WorkerHeartbeatRequest {
+                status,
+                current_job_id: current_job_id.map(str::to_owned),
+                loaded_models: Vec::new(),
+                utilization: gpu_utilization(&settings.gpu_id).await,
+                extra: BTreeMap::new(),
+            },
+        )
+        .await;
+    match outcome {
+        Ok(_) => Ok(()),
+        Err(WorkerError::Http(error)) => {
+            emit_json(json!({
+                "event": "worker_heartbeat_transport_failed",
+                "workerId": settings.worker_id,
+                "jobId": current_job_id,
+                "status": status_label,
+                "error": error.to_string(),
+                "reportedAt": now_rfc3339(),
+            }));
+            Ok(())
+        }
+        Err(other) => Err(other),
+    }
 }
 
 async fn run_utility_job(

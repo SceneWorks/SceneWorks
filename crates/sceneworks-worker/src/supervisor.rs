@@ -27,6 +27,16 @@ fn backoff_resets_after_healthy_uptime(uptime: Duration) -> bool {
     uptime >= HEALTHY_UPTIME_RESET
 }
 
+/// Whether a reaped child died abnormally and should be attributed to the user as a
+/// real job FAILURE (vs. left to the generic heartbeat-sweep `interrupted`). True
+/// for an uncatchable signal death (`signal` set) or a non-zero self-exit
+/// (`exit_code` set and non-zero, e.g. a Rust panic → 101). A clean exit-0 — the
+/// child caught a shutdown signal and exited itself — is graceful and reports
+/// nothing (sc-4881 signals; sc-6320 non-signal exits).
+pub(crate) fn child_died_abnormally(signal: Option<i32>, exit_code: Option<i32>) -> bool {
+    signal.is_some() || exit_code.is_some_and(|code| code != 0)
+}
+
 pub(crate) async fn supervise_auto_workers(settings: Settings) -> WorkerResult<()> {
     let gpus = discover_gpus().await;
     if gpus.is_empty() {
@@ -101,29 +111,35 @@ where
             // backoff below both read the same stored value.
             child.restart_attempt = child.restart_attempt.saturating_add(1);
             let delay = retry_delay(settings.poll_seconds, child.restart_attempt);
-            // A child reaped with a terminating signal died an uncatchable death
-            // (SIGKILL/OOM, SIGABRT, SIGSEGV, …) and never got to report it. Carry
-            // the signal so we can attribute its active job as a real FAILURE
-            // before restarting, rather than letting the heartbeat sweep mark it
-            // the generic `interrupted` (sc-4881).
+            // A child that terminated abnormally never got to report it. A
+            // terminating signal (SIGKILL/OOM, SIGABRT, SIGSEGV, …) is an
+            // uncatchable death; a non-zero exit code is a self-terminated process
+            // (e.g. a Rust panic that unwound to exit 101). Carry both so we can
+            // attribute its active job as a real FAILURE before restarting, rather
+            // than letting the heartbeat sweep mark it the generic `interrupted`
+            // (sc-4881 signals; sc-6320 non-signal exits). `status.code()` is `None`
+            // when the child died by signal and `Some(code)` when it exited itself.
             let signal = terminating_signal(&status);
+            let exit_code = status.code();
             emit_json(json!({
                 "event": "worker_exited",
                 "workerId": worker_id,
                 "gpuId": child.spec.gpu_id,
-                "exitCode": status.code(),
+                "exitCode": exit_code,
                 "signal": signal,
                 "restartInSeconds": delay,
                 "reportedAt": now_rfc3339(),
             }));
-            exited.push((worker_id.clone(), signal));
+            exited.push((worker_id.clone(), signal, exit_code));
         }
     }
-    for (worker_id, signal) in exited {
-        // Surface an uncatchable death to the user before the backoff sleep, so a
-        // job that died on signal fails promptly instead of hanging until restart.
-        if let Some(signal) = signal {
-            report_worker_signal_death(settings, &worker_id, signal).await;
+    for (worker_id, signal, exit_code) in exited {
+        // Surface an abnormal death to the user before the backoff sleep, so a job
+        // that died fails promptly instead of hanging until restart. A clean exit-0
+        // is a graceful stop (e.g. the child caught a shutdown signal and exited
+        // itself) and is never reported (sc-6320).
+        if child_died_abnormally(signal, exit_code) {
+            report_worker_terminated(settings, &worker_id, signal, exit_code).await;
         }
         let Some(mut child) = children.remove(&worker_id) else {
             continue;
@@ -223,20 +239,30 @@ pub(crate) fn terminating_signal(_status: &std::process::ExitStatus) -> Option<i
     None
 }
 
-/// Best-effort: tell the API that a worker child died by `signal` so its active
-/// job is failed (signal-attributed) rather than swept to `interrupted`
-/// (sc-4881). The dying worker can't report this itself, so the supervisor does.
-/// A failure here (API down, job already terminal) must never disrupt the restart
-/// loop — the heartbeat sweep remains the backstop — so it is logged, not raised.
-async fn report_worker_signal_death(settings: &Settings, worker_id: &str, signal: i32) {
+/// Best-effort: tell the API that a worker child terminated abnormally — by
+/// `signal` (uncatchable death) or a non-zero `exit_code` (self-exit / panic) — so
+/// its active job is failed (attributed) rather than swept to the generic
+/// `interrupted` (sc-4881 signals; sc-6320 non-signal exits). The dying worker
+/// can't report this itself, so the supervisor does. A failure here (API down, job
+/// already terminal) must never disrupt the restart loop — the heartbeat sweep
+/// remains the backstop — so it is logged, not raised.
+async fn report_worker_terminated(
+    settings: &Settings,
+    worker_id: &str,
+    signal: Option<i32>,
+    exit_code: Option<i32>,
+) {
     let api = ApiClient::new(settings);
-    let path = format!("/api/v1/workers/{worker_id}/signal-death");
-    let outcome: WorkerResult<Value> = api.post_json(&path, &json!({ "signal": signal })).await;
+    let path = format!("/api/v1/workers/{worker_id}/terminated");
+    let outcome: WorkerResult<Value> = api
+        .post_json(&path, &json!({ "signal": signal, "exitCode": exit_code }))
+        .await;
     if let Err(error) = outcome {
         emit_json(json!({
-            "event": "worker_signal_death_report_failed",
+            "event": "worker_termination_report_failed",
             "workerId": worker_id,
             "signal": signal,
+            "exitCode": exit_code,
             "error": error.to_string(),
             "reportedAt": now_rfc3339(),
         }));

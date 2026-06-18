@@ -1078,7 +1078,7 @@ fn signal_death_fails_active_job_with_attributed_error() {
     assert_eq!(claimed.id, created.id);
 
     let failed = store
-        .fail_worker_job_killed_by_signal("worker-1", 9)
+        .fail_worker_job_terminated("worker-1", Some(9), None)
         .expect("signal death recorded")
         .expect("the worker's active job is failed");
 
@@ -1111,10 +1111,53 @@ fn signal_death_with_no_active_job_is_a_noop() {
     register_image_worker(&store);
 
     let failed = store
-        .fail_worker_job_killed_by_signal("worker-1", 11)
+        .fail_worker_job_terminated("worker-1", Some(11), None)
         .expect("signal death recorded");
 
     assert!(failed.is_none(), "an idle worker death fails no job");
+}
+
+#[test]
+fn non_signal_exit_fails_active_job_with_exit_code_error() {
+    // sc-6320: a worker child that exited on its own with a non-zero status (e.g. a
+    // Rust panic that unwound to exit 101) is just as dead as a signaled one, but
+    // the supervisor reports an exit code, not a signal. It must still become a real
+    // FAILURE that names the exit code, not a heartbeat-sweep `interrupted` that
+    // reads as a frozen progress bar.
+    let store = store("non-signal-exit-fails-job");
+    register_image_worker(&store);
+    let created = store
+        .create_job(image_job(Map::new()))
+        .expect("job creates");
+    let claimed = store
+        .claim_next_job("worker-1")
+        .expect("claim succeeds")
+        .expect("job claimed");
+    assert_eq!(claimed.id, created.id);
+
+    let failed = store
+        .fail_worker_job_terminated("worker-1", None, Some(101))
+        .expect("termination recorded")
+        .expect("the worker's active job is failed");
+
+    assert_eq!(failed.id, created.id);
+    assert_eq!(failed.status, JobStatus::Failed);
+    assert_eq!(failed.worker_id, None);
+    let error = failed.error.clone().unwrap_or_default();
+    assert!(
+        error.contains("panicked") && error.contains("101"),
+        "a code-101 exit must self-name the panic, got {error:?}"
+    );
+    // A non-signal exit is not a signal — it must not claim to be one.
+    assert!(
+        !error.contains("signal"),
+        "a non-signal exit must not report a signal, got {error:?}"
+    );
+
+    // The worker is released, exactly as on a signal death.
+    let worker = store.get_worker("worker-1").expect("worker loads");
+    assert_eq!(worker.current_job_id, None);
+    assert_eq!(worker.status, WorkerStatus::Offline);
 }
 
 #[test]
@@ -1275,6 +1318,15 @@ fn stale_sweep_marks_worker_offline_and_job_interrupted() {
     assert_eq!(sweep.workers[0].current_job_id, None);
     assert_eq!(sweep.jobs[0].status, JobStatus::Interrupted);
     assert_eq!(sweep.jobs[0].worker_id, None);
+    // sc-6320: the timeout error must be honest (the worker may have crashed, hung,
+    // or lost its connection — not a confirmed death) and name the timeout window.
+    let error = sweep.jobs[0].error.clone().unwrap_or_default();
+    assert!(
+        error.contains("No heartbeat from the worker for 1s")
+            && error.contains("crashed, hung, or lost"),
+        "stale-sweep error must state the ambiguity + timeout, got {error:?}"
+    );
+    assert_eq!(sweep.jobs[0].message, "Lost contact with the worker.");
 }
 
 #[test]
@@ -4551,7 +4603,7 @@ fn progress_cannot_resurrect_terminal_jobs() {
         .expect("same-terminal re-report succeeds");
     assert_eq!(job.status, JobStatus::Interrupted);
     assert_eq!(
-        job.message, "Job was interrupted after its worker stopped sending heartbeats.",
+        job.message, "Lost contact with the worker.",
         "no-op re-report must not rewrite the row"
     );
 

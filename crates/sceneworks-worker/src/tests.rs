@@ -42,8 +42,8 @@ use super::model_jobs::{
 #[cfg(unix)]
 use super::supervisor::terminating_signal;
 use super::supervisor::{
-    auto_worker_specs, child_environment, restart_exited_children_with_spawner,
-    utility_worker_specs, SupervisedChild, WorkerSpec,
+    auto_worker_specs, child_died_abnormally, child_environment,
+    restart_exited_children_with_spawner, utility_worker_specs, SupervisedChild, WorkerSpec,
 };
 use super::{
     allow_pattern_matches, bounded_tail, cancel_requested_peek, cleanup_uploaded_import_source,
@@ -882,6 +882,27 @@ async fn terminating_signal_distinguishes_signal_death_from_clean_exit() {
     let mut clean = spawn_exit_child();
     let status = clean.wait().await.expect("clean child reaped");
     assert_eq!(terminating_signal(&status), None);
+}
+
+#[test]
+fn child_died_abnormally_reports_signals_and_non_zero_exits_not_clean_exits() {
+    // sc-6320: the supervisor attributes a real FAILURE for an uncatchable signal
+    // death OR a non-zero self-exit (e.g. a Rust panic → 101), but a clean exit-0
+    // is graceful and must report nothing (else a normal worker shutdown would
+    // spuriously fail its job).
+    assert!(child_died_abnormally(Some(9), None), "SIGKILL is abnormal");
+    assert!(
+        child_died_abnormally(None, Some(101)),
+        "a panic exit (101) is abnormal"
+    );
+    assert!(
+        child_died_abnormally(None, Some(1)),
+        "any non-zero exit is abnormal"
+    );
+    assert!(
+        !child_died_abnormally(None, Some(0)),
+        "a clean exit-0 is graceful, not reported"
+    );
 }
 
 #[tokio::test]
