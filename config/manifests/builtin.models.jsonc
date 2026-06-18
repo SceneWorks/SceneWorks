@@ -877,11 +877,14 @@
         "types": ["style", "enhance"]
       },
       // Pre-quantized turnkey (q4/ default, q8/ opt-in via advanced mlxQuantize: 8); the worker
-      // resolve_ideogram_model_dir picks the subdir. Q4 measured peak ~28 GB @1024² (64 GB @2048²);
-      // packed, so NO bf16 load transient. minMemoryGb covers the 1024² default + headroom; the
-      // 2048²/6:1 ceiling wants ~96 GB (advanced high-res on smaller Macs is capped UI-side).
+      // resolve_ideogram_model_dir picks the subdir; packed, so NO bf16 load transient. MEASURED Q4
+      // phys_footprint peak ~60 GiB @1024²/8-step (the two-DiT asymmetric-CFG path) — the earlier
+      // "~28 GB @1024²" note was a ~2× under-measurement (that figure is closer to the steady-state
+      // resident set; the high-water peak is ~60 GiB and includes reclaimable MLX free-buffer cache).
+      // minMemoryGb 64 = the Mac RAM tier that fits the ~60 GiB peak without OOM. 2048²/6:1 needs
+      // substantially more (well past 128 GB) — advanced high-res is capped UI-side on smaller Macs.
       "mlx": {
-        "minMemoryGb": 48,
+        "minMemoryGb": 64,
         // The turnkey's default subdir is the packed q4/ weights, so the resolved quant must be Q4 —
         // otherwise the generic resolve_quant Q8 default is recorded in the asset recipe even though
         // the model runs q4 (sc-6237). Q8 is still reachable per-request via advanced mlxQuantize: 8.
@@ -963,10 +966,12 @@
         "schedulers": ["default"]
       },
       // Same packed turnkey + quant resolution as the base (resolve_ideogram_model_dir picks the
-      // q4/q8 subdir, which carries the bundled LoRA). Measured Q4 peak ~52 GB @1024²/8-step (one
-      // DiT); minMemoryGb mirrors the base entry (turbo is strictly lighter than the 2-DiT base).
+      // q4/q8 subdir, which carries the bundled LoRA). MEASURED Q4 phys_footprint peak ~52 GiB
+      // @1024²/8-step (one DiT) — ~8 GiB lighter than the 2-DiT base's ~60 GiB, but both peaks exceed
+      // a 48 GiB Mac, so minMemoryGb tracks the base at 64 (the RAM tier the peak needs). The lighter
+      // footprint shows in the peak, not a lower RAM tier (no Mac tier sits between 48 and 64).
       "mlx": {
-        "minMemoryGb": 48,
+        "minMemoryGb": 64,
         "quantize": 4,
         "repo": "SceneWorks/ideogram-4-mlx"
       },
