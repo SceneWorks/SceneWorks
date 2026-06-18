@@ -54,6 +54,18 @@ pub(crate) const MODEL_TABLE: &[ModelRow] = &[
         default_guidance: 7.0,
         adapter_label: "mlx_ideogram",
     },
+    // Ideogram 4 Turbo (mlx-gen #488) — the CFG-free, single-DiT few-step variant: the same
+    // turnkey base (q4/q8 subdirs) plus the bundled ostris TurboTime LoRA the engine installs at
+    // load. 8 steps; guidance is INERT (the `ideogram_4_turbo` descriptor advertises
+    // supports_guidance=false, so `resolve_guidance` returns None and never forwards a value).
+    ModelRow {
+        sceneworks_id: "ideogram_4_turbo",
+        engine_id: "ideogram_4_turbo",
+        default_repo: "SceneWorks/ideogram-4-mlx",
+        default_steps: 8,
+        default_guidance: 0.0,
+        adapter_label: "mlx_ideogram",
+    },
     // Z-Image-Edit (epic 3529) — img2img/edit. No dedicated Edit checkpoint exists yet, so
     // (like the Python `MODEL_TARGETS` row) it runs the **Turbo weights** through the engine's
     // img2img path (`Conditioning::Reference` — VAE-encode the source + denoise from
