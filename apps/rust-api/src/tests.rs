@@ -5432,6 +5432,56 @@ fn huggingface_cache_health_accepts_readable_snapshot_symlinked_model_index() {
     assert!(health.missing_files.is_empty());
 }
 
+#[test]
+fn turbo_cache_health_flags_missing_lora_only_when_listed_explicitly() {
+    // mlx-gen #488: a user who downloaded base Ideogram 4 BEFORE the TurboTime LoRA was published
+    // shares this repo's snapshot — q4/ holds the base files but NOT turbo_lora.safetensors. A coarse
+    // `q4/*` glob is already satisfied by the base files, so the missing LoRA never flags
+    // "incomplete" (no Fix button — the reported symptom). Listing the exact path makes the check
+    // verify that specific file.
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let repo_root = temp_dir.path().join("models--SceneWorks--ideogram-4-mlx");
+    let q4 = repo_root.join("snapshots/abc123/q4");
+    std::fs::create_dir_all(&q4).expect("q4 creates");
+    std::fs::create_dir_all(repo_root.join("refs")).expect("refs creates");
+    std::fs::write(repo_root.join("refs/main"), "abc123").expect("ref writes");
+    // A base file under q4/ so the `q4/*` glob is satisfied — but the LoRA is absent.
+    std::fs::write(q4.join("model_index.json"), "{}").expect("base file writes");
+
+    let glob_only = vec!["q4/*".to_owned()];
+    let with_specific = vec!["q4/*".to_owned(), "q4/turbo_lora.safetensors".to_owned()];
+
+    // The coarse glob alone misses it (the bug): q4/model_index.json satisfies `q4/*`.
+    let coarse = super::models::huggingface_cache_health(&repo_root, &glob_only);
+    assert!(
+        coarse.installed && !coarse.incomplete,
+        "coarse `q4/*` glob is satisfied by base files and falsely reports complete"
+    );
+
+    // The explicit path catches the missing LoRA → incomplete → Fix button.
+    let precise = super::models::huggingface_cache_health(&repo_root, &with_specific);
+    assert!(
+        precise.incomplete,
+        "explicit `q4/turbo_lora.safetensors` must flag the missing file"
+    );
+    assert!(
+        precise
+            .missing_files
+            .iter()
+            .any(|file| file == "q4/turbo_lora.safetensors"),
+        "missing_files must name the LoRA, got {:?}",
+        precise.missing_files
+    );
+
+    // Once the LoRA is present, the model is complete again.
+    std::fs::write(q4.join("turbo_lora.safetensors"), "weights").expect("lora writes");
+    let fixed = super::models::huggingface_cache_health(&repo_root, &with_specific);
+    assert!(
+        fixed.installed && !fixed.incomplete && fixed.missing_files.is_empty(),
+        "complete once the LoRA is present"
+    );
+}
+
 #[cfg(windows)]
 fn create_test_symlink_file(
     target: &std::path::Path,

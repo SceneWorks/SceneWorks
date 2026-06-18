@@ -3124,10 +3124,10 @@ const MLX_ROUTED_MODELS: &[&str] = &[
     // (sc-6303 — the engine + worker `resolve_ideogram_edit` edit path); both route to MLX. Mirrors
     // `ideogram_mlx_eligible`.
     "ideogram_4",
-    // Ideogram 4 Turbo — the SAME base model + the bundled TurboTime LoRA the engine installs at load
-    // (CFG-free, few-step, single DiT; engine id `ideogram_4_turbo`). Same routing + edit surface as
-    // the base (the shared denoise serves both); registered here so it reaches the picker and routes
-    // to MLX for both T2I and edit (sc-6303).
+    // Ideogram 4 Turbo (mlx-gen #488) — the SAME base model + the bundled TurboTime LoRA the engine
+    // installs at load (CFG-free, few-step, single DiT; engine id `ideogram_4_turbo`). Same routing +
+    // edit surface as the base (the shared denoise serves both); registered so it reaches the picker
+    // and routes to MLX for both T2I and edit (sc-6303). macOS-only (no torch backend).
     "ideogram_4_turbo",
 ];
 

@@ -88,6 +88,15 @@ two is the signature of a cold-weight load — the prime suspect when an MLX job
 > information, accurate to the Rust engine's architecture, rather than fabricated
 > zero-duration sub-phase events.
 
+### MLX generator cache idle eviction — `mlx_generator_cache_idle_evicted`
+
+Emitted by the Rust MLX worker when the shared generator cache drops its
+resident generator after the idle timeout: `engine`, `idleSeconds`. This is
+expected after the worker has been idle for
+`SCENEWORKS_GENERATOR_CACHE_IDLE_SECONDS` seconds (default 300). It should
+correlate with the worker releasing cached Metal/MLX allocations before the
+next generation cold-loads weights again.
+
 ## Diagnosing "MLX-eligible job ran on torch/MPS"
 
 1. Open **System → Logs**, filter source = `api`, search `mlx_route_decision`.

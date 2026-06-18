@@ -51,9 +51,9 @@ use super::{
     normalize_app_managed_cache_path, now_rfc3339, parse_credentials_env,
     resolve_model_convert_output, resolve_model_import_target, safe_download_dir,
     safe_project_path, value_f64, wan_moe_pair_filenames, write_model_install_marker,
-    CredentialScheme, JsonObject, SafetensorsHeaderError, Settings, WorkerCredential, WorkerError,
-    DEFAULT_MAX_LORA_URL_BYTES, DEFAULT_MAX_MODEL_URL_BYTES, DEFAULT_TRANSITION_DURATION_SECONDS,
-    INSTALL_MARKER,
+    CredentialScheme, IdleHeartbeat, JsonObject, SafetensorsHeaderError, Settings,
+    WorkerCredential, WorkerError, DEFAULT_MAX_LORA_URL_BYTES, DEFAULT_MAX_MODEL_URL_BYTES,
+    DEFAULT_TRANSITION_DURATION_SECONDS, INSTALL_MARKER,
 };
 
 fn write_safetensors_with_keys(path: &std::path::Path, keys: &[String]) {
@@ -2670,6 +2670,34 @@ fn test_settings(huggingface_base_url: String, huggingface_token: Option<&str>) 
         backend_mlx_enabled: true,
         backend_candle_enabled: false,
     }
+}
+
+#[test]
+fn idle_heartbeat_is_due_immediately_then_waits_for_interval() {
+    let mut heartbeat = IdleHeartbeat::new(Duration::from_secs(60));
+
+    assert!(heartbeat.should_send());
+    heartbeat.mark_sent();
+    assert!(!heartbeat.should_send());
+}
+
+#[test]
+fn idle_heartbeat_allows_immediate_resend_when_interval_is_zero() {
+    let mut heartbeat = IdleHeartbeat::new(Duration::ZERO);
+
+    assert!(heartbeat.should_send());
+    heartbeat.mark_sent();
+    assert!(heartbeat.should_send());
+}
+
+#[test]
+fn idle_heartbeat_can_be_forced_due_after_work() {
+    let mut heartbeat = IdleHeartbeat::new(Duration::from_secs(60));
+
+    heartbeat.mark_sent();
+    assert!(!heartbeat.should_send());
+    heartbeat.mark_due();
+    assert!(heartbeat.should_send());
 }
 
 fn spawn_exit_child() -> tokio::process::Child {
