@@ -17,6 +17,7 @@ import {
   layerById,
   moveLayer,
   removeLayer,
+  replaceLayerBitmap,
   sameLayerStack,
   setActiveLayer,
   setLayerProps,
@@ -1404,30 +1405,103 @@ export function ImageEditor() {
     setCropRect(next);
   }
 
-  // Apply: rasterize the selected region into a fresh working image. The source
-  // bitmap is blob-backed (never tainted), so reading pixels back is safe. The
-  // result keeps the same source provenance so lineage survives to Save (sc-2434).
+  // ── Active-layer write-back + flatten plumbing (sc-6119) ───────────────────
+  // Encode just the ACTIVE layer's bitmap to a PNG File — the source for an
+  // active-layer AI op (same-size edit / detail / smart-select) whose result is
+  // written back to that layer, the rest of the stack preserved.
+  const activeLayerToFile = useCallback(
+    (filename) =>
+      new Promise((resolve, reject) => {
+        const work = workingRef.current;
+        const layer = activeLayerOf(work);
+        if (!layer) {
+          reject(new Error("No active layer."));
+          return;
+        }
+        const canvas = document.createElement("canvas");
+        canvas.width = layer.image.naturalWidth;
+        canvas.height = layer.image.naturalHeight;
+        canvas.getContext("2d").drawImage(layer.image, 0, 0);
+        const base = (work.source.name || "image").replace(/\.[^./\\]+$/, "");
+        canvas.toBlob(
+          (blob) =>
+            blob
+              ? resolve(new File([blob], filename || `${base}.png`, { type: "image/png" }))
+              : reject(new Error("Could not encode the layer.")),
+          "image/png",
+        );
+      }),
+    [],
+  );
+
+  // Write a decoded AI/grade result back into a specific layer, revoking that
+  // layer's previous object URL. Preserves the doc dims + the rest of the stack.
+  const replaceLayerImage = useCallback((id, image, objectUrl, blob) => {
+    const prev = layerById(workingRef.current, id);
+    if (prev?.objectUrl && prev.objectUrl !== objectUrl) URL.revokeObjectURL(prev.objectUrl);
+    setWorking((cur) => replaceLayerBitmap(cur, id, { image, objectUrl, blob }));
+  }, []);
+
+  // A document-level AI op (upscale / outpaint / box-keyed edit) flattens the stack
+  // into one base layer; warn before discarding a multi-layer stack.
+  const confirmFlatten = useCallback(() => {
+    const n = workingRef.current?.layers?.length ?? 0;
+    if (n <= 1) return true;
+    return (
+      typeof window.confirm !== "function" ||
+      window.confirm(`This will flatten ${n} layers into a single layer. Continue?`)
+    );
+  }, []);
+
+  // Apply: document-level crop — crop every layer to the rect, set the doc dims,
+  // keep the stack. The bitmaps are blob-backed (never tainted), so reading pixels
+  // back is safe; provenance is preserved so lineage survives to Save (sc-2434).
   const applyCrop = useCallback(async () => {
-    const layer = activeLayerOf(working);
-    if (!working || !cropRect || !layer) return;
+    if (!working || !cropRect || !working.layers.length) return;
     const sx = clamp(Math.round(cropRect.x), 0, working.width - 1);
     const sy = clamp(Math.round(cropRect.y), 0, working.height - 1);
     const sw = clamp(Math.round(cropRect.width), 1, working.width - sx);
     const sh = clamp(Math.round(cropRect.height), 1, working.height - sy);
-    const canvas = document.createElement("canvas");
-    canvas.width = sw;
-    canvas.height = sh;
-    // Single-layer document (sc-6117): crop the lone layer and rebuild the stack at
-    // the new size. Document-level crop across a multi-layer stack is sc-6119.
-    canvas.getContext("2d").drawImage(layer.image, sx, sy, sw, sh, 0, 0, sw, sh);
-    const blob = await new Promise((resolve) => canvas.toBlob(resolve, "image/png"));
-    if (!blob) return;
-    const { image, objectUrl } = await blobToImage(blob);
+    // Document-level crop (sc-6119): crop EVERY layer's bitmap to the rect and set the
+    // doc dims — the stack is preserved. Layers are doc-aligned in this slice; per-layer
+    // transforms (and transform-aware crop) arrive with sc-6120.
+    let cropped;
+    try {
+      cropped = await Promise.all(
+        working.layers.map(async (layer) => {
+          const canvas = document.createElement("canvas");
+          canvas.width = sw;
+          canvas.height = sh;
+          canvas.getContext("2d").drawImage(layer.image, sx, sy, sw, sh, 0, 0, sw, sh);
+          const blob = await new Promise((resolve) => canvas.toBlob(resolve, "image/png"));
+          if (!blob) throw new Error("Could not encode the crop.");
+          const { image, objectUrl } = await blobToImage(blob);
+          return { id: layer.id, image, objectUrl, blob };
+        }),
+      );
+    } catch (err) {
+      setStatus({ loading: false, error: err.message || "Could not crop the layers." });
+      return;
+    }
     checkpoint();
-    installWorkingImage(image, objectUrl, blob, working.source);
+    const oldLayers = workingRef.current.layers;
+    needsFitRef.current = true;
+    // Crop invalidates the mask + boxes (old-document pixel coords) and returns to Move.
+    resetEditorOverlays();
+    const byId = new Map(cropped.map((c) => [c.id, c]));
+    setWorking((prev) => ({
+      ...prev,
+      width: sw,
+      height: sh,
+      layers: prev.layers.map((layer) => {
+        const c = byId.get(layer.id);
+        return c ? { ...layer, image: c.image, objectUrl: c.objectUrl, blob: c.blob } : layer;
+      }),
+    }));
+    oldLayers.forEach((layer) => layer.objectUrl && URL.revokeObjectURL(layer.objectUrl));
     setEdits((prev) => [...prev, { op: "crop", width: sw, height: sh }]);
     setDirty(true);
-  }, [working, cropRect, installWorkingImage, checkpoint]);
+  }, [working, cropRect, checkpoint, resetEditorOverlays]);
 
   // Bind the transformer to the crop rect whenever crop mode is active.
   useEffect(() => {
@@ -1472,15 +1546,17 @@ export function ImageEditor() {
   const applyColorGrade = useCallback(async () => {
     const layer = activeLayerOf(working);
     if (!working || !layer || isIdentityAdjust(colorAdjust)) return;
+    const w = layer.image.naturalWidth;
+    const h = layer.image.naturalHeight;
     const canvas = document.createElement("canvas");
-    canvas.width = working.width;
-    canvas.height = working.height;
+    canvas.width = w;
+    canvas.height = h;
     const ctx = canvas.getContext("2d");
-    // Single-layer document (sc-6117): bake the grade into the lone layer. Grading
-    // the active layer of a multi-layer stack is sc-6119 (the live preview already
-    // caches the active layer's node, below).
+    // Active-layer op (sc-6119): bake the grade into the ACTIVE layer's pixels and
+    // write it back, preserving the rest of the stack + the doc dims. The live
+    // preview already caches the active layer's node (below).
     ctx.drawImage(layer.image, 0, 0);
-    const imageData = ctx.getImageData(0, 0, working.width, working.height);
+    const imageData = ctx.getImageData(0, 0, w, h);
     applyColorAdjustments(imageData.data, colorAdjust);
     ctx.putImageData(imageData, 0, 0);
     const blob = await new Promise((resolve) => canvas.toBlob(resolve, "image/png"));
@@ -1488,10 +1564,12 @@ export function ImageEditor() {
     const baked = { ...colorAdjust };
     const { image, objectUrl } = await blobToImage(blob);
     checkpoint();
-    installWorkingImage(image, objectUrl, blob, working.source);
+    replaceLayerImage(layer.id, image, objectUrl, blob);
+    setColorAdjust(IDENTITY_COLOR_ADJUST); // the grade is baked; drop the live preview
+    setTool("move");
     setEdits((prev) => [...prev, { op: "color", ...baked }]);
     setDirty(true);
-  }, [working, colorAdjust, installWorkingImage, checkpoint]);
+  }, [working, colorAdjust, replaceLayerImage, checkpoint]);
 
   // ── Layer stack ops (sc-6118) ─────────────────────────────────────────────
   // Wire the layers panel to the pure layer-stack ops (../imageLayers.js). Each
@@ -1741,6 +1819,9 @@ export function ImageEditor() {
     runAiOp({
       label: "edit",
       endpoint: "/api/v1/image/jobs",
+      // The boxes overlay the whole document → the baked composite is the source and
+      // the re-rendered result flattens the stack to one base layer (sc-6119).
+      layerSource: "composite",
       edit: { op: "boxLayout", model: editModel, prompt, boxes: boxes.length },
       sourceFile,
       buildBody: (scratch) =>
@@ -1945,16 +2026,25 @@ export function ImageEditor() {
       maskFile = null,
       sourceFile = null,
       onComplete = null,
+      // The tool-interaction matrix (sc-6119): "activeLayer" ops stage the active
+      // layer and write the result back to it (dims unchanged); "composite" ops
+      // stage the flattened document and the result becomes a single new base layer.
+      layerSource = "activeLayer",
     }) => {
       if (!working || aiOp || !activeProject) return;
+      // A composite-source op flattens the stack into one base layer — confirm first.
+      if (layerSource === "composite" && !confirmFlatten()) return;
       setStatus({ loading: false, error: "" });
-      // Stage the source (and, for a masked edit, the mask) as scratch assets. The
-      // source defaults to the working bitmap, but callers can pass a derived PNG —
-      // e.g. the box-baked pass-through (sc-6093) — to edit that instead.
+      const targetLayerId = activeLayerOf(working)?.id ?? null;
+      // Stage the source (and, for a masked edit, the mask) as scratch assets. An
+      // explicit sourceFile (e.g. the box-baked pass-through, sc-6093) wins; else
+      // stage the composite (flatten ops) or just the active layer (active-layer ops).
       let scratch;
       let maskScratch = null;
       try {
-        scratch = await importAsset(sourceFile ?? (await workingImageToFile()), { throwOnError: true });
+        const staged =
+          sourceFile ?? (layerSource === "composite" ? await workingImageToFile() : await activeLayerToFile());
+        scratch = await importAsset(staged, { throwOnError: true });
         if (maskFile) maskScratch = await importAsset(maskFile, { throwOnError: true });
       } catch (err) {
         if (scratch) purgeAsset(scratch).catch(() => {});
@@ -1967,7 +2057,19 @@ export function ImageEditor() {
           body: JSON.stringify(buildBody(scratch, maskScratch)),
         });
         if (!job?.id) throw new Error("The job was not created.");
-        setAiOp({ jobId: job.id, scratch, maskScratch, source: working.source, label, edit, onComplete });
+        setAiOp({
+          jobId: job.id,
+          scratch,
+          maskScratch,
+          source: working.source,
+          label,
+          edit,
+          onComplete,
+          // How the watcher writes the result back: active-layer ops replace the
+          // target layer's bitmap; composite ops flatten the stack to one layer.
+          writeBack: onComplete ? null : layerSource === "composite" ? "document" : "activeLayer",
+          targetLayerId,
+        });
         setTool("move");
       } catch (err) {
         purgeAsset(scratch).catch(() => {});
@@ -1975,7 +2077,7 @@ export function ImageEditor() {
         setStatus({ loading: false, error: `Could not start ${label}: ${err.message || err}` });
       }
     },
-    [working, aiOp, activeProject, workingImageToFile, importAsset, token, purgeAsset],
+    [working, aiOp, activeProject, workingImageToFile, activeLayerToFile, confirmFlatten, importAsset, token, purgeAsset],
   );
 
   function runUpscale() {
@@ -1984,6 +2086,8 @@ export function ImageEditor() {
     const softness = upscaleEngineHasSoftness(upscaleEngine) ? upscaleSoftness : undefined;
     runAiOp({
       label: "upscale",
+      // Upscale changes dimensions → document-level: flatten the stack, upscale once.
+      layerSource: "composite",
       edit: {
         op: "upscale",
         engine: upscaleEngine,
@@ -2029,6 +2133,9 @@ export function ImageEditor() {
     // the working size, so the existing same-size edit behavior is unchanged.
     const fitMode = effectiveFitMode(editFitMode, canMask);
     const { width: outWidth, height: outHeight } = editOutputDims(working.width, working.height, editAspect, fitMode);
+    // Same-size edit → active layer; a canvas-extend / outpaint (dims change) →
+    // document-level flatten (sc-6119 tool matrix).
+    const dimsChange = outWidth !== working.width || outHeight !== working.height;
     // A mask is sent only for inpaint-capable models; otherwise it's a whole-image edit (the mask
     // stays as a local guide but isn't uploaded). The mask is brush strokes (sc-2436) and/or a
     // smart-select base (sc-3751), composited together by rasterizeMaskToFile.
@@ -2045,6 +2152,7 @@ export function ImageEditor() {
     runAiOp({
       label: "edit",
       endpoint: "/api/v1/image/jobs",
+      layerSource: dimsChange ? "composite" : "activeLayer",
       edit: { op: "edit", model: editModel, prompt, ...(masked ? { masked: true } : {}) },
       maskFile,
       buildBody: (scratch, maskScratch) =>
@@ -2125,7 +2233,7 @@ export function ImageEditor() {
     if (!aiOp?.jobId) return;
     const job = jobs?.find((item) => item.id === aiOp.jobId);
     if (!job || !terminalStatuses.has(job.status)) return;
-    const { scratch, maskScratch, source, edit, onComplete } = aiOp;
+    const { scratch, maskScratch, source, edit, onComplete, writeBack, targetLayerId } = aiOp;
     setAiOp(null); // stop tracking immediately so this can't re-enter on the next jobs tick
     const resultAsset = job.status === "completed" ? job.result?.assets?.[0] ?? null : null;
     (async () => {
@@ -2146,7 +2254,14 @@ export function ImageEditor() {
         const blob = await res.blob();
         const { image, objectUrl } = await blobToImage(blob);
         checkpoint();
-        installWorkingImage(image, objectUrl, blob, source);
+        // Active-layer op (same-size edit / detail) → write the result back into the
+        // target layer, preserving the rest of the stack; document op (upscale /
+        // outpaint / box edit) → flatten the stack into one new base layer (sc-6119).
+        if (writeBack === "activeLayer" && targetLayerId && layerById(workingRef.current, targetLayerId)) {
+          replaceLayerImage(targetLayerId, image, objectUrl, blob);
+        } else {
+          installWorkingImage(image, objectUrl, blob, source);
+        }
         if (edit) setEdits((prev) => [...prev, edit]);
         setDirty(true);
       } catch (err) {
@@ -2157,7 +2272,7 @@ export function ImageEditor() {
         if (resultAsset) purgeAsset(resultAsset).catch(() => {});
       }
     })();
-  }, [aiOp, jobs, installWorkingImage, purgeAsset, checkpoint]);
+  }, [aiOp, jobs, installWorkingImage, replaceLayerImage, purgeAsset, checkpoint]);
 
   // ── Save / export (sc-2434) ───────────────────────────────────────────────
   // Persist the working image as a NEW Library asset, never overwriting the

@@ -166,6 +166,17 @@ export function setActiveLayer(working, id) {
   return { ...working, activeLayerId: id };
 }
 
+// Swap a layer's bitmap (image + decoded object URL + source blob) in place,
+// preserving the layer's metadata and the rest of the stack (sc-6119). Used when
+// an active-layer op (color grade / same-size AI edit / detail) writes its result
+// back to the layer instead of flattening. Pure — the caller revokes the old URL.
+export function replaceLayerBitmap(working, id, { image, objectUrl, blob }) {
+  const layers = working.layers.map((layer) =>
+    layer.id === id ? { ...layer, image, objectUrl, blob } : layer,
+  );
+  return withLayers(working, layers);
+}
+
 // Strip a live layer down to the snapshot representation: metadata + the shared
 // blob, no live image/objectUrl. Undo snapshots hold these (blobs shared by
 // reference), so an evicted snapshot is plain garbage with nothing to revoke.
