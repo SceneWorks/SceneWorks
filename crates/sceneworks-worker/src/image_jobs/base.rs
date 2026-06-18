@@ -210,8 +210,10 @@ pub(crate) fn resolve_weights_dir(
     let snapshot = huggingface_snapshot_dir(&settings.data_dir, &model_repo(request, &model));
     // Ideogram 4 ships a turnkey with packed `q4/` (default) + `q8/` self-contained subdirs; point
     // the engine at the chosen quant's subdir rather than the repo root (epic 4725 / sc-5992),
-    // mirroring the LTX bundle pattern. The packed weights auto-detect their quant on load.
-    if request.model == "ideogram_4" {
+    // mirroring the LTX bundle pattern. The packed weights auto-detect their quant on load. The
+    // turbo variant (mlx-gen #488) shares the same turnkey — each subdir also carries the bundled
+    // `turbo_lora.safetensors` the `ideogram_4_turbo` engine installs at load.
+    if request.model == "ideogram_4" || request.model == "ideogram_4_turbo" {
         return Ok(snapshot.map(|root| ideogram_model_subdir(&root, request)));
     }
     Ok(snapshot)

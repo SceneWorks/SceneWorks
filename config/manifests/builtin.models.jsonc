@@ -910,6 +910,79 @@
       }
     },
     {
+      "id": "ideogram_4_turbo",
+      "name": "Ideogram 4 Turbo",
+      "family": "ideogram",
+      "type": "image",
+      // Ideogram 4 Turbo (mlx-gen #488) — the few-step, CFG-free, single-DiT variant: the same
+      // gated turnkey base (q4/q8 subdirs) plus the bundled ostris TurboTime LoRA the engine
+      // installs onto the conditional DiT at load. ~8 steps and one DiT forward per step (no
+      // unconditional branch / guidance), so a render is ~2x faster and ~12 GB lighter than the
+      // 48-step asymmetric-CFG base (measured: 52 GB vs 64 GB peak @1024²/8-step Q4). Opt-in "fast
+      // mode" — NOT `recommended` until structured-caption adherence + the safety-placeholder path
+      // are re-validated under no-CFG. Dispatched through engines::MODEL_TABLE id `ideogram_4_turbo`.
+      "adapter": "mlx_ideogram",
+      "capabilities": ["text_to_image"],
+      "macOnly": true,
+      // Same structured JSON-caption prompt surface as the base model (turbo distills the base, so
+      // the caption contract is identical).
+      "structuredPrompt": true,
+      "downloads": [
+        {
+          // Same repo as `ideogram_4`; the q4/ subdir now also carries `turbo_lora.safetensors`
+          // (~0.85 GB) the engine installs at load. Q8 opt-in via advanced mlxQuantize: 8.
+          "provider": "huggingface",
+          "repo": "SceneWorks/ideogram-4-mlx",
+          "files": ["q4/*"],
+          "platforms": ["macos"],
+          "estimatedSizeBytes": 16247340792
+        }
+      ],
+      "paths": {
+        "model": "${HF_CACHE}/SceneWorks/ideogram-4-mlx"
+      },
+      "defaults": {
+        // Few-step turbo default (8); CFG-free, so guidanceScale is inert (the engine descriptor
+        // advertises supports_guidance=false → the worker never forwards a guidance value).
+        "resolution": "1024x1024",
+        "steps": 8,
+        "guidanceScale": 0,
+        "count": 1,
+        "sampler": "default",
+        "scheduler": "default"
+      },
+      "limits": {
+        "resolutions": ["1024x1024", "768x1024", "1024x768", "1280x720", "720x1280"],
+        "count": [1, 2, 4],
+        "samplers": ["default"],
+        "schedulers": ["default"]
+      },
+      // Same packed turnkey + quant resolution as the base (resolve_ideogram_model_dir picks the
+      // q4/q8 subdir, which carries the bundled LoRA). Measured Q4 peak ~52 GB @1024²/8-step (one
+      // DiT); minMemoryGb mirrors the base entry (turbo is strictly lighter than the 2-DiT base).
+      "mlx": {
+        "minMemoryGb": 48,
+        "quantize": 4,
+        "repo": "SceneWorks/ideogram-4-mlx"
+      },
+      "gated": true,
+      "credentialHost": "huggingface.co",
+      "licenseUrl": "https://huggingface.co/ideogram-ai/ideogram-4-fp8",
+      "ui": {
+        "label": "Ideogram 4 Turbo",
+        "description": "Ideogram 4 Turbo — the few-step (~8) fast variant of Ideogram 4: same 9.3B flow-matching model and structured JSON-caption prompting, distilled to a CFG-free single-DiT path (the ostris TurboTime LoRA) for ~2x faster renders. MLX-only (Apple Silicon). Shares the gated Ideogram 4 turnkey — accept the license at huggingface.co/ideogram-ai/ideogram-4-fp8 and add a Hugging Face token under Settings → Service credentials before downloading.",
+        "recommendedFor": ["text_to_image"],
+        "promptGuide": {
+          "title": "Ideogram 4 Prompt Guide",
+          "path": "/prompt-guides/ideogram-4.md",
+          "sources": [
+            { "label": "Ideogram 4 model card", "url": "https://huggingface.co/ideogram-ai/ideogram-4-fp8" },
+            { "label": "ostris TurboTime LoRA", "url": "https://huggingface.co/ostris/ideogram_4_turbotime_lora" }
+          ]
+        }
+      }
+    },
+    {
       "id": "flux2_klein_9b",
       "name": "FLUX.2 [klein] 9B",
       "family": "flux2-klein",

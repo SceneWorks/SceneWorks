@@ -650,6 +650,10 @@ fn model_table_rows_resolve_and_flags_match_descriptor() {
         // Ideogram 4 (epic 4725): asymmetric-CFG guidance (supports_guidance=true) with no user
         // negative prompt (the "negative" is a fixed unconditional DiT, not a prompt).
         ("ideogram_4", true, false),
+        // Ideogram 4 Turbo (mlx-gen #488): CFG-free single-DiT — the descriptor drops guidance
+        // (supports_guidance=false), no negative prompt. Requires the mlx-gen pin to include the
+        // `ideogram_4_turbo` engine (PR #489) for this row to resolve through the registry.
+        ("ideogram_4_turbo", false, false),
         ("z_image_edit", false, false),
         ("flux_schnell", false, false),
         ("flux_dev", true, false),
