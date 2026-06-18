@@ -113,18 +113,20 @@ pub(crate) async fn heartbeat_worker(
     Ok(Json(worker))
 }
 
-/// The supervisor reports a worker child that died by an uncatchable signal
-/// (SIGKILL/OOM, SIGABRT, SIGSEGV, …). We fail that worker's still-active job with
-/// a signal-attributed error instead of waiting for the heartbeat sweep to mark it
-/// the generic `interrupted` — so the user sees a real, actionable failure rather
-/// than a frozen progress bar (sc-4881). Returns the failed job, if any.
-pub(crate) async fn worker_signal_death(
+/// The supervisor reports a worker child that terminated abnormally — killed by an
+/// uncatchable signal (SIGKILL/OOM, SIGABRT, SIGSEGV, …) or exited on its own with
+/// a non-zero status (e.g. a Rust panic, exit code 101). We fail that worker's
+/// still-active job with an attributed error instead of waiting for the heartbeat
+/// sweep to mark it the generic `interrupted` — so the user sees a real, actionable
+/// failure rather than a frozen progress bar (sc-4881 signals; sc-6320 non-signal
+/// exits). Returns the failed job, if any.
+pub(crate) async fn worker_terminated(
     State(state): State<AppState>,
     Path(worker_id): Path<String>,
-    ApiJson(payload): ApiJson<WorkerSignalDeathRequest>,
+    ApiJson(payload): ApiJson<WorkerTerminationRequest>,
 ) -> Result<Json<Option<JobSnapshot>>, ApiError> {
     let failed = store_call(state.clone(), move |store, _timeout| {
-        store.fail_worker_job_killed_by_signal(&worker_id, payload.signal)
+        store.fail_worker_job_terminated(&worker_id, payload.signal, payload.exit_code)
     })
     .await?;
     if let Some(job) = &failed {

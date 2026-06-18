@@ -700,8 +700,8 @@ impl JobsStore {
                 update jobs
                    set status = 'interrupted',
                        stage = 'interrupted',
-                       message = 'Job was interrupted after its worker stopped sending heartbeats.',
-                       error = 'Worker heartbeat timed out.',
+                       message = 'Lost contact with the worker.',
+                       error = 'No heartbeat from the worker for {timeout_seconds}s. The worker may have crashed, hung, or lost its connection to the app. If it reconnects you can retry the job; if this keeps happening, check System → Logs.',
                        completed_at = ?1,
                        updated_at = ?1,
                        worker_id = null
@@ -740,20 +740,24 @@ impl JobsStore {
         })
     }
 
-    /// Surface a worker's death-by-uncatchable-signal (SIGKILL/OOM, SIGABRT,
-    /// SIGSEGV, …) as a terminal job FAILURE, instead of letting the heartbeat
-    /// sweep later mark it the generic `interrupted` (which reads to the user like
-    /// a frozen progress bar). The supervisor that reaped the child observes the
-    /// terminating signal — the only layer that can, since the death is
-    /// uncatchable in-process — and calls this with that signal. We fail the
-    /// worker's still-active job with an actionable, signal-attributed error and
-    /// release the worker so the UI doesn't show it pinned to a dead job. Returns
-    /// the failed job if the worker had an active one (else `None` — it died idle
-    /// between jobs). (sc-4881)
-    pub fn fail_worker_job_killed_by_signal(
+    /// Surface a worker's abnormal death — killed by an uncatchable signal
+    /// (SIGKILL/OOM, SIGABRT, SIGSEGV, …) or exited on its own with a non-zero
+    /// status (e.g. a Rust panic, exit code 101) — as a terminal job FAILURE,
+    /// instead of letting the heartbeat sweep later mark it the generic
+    /// `interrupted` (which reads to the user like a frozen progress bar). The
+    /// supervisor that reaped the child observes the termination — the only layer
+    /// that can, since the death is uncatchable in-process — and calls this with
+    /// the signal (when killed) or exit code (when it self-exited non-zero); a
+    /// clean exit-0 is graceful and is never reported here. We fail the worker's
+    /// still-active job with an actionable, attributed error and release the worker
+    /// so the UI doesn't show it pinned to a dead job. Returns the failed job if
+    /// the worker had an active one (else `None` — it died idle between jobs).
+    /// (sc-4881 signals; sc-6320 non-signal exits)
+    pub fn fail_worker_job_terminated(
         &self,
         worker_id: &str,
-        signal: i32,
+        signal: Option<i32>,
+        exit_code: Option<i32>,
     ) -> JobsStoreResult<Option<JobSnapshot>> {
         let _guard = self.lock.lock();
         let mut connection = self.connect()?;
@@ -766,7 +770,7 @@ impl JobsStore {
             // Tailor the OOM/signal hint to the dead job's kind so the guidance is
             // actionable (sc-5567): an image-batch SIGKILL points at count/resolution,
             // not the training-only gradient-checkpointing remediation.
-            let error = signal_failure_error(signal, Some(&job.job_type));
+            let error = termination_failure_error(signal, exit_code, Some(&job.job_type));
             transaction.execute(
                 &format!(
                     "
@@ -1888,25 +1892,51 @@ fn mlx_unavailable_error(job: &JobSnapshot, grace_seconds: u64) -> String {
     )
 }
 
-/// Human, actionable terminal error attributing a worker's death to its
-/// terminating signal (sc-4881). Signal 9 (an uncatchable SIGKILL — almost always an
-/// OS memory-pressure OOM kill) carries a remediation hint tailored to the dead job's
-/// kind (sc-5567): training points at gradient checkpointing (the sc-4874 first-step
-/// OOM), image/video generation at the knobs that actually shrink the working set
-/// (batch count, resolution, frame count). Other uncatchable deaths (SIGABRT GPU/Metal
-/// abort, SIGSEGV) name themselves so the job card and System → Logs show a real cause
-/// instead of a frozen progress bar. `job_type` is the failed job's kind when one was
-/// active (`None` when the worker died idle).
-fn signal_failure_error(signal: i32, job_type: Option<&JobType>) -> String {
-    let hint = match signal {
-        9 => oom_remediation_hint(job_type),
-        6 => ", likely a GPU/Metal command-buffer abort or assertion",
-        11 => " (segmentation fault)",
-        _ => "",
-    };
-    match signal_name(signal) {
-        Some(name) => format!("Worker terminated by signal {signal} ({name}){hint}."),
-        None => format!("Worker terminated by signal {signal}{hint}."),
+/// Human, actionable terminal error attributing a worker's abnormal death to its
+/// terminating signal or non-zero exit code (sc-4881 signals; sc-6320 non-signal
+/// exits). Signal 9 (an uncatchable SIGKILL — almost always an OS memory-pressure
+/// OOM kill) carries a remediation hint tailored to the dead job's kind (sc-5567):
+/// training points at gradient checkpointing (the sc-4874 first-step OOM),
+/// image/video generation at the knobs that actually shrink the working set (batch
+/// count, resolution, frame count). Other uncatchable deaths (SIGABRT GPU/Metal
+/// abort, SIGSEGV) name themselves. A non-signal non-zero exit is a self-terminated
+/// process — exit code 101 is the Rust panic code and self-names; other codes report
+/// the raw code — so the job card and System → Logs show a real cause instead of a
+/// frozen progress bar. A signal takes precedence when both are somehow present.
+/// `job_type` is the failed job's kind when one was active (`None` when the worker
+/// died idle).
+fn termination_failure_error(
+    signal: Option<i32>,
+    exit_code: Option<i32>,
+    job_type: Option<&JobType>,
+) -> String {
+    if let Some(signal) = signal {
+        let hint = match signal {
+            9 => oom_remediation_hint(job_type),
+            6 => ", likely a GPU/Metal command-buffer abort or assertion",
+            11 => " (segmentation fault)",
+            _ => "",
+        };
+        return match signal_name(signal) {
+            Some(name) => format!("Worker terminated by signal {signal} ({name}){hint}."),
+            None => format!("Worker terminated by signal {signal}{hint}."),
+        };
+    }
+    match exit_code {
+        // 101 is the Rust panic exit code — a panic that unwound to a process exit
+        // rather than aborting on a signal. Name it so the cause is unmistakable.
+        Some(101) => "Worker process panicked and exited (code 101). \
+                      Check System → Logs for the panic message."
+            .to_owned(),
+        Some(code) => format!(
+            "Worker process exited unexpectedly (code {code}). Check System → Logs for the cause."
+        ),
+        // Defensive: the supervisor only calls this for an abnormal exit (a signal
+        // or a non-zero code), so neither-present shouldn't reach here — report it
+        // generically rather than fabricate a signal or code.
+        None => {
+            "Worker process terminated unexpectedly. Check System → Logs for the cause.".to_owned()
+        }
     }
 }
 
@@ -4881,16 +4911,17 @@ mod active_statuses_sql_tests {
 }
 
 #[cfg(test)]
-mod signal_failure_error_tests {
+mod termination_failure_error_tests {
     //! sc-4881 signal attribution + sc-5567 job-kind-aware OOM remediation: a signal-9
     //! (SIGKILL/OOM) death must give guidance that fits the dead job — count/resolution
     //! for an image batch, frames for video, gradient checkpointing only for training —
-    //! and non-OOM uncatchable deaths must keep naming their real cause.
-    use super::{signal_failure_error, JobType};
+    //! and non-OOM uncatchable deaths must keep naming their real cause. sc-6320: a
+    //! non-signal non-zero exit (a self-terminated process / panic) names the exit code.
+    use super::{termination_failure_error, JobType};
 
     #[test]
     fn signal_9_image_batch_points_at_count_not_gradient_checkpointing() {
-        let msg = signal_failure_error(9, Some(&JobType::ImageGenerate));
+        let msg = termination_failure_error(Some(9), None, Some(&JobType::ImageGenerate));
         assert!(msg.contains("signal 9 (SIGKILL)"), "{msg}");
         assert!(msg.contains("out-of-memory"), "{msg}");
         assert!(msg.contains("image count or resolution"), "{msg}");
@@ -4901,14 +4932,14 @@ mod signal_failure_error_tests {
 
     #[test]
     fn signal_9_training_keeps_gradient_checkpointing_hint() {
-        let msg = signal_failure_error(9, Some(&JobType::LoraTrain));
+        let msg = termination_failure_error(Some(9), None, Some(&JobType::LoraTrain));
         assert!(msg.contains("Gradient Checkpointing"), "{msg}");
         assert!(msg.contains("training step"), "{msg}");
     }
 
     #[test]
     fn signal_9_video_points_at_frame_count() {
-        let msg = signal_failure_error(9, Some(&JobType::VideoGenerate));
+        let msg = termination_failure_error(Some(9), None, Some(&JobType::VideoGenerate));
         assert!(msg.contains("out-of-memory"), "{msg}");
         assert!(msg.contains("frame count"), "{msg}");
         assert!(!msg.contains("Gradient Checkpointing"), "{msg}");
@@ -4919,7 +4950,7 @@ mod signal_failure_error_tests {
         // No active job (worker died idle) and an unmapped job kind both get the generic
         // OOM hint rather than a misleading training/image/video-specific one.
         for job_type in [None, Some(&JobType::Unknown("future".to_owned()))] {
-            let msg = signal_failure_error(9, job_type);
+            let msg = termination_failure_error(Some(9), None, job_type);
             assert!(msg.contains("out-of-memory"), "{msg}");
             assert!(!msg.contains("Gradient Checkpointing"), "{msg}");
             assert!(!msg.contains("image count"), "{msg}");
@@ -4930,15 +4961,42 @@ mod signal_failure_error_tests {
     #[test]
     fn non_oom_signals_keep_their_own_cause_regardless_of_job_kind() {
         // SIGABRT / SIGSEGV are not OOM, so the job kind must not turn them into one.
-        let abort = signal_failure_error(6, Some(&JobType::ImageGenerate));
+        let abort = termination_failure_error(Some(6), None, Some(&JobType::ImageGenerate));
         assert!(abort.contains("signal 6 (SIGABRT)"), "{abort}");
         assert!(abort.contains("GPU/Metal command-buffer abort"), "{abort}");
         assert!(!abort.contains("out-of-memory"), "{abort}");
 
-        let segv = signal_failure_error(11, Some(&JobType::LoraTrain));
+        let segv = termination_failure_error(Some(11), None, Some(&JobType::LoraTrain));
         assert!(segv.contains("signal 11 (SIGSEGV)"), "{segv}");
         assert!(segv.contains("segmentation fault"), "{segv}");
         assert!(!segv.contains("Gradient Checkpointing"), "{segv}");
+    }
+
+    #[test]
+    fn panic_exit_code_101_self_names_without_claiming_a_signal() {
+        // sc-6320: a Rust panic unwinds to exit 101 (no signal). The attribution must
+        // name the panic + code and must NOT fabricate a signal or an OOM hint.
+        let msg = termination_failure_error(None, Some(101), Some(&JobType::ImageGenerate));
+        assert!(msg.contains("panicked"), "{msg}");
+        assert!(msg.contains("101"), "{msg}");
+        assert!(!msg.contains("signal"), "{msg}");
+        assert!(!msg.contains("out-of-memory"), "{msg}");
+    }
+
+    #[test]
+    fn other_non_zero_exit_reports_the_raw_code() {
+        // A non-zero, non-101 self-exit reports the raw code so the cause is greppable.
+        let msg = termination_failure_error(None, Some(2), None);
+        assert!(msg.contains("exited unexpectedly (code 2)"), "{msg}");
+        assert!(!msg.contains("signal"), "{msg}");
+    }
+
+    #[test]
+    fn signal_takes_precedence_when_both_are_present() {
+        // Defensive: if both somehow arrive, the signal (the harder cause) wins.
+        let msg = termination_failure_error(Some(11), Some(101), None);
+        assert!(msg.contains("signal 11 (SIGSEGV)"), "{msg}");
+        assert!(!msg.contains("101"), "{msg}");
     }
 }
 

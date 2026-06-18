@@ -724,16 +724,23 @@ pub struct WorkerHeartbeatRequest {
     pub extra: ExtraFields,
 }
 
-/// Posted by the supervisor when it reaps a worker child that died by an
-/// uncatchable signal (SIGKILL/OOM, SIGABRT, SIGSEGV, …). The dying worker can't
-/// report its own death, so the supervisor attributes it here and the server
-/// fails the worker's still-active job instead of waiting for the heartbeat sweep
-/// to mark it `interrupted` (sc-4881).
+/// Posted by the supervisor when it reaps a worker child that terminated
+/// abnormally — either killed by an uncatchable signal (SIGKILL/OOM, SIGABRT,
+/// SIGSEGV, …) or exited on its own with a non-zero status (e.g. a Rust panic,
+/// exit code 101). The dying worker can't report its own death, so the supervisor
+/// attributes it here and the server fails the worker's still-active job instead
+/// of waiting for the heartbeat sweep to mark it the generic `interrupted`
+/// (sc-4881 signals; sc-6320 generalized to non-signal exits). Exactly one of
+/// `signal` / `exit_code` is set, matching how the OS reported the child's exit.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct WorkerSignalDeathRequest {
-    /// Terminating signal number reported by the OS (e.g. 9 for SIGKILL).
-    pub signal: i32,
+pub struct WorkerTerminationRequest {
+    /// Terminating signal number reported by the OS (e.g. 9 for SIGKILL) when the
+    /// child died by signal; `None` for a non-zero self-exit.
+    pub signal: Option<i32>,
+    /// Process exit code when the child exited on its own with a non-zero status
+    /// (e.g. 101 for a Rust panic); `None` when it died by signal.
+    pub exit_code: Option<i32>,
     #[serde(flatten)]
     pub extra: ExtraFields,
 }

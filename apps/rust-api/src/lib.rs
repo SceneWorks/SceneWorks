@@ -23,7 +23,7 @@ use sceneworks_core::contracts::{
     ClaimRequest, ClaimResponse, ContractNumber, DuplicateJobRequest, ImageUpscaleRequest,
     JobCreateRequest, JobSnapshot, JobStatus, JobType, JsonObject, ProgressRequest, QueueSummary,
     RetryJobRequest, WorkerCapability, WorkerHeartbeatRequest, WorkerRegisterRequest,
-    WorkerSignalDeathRequest, WorkerSnapshot, WorkerStatus,
+    WorkerSnapshot, WorkerStatus, WorkerTerminationRequest,
 };
 use sceneworks_core::hf_home::{huggingface_hub_cache_dir, huggingface_repo_cache_path};
 use sceneworks_core::jobs_store::{
@@ -858,8 +858,8 @@ pub(crate) fn create_app_with_state(
             post(heartbeat_worker),
         )
         .route(
-            "/api/v1/workers/:worker_id/signal-death",
-            post(worker_signal_death),
+            "/api/v1/workers/:worker_id/terminated",
+            post(worker_terminated),
         )
         .fallback(app_fallback)
         .with_state(state.clone())
