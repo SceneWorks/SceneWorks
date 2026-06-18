@@ -12,6 +12,7 @@ import {
   moveLayer,
   setLayerProps,
   setActiveLayer,
+  replaceLayerBitmap,
   snapshotLayer,
   snapshotLayers,
   sameLayerStack,
@@ -119,6 +120,24 @@ describe("layer operations — add / delete / duplicate / reorder (sc-6117)", ()
   it("setActiveLayer ignores unknown ids", () => {
     expect(setActiveLayer(base(), "b").activeLayerId).toBe("b");
     expect(setActiveLayer(base(), "ghost").activeLayerId).toBe("a");
+  });
+
+  it("replaceLayerBitmap swaps one layer's pixels, preserving metadata + the rest of the stack (sc-6119)", () => {
+    const src = base();
+    src.layers[1] = liveLayer("b", { name: "Sky", opacity: 0.5, visible: false });
+    const img = fakeImage();
+    const next = replaceLayerBitmap(src, "b", { image: img, objectUrl: "blob:new", blob: { fresh: 1 } });
+    const b = layerById(next, "b");
+    expect(b.image).toBe(img);
+    expect(b.objectUrl).toBe("blob:new");
+    expect(b.blob).toEqual({ fresh: 1 });
+    // Metadata preserved.
+    expect(b.name).toBe("Sky");
+    expect(b.opacity).toBe(0.5);
+    expect(b.visible).toBe(false);
+    // The other layer is untouched (same object reference).
+    expect(layerById(next, "a")).toBe(src.layers[0]);
+    expect(next.activeLayerId).toBe("a");
   });
 });
 
