@@ -9086,13 +9086,32 @@ details[open] > summary.lora-scope-group-heading::before,
   gap: 6px;
 }
 .sw-adv select {
-  padding: 10px 12px;
+  /* Drop the raw native control (the macOS ⇅ stepper look) for a single custom
+     caret that matches the rest of the Simple kit — same radius, hover and focus
+     ring as the prompt box and chips. */
+  appearance: none;
+  -webkit-appearance: none;
+  width: 100%;
+  padding: 10px 38px 10px 13px;
   border: 1px solid var(--border-strong);
-  border-radius: var(--r-sm);
+  border-radius: var(--r-md);
   font-family: var(--font-ui);
   font-size: 14px;
-  background: var(--surface);
+  font-weight: 600;
   color: var(--text);
+  background-color: var(--surface);
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='14' height='14' viewBox='0 0 24 24' fill='none' stroke='%23888c94' stroke-width='2.2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpolyline points='6 9 12 15 18 9'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: right 12px center;
+  cursor: pointer;
+}
+.sw-adv select:hover {
+  border-color: var(--text);
+}
+.sw-adv select:focus {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-soft);
 }
 .sw-results h3 {
   margin-top: 0;
