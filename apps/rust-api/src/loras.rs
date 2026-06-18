@@ -1073,8 +1073,11 @@ pub(crate) fn reconcile_lora_family(
         }
         (None, Some(detected)) => Ok(Some(detected)),
         (Some(supplied), None) => {
-            println!(
-                "LoRA import {context}: architecture detection inconclusive; accepting supplied family {supplied}"
+            tracing::info!(
+                event = "lora_import_architecture_inconclusive",
+                context = %context,
+                family = %supplied,
+                "LoRA import: architecture detection inconclusive; accepting supplied family"
             );
             Ok(Some(supplied))
         }

@@ -1291,11 +1291,12 @@ impl JobsStore {
                 // semantics for the rest of the process with no signal. Leave the
                 // connection in whatever mode it opened with and warn loudly
                 // instead (sc-4275 / F-CORE-16).
-                eprintln!(
-                    "WARNING: SceneWorks could not enable SQLite WAL mode for {} ({error}); \
-                     continuing in the default rollback-journal mode. Cross-process write \
-                     concurrency will be more serialized than usual.",
-                    self.db_path.display()
+                tracing::warn!(
+                    event = "sqlite_wal_enable_failed",
+                    dbPath = %self.db_path.display(),
+                    error = %error,
+                    "could not enable SQLite WAL mode; continuing in the default rollback-journal \
+                     mode — cross-process write concurrency will be more serialized than usual"
                 );
             }
         }
@@ -1966,6 +1967,7 @@ fn oom_remediation_hint(job_type: Option<&JobType>) -> &'static str {
             | JobType::ImageEdit
             | JobType::ImageUpscale
             | JobType::ImageDetail
+            | JobType::ImageSegment
             | JobType::ImageVqa
             | JobType::ImageInterleave,
         ) => ", likely out-of-memory — reduce the image count or resolution",
@@ -2128,6 +2130,13 @@ pub fn mac_rust_supported(job: &JobSnapshot) -> Result<(), UnsupportedReason> {
         // in-process, so the Key Point Library "extract kps from this image" flow is
         // Python-free on Mac.
         JobType::KpsExtract => Ok(()),
+
+        // Smart-select segmentation (epic 6087, sc-6105): native-MLX SAM3 box-prompt
+        // segmentation runs in-process on the macOS Rust worker (the box-PVS path of the
+        // sc-4926 SAM3 stack — `segment_jobs::run_image_segment_job`), so the Image Editor
+        // smart-select tool is Python-free on Mac. Mac-only by construction: the capability
+        // is advertised only by `mlx_gpu`, so no torch/candle worker ever claims it.
+        JobType::ImageSegment => Ok(()),
 
         // Real-ESRGAN image upscaling is ported to the Rust worker (sc-3489) and SeedVR2 (the
         // native-MLX one-step diffusion upscaler, epic 4811 / sc-4815) runs in-process via
@@ -2521,6 +2530,27 @@ pub fn mac_capabilities(platform: &str, mac_gating_active: bool) -> MacCapabilit
         MacFeatureSupport {
             supported: true,
             reason: None,
+        },
+    );
+    features.insert(
+        // Smart-select segmentation (epic 6087, sc-6105): native-MLX SAM3 box-prompt
+        // segmentation runs in-process on the macOS Rust worker, so the Image Editor
+        // smart-select tool works on a Python-free Mac. Mac-only (no torch SAM3 image
+        // path); must agree with the ImageSegment arm of `mac_rust_supported` — what the
+        // UI shows == what routing accepts (sc-4206 / F-CORE-2).
+        "imageSegment".to_owned(),
+        MacFeatureSupport {
+            supported: is_mac,
+            reason: if is_mac {
+                None
+            } else {
+                Some(UnsupportedReason::new(
+                    None,
+                    "image_segment (SAM3 smart-select)",
+                    "smart-select segmentation runs on the native-MLX SAM3 stack (macOS only); there is no torch/candle SAM3 image path yet.",
+                    Some("sc-6105"),
+                ))
+            },
         },
     );
     features.insert(
@@ -4852,6 +4882,7 @@ fn job_requires_gpu(job_type: &JobType) -> bool {
             | JobType::ImageInterleave
             | JobType::ImageUpscale
             | JobType::ImageDetail
+            | JobType::ImageSegment
             | JobType::VideoGenerate
             | JobType::VideoExtend
             | JobType::VideoBridge

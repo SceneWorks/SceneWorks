@@ -721,9 +721,12 @@ async fn consume_training_events(
                             )
                             .await?;
                         }
-                        Err(error) => eprintln!(
-                            "[sc-5637] worker failed to persist training preview at step {step} \
-                             (index {index}): {error} — skipping, training continues"
+                        Err(error) => tracing::warn!(
+                            event = "training_preview_persist_failed",
+                            step,
+                            index,
+                            error = %error,
+                            "worker failed to persist training preview — skipping, training continues"
                         ),
                     }
                     continue;
