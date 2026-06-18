@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { useAppContext } from "../../context/AppContext.js";
 import { LOOKS, composePrompt } from "./simpleDefaults.js";
+import { defaultImageModelId, textToImageModels } from "./simpleModel.js";
 import { readLookExemplars, writeLookExemplar } from "./lookExemplars.js";
 import { errorStatuses, terminalStatuses } from "../../jobTypes.js";
 
@@ -21,7 +22,7 @@ function randomSeed() {
 // is event-driven: we submit createImageJob and resolve the resulting asset by
 // watching the shared jobs/asset lists (the same SSE feed the rest of the app
 // uses) rather than polling.
-export function useLookExemplars() {
+export function useLookExemplars(preferredModelId = null) {
   const {
     activeProject,
     imageModels = [],
@@ -32,7 +33,17 @@ export function useLookExemplars() {
   } = useAppContext();
 
   const projectId = activeProject?.id ?? null;
-  const model = imageModels[0] ?? null;
+  // Preview with the model the user picked for Make a picture, so the look tiles
+  // match what Create renders; fall back to the same default when none is passed.
+  const model = useMemo(() => {
+    const choices = textToImageModels(imageModels);
+    if (preferredModelId) {
+      const match = choices.find((entry) => entry.id === preferredModelId);
+      if (match) return match;
+    }
+    const id = defaultImageModelId(choices);
+    return choices.find((entry) => entry.id === id) ?? null;
+  }, [imageModels, preferredModelId]);
   const [exemplars, setExemplars] = useState(() => readLookExemplars(projectId));
   const [pending, setPending] = useState({}); // lookId → jobId in flight
 

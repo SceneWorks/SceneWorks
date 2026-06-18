@@ -5,6 +5,8 @@ import { AssetThumbnail } from "../../components/assetMedia.jsx";
 import { pickClosestResolution, parseResolution } from "../../resolutionMatch.js";
 import { LookTile } from "./LookTile.jsx";
 import { useLookExemplars } from "./useLookExemplars.js";
+import { modelLabel, useSimpleImageModel } from "./simpleModel.js";
+import { readPref, writePref } from "./simplePrefs.js";
 import {
   LOOKS,
   SHAPES,
@@ -28,12 +30,27 @@ function resolveDims(model, shape) {
   return { ...dims, resolution: `${dims.width}x${dims.height}` };
 }
 
+// A More-options dropdown plus a "Make my default" pin. Changing the dropdown is
+// session-only; the button persists the current value as the user's default.
+function AdvField({ label, children, isDefault, onMakeDefault }) {
+  return (
+    <div className="sw-advf">
+      <label>
+        {label}
+        {children}
+      </label>
+      <button type="button" className="sw-mkdefault" onClick={onMakeDefault} disabled={isDefault}>
+        {isDefault ? "Default ✓" : "Make my default"}
+      </button>
+    </div>
+  );
+}
+
 export function MakePicture() {
   const {
     activeProject,
     createImageJob,
     refinePrompt,
-    imageModels = [],
     recentImageAssets = [],
     imageLocalJobs = [],
     setPreviewAsset,
@@ -42,17 +59,30 @@ export function MakePicture() {
   const [prompt, setPrompt] = useState("");
   const [lookId, setLookId] = useState(null);
   const [shapeId, setShapeId] = useState("square");
-  const [count, setCount] = useState(4);
-  const [detailId, setDetailId] = useState("standard");
-  const [creativityId, setCreativityId] = useState("balanced");
-  const [upscaleId, setUpscaleId] = useState("off");
+  // Each control seeds from the user's saved default (if any), else the built-in.
+  const [count, setCount] = useState(() => Number(readPref("count")) || 4);
+  const [detailId, setDetailId] = useState(() => readPref("detail") || "standard");
+  const [creativityId, setCreativityId] = useState(() => readPref("creativity") || "balanced");
+  const [upscaleId, setUpscaleId] = useState(() => readPref("upscale") || "off");
   const [submitting, setSubmitting] = useState(false);
   const [describing, setDescribing] = useState(false);
   const [notice, setNotice] = useState("");
 
-  const looks = useLookExemplars();
-  const model = imageModels[0] ?? null;
-  const modelId = model?.id ?? "z_image_turbo";
+  // "Make my default" persistence for the plain dropdowns (the model has its own).
+  const [savedDefaults, setSavedDefaults] = useState(() => ({
+    count: readPref("count"),
+    detail: readPref("detail"),
+    creativity: readPref("creativity"),
+    upscale: readPref("upscale"),
+  }));
+  const saveDefault = (key, value) => {
+    writePref(key, value);
+    setSavedDefaults((current) => ({ ...current, [key]: String(value) }));
+  };
+  const isFieldDefault = (key, value) => savedDefaults[key] === String(value);
+
+  const { models: imageChoices, model, modelId, select: selectModel, makeDefault, isDefault } = useSimpleImageModel();
+  const looks = useLookExemplars(modelId);
   const usesGuidance = useMemo(() => modelUsesGuidance(model), [model]);
   const look = useMemo(() => LOOKS.find((entry) => entry.id === lookId) ?? null, [lookId]);
   const shape = useMemo(() => SHAPES.find((entry) => entry.id === shapeId) ?? SHAPES[0], [shapeId]);
@@ -75,7 +105,7 @@ export function MakePicture() {
       mode: "text_to_image",
       prompt: composePrompt(prompt, look),
       negativePrompt: "",
-      model: modelId,
+      model: modelId ?? "z_image_turbo",
       count,
       width: dims.width,
       height: dims.height,
@@ -197,8 +227,18 @@ export function MakePicture() {
               <Icon.ChevDown className="sw-caret" /> More options
             </summary>
             <div className="sw-adv">
-              <label>
-                How many
+              {imageChoices.length > 0 ? (
+                <AdvField label="Model" isDefault={isDefault} onMakeDefault={makeDefault}>
+                  <select value={modelId ?? ""} onChange={(event) => selectModel(event.target.value)}>
+                    {imageChoices.map((entry) => (
+                      <option key={entry.id} value={entry.id}>
+                        {modelLabel(entry)}
+                      </option>
+                    ))}
+                  </select>
+                </AdvField>
+              ) : null}
+              <AdvField label="How many" isDefault={isFieldDefault("count", count)} onMakeDefault={() => saveDefault("count", count)}>
                 <select value={count} onChange={(event) => setCount(Number(event.target.value))}>
                   {COUNT_OPTIONS.map((value) => (
                     <option key={value} value={value}>
@@ -206,9 +246,8 @@ export function MakePicture() {
                     </option>
                   ))}
                 </select>
-              </label>
-              <label>
-                Detail
+              </AdvField>
+              <AdvField label="Detail" isDefault={isFieldDefault("detail", detailId)} onMakeDefault={() => saveDefault("detail", detailId)}>
                 <select value={detailId} onChange={(event) => setDetailId(event.target.value)}>
                   {DETAIL_LEVELS.map((entry) => (
                     <option key={entry.id} value={entry.id}>
@@ -216,10 +255,9 @@ export function MakePicture() {
                     </option>
                   ))}
                 </select>
-              </label>
+              </AdvField>
               {usesGuidance ? (
-                <label>
-                  Creativity
+                <AdvField label="Creativity" isDefault={isFieldDefault("creativity", creativityId)} onMakeDefault={() => saveDefault("creativity", creativityId)}>
                   <select value={creativityId} onChange={(event) => setCreativityId(event.target.value)}>
                     {CREATIVITY_LEVELS.map((entry) => (
                       <option key={entry.id} value={entry.id}>
@@ -227,10 +265,9 @@ export function MakePicture() {
                       </option>
                     ))}
                   </select>
-                </label>
+                </AdvField>
               ) : null}
-              <label>
-                Make it sharper
+              <AdvField label="Make it sharper" isDefault={isFieldDefault("upscale", upscaleId)} onMakeDefault={() => saveDefault("upscale", upscaleId)}>
                 <select value={upscaleId} onChange={(event) => setUpscaleId(event.target.value)}>
                   {UPSCALE_OPTIONS.map((entry) => (
                     <option key={entry.id} value={entry.id}>
@@ -238,7 +275,7 @@ export function MakePicture() {
                     </option>
                   ))}
                 </select>
-              </label>
+              </AdvField>
             </div>
           </details>
         </div>
