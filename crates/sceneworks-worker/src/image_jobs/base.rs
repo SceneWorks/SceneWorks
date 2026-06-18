@@ -706,6 +706,7 @@ fn generate_one(
     guidance: Option<f32>,
     negative_prompt: Option<String>,
     reference: Option<&(Image, f32)>,
+    edit_mask: Option<&Image>,
     true_cfg: Option<f32>,
     sampler: Option<&str>,
     scheduler: Option<&str>,
@@ -714,13 +715,21 @@ fn generate_one(
     cancel: &CancelFlag,
     on_progress: &mut dyn FnMut(Progress),
 ) -> WorkerResult<(u32, u32, Vec<u8>)> {
-    let conditioning = match reference {
+    let mut conditioning = match reference {
         Some((image, strength)) => vec![Conditioning::Reference {
             image: image.clone(),
             strength: Some(*strength),
         }],
         None => Vec::new(),
     };
+    // Inpaint / outpaint mask (Ideogram 4 edit, sc-6303): a `Conditioning::Mask` (white = repaint)
+    // alongside the source `Reference`. Only the Ideogram edit path supplies one today; every other
+    // base-path family passes `None`.
+    if let Some(mask) = edit_mask {
+        conditioning.push(Conditioning::Mask {
+            image: mask.clone(),
+        });
+    }
     let mut request = GenerationRequest {
         prompt: prompt.to_owned(),
         negative_prompt,
@@ -808,6 +817,110 @@ pub(crate) fn load_reference_image(
         height: decoded.height(),
         pixels: decoded.into_raw(),
     })
+}
+
+/// img2img (Remix) strength for a plain Ideogram 4 edit with no mask — mirrors the sdxl/z-image 0.6
+/// edit default and the engine's `DEFAULT_IMG2IMG_STRENGTH`.
+#[cfg(target_os = "macos")]
+const IDEOGRAM_EDIT_STRENGTH: f32 = 0.6;
+/// Heavier img2img strength for masked inpaint / outpaint (regenerate the painted region) — mirrors
+/// the sdxl 0.85 inpaint default and the engine's `DEFAULT_INPAINT_STRENGTH`.
+#[cfg(target_os = "macos")]
+const IDEOGRAM_INPAINT_STRENGTH: f32 = 0.85;
+
+/// Resolve the Ideogram 4 `edit_image` conditioning (sc-6303) into the base MLX path's
+/// `(source, strength, optional-mask)` shape (→ the engine's `Conditioning::Reference` +
+/// `Conditioning::Mask`). Three sub-shapes, mirroring the sdxl edit classification:
+///   * **img2img / Remix** — `sourceAssetId`, no mask: pre-fit the source to the output W×H
+///     (crop/pad, never stretch) → `(source, 0.6, None)`.
+///   * **masked inpaint** — `+ maskAssetId`: the mask fit with the same geometry → `(source, 0.85,
+///     Some(mask))` (white = repaint).
+///   * **outpaint** — `fit_mode == "outpaint"`: contain-pad the source onto the canvas and generate
+///     the border via [`gen_core::imageops::outpaint_border_mask`] (using the ORIGINAL source dims so
+///     it lines up), unioning any user mask (white wins).
+///
+/// `None` when not an edit job or no source asset (the caller falls back to plain txt2img).
+#[cfg(target_os = "macos")]
+fn resolve_ideogram_edit(
+    request: &ImageRequest,
+    settings: &Settings,
+    project_path: &Path,
+) -> WorkerResult<Option<(Image, f32, Option<Image>)>> {
+    if request.mode != "edit_image" {
+        return Ok(None);
+    }
+    let Some(asset_id) = request
+        .source_asset_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|id| !id.is_empty())
+    else {
+        return Ok(None);
+    };
+    let source = load_reference_image(
+        &settings.data_dir,
+        &request.project_id,
+        asset_id,
+        project_path,
+    )?;
+    let is_outpaint = request.fit_mode == "outpaint";
+    let has_user_mask = non_empty(&request.mask_asset_id);
+    let strength = advanced::f32_clamped(
+        &request.advanced,
+        "strength",
+        if is_outpaint || has_user_mask {
+            IDEOGRAM_INPAINT_STRENGTH
+        } else {
+            IDEOGRAM_EDIT_STRENGTH
+        },
+        0.05..=1.0,
+    );
+
+    if is_outpaint {
+        // Pad the source onto the target canvas (contain) and regenerate the border. The border mask
+        // uses the ORIGINAL source dims so it lines up with the padded canvas (same contain geometry
+        // as `fit_engine_image`'s "outpaint"/pad). Any user mask unions into the border (white wins).
+        let (src_w, src_h) = (source.width, source.height);
+        let canvas = fit_engine_image(source, request.width, request.height, "outpaint")?;
+        let mut mask =
+            gen_core::imageops::outpaint_border_mask(src_w, src_h, request.width, request.height);
+        if has_user_mask {
+            let mask_id = request.mask_asset_id.as_deref().unwrap().trim();
+            let user_mask = load_reference_image(
+                &settings.data_dir,
+                &request.project_id,
+                mask_id,
+                project_path,
+            )?;
+            let user_mask = fit_engine_image(user_mask, request.width, request.height, "pad")?;
+            mask = gen_core::imageops::union_masks(&mask, &user_mask).map_err(|error| {
+                WorkerError::Engine(format!("ideogram outpaint mask union failed: {error}"))
+            })?;
+        }
+        return Ok(Some((canvas, strength, Some(mask))));
+    }
+
+    // img2img / inpaint: pre-fit the source to the output W×H so an off-aspect edit doesn't stretch.
+    let source = fit_engine_image(source, request.width, request.height, &request.fit_mode)?;
+    let mask = if has_user_mask {
+        let mask_id = request.mask_asset_id.as_deref().unwrap().trim();
+        let user_mask = load_reference_image(
+            &settings.data_dir,
+            &request.project_id,
+            mask_id,
+            project_path,
+        )?;
+        // Align the mask to the source with the SAME fit geometry.
+        Some(fit_engine_image(
+            user_mask,
+            request.width,
+            request.height,
+            &request.fit_mode,
+        )?)
+    } else {
+        None
+    };
+    Ok(Some((source, strength, mask)))
 }
 
 // ---------------------------------------------------------------------------
@@ -1042,6 +1155,9 @@ async fn generate_stream(
         .reference_asset_id
         .as_deref()
         .is_some_and(|id| !id.trim().is_empty());
+    // Ideogram 4 inpaint/outpaint mask (sc-6303), set by the ideogram edit branch below and threaded
+    // to `generate_one` as a `Conditioning::Mask`. `None` for every other family / plain img2img.
+    let mut ideogram_edit_mask: Option<Image> = None;
     let (identity_init, flux_ip_dir, flux_true_cfg): (
         Option<(Image, f32)>,
         Option<PathBuf>,
@@ -1100,6 +1216,20 @@ async fn generate_stream(
         let (image, scale) = resolve_kolors_ip_reference(request, settings, project_path)?;
         let ip_dir = resolve_kolors_ip_adapter_dir(settings)?;
         (Some((image, scale)), Some(ip_dir), None)
+    } else if matches!(request.model.as_str(), "ideogram_4" | "ideogram_4_turbo")
+        && request.mode == "edit_image"
+    {
+        // Ideogram 4 img2img (Remix) + mask inpaint / outpaint (Edit), sc-6303: `sourceAssetId` →
+        // the engine's `Reference` (img2img init); a `maskAssetId` (inpaint) or `fit_mode ==
+        // "outpaint"` adds a `Conditioning::Mask` (white = repaint), threaded via `ideogram_edit_mask`.
+        // Works in both quality (`ideogram_4`) and turbo (same base + TurboTime LoRA). No IP-Adapter.
+        match resolve_ideogram_edit(request, settings, project_path)? {
+            Some((source, strength, mask)) => {
+                ideogram_edit_mask = mask;
+                (Some((source, strength)), None, None)
+            }
+            None => (None, None, None),
+        }
     } else {
         (None, None, None)
     };
@@ -1133,6 +1263,7 @@ async fn generate_stream(
                     guidance,
                     negative_prompt.clone(),
                     identity_init.as_ref(),
+                    ideogram_edit_mask.as_ref(),
                     true_cfg,
                     sampler.as_deref(),
                     scheduler.as_deref(),
@@ -1334,6 +1465,7 @@ async fn generate_candle_stream(
                     steps,
                     guidance,
                     negative_prompt.clone(),
+                    None,
                     None,
                     true_cfg,
                     // The candle txt2img families don't advertise sampler/scheduler selection (each uses

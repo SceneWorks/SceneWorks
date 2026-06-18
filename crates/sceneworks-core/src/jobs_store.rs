@@ -3120,13 +3120,14 @@ const MLX_ROUTED_MODELS: &[&str] = &[
     "bernini_image",
     // Ideogram 4 (epic 4725): 9.3B single-stream flow DiT (asymmetric two-DiT CFG) + Qwen3-VL-8B
     // text encoder on the native `mlx-gen-ideogram` engine (id `ideogram_4`, adapter `mlx_ideogram`),
-    // macOS-only (no torch backend). Text-to-image only as implemented — the predicate keeps
-    // `edit_image`/reference off MLX (edit/remix is net-new engine work, sc-6303). Mirrors
+    // macOS-only (no torch backend). Text-to-image AND img2img/Remix + mask inpaint/outpaint edit
+    // (sc-6303 — the engine + worker `resolve_ideogram_edit` edit path); both route to MLX. Mirrors
     // `ideogram_mlx_eligible`.
     "ideogram_4",
-    // Ideogram 4 Turbo (mlx-gen #488): the few-step CFG-free single-DiT variant on the same
-    // `mlx-gen-ideogram` engine (id `ideogram_4_turbo`). Text-to-image only, same surface as the
-    // base id — shares `ideogram_mlx_eligible`. macOS-only (no torch backend).
+    // Ideogram 4 Turbo (mlx-gen #488) — the SAME base model + the bundled TurboTime LoRA the engine
+    // installs at load (CFG-free, few-step, single DiT; engine id `ideogram_4_turbo`). Same routing +
+    // edit surface as the base (the shared denoise serves both); registered so it reaches the picker
+    // and routes to MLX for both T2I and edit (sc-6303). macOS-only (no torch backend).
     "ideogram_4_turbo",
 ];
 
@@ -4127,17 +4128,18 @@ fn bernini_image_mlx_eligible(payload: &Map<String, Value>) -> bool {
     true
 }
 
-/// Ideogram 4 (epic 4725) MLX-routing conditions. The native `mlx-gen-ideogram` engine is wired as a
-/// pure text-to-image family today (catalog `capabilities:["text_to_image"]`): the asymmetric two-DiT
-/// flow renderer under a Qwen3-VL-8B encoder has no img2img / edit / reference / pose path in the
-/// worker (no `resolve_ideogram_edit`, unlike z_image/flux2/qwen-edit). So every non-edit
-/// `image_generate` job routes to the in-process Rust worker, and an `edit_image` mode stays OFF MLX
-/// so it is never silently run as plain T2I against a dropped source image (defensive; the UI never
-/// offers edit for Ideogram, lacking the `edit_image` capability). The edit / remix capability is
-/// net-new engine work tracked under sc-6303. Mirrors [`lens_mlx_eligible`]. macOS-only (the catalog
-/// flags `macOnly`); on Windows/Linux no `mlx` worker is registered, so nothing defers.
-fn ideogram_mlx_eligible(payload: &Map<String, Value>) -> bool {
-    payload.get("mode").and_then(Value::as_str) != Some("edit_image")
+/// Ideogram 4 (epic 4725) MLX-routing conditions — shared by `ideogram_4` and `ideogram_4_turbo`
+/// (the same base model + the bundled TurboTime LoRA). The native `mlx-gen-ideogram` engine serves
+/// **text-to-image** and, since sc-6303, **img2img / mask-inpaint edit** (`mode == "edit_image"` with
+/// a `sourceAssetId` + optional `maskAssetId`, resolved by the worker's `resolve_ideogram_edit`).
+/// Both route to the in-process Rust worker, so every `image_generate` job is MLX-eligible. (Ideogram
+/// has no identity-reference / pose path; those modes are not offered by the UI — the catalog
+/// `capabilities` drive the affordances, not this predicate — so leaving them eligible here is inert
+/// and preserves the pre-edit behavior of running an unsupported reference as plain T2I rather than
+/// stranding it.) macOS-only (the catalog flags `macOnly`); on Windows/Linux no `mlx` worker is
+/// registered, so nothing defers.
+fn ideogram_mlx_eligible(_payload: &Map<String, Value>) -> bool {
+    true
 }
 
 /// Video models the in-process Rust MLX worker generates today (sc-3034 Wan2.2,
@@ -6732,53 +6734,42 @@ mod mlx_routing_tests {
     }
 
     #[test]
-    fn ideogram_4_text_to_image_routes_to_mlx_but_edit_stays_off() {
-        // sc-6302: `ideogram_4` is registered in MLX_ROUTED_MODELS with a T2I-only predicate. Plain
-        // text-to-image (the only wired capability) routes to the in-process MLX worker; the
-        // unimplemented edit/remix shape (sc-6303) stays off MLX so it never silently renders as
-        // plain T2I against a dropped source.
+    fn ideogram_4_text_to_image_and_edit_route_to_mlx() {
+        // sc-6302 + sc-6303: `ideogram_4` is in MLX_ROUTED_MODELS, and the native engine now serves
+        // both text-to-image and img2img/mask-inpaint edit — both route to the in-process MLX worker.
         assert!(image_request_mlx_eligible(
             "ideogram_4",
             &object(json!({ "prompt": "a neon city skyline" }))
         ));
         assert!(image_request_mlx_eligible("ideogram_4", &Map::new()));
-        assert!(!image_request_mlx_eligible(
+        // Edit (img2img / inpaint) now routes to MLX (sc-6303 — `resolve_ideogram_edit`).
+        assert!(image_request_mlx_eligible(
             "ideogram_4",
             &object(json!({ "mode": "edit_image", "sourceAssetId": "asset_1" }))
         ));
 
-        // The UI gating oracle (the reported symptom): Ideogram 4 must be macSupport.supported on
-        // Mac so it reaches the Text → Image picker. `edit` is off (the predicate rejects
-        // `edit_image`); `reference`/`pose` mirror the chroma/lens T2I-only quirk (their probes set
-        // no `mode`, so the `!= edit_image` predicate admits them) — harmless because the catalog
-        // `capabilities:["text_to_image"]` gate, not these flags, drives the UI affordances.
+        // The UI gating oracle: Ideogram 4 is macSupport.supported (reaches the Text → Image picker)
+        // and `features.edit` is now true (drives the Image Studio Edit tab alongside the catalog
+        // `edit_image` capability). `reference`/`pose` remain true — inert, since the catalog
+        // capabilities (not these flags) drive the UI affordances.
         let support = model_mac_support("ideogram_4", "image");
         assert!(support.supported, "ideogram_4 must be Mac-supported");
-        assert!(!support.features.edit, "ideogram_4 is T2I-only, no edit");
-    }
+        assert!(
+            support.features.edit,
+            "ideogram_4 now supports edit (sc-6303)"
+        );
 
-    #[test]
-    fn ideogram_4_turbo_text_to_image_routes_to_mlx_and_is_mac_supported() {
-        // mlx-gen #488: the turbo variant shares the T2I-only `ideogram_mlx_eligible` predicate, so
-        // (like the base id) it must route to the in-process MLX worker for text-to-image AND be
-        // `macSupport.supported` so the opt-in "Ideogram 4 Turbo" model reaches the Text → Image
-        // picker. (The reported "no way to use it" symptom = a model absent from MLX_ROUTED_MODELS
-        // is `supported:false` → `macModelBlock` hides it.)
-        assert!(image_request_mlx_eligible(
-            "ideogram_4_turbo",
-            &object(json!({ "prompt": "a neon city skyline" }))
-        ));
+        // Turbo is the same base model + the bundled TurboTime LoRA, so it routes + edits identically
+        // (sc-6303). It was never registered in core before this (sc-6302 added only the base id), so
+        // this also restores its Text → Image picker visibility.
         assert!(image_request_mlx_eligible("ideogram_4_turbo", &Map::new()));
-        assert!(!image_request_mlx_eligible(
+        assert!(image_request_mlx_eligible(
             "ideogram_4_turbo",
             &object(json!({ "mode": "edit_image", "sourceAssetId": "asset_1" }))
         ));
-        let support = model_mac_support("ideogram_4_turbo", "image");
-        assert!(support.supported, "ideogram_4_turbo must be Mac-supported");
-        assert!(
-            !support.features.edit,
-            "ideogram_4_turbo is T2I-only, no edit"
-        );
+        let turbo = model_mac_support("ideogram_4_turbo", "image");
+        assert!(turbo.supported, "ideogram_4_turbo must be Mac-supported");
+        assert!(turbo.features.edit, "ideogram_4_turbo supports edit");
     }
 
     #[test]
