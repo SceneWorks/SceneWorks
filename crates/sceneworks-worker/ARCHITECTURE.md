@@ -54,6 +54,15 @@ Routing is by **capability advertisement**, not by queue or static config:
 > off macOS, MLX GPU on macOS. Off-macOS, GPU arms in `lib.rs` are
 > `#[cfg(target_os = "macos")]`-gated or never advertised.
 
+### MLX generator cache residency
+
+The macOS MLX worker keeps one generator resident across jobs so repeated image
+or video requests do not cold-load weights every time. To avoid leaving a
+multi-GB Metal/MLX allocation resident while the desktop app is idle, the cache
+evicts its resident generator after 300 idle seconds by default and clears the
+MLX backend cache. Tune this with `SCENEWORKS_GENERATOR_CACHE_IDLE_SECONDS`; set
+it to `0` to disable idle eviction.
+
 ## Capability matrix
 
 Legend: ✅ handled · ❌ never dispatched (explicit fail-arm) · ⚠️ handled but
