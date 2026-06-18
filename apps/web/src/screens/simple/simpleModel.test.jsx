@@ -4,10 +4,13 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import {
   SIMPLE_IMAGE_MODEL_KEY,
+  SIMPLE_VIDEO_MODEL_KEY,
   defaultImageModelId,
+  defaultModelId,
   modelLabel,
   textToImageModels,
   useSimpleImageModel,
+  useSimpleVideoModel,
 } from "./simpleModel.js";
 import { AppContext } from "../../context/AppContext.js";
 
@@ -105,5 +108,42 @@ describe("useSimpleImageModel", () => {
     await render();
     expect(text("id")).toBe("z_image_turbo");
     expect(text("isDefault")).toBe("true");
+  });
+});
+
+describe("defaultModelId (generic)", () => {
+  it("honors the preference order, then falls back to the first", () => {
+    const vids = [{ id: "other_video" }, { id: "ltx_2_3" }];
+    expect(defaultModelId(vids, ["ltx_2_3"])).toBe("ltx_2_3");
+    expect(defaultModelId([{ id: "other_video" }], ["ltx_2_3"])).toBe("other_video");
+    expect(defaultModelId([], ["ltx_2_3"])).toBe(null);
+  });
+});
+
+function VideoHarness() {
+  const { modelId, makeDefault, isDefault } = useSimpleVideoModel();
+  return (
+    <div>
+      <span data-testid="id">{modelId ?? ""}</span>
+      <span data-testid="isDefault">{String(isDefault)}</span>
+      <button onClick={makeDefault}>make-default</button>
+    </div>
+  );
+}
+
+describe("useSimpleVideoModel", () => {
+  it("defaults to LTX and pins to its own storage key (no image filter)", async () => {
+    await act(() => {
+      root.render(
+        <AppContext.Provider value={{ videoModels: [{ id: "ltx_2_3" }] }}>
+          <VideoHarness />
+        </AppContext.Provider>,
+      );
+    });
+    expect(text("id")).toBe("ltx_2_3");
+    expect(text("isDefault")).toBe("false");
+    await click("make-default");
+    expect(localStorage.getItem(SIMPLE_VIDEO_MODEL_KEY)).toBe("ltx_2_3");
+    expect(localStorage.getItem(SIMPLE_IMAGE_MODEL_KEY)).toBe(null);
   });
 });

@@ -55,7 +55,9 @@ export const QUALITY_CHOICES = [
 ];
 
 export const FALLBACK_VIDEO_RESOLUTIONS = ["1280x720", "768x1280", "768x768"];
-export const FALLBACK_DURATIONS = [4, 6, 8];
+// Only used when a model declares no `limits.durations`; mirrors the Advanced
+// Video Studio fallback. Real models drive the length options per-model.
+export const FALLBACK_DURATIONS = [4, 6, 8, 10];
 
 // "Creativity" → guidance scale (CFG). Higher CFG follows the prompt more
 // literally; lower lets the model roam. Only meaningful for models that use

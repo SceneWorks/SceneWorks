@@ -7,6 +7,7 @@ import { LookTile } from "./LookTile.jsx";
 import { useLookExemplars } from "./useLookExemplars.js";
 import { modelLabel, useSimpleImageModel } from "./simpleModel.js";
 import { readPref, writePref } from "./simplePrefs.js";
+import { AdvField } from "./AdvField.jsx";
 import {
   LOOKS,
   SHAPES,
@@ -26,22 +27,6 @@ function resolveDims(model, shape) {
   const picked = pickClosestResolution(shape.width, shape.height, options) ?? options[0] ?? "1024x1024";
   const dims = parseResolution(picked) ?? { width: 1024, height: 1024 };
   return { ...dims, resolution: `${dims.width}x${dims.height}` };
-}
-
-// A More-options dropdown plus a "Make my default" pin. Changing the dropdown is
-// session-only; the button persists the current value as the user's default.
-function AdvField({ label, children, isDefault, onMakeDefault }) {
-  return (
-    <div className="sw-advf">
-      <label>
-        {label}
-        {children}
-      </label>
-      <button type="button" className="sw-mkdefault" onClick={onMakeDefault} disabled={isDefault}>
-        {isDefault ? "Default ✓" : "Make my default"}
-      </button>
-    </div>
-  );
 }
 
 export function MakePicture() {

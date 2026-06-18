@@ -7,6 +7,9 @@ import { effectiveFitMode } from "../../components/FitModeControl.jsx";
 import { pickClosestResolution, parseResolution } from "../../resolutionMatch.js";
 import { LookTile } from "./LookTile.jsx";
 import { useLookExemplars } from "./useLookExemplars.js";
+import { modelLabel, useSimpleVideoModel } from "./simpleModel.js";
+import { readPref, writePref } from "./simplePrefs.js";
+import { AdvField } from "./AdvField.jsx";
 import {
   LOOKS,
   SHAPES,
@@ -30,7 +33,6 @@ export function MakeVideo() {
     activeProject,
     createVideoJob,
     refinePrompt,
-    videoModels = [],
     mediaAssets = [],
     recentVideoAssets = [],
     videoLocalJobs = [],
@@ -42,22 +44,39 @@ export function MakeVideo() {
   const [sourceAssetId, setSourceAssetId] = useState("");
   const [motionId, setMotionId] = useState("push");
   const [lookId, setLookId] = useState(null);
-  const [shapeId, setShapeId] = useState("wide");
+  const [shapeId, setShapeId] = useState(() => readPref("video-shape") || "wide");
   const [durationValue, setDurationValue] = useState(null);
-  const [quality, setQuality] = useState("balanced");
+  const [quality, setQuality] = useState(() => readPref("video-quality") || "balanced");
   const [submitting, setSubmitting] = useState(false);
   const [describing, setDescribing] = useState(false);
   const [notice, setNotice] = useState("");
 
+  // "Make my default" persistence for the video dropdowns (the model has its own).
+  const [savedDefaults, setSavedDefaults] = useState(() => ({
+    "video-quality": readPref("video-quality"),
+    "video-shape": readPref("video-shape"),
+  }));
+  const saveDefault = (key, value) => {
+    writePref(key, value);
+    setSavedDefaults((current) => ({ ...current, [key]: String(value) }));
+  };
+  const isFieldDefault = (key, value) => savedDefaults[key] === String(value);
+
   const looks = useLookExemplars();
-  const model = videoModels[0] ?? null;
-  const modelId = model?.id ?? "";
+  const { models: videoChoices, model, modelId, select: selectModel, makeDefault, isDefault } = useSimpleVideoModel();
   const motion = useMemo(() => VIDEO_MOTIONS.find((entry) => entry.id === motionId) ?? VIDEO_MOTIONS[0], [motionId]);
   const look = useMemo(() => LOOKS.find((entry) => entry.id === lookId) ?? null, [lookId]);
   const shape = useMemo(() => SHAPES.find((entry) => entry.id === shapeId) ?? SHAPES[0], [shapeId]);
 
+  // Length options come from the selected model (lengths vary per model); fall
+  // back only when a model declares none. Clamp the chosen value to the current
+  // model's options so switching models can't leave an unsupported length set.
   const durations = model?.limits?.durations?.length ? model.limits.durations : FALLBACK_DURATIONS;
-  const duration = durationValue ?? model?.defaults?.duration ?? durations[0];
+  const modelDuration = model?.defaults?.duration ?? durations[0];
+  const duration =
+    durationValue != null && durations.some((value) => Number(value) === Number(durationValue))
+      ? durationValue
+      : modelDuration;
   const fps = model?.defaults?.fps ?? model?.limits?.fps?.[0] ?? 25;
 
   // Only stills make sense as a first frame.
@@ -85,7 +104,7 @@ export function MakeVideo() {
         mode: isImage ? "image_to_video" : "text_to_video",
         prompt: composePrompt(prompt, look),
         negativePrompt: "",
-        model: modelId,
+        model: modelId ?? "",
         duration: Number(duration),
         fps: Number(fps),
         width: dims.width,
@@ -258,8 +277,18 @@ export function MakeVideo() {
               <Icon.ChevDown className="sw-caret" /> More options
             </summary>
             <div className="sw-adv">
-              <label>
-                Quality
+              {videoChoices.length > 0 ? (
+                <AdvField label="Model" isDefault={isDefault} onMakeDefault={makeDefault}>
+                  <select value={modelId ?? ""} onChange={(event) => selectModel(event.target.value)}>
+                    {videoChoices.map((entry) => (
+                      <option key={entry.id} value={entry.id}>
+                        {modelLabel(entry)}
+                      </option>
+                    ))}
+                  </select>
+                </AdvField>
+              ) : null}
+              <AdvField label="Quality" isDefault={isFieldDefault("video-quality", quality)} onMakeDefault={() => saveDefault("video-quality", quality)}>
                 <select value={quality} onChange={(event) => setQuality(event.target.value)}>
                   {QUALITY_CHOICES.map((entry) => (
                     <option key={entry.id} value={entry.id}>
@@ -267,9 +296,8 @@ export function MakeVideo() {
                     </option>
                   ))}
                 </select>
-              </label>
-              <label>
-                Shape
+              </AdvField>
+              <AdvField label="Shape" isDefault={isFieldDefault("video-shape", shapeId)} onMakeDefault={() => saveDefault("video-shape", shapeId)}>
                 <select value={shapeId} onChange={(event) => setShapeId(event.target.value)}>
                   {SHAPES.map((entry) => (
                     <option key={entry.id} value={entry.id}>
@@ -277,7 +305,7 @@ export function MakeVideo() {
                     </option>
                   ))}
                 </select>
-              </label>
+              </AdvField>
             </div>
           </details>
         </div>
