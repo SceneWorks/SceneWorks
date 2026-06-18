@@ -134,7 +134,13 @@ export function Teach() {
   }, [trainingPresets, target?.id, kind]);
 
   const captionModel = useMemo(() => models.find((model) => model.id === JOY_CAPTION_MODEL_ID), [models]);
-  const captionUnavailable = Boolean(caps?.macGatingActive) && captionModel?.installState === "missing";
+  // Auto-describe only works when the JoyCaption model is actually downloaded.
+  // Gate on install state (NOT macGatingActive — that's false in observe mode):
+  // if the describer isn't installed, a queued caption job just fails in the
+  // worker, so skip it and teach from the examples directly. Offer to add the
+  // model when it's in the catalog but not yet installed.
+  const captionReady = captionModel?.installState === "installed";
+  const captionDownloadable = Boolean(captionModel) && !captionReady;
 
   // Keep the trigger word in step with the name until the user edits it directly.
   useEffect(() => {
@@ -252,7 +258,7 @@ export function Teach() {
       });
       const dataset = await createTrainingDataset(payload);
       if (!dataset?.id) throw new Error("Couldn't create the example set.");
-      if (captionUnavailable) {
+      if (!captionReady) {
         await startTraining(dataset.id, cleanName, "");
         return;
       }
@@ -428,7 +434,7 @@ export function Teach() {
                     </select>
                   </label>
                 </div>
-                {captionUnavailable && captionModel ? (
+                {captionDownloadable ? (
                   <p className="sw-meta sw-teach-capnote">
                     Auto-describe is off until the describer model is added.{" "}
                     <button type="button" className="sw-linkbtn" onClick={() => createModelDownloadJob(captionModel)}>Add it</button> — teaching still works without it.

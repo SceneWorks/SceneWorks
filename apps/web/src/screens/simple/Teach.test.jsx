@@ -88,7 +88,11 @@ function imageFiles(count) {
 function baseContext(overrides = {}) {
   return {
     activeProject: { id: "project-a", name: "Project A" },
-    models: [{ id: "z_image_turbo", installState: "installed" }],
+    // Describer model installed by default so the caption path is exercised.
+    models: [
+      { id: "z_image_turbo", installState: "installed" },
+      { id: "joycaption_beta_one", installState: "installed" },
+    ],
     loras: [],
     jobs: [],
     trainingTargets: TRAINING_TARGETS,
@@ -170,9 +174,10 @@ describe("Teach", () => {
     expect(request.config.steps).toBeGreaterThan(0);
   });
 
-  it("skips captioning and trains directly when the describer model is unavailable on a gated Mac", async () => {
+  it("skips captioning and trains directly when the describer model isn't installed (no mac gating)", async () => {
+    // Regression: a missing JoyCaption model must skip captioning regardless of
+    // macGatingActive — otherwise Teach queues a caption job the worker can't run.
     const ctx = baseContext({
-      macCapabilities: { macGatingActive: true, training: { supportedKernels: ["z_image_lora"], lokrOnWanSupported: false } },
       models: [
         { id: "z_image_turbo", installState: "installed" },
         { id: "joycaption_beta_one", installState: "missing" },
