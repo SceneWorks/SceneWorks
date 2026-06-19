@@ -19,6 +19,12 @@ pub(crate) async fn create_image_job(
         job_payload.remove("recipePresetId");
     }
     apply_recipe_preset_to_image_payload(&state, &payload, &mut job_payload).await?;
+    // Ideogram 4 headless/API parity (sc-6519): auto-expand a plain prompt into a rich JSON caption
+    // via the magic-prompt utility model — the same separate prompt_refine job the web runs (sc-6501)
+    // — and rewrite the job's prompt before it dispatches, so a direct/headless plain-text job escapes
+    // the "Image blocked by safety filter" placeholder instead of relying on the worker reseed net. A
+    // no-op for every other model, an already-structured caption, or when the expander is unavailable.
+    crate::ideogram::rich_auto_caption_for_ideogram(&state, &mut job_payload).await;
     let model_manifest_entry = resolve_model_manifest_entry(&state, &payload.model).await?;
     job_payload.insert("modelManifestEntry".to_owned(), model_manifest_entry);
     validate_job_lora_compatibility(&state, Some(&payload.project_id), &mut job_payload, false)

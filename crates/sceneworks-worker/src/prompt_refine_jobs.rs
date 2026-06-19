@@ -282,7 +282,7 @@ fn magic_section(name: &str) -> String {
     target_os = "macos",
     all(not(target_os = "macos"), feature = "backend-candle")
 ))]
-fn build_magic_prompt_messages(prompt: &str, aspect_ratio: &str) -> (String, String) {
+pub(crate) fn build_magic_prompt_messages(prompt: &str, aspect_ratio: &str) -> (String, String) {
     let system = magic_section("SYSTEM");
     let mut user = magic_section("USER");
     if user.is_empty() {
@@ -305,7 +305,7 @@ fn build_magic_prompt_messages(prompt: &str, aspect_ratio: &str) -> (String, Str
     target_os = "macos",
     all(not(target_os = "macos"), feature = "backend-candle")
 ))]
-fn clean_json_output(text: &str) -> String {
+pub(crate) fn clean_json_output(text: &str) -> String {
     let mut text = strip_think_blocks(text.trim()).trim().to_owned();
     if let Some(pos) = last_ci(&text, "</think>") {
         text = text[pos + "</think>".len()..].trim().to_owned();

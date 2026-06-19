@@ -3016,6 +3016,328 @@ async fn image_job_route_threads_reference_asset_ids() {
     assert_eq!(plain_job["payload"]["referenceAssetIds"], json!([]));
 }
 
+/// Poll the job list until an Ideogram magic-prompt expansion (`prompt_refine`) job other than
+/// `exclude` appears, and return its id. The image-job handler is blocked awaiting this job, so it
+/// materializes promptly. `exclude` lets a test wait for a *re-sampled* second job after completing
+/// the first.
+async fn wait_for_prompt_refine_job_excluding(app: &axum::Router, exclude: Option<&str>) -> String {
+    for _ in 0..250 {
+        let (_, jobs) = request(app.clone(), "GET", "/api/v1/jobs", Value::Null).await;
+        if let Some(id) = jobs.as_array().and_then(|items| {
+            items
+                .iter()
+                .filter(|job| job["type"] == "prompt_refine")
+                .find_map(|job| job["id"].as_str().filter(|id| Some(*id) != exclude))
+        }) {
+            return id.to_owned();
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    panic!("the Ideogram magic-prompt prompt_refine job was never created");
+}
+
+/// Wait for the first Ideogram magic-prompt expansion job.
+async fn wait_for_prompt_refine_job(app: &axum::Router) -> String {
+    wait_for_prompt_refine_job_excluding(app, None).await
+}
+
+/// Complete a queued (unclaimed) magic-prompt job. The job has no owner, so the progress report omits
+/// a workerId (matching the store's `(None, None)` ownership rule); `result` carries the model reply.
+async fn complete_prompt_refine_job(app: &axum::Router, job_id: &str, result: Value) {
+    let (status, _) = request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/jobs/{job_id}/progress"),
+        json!({
+            "status": "completed",
+            "stage": "completed",
+            "progress": 1,
+            "message": "Caption ready.",
+            "result": result
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+}
+
+#[tokio::test]
+async fn ideogram_plain_text_job_is_rich_auto_captioned_before_dispatch() {
+    // sc-6519: a direct/headless plain-text Ideogram 4 job (no UI auto-expand) is rich-auto-captioned
+    // BEFORE it dispatches — the API runs the same separate magic_prompt expansion the web runs and
+    // rewrites the job's prompt to the rich JSON caption, matching the UI path. The image job is held
+    // (not yet created) while the expansion runs, so there is no 3B/Ideogram co-residency.
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+
+    let submit = {
+        let app = app.clone();
+        tokio::spawn(async move {
+            request(
+                app,
+                "POST",
+                "/api/v1/image/jobs",
+                json!({
+                    "projectId": "project-1",
+                    "mode": "text_to_image",
+                    "prompt": "a red fox in a snowy forest",
+                    "model": "ideogram_4",
+                    "count": 1,
+                    "seed": 7
+                }),
+            )
+            .await
+        })
+    };
+
+    let refine_id = wait_for_prompt_refine_job(&app).await;
+    // The expansion job carries the plain prompt, the magic_prompt task, and the derived aspect ratio.
+    let (status, refine_job) = request(
+        app.clone(),
+        "GET",
+        &format!("/api/v1/jobs/{refine_id}"),
+        Value::Null,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(refine_job["type"], "prompt_refine");
+    assert_eq!(refine_job["payload"]["task"], "magic_prompt");
+    assert_eq!(
+        refine_job["payload"]["prompt"],
+        "a red fox in a snowy forest"
+    );
+    assert_eq!(refine_job["payload"]["aspectRatio"], "1:1");
+
+    // Complete the expansion with a rich caption. The unclaimed job has no owner, so the progress
+    // report omits a workerId (matching the store's `(None, None)` ownership rule).
+    let caption = r#"{"high_level_description": "a red fox", "compositional_deconstruction": {"background": "a snowy forest at golden hour", "elements": []}}"#;
+    let (status, _) = request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/jobs/{refine_id}/progress"),
+        json!({
+            "status": "completed",
+            "stage": "completed",
+            "progress": 1,
+            "message": "Caption ready.",
+            "result": { "refinedPrompt": caption }
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    // The image job now dispatches with the rich caption as its prompt.
+    let (status, image_job) = submit.await.expect("submit task joins");
+    assert_eq!(status, StatusCode::CREATED);
+    assert_eq!(image_job["type"], "image_generate");
+    assert_eq!(image_job["payload"]["model"], "ideogram_4");
+    assert_eq!(image_job["payload"]["prompt"], caption);
+}
+
+#[tokio::test]
+async fn ideogram_plain_text_job_degrades_to_original_prompt_when_expansion_fails() {
+    // sc-6519 graceful degradation: if the magic_prompt expansion fails (e.g. the refiner is not
+    // staged), the image job still dispatches with the ORIGINAL prompt — the worker's format-guard +
+    // placeholder reseed net (sc-6501) remains the fallback, so a render is always produced.
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+
+    let submit = {
+        let app = app.clone();
+        tokio::spawn(async move {
+            request(
+                app,
+                "POST",
+                "/api/v1/image/jobs",
+                json!({
+                    "projectId": "project-1",
+                    "mode": "text_to_image",
+                    "prompt": "a red fox in a snowy forest",
+                    "model": "ideogram_4",
+                    "seed": 7
+                }),
+            )
+            .await
+        })
+    };
+
+    let refine_id = wait_for_prompt_refine_job(&app).await;
+    let (status, _) = request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/jobs/{refine_id}/progress"),
+        json!({
+            "status": "failed",
+            "stage": "failed",
+            "progress": 0,
+            "message": "Expansion failed.",
+            "error": "prompt-refine model not staged"
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    let (status, image_job) = submit.await.expect("submit task joins");
+    assert_eq!(status, StatusCode::CREATED);
+    assert_eq!(image_job["type"], "image_generate");
+    assert_eq!(
+        image_job["payload"]["prompt"],
+        "a red fox in a snowy forest"
+    );
+}
+
+#[tokio::test]
+async fn ideogram_plain_text_job_resamples_on_invalid_caption_then_dispatches() {
+    // sc-6519 real-weight finding: the 3B magic-prompt model is stochastic and occasionally returns
+    // malformed JSON / prose instead of a caption. A completed-but-invalid expansion is re-sampled
+    // with a fresh job (the headless path has no human to retry) before the image job dispatches with
+    // the valid caption.
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+
+    let submit = {
+        let app = app.clone();
+        tokio::spawn(async move {
+            request(
+                app,
+                "POST",
+                "/api/v1/image/jobs",
+                json!({
+                    "projectId": "project-1",
+                    "mode": "text_to_image",
+                    "prompt": "a red fox in a snowy forest",
+                    "model": "ideogram_4",
+                    "seed": 7
+                }),
+            )
+            .await
+        })
+    };
+
+    // The first expansion returns prose, not a caption → the API re-samples a fresh job.
+    let first = wait_for_prompt_refine_job(&app).await;
+    complete_prompt_refine_job(
+        &app,
+        &first,
+        json!({ "refinedPrompt": "just a fox, nothing structured" }),
+    )
+    .await;
+
+    // The re-sampled job produces a valid caption → the image job dispatches with it.
+    let caption =
+        r#"{"compositional_deconstruction": {"background": "a snowy forest", "elements": []}}"#;
+    let second = wait_for_prompt_refine_job_excluding(&app, Some(&first)).await;
+    assert_ne!(second, first, "a fresh expansion job was enqueued");
+    complete_prompt_refine_job(&app, &second, json!({ "refinedPrompt": caption })).await;
+
+    let (status, image_job) = submit.await.expect("submit task joins");
+    assert_eq!(status, StatusCode::CREATED);
+    assert_eq!(image_job["payload"]["prompt"], caption);
+}
+
+#[tokio::test]
+async fn ideogram_caption_prompt_dispatches_without_expansion() {
+    // sc-6519: an already-structured caption (the normal web submit) is never re-expanded — no
+    // magic_prompt job is enqueued and the job dispatches immediately with the caption unchanged.
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+
+    let caption =
+        r#"{"compositional_deconstruction": {"background": "a beach at sunset", "elements": []}}"#;
+    let (status, job) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/image/jobs",
+        json!({
+            "projectId": "project-1",
+            "mode": "text_to_image",
+            "prompt": caption,
+            "model": "ideogram_4",
+            "seed": 7
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    assert_eq!(job["payload"]["prompt"], caption);
+
+    let (_, jobs) = request(app, "GET", "/api/v1/jobs", Value::Null).await;
+    assert!(
+        jobs.as_array()
+            .expect("jobs is an array")
+            .iter()
+            .all(|job| job["type"] != "prompt_refine"),
+        "an already-structured caption must not enqueue a magic_prompt job"
+    );
+}
+
+#[tokio::test]
+async fn ideogram_edit_job_skips_auto_caption() {
+    // sc-6519: an Ideogram 4 EDIT job conditions on a source image and its prompt is an edit
+    // instruction, not a scene to caption — the auto-caption must not rewrite it, and no magic_prompt
+    // job is enqueued.
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+
+    let (status, job) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/image/jobs",
+        json!({
+            "projectId": "project-1",
+            "mode": "edit_image",
+            "prompt": "make the sky purple",
+            "model": "ideogram_4",
+            "sourceAssetId": "asset-1",
+            "seed": 7
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    assert_eq!(job["type"], "image_edit");
+    assert_eq!(job["payload"]["prompt"], "make the sky purple");
+
+    let (_, jobs) = request(app, "GET", "/api/v1/jobs", Value::Null).await;
+    assert!(
+        jobs.as_array()
+            .expect("jobs is an array")
+            .iter()
+            .all(|job| job["type"] != "prompt_refine"),
+        "an Ideogram edit job must not enqueue a magic_prompt job"
+    );
+}
+
+#[tokio::test]
+async fn non_ideogram_image_job_skips_auto_caption() {
+    // sc-6519: the auto-caption is gated to the Ideogram 4 models — a plain prompt for any other
+    // model dispatches immediately, unchanged, with no magic_prompt expansion job.
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+
+    let (status, job) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/image/jobs",
+        json!({
+            "projectId": "project-1",
+            "mode": "text_to_image",
+            "prompt": "mist over hills",
+            "model": "flux_dev",
+            "seed": 7
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    assert_eq!(job["payload"]["prompt"], "mist over hills");
+
+    let (_, jobs) = request(app, "GET", "/api/v1/jobs", Value::Null).await;
+    assert!(
+        jobs.as_array()
+            .expect("jobs is an array")
+            .iter()
+            .all(|job| job["type"] != "prompt_refine"),
+        "a non-Ideogram job must not enqueue a magic_prompt job"
+    );
+}
+
 #[tokio::test]
 async fn image_and_video_job_routes_normalize_payloads() {
     let temp_dir = tempfile::tempdir().expect("temp dir creates");

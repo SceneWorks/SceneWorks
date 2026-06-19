@@ -81,6 +81,7 @@ mod training;
 use training::*;
 mod generation;
 use generation::*;
+mod ideogram;
 mod jobs;
 use jobs::*;
 mod workers;
