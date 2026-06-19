@@ -2498,11 +2498,18 @@ pub(crate) async fn run_ffmpeg(
     // desktop app sets this to the venv's bundled imageio-ffmpeg (it ships no
     // system ffmpeg); the server stack / Docker leave it unset and use the
     // caller's "ffmpeg" on PATH.
-    let resolved_program = match std::env::var("SCENEWORKS_FFMPEG") {
+    let configured_program = match std::env::var("SCENEWORKS_FFMPEG") {
         Ok(path) if program.as_str() == "ffmpeg" && !path.trim().is_empty() => path,
         _ => program.clone(),
     };
-    let mut child = Command::new(&resolved_program)
+    // On Windows an ffmpeg reached through a symlink/reparse point (e.g. WinGet's
+    // `…\WinGet\Links\ffmpeg.exe` shim) cannot be launched under redirection-trust enforcement:
+    // CreateProcess returns ERROR_UNTRUSTED_MOUNT_POINT (os error 448), the same wall HF-cache
+    // symlinks hit in the model loaders. Resolve it to the real (non-reparse) target first; a
+    // no-op for a plain binary and on every other platform.
+    let resolved_program =
+        sceneworks_core::media_convert::resolve_ffmpeg_program(&configured_program);
+    let mut child = Command::new(resolved_program.as_ref())
         .args(arguments)
         .stdout(Stdio::null())
         .stderr(Stdio::piped())
