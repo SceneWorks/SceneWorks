@@ -26,6 +26,16 @@ import {
   snapshotLayers,
 } from "../imageLayers.js";
 import { LayersPanel } from "../components/LayersPanel.jsx";
+import { CurveEditor } from "../components/CurveEditor.jsx";
+import {
+  IDENTITY_LEVELS,
+  IDENTITY_CURVES,
+  isIdentityLevels,
+  isIdentityCurves,
+  applyLevels,
+  applyCurves,
+  computeHistogram,
+} from "../colorGrade.js";
 
 const MIN_SCALE = 0.05;
 const MAX_SCALE = 16;
@@ -229,10 +239,15 @@ export function applyColorAdjustments(data, adjust) {
   }
 }
 
-// Konva custom filter for the live preview — reads the grade from the node's
-// `colorAdjust` attr (set declaratively by react-konva) and runs the shared math.
+// Konva custom filter for the live preview — reads the grade from the node's attrs
+// (set declaratively by react-konva) and runs the shared math, so preview === bake.
+// `gradeMode` selects which grade is previewed (sc-6109): the brightness/contrast
+// "adjust", levels, or curves.
 function konvaColorFilter(imageData) {
-  applyColorAdjustments(imageData.data, this.getAttr("colorAdjust"));
+  const mode = this.getAttr("gradeMode");
+  if (mode === "levels") applyLevels(imageData.data, this.getAttr("gradeLevels"));
+  else if (mode === "curves") applyCurves(imageData.data, this.getAttr("gradeCurves"));
+  else applyColorAdjustments(imageData.data, this.getAttr("colorAdjust"));
 }
 
 // Upscale engines + their valid factors (sc-2433). Real-ESRGAN 2x/4x is the cross-platform default
@@ -845,6 +860,15 @@ export function ImageEditor() {
   // Color grade (sc-2439): non-destructive −1..1 adjustments previewed live via a
   // Konva filter, baked into the working image on Apply.
   const [colorAdjust, setColorAdjust] = useState(IDENTITY_COLOR_ADJUST);
+  // Curves + levels (sc-6109): the Color tool has three modes — the brightness/
+  // contrast "adjust" (above), per-channel levels, and an editable tone curve. Each
+  // previews via the same Konva filter and bakes via the same Canvas-2D pass. The
+  // active channel ("master" | "r" | "g" | "b") is shared by the levels + curves UI.
+  const [colorMode, setColorMode] = useState("adjust"); // "adjust" | "levels" | "curves"
+  const [levels, setLevels] = useState(IDENTITY_LEVELS);
+  const [curves, setCurves] = useState(IDENTITY_CURVES);
+  const [colorChannel, setColorChannel] = useState("master");
+  const histogramRef = useRef(null);
 
   // AI prompt edit (sc-2435): an edit-capable model + instruction + optional seed,
   // run against the working image through the existing edit_image flow.
@@ -1043,6 +1067,10 @@ export function ImageEditor() {
     setTool("move");
     setCropRect(null);
     setColorAdjust(IDENTITY_COLOR_ADJUST);
+    setColorMode("adjust");
+    setLevels(IDENTITY_LEVELS);
+    setCurves(IDENTITY_CURVES);
+    setColorChannel("master");
     // A new working bitmap invalidates the mask (dims/content changed) — strokes + smart-select base.
     setMaskLines([]);
     setMaskMode(false);
@@ -1379,7 +1407,10 @@ export function ImageEditor() {
   function cancelCrop() {
     setTool("move");
     setCropRect(null);
-    setColorAdjust(IDENTITY_COLOR_ADJUST); // discard any unbaked color preview
+    // Discard any unbaked color preview (adjust / levels / curves).
+    setColorAdjust(IDENTITY_COLOR_ADJUST);
+    setLevels(IDENTITY_LEVELS);
+    setCurves(IDENTITY_CURVES);
   }
 
   function chooseRatio(key) {
@@ -1546,63 +1577,133 @@ export function ImageEditor() {
     transformer.getLayer()?.batchDraw();
   }, [tool, working]);
 
-  // ── Color grade (sc-2439) ─────────────────────────────────────────────────
+  // ── Color grade (sc-2439; curves + levels sc-6109) ─────────────────────────
   function startColorGrade() {
     if (!working) return;
     setTool("color");
+    setColorMode("adjust");
+    setColorChannel("master");
     setColorAdjust(IDENTITY_COLOR_ADJUST);
+    setLevels(IDENTITY_LEVELS);
+    setCurves(IDENTITY_CURVES);
   }
 
   const setAdjustValue = (key, value) => setColorAdjust((prev) => ({ ...prev, [key]: value }));
   const resetAdjust = (key) => setAdjustValue(key, 0);
-  const resetAllAdjust = () => setColorAdjust(IDENTITY_COLOR_ADJUST);
+
+  // Patch the active channel's levels (sc-6109).
+  const setLevelsValue = (key, value) =>
+    setLevels((prev) => ({ ...prev, [colorChannel]: { ...prev[colorChannel], [key]: value } }));
+
+  // Reset the currently-selected color mode (all channels) to its identity.
+  function resetActiveColorMode() {
+    if (colorMode === "levels") setLevels(IDENTITY_LEVELS);
+    else if (colorMode === "curves") setCurves(IDENTITY_CURVES);
+    else setColorAdjust(IDENTITY_COLOR_ADJUST);
+  }
+
+  // Stroke for the curve editor / channel cue.
+  const channelStroke = { master: "var(--accent)", r: "#d44", g: "#4a4", b: "#46d" }[colorChannel];
+
+  // Whether the currently-selected color mode is at its identity (gates Apply + the
+  // live-preview cache).
+  function activeGradeIsIdentity() {
+    if (colorMode === "levels") return isIdentityLevels(levels);
+    if (colorMode === "curves") return isIdentityCurves(curves);
+    return isIdentityAdjust(colorAdjust);
+  }
 
   // Live preview: Konva applies filters only on a cached node, and re-running them
-  // needs a re-cache. Cache the image node (re-caching when the grade changes) while
-  // the color tool is active with a non-identity grade; clear it otherwise so Move/
-  // other tools see the untouched bitmap. The filter reads the `colorAdjust` attr.
+  // needs a re-cache. Cache the active layer's node (re-caching when ANY grade input
+  // changes) while the color tool is active with a non-identity grade; clear it
+  // otherwise so Move/other tools see the untouched bitmap. The filter reads the
+  // gradeMode + colorAdjust/levels/curves attrs.
   useEffect(() => {
     const node = imageNodeRef.current;
     if (!node) return;
-    const active = tool === "color" && !isIdentityAdjust(colorAdjust);
-    if (active) {
+    if (tool === "color" && !activeGradeIsIdentity()) {
       node.cache();
     } else {
       node.clearCache();
     }
     node.getLayer()?.batchDraw();
-  }, [tool, colorAdjust, working]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [tool, colorMode, colorAdjust, levels, curves, working]);
 
-  // Apply: bake the grade into a fresh working image using the SAME pixel math as the
-  // preview (a 2D-canvas pass, no Konva-cache readback). Keeps the source provenance
-  // so lineage survives to Save; records the grade in the edit chain.
+  // Draw the active layer's histogram for the levels mode (sc-6109). Recomputed when
+  // the layer or selected channel changes; cheap (one pass over the layer bitmap).
+  useEffect(() => {
+    const canvas = histogramRef.current;
+    if (!canvas || tool !== "color" || colorMode !== "levels") return;
+    const layer = activeLayerOf(working);
+    if (!layer) return;
+    const off = document.createElement("canvas");
+    off.width = layer.image.naturalWidth;
+    off.height = layer.image.naturalHeight;
+    const octx = off.getContext("2d");
+    octx.drawImage(layer.image, 0, 0);
+    const hist = computeHistogram(octx.getImageData(0, 0, off.width, off.height).data);
+    const series = colorChannel === "master" ? hist.luma : hist[colorChannel];
+    const peak = Math.max(1, ...series);
+    const ctx = canvas.getContext("2d");
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+    ctx.fillStyle = colorChannel === "r" ? "#d44" : colorChannel === "g" ? "#4a4" : colorChannel === "b" ? "#46d" : "#888";
+    const bw = canvas.width / 256;
+    for (let i = 0; i < 256; i += 1) {
+      const h = (series[i] / peak) * canvas.height;
+      ctx.fillRect(i * bw, canvas.height - h, Math.max(1, bw), h);
+    }
+  }, [tool, colorMode, colorChannel, working]);
+
+  // Apply: bake the active mode's grade (adjust / levels / curves) into the ACTIVE
+  // layer using the SAME pixel math as the live preview (a 2D-canvas pass), writing
+  // it back in place — stack + dims preserved (sc-6119). Records the grade in the
+  // edit chain (sc-6109).
   const applyColorGrade = useCallback(async () => {
     const layer = activeLayerOf(working);
-    if (!working || !layer || isIdentityAdjust(colorAdjust)) return;
+    if (!working || !layer) return;
+    // Resolve the active mode's transform + provenance entry; bail if it's identity.
+    let transform;
+    let edit;
+    if (colorMode === "levels") {
+      if (isIdentityLevels(levels)) return;
+      const baked = levels;
+      transform = (data) => applyLevels(data, baked);
+      edit = { op: "levels", levels: baked };
+    } else if (colorMode === "curves") {
+      if (isIdentityCurves(curves)) return;
+      const baked = curves;
+      transform = (data) => applyCurves(data, baked);
+      edit = { op: "curves", curves: baked };
+    } else {
+      if (isIdentityAdjust(colorAdjust)) return;
+      const baked = { ...colorAdjust };
+      transform = (data) => applyColorAdjustments(data, baked);
+      edit = { op: "color", ...baked };
+    }
     const w = layer.image.naturalWidth;
     const h = layer.image.naturalHeight;
     const canvas = document.createElement("canvas");
     canvas.width = w;
     canvas.height = h;
     const ctx = canvas.getContext("2d");
-    // Active-layer op (sc-6119): bake the grade into the ACTIVE layer's pixels and
-    // write it back, preserving the rest of the stack + the doc dims. The live
-    // preview already caches the active layer's node (below).
     ctx.drawImage(layer.image, 0, 0);
     const imageData = ctx.getImageData(0, 0, w, h);
-    applyColorAdjustments(imageData.data, colorAdjust);
+    transform(imageData.data);
     ctx.putImageData(imageData, 0, 0);
     const blob = await new Promise((resolve) => canvas.toBlob(resolve, "image/png"));
     if (!blob) return;
-    const baked = { ...colorAdjust };
     const { image, objectUrl } = await blobToImage(blob);
     checkpoint();
     replaceLayerImage(layer.id, image, objectUrl, blob);
-    setColorAdjust(IDENTITY_COLOR_ADJUST); // the grade is baked; drop the live preview
+    // The grade is baked; drop every live preview.
+    setColorAdjust(IDENTITY_COLOR_ADJUST);
+    setLevels(IDENTITY_LEVELS);
+    setCurves(IDENTITY_CURVES);
     setTool("move");
-    setEdits((prev) => [...prev, { op: "color", ...baked }]);
+    setEdits((prev) => [...prev, edit]);
     setDirty(true);
-  }, [working, colorAdjust, replaceLayerImage, checkpoint]);
+  }, [working, colorMode, colorAdjust, levels, curves, replaceLayerImage, checkpoint]);
 
   // ── Layer stack ops (sc-6118) ─────────────────────────────────────────────
   // Wire the layers panel to the pure layer-stack ops (../imageLayers.js). Each
@@ -2565,7 +2666,16 @@ export function ImageEditor() {
                     width={layer.image.naturalWidth}
                     x={t.x}
                     y={t.y}
-                    {...(isActive ? { colorAdjust, filters: [konvaColorFilter], ref: imageNodeRef } : {})}
+                    {...(isActive
+                      ? {
+                          colorAdjust,
+                          gradeMode: colorMode,
+                          gradeLevels: levels,
+                          gradeCurves: curves,
+                          filters: [konvaColorFilter],
+                          ref: imageNodeRef,
+                        }
+                      : {})}
                     {...(isActive && tool === "transform"
                       ? { draggable: true, onDragEnd: commitActiveLayerTransform, onTransformEnd: commitActiveLayerTransform }
                       : {})}
@@ -2995,26 +3105,113 @@ export function ImageEditor() {
 
         {tool === "color" && working ? (
           <div className="image-editor-cropbar image-editor-colorbar">
-            {COLOR_ADJUSTMENTS.map(({ key, label }) => (
-              <label className="image-editor-slider" key={key} title="Double-click the slider to reset">
-                <span className="image-editor-slider-label">{label}</span>
-                <input
-                  aria-label={label}
-                  max={1}
-                  min={-1}
-                  onChange={(event) => setAdjustValue(key, Number(event.target.value))}
-                  onDoubleClick={() => resetAdjust(key)}
-                  step={0.01}
-                  type="range"
-                  value={colorAdjust[key]}
-                />
-                <span className="image-editor-slider-value">{Math.round(colorAdjust[key] * 100)}</span>
-              </label>
-            ))}
-            <button disabled={isIdentityAdjust(colorAdjust)} onClick={resetAllAdjust} type="button">
+            <div className="image-editor-color-modes" role="group" aria-label="Color mode">
+              {[
+                ["adjust", "Adjust"],
+                ["levels", "Levels"],
+                ["curves", "Curves"],
+              ].map(([mode, label]) => (
+                <button
+                  key={mode}
+                  className={colorMode === mode ? "active" : ""}
+                  onClick={() => setColorMode(mode)}
+                  type="button"
+                >
+                  {label}
+                </button>
+              ))}
+            </div>
+
+            {colorMode === "adjust"
+              ? COLOR_ADJUSTMENTS.map(({ key, label }) => (
+                  <label className="image-editor-slider" key={key} title="Double-click the slider to reset">
+                    <span className="image-editor-slider-label">{label}</span>
+                    <input
+                      aria-label={label}
+                      max={1}
+                      min={-1}
+                      onChange={(event) => setAdjustValue(key, Number(event.target.value))}
+                      onDoubleClick={() => resetAdjust(key)}
+                      step={0.01}
+                      type="range"
+                      value={colorAdjust[key]}
+                    />
+                    <span className="image-editor-slider-value">{Math.round(colorAdjust[key] * 100)}</span>
+                  </label>
+                ))
+              : null}
+
+            {colorMode === "levels" || colorMode === "curves" ? (
+              <select
+                aria-label="Channel"
+                className="image-editor-editmodel"
+                onChange={(event) => setColorChannel(event.target.value)}
+                value={colorChannel}
+              >
+                <option value="master">Master</option>
+                <option value="r">Red</option>
+                <option value="g">Green</option>
+                <option value="b">Blue</option>
+              </select>
+            ) : null}
+
+            {colorMode === "levels" ? (
+              <>
+                <canvas className="image-editor-histogram" height={56} ref={histogramRef} width={200} />
+                <label className="image-editor-slider" title="Black point">
+                  <span className="image-editor-slider-label">Black</span>
+                  <input
+                    aria-label="Black point"
+                    max={254}
+                    min={0}
+                    onChange={(event) => setLevelsValue("black", Number(event.target.value))}
+                    step={1}
+                    type="range"
+                    value={levels[colorChannel].black}
+                  />
+                  <span className="image-editor-slider-value">{levels[colorChannel].black}</span>
+                </label>
+                <label className="image-editor-slider" title="Gamma (midtones)">
+                  <span className="image-editor-slider-label">Gamma</span>
+                  <input
+                    aria-label="Gamma"
+                    max={2.5}
+                    min={0.1}
+                    onChange={(event) => setLevelsValue("gamma", Number(event.target.value))}
+                    step={0.01}
+                    type="range"
+                    value={levels[colorChannel].gamma}
+                  />
+                  <span className="image-editor-slider-value">{levels[colorChannel].gamma.toFixed(2)}</span>
+                </label>
+                <label className="image-editor-slider" title="White point">
+                  <span className="image-editor-slider-label">White</span>
+                  <input
+                    aria-label="White point"
+                    max={255}
+                    min={1}
+                    onChange={(event) => setLevelsValue("white", Number(event.target.value))}
+                    step={1}
+                    type="range"
+                    value={levels[colorChannel].white}
+                  />
+                  <span className="image-editor-slider-value">{levels[colorChannel].white}</span>
+                </label>
+              </>
+            ) : null}
+
+            {colorMode === "curves" ? (
+              <CurveEditor
+                points={curves[colorChannel]}
+                stroke={channelStroke}
+                onChange={(points) => setCurves((prev) => ({ ...prev, [colorChannel]: points }))}
+              />
+            ) : null}
+
+            <button disabled={activeGradeIsIdentity()} onClick={resetActiveColorMode} type="button">
               Reset
             </button>
-            <button className="primary" disabled={isIdentityAdjust(colorAdjust)} onClick={applyColorGrade} type="button">
+            <button className="primary" disabled={activeGradeIsIdentity()} onClick={applyColorGrade} type="button">
               Apply
             </button>
             <button onClick={cancelCrop} type="button">

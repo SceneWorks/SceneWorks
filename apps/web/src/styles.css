@@ -6255,6 +6255,77 @@ details[open] > summary.lora-scope-group-heading::before,
   color: var(--text-muted);
 }
 
+/* Color tool (sc-6109): a vertical panel with Adjust / Levels / Curves modes. */
+.image-editor-colorbar {
+  flex-direction: column;
+  align-items: stretch;
+  gap: 8px;
+  max-width: 260px;
+}
+
+.image-editor-colorbar .image-editor-slider {
+  flex-direction: row;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.image-editor-colorbar .image-editor-slider input[type="range"] {
+  flex: 1 1 auto;
+  width: auto;
+}
+
+.image-editor-color-modes {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 4px;
+}
+
+.image-editor-color-modes button.active {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.image-editor-histogram {
+  width: 100%;
+  height: 56px;
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+  background: var(--surface-2);
+}
+
+.image-editor-curve {
+  width: 100%;
+  height: auto;
+  aspect-ratio: 1 / 1;
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+  touch-action: none;
+}
+
+.image-editor-curve-bg {
+  fill: var(--surface-2);
+}
+
+.image-editor-curve-grid {
+  stroke: var(--border);
+  stroke-width: 1;
+  vector-effect: non-scaling-stroke;
+}
+
+.image-editor-curve-diagonal {
+  stroke: var(--text-muted);
+  stroke-dasharray: 4 4;
+  stroke-width: 1;
+  vector-effect: non-scaling-stroke;
+  opacity: 0.5;
+}
+
+.image-editor-curve-handle {
+  fill: var(--surface);
+  stroke-width: 2;
+  cursor: grab;
+}
+
 /* AI prompt-edit bar (sc-2435): model picker + prompt + seed inline. */
 .image-editor-editbar .image-editor-editprompt {
   min-width: 260px;
