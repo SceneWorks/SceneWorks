@@ -918,7 +918,27 @@ pub(crate) async fn run_model_convert_job(
 /// actually holds the checkpoint files). Prefers the commit referenced by
 /// `refs/main`, else the first snapshot directory. Returns `None` when the repo is
 /// not present in the cache.
+///
+/// On Windows the resolved snapshot is repaired in place
+/// ([`materialize_snapshot_hardlinks`]): the candle worker process cannot traverse
+/// the relative `snapshots/<rev>/… -> ../blobs/<etag>` symlinks that `huggingface_hub`
+/// (and, before this fix, our own downloader) create — the open fails with
+/// `ERROR_UNTRUSTED_MOUNT_POINT` (os error 448), so every model load died at the first
+/// file read. The repair replaces those symlinks with hardlinks to the same blob (no
+/// reparse point, same volume, still deduped); it is idempotent and best-effort, and a
+/// no-op on every other platform.
 pub(crate) fn huggingface_snapshot_dir(data_dir: &Path, repo: &str) -> Option<PathBuf> {
+    let dir = resolve_huggingface_snapshot_dir(data_dir, repo)?;
+    // Windows-only in production (the symlink-traversal defect is Windows-specific); the
+    // function itself is still compiled under `test` so the conversion is unit-testable
+    // off-Windows, but it must not run against a developer's real HF cache during an
+    // unrelated `cargo test` on Unix — hence the call, not just the body, is gated.
+    #[cfg(windows)]
+    materialize_snapshot_hardlinks(&dir);
+    Some(dir)
+}
+
+fn resolve_huggingface_snapshot_dir(data_dir: &Path, repo: &str) -> Option<PathBuf> {
     let repo_dir = huggingface_repo_cache_path(data_dir, repo)?;
     let snapshots = repo_dir.join("snapshots");
     if let Ok(rev) = std::fs::read_to_string(repo_dir.join("refs").join("main")) {
@@ -932,6 +952,65 @@ pub(crate) fn huggingface_snapshot_dir(data_dir: &Path, repo: &str) -> Option<Pa
         .flatten()
         .map(|entry| entry.path())
         .find(|path| path.is_dir())
+}
+
+/// Replace the relative `snapshots/<rev>/… -> ../blobs/<etag>` symlinks under a resolved
+/// HF snapshot dir with hardlinks to the same blob. **Windows-only** (a no-op
+/// elsewhere): the candle worker process cannot traverse those reparse points — the
+/// open fails with `ERROR_UNTRUSTED_MOUNT_POINT` (os error 448, see
+/// [`downloaded_model_detection_io_error_is_inconclusive`]) — but a hardlink is a plain
+/// directory entry to the blob data (no reparse, same volume, still deduped) and reads
+/// fine. Caches our downloader writes now hardlink from the start
+/// ([`crate::downloads`]); this repairs caches already materialized as symlinks (e.g. by
+/// `huggingface_hub`). Best-effort and idempotent: once converted there is nothing left
+/// to do, and any per-file failure leaves that entry untouched for the loader to
+/// surface. Compiled on `test` too so the conversion is unit-testable off-Windows.
+#[cfg(any(windows, test))]
+fn materialize_snapshot_hardlinks(dir: &Path) {
+    fn repair(dir: &Path) {
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let Ok(file_type) = entry.file_type() else {
+                continue;
+            };
+            let path = entry.path();
+            if file_type.is_symlink() {
+                relink_to_blob(&path);
+            } else if file_type.is_dir() {
+                repair(&path);
+            }
+        }
+    }
+    repair(dir);
+}
+
+/// Replace a single snapshot symlink with a hardlink (or, failing that, a copy) to its
+/// blob, so the entry is always present afterward. The symlink target is read **without
+/// traversing it** (`read_link`), so resolving the blob never hits the os-448 path; the
+/// symlink is removed only once its blob is confirmed to exist.
+#[cfg(any(windows, test))]
+fn relink_to_blob(link: &Path) {
+    let Ok(target) = std::fs::read_link(link) else {
+        return;
+    };
+    let Some(parent) = link.parent() else {
+        return;
+    };
+    // `canonicalize` resolves the `..` segments and confirms the blob exists; it opens
+    // the blob (a plain file, not a reparse point) so it does not hit the os-448 path.
+    let Ok(blob) = std::fs::canonicalize(parent.join(target)) else {
+        return;
+    };
+    if std::fs::remove_file(link).is_err() {
+        return;
+    }
+    if std::fs::hard_link(&blob, link).is_err() {
+        // Cross-volume or a filesystem without hardlinks: fall back to a real copy so
+        // the entry is never left missing.
+        let _ = std::fs::copy(&blob, link);
+    }
 }
 
 /// Atomically promote a freshly converted temp directory to its final location,
@@ -2020,5 +2099,67 @@ mod tests {
         }
 
         let _ = std::fs::remove_dir_all(&out);
+    }
+}
+
+// Cross-platform (not macOS-gated like the module above): exercises the Windows
+// symlink-repair logic, which is compiled under `test` on every platform.
+#[cfg(test)]
+mod hardlink_tests {
+    use super::*;
+
+    /// The HF-cache symlink-traversal fix: a `snapshots/<rev>/<sub>/file ->
+    /// ../blobs/<etag>` symlink is replaced in place by a non-reparse entry (hardlink,
+    /// or a copy fallback) pointing at the same bytes, and the blob is left untouched.
+    /// Recurses into component sub-dirs. Skips when the platform won't let the test
+    /// create a symlink (e.g. Windows without Developer Mode).
+    #[test]
+    fn materialize_snapshot_hardlinks_replaces_symlinks_with_real_files() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let blobs = root.path().join("blobs");
+        std::fs::create_dir_all(&blobs).expect("blobs dir");
+        let blob = blobs.join("deadbeef");
+        std::fs::write(&blob, b"tokenizer-bytes").expect("write blob");
+
+        let snapshot = root.path().join("snapshots").join("rev");
+        let tokenizer_dir = snapshot.join("tokenizer");
+        std::fs::create_dir_all(&tokenizer_dir).expect("tokenizer dir");
+        let link = tokenizer_dir.join("tokenizer.json");
+        // Relative, like huggingface_hub: snapshots/rev/tokenizer/ -> ../../../blobs.
+        let rel_target: PathBuf = ["..", "..", "..", "blobs", "deadbeef"].iter().collect();
+
+        #[cfg(unix)]
+        let made = std::os::unix::fs::symlink(&rel_target, &link).is_ok();
+        #[cfg(windows)]
+        let made = std::os::windows::fs::symlink_file(&rel_target, &link).is_ok();
+        #[cfg(not(any(unix, windows)))]
+        let made = false;
+        if !made {
+            return; // no privilege to create a symlink — nothing to convert
+        }
+        assert!(
+            std::fs::symlink_metadata(&link)
+                .unwrap()
+                .file_type()
+                .is_symlink(),
+            "precondition: entry is a symlink before repair"
+        );
+
+        materialize_snapshot_hardlinks(&snapshot);
+
+        let meta = std::fs::symlink_metadata(&link).expect("metadata after repair");
+        assert!(
+            !meta.file_type().is_symlink(),
+            "the symlink must be replaced by a non-reparse entry"
+        );
+        assert_eq!(
+            std::fs::read(&link).expect("read repaired entry"),
+            b"tokenizer-bytes"
+        );
+        assert_eq!(
+            std::fs::read(&blob).expect("read blob"),
+            b"tokenizer-bytes",
+            "the blob itself must be untouched"
+        );
     }
 }

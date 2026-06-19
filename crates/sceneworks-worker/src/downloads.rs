@@ -503,7 +503,8 @@ pub(crate) async fn download_snapshot(
 /// Download a Hugging Face snapshot into the standard hub cache layout under
 /// `repo_dir` (`models--<org>--<name>`): content lands in `blobs/<etag>`, the
 /// checkpoint is materialized as `snapshots/<commit>/<path>` (a relative symlink to
-/// its blob, or a copy where symlinks are unavailable), and `refs/<rev>` records the
+/// its blob on Unix, a hardlink to the blob on Windows — see [`link_blob`] — or a
+/// copy where neither is available), and `refs/<rev>` records the
 /// commit. This matches `huggingface_hub`, so HF-sourced downloads dedupe with other
 /// tools and the Python loader instead of duplicating into the private app store
 /// (sc-1904).
@@ -580,7 +581,7 @@ pub(crate) async fn download_snapshot_into_cache(
         }
         rel_target.push("blobs");
         rel_target.push(etag);
-        if !link_blob(&rel_target, &link).await {
+        if !link_blob(&blobs_dir.join(etag), &rel_target, &link).await {
             tokio::fs::copy(blobs_dir.join(etag), &link).await?;
         }
     }
@@ -620,21 +621,31 @@ fn blob_fallback_name(path: &str) -> String {
         .collect()
 }
 
-/// Create a relative symlink from `link` to its blob, returning whether it
-/// succeeded. Mirrors huggingface_hub: symlink where supported, and the caller
-/// copies instead when this returns false (Windows without privilege).
-async fn link_blob(rel_target: &Path, link: &Path) -> bool {
-    #[cfg(unix)]
-    {
-        tokio::fs::symlink(rel_target, link).await.is_ok()
-    }
+/// Materialize a snapshot entry pointing at its blob, returning whether it
+/// succeeded (the caller copies when it does not). On Unix this is a relative
+/// symlink, mirroring huggingface_hub so HF tools dedupe with this cache. On
+/// Windows it is a **hardlink** to the absolute blob instead: the candle worker
+/// process cannot traverse the relative `snapshots/<rev>/… -> ../blobs/<etag>`
+/// symlinks — the open fails with `ERROR_UNTRUSTED_MOUNT_POINT` (os error 448, see
+/// [`crate::model_jobs::downloaded_model_detection_io_error_is_inconclusive`]) — so
+/// every model load died at the first file read. A hardlink is a plain directory
+/// entry to the same blob data (no reparse point, same volume by construction, still
+/// deduped) and reads fine. (`model_jobs::huggingface_snapshot_dir` repairs caches
+/// that were already downloaded as symlinks, e.g. by `huggingface_hub`.)
+async fn link_blob(blob_abs: &Path, rel_target: &Path, link: &Path) -> bool {
     #[cfg(windows)]
     {
-        tokio::fs::symlink_file(rel_target, link).await.is_ok()
+        let _ = rel_target;
+        tokio::fs::hard_link(blob_abs, link).await.is_ok()
+    }
+    #[cfg(unix)]
+    {
+        let _ = blob_abs;
+        tokio::fs::symlink(rel_target, link).await.is_ok()
     }
     #[cfg(not(any(unix, windows)))]
     {
-        let _ = (rel_target, link);
+        let _ = (blob_abs, rel_target, link);
         false
     }
 }
