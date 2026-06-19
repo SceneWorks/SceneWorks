@@ -7,11 +7,16 @@
 //! (`upscale_jobs`): resolve the `sourceAssetId` against its project, decode, run the engine under
 //! `spawn_blocking`, write one child asset with lineage back to the source.
 //!
-//! Engine: native-MLX **SAM3** box-prompted PVS via `person_segment_sam3::segment_box_blocking`
-//! (the box path of the sc-4926 SAM3 stack — `Sam3ImageSegmenter::segment_with_boxes`, epic 4910
-//! sc-4923). macOS-only, like the SAM3 dependency; the capability is advertised only by the MLX
-//! worker (`gpu.rs mlx_gpu`), so a segment job never routes off-Mac. There is no torch/candle SAM3
-//! image path yet (a Windows/Linux backport is tracked separately).
+//! Engine (native-MLX **SAM3**, prompt-driven, one checkpoint): a **box** prompt runs SAM3's
+//! concept *detector* (`person_segment_sam3::segment_box_blocking` →
+//! `Sam3ImageSegmenter::segment_with_boxes`, sc-4923/sc-6105); **fg/bg click points** run SAM3's
+//! *tracker* single-frame PVS (`person_segment_sam3::segment_points_blocking` →
+//! `Sam3Tracker::segment_points`, sc-6346). Both load from the same `facebook/sam3` checkpoint —
+//! SAM3 does interactive point refinement via its SAM2-lineage tracker, so no second model/download.
+//! Points take precedence when both are present; exactly one path runs per job and both return the
+//! same `maskAssetId` shape. macOS-only, like the SAM3 dependency; the capability is advertised only
+//! by the MLX worker (`gpu.rs mlx_gpu`), so a segment job never routes off-Mac. There is no
+//! torch/candle SAM3 image path yet (a Windows/Linux backport is tracked separately).
 
 use std::path::{Path, PathBuf};
 
@@ -20,7 +25,9 @@ use serde_json::{json, Value};
 use gen_core::CancelFlag;
 
 use crate::downloads::DownloadContext;
-use crate::person_segment_sam3::{ensure_segmenter_weights, segment_box_blocking};
+use crate::person_segment_sam3::{
+    ensure_segmenter_weights, segment_box_blocking, segment_points_blocking,
+};
 use crate::{
     cancel_requested_peek, fresh_asset_id, heartbeat, mark_job_canceled, now_rfc3339,
     progress_payload, progress_report_interval, task_join_error, update_job, ApiClient, Settings,
@@ -92,6 +99,46 @@ fn parse_box(payload: &JsonObject) -> WorkerResult<[f32; 4]> {
     ))
 }
 
+/// Parse `payload.points` (fg/bg click prompts in source-image pixel coords) for the SAM3 tracker
+/// point path (sc-6346). Each entry is `{x, y, label}` — `label` `1` = foreground / `0` = background
+/// (accepts an integer `label`, or a boolean `fg`; defaults to foreground). Returns `None` when
+/// `points` is absent or an empty array (→ the caller falls back to the box path), `Err` on a
+/// malformed entry. Points and box are alternative prompt modes; when both are present, points win.
+fn parse_points(payload: &JsonObject) -> WorkerResult<Option<Vec<(f32, f32, i32)>>> {
+    let Some(value) = payload.get("points") else {
+        return Ok(None);
+    };
+    let arr = value.as_array().ok_or_else(|| {
+        WorkerError::InvalidPayload("Smart-select 'points' must be an array.".to_owned())
+    })?;
+    if arr.is_empty() {
+        return Ok(None);
+    }
+    let mut out = Vec::with_capacity(arr.len());
+    for entry in arr {
+        let obj = entry.as_object().ok_or_else(|| {
+            WorkerError::InvalidPayload(
+                "Smart-select point must be an object {x, y, label}.".to_owned(),
+            )
+        })?;
+        let coord = |key: &str| obj.get(key).and_then(Value::as_f64).map(|v| v as f32);
+        let (Some(x), Some(y)) = (coord("x"), coord("y")) else {
+            return Err(WorkerError::InvalidPayload(
+                "Smart-select point needs numeric 'x' and 'y'.".to_owned(),
+            ));
+        };
+        // label: 1 = foreground (default), 0 = background. Accept an int `label` or a bool `fg`.
+        let label = obj
+            .get("label")
+            .and_then(Value::as_i64)
+            .map(|v| i32::from(v != 0))
+            .or_else(|| obj.get("fg").and_then(Value::as_bool).map(i32::from))
+            .unwrap_or(1);
+        out.push((x, y, label));
+    }
+    Ok(Some(out))
+}
+
 /// Heartbeat + cancel poll while the blocking segmentation task runs (mirrors
 /// `upscale_jobs::run_upscale_with_heartbeat`): keeps the worker live during the model load +
 /// inference and propagates a user cancel.
@@ -160,7 +207,14 @@ pub(crate) async fn run_image_segment_job(
             WorkerError::InvalidPayload("Smart-select requires a source image asset.".to_owned())
         })?
         .to_owned();
-    let box_xyxy = parse_box(payload)?;
+    // Smart-select prompt: fg/bg points (SAM3 tracker — the interactive-click path) take precedence;
+    // else a box (SAM3 concept detector, sc-6105). Both use the same SAM3 checkpoint (sc-6346).
+    // Exactly one prompt mode runs per job.
+    let points = parse_points(payload)?;
+    let box_xyxy = match &points {
+        Some(_) => None,
+        None => Some(parse_box(payload)?),
+    };
     // The optional text concept paired with the box (SAM3 PVS is text⊕box). Empty = rely on the
     // geometric prompt — the smart-select default, since the user draws a box around any object.
     let concept = payload
@@ -178,6 +232,26 @@ pub(crate) async fn run_image_segment_job(
         .and_then(Value::as_f64)
         .map(|v| v.clamp(0.0, 1.0) as f32)
         .unwrap_or(SEGMENT_MASK_THRESHOLD);
+
+    // The prompt recorded on the mask asset's `rawAdapterSettings` (both modes are engine "sam3"):
+    // the click points for the point path, the box + thresholds for the box path. Built now, before
+    // the prompt is moved into the segmentation task below.
+    let segment_settings = if let Some(points) = &points {
+        json!({
+            "engine": "sam3",
+            "points": points
+                .iter()
+                .map(|&(x, y, label)| json!({ "x": x, "y": y, "label": label }))
+                .collect::<Vec<_>>(),
+        })
+    } else {
+        json!({
+            "engine": "sam3",
+            "box": box_xyxy.expect("box prompt present when there are no points"),
+            "threshold": threshold,
+            "maskThreshold": mask_threshold,
+        })
+    };
 
     let project_id = payload
         .get("projectId")
@@ -226,6 +300,7 @@ pub(crate) async fn run_image_segment_job(
         cancel_message: "Smart-select canceled while fetching SAM3 weights.",
         fresh_download: false,
     };
+    // Both prompt modes load the same facebook/sam3 checkpoint — one resolve/download.
     let (model_path, tokenizer_path) = ensure_segmenter_weights(settings, &context).await?;
 
     update_job(
@@ -243,24 +318,39 @@ pub(crate) async fn run_image_segment_job(
     )
     .await?;
     let cancel = CancelFlag::new();
-    let mask = run_with_heartbeat(
-        api,
-        settings,
-        &job.id,
-        cancel.clone(),
-        tokio::task::spawn_blocking(move || {
-            segment_box_blocking(
-                model_path,
-                tokenizer_path,
-                source_image,
-                box_xyxy,
-                &concept,
-                threshold,
-                mask_threshold,
-            )
-        }),
-    )
-    .await?;
+    // Points → SAM3 tracker single-frame PVS (interactive clicks); box → SAM3 concept detector.
+    let mask = if let Some(points) = points {
+        run_with_heartbeat(
+            api,
+            settings,
+            &job.id,
+            cancel.clone(),
+            tokio::task::spawn_blocking(move || {
+                segment_points_blocking(model_path, source_image, points)
+            }),
+        )
+        .await?
+    } else {
+        let box_xyxy = box_xyxy.expect("box prompt present when there are no points");
+        run_with_heartbeat(
+            api,
+            settings,
+            &job.id,
+            cancel.clone(),
+            tokio::task::spawn_blocking(move || {
+                segment_box_blocking(
+                    model_path,
+                    tokenizer_path,
+                    source_image,
+                    box_xyxy,
+                    &concept,
+                    threshold,
+                    mask_threshold,
+                )
+            }),
+        )
+        .await?
+    };
 
     // The mask is a row-major `src_w*src_h` 0/255 grayscale buffer (white = the selected region).
     let mask_image = image::GrayImage::from_raw(src_w, src_h, mask)
@@ -317,12 +407,7 @@ pub(crate) async fn run_image_segment_job(
         "stylePreset": "",
         "sourceAssetId": source_asset_id,
         "rawAdapterSettings": {
-            "segment": {
-                "engine": "sam3",
-                "box": box_xyxy,
-                "threshold": threshold,
-                "maskThreshold": mask_threshold,
-            }
+            "segment": segment_settings,
         },
         "parents": [source_asset_id],
         "extra": {
