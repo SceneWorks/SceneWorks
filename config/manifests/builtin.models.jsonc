@@ -1001,6 +1001,226 @@
       }
     },
     {
+      "id": "boogu_image",
+      "name": "Boogu Image",
+      "family": "boogu",
+      "type": "image",
+      // Boogu-Image-0.1 Base (epic 6387) — a Lumina-Image-2.0 / OmniGen2-lineage flow-matching image
+      // model: a mixed single/double-stream DiT (hidden 3360, 40 layers = 8 double + 32 single + 2
+      // refiner, GQA 28q/7kv, 3-axis RoPE) + a Qwen3-VL-8B condition encoder + the FLUX.1 16-channel
+      // VAE. Native MLX only (mlx-gen-boogu, no torch backend) → macOnly. True-CFG text-to-image.
+      // Worker routing through engines::MODEL_TABLE / the gen_core registry lands in sc-6399 (until
+      // then macSupport.supported is false — the model is downloadable but not yet a Studio picker).
+      // `adapter` is the asset stamp (mirrors mlx_<family>).
+      "adapter": "mlx_boogu",
+      "capabilities": ["text_to_image"],
+      "macOnly": true,
+      "downloads": [
+        {
+          // Pre-converted MLX turnkey on the SceneWorks HF org (epic 6387 / sc-6397): ONE repo with
+          // Q8 `base/ turbo/ edit/` subfolders (the ship default) + `*-bf16/` full-precision
+          // subfolders. Each subfolder is a complete `transformer/` + `mllm/` (Qwen3-VL + tokenizer)
+          // + `vae/` snapshot loadable via BooguPipeline::from_snapshot. This entry pulls only the Q8
+          // `base/` subfolder (leaf-dir globs — the subfolder nests, so a single-level `base/*` would
+          // miss the files). Apache-2.0, ungated.
+          "provider": "huggingface",
+          "repo": "SceneWorks/boogu-image-mlx",
+          "files": ["base/transformer/*", "base/mllm/*", "base/vae/*"],
+          "platforms": ["macos"],
+          "estimatedSizeBytes": 23380234752
+        }
+      ],
+      "paths": {
+        "model": "${HF_CACHE}/SceneWorks/boogu-image-mlx"
+      },
+      "defaults": {
+        // Reference __call__ defaults: 50 steps, true-CFG guidance 4.0 at native 1024² (clean in the
+        // 25-50 step / 2-5 guidance band).
+        "resolution": "1024x1024",
+        "steps": 50,
+        "guidanceScale": 4.0,
+        "count": 1,
+        "sampler": "default",
+        "scheduler": "default"
+      },
+      "limits": {
+        // W×H multiples of 16 (validate_multiple_of_16). Single static-v1 time-shift schedule → one
+        // sampler / scheduler.
+        "resolutions": ["1024x1024", "768x1024", "1024x768", "1280x720", "720x1280"],
+        "count": [1, 2, 4],
+        "samplers": ["default"],
+        "schedulers": ["default"]
+      },
+      "loraCompatibility": {
+        // No Boogu LoRA wired yet (the engine descriptor reports supports_lora: false). Family
+        // reserved for when/if adapters are added.
+        "families": ["boogu"],
+        "types": []
+      },
+      "mlx": {
+        // Pre-quantized turnkey — `base/` ships packed Q8 (group size 32: the DiT hidden 3360 is
+        // divisible by 32, not the usual 64 — E8), so there is NO bf16 load transient and no runtime
+        // quantize. quantize: 8 records the shipped Q8 in the asset recipe. MEASURED Q8 @1024²: ~35.5
+        // GB runtime peak (E8-2, largely activation-bound), so minMemoryGb 64 with headroom. The
+        // `base-bf16/` subfolder is the full-precision opt-in; its selection path is wired with worker
+        // routing (sc-6399).
+        "minMemoryGb": 64,
+        "quantize": 8,
+        "repo": "SceneWorks/boogu-image-mlx"
+      },
+      "licenseUrl": "https://huggingface.co/Boogu/Boogu-Image-0.1-Base",
+      "ui": {
+        "label": "Boogu Image",
+        "description": "Boogu-Image-0.1 — a Lumina-Image-2.0 / OmniGen2-lineage flow-matching text-to-image model (~10.3B DiT + Qwen3-VL-8B condition encoder + FLUX.1 VAE), native MLX (Apple Silicon). True-CFG, natural-language prompting with strong bilingual (English/Chinese) in-image text rendering. Pre-quantized Q8 (~23 GB, default; full-precision bf16 also hosted). Apache-2.0 (ungated). Needs a 64 GB-class Mac.",
+        "recommendedFor": ["text_to_image"],
+        "promptGuide": {
+          "title": "Boogu Image Prompt Guide",
+          "path": "/prompt-guides/boogu-image.md",
+          "sources": [
+            { "label": "Boogu-Image-0.1 (Hugging Face)", "url": "https://huggingface.co/Boogu" },
+            { "label": "SceneWorks/boogu-image-mlx", "url": "https://huggingface.co/SceneWorks/boogu-image-mlx" }
+          ]
+        }
+      }
+    },
+    {
+      "id": "boogu_image_turbo",
+      "name": "Boogu Image Turbo",
+      "family": "boogu",
+      "type": "image",
+      // Boogu-Image-0.1 Turbo (epic 6387) — the DMD few-step, CFG-free distilled variant: same
+      // architecture as Base but ~4 steps and no unconditional branch (guidance inert), so a render is
+      // several times faster — the variant to iterate with. Native MLX only; same gen_core engine
+      // code (BooguPipeline::generate_turbo), the `turbo/` checkpoint.
+      "adapter": "mlx_boogu",
+      "capabilities": ["text_to_image"],
+      "macOnly": true,
+      "downloads": [
+        {
+          // Q8 `turbo/` subfolder of the shared SceneWorks/boogu-image-mlx turnkey (sc-6397).
+          "provider": "huggingface",
+          "repo": "SceneWorks/boogu-image-mlx",
+          "files": ["turbo/transformer/*", "turbo/mllm/*", "turbo/vae/*"],
+          "platforms": ["macos"],
+          "estimatedSizeBytes": 23380234586
+        }
+      ],
+      "paths": {
+        "model": "${HF_CACHE}/SceneWorks/boogu-image-mlx"
+      },
+      "defaults": {
+        // Few-step DMD default (4); CFG-free, so guidanceScale is inert (the turbo path never forwards
+        // a guidance value / negative prompt).
+        "resolution": "1024x1024",
+        "steps": 4,
+        "guidanceScale": 0,
+        "count": 1,
+        "sampler": "default",
+        "scheduler": "default"
+      },
+      "limits": {
+        "resolutions": ["1024x1024", "768x1024", "1024x768", "1280x720", "720x1280"],
+        "count": [1, 2, 4],
+        "samplers": ["default"],
+        "schedulers": ["default"]
+      },
+      "loraCompatibility": {
+        "families": ["boogu"],
+        "types": []
+      },
+      "mlx": {
+        // Same pre-quantized Q8 turnkey (turbo/ subfolder, same weights footprint as Base). Few-step +
+        // single forward per step → the lightest Boogu path; minMemoryGb 64 mirrors Base.
+        "minMemoryGb": 64,
+        "quantize": 8,
+        "repo": "SceneWorks/boogu-image-mlx"
+      },
+      "licenseUrl": "https://huggingface.co/Boogu/Boogu-Image-0.1-Turbo",
+      "ui": {
+        "label": "Boogu Image Turbo",
+        "description": "Boogu-Image-0.1 Turbo — the few-step (~4), CFG-free fast variant of Boogu Image: the same ~10.3B flow-matching model distilled (DMD) for much faster renders, native MLX (Apple Silicon). Best for quick iteration. Pre-quantized Q8 (~23 GB, default). Apache-2.0 (ungated). Needs a 64 GB-class Mac.",
+        "recommendedFor": ["text_to_image"],
+        "promptGuide": {
+          "title": "Boogu Image Prompt Guide",
+          "path": "/prompt-guides/boogu-image.md",
+          "sources": [
+            { "label": "Boogu-Image-0.1 (Hugging Face)", "url": "https://huggingface.co/Boogu" },
+            { "label": "SceneWorks/boogu-image-mlx", "url": "https://huggingface.co/SceneWorks/boogu-image-mlx" }
+          ]
+        }
+      }
+    },
+    {
+      "id": "boogu_image_edit",
+      "name": "Boogu Image Edit",
+      "family": "boogu",
+      "type": "image",
+      // Boogu-Image-0.1 Edit (epic 6387) — the instruction image-edit checkpoint: the source image is
+      // routed through the Qwen3-VL VISION tower so the MLLM "sees" it, and a text instruction drives a
+      // faithful semantic edit (BooguPipeline::generate_edit → forward_edit). The vision-tower
+      // semantic edit is an EDIT-checkpoint capability — Base produces incoherent output for it
+      // (verified against the reference pipeline, E7b-3), so editing ships on these dedicated weights
+      // only. Native MLX only; the `edit/` checkpoint (carries the lazily-loaded f32 vision tower).
+      "adapter": "mlx_boogu",
+      "capabilities": ["edit_image"],
+      "macOnly": true,
+      "downloads": [
+        {
+          // Q8 `edit/` subfolder of SceneWorks/boogu-image-mlx (sc-6397).
+          "provider": "huggingface",
+          "repo": "SceneWorks/boogu-image-mlx",
+          "files": ["edit/transformer/*", "edit/mllm/*", "edit/vae/*"],
+          "platforms": ["macos"],
+          "estimatedSizeBytes": 23380234314
+        }
+      ],
+      "paths": {
+        "model": "${HF_CACHE}/SceneWorks/boogu-image-mlx"
+      },
+      "defaults": {
+        // Edit mirrors Base __call__: 50 steps, true-CFG guidance 4.0 at 1024². The source image's own
+        // dimensions (multiples of 16) drive the reference latent.
+        "resolution": "1024x1024",
+        "steps": 50,
+        "guidanceScale": 4.0,
+        "count": 1,
+        "sampler": "default",
+        "scheduler": "default"
+      },
+      "limits": {
+        "resolutions": ["1024x1024", "768x1024", "1024x768", "1280x720", "720x1280"],
+        "count": [1, 2, 4],
+        "samplers": ["default"],
+        "schedulers": ["default"]
+      },
+      "loraCompatibility": {
+        "families": ["boogu"],
+        "types": []
+      },
+      "mlx": {
+        // Pre-quantized Q8 turnkey (edit/ subfolder). MEASURED @1024²: Q8 runtime a touch above Base —
+        // the f32 Qwen3-VL vision tower loads lazily on the first edit (Q4 was 29.5 vs 27.1 GB in
+        // E8-2) — still comfortably within 64 GB.
+        "minMemoryGb": 64,
+        "quantize": 8,
+        "repo": "SceneWorks/boogu-image-mlx"
+      },
+      "licenseUrl": "https://huggingface.co/Boogu/Boogu-Image-0.1-Edit",
+      "ui": {
+        "label": "Boogu Image Edit",
+        "description": "Boogu-Image-0.1 Edit — instruction-driven image editing: give a source image and a text instruction and Boogu produces a faithful edited image (the source is read by the Qwen3-VL vision tower). Native MLX (Apple Silicon). Pre-quantized Q8 (~23 GB, default). Apache-2.0 (ungated). Needs a 64 GB-class Mac.",
+        "recommendedFor": ["edit_image"],
+        "promptGuide": {
+          "title": "Boogu Image Prompt Guide",
+          "path": "/prompt-guides/boogu-image.md",
+          "sources": [
+            { "label": "Boogu-Image-0.1 (Hugging Face)", "url": "https://huggingface.co/Boogu" },
+            { "label": "SceneWorks/boogu-image-mlx", "url": "https://huggingface.co/SceneWorks/boogu-image-mlx" }
+          ]
+        }
+      }
+    },
+    {
       "id": "flux2_klein_9b",
       "name": "FLUX.2 [klein] 9B",
       "family": "flux2-klein",
