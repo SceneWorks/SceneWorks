@@ -39,8 +39,8 @@ describe("LogsScreen", () => {
         0,
         "api",
         "info",
-        "mlx_route_decision decision=fell_back_to_torch reason=no_idle_mlx_worker model=qwen_image_edit_2511_lightning",
-        { event: "mlx_route_decision", decision: "fell_back_to_torch", reason: "no_idle_mlx_worker" },
+        "gpu_route_decision decision=claimed_by_candle reason=candle_worker model=ltx_2_3",
+        { event: "gpu_route_decision", decision: "claimed_by_candle", reason: "candle_worker" },
       ),
       row(1, "worker", "error", "image_inference_failed error=boom", { event: "image_inference_failed", error: "boom" }),
       row(2, "mlx-worker", "info", "claimed jobId=j1", { event: "claimed", jobId: "j1" }),
@@ -70,7 +70,7 @@ describe("LogsScreen", () => {
   it("renders captured log entries with their messages", async () => {
     await render();
     expect(container.querySelectorAll(".logs-row").length).toBe(3);
-    expect(container.textContent).toContain("fell_back_to_torch");
+    expect(container.textContent).toContain("claimed_by_candle");
     expect(container.textContent).toContain("image_inference_failed");
   });
 
@@ -78,7 +78,7 @@ describe("LogsScreen", () => {
     await render();
     const highlighted = container.querySelector(".logs-row.highlighted");
     expect(highlighted).toBeTruthy();
-    expect(highlighted.textContent).toContain("fell_back_to_torch");
+    expect(highlighted.textContent).toContain("claimed_by_candle");
   });
 
   it("requests server-side filtering when a source is selected", async () => {

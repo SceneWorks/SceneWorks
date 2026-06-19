@@ -10,8 +10,8 @@
   sidecar (the sc-5126 teardown). Companion to docs/sc-5099/candle-lane-smoke.md.
 
   The candle worker claims Lens jobs via the "candle" capability marker + worker_supports_job; the
-  API's mlx_route_decision log (which only knows about MLX) will say fell_back_to_torch -- ignore it,
-  the candle_lens asset label is the proof the candle lane ran.
+  API's gpu_route_decision log names the backend that ran it (decision=claimed_by_candle /
+  reason=candle_worker); the candle_lens asset label is the proof the candle lane ran.
 
 .PREREQUISITES
   - Build the binaries (VS2022 v143 BuildTools / CUDA 12.9; sm_120 native PTX shown):

@@ -48,7 +48,7 @@ Routing is by **capability advertisement**, not by queue or static config:
 4. CPU-utility kinds (`NON_GPU_JOB_TYPES`: `model_download`, `model_import`,
    `model_convert`, `lora_import`) never route to GPU workers.
 5. Route decisions are logged (`RouteDecision`:
-   `deferred_to_mlx | claimed_by_mlx | fell_back_to_torch | explicit_gpu`).
+   `deferred_to_mlx | claimed_by_mlx | claimed_by_candle | claimed_by_gpu | explicit_gpu`).
 
 > "Rust ✅" in the matrix means **"in its capable configuration"** — CPU-utility
 > off macOS, MLX GPU on macOS. Off-macOS, GPU arms in `lib.rs` are

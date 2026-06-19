@@ -11,7 +11,7 @@ to a per-process file under the platform log dir (`apps/desktop/src/setup.rs::lo
 
 | File | Process | Content |
 | --- | --- | --- |
-| `api.log` | `sceneworks-api` | API events incl. `mlx_route_decision`, plus axum/startup output |
+| `api.log` | `sceneworks-api` | API events incl. `gpu_route_decision`, plus axum/startup output |
 | `worker.log` | Python torch worker | `emit_worker_event` JSON (load/lora/inference + `backend`) |
 | `mlx-worker.log` | Rust MLX GPU worker | `claim_lock_contention`, `image_inference_*`, supervisor events |
 
@@ -72,7 +72,7 @@ persisted or surfaced.
 
 **System → Logs** (`apps/web/src/screens/LogsScreen.jsx`). Read-only, live-tailing,
 filter by source (api / worker / mlx-worker) and level (info / warn / error), free-text
-search. Routing (`mlx_route_decision`) and contention (`claim_lock_contention`) events
+search. Routing (`gpu_route_decision`) and contention (`claim_lock_contention`) events
 are visually highlighted. Click a row to expand its raw structured event.
 
 Data source:
@@ -92,21 +92,24 @@ shape minus the declared `level`). `LogEntry` reads the declared `level` when pr
 (`error`/`warn`/`info`/`debug`), falling back to a heuristic otherwise, and derives a
 compact `message` summary from each line.
 
-### Routing — `mlx_route_decision` (API, sc-3449)
+### Routing — `gpu_route_decision` (API, sc-3449)
 
 Emitted at claim time whenever a claim is routing-relevant. **This is the line that
-answers "why did this run on torch instead of MLX?"**
+answers "which backend ran this job?"** Every label is named after the backend that
+actually claimed the job — never as a deficiency, so the line never reads as if a worker
+is missing on a platform that never had one (e.g. there is no MLX worker off-Mac).
 
 | field | meaning |
 | --- | --- |
-| `decision` | `deferred_to_mlx` \| `claimed_by_mlx` \| `fell_back_to_torch` \| `explicit_gpu` |
-| `reason` | `idle_mlx_available` \| `mlx_worker` \| `no_idle_mlx_worker` \| `explicit_gpu` |
+| `decision` | `deferred_to_mlx` \| `claimed_by_mlx` \| `claimed_by_candle` \| `claimed_by_gpu` \| `explicit_gpu` |
+| `reason` | `idle_mlx_available` \| `mlx_worker` \| `candle_worker` \| `gpu_worker` \| `explicit_gpu` |
 | `model`, `jobType`, `requestedGpu`, `workerId`, `gpuId` | context |
 
-- `deferred_to_mlx` / `idle_mlx_available` — a torch worker yielded the job to an idle MLX worker.
-- `claimed_by_mlx` / `mlx_worker` — the MLX worker took an MLX-eligible job (the happy path).
-- `fell_back_to_torch` / `no_idle_mlx_worker` — **an MLX-eligible job ran on torch because no idle MLX worker was available** (restart churn, busy, or down).
-- `explicit_gpu` — the user pinned a specific GPU, so MLX routing was intentionally bypassed.
+- `claimed_by_mlx` / `mlx_worker` — the MLX worker took the job (the Mac GPU path).
+- `claimed_by_candle` / `candle_worker` — the candle (Windows/Linux CUDA) worker took the job. **The expected off-Mac happy path**, not a fallback. Candle is identified by the `candle` capability marker (it runs on a real GPU index, so `gpuId` alone can't distinguish it).
+- `claimed_by_gpu` / `gpu_worker` — a defensive catch-all: a GPU worker that is neither MLX nor candle took the job. With the Python torch worker retired from every surface, this should not appear in practice; it names no specific backend.
+- `deferred_to_mlx` / `idle_mlx_available` — a non-mlx worker yielded the job to an idle MLX worker (Mac only).
+- `explicit_gpu` — the user pinned a specific GPU, so backend auto-routing was intentionally bypassed.
 
 ### Claim contention — `claim_lock_contention` (Rust worker, sc-3448)
 
@@ -138,14 +141,14 @@ two is the signature of a cold-weight load — the prime suspect when an MLX job
 > information, accurate to the Rust engine's architecture, rather than fabricated
 > zero-duration sub-phase events.
 
-### MLX generator cache idle eviction — `mlx_generator_cache_idle_evicted`
+### Generator cache idle eviction — `generator_cache_idle_evicted`
 
-Emitted by the Rust MLX worker when the shared generator cache drops its
-resident generator after the idle timeout: `engine`, `idleSeconds`. This is
-expected after the worker has been idle for
-`SCENEWORKS_GENERATOR_CACHE_IDLE_SECONDS` seconds (default 300). It should
-correlate with the worker releasing cached Metal/MLX allocations before the
-next generation cold-loads weights again.
+Emitted by the Rust worker (MLX on Mac, candle/CUDA off-Mac — the generator cache is
+shared code) when it drops its resident generator after the idle timeout: `engine`,
+`idleSeconds`. This is **expected** after the worker has been idle for
+`SCENEWORKS_GENERATOR_CACHE_IDLE_SECONDS` seconds (default 300) and is logged at info
+level. It correlates with the worker releasing cached GPU allocations (Metal/MLX or
+CUDA) before the next generation cold-loads weights again.
 
 ### API errors — `api_error` (API)
 
@@ -164,11 +167,17 @@ query string), `reason` (`missing_or_invalid_token`), `status` (401). The token 
 secret is deliberately **never** logged. Previously these rejections returned 401
 with no server-side trace.
 
-## Diagnosing "MLX-eligible job ran on torch/MPS"
+## Diagnosing "which backend ran this job?"
 
-1. Open **System → Logs**, filter source = `api`, search `mlx_route_decision`.
-2. Find the decision for the job's model. `fell_back_to_torch` + `no_idle_mlx_worker`
-   means the MLX worker wasn't idle/claimable at claim time — check `mlx-worker.log`
-   (filter source = `mlx-worker`) for restarts or `claim_lock_contention`.
-3. `claimed_by_mlx` plus `image_inference_*` on `mlx-worker` confirms a true MLX run.
-4. The asset's recorded `backend` (`mlx` vs `mps`/`cuda`) is the ground truth for where it ran.
+1. Open **System → Logs**, filter source = `api`, search `gpu_route_decision`.
+2. Find the decision for the job's model. The `decision`/`reason` names the backend
+   that claimed it: `claimed_by_candle` (Windows/Linux CUDA), `claimed_by_mlx` (Mac),
+   or `deferred_to_mlx` (Mac, yielded to the MLX worker). None of these means anything
+   is missing. (`claimed_by_gpu` is a generic catch-all that should not appear on a
+   shipped surface.)
+3. **On Mac, to confirm a true MLX run:** `claimed_by_mlx` plus `image_inference_*` on
+   `mlx-worker`. If you instead see `claimed_by_gpu` for an MLX-eligible model, the MLX
+   worker wasn't idle/claimable at claim time — check `mlx-worker.log` for restarts or
+   `claim_lock_contention`.
+4. The asset's recorded `backend` (`mlx` / `mps` / `cuda`) is the ground truth for where
+   it ran.

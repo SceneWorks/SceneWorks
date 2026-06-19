@@ -1223,7 +1223,7 @@ impl JobsStore {
         )?;
         let job = self.get_job_on_connection(&transaction, &queued.id)?;
         transaction.commit()?;
-        let decision = route_decision_for_claim(&queued, &worker_gpu_id, worker_id);
+        let decision = route_decision_for_claim(&queued, &worker);
         Ok((Some(job), decision))
     }
 
@@ -1971,9 +1971,11 @@ fn is_non_gpu_job_type(job_type: &str) -> bool {
     NON_GPU_JOB_TYPES.contains(&job_type)
 }
 
-/// The MLX↔torch routing decision for a single claim, emitted as a structured log
-/// event (`mlx_route_decision`) by the API so operators can see *why* a job ran where
-/// it did (sc-3449) — the line that answers "why did this MLX-eligible job run on torch?".
+/// The GPU routing decision for a single claim, emitted as a structured log event
+/// (`gpu_route_decision`) by the API so operators can see *which backend ran a job, and
+/// why* (sc-3449). Every label is named after the backend that actually claimed the job,
+/// never as a deficiency: on Windows/Linux a candle (CUDA) claim is the normal happy path,
+/// so the line must never read like an MLX worker is missing.
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct RouteDecision {
     pub job_id: String,
@@ -1982,10 +1984,11 @@ pub struct RouteDecision {
     pub requested_gpu: String,
     pub worker_id: String,
     pub gpu_id: String,
-    /// `deferred_to_mlx` | `claimed_by_mlx` | `fell_back_to_torch` | `explicit_gpu`.
+    /// `deferred_to_mlx` | `claimed_by_mlx` | `claimed_by_candle` | `claimed_by_gpu` |
+    /// `explicit_gpu`.
     pub decision: &'static str,
-    /// Machine-readable cause: `idle_mlx_available`, `mlx_worker`, `no_idle_mlx_worker`,
-    /// or `explicit_gpu`.
+    /// Machine-readable cause: `idle_mlx_available`, `mlx_worker`, `candle_worker`,
+    /// `gpu_worker`, or `explicit_gpu`.
     pub reason: &'static str,
 }
 
@@ -3170,21 +3173,24 @@ fn classify_convert_gap(payload: &Map<String, Value>) -> Result<(), UnsupportedR
     ))
 }
 
-/// Classify a *successful* claim for routing observability. `None` means the claim was
-/// routing-neutral (the job is not MLX-eligible, so no `mlx` worker would have wanted
-/// it). When a non-`mlx` worker claims an MLX-eligible job, the reason distinguishes a
-/// user pinning a specific GPU (`explicit_gpu`) from the case the team cares about — no
-/// idle `mlx` worker was available to take it (`fell_back_to_torch`/`no_idle_mlx_worker`).
-/// The deferral path (a non-mlx worker yielding to an idle mlx worker) is reported
-/// separately inside `claim_next_job_routed` as `deferred_to_mlx`.
-fn route_decision_for_claim(
-    job: &JobSnapshot,
-    gpu_id: &str,
-    worker_id: &str,
-) -> Option<RouteDecision> {
+/// Classify a *successful* claim for routing observability, named after the backend that
+/// actually took the job. `None` means the claim was routing-neutral (nothing an `mlx`
+/// worker would ever want, so there is nothing to explain). Every label describes what
+/// happened, never a deficiency: an `mlx` worker claim is `claimed_by_mlx`, a candle
+/// (Windows/Linux CUDA) claim is `claimed_by_candle`, and a user-pinned GPU is
+/// `explicit_gpu`. Candle is identified by the `candle` capability marker
+/// (`worker_is_candle`) — it runs on a real GPU index, so `gpu_id` alone can't distinguish
+/// it. Any other GPU worker falls to the generic `claimed_by_gpu` catch-all: with the
+/// Python torch worker retired from every surface, nothing else should claim these jobs, so
+/// the label names no specific backend. The deferral path (a non-mlx worker yielding to an
+/// idle mlx worker on Mac) is reported separately inside `claim_next_job_routed` as
+/// `deferred_to_mlx`.
+fn route_decision_for_claim(job: &JobSnapshot, worker: &WorkerSnapshot) -> Option<RouteDecision> {
     if !job_is_any_mlx_eligible(job) {
         return None;
     }
+    let gpu_id = worker.gpu_id.as_str();
+    let worker_id = worker.id.as_str();
     if gpu_id.eq_ignore_ascii_case("mlx") {
         return Some(RouteDecision::new(
             job,
@@ -3194,21 +3200,36 @@ fn route_decision_for_claim(
             "mlx_worker",
         ));
     }
-    if job.requested_gpu == "auto" {
+    // An explicit (non-`auto`) GPU pin is always honoured as the user asked.
+    if job.requested_gpu != "auto" {
+        return Some(RouteDecision::new(
+            job,
+            gpu_id,
+            worker_id,
+            "explicit_gpu",
+            "explicit_gpu",
+        ));
+    }
+    // An `auto` claim by a non-mlx GPU worker. On Windows/Linux the candle (CUDA) lane is
+    // the expected home, not a fallback. The `else` is a defensive catch-all for any other
+    // GPU worker — with the Python torch worker retired from every surface it should not
+    // fire in practice, so it is named generically rather than after a backend that no
+    // longer exists.
+    if worker_is_candle(worker) {
         Some(RouteDecision::new(
             job,
             gpu_id,
             worker_id,
-            "fell_back_to_torch",
-            "no_idle_mlx_worker",
+            "claimed_by_candle",
+            "candle_worker",
         ))
     } else {
         Some(RouteDecision::new(
             job,
             gpu_id,
             worker_id,
-            "explicit_gpu",
-            "explicit_gpu",
+            "claimed_by_gpu",
+            "gpu_worker",
         ))
     }
 }
@@ -3565,7 +3586,7 @@ fn image_job_is_mlx_eligible(job: &JobSnapshot) -> bool {
     // type (`run_image_generate_job`), and the per-model arms below already gate
     // `edit_image` (qwen/flux2/sdxl edit → eligible; torch-only edit models aren't
     // in `MLX_ROUTED_MODELS` → torch). Without `image_edit` in this gate, plain
-    // Image Edit fell through to torch silently with no `mlx_route_decision`
+    // Image Edit fell through to torch silently with no `gpu_route_decision`
     // (sc-3513).
     if !matches!(job.job_type, JobType::ImageGenerate | JobType::ImageEdit) {
         return false;

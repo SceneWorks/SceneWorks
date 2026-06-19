@@ -55,9 +55,9 @@ Introduce `tracing` + `tracing-subscriber` as the single logging backbone for al
 
 ### WS3 — Declared levels replace inference
 
-- Migrate the structured-event helpers (`sceneworks_worker::emit_json` / `emit_event`, the API's `mlx_route_decision` emitter) and the **high-value error/warn `eprintln!` sites** to `tracing::{error,warn,info,debug}!` with structured fields. The full ~200 `println!` sweep is **not** required — prioritize: (a) every existing structured event, (b) every `*_failed`/`*_error` site, (c) anything currently relied on by `docs/observability.md`.
+- Migrate the structured-event helpers (`sceneworks_worker::emit_json` / `emit_event`, the API's `gpu_route_decision` emitter — renamed from `mlx_route_decision` in the sc-3449 follow-up so the off-Mac candle lane isn't mislabelled) and the **high-value error/warn `eprintln!` sites** to `tracing::{error,warn,info,debug}!` with structured fields. The full ~200 `println!` sweep is **not** required — prioritize: (a) every existing structured event, (b) every `*_failed`/`*_error` site, (c) anything currently relied on by `docs/observability.md`.
 - **Preserve event names** as a field/target so the vocabulary in `docs/observability.md` stays valid, e.g.
-  `info!(event = "mlx_route_decision", decision = ?d, reason = %r, model = %m, job_id = %id);`
+  `info!(event = "gpu_route_decision", decision = ?d, reason = %r, model = %m, job_id = %id);`
 - Update `session_log::infer_level` so that when a line carries a **declared `level`**, that level is used verbatim; fall back to the existing heuristic only for legacy/plain lines that lack one. The Logs-screen `level` filter must become trustworthy.
 
 ### WS4 — Make API 500s and auth rejections visible
@@ -74,7 +74,7 @@ Introduce `tracing` + `tracing-subscriber` as the single logging backbone for al
 
 1. Secret redaction still scrubs tokens / api-keys / bearer / authorization before anything is persisted or surfaced.
 2. The `LogEntry` shape and the Logs-screen source/level/search filters keep working; expanding a row still shows the raw structured event.
-3. Every event documented in `docs/observability.md` is still emitted under its existing name (`mlx_route_decision`, `claim_lock_contention`, `image_inference_*`, `image_pipeline_load_*`, `mlx_generator_cache_idle_evicted`).
+3. Every event documented in `docs/observability.md` is still emitted under its documented name (`gpu_route_decision`, `claim_lock_contention`, `image_inference_*`, `image_pipeline_load_*`, `generator_cache_idle_evicted`).
 4. `job_id` / `worker_id` remain present on job-lifecycle events for cross-process correlation.
 5. No new heavyweight runtime dependency beyond the `tracing` ecosystem.
 6. `cargo fmt --check`, `cargo clippy`, and the existing test suites pass. (Repo has a rustfmt pre-commit hook — keep it green.)
@@ -85,7 +85,7 @@ Introduce `tracing` + `tracing-subscriber` as the single logging backbone for al
 - [x] `tracing` + `tracing-subscriber` are workspace dependencies; a single `init_logging()` is called from every Rust binary's `main`.
 - [x] `SCENEWORKS_LOG_FORMAT=json|pretty|auto` works; `auto` selects JSON for non-TTY stdout and pretty for a TTY. `RUST_LOG` filtering works.
 - [x] Running the API headless and hitting `GET /api/v1/logs` returns entries whose `level` is the **declared** level (not inferred). Forcing an internal error produces an `error`-level `api_error` entry visible in the logs; an unauthorized request produces a `warn`-level `auth_rejected` entry. *(Verified live: a 401 yields `warn` `auth_rejected`; a typed 4xx yields `debug` `api_error` that is **not** re-promoted to error; 5xx logs at `error` via the same `IntoResponse` branch.)*
-- [x] In the desktop build, the **System → Logs** screen still tails, filters by source/level (accurately now), searches, and expands raw events — and `mlx_route_decision` / `claim_lock_contention` rows are still highlighted. *(No frontend change; `LogEntry` shape unchanged, levels now declared.)*
+- [x] In the desktop build, the **System → Logs** screen still tails, filters by source/level (accurately now), searches, and expands raw events — and `gpu_route_decision` / `claim_lock_contention` rows are still highlighted. *(No frontend change; `LogEntry` shape unchanged, levels now declared.)*
 - [x] All structured events from `docs/observability.md` still appear under their documented names with their documented fields. Secrets are still redacted.
 - [x] `cargo fmt --check`, `cargo clippy`, and `cargo test` (all crates) pass; web tests (`apps/web`) unaffected.
 - [x] `docs/observability.md` updated (Logging backbone section + `api_error`/`auth_rejected` events); this doc's Status set to Done.

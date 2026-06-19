@@ -38,9 +38,9 @@ mod tests {
         api_session_log().push_line(
             "api",
             &json!({
-                "event": "mlx_route_decision",
-                "decision": "fell_back_to_torch",
-                "reason": "no_idle_mlx_worker",
+                "event": "gpu_route_decision",
+                "decision": "claimed_by_candle",
+                "reason": "candle_worker",
                 "model": marker,
                 "level": "info",
                 "reportedAt": "2026-06-07T00:00:00Z"
@@ -53,7 +53,7 @@ mod tests {
         });
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].source, "api");
-        assert!(hits[0].message.contains("decision=fell_back_to_torch"));
+        assert!(hits[0].message.contains("decision=claimed_by_candle"));
         assert!(hits[0].event.is_some());
     }
 }

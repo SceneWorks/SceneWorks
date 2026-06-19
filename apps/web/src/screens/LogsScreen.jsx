@@ -4,8 +4,8 @@ import { apiFetch } from "../api.js";
 import { useAppContext } from "../context/AppContext.js";
 
 // In-app Logs viewer (sc-3452). Shows the current session's activity — most
-// importantly the MLX↔torch routing decisions (`mlx_route_decision`) and claim
-// contention (`claim_lock_contention`) — so "why did this run on MPS not MLX?" is
+// importantly the GPU routing decisions (`gpu_route_decision`) and claim
+// contention (`claim_lock_contention`) — so "which backend ran this job?" is
 // answerable from inside the app instead of by tailing ~/Library/Logs/SceneWorks.
 //
 // Data source: on the desktop the rich multi-source buffer (api + worker +
@@ -20,7 +20,7 @@ const POLL_MS = 2000;
 const MAX_ROWS = 2000;
 
 // Events that answer the routing question get visual emphasis.
-const HIGHLIGHT_EVENTS = new Set(["mlx_route_decision", "claim_lock_contention"]);
+const HIGHLIGHT_EVENTS = new Set(["gpu_route_decision", "claim_lock_contention"]);
 
 async function fetchLogs(token, { afterSeq, limit, source, level, search }) {
   if (isDesktop) {
