@@ -597,6 +597,60 @@ describe("ImageStudio model picker capability gating", () => {
     expect(modeButton("Edit").disabled).toBe(true);
     expect(modeButton("Edit").title).toBe("No available Mac model supports this mode.");
   });
+
+  // Boogu-Image-0.1 (epic 6387 / sc-6400) is backend-driven — no dedicated JSX. Base/Turbo are
+  // text-to-image, Edit is the instruction-edit checkpoint, and (unlike Ideogram) Boogu is
+  // natural-language, so it must render the plain prompt textarea, NOT the structured caption builder.
+  const BOOGU_BASE = {
+    ...Z_IMAGE,
+    id: "boogu_image",
+    name: "Boogu Image",
+    family: "boogu",
+    capabilities: ["text_to_image"],
+    macSupport: { supported: true, features: { edit: false, reference: false } },
+  };
+  const BOOGU_TURBO = {
+    ...Z_IMAGE,
+    id: "boogu_image_turbo",
+    name: "Boogu Image Turbo",
+    family: "boogu",
+    capabilities: ["text_to_image"],
+    macSupport: { supported: true, features: { edit: false, reference: false } },
+  };
+  const BOOGU_EDIT = {
+    ...Z_IMAGE,
+    id: "boogu_image_edit",
+    name: "Boogu Image Edit",
+    family: "boogu",
+    capabilities: ["edit_image"],
+    macSupport: { supported: true, features: { edit: true, reference: false } },
+  };
+
+  it("surfaces Boogu Base/Turbo in Text (plain prompt, not the structured builder) and Edit in the Edit tab (sc-6400)", async () => {
+    await render(
+      baseContext({
+        imageModels: [BOOGU_BASE, BOOGU_TURBO, BOOGU_EDIT],
+        macCapabilities: MAC_CAPS,
+      }),
+    );
+
+    // Text tab: Base + Turbo (text_to_image); the Edit checkpoint is excluded.
+    const textOptions = modelOptionValues();
+    expect(textOptions).toContain("boogu_image");
+    expect(textOptions).toContain("boogu_image_turbo");
+    expect(textOptions).not.toContain("boogu_image_edit");
+
+    // Boogu is natural-language (no `structuredPrompt`) → the plain prompt textarea, NOT the
+    // Ideogram structured-caption builder.
+    expect(container.querySelector('textarea[aria-label="Prompt"]')).toBeTruthy();
+
+    // Edit tab enabled, and lists only the Edit checkpoint.
+    expect(modeButton("Edit").disabled).toBe(false);
+    await click(modeButton("Edit"));
+    await act(async () => {});
+    expect(field(container, "Model").value).toBe("boogu_image_edit");
+    expect(modelOptionValues()).toEqual(["boogu_image_edit"]);
+  });
 });
 
 describe("ImageStudio structured-prompt recipe round-trip (sc-6147)", () => {
