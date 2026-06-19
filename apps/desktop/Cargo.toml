@@ -6,8 +6,9 @@ rust-version.workspace = true
 publish = false
 
 # SceneWorks desktop shell (Tauri v2). Hosts the native webview (WebView2 on
-# Windows, WebKit on macOS) and, from sc-1346, manages the sceneworks-api and
-# Python inference sidecars.
+# Windows, WebKit on macOS) and manages the sceneworks-api sidecar + the native
+# GPU worker (MLX on macOS, candle/CUDA off-Mac). The Python inference worker was
+# retired off-Mac in sc-5563 (Phase 7), matching the macOS MLX-only cutover.
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }

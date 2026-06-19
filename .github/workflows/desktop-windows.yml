@@ -13,13 +13,12 @@ on:
       - "apps/web/**"
       - "apps/rust-api/**"
       - "apps/rust-worker/**"
-      - "apps/worker/**"
       - "crates/**"
-      # Also bundled into the installer: sceneworks_shared (staged by
-      # stage-python.mjs) and the builtin model catalog (embedded via
+      # Also embedded into the installer: the builtin model catalog (via
       # include_str! in setup.rs). Changes here can break the packaged app, so
       # they must trigger the only job that compiles + packages the desktop.
-      - "packages/shared/**"
+      # (The Python worker was retired off-Mac — sc-5563 — so apps/worker +
+      # packages/shared no longer feed the desktop bundle.)
       - "config/manifests/**"
       - "Cargo.toml"
       - "Cargo.lock"
@@ -56,10 +55,12 @@ jobs:
         run: cargo test -p sceneworks-desktop
       - name: Check desktop Rust lint
         run: npm run desktop:check
-      # `tauri build` runs the beforeBuildCommand (build-sidecar/fetch-uv/
-      # stage-python), then compiles the Tauri shell and packages the NSIS
-      # installer. --bundles nsis pins the release pipeline to NSIS (the .exe
-      # installer) and skips WiX/MSI. Output lands in the workspace target dir.
+      # `tauri build` runs the beforeBuildCommand (build-sidecar.mjs — builds the
+      # API sidecar + stages the onnxruntime/ffmpeg/cuda resources), then compiles
+      # the Tauri shell and packages the NSIS installer. This plain lane builds
+      # WITHOUT candle (no Python either, sc-5563) — desktop-candle-windows.yml is
+      # the candle/CUDA build. --bundles nsis pins the release pipeline to NSIS (the
+      # .exe installer) and skips WiX/MSI. Output lands in the workspace target dir.
       - name: Build Windows installer (NSIS)
         run: npm --prefix apps/desktop run build -- --bundles nsis
       - name: Upload installer artifact
