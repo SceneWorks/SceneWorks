@@ -8797,8 +8797,8 @@ fn builtin_manifest_registers_the_prompt_refine_model() {
         .as_array()
         .expect("models array")
         .iter()
-        .find(|entry| entry["id"] == "prompt_refine_llama_3_2_3b")
-        .expect("prompt_refine_llama_3_2_3b is registered in the catalog");
+        .find(|entry| entry["id"] == "prompt_refine_anubis_8b")
+        .expect("prompt_refine_anubis_8b is registered in the catalog");
     // A non-generation utility entry (mirrors the upscalers): absent from the image/video
     // studio pickers, present + downloadable in Model Manager.
     assert_eq!(model["type"], "utility");
@@ -8810,13 +8810,13 @@ fn builtin_manifest_registers_the_prompt_refine_model() {
     // Must match the worker's DEFAULT_REFINE_MODEL (prompt_refine_jobs.rs) — the string the
     // worker passes to huggingface_snapshot_dir.
     assert_eq!(
-        download["repo"], "huihui-ai/Llama-3.2-3B-Instruct-abliterated",
+        download["repo"], "TheDrummer/Anubis-Mini-8B-v1",
         "manifest repo must match the worker's DEFAULT_REFINE_MODEL"
     );
     // The catalog install-state path must resolve the same HF repo the worker does.
     assert_eq!(
         model["paths"]["model"],
-        "${HF_CACHE}/huihui-ai/Llama-3.2-3B-Instruct-abliterated"
+        "${HF_CACHE}/TheDrummer/Anubis-Mini-8B-v1"
     );
 }
 

@@ -398,7 +398,7 @@ string_enum! {
         // macOS (sc-5552) and candle on the Windows/CUDA build when `backend_candle_enabled`
         // (sc-5525). The torch `PromptRefiner` remains only as the fallback on platforms with neither
         // native provider (e.g. the candle-less Desktop installer / Linux). The model is provisioned
-        // from the catalog (`prompt_refine_llama_3_2_3b`, sc-5605) into the HF cache the worker
+        // from the catalog (`prompt_refine_anubis_8b`, sc-5605/sc-6550) into the HF cache the worker
         // resolves; the native path does not auto-download. Routed by capability match. See
         // apps/worker/scene_worker/runtime.py and crates/sceneworks-worker/src/prompt_refine_jobs.rs.
         PromptRefine => "prompt_refine",
