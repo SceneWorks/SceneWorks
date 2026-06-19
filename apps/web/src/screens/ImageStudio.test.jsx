@@ -651,6 +651,18 @@ describe("ImageStudio model picker capability gating", () => {
     expect(field(container, "Model").value).toBe("boogu_image_edit");
     expect(modelOptionValues()).toEqual(["boogu_image_edit"]);
   });
+
+  it("offers the Refine-my-prompt control for Boogu — prompt enhancement reuses prompt_refine (sc-6401)", async () => {
+    await render(baseContext({ imageModels: [BOOGU_BASE, BOOGU_TURBO], macCapabilities: MAC_CAPS }));
+
+    // Boogu is non-structured, so the plain-prompt path renders RefinePromptControl ("Refine my
+    // prompt"). It drives the prompt_refine utility with Boogu's prompt guide as the rewriter context
+    // (S4) — the optional, user-editable enhancement step; raw prompt remains the fallback.
+    const refineButton = [...container.querySelectorAll("button")].find((b) =>
+      b.textContent.includes("Refine my prompt"),
+    );
+    expect(refineButton).toBeTruthy();
+  });
 });
 
 describe("ImageStudio structured-prompt recipe round-trip (sc-6147)", () => {
