@@ -215,17 +215,17 @@ fn emit_candle_unavailable(job: &JobSnapshot) {
     );
 }
 
-/// Emit the MLX↔torch routing decision as a structured JSON line on the API's stdout
+/// Emit the GPU routing decision as a structured JSON line on the API's stdout
 /// (sc-3449). The desktop wrapper captures this into `api.log` + the in-app Logs buffer,
-/// so an MLX-eligible job that lands on torch is explained at claim time rather than
-/// inferred from archaeology. Shape mirrors the worker's `emit_worker_event` events
+/// so *which backend ran a job* is explained at claim time rather than inferred from
+/// archaeology. Shape mirrors the worker's `emit_worker_event` events
 /// (`event` + `reportedAt` + payload).
 fn emit_route_decision(decision: &RouteDecision) {
     let mut value = serde_json::to_value(decision).unwrap_or_else(|_| json!({}));
     if let Some(object) = value.as_object_mut() {
         object.insert(
             "event".to_owned(),
-            Value::String("mlx_route_decision".to_owned()),
+            Value::String("gpu_route_decision".to_owned()),
         );
     }
     // Emitted through the tracing backbone: the stdout JSON layer reaches the desktop

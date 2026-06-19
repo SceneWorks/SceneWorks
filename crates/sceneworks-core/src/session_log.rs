@@ -1,8 +1,8 @@
 //! In-memory session log buffer (epic 3447 / sc-3451, sc-3453).
 //!
 //! A bounded ring buffer of captured output lines that the app can read back to
-//! show "what happened this session" — most importantly the MLX↔torch routing
-//! decisions (`mlx_route_decision`), claim contention (`claim_lock_contention`)
+//! show "what happened this session" — most importantly the GPU routing
+//! decisions (`gpu_route_decision`), claim contention (`claim_lock_contention`)
 //! and the worker generation phases — without log-archaeology across the three
 //! append-only files in `~/Library/Logs/SceneWorks/`.
 //!
@@ -24,7 +24,7 @@ use crate::time::utc_now;
 /// One captured log line, tagged with its origin and severity (the **declared**
 /// `level` from the tracing backbone when present, else inferred), plus the parsed
 /// structured event when the line was a JSON object (the worker's `emit_worker_event`
-/// output or the API's `mlx_route_decision`).
+/// output or the API's `gpu_route_decision`).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct LogEntry {
@@ -334,9 +334,9 @@ mod tests {
         log.push_line(
             "api",
             &json!({
-                "event": "mlx_route_decision",
-                "decision": "fell_back_to_torch",
-                "reason": "no_idle_mlx_worker",
+                "event": "gpu_route_decision",
+                "decision": "claimed_by_candle",
+                "reason": "candle_worker",
                 "model": "qwen_image_edit_2511_lightning",
                 "jobId": "job_1",
                 "reportedAt": "2026-06-07T00:00:00Z"
@@ -349,9 +349,9 @@ mod tests {
         assert_eq!(entry.source, "api");
         assert_eq!(entry.level, "info");
         assert_eq!(entry.timestamp, "2026-06-07T00:00:00Z");
-        assert!(entry.message.contains("mlx_route_decision"));
-        assert!(entry.message.contains("decision=fell_back_to_torch"));
-        assert!(entry.message.contains("reason=no_idle_mlx_worker"));
+        assert!(entry.message.contains("gpu_route_decision"));
+        assert!(entry.message.contains("decision=claimed_by_candle"));
+        assert!(entry.message.contains("reason=candle_worker"));
         assert!(entry.event.is_some());
     }
 
@@ -368,7 +368,7 @@ mod tests {
         // A declared error level is honored even when the text has no error markers.
         log.push_line(
             "api",
-            &json!({ "event": "mlx_route_decision", "level": "error" }).to_string(),
+            &json!({ "event": "gpu_route_decision", "level": "error" }).to_string(),
         );
         // No declared level -> fall back to the heuristic (legacy / Python worker line).
         log.push_line(

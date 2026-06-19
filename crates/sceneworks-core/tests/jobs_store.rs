@@ -2966,10 +2966,13 @@ fn fail_unsupported_mlx_jobs_noop_when_warn_or_off() {
 // sc-3449 — claim_next_job_routed reports *why* an MLX-eligible job landed where it did.
 
 #[test]
-fn routing_decision_reports_fell_back_to_torch_with_no_mlx_worker() {
-    let store = store("route-decision-fallback");
-    // No mlx worker registered — the diagnostic case from the qwen-lightning report.
-    register_gpu_worker(&store, "worker-torch", "cuda:0", image_caps());
+fn routing_decision_reports_claimed_by_gpu_for_uncategorized_worker() {
+    let store = store("route-decision-gpu");
+    // Defensive catch-all: a GPU worker that is neither `mlx` nor candle (no `candle` marker)
+    // claims an MLX-eligible auto job. With the Python torch worker retired from every surface
+    // this should not happen in practice, so the decision is named generically
+    // (`claimed_by_gpu`) rather than after a backend that no longer exists.
+    register_gpu_worker(&store, "worker-gpu", "cuda:0", image_caps());
     let job = store
         .create_job(image_job_with(
             json!({
@@ -2983,17 +2986,41 @@ fn routing_decision_reports_fell_back_to_torch_with_no_mlx_worker() {
         .expect("job creates");
 
     let (claimed, decision) = store
-        .claim_next_job_routed("worker-torch", false)
-        .expect("torch claim ok");
-    assert_eq!(claimed.expect("torch claims it").id, job.id);
+        .claim_next_job_routed("worker-gpu", false)
+        .expect("gpu claim ok");
+    assert_eq!(claimed.expect("gpu worker claims it").id, job.id);
     let decision = decision.expect("routing decision present");
-    assert_eq!(decision.decision, "fell_back_to_torch");
-    assert_eq!(decision.reason, "no_idle_mlx_worker");
+    assert_eq!(decision.decision, "claimed_by_gpu");
+    assert_eq!(decision.reason, "gpu_worker");
     assert_eq!(decision.gpu_id, "cuda:0");
     assert_eq!(
         decision.model.as_deref(),
         Some("qwen_image_edit_2511_lightning")
     );
+}
+
+#[test]
+fn routing_decision_reports_claimed_by_candle() {
+    let store = store("route-decision-candle");
+    // The Windows/Linux happy path: the candle (CUDA) worker — identified by the `candle`
+    // capability marker, on a real gpu index ("0") — claims an MLX-eligible auto job. The
+    // decision names candle, never "fell back to torch": nothing is missing here.
+    register_candle_worker(&store, "worker-candle");
+    let job = store
+        .create_job(image_job_with(
+            json!({ "model": "z_image_turbo", "prompt": "p" }),
+            "auto",
+        ))
+        .expect("job creates");
+
+    let (claimed, decision) = store
+        .claim_next_job_routed("worker-candle", false)
+        .expect("candle claim ok");
+    assert_eq!(claimed.expect("candle claims it").id, job.id);
+    let decision = decision.expect("routing decision present");
+    assert_eq!(decision.decision, "claimed_by_candle");
+    assert_eq!(decision.reason, "candle_worker");
+    assert_eq!(decision.gpu_id, "0");
 }
 
 #[test]
@@ -3066,7 +3093,7 @@ fn routing_decision_is_none_for_non_mlx_model() {
 // engine dispatches edits on payload model+mode, not job type, so the edit-capable families
 // (qwen/flux2/sdxl) must route to the in-process mlx worker exactly like the generate flow;
 // torch-only edit models stay on torch. Before sc-3513 the routing gate excluded every
-// non-ImageGenerate type, so these jobs ran on torch silently with no `mlx_route_decision`.
+// non-ImageGenerate type, so these jobs ran on torch silently with no `gpu_route_decision`.
 
 #[test]
 fn qwen_image_edit_job_type_defers_to_mlx_worker() {
@@ -3258,7 +3285,7 @@ fn routing_decision_reports_claimed_by_mlx_for_image_edit() {
         ))
         .expect("job creates");
 
-    // The fix makes the claim non-routing-neutral: an mlx_route_decision is now emitted.
+    // The fix makes the claim non-routing-neutral: a gpu_route_decision is now emitted.
     let (claimed, decision) = store
         .claim_next_job_routed("worker-mlx", false)
         .expect("mlx claim ok");
@@ -3303,7 +3330,7 @@ fn torch_only_image_model_stays_on_torch() {
     assert_eq!(claimed.assigned_gpu.as_deref(), Some("mps"));
     assert!(
         decision.is_none(),
-        "a torch-only image model is routing-neutral (no mlx_route_decision)"
+        "a torch-only image model is routing-neutral (no gpu_route_decision)"
     );
 }
 
