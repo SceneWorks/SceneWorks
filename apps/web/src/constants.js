@@ -16,11 +16,13 @@ export const INTERLEAVE_RESOLUTION_OPTIONS = [
 ];
 export const DEFAULT_INTERLEAVE_RESOLUTION = "2048x1152";
 
-// Catalog id of the prompt-refinement LLM (sc-5605, builtin.models.jsonc). The native
-// worker resolves the model by repo string, not this id; the web uses it to look up the
-// catalog entry's install state and to enqueue its ModelDownload job when "Refine my
-// prompt" fails because the model isn't provisioned.
-export const PROMPT_REFINE_MODEL_ID = "prompt_refine_llama_3_2_3b";
+// Catalog id of the prompt-refinement / magic-prompt LLM (sc-5605 / sc-6550, builtin.models.jsonc):
+// one coherent Anubis-8B serves BOTH the free-text "Refine my prompt" rewrite AND Ideogram 4's
+// magic-prompt (plain idea -> structured JSON caption) — the sc-6550 bake-off found the old 3B / plain
+// Llama-3.1-8B emit degenerate captions that placeholder. The native worker resolves the model by repo
+// string, not this id; the web uses it to look up the catalog entry's install state and to enqueue its
+// ModelDownload job when refine / magic-prompt needs it.
+export const PROMPT_REFINE_MODEL_ID = "prompt_refine_anubis_8b";
 
 // Catalog id of the dataset-captioning model (sc-5620, builtin.models.jsonc). Same pattern
 // as PROMPT_REFINE_MODEL_ID — the native captioner resolves it by repo string; the web uses

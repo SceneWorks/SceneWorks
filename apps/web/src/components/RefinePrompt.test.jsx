@@ -152,7 +152,7 @@ describe("RefinePromptControl", () => {
         workflow="image"
         refinePrompt={refinePrompt}
         onApply={vi.fn()}
-        refineModel={{ id: "prompt_refine_llama_3_2_3b", name: "Prompt Refiner", installState: "missing", downloadSizeBytes: 7222715642 }}
+        refineModel={{ id: "prompt_refine_anubis_8b", name: "Prompt Refiner", installState: "missing", downloadSizeBytes: 16077901824 }}
         onDownloadRefineModel={onDownloadRefineModel}
       />,
     );
@@ -164,7 +164,7 @@ describe("RefinePromptControl", () => {
 
     // The raw worker error is replaced by a download affordance with a size hint.
     expect(container.querySelector(".refine-missing-model").textContent).toContain("isn’t installed");
-    expect(container.querySelector(".refine-missing-model").textContent).toContain("7.2 GB");
+    expect(container.querySelector(".refine-missing-model").textContent).toContain("16.1 GB");
     const downloadButton = buttonByText(container, "Download refinement model");
     expect(downloadButton).toBeTruthy();
 
@@ -189,7 +189,7 @@ describe("RefinePromptControl", () => {
         workflow="image"
         refinePrompt={refinePrompt}
         onApply={vi.fn()}
-        refineModel={{ id: "prompt_refine_llama_3_2_3b", name: "Prompt Refiner", installState: "installed" }}
+        refineModel={{ id: "prompt_refine_anubis_8b", name: "Prompt Refiner", installState: "installed" }}
         onDownloadRefineModel={vi.fn()}
       />,
     );
