@@ -16,8 +16,11 @@
 //! with an `ffmpeg` fallback (and `ffmpeg`-only off macOS) — so it pulls in no native image-codec
 //! build (libdav1d/nasm/meson) and stays correct on the Windows candle lane.
 
+use std::borrow::Cow;
 use std::fmt;
 use std::path::Path;
+#[cfg(any(windows, test))]
+use std::path::PathBuf;
 use std::process::Command;
 
 /// Raster image formats recognized by magic bytes.
@@ -203,14 +206,105 @@ fn run_sips_to_png(src: &Path, dst: &Path) -> Result<(), TranscodeError> {
     ensure_nonempty_output(dst)
 }
 
+/// Resolve an ffmpeg program string to a spawn-ready path, working around a Windows launch
+/// failure. An executable reached through a symlink/reparse point — e.g. WinGet's
+/// `…\Microsoft\WinGet\Links\ffmpeg.exe` shim, a symbolic link to the real Gyan.FFmpeg binary —
+/// cannot be started under redirection-trust enforcement: `CreateProcess` returns
+/// `ERROR_UNTRUSTED_MOUNT_POINT` (os error 448), the very wall the HF-cache symlinks hit in the
+/// model loaders (see `sceneworks_worker::model_jobs`). We locate the program (searching `PATH`
+/// for a bare name) and, if it is a reparse point, resolve it to its real target — read **without
+/// traversing it** (`read_link`, chasing chained links) — and return that plain-file path. A plain
+/// executable, a name we cannot locate, or any non-Windows host returns the input unchanged so
+/// normal resolution (PATH search, the host's own ordering) is preserved.
+///
+/// This is the single resolver shared by the worker's `media_jobs::run_ffmpeg` and the transcoder
+/// below, so every ffmpeg spawn — timeline export, video encode, audio mux, frame extract, image
+/// transcode — is reparse-safe.
+pub fn resolve_ffmpeg_program(program: &str) -> Cow<'_, str> {
+    #[cfg(windows)]
+    {
+        if let Some(real) = resolve_ffmpeg_program_reparse(program) {
+            return Cow::Owned(real);
+        }
+    }
+    Cow::Borrowed(program)
+}
+
+/// Windows reparse-resolution core, factored out so it is unit-testable off-Windows
+/// (`#[cfg(any(windows, test))]`); the public resolver only invokes it under `#[cfg(windows)]`.
+/// Returns `Some(real_path)` only when the program resolves to a reparse point that must be
+/// rewritten; `None` (keep the original string) for a plain file or a name we cannot locate.
+#[cfg(any(windows, test))]
+fn resolve_ffmpeg_program_reparse(program: &str) -> Option<String> {
+    let located = locate_executable(program)?;
+    // A plain file launches fine — leave it to normal resolution.
+    if !is_symlink(&located) {
+        return None;
+    }
+    let real = resolve_reparse_chain(&located)?;
+    Some(real.to_string_lossy().into_owned())
+}
+
+/// `symlink_metadata` does not traverse the link, so a 448-prone reparse point is still detected.
+#[cfg(any(windows, test))]
+fn is_symlink(path: &Path) -> bool {
+    std::fs::symlink_metadata(path)
+        .map(|meta| meta.file_type().is_symlink())
+        .unwrap_or(false)
+}
+
+/// Find the file `CreateProcess` would launch. An explicit path is used as-is; a bare name is
+/// searched on `PATH` (trying the name and a `.exe` suffix). A candidate is accepted if it is a
+/// file *or* a symlink — the latter via `symlink_metadata`, which does not traverse and so still
+/// sees a link whose target cannot be opened.
+#[cfg(any(windows, test))]
+fn locate_executable(program: &str) -> Option<PathBuf> {
+    let direct = Path::new(program);
+    if direct.is_absolute() || direct.components().count() > 1 {
+        return (direct.exists() || is_symlink(direct)).then(|| direct.to_path_buf());
+    }
+    let path_var = std::env::var_os("PATH")?;
+    for dir in std::env::split_paths(&path_var) {
+        for suffix in ["", ".exe"] {
+            let candidate = dir.join(format!("{program}{suffix}"));
+            if candidate.is_file() || is_symlink(&candidate) {
+                return Some(candidate);
+            }
+        }
+    }
+    None
+}
+
+/// Follow a symlink to the first non-symlink path, resolving relative targets against the link's
+/// parent and bounding the walk so a cyclic link cannot loop forever. The caller only invokes this
+/// once `start` is known to be a symlink, so `read_link` runs without ever traversing the reparse
+/// point that would otherwise hit os error 448.
+#[cfg(any(windows, test))]
+fn resolve_reparse_chain(start: &Path) -> Option<PathBuf> {
+    let mut current = start.to_path_buf();
+    for _ in 0..16 {
+        if !is_symlink(&current) {
+            return Some(current);
+        }
+        let target = std::fs::read_link(&current).ok()?;
+        current = if target.is_absolute() {
+            target
+        } else {
+            current.parent()?.join(target)
+        };
+    }
+    None
+}
+
 fn run_ffmpeg_to_png(src: &Path, dst: &Path) -> Result<(), TranscodeError> {
     // Mirror the worker's ffmpeg resolution: the desktop app points SCENEWORKS_FFMPEG at its bundled
     // binary (it ships no system ffmpeg); the server stack leaves it unset and uses PATH.
-    let program = std::env::var("SCENEWORKS_FFMPEG")
+    let configured = std::env::var("SCENEWORKS_FFMPEG")
         .ok()
         .filter(|value| !value.trim().is_empty())
         .unwrap_or_else(|| "ffmpeg".to_owned());
-    let output = Command::new(&program)
+    let program = resolve_ffmpeg_program(&configured);
+    let output = Command::new(program.as_ref())
         .arg("-y")
         .arg("-loglevel")
         .arg("error")
@@ -316,6 +410,48 @@ mod tests {
             bytes.extend_from_slice(*brand);
         }
         bytes
+    }
+
+    /// The ffmpeg reparse-resolution fix (os error 448): a program reached through a symlink — e.g.
+    /// WinGet's `…\WinGet\Links\ffmpeg.exe` shim — resolves to its real, non-reparse target so
+    /// `CreateProcess` never has to traverse the reparse point. Skips when the platform won't let
+    /// the test create a symlink (e.g. Windows without Developer Mode).
+    #[test]
+    fn resolve_ffmpeg_program_follows_reparse_to_real_binary() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let real = dir.path().join("ffmpeg-real.exe");
+        std::fs::write(&real, b"MZ-stub").expect("write real binary");
+        let link = dir.path().join("ffmpeg.exe");
+
+        // Absolute target, like WinGet's Links shim.
+        #[cfg(unix)]
+        let made = std::os::unix::fs::symlink(&real, &link).is_ok();
+        #[cfg(windows)]
+        let made = std::os::windows::fs::symlink_file(&real, &link).is_ok();
+        #[cfg(not(any(unix, windows)))]
+        let made = false;
+        if !made {
+            return; // no privilege to create a symlink — nothing to resolve
+        }
+        assert!(is_symlink(&link), "precondition: the shim is a symlink");
+
+        let resolved = resolve_ffmpeg_program_reparse(&link.to_string_lossy())
+            .expect("a symlinked program resolves to its target");
+        assert_eq!(
+            std::fs::canonicalize(&resolved).expect("canonicalize resolved"),
+            std::fs::canonicalize(&real).expect("canonicalize real"),
+            "resolved path must point at the real binary"
+        );
+        assert!(
+            !is_symlink(Path::new(&resolved)),
+            "resolved path must not itself be a reparse point"
+        );
+
+        // A plain binary is left untouched (None → caller keeps the original program).
+        assert!(
+            resolve_ffmpeg_program_reparse(&real.to_string_lossy()).is_none(),
+            "a plain file needs no rewrite"
+        );
     }
 
     /// Real conversion path: a hand-rolled BMP → PNG via `sips`. macOS-only because `sips` is the
