@@ -438,20 +438,33 @@ mod tests {
             .recv_timeout(Duration::from_secs(1))
             .expect("cache seed ack");
 
-        thread::sleep(Duration::from_millis(80));
-
-        let (reply_tx, reply_rx) = mpsc::channel();
-        tx.send(Box::new(move |cache: &mut GeneratorCache| {
-            reply_tx
-                .send(cache.entry.is_none())
-                .expect("send cache state");
-        }))
-        .expect("check cache state");
-
-        assert!(
-            reply_rx
+        // Poll for eviction instead of asserting after a single fixed sleep. The worker only evicts
+        // when its `recv_timeout(idle)` actually TIMES OUT; under CI load the worker thread can be
+        // starved past a fixed wait, then wake to find the check job already queued and return it as
+        // `Ok` — resetting the idle window without ever evicting (the old flake). Each poll sleeps
+        // longer than the 20ms idle window so the worker gets a fresh timeout between checks, and the
+        // generous iteration budget tolerates a slow runner. Still verifies the same thing: idle
+        // timeout evicts the resident generator.
+        let mut evicted = false;
+        for _ in 0..100 {
+            thread::sleep(Duration::from_millis(50));
+            let (reply_tx, reply_rx) = mpsc::channel();
+            tx.send(Box::new(move |cache: &mut GeneratorCache| {
+                reply_tx
+                    .send(cache.entry.is_none())
+                    .expect("send cache state");
+            }))
+            .expect("check cache state");
+            if reply_rx
                 .recv_timeout(Duration::from_secs(1))
-                .expect("cache state reply"),
+                .expect("cache state reply")
+            {
+                evicted = true;
+                break;
+            }
+        }
+        assert!(
+            evicted,
             "expected idle timeout to evict the resident generator"
         );
         drop(tx);
