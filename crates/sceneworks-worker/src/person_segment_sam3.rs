@@ -29,7 +29,8 @@ use std::sync::{Mutex, OnceLock};
 use crate::downloads::{ensure_hf_cached_file, DownloadContext};
 use mlx_gen::weights::Weights;
 use mlx_gen_sam3::{
-    Sam3ImageSegmenter, Sam3TextConfig, Sam3Tokenizer, Sam3VideoModel, VideoFrameOutput,
+    Sam3ImageSegmenter, Sam3TextConfig, Sam3Tokenizer, Sam3Tracker, Sam3VideoModel,
+    VideoFrameOutput,
 };
 use mlx_rs::Array;
 
@@ -478,6 +479,83 @@ pub(crate) fn segment_box_blocking(
     Ok(mask_to_frame(&grid_mask, grid, width, height))
 }
 
+/// Smart-select POINT path (epic 6087, sc-6346): segment whatever lies under fg/bg click points on
+/// ONE still image with the native-MLX SAM3 **tracker's** single-frame PVS point prompt
+/// ([`Sam3Tracker::segment_points`]). SAM3 does interactive point refinement via its tracker (the
+/// SAM2-lineage promptable mask decoder); the box smart-select (sc-6105) uses the concept *detector*
+/// (`Sam3ImageSegmenter::segment_with_boxes`) while points use the *tracker* — but both load from the
+/// SAME `facebook/sam3` checkpoint, so no second model/download. `points` are `(x, y, label)` in
+/// source-image pixel coords, `label` `1` = foreground / `0` = background. Returns one binary mask
+/// (row-major `width*height`, `0`/`255`, white = the selected region) at the source dims — the same
+/// `maskAssetId` shape the box path returns for the editor's inpaint flow (sc-2436/2476). Loads the
+/// tracker from the shared (cached) SAM3 checkpoint + quantizes it (Q8 default); run under
+/// `spawn_blocking` (MLX is synchronous + holds the autorelease pool).
+pub(crate) fn segment_points_blocking(
+    model_path: PathBuf,
+    image: image::RgbImage,
+    points: Vec<(f32, f32, i32)>,
+) -> WorkerResult<Vec<u8>> {
+    let (width, height) = (image.width(), image.height());
+    if width == 0 || height == 0 {
+        return Err(WorkerError::InvalidPayload(
+            "smart-select source image has zero dimension".into(),
+        ));
+    }
+    if points.is_empty() {
+        return Err(WorkerError::InvalidPayload(
+            "smart-select point path needs at least one point".into(),
+        ));
+    }
+    let pixels = input_tensor(&image);
+
+    // SAM3 squashes the image to a fixed 1008² square (uniform, NOT aspect-preserving), so a source
+    // point maps to model-input space by the per-axis scale 1008/W, 1008/H (mirrors the box path's
+    // normalize_box_cxcywh — no letterbox math).
+    let (sx, sy) = (
+        INPUT_SIZE as f32 / width as f32,
+        INPUT_SIZE as f32 / height as f32,
+    );
+    let coords: Vec<(f32, f32)> = points.iter().map(|&(x, y, _)| (x * sx, y * sy)).collect();
+    let labels: Vec<i32> = points.iter().map(|&(_, _, l)| l).collect();
+
+    // Cached checkpoint (poison-recovery), shared with the box/video paths — all consume the same
+    // facebook/sam3 weight map (mirrors segment_box_blocking).
+    let cell = WEIGHTS.get_or_init(|| Mutex::new(None));
+    let mut guard = cell.lock().unwrap_or_else(|poisoned| {
+        let mut guard = poisoned.into_inner();
+        *guard = None;
+        guard
+    });
+    if guard.is_none() {
+        let weights = Weights::from_file(&model_path)
+            .map_err(|e| WorkerError::Engine(format!("sam3 weights load: {e}")))?;
+        *guard = Some(weights);
+    }
+    let weights = guard.as_ref().expect("weights loaded");
+
+    let mut tracker = Sam3Tracker::from_weights(weights)
+        .map_err(|e| WorkerError::Engine(format!("sam3 tracker build: {e}")))?;
+    if let Some(bits) = quant_bits() {
+        tracker
+            .quantize(bits)
+            .map_err(|e| WorkerError::Engine(format!("sam3 tracker quantize q{bits}: {e}")))?;
+    }
+
+    let mask = tracker
+        .segment_points(&pixels, &coords, &labels)
+        .map_err(|e| WorkerError::Engine(format!("sam3 tracker segment_points: {e}")))?;
+
+    // Low-res mask logits `[mg, mg]` → binarize `> 0` + resize to source dims (inverts the squash).
+    let grid = mask.low_res.shape()[0] as usize;
+    let logits = mask
+        .low_res
+        .as_dtype(mlx_rs::Dtype::Float32)
+        .map_err(|e| WorkerError::Engine(format!("sam3 mask read: {e}")))?
+        .as_slice::<f32>()
+        .to_vec();
+    Ok(mask_to_frame(&logits, grid, width, height))
+}
+
 /// Every tracked person's per-frame mask + a stable left-to-right paint order — the input to the
 /// SCAIL-2 color-mask painter (sc-5448). Unlike [`segment_track_blocking`] (which selects ONE person
 /// via ByteTrack anchors for replace_person), this keeps EVERY SAM3 object so each person can be
@@ -899,5 +977,67 @@ mod tests {
             "mask containment in box {containment:.3} too low (wrong object?)"
         );
         eprintln!("box-segment smoke: fg_frac={frac:.3} containment={containment:.3} dims={w}x{h}");
+    }
+
+    /// Real-weights smoke for the smart-select POINT path (sc-6346): decode an image → a single
+    /// foreground click on the subject → `segment_points_blocking` (SAM3 tracker single-frame PVS) →
+    /// a binary mask at the source dims, against the stock `facebook/sam3` checkpoint. Proves a
+    /// positive click segments the object under it (the engine half of the sc-3751 click tool).
+    /// `#[ignore]`d (needs the 3.2 GB weights + GPU); run with:
+    ///   SCENEWORKS_SAM3_WEIGHTS=<facebook/sam3 snapshot dir> \
+    ///   SCENEWORKS_SAM3_SMOKE_IMAGE=<jpg/png with a clear subject, e.g. zidane.jpg 1280×720> \
+    ///   [SCENEWORKS_SAM3_SMOKE_POINT="x,y"] \
+    ///   cargo test -p sceneworks-worker --release sam3_real_weights_point_segment_smoke -- --ignored --nocapture
+    #[test]
+    #[ignore = "real SAM3 weights + GPU; set SCENEWORKS_SAM3_WEIGHTS + SCENEWORKS_SAM3_SMOKE_IMAGE"]
+    fn sam3_real_weights_point_segment_smoke() {
+        let snap = std::env::var("SCENEWORKS_SAM3_WEIGHTS")
+            .expect("set SCENEWORKS_SAM3_WEIGHTS to a facebook/sam3 snapshot dir");
+        let dir = {
+            let p = PathBuf::from(&snap);
+            if p.is_file() {
+                p.parent().unwrap().to_path_buf()
+            } else {
+                p
+            }
+        };
+        let model = dir.join(MODEL_FILE);
+        let image_path = PathBuf::from(
+            std::env::var("SCENEWORKS_SAM3_SMOKE_IMAGE")
+                .expect("set SCENEWORKS_SAM3_SMOKE_IMAGE to an image with a clear subject"),
+        );
+        let image = crate::image_decode::decode_image_any(&image_path)
+            .expect("decode smoke image")
+            .to_rgb8();
+        let (w, h) = (image.width(), image.height());
+
+        // A single positive click on the prominent subject (default = image center; override with
+        // SCENEWORKS_SAM3_SMOKE_POINT="x,y" in source pixels for a different image).
+        let (px, py) = std::env::var("SCENEWORKS_SAM3_SMOKE_POINT")
+            .ok()
+            .and_then(|s| {
+                let v: Vec<f32> = s.split(',').filter_map(|p| p.trim().parse().ok()).collect();
+                (v.len() == 2).then(|| (v[0], v[1]))
+            })
+            .unwrap_or((w as f32 * 0.5, h as f32 * 0.5));
+        let mask = segment_points_blocking(model, image, vec![(px, py, 1)])
+            .expect("segment_points_blocking");
+
+        assert_eq!(mask.len(), (w * h) as usize, "mask size = source dims");
+        assert!(mask.iter().all(|&v| v == 0 || v == 255), "mask is binary");
+        let fg = mask.iter().filter(|&&v| v == 255).count();
+        let frac = fg as f64 / (w * h) as f64;
+        // A real subject mask covers a non-trivial, non-whole region.
+        assert!(
+            (0.001..0.95).contains(&frac),
+            "foreground fraction {frac:.3} is implausible (empty or whole-frame)"
+        );
+        // A positive click must land inside its own selected region.
+        let idx = (py as u32).min(h - 1) * w + (px as u32).min(w - 1);
+        assert_eq!(
+            mask[idx as usize], 255,
+            "the clicked pixel must be foreground in the mask"
+        );
+        eprintln!("point-segment smoke: fg_frac={frac:.3} at click ({px},{py}) dims={w}x{h}");
     }
 }
