@@ -70,7 +70,11 @@ jobs:
       # the candle `cuda` feature links against. Sets CUDA_PATH for the build +
       # the redist staging in build-sidecar.mjs.
       - name: Install CUDA Toolkit 12.9
-        uses: Jimver/cuda-toolkit@v0.2.21
+        # v0.2.35: the version catalog must contain CUDA 12.9.1 — the older v0.2.21
+        # pin tops out at 12.8.0 (network method still validates against the map), so
+        # `cuda: "12.9.1"` failed with "Version not available". (Kept in lockstep with
+        # server-candle-linux.yml's pin.)
+        uses: Jimver/cuda-toolkit@v0.2.35
         with:
           cuda: "12.9.1"
           method: "network"
