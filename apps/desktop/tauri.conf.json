@@ -5,7 +5,7 @@
   "identifier": "net.trefry.sceneworks",
   "build": {
     "frontendDist": "ui",
-    "beforeBuildCommand": "node scripts/build-sidecar.mjs && node scripts/fetch-uv.mjs && node scripts/stage-python.mjs"
+    "beforeBuildCommand": "node scripts/build-sidecar.mjs"
   },
   "app": {
     "withGlobalTauri": true,
@@ -27,9 +27,8 @@
   "bundle": {
     "active": true,
     "targets": "all",
-    "externalBin": ["binaries/sceneworks-api", "binaries/uv"],
+    "externalBin": ["binaries/sceneworks-api"],
     "resources": [
-      "python-src/**/*",
       "onnxruntime/**/*",
       "ffmpeg/**/*",
       "cuda/**/*"

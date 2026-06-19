@@ -48,27 +48,12 @@ pub fn get_session_logs(
     })
 }
 
-/// Bump to force a re-provision even if requirements.txt is unchanged.
-#[cfg(not(target_os = "macos"))]
-const SETUP_VERSION: &str = "3";
 const HEALTH_TIMEOUT: Duration = Duration::from_secs(30);
-
-/// Lens sidecar venv torch stack. Same versions on every platform; only the
-/// install index differs (see `provision_lens_venv`): macOS pulls the default
-/// PyPI wheels (MPS), Windows/Linux pull cu128 (Blackwell sm_120) where
-/// torchvision MUST match the CUDA torch build or diffusers 0.38's Flux.2 VAE
-/// import fails with "operator torchvision::nms does not exist". Mirrors the
-/// Docker /opt/lens-venv.
-#[cfg(not(target_os = "macos"))]
-const LENS_TORCH_SPEC: &str = "torch>=2.11,<2.12";
-#[cfg(not(target_os = "macos"))]
-const LENS_TORCHVISION_SPEC: &str = "torchvision>=0.26,<0.27";
 
 /// Process handles + run guards shared across the app.
 #[derive(Default)]
 pub struct Managed {
     pub api: Mutex<Option<CommandChild>>,
-    pub worker: Mutex<Option<CommandChild>>,
     /// The Apple-Silicon MLX GPU worker (sc-3289): the same `sceneworks-api`
     /// binary re-launched in worker mode (`SCENEWORKS_WORKER_ONLY=1`,
     /// `SCENEWORKS_GPU_ID=mlx`). Only populated on macOS.
@@ -99,7 +84,6 @@ pub struct Managed {
 #[derive(Default, Clone, Serialize, Deserialize)]
 struct SidecarPids {
     api: Option<u32>,
-    worker: Option<u32>,
     /// The MLX GPU worker (sc-3289). `#[serde(default)]` so a pidfile written by
     /// an older build (no such field) still deserializes for reaping.
     #[serde(default)]
@@ -158,36 +142,6 @@ pub fn app_support_dir() -> PathBuf {
     std::env::temp_dir().join("SceneWorks")
 }
 
-pub fn venv_dir() -> PathBuf {
-    app_support_dir().join("python").join("venv")
-}
-
-/// Separate Lens sidecar venv (torch 2.11 / transformers 5.8 / diffusers 0.38),
-/// kept apart from the main venv whose transformers 4.x stack native LTX-2.3
-/// requires. LensTurboAdapter runs its interpreter via SCENEWORKS_LENS_PYTHON.
-#[cfg(not(target_os = "macos"))]
-fn lens_venv_dir() -> PathBuf {
-    app_support_dir().join("python").join("lens-venv")
-}
-
-pub fn venv_python(venv: &Path) -> PathBuf {
-    if cfg!(target_os = "windows") {
-        venv.join("Scripts").join("python.exe")
-    } else {
-        venv.join("bin").join("python")
-    }
-}
-
-#[cfg(not(target_os = "macos"))]
-fn marker_path() -> PathBuf {
-    app_support_dir().join("python").join(".venv-marker")
-}
-
-#[cfg(not(target_os = "macos"))]
-fn lens_marker_path() -> PathBuf {
-    app_support_dir().join("python").join(".lens-venv-marker")
-}
-
 /// Platform-appropriate logs directory (also used for the API/worker logs).
 pub fn logs_dir() -> PathBuf {
     #[cfg(target_os = "macos")]
@@ -215,109 +169,6 @@ pub fn logs_dir() -> PathBuf {
         }
     }
     std::env::temp_dir().join("SceneWorks").join("logs")
-}
-
-/// requirements.txt location: an explicit override (testing / custom installs),
-/// the bundled resource in a packaged app, or the repo copy during development.
-#[cfg(not(target_os = "macos"))]
-fn requirements_path(app: &AppHandle) -> PathBuf {
-    if let Ok(override_path) = std::env::var("SCENEWORKS_DESKTOP_REQUIREMENTS") {
-        let trimmed = override_path.trim();
-        if !trimmed.is_empty() {
-            return PathBuf::from(trimmed);
-        }
-    }
-    if let Ok(resources) = app.path().resource_dir() {
-        let bundled = resources.join("python-src").join("requirements.txt");
-        if bundled.exists() {
-            return bundled;
-        }
-    }
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("..")
-        .join("worker")
-        .join("requirements.txt")
-}
-
-/// requirements-ltx.txt location (native LTX pipelines deps): the bundled
-/// resource in a packaged app, or the repo copy during development. Optional —
-/// absent in older worker checkouts, in which case LTX video is unavailable.
-#[cfg(not(target_os = "macos"))]
-fn requirements_ltx_path(app: &AppHandle) -> PathBuf {
-    if let Ok(resources) = app.path().resource_dir() {
-        let bundled = resources.join("python-src").join("requirements-ltx.txt");
-        if bundled.exists() {
-            return bundled;
-        }
-    }
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("..")
-        .join("worker")
-        .join("requirements-ltx.txt")
-}
-
-/// requirements-instantid.txt location (InstantID face-identity extras:
-/// insightface/onnxruntime/onnx/peft/einops): the bundled resource in a packaged
-/// app, or the repo copy during development. Optional — absent in older worker
-/// checkouts, in which case the InstantID character model is unavailable. Installed
-/// on all platforms (face analysis uses the CPU onnxruntime provider; the SDXL
-/// pipeline runs on CUDA or MPS like the other image adapters).
-#[cfg(not(target_os = "macos"))]
-fn requirements_instantid_path(app: &AppHandle) -> PathBuf {
-    if let Ok(resources) = app.path().resource_dir() {
-        let bundled = resources
-            .join("python-src")
-            .join("requirements-instantid.txt");
-        if bundled.exists() {
-            return bundled;
-        }
-    }
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("..")
-        .join("worker")
-        .join("requirements-instantid.txt")
-}
-
-// PuLID-FLUX (sc-2012) was retired to the native mlx-gen `pulid_flux` worker target
-// (sc-3344): its torch extras (requirements-pulid-flux.txt) + vendored stack were
-// removed, so there is no requirements-pulid-flux.txt to resolve or provision here.
-
-/// requirements-pose.txt location (DWPose whole-body pose detection: rtmlib + the
-/// onnxruntime shared with InstantID): the bundled resource in a packaged
-/// app, or the repo copy during development. Optional — absent in older worker
-/// checkouts, in which case the `pose_detect` worker capability isn't advertised
-/// and the Pose Library Create tab's detect jobs block ("no active worker supports
-/// pose detect"). Installed on all platforms (DWPose uses the CoreML/CPU
-/// onnxruntime provider). Epic 2282 / sc-2285.
-#[cfg(not(target_os = "macos"))]
-fn requirements_pose_path(app: &AppHandle) -> PathBuf {
-    if let Ok(resources) = app.path().resource_dir() {
-        let bundled = resources.join("python-src").join("requirements-pose.txt");
-        if bundled.exists() {
-            return bundled;
-        }
-    }
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("..")
-        .join("worker")
-        .join("requirements-pose.txt")
-}
-
-/// requirements-lens.txt location (Microsoft Lens sidecar venv deps): the bundled
-/// resource in a packaged app, or the repo copy during development. Optional —
-/// absent in older worker checkouts, in which case Lens is unavailable.
-#[cfg(not(target_os = "macos"))]
-fn requirements_lens_path(app: &AppHandle) -> PathBuf {
-    if let Ok(resources) = app.path().resource_dir() {
-        let bundled = resources.join("python-src").join("requirements-lens.txt");
-        if bundled.exists() {
-            return bundled;
-        }
-    }
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("..")
-        .join("worker")
-        .join("requirements-lens.txt")
 }
 
 /// Platform default workspace data directory, used when the user hasn't picked a
@@ -395,44 +246,6 @@ fn resolved_data_dir() -> PathBuf {
         .unwrap_or_else(default_data_dir)
 }
 
-/// Directory containing the Python `scene_worker` package + requirements: the
-/// bundled resource in a packaged app, the repo copy during development.
-///
-/// Only used to launch the Python worker, which macOS no longer spawns (sc-3492).
-#[cfg(not(target_os = "macos"))]
-fn worker_src_dir(app: &AppHandle) -> PathBuf {
-    if let Ok(resources) = app.path().resource_dir() {
-        let bundled = resources.join("python-src");
-        if bundled.join("scene_worker").exists() {
-            return bundled;
-        }
-    }
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("..")
-        .join("worker")
-}
-
-/// Directory to add to PYTHONPATH so the worker can import `sceneworks_shared`
-/// (scene_worker depends on it at startup). Bundled: it's staged into python-src
-/// alongside scene_worker. Development: it lives in the repo's packages/shared.
-/// Mirrors the Docker worker's `PYTHONPATH=...:/app/packages/shared`.
-///
-/// Only used to launch the Python worker, which macOS no longer spawns (sc-3492).
-#[cfg(not(target_os = "macos"))]
-fn shared_parent_dir(app: &AppHandle) -> PathBuf {
-    if let Ok(resources) = app.path().resource_dir() {
-        let bundled = resources.join("python-src");
-        if bundled.join("sceneworks_shared").exists() {
-            return bundled;
-        }
-    }
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("..")
-        .join("..")
-        .join("packages")
-        .join("shared")
-}
-
 fn append_log(path: &Path, line: &str) {
     if let Some(parent) = path.parent() {
         let _ = std::fs::create_dir_all(parent);
@@ -495,279 +308,14 @@ fn health_is_sceneworks(port: u16) -> bool {
         && response.contains("\"runtime\":\"rust\"")
 }
 
-/// Run the bundled `uv` with the given args, streaming output to setup-status
-/// log events. Returns Err with a message on a non-zero exit.
-#[cfg(not(target_os = "macos"))]
-async fn run_uv(app: &AppHandle, args: Vec<String>) -> Result<(), String> {
-    let (mut events, _child) = app
-        .shell()
-        .sidecar("uv")
-        .map_err(|error| format!("locate uv: {error}"))?
-        .args(args)
-        .spawn()
-        .map_err(|error| format!("spawn uv: {error}"))?;
-    let mut exit_code = None;
-    while let Some(event) = events.recv().await {
-        match event {
-            CommandEvent::Stdout(bytes) | CommandEvent::Stderr(bytes) => {
-                let line = String::from_utf8_lossy(&bytes).trim_end().to_owned();
-                if !line.is_empty() {
-                    emit(app, "log", line, false);
-                }
-            }
-            CommandEvent::Terminated(payload) => {
-                exit_code = payload.code;
-                break;
-            }
-            CommandEvent::Error(error) => return Err(error),
-            _ => {}
-        }
-    }
-    match exit_code {
-        Some(0) => Ok(()),
-        other => Err(format!("uv exited with status {other:?}")),
-    }
-}
-
-/// Build `uv pip install -r <req>…` args for the given requirement files. On
-/// Windows it adds the CUDA extra index so torch/torchaudio resolve to CUDA
-/// wheels (other packages still come from PyPI); macOS torch wheels include MPS
-/// by default. All requirement files are installed in one pass so torch and its
-/// companions (e.g. torchaudio) resolve to a single, ABI-compatible version set.
-#[cfg(not(target_os = "macos"))]
-fn pip_install_args(python: &Path, requirement_files: &[PathBuf]) -> Vec<String> {
-    #[cfg_attr(not(target_os = "windows"), allow(unused_mut))]
-    let mut args = vec![
-        "pip".to_owned(),
-        "install".to_owned(),
-        "--python".to_owned(),
-        python.to_string_lossy().into_owned(),
-    ];
-    for requirements in requirement_files {
-        args.push("-r".to_owned());
-        args.push(requirements.to_string_lossy().into_owned());
-    }
-    #[cfg(target_os = "windows")]
-    {
-        let index = std::env::var("SCENEWORKS_PYTORCH_INDEX_URL")
-            .unwrap_or_else(|_| "https://download.pytorch.org/whl/cu128".to_owned());
-        args.push("--extra-index-url".to_owned());
-        args.push(index);
-    }
-    args
-}
-
-/// Provision the venv if missing or stale (requirements / setup version changed).
-#[cfg(not(target_os = "macos"))]
-async fn provision_venv(app: &AppHandle) -> Result<(), String> {
-    let venv = venv_dir();
-    let python = venv_python(&venv);
-    let requirements = requirements_path(app);
-    let requirements_body = std::fs::read_to_string(&requirements)
-        .map_err(|error| format!("read requirements: {error}"))?;
-    // Native LTX pipelines deps (ltx-core/ltx-pipelines + a torch-matched
-    // torchaudio). Optional: absent in older worker checkouts.
-    let requirements_ltx = requirements_ltx_path(app);
-    let requirements_ltx_body = std::fs::read_to_string(&requirements_ltx).unwrap_or_default();
-    // InstantID face-identity extras (insightface/onnxruntime/onnx/peft/einops).
-    // Optional: absent in older worker checkouts, in which case the InstantID
-    // character model stays unavailable (the adapter reports a clear error).
-    let requirements_instantid = requirements_instantid_path(app);
-    let requirements_instantid_body =
-        std::fs::read_to_string(&requirements_instantid).unwrap_or_default();
-    // PuLID-FLUX (sc-2012) retired to the native mlx-gen `pulid_flux` worker (sc-3344) — no
-    // torch extras to read or install.
-    // DWPose whole-body pose-detection extras (rtmlib + the onnxruntime shared with
-    // InstantID). Optional: absent in older worker checkouts, in which case
-    // the `pose_detect` capability isn't advertised and Pose Library detect jobs
-    // stay blocked. Epic 2282 / sc-2285.
-    let requirements_pose = requirements_pose_path(app);
-    let requirements_pose_body = std::fs::read_to_string(&requirements_pose).unwrap_or_default();
-    let marker = marker_path();
-    let expected = format!(
-        "v{SETUP_VERSION}\n{requirements_body}\n# ltx\n{requirements_ltx_body}\n# instantid\n{requirements_instantid_body}\n# pose\n{requirements_pose_body}"
-    );
-
-    if python.exists() {
-        if let Ok(found) = std::fs::read_to_string(&marker) {
-            if found == expected {
-                emit(app, "ready", "Python environment ready.", false);
-                return Ok(());
-            }
-        }
-    }
-
-    if let Some(parent) = venv.parent() {
-        std::fs::create_dir_all(parent).map_err(|error| format!("create python dir: {error}"))?;
-    }
-
-    // Create the venv only when its interpreter is missing. A prior run that
-    // created the venv but failed during dependency install (e.g. an
-    // unsatisfiable resolution) or was interrupted leaves a venv that `uv venv`
-    // refuses to overwrite — without this guard every retry dies on "a virtual
-    // environment already exists". When the interpreter is present we skip
-    // creation and let the install below reconcile the env. `--clear` wipes any
-    // partial/corrupt directory when we do (re)create from scratch.
-    if !python.exists() {
-        emit(app, "creating", "Creating the Python environment…", false);
-        run_uv(
-            app,
-            vec![
-                "venv".to_owned(),
-                "--clear".to_owned(),
-                "--python".to_owned(),
-                "3.12".to_owned(),
-                venv.to_string_lossy().into_owned(),
-            ],
-        )
-        .await?;
-    }
-
-    emit(
-        app,
-        "installing",
-        "Installing dependencies — this can take several minutes on first run…",
-        false,
-    );
-    // Install the base requirements together with the LTX pipelines deps (when
-    // bundled) in a single resolution pass: a separate LTX pass pulls a newer
-    // torchaudio whose native extension fails to load against the pinned torch.
-    let mut requirement_files = vec![requirements.clone()];
-    if requirements_ltx.exists() {
-        requirement_files.push(requirements_ltx.clone());
-    }
-    // InstantID extras resolve cleanly alongside the pinned torch/diffusers stack
-    // (validated on the torch 2.8 / diffusers 0.39 worker venv) — add them to the
-    // same single uv pass so the dependency set stays ABI-consistent.
-    if requirements_instantid.exists() {
-        requirement_files.push(requirements_instantid.clone());
-    }
-    // DWPose extras (sc-2285): rtmlib + the shared onnxruntime. Same single uv pass
-    // so the onnxruntime pin stays aligned with InstantID. Without these the
-    // worker can't advertise `pose_detect` and Pose Library detect jobs block.
-    if requirements_pose.exists() {
-        requirement_files.push(requirements_pose.clone());
-    }
-    run_uv(app, pip_install_args(&python, &requirement_files)).await?;
-
-    std::fs::write(&marker, &expected).map_err(|error| format!("write marker: {error}"))?;
-    emit(app, "ready", "Python environment ready.", false);
-    Ok(())
-}
-
-/// Provision the separate Lens sidecar venv (torch 2.11 + torchvision +
-/// requirements-lens.txt). Runs in the BACKGROUND after the app is up so the large
-/// torch download never blocks launch. macOS pulls MPS wheels from PyPI and runs
-/// the gpt-oss-20b text encoder dequantized to bf16 (mxfp4 needs CUDA + Triton, so
-/// `LensTurboAdapter` forces dequantization on non-CUDA devices); Windows/Linux use
-/// the cu128 stack. Idempotent via its own marker. Failures are non-fatal: Lens
-/// stays unavailable (LensTurboAdapter reports a clear error) while the rest of the
-/// app works. Opt out with SCENEWORKS_DISABLE_LENS=1.
-#[cfg(not(target_os = "macos"))]
-async fn provision_lens_venv(app: &AppHandle) -> Result<(), String> {
-    if std::env::var("SCENEWORKS_DISABLE_LENS")
-        .map(|value| matches!(value.trim(), "1" | "true" | "yes"))
-        .unwrap_or(false)
-    {
-        return Ok(());
-    }
-    let requirements = requirements_lens_path(app);
-    if !requirements.exists() {
-        // Older worker checkout without the Lens requirements; Lens stays off.
-        return Ok(());
-    }
-    let body = std::fs::read_to_string(&requirements)
-        .map_err(|error| format!("read requirements-lens: {error}"))?;
-    let venv = lens_venv_dir();
-    let python = venv_python(&venv);
-    let marker = lens_marker_path();
-    // torch / torchvision source: macOS uses the default PyPI index (its wheels
-    // bundle MPS), Windows/Linux use the cu128 index (Blackwell sm_120), where a
-    // CPU torchvision would ABI-mismatch the CUDA torch and break diffusers 0.38's
-    // Flux.2 VAE import. An explicit SCENEWORKS_PYTORCH_INDEX_URL overrides either.
-    let torch_index: Option<String> = std::env::var("SCENEWORKS_PYTORCH_INDEX_URL")
-        .ok()
-        .map(|value| value.trim().to_owned())
-        .filter(|value| !value.is_empty())
-        .or_else(|| {
-            if cfg!(target_os = "macos") {
-                None
-            } else {
-                Some("https://download.pytorch.org/whl/cu128".to_owned())
-            }
-        });
-    let index_label = torch_index.as_deref().unwrap_or("pypi");
-    let expected = format!(
-        "v{SETUP_VERSION}\n{LENS_TORCH_SPEC} {LENS_TORCHVISION_SPEC} @ {index_label}\n{body}"
-    );
-
-    if python.exists() {
-        if let Ok(found) = std::fs::read_to_string(&marker) {
-            if found == expected {
-                return Ok(());
-            }
-        }
-    }
-    if let Some(parent) = venv.parent() {
-        std::fs::create_dir_all(parent).map_err(|error| format!("create python dir: {error}"))?;
-    }
-    if !python.exists() {
-        run_uv(
-            app,
-            vec![
-                "venv".to_owned(),
-                "--clear".to_owned(),
-                "--python".to_owned(),
-                "3.12".to_owned(),
-                venv.to_string_lossy().into_owned(),
-            ],
-        )
-        .await?;
-    }
-    // torch + torchvision from the resolved index first so they are an ABI-matched
-    // build (on CUDA a CPU torchvision breaks diffusers 0.38's Flux.2 VAE import;
-    // on macOS the default PyPI wheels carry MPS).
-    let mut torch_args = vec![
-        "pip".to_owned(),
-        "install".to_owned(),
-        "--python".to_owned(),
-        python.to_string_lossy().into_owned(),
-    ];
-    if let Some(ref index) = torch_index {
-        torch_args.push("--index-url".to_owned());
-        torch_args.push(index.clone());
-    }
-    torch_args.push(LENS_TORCH_SPEC.to_owned());
-    torch_args.push(LENS_TORCHVISION_SPEC.to_owned());
-    run_uv(app, torch_args).await?;
-    // Then the remaining Lens deps from PyPI — they don't pin torch, so the
-    // torch/torchvision installed above stay put. (`kernels` installs as a no-op
-    // on macOS; the dequantized mxfp4 path never invokes its CUDA kernels.)
-    run_uv(
-        app,
-        vec![
-            "pip".to_owned(),
-            "install".to_owned(),
-            "--python".to_owned(),
-            python.to_string_lossy().into_owned(),
-            "-r".to_owned(),
-            requirements.to_string_lossy().into_owned(),
-        ],
-    )
-    .await?;
-    std::fs::write(&marker, &expected).map_err(|error| format!("write lens marker: {error}"))?;
-    Ok(())
-}
-
 /// Resolve the ffmpeg binary the Rust worker shells out to (frame sampling,
 /// frame extract, timeline export, video-gen audio mux — all via
 /// `media_jobs::run_ffmpeg`, which honors `SCENEWORKS_FFMPEG`). The desktop ships
 /// no system ffmpeg, so without this those jobs fail. Prefers the static ffmpeg
 /// bundled next to the app (staged by build-sidecar.mjs into the `ffmpeg` resource
-/// dir, so a packaged Python-free Mac still works — epic 3482, sc-3767); falls
-/// back to the venv's imageio-ffmpeg only in dev / pre-bundle. Returns None when
-/// neither is available (Windows/Linux desktop pre-bundle, or after the venv strip
-/// with no resource — caller then leaves `SCENEWORKS_FFMPEG` unset → PATH ffmpeg).
+/// dir, so a packaged Python-free Mac still works — epic 3482, sc-3767). Returns
+/// None when it isn't bundled (pre-bundle / dev — caller then leaves
+/// `SCENEWORKS_FFMPEG` unset → PATH ffmpeg).
 fn resolve_bundled_ffmpeg(app: &AppHandle) -> Option<String> {
     if let Ok(resources) = app.path().resource_dir() {
         let bundled = resources.join("ffmpeg").join(if cfg!(windows) {
@@ -779,40 +327,16 @@ fn resolve_bundled_ffmpeg(app: &AppHandle) -> Option<String> {
             return Some(bundled.to_string_lossy().to_string());
         }
     }
-    // Dev / pre-bundle fallback: the venv's imageio-ffmpeg binary.
-    let python = venv_python(&venv_dir());
-    if !python.exists() {
-        return None;
-    }
-    let mut command = std::process::Command::new(&python);
-    command.args([
-        "-c",
-        "import imageio_ffmpeg,sys; sys.stdout.write(imageio_ffmpeg.get_ffmpeg_exe())",
-    ]);
-    // Don't flash a console window when probing from the GUI app.
-    #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt;
-        command.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
-    }
-    let output = command.output().ok()?;
-    if !output.status.success() {
-        return None;
-    }
-    let path = String::from_utf8_lossy(&output.stdout).trim().to_owned();
-    if path.is_empty() || !Path::new(&path).exists() {
-        return None;
-    }
-    Some(path)
+    None
 }
 
 /// Resolve the onnxruntime dynamic library the Rust worker's DWPose pose detector
 /// (`ort`, sc-3487) dlopens at runtime via `ORT_DYLIB_PATH` (the `load-dynamic`
 /// feature). Prefers the dylib bundled next to the app (staged by build-sidecar.mjs
 /// into the `onnxruntime` resource dir, so a packaged Python-free Mac still detects
-/// poses); falls back to the venv's onnxruntime (dev / pre-bundle), the same
-/// CoreML-enabled build the Python rtmlib path uses. macOS-only — pose detection on
-/// the Rust worker is macOS-only, so this returns None elsewhere.
+/// poses), the same CoreML-enabled build. Returns None when it isn't bundled
+/// (pre-bundle / dev). macOS-only — pose detection on the Rust worker is macOS-only,
+/// so this returns None elsewhere.
 #[cfg(target_os = "macos")]
 fn resolve_bundled_onnxruntime(app: &AppHandle) -> Option<String> {
     if let Ok(resources) = app.path().resource_dir() {
@@ -821,24 +345,7 @@ fn resolve_bundled_onnxruntime(app: &AppHandle) -> Option<String> {
             return Some(bundled.to_string_lossy().to_string());
         }
     }
-    // Dev / pre-bundle fallback: the venv's onnxruntime shared library.
-    let python = venv_python(&venv_dir());
-    if !python.exists() {
-        return None;
-    }
-    let output = std::process::Command::new(&python)
-        .args([
-            "-c",
-            "import onnxruntime,os,glob,sys;d=os.path.dirname(onnxruntime.__file__);\
-h=glob.glob(os.path.join(d,'capi','libonnxruntime*.dylib'));sys.stdout.write(h[0] if h else '')",
-        ])
-        .output()
-        .ok()?;
-    if !output.status.success() {
-        return None;
-    }
-    let path = String::from_utf8_lossy(&output.stdout).trim().to_owned();
-    (!path.is_empty() && Path::new(&path).exists()).then_some(path)
+    None
 }
 
 /// Resolve the bundled CUDA-enabled onnxruntime DLL the candle worker's `ort` paths
@@ -916,6 +423,20 @@ fn spawn_api(app: &AppHandle) -> Result<(), String> {
     #[cfg(target_os = "macos")]
     {
         command = command.env("SCENEWORKS_MLX_REQUIRED", "1");
+    }
+    // Off-Mac (epic 5483 Phase 7, sc-5563): candle is the ONLY backend on the desktop —
+    // the Python torch worker is no longer spawned (see `gate_window`) and no venv is
+    // bundled or bootstrapped. Mirror the Mac MLX-required flip: require candle so a
+    // candle-eligible job stranded with no live candle worker fails `candle_unavailable`,
+    // and enforce so a shape candle can't serve fails `candle_unsupported` — never a silent
+    // torch fallback (there is no torch worker left to fall back to). The candle sweeps are
+    // biased to Ok, so only the true generation gaps fail; the CV-aux / segment / training
+    // surfaces stay served by the candle worker.
+    #[cfg(not(target_os = "macos"))]
+    {
+        command = command
+            .env("SCENEWORKS_CANDLE_REQUIRED", "1")
+            .env("SCENEWORKS_CANDLE_UNSUPPORTED_MODE", "enforce");
     }
     // The in-process utility worker shells out to ffmpeg; point it at the bundled
     // static binary (sc-3767) since the desktop has no system ffmpeg on PATH.
@@ -1034,17 +555,20 @@ fn gate_window(app: AppHandle) {
                     }
                     #[cfg(not(target_os = "macos"))]
                     {
-                        // The Windows candle (CUDA) GPU worker (sc-5561) runs
-                        // candle-eligible jobs alongside the Python torch worker
-                        // (Wave A), exactly like the server lane — the existing
-                        // jobs_store claim/defer routing sends candle-eligible jobs
-                        // here and everything else to Python. Only when the candle
-                        // backend is actually bundled (a plain build has no DLLs).
+                        // Epic 5483 Phase 7 (sc-5563): off-Mac is candle-only — the Python
+                        // torch worker is no longer spawned (its venv + bundle were dropped),
+                        // exactly as macOS went MLX-only in sc-3492. The Windows candle (CUDA)
+                        // GPU worker runs the candle-eligible surface; anything candle can't
+                        // serve fails loudly (candle_unsupported / candle_unavailable) per
+                        // Settings.candle_required (set in spawn_api), never a silent torch
+                        // fallback. Spawned only when the candle backend is actually bundled
+                        // (a plain build has no CUDA DLLs); without it there is no GPU worker
+                        // and GPU jobs fail loudly rather than silently degrading. (Linux
+                        // desktop is not a shipped target — the Linux server runs via Docker.)
                         #[cfg(target_os = "windows")]
                         if resolve_bundled_cuda_dir(&app).is_some() {
-                            supervise_candle_worker(app.clone(), port);
+                            supervise_candle_worker(app, port);
                         }
-                        supervise_worker(app, port);
                     }
                     return;
                 }
@@ -1054,162 +578,6 @@ fn gate_window(app: AppHandle) {
                 return;
             }
             std::thread::sleep(Duration::from_millis(300));
-        }
-    });
-}
-
-/// Spawn and supervise the Python inference worker on a background thread,
-/// restarting it with exponential backoff if it dies unexpectedly while the app
-/// is open. Output is appended to worker.log.
-///
-/// Not compiled on macOS: the MLX-only cutover (sc-3492) never spawns the Python
-/// torch/MPS worker there — only `supervise_mlx_worker` runs. (The venv strip is
-/// sc-3493.)
-#[cfg(not(target_os = "macos"))]
-fn supervise_worker(app: AppHandle, api_port: u16) {
-    std::thread::spawn(move || {
-        let log_path = logs_dir().join("worker.log");
-        let python = venv_python(&venv_dir());
-        let src = worker_src_dir(&app);
-        // Ensure the worker can import sceneworks_shared (staged into python-src
-        // when bundled, or packages/shared in dev). Mirrors the Docker worker's
-        // PYTHONPATH; `-m` already adds the cwd but we set it explicitly so the
-        // dev (unbundled) path resolves too.
-        let path_sep = if cfg!(windows) { ";" } else { ":" };
-        let pythonpath = format!(
-            "{}{}{}",
-            src.to_string_lossy(),
-            path_sep,
-            shared_parent_dir(&app).to_string_lossy()
-        );
-        let api_url = format!("http://127.0.0.1:{api_port}");
-        // Match the API sidecar's HF cache root so downloaded weights land where
-        // the catalog looks for them (and reuse anything already cached there).
-        let hf_home = huggingface_home().to_string_lossy().to_string();
-        // Unique per app launch (stable across in-launch respawns) so a worker
-        // from a prior/overlapping session can't impersonate this one in the
-        // shared jobs.db. A fixed "worker-local-0" let two incarnations collide:
-        // one claims a job, the other's idle heartbeat instantly interrupts it.
-        let worker_id = format!(
-            "worker-local-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|elapsed| elapsed.as_millis())
-                .unwrap_or_default()
-        );
-        let mut backoff = 1u64;
-        loop {
-            if app.state::<Managed>().shutting_down.load(Ordering::SeqCst) {
-                return;
-            }
-            if !python.exists() {
-                append_log(
-                    &log_path,
-                    "[desktop] cannot start worker: venv python missing\n",
-                );
-                return;
-            }
-            let mut command = app
-                .shell()
-                .command(python.to_string_lossy().to_string())
-                .args(["-m", "scene_worker"])
-                .current_dir(&src)
-                .env("PYTHONPATH", &pythonpath)
-                .env("SCENEWORKS_WORKER_ID", &worker_id)
-                .env("SCENEWORKS_API_URL", &api_url)
-                .env("HF_HOME", &hf_home)
-                // The worker watches this pid and self-terminates if we (the
-                // shell) die without a clean shutdown — macOS has no
-                // PR_SET_PDEATHSIG, so otherwise a force-quit/crash orphans the
-                // worker to launchd with its multi-GB model resident forever.
-                .env("SCENEWORKS_PARENT_PID", std::process::id().to_string())
-                // Point LensTurboAdapter at the Lens sidecar venv interpreter. The
-                // adapter existence-checks it at job time, so this is safe even
-                // while the venv is still provisioning in the background (and on
-                // macOS, where it never exists and Lens reports unavailable).
-                .env(
-                    "SCENEWORKS_LENS_PYTHON",
-                    venv_python(&lens_venv_dir()).to_string_lossy().to_string(),
-                )
-                .env(
-                    "SCENEWORKS_DATA_DIR",
-                    resolved_data_dir().to_string_lossy().to_string(),
-                )
-                .env(
-                    "SCENEWORKS_CONFIG_DIR",
-                    config_dir().to_string_lossy().to_string(),
-                );
-            if let Some(token) = crate::settings::read_hf_token() {
-                command = command.env("HF_TOKEN", token);
-            }
-            if let Some(credentials) = crate::settings::credentials_env_json() {
-                command = command.env("SCENEWORKS_CREDENTIALS", credentials);
-            }
-            let spawned = command.spawn();
-            let (mut events, child) = match spawned {
-                Ok(pair) => pair,
-                Err(error) => {
-                    append_log(
-                        &log_path,
-                        &format!("[desktop] worker spawn failed: {error}\n"),
-                    );
-                    std::thread::sleep(Duration::from_secs(backoff));
-                    backoff = (backoff * 2).min(30);
-                    continue;
-                }
-            };
-            record_worker_pid(&app, Some(child.pid()));
-            app.state::<Managed>()
-                .worker
-                .lock()
-                .expect("worker lock")
-                .replace(child);
-            let started = Instant::now();
-            loop {
-                match tauri::async_runtime::block_on(events.recv()) {
-                    Some(CommandEvent::Stdout(bytes)) | Some(CommandEvent::Stderr(bytes)) => {
-                        append_log(&log_path, &String::from_utf8_lossy(&bytes));
-                    }
-                    Some(CommandEvent::Terminated(payload)) => {
-                        append_log(
-                            &log_path,
-                            &format!(
-                                "[desktop] worker terminated: code={:?} signal={:?}\n",
-                                payload.code, payload.signal
-                            ),
-                        );
-                        break;
-                    }
-                    Some(CommandEvent::Error(error)) => {
-                        append_log(&log_path, &format!("[desktop] worker error: {error}\n"));
-                        break;
-                    }
-                    None => break,
-                    _ => {}
-                }
-            }
-            let _ = app
-                .state::<Managed>()
-                .worker
-                .lock()
-                .expect("worker lock")
-                .take();
-            record_worker_pid(&app, None);
-            if app.state::<Managed>().shutting_down.load(Ordering::SeqCst) {
-                return;
-            }
-            // Reset backoff after a stable run; otherwise grow it to avoid a
-            // tight crash loop.
-            if started.elapsed() > Duration::from_secs(20) {
-                backoff = 1;
-            }
-            append_log(
-                &log_path,
-                &format!("[desktop] restarting worker in {backoff}s\n"),
-            );
-            std::thread::sleep(Duration::from_secs(backoff));
-            backoff = (backoff * 2).min(30);
         }
     });
 }
@@ -1633,16 +1001,6 @@ fn record_api_pid(app: &AppHandle, pid: u32) {
     write_sidecar_pidfile(&pids);
 }
 
-/// Only used by `supervise_worker`, which macOS no longer spawns (sc-3492); the
-/// `WorkerPids.worker` field it writes stays for Windows/Linux + crash recovery.
-#[cfg(not(target_os = "macos"))]
-fn record_worker_pid(app: &AppHandle, pid: Option<u32>) {
-    let state = app.state::<Managed>();
-    let mut pids = state.pids.lock().expect("pids lock");
-    pids.worker = pid;
-    write_sidecar_pidfile(&pids);
-}
-
 #[cfg(target_os = "macos")]
 fn record_mlx_worker_pid(app: &AppHandle, pid: Option<u32>) {
     let state = app.state::<Managed>();
@@ -1722,7 +1080,7 @@ pub fn reap_stale_sidecars() {
         return;
     };
     let pids: SidecarPids = serde_json::from_slice(&bytes).unwrap_or_default();
-    for pid in [pids.api, pids.worker, pids.mlx_worker, pids.candle_worker]
+    for pid in [pids.api, pids.mlx_worker, pids.candle_worker]
         .into_iter()
         .flatten()
     {
@@ -1733,7 +1091,8 @@ pub fn reap_stale_sidecars() {
     let _ = std::fs::remove_file(&path);
 }
 
-/// Begin graceful shutdown: stop the Python + MLX workers then the API sidecar.
+/// Begin graceful shutdown: stop the GPU worker (MLX on macOS, candle on Windows)
+/// then the API sidecar.
 /// On Unix this sends SIGTERM and waits up to the grace period before
 /// force-killing; on Windows it force-kills (CTRL_BREAK handling is a
 /// Windows-session refinement). Returns true if shutdown was initiated (caller
@@ -1743,7 +1102,6 @@ pub fn begin_shutdown(app: &AppHandle) -> bool {
     if managed.shutting_down.swap(true, Ordering::SeqCst) {
         return false;
     }
-    let worker = managed.worker.lock().expect("worker lock").take();
     let mlx_worker = managed.mlx_worker.lock().expect("mlx worker lock").take();
     let candle_worker = managed
         .candle_worker
@@ -1760,11 +1118,10 @@ pub fn begin_shutdown(app: &AppHandle) -> bool {
                 .and_then(|value| value.parse::<u64>().ok())
                 .unwrap_or(10)
                 .clamp(1, 30);
-            let worker_pid = worker.as_ref().map(CommandChild::pid);
             let mlx_worker_pid = mlx_worker.as_ref().map(CommandChild::pid);
             let api_pid = api_child.as_ref().map(CommandChild::pid);
             // SIGTERM the workers first, then the API.
-            for pid in [worker_pid, mlx_worker_pid, api_pid].into_iter().flatten() {
+            for pid in [mlx_worker_pid, api_pid].into_iter().flatten() {
                 let _ = nix::sys::signal::kill(
                     nix::unistd::Pid::from_raw(pid as i32),
                     nix::sys::signal::Signal::SIGTERM,
@@ -1772,7 +1129,7 @@ pub fn begin_shutdown(app: &AppHandle) -> bool {
             }
             let deadline = Instant::now() + Duration::from_secs(grace);
             while Instant::now() < deadline {
-                if ![worker_pid, mlx_worker_pid, api_pid]
+                if ![mlx_worker_pid, api_pid]
                     .into_iter()
                     .flatten()
                     .any(pid_alive)
@@ -1783,9 +1140,6 @@ pub fn begin_shutdown(app: &AppHandle) -> bool {
             }
         }
         // Force-kill anything still alive.
-        if let Some(child) = worker {
-            let _ = child.kill();
-        }
         if let Some(child) = mlx_worker {
             let _ = child.kill();
         }
@@ -1890,15 +1244,9 @@ async fn run_startup(app: AppHandle) {
             return;
         }
     }
-    // macOS is MLX-only (epic 3482, sc-3492/sc-3493): no Python venv is bundled or
-    // bootstrapped — skip provisioning entirely so first run starts straight on the
-    // Rust/MLX engine. Windows/Linux/Docker provision the uv-managed venv the Python
-    // torch worker needs.
-    #[cfg(not(target_os = "macos"))]
-    if let Err(error) = provision_venv(&app).await {
-        emit(&app, "error", format!("Setup failed: {error}"), true);
-        return;
-    }
+    // No Python venv on ANY platform: macOS went MLX-only (epic 3482, sc-3492/sc-3493)
+    // and off-Mac went candle-only (epic 5483 Phase 7, sc-5563), so first run starts
+    // straight on the native engine with no provisioning step.
     // Spawn the API only once across retries.
     if app
         .state::<Managed>()
@@ -1914,24 +1262,7 @@ async fn run_startup(app: AppHandle) {
         emit(&app, "error", error, true);
         return;
     }
-    gate_window(app.clone());
-    // Provision the Lens sidecar venv (torch) in the background on Windows/Linux so its
-    // large download never blocks startup; Lens becomes usable once it finishes, while
-    // the rest of the app is available immediately. Non-fatal: failures only mean Lens
-    // stays unavailable. Skipped on macOS (epic 3482, sc-3493): Lens ran in the Python
-    // torch worker the MLX-only Mac no longer spawns, and no torch venv is bundled there.
-    #[cfg(not(target_os = "macos"))]
-    {
-        let lens_app = app.clone();
-        tauri::async_runtime::spawn(async move {
-            if let Err(error) = provision_lens_venv(&lens_app).await {
-                append_log(
-                    &logs_dir().join("lens-setup.log"),
-                    &format!("[desktop] lens venv provisioning failed: {error}\n"),
-                );
-            }
-        });
-    }
+    gate_window(app);
 }
 
 /// Frontend entry point (called on setup-screen load and on retry). Kicks off

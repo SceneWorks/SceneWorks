@@ -522,16 +522,28 @@ pub fn delete_credential(app: AppHandle, host: String) -> Result<Vec<CredentialS
 
 #[tauri::command]
 pub fn restart_worker(app: AppHandle) {
-    // Kill the current worker child; the supervisor restarts it.
-    if let Some(child) = app
+    // Kill the current GPU worker child; its supervisor respawns it. macOS runs the MLX
+    // worker; Windows runs the candle worker (the Python worker was retired off-Mac, sc-5563).
+    #[cfg(target_os = "macos")]
+    let child = app
         .state::<Managed>()
-        .worker
+        .mlx_worker
         .lock()
-        .expect("worker lock")
-        .take()
-    {
+        .expect("mlx worker lock")
+        .take();
+    #[cfg(target_os = "windows")]
+    let child = app
+        .state::<Managed>()
+        .candle_worker
+        .lock()
+        .expect("candle worker lock")
+        .take();
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
+    if let Some(child) = child {
         let _ = child.kill();
     }
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    let _ = app;
 }
 
 #[tauri::command]

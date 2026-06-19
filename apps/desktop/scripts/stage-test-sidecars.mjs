@@ -22,7 +22,7 @@ const exe = triple.includes("windows") ? ".exe" : "";
 const binariesDir = join(desktopDir, "binaries");
 mkdirSync(binariesDir, { recursive: true });
 
-for (const name of ["sceneworks-api", "uv"]) {
+for (const name of ["sceneworks-api"]) {
   const path = join(binariesDir, `${name}-${triple}${exe}`);
   writeFileSync(
     path,
@@ -34,7 +34,7 @@ for (const name of ["sceneworks-api", "uv"]) {
   console.log(`stage-test-sidecars: staged ${path}`);
 }
 
-for (const dir of ["python-src", "onnxruntime", "ffmpeg", "cuda"]) {
+for (const dir of ["onnxruntime", "ffmpeg", "cuda"]) {
   const path = join(desktopDir, dir);
   mkdirSync(path, { recursive: true });
   writeFileSync(

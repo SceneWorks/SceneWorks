@@ -42,7 +42,7 @@ if (!triple) {
 const exe = triple.includes("windows") ? ".exe" : "";
 
 // Sign a nested Mach-O for notarization. Tauri signs the .app and the externalBin
-// sidecars (sceneworks-api, uv), but NOT the extra binaries we drop into the
+// sidecar (sceneworks-api), but NOT the extra binaries we drop into the
 // bundle's Resources/ (the static ffmpeg, the onnxruntime dylib). Apple's notary
 // service rejects any nested binary that lacks a Developer ID signature, a secure
 // timestamp, or (for executables) hardened runtime — so sign them inside-out here,
