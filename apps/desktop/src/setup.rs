@@ -58,11 +58,12 @@ pub struct Managed {
     /// binary re-launched in worker mode (`SCENEWORKS_WORKER_ONLY=1`,
     /// `SCENEWORKS_GPU_ID=mlx`). Only populated on macOS.
     pub mlx_worker: Mutex<Option<CommandChild>>,
-    /// The Windows candle (CUDA) GPU worker (sc-5561): the same `sceneworks-api`
-    /// binary re-launched in worker mode (`SCENEWORKS_WORKER_ONLY=1`,
-    /// `SCENEWORKS_GPU_ID=0`, `SCENEWORKS_BACKEND_CANDLE_ENABLED=true`). Runs
-    /// alongside the Python torch worker (Wave A). Only populated on the Windows
-    /// candle build.
+    /// The Windows candle (CUDA) GPU worker supervisor (sc-5561): the same
+    /// `sceneworks-api` binary re-launched in worker mode (`SCENEWORKS_WORKER_ONLY=1`,
+    /// `SCENEWORKS_GPU_ID=auto`, `SCENEWORKS_BACKEND_CANDLE_ENABLED=true`). `auto`
+    /// makes it the multi-GPU supervisor — it spawns one candle child per NVIDIA GPU
+    /// (those children are owned by the supervisor, not tracked here). Only populated
+    /// on the Windows candle build.
     pub candle_worker: Mutex<Option<CommandChild>>,
     /// On-demand keychain credential socket served to the MLX worker (sc-5891).
     /// Started once before the worker spawns; the worker pulls a host's secret from
@@ -785,20 +786,22 @@ fn supervise_mlx_worker(app: AppHandle, api_port: u16) {
     });
 }
 
-/// Spawn and supervise the Windows candle (CUDA) GPU worker (sc-5561): the same
+/// Spawn and supervise the Windows candle (CUDA) GPU worker(s) (sc-5561): the same
 /// `sceneworks-api` sidecar re-launched in worker mode (`SCENEWORKS_WORKER_ONLY=1`)
-/// with `SCENEWORKS_GPU_ID=0` (the first NVIDIA GPU) and the candle backend enabled
+/// with `SCENEWORKS_GPU_ID=auto` and the candle backend enabled
 /// (`SCENEWORKS_BACKEND_CANDLE_ENABLED=true`), so candle-eligible image/video/caption
-/// jobs run on the in-process candle gen-core engines instead of the Python torch
-/// path. A crash-isolated sibling of the API process; restarted with exponential
-/// backoff while the app is open. Output goes to candle-worker.log.
+/// jobs run on the in-process candle gen-core engines. `auto` makes this process the
+/// multi-GPU supervisor: it discovers every NVIDIA GPU and spawns one crash-isolated
+/// candle child per GPU (restarted with exponential backoff), so a multi-GPU box uses
+/// ALL its GPUs rather than just index 0. A crash-isolated sibling of the API process;
+/// output goes to candle-worker.log.
 ///
-/// The Windows analogue of `supervise_mlx_worker`. Runs ALONGSIDE the Python torch
-/// worker (Wave A): the existing `jobs_store` claim/defer routing
-/// (`torch_worker_claims_everything_the_candle_worker_defers`) confines this worker
-/// to the candle lane and keeps everything else on Python. Only spawned when the
-/// candle redist DLLs are actually bundled (`resolve_bundled_cuda_dir`), so a plain
-/// desktop build never starts it.
+/// The Windows analogue of `supervise_mlx_worker`, and the desktop twin of the
+/// server/Docker candle worker (which also runs `SCENEWORKS_GPU_ID=auto`). Off-Mac is
+/// candle-only post-Phase-7 (sc-5563): anything candle can't serve fails loudly
+/// (`candle_unsupported`/`candle_unavailable`) rather than a silent torch fallback.
+/// Only spawned when the candle redist DLLs are actually bundled
+/// (`resolve_bundled_cuda_dir`), so a plain desktop build never starts it.
 #[cfg(target_os = "windows")]
 fn supervise_candle_worker(app: AppHandle, api_port: u16) {
     std::thread::spawn(move || {
@@ -836,10 +839,18 @@ fn supervise_candle_worker(app: AppHandle, api_port: u16) {
             let mut command = sidecar
                 // Dispatches `main` to `run_worker()` (HTTP API never starts).
                 .env("SCENEWORKS_WORKER_ONLY", "1")
-                // The first NVIDIA GPU (nvidia-smi index 0); a bare index runs the
-                // single-GPU `run_worker_loop` (not the `auto` multi-GPU supervisor).
-                .env("SCENEWORKS_GPU_ID", "0")
-                // Light up the candle lane on the discovered NVIDIA GPU
+                // `auto` runs the multi-GPU supervisor (`supervise_auto_workers`): it
+                // enumerates every NVIDIA GPU via nvidia-smi and spawns one crash-
+                // isolated candle child per GPU (each pinned with CUDA_VISIBLE_DEVICES)
+                // plus a cpu utility child — so a 2-GPU box uses BOTH GPUs, not just
+                // index 0. A bare index (e.g. "0") would run the single-GPU loop and
+                // strand the other GPU. Mirrors the server/Docker candle worker
+                // (`docker-compose` `SCENEWORKS_CANDLE_GPU_ID:-auto`). The children
+                // inherit this process's candle env (PATH+CUDA DLLs, ORT, ffmpeg,
+                // HF/creds, SCENEWORKS_PARENT_PID death-watchdog), so each GPU child is
+                // wired exactly as the single worker was.
+                .env("SCENEWORKS_GPU_ID", "auto")
+                // Light up the candle lane on each discovered NVIDIA GPU
                 // (gpu::with_candle_capabilities + engines::registry_capabilities).
                 .env("SCENEWORKS_BACKEND_CANDLE_ENABLED", "true")
                 .env("SCENEWORKS_WORKER_ID", &worker_id)
