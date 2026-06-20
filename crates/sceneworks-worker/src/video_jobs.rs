@@ -90,6 +90,13 @@ use candle_gen_wan as _;
 // `run_video_upscale_job`. Force-linked so the MSVC release linker keeps the `inventory::submit!`.
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 use candle_gen_seedvr2 as _;
+// Candle SCAIL-2 (sc-6837, epic 6563): the character-animation + cross-identity replace_person
+// `Generator` registers under `scail2_14b` via `inventory::submit!`; force-link so the registration
+// survives the MSVC release linker (reached only through `gen_core::load("scail2_14b")`, no direct type
+// contact — the "no generator registered" trap). The off-Mac sibling of the macOS `mlx_gen_scail2`
+// anchor above.
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+use candle_gen_scail2 as _;
 #[cfg(any(
     target_os = "macos",
     all(not(target_os = "macos"), feature = "backend-candle")
@@ -439,53 +446,100 @@ pub(crate) async fn run_video_generate_job(
     // off → routing unchanged until parity). Conditioning shapes never reach here — the router's
     // `video_job_is_candle_eligible` confines the candle worker to txt2video.
     #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
-    let (decoded, adapter, raw_settings, replacement_status) = if settings.backend_candle_enabled
-        && request.mode == "replace_person"
-    {
-        // Candle Wan-VACE person replacement (sc-5494) — the candle equivalent of the MLX `wan_vace`
-        // path. The router (`video_request_candle_eligible`) already confirmed the candle-VACE model +
-        // the source clip + person track before this job reached the candle worker; `generate_candle_
-        // wan_vace` resolves-or-errors loudly (a person-replace must never silently degrade to a stub).
-        let (decoded, status) =
-            generate_candle_wan_vace(api, settings, job, &request, &project_path, backend).await?;
-        (
-            decoded,
-            CANDLE_WAN_VACE_ADAPTER,
-            wan_vace_raw_settings(&request, "wan_vace"),
-            Some(status),
-        )
-    } else if settings.backend_candle_enabled
-        && matches!(request.mode.as_str(), "extend_clip" | "video_bridge")
-    {
-        // Candle Wan-VACE extend/bridge (sc-5494): real source frames pinned at the kept positions +
-        // a generated span (the candle equivalent of the MLX `generate_wan_vace_extend_bridge`).
-        let decoded = generate_candle_wan_vace_extend_bridge(
-            api,
-            settings,
-            job,
-            &request,
-            &project_path,
-            backend,
-        )
-        .await?;
-        (
-            decoded,
-            CANDLE_WAN_VACE_ADAPTER,
-            wan_vace_extend_raw_settings(&request),
-            None::<Value>,
-        )
-    } else if settings.backend_candle_enabled && is_candle_video_engine(&request.model) {
-        let (decoded, adapter, raw_settings) =
-            generate_candle_video(api, settings, job, &request, &project_path, backend).await?;
-        (decoded, adapter, raw_settings, None::<Value>)
-    } else {
-        (
-            generate_stub_video(&request, seed),
-            STUB_ADAPTER,
-            stub_raw_settings(&request),
-            None::<Value>,
-        )
-    };
+    let (decoded, adapter, raw_settings, replacement_status) =
+        if settings.backend_candle_enabled && request.mode == "replace_person" {
+            // sc-6837 (epic 6563): SCAIL-2 is a distinct cross-identity replacement backend (NOT Wan-VACE)
+            // behind the same person-track pipeline. A `scail2_14b` replace_person job routes to the candle
+            // SCAIL-2 engine (the character reference + the tracked person's color masks, `replace_flag`),
+            // mirroring the macOS `generate_scail2_replace` dispatch; every other replace-capable model
+            // keeps candle Wan-VACE. Routed by model id, not weight availability — `generate_candle_scail2_
+            // replace` resolves-or-errors loudly (a person-replace must never silently degrade to a stub).
+            if let Some(engine_id) = candle_scail2_engine_id(&request.model) {
+                let (decoded, status) = generate_candle_scail2_replace(
+                    api,
+                    settings,
+                    job,
+                    &request,
+                    &project_path,
+                    engine_id,
+                    backend,
+                )
+                .await?;
+                (
+                    decoded,
+                    CANDLE_SCAIL2_ADAPTER,
+                    candle_scail2_raw_settings(&request),
+                    Some(status),
+                )
+            } else {
+                // Candle Wan-VACE person replacement (sc-5494) — the candle equivalent of the MLX
+                // `wan_vace` path. The router (`video_request_candle_vace_eligible`) already confirmed the
+                // candle-VACE model + the source clip + person track before this job reached the candle
+                // worker; `generate_candle_wan_vace` resolves-or-errors loudly (a person-replace must never
+                // silently degrade to a stub).
+                let (decoded, status) =
+                    generate_candle_wan_vace(api, settings, job, &request, &project_path, backend)
+                        .await?;
+                (
+                    decoded,
+                    CANDLE_WAN_VACE_ADAPTER,
+                    wan_vace_raw_settings(&request, "wan_vace"),
+                    Some(status),
+                )
+            }
+        } else if settings.backend_candle_enabled
+            && request.mode == "animate_character"
+            && candle_scail2_engine_id(&request.model).is_some()
+        {
+            // sc-6837: SCAIL-2 standalone character animation — a reference character + a driving video →
+            // an animated clip. `generate_candle_scail2` segments the reference + driving frames with the
+            // candle SAM3 segmenter, paints the color-coded masks, and runs the `scail2_14b` engine
+            // (`animate_character` → engine task `animation`). The candle sibling of the macOS
+            // `generate_scail2`; resolves-or-errors loudly (no torch fallback — a distinct candle engine).
+            let engine_id = candle_scail2_engine_id(&request.model).expect("scail2 model");
+            let (decoded, adapter, raw_settings) = generate_candle_scail2(
+                api,
+                settings,
+                job,
+                &request,
+                &project_path,
+                engine_id,
+                backend,
+            )
+            .await?;
+            (decoded, adapter, raw_settings, None::<Value>)
+        } else if settings.backend_candle_enabled
+            && matches!(request.mode.as_str(), "extend_clip" | "video_bridge")
+        {
+            // Candle Wan-VACE extend/bridge (sc-5494): real source frames pinned at the kept positions +
+            // a generated span (the candle equivalent of the MLX `generate_wan_vace_extend_bridge`).
+            let decoded = generate_candle_wan_vace_extend_bridge(
+                api,
+                settings,
+                job,
+                &request,
+                &project_path,
+                backend,
+            )
+            .await?;
+            (
+                decoded,
+                CANDLE_WAN_VACE_ADAPTER,
+                wan_vace_extend_raw_settings(&request),
+                None::<Value>,
+            )
+        } else if settings.backend_candle_enabled && is_candle_video_engine(&request.model) {
+            let (decoded, adapter, raw_settings) =
+                generate_candle_video(api, settings, job, &request, &project_path, backend).await?;
+            (decoded, adapter, raw_settings, None::<Value>)
+        } else {
+            (
+                generate_stub_video(&request, seed),
+                STUB_ADAPTER,
+                stub_raw_settings(&request),
+                None::<Value>,
+            )
+        };
     #[cfg(not(any(
         target_os = "macos",
         all(not(target_os = "macos"), feature = "backend-candle")
@@ -3079,6 +3133,405 @@ async fn generate_candle_video(
     let raw_settings = candle_video_raw_settings(request, &repo);
     let decoded = generate_video(api, settings, job, backend, input).await?;
     Ok((decoded, adapter, raw_settings))
+}
+
+// ---------------------------------------------------------------------------
+// Candle (Windows/CUDA) SCAIL-2 generation (sc-6837, epic 6563): the off-Mac sibling of the macOS
+// `generate_scail2` / `generate_scail2_replace` (epic 5439). Same end-to-end shape — a reference
+// character image + a driving video → an animated clip (`animate_character`), or cross-identity
+// `replace_person` (engine `replace_flag`) over the saved YOLO11 → ByteTrack → SAM3 person track. The
+// worker paints the color-coded masks from the candle SAM3 segmenter (`person_segment_sam3_candle`);
+// the painters (`scail2_masks`) are shared with the MLX lane. A distinct candle engine, NOT VACE — no
+// torch fallback (`gen_core::load("scail2_14b")` resolves the `candle_gen_scail2` provider, sc-6836).
+// ---------------------------------------------------------------------------
+
+/// Adapter id recorded on a real candle SCAIL-2 asset (the candle sibling of `mlx_scail2`).
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+const CANDLE_SCAIL2_ADAPTER: &str = "candle_scail2";
+
+/// SceneWorks SCAIL-2 model id → candle registry id, or `None` if `model` is not SCAIL-2.
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+fn candle_scail2_engine_id(model: &str) -> Option<&'static str> {
+    (model == "scail2_14b").then_some("scail2_14b")
+}
+
+/// Map a SceneWorks video mode to the SCAIL-2 engine `video_mode` task string. `replace_person`
+/// (cross-identity) flips the engine `replace_flag`; everything else (`animate_character`) is plain
+/// animation. Mirrors the macOS `scail2_engine_video_mode`.
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+fn candle_scail2_engine_video_mode(mode: &str) -> &'static str {
+    match mode {
+        "replace_person" => "replacement",
+        _ => "animation",
+    }
+}
+
+/// Resolve the candle SCAIL-2 snapshot dir from the `SCENEWORKS_CANDLE_SCAIL2_DIR` override, else the
+/// app-managed `<data>/models/candle/scail2`. The sentinel is the `transformer/` subdir (the converted
+/// SCAIL2Model DiT): the `candle_gen_scail2` provider builds its `Scail2Config` from hardcoded
+/// Wan2.1-14B dims and reads only the component subdirs (transformer, vae, text_encoder, clip, and
+/// `tokenizer/tokenizer.json`), not a root `config.json`, so that is the right marker. Errors loudly
+/// when absent — like the candle Wan-VACE resolver, a missing checkpoint surfaces a clear error
+/// instead of degrading to a stub (a character animation / replacement must never silently produce
+/// meaningless output). The provider's `load` then validates each subdir and reports the precise gap.
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+fn resolve_candle_scail2_model_dir(settings: &Settings) -> WorkerResult<PathBuf> {
+    if let Ok(dir) = std::env::var("SCENEWORKS_CANDLE_SCAIL2_DIR") {
+        let path = PathBuf::from(dir.trim());
+        if path.join("transformer").is_dir() {
+            return Ok(path);
+        }
+    }
+    let managed = settings
+        .data_dir
+        .join("models")
+        .join("candle")
+        .join("scail2");
+    if managed.join("transformer").is_dir() {
+        return Ok(managed);
+    }
+    Err(WorkerError::InvalidPayload(format!(
+        "scail2 (candle): no weights found. Place a candle-layout SCAIL-2 snapshot (transformer/ + \
+         vae/ + text_encoder/ + clip/ + tokenizer/) at {} or set $SCENEWORKS_CANDLE_SCAIL2_DIR.",
+        managed.display(),
+    )))
+}
+
+/// Raw-settings recorded on a candle SCAIL-2 asset (mirrors `candle_video_raw_settings` + the macOS
+/// `scail2_raw_settings`, trimmed to the no-LoRA candle surface — inference LoRA is sc-6838).
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+fn candle_scail2_raw_settings(request: &VideoRequest) -> Value {
+    let mut raw = request.advanced.clone();
+    raw.insert("realModelInference".to_owned(), Value::Bool(true));
+    raw.insert("model".to_owned(), Value::String(request.model.clone()));
+    raw.insert("frameCount".to_owned(), json!(request.frame_count()));
+    raw.insert("fps".to_owned(), json!(request.fps));
+    raw.insert(
+        "scail2Task".to_owned(),
+        Value::String(candle_scail2_engine_video_mode(&request.mode).to_owned()),
+    );
+    Value::Object(raw)
+}
+
+/// Resolve a candle SCAIL-2 `animate_character` request into the engine conditioning — the candle
+/// sibling of the macOS `resolve_scail2_conditioning`. Loads the reference character image + the
+/// driving clip, segments both with the candle SAM3 PCS segmenter (every person → a palette color,
+/// left-to-right), paints the color-coded masks (animation: reference bg white, driving bg black), and
+/// assembles `Reference` + `Mask` + `ControlClip`. Segmentation + painting run on the blocking pool.
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+async fn resolve_candle_scail2_conditioning(
+    api: &ApiClient,
+    settings: &Settings,
+    job: &JobSnapshot,
+    request: &VideoRequest,
+    project_path: &Path,
+) -> WorkerResult<Vec<Conditioning>> {
+    // The character: a reference image (referenceAssetIds first, else the i2v sourceAssetId).
+    let ref_id = request
+        .reference_asset_ids
+        .first()
+        .map(String::as_str)
+        .or(request.source_asset_id.as_deref())
+        .ok_or_else(|| {
+            WorkerError::InvalidPayload(
+                "scail2 animate_character requires a reference character image (referenceAssetIds \
+                 or sourceAssetId)."
+                    .into(),
+            )
+        })?;
+    let reference = crate::image_jobs::load_reference_image(
+        &settings.data_dir,
+        &request.project_id,
+        ref_id,
+        project_path,
+    )?;
+
+    // The driving video → frames at the output size (the engine re-resizes internally). Reuses the
+    // candle Wan-VACE source-clip loader (`load_source_video_frames`, which reads `sourceClipAssetId`
+    // and aspect-fits to W×H) — the candle-lane sibling of the macOS path's `extract_clip_frames`
+    // (that helper is macOS-only).
+    if request
+        .source_clip_asset_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|id| !id.is_empty())
+        .is_none()
+    {
+        return Err(WorkerError::InvalidPayload(
+            "scail2 animate_character requires a driving video (sourceClipAssetId).".into(),
+        ));
+    }
+    let driving = load_source_video_frames(
+        api,
+        settings,
+        job,
+        request,
+        project_path,
+        wan_frame_count(request.raw_frame_count()) as usize,
+    )
+    .await?;
+
+    // SAM3 segmenter weights (download-on-first-use), shared by both segmentation passes.
+    let client = reqwest::Client::new();
+    let context = crate::downloads::DownloadContext {
+        api,
+        client: &client,
+        settings,
+        job_id: &job.id,
+        cancel_message: "SCAIL-2 canceled while fetching the SAM3 segmenter weights.",
+        fresh_download: false,
+    };
+    let (sam_model, sam_tokenizer) =
+        crate::person_segment_sam3_candle::ensure_segmenter_weights(settings, &context).await?;
+
+    // Decode the engine `Image`s to `RgbImage`s for SAM3 (it normalizes RGB internally).
+    let ref_rgb =
+        image::RgbImage::from_raw(reference.width, reference.height, reference.pixels.clone())
+            .ok_or_else(|| {
+                WorkerError::InvalidPayload("scail2 reference image is malformed".into())
+            })?;
+    let driving_rgb: Vec<image::RgbImage> = driving
+        .iter()
+        .map(|f| image::RgbImage::from_raw(f.width, f.height, f.pixels.clone()))
+        .collect::<Option<Vec<_>>>()
+        .ok_or_else(|| WorkerError::InvalidPayload("scail2 driving frame is malformed".into()))?;
+
+    // Segment + paint the reference mask (animation keeps the reference's world → white background).
+    let (rm, rt) = (sam_model.clone(), sam_tokenizer.clone());
+    let ref_mask = tokio::task::spawn_blocking(move || -> WorkerResult<Image> {
+        let masks = crate::person_segment_sam3_candle::segment_all_persons_in_memory(
+            &rm,
+            &rt,
+            std::slice::from_ref(&ref_rgb),
+        )?;
+        crate::scail2_masks::paint_reference_mask(&masks, crate::scail2_masks::BG_WHITE)
+    })
+    .await
+    .map_err(|error| WorkerError::Io(std::io::Error::other(error)))??;
+
+    // Segment + paint the per-frame driving masks (animation → black background).
+    let driving_mask = tokio::task::spawn_blocking(move || -> WorkerResult<Vec<Image>> {
+        let masks = crate::person_segment_sam3_candle::segment_all_persons_in_memory(
+            &sam_model,
+            &sam_tokenizer,
+            &driving_rgb,
+        )?;
+        Ok(crate::scail2_masks::paint_driving_masks(
+            &masks,
+            crate::scail2_masks::BG_BLACK,
+        ))
+    })
+    .await
+    .map_err(|error| WorkerError::Io(std::io::Error::other(error)))??;
+
+    Ok(vec![
+        Conditioning::Reference {
+            image: reference,
+            strength: None,
+        },
+        Conditioning::Mask { image: ref_mask },
+        Conditioning::ControlClip {
+            frames: driving,
+            mask: driving_mask,
+            masking_strength: 1.0,
+            start_frame: 0,
+            mode: ReplacementMode::default(),
+        },
+    ])
+}
+
+/// Real candle SCAIL-2 character animation (sc-6837): build the `VideoGenInput` and run the shared
+/// `generate_video` path. `animate_character` → engine task `animation`; the source media becomes the
+/// SAM3-painted conditioning. No LoRA / quant on the candle path (the provider rejects them — inference
+/// LoRA is sc-6838); steps/guidance stay at the engine defaults. Frame count uses the Wan 1-mod-4
+/// stride (the renderer is Wan2.1); the engine stitches > 81-frame clips into overlapping segments.
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+async fn generate_candle_scail2(
+    api: &ApiClient,
+    settings: &Settings,
+    job: &JobSnapshot,
+    request: &VideoRequest,
+    project_path: &Path,
+    engine_id: &'static str,
+    backend: &str,
+) -> WorkerResult<(DecodedVideo, &'static str, Value)> {
+    let negative_prompt = {
+        let trimmed = request.negative_prompt.trim();
+        (!trimmed.is_empty()).then(|| trimmed.to_owned())
+    };
+    let conditioning =
+        resolve_candle_scail2_conditioning(api, settings, job, request, project_path).await?;
+    let input = VideoGenInput {
+        engine_id,
+        model_dir: resolve_candle_scail2_model_dir(settings)?,
+        conditioning,
+        prompt: request.prompt.clone(),
+        negative_prompt,
+        width: request.width,
+        height: request.height,
+        frames: wan_frame_count(request.raw_frame_count()),
+        fps: request.fps,
+        seed: resolve_video_seed(request) as u64,
+        video_mode: Some(candle_scail2_engine_video_mode(&request.mode).to_owned()),
+        ..VideoGenInput::default()
+    };
+    let decoded = generate_video(api, settings, job, backend, input).await?;
+    Ok((
+        decoded,
+        CANDLE_SCAIL2_ADAPTER,
+        candle_scail2_raw_settings(request),
+    ))
+}
+
+/// Resolve a candle SCAIL-2 `replace_person` request into cross-identity replacement conditioning — the
+/// candle sibling of the macOS `resolve_scail2_replace_conditioning` (sc-5452). Reuses the masks
+/// SceneWorks already computed: the saved person track (YOLO11 → ByteTrack → SAM3, corrections applied)
+/// supplies the per-frame driving masks; the character's approved reference is the identity. Driving
+/// frames load exactly as the candle Wan-VACE backend loads them (`load_source_video_frames`) so the
+/// resampled track masks stay frame-aligned 1:1. Replacement keeps the driving clip's world (driving
+/// mask bg white, reference mask bg black); `video_mode = "replacement"` flips the engine `replace_flag`.
+/// SCAIL-2 replaces the whole tracked person, so face_only/full_person + maskingStrength are inert.
+/// Returns the conditioning plus the honest `replacementStatus`.
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+async fn resolve_candle_scail2_replace_conditioning(
+    api: &ApiClient,
+    settings: &Settings,
+    job: &JobSnapshot,
+    request: &VideoRequest,
+    project_path: &Path,
+) -> WorkerResult<(Vec<Conditioning>, Value)> {
+    let track_id = request.person_track_id.as_deref().ok_or_else(|| {
+        WorkerError::InvalidPayload(
+            "replace_person requires a person track (personTrackId).".to_owned(),
+        )
+    })?;
+    let track = ProjectStore::new(settings.data_dir.clone(), "worker")
+        .get_person_track(&request.project_id, track_id)
+        .map_err(|error| {
+            WorkerError::InvalidPayload(format!("person track {track_id}: {error}"))
+        })?;
+
+    // Driving frames + their per-frame binary person masks — the same source the candle Wan-VACE
+    // backend consumes, loaded identically so the resampled masks align 1:1 with the frames.
+    let frame_count = wan_frame_count(request.raw_frame_count()) as usize;
+    let driving =
+        load_source_video_frames(api, settings, job, request, project_path, frame_count).await?;
+    let frame_total = driving.len();
+    let (binary_masks, mask_mode) = crate::person_replace::person_track_masks(
+        project_path,
+        &track,
+        request.width,
+        request.height,
+        frame_total,
+    )?;
+    // The tracked person → blue (person 0); replacement keeps the driving's world → white bg.
+    let driving_masks = crate::scail2_masks::paint_track_driving_masks(
+        &binary_masks,
+        crate::scail2_masks::BG_WHITE,
+    );
+
+    // The character identity: the first approved reference image (multi-ref = the engine-contract
+    // extension, sc-5583 on the MLX side).
+    let references = resolve_character_references(settings, request, project_path)?;
+    let reference_count = references.len();
+    let reference = references.into_iter().next().ok_or_else(|| {
+        WorkerError::InvalidPayload(
+            "Replace Person requires at least one approved character reference image.".to_owned(),
+        )
+    })?;
+
+    // The reference color mask: a candle SAM3 pass on the reference image → the primary person painted
+    // blue on a black background (replacement discards the reference's surrounding world).
+    let client = reqwest::Client::new();
+    let context = crate::downloads::DownloadContext {
+        api,
+        client: &client,
+        settings,
+        job_id: &job.id,
+        cancel_message: "SCAIL-2 canceled while fetching the SAM3 segmenter weights.",
+        fresh_download: false,
+    };
+    let (sam_model, sam_tokenizer) =
+        crate::person_segment_sam3_candle::ensure_segmenter_weights(settings, &context).await?;
+    let ref_rgb =
+        image::RgbImage::from_raw(reference.width, reference.height, reference.pixels.clone())
+            .ok_or_else(|| {
+                WorkerError::InvalidPayload("scail2 reference image is malformed".into())
+            })?;
+    let ref_mask = tokio::task::spawn_blocking(move || -> WorkerResult<Image> {
+        let masks = crate::person_segment_sam3_candle::segment_all_persons_in_memory(
+            &sam_model,
+            &sam_tokenizer,
+            std::slice::from_ref(&ref_rgb),
+        )?;
+        crate::scail2_masks::paint_reference_mask(&masks, crate::scail2_masks::BG_BLACK)
+    })
+    .await
+    .map_err(|error| WorkerError::Io(std::io::Error::other(error)))??;
+
+    let conditioning = vec![
+        Conditioning::Reference {
+            image: reference,
+            strength: None,
+        },
+        Conditioning::Mask { image: ref_mask },
+        Conditioning::ControlClip {
+            frames: driving,
+            mask: driving_masks,
+            masking_strength: 1.0,
+            start_frame: 0,
+            mode: ReplacementMode::default(),
+        },
+    ];
+    let status = replacement_status_value(
+        &track,
+        track_id,
+        mask_mode,
+        1.0,
+        reference_count,
+        frame_total,
+        CANDLE_SCAIL2_ADAPTER,
+    );
+    Ok((conditioning, status))
+}
+
+/// Real candle SCAIL-2 cross-identity replacement (sc-6837): the candle sibling of the MLX
+/// `generate_scail2_replace`. Builds the replacement conditioning from the saved person track +
+/// character reference and runs the shared `generate_video` path with `video_mode = "replacement"`
+/// (engine `replace_flag = true`). Returns the decoded video + the honest `replacementStatus`.
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+async fn generate_candle_scail2_replace(
+    api: &ApiClient,
+    settings: &Settings,
+    job: &JobSnapshot,
+    request: &VideoRequest,
+    project_path: &Path,
+    engine_id: &'static str,
+    backend: &str,
+) -> WorkerResult<(DecodedVideo, Value)> {
+    let negative_prompt = {
+        let trimmed = request.negative_prompt.trim();
+        (!trimmed.is_empty()).then(|| trimmed.to_owned())
+    };
+    let (conditioning, status) =
+        resolve_candle_scail2_replace_conditioning(api, settings, job, request, project_path)
+            .await?;
+    let input = VideoGenInput {
+        engine_id,
+        model_dir: resolve_candle_scail2_model_dir(settings)?,
+        conditioning,
+        prompt: request.prompt.clone(),
+        negative_prompt,
+        width: request.width,
+        height: request.height,
+        frames: wan_frame_count(request.raw_frame_count()),
+        fps: request.fps,
+        seed: resolve_video_seed(request) as u64,
+        video_mode: Some("replacement".to_owned()),
+        ..VideoGenInput::default()
+    };
+    let decoded = generate_video(api, settings, job, backend, input).await?;
+    Ok((decoded, status))
 }
 
 /// Resolve the candle Wan-VACE diffusers snapshot dir (sc-5494): `SCENEWORKS_CANDLE_WAN_VACE_DIR`
