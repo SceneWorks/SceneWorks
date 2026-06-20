@@ -663,6 +663,35 @@ describe("ImageStudio model picker capability gating", () => {
     );
     expect(refineButton).toBeTruthy();
   });
+
+  const precisionLabel = (root) =>
+    [...root.querySelectorAll("label")].find((l) =>
+      l.textContent.includes("Full precision (bf16)"),
+    );
+  const openAdvanced = async (root) =>
+    click([...root.querySelectorAll("button")].find((b) => b.textContent === "Advanced"));
+
+  it("exposes the Full-precision (bf16) toggle for Boogu in Advanced when ui.precisionToggle is set (sc-6568)", async () => {
+    await render(
+      baseContext({
+        imageModels: [{ ...BOOGU_BASE, ui: { precisionToggle: true } }],
+        macCapabilities: MAC_CAPS,
+      }),
+    );
+    await openAdvanced(container);
+    await act(async () => {});
+    const toggle = precisionLabel(container);
+    expect(toggle).toBeTruthy();
+    // Default off → the packed Q8 build (no mlxQuantize emitted).
+    expect(toggle.querySelector('input[type="checkbox"]').checked).toBe(false);
+  });
+
+  it("hides the precision toggle when the model omits ui.precisionToggle — catalog-gated, not family-hardcoded (sc-6568)", async () => {
+    await render(baseContext({ imageModels: [BOOGU_BASE], macCapabilities: MAC_CAPS }));
+    await openAdvanced(container);
+    await act(async () => {});
+    expect(precisionLabel(container)).toBeFalsy();
+  });
 });
 
 describe("ImageStudio structured-prompt recipe round-trip (sc-6147)", () => {

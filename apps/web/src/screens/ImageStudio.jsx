@@ -389,6 +389,9 @@ export function ImageStudio() {
   // the prompt before encoding — text-only for txt2img, reference-aware for edit. Per-payload
   // (`advanced.enhancePrompt`); only flux2_dev acts on it. Sticky pref (persisted), default off.
   const [enhancePrompt, setEnhancePrompt] = useState(saved.enhancePrompt ?? false);
+  // Boogu precision toggle (sc-6568): off = the packed Q8 default; on emits `advanced.mlxQuantize: 0`
+  // (the full-precision bf16 build, fetched on demand by the worker). Sticky pref, default off (Q8).
+  const [bf16Precision, setBf16Precision] = useState(saved.bf16Precision ?? false);
   const [faceRestore, setFaceRestore] = useState(false);
   // User-created poses (reserved global project) join the built-in library in both
   // the picker and the id→keypoints resolver below, so saved poses can generate.
@@ -583,6 +586,9 @@ export function ImageStudio() {
   const poseLibrary = Boolean(selectedModel?.ui?.poseLibrary);
   // Whether the model exposes its built-in prompt upsampler ("Enhance prompt" toggle) — FLUX.2-dev.
   const promptEnhance = Boolean(selectedModel?.ui?.promptEnhance);
+  // Whether the model ships a packed default + a hosted full-precision bf16 build, exposing the
+  // Studio "Full precision (bf16)" toggle (sc-6568) — Boogu Base/Turbo/Edit.
+  const precisionToggle = Boolean(selectedModel?.ui?.precisionToggle);
   // Whether the model supports multi-image reference editing (sc-6211) — edit_image mode shows a
   // multi-select reference picker (plural `referenceAssetIds`) instead of the single source picker.
   // FLUX.2-dev only (its DiT sequence-gated chunking keeps the multi-reference edit under 96 GB).
@@ -1004,6 +1010,7 @@ export function ImageStudio() {
     guidanceScale: guidanceOverride,
     flashAttn,
     enhancePrompt,
+    bf16Precision,
   });
 
   // Snapshot the current working config into a named recipe preset in the
@@ -1229,6 +1236,10 @@ export function ImageStudio() {
           // FLUX.2-dev caption upsampling (sc-6135): emitted only when the model declares the
           // toggle AND it's on (off-by-default; the worker/engine ignore it for other models).
           ...(promptEnhance && enhancePrompt ? { enhancePrompt: true } : {}),
+          // Boogu precision (sc-6568): emit mlxQuantize:0 (full-precision bf16) only when the model
+          // exposes the precision toggle AND bf16 is selected; the default Q8 emits nothing (the
+          // worker reads manifest mlx.quantize and fetches the `<variant>-bf16/` subfolder on demand).
+          ...(precisionToggle && bf16Precision ? { mlxQuantize: 0 } : {}),
           // IP-Adapter / InstantID reference strength only applies when a character
           // reference is attached AND the model uses the IP-Adapter knob; Qwen's
           // edit pipeline ignores this scalar (hideReferenceStrength gates it out).
@@ -1822,6 +1833,19 @@ export function ImageStudio() {
                       type="checkbox"
                     />
                     Enhance prompt
+                  </label>
+                ) : null}
+                {precisionToggle ? (
+                  <label
+                    className="checkline boogu-precision-toggle"
+                    title="Use the full-precision bf16 build instead of the default Q8. Higher fidelity, but a much larger download (~38 GB per variant, fetched on demand) that needs a larger Mac (≈96 GB unified memory). Off = the Q8 default (~23 GB, 64 GB-class Mac)."
+                  >
+                    <input
+                      checked={bf16Precision}
+                      onChange={(event) => setBf16Precision(event.target.checked)}
+                      type="checkbox"
+                    />
+                    Full precision (bf16)
                   </label>
                 ) : null}
                 <label className="checkline upscale-toggle">

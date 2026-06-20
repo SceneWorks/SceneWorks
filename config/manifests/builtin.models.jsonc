@@ -1071,6 +1071,10 @@
       "licenseUrl": "https://huggingface.co/Boogu/Boogu-Image-0.1-Base",
       "ui": {
         "label": "Boogu Image",
+        // Exposes the Image Studio "Full precision (bf16)" toggle (sc-6568): off = the packed Q8
+        // default (the downloaded `base/` subfolder); on sends advanced `mlxQuantize: 0` and the
+        // worker fetches the `base-bf16/` subfolder on demand. Needs a larger Mac (~96 GB).
+        "precisionToggle": true,
         "description": "Boogu-Image-0.1 — a Lumina-Image-2.0 / OmniGen2-lineage flow-matching text-to-image model (~10.3B DiT + Qwen3-VL-8B condition encoder + FLUX.1 VAE), native MLX (Apple Silicon). True-CFG, natural-language prompting with strong bilingual (English/Chinese) in-image text rendering. Pre-quantized Q8 (~23 GB, default; full-precision bf16 also hosted). Apache-2.0 (ungated). Needs a 64 GB-class Mac.",
         "recommendedFor": ["text_to_image"],
         "promptGuide": {
@@ -1138,6 +1142,9 @@
       "licenseUrl": "https://huggingface.co/Boogu/Boogu-Image-0.1-Turbo",
       "ui": {
         "label": "Boogu Image Turbo",
+        // Full-precision bf16 opt-in (sc-6568): on sends `mlxQuantize: 0`; the worker fetches the
+        // `turbo-bf16/` subfolder on demand. Off = the packed Q8 `turbo/` default.
+        "precisionToggle": true,
         "description": "Boogu-Image-0.1 Turbo — the few-step (~4), CFG-free fast variant of Boogu Image: the same ~10.3B flow-matching model distilled (DMD) for much faster renders, native MLX (Apple Silicon). Best for quick iteration. Pre-quantized Q8 (~23 GB, default). Apache-2.0 (ungated). Needs a 64 GB-class Mac.",
         "recommendedFor": ["text_to_image"],
         "promptGuide": {
@@ -1208,6 +1215,9 @@
       "licenseUrl": "https://huggingface.co/Boogu/Boogu-Image-0.1-Edit",
       "ui": {
         "label": "Boogu Image Edit",
+        // Full-precision bf16 opt-in (sc-6568): on sends `mlxQuantize: 0`; the worker fetches the
+        // `edit-bf16/` subfolder on demand. Off = the packed Q8 `edit/` default.
+        "precisionToggle": true,
         "description": "Boogu-Image-0.1 Edit — instruction-driven image editing: give a source image and a text instruction and Boogu produces a faithful edited image (the source is read by the Qwen3-VL vision tower). Native MLX (Apple Silicon). Pre-quantized Q8 (~23 GB, default). Apache-2.0 (ungated). Needs a 64 GB-class Mac.",
         "recommendedFor": ["edit_image"],
         "promptGuide": {
