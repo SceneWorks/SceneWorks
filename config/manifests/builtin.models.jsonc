@@ -855,6 +855,17 @@
           "files": ["q4/*"],
           "platforms": ["macos"],
           "estimatedSizeBytes": 15400562623
+        },
+        {
+          // Candle (Windows/Linux CUDA) bf16 snapshot (epic 6561 / sc-6859): the candle provider can't
+          // read the MLX-quantized turnkey above, so off-Mac loads bf16 from a separate repo. Weights
+          // live under the `bf16/` subdir (the worker's `candle_ideogram_subdir`) so quant variants can
+          // slot in later without a rename. Same gated non-commercial license; Windows/Linux download.
+          "provider": "huggingface",
+          "repo": "SceneWorks/ideogram-4",
+          "files": ["bf16/*"],
+          "platforms": ["windows", "linux"],
+          "estimatedSizeBytes": 54760833024
         }
       ],
       "paths": {
@@ -952,6 +963,16 @@
           "files": ["q4/*", "q4/turbo_lora.safetensors"],
           "platforms": ["macos"],
           "estimatedSizeBytes": 16247340792
+        },
+        {
+          // Candle (Windows/Linux CUDA) bf16 snapshot (epic 6561 / sc-6859): off-Mac loads bf16 from
+          // `SceneWorks/ideogram-4`'s `bf16/` subdir, which carries `turbo_lora.safetensors` alongside
+          // the base weights (the turbo loader merges it at load). Same gated license; Win/Linux only.
+          "provider": "huggingface",
+          "repo": "SceneWorks/ideogram-4",
+          "files": ["bf16/*"],
+          "platforms": ["windows", "linux"],
+          "estimatedSizeBytes": 54760833024
         }
       ],
       "paths": {
