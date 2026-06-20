@@ -3858,6 +3858,17 @@ fn image_job_is_candle_eligible(job: &JobSnapshot) -> bool {
     {
         return true;
     }
+    // Ideogram 4 img2img / Remix + mask inpaint / outpaint edit (sc-6598, epic 6561): an ideogram-family
+    // `edit_image` job with a source image runs the candle `candle-gen-ideogram` edit path. Unlike the
+    // other families above, Ideogram has no bespoke edit stream — it's the SAME engine for T2I and edit,
+    // so the generic `generate_candle_stream` resolves the source `Reference` (+ optional `Mask`), exactly
+    // as the MLX `generate_stream` handles Ideogram edit in-lane. The `image_request_candle_eligible` gate
+    // below rejects the whole `edit_image` family, so branch it out here. Mirrors the worker's dispatch.
+    if matches!(model, "ideogram_4" | "ideogram_4_turbo")
+        && ideogram_edit_candle_eligible(&job.payload)
+    {
+        return true;
+    }
     // SDXL IP-Adapter-Plus reference conditioning (sc-5488, epic 5480): an sdxl-family model with a
     // reference image is a bespoke candle lane (`generate_candle_sdxl_ipadapter_stream`), NOT txt2img —
     // the `image_request_candle_eligible` gate below rejects `referenceAssetId`. Branch it out first
@@ -4243,6 +4254,25 @@ fn qwen_edit_candle_eligible(payload: &Map<String, Value>) -> bool {
 /// worker's `zimage_edit_candle_available` gate (minus the local weight-resolve check) so the router and
 /// worker agree. Candle-only — macOS keeps the MLX `z_image_turbo` registry generator's `Reference` path.
 fn zimage_edit_candle_eligible(payload: &Map<String, Value>) -> bool {
+    if payload.get("mode").and_then(Value::as_str) != Some("edit_image") {
+        return false;
+    }
+    payload
+        .get("sourceAssetId")
+        .and_then(Value::as_str)
+        .is_some_and(|value| !value.trim().is_empty())
+}
+
+/// Ideogram 4 img2img / Remix + mask inpaint / outpaint edit candle-routing conditions (sc-6598, epic
+/// 6561). The candle `candle-gen-ideogram` provider serves `edit_image` mode with a `sourceAssetId` on
+/// the ideogram family — img2img/Remix (source `Reference`), masked inpaint (`+ maskAssetId`), and
+/// outpaint (`fit_mode == "outpaint"`, the worker synthesizes the border mask) all require a source.
+/// Same payload predicate as the other edit gates (an optional mask / outpaint is resolved worker-side
+/// in `resolve_ideogram_edit`). Gated to the ideogram family by the caller. The candle lane reuses the
+/// generic `generate_candle_stream` (same engine as T2I), so there is no separate worker `*_available`
+/// gate to mirror — the worker's `is_candle_engine` + in-lane edit resolve cover both. Candle-only —
+/// macOS keeps the MLX `ideogram_4` registry generator's edit path (sc-6303).
+fn ideogram_edit_candle_eligible(payload: &Map<String, Value>) -> bool {
     if payload.get("mode").and_then(Value::as_str) != Some("edit_image") {
         return false;
     }
@@ -5671,25 +5701,45 @@ mod candle_routing_tests {
     }
 
     #[test]
-    fn ideogram_candle_txt2img_eligible_but_edit_defers_to_torch() {
+    fn ideogram_candle_txt2img_and_edit_route_to_candle() {
         // sc-6597 (epic 6561): `ideogram_4` + `ideogram_4_turbo` route to the candle lane for plain
-        // text-to-image only. Edit / img2img / mask / reference shapes defer to the Python torch
-        // worker until the candle edit lane lands (sc-6598).
+        // text-to-image via the generic `image_request_candle_eligible` gate. sc-6598: img2img / Remix +
+        // mask inpaint / outpaint now route to candle too — via the bespoke `ideogram_edit_candle_eligible`
+        // branch in `image_job_is_candle_eligible` (the generic gate stays txt2img-only, like every other
+        // candle edit family). A pure `referenceAssetId` (IP-Adapter — no candle Ideogram path) still
+        // defers to torch.
         for model in ["ideogram_4", "ideogram_4_turbo"] {
+            // Plain txt2img → the generic gate.
             assert!(
                 image_request_candle_eligible(model, &object(json!({ "prompt": "an aurora" }))),
                 "{model} plain txt2img must be candle-eligible"
             );
+            // Edit shapes → the bespoke dispatcher branch (img2img, inpaint, outpaint all need a source).
             for payload in [
-                json!({ "mode": "edit_image", "sourceAssetId": "a" }),
-                json!({ "referenceAssetId": "a" }),
-                json!({ "maskAssetId": "m", "sourceAssetId": "a" }),
+                json!({ "model": model, "mode": "edit_image", "sourceAssetId": "a" }),
+                json!({ "model": model, "mode": "edit_image", "sourceAssetId": "a", "maskAssetId": "m" }),
+                json!({ "model": model, "mode": "edit_image", "sourceAssetId": "a", "fit_mode": "outpaint" }),
             ] {
                 assert!(
-                    !image_request_candle_eligible(model, &object(payload.clone())),
-                    "{model} edit shape must defer to torch: {payload}"
+                    ideogram_edit_candle_eligible(&object(payload.clone())),
+                    "{model} edit shape must be candle-eligible: {payload}"
                 );
+                assert!(
+                    image_job_is_candle_eligible(&image_edit_job(payload.clone())),
+                    "{model} edit job must route to candle: {payload}"
+                );
+                // The generic txt2img gate still rejects the edit_image family (the bespoke lane handles it).
+                assert!(!image_request_candle_eligible(model, &object(payload)));
             }
+            // `edit_image` WITHOUT a source → nothing to edit → not this lane.
+            assert!(!ideogram_edit_candle_eligible(&object(json!({
+                "model": model, "mode": "edit_image"
+            }))));
+            // Pure IP-Adapter reference (Ideogram has no candle IP path) still defers to torch.
+            assert!(!image_request_candle_eligible(
+                model,
+                &object(json!({ "referenceAssetId": "a" }))
+            ));
         }
     }
 

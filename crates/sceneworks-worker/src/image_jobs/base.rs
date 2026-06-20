@@ -937,12 +937,19 @@ pub(crate) fn load_reference_image(
 }
 
 /// img2img (Remix) strength for a plain Ideogram 4 edit with no mask — mirrors the sdxl/z-image 0.6
-/// edit default and the engine's `DEFAULT_IMG2IMG_STRENGTH`.
-#[cfg(target_os = "macos")]
+/// edit default and the engine's `DEFAULT_IMG2IMG_STRENGTH`. Shared by the macOS MLX edit path and the
+/// candle in-lane edit (sc-6598), so it compiles off-Mac under `backend-candle` too.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
 const IDEOGRAM_EDIT_STRENGTH: f32 = 0.6;
 /// Heavier img2img strength for masked inpaint / outpaint (regenerate the painted region) — mirrors
 /// the sdxl 0.85 inpaint default and the engine's `DEFAULT_INPAINT_STRENGTH`.
-#[cfg(target_os = "macos")]
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
 const IDEOGRAM_INPAINT_STRENGTH: f32 = 0.85;
 
 /// Resolve the Boogu instruction-edit source: the `sourceAssetId` image, fit to the output W×H (so
@@ -989,7 +996,15 @@ fn resolve_boogu_edit(
 ///     it lines up), unioning any user mask (white wins).
 ///
 /// `None` when not an edit job or no source asset (the caller falls back to plain txt2img).
-#[cfg(target_os = "macos")]
+///
+/// Shared by the macOS MLX `generate_stream` and the off-Mac candle `generate_candle_stream`
+/// (sc-6598): Ideogram is the same engine for T2I and edit on both backends, so both lanes resolve the
+/// edit conditioning the same way. Its deps (`load_reference_image`, `fit_engine_image`, `non_empty`,
+/// the `gen_core::imageops` mask helpers) are all already compiled off-Mac under `backend-candle`.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
 fn resolve_ideogram_edit(
     request: &ImageRequest,
     settings: &Settings,
@@ -1503,15 +1518,16 @@ async fn generate_stream(
     .await
 }
 
-/// Whether `model` is served by the candle (Windows/CUDA) backend's **txt2img** lane. SDXL/RealVisXL
-/// (sc-3675) plus the four image families wired in sc-5096 — z-image, flux schnell/dev, flux2-klein,
-/// qwen-image — plus Lens / Lens-Turbo (sc-5126, the first candle family with quant + LoRA/LoKr).
+/// Whether `model` is served by the candle (Windows/CUDA) backend's generic lane (txt2img, plus the
+/// Ideogram 4 in-lane edit, below). SDXL/RealVisXL (sc-3675) plus the four image families wired in
+/// sc-5096 — z-image, flux schnell/dev, flux2-klein, qwen-image — plus Lens / Lens-Turbo (sc-5126, the
+/// first candle family with quant + LoRA/LoKr) plus Ideogram 4 + Turbo (sc-6597/sc-6598, epic 6561).
 /// `realvisxl` shares the candle `"sdxl"` engine via a weights swap; every other id maps 1:1 to its
-/// `MODEL_TABLE` engine id. Edit/control/reference shapes and the non-base weight variants stay on the
-/// Python torch worker (the router's `image_request_candle_eligible` enforces the same boundary), so
-/// this gate is intentionally the base-id set only. Lens is pure T2I (no conditioning), so it joins
-/// the lane with no new dispatch shape — only quant + adapters, which `generate_candle_stream`
-/// resolves from the descriptor.
+/// `MODEL_TABLE` engine id. For the OTHER families, edit/control/reference shapes route to their bespoke
+/// candle lanes (checked before this gate in the dispatch) or to the Python torch worker; Ideogram is
+/// the exception — its img2img/mask edit is the SAME engine as its T2I, so `generate_candle_stream`
+/// resolves the edit conditioning in-lane (mirroring the MLX `generate_stream`), no separate stream.
+/// Lens is pure T2I; only quant + adapters, which `generate_candle_stream` resolves from the descriptor.
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 fn is_candle_engine(model: &str) -> bool {
     matches!(
@@ -1531,6 +1547,8 @@ fn is_candle_engine(model: &str) -> bool {
             | "kolors"
             | "sensenova_u1_8b"
             | "sensenova_u1_8b_fast"
+            | "ideogram_4"
+            | "ideogram_4_turbo"
     )
 }
 
@@ -1549,6 +1567,7 @@ fn candle_adapter_label(model: &str) -> &'static str {
         "lens" | "lens_turbo" => "candle_lens",
         "kolors" => "candle_kolors",
         "sensenova_u1_8b" | "sensenova_u1_8b_fast" => "candle_sensenova",
+        "ideogram_4" | "ideogram_4_turbo" => "candle_ideogram",
         // sdxl / realvisxl share the candle "sdxl" engine.
         _ => CANDLE_ADAPTER,
     }
@@ -1646,7 +1665,29 @@ async fn generate_candle_stream(
 
     let count = request.count as usize;
     let seeds: Vec<i64> = (0..count).map(|index| resolve_seed(request, index)).collect();
-    let prompt = request.prompt.clone();
+    // Ideogram 4 (epic 4725, sc-6501) is JSON-caption-only: a raw plain-text prompt is out-of-
+    // distribution and stochastically renders the "Image blocked by safety filter" placeholder. Wrap a
+    // non-caption prompt into a minimal valid caption — the same worker-side guarantee the macOS path
+    // applies via `ideogram_caption::ensure_caption_prompt`. No-op (a clone) for every other family.
+    let prompt = if crate::ideogram_caption::is_ideogram_model(&request.model) {
+        crate::ideogram_caption::ensure_caption_prompt(&request.prompt)
+    } else {
+        request.prompt.clone()
+    };
+    // Ideogram 4 img2img / Remix + mask inpaint / outpaint edit (sc-6598): resolve the source
+    // `Reference` (+ optional `Mask`) + strength once, seed-independent — the candle sibling of the MLX
+    // `generate_stream` edit path. `resolve_ideogram_edit` returns `None` for a non-edit (T2I) job, and
+    // it is gated to the ideogram family so a stray non-ideogram job reaching this generic lane is
+    // untouched. Other candle edit families have their own bespoke streams (checked before this dispatch).
+    let (ideogram_reference, ideogram_mask) =
+        if crate::ideogram_caption::is_ideogram_model(&request.model) {
+            match resolve_ideogram_edit(request, settings, project_path)? {
+                Some((source, strength, mask)) => (Some((source, strength)), mask),
+                None => (None, None),
+            }
+        } else {
+            (None, None)
+        };
     let (width, height) = (request.width, request.height);
     // sc-6135: caption upsampling is FLUX.2-dev-only and dev runs on the macOS path, so this is a
     // no-op here — resolved for uniformity (and so a future candle enhancer would be wired).
@@ -1673,8 +1714,8 @@ async fn generate_candle_stream(
                     steps,
                     guidance,
                     negative_prompt.clone(),
-                    None,
-                    None,
+                    ideogram_reference.as_ref(),
+                    ideogram_mask.as_ref(),
                     true_cfg,
                     // The candle txt2img families don't advertise sampler/scheduler selection (each uses
                     // its family default), so no override is forwarded — matching this path's behavior
