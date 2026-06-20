@@ -35,7 +35,7 @@ concurrency:
 jobs:
   macos:
     # Self-hosted macOS 26.2 runner; same-repo only — never run fork code.
-    if: ${{ github.repository == 'michaeltrefry/SceneWorks' }}
+    if: ${{ github.repository == 'SceneWorks/SceneWorks' }}
     runs-on: [self-hosted, macOS, ARM64, nax]
     env:
       APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
