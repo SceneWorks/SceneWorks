@@ -3391,8 +3391,9 @@ fn flux2_pose_tier_real_weights_generates_one_image() {
         None,
     )
     .unwrap();
-    // A minimal standing skeleton (body only — the best-effort tier uses no
-    // hands/face) + a synthetic reference, paired as the pose multi-image set.
+    // A minimal standing skeleton (body only for this smoke — the production tier now
+    // threads hands/face per sc-6702, exercised by the A/B test below) + a synthetic
+    // reference, paired as the pose multi-image set.
     let kp = crate::openpose_skeleton::normalize_keypoints(&json!([
         [0.5, 0.2],
         [0.5, 0.35],
@@ -3458,6 +3459,146 @@ fn flux2_pose_tier_real_weights_generates_one_image() {
     assert_eq!(pixels.len(), 512 * 512 * 3);
     assert!(steps_seen >= 1, "expected denoise step progress");
     assert!(pixels.windows(2).any(|w| w[0] != w[1]));
+}
+
+/// sc-6702 A/B (real weights): does threading the pose's hands/face into the
+/// FLUX.2-klein best-effort skeleton improve hand/gesture fidelity (as it did for
+/// Qwen-Edit, sc-6599 = GO)? The best-effort tier feeds the skeleton as the *first*
+/// image of a `[skeleton, reference]` `MultiReference` edit (NOT a ControlNet), so
+/// there is no training-distribution argument either way — only a real A/B settles it.
+///
+/// This reuses the persistent sc-6599 harness assets at `~/sceneworks-pytorch-harness/`
+/// (the same auburn-haired reference + two whole-body pose donors with hands/face
+/// detected by production DWPose) so the result is directly comparable to the Qwen run.
+/// For each pose it renders the skeleton body-only vs whole-body and runs the exact
+/// production engine call with an identical seed/prompt/reference — the ONLY variable is
+/// whether the skeleton carries hands+face — writing `flux2_out_{pose}_{arm}.png` for
+/// visual judgment. Needs the HF cache (`black-forest-labs/FLUX.2-klein-9b`) + Metal:
+/// `cargo test -p sceneworks-worker --lib -- --ignored --nocapture flux2_pose_tier_ab_wholebody`.
+#[cfg(target_os = "macos")]
+#[test]
+#[ignore = "sc-6702 real-weight A/B: needs FLUX.2-klein-9b weights + Metal + the sc-6599 harness assets"]
+fn flux2_pose_tier_ab_wholebody_vs_body_real_weights() {
+    use crate::openpose_skeleton::{
+        body_stickwidth, draw_wholebody, normalize_face, normalize_hands, normalize_keypoints,
+    };
+
+    // Harness dir (override with SC6702_HARNESS for a relocated copy).
+    let harness = std::env::var("SC6702_HARNESS")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|_| dirs_home().join("sceneworks-pytorch-harness"));
+    assert!(
+        harness.join("ref.png").exists(),
+        "missing sc-6599 harness assets at {} — see sc_6599_qwen_edit_pose_wholebody_ab",
+        harness.display()
+    );
+
+    // SIDE matches the reference + the Qwen A/B (max hand/face scale). BASE is the same
+    // character description used for the reference image in the Qwen A/B, wrapped by the
+    // production pose-prompt augmenter (`augment_prompt_for_pose`).
+    const SIDE: u32 = 1024;
+    const BASE: &str = "The same woman with long wavy auburn hair, freckles, and a \
+        mustard-yellow turtleneck sweater, full body, standing, plain light background, \
+        photorealistic";
+    let prompt = augment_prompt_for_pose(BASE);
+    let stickwidth = body_stickwidth(SIDE, SIDE);
+
+    // Shared reference (identity), resized to the working square if needed.
+    let ref_rgb = {
+        let img = image::open(harness.join("ref.png")).unwrap().to_rgb8();
+        if img.width() == SIDE && img.height() == SIDE {
+            img
+        } else {
+            image::imageops::resize(&img, SIDE, SIDE, image::imageops::FilterType::Triangle)
+        }
+    };
+    let reference = gen_core::Image {
+        width: SIDE,
+        height: SIDE,
+        pixels: ref_rgb.into_raw(),
+    };
+
+    // Load the klein edit engine once; reuse for all four renders.
+    let snapshot = hf_snapshot("models--black-forest-labs--FLUX.2-klein-9b");
+    let generator = load_engine(
+        "flux2_klein_9b_edit",
+        snapshot,
+        Some(gen_core::Quant::Q8),
+        Vec::new(),
+        None,
+    )
+    .unwrap();
+
+    // Seeds mirror the Qwen A/B (pose1=8001, pose2=8002) for a clean cross-model comparison.
+    for (pose, seed) in [("pose1", 8001i64), ("pose2", 8002i64)] {
+        let raw = std::fs::read_to_string(harness.join(format!("{pose}.json"))).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&raw).unwrap();
+        let keypoints = normalize_keypoints(&v["keypoints"]);
+        let hands = normalize_hands(&v["hands"]);
+        let face = normalize_face(&v["face"]);
+        assert!(
+            hands.is_some() && face.is_some(),
+            "{pose}.json must carry hands + face for the A/B to mean anything"
+        );
+
+        // arm "body" = body-only (None/None — the current production behavior);
+        // arm "whole" = body + hands + face (the candidate fix).
+        for arm in ["body", "whole"] {
+            let (hands_arg, face_arg) = if arm == "whole" {
+                (hands.as_deref(), face.as_deref())
+            } else {
+                (None, None)
+            };
+            let skeleton = draw_wholebody(SIDE, SIDE, &keypoints, hands_arg, face_arg, stickwidth);
+            // Record the skeleton actually fed to the engine.
+            skeleton
+                .save(harness.join(format!("flux2_{pose}_skel_{arm}.png")))
+                .unwrap();
+            let skeleton_img = gen_core::Image {
+                width: SIDE,
+                height: SIDE,
+                pixels: skeleton.into_raw(),
+            };
+            // Production order: [skeleton, reference] (flux2.rs:419 — skeleton FIRST,
+            // unlike Qwen's [reference, skeleton]).
+            let conditioning = vec![gen_core::Conditioning::MultiReference {
+                images: vec![skeleton_img, reference.clone()],
+            }];
+            let cancel = gen_core::CancelFlag::new();
+            let mut steps_seen = 0u32;
+            eprintln!("[sc-6702] generating {pose}/{arm} (seed {seed}) ...");
+            let (w, h, pixels) = flux2_edit_generate_one(
+                generator.as_ref(),
+                &prompt,
+                SIDE,
+                SIDE,
+                seed,
+                4, // klein is a 4-step distill
+                Some(1.0),
+                conditioning,
+                &PromptEnhance::default(),
+                &cancel,
+                &mut |p| {
+                    if let gen_core::Progress::Step { current, .. } = p {
+                        steps_seen = steps_seen.max(current);
+                    }
+                },
+            )
+            .unwrap();
+            assert_eq!((w, h), (SIDE, SIDE));
+            assert!(steps_seen >= 1, "expected denoise step progress");
+            let out = harness.join(format!("flux2_out_{pose}_{arm}.png"));
+            image::RgbImage::from_raw(w, h, pixels)
+                .unwrap()
+                .save(&out)
+                .unwrap();
+            eprintln!("[sc-6702]   saved {}", out.display());
+        }
+    }
+    eprintln!(
+        "[sc-6702] A/B done — compare flux2_out_pose{{1,2}}_{{body,whole}}.png in {}",
+        harness.display()
+    );
 }
 
 #[cfg(target_os = "macos")]
