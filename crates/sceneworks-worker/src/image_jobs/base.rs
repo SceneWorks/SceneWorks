@@ -1573,6 +1573,59 @@ fn candle_adapter_label(model: &str) -> &'static str {
     }
 }
 
+/// The candle Ideogram 4 weights repo (bf16). Ideogram is the lone candle image family whose upstream
+/// isn't candle-readable — the published `SceneWorks/ideogram-4-mlx` turnkey (the MODEL_TABLE default +
+/// the macOS MLX repo) is MLX-quantized — so the candle lane loads bf16 from a separate repo (sc-6859),
+/// the image sibling of the video `CANDLE_WAN_5B_REPO`. The bf16 weights live under the repo's `bf16/`
+/// subdir so quant variants (`q4/`/`q8/`) can slot in later without a rename (cf. the MLX turnkey).
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+const CANDLE_IDEOGRAM_REPO: &str = "SceneWorks/ideogram-4";
+
+/// Resolve the candle Ideogram weights repo: the off-Mac (`std::env::consts::OS`) download entry's
+/// `repo` from the manifest (the bf16 repo) — the single source of truth, also driving the downloader —
+/// else the [`CANDLE_IDEOGRAM_REPO`] default. Deliberately NOT the entry-level `repo`, which is the
+/// macOS MLX turnkey. Mirrors how `candle_video_repo` overrides the MLX repo with the diffusers one.
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+fn candle_ideogram_repo(request: &ImageRequest) -> String {
+    let os = std::env::consts::OS;
+    request
+        .model_manifest_entry
+        .get("downloads")
+        .and_then(Value::as_array)
+        .and_then(|downloads| {
+            downloads.iter().find_map(|entry| {
+                let matches_os = entry
+                    .get("platforms")
+                    .and_then(Value::as_array)
+                    .is_some_and(|platforms| platforms.iter().any(|p| p.as_str() == Some(os)));
+                if !matches_os {
+                    return None;
+                }
+                entry
+                    .get("repo")
+                    .and_then(Value::as_str)
+                    .map(str::trim)
+                    .filter(|repo| !repo.is_empty())
+                    .map(str::to_owned)
+            })
+        })
+        .unwrap_or_else(|| CANDLE_IDEOGRAM_REPO.to_owned())
+}
+
+/// The precision subdir within the candle Ideogram repo snapshot. Candle is bf16-only today (the
+/// provider rejects on-the-fly quant), so this resolves the `bf16/` subdir (mirroring the MLX turnkey's
+/// `q4/`/`q8/`); a future candle quant variant slots in alongside it. Falls back to the snapshot root so
+/// a flat (subdir-less) layout still loads.
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+fn candle_ideogram_subdir(root: &Path) -> PathBuf {
+    let bf16 = root.join("bf16");
+    if bf16.join("transformer").join("model.safetensors").is_file() {
+        bf16
+    } else {
+        root.to_path_buf()
+    }
+}
+
 /// Windows/CUDA candle execution path (sc-3675 SDXL, generalized in sc-5096). The macOS dispatch is
 /// MLX-bound; candle is a narrow **txt2img-only** lane, so this is a trimmed sibling of
 /// [`generate_stream`] that drives the SAME neutral streaming harness (`start_cached_gen_stream` →
@@ -1618,10 +1671,25 @@ async fn generate_candle_stream(
     } else {
         model.backend()
     };
-    let repo = model_repo(request, &model);
-    let weights_dir = huggingface_snapshot_dir(&settings.data_dir, &repo).ok_or_else(|| {
+    let is_ideogram = crate::ideogram_caption::is_ideogram_model(&request.model);
+    // Ideogram is the lone candle image family whose upstream isn't candle-readable: the published
+    // turnkey `SceneWorks/ideogram-4-mlx` (the MODEL_TABLE default + the macOS MLX repo) is
+    // MLX-quantized, so the candle lane loads bf16 from `SceneWorks/ideogram-4` (the `bf16/` subdir)
+    // instead — the image sibling of the candle video `candle_video_repo` override (sc-6859). macOS
+    // keeps the MLX turnkey. Every other candle family shares its upstream diffusers repo via `model_repo`.
+    let repo = if is_ideogram {
+        candle_ideogram_repo(request)
+    } else {
+        model_repo(request, &model)
+    };
+    let snapshot = huggingface_snapshot_dir(&settings.data_dir, &repo).ok_or_else(|| {
         WorkerError::InvalidPayload(format!("candle weights snapshot not found for {repo}"))
     })?;
+    let weights_dir = if is_ideogram {
+        candle_ideogram_subdir(&snapshot)
+    } else {
+        snapshot
+    };
 
     // Descriptor-derived denoise/guidance surface (distilled families → no guidance/negative; guided
     // families → the scale + negative prompt). Identical to the MLX path; quant + LoRA are omitted.
@@ -1669,7 +1737,7 @@ async fn generate_candle_stream(
     // distribution and stochastically renders the "Image blocked by safety filter" placeholder. Wrap a
     // non-caption prompt into a minimal valid caption — the same worker-side guarantee the macOS path
     // applies via `ideogram_caption::ensure_caption_prompt`. No-op (a clone) for every other family.
-    let is_ideogram = crate::ideogram_caption::is_ideogram_model(&request.model);
+    // (`is_ideogram` was resolved above with the weights repo.)
     let prompt = if is_ideogram {
         crate::ideogram_caption::ensure_caption_prompt(&request.prompt)
     } else {
