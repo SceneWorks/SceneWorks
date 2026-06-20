@@ -195,9 +195,14 @@ mod segment_jobs;
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 mod person_segment_sam3_candle;
 // SCAIL-2 color-coded segmentation-mask painting (epic 5439, sc-5448): turns native SAM3
-// per-person masks into the palette-painted RGB masks the SCAIL-2 engine consumes. macOS-only
-// like its SAM3 dependency.
-#[cfg(target_os = "macos")]
+// per-person masks into the palette-painted RGB masks the SCAIL-2 engine consumes. Backend-neutral
+// (pure pixel painting over `AllPersonMasks`); available on both the macOS MLX lane (sc-5448) and the
+// off-Mac candle lane (sc-6837, the candle SCAIL-2 sibling), each over its own SAM3 module's
+// structurally-identical `AllPersonMasks`.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
 mod scail2_masks;
 use downloads::*;
 #[cfg(any(

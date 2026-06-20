@@ -346,6 +346,149 @@ pub(crate) fn segment_track_blocking(
     Ok(masks)
 }
 
+/// Every tracked person's per-frame mask + a stable left-to-right paint order — the candle sibling of
+/// `crate::person_segment_sam3::AllPersonMasks` (sc-6837, the off-Mac SCAIL-2 lane). Field-identical to
+/// the MLX twin so [`crate::scail2_masks`]'s painters compile against either. Unlike
+/// [`segment_track_blocking`] (which selects ONE person via ByteTrack anchors for replace_person), this
+/// keeps EVERY SAM3 object so each person can be painted a distinct palette color.
+pub(crate) struct AllPersonMasks {
+    /// SAM3 object ids in left-to-right paint order (ascending centroid-x in the frame where each
+    /// object first appears); person index 0 = leftmost = the SCAIL-2 palette's first color.
+    pub order: Vec<i32>,
+    /// `per_frame[f]` = `(obj_id, binary mask row-major width*height, 0/255)` for every object present
+    /// on frame `f` (empty masks dropped). Object ids index into [`AllPersonMasks::order`].
+    pub per_frame: Vec<Vec<(i32, Vec<u8>)>>,
+    pub width: u32,
+    pub height: u32,
+}
+
+/// Normalized centroid-x (0..1) of a SAM3 low-res mask's foreground (logit `> 0`); `None` if the mask
+/// is empty. Sorts tracked people left-to-right for deterministic palette assignment. Shared verbatim
+/// with the MLX module.
+fn mask_centroid_x(mask_logits: &[f32], grid: usize) -> Option<f64> {
+    let (mut sum_x, mut n) = (0f64, 0u64);
+    for my in 0..grid {
+        for mx in 0..grid {
+            if mask_logits[my * grid + mx] > 0.0 {
+                sum_x += (mx as f64 + 0.5) / grid as f64;
+                n += 1;
+            }
+        }
+    }
+    (n > 0).then(|| sum_x / n as f64)
+}
+
+/// Segment + track every "person" across already-decoded RGB `frames` with the off-Mac candle SAM3
+/// text-concept (PCS) video pipeline (sc-6837), returning all objects' per-frame masks + the
+/// left-to-right paint order — the input to [`crate::scail2_masks`]. The candle sibling of
+/// `crate::person_segment_sam3::segment_all_persons_in_memory`; in-memory (no temp frame files, unlike
+/// [`segment_track_blocking`]) since the SCAIL-2 reference / driving frames are already decoded
+/// `Image`s. `frames` must be non-empty and uniform-sized. The checkpoint parses once and is cached
+/// process-wide; a fresh `Sam3VideoModel` is built per call (clean tracking state). Run under
+/// `spawn_blocking` (GPU inference is blocking).
+pub(crate) fn segment_all_persons_in_memory(
+    model_path: &Path,
+    tokenizer_path: &Path,
+    frames: &[image::RgbImage],
+) -> WorkerResult<AllPersonMasks> {
+    let first = frames.first().ok_or_else(|| {
+        WorkerError::InvalidPayload("scail2 segmentation: no frames to segment".into())
+    })?;
+    let (width, height) = (first.width(), first.height());
+    if frames
+        .iter()
+        .any(|f| f.width() != width || f.height() != height)
+    {
+        return Err(WorkerError::InvalidPayload(
+            "scail2 segmentation: frames are not all the same size".into(),
+        ));
+    }
+
+    let device = default_device().map_err(|e| WorkerError::Engine(format!("sam3 device: {e}")))?;
+    let tensors: Vec<Tensor> = frames
+        .iter()
+        .map(|f| input_tensor(f, &device))
+        .collect::<WorkerResult<Vec<_>>>()?;
+
+    // Cached checkpoint; recover from a poisoned lock by dropping + reloading (mirrors
+    // `segment_track_blocking`).
+    let cell = WEIGHTS.get_or_init(|| Mutex::new(None));
+    let mut guard = cell.lock().unwrap_or_else(|poisoned| {
+        let mut guard = poisoned.into_inner();
+        *guard = None;
+        guard
+    });
+    if guard.is_none() {
+        let weights = Weights::from_file(model_path, &device)
+            .map_err(|e| WorkerError::Engine(format!("sam3 weights load: {e}")))?;
+        *guard = Some(weights);
+    }
+    let weights = guard.as_ref().expect("weights loaded");
+
+    // Fresh model per call (clean tracking state) + tokenize the concept once. Off-Mac defaults to
+    // dense (sc-6361); `SCENEWORKS_SAM3_QUANT` opts back in.
+    let mut model = Sam3VideoModel::from_weights(weights)
+        .map_err(|e| WorkerError::Engine(format!("sam3 model build: {e}")))?;
+    if let Some(quant) = quant_level() {
+        model
+            .quantize(quant)
+            .map_err(|e| WorkerError::Engine(format!("sam3 quantize: {e}")))?;
+    }
+    let tokenizer = Sam3Tokenizer::from_file(tokenizer_path, &Sam3TextConfig::sam3())
+        .map_err(|e| WorkerError::Engine(format!("sam3 tokenizer load: {e}")))?;
+    let (input_ids, text_mask) = tokenizer
+        .encode(CONCEPT_PROMPT, &device)
+        .map_err(|e| WorkerError::Engine(format!("sam3 tokenize: {e}")))?;
+
+    let outputs = model
+        .propagate(&tensors, &input_ids, &text_mask)
+        .map_err(|e| WorkerError::Engine(format!("sam3 propagate: {e}")))?;
+
+    // Paint order: each object's centroid-x in the FIRST frame it appears, ascending (tie-break on
+    // first-seen frame, then object id, so repeated runs agree). Shared with the MLX module.
+    use std::collections::BTreeMap;
+    let mut first_seen: BTreeMap<i32, (usize, f64)> = BTreeMap::new();
+    for (f, frame) in outputs.iter().enumerate() {
+        for (oid, logits) in frame.obj_ids.iter().zip(&frame.masks) {
+            if first_seen.contains_key(oid) {
+                continue;
+            }
+            if let Some(cx) = mask_centroid_x(logits, MASK_GRID) {
+                first_seen.insert(*oid, (f, cx));
+            }
+        }
+    }
+    let mut order: Vec<i32> = first_seen.keys().copied().collect();
+    order.sort_by(|a, b| {
+        let (fa, xa) = first_seen[a];
+        let (fb, xb) = first_seen[b];
+        xa.partial_cmp(&xb)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then(fa.cmp(&fb))
+            .then(a.cmp(b))
+    });
+
+    let per_frame = outputs
+        .iter()
+        .map(|frame| {
+            frame
+                .obj_ids
+                .iter()
+                .zip(&frame.masks)
+                .map(|(oid, logits)| (*oid, mask_to_frame(logits, MASK_GRID, width, height)))
+                .filter(|(_, mask)| !mask.is_empty())
+                .collect()
+        })
+        .collect();
+
+    Ok(AllPersonMasks {
+        order,
+        per_frame,
+        width,
+        height,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

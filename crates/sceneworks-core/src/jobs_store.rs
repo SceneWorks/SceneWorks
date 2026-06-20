@@ -4032,18 +4032,30 @@ const CANDLE_VIDEO_I2V_ROUTED_MODELS: &[&str] = &["wan_2_2_i2v_14b", "svd"];
 /// text-to-video, the 14B I2V's single source-image conditioning (sc-5175), SVD image→video (sc-5493),
 /// **and** the Wan-VACE advanced modes — replace_person / extend / bridge (sc-5494, the `PersonReplace`
 /// / `VideoExtend` / `VideoBridge` job types → the candle `wan_vace` engine). Every other shape
-/// (reference/mask/first-last-frame conditioning, LoRAs, SCAIL-2 replace) must fall back to the Python
-/// torch worker, so the candle worker refuses it here. The per-model shape gates are
-/// [`video_request_candle_eligible`] (base) and [`video_request_candle_vace_eligible`] (VACE modes).
+/// (reference/mask/first-last-frame conditioning, LoRAs) must fall back to the Python torch worker, so
+/// the candle worker refuses it here. SCAIL-2 (`scail2_14b`) adds a DISTINCT candle engine off-Mac —
+/// `animate_character` + `replace_person` (sc-6837, epic 6563) — gated separately (it is not a VACE
+/// model). The per-model shape gates are [`video_request_candle_eligible`] (base),
+/// [`video_request_candle_vace_eligible`] (VACE modes), and
+/// [`scail2_animate_candle_eligible`] / [`scail2_replace_candle_eligible`].
 fn video_job_is_candle_eligible(job: &JobSnapshot) -> bool {
     let Some(model) = job.payload.get("model").and_then(Value::as_str) else {
         return false;
     };
     match job.job_type {
-        // The base txt2video / image→video lane (sc-5097 / sc-5175 / sc-5493).
-        JobType::VideoGenerate => video_request_candle_eligible(model, &job.payload),
-        // The Wan-VACE advanced modes (sc-5494): replace_person / extend_clip / video_bridge.
-        JobType::PersonReplace | JobType::VideoExtend | JobType::VideoBridge => {
+        // The base txt2video / image→video lane (sc-5097 / sc-5175 / sc-5493), plus SCAIL-2 standalone
+        // character animation (`animate_character`, sc-6837 — a distinct candle engine, not VACE).
+        JobType::VideoGenerate => {
+            video_request_candle_eligible(model, &job.payload)
+                || scail2_animate_candle_eligible(model, &job.payload)
+        }
+        // replace_person → candle Wan-VACE (sc-5494) OR candle SCAIL-2 (sc-6837, routed by model id).
+        JobType::PersonReplace => {
+            video_request_candle_vace_eligible(model, &job.payload, &job.job_type)
+                || scail2_replace_candle_eligible(model, &job.payload)
+        }
+        // extend_clip / video_bridge → candle Wan-VACE only (sc-5494).
+        JobType::VideoExtend | JobType::VideoBridge => {
             video_request_candle_vace_eligible(model, &job.payload, &job.job_type)
         }
         _ => false,
@@ -4151,6 +4163,89 @@ fn video_request_candle_vace_eligible(
         _ => return false,
     }
     // LoRAs / on-the-fly quant are not in the candle video lane (the VACE provider rejects them).
+    if payload
+        .get("loras")
+        .and_then(Value::as_array)
+        .is_some_and(|loras| !loras.is_empty())
+    {
+        return false;
+    }
+    if candle_request_wants_quant(payload) {
+        return false;
+    }
+    true
+}
+
+/// Candle SCAIL-2 `animate_character` eligibility (sc-6837, epic 6563). SCAIL-2 is a DISTINCT candle
+/// engine (NOT Wan-VACE), so it has its own gate rather than membership in [`CANDLE_VIDEO_VACE_MODELS`]:
+/// the `scail2_14b` model + the `animate_character` mode + a reference character image
+/// (`referenceAssetId` / `referenceAssetIds` / `sourceAssetId`) + a driving clip (`sourceClipAssetId`).
+/// LoRA / on-the-fly quant are not on the candle path (the provider rejects them; inference LoRA is the
+/// follow-up sc-6838). Mirrors the MLX `video_mode_is_mlx_eligible(scail2_14b, animate_character)` shape,
+/// expressed as a candle-claim gate. Factored out so the routing tests can probe it with synthetic
+/// payloads (parity with [`video_request_candle_eligible`]).
+fn scail2_animate_candle_eligible(model: &str, payload: &Map<String, Value>) -> bool {
+    if model != "scail2_14b" {
+        return false;
+    }
+    if payload.get("mode").and_then(Value::as_str) != Some("animate_character") {
+        return false;
+    }
+    let has_nonempty_id = |key: &str| {
+        payload
+            .get(key)
+            .and_then(Value::as_str)
+            .is_some_and(|value| !value.trim().is_empty())
+    };
+    let has_reference = has_nonempty_id("referenceAssetId")
+        || has_nonempty_id("sourceAssetId")
+        || payload
+            .get("referenceAssetIds")
+            .and_then(Value::as_array)
+            .is_some_and(|ids| {
+                ids.iter()
+                    .any(|v| v.as_str().is_some_and(|s| !s.trim().is_empty()))
+            });
+    if !has_reference {
+        return false;
+    }
+    if !has_nonempty_id("sourceClipAssetId") {
+        return false;
+    }
+    if payload
+        .get("loras")
+        .and_then(Value::as_array)
+        .is_some_and(|loras| !loras.is_empty())
+    {
+        return false;
+    }
+    if candle_request_wants_quant(payload) {
+        return false;
+    }
+    true
+}
+
+/// Candle SCAIL-2 `replace_person` eligibility (sc-6837, epic 6563). The `scail2_14b` model behind a
+/// `PersonReplace` job: the source control clip + the tracked person + the character references (the
+/// same per-mode assets the Wan-VACE replace gate requires). No LoRA / on-the-fly quant (the provider
+/// rejects them; inference LoRA is sc-6838). A distinct candle engine, so it is gated here rather than
+/// added to [`CANDLE_VIDEO_VACE_MODELS`]. Factored out so the routing tests can probe it.
+fn scail2_replace_candle_eligible(model: &str, payload: &Map<String, Value>) -> bool {
+    if model != "scail2_14b" {
+        return false;
+    }
+    let has_nonempty_id = |key: &str| {
+        payload
+            .get(key)
+            .and_then(Value::as_str)
+            .is_some_and(|value| !value.trim().is_empty())
+    };
+    if !has_nonempty_id("sourceClipAssetId")
+        || !has_nonempty_id("personTrackId")
+        || !has_nonempty_id("characterId")
+    {
+        return false;
+    }
     if payload
         .get("loras")
         .and_then(Value::as_array)
@@ -6249,7 +6344,8 @@ mod candle_routing_tests {
             &object(json!({ "sourceClipAssetId": "l" })), // bridge needs the right clip too
             &JobType::VideoBridge
         ));
-        // SCAIL-2 (MLX-only) is not a candle VACE model → torch.
+        // SCAIL-2 is a DISTINCT candle engine, not a VACE model → the VACE gate rejects it (the SCAIL-2
+        // candle replace path is `scail2_replace_candle_eligible`, sc-6837).
         assert!(!video_request_candle_vace_eligible(
             "scail2_14b",
             &object(json!({ "sourceClipAssetId": "c", "personTrackId": "t", "characterId": "ch" })),
@@ -6271,6 +6367,134 @@ mod candle_routing_tests {
             "wan_2_2",
             &object(json!({ "sourceClipAssetId": "c", "personTrackId": "t", "characterId": "ch" })),
             &JobType::VideoGenerate
+        ));
+    }
+
+    // ---- Candle SCAIL-2 character animation + replace_person (sc-6837, epic 6563) ----
+
+    /// A queued `person_replace` job carrying `payload` (the PersonReplace job type the API stamps for
+    /// the integrated replace_person pipeline).
+    fn person_replace_job(payload: Value) -> JobSnapshot {
+        serde_json::from_value(json!({
+            "id": "job_pr",
+            "type": "person_replace",
+            "status": "queued",
+            "payload": payload,
+            "result": {},
+            "requestedGpu": "auto",
+            "progress": 0,
+            "stage": "queued",
+            "message": "",
+            "attempts": 1,
+            "cancelRequested": false,
+            "createdAt": "2026-06-20T00:00:00Z",
+            "updatedAt": "2026-06-20T00:00:00Z",
+        }))
+        .expect("valid JobSnapshot")
+    }
+
+    #[test]
+    fn scail2_candle_serves_animation_and_replace_in_native_shape() {
+        // Standalone character animation: scail2_14b + animate_character + a reference + a driving clip.
+        // The reference can be referenceAssetIds, a bare referenceAssetId, or the i2v sourceAssetId.
+        for reference in [
+            json!({ "referenceAssetIds": ["ref_1"] }),
+            json!({ "referenceAssetId": "ref_1" }),
+            json!({ "sourceAssetId": "img_1" }),
+        ] {
+            let mut payload = object(reference);
+            payload.insert("mode".into(), json!("animate_character"));
+            payload.insert("sourceClipAssetId".into(), json!("clip_1"));
+            assert!(
+                scail2_animate_candle_eligible("scail2_14b", &payload),
+                "scail2 animate_character must be candle-eligible: {payload:?}"
+            );
+        }
+        // Cross-identity replacement: scail2_14b PersonReplace with the clip + track + character.
+        assert!(scail2_replace_candle_eligible(
+            "scail2_14b",
+            &object(json!({
+                "sourceClipAssetId": "clip_1",
+                "personTrackId": "track_1",
+                "characterId": "char_1"
+            }))
+        ));
+        // Through the full video claim gate: animate_character (VideoGenerate) + replace (PersonReplace).
+        assert!(video_job_is_candle_eligible(&video_generate_job(json!({
+            "model": "scail2_14b",
+            "mode": "animate_character",
+            "referenceAssetIds": ["ref_1"],
+            "sourceClipAssetId": "clip_1"
+        }))));
+        assert!(video_job_is_candle_eligible(&person_replace_job(json!({
+            "model": "scail2_14b",
+            "sourceClipAssetId": "clip_1",
+            "personTrackId": "track_1",
+            "characterId": "char_1"
+        }))));
+    }
+
+    #[test]
+    fn scail2_candle_rejects_incomplete_or_wrong_shape() {
+        // animate_character needs BOTH a reference image and a driving clip.
+        assert!(!scail2_animate_candle_eligible(
+            "scail2_14b",
+            &object(json!({ "mode": "animate_character", "referenceAssetIds": ["ref_1"] }))
+        ));
+        assert!(!scail2_animate_candle_eligible(
+            "scail2_14b",
+            &object(json!({ "mode": "animate_character", "sourceClipAssetId": "clip_1" }))
+        ));
+        // Wrong mode / wrong model never claim the SCAIL-2 candle lane.
+        assert!(!scail2_animate_candle_eligible(
+            "scail2_14b",
+            &object(json!({
+                "mode": "text_to_video",
+                "sourceAssetId": "i",
+                "sourceClipAssetId": "c"
+            }))
+        ));
+        assert!(!scail2_animate_candle_eligible(
+            "wan_2_2",
+            &object(json!({
+                "mode": "animate_character",
+                "sourceAssetId": "i",
+                "sourceClipAssetId": "c"
+            }))
+        ));
+        // LoRA / on-the-fly quant defer to torch (the candle SCAIL-2 path has no LoRA yet — sc-6838).
+        for extra in [
+            json!({ "loras": [{ "name": "x" }] }),
+            json!({ "advanced": { "mlxQuantize": 8 } }),
+        ] {
+            let mut payload = object(json!({
+                "mode": "animate_character",
+                "sourceAssetId": "i",
+                "sourceClipAssetId": "c"
+            }));
+            for (k, v) in object(extra) {
+                payload.insert(k, v);
+            }
+            assert!(
+                !scail2_animate_candle_eligible("scail2_14b", &payload),
+                "scail2 animate with LoRA/quant must defer to torch: {payload:?}"
+            );
+        }
+        // replace_person needs the clip + track + character; missing any → torch.
+        for case in [
+            json!({ "sourceClipAssetId": "c", "personTrackId": "t" }),
+            json!({ "sourceClipAssetId": "c", "characterId": "ch" }),
+            json!({ "personTrackId": "t", "characterId": "ch" }),
+        ] {
+            assert!(
+                !scail2_replace_candle_eligible("scail2_14b", &object(case.clone())),
+                "incomplete scail2 replace must defer to torch: {case}"
+            );
+        }
+        // A non-SCAIL-2 model never claims the SCAIL-2 replace lane (it routes via Wan-VACE instead).
+        assert!(!scail2_replace_candle_eligible(
+            "wan_2_2",
+            &object(json!({ "sourceClipAssetId": "c", "personTrackId": "t", "characterId": "ch" }))
         ));
     }
 

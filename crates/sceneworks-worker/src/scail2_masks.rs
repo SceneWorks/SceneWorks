@@ -16,7 +16,13 @@
 use gen_core::Image;
 use image::RgbImage;
 
+// `AllPersonMasks` comes from whichever native SAM3 module the build links: the MLX twin on macOS
+// (sc-5448), the candle twin off-Mac (sc-6837). The two structs are field-identical, so the painters
+// below compile against either.
+#[cfg(target_os = "macos")]
 use crate::person_segment_sam3::AllPersonMasks;
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+use crate::person_segment_sam3_candle::AllPersonMasks;
 use crate::{WorkerError, WorkerResult};
 
 /// Person palette in RGB, person 0 = leftmost. Maps onto the engine's six chromatic color classes
