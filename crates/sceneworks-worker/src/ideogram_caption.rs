@@ -20,6 +20,15 @@
 //
 // No engine change — the fix is entirely in the prompt we hand the engine, and a post-render check.
 
+// sc-6610: off-Mac, Ideogram routes to candle (txt2img) or the torch worker — neither uses this
+// caption-guard + placeholder detect-and-recover module (its only non-test callers are in the macOS
+// MLX `image_jobs/base.rs` `generate_one`). So every item here is dead off-Mac and the candle
+// `clippy -p sceneworks-worker --features backend-candle -- -D warnings` lane denies the lot. The
+// logic is platform-independent and exercised by the cross-platform tests below, so the whole module
+// is `allow(dead_code)` off-Mac (NOT cfg-gated to macOS) to keep that test coverage on the
+// Windows/CUDA box while the production callers stay macOS-only.
+#![cfg_attr(not(target_os = "macos"), allow(dead_code))]
+
 /// Whether `model` is one of the Ideogram 4 image models (quality + turbo). Both are JSON-caption
 /// trained, so both get the caption guard; the placeholder is a quality-mode CFG behavior the turbo
 /// (CFG-free) path cannot trigger, but running the detector on turbo is a cheap, harmless no-op.
