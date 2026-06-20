@@ -261,8 +261,9 @@ fn ideogram_model_subdir(root: &Path, request: &ImageRequest) -> PathBuf {
 /// explicit advanced `mlxQuantize <= 4` selects the full-precision `<variant>-bf16/` build instead —
 /// the source the engine quantizes at load (no packed Q4 is shipped) or runs dense. Falls back to
 /// whichever subfolder is present, then `root`, so a partially-downloaded bundle surfaces as a load
-/// error rather than a silent half-load. (The `*-bf16/` files are an on-demand download — sc tracked;
-/// when absent the bf16 request resolves the Q8 folder.)
+/// error rather than a silent half-load. (The `*-bf16/` files are an on-demand download fetched by
+/// [`ensure_boogu_bf16_present`] before this resolves, sc-6568; if that fetch was skipped/failed the
+/// bf16 request falls back to the Q8 folder.)
 fn boogu_model_subdir(root: &Path, request: &ImageRequest) -> PathBuf {
     let variant = match request.model.as_str() {
         "boogu_image_turbo" => "turbo",
@@ -289,6 +290,77 @@ fn boogu_model_subdir(root: &Path, request: &ImageRequest) -> PathBuf {
     present(variant)
         .or_else(|| present(&bf16))
         .unwrap_or_else(|| root.to_path_buf())
+}
+
+/// On-demand fetch of the full-precision `<variant>-bf16/` Boogu subfolder (sc-6568). The S1 catalog
+/// download pulls only the packed Q8 `<variant>/` subfolder, so when a job opts into the bf16 build
+/// (advanced `mlxQuantize <= 4` — the same gate [`boogu_model_subdir`] uses to select it) and that
+/// subfolder isn't present yet, pull just its files into the HF cache so `boogu_model_subdir` resolves
+/// it. No-op when bf16 isn't requested, the model isn't Boogu, the turnkey snapshot isn't downloaded
+/// yet (`boogu_model_subdir` then falls back to Q8 / surfaces the load error), or the bf16 subfolder
+/// is already complete. Fails loud on a real download error — fast, before any compute; a missing `hf`
+/// CLI leaves the subfolder absent so the request gracefully falls back to Q8. Mirrors
+/// [`crate::video_jobs::ensure_ltx_q8_present`].
+#[cfg(target_os = "macos")]
+async fn ensure_boogu_bf16_present(
+    api: &ApiClient,
+    settings: &Settings,
+    job: &JobSnapshot,
+    request: &ImageRequest,
+) -> WorkerResult<()> {
+    let variant = match request.model.as_str() {
+        "boogu_image" => "base",
+        "boogu_image_turbo" => "turbo",
+        "boogu_image_edit" => "edit",
+        _ => return Ok(()),
+    };
+    let wants_bf16 = request
+        .advanced
+        .get("mlxQuantize")
+        .and_then(quant_int)
+        .is_some_and(|bits| bits <= 4);
+    if !wants_bf16 {
+        return Ok(());
+    }
+    let Some(model) = mlx_model(&request.model) else {
+        return Ok(());
+    };
+    let Some(root) = huggingface_snapshot_dir(&settings.data_dir, &model_repo(request, &model))
+    else {
+        // Turnkey not downloaded at all → leave it to the load path's "weights not found" error.
+        return Ok(());
+    };
+    let bf16 = format!("{variant}-bf16");
+    if root
+        .join(&bf16)
+        .join("transformer/diffusion_pytorch_model.safetensors")
+        .is_file()
+    {
+        return Ok(());
+    }
+    let scratch = settings
+        .data_dir
+        .join("cache")
+        .join(format!(".boogu-bf16-fetch-{}", job.id));
+    tokio::fs::create_dir_all(&scratch).await?;
+    // The bf16 subfolder nests transformer/mllm/vae (leaf-dir globs, like the catalog Q8 entry).
+    let files = vec![
+        format!("{bf16}/transformer/*"),
+        format!("{bf16}/mllm/*"),
+        format!("{bf16}/vae/*"),
+    ];
+    let result = crate::model_jobs::download_model_with_hf_cli(
+        api,
+        settings,
+        job,
+        &model_repo(request, &model),
+        "main",
+        &files,
+        &scratch,
+    )
+    .await;
+    let _ = tokio::fs::remove_dir_all(&scratch).await;
+    result.map(|_| ())
 }
 
 #[cfg(any(
@@ -1154,6 +1226,10 @@ async fn generate_stream(
     let request = &plan.request;
     let model = mlx_model(&request.model)
         .ok_or_else(|| WorkerError::InvalidPayload("not an MLX-backed model".to_owned()))?;
+    // sc-6568: a bf16 opt-in for Boogu fetches the full-precision `<variant>-bf16/` subfolder on
+    // demand (the catalog ships only the Q8 default) before snapshot resolution. No-op for every
+    // other model / the default Q8 path.
+    ensure_boogu_bf16_present(api, settings, job, request).await?;
     let weights_dir = resolve_weights_dir(request, settings)?
         .ok_or_else(|| WorkerError::InvalidPayload("model weights not found".to_owned()))?;
     // sc-3723: surface the descriptor-derived backend ("mlx" for every linked family today; a
