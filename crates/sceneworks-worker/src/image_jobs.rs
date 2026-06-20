@@ -104,6 +104,10 @@ use candle_gen_flux as _;
 use candle_gen_flux2 as _;
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 use candle_gen_qwen_image as _;
+// Candle Ideogram 4 (sc-6596, epic 6561): `ideogram_4` + `ideogram_4_turbo` self-register into the
+// shared gen_core inventory; `as _;` keeps the MSVC release linker from GC-ing the registrations.
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+use candle_gen_ideogram as _;
 // Candle Chroma (sc-5484, epic 3692): chroma1_hd / chroma1_base / chroma1_flash self-register into the
 // shared gen_core inventory; the `as _;` keeps the MSVC release linker from GC-ing the registrations.
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]

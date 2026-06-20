@@ -3750,6 +3750,13 @@ const CANDLE_ROUTED_MODELS: &[&str] = &[
     "kolors",
     "sensenova_u1_8b",
     "sensenova_u1_8b_fast",
+    // Ideogram 4 (sc-6597, epic 6561): the candle `candle-gen-ideogram` provider serves `ideogram_4`
+    // (asymmetric two-DiT CFG) and `ideogram_4_turbo` (CFG-free single DiT + bundled TurboTime LoRA).
+    // Pure **txt2img** on candle for now — edit / img2img / mask shapes are rejected below
+    // (`image_request_candle_eligible`) and fall back to the Python torch worker until the candle edit
+    // lane lands (sc-6598). These ids are also in `MLX_ROUTED_MODELS` (the macOS native engine).
+    "ideogram_4",
+    "ideogram_4_turbo",
 ];
 
 /// The candle image families that advertise on-the-fly Q4/Q8 quant AND LoRA/LoKr adapters — Lens /
@@ -5660,6 +5667,29 @@ mod candle_routing_tests {
                 !image_request_candle_eligible(model, &object(payload.clone())),
                 "{model} conditioning shape must fall back to torch: {payload}"
             );
+        }
+    }
+
+    #[test]
+    fn ideogram_candle_txt2img_eligible_but_edit_defers_to_torch() {
+        // sc-6597 (epic 6561): `ideogram_4` + `ideogram_4_turbo` route to the candle lane for plain
+        // text-to-image only. Edit / img2img / mask / reference shapes defer to the Python torch
+        // worker until the candle edit lane lands (sc-6598).
+        for model in ["ideogram_4", "ideogram_4_turbo"] {
+            assert!(
+                image_request_candle_eligible(model, &object(json!({ "prompt": "an aurora" }))),
+                "{model} plain txt2img must be candle-eligible"
+            );
+            for payload in [
+                json!({ "mode": "edit_image", "sourceAssetId": "a" }),
+                json!({ "referenceAssetId": "a" }),
+                json!({ "maskAssetId": "m", "sourceAssetId": "a" }),
+            ] {
+                assert!(
+                    !image_request_candle_eligible(model, &object(payload.clone())),
+                    "{model} edit shape must defer to torch: {payload}"
+                );
+            }
         }
     }
 

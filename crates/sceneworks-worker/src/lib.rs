@@ -82,12 +82,12 @@ mod image_jobs;
 use image_jobs::*;
 // Ideogram 4 mandatory JSON-caption conditioning + placeholder detect-and-recover (epic 4725,
 // sc-6501). Pure prompt-guard + post-render heuristic, compiled cross-platform so its unit tests run
-// on the Linux parity lane; its functions are called from the macOS/candle image base path
-// (`image_jobs/base.rs`), so they read as dead code only on a plain non-macOS, non-candle build.
-#[cfg_attr(
-    all(not(target_os = "macos"), not(feature = "backend-candle")),
-    allow(dead_code)
-)]
+// on the Linux parity lane. sc-6610: its functions are called only from the macOS MLX generate path
+// (`image_jobs/base.rs` `generate_stream`, `#[cfg(target_os = "macos")]`) — off-Mac, Ideogram routes
+// to candle (txt2img) or the torch worker, neither of which applies the caption guard, so they read
+// as dead code on EVERY non-macOS build (the candle `backend-candle` lane included; the prior
+// `not(feature = "backend-candle")` carve-out wrongly assumed the candle path called them).
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 mod ideogram_caption;
 // SenseNova-U1 understanding + interleave jobs (epic 3180, sc-3905 — Path B). VQA + Document
 // Studio (interleave) consume the concrete `T2iModel` directly (the `Generator` contract emits
