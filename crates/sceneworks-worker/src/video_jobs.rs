@@ -194,20 +194,19 @@ pub(crate) async fn run_video_generate_job(
         ),
     )
     .await?;
-    // sc-3459 (epic 3456): Wan2.2 VACE-Fun A14B is a NEW dual-expert VACE engine
-    // (`wan2_2_vace_fun_14b`; native MLX sc-6604, native candle sc-6605). Until those engines
-    // merge and the worker's mlx-gen/candle-gen pin is bumped, the runtime cannot serve it — and
-    // replace_person must NEVER fall through to the Wan2.1 `generate_wan_vace` backend below, which
-    // would silently render with the WRONG checkpoint (the exact failure the epic forbids). Fail
-    // honestly instead. When the engine pin lands, this guard is replaced by the real per-platform
-    // `generate_wan_vace_fun` dispatch (resolve the dual-expert snapshot → the `wan2_2_vace_fun_14b`
-    // engine).
+    // sc-3459 (epic 3456): Wan2.2 VACE-Fun A14B routes to the NEW dual-expert VACE engine
+    // `wan2_2_vace_fun_14b`. macOS is served natively (mlx-gen sc-6604, merged + pinned) via
+    // `generate_wan_vace_fun` in the macOS block below. The native **candle** engine (sc-6605) is
+    // not done, so on Windows/Linux (candle) and the no-backend stub path a VACE-Fun job must fail
+    // honestly here — it must NEVER fall through to the Wan2.1 `generate_candle_wan_vace` /
+    // `generate_wan_vace` backend, which would silently render with the WRONG checkpoint (the exact
+    // failure the epic forbids).
+    #[cfg(not(target_os = "macos"))]
     if request.model == "wan_2_2_vace_fun_14b" {
         return Err(WorkerError::InvalidPayload(
-            "wan_2_2_vace_fun_14b: the native Wan2.2 VACE-Fun engine is not yet available in this \
-             build (pending the mlx-gen/candle-gen integration, sc-6604/sc-6605). The job will not \
-             be routed to the Wan2.1 VACE backend. Choose another model, or update once the engine \
-             ships."
+            "wan_2_2_vace_fun_14b: the native Wan2.2 VACE-Fun engine is macOS-only for now (the \
+             candle backend is pending sc-6605). The job will not be routed to the Wan2.1 VACE \
+             backend. Choose another model on this platform."
                 .to_owned(),
         ));
     }
@@ -246,13 +245,26 @@ pub(crate) async fn run_video_generate_job(
                 scail2_raw_settings(&request, false),
                 Some(status),
             )
+        } else if request.model == "wan_2_2_vace_fun_14b" {
+            // sc-3459: the native dual-expert Wan2.2 VACE-Fun engine (`wan2_2_vace_fun_14b`,
+            // mlx-gen sc-6604). Same replace_person conditioning as single-expert Wan-VACE, but the
+            // dual-expert snapshot + engine — `generate_wan_vace_fun` resolves-or-errors loudly,
+            // never falling back to the Wan2.1 `wan_vace` checkpoint.
+            let (decoded, status) =
+                generate_wan_vace_fun(api, settings, job, &request, &project_path, backend).await?;
+            (
+                decoded,
+                WAN_VACE_FUN_ADAPTER,
+                wan_vace_raw_settings(&request, "wan2_2_vace_fun_14b"),
+                Some(status),
+            )
         } else {
             let (decoded, status) =
                 generate_wan_vace(api, settings, job, &request, &project_path, backend).await?;
             (
                 decoded,
                 WAN_VACE_ADAPTER,
-                wan_vace_raw_settings(&request),
+                wan_vace_raw_settings(&request, "wan_vace"),
                 Some(status),
             )
         }
@@ -439,7 +451,7 @@ pub(crate) async fn run_video_generate_job(
         (
             decoded,
             CANDLE_WAN_VACE_ADAPTER,
-            wan_vace_raw_settings(&request),
+            wan_vace_raw_settings(&request, "wan_vace"),
             Some(status),
         )
     } else if settings.backend_candle_enabled
@@ -5034,6 +5046,12 @@ async fn generate_svd(
 #[cfg(target_os = "macos")]
 const WAN_VACE_ADAPTER: &str = "mlx_wan_vace";
 
+/// Per-asset adapter label for the native dual-expert Wan2.2 VACE-Fun replace_person backend
+/// (`wan2_2_vace_fun_14b`, sc-3459) — distinct from single-expert `mlx_wan_vace` so the asset
+/// honestly records which VACE engine produced the replacement.
+#[cfg(target_os = "macos")]
+const WAN_VACE_FUN_ADAPTER: &str = "mlx_wan_vace_fun";
+
 /// Letterbox pad colour for extracted source-clip frames — matches the Python `fit_frame`
 /// background (`0x12110f` = RGB 18,17,15) so the box masks (rasterized from the same
 /// normalized boxes at W×H) stay aligned with the control frames through the engine's
@@ -5050,10 +5068,10 @@ const FRAME_PAD_COLOR: &str = "0x12110f";
     target_os = "macos",
     all(not(target_os = "macos"), feature = "backend-candle")
 ))]
-fn wan_vace_raw_settings(request: &VideoRequest) -> Value {
+fn wan_vace_raw_settings(request: &VideoRequest, model: &str) -> Value {
     let mut raw = request.advanced.clone();
     raw.insert("realModelInference".to_owned(), Value::Bool(true));
-    raw.insert("model".to_owned(), Value::String("wan_vace".to_owned()));
+    raw.insert("model".to_owned(), Value::String(model.to_owned()));
     raw.insert(
         "frameCount".to_owned(),
         json!(wan_frame_count(request.raw_frame_count())),
@@ -5143,6 +5161,80 @@ fn resolve_wan_vace_model_dir(settings: &Settings) -> WorkerResult<PathBuf> {
             "replace_person: failed to assemble the Wan-VACE snapshot: {error}"
         ))
     })?;
+    Ok(out_dir)
+}
+
+/// Whether `dir` is a load-ready assembled Wan2.2 VACE-Fun snapshot — BOTH diffusers VACE-Fun
+/// expert dirs (`transformer/` high-noise + `transformer_2/` low-noise) plus the shared base-Wan
+/// UMT5/VAE/tokenizer that `gen_core::load("wan2_2_vace_fun_14b")` reads (sc-6604
+/// `assemble_wan_vace_fun_snapshot` layout).
+#[cfg(target_os = "macos")]
+fn wan_vace_fun_dir_is_complete(dir: &Path) -> bool {
+    dir.join("transformer").join("config.json").is_file()
+        && dir.join("transformer_2").join("config.json").is_file()
+        && dir.join("t5_encoder.safetensors").is_file()
+        && dir.join("vae.safetensors").is_file()
+        && dir.join("tokenizer.json").is_file()
+}
+
+/// Resolve (assembling on first use) the dual-expert Wan2.2 VACE-Fun snapshot dir (sc-3459). Env
+/// override (`SCENEWORKS_MLX_WAN_VACE_FUN_DIR`) → the app-managed `<data>/models/mlx/wan_2_2_vace_fun`
+/// → assemble it from the diffusers VACE-Fun experts (HF `linoyts/Wan2.2-VACE-Fun-14B-diffusers`,
+/// `transformer/` + `transformer_2/`) + a converted base-Wan 14B snapshot's shared UMT5/z16-VAE/
+/// tokenizer (sc-6604 `assemble_wan_vace_fun_snapshot` — packaging, not conversion). Errors clearly
+/// when a component is missing rather than degrading to the Wan2.1 VACE backend or the stub.
+#[cfg(target_os = "macos")]
+fn resolve_wan_vace_fun_model_dir(settings: &Settings) -> WorkerResult<PathBuf> {
+    if let Ok(override_dir) = std::env::var("SCENEWORKS_MLX_WAN_VACE_FUN_DIR") {
+        let path = PathBuf::from(override_dir.trim());
+        if wan_vace_fun_dir_is_complete(&path) {
+            return Ok(path);
+        }
+    }
+    let out_dir = settings
+        .data_dir
+        .join("models")
+        .join("mlx")
+        .join("wan_2_2_vace_fun");
+    if wan_vace_fun_dir_is_complete(&out_dir) {
+        return Ok(out_dir);
+    }
+    // Assemble on first use: the two VACE-Fun experts are diffusers-layout (read directly, no
+    // conversion); the shared T5/VAE/tokenizer come from a converted base-Wan 14B snapshot (z16 VAE,
+    // shared with VACE-Fun since it is Wan2.2-A14B-based with the Wan2.1 z16 VAE).
+    let vace_repo = "linoyts/Wan2.2-VACE-Fun-14B-diffusers";
+    let snapshot = huggingface_snapshot_dir(&settings.data_dir, vace_repo).ok_or_else(|| {
+        WorkerError::InvalidPayload(format!(
+            "wan_2_2_vace_fun_14b: the VACE-Fun transformers ({vace_repo}) are not downloaded — \
+             fetch the model via the model manager."
+        ))
+    })?;
+    let high = snapshot.join("transformer");
+    let low = snapshot.join("transformer_2");
+    if !high.join("config.json").is_file() || !low.join("config.json").is_file() {
+        return Err(WorkerError::InvalidPayload(format!(
+            "wan_2_2_vace_fun_14b: the {vace_repo} download is incomplete (missing transformer/ or \
+             transformer_2/) — re-fetch it via the model manager."
+        )));
+    }
+    let base_wan = ["wan_2_2_t2v_14b", "wan_2_2_i2v_14b"]
+        .into_iter()
+        .find_map(|model| resolve_wan_model_dir(settings, model, model).ok())
+        .ok_or_else(|| {
+            WorkerError::InvalidPayload(
+                "wan_2_2_vace_fun_14b: VACE-Fun needs a converted base-Wan 14B snapshot (its shared \
+                 UMT5 text encoder + z16 VAE + tokenizer). Convert/download wan_2_2_t2v_14b or \
+                 wan_2_2_i2v_14b first."
+                    .to_owned(),
+            )
+        })?;
+    // CARVE-OUT(epic 3720): backend-specific weight packager; not a registry contract.
+    mlx_gen_wan::convert::assemble_wan_vace_fun_snapshot(&out_dir, &high, &low, &base_wan, true)
+        .map_err(|error| {
+            WorkerError::InvalidPayload(format!(
+                "wan_2_2_vace_fun_14b: failed to assemble the VACE-Fun snapshot: {error}"
+            ))
+        })?;
     Ok(out_dir)
 }
 
@@ -5428,6 +5520,70 @@ async fn generate_wan_vace(
     backend: &str,
 ) -> WorkerResult<(DecodedVideo, Value)> {
     let model_dir = resolve_wan_vace_model_dir(settings)?;
+    generate_wan_vace_engine(
+        api,
+        settings,
+        job,
+        request,
+        project_path,
+        backend,
+        "wan_vace",
+        model_dir,
+        WAN_VACE_ADAPTER,
+        resolve_wan_quant(request),
+    )
+    .await
+}
+
+/// The dual-expert Wan2.2 VACE-Fun replace_person dispatch (sc-3459) — identical conditioning to
+/// single-expert [`generate_wan_vace`], but resolves the dual-expert snapshot
+/// ([`resolve_wan_vace_fun_model_dir`]) + the `wan2_2_vace_fun_14b` engine. Forces **Q4** by default
+/// (the validated real-weight footprint; both 14B experts at bf16 would risk OOM on a 128 GB Mac),
+/// still overridable via the `mlxQuantize` advanced knob.
+#[cfg(target_os = "macos")]
+async fn generate_wan_vace_fun(
+    api: &ApiClient,
+    settings: &Settings,
+    job: &JobSnapshot,
+    request: &VideoRequest,
+    project_path: &Path,
+    backend: &str,
+) -> WorkerResult<(DecodedVideo, Value)> {
+    let model_dir = resolve_wan_vace_fun_model_dir(settings)?;
+    let quant = resolve_wan_quant(request).or(Some(Quant::Q4));
+    generate_wan_vace_engine(
+        api,
+        settings,
+        job,
+        request,
+        project_path,
+        backend,
+        "wan2_2_vace_fun_14b",
+        model_dir,
+        WAN_VACE_FUN_ADAPTER,
+        quant,
+    )
+    .await
+}
+
+/// Shared replace_person engine dispatch for both VACE backends (single-expert `wan_vace` +
+/// dual-expert `wan2_2_vace_fun_14b`): builds the source-frame + person-mask + character-reference
+/// control conditioning, runs the resolved engine, and returns the decoded video + the honest
+/// `replacementStatus`. Only `engine_id` / `model_dir` / `adapter` / `quant` differ between the two.
+#[cfg(target_os = "macos")]
+#[allow(clippy::too_many_arguments)]
+async fn generate_wan_vace_engine(
+    api: &ApiClient,
+    settings: &Settings,
+    job: &JobSnapshot,
+    request: &VideoRequest,
+    project_path: &Path,
+    backend: &str,
+    engine_id: &'static str,
+    model_dir: PathBuf,
+    adapter: &'static str,
+    quant: Option<Quant>,
+) -> WorkerResult<(DecodedVideo, Value)> {
     let track_id = request.person_track_id.as_deref().ok_or_else(|| {
         WorkerError::InvalidPayload(
             "replace_person requires a person track (personTrackId).".to_owned(),
@@ -5481,9 +5637,9 @@ async fn generate_wan_vace(
             .map(|value| value as f32)
     });
     let input = VideoGenInput {
-        engine_id: "wan_vace",
+        engine_id,
         model_dir,
-        quant: resolve_wan_quant(request),
+        quant,
         adapters: resolve_wan_vace_adapters(settings, request)?,
         conditioning,
         prompt: request.prompt.clone(),
@@ -5506,7 +5662,7 @@ async fn generate_wan_vace(
         masking_strength,
         reference_count,
         frame_total,
-        WAN_VACE_ADAPTER,
+        adapter,
     );
     Ok((decoded, status))
 }
@@ -7232,6 +7388,10 @@ mod tests {
         assert_eq!(wan_engine_id("wan_2_2_i2v_14b"), Some("wan2_2_i2v_14b"));
         assert_eq!(wan_engine_id("ltx_2_3"), None);
         assert_eq!(wan_engine_id("z_image_turbo"), None);
+        // sc-3459: VACE-Fun is a replace_person/control engine, NOT a base Wan T2V/I2V engine —
+        // it must stay out of `wan_engine_id` so a replace_person job routes to `generate_wan_vace_fun`
+        // (the dual-expert `wan2_2_vace_fun_14b` engine), never the base txt/img→video path.
+        assert_eq!(wan_engine_id("wan_2_2_vace_fun_14b"), None);
     }
 
     /// Per-model sampling (sc-4997): both A14B MoE models (T2V + I2V) force the 4-step
