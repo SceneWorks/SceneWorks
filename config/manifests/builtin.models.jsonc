@@ -3020,9 +3020,10 @@
         // worker resolves env override (SCENEWORKS_MLX_WAN_VACE_FUN_DIR) → local
         // <data>/models/mlx/wan_2_2_vace_fun → the assembled snapshot (diffusers transformer/
         // + transformer_2/ + native-converted UMT5/z16-VAE/tokenizer from a base-Wan-14B
-        // snapshot). Dual 14B bf16 ≈ 56 GB transformers + encoder/VAE → 133 GB floor (Q4/Q8
-        // at load). Runtime support lands with the mlx-gen pin bump (sc-3459).
-        "minMemoryGb": 133,
+        // snapshot). The worker forces Q4 by default (dual 14B bf16 would be ~56 GB of
+        // transformers; the validated real-weight smoke ran at Q4, ~38 GB RSS on a 128 GB Mac).
+        // 64 GB floor keeps a 128 GB Mac eligible while staying honest about the dual-expert load.
+        "minMemoryGb": 64,
         "repo": "linoyts/Wan2.2-VACE-Fun-14B-diffusers",
         "limits": {
           "samplers": ["default"],
