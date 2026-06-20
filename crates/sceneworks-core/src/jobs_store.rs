@@ -3772,15 +3772,23 @@ fn worker_is_candle(worker: &WorkerSnapshot) -> bool {
         .any(|capability| capability.as_str() == "candle")
 }
 
-/// Does this image job belong on the candle SDXL **txt2img-only** lane (epic 3672, sc-3678)? The
-/// candle generator (`image_jobs::generate_candle_stream`) drives plain text-to-image only — no
-/// img2img/edit (`mode == "edit_image"` + `sourceAssetId`), no reference/IP-Adapter
-/// (`referenceAssetId`), no masked inpaint/outpaint (`maskAssetId`), no strict-pose ControlNet
-/// (`advanced.poses`), and no LoRAs. Every one of those shapes must fall back to the Python torch
-/// worker, so the candle worker refuses them here. The conditioning signals mirror the worker's
-/// `sdxl_sub_mode` / `pose_entries` exactly, so the router and worker agree on the lane boundary.
+/// Does this image job belong on the candle (Windows/CUDA) image lane (epic 3672, sc-3678)? The base
+/// `generate_candle_stream` drives plain text-to-image, and the bespoke lanes branched out below add
+/// the conditioned shapes ported under epic 5480 — SDXL/FLUX.2/Qwen `edit_image` (sc-5487), IP-Adapter
+/// reference (sc-5488/sc-5872), InstantID/PuLID identity (sc-5491/sc-5492), and strict-pose ControlNet
+/// (sc-5489). Anything still without a candle lane (a torch-only family, an unported shape, a LoRA on a
+/// non-Lens family) falls back to the Python torch worker, so the candle worker refuses it here.
+///
+/// Like the MLX twin [`image_job_is_mlx_eligible`], this accepts BOTH `image_generate` and the distinct
+/// `image_edit` job type (the Image Studio/Editor "plain Image Edit": `mode == "edit_image"` +
+/// `sourceAssetId`, epic 2427) — the engine dispatches the SdxlEdit/Flux2Edit/QwenEdit lanes by payload
+/// model+mode, not job type, so both job types route through the same per-model predicates. Without
+/// `image_edit` here a plain Image Edit was wrongly enforce-failed `candle_unsupported` off-Mac instead
+/// of reaching its candle edit lane (the sc-5487 lanes were validated only via `image_generate` jobs, so
+/// the gap was invisible). The conditioning signals mirror the worker's `sdxl_sub_mode` / `pose_entries`
+/// exactly, so the router and worker agree on the lane boundary.
 fn image_job_is_candle_eligible(job: &JobSnapshot) -> bool {
-    if !matches!(job.job_type, JobType::ImageGenerate) {
+    if !matches!(job.job_type, JobType::ImageGenerate | JobType::ImageEdit) {
         return false;
     }
     let Some(model) = job.payload.get("model").and_then(Value::as_str) else {
@@ -5031,12 +5039,15 @@ fn worker_supports_job(worker: &WorkerSnapshot, job: &JobSnapshot) -> bool {
     // which is a real CUDA index here). When candle is disabled the marker is absent and this is inert,
     // so production routing is unchanged until the lane is turned on.
     if worker_is_candle(worker) {
-        // ImageGenerate: claim the candle-served shapes AND the unsupported-pose shapes the candle
+        // ImageGenerate + ImageEdit: claim the candle-served shapes (incl. the sc-5487
+        // SdxlEdit/Flux2Edit/QwenEdit `image_edit` lanes) AND the unsupported-pose shapes the candle
         // worker must OWN to reject (a `advanced.poses` job on a candle model with no pose lane, e.g.
         // sdxl) — so those fail loudly on candle instead of falling back to torch + silently rendering
         // an unconditioned T2I image (sc-5968, the no-torch-fallback / no-silent-T2I directive). Every
-        // other shape candle declines, staying on the co-resident torch worker.
-        if matches!(job.job_type, JobType::ImageGenerate)
+        // other shape candle declines, staying on the co-resident torch worker. `image_edit` is gated
+        // here too (mirroring the mlx `JobType::ImageGenerate | JobType::ImageEdit` claim arm): without
+        // it a torch-only edit model would be claimed by candle and fail instead of falling back.
+        if matches!(job.job_type, JobType::ImageGenerate | JobType::ImageEdit)
             && !(image_job_is_candle_eligible(job) || image_job_candle_pose_reject(job))
         {
             return false;
@@ -5503,6 +5514,29 @@ mod candle_routing_tests {
         .expect("valid JobSnapshot")
     }
 
+    /// A queued `image_edit` job carrying `payload` — the distinct job type the API stamps for the
+    /// Image Studio/Editor "plain Image Edit" (`mode == "edit_image"`, `apps/rust-api` generation.rs).
+    /// The candle edit lanes (sc-5487) are reached via this type, so the routing/claim tests must probe
+    /// it directly rather than only via `image_generate_job`.
+    fn image_edit_job(payload: Value) -> JobSnapshot {
+        serde_json::from_value(json!({
+            "id": "job_1",
+            "type": "image_edit",
+            "status": "queued",
+            "payload": payload,
+            "result": {},
+            "requestedGpu": "auto",
+            "progress": 0,
+            "stage": "queued",
+            "message": "",
+            "attempts": 1,
+            "cancelRequested": false,
+            "createdAt": "2026-06-12T00:00:00Z",
+            "updatedAt": "2026-06-12T00:00:00Z",
+        }))
+        .expect("valid JobSnapshot")
+    }
+
     /// A worker on a real CUDA gpu index advertising `capabilities` (string ids). The candle worker
     /// carries the `candle` marker; the torch worker on the same box does not.
     fn gpu_worker(capabilities: &[&str]) -> WorkerSnapshot {
@@ -5518,7 +5552,9 @@ mod candle_routing_tests {
         .expect("valid WorkerSnapshot")
     }
 
-    const CANDLE_CAPS: &[&str] = &["gpu", "image_generate", "candle"];
+    // Mirrors the real candle advertised set (`with_candle_capabilities`): `image_generate` (derived)
+    // plus the `image_edit` carve-out (sc-5487 edit lanes) and the `candle` lane marker.
+    const CANDLE_CAPS: &[&str] = &["gpu", "image_generate", "image_edit", "candle"];
     // The Python torch worker advertises the broad image surface but no `candle` marker.
     const TORCH_CAPS: &[&str] = &["gpu", "image_generate", "image_edit", "image_detail"];
 
@@ -6749,6 +6785,70 @@ mod candle_routing_tests {
         assert!(!sdxl_edit_candle_eligible(&object(
             json!({ "model": "sdxl" })
         )));
+    }
+
+    #[test]
+    fn image_edit_job_type_routes_through_candle_edit_lane() {
+        // Regression for the sc-5487 edit lanes being unreachable through the actual `image_edit` job
+        // type the Image Editor submits (the prior tests only exercised `image_generate` jobs with
+        // `mode == "edit_image"`, so the `JobType::ImageEdit`-only gap was invisible). A plain SDXL edit
+        // submitted as `image_edit` must: be candle-eligible, survive the `candle_required` enforce sweep
+        // (`candle_supported` → Ok), and be claimed by the candle worker — NOT enforce-failed
+        // `candle_unsupported`.
+        let sdxl_edit = json!({
+            "model": "sdxl",
+            "mode": "edit_image",
+            "sourceAssetId": "asset_1"
+        });
+        assert!(
+            image_job_is_candle_eligible(&image_edit_job(sdxl_edit.clone())),
+            "an `image_edit`-typed SDXL edit must reach the candle SdxlEdit lane"
+        );
+        assert!(
+            candle_supported(&image_edit_job(sdxl_edit.clone())).is_ok(),
+            "an eligible `image_edit` SDXL job must not be enforce-failed candle_unsupported"
+        );
+        assert!(
+            worker_supports_job(&gpu_worker(CANDLE_CAPS), &image_edit_job(sdxl_edit.clone())),
+            "the candle worker (advertising `image_edit`) must claim the SDXL edit job"
+        );
+        // The FLUX.2-klein and Qwen-Image-Edit lanes are reached through the same job type.
+        for model in [
+            "flux2_klein_9b",
+            "qwen_image_edit",
+            "qwen_image_edit_2511_lightning",
+        ] {
+            let job = image_edit_job(json!({
+                "model": model, "mode": "edit_image", "sourceAssetId": "asset_1"
+            }));
+            assert!(
+                image_job_is_candle_eligible(&job) && candle_supported(&job).is_ok(),
+                "{model} edit via the `image_edit` job type must reach its candle lane"
+            );
+        }
+        // A torch-only edit family (`kolors` has a candle txt2img lane but no candle EDIT lane) submitted
+        // as `image_edit` is NOT candle-eligible: the candle worker must refuse it so it falls back to the
+        // co-resident torch worker, which claims it. (Mirrors the `image_generate` + edit_image case.)
+        let kolors_edit = json!({
+            "model": "kolors",
+            "mode": "edit_image",
+            "sourceAssetId": "asset_1"
+        });
+        assert!(!image_job_is_candle_eligible(&image_edit_job(
+            kolors_edit.clone()
+        )));
+        assert!(!worker_supports_job(
+            &gpu_worker(CANDLE_CAPS),
+            &image_edit_job(kolors_edit.clone())
+        ));
+        assert!(
+            worker_supports_job(&gpu_worker(TORCH_CAPS), &image_edit_job(kolors_edit)),
+            "a torch-only edit model must still be claimable by the co-resident torch worker"
+        );
+        // An `image_edit` job with no source image is not the edit lane → not candle-eligible.
+        assert!(!image_job_is_candle_eligible(&image_edit_job(json!({
+            "model": "sdxl", "mode": "edit_image"
+        }))));
     }
 
     #[test]

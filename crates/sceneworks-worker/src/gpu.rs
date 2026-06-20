@@ -56,6 +56,18 @@ fn with_candle_capabilities(mut gpu: DiscoveredGpu, settings: &Settings) -> Disc
                     gpu.capabilities.push(capability);
                 }
             }
+            // Plain Image Edit (sc-5487, epic 5480): the distinct `image_edit` job type
+            // (`mode == "edit_image"` + `sourceAssetId`, epic 2427) runs the bespoke candle edit lanes
+            // (SdxlEdit / Flux2Edit / QwenEdit) via `run_image_generate_job`, which dispatches by payload
+            // model+mode, not job type. Like the MLX carve-out (`mlx_gpu`), `image_edit` is NOT derivable
+            // from a single generator descriptor (`registry_capabilities` only emits `image_generate`),
+            // so advertise it explicitly — otherwise the candle worker never claims an edit job and the
+            // API enforce-fails it `candle_unsupported`. The routing gate confines the claim to the
+            // candle-eligible edit models (`image_job_is_candle_eligible`); torch-only edit models stay on
+            // the co-resident Python worker.
+            if !gpu.capabilities.contains(&WorkerCapability::ImageEdit) {
+                gpu.capabilities.push(WorkerCapability::ImageEdit);
+            }
             // SenseNova-U1 VQA + Document-Studio interleave (sc-5501) run off the `Generator`
             // registry via the concrete candle `T2iModel::{vqa, interleave_gen}` (their text /
             // text+image output the neutral contract can't express), so they are NOT in
