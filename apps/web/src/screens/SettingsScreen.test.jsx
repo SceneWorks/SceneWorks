@@ -186,4 +186,117 @@ describe("SettingsScreen server (REST) mode", () => {
       expect.objectContaining({ method: "PUT" }),
     );
   });
+
+  // epic 4484 stories 10/12: a remote browser hides the Tauri-only cards (including
+  // the desktop-only Remote Access controls) but keeps the inference-worker restart,
+  // which routes over REST instead of the Tauri command.
+  it("hides desktop-only cards and restarts the worker over REST", async () => {
+    await render();
+    expect(container.textContent).not.toContain("Remote access (LAN)");
+    expect(container.textContent).not.toContain("Data directory");
+    expect(container.textContent).not.toContain("Detected GPU");
+    expect(container.textContent).not.toContain("Setup wizard");
+    expect(container.textContent).toContain("Inference worker");
+    const restartButton = [...container.querySelectorAll("button")].find(
+      (button) => button.textContent.trim() === "Restart worker",
+    );
+    expect(restartButton).toBeTruthy();
+    await click(restartButton);
+    expect(apiFetch).toHaveBeenCalledWith(
+      "/api/v1/worker/restart",
+      expect.anything(),
+      expect.objectContaining({ method: "POST" }),
+    );
+  });
+});
+
+describe("SettingsScreen remote access (desktop)", () => {
+  let container;
+  let root;
+  let invoke;
+  let remote;
+  let SettingsScreen;
+
+  beforeEach(async () => {
+    global.IS_REACT_ACT_ENVIRONMENT = true;
+    remote = {
+      enabled: false,
+      port: 8787,
+      passwordSet: false,
+      lanAddress: "192.168.1.50",
+      lanCandidates: ["192.168.1.50"],
+      url: "http://192.168.1.50:8787",
+      defaultPort: 8787,
+      platform: "macos",
+    };
+    invoke = vi.fn(async (command, args) => {
+      switch (command) {
+        case "get_app_settings":
+          return {};
+        case "get_gpu_info":
+          return { platform: "macos", devices: [] };
+        case "list_credentials":
+          return [];
+        case "get_remote_access":
+          return remote;
+        case "set_remote_access_password":
+          remote = { ...remote, passwordSet: true };
+          return remote;
+        case "clear_remote_access_password":
+          remote = { ...remote, passwordSet: false, enabled: false };
+          return remote;
+        case "set_remote_access":
+          remote = { ...remote, enabled: args.enabled, port: args.port };
+          return remote;
+        default:
+          return null;
+      }
+    });
+    window.__TAURI__ = { core: { invoke } };
+    vi.resetModules();
+    ({ SettingsScreen } = await import("./SettingsScreen.jsx"));
+    container = document.createElement("div");
+    document.body.appendChild(container);
+    root = createRoot(container);
+  });
+
+  afterEach(async () => {
+    await act(async () => {
+      root.unmount();
+    });
+    container.remove();
+    delete window.__TAURI__;
+    vi.restoreAllMocks();
+  });
+
+  async function render() {
+    await act(async () => {
+      root.render(<SettingsScreen />);
+    });
+    await act(async () => {});
+  }
+
+  const button = (label) =>
+    [...container.querySelectorAll("button")].find((b) => b.textContent.trim() === label);
+
+  it("shows the section, the LAN URL, and blocks enabling without a password", async () => {
+    await render();
+    expect(container.textContent).toContain("Remote access (LAN)");
+    expect(container.textContent).toContain("http://192.168.1.50:8787");
+    expect(button("Enable remote access").disabled).toBe(true);
+  });
+
+  it("sets a password, then can enable remote access on the chosen port", async () => {
+    await render();
+    await changeField(
+      container.querySelector('[aria-label="Remote access password"]'),
+      "lan-pass",
+    );
+    await click(button("Set password"));
+    expect(invoke).toHaveBeenCalledWith("set_remote_access_password", { password: "lan-pass" });
+    // Re-rendered with passwordSet → the enable button is now allowed.
+    expect(button("Enable remote access").disabled).toBe(false);
+    await click(button("Enable remote access"));
+    expect(invoke).toHaveBeenCalledWith("set_remote_access", { enabled: true, port: 8787 });
+  });
 });

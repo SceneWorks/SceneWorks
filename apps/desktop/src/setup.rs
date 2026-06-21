@@ -268,16 +268,25 @@ fn append_log(path: &Path, line: &str) {
     session_log().push_line(source, line);
 }
 
-/// Extract the port from the API's `listening on http://127.0.0.1:PORT` line.
+/// Extract the port from the API's bound-address startup line. In loopback mode the
+/// API logs `…address=127.0.0.1:PORT`; in LAN mode (epic 4484) it binds 0.0.0.0 and
+/// logs `…address=0.0.0.0:PORT`, so both markers are tried. (LAN mode also pre-sets
+/// the known fixed port, so this is the fallback for the dynamic loopback case.)
 fn parse_listening_port(line: &str) -> Option<u16> {
-    const MARKER: &str = "127.0.0.1:";
-    let start = line.find(MARKER)? + MARKER.len();
-    line[start..]
-        .chars()
-        .take_while(char::is_ascii_digit)
-        .collect::<String>()
-        .parse()
-        .ok()
+    for marker in ["127.0.0.1:", "0.0.0.0:"] {
+        if let Some(index) = line.find(marker) {
+            let start = index + marker.len();
+            if let Ok(port) = line[start..]
+                .chars()
+                .take_while(char::is_ascii_digit)
+                .collect::<String>()
+                .parse()
+            {
+                return Some(port);
+            }
+        }
+    }
+    None
 }
 
 /// Health check that also confirms the responder is genuinely the SceneWorks API
@@ -381,16 +390,110 @@ fn resolve_bundled_cuda_dir(_app: &AppHandle) -> Option<std::path::PathBuf> {
     crate::cuda_provision::cuda_dir_if_present()
 }
 
+/// The resolved bind/auth environment for the API sidecar for one launch (epic 4484
+/// stories 2/3). Pure output of [`decide_api_bind_env`] so the loopback-vs-LAN choice
+/// is unit-tested without spawning anything.
+#[derive(Debug, PartialEq)]
+struct ApiBindEnv {
+    /// `SCENEWORKS_API_HOST`: `127.0.0.1` (loopback) or `0.0.0.0` (LAN, all interfaces).
+    host: &'static str,
+    /// `SCENEWORKS_API_PORT`: `"0"` (OS-assigned dynamic) in loopback mode, or the
+    /// configured fixed port (as a string) in LAN mode.
+    port: String,
+    /// `SCENEWORKS_ACCESS_TOKEN`: the user's password in LAN mode, `None` otherwise.
+    /// When set it is also injected into the GPU worker(s) so they can still reach the
+    /// now-authenticated API.
+    access_token: Option<String>,
+    /// The fixed bound port when known up-front (LAN mode), so window-gating doesn't
+    /// depend on parsing the API's stdout marker. `None` ⇒ discover from the log.
+    fixed_port: Option<u16>,
+    /// A non-fatal warning to log when remote access is requested but can't be honored
+    /// safely (enabled without a password) — the bind falls back to loopback rather
+    /// than exposing the host unauthenticated (fail-closed, story 3).
+    warning: Option<String>,
+}
+
+/// Choose the API sidecar's bind/auth env from the persisted remote-access settings.
+///
+/// Fail-closed security invariant (epic 4484 story 3): a non-loopback bind happens
+/// ONLY when remote access is explicitly enabled AND a non-empty password is present.
+/// Disabled → today's loopback/dynamic/no-token behavior, byte-for-byte. Enabled but
+/// no password → loopback with a warning (NEVER an open unauthenticated bind). The
+/// desktop never sets `SCENEWORKS_ALLOW_OPEN_BIND`, so even a hand-edited settings.json
+/// can't get past the server's own open-bind refusal.
+fn decide_api_bind_env(enabled: bool, port: Option<u16>, password: Option<String>) -> ApiBindEnv {
+    let loopback = || ApiBindEnv {
+        host: "127.0.0.1",
+        // OS-assigned free port (no reserve/release TOCTOU); discovered from the log.
+        port: "0".to_owned(),
+        access_token: None,
+        fixed_port: None,
+        warning: None,
+    };
+    if !enabled {
+        return loopback();
+    }
+    let password = password
+        .map(|value| value.trim().to_owned())
+        .filter(|value| !value.is_empty());
+    let Some(password) = password else {
+        return ApiBindEnv {
+            warning: Some(
+                "remote access is enabled but no password is set — binding loopback-only. \
+                 Set a password in Settings → Remote Access to allow LAN connections."
+                    .to_owned(),
+            ),
+            ..loopback()
+        };
+    };
+    let port = port.unwrap_or(crate::settings::DEFAULT_REMOTE_PORT);
+    ApiBindEnv {
+        host: "0.0.0.0",
+        port: port.to_string(),
+        access_token: Some(password),
+        fixed_port: Some(port),
+        warning: None,
+    }
+}
+
+/// The API access token for this launch when LAN remote access is on (the user's
+/// password), or `None` for the default loopback mode. Used to authenticate the GPU
+/// worker(s) to the now-protected API; mirrors the fail-closed rule in
+/// [`decide_api_bind_env`] (enabled AND a non-empty password). Returns `None` without
+/// touching the keychain when remote access is disabled (the password read self-gates
+/// on the `remote_password_set` metadata).
+fn lan_access_token() -> Option<String> {
+    if !crate::settings::load_settings().remote_access_enabled {
+        return None;
+    }
+    crate::settings::read_remote_password()
+        .map(|value| value.trim().to_owned())
+        .filter(|value| !value.is_empty())
+}
+
 /// Spawn the API sidecar, pipe its output to api.log, and return the chosen port.
 fn spawn_api(app: &AppHandle) -> Result<(), String> {
+    // epic 4484 stories 2/3: pick loopback/dynamic (default) vs 0.0.0.0/fixed-port +
+    // password-as-access-token (LAN) from the persisted settings, fail-closed.
+    let settings = crate::settings::load_settings();
+    let bind = decide_api_bind_env(
+        settings.remote_access_enabled,
+        settings.remote_port,
+        crate::settings::read_remote_password(),
+    );
+    if let Some(warning) = &bind.warning {
+        append_log(
+            &logs_dir().join("api.log"),
+            &format!("[desktop] {warning}\n"),
+        );
+    }
     let mut command = app
         .shell()
         .sidecar("sceneworks-api")
         .map_err(|error| format!("locate api: {error}"))?
-        .env("SCENEWORKS_API_HOST", "127.0.0.1")
-        // Let the OS assign a free port (no reserve/release TOCTOU); the actual
-        // port is discovered from the API's startup line below.
-        .env("SCENEWORKS_API_PORT", "0")
+        // Loopback/dynamic by default; 0.0.0.0/fixed-port in LAN mode (epic 4484).
+        .env("SCENEWORKS_API_HOST", bind.host)
+        .env("SCENEWORKS_API_PORT", &bind.port)
         .env("SCENEWORKS_RUN_UTILITY_INPROCESS", "true")
         // Parent-death watchdog: a force-quit/crash skips `begin_shutdown`, so
         // without this the API orphans to launchd (PPID=1), holding its
@@ -459,6 +562,15 @@ fn spawn_api(app: &AppHandle) -> Result<(), String> {
             command = command.env("PATH", joined);
         }
     }
+    // LAN mode (epic 4484): hand the API the user's password as the access token so it
+    // requires auth on the now-network-reachable bind. The server ALSO refuses any
+    // non-loopback bind without a token (API-001 gate), so this is what unlocks the
+    // 0.0.0.0 bind — and we deliberately never set SCENEWORKS_ALLOW_OPEN_BIND, leaving
+    // that server gate as the backstop. The in-process utility worker inherits this
+    // env; the separately-spawned GPU worker(s) get it via `lan_access_token()` below.
+    if let Some(token) = &bind.access_token {
+        command = command.env("SCENEWORKS_ACCESS_TOKEN", token);
+    }
     // FLUX.2-klein true_v2 single-file conversion is now in-process Rust/MLX
     // (mlx_gen_flux2::convert_and_assemble, sc-3136) — no sidecar venv / converter
     // script, so no SCENEWORKS_MLX_FLUX_* env wiring.
@@ -471,6 +583,16 @@ fn spawn_api(app: &AppHandle) -> Result<(), String> {
         .lock()
         .expect("api lock")
         .replace(child);
+    // In LAN mode the bound port is known up-front (fixed), and the API logs it as
+    // `0.0.0.0:<port>` rather than the `127.0.0.1:` marker the stdout parser keys on —
+    // so seed it directly. Window-gating + the loopback health check then proceed
+    // without depending on the marker (0.0.0.0 includes 127.0.0.1).
+    if let Some(fixed_port) = bind.fixed_port {
+        *app.state::<Managed>()
+            .api_port
+            .lock()
+            .expect("api port lock") = Some(fixed_port);
+    }
 
     let log_path = logs_dir().join("api.log");
     let _ = std::fs::create_dir_all(logs_dir());
@@ -486,12 +608,21 @@ fn spawn_api(app: &AppHandle) -> Result<(), String> {
                 CommandEvent::Stdout(bytes) | CommandEvent::Stderr(bytes) => {
                     let text = String::from_utf8_lossy(&bytes).into_owned();
                     // Discover the OS-assigned port from the API's startup line.
-                    let state = app_handle.state::<Managed>();
-                    let mut port = state.api_port.lock().expect("api port lock");
-                    if port.is_none() {
-                        if let Some(found) = parse_listening_port(&text) {
-                            *port = Some(found);
+                    {
+                        let state = app_handle.state::<Managed>();
+                        let mut port = state.api_port.lock().expect("api port lock");
+                        if port.is_none() {
+                            if let Some(found) = parse_listening_port(&text) {
+                                *port = Some(found);
+                            }
                         }
+                    }
+                    // Remote worker-restart sentinel (epic 4484 story 12): the API
+                    // prints this when an authenticated remote admin POSTs
+                    // /api/v1/worker/restart. Do the same kill-and-respawn as the local
+                    // "Restart worker" command.
+                    if text.contains(sceneworks_core::WORKER_RESTART_SENTINEL) {
+                        restart_gpu_worker(&app_handle);
                     }
                     text
                 }
@@ -625,6 +756,34 @@ pub fn invalidate_credential_cache(app: &AppHandle, host: &str) {
     }
 }
 
+/// Kill the current GPU worker child so its supervisor respawns it — the shared core of
+/// the local "Restart worker" Tauri command and the remote REST restart (epic 4484
+/// story 12, triggered when the API prints `WORKER_RESTART_SENTINEL` to stdout). macOS
+/// runs the MLX worker; Windows runs the candle worker; elsewhere there is no GPU
+/// worker to restart.
+pub fn restart_gpu_worker(app: &AppHandle) {
+    #[cfg(target_os = "macos")]
+    let child = app
+        .state::<Managed>()
+        .mlx_worker
+        .lock()
+        .expect("mlx worker lock")
+        .take();
+    #[cfg(target_os = "windows")]
+    let child = app
+        .state::<Managed>()
+        .candle_worker
+        .lock()
+        .expect("candle worker lock")
+        .take();
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
+    if let Some(child) = child {
+        let _ = child.kill();
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    let _ = app;
+}
+
 /// Spawn and supervise the Apple-Silicon MLX GPU worker (sc-3289): the same
 /// `sceneworks-api` sidecar binary re-launched in worker mode
 /// (`SCENEWORKS_WORKER_ONLY=1`) with `SCENEWORKS_GPU_ID=mlx`, so MLX-eligible
@@ -719,6 +878,13 @@ fn supervise_mlx_worker(app: AppHandle, api_port: u16) {
                         command = command.env("SCENEWORKS_CREDENTIAL_HOSTS", hosts);
                     }
                 }
+            }
+            // LAN mode (epic 4484): the API now requires the password as an access
+            // token, so the MLX worker must send it on every API call (register/claim/
+            // heartbeat) or it'd be 401'd. `None` in the default loopback mode, so this
+            // is a no-op unless the user opted into LAN remote access.
+            if let Some(token) = lan_access_token() {
+                command = command.env("SCENEWORKS_ACCESS_TOKEN", token);
             }
             let spawned = command.spawn();
             let (mut events, child) = match spawned {
@@ -905,6 +1071,12 @@ fn supervise_candle_worker(app: AppHandle, api_port: u16) {
             }
             if let Some(credentials) = crate::settings::credentials_env_json() {
                 command = command.env("SCENEWORKS_CREDENTIALS", credentials);
+            }
+            // LAN mode (epic 4484): the API now requires the password as an access
+            // token, so the candle worker must send it on every API call or it'd be
+            // 401'd. `None` in the default loopback mode (no-op unless LAN is on).
+            if let Some(token) = lan_access_token() {
+                command = command.env("SCENEWORKS_ACCESS_TOKEN", token);
             }
             let spawned = command.spawn();
             let (mut events, child) = match spawned {
@@ -1345,5 +1517,110 @@ mod preflight_tests {
     fn unparseable_driver_does_not_block_a_present_gpu() {
         // The GPU is present; an odd version string shouldn't hard-block startup.
         assert!(evaluate_nvidia_preflight(Some("NVIDIA RTX, not-a-version")).is_ok());
+    }
+}
+
+#[cfg(test)]
+mod bind_tests {
+    use super::{decide_api_bind_env, parse_listening_port, ApiBindEnv};
+    use crate::settings::DEFAULT_REMOTE_PORT;
+
+    // epic 4484 stories 2/3/10: the API sidecar launch-env selector.
+
+    #[test]
+    fn disabled_binds_loopback_dynamic_no_token() {
+        // Default (remote access off): byte-for-byte today's behavior.
+        let env = decide_api_bind_env(false, Some(9000), Some("hunter2".to_owned()));
+        assert_eq!(
+            env,
+            ApiBindEnv {
+                host: "127.0.0.1",
+                port: "0".to_owned(),
+                access_token: None,
+                fixed_port: None,
+                warning: None,
+            }
+        );
+    }
+
+    #[test]
+    fn enabled_with_password_binds_open_fixed_port_with_token() {
+        let env = decide_api_bind_env(true, Some(8910), Some("  swordfish  ".to_owned()));
+        assert_eq!(env.host, "0.0.0.0");
+        assert_eq!(env.port, "8910");
+        // Token is the trimmed password; it is also handed to the GPU worker(s).
+        assert_eq!(env.access_token.as_deref(), Some("swordfish"));
+        assert_eq!(env.fixed_port, Some(8910));
+        assert!(env.warning.is_none());
+    }
+
+    #[test]
+    fn enabled_without_port_uses_the_default_suggestion() {
+        let env = decide_api_bind_env(true, None, Some("pw".to_owned()));
+        assert_eq!(env.host, "0.0.0.0");
+        assert_eq!(env.port, DEFAULT_REMOTE_PORT.to_string());
+        assert_eq!(env.fixed_port, Some(DEFAULT_REMOTE_PORT));
+    }
+
+    #[test]
+    fn enabled_without_password_fails_closed_to_loopback() {
+        // Security invariant: never bind non-loopback without a password (story 3).
+        let env = decide_api_bind_env(true, Some(8787), None);
+        assert_eq!(env.host, "127.0.0.1");
+        assert_eq!(env.port, "0");
+        assert!(env.access_token.is_none());
+        assert!(env.fixed_port.is_none());
+        assert!(
+            env.warning.is_some(),
+            "missing-password must surface a warning"
+        );
+    }
+
+    #[test]
+    fn enabled_with_blank_password_fails_closed() {
+        // A whitespace-only password is treated as absent → loopback, never an empty
+        // token on an open bind.
+        let env = decide_api_bind_env(true, Some(8787), Some("   ".to_owned()));
+        assert_eq!(env.host, "127.0.0.1");
+        assert!(env.access_token.is_none());
+        assert!(env.warning.is_some());
+    }
+
+    /// Story 3: the desktop must NEVER set `SCENEWORKS_ALLOW_OPEN_BIND` (the server's
+    /// open-bind refusal must remain the backstop). Assert the var never appears as a
+    /// double-quoted string literal anywhere in the desktop crate — i.e. it is never
+    /// passed to `.env("…")` / `set_var("…")`. (Explanatory comments referencing the
+    /// var in prose or `backticks` are allowed and don't match.) The needle is
+    /// assembled from parts so this test's own source doesn't trip the `include_str!`
+    /// scan of this very file.
+    #[test]
+    fn desktop_never_sets_allow_open_bind() {
+        let needle = concat!("\"SCENEWORKS_", "ALLOW_OPEN_BIND\"");
+        for source in [
+            include_str!("setup.rs"),
+            include_str!("settings.rs"),
+            include_str!("main.rs"),
+            include_str!("net.rs"),
+        ] {
+            assert!(
+                !source.contains(needle),
+                "desktop crate must never set the open-bind override env var"
+            );
+        }
+    }
+
+    #[test]
+    fn parse_listening_port_handles_both_markers() {
+        // Loopback (dynamic) startup line.
+        assert_eq!(
+            parse_listening_port("api_listening address=127.0.0.1:54321 ..."),
+            Some(54321)
+        );
+        // LAN (0.0.0.0/fixed) startup line.
+        assert_eq!(
+            parse_listening_port("api_listening address=0.0.0.0:8787 ..."),
+            Some(8787)
+        );
+        assert_eq!(parse_listening_port("nothing to see here"), None);
     }
 }

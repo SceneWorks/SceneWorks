@@ -14,6 +14,10 @@ publish = false
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
+# Cross-platform network-interface enumeration for the LAN remote-access URL
+# (epic 4484, story 5): lists adapters with their IPs on macOS AND Windows, so the
+# desktop can offer a likely private LAN address. Small, std-only deps under the hood.
+if-addrs = "0.13"
 keyring = { version = "3", features = ["apple-native", "windows-native", "sync-secret-service"] }
 # In-app session log buffer (sc-3451): shared LogEntry/SessionLog types.
 sceneworks-core = { path = "../../crates/sceneworks-core" }

@@ -106,6 +106,27 @@ pub(crate) struct AccessResponse {
     pub(crate) token_header: &'static str,
 }
 
+/// Host memory for remote-browser model gating (epic 4484 story 9). A remote browser
+/// can't call the desktop-only Tauri `get_gpu_info`, so it reads the host's memory
+/// from here — derived from the registered GPU worker's reported utilization. Carries
+/// only aggregate memory totals + the platform string (no paths/secrets), and is
+/// auth-protected (not a public path).
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct HostCapabilitiesResponse {
+    /// API host OS (`macos`/`windows`/`linux`) so the client gates with the right
+    /// memory concept (unified vs VRAM).
+    pub(crate) platform: &'static str,
+    /// Unified system memory (GB) — the macOS MLX worker reports `sysctl hw.memsize`.
+    /// `None` when no MLX worker is registered.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) unified_memory_gb: Option<f64>,
+    /// Largest discrete GPU VRAM (GB) across registered GPU workers (Windows candle /
+    /// CUDA). `None` when no such worker is registered.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) gpu_memory_gb: Option<f64>,
+}
+
 #[derive(Debug, Serialize)]
 pub(crate) struct VerifyResponse {
     pub(crate) ok: bool,

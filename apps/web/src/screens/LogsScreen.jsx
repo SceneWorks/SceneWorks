@@ -2,6 +2,7 @@ import React, { useCallback, useEffect, useRef, useState } from "react";
 
 import { apiFetch } from "../api.js";
 import { useAppContext } from "../context/AppContext.js";
+import { isDesktop, tauriInvoke } from "../runtime.js";
 
 // In-app Logs viewer (sc-3452). Shows the current session's activity — most
 // importantly the GPU routing decisions (`gpu_route_decision`) and claim
@@ -10,9 +11,9 @@ import { useAppContext } from "../context/AppContext.js";
 //
 // Data source: on the desktop the rich multi-source buffer (api + worker +
 // mlx-worker) is read via the `get_session_logs` Tauri command (sc-3451); on
-// web/Docker the API-side buffer is read over HTTP (`GET /api/v1/logs`, sc-3453).
-const isDesktop = typeof window !== "undefined" && !!window.__TAURI__;
-const tauriInvoke = (command, args) => window.__TAURI__.core.invoke(command, args);
+// web/Docker (and a remote LAN browser) the API-side buffer is read over HTTP
+// (`GET /api/v1/logs`, sc-3453). `isDesktop`/`tauriInvoke` come from the unified
+// runtime helper (epic 4484 story 6).
 
 const SOURCES = ["api", "worker", "mlx-worker"];
 const LEVELS = ["info", "warn", "error"];
