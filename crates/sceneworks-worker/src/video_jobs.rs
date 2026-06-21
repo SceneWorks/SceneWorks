@@ -2696,17 +2696,11 @@ async fn generate_video(
     // default + a `sampling_knob_unsupported` event, never a `validate_request` hard-fail.
     {
         let advanced = VideoRequest::from_payload(&job.payload).advanced;
-        let read = |key: &str| {
-            advanced
-                .get(key)
-                .and_then(|value| value.as_str())
-                .map(str::trim)
-                .filter(|value| !value.is_empty() && *value != "default")
-                .map(str::to_owned)
-        };
+        let (raw_sampler, raw_scheduler, raw_shift) =
+            crate::image_jobs::read_advanced_sampling_knobs(&advanced);
         let (samplers, schedulers) = video_engine_sampling_surface(input.engine_id);
         input.sampler = crate::image_jobs::normalize_sampling_knob(
-            read("sampler"),
+            raw_sampler,
             &samplers,
             "sampler",
             input.engine_id,
@@ -2714,7 +2708,7 @@ async fn generate_video(
             backend,
         );
         input.scheduler = crate::image_jobs::normalize_sampling_knob(
-            read("scheduler"),
+            raw_scheduler,
             &schedulers,
             "scheduler",
             input.engine_id,
@@ -2725,15 +2719,7 @@ async fn generate_video(
         // sets shift 1.0), so the user knob can't clobber a model's required recipe. Parity with the
         // image lane's `advanced.schedulerShift` / `timestepShift` read.
         if input.scheduler_shift.is_none() {
-            input.scheduler_shift = advanced
-                .get("schedulerShift")
-                .or_else(|| advanced.get("timestepShift"))
-                .and_then(|value| {
-                    value
-                        .as_f64()
-                        .or_else(|| value.as_str()?.trim().parse().ok())
-                })
-                .map(|value| value as f32);
+            input.scheduler_shift = raw_shift;
         }
     }
     let cancel = CancelFlag::new();
