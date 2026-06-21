@@ -643,3 +643,94 @@ describe("ModelManagerScreen type-grouped layout", () => {
     expect(downloadButton).toBeUndefined();
   });
 });
+
+// epic 4484 stories 9/10: a remote browser (no Tauri) can't call get_gpu_info, so it
+// reads the host's memory from GET /api/v1/host-capabilities and gates MLX models with
+// it exactly as the desktop does with the Tauri probe.
+describe("ModelManagerScreen remote memory gating (REST)", () => {
+  let container;
+  let root;
+  let apiFetch;
+  let ModelManagerScreen;
+  let AppContext;
+
+  const HEAVY_MLX_MODEL = {
+    id: "big_mlx",
+    name: "Big MLX",
+    type: "image",
+    family: "flux",
+    installState: "installed",
+    mlxConversionState: "needs_conversion",
+    mlx: { minMemoryGb: 64 },
+    ui: { description: "Heavy MLX model." },
+  };
+
+  beforeEach(async () => {
+    global.IS_REACT_ACT_ENVIRONMENT = true;
+    delete window.__TAURI__;
+    apiFetch = vi.fn(async (path) => {
+      if (path === "/api/v1/host-capabilities") {
+        return { platform: "macos", unifiedMemoryGb: 16 };
+      }
+      return [];
+    });
+    vi.resetModules();
+    vi.doMock("../api.js", () => ({
+      apiFetch,
+      isAbortError: () => false,
+      API_BASE_URL: "",
+      eventUrl: () => "",
+    }));
+    ({ AppContext } = await import("../context/AppContext.js"));
+    ({ ModelManagerScreen } = await import("./ModelManagerScreen.jsx"));
+    container = document.createElement("div");
+    document.body.appendChild(container);
+    root = createRoot(container);
+  });
+
+  afterEach(async () => {
+    await act(async () => {
+      root.unmount();
+    });
+    container.remove();
+    vi.doUnmock("../api.js");
+    vi.restoreAllMocks();
+  });
+
+  async function render(models) {
+    const value = {
+      activeProject: null,
+      jobs: [],
+      loras: [],
+      models,
+      presets: [],
+      jobAction: () => {},
+      setActiveView: () => {},
+      deleteLora: () => {},
+      deleteModel: () => {},
+      createModelDownloadJob: () => {},
+      createModelConvertJob: () => {},
+      createLoraImportJob: () => {},
+      createModelImportJob: () => {},
+    };
+    await act(async () => {
+      root.render(
+        <AppContext.Provider value={value}>
+          <ModelManagerScreen />
+        </AppContext.Provider>,
+      );
+    });
+    // Flush the host-capabilities effect promise.
+    await act(async () => {});
+  }
+
+  it("reads host memory over REST and warns when the model needs more than the host has", async () => {
+    await render([HEAVY_MLX_MODEL]);
+    expect(apiFetch).toHaveBeenCalledWith("/api/v1/host-capabilities", expect.anything());
+    // 64 GB required vs 16 GB host → the insufficient-memory warning is shown, proving
+    // the REST signal drives gating just like the desktop Tauri probe.
+    expect(container.textContent).toContain("needs ≥ 64 GB");
+    expect(container.textContent).toContain("Needs ≥ 64 GB unified memory");
+    expect(container.textContent).toContain("~16 GB");
+  });
+});

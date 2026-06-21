@@ -10,6 +10,8 @@ mod cred_ipc;
 // run into %APPDATA%\SceneWorks\gpu-runtime and resolved from there.
 #[cfg(target_os = "windows")]
 mod cuda_provision;
+// Likely-LAN-address discovery for the remote-access URL (epic 4484, story 5).
+mod net;
 mod settings;
 mod setup;
 
@@ -46,6 +48,12 @@ fn main() {
             settings::delete_credential,
             settings::restart_worker,
             settings::get_gpu_info,
+            // LAN remote access (epic 4484, stories 4/5).
+            settings::get_remote_access,
+            settings::set_remote_access,
+            settings::set_remote_access_password,
+            settings::clear_remote_access_password,
+            net::get_lan_address,
         ])
         .build(tauri::generate_context!())
         .expect("error while building the SceneWorks desktop shell");

@@ -39,13 +39,13 @@ import {
   restrictFoldedToScope,
 } from "./assetVariants.js";
 import { buildWorkersById } from "./workers.js";
+import { isDesktop as isDesktopShell, tauriInvoke } from "./runtime.js";
 
-// Desktop (Tauri) shell detection. The first-run setup wizard is desktop-only;
-// web/Docker keep the existing first-run project gate. Tauri commands persist the
-// wizard state (the API binds a random port each launch, so localStorage — keyed
-// to the origin — can't be relied on across launches).
-const isDesktopShell = typeof window !== "undefined" && !!window.__TAURI__;
-const tauriInvoke = (command, args) => window.__TAURI__.core.invoke(command, args);
+// Desktop (Tauri) shell detection (unified helper, epic 4484 story 6). The first-run
+// setup wizard is desktop-only; web/Docker (and a remote LAN browser) keep the
+// existing first-run project gate. Tauri commands persist the wizard state (the API
+// binds a random port each launch, so localStorage — keyed to the origin — can't be
+// relied on across launches).
 
 function isActiveWorker(worker) {
   return worker.status !== "offline";
@@ -464,6 +464,8 @@ export function App() {
   const [health, setHealth] = useState(null);
   const [access, setAccess] = useState({ authRequired: false });
   const [token, setToken] = useState(() => window.localStorage.getItem("sceneworks-token") ?? "");
+  // Wrong-password feedback for the remote-browser login gate (epic 4484 story 7).
+  const [authError, setAuthError] = useState("");
   const [projects, setProjects] = useState([]);
   const [projectsLoaded, setProjectsLoaded] = useState(false);
   // Desktop first-run wizard gate: null = unknown (still reading on desktop),
@@ -1229,11 +1231,42 @@ export function App() {
   refreshDataWithLoraOverlayRef.current = refreshDataWithLoraOverlay;
 
 
-  function saveToken(event) {
+  // Remote-browser login (epic 4484 story 7): the password IS the API access token.
+  // Verify it against the public /api/v1/auth/verify endpoint BEFORE persisting, so a
+  // wrong password keeps the gate up (instead of saving a bad token and silently
+  // failing every subsequent request). A correct password is stored to localStorage
+  // and unlocks the app; it persists across reloads.
+  async function saveToken(event) {
     event.preventDefault();
-    window.localStorage.setItem("sceneworks-token", token);
+    const candidate = token.trim();
+    if (!candidate) {
+      setAuthError("Enter the password.");
+      return;
+    }
+    try {
+      const result = await apiFetch("/api/v1/auth/verify", candidate, { method: "POST" });
+      if (!result?.ok) {
+        setAuthError("Incorrect password. Try again.");
+        return;
+      }
+    } catch {
+      setAuthError("Couldn't reach the host to verify the password.");
+      return;
+    }
+    window.localStorage.setItem("sceneworks-token", candidate);
+    setToken(candidate);
+    setAuthError("");
     setError("");
     refreshData();
+  }
+
+  // Clear the stored password and re-show the login gate ("lock"/forget affordance,
+  // epic 4484 story 7). Setting the token state to "" forces a re-render so the gate
+  // (which keys off the stored token) reappears.
+  function lockRemote() {
+    window.localStorage.removeItem("sceneworks-token");
+    setToken("");
+    setAuthError("");
   }
 
   async function completeSetupWizard() {
@@ -1993,6 +2026,18 @@ export function App() {
           >
             {theme === "light" ? <Icon.Moon /> : <Icon.Sun />}
           </button>
+          {/* Lock/forget the saved password (epic 4484 story 7) — only meaningful in a
+              remote browser where a password was entered to unlock the host. */}
+          {access.authRequired && !isDesktopShell && token ? (
+            <button
+              className="icon-btn"
+              onClick={lockRemote}
+              title="Lock — forget the saved password"
+              type="button"
+            >
+              Lock
+            </button>
+          ) : null}
         </header>
 
         {notices.map((notice) => (
@@ -2002,17 +2047,18 @@ export function App() {
         {access.authRequired && !window.localStorage.getItem("sceneworks-token") ? (
           <section className="auth-band">
             <form onSubmit={saveToken}>
-              <label htmlFor="token">Pairing token</label>
+              <label htmlFor="token">Password</label>
               <div className="form-row">
                 <input
                   id="token"
                   onChange={(event) => setToken(event.target.value)}
-                  placeholder="Enter local token"
+                  placeholder="Enter the access password"
                   type="password"
                   value={token}
                 />
                 <button type="submit">Unlock</button>
               </div>
+              {authError ? <p className="notice error">{authError}</p> : null}
             </form>
           </section>
         ) : null}

@@ -1,14 +1,16 @@
 import { apiFetch } from "./api.js";
+import { isDesktop, tauriInvoke } from "./runtime.js";
 
 // Service-credential transport shared by the Settings screen (where users manage
 // tokens) and the Models screen (which checks token presence for gated models).
 // The desktop build stores credentials in the OS keychain via Tauri (sc-1891);
 // the server/Docker build manages them over the authed REST API (sc-1893). These
 // helpers hide that split so both screens use one transport + presence check.
-export const credentialsIsDesktop =
-  typeof window !== "undefined" && !!window.__TAURI__;
+// `credentialsIsDesktop` is a thin re-export of the unified `isDesktop` (epic 4484
+// story 6) kept for existing importers.
+export const credentialsIsDesktop = isDesktop;
 
-const invoke = (command, args) => window.__TAURI__.core.invoke(command, args);
+const invoke = tauriInvoke;
 
 export const SCHEME_LABELS = {
   bearer: "Bearer header",

@@ -7980,6 +7980,87 @@ async fn public_health_withholds_host_paths_when_a_token_is_configured() {
     assert!(health.get("directories").is_none());
 }
 
+#[tokio::test]
+async fn host_capabilities_requires_token_and_reports_host_memory() {
+    // epic 4484 story 9: the remote-browser host-memory signal is auth-protected and
+    // derives the platform-correct memory from the registered GPU worker's utilization.
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let mut settings = test_settings(&temp_dir);
+    settings.access_token = "secret-token".to_owned();
+    let app = create_app(settings).expect("app creates");
+
+    // Protected: no token → 401 (not a public path).
+    let (status, _) = request(app.clone(), "GET", "/api/v1/host-capabilities", Value::Null).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+
+    // With the token but no workers registered: 200, platform present, memory omitted.
+    let (status, caps) = request_with_headers(
+        app.clone(),
+        "GET",
+        "/api/v1/host-capabilities",
+        Value::Null,
+        &[("x-sceneworks-token", "secret-token")],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(caps.get("platform").is_some());
+    assert!(caps.get("unifiedMemoryGb").is_none());
+
+    // Register an MLX worker reporting unified memory (sysctl hw.memsize as total MB);
+    // the endpoint surfaces it as GB.
+    let (status, _) = request_with_headers(
+        app.clone(),
+        "POST",
+        "/api/v1/workers/register",
+        json!({
+            "workerId": "mlx-test",
+            "gpuId": "mlx",
+            "capabilities": [],
+            "loadedModels": [],
+            "utilization": { "memoryTotalMb": 131072 }
+        }),
+        &[("x-sceneworks-token", "secret-token")],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    let (status, caps) = request_with_headers(
+        app,
+        "GET",
+        "/api/v1/host-capabilities",
+        Value::Null,
+        &[("x-sceneworks-token", "secret-token")],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(caps["unifiedMemoryGb"], 128.0);
+    // No host paths or secrets leak through this endpoint.
+    assert!(caps.get("directories").is_none());
+}
+
+#[tokio::test]
+async fn worker_restart_requires_token() {
+    // epic 4484 story 12: the remote-admin worker-restart endpoint is auth-protected.
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let mut settings = test_settings(&temp_dir);
+    settings.access_token = "secret-token".to_owned();
+    let app = create_app(settings).expect("app creates");
+
+    let (status, _) = request(app.clone(), "POST", "/api/v1/worker/restart", Value::Null).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+
+    let (status, body) = request_with_headers(
+        app,
+        "POST",
+        "/api/v1/worker/restart",
+        Value::Null,
+        &[("x-sceneworks-token", "secret-token")],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["ok"], true);
+}
+
 #[test]
 fn requires_token_only_gates_api_paths() {
     // Non-API paths (embedded UI / SPA fallback) must never require a token,

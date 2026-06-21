@@ -1,17 +1,21 @@
 import React, { useCallback, useEffect, useState } from "react";
 import {
   SCHEME_LABELS,
-  credentialsIsDesktop as isDesktop,
   loadCredentials,
   removeCredentialRequest,
   saveCredential,
+  serverToken,
 } from "../credentials.js";
+import { apiFetch } from "../api.js";
+import { isDesktop, tauriInvoke as invoke } from "../runtime.js";
 
-// The data-dir / GPU / worker / wizard controls are desktop-only (backed by Tauri
-// commands in the shell). Service credentials work in both deployments and route
-// through the shared ../credentials.js transport (keychain on desktop, authed REST
-// on the server). The remaining commands here are desktop-only Tauri invokes.
-const invoke = (command, args) => window.__TAURI__.core.invoke(command, args);
+// The data-dir / GPU / worker / wizard / remote-access controls are desktop-only
+// (backed by Tauri commands in the shell) and are gated behind `isDesktop` so a
+// remote LAN browser (epic 4484) doesn't render buttons that would call a missing
+// Tauri bridge. Service credentials work in both deployments and route through the
+// shared ../credentials.js transport (keychain on desktop, authed REST on the
+// server / remote browser). `isDesktop`/`invoke` come from the unified runtime
+// helper (story 6).
 
 export function SettingsScreen() {
   const [settings, setSettings] = useState(null);
@@ -22,18 +26,28 @@ export function SettingsScreen() {
   const [newScheme, setNewScheme] = useState("bearer");
   const [newToken, setNewToken] = useState("");
   const [status, setStatus] = useState("");
+  // LAN remote access (epic 4484 stories 4/11). `remote` is the RemoteAccessStatus
+  // snapshot from the shell; only fetched/rendered on desktop.
+  const [remote, setRemote] = useState(null);
+  const [remotePort, setRemotePort] = useState("");
+  const [remotePassword, setRemotePassword] = useState("");
 
   const refresh = useCallback(async () => {
     try {
       if (isDesktop) {
-        const [loadedSettings, gpuInfo, storedCredentials] = await Promise.all([
+        const [loadedSettings, gpuInfo, storedCredentials, remoteAccess] = await Promise.all([
           invoke("get_app_settings"),
           invoke("get_gpu_info"),
           invoke("list_credentials"),
+          invoke("get_remote_access"),
         ]);
         setSettings(loadedSettings);
         setGpu(gpuInfo);
         setCredentials(storedCredentials ?? []);
+        if (remoteAccess) {
+          setRemote(remoteAccess);
+          setRemotePort(String(remoteAccess.port));
+        }
       } else {
         setCredentials(await loadCredentials());
       }
@@ -102,7 +116,13 @@ export function SettingsScreen() {
 
   async function restartWorker() {
     try {
-      await invoke("restart_worker");
+      // Desktop kills the worker child directly via Tauri; a remote admin restarts it
+      // over REST (epic 4484 story 12), which signals the desktop supervisor to respawn.
+      if (isDesktop) {
+        await invoke("restart_worker");
+      } else {
+        await apiFetch("/api/v1/worker/restart", serverToken(), { method: "POST" });
+      }
       setStatus("Restarting the inference worker…");
     } catch (error) {
       setStatus(String(error));
@@ -115,6 +135,60 @@ export function SettingsScreen() {
       window.location.reload();
     } catch (error) {
       setStatus(String(error));
+    }
+  }
+
+  // --- Remote access (LAN) handlers (epic 4484 story 4) ---
+  async function saveRemotePassword() {
+    try {
+      const updated = await invoke("set_remote_access_password", { password: remotePassword });
+      setRemote(updated);
+      setRemotePassword("");
+      setStatus("Remote access password saved.");
+    } catch (error) {
+      setStatus(String(error));
+    }
+  }
+
+  async function clearRemotePassword() {
+    try {
+      const updated = await invoke("clear_remote_access_password");
+      setRemote(updated);
+      setStatus("Password cleared — remote access disabled.");
+    } catch (error) {
+      setStatus(String(error));
+    }
+  }
+
+  async function applyRemoteAccess(enabled) {
+    const port = Number.parseInt(remotePort, 10);
+    if (!Number.isInteger(port) || port < 1024 || port > 65535) {
+      setStatus("Choose a port between 1024 and 65535.");
+      return;
+    }
+    try {
+      const updated = await invoke("set_remote_access", { enabled, port });
+      setRemote(updated);
+      setRemotePort(String(updated.port));
+      setStatus(
+        enabled
+          ? "Remote access enabled — restart SceneWorks to apply."
+          : "Remote access disabled — restart SceneWorks to apply.",
+      );
+    } catch (error) {
+      setStatus(String(error));
+    }
+  }
+
+  async function copyRemoteUrl() {
+    if (!remote?.url) {
+      return;
+    }
+    try {
+      await navigator.clipboard.writeText(remote.url);
+      setStatus(`Copied ${remote.url}`);
+    } catch {
+      setStatus("Couldn't copy to clipboard.");
     }
   }
 
@@ -136,6 +210,121 @@ export function SettingsScreen() {
               Reveal in {gpu?.platform === "windows" ? "Explorer" : "Finder"}
             </button>
           </div>
+        </section>
+      ) : null}
+
+      {isDesktop && remote ? (
+        <section className="settings-card">
+          <h3>Remote access (LAN)</h3>
+          <p className="settings-muted">
+            Let another device on your local network use SceneWorks in a browser, with
+            generation running on this computer. Off by default; protected by a password
+            you set.
+          </p>
+          <p className="settings-value">
+            {remote.enabled ? "Enabled" : "Disabled"}
+            {remote.enabled && remote.url ? ` · ${remote.url}` : ""}
+          </p>
+
+          <div className="settings-actions settings-credential-form">
+            <input
+              type="password"
+              placeholder={remote.passwordSet ? "Change password" : "Set a password"}
+              value={remotePassword}
+              onChange={(event) => setRemotePassword(event.target.value)}
+              aria-label="Remote access password"
+            />
+            <button
+              type="button"
+              onClick={saveRemotePassword}
+              disabled={!remotePassword.trim()}
+            >
+              {remote.passwordSet ? "Change password" : "Set password"}
+            </button>
+            {remote.passwordSet ? (
+              <button type="button" onClick={clearRemotePassword}>
+                Clear password
+              </button>
+            ) : null}
+          </div>
+          <p className="settings-muted">
+            {remote.passwordSet
+              ? "A password is set. Remote browsers must enter it to connect."
+              : "Set a password before enabling remote access."}
+          </p>
+
+          <div className="settings-actions">
+            <label htmlFor="remote-port">Port</label>
+            <input
+              id="remote-port"
+              type="number"
+              min="1024"
+              max="65535"
+              value={remotePort}
+              onChange={(event) => setRemotePort(event.target.value)}
+              aria-label="Remote access port"
+            />
+            {remote.enabled ? (
+              <button type="button" onClick={() => applyRemoteAccess(false)}>
+                Disable remote access
+              </button>
+            ) : (
+              <button
+                type="button"
+                onClick={() => applyRemoteAccess(true)}
+                disabled={!remote.passwordSet}
+              >
+                Enable remote access
+              </button>
+            )}
+            {remote.url ? (
+              <button type="button" onClick={copyRemoteUrl}>
+                Copy URL
+              </button>
+            ) : null}
+          </div>
+
+          {remote.url ? (
+            <p className="settings-muted">
+              Open <code>{remote.url}</code> on another device on this network.
+              {remote.lanCandidates && remote.lanCandidates.length > 1
+                ? ` Other addresses: ${remote.lanCandidates.slice(1).join(", ")}.`
+                : ""}
+            </p>
+          ) : (
+            <p className="settings-muted">
+              Couldn’t determine this computer’s LAN address — check your network
+              connection.
+            </p>
+          )}
+
+          {/* Security note + platform firewall guidance (story 11). */}
+          <p className="settings-help">
+            Trusted local networks only. Traffic uses plain HTTP, so the password and
+            your content travel unencrypted on the LAN — do not port-forward this or
+            expose it to the public internet. The URL only works for devices on the same
+            network.
+          </p>
+          {remote.enabled ? (
+            remote.platform === "windows" ? (
+              <p className="settings-help">
+                The first time SceneWorks binds the network port, Windows shows a
+                “Windows Security Alert”. Allow SceneWorks on <strong>Private</strong>{" "}
+                networks (not Public), or remote devices can’t connect. To change it
+                later: Windows Security → Firewall &amp; network protection → Allow an
+                app through firewall.
+              </p>
+            ) : (
+              <p className="settings-help">
+                The first time SceneWorks binds the network port, macOS may ask to
+                “allow incoming connections” — click Allow. To change it later: System
+                Settings → Network → Firewall.
+              </p>
+            )
+          ) : null}
+          <p className="settings-muted">
+            Changing these settings takes effect after you restart SceneWorks.
+          </p>
         </section>
       ) : null}
 
@@ -238,16 +427,16 @@ export function SettingsScreen() {
         </section>
       ) : null}
 
-      {isDesktop ? (
-        <section className="settings-card">
-          <h3>Inference worker</h3>
-          <div className="settings-actions">
-            <button type="button" onClick={restartWorker}>
-              Restart worker
-            </button>
-          </div>
-        </section>
-      ) : null}
+      {/* Available in both modes: desktop restarts via Tauri, a remote admin via REST
+          (epic 4484 story 12). */}
+      <section className="settings-card">
+        <h3>Inference worker</h3>
+        <div className="settings-actions">
+          <button type="button" onClick={restartWorker}>
+            Restart worker
+          </button>
+        </div>
+      </section>
 
       {isDesktop ? (
         <section className="settings-card">

@@ -6,10 +6,10 @@ use std::path::PathBuf;
 use std::process::Command;
 
 use serde::{Deserialize, Serialize};
-use tauri::{AppHandle, Manager};
+use tauri::AppHandle;
 use tauri_plugin_dialog::DialogExt;
 
-use crate::setup::{app_support_dir, default_data_dir, shared_huggingface_home, Managed};
+use crate::setup::{app_support_dir, default_data_dir, shared_huggingface_home};
 
 const KEYRING_SERVICE: &str = "SceneWorks";
 /// Pre-migration account that held the single Hugging Face token. Retained only so
@@ -20,6 +20,16 @@ const KEYRING_SERVICE: &str = "SceneWorks";
 const HF_TOKEN_ACCOUNT: &str = "huggingface_token";
 /// Host of the migrated Hugging Face credential.
 const HF_HOST: &str = "huggingface.co";
+/// Keychain account for the LAN remote-access password (epic 4484, story 1). The
+/// password the user sets to gate LAN access is stored as a secret here — never in
+/// `settings.json`, which holds only the `remote_password_set` boolean. Resolves to
+/// macOS Keychain / Windows Credential Manager via the same `keyring::Entry` path as
+/// the download credentials above. Read only when the user opts into LAN mode, so a
+/// default (LAN-off) install never touches the keychain for it.
+const REMOTE_PASSWORD_ACCOUNT: &str = "remote-access-password";
+/// Suggested default LAN port the Settings UI pre-fills the first time remote access
+/// is enabled (story 4). Kept here so the launcher and UI agree on the suggestion.
+pub const DEFAULT_REMOTE_PORT: u16 = 8787;
 
 /// How a stored credential is attached to a download request for its host.
 #[derive(Default, Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -153,6 +163,23 @@ pub struct AppSettings {
     /// host/label/scheme so the UI can enumerate them.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub credentials: Vec<CredentialMeta>,
+    /// LAN remote-access master switch (epic 4484). OFF by default: the API sidecar
+    /// binds loopback-only on a dynamic port exactly as before. When ON *and* a
+    /// password is set, the launcher binds `0.0.0.0:<remote_port>` with the password
+    /// as the API access token so other devices on the LAN can reach the host.
+    #[serde(default)]
+    pub remote_access_enabled: bool,
+    /// Fixed port for LAN remote access. `None` until the user picks one; the UI
+    /// pre-fills [`DEFAULT_REMOTE_PORT`] (8787) the first time remote access is
+    /// enabled. Only consulted when `remote_access_enabled`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub remote_port: Option<u16>,
+    /// Whether a LAN password secret is recorded in the OS keychain. Non-secret
+    /// metadata (the password itself never lands in `settings.json`); gates the
+    /// keychain read so a no-password install never touches it (mirrors the HF
+    /// `credentials` gate, sc-5891). LAN cannot be enabled while this is false.
+    #[serde(default)]
+    pub remote_password_set: bool,
 }
 
 fn settings_path() -> PathBuf {
@@ -251,6 +278,186 @@ pub fn credentials_env_json() -> Option<String> {
     } else {
         serde_json::to_string(&serde_json::Value::Object(map)).ok()
     }
+}
+
+// ---------------------------------------------------------------------------
+// LAN remote-access (epic 4484, story 1)
+// ---------------------------------------------------------------------------
+
+/// Whether a LAN password is recorded, from the non-secret `settings.json`
+/// metadata. The keychain gate for [`read_remote_password`]: a no-password install
+/// must short-circuit here so it never constructs a `keyring::Entry` / prompts —
+/// the same pattern as `hf_credential_recorded` (sc-5891).
+fn remote_password_recorded(settings: &AppSettings) -> bool {
+    settings.remote_password_set
+}
+
+/// Apply a password set/clear to the non-secret metadata. Pure (no keychain/disk)
+/// so the metadata transitions — including the fail-closed disable on clear — are
+/// unit-tested; the keychain write/delete is done by the set/clear wrappers around
+/// this. Clearing the password also disables LAN remote access: with no password the
+/// launcher must never bind non-loopback (epic 4484 security constraint, story 3).
+fn mark_remote_password(settings: &mut AppSettings, present: bool) {
+    settings.remote_password_set = present;
+    if !present {
+        settings.remote_access_enabled = false;
+    }
+}
+
+/// The LAN remote-access password from the OS keychain, used as the API access token
+/// when the launcher binds non-loopback (story 2). Gated on the non-secret
+/// `settings.json` metadata first: if no password is recorded, returns `None`
+/// *without constructing a `keyring::Entry` or calling `get_password()`*, so a
+/// LAN-off install never touches the OS keychain at launch (mirrors `read_hf_token`,
+/// sc-5891). Empty/whitespace secrets are treated as absent.
+pub fn read_remote_password() -> Option<String> {
+    if !remote_password_recorded(&load_settings()) {
+        return None;
+    }
+    keyring::Entry::new(KEYRING_SERVICE, REMOTE_PASSWORD_ACCOUNT)
+        .ok()
+        .and_then(|entry| entry.get_password().ok())
+        .map(|secret| secret.trim().to_owned())
+        .filter(|secret| !secret.is_empty())
+}
+
+/// Store (or overwrite) the LAN password secret in the OS keychain and record the
+/// `remote_password_set` metadata. The password is write-only — it is never read back
+/// to the UI (only used as the sidecar access token). Rejects an empty password so a
+/// LAN bind can never end up with an empty token (story 3 backstop).
+pub fn set_remote_password(password: &str) -> Result<(), String> {
+    let password = password.trim();
+    if password.is_empty() {
+        return Err("A password is required.".to_owned());
+    }
+    keyring::Entry::new(KEYRING_SERVICE, REMOTE_PASSWORD_ACCOUNT)
+        .map_err(|error| error.to_string())?
+        .set_password(password)
+        .map_err(|error| error.to_string())?;
+    let mut settings = load_settings();
+    mark_remote_password(&mut settings, true);
+    save_settings(&settings)
+}
+
+/// Remove the LAN password from the keychain and clear its metadata, which also
+/// disables remote access (fail-closed: no password ⇒ no non-loopback bind). Safe to
+/// call when no password is stored.
+pub fn clear_remote_password() -> Result<(), String> {
+    if let Ok(entry) = keyring::Entry::new(KEYRING_SERVICE, REMOTE_PASSWORD_ACCOUNT) {
+        match entry.delete_credential() {
+            Ok(()) | Err(keyring::Error::NoEntry) => {}
+            Err(error) => return Err(error.to_string()),
+        }
+    }
+    let mut settings = load_settings();
+    mark_remote_password(&mut settings, false);
+    save_settings(&settings)
+}
+
+/// Host OS the desktop shell is running on, so the Settings UI can show the
+/// platform-correct firewall guidance (story 11): macOS firewall prompt vs Windows
+/// Defender alert.
+fn host_platform() -> &'static str {
+    #[cfg(target_os = "macos")]
+    {
+        "macos"
+    }
+    #[cfg(target_os = "windows")]
+    {
+        "windows"
+    }
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        "linux"
+    }
+}
+
+/// Snapshot of the LAN remote-access state for the Settings UI (story 4). Carries no
+/// secret — only whether a password is set, plus the computed URL/candidates.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RemoteAccessStatus {
+    /// Whether LAN remote access is enabled (takes effect on next launch).
+    enabled: bool,
+    /// Configured port, or the [`DEFAULT_REMOTE_PORT`] suggestion when unset, so the
+    /// UI can pre-fill the input.
+    port: u16,
+    /// Whether a password secret is recorded (gates enabling; never the value).
+    password_set: bool,
+    /// Best-guess LAN IPv4 for the URL, or `None` if none could be determined.
+    lan_address: Option<String>,
+    /// All private LAN candidates (so the UI could offer a picker if the guess is off).
+    lan_candidates: Vec<String>,
+    /// `http://<lan_address>:<port>` when an address is known; `None` otherwise.
+    url: Option<String>,
+    /// The suggested default port, for the UI's initial value / reset.
+    default_port: u16,
+    /// Host OS (`macos`/`windows`/`linux`) for platform-conditional firewall copy.
+    platform: &'static str,
+}
+
+/// Build the current remote-access snapshot from persisted settings + a fresh LAN
+/// address probe. Never reads the password secret (only its `*_set` metadata).
+fn remote_access_status() -> RemoteAccessStatus {
+    let settings = load_settings();
+    let port = settings.remote_port.unwrap_or(DEFAULT_REMOTE_PORT);
+    let lan = crate::net::lan_addresses();
+    let url = lan.primary.as_ref().map(|ip| format!("http://{ip}:{port}"));
+    RemoteAccessStatus {
+        enabled: settings.remote_access_enabled,
+        port,
+        password_set: settings.remote_password_set,
+        lan_address: lan.primary,
+        lan_candidates: lan.candidates,
+        url,
+        default_port: DEFAULT_REMOTE_PORT,
+        platform: host_platform(),
+    }
+}
+
+/// Current LAN remote-access status for the Settings screen (story 4).
+#[tauri::command]
+pub fn get_remote_access() -> RemoteAccessStatus {
+    remote_access_status()
+}
+
+/// Enable/disable LAN remote access and set the port (story 4). Fail-closed: enabling
+/// is rejected unless a password is already set (mirrors the launcher guard, story 3),
+/// and a privileged/low port the app can't bind is rejected up front rather than
+/// bricking startup. The change takes effect on the next launch (sidecar relaunch).
+#[tauri::command]
+pub fn set_remote_access(enabled: bool, port: u16) -> Result<RemoteAccessStatus, String> {
+    let mut settings = load_settings();
+    if enabled && !settings.remote_password_set {
+        return Err("Set a password before enabling remote access.".to_owned());
+    }
+    if enabled && port < 1024 {
+        return Err(
+            "Choose a port between 1024 and 65535 — lower ports need administrator privileges."
+                .to_owned(),
+        );
+    }
+    settings.remote_access_enabled = enabled;
+    // Persist a valid port choice even while disabled, so it's remembered for next time.
+    if port >= 1024 {
+        settings.remote_port = Some(port);
+    }
+    save_settings(&settings)?;
+    Ok(remote_access_status())
+}
+
+/// Set/change the LAN password (story 4). Stored in the OS keychain; never echoed back.
+#[tauri::command]
+pub fn set_remote_access_password(password: String) -> Result<RemoteAccessStatus, String> {
+    set_remote_password(&password)?;
+    Ok(remote_access_status())
+}
+
+/// Clear the LAN password, which also disables remote access (fail-closed, story 3).
+#[tauri::command]
+pub fn clear_remote_access_password() -> Result<RemoteAccessStatus, String> {
+    clear_remote_password()?;
+    Ok(remote_access_status())
 }
 
 #[derive(Serialize)]
@@ -523,27 +730,9 @@ pub fn delete_credential(app: AppHandle, host: String) -> Result<Vec<CredentialS
 #[tauri::command]
 pub fn restart_worker(app: AppHandle) {
     // Kill the current GPU worker child; its supervisor respawns it. macOS runs the MLX
-    // worker; Windows runs the candle worker (the Python worker was retired off-Mac, sc-5563).
-    #[cfg(target_os = "macos")]
-    let child = app
-        .state::<Managed>()
-        .mlx_worker
-        .lock()
-        .expect("mlx worker lock")
-        .take();
-    #[cfg(target_os = "windows")]
-    let child = app
-        .state::<Managed>()
-        .candle_worker
-        .lock()
-        .expect("candle worker lock")
-        .take();
-    #[cfg(any(target_os = "macos", target_os = "windows"))]
-    if let Some(child) = child {
-        let _ = child.kill();
-    }
-    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
-    let _ = app;
+    // worker; Windows runs the candle worker (the Python worker was retired off-Mac,
+    // sc-5563). Shared with the remote REST restart (epic 4484 story 12).
+    crate::setup::restart_gpu_worker(&app);
 }
 
 #[tauri::command]
@@ -683,5 +872,66 @@ mod tests {
         let settings = AppSettings::default();
         assert!(!hf_credential_recorded(&settings));
         assert!(settings.credentials.is_empty());
+    }
+
+    /// epic 4484 story 1: LAN remote access is OFF by default with no port and no
+    /// recorded password, and a default `settings.json` carries none of the new keys
+    /// it doesn't need (so an untouched install reads exactly as before).
+    #[test]
+    fn remote_access_defaults_off() {
+        let settings = AppSettings::default();
+        assert!(!settings.remote_access_enabled);
+        assert_eq!(settings.remote_port, None);
+        assert!(!settings.remote_password_set);
+        // The keychain gate short-circuits with no password recorded.
+        assert!(!remote_password_recorded(&settings));
+        // remote_port is Option → skipped when None; the bools default to false so
+        // they round-trip but add no behavior.
+        let json = serde_json::to_string(&settings).unwrap();
+        assert!(!json.contains("remotePort"));
+    }
+
+    /// The new fields round-trip through serde with the expected camelCase keys.
+    #[test]
+    fn remote_access_settings_round_trip() {
+        let settings = AppSettings {
+            remote_access_enabled: true,
+            remote_port: Some(DEFAULT_REMOTE_PORT),
+            remote_password_set: true,
+            ..AppSettings::default()
+        };
+        let json = serde_json::to_string(&settings).unwrap();
+        assert!(json.contains("remoteAccessEnabled"));
+        assert!(json.contains("remotePort"));
+        assert!(json.contains("remotePasswordSet"));
+        let back: AppSettings = serde_json::from_str(&json).unwrap();
+        assert!(back.remote_access_enabled);
+        assert_eq!(back.remote_port, Some(DEFAULT_REMOTE_PORT));
+        assert!(back.remote_password_set);
+    }
+
+    /// Setting a password records the metadata; clearing it both drops the metadata
+    /// AND disables remote access (fail-closed: no password ⇒ no LAN bind). This is
+    /// the pure metadata half of `set_remote_password`/`clear_remote_password` — the
+    /// keychain write/delete is exercised on real hardware (story 13).
+    #[test]
+    fn mark_remote_password_sets_then_clears_and_disables() {
+        let mut settings = AppSettings {
+            remote_access_enabled: true,
+            remote_port: Some(DEFAULT_REMOTE_PORT),
+            ..AppSettings::default()
+        };
+        mark_remote_password(&mut settings, true);
+        assert!(settings.remote_password_set);
+        assert!(remote_password_recorded(&settings));
+        // Still enabled — setting a password doesn't toggle the switch.
+        assert!(settings.remote_access_enabled);
+        // Clearing the password forces remote access off.
+        mark_remote_password(&mut settings, false);
+        assert!(!settings.remote_password_set);
+        assert!(!remote_password_recorded(&settings));
+        assert!(!settings.remote_access_enabled);
+        // Port choice is preserved across a clear (the user's preference persists).
+        assert_eq!(settings.remote_port, Some(DEFAULT_REMOTE_PORT));
     }
 }

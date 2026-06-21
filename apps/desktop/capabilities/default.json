@@ -22,6 +22,11 @@
     "allow-set-credential",
     "allow-delete-credential",
     "allow-restart-worker",
-    "allow-get-gpu-info"
+    "allow-get-gpu-info",
+    "allow-get-remote-access",
+    "allow-set-remote-access",
+    "allow-set-remote-access-password",
+    "allow-clear-remote-access-password",
+    "allow-get-lan-address"
   ]
 }

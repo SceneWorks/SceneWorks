@@ -26,6 +26,14 @@ pub mod video_request;
 pub const API_PREFIX: &str = "/api/v1";
 pub const HEALTH_ROUTE: &str = "/health";
 
+/// Stdout sentinel for remote worker-restart (epic 4484 story 12). The API process
+/// doesn't supervise the desktop's GPU worker, so `POST /api/v1/worker/restart` prints
+/// this exact line to stdout; the desktop shell — which already reads the API sidecar's
+/// stdout — matches it and performs the same kill-and-respawn as its local "Restart
+/// worker" button. Shared here so the emitter (rust-api) and matcher (desktop) can
+/// never drift. Deliberately unique/unlikely to appear in ordinary log output.
+pub const WORKER_RESTART_SENTINEL: &str = "__SCENEWORKS_WORKER_RESTART_REQUESTED__";
+
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub struct HealthContract {
     route: &'static str,

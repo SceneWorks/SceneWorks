@@ -17,6 +17,12 @@ fn main() {
             "delete_credential",
             "restart_worker",
             "get_gpu_info",
+            // LAN remote access (epic 4484, stories 4/5).
+            "get_remote_access",
+            "set_remote_access",
+            "set_remote_access_password",
+            "clear_remote_access_password",
+            "get_lan_address",
         ]),
     ))
     .expect("failed to run Tauri build script");

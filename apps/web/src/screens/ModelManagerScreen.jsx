@@ -1,10 +1,12 @@
 import React, { useEffect, useState } from "react";
 import { WorkerProgressCard } from "../components/WorkerProgressCard.jsx";
 import { terminalStatuses } from "../constants.js";
-import { hasPresentCredential, loadCredentials } from "../credentials.js";
+import { hasPresentCredential, loadCredentials, serverToken } from "../credentials.js";
 import { extractFamilies, modelLoraFamilies, presetLoraId, presetLoras } from "../presetUtils.js";
 import { useAppContext } from "../context/AppContext.js";
 import { DEFAULT_MAC_CAPABILITIES, macModelBlock } from "../macGating.js";
+import { apiFetch } from "../api.js";
+import { isDesktop, tauriInvoke } from "../runtime.js";
 
 // Wan A14B is a two-expert mixture; its LoRAs come as a high/low-noise pair. These
 // base models accept the optional low-noise expert upload (sc-1991). The 5B model
@@ -280,9 +282,10 @@ export function ModelManagerScreen() {
   const [modelFileInputKey, setModelFileInputKey] = useState(0);
   const [deletingItem, setDeletingItem] = useState("");
   const [deleteMessage, setDeleteMessage] = useState({ tone: "neutral", text: "" });
-  // Desktop only: read the host's unified memory so MLX models can be gated against
-  // their memory tier. Browser/Docker builds have no Tauri bridge and skip this.
-  const isDesktop = typeof window !== "undefined" && Boolean(window.__TAURI__);
+  // Read the host's memory so MLX models can be gated against their memory tier.
+  // Desktop reads it from the Tauri GPU probe; a remote LAN browser reads the
+  // auth-protected REST signal (epic 4484 story 9). `isDesktop`/`tauriInvoke` come
+  // from the unified runtime helper (story 6).
   const [unifiedMemoryGb, setUnifiedMemoryGb] = useState(null);
   // Gated-model credential presence (sc-1898): only fetched when the catalog has a
   // gated model, so non-gated deployments make no extra credential request.
@@ -319,22 +322,37 @@ export function ModelManagerScreen() {
   }, [importForm.family]);
 
   useEffect(() => {
-    if (!isDesktop) {
-      return undefined;
-    }
     let cancelled = false;
-    window.__TAURI__.core
-      .invoke("get_gpu_info")
-      .then((info) => {
-        if (!cancelled && info && typeof info.unifiedMemoryMb === "number") {
-          setUnifiedMemoryGb(info.unifiedMemoryMb / 1024);
-        }
-      })
-      .catch(() => {});
+    if (isDesktop) {
+      // Desktop: read unified memory straight from the Tauri GPU probe.
+      tauriInvoke("get_gpu_info")
+        .then((info) => {
+          if (!cancelled && info && typeof info.unifiedMemoryMb === "number") {
+            setUnifiedMemoryGb(info.unifiedMemoryMb / 1024);
+          }
+        })
+        .catch(() => {});
+    } else {
+      // Remote LAN browser (epic 4484 story 9): the Tauri probe is unavailable, so
+      // read the host's memory from the auth-protected REST signal derived from the
+      // registered GPU worker (unified memory on macOS / GPU VRAM on Windows). Without
+      // this, memory gating would silently no-op for remote users.
+      apiFetch("/api/v1/host-capabilities", serverToken())
+        .then((caps) => {
+          if (cancelled || !caps) {
+            return;
+          }
+          const gb = caps.unifiedMemoryGb ?? caps.gpuMemoryGb;
+          if (typeof gb === "number") {
+            setUnifiedMemoryGb(gb);
+          }
+        })
+        .catch(() => {});
+    }
     return () => {
       cancelled = true;
     };
-  }, [isDesktop]);
+  }, []);
 
   useEffect(() => {
     if (!hasGatedModel) {
