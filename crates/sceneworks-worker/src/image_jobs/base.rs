@@ -806,6 +806,32 @@ pub(crate) fn normalize_sampling_knob(
     None
 }
 
+/// Read the raw per-generation sampler / scheduler / schedule-shift knobs from a job's `advanced`
+/// block (the 1753 front-half carrier). `sampler` / `scheduler` strip the `"default"` sentinel + blanks
+/// to `None`, so the engine default — N1's guaranteed no-op — is the ABSENCE of a name, not a magic
+/// string; `scheduler_shift` accepts the `schedulerShift` (or legacy `timestepShift`) key as a number or
+/// numeric string. Shared by the MLX (`generate_stream`) + candle (`generate_candle_stream`) image lanes
+/// — the result is then realvisxl-forced (the lightning checkpoint) and N3-guarded via
+/// [`normalize_sampling_knob`]. Returns `(sampler, scheduler, scheduler_shift)`.
+pub(crate) fn read_advanced_sampling_knobs(
+    advanced: &JsonObject,
+) -> (Option<String>, Option<String>, Option<f32>) {
+    let name = |key: &str| {
+        advanced
+            .get(key)
+            .and_then(|value| value.as_str())
+            .map(str::trim)
+            .filter(|value| !value.is_empty() && *value != "default")
+            .map(str::to_owned)
+    };
+    let scheduler_shift = advanced
+        .get("schedulerShift")
+        .or_else(|| advanced.get("timestepShift"))
+        .and_then(|value| value.as_f64().or_else(|| value.as_str()?.trim().parse().ok()))
+        .map(|value| value as f32);
+    (name("sampler"), name("scheduler"), scheduler_shift)
+}
+
 #[cfg(test)]
 mod sampling_knob_tests {
     use super::*;
@@ -852,6 +878,56 @@ mod sampling_knob_tests {
             normalize_sampling_knob(None, &advertised, "scheduler", "m", "j", "mlx"),
             None
         );
+    }
+
+    fn advanced(value: serde_json::Value) -> JsonObject {
+        value.as_object().expect("object").clone()
+    }
+
+    // N1 (epic 7114): the guaranteed no-op default. A job with no sampling knobs — or the explicit
+    // `"default"` sentinel the UI sends for "Model default" — must resolve to ALL `None`, i.e. the engine
+    // runs its existing native path byte-for-byte. This guards the worker read against a future change
+    // that silently injects a non-default sampler onto the default path.
+    #[test]
+    fn n1_default_advanced_is_a_no_op() {
+        assert_eq!(
+            read_advanced_sampling_knobs(&advanced(serde_json::json!({}))),
+            (None, None, None)
+        );
+        assert_eq!(
+            read_advanced_sampling_knobs(&advanced(serde_json::json!({
+                "sampler": "default",
+                "scheduler": "default",
+                "steps": 30
+            }))),
+            (None, None, None)
+        );
+        // Blank / whitespace-only names are also treated as the default (no name).
+        assert_eq!(
+            read_advanced_sampling_knobs(&advanced(serde_json::json!({"sampler": "  ", "scheduler": ""}))),
+            (None, None, None)
+        );
+    }
+
+    #[test]
+    fn read_passes_real_names_and_shift_through() {
+        assert_eq!(
+            read_advanced_sampling_knobs(&advanced(serde_json::json!({
+                "sampler": "dpmpp_2m",
+                "scheduler": "sgm_uniform",
+                "schedulerShift": 2.5
+            }))),
+            (
+                Some("dpmpp_2m".to_owned()),
+                Some("sgm_uniform".to_owned()),
+                Some(2.5)
+            )
+        );
+        // schedulerShift accepts a numeric string and the legacy `timestepShift` key.
+        let (_, _, shift) = read_advanced_sampling_knobs(&advanced(serde_json::json!({
+            "timestepShift": "1.5"
+        })));
+        assert_eq!(shift, Some(1.5));
     }
 }
 
@@ -1347,13 +1423,7 @@ async fn generate_stream(
     let (quant, quant_bits) = resolve_quant(request);
     let steps = resolve_steps(request, &model);
     let guidance = resolve_guidance(request, &model);
-    let sampler = request
-        .advanced
-        .get("sampler")
-        .and_then(|value| value.as_str())
-        .map(str::trim)
-        .filter(|value| !value.is_empty() && *value != "default")
-        .map(str::to_owned);
+    let (sampler, scheduler, scheduler_shift) = read_advanced_sampling_knobs(&request.advanced);
     // RealVisXL Lightning (sc-6075): a standalone few-step *distilled checkpoint* (the
     // SDXL-Lightning distillation is baked into the weights — no acceleration LoRA). It must run
     // on the engine's `lightning` (Euler-trailing) few-step schedule, not the 30-step
@@ -1365,23 +1435,6 @@ async fn generate_stream(
     } else {
         sampler
     };
-    let scheduler = request
-        .advanced
-        .get("scheduler")
-        .and_then(|value| value.as_str())
-        .map(str::trim)
-        .filter(|value| !value.is_empty() && *value != "default")
-        .map(str::to_owned);
-    let scheduler_shift = request
-        .advanced
-        .get("schedulerShift")
-        .or_else(|| request.advanced.get("timestepShift"))
-        .and_then(|value| {
-            value
-                .as_f64()
-                .or_else(|| value.as_str()?.trim().parse().ok())
-        })
-        .map(|value| value as f32);
     // N3 (epic 7114): drop a sampler/scheduler the linked engine descriptor doesn't advertise back to
     // the engine default + emit an event, instead of letting `validate_request` hard-fail the whole
     // generation over a sampling knob (a stale recipe, manifest drift, or a per-backend gap). The forced
@@ -1881,31 +1934,12 @@ async fn generate_candle_stream(
     // P4, so most families advertise only their family default today) is dropped back to the engine default
     // + a `sampling_knob_unsupported` event, never a hard-fail. The curated knobs light up per-family with
     // zero worker change as the candle engines are adopted.
-    let sampler = request
-        .advanced
-        .get("sampler")
-        .and_then(|value| value.as_str())
-        .map(str::trim)
-        .filter(|value| !value.is_empty() && *value != "default")
-        .map(str::to_owned);
+    let (sampler, scheduler, scheduler_shift) = read_advanced_sampling_knobs(&request.advanced);
     let sampler = if request.model == "realvisxl_lightning" {
         Some("lightning".to_owned())
     } else {
         sampler
     };
-    let scheduler = request
-        .advanced
-        .get("scheduler")
-        .and_then(|value| value.as_str())
-        .map(str::trim)
-        .filter(|value| !value.is_empty() && *value != "default")
-        .map(str::to_owned);
-    let scheduler_shift = request
-        .advanced
-        .get("schedulerShift")
-        .or_else(|| request.advanced.get("timestepShift"))
-        .and_then(|value| value.as_f64().or_else(|| value.as_str()?.trim().parse().ok()))
-        .map(|value| value as f32);
     let caps = &model.descriptor.capabilities;
     let sampler = normalize_sampling_knob(
         sampler,
