@@ -638,8 +638,9 @@ mod tests {
     // The builtin manifest's advertised sampler/scheduler menu for a model MUST be a subset of what
     // the linked engine descriptor actually advertises on the ACTIVE backend, or the worker N3-falls
     // the name back to the default (sc-7127) — i.e. the UI offers a knob the engine silently ignores.
-    // This test parses the embedded manifest and, for every image model with a linked descriptor,
-    // asserts the per-backend-effective menu (base `limits` overridden by `<backend>.limits`) is
+    // This test parses the embedded manifest and, for every image model (via `mlx_model` / MODEL_TABLE)
+    // AND every video model (via `video_descriptor`, sc-7296) with a linked descriptor on the active
+    // backend, asserts the per-backend-effective menu (base `limits` overridden by `<backend>.limits`) is
     // honoured by the descriptor. It checks `mlx` on macOS (where the MLX provider crates are linked)
     // and `candle` on the `backend-candle` build — whichever registry is active — so each backend's
     // truthfulness is enforced on its own lane. `"default"` is the engine-default sentinel, always allowed.
@@ -678,6 +679,46 @@ mod tests {
         model.get(backend).and_then(pick).or_else(|| pick(model))
     }
 
+    /// The engine registry id(s) a video manifest model resolves to, across backends — the union of
+    /// the mlx maps (`wan_engine_id` / `ltx_engine_id` / `svd_engine_id` + the native VACE-Fun
+    /// dispatch) and the candle map (`candle_video_engine_id`) in `video_jobs`. LTX is backend-split
+    /// (`ltx_2_3` on mlx, `ltx_2_3_distilled` on candle) and `ltx_2_3_eros` shares the base engine id
+    /// per backend; the resolver lists both and picks whichever the active registry actually holds.
+    /// `wan_2_2_vace_fun_14b` is mlx-only (candle has no VACE engine), so it resolves to `None` on the
+    /// candle lane and is skipped there.
+    #[cfg(any(
+        target_os = "macos",
+        all(not(target_os = "macos"), feature = "backend-candle")
+    ))]
+    fn video_engine_ids(sceneworks_id: &str) -> &'static [&'static str] {
+        match sceneworks_id {
+            "wan_2_2" => &["wan2_2_ti2v_5b"],
+            "wan_2_2_t2v_14b" => &["wan2_2_t2v_14b"],
+            "wan_2_2_i2v_14b" => &["wan2_2_i2v_14b"],
+            "wan_2_2_vace_fun_14b" => &["wan2_2_vace_fun_14b"],
+            "svd" => &["svd_xt"],
+            "ltx_2_3" | "ltx_2_3_eros" => &["ltx_2_3", "ltx_2_3_distilled"],
+            _ => &[],
+        }
+    }
+
+    /// The linked gen-core descriptor for a video manifest model on the ACTIVE backend, or `None`
+    /// when no provider crate registered its engine id here. Mirrors [`mlx_model`]'s registry join
+    /// for the video ids that live outside [`MODEL_TABLE`] (the image path).
+    #[cfg(any(
+        target_os = "macos",
+        all(not(target_os = "macos"), feature = "backend-candle")
+    ))]
+    fn video_descriptor(sceneworks_id: &str) -> Option<gen_core::ModelDescriptor> {
+        let ids = video_engine_ids(sceneworks_id);
+        if ids.is_empty() {
+            return None;
+        }
+        gen_core::registry::generators()
+            .map(|reg| (reg.descriptor)())
+            .find(|d| ids.contains(&d.id))
+    }
+
     #[cfg(any(
         target_os = "macos",
         all(not(target_os = "macos"), feature = "backend-candle")
@@ -697,12 +738,16 @@ mod tests {
             let Some(id) = model["id"].as_str() else {
                 continue;
             };
-            // Only image models with a linked descriptor (MODEL_TABLE). Video / unlinked models are out
-            // of this guard's scope (their descriptors aren't reached via `mlx_model`).
-            let Some(resolved) = mlx_model(id) else {
+            // Image models resolve via MODEL_TABLE (`mlx_model`); video models via their engine-id
+            // map (`video_descriptor`). A model with no linked descriptor on the active backend is
+            // skipped (e.g. the mlx-only `wan_2_2_vace_fun_14b` on the candle lane).
+            let Some(descriptor) = mlx_model(id)
+                .map(|resolved| resolved.descriptor)
+                .or_else(|| video_descriptor(id))
+            else {
                 continue;
             };
-            let caps = &resolved.descriptor.capabilities;
+            let caps = &descriptor.capabilities;
             for (axis, advertised) in [
                 ("samplers", &caps.samplers),
                 ("schedulers", &caps.schedulers),
@@ -715,7 +760,7 @@ mod tests {
                         if !advertised.contains(&name.as_str()) {
                             violations.push(format!(
                                 "{id}: {backend} {axis} {name:?} not advertised by descriptor {:?} (advertised: {advertised:?})",
-                                resolved.descriptor.id
+                                descriptor.id
                             ));
                         }
                     }
