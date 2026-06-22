@@ -1916,12 +1916,6 @@
         "samplers": ["default", "euler", "euler_ancestral", "heun", "dpmpp_2m", "dpmpp_sde", "uni_pc", "lcm", "ddim"],
         "schedulers": ["default", "normal", "simple", "karras", "exponential", "sgm_uniform", "beta", "ddim_uniform"]
       },
-      "candle": {
-        "limits": {
-          "samplers": ["default"],
-          "schedulers": ["default"]
-        }
-      },
       "loraCompatibility": {
         // Kolors uses an SDXL-style UNet. Advertise only the kolors family so the
         // picker never offers cross-architecture LoRAs (e.g. z-image): an empty
@@ -1992,12 +1986,6 @@
         "count": [1, 2, 4],
         "samplers": ["default", "euler", "euler_ancestral", "heun", "dpmpp_2m", "dpmpp_sde", "uni_pc", "lcm", "ddim"],
         "schedulers": ["default", "normal", "simple", "karras", "exponential", "sgm_uniform", "beta", "ddim_uniform"]
-      },
-      "candle": {
-        "limits": {
-          "samplers": ["default", "ddim"],
-          "schedulers": ["default"]
-        }
       },
       "loraCompatibility": {
         // Declare the real family so the picker only offers sdxl-family LoRAs
@@ -2084,12 +2072,6 @@
         "count": [1, 2, 4],
         "samplers": ["default", "euler", "euler_ancestral", "heun", "dpmpp_2m", "dpmpp_sde", "uni_pc", "lcm", "ddim"],
         "schedulers": ["default", "normal", "simple", "karras", "exponential", "sgm_uniform", "beta", "ddim_uniform"]
-      },
-      "candle": {
-        "limits": {
-          "samplers": ["default", "ddim"],
-          "schedulers": ["default"]
-        }
       },
       "loraCompatibility": {
         // SDXL UNet, so sdxl-family LoRAs apply (per sc-1927 declare the real
