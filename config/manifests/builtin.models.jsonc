@@ -2464,7 +2464,10 @@
         // the square option at 640x640 even though normalized_dimensions would
         // accept larger.
         "resolutions": ["768x512", "512x768", "640x640", "1280x720", "720x1280"],
-        "requiresDimensionsMultipleOf": 32
+        "requiresDimensionsMultipleOf": 32,
+        // Epic 7114 curated sampler menu (sc-7296): both backends' LTX engine advertises the full
+        // curated set (candle also keeps the legacy `rectified-flow` alias). No scheduler axis.
+        "samplers": ["default", "euler", "euler_ancestral", "heun", "dpmpp_2m", "dpmpp_sde", "uni_pc", "lcm", "ddim"]
       },
       "loraCompatibility": {
         "families": ["ltx-video"],
@@ -2569,7 +2572,10 @@
         // See LTX-2.3 note above: squares above 640x640 are out-of-distribution
         // and render black.
         "resolutions": ["768x512", "512x768", "640x640", "1280x720", "720x1280"],
-        "requiresDimensionsMultipleOf": 32
+        "requiresDimensionsMultipleOf": 32,
+        // Epic 7114 curated sampler menu (sc-7296): shares LTX's curated set (same engine id as
+        // base LTX-2.3 per backend). No scheduler axis.
+        "samplers": ["default", "euler", "euler_ancestral", "heun", "dpmpp_2m", "dpmpp_sde", "uni_pc", "lcm", "ddim"]
       },
       "loraCompatibility": {
         "families": ["ltx-video"],
@@ -2650,7 +2656,10 @@
         "recommendedMaxDuration": 4,
         "hardMaxDuration": 4,
         "fps": [6, 7, 8, 10, 12, 25],
-        "resolutions": ["1024x576", "576x1024"]
+        "resolutions": ["1024x576", "576x1024"],
+        // Epic 7114 curated sampler menu (sc-7296): both backends' SVD engine advertises the
+        // full curated set. No scheduler axis. Same menu both backends (no per-backend override).
+        "samplers": ["default", "euler", "euler_ancestral", "heun", "dpmpp_2m", "dpmpp_sde", "uni_pc", "lcm", "ddim"]
       },
       "loraCompatibility": {
         // No SVD LoRA ecosystem (generation-only); declare the family so the
@@ -2717,9 +2726,11 @@
         "hardMaxDuration": 8,
         "fps": [16, 24],
         "resolutions": ["832x480", "1280x720", "720x1280"],
-        // Diffusers WanPipeline (torch backend) supports flow-matching swaps
-        // via apply_sampler. Per-backend MLX override below pins default-only.
-        "samplers": ["default"],
+        // Epic 7114 curated sampler menu (sc-7296). Base = the candle (Windows) Wan engine's
+        // curated set, run over Wan's native flow σ schedule; the macOS mlx override below adds
+        // `dpmpp_2m` (mlx Wan's native FLOW-SNR DPM++2M). No scheduler axis — the flow shift is
+        // the separate `scheduler_shift` knob. The drift guard keeps each ⊆ its engine descriptor.
+        "samplers": ["default", "uni_pc", "euler", "euler_ancestral", "heun", "dpmpp_sde", "ddim"],
         "schedulers": ["default"]
       },
       "loraCompatibility": {
@@ -2755,10 +2766,11 @@
         // converter "wan_ti2v_5b" emits bf16 (Q4/Q8 applied at load, not baked in).
         "minMemoryGb": 45,
         "repo": "SceneWorks/wan2.2-ti2v-5b-mlx",
-        // MLX path is sealed (own ODE solver, no diffusers scheduler) — override
-        // the top-level sampler/scheduler menu to default-only (epic 1753 §14).
+        // macOS curated menu (sc-7296): mlx Wan adopts the unified framework over its native
+        // flow σ schedule, adding `dpmpp_2m` (native FLOW-SNR DPM++2M) on top of the base set.
+        // No scheduler axis (the flow shift is `scheduler_shift`).
         "limits": {
-          "samplers": ["default"],
+          "samplers": ["default", "uni_pc", "euler", "dpmpp_2m", "euler_ancestral", "heun", "dpmpp_sde", "ddim"],
           "schedulers": ["default"]
         }
       },
@@ -2824,9 +2836,10 @@
         "hardMaxDuration": 5,
         "fps": [16],
         "resolutions": ["832x480", "480x832", "1280x720", "720x1280"],
-        // Diffusers WanPipeline (torch backend) supports flow-matching swaps
-        // via apply_sampler. MLX path is default-only — declared on mlx.limits.
-        "samplers": ["default"],
+        // Epic 7114 curated menu (sc-7296). Base = the candle (Windows) A14B engine's curated
+        // set (native `uni_pc`/`euler`); the macOS mlx override below exposes the full curated
+        // fold-in. No scheduler axis (flow shift = `scheduler_shift`).
+        "samplers": ["default", "uni_pc", "euler"],
         "schedulers": ["default"]
       },
       "loraCompatibility": {
@@ -2867,8 +2880,10 @@
         // Lightning LoRA is downloaded on demand by MlxVideoAdapter at generation time.
         "minMemoryGb": 133,
         "repo": "SceneWorks/wan2.2-t2v-a14b-mlx",
+        // macOS curated menu (sc-7296): the full curated fold-in over the A14B native flow σ
+        // schedule. No scheduler axis (flow shift = `scheduler_shift`).
         "limits": {
-          "samplers": ["default"],
+          "samplers": ["default", "uni_pc", "euler", "dpmpp_2m", "euler_ancestral", "heun", "dpmpp_sde", "ddim"],
           "schedulers": ["default"]
         }
       },
@@ -2931,9 +2946,10 @@
         "hardMaxDuration": 5,
         "fps": [16],
         "resolutions": ["832x480", "480x832", "1280x720", "720x1280"],
-        // Diffusers WanPipeline (torch backend) supports flow-matching swaps
-        // via apply_sampler. MLX path is default-only — declared on mlx.limits.
-        "samplers": ["default"],
+        // Epic 7114 curated menu (sc-7296). Base = the candle (Windows) A14B engine's curated
+        // set (native `uni_pc`/`euler`); the macOS mlx override below exposes the full curated
+        // fold-in. No scheduler axis (flow shift = `scheduler_shift`).
+        "samplers": ["default", "uni_pc", "euler"],
         "schedulers": ["default"]
       },
       "loraCompatibility": {
@@ -2972,8 +2988,10 @@
         // (Q4/Q8 at load). Its distill LoRA is applied at run time.
         "minMemoryGb": 133,
         "repo": "SceneWorks/wan2.2-i2v-a14b-mlx",
+        // macOS curated menu (sc-7296): the full curated fold-in over the A14B native flow σ
+        // schedule. No scheduler axis (flow shift = `scheduler_shift`).
         "limits": {
-          "samplers": ["default"],
+          "samplers": ["default", "uni_pc", "euler", "dpmpp_2m", "euler_ancestral", "heun", "dpmpp_sde", "ddim"],
           "schedulers": ["default"]
         }
       },
@@ -3050,9 +3068,10 @@
         "hardMaxDuration": 5,
         "fps": [16],
         "resolutions": ["832x480", "480x832", "1280x720", "720x1280"],
-        // Native engines are default-sampler only (no flow-match swaps wired) — declared on
-        // mlx.limits too; there is no Torch backend for this model.
-        "samplers": ["default"],
+        // Epic 7114 curated menu (sc-7296). mlx-only model (no candle/Torch backend) — the native
+        // dual-expert VACE-Fun engine over Wan's flow σ schedule exposes the native curated set.
+        // No scheduler axis (flow shift = `scheduler_shift`).
+        "samplers": ["default", "uni_pc", "euler", "dpmpp_2m"],
         "schedulers": ["default"]
       },
       "loraCompatibility": {
@@ -3068,11 +3087,7 @@
         // transformers; the validated real-weight smoke ran at Q4, ~38 GB RSS on a 128 GB Mac).
         // 64 GB floor keeps a 128 GB Mac eligible while staying honest about the dual-expert load.
         "minMemoryGb": 64,
-        "repo": "linoyts/Wan2.2-VACE-Fun-14B-diffusers",
-        "limits": {
-          "samplers": ["default"],
-          "schedulers": ["default"]
-        }
+        "repo": "linoyts/Wan2.2-VACE-Fun-14B-diffusers"
       },
       "ui": {
         "label": "Wan2.2 VACE-Fun (A14B)",
