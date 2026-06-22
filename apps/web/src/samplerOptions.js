@@ -1,30 +1,55 @@
-// Shared labels + helpers for the configurable sampler/scheduler controls
-// (epic 1753). The worker's flow-compatible registry lives in
-// apps/worker/scene_worker/sampler_registry.py; the studios source their
-// dropdown contents from each model's manifest `limits.samplers` /
-// `limits.schedulers` arrays so invalid combos are never selectable.
+// Shared labels + helpers for the configurable sampler/scheduler controls. The
+// curated vocabulary (epic 7114) matches the native mlx-gen / candle-gen gen-core
+// Solver / Scheduler registries exactly — the names sent in the job's `advanced`
+// block ARE the engine's sampler/scheduler ids. The studios source their dropdown
+// contents from each model's per-backend manifest `limits.samplers` /
+// `limits.schedulers` arrays (base `limits` overridden by `mlx.limits` /
+// `candle.limits` for the active backend) so invalid combos are never selectable.
 
 export const SAMPLER_LABELS = {
   default: "Model default",
   euler: "Euler",
-  euler_a: "Euler ancestral",
+  euler_ancestral: "Euler ancestral",
   heun: "Heun (2nd-order)",
-  dpmpp: "DPM++ (2M)",
+  dpmpp_2m: "DPM++ (2M)",
   dpmpp_sde: "DPM++ SDE",
-  unipc: "UniPC",
+  uni_pc: "UniPC",
+  lcm: "LCM",
+  ddim: "DDIM",
 };
 
 export const SCHEDULER_LABELS = {
   default: "Model default",
+  normal: "Normal",
   simple: "Simple (uniform)",
-  shift: "Shift (timestep)",
   karras: "Karras",
   exponential: "Exponential",
+  sgm_uniform: "SGM uniform",
   beta: "Beta",
+  ddim_uniform: "DDIM uniform",
 };
 
-const SAMPLER_ORDER = ["default", "euler", "euler_a", "heun", "dpmpp", "dpmpp_sde", "unipc"];
-const SCHEDULER_ORDER = ["default", "simple", "shift", "karras", "exponential", "beta"];
+const SAMPLER_ORDER = [
+  "default",
+  "euler",
+  "euler_ancestral",
+  "heun",
+  "dpmpp_2m",
+  "dpmpp_sde",
+  "uni_pc",
+  "lcm",
+  "ddim",
+];
+const SCHEDULER_ORDER = [
+  "default",
+  "normal",
+  "simple",
+  "karras",
+  "exponential",
+  "sgm_uniform",
+  "beta",
+  "ddim_uniform",
+];
 
 function uniqueOrdered(values, order) {
   const seen = new Set();
@@ -45,16 +70,27 @@ function uniqueOrdered(values, order) {
   return result;
 }
 
+// The effective `limits` for the active backend: the per-backend `mlx.limits` /
+// `candle.limits` override when present, else the base `limits` (epic 7114 P5
+// per-model-per-backend gating). `backend` is the active worker's backend
+// ("mlx" | "candle"); a null/unknown backend falls back to the base menu.
+function effectiveLimits(model, backend) {
+  const override = backend ? model?.[backend]?.limits : null;
+  return override ?? model?.limits;
+}
+
 // Pull the menu out of a model manifest entry, falling back to default-only.
 // When the menu has fewer than 2 entries, the studio hides the dropdown — the
 // caller can use `samplerMenu.length > 1` to gate rendering.
-export function samplerOptionsFromModel(model) {
-  const values = Array.isArray(model?.limits?.samplers) ? model.limits.samplers : ["default"];
+export function samplerOptionsFromModel(model, backend) {
+  const limits = effectiveLimits(model, backend);
+  const values = Array.isArray(limits?.samplers) ? limits.samplers : ["default"];
   return uniqueOrdered(values, SAMPLER_ORDER);
 }
 
-export function schedulerOptionsFromModel(model) {
-  const values = Array.isArray(model?.limits?.schedulers) ? model.limits.schedulers : ["default"];
+export function schedulerOptionsFromModel(model, backend) {
+  const limits = effectiveLimits(model, backend);
+  const values = Array.isArray(limits?.schedulers) ? limits.schedulers : ["default"];
   return uniqueOrdered(values, SCHEDULER_ORDER);
 }
 

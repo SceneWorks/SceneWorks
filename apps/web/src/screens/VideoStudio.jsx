@@ -367,9 +367,18 @@ export function VideoStudio() {
   });
   // Sampler / scheduler menus declared by the model. Video Wan torch
   // declares the full menu; sealed paths (LTX native, MLX) drop to
-  // default-only and the picker hides.
-  const samplerOptions = useMemo(() => samplerOptionsFromModel(selectedModel), [selectedModel]);
-  const schedulerOptions = useMemo(() => schedulerOptionsFromModel(selectedModel), [selectedModel]);
+  // default-only and the picker hides. Gated to the ACTIVE backend (epic 7114 P5):
+  // `macGating` is the worker `mlx_required` master switch, so the menu reflects the
+  // manifest's `mlx.limits` override on Mac/MLX and `candle.limits` on the candle build.
+  const activeBackend = macGating ? "mlx" : "candle";
+  const samplerOptions = useMemo(
+    () => samplerOptionsFromModel(selectedModel, activeBackend),
+    [selectedModel, activeBackend],
+  );
+  const schedulerOptions = useMemo(
+    () => schedulerOptionsFromModel(selectedModel, activeBackend),
+    [selectedModel, activeBackend],
+  );
   const showSamplerPicker = samplerOptions.length > 1;
   const showSchedulerPicker = schedulerOptions.length > 1;
   useEffect(() => {
@@ -831,7 +840,12 @@ export function VideoStudio() {
           // diffusers (torch) path actually applies these.
           ...(sampler && sampler !== "default" ? { sampler } : {}),
           ...(scheduler && scheduler !== "default" ? { scheduler } : {}),
-          ...(scheduler === "shift" && Number.isFinite(Number(schedulerShift))
+          // Schedule shift (time-shift mu) only pairs with a curated (non-default)
+          // scheduler — it shapes that schedule; the default scheduler keeps the
+          // engine's resolution-native shift (epic 7114).
+          ...(scheduler &&
+          scheduler !== "default" &&
+          Number.isFinite(Number(schedulerShift))
             ? { schedulerShift: Number(schedulerShift) }
             : {}),
           ...(stepsOverride !== "" && Number.isFinite(Number(stepsOverride))
@@ -1590,7 +1604,7 @@ export function VideoStudio() {
                       </select>
                     </label>
                   ) : null}
-                  {scheduler === "shift" ? (
+                  {showSchedulerPicker && scheduler !== "default" ? (
                     <label>
                       Schedule shift
                       <input

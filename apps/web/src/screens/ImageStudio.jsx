@@ -710,10 +710,21 @@ export function ImageStudio() {
         : DEFAULT_RESOLUTION_OPTIONS,
     [selectedModel],
   );
-  // Sampler / scheduler menus declared by the model. The advanced panel hides
-  // the dropdowns when the menu has fewer than 2 options (epic 1753 §7.4).
-  const samplerOptions = useMemo(() => samplerOptionsFromModel(selectedModel), [selectedModel]);
-  const schedulerOptions = useMemo(() => schedulerOptionsFromModel(selectedModel), [selectedModel]);
+  // Sampler / scheduler menus declared by the model, gated to the ACTIVE backend
+  // (epic 7114 P5): `macGatingActive` is the worker `mlx_required` master switch, so
+  // it picks the manifest's `mlx.limits` override on Mac/MLX and the `candle.limits`
+  // override on the Windows/Linux candle build (e.g. Lens exposes the curated menu
+  // only on candle; SDXL only on MLX). The advanced panel hides the dropdowns when
+  // the menu has fewer than 2 options (epic 1753 §7.4).
+  const activeBackend = macCapabilities?.macGatingActive ? "mlx" : "candle";
+  const samplerOptions = useMemo(
+    () => samplerOptionsFromModel(selectedModel, activeBackend),
+    [selectedModel, activeBackend],
+  );
+  const schedulerOptions = useMemo(
+    () => schedulerOptionsFromModel(selectedModel, activeBackend),
+    [selectedModel, activeBackend],
+  );
   const showSamplerPicker = samplerOptions.length > 1;
   const showSchedulerPicker = schedulerOptions.length > 1;
   const advancedDefaultsModel = useRef(model);
@@ -1218,7 +1229,13 @@ export function ImageStudio() {
           // values unconditionally is safe — invalid values are ignored.
           ...(sampler && sampler !== "default" ? { sampler } : {}),
           ...(scheduler && scheduler !== "default" ? { scheduler } : {}),
-          ...(scheduler === "shift" && Number.isFinite(Number(schedulerShift))
+          // The schedule shift (time-shift mu) is only honored when a curated
+          // (non-default) scheduler is active — it shapes that curated schedule;
+          // the default scheduler keeps the engine's resolution-native shift, so
+          // emitting it there would override the no-op default (epic 7114).
+          ...(scheduler &&
+          scheduler !== "default" &&
+          Number.isFinite(Number(schedulerShift))
             ? { schedulerShift: Number(schedulerShift) }
             : {}),
           // Step / guidance overrides — empty string means "use the model
@@ -1772,7 +1789,7 @@ export function ImageStudio() {
                     </select>
                   </label>
                 ) : null}
-                {scheduler === "shift" ? (
+                {showSchedulerPicker && scheduler !== "default" ? (
                   <label>
                     Schedule shift
                     <input
