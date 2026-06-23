@@ -726,6 +726,15 @@ async fn run_utility_job(
         JobType::ImageUpscale => run_image_upscale_job(api, settings, http_client, &job)
             .await
             .map_err(|error| ("Image upscale failed.", error)),
+        // Dataset Doctor one-tap upscale (sc-6539): Real-ESRGAN over flagged low-res items, then
+        // re-point each via the API. Same engine + worker lanes as image_upscale.
+        #[cfg(any(
+            target_os = "macos",
+            all(not(target_os = "macos"), feature = "backend-candle")
+        ))]
+        JobType::DatasetUpscale => run_dataset_upscale_job(api, settings, http_client, &job)
+            .await
+            .map_err(|error| ("Dataset upscale failed.", error)),
         // Smart-select segmentation (epic 6087, sc-6105): native-MLX SAM3 box-prompt segmentation,
         // served in-process by `segment_jobs::run_image_segment_job` — a box prompt → a binary
         // inpaint mask asset for the Image Editor. macOS-only (the capability is advertised only by

@@ -369,3 +369,55 @@ fn real_esrgan_candle_real_weights_upscales() {
         out.height()
     );
 }
+
+// --- Dataset Doctor one-tap upscale plumbing (sc-6539), pure + weight-free ---
+
+#[test]
+fn parse_dataset_upscale_items_reads_valid_entries_and_skips_malformed() {
+    let payload = json!({
+        "items": [
+            { "itemId": "a", "imagePath": "/data/a.png", "assetId": "asset_a" },
+            { "itemId": "", "imagePath": "/data/blank.png" }, // empty id → skipped
+            { "itemId": "c" },                                // no imagePath → skipped
+            { "itemId": "d", "imagePath": "/data/d.jpg" },
+        ],
+    });
+    let items = parse_dataset_upscale_items(payload.as_object().unwrap());
+    assert_eq!(items.len(), 2);
+    assert_eq!(items[0].item_id, "a");
+    assert_eq!(items[0].image_path, std::path::PathBuf::from("/data/a.png"));
+    assert_eq!(items[1].item_id, "d");
+}
+
+#[test]
+fn parse_dataset_upscale_items_is_empty_without_an_items_array() {
+    assert!(parse_dataset_upscale_items(json!({}).as_object().unwrap()).is_empty());
+}
+
+#[test]
+fn dataset_repoint_body_maps_records_with_a_null_asset_id() {
+    let body = dataset_repoint_body(&[
+        (
+            "a".to_owned(),
+            "training/datasets/ds/upscaled/a.png".to_owned(),
+        ),
+        (
+            "b".to_owned(),
+            "training/datasets/ds/upscaled/b.png".to_owned(),
+        ),
+    ]);
+    let items = body
+        .get("items")
+        .and_then(serde_json::Value::as_array)
+        .expect("items array");
+    assert_eq!(items.len(), 2);
+    assert_eq!(items[0]["itemId"], "a");
+    assert_eq!(
+        items[0]["sourcePath"],
+        "training/datasets/ds/upscaled/a.png"
+    );
+    assert!(
+        items[0]["assetId"].is_null(),
+        "dataset fix re-points to bytes, not a minted child asset"
+    );
+}
