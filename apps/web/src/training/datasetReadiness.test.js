@@ -15,6 +15,7 @@ import {
   flagReason,
   gateMeta,
   itemBadge,
+  lowResolutionFlaggedItemIds,
   nextDismissedChecks,
   primaryReason,
   readinessBySelectionKey,
@@ -318,6 +319,21 @@ describe("gate + sub-scores", () => {
     // No plan / no report → nothing to remove.
     expect(duplicateRemovalItemIds(report({}))).toEqual([]);
     expect(duplicateRemovalItemIds(null)).toEqual([]);
+  });
+
+  it("collects active resolution-flagged item IDs for the upscale action (sc-6539)", () => {
+    const flagged = report({
+      items: [
+        { itemId: "a", flags: [{ check: "resolution", severity: "warn" }] },
+        { itemId: "b", flags: [{ check: "blur", severity: "warn" }] },
+        // A dismissed resolution flag is excluded — the user opted to keep it.
+        { itemId: "c", flags: [{ check: "resolution", severity: "warn", acknowledged: true }] },
+        { itemId: "d", flags: [{ check: "resolution", severity: "warn" }] },
+      ],
+    });
+    expect(lowResolutionFlaggedItemIds(flagged)).toEqual(["a", "d"]);
+    expect(lowResolutionFlaggedItemIds(report({ items: [] }))).toEqual([]);
+    expect(lowResolutionFlaggedItemIds(null)).toEqual([]);
   });
 });
 

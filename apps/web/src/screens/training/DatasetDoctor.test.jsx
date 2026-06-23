@@ -178,6 +178,27 @@ describe("DatasetDoctorReadout gating states", () => {
     expect(container.querySelector(".dataset-doctor-actions")).toBeNull();
   });
 
+  it("surfaces an upscale action for resolution-flagged items (sc-6539)", () => {
+    const onUpscaleLowRes = vi.fn();
+    mount(
+      <DatasetDoctorReadout
+        report={report({
+          items: [
+            { itemId: "a", flags: [{ check: "resolution", severity: "warn" }] },
+            { itemId: "b", flags: [] },
+            { itemId: "c", flags: [{ check: "resolution", severity: "warn" }] },
+          ],
+        })}
+        onUpscaleLowRes={onUpscaleLowRes}
+      />,
+    );
+    const button = container.querySelector(".dataset-doctor-actions button");
+    expect(button).not.toBeNull();
+    expect(button.textContent).toContain("Upscale 2 low-res");
+    act(() => button.dispatchEvent(new MouseEvent("click", { bubbles: true })));
+    expect(onUpscaleLowRes).toHaveBeenCalledWith(["a", "c"]);
+  });
+
   it("renders the blocked headline when the set is untrainable", () => {
     mount(
       <DatasetDoctorReadout

@@ -62,6 +62,7 @@ export function ConfigureJobPanel({
   readinessLoading = false,
   readinessBlocksTraining = false,
   onRemoveDuplicates,
+  onUpscaleLowRes,
 }) {
   return (
     <>
@@ -408,6 +409,7 @@ export function ConfigureJobPanel({
             loading={readinessLoading}
             compact
             onRemoveDuplicates={onRemoveDuplicates}
+            onUpscaleLowRes={onUpscaleLowRes}
           />
           {readinessBlocksTraining ? (
             <p className="inline-warning">

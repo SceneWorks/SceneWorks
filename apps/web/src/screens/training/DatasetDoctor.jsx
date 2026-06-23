@@ -11,6 +11,7 @@ import {
   flagReason,
   gateMeta,
   itemBadge,
+  lowResolutionFlaggedItemIds,
   primaryReason,
   technicalPercent,
 } from "../../training/datasetReadiness.js";
@@ -177,6 +178,7 @@ export function DatasetDoctorReadout({
   compact = false,
   onRecaptionFlagged,
   onRemoveDuplicates,
+  onUpscaleLowRes,
 }) {
   if (!report) {
     if (loading) {
@@ -206,6 +208,10 @@ export function DatasetDoctorReadout({
   // Empty unless a consumer wired `onRemoveDuplicates`, so the compact readout stays button-free there.
   const removeDuplicateIds =
     typeof onRemoveDuplicates === "function" ? duplicateRemovalItemIds(report) : [];
+  // sc-6539: sub-target images the one-tap upscale would enlarge (Real-ESRGAN). Empty unless a
+  // consumer wired `onUpscaleLowRes`.
+  const lowResIds =
+    typeof onUpscaleLowRes === "function" ? lowResolutionFlaggedItemIds(report) : [];
   return (
     <div className={`dataset-doctor tone-${gate.tone}${compact ? " compact" : ""}`} aria-label="Dataset Doctor">
       <div className="dataset-doctor-head">
@@ -273,7 +279,7 @@ export function DatasetDoctorReadout({
           {counts.warn ? <span className="tone-warn">{counts.warn} to review</span> : null}
         </div>
       ) : null}
-      {recaptionFlaggedIds.length || removeDuplicateIds.length ? (
+      {recaptionFlaggedIds.length || removeDuplicateIds.length || lowResIds.length ? (
         <div className="dataset-doctor-actions">
           {removeDuplicateIds.length ? (
             <button
@@ -283,6 +289,16 @@ export function DatasetDoctorReadout({
             >
               Remove {removeDuplicateIds.length}{" "}
               {removeDuplicateIds.length === 1 ? "duplicate" : "duplicates"} (keeps the sharpest)
+            </button>
+          ) : null}
+          {lowResIds.length ? (
+            <button
+              type="button"
+              className="secondary-action"
+              onClick={() => onUpscaleLowRes(lowResIds)}
+            >
+              Upscale {lowResIds.length} low-res{" "}
+              {lowResIds.length === 1 ? "image" : "images"}
             </button>
           ) : null}
           {recaptionFlaggedIds.length ? (

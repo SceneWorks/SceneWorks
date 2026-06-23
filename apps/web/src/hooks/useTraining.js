@@ -205,6 +205,27 @@ export function useTraining({ token, activeProject, setError, setJobs }) {
     [token, activeProject, setJobs, setError],
   );
 
+  // sc-6539: enqueue a Real-ESRGAN upscale over the low-resolution-flagged dataset items.
+  const createTrainingDatasetUpscaleJob = useCallback(
+    async (datasetId, payload, projectId = activeProject?.id) => {
+      if (!projectId || !datasetId) {
+        throw new Error("Select a training dataset first.");
+      }
+      const job = await apiFetch(
+        `/api/v1/projects/${projectId}/training/datasets/${encodeURIComponent(datasetId)}/upscale-jobs`,
+        token,
+        {
+          method: "POST",
+          body: JSON.stringify(payload),
+        },
+      );
+      setJobs((items) => [job, ...items.filter((item) => item.id !== job.id)].sort(sortNewest));
+      setError("");
+      return job;
+    },
+    [token, activeProject, setJobs, setError],
+  );
+
   const createTrainingJob = useCallback(
     async (request, projectId = activeProject?.id) => {
       if (!projectId) {
@@ -239,6 +260,7 @@ export function useTraining({ token, activeProject, setError, setJobs }) {
     batchRenameTrainingDataset,
     writeTrainingDatasetCaptionSidecars,
     createTrainingDatasetCaptionJob,
+    createTrainingDatasetUpscaleJob,
     createTrainingJob,
   };
 }
