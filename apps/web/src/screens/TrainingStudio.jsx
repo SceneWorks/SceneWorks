@@ -25,6 +25,7 @@ import {
   summarizeDatasets,
 } from "../training/datasetHelpers.js";
 import {
+  captionHash,
   nextDismissedChecks,
   readinessBySelectionKey,
   readinessQueryParams,
@@ -649,8 +650,16 @@ export function TrainingStudio({ mode = "training" } = {}) {
       return;
     }
     const checks = nextDismissedChecks(entry, check, dismissed);
+    const item = activeDataset.items?.find((candidate) => candidate.id === entry.itemId);
+    if (!item?.contentHash) {
+      setDatasetError("Refresh the dataset before dismissing this finding.");
+      return;
+    }
     try {
-      await setTrainingDatasetItemQualityAck(activeDataset.id, entry.itemId, checks);
+      await setTrainingDatasetItemQualityAck(activeDataset.id, entry.itemId, checks, {
+        expectedContentHash: item.contentHash,
+        expectedCaptionHash: await captionHash(item.caption?.text ?? ""),
+      });
       setReadinessRefreshTick((tick) => tick + 1);
     } catch (err) {
       setDatasetError(err.message);

@@ -2,7 +2,9 @@ import { describe, expect, it } from "vitest";
 
 import {
   aestheticScore,
+  alignmentPercent,
   badgeForSeverity,
+  captionHash,
   datasetDoctorSummary,
   dismissedChecks,
   diversityPercent,
@@ -31,6 +33,14 @@ function report(overrides = {}) {
     ...overrides,
   };
 }
+
+describe("captionHash", () => {
+  it("matches lowercase SHA-256 hex for the exact caption text", async () => {
+    expect(await captionHash("tiny test image")).toBe(
+      "d93dcd03ca0197eb0ae2041bfc1b3c3b78399bb19e904c901713bcc85cc39cf7",
+    );
+  });
+});
 
 describe("badges", () => {
   it("maps worst severity to the three states, treating info/clean as good", () => {
@@ -68,7 +78,7 @@ describe("flagReason", () => {
   });
 
   it("has plain-language copy for the Tier-1 embedding checks (sc-6535)", () => {
-    for (const check of ["near_duplicate_embedding", "low_diversity"]) {
+    for (const check of ["near_duplicate_embedding", "low_diversity", "caption_alignment"]) {
       const text = flagReason({ check });
       expect(text).toBeTruthy();
       expect(text).not.toBe("Flagged for review");
@@ -160,6 +170,33 @@ describe("datasetDoctorSummary", () => {
     expect(text).toContain("more variety");
   });
 
+  it("phrases caption alignment warnings as re-captioning advice (sc-6537)", () => {
+    const text = datasetDoctorSummary(
+      report({
+        gate: "needs_attention",
+        itemCount: 6,
+        items: [
+          { itemId: "a", flags: [{ check: "caption_alignment", severity: "warn" }] },
+          { itemId: "b", flags: [{ check: "caption_alignment", severity: "warn" }] },
+        ],
+      }),
+    );
+    expect(text).toContain("2 captions may not match their images");
+    expect(text).toContain("Re-captioning");
+  });
+
+  it("uses singular copy for one caption alignment warning (sc-6537)", () => {
+    const text = datasetDoctorSummary(
+      report({
+        gate: "needs_attention",
+        itemCount: 6,
+        items: [{ itemId: "a", flags: [{ check: "caption_alignment", severity: "warn" }] }],
+      }),
+    );
+    expect(text).toContain("1 caption may not match its image");
+    expect(text).toContain("Re-captioning this can improve training");
+  });
+
   it("surfaces the style-only aesthetic advisory as a non-blocking heads-up (sc-6537)", () => {
     const text = datasetDoctorSummary(
       report({
@@ -237,6 +274,12 @@ describe("gate + sub-scores", () => {
     expect(aestheticScore(report({ subScores: { technical: 0.8, aesthetic: 5.34 } }))).toBe(5.3);
     expect(aestheticScore(report({ subScores: { technical: 0.8 } }))).toBeNull();
     expect(aestheticScore(null)).toBeNull();
+  });
+
+  it("renders the alignment sub-score as a meter score, absent until text embeddings exist (sc-6537)", () => {
+    expect(alignmentPercent(report({ subScores: { technical: 0.8, alignment: 0.67 } }))).toBe(67);
+    expect(alignmentPercent(report({ subScores: { technical: 0.8 } }))).toBeNull();
+    expect(alignmentPercent(null)).toBeNull();
   });
 });
 

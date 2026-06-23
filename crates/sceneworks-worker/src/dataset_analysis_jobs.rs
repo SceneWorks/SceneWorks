@@ -11,6 +11,8 @@ use super::*;
 #[cfg(target_os = "macos")]
 const CLIP_EMBEDDER_ID: &str = "clip_vit_l14";
 #[cfg(target_os = "macos")]
+const CLIP_TEXT_EMBEDDER_ID: &str = "clip_vit_l14_text";
+#[cfg(target_os = "macos")]
 const CLIP_EMBEDDER_MODEL: &str = "openai/clip-vit-large-patch14";
 #[cfg(target_os = "macos")]
 const EMBEDDING_SPACE: &str = "clip-vit-l14";
@@ -30,6 +32,17 @@ use mlx_gen_clip as _;
 struct AnalysisItem {
     image_path: PathBuf,
     content_hash: String,
+    caption_text: String,
+    caption_hash: String,
+}
+
+#[cfg(target_os = "macos")]
+#[derive(Clone, Debug)]
+struct AnalysisEmbeddingRecord {
+    content_hash: String,
+    image_embedding: Vec<f32>,
+    caption_hash: Option<String>,
+    text_embedding: Option<Vec<f32>>,
 }
 
 #[cfg(target_os = "macos")]
@@ -91,35 +104,72 @@ pub(crate) async fn run_dataset_analysis_job(
     let blocking_cancel = cancel.clone();
     let blocking_items = items.clone();
     let job_id = job.id.clone();
-    let blocking = tokio::task::spawn_blocking(move || -> WorkerResult<Vec<(String, Vec<f32>)>> {
-        emit_event(
-            "dataset_analysis_load_start",
-            json!({ "jobId": job_id, "engine": CLIP_EMBEDDER_ID }),
-        );
-        let embedder = gen_core::load_image_embedder(
-            CLIP_EMBEDDER_ID,
-            &LoadSpec::new(WeightsSource::Dir(weights_dir)),
-        )
-        .map_err(|error| WorkerError::Engine(format!("CLIP embedder load failed: {error}")))?;
-        emit_event(
-            "dataset_analysis_load_complete",
-            json!({ "jobId": job_id, "engine": CLIP_EMBEDDER_ID }),
-        );
-        let mut out = Vec::with_capacity(blocking_items.len());
-        for (index, item) in blocking_items.into_iter().enumerate() {
-            if blocking_cancel.is_cancelled() {
-                return Err(WorkerError::Canceled(CANCEL_MESSAGE.to_owned()));
+    let blocking =
+        tokio::task::spawn_blocking(move || -> WorkerResult<Vec<AnalysisEmbeddingRecord>> {
+            emit_event(
+                "dataset_analysis_load_start",
+                json!({ "jobId": job_id, "engine": CLIP_EMBEDDER_ID }),
+            );
+            let embedder = gen_core::load_image_embedder(
+                CLIP_EMBEDDER_ID,
+                &LoadSpec::new(WeightsSource::Dir(weights_dir.clone())),
+            )
+            .map_err(|error| WorkerError::Engine(format!("CLIP embedder load failed: {error}")))?;
+            let needs_text = blocking_items
+                .iter()
+                .any(|item| !item.caption_text.trim().is_empty());
+            let text_embedder = if needs_text {
+                Some(
+                    gen_core::load_text_embedder(
+                        CLIP_TEXT_EMBEDDER_ID,
+                        &LoadSpec::new(WeightsSource::Dir(weights_dir)),
+                    )
+                    .map_err(|error| {
+                        WorkerError::Engine(format!("CLIP text embedder load failed: {error}"))
+                    })?,
+                )
+            } else {
+                None
+            };
+            emit_event(
+                "dataset_analysis_load_complete",
+                json!({ "jobId": job_id, "engine": CLIP_EMBEDDER_ID }),
+            );
+            let mut out = Vec::with_capacity(blocking_items.len());
+            for (index, item) in blocking_items.into_iter().enumerate() {
+                if blocking_cancel.is_cancelled() {
+                    return Err(WorkerError::Canceled(CANCEL_MESSAGE.to_owned()));
+                }
+                let image = load_analysis_image(&item.image_path)?;
+                let embedding = embedder
+                    .embed(&image)
+                    .map_err(|error| WorkerError::Engine(format!("CLIP embed failed: {error}")))?;
+                let (caption_hash, text_embedding) =
+                    if let Some(text_embedder) = text_embedder.as_ref() {
+                        if item.caption_text.trim().is_empty() {
+                            (None, None)
+                        } else {
+                            let text_embedding = text_embedder
+                                .embed_text(&item.caption_text)
+                                .map_err(|error| {
+                                    WorkerError::Engine(format!("CLIP text embed failed: {error}"))
+                                })?;
+                            (Some(item.caption_hash), Some(text_embedding))
+                        }
+                    } else {
+                        (None, None)
+                    };
+                out.push(AnalysisEmbeddingRecord {
+                    content_hash: item.content_hash,
+                    image_embedding: embedding,
+                    caption_hash,
+                    text_embedding,
+                });
+                // Best-effort per-item progress; a dropped receiver just means we stop reporting.
+                let _ = tx.blocking_send(index);
             }
-            let image = load_analysis_image(&item.image_path)?;
-            let embedding = embedder
-                .embed(&image)
-                .map_err(|error| WorkerError::Engine(format!("CLIP embed failed: {error}")))?;
-            out.push((item.content_hash, embedding));
-            // Best-effort per-item progress; a dropped receiver just means we stop reporting.
-            let _ = tx.blocking_send(index);
-        }
-        Ok(out)
-    });
+            Ok(out)
+        });
 
     let mut interval = tokio::time::interval(progress_report_interval(settings));
     interval.set_missed_tick_behavior(MissedTickBehavior::Delay);
@@ -176,10 +226,7 @@ pub(crate) async fn run_dataset_analysis_job(
     .await?;
     let project_id = required_payload_string(&job.payload, "projectId")?;
     let dataset_id = required_payload_string(&job.payload, "datasetId")?;
-    let records: Vec<Value> = embeddings
-        .iter()
-        .map(|(content_hash, embedding)| json!({ "contentHash": content_hash, "embedding": embedding }))
-        .collect();
+    let records = analysis_embedding_records_payload(&embeddings);
     let stored: Value = api
         .post_json(
             &format!(
@@ -202,6 +249,21 @@ pub(crate) async fn run_dataset_analysis_job(
     )
     .await?;
     Ok(())
+}
+
+#[cfg(target_os = "macos")]
+fn analysis_embedding_records_payload(records: &[AnalysisEmbeddingRecord]) -> Vec<Value> {
+    records
+        .iter()
+        .map(|record| {
+            json!({
+                "contentHash": record.content_hash,
+                "embedding": record.image_embedding,
+                "captionHash": record.caption_hash,
+                "textEmbedding": record.text_embedding,
+            })
+        })
+        .collect()
 }
 
 #[cfg(target_os = "macos")]
@@ -252,6 +314,18 @@ fn analysis_items(settings: &Settings, payload: &JsonObject) -> WorkerResult<Vec
                     ))
                 })?
                 .to_owned();
+            let caption_text = object
+                .get("captionText")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_owned();
+            let caption_hash = object
+                .get("captionHash")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(str::to_owned)
+                .unwrap_or_else(|| sceneworks_core::dataset_quality::caption_hash(&caption_text));
             let image_path = object
                 .get("imagePath")
                 .and_then(Value::as_str)
@@ -271,6 +345,8 @@ fn analysis_items(settings: &Settings, payload: &JsonObject) -> WorkerResult<Vec
             Ok(AnalysisItem {
                 image_path,
                 content_hash,
+                caption_text,
+                caption_hash,
             })
         })
         .collect()
@@ -343,6 +419,102 @@ pub(crate) async fn run_dataset_analysis_job(
 }
 
 #[cfg(all(test, target_os = "macos"))]
+mod tests {
+    use super::*;
+
+    fn test_settings(data_dir: &Path) -> Settings {
+        Settings {
+            api_url: "http://127.0.0.1".to_owned(),
+            access_token: None,
+            data_dir: data_dir.to_path_buf(),
+            config_dir: data_dir.join("config"),
+            worker_id: "test-worker".to_owned(),
+            gpu_id: "gpu-0".to_owned(),
+            is_child_worker: false,
+            poll_seconds: 1,
+            heartbeat_seconds: 1,
+            shutdown_timeout_seconds: 1,
+            huggingface_base_url: DEFAULT_HUGGINGFACE_BASE_URL.to_owned(),
+            huggingface_token: None,
+            credentials: Vec::new(),
+            max_lora_url_bytes: DEFAULT_MAX_LORA_URL_BYTES,
+            max_model_url_bytes: DEFAULT_MAX_MODEL_URL_BYTES,
+            allow_private_lora_urls: false,
+            utility_workers: 1,
+            backend_mlx_enabled: true,
+            backend_candle_enabled: false,
+        }
+    }
+
+    #[test]
+    fn analysis_items_parse_caption_text_and_hash() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let settings = test_settings(dir.path());
+        let dataset_root = dir.path().join("datasets").join("ds-1");
+        let image_path = dataset_root.join("image.png");
+        let caption_hash = sceneworks_core::dataset_quality::caption_hash("a red square");
+        let payload = serde_json::Map::from_iter([
+            (
+                "datasetRoot".to_owned(),
+                json!(dataset_root.display().to_string()),
+            ),
+            (
+                "items".to_owned(),
+                json!([{
+                    "itemId": "item_1",
+                    "imagePath": image_path.display().to_string(),
+                    "contentHash": "image_hash",
+                    "captionText": "a red square",
+                    "captionHash": caption_hash,
+                }]),
+            ),
+        ]);
+
+        let items = analysis_items(&settings, &payload).expect("items parse");
+
+        assert_eq!(items[0].content_hash, "image_hash");
+        assert_eq!(items[0].caption_text, "a red square");
+        assert_eq!(items[0].caption_hash, caption_hash);
+    }
+
+    #[test]
+    fn analysis_embedding_records_encode_text_pairs_and_empty_captions() {
+        let payload = analysis_embedding_records_payload(&[
+            AnalysisEmbeddingRecord {
+                content_hash: "image_a".to_owned(),
+                image_embedding: vec![1.0, 0.0],
+                caption_hash: Some("caption_a".to_owned()),
+                text_embedding: Some(vec![0.5, 0.25]),
+            },
+            AnalysisEmbeddingRecord {
+                content_hash: "image_b".to_owned(),
+                image_embedding: vec![0.0, 1.0],
+                caption_hash: None,
+                text_embedding: None,
+            },
+        ]);
+
+        assert_eq!(
+            Value::Array(payload),
+            json!([
+                {
+                    "contentHash": "image_a",
+                    "embedding": [1.0, 0.0],
+                    "captionHash": "caption_a",
+                    "textEmbedding": [0.5, 0.25]
+                },
+                {
+                    "contentHash": "image_b",
+                    "embedding": [0.0, 1.0],
+                    "captionHash": null,
+                    "textEmbedding": null
+                }
+            ])
+        );
+    }
+}
+
+#[cfg(all(test, target_os = "macos"))]
 mod real_weights_tests {
     use super::*;
 
@@ -353,7 +525,7 @@ mod real_weights_tests {
     /// per convention — the weights live outside CI; run on a Mac with the snapshot cached + Metal.
     #[test]
     #[ignore = "real-weight: needs the openai/clip-vit-large-patch14 snapshot in the HF cache + Metal"]
-    fn embeds_a_real_image_file_through_the_worker_seam() {
+    fn embeds_a_real_image_and_caption_through_the_worker_seam() {
         // Locate the cached snapshot (mirrors prompt_refine_jobs.rs's HF-cache resolution).
         let home = std::env::var("HOME").expect("HOME");
         let snapshots = std::path::Path::new(&home)
@@ -379,10 +551,16 @@ mod real_weights_tests {
         // Load the embedder through the worker's gen_core seam, then run the real CLIP forward.
         let embedder = gen_core::load_image_embedder(
             CLIP_EMBEDDER_ID,
-            &LoadSpec::new(WeightsSource::Dir(weights_dir)),
+            &LoadSpec::new(WeightsSource::Dir(weights_dir.clone())),
         )
         .expect("the worker binary links + loads mlx-gen-clip's clip_vit_l14");
         assert_eq!(embedder.descriptor().embedding_dim, 768);
+        let text_embedder = gen_core::load_text_embedder(
+            CLIP_TEXT_EMBEDDER_ID,
+            &LoadSpec::new(WeightsSource::Dir(weights_dir)),
+        )
+        .expect("the worker binary links + loads mlx-gen-clip's clip_vit_l14_text");
+        assert_eq!(text_embedder.descriptor().embedding_dim, 768);
 
         let embedding = embedder.embed(&image).expect("real CLIP embed");
         assert_eq!(embedding.len(), 768, "CLIP ViT-L/14 embedding is 768-d");
@@ -390,7 +568,24 @@ mod real_weights_tests {
             embedding.iter().all(|v| v.is_finite()) && embedding.iter().any(|&v| v != 0.0),
             "embedding is finite + non-degenerate"
         );
-        println!("worker clip ok: dim={}", embedding.len());
+        let text_embedding = text_embedder
+            .embed_text("a blue and green gradient probe")
+            .expect("real CLIP text embed");
+        assert_eq!(
+            text_embedding.len(),
+            768,
+            "CLIP ViT-L/14 text embedding is 768-d"
+        );
+        assert!(
+            text_embedding.iter().all(|v| v.is_finite())
+                && text_embedding.iter().any(|&v| v != 0.0),
+            "text embedding is finite + non-degenerate"
+        );
+        println!(
+            "worker clip ok: image_dim={} text_dim={}",
+            embedding.len(),
+            text_embedding.len()
+        );
     }
 
     /// Tier-1 threshold calibration (sc-6535 follow-up — NOT committed): embed real LoRA training

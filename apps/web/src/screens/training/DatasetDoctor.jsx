@@ -2,6 +2,7 @@ import React from "react";
 
 import {
   aestheticScore,
+  alignmentPercent,
   datasetDoctorSummary,
   diversityPercent,
   flagMetric,
@@ -184,6 +185,8 @@ export function DatasetDoctorReadout({ report, loading = false, compact = false 
   // Tier-1 (sc-6535): absent until the embedding job has run, so the Variety meter only appears
   // once the report carries a diversity sub-score.
   const diversity = diversityPercent(report);
+  // Caption alignment (sc-6537): absent until current-caption text embeddings are available.
+  const alignment = alignmentPercent(report);
   // Aesthetic (sc-6537): STYLE datasets only — `null` for person/object, so the meter is style-scoped.
   const aesthetic = aestheticScore(report);
   const counts = report.counts ?? {};
@@ -192,21 +195,52 @@ export function DatasetDoctorReadout({ report, loading = false, compact = false 
       <div className="dataset-doctor-head">
         <span className="dataset-doctor-gate">{gate.label}</span>
         {Number.isFinite(technical) ? (
-          <span className="dataset-doctor-meter" title={`${technical}% of photos pass the technical checks`}>
+          <span
+            className="dataset-doctor-meter"
+            role="meter"
+            aria-label="Technical pass rate"
+            aria-valuemin={0}
+            aria-valuemax={100}
+            aria-valuenow={technical}
+            title={`${technical}% of photos pass the technical checks`}
+          >
             <span className="dataset-doctor-meter-fill" style={{ width: `${technical}%` }} />
           </span>
         ) : null}
         {Number.isFinite(diversity) ? (
           <span
             className="dataset-doctor-meter dataset-doctor-meter-variety"
+            role="meter"
+            aria-label="Variety score"
+            aria-valuemin={0}
+            aria-valuemax={100}
+            aria-valuenow={diversity}
             title={`Variety ${diversity}% — how visually varied the set is`}
           >
             <span className="dataset-doctor-meter-fill" style={{ width: `${diversity}%` }} />
           </span>
         ) : null}
+        {Number.isFinite(alignment) ? (
+          <span
+            className="dataset-doctor-meter dataset-doctor-meter-alignment"
+            role="meter"
+            aria-label="Caption match score"
+            aria-valuemin={0}
+            aria-valuemax={100}
+            aria-valuenow={alignment}
+            title={`Caption match score ${alignment}% — based on current-caption image/text similarity`}
+          >
+            <span className="dataset-doctor-meter-fill" style={{ width: `${alignment}%` }} />
+          </span>
+        ) : null}
         {Number.isFinite(aesthetic) ? (
           <span
             className="dataset-doctor-meter dataset-doctor-meter-aesthetic"
+            role="meter"
+            aria-label="Aesthetic score"
+            aria-valuemin={0}
+            aria-valuemax={10}
+            aria-valuenow={aesthetic}
             title={`Aesthetic ${aesthetic} / 10 — visual polish (style sets, advisory)`}
           >
             <span
