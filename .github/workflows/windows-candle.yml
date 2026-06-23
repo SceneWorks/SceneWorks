@@ -64,9 +64,10 @@ jobs:
       CUDA_COMPUTE_CAP: "120"
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          components: clippy
+      # No rust-toolchain action: the self-hosted box has rustup + the repo's
+      # `rust-toolchain.toml`-pinned toolchain (incl. clippy) pre-installed, and the
+      # action's bash step breaks here — `bash` resolves to the box's WSL stub, not
+      # Git Bash. cargo in-repo auto-selects the pinned toolchain.
       # nvcc needs the MSVC 14.44 host compiler (NOT VS2026 14.51, which CUDA 12.9
       # rejects). Load the BuildTools vcvars in-shell, then build+test in the same
       # cmd invocation so the toolchain env survives (each step is a fresh shell).
