@@ -4426,10 +4426,20 @@ fn boogu_edit_candle_eligible(payload: &Map<String, Value>) -> bool {
     if payload.get("mode").and_then(Value::as_str) != Some("edit_image") {
         return false;
     }
-    payload
+    // One source: the single `sourceAssetId`, or the plural `referenceAssetIds` multi-image picker
+    // (sc-7645 — the Boogu DiT packs up to 5 references). Either routes the edit to candle.
+    let single = payload
         .get("sourceAssetId")
         .and_then(Value::as_str)
-        .is_some_and(|value| !value.trim().is_empty())
+        .is_some_and(|value| !value.trim().is_empty());
+    let plural = payload
+        .get("referenceAssetIds")
+        .and_then(Value::as_array)
+        .is_some_and(|ids| {
+            ids.iter()
+                .any(|v| v.as_str().is_some_and(|s| !s.trim().is_empty()))
+        });
+    single || plural
 }
 
 /// SDXL IP-Adapter-Plus candle-routing conditions (sc-5488, epic 5480). The candle `IpAdapterSdxl`
@@ -5928,9 +5938,19 @@ mod candle_routing_tests {
         assert!(!image_job_is_candle_eligible(&image_edit_job(
             edit_payload("boogu_image_turbo")
         )));
+        // sc-7645: the multi-image picker sends plural `referenceAssetIds` (no `sourceAssetId`) — the
+        // bespoke branch still claims it for candle (the Boogu DiT packs up to 5 references).
+        assert!(boogu_edit_candle_eligible(&object(json!({
+            "model": "boogu_image_edit", "mode": "edit_image",
+            "referenceAssetIds": ["a", "b"]
+        }))));
         // `edit_image` WITHOUT a source → nothing to edit → not this lane.
         assert!(!boogu_edit_candle_eligible(&object(json!({
             "model": "boogu_image_edit", "mode": "edit_image"
+        }))));
+        // An empty plural list with no `sourceAssetId` is also nothing to edit.
+        assert!(!boogu_edit_candle_eligible(&object(json!({
+            "model": "boogu_image_edit", "mode": "edit_image", "referenceAssetIds": []
         }))));
         // bf16-only: a deliberate Q8/Q4 quant request defers (boogu is not in CANDLE_QUANT_LORA_MODELS).
         assert!(!image_request_candle_eligible(
