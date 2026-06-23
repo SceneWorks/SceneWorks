@@ -4,6 +4,7 @@ import {
   badgeForSeverity,
   datasetDoctorSummary,
   dismissedChecks,
+  diversityPercent,
   flagCountsByCheck,
   flagMetric,
   flagReason,
@@ -59,6 +60,14 @@ describe("flagReason", () => {
       "count",
       "decode",
     ]) {
+      const text = flagReason({ check });
+      expect(text).toBeTruthy();
+      expect(text).not.toBe("Flagged for review");
+    }
+  });
+
+  it("has plain-language copy for the Tier-1 embedding checks (sc-6535)", () => {
+    for (const check of ["near_duplicate_embedding", "low_diversity"]) {
       const text = flagReason({ check });
       expect(text).toBeTruthy();
       expect(text).not.toBe("Flagged for review");
@@ -134,6 +143,22 @@ describe("datasetDoctorSummary", () => {
     expect(text).toContain("stronger");
   });
 
+  it("phrases embedding near-duplicates and mentions low set diversity (sc-6535)", () => {
+    const text = datasetDoctorSummary(
+      report({
+        gate: "needs_attention",
+        itemCount: 6,
+        items: [
+          { itemId: "a", flags: [{ check: "near_duplicate_embedding", severity: "warn" }] },
+          { itemId: "b", flags: [{ check: "near_duplicate_embedding", severity: "warn" }] },
+        ],
+        datasetFlags: [{ check: "low_diversity", severity: "warn" }],
+      }),
+    );
+    expect(text).toContain("2 look very similar to others");
+    expect(text).toContain("more variety");
+  });
+
   it("says a ready set is ready", () => {
     const text = datasetDoctorSummary(report({ gate: "ready", itemCount: 20, items: [] }));
     expect(text).toBe("20 photos. This set looks ready to train.");
@@ -186,6 +211,12 @@ describe("gate + sub-scores", () => {
     expect(technicalPercent(report({ subScores: { technical: 0.8 } }))).toBe(80);
     expect(technicalPercent(report({ subScores: {} }))).toBeNull();
     expect(technicalPercent(null)).toBeNull();
+  });
+
+  it("renders the diversity sub-score as a percentage, absent until the embedding job runs (sc-6535)", () => {
+    expect(diversityPercent(report({ subScores: { technical: 0.8, diversity: 0.42 } }))).toBe(42);
+    expect(diversityPercent(report({ subScores: { technical: 0.8 } }))).toBeNull();
+    expect(diversityPercent(null)).toBeNull();
   });
 });
 

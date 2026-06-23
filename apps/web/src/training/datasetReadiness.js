@@ -66,6 +66,8 @@ const CHECK_REASON = {
   exposure: "Over- or under-exposed — clipped highlights or shadows",
   exact_duplicate: "Exact duplicate of another photo",
   near_duplicate: "Nearly identical to another photo",
+  near_duplicate_embedding: "Looks very similar to other photos",
+  low_diversity: "The set isn't varied enough — too many similar-looking shots",
   count: "Not enough photos to train well yet",
   decode: "This image couldn't be read",
 };
@@ -122,6 +124,8 @@ const METRIC_LABEL = {
   exposure: "clipped fraction",
   near_duplicate: "Hamming distance",
   exact_duplicate: "Hamming distance",
+  near_duplicate_embedding: "cosine similarity",
+  low_diversity: "diversity score",
   count: "item count",
   decode: "decoded",
 };
@@ -160,12 +164,25 @@ const CHECK_PHRASE = {
   blur: (n) => `${n} look${n === 1 ? "s" : ""} blurry`,
   near_duplicate: (n) => (n === 1 ? "1 is a near-duplicate" : `${n} are near-duplicates`),
   exact_duplicate: (n) => (n === 1 ? "1 is an exact duplicate" : `${n} are exact duplicates`),
+  near_duplicate_embedding: (n) =>
+    n === 1 ? "1 looks very similar to others" : `${n} look very similar to others`,
   resolution: (n) => `${n} ${n === 1 ? "is" : "are"} low-resolution`,
   crop_loss: (n) => `${n} lose${n === 1 ? "s" : ""} a lot to cropping`,
   exposure: (n) => `${n} ${n === 1 ? "is" : "are"} over- or under-exposed`,
   decode: (n) => `${n} couldn't be read`,
 };
-const PHRASE_ORDER = ["blur", "near_duplicate", "exact_duplicate", "resolution", "crop_loss", "exposure", "decode"];
+// `low_diversity` is omitted: it's a dataset-level finding (not a per-image count), surfaced
+// separately in the summary + the diversity sub-score meter.
+const PHRASE_ORDER = [
+  "blur",
+  "near_duplicate",
+  "near_duplicate_embedding",
+  "exact_duplicate",
+  "resolution",
+  "crop_loss",
+  "exposure",
+  "decode",
+];
 
 function joinList(parts) {
   if (parts.length <= 1) {
@@ -208,6 +225,15 @@ export function datasetDoctorSummary(report) {
     parts.push(`${capitalizeFirst(joinList(fragments))}.`);
   }
 
+  // Low diversity is a set-level property (not a per-image count), so it's surfaced separately
+  // from the per-item fragments — and from the diversity sub-score meter in the readout.
+  const lowDiversity = (report.datasetFlags ?? []).some(
+    (flag) => flag.check === "low_diversity" && !flag.acknowledged,
+  );
+  if (lowDiversity) {
+    parts.push("The photos are quite similar — adding more variety would help.");
+  }
+
   if (report.gate === "ready") {
     parts.push("This set looks ready to train.");
   } else if (countFlag) {
@@ -215,7 +241,7 @@ export function datasetDoctorSummary(report) {
     parts.push(`Aim for ${need}+ photos with some variety to make it stronger.`);
   } else if (fragments.length) {
     parts.push("Replacing or removing these would make the LoRA stronger.");
-  } else {
+  } else if (!lowDiversity) {
     parts.push("This set looks ready to train.");
   }
   return parts.join(" ");
@@ -236,6 +262,16 @@ export function gateMeta(gate) {
 // technical-quality warning). Tier-1 sub-scores stay absent until sc-6535.
 export function technicalPercent(report) {
   const value = report?.subScores?.technical;
+  if (!Number.isFinite(value)) {
+    return null;
+  }
+  return Math.round(value * 100);
+}
+
+// Diversity sub-score (1 − mean pairwise CLIP cosine) as a 0–100 percentage for the Variety
+// meter. Absent until the embedding job (sc-6535) computes it — `null` hides the meter.
+export function diversityPercent(report) {
+  const value = report?.subScores?.diversity;
   if (!Number.isFinite(value)) {
     return null;
   }

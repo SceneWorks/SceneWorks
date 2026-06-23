@@ -838,6 +838,10 @@ fn is_technical_check(check: &QualityCheck) -> bool {
 pub struct ItemEmbedding {
     pub item_id: String,
     pub embedding: Vec<f32>,
+    /// Per-image overrides (sc-6534): the checks the user dismissed for this item. `evaluate_tier1`
+    /// marks the matching non-`Fatal` per-item flag (`near_duplicate_embedding`) acknowledged so it
+    /// drops from the rollups but stays for struck-through display — mirrors `ItemQualityInput`.
+    pub acknowledged: Vec<QualityCheck>,
 }
 
 /// Tier-1 thresholds (sc-6536). **Placeholders pending calibration** (sc-6535 §8) — a fixture sweep
@@ -938,6 +942,21 @@ pub fn evaluate_tier1(items: &[ItemEmbedding], thresholds: &Tier1Thresholds) -> 
                     peers,
                     acknowledged: false,
                 });
+            }
+        }
+    }
+
+    // Per-image overrides (sc-6534): a dismissed `near_duplicate_embedding` drops from the rollups
+    // but stays for struck-through display — the same post-pass as `evaluate_tier0`. `low_diversity`
+    // is dataset-level, so it is not per-item-acknowledgeable. (NearDuplicateEmbedding is `Warn`, so
+    // the non-`Fatal` guard never blocks it; it is kept for parity with Tier-0.)
+    for (idx, item) in items.iter().enumerate() {
+        if item.acknowledged.is_empty() {
+            continue;
+        }
+        for flag in &mut per_item[idx].flags {
+            if flag.severity != Severity::Fatal && item.acknowledged.contains(&flag.check) {
+                flag.acknowledged = true;
             }
         }
     }
@@ -1461,6 +1480,7 @@ mod tests {
         ItemEmbedding {
             item_id: id.to_owned(),
             embedding: vector.to_vec(),
+            acknowledged: Vec::new(),
         }
     }
 
@@ -1564,5 +1584,46 @@ mod tests {
         );
         assert_eq!(report.sub_scores.diversity, None);
         assert_eq!(report.sub_scores.aesthetic, None);
+    }
+
+    #[test]
+    fn tier1_acknowledged_near_duplicate_is_marked_and_kept_per_side() {
+        // The user dismisses the embedding near-dup on "a"; "b" still flags (per-side dismissal,
+        // like Tier-0). The acked flag is retained for struck-through display — and
+        // build_readiness_report already excludes acknowledged flags from every rollup.
+        let a = ItemEmbedding {
+            item_id: "a".to_owned(),
+            embedding: vec![1.0, 0.0, 0.0],
+            acknowledged: vec![QualityCheck::NearDuplicateEmbedding],
+        };
+        let eval = evaluate_tier1(&[a, emb("b", &[1.0, 0.0, 0.0])], &tier1_thresholds());
+
+        let a_flag = eval
+            .items
+            .iter()
+            .find(|e| e.item_id == "a")
+            .expect("a")
+            .flags
+            .iter()
+            .find(|f| f.check == QualityCheck::NearDuplicateEmbedding)
+            .expect("a keeps the flag for display");
+        assert!(
+            a_flag.acknowledged,
+            "a's dismissed near-dup is acknowledged"
+        );
+
+        let b_flag = eval
+            .items
+            .iter()
+            .find(|e| e.item_id == "b")
+            .expect("b")
+            .flags
+            .iter()
+            .find(|f| f.check == QualityCheck::NearDuplicateEmbedding)
+            .expect("b flags");
+        assert!(
+            !b_flag.acknowledged,
+            "b's near-dup stands (per-side dismissal)"
+        );
     }
 }
