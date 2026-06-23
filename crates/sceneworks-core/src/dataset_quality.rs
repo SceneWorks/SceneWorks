@@ -1088,8 +1088,11 @@ pub struct ItemCaptionAlignment {
     pub acknowledged: Vec<QualityCheck>,
 }
 
-/// Caption↔image CLIP alignment thresholds (sc-6537). The floor is deliberately advisory and can be
-/// calibrated from real datasets without changing the payload shape.
+/// Caption↔image CLIP alignment thresholds (sc-6537). **Placeholder pending a JoyCaption-caption
+/// sweep.** A real-weights probe (one photo, short captions) put *matched* caption↔image cosines at
+/// ~0.13–0.16 and clear *mismatches* at ~0.03–0.05 — raw CLIP image/text cosines are low and
+/// compressed. So `0.10` flags clear mismatches without false-flagging good captions; the prior `0.20`
+/// sat *above* the matched range and would have flagged essentially every caption.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct CaptionAlignmentThresholds {
     /// Cosine similarity below this ⇒ `caption_alignment` warning.
@@ -1098,7 +1101,7 @@ pub struct CaptionAlignmentThresholds {
 
 impl Default for CaptionAlignmentThresholds {
     fn default() -> Self {
-        Self { cosine_floor: 0.20 }
+        Self { cosine_floor: 0.10 }
     }
 }
 

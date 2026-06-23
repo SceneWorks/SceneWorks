@@ -307,12 +307,28 @@ export function diversityPercent(report) {
 
 // Caption↔image CLIP alignment as a 0–100 meter score. The source value is mean CLIP cosine,
 // clamped by the server for display; absent until text embeddings exist for the current caption hash.
+// The caption-alignment sub-score is the mean RAW CLIP image↔text cosine — low and compressed
+// (matched pairs land ~0.13–0.16, clear mismatches ~0.03–0.05). Showing it ×100 reads alarmingly (a
+// good caption as "15%"), so the meter rescales the meaningful range [0.05, 0.18] → [0, 100]. This is
+// display-only — the stored sub-score stays the raw cosine. sc-6537.
+const ALIGNMENT_DISPLAY_LO = 0.05;
+const ALIGNMENT_DISPLAY_HI = 0.18;
 export function alignmentPercent(report) {
   const value = report?.subScores?.alignment;
   if (!Number.isFinite(value)) {
     return null;
   }
-  return Math.round(value * 100);
+  const scaled =
+    ((value - ALIGNMENT_DISPLAY_LO) / (ALIGNMENT_DISPLAY_HI - ALIGNMENT_DISPLAY_LO)) * 100;
+  return Math.round(Math.min(100, Math.max(0, scaled)));
+}
+
+// Item IDs whose active (non-dismissed) flags include `caption_alignment` — the targets for the
+// "Re-caption flagged" action surfaced from the readout. sc-6537.
+export function captionAlignmentFlaggedItemIds(report) {
+  return (report?.items ?? [])
+    .filter((item) => activeFlags(item).some((flag) => flag.check === "caption_alignment"))
+    .map((item) => item.itemId);
 }
 
 // Aesthetic sub-score — the mean LAION-Aesthetics score (~[1, 10]) for STYLE datasets only; `null`

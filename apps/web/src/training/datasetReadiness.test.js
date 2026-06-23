@@ -4,6 +4,7 @@ import {
   aestheticScore,
   alignmentPercent,
   badgeForSeverity,
+  captionAlignmentFlaggedItemIds,
   captionHash,
   datasetDoctorSummary,
   dismissedChecks,
@@ -276,10 +277,31 @@ describe("gate + sub-scores", () => {
     expect(aestheticScore(null)).toBeNull();
   });
 
-  it("renders the alignment sub-score as a meter score, absent until text embeddings exist (sc-6537)", () => {
-    expect(alignmentPercent(report({ subScores: { technical: 0.8, alignment: 0.67 } }))).toBe(67);
+  it("rescales the alignment sub-score from raw CLIP cosine to a meter % (sc-6537)", () => {
+    // Raw image↔text cosines are low/compressed; the meter rescales [0.05, 0.18] → [0, 100], so a
+    // good caption (~0.15) reads ~77% instead of an alarming 15%, and a mismatch (~0.05) reads 0%.
+    expect(alignmentPercent(report({ subScores: { technical: 0.8, alignment: 0.15 } }))).toBe(77);
+    expect(alignmentPercent(report({ subScores: { technical: 0.8, alignment: 0.05 } }))).toBe(0);
+    expect(alignmentPercent(report({ subScores: { technical: 0.8, alignment: 0.3 } }))).toBe(100);
     expect(alignmentPercent(report({ subScores: { technical: 0.8 } }))).toBeNull();
     expect(alignmentPercent(null)).toBeNull();
+  });
+
+  it("collects active caption-alignment-flagged item IDs for the re-caption action (sc-6537)", () => {
+    const flagged = report({
+      items: [
+        { itemId: "a", flags: [{ check: "caption_alignment", severity: "warn" }] },
+        { itemId: "b", flags: [{ check: "blur", severity: "warn" }] },
+        {
+          itemId: "c",
+          flags: [{ check: "caption_alignment", severity: "warn", acknowledged: true }],
+        },
+        { itemId: "d", flags: [{ check: "caption_alignment", severity: "warn" }] },
+      ],
+    });
+    expect(captionAlignmentFlaggedItemIds(flagged)).toEqual(["a", "d"]);
+    expect(captionAlignmentFlaggedItemIds(report({ items: [] }))).toEqual([]);
+    expect(captionAlignmentFlaggedItemIds(null)).toEqual([]);
   });
 });
 

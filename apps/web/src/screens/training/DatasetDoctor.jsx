@@ -3,6 +3,7 @@ import React from "react";
 import {
   aestheticScore,
   alignmentPercent,
+  captionAlignmentFlaggedItemIds,
   datasetDoctorSummary,
   diversityPercent,
   flagMetric,
@@ -169,7 +170,12 @@ function MetricHistogram({ label, metric }) {
 // technical-quality meter, the summary sentence, and severity-count chips. Renders
 // nothing for an unsaved draft (no report, not loading) so the panel isn't noisy
 // before there's anything to assess.
-export function DatasetDoctorReadout({ report, loading = false, compact = false }) {
+export function DatasetDoctorReadout({
+  report,
+  loading = false,
+  compact = false,
+  onRecaptionFlagged,
+}) {
   if (!report) {
     if (loading) {
       return (
@@ -190,6 +196,10 @@ export function DatasetDoctorReadout({ report, loading = false, compact = false 
   // Aesthetic (sc-6537): STYLE datasets only — `null` for person/object, so the meter is style-scoped.
   const aesthetic = aestheticScore(report);
   const counts = report.counts ?? {};
+  // sc-6537: items whose caption looks misaligned — the targets for the re-caption action. Empty
+  // unless a consumer wired `onRecaptionFlagged` (so the compact readout never shows the button).
+  const recaptionFlaggedIds =
+    typeof onRecaptionFlagged === "function" ? captionAlignmentFlaggedItemIds(report) : [];
   return (
     <div className={`dataset-doctor tone-${gate.tone}${compact ? " compact" : ""}`} aria-label="Dataset Doctor">
       <div className="dataset-doctor-head">
@@ -255,6 +265,18 @@ export function DatasetDoctorReadout({ report, loading = false, compact = false 
         <div className="dataset-doctor-counts">
           {counts.fatal ? <span className="tone-fatal">{counts.fatal} blocking</span> : null}
           {counts.warn ? <span className="tone-warn">{counts.warn} to review</span> : null}
+        </div>
+      ) : null}
+      {recaptionFlaggedIds.length ? (
+        <div className="dataset-doctor-actions">
+          <button
+            type="button"
+            className="secondary-action"
+            onClick={() => onRecaptionFlagged(recaptionFlaggedIds)}
+          >
+            Re-caption {recaptionFlaggedIds.length}{" "}
+            {recaptionFlaggedIds.length === 1 ? "flagged image" : "flagged images"}
+          </button>
         </div>
       ) : null}
     </div>

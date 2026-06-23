@@ -1115,6 +1115,15 @@ export function TrainingStudio({ mode = "training" } = {}) {
           return;
         }
         itemIds = [id];
+      } else if (captionDialog.type === "flagged") {
+        // sc-6537: re-caption the caption-alignment-flagged items. Filter to IDs still present in the
+        // just-saved dataset so a stale readout can't target removed items.
+        const flagged = new Set(captionDialog.itemIds ?? []);
+        itemIds = (saved.items ?? []).map((item) => item.id).filter((id) => flagged.has(id));
+        if (!itemIds.length) {
+          setDatasetError("No flagged images to re-caption.");
+          return;
+        }
       }
       const payload = {
         ...trainingCaptionJobPayload(captionSettings),

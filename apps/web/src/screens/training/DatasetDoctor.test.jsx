@@ -89,14 +89,55 @@ describe("DatasetDoctorReadout gating states", () => {
     mount(<DatasetDoctorReadout report={report()} />);
     expect(container.querySelector(".dataset-doctor-meter-alignment")).toBeNull();
 
-    mount(<DatasetDoctorReadout report={report({ subScores: { technical: 0.8, alignment: 0.64 } })} />);
+    // alignment is a raw CLIP cosine (~0.15 is a good match), rescaled for display by alignmentPercent.
+    mount(<DatasetDoctorReadout report={report({ subScores: { technical: 0.8, alignment: 0.15 } })} />);
     const alignment = container.querySelector(".dataset-doctor-meter-alignment");
     expect(alignment).not.toBeNull();
     expect(alignment.getAttribute("role")).toBe("meter");
     expect(alignment.getAttribute("aria-label")).toBe("Caption match score");
-    expect(alignment.getAttribute("aria-valuenow")).toBe("64");
+    expect(alignment.getAttribute("aria-valuenow")).toBe("77");
     expect(alignment.getAttribute("title")).toContain("Caption match score");
-    expect(alignment.querySelector(".dataset-doctor-meter-fill").style.width).toBe("64%");
+    expect(alignment.querySelector(".dataset-doctor-meter-fill").style.width).toBe("77%");
+  });
+
+  it("surfaces a re-caption action for caption-alignment-flagged items (sc-6537)", () => {
+    const onRecaptionFlagged = vi.fn();
+    mount(
+      <DatasetDoctorReadout
+        report={report({
+          items: [
+            { itemId: "a", flags: [{ check: "caption_alignment", severity: "warn" }] },
+            { itemId: "b", flags: [] },
+            { itemId: "c", flags: [{ check: "caption_alignment", severity: "warn" }] },
+          ],
+        })}
+        onRecaptionFlagged={onRecaptionFlagged}
+      />,
+    );
+    const button = container.querySelector(".dataset-doctor-actions button");
+    expect(button).not.toBeNull();
+    expect(button.textContent).toContain("Re-caption 2");
+    act(() => button.dispatchEvent(new MouseEvent("click", { bubbles: true })));
+    expect(onRecaptionFlagged).toHaveBeenCalledWith(["a", "c"]);
+  });
+
+  it("hides the re-caption action with no flagged items or no handler (sc-6537)", () => {
+    mount(
+      <DatasetDoctorReadout
+        report={report({ items: [{ itemId: "a", flags: [{ check: "blur", severity: "warn" }] }] })}
+        onRecaptionFlagged={() => {}}
+      />,
+    );
+    expect(container.querySelector(".dataset-doctor-actions")).toBeNull();
+    // Even with flagged items, no button without a handler (e.g. the compact readout).
+    mount(
+      <DatasetDoctorReadout
+        report={report({
+          items: [{ itemId: "a", flags: [{ check: "caption_alignment", severity: "warn" }] }],
+        })}
+      />,
+    );
+    expect(container.querySelector(".dataset-doctor-actions")).toBeNull();
   });
 
   it("renders the blocked headline when the set is untrainable", () => {
