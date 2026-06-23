@@ -1344,6 +1344,35 @@ async fn training_dataset_routes_persist_and_validate_project_assets() {
     assert_eq!(single_items.len(), 1);
     assert_eq!(single_items[0]["itemId"], "item_0001");
 
+    // sc-6535: the Dataset Doctor analysis job enqueues with the right type + embedder + a per-item
+    // work list (the worker claims it once mlx-gen-clip is linked; here we assert the enqueue
+    // contract). An empty body uses the defaults (clip_vit_l14, every item).
+    let (status, analysis_job) = request(
+        reloaded_app.clone(),
+        "POST",
+        &format!("/api/v1/projects/{project_id}/training/datasets/{dataset_id}/analysis-jobs"),
+        json!({}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    assert_eq!(analysis_job["type"], "dataset_analysis");
+    assert_eq!(analysis_job["payload"]["embedder"], "clip_vit_l14");
+    assert_eq!(analysis_job["payload"]["items"][0]["itemId"], "item_0001");
+    let analysis_image_path = analysis_job["payload"]["items"][0]["imagePath"]
+        .as_str()
+        .expect("analysis image path");
+    assert!(analysis_image_path.ends_with("item_0001.png"));
+
+    // An unknown embedder is rejected up front.
+    let (status, _) = request(
+        reloaded_app.clone(),
+        "POST",
+        &format!("/api/v1/projects/{project_id}/training/datasets/{dataset_id}/analysis-jobs"),
+        json!({ "embedder": "not_a_real_embedder" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+
     let (status, renamed) = request(
         reloaded_app.clone(),
         "POST",

@@ -1693,6 +1693,12 @@ fn derive_job_title(job_type: &JobType, payload: &Map<String, Value>) -> Option<
                 .to_owned();
             Some(format!("Dataset Captioning — {subject}"))
         }
+        JobType::DatasetAnalysis => {
+            let subject = first_str(payload, &["datasetName", "datasetId"])
+                .unwrap_or("(unnamed dataset)")
+                .to_owned();
+            Some(format!("Dataset Analysis — {subject}"))
+        }
         JobType::ImageGenerate
         | JobType::ImageEdit
         | JobType::ImageVqa
@@ -2272,7 +2278,11 @@ pub fn mac_rust_supported(job: &JobSnapshot) -> Result<(), UnsupportedReason> {
         | JobType::LoraDownload
         | JobType::FrameExtract
         | JobType::TimelineExport
-        | JobType::PromptRefine => Ok(()),
+        | JobType::PromptRefine
+        // sc-6535: dataset_analysis is a native Rust/MLX job (the CLIP image embedder), not a
+        // Python-torch gap — so it's `Ok` here. Its real capability is gated by the worker's
+        // advertisement once `mlx-gen-clip` is linked; until then it queues, never enforce-fails.
+        | JobType::DatasetAnalysis => Ok(()),
 
         // Forward-compat: an unrecognized job type isn't a known Python-torch gap, so don't
         // enforce-fail it (it would otherwise break a newer job type this build doesn't model).
@@ -2507,6 +2517,10 @@ pub fn candle_supported(job: &JobSnapshot) -> Result<(), UnsupportedReason> {
         | JobType::KpsExtract
         | JobType::ImageSegment
         | JobType::LoraTrain
+        // sc-6535: a candle CLIP embedder (`candle-gen-clip`) is future work; until then
+        // dataset_analysis routes by capability (no candle worker advertises it) rather than
+        // enforce-failing — the same "parity landing later" treatment as the surfaces above.
+        | JobType::DatasetAnalysis
         | JobType::Unknown(_) => Ok(()),
     }
 }
@@ -5493,6 +5507,7 @@ fn job_requires_gpu(job_type: &JobType) -> bool {
             | JobType::PersonReplace
             | JobType::LoraTrain
             | JobType::TrainingCaption
+            | JobType::DatasetAnalysis
     )
 }
 

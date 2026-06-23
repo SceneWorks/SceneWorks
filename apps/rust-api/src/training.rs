@@ -328,6 +328,103 @@ pub(crate) async fn create_training_dataset_caption_job(
     Ok((StatusCode::CREATED, Json(job)))
 }
 
+/// Enqueue a Dataset Doctor CLIP-embedding analysis job over a training dataset (sc-6535).
+/// Mirrors [`create_training_dataset_caption_job`]: build a per-item work list (item id + absolute
+/// image path + content hash) and create a GPU-routed `dataset_analysis` job. The Rust/MLX worker
+/// runs the `clip_vit_l14` embedder once it advertises the capability (after the cross-repo re-pin);
+/// until then the job stays queued.
+pub(crate) async fn create_training_dataset_analysis_job(
+    State(state): State<AppState>,
+    Path((project_id, dataset_id)): Path<(String, String)>,
+    ApiJson(payload): ApiJson<DatasetAnalysisJobRequest>,
+) -> Result<(StatusCode, Json<JobSnapshot>), ApiError> {
+    validate_dataset_analysis_job_request(&payload)?;
+    let (dataset, dataset_root, project_name) = project_call(state.clone(), {
+        let project_id = project_id.clone();
+        let dataset_id = dataset_id.clone();
+        move |store| store.training_dataset_for_plan(&project_id, &dataset_id)
+    })
+    .await?;
+    if dataset.items.is_empty() {
+        return Err(ApiError::bad_request(
+            "Training dataset has no items to analyze.",
+        ));
+    }
+    // No item_ids → analyze the whole dataset; otherwise just the named items.
+    let target_ids: Option<std::collections::HashSet<&str>> = payload
+        .item_ids
+        .as_ref()
+        .map(|ids| ids.iter().map(String::as_str).collect());
+    let items = dataset
+        .items
+        .iter()
+        .filter(|item| match &target_ids {
+            Some(ids) => ids.contains(item.id.as_str()),
+            None => true,
+        })
+        .map(|item| {
+            json!({
+                "itemId": item.id.clone(),
+                "imagePath": dataset_root.join(&item.path).display().to_string(),
+                "contentHash": item.content_hash.clone(),
+            })
+        })
+        .collect::<Vec<_>>();
+    if items.is_empty() {
+        return Err(ApiError::bad_request(
+            "No matching dataset items to analyze.",
+        ));
+    }
+    let embedder = payload.embedder;
+    let model_name_or_path = payload.model_name_or_path;
+    let requested_gpu = payload.requested_gpu;
+    let job_payload = match json!({
+        "provider": "training",
+        "kind": "dataset_analysis",
+        "embedder": embedder,
+        "modelNameOrPath": model_name_or_path,
+        "projectId": project_id.clone(),
+        "datasetId": dataset.id,
+        "datasetVersion": dataset.version,
+        "datasetRoot": dataset_root.display().to_string(),
+        "items": items,
+    }) {
+        Value::Object(map) => map,
+        _ => {
+            return Err(ApiError::internal(
+                "dataset analysis job payload must be an object",
+            ))
+        }
+    };
+    let job = store_call(state.clone(), move |store, _timeout| {
+        store.create_job(CreateJob {
+            job_type: JobType::DatasetAnalysis,
+            project_id: Some(project_id),
+            project_name: Some(project_name),
+            payload: job_payload,
+            requested_gpu,
+            source_job_id: None,
+            duplicate_of_job_id: None,
+            attempts: 1,
+        })
+    })
+    .await?;
+    publish(&state, "job.updated", &job);
+    publish_queue(&state).await?;
+    Ok((StatusCode::CREATED, Json(job)))
+}
+
+pub(crate) fn validate_dataset_analysis_job_request(
+    payload: &DatasetAnalysisJobRequest,
+) -> Result<(), ApiError> {
+    if payload.embedder.trim() != "clip_vit_l14" {
+        return Err(ApiError::bad_request(
+            "Unsupported dataset analysis embedder. Use clip_vit_l14.",
+        ));
+    }
+    Ok(())
+}
+
 pub(crate) fn validate_training_caption_job_request(
     payload: &TrainingCaptionJobRequest,
 ) -> Result<(), ApiError> {

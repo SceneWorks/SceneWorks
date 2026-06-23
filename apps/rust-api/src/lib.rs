@@ -740,6 +740,10 @@ pub(crate) fn create_app_with_state(
             post(create_training_dataset_caption_job),
         )
         .route(
+            "/api/v1/projects/:project_id/training/datasets/:dataset_id/analysis-jobs",
+            post(create_training_dataset_analysis_job),
+        )
+        .route(
             "/api/v1/projects/:project_id/training/jobs",
             post(create_training_job),
         )
@@ -2180,6 +2184,10 @@ fn default_training_captioner() -> String {
 
 fn default_training_caption_model() -> String {
     "fancyfeast/llama-joycaption-beta-one-hf-llava".to_owned()
+}
+
+fn default_dataset_analysis_embedder() -> String {
+    "clip_vit_l14".to_owned()
 }
 
 fn default_training_caption_type() -> String {
