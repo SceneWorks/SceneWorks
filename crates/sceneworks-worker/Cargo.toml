@@ -286,15 +286,33 @@ sceneworks-core = { path = "../sceneworks-core" }
 # `671cb13` -> `2dc0306` IN LOCKSTEP — candle-gen #134 mirrors the `ms` thread + re-pins candle-gen's
 # gen-core to 43aa2bf, so `--features backend-candle --target all` resolves the SINGLE gen-core rev
 # 43aa2bf (the skew gate) rather than two.
-# Rev 54e87e9 (mlx-gen #545, sc-7189 + the #542/#544 catch-up): bumps EVERY mlx-gen crate + gen-core
-# 43aa2bf -> 54e87e9. The gen-core delta over the range is PURELY ADDITIVE — the `core_llm` re-export
-# (`gen_core::core_llm`, sc-7189) the macOS prompt_refine path now consumes, plus the additive
-# `TextEmbedder` CLIP contract (sc-6537); no existing TextLlm/registry/runtime/sampling surface moved,
-# so the worker's import surface is unchanged. SKEW GATE: the candle pin below moves to candle-gen
-# `33d50a3` (#142, sc-7404) IN LOCKSTEP — it re-pins candle-gen's gen-core to 54e87e9 AND is a strict
-# SUPERSET of the standalone `5ea4865` flux2_dev Q4 bump (sc-7458, now an ancestor), so `--features
-# backend-candle --target all` resolves the single gen-core rev 54e87e9 while keeping flux2_dev's
-# candle Q4 lane. mlx-rs unchanged (44929a0).
+# Bumped the candle pin ALONE `2dc0306` -> `5ea4865` (epic 6564 sc-7458) — mlx-gen/gen-core stays 43aa2bf.
+# UNLIKE the lockstep bumps above (which move mlx-gen + candle-gen together), this moves ONLY the candle-gen
+# pin to pick up sc-7457's FLUX.2-dev Q4/Q8 dev-quant load path (candle-gen #136/#137: the CPU-stage ->
+# `quantize_onto`-GPU `flux2_dev` loader the worker's `generate_candle_stream` needs — the `2dc0306` pin had
+# only the DENSE dev port, which rejects `spec.quantize` and can't fit the 32B on the GPU). `5ea4865` is the
+# #137 merge, which lands BEFORE candle-gen's own gen-core bump to 418f900d (#138), so it STILL pins gen-core
+# 43aa2bf — IDENTICAL to the worker's mlx-gen pin, no mlx-gen bump needed. Only `candle-gen-flux2` differs
+# across `2dc0306..5ea4865` (candle-gen-boogu also changed, but the worker doesn't link it), so the bump is
+# surgical: `flux2_dev` gains its Q4 lane, every other candle family is byte-identical, and `--features
+# backend-candle --target all` still resolves the SINGLE gen-core rev 43aa2bf (the skew gate).
+# Bumped `43aa2bf` -> `418f900d` (sc-7524, epic 6831): the candle Boogu wiring needs the candle-gen rev
+# to carry the COMPLETE Boogu provider (Base+Turbo #136 + Edit #140) AND keep sc-7458's FLUX.2-dev Q4 lane
+# (#137). Those two landed on DIVERGENT candle-gen branches — #137 (`5ea4865`, gen-core 43aa2bf) does NOT
+# contain the Boogu Edit, and the Edit (#140) merged into candle-gen main TOGETHER with candle-gen's own
+# gen-core bump to 418f900d (the sc-6537 CLIP-text-embedder, mlx-gen #542). So NO single candle-gen rev
+# has {flux2_dev + Boogu Base+Turbo+Edit} on gen-core 43aa2bf — shipping Boogu Edit without regressing
+# sc-7458 REQUIRES advancing to candle-gen main HEAD `80451b3` (has #136+#137+#140+#141), which pins
+# gen-core 418f900d. So this worker syncs its mlx-gen pin 43aa2bf -> 418f900d IN LOCKSTEP (the candle pin
+# below moves `5ea4865` -> `80451b3`) → `--features backend-candle --target all` resolves the SINGLE
+# gen-core rev 418f900d. The mlx-gen delta 43aa2bf..418f900d is exactly ONE additive PR (#542: the new
+# `gen-core` CLIP-text-embedder contract, +197 lines in lib/registry/text_embed) — the worker's import
+# surface is unchanged, MLX core does not rebuild beyond gen-core, so N1/skew-gate hold at one rev.
+# Further bumped `418f900d` -> `54e87e9` (epic 7153, sc-7189/sc-7158): adds gen-core's `core_llm`
+# re-export (`gen_core::core_llm`) the macOS prompt_refine path now consumes. The candle pin below moves
+# to `33d50a3` — a SUPERSET of `80451b3` (keeps Boogu Base/Turbo/Edit + flux2_dev Q4) that also carries
+# gen-core 54e87e9 — so `--features backend-candle --target all` still resolves the SINGLE gen-core rev
+# 54e87e9. 418f900d..54e87e9 is additive (the core_llm re-export + krea); mlx-rs unchanged (44929a0).
 sceneworks-gen-core = { git = "https://github.com/michaeltrefry/mlx-gen", rev = "54e87e995f1477176bba815814648ded1f2a65a4" }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
@@ -361,6 +379,11 @@ backend-candle = [
     "dep:candle-gen-ideogram",
     # sc-5484 (epic 3692): the candle Chroma image provider (chroma1_hd / chroma1_base / chroma1_flash).
     "dep:candle-gen-chroma",
+    # sc-7524 (epic 6831): the candle Boogu-Image-0.1 provider (`boogu_image` / `boogu_image_turbo` /
+    # `boogu_image_edit`). Base/Turbo T2I + the single-reference instruction-edit lane; bf16-only,
+    # Apache-2.0 ungated. Its `MODEL_TABLE` rows already exist (the MLX twin), so
+    # `engines::registry_capabilities` advertises them off-Mac with no further change.
+    "dep:candle-gen-boogu",
     # sc-5576 (epic 3692): the candle Kolors image provider (`kolors` — SDXL UNet + ChatGLM3-6B
     # encoder) and the candle SenseNova-U1 NEO-Unify image provider (`sensenova_u1_8b` +
     # `sensenova_u1_8b_fast`). Both pure T2I; their `MODEL_TABLE` rows already exist (MLX families), so
@@ -1016,6 +1039,17 @@ mlx-gen-scail2 = { git = "https://github.com/michaeltrefry/mlx-gen", rev = "54e8
 # — AND #132's gen-core re-pin 903f295 -> 04aa4aa (BYTE-IDENTICAL; same `gen-core/` tree SHA 5450444), so
 # `--features backend-candle --target all` resolves the SINGLE gen-core rev 04aa4aa shared with the mlx
 # pin. candle-gen #132 CI (macos-15 + ubuntu-latest fmt/clippy/check/test) green against 04aa4aa.
+# Rev 671cb13 -> 2dc0306 (sc-7491): documented in the mlx-pin block above (candle-gen #134 mirrored the
+# `ms` thread + re-pinned its gen-core to 43aa2bf in lockstep with the worker's mlx pin).
+# Rev 5ea4865 -> 80451b3 (sc-7524, epic 6831): re-pin candle-gen to main HEAD to ADD the `candle-gen-boogu`
+# Boogu-Image-0.1 provider (Windows/CUDA sibling of mlx-gen-boogu; registers `boogu_image` /
+# `boogu_image_turbo` / `boogu_image_edit`) the worker now links + force-links (boogu dep below), WHILE
+# keeping sc-7458's FLUX.2-dev Q4 lane (#137 / `5ea4865`). main HEAD `80451b3` carries #136 (Boogu
+# Base+Turbo) + #137 (flux2_dev) + #140 (Boogu Edit) + #141 — the FIRST rev with both the Edit and
+# flux2_dev (they were on divergent branches; see the mlx-pin block above for why a single 43aa2bf rev
+# can't carry both). `80451b3` pins gen-core 418f900d, matched by this worker's mlx pin (bumped 43aa2bf ->
+# 418f900d above) so `--features backend-candle --target all` resolves the SINGLE gen-core rev 418f900d.
+# Boogu is bf16-only on candle (the provider rejects on-the-fly quant), Apache-2.0 ungated (no gating UI).
 candle-gen-sdxl = { git = "https://github.com/michaeltrefry/candle-gen", rev = "33d50a3b4f4d57161923c72380ce7d6d31e0ad18", features = ["cuda"], optional = true }
 # Candle image providers (sc-5096) -- Windows/CUDA siblings of the mlx-gen image crates above. Each
 # self-registers its engine id into the shared gen_core inventory registry; force-linked in
@@ -1035,6 +1069,16 @@ candle-gen-ideogram = { git = "https://github.com/michaeltrefry/candle-gen", rev
 # guidance Approximator, T5-only conditioning, true-CFG). Force-linked in `image_jobs.rs`
 # (`use candle_gen_chroma as _;`). Same rev as the others (one candle build, single gen-core pin).
 candle-gen-chroma = { git = "https://github.com/michaeltrefry/candle-gen", rev = "33d50a3b4f4d57161923c72380ce7d6d31e0ad18", features = ["cuda"], optional = true }
+# Candle Boogu-Image-0.1 provider (sc-7524, epic 6831) — Windows/CUDA sibling of mlx-gen-boogu.
+# Self-registers THREE ids: `boogu_image` (Base, true-CFG T2I) + `boogu_image_turbo` (DMD few-step,
+# CFG-free) + `boogu_image_edit` (single-reference instruction TI2I — the source is VAE-encoded into the
+# DiT reference latent AND read by the Qwen3-VL vision tower). A ~10.3B Lumina-Image-2.0 / OmniGen2-lineage
+# hybrid MMDiT (8 double + 32 single + 2 refiner) + Qwen3-VL-8B condition encoder + the FLUX.1 16-ch VAE.
+# bf16-only on candle (the provider rejects on-the-fly Q4/Q8 — see `image_request_candle_eligible`'s quant
+# gate). Base/Turbo are pure T2I; Edit's reference is resolved in-lane by `generate_candle_stream` (like
+# Ideogram — NOT a separate bespoke stream). Force-linked in `image_jobs.rs` (`use candle_gen_boogu as _;`).
+# Same rev as the others (one candle build, single gen-core pin == the mlx pin 43aa2bf).
+candle-gen-boogu = { git = "https://github.com/michaeltrefry/candle-gen", rev = "33d50a3b4f4d57161923c72380ce7d6d31e0ad18", features = ["cuda"], optional = true }
 # Candle VIDEO providers (sc-5097) — Windows/CUDA siblings of mlx-gen-wan / mlx-gen-ltx. wan registers
 # `wan2_2_ti2v_5b` + the 14B MoE pair (`wan2_2_t2v_14b`/`wan2_2_i2v_14b`, sc-5175) + `wan_vace` (the
 # Wan-VACE controllable-video provider, sc-5494 / epic 5481, the worker routes replace_person /

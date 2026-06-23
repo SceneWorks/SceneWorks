@@ -450,6 +450,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "candle-gen-boogu"
+version = "0.0.0"
+source = "git+https://github.com/michaeltrefry/candle-gen?rev=33d50a3b4f4d57161923c72380ce7d6d31e0ad18#33d50a3b4f4d57161923c72380ce7d6d31e0ad18"
+dependencies = [
+ "candle-gen",
+ "candle-transformers",
+ "inventory",
+ "rand 0.9.4",
+ "rand_distr 0.5.1",
+ "serde_json",
+]
+
+[[package]]
 name = "candle-gen-chroma"
 version = "0.0.0"
 source = "git+https://github.com/michaeltrefry/candle-gen?rev=33d50a3b4f4d57161923c72380ce7d6d31e0ad18#33d50a3b4f4d57161923c72380ce7d6d31e0ad18"
@@ -5363,6 +5376,7 @@ version = "0.2.0"
 dependencies = [
  "axum",
  "candle-gen",
+ "candle-gen-boogu",
  "candle-gen-chroma",
  "candle-gen-face",
  "candle-gen-flux",
