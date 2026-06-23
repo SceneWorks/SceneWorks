@@ -3745,6 +3745,15 @@ const CANDLE_ROUTED_MODELS: &[&str] = &[
     "flux_schnell",
     "flux_dev",
     "flux2_klein_9b",
+    // FLUX.2-dev (epic 6564 sc-7458): the guidance-distilled 32B flagship, a SEPARATE candle engine
+    // from klein (Mistral3 TE + 48/48/15360 DiT), registered by `candle-gen-flux2`'s `flux2_dev`
+    // generator (sc-7457). Off-Mac the candle lane loads the dense `black-forest-labs/FLUX.2-dev`
+    // diffusers snapshot and Q4-quantizes it at load (CPU-stage → quantize-onto-GPU; the 32B doesn't
+    // fit the GPU dense) — the manifest `mlx.quantize: 4` + the dev descriptor's `supported_quants`
+    // drive that through the shared `resolve_quant` gate, so it needs no per-payload quant request and
+    // stays a pure **txt2img** id here. Edit / multi-reference / strict-pose shapes are rejected below
+    // (`image_request_candle_eligible`) and fall back to the Python torch worker until story 4 lands.
+    "flux2_dev",
     "qwen_image",
     "lens",
     "lens_turbo",
@@ -5959,6 +5968,9 @@ mod candle_routing_tests {
             "realvisxl_lightning",
             "z_image_turbo",
             "flux_dev",
+            // sc-7458: FLUX.2-dev (the 32B flagship) routes to candle for plain txt2img off-Mac (loads
+            // the dense snapshot + Q4-quantizes at load). Edit/reference shapes still defer (story 4).
+            "flux2_dev",
             "qwen_image",
             "chroma1_hd",
             "kolors",
@@ -6061,6 +6073,18 @@ mod candle_routing_tests {
             "model": "flux2_klein_9b_kv",
             "mode": "edit_image",
             "sourceAssetId": "asset_1"
+        }))));
+        // sc-7458: FLUX.2-dev is txt2img-only on candle in this slice. Its edit / multi-reference shapes
+        // (the `flux2_dev_edit` surface) are NOT a candle lane yet (epic 6564 story 4), so the candle
+        // worker does NOT claim them — they stay off the candle lane until that port lands.
+        assert!(!image_job_is_candle_eligible(&image_generate_job(json!({
+            "model": "flux2_dev",
+            "mode": "edit_image",
+            "sourceAssetId": "asset_1"
+        }))));
+        assert!(!image_job_is_candle_eligible(&image_generate_job(json!({
+            "model": "flux2_dev",
+            "referenceAssetId": "asset_1"
         }))));
         // sc-5487: a Qwen-Image-Edit edit (`edit_image` + a source) is now the candle `QwenEdit` lane
         // (dual-latent reference editing). Off-Mac this was a torch fallback; the candle worker CLAIMS

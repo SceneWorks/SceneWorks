@@ -196,9 +196,13 @@ pub(crate) const MODEL_TABLE: &[ModelRow] = &[
     // model `flux2_dev` (Mistral3 TE + 48/48/15360 DiT), NOT a klein weight variant, so it
     // maps to its own engine id. Embedded distilled guidance (FLUX.1-dev pattern, NOT
     // true-CFG): the descriptor advertises `supports_guidance` but not negative prompt, so
-    // the engine takes the guidance scalar (default 4.0) over ~28 steps. Loaded from a
-    // pre-quantized Q4 dir assembled by the install-time `flux2_dev_quant` convert job
-    // (sc-5917 / sc-5921) — in-app Q4 load of the dense bf16 snapshot would peak ~105 GB.
+    // the engine takes the guidance scalar (default 4.0) over ~28 steps. On MLX it loads
+    // from a pre-quantized Q4 dir assembled by the install-time `flux2_dev_quant` convert
+    // job (sc-5917 / sc-5921). On the **candle** off-Mac lane (sc-7458) there is no packed
+    // convert: it loads the dense `black-forest-labs/FLUX.2-dev` diffusers snapshot and
+    // Q4-quantizes it at load — the 32B dense never lands on the GPU (CPU-staged in system
+    // RAM, then `quantize_onto` the GPU; candle-gen-flux2 sc-7457). `resolve_quant` reads
+    // the manifest `mlx.quantize: 4` so the candle descriptor's Q4 support drives it.
     ModelRow {
         sceneworks_id: "flux2_dev",
         engine_id: "flux2_dev",
