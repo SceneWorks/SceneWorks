@@ -822,10 +822,8 @@ mod tests {
             else {
                 continue;
             };
-            for (axis, advertised) in [
-                ("samplers", &adv_samplers),
-                ("schedulers", &adv_schedulers),
-            ] {
+            for (axis, advertised) in [("samplers", &adv_samplers), ("schedulers", &adv_schedulers)]
+            {
                 if let Some(list) = effective_list(model, backend, axis) {
                     for name in list {
                         if name == "default" {
@@ -862,7 +860,10 @@ mod tests {
             let (samplers, schedulers) = bespoke_advertised(id)
                 .unwrap_or_else(|| panic!("{id}: bespoke_advertised must resolve an engine menu"));
             assert!(!samplers.is_empty(), "{id}: sampler menu must be non-empty");
-            assert!(!schedulers.is_empty(), "{id}: scheduler menu must be non-empty");
+            assert!(
+                !schedulers.is_empty(),
+                "{id}: scheduler menu must be non-empty"
+            );
             // The manifest advertises euler + heun for both; the engine must honor them.
             for solver in ["euler", "heun"] {
                 assert!(
