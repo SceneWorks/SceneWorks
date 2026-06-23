@@ -425,6 +425,30 @@ pub(crate) fn validate_dataset_analysis_job_request(
     Ok(())
 }
 
+/// Persist the analysis worker's computed CLIP embeddings to the dataset's content-hash-keyed
+/// sidecar (sc-6535) — the embedding-side analog of `write_training_dataset_caption_sidecars`. A
+/// metadata write: it does not bump the dataset version. Returns the count stored.
+pub(crate) async fn write_training_dataset_analysis_embeddings(
+    State(state): State<AppState>,
+    Path((project_id, dataset_id)): Path<(String, String)>,
+    ApiJson(payload): ApiJson<DatasetEmbeddingsBody>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let embeddings = sceneworks_core::dataset_quality::DatasetEmbeddings {
+        space: payload.space,
+        embeddings: payload
+            .items
+            .into_iter()
+            .map(|record| (record.content_hash, record.embedding))
+            .collect(),
+    };
+    let stored = embeddings.embeddings.len();
+    project_call(state, move |store| {
+        store.write_dataset_embeddings(&project_id, &dataset_id, &embeddings)
+    })
+    .await?;
+    Ok(Json(json!({ "stored": stored })))
+}
+
 pub(crate) fn validate_training_caption_job_request(
     payload: &TrainingCaptionJobRequest,
 ) -> Result<(), ApiError> {

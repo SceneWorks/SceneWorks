@@ -5,7 +5,7 @@ use rusqlite::{params, Connection};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::dataset_quality::{CachedTier0Scalars, QualityAck, QualityCheck};
+use crate::dataset_quality::{CachedTier0Scalars, DatasetEmbeddings, QualityAck, QualityCheck};
 use crate::project_store::{apply_project_migrations, ProjectStoreError, ProjectStoreResult};
 use crate::store_util::{
     atomic_write, ensure_column, is_safe_id, is_safe_relative_path, parse_string_enum, random_hex,
@@ -18,6 +18,9 @@ use crate::training::{
 };
 
 const DATASET_MANIFEST_NAME: &str = "dataset.sceneworks.training-dataset.json";
+// Tier-1 CLIP embeddings sidecar (sc-6535) — kept out of the manifest (768×f32 per item is too big
+// to inline like tier0_scalars); content-hash-keyed so it survives dataset edits.
+const DATASET_EMBEDDINGS_NAME: &str = "dataset.sceneworks.embeddings.json";
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -318,6 +321,40 @@ impl TrainingDatasetStore {
             self.save_dataset(&dataset)?;
         }
         Ok(())
+    }
+
+    /// Persist the dataset's CLIP image embeddings to the content-hash-keyed sidecar (sc-6535).
+    /// Like `cache_tier0_scalars` this is a metadata write — it does NOT bump the dataset version
+    /// (the pixels didn't change). The analysis job sends the full set, so the sidecar is replaced.
+    pub fn write_dataset_embeddings(
+        &self,
+        project_id: &str,
+        dataset_id: &str,
+        embeddings: &DatasetEmbeddings,
+    ) -> ProjectStoreResult<()> {
+        let dataset = self.read_dataset_by_id(dataset_id)?;
+        ensure_dataset_project(project_id, &dataset)?;
+        write_json(
+            &dataset_embeddings_path(&self.project_path, dataset_id),
+            embeddings,
+        )
+    }
+
+    /// Read the dataset's persisted CLIP embeddings, or `None` when the analysis job hasn't run yet.
+    pub fn read_dataset_embeddings(
+        &self,
+        project_id: &str,
+        dataset_id: &str,
+    ) -> ProjectStoreResult<Option<DatasetEmbeddings>> {
+        let dataset = self.read_dataset_by_id(dataset_id)?;
+        ensure_dataset_project(project_id, &dataset)?;
+        match fs::read(dataset_embeddings_path(&self.project_path, dataset_id)) {
+            Ok(bytes) => Ok(Some(
+                serde_json::from_slice(&bytes).map_err(ProjectStoreError::Json)?,
+            )),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(error) => Err(ProjectStoreError::Io(error)),
+        }
     }
 
     /// Persist (or clear) a per-image quality override (sc-6534). `checks` are the findings the user
@@ -1182,6 +1219,10 @@ pub(crate) fn dataset_root(project_path: &Path, dataset_id: &str) -> PathBuf {
 
 fn dataset_manifest_path(project_path: &Path, dataset_id: &str) -> PathBuf {
     dataset_root(project_path, dataset_id).join(DATASET_MANIFEST_NAME)
+}
+
+fn dataset_embeddings_path(project_path: &Path, dataset_id: &str) -> PathBuf {
+    dataset_root(project_path, dataset_id).join(DATASET_EMBEDDINGS_NAME)
 }
 
 fn replace_dataset_media_dir(

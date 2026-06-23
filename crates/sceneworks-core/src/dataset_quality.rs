@@ -844,6 +844,19 @@ pub struct ItemEmbedding {
     pub acknowledged: Vec<QualityCheck>,
 }
 
+/// Persisted CLIP image embeddings for a dataset (sc-6535) — too large to inline in the manifest
+/// (768×f32 per item), so they live in a content-hash-keyed sidecar file
+/// (`dataset.sceneworks.embeddings.json`). Reused across edits: an item whose bytes are unchanged
+/// keeps its embedding. The readiness path maps each item's `content_hash` → embedding → [`ItemEmbedding`].
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DatasetEmbeddings {
+    /// The embedding space (e.g. `"clip-vit-l14"`); guards against mixing encoders on reuse.
+    pub space: String,
+    /// `content_hash` → raw embedding (the encoder's un-normalized output).
+    pub embeddings: std::collections::BTreeMap<String, Vec<f32>>,
+}
+
 /// Tier-1 thresholds (sc-6536). **Placeholders pending calibration** (sc-6535 §8) — a fixture sweep
 /// over a near-dup-heavy set and a healthy diverse set sets these, not these guesses.
 #[derive(Debug, Clone, Copy, PartialEq)]

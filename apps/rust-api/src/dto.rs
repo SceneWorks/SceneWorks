@@ -385,6 +385,25 @@ pub(crate) struct DatasetAnalysisJobRequest {
     pub(crate) item_ids: Option<Vec<String>>,
 }
 
+/// The analysis worker POSTs its computed CLIP embeddings here to persist the sidecar (sc-6535) —
+/// the embedding-side analog of the caption job's `/caption-sidecars` write.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct DatasetEmbeddingsBody {
+    /// The embedding space (e.g. `clip-vit-l14`).
+    pub(crate) space: String,
+    pub(crate) items: Vec<DatasetEmbeddingRecord>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct DatasetEmbeddingRecord {
+    /// The item's content hash (the sidecar key — survives dataset edits).
+    pub(crate) content_hash: String,
+    /// The raw (un-normalized) embedding vector.
+    pub(crate) embedding: Vec<f32>,
+}
+
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct TrainingCaptionOptions {

@@ -1373,6 +1373,25 @@ async fn training_dataset_routes_persist_and_validate_project_assets() {
     .await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
 
+    // sc-6535: the analysis worker persists its computed embeddings to the content-hash-keyed sidecar.
+    let (status, stored) = request(
+        reloaded_app.clone(),
+        "POST",
+        &format!(
+            "/api/v1/projects/{project_id}/training/datasets/{dataset_id}/analysis-embeddings"
+        ),
+        json!({
+            "space": "clip-vit-l14",
+            "items": [
+                { "contentHash": "hash_a", "embedding": [1.0, 0.0, 0.0] },
+                { "contentHash": "hash_b", "embedding": [0.0, 1.0, 0.0] }
+            ]
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(stored["stored"], 2);
+
     let (status, renamed) = request(
         reloaded_app.clone(),
         "POST",
