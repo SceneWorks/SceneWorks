@@ -341,3 +341,55 @@ pub(crate) async fn run_dataset_analysis_job(
             .to_owned(),
     ))
 }
+
+#[cfg(all(test, target_os = "macos"))]
+mod real_weights_tests {
+    use super::*;
+
+    /// Real-weights worker integration (sc-6535): proves the *worker binary* force-links
+    /// `mlx-gen-clip` (so `gen_core::load_image_embedder("clip_vit_l14")` resolves **and loads** —
+    /// not just that the descriptor links, which the capability test already covers), and that the
+    /// worker's `load_analysis_image` feeds a real image file into the real CLIP forward. `#[ignore]`
+    /// per convention — the weights live outside CI; run on a Mac with the snapshot cached + Metal.
+    #[test]
+    #[ignore = "real-weight: needs the openai/clip-vit-large-patch14 snapshot in the HF cache + Metal"]
+    fn embeds_a_real_image_file_through_the_worker_seam() {
+        // Locate the cached snapshot (mirrors prompt_refine_jobs.rs's HF-cache resolution).
+        let home = std::env::var("HOME").expect("HOME");
+        let snapshots = std::path::Path::new(&home)
+            .join(".cache/huggingface/hub/models--openai--clip-vit-large-patch14/snapshots");
+        let weights_dir = std::fs::read_dir(&snapshots)
+            .expect("openai/clip-vit-large-patch14 snapshot dir is cached")
+            .filter_map(Result::ok)
+            .map(|entry| entry.path())
+            .find(|path| path.is_dir())
+            .expect("a snapshot subdir");
+
+        // Write a real (non-uniform) PNG and decode it through the worker's image path.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let image_path = dir.path().join("probe.png");
+        let mut buf = image::RgbImage::new(64, 64);
+        for (x, _y, px) in buf.enumerate_pixels_mut() {
+            *px = image::Rgb([(x * 4) as u8, 120, 200]);
+        }
+        buf.save(&image_path).expect("encode probe png");
+        let image = load_analysis_image(&image_path).expect("decode via the worker image path");
+        assert_eq!((image.width, image.height), (64, 64));
+
+        // Load the embedder through the worker's gen_core seam, then run the real CLIP forward.
+        let embedder = gen_core::load_image_embedder(
+            CLIP_EMBEDDER_ID,
+            &LoadSpec::new(WeightsSource::Dir(weights_dir)),
+        )
+        .expect("the worker binary links + loads mlx-gen-clip's clip_vit_l14");
+        assert_eq!(embedder.descriptor().embedding_dim, 768);
+
+        let embedding = embedder.embed(&image).expect("real CLIP embed");
+        assert_eq!(embedding.len(), 768, "CLIP ViT-L/14 embedding is 768-d");
+        assert!(
+            embedding.iter().all(|v| v.is_finite()) && embedding.iter().any(|&v| v != 0.0),
+            "embedding is finite + non-degenerate"
+        );
+        println!("worker clip ok: dim={}", embedding.len());
+    }
+}
