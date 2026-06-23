@@ -1,0 +1,218 @@
+import React, { act } from "react";
+import { createRoot } from "react-dom/client";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+
+import {
+  DatasetDoctorDistributions,
+  DatasetDoctorReadout,
+  ReadinessBadge,
+  ReadinessFlagDetails,
+} from "./DatasetDoctor.jsx";
+
+// Render helper mirroring the project's createRoot + act convention (no testing-library).
+let container;
+let root;
+
+beforeEach(() => {
+  global.IS_REACT_ACT_ENVIRONMENT = true;
+  container = document.createElement("div");
+  document.body.appendChild(container);
+  root = createRoot(container);
+});
+
+afterEach(async () => {
+  await act(async () => root.unmount());
+  container.remove();
+});
+
+function mount(node) {
+  act(() => root.render(node));
+}
+
+function report(overrides = {}) {
+  return {
+    gate: "needs_attention",
+    subScores: { technical: 0.8 },
+    counts: { info: 0, warn: 2, fatal: 0 },
+    itemCount: 5,
+    items: [],
+    datasetFlags: [],
+    ...overrides,
+  };
+}
+
+describe("DatasetDoctorReadout gating states", () => {
+  it("renders nothing for an unsaved draft (no report, not loading)", () => {
+    mount(<DatasetDoctorReadout report={null} loading={false} />);
+    expect(container.querySelector(".dataset-doctor")).toBeNull();
+  });
+
+  it("shows a pending state while the first fetch is in flight", () => {
+    mount(<DatasetDoctorReadout report={null} loading />);
+    expect(container.textContent).toContain("Checking dataset");
+  });
+
+  it("renders the gate headline, meter, and summary for a warnable set", () => {
+    mount(
+      <DatasetDoctorReadout
+        report={report({
+          itemCount: 18,
+          items: [
+            { itemId: "a", severity: "warn", flags: [{ check: "blur", severity: "warn" }] },
+            { itemId: "b", severity: "warn", flags: [{ check: "blur", severity: "warn" }] },
+          ],
+        })}
+      />,
+    );
+    const node = container.querySelector(".dataset-doctor");
+    expect(node.className).toContain("tone-warn");
+    expect(container.textContent).toContain("Trainable");
+    expect(container.textContent).toContain("18 photos.");
+    expect(container.textContent).toContain("2 look blurry");
+    // Technical sub-score drives the meter width.
+    expect(container.querySelector(".dataset-doctor-meter-fill").style.width).toBe("80%");
+  });
+
+  it("renders the blocked headline when the set is untrainable", () => {
+    mount(
+      <DatasetDoctorReadout
+        report={report({
+          gate: "blocked",
+          itemCount: 3,
+          counts: { info: 0, warn: 0, fatal: 1 },
+          datasetFlags: [{ check: "count", severity: "fatal", value: 3, threshold: 15 }],
+        })}
+      />,
+    );
+    expect(container.querySelector(".dataset-doctor").className).toContain("tone-fatal");
+    expect(container.textContent).toContain("Not ready to train");
+    expect(container.textContent).toContain("add 12 more");
+  });
+
+  it("renders a ready set as ready", () => {
+    mount(<DatasetDoctorReadout report={report({ gate: "ready", itemCount: 20, counts: { info: 0, warn: 0, fatal: 0 } })} />);
+    expect(container.querySelector(".dataset-doctor").className).toContain("tone-good");
+    expect(container.textContent).toContain("Ready to train");
+  });
+});
+
+describe("ReadinessBadge gating states", () => {
+  it("is pending (never good) for an item the report has not covered", () => {
+    mount(<ReadinessBadge entry={undefined} />);
+    const badge = container.querySelector(".dataset-doctor-badge");
+    expect(badge.className).toContain("tone-pending");
+    expect(badge.getAttribute("title")).toBe("Not assessed yet");
+  });
+
+  it("is pending while loading", () => {
+    mount(<ReadinessBadge entry={undefined} loading />);
+    expect(container.querySelector(".dataset-doctor-badge").className).toContain("tone-pending");
+  });
+
+  it("is good for a covered, clean item", () => {
+    mount(<ReadinessBadge entry={{ severity: undefined, flags: [] }} />);
+    expect(container.querySelector(".dataset-doctor-badge").className).toContain("tone-good");
+  });
+
+  it("surfaces the worst-flag reason for a warned item", () => {
+    mount(<ReadinessBadge entry={{ severity: "warn", flags: [{ check: "blur", severity: "warn" }] }} />);
+    const badge = container.querySelector(".dataset-doctor-badge");
+    expect(badge.className).toContain("tone-warn");
+    expect(badge.getAttribute("title")).toContain("blurry");
+  });
+
+  it("is fatal for an untrainable item", () => {
+    mount(<ReadinessBadge entry={{ severity: "fatal", flags: [{ check: "decode", severity: "fatal" }] }} />);
+    expect(container.querySelector(".dataset-doctor-badge").className).toContain("tone-fatal");
+  });
+});
+
+describe("ReadinessFlagDetails (Advanced raw numbers)", () => {
+  it("renders nothing for a clean item", () => {
+    mount(<ReadinessFlagDetails entry={{ flags: [] }} />);
+    expect(container.querySelector(".dataset-doctor-flags")).toBeNull();
+  });
+
+  it("shows the raw value and threshold behind a flag", () => {
+    mount(
+      <ReadinessFlagDetails
+        entry={{ flags: [{ check: "blur", severity: "warn", value: 42, threshold: 100 }] }}
+      />,
+    );
+    expect(container.textContent).toContain("blurry");
+    expect(container.textContent).toContain("sharpness");
+    expect(container.textContent).toContain("42");
+    expect(container.textContent).toContain("threshold 100");
+  });
+
+  it("keeps sub-one fractions readable (e.g. clip/crop)", () => {
+    mount(
+      <ReadinessFlagDetails
+        entry={{ flags: [{ check: "exposure", severity: "warn", value: 0.0734, threshold: 0.05 }] }}
+      />,
+    );
+    expect(container.textContent).toContain("0.073");
+  });
+
+  it("offers Dismiss on an active finding and calls back to acknowledge it", () => {
+    const onToggle = vi.fn();
+    mount(
+      <ReadinessFlagDetails
+        entry={{ flags: [{ check: "blur", severity: "warn", value: 40, threshold: 100 }] }}
+        onToggle={onToggle}
+      />,
+    );
+    const button = container.querySelector(".dataset-doctor-flag-toggle");
+    expect(button.textContent).toBe("Dismiss");
+    act(() => button.dispatchEvent(new window.MouseEvent("click", { bubbles: true })));
+    expect(onToggle).toHaveBeenCalledWith("blur", true);
+  });
+
+  it("shows a dismissed finding struck-through with an Undo affordance", () => {
+    const onToggle = vi.fn();
+    mount(
+      <ReadinessFlagDetails
+        entry={{ flags: [{ check: "blur", severity: "warn", value: 40, threshold: 100, acknowledged: true }] }}
+        onToggle={onToggle}
+      />,
+    );
+    const li = container.querySelector(".dataset-doctor-flags li");
+    expect(li.className).toContain("dismissed");
+    const button = container.querySelector(".dataset-doctor-flag-toggle");
+    expect(button.textContent).toBe("Undo");
+    act(() => button.dispatchEvent(new window.MouseEvent("click", { bubbles: true })));
+    expect(onToggle).toHaveBeenCalledWith("blur", false);
+  });
+
+  it("does not offer to dismiss a non-acknowledgeable finding (decode)", () => {
+    mount(
+      <ReadinessFlagDetails entry={{ flags: [{ check: "decode", severity: "warn" }] }} onToggle={() => {}} />,
+    );
+    expect(container.querySelector(".dataset-doctor-flag-toggle")).toBeNull();
+  });
+});
+
+describe("DatasetDoctorDistributions", () => {
+  it("renders nothing without distributions", () => {
+    mount(<DatasetDoctorDistributions report={{ gate: "ready" }} />);
+    expect(container.querySelector(".dataset-doctor-distributions")).toBeNull();
+  });
+
+  it("draws a histogram per metric with the threshold marked", () => {
+    mount(
+      <DatasetDoctorDistributions
+        report={{
+          distributions: {
+            blurVariance: { values: [10, 200, 400, 50], threshold: 100, higherIsBetter: true },
+            shadowClip: { values: [0, 0.01, 0.2], threshold: 0.05, higherIsBetter: false },
+            highlightClip: { values: [0, 0, 0], threshold: 0.05, higherIsBetter: false },
+          },
+        }}
+      />,
+    );
+    expect(container.querySelectorAll(".dataset-doctor-histogram").length).toBe(3);
+    expect(container.querySelectorAll(".dataset-doctor-histogram-threshold").length).toBe(3);
+    expect(container.textContent).toContain("Sharpness");
+    expect(container.textContent).toContain("higher is better");
+  });
+});

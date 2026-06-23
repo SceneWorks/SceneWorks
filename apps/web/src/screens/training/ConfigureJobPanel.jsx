@@ -1,6 +1,7 @@
 import React from "react";
 
 import { Icon } from "../../components/Icons.jsx";
+import { DatasetDoctorReadout } from "./DatasetDoctor.jsx";
 import {
   lossTypeOptions,
   networkTypeLabel,
@@ -57,6 +58,9 @@ export function ConfigureJobPanel({
   resetConfigDefaults,
   submitTrainingJob,
   configSnapshot,
+  readiness = null,
+  readinessLoading = false,
+  readinessBlocksTraining = false,
 }) {
   return (
     <>
@@ -395,6 +399,16 @@ export function ConfigureJobPanel({
             </div>
           ) : null}
 
+          {/* Dataset Doctor readout before the Train button (sc-6534). Advisory: it
+              only hard-blocks training when the gate is Blocked (too few images / a
+              fatal flag); warnings stay informational. */}
+          <DatasetDoctorReadout report={readiness} loading={readinessLoading} compact />
+          {readinessBlocksTraining ? (
+            <p className="inline-warning">
+              This dataset isn’t ready to train yet — open Data Sets to add or fix images.
+            </p>
+          ) : null}
+
           <div className="training-config-actions">
             <label className="training-run-mode">
               <span>Run mode</span>
@@ -413,7 +427,7 @@ export function ConfigureJobPanel({
             </button>
             <button
               className="primary-action"
-              disabled={!configReady || submittingJob}
+              disabled={!configReady || submittingJob || readinessBlocksTraining}
               onClick={submitTrainingJob}
               type="button"
             >

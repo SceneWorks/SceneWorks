@@ -5,6 +5,7 @@ use rusqlite::{params, Connection};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+use crate::dataset_quality::{CachedTier0Scalars, QualityAck, QualityCheck};
 use crate::project_store::{apply_project_migrations, ProjectStoreError, ProjectStoreResult};
 use crate::store_util::{
     atomic_write, ensure_column, is_safe_id, is_safe_relative_path, parse_string_enum, random_hex,
@@ -287,6 +288,77 @@ impl TrainingDatasetStore {
         dataset.updated_at = utc_now();
         self.save_dataset(&dataset)?;
         Ok(dataset)
+    }
+
+    /// Persist freshly-extracted Tier-0 scalars onto matching dataset items as the content-hash +
+    /// bucket-keyed cache (sc-6533). This is a derived-metadata write: it does **not** bump the
+    /// dataset version or `updated_at` (the pixels didn't change, only our cache of measurements),
+    /// and it silently skips ids no longer present — the set may have been edited between the
+    /// readiness read and this write, and a stale entry self-invalidates via
+    /// [`CachedTier0Scalars::valid_for`].
+    pub fn cache_tier0_scalars(
+        &self,
+        project_id: &str,
+        dataset_id: &str,
+        updates: &[(String, CachedTier0Scalars)],
+    ) -> ProjectStoreResult<()> {
+        if updates.is_empty() {
+            return Ok(());
+        }
+        let mut dataset = self.read_dataset_by_id(dataset_id)?;
+        ensure_dataset_project(project_id, &dataset)?;
+        let mut changed = false;
+        for item in &mut dataset.items {
+            if let Some(entry) = updates.iter().find(|(id, _)| id == &item.id) {
+                item.tier0_scalars = Some(entry.1.clone());
+                changed = true;
+            }
+        }
+        if changed {
+            self.save_dataset(&dataset)?;
+        }
+        Ok(())
+    }
+
+    /// Persist (or clear) a per-image quality override (sc-6534). `checks` are the findings the user
+    /// dismissed for the image; the non-acknowledgeable ones (`Decode` is untrainable, `Count` is
+    /// dataset-level) are stripped, and an empty result clears any existing ack. Like
+    /// `cache_tier0_scalars` this is a metadata write — it does NOT bump the dataset version (the
+    /// pixels didn't change). The ack is keyed by the item's current content hash so it self-voids
+    /// via [`QualityAck::valid_for`] if the image is later replaced. Returns the stored ack (or
+    /// `None` when cleared) so the caller can confirm what was actually kept.
+    pub fn set_item_quality_ack(
+        &self,
+        project_id: &str,
+        dataset_id: &str,
+        item_id: &str,
+        checks: &[QualityCheck],
+    ) -> ProjectStoreResult<Option<QualityAck>> {
+        let mut dataset = self.read_dataset_by_id(dataset_id)?;
+        ensure_dataset_project(project_id, &dataset)?;
+        let item = dataset
+            .items
+            .iter_mut()
+            .find(|item| item.id == item_id)
+            .ok_or_else(|| {
+                ProjectStoreError::NotFound("Training dataset item not found".to_owned())
+            })?;
+        let kept: Vec<QualityCheck> = checks
+            .iter()
+            .filter(|check| !matches!(check, QualityCheck::Decode | QualityCheck::Count))
+            .cloned()
+            .collect();
+        // A hashless item (shouldn't happen post-upload) can't be keyed, so it also clears.
+        let ack = match (kept.is_empty(), item.content_hash.clone()) {
+            (false, Some(content_hash)) => Some(QualityAck {
+                content_hash,
+                checks: kept,
+            }),
+            _ => None,
+        };
+        item.quality_ack = ack.clone();
+        self.save_dataset(&dataset)?;
+        Ok(ack)
     }
 
     pub fn batch_rename_dataset_items(
@@ -741,6 +813,21 @@ fn materialize_item(
     }
     fs::copy(&source.path, &target_path)?;
     let caption = input.caption.unwrap_or_default();
+    // sc-6531 (Dataset Doctor): every item must carry real pixel dimensions + a content hash —
+    // the foundation Tier-0 checks (min-resolution, crop-loss, exact-dup) rely on. Prefer
+    // caller-/asset-provided dimensions; otherwise read them from the stored file's header
+    // (covers path uploads and library assets with no recorded size, and backfills on any
+    // re-materialize). The read is header-only and the hash streams the file — neither decodes
+    // the image, so core stays codec-free.
+    let mut width = input.width.or(source.width);
+    let mut height = input.height.or(source.height);
+    if width.is_none() || height.is_none() {
+        if let Some((file_w, file_h)) = crate::media_convert::image_dimensions(&target_path) {
+            width = width.or(Some(file_w));
+            height = height.or(Some(file_h));
+        }
+    }
+    let content_hash = crate::media_convert::file_content_hash(&target_path).ok();
     Ok(TrainingDatasetItem {
         id: item_id,
         asset_id: source.asset_id,
@@ -753,8 +840,14 @@ fn materialize_item(
             updated_at: Some(now.to_owned()),
             extra: Default::default(),
         },
-        width: input.width.or(source.width),
-        height: input.height.or(source.height),
+        width,
+        height,
+        content_hash,
+        // Fresh file → no cached Tier-0 scalars yet; the readiness endpoint fills them lazily
+        // (and re-fills when content hash or bucket edge changes). sc-6533.
+        tier0_scalars: None,
+        // Fresh file → no dismissed findings yet (sc-6534).
+        quality_ack: None,
         added_at: now.to_owned(),
         extra: Default::default(),
     })
@@ -1128,7 +1221,37 @@ fn remove_optional_dir(path: Option<PathBuf>) -> ProjectStoreResult<()> {
 
 fn read_dataset(path: &Path) -> ProjectStoreResult<TrainingDataset> {
     let payload = fs::read_to_string(path)?;
-    Ok(serde_json::from_str(&payload)?)
+    let mut dataset: TrainingDataset = serde_json::from_str(&payload)?;
+    // sc-6531 (Dataset Doctor): lazily backfill dimensions for items written before we measured
+    // them, so *every* item carries accurate width/height (the foundation Tier-0 relies on). The
+    // manifest lives at `<dataset_root>/<manifest>`, so its parent is the dataset root the item
+    // paths are relative to. Header-only reads, in-memory only — a read never rewrites the
+    // manifest; a later save persists the filled values opportunistically. The `is_some` guard
+    // makes this zero-I/O once dimensions are present (the steady state after this ships).
+    if let Some(dataset_root) = path.parent() {
+        backfill_missing_dimensions(dataset_root, &mut dataset);
+    }
+    Ok(dataset)
+}
+
+/// Fill absent `width`/`height` on dataset items from their on-disk image headers (sc-6531).
+/// Skips items that already have both dimensions or whose stored path is unsafe; a missing or
+/// unreadable file leaves the item untouched (best-effort, never fails the read).
+fn backfill_missing_dimensions(dataset_root: &Path, dataset: &mut TrainingDataset) {
+    for item in &mut dataset.items {
+        if item.width.is_some() && item.height.is_some() {
+            continue;
+        }
+        if !is_safe_relative_path(&item.path) {
+            continue;
+        }
+        if let Some((width, height)) =
+            crate::media_convert::image_dimensions(&dataset_root.join(&item.path))
+        {
+            item.width = item.width.or(Some(width));
+            item.height = item.height.or(Some(height));
+        }
+    }
 }
 
 fn write_text(path: &Path, payload: &str) -> ProjectStoreResult<()> {
@@ -1196,4 +1319,160 @@ fn optional_u32(value: Option<&Value>) -> Option<u32> {
     value
         .and_then(Value::as_u64)
         .and_then(|value| u32::try_from(value).ok())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::dataset_quality::Tier0Scalars;
+
+    fn item(id: &str, content_hash: &str) -> TrainingDatasetItem {
+        TrainingDatasetItem {
+            id: id.to_owned(),
+            asset_id: None,
+            path: format!("images/{id}.png"),
+            display_name: id.to_owned(),
+            caption: Caption {
+                text: String::new(),
+                source: CaptionSource::Manual,
+                trigger_words: Vec::new(),
+                updated_at: None,
+                extra: Default::default(),
+            },
+            width: Some(512),
+            height: Some(512),
+            content_hash: Some(content_hash.to_owned()),
+            tier0_scalars: None,
+            quality_ack: None,
+            added_at: utc_now(),
+            extra: Default::default(),
+        }
+    }
+
+    fn saved_dataset(project_path: &Path) -> TrainingDatasetStore {
+        let dataset = TrainingDataset {
+            schema_version: TRAINING_CONTRACT_SCHEMA_VERSION,
+            id: "ds_test".to_owned(),
+            version: 1,
+            project_id: Some("proj".to_owned()),
+            character_id: None,
+            name: "Test".to_owned(),
+            modality: TrainingModality::Image,
+            status: TrainingDatasetStatus::Draft,
+            created_at: utc_now(),
+            updated_at: utc_now(),
+            items: vec![item("item_1", "h1"), item("item_2", "h2")],
+            extra: Default::default(),
+        };
+        let store = TrainingDatasetStore::new(project_path.to_path_buf());
+        store.save_dataset(&dataset).expect("save dataset");
+        store
+    }
+
+    fn cache_entry(content_hash: &str, bucket_edge: u32) -> CachedTier0Scalars {
+        CachedTier0Scalars {
+            content_hash: content_hash.to_owned(),
+            bucket_edge,
+            scalars: Tier0Scalars {
+                blur_variance: 1234.0,
+                shadow_clip: 0.0,
+                highlight_clip: 0.0,
+                phash: vec![1, 2, 3, 4, 5, 6, 7, 8],
+            },
+        }
+    }
+
+    #[test]
+    fn cache_tier0_scalars_persists_only_matching_items_without_bumping_version() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let store = saved_dataset(dir.path());
+
+        let updates = vec![("item_1".to_owned(), cache_entry("h1", 512))];
+        store
+            .cache_tier0_scalars("proj", "ds_test", &updates)
+            .expect("cache scalars");
+
+        let reloaded = store.get_dataset("proj", "ds_test").expect("reload");
+        let item_1 = reloaded.items.iter().find(|i| i.id == "item_1").unwrap();
+        let cached = item_1.tier0_scalars.as_ref().expect("item_1 has cache");
+        assert_eq!(cached.content_hash, "h1");
+        assert_eq!(cached.bucket_edge, 512);
+        assert_eq!(cached.scalars.blur_variance, 1234.0);
+
+        // The unaddressed item stays uncached, and a metadata write leaves the version untouched.
+        let item_2 = reloaded.items.iter().find(|i| i.id == "item_2").unwrap();
+        assert!(item_2.tier0_scalars.is_none());
+        assert_eq!(reloaded.version, 1);
+    }
+
+    #[test]
+    fn cache_tier0_scalars_ignores_unknown_ids() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let store = saved_dataset(dir.path());
+
+        store
+            .cache_tier0_scalars(
+                "proj",
+                "ds_test",
+                &[("ghost".to_owned(), cache_entry("hx", 512))],
+            )
+            .expect("unknown id is a no-op");
+
+        let reloaded = store.get_dataset("proj", "ds_test").expect("reload");
+        assert!(reloaded.items.iter().all(|i| i.tier0_scalars.is_none()));
+    }
+
+    #[test]
+    fn set_item_quality_ack_strips_unacknowledgeable_and_keys_by_hash() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let store = saved_dataset(dir.path());
+
+        // Blur is dismissable; Decode (untrainable) and the dataset-level Count are stripped.
+        let stored = store
+            .set_item_quality_ack(
+                "proj",
+                "ds_test",
+                "item_1",
+                &[
+                    QualityCheck::Blur,
+                    QualityCheck::Decode,
+                    QualityCheck::Count,
+                ],
+            )
+            .expect("set ack")
+            .expect("ack stored");
+        assert_eq!(stored.checks, vec![QualityCheck::Blur]);
+        assert_eq!(
+            stored.content_hash, "h1",
+            "keyed by the item's current hash"
+        );
+
+        let reloaded = store.get_dataset("proj", "ds_test").expect("reload");
+        let item_1 = reloaded.items.iter().find(|i| i.id == "item_1").unwrap();
+        assert_eq!(
+            item_1.quality_ack.as_ref().map(|a| a.checks.clone()),
+            Some(vec![QualityCheck::Blur])
+        );
+        // Metadata write: the version is untouched.
+        assert_eq!(reloaded.version, 1);
+    }
+
+    #[test]
+    fn set_item_quality_ack_clears_on_empty() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let store = saved_dataset(dir.path());
+
+        store
+            .set_item_quality_ack("proj", "ds_test", "item_1", &[QualityCheck::Blur])
+            .expect("set ack");
+        // An empty set (or a set of only unacknowledgeable checks) clears the override.
+        let cleared = store
+            .set_item_quality_ack("proj", "ds_test", "item_1", &[QualityCheck::Decode])
+            .expect("clear ack");
+        assert!(cleared.is_none());
+
+        let reloaded = store.get_dataset("proj", "ds_test").expect("reload");
+        let item_1 = reloaded.items.iter().find(|i| i.id == "item_1").unwrap();
+        assert!(item_1.quality_ack.is_none());
+    }
 }

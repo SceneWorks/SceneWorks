@@ -27,6 +27,7 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use serde_json::{json, Value};
 
 use crate::contracts::{string_enum, ContractNumber, ExtraFields, JsonObject};
+use crate::dataset_quality::{CachedTier0Scalars, QualityAck};
 use crate::store_util::is_safe_relative_path;
 
 /// Schema version stamped on persisted training contracts.
@@ -122,6 +123,18 @@ pub struct TrainingDatasetItem {
     pub width: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub height: Option<u32>,
+    /// SHA-256 (lowercase hex) of the stored image bytes (sc-6531). Exact-duplicate key for
+    /// Tier-0 and the cache key for Tier-1 embeddings (epic 6529 Dataset Doctor).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub content_hash: Option<String>,
+    /// Cached Tier-0 pixel scalars (sc-6533), keyed inside the cache by content hash + bucket edge
+    /// so switching training resolution re-extracts. Filled lazily by the readiness endpoint.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tier0_scalars: Option<CachedTier0Scalars>,
+    /// The user's dismissed quality findings for this image (sc-6534 per-image override), keyed by
+    /// content hash so a dismissal voids if the image is replaced. Honored by the readiness endpoint.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub quality_ack: Option<QualityAck>,
     pub added_at: String,
     #[serde(flatten)]
     pub extra: ExtraFields,

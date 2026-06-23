@@ -720,6 +720,14 @@ pub(crate) fn create_app_with_state(
                 .delete(delete_training_dataset),
         )
         .route(
+            "/api/v1/projects/:project_id/training/datasets/:dataset_id/readiness",
+            get(get_training_dataset_readiness),
+        )
+        .route(
+            "/api/v1/projects/:project_id/training/datasets/:dataset_id/items/:item_id/quality-ack",
+            post(set_training_dataset_item_quality_ack),
+        )
+        .route(
             "/api/v1/projects/:project_id/training/datasets/:dataset_id/batch-rename",
             post(batch_rename_training_dataset_items),
         )

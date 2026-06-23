@@ -17,6 +17,7 @@ WORKDIR /app
 COPY Cargo.toml Cargo.lock rust-toolchain.toml rustfmt.toml ./
 COPY crates/sceneworks-core/Cargo.toml ./crates/sceneworks-core/Cargo.toml
 COPY crates/sceneworks-worker/Cargo.toml ./crates/sceneworks-worker/Cargo.toml
+COPY crates/sceneworks-image-quality/Cargo.toml ./crates/sceneworks-image-quality/Cargo.toml
 COPY apps/rust-api/Cargo.toml ./apps/rust-api/Cargo.toml
 COPY apps/rust-worker/Cargo.toml ./apps/rust-worker/Cargo.toml
 COPY apps/desktop/Cargo.toml ./apps/desktop/Cargo.toml
@@ -27,10 +28,11 @@ RUN mkdir -p \
       apps/rust-worker/src \
       crates/sceneworks-core/src \
       crates/sceneworks-worker/src \
+      crates/sceneworks-image-quality/src \
     && printf 'fn main() {}\n' > apps/desktop/src/main.rs \
     && printf 'fn main() {}\n' > apps/rust-api/src/main.rs \
     && printf 'fn main() {}\n' > apps/rust-worker/src/main.rs \
-    && touch crates/sceneworks-core/src/lib.rs crates/sceneworks-worker/src/lib.rs
+    && touch crates/sceneworks-core/src/lib.rs crates/sceneworks-worker/src/lib.rs crates/sceneworks-image-quality/src/lib.rs
 
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/usr/local/cargo/git \
@@ -116,16 +118,17 @@ WORKDIR /app
 COPY Cargo.toml Cargo.lock rust-toolchain.toml rustfmt.toml ./
 COPY crates/sceneworks-core/Cargo.toml ./crates/sceneworks-core/Cargo.toml
 COPY crates/sceneworks-worker/Cargo.toml ./crates/sceneworks-worker/Cargo.toml
+COPY crates/sceneworks-image-quality/Cargo.toml ./crates/sceneworks-image-quality/Cargo.toml
 COPY apps/rust-api/Cargo.toml ./apps/rust-api/Cargo.toml
 COPY apps/rust-worker/Cargo.toml ./apps/rust-worker/Cargo.toml
 COPY apps/desktop/Cargo.toml ./apps/desktop/Cargo.toml
 RUN mkdir -p \
       apps/desktop/src apps/rust-api/src apps/rust-worker/src \
-      crates/sceneworks-core/src crates/sceneworks-worker/src \
+      crates/sceneworks-core/src crates/sceneworks-worker/src crates/sceneworks-image-quality/src \
     && printf 'fn main() {}\n' > apps/desktop/src/main.rs \
     && printf 'fn main() {}\n' > apps/rust-api/src/main.rs \
     && printf 'fn main() {}\n' > apps/rust-worker/src/main.rs \
-    && touch crates/sceneworks-core/src/lib.rs crates/sceneworks-worker/src/lib.rs
+    && touch crates/sceneworks-core/src/lib.rs crates/sceneworks-worker/src/lib.rs crates/sceneworks-image-quality/src/lib.rs
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/usr/local/cargo/git \
     cargo fetch --locked

@@ -15,6 +15,9 @@ mime_guess = { version = "2", optional = true }
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 rust-embed = { version = "8", features = ["debug-embed"], optional = true }
 sceneworks-core = { path = "../../crates/sceneworks-core" }
+# Tier-0 dataset-quality pixel extraction for the readiness endpoint (sc-6533). GPU-free
+# (image/imageproc/image_hasher), so it does not add to the worker/MLX build surface.
+sceneworks-image-quality = { path = "../../crates/sceneworks-image-quality" }
 sceneworks-worker = { path = "../../crates/sceneworks-worker" }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"

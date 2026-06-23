@@ -79,6 +79,133 @@ pub(crate) async fn get_training_dataset(
     ))
 }
 
+/// Tier-0 readiness report for a dataset (sc-6533). Computed server-side and returned as one
+/// structured payload the training screens render; replaces the client-only `datasetHealth`.
+pub(crate) async fn get_training_dataset_readiness(
+    State(state): State<AppState>,
+    Path((project_id, dataset_id)): Path<(String, String)>,
+    Query(query): Query<ReadinessQuery>,
+) -> Result<Json<sceneworks_core::dataset_quality::DatasetReadinessReport>, ApiError> {
+    Ok(Json(
+        project_call(state, move |store| {
+            dataset_readiness_report(&store, &project_id, &dataset_id, &query)
+        })
+        .await?,
+    ))
+}
+
+/// Persist (or clear) a per-image quality override (sc-6534). The body lists the checks the user
+/// dismissed for the image; the store strips the non-acknowledgeable ones (`decode`, `count`) and
+/// keys the ack by the item's current content hash, so a later image swap voids it. Returns the
+/// stored ack, or `null` when the override was cleared.
+pub(crate) async fn set_training_dataset_item_quality_ack(
+    State(state): State<AppState>,
+    Path((project_id, dataset_id, item_id)): Path<(String, String, String)>,
+    ApiJson(payload): ApiJson<QualityAckBody>,
+) -> Result<Json<Option<sceneworks_core::dataset_quality::QualityAck>>, ApiError> {
+    Ok(Json(
+        project_call(state, move |store| {
+            store.set_dataset_item_quality_ack(&project_id, &dataset_id, &item_id, &payload.checks)
+        })
+        .await?,
+    ))
+}
+
+/// Read the dataset, reuse any still-valid cached Tier-0 scalars, decode the rest via
+/// `sceneworks-image-quality`, roll the readiness report up, and persist the freshly-extracted
+/// scalars as the content-hash + bucket-keyed cache. Runs synchronously inside `project_call`'s
+/// blocking task (the image decode belongs off the async runtime).
+fn dataset_readiness_report(
+    store: &ProjectStore,
+    project_id: &str,
+    dataset_id: &str,
+    query: &ReadinessQuery,
+) -> Result<sceneworks_core::dataset_quality::DatasetReadinessReport, ProjectStoreError> {
+    use sceneworks_core::dataset_quality::{readiness_context, CachedTier0Scalars};
+    use sceneworks_image_quality::{compute_readiness, ReadinessItem};
+
+    let (dataset, root, _project_stem) = store.training_dataset_for_plan(project_id, dataset_id)?;
+
+    let recommended_for: Vec<String> = query
+        .recommended_for
+        .as_deref()
+        .map(|tags| {
+            tags.split(',')
+                .map(|tag| tag.trim().to_owned())
+                .filter(|tag| !tag.is_empty())
+                .collect()
+        })
+        .unwrap_or_default();
+    let context = readiness_context(
+        query.target_resolution,
+        &recommended_for,
+        query.character_type.as_deref(),
+        query.min_items,
+    );
+
+    let items: Vec<ReadinessItem> = dataset
+        .items
+        .iter()
+        .map(|item| {
+            let cached_scalars = item
+                .tier0_scalars
+                .as_ref()
+                .filter(|cache| cache.valid_for(item.content_hash.as_deref(), context.bucket_edge))
+                .map(|cache| cache.scalars.clone());
+            // Resolve the user's dismissed findings (sc-6534) against the current bytes — a stale
+            // ack (image replaced since) yields no effective checks.
+            let acknowledged = item
+                .quality_ack
+                .as_ref()
+                .map(|ack| ack.effective_checks(item.content_hash.as_deref()))
+                .unwrap_or_default();
+            ReadinessItem {
+                item_id: item.id.clone(),
+                width: item.width,
+                height: item.height,
+                content_hash: item.content_hash.clone(),
+                image_path: Some(root.join(&item.path)),
+                cached_scalars,
+                acknowledged,
+            }
+        })
+        .collect();
+
+    let (report, extracted) = compute_readiness(
+        &items,
+        context.bucket_edge,
+        context.min_items,
+        &context.thresholds,
+    );
+
+    if !extracted.is_empty() {
+        let updates: Vec<(String, CachedTier0Scalars)> = extracted
+            .into_iter()
+            .filter_map(|(item_id, scalars)| {
+                // Key the cache by the item's current content hash; skip items without one (they
+                // can't be validated on reuse, so they're recomputed each time).
+                let content_hash = dataset
+                    .items
+                    .iter()
+                    .find(|item| item.id == item_id)?
+                    .content_hash
+                    .clone()?;
+                Some((
+                    item_id,
+                    CachedTier0Scalars {
+                        content_hash,
+                        bucket_edge: context.bucket_edge,
+                        scalars,
+                    },
+                ))
+            })
+            .collect();
+        store.cache_dataset_tier0_scalars(project_id, dataset_id, &updates)?;
+    }
+
+    Ok(report)
+}
+
 pub(crate) async fn update_training_dataset(
     State(state): State<AppState>,
     Path((project_id, dataset_id)): Path<(String, String)>,

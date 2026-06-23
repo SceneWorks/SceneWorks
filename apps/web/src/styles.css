@@ -7715,6 +7715,7 @@ details[open] > summary.lora-scope-group-heading::before,
 }
 
 .training-caption-card-thumb {
+  position: relative;
   padding: 0;
   border: none;
   background: none;
@@ -7774,6 +7775,256 @@ details[open] > summary.lora-scope-group-heading::before,
 
 .training-caption-card-actions button {
   flex: 1;
+}
+
+/* Dataset Doctor — pre-training quality readout + per-thumbnail badges (sc-6534).
+   Tone vocabulary: good = success, warn = amber (no global token), fatal = danger,
+   pending = muted. Amber is defined inline so it reads on both light/dark surfaces. */
+.dataset-doctor {
+  --dd-tone: var(--text-muted);
+  display: grid;
+  gap: 6px;
+  padding: 10px 12px;
+  border: 1px solid color-mix(in oklch, var(--dd-tone) 38%, var(--border));
+  border-left: 3px solid var(--dd-tone);
+  border-radius: var(--r-sm);
+  background: color-mix(in oklch, var(--dd-tone) 7%, var(--surface));
+}
+
+.dataset-doctor.tone-good {
+  --dd-tone: var(--success);
+}
+
+.dataset-doctor.tone-warn {
+  --dd-tone: oklch(0.76 0.14 75);
+}
+
+.dataset-doctor.tone-fatal {
+  --dd-tone: var(--danger);
+}
+
+.dataset-doctor.compact {
+  gap: 4px;
+  padding: 8px 10px;
+}
+
+.dataset-doctor-pending {
+  color: var(--text-muted);
+  font-size: 12px;
+}
+
+.dataset-doctor-head {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+}
+
+.dataset-doctor-gate {
+  font-size: 13px;
+  font-weight: 600;
+  color: color-mix(in oklch, var(--dd-tone) 70%, var(--text));
+}
+
+.dataset-doctor-meter {
+  flex: 1;
+  height: 6px;
+  border-radius: 999px;
+  background: color-mix(in oklch, var(--dd-tone) 18%, var(--surface-2));
+  overflow: hidden;
+}
+
+.dataset-doctor-meter-fill {
+  display: block;
+  height: 100%;
+  border-radius: 999px;
+  background: var(--dd-tone);
+}
+
+.dataset-doctor-summary {
+  margin: 0;
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+.dataset-doctor-counts {
+  display: flex;
+  gap: 8px;
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.dataset-doctor-counts .tone-fatal {
+  color: var(--danger);
+}
+
+.dataset-doctor-counts .tone-warn {
+  color: oklch(0.62 0.14 75);
+}
+
+/* Per-thumbnail badge overlaid on the caption-card thumbnail. */
+.dataset-doctor-badge {
+  --dd-tone: var(--text-muted);
+  position: absolute;
+  top: -4px;
+  right: -4px;
+  display: grid;
+  place-items: center;
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  border: 1.5px solid var(--surface);
+  font-size: 11px;
+  font-weight: 700;
+  line-height: 1;
+  color: #fff;
+  background: var(--dd-tone);
+}
+
+.dataset-doctor-badge.tone-good {
+  --dd-tone: var(--success);
+}
+
+.dataset-doctor-badge.tone-warn {
+  --dd-tone: oklch(0.72 0.15 75);
+}
+
+.dataset-doctor-badge.tone-fatal {
+  --dd-tone: var(--danger);
+}
+
+.dataset-doctor-badge.tone-pending {
+  color: var(--text-muted);
+  background: var(--surface-2);
+  border-color: var(--border);
+}
+
+/* Advanced raw-metric list per flagged item. */
+.dataset-doctor-flags {
+  display: grid;
+  gap: 4px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.dataset-doctor-flags li {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 5px 8px;
+  border-left: 2px solid var(--border);
+  border-radius: var(--r-sm);
+  background: var(--surface-2);
+  font-size: 11px;
+}
+
+.dataset-doctor-flags li.tone-warn {
+  border-left-color: oklch(0.72 0.15 75);
+}
+
+.dataset-doctor-flags li.tone-fatal {
+  border-left-color: var(--danger);
+}
+
+/* A dismissed finding (sc-6534): muted + struck-through, still listed so the choice is visible. */
+.dataset-doctor-flags li.dismissed {
+  border-left-color: var(--border);
+  opacity: 0.6;
+}
+
+.dataset-doctor-flags li.dismissed .dataset-doctor-flag-reason {
+  text-decoration: line-through;
+}
+
+.dataset-doctor-flag-text {
+  display: grid;
+  gap: 1px;
+  flex: 1;
+  min-width: 0;
+}
+
+.dataset-doctor-flag-reason {
+  color: var(--text);
+}
+
+.dataset-doctor-flag-metric {
+  color: var(--text-muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.dataset-doctor-flag-toggle {
+  flex: none;
+  padding: 2px 8px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--surface);
+  color: var(--text-muted);
+  font-size: 11px;
+  cursor: pointer;
+}
+
+.dataset-doctor-flag-toggle:hover {
+  border-color: var(--accent);
+  color: var(--text);
+}
+
+/* Advanced metric distributions (sc-6534) — one small histogram per Tier-0 metric. */
+.dataset-doctor-advanced {
+  font-size: 12px;
+}
+
+.dataset-doctor-advanced > summary {
+  color: var(--text-muted);
+  cursor: pointer;
+}
+
+.dataset-doctor-distributions {
+  display: grid;
+  gap: 10px;
+  margin-top: 8px;
+}
+
+.dataset-doctor-histogram {
+  display: grid;
+  gap: 4px;
+}
+
+.dataset-doctor-histogram-label {
+  display: flex;
+  justify-content: space-between;
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.dataset-doctor-histogram-hint {
+  color: var(--text-muted);
+  font-weight: 400;
+}
+
+.dataset-doctor-histogram-bars {
+  position: relative;
+  display: flex;
+  align-items: flex-end;
+  gap: 2px;
+  height: 44px;
+  padding: 0 1px;
+  border-bottom: 1px solid var(--border);
+}
+
+.dataset-doctor-histogram-bar {
+  flex: 1;
+  min-height: 1px;
+  border-radius: 2px 2px 0 0;
+  background: color-mix(in oklch, var(--accent) 55%, var(--surface-2));
+}
+
+.dataset-doctor-histogram-threshold {
+  position: absolute;
+  top: -2px;
+  bottom: 0;
+  width: 2px;
+  margin-left: -1px;
+  background: var(--danger);
 }
 
 /* Caption settings dialog (sc-2025) */
