@@ -69,8 +69,9 @@ New embedding-based `QualityCheck` variants (additive to the P1 string-enum; all
 - `CaptionAlignment` — low CLIP image↔caption score → re-caption action (6537, increment-2).
 - `LowAesthetic` — **style datasets only**; advisory, never on person/object (6537, increment-2).
 
-All thresholds are **placeholders pending calibration** (§8), like sc-6530 §8 — invented numbers must
-not read as tuned.
+Near-dup + diversity thresholds are **calibrated** against a real CLIP corpus (§8). The remaining
+thresholds (caption-alignment floor, aesthetic band, background contamination) are still **placeholders
+pending calibration** — invented numbers must not read as tuned.
 
 ---
 
@@ -205,16 +206,31 @@ consume = verifiable), mirroring Tier-0's pure/decode split.
 
 ---
 
-## 8. Calibration TODO (placeholders, not tuned)
+## 8. Calibration
 
-All Tier-1 thresholds below are **guesses pending a fixture sweep** (a near-dup-heavy set + a healthy
-diverse set, per 6536 acceptance):
-- CLIP near-dup cosine threshold (≈0.95?).
-- Diversity/coverage: how to summarize embedding spread (mean pairwise cosine? cluster count vs item
-  count?) and the "too tight" floor.
+### Calibrated (sc-6535) — near-dup + diversity
+Swept real CLIP ViT-L/14 embeddings (the production worker seam) over a curated corpus: the **Google
+DreamBooth** benchmark (30 subject sets, 4–6 imgs each), two style sets (**hokusai-style** 46,
+**monkey-island** 44), and a real **64-image person set**. Results drove `Tier1Thresholds::for_kind`:
+- **Near-dup cosine = 0.95 — validated, kept.** Fires on genuine redundancy (DreamBooth `cat` 8/10
+  pairs ≥.95, `berry_bowl` 9/15, the person set's 40 burst pairs); silent on diverse sets
+  (monkey-island 0). It's a plain pairwise threshold, so it matches the implemented math exactly.
+- **Diversity = 1 − mean pairwise cosine** confirmed as the summary (this is what `evaluate_tier1`
+  computes — verified, no near-dup-cluster collapsing).
+- **Non-style diversity floor 0.18 → 0.12.** The old 0.18 flagged **22/30** of the canonical
+  DreamBooth subjects and sat only 0.008 above a healthy real person set (0.188). 0.12 lets healthy
+  person/object sets breathe while still catching genuinely degenerate large sets.
+- **Size gate `diversity_min_items = 15`.** Diversity does **not** cleanly separate subject vs style
+  (hokusai 0.144 < person 0.188 — it's really a one-subject Mt-Fuji series), and small subject sets
+  are *supposed* to be tight. So the low-diversity **warning** is suppressed below 15 comparable items
+  (near-dup carries small-set redundancy); the diversity **score** still feeds the variety meter.
+- **Style floor 0.10 — provisional.** Only two style sets sampled and they disagree (0.144 vs 0.284);
+  needs more style sets before it can be trusted.
+
+### Still pending a sweep
 - Background contamination: detection method (patch-region embeddings? a separate signal).
-- Caption alignment floor (CLIPScore is unnormalized; needs a per-kind floor).
-- Aesthetic: LAION MLP scale, the style-only advisory band.
+- Caption alignment floor (CLIPScore is unnormalized; needs a per-kind floor) — sc-6537.
+- Aesthetic: LAION MLP scale, the style-only advisory band — sc-6537.
 
 ---
 

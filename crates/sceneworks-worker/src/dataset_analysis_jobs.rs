@@ -392,4 +392,195 @@ mod real_weights_tests {
         );
         println!("worker clip ok: dim={}", embedding.len());
     }
+
+    /// Tier-1 threshold calibration (sc-6535 follow-up — NOT committed): embed real LoRA training
+    /// sets through the production CLIP seam and dump per-dataset diversity + near-duplicate
+    /// distributions so `Tier1Thresholds` (near_dup_cosine / diversity_floor) can be set from data.
+    /// `CALIB_DIR` may point at a flat image dir (one dataset) OR a dir of image-bearing subdirs
+    /// (each a dataset, e.g. `~/Datasets/dreambooth/dataset`). Run:
+    ///   CALIB_DIR=~/Datasets/dreambooth/dataset RUST_TEST_THREADS=1 \
+    ///     cargo test -p sceneworks-worker calibrate_thresholds -- --ignored --nocapture
+    #[test]
+    #[ignore = "calibration: needs CLIP snapshot + datasets under ~/Datasets (set CALIB_DIR)"]
+    fn calibrate_thresholds() {
+        let home = std::env::var("HOME").expect("HOME");
+        let snapshots = std::path::Path::new(&home)
+            .join(".cache/huggingface/hub/models--openai--clip-vit-large-patch14/snapshots");
+        let weights_dir = std::fs::read_dir(&snapshots)
+            .expect("clip snapshot cached")
+            .filter_map(Result::ok)
+            .map(|entry| entry.path())
+            .find(|path| path.is_dir())
+            .expect("a snapshot subdir");
+
+        let root = std::path::PathBuf::from(
+            std::env::var("CALIB_DIR").unwrap_or_else(|_| format!("{home}/Datasets/Basim")),
+        );
+        let is_img = |path: &std::path::Path| {
+            path.extension()
+                .and_then(|ext| ext.to_str())
+                .map(|ext| {
+                    matches!(
+                        ext.to_ascii_lowercase().as_str(),
+                        "jpg" | "jpeg" | "png" | "webp" | "bmp"
+                    )
+                })
+                .unwrap_or(false)
+        };
+        let direct_imgs = |dir: &std::path::Path| {
+            let mut imgs: Vec<std::path::PathBuf> = std::fs::read_dir(dir)
+                .map(|rd| {
+                    rd.filter_map(Result::ok)
+                        .map(|entry| entry.path())
+                        .filter(|path| path.is_file() && is_img(path))
+                        .collect()
+                })
+                .unwrap_or_default();
+            imgs.sort();
+            imgs
+        };
+
+        // Each image-bearing immediate subdir is a dataset; else the root itself is one dataset.
+        let mut subdirs: Vec<std::path::PathBuf> = std::fs::read_dir(&root)
+            .expect("root dir")
+            .filter_map(Result::ok)
+            .map(|entry| entry.path())
+            .filter(|path| path.is_dir())
+            .collect();
+        subdirs.sort();
+        let mut datasets: Vec<(String, Vec<std::path::PathBuf>)> = Vec::new();
+        for dir in &subdirs {
+            let imgs = direct_imgs(dir);
+            if imgs.len() >= 2 {
+                datasets.push((
+                    dir.file_name().unwrap().to_string_lossy().into_owned(),
+                    imgs,
+                ));
+            }
+        }
+        let root_imgs = direct_imgs(&root);
+        if root_imgs.len() >= 2 {
+            datasets.push((
+                root.file_name().unwrap().to_string_lossy().into_owned(),
+                root_imgs,
+            ));
+        }
+        assert!(
+            !datasets.is_empty(),
+            "no image-bearing datasets under {}",
+            root.display()
+        );
+
+        let embedder = gen_core::load_image_embedder(
+            CLIP_EMBEDDER_ID,
+            &LoadSpec::new(WeightsSource::Dir(weights_dir)),
+        )
+        .expect("load clip");
+
+        println!(
+            "\n=== CLIP calibration over {} dataset(s) in {} ===",
+            datasets.len(),
+            root.display()
+        );
+        // Per-dataset rows (name, n, diversity, max_cos, dups>=0.95) + a pooled near-dup tally.
+        let thresholds = [0.90_f32, 0.93, 0.95, 0.97, 0.99];
+        let mut rows: Vec<(String, usize, f32, f32, usize)> = Vec::new();
+        let mut pooled_dups = [0usize; 5];
+        let mut pooled_pairs = 0usize;
+        for (name, paths) in &datasets {
+            let mut vecs: Vec<Vec<f32>> = Vec::new();
+            for path in paths {
+                let image = match load_analysis_image(path) {
+                    Ok(image) => image,
+                    Err(error) => {
+                        println!("skip {}: {error}", path.display());
+                        continue;
+                    }
+                };
+                let mut embedding = embedder.embed(&image).expect("embed");
+                // L2-normalize so dot == cosine (the embed contract returns RAW vectors, exactly
+                // as evaluate_tier1's caller normalizes them before cosine clustering).
+                let norm = embedding.iter().map(|v| v * v).sum::<f32>().sqrt();
+                if norm > 0.0 {
+                    for v in &mut embedding {
+                        *v /= norm;
+                    }
+                }
+                vecs.push(embedding);
+            }
+            let n = vecs.len();
+            if n < 2 {
+                continue;
+            }
+            let mut sum = 0.0f32;
+            let mut cnt = 0usize;
+            let mut max_cos = f32::MIN;
+            let mut dups95 = 0usize;
+            for i in 0..n {
+                for j in (i + 1)..n {
+                    let cos: f32 = vecs[i].iter().zip(&vecs[j]).map(|(a, b)| a * b).sum();
+                    sum += cos;
+                    cnt += 1;
+                    pooled_pairs += 1;
+                    if cos > max_cos {
+                        max_cos = cos;
+                    }
+                    if cos >= 0.95 {
+                        dups95 += 1;
+                    }
+                    for (k, threshold) in thresholds.iter().enumerate() {
+                        if cos >= *threshold {
+                            pooled_dups[k] += 1;
+                        }
+                    }
+                }
+            }
+            let diversity = 1.0 - sum / cnt as f32;
+            rows.push((name.clone(), n, diversity, max_cos, dups95));
+        }
+
+        rows.sort_by(|a, b| a.2.partial_cmp(&b.2).unwrap());
+        println!(
+            "{:<24} {:>4} {:>9} {:>8} {:>9}",
+            "dataset", "n", "diversity", "max_cos", "dup>=.95"
+        );
+        for (name, n, diversity, max_cos, dups) in &rows {
+            println!(
+                "{:<24} {:>4} {:>9.4} {:>8.4} {:>9}",
+                name, n, diversity, max_cos, dups
+            );
+        }
+
+        // Pooled near-duplicate behavior across every within-dataset pair in the corpus.
+        println!("\npooled near-dup crossings across {pooled_pairs} pairs:");
+        for (k, threshold) in thresholds.iter().enumerate() {
+            println!(
+                "  >= {threshold:.2}: {} ({:.1}%)",
+                pooled_dups[k],
+                100.0 * pooled_dups[k] as f32 / pooled_pairs.max(1) as f32
+            );
+        }
+
+        // Floor-calibration distribution (only meaningful with several datasets).
+        if rows.len() >= 3 {
+            let mut divs: Vec<f32> = rows.iter().map(|r| r.2).collect();
+            divs.sort_by(|a, b| a.partial_cmp(b).unwrap());
+            let pct = |p: f32| divs[((p / 100.0) * (divs.len() as f32 - 1.0)).round() as usize];
+            println!(
+                "\nper-dataset diversity: min={:.4} p10={:.4} median={:.4} p90={:.4} max={:.4}",
+                divs[0],
+                pct(10.0),
+                pct(50.0),
+                pct(90.0),
+                divs[divs.len() - 1]
+            );
+            for floor in [0.10f32, 0.12, 0.14, 0.15, 0.18, 0.20] {
+                let flagged = rows.iter().filter(|r| r.2 < floor).count();
+                println!(
+                    "  floor {floor:.2}: {flagged} / {} datasets flagged low_diversity",
+                    rows.len()
+                );
+            }
+        }
+    }
 }

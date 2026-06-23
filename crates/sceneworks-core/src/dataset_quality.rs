@@ -857,27 +857,40 @@ pub struct DatasetEmbeddings {
     pub embeddings: std::collections::BTreeMap<String, Vec<f32>>,
 }
 
-/// Tier-1 thresholds (sc-6536). **Placeholders pending calibration** (sc-6535 §8) — a fixture sweep
-/// over a near-dup-heavy set and a healthy diverse set sets these, not these guesses.
+/// Tier-1 thresholds (sc-6536). Calibrated in sc-6535 against real CLIP ViT-L/14 embeddings over the
+/// Google DreamBooth benchmark (30 subject sets), two style sets (hokusai, monkey-island), and a real
+/// 64-image person set: `near_dup_cosine 0.95` validated; the non-style diversity floor dropped
+/// `0.18 → 0.12` (0.18 flagged 22/30 of the canonical subject benchmark, incl. a healthy real person
+/// set at 0.188); and `diversity_min_items` gates the low-diversity *warning* to sets large enough for
+/// it to mean redundancy rather than just smallness. The Style floor (0.10) is provisional — only two
+/// style sets sampled, and they disagree (0.144 vs 0.284).
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Tier1Thresholds {
     /// Cosine similarity ≥ this ⇒ embedding near-duplicate.
     pub near_dup_cosine: f64,
     /// Diversity (`1 - mean pairwise cosine`) below this ⇒ a `LowDiversity` warning.
     pub diversity_floor: f64,
+    /// Minimum comparable items before the low-diversity *warning* fires. Below this a dataset is too
+    /// small for "diversity" to mean anything (a 5-image subject set is supposed to be tight) — near-
+    /// duplicate detection carries the redundancy signal instead. The diversity *score* is still
+    /// computed for the variety meter; only the warning is gated. (sc-6535 calibration.)
+    pub diversity_min_items: usize,
 }
 
 impl Tier1Thresholds {
     pub fn for_kind(kind: &DatasetKind) -> Self {
         // Style sets are intentionally more uniform (one aesthetic), so tolerate lower diversity;
-        // person/object want pose/angle variety. Placeholders.
+        // person/object want pose/angle variety. The 0.12 non-style floor is calibrated (sc-6535):
+        // it clears healthy real person sets (~0.19) while still catching genuinely degenerate large
+        // sets; the prior 0.18 flagged most of the canonical DreamBooth subject benchmark.
         let diversity_floor = match kind {
             DatasetKind::Style => 0.10,
-            _ => 0.18,
+            _ => 0.12,
         };
         Self {
             near_dup_cosine: 0.95,
             diversity_floor,
+            diversity_min_items: 15,
         }
     }
 }
@@ -980,8 +993,11 @@ pub fn evaluate_tier1(items: &[ItemEmbedding], thresholds: &Tier1Thresholds) -> 
     } else {
         (1.0 - sim_sum / sim_count as f64).clamp(0.0, 1.0)
     };
+    // Low-diversity is a dataset-level *warning*, gated by size: below `diversity_min_items` a tight
+    // set is expected (a small subject LoRA), so near-dup carries the signal and this stays quiet.
+    let comparable = normalized.iter().filter(|entry| entry.is_some()).count();
     let mut dataset = Vec::new();
-    if sim_count > 0 && diversity < thresholds.diversity_floor {
+    if comparable >= thresholds.diversity_min_items && diversity < thresholds.diversity_floor {
         dataset.push(QualityFlag {
             check: QualityCheck::LowDiversity,
             severity: Severity::Warn,
@@ -1503,24 +1519,20 @@ mod tests {
 
     #[test]
     fn tier1_clusters_near_identical_embeddings_and_scores_low_diversity() {
-        // Three (nearly) identical vectors — a burst — cluster and read as undiverse.
-        let items = [
-            emb("a", &[1.0, 0.0, 0.0, 0.0]),
-            emb("b", &[0.999, 0.01, 0.0, 0.0]),
-            emb("c", &[1.0, 0.0, 0.0, 0.0]),
-        ];
+        // A large burst of near-identical vectors clusters and reads as undiverse. Above the size
+        // gate (>= diversity_min_items) the dataset-level LowDiversity warning fires.
+        let items: Vec<_> = (0..16)
+            .map(|i| emb(&format!("v{i}"), &[1.0, i as f32 * 0.001, 0.0, 0.0]))
+            .collect();
         let eval = evaluate_tier1(&items, &tier1_thresholds());
 
-        for id in ["a", "b", "c"] {
-            let entry = eval.items.iter().find(|e| e.item_id == id).expect("item");
-            assert!(
-                entry
-                    .flags
-                    .iter()
-                    .any(|f| f.check == QualityCheck::NearDuplicateEmbedding),
-                "{id} should be an embedding near-duplicate"
-            );
-        }
+        assert!(
+            eval.items.iter().all(|e| e
+                .flags
+                .iter()
+                .any(|f| f.check == QualityCheck::NearDuplicateEmbedding)),
+            "every near-identical item should be an embedding near-duplicate"
+        );
         assert!(
             eval.diversity < 0.1,
             "near-identical set has near-zero diversity"
@@ -1529,6 +1541,37 @@ mod tests {
             .dataset
             .iter()
             .any(|f| f.check == QualityCheck::LowDiversity));
+    }
+
+    #[test]
+    fn tier1_small_set_does_not_warn_low_diversity() {
+        // Below the size gate a tight set is expected (a small subject LoRA), so the dataset-level
+        // LowDiversity warning is suppressed even though the score is low — near-dup still flags the
+        // redundancy. (sc-6535 calibration.)
+        let items = [
+            emb("a", &[1.0, 0.0, 0.0, 0.0]),
+            emb("b", &[0.999, 0.01, 0.0, 0.0]),
+            emb("c", &[1.0, 0.0, 0.0, 0.0]),
+        ];
+        let eval = evaluate_tier1(&items, &tier1_thresholds());
+        assert!(
+            eval.diversity < 0.1,
+            "score is still computed for the variety meter"
+        );
+        assert!(
+            eval.items.iter().all(|e| e
+                .flags
+                .iter()
+                .any(|f| f.check == QualityCheck::NearDuplicateEmbedding)),
+            "near-dup still flags the redundancy"
+        );
+        assert!(
+            !eval
+                .dataset
+                .iter()
+                .any(|f| f.check == QualityCheck::LowDiversity),
+            "small set: the low-diversity warning is gated off"
+        );
     }
 
     #[test]
