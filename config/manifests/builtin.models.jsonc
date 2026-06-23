@@ -1579,12 +1579,18 @@
       "type": "image",
       // FLUX.2 [dev] (epic 5914) — the guidance-distilled 32B flagship, a SEPARATE
       // model from klein: a Mistral3 text encoder (vs klein's Qwen3) + a 48/48/15360
-      // DiT, ported natively to mlx-gen (sc-5915/5916/5917/2365). MLX-only (no torch
-      // backend), Mac-only. Shares the `mlx_flux2` adapter + the `flux2` engine.
+      // DiT, ported natively to mlx-gen (sc-5915/5916/5917/2365). No torch backend.
+      // Shares the `mlx_flux2` adapter + the `flux2` engine. On Apple Silicon it runs
+      // on MLX (the pre-quantized Q4 dir below); off-Mac the **candle** (Windows/Linux
+      // CUDA) lane now serves txt2img (epic 6564: `candle-gen-flux2` `flux2_dev`, sc-7457
+      // provider + sc-7458 worker wiring) — `macOnly` stays a no-op label mirroring klein,
+      // since candle availability is driven by the routing tables, not this flag. The
+      // candle lane loads the dense diffusers snapshot and Q4-quantizes it at load (the
+      // install-time convert + packed loader are MLX-only; off-Mac is download-and-go).
       // Image edit + reference (sc-5919/5922): reference image(s) condition via the
       // DiT token concat through the `flux2_dev_edit` variant — the same surface as
-      // klein. Pose library is best-effort (skeleton-as-edit-image, like klein); the
-      // real FLUX.2-dev pose ControlNet is sc-2292.
+      // klein (candle edit is epic 6564 story 4). Pose library is best-effort
+      // (skeleton-as-edit-image, like klein); the real FLUX.2-dev pose ControlNet is sc-2292.
       "adapter": "mlx_flux2",
       "capabilities": ["text_to_image", "edit_image", "character_image", "style_variations"],
       "macOnly": true,
