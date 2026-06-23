@@ -778,4 +778,146 @@ mod real_weights_tests {
             }
         }
     }
+
+    /// Caption↔image alignment floor calibration (sc-6537). Embeds each image under `CALIB_DIR` with
+    /// its sibling `<stem>.txt` caption, then dumps the MATCHED (own-caption) vs MISMATCHED (other-
+    /// caption) cosine distributions + a floor-crossing table so `CaptionAlignmentThresholds::cosine_floor`
+    /// can be set from data instead of the `0.10` placeholder. For a **production-faithful** sweep, point
+    /// `CALIB_DIR` at a dataset captioned by the real JoyCaption job (its `.txt` sidecars). The default
+    /// `~/Datasets/dreambooth/dataset` is a quick proxy — its `<subject>/` folders give ground-truth
+    /// labels (write `a photo of a <subject>` sidecars first), but those short captions are NOT
+    /// JoyCaption-style, so treat the absolute numbers as a sanity check, not the final floor. Run:
+    ///   CALIB_DIR=~/Datasets/dreambooth/dataset RUST_TEST_THREADS=1 \
+    ///     cargo test -p sceneworks-worker sweep_caption_alignment -- --ignored --nocapture
+    #[test]
+    #[ignore = "calibration: caption↔image alignment over CALIB_DIR images + sibling .txt captions"]
+    fn sweep_caption_alignment() {
+        let home = std::env::var("HOME").expect("HOME");
+        let snapshots = std::path::Path::new(&home)
+            .join(".cache/huggingface/hub/models--openai--clip-vit-large-patch14/snapshots");
+        let weights_dir = std::fs::read_dir(&snapshots)
+            .expect("clip snapshot cached")
+            .filter_map(Result::ok)
+            .map(|entry| entry.path())
+            .find(|path| path.is_dir())
+            .expect("a snapshot subdir");
+        let root = std::path::PathBuf::from(
+            std::env::var("CALIB_DIR")
+                .unwrap_or_else(|_| format!("{home}/Datasets/dreambooth/dataset")),
+        );
+
+        // Recursively collect (image, caption text) pairs: an image with a sibling `<stem>.txt`.
+        fn collect(dir: &std::path::Path, out: &mut Vec<(std::path::PathBuf, String)>) {
+            let Ok(read) = std::fs::read_dir(dir) else {
+                return;
+            };
+            let mut entries: Vec<std::path::PathBuf> =
+                read.filter_map(Result::ok).map(|e| e.path()).collect();
+            entries.sort();
+            for path in entries {
+                if path.is_dir() {
+                    collect(&path, out);
+                } else if path
+                    .extension()
+                    .and_then(|e| e.to_str())
+                    .map(|e| matches!(e.to_ascii_lowercase().as_str(), "jpg" | "jpeg" | "png"))
+                    .unwrap_or(false)
+                {
+                    if let Ok(caption) = std::fs::read_to_string(path.with_extension("txt")) {
+                        let caption = caption.trim().to_owned();
+                        if !caption.is_empty() {
+                            out.push((path, caption));
+                        }
+                    }
+                }
+            }
+        }
+        let mut pairs = Vec::new();
+        collect(&root, &mut pairs);
+        assert!(
+            pairs.len() >= 4,
+            "need >=4 (image, .txt caption) pairs under {} — got {}",
+            root.display(),
+            pairs.len()
+        );
+
+        let image_embedder = gen_core::load_image_embedder(
+            CLIP_EMBEDDER_ID,
+            &LoadSpec::new(WeightsSource::Dir(weights_dir.clone())),
+        )
+        .expect("image embedder");
+        let text_embedder = gen_core::load_text_embedder(
+            CLIP_TEXT_EMBEDDER_ID,
+            &LoadSpec::new(WeightsSource::Dir(weights_dir)),
+        )
+        .expect("text embedder");
+        let norm = |mut v: Vec<f32>| {
+            let mag = v.iter().map(|x| x * x).sum::<f32>().sqrt();
+            if mag > 0.0 {
+                for x in &mut v {
+                    *x /= mag;
+                }
+            }
+            v
+        };
+        let cos = |a: &[f32], b: &[f32]| a.iter().zip(b).map(|(x, y)| x * y).sum::<f32>();
+
+        let mut imgs = Vec::with_capacity(pairs.len());
+        let mut txts = Vec::with_capacity(pairs.len());
+        let mut captions = Vec::with_capacity(pairs.len());
+        for (path, caption) in &pairs {
+            let image = load_analysis_image(path).expect("decode");
+            imgs.push(norm(image_embedder.embed(&image).expect("img embed")));
+            txts.push(norm(text_embedder.embed_text(caption).expect("text embed")));
+            captions.push(caption.clone());
+        }
+        let n = imgs.len();
+
+        let mut matched: Vec<f32> = (0..n).map(|i| cos(&imgs[i], &txts[i])).collect();
+        // Each image vs a few OTHER captions whose text differs (a genuinely wrong caption).
+        let mut mismatched: Vec<f32> = Vec::new();
+        for i in 0..n {
+            for step in [1usize, n / 3, n / 2, 2 * n / 3] {
+                let j = (i + step.max(1)) % n;
+                if captions[j] != captions[i] {
+                    mismatched.push(cos(&imgs[i], &txts[j]));
+                }
+            }
+        }
+        matched.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        mismatched.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        let pct = |v: &[f32], p: f32| v[((p / 100.0) * (v.len() as f32 - 1.0)).round() as usize];
+
+        println!(
+            "\n=== caption↔image alignment over {n} (image, caption) pairs in {} ===",
+            root.display()
+        );
+        println!(
+            "MATCHED    (own caption):   min={:.4} p05={:.4} p25={:.4} median={:.4} p75={:.4}",
+            matched[0],
+            pct(&matched, 5.0),
+            pct(&matched, 25.0),
+            pct(&matched, 50.0),
+            pct(&matched, 75.0)
+        );
+        println!(
+            "MISMATCHED (other caption): median={:.4} p75={:.4} p95={:.4} max={:.4}  (n={})",
+            pct(&mismatched, 50.0),
+            pct(&mismatched, 75.0),
+            pct(&mismatched, 95.0),
+            mismatched[mismatched.len() - 1],
+            mismatched.len()
+        );
+        println!("\nfloor: % MATCHED flagged (false-positive — keep low) | % MISMATCHED flagged (caught — keep high):");
+        for floor in [0.06f32, 0.08, 0.10, 0.12, 0.15, 0.18, 0.20] {
+            let false_pos = matched.iter().filter(|c| **c < floor).count();
+            let caught = mismatched.iter().filter(|c| **c < floor).count();
+            println!(
+                "  floor {floor:.2}: matched {false_pos}/{n} ({:.0}%) | mismatched {caught}/{} ({:.0}%)",
+                100.0 * false_pos as f32 / n as f32,
+                mismatched.len(),
+                100.0 * caught as f32 / mismatched.len() as f32
+            );
+        }
+    }
 }
