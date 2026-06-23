@@ -1,0 +1,214 @@
+import React from "react";
+
+import {
+  datasetDoctorSummary,
+  flagMetric,
+  flagReason,
+  gateMeta,
+  itemBadge,
+  primaryReason,
+  technicalPercent,
+} from "../../training/datasetReadiness.js";
+
+// Dataset Doctor surface (sc-6534): the plain-language readiness readout, the
+// per-thumbnail quality badge, and the Advanced raw-metric list. All presentational
+// — it renders the server's readiness report (sc-6533); the view-model shaping and
+// copy live in datasetReadiness.js so they stay unit-tested.
+
+// Per-thumbnail badge: ✓ good / ⚠ needs attention / ✕ likely to hurt, plus a neutral
+// "·" for an item the report hasn't covered yet (just added, or first fetch in flight).
+// The tooltip carries the one plain-language reason behind the worst flag.
+export function ReadinessBadge({ entry, loading = false }) {
+  const badge = itemBadge(entry, { loading });
+  let reason;
+  if (loading && !entry) {
+    reason = "Checking…";
+  } else if (!entry) {
+    reason = "Not assessed yet";
+  } else {
+    reason = primaryReason(entry) || "Looks good";
+  }
+  return (
+    <span
+      className={`dataset-doctor-badge tone-${badge.tone}`}
+      title={reason}
+      aria-label={reason === badge.label ? badge.label : `${badge.label} — ${reason}`}
+    >
+      {badge.symbol}
+    </span>
+  );
+}
+
+// Findings that can't be dismissed: a decode failure is untrainable, and count is dataset-level
+// (sc-6534). The server also strips these from any ack, but the UI shouldn't offer the affordance.
+const NON_DISMISSABLE = new Set(["decode", "count"]);
+
+// The Advanced raw-metric list for one flagged item (the editor IS the advanced
+// surface). Shows each flag's plain reason, the measured value vs. threshold, and a per-image
+// override (sc-6534): Dismiss a finding to drop it from the badge/readout/gate, or Undo to restore
+// it. A dismissed finding stays listed, struck-through, so the choice is visible.
+export function ReadinessFlagDetails({ entry, onToggle }) {
+  const flags = entry?.flags ?? [];
+  if (!flags.length) {
+    return null;
+  }
+  return (
+    <ul className="dataset-doctor-flags" aria-label="Quality findings">
+      {flags.map((flag, index) => {
+        const metric = flagMetric(flag);
+        const hasValue = Number.isFinite(metric.value);
+        const hasThreshold = Number.isFinite(metric.threshold);
+        const dismissed = Boolean(flag.acknowledged);
+        const tone = dismissed
+          ? "dismissed"
+          : flag.severity === "fatal"
+            ? "fatal"
+            : flag.severity === "warn"
+              ? "warn"
+              : "good";
+        const canToggle = typeof onToggle === "function" && !NON_DISMISSABLE.has(flag.check);
+        return (
+          <li className={`tone-${tone}${dismissed ? " dismissed" : ""}`} key={`${flag.check}-${index}`}>
+            <div className="dataset-doctor-flag-text">
+              <span className="dataset-doctor-flag-reason">{flagReason(flag)}</span>
+              {hasValue || hasThreshold ? (
+                <span className="dataset-doctor-flag-metric">
+                  {metric.label}: {hasValue ? round(metric.value) : "—"}
+                  {hasThreshold ? ` (threshold ${round(metric.threshold)})` : ""}
+                </span>
+              ) : null}
+            </div>
+            {canToggle ? (
+              <button
+                className="dataset-doctor-flag-toggle"
+                onClick={() => onToggle(flag.check, !dismissed)}
+                type="button"
+              >
+                {dismissed ? "Undo" : "Dismiss"}
+              </button>
+            ) : null}
+          </li>
+        );
+      })}
+    </ul>
+  );
+}
+
+// Per-metric distributions for the Advanced surface (sc-6534), drawn from the report's
+// `distributions` payload — sharpness and the two clip fractions, each a small histogram with the
+// threshold marked. Renders nothing until any item has scalars.
+const DISTRIBUTION_METRICS = [
+  { key: "blurVariance", label: "Sharpness" },
+  { key: "shadowClip", label: "Shadow clipping" },
+  { key: "highlightClip", label: "Highlight clipping" },
+];
+
+export function DatasetDoctorDistributions({ report }) {
+  const distributions = report?.distributions;
+  if (!distributions) {
+    return null;
+  }
+  const charts = DISTRIBUTION_METRICS.filter(({ key }) => distributions[key]?.values?.length);
+  if (!charts.length) {
+    return null;
+  }
+  return (
+    <div className="dataset-doctor-distributions" aria-label="Metric distributions">
+      {charts.map(({ key, label }) => (
+        <MetricHistogram key={key} label={label} metric={distributions[key]} />
+      ))}
+    </div>
+  );
+}
+
+const HISTOGRAM_BINS = 10;
+
+function MetricHistogram({ label, metric }) {
+  const values = metric.values ?? [];
+  const threshold = Number.isFinite(metric.threshold) ? metric.threshold : null;
+  const lo = Math.min(...values, threshold ?? Infinity);
+  const hi = Math.max(...values, threshold ?? -Infinity);
+  const span = hi - lo || 1;
+  const counts = new Array(HISTOGRAM_BINS).fill(0);
+  for (const value of values) {
+    const idx = Math.min(HISTOGRAM_BINS - 1, Math.max(0, Math.floor(((value - lo) / span) * HISTOGRAM_BINS)));
+    counts[idx] += 1;
+  }
+  const peak = Math.max(...counts, 1);
+  const thresholdPct = threshold == null ? null : Math.max(0, Math.min(100, ((threshold - lo) / span) * 100));
+  return (
+    <div className="dataset-doctor-histogram">
+      <span className="dataset-doctor-histogram-label">
+        {label}
+        <span className="dataset-doctor-histogram-hint">{metric.higherIsBetter ? "higher is better" : "lower is better"}</span>
+      </span>
+      <div className="dataset-doctor-histogram-bars">
+        {counts.map((count, index) => (
+          <span
+            className="dataset-doctor-histogram-bar"
+            key={index}
+            style={{ height: `${(count / peak) * 100}%` }}
+          />
+        ))}
+        {thresholdPct == null ? null : (
+          <span
+            className="dataset-doctor-histogram-threshold"
+            style={{ left: `${thresholdPct}%` }}
+            title={`threshold ${metric.threshold}`}
+          />
+        )}
+      </div>
+    </div>
+  );
+}
+
+// The friendly readout shown before the build/train actions: gate headline, a
+// technical-quality meter, the summary sentence, and severity-count chips. Renders
+// nothing for an unsaved draft (no report, not loading) so the panel isn't noisy
+// before there's anything to assess.
+export function DatasetDoctorReadout({ report, loading = false, compact = false }) {
+  if (!report) {
+    if (loading) {
+      return (
+        <div className="dataset-doctor dataset-doctor-pending" aria-label="Dataset Doctor">
+          Checking dataset…
+        </div>
+      );
+    }
+    return null;
+  }
+  const gate = gateMeta(report.gate);
+  const technical = technicalPercent(report);
+  const counts = report.counts ?? {};
+  return (
+    <div className={`dataset-doctor tone-${gate.tone}${compact ? " compact" : ""}`} aria-label="Dataset Doctor">
+      <div className="dataset-doctor-head">
+        <span className="dataset-doctor-gate">{gate.label}</span>
+        {Number.isFinite(technical) ? (
+          <span className="dataset-doctor-meter" title={`${technical}% of photos pass the technical checks`}>
+            <span className="dataset-doctor-meter-fill" style={{ width: `${technical}%` }} />
+          </span>
+        ) : null}
+      </div>
+      <p className="dataset-doctor-summary">{datasetDoctorSummary(report)}</p>
+      {!compact && (counts.warn || counts.fatal) ? (
+        <div className="dataset-doctor-counts">
+          {counts.fatal ? <span className="tone-fatal">{counts.fatal} blocking</span> : null}
+          {counts.warn ? <span className="tone-warn">{counts.warn} to review</span> : null}
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+// Round a raw metric for display — duplicates keep many decimals (Hamming is an int),
+// so keep it tidy without hiding meaningful precision on the sub-one fractions.
+function round(value) {
+  if (!Number.isFinite(value)) {
+    return value;
+  }
+  if (Number.isInteger(value)) {
+    return value;
+  }
+  return Math.abs(value) < 1 ? Number(value.toFixed(3)) : Math.round(value);
+}

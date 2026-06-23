@@ -3,7 +3,7 @@ import { useAppContext } from "../context/AppContext.js";
 import { ModelAvailabilityGate } from "../components/ModelAvailabilityGate.jsx";
 import { downloadOffersFor } from "../modelEligibility.js";
 import { DEFAULT_MAC_CAPABILITIES, macTrainingKernelBlocked } from "../macGating.js";
-import { API_BASE_URL } from "../api.js";
+import { API_BASE_URL, isAbortError } from "../api.js";
 import { assetCanRenderAsImage } from "../components/assetMedia.jsx";
 import { Icon } from "../components/Icons.jsx";
 import { WorkerProgressCard } from "../components/WorkerProgressCard.jsx";
@@ -24,6 +24,12 @@ import {
   normalizeDatasetAssetIds,
   summarizeDatasets,
 } from "../training/datasetHelpers.js";
+import {
+  nextDismissedChecks,
+  readinessBySelectionKey,
+  readinessQueryParams,
+  trainBlockedByReadiness,
+} from "../training/datasetReadiness.js";
 import {
   configDraftFromTarget,
   configFieldLabels,
@@ -287,6 +293,8 @@ export function TrainingStudio({ mode = "training" } = {}) {
     loadingTrainingDatasets = false,
     refreshTrainingDatasets,
     loadTrainingDataset,
+    loadTrainingDatasetReadiness,
+    setTrainingDatasetItemQualityAck,
     createTrainingDataset,
     uploadTrainingDatasetItem,
     updateTrainingDataset,
@@ -328,6 +336,14 @@ export function TrainingStudio({ mode = "training" } = {}) {
   const [uploadedDatasetAssets, setUploadedDatasetAssets] = useState([]);
   const [savingDataset, setSavingDataset] = useState(false);
   const [selectedAssetIds, setSelectedAssetIds] = useState([]);
+  // Dataset Doctor readiness report (sc-6534), fetched server-side over the saved
+  // dataset. `null` until the first fetch resolves; the loading flag keeps badges in
+  // a neutral "not assessed" state rather than flashing green while a fetch is in flight.
+  const [readiness, setReadiness] = useState(null);
+  const [readinessLoading, setReadinessLoading] = useState(false);
+  // Bumped after a per-image override write (sc-6534) to re-fetch readiness — an ack is a metadata
+  // write that doesn't change the dataset version, so it isn't caught by the version-keyed effect.
+  const [readinessRefreshTick, setReadinessRefreshTick] = useState(0);
   // Owning character for this dataset (sc-2022). Seeded from the loaded dataset,
   // set when images are imported from the Character tab, threaded into the save
   // payload. "" = a general (unassociated) dataset.
@@ -411,6 +427,12 @@ export function TrainingStudio({ mode = "training" } = {}) {
     () => datasetHealth({ activeDataset, imageAssets, selectedAssetIds }),
     [activeDataset, imageAssets, selectedAssetIds],
   );
+  // Per-thumbnail readiness, keyed by the same selection id the caption grid renders
+  // under (sc-6534). An absent entry means "not assessed yet" — never silently good.
+  const readinessByKey = useMemo(() => readinessBySelectionKey(activeDataset, readiness), [activeDataset, readiness]);
+  // Train is disabled only when a saved report exists and is genuinely Blocked (too few
+  // images / a fatal flag). Bias to warn: no report or a warning gate never hard-blocks.
+  const readinessBlocksTraining = trainBlockedByReadiness(readiness);
   const originalAssetIds = useMemo(() => normalizeDatasetAssetIds(activeDataset, assets), [activeDataset, assets]);
   // Caption edits also make the dataset dirty so the single Save persists them.
   const captionsDirty = useMemo(
@@ -560,6 +582,80 @@ export function TrainingStudio({ mode = "training" } = {}) {
   const configWarnings = configValidation({ activeDataset, configDraft, selectedTarget });
   const configReady = configWarnings.length === 0;
   const customizedConfigLabels = [...customizedConfigFields].map((field) => configFieldLabels[field] ?? field);
+
+  // The dataset's character kind (person/style/object) — refines the readiness kind
+  // and thus the blur floor. "" when the dataset isn't tied to a character.
+  const datasetCharacterType = useMemo(
+    () => characters.find((character) => character.id === associatedCharacterId)?.type ?? "",
+    [characters, associatedCharacterId],
+  );
+  // Readiness query string. Blur/exposure are measured at the training bucket and the
+  // blur floor varies by kind, so the chosen resolution + target tags + character kind
+  // are threaded in — otherwise the badges would describe a different bucket than the
+  // user trains at (sc-6534). All optional; the server falls back to per-kind defaults.
+  const readinessQuery = useMemo(
+    () =>
+      readinessQueryParams({
+        resolution: configDraft.resolution,
+        recommendedFor: selectedTarget?.recommendedFor ?? selectedPreset?.recommendedFor ?? [],
+        characterType: datasetCharacterType,
+      }),
+    [configDraft.resolution, selectedTarget?.recommendedFor, selectedPreset?.recommendedFor, datasetCharacterType],
+  );
+  // Fetch the readiness report for the SAVED dataset whenever the saved version or the
+  // training context changes. Kept entirely off the save-gate path: the first (uncached)
+  // pass decodes every image, so a slow assessment must never block editing or saving.
+  useEffect(() => {
+    const projectId = activeProject?.id;
+    const datasetId = activeDataset?.id;
+    if (!projectId || !datasetId || typeof loadTrainingDatasetReadiness !== "function") {
+      setReadiness(null);
+      setReadinessLoading(false);
+      return undefined;
+    }
+    const controller = new AbortController();
+    setReadinessLoading(true);
+    loadTrainingDatasetReadiness(datasetId, readinessQuery, projectId, { signal: controller.signal })
+      .then((report) => {
+        if (controller.signal.aborted) {
+          return;
+        }
+        setReadiness(report ?? null);
+        setReadinessLoading(false);
+      })
+      .catch((err) => {
+        if (isAbortError(err) || controller.signal.aborted) {
+          return;
+        }
+        // Readiness is advisory — a failed assessment must not surface as a hard error
+        // or block training; just drop back to "not assessed".
+        setReadiness(null);
+        setReadinessLoading(false);
+      });
+    return () => controller.abort();
+  }, [
+    activeProject?.id,
+    activeDataset?.id,
+    activeDataset?.version,
+    readinessQuery,
+    readinessRefreshTick,
+    loadTrainingDatasetReadiness,
+  ]);
+
+  // Dismiss/undo a single quality finding on an image (sc-6534). The endpoint replaces the item's
+  // full dismissed-check set, so we send the next set derived from the readiness entry, then refetch.
+  async function toggleItemQualityAck(entry, check, dismissed) {
+    if (!activeDataset?.id || !entry?.itemId || typeof setTrainingDatasetItemQualityAck !== "function") {
+      return;
+    }
+    const checks = nextDismissedChecks(entry, check, dismissed);
+    try {
+      await setTrainingDatasetItemQualityAck(activeDataset.id, entry.itemId, checks);
+      setReadinessRefreshTick((tick) => tick + 1);
+    } catch (err) {
+      setDatasetError(err.message);
+    }
+  }
 
   useEffect(() => {
     setActiveDataset(null);
@@ -1026,7 +1122,7 @@ export function TrainingStudio({ mode = "training" } = {}) {
   }
 
   async function submitTrainingJob() {
-    if (!configReady || submittingJob) {
+    if (!configReady || submittingJob || readinessBlocksTraining) {
       return;
     }
     setSubmittingJob(true);
@@ -1170,6 +1266,10 @@ export function TrainingStudio({ mode = "training" } = {}) {
                   applyOrderedNames={applyOrderedNames}
                   setCaptionDialog={setCaptionDialog}
                   health={health}
+                  readiness={readiness}
+                  readinessLoading={readinessLoading}
+                  readinessByKey={readinessByKey}
+                  onToggleItemAck={toggleItemQualityAck}
                   canSave={canSave}
                   saveDataset={saveDataset}
                   savingDataset={savingDataset}
@@ -1243,6 +1343,9 @@ export function TrainingStudio({ mode = "training" } = {}) {
                   resetConfigDefaults={resetConfigDefaults}
                   submitTrainingJob={submitTrainingJob}
                   configSnapshot={configSnapshot}
+                  readiness={readiness}
+                  readinessLoading={readinessLoading}
+                  readinessBlocksTraining={readinessBlocksTraining}
                 />
               ) : null}
             </section>

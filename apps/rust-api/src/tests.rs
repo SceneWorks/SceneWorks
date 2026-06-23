@@ -18,6 +18,8 @@ use std::time::{Duration, SystemTime};
 use tokio_stream::StreamExt;
 use tower::ServiceExt;
 
+const PNG_32X32: &[u8] = include_bytes!("../../desktop/icons/32x32.png");
+
 #[test]
 fn default_api_host_is_loopback() {
     // sc-4201 (F-API-1): an out-of-the-box bind must not expose the API to the LAN.
@@ -1657,6 +1659,103 @@ async fn training_dataset_uploads_are_dataset_owned_not_assets() {
             .len(),
         0
     );
+}
+
+#[tokio::test]
+async fn training_dataset_readiness_reports_and_persists_tier0_cache() {
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let settings = test_settings(&temp_dir);
+    let app = create_app(settings).expect("app creates");
+
+    let (_, project) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/projects",
+        json!({ "name": "Dataset Readiness Project" }),
+    )
+    .await;
+    let project_id = project["id"].as_str().expect("project id").to_owned();
+
+    let (status, upload) = request_multipart_upload(
+        app.clone(),
+        &format!("/api/v1/projects/{project_id}/training/uploads"),
+        "Tiny.PNG",
+        "image/png",
+        PNG_32X32,
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    assert_eq!(upload["file"]["width"], 32);
+    assert_eq!(upload["file"]["height"], 32);
+    let upload_hash = upload["file"]["contentHash"]
+        .as_str()
+        .expect("content hash")
+        .to_owned();
+    assert_eq!(upload_hash.len(), 64);
+    let staged_path = upload["file"]["path"]
+        .as_str()
+        .expect("staged path")
+        .to_owned();
+
+    let (status, dataset) = request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/projects/{project_id}/training/datasets"),
+        json!({
+            "name": "Tiny readiness set",
+            "items": [{
+                "path": staged_path,
+                "displayName": "Tiny.PNG",
+                "caption": { "text": "tiny test image" }
+            }]
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    assert_eq!(dataset["items"][0]["width"], 32);
+    assert_eq!(dataset["items"][0]["height"], 32);
+    assert_eq!(dataset["items"][0]["contentHash"], upload_hash);
+    assert!(dataset["items"][0]["tier0Scalars"].is_null());
+    let dataset_id = dataset["id"].as_str().expect("dataset id").to_owned();
+    let item_id = dataset["items"][0]["id"]
+        .as_str()
+        .expect("item id")
+        .to_owned();
+
+    let (status, report) = request(
+        app.clone(),
+        "GET",
+        &format!(
+            "/api/v1/projects/{project_id}/training/datasets/{dataset_id}/readiness?targetResolution=64&recommendedFor=style&minItems=1"
+        ),
+        Value::Null,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(report["gate"], "needs_attention");
+    assert_eq!(report["itemCount"], 1);
+    assert_eq!(report["datasetFlags"], json!([]));
+    let flags = report["items"][0]["flags"].as_array().expect("flags array");
+    assert!(flags.iter().any(|flag| flag["check"] == "resolution"));
+    assert!(!flags.iter().any(|flag| flag["check"] == "decode"));
+
+    let (status, detail) = request(
+        app.clone(),
+        "GET",
+        &format!("/api/v1/projects/{project_id}/training/datasets/{dataset_id}"),
+        Value::Null,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(detail["items"][0]["id"], item_id);
+    let cache = &detail["items"][0]["tier0Scalars"];
+    assert_eq!(cache["contentHash"], upload_hash);
+    assert_eq!(cache["bucketEdge"], 64);
+    assert!(cache["scalars"]["blurVariance"].is_number());
+    assert!(!cache["scalars"]["phash"]
+        .as_array()
+        .expect("phash array")
+        .is_empty());
 }
 
 #[tokio::test]

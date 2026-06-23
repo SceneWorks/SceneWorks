@@ -46,6 +46,30 @@ pub(crate) struct CharactersQuery {
     pub(crate) include_archived: Option<bool>,
 }
 
+/// Query parameters for the dataset readiness report (sc-6533). The training UI passes what it has
+/// selected; all are optional and fall back to per-kind defaults in `readiness_context`.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct ReadinessQuery {
+    /// The chosen training target's resolution; drives the bucket the scalars are measured at.
+    pub(crate) target_resolution: Option<u32>,
+    /// Comma-separated preset/target `recommendedFor` tags (e.g. `"character,style"`).
+    pub(crate) recommended_for: Option<String>,
+    /// The dataset's character kind (e.g. `"person"`).
+    pub(crate) character_type: Option<String>,
+    /// Override for the preset's minimum item count.
+    pub(crate) min_items: Option<u32>,
+}
+
+/// Body for the per-image quality override (sc-6534): the checks the user dismissed for one image.
+/// The store strips the non-acknowledgeable ones (`decode`, `count`); an empty list clears the ack.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct QualityAckBody {
+    #[serde(default)]
+    pub(crate) checks: Vec<sceneworks_core::dataset_quality::QualityCheck>,
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct LorasQuery {

@@ -57,6 +57,44 @@ export function useTraining({ token, activeProject, setError, setJobs }) {
     [token, activeProject],
   );
 
+  // Dataset Doctor readiness report (sc-6533/6534). A read over the SAVED dataset
+  // — pixel metrics (blur/dup/exposure) need the files on disk — so callers fetch
+  // it keyed on the dataset version, not the live unsaved selection. `query` is the
+  // pre-built query string (target resolution / kind / min) from readinessQueryParams;
+  // `signal` lets a stale fetch be aborted when the target or dataset changes.
+  const loadTrainingDatasetReadiness = useCallback(
+    async (datasetId, query = "", projectId = activeProject?.id, { signal } = {}) => {
+      if (!projectId || !datasetId) {
+        return null;
+      }
+      const suffix = query ? `?${query}` : "";
+      return apiFetch(
+        `/api/v1/projects/${projectId}/training/datasets/${encodeURIComponent(datasetId)}/readiness${suffix}`,
+        token,
+        { signal },
+      );
+    },
+    [token, activeProject],
+  );
+
+  // Persist (or clear) a per-image quality override (sc-6534). `checks` is the full set of dismissed
+  // findings for the item (the endpoint replaces the stored set); an empty array clears it. A
+  // metadata write — it does not bump the dataset version — so callers refetch readiness, not the
+  // dataset, afterward.
+  const setTrainingDatasetItemQualityAck = useCallback(
+    async (datasetId, itemId, checks, projectId = activeProject?.id) => {
+      if (!projectId || !datasetId || !itemId) {
+        throw new Error("Select a training dataset item first.");
+      }
+      return apiFetch(
+        `/api/v1/projects/${projectId}/training/datasets/${encodeURIComponent(datasetId)}/items/${encodeURIComponent(itemId)}/quality-ack`,
+        token,
+        { method: "POST", body: JSON.stringify({ checks }) },
+      );
+    },
+    [token, activeProject],
+  );
+
   const createTrainingDataset = useCallback(
     async (payload, projectId = activeProject?.id) => {
       if (!projectId) {
@@ -186,6 +224,8 @@ export function useTraining({ token, activeProject, setError, setJobs }) {
     setTrainingDatasetsError,
     refreshTrainingDatasets,
     loadTrainingDataset,
+    loadTrainingDatasetReadiness,
+    setTrainingDatasetItemQualityAck,
     createTrainingDataset,
     uploadTrainingDatasetItem,
     updateTrainingDataset,

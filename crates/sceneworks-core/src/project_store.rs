@@ -21,6 +21,7 @@ pub use crate::character_store::{
     CharacterLoraUpdateInput, CharacterMutationResult, CharacterReferenceInput,
     CharacterReferenceUpdateInput, CharacterUpdateInput, CHARACTER_SIDECAR_PATTERN,
 };
+use crate::dataset_quality::{CachedTier0Scalars, QualityAck, QualityCheck};
 use crate::slug::slugify;
 use crate::store_util::{
     ensure_column, is_safe_id, is_safe_relative_path, lock_project_files, optional_f64,
@@ -464,6 +465,16 @@ impl ProjectStore {
             .unwrap_or("dataset-upload")
             .to_owned();
 
+        // sc-6531 (Dataset Doctor): emit the stored image's real pixel dimensions + a content
+        // hash instead of the historical `Null`s, so the asset layer / pre-train readout
+        // (`datasetHelpers.js`) and Tier-0 checks have them up front. Read from the normalized
+        // stored file — header-only dims + a streamed hash, no full decode (core stays codec-free).
+        let (width, height) = crate::media_convert::image_dimensions(&media_path)
+            .map_or((Value::Null, Value::Null), |(w, h)| (json!(w), json!(h)));
+        let content_hash = crate::media_convert::file_content_hash(&media_path)
+            .ok()
+            .map_or(Value::Null, Value::String);
+
         Ok(json!({
             "id": upload_id,
             "projectId": project_id,
@@ -473,8 +484,9 @@ impl ProjectStore {
             "file": {
                 "path": media_rel,
                 "mimeType": content_type,
-                "width": Value::Null,
-                "height": Value::Null
+                "width": width,
+                "height": height,
+                "contentHash": content_hash
             },
             "url": format!("/api/v1/projects/{project_id}/files/{media_rel}")
         }))
@@ -518,6 +530,32 @@ impl ProjectStore {
     ) -> ProjectStoreResult<TrainingDataset> {
         let (project_path, _project_guard) = self.lock_project(project_id)?;
         TrainingDatasetStore::new(project_path).update_dataset(project_id, dataset_id, input)
+    }
+
+    /// Persist freshly-extracted Tier-0 scalars onto dataset items as the readiness cache (sc-6533).
+    /// Locked like any dataset mutation; a metadata-only write (no version/`updated_at` bump).
+    pub fn cache_dataset_tier0_scalars(
+        &self,
+        project_id: &str,
+        dataset_id: &str,
+        updates: &[(String, CachedTier0Scalars)],
+    ) -> ProjectStoreResult<()> {
+        let (project_path, _project_guard) = self.lock_project(project_id)?;
+        TrainingDatasetStore::new(project_path).cache_tier0_scalars(project_id, dataset_id, updates)
+    }
+
+    /// Persist (or clear) a per-image quality override (sc-6534). Locked wrapper over
+    /// [`TrainingDatasetStore::set_item_quality_ack`].
+    pub fn set_dataset_item_quality_ack(
+        &self,
+        project_id: &str,
+        dataset_id: &str,
+        item_id: &str,
+        checks: &[QualityCheck],
+    ) -> ProjectStoreResult<Option<QualityAck>> {
+        let (project_path, _project_guard) = self.lock_project(project_id)?;
+        TrainingDatasetStore::new(project_path)
+            .set_item_quality_ack(project_id, dataset_id, item_id, checks)
     }
 
     pub fn batch_rename_training_dataset_items(

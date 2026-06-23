@@ -5,6 +5,12 @@ import { CompactSelector } from "../../components/CompactSelector.jsx";
 import { DatasetAddDialog } from "../../components/DatasetAddDialog.jsx";
 import { DatasetCaptionDialog } from "../../components/DatasetCaptionDialog.jsx";
 import { Icon } from "../../components/Icons.jsx";
+import {
+  DatasetDoctorDistributions,
+  DatasetDoctorReadout,
+  ReadinessBadge,
+  ReadinessFlagDetails,
+} from "./DatasetDoctor.jsx";
 import { datasetItemCount, imageAssetName } from "../../training/datasetHelpers.js";
 import { joyCaptionExtraOptions, joyCaptionLengths, joyCaptionTypes } from "../../training/joyCaptionPrompts.js";
 
@@ -68,6 +74,10 @@ export function DatasetEditorPanel({
   applyOrderedNames,
   setCaptionDialog,
   health,
+  readiness = null,
+  readinessLoading = false,
+  readinessByKey,
+  onToggleItemAck,
   canSave,
   saveDataset,
   savingDataset,
@@ -190,6 +200,13 @@ export function DatasetEditorPanel({
             <span className={health.valid ? "training-valid-dot valid" : "training-valid-dot"} />
             <span>{health.valid ? "Dataset is ready for downstream steps" : "Add image assets to build this dataset"}</span>
           </div>
+          <DatasetDoctorReadout report={readiness} loading={readinessLoading} />
+          {readiness?.distributions ? (
+            <details className="dataset-doctor-advanced">
+              <summary>Metric distributions (advanced)</summary>
+              <DatasetDoctorDistributions report={readiness} />
+            </details>
+          ) : null}
           {unavailableAssetIds.length ? (
             <div className="training-unavailable-list" aria-label="Unavailable dataset items">
               {unavailableAssetIds.map((assetId) => (
@@ -212,6 +229,7 @@ export function DatasetEditorPanel({
                 const draft = captionDraftById[asset.id] ?? {};
                 const source = draft.source ?? "manual";
                 const name = asset.displayName ?? imageAssetName(asset);
+                const readinessEntry = readinessByKey?.get(asset.id);
                 return (
                   <article
                     className={["training-caption-card", disabled ? "disabled" : ""].filter(Boolean).join(" ")}
@@ -220,6 +238,9 @@ export function DatasetEditorPanel({
                     <div className="training-caption-card-head">
                       <button className="training-caption-card-thumb" onClick={() => onPreview(asset, memberAssets)} type="button">
                         <AssetThumbnail asset={asset} />
+                        {/* Only flash pending on the first load — during an ack-triggered refetch the
+                            prior report's badges hold steady rather than blinking to "·". */}
+                        <ReadinessBadge entry={readinessEntry} loading={readinessLoading && !readiness} />
                       </button>
                       <div className="training-caption-card-meta">
                         <strong title={name}>{name}</strong>
@@ -229,6 +250,14 @@ export function DatasetEditorPanel({
                         ) : null}
                       </div>
                     </div>
+                    <ReadinessFlagDetails
+                      entry={readinessEntry}
+                      onToggle={
+                        readinessEntry && typeof onToggleItemAck === "function"
+                          ? (check, dismissed) => onToggleItemAck(readinessEntry, check, dismissed)
+                          : undefined
+                      }
+                    />
                     <textarea
                       aria-label={`Caption for ${name}`}
                       className="training-caption-card-text"

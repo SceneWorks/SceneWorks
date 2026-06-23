@@ -14,6 +14,15 @@ serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 mime_guess = "2.0"
 url = "2.5"
+# sc-6531 (Dataset Doctor): read image dimensions from the header without a full decode.
+# `imagesize` is pure-Rust and pulls in NO native image-codec build (libdav1d/nasm/meson),
+# keeping core decode-free and correct on the Windows candle lane — same reason
+# `media_convert` shells out to sips/ffmpeg instead of linking the `image` crate.
+imagesize = "0.13"
+# sc-6531: SHA-256 of stored bytes = exact-duplicate key + the cache key for Tier-1
+# embeddings (epic 6529 §6.3). Pinned to the workspace's existing 0.10 line (worker + desktop)
+# so no new locked version appears.
+sha2 = "0.10"
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 

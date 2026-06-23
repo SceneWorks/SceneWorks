@@ -147,6 +147,49 @@ pub fn sniff_image_kind_at(path: &Path) -> Option<ImageKind> {
     sniff_image_kind(&header[..read])
 }
 
+/// Read an image's pixel dimensions from its header **without a full decode** (sc-6531,
+/// Dataset Doctor). Used at dataset import to populate `TrainingDatasetItem.width/height`,
+/// the foundation every Tier-0 quality check (min-resolution, crop-loss) relies on.
+///
+/// Header-only by design: `imagesize` parses just the format header, so this stays cheap and
+/// — like the rest of this module — pulls in no native image-codec build. Returns `None` for
+/// an unreadable file or an unrecognized format (the caller leaves dimensions absent rather
+/// than failing the import).
+pub fn image_dimensions(path: &Path) -> Option<(u32, u32)> {
+    let size = imagesize::size(path).ok()?;
+    Some((
+        u32::try_from(size.width).ok()?,
+        u32::try_from(size.height).ok()?,
+    ))
+}
+
+/// SHA-256 of a file's raw bytes, lowercase hex (sc-6531). The stable content identity of a
+/// stored dataset image: the exact-duplicate key for Tier-0 and the cache key that
+/// invalidates a Tier-1 embedding exactly when the image bytes change (epic 6529 §6.3).
+/// Streams the file so it never holds a whole image in memory.
+pub fn file_content_hash(path: &Path) -> std::io::Result<String> {
+    use sha2::{Digest, Sha256};
+    use std::fmt::Write as _;
+    use std::io::Read as _;
+
+    let mut file = std::fs::File::open(path)?;
+    let mut hasher = Sha256::new();
+    let mut buffer = [0u8; 8192];
+    loop {
+        let read = file.read(&mut buffer)?;
+        if read == 0 {
+            break;
+        }
+        hasher.update(&buffer[..read]);
+    }
+    // SHA-256 is always 32 bytes → 64 lowercase-hex chars.
+    let mut hex = String::with_capacity(64);
+    for byte in hasher.finalize() {
+        let _ = write!(hex, "{byte:02x}");
+    }
+    Ok(hex)
+}
+
 /// Failure converting an image to PNG.
 #[derive(Debug)]
 pub struct TranscodeError(pub String);
@@ -409,6 +452,67 @@ mod tests {
         for brand in compatible {
             bytes.extend_from_slice(*brand);
         }
+        bytes
+    }
+
+    // sc-6531 (Dataset Doctor) — header-only dimensions + content hash.
+
+    #[test]
+    fn image_dimensions_reads_header_without_decode() {
+        let dir = tempfile::tempdir().expect("temp dir");
+
+        // Two formats whose dimensions sit at fixed header offsets, so a header-only reader needs
+        // no pixel decode. Both are non-square, so a width/height transposition would be caught.
+        let gif = dir.path().join("wide.gif");
+        std::fs::write(&gif, gif_header(5, 3)).expect("write gif");
+        assert_eq!(image_dimensions(&gif), Some((5, 3)));
+
+        let png = dir.path().join("wide.png");
+        std::fs::write(&png, png_header(4, 2)).expect("write png");
+        assert_eq!(image_dimensions(&png), Some((4, 2)));
+    }
+
+    #[test]
+    fn image_dimensions_returns_none_for_non_image_or_missing() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let path = dir.path().join("notes.txt");
+        std::fs::write(&path, b"not an image").expect("write file");
+        assert_eq!(image_dimensions(&path), None);
+        assert_eq!(image_dimensions(&dir.path().join("missing.png")), None);
+    }
+
+    #[test]
+    fn file_content_hash_is_sha256_of_bytes() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let path = dir.path().join("blob.bin");
+        std::fs::write(&path, b"hello").expect("write file");
+        // Known SHA-256("hello"); identical bytes must hash identically (the exact-duplicate key).
+        assert_eq!(
+            file_content_hash(&path).expect("hash"),
+            "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824"
+        );
+    }
+
+    /// Minimal PNG: 8-byte signature + a complete IHDR chunk carrying `width`/`height` — enough
+    /// for a header-only dimension read (no IDAT; the reader does not verify the CRC).
+    fn png_header(width: u32, height: u32) -> Vec<u8> {
+        let mut bytes = vec![0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A];
+        bytes.extend_from_slice(&13u32.to_be_bytes()); // IHDR data length
+        bytes.extend_from_slice(b"IHDR");
+        bytes.extend_from_slice(&width.to_be_bytes());
+        bytes.extend_from_slice(&height.to_be_bytes());
+        bytes.extend_from_slice(&[0x08, 0x06, 0x00, 0x00, 0x00]); // depth, color, compression, filter, interlace
+        bytes.extend_from_slice(&[0x00, 0x00, 0x00, 0x00]); // CRC placeholder
+        bytes
+    }
+
+    /// Minimal GIF89a: 6-byte signature + the logical-screen `width`/`height` (LE u16) — the
+    /// fixed-offset header a dimension read needs (no color table / image data required).
+    fn gif_header(width: u16, height: u16) -> Vec<u8> {
+        let mut bytes = Vec::from(*b"GIF89a");
+        bytes.extend_from_slice(&width.to_le_bytes());
+        bytes.extend_from_slice(&height.to_le_bytes());
+        bytes.extend_from_slice(&[0x00, 0x00, 0x00]); // packed fields, bg color, aspect ratio
         bytes
     }
 

@@ -1,0 +1,24 @@
+[package]
+name = "sceneworks-image-quality"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish = false
+
+[dependencies]
+# Tier-0 result types + the pure decision logic this crate feeds (sc-6532, epic 6529).
+sceneworks-core = { path = "../sceneworks-core" }
+# Pure-Rust decode (png/jpeg/webp) — no native codec build, matching the rest of the tree. Dataset
+# uploads are normalized to these formats at import (sc-6143), so this feature set is sufficient.
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp"] }
+# Convolution for the Laplacian-variance blur metric.
+imageproc = { version = "0.25", default-features = false }
+# Perceptual hashing for exact/near-duplicate detection (the epic's one sanctioned new dependency).
+# v3 resolves a single `image` 0.25 in the graph (verified) — no duplicate image crate.
+image_hasher = "3"
+
+[dev-dependencies]
+tempfile = "3.13"
+
+[lints]
+workspace = true
