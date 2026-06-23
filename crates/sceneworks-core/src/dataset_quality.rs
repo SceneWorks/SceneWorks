@@ -33,6 +33,17 @@ string_enum! {
         // are normalized to png/jpeg/webp). Surfaced so an undecodable image can't quietly count as
         // "technically fine" in the readiness rollup.
         Decode => "decode",
+        // Tier-1 (epic 6529 P2, sc-6536): embedding-based "training usefulness" findings, computed by
+        // the dataset-analysis job from CLIP image embeddings. Advisory only (never Fatal) and NOT
+        // counted toward the technical sub-score — they describe the dataset's usefulness, not each
+        // image's technical quality.
+        // NearDuplicateEmbedding: CLIP-cosine near-duplicate — catches a burst of near-identical
+        // frames that the pHash `NearDuplicate` check misses (different crop/exposure, same content).
+        NearDuplicateEmbedding => "near_duplicate_embedding",
+        // LowDiversity: dataset-level — the set clusters too tightly in embedding space (same
+        // pose/angle/lighting/background), so the LoRA won't generalize. Carries the "add some from
+        // other angles" recommendation.
+        LowDiversity => "low_diversity",
     }
 }
 
@@ -565,12 +576,20 @@ string_enum! {
 pub struct ReadinessSubScores {
     /// Share of items with no technical-quality warning (resolution/crop/blur/exposure/dup/decode).
     pub technical: f64,
+    /// Embedding spread in `[0, 1]` (sc-6536): `1 - mean pairwise cosine similarity`. Higher = more
+    /// varied. `None` until the dataset-analysis job runs.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub diversity: Option<f64>,
+    /// Face-embedding consistency (sc-6529 face stack — a *different* encoder than CLIP). Reserved;
+    /// CLIP must not fill this.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub identity: Option<f64>,
+    /// Caption↔image CLIP alignment (sc-6537). `None` until increment-2.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub alignment: Option<f64>,
+    /// Aesthetic score (sc-6537, style datasets only — advisory). `None` until increment-2.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub aesthetic: Option<f64>,
 }
 
 /// Per-item readiness: the worst severity (for the thumbnail badge) and the flags behind it.
@@ -702,41 +721,70 @@ fn default_min_items(kind: &DatasetKind) -> u32 {
     }
 }
 
-/// Roll a Tier-0 evaluation up into the dataset readiness report (sc-6533). Pure: no IO. The gate
-/// follows the spike's block-vs-warn policy — `Blocked` on any fatal flag, else `NeedsAttention` on
-/// any warning, else `Ready`. An item is "technically fine" only if it carries no warn/fatal flag,
-/// so a decode failure (which raises a `Decode` warning) correctly drags the `technical` share down.
-pub fn build_readiness_report(evaluation: Tier0Evaluation) -> DatasetReadinessReport {
+/// Roll a Tier-0 evaluation (plus optional Tier-1 embedding findings, sc-6536) up into the dataset
+/// readiness report (sc-6533). Pure: no IO. The gate follows the spike's block-vs-warn policy —
+/// `Blocked` on any fatal flag, else `NeedsAttention` on any warning, else `Ready`. The `technical`
+/// share counts only **technical** checks (resolution/crop/blur/exposure/dup/decode) — embedding
+/// "usefulness" findings describe the *set*, not an image's technical quality, so they raise the
+/// badge and the gate but never drag `technical` down. Pass `None` for `tier1` when only Tier-0 ran.
+pub fn build_readiness_report(
+    evaluation: Tier0Evaluation,
+    tier1: Option<&Tier1Evaluation>,
+) -> DatasetReadinessReport {
     let item_count = evaluation.items.len() as u32;
     let mut counts = SeverityCounts::default();
     let mut items = Vec::with_capacity(evaluation.items.len());
-    let mut clean_items = 0_u32;
+    let mut technically_clean = 0_u32;
+
+    // Per-item Tier-1 flags keyed by item id, merged onto the authoritative Tier-0 item set.
+    let tier1_by_item: HashMap<&str, &[QualityFlag]> = tier1
+        .map(|t| {
+            t.items
+                .iter()
+                .map(|entry| (entry.item_id.as_str(), entry.flags.as_slice()))
+                .collect()
+        })
+        .unwrap_or_default();
 
     for entry in &evaluation.items {
-        // Acknowledged findings are dropped from every rollup — counts, the item badge, the
-        // technical share, and (via counts) the gate — but kept in `flags` so the UI can show the
-        // user what they dismissed (sc-6534).
-        for flag in entry.flags.iter().filter(|flag| !flag.acknowledged) {
+        let mut flags = entry.flags.clone();
+        if let Some(extra) = tier1_by_item.get(entry.item_id.as_str()) {
+            flags.extend(extra.iter().cloned());
+        }
+        // Acknowledged findings (sc-6534) are dropped from every rollup — counts, the badge, the
+        // technical share, and (via counts) the gate — but kept in `flags` for struck-through display.
+        for flag in flags.iter().filter(|flag| !flag.acknowledged) {
             bump(&mut counts, &flag.severity);
         }
-        let severity = worst_severity(&entry.flags);
-        if !matches!(severity, Some(Severity::Warn | Severity::Fatal)) {
-            clean_items += 1;
+        // Technical share: a decode failure (Decode warn) correctly counts; an embedding near-dup
+        // (sc-6536) does not.
+        let has_technical_problem = flags
+            .iter()
+            .filter(|flag| !flag.acknowledged && is_technical_check(&flag.check))
+            .any(|flag| matches!(flag.severity, Severity::Warn | Severity::Fatal));
+        if !has_technical_problem {
+            technically_clean += 1;
         }
+        let severity = worst_severity(&flags);
         items.push(ItemReadiness {
             item_id: entry.item_id.clone(),
             severity,
-            flags: entry.flags.clone(),
+            flags,
         });
     }
-    for flag in &evaluation.dataset {
+
+    let mut dataset_flags = evaluation.dataset;
+    if let Some(t) = tier1 {
+        dataset_flags.extend(t.dataset.iter().cloned());
+    }
+    for flag in dataset_flags.iter().filter(|flag| !flag.acknowledged) {
         bump(&mut counts, &flag.severity);
     }
 
     let technical = if item_count == 0 {
         1.0
     } else {
-        f64::from(clean_items) / f64::from(item_count)
+        f64::from(technically_clean) / f64::from(item_count)
     };
     let gate = if counts.fatal > 0 {
         ReadinessGate::Blocked
@@ -750,16 +798,199 @@ pub fn build_readiness_report(evaluation: Tier0Evaluation) -> DatasetReadinessRe
         gate,
         sub_scores: ReadinessSubScores {
             technical,
-            diversity: None,
+            diversity: tier1.map(|t| t.diversity),
             identity: None,
             alignment: None,
+            aesthetic: None,
         },
         counts,
         item_count,
         items,
-        dataset_flags: evaluation.dataset,
+        dataset_flags,
         distributions: None,
     }
+}
+
+/// Technical-quality checks (Tier-0) vs. the "training usefulness" checks (Tier-1, sc-6536). Only the
+/// former feed the `technical` sub-score. Unknown/future checks are treated as non-technical.
+fn is_technical_check(check: &QualityCheck) -> bool {
+    matches!(
+        check,
+        QualityCheck::Resolution
+            | QualityCheck::CropLoss
+            | QualityCheck::Blur
+            | QualityCheck::Exposure
+            | QualityCheck::ExactDuplicate
+            | QualityCheck::NearDuplicate
+            | QualityCheck::Count
+            | QualityCheck::Decode
+    )
+}
+
+// ---------------------------------------------------------------------------
+// Tier-1 embedding analysis (epic 6529 P2, sc-6536) — pure math over CLIP image embeddings. The
+// embeddings are produced by the (Metal-only) dataset-analysis job; everything here operates on
+// `Vec<f32>` and is fully unit-testable with synthetic vectors, exactly like `evaluate_tier0`.
+// ---------------------------------------------------------------------------
+
+/// One item's CLIP image embedding (raw — `evaluate_tier1` L2-normalizes internally).
+#[derive(Debug, Clone, PartialEq)]
+pub struct ItemEmbedding {
+    pub item_id: String,
+    pub embedding: Vec<f32>,
+}
+
+/// Tier-1 thresholds (sc-6536). **Placeholders pending calibration** (sc-6535 §8) — a fixture sweep
+/// over a near-dup-heavy set and a healthy diverse set sets these, not these guesses.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Tier1Thresholds {
+    /// Cosine similarity ≥ this ⇒ embedding near-duplicate.
+    pub near_dup_cosine: f64,
+    /// Diversity (`1 - mean pairwise cosine`) below this ⇒ a `LowDiversity` warning.
+    pub diversity_floor: f64,
+}
+
+impl Tier1Thresholds {
+    pub fn for_kind(kind: &DatasetKind) -> Self {
+        // Style sets are intentionally more uniform (one aesthetic), so tolerate lower diversity;
+        // person/object want pose/angle variety. Placeholders.
+        let diversity_floor = match kind {
+            DatasetKind::Style => 0.10,
+            _ => 0.18,
+        };
+        Self {
+            near_dup_cosine: 0.95,
+            diversity_floor,
+        }
+    }
+}
+
+/// Result of Tier-1 evaluation: per-item embedding flags + dataset-level findings + the diversity
+/// score (`[0, 1]`) that fills `ReadinessSubScores.diversity`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Tier1Evaluation {
+    pub items: Vec<ItemQualityFlags>,
+    pub dataset: Vec<QualityFlag>,
+    pub diversity: f64,
+}
+
+/// Evaluate Tier-1 over a dataset's CLIP image embeddings (sc-6536). Pure: no IO, no model. Degenerate
+/// inputs are handled — fewer than two comparable items form no clusters and have an undefined spread,
+/// so `diversity` defaults to 1.0 (nothing to be redundant with) and no flags fire.
+pub fn evaluate_tier1(items: &[ItemEmbedding], thresholds: &Tier1Thresholds) -> Tier1Evaluation {
+    let mut per_item: Vec<ItemQualityFlags> = items
+        .iter()
+        .map(|item| ItemQualityFlags {
+            item_id: item.item_id.clone(),
+            flags: Vec::new(),
+        })
+        .collect();
+
+    // L2-normalize once; a zero/degenerate vector → `None`, excluded from cosine.
+    let normalized: Vec<Option<Vec<f32>>> = items
+        .iter()
+        .map(|item| l2_normalize(&item.embedding))
+        .collect();
+
+    // Pairwise cosine drives both the near-dup union-find and the diversity mean.
+    let mut uf = UnionFind::new(items.len());
+    let mut sim_sum = 0.0_f64;
+    let mut sim_count = 0_u64;
+    for (i, ni) in normalized.iter().enumerate() {
+        let Some(a) = ni else { continue };
+        for (j, nj) in normalized.iter().enumerate().skip(i + 1) {
+            let Some(b) = nj else { continue };
+            let cos = dot(a, b);
+            sim_sum += cos;
+            sim_count += 1;
+            if cos >= thresholds.near_dup_cosine {
+                uf.union(i, j);
+            }
+        }
+    }
+
+    // Near-dup clusters → per-item `NearDuplicateEmbedding` flags with peers + the cluster's max cosine.
+    let mut clusters: HashMap<usize, Vec<usize>> = HashMap::new();
+    for (i, hash) in normalized.iter().enumerate() {
+        if hash.is_some() {
+            clusters.entry(uf.find(i)).or_default().push(i);
+        }
+    }
+    for cluster in clusters.values().filter(|cluster| cluster.len() > 1) {
+        for &idx in cluster {
+            let mut peers = Vec::new();
+            let mut max_cos = 0.0_f64;
+            for &other in cluster {
+                if other == idx {
+                    continue;
+                }
+                if let (Some(a), Some(b)) = (&normalized[idx], &normalized[other]) {
+                    max_cos = max_cos.max(dot(a, b));
+                }
+                peers.push(items[other].item_id.clone());
+            }
+            if !peers.is_empty() {
+                per_item[idx].flags.push(QualityFlag {
+                    check: QualityCheck::NearDuplicateEmbedding,
+                    severity: Severity::Warn,
+                    value: Some(max_cos),
+                    threshold: Some(thresholds.near_dup_cosine),
+                    peers,
+                    acknowledged: false,
+                });
+            }
+        }
+    }
+
+    // Diversity = 1 − mean pairwise cosine (clamped). Undefined for <2 comparable items → 1.0.
+    let diversity = if sim_count == 0 {
+        1.0
+    } else {
+        (1.0 - sim_sum / sim_count as f64).clamp(0.0, 1.0)
+    };
+    let mut dataset = Vec::new();
+    if sim_count > 0 && diversity < thresholds.diversity_floor {
+        dataset.push(QualityFlag {
+            check: QualityCheck::LowDiversity,
+            severity: Severity::Warn,
+            value: Some(diversity),
+            threshold: Some(thresholds.diversity_floor),
+            peers: Vec::new(),
+            acknowledged: false,
+        });
+    }
+
+    Tier1Evaluation {
+        items: per_item,
+        dataset,
+        diversity,
+    }
+}
+
+/// L2-normalize a vector for cosine, or `None` when it has no magnitude (a degenerate embedding).
+fn l2_normalize(values: &[f32]) -> Option<Vec<f32>> {
+    let norm = values
+        .iter()
+        .map(|x| f64::from(*x) * f64::from(*x))
+        .sum::<f64>()
+        .sqrt();
+    if norm <= f64::EPSILON {
+        return None;
+    }
+    Some(
+        values
+            .iter()
+            .map(|x| (f64::from(*x) / norm) as f32)
+            .collect(),
+    )
+}
+
+/// Cosine similarity of two already-L2-normalized vectors (their dot product).
+fn dot(a: &[f32], b: &[f32]) -> f64 {
+    a.iter()
+        .zip(b)
+        .map(|(x, y)| f64::from(*x) * f64::from(*y))
+        .sum()
 }
 
 /// Worst severity among the item's *active* flags — acknowledged findings (sc-6534) and the
@@ -1012,7 +1243,7 @@ mod tests {
     #[test]
     fn gate_is_ready_when_every_item_is_clean() {
         let eval = evaluate_tier0(&[sharp("a", 0xAA), sharp("b", 0x55)], 512, 1, &thresholds());
-        let report = build_readiness_report(eval);
+        let report = build_readiness_report(eval, None);
         assert_eq!(report.gate, ReadinessGate::Ready);
         assert!((report.sub_scores.technical - 1.0).abs() < 1e-9);
         assert!(report.sub_scores.diversity.is_none()); // Tier-1 not computed yet
@@ -1025,7 +1256,7 @@ mod tests {
         let mut soft = item("soft");
         soft.scalars = Some(scalars(10.0, 0.0, 0.0, vec![0x0F; 8]));
         let eval = evaluate_tier0(&[soft, sharp("ok", 0xF0)], 512, 1, &thresholds());
-        let report = build_readiness_report(eval);
+        let report = build_readiness_report(eval, None);
         assert_eq!(report.gate, ReadinessGate::NeedsAttention);
         assert!(report.counts.warn >= 1);
         assert!((report.sub_scores.technical - 0.5).abs() < 1e-9);
@@ -1038,7 +1269,7 @@ mod tests {
     #[test]
     fn gate_blocks_when_too_few_images() {
         let eval = evaluate_tier0(&[item("a"), item("b")], 512, 12, &thresholds());
-        let report = build_readiness_report(eval);
+        let report = build_readiness_report(eval, None);
         assert_eq!(report.gate, ReadinessGate::Blocked);
         assert!(report.counts.fatal >= 1);
         assert!(report
@@ -1067,7 +1298,7 @@ mod tests {
                 peers: Vec::new(),
                 acknowledged: false,
             });
-        let report = build_readiness_report(eval);
+        let report = build_readiness_report(eval, None);
         assert!((report.sub_scores.technical - 0.5).abs() < 1e-9);
         assert_eq!(report.gate, ReadinessGate::NeedsAttention);
     }
@@ -1095,7 +1326,7 @@ mod tests {
     #[test]
     fn report_round_trips_as_camelcase_json() {
         let eval = evaluate_tier0(&[sharp("a", 0x11)], 512, 1, &thresholds());
-        let report = build_readiness_report(eval);
+        let report = build_readiness_report(eval, None);
         let json = serde_json::to_string(&report).expect("serialize");
         assert!(json.contains("\"subScores\""));
         assert!(json.contains("\"itemCount\""));
@@ -1150,7 +1381,7 @@ mod tests {
             .expect("blur flag on b");
         assert!(!b_blur.acknowledged);
 
-        let report = build_readiness_report(eval);
+        let report = build_readiness_report(eval, None);
         assert_eq!(report.counts.warn, 1, "only b's warning counts");
         assert!(
             (report.sub_scores.technical - 0.5).abs() < 1e-9,
@@ -1166,12 +1397,10 @@ mod tests {
         let mut soft = item("solo");
         soft.scalars = Some(scalars(10.0, 0.0, 0.0, vec![0; 8]));
         soft.acknowledged = vec![QualityCheck::Blur];
-        let report = build_readiness_report(evaluate_tier0(
-            std::slice::from_ref(&soft),
-            512,
-            1,
-            &thresholds(),
-        ));
+        let report = build_readiness_report(
+            evaluate_tier0(std::slice::from_ref(&soft), 512, 1, &thresholds()),
+            None,
+        );
         assert_eq!(report.gate, ReadinessGate::Ready);
         assert_eq!(report.counts.warn, 0);
         assert!((report.sub_scores.technical - 1.0).abs() < 1e-9);
@@ -1224,5 +1453,116 @@ mod tests {
         assert!(!ack.valid_for(Some("xyz")));
         assert!(ack.effective_checks(Some("xyz")).is_empty());
         assert!(ack.effective_checks(None).is_empty());
+    }
+
+    // ----- Tier-1 embedding analysis (sc-6536) -----
+
+    fn emb(id: &str, vector: &[f32]) -> ItemEmbedding {
+        ItemEmbedding {
+            item_id: id.to_owned(),
+            embedding: vector.to_vec(),
+        }
+    }
+
+    fn tier1_thresholds() -> Tier1Thresholds {
+        Tier1Thresholds::for_kind(&DatasetKind::Person)
+    }
+
+    #[test]
+    fn tier1_clusters_near_identical_embeddings_and_scores_low_diversity() {
+        // Three (nearly) identical vectors — a burst — cluster and read as undiverse.
+        let items = [
+            emb("a", &[1.0, 0.0, 0.0, 0.0]),
+            emb("b", &[0.999, 0.01, 0.0, 0.0]),
+            emb("c", &[1.0, 0.0, 0.0, 0.0]),
+        ];
+        let eval = evaluate_tier1(&items, &tier1_thresholds());
+
+        for id in ["a", "b", "c"] {
+            let entry = eval.items.iter().find(|e| e.item_id == id).expect("item");
+            assert!(
+                entry
+                    .flags
+                    .iter()
+                    .any(|f| f.check == QualityCheck::NearDuplicateEmbedding),
+                "{id} should be an embedding near-duplicate"
+            );
+        }
+        assert!(
+            eval.diversity < 0.1,
+            "near-identical set has near-zero diversity"
+        );
+        assert!(eval
+            .dataset
+            .iter()
+            .any(|f| f.check == QualityCheck::LowDiversity));
+    }
+
+    #[test]
+    fn tier1_orthogonal_embeddings_are_diverse_and_unclustered() {
+        // Pairwise-orthogonal unit vectors: cosine 0 → no near-dup, maximal diversity.
+        let items = [
+            emb("a", &[1.0, 0.0, 0.0, 0.0]),
+            emb("b", &[0.0, 1.0, 0.0, 0.0]),
+            emb("c", &[0.0, 0.0, 1.0, 0.0]),
+        ];
+        let eval = evaluate_tier1(&items, &tier1_thresholds());
+        assert!(eval.items.iter().all(|e| e.flags.is_empty()));
+        assert!(eval.dataset.is_empty());
+        assert!((eval.diversity - 1.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn tier1_degenerate_inputs_are_safe() {
+        // A single item (no pairs) and a zero vector (no magnitude) raise nothing.
+        let single = evaluate_tier1(&[emb("solo", &[1.0, 2.0, 3.0])], &tier1_thresholds());
+        assert!((single.diversity - 1.0).abs() < 1e-9);
+        assert!(single.items[0].flags.is_empty());
+
+        let zero = evaluate_tier1(
+            &[emb("z1", &[0.0, 0.0, 0.0]), emb("z2", &[0.0, 0.0, 0.0])],
+            &tier1_thresholds(),
+        );
+        assert!(zero.items.iter().all(|e| e.flags.is_empty()));
+        assert!((zero.diversity - 1.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn tier1_findings_merge_into_the_report_without_touching_technical() {
+        // Two technically-perfect images that are embedding near-duplicates.
+        let mut a = item("a");
+        a.scalars = Some(scalars(5000.0, 0.0, 0.0, vec![0x00; 8]));
+        let mut b = item("b");
+        b.scalars = Some(scalars(5000.0, 0.0, 0.0, vec![0xFF; 8])); // distinct pHash → no Tier-0 dup
+        let tier0 = evaluate_tier0(&[a, b], 512, 1, &thresholds());
+
+        let tier1 = evaluate_tier1(
+            &[emb("a", &[1.0, 0.0, 0.0]), emb("b", &[1.0, 0.0, 0.0])],
+            &tier1_thresholds(),
+        );
+        let report = build_readiness_report(tier0, Some(&tier1));
+
+        // Embedding dup raises the badge + gate, but the images are technically fine → technical 1.0.
+        assert!((report.sub_scores.technical - 1.0).abs() < 1e-9);
+        assert_eq!(report.gate, ReadinessGate::NeedsAttention);
+        assert!(report.sub_scores.diversity.expect("diversity set") < 0.1);
+        let a = report.items.iter().find(|i| i.item_id == "a").expect("a");
+        assert_eq!(a.severity, Some(Severity::Warn));
+        assert!(a
+            .flags
+            .iter()
+            .any(|f| f.check == QualityCheck::NearDuplicateEmbedding));
+    }
+
+    #[test]
+    fn report_without_tier1_leaves_diversity_none() {
+        let mut ok = item("ok");
+        ok.scalars = Some(scalars(5000.0, 0.0, 0.0, vec![1; 8]));
+        let report = build_readiness_report(
+            evaluate_tier0(std::slice::from_ref(&ok), 512, 1, &thresholds()),
+            None,
+        );
+        assert_eq!(report.sub_scores.diversity, None);
+        assert_eq!(report.sub_scores.aesthetic, None);
     }
 }

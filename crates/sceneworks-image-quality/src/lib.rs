@@ -132,7 +132,7 @@ pub fn compute_readiness(
         }
     }
 
-    let mut report = build_readiness_report(evaluation);
+    let mut report = build_readiness_report(evaluation, None);
     report.distributions = build_distributions(&inputs, thresholds);
     (report, extracted)
 }
