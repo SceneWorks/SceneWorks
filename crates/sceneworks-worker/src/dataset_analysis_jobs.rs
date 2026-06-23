@@ -178,9 +178,16 @@ pub(crate) async fn run_dataset_analysis_job(
                         if item.caption_text.trim().is_empty() {
                             (None, None)
                         } else {
-                            let text_embedding = text_embedder
-                                .embed_text(&item.caption_text)
-                                .map_err(|error| {
+                            // Embed only the subject phrase (first sentence). Full JoyCaption
+                            // "Descriptive/long" captions wash the subject out of CLIP's truncated
+                            // text embedding and the cosine loses all matched-vs-mismatched signal —
+                            // see `caption_alignment_text` + `CaptionAlignmentThresholds` (sc-6537).
+                            let alignment_text =
+                                sceneworks_core::dataset_quality::caption_alignment_text(
+                                    &item.caption_text,
+                                );
+                            let text_embedding =
+                                text_embedder.embed_text(alignment_text).map_err(|error| {
                                     WorkerError::Engine(format!("CLIP text embed failed: {error}"))
                                 })?;
                             (Some(item.caption_hash), Some(text_embedding))
@@ -824,13 +831,18 @@ mod real_weights_tests {
     }
 
     /// Caption↔image alignment floor calibration (sc-6537). Embeds each image under `CALIB_DIR` with
-    /// its sibling `<stem>.txt` caption, then dumps the MATCHED (own-caption) vs MISMATCHED (other-
-    /// caption) cosine distributions + a floor-crossing table so `CaptionAlignmentThresholds::cosine_floor`
-    /// can be set from data instead of the `0.10` placeholder. For a **production-faithful** sweep, point
-    /// `CALIB_DIR` at a dataset captioned by the real JoyCaption job (its `.txt` sidecars). The default
-    /// `~/Datasets/dreambooth/dataset` is a quick proxy — its `<subject>/` folders give ground-truth
-    /// labels (write `a photo of a <subject>` sidecars first), but those short captions are NOT
-    /// JoyCaption-style, so treat the absolute numbers as a sanity check, not the final floor. Run:
+    /// its sibling `<stem>.txt` caption, then dumps the MATCHED (own-caption) vs MISMATCHED
+    /// (cross-subject) cosine distributions + a floor-crossing table so
+    /// `CaptionAlignmentThresholds::cosine_floor` can be set from data. Subject = the image's parent
+    /// dir (`<subject>/`), so MISMATCHED stays strictly cross-subject.
+    ///
+    /// Prints TWO tables — `[FULL CAPTION]` (embed the whole `.txt`) vs `[FIRST SENTENCE]` (embed only
+    /// `caption_alignment_text`, what the worker actually does). The production-faithful result that set
+    /// the `0.15` floor: `~/Datasets/dreambooth/dataset` captioned by the **real** JoyCaption job
+    /// ("Descriptive/long"). FULL CAPTION → matched & mismatched medians both ≈0.11 (no signal);
+    /// FIRST SENTENCE → matched min ≈0.18 / median ≈0.25 vs mismatched max ≈0.16 (clean gap). Embedding
+    /// the full descriptive paragraph washes the subject out of CLIP's 77-token-truncated text vector.
+    /// Run:
     ///   CALIB_DIR=~/Datasets/dreambooth/dataset RUST_TEST_THREADS=1 \
     ///     cargo test -p sceneworks-worker sweep_caption_alignment -- --ignored --nocapture
     #[test]
@@ -906,62 +918,90 @@ mod real_weights_tests {
         };
         let cos = |a: &[f32], b: &[f32]| a.iter().zip(b).map(|(x, y)| x * y).sum::<f32>();
 
+        // Subject label = parent dir name (dreambooth: dog/cat/teapot/backpack). Keeps MISMATCHED
+        // strictly cross-subject — a *different photo of the same subject* is a genuine match, not a
+        // mismatch, so counting it as one would bias toward a no-separation conclusion.
+        let subject = |p: &std::path::Path| {
+            p.parent()
+                .and_then(|d| d.file_name())
+                .and_then(|s| s.to_str())
+                .unwrap_or("")
+                .to_owned()
+        };
+
         let mut imgs = Vec::with_capacity(pairs.len());
-        let mut txts = Vec::with_capacity(pairs.len());
-        let mut captions = Vec::with_capacity(pairs.len());
+        let mut subjects = Vec::with_capacity(pairs.len());
+        let mut full_caps = Vec::with_capacity(pairs.len());
         for (path, caption) in &pairs {
             let image = load_analysis_image(path).expect("decode");
             imgs.push(norm(image_embedder.embed(&image).expect("img embed")));
-            txts.push(norm(text_embedder.embed_text(caption).expect("text embed")));
-            captions.push(caption.clone());
+            subjects.push(subject(path));
+            full_caps.push(caption.clone());
         }
         let n = imgs.len();
 
-        let mut matched: Vec<f32> = (0..n).map(|i| cos(&imgs[i], &txts[i])).collect();
-        // Each image vs a few OTHER captions whose text differs (a genuinely wrong caption).
-        let mut mismatched: Vec<f32> = Vec::new();
-        for i in 0..n {
-            for step in [1usize, n / 3, n / 2, 2 * n / 3] {
-                let j = (i + step.max(1)) % n;
-                if captions[j] != captions[i] {
-                    mismatched.push(cos(&imgs[i], &txts[j]));
+        // Subject-phrase reduction — strips the long descriptive paragraph CLIP truncates at 77 tokens
+        // anyway, leaving the subject phrase ("Photograph of a Shiba Inu dog"). Delegates to the SAME
+        // core fn the worker applies in production, so this calibrated floor matches what the analysis
+        // job actually embeds.
+        let first_sentence =
+            |c: &str| sceneworks_core::dataset_quality::caption_alignment_text(c).to_owned();
+
+        // Run matched/mismatched/floor analysis for one caption-preprocessing mode.
+        let analyze = |label: &str, prep: &dyn Fn(&str) -> String| {
+            let txts: Vec<Vec<f32>> = full_caps
+                .iter()
+                .map(|c| norm(text_embedder.embed_text(&prep(c)).expect("text embed")))
+                .collect();
+            let mut matched: Vec<f32> = (0..n).map(|i| cos(&imgs[i], &txts[i])).collect();
+            // Every cross-subject (image_i, caption_j) pair is a genuinely wrong caption.
+            let mut mismatched: Vec<f32> = Vec::new();
+            for i in 0..n {
+                for j in 0..n {
+                    if subjects[i] != subjects[j] {
+                        mismatched.push(cos(&imgs[i], &txts[j]));
+                    }
                 }
             }
-        }
-        matched.sort_by(|a, b| a.partial_cmp(b).unwrap());
-        mismatched.sort_by(|a, b| a.partial_cmp(b).unwrap());
-        let pct = |v: &[f32], p: f32| v[((p / 100.0) * (v.len() as f32 - 1.0)).round() as usize];
+            matched.sort_by(|a, b| a.partial_cmp(b).unwrap());
+            mismatched.sort_by(|a, b| a.partial_cmp(b).unwrap());
+            let pct =
+                |v: &[f32], p: f32| v[((p / 100.0) * (v.len() as f32 - 1.0)).round() as usize];
 
-        println!(
-            "\n=== caption↔image alignment over {n} (image, caption) pairs in {} ===",
-            root.display()
-        );
-        println!(
-            "MATCHED    (own caption):   min={:.4} p05={:.4} p25={:.4} median={:.4} p75={:.4}",
-            matched[0],
-            pct(&matched, 5.0),
-            pct(&matched, 25.0),
-            pct(&matched, 50.0),
-            pct(&matched, 75.0)
-        );
-        println!(
-            "MISMATCHED (other caption): median={:.4} p75={:.4} p95={:.4} max={:.4}  (n={})",
-            pct(&mismatched, 50.0),
-            pct(&mismatched, 75.0),
-            pct(&mismatched, 95.0),
-            mismatched[mismatched.len() - 1],
-            mismatched.len()
-        );
-        println!("\nfloor: % MATCHED flagged (false-positive — keep low) | % MISMATCHED flagged (caught — keep high):");
-        for floor in [0.06f32, 0.08, 0.10, 0.12, 0.15, 0.18, 0.20] {
-            let false_pos = matched.iter().filter(|c| **c < floor).count();
-            let caught = mismatched.iter().filter(|c| **c < floor).count();
             println!(
-                "  floor {floor:.2}: matched {false_pos}/{n} ({:.0}%) | mismatched {caught}/{} ({:.0}%)",
-                100.0 * false_pos as f32 / n as f32,
-                mismatched.len(),
-                100.0 * caught as f32 / mismatched.len() as f32
+                "\n=== [{label}] caption↔image alignment over {n} pairs in {} ===",
+                root.display()
             );
-        }
+            println!(
+                "MATCHED    (own caption):   min={:.4} p05={:.4} p25={:.4} median={:.4} p75={:.4}",
+                matched[0],
+                pct(&matched, 5.0),
+                pct(&matched, 25.0),
+                pct(&matched, 50.0),
+                pct(&matched, 75.0)
+            );
+            println!(
+                "MISMATCHED (cross-subject): median={:.4} p75={:.4} p95={:.4} max={:.4}  (n={})",
+                pct(&mismatched, 50.0),
+                pct(&mismatched, 75.0),
+                pct(&mismatched, 95.0),
+                mismatched[mismatched.len() - 1],
+                mismatched.len()
+            );
+            println!("floor: % MATCHED flagged (false-pos — keep low) | % MISMATCHED flagged (caught — keep high):");
+            for floor in [0.06f32, 0.08, 0.10, 0.12, 0.15, 0.18, 0.20, 0.24] {
+                let false_pos = matched.iter().filter(|c| **c < floor).count();
+                let caught = mismatched.iter().filter(|c| **c < floor).count();
+                println!(
+                    "  floor {floor:.2}: matched {false_pos}/{n} ({:.0}%) | mismatched {caught}/{} ({:.0}%)",
+                    100.0 * false_pos as f32 / n as f32,
+                    mismatched.len(),
+                    100.0 * caught as f32 / mismatched.len() as f32
+                );
+            }
+        };
+
+        analyze("FULL CAPTION", &|c: &str| c.to_owned());
+        analyze("FIRST SENTENCE", &first_sentence);
     }
 }

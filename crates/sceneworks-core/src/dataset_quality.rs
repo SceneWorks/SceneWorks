@@ -1088,11 +1088,25 @@ pub struct ItemCaptionAlignment {
     pub acknowledged: Vec<QualityCheck>,
 }
 
-/// Caption↔image CLIP alignment thresholds (sc-6537). **Placeholder pending a JoyCaption-caption
-/// sweep.** A real-weights probe (one photo, short captions) put *matched* caption↔image cosines at
-/// ~0.13–0.16 and clear *mismatches* at ~0.03–0.05 — raw CLIP image/text cosines are low and
-/// compressed. So `0.10` flags clear mismatches without false-flagging good captions; the prior `0.20`
-/// sat *above* the matched range and would have flagged essentially every caption.
+/// Caption↔image CLIP alignment thresholds (sc-6537). `0.15` from a real-weights, production-faithful
+/// sweep: 12 dreambooth photos captioned by the real JoyCaption job ("Descriptive/long"), CLIP-L
+/// image/text cosines, matched (own caption) vs cross-subject mismatched.
+///
+/// The decisive finding: the cosine only separates when the **first sentence** of the caption is
+/// embedded (see [`caption_alignment_text`]). Full 256-token captions put matched and mismatched at the
+/// *same* median (≈0.11, no signal); first-sentence embedding gives matched min ≈0.18 / median ≈0.25 vs
+/// mismatched max ≈0.16 — a clean gap. At `0.15`: 0/12 correct captions flagged, ~93% of cross-subject
+/// mismatches caught, with headroom below the matched minimum. **The floor is only meaningful when the
+/// `text_embedding` was produced from [`caption_alignment_text`]** — the worker must apply it before
+/// embedding, or this threshold sits in no-man's-land.
+///
+/// **Provisional, photographic-subject only.** The 4 calibration subjects are maximally distinct, so
+/// this validates *gross wrong-subject* detection (dog photo ↔ teapot caption), not subtle mis-caption,
+/// and only on single-subject photos. CLIP scores style/illustration imagery lower, so a *correct*
+/// first sentence there could dip below `0.15` and false-flag — the sibling diversity/aesthetic floors
+/// ship flagged-provisional for the same reason. A broader/style sweep (and possibly a per-kind floor,
+/// like [`Tier1Thresholds`]) is future work; until then this stays a single conservative scalar and the
+/// finding is a dismissable advisory `Warn`, never a gate.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct CaptionAlignmentThresholds {
     /// Cosine similarity below this ⇒ `caption_alignment` warning.
@@ -1101,8 +1115,39 @@ pub struct CaptionAlignmentThresholds {
 
 impl Default for CaptionAlignmentThresholds {
     fn default() -> Self {
-        Self { cosine_floor: 0.10 }
+        Self { cosine_floor: 0.15 }
     }
+}
+
+/// Reduce a caption to the subject phrase used for caption↔image CLIP alignment (sc-6537).
+///
+/// JoyCaption "Descriptive/long" captions lead with a subject sentence ("Photograph of a Shiba Inu
+/// dog ...") then continue with paragraphs of scene/lighting/background detail. CLIP's text encoder
+/// truncates at 77 tokens and that trailing detail is generic across single-subject photos, so it
+/// washes the subject noun out of the embedding — the full-caption cosine carries no
+/// matched-vs-mismatched signal (calibration: both medians ≈0.11). Embedding only the first sentence
+/// restores a clean separation (matched min ≈0.18 vs mismatched max ≈0.16). Short or single-sentence
+/// captions pass through essentially unchanged, so this is safe for hand-written captions too.
+///
+/// "First sentence" = up to and including the first sentence-ending `.` on the first non-empty line,
+/// else the whole first line. A `.` only ends the sentence when it sits at end-of-line or is followed
+/// by whitespace, so decimals ("a 3.5 inch teapot.") and ellipses don't truncate the phrase mid-token.
+/// (A trailing-period abbreviation followed by a space — "U.S. flag" — is a rare, accepted early cut;
+/// image-caption subject sentences seldom open with one, and CLIP tolerates the shorter phrase.) The
+/// worker must apply this before `embed_text` so the embedding matches the
+/// [`CaptionAlignmentThresholds`] floor calibration.
+pub fn caption_alignment_text(caption: &str) -> &str {
+    let line = caption.trim().lines().next().unwrap_or("").trim();
+    for (i, _) in line.match_indices('.') {
+        let ends_sentence = match line[i + 1..].chars().next() {
+            None => true,
+            Some(next) => next.is_whitespace(),
+        };
+        if ends_sentence {
+            return line[..=i].trim();
+        }
+    }
+    line
 }
 
 /// Result of caption↔image alignment: per-item flags and the mean cosine score that fills
@@ -2248,6 +2293,40 @@ mod tests {
             .expect("good item")
             .flags
             .is_empty());
+    }
+
+    #[test]
+    fn caption_alignment_text_reduces_to_subject_sentence() {
+        // Long JoyCaption "Descriptive" caption → just the leading subject sentence (incl. its period).
+        assert_eq!(
+            caption_alignment_text(
+                "Photograph of a Shiba Inu dog. The fluffy double coat is cream and orange. Behind it, a blurred forest.",
+            ),
+            "Photograph of a Shiba Inu dog.",
+        );
+        // Short / single-sentence captions pass through (trimmed), so hand-written captions are unharmed.
+        assert_eq!(
+            caption_alignment_text("  a ginger tabby cat  "),
+            "a ginger tabby cat"
+        );
+        // First *line* wins before first period when the caption is newline-structured.
+        assert_eq!(
+            caption_alignment_text("A pink backpack\non a rocky ridge."),
+            "A pink backpack",
+        );
+        // A decimal mid-sentence is NOT a sentence break (the `.` isn't followed by whitespace) —
+        // regression guard for the truncation bug that would have returned "A 3.".
+        assert_eq!(
+            caption_alignment_text("A 3.5 inch matte teapot. On a wooden table."),
+            "A 3.5 inch matte teapot.",
+        );
+        assert_eq!(
+            caption_alignment_text("A 3.5 inch matte teapot"),
+            "A 3.5 inch matte teapot"
+        );
+        // Degenerate inputs never panic.
+        assert_eq!(caption_alignment_text(""), "");
+        assert_eq!(caption_alignment_text("   \n  "), "");
     }
 
     #[test]
