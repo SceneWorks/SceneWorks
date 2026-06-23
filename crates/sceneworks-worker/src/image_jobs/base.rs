@@ -1730,6 +1730,11 @@ fn is_candle_engine(model: &str) -> bool {
             | "flux_schnell"
             | "flux_dev"
             | "flux2_klein_9b"
+            // FLUX.2-dev (sc-7458): the 32B flagship rides the generic candle txt2img lane like klein.
+            // `generate_candle_stream` resolves Q4 (manifest `mlx.quantize: 4` + the dev descriptor's
+            // `supported_quants`) so the dense snapshot is staged in CPU RAM and quantized onto the GPU
+            // at load. Edit/control/reference shapes route to their bespoke lanes or torch (story 4).
+            | "flux2_dev"
             | "qwen_image"
             | "chroma1_hd"
             | "chroma1_base"
@@ -1753,7 +1758,7 @@ fn candle_adapter_label(model: &str) -> &'static str {
     match model {
         "z_image_turbo" => "candle_z_image",
         "flux_schnell" | "flux_dev" => "candle_flux",
-        "flux2_klein_9b" => "candle_flux2",
+        "flux2_klein_9b" | "flux2_dev" => "candle_flux2",
         "qwen_image" => "candle_qwen",
         "chroma1_hd" | "chroma1_base" | "chroma1_flash" => "candle_chroma",
         "lens" | "lens_turbo" => "candle_lens",
@@ -1982,8 +1987,13 @@ async fn generate_candle_stream(
         &job.id,
         backend,
     );
-    // sc-6135: caption upsampling is FLUX.2-dev-only and dev runs on the macOS path, so this is a
-    // no-op here — resolved for uniformity (and so a future candle enhancer would be wired).
+    // sc-6135 / sc-7458: caption upsampling is FLUX.2-dev-only. On candle (off-Mac) dev now runs here,
+    // but the Mistral3/Pixtral caption-upsampler vision tower is NOT ported (deferred to epic 6564
+    // story 4), so `enhance` degrades to **passthrough**: it is carried onto the `GenerationRequest`
+    // for uniformity, but the candle `Flux2Generator` ignores `enhance_prompt`, so the raw prompt is
+    // used verbatim. Critically this is a no-op, NOT a fall-back to the Python torch worker — the dev
+    // T2I job stays on candle (a future candle enhancer lights up here with no router change). Every
+    // other candle family ignores the fields too.
     let enhance = PromptEnhance::from_advanced(&request.advanced);
     // Record the effective CFG knob (guidance for guided families, else true_cfg) + quant bits in the
     // recipe, so a Lens asset's sidecar reflects the Q4/Q8 it ran at (parity with the MLX path).
@@ -2295,6 +2305,7 @@ mod candle_label_tests {
         assert_eq!(candle_adapter_label("flux_schnell"), "candle_flux");
         assert_eq!(candle_adapter_label("flux_dev"), "candle_flux");
         assert_eq!(candle_adapter_label("flux2_klein_9b"), "candle_flux2");
+        assert_eq!(candle_adapter_label("flux2_dev"), "candle_flux2");
         assert_eq!(candle_adapter_label("qwen_image"), "candle_qwen");
         assert_eq!(candle_adapter_label("chroma1_hd"), "candle_chroma");
         assert_eq!(candle_adapter_label("chroma1_base"), "candle_chroma");
@@ -2315,6 +2326,7 @@ mod candle_label_tests {
             "flux_schnell",
             "flux_dev",
             "flux2_klein_9b",
+            "flux2_dev",
             "qwen_image",
             "chroma1_hd",
             "chroma1_base",
@@ -2341,6 +2353,7 @@ mod candle_label_tests {
             "flux_schnell",
             "flux_dev",
             "flux2_klein_9b",
+            "flux2_dev",
             "qwen_image",
             "chroma1_hd",
             "chroma1_base",

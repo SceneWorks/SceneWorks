@@ -290,9 +290,11 @@ sceneworks-core = { path = "../sceneworks-core" }
 # 43aa2bf -> 54e87e9. The gen-core delta over the range is PURELY ADDITIVE — the `core_llm` re-export
 # (`gen_core::core_llm`, sc-7189) the macOS prompt_refine path now consumes, plus the additive
 # `TextEmbedder` CLIP contract (sc-6537); no existing TextLlm/registry/runtime/sampling surface moved,
-# so the worker's import surface is unchanged. SKEW GATE: the candle pin below must re-pin candle-gen's
-# gen-core to 54e87e9 IN LOCKSTEP (candle-gen dep bump, sc-7404) so `--features backend-candle --target
-# all` resolves the single gen-core rev 54e87e9. mlx-rs unchanged (44929a0).
+# so the worker's import surface is unchanged. SKEW GATE: the candle pin below moves to candle-gen
+# `33d50a3` (#142, sc-7404) IN LOCKSTEP — it re-pins candle-gen's gen-core to 54e87e9 AND is a strict
+# SUPERSET of the standalone `5ea4865` flux2_dev Q4 bump (sc-7458, now an ancestor), so `--features
+# backend-candle --target all` resolves the single gen-core rev 54e87e9 while keeping flux2_dev's
+# candle Q4 lane. mlx-rs unchanged (44929a0).
 sceneworks-gen-core = { git = "https://github.com/michaeltrefry/mlx-gen", rev = "54e87e995f1477176bba815814648ded1f2a65a4" }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
