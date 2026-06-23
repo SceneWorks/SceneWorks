@@ -1013,6 +1013,7 @@ fn generate_one(
     guidance: Option<f32>,
     negative_prompt: Option<String>,
     reference: Option<&(Image, f32)>,
+    multi_references: &[Image],
     edit_mask: Option<&Image>,
     true_cfg: Option<f32>,
     sampler: Option<&str>,
@@ -1022,12 +1023,19 @@ fn generate_one(
     cancel: &CancelFlag,
     on_progress: &mut dyn FnMut(Progress),
 ) -> WorkerResult<(u32, u32, Vec<u8>)> {
-    let mut conditioning = match reference {
-        Some((image, strength)) => vec![Conditioning::Reference {
-            image: image.clone(),
-            strength: Some(*strength),
-        }],
-        None => Vec::new(),
+    // `multi_references` (Boogu instruction edit, sc-7645) takes precedence when present: one image →
+    // `Reference` (byte-identical to the single-reference path); 2–5 → `MultiReference`. Every other
+    // family passes `&[]` and keeps the single `reference` (img2img init / IP-Adapter) path unchanged.
+    let mut conditioning = if !multi_references.is_empty() {
+        build_reference_conditioning(multi_references)
+    } else {
+        match reference {
+            Some((image, strength)) => vec![Conditioning::Reference {
+                image: image.clone(),
+                strength: Some(*strength),
+            }],
+            None => Vec::new(),
+        }
     };
     // Inpaint / outpaint mask (Ideogram 4 edit, sc-6303): a `Conditioning::Mask` (white = repaint)
     // alongside the source `Reference`. Only the Ideogram edit path supplies one today; every other
@@ -1142,15 +1150,75 @@ const IDEOGRAM_EDIT_STRENGTH: f32 = 0.6;
 ))]
 const IDEOGRAM_INPAINT_STRENGTH: f32 = 0.85;
 
-/// Resolve the Boogu instruction-edit source: the `sourceAssetId` image, fit to the output W×H (so
-/// it satisfies the engine's multiple-of-16 guard and aligns to the target aspect). Returns
-/// `(source, strength)`; `None` when not an edit / no source. The `strength` is inert for Boogu (the
-/// edit is structural — the engine ignores `Conditioning::Reference.strength`), so a full-strength
-/// 1.0 is returned for the contract. No mask / outpaint path (the descriptor accepts only `Reference`).
+/// Upper bound on reference images for a Boogu instruction edit (sc-7645). The DiT's
+/// `image_index_embedding` carries 5 per-image index slots (OmniGen2 lineage), so `N ∈ [1, 5]`
+/// references can be packed into one edit (e.g. subject-from-A composed into scene-from-B); a plural
+/// picker beyond that is capped here. Matches the `mlx-gen-boogu` / `candle-gen-boogu` `MAX_EDIT_REFS`.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+const BOOGU_MAX_EDIT_REFERENCES: usize = 5;
+
+/// One `Conditioning::Reference` (a single reference) or one `Conditioning::MultiReference` (2–5) from
+/// the resolved Boogu edit references (cloned per output). Empty references → empty (T2I fallback).
+/// The single case stays a `Reference` so it is byte-identical to the pre-sc-7645 single-reference
+/// path. Mirrors `flux2.rs::build_edit_conditioning`. The per-reference strength is inert for Boogu
+/// (the edit is structural), so `None` is used. Not cfg-gated — called from the un-gated [`generate_one`].
+fn build_reference_conditioning(references: &[Image]) -> Vec<Conditioning> {
+    match references {
+        [] => Vec::new(),
+        [single] => vec![Conditioning::Reference {
+            image: single.clone(),
+            strength: None,
+        }],
+        many => vec![Conditioning::MultiReference {
+            images: many.to_vec(),
+        }],
+    }
+}
+
+/// Reference asset ids for a Boogu instruction edit, in order. The multi-image picker sends the plural
+/// `referenceAssetIds` — take all of them, capped at [`BOOGU_MAX_EDIT_REFERENCES`]; with no plural list
+/// it falls back to the single Image-Edit `sourceAssetId` (`edit_image` mode). Mirrors
+/// `flux2_edit_reference_ids`.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+fn boogu_edit_reference_ids(request: &ImageRequest) -> Vec<String> {
+    if !request.reference_asset_ids.is_empty() {
+        // The parsed list is already trimmed + non-empty (sceneworks-core `string_list`).
+        return request
+            .reference_asset_ids
+            .iter()
+            .take(BOOGU_MAX_EDIT_REFERENCES)
+            .cloned()
+            .collect();
+    }
+    if let Some(id) = request
+        .source_asset_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|id| !id.is_empty())
+    {
+        return vec![id.to_owned()];
+    }
+    Vec::new()
+}
+
+/// Resolve the Boogu instruction-edit sources: the `N ∈ [1, 5]` reference images (plural
+/// `referenceAssetIds`, else the single `sourceAssetId` — [`boogu_edit_reference_ids`]), each fit to the
+/// output W×H (so it satisfies the engine's multiple-of-16 guard and aligns to the target aspect).
+/// Returns the references in order; **empty** when not an edit / no source. The engine treats one
+/// reference as `Conditioning::Reference` and 2–5 as `Conditioning::MultiReference` (each read by the
+/// Qwen3-VL vision tower + VAE-encoded into the DiT spatial sequence). The per-reference strength is
+/// inert for Boogu (the edit is structural — the engine ignores `Conditioning::Reference.strength`). No
+/// mask / outpaint path (the descriptor accepts only `Reference` / `MultiReference`).
 ///
 /// Shared by the macOS MLX `generate_stream` and the off-Mac candle `generate_candle_stream` (sc-7524):
 /// Boogu is the same engine family for T2I and edit on both backends (the registered `boogu_image_edit`
-/// resolves the source `Reference` in-lane, like Ideogram), so both lanes resolve the edit source the
+/// resolves the source `Reference`(s) in-lane, like Ideogram), so both lanes resolve the edit sources the
 /// same way. Its deps (`load_reference_image`, `fit_engine_image`) already compile off-Mac under
 /// `backend-candle` (the Ideogram edit path uses them too).
 #[cfg(any(
@@ -1161,26 +1229,18 @@ fn resolve_boogu_edit(
     request: &ImageRequest,
     settings: &Settings,
     project_path: &Path,
-) -> WorkerResult<Option<(Image, f32)>> {
+) -> WorkerResult<Vec<Image>> {
     if request.mode != "edit_image" {
-        return Ok(None);
+        return Ok(Vec::new());
     }
-    let Some(asset_id) = request
-        .source_asset_id
-        .as_deref()
-        .map(str::trim)
-        .filter(|id| !id.is_empty())
-    else {
-        return Ok(None);
-    };
-    let source = load_reference_image(
-        &settings.data_dir,
-        &request.project_id,
-        asset_id,
-        project_path,
-    )?;
-    let source = fit_engine_image(source, request.width, request.height, &request.fit_mode)?;
-    Ok(Some((source, 1.0)))
+    let ids = boogu_edit_reference_ids(request);
+    let mut references = Vec::with_capacity(ids.len());
+    for id in &ids {
+        let source = load_reference_image(&settings.data_dir, &request.project_id, id, project_path)?;
+        let source = fit_engine_image(source, request.width, request.height, &request.fit_mode)?;
+        references.push(source);
+    }
+    Ok(references)
 }
 
 /// Resolve the Ideogram 4 `edit_image` conditioning (sc-6303) into the base MLX path's
@@ -1595,16 +1655,19 @@ async fn generate_stream(
             }
             None => (None, None, None),
         }
-    } else if request.model == "boogu_image_edit" && request.mode == "edit_image" {
-        // Boogu instruction edit (epic 6387): `sourceAssetId` → the engine's `Reference` (the Qwen3-VL
-        // vision tower reads it + it VAE-encodes into the DiT spatial latent); the prompt is the edit
-        // instruction. No mask / IP-Adapter (the `boogu_image_edit` descriptor accepts only `Reference`).
-        match resolve_boogu_edit(request, settings, project_path)? {
-            Some((source, strength)) => (Some((source, strength)), None, None),
-            None => (None, None, None),
-        }
     } else {
+        // Boogu instruction edit resolves its (1..5) references separately into `boogu_refs` below —
+        // it uses the `MultiReference`-capable path, not the single `identity_init` reference.
         (None, None, None)
+    };
+    // Boogu instruction edit (epic 6387, multi-reference sc-7645): resolve the 1..5 source references
+    // (the Qwen3-VL vision tower reads each + they VAE-encode into the DiT spatial sequence); the prompt
+    // is the edit instruction. Threaded to `generate_one` as `Conditioning::Reference` (one reference) /
+    // `MultiReference` (2–5). No mask / IP-Adapter (the descriptor accepts only Reference/MultiReference).
+    let boogu_refs: Vec<Image> = if request.model == "boogu_image_edit" {
+        resolve_boogu_edit(request, settings, project_path)?
+    } else {
+        Vec::new()
     };
     // The CFG scale passed to the engine as `true_cfg`: the FLUX.1-dev reference path's scale if
     // present, otherwise the true-CFG family scale (Chroma). `None` for the guidance-scalar and
@@ -1649,6 +1712,7 @@ async fn generate_stream(
                         guidance,
                         negative_prompt.clone(),
                         identity_init.as_ref(),
+                        &boogu_refs,
                         ideogram_edit_mask.as_ref(),
                         true_cfg,
                         sampler.as_deref(),
@@ -2032,13 +2096,17 @@ async fn generate_candle_stream(
             Some((source, strength, mask)) => (Some((source, strength)), mask),
             None => (None, None),
         }
-    } else if request.model == "boogu_image_edit" {
-        match resolve_boogu_edit(request, settings, project_path)? {
-            Some((source, strength)) => (Some((source, strength)), None),
-            None => (None, None),
-        }
     } else {
         (None, None)
+    };
+    // Boogu instruction edit (sc-7524, multi-reference sc-7645): resolve the 1..5 references here (each
+    // read by the Qwen3-VL vision tower + VAE-encoded into the DiT spatial sequence) — the
+    // `MultiReference`-capable path, not the single `edit_reference`. Threaded to `generate_one` as
+    // `Conditioning::Reference` (one) / `MultiReference` (2–5). Empty for non-Boogu / non-edit jobs.
+    let boogu_refs: Vec<Image> = if request.model == "boogu_image_edit" {
+        resolve_boogu_edit(request, settings, project_path)?
+    } else {
+        Vec::new()
     };
     let (width, height) = (request.width, request.height);
     // Per-payload sampler / scheduler / schedule-shift, mirroring the MLX `generate_stream` lane (the
@@ -2104,6 +2172,7 @@ async fn generate_candle_stream(
                         guidance,
                         negative_prompt.clone(),
                         edit_reference.as_ref(),
+                        &boogu_refs,
                         edit_mask.as_ref(),
                         true_cfg,
                         // Per-payload sampler / scheduler / schedule-shift (sc-7127), already N3-guarded
