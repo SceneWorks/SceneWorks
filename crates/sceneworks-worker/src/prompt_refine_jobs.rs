@@ -515,7 +515,8 @@ pub(crate) async fn run_prompt_refine_job(
         #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
         let text = {
             use gen_core::{
-                LoadSpec, Progress, TextLlmConstraint, TextLlmRequest, TextLlmSampling, WeightsSource,
+                LoadSpec, Progress, TextLlmConstraint, TextLlmRequest, TextLlmSampling,
+                WeightsSource,
             };
             let refiner = gen_core::load_textllm(
                 PROMPT_REFINE_ENGINE_ID,
@@ -546,9 +547,11 @@ pub(crate) async fn run_prompt_refine_job(
                     let _ = tx.blocking_send((current, total));
                 }
             };
-            let output = refiner.generate(&request, &mut on_progress).map_err(|error| {
-                WorkerError::Engine(format!("prompt-refine generation failed: {error}"))
-            })?;
+            let output = refiner
+                .generate(&request, &mut on_progress)
+                .map_err(|error| {
+                    WorkerError::Engine(format!("prompt-refine generation failed: {error}"))
+                })?;
             output.text
         };
 
@@ -1098,10 +1101,7 @@ mod tests {
             let (system, user) = build_magic_prompt_messages(prompt.text, "1:1");
             for seed in 0..seeds {
                 let request = TextLlmRequest {
-                    messages: vec![
-                        Message::system(system.clone()),
-                        Message::user(user.clone()),
-                    ],
+                    messages: vec![Message::system(system.clone()), Message::user(user.clone())],
                     sampling: Sampling {
                         temperature: 0.4, // matches the worker's magic-prompt sampling
                         top_p: 0.9,

@@ -607,17 +607,26 @@ pub(crate) fn registry_capabilities(
     }) {
         push(Cap::TrainingCaption, &mut caps);
     }
-    // Prompt-refinement TextLlm (sc-5500 contract / sc-5525 candle cutover / sc-5552 mlx twin): a
-    // prompt-refine provider registers a `TextLlm` under id `prompt_refine`. Advertise `prompt_refine`
-    // when its backend is enabled — the native MLX Llama-3.2-3B path on macOS (sc-5552) and the candle
-    // Llama-3.2-3B path on the Windows candle build (sc-5525). The Python torch `PromptRefiner` stays
-    // the fallback on platforms with neither (e.g. the candle-less Desktop installer). The derivation
-    // is backend-agnostic, so no change here was needed to light up the mlx twin — only force-linking
-    // `mlx_gen_prompt_refine` in prompt_refine_jobs.rs.
-    if gen_core::registry::textllms().any(|r| {
+    // Prompt-refinement (sc-5500 contract). Two provider paths advertise the `prompt_refine` cap:
+    //  - candle (Windows, sc-5525): `candle-gen-prompt-refine` registers a `gen_core::TextLlm` under id
+    //    `prompt_refine` — light it up when the `candle` backend is enabled.
+    //  - macOS (epic 7153, sc-7158): prompt_refine now runs through mlx-llm's `mlx-llama`
+    //    (`core_llm::TextLlm`, resolved model-first), which registers in core-llm's registry, NOT
+    //    gen_core's — so light it up when the `mlx` backend is enabled and a core-llm text (non-vision)
+    //    provider is linked. (Retired the old `mlx-gen-prompt-refine` gen_core registration.)
+    // The Python torch `PromptRefiner` stays the fallback on platforms with neither.
+    let candle_prompt_refine = gen_core::registry::textllms().any(|r| {
         let d = (r.descriptor)();
         backends.contains(&d.backend) && d.id == "prompt_refine"
-    }) {
+    });
+    #[cfg(target_os = "macos")]
+    let native_prompt_refine = gen_core::core_llm::textllms().any(|r| {
+        let d = (r.descriptor)();
+        backends.contains(&d.backend.as_str()) && !d.capabilities.supports_vision
+    });
+    #[cfg(not(target_os = "macos"))]
+    let native_prompt_refine = false;
+    if candle_prompt_refine || native_prompt_refine {
         push(Cap::PromptRefine, &mut caps);
     }
     caps
