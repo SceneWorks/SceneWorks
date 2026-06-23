@@ -121,7 +121,9 @@ fn dataset_readiness_report(
     dataset_id: &str,
     query: &ReadinessQuery,
 ) -> Result<sceneworks_core::dataset_quality::DatasetReadinessReport, ProjectStoreError> {
-    use sceneworks_core::dataset_quality::{readiness_context, CachedTier0Scalars};
+    use sceneworks_core::dataset_quality::{
+        evaluate_tier1, readiness_context, CachedTier0Scalars, ItemEmbedding, Tier1Thresholds,
+    };
     use sceneworks_image_quality::{compute_readiness, ReadinessItem};
 
     let (dataset, root, _project_stem) = store.training_dataset_for_plan(project_id, dataset_id)?;
@@ -171,11 +173,43 @@ fn dataset_readiness_report(
         })
         .collect();
 
+    // Tier-1 (sc-6535): if the analysis worker has persisted an embedding sidecar, fold its findings
+    // (embedding near-duplicates + low set diversity) into the report. Each item's dismissed checks
+    // (sc-6534) carry through, so an acknowledged near-dup drops from the rollups. No sidecar (the
+    // job hasn't run) → `None` → the report stays Tier-0 only, exactly as before.
+    let tier1 = store
+        .read_dataset_embeddings(project_id, dataset_id)?
+        .and_then(|sidecar| {
+            let embeddings: Vec<ItemEmbedding> = dataset
+                .items
+                .iter()
+                .filter_map(|item| {
+                    let content_hash = item.content_hash.as_deref()?;
+                    let embedding = sidecar.embeddings.get(content_hash)?.clone();
+                    let acknowledged = item
+                        .quality_ack
+                        .as_ref()
+                        .map(|ack| ack.effective_checks(item.content_hash.as_deref()))
+                        .unwrap_or_default();
+                    Some(ItemEmbedding {
+                        item_id: item.id.clone(),
+                        embedding,
+                        acknowledged,
+                    })
+                })
+                .collect();
+            // A sidecar with no current item matching it (every image changed since the analysis) is
+            // not Tier-1 data — fall back to Tier-0 only rather than a misleading 1.0 diversity.
+            (!embeddings.is_empty())
+                .then(|| evaluate_tier1(&embeddings, &Tier1Thresholds::for_kind(&context.kind)))
+        });
+
     let (report, extracted) = compute_readiness(
         &items,
         context.bucket_edge,
         context.min_items,
         &context.thresholds,
+        tier1.as_ref(),
     );
 
     if !extracted.is_empty() {
