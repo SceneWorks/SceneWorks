@@ -196,9 +196,13 @@ pub(crate) const MODEL_TABLE: &[ModelRow] = &[
     // model `flux2_dev` (Mistral3 TE + 48/48/15360 DiT), NOT a klein weight variant, so it
     // maps to its own engine id. Embedded distilled guidance (FLUX.1-dev pattern, NOT
     // true-CFG): the descriptor advertises `supports_guidance` but not negative prompt, so
-    // the engine takes the guidance scalar (default 4.0) over ~28 steps. Loaded from a
-    // pre-quantized Q4 dir assembled by the install-time `flux2_dev_quant` convert job
-    // (sc-5917 / sc-5921) — in-app Q4 load of the dense bf16 snapshot would peak ~105 GB.
+    // the engine takes the guidance scalar (default 4.0) over ~28 steps. On MLX it loads
+    // from a pre-quantized Q4 dir assembled by the install-time `flux2_dev_quant` convert
+    // job (sc-5917 / sc-5921). On the **candle** off-Mac lane (sc-7458) there is no packed
+    // convert: it loads the dense `black-forest-labs/FLUX.2-dev` diffusers snapshot and
+    // Q4-quantizes it at load — the 32B dense never lands on the GPU (CPU-staged in system
+    // RAM, then `quantize_onto` the GPU; candle-gen-flux2 sc-7457). `resolve_quant` reads
+    // the manifest `mlx.quantize: 4` so the candle descriptor's Q4 support drives it.
     ModelRow {
         sceneworks_id: "flux2_dev",
         engine_id: "flux2_dev",
@@ -613,17 +617,26 @@ pub(crate) fn registry_capabilities(
     }) {
         push(Cap::DatasetAnalysis, &mut caps);
     }
-    // Prompt-refinement TextLlm (sc-5500 contract / sc-5525 candle cutover / sc-5552 mlx twin): a
-    // prompt-refine provider registers a `TextLlm` under id `prompt_refine`. Advertise `prompt_refine`
-    // when its backend is enabled — the native MLX Llama-3.2-3B path on macOS (sc-5552) and the candle
-    // Llama-3.2-3B path on the Windows candle build (sc-5525). The Python torch `PromptRefiner` stays
-    // the fallback on platforms with neither (e.g. the candle-less Desktop installer). The derivation
-    // is backend-agnostic, so no change here was needed to light up the mlx twin — only force-linking
-    // `mlx_gen_prompt_refine` in prompt_refine_jobs.rs.
-    if gen_core::registry::textllms().any(|r| {
+    // Prompt-refinement (sc-5500 contract). Two provider paths advertise the `prompt_refine` cap:
+    //  - candle (Windows, sc-5525): `candle-gen-prompt-refine` registers a `gen_core::TextLlm` under id
+    //    `prompt_refine` — light it up when the `candle` backend is enabled.
+    //  - macOS (epic 7153, sc-7158): prompt_refine now runs through mlx-llm's `mlx-llama`
+    //    (`core_llm::TextLlm`, resolved model-first), which registers in core-llm's registry, NOT
+    //    gen_core's — so light it up when the `mlx` backend is enabled and a core-llm text (non-vision)
+    //    provider is linked. (Retired the old `mlx-gen-prompt-refine` gen_core registration.)
+    // The Python torch `PromptRefiner` stays the fallback on platforms with neither.
+    let candle_prompt_refine = gen_core::registry::textllms().any(|r| {
         let d = (r.descriptor)();
         backends.contains(&d.backend) && d.id == "prompt_refine"
-    }) {
+    });
+    #[cfg(target_os = "macos")]
+    let native_prompt_refine = gen_core::core_llm::textllms().any(|r| {
+        let d = (r.descriptor)();
+        backends.contains(&d.backend.as_str()) && !d.capabilities.supports_vision
+    });
+    #[cfg(not(target_os = "macos"))]
+    let native_prompt_refine = false;
+    if candle_prompt_refine || native_prompt_refine {
         push(Cap::PromptRefine, &mut caps);
     }
     caps
@@ -644,16 +657,17 @@ mod tests {
         s
     }
 
-    // ── epic 7114 P5 / sc-7126: manifest ⊆ descriptor drift guard ────────────────────────────────
+    // ── epic 7114 P5 / sc-7126 (+ sc-7432 bespoke coverage): manifest ⊆ engine drift guard ─────────
     // The builtin manifest's advertised sampler/scheduler menu for a model MUST be a subset of what
-    // the linked engine descriptor actually advertises on the ACTIVE backend, or the worker N3-falls
-    // the name back to the default (sc-7127) — i.e. the UI offers a knob the engine silently ignores.
-    // This test parses the embedded manifest and, for every image model (via `mlx_model` / MODEL_TABLE)
-    // AND every video model (via `video_descriptor`, sc-7296) with a linked descriptor on the active
-    // backend, asserts the per-backend-effective menu (base `limits` overridden by `<backend>.limits`) is
-    // honoured by the descriptor. It checks `mlx` on macOS (where the MLX provider crates are linked)
-    // and `candle` on the `backend-candle` build — whichever registry is active — so each backend's
-    // truthfulness is enforced on its own lane. `"default"` is the engine-default sentinel, always allowed.
+    // the linked engine actually honors on the ACTIVE backend, or the worker N3-falls the name back to
+    // the default (sc-7127) — i.e. the UI offers a knob the engine silently ignores. This test parses
+    // the embedded manifest and, for every image model (via `mlx_model` / MODEL_TABLE), every video
+    // model (via `video_descriptor`, sc-7296), AND every bespoke out-of-MODEL_TABLE image model
+    // (InstantID / PuLID via `bespoke_advertised`, sc-7432) with a source on the active backend, asserts
+    // the per-backend-effective menu (base `limits` overridden by `<backend>.limits`) is honored. It
+    // checks `mlx` on macOS (where the MLX provider crates are linked) and `candle` on the
+    // `backend-candle` build — whichever registry is active — so each backend's truthfulness is enforced
+    // on its own lane. `"default"` is the engine-default sentinel, always allowed.
     #[cfg(any(
         target_os = "macos",
         all(not(target_os = "macos"), feature = "backend-candle")
@@ -729,6 +743,61 @@ mod tests {
             .find(|d| ids.contains(&d.id))
     }
 
+    /// The `(samplers, schedulers)` menu the engine actually honors for a **bespoke** image model that
+    /// lives OUTSIDE [`MODEL_TABLE`] (no `mlx_model` row, no video engine id) — sc-7432. These build
+    /// CUSTOM request structs the worker N3-normalizes against [`crate::image_jobs::curated_image_menu`]
+    /// (`instantid.rs` / `kolors_*` / `pulid*`), so the guard checks the manifest against the SAME source
+    /// of truth and the two never disagree:
+    ///   • `instantid_realvisxl` is a bespoke provider (`InstantId::load`) with NO `ModelDescriptor`;
+    ///     both engines (mlx #538 / candle #130) honor the curated solver vocab via `Solver::from_name` /
+    ///     the additive `denoise_curated` path, so the honored menu IS the curated vocab.
+    ///   • `pulid_flux_dev` is the inventory-registered `pulid_flux` Generator on mlx (a real descriptor
+    ///     advertising curated + flow_match/linear); on the candle lane it is the bespoke `PulidFlux`
+    ///     provider (no descriptor), so fall back to the curated vocab + FLUX's native flow names. Either
+    ///     way a superset of the manifest's `default`+curated menu.
+    /// Kolors-conditioned is NOT here: `kolors` IS a `MODEL_TABLE` row, so the loop already resolves it
+    /// via `mlx_model` and the existing descriptor check covers its (shared) menu.
+    #[cfg(any(
+        target_os = "macos",
+        all(not(target_os = "macos"), feature = "backend-candle")
+    ))]
+    fn bespoke_advertised(sceneworks_id: &str) -> Option<(Vec<String>, Vec<String>)> {
+        let curated = || {
+            let (samplers, schedulers) = crate::image_jobs::curated_image_menu();
+            (
+                samplers.iter().map(|s| s.to_string()).collect::<Vec<_>>(),
+                schedulers.iter().map(|s| s.to_string()).collect::<Vec<_>>(),
+            )
+        };
+        match sceneworks_id {
+            "instantid_realvisxl" => Some(curated()),
+            "pulid_flux_dev" => gen_core::registry::generators()
+                .map(|reg| (reg.descriptor)())
+                .find(|d| d.id == "pulid_flux")
+                .map(|d| {
+                    (
+                        d.capabilities
+                            .samplers
+                            .iter()
+                            .map(|s| s.to_string())
+                            .collect::<Vec<_>>(),
+                        d.capabilities
+                            .schedulers
+                            .iter()
+                            .map(|s| s.to_string())
+                            .collect::<Vec<_>>(),
+                    )
+                })
+                .or_else(|| {
+                    let (mut samplers, mut schedulers) = curated();
+                    samplers.push("flow_match".to_string());
+                    schedulers.push("linear".to_string());
+                    Some((samplers, schedulers))
+                }),
+            _ => None,
+        }
+    }
+
     #[cfg(any(
         target_os = "macos",
         all(not(target_os = "macos"), feature = "backend-candle")
@@ -748,29 +817,44 @@ mod tests {
             let Some(id) = model["id"].as_str() else {
                 continue;
             };
-            // Image models resolve via MODEL_TABLE (`mlx_model`); video models via their engine-id
-            // map (`video_descriptor`). A model with no linked descriptor on the active backend is
-            // skipped (e.g. the mlx-only `wan_2_2_vace_fun_14b` on the candle lane).
-            let Some(descriptor) = mlx_model(id)
+            // The advertised sampler/scheduler menu the engine honors, from whichever source applies:
+            // image models via MODEL_TABLE (`mlx_model`); video models via their engine-id map
+            // (`video_descriptor`); the bespoke out-of-MODEL_TABLE image models (InstantID / PuLID,
+            // sc-7432) via `bespoke_advertised`. A model with no source on the active backend is skipped
+            // (e.g. the mlx-only `wan_2_2_vace_fun_14b` on the candle lane).
+            let Some((adv_samplers, adv_schedulers)) = mlx_model(id)
                 .map(|resolved| resolved.descriptor)
                 .or_else(|| video_descriptor(id))
+                .map(|descriptor| {
+                    (
+                        descriptor
+                            .capabilities
+                            .samplers
+                            .iter()
+                            .map(|s| s.to_string())
+                            .collect::<Vec<_>>(),
+                        descriptor
+                            .capabilities
+                            .schedulers
+                            .iter()
+                            .map(|s| s.to_string())
+                            .collect::<Vec<_>>(),
+                    )
+                })
+                .or_else(|| bespoke_advertised(id))
             else {
                 continue;
             };
-            let caps = &descriptor.capabilities;
-            for (axis, advertised) in [
-                ("samplers", &caps.samplers),
-                ("schedulers", &caps.schedulers),
-            ] {
+            for (axis, advertised) in [("samplers", &adv_samplers), ("schedulers", &adv_schedulers)]
+            {
                 if let Some(list) = effective_list(model, backend, axis) {
                     for name in list {
                         if name == "default" {
                             continue;
                         }
-                        if !advertised.contains(&name.as_str()) {
+                        if !advertised.iter().any(|advertised| advertised == &name) {
                             violations.push(format!(
-                                "{id}: {backend} {axis} {name:?} not advertised by descriptor {:?} (advertised: {advertised:?})",
-                                descriptor.id
+                                "{id}: {backend} {axis} {name:?} not honored by the engine (advertised: {advertised:?})"
                             ));
                         }
                     }
@@ -783,6 +867,34 @@ mod tests {
             violations.len(),
             violations.join("\n  ")
         );
+    }
+
+    // sc-7432: the subset guard above only EXERCISES the bespoke out-of-MODEL_TABLE models if
+    // `bespoke_advertised` resolves a menu for them — a `None` would silently skip them and leave the
+    // guard vacuously green. Pin that down: both bespoke ids must resolve a non-empty menu that includes
+    // the solvers their manifest entries advertise (euler/heun), on whichever backend is active.
+    #[cfg(any(
+        target_os = "macos",
+        all(not(target_os = "macos"), feature = "backend-candle")
+    ))]
+    #[test]
+    fn bespoke_models_resolve_a_curated_menu() {
+        for id in ["instantid_realvisxl", "pulid_flux_dev"] {
+            let (samplers, schedulers) = bespoke_advertised(id)
+                .unwrap_or_else(|| panic!("{id}: bespoke_advertised must resolve an engine menu"));
+            assert!(!samplers.is_empty(), "{id}: sampler menu must be non-empty");
+            assert!(
+                !schedulers.is_empty(),
+                "{id}: scheduler menu must be non-empty"
+            );
+            // The manifest advertises euler + heun for both; the engine must honor them.
+            for solver in ["euler", "heun"] {
+                assert!(
+                    samplers.iter().any(|advertised| advertised == solver),
+                    "{id}: engine must honor {solver:?} (advertised: {samplers:?})"
+                );
+            }
+        }
     }
 
     // An MLX-backed stub generator registered into the same `inventory` registry the real

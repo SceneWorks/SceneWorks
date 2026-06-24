@@ -1,0 +1,85 @@
+name: Windows Candle worker
+
+# Compiles AND tests the Rust GPU worker with the native candle (Windows/NVIDIA)
+# engines (candle-gen) linked in — the off-Mac counterpart to macos-mlx.yml. The
+# candle-gated worker code lives under
+# `#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]`, so neither
+# the Linux `parity` job (check.yml, no backend-candle) nor the macOS lane (mlx
+# only) ever exercises it. The hosted `build-windows` desktop job COMPILES the
+# candle sidecar but runs no worker tests, and server-candle-linux.yml is
+# `workflow_dispatch`-only and compile-only. So before this lane, the
+# candle-gated drift guard + sampler-knob + engine-map unit tests were validated
+# ONLY by hand on the dev box — which let a stale candle test rot red on main
+# undetected (sc-5495 → sc-7475; PR #865). This job closes that gap by actually
+# RUNNING `cargo test --features backend-candle` on every candle-touching PR.
+#
+# RUNS ON A SELF-HOSTED Windows + NVIDIA (CUDA) RUNNER (label `cuda`). GitHub's
+# hosted windows runners have no GPU and only compile; a real candle build also
+# needs the box's MSVC 14.44 BuildTools toolset (CUDA 12.9's nvcc rejects VS2026's
+# 14.51, sc-3676). The runner reuses its `_work` target dir, so candle compiles
+# once and is incremental across runs. The real-weight GPU smokes stay `#[ignore]`d
+# (the ~logic tests run driver-free); add `-- --ignored` by hand for a GPU pass.
+#
+# Runner prerequisites: Windows 11 + NVIDIA driver, CUDA Toolkit 12.9, VS2022
+# BuildTools (MSVC 14.44), a Rust toolchain, registered with the `cuda` label.
+#
+# SECURITY: this repo is PUBLIC, and GitHub warns against running self-hosted
+# runners for public repos because a fork PR could execute arbitrary code on the
+# runner. The job-level `if:` below restricts execution to same-repo branches, so
+# fork PRs never run here (mirrors macos-mlx.yml). Keep "Require approval for all
+# external contributors' workflows" enabled in the repo Actions settings as
+# defense in depth.
+
+on:
+  push:
+    branches: [main]
+    paths: &candle_paths
+      - "crates/**"
+      - "apps/rust-worker/**"
+      - "apps/rust-api/**"
+      # The builtin model catalog is include_str!'d into the worker and read by the
+      # `manifest_menu_is_subset_of_descriptor` drift guard, so a manifest edit can
+      # turn the candle suite red — gate on it.
+      - "config/manifests/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - ".github/workflows/windows-candle.yml"
+  pull_request:
+    branches: [main]
+    paths: *candle_paths
+  workflow_dispatch:
+
+concurrency:
+  group: windows-candle-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  candle-worker:
+    # Same-repo only — never execute untrusted fork code on the self-hosted runner.
+    if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
+    runs-on: [self-hosted, Windows, X64, cuda]
+    env:
+      # Native sm_120 (Blackwell) — this runner IS the RTX PRO 6000 box; nvcc emits
+      # SASS directly (no load-time JIT). compute_80 PTX would also forward-JIT.
+      CUDA_COMPUTE_CAP: "120"
+    steps:
+      - uses: actions/checkout@v4
+      # No rust-toolchain action: the self-hosted box has rustup + the repo's
+      # `rust-toolchain.toml`-pinned toolchain (incl. clippy) pre-installed, and the
+      # action's bash step breaks here — `bash` resolves to the box's WSL stub, not
+      # Git Bash. cargo in-repo auto-selects the pinned toolchain.
+      # nvcc needs the MSVC 14.44 host compiler (NOT VS2026 14.51, which CUDA 12.9
+      # rejects). Load the BuildTools vcvars in-shell, then build+test in the same
+      # cmd invocation so the toolchain env survives (each step is a fresh shell).
+      - name: Test the candle GPU worker (backend-candle)
+        shell: cmd
+        run: |
+          call "C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Auxiliary\Build\vcvars64.bat"
+          set NVCC_CCBIN=%VCToolsInstallDir%bin\Hostx64\x64
+          cargo test -p sceneworks-worker --features backend-candle
+      - name: Clippy (candle worker)
+        shell: cmd
+        run: |
+          call "C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Auxiliary\Build\vcvars64.bat"
+          set NVCC_CCBIN=%VCToolsInstallDir%bin\Hostx64\x64
+          cargo clippy -p sceneworks-worker --features backend-candle --all-targets -- -D warnings
