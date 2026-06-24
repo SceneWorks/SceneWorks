@@ -484,6 +484,54 @@ fn map_training_config(config: &sceneworks_core::training::TrainingConfig) -> Tr
     }
 }
 
+/// Whether the candle (Windows/CUDA + Linux/NVIDIA) backend MUST run this family with gradient
+/// checkpointing, because a dense backward over its base DiT OOMs. UNLIKE MLX/torch, candle's matmul
+/// backward materializes a gradient for the FROZEN base weight too, so a dense backward over a
+/// multi-billion-parameter DiT OOMs even alone on a 96 GB card (epic 5164: the candle Z-Image trainer
+/// got checkpointing in sc-5246, and the Wan A14B trainer needs it too). Scoped to exactly the
+/// candle-trainable big-DiT families: Z-Image and the Wan A14B **T2V** MoE — the same set
+/// `jobs_store::training_job_is_candle_eligible` gates the MoE to (only `wan_2_2_t2v_14b` has a candle
+/// trainer; the I2V A14B / dense 5B stay on torch). SDXL's smaller U-Net fits a dense backward (the
+/// `candle_sdxl_real_weights` smoke trains it with checkpointing off) and Lens is small, so neither is
+/// forced — both honor the plan's value.
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+fn candle_requires_gradient_checkpointing(plan: &TrainingPlan) -> bool {
+    match plan.target.kernel.as_str() {
+        "z_image_lora" => true,
+        "wan_moe_lora" => plan.target.base_model == "wan_2_2_t2v_14b",
+        _ => false,
+    }
+}
+
+/// Apply backend-specific safety overrides to the mapped engine [`TrainingConfig`] before it reaches
+/// the trainer. On candle, force gradient checkpointing on for the big-DiT families that can't do a
+/// dense backward (see [`candle_requires_gradient_checkpointing`]): every preset already defaults the
+/// cross-platform "Gradient Checkpointing" UI box ON, but the user can turn it OFF — harmless on the
+/// macOS MLX path (bf16 alone fits) yet a guaranteed OOM on candle for these families — and a thin /
+/// legacy submit that omits the key leaves the worker's `map_training_config` default (`false`) in
+/// force. Forcing it here makes a real off-Mac Z-Image / Wan A14B-T2V run impossible to configure
+/// into a dense-backward OOM. On macOS this is the identity (the MLX path tolerates a dense bf16
+/// backward), so the mapped config passes through unchanged.
+#[cfg(target_os = "macos")]
+fn finalize_training_config(config: TrainingConfig, _plan: &TrainingPlan) -> TrainingConfig {
+    config
+}
+
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+fn finalize_training_config(mut config: TrainingConfig, plan: &TrainingPlan) -> TrainingConfig {
+    if candle_requires_gradient_checkpointing(plan) && !config.gradient_checkpointing {
+        tracing::info!(
+            event = "candle_training_force_gradient_checkpointing",
+            kernel = %plan.target.kernel,
+            base_model = %plan.target.base_model,
+            "candle big-DiT training family requires gradient checkpointing; overriding the plan's \
+             gradientCheckpointing=false to avoid a dense-backward CUDA OOM"
+        );
+        config.gradient_checkpointing = true;
+    }
+    config
+}
+
 /// One progress event streamed from the blocking training thread to the async side.
 #[cfg(any(
     target_os = "macos",
@@ -562,7 +610,11 @@ async fn run_training_execution(
             })
         })
         .collect::<WorkerResult<Vec<_>>>()?;
-    let config = map_training_config(&plan.config);
+    // Apply backend-specific safety overrides before the config reaches the engine: candle can't run
+    // a dense backward over the big-DiT families without a CUDA OOM, so `finalize_training_config`
+    // forces gradient checkpointing on for them (Z-Image, Wan A14B-T2V) regardless of the plan value.
+    // On macOS this is the identity. See its doc comment for the why.
+    let config = finalize_training_config(map_training_config(&plan.config), plan);
     let total_steps = config.steps;
     let file_name = plan.output.file_name.clone();
     let trigger_words = plan.output.trigger_words.clone();
@@ -1285,6 +1337,55 @@ mod tests {
         let mapped = map_training_config(&parse(value).config);
         assert_eq!(mapped.train_dtype, "f32");
         assert!(mapped.gradient_checkpointing);
+    }
+
+    /// sc-7817 follow-up: the candle backend OOMs on a dense backward over the big-DiT training
+    /// families (Z-Image, Wan A14B-T2V), so `finalize_training_config` must force gradient
+    /// checkpointing on for them even when the resolved plan turns it off — a user un-checking the
+    /// cross-platform "Gradient Checkpointing" UI box, or a thin submit that omits the key (the
+    /// worker default is `false`). SDXL's smaller U-Net fits a dense backward, so its plan value is
+    /// honored. Candle-only (the override is a candle-backend invariant); run with
+    /// `cargo test -p sceneworks-worker --lib --features backend-candle`.
+    #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+    #[test]
+    fn finalize_training_config_forces_checkpointing_for_candle_big_dit_families() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let image = dir.path().join("datasets").join("ds-1").join("x.png");
+        let image = image.display().to_string();
+
+        // Map + finalize a plan with `gradientCheckpointing` explicitly OFF, and report whether the
+        // engine config the worker would actually send has checkpointing on.
+        let finalized_checkpointing = |kernel: &str, base_model: &str| -> bool {
+            let mut value = plan_json(dir.path(), kernel, base_model, "lora", &[&image]);
+            value["config"]["advanced"]["gradientCheckpointing"] = json!(false);
+            let plan = parse(value);
+            finalize_training_config(map_training_config(&plan.config), &plan).gradient_checkpointing
+        };
+
+        // The candle-eligible big DiTs are forced on despite the plan's `false`, so a real off-Mac
+        // run can't be configured into a dense-backward OOM.
+        assert!(
+            finalized_checkpointing("z_image_lora", "z_image_turbo"),
+            "z-image forces gradient checkpointing on candle"
+        );
+        assert!(
+            finalized_checkpointing("wan_moe_lora", "wan_2_2_t2v_14b"),
+            "wan A14B T2V forces gradient checkpointing on candle"
+        );
+        // SDXL fits a dense backward, so its plan value (off) is honored — never forced on.
+        assert!(
+            !finalized_checkpointing("sdxl_lora", "sdxl"),
+            "sdxl honors the plan (its U-Net fits dense)"
+        );
+
+        // A plan that already requests checkpointing is unchanged (the override only flips false→true).
+        let mut value = plan_json(dir.path(), "z_image_lora", "z_image_turbo", "lora", &[&image]);
+        value["config"]["advanced"]["gradientCheckpointing"] = json!(true);
+        let plan = parse(value);
+        assert!(
+            finalize_training_config(map_training_config(&plan.config), &plan).gradient_checkpointing,
+            "an explicit gradientCheckpointing=true is preserved"
+        );
     }
 
     #[test]
