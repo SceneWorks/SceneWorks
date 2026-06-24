@@ -226,6 +226,29 @@ export function useTraining({ token, activeProject, setError, setJobs }) {
     [token, activeProject, setJobs, setError],
   );
 
+  // sc-6535: enqueue the CLIP embedding pass over the dataset. It produces the embedding sidecar the
+  // readiness fold reads for the Variety / aesthetic / off-style-outlier / caption-alignment checks
+  // (every kind). Async (GPU); the readiness updates when it finishes.
+  const createTrainingDatasetAnalysisJob = useCallback(
+    async (datasetId, payload = {}, projectId = activeProject?.id) => {
+      if (!projectId || !datasetId) {
+        throw new Error("Select a training dataset first.");
+      }
+      const job = await apiFetch(
+        `/api/v1/projects/${projectId}/training/datasets/${encodeURIComponent(datasetId)}/analysis-jobs`,
+        token,
+        {
+          method: "POST",
+          body: JSON.stringify(payload),
+        },
+      );
+      setJobs((items) => [job, ...items.filter((item) => item.id !== job.id)].sort(sortNewest));
+      setError("");
+      return job;
+    },
+    [token, activeProject, setJobs, setError],
+  );
+
   // sc-6538: enqueue the SCRFD+ArcFace face pass over the dataset. It produces the face sidecar the
   // readiness fold reads for the Person identity / no-face / small-subject checks. Async (GPU); the
   // readiness updates when it finishes, like the CLIP analysis pass.
@@ -317,6 +340,7 @@ export function useTraining({ token, activeProject, setError, setJobs }) {
     writeTrainingDatasetCaptionSidecars,
     createTrainingDatasetCaptionJob,
     createTrainingDatasetUpscaleJob,
+    createTrainingDatasetAnalysisJob,
     createTrainingDatasetFaceAnalysisJob,
     smartCropTrainingDataset,
     stripExifTrainingDataset,

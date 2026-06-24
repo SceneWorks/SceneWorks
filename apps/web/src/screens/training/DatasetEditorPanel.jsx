@@ -82,6 +82,7 @@ export function DatasetEditorPanel({
   onUpscaleLowRes,
   onSmartCrop,
   onStripExif,
+  onAnalyzeDataset,
   onAnalyzeFaces,
   canSave,
   saveDataset,
@@ -213,6 +214,7 @@ export function DatasetEditorPanel({
             onUpscaleLowRes={onUpscaleLowRes}
             onSmartCrop={onSmartCrop}
             onStripExif={onStripExif}
+            onAnalyzeDataset={onAnalyzeDataset}
             onAnalyzeFaces={onAnalyzeFaces}
           />
           {readiness?.distributions ? (

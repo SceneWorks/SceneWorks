@@ -265,6 +265,27 @@ describe("DatasetDoctorReadout gating states", () => {
     expect(onAnalyzeFaces).toHaveBeenCalled();
   });
 
+  it("surfaces an Analyze-photos action for any kind when wired, even on a clean set (sc-6535)", () => {
+    const onAnalyzeDataset = vi.fn();
+    mount(
+      <DatasetDoctorReadout
+        report={report({
+          kind: "style",
+          gate: "ready",
+          counts: { info: 0, warn: 0, fatal: 0 },
+          items: [{ itemId: "a", flags: [] }],
+        })}
+        onAnalyzeDataset={onAnalyzeDataset}
+      />,
+    );
+    const button = [...container.querySelectorAll(".dataset-doctor-actions button")].find((node) =>
+      node.textContent.includes("Analyze photos"),
+    );
+    expect(button).toBeTruthy();
+    act(() => button.dispatchEvent(new MouseEvent("click", { bubbles: true })));
+    expect(onAnalyzeDataset).toHaveBeenCalled();
+  });
+
   it("hides the Check-faces action for a non-person dataset (sc-6538)", () => {
     const onAnalyzeFaces = vi.fn();
     mount(
