@@ -130,9 +130,9 @@ fn dataset_readiness_report(
 ) -> Result<sceneworks_core::dataset_quality::DatasetReadinessReport, ProjectStoreError> {
     use sceneworks_core::dataset_quality::{
         caption_hash, dataset_text_embedding_key, evaluate_aesthetic, evaluate_caption_alignment,
-        evaluate_tier1, readiness_context, AestheticThresholds, CachedTier0Scalars,
-        CaptionAlignmentThresholds, DatasetKind, ItemCaptionAlignment, ItemEmbedding,
-        Tier1Thresholds,
+        evaluate_identity, evaluate_tier1, readiness_context, AestheticThresholds,
+        CachedTier0Scalars, CaptionAlignmentThresholds, DatasetKind, FaceItem, IdentityThresholds,
+        ItemCaptionAlignment, ItemEmbedding, Tier1Thresholds,
     };
     use sceneworks_image_quality::{aesthetic_predictor, compute_readiness, ReadinessItem};
 
@@ -284,6 +284,43 @@ fn dataset_readiness_report(
     } else {
         None
     };
+    // Face stack (sc-6538): PERSON datasets only. If the worker face pass has persisted a face
+    // sidecar, fold its identity-consistency + subject-prominence findings into the report; each
+    // item's dismissed checks (sc-6534) carry through, content-hash-keyed (a face flag is not
+    // caption-dependent). Non-person / no sidecar → `None` → the identity sub-score + flags stay
+    // untouched. A sidecar that matches no current item (every image changed) yields an empty list
+    // and falls back to no findings, exactly like the Tier-1 fold.
+    let identity = if context.kind == DatasetKind::Person {
+        let faces = store.read_dataset_faces(project_id, dataset_id)?;
+        let face_items: Vec<FaceItem> = faces
+            .as_ref()
+            .map(|faces| {
+                dataset
+                    .items
+                    .iter()
+                    .filter_map(|item| {
+                        let content_hash = item.content_hash.as_deref()?;
+                        let record = faces.records.get(content_hash)?;
+                        let acknowledged = item
+                            .quality_ack
+                            .as_ref()
+                            .map(|ack| ack.effective_checks(item.content_hash.as_deref()))
+                            .unwrap_or_default();
+                        Some(FaceItem {
+                            item_id: item.id.clone(),
+                            embedding: record.embedding.clone(),
+                            face_fraction: record.face_fraction,
+                            acknowledged,
+                        })
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        (!face_items.is_empty())
+            .then(|| evaluate_identity(&face_items, &IdentityThresholds::default_person()))
+    } else {
+        None
+    };
 
     let (mut report, extracted) = compute_readiness(
         &items,
@@ -293,6 +330,7 @@ fn dataset_readiness_report(
         tier1.as_ref(),
         alignment.as_ref(),
         aesthetic.as_ref(),
+        identity.as_ref(),
     );
     // Echo the resolved kind so the client branches its kind-aware recommendations on the same
     // source of truth that already shaped the gate/flags (sc-6540).
@@ -609,6 +647,45 @@ pub(crate) async fn write_training_dataset_analysis_embeddings(
     })
     .await?;
     Ok(Json(json!({ "stored": stored, "storedText": stored_text })))
+}
+
+/// Persist the worker face pass's largest-face records to the dataset's content-hash-keyed sidecar
+/// (sc-6538) — the face-stack analog of `write_training_dataset_analysis_embeddings`. A metadata
+/// write: it does not bump the dataset version. Records merge into any existing sidecar of the same
+/// space, so a partial re-run (only the changed items) updates in place. Returns the count stored.
+pub(crate) async fn write_training_dataset_face_embeddings(
+    State(state): State<AppState>,
+    Path((project_id, dataset_id)): Path<(String, String)>,
+    ApiJson(payload): ApiJson<DatasetFaceRecordsBody>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let mut records = std::collections::BTreeMap::new();
+    for record in payload.items {
+        records.insert(
+            record.content_hash,
+            sceneworks_core::dataset_quality::FaceRecord {
+                embedding: record.embedding,
+                face_fraction: record.face_fraction,
+            },
+        );
+    }
+    let faces = sceneworks_core::dataset_quality::DatasetFaceRecords {
+        space: payload.space,
+        records,
+    };
+    let stored = faces.records.len();
+    project_call(state, move |store| {
+        let mut merged = faces;
+        if let Some(existing) = store.read_dataset_faces(&project_id, &dataset_id)? {
+            if existing.space == merged.space {
+                let mut records = existing.records;
+                records.extend(std::mem::take(&mut merged.records));
+                merged.records = records;
+            }
+        }
+        store.write_dataset_faces(&project_id, &dataset_id, &merged)
+    })
+    .await?;
+    Ok(Json(json!({ "stored": stored })))
 }
 
 /// Enqueue a Real-ESRGAN upscale over the named (low-resolution-flagged) dataset items (sc-6539

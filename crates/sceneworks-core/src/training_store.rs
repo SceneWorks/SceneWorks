@@ -6,7 +6,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::dataset_quality::{
-    caption_hash, CachedTier0Scalars, DatasetEmbeddings, QualityAck, QualityCheck,
+    caption_hash, CachedTier0Scalars, DatasetEmbeddings, DatasetFaceRecords, QualityAck,
+    QualityCheck,
 };
 use crate::project_store::{apply_project_migrations, ProjectStoreError, ProjectStoreResult};
 use crate::store_util::{
@@ -23,6 +24,9 @@ const DATASET_MANIFEST_NAME: &str = "dataset.sceneworks.training-dataset.json";
 // Tier-1 CLIP embeddings sidecar (sc-6535) — kept out of the manifest (768×f32 per item is too big
 // to inline like tier0_scalars); content-hash-keyed so it survives dataset edits.
 const DATASET_EMBEDDINGS_NAME: &str = "dataset.sceneworks.embeddings.json";
+// Face-stack sidecar (sc-6538) — the largest-face ArcFace embedding + frame fraction per item. A
+// *different* encoder than CLIP, so it lives in its own content-hash-keyed file beside the embeddings.
+const DATASET_FACES_NAME: &str = "dataset.sceneworks.faces.json";
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -351,6 +355,38 @@ impl TrainingDatasetStore {
         let dataset = self.read_dataset_by_id(dataset_id)?;
         ensure_dataset_project(project_id, &dataset)?;
         match fs::read(dataset_embeddings_path(&self.project_path, dataset_id)) {
+            Ok(bytes) => Ok(Some(
+                serde_json::from_slice(&bytes).map_err(ProjectStoreError::Json)?,
+            )),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(error) => Err(ProjectStoreError::Io(error)),
+        }
+    }
+
+    /// Persist the dataset's largest-face records to the content-hash-keyed sidecar (sc-6538) — the
+    /// face-stack analog of `write_dataset_embeddings`. Like it, a metadata write: it does NOT bump the
+    /// dataset version (the pixels didn't change). The worker face pass sends the full set, so the
+    /// sidecar is replaced.
+    pub fn write_dataset_faces(
+        &self,
+        project_id: &str,
+        dataset_id: &str,
+        faces: &DatasetFaceRecords,
+    ) -> ProjectStoreResult<()> {
+        let dataset = self.read_dataset_by_id(dataset_id)?;
+        ensure_dataset_project(project_id, &dataset)?;
+        write_json(&dataset_faces_path(&self.project_path, dataset_id), faces)
+    }
+
+    /// Read the dataset's persisted face records, or `None` when the face pass hasn't run yet.
+    pub fn read_dataset_faces(
+        &self,
+        project_id: &str,
+        dataset_id: &str,
+    ) -> ProjectStoreResult<Option<DatasetFaceRecords>> {
+        let dataset = self.read_dataset_by_id(dataset_id)?;
+        ensure_dataset_project(project_id, &dataset)?;
+        match fs::read(dataset_faces_path(&self.project_path, dataset_id)) {
             Ok(bytes) => Ok(Some(
                 serde_json::from_slice(&bytes).map_err(ProjectStoreError::Json)?,
             )),
@@ -1393,6 +1429,10 @@ fn dataset_embeddings_path(project_path: &Path, dataset_id: &str) -> PathBuf {
     dataset_root(project_path, dataset_id).join(DATASET_EMBEDDINGS_NAME)
 }
 
+fn dataset_faces_path(project_path: &Path, dataset_id: &str) -> PathBuf {
+    dataset_root(project_path, dataset_id).join(DATASET_FACES_NAME)
+}
+
 fn replace_dataset_media_dir(
     dataset_root: &Path,
     temp_media_dir: &Path,
@@ -1927,5 +1967,53 @@ mod tests {
             stored.caption_hash.as_deref(),
             Some(current_caption.as_str())
         );
+    }
+
+    #[test]
+    fn dataset_faces_round_trip_and_default_to_none() {
+        use crate::dataset_quality::{DatasetFaceRecords, FaceRecord};
+        use std::collections::BTreeMap;
+
+        let dir = tempfile::tempdir().expect("temp dir");
+        let store = saved_dataset(dir.path());
+
+        // No sidecar yet → None (the face pass hasn't run), exactly like the embeddings sidecar.
+        assert!(store
+            .read_dataset_faces("proj", "ds_test")
+            .expect("read faces")
+            .is_none());
+
+        let faces = DatasetFaceRecords {
+            space: "arcface-r100".to_owned(),
+            records: BTreeMap::from([
+                (
+                    "h1".to_owned(),
+                    FaceRecord {
+                        embedding: vec![1.0, 0.0],
+                        face_fraction: 0.15,
+                    },
+                ),
+                // "examined, no face found": empty embedding + 0.0 fraction.
+                (
+                    "h2".to_owned(),
+                    FaceRecord {
+                        embedding: Vec::new(),
+                        face_fraction: 0.0,
+                    },
+                ),
+            ]),
+        };
+        store
+            .write_dataset_faces("proj", "ds_test", &faces)
+            .expect("write faces");
+
+        let reloaded = store
+            .read_dataset_faces("proj", "ds_test")
+            .expect("read faces")
+            .expect("sidecar present");
+        assert_eq!(reloaded, faces);
+
+        // Metadata write: the dataset version is untouched (the pixels didn't change).
+        assert_eq!(store.get_dataset("proj", "ds_test").unwrap().version, 1);
     }
 }

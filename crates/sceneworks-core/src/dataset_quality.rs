@@ -690,8 +690,9 @@ pub struct ReadinessSubScores {
     /// varied. `None` until the dataset-analysis job runs.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub diversity: Option<f64>,
-    /// Face-embedding consistency (sc-6529 face stack — a *different* encoder than CLIP). Reserved;
-    /// CLIP must not fill this.
+    /// Face-embedding consistency (sc-6538 face stack — a *different* encoder than CLIP): the share of
+    /// detected faces belonging to the dataset's main identity cluster. Filled by `evaluate_identity`
+    /// for Person datasets once the face sidecar exists; CLIP must never fill this.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub identity: Option<f64>,
     /// Caption↔image CLIP alignment (sc-6537). `None` until increment-2.
@@ -1141,6 +1142,33 @@ pub struct DatasetEmbeddings {
     /// re-captioning the same image bytes cannot accidentally reuse stale text vectors.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub text_embeddings: BTreeMap<String, Vec<f32>>,
+}
+
+/// One item's largest detected face (sc-6538): the raw ArcFace embedding plus the bounding-box area
+/// as a fraction of the frame. An **empty** `embedding` with `face_fraction` `0.0` records "examined,
+/// no face found" — which is distinct from an item having *no record at all* (not yet processed by the
+/// Metal-only face pass). The readiness fold turns each record into a [`FaceItem`] for
+/// [`evaluate_identity`]; an absent record is skipped (never flagged), exactly like the CLIP sidecar.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FaceRecord {
+    /// The largest face's raw (un-normalized) ArcFace embedding. Empty ⇒ no face detected.
+    pub embedding: Vec<f32>,
+    /// The largest face's bbox area / frame area, in `[0, 1]`. `0.0` when no face.
+    pub face_fraction: f64,
+}
+
+/// Persisted face records for a dataset (sc-6538) — the face-stack analog of [`DatasetEmbeddings`].
+/// A content-hash-keyed sidecar (`dataset.sceneworks.faces.json`) that survives dataset edits and is
+/// written only by the Metal-only worker face pass. Kept out of the manifest (512×f32 per item) and a
+/// *different* encoder than CLIP, so it lives beside — not inside — the embeddings sidecar.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DatasetFaceRecords {
+    /// The face-embedding space (e.g. `"arcface-r100"`); guards against mixing encoders on reuse.
+    pub space: String,
+    /// `content_hash` → the item's largest-face record.
+    pub records: BTreeMap<String, FaceRecord>,
 }
 
 /// Stable SHA-256 over the exact caption text that was embedded.

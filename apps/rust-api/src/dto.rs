@@ -416,6 +416,29 @@ pub(crate) struct DatasetEmbeddingRecord {
     pub(crate) text_embedding: Option<Vec<f32>>,
 }
 
+/// The worker face pass POSTs its largest-face records here to persist the face sidecar (sc-6538) —
+/// the face-stack analog of the analysis job's embedding write.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct DatasetFaceRecordsBody {
+    /// The face-embedding space (e.g. `arcface-r100`).
+    pub(crate) space: String,
+    pub(crate) items: Vec<DatasetFaceRecord>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct DatasetFaceRecord {
+    /// The item's content hash (the sidecar key — survives dataset edits).
+    pub(crate) content_hash: String,
+    /// The largest face's raw (un-normalized) ArcFace embedding. Empty ⇒ examined, no face found.
+    #[serde(default)]
+    pub(crate) embedding: Vec<f32>,
+    /// The largest face's bbox area as a fraction of the frame, in `[0, 1]`. `0.0` when no face.
+    #[serde(default)]
+    pub(crate) face_fraction: f64,
+}
+
 /// Body for the synchronous one-tap image fixes (sc-6539 smart-crop / EXIF-strip). `itemIds` scopes
 /// the fix; when absent it applies to every item in the dataset (EXIF-strip-all).
 #[derive(Debug, Clone, Deserialize)]
