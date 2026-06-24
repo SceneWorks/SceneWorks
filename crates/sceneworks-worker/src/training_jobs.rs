@@ -34,9 +34,9 @@ use gen_core::{
     TrainingOutput, TrainingProgress, TrainingRequest, WeightsSource,
 };
 #[cfg(target_os = "macos")]
-use mlx_gen_krea as _;
-#[cfg(target_os = "macos")]
 use mlx_gen_kolors as _;
+#[cfg(target_os = "macos")]
+use mlx_gen_krea as _;
 #[cfg(target_os = "macos")]
 use mlx_gen_lens as _;
 #[cfg(target_os = "macos")]
