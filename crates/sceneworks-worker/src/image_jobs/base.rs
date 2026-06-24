@@ -225,6 +225,12 @@ pub(crate) fn resolve_weights_dir(
     ) {
         return Ok(snapshot.map(|root| boogu_model_subdir(&root, request)));
     }
+    // Krea 2 Turbo (epic 7565) ships a turnkey with packed `q8/` (default) + `q4/` self-contained subdirs;
+    // point the engine at the chosen quant's subdir rather than the repo root. The packed weights
+    // auto-detect their quant on load, so the resolved `spec.quantize` is a no-op on them.
+    if request.model == "krea_2_turbo" {
+        return Ok(snapshot.map(|root| krea_model_subdir(&root, request)));
+    }
     Ok(snapshot)
 }
 
@@ -289,6 +295,36 @@ fn boogu_model_subdir(root: &Path, request: &ImageRequest) -> PathBuf {
     }
     present(variant)
         .or_else(|| present(&bf16))
+        .unwrap_or_else(|| root.to_path_buf())
+}
+
+/// Pick the engine-complete packed subdir of a Krea 2 Turbo turnkey `root`: `q4/` when the request opts
+/// into Q4 (`advanced.mlxQuantize <= 4`) AND it is downloaded, else the default `q8/` (the shipped
+/// default — the P1-validated near-lossless quant). Falls back to whichever subdir is present, then
+/// `root`, so a partially-downloaded bundle surfaces as a load error rather than a silent half-load. The
+/// turnkey (`SceneWorks/krea-2-turbo-mlx`, sc-7573) carries one `from_snapshot`-loadable subdir per quant
+/// (each with a packed `transformer/diffusion_pytorch_model.safetensors`); the loader auto-detects the
+/// packed quant, so the resolved `spec.quantize` is a no-op on it. Mirrors [`ideogram_model_subdir`]
+/// (q4/q8 subdirs) with Boogu's packed-transformer filename and a Q8-default selection.
+fn krea_model_subdir(root: &Path, request: &ImageRequest) -> PathBuf {
+    let wants_q4 = request
+        .advanced
+        .get("mlxQuantize")
+        .and_then(|v| v.as_i64().or_else(|| v.as_str()?.trim().parse().ok()))
+        .is_some_and(|bits| bits <= 4);
+    let present = |name: &str| -> Option<PathBuf> {
+        let dir = root.join(name);
+        dir.join("transformer/diffusion_pytorch_model.safetensors")
+            .is_file()
+            .then_some(dir)
+    };
+    if wants_q4 {
+        if let Some(dir) = present("q4") {
+            return dir;
+        }
+    }
+    present("q8")
+        .or_else(|| present("q4"))
         .unwrap_or_else(|| root.to_path_buf())
 }
 

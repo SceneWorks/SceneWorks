@@ -1307,6 +1307,92 @@
       }
     },
     {
+      "id": "krea_2_turbo",
+      // Krea 2 Turbo (epic 7565) — Krea AI's from-scratch foundation image model, TDM-distilled to a
+      // few-step (~8), CFG-free rectified-flow student: a Qwen3-VL-4B text encoder (12-layer learned
+      // aggregator) + a 28-block single-stream DiT + the Qwen-Image VAE, native MLX (Apple Silicon).
+      // Same gen_core engine code (the `krea_2_turbo` descriptor / KreaPipeline::generate_turbo); loads
+      // the packed Q8 (default) / Q4 turnkey subdir. Krea 2 Community License (non-commercial OK; the
+      // re-host carries the license + "Krea" name prefix + attribution — sc-7573).
+      "autoDownload": false,
+      "name": "Krea 2 Turbo",
+      "family": "krea_2",
+      "type": "image",
+      "adapter": "mlx_krea",
+      "capabilities": ["text_to_image"],
+      "macOnly": true,
+      "downloads": [
+        {
+          // Q8 `q8/` subdir of the SceneWorks/krea-2-turbo-mlx turnkey (sc-7573). Each quant subdir is a
+          // complete `from_snapshot`-loadable root (transformer/ text_encoder/ vae/ tokenizer/ scheduler/
+          // model_index.json). `estimatedSizeBytes` is a pre-publish estimate refreshed by sc-7573.
+          "provider": "huggingface",
+          "repo": "SceneWorks/krea-2-turbo-mlx",
+          "files": [
+            "q8/transformer/*",
+            "q8/text_encoder/*",
+            "q8/vae/*",
+            "q8/tokenizer/*",
+            "q8/scheduler/*",
+            "q8/model_index.json"
+          ],
+          "platforms": ["macos"],
+          "estimatedSizeBytes": 18000000000
+        }
+      ],
+      "paths": {
+        "model": "${HF_CACHE}/SceneWorks/krea-2-turbo-mlx"
+      },
+      "defaults": {
+        // Turbo: TDM-distilled few-step (8), CFG-free (guidanceScale inert — the engine never forwards a
+        // guidance value or negative prompt), fixed mu 1.15. Up to 2048² (the descriptor max_size).
+        "resolution": "1024x1024",
+        "steps": 8,
+        "guidanceScale": 0,
+        "count": 1,
+        "sampler": "default",
+        "scheduler": "default"
+      },
+      "limits": {
+        "resolutions": ["1024x1024", "768x1024", "1024x768", "1280x720", "720x1280", "1536x1536"],
+        "count": [1, 2, 4],
+        // Krea Turbo routes the per-generation sampler/scheduler knobs through the unified framework
+        // (run_flow_sampler / resolve_flow_schedule), exactly like z_image_turbo — so it advertises the
+        // full curated flow menu. "default" is the native exp-shifted rectified-flow Euler loop. The
+        // `krea_2_turbo` descriptor advertises curated_sampler_names()/curated_scheduler_names(); the
+        // engines.rs drift guard checks this manifest list is a subset of it.
+        "samplers": ["default", "euler", "euler_ancestral", "heun", "dpmpp_2m", "dpmpp_sde", "uni_pc", "lcm", "ddim"],
+        "schedulers": ["default", "normal", "simple", "karras", "exponential", "sgm_uniform", "beta", "ddim_uniform"]
+      },
+      "loraCompatibility": {
+        // Krea LoRAs train on Raw and apply at Turbo inference (family match, no base-model gating —
+        // the Lens / Z-Image precedent). The Raw trainer + this compatibility tier land in P3 (sc-7576+).
+        "families": ["krea_2"],
+        "types": []
+      },
+      "mlx": {
+        // Pre-quantized Q8 turnkey (`q8/` subdir). MEASURED @1024²/8-step: Q8 ~27 GB peak (near-lossless),
+        // bf16 ~43 GB. minMemoryGb 48 covers Q8 + the 1536² stretch with headroom.
+        "minMemoryGb": 48,
+        "quantize": 8,
+        "repo": "SceneWorks/krea-2-turbo-mlx"
+      },
+      "licenseUrl": "https://www.krea.ai/krea-2-licensing",
+      "ui": {
+        "label": "Krea 2 Turbo",
+        "description": "Krea 2 Turbo — Krea AI's from-scratch foundation image model, distilled to a fast few-step (~8), CFG-free variant: a 28-block single-stream rectified-flow DiT with a Qwen3-VL-4B text encoder, native MLX (Apple Silicon). Strong photorealism up to 2048². Pre-quantized Q8 (~18 GB download, default). Krea 2 Community License (non-commercial). Needs a 48 GB-class Mac.",
+        "recommendedFor": ["text_to_image"],
+        "promptGuide": {
+          "title": "Krea 2 Prompt Guide",
+          "path": "/prompt-guides/krea-2.md",
+          "sources": [
+            { "label": "Krea 2 (Hugging Face)", "url": "https://huggingface.co/krea" },
+            { "label": "Krea 2 Technical Report", "url": "https://www.krea.ai/blog/krea-2-technical-report" }
+          ]
+        }
+      }
+    },
+    {
       "id": "flux2_klein_9b",
       "name": "FLUX.2 [klein] 9B",
       "family": "flux2-klein",

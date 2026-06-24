@@ -712,6 +712,10 @@ fn model_table_rows_resolve_and_flags_match_descriptor() {
         ("boogu_image", true, false),
         ("boogu_image_turbo", false, false),
         ("boogu_image_edit", true, false),
+        // Krea 2 Turbo (epic 7565 / sc-7572): TDM-distilled few-step, CFG-free
+        // (supports_guidance=false) with no user negative prompt (supports_negative_prompt=false) — the
+        // z_image_turbo / boogu_image_turbo distilled-turbo pattern.
+        ("krea_2_turbo", false, false),
     ];
     // Every row is covered by the expectation table (no row added without a flag pair here).
     assert_eq!(MODEL_TABLE.len(), expected.len());
