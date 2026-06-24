@@ -61,10 +61,10 @@ export function itemBadge(entry, { loading = false } = {}) {
   return badgeForSeverity(entry.severity);
 }
 
-// Plain-language reason per Tier-0 check (sc-6530 catalog). Only the eight checks
-// that exist today — no Tier-1 identity copy ("different person") until the
-// embedding job (sc-6535) actually computes it. `string_enum` can emit an unknown
-// check, so anything unrecognized degrades to generic copy, never `undefined`.
+// Plain-language reason per check (sc-6530 catalog + the Tier-1/face advisories layered on later). The
+// face-stack checks (identity_mismatch/no_face/small_subject, sc-6538) only ever appear on Person
+// datasets. `string_enum` can emit an unknown check, so anything unrecognized degrades to generic copy,
+// never `undefined`.
 const CHECK_REASON = {
   resolution: "Low resolution — may look soft at the training size",
   crop_loss: "A lot of this photo is cropped away at the training size",
@@ -77,6 +77,9 @@ const CHECK_REASON = {
   caption_alignment: "Caption may not match this image — re-captioning can help",
   low_aesthetic: "Lower aesthetic score for a style set — advisory only",
   embedding_outlier: "Doesn't match the rest of the set — off-style, or missing the subject",
+  identity_mismatch: "Looks like a different person than the rest of the set",
+  no_face: "No face detected — won't help a character LoRA",
+  small_subject: "The face is small in the frame — may be hard to learn from",
   count: "Not enough photos to train well yet",
   decode: "This image couldn't be read",
 };
@@ -137,6 +140,10 @@ const METRIC_LABEL = {
   low_diversity: "diversity score",
   caption_alignment: "caption-image cosine similarity",
   low_aesthetic: "aesthetic score",
+  embedding_outlier: "cosine to set centroid",
+  identity_mismatch: "identity cosine",
+  small_subject: "face size (fraction of frame)",
+  no_face: "face detected",
   count: "item count",
   decode: "decoded",
 };
@@ -442,6 +449,37 @@ export function datasetRecommendations(report) {
     kind === "style" || kind === "object" ? itemsWithActive("embedding_outlier") : [];
   if (outliers.length) {
     recs.push({ id: "outlier", tone: "warn", text: outlierAdvice(kind, outliers.length) });
+  }
+
+  // Person face findings (sc-6538): wrong-person / no-face / small-face. PERSON only — the backend
+  // raises these only for a character set, and the explicit gate keeps the copy correct (and matches
+  // the outlier gate above). Every one is a manual remove/replace/crop-closer move — no one-tap fix
+  // targets the face (smart-crop trims aspect, not framing) — so they belong in this list.
+  if (kind === "person") {
+    const mismatched = itemsWithActive("identity_mismatch").length;
+    if (mismatched) {
+      recs.push({
+        id: "identity",
+        tone: "warn",
+        text: `${mismatched} image${mismatched === 1 ? "" : "s"} look${mismatched === 1 ? "s" : ""} like a different person — remove or replace ${mismatched === 1 ? "it" : "them"} so the LoRA learns one identity.`,
+      });
+    }
+    const faceless = itemsWithActive("no_face").length;
+    if (faceless) {
+      recs.push({
+        id: "no_face",
+        tone: "warn",
+        text: `${faceless} image${faceless === 1 ? " has" : "s have"} no detectable face — ${faceless === 1 ? "it won't" : "they won't"} teach the character; remove or replace ${faceless === 1 ? "it" : "them"}.`,
+      });
+    }
+    const small = itemsWithActive("small_subject").length;
+    if (small) {
+      recs.push({
+        id: "small_subject",
+        tone: "info",
+        text: `${small} image${small === 1 ? " has" : "s have"} a very small face — crop in closer or replace ${small === 1 ? "it" : "them"} so the identity is clear.`,
+      });
+    }
   }
 
   // Weak aesthetics → replace (Style only).

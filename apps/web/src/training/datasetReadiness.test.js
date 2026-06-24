@@ -90,17 +90,26 @@ describe("flagReason", () => {
     }
   });
 
+  it("has plain-language copy for the face checks (sc-6538)", () => {
+    for (const check of ["identity_mismatch", "no_face", "small_subject"]) {
+      const text = flagReason({ check });
+      expect(text).toBeTruthy();
+      expect(text).not.toBe("Flagged for review");
+    }
+  });
+
   it("degrades an unknown check to generic copy, never undefined", () => {
     expect(flagReason({ check: "some_future_check" })).toBe("Flagged for review");
     expect(flagReason(null)).toBe("");
   });
 
-  it("never implies Tier-1 identity ('different person') which does not exist yet", () => {
+  it("keeps the pixel-quality (Tier-0) copy subject-agnostic — no face wording leaks in", () => {
     const all = ["resolution", "crop_loss", "blur", "exposure", "exact_duplicate", "near_duplicate", "count", "decode"]
       .map((check) => flagReason({ check }))
       .join(" ")
       .toLowerCase();
     expect(all).not.toContain("person");
+    expect(all).not.toContain("face");
   });
 });
 
@@ -527,6 +536,48 @@ describe("datasetRecommendations (sc-6540)", () => {
     });
     // Only the standing kind tip — none of the button-backed checks become recommendations.
     expect(recs.map((rec) => rec.id)).toEqual(["tip"]);
+  });
+
+  it("surfaces the face findings only for a person set (sc-6538)", () => {
+    const base = {
+      itemCount: 16,
+      datasetFlags: [],
+      items: [
+        { itemId: "a", flags: [{ check: "identity_mismatch", severity: "warn" }] },
+        { itemId: "b", flags: [{ check: "no_face", severity: "warn" }] },
+        { itemId: "c", flags: [{ check: "small_subject", severity: "warn" }] },
+        { itemId: "d", flags: [] },
+      ],
+    };
+    const person = datasetRecommendations({ ...base, kind: "person" });
+    const ids = person.map((rec) => rec.id);
+    expect(ids).toContain("identity");
+    expect(ids).toContain("no_face");
+    expect(ids).toContain("small_subject");
+    expect(person.find((rec) => rec.id === "identity").text).toMatch(/different person/i);
+
+    // The face fold is Person-only — a style/object set never raises these, and the recs stay silent.
+    for (const kind of ["style", "object"]) {
+      const recs = datasetRecommendations({ ...base, kind }).map((rec) => rec.id);
+      expect(recs).not.toContain("identity");
+      expect(recs).not.toContain("no_face");
+      expect(recs).not.toContain("small_subject");
+    }
+  });
+
+  it("pluralizes and dismiss-filters the face findings", () => {
+    const recs = datasetRecommendations({
+      kind: "person",
+      itemCount: 16,
+      datasetFlags: [],
+      items: [
+        { itemId: "a", flags: [{ check: "no_face", severity: "warn" }] },
+        { itemId: "b", flags: [{ check: "no_face", severity: "warn" }] },
+        // A dismissed finding (sc-6534) must not be counted, like every other derivation.
+        { itemId: "c", flags: [{ check: "no_face", severity: "warn", acknowledged: true }] },
+      ],
+    });
+    expect(recs.find((rec) => rec.id === "no_face").text).toContain("2 images have no detectable face");
   });
 
   it("still gives a kind tip on a clean set so guidance differs by kind", () => {
