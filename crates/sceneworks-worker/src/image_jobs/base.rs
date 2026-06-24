@@ -1782,8 +1782,10 @@ async fn generate_stream(
 /// Whether `model` is served by the candle (Windows/CUDA) backend's generic lane (txt2img, plus the
 /// Ideogram 4 in-lane edit, below). SDXL/RealVisXL (sc-3675) plus the four image families wired in
 /// sc-5096 — z-image, flux schnell/dev, flux2-klein, qwen-image — plus Lens / Lens-Turbo (sc-5126, the
-/// first candle family with quant + LoRA/LoKr) plus Ideogram 4 + Turbo (sc-6597/sc-6598, epic 6561).
-/// `realvisxl` shares the candle `"sdxl"` engine via a weights swap; every other id maps 1:1 to its
+/// first candle family with quant + LoRA/LoKr) plus Ideogram 4 + Turbo (sc-6597/sc-6598, epic 6561) plus
+/// the two FLUX.2-klein weight variants (sc-7459: `_kv` / `_true_v2`, sharing the `flux2_klein_9b` loader).
+/// `realvisxl` (and the klein `_kv` / `_true_v2`) share an existing candle engine via a weights swap;
+/// every other id maps 1:1 to its
 /// `MODEL_TABLE` engine id. For the OTHER families, edit/control/reference shapes route to their bespoke
 /// candle lanes (checked before this gate in the dispatch) or to the Python torch worker; Ideogram is
 /// the exception — its img2img/mask edit is the SAME engine as its T2I, so `generate_candle_stream`
@@ -1803,6 +1805,12 @@ fn is_candle_engine(model: &str) -> bool {
             | "flux_schnell"
             | "flux_dev"
             | "flux2_klein_9b"
+            // FLUX.2-klein weight variants (sc-7459): same candle `flux2_klein_9b` loader/arch, a
+            // weights swap. `_kv` loads its own full diffusers tree; `_true_v2` loads the locally
+            // converted diffusers dir (`modelPath` seam). txt2img only — `_kv`'s reference-edit /
+            // KV-cache accel and every edit/reference shape defer to torch (`image_request_candle_eligible`).
+            | "flux2_klein_9b_kv"
+            | "flux2_klein_9b_true_v2"
             // FLUX.2-dev (sc-7458): the 32B flagship rides the generic candle txt2img lane like klein.
             // `generate_candle_stream` resolves Q4 (manifest `mlx.quantize: 4` + the dev descriptor's
             // `supported_quants`) so the dense snapshot is staged in CPU RAM and quantized onto the GPU
@@ -1837,7 +1845,10 @@ fn candle_adapter_label(model: &str) -> &'static str {
     match model {
         "z_image_turbo" => "candle_z_image",
         "flux_schnell" | "flux_dev" => "candle_flux",
-        "flux2_klein_9b" | "flux2_dev" => "candle_flux2",
+        // The base klein + its `_kv` / `_true_v2` weight variants (sc-7459) + dev all run candle FLUX.2.
+        "flux2_klein_9b" | "flux2_klein_9b_kv" | "flux2_klein_9b_true_v2" | "flux2_dev" => {
+            "candle_flux2"
+        }
         "qwen_image" => "candle_qwen",
         "chroma1_hd" | "chroma1_base" | "chroma1_flash" => "candle_chroma",
         "lens" | "lens_turbo" => "candle_lens",
@@ -2018,15 +2029,31 @@ async fn generate_candle_stream(
     } else {
         model_repo(request, &model)
     };
-    let snapshot = huggingface_snapshot_dir(&settings.data_dir, &repo).ok_or_else(|| {
-        WorkerError::InvalidPayload(format!("candle weights snapshot not found for {repo}"))
-    })?;
-    // Ideogram nests its weights under a `bf16/` subdir; Boogu's originals (and every other family) are a
-    // complete snapshot at the root, so `weights_dir` is the snapshot itself.
-    let weights_dir = if is_ideogram {
-        candle_ideogram_subdir(&snapshot)
+    // A convert-at-install model (FLUX.2-klein `_true_v2`, sc-7459) is a single-file fine-tune with no
+    // diffusers tree in its HF cache, so it loads from the locally-assembled converted dir via the
+    // `modelPath` seam (injected by the API's `inject_converted_model_path`), exactly like the MLX
+    // path's `resolve_weights_dir`. An explicit `modelPath` (advanced override or manifest) wins over
+    // the HF-cache snapshot; `resolve_app_managed_model_dir` constrains it to app-managed data.
+    let model_path = request
+        .advanced
+        .get("modelPath")
+        .or_else(|| request.model_manifest_entry.get("modelPath"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|path| !path.is_empty());
+    let weights_dir = if let Some(model_path) = model_path {
+        resolve_app_managed_model_dir(settings, model_path, "Image modelPath")?
     } else {
-        snapshot
+        let snapshot = huggingface_snapshot_dir(&settings.data_dir, &repo).ok_or_else(|| {
+            WorkerError::InvalidPayload(format!("candle weights snapshot not found for {repo}"))
+        })?;
+        // Ideogram nests its weights under a `bf16/` subdir; Boogu's originals (and every other family)
+        // are a complete snapshot at the root, so `weights_dir` is the snapshot itself.
+        if is_ideogram {
+            candle_ideogram_subdir(&snapshot)
+        } else {
+            snapshot
+        }
     };
 
     // Descriptor-derived denoise/guidance surface (distilled families → no guidance/negative; guided
@@ -2460,6 +2487,12 @@ mod candle_label_tests {
         assert_eq!(candle_adapter_label("flux_dev"), "candle_flux");
         assert_eq!(candle_adapter_label("flux2_klein_9b"), "candle_flux2");
         assert_eq!(candle_adapter_label("flux2_dev"), "candle_flux2");
+        // sc-7459: the klein weight variants share the FLUX.2 family label.
+        assert_eq!(candle_adapter_label("flux2_klein_9b_kv"), "candle_flux2");
+        assert_eq!(
+            candle_adapter_label("flux2_klein_9b_true_v2"),
+            "candle_flux2"
+        );
         assert_eq!(candle_adapter_label("qwen_image"), "candle_qwen");
         assert_eq!(candle_adapter_label("chroma1_hd"), "candle_chroma");
         assert_eq!(candle_adapter_label("chroma1_base"), "candle_chroma");
@@ -2519,6 +2552,9 @@ mod candle_label_tests {
             "flux_dev",
             "flux2_klein_9b",
             "flux2_dev",
+            // sc-7459: the two klein weight variants share the candle FLUX.2 engine.
+            "flux2_klein_9b_kv",
+            "flux2_klein_9b_true_v2",
             "qwen_image",
             "chroma1_hd",
             "chroma1_base",
@@ -2539,14 +2575,14 @@ mod candle_label_tests {
         ] {
             assert!(is_candle_engine(model), "{model} should be a candle engine");
         }
-        // Non-candle families + non-base variants (the bespoke-stream edit ids, the kv distill) are not
-        // in the generic lane. (kolors / sensenova ARE candle engines now — sc-5576 — for their base
-        // txt2img shape; `boogu_image_edit` IS — sc-7524 — because its edit is in-lane, not bespoke.)
+        // Non-candle families + still-unwired variants (bespoke-stream edit ids) are not in the generic
+        // lane. (kolors / sensenova ARE candle engines now — sc-5576 — for their base txt2img shape;
+        // `boogu_image_edit` IS — sc-7524 — because its edit is in-lane, not bespoke; the klein
+        // `_kv` / `_true_v2` weight variants are candle engines too — sc-7459 — for txt2img.)
         for model in [
             "bernini_image",
             "z_image_edit",
             "qwen_image_edit",
-            "flux2_klein_9b_kv",
             "wan_2_2",
         ] {
             assert!(!is_candle_engine(model), "{model} must not be a candle engine");

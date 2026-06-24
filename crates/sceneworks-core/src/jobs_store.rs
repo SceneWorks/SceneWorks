@@ -3747,15 +3747,18 @@ fn realvisxl_lightning_mlx_eligible(payload: &Map<String, Value>) -> bool {
 
 /// The models the candle (Windows/CUDA) lane can serve (epic 3672 sc-3678 for SDXL; epic 5095
 /// sc-5096 adds the four image families; sc-5126 adds Lens / Lens-Turbo; sc-5484 + sc-5576 add Chroma,
-/// Kolors, and SenseNova-U1). Mirrors the worker's
+/// Kolors, and SenseNova-U1; sc-7459 adds the two FLUX.2-klein weight variants). Mirrors the worker's
 /// `image_jobs::is_candle_engine`: SDXL/RealVisXL (`realvisxl` shares the candle `"sdxl"` engine via a
-/// weights swap), plus z-image-turbo, FLUX.1 schnell/dev, FLUX.2-klein-9B, Qwen-Image,
+/// weights swap), plus z-image-turbo, FLUX.1 schnell/dev, FLUX.2-klein-9B (+ the `_kv` / `_true_v2`
+/// weight variants, which share the candle `flux2_klein_9b` loader), Qwen-Image,
 /// `lens`/`lens_turbo`, `chroma1_hd`/`_base`/`_flash`, `kolors`, and `sensenova_u1_8b`/`_fast` —
-/// the base **txt2img** ids only. Deliberately narrow: candle is a gated
-/// txt2img-only lane, so every conditioning shape AND every non-base weight variant (e.g.
-/// `flux2_klein_9b_kv`, `qwen_image_edit`) falls back to the Python torch worker. Lens is pure T2I
-/// (no conditioning at all) but — unlike the others — DOES advertise quant + LoRA/LoKr, so it is also
-/// listed in [`CANDLE_QUANT_LORA_MODELS`] below to exempt it from the quant/LoRA → torch fallbacks.
+/// the base **txt2img** ids (plus the klein weight swaps). Deliberately narrow: candle is a gated
+/// txt2img-only lane, so every conditioning shape AND every still-unwired weight variant (e.g.
+/// `qwen_image_edit`) falls back to the Python torch worker — including the klein variants' OWN edit /
+/// KV-cache shapes (`flux2_klein_9b_kv`'s reference-edit accel is out of scope; sc-7459 is txt2img weight
+/// parity only). Lens is pure T2I (no conditioning at all) but — unlike the others — DOES advertise
+/// quant + LoRA/LoKr, so it is also listed in [`CANDLE_QUANT_LORA_MODELS`] below to exempt it from the
+/// quant/LoRA → torch fallbacks.
 const CANDLE_ROUTED_MODELS: &[&str] = &[
     "sdxl",
     "realvisxl",
@@ -3771,6 +3774,15 @@ const CANDLE_ROUTED_MODELS: &[&str] = &[
     "flux_schnell",
     "flux_dev",
     "flux2_klein_9b",
+    // FLUX.2-klein weight variants (sc-7459, epic 6564 story 3): same candle `flux2_klein_9b`
+    // loader/arch, a weights swap. `_kv` is a separately-distilled checkpoint with a full diffusers
+    // tree (4-step, guidance 1.0); `_true_v2` is the wikeeyang undistilled fine-tune (24-step,
+    // guidance 1.0) the convert-at-install lane assembles into a local diffusers dir (loaded via the
+    // `modelPath` seam — candle converter sc-7459). **txt2img only**: `_kv`'s reference-edit / KV-cache
+    // accel and every reference/edit shape are rejected below (`image_request_candle_eligible`) and
+    // fall back to the Python torch worker.
+    "flux2_klein_9b_kv",
+    "flux2_klein_9b_true_v2",
     // FLUX.2-dev (epic 6564 sc-7458): the guidance-distilled 32B flagship, a SEPARATE candle engine
     // from klein (Mistral3 TE + 48/48/15360 DiT), registered by `candle-gen-flux2`'s `flux2_dev`
     // generator (sc-7457). Off-Mac the candle lane loads the dense `black-forest-labs/FLUX.2-dev`
@@ -5824,18 +5836,38 @@ mod candle_routing_tests {
 
     #[test]
     fn non_candle_families_and_variants_are_never_candle_eligible() {
-        // A family with no candle provider at all (`bernini_image`) AND the non-base weight/shape
-        // variants of wired families (edit ids, the kv distill) all stay on the Python torch worker.
-        // (chroma / kolors / sensenova ARE candle-routed now — sc-5484 / sc-5576 — for txt2img.)
-        for model in [
-            "bernini_image",
-            "z_image_edit",
-            "qwen_image_edit",
-            "flux2_klein_9b_kv",
-        ] {
+        // A family with no candle provider at all (`bernini_image`) AND the still-unwired weight/shape
+        // variants of wired families (edit ids) all stay on the Python torch worker.
+        // (chroma / kolors / sensenova ARE candle-routed now — sc-5484 / sc-5576 — for txt2img; the
+        // FLUX.2-klein `_kv` / `_true_v2` weight variants are too — sc-7459 — see the dedicated test below.)
+        for model in ["bernini_image", "z_image_edit", "qwen_image_edit"] {
             assert!(
                 !image_request_candle_eligible(model, &object(json!({ "prompt": "p" }))),
                 "{model} must fall back to the Python worker"
+            );
+        }
+    }
+
+    #[test]
+    fn flux2_klein_weight_variants_route_txt2img_to_candle() {
+        // sc-7459 (epic 6564 story 3): both klein weight variants serve plain txt2img on the candle lane
+        // via the shared `flux2_klein_9b` loader — a weights swap, not a new arch.
+        for model in ["flux2_klein_9b_kv", "flux2_klein_9b_true_v2"] {
+            assert!(
+                image_request_candle_eligible(model, &object(json!({ "prompt": "a red fox" }))),
+                "{model} plain txt2img should be candle-eligible"
+            );
+        }
+        // ...but their reference/edit shapes are NOT in scope (txt2img weight parity only). The `_kv`
+        // checkpoint's whole point is the reference-edit KV-cache accel — that stays on the Python torch
+        // worker (the candle lane has no klein edit path), same as every other candle conditioning shape.
+        for payload in [
+            json!({ "referenceAssetId": "a" }),
+            json!({ "mode": "edit_image", "sourceAssetId": "a" }),
+        ] {
+            assert!(
+                !image_request_candle_eligible("flux2_klein_9b_kv", &object(payload.clone())),
+                "flux2_klein_9b_kv conditioning shape must fall back to torch: {payload}"
             );
         }
     }
