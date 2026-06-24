@@ -147,14 +147,17 @@ export function SettingsScreen() {
 
   async function commitGpuMemoryLimit(percent) {
     try {
-      // 100% = no limit → send null so the shell clears the cap; otherwise a fraction (0.1–0.99).
+      // 100% = Off → send null so the shell clears it; otherwise a fraction (0.1–0.99).
       const fraction = percent >= 100 ? null : percent / 100;
       const updated = await invoke("set_gpu_memory_limit", { fraction });
       setSettings(updated);
+      // The worker only reads the target at spawn, so restart it now to actually apply the
+      // change — otherwise moving the slider silently does nothing until the next restart.
+      await invoke("restart_worker");
       setStatus(
         fraction == null
-          ? "GPU memory limit removed. Restart the worker to apply."
-          : `GPU memory limit set to ${percent}%. Restart the worker to apply.`,
+          ? "GPU memory target turned off. Restarting the worker to apply…"
+          : `GPU memory target set to ${percent}%. Restarting the worker to apply…`,
       );
     } catch (error) {
       setStatus(String(error));
@@ -448,10 +451,10 @@ export function SettingsScreen() {
           {gpu?.platform === "macos" && gpu?.unifiedMemoryMb ? (
             <div className="settings-gpu-cap">
               <label htmlFor="gpu-memory-cap">
-                GPU memory limit:{" "}
+                GPU memory for SceneWorks:{" "}
                 {gpuLimitPercent >= 100
-                  ? "Off — no limit"
-                  : `${Math.round((gpu.unifiedMemoryMb / 1024) * (gpuLimitPercent / 100))} GB of ` +
+                  ? "Use all available"
+                  : `~${Math.round((gpu.unifiedMemoryMb / 1024) * (gpuLimitPercent / 100))} GB of ` +
                     `${Math.round(gpu.unifiedMemoryMb / 1024)} GB (${gpuLimitPercent}%)`}
               </label>
               <input
@@ -461,16 +464,16 @@ export function SettingsScreen() {
                 max={100}
                 step={5}
                 value={gpuLimitPercent}
-                aria-label="GPU memory limit (percent of unified memory)"
+                aria-label="GPU memory target for SceneWorks (percent of unified memory)"
                 onChange={(event) => setGpuLimitPercent(Number(event.target.value))}
                 onMouseUp={(event) => commitGpuMemoryLimit(Number(event.target.value))}
                 onKeyUp={(event) => commitGpuMemoryLimit(Number(event.target.value))}
                 onTouchEnd={(event) => commitGpuMemoryLimit(Number(event.target.value))}
               />
               <p className="settings-help">
-                Caps the shared memory generations and LoRA training may use, leaving the rest for
-                the system. This is a soft target, not a hard limit — set it too low and large models
-                may slow down or fail. Takes effect when you restart the worker.
+                A soft target for how much unified memory SceneWorks holds, so more stays free for the
+                rest of your system. It is not a hard limit — large models can still use more when they
+                need it. Changing this restarts the inference worker.
               </p>
             </div>
           ) : null}
