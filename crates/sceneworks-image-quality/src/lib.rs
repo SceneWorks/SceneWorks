@@ -155,7 +155,8 @@ pub fn compute_readiness(
         }
     }
 
-    let mut report = build_readiness_report(evaluation, tier1, alignment, aesthetic);
+    // identity (sc-6538) is folded in by the API layer, which holds the face sidecar — None here.
+    let mut report = build_readiness_report(evaluation, tier1, alignment, aesthetic, None);
     report.distributions = build_distributions(&inputs, thresholds);
     report.duplicate_removal = plan_dataset_duplicate_removal(&report, &inputs);
     (report, extracted)
