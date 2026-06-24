@@ -634,26 +634,18 @@ pub(crate) fn registry_capabilities(
     if has_clip_image && has_clip_text {
         push(Cap::DatasetAnalysis, &mut caps);
     }
-    // Prompt-refinement (sc-5500 contract). Two provider paths advertise the `prompt_refine` cap:
-    //  - candle (Windows, sc-5525): `candle-gen-prompt-refine` registers a `gen_core::TextLlm` under id
-    //    `prompt_refine` — light it up when the `candle` backend is enabled.
-    //  - macOS (epic 7153, sc-7158): prompt_refine now runs through mlx-llm's `mlx-llama`
-    //    (`core_llm::TextLlm`, resolved model-first), which registers in core-llm's registry, NOT
-    //    gen_core's — so light it up when the `mlx` backend is enabled and a core-llm text (non-vision)
-    //    provider is linked. (Retired the old `mlx-gen-prompt-refine` gen_core registration.)
-    // The Python torch `PromptRefiner` stays the fallback on platforms with neither.
-    let candle_prompt_refine = gen_core::registry::textllms().any(|r| {
-        let d = (r.descriptor)();
-        backends.contains(&d.backend) && d.id == "prompt_refine"
-    });
-    #[cfg(target_os = "macos")]
+    // Prompt-refinement (epic 7153). Both native lanes now run through the unified LLM engine — a
+    // generic `core_llm::TextLlm` registered in core-llm's registry (NOT gen_core's), resolved
+    // model-first: mlx-llm's `mlx-llama` on macOS (sc-7158), candle-llm's `candle-llama` on the
+    // Windows/CUDA candle build (sc-7404). Light up `prompt_refine` when an enabled backend has a
+    // core-llm text (non-vision) provider linked — the vision providers (mlx-joycaption / candle-llava)
+    // set `supports_vision` and are excluded. The Python torch `PromptRefiner` stays the fallback on
+    // platforms with neither.
     let native_prompt_refine = gen_core::core_llm::textllms().any(|r| {
         let d = (r.descriptor)();
         backends.contains(&d.backend.as_str()) && !d.capabilities.supports_vision
     });
-    #[cfg(not(target_os = "macos"))]
-    let native_prompt_refine = false;
-    if candle_prompt_refine || native_prompt_refine {
+    if native_prompt_refine {
         push(Cap::PromptRefine, &mut caps);
     }
     caps
@@ -975,24 +967,32 @@ mod tests {
         gen_core::registry::ModelRegistration { descriptor: stub_unknown_descriptor, load: stub_unknown_load }
     }
 
-    // A candle-backed TextLlm stub under id `prompt_refine`: proves the prompt-refine TextLlm
-    // derivation lights up `prompt_refine` purely from a registered descriptor with `backend =
-    // "candle"` (sc-5525), exactly like the generator/captioner derivations above.
-    fn stub_textllm_descriptor() -> gen_core::TextLlmDescriptor {
-        gen_core::TextLlmDescriptor {
-            id: "prompt_refine",
-            family: "llama",
-            backend: "candle",
-            capabilities: gen_core::TextLlmCapabilities::default(),
+    // A candle-backed core-llm `TextLlm` stub (backend "candle", non-vision): proves the prompt-refine
+    // derivation lights up `prompt_refine` purely from a registered `core_llm::TextLlm` descriptor on an
+    // enabled backend (sc-7404), so the default (Linux) CI lane exercises it without linking a real
+    // provider crate. The real lanes register mlx-llama / candle-llama into this SAME core-llm registry.
+    fn stub_textllm_descriptor() -> gen_core::core_llm::TextLlmDescriptor {
+        gen_core::core_llm::TextLlmDescriptor {
+            id: "prompt_refine".to_string(),
+            family: "llama".to_string(),
+            backend: "candle".to_string(),
+            capabilities: gen_core::core_llm::TextLlmCapabilities::default(),
         }
     }
     fn stub_textllm_load(
-        _spec: &gen_core::LoadSpec,
-    ) -> gen_core::Result<Box<dyn gen_core::TextLlm>> {
+        _spec: &gen_core::core_llm::LoadSpec,
+    ) -> gen_core::core_llm::Result<Box<dyn gen_core::core_llm::TextLlm>> {
         unimplemented!("registry-derivation test stub never loads")
     }
+    fn stub_textllm_can_load(_spec: &gen_core::core_llm::LoadSpec) -> bool {
+        false
+    }
     inventory::submit! {
-        gen_core::registry::TextLlmRegistration { descriptor: stub_textllm_descriptor, load: stub_textllm_load }
+        gen_core::core_llm::TextLlmRegistration {
+            descriptor: stub_textllm_descriptor,
+            load: stub_textllm_load,
+            can_load: stub_textllm_can_load,
+        }
     }
 
     #[test]
@@ -1029,11 +1029,11 @@ mod tests {
 
     #[test]
     fn candle_textllm_lights_up_prompt_refine() {
-        // candle enabled ⇒ the candle `prompt_refine` TextLlm stub derives the PromptRefine cap.
+        // candle enabled ⇒ the candle core-llm `TextLlm` stub (non-vision) derives the PromptRefine cap.
         let on = registry_capabilities(&settings_with_backends(false, true));
         assert!(
             on.contains(&Cap::PromptRefine),
-            "an enabled candle backend should derive prompt_refine from its TextLlm descriptor"
+            "an enabled candle backend should derive prompt_refine from its core-llm TextLlm descriptor"
         );
         // both off ⇒ nothing (neither the candle stub nor — on macOS — the real mlx twin is enabled).
         let off = registry_capabilities(&settings_with_backends(false, false));
