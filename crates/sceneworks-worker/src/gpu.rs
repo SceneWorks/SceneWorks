@@ -111,6 +111,16 @@ fn with_candle_capabilities(mut gpu: DiscoveredGpu, settings: &Settings) -> Disc
             if !gpu.capabilities.contains(&WorkerCapability::KpsExtract) {
                 gpu.capabilities.push(WorkerCapability::KpsExtract);
             }
+            // Dataset Doctor face pass (sc-6538): the off-Mac sibling of the macOS face stack — the
+            // candle SCRFD/ArcFace stack (`candle-gen-face`, reused from kps_jobs.rs) embeds the largest
+            // face of each Person-dataset image. A job-type capability (not a generation modality), so
+            // it isn't in `registry_capabilities`; advertise it explicitly, like kps_extract.
+            if !gpu
+                .capabilities
+                .contains(&WorkerCapability::DatasetFaceAnalysis)
+            {
+                gpu.capabilities.push(WorkerCapability::DatasetFaceAnalysis);
+            }
             // DWPose whole-body pose detection (sc-5496, epic 5482): the off-Mac sibling of the macOS
             // `ort`/CoreML path (sc-3487) — the same RTMW detector via `pose_jobs::run_pose_detect_job`
             // with the CUDA execution provider, serving `pose_detect` for the Pose Library "create from
@@ -572,6 +582,13 @@ pub(crate) fn mlx_gpu(settings: &Settings) -> DiscoveredGpu {
         // Python-free on Mac. Reuses the InstantID `scrfd_10g` bundle (cached on
         // first InstantID/extraction use).
         WorkerCapability::KpsExtract,
+        // Dataset Doctor face pass (epic 6529 P3, sc-6538): the native SCRFD+ArcFace stack
+        // (`mlx-gen-face`, the same detector+recognizer the InstantID/kps paths use) embeds the
+        // largest face of each Person-dataset image for the identity / subject-prominence checks
+        // (`face_analysis_jobs::run_dataset_face_analysis_job`). Hardcoded like KpsExtract — the
+        // `FaceEmbedder` stack has no gen-core registry, so it isn't in `registry_capabilities`;
+        // advertised here so a `dataset_face_analysis` job routes to the Mac worker by construction.
+        WorkerCapability::DatasetFaceAnalysis,
         // Real-ESRGAN image upscaling (epic 3482, sc-3489): RRDBNet x2/x4 via
         // onnxruntime/CoreML, served in-process by `upscale_jobs::run_image_upscale_job`.
         // Replaces the Python torch Real-ESRGAN path so the Image Editor upscale tool

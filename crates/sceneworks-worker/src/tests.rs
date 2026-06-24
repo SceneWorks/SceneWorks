@@ -625,6 +625,10 @@ fn mlx_gpu_capability_set_matches_expected_full_set() {
         WorkerCapability::PersonReplace,
         WorkerCapability::PoseDetect,
         WorkerCapability::KpsExtract,
+        // sc-6538: the native SCRFD+ArcFace face stack (mlx-gen-face) is hardcoded in mlx_gpu (no
+        // gen-core registry for FaceEmbedder), so DatasetFaceAnalysis is advertised on Mac like
+        // KpsExtract.
+        WorkerCapability::DatasetFaceAnalysis,
         WorkerCapability::ImageUpscale,
         // sc-6539: Dataset Doctor one-tap upscale — reuses the Real-ESRGAN engine, advertised
         // wherever image_upscale is.
