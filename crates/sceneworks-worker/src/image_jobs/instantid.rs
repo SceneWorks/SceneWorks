@@ -10,8 +10,10 @@ const INSTANTID_CONTROLNET_REPO: &str = "InstantX/InstantID";
 /// repo, mirroring the YOLO11 / SAM2 `SceneWorks/*-mlx` uploads (sc-3633 / sc-3707).
 const INSTANTID_MLX_REPO: &str = "SceneWorks/instantid-mlx";
 const INSTANTID_IP_ADAPTER_FILE: &str = "ip-adapter.safetensors";
-const INSTANTID_SCRFD_FILE: &str = "scrfd_10g.safetensors";
-const INSTANTID_ARCFACE_FILE: &str = "arcface_iresnet100.safetensors";
+// `pub(crate)` so the Dataset Doctor face pass (sc-6538) can join them under the bundle dir that
+// `ensure_face_stack_dir` stages, to load the MLX `FaceAnalysis` (SCRFD + ArcFace) directly.
+pub(crate) const INSTANTID_SCRFD_FILE: &str = "scrfd_10g.safetensors";
+pub(crate) const INSTANTID_ARCFACE_FILE: &str = "arcface_iresnet100.safetensors";
 /// The IdentityNet weight file inside `ControlNetModel/` (a stock diffusers SDXL ControlNet).
 const INSTANTID_CONTROLNET_FILES: [&str; 2] =
     ["config.json", "diffusion_pytorch_model.safetensors"];
@@ -325,15 +327,19 @@ pub(crate) async fn ensure_scrfd_weights(
     .await
 }
 
-/// Resolve the candle face-stack DIRECTORY (`scrfd_10g.safetensors` + `arcface_iresnet100.safetensors`)
-/// for the off-Mac kps-extraction capability (sc-5497, epic 5482). Unlike the Mac path — which loads
-/// SCRFD alone via [`ensure_scrfd_weights`] — the candle `candle_gen_face::load` loads the SCRFD
-/// detector AND the ArcFace recognizer from one directory by their canonical names, so BOTH files must
-/// be staged. Shares the same env override (`SCENEWORKS_INSTANTID_WEIGHTS`) + app cache +
-/// download-on-first-use with [`ensure_instantid_weights`], so a prior InstantID / PuLID / extraction
-/// run leaves it already cached. Returns the bundle dir (which IS the candle face stack's load dir,
-/// exactly the `face_dir` the candle InstantID path resolves).
-#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+/// Resolve the face-stack DIRECTORY (`scrfd_10g.safetensors` and `arcface_iresnet100.safetensors`),
+/// staging BOTH files. The off-Mac kps-extraction capability (sc-5497, epic 5482) loads them through
+/// `candle_gen_face::load`, and the Dataset Doctor face pass (sc-6538) loads them on BOTH backends:
+/// candle from the dir, MLX by joining the two canonical file names ([`INSTANTID_SCRFD_FILE`],
+/// [`INSTANTID_ARCFACE_FILE`]) — so it is no longer candle-only. (The Mac kps path still loads SCRFD
+/// alone via [`ensure_scrfd_weights`].) Shares the env override (`SCENEWORKS_INSTANTID_WEIGHTS`), the
+/// app cache, and download-on-first-use with [`ensure_instantid_weights`], so a prior
+/// InstantID/PuLID/extraction run leaves it already cached. Returns the bundle dir (which IS the candle
+/// face stack's load dir, exactly the `face_dir` the candle InstantID path resolves).
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
 pub(crate) async fn ensure_face_stack_dir(
     api: &ApiClient,
     settings: &Settings,
@@ -345,7 +351,7 @@ pub(crate) async fn ensure_face_stack_dir(
         client: &client,
         settings,
         job_id: &job.id,
-        cancel_message: "KPS extraction canceled while fetching face-stack weights.",
+        cancel_message: "Canceled while fetching face-stack weights.",
         fresh_download: false,
     };
     let bundle_dir = std::env::var("SCENEWORKS_INSTANTID_WEIGHTS")

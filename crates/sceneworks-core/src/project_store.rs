@@ -21,7 +21,9 @@ pub use crate::character_store::{
     CharacterLoraUpdateInput, CharacterMutationResult, CharacterReferenceInput,
     CharacterReferenceUpdateInput, CharacterUpdateInput, CHARACTER_SIDECAR_PATTERN,
 };
-use crate::dataset_quality::{CachedTier0Scalars, DatasetEmbeddings, QualityAck, QualityCheck};
+use crate::dataset_quality::{
+    CachedTier0Scalars, DatasetEmbeddings, DatasetFaceRecords, QualityAck, QualityCheck,
+};
 use crate::slug::slugify;
 use crate::store_util::{
     ensure_column, is_safe_id, is_safe_relative_path, lock_project_files, optional_f64,
@@ -601,6 +603,29 @@ impl ProjectStore {
     ) -> ProjectStoreResult<Option<DatasetEmbeddings>> {
         let (project_path, _project_guard) = self.lock_project(project_id)?;
         TrainingDatasetStore::new(project_path).read_dataset_embeddings(project_id, dataset_id)
+    }
+
+    /// Persist the dataset's face sidecar (sc-6538). Locked wrapper over
+    /// [`TrainingDatasetStore::write_dataset_faces`].
+    pub fn write_dataset_faces(
+        &self,
+        project_id: &str,
+        dataset_id: &str,
+        faces: &DatasetFaceRecords,
+    ) -> ProjectStoreResult<()> {
+        let (project_path, _project_guard) = self.lock_project(project_id)?;
+        TrainingDatasetStore::new(project_path).write_dataset_faces(project_id, dataset_id, faces)
+    }
+
+    /// Read the dataset's face sidecar (`None` if the worker face pass hasn't run). Locked wrapper
+    /// over [`TrainingDatasetStore::read_dataset_faces`].
+    pub fn read_dataset_faces(
+        &self,
+        project_id: &str,
+        dataset_id: &str,
+    ) -> ProjectStoreResult<Option<DatasetFaceRecords>> {
+        let (project_path, _project_guard) = self.lock_project(project_id)?;
+        TrainingDatasetStore::new(project_path).read_dataset_faces(project_id, dataset_id)
     }
 
     pub fn batch_rename_training_dataset_items(

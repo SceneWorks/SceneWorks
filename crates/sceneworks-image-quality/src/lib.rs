@@ -20,8 +20,8 @@ use image_hasher::{HashAlg, Hasher, HasherConfig};
 use sceneworks_core::dataset_quality::{
     build_readiness_report, evaluate_tier0, plan_duplicate_removal, AestheticEvaluation,
     AestheticPredictor, CaptionAlignmentEvaluation, DatasetReadinessReport, DuplicateCandidate,
-    DuplicateRemovalPlan, ItemQualityInput, MetricDistribution, QualityCheck, QualityFlag,
-    ReadinessDistributions, Severity, Tier0Scalars, Tier0Thresholds, Tier1Evaluation,
+    DuplicateRemovalPlan, IdentityEvaluation, ItemQualityInput, MetricDistribution, QualityCheck,
+    QualityFlag, ReadinessDistributions, Severity, Tier0Scalars, Tier0Thresholds, Tier1Evaluation,
 };
 
 /// One-tap pixel-rewriting fixes (sc-6539 smart-crop + EXIF-strip).
@@ -98,6 +98,9 @@ pub struct ReadinessItem {
 /// reusable cached value. Returns the report plus the freshly-extracted `(item_id, scalars)` pairs
 /// so the caller can persist them as the content-hash + bucket-keyed cache. An item whose image
 /// fails to decode gets a `Decode` warning, so it can never pass as "technically fine".
+// Each optional eval (`tier1`/`alignment`/`aesthetic`/`identity`) is a distinct, independently-present
+// fold input the caller assembles from separate sidecars — a struct would only relocate the arity.
+#[allow(clippy::too_many_arguments)]
 pub fn compute_readiness(
     items: &[ReadinessItem],
     bucket_edge: u32,
@@ -106,6 +109,7 @@ pub fn compute_readiness(
     tier1: Option<&Tier1Evaluation>,
     alignment: Option<&CaptionAlignmentEvaluation>,
     aesthetic: Option<&AestheticEvaluation>,
+    identity: Option<&IdentityEvaluation>,
 ) -> (DatasetReadinessReport, Vec<(String, Tier0Scalars)>) {
     let mut inputs = Vec::with_capacity(items.len());
     let mut extracted = Vec::new();
@@ -155,7 +159,10 @@ pub fn compute_readiness(
         }
     }
 
-    let mut report = build_readiness_report(evaluation, tier1, alignment, aesthetic);
+    // identity (sc-6538): the API layer holds the face sidecar, builds the `IdentityEvaluation` for a
+    // Person dataset, and threads it here; `None` (non-person / no sidecar) leaves the face sub-score
+    // and flags untouched.
+    let mut report = build_readiness_report(evaluation, tier1, alignment, aesthetic, identity);
     report.distributions = build_distributions(&inputs, thresholds);
     report.duplicate_removal = plan_dataset_duplicate_removal(&report, &inputs);
     (report, extracted)
@@ -547,7 +554,7 @@ mod tests {
         ];
 
         let (report, extracted) =
-            compute_readiness(&items, bucket, 1, &thresholds, None, None, None);
+            compute_readiness(&items, bucket, 1, &thresholds, None, None, None, None);
 
         // Both decoded fresh (returned for the caller to cache); flat reads soft → NeedsAttention.
         assert_eq!(extracted.len(), 2);
@@ -583,7 +590,7 @@ mod tests {
         };
         let items = vec![dup("soft", 5000.0), dup("sharp", 9000.0)];
 
-        let (report, _) = compute_readiness(&items, 64, 1, &thresholds, None, None, None);
+        let (report, _) = compute_readiness(&items, 64, 1, &thresholds, None, None, None, None);
         let plan = report
             .duplicate_removal
             .expect("exact duplicates produce a removal plan");
@@ -631,7 +638,8 @@ mod tests {
             &Tier1Thresholds::for_kind(&DatasetKind::Person),
         );
 
-        let (report, _) = compute_readiness(&items, 64, 1, &thresholds, Some(&tier1), None, None);
+        let (report, _) =
+            compute_readiness(&items, 64, 1, &thresholds, Some(&tier1), None, None, None);
         assert!(
             report
                 .items
@@ -676,7 +684,7 @@ mod tests {
         ];
 
         let (report, extracted) =
-            compute_readiness(&items, bucket, 1, &thresholds, None, None, None);
+            compute_readiness(&items, bucket, 1, &thresholds, None, None, None, None);
 
         // The cached item is not re-extracted; the broken path yields nothing to cache.
         assert!(extracted.is_empty());
@@ -712,7 +720,7 @@ mod tests {
             acknowledged: vec![QualityCheck::Blur],
         }];
 
-        let (report, _) = compute_readiness(&items, bucket, 1, &thresholds, None, None, None);
+        let (report, _) = compute_readiness(&items, bucket, 1, &thresholds, None, None, None, None);
         // Blur is the only finding and the user dismissed it → Ready, badge clean…
         assert_eq!(report.gate, ReadinessGate::Ready);
         assert_eq!(report.items[0].severity, None);
@@ -743,7 +751,7 @@ mod tests {
             acknowledged: vec![QualityCheck::Decode], // even if asked, a decode failure stands
         }];
 
-        let (report, _) = compute_readiness(&items, bucket, 1, &thresholds, None, None, None);
+        let (report, _) = compute_readiness(&items, bucket, 1, &thresholds, None, None, None, None);
         let decode = report.items[0]
             .flags
             .iter()
@@ -788,7 +796,7 @@ mod tests {
             },
         ];
 
-        let (report, _) = compute_readiness(&items, bucket, 1, &thresholds, None, None, None);
+        let (report, _) = compute_readiness(&items, bucket, 1, &thresholds, None, None, None, None);
         let dist = report.distributions.expect("distributions present");
         // One value per decodable item, oriented + thresholded for the chart.
         assert_eq!(dist.blur_variance.values.len(), 2);

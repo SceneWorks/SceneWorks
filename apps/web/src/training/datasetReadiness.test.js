@@ -8,6 +8,7 @@ import {
   captionHash,
   cropLossFlaggedItemIds,
   datasetDoctorSummary,
+  datasetRecommendations,
   dismissedChecks,
   diversityPercent,
   duplicateRemovalItemIds,
@@ -89,17 +90,26 @@ describe("flagReason", () => {
     }
   });
 
+  it("has plain-language copy for the face checks (sc-6538)", () => {
+    for (const check of ["identity_mismatch", "no_face", "small_subject"]) {
+      const text = flagReason({ check });
+      expect(text).toBeTruthy();
+      expect(text).not.toBe("Flagged for review");
+    }
+  });
+
   it("degrades an unknown check to generic copy, never undefined", () => {
     expect(flagReason({ check: "some_future_check" })).toBe("Flagged for review");
     expect(flagReason(null)).toBe("");
   });
 
-  it("never implies Tier-1 identity ('different person') which does not exist yet", () => {
+  it("keeps the pixel-quality (Tier-0) copy subject-agnostic — no face wording leaks in", () => {
     const all = ["resolution", "crop_loss", "blur", "exposure", "exact_duplicate", "near_duplicate", "count", "decode"]
       .map((check) => flagReason({ check }))
       .join(" ")
       .toLowerCase();
     expect(all).not.toContain("person");
+    expect(all).not.toContain("face");
   });
 });
 
@@ -450,5 +460,135 @@ describe("readinessQueryParams", () => {
   it("omits empty/zero values", () => {
     const qs = readinessQueryParams({ resolution: 0, recommendedFor: [], characterType: "" });
     expect(qs).toBe("");
+  });
+});
+
+describe("datasetRecommendations (sc-6540)", () => {
+  const textOf = (recs) => recs.map((rec) => rec.text).join(" ");
+
+  it("changes the recommendation set with the kind on the same input (acceptance)", () => {
+    const base = {
+      itemCount: 12,
+      datasetFlags: [{ check: "low_diversity", severity: "warn" }],
+      items: [
+        { itemId: "a", flags: [{ check: "embedding_outlier", severity: "warn" }] },
+        { itemId: "b", flags: [] },
+      ],
+    };
+    const person = datasetRecommendations({ ...base, kind: "person" });
+    const style = datasetRecommendations({ ...base, kind: "style" });
+    const object = datasetRecommendations({ ...base, kind: "object" });
+
+    // The whole set of guidance differs across all three kinds on identical input.
+    expect(textOf(person)).not.toEqual(textOf(style));
+    expect(textOf(style)).not.toEqual(textOf(object));
+    expect(textOf(person)).not.toEqual(textOf(object));
+
+    // Person never surfaces embedding outliers (detector off); style/object do.
+    expect(person.some((rec) => rec.id === "outlier")).toBe(false);
+    expect(style.some((rec) => rec.id === "outlier")).toBe(true);
+    expect(object.some((rec) => rec.id === "outlier")).toBe(true);
+
+    // Diversity advice is kind-specific.
+    expect(person.find((rec) => rec.id === "diversity").text).toMatch(/poses|expressions/i);
+    expect(object.find((rec) => rec.id === "diversity").text).toMatch(/angles|backgrounds/i);
+    expect(style.find((rec) => rec.id === "diversity").text).toMatch(/subjects/i);
+  });
+
+  it("recommends acquiring images to reach the kind minimum", () => {
+    const recs = datasetRecommendations({
+      kind: "person",
+      itemCount: 12,
+      datasetFlags: [{ check: "count", severity: "warn", threshold: 15 }],
+      items: [],
+    });
+    expect(recs.find((rec) => rec.id === "count").text).toContain("Add 3 more images");
+  });
+
+  it("surfaces aesthetics only for style, and blur/exposure as replace-by-hand", () => {
+    const base = {
+      itemCount: 10,
+      datasetFlags: [{ check: "low_aesthetic", severity: "info" }],
+      items: [{ itemId: "x", flags: [{ check: "blur", severity: "warn" }] }],
+    };
+    expect(datasetRecommendations({ ...base, kind: "style" }).some((r) => r.id === "aesthetic")).toBe(
+      true,
+    );
+    expect(datasetRecommendations({ ...base, kind: "person" }).some((r) => r.id === "aesthetic")).toBe(
+      false,
+    );
+    expect(datasetRecommendations({ ...base, kind: "style" }).some((r) => r.id === "unfixable")).toBe(
+      true,
+    );
+  });
+
+  it("does not restate the one-tap fixes (dedupe/upscale/crop/caption have buttons)", () => {
+    const recs = datasetRecommendations({
+      kind: "style",
+      itemCount: 10,
+      datasetFlags: [],
+      items: [
+        { itemId: "a", flags: [{ check: "resolution", severity: "warn" }] },
+        { itemId: "b", flags: [{ check: "crop_loss", severity: "warn" }] },
+        { itemId: "c", flags: [{ check: "exact_duplicate", severity: "warn" }] },
+        { itemId: "d", flags: [{ check: "caption_alignment", severity: "warn" }] },
+      ],
+    });
+    // Only the standing kind tip — none of the button-backed checks become recommendations.
+    expect(recs.map((rec) => rec.id)).toEqual(["tip"]);
+  });
+
+  it("surfaces the face findings only for a person set (sc-6538)", () => {
+    const base = {
+      itemCount: 16,
+      datasetFlags: [],
+      items: [
+        { itemId: "a", flags: [{ check: "identity_mismatch", severity: "warn" }] },
+        { itemId: "b", flags: [{ check: "no_face", severity: "warn" }] },
+        { itemId: "c", flags: [{ check: "small_subject", severity: "warn" }] },
+        { itemId: "d", flags: [] },
+      ],
+    };
+    const person = datasetRecommendations({ ...base, kind: "person" });
+    const ids = person.map((rec) => rec.id);
+    expect(ids).toContain("identity");
+    expect(ids).toContain("no_face");
+    expect(ids).toContain("small_subject");
+    expect(person.find((rec) => rec.id === "identity").text).toMatch(/different person/i);
+
+    // The face fold is Person-only — a style/object set never raises these, and the recs stay silent.
+    for (const kind of ["style", "object"]) {
+      const recs = datasetRecommendations({ ...base, kind }).map((rec) => rec.id);
+      expect(recs).not.toContain("identity");
+      expect(recs).not.toContain("no_face");
+      expect(recs).not.toContain("small_subject");
+    }
+  });
+
+  it("pluralizes and dismiss-filters the face findings", () => {
+    const recs = datasetRecommendations({
+      kind: "person",
+      itemCount: 16,
+      datasetFlags: [],
+      items: [
+        { itemId: "a", flags: [{ check: "no_face", severity: "warn" }] },
+        { itemId: "b", flags: [{ check: "no_face", severity: "warn" }] },
+        // A dismissed finding (sc-6534) must not be counted, like every other derivation.
+        { itemId: "c", flags: [{ check: "no_face", severity: "warn", acknowledged: true }] },
+      ],
+    });
+    expect(recs.find((rec) => rec.id === "no_face").text).toContain("2 images have no detectable face");
+  });
+
+  it("still gives a kind tip on a clean set so guidance differs by kind", () => {
+    const clean = { kind: "object", itemCount: 20, datasetFlags: [], items: [] };
+    const recs = datasetRecommendations(clean);
+    expect(recs).toHaveLength(1);
+    expect(recs[0].id).toBe("tip");
+    expect(datasetRecommendations({ ...clean, kind: "person" })[0].text).not.toEqual(recs[0].text);
+  });
+
+  it("returns nothing without a report", () => {
+    expect(datasetRecommendations(null)).toEqual([]);
   });
 });

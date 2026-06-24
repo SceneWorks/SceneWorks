@@ -6,6 +6,7 @@ import {
   captionAlignmentFlaggedItemIds,
   cropLossFlaggedItemIds,
   datasetDoctorSummary,
+  datasetRecommendations,
   diversityPercent,
   duplicateRemovalItemIds,
   flagMetric,
@@ -182,6 +183,8 @@ export function DatasetDoctorReadout({
   onUpscaleLowRes,
   onSmartCrop,
   onStripExif,
+  onAnalyzeDataset,
+  onAnalyzeFaces,
 }) {
   if (!report) {
     if (loading) {
@@ -221,6 +224,17 @@ export function DatasetDoctorReadout({
   // sc-6539: EXIF-strip is a blanket hygiene pass (not flag-gated), so its count is every item.
   const stripExifCount =
     typeof onStripExif === "function" ? (report.items ?? []).length : 0;
+  // sc-6535: the CLIP analysis is the kind-agnostic analysis trigger — it embeds every photo to light
+  // up the Variety / aesthetic / off-style-outlier / caption-alignment readout. An analysis prerequisite,
+  // not a fix on flagged items, so it shows whenever wired (re-running is valid after a dataset edit).
+  const canAnalyzeDataset = typeof onAnalyzeDataset === "function";
+  // sc-6538: the face check is a PERSON-only analysis trigger, not a fix on flagged items — it runs the
+  // SCRFD+ArcFace pass that produces the face sidecar the identity / no-face / small-subject checks read.
+  // So it shows for a person dataset whenever wired, regardless of whether face findings exist yet.
+  const canAnalyzeFaces = report.kind === "person" && typeof onAnalyzeFaces === "function";
+  // sc-6540: kind-aware next-steps the user must do by hand (acquire/replace) — distinct from the
+  // one-tap action buttons above.
+  const recommendations = compact ? [] : datasetRecommendations(report);
   return (
     <div className={`dataset-doctor tone-${gate.tone}${compact ? " compact" : ""}`} aria-label="Dataset Doctor">
       <div className="dataset-doctor-head">
@@ -292,7 +306,9 @@ export function DatasetDoctorReadout({
       removeDuplicateIds.length ||
       lowResIds.length ||
       cropLossIds.length ||
-      stripExifCount ? (
+      stripExifCount ||
+      canAnalyzeDataset ||
+      canAnalyzeFaces ? (
         <div className="dataset-doctor-actions">
           {removeDuplicateIds.length ? (
             <button
@@ -340,7 +356,26 @@ export function DatasetDoctorReadout({
               {recaptionFlaggedIds.length === 1 ? "flagged image" : "flagged images"}
             </button>
           ) : null}
+          {canAnalyzeDataset ? (
+            <button type="button" className="secondary-action" onClick={() => onAnalyzeDataset()}>
+              Analyze photos
+            </button>
+          ) : null}
+          {canAnalyzeFaces ? (
+            <button type="button" className="secondary-action" onClick={() => onAnalyzeFaces()}>
+              Check faces
+            </button>
+          ) : null}
         </div>
+      ) : null}
+      {recommendations.length ? (
+        <ul className="dataset-doctor-recommendations" aria-label="Recommendations">
+          {recommendations.map((rec) => (
+            <li key={rec.id} className={`dataset-doctor-rec tone-${rec.tone}`}>
+              {rec.text}
+            </li>
+          ))}
+        </ul>
       ) : null}
     </div>
   );

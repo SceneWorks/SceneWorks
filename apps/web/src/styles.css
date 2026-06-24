@@ -7865,6 +7865,33 @@ details[open] > summary.lora-scope-group-heading::before,
   margin-top: 0.5rem;
 }
 
+/* Kind-aware recommendations (sc-6540) — the manual next-steps (acquire/replace), distinct from the
+   one-tap action buttons. A quiet bulleted list; tones tint the marker. */
+.dataset-doctor-recommendations {
+  margin: 0.6rem 0 0;
+  padding-left: 1.1rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.3rem;
+  font-size: 0.85em;
+  color: var(--text-2);
+}
+
+.dataset-doctor-rec {
+  list-style: disc;
+}
+
+.dataset-doctor-rec.tone-warn::marker {
+  color: oklch(0.72 0.15 70);
+}
+
+.dataset-doctor-rec.tone-tip {
+  list-style: none;
+  margin-left: -1.1rem;
+  opacity: 0.85;
+  font-style: italic;
+}
+
 /* The Aesthetic meter (sc-6537) — STYLE datasets only, a warm hue distinct from the technical and
    variety meters; it reads as advisory polish, not overall health. */
 .dataset-doctor-meter-aesthetic {

@@ -53,6 +53,21 @@ string_enum! {
         // CLIP+MLP aesthetic predictor. Advisory, never gates: low-aesthetic candids are often the best
         // identity shots, so this is never raised on person/object datasets (documented bias).
         LowAesthetic => "low_aesthetic",
+        // EmbeddingOutlier: per-image (sc-6540) — this image sits far from the set's CLIP centroid, so
+        // it "doesn't belong": an off-style image in a Style set, or one missing the object in an
+        // Object set. Style/Object ONLY (a Person set varies legitimately — identity is the face
+        // stack's job). Advisory, never gates; robust + relative (a margin below the set MEDIAN), so it
+        // adapts per-set rather than needing a calibrated global floor.
+        EmbeddingOutlier => "embedding_outlier",
+        // The face stack (sc-6538), PERSON/CHARACTER datasets ONLY. All advisory (Warn) — strong-warn,
+        // never auto-remove, since a false positive on an identity is costly.
+        // IdentityMismatch: a detectable face that doesn't match the set's main identity cluster — a
+        // different person, which poisons a person LoRA.
+        IdentityMismatch => "identity_mismatch",
+        // NoFace: no detectable face — contributes no identity signal to a person LoRA.
+        NoFace => "no_face",
+        // SmallSubject: the face is too small a fraction of the frame — weak training signal.
+        SmallSubject => "small_subject",
     }
 }
 
@@ -675,8 +690,9 @@ pub struct ReadinessSubScores {
     /// varied. `None` until the dataset-analysis job runs.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub diversity: Option<f64>,
-    /// Face-embedding consistency (sc-6529 face stack — a *different* encoder than CLIP). Reserved;
-    /// CLIP must not fill this.
+    /// Face-embedding consistency (sc-6538 face stack — a *different* encoder than CLIP): the share of
+    /// detected faces belonging to the dataset's main identity cluster. Filled by `evaluate_identity`
+    /// for Person datasets once the face sidecar exists; CLIP must never fill this.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub identity: Option<f64>,
     /// Caption↔image CLIP alignment (sc-6537). `None` until increment-2.
@@ -753,6 +769,13 @@ pub struct DatasetReadinessReport {
     /// safely removable.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub duplicate_removal: Option<DuplicateRemovalPlan>,
+    /// The resolved training kind (person/style/object) this report was evaluated for (sc-6540). The
+    /// per-kind thresholds already shape the gate + flags; this echoes the kind so the client can
+    /// branch its kind-aware recommendations on the same source of truth (vs. re-deriving it). Set by
+    /// the extraction layer (which holds the [`ReadinessContext`]); the pure core rollup leaves it
+    /// `None`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kind: Option<DatasetKind>,
 }
 
 /// One item's input to the one-tap duplicate-removal planner (sc-6539). `duplicate_peers` are the
@@ -962,6 +985,7 @@ pub fn build_readiness_report(
     tier1: Option<&Tier1Evaluation>,
     alignment: Option<&CaptionAlignmentEvaluation>,
     aesthetic: Option<&AestheticEvaluation>,
+    identity: Option<&IdentityEvaluation>,
 ) -> DatasetReadinessReport {
     let item_count = evaluation.items.len() as u32;
     let mut counts = SeverityCounts::default();
@@ -985,6 +1009,14 @@ pub fn build_readiness_report(
                 .collect()
         })
         .unwrap_or_default();
+    let identity_by_item: HashMap<&str, &[QualityFlag]> = identity
+        .map(|i| {
+            i.items
+                .iter()
+                .map(|entry| (entry.item_id.as_str(), entry.flags.as_slice()))
+                .collect()
+        })
+        .unwrap_or_default();
 
     for entry in &evaluation.items {
         let mut flags = entry.flags.clone();
@@ -992,6 +1024,9 @@ pub fn build_readiness_report(
             flags.extend(extra.iter().cloned());
         }
         if let Some(extra) = alignment_by_item.get(entry.item_id.as_str()) {
+            flags.extend(extra.iter().cloned());
+        }
+        if let Some(extra) = identity_by_item.get(entry.item_id.as_str()) {
             flags.extend(extra.iter().cloned());
         }
         // Acknowledged findings (sc-6534) are dropped from every rollup — counts, the badge, the
@@ -1045,7 +1080,7 @@ pub fn build_readiness_report(
         sub_scores: ReadinessSubScores {
             technical,
             diversity: tier1.map(|t| t.diversity),
-            identity: None,
+            identity: identity.and_then(|i| i.identity),
             alignment: alignment.map(|a| a.score),
             aesthetic: aesthetic.map(|a| a.score),
         },
@@ -1055,6 +1090,7 @@ pub fn build_readiness_report(
         dataset_flags,
         distributions: None,
         duplicate_removal: None,
+        kind: None,
     }
 }
 
@@ -1108,6 +1144,33 @@ pub struct DatasetEmbeddings {
     pub text_embeddings: BTreeMap<String, Vec<f32>>,
 }
 
+/// One item's largest detected face (sc-6538): the raw ArcFace embedding plus the bounding-box area
+/// as a fraction of the frame. An **empty** `embedding` with `face_fraction` `0.0` records "examined,
+/// no face found" — which is distinct from an item having *no record at all* (not yet processed by the
+/// Metal-only face pass). The readiness fold turns each record into a [`FaceItem`] for
+/// [`evaluate_identity`]; an absent record is skipped (never flagged), exactly like the CLIP sidecar.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FaceRecord {
+    /// The largest face's raw (un-normalized) ArcFace embedding. Empty ⇒ no face detected.
+    pub embedding: Vec<f32>,
+    /// The largest face's bbox area / frame area, in `[0, 1]`. `0.0` when no face.
+    pub face_fraction: f64,
+}
+
+/// Persisted face records for a dataset (sc-6538) — the face-stack analog of [`DatasetEmbeddings`].
+/// A content-hash-keyed sidecar (`dataset.sceneworks.faces.json`) that survives dataset edits and is
+/// written only by the Metal-only worker face pass. Kept out of the manifest (512×f32 per item) and a
+/// *different* encoder than CLIP, so it lives beside — not inside — the embeddings sidecar.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DatasetFaceRecords {
+    /// The face-embedding space (e.g. `"arcface-r100"`); guards against mixing encoders on reuse.
+    pub space: String,
+    /// `content_hash` → the item's largest-face record.
+    pub records: BTreeMap<String, FaceRecord>,
+}
+
 /// Stable SHA-256 over the exact caption text that was embedded.
 pub fn caption_hash(caption: &str) -> String {
     format!("{:x}", Sha256::digest(caption.as_bytes()))
@@ -1137,6 +1200,13 @@ pub struct Tier1Thresholds {
     /// duplicate detection carries the redundancy signal instead. The diversity *score* is still
     /// computed for the variety meter; only the warning is gated. (sc-6535 calibration.)
     pub diversity_min_items: usize,
+    /// How far below the set's *median* centroid-cosine an image must sit to be flagged an
+    /// `EmbeddingOutlier` (sc-6540). `None` disables outlier detection (Person — a person set varies
+    /// legitimately). `Some(margin)` enables it for Style/Object. Relative-to-median (not an absolute
+    /// floor) so it adapts to each set; PROVISIONAL pending a labelled off-style sweep.
+    pub outlier_margin: Option<f64>,
+    /// Minimum comparable items before outlier detection runs — a stable median needs a few points.
+    pub outlier_min_items: usize,
 }
 
 impl Tier1Thresholds {
@@ -1149,10 +1219,20 @@ impl Tier1Thresholds {
             DatasetKind::Style => 0.10,
             _ => 0.12,
         };
+        // Outlier detection (sc-6540): off-style (Style) / object-absent (Object). Disabled for Person
+        // — a person dataset legitimately varies in background/pose/outfit, so a CLIP centroid outlier
+        // would mostly be noise; "doesn't match" for a person is the face stack's job (sc-6538). The
+        // 0.20 median-margin is PROVISIONAL (no labelled off-style set sampled yet).
+        let outlier_margin = match kind {
+            DatasetKind::Person => None,
+            _ => Some(0.20),
+        };
         Self {
             near_dup_cosine: 0.95,
             diversity_floor,
             diversity_min_items: 15,
+            outlier_margin,
+            outlier_min_items: 8,
         }
     }
 }
@@ -1230,6 +1310,53 @@ pub fn evaluate_tier1(items: &[ItemEmbedding], thresholds: &Tier1Thresholds) -> 
                     peers,
                     acknowledged: false,
                 });
+            }
+        }
+    }
+
+    // sc-6540 embedding outliers: an image far from the set's CLIP centroid "doesn't belong" — an
+    // off-style image (Style) or one missing the object (Object). Flagged relative to the set MEDIAN
+    // centroid-cosine, so a tight coherent set doesn't false-flag its least-typical-but-fine member.
+    // Style/Object only (thresholds.outlier_margin is None for Person).
+    if let Some(margin) = thresholds.outlier_margin {
+        let present: Vec<usize> = normalized
+            .iter()
+            .enumerate()
+            .filter_map(|(i, entry)| entry.as_ref().map(|_| i))
+            .collect();
+        if present.len() >= thresholds.outlier_min_items {
+            let dim = normalized[present[0]].as_ref().map_or(0, Vec::len);
+            let mut mean = vec![0.0_f32; dim];
+            for &i in &present {
+                if let Some(vector) = &normalized[i] {
+                    for (acc, value) in mean.iter_mut().zip(vector) {
+                        *acc += *value;
+                    }
+                }
+            }
+            for acc in &mut mean {
+                *acc /= present.len() as f32;
+            }
+            if let Some(centroid) = l2_normalize(&mean) {
+                let cosines: Vec<(usize, f64)> = present
+                    .iter()
+                    .filter_map(|&i| normalized[i].as_ref().map(|v| (i, dot(v, &centroid))))
+                    .collect();
+                let mut sorted: Vec<f64> = cosines.iter().map(|(_, cos)| *cos).collect();
+                sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+                let cutoff = sorted[sorted.len() / 2] - margin;
+                for (i, cos) in cosines {
+                    if cos < cutoff {
+                        per_item[i].flags.push(QualityFlag {
+                            check: QualityCheck::EmbeddingOutlier,
+                            severity: Severity::Warn,
+                            value: Some(cos),
+                            threshold: Some(cutoff),
+                            peers: Vec::new(),
+                            acknowledged: false,
+                        });
+                    }
+                }
             }
         }
     }
@@ -1652,6 +1779,161 @@ impl Default for AestheticThresholds {
     }
 }
 
+/// One item's face-stack input (sc-6538): the largest detected face's raw ArcFace embedding and its
+/// bounding-box area as a fraction of the frame, plus the item's dismissed checks. `embedding` is
+/// empty + `face_fraction` is `0.0` when no face was detected.
+#[derive(Debug, Clone, PartialEq)]
+pub struct FaceItem {
+    pub item_id: String,
+    pub embedding: Vec<f32>,
+    pub face_fraction: f64,
+    pub acknowledged: Vec<QualityCheck>,
+}
+
+/// Thresholds for the identity / subject-prominence checks (sc-6538). PROVISIONAL — the ArcFace
+/// operating point and the face-fraction floor want a labelled-set sweep.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct IdentityThresholds {
+    /// ArcFace cosine ≥ this ⇒ the same person (cluster together). antelopev2/glintr100 separates
+    /// same-vs-different around ~0.3–0.5; 0.4 is the provisional operating point.
+    pub same_person_cosine: f64,
+    /// Largest-face bbox area as a fraction of the frame, below which ⇒ `SmallSubject`. (A v1
+    /// approximation: the trainer center-crops to a bucket, so a face fine in the original frame can
+    /// shrink post-crop — raw-frame fraction is the resolution-independent first cut.)
+    pub min_face_fraction: f64,
+    /// Minimum detected faces before identity *clustering* runs — too few and "the main identity" is
+    /// undefined, so only the per-image no-face / small-subject checks fire.
+    pub min_cluster_items: usize,
+}
+
+impl IdentityThresholds {
+    pub fn default_person() -> Self {
+        Self {
+            same_person_cosine: 0.40,
+            min_face_fraction: 0.02,
+            min_cluster_items: 3,
+        }
+    }
+}
+
+/// Result of the face stack: per-item flags + the identity-consistency score (share of detected faces
+/// that belong to the main identity cluster, `[0, 1]`; `None` when too few faces to judge).
+#[derive(Debug, Clone, PartialEq)]
+pub struct IdentityEvaluation {
+    pub items: Vec<ItemQualityFlags>,
+    pub identity: Option<f64>,
+}
+
+/// Evaluate identity consistency + subject prominence over a person dataset's face records (sc-6538).
+/// Pure: no IO, no model. Only invoked for person/character kinds.
+///
+/// * **No face** → `NoFace` (empty embedding — contributes no identity).
+/// * **Small subject** → `SmallSubject` (a detected face below `min_face_fraction` of the frame).
+/// * **Identity mismatch** → cluster the detected faces by ArcFace cosine (union-find at
+///   `same_person_cosine`); the LARGEST cluster is the intended subject, and every detected face
+///   outside it is a different person. Skipped below `min_cluster_items` (no stable "main identity").
+///   Clustering (not centroid distance) is deliberate: one wrong-person image is a singleton outside
+///   the main cluster rather than a contaminant that drags a centroid.
+pub fn evaluate_identity(
+    items: &[FaceItem],
+    thresholds: &IdentityThresholds,
+) -> IdentityEvaluation {
+    let mut per_item: Vec<ItemQualityFlags> = items
+        .iter()
+        .map(|item| ItemQualityFlags {
+            item_id: item.item_id.clone(),
+            flags: Vec::new(),
+        })
+        .collect();
+
+    // Per-image checks (no clustering needed).
+    let mut detected: Vec<usize> = Vec::new();
+    for (idx, item) in items.iter().enumerate() {
+        if item.embedding.is_empty() {
+            per_item[idx].flags.push(QualityFlag {
+                check: QualityCheck::NoFace,
+                severity: Severity::Warn,
+                value: None,
+                threshold: None,
+                peers: Vec::new(),
+                acknowledged: false,
+            });
+            continue;
+        }
+        detected.push(idx);
+        if item.face_fraction < thresholds.min_face_fraction {
+            per_item[idx].flags.push(QualityFlag {
+                check: QualityCheck::SmallSubject,
+                severity: Severity::Warn,
+                value: Some(item.face_fraction),
+                threshold: Some(thresholds.min_face_fraction),
+                peers: Vec::new(),
+                acknowledged: false,
+            });
+        }
+    }
+
+    // Identity clustering — meaningful only with enough faces.
+    let mut identity = None;
+    if detected.len() >= thresholds.min_cluster_items {
+        let normalized: Vec<Option<Vec<f32>>> = items
+            .iter()
+            .map(|item| l2_normalize(&item.embedding))
+            .collect();
+        let mut uf = UnionFind::new(items.len());
+        for (a_pos, &i) in detected.iter().enumerate() {
+            let Some(a) = &normalized[i] else { continue };
+            for &j in &detected[a_pos + 1..] {
+                let Some(b) = &normalized[j] else { continue };
+                if dot(a, b) >= thresholds.same_person_cosine {
+                    uf.union(i, j);
+                }
+            }
+        }
+        let mut clusters: HashMap<usize, Vec<usize>> = HashMap::new();
+        for &i in &detected {
+            clusters.entry(uf.find(i)).or_default().push(i);
+        }
+        let main = clusters
+            .values()
+            .max_by_key(|members| members.len())
+            .cloned()
+            .unwrap_or_default();
+        let main_set: std::collections::HashSet<usize> = main.iter().copied().collect();
+        for &i in &detected {
+            if !main_set.contains(&i) {
+                per_item[i].flags.push(QualityFlag {
+                    check: QualityCheck::IdentityMismatch,
+                    severity: Severity::Warn,
+                    value: None,
+                    threshold: Some(thresholds.same_person_cosine),
+                    peers: Vec::new(),
+                    acknowledged: false,
+                });
+            }
+        }
+        identity = Some(main.len() as f64 / detected.len() as f64);
+    }
+
+    // Per-image dismissals (sc-6534): a dismissed face flag drops from the rollups but stays
+    // struck-through. All face checks are Warn, so the non-Fatal guard never blocks the dismissal.
+    for (idx, item) in items.iter().enumerate() {
+        if item.acknowledged.is_empty() {
+            continue;
+        }
+        for flag in &mut per_item[idx].flags {
+            if flag.severity != Severity::Fatal && item.acknowledged.contains(&flag.check) {
+                flag.acknowledged = true;
+            }
+        }
+    }
+
+    IdentityEvaluation {
+        items: per_item,
+        identity,
+    }
+}
+
 /// Result of aesthetic scoring (sc-6537): the mean LAION score (fills `ReadinessSubScores.aesthetic`)
 /// plus dataset-level advisory flags (`LowAesthetic`). Only ever produced for `DatasetKind::Style`.
 #[derive(Debug, Clone, PartialEq)]
@@ -2028,7 +2310,7 @@ mod tests {
     #[test]
     fn gate_is_ready_when_every_item_is_clean() {
         let eval = evaluate_tier0(&[sharp("a", 0xAA), sharp("b", 0x55)], 512, 1, &thresholds());
-        let report = build_readiness_report(eval, None, None, None);
+        let report = build_readiness_report(eval, None, None, None, None);
         assert_eq!(report.gate, ReadinessGate::Ready);
         assert!((report.sub_scores.technical - 1.0).abs() < 1e-9);
         assert!(report.sub_scores.diversity.is_none()); // Tier-1 not computed yet
@@ -2041,7 +2323,7 @@ mod tests {
         let mut soft = item("soft");
         soft.scalars = Some(scalars(10.0, 0.0, 0.0, vec![0x0F; 8]));
         let eval = evaluate_tier0(&[soft, sharp("ok", 0xF0)], 512, 1, &thresholds());
-        let report = build_readiness_report(eval, None, None, None);
+        let report = build_readiness_report(eval, None, None, None, None);
         assert_eq!(report.gate, ReadinessGate::NeedsAttention);
         assert!(report.counts.warn >= 1);
         assert!((report.sub_scores.technical - 0.5).abs() < 1e-9);
@@ -2054,7 +2336,7 @@ mod tests {
     #[test]
     fn gate_blocks_when_too_few_images() {
         let eval = evaluate_tier0(&[item("a"), item("b")], 512, 12, &thresholds());
-        let report = build_readiness_report(eval, None, None, None);
+        let report = build_readiness_report(eval, None, None, None, None);
         assert_eq!(report.gate, ReadinessGate::Blocked);
         assert!(report.counts.fatal >= 1);
         assert!(report
@@ -2083,7 +2365,7 @@ mod tests {
                 peers: Vec::new(),
                 acknowledged: false,
             });
-        let report = build_readiness_report(eval, None, None, None);
+        let report = build_readiness_report(eval, None, None, None, None);
         assert!((report.sub_scores.technical - 0.5).abs() < 1e-9);
         assert_eq!(report.gate, ReadinessGate::NeedsAttention);
     }
@@ -2111,7 +2393,7 @@ mod tests {
     #[test]
     fn report_round_trips_as_camelcase_json() {
         let eval = evaluate_tier0(&[sharp("a", 0x11)], 512, 1, &thresholds());
-        let report = build_readiness_report(eval, None, None, None);
+        let report = build_readiness_report(eval, None, None, None, None);
         let json = serde_json::to_string(&report).expect("serialize");
         assert!(json.contains("\"subScores\""));
         assert!(json.contains("\"itemCount\""));
@@ -2166,7 +2448,7 @@ mod tests {
             .expect("blur flag on b");
         assert!(!b_blur.acknowledged);
 
-        let report = build_readiness_report(eval, None, None, None);
+        let report = build_readiness_report(eval, None, None, None, None);
         assert_eq!(report.counts.warn, 1, "only b's warning counts");
         assert!(
             (report.sub_scores.technical - 0.5).abs() < 1e-9,
@@ -2184,6 +2466,7 @@ mod tests {
         soft.acknowledged = vec![QualityCheck::Blur];
         let report = build_readiness_report(
             evaluate_tier0(std::slice::from_ref(&soft), 512, 1, &thresholds()),
+            None,
             None,
             None,
             None,
@@ -2475,6 +2758,192 @@ mod tests {
     }
 
     #[test]
+    fn embedding_outlier_flags_the_odd_one_out_for_style_not_person() {
+        // Nine tightly-clustered embeddings (~[1,0,0]) + one clearly off-set ([0,1,0]). Style/Object
+        // flag the off-set image; Person never runs outlier detection (its outlier_margin is None).
+        let mut items: Vec<ItemEmbedding> = (0..9)
+            .map(|i| emb(&format!("in{i}"), &[1.0, 0.02 * i as f32, 0.0]))
+            .collect();
+        items.push(emb("odd", &[0.0, 1.0, 0.0]));
+
+        let outliers = |kind: &DatasetKind| {
+            evaluate_tier1(&items, &Tier1Thresholds::for_kind(kind))
+                .items
+                .into_iter()
+                .filter(|entry| {
+                    entry
+                        .flags
+                        .iter()
+                        .any(|flag| flag.check == QualityCheck::EmbeddingOutlier)
+                })
+                .map(|entry| entry.item_id)
+                .collect::<Vec<_>>()
+        };
+
+        assert_eq!(
+            outliers(&DatasetKind::Style),
+            vec!["odd".to_string()],
+            "style flags the off-style image"
+        );
+        assert_eq!(
+            outliers(&DatasetKind::Object),
+            vec!["odd".to_string()],
+            "object flags the image missing the object"
+        );
+        assert!(
+            outliers(&DatasetKind::Person).is_empty(),
+            "person never runs outlier detection"
+        );
+    }
+
+    #[test]
+    fn embedding_outlier_is_quiet_on_a_coherent_set() {
+        // A coherent set with only mild variation flags nobody — relative-to-median, so the
+        // least-typical-but-fine member isn't a false positive.
+        let items: Vec<ItemEmbedding> = (0..10)
+            .map(|i| emb(&format!("c{i}"), &[1.0, 0.03 * i as f32, 0.01 * i as f32]))
+            .collect();
+        let eval = evaluate_tier1(&items, &Tier1Thresholds::for_kind(&DatasetKind::Style));
+        assert!(eval.items.iter().all(|entry| entry
+            .flags
+            .iter()
+            .all(|f| f.check != QualityCheck::EmbeddingOutlier)));
+    }
+
+    // --- sc-6538 face stack: identity consistency + subject prominence ---
+
+    fn face_item(id: &str, embedding: &[f32], face_fraction: f64) -> FaceItem {
+        FaceItem {
+            item_id: id.to_owned(),
+            embedding: embedding.to_vec(),
+            face_fraction,
+            acknowledged: Vec::new(),
+        }
+    }
+
+    fn no_face_item(id: &str) -> FaceItem {
+        FaceItem {
+            item_id: id.to_owned(),
+            embedding: Vec::new(),
+            face_fraction: 0.0,
+            acknowledged: Vec::new(),
+        }
+    }
+
+    fn flagged_ids(eval: &IdentityEvaluation, check: QualityCheck) -> Vec<String> {
+        eval.items
+            .iter()
+            .filter(|entry| entry.flags.iter().any(|flag| flag.check == check))
+            .map(|entry| entry.item_id.clone())
+            .collect()
+    }
+
+    #[test]
+    fn identity_eval_flags_the_wrong_person_and_the_faceless_image() {
+        // ACCEPTANCE (sc-6538): a person set seeded with one wrong-person image + one with no face.
+        // Six tight same-person embeddings → the main cluster; the wrong person is a singleton outside
+        // it → IdentityMismatch; the faceless image → NoFace. The six real photos stay clean.
+        let mut items: Vec<FaceItem> = (0..6)
+            .map(|i| face_item(&format!("p{i}"), &[1.0, 0.02 * i as f32, 0.0], 0.2))
+            .collect();
+        items.push(face_item("wrong", &[0.0, 1.0, 0.0], 0.2));
+        items.push(no_face_item("noface"));
+
+        let eval = evaluate_identity(&items, &IdentityThresholds::default_person());
+
+        assert_eq!(
+            flagged_ids(&eval, QualityCheck::IdentityMismatch),
+            vec!["wrong".to_string()]
+        );
+        assert_eq!(
+            flagged_ids(&eval, QualityCheck::NoFace),
+            vec!["noface".to_string()]
+        );
+        assert!(
+            eval.items
+                .iter()
+                .filter(|entry| entry.item_id.starts_with('p'))
+                .all(|entry| entry.flags.is_empty()),
+            "the real photos are clean"
+        );
+        // Consistency = 6 main-cluster / 7 detected faces.
+        assert!((eval.identity.unwrap() - 6.0 / 7.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn identity_eval_flags_a_small_subject_but_not_a_consistent_set() {
+        let mut items: Vec<FaceItem> = (0..4)
+            .map(|i| face_item(&format!("c{i}"), &[1.0, 0.01 * i as f32, 0.0], 0.3))
+            .collect();
+        items.push(face_item("tiny", &[1.0, 0.0, 0.0], 0.005)); // same person, face 0.5% of frame
+
+        let eval = evaluate_identity(&items, &IdentityThresholds::default_person());
+        assert_eq!(
+            flagged_ids(&eval, QualityCheck::SmallSubject),
+            vec!["tiny".to_string()]
+        );
+        assert!(
+            flagged_ids(&eval, QualityCheck::IdentityMismatch).is_empty(),
+            "all the same person"
+        );
+        assert!((eval.identity.unwrap() - 1.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn identity_eval_skips_clustering_below_min_items() {
+        // Two faces (below min_cluster_items) → no "main identity", so no mismatch flags + no score;
+        // the per-image no-face / small-subject checks would still fire (none do here).
+        let items = vec![
+            face_item("a", &[1.0, 0.0, 0.0], 0.2),
+            face_item("b", &[0.0, 1.0, 0.0], 0.2),
+        ];
+        let eval = evaluate_identity(&items, &IdentityThresholds::default_person());
+        assert!(eval.identity.is_none());
+        assert!(eval.items.iter().all(|entry| entry.flags.is_empty()));
+    }
+
+    #[test]
+    fn identity_findings_merge_into_the_report_and_fill_the_sub_score() {
+        let mut faces: Vec<FaceItem> = (0..4)
+            .map(|i| face_item(&format!("p{i}"), &[1.0, 0.02 * i as f32, 0.0], 0.2))
+            .collect();
+        faces.push(face_item("wrong", &[0.0, 1.0, 0.0], 0.2));
+        let identity = evaluate_identity(&faces, &IdentityThresholds::default_person());
+
+        let tier0_items: Vec<ItemQualityInput> = faces
+            .iter()
+            .enumerate()
+            .map(|(i, face)| {
+                let mut entry = item(&face.item_id);
+                // Distinct phashes so the clean tier0 set raises no duplicate flags.
+                entry.scalars = Some(scalars(5000.0, 0.0, 0.0, vec![i as u8; 8]));
+                entry
+            })
+            .collect();
+        let report = build_readiness_report(
+            evaluate_tier0(&tier0_items, 512, 1, &thresholds()),
+            None,
+            None,
+            None,
+            Some(&identity),
+        );
+
+        let wrong = report
+            .items
+            .iter()
+            .find(|entry| entry.item_id == "wrong")
+            .unwrap();
+        assert!(wrong
+            .flags
+            .iter()
+            .any(|flag| flag.check == QualityCheck::IdentityMismatch));
+        assert_eq!(report.gate, ReadinessGate::NeedsAttention);
+        assert!((report.sub_scores.identity.unwrap() - 4.0 / 5.0).abs() < 1e-9);
+        // Identity is a usefulness check — it must not drag the technical share down.
+        assert!((report.sub_scores.technical - 1.0).abs() < 1e-9);
+    }
+
+    #[test]
     fn tier1_findings_merge_into_the_report_without_touching_technical() {
         // Two technically-perfect images that are embedding near-duplicates.
         let mut a = item("a");
@@ -2487,7 +2956,7 @@ mod tests {
             &[emb("a", &[1.0, 0.0, 0.0]), emb("b", &[1.0, 0.0, 0.0])],
             &tier1_thresholds(),
         );
-        let report = build_readiness_report(tier0, Some(&tier1), None, None);
+        let report = build_readiness_report(tier0, Some(&tier1), None, None, None);
 
         // Embedding dup raises the badge + gate, but the images are technically fine → technical 1.0.
         assert!((report.sub_scores.technical - 1.0).abs() < 1e-9);
@@ -2507,6 +2976,7 @@ mod tests {
         ok.scalars = Some(scalars(5000.0, 0.0, 0.0, vec![1; 8]));
         let report = build_readiness_report(
             evaluate_tier0(std::slice::from_ref(&ok), 512, 1, &thresholds()),
+            None,
             None,
             None,
             None,
@@ -2659,7 +3129,7 @@ mod tests {
         )
         .expect("alignment");
 
-        let report = build_readiness_report(tier0, None, Some(&alignment), None);
+        let report = build_readiness_report(tier0, None, Some(&alignment), None, None);
 
         assert_eq!(report.gate, ReadinessGate::NeedsAttention);
         assert_eq!(report.counts.warn, 1);
@@ -2736,5 +3206,47 @@ mod tests {
         let right = plan_smart_crop(300, 60, 0.25, Some((1.0, 0.5))).expect("crop");
         assert_eq!(right.x, 300 - right.width);
         assert!(right.x + right.width <= 300);
+    }
+
+    // --- sc-6540: the verdict half of acceptance — the same set scores differently per kind ---
+
+    #[test]
+    fn verdict_and_count_flag_vary_by_kind_on_the_same_set() {
+        // 12 clean, distinct images. A person LoRA wants ≥15 (Count warning → NeedsAttention); an
+        // object LoRA only ≥10 (clean → Ready). The verdict changes with the kind on identical input —
+        // the gate/flags already carry the per-kind weighting that the recommendations build on.
+        let items: Vec<_> = (0..12u8)
+            .map(|i| {
+                let mut entry = item(&format!("img{i}"));
+                entry.scalars = Some(scalars(5000.0, 0.0, 0.0, vec![i; 8]));
+                entry
+            })
+            .collect();
+        let person = build_readiness_report(
+            evaluate_tier0(&items, 512, 15, &thresholds()),
+            None,
+            None,
+            None,
+            None,
+        );
+        let object = build_readiness_report(
+            evaluate_tier0(&items, 512, 10, &thresholds()),
+            None,
+            None,
+            None,
+            None,
+        );
+        let has_count = |report: &DatasetReadinessReport| {
+            report
+                .dataset_flags
+                .iter()
+                .any(|flag| flag.check == QualityCheck::Count)
+        };
+        assert!(has_count(&person), "person (min 15) flags a 12-image set");
+        assert!(!has_count(&object), "object (min 10) accepts 12 images");
+        assert_ne!(
+            person.gate, object.gate,
+            "the verdict differs by kind on identical input"
+        );
     }
 }

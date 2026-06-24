@@ -65,6 +65,8 @@ export function ConfigureJobPanel({
   onUpscaleLowRes,
   onSmartCrop,
   onStripExif,
+  onAnalyzeDataset,
+  onAnalyzeFaces,
 }) {
   return (
     <>
@@ -414,6 +416,8 @@ export function ConfigureJobPanel({
             onUpscaleLowRes={onUpscaleLowRes}
             onSmartCrop={onSmartCrop}
             onStripExif={onStripExif}
+            onAnalyzeDataset={onAnalyzeDataset}
+            onAnalyzeFaces={onAnalyzeFaces}
           />
           {readinessBlocksTraining ? (
             <p className="inline-warning">

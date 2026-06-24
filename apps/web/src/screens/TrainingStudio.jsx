@@ -303,6 +303,8 @@ export function TrainingStudio({ mode = "training" } = {}) {
     batchRenameTrainingDataset,
     createTrainingDatasetCaptionJob,
     createTrainingDatasetUpscaleJob,
+    createTrainingDatasetAnalysisJob,
+    createTrainingDatasetFaceAnalysisJob,
     smartCropTrainingDataset,
     stripExifTrainingDataset,
     createTrainingJob,
@@ -1229,6 +1231,60 @@ export function TrainingStudio({ mode = "training" } = {}) {
     }
   }
 
+  // CLIP analysis (sc-6535): enqueue the embedding pass over the whole dataset, producing the
+  // embedding sidecar the readiness fold reads (Variety / aesthetic / off-style outliers / caption
+  // alignment). Saves first so the job sees the live items; async (GPU), readiness updates on finish.
+  async function analyzeDataset() {
+    if (savingDataset) {
+      return;
+    }
+    setSavingDataset(true);
+    setDatasetError("");
+    setDatasetMessage("");
+    try {
+      const saved = await persistDataset();
+      if (!saved?.id) {
+        setDatasetError("Save the dataset before analyzing.");
+        return;
+      }
+      const job = await createTrainingDatasetAnalysisJob(saved.id, {});
+      setDatasetMessage(
+        `Analysis queued${job?.id ? ` (${job.id})` : ""}. Track it in the Queue; the readiness updates when it finishes.`,
+      );
+    } catch (err) {
+      setDatasetError(err.message);
+    } finally {
+      setSavingDataset(false);
+    }
+  }
+
+  // Person face check (sc-6538): enqueue the SCRFD+ArcFace pass over the whole dataset, producing the
+  // face sidecar the readiness fold reads (identity / no-face / small-subject). Saves first so the job
+  // sees the live items; async (GPU), so the readiness updates when it finishes, like the CLIP pass.
+  async function analyzeFaces() {
+    if (savingDataset) {
+      return;
+    }
+    setSavingDataset(true);
+    setDatasetError("");
+    setDatasetMessage("");
+    try {
+      const saved = await persistDataset();
+      if (!saved?.id) {
+        setDatasetError("Save the dataset before checking faces.");
+        return;
+      }
+      const job = await createTrainingDatasetFaceAnalysisJob(saved.id, {});
+      setDatasetMessage(
+        `Face check queued${job?.id ? ` (${job.id})` : ""}. Track it in the Queue; the readiness updates when it finishes.`,
+      );
+    } catch (err) {
+      setDatasetError(err.message);
+    } finally {
+      setSavingDataset(false);
+    }
+  }
+
   // One-tap smart-crop (sc-6539): synchronously crop the crop-loss-flagged items toward a trainable
   // aspect, then reload the dataset (re-derives selection — re-pointed items become dataset-owned).
   async function smartCropItems(itemIds) {
@@ -1432,6 +1488,8 @@ export function TrainingStudio({ mode = "training" } = {}) {
                   onUpscaleLowRes={upscaleLowRes}
                   onSmartCrop={smartCropItems}
                   onStripExif={stripExifItems}
+                  onAnalyzeDataset={analyzeDataset}
+                  onAnalyzeFaces={analyzeFaces}
                   canSave={canSave}
                   saveDataset={saveDataset}
                   savingDataset={savingDataset}
@@ -1512,6 +1570,8 @@ export function TrainingStudio({ mode = "training" } = {}) {
                   onUpscaleLowRes={upscaleLowRes}
                   onSmartCrop={smartCropItems}
                   onStripExif={stripExifItems}
+                  onAnalyzeDataset={analyzeDataset}
+                  onAnalyzeFaces={analyzeFaces}
                 />
               ) : null}
             </section>

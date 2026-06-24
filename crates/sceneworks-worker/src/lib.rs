@@ -109,6 +109,8 @@ mod caption_jobs;
 use caption_jobs::*;
 mod dataset_analysis_jobs;
 use dataset_analysis_jobs::*;
+mod face_analysis_jobs;
+use face_analysis_jobs::*;
 mod prompt_refine_jobs;
 use prompt_refine_jobs::*;
 mod downloads;
@@ -660,6 +662,12 @@ async fn run_utility_job(
         JobType::DatasetAnalysis => run_dataset_analysis_job(api, settings, &job)
             .await
             .map_err(|error| ("Dataset analysis failed.", error)),
+        // Dataset Doctor face pass (sc-6538): the native SCRFD+ArcFace stack embeds the largest face of
+        // each Person-dataset image and POSTs the face sidecar. MLX on Mac (`mlx-gen-face`), candle on
+        // the candle lane; off both the handler returns a precise unsupported error.
+        JobType::DatasetFaceAnalysis => run_dataset_face_analysis_job(api, settings, &job)
+            .await
+            .map_err(|error| ("Dataset face analysis failed.", error)),
         // Native candle prompt refinement (epic 5095, sc-5525): routes `prompt_refine` to the candle
         // `TextLlm` provider (Llama-3.2-3B) via `gen_core::load_textllm`. The candle worker advertises
         // `prompt_refine` only when `backend_candle_enabled` (engines::registry_capabilities from the

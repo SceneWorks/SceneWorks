@@ -391,6 +391,19 @@ pub(crate) struct DatasetAnalysisJobRequest {
     pub(crate) item_ids: Option<Vec<String>>,
 }
 
+/// Request to run the Dataset Doctor face-embedding pass over a (Person) training dataset (sc-6538).
+/// Simpler than the CLIP analysis request — the face stack is fixed (SCRFD + ArcFace), so there is no
+/// embedder choice; only GPU routing + an optional item subset.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct DatasetFaceAnalysisJobRequest {
+    #[serde(default = "default_requested_gpu")]
+    pub(crate) requested_gpu: String,
+    /// Restrict the pass to these dataset item ids; when absent, every item is analyzed.
+    #[serde(default)]
+    pub(crate) item_ids: Option<Vec<String>>,
+}
+
 /// The analysis worker POSTs its computed CLIP embeddings here to persist the sidecar (sc-6535) —
 /// the embedding-side analog of the caption job's `/caption-sidecars` write.
 #[derive(Debug, Clone, Deserialize)]
@@ -414,6 +427,29 @@ pub(crate) struct DatasetEmbeddingRecord {
     /// The raw (un-normalized) CLIP text embedding for the caption.
     #[serde(default)]
     pub(crate) text_embedding: Option<Vec<f32>>,
+}
+
+/// The worker face pass POSTs its largest-face records here to persist the face sidecar (sc-6538) —
+/// the face-stack analog of the analysis job's embedding write.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct DatasetFaceRecordsBody {
+    /// The face-embedding space (e.g. `arcface-r100`).
+    pub(crate) space: String,
+    pub(crate) items: Vec<DatasetFaceRecord>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct DatasetFaceRecord {
+    /// The item's content hash (the sidecar key — survives dataset edits).
+    pub(crate) content_hash: String,
+    /// The largest face's raw (un-normalized) ArcFace embedding. Empty ⇒ examined, no face found.
+    #[serde(default)]
+    pub(crate) embedding: Vec<f32>,
+    /// The largest face's bbox area as a fraction of the frame, in `[0, 1]`. `0.0` when no face.
+    #[serde(default)]
+    pub(crate) face_fraction: f64,
 }
 
 /// Body for the synchronous one-tap image fixes (sc-6539 smart-crop / EXIF-strip). `itemIds` scopes

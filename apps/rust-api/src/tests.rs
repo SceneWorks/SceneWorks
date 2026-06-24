@@ -1371,6 +1371,26 @@ async fn training_dataset_routes_persist_and_validate_project_assets() {
         .expect("analysis image path");
     assert!(analysis_image_path.ends_with("item_0001.png"));
 
+    // sc-6538: the Dataset Doctor face pass enqueues with its own type + a per-item work list (item id
+    // + image path + content hash, no caption — the face stack ignores captions). The worker claims it
+    // once the SCRFD+ArcFace stack is advertised (slice 4b); here we assert the enqueue contract.
+    let (status, face_job) = request(
+        reloaded_app.clone(),
+        "POST",
+        &format!("/api/v1/projects/{project_id}/training/datasets/{dataset_id}/face-analysis-jobs"),
+        json!({}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    assert_eq!(face_job["type"], "dataset_face_analysis");
+    assert_eq!(face_job["payload"]["items"][0]["itemId"], "item_0001");
+    assert!(face_job["payload"]["items"][0]["imagePath"]
+        .as_str()
+        .expect("face image path")
+        .ends_with("item_0001.png"));
+    // The face pass carries no caption fields (unlike the CLIP analysis pass).
+    assert!(face_job["payload"]["items"][0]["captionText"].is_null());
+
     // An unknown embedder is rejected up front.
     let (status, _) = request(
         reloaded_app.clone(),
@@ -1798,6 +1818,8 @@ async fn training_dataset_readiness_reports_and_persists_tier0_cache() {
     assert!(report["subScores"]["diversity"].is_null());
     // sc-6537: nor an aesthetic sub-score (style dataset, but no embeddings yet).
     assert!(report["subScores"]["aesthetic"].is_null());
+    // sc-6540: the resolved kind is echoed so the client can branch its recommendations.
+    assert_eq!(report["kind"], "style");
 
     let (status, detail) = request(
         app.clone(),
@@ -1992,6 +2014,233 @@ async fn training_dataset_readiness_reports_and_persists_tier0_cache() {
     assert_eq!(status, StatusCode::OK);
     assert_eq!(ack["captionHash"], current_caption_hash);
     assert_eq!(ack["checks"], json!(["caption_alignment"]));
+}
+
+/// sc-6538 face stack (slice 2): the worker face pass POSTs a face sidecar; a PERSON readiness report
+/// then folds in subject-prominence / identity findings, while the same sidecar is ignored for a
+/// non-person dataset. Single-item set so the per-image `SmallSubject` check (which needs no
+/// clustering) carries the proof end-to-end through the new `face-embeddings` route + the fold.
+#[tokio::test]
+async fn training_dataset_face_sidecar_folds_into_person_readiness_only() {
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let settings = test_settings(&temp_dir);
+    let app = create_app(settings).expect("app creates");
+
+    let (_, project) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/projects",
+        json!({ "name": "Face Stack Project" }),
+    )
+    .await;
+    let project_id = project["id"].as_str().expect("project id").to_owned();
+
+    let (status, upload) = request_multipart_upload(
+        app.clone(),
+        &format!("/api/v1/projects/{project_id}/training/uploads"),
+        "Face.PNG",
+        "image/png",
+        PNG_32X32,
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    let upload_hash = upload["file"]["contentHash"]
+        .as_str()
+        .expect("content hash")
+        .to_owned();
+    let staged_path = upload["file"]["path"]
+        .as_str()
+        .expect("staged path")
+        .to_owned();
+
+    let (status, dataset) = request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/projects/{project_id}/training/datasets"),
+        json!({
+            "name": "Face set",
+            "items": [{
+                "path": staged_path,
+                "displayName": "Face.PNG",
+                "caption": { "text": "a photo of the subject" }
+            }]
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    let dataset_id = dataset["id"].as_str().expect("dataset id").to_owned();
+
+    // The worker face pass POSTs the largest-face record. A detected face (non-empty embedding) whose
+    // bbox covers only 0.5% of the frame is below the 2% floor → a SmallSubject finding.
+    let (status, stored) = request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/projects/{project_id}/training/datasets/{dataset_id}/face-embeddings"),
+        json!({
+            "space": "arcface-r100",
+            "items": [{
+                "contentHash": upload_hash.clone(),
+                "embedding": [1.0, 0.0],
+                "faceFraction": 0.005
+            }]
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(stored["stored"], 1);
+
+    // PERSON readiness folds the face sidecar in: the SmallSubject flag surfaces on the item. With a
+    // single face (below the clustering minimum) there is no identity *score* yet — only the per-image
+    // prominence check fires.
+    let (status, person) = request(
+        app.clone(),
+        "GET",
+        &format!(
+            "/api/v1/projects/{project_id}/training/datasets/{dataset_id}/readiness?targetResolution=64&recommendedFor=person&minItems=1"
+        ),
+        Value::Null,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(person["kind"], "person");
+    let flags = person["items"][0]["flags"].as_array().expect("flags array");
+    assert!(
+        flags.iter().any(|flag| flag["check"] == "small_subject"),
+        "the person readiness folds the face sidecar's SmallSubject finding in"
+    );
+    assert!(
+        person["subScores"]["identity"].is_null(),
+        "one detected face is below the clustering minimum — no identity score"
+    );
+
+    // The SAME sidecar is ignored for a non-person dataset (the fold is Person-gated): no face flags,
+    // no identity sub-score.
+    let (status, style) = request(
+        app.clone(),
+        "GET",
+        &format!(
+            "/api/v1/projects/{project_id}/training/datasets/{dataset_id}/readiness?targetResolution=64&recommendedFor=style&minItems=1"
+        ),
+        Value::Null,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(style["kind"], "style");
+    let style_flags = style["items"][0]["flags"].as_array().expect("flags array");
+    assert!(
+        !style_flags
+            .iter()
+            .any(|flag| flag["check"] == "small_subject"),
+        "the face fold is Person-gated — a style dataset ignores the face sidecar"
+    );
+    assert!(style["subScores"]["identity"].is_null());
+}
+
+/// sc-6538 face stack (slice 2): with enough detected faces the fold runs identity *clustering* and
+/// lights up the `identity` sub-score. Three items over the same content hash all resolve to one face
+/// record → a single coherent identity cluster → score 1.0 (a number, not null). This exercises the
+/// embedding through clustering, which the single-item SmallSubject test deliberately skips.
+#[tokio::test]
+async fn training_dataset_face_sidecar_lights_up_identity_score_when_clustered() {
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let settings = test_settings(&temp_dir);
+    let app = create_app(settings).expect("app creates");
+
+    let (_, project) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/projects",
+        json!({ "name": "Identity Score Project" }),
+    )
+    .await;
+    let project_id = project["id"].as_str().expect("project id").to_owned();
+
+    let (status, upload) = request_multipart_upload(
+        app.clone(),
+        &format!("/api/v1/projects/{project_id}/training/uploads"),
+        "Subject.PNG",
+        "image/png",
+        PNG_32X32,
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    let upload_hash = upload["file"]["contentHash"]
+        .as_str()
+        .expect("content hash")
+        .to_owned();
+    let staged_path = upload["file"]["path"]
+        .as_str()
+        .expect("staged path")
+        .to_owned();
+
+    // Three items over the same staged image → three items sharing one content hash. (The clustering
+    // minimum is 3 detected faces.)
+    let item = json!({
+        "path": staged_path,
+        "displayName": "Subject.PNG",
+        "caption": { "text": "a photo of the subject" }
+    });
+    let (status, dataset) = request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/projects/{project_id}/training/datasets"),
+        json!({
+            "name": "Identity set",
+            "items": [item.clone(), item.clone(), item]
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    let dataset_id = dataset["id"].as_str().expect("dataset id").to_owned();
+    let hashes: Vec<&str> = dataset["items"]
+        .as_array()
+        .expect("items")
+        .iter()
+        .map(|i| i["contentHash"].as_str().expect("content hash"))
+        .collect();
+    assert_eq!(
+        hashes,
+        vec![upload_hash.as_str(); 3],
+        "items share one hash"
+    );
+
+    // One face record (face well above the prominence floor). All three items resolve to it.
+    let (status, stored) = request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/projects/{project_id}/training/datasets/{dataset_id}/face-embeddings"),
+        json!({
+            "space": "arcface-r100",
+            "items": [{
+                "contentHash": upload_hash.clone(),
+                "embedding": [1.0, 0.0],
+                "faceFraction": 0.25
+            }]
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(stored["stored"], 1);
+
+    let (status, person) = request(
+        app.clone(),
+        "GET",
+        &format!(
+            "/api/v1/projects/{project_id}/training/datasets/{dataset_id}/readiness?targetResolution=64&recommendedFor=person&minItems=1"
+        ),
+        Value::Null,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(person["subScores"]["identity"], json!(1.0));
+    // A coherent single identity → no mismatch flags on any item.
+    for item in person["items"].as_array().expect("items") {
+        let flags = item["flags"].as_array().expect("flags array");
+        assert!(!flags
+            .iter()
+            .any(|flag| flag["check"] == "identity_mismatch"));
+        assert!(!flags.iter().any(|flag| flag["check"] == "small_subject"));
+    }
 }
 
 #[tokio::test]
