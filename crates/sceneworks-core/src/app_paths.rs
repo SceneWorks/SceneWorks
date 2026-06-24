@@ -1,4 +1,6 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+
+use serde::{Deserialize, Serialize};
 
 /// OS-appropriate default locations for SceneWorks user data, configuration, and
 /// cache. Environment overrides (`SCENEWORKS_DATA_DIR`, `SCENEWORKS_CONFIG_DIR`,
@@ -36,6 +38,37 @@ impl AppPaths {
         std::fs::create_dir_all(&self.cache_dir)?;
         Ok(())
     }
+}
+
+/// Filename (under [`AppPaths::config_dir`]) of the live GPU-memory-limit handoff the desktop
+/// shell writes whenever the Settings slider changes, and the running MLX worker re-reads between
+/// jobs (epic 7819, sc-7824). A bare decimal byte count; `0` means "no limit". Keeping it in the
+/// shared config dir — which the desktop injects into the worker as `SCENEWORKS_CONFIG_DIR` — lets
+/// the cap change live without a worker restart. An absent file leaves the worker on whatever it
+/// applied at spawn from `SCENEWORKS_GPU_MEMORY_LIMIT_BYTES`.
+pub fn gpu_memory_limit_file(config_dir: &Path) -> PathBuf {
+    config_dir.join("gpu_memory_limit")
+}
+
+/// Filename (under [`AppPaths::config_dir`]) where the MLX worker publishes live GPU-memory
+/// telemetry for the Settings readout (epic 7819, sc-7825). JSON-encoded [`GpuMemoryTelemetry`],
+/// rewritten on a short interval. macOS/MLX only — candle/CPU workers never write it, so the
+/// desktop telemetry command returns `None` there.
+pub fn gpu_telemetry_file(config_dir: &Path) -> PathBuf {
+    config_dir.join("gpu_telemetry.json")
+}
+
+/// A snapshot of the MLX runtime's process-global memory counters (epic 7819, sc-7825), written by
+/// the worker to [`gpu_telemetry_file`] and read back by the desktop shell for the Settings
+/// display. All values are bytes. `limit_bytes` is the currently-applied soft ceiling (`0` = no
+/// limit), tracked from what the worker actually applied rather than MLX's internal default budget.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GpuMemoryTelemetry {
+    pub active_bytes: u64,
+    pub peak_bytes: u64,
+    pub cache_bytes: u64,
+    pub limit_bytes: u64,
 }
 
 fn repo_relative_paths() -> AppPaths {

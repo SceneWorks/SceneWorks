@@ -372,6 +372,12 @@ pub async fn run_worker_loop(settings: Settings) -> WorkerResult<()> {
     // before any model load. The MLX limit is process-global, so this single call covers
     // generations, upscales, AND LoRA training. No-op when unset (0) and on non-macOS/candle builds.
     generator_cache::apply_gpu_memory_limit(settings.gpu_memory_limit_bytes);
+    // sc-7825 (epic 7819): on the MLX GPU worker only, publish live MLX memory telemetry to the
+    // shared config dir for the Settings readout. Gated to `mlx` so the CPU utility workers (which
+    // do no MLX work) don't clobber the file with zeros.
+    if settings.gpu_id == "mlx" {
+        generator_cache::spawn_gpu_telemetry(settings.config_dir.clone());
+    }
     let gpu = discover_gpu(&settings).await;
     let api = ApiClient::new(&settings);
     let http_client = reqwest::Client::new();
@@ -468,6 +474,12 @@ async fn poll_once(
     http_client: &reqwest::Client,
     idle_heartbeat: &mut IdleHeartbeat,
 ) -> WorkerResult<()> {
+    // sc-7824 (epic 7819): pick up a live GPU-memory-limit change here, before claiming the next
+    // job, so a Settings slider move applies between jobs (not mid-flight) with no worker restart.
+    // No-op unless this is the MLX worker and the desktop has written the live-handoff file.
+    if settings.gpu_id == "mlx" {
+        generator_cache::sync_gpu_memory_limit(&settings.config_dir);
+    }
     if idle_heartbeat.should_send() {
         heartbeat(api, settings, WorkerStatus::Idle, None).await?;
         idle_heartbeat.mark_sent();

@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{mpsc, OnceLock};
 use std::thread;
 use std::time::Duration;
@@ -245,25 +245,103 @@ fn release_backend_cache_after_evict() {}
 /// The MLX limit is **process-global**, so calling this once at worker startup (before any model
 /// load) covers generations, upscales, AND LoRA training — even though training takes a separate
 /// path from the generator cache.
+/// The GPU memory ceiling (bytes) currently applied to this process's MLX runtime, so the live
+/// sync (sc-7824) only re-applies on an actual change. `u64::MAX` is the "nothing applied yet"
+/// sentinel — distinct from `0` ("no limit"), so the first real value (including a deliberate `0`
+/// that clears a prior cap) always takes effect.
 #[cfg(all(target_os = "macos", not(test)))]
-pub(crate) fn apply_gpu_memory_limit(bytes: u64) {
-    if bytes == 0 {
-        return;
-    }
-    let bytes = bytes as usize;
-    let previous_limit = mlx_rs::memory::set_memory_limit(bytes);
-    let previous_wired = mlx_rs::memory::set_wired_limit(bytes);
+static APPLIED_GPU_MEMORY_LIMIT: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(u64::MAX);
+
+#[cfg(all(target_os = "macos", not(test)))]
+fn set_gpu_memory_limit_inner(bytes: u64) {
+    use std::sync::atomic::Ordering;
+    let limit = bytes as usize;
+    let previous_limit = mlx_rs::memory::set_memory_limit(limit);
+    let previous_wired = mlx_rs::memory::set_wired_limit(limit);
+    APPLIED_GPU_MEMORY_LIMIT.store(bytes, Ordering::SeqCst);
     tracing::info!(
         event = "gpu_memory_limit_applied",
-        limitBytes = bytes,
+        limitBytes = limit,
         previousLimitBytes = previous_limit,
         previousWiredLimitBytes = previous_wired,
         "applied user-configured GPU memory ceiling to the MLX runtime"
     );
 }
 
+#[cfg(all(target_os = "macos", not(test)))]
+pub(crate) fn apply_gpu_memory_limit(bytes: u64) {
+    if bytes == 0 {
+        // Unset at startup: leave MLX on its own default budget — byte-identical to prior behavior.
+        // (The live sync below still applies a deliberate `0` to *clear* a previously-set cap.)
+        return;
+    }
+    set_gpu_memory_limit_inner(bytes);
+}
+
+/// Re-read the live GPU-memory-limit handoff file and apply it if it changed since the last applied
+/// value (epic 7819, sc-7824). Called from the worker poll loop *between jobs*, so moving the
+/// Settings slider takes effect on the next job without a worker restart. An absent file is a
+/// no-op (the spawn-time `SCENEWORKS_GPU_MEMORY_LIMIT_BYTES` value stays in force); a written `0`
+/// actively clears a previously-applied cap (MLX treats `0` as "no limit").
+#[cfg(all(target_os = "macos", not(test)))]
+pub(crate) fn sync_gpu_memory_limit(config_dir: &Path) {
+    use std::sync::atomic::Ordering;
+    let path = sceneworks_core::app_paths::gpu_memory_limit_file(config_dir);
+    let Some(bytes) = std::fs::read_to_string(&path)
+        .ok()
+        .and_then(|raw| raw.trim().parse::<u64>().ok())
+    else {
+        return;
+    };
+    if APPLIED_GPU_MEMORY_LIMIT.load(Ordering::SeqCst) != bytes {
+        set_gpu_memory_limit_inner(bytes);
+    }
+}
+
+/// Publish a snapshot of the MLX runtime's process-global memory counters to the telemetry file for
+/// the desktop Settings readout (epic 7819, sc-7825). `limit_bytes` reports the cap this worker has
+/// actually applied (`0` = none), not MLX's internal default budget, so the UI can show "peak vs
+/// limit" honestly. Best-effort: a write failure is ignored (the readout just goes stale).
+#[cfg(all(target_os = "macos", not(test)))]
+pub(crate) fn write_gpu_telemetry(config_dir: &Path) {
+    use std::sync::atomic::Ordering;
+    let applied = APPLIED_GPU_MEMORY_LIMIT.load(Ordering::SeqCst);
+    let telemetry = sceneworks_core::app_paths::GpuMemoryTelemetry {
+        active_bytes: mlx_rs::memory::get_active_memory() as u64,
+        peak_bytes: mlx_rs::memory::get_peak_memory() as u64,
+        cache_bytes: mlx_rs::memory::get_cache_memory() as u64,
+        limit_bytes: if applied == u64::MAX { 0 } else { applied },
+    };
+    if let Ok(json) = serde_json::to_string(&telemetry) {
+        let path = sceneworks_core::app_paths::gpu_telemetry_file(config_dir);
+        let _ = std::fs::write(&path, json);
+    }
+}
+
+/// Spawn a background task that republishes MLX memory telemetry on a short interval (epic 7819,
+/// sc-7825). Runs independently of the job poll loop so the readout reflects usage *during* a
+/// generation, not only between jobs. The first tick fires immediately. The task lives for the
+/// worker's lifetime (aborted when the process exits).
+#[cfg(all(target_os = "macos", not(test)))]
+pub(crate) fn spawn_gpu_telemetry(config_dir: PathBuf) {
+    tokio::spawn(async move {
+        let mut ticker = tokio::time::interval(Duration::from_secs(2));
+        loop {
+            ticker.tick().await;
+            write_gpu_telemetry(&config_dir);
+        }
+    });
+}
+
 #[cfg(any(not(target_os = "macos"), test))]
 pub(crate) fn apply_gpu_memory_limit(_bytes: u64) {}
+
+#[cfg(any(not(target_os = "macos"), test))]
+pub(crate) fn sync_gpu_memory_limit(_config_dir: &Path) {}
+
+#[cfg(any(not(target_os = "macos"), test))]
+pub(crate) fn spawn_gpu_telemetry(_config_dir: PathBuf) {}
 
 /// Best-effort human-readable text from a caught panic payload — the `&str`/`String` a `panic!`
 /// produces. mlx-rs `.unwrap()`/`.expect()` panics carry their formatted message as a `String`

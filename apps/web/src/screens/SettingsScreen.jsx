@@ -25,6 +25,12 @@ function fractionToPercent(fraction) {
   return Math.min(100, Math.max(GPU_LIMIT_MIN_PERCENT, Math.round(fraction * 100)));
 }
 
+// GPU memory telemetry (epic 7819, sc-7825). The worker publishes byte counts; the readout is in GB.
+function bytesToGb(bytes) {
+  if (typeof bytes !== "number" || !Number.isFinite(bytes) || bytes <= 0) return 0;
+  return bytes / (1024 * 1024 * 1024);
+}
+
 export function SettingsScreen() {
   const [settings, setSettings] = useState(null);
   const [gpu, setGpu] = useState(null);
@@ -42,6 +48,9 @@ export function SettingsScreen() {
   // GPU memory cap (epic 7819). Local slider percent for smooth dragging; committed to the shell
   // on release. 100 = Off (no limit). Synced from persisted settings once they load.
   const [gpuLimitPercent, setGpuLimitPercent] = useState(100);
+  // Live MLX memory telemetry (epic 7819, sc-7825). The worker's latest snapshot, polled while the
+  // GPU card is visible; null until the first sample arrives (or on platforms without it).
+  const [gpuTelemetry, setGpuTelemetry] = useState(null);
 
   const refresh = useCallback(async () => {
     try {
@@ -75,6 +84,28 @@ export function SettingsScreen() {
   useEffect(() => {
     if (settings) setGpuLimitPercent(fractionToPercent(settings.gpuMemoryLimitFraction));
   }, [settings]);
+
+  // Poll live MLX memory telemetry while the GPU card is visible (epic 7819, sc-7825). macOS-only —
+  // the worker only publishes the snapshot on the MLX path; elsewhere the command returns null.
+  // Lightweight: a small file read in the shell every 2s, cleaned up on unmount / platform change.
+  useEffect(() => {
+    if (!isDesktop || gpu?.platform !== "macos" || !gpu?.unifiedMemoryMb) return undefined;
+    let cancelled = false;
+    const poll = async () => {
+      try {
+        const telemetry = await invoke("get_gpu_telemetry");
+        if (!cancelled) setGpuTelemetry(telemetry ?? null);
+      } catch {
+        if (!cancelled) setGpuTelemetry(null);
+      }
+    };
+    poll();
+    const id = setInterval(poll, 2000);
+    return () => {
+      cancelled = true;
+      clearInterval(id);
+    };
+  }, [gpu]);
 
   const secretStore = gpu?.platform === "windows" ? "Credential Manager" : "Keychain";
   const credentialLocation = isDesktop
@@ -151,13 +182,12 @@ export function SettingsScreen() {
       const fraction = percent >= 100 ? null : percent / 100;
       const updated = await invoke("set_gpu_memory_limit", { fraction });
       setSettings(updated);
-      // The worker only reads the target at spawn, so restart it now to actually apply the
-      // change — otherwise moving the slider silently does nothing until the next restart.
-      await invoke("restart_worker");
+      // sc-7824: the shell writes the new ceiling to a live-handoff file the running worker re-reads
+      // between jobs, so no restart is needed — it applies within a couple of seconds.
       setStatus(
         fraction == null
-          ? "GPU memory target turned off. Restarting the worker to apply…"
-          : `GPU memory target set to ${percent}%. Restarting the worker to apply…`,
+          ? "GPU memory target turned off — applies within a couple of seconds."
+          : `GPU memory target set to ${percent}% — applies within a couple of seconds.`,
       );
     } catch (error) {
       setStatus(String(error));
@@ -473,8 +503,17 @@ export function SettingsScreen() {
               <p className="settings-help">
                 A soft target for how much unified memory SceneWorks holds, so more stays free for the
                 rest of your system. It is not a hard limit — large models can still use more when they
-                need it. Changing this restarts the inference worker.
+                need it. Changes apply within a couple of seconds — no restart needed.
               </p>
+              {gpuTelemetry ? (
+                <p className="settings-muted">
+                  MLX memory — Active: {bytesToGb(gpuTelemetry.activeBytes).toFixed(1)} GB · Peak:{" "}
+                  {bytesToGb(gpuTelemetry.peakBytes).toFixed(1)} GB
+                  {gpuTelemetry.limitBytes
+                    ? ` · Limit: ${Math.round(bytesToGb(gpuTelemetry.limitBytes))} GB`
+                    : ""}
+                </p>
+              ) : null}
             </div>
           ) : null}
           {gpu?.platform === "macos" ? (
@@ -483,9 +522,11 @@ export function SettingsScreen() {
               <code>sudo sysctl iogpu.wired_limit_mb=&lt;bytes&gt;</code>
             </p>
           ) : null}
-          {gpu?.platform === "windows" ? (
+          {gpu?.platform === "windows" || gpu?.platform === "linux" ? (
             <p className="settings-help">
-              Requires current NVIDIA drivers with CUDA support.
+              Requires current NVIDIA drivers with CUDA support. The GPU memory target is
+              macOS-only — a discrete GPU has no per-process memory cap, so generations use
+              whatever VRAM they need.
             </p>
           ) : null}
         </section>
