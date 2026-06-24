@@ -407,6 +407,18 @@ pub(crate) const MODEL_TABLE: &[ModelRow] = &[
         default_guidance: 4.0,
         adapter_label: "mlx_boogu",
     },
+    // Krea 2 Turbo (epic 7565) — native MLX, CFG-free rectified-flow few-step T2I (Qwen3-VL-4B TE +
+    // 28-block single-stream DiT + Qwen-Image VAE). 8 steps; guidance is INERT (the `krea_2_turbo`
+    // descriptor advertises supports_guidance=false, so `resolve_guidance` returns None and never
+    // forwards a value). Loads the packed Q8 (default) / Q4 turnkey subdir (`krea_model_subdir`).
+    ModelRow {
+        sceneworks_id: "krea_2_turbo",
+        engine_id: "krea_2_turbo",
+        default_repo: "SceneWorks/krea-2-turbo-mlx",
+        default_steps: 8,
+        default_guidance: 0.0,
+        adapter_label: "mlx_krea",
+    },
 ];
 
 /// The mlx-gen registry ids of the video generators this worker serves (the engine ids

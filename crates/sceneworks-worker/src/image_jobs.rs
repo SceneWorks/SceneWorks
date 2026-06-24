@@ -56,6 +56,10 @@ use mlx_gen_ideogram as _;
 use mlx_gen_boogu as _;
 #[cfg(target_os = "macos")]
 use mlx_gen_kolors as _;
+// Krea 2 Turbo (epic 7565) — force-link so `inventory::submit!` registers `krea_2_turbo` (else linker GC
+// drops its `ModelRegistration` and `gen_core::load("krea_2_turbo")` returns "no generator registered").
+#[cfg(target_os = "macos")]
+use mlx_gen_krea as _;
 // Lens / Lens-Turbo (epic 3164 engine / sc-5105) — an inventory-registered `Generator` under the ids
 // `lens` + `lens_turbo`, reached through the generic MODEL_TABLE / `generate_stream` path. Force-link
 // or the linker GCs its `ModelRegistration` and `gen_core::load("lens_turbo")` returns "no generator
