@@ -391,6 +391,19 @@ pub(crate) struct DatasetAnalysisJobRequest {
     pub(crate) item_ids: Option<Vec<String>>,
 }
 
+/// Request to run the Dataset Doctor face-embedding pass over a (Person) training dataset (sc-6538).
+/// Simpler than the CLIP analysis request — the face stack is fixed (SCRFD + ArcFace), so there is no
+/// embedder choice; only GPU routing + an optional item subset.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct DatasetFaceAnalysisJobRequest {
+    #[serde(default = "default_requested_gpu")]
+    pub(crate) requested_gpu: String,
+    /// Restrict the pass to these dataset item ids; when absent, every item is analyzed.
+    #[serde(default)]
+    pub(crate) item_ids: Option<Vec<String>>,
+}
+
 /// The analysis worker POSTs its computed CLIP embeddings here to persist the sidecar (sc-6535) —
 /// the embedding-side analog of the caption job's `/caption-sidecars` write.
 #[derive(Debug, Clone, Deserialize)]

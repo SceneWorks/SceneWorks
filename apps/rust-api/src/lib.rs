@@ -744,6 +744,10 @@ pub(crate) fn create_app_with_state(
             post(create_training_dataset_analysis_job),
         )
         .route(
+            "/api/v1/projects/:project_id/training/datasets/:dataset_id/face-analysis-jobs",
+            post(create_training_dataset_face_analysis_job),
+        )
+        .route(
             "/api/v1/projects/:project_id/training/datasets/:dataset_id/analysis-embeddings",
             post(write_training_dataset_analysis_embeddings),
         )

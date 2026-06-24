@@ -587,6 +587,88 @@ pub(crate) fn validate_dataset_analysis_job_request(
     Ok(())
 }
 
+/// Enqueue a Dataset Doctor face-embedding pass over a training dataset (sc-6538). Mirrors
+/// [`create_training_dataset_analysis_job`]: build a per-item work list (item id, absolute image path,
+/// content hash) and create a GPU-routed `dataset_face_analysis` job. The worker runs the native
+/// SCRFD+ArcFace stack once it advertises the capability (sc-6538 slice 4b); until then the job stays
+/// queued. The web only offers this for Person datasets (the readiness fold consumes the sidecar only
+/// for Person), so there is no server-side kind gate — a stray run just produces ignored records.
+pub(crate) async fn create_training_dataset_face_analysis_job(
+    State(state): State<AppState>,
+    Path((project_id, dataset_id)): Path<(String, String)>,
+    ApiJson(payload): ApiJson<DatasetFaceAnalysisJobRequest>,
+) -> Result<(StatusCode, Json<JobSnapshot>), ApiError> {
+    let (dataset, dataset_root, project_name) = project_call(state.clone(), {
+        let project_id = project_id.clone();
+        let dataset_id = dataset_id.clone();
+        move |store| store.training_dataset_for_plan(&project_id, &dataset_id)
+    })
+    .await?;
+    if dataset.items.is_empty() {
+        return Err(ApiError::bad_request(
+            "Training dataset has no items to analyze.",
+        ));
+    }
+    // No item_ids → analyze the whole dataset; otherwise just the named items.
+    let target_ids: Option<std::collections::HashSet<&str>> = payload
+        .item_ids
+        .as_ref()
+        .map(|ids| ids.iter().map(String::as_str).collect());
+    let items = dataset
+        .items
+        .iter()
+        .filter(|item| match &target_ids {
+            Some(ids) => ids.contains(item.id.as_str()),
+            None => true,
+        })
+        .map(|item| {
+            json!({
+                "itemId": item.id.clone(),
+                "imagePath": dataset_root.join(&item.path).display().to_string(),
+                "contentHash": item.content_hash.clone(),
+            })
+        })
+        .collect::<Vec<_>>();
+    if items.is_empty() {
+        return Err(ApiError::bad_request(
+            "No matching dataset items to analyze.",
+        ));
+    }
+    let requested_gpu = payload.requested_gpu;
+    let job_payload = match json!({
+        "provider": "training",
+        "kind": "dataset_face_analysis",
+        "projectId": project_id.clone(),
+        "datasetId": dataset.id,
+        "datasetVersion": dataset.version,
+        "datasetRoot": dataset_root.display().to_string(),
+        "items": items,
+    }) {
+        Value::Object(map) => map,
+        _ => {
+            return Err(ApiError::internal(
+                "dataset face analysis job payload must be an object",
+            ))
+        }
+    };
+    let job = store_call(state.clone(), move |store, _timeout| {
+        store.create_job(CreateJob {
+            job_type: JobType::DatasetFaceAnalysis,
+            project_id: Some(project_id),
+            project_name: Some(project_name),
+            payload: job_payload,
+            requested_gpu,
+            source_job_id: None,
+            duplicate_of_job_id: None,
+            attempts: 1,
+        })
+    })
+    .await?;
+    publish(&state, "job.updated", &job);
+    publish_queue(&state).await?;
+    Ok((StatusCode::CREATED, Json(job)))
+}
+
 /// Persist the analysis worker's computed CLIP embeddings to the dataset's content-hash-keyed
 /// sidecar (sc-6535) — the embedding-side analog of `write_training_dataset_caption_sidecars`. A
 /// metadata write: it does not bump the dataset version. Returns the count stored.

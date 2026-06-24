@@ -1371,6 +1371,26 @@ async fn training_dataset_routes_persist_and_validate_project_assets() {
         .expect("analysis image path");
     assert!(analysis_image_path.ends_with("item_0001.png"));
 
+    // sc-6538: the Dataset Doctor face pass enqueues with its own type + a per-item work list (item id
+    // + image path + content hash, no caption — the face stack ignores captions). The worker claims it
+    // once the SCRFD+ArcFace stack is advertised (slice 4b); here we assert the enqueue contract.
+    let (status, face_job) = request(
+        reloaded_app.clone(),
+        "POST",
+        &format!("/api/v1/projects/{project_id}/training/datasets/{dataset_id}/face-analysis-jobs"),
+        json!({}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    assert_eq!(face_job["type"], "dataset_face_analysis");
+    assert_eq!(face_job["payload"]["items"][0]["itemId"], "item_0001");
+    assert!(face_job["payload"]["items"][0]["imagePath"]
+        .as_str()
+        .expect("face image path")
+        .ends_with("item_0001.png"));
+    // The face pass carries no caption fields (unlike the CLIP analysis pass).
+    assert!(face_job["payload"]["items"][0]["captionText"].is_null());
+
     // An unknown embedder is rejected up front.
     let (status, _) = request(
         reloaded_app.clone(),

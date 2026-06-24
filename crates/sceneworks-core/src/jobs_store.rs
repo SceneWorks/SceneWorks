@@ -1705,6 +1705,12 @@ fn derive_job_title(job_type: &JobType, payload: &Map<String, Value>) -> Option<
                 .to_owned();
             Some(format!("Upscaling Dataset Images — {subject}"))
         }
+        JobType::DatasetFaceAnalysis => {
+            let subject = first_str(payload, &["datasetName", "datasetId"])
+                .unwrap_or("(unnamed dataset)")
+                .to_owned();
+            Some(format!("Dataset Face Analysis — {subject}"))
+        }
         JobType::ImageGenerate
         | JobType::ImageEdit
         | JobType::ImageVqa
@@ -2292,7 +2298,11 @@ pub fn mac_rust_supported(job: &JobSnapshot) -> Result<(), UnsupportedReason> {
         // sc-6539: dataset_upscale runs the Real-ESRGAN ONNX engine natively in the Rust worker
         // (the same engine as image_upscale) — not a Python-torch gap. Its real availability is the
         // worker's capability advertisement, so it queues rather than enforce-fails here.
-        | JobType::DatasetUpscale => Ok(()),
+        | JobType::DatasetUpscale
+        // sc-6538: dataset_face_analysis runs the native SCRFD+ArcFace stack (mlx-gen-face) in the Rust
+        // worker — not a Python-torch gap. Gated by the worker's capability advertisement, so it queues
+        // rather than enforce-fails here.
+        | JobType::DatasetFaceAnalysis => Ok(()),
 
         // Forward-compat: an unrecognized job type isn't a known Python-torch gap, so don't
         // enforce-fail it (it would otherwise break a newer job type this build doesn't model).
@@ -2533,6 +2543,8 @@ pub fn candle_supported(job: &JobSnapshot) -> Result<(), UnsupportedReason> {
         | JobType::DatasetAnalysis
         // sc-6539: dataset_upscale parity on candle routes by capability, like dataset_analysis.
         | JobType::DatasetUpscale
+        // sc-6538: dataset_face_analysis on the candle lane (candle-gen-face) routes by capability too.
+        | JobType::DatasetFaceAnalysis
         | JobType::Unknown(_) => Ok(()),
     }
 }
@@ -5521,6 +5533,7 @@ fn job_requires_gpu(job_type: &JobType) -> bool {
             | JobType::TrainingCaption
             | JobType::DatasetAnalysis
             | JobType::DatasetUpscale
+            | JobType::DatasetFaceAnalysis
     )
 }
 

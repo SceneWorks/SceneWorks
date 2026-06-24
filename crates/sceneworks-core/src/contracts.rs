@@ -273,6 +273,11 @@ string_enum! {
         // item at the upscaled child asset (epic 6529 P3, sc-6539 one-tap fixes). GPU-routed like
         // dataset_analysis (reuses the image_upscale ONNX engine), served by the Rust worker.
         DatasetUpscale => "dataset_upscale",
+        // ArcFace face-embedding pass over a Person training dataset for Dataset Doctor's identity +
+        // subject-prominence checks (epic 6529 P3, sc-6538): per item, the largest face's raw ArcFace
+        // embedding + its frame fraction → the face sidecar. GPU-routed like dataset_analysis (the
+        // native SCRFD+ArcFace stack), served by the Rust/MLX worker.
+        DatasetFaceAnalysis => "dataset_face_analysis",
         PromptRefine => "prompt_refine",
     }
 }
@@ -405,6 +410,11 @@ string_enum! {
         // Real-ESRGAN ONNX upscaler (the same engine as `image_upscale`); a `dataset_upscale` job
         // stays queued rather than mis-claimed where the upscaler isn't available.
         DatasetUpscale => "dataset_upscale",
+        // Dataset Doctor face pass (sc-6538). Advertised by a worker that links the native SCRFD+ArcFace
+        // face stack (`mlx-gen-face` on Mac / `candle-gen-face` on the candle lane) — gpu.rs-hardcoded
+        // like `kps_extract`, not registry-derived (the `FaceEmbedder` has no gen-core registry); a
+        // `dataset_face_analysis` job stays queued rather than mis-claimed where the stack isn't linked.
+        DatasetFaceAnalysis => "dataset_face_analysis",
         // Real (non-dry-run) LoRA training execution. Advertised separately from
         // `LoraTrain` (dry-run plan validation, which needs no inference backend)
         // so a real run only routes to a worker that can actually train. See
