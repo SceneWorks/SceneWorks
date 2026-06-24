@@ -53,6 +53,12 @@ string_enum! {
         // CLIP+MLP aesthetic predictor. Advisory, never gates: low-aesthetic candids are often the best
         // identity shots, so this is never raised on person/object datasets (documented bias).
         LowAesthetic => "low_aesthetic",
+        // EmbeddingOutlier: per-image (sc-6540) — this image sits far from the set's CLIP centroid, so
+        // it "doesn't belong": an off-style image in a Style set, or one missing the object in an
+        // Object set. Style/Object ONLY (a Person set varies legitimately — identity is the face
+        // stack's job). Advisory, never gates; robust + relative (a margin below the set MEDIAN), so it
+        // adapts per-set rather than needing a calibrated global floor.
+        EmbeddingOutlier => "embedding_outlier",
     }
 }
 
@@ -1145,6 +1151,13 @@ pub struct Tier1Thresholds {
     /// duplicate detection carries the redundancy signal instead. The diversity *score* is still
     /// computed for the variety meter; only the warning is gated. (sc-6535 calibration.)
     pub diversity_min_items: usize,
+    /// How far below the set's *median* centroid-cosine an image must sit to be flagged an
+    /// `EmbeddingOutlier` (sc-6540). `None` disables outlier detection (Person — a person set varies
+    /// legitimately). `Some(margin)` enables it for Style/Object. Relative-to-median (not an absolute
+    /// floor) so it adapts to each set; PROVISIONAL pending a labelled off-style sweep.
+    pub outlier_margin: Option<f64>,
+    /// Minimum comparable items before outlier detection runs — a stable median needs a few points.
+    pub outlier_min_items: usize,
 }
 
 impl Tier1Thresholds {
@@ -1157,10 +1170,20 @@ impl Tier1Thresholds {
             DatasetKind::Style => 0.10,
             _ => 0.12,
         };
+        // Outlier detection (sc-6540): off-style (Style) / object-absent (Object). Disabled for Person
+        // — a person dataset legitimately varies in background/pose/outfit, so a CLIP centroid outlier
+        // would mostly be noise; "doesn't match" for a person is the face stack's job (sc-6538). The
+        // 0.20 median-margin is PROVISIONAL (no labelled off-style set sampled yet).
+        let outlier_margin = match kind {
+            DatasetKind::Person => None,
+            _ => Some(0.20),
+        };
         Self {
             near_dup_cosine: 0.95,
             diversity_floor,
             diversity_min_items: 15,
+            outlier_margin,
+            outlier_min_items: 8,
         }
     }
 }
@@ -1238,6 +1261,53 @@ pub fn evaluate_tier1(items: &[ItemEmbedding], thresholds: &Tier1Thresholds) -> 
                     peers,
                     acknowledged: false,
                 });
+            }
+        }
+    }
+
+    // sc-6540 embedding outliers: an image far from the set's CLIP centroid "doesn't belong" — an
+    // off-style image (Style) or one missing the object (Object). Flagged relative to the set MEDIAN
+    // centroid-cosine, so a tight coherent set doesn't false-flag its least-typical-but-fine member.
+    // Style/Object only (thresholds.outlier_margin is None for Person).
+    if let Some(margin) = thresholds.outlier_margin {
+        let present: Vec<usize> = normalized
+            .iter()
+            .enumerate()
+            .filter_map(|(i, entry)| entry.as_ref().map(|_| i))
+            .collect();
+        if present.len() >= thresholds.outlier_min_items {
+            let dim = normalized[present[0]].as_ref().map_or(0, Vec::len);
+            let mut mean = vec![0.0_f32; dim];
+            for &i in &present {
+                if let Some(vector) = &normalized[i] {
+                    for (acc, value) in mean.iter_mut().zip(vector) {
+                        *acc += *value;
+                    }
+                }
+            }
+            for acc in &mut mean {
+                *acc /= present.len() as f32;
+            }
+            if let Some(centroid) = l2_normalize(&mean) {
+                let cosines: Vec<(usize, f64)> = present
+                    .iter()
+                    .filter_map(|&i| normalized[i].as_ref().map(|v| (i, dot(v, &centroid))))
+                    .collect();
+                let mut sorted: Vec<f64> = cosines.iter().map(|(_, cos)| *cos).collect();
+                sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+                let cutoff = sorted[sorted.len() / 2] - margin;
+                for (i, cos) in cosines {
+                    if cos < cutoff {
+                        per_item[i].flags.push(QualityFlag {
+                            check: QualityCheck::EmbeddingOutlier,
+                            severity: Severity::Warn,
+                            value: Some(cos),
+                            threshold: Some(cutoff),
+                            peers: Vec::new(),
+                            acknowledged: false,
+                        });
+                    }
+                }
             }
         }
     }
@@ -2480,6 +2550,59 @@ mod tests {
         );
         assert!(zero.items.iter().all(|e| e.flags.is_empty()));
         assert!((zero.diversity - 1.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn embedding_outlier_flags_the_odd_one_out_for_style_not_person() {
+        // Nine tightly-clustered embeddings (~[1,0,0]) + one clearly off-set ([0,1,0]). Style/Object
+        // flag the off-set image; Person never runs outlier detection (its outlier_margin is None).
+        let mut items: Vec<ItemEmbedding> = (0..9)
+            .map(|i| emb(&format!("in{i}"), &[1.0, 0.02 * i as f32, 0.0]))
+            .collect();
+        items.push(emb("odd", &[0.0, 1.0, 0.0]));
+
+        let outliers = |kind: &DatasetKind| {
+            evaluate_tier1(&items, &Tier1Thresholds::for_kind(kind))
+                .items
+                .into_iter()
+                .filter(|entry| {
+                    entry
+                        .flags
+                        .iter()
+                        .any(|flag| flag.check == QualityCheck::EmbeddingOutlier)
+                })
+                .map(|entry| entry.item_id)
+                .collect::<Vec<_>>()
+        };
+
+        assert_eq!(
+            outliers(&DatasetKind::Style),
+            vec!["odd".to_string()],
+            "style flags the off-style image"
+        );
+        assert_eq!(
+            outliers(&DatasetKind::Object),
+            vec!["odd".to_string()],
+            "object flags the image missing the object"
+        );
+        assert!(
+            outliers(&DatasetKind::Person).is_empty(),
+            "person never runs outlier detection"
+        );
+    }
+
+    #[test]
+    fn embedding_outlier_is_quiet_on_a_coherent_set() {
+        // A coherent set with only mild variation flags nobody — relative-to-median, so the
+        // least-typical-but-fine member isn't a false positive.
+        let items: Vec<ItemEmbedding> = (0..10)
+            .map(|i| emb(&format!("c{i}"), &[1.0, 0.03 * i as f32, 0.01 * i as f32]))
+            .collect();
+        let eval = evaluate_tier1(&items, &Tier1Thresholds::for_kind(&DatasetKind::Style));
+        assert!(eval.items.iter().all(|entry| entry
+            .flags
+            .iter()
+            .all(|f| f.check != QualityCheck::EmbeddingOutlier)));
     }
 
     #[test]
