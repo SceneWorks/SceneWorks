@@ -112,6 +112,11 @@ sign-test p; identity n = 14 because ~2/16 generations had no detected face):
 (`same_prompt_spread` 0.172 → 0.130), with identity **unchanged** (p = 0.79). Two degradations, two
 *different* output-harm axes. (Output *sharpness* stayed too content-dominated, std ~1200, to use.)
 
+> ⚠️ **Superseded by §4.** These sign-test p-values are **pseudoreplicated** — one trained LoRA
+> per condition, so the paired outputs are subsamples of a single checkpoint (see §4.1). A second
+> training seed and a convergence run (§4) revised these directions. Read **§4.6** for the final
+> conclusions.
+
 ## §2. LoRA output quality (Y) — calibration gate (2026-06-24)
 
 **Clean calibration LoRA** (21 imgs, rank 16, res 512, 400 steps, bf16, scale 0.8 at gen; ~7 min
@@ -175,6 +180,11 @@ rank 16, res 512, 400 steps, bf16, trigger `sks man`; generate at 1024² scale 0
 variant runs add seeds for paired power).
 
 ## §3. Analysis & threshold recommendations
+
+> ⚠️ **Revised by §4.** The analysis below is the initial single-draw pilot. A second training
+> seed and a convergence run (§4) found the §1 significance to be pseudoreplicated and revised the
+> per-signal conclusions. The final, scoped threshold feedback is in **§4.6**; this section is kept
+> as the record of the pilot's reasoning.
 
 ### What's solid vs what's directional
 
@@ -248,4 +258,129 @@ render domain gap.
 
 [`docs/sc-6530/dataset-doctor-metrics.md`](../sc-6530/dataset-doctor-metrics.md) §3 + §8 updated
 with these pilot-supported results (blur dual-floor validated; diversity 0.12 + near-dup 0.95
-supported; §8 gains a worked closed-loop example).
+supported; §8 gains a worked closed-loop example). *(See §4.6 for the revised feedback.)*
+
+## §4. Robustness: second training seed, convergence, and mode-collapse (2026-06-24)
+
+§1–§3 are the initial single-draw pilot. Before its directional results are treated as
+conclusions, two robustness checks were run — a second *training* seed (does each effect survive an
+independent training draw?) and a higher step budget (are the effects an artifact of reduced-step
+underfit?). Both materially revised the conclusions; this section supersedes the significance
+claims in §1 and §3.
+
+### §4.1 Pseudoreplication
+
+Each condition is a *single* trained LoRA. The 8–16 paired outputs per condition are subsamples of
+that one checkpoint, so the §1 sign-test p-values measure "do these two checkpoints differ across
+the grid?", not "does the degradation *cause* the difference?" The gap between those questions is
+the between-training-run variance (training seed, which images entered the degraded draw, optimizer
+noise), which is unestimated at one LoRA per condition. The §1 p ≈ 0.06–0.08 values are
+pseudoreplicated and are not evidence of a causal effect.
+
+### §4.2 Second training seed (400 steps, Z_SEED 7 vs 13)
+
+Each condition was retrained at a second training seed, all else identical, and evaluated at 4
+generation seeds (32 outputs/condition):
+
+| condition | identity, seed 7 | identity, seed 13 |
+|---|---|---|
+| clean | +0.282 | +0.176 |
+| blur | +0.190 | +0.156 |
+| neardup | +0.276 | +0.290 |
+
+- **Clean identity itself swung 0.282 → 0.176 (Δ 0.106) across the two seeds** — larger than any
+  degradation effect in §1.
+- **Held:** low-diversity → prompt-adherence (clean higher by +0.013 / +0.012 — consistent sign
+  *and* magnitude).
+- **Confirmed nulls:** blur → adherence (≈0 both draws); low-diversity → identity (neardup ≥ clean
+  in both draws — no harm).
+- **Fragile:** blur → identity — direction held (blur is lowest-identity in both draws) but the
+  clean–blur gap collapsed +0.093 → +0.019.
+- **Not reproducible:** low-diversity → within-prompt variety (`same_prompt_spread`) gave opposite
+  signs across the two draws.
+
+Between-run variance dominated the subtle effects; only the small low-div→adherence effect and the
+nulls survived replication.
+
+### §4.3 Mechanism — reduced-step underfit
+
+Per-prompt and visual inspection localize the variance. At 400 steps both seeds learn the face for
+a frontal portrait, but the seed-13 clean LoRA failed to hold identity on harder compositions:
+e.g. the "professional studio portrait … in a suit" prompt reverted to a generic businessman
+(identity 0.06 vs 0.33 for seed 7), while portrait/smiling prompts stayed strong in both draws. The
+variance is in identity-*in-novel-contexts* — binding strength — confirmed by raising the inference
+adapter scale 0.8 → 1.1, which recovered ~75% of the seed-13 gap (at a cost to face coherence:
+face-detect 0.875 → 0.781). This is the deliberate reduced-step choice of §2.1; its cost is high
+run-to-run variance.
+
+### §4.4 Convergence (1200 steps) and the blur effect size
+
+Retraining clean at 1200 steps (3×) raised identity strongly (mean ≈ 0.23 → ≈ 0.36) but reduced the
+between-seed swing only modestly (0.106 → ≈ 0.08): steps strengthen the *signal* but are a weak
+lever on the *variance*. An effect-size probe — blur at 1200 steps, both training seeds, 4
+generation seeds, identity + face-detect — against a pre-registered decision rule
+(`scratchpad/sc6541/probe_decision_rule.md`):
+
+| | identity, seed 7 | identity, seed 13 | faceRate (s7 / s13) |
+|---|---|---|---|
+| clean | +0.410 | +0.331 | 0.78 / 0.84 |
+| blur | +0.284 | +0.315 | 0.84 / 0.84 |
+
+The clean and blur identity ranges separate by only **0.016** — far under the ≈0.08 between-seed
+swing — and blur's face-detection rate is no lower. Pre-registered verdict: **MARGINAL**. Even fully
+converged, blur barely reduces identity: a blurry photo retains facial structure and ArcFace is
+blur-robust. Firming a ~0.07 effect against ~0.06 between-seed SD would require 5–6 training seeds
+per condition and would still describe a single render subject; not pursued (§2.1 register; the
+crop confound, §2, is the strong identity result, not blur).
+
+### §4.5 Low-diversity → mode-collapse, at convergence
+
+neardup retrained at 1200 steps, compared to clean on the same prompts and generation seeds:
+identity and prompt-adherence are unchanged; `same_prompt_spread` (CLIP) drops 0.15 → 0.12, this
+time *consistently* across both seeds (unlike the 400-step flip). Visual inspection (prompts
+`p05_smiling`, `p07_beach`) shows the mechanism the scalars miss: across generations the neardup
+LoRA locks onto the memorized appearance of its 4 base images — longer hair, fuller beard, fixed
+accessories/wardrobe — while clean varies grooming and wardrobe. It is an **appearance-manifold
+collapse, not pose collapse**: composition (driven by the prompt and seed) still varies, which masks
+it in CLIP whole-image spread, and a consistent memorized look leaves ArcFace identity intact. A
+real but subtle effect, visible on inspection.
+
+### §4.6 Revised conclusions
+
+1. **X-side isolation is decisive** (unchanged from §3): each degradation moves only its own signal.
+2. **Gross prep defects → large, robust harm.** The center-crop confound (§2) halved learned
+   identity (0.156 → 0.285 once faces were kept in frame). Mechanism-level support for `crop_loss` /
+   `subject_prominence`.
+3. **Subtle uniform pixel degradation (blur) is a weak predictor of identity.** Consistent across
+   400 and 1200 steps; the effect is below run-to-run training variance. Blur's value is for output
+   sharpness/aesthetic (not cleanly measurable here) and as an absolute floor for uniformly-soft
+   sets — not identity.
+4. **Low-diversity causes a real but subtle appearance mode-collapse** (§4.5), visible at
+   convergence; identity and adherence are not affected. Supports the diversity / near-dup checks as
+   variety predictors.
+5. **Training budget is a confound on the measurement itself.** Run-to-run variance swamps subtle
+   dataset effects at reduced steps and only partly closes at 1200; calibrating subtle thresholds
+   from trained-LoRA outcomes requires converged training and multi-seed replication.
+
+**Threshold feedback (scoped to what was tested — one stylized-render subject; one gross defect
+[crop] and one subtle defect [blur], plus low-diversity):**
+- Weight gross structural/prep checks (`crop_loss`, `subject_prominence`) heavily — measured large
+  causal harm. Wrong-person and no-face are expected by the same mechanism but were **not measured**
+  here.
+- Treat the blur check as advisory for *identity*; keep the **absolute** blur floor (load-bearing
+  for uniformly-soft sets, a design fact); do not prune it (it defends output sharpness).
+- Diversity (non-style 0.12) and near-dup (CLIP 0.95): supported — they predict a real, if subtle,
+  appearance mode-collapse.
+- Output *sharpness* as a LoRA-quality axis: too content-dominated to use (eval-harness note).
+
+**Ceiling:** all results are one stylized-render subject (Basim) at reduced step budgets. They
+establish mechanism and direction, not cross-subject or real-photo generalization. Reproduce on
+additional real-photo subjects before fixing any absolute constant.
+
+### §4.7 Reproduce
+
+Adapters, generation grids, and per-output eval JSON are on disk under `~/Datasets/lora-eval/`
+(`adapters/`, `gen/`) and `scratchpad/sc6541/` (`eval_*_4s.json`, `eval_*_1200_*.json`). Drivers:
+`run_firming.sh` (2nd training seed), `run_probe.sh` + `probe_decision_rule.md` (blur effect size),
+`run_lowdiv.sh` (mode-collapse), analysed by `analyze_firming.py` / `analyze_probe.py`. All training
+and evaluation is native Rust/MLX via the `#[ignore]` harness + driver (no Python).

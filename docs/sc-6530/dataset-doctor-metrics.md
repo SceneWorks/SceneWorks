@@ -96,14 +96,18 @@ the kind changes what "good" means.
 All thresholds live in **one config surface** (a Rust constants module + per-kind overrides),
 never scattered at call sites — calibration in §8 should be a data edit, not a refactor.
 
-> **Pilot evidence (sc-6541, see §8.1) — borderline-significant, not yet validated.** The blur
-> **dual floor** (the absolute arm is load-bearing — a uniformly-soft set only trips the absolute
-> one, a design fact), the non-style **diversity 0.12** floor, and the **near-dup CLIP 0.95**
-> threshold all separated clean-vs-degraded *decisively on the signal (X) side*. The **leap to
-> trained-LoRA output quality is marginal** at N = 16 (blur→identity 11/14, p ≈ 0.057;
-> low-div→adherence 12/16, p ≈ 0.077, + a within-prompt variety collapse 0.172 → 0.130) — borderline,
-> not p < 0.05, so *consistent with* the loop, not yet validated by it. The absolute blur value
-> also needs multi-subject calibration before freezing.
+> **Pilot evidence (sc-6541, see §8.1).** On the **signal (X) side** the blur **dual floor** (the
+> absolute arm is load-bearing — a uniformly-soft set only trips the absolute one, a design fact),
+> the non-style **diversity 0.12** floor, and the **near-dup CLIP 0.95** threshold all separated
+> clean-vs-degraded *decisively*. On the **output (Y) side**, a replication across a second training
+> seed and a convergence (1200-step) run revised the initial pilot: **gross prep defects cause large
+> robust harm** (the center-crop confound halved identity), **blur is a weak predictor of identity**
+> (a blurry photo retains facial structure; the effect is below run-to-run training variance),
+> **low-diversity causes a subtle appearance mode-collapse** (visible at convergence; identity
+> unaffected), and **training budget is itself a confound** (run-to-run variance swamps subtle
+> dataset effects at low steps). Net: weight gross structural checks heavily; keep the absolute blur
+> floor but treat blur as advisory for identity; diversity/near-dup are supported as variety
+> predictors. All on one render subject — direction and mechanism, not cross-subject generalization.
 
 ---
 
@@ -247,12 +251,13 @@ had to be settled first, and they are.
 The deepest validation of §8 isn't "does the bad set trip the check" but "does tripping the check
 predict a worse **trained LoRA**." sc-6541 ran that closed loop on-device (native MLX:
 Z-Image-Turbo LoRA train → generate → ArcFace/CLIP score). Full write-up:
-[`docs/sc-6541/results.md`](../sc-6541/results.md). Pilot scope (N = 16 paired = 8 prompts × 2
-seeds, reduced-step LoRAs, one render subject) — **marginal-significance directional evidence,
-not regression-learned thresholds.**
+[`docs/sc-6541/results.md`](../sc-6541/results.md). Scope: reduced-step LoRAs, one stylized-render
+subject. The initial single-draw pilot (N = 16) was then stress-tested with a **second training
+seed** and a **convergence (1200-step) run**, which revised its output-side conclusions — **direction
+and mechanism, not regression-learned thresholds, and not cross-subject generalization.**
 
 What it established (each degradation derived from one clean 21-image set, count held fixed).
-**Two tiers of confidence — keep them apart:**
+**The signal (X) side is solid; the output (Y) side was revised by replication — keep them apart:**
 
 **Solid (decisive on its own terms):**
 - **X-side isolation.** Each degradation moved *only* its own signal: blur collapsed
@@ -270,19 +275,30 @@ What it established (each degradation derived from one clean 21-image set, count
   statistical claim. The absolute *value* is resolution/content/subject-dependent → still needs
   multi-subject calibration before freezing a constant.
 
-**Marginal (N = 16 = 8 prompts × 2 seeds — borderline significant, p ≈ 0.06–0.08, not p < 0.05):**
-- **Blur → output identity (fidelity).** Blurred LoRA 0.178 vs clean 0.284 (paired clean-wins
-  **11/14, sign-test p ≈ 0.057**, meanΔ +0.106). The 2nd seed moved this from p ≈ 0.23 (single
-  seed) to borderline. Consistent with the blur signal tracking fidelity loss.
-- **Low-diversity → output variety + adherence, NOT identity.** Identity unchanged (8/14, p ≈ 0.79
-  — correct, same subject). Prompt-adherence down (**12/16, p ≈ 0.077**), and a within-prompt
-  variety metric (`same_prompt_spread`, spread of the *same* prompt across seeds) collapsed
-  **0.172 → 0.130** — the actual mode-collapse signal the single-prompt `output_spread` couldn't
-  see. So the diversity check predicts a variety/adherence outcome (directional, 8 prompt-pairs).
+**Revised by replication (second training seed) + convergence (1200 steps) — see results.md §4:**
+- **The N = 16 sign-test p-values were pseudoreplicated** (one LoRA per condition → paired outputs
+  subsample a single checkpoint). A second training seed exposed it: the *control's* own identity
+  swung 0.282 → 0.176 (Δ 0.106) — larger than the degradation effects — so the earlier p ≈ 0.06–0.08
+  figures are not causal evidence.
+- **Blur → identity: weak.** Direction held (blur was lowest-identity in both training seeds) but
+  the clean–blur gap collapsed +0.093 → +0.019; at convergence (1200 steps) clean [0.331, 0.410]
+  and blur [0.284, 0.315] separate by only 0.016, under the ≈0.08 between-seed swing. A blurry photo
+  retains facial structure (ArcFace is blur-robust). Blur is a **weak predictor of identity** — its
+  value is output sharpness + the absolute floor, not identity.
+- **Low-diversity → mode-collapse: real but subtle, visible only at convergence.** The 400-step
+  `same_prompt_spread` claim did not reproduce across seeds; at 1200 steps it dropped consistently
+  (0.15 → 0.12) and visual inspection shows the neardup LoRA locking onto the memorized appearance of
+  its 4 base images (hair/beard/wardrobe) while clean varies — an appearance-manifold collapse that
+  CLIP-whole-image and ArcFace-identity structurally miss. Identity and adherence unaffected.
+- **Training budget is a confound on the measurement.** Run-to-run variance swamps subtle dataset
+  effects at reduced steps and only partly closes at 1200; subtle thresholds cannot be calibrated
+  from low-step single-draw LoRAs.
 
-Net: the X separation and the crop-confound finding are solid; the **signal → trained-LoRA-quality
-leap is borderline-significant** at N = 16 (p ≈ 0.06–0.08), not p < 0.05. The thresholds in §3 are
-*consistent with* this loop and now have a directional output link, but are not yet *validated* by
-it. Remaining strengthening, in order: the deferred wrong-person + pose-collapse variants, more
-seeds/subjects to cross p < 0.05, and a real-person (non-render) subject to remove the ArcFace
-domain gap.
+Net: the X-side separation and the crop-confound finding are solid. On the output side, **gross prep
+defects (crop) cause large robust harm, subtle pixel degradation (blur) is a weak identity
+predictor, and low-diversity causes a subtle appearance mode-collapse** — all on one render subject,
+establishing direction and mechanism, not learned thresholds. The §3 thresholds stand as a sensible
+prioritization (weight gross structural checks; keep the absolute blur floor; diversity/near-dup
+supported as variety predictors); fixing absolute constants needs additional real-photo subjects and
+converged, multi-seed training. Remaining strengthening: the deferred wrong-person + subject-
+prominence variants (untested), and replication on real-photo subjects.
