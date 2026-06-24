@@ -1,11 +1,11 @@
 //! Native prompt refinement (epic 5095): candle on Windows/CUDA (sc-5525) + MLX on macOS (sc-5552).
 //!
-//! Routes the `prompt_refine` job to a native LLM provider. On macOS (sc-7158, epic 7153) it runs
-//! through the unified mlx-llm engine — the generic `mlx-llama` `core_llm::TextLlm` provider resolved
-//! model-first via `gen_core::core_llm::load_for_model` (Anubis-Mini-8B, sc-6550) — retiring the
-//! bespoke `mlx-gen-prompt-refine` decoder. The Windows candle build still uses the
-//! `candle-gen-prompt-refine` `gen_core::TextLlm` (sc-5525) via `gen_core::load_textllm` until its
-//! twin migration (sc-7404). The Python torch `PromptRefiner`
+//! Routes the `prompt_refine` job to a native LLM provider through the unified LLM engine (epic 7153)
+//! — a generic `core_llm::TextLlm` resolved model-first via `gen_core::core_llm::load_for_model`
+//! (Anubis-Mini-8B, sc-6550), so the dispatch body is one backend-agnostic path: macOS (sc-7158) picks
+//! mlx-llm's `mlx-llama`, the Windows/CUDA candle build (sc-7404) picks candle-llm's `candle-llama`.
+//! Both retired their bespoke hand-rolled Llama decoders (`mlx-gen-prompt-refine` /
+//! `candle-gen-prompt-refine`). The Python torch `PromptRefiner`
 //! (`apps/worker/scene_worker/prompt_refine.py`) stays the fallback only on platforms with neither
 //! native provider (e.g. the candle-less Desktop installer).
 //!
@@ -20,20 +20,15 @@
 use super::*;
 
 // Prompt-refine provider force-link anchors: keep each backend's `inventory::submit!` provider
-// registration from being dropped by the release linker. macOS (sc-7158, epic 7153) force-links
-// `mlx_llm` so the unified `mlx-llama` `core_llm::TextLlm` provider — resolved model-first via
-// `gen_core::core_llm::load_for_model` — survives the linker; the Windows/CUDA candle build keeps
-// sc-5525's `candle_gen_prompt_refine` anchor (its `gen_core::TextLlm` migration is the sc-7404 twin).
+// registration from being dropped by the release linker, so model-first `core_llm::load_for_model`
+// resolution can discover it. macOS (sc-7158, epic 7153) force-links `mlx_llm` for `mlx-llama`; the
+// Windows/CUDA candle build (sc-7404) force-links `candle_llm` for `candle-llama` — both generic
+// `core_llm::TextLlm` providers (retiring the bespoke `mlx-gen-prompt-refine` / `candle-gen-prompt-refine`).
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
-use candle_gen_prompt_refine as _;
+use candle_llm as _;
 #[cfg(target_os = "macos")]
 use mlx_llm as _;
 
-// The candle provider's registry id (`prompt::PROMPT_REFINE_ID`). Only the candle lane still routes by
-// id through `gen_core::load_textllm`; the macOS lane resolves mlx-llm model-first (no id), so this is
-// candle-only now (retired on macOS with sc-7158).
-#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
-const PROMPT_REFINE_ENGINE_ID: &str = "prompt_refine";
 // The prompt-refinement / magic-prompt checkpoint — the coherent Anubis-8B (sc-6550 bake-off). It
 // serves BOTH the free-text "Refine my prompt" rewrite AND the Ideogram magic-prompt JSON caption:
 // the bake-off found the old 3B (and plain Llama-3.1-8B, stock + abliterated) stochastically emit
@@ -340,15 +335,11 @@ pub(crate) async fn run_prompt_refine_job(
     settings: &Settings,
     job: &JobSnapshot,
 ) -> WorkerResult<()> {
-    // The cooperative cancel handle is created here and threaded into the (backend-specific) request
-    // built inside the blocking task. macOS uses core-llm's CancelFlag (via the gen_core re-export),
-    // the candle lane gen-core's; both expose new()/clone()/cancel()/is_cancelled(), so the shared
-    // orchestration below is identical regardless. The request/load/stream types are backend-specific
-    // and are imported inside each arm of the blocking task.
-    #[cfg(target_os = "macos")]
+    // The cooperative cancel handle is created here and threaded into the request built inside the
+    // blocking task. Both lanes now run through the unified `core_llm` contract, so this is core-llm's
+    // CancelFlag (via the gen_core re-export) on both — new()/clone()/cancel()/is_cancelled() — and the
+    // dispatch body below is a single backend-agnostic path.
     use gen_core::core_llm::CancelFlag;
-    #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
-    use gen_core::CancelFlag;
 
     let payload = &job.payload;
     let original_prompt = payload
@@ -450,11 +441,11 @@ pub(crate) async fn run_prompt_refine_job(
             json!({ "jobId": job_id, "engine": engine_label }),
         );
 
-        // macOS (sc-7158): resolve mlx-llm's generic provider model-first (no provider id) — a JSON
-        // constraint steers resolution to the JSON-capable `mlx-llama` — and stream through the
-        // `core_llm::TextLlm` contract. The provider renders the model's own chat template, so the
-        // worker supplies only the system + user turns (the product policy stays caller-side).
-        #[cfg(target_os = "macos")]
+        // Resolve the native provider model-first (no provider id) — a JSON constraint steers
+        // resolution to a JSON-capable provider — and stream through the `core_llm::TextLlm` contract.
+        // One backend-agnostic path: the force-linked provider (mlx-llama on macOS, candle-llama on the
+        // Windows candle build) wins resolution. The provider renders the model's own chat template, so
+        // the worker supplies only the system + user turns (the product policy stays caller-side).
         let text = {
             use gen_core::core_llm::{
                 load_for_model_with, Constraint, LoadSpec, Message, ModelRequirements, Sampling,
@@ -467,7 +458,7 @@ pub(crate) async fn run_prompt_refine_job(
             messages.push(Message::user(prompt));
             let request = TextLlmRequest {
                 messages,
-                // The mlx-gen-prompt-refine sampler was plain temperature/top-p (no repetition
+                // The bespoke prompt-refine samplers were plain temperature/top-p (no repetition
                 // penalty / top-k); core-llm's defaults match (top_k 0, repetition_penalty 1.0).
                 sampling: Sampling {
                     temperature,
@@ -478,6 +469,8 @@ pub(crate) async fn run_prompt_refine_job(
                 seed: None,
                 // sc-6585: magic-prompt expansion must emit a structurally-valid JSON caption, so
                 // constrain its decode to the JSON grammar; the free-text rewrite is unconstrained.
+                // (On the candle lane this constraint now actually steers + masks the decode — the
+                // sc-7404 parity gain over the old `candle-gen-prompt-refine` path.)
                 constraint: is_magic.then_some(Constraint::Json),
                 cancel: blocking_cancel.clone(),
                 ..Default::default()
@@ -497,7 +490,7 @@ pub(crate) async fn run_prompt_refine_job(
             if blocking_cancel.is_cancelled() {
                 return Err(WorkerError::Canceled(CANCEL_MESSAGE.to_owned()));
             }
-            // Drive the same (current, total) progress channel the shared loop below reads, counting
+            // Drive the (current, total) progress channel the shared loop below reads, counting
             // generated tokens against the max-new-tokens budget.
             let mut on_event = |event: StreamEvent| {
                 if let StreamEvent::Token { index, .. } = event {
@@ -507,51 +500,6 @@ pub(crate) async fn run_prompt_refine_job(
             let output = refiner.generate(&request, &mut on_event).map_err(|error| {
                 WorkerError::Engine(format!("prompt-refine generation failed: {error}"))
             })?;
-            output.text
-        };
-
-        // candle (Windows/CUDA): unchanged legacy path — the `candle-gen-prompt-refine`
-        // `gen_core::TextLlm` resolved by id (migrates to candle-llm under sc-7404).
-        #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
-        let text = {
-            use gen_core::{
-                LoadSpec, Progress, TextLlmConstraint, TextLlmRequest, TextLlmSampling,
-                WeightsSource,
-            };
-            let refiner = gen_core::load_textllm(
-                PROMPT_REFINE_ENGINE_ID,
-                &LoadSpec::new(WeightsSource::Dir(weights_dir)),
-            )
-            .map_err(|error| WorkerError::Engine(format!("prompt-refine load failed: {error}")))?;
-            emit_event(
-                "prompt_refine_load_complete",
-                json!({ "jobId": job_id, "engine": engine_label }),
-            );
-            if blocking_cancel.is_cancelled() {
-                return Err(WorkerError::Canceled(CANCEL_MESSAGE.to_owned()));
-            }
-            let request = TextLlmRequest {
-                system,
-                prompt,
-                sampling: TextLlmSampling {
-                    temperature,
-                    top_p: 0.9,
-                    max_new_tokens,
-                    seed: None,
-                },
-                constraint: is_magic.then_some(TextLlmConstraint::Json),
-                cancel: blocking_cancel.clone(),
-            };
-            let mut on_progress = |progress: Progress| {
-                if let Progress::Step { current, total } = progress {
-                    let _ = tx.blocking_send((current, total));
-                }
-            };
-            let output = refiner
-                .generate(&request, &mut on_progress)
-                .map_err(|error| {
-                    WorkerError::Engine(format!("prompt-refine generation failed: {error}"))
-                })?;
             output.text
         };
 
@@ -847,6 +795,87 @@ mod tests {
         let output = refiner.generate(&request, &mut sink).expect("generate");
         let json = clean_json_output(&output.text);
         eprintln!("magic-prompt JSON:\n{json}");
+
+        let parsed: Value = serde_json::from_str(&json).expect("a valid JSON object");
+        let cd = parsed
+            .get("compositional_deconstruction")
+            .expect("has compositional_deconstruction");
+        assert!(cd.get("background").is_some(), "has a background");
+        assert!(
+            cd.get("elements").map(Value::is_array).unwrap_or(false),
+            "elements is an array"
+        );
+    }
+
+    /// Real-weight magic-prompt smoke (sc-7404) — the Windows/CUDA twin of the macOS test above. Expands
+    /// a plain idea into a JSON caption through the unified candle engine: `gen_core::core_llm::load_for_model`
+    /// resolves candle-llm's `candle-llama` on the Anubis snapshot (the JSON constraint steers the
+    /// model-first pick + masks the decode), and the cleaned reply must parse with the caption's required
+    /// section. This is the candle parity gate for retiring `candle-gen-prompt-refine`. `#[ignore]` — the
+    /// weights live outside CI; run on the CUDA box with the model staged (point `PROMPT_REFINE_SNAPSHOT`
+    /// at the snapshot dir, else it resolves the standard HF cache under `%USERPROFILE%`):
+    ///   cargo test -p sceneworks-worker --lib --features backend-candle --release -- --ignored magic_prompt_expands_plain_text_to_caption_candle --nocapture
+    #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+    #[test]
+    #[ignore = "real-weight: needs the Anubis-Mini-8B prompt-refine model staged + a CUDA GPU"]
+    fn magic_prompt_expands_plain_text_to_caption_candle() {
+        use gen_core::core_llm::{
+            load_for_model_with, Constraint, LoadSpec, Message, ModelRequirements, Sampling,
+            StreamEvent, TextLlmRequest,
+        };
+
+        // Force-link `candle-llama` so model-first resolution can discover it in this test binary
+        // (the worker's force-link anchor is cfg'd to the job path, not the test module).
+        use candle_llm as _;
+
+        // An explicit snapshot override wins; otherwise resolve the HF cache under the Windows home.
+        let weights_dir = match std::env::var("PROMPT_REFINE_SNAPSHOT") {
+            Ok(dir) => std::path::PathBuf::from(dir),
+            Err(_) => {
+                let home = std::env::var("USERPROFILE")
+                    .or_else(|_| std::env::var("HOME"))
+                    .expect("USERPROFILE/HOME");
+                let snapshots = std::path::Path::new(&home).join(
+                    ".cache/huggingface/hub/models--TheDrummer--Anubis-Mini-8B-v1/snapshots",
+                );
+                std::fs::read_dir(&snapshots)
+                    .expect("prompt-refine model staged in the HF cache (or set PROMPT_REFINE_SNAPSHOT)")
+                    .flatten()
+                    .map(|entry| entry.path())
+                    .find(|path| path.is_dir())
+                    .expect("a snapshot dir")
+            }
+        };
+
+        let (system, user) = build_magic_prompt_messages(
+            "a red fox sitting in a snowy forest at golden hour",
+            "1:1",
+        );
+        let request = TextLlmRequest {
+            messages: vec![Message::system(system), Message::user(user)],
+            sampling: Sampling {
+                temperature: 0.4,
+                top_p: 0.9,
+                ..Sampling::default()
+            },
+            max_new_tokens: 2048,
+            seed: None,
+            constraint: Some(Constraint::Json), // sc-6585: exercise constrained decoding on candle
+            ..Default::default()
+        };
+        let refiner = load_for_model_with(
+            &LoadSpec {
+                source: weights_dir.to_string_lossy().into_owned(),
+                quantize: None,
+            },
+            &ModelRequirements::from_request(&request),
+        )
+        .expect("load prompt_refine via core-llm model-first resolution (candle-llama)");
+
+        let mut sink = |_event: StreamEvent| {};
+        let output = refiner.generate(&request, &mut sink).expect("generate");
+        let json = clean_json_output(&output.text);
+        eprintln!("magic-prompt JSON (candle):\n{json}");
 
         let parsed: Value = serde_json::from_str(&json).expect("a valid JSON object");
         let cd = parsed
