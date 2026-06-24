@@ -1344,6 +1344,54 @@ async fn training_dataset_routes_persist_and_validate_project_assets() {
     assert_eq!(single_items.len(), 1);
     assert_eq!(single_items[0]["itemId"], "item_0001");
 
+    // sc-6535: the Dataset Doctor analysis job enqueues with the right type + embedder + a per-item
+    // work list (the worker claims it once mlx-gen-clip is linked; here we assert the enqueue
+    // contract). An empty body uses the defaults (clip_vit_l14, every item).
+    let (status, analysis_job) = request(
+        reloaded_app.clone(),
+        "POST",
+        &format!("/api/v1/projects/{project_id}/training/datasets/{dataset_id}/analysis-jobs"),
+        json!({}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    assert_eq!(analysis_job["type"], "dataset_analysis");
+    assert_eq!(analysis_job["payload"]["embedder"], "clip_vit_l14");
+    assert_eq!(analysis_job["payload"]["items"][0]["itemId"], "item_0001");
+    let analysis_image_path = analysis_job["payload"]["items"][0]["imagePath"]
+        .as_str()
+        .expect("analysis image path");
+    assert!(analysis_image_path.ends_with("item_0001.png"));
+
+    // An unknown embedder is rejected up front.
+    let (status, _) = request(
+        reloaded_app.clone(),
+        "POST",
+        &format!("/api/v1/projects/{project_id}/training/datasets/{dataset_id}/analysis-jobs"),
+        json!({ "embedder": "not_a_real_embedder" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+
+    // sc-6535: the analysis worker persists its computed embeddings to the content-hash-keyed sidecar.
+    let (status, stored) = request(
+        reloaded_app.clone(),
+        "POST",
+        &format!(
+            "/api/v1/projects/{project_id}/training/datasets/{dataset_id}/analysis-embeddings"
+        ),
+        json!({
+            "space": "clip-vit-l14",
+            "items": [
+                { "contentHash": "hash_a", "embedding": [1.0, 0.0, 0.0] },
+                { "contentHash": "hash_b", "embedding": [0.0, 1.0, 0.0] }
+            ]
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(stored["stored"], 2);
+
     let (status, renamed) = request(
         reloaded_app.clone(),
         "POST",
@@ -1738,6 +1786,8 @@ async fn training_dataset_readiness_reports_and_persists_tier0_cache() {
     let flags = report["items"][0]["flags"].as_array().expect("flags array");
     assert!(flags.iter().any(|flag| flag["check"] == "resolution"));
     assert!(!flags.iter().any(|flag| flag["check"] == "decode"));
+    // sc-6535: before the analysis job persists an embedding sidecar there is no Tier-1 sub-score.
+    assert!(report["subScores"]["diversity"].is_null());
 
     let (status, detail) = request(
         app.clone(),
@@ -1756,6 +1806,37 @@ async fn training_dataset_readiness_reports_and_persists_tier0_cache() {
         .as_array()
         .expect("phash array")
         .is_empty());
+
+    // sc-6535 read-back: once the analysis worker POSTs an embedding sidecar (keyed by content hash),
+    // the readiness report folds the Tier-1 diversity sub-score in. This is the seam that lights up
+    // the Variety meter + embedding findings in the UI.
+    let (status, _) = request(
+        app.clone(),
+        "POST",
+        &format!(
+            "/api/v1/projects/{project_id}/training/datasets/{dataset_id}/analysis-embeddings"
+        ),
+        json!({
+            "space": "clip-vit-l14",
+            "items": [{ "contentHash": upload_hash.clone(), "embedding": [0.6, 0.8, 0.0] }]
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let (status, report) = request(
+        app.clone(),
+        "GET",
+        &format!(
+            "/api/v1/projects/{project_id}/training/datasets/{dataset_id}/readiness?targetResolution=64&recommendedFor=style&minItems=1"
+        ),
+        Value::Null,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(
+        report["subScores"]["diversity"].is_number(),
+        "the embedding sidecar lights up the Tier-1 diversity sub-score"
+    );
 }
 
 #[tokio::test]

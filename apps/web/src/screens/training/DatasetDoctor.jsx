@@ -2,6 +2,7 @@ import React from "react";
 
 import {
   datasetDoctorSummary,
+  diversityPercent,
   flagMetric,
   flagReason,
   gateMeta,
@@ -179,6 +180,9 @@ export function DatasetDoctorReadout({ report, loading = false, compact = false 
   }
   const gate = gateMeta(report.gate);
   const technical = technicalPercent(report);
+  // Tier-1 (sc-6535): absent until the embedding job has run, so the Variety meter only appears
+  // once the report carries a diversity sub-score.
+  const diversity = diversityPercent(report);
   const counts = report.counts ?? {};
   return (
     <div className={`dataset-doctor tone-${gate.tone}${compact ? " compact" : ""}`} aria-label="Dataset Doctor">
@@ -187,6 +191,14 @@ export function DatasetDoctorReadout({ report, loading = false, compact = false 
         {Number.isFinite(technical) ? (
           <span className="dataset-doctor-meter" title={`${technical}% of photos pass the technical checks`}>
             <span className="dataset-doctor-meter-fill" style={{ width: `${technical}%` }} />
+          </span>
+        ) : null}
+        {Number.isFinite(diversity) ? (
+          <span
+            className="dataset-doctor-meter dataset-doctor-meter-variety"
+            title={`Variety ${diversity}% — how visually varied the set is`}
+          >
+            <span className="dataset-doctor-meter-fill" style={{ width: `${diversity}%` }} />
           </span>
         ) : null}
       </div>

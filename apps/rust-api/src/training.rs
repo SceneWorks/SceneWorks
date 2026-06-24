@@ -121,7 +121,9 @@ fn dataset_readiness_report(
     dataset_id: &str,
     query: &ReadinessQuery,
 ) -> Result<sceneworks_core::dataset_quality::DatasetReadinessReport, ProjectStoreError> {
-    use sceneworks_core::dataset_quality::{readiness_context, CachedTier0Scalars};
+    use sceneworks_core::dataset_quality::{
+        evaluate_tier1, readiness_context, CachedTier0Scalars, ItemEmbedding, Tier1Thresholds,
+    };
     use sceneworks_image_quality::{compute_readiness, ReadinessItem};
 
     let (dataset, root, _project_stem) = store.training_dataset_for_plan(project_id, dataset_id)?;
@@ -171,11 +173,43 @@ fn dataset_readiness_report(
         })
         .collect();
 
+    // Tier-1 (sc-6535): if the analysis worker has persisted an embedding sidecar, fold its findings
+    // (embedding near-duplicates + low set diversity) into the report. Each item's dismissed checks
+    // (sc-6534) carry through, so an acknowledged near-dup drops from the rollups. No sidecar (the
+    // job hasn't run) → `None` → the report stays Tier-0 only, exactly as before.
+    let tier1 = store
+        .read_dataset_embeddings(project_id, dataset_id)?
+        .and_then(|sidecar| {
+            let embeddings: Vec<ItemEmbedding> = dataset
+                .items
+                .iter()
+                .filter_map(|item| {
+                    let content_hash = item.content_hash.as_deref()?;
+                    let embedding = sidecar.embeddings.get(content_hash)?.clone();
+                    let acknowledged = item
+                        .quality_ack
+                        .as_ref()
+                        .map(|ack| ack.effective_checks(item.content_hash.as_deref()))
+                        .unwrap_or_default();
+                    Some(ItemEmbedding {
+                        item_id: item.id.clone(),
+                        embedding,
+                        acknowledged,
+                    })
+                })
+                .collect();
+            // A sidecar with no current item matching it (every image changed since the analysis) is
+            // not Tier-1 data — fall back to Tier-0 only rather than a misleading 1.0 diversity.
+            (!embeddings.is_empty())
+                .then(|| evaluate_tier1(&embeddings, &Tier1Thresholds::for_kind(&context.kind)))
+        });
+
     let (report, extracted) = compute_readiness(
         &items,
         context.bucket_edge,
         context.min_items,
         &context.thresholds,
+        tier1.as_ref(),
     );
 
     if !extracted.is_empty() {
@@ -326,6 +360,127 @@ pub(crate) async fn create_training_dataset_caption_job(
     publish(&state, "job.updated", &job);
     publish_queue(&state).await?;
     Ok((StatusCode::CREATED, Json(job)))
+}
+
+/// Enqueue a Dataset Doctor CLIP-embedding analysis job over a training dataset (sc-6535).
+/// Mirrors [`create_training_dataset_caption_job`]: build a per-item work list (item id + absolute
+/// image path + content hash) and create a GPU-routed `dataset_analysis` job. The Rust/MLX worker
+/// runs the `clip_vit_l14` embedder once it advertises the capability (after the cross-repo re-pin);
+/// until then the job stays queued.
+pub(crate) async fn create_training_dataset_analysis_job(
+    State(state): State<AppState>,
+    Path((project_id, dataset_id)): Path<(String, String)>,
+    ApiJson(payload): ApiJson<DatasetAnalysisJobRequest>,
+) -> Result<(StatusCode, Json<JobSnapshot>), ApiError> {
+    validate_dataset_analysis_job_request(&payload)?;
+    let (dataset, dataset_root, project_name) = project_call(state.clone(), {
+        let project_id = project_id.clone();
+        let dataset_id = dataset_id.clone();
+        move |store| store.training_dataset_for_plan(&project_id, &dataset_id)
+    })
+    .await?;
+    if dataset.items.is_empty() {
+        return Err(ApiError::bad_request(
+            "Training dataset has no items to analyze.",
+        ));
+    }
+    // No item_ids → analyze the whole dataset; otherwise just the named items.
+    let target_ids: Option<std::collections::HashSet<&str>> = payload
+        .item_ids
+        .as_ref()
+        .map(|ids| ids.iter().map(String::as_str).collect());
+    let items = dataset
+        .items
+        .iter()
+        .filter(|item| match &target_ids {
+            Some(ids) => ids.contains(item.id.as_str()),
+            None => true,
+        })
+        .map(|item| {
+            json!({
+                "itemId": item.id.clone(),
+                "imagePath": dataset_root.join(&item.path).display().to_string(),
+                "contentHash": item.content_hash.clone(),
+            })
+        })
+        .collect::<Vec<_>>();
+    if items.is_empty() {
+        return Err(ApiError::bad_request(
+            "No matching dataset items to analyze.",
+        ));
+    }
+    let embedder = payload.embedder;
+    let model_name_or_path = payload.model_name_or_path;
+    let requested_gpu = payload.requested_gpu;
+    let job_payload = match json!({
+        "provider": "training",
+        "kind": "dataset_analysis",
+        "embedder": embedder,
+        "modelNameOrPath": model_name_or_path,
+        "projectId": project_id.clone(),
+        "datasetId": dataset.id,
+        "datasetVersion": dataset.version,
+        "datasetRoot": dataset_root.display().to_string(),
+        "items": items,
+    }) {
+        Value::Object(map) => map,
+        _ => {
+            return Err(ApiError::internal(
+                "dataset analysis job payload must be an object",
+            ))
+        }
+    };
+    let job = store_call(state.clone(), move |store, _timeout| {
+        store.create_job(CreateJob {
+            job_type: JobType::DatasetAnalysis,
+            project_id: Some(project_id),
+            project_name: Some(project_name),
+            payload: job_payload,
+            requested_gpu,
+            source_job_id: None,
+            duplicate_of_job_id: None,
+            attempts: 1,
+        })
+    })
+    .await?;
+    publish(&state, "job.updated", &job);
+    publish_queue(&state).await?;
+    Ok((StatusCode::CREATED, Json(job)))
+}
+
+pub(crate) fn validate_dataset_analysis_job_request(
+    payload: &DatasetAnalysisJobRequest,
+) -> Result<(), ApiError> {
+    if payload.embedder.trim() != "clip_vit_l14" {
+        return Err(ApiError::bad_request(
+            "Unsupported dataset analysis embedder. Use clip_vit_l14.",
+        ));
+    }
+    Ok(())
+}
+
+/// Persist the analysis worker's computed CLIP embeddings to the dataset's content-hash-keyed
+/// sidecar (sc-6535) — the embedding-side analog of `write_training_dataset_caption_sidecars`. A
+/// metadata write: it does not bump the dataset version. Returns the count stored.
+pub(crate) async fn write_training_dataset_analysis_embeddings(
+    State(state): State<AppState>,
+    Path((project_id, dataset_id)): Path<(String, String)>,
+    ApiJson(payload): ApiJson<DatasetEmbeddingsBody>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let embeddings = sceneworks_core::dataset_quality::DatasetEmbeddings {
+        space: payload.space,
+        embeddings: payload
+            .items
+            .into_iter()
+            .map(|record| (record.content_hash, record.embedding))
+            .collect(),
+    };
+    let stored = embeddings.embeddings.len();
+    project_call(state, move |store| {
+        store.write_dataset_embeddings(&project_id, &dataset_id, &embeddings)
+    })
+    .await?;
+    Ok(Json(json!({ "stored": stored })))
 }
 
 pub(crate) fn validate_training_caption_job_request(

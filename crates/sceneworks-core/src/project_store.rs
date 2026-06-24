@@ -21,7 +21,7 @@ pub use crate::character_store::{
     CharacterLoraUpdateInput, CharacterMutationResult, CharacterReferenceInput,
     CharacterReferenceUpdateInput, CharacterUpdateInput, CHARACTER_SIDECAR_PATTERN,
 };
-use crate::dataset_quality::{CachedTier0Scalars, QualityAck, QualityCheck};
+use crate::dataset_quality::{CachedTier0Scalars, DatasetEmbeddings, QualityAck, QualityCheck};
 use crate::slug::slugify;
 use crate::store_util::{
     ensure_column, is_safe_id, is_safe_relative_path, lock_project_files, optional_f64,
@@ -556,6 +556,30 @@ impl ProjectStore {
         let (project_path, _project_guard) = self.lock_project(project_id)?;
         TrainingDatasetStore::new(project_path)
             .set_item_quality_ack(project_id, dataset_id, item_id, checks)
+    }
+
+    /// Persist the dataset's CLIP embeddings sidecar (sc-6535). Locked wrapper over
+    /// [`TrainingDatasetStore::write_dataset_embeddings`].
+    pub fn write_dataset_embeddings(
+        &self,
+        project_id: &str,
+        dataset_id: &str,
+        embeddings: &DatasetEmbeddings,
+    ) -> ProjectStoreResult<()> {
+        let (project_path, _project_guard) = self.lock_project(project_id)?;
+        TrainingDatasetStore::new(project_path)
+            .write_dataset_embeddings(project_id, dataset_id, embeddings)
+    }
+
+    /// Read the dataset's CLIP embeddings sidecar (`None` if the analysis job hasn't run). Locked
+    /// wrapper over [`TrainingDatasetStore::read_dataset_embeddings`].
+    pub fn read_dataset_embeddings(
+        &self,
+        project_id: &str,
+        dataset_id: &str,
+    ) -> ProjectStoreResult<Option<DatasetEmbeddings>> {
+        let (project_path, _project_guard) = self.lock_project(project_id)?;
+        TrainingDatasetStore::new(project_path).read_dataset_embeddings(project_id, dataset_id)
     }
 
     pub fn batch_rename_training_dataset_items(

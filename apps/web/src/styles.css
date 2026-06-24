@@ -7840,6 +7840,16 @@ details[open] > summary.lora-scope-group-heading::before,
   background: var(--dd-tone);
 }
 
+/* The Variety meter (sc-6535 diversity sub-score) sits beside the gate-toned technical meter, so
+   it carries its own fixed hue to read as a distinct dimension rather than overall health. */
+.dataset-doctor-meter-variety {
+  background: color-mix(in oklch, oklch(0.62 0.16 285) 20%, var(--surface-2));
+}
+
+.dataset-doctor-meter-variety .dataset-doctor-meter-fill {
+  background: oklch(0.62 0.16 285);
+}
+
 .dataset-doctor-summary {
   margin: 0;
   font-size: 12px;

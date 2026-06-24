@@ -19,7 +19,7 @@ use image_hasher::{HashAlg, Hasher, HasherConfig};
 use sceneworks_core::dataset_quality::{
     build_readiness_report, evaluate_tier0, DatasetReadinessReport, ItemQualityInput,
     MetricDistribution, QualityCheck, QualityFlag, ReadinessDistributions, Severity, Tier0Scalars,
-    Tier0Thresholds,
+    Tier0Thresholds, Tier1Evaluation,
 };
 
 /// Luma at or below this counts as crushed-to-black (8-bit).
@@ -83,6 +83,7 @@ pub fn compute_readiness(
     bucket_edge: u32,
     min_items: u32,
     thresholds: &Tier0Thresholds,
+    tier1: Option<&Tier1Evaluation>,
 ) -> (DatasetReadinessReport, Vec<(String, Tier0Scalars)>) {
     let mut inputs = Vec::with_capacity(items.len());
     let mut extracted = Vec::new();
@@ -132,7 +133,7 @@ pub fn compute_readiness(
         }
     }
 
-    let mut report = build_readiness_report(evaluation);
+    let mut report = build_readiness_report(evaluation, tier1);
     report.distributions = build_distributions(&inputs, thresholds);
     (report, extracted)
 }
@@ -444,7 +445,7 @@ mod tests {
             },
         ];
 
-        let (report, extracted) = compute_readiness(&items, bucket, 1, &thresholds);
+        let (report, extracted) = compute_readiness(&items, bucket, 1, &thresholds, None);
 
         // Both decoded fresh (returned for the caller to cache); flat reads soft → NeedsAttention.
         assert_eq!(extracted.len(), 2);
@@ -486,7 +487,7 @@ mod tests {
             },
         ];
 
-        let (report, extracted) = compute_readiness(&items, bucket, 1, &thresholds);
+        let (report, extracted) = compute_readiness(&items, bucket, 1, &thresholds, None);
 
         // The cached item is not re-extracted; the broken path yields nothing to cache.
         assert!(extracted.is_empty());
@@ -522,7 +523,7 @@ mod tests {
             acknowledged: vec![QualityCheck::Blur],
         }];
 
-        let (report, _) = compute_readiness(&items, bucket, 1, &thresholds);
+        let (report, _) = compute_readiness(&items, bucket, 1, &thresholds, None);
         // Blur is the only finding and the user dismissed it → Ready, badge clean…
         assert_eq!(report.gate, ReadinessGate::Ready);
         assert_eq!(report.items[0].severity, None);
@@ -553,7 +554,7 @@ mod tests {
             acknowledged: vec![QualityCheck::Decode], // even if asked, a decode failure stands
         }];
 
-        let (report, _) = compute_readiness(&items, bucket, 1, &thresholds);
+        let (report, _) = compute_readiness(&items, bucket, 1, &thresholds, None);
         let decode = report.items[0]
             .flags
             .iter()
@@ -598,7 +599,7 @@ mod tests {
             },
         ];
 
-        let (report, _) = compute_readiness(&items, bucket, 1, &thresholds);
+        let (report, _) = compute_readiness(&items, bucket, 1, &thresholds, None);
         let dist = report.distributions.expect("distributions present");
         // One value per decodable item, oriented + thresholded for the chart.
         assert_eq!(dist.blur_variance.values.len(), 2);

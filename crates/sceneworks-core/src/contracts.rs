@@ -264,6 +264,11 @@ string_enum! {
         LoraDownload => "lora_download",
         LoraTrain => "lora_train",
         TrainingCaption => "training_caption",
+        // CLIP image-embedding pass over a training dataset for Dataset Doctor analysis
+        // (epic 6529 P2, sc-6535): set-level near-duplicate / diversity / aesthetic findings.
+        // GPU-routed (MLX `clip_vit_l14`; in job_requires_gpu, not in NON_GPU_JOB_TYPES),
+        // served by the Rust/MLX worker.
+        DatasetAnalysis => "dataset_analysis",
         PromptRefine => "prompt_refine",
     }
 }
@@ -387,6 +392,11 @@ string_enum! {
         LoraDownload => "lora_download",
         LoraTrain => "lora_train",
         TrainingCaption => "training_caption",
+        // Dataset Doctor CLIP-embedding analysis (sc-6535). Advertised only when the MLX/candle
+        // CLIP image embedder (`mlx-gen-clip` / `candle-gen-clip`) is linked + registered
+        // (engines::registry_capabilities) — so before the worker re-pin a `dataset_analysis`
+        // job stays queued rather than mis-claimed.
+        DatasetAnalysis => "dataset_analysis",
         // Real (non-dry-run) LoRA training execution. Advertised separately from
         // `LoraTrain` (dry-run plan validation, which needs no inference backend)
         // so a real run only routes to a worker that can actually train. See

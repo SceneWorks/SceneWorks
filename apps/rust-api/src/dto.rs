@@ -367,6 +367,43 @@ pub(crate) struct TrainingCaptionJobRequest {
     pub(crate) item_ids: Option<Vec<String>>,
 }
 
+/// Request to run the Dataset Doctor CLIP-embedding analysis over a training dataset (sc-6535).
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct DatasetAnalysisJobRequest {
+    /// The image-embedder provider id to run. Only `clip_vit_l14` is supported today (validated
+    /// server-side); the field exists so a future EVA-CLIP/SigLIP swap is a payload change.
+    #[serde(default = "default_dataset_analysis_embedder")]
+    pub(crate) embedder: String,
+    /// Optional weights snapshot path/id for the embedder; resolved worker-side when absent.
+    #[serde(default)]
+    pub(crate) model_name_or_path: Option<String>,
+    #[serde(default = "default_requested_gpu")]
+    pub(crate) requested_gpu: String,
+    /// Restrict the analysis to these dataset item ids; when absent, every item is embedded.
+    #[serde(default)]
+    pub(crate) item_ids: Option<Vec<String>>,
+}
+
+/// The analysis worker POSTs its computed CLIP embeddings here to persist the sidecar (sc-6535) —
+/// the embedding-side analog of the caption job's `/caption-sidecars` write.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct DatasetEmbeddingsBody {
+    /// The embedding space (e.g. `clip-vit-l14`).
+    pub(crate) space: String,
+    pub(crate) items: Vec<DatasetEmbeddingRecord>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct DatasetEmbeddingRecord {
+    /// The item's content hash (the sidecar key — survives dataset edits).
+    pub(crate) content_hash: String,
+    /// The raw (un-normalized) embedding vector.
+    pub(crate) embedding: Vec<f32>,
+}
+
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct TrainingCaptionOptions {

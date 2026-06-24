@@ -73,6 +73,18 @@ describe("DatasetDoctorReadout gating states", () => {
     expect(container.querySelector(".dataset-doctor-meter-fill").style.width).toBe("80%");
   });
 
+  it("renders the Variety meter only once a diversity sub-score is present (sc-6535)", () => {
+    // No diversity sub-score yet (pre-embedding-job) → no Variety meter.
+    mount(<DatasetDoctorReadout report={report()} />);
+    expect(container.querySelector(".dataset-doctor-meter-variety")).toBeNull();
+
+    // With the Tier-1 diversity sub-score → a second, distinct meter at that width.
+    mount(<DatasetDoctorReadout report={report({ subScores: { technical: 0.8, diversity: 0.3 } })} />);
+    const variety = container.querySelector(".dataset-doctor-meter-variety");
+    expect(variety).not.toBeNull();
+    expect(variety.querySelector(".dataset-doctor-meter-fill").style.width).toBe("30%");
+  });
+
   it("renders the blocked headline when the set is untrainable", () => {
     mount(
       <DatasetDoctorReadout
