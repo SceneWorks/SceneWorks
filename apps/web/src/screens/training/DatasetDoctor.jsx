@@ -6,6 +6,7 @@ import {
   captionAlignmentFlaggedItemIds,
   cropLossFlaggedItemIds,
   datasetDoctorSummary,
+  datasetRecommendations,
   diversityPercent,
   duplicateRemovalItemIds,
   flagMetric,
@@ -221,6 +222,9 @@ export function DatasetDoctorReadout({
   // sc-6539: EXIF-strip is a blanket hygiene pass (not flag-gated), so its count is every item.
   const stripExifCount =
     typeof onStripExif === "function" ? (report.items ?? []).length : 0;
+  // sc-6540: kind-aware next-steps the user must do by hand (acquire/replace) — distinct from the
+  // one-tap action buttons above.
+  const recommendations = compact ? [] : datasetRecommendations(report);
   return (
     <div className={`dataset-doctor tone-${gate.tone}${compact ? " compact" : ""}`} aria-label="Dataset Doctor">
       <div className="dataset-doctor-head">
@@ -341,6 +345,15 @@ export function DatasetDoctorReadout({
             </button>
           ) : null}
         </div>
+      ) : null}
+      {recommendations.length ? (
+        <ul className="dataset-doctor-recommendations" aria-label="Recommendations">
+          {recommendations.map((rec) => (
+            <li key={rec.id} className={`dataset-doctor-rec tone-${rec.tone}`}>
+              {rec.text}
+            </li>
+          ))}
+        </ul>
       ) : null}
     </div>
   );

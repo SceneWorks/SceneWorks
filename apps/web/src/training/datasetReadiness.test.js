@@ -8,6 +8,7 @@ import {
   captionHash,
   cropLossFlaggedItemIds,
   datasetDoctorSummary,
+  datasetRecommendations,
   dismissedChecks,
   diversityPercent,
   duplicateRemovalItemIds,
@@ -450,5 +451,93 @@ describe("readinessQueryParams", () => {
   it("omits empty/zero values", () => {
     const qs = readinessQueryParams({ resolution: 0, recommendedFor: [], characterType: "" });
     expect(qs).toBe("");
+  });
+});
+
+describe("datasetRecommendations (sc-6540)", () => {
+  const textOf = (recs) => recs.map((rec) => rec.text).join(" ");
+
+  it("changes the recommendation set with the kind on the same input (acceptance)", () => {
+    const base = {
+      itemCount: 12,
+      datasetFlags: [{ check: "low_diversity", severity: "warn" }],
+      items: [
+        { itemId: "a", flags: [{ check: "embedding_outlier", severity: "warn" }] },
+        { itemId: "b", flags: [] },
+      ],
+    };
+    const person = datasetRecommendations({ ...base, kind: "person" });
+    const style = datasetRecommendations({ ...base, kind: "style" });
+    const object = datasetRecommendations({ ...base, kind: "object" });
+
+    // The whole set of guidance differs across all three kinds on identical input.
+    expect(textOf(person)).not.toEqual(textOf(style));
+    expect(textOf(style)).not.toEqual(textOf(object));
+    expect(textOf(person)).not.toEqual(textOf(object));
+
+    // Person never surfaces embedding outliers (detector off); style/object do.
+    expect(person.some((rec) => rec.id === "outlier")).toBe(false);
+    expect(style.some((rec) => rec.id === "outlier")).toBe(true);
+    expect(object.some((rec) => rec.id === "outlier")).toBe(true);
+
+    // Diversity advice is kind-specific.
+    expect(person.find((rec) => rec.id === "diversity").text).toMatch(/poses|expressions/i);
+    expect(object.find((rec) => rec.id === "diversity").text).toMatch(/angles|backgrounds/i);
+    expect(style.find((rec) => rec.id === "diversity").text).toMatch(/subjects/i);
+  });
+
+  it("recommends acquiring images to reach the kind minimum", () => {
+    const recs = datasetRecommendations({
+      kind: "person",
+      itemCount: 12,
+      datasetFlags: [{ check: "count", severity: "warn", threshold: 15 }],
+      items: [],
+    });
+    expect(recs.find((rec) => rec.id === "count").text).toContain("Add 3 more images");
+  });
+
+  it("surfaces aesthetics only for style, and blur/exposure as replace-by-hand", () => {
+    const base = {
+      itemCount: 10,
+      datasetFlags: [{ check: "low_aesthetic", severity: "info" }],
+      items: [{ itemId: "x", flags: [{ check: "blur", severity: "warn" }] }],
+    };
+    expect(datasetRecommendations({ ...base, kind: "style" }).some((r) => r.id === "aesthetic")).toBe(
+      true,
+    );
+    expect(datasetRecommendations({ ...base, kind: "person" }).some((r) => r.id === "aesthetic")).toBe(
+      false,
+    );
+    expect(datasetRecommendations({ ...base, kind: "style" }).some((r) => r.id === "unfixable")).toBe(
+      true,
+    );
+  });
+
+  it("does not restate the one-tap fixes (dedupe/upscale/crop/caption have buttons)", () => {
+    const recs = datasetRecommendations({
+      kind: "style",
+      itemCount: 10,
+      datasetFlags: [],
+      items: [
+        { itemId: "a", flags: [{ check: "resolution", severity: "warn" }] },
+        { itemId: "b", flags: [{ check: "crop_loss", severity: "warn" }] },
+        { itemId: "c", flags: [{ check: "exact_duplicate", severity: "warn" }] },
+        { itemId: "d", flags: [{ check: "caption_alignment", severity: "warn" }] },
+      ],
+    });
+    // Only the standing kind tip — none of the button-backed checks become recommendations.
+    expect(recs.map((rec) => rec.id)).toEqual(["tip"]);
+  });
+
+  it("still gives a kind tip on a clean set so guidance differs by kind", () => {
+    const clean = { kind: "object", itemCount: 20, datasetFlags: [], items: [] };
+    const recs = datasetRecommendations(clean);
+    expect(recs).toHaveLength(1);
+    expect(recs[0].id).toBe("tip");
+    expect(datasetRecommendations({ ...clean, kind: "person" })[0].text).not.toEqual(recs[0].text);
+  });
+
+  it("returns nothing without a report", () => {
+    expect(datasetRecommendations(null)).toEqual([]);
   });
 });

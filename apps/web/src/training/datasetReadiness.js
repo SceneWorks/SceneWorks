@@ -76,6 +76,7 @@ const CHECK_REASON = {
   low_diversity: "The set isn't varied enough — too many similar-looking shots",
   caption_alignment: "Caption may not match this image — re-captioning can help",
   low_aesthetic: "Lower aesthetic score for a style set — advisory only",
+  embedding_outlier: "Doesn't match the rest of the set — off-style, or missing the subject",
   count: "Not enough photos to train well yet",
   decode: "This image couldn't be read",
 };
@@ -355,6 +356,123 @@ export function cropLossFlaggedItemIds(report) {
   return (report?.items ?? [])
     .filter((item) => activeFlags(item).some((flag) => flag.check === "crop_loss"))
     .map((item) => item.itemId);
+}
+
+// --- Kind-aware recommendations (sc-6540) ---------------------------------------------------------
+// Concrete next-steps that change with the training kind (person/style/object) the user picked in
+// Teach. These are the MANUAL moves only — acquiring or replacing images — not the one-tap fixes that
+// already have buttons (dedupe/upscale/smart-crop/strip-exif/re-caption), so the list stays a short
+// "what only you can do" rather than restating the actions above it.
+
+const KIND_NOUN = { person: "character", style: "style", object: "object" };
+
+function kindNoun(kind) {
+  return KIND_NOUN[kind] ?? "LoRA";
+}
+
+function diversityAdvice(kind) {
+  switch (kind) {
+    case "person":
+      return "Add photos from other poses, expressions, angles, and lighting — the set looks too similar, so the LoRA may overfit to one look.";
+    case "object":
+      return "Add shots from more angles with varied backgrounds, so the LoRA binds to the object rather than the setting.";
+    case "style":
+      return "Apply the style to more varied subjects — the set clusters too tightly to teach the style broadly.";
+    default:
+      return "Add more variety (angles, lighting, subjects) so the LoRA generalizes.";
+  }
+}
+
+function outlierAdvice(kind, count) {
+  const n = `${count} image${count === 1 ? "" : "s"}`;
+  if (kind === "object") {
+    return `${n} look like ${count === 1 ? "it doesn't" : "they don't"} contain the object — remove or replace ${count === 1 ? "it" : "them"}.`;
+  }
+  return `${n} ${count === 1 ? "doesn't" : "don't"} match the rest of your style — remove or replace ${count === 1 ? "it" : "them"} so ${count === 1 ? "it doesn't" : "they don't"} dilute it.`;
+}
+
+function kindTip(kind) {
+  switch (kind) {
+    case "person":
+      return "Keep captions about the scene, clothing, and pose — not the face. Over-describing the invariant identity weakens what the LoRA learns.";
+    case "object":
+      return "Vary backgrounds and angles, but keep the object clearly the subject in every shot.";
+    case "style":
+      return "Aim for diverse subjects in one consistent style — variety of what, consistency of how.";
+    default:
+      return "";
+  }
+}
+
+// Build the ordered recommendation list for the readout. Each entry is `{ id, tone, text }`. Pure
+// over the report's kind + existing signals, so the same set yields different guidance per kind
+// (the acceptance criterion). Items the user must acquire/replace by hand only — never a one-tap fix.
+export function datasetRecommendations(report) {
+  if (!report) {
+    return [];
+  }
+  const kind = report.kind ?? null;
+  const datasetFlags = report.dataset_flags ?? report.datasetFlags ?? [];
+  const datasetHas = (check) => datasetFlags.some((flag) => flag.check === check);
+  const itemsWithActive = (check) =>
+    (report.items ?? []).filter((item) => activeFlags(item).some((flag) => flag.check === check));
+
+  const recs = [];
+
+  // Too few images → acquire more (kind sets the target via the Count flag's threshold).
+  const countFlag = datasetFlags.find((flag) => flag.check === "count");
+  if (countFlag) {
+    const min = Math.max(0, Math.round(countFlag.threshold ?? 0));
+    const need = Math.max(1, min - (report.itemCount ?? 0));
+    recs.push({
+      id: "count",
+      tone: "warn",
+      text: `Add ${need} more image${need === 1 ? "" : "s"} — aim for at least ${min} for a reliable ${kindNoun(kind)} LoRA.`,
+    });
+  }
+
+  // Too uniform → acquire variety, framed by what this kind needs.
+  if (datasetHas("low_diversity")) {
+    recs.push({ id: "diversity", tone: "warn", text: diversityAdvice(kind) });
+  }
+
+  // Off-style / object-absent outliers → remove or replace. Style/Object only: the detector is off for
+  // Person (the backend never raises it), and this guard also keeps the copy from mis-firing as "style".
+  const outliers =
+    kind === "style" || kind === "object" ? itemsWithActive("embedding_outlier") : [];
+  if (outliers.length) {
+    recs.push({ id: "outlier", tone: "warn", text: outlierAdvice(kind, outliers.length) });
+  }
+
+  // Weak aesthetics → replace (Style only).
+  if (kind === "style" && datasetHas("low_aesthetic")) {
+    recs.push({
+      id: "aesthetic",
+      tone: "info",
+      text: "Several images score low on aesthetics — swap in stronger examples so the style reads clearly.",
+    });
+  }
+
+  // Blur / exposure → replace by hand (resolution + crop have one-tap fixes; these don't).
+  const unfixable = (report.items ?? []).filter((item) =>
+    activeFlags(item).some((flag) => flag.check === "blur" || flag.check === "exposure"),
+  ).length;
+  if (unfixable) {
+    recs.push({
+      id: "unfixable",
+      tone: "warn",
+      text: `${unfixable} image${unfixable === 1 ? " is" : "s are"} blurry or poorly exposed — replace ${unfixable === 1 ? "it" : "them"} (no one-tap fix).`,
+    });
+  }
+
+  // A standing kind-specific tip — the "what this kind needs" nudge, so guidance differs by kind even
+  // on a clean set.
+  const tip = kindTip(kind);
+  if (tip) {
+    recs.push({ id: "tip", tone: "tip", text: tip });
+  }
+
+  return recs;
 }
 
 // Aesthetic sub-score — the mean LAION-Aesthetics score (~[1, 10]) for STYLE datasets only; `null`
