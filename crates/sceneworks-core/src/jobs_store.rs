@@ -3824,6 +3824,14 @@ const CANDLE_ROUTED_MODELS: &[&str] = &[
     "boogu_image",
     "boogu_image_turbo",
     "boogu_image_edit",
+    // Krea 2 Turbo (epic 7565 P4, sc-7581): the candle `candle-gen-krea` provider serves `krea_2_turbo`
+    // (12B single-stream rectified-flow DiT + Qwen3-VL-4B TE + Qwen-Image VAE, TDM-distilled CFG-free
+    // few-step). Pure **txt2img** — `image_request_candle_eligible` accepts the plain shape and rejects
+    // edit / reference / mask / quant / LoRA (the provider advertises none). The MODEL_TABLE row + manifest
+    // entry are the MLX twin (sc-7572); sc-7581 adds the candle lane (bf16 off the ungated public
+    // `krea/Krea-2-Turbo`, the boogu pattern). NOT yet in `MLX_ROUTED_MODELS` (the mac/MLX routing is a
+    // separate mlx-P2 follow-up), so off-Mac candle is the only native lane today.
+    "krea_2_turbo",
 ];
 
 /// The candle image families that advertise on-the-fly Q4/Q8 quant AND LoRA/LoKr adapters — Lens /

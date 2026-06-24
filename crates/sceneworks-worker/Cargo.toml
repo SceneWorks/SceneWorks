@@ -392,6 +392,10 @@ backend-candle = [
     # Apache-2.0 ungated. Its `MODEL_TABLE` rows already exist (the MLX twin), so
     # `engines::registry_capabilities` advertises them off-Mac with no further change.
     "dep:candle-gen-boogu",
+    # sc-7581 (epic 7565 P4): the candle Krea 2 image provider (`krea_2_turbo`). MODEL_TABLE row +
+    # manifest entry already exist (the MLX twin sc-7572); sc-7581 adds the candle force-link + the
+    # windows/linux bf16 download.
+    "dep:candle-gen-krea",
     # sc-5576 (epic 3692): the candle Kolors image provider (`kolors` — SDXL UNet + ChatGLM3-6B
     # encoder) and the candle SenseNova-U1 NEO-Unify image provider (`sensenova_u1_8b` +
     # `sensenova_u1_8b_fast`). Both pure T2I; their `MODEL_TABLE` rows already exist (MLX families), so
@@ -1110,6 +1114,14 @@ candle-gen-chroma = { git = "https://github.com/michaeltrefry/candle-gen", rev =
 # Ideogram — NOT a separate bespoke stream). Force-linked in `image_jobs.rs` (`use candle_gen_boogu as _;`).
 # Same rev as the others (one candle build, single gen-core pin == the mlx pin 43aa2bf).
 candle-gen-boogu = { git = "https://github.com/michaeltrefry/candle-gen", rev = "88a214fcb8501d54dc6bc67593573f9758d9b651", features = ["cuda"], optional = true }
+# Candle Krea 2 (sc-7581, epic 7565 P4) — Windows/CUDA sibling of the `mlx-gen-krea` pin above.
+# Registers `krea_2_turbo` (12B single-stream DiT + Qwen3-VL-4B TE + Qwen-Image VAE; CFG-free 8-step
+# rectified-flow). bf16-only on candle (the provider rejects on-the-fly quant); force-linked in
+# `image_jobs.rs` (`use candle_gen_krea as _;`). The MODEL_TABLE row + manifest entry already exist
+# (the MLX twin, sc-7572) — sc-7581 adds the candle force-link + the windows/linux bf16 download from
+# the ungated public `krea/Krea-2-Turbo` (the boogu pattern: snapshot root, no quant subdir). Same rev
+# as the other candle crates (one candle build / one gen-core pin cf6f338c == the mlx pin).
+candle-gen-krea = { git = "https://github.com/michaeltrefry/candle-gen", rev = "88a214fcb8501d54dc6bc67593573f9758d9b651", features = ["cuda"], optional = true }
 # Candle VIDEO providers (sc-5097) — Windows/CUDA siblings of mlx-gen-wan / mlx-gen-ltx. wan registers
 # `wan2_2_ti2v_5b` + the 14B MoE pair (`wan2_2_t2v_14b`/`wan2_2_i2v_14b`, sc-5175) + `wan_vace` (the
 # Wan-VACE controllable-video provider, sc-5494 / epic 5481, the worker routes replace_person /

@@ -585,6 +585,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "candle-gen-krea"
+version = "0.0.0"
+source = "git+https://github.com/michaeltrefry/candle-gen?rev=88a214fcb8501d54dc6bc67593573f9758d9b651#88a214fcb8501d54dc6bc67593573f9758d9b651"
+dependencies = [
+ "candle-gen",
+ "candle-gen-qwen-image",
+ "candle-transformers",
+ "inventory",
+ "rand 0.9.4",
+ "rand_distr 0.5.1",
+ "serde_json",
+]
+
+[[package]]
 name = "candle-gen-lens"
 version = "0.0.0"
 source = "git+https://github.com/michaeltrefry/candle-gen?rev=88a214fcb8501d54dc6bc67593573f9758d9b651#88a214fcb8501d54dc6bc67593573f9758d9b651"
@@ -5489,6 +5503,7 @@ dependencies = [
  "candle-gen-instantid",
  "candle-gen-joycaption",
  "candle-gen-kolors",
+ "candle-gen-krea",
  "candle-gen-lens",
  "candle-gen-ltx",
  "candle-gen-prompt-refine",
@@ -7744,7 +7759,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.48.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

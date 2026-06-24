@@ -122,6 +122,11 @@ use candle_gen_chroma as _;
 // Windows/CUDA sibling of the `mlx_gen_boogu` anchor above.
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 use candle_gen_boogu as _;
+// Candle Krea 2 (sc-7581, epic 7565 P4): `krea_2_turbo` self-registers into the shared gen_core
+// inventory; `as _;` keeps the MSVC release linker from GC-ing the `ModelRegistration`. The
+// Windows/CUDA sibling of the `mlx_gen_krea` anchor above.
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+use candle_gen_krea as _;
 // Candle Kolors (sc-5576, epic 3692): the `kolors` T2I id self-registers into the shared gen_core
 // inventory; `as _;` keeps the MSVC release linker from GC-ing the registration.
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
