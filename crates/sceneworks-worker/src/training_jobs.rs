@@ -1359,7 +1359,8 @@ mod tests {
             let mut value = plan_json(dir.path(), kernel, base_model, "lora", &[&image]);
             value["config"]["advanced"]["gradientCheckpointing"] = json!(false);
             let plan = parse(value);
-            finalize_training_config(map_training_config(&plan.config), &plan).gradient_checkpointing
+            finalize_training_config(map_training_config(&plan.config), &plan)
+                .gradient_checkpointing
         };
 
         // The candle-eligible big DiTs are forced on despite the plan's `false`, so a real off-Mac
@@ -1379,11 +1380,18 @@ mod tests {
         );
 
         // A plan that already requests checkpointing is unchanged (the override only flips false→true).
-        let mut value = plan_json(dir.path(), "z_image_lora", "z_image_turbo", "lora", &[&image]);
+        let mut value = plan_json(
+            dir.path(),
+            "z_image_lora",
+            "z_image_turbo",
+            "lora",
+            &[&image],
+        );
         value["config"]["advanced"]["gradientCheckpointing"] = json!(true);
         let plan = parse(value);
         assert!(
-            finalize_training_config(map_training_config(&plan.config), &plan).gradient_checkpointing,
+            finalize_training_config(map_training_config(&plan.config), &plan)
+                .gradient_checkpointing,
             "an explicit gradientCheckpointing=true is preserved"
         );
     }
