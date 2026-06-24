@@ -87,7 +87,7 @@ mod tests {
         assert!(cropped, "200x64 (crop-loss 0.68) needs a crop");
         let (w, h) = dims(&out);
         assert_eq!(h, 64, "short edge kept");
-        assert!(w < 200 && w >= 64);
+        assert!((64..200).contains(&w));
         assert!(
             f64::from(w - h) / f64::from(w) < 0.35,
             "clears the crop-loss flag"

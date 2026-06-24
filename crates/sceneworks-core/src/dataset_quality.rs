@@ -2691,7 +2691,7 @@ mod tests {
         let rect = plan_smart_crop(200, 64, 0.25, None).expect("needs a crop");
         assert_eq!(rect.height, 64, "short edge kept in full");
         assert!(
-            rect.width < 200 && rect.width >= 64,
+            (64..200).contains(&rect.width),
             "long edge trimmed, not below short"
         );
         // centered window: equal margins either side (±1px for rounding).
@@ -2709,7 +2709,7 @@ mod tests {
     fn smart_crop_handles_portrait_on_the_vertical_axis() {
         let rect = plan_smart_crop(64, 200, 0.25, None).expect("needs a crop");
         assert_eq!(rect.width, 64, "short edge (width) kept");
-        assert!(rect.height < 200 && rect.height >= 64);
+        assert!((64..200).contains(&rect.height));
         assert_eq!(rect.x, 0);
         assert!((i64::from(rect.y) - i64::from((200 - rect.height) / 2)).abs() <= 1);
     }
