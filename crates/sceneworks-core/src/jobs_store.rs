@@ -3759,6 +3759,15 @@ const CANDLE_ROUTED_MODELS: &[&str] = &[
     "flux_schnell",
     "flux_dev",
     "flux2_klein_9b",
+    // FLUX.2-dev (epic 6564 sc-7458): the guidance-distilled 32B flagship, a SEPARATE candle engine
+    // from klein (Mistral3 TE + 48/48/15360 DiT), registered by `candle-gen-flux2`'s `flux2_dev`
+    // generator (sc-7457). Off-Mac the candle lane loads the dense `black-forest-labs/FLUX.2-dev`
+    // diffusers snapshot and Q4-quantizes it at load (CPU-stage → quantize-onto-GPU; the 32B doesn't
+    // fit the GPU dense) — the manifest `mlx.quantize: 4` + the dev descriptor's `supported_quants`
+    // drive that through the shared `resolve_quant` gate, so it needs no per-payload quant request and
+    // stays a pure **txt2img** id here. Edit / multi-reference / strict-pose shapes are rejected below
+    // (`image_request_candle_eligible`) and fall back to the Python torch worker until story 4 lands.
+    "flux2_dev",
     "qwen_image",
     "lens",
     "lens_turbo",
@@ -3779,6 +3788,18 @@ const CANDLE_ROUTED_MODELS: &[&str] = &[
     // lane lands (sc-6598). These ids are also in `MLX_ROUTED_MODELS` (the macOS native engine).
     "ideogram_4",
     "ideogram_4_turbo",
+    // Boogu-Image-0.1 (sc-7524, epic 6831): the candle `candle-gen-boogu` provider serves `boogu_image`
+    // (Base, true-CFG), `boogu_image_turbo` (DMD few-step, CFG-free), and `boogu_image_edit` (single-
+    // reference instruction TI2I). Base + Turbo are pure **txt2img** on candle; `boogu_image_edit`'s
+    // `edit_image` shape is handled by the bespoke `boogu_edit_candle_eligible` branch in
+    // `image_job_is_candle_eligible` (the source `Reference` is resolved in-lane by the worker's
+    // `generate_candle_stream`, like Ideogram — NOT a separate bespoke stream). bf16-only (the provider
+    // rejects on-the-fly quant), so a deliberate quant request defers below — boogu is intentionally NOT
+    // in `CANDLE_QUANT_LORA_MODELS`. Apache-2.0 ungated. These ids are also in `MLX_ROUTED_MODELS` (the
+    // macOS native engine); mirror `boogu_mlx_eligible`.
+    "boogu_image",
+    "boogu_image_turbo",
+    "boogu_image_edit",
 ];
 
 /// The candle image families that advertise on-the-fly Q4/Q8 quant AND LoRA/LoKr adapters — Lens /
@@ -3889,6 +3910,17 @@ fn image_job_is_candle_eligible(job: &JobSnapshot) -> bool {
     if matches!(model, "ideogram_4" | "ideogram_4_turbo")
         && ideogram_edit_candle_eligible(&job.payload)
     {
+        return true;
+    }
+    // Boogu instruction edit (sc-7524, epic 6831): a `boogu_image_edit` `edit_image` job with a source
+    // image runs the candle `candle-gen-boogu` edit path. Like Ideogram (and unlike the SDXL/FLUX.2/Qwen/
+    // Z-Image bespoke streams above), Boogu has no separate edit stream — the SAME registered
+    // `boogu_image_edit` engine resolves the source `Reference` in the worker's `generate_candle_stream`
+    // (the Qwen3-VL vision tower reads it + it VAE-encodes into the DiT reference latent), exactly as the
+    // MLX `generate_stream` handles Boogu edit in-lane. The `image_request_candle_eligible` gate below
+    // rejects the whole `edit_image` family, so branch it out here. Base/Turbo are pure T2I (the generic
+    // gate). Mirrors the worker's dispatch + the MLX `boogu_mlx_eligible`.
+    if model == "boogu_image_edit" && boogu_edit_candle_eligible(&job.payload) {
         return true;
     }
     // SDXL IP-Adapter-Plus reference conditioning (sc-5488, epic 5480): an sdxl-family model with a
@@ -4393,6 +4425,35 @@ fn ideogram_edit_candle_eligible(payload: &Map<String, Value>) -> bool {
         .get("sourceAssetId")
         .and_then(Value::as_str)
         .is_some_and(|value| !value.trim().is_empty())
+}
+
+/// Boogu instruction-edit candle-routing conditions (sc-7524, epic 6831). The candle `boogu_image_edit`
+/// engine serves `edit_image` mode with a `sourceAssetId` — a single-reference instruction TI2I (the
+/// source is VAE-encoded into the DiT reference latent AND read by the Qwen3-VL vision tower; no mask /
+/// inpaint / outpaint, the descriptor accepts only `Reference`). Same payload predicate as the other edit
+/// gates, gated to `boogu_image_edit` by the caller (only the Edit checkpoint edits — Base/Turbo are
+/// T2I-only). Like Ideogram, the candle lane reuses the generic `generate_candle_stream` (the source is
+/// resolved in-lane by `resolve_boogu_edit`), so there is no separate worker `*_available` gate to mirror
+/// — the worker's `is_candle_engine` + in-lane edit resolve cover it. Candle-only — macOS keeps the MLX
+/// `boogu_image_edit` registry generator's edit path.
+fn boogu_edit_candle_eligible(payload: &Map<String, Value>) -> bool {
+    if payload.get("mode").and_then(Value::as_str) != Some("edit_image") {
+        return false;
+    }
+    // One source: the single `sourceAssetId`, or the plural `referenceAssetIds` multi-image picker
+    // (sc-7645 — the Boogu DiT packs up to 5 references). Either routes the edit to candle.
+    let single = payload
+        .get("sourceAssetId")
+        .and_then(Value::as_str)
+        .is_some_and(|value| !value.trim().is_empty());
+    let plural = payload
+        .get("referenceAssetIds")
+        .and_then(Value::as_array)
+        .is_some_and(|ids| {
+            ids.iter()
+                .any(|v| v.as_str().is_some_and(|s| !s.trim().is_empty()))
+        });
+    single || plural
 }
 
 /// SDXL IP-Adapter-Plus candle-routing conditions (sc-5488, epic 5480). The candle `IpAdapterSdxl`
@@ -5858,6 +5919,62 @@ mod candle_routing_tests {
     }
 
     #[test]
+    fn boogu_text_to_image_and_edit_route_to_candle() {
+        // sc-7524 (epic 6831): the candle parity of `boogu_text_to_image_and_edit_route_to_mlx`. The
+        // three Boogu ids are in `CANDLE_ROUTED_MODELS`; Base + Turbo are pure txt2img (the generic gate),
+        // and `boogu_image_edit`'s `edit_image` shape routes via the bespoke `boogu_edit_candle_eligible`
+        // branch (the source `Reference` is resolved in-lane by `generate_candle_stream`, like Ideogram).
+        for model in ["boogu_image", "boogu_image_turbo", "boogu_image_edit"] {
+            // Plain txt2img → the generic gate (the edit checkpoint can also T2I, mirroring MLX).
+            assert!(
+                image_request_candle_eligible(model, &object(json!({ "prompt": "a red panda" }))),
+                "{model} plain txt2img must be candle-eligible"
+            );
+        }
+        // Edit (source instruction) is the Edit checkpoint's capability ONLY.
+        let edit_payload = |model: &str| json!({ "model": model, "mode": "edit_image", "sourceAssetId": "asset_1" });
+        // `boogu_image_edit` + edit_image + source → the bespoke branch claims it for candle.
+        assert!(boogu_edit_candle_eligible(&object(edit_payload(
+            "boogu_image_edit"
+        ))));
+        assert!(image_job_is_candle_eligible(&image_edit_job(edit_payload(
+            "boogu_image_edit"
+        ))));
+        // The generic txt2img gate still rejects the edit_image family (the bespoke lane handles it).
+        assert!(!image_request_candle_eligible(
+            "boogu_image_edit",
+            &object(edit_payload("boogu_image_edit"))
+        ));
+        // Base / Turbo do NOT edit — an edit_image job on them is not candle-eligible (no edit lane; the
+        // generic gate rejects edit_image and the boogu edit branch is gated to `boogu_image_edit`).
+        assert!(!image_job_is_candle_eligible(&image_edit_job(
+            edit_payload("boogu_image")
+        )));
+        assert!(!image_job_is_candle_eligible(&image_edit_job(
+            edit_payload("boogu_image_turbo")
+        )));
+        // sc-7645: the multi-image picker sends plural `referenceAssetIds` (no `sourceAssetId`) — the
+        // bespoke branch still claims it for candle (the Boogu DiT packs up to 5 references).
+        assert!(boogu_edit_candle_eligible(&object(json!({
+            "model": "boogu_image_edit", "mode": "edit_image",
+            "referenceAssetIds": ["a", "b"]
+        }))));
+        // `edit_image` WITHOUT a source → nothing to edit → not this lane.
+        assert!(!boogu_edit_candle_eligible(&object(json!({
+            "model": "boogu_image_edit", "mode": "edit_image"
+        }))));
+        // An empty plural list with no `sourceAssetId` is also nothing to edit.
+        assert!(!boogu_edit_candle_eligible(&object(json!({
+            "model": "boogu_image_edit", "mode": "edit_image", "referenceAssetIds": []
+        }))));
+        // bf16-only: a deliberate Q8/Q4 quant request defers (boogu is not in CANDLE_QUANT_LORA_MODELS).
+        assert!(!image_request_candle_eligible(
+            "boogu_image",
+            &object(json!({ "prompt": "x", "advanced": { "mlxQuantize": 8 } }))
+        ));
+    }
+
+    #[test]
     fn explicit_quantization_falls_back_to_torch_image_and_video() {
         // sc-5099: the candle providers are dense (supported_quants: &[]); an explicit
         // `advanced.mlxQuantize > 0` must route to Python rather than silently running dense.
@@ -5974,6 +6091,9 @@ mod candle_routing_tests {
             "realvisxl_lightning",
             "z_image_turbo",
             "flux_dev",
+            // sc-7458: FLUX.2-dev (the 32B flagship) routes to candle for plain txt2img off-Mac (loads
+            // the dense snapshot + Q4-quantizes at load). Edit/reference shapes still defer (story 4).
+            "flux2_dev",
             "qwen_image",
             "chroma1_hd",
             "kolors",
@@ -6076,6 +6196,18 @@ mod candle_routing_tests {
             "model": "flux2_klein_9b_kv",
             "mode": "edit_image",
             "sourceAssetId": "asset_1"
+        }))));
+        // sc-7458: FLUX.2-dev is txt2img-only on candle in this slice. Its edit / multi-reference shapes
+        // (the `flux2_dev_edit` surface) are NOT a candle lane yet (epic 6564 story 4), so the candle
+        // worker does NOT claim them — they stay off the candle lane until that port lands.
+        assert!(!image_job_is_candle_eligible(&image_generate_job(json!({
+            "model": "flux2_dev",
+            "mode": "edit_image",
+            "sourceAssetId": "asset_1"
+        }))));
+        assert!(!image_job_is_candle_eligible(&image_generate_job(json!({
+            "model": "flux2_dev",
+            "referenceAssetId": "asset_1"
         }))));
         // sc-5487: a Qwen-Image-Edit edit (`edit_image` + a source) is now the candle `QwenEdit` lane
         // (dual-latent reference editing). Off-Mac this was a torch fallback; the candle worker CLAIMS

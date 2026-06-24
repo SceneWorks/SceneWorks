@@ -832,6 +832,31 @@ pub(crate) fn read_advanced_sampling_knobs(
     (name("sampler"), name("scheduler"), scheduler_shift)
 }
 
+/// The curated sampler/scheduler menu (epic 7114 decision 2) the **bespoke** conditioned image paths
+/// honor — the shared `gen_core` solver/scheduler vocabulary the unified-sampler engines gate on
+/// (`Solver::from_name` / the additive `denoise_curated` path; mlx #537/#538/#539, candle #130). The
+/// bespoke per-family paths (InstantID, Kolors-conditioned, PuLID — sc-7432) build CUSTOM request
+/// structs OUTSIDE `generate_stream`'s generic plumbing, so they N3-normalize the per-request knob
+/// against THIS menu instead of a `Capabilities` list: every engine's advertised set is a superset of
+/// it (their native default is the only extra, and `"default"`/`None` already strip to the engine
+/// default), so a name that survives [`normalize_sampling_knob`] here also passes the engine's own
+/// `validate_request`. This is also the single source of truth the manifest⊆engine drift guard
+/// (`engines.rs`) checks these out-of-`MODEL_TABLE` models against, so the runtime and the guard never
+/// disagree. Derived from `gen_core` (the engines' own vocab), so it tracks the framework on BOTH
+/// backends rather than hard-coding names. Returns `(samplers, schedulers)`.
+pub(crate) fn curated_image_menu() -> (Vec<&'static str>, Vec<&'static str>) {
+    (
+        gen_core::sampling::Solver::ALL
+            .iter()
+            .map(|solver| solver.name())
+            .collect(),
+        gen_core::sampling::Scheduler::ALL
+            .iter()
+            .map(|scheduler| scheduler.name())
+            .collect(),
+    )
+}
+
 #[cfg(test)]
 mod sampling_knob_tests {
     use super::*;
@@ -988,6 +1013,7 @@ fn generate_one(
     guidance: Option<f32>,
     negative_prompt: Option<String>,
     reference: Option<&(Image, f32)>,
+    multi_references: &[Image],
     edit_mask: Option<&Image>,
     true_cfg: Option<f32>,
     sampler: Option<&str>,
@@ -997,12 +1023,19 @@ fn generate_one(
     cancel: &CancelFlag,
     on_progress: &mut dyn FnMut(Progress),
 ) -> WorkerResult<(u32, u32, Vec<u8>)> {
-    let mut conditioning = match reference {
-        Some((image, strength)) => vec![Conditioning::Reference {
-            image: image.clone(),
-            strength: Some(*strength),
-        }],
-        None => Vec::new(),
+    // `multi_references` (Boogu instruction edit, sc-7645) takes precedence when present: one image →
+    // `Reference` (byte-identical to the single-reference path); 2–5 → `MultiReference`. Every other
+    // family passes `&[]` and keeps the single `reference` (img2img init / IP-Adapter) path unchanged.
+    let mut conditioning = if !multi_references.is_empty() {
+        build_reference_conditioning(multi_references)
+    } else {
+        match reference {
+            Some((image, strength)) => vec![Conditioning::Reference {
+                image: image.clone(),
+                strength: Some(*strength),
+            }],
+            None => Vec::new(),
+        }
     };
     // Inpaint / outpaint mask (Ideogram 4 edit, sc-6303): a `Conditioning::Mask` (white = repaint)
     // alongside the source `Reference`. Only the Ideogram edit path supplies one today; every other
@@ -1117,36 +1150,97 @@ const IDEOGRAM_EDIT_STRENGTH: f32 = 0.6;
 ))]
 const IDEOGRAM_INPAINT_STRENGTH: f32 = 0.85;
 
-/// Resolve the Boogu instruction-edit source: the `sourceAssetId` image, fit to the output W×H (so
-/// it satisfies the engine's multiple-of-16 guard and aligns to the target aspect). Returns
-/// `(source, strength)`; `None` when not an edit / no source. The `strength` is inert for Boogu (the
-/// edit is structural — the engine ignores `Conditioning::Reference.strength`), so a full-strength
-/// 1.0 is returned for the contract. No mask / outpaint path (the descriptor accepts only `Reference`).
-#[cfg(target_os = "macos")]
-fn resolve_boogu_edit(
-    request: &ImageRequest,
-    settings: &Settings,
-    project_path: &Path,
-) -> WorkerResult<Option<(Image, f32)>> {
-    if request.mode != "edit_image" {
-        return Ok(None);
+/// Upper bound on reference images for a Boogu instruction edit (sc-7645). The DiT's
+/// `image_index_embedding` carries 5 per-image index slots (OmniGen2 lineage), so `N ∈ [1, 5]`
+/// references can be packed into one edit (e.g. subject-from-A composed into scene-from-B); a plural
+/// picker beyond that is capped here. Matches the `mlx-gen-boogu` / `candle-gen-boogu` `MAX_EDIT_REFS`.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+const BOOGU_MAX_EDIT_REFERENCES: usize = 5;
+
+/// One `Conditioning::Reference` (a single reference) or one `Conditioning::MultiReference` (2–5) from
+/// the resolved Boogu edit references (cloned per output). Empty references → empty (T2I fallback).
+/// The single case stays a `Reference` so it is byte-identical to the pre-sc-7645 single-reference
+/// path. Mirrors `flux2.rs::build_edit_conditioning`. The per-reference strength is inert for Boogu
+/// (the edit is structural), so `None` is used. Not cfg-gated — called from the un-gated [`generate_one`].
+fn build_reference_conditioning(references: &[Image]) -> Vec<Conditioning> {
+    match references {
+        [] => Vec::new(),
+        [single] => vec![Conditioning::Reference {
+            image: single.clone(),
+            strength: None,
+        }],
+        many => vec![Conditioning::MultiReference {
+            images: many.to_vec(),
+        }],
     }
-    let Some(asset_id) = request
+}
+
+/// Reference asset ids for a Boogu instruction edit, in order. The multi-image picker sends the plural
+/// `referenceAssetIds` — take all of them, capped at [`BOOGU_MAX_EDIT_REFERENCES`]; with no plural list
+/// it falls back to the single Image-Edit `sourceAssetId` (`edit_image` mode). Mirrors
+/// `flux2_edit_reference_ids`.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+fn boogu_edit_reference_ids(request: &ImageRequest) -> Vec<String> {
+    if !request.reference_asset_ids.is_empty() {
+        // The parsed list is already trimmed + non-empty (sceneworks-core `string_list`).
+        return request
+            .reference_asset_ids
+            .iter()
+            .take(BOOGU_MAX_EDIT_REFERENCES)
+            .cloned()
+            .collect();
+    }
+    if let Some(id) = request
         .source_asset_id
         .as_deref()
         .map(str::trim)
         .filter(|id| !id.is_empty())
-    else {
-        return Ok(None);
-    };
-    let source = load_reference_image(
-        &settings.data_dir,
-        &request.project_id,
-        asset_id,
-        project_path,
-    )?;
-    let source = fit_engine_image(source, request.width, request.height, &request.fit_mode)?;
-    Ok(Some((source, 1.0)))
+    {
+        return vec![id.to_owned()];
+    }
+    Vec::new()
+}
+
+/// Resolve the Boogu instruction-edit sources: the `N ∈ [1, 5]` reference images (plural
+/// `referenceAssetIds`, else the single `sourceAssetId` — [`boogu_edit_reference_ids`]), each fit to the
+/// output W×H (so it satisfies the engine's multiple-of-16 guard and aligns to the target aspect).
+/// Returns the references in order; **empty** when not an edit / no source. The engine treats one
+/// reference as `Conditioning::Reference` and 2–5 as `Conditioning::MultiReference` (each read by the
+/// Qwen3-VL vision tower + VAE-encoded into the DiT spatial sequence). The per-reference strength is
+/// inert for Boogu (the edit is structural — the engine ignores `Conditioning::Reference.strength`). No
+/// mask / outpaint path (the descriptor accepts only `Reference` / `MultiReference`).
+///
+/// Shared by the macOS MLX `generate_stream` and the off-Mac candle `generate_candle_stream` (sc-7524):
+/// Boogu is the same engine family for T2I and edit on both backends (the registered `boogu_image_edit`
+/// resolves the source `Reference`(s) in-lane, like Ideogram), so both lanes resolve the edit sources the
+/// same way. Its deps (`load_reference_image`, `fit_engine_image`) already compile off-Mac under
+/// `backend-candle` (the Ideogram edit path uses them too).
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+fn resolve_boogu_edit(
+    request: &ImageRequest,
+    settings: &Settings,
+    project_path: &Path,
+) -> WorkerResult<Vec<Image>> {
+    if request.mode != "edit_image" {
+        return Ok(Vec::new());
+    }
+    let ids = boogu_edit_reference_ids(request);
+    let mut references = Vec::with_capacity(ids.len());
+    for id in &ids {
+        let source = load_reference_image(&settings.data_dir, &request.project_id, id, project_path)?;
+        let source = fit_engine_image(source, request.width, request.height, &request.fit_mode)?;
+        references.push(source);
+    }
+    Ok(references)
 }
 
 /// Resolve the Ideogram 4 `edit_image` conditioning (sc-6303) into the base MLX path's
@@ -1561,16 +1655,19 @@ async fn generate_stream(
             }
             None => (None, None, None),
         }
-    } else if request.model == "boogu_image_edit" && request.mode == "edit_image" {
-        // Boogu instruction edit (epic 6387): `sourceAssetId` → the engine's `Reference` (the Qwen3-VL
-        // vision tower reads it + it VAE-encodes into the DiT spatial latent); the prompt is the edit
-        // instruction. No mask / IP-Adapter (the `boogu_image_edit` descriptor accepts only `Reference`).
-        match resolve_boogu_edit(request, settings, project_path)? {
-            Some((source, strength)) => (Some((source, strength)), None, None),
-            None => (None, None, None),
-        }
     } else {
+        // Boogu instruction edit resolves its (1..5) references separately into `boogu_refs` below —
+        // it uses the `MultiReference`-capable path, not the single `identity_init` reference.
         (None, None, None)
+    };
+    // Boogu instruction edit (epic 6387, multi-reference sc-7645): resolve the 1..5 source references
+    // (the Qwen3-VL vision tower reads each + they VAE-encode into the DiT spatial sequence); the prompt
+    // is the edit instruction. Threaded to `generate_one` as `Conditioning::Reference` (one reference) /
+    // `MultiReference` (2–5). No mask / IP-Adapter (the descriptor accepts only Reference/MultiReference).
+    let boogu_refs: Vec<Image> = if request.model == "boogu_image_edit" {
+        resolve_boogu_edit(request, settings, project_path)?
+    } else {
+        Vec::new()
     };
     // The CFG scale passed to the engine as `true_cfg`: the FLUX.1-dev reference path's scale if
     // present, otherwise the true-CFG family scale (Chroma). `None` for the guidance-scalar and
@@ -1615,6 +1712,7 @@ async fn generate_stream(
                         guidance,
                         negative_prompt.clone(),
                         identity_init.as_ref(),
+                        &boogu_refs,
                         ideogram_edit_mask.as_ref(),
                         true_cfg,
                         sampler.as_deref(),
@@ -1705,6 +1803,11 @@ fn is_candle_engine(model: &str) -> bool {
             | "flux_schnell"
             | "flux_dev"
             | "flux2_klein_9b"
+            // FLUX.2-dev (sc-7458): the 32B flagship rides the generic candle txt2img lane like klein.
+            // `generate_candle_stream` resolves Q4 (manifest `mlx.quantize: 4` + the dev descriptor's
+            // `supported_quants`) so the dense snapshot is staged in CPU RAM and quantized onto the GPU
+            // at load. Edit/control/reference shapes route to their bespoke lanes or torch (story 4).
+            | "flux2_dev"
             | "qwen_image"
             | "chroma1_hd"
             | "chroma1_base"
@@ -1716,6 +1819,12 @@ fn is_candle_engine(model: &str) -> bool {
             | "sensenova_u1_8b_fast"
             | "ideogram_4"
             | "ideogram_4_turbo"
+            // Boogu-Image-0.1 (sc-7524, epic 6831): Base + Turbo (txt2img) and the Edit checkpoint, all
+            // on the generic candle lane. Like Ideogram, `boogu_image_edit`'s instruction edit is in-lane
+            // (the engine resolves the source `Reference`), not a separate bespoke stream.
+            | "boogu_image"
+            | "boogu_image_turbo"
+            | "boogu_image_edit"
     )
 }
 
@@ -1728,13 +1837,14 @@ fn candle_adapter_label(model: &str) -> &'static str {
     match model {
         "z_image_turbo" => "candle_z_image",
         "flux_schnell" | "flux_dev" => "candle_flux",
-        "flux2_klein_9b" => "candle_flux2",
+        "flux2_klein_9b" | "flux2_dev" => "candle_flux2",
         "qwen_image" => "candle_qwen",
         "chroma1_hd" | "chroma1_base" | "chroma1_flash" => "candle_chroma",
         "lens" | "lens_turbo" => "candle_lens",
         "kolors" => "candle_kolors",
         "sensenova_u1_8b" | "sensenova_u1_8b_fast" => "candle_sensenova",
         "ideogram_4" | "ideogram_4_turbo" => "candle_ideogram",
+        "boogu_image" | "boogu_image_turbo" | "boogu_image_edit" => "candle_boogu",
         // sdxl / realvisxl share the candle "sdxl" engine.
         _ => CANDLE_ADAPTER,
     }
@@ -1793,6 +1903,53 @@ fn candle_ideogram_subdir(root: &Path) -> PathBuf {
     }
 }
 
+/// The default candle Boogu-Image-0.1 weights repo for a variant. The MLX turnkey
+/// (`SceneWorks/boogu-image-mlx`, the `MODEL_TABLE` default + the macOS MLX repo) is MLX-quantized and
+/// NOT candle-readable, but — unlike Ideogram — Boogu needs no re-hosted bf16 turnkey: the ORIGINAL
+/// public repos `Boogu/Boogu-Image-0.1-{Base,Turbo,Edit}` (Apache-2.0, ungated) are already bf16 and
+/// already laid out as a complete `mllm/ transformer/ vae/` snapshot at the repo root — exactly what the
+/// provider's `pipeline::load_components` reads. So the candle lane points straight at them (one repo per
+/// variant, loaded from the snapshot root — no `base/ turbo/ edit/` subfolder, unlike the MLX turnkey).
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+fn candle_boogu_default_repo(model: &str) -> &'static str {
+    match model {
+        "boogu_image_turbo" => "Boogu/Boogu-Image-0.1-Turbo",
+        "boogu_image_edit" => "Boogu/Boogu-Image-0.1-Edit",
+        _ => "Boogu/Boogu-Image-0.1-Base",
+    }
+}
+
+/// Resolve the candle Boogu weights repo for `request.model`: the off-Mac (`std::env::consts::OS`)
+/// download entry's `repo` from the manifest (the single source of truth, also driving the downloader) —
+/// else the per-variant [`candle_boogu_default_repo`]. Deliberately NOT the entry-level `repo` /
+/// `model_repo`, which is the macOS MLX turnkey. Mirrors `candle_ideogram_repo`.
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+fn candle_boogu_repo(request: &ImageRequest) -> String {
+    let os = std::env::consts::OS;
+    request
+        .model_manifest_entry
+        .get("downloads")
+        .and_then(Value::as_array)
+        .and_then(|downloads| {
+            downloads.iter().find_map(|entry| {
+                let matches_os = entry
+                    .get("platforms")
+                    .and_then(Value::as_array)
+                    .is_some_and(|platforms| platforms.iter().any(|p| p.as_str() == Some(os)));
+                if !matches_os {
+                    return None;
+                }
+                entry
+                    .get("repo")
+                    .and_then(Value::as_str)
+                    .map(str::trim)
+                    .filter(|repo| !repo.is_empty())
+                    .map(str::to_owned)
+            })
+        })
+        .unwrap_or_else(|| candle_boogu_default_repo(&request.model).to_owned())
+}
+
 /// Windows/CUDA candle execution path (sc-3675 SDXL, generalized in sc-5096). The macOS dispatch is
 /// MLX-bound; candle is a narrow **txt2img-only** lane, so this is a trimmed sibling of
 /// [`generate_stream`] that drives the SAME neutral streaming harness (`start_cached_gen_stream` →
@@ -1839,19 +1996,33 @@ async fn generate_candle_stream(
         model.backend()
     };
     let is_ideogram = crate::ideogram_caption::is_ideogram_model(&request.model);
-    // Ideogram is the lone candle image family whose upstream isn't candle-readable: the published
-    // turnkey `SceneWorks/ideogram-4-mlx` (the MODEL_TABLE default + the macOS MLX repo) is
-    // MLX-quantized, so the candle lane loads bf16 from `SceneWorks/ideogram-4` (the `bf16/` subdir)
-    // instead — the image sibling of the candle video `candle_video_repo` override (sc-6859). macOS
-    // keeps the MLX turnkey. Every other candle family shares its upstream diffusers repo via `model_repo`.
+    // Boogu (sc-7524) is the second candle image family whose upstream turnkey isn't candle-readable: its
+    // `SceneWorks/boogu-image-mlx` turnkey is MLX-quantized, so the candle lane loads bf16 from the
+    // ORIGINAL public `Boogu/Boogu-Image-0.1-{Base,Turbo,Edit}` repos (per-variant; each a complete
+    // `mllm/ transformer/ vae/` snapshot at its root — loaded directly, no subfolder).
+    let is_boogu = matches!(
+        request.model.as_str(),
+        "boogu_image" | "boogu_image_turbo" | "boogu_image_edit"
+    );
+    // Ideogram + Boogu are the candle image families whose `MODEL_TABLE` turnkey isn't candle-readable:
+    // the published `SceneWorks/ideogram-4-mlx` / `SceneWorks/boogu-image-mlx` (the macOS MLX repos) are
+    // MLX-quantized, so the candle lane loads bf16 from a different repo. Ideogram re-hosts a bf16 copy
+    // (`SceneWorks/ideogram-4`'s `bf16/` subdir, because the upstream is gated); Boogu points straight at
+    // its ungated public originals (`Boogu/Boogu-Image-0.1-*`, one repo per variant, loaded from the
+    // snapshot root). macOS keeps the MLX turnkeys. Every other candle family shares its upstream diffusers
+    // repo via `model_repo`.
     let repo = if is_ideogram {
         candle_ideogram_repo(request)
+    } else if is_boogu {
+        candle_boogu_repo(request)
     } else {
         model_repo(request, &model)
     };
     let snapshot = huggingface_snapshot_dir(&settings.data_dir, &repo).ok_or_else(|| {
         WorkerError::InvalidPayload(format!("candle weights snapshot not found for {repo}"))
     })?;
+    // Ideogram nests its weights under a `bf16/` subdir; Boogu's originals (and every other family) are a
+    // complete snapshot at the root, so `weights_dir` is the snapshot itself.
     let weights_dir = if is_ideogram {
         candle_ideogram_subdir(&snapshot)
     } else {
@@ -1911,20 +2082,32 @@ async fn generate_candle_stream(
     } else {
         request.prompt.clone()
     };
-    // Ideogram 4 img2img / Remix + mask inpaint / outpaint edit (sc-6598): resolve the source
-    // `Reference` (+ optional `Mask`) + strength once, seed-independent — the candle sibling of the MLX
-    // `generate_stream` edit path. `resolve_ideogram_edit` returns `None` for a non-edit (T2I) job, and
-    // it is gated to the ideogram family so a stray non-ideogram job reaching this generic lane is
-    // untouched. Other candle edit families have their own bespoke streams (checked before this dispatch).
-    let (ideogram_reference, ideogram_mask) =
-        if is_ideogram {
-            match resolve_ideogram_edit(request, settings, project_path)? {
-                Some((source, strength, mask)) => (Some((source, strength)), mask),
-                None => (None, None),
-            }
-        } else {
-            (None, None)
-        };
+    // In-lane edit conditioning (sc-6598 Ideogram / sc-7524 Boogu): resolve the source `Reference`
+    // (+ optional `Mask` for Ideogram) + strength once, seed-independent — the candle sibling of the MLX
+    // `generate_stream` edit path. Both families edit on the SAME engine as their T2I (no separate bespoke
+    // stream), so the generic lane resolves the source here. `resolve_ideogram_edit` / `resolve_boogu_edit`
+    // return `None` for a non-edit (T2I) job, and each is gated to its family so a stray job reaching this
+    // generic lane is untouched. Boogu has no mask (the `boogu_image_edit` descriptor accepts only
+    // `Reference` — the Qwen3-VL vision tower reads it + it VAE-encodes into the DiT reference latent).
+    // Other candle edit families (sdxl/flux2/qwen/z-image) have their own bespoke streams (checked before
+    // this dispatch).
+    let (edit_reference, edit_mask) = if is_ideogram {
+        match resolve_ideogram_edit(request, settings, project_path)? {
+            Some((source, strength, mask)) => (Some((source, strength)), mask),
+            None => (None, None),
+        }
+    } else {
+        (None, None)
+    };
+    // Boogu instruction edit (sc-7524, multi-reference sc-7645): resolve the 1..5 references here (each
+    // read by the Qwen3-VL vision tower + VAE-encoded into the DiT spatial sequence) — the
+    // `MultiReference`-capable path, not the single `edit_reference`. Threaded to `generate_one` as
+    // `Conditioning::Reference` (one) / `MultiReference` (2–5). Empty for non-Boogu / non-edit jobs.
+    let boogu_refs: Vec<Image> = if request.model == "boogu_image_edit" {
+        resolve_boogu_edit(request, settings, project_path)?
+    } else {
+        Vec::new()
+    };
     let (width, height) = (request.width, request.height);
     // Per-payload sampler / scheduler / schedule-shift, mirroring the MLX `generate_stream` lane (the
     // 1753 front-half advanced carrier — epic 7114 P5, sc-7127). RealVisXL Lightning (sc-7176) forces the
@@ -1957,8 +2140,13 @@ async fn generate_candle_stream(
         &job.id,
         backend,
     );
-    // sc-6135: caption upsampling is FLUX.2-dev-only and dev runs on the macOS path, so this is a
-    // no-op here — resolved for uniformity (and so a future candle enhancer would be wired).
+    // sc-6135 / sc-7458: caption upsampling is FLUX.2-dev-only. On candle (off-Mac) dev now runs here,
+    // but the Mistral3/Pixtral caption-upsampler vision tower is NOT ported (deferred to epic 6564
+    // story 4), so `enhance` degrades to **passthrough**: it is carried onto the `GenerationRequest`
+    // for uniformity, but the candle `Flux2Generator` ignores `enhance_prompt`, so the raw prompt is
+    // used verbatim. Critically this is a no-op, NOT a fall-back to the Python torch worker — the dev
+    // T2I job stays on candle (a future candle enhancer lights up here with no router change). Every
+    // other candle family ignores the fields too.
     let enhance = PromptEnhance::from_advanced(&request.advanced);
     // Record the effective CFG knob (guidance for guided families, else true_cfg) + quant bits in the
     // recipe, so a Lens asset's sidecar reflects the Q4/Q8 it ran at (parity with the MLX path).
@@ -1983,8 +2171,9 @@ async fn generate_candle_stream(
                         steps,
                         guidance,
                         negative_prompt.clone(),
-                        ideogram_reference.as_ref(),
-                        ideogram_mask.as_ref(),
+                        edit_reference.as_ref(),
+                        &boogu_refs,
+                        edit_mask.as_ref(),
                         true_cfg,
                         // Per-payload sampler / scheduler / schedule-shift (sc-7127), already N3-guarded
                         // against this family's advertised surface above. RealVisXL Lightning forces
@@ -2270,6 +2459,7 @@ mod candle_label_tests {
         assert_eq!(candle_adapter_label("flux_schnell"), "candle_flux");
         assert_eq!(candle_adapter_label("flux_dev"), "candle_flux");
         assert_eq!(candle_adapter_label("flux2_klein_9b"), "candle_flux2");
+        assert_eq!(candle_adapter_label("flux2_dev"), "candle_flux2");
         assert_eq!(candle_adapter_label("qwen_image"), "candle_qwen");
         assert_eq!(candle_adapter_label("chroma1_hd"), "candle_chroma");
         assert_eq!(candle_adapter_label("chroma1_base"), "candle_chroma");
@@ -2282,6 +2472,12 @@ mod candle_label_tests {
             candle_adapter_label("sensenova_u1_8b_fast"),
             "candle_sensenova"
         );
+        assert_eq!(candle_adapter_label("ideogram_4"), "candle_ideogram");
+        assert_eq!(candle_adapter_label("ideogram_4_turbo"), "candle_ideogram");
+        // Boogu (sc-7524): all three variants share the `candle_boogu` asset stamp.
+        assert_eq!(candle_adapter_label("boogu_image"), "candle_boogu");
+        assert_eq!(candle_adapter_label("boogu_image_turbo"), "candle_boogu");
+        assert_eq!(candle_adapter_label("boogu_image_edit"), "candle_boogu");
         assert_eq!(candle_adapter_label("sdxl"), "candle_sdxl");
         assert_eq!(candle_adapter_label("realvisxl"), "candle_sdxl");
         // Every wired engine carries a `candle_`-prefixed label, distinct from the `mlx_` labels.
@@ -2290,6 +2486,7 @@ mod candle_label_tests {
             "flux_schnell",
             "flux_dev",
             "flux2_klein_9b",
+            "flux2_dev",
             "qwen_image",
             "chroma1_hd",
             "chroma1_base",
@@ -2299,6 +2496,11 @@ mod candle_label_tests {
             "kolors",
             "sensenova_u1_8b",
             "sensenova_u1_8b_fast",
+            "ideogram_4",
+            "ideogram_4_turbo",
+            "boogu_image",
+            "boogu_image_turbo",
+            "boogu_image_edit",
             "sdxl",
             "realvisxl",
         ] {
@@ -2316,6 +2518,7 @@ mod candle_label_tests {
             "flux_schnell",
             "flux_dev",
             "flux2_klein_9b",
+            "flux2_dev",
             "qwen_image",
             "chroma1_hd",
             "chroma1_base",
@@ -2325,11 +2528,20 @@ mod candle_label_tests {
             "kolors",
             "sensenova_u1_8b",
             "sensenova_u1_8b_fast",
+            "ideogram_4",
+            "ideogram_4_turbo",
+            // Boogu (sc-7524): Base + Turbo (txt2img) AND `boogu_image_edit` — unlike z_image_edit /
+            // qwen_image_edit (bespoke streams), Boogu's instruction edit is in-lane on the generic
+            // candle stream (like Ideogram), so `boogu_image_edit` IS a candle engine.
+            "boogu_image",
+            "boogu_image_turbo",
+            "boogu_image_edit",
         ] {
             assert!(is_candle_engine(model), "{model} should be a candle engine");
         }
-        // Non-candle families + non-base variants (edit ids, the kv distill) are not in the lane.
-        // (kolors / sensenova ARE candle engines now — sc-5576 — for their base txt2img shape.)
+        // Non-candle families + non-base variants (the bespoke-stream edit ids, the kv distill) are not
+        // in the generic lane. (kolors / sensenova ARE candle engines now — sc-5576 — for their base
+        // txt2img shape; `boogu_image_edit` IS — sc-7524 — because its edit is in-lane, not bespoke.)
         for model in [
             "bernini_image",
             "z_image_edit",

@@ -992,6 +992,7 @@ fn smoke_generate_one(
         guidance,
         negative_prompt,
         None,
+        &[],
         None,
         None,
         None,
@@ -1167,6 +1168,7 @@ fn lens_turbo_real_weights_bucket_resolution() {
         Some(1.0),
         None,
         None,
+        &[],
         None,
         None,
         None,
@@ -1416,6 +1418,7 @@ fn kolors_real_weights_img2img_generates_one_image() {
         Some(5.0),
         Some("blurry, low quality".to_owned()),
         Some(&(source, 0.6)),
+        &[],
         None,
         None,
         None,
@@ -1467,6 +1470,7 @@ fn kolors_real_weights_ip_adapter_generates_one_image() {
         Some(5.0),
         Some("blurry, low quality".to_owned()),
         Some(&(reference, 0.6)),
+        &[],
         None,
         None,
         None,
@@ -1801,6 +1805,7 @@ fn smoke_generate_one_true_cfg(
         None,
         negative_prompt,
         None,
+        &[],
         None,
         true_cfg,
         None,
@@ -1993,6 +1998,7 @@ fn sc3031_ab_dump_txt2img() {
         guidance,
         negative,
         None,
+        &[],
         None,
         None,
         None,
@@ -2714,6 +2720,58 @@ fn build_edit_conditioning_single_vs_multi() {
     }
     match build_edit_conditioning(&[img(1), img(2)]).as_slice() {
         [gen_core::Conditioning::MultiReference { images }] => assert_eq!(images.len(), 2),
+        other => panic!("expected MultiReference, got {other:?}"),
+    }
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn boogu_edit_reference_ids_prefers_plural_then_source() {
+    // sc-7645: the multi-image picker's plural `referenceAssetIds` wins, in order (over `sourceAssetId`).
+    assert_eq!(
+        boogu_edit_reference_ids(&request(json!({
+            "projectId": "p", "mode": "edit_image",
+            "referenceAssetIds": ["a", "b", "c"], "sourceAssetId": "ignored"
+        }))),
+        vec!["a".to_owned(), "b".to_owned(), "c".to_owned()]
+    );
+    // With no plural list it falls back to the single Image-Edit `sourceAssetId`.
+    assert_eq!(
+        boogu_edit_reference_ids(&request(json!({
+            "projectId": "p", "mode": "edit_image", "sourceAssetId": "src_1"
+        }))),
+        vec!["src_1".to_owned()]
+    );
+    // Capped at BOOGU_MAX_EDIT_REFERENCES (5) — a 7-image pick keeps the first five.
+    assert_eq!(
+        boogu_edit_reference_ids(&request(json!({
+            "projectId": "p", "mode": "edit_image",
+            "referenceAssetIds": ["a", "b", "c", "d", "e", "f", "g"]
+        })))
+        .len(),
+        BOOGU_MAX_EDIT_REFERENCES
+    );
+    // Neither a plural list nor a source → empty (the generic lane runs plain txt2img).
+    assert!(boogu_edit_reference_ids(&request(json!({ "projectId": "p" }))).is_empty());
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn boogu_build_reference_conditioning_single_vs_multi() {
+    // sc-7645: one reference stays a `Reference` (byte-identical to the single-reference edit path);
+    // 2–5 become a single `MultiReference` (the DiT packs all of them). Empty → no conditioning.
+    let img = |seed| gen_core::Image {
+        width: 8,
+        height: 8,
+        pixels: stub_rgb8(8, 8, seed),
+    };
+    assert!(build_reference_conditioning(&[]).is_empty());
+    match build_reference_conditioning(std::slice::from_ref(&img(1))).as_slice() {
+        [gen_core::Conditioning::Reference { strength, .. }] => assert!(strength.is_none()),
+        other => panic!("expected one Reference, got {other:?}"),
+    }
+    match build_reference_conditioning(&[img(1), img(2), img(3)]).as_slice() {
+        [gen_core::Conditioning::MultiReference { images }] => assert_eq!(images.len(), 3),
         other => panic!("expected MultiReference, got {other:?}"),
     }
 }
@@ -4142,6 +4200,7 @@ fn ideogram_4_real_weights_generates_caption_and_plain_images() {
             guidance,
             None,
             None,
+            &[],
             None,
             None,
             None,
@@ -4314,6 +4373,7 @@ fn ideogram_4_headless_auto_caption_renders_real_image() {
             guidance,
             None,
             None,
+            &[],
             None,
             None,
             None,
@@ -4448,6 +4508,7 @@ fn ideogram_4_real_weights_edit_img2img_and_inpaint() {
             guidance,
             None,
             reference,
+            &[],
             edit_mask,
             None,
             None,
@@ -4643,6 +4704,7 @@ fn boogu_real_weights_generates_base_turbo_edit() {
             guidance,
             None,
             reference,
+            &[],
             None,
             true_cfg,
             None,
