@@ -835,9 +835,8 @@ mod tests {
                 let home = std::env::var("USERPROFILE")
                     .or_else(|_| std::env::var("HOME"))
                     .expect("USERPROFILE/HOME");
-                let snapshots = std::path::Path::new(&home).join(
-                    ".cache/huggingface/hub/models--TheDrummer--Anubis-Mini-8B-v1/snapshots",
-                );
+                let snapshots = std::path::Path::new(&home)
+                    .join(".cache/huggingface/hub/models--TheDrummer--Anubis-Mini-8B-v1/snapshots");
                 std::fs::read_dir(&snapshots)
                     .expect("prompt-refine model staged in the HF cache (or set PROMPT_REFINE_SNAPSHOT)")
                     .flatten()
