@@ -1869,6 +1869,11 @@ fn is_candle_engine(model: &str) -> bool {
             | "boogu_image"
             | "boogu_image_turbo"
             | "boogu_image_edit"
+            // Krea 2 Turbo (sc-7581, epic 7565 P4): pure txt2img on the generic candle lane (CFG-free
+            // 8-step). Like Boogu, its MLX turnkey (`SceneWorks/krea-2-turbo-mlx`, q8/q4 packed) isn't
+            // candle-readable, so the candle lane loads bf16 from the ungated public `krea/Krea-2-Turbo`
+            // snapshot root (no subdir). No edit/reference/control shapes.
+            | "krea_2_turbo"
     )
 }
 
@@ -1892,6 +1897,7 @@ fn candle_adapter_label(model: &str) -> &'static str {
         "sensenova_u1_8b" | "sensenova_u1_8b_fast" => "candle_sensenova",
         "ideogram_4" | "ideogram_4_turbo" => "candle_ideogram",
         "boogu_image" | "boogu_image_turbo" | "boogu_image_edit" => "candle_boogu",
+        "krea_2_turbo" => "candle_krea",
         // sdxl / realvisxl share the candle "sdxl" engine.
         _ => CANDLE_ADAPTER,
     }
@@ -1997,6 +2003,47 @@ fn candle_boogu_repo(request: &ImageRequest) -> String {
         .unwrap_or_else(|| candle_boogu_default_repo(&request.model).to_owned())
 }
 
+/// The candle Krea 2 Turbo weights repo (bf16). The MLX turnkey (`SceneWorks/krea-2-turbo-mlx`, the
+/// `MODEL_TABLE` default + the macOS MLX repo) ships packed `q8/`/`q4/` subdirs, which the candle
+/// provider (dense bf16, `supported_quants: &[]`) can't load — but, like Boogu, Krea needs no re-hosted
+/// bf16 turnkey: the ORIGINAL public `krea/Krea-2-Turbo` (Krea 2 Community License, ungated) is already a
+/// complete bf16 `transformer/ text_encoder/ vae/ tokenizer/` diffusers snapshot at the repo root —
+/// exactly what the provider's `pipeline::load_components` reads. So the candle lane points straight at it
+/// (loaded from the snapshot root — no subdir). Mirrors `candle_boogu_repo` / `candle_ideogram_repo`.
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+const CANDLE_KREA_REPO: &str = "krea/Krea-2-Turbo";
+
+/// Resolve the candle Krea weights repo: the off-Mac (`std::env::consts::OS`) download entry's `repo`
+/// from the manifest (the bf16 repo — the single source of truth, also driving the downloader) — else
+/// the [`CANDLE_KREA_REPO`] default. Deliberately NOT the entry-level `repo` / `model_repo`, which is the
+/// macOS MLX turnkey. Mirrors `candle_boogu_repo`.
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+fn candle_krea_repo(request: &ImageRequest) -> String {
+    let os = std::env::consts::OS;
+    request
+        .model_manifest_entry
+        .get("downloads")
+        .and_then(Value::as_array)
+        .and_then(|downloads| {
+            downloads.iter().find_map(|entry| {
+                let matches_os = entry
+                    .get("platforms")
+                    .and_then(Value::as_array)
+                    .is_some_and(|platforms| platforms.iter().any(|p| p.as_str() == Some(os)));
+                if !matches_os {
+                    return None;
+                }
+                entry
+                    .get("repo")
+                    .and_then(Value::as_str)
+                    .map(str::trim)
+                    .filter(|repo| !repo.is_empty())
+                    .map(str::to_owned)
+            })
+        })
+        .unwrap_or_else(|| CANDLE_KREA_REPO.to_owned())
+}
+
 /// Windows/CUDA candle execution path (sc-3675 SDXL, generalized in sc-5096). The macOS dispatch is
 /// MLX-bound; candle is a narrow **txt2img-only** lane, so this is a trimmed sibling of
 /// [`generate_stream`] that drives the SAME neutral streaming harness (`start_cached_gen_stream` →
@@ -2051,17 +2098,23 @@ async fn generate_candle_stream(
         request.model.as_str(),
         "boogu_image" | "boogu_image_turbo" | "boogu_image_edit"
     );
-    // Ideogram + Boogu are the candle image families whose `MODEL_TABLE` turnkey isn't candle-readable:
-    // the published `SceneWorks/ideogram-4-mlx` / `SceneWorks/boogu-image-mlx` (the macOS MLX repos) are
-    // MLX-quantized, so the candle lane loads bf16 from a different repo. Ideogram re-hosts a bf16 copy
-    // (`SceneWorks/ideogram-4`'s `bf16/` subdir, because the upstream is gated); Boogu points straight at
-    // its ungated public originals (`Boogu/Boogu-Image-0.1-*`, one repo per variant, loaded from the
-    // snapshot root). macOS keeps the MLX turnkeys. Every other candle family shares its upstream diffusers
-    // repo via `model_repo`.
+    // Krea 2 Turbo (sc-7581) is the third such family: its `SceneWorks/krea-2-turbo-mlx` turnkey is packed
+    // q8/q4, so the candle lane loads bf16 from the ungated public `krea/Krea-2-Turbo` (the boogu pattern —
+    // the diffusers snapshot root, no subdir).
+    let is_krea = request.model == "krea_2_turbo";
+    // Ideogram + Boogu + Krea are the candle image families whose `MODEL_TABLE` turnkey isn't
+    // candle-readable: the published `SceneWorks/ideogram-4-mlx` / `SceneWorks/boogu-image-mlx` /
+    // `SceneWorks/krea-2-turbo-mlx` (the macOS MLX repos) are MLX-quantized, so the candle lane loads bf16
+    // from a different repo. Ideogram re-hosts a bf16 copy (`SceneWorks/ideogram-4`'s `bf16/` subdir,
+    // because the upstream is gated); Boogu + Krea point straight at their ungated public originals
+    // (`Boogu/Boogu-Image-0.1-*` / `krea/Krea-2-Turbo`, loaded from the snapshot root). macOS keeps the MLX
+    // turnkeys. Every other candle family shares its upstream diffusers repo via `model_repo`.
     let repo = if is_ideogram {
         candle_ideogram_repo(request)
     } else if is_boogu {
         candle_boogu_repo(request)
+    } else if is_krea {
+        candle_krea_repo(request)
     } else {
         model_repo(request, &model)
     };
@@ -2547,6 +2600,8 @@ mod candle_label_tests {
         assert_eq!(candle_adapter_label("boogu_image"), "candle_boogu");
         assert_eq!(candle_adapter_label("boogu_image_turbo"), "candle_boogu");
         assert_eq!(candle_adapter_label("boogu_image_edit"), "candle_boogu");
+        // Krea 2 Turbo (sc-7581): the candle asset stamp.
+        assert_eq!(candle_adapter_label("krea_2_turbo"), "candle_krea");
         assert_eq!(candle_adapter_label("sdxl"), "candle_sdxl");
         assert_eq!(candle_adapter_label("realvisxl"), "candle_sdxl");
         // Every wired engine carries a `candle_`-prefixed label, distinct from the `mlx_` labels.
@@ -2608,6 +2663,8 @@ mod candle_label_tests {
             "boogu_image",
             "boogu_image_turbo",
             "boogu_image_edit",
+            // Krea 2 Turbo (sc-7581): pure txt2img on the generic candle lane.
+            "krea_2_turbo",
         ] {
             assert!(is_candle_engine(model), "{model} should be a candle engine");
         }

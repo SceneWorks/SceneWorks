@@ -1320,7 +1320,10 @@
       "type": "image",
       "adapter": "mlx_krea",
       "capabilities": ["text_to_image"],
-      "macOnly": true,
+      // macOnly is now a no-op label (mirroring klein/flux2_dev): candle availability is driven by the
+      // routing tables (`CANDLE_ROUTED_MODELS` / `is_candle_engine`), not this flag. The candle
+      // (Windows/Linux) lane lights up off the bf16 download below (sc-7581).
+      "macOnly": false,
       "downloads": [
         {
           // Q8 `q8/` subdir of the SceneWorks/krea-2-turbo-mlx turnkey (sc-7573). Each quant subdir is a
@@ -1338,6 +1341,18 @@
           ],
           "platforms": ["macos"],
           "estimatedSizeBytes": 18000000000
+        },
+        {
+          // Candle (Windows/Linux CUDA) dense bf16 — the ungated public `krea/Krea-2-Turbo` diffusers tree
+          // (Krea 2 Community License). The native candle loader (`Weights::from_dir`) reads the diffusers
+          // subdirs from the snapshot ROOT (no quant subdir — the boogu pattern), so it does NOT use the
+          // MLX `q8/` turnkey above; `candle_krea_repo` reads this entry's `repo`. The repo also ships a
+          // redundant ~24 GB single-file `turbo.safetensors`; skip it (the loader reads only the subdirs).
+          "provider": "huggingface",
+          "repo": "krea/Krea-2-Turbo",
+          "files": ["model_index.json", "transformer/*", "text_encoder/*", "vae/*", "tokenizer/*"],
+          "platforms": ["windows", "linux"],
+          "estimatedSizeBytes": 33800000000
         }
       ],
       "paths": {
