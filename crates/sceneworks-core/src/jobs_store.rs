@@ -3610,6 +3610,9 @@ const MLX_ROUTED_MODELS: &[&str] = &[
     "boogu_image",
     "boogu_image_turbo",
     "boogu_image_edit",
+    // Krea 2 Turbo (epic 7565 / sc-7572): native `mlx-gen-krea` text-to-image engine
+    // (adapter `mlx_krea`) over the packed Q8/Q4 turnkey. CFG-free Turbo is text-to-image only.
+    "krea_2_turbo",
 ];
 
 /// Epic 3018 routing — does this image job belong on the in-process Rust MLX
@@ -3672,6 +3675,7 @@ fn image_request_mlx_eligible(model: &str, payload: &Map<String, Value>) -> bool
         "bernini_image" => bernini_image_mlx_eligible(payload),
         "ideogram_4" | "ideogram_4_turbo" => ideogram_mlx_eligible(payload),
         "boogu_image" | "boogu_image_turbo" | "boogu_image_edit" => boogu_mlx_eligible(payload),
+        "krea_2_turbo" => krea_mlx_eligible(payload),
         // Every model in MLX_ROUTED_MODELS must have an arm.
         _ => false,
     }
@@ -3842,8 +3846,8 @@ const CANDLE_ROUTED_MODELS: &[&str] = &[
     // few-step). Pure **txt2img** — `image_request_candle_eligible` accepts the plain shape and rejects
     // edit / reference / mask / quant / LoRA (the provider advertises none). The MODEL_TABLE row + manifest
     // entry are the MLX twin (sc-7572); sc-7581 adds the candle lane (bf16 off the ungated public
-    // `krea/Krea-2-Turbo`, the boogu pattern). NOT yet in `MLX_ROUTED_MODELS` (the mac/MLX routing is a
-    // separate mlx-P2 follow-up), so off-Mac candle is the only native lane today.
+    // `krea/Krea-2-Turbo`, the boogu pattern). This id is also in `MLX_ROUTED_MODELS`; mirror
+    // `krea_mlx_eligible`.
     "krea_2_turbo",
 ];
 
@@ -4933,6 +4937,13 @@ fn boogu_mlx_eligible(payload: &Map<String, Value>) -> bool {
         return payload.get("model").and_then(Value::as_str) == Some("boogu_image_edit");
     }
     true
+}
+
+/// Krea 2 Turbo (epic 7565 / sc-7572) MLX-eligibility. The native `mlx-gen-krea`
+/// engine serves the Turbo text-to-image surface only; `edit_image` has no source/reference
+/// path, so reject that defensive shape the same way Lens does.
+fn krea_mlx_eligible(payload: &Map<String, Value>) -> bool {
+    payload.get("mode").and_then(Value::as_str) != Some("edit_image")
 }
 
 /// Video models the in-process Rust MLX worker generates today (sc-3034 Wan2.2,
@@ -8050,6 +8061,27 @@ mod mlx_routing_tests {
                 .edit,
             "boogu_image_turbo is text-to-image only"
         );
+    }
+
+    #[test]
+    fn krea_2_turbo_text_to_image_routes_to_mlx() {
+        // sc-7572: Krea 2 Turbo has a native `mlx-gen-krea` text-to-image engine and should not be
+        // hidden by the Mac model-card gating. It is T2I-only, so edit remains ineligible.
+        assert!(image_request_mlx_eligible(
+            "krea_2_turbo",
+            &object(json!({ "model": "krea_2_turbo", "prompt": "cinematic editorial portrait" }))
+        ));
+        assert!(image_request_mlx_eligible("krea_2_turbo", &Map::new()));
+        assert!(!image_request_mlx_eligible(
+            "krea_2_turbo",
+            &object(
+                json!({ "model": "krea_2_turbo", "mode": "edit_image", "sourceAssetId": "asset_1" })
+            )
+        ));
+
+        let support = model_mac_support("krea_2_turbo", "image");
+        assert!(support.supported, "krea_2_turbo must be Mac-supported");
+        assert!(!support.features.edit, "krea_2_turbo is text-to-image only");
     }
 
     #[test]
