@@ -744,7 +744,8 @@ pub(crate) async fn run_image_generate_job(
         )
         .await?;
         true
-    } else if settings.backend_candle_enabled && flux2_control_candle_available(&request, settings) {
+    } else if settings.backend_candle_enabled && flux2_control_candle_available(&request, settings)
+    {
         // FLUX.2-dev strict-pose Fun-Controlnet-Union (sc-7736, epic 6564) — `flux2_dev` + `advanced.poses`
         // is the bespoke candle `Flux2Control` lane (`generate_candle_flux2_control_stream`), NOT txt2img —
         // the `is_candle_engine` txt2img branch below would silently drop the poses, and the no-pose-lane

@@ -220,7 +220,10 @@ fn flux2_dev_edit_candle_gpu_smoke() {
         _ => synthetic_rgb(w, h),
     };
 
-    println!("[smoke] loading flux2_dev EDIT (Q4) from {} ...", weights_dir.display());
+    println!(
+        "[smoke] loading flux2_dev EDIT (Q4) from {} ...",
+        weights_dir.display()
+    );
     let model = Flux2Edit::load_dev(
         &Flux2EditPaths {
             root: weights_dir.clone(),
@@ -230,7 +233,10 @@ fn flux2_dev_edit_candle_gpu_smoke() {
     .expect("load candle Flux2Edit dev");
 
     let req = Flux2EditRequest {
-        prompt: env_or("FLUX2_DEV_PROMPT", "make the person wear a bright red wizard hat"),
+        prompt: env_or(
+            "FLUX2_DEV_PROMPT",
+            "make the person wear a bright red wizard hat",
+        ),
         negative: String::new(),
         width: w,
         height: h,
@@ -246,9 +252,18 @@ fn flux2_dev_edit_candle_gpu_smoke() {
     let std = image_std(&image);
     let png = out_dir.join("flux2_dev_edit_candle.png");
     save_png(&image, &png);
-    println!("[smoke] dev edit {}x{} std {:.2} -> {}", image.width, image.height, std, png.display());
+    println!(
+        "[smoke] dev edit {}x{} std {:.2} -> {}",
+        image.width,
+        image.height,
+        std,
+        png.display()
+    );
     assert_eq!((image.width, image.height), (w, h));
-    assert!(std > 5.0, "dev edit render degenerate (std {std:.2}) — check CUDA_COMPUTE_CAP=120");
+    assert!(
+        std > 5.0,
+        "dev edit render degenerate (std {std:.2}) — check CUDA_COMPUTE_CAP=120"
+    );
     println!("[smoke] DONE: flux2_dev edit (candle) coherent");
 }
 
@@ -286,7 +301,11 @@ fn flux2_dev_control_candle_gpu_smoke() {
         .expect("FLUX2_DEV_STEPS");
     let pose = synthetic_rgb(w, h);
 
-    println!("[smoke] loading flux2_dev CONTROL (Q4) from {} + {} ...", weights_dir.display(), control.display());
+    println!(
+        "[smoke] loading flux2_dev CONTROL (Q4) from {} + {} ...",
+        weights_dir.display(),
+        control.display()
+    );
     let model = Flux2Control::load(
         &Flux2ControlPaths {
             root: weights_dir.clone(),
@@ -316,8 +335,17 @@ fn flux2_dev_control_candle_gpu_smoke() {
     let std = image_std(&image);
     let png = out_dir.join("flux2_dev_control_candle.png");
     save_png(&image, &png);
-    println!("[smoke] dev control {}x{} std {:.2} -> {}", image.width, image.height, std, png.display());
+    println!(
+        "[smoke] dev control {}x{} std {:.2} -> {}",
+        image.width,
+        image.height,
+        std,
+        png.display()
+    );
     assert_eq!((image.width, image.height), (w, h));
-    assert!(std > 5.0, "dev control render degenerate (std {std:.2}) — check CUDA_COMPUTE_CAP=120");
+    assert!(
+        std > 5.0,
+        "dev control render degenerate (std {std:.2}) — check CUDA_COMPUTE_CAP=120"
+    );
     println!("[smoke] DONE: flux2_dev control (candle) coherent");
 }
