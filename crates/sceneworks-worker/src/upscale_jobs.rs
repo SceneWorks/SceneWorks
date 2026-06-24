@@ -949,5 +949,200 @@ pub(crate) async fn run_image_upscale_job(
     Ok(())
 }
 
+// ---------------------------------------------------------------------------
+// Dataset Doctor one-tap upscale (sc-6539): Real-ESRGAN over flagged low-resolution items, then
+// re-point each item at the upscaled bytes via the API. Reuses the engine above (ensure_onnx +
+// upscale_blocking). The payload-parse and repoint-body build are pure (unit-tested); the only
+// session-unverifiable leg is the literal upscale_blocking call.
+// ---------------------------------------------------------------------------
+
+/// One dataset item to upscale, parsed from the job payload.
+#[derive(Debug, Clone, PartialEq)]
+struct DatasetUpscaleItem {
+    item_id: String,
+    image_path: PathBuf,
+}
+
+/// Parse the `items` array of a `dataset_upscale` job into typed entries (pure). Each entry needs a
+/// non-empty `itemId` + `imagePath`; malformed entries are skipped.
+fn parse_dataset_upscale_items(payload: &JsonObject) -> Vec<DatasetUpscaleItem> {
+    payload
+        .get("items")
+        .and_then(Value::as_array)
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(|item| {
+                    let item_id = item.get("itemId").and_then(Value::as_str)?;
+                    let image_path = item.get("imagePath").and_then(Value::as_str)?;
+                    if item_id.is_empty() || image_path.is_empty() {
+                        return None;
+                    }
+                    Some(DatasetUpscaleItem {
+                        item_id: item_id.to_owned(),
+                        image_path: PathBuf::from(image_path),
+                    })
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Build the `/repoint` request body from `(item_id, project-relative source path)` results (pure).
+/// `assetId` is null: the dataset fix re-points to the upscaled bytes directly (the original library
+/// asset/upload is left untouched), so no child library asset is minted.
+fn dataset_repoint_body(records: &[(String, String)]) -> Value {
+    json!({
+        "items": records
+            .iter()
+            .map(|(item_id, source_path)| {
+                json!({ "itemId": item_id, "assetId": Value::Null, "sourcePath": source_path })
+            })
+            .collect::<Vec<_>>(),
+    })
+}
+
+pub(crate) async fn run_dataset_upscale_job(
+    api: &ApiClient,
+    settings: &Settings,
+    http_client: &reqwest::Client,
+    job: &JobSnapshot,
+) -> WorkerResult<()> {
+    heartbeat(api, settings, WorkerStatus::Busy, Some(&job.id)).await?;
+    let payload = &job.payload;
+    let factor: u8 = match payload.get("factor").and_then(Value::as_u64).unwrap_or(2) {
+        4 => 4,
+        _ => 2,
+    };
+    let project_id = payload
+        .get("projectId")
+        .and_then(Value::as_str)
+        .or(job.project_id.as_deref())
+        .ok_or_else(|| {
+            WorkerError::InvalidPayload("Dataset upscale jobs require a projectId.".to_owned())
+        })?
+        .to_owned();
+    let dataset_id = payload
+        .get("datasetId")
+        .and_then(Value::as_str)
+        .ok_or_else(|| {
+            WorkerError::InvalidPayload("Dataset upscale jobs require a datasetId.".to_owned())
+        })?
+        .to_owned();
+    let items = parse_dataset_upscale_items(payload);
+    if items.is_empty() {
+        return Err(WorkerError::InvalidPayload(
+            "Dataset upscale job has no items to upscale.".to_owned(),
+        ));
+    }
+
+    update_job(
+        api,
+        &job.id,
+        progress_payload(
+            JobStatus::LoadingModel,
+            ProgressStage::Downloading,
+            0.1,
+            "Loading upscaler.",
+            None,
+            None,
+            None,
+        ),
+    )
+    .await?;
+    let onnx_path = ensure_onnx(api, settings, http_client, job, factor, &Value::Null).await?;
+
+    let store = ProjectStore::new(settings.data_dir.clone(), "worker");
+    let project = store
+        .get_project(&project_id)
+        .map_err(|e| WorkerError::InvalidPayload(format!("project not found: {e}")))?;
+    let project_path = PathBuf::from(project.path);
+    let derived_dir_rel = format!("training/datasets/{dataset_id}/upscaled");
+
+    let total = items.len();
+    let mut records: Vec<(String, String)> = Vec::with_capacity(total);
+    for (index, item) in items.iter().enumerate() {
+        let fraction = 0.15 + 0.75 * (index as f64 / total as f64);
+        update_job(
+            api,
+            &job.id,
+            progress_payload(
+                JobStatus::Running,
+                ProgressStage::Running,
+                fraction,
+                &format!("Upscaling image {} of {total}.", index + 1),
+                None,
+                None,
+                None,
+            ),
+        )
+        .await?;
+
+        let source_image = crate::image_decode::decode_image_any(&item.image_path)
+            .map_err(|e| WorkerError::InvalidPayload(format!("Image could not be loaded: {e}")))?
+            .to_rgb8();
+        let onnx = onnx_path.clone();
+        let cancel = CancelFlag::new();
+        let cancel_run = cancel.clone();
+        let upscaled = run_upscale_with_heartbeat(
+            api,
+            settings,
+            &job.id,
+            cancel,
+            tokio::task::spawn_blocking(move || {
+                upscale_blocking(onnx, factor, source_image, cancel_run)
+            }),
+        )
+        .await?;
+
+        let rel = format!("{derived_dir_rel}/{}.png", item.item_id);
+        let abs = project_path.join(&rel);
+        if let Some(parent) = abs.parent() {
+            tokio::fs::create_dir_all(parent).await?;
+        }
+        upscaled
+            .save_with_format(&abs, image::ImageFormat::Png)
+            .map_err(|e| WorkerError::Io(std::io::Error::other(e)))?;
+        records.push((item.item_id.clone(), rel));
+    }
+
+    update_job(
+        api,
+        &job.id,
+        progress_payload(
+            JobStatus::Running,
+            ProgressStage::Running,
+            0.94,
+            "Updating dataset.",
+            None,
+            None,
+            None,
+        ),
+    )
+    .await?;
+    let _: Value = api
+        .post_json(
+            &format!("/api/v1/projects/{project_id}/training/datasets/{dataset_id}/repoint"),
+            &dataset_repoint_body(&records),
+        )
+        .await?;
+
+    update_job(
+        api,
+        &job.id,
+        progress_payload(
+            JobStatus::Completed,
+            ProgressStage::Completed,
+            1.0,
+            &format!("Upscaled {total} image(s)."),
+            None,
+            None,
+            None,
+        ),
+    )
+    .await?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests;

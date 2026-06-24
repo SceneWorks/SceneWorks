@@ -302,6 +302,7 @@ export function TrainingStudio({ mode = "training" } = {}) {
     updateTrainingDataset,
     batchRenameTrainingDataset,
     createTrainingDatasetCaptionJob,
+    createTrainingDatasetUpscaleJob,
     createTrainingJob,
     trainingPresets: trainingPresetsCatalog,
     trainingPresetsError = "",
@@ -1193,6 +1194,39 @@ export function TrainingStudio({ mode = "training" } = {}) {
     }
   }
 
+  // One-tap "upscale low-res" (sc-6539): enqueue a Real-ESRGAN job over the resolution-flagged items.
+  // Saves first so the job sees the live items, then targets only those still present. The worker
+  // re-points each item at the upscaled bytes on completion, so the dataset refreshes asynchronously.
+  async function upscaleLowRes(itemIds) {
+    if (!itemIds?.length || savingDataset) {
+      return;
+    }
+    setSavingDataset(true);
+    setDatasetError("");
+    setDatasetMessage("");
+    try {
+      const saved = await persistDataset();
+      if (!saved?.id) {
+        setDatasetError("Save the dataset before upscaling.");
+        return;
+      }
+      const present = new Set((saved.items ?? []).map((item) => item.id));
+      const targets = itemIds.filter((id) => present.has(id));
+      if (!targets.length) {
+        setDatasetError("No low-resolution images to upscale.");
+        return;
+      }
+      const job = await createTrainingDatasetUpscaleJob(saved.id, { itemIds: targets });
+      setDatasetMessage(
+        `Upscale job queued${job?.id ? ` (${job.id})` : ""}. Track it in the Queue; the dataset updates when it finishes.`,
+      );
+    } catch (err) {
+      setDatasetError(err.message);
+    } finally {
+      setSavingDataset(false);
+    }
+  }
+
   async function submitTrainingJob() {
     if (!configReady || submittingJob || readinessBlocksTraining) {
       return;
@@ -1343,6 +1377,7 @@ export function TrainingStudio({ mode = "training" } = {}) {
                   readinessByKey={readinessByKey}
                   onToggleItemAck={toggleItemQualityAck}
                   onRemoveDuplicates={removeDuplicates}
+                  onUpscaleLowRes={upscaleLowRes}
                   canSave={canSave}
                   saveDataset={saveDataset}
                   savingDataset={savingDataset}
@@ -1420,6 +1455,7 @@ export function TrainingStudio({ mode = "training" } = {}) {
                   readinessLoading={readinessLoading}
                   readinessBlocksTraining={readinessBlocksTraining}
                   onRemoveDuplicates={removeDuplicates}
+                  onUpscaleLowRes={upscaleLowRes}
                 />
               ) : null}
             </section>

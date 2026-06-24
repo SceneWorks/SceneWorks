@@ -416,6 +416,42 @@ pub(crate) struct DatasetEmbeddingRecord {
     pub(crate) text_embedding: Option<Vec<f32>>,
 }
 
+/// Request to upscale flagged low-resolution items in a training dataset (sc-6539 one-tap fix).
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct DatasetUpscaleJobRequest {
+    /// Integer upscale factor (Real-ESRGAN x2 / x4). Defaults to x2.
+    #[serde(default = "default_dataset_upscale_factor")]
+    pub(crate) factor: u8,
+    #[serde(default = "default_requested_gpu")]
+    pub(crate) requested_gpu: String,
+    /// The dataset item ids to upscale — the readiness report's low-resolution-flagged items.
+    pub(crate) item_ids: Vec<String>,
+}
+
+pub(crate) fn default_dataset_upscale_factor() -> u8 {
+    2
+}
+
+/// The upscale worker POSTs its results here to re-point each item at the upscaled child asset
+/// (sc-6539) — the dataset-mutation analog of the caption job's `/caption-sidecars` write.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct DatasetRepointBody {
+    pub(crate) items: Vec<DatasetRepointRecord>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct DatasetRepointRecord {
+    pub(crate) item_id: String,
+    /// The upscaled child asset (lineage back to the original).
+    #[serde(default)]
+    pub(crate) asset_id: Option<String>,
+    /// Project-relative path of the upscaled bytes the worker wrote.
+    pub(crate) source_path: String,
+}
+
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct TrainingCaptionOptions {

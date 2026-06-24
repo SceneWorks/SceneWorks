@@ -30,7 +30,7 @@ use crate::store_util::{
 use crate::time::utc_now;
 use crate::training::TrainingDataset;
 use crate::training_store::{
-    apply_training_dataset_migrations, TrainingCaptionSidecarsResult,
+    apply_training_dataset_migrations, DatasetItemRepoint, TrainingCaptionSidecarsResult,
     TrainingDatasetBatchRenameInput, TrainingDatasetCaptionSidecarsInput,
     TrainingDatasetCreateInput, TrainingDatasetMutationResult, TrainingDatasetStore,
     TrainingDatasetSummary, TrainingDatasetUpdateInput,
@@ -577,6 +577,19 @@ impl ProjectStore {
         let (project_path, _project_guard) = self.lock_project(project_id)?;
         TrainingDatasetStore::new(project_path)
             .write_dataset_embeddings(project_id, dataset_id, embeddings)
+    }
+
+    /// Re-point dataset items at derived (e.g. upscaled) child assets (sc-6539). Locked wrapper over
+    /// [`TrainingDatasetStore::repoint_dataset_items`].
+    pub fn repoint_dataset_items(
+        &self,
+        project_id: &str,
+        dataset_id: &str,
+        repoints: &[DatasetItemRepoint],
+    ) -> ProjectStoreResult<TrainingDataset> {
+        let (project_path, _project_guard) = self.lock_project(project_id)?;
+        TrainingDatasetStore::new(project_path)
+            .repoint_dataset_items(project_id, dataset_id, repoints)
     }
 
     /// Read the dataset's CLIP embeddings sidecar (`None` if the analysis job hasn't run). Locked

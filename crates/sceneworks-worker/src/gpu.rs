@@ -94,6 +94,7 @@ fn with_candle_capabilities(mut gpu: DiscoveredGpu, settings: &Settings) -> Disc
             for capability in [
                 WorkerCapability::ImageUpscale,
                 WorkerCapability::VideoUpscale,
+                WorkerCapability::DatasetUpscale,
             ] {
                 if !gpu.capabilities.contains(&capability) {
                     gpu.capabilities.push(capability);
@@ -577,6 +578,9 @@ pub(crate) fn mlx_gpu(settings: &Settings) -> DiscoveredGpu {
         // works on a Python-free Mac. Only `engine=real-esrgan` (the default) is
         // served here; `aura-sr` stays on the Python worker (routing oracle).
         WorkerCapability::ImageUpscale,
+        // Dataset Doctor one-tap upscale (sc-6539): reuses the Real-ESRGAN engine to upscale flagged
+        // low-resolution training items, then re-points each. Advertised wherever image_upscale is.
+        WorkerCapability::DatasetUpscale,
         // Smart-select segmentation (epic 6087, sc-6105): native-MLX SAM3 box-prompt
         // segmentation, served in-process by `segment_jobs::run_image_segment_job` (the
         // box-PVS path of the sc-4926 SAM3 stack). The Image Editor smart-select tool's

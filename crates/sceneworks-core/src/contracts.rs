@@ -269,6 +269,10 @@ string_enum! {
         // GPU-routed (MLX `clip_vit_l14`; in job_requires_gpu, not in NON_GPU_JOB_TYPES),
         // served by the Rust/MLX worker.
         DatasetAnalysis => "dataset_analysis",
+        // Real-ESRGAN upscale of flagged low-resolution items in a training dataset, then re-point each
+        // item at the upscaled child asset (epic 6529 P3, sc-6539 one-tap fixes). GPU-routed like
+        // dataset_analysis (reuses the image_upscale ONNX engine), served by the Rust worker.
+        DatasetUpscale => "dataset_upscale",
         PromptRefine => "prompt_refine",
     }
 }
@@ -397,6 +401,10 @@ string_enum! {
         // (engines::registry_capabilities) — so before the worker re-pin a `dataset_analysis`
         // job stays queued rather than mis-claimed.
         DatasetAnalysis => "dataset_analysis",
+        // Dataset Doctor one-tap upscale (sc-6539). Advertised by the worker that links the
+        // Real-ESRGAN ONNX upscaler (the same engine as `image_upscale`); a `dataset_upscale` job
+        // stays queued rather than mis-claimed where the upscaler isn't available.
+        DatasetUpscale => "dataset_upscale",
         // Real (non-dry-run) LoRA training execution. Advertised separately from
         // `LoraTrain` (dry-run plan validation, which needs no inference backend)
         // so a real run only routes to a worker that can actually train. See

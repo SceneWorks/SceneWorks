@@ -49,7 +49,7 @@ use sceneworks_core::training::{
     TrainingTargetRegistry,
 };
 use sceneworks_core::training_store::{
-    TrainingCaptionSidecarsResult, TrainingDatasetBatchRenameInput,
+    DatasetItemRepoint, TrainingCaptionSidecarsResult, TrainingDatasetBatchRenameInput,
     TrainingDatasetCaptionSidecarsInput, TrainingDatasetCreateInput, TrainingDatasetMutationResult,
     TrainingDatasetSummary, TrainingDatasetUpdateInput,
 };
@@ -746,6 +746,14 @@ pub(crate) fn create_app_with_state(
         .route(
             "/api/v1/projects/:project_id/training/datasets/:dataset_id/analysis-embeddings",
             post(write_training_dataset_analysis_embeddings),
+        )
+        .route(
+            "/api/v1/projects/:project_id/training/datasets/:dataset_id/upscale-jobs",
+            post(create_training_dataset_upscale_job),
+        )
+        .route(
+            "/api/v1/projects/:project_id/training/datasets/:dataset_id/repoint",
+            post(repoint_training_dataset_items),
         )
         .route(
             "/api/v1/projects/:project_id/training/jobs",

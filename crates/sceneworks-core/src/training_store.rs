@@ -465,6 +465,92 @@ impl TrainingDatasetStore {
         Ok(dataset)
     }
 
+    /// Re-point dataset items at derived images (sc-6539 one-tap fixes). Each entry names an item and a
+    /// project-relative `source_path` — the derived bytes the worker just wrote as a library child asset
+    /// (e.g. an upscale) — plus that child `asset_id`. The bytes are copied into the dataset's `images/`
+    /// so the dataset stays self-contained, then [`repoint_item`] swaps the item's source while
+    /// preserving its caption/identity. Items edited away since the job ran are skipped (the fix
+    /// self-invalidates). Bumps the dataset version, since the pixels changed.
+    pub fn repoint_dataset_items(
+        &self,
+        project_id: &str,
+        dataset_id: &str,
+        repoints: &[DatasetItemRepoint],
+    ) -> ProjectStoreResult<TrainingDataset> {
+        let mut dataset = self.read_dataset_by_id(dataset_id)?;
+        ensure_dataset_project(project_id, &dataset)?;
+        let root = dataset_root(&self.project_path, &dataset.id);
+        let project_root = fs::canonicalize(&self.project_path)?;
+        let mut changed = false;
+        for repoint in repoints {
+            if !is_safe_relative_path(&repoint.source_path) {
+                return Err(ProjectStoreError::BadRequest(
+                    "Invalid derived image path".to_owned(),
+                ));
+            }
+            let Some(index) = dataset
+                .items
+                .iter()
+                .position(|item| item.id == repoint.item_id)
+            else {
+                continue;
+            };
+            let source = fs::canonicalize(self.project_path.join(&repoint.source_path)).map_err(
+                |error| {
+                    if error.kind() == std::io::ErrorKind::NotFound {
+                        ProjectStoreError::NotFound("Derived image not found".to_owned())
+                    } else {
+                        ProjectStoreError::Io(error)
+                    }
+                },
+            )?;
+            if !source.starts_with(&project_root) || !source.is_file() {
+                return Err(ProjectStoreError::BadRequest(
+                    "Invalid derived image path".to_owned(),
+                ));
+            }
+            let extension = source
+                .extension()
+                .and_then(|value| value.to_str())
+                .filter(|value| !value.is_empty())
+                .map(|value| value.to_ascii_lowercase())
+                .unwrap_or_else(|| "png".to_owned());
+            let relative_path = format!("images/{}.{extension}", repoint.item_id);
+            let target = root.join(&relative_path);
+            if let Some(parent) = target.parent() {
+                fs::create_dir_all(parent)?;
+            }
+            fs::copy(&source, &target)?;
+            // Drop the item's previous file if its extension (hence path) changed, to avoid orphans.
+            let previous = root.join(&dataset.items[index].path);
+            if previous != target && previous.exists() {
+                let _ = fs::remove_file(&previous);
+            }
+            let (width, height) = match crate::media_convert::image_dimensions(&target) {
+                Some((file_w, file_h)) => (Some(file_w), Some(file_h)),
+                None => (None, None),
+            };
+            let content_hash = crate::media_convert::file_content_hash(&target).ok();
+            dataset.items[index] = repoint_item(
+                &dataset.items[index],
+                RepointSource {
+                    asset_id: repoint.asset_id.clone(),
+                    path: relative_path,
+                    width,
+                    height,
+                    content_hash,
+                },
+            );
+            changed = true;
+        }
+        if changed {
+            dataset.version = dataset.version.saturating_add(1);
+            dataset.updated_at = utc_now();
+            self.save_dataset(&dataset)?;
+        }
+        Ok(dataset)
+    }
+
     pub fn write_caption_sidecars(
         &self,
         project_id: &str,
@@ -922,6 +1008,54 @@ fn materialize_item(
         added_at: now.to_owned(),
         extra: Default::default(),
     })
+}
+
+/// The derived image to re-point a dataset item at (sc-6539 one-tap fixes). Produced by a fix that
+/// transforms an item's image (e.g. Real-ESRGAN upscale) and persists the result as a new child asset
+/// with lineage back to the original; the item is then re-pointed here. The original asset/upload is
+/// left untouched, so the fix is reversible by re-pointing back.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RepointSource {
+    /// The derived child asset, when the result was written to the library (the upscale path).
+    pub asset_id: Option<String>,
+    /// Path (dataset-root-relative) of the materialized derived image for the item.
+    pub path: String,
+    pub width: Option<u32>,
+    pub height: Option<u32>,
+    /// SHA-256 of the derived bytes — the new exact-dup / cache key.
+    pub content_hash: Option<String>,
+}
+
+/// One item to re-point at a derived image (sc-6539). `source_path` is project-relative — the derived
+/// child asset the worker wrote; `asset_id` is that child asset (so the item gains library lineage).
+#[derive(Debug, Clone, PartialEq)]
+pub struct DatasetItemRepoint {
+    pub item_id: String,
+    pub asset_id: Option<String>,
+    pub source_path: String,
+}
+
+/// Re-point a dataset item at a derived image (sc-6539 one-tap fixes). Preserves the item's
+/// user-facing identity — id and position, display name, caption + trigger words, and `added_at` — and
+/// swaps only the underlying source (`asset_id`/`path`/`content_hash`/dimensions). The per-image caches
+/// the new bytes invalidate are cleared: `tier0_scalars` (measured on the old pixels) and `quality_ack`
+/// (dismissals are content-hash keyed, so they must not carry to different bytes). Pure so the data
+/// mutation is unit-tested independently of the transform that produced `source`.
+pub fn repoint_item(item: &TrainingDatasetItem, source: RepointSource) -> TrainingDatasetItem {
+    TrainingDatasetItem {
+        id: item.id.clone(),
+        asset_id: source.asset_id,
+        path: source.path,
+        display_name: item.display_name.clone(),
+        caption: item.caption.clone(),
+        width: source.width,
+        height: source.height,
+        content_hash: source.content_hash,
+        tier0_scalars: None,
+        quality_ack: None,
+        added_at: item.added_at.clone(),
+        extra: item.extra.clone(),
+    }
 }
 
 #[derive(Debug)]
@@ -1455,6 +1589,185 @@ mod tests {
                 phash: vec![1, 2, 3, 4, 5, 6, 7, 8],
             },
         }
+    }
+
+    #[test]
+    fn repoint_item_swaps_source_preserves_identity_and_clears_stale_caches() {
+        use crate::dataset_quality::{QualityAck, QualityCheck};
+
+        // A fully-populated item: a real caption + trigger words, a Tier-0 cache, and a dismissed
+        // finding — all keyed to the OLD bytes.
+        let mut original = item("item_7", "old_hash");
+        original.asset_id = Some("asset_original".to_owned());
+        original.display_name = "Mira_07".to_owned();
+        original.caption = Caption {
+            text: "a photo of Mira".to_owned(),
+            source: CaptionSource::Auto,
+            trigger_words: vec!["mira".to_owned()],
+            updated_at: Some("then".to_owned()),
+            extra: Default::default(),
+        };
+        original.tier0_scalars = Some(cache_entry("old_hash", 512));
+        original.quality_ack = Some(QualityAck {
+            content_hash: "old_hash".to_owned(),
+            caption_hash: None,
+            checks: vec![QualityCheck::Blur],
+        });
+
+        let repointed = repoint_item(
+            &original,
+            RepointSource {
+                asset_id: Some("asset_upscaled".to_owned()),
+                path: "images/item_7.png".to_owned(),
+                width: Some(2048),
+                height: Some(2048),
+                content_hash: Some("new_hash".to_owned()),
+            },
+        );
+
+        // Identity + caption survive the swap.
+        assert_eq!(repointed.id, "item_7");
+        assert_eq!(repointed.display_name, "Mira_07");
+        assert_eq!(repointed.caption, original.caption);
+        assert_eq!(repointed.added_at, original.added_at);
+
+        // Source is swapped to the derived image.
+        assert_eq!(repointed.asset_id.as_deref(), Some("asset_upscaled"));
+        assert_eq!(repointed.content_hash.as_deref(), Some("new_hash"));
+        assert_eq!(repointed.width, Some(2048));
+        assert_eq!(repointed.height, Some(2048));
+
+        // Caches measured against the OLD bytes are cleared (they no longer describe the image).
+        assert!(repointed.tier0_scalars.is_none());
+        assert!(repointed.quality_ack.is_none());
+    }
+
+    #[test]
+    fn repoint_item_handles_a_dataset_owned_item_with_no_parent_asset() {
+        // A direct-upload (path-based) item has no library asset; re-pointing to a derived child asset
+        // gives it one without disturbing its id/caption.
+        let original = item("item_3", "h3"); // asset_id: None
+        assert!(original.asset_id.is_none());
+        let repointed = repoint_item(
+            &original,
+            RepointSource {
+                asset_id: Some("asset_derived".to_owned()),
+                path: "images/item_3.png".to_owned(),
+                width: Some(1024),
+                height: Some(1024),
+                content_hash: Some("h3_up".to_owned()),
+            },
+        );
+        assert_eq!(repointed.id, "item_3");
+        assert_eq!(repointed.asset_id.as_deref(), Some("asset_derived"));
+        assert_eq!(repointed.content_hash.as_deref(), Some("h3_up"));
+    }
+
+    #[test]
+    fn repoint_dataset_items_copies_derived_bytes_swaps_source_and_bumps_version() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let store = saved_dataset(dir.path());
+
+        // A "derived" image the worker would have written as a child asset under the project.
+        let derived_rel = "assets/images/derived.png";
+        let derived_abs = dir.path().join(derived_rel);
+        std::fs::create_dir_all(derived_abs.parent().unwrap()).unwrap();
+        std::fs::write(&derived_abs, b"upscaled-bytes").unwrap();
+
+        let updated = store
+            .repoint_dataset_items(
+                "proj",
+                "ds_test",
+                &[
+                    DatasetItemRepoint {
+                        item_id: "item_1".to_owned(),
+                        asset_id: Some("asset_upscaled".to_owned()),
+                        source_path: derived_rel.to_owned(),
+                    },
+                    // An item edited away since the job ran is silently skipped.
+                    DatasetItemRepoint {
+                        item_id: "ghost".to_owned(),
+                        asset_id: None,
+                        source_path: derived_rel.to_owned(),
+                    },
+                ],
+            )
+            .expect("repoint");
+
+        let item_1 = updated.items.iter().find(|i| i.id == "item_1").unwrap();
+        assert_eq!(item_1.asset_id.as_deref(), Some("asset_upscaled"));
+        assert_eq!(item_1.path, "images/item_1.png");
+
+        // The derived bytes were copied into the dataset's images/, and the item now hashes them.
+        let copied = dataset_root(&store.project_path, "ds_test").join("images/item_1.png");
+        assert_eq!(std::fs::read(&copied).unwrap(), b"upscaled-bytes");
+        assert_eq!(
+            item_1.content_hash,
+            crate::media_convert::file_content_hash(&copied).ok()
+        );
+        assert!(item_1.content_hash.is_some());
+
+        // Pixels changed → version bumped once; the untouched item keeps its source.
+        assert_eq!(updated.version, 2);
+        let item_2 = updated.items.iter().find(|i| i.id == "item_2").unwrap();
+        assert_eq!(item_2.content_hash.as_deref(), Some("h2"));
+        assert!(item_2.asset_id.is_none());
+    }
+
+    #[test]
+    fn repoint_dataset_items_replaces_a_jpg_with_png_and_removes_the_orphan() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let store = saved_dataset(dir.path());
+        let root = dataset_root(&store.project_path, "ds_test");
+
+        // Make item_1 a .jpg with a real on-disk file (the derived upscale is always .png).
+        let mut dataset = store.get_dataset("proj", "ds_test").expect("read");
+        dataset.items[0].path = "images/item_1.jpg".to_owned();
+        store.save_dataset(&dataset).expect("save");
+        let old_jpg = root.join("images/item_1.jpg");
+        std::fs::create_dir_all(old_jpg.parent().unwrap()).unwrap();
+        std::fs::write(&old_jpg, b"old-jpg-bytes").unwrap();
+
+        let derived_rel = "assets/images/up.png";
+        let derived_abs = dir.path().join(derived_rel);
+        std::fs::create_dir_all(derived_abs.parent().unwrap()).unwrap();
+        std::fs::write(&derived_abs, b"upscaled").unwrap();
+
+        let updated = store
+            .repoint_dataset_items(
+                "proj",
+                "ds_test",
+                &[DatasetItemRepoint {
+                    item_id: "item_1".to_owned(),
+                    asset_id: None,
+                    source_path: derived_rel.to_owned(),
+                }],
+            )
+            .expect("repoint");
+
+        let item = updated.items.iter().find(|i| i.id == "item_1").unwrap();
+        assert_eq!(
+            item.path, "images/item_1.png",
+            "path follows the derived extension"
+        );
+        assert!(root.join("images/item_1.png").exists(), "new png written");
+        assert!(!old_jpg.exists(), "the orphaned .jpg is removed");
+    }
+
+    #[test]
+    fn repoint_dataset_items_rejects_an_out_of_project_source() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let store = saved_dataset(dir.path());
+        let result = store.repoint_dataset_items(
+            "proj",
+            "ds_test",
+            &[DatasetItemRepoint {
+                item_id: "item_1".to_owned(),
+                asset_id: None,
+                source_path: "../escape.png".to_owned(),
+            }],
+        );
+        assert!(matches!(result, Err(ProjectStoreError::BadRequest(_))));
     }
 
     #[test]

@@ -340,6 +340,15 @@ export function duplicateRemovalItemIds(report) {
   return (report?.duplicateRemoval?.groups ?? []).flatMap((group) => group?.remove ?? []);
 }
 
+// Item IDs whose active (non-dismissed) flags include `resolution` — the sub-target images the
+// one-tap "Upscale low-res" action targets (sc-6539). Real-ESRGAN upscales each and re-points the
+// item; the originals stay in the library.
+export function lowResolutionFlaggedItemIds(report) {
+  return (report?.items ?? [])
+    .filter((item) => activeFlags(item).some((flag) => flag.check === "resolution"))
+    .map((item) => item.itemId);
+}
+
 // Aesthetic sub-score — the mean LAION-Aesthetics score (~[1, 10]) for STYLE datasets only; `null`
 // for person/object (never computed) or until the embedding job runs. Surfaced as an advisory
 // "Aesthetic" readout (rounded to one decimal), never a gate.

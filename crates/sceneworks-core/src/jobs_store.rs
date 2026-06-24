@@ -1699,6 +1699,12 @@ fn derive_job_title(job_type: &JobType, payload: &Map<String, Value>) -> Option<
                 .to_owned();
             Some(format!("Dataset Analysis — {subject}"))
         }
+        JobType::DatasetUpscale => {
+            let subject = first_str(payload, &["datasetName", "datasetId"])
+                .unwrap_or("(unnamed dataset)")
+                .to_owned();
+            Some(format!("Upscaling Dataset Images — {subject}"))
+        }
         JobType::ImageGenerate
         | JobType::ImageEdit
         | JobType::ImageVqa
@@ -2282,7 +2288,11 @@ pub fn mac_rust_supported(job: &JobSnapshot) -> Result<(), UnsupportedReason> {
         // sc-6535: dataset_analysis is a native Rust/MLX job (the CLIP image embedder), not a
         // Python-torch gap — so it's `Ok` here. Its real capability is gated by the worker's
         // advertisement once `mlx-gen-clip` is linked; until then it queues, never enforce-fails.
-        | JobType::DatasetAnalysis => Ok(()),
+        | JobType::DatasetAnalysis
+        // sc-6539: dataset_upscale runs the Real-ESRGAN ONNX engine natively in the Rust worker
+        // (the same engine as image_upscale) — not a Python-torch gap. Its real availability is the
+        // worker's capability advertisement, so it queues rather than enforce-fails here.
+        | JobType::DatasetUpscale => Ok(()),
 
         // Forward-compat: an unrecognized job type isn't a known Python-torch gap, so don't
         // enforce-fail it (it would otherwise break a newer job type this build doesn't model).
@@ -2521,6 +2531,8 @@ pub fn candle_supported(job: &JobSnapshot) -> Result<(), UnsupportedReason> {
         // dataset_analysis routes by capability (no candle worker advertises it) rather than
         // enforce-failing — the same "parity landing later" treatment as the surfaces above.
         | JobType::DatasetAnalysis
+        // sc-6539: dataset_upscale parity on candle routes by capability, like dataset_analysis.
+        | JobType::DatasetUpscale
         | JobType::Unknown(_) => Ok(()),
     }
 }
@@ -5569,6 +5581,7 @@ fn job_requires_gpu(job_type: &JobType) -> bool {
             | JobType::LoraTrain
             | JobType::TrainingCaption
             | JobType::DatasetAnalysis
+            | JobType::DatasetUpscale
     )
 }
 

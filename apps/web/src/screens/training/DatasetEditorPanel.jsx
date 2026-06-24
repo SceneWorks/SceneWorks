@@ -79,6 +79,7 @@ export function DatasetEditorPanel({
   readinessByKey,
   onToggleItemAck,
   onRemoveDuplicates,
+  onUpscaleLowRes,
   canSave,
   saveDataset,
   savingDataset,
@@ -206,6 +207,7 @@ export function DatasetEditorPanel({
             loading={readinessLoading}
             onRecaptionFlagged={(itemIds) => setCaptionDialog({ type: "flagged", itemIds })}
             onRemoveDuplicates={onRemoveDuplicates}
+            onUpscaleLowRes={onUpscaleLowRes}
           />
           {readiness?.distributions ? (
             <details className="dataset-doctor-advanced">

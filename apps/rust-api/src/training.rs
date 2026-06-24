@@ -608,6 +608,112 @@ pub(crate) async fn write_training_dataset_analysis_embeddings(
     Ok(Json(json!({ "stored": stored, "storedText": stored_text })))
 }
 
+/// Enqueue a Real-ESRGAN upscale over the named (low-resolution-flagged) dataset items (sc-6539
+/// one-tap fix). The worker upscales each, writes a child asset, and re-points the item via
+/// `/repoint`. Mirrors `create_training_dataset_analysis_job`.
+pub(crate) async fn create_training_dataset_upscale_job(
+    State(state): State<AppState>,
+    Path((project_id, dataset_id)): Path<(String, String)>,
+    ApiJson(payload): ApiJson<DatasetUpscaleJobRequest>,
+) -> Result<(StatusCode, Json<JobSnapshot>), ApiError> {
+    if !matches!(payload.factor, 2 | 4) {
+        return Err(ApiError::bad_request("Upscale factor must be 2 or 4."));
+    }
+    if payload.item_ids.is_empty() {
+        return Err(ApiError::bad_request("No items to upscale."));
+    }
+    let (dataset, dataset_root, project_name) = project_call(state.clone(), {
+        let project_id = project_id.clone();
+        let dataset_id = dataset_id.clone();
+        move |store| store.training_dataset_for_plan(&project_id, &dataset_id)
+    })
+    .await?;
+    let target_ids: std::collections::HashSet<&str> =
+        payload.item_ids.iter().map(String::as_str).collect();
+    let items = dataset
+        .items
+        .iter()
+        .filter(|item| target_ids.contains(item.id.as_str()))
+        .map(|item| {
+            json!({
+                "itemId": item.id.clone(),
+                "imagePath": dataset_root.join(&item.path).display().to_string(),
+                "assetId": item.asset_id.clone(),
+            })
+        })
+        .collect::<Vec<_>>();
+    if items.is_empty() {
+        return Err(ApiError::bad_request(
+            "No matching dataset items to upscale.",
+        ));
+    }
+    let factor = payload.factor;
+    let requested_gpu = payload.requested_gpu;
+    let job_payload = match json!({
+        "provider": "training",
+        "kind": "dataset_upscale",
+        "factor": factor,
+        "projectId": project_id.clone(),
+        "datasetId": dataset.id,
+        "datasetName": dataset.name,
+        "datasetVersion": dataset.version,
+        "datasetRoot": dataset_root.display().to_string(),
+        "items": items,
+    }) {
+        Value::Object(map) => map,
+        _ => {
+            return Err(ApiError::internal(
+                "dataset upscale job payload must be an object",
+            ))
+        }
+    };
+    let job = store_call(state.clone(), move |store, _timeout| {
+        store.create_job(CreateJob {
+            job_type: JobType::DatasetUpscale,
+            project_id: Some(project_id),
+            project_name: Some(project_name),
+            payload: job_payload,
+            requested_gpu,
+            source_job_id: None,
+            duplicate_of_job_id: None,
+            attempts: 1,
+        })
+    })
+    .await?;
+    publish(&state, "job.updated", &job);
+    publish_queue(&state).await?;
+    Ok((StatusCode::CREATED, Json(job)))
+}
+
+/// Re-point dataset items at the upscaled child assets the worker just wrote (sc-6539) — the
+/// dataset-mutation analog of the caption job's `/caption-sidecars` write. Bumps the dataset version.
+pub(crate) async fn repoint_training_dataset_items(
+    State(state): State<AppState>,
+    Path((project_id, dataset_id)): Path<(String, String)>,
+    ApiJson(payload): ApiJson<DatasetRepointBody>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    if payload.items.is_empty() {
+        return Ok(Json(json!({ "repointed": 0 })));
+    }
+    let repoints: Vec<DatasetItemRepoint> = payload
+        .items
+        .into_iter()
+        .map(|record| DatasetItemRepoint {
+            item_id: record.item_id,
+            asset_id: record.asset_id,
+            source_path: record.source_path,
+        })
+        .collect();
+    let count = repoints.len();
+    let updated = project_call(state, move |store| {
+        store.repoint_dataset_items(&project_id, &dataset_id, &repoints)
+    })
+    .await?;
+    Ok(Json(
+        json!({ "repointed": count, "version": updated.version }),
+    ))
+}
+
 pub(crate) fn validate_training_caption_job_request(
     payload: &TrainingCaptionJobRequest,
 ) -> Result<(), ApiError> {
