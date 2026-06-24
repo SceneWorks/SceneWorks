@@ -244,6 +244,41 @@ describe("DatasetDoctorReadout gating states", () => {
     expect(onStripExif).toHaveBeenCalled();
   });
 
+  it("surfaces a Check-faces action for a person dataset, even on a clean set (sc-6538)", () => {
+    const onAnalyzeFaces = vi.fn();
+    mount(
+      <DatasetDoctorReadout
+        report={report({
+          kind: "person",
+          gate: "ready",
+          counts: { info: 0, warn: 0, fatal: 0 },
+          items: [{ itemId: "a", flags: [] }],
+        })}
+        onAnalyzeFaces={onAnalyzeFaces}
+      />,
+    );
+    const button = [...container.querySelectorAll(".dataset-doctor-actions button")].find((node) =>
+      node.textContent.includes("Check faces"),
+    );
+    expect(button).toBeTruthy();
+    act(() => button.dispatchEvent(new MouseEvent("click", { bubbles: true })));
+    expect(onAnalyzeFaces).toHaveBeenCalled();
+  });
+
+  it("hides the Check-faces action for a non-person dataset (sc-6538)", () => {
+    const onAnalyzeFaces = vi.fn();
+    mount(
+      <DatasetDoctorReadout
+        report={report({ kind: "style", items: [{ itemId: "a", flags: [] }] })}
+        onAnalyzeFaces={onAnalyzeFaces}
+      />,
+    );
+    const button = [...container.querySelectorAll(".dataset-doctor-actions button")].find((node) =>
+      node.textContent.includes("Check faces"),
+    );
+    expect(button).toBeFalsy();
+  });
+
   it("renders the blocked headline when the set is untrainable", () => {
     mount(
       <DatasetDoctorReadout

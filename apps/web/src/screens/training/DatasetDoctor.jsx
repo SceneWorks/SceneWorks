@@ -183,6 +183,7 @@ export function DatasetDoctorReadout({
   onUpscaleLowRes,
   onSmartCrop,
   onStripExif,
+  onAnalyzeFaces,
 }) {
   if (!report) {
     if (loading) {
@@ -222,6 +223,10 @@ export function DatasetDoctorReadout({
   // sc-6539: EXIF-strip is a blanket hygiene pass (not flag-gated), so its count is every item.
   const stripExifCount =
     typeof onStripExif === "function" ? (report.items ?? []).length : 0;
+  // sc-6538: the face check is a PERSON-only analysis trigger, not a fix on flagged items — it runs the
+  // SCRFD+ArcFace pass that produces the face sidecar the identity / no-face / small-subject checks read.
+  // So it shows for a person dataset whenever wired, regardless of whether face findings exist yet.
+  const canAnalyzeFaces = report.kind === "person" && typeof onAnalyzeFaces === "function";
   // sc-6540: kind-aware next-steps the user must do by hand (acquire/replace) — distinct from the
   // one-tap action buttons above.
   const recommendations = compact ? [] : datasetRecommendations(report);
@@ -296,7 +301,8 @@ export function DatasetDoctorReadout({
       removeDuplicateIds.length ||
       lowResIds.length ||
       cropLossIds.length ||
-      stripExifCount ? (
+      stripExifCount ||
+      canAnalyzeFaces ? (
         <div className="dataset-doctor-actions">
           {removeDuplicateIds.length ? (
             <button
@@ -342,6 +348,11 @@ export function DatasetDoctorReadout({
             >
               Re-caption {recaptionFlaggedIds.length}{" "}
               {recaptionFlaggedIds.length === 1 ? "flagged image" : "flagged images"}
+            </button>
+          ) : null}
+          {canAnalyzeFaces ? (
+            <button type="button" className="secondary-action" onClick={() => onAnalyzeFaces()}>
+              Check faces
             </button>
           ) : null}
         </div>

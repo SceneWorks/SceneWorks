@@ -82,6 +82,7 @@ export function DatasetEditorPanel({
   onUpscaleLowRes,
   onSmartCrop,
   onStripExif,
+  onAnalyzeFaces,
   canSave,
   saveDataset,
   savingDataset,
@@ -212,6 +213,7 @@ export function DatasetEditorPanel({
             onUpscaleLowRes={onUpscaleLowRes}
             onSmartCrop={onSmartCrop}
             onStripExif={onStripExif}
+            onAnalyzeFaces={onAnalyzeFaces}
           />
           {readiness?.distributions ? (
             <details className="dataset-doctor-advanced">
