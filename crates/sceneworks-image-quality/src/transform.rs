@@ -126,4 +126,13 @@ mod tests {
         let img = load_oriented(&src).unwrap();
         assert_eq!((img.width(), img.height()), (70, 50));
     }
+
+    #[test]
+    fn baking_a_90_degree_orientation_swaps_dims() {
+        // The behavior load_oriented relies on for rotated sources: a 90°/270° tag swaps width and
+        // height, which is exactly why the crop must be planned on the *oriented* dimensions.
+        let mut img = image::DynamicImage::ImageRgb8(RgbImage::new(10, 20));
+        img.apply_orientation(image::metadata::Orientation::Rotate90);
+        assert_eq!((img.width(), img.height()), (20, 10));
+    }
 }
