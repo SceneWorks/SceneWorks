@@ -433,8 +433,8 @@ pub(crate) async fn overlay_derived_tokenizer(
 /// transformer, remaps it to the diffusers layout (fused-qkv 1→3 split + the load-bearing
 /// `norm_out` scale/shift swap), validates against the base, and assembles a local diffusers
 /// dir whose borrowed vae/text-encoder/tokenizer are absolute symlinks (so they survive the
-/// worker's temp→final atomic rename). Runs MLX, so macOS-only — other targets can't reach
-/// it (FLUX.2-klein is `macOnly` in the manifest).
+/// worker's temp→final atomic rename). Runs MLX on macOS; the candle (Windows/CUDA) lane runs the
+/// byte-equivalent candle twin (sc-7459) so `flux2_klein_9b_true_v2` installs + converts off-Mac too.
 #[cfg(target_os = "macos")]
 fn convert_flux2_klein_diffusers(
     source_file: &Path,
@@ -447,14 +447,32 @@ fn convert_flux2_klein_diffusers(
         .map_err(|error| error.to_string())
 }
 
-#[cfg(not(target_os = "macos"))]
+/// Candle (Windows/CUDA) twin of the macOS converter (sc-7459): the same single-file → diffusers key
+/// remap (fused-qkv split + the `norm_out` scale/shift swap), implemented on candle CPU tensors, so the
+/// `flux2_klein_9b_true_v2` weight variant has a real install-time convert lane on the candle worker
+/// (the borrowed components are hardlinked, not symlinked — Windows symlinks fail to read; see the
+/// crate's `convert` module). Reached only on the `backend-candle` build.
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+fn convert_flux2_klein_diffusers(
+    source_file: &Path,
+    base_dir: &Path,
+    out_dir: &Path,
+) -> Result<(), String> {
+    // CARVE-OUT(epic 3720 / sc-7459): backend-specific weight converter; not a registry contract.
+    candle_gen_flux2::convert_and_assemble(source_file, base_dir, out_dir)
+        .map(|_| ())
+        .map_err(|error| error.to_string())
+}
+
+#[cfg(all(not(target_os = "macos"), not(feature = "backend-candle")))]
 fn convert_flux2_klein_diffusers(
     _source_file: &Path,
     _base_dir: &Path,
     _out_dir: &Path,
 ) -> Result<(), String> {
     Err(
-        "FLUX.2-klein conversion requires macOS (mlx-gen-flux2); this model is macOS-only."
+        "FLUX.2-klein conversion requires the candle backend (Windows/CUDA, --features \
+         backend-candle) or macOS (mlx-gen-flux2)."
             .to_owned(),
     )
 }
