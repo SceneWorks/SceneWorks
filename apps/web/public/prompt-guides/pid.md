@@ -6,8 +6,10 @@ VAE decoder. Instead of decoding the latent at native resolution, PiD denoises
 pass** — so turning it on is effectively a "decode straight to high-res, with
 detail synthesis" mode rather than a transparent decoder swap.
 
-It applies to the **Qwen-Image latent space**: Qwen-Image, Qwen-Image-Edit, and
-Krea 2 Turbo.
+It's offered per latent space, so the eligible models depend on which PiD decoder
+is downloaded: **Qwen-Image** (Qwen-Image, Qwen-Image-Edit, Krea 2 Turbo),
+**FLUX.1** (FLUX.1, Boogu-Image, Chroma, Z-Image), and **FLUX.2** (FLUX.2-dev,
+FLUX.2-klein, Lens, Ideogram 4).
 
 ## ⚠️ Non-commercial — research / evaluation only
 
