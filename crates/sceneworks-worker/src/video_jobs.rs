@@ -2472,6 +2472,9 @@ fn video_load_spec(input: &VideoGenInput) -> LoadSpec {
         extra_controls: Vec::new(),
         ip_adapter: None,
         adapters: input.adapters.clone(),
+        // PiD super-resolving decode (epic 7840) is an image-only latent-space swap; video
+        // providers have no PiD backbone, so never request it.
+        pid: None,
     }
 }
 
@@ -2556,6 +2559,9 @@ fn load_video_generation_for_tests(input: &VideoGenInput) -> WorkerResult<Box<dy
         extra_controls: Vec::new(),
         ip_adapter: None,
         adapters: input.adapters.clone(),
+        // PiD super-resolving decode (epic 7840) is an image-only latent-space swap; video
+        // providers have no PiD backbone, so never request it.
+        pid: None,
     };
     gen_core::load(input.engine_id, &spec)
         .map_err(|error| WorkerError::Engine(format!("video load failed: {error}")))
