@@ -2988,8 +2988,22 @@ label {
 
 .preset-rail-row {
   display: grid;
-  grid-template-columns: 1fr 1.4fr;
+  grid-template-columns: 1fr 1fr;
   gap: 10px;
+}
+
+/* Uniform control height down the preset rail so the model picker, save-preset
+   name + button, and the variations/aspect row all read as one consistent column
+   of boxes. box-sizing is border-box globally, so a single height value aligns
+   every control regardless of its own padding. The project-scope segment is left
+   at its original height — it's a distinct two-option toggle, not a plain box. */
+.preset-rail > label select,
+.preset-rail .save-preset-name,
+.preset-rail .save-preset-btn,
+.preset-rail .preset-rail-row input,
+.preset-rail .preset-rail-row select {
+  height: 36px;
+  min-height: 36px;
 }
 
 /* "Save as Preset" — inline sidebar control that snapshots the current setup. */
