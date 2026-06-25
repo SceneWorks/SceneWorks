@@ -419,6 +419,46 @@ pub(crate) const MODEL_TABLE: &[ModelRow] = &[
         default_guidance: 0.0,
         adapter_label: "mlx_krea",
     },
+    // Stable Diffusion 3.5 Large (epic 7841 / sc-7871) — native MLX, gated. 8B MMDiT + triple text
+    // encoder (CLIP-L + CLIP-G + T5-XXL) + 16-ch VAE. True-CFG flagship: 28 steps / guidance 3.5 +
+    // negative prompt (the `sd3_5_large` descriptor advertises supports_guidance + supports_negative
+    // + supports_true_cfg). Installs a packed Q8 dir (`sd3_5_large_quant` converter, model_jobs.rs).
+    ModelRow {
+        sceneworks_id: "sd3_5_large",
+        engine_id: "sd3_5_large",
+        default_repo: "stabilityai/stable-diffusion-3.5-large",
+        default_steps: 28,
+        default_guidance: 3.5,
+        adapter_label: "mlx_sd3",
+    },
+    // SD3.5 Large Turbo (epic 7841 / sc-7871) — the ADD-distilled few-step, CFG-free sibling: same 8B
+    // MMDiT + triple TE + 16-ch VAE backbone + snapshot layout, distilled checkpoint. 4 steps; guidance
+    // is INERT (the `sd3_5_large_turbo` descriptor advertises supports_guidance=false, so
+    // `resolve_guidance` returns None and never forwards a value — the pipeline's `denoise_cfg` skips the
+    // uncond forward at guidance 1.0). No negative prompt. The z_image_turbo / boogu / krea turbo pattern.
+    ModelRow {
+        sceneworks_id: "sd3_5_large_turbo",
+        engine_id: "sd3_5_large_turbo",
+        default_repo: "stabilityai/stable-diffusion-3.5-large-turbo",
+        default_steps: 4,
+        default_guidance: 0.0,
+        adapter_label: "mlx_sd3",
+    },
+    // SD3.5 Medium (epic 7841 / sc-7869 M3, wired in sc-7871) — the MMDiT-X variant: 2.5B, 24 joint
+    // blocks (first 13 dual-attention), hidden 1536, `pos_embed_max_size` 384. True-CFG like Large but a
+    // distinct (smaller) transformer + its own recipe — 40 steps / guidance 5.0 (Stability's card notes
+    // Medium is more guidance-sensitive than Large). The `sd3_5_medium` descriptor advertises
+    // supports_guidance + supports_negative + supports_true_cfg. Installs a packed dir via the
+    // `sd3_5_medium_quant` converter (model_jobs.rs). The generator self-registers via the shared
+    // force-link (`use mlx_gen_sd3 as _;` in image_jobs.rs) now that M3 is on mlx-gen main (rev 1a784cd).
+    ModelRow {
+        sceneworks_id: "sd3_5_medium",
+        engine_id: "sd3_5_medium",
+        default_repo: "stabilityai/stable-diffusion-3.5-medium",
+        default_steps: 40,
+        default_guidance: 5.0,
+        adapter_label: "mlx_sd3",
+    },
 ];
 
 /// The mlx-gen registry ids of the video generators this worker serves (the engine ids
