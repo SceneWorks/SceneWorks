@@ -178,7 +178,7 @@ pub fn default_data_dir() -> PathBuf {
     app_support_dir().join("data")
 }
 
-fn config_dir() -> PathBuf {
+pub(crate) fn config_dir() -> PathBuf {
     app_support_dir().join("config")
 }
 

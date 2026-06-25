@@ -497,9 +497,10 @@ const MIN_GPU_MEMORY_FRACTION: f32 = 0.1;
 
 /// Persist the user's GPU memory cap as a fraction of total unified memory, or clear it. `None`
 /// (and a non-finite or ≥ 1.0 value — 100% is "use everything" = no constraint) clears the cap;
-/// otherwise the value is clamped to `[MIN_GPU_MEMORY_FRACTION, 0.99]`. Mirrors `set_remote_access`:
-/// **persist only** — the worker reads the derived byte ceiling at spawn, so the change takes effect
-/// on the next "Restart worker" (the UI drives that), not mid-job. Returns the updated settings.
+/// otherwise the value is clamped to `[MIN_GPU_MEMORY_FRACTION, 0.99]`. Persists the fraction AND
+/// (macOS, sc-7824) writes the derived byte ceiling to the live-handoff file the running MLX worker
+/// re-reads between jobs, so the change applies within a couple of seconds with no worker restart.
+/// Returns the updated settings.
 #[tauri::command]
 pub fn set_gpu_memory_limit(fraction: Option<f32>) -> Result<AppSettings, String> {
     let mut settings = load_settings();
@@ -510,7 +511,30 @@ pub fn set_gpu_memory_limit(fraction: Option<f32>) -> Result<AppSettings, String
         _ => None,
     };
     save_settings(&settings)?;
+    #[cfg(target_os = "macos")]
+    write_gpu_memory_limit_file();
     Ok(settings)
+}
+
+/// Write the resolved byte ceiling (or `0` for "no limit") to the live-handoff file the running MLX
+/// worker re-reads between jobs (epic 7819, sc-7824), so a slider change applies without a worker
+/// restart. Best-effort: a write failure just means the change waits for the next worker restart
+/// (which re-reads `SCENEWORKS_GPU_MEMORY_LIMIT_BYTES` from the persisted fraction anyway).
+#[cfg(target_os = "macos")]
+fn write_gpu_memory_limit_file() {
+    let bytes = gpu_memory_limit_bytes().unwrap_or(0);
+    let path = sceneworks_core::app_paths::gpu_memory_limit_file(&crate::setup::config_dir());
+    let _ = std::fs::write(&path, bytes.to_string());
+}
+
+/// Read the MLX worker's latest GPU memory telemetry for the Settings readout (epic 7819, sc-7825).
+/// `None` when the worker hasn't published any yet, or on platforms/workers without MLX telemetry
+/// (candle/CPU never write the file). Best-effort: a missing or unparseable file yields `None`.
+#[tauri::command]
+pub fn get_gpu_telemetry() -> Option<sceneworks_core::app_paths::GpuMemoryTelemetry> {
+    let path = sceneworks_core::app_paths::gpu_telemetry_file(&crate::setup::config_dir());
+    let raw = std::fs::read_to_string(&path).ok()?;
+    serde_json::from_str(&raw).ok()
 }
 
 /// The configured GPU memory ceiling in BYTES for the MLX worker, or `None` for no limit:

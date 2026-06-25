@@ -300,3 +300,84 @@ describe("SettingsScreen remote access (desktop)", () => {
     expect(invoke).toHaveBeenCalledWith("set_remote_access", { enabled: true, port: 8787 });
   });
 });
+
+// epic 7819 Phase 2: live-apply the GPU memory target (sc-7824, no worker restart) and show live
+// MLX memory telemetry (sc-7825) on macOS with a known unified-memory total.
+describe("SettingsScreen GPU memory (desktop macOS)", () => {
+  let container;
+  let root;
+  let invoke;
+  let SettingsScreen;
+  const GIB = 1024 * 1024 * 1024;
+
+  beforeEach(async () => {
+    global.IS_REACT_ACT_ENVIRONMENT = true;
+    invoke = vi.fn(async (command) => {
+      switch (command) {
+        case "get_app_settings":
+          return {}; // no cap → slider starts at 100% (Off)
+        case "get_gpu_info":
+          return { platform: "macos", devices: ["Apple M3 Max"], unifiedMemoryMb: 131072 };
+        case "list_credentials":
+          return [];
+        case "get_remote_access":
+          return null;
+        case "get_gpu_telemetry":
+          return { activeBytes: 20 * GIB, peakBytes: 40 * GIB, cacheBytes: 2 * GIB, limitBytes: 64 * GIB };
+        case "set_gpu_memory_limit":
+          return { gpuMemoryLimitFraction: 0.5 };
+        default:
+          return null;
+      }
+    });
+    window.__TAURI__ = { core: { invoke } };
+    vi.resetModules();
+    ({ SettingsScreen } = await import("./SettingsScreen.jsx"));
+    container = document.createElement("div");
+    document.body.appendChild(container);
+    root = createRoot(container);
+  });
+
+  afterEach(async () => {
+    await act(async () => {
+      root.unmount();
+    });
+    container.remove();
+    delete window.__TAURI__;
+    vi.restoreAllMocks();
+  });
+
+  async function render() {
+    await act(async () => {
+      root.render(<SettingsScreen />);
+    });
+    await act(async () => {});
+  }
+
+  const slider = () =>
+    container.querySelector(
+      '[aria-label="GPU memory target for SceneWorks (percent of unified memory)"]',
+    );
+
+  it("shows live MLX memory telemetry from the worker", async () => {
+    await render();
+    expect(invoke).toHaveBeenCalledWith("get_gpu_telemetry", undefined);
+    expect(container.textContent).toContain("MLX memory");
+    expect(container.textContent).toContain("Active: 20.0 GB");
+    expect(container.textContent).toContain("Peak: 40.0 GB");
+    expect(container.textContent).toContain("Limit: 64 GB");
+  });
+
+  it("applies the GPU memory target live, without restarting the worker", async () => {
+    await render();
+    const input = slider();
+    expect(input).toBeTruthy();
+    await changeField(input, "50");
+    await act(async () => {
+      input.dispatchEvent(new window.MouseEvent("mouseup", { bubbles: true }));
+    });
+    expect(invoke).toHaveBeenCalledWith("set_gpu_memory_limit", { fraction: 0.5 });
+    expect(invoke).not.toHaveBeenCalledWith("restart_worker");
+    expect(container.textContent).toContain("applies within a couple of seconds");
+  });
+});
