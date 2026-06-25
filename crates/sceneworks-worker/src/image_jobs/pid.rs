@@ -27,9 +27,12 @@ const PID_FLUX2_REPO: &str = "SceneWorks/pid-flux2";
 const PID_FLUX2_FILE: &str = "pid_flux2_2kto4k.safetensors";
 const PID_SDXL_REPO: &str = "SceneWorks/pid-sdxl";
 const PID_SDXL_FILE: &str = "pid_sdxl_2kto4k.safetensors";
-// gemma-2-2b-it is the PiD caption encoder (shared by every backbone). sc-8025 tracks a turnkey
-// non-gated SceneWorks mirror; the default points at the canonical (gated) id for now.
-const PID_GEMMA_REPO: &str = "google/gemma-2-2b-it";
+// gemma-2-2b-it is the PiD caption encoder (shared by every backbone). sc-8025 re-hosts the stock
+// weights (no conversion) at the non-gated `SceneWorks/gemma-2-2b-it` mirror so the in-app download
+// needs no Gemma-gated HF token; the catalog `downloads[]` + `pidDecoders.<bb>.gemmaRepo` point here
+// too (they must agree, or this snapshot is never cached → native VAE). The `advanced.pidGemma`
+// per-request override still wins. Gemma Terms §3.1 permit the mirror (terms ship alongside the weights).
+const PID_GEMMA_REPO: &str = "SceneWorks/gemma-2-2b-it";
 
 /// Map a SceneWorks image model id to its PiD latent-space backbone, or `None` when the model has no
 /// PiD backbone (so `usePid` is silently ignored — the guard for SenseNova et al.). All four wired

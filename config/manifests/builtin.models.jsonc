@@ -4121,7 +4121,7 @@
       // model that reuses QwenVae — Qwen-Image, Qwen-Image-Edit (all variants), and Krea 2 Turbo.
       //
       // The native worker (`image_jobs/pid.rs`, sc-7849) resolves the weights by REPO STRING
-      // (`SceneWorks/pid-qwenimage` checkpoint + `google/gemma-2-2b-it` caption encoder), not by this
+      // (`SceneWorks/pid-qwenimage` checkpoint + `SceneWorks/gemma-2-2b-it` caption encoder), not by this
       // catalog id — cataloging it lets Model Manager download both into the HF cache the worker reads.
       // `resolve_pid_weights` returns `None` (→ native VAE, behavior-preserving) until BOTH snapshots are
       // cached, so this is a safe, opt-in, on-demand asset (autoDownload:false) with no auto-pull.
@@ -4133,9 +4133,10 @@
       // attribution + provenance + the exact lossless conversion) + a model-card README; `files: []`
       // pulls those alongside the weights so the obligation travels with the bytes (§3.1).
       //
-      // gemma-2-2b-it is the PiD caption encoder. It is a GATED upstream Google repo today (the download
-      // needs a user HF token that has accepted the Gemma terms); a turnkey non-gated SceneWorks mirror
-      // is tracked as a follow-up so this entry stays focused on the PiD checkpoint re-host.
+      // gemma-2-2b-it is the PiD caption encoder. Re-hosted (sc-8025) at the non-gated
+      // `SceneWorks/gemma-2-2b-it` mirror — stock weights pulled as-is (no conversion), shipping the
+      // verbatim Gemma Terms of Use + Prohibited Use Policy alongside (Gemma Terms §3.1 permit the
+      // mirror). So the in-app download needs NO Gemma-gated HF token, completing the turnkey goal.
       "id": "pid_qwenimage_decoder",
       "autoDownload": false,
       "nonCommercial": true,
@@ -4155,12 +4156,12 @@
           "estimatedSizeBytes": 2724745532
         },
         {
-          // PiD caption encoder (Gemma-2-2B-IT). GATED upstream repo — download needs an HF token that
-          // has accepted the Gemma terms. Pulled as-is (no conversion); the mlx-gen-pid / candle-gen-pid
+          // PiD caption encoder (Gemma-2-2B-IT). Non-gated `SceneWorks/gemma-2-2b-it` mirror (sc-8025) —
+          // no HF token needed. Stock weights pulled as-is (no conversion); the mlx-gen-pid / candle-gen-pid
           // Gemma-2 port reads the stock config/safetensors/tokenizer directly. `files: []` pulls the
-          // repo's own license/policy files alongside the weights.
+          // mirror's LICENSE (Gemma Terms) + Prohibited Use Policy + NOTICE alongside the weights.
           "provider": "huggingface",
-          "repo": "google/gemma-2-2b-it",
+          "repo": "SceneWorks/gemma-2-2b-it",
           "files": [],
           "estimatedSizeBytes": 5228717488
         }
@@ -4173,7 +4174,7 @@
           "qwenimage": {
             "repo": "SceneWorks/pid-qwenimage",
             "file": "pid_qwenimage_2kto4k.safetensors",
-            "gemmaRepo": "google/gemma-2-2b-it",
+            "gemmaRepo": "SceneWorks/gemma-2-2b-it",
             "nonCommercial": true,
             "license": "NVIDIA License (NSCLv1)",
             "licenseUrl": "https://huggingface.co/nvidia/PixelDiT-1300M-1024px/blob/main/LICENSE",
@@ -4230,7 +4231,7 @@
         },
         {
           "provider": "huggingface",
-          "repo": "google/gemma-2-2b-it",
+          "repo": "SceneWorks/gemma-2-2b-it",
           "files": [],
           "estimatedSizeBytes": 5228717488
         }
@@ -4243,7 +4244,7 @@
           "flux": {
             "repo": "SceneWorks/pid-flux",
             "file": "pid_flux_2kto4k.safetensors",
-            "gemmaRepo": "google/gemma-2-2b-it",
+            "gemmaRepo": "SceneWorks/gemma-2-2b-it",
             "nonCommercial": true,
             "license": "NVIDIA License (NSCLv1)",
             "licenseUrl": "https://huggingface.co/nvidia/PixelDiT-1300M-1024px/blob/main/LICENSE",
@@ -4299,7 +4300,7 @@
         },
         {
           "provider": "huggingface",
-          "repo": "google/gemma-2-2b-it",
+          "repo": "SceneWorks/gemma-2-2b-it",
           "files": [],
           "estimatedSizeBytes": 5228717488
         }
@@ -4312,7 +4313,7 @@
           "flux2": {
             "repo": "SceneWorks/pid-flux2",
             "file": "pid_flux2_2kto4k.safetensors",
-            "gemmaRepo": "google/gemma-2-2b-it",
+            "gemmaRepo": "SceneWorks/gemma-2-2b-it",
             "nonCommercial": true,
             "license": "NVIDIA License (NSCLv1)",
             "licenseUrl": "https://huggingface.co/nvidia/PixelDiT-1300M-1024px/blob/main/LICENSE",
@@ -4368,7 +4369,7 @@
         },
         {
           "provider": "huggingface",
-          "repo": "google/gemma-2-2b-it",
+          "repo": "SceneWorks/gemma-2-2b-it",
           "files": [],
           "estimatedSizeBytes": 5228717488
         }
@@ -4381,7 +4382,7 @@
           "sdxl": {
             "repo": "SceneWorks/pid-sdxl",
             "file": "pid_sdxl_2kto4k.safetensors",
-            "gemmaRepo": "google/gemma-2-2b-it",
+            "gemmaRepo": "SceneWorks/gemma-2-2b-it",
             "nonCommercial": true,
             "license": "NVIDIA License (NSCLv1)",
             "licenseUrl": "https://huggingface.co/nvidia/PixelDiT-1300M-1024px/blob/main/LICENSE",
