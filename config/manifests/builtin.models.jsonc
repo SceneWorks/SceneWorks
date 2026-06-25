@@ -2086,6 +2086,293 @@
       }
     },
     {
+      "id": "sd3_5_large",
+      "name": "Stable Diffusion 3.5 Large",
+      "family": "sd3",
+      "type": "image",
+      // Stable Diffusion 3.5 Large (epic 7841 / S1 sc-7870) — Stability AI's 8B MMDiT flagship,
+      // ported natively to mlx-gen (engine id `sd3_5_large`, E5 — real-weight validated, coherent
+      // 1024²). Triple text-encoder aggregator (CLIP-L + CLIP-G + T5-XXL) feeding a multimodal
+      // diffusion transformer (NO RoPE) + the 16-channel SD3.5 VAE. No torch backend → native MLX
+      // only (macOnly initially; off-Mac/candle is epic 7982). `adapter` is the asset stamp
+      // (mirrors mlx_<family>). Worker routing through engines::MODEL_TABLE / the gen_core registry
+      // lands in S2 (sc-7871) — until then this entry is downloadable/catalog-visible but not yet a
+      // Studio picker (mirrors the Boogu sc-6399 staging).
+      "adapter": "mlx_sd3",
+      "capabilities": ["text_to_image"],
+      "macOnly": true,
+      "downloads": [
+        {
+          // Gated repo (Stability AI Community License — non-commercial / <$1M-rev commercial OK;
+          // requires HF license acknowledgement + token). The repo ships the diffusers tree
+          // (transformer/ + the three text encoders + VAE + tokenizers) AND single-file checkpoints;
+          // the native converter reads ONLY the diffusers subdirs, so include just those (+
+          // model_index.json). estimatedSizeBytes is a PLACEHOLDER (the diffusers subset of the
+          // gated repo) — refine in E7/S3 once the real pull is measured.
+          "provider": "huggingface",
+          "repo": "stabilityai/stable-diffusion-3.5-large",
+          "files": [
+            "model_index.json",
+            "transformer/*",
+            "text_encoder/*",
+            "text_encoder_2/*",
+            "text_encoder_3/*",
+            "tokenizer/*",
+            "tokenizer_2/*",
+            "tokenizer_3/*",
+            "vae/*",
+            "scheduler/*"
+          ],
+          "estimatedSizeBytes": 20500000000
+        }
+      ],
+      "paths": {
+        "model": "${HF_CACHE}/stabilityai/stable-diffusion-3.5-large"
+      },
+      "defaults": {
+        // SD3.5 Large reference defaults: flow-match Euler with a time-shift of 3.0, ~28 steps,
+        // true classifier-free guidance 3.5 (negative-prompt capable). The shift is the orthogonal
+        // schedulerShift knob (epic 7114) rather than a scheduler choice.
+        "resolution": "1024x1024",
+        "steps": 28,
+        "guidanceScale": 3.5,
+        "count": 1,
+        "sampler": "euler",
+        "scheduler": "default",
+        "schedulerShift": 3.0
+      },
+      "limits": {
+        // Native 1024² (1K) plus the canonical aspect-ratio buckets. SD3.5 Large routes the
+        // per-generation sampler/scheduler knobs through the unified flow framework (epic 7114),
+        // so it advertises the full curated flow menu. "default" is the native flow-match Euler
+        // loop. The S2 `sd3_5_large` descriptor will advertise curated_sampler_names()/
+        // curated_scheduler_names(); the engines.rs drift guard checks this list is a subset of it
+        // (the guard skips this id until S2 wires MODEL_TABLE).
+        "resolutions": ["1024x1024", "1152x896", "896x1152", "1216x832", "832x1216", "1344x768", "768x1344"],
+        "count": [1, 2, 4],
+        "samplers": ["default", "euler", "euler_ancestral", "heun", "dpmpp_2m", "dpmpp_sde", "uni_pc", "lcm", "ddim"],
+        "schedulers": ["default", "normal", "simple", "karras", "exponential", "sgm_uniform", "beta", "ddim_uniform"]
+      },
+      "loraCompatibility": {
+        // SD3.5 MMDiT family. Declare the real family so the picker only offers sd3-family LoRAs
+        // (per sc-1927: an empty list would match EVERY LoRA). No sd3 LoRA wiring yet; reserved.
+        "families": ["sd3"],
+        "types": ["style", "enhance", "character"]
+      },
+      "mlx": {
+        // 8B MMDiT + triple text encoder (CLIP-L + CLIP-G + ~4.7B T5-XXL) + 16-ch VAE. Converted to
+        // a packed MLX dir at install (mlx.requiresConversion + the `sd3_5_large_quant` converter,
+        // REGISTERED IN S2/S3 — this entry only declares it). minMemoryGb is a PLACEHOLDER consistent
+        // with sibling large flow models (krea_2 48, Boogu 64); E5 measured Large Q8 ~2.67 GB RSS but
+        // MLX Metal-wired memory is higher and generate is activation-bound — E7 (sc-78xx) refines.
+        "minMemoryGb": 48,
+        "quantize": 8,
+        "requiresConversion": true,
+        "converter": "sd3_5_large_quant",
+        "convertSourceRepo": "stabilityai/stable-diffusion-3.5-large"
+      },
+      "gated": true,
+      "credentialHost": "huggingface.co",
+      "licenseUrl": "https://huggingface.co/stabilityai/stable-diffusion-3.5-large",
+      "ui": {
+        "label": "Stable Diffusion 3.5 Large",
+        "description": "Stability AI Stable Diffusion 3.5 Large — the 8B multimodal diffusion transformer (MMDiT) flagship, ported natively to MLX (Apple Silicon only). Triple text encoder (CLIP-L + CLIP-G + T5-XXL) for strong prompt adherence and in-image text; true classifier-free guidance with negative prompts. Runs ~28 steps at guidance 3.5 (flow-match Euler, shift 3.0); native 1024×1024. Distributed under the Stability AI Community License (gated): accept the license at huggingface.co/stabilityai/stable-diffusion-3.5-large and add a Hugging Face token under Settings → Service credentials before downloading. Pre-quantized to Q8 at install.",
+        "recommendedFor": ["text_to_image", "style_variations"],
+        "promptGuide": {
+          "title": "Stable Diffusion 3.5 Prompt Guide",
+          "path": "/prompt-guides/sd3-5.md",
+          "sources": [
+            { "label": "SD3.5 Large model card", "url": "https://huggingface.co/stabilityai/stable-diffusion-3.5-large" },
+            { "label": "Stable Diffusion 3 technical report (MMDiT)", "url": "https://arxiv.org/abs/2403.03206" },
+            { "label": "Diffusers SD3 pipeline docs", "url": "https://huggingface.co/docs/diffusers/main/en/api/pipelines/stable_diffusion/stable_diffusion_3" }
+          ]
+        }
+      }
+    },
+    {
+      "id": "sd3_5_large_turbo",
+      // Recommended (the fast default per epic 7841): the few-step distilled flagship — discoverable
+      // in the Models Recommended section. autoDownload:false because it is a gated, large turnkey
+      // (mirrors the Boogu / krea_2 opt-in pattern) — users acknowledge the license + opt in rather
+      // than the wizard auto-pulling it.
+      "recommended": true,
+      "autoDownload": false,
+      "name": "Stable Diffusion 3.5 Large Turbo",
+      "family": "sd3",
+      "type": "image",
+      // Stable Diffusion 3.5 Large Turbo (epic 7841 / S1 sc-7870) — the ADD-distilled few-step,
+      // CFG-free sibling of SD3.5 Large: same 8B MMDiT + triple TE + 16-ch VAE, rendered in ~4 steps
+      // with guidance off. Native MLX only (engine id `sd3_5_large_turbo`, E6 — in flight). Worker
+      // routing lands in S2 (sc-7871).
+      "adapter": "mlx_sd3",
+      "capabilities": ["text_to_image"],
+      "macOnly": true,
+      "downloads": [
+        {
+          // Gated repo (Stability AI Community License; HF license-ack + token required). Diffusers
+          // subset only; estimatedSizeBytes is a PLACEHOLDER (refine in E7/S3).
+          "provider": "huggingface",
+          "repo": "stabilityai/stable-diffusion-3.5-large-turbo",
+          "files": [
+            "model_index.json",
+            "transformer/*",
+            "text_encoder/*",
+            "text_encoder_2/*",
+            "text_encoder_3/*",
+            "tokenizer/*",
+            "tokenizer_2/*",
+            "tokenizer_3/*",
+            "vae/*",
+            "scheduler/*"
+          ],
+          "estimatedSizeBytes": 20500000000
+        }
+      ],
+      "paths": {
+        "model": "${HF_CACHE}/stabilityai/stable-diffusion-3.5-large-turbo"
+      },
+      "defaults": {
+        // Turbo: ADD-distilled few-step (4), CFG-free (guidanceScale ~1.0 — the turbo path runs no
+        // unconditional branch, so the negative prompt is inert). Flow-match Euler, shift 3.0.
+        "resolution": "1024x1024",
+        "steps": 4,
+        "guidanceScale": 1.0,
+        "count": 1,
+        "sampler": "euler",
+        "scheduler": "default",
+        "schedulerShift": 3.0
+      },
+      "limits": {
+        // Native 1024² (1K) + the canonical buckets. Same unified flow menu as Large (the few-step
+        // student renders cleanest on the stochastic solvers, but the full curated vocab is exposed;
+        // S2's `sd3_5_large_turbo` descriptor pins the honored subset and the drift guard checks it).
+        "resolutions": ["1024x1024", "1152x896", "896x1152", "1216x832", "832x1216", "1344x768", "768x1344"],
+        "count": [1, 2, 4],
+        "samplers": ["default", "euler", "euler_ancestral", "heun", "dpmpp_2m", "dpmpp_sde", "uni_pc", "lcm", "ddim"],
+        "schedulers": ["default", "normal", "simple", "karras", "exponential", "sgm_uniform", "beta", "ddim_uniform"]
+      },
+      "loraCompatibility": {
+        "families": ["sd3"],
+        "types": ["style", "enhance", "character"]
+      },
+      "mlx": {
+        // Same footprint as Large (same backbone weights, few-step schedule). Converted to a packed
+        // MLX dir at install (`sd3_5_large_turbo_quant` converter, REGISTERED IN S2/S3). minMemoryGb
+        // PLACEHOLDER mirroring Large; E7 refines.
+        "minMemoryGb": 48,
+        "quantize": 8,
+        "requiresConversion": true,
+        "converter": "sd3_5_large_turbo_quant",
+        "convertSourceRepo": "stabilityai/stable-diffusion-3.5-large-turbo"
+      },
+      "gated": true,
+      "credentialHost": "huggingface.co",
+      "licenseUrl": "https://huggingface.co/stabilityai/stable-diffusion-3.5-large-turbo",
+      "ui": {
+        "label": "Stable Diffusion 3.5 Large Turbo",
+        "description": "Stable Diffusion 3.5 Large Turbo — the few-step (~4), CFG-free distilled variant of SD3.5 Large: the same 8B multimodal diffusion transformer with a triple text encoder, distilled (ADD) for much faster renders, native MLX (Apple Silicon). Best for fast iteration at flagship quality; native 1024×1024. Runs CFG-free (the negative prompt is inert). Distributed under the Stability AI Community License (gated): accept the license at huggingface.co/stabilityai/stable-diffusion-3.5-large-turbo and add a Hugging Face token under Settings → Service credentials before downloading. Pre-quantized to Q8 at install.",
+        "recommendedFor": ["text_to_image", "style_variations"],
+        "promptGuide": {
+          "title": "Stable Diffusion 3.5 Prompt Guide",
+          "path": "/prompt-guides/sd3-5.md",
+          "sources": [
+            { "label": "SD3.5 Large Turbo model card", "url": "https://huggingface.co/stabilityai/stable-diffusion-3.5-large-turbo" },
+            { "label": "Stable Diffusion 3 technical report (MMDiT)", "url": "https://arxiv.org/abs/2403.03206" },
+            { "label": "Diffusers SD3 pipeline docs", "url": "https://huggingface.co/docs/diffusers/main/en/api/pipelines/stable_diffusion/stable_diffusion_3" }
+          ]
+        }
+      }
+    },
+    {
+      "id": "sd3_5_medium",
+      "name": "Stable Diffusion 3.5 Medium",
+      "family": "sd3",
+      "type": "image",
+      // Stable Diffusion 3.5 Medium (epic 7841 / S1 sc-7870) — the 2.5B MMDiT-X (dual-attention)
+      // mid-tier: same triple text encoder + 16-ch VAE, a smaller transformer that renders up to
+      // 1440². Native MLX only (engine id `sd3_5_medium` — forward M2 in flight, pipeline M3 later).
+      // Worker routing lands in S2 (sc-7871).
+      "adapter": "mlx_sd3",
+      "capabilities": ["text_to_image"],
+      "macOnly": true,
+      "downloads": [
+        {
+          // Gated repo (Stability AI Community License; HF license-ack + token required). Diffusers
+          // subset only; estimatedSizeBytes is a PLACEHOLDER (the smaller 2.5B backbone — refine in
+          // E7/S3).
+          "provider": "huggingface",
+          "repo": "stabilityai/stable-diffusion-3.5-medium",
+          "files": [
+            "model_index.json",
+            "transformer/*",
+            "text_encoder/*",
+            "text_encoder_2/*",
+            "text_encoder_3/*",
+            "tokenizer/*",
+            "tokenizer_2/*",
+            "tokenizer_3/*",
+            "vae/*",
+            "scheduler/*"
+          ],
+          "estimatedSizeBytes": 12000000000
+        }
+      ],
+      "paths": {
+        "model": "${HF_CACHE}/stabilityai/stable-diffusion-3.5-medium"
+      },
+      "defaults": {
+        // SD3.5 Medium reference defaults: flow-match Euler, shift 3.0, ~40 steps, true CFG ~4.5
+        // (the Medium MMDiT-X benefits from a few more steps + slightly higher guidance than Large).
+        "resolution": "1024x1024",
+        "steps": 40,
+        "guidanceScale": 4.5,
+        "count": 1,
+        "sampler": "euler",
+        "scheduler": "default",
+        "schedulerShift": 3.0
+      },
+      "limits": {
+        // Medium renders up to 1440² (its trained max) plus 1K + the canonical buckets. Same unified
+        // flow menu; S2's `sd3_5_medium` descriptor pins the honored subset (drift guard checks it).
+        "resolutions": ["1024x1024", "1440x1440", "1152x896", "896x1152", "1216x832", "832x1216", "1344x768", "768x1344"],
+        "count": [1, 2, 4],
+        "samplers": ["default", "euler", "euler_ancestral", "heun", "dpmpp_2m", "dpmpp_sde", "uni_pc", "lcm", "ddim"],
+        "schedulers": ["default", "normal", "simple", "karras", "exponential", "sgm_uniform", "beta", "ddim_uniform"]
+      },
+      "loraCompatibility": {
+        "families": ["sd3"],
+        "types": ["style", "enhance", "character"]
+      },
+      "mlx": {
+        // 2.5B MMDiT-X + the same triple TE + 16-ch VAE (the TEs dominate the footprint, so Medium is
+        // not dramatically lighter than Large at load). Converted to a packed MLX dir at install
+        // (`sd3_5_medium_quant` converter, REGISTERED IN S2/S3). minMemoryGb PLACEHOLDER (lower than
+        // Large given the smaller backbone, but the triple TE keeps it non-trivial); E7 refines.
+        "minMemoryGb": 32,
+        "quantize": 8,
+        "requiresConversion": true,
+        "converter": "sd3_5_medium_quant",
+        "convertSourceRepo": "stabilityai/stable-diffusion-3.5-medium"
+      },
+      "gated": true,
+      "credentialHost": "huggingface.co",
+      "licenseUrl": "https://huggingface.co/stabilityai/stable-diffusion-3.5-medium",
+      "ui": {
+        "label": "Stable Diffusion 3.5 Medium",
+        "description": "Stability AI Stable Diffusion 3.5 Medium — the 2.5B MMDiT-X (dual-attention) mid-tier of the SD3.5 family, ported natively to MLX (Apple Silicon only). Same triple text encoder (CLIP-L + CLIP-G + T5-XXL) and true CFG as Large, with a smaller transformer that renders up to 1440×1440 and a lighter memory footprint. Runs ~40 steps at guidance 4.5 (flow-match Euler, shift 3.0). Distributed under the Stability AI Community License (gated): accept the license at huggingface.co/stabilityai/stable-diffusion-3.5-medium and add a Hugging Face token under Settings → Service credentials before downloading. Pre-quantized to Q8 at install.",
+        "recommendedFor": ["text_to_image", "style_variations"],
+        "promptGuide": {
+          "title": "Stable Diffusion 3.5 Prompt Guide",
+          "path": "/prompt-guides/sd3-5.md",
+          "sources": [
+            { "label": "SD3.5 Medium model card", "url": "https://huggingface.co/stabilityai/stable-diffusion-3.5-medium" },
+            { "label": "Stable Diffusion 3 technical report (MMDiT)", "url": "https://arxiv.org/abs/2403.03206" },
+            { "label": "Diffusers SD3 pipeline docs", "url": "https://huggingface.co/docs/diffusers/main/en/api/pipelines/stable_diffusion/stable_diffusion_3" }
+          ]
+        }
+      }
+    },
+    {
       "id": "sdxl",
       "recommended": true,
       "name": "Stable Diffusion XL",
