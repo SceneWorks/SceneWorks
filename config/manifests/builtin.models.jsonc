@@ -74,6 +74,7 @@
         "label": "Z-Image-Turbo",
         "description": "Fast first image target for local text-to-image generation.",
         "recommendedFor": ["text_to_image", "style_variations"],
+        "pid": { "checkpointId": "pid_flux" },
         "promptGuide": {
           "title": "Z-Image-Turbo Prompt Guide",
           "path": "/prompt-guides/z-image-turbo.md",
@@ -136,6 +137,7 @@
         "label": "Z-Image-Edit",
         "description": "Z-Image edit target using Diffusers ZImageImg2ImgPipeline while the dedicated Edit checkpoint is pending release.",
         "recommendedFor": ["edit_image"],
+        "pid": { "checkpointId": "pid_flux" },
         "promptGuide": {
           "title": "Z-Image-Edit Prompt Guide",
           "path": "/prompt-guides/z-image-edit.md",
@@ -459,6 +461,7 @@
         "label": "Lens (base)",
         "description": "Microsoft Lens base text-to-image (20-step, CFG 5.0): higher quality than Lens-Turbo, slower. Also the LoRA training base (sc-1583). gpt-oss-20b text encoder + FLUX.2 VAE; needs a large-VRAM GPU (~30GB mxfp4 / ~60GB bf16).",
         "recommendedFor": ["text_to_image", "style_variations"],
+        "pid": { "checkpointId": "pid_flux2" },
         "promptGuide": {
           "title": "Lens Prompt Guide",
           "path": "/prompt-guides/lens.md",
@@ -516,6 +519,7 @@
         "label": "Lens-Turbo",
         "description": "Microsoft Lens distilled 4-step text-to-image (gpt-oss-20b text encoder + FLUX.2 VAE). Strong prompt following and text rendering; needs a large-VRAM GPU (~30GB mxfp4 / ~60GB bf16).",
         "recommendedFor": ["text_to_image", "style_variations"],
+        "pid": { "checkpointId": "pid_flux2" },
         "promptGuide": {
           "title": "Lens-Turbo Prompt Guide",
           "path": "/prompt-guides/lens-turbo.md",
@@ -746,6 +750,7 @@
         "label": "FLUX.1 [schnell]",
         "description": "Black Forest Labs FLUX.1 [schnell] — fast ~4-step distilled text-to-image, Apache-2.0 (commercial-safe). 12B transformer + T5-XXL text encoder; ~34GB bf16 VRAM, needs a large-VRAM GPU.",
         "recommendedFor": ["text_to_image", "style_variations"],
+        "pid": { "checkpointId": "pid_flux" },
         "promptGuide": {
           "title": "FLUX.1 [schnell] Prompt Guide",
           "path": "/prompt-guides/flux-schnell.md",
@@ -817,6 +822,7 @@
         "label": "FLUX.1 [dev]",
         "description": "Black Forest Labs FLUX.1 [dev] — higher-quality ~28-step (guidance 3.5) text-to-image. Distributed under the FLUX.1 [dev] Non-Commercial License: generations are for non-commercial use only. Gated Hugging Face download — accept the license at huggingface.co/black-forest-labs/FLUX.1-dev and add a Hugging Face token under Settings → Service credentials (or set HF_TOKEN on a server) before downloading. For commercial use choose FLUX.1 [schnell] (Apache-2.0). 12B transformer + T5-XXL; ~34GB bf16 VRAM, large-VRAM GPU. With a character reference, runs XLabs IP-Adapter for scene-flexible resemblance (faithful identity belongs to PuLID-FLUX).",
         "recommendedFor": ["text_to_image", "character_image", "style_variations"],
+        "pid": { "checkpointId": "pid_flux" },
         // FLUX is guidance-distilled; real CFG against the negative prompt rides
         // on the parallel true_cfg_scale kwarg, distinct from the IP-Adapter
         // reference-strength scalar. Surface BOTH levers in the picker (sc-2017).
@@ -936,6 +942,7 @@
         "label": "Ideogram 4",
         "description": "Ideogram 4 — 9.3B flow-matching text-to-image with structured JSON-caption prompting (bounding-box layout + color palettes), MLX-only (Apple Silicon). Pre-quantized Q4 (~15 GB, default) / Q8. Distributed under the Ideogram Non-Commercial Model Agreement (gated): accept the license at huggingface.co/ideogram-ai/ideogram-4-fp8 and add a Hugging Face token under Settings → Service credentials before downloading. Trained on JSON captions — SceneWorks builds the caption from your prompt.",
         "recommendedFor": ["text_to_image"],
+        "pid": { "checkpointId": "pid_flux2" },
         "promptGuide": {
           "title": "Ideogram 4 Prompt Guide",
           "path": "/prompt-guides/ideogram-4.md",
@@ -1028,6 +1035,7 @@
         "label": "Ideogram 4 Turbo",
         "description": "Ideogram 4 Turbo — the few-step (~8) fast variant of Ideogram 4: same 9.3B flow-matching model and structured JSON-caption prompting, distilled to a CFG-free single-DiT path (the ostris TurboTime LoRA) for ~2x faster renders. MLX-only (Apple Silicon). Shares the gated Ideogram 4 turnkey — accept the license at huggingface.co/ideogram-ai/ideogram-4-fp8 and add a Hugging Face token under Settings → Service credentials before downloading.",
         "recommendedFor": ["text_to_image"],
+        "pid": { "checkpointId": "pid_flux2" },
         "promptGuide": {
           "title": "Ideogram 4 Prompt Guide",
           "path": "/prompt-guides/ideogram-4.md",
@@ -1134,6 +1142,7 @@
         "precisionToggle": true,
         "description": "Boogu-Image-0.1 — a Lumina-Image-2.0 / OmniGen2-lineage flow-matching text-to-image model (~10.3B DiT + Qwen3-VL-8B condition encoder + FLUX.1 VAE), native MLX (Apple Silicon). True-CFG, natural-language prompting with strong bilingual (English/Chinese) in-image text rendering. Pre-quantized Q8 (~23 GB, default; full-precision bf16 also hosted). Apache-2.0 (ungated). Needs a 64 GB-class Mac.",
         "recommendedFor": ["text_to_image"],
+        "pid": { "checkpointId": "pid_flux" },
         "promptGuide": {
           "title": "Boogu Image Prompt Guide",
           "path": "/prompt-guides/boogu-image.md",
@@ -1225,6 +1234,7 @@
         "precisionToggle": true,
         "description": "Boogu-Image-0.1 Turbo — the few-step (~4), CFG-free fast variant of Boogu Image: the same ~10.3B flow-matching model distilled (DMD) for much faster renders, native MLX (Apple Silicon). Best for quick iteration. Pre-quantized Q8 (~23 GB, default). Apache-2.0 (ungated). Needs a 64 GB-class Mac.",
         "recommendedFor": ["text_to_image"],
+        "pid": { "checkpointId": "pid_flux" },
         "promptGuide": {
           "title": "Boogu Image Prompt Guide",
           "path": "/prompt-guides/boogu-image.md",
@@ -1309,6 +1319,7 @@
         "precisionToggle": true,
         "description": "Boogu-Image-0.1 Edit — instruction-driven image editing: give a source image and a text instruction and Boogu produces a faithful edited image (the source is read by the Qwen3-VL vision tower). Native MLX (Apple Silicon). Pre-quantized Q8 (~23 GB, default). Apache-2.0 (ungated). Needs a 64 GB-class Mac.",
         "recommendedFor": ["edit_image"],
+        "pid": { "checkpointId": "pid_flux" },
         "promptGuide": {
           "title": "Boogu Image Prompt Guide",
           "path": "/prompt-guides/boogu-image.md",
@@ -1489,6 +1500,7 @@
         "label": "FLUX.2 [klein] 9B",
         "description": "Black Forest Labs FLUX.2 [klein] 9B — 4-step distilled text-to-image + reference editing, MLX-only (Apple Silicon). 9B flow transformer + 8B Qwen3 text embedder; ~36 GB bf16 peak at 1024². Distributed under the FLUX Non-Commercial License (gated): accept the license at huggingface.co/black-forest-labs/FLUX.2-klein-9B and add a Hugging Face token under Settings → Service credentials before downloading. For faster reference editing on the same architecture, see FLUX.2 [klein] 9B-KV.",
         "recommendedFor": ["text_to_image", "character_image", "style_variations"],
+        "pid": { "checkpointId": "pid_flux2" },
         // Edit-style backbone (Flux2KleinEdit handles reference natively; no
         // IP-Adapter, no face-ID). The variation knob maps to image_strength
         // — surfaced as "Prompt strength" because the cache-distilled model
@@ -1590,6 +1602,7 @@
         "label": "FLUX.2 [klein] 9B-KV",
         "description": "A KV-optimized distill of FLUX.2 [klein] 9B: text-to-image, reference editing, and style variations, plus KV-cache acceleration that makes reference editing ~2.4× faster than the base 9B edit path on Apple Silicon (validated M5 Max 128 GB, sc-2163). The cache engages automatically when you attach a reference; without one it runs plain text-to-image on par with the base 9B (sc-2173). Distributed under the FLUX Non-Commercial License (gated). Same ~36 GB bf16 peak at 1024² as the base 9B.",
         "recommendedFor": ["character_image"],
+        "pid": { "checkpointId": "pid_flux2" },
         // Same edit-style knob as the base 9B (Flux2KleinEdit). The cache
         // doesn't change the variation behavior, just the per-step compute.
         "variationStrength": {
@@ -1690,6 +1703,7 @@
         "label": "FLUX.2 [klein] 9B True V2",
         "description": "Community full fine-tune of FLUX.2 [klein] 9B (wikeeyang) tuned for stronger realism, texture, and prompt adherence, with cleaner reference editing. Runs on Apple Silicon via the same MLX path as the base klein. This is the undistilled line, so it uses ~24 steps at guidance 1.0 (slower than the 4-step distill, ~50 s/image at 1024² on an M5 Max). Requires the base FLUX.2 [klein] 9B to be installed (its VAE/text-encoder/tokenizer are reused) and is converted locally at install. Distributed under the FLUX Non-Commercial License.",
         "recommendedFor": ["text_to_image", "character_image", "style_variations"],
+        "pid": { "checkpointId": "pid_flux2" },
         "variationStrength": {
           "label": "Prompt strength",
           "default": 4.0,
@@ -1810,6 +1824,7 @@
         "label": "FLUX.2 [dev]",
         "description": "Black Forest Labs FLUX.2 [dev] — the 32B guidance-distilled flagship text-to-image + reference-editing model, ported natively to MLX (Apple Silicon only). A larger, higher-fidelity sibling of FLUX.2 [klein] with a Mistral-3 text encoder and a 48-layer flow transformer; runs ~28 steps at guidance 4.0. Supports reference editing — drop in a source or character image and the model conditions on it (single + multi-image), the same surface as FLUX.2 [klein]. Pre-quantized to Q4 at install (the dense weights are too large to quantize in memory) and needs a 128 GB Mac (~74 GB peak at 1024²; reference editing adds the reference tokens on top, so expect higher peaks and slower renders than klein). Distributed under the FLUX [dev] Non-Commercial License (gated): accept the license at huggingface.co/black-forest-labs/FLUX.2-dev and add a Hugging Face token under Settings → Service credentials before downloading. LoRAs are coming separately.",
         "recommendedFor": ["text_to_image", "character_image", "style_variations"],
+        "pid": { "checkpointId": "pid_flux2" },
         // Embedded-guidance edit knob: maps to the dev guidance scale (default 4.0,
         // 1–10), the same "Prompt strength" surface as the klein edit variants
         // (mlx_flux2 adapter). The reference is concatenated structurally (not a
@@ -1918,6 +1933,7 @@
         "label": "Chroma1-HD",
         "description": "Lodestones Chroma1-HD — high-resolution text-to-image, Apache-2.0 (commercial-safe). FLUX.1-schnell-derived 8.9B transformer + T5-XXL text encoder (no CLIP); true classifier-free guidance with negative prompts (~40 steps, guidance 3.0). Needs a large-VRAM GPU.",
         "recommendedFor": ["text_to_image", "style_variations"],
+        "pid": { "checkpointId": "pid_flux" },
         "promptGuide": {
           "title": "Chroma1-HD Prompt Guide",
           "path": "/prompt-guides/chroma1-hd.md",
@@ -1972,6 +1988,7 @@
         "label": "Chroma1-Base",
         "description": "Lodestones Chroma1-Base — text-to-image foundation tuned for finetuning, Apache-2.0 (commercial-safe). FLUX.1-schnell-derived 8.9B transformer + T5-XXL text encoder (no CLIP); true classifier-free guidance with negative prompts (~40 steps, guidance 3.0). Needs a large-VRAM GPU.",
         "recommendedFor": ["text_to_image", "style_variations"],
+        "pid": { "checkpointId": "pid_flux" },
         "promptGuide": {
           "title": "Chroma1-Base Prompt Guide",
           "path": "/prompt-guides/chroma1-base.md",
@@ -2029,6 +2046,7 @@
         "label": "Chroma1-Flash",
         "description": "Lodestones Chroma1-Flash — fast CFG-baked text-to-image, Apache-2.0 (commercial-safe). FLUX.1-schnell-derived 8.9B transformer + T5-XXL text encoder (no CLIP); Heun ~12-step generation with CFG disabled (guidance 1.0, negative prompt ignored). Needs a large-VRAM GPU.",
         "recommendedFor": ["text_to_image", "style_variations"],
+        "pid": { "checkpointId": "pid_flux" },
         "promptGuide": {
           "title": "Chroma1-Flash Prompt Guide",
           "path": "/prompt-guides/chroma1-flash.md",
@@ -2086,6 +2104,7 @@
         "label": "Kolors",
         "description": "Kwai-Kolors Kolors — photorealistic text-to-image and image-to-image editing with strong Chinese + English prompting and text rendering (Midjourney-v6-level human eval). Apache-2.0 (commercial-safe). ChatGLM3-6B text encoder + SDXL-style UNet; ~16.5GB checkpoint, real CFG + negative prompt. Recommended ~25 steps at guidance 5.0.",
         "recommendedFor": ["text_to_image", "edit_image", "character_image", "style_variations"],
+        "pid": { "checkpointId": "pid_sdxl" },
         // Strict pose tier (sc-2264): the official Kolors-ControlNet-Pose (DWPose)
         // loaded via the vendored Kolors_ControlNetModel + ControlNet img2img pipeline,
         // composed with IP-Adapter-Plus identity. Real pose-lock (vs the best-effort
@@ -2466,6 +2485,7 @@
         "label": "Stable Diffusion XL",
         "description": "Stability AI Stable Diffusion XL base 1.0 — the widely-supported open text-to-image foundation with the largest LoRA/finetune ecosystem. CreativeML OpenRAIL++-M (commercial use OK, ungated). SDXL UNet + dual CLIP text encoders; ~6.9GB fp16, real CFG + negative prompt. Recommended ~30 steps at guidance 7.0; native 1024x1024. With a character reference, runs IP-Adapter plus-face for scene-flexible resemblance (faithful likeness — see InstantID).",
         "recommendedFor": ["text_to_image", "edit_image", "character_image", "style_variations"],
+        "pid": { "checkpointId": "pid_sdxl" },
         "promptGuide": {
           "title": "Stable Diffusion XL Prompt Guide",
           "path": "/prompt-guides/sdxl.md",
@@ -2527,6 +2547,7 @@
         "label": "RealVisXL (photoreal SDXL)",
         "description": "Photoreal SDXL finetune that targets the \"shiny/plastic\" look of base SDXL — the same RealVisXL_V5.0 checkpoint the InstantID built-in uses, exposed as a plain selectable for general photoreal work. openrail++ (commercial use OK, ungated). Drop-in SDXL: same UNet, same dual-CLIP, sdxl-family LoRA support, real CFG + negative prompt; ~30 steps at guidance 7.0, native 1024x1024. With a character reference, runs IP-Adapter plus-face for scene-flexible resemblance (faithful likeness — see InstantID).",
         "recommendedFor": ["text_to_image", "edit_image", "character_image", "style_variations"],
+        "pid": { "checkpointId": "pid_sdxl" },
         "promptGuide": {
           "title": "RealVisXL Prompt Guide",
           "path": "/prompt-guides/realvisxl.md",
@@ -2614,6 +2635,7 @@
         "label": "RealVisXL Lightning (fast photoreal SDXL)",
         "description": "Few-step distilled RealVisXL — photoreal SDXL at ~5 steps, roughly 6x faster than the 30-step base. A standalone SDXL-Lightning checkpoint (openrail++, commercial-OK, ungated) tuned for the same photoreal look as RealVisXL_V5.0. Runs CFG-free by default (the negative prompt is inert unless you raise guidance toward 2.0). Text-to-image only; for edits, reference identity, masked inpaint, or detail-refine use the standard RealVisXL. Accepts sdxl-family LoRAs.",
         "recommendedFor": ["text_to_image", "style_variations"],
+        "pid": { "checkpointId": "pid_sdxl" },
         "promptGuide": {
           "title": "RealVisXL Lightning Prompt Guide",
           "path": "/prompt-guides/realvisxl-lightning.md",
@@ -4137,7 +4159,7 @@
       // `SceneWorks/gemma-2-2b-it` mirror — stock weights pulled as-is (no conversion), shipping the
       // verbatim Gemma Terms of Use + Prohibited Use Policy alongside (Gemma Terms §3.1 permit the
       // mirror). So the in-app download needs NO Gemma-gated HF token, completing the turnkey goal.
-      "id": "pid_qwenimage_decoder",
+      "id": "pid_qwenimage",
       "autoDownload": false,
       "nonCommercial": true,
       "name": "PiD Decoder (Qwen-Image)",
@@ -4214,7 +4236,7 @@
       // today); until that lands a usePid request on these models falls through to native VAE.
       // LICENSE (sc-7842): NVIDIA License (NSCLv1) — non-commercial (research/evaluation) only, flows to
       // output; the SceneWorks/pid-flux repo ships the verbatim LICENSE + NOTICE + README.
-      "id": "pid_flux_decoder",
+      "id": "pid_flux",
       "autoDownload": false,
       "nonCommercial": true,
       "name": "PiD Decoder (FLUX.1 / Boogu / Chroma / Z-Image)",
@@ -4283,7 +4305,7 @@
       // Worker routing = sc-8035 (qwenimage-only today). LICENSE (sc-7842): NVIDIA License (NSCLv1),
       // non-commercial (research/evaluation) only, flows to output; SceneWorks/pid-flux2 ships the
       // verbatim LICENSE + NOTICE + README.
-      "id": "pid_flux2_decoder",
+      "id": "pid_flux2",
       "autoDownload": false,
       "nonCommercial": true,
       "name": "PiD Decoder (FLUX.2 / Lens / Ideogram 4)",
@@ -4352,7 +4374,7 @@
       // Worker routing = sc-8035 (qwenimage-only today). LICENSE (sc-7842): NVIDIA License (NSCLv1),
       // non-commercial (research/evaluation) only, flows to output; SceneWorks/pid-sdxl ships the
       // verbatim LICENSE + NOTICE + README.
-      "id": "pid_sdxl_decoder",
+      "id": "pid_sdxl",
       "autoDownload": false,
       "nonCommercial": true,
       "name": "PiD Decoder (SDXL / RealVisXL / Kolors)",
