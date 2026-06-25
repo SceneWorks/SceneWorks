@@ -432,11 +432,11 @@ mod driver {
         // The worker reaches the trainer through this exact registry call (see
         // `training_jobs::engine_trainer_id` → `sd3_5_large`/`sd3_5_medium`). The `mlx_gen_sd3` crate
         // is force-linked by `training_jobs` so its `register_trainer!` survives linker GC.
-        let mut trainer = gen_core::load_trainer(
-            &trainer_id,
-            &LoadSpec::new(WeightsSource::Dir(base)),
-        )
-        .unwrap_or_else(|e| panic!("load {trainer_id} trainer (is mlx_gen_sd3 linked?): {e}"));
+        let mut trainer =
+            gen_core::load_trainer(&trainer_id, &LoadSpec::new(WeightsSource::Dir(base)))
+                .unwrap_or_else(|e| {
+                    panic!("load {trainer_id} trainer (is mlx_gen_sd3 linked?): {e}")
+                });
         trainer.validate(&req).expect("validate training request");
 
         let mut last_loss = f32::NAN;

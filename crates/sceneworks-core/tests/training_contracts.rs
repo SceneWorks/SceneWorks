@@ -343,7 +343,14 @@ fn builtin_registry_exposes_sd3_targets() {
     let registry = builtin_training_targets();
 
     let joint_modules = serde_json::json!([
-        "to_q", "to_k", "to_v", "to_out.0", "add_q_proj", "add_k_proj", "add_v_proj", "to_add_out"
+        "to_q",
+        "to_k",
+        "to_v",
+        "to_out.0",
+        "add_q_proj",
+        "add_k_proj",
+        "add_v_proj",
+        "to_add_out"
     ]);
 
     for (id, base_model, repo) in [
