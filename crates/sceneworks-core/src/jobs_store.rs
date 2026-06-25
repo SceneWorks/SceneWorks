@@ -5122,13 +5122,17 @@ fn video_mode_is_mlx_eligible(model: &str, mode: &str) -> bool {
 /// gained a native mlx-gen-lens trainer in sc-5148, cut over here in sc-5180 (off-Mac
 /// keeps the Python sidecar trainer). `krea_lora` is the native `mlx-gen-krea` trainer
 /// (sc-7577); it has no torch path, so it is also listed in `MLX_ONLY_TRAINING_KERNELS`
-/// (sc-7578). A kernel absent here is never routed to the mlx worker.
+/// (sc-7578). `sd3_lora` is the native `mlx-gen-sd3` trainer (sc-7883/7885; Large +
+/// MMDiT-X Medium training bases), cut over here in sc-7884; it has no torch path either,
+/// so it is also in `MLX_ONLY_TRAINING_KERNELS`. A kernel absent here is never routed to
+/// the mlx worker.
 const MLX_ROUTED_TRAINING_KERNELS: &[&str] = &[
     "z_image_lora",
     "sdxl_lora",
     "kolors_lora",
     "lens_lora",
     "krea_lora",
+    "sd3_lora",
     "wan_lora",
     "wan_moe_lora",
     "ltx_mlx_lora",
@@ -5309,7 +5313,9 @@ fn video_upscale_job_is_candle_eligible(job: &JobSnapshot) -> bool {
 /// (z-image/sdxl/wan) keep their Python trainer as the Windows path + Mac fallback, so
 /// they are deliberately NOT listed here. `krea_lora` (epic 7565 P3) is MLX-native with
 /// no torch trainer — like LTX — so it is listed here (the candle Krea trainer is sc P4).
-const MLX_ONLY_TRAINING_KERNELS: &[&str] = &["ltx_mlx_lora", "krea_lora"];
+/// `sd3_lora` (epic 7841 T3 sc-7884) is likewise MLX-native with no torch trainer — the
+/// off-Mac/candle SD3.5 trainer is epic 7982 — so it is listed here too.
+const MLX_ONLY_TRAINING_KERNELS: &[&str] = &["ltx_mlx_lora", "krea_lora", "sd3_lora"];
 
 /// Whether this `lora_train` job targets a kernel with no non-Rust fallback (see
 /// [`MLX_ONLY_TRAINING_KERNELS`]). Such a job can only run on the mlx worker.

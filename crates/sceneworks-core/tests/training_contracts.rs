@@ -111,7 +111,9 @@ fn builtin_targets_gate_network_types() {
     // the Wan2.2 5B video backend (sc-2211). Krea 2 (epic 7565) is the first *native-MLX*
     // LoKr target: its `mlx-gen-krea` trainer reports `supports_lokr` and builds LoKr targets
     // natively, and the Turbo inference loader applies LoKr through the shared adapter seam
-    // (sc-7911). The older MLX-only LTX and the Wan MoE targets stay lora-only.
+    // (sc-7911). SD3.5 Large + Medium (epic 7841 T3 sc-7884) are likewise native-MLX LoKr
+    // targets — the `mlx-gen-sd3` trainer reports `supports_lokr` and the `apply_sd3_adapters`
+    // seam loads both. The older MLX-only LTX and the Wan MoE targets stay lora-only.
     let lokr_targets: Vec<&str> = registry
         .targets
         .iter()
@@ -134,6 +136,8 @@ fn builtin_targets_gate_network_types() {
             "kolors_lora",
             "lens_turbo_lora",
             "krea_2_raw_lora",
+            "sd3_5_large_lora",
+            "sd3_5_medium_lora",
             "wan_lora"
         ]
     );
@@ -328,6 +332,70 @@ fn builtin_registry_exposes_krea_target() {
         target.limits.get("appleSiliconOnly"),
         Some(&serde_json::Value::Bool(true))
     );
+}
+
+#[test]
+fn builtin_registry_exposes_sd3_targets() {
+    // SD3.5 (epic 7841 T3 sc-7884) exposes TWO native-MLX LoRA/LoKr training bases on the shared
+    // `sd3_lora` kernel: Large (`mlx-gen-sd3` trainer id `sd3_5_large`) and the MMDiT-X Medium
+    // (`sd3_5_medium`). Both stamp `family: sd3` and apply back at their base via the
+    // `apply_sd3_adapters` seam (family-match, no base-model gating). Native MLX, Apple-Silicon only.
+    let registry = builtin_training_targets();
+
+    let joint_modules = serde_json::json!([
+        "to_q", "to_k", "to_v", "to_out.0", "add_q_proj", "add_k_proj", "add_v_proj", "to_add_out"
+    ]);
+
+    for (id, base_model, repo) in [
+        (
+            "sd3_5_large_lora",
+            "sd3_5_large",
+            "stabilityai/stable-diffusion-3.5-large",
+        ),
+        (
+            "sd3_5_medium_lora",
+            "sd3_5_medium",
+            "stabilityai/stable-diffusion-3.5-medium",
+        ),
+    ] {
+        let target = registry
+            .targets
+            .iter()
+            .find(|target| target.id == id)
+            .unwrap_or_else(|| panic!("{id} target present"));
+
+        assert_eq!(target.modality, TrainingModality::Image);
+        assert_eq!(target.output_kind, TrainingOutputKind::Lora);
+        assert_eq!(target.family, "sd3", "{id} stamps the sd3 LoRA family");
+        assert_eq!(target.base_model, base_model);
+        assert_eq!(target.kernel, "sd3_lora");
+        assert_eq!(target.base_model_repo.as_deref(), Some(repo));
+        // SD3.5 MMDiT joint-block attention: both joint streams (image + text), matching the
+        // `mlx-gen-sd3` trainer's DEFAULT_TARGET_MODULES.
+        assert_eq!(
+            target.defaults.advanced.get("loraTargetModules"),
+            Some(&joint_modules),
+            "{id} targets both joint attention streams"
+        );
+        // SD3 native logit-normal flow-match recipe (the trainer default).
+        assert_eq!(
+            target.defaults.advanced.get("timestepType"),
+            Some(&serde_json::json!("logit_normal")),
+            "{id} uses the SD3 logit-normal recipe"
+        );
+        // Native-MLX LoRA + LoKr (supports_lokr + apply_sd3_adapters).
+        assert_eq!(
+            target.limits.get("networkTypes"),
+            Some(&serde_json::json!(["lora", "lokr"])),
+            "{id} advertises lora + lokr"
+        );
+        // No torch SD3 trainer — Apple-Silicon/MLX-only (off-Mac/candle is epic 7982).
+        assert_eq!(
+            target.limits.get("appleSiliconOnly"),
+            Some(&serde_json::Value::Bool(true)),
+            "{id} is Apple-Silicon only"
+        );
+    }
 }
 
 #[test]

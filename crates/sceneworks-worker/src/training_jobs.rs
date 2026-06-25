@@ -10,10 +10,13 @@
 //! `register_trained_lora`), so the streamed `result` here is informational/UI only.
 //!
 //! Routing (sc-3049, sc-7817): the API sends native-trainable families
-//! (`z_image_lora`/`sdxl_lora`/`kolors_lora`/`lens_lora`/`wan_lora`/`wan_moe_lora`/`ltx_mlx_lora`)
+//! (`z_image_lora`/`sdxl_lora`/`kolors_lora`/`lens_lora`/`krea_lora`/`sd3_lora`/`wan_lora`/
+//! `wan_moe_lora`/`ltx_mlx_lora`)
 //! here (`jobs_store::training_job_is_mlx_eligible` on Mac, `…_is_candle_eligible` off-Mac).
 //! `kolors_lora` joined the native trainers in sc-4732 (engine trainer sc-4568); `lens_lora` in
-//! sc-5180. The dry-run validator is cross-platform. The real run executes in-process on the macOS
+//! sc-5180; `krea_lora` in sc-7577/7578; `sd3_lora` (Large + MMDiT-X Medium training bases) in
+//! sc-7884 (engine trainer sc-7883/7885), native-MLX/Apple-Silicon only. The dry-run validator is
+//! cross-platform. The real run executes in-process on the macOS
 //! MLX engine OR — the off-Mac cutover (sc-7817, epic 5164) — on the candle Windows/CUDA + Linux
 //! engine, for the four families with a candle trainer (`sdxl`/`z_image_turbo`/`lens`/the Wan A14B
 //! **T2V** `wan2_2_t2v_14b`). The Python torch trainer stays the fallback for everything off-Mac
@@ -48,6 +51,8 @@ use mlx_gen_krea as _;
 use mlx_gen_lens as _;
 #[cfg(target_os = "macos")]
 use mlx_gen_ltx as _;
+#[cfg(target_os = "macos")]
+use mlx_gen_sd3 as _;
 #[cfg(target_os = "macos")]
 use mlx_gen_sdxl as _;
 #[cfg(target_os = "macos")]
@@ -313,6 +318,16 @@ fn engine_trainer_id(plan: &TrainingPlan) -> Option<&'static str> {
         // Krea trains the undistilled `krea/Krea-2-Raw` DiT; the engine registers its LoRA/LoKr
         // trainer under the base id `"krea_2_raw"` (arch-identical to krea_2_turbo), sc-7577/7578.
         "krea_lora" => Some("krea_2_raw"),
+        // SD3.5 (epic 7841, T3 sc-7884): the engine registers its LoRA/LoKr trainer under the same
+        // id as the inference generator of the training base — `sd3_5_large` (T2 sc-7883) and the
+        // MMDiT-X `sd3_5_medium` (T4 sc-7885). The trained adapter records `family: sd3` and applies
+        // back at that base (Large also covers the family-arch-identical `sd3_5_large_turbo`) via the
+        // `apply_sd3_adapters` seam — no base-model gating (family-match, like Krea Raw→Turbo).
+        "sd3_lora" => match plan.target.base_model.as_str() {
+            "sd3_5_large" => Some("sd3_5_large"),
+            "sd3_5_medium" => Some("sd3_5_medium"),
+            _ => None,
+        },
         "ltx_mlx_lora" => Some("ltx_2_3"),
         // Dense Wan2.2-TI2V-5B.
         "wan_lora" => Some("wan2_2_ti2v_5b"),
@@ -1698,6 +1713,12 @@ mod tests {
             // Krea trains the undistilled Raw DiT; the engine trainer registers under the base id
             // `"krea_2_raw"` (sc-7577/7578).
             ("krea_lora", "krea_2_raw", Some("krea_2_raw")),
+            // SD3.5 (sc-7884): the `sd3_lora` kernel splits by training base — the engine trainer
+            // registers under the inference-generator id of each base.
+            ("sd3_lora", "sd3_5_large", Some("sd3_5_large")),
+            ("sd3_lora", "sd3_5_medium", Some("sd3_5_medium")),
+            // Unknown SD3.5 base model variant (e.g. Turbo is NOT a training base).
+            ("sd3_lora", "sd3_5_large_turbo", None),
             // Unknown A14B base model variant.
             ("wan_moe_lora", "wan_2_2_mystery", None),
         ];

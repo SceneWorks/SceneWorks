@@ -343,6 +343,131 @@ mod driver {
         assert!(out.final_loss.is_finite(), "final loss finite");
     }
 
+    /// sc-7884 — SceneWorks-WIRING real-weight smoke for the native MLX SD3.5 LoRA trainer.
+    ///
+    /// Exercises the EXACT path the worker's `lora_train` job uses — `gen_core::load_trainer(id, …)`
+    /// over the SD3.5 diffusers snapshot, force-linked here via `training_jobs`' `use mlx_gen_sd3 as _`
+    /// — to prove the trainer is reachable from the SceneWorks process and emits a usable adapter that
+    /// the inference loader (`apply_sd3_adapters`) can pick up at `sd3_5_*` generation. The deeper
+    /// numeric round-trip (loss descends, adapter shapes match, applies + renders) is already proven by
+    /// the mlx-gen-sd3 T2/T4 `#[ignore]` tests; this asserts the SceneWorks wiring specifically.
+    ///
+    /// `SD3_TRAINER_ID` selects the training base (`sd3_5_large` default, or `sd3_5_medium`);
+    /// `SD3_BASE` points at the diffusers snapshot dir for that base. Heavy (loads the MMDiT + the
+    /// triple TE) — Mac + Metal + the gated weights only; `RUST_TEST_THREADS=1` (MLX is `!Send`).
+    ///
+    /// ```sh
+    /// SD3_TRAINER_ID=sd3_5_large \
+    ///   SD3_BASE=~/.cache/huggingface/hub/models--stabilityai--stable-diffusion-3.5-large/snapshots/<rev> \
+    ///   TRAIN_DIR=~/Datasets/lora-eval/basim-train-cal OUTPUT_DIR=~/Datasets/lora-eval/adapters \
+    ///   ADAPTER_NAME=sd3-large-smoke.safetensors TRIGGER="sks man" SD3_STEPS=20 SD3_RESOLUTION=512 \
+    ///   RUST_TEST_THREADS=1 cargo test -p sceneworks-worker --lib train_sd3_lora -- --ignored --nocapture
+    /// ```
+    #[test]
+    #[ignore = "real-weight: trains a SD3.5 LoRA via the worker's trainer path; needs the gated SD3.5 diffusers snapshot + Metal. Set SD3_BASE/TRAIN_DIR/OUTPUT_DIR (+ SD3_TRAINER_ID)"]
+    fn train_sd3_lora() {
+        let trainer_id = env_str("SD3_TRAINER_ID", "sd3_5_large");
+        assert!(
+            trainer_id == "sd3_5_large" || trainer_id == "sd3_5_medium",
+            "SD3_TRAINER_ID must be sd3_5_large or sd3_5_medium (got {trainer_id:?})"
+        );
+        let base = require_env("SD3_BASE");
+        let train_dir = require_env("TRAIN_DIR");
+        let output_dir = require_env("OUTPUT_DIR");
+        std::fs::create_dir_all(&output_dir).unwrap();
+        let trigger = env_str("TRIGGER", "sks man");
+        let caption = format!("a photo of {trigger}");
+        let file_name = env_str("ADAPTER_NAME", "sd3-lora-smoke.safetensors");
+
+        let items: Vec<TrainingItem> = image_files(&train_dir)
+            .into_iter()
+            .map(|image_path| TrainingItem {
+                image_path,
+                caption: caption.clone(),
+            })
+            .collect();
+        assert!(
+            !items.is_empty(),
+            "no training images in {}",
+            train_dir.display()
+        );
+        println!(
+            "[{trainer_id}] training on {} images, trigger {trigger:?}, caption {caption:?}",
+            items.len()
+        );
+
+        let rank = env_u32("SD3_RANK", 16);
+        let config = TrainingConfig {
+            rank,
+            alpha: rank as f32,
+            learning_rate: env_f32("SD3_LR", 1e-4),
+            // A short run — this is a wiring smoke, not a quality run.
+            steps: env_u32("SD3_STEPS", 20),
+            resolution: env_u32("SD3_RESOLUTION", 512),
+            save_every: 0,
+            seed: env_u32("SD3_SEED", 7) as u64,
+            train_dtype: "bf16".to_string(),
+            // SD3 native flow-match recipe (matches the SceneWorks sd3_5_*_lora target defaults).
+            timestep_type: "logit_normal".to_string(),
+            ..Default::default()
+        };
+        println!(
+            "[{trainer_id}] config: rank {} steps {} res {} lr {} timestep {}",
+            config.rank,
+            config.steps,
+            config.resolution,
+            config.learning_rate,
+            config.timestep_type
+        );
+
+        let req = TrainingRequest {
+            items,
+            config,
+            output_dir,
+            file_name,
+            trigger_words: vec![trigger],
+            cancel: CancelFlag::new(),
+        };
+
+        // The worker reaches the trainer through this exact registry call (see
+        // `training_jobs::engine_trainer_id` → `sd3_5_large`/`sd3_5_medium`). The `mlx_gen_sd3` crate
+        // is force-linked by `training_jobs` so its `register_trainer!` survives linker GC.
+        let mut trainer = gen_core::load_trainer(
+            &trainer_id,
+            &LoadSpec::new(WeightsSource::Dir(base)),
+        )
+        .unwrap_or_else(|e| panic!("load {trainer_id} trainer (is mlx_gen_sd3 linked?): {e}"));
+        trainer.validate(&req).expect("validate training request");
+
+        let mut last_loss = f32::NAN;
+        let out = trainer
+            .train(&req, &mut |p| match p {
+                TrainingProgress::Caching { current, total } => {
+                    if current == 1 || current == total {
+                        println!("caching {current}/{total}");
+                    }
+                }
+                TrainingProgress::Training { step, total, loss } => {
+                    last_loss = loss;
+                    if step == 1 || step % 5 == 0 || step == total {
+                        println!("step {step}/{total} loss {loss:.4}");
+                    }
+                }
+                TrainingProgress::Checkpoint { step } => println!("checkpoint @ {step}"),
+                _ => {}
+            })
+            .expect("train");
+
+        println!(
+            "DONE [{trainer_id}] adapter={} steps={} final_loss={} (last_seen={last_loss:.4})",
+            out.adapter_path.display(),
+            out.steps,
+            out.final_loss
+        );
+        assert!(out.adapter_path.exists(), "adapter file written");
+        assert!(out.final_loss.is_finite(), "final loss finite");
+    }
+
     /// Generate the fixed prompt grid into `GEN_DIR` (+ a `prompts.json` map the eval harness
     /// reads for prompt adherence). `ADAPTER_PATH` set → use that LoRA at `ADAPTER_SCALE`;
     /// unset → the no-LoRA baseline. `GEN_SEEDS` is a comma list (default `42,1234`).
