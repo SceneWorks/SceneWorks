@@ -727,6 +727,10 @@ fn model_table_rows_resolve_and_flags_match_descriptor() {
         // `sd3_5_large_turbo` descriptor drops guidance + negative prompt (supports_guidance=false,
         // supports_negative_prompt=false), the distilled-turbo pattern.
         ("sd3_5_large_turbo", false, false),
+        // SD3.5 Medium (epic 7841 / sc-7869 M3, wired sc-7871): the MMDiT-X true-CFG variant —
+        // supports_guidance=true + supports_negative_prompt=true (the `sd3_5_medium` descriptor advertises
+        // supports_true_cfg, same as Large; only the transformer + step/guidance recipe differ).
+        ("sd3_5_medium", true, true),
     ];
     // Every row is covered by the expectation table (no row added without a flag pair here).
     assert_eq!(MODEL_TABLE.len(), expected.len());

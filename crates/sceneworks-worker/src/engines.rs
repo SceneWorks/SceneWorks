@@ -444,10 +444,21 @@ pub(crate) const MODEL_TABLE: &[ModelRow] = &[
         default_guidance: 0.0,
         adapter_label: "mlx_sd3",
     },
-    // NB: SD3.5 Medium (MMDiT-X) has a converter (`sd3_5_medium_quant`, registered in model_jobs.rs) but
-    // NO registered generator yet (M3 is a separate epic story), so it deliberately has no MODEL_TABLE row
-    // — a row here would fail `model_table_rows_resolve_and_flags_match_descriptor` ("no generator
-    // registered"). Add the row + force-linked generator together when M3 lands.
+    // SD3.5 Medium (epic 7841 / sc-7869 M3, wired in sc-7871) — the MMDiT-X variant: 2.5B, 24 joint
+    // blocks (first 13 dual-attention), hidden 1536, `pos_embed_max_size` 384. True-CFG like Large but a
+    // distinct (smaller) transformer + its own recipe — 40 steps / guidance 5.0 (Stability's card notes
+    // Medium is more guidance-sensitive than Large). The `sd3_5_medium` descriptor advertises
+    // supports_guidance + supports_negative + supports_true_cfg. Installs a packed dir via the
+    // `sd3_5_medium_quant` converter (model_jobs.rs). The generator self-registers via the shared
+    // force-link (`use mlx_gen_sd3 as _;` in image_jobs.rs) now that M3 is on mlx-gen main (rev 1a784cd).
+    ModelRow {
+        sceneworks_id: "sd3_5_medium",
+        engine_id: "sd3_5_medium",
+        default_repo: "stabilityai/stable-diffusion-3.5-medium",
+        default_steps: 40,
+        default_guidance: 5.0,
+        adapter_label: "mlx_sd3",
+    },
 ];
 
 /// The mlx-gen registry ids of the video generators this worker serves (the engine ids
