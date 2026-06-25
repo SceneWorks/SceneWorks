@@ -1,4 +1,4 @@
-use super::auth::requires_token;
+use super::auth::{loopback_trusted, requires_token};
 use super::events::{EventHub, EventMessage};
 use super::training::{insufficient_disk_space, resolve_base_model_path};
 use super::workers::person_readiness_from_workers;
@@ -40,6 +40,23 @@ fn warns_only_on_open_bind_without_token() {
     assert!(!should_warn_open_bind("secret", v4("0.0.0.0")));
     assert!(!should_warn_open_bind("", v4("127.0.0.1")));
     assert!(!should_warn_open_bind("", "::1".parse().unwrap()));
+}
+
+#[test]
+fn loopback_trusted_only_when_enabled_and_peer_is_local() {
+    use std::net::SocketAddr;
+    let addr = |s: &str| s.parse::<SocketAddr>().unwrap();
+    // Epic 4484: only a loopback peer is trusted, and only when the opt-in is set — so the
+    // local desktop UI/worker bypass the password while LAN clients (other IPs) don't.
+    assert!(loopback_trusted(true, Some(addr("127.0.0.1:51234"))));
+    assert!(loopback_trusted(true, Some(addr("[::1]:51234"))));
+    // Enabled but the peer is on the LAN → still gated.
+    assert!(!loopback_trusted(true, Some(addr("192.168.1.5:51234"))));
+    assert!(!loopback_trusted(true, Some(addr("0.0.0.0:51234"))));
+    // A loopback peer alone never trusts without the opt-in (server/Docker default).
+    assert!(!loopback_trusted(false, Some(addr("127.0.0.1:51234"))));
+    // Unknown peer (e.g. the unit-test oneshot path with no connect info) → not trusted.
+    assert!(!loopback_trusted(true, None));
 }
 
 #[test]
@@ -234,6 +251,7 @@ fn test_settings(temp_dir: &tempfile::TempDir) -> Settings {
         mlx_enforce_unsupported: false,
         candle_required: false,
         candle_enforce_unsupported: false,
+        trust_loopback: false,
     }
 }
 

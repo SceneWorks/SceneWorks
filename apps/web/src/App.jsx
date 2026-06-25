@@ -463,6 +463,11 @@ function FirstRunProjectGate({ onCreate, disabled }) {
 export function App() {
   const [health, setHealth] = useState(null);
   const [access, setAccess] = useState({ authRequired: false });
+  // Whether GET /api/v1/access has answered yet. Until it does we don't know if a
+  // password is required, so a remote browser must hold its protected data loads —
+  // otherwise they fire optimistically, 401, and bury the password prompt under a band
+  // of "access token required" errors (epic 4484).
+  const [accessResolved, setAccessResolved] = useState(false);
   const [token, setToken] = useState(() => window.localStorage.getItem("sceneworks-token") ?? "");
   // Wrong-password feedback for the remote-browser login gate (epic 4484 story 7).
   const [authError, setAuthError] = useState("");
@@ -739,7 +744,17 @@ export function App() {
     createVideoJob,
   });
 
-  const authenticated = useMemo(() => !access.authRequired || token.length > 0, [access, token]);
+  // The desktop shell reaches its own API over loopback, which the API trusts
+  // (SCENEWORKS_TRUST_LOOPBACK), so it's authenticated without a password — never prompt
+  // for one locally (epic 4484). A remote browser must wait for GET /api/v1/access before
+  // it knows whether a password is needed; until then it holds its protected loads rather
+  // than firing them unauthenticated.
+  const authenticated = useMemo(
+    () =>
+      isDesktopShell ||
+      (accessResolved && (!access.authRequired || token.length > 0)),
+    [accessResolved, access, token],
+  );
   const imageModels = useMemo(() => {
     const items = models.filter((model) => model.type === "image" && model.installState !== "missing");
     return items.length || models.length ? items : fallbackModels.filter((model) => model.type === "image");
@@ -944,7 +959,10 @@ export function App() {
 
     apiFetch("/api/v1/access", "")
       .then(setAccess)
-      .catch((err) => setError(err.message));
+      .catch((err) => setError(err.message))
+      // Either way the auth state is now as resolved as it'll get; release the gate so
+      // an authenticated client (or one not requiring auth) can load its data.
+      .finally(() => setAccessResolved(true));
   }, []);
 
   useEffect(() => {
@@ -2054,7 +2072,7 @@ export function App() {
           <p className="notice error" key={notice.kind}>{notice.message}</p>
         ))}
 
-        {access.authRequired && !window.localStorage.getItem("sceneworks-token") ? (
+        {access.authRequired && !isDesktopShell && !window.localStorage.getItem("sceneworks-token") ? (
           <section className="auth-band">
             <form onSubmit={saveToken}>
               <label htmlFor="token">Password</label>
