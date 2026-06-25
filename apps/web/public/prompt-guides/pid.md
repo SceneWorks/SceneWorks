@@ -8,8 +8,9 @@ detail synthesis" mode rather than a transparent decoder swap.
 
 It's offered per latent space, so the eligible models depend on which PiD decoder
 is downloaded: **Qwen-Image** (Qwen-Image, Qwen-Image-Edit, Krea 2 Turbo),
-**FLUX.1** (FLUX.1, Boogu-Image, Chroma, Z-Image), and **FLUX.2** (FLUX.2-dev,
-FLUX.2-klein, Lens, Ideogram 4).
+**FLUX.1** (FLUX.1, Boogu-Image, Chroma, Z-Image), **FLUX.2** (FLUX.2-dev,
+FLUX.2-klein, Lens, Ideogram 4), and **SDXL** (SDXL, RealVisXL, RealVisXL
+Lightning, Kolors).
 
 ## ⚠️ Non-commercial — research / evaluation only
 

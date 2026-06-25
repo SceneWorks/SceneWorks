@@ -4036,6 +4036,75 @@
           ]
         }
       }
+    },
+    {
+      // PiD pixel-diffusion decoder — `sdxl` latent space (epic 7840, sc-7852). Serves the SDXL VAE
+      // latent space (4-ch affine 0.13025/0.0 — the largest latent→pixel ratio): SDXL base, RealVisXL
+      // (incl. RealVisXL Lightning), and Kolors (reuses the SDXL VAE). Engine wiring: sc-7848 (gate GO
+      // 4/4, #585). The `sdxl` student is variance-preserving (VP-frame); the shipped clean sigma=0
+      // decode path is frame-agnostic. 2kto4k-only (no 2k release).
+      //
+      // Worker routing = sc-8035 (qwenimage-only today). LICENSE (sc-7842): NVIDIA License (NSCLv1),
+      // non-commercial (research/evaluation) only, flows to output; SceneWorks/pid-sdxl ships the
+      // verbatim LICENSE + NOTICE + README.
+      "id": "pid_sdxl_decoder",
+      "autoDownload": false,
+      "nonCommercial": true,
+      "name": "PiD Decoder (SDXL / RealVisXL / Kolors)",
+      "family": "pid",
+      "type": "utility",
+      "adapter": "pid",
+      "capabilities": [],
+      "downloads": [
+        {
+          "provider": "huggingface",
+          "repo": "SceneWorks/pid-sdxl",
+          "files": [],
+          "estimatedSizeBytes": 2724634940
+        },
+        {
+          "provider": "huggingface",
+          "repo": "google/gemma-2-2b-it",
+          "files": [],
+          "estimatedSizeBytes": 5228717488
+        }
+      ],
+      "paths": {
+        "model": "${HF_CACHE}/SceneWorks/pid-sdxl"
+      },
+      "resources": {
+        "pidDecoders": {
+          "sdxl": {
+            "repo": "SceneWorks/pid-sdxl",
+            "file": "pid_sdxl_2kto4k.safetensors",
+            "gemmaRepo": "google/gemma-2-2b-it",
+            "nonCommercial": true,
+            "license": "NVIDIA License (NSCLv1)",
+            "licenseUrl": "https://huggingface.co/nvidia/PixelDiT-1300M-1024px/blob/main/LICENSE",
+            "originalUrl": "https://huggingface.co/nvidia/PiD"
+          }
+        }
+      },
+      "defaults": {},
+      "limits": {},
+      "loraCompatibility": {
+        "families": [],
+        "types": []
+      },
+      "ui": {
+        "label": "PiD Decoder (SDXL / RealVisXL / Kolors)",
+        "description": "Optional pixel-diffusion decoder that replaces the VAE for the SDXL latent space (SDXL, RealVisXL, RealVisXL Lightning, Kolors), decoding straight to 4x-larger (2K/4K) pixels with detail synthesis. NON-COMMERCIAL: research/evaluation use only — the restriction applies to images decoded with PiD.",
+        "recommendedFor": ["image_generate"],
+        "promptGuide": {
+          "title": "PiD Decoder Guide",
+          "path": "/prompt-guides/pid.md",
+          "sources": [
+            { "label": "PiD project page", "url": "https://research.nvidia.com/labs/sil/projects/pid/" },
+            { "label": "PiD model card (nvidia/PiD)", "url": "https://huggingface.co/nvidia/PiD" },
+            { "label": "PiD GitHub (nv-tlabs/pid)", "url": "https://github.com/nv-tlabs/pid" }
+          ]
+        }
+      }
     }
   ]
 }
