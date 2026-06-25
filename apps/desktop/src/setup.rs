@@ -494,6 +494,12 @@ fn spawn_api(app: &AppHandle) -> Result<(), String> {
         // Loopback/dynamic by default; 0.0.0.0/fixed-port in LAN mode (epic 4484).
         .env("SCENEWORKS_API_HOST", bind.host)
         .env("SCENEWORKS_API_PORT", &bind.port)
+        // Epic 4484: in LAN mode the password becomes the API access token, but the
+        // embedded desktop UI and local GPU worker(s) reach the API over loopback with no
+        // password. Trust loopback peers so local use stays password-free while LAN
+        // callers stay gated. A no-op in loopback-only mode (no token is set). Never set
+        // by Docker/server, so a reverse-proxied deployment stays fail-closed.
+        .env("SCENEWORKS_TRUST_LOOPBACK", "true")
         .env("SCENEWORKS_RUN_UTILITY_INPROCESS", "true")
         // Parent-death watchdog: a force-quit/crash skips `begin_shutdown`, so
         // without this the API orphans to launchd (PPID=1), holding its

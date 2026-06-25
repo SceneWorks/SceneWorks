@@ -195,6 +195,13 @@ pub struct Settings {
     /// job terminal with `candle_unsupported`. Read from `SCENEWORKS_CANDLE_UNSUPPORTED_MODE`
     /// (`enforce` vs anything else). Irrelevant unless `candle_required`.
     pub candle_enforce_unsupported: bool,
+    /// Epic 4484 — trust loopback peers to bypass the access token. When LAN remote
+    /// access binds `0.0.0.0` with the password as `access_token`, the embedded desktop
+    /// UI and the local GPU worker(s) still reach the API over loopback with no password;
+    /// trusting `127.0.0.1`/`::1` peers keeps local use password-free while LAN callers
+    /// (other source IPs) stay gated. The desktop sets `SCENEWORKS_TRUST_LOOPBACK`;
+    /// Docker/server never does, so a reverse-proxied deployment stays fail-closed.
+    pub trust_loopback: bool,
 }
 
 impl Settings {
@@ -244,6 +251,9 @@ impl Settings {
                 .unwrap_or(false),
             candle_enforce_unsupported: std::env::var("SCENEWORKS_CANDLE_UNSUPPORTED_MODE")
                 .map(|value| value.trim().eq_ignore_ascii_case("enforce"))
+                .unwrap_or(false),
+            trust_loopback: std::env::var("SCENEWORKS_TRUST_LOOPBACK")
+                .map(|value| matches!(value.trim(), "1" | "true" | "TRUE" | "True"))
                 .unwrap_or(false),
         }
     }
@@ -412,9 +422,15 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
 
     let utility_worker = run_utility_inprocess.then(|| spawn_inprocess_utility_worker(port));
 
-    axum::serve(listener, app)
-        .with_graceful_shutdown(shutdown_signal())
-        .await?;
+    // `into_make_service_with_connect_info` exposes the peer `SocketAddr` to the auth
+    // middleware so loopback callers can be trusted (epic 4484: keep the local desktop UI
+    // and worker password-free while LAN clients stay gated).
+    axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<SocketAddr>(),
+    )
+    .with_graceful_shutdown(shutdown_signal())
+    .await?;
 
     if let Some(worker) = utility_worker {
         worker.shutdown().await;
