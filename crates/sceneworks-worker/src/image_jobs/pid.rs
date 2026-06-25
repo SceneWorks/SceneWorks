@@ -17,25 +17,63 @@
 // (`{repo, filename}`) and `advanced.pidGemma` (repo string), mirroring `advanced.controlWeights`.
 const PID_QWENIMAGE_REPO: &str = "SceneWorks/pid-qwenimage";
 const PID_QWENIMAGE_FILE: &str = "pid_qwenimage_2kto4k.safetensors";
-// gemma-2-2b-it is the PiD caption encoder. sc-7852 finalizes the concrete source (likely a SceneWorks
-// mirror to avoid the upstream gated repo); the default points at the canonical id for now.
+// flux latent space (FLUX.1 / Boogu / Chroma / Z-Image — sc-7846); flux2 (FLUX.2 / klein / Lens /
+// Ideogram — sc-7847); sdxl (SDXL / RealVisXL / Kolors — sc-7848). All re-hosted by sc-7852 (the
+// `SceneWorks/pid-flux2` repo carries the bug-fixed `_2606` 2kto4k revision; the filenames below are the
+// canonical re-host names).
+const PID_FLUX_REPO: &str = "SceneWorks/pid-flux";
+const PID_FLUX_FILE: &str = "pid_flux_2kto4k.safetensors";
+const PID_FLUX2_REPO: &str = "SceneWorks/pid-flux2";
+const PID_FLUX2_FILE: &str = "pid_flux2_2kto4k.safetensors";
+const PID_SDXL_REPO: &str = "SceneWorks/pid-sdxl";
+const PID_SDXL_FILE: &str = "pid_sdxl_2kto4k.safetensors";
+// gemma-2-2b-it is the PiD caption encoder (shared by every backbone). sc-8025 tracks a turnkey
+// non-gated SceneWorks mirror; the default points at the canonical (gated) id for now.
 const PID_GEMMA_REPO: &str = "google/gemma-2-2b-it";
 
 /// Map a SceneWorks image model id to its PiD latent-space backbone, or `None` when the model has no
-/// PiD backbone (so `usePid` is silently ignored — the guard for SenseNova et al.). Today only the
-/// `qwenimage` latent space is wired (sc-7845): Qwen-Image (incl. its strict-pose control variant,
-/// which shares the `qwen_image` model id), Qwen-Image-Edit, and Krea 2 Turbo (reuses `QwenVae`). The
-/// flux / flux2 / sdxl backbones light up in sc-7846 / 7847 / 7848.
+/// PiD backbone (so `usePid` is silently ignored — the guard for SenseNova et al.). All four wired
+/// latent spaces are mapped here (sc-7845 qwenimage, sc-7846 flux, sc-7847 flux2, sc-7848 sdxl); the
+/// returned string selects the default re-host repo in `resolve_pid_weights` (the engine itself picks
+/// its backbone from each crate's own `PID_BACKBONE` constant, so this is repo-selection only).
+///
+/// This routes the standard t2i/i2i path (the generic `ImageRoute::Mlx` `generate_stream`). The
+/// bespoke advanced sub-mode streams (control / edit / IP-Adapter / inpaint / InstantID / PuLID) build
+/// their own request and do not yet thread PiD — they stay on the native VAE, mirroring the engine-side
+/// scope decisions in sc-7846/47/48 (tracked as a follow-up).
 fn pid_backbone_for(model: &str) -> Option<&'static str> {
     match model {
-        // Qwen-Image T2I + its strict-pose control variant (both the `qwen_image` model id), every
-        // Qwen-Image-Edit variant (all → the one `qwen_image_edit` engine), and Krea 2 Turbo.
+        // qwenimage (sc-7845): Qwen-Image T2I + its strict-pose control variant (both the `qwen_image`
+        // model id), every Qwen-Image-Edit variant (all → the one `qwen_image_edit` engine), Krea 2.
         "qwen_image"
         | "qwen_image_edit"
         | "qwen_image_edit_2509"
         | "qwen_image_edit_2511"
         | "qwen_image_edit_2511_lightning"
         | "krea_2_turbo" => Some("qwenimage"),
+        // flux (sc-7846): FLUX.1, Boogu-Image, Chroma, and Z-Image — Z-Image is in the FLUX.1 VAE latent
+        // space (PiD's zimage tags alias the flux checkpoint), not the qwenimage space.
+        "flux_dev"
+        | "flux_schnell"
+        | "boogu_image"
+        | "boogu_image_turbo"
+        | "boogu_image_edit"
+        | "chroma1_hd"
+        | "chroma1_base"
+        | "chroma1_flash"
+        | "z_image_turbo"
+        | "z_image_edit" => Some("flux"),
+        // flux2 (sc-7847): FLUX.2-dev, every klein-9b variant, Lens, Ideogram 4 (packed 128-ch latent).
+        "flux2_dev"
+        | "flux2_klein_9b"
+        | "flux2_klein_9b_kv"
+        | "flux2_klein_9b_true_v2"
+        | "lens"
+        | "lens_turbo"
+        | "ideogram_4"
+        | "ideogram_4_turbo" => Some("flux2"),
+        // sdxl (sc-7848): SDXL base, RealVisXL (+ Lightning), Kolors (reuses the SDXL VAE).
+        "sdxl" | "realvisxl" | "realvisxl_lightning" | "kolors" => Some("sdxl"),
         _ => None,
     }
 }
@@ -78,7 +116,9 @@ fn resolve_pid_weights(
     let backbone = pid_backbone_for(model)?;
     let (default_repo, default_file) = match backbone {
         "qwenimage" => (PID_QWENIMAGE_REPO, PID_QWENIMAGE_FILE),
-        // flux / flux2 / sdxl backbones (sc-7846/47/48) register their defaults here as they land.
+        "flux" => (PID_FLUX_REPO, PID_FLUX_FILE),
+        "flux2" => (PID_FLUX2_REPO, PID_FLUX2_FILE),
+        "sdxl" => (PID_SDXL_REPO, PID_SDXL_FILE),
         _ => return None,
     };
 
@@ -132,14 +172,28 @@ mod pid_tests {
     }
 
     #[test]
-    fn backbone_map_covers_qwenimage_family_only() {
+    fn backbone_map_covers_all_wired_latent_spaces() {
+        // qwenimage (sc-7845)
         assert_eq!(pid_backbone_for("qwen_image"), Some("qwenimage"));
         assert_eq!(pid_backbone_for("qwen_image_edit"), Some("qwenimage"));
         assert_eq!(pid_backbone_for("krea_2_turbo"), Some("qwenimage"));
-        // Not yet wired / no PiD backbone → silently ignored.
-        assert_eq!(pid_backbone_for("flux_dev"), None);
-        assert_eq!(pid_backbone_for("sdxl"), None);
+        // flux (sc-7846) — incl. Z-Image, which is in the FLUX.1 VAE latent space.
+        assert_eq!(pid_backbone_for("flux_dev"), Some("flux"));
+        assert_eq!(pid_backbone_for("boogu_image_turbo"), Some("flux"));
+        assert_eq!(pid_backbone_for("chroma1_flash"), Some("flux"));
+        assert_eq!(pid_backbone_for("z_image_turbo"), Some("flux"));
+        // flux2 (sc-7847) — incl. every klein-9b variant, Lens, Ideogram 4.
+        assert_eq!(pid_backbone_for("flux2_dev"), Some("flux2"));
+        assert_eq!(pid_backbone_for("flux2_klein_9b_true_v2"), Some("flux2"));
+        assert_eq!(pid_backbone_for("lens_turbo"), Some("flux2"));
+        assert_eq!(pid_backbone_for("ideogram_4"), Some("flux2"));
+        // sdxl (sc-7848)
+        assert_eq!(pid_backbone_for("sdxl"), Some("sdxl"));
+        assert_eq!(pid_backbone_for("realvisxl_lightning"), Some("sdxl"));
+        assert_eq!(pid_backbone_for("kolors"), Some("sdxl"));
+        // No PiD backbone → silently ignored (SenseNova is autoregressive, no VAE latent).
         assert_eq!(pid_backbone_for("sensenova_u1_8b"), None);
+        assert_eq!(pid_backbone_for("bernini_image"), None);
     }
 
     #[test]
@@ -160,15 +214,22 @@ mod pid_tests {
     #[test]
     fn resolve_returns_none_for_non_eligible_model_even_when_requested() {
         let dir = tempfile::tempdir().unwrap();
-        let req = request("sdxl", json!({ "usePid": true }));
+        // SenseNova is autoregressive (no VAE latent) → no PiD backbone, toggle ignored.
+        let req = request("sensenova_u1_8b", json!({ "usePid": true }));
         assert!(resolve_pid_weights(&req, dir.path(), &req.model).is_none());
     }
 
     #[test]
     fn resolve_returns_none_when_checkpoint_not_cached() {
-        // Opted-in + eligible, but the PiD checkpoint repo is not in the (empty) HF cache → native VAE.
+        // Opted-in + eligible (every wired backbone), but the PiD checkpoint repo is not in the (empty)
+        // HF cache → native VAE.
         let dir = tempfile::tempdir().unwrap();
-        let req = request("qwen_image", json!({ "usePid": true }));
-        assert!(resolve_pid_weights(&req, dir.path(), &req.model).is_none());
+        for model in ["qwen_image", "flux_dev", "flux2_dev", "sdxl"] {
+            let req = request(model, json!({ "usePid": true }));
+            assert!(
+                resolve_pid_weights(&req, dir.path(), &req.model).is_none(),
+                "{model} should resolve None when its checkpoint is not cached"
+            );
+        }
     }
 }
