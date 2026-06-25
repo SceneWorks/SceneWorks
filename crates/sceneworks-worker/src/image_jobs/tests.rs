@@ -998,6 +998,7 @@ fn smoke_generate_one(
         None,
         None,
         None,
+        false,
         &PromptEnhance::default(),
         &cancel,
         &mut |p| {
@@ -1174,6 +1175,7 @@ fn lens_turbo_real_weights_bucket_resolution() {
         None,
         None,
         None,
+        false,
         &PromptEnhance::default(),
         &cancel,
         &mut |_p| {},
@@ -1424,6 +1426,7 @@ fn kolors_real_weights_img2img_generates_one_image() {
         None,
         None,
         None,
+        false,
         &PromptEnhance::default(),
         &cancel,
         &mut |p| {
@@ -1476,6 +1479,7 @@ fn kolors_real_weights_ip_adapter_generates_one_image() {
         None,
         None,
         None,
+        false,
         &PromptEnhance::default(),
         &cancel,
         &mut |p| {
@@ -1811,6 +1815,7 @@ fn smoke_generate_one_true_cfg(
         None,
         None,
         None,
+        false,
         &PromptEnhance::default(),
         &cancel,
         &mut |p| {
@@ -2004,6 +2009,7 @@ fn sc3031_ab_dump_txt2img() {
         None,
         None,
         None,
+        false,
         &PromptEnhance::default(),
         &cancel,
         &mut |_| {},
@@ -2335,6 +2341,7 @@ fn qwen_control_real_weights_generates_one_pose() {
         4.0,
         control,
         0.9,
+        false,
         &cancel,
         &mut |p| {
             if let gen_core::Progress::Step { current, .. } = p {
@@ -3351,6 +3358,7 @@ fn qwen_edit_real_weights_generates_one_image() {
         4.0,
         None,
         build_edit_conditioning(std::slice::from_ref(&reference)),
+        false,
         &cancel,
         &mut |p| {
             if let gen_core::Progress::Step { current, .. } = p {
@@ -3416,6 +3424,7 @@ fn qwen_edit_lightning_real_weights_generates_one_image() {
         1.0,
         Some("lightning"),
         build_edit_conditioning(std::slice::from_ref(&reference)),
+        false,
         &cancel,
         &mut |p| {
             if let gen_core::Progress::Step { current, .. } = p {
@@ -4206,6 +4215,7 @@ fn ideogram_4_real_weights_generates_caption_and_plain_images() {
             None,
             None,
             None,
+            false,
             &enhance,
             &cancel,
             &mut |p| {
@@ -4395,6 +4405,7 @@ fn ideogram_4_headless_auto_caption_renders_real_image() {
             None,
             None,
             None,
+            false,
             &enhance,
             &cancel,
             &mut |_| {},
@@ -4530,6 +4541,7 @@ fn ideogram_4_real_weights_edit_img2img_and_inpaint() {
             None,
             None,
             None,
+            false,
             &enhance,
             &cancel,
             &mut |p| {
@@ -4726,6 +4738,7 @@ fn boogu_real_weights_generates_base_turbo_edit() {
             None,
             None,
             None,
+            false,
             &enhance,
             &cancel,
             &mut |p| {

@@ -1055,6 +1055,10 @@ fn generate_one(
     sampler: Option<&str>,
     scheduler: Option<&str>,
     scheduler_shift: Option<f32>,
+    // Per-generation PiD super-resolving decode (epic 7840, sc-7849). Must be `true` only when the
+    // generator was loaded with `LoadSpec::with_pid` (the engine rejects a mismatch); the caller keeps
+    // the two in lockstep. The candle path passes `false` (candle PiD is Phase 4, sc-7853).
+    use_pid: bool,
     enhance: &PromptEnhance,
     cancel: &CancelFlag,
     on_progress: &mut dyn FnMut(Progress),
@@ -1094,6 +1098,7 @@ fn generate_one(
         sampler: sampler.map(str::to_owned),
         scheduler: scheduler.map(str::to_owned),
         scheduler_shift,
+        use_pid,
         conditioning,
         cancel: cancel.clone(),
         ..Default::default()
@@ -1728,7 +1733,15 @@ async fn generate_stream(
     // sc-6135: caption upsampling (FLUX.2-dev only; every other engine ignores it). Resolved from
     // the request's advanced `enhancePrompt` toggle, gated to dev by the manifest `ui.promptEnhance`.
     let enhance = PromptEnhance::from_advanced(&request.advanced);
-    let spec = load_spec(weights_dir, quant, adapters, flux_ip_dir);
+    // Per-generation PiD decode (epic 7840, sc-7849): resolve the PiD checkpoint + Gemma for this
+    // model's latent space when `advanced.usePid` is set and the snapshots are cached; otherwise keep
+    // the native VAE. `use_pid` and `spec.pid` stay in lockstep (the engine rejects a mismatch).
+    let pid_weights = resolve_pid_weights(request, &settings.data_dir, &request.model);
+    let use_pid = pid_weights.is_some();
+    let mut spec = load_spec(weights_dir, quant, adapters, flux_ip_dir);
+    if let Some(pid) = pid_weights {
+        spec = spec.with_pid(pid.checkpoint, pid.gemma);
+    }
     let (cancel, rx, blocking) = start_cached_gen_stream(
         job.id.clone(),
         engine_id,
@@ -1754,6 +1767,7 @@ async fn generate_stream(
                         sampler.as_deref(),
                         scheduler.as_deref(),
                         scheduler_shift,
+                        use_pid,
                         &enhance,
                         &cancel,
                         on_progress,
@@ -2298,6 +2312,8 @@ async fn generate_candle_stream(
                         sampler.as_deref(),
                         scheduler.as_deref(),
                         scheduler_shift,
+                        // candle PiD is Phase 4 (sc-7853); the off-Mac lane never requests it.
+                        false,
                         &enhance,
                         &cancel,
                         on_progress,

@@ -1233,6 +1233,9 @@ include!("image_jobs/stream.rs");
 // base image routing (MLX) + neutral txt2img generation harness + the candle execution path.
 include!("image_jobs/base.rs");
 #[cfg(target_os = "macos")]
+// Per-generation PiD (pixel-diffusion) super-resolving decoder routing (epic 7840, sc-7849).
+include!("image_jobs/pid.rs");
+#[cfg(target_os = "macos")]
 // Z-Image strict-pose and prompt augmentation helpers.
 include!("image_jobs/zimage.rs");
 #[cfg(target_os = "macos")]

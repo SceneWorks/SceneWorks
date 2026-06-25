@@ -36,6 +36,11 @@ pub(crate) struct GeneratorCacheKey {
     extra_controls: Vec<CacheWeightsSource>,
     ip_adapter: Option<CacheWeightsSource>,
     adapters: Vec<CacheAdapterSpec>,
+    // Per-generation PiD decoder aux-weights (epic 7840, sc-7849): `(checkpoint, gemma)` when the
+    // generator was loaded with `LoadSpec::with_pid`, else `None`. Keyed so a PiD-equipped load is a
+    // distinct cache entry from the plain VAE load — toggling `usePid` reloads rather than reusing a
+    // generator with the wrong decoder.
+    pid: Option<(CacheWeightsSource, CacheWeightsSource)>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -68,6 +73,12 @@ impl GeneratorCacheKey {
                 .collect(),
             ip_adapter: spec.ip_adapter.as_ref().map(CacheWeightsSource::from),
             adapters: spec.adapters.iter().map(CacheAdapterSpec::from).collect(),
+            pid: spec.pid.as_ref().map(|pid| {
+                (
+                    CacheWeightsSource::from(&pid.checkpoint),
+                    CacheWeightsSource::from(&pid.gemma),
+                )
+            }),
         }
     }
 }
