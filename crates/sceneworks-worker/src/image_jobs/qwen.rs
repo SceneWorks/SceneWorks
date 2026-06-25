@@ -64,6 +64,7 @@ fn qwen_control_generate_one(
     guidance: f32,
     control: Image,
     control_scale: f32,
+    use_pid: bool,
     cancel: &CancelFlag,
     on_progress: &mut dyn FnMut(Progress),
 ) -> WorkerResult<(u32, u32, Vec<u8>)> {
@@ -76,6 +77,7 @@ fn qwen_control_generate_one(
         seed: Some(seed as u64),
         steps: Some(steps),
         guidance: Some(guidance),
+        use_pid,
         conditioning: vec![Conditioning::Control {
             image: control,
             kind: ControlKind::Pose,
@@ -173,7 +175,15 @@ async fn generate_qwen_control_stream(
     let (width, height) = (request.width, request.height);
     let stickwidth = crate::openpose_skeleton::body_stickwidth(width, height);
     let adapter_count = adapters.len();
-    let spec = qwen_control_spec(weights_dir, control_weights, quant, adapters);
+    // Per-generation PiD decode (epic 7840, sc-7849): the strict-pose control engine shares the
+    // `qwenimage` latent space, so route its decode through PiD when `advanced.usePid` is set and the
+    // snapshots are cached; otherwise native VAE. `use_pid` and `spec.pid` stay in lockstep.
+    let pid_weights = resolve_pid_weights(request, &settings.data_dir, &request.model);
+    let use_pid = pid_weights.is_some();
+    let mut spec = qwen_control_spec(weights_dir, control_weights, quant, adapters);
+    if let Some(pid) = pid_weights {
+        spec = spec.with_pid(pid.checkpoint, pid.gemma);
+    }
     let (cancel, rx, blocking) = start_cached_gen_stream(
         job.id.clone(),
         QWEN_CONTROL_ENGINE_ID,
@@ -206,6 +216,7 @@ async fn generate_qwen_control_stream(
                     guidance,
                     control,
                     control_scale,
+                    use_pid,
                     &cancel,
                     on_progress,
                 )?;
@@ -460,6 +471,7 @@ fn qwen_edit_generate_one(
     guidance: f32,
     sampler: Option<&str>,
     conditioning: Vec<Conditioning>,
+    use_pid: bool,
     cancel: &CancelFlag,
     on_progress: &mut dyn FnMut(Progress),
 ) -> WorkerResult<(u32, u32, Vec<u8>)> {
@@ -473,6 +485,7 @@ fn qwen_edit_generate_one(
         steps: Some(steps),
         guidance: Some(guidance),
         sampler: sampler.map(str::to_owned),
+        use_pid,
         conditioning,
         cancel: cancel.clone(),
         ..Default::default()
@@ -639,7 +652,15 @@ async fn generate_qwen_edit_stream(
     let (width, height) = (request.width, request.height);
     let stickwidth = crate::openpose_skeleton::body_stickwidth(width, height);
     let adapter_count = adapters.len();
-    let spec = load_spec(weights_dir, quant, adapters, None);
+    // Per-generation PiD decode (epic 7840, sc-7849): Qwen-Image-Edit shares the `qwenimage` latent
+    // space, so route its decode through PiD when `advanced.usePid` is set and the snapshots are
+    // cached; otherwise native VAE. `use_pid` and `spec.pid` stay in lockstep.
+    let pid_weights = resolve_pid_weights(request, &settings.data_dir, &request.model);
+    let use_pid = pid_weights.is_some();
+    let mut spec = load_spec(weights_dir, quant, adapters, None);
+    if let Some(pid) = pid_weights {
+        spec = spec.with_pid(pid.checkpoint, pid.gemma);
+    }
     let (cancel, rx, blocking) = start_cached_gen_stream(
         job.id.clone(),
         engine_id,
@@ -693,6 +714,7 @@ async fn generate_qwen_edit_stream(
                         guidance,
                         sampler,
                         conditioning,
+                        use_pid,
                         &cancel,
                         on_progress,
                     )?;
