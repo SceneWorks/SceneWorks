@@ -278,7 +278,11 @@ fn sd3_5_large_mlx_gpu_smoke() {
     let w: u32 = env_or("SD3_W", "1024").parse().expect("SD3_W");
     let h: u32 = env_or("SD3_H", "1024").parse().expect("SD3_H");
     let steps: u32 = env_or("SD3_STEPS", "28").parse().expect("SD3_STEPS");
-    let q = if matches!(quant, Quant::Q4) { "q4" } else { "q8" };
+    let q = if matches!(quant, Quant::Q4) {
+        "q4"
+    } else {
+        "q8"
+    };
     run_worker_smoke(
         "sd3_5_large",
         snap,
@@ -305,7 +309,11 @@ fn sd3_5_large_turbo_mlx_gpu_smoke() {
     let w: u32 = env_or("SD3_W", "1024").parse().expect("SD3_W");
     let h: u32 = env_or("SD3_H", "1024").parse().expect("SD3_H");
     let steps: u32 = env_or("SD3_STEPS", "4").parse().expect("SD3_STEPS");
-    let q = if matches!(quant, Quant::Q4) { "q4" } else { "q8" };
+    let q = if matches!(quant, Quant::Q4) {
+        "q4"
+    } else {
+        "q8"
+    };
     run_worker_smoke(
         "sd3_5_large_turbo",
         snap,
@@ -320,7 +328,10 @@ fn sd3_5_large_turbo_mlx_gpu_smoke() {
 }
 
 /// SD3.5 Medium (MMDiT-X, true-CFG) through the worker lane. 40 steps / guidance 5.0 (the MODEL_TABLE
-/// recipe). minMemoryGb 16 — the lightest SD3.5 tier; verify the footprint is consistent with that.
+/// recipe). The S6 worker-lane validation measured the OS peak at ~52 GB Q8 / ~48.6 GB Q4 (the dense
+/// bf16 T5-XXL TE + VAE + load-time quant dominate the 2.5B backbone, disproving the earlier ~16 GB
+/// estimate), so the manifest minMemoryGb is 56 — the lightest SD3.5 tier; verify the footprint stays
+/// consistent with that.
 #[test]
 #[ignore = "real-weight MLX smoke; needs the gated stabilityai/stable-diffusion-3.5-medium snapshot + an Apple-Silicon Mac"]
 fn sd3_5_medium_mlx_gpu_smoke() {
@@ -332,7 +343,11 @@ fn sd3_5_medium_mlx_gpu_smoke() {
     let w: u32 = env_or("SD3_W", "1024").parse().expect("SD3_W");
     let h: u32 = env_or("SD3_H", "1024").parse().expect("SD3_H");
     let steps: u32 = env_or("SD3_STEPS", "40").parse().expect("SD3_STEPS");
-    let q = if matches!(quant, Quant::Q4) { "q4" } else { "q8" };
+    let q = if matches!(quant, Quant::Q4) {
+        "q4"
+    } else {
+        "q8"
+    };
     run_worker_smoke(
         "sd3_5_medium",
         snap,
@@ -396,12 +411,16 @@ fn sd3_5_lora_apply_mlx_gpu_smoke() {
         ),
     };
 
-    let scale: f32 = env_or("SD3_LORA_SCALE", "1.0").parse().expect("SD3_LORA_SCALE");
+    let scale: f32 = env_or("SD3_LORA_SCALE", "1.0")
+        .parse()
+        .expect("SD3_LORA_SCALE");
     let snap = snapshot(env_snap, hub_dir);
     let quant = quant_from_env();
     let w: u32 = env_or("SD3_W", "1024").parse().expect("SD3_W");
     let h: u32 = env_or("SD3_H", "1024").parse().expect("SD3_H");
-    let steps: u32 = env_or("SD3_STEPS", default_steps).parse().expect("SD3_STEPS");
+    let steps: u32 = env_or("SD3_STEPS", default_steps)
+        .parse()
+        .expect("SD3_STEPS");
 
     // Mirror `image_jobs::base::resolve_adapters`: AdapterSpec::new(file, scale, kind=Lora).
     let adapters = vec![AdapterSpec::new(lora.clone(), scale, AdapterKind::Lora)];

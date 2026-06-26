@@ -2383,10 +2383,12 @@
       "mlx": {
         // 2.5B MMDiT-X + the same triple TE + 16-ch VAE (the smaller backbone keeps the footprint
         // well under Large). Converted to a packed MLX dir at install (`sd3_5_medium_quant` converter,
-        // REGISTERED IN S2/S3). minMemoryGb 16 — M3 measured the real OS peak at ~16 GB Q8 / ~12 GB Q4;
-        // 16 admits Medium on smaller Apple Silicon (the lightest SD3.5 tier) while gating Large/Turbo
-        // to 64 GB machines.
-        "minMemoryGb": 16,
+        // REGISTERED IN S2/S3). minMemoryGb 56 — the S6 real-weight worker-lane validation measured the
+        // OS peak at ~52 GB Q8 / ~48.6 GB Q4 (the dense bf16 T5-XXL TE + VAE + load-time quant dominate
+        // the 2.5B backbone, so the earlier ~16 GB estimate was badly understated). 56 covers the
+        // measured Q8 peak plus headroom while staying below Large/Turbo's 64 so Medium remains the
+        // lightest SD3.5 tier without admitting a machine that would OOM.
+        "minMemoryGb": 56,
         "quantize": 8,
         "requiresConversion": true,
         "converter": "sd3_5_medium_quant",

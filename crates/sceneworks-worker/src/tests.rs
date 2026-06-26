@@ -776,11 +776,12 @@ fn sd3_5_manifest_entries_gate_correctly() {
         .and_then(Value::as_array)
         .expect("models array");
 
-    // (id, expected minMemoryGb) — Large/Turbo flagship-tier 64, Medium light-tier 16.
+    // (id, expected minMemoryGb) — Large/Turbo flagship-tier 64, Medium light-tier 56
+    // (S6 worker-lane footprint ~52 GB Q8 / ~48.6 GB Q4 + headroom, below the 64 flagship tier).
     let expected: &[(&str, u64)] = &[
         ("sd3_5_large", 64),
         ("sd3_5_large_turbo", 64),
-        ("sd3_5_medium", 16),
+        ("sd3_5_medium", 56),
     ];
     for (id, min_mem) in expected {
         let entry = models
@@ -846,7 +847,11 @@ fn sd3_5_manifest_entries_gate_correctly() {
             .and_then(Value::as_array)
             .map(|a| a.iter().filter_map(Value::as_str).collect())
             .unwrap_or_default();
-        assert_eq!(lora_families, vec!["sd3"], "{id} loraCompatibility.families");
+        assert_eq!(
+            lora_families,
+            vec!["sd3"],
+            "{id} loraCompatibility.families"
+        );
     }
 }
 
