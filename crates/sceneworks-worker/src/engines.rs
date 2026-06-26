@@ -491,6 +491,11 @@ pub(crate) const TRAINER_IDS: &[&str] = &[
     "sdxl",
     "kolors",
     "lens",
+    // SD3.5 LoRA-training bases (epic 7841 T3 sc-7884): the engine registers the LoRA/LoKr trainer
+    // under the same id as the inference generator of the training base — Large (sc-7883) and the
+    // MMDiT-X Medium (sc-7885). mlx-only (no candle SD3 trainer; epic 7982).
+    "sd3_5_large",
+    "sd3_5_medium",
     "ltx_2_3",
     "wan2_2_ti2v_5b",
     "wan2_2_t2v_14b",

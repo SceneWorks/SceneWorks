@@ -422,6 +422,8 @@ pub fn builtin_training_targets() -> TrainingTargetRegistry {
             kolors_lora_target(),
             lens_turbo_lora_target(),
             krea_raw_lora_target(),
+            sd3_large_lora_target(),
+            sd3_medium_lora_target(),
             ltx_video_lora_target(),
             wan_lora_target(),
             wan_t2v_14b_lora_target(),
@@ -1302,6 +1304,182 @@ fn krea_raw_lora_target() -> TrainingTarget {
         ui: object(json!({
             "label": "Krea 2 LoRA",
             "description": "Train an image LoRA for Krea 2 (Qwen3-VL-4B text encoder + Qwen-Image VAE). Trains on the undistilled Krea 2 Raw base and applies to Krea 2 Turbo. Apple Silicon only (native MLX).",
+            "recommendedFor": ["character", "style"],
+            "appleSiliconOnly": true,
+            "backend": "mlx",
+            "datasetModality": "image"
+        })),
+        extra: ExtraFields::new(),
+    }
+}
+
+/// Native MLX LoRA/LoKr training for Stable Diffusion 3.5 **Large** (epic 7841, T3 sc-7884).
+///
+/// LoRAs train on the `stabilityai/stable-diffusion-3.5-large` MMDiT (the `sd3_lora` kernel →
+/// `mlx-gen-sd3` `register_trainer` id `sd3_5_large`, T2 sc-7883) and apply back at `sd3_5_large`
+/// — and the family-arch-identical `sd3_5_large_turbo` — inference via the `sd3` LoRA family
+/// (no base-model gating; the family match alone gates eligibility, mirroring Krea Raw→Turbo).
+/// Native MLX only (no torch SD3 trainer; off-Mac/candle is epic 7982), so Apple-Silicon-gated.
+fn sd3_large_lora_target() -> TrainingTarget {
+    TrainingTarget {
+        id: "sd3_5_large_lora".to_owned(),
+        name: "SD3.5 Large LoRA".to_owned(),
+        modality: TrainingModality::Image,
+        output_kind: TrainingOutputKind::Lora,
+        family: "sd3".to_owned(),
+        base_model: "sd3_5_large".to_owned(),
+        base_model_repo: Some("stabilityai/stable-diffusion-3.5-large".to_owned()),
+        kernel: "sd3_lora".to_owned(),
+        defaults: TrainingConfig {
+            rank: 16,
+            alpha: 16,
+            learning_rate: ContractNumber::from_f64(0.0001).expect("0.0001 is finite"),
+            steps: 3000,
+            batch_size: 1,
+            gradient_accumulation: 1,
+            resolution: 1024,
+            save_every: 250,
+            seed: 42,
+            // MLX training aliases `adamw8bit` → AdamW (bitsandbytes 8-bit is CUDA-only); the label
+            // stays consistent with the other native image targets (the engine normalizes it).
+            optimizer: "adamw8bit".to_owned(),
+            trigger_word: None,
+            advanced: object(json!({
+                "mixedPrecision": "bf16",
+                "cacheLatents": true,
+                "cacheTextEmbeddings": true,
+                "gradientCheckpointing": true,
+                "networkType": "lora",
+                // SD3.5 native flow-match noise sampling: logit-normal (the SD3 training recipe — the
+                // `mlx-gen-sd3` trainer default). No high/low-noise bias (neutral) — SD3.5 trains the
+                // full schedule, unlike the distilled-Turbo families that bias toward the few-step
+                // region.
+                "timestepType": "logit_normal",
+                "lossType": "mse",
+                "weightDecay": 0.0001,
+                // Learning-rate scheduler (see the Z-Image target); the worker honors
+                // `constant`/`linear`/`cosine` with an optional warmup.
+                "lrScheduler": "constant",
+                // SD3.5 MMDiT joint-block attention: the image stream (`to_q`/`to_k`/`to_v`/`to_out.0`)
+                // plus the text stream (`add_q_proj`/`add_k_proj`/`add_v_proj`/`to_add_out`) — the
+                // `mlx-gen-sd3` trainer's DEFAULT_TARGET_MODULES (both joint streams).
+                "loraTargetModules": ["to_q", "to_k", "to_v", "to_out.0", "add_q_proj", "add_k_proj", "add_v_proj", "to_add_out"],
+                // In-training previews render on the loaded Large base with its real-CFG settings
+                // (true classifier-free guidance 3.5, ~28 steps — SD3.5 Large is not distilled).
+                "sampleEvery": 500,
+                "sampleSteps": 28,
+                "sampleGuidanceScale": 3.5,
+                "qualityPreset": "balanced",
+                "outputScope": "project",
+                "requestedGpu": "auto",
+                // Native MLX trainer (surfaced for the UI; Apple-Silicon only).
+                "backend": "mlx"
+            })),
+            extra: ExtraFields::new(),
+        },
+        limits: object(json!({
+            "rank": [4, 128],
+            "alpha": [1, 128],
+            "steps": [200, 6000],
+            "resolutions": [768, 1024, 1536],
+            "batchSize": [1, 4],
+            "optimizers": ["adamw8bit", "adamw", "adam", "prodigyopt", "rose"],
+            // Both LoRA and LoKr round-trip the engine's `apply_sd3_adapters` seam at inference
+            // (the `mlx-gen-sd3` trainer builds both; `supports_lokr: true`).
+            "networkTypes": ["lora", "lokr"],
+            "lrSchedulers": ["constant", "linear", "cosine"],
+            "qualityPresets": ["speed", "balanced", "quality"],
+            "outputScopes": ["project", "global"],
+            // Native MLX trainer — no torch SD3 path (mirrors the Krea / LTX MLX targets).
+            "requiresBackend": "mlx",
+            "appleSiliconOnly": true
+        })),
+        ui: object(json!({
+            "label": "SD3.5 Large LoRA",
+            "description": "Train an image LoRA for Stable Diffusion 3.5 Large (triple text encoder CLIP-L + CLIP-G + T5-XXL, 16-channel VAE). Trains on the SD3.5 Large MMDiT and applies to SD3.5 Large and Large Turbo. Apple Silicon only (native MLX).",
+            "recommendedFor": ["character", "style"],
+            "appleSiliconOnly": true,
+            "backend": "mlx",
+            "datasetModality": "image"
+        })),
+        extra: ExtraFields::new(),
+    }
+}
+
+/// Native MLX LoRA/LoKr training for Stable Diffusion 3.5 **Medium** (MMDiT-X) (epic 7841, T4
+/// sc-7885 base; T3 sc-7884 wiring).
+///
+/// Body-identical to the Large target (same LoRA/LoKr capability surface, same logit-normal recipe,
+/// same joint-block attention targets) — it differs only in the base model / trainer id. LoRAs train
+/// on the `stabilityai/stable-diffusion-3.5-medium` MMDiT-X (dual-attention; the `sd3_lora` kernel →
+/// `mlx-gen-sd3` `register_trainer` id `sd3_5_medium`) and apply back at `sd3_5_medium` inference via
+/// the `sd3` LoRA family (no base-model gating). Apple-Silicon-gated (native MLX only).
+fn sd3_medium_lora_target() -> TrainingTarget {
+    TrainingTarget {
+        id: "sd3_5_medium_lora".to_owned(),
+        name: "SD3.5 Medium LoRA".to_owned(),
+        modality: TrainingModality::Image,
+        output_kind: TrainingOutputKind::Lora,
+        family: "sd3".to_owned(),
+        base_model: "sd3_5_medium".to_owned(),
+        base_model_repo: Some("stabilityai/stable-diffusion-3.5-medium".to_owned()),
+        kernel: "sd3_lora".to_owned(),
+        defaults: TrainingConfig {
+            rank: 16,
+            alpha: 16,
+            learning_rate: ContractNumber::from_f64(0.0001).expect("0.0001 is finite"),
+            steps: 3000,
+            batch_size: 1,
+            gradient_accumulation: 1,
+            resolution: 1024,
+            save_every: 250,
+            seed: 42,
+            optimizer: "adamw8bit".to_owned(),
+            trigger_word: None,
+            advanced: object(json!({
+                "mixedPrecision": "bf16",
+                "cacheLatents": true,
+                "cacheTextEmbeddings": true,
+                "gradientCheckpointing": true,
+                "networkType": "lora",
+                // SD3.5 native logit-normal flow-match recipe (the `mlx-gen-sd3` trainer default).
+                "timestepType": "logit_normal",
+                "lossType": "mse",
+                "weightDecay": 0.0001,
+                "lrScheduler": "constant",
+                // SD3.5 MMDiT-X joint-block attention (the trainer's DEFAULT_TARGET_MODULES — body
+                // identical to Large; the dual-attention `attn2` is validated at load).
+                "loraTargetModules": ["to_q", "to_k", "to_v", "to_out.0", "add_q_proj", "add_k_proj", "add_v_proj", "to_add_out"],
+                // SD3.5 Medium is not distilled — previews use real CFG (~40 steps / guidance 4.5,
+                // matching the Medium inference defaults).
+                "sampleEvery": 500,
+                "sampleSteps": 40,
+                "sampleGuidanceScale": 4.5,
+                "qualityPreset": "balanced",
+                "outputScope": "project",
+                "requestedGpu": "auto",
+                "backend": "mlx"
+            })),
+            extra: ExtraFields::new(),
+        },
+        limits: object(json!({
+            "rank": [4, 128],
+            "alpha": [1, 128],
+            "steps": [200, 6000],
+            // SD3.5 Medium renders up to 1440²; allow the higher training bucket.
+            "resolutions": [768, 1024, 1440],
+            "batchSize": [1, 4],
+            "optimizers": ["adamw8bit", "adamw", "adam", "prodigyopt", "rose"],
+            "networkTypes": ["lora", "lokr"],
+            "lrSchedulers": ["constant", "linear", "cosine"],
+            "qualityPresets": ["speed", "balanced", "quality"],
+            "outputScopes": ["project", "global"],
+            "requiresBackend": "mlx",
+            "appleSiliconOnly": true
+        })),
+        ui: object(json!({
+            "label": "SD3.5 Medium LoRA",
+            "description": "Train an image LoRA for Stable Diffusion 3.5 Medium (MMDiT-X dual-attention; triple text encoder, 16-channel VAE). Trains on the SD3.5 Medium MMDiT-X and applies to SD3.5 Medium. Apple Silicon only (native MLX).",
             "recommendedFor": ["character", "style"],
             "appleSiliconOnly": true,
             "backend": "mlx",
