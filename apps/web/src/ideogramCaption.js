@@ -219,11 +219,14 @@ export function parseCaption(text) {
 // matching the reference) strip per-element bboxes — the model's box guesses are
 // unreliable and the user places boxes themselves. The result is validated by the
 // caller; serializeCaption drops any remaining unknown keys.
-export function parseMagicPromptCaption(rawText, { stripBboxes = true } = {}) {
+export function parseMagicPromptCaption(
+  rawText,
+  { stripBboxes = true, nonObjectError = "Magic-prompt did not return a JSON object." } = {},
+) {
   const { caption, error } = parseCaption(rawText);
   if (error) return { caption: null, error };
   if (!caption || typeof caption !== "object" || Array.isArray(caption)) {
-    return { caption: null, error: "Magic-prompt did not return a JSON object." };
+    return { caption: null, error: nonObjectError };
   }
   const out = { ...caption };
   delete out.aspect_ratio;
@@ -274,7 +277,10 @@ export function stripJsonFence(rawText) {
 // VLM output is frequently wrapped in a Markdown fence. Drops only the non-schema
 // top-level `aspect_ratio` key; serializeCaption drops any other unknown keys.
 export function parseVisionCaption(rawText) {
-  return parseMagicPromptCaption(stripJsonFence(rawText), { stripBboxes: false });
+  return parseMagicPromptCaption(stripJsonFence(rawText), {
+    stripBboxes: false,
+    nonObjectError: "The model did not return a JSON object.",
+  });
 }
 
 // Validation entry point the vision inject flow (sc-8108) calls: given a raw

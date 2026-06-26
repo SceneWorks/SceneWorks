@@ -321,6 +321,10 @@ describe("parseMagicPromptCaption", () => {
     expect(parseMagicPromptCaption("not json").error).toBeTruthy();
     expect(parseMagicPromptCaption("[1, 2]").error).toBeTruthy();
   });
+
+  it("uses the magic-prompt non-object error message", () => {
+    expect(parseMagicPromptCaption("[1, 2]").error).toBe("Magic-prompt did not return a JSON object.");
+  });
 });
 
 describe("parseVisionCaption (epic 8102)", () => {
@@ -372,6 +376,14 @@ describe("parseVisionCaption (epic 8102)", () => {
     expect(parseVisionCaption("[1, 2]").error).toBeTruthy();
     expect(parseVisionCaption("").error).toBeTruthy();
     expect(parseVisionCaption("   ").error).toBeTruthy();
+  });
+
+  it("surfaces a vision-specific non-object error, not the magic-prompt one", () => {
+    // The vision path must NOT leak the magic-prompt label.
+    expect(parseVisionCaption("[1, 2]").error).toBe("The model did not return a JSON object.");
+    expect(parseVisionCaption("[1, 2]").error).not.toBe("Magic-prompt did not return a JSON object.");
+    // Sanity: the magic-prompt path's message is unchanged.
+    expect(parseMagicPromptCaption("[1, 2]").error).toBe("Magic-prompt did not return a JSON object.");
   });
 });
 
