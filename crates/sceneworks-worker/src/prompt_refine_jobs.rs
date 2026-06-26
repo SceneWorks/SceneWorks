@@ -242,6 +242,19 @@ fn last_ci(haystack: &str, needle: &str) -> Option<usize> {
 ))]
 const MAGIC_PROMPT_V1: &str = include_str!("ideogram_magic_prompt_v1.txt");
 
+/// Ideogram 4's image-grounded caption system prompt (epic 8102, sc-8105), embedded verbatim and
+/// versioned like [`MAGIC_PROMPT_V1`]. Drives the SAME `prompt_refine` TextLlm seam — but through the
+/// `core_llm` vision path: the model EXAMINES a reference image and emits a schema-valid Ideogram JSON
+/// caption (style + grounded composition, bboxes kept) instead of expanding a text idea. Parsed for its
+/// `[SYSTEM]` + `[USER]` sections at runtime by the same [`magic_section_from`] parser (the `[META]`
+/// block is ignored).
+#[cfg(any(
+    test,
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+const IMAGE_CAPTION_V1: &str = include_str!("ideogram_image_caption_v1.txt");
+
 /// Body of a `[NAME]` section in the magic-prompt file (port of the reference `_load_sections`):
 /// section markers are a bracketed single word alone on a line. Returns the trimmed body, or empty.
 #[cfg(any(
@@ -250,9 +263,22 @@ const MAGIC_PROMPT_V1: &str = include_str!("ideogram_magic_prompt_v1.txt");
     all(not(target_os = "macos"), feature = "backend-candle")
 ))]
 fn magic_section(name: &str) -> String {
+    magic_section_from(MAGIC_PROMPT_V1, name)
+}
+
+/// Body of a `[NAME]` section in ANY bracketed-marker prompt file (the magic-prompt or the
+/// image-caption asset). Section markers are a bracketed single word alone on a line. Returns the
+/// trimmed body, or empty. Generalized from `magic_section` so the sc-8105 image-caption asset reuses
+/// the same parser.
+#[cfg(any(
+    test,
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+fn magic_section_from(source: &str, name: &str) -> String {
     let mut capturing = false;
     let mut body: Vec<&str> = Vec::new();
-    for line in MAGIC_PROMPT_V1.lines() {
+    for line in source.lines() {
         let trimmed = line.trim();
         let is_marker = trimmed.len() >= 2
             && trimmed.starts_with('[')
@@ -293,6 +319,68 @@ pub(crate) fn build_magic_prompt_messages(prompt: &str, aspect_ratio: &str) -> (
         format!("{user}\n\n{prompt}")
     };
     (system, user)
+}
+
+// ----------------------------------------------------------------------------------------------
+// Image-grounded caption (epic 8102, sc-8105) — reference image → structured Ideogram JSON caption.
+// Drives the SAME `prompt_refine` TextLlm seam (`task: "image_caption"`) through the `core_llm` VISION
+// path: the user turn carries a `Content::Image(ImageRef)` alongside the `[USER]` instruction, and the
+// `[SYSTEM]` block is the embedded `ideogram_image_caption_v1.txt` (observe-don't-populate, style +
+// grounded composition, bboxes kept). The image drives the multimodal path at GENERATE time
+// (`mlx-llama`'s loaded Qwen-VL vision tower reads the `Content::Image`). At RESOLUTION time the worker
+// must NOT demand vision: core-llm's `select`/`meets` filters on each provider's STATIC descriptor, and
+// no linked provider statically advertises BOTH vision and Json for a Qwen-VL snapshot (`mlx-llama` is
+// text+Json until it loads; `mlx-joycaption` is vision-but-no-constraints and only serves LLaVA). So the
+// worker resolves on the JSON constraint ALONE — that selects `mlx-llama`, which loads the Qwen-VL
+// snapshot and flips to vision at load. The reply is cleaned with the SAME `clean_json_output` +
+// validated with `sceneworks_core::ideogram_caption::is_caption`; malformed output is handled like
+// magic-prompt (the empty/non-caption result errors caller-side).
+// ----------------------------------------------------------------------------------------------
+
+/// The `(system, user)` chat text for an image-caption run: the `[SYSTEM]` + `[USER]` blocks of the
+/// embedded `ideogram_image_caption_v1.txt`. The reference image is attached to the user turn as a
+/// separate `Content::Image` block by the caller (this only supplies the text).
+#[cfg(any(
+    test,
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+pub(crate) fn build_image_caption_messages() -> (String, String) {
+    let system = magic_section_from(IMAGE_CAPTION_V1, "SYSTEM");
+    let mut user = magic_section_from(IMAGE_CAPTION_V1, "USER");
+    if user.is_empty() {
+        user = "Examine the reference image attached to this message and emit the single JSON \
+                caption object as specified. Describe only what is visible in the image."
+            .to_owned();
+    }
+    (system, user)
+}
+
+/// Decode a reference image off disk into a `core_llm::ImageRef` (RGB8), mirroring the JoyCaption
+/// `load_caption_image` pattern (`decode_image_any` → `to_rgb8`) but producing the vision contract's
+/// tensor-free image type instead of the captioner's `gen_core::Image`. Used by the `image_caption`
+/// task to build the `Content::Image` block.
+#[cfg(any(
+    test,
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+fn load_caption_image_ref(path: &Path) -> WorkerResult<gen_core::core_llm::ImageRef> {
+    let decoded = crate::image_decode::decode_image_any(path)
+        .map_err(|error| {
+            WorkerError::InvalidPayload(format!(
+                "image-caption reference image {}: {error}",
+                path.display()
+            ))
+        })?
+        .to_rgb8();
+    let (width, height) = (decoded.width(), decoded.height());
+    gen_core::core_llm::ImageRef::new(width, height, decoded.into_raw()).map_err(|error| {
+        WorkerError::InvalidPayload(format!(
+            "image-caption reference image {}: {error}",
+            path.display()
+        ))
+    })
 }
 
 /// Reduce a magic-prompt reply to its JSON object: strip `<think>` blocks and a wrapping code fence
@@ -343,17 +431,58 @@ pub(crate) async fn run_prompt_refine_job(
     use gen_core::core_llm::CancelFlag;
 
     let payload = &job.payload;
+    // The job is dispatched by the `task` discriminator: `magic_prompt` (text idea → JSON caption,
+    // sc-5997), `image_caption` (reference image → JSON caption, sc-8105 — the `core_llm` VISION path),
+    // or the default free-text rewrite. The two caption tasks both emit a JSON-constrained Ideogram
+    // caption; `image_caption` additionally carries an image and needs no text prompt.
+    let task = payload
+        .get("task")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .unwrap_or_default();
+    let is_magic = task.eq_ignore_ascii_case("magic_prompt");
+    let is_image_caption = task.eq_ignore_ascii_case("image_caption");
     let original_prompt = payload
         .get("prompt")
         .and_then(Value::as_str)
         .map(str::trim)
         .unwrap_or_default()
         .to_owned();
-    if original_prompt.is_empty() {
+    // The image-caption task is driven by the reference image, not a text prompt, so it does not
+    // require a `prompt`; every other task does.
+    if original_prompt.is_empty() && !is_image_caption {
         return Err(WorkerError::InvalidPayload(
             "Prompt refinement requires a non-empty prompt.".to_owned(),
         ));
     }
+    // The image-caption task resolves + decodes a reference image (the JoyCaption `load_caption_image`
+    // pattern → RGB8) into the vision contract's `ImageRef`. Accept either `imagePath` or `referencePath`.
+    // The path is UNTRUSTED (it arrives on the job payload over the LAN-remote API boundary, epic 4484),
+    // so — like every other on-disk image/model input (JoyCaption via `resolve_dataset_item_path`, the
+    // InstantID/captioner reference reads, the LoRA load path) — confine it to an app-managed root via
+    // `normalize_app_managed_model_path` BEFORE opening it. That rejects `..` traversal and any absolute
+    // path outside the app data dir / HF hub cache, closing the arbitrary-file-read gap.
+    let image_ref = if is_image_caption {
+        let image_path = payload
+            .get("imagePath")
+            .or_else(|| payload.get("referencePath"))
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .ok_or_else(|| {
+                WorkerError::InvalidPayload(
+                    "Image caption requires a non-empty `imagePath` reference image.".to_owned(),
+                )
+            })?;
+        let safe_path = normalize_app_managed_model_path(
+            settings,
+            image_path,
+            "Image caption reference image",
+        )?;
+        Some(load_caption_image_ref(&safe_path)?)
+    } else {
+        None
+    };
     let guide = payload
         .get("guide")
         .and_then(Value::as_str)
@@ -362,14 +491,10 @@ pub(crate) async fn run_prompt_refine_job(
         .get("workflow")
         .and_then(Value::as_str)
         .map(str::to_owned);
-    // Magic-prompt expansion (sc-5997) drives the same TextLlm seam with Ideogram's caption system
-    // prompt instead of the rewrite rules; captions run longer than a one-line prompt, so allow more
-    // tokens and sample cooler for steadier JSON.
-    let is_magic = payload
-        .get("task")
-        .and_then(Value::as_str)
-        .map(|task| task.trim().eq_ignore_ascii_case("magic_prompt"))
-        .unwrap_or(false);
+    // A caption task (magic-prompt OR image-caption) drives the same TextLlm seam with Ideogram's
+    // caption system prompt instead of the rewrite rules; captions run longer than a one-line prompt,
+    // so allow more tokens and sample cooler for steadier JSON.
+    let is_caption_task = is_magic || is_image_caption;
     let model = payload
         .get("model")
         .and_then(Value::as_str)
@@ -382,20 +507,24 @@ pub(crate) async fn run_prompt_refine_job(
         .and_then(Value::as_u64)
         .and_then(|value| u32::try_from(value).ok())
         .filter(|value| *value > 0)
-        .unwrap_or(if is_magic { 2048 } else { 512 });
-    let temperature = if is_magic { 0.4 } else { 0.7 };
-    let work_message = if is_magic {
+        .unwrap_or(if is_caption_task { 2048 } else { 512 });
+    let temperature = if is_caption_task { 0.4 } else { 0.7 };
+    let work_message = if is_image_caption {
+        "Captioning image…"
+    } else if is_magic {
         "Expanding to a caption…"
     } else {
         "Refining prompt…"
     };
-    let done_message = if is_magic {
+    let done_message = if is_caption_task {
         "Caption ready."
     } else {
         "Prompt refined."
     };
 
-    let (system, user_message) = if is_magic {
+    let (system, user_message) = if is_image_caption {
+        build_image_caption_messages()
+    } else if is_magic {
         let aspect_ratio = payload
             .get("aspectRatio")
             .and_then(Value::as_str)
@@ -442,21 +571,47 @@ pub(crate) async fn run_prompt_refine_job(
             json!({ "jobId": job_id, "engine": engine_label }),
         );
 
-        // Resolve the native provider model-first (no provider id) — a JSON constraint steers
-        // resolution to a JSON-capable provider — and stream through the `core_llm::TextLlm` contract.
-        // One backend-agnostic path: the force-linked provider (mlx-llama on macOS, candle-llama on the
-        // Windows candle build) wins resolution. The provider renders the model's own chat template, so
-        // the worker supplies only the system + user turns (the product policy stays caller-side).
+        // Resolve the native provider model-first (no provider id) and stream through the
+        // `core_llm::TextLlm` contract. One backend-agnostic path: the force-linked provider
+        // (mlx-llama on macOS, candle-llama on the Windows candle build) wins resolution. The provider
+        // renders the model's own chat template, so the worker supplies only the system + user turns
+        // (the product policy stays caller-side).
+        //
+        // sc-8105 resolution note: `core-llm`'s `select`/`meets` filters on each provider's STATIC
+        // (weightless) descriptor BEFORE any `load` runs. `mlx-llama` statically advertises
+        // `supports_vision:false` + `[Constraint::Json]` — it loads a Qwen-VL (`qwen3_5`) snapshot and
+        // flips `supports_vision` on only at LOAD time (mlx-llm provider.rs:267). `mlx-joycaption`
+        // statically advertises vision but NO constraints and only `can_load`s LLaVA (not Qwen-VL).
+        // So NO provider statically satisfies BOTH vision AND Json for a Qwen-VL snapshot: demanding
+        // `vision:true` at resolution (what `ModelRequirements::from_request` derives from the image
+        // block) would make `select` return `Error::Unsupported` and never reach `load`. The image is
+        // what drives the multimodal generate path at GENERATE time (LlamaProvider::generate gates on
+        // its loaded `vision` tower), NOT what must be matched at resolution. So the image_caption path
+        // resolves on the JSON constraint ALONE (no vision filter): that selects `mlx-llama`, which then
+        // loads the Qwen-VL snapshot, flips to vision, and examines the `Content::Image`. (The other
+        // tasks carry no image, so their `from_request` reqs never set the vision filter anyway.)
         let text = {
             use gen_core::core_llm::{
-                load_for_model_with, Constraint, LoadSpec, Message, ModelRequirements, Sampling,
-                StreamEvent, TextLlmRequest,
+                load_for_model_with, Constraint, Content, LoadSpec, Message, ModelRequirements,
+                Role, Sampling, StreamEvent, TextLlmRequest,
             };
             let mut messages = Vec::with_capacity(2);
             if !system.trim().is_empty() {
                 messages.push(Message::system(system));
             }
-            messages.push(Message::user(prompt));
+            // The image-caption user turn carries the reference image (a `Content::Image` block)
+            // alongside the instruction text, so the loaded provider examines the picture at generate
+            // time. Every other task is a plain text user turn.
+            let carries_image = image_ref.is_some();
+            match image_ref {
+                Some(image) => messages.push(Message {
+                    role: Role::User,
+                    content: vec![Content::Image(image), Content::text(prompt)],
+                    thinking: None,
+                    tool_calls: Vec::new(),
+                }),
+                None => messages.push(Message::user(prompt)),
+            }
             let request = TextLlmRequest {
                 messages,
                 // The bespoke prompt-refine samplers were plain temperature/top-p (no repetition
@@ -468,20 +623,32 @@ pub(crate) async fn run_prompt_refine_job(
                 },
                 max_new_tokens,
                 seed: None,
-                // sc-6585: magic-prompt expansion must emit a structurally-valid JSON caption, so
-                // constrain its decode to the JSON grammar; the free-text rewrite is unconstrained.
-                // (On the candle lane this constraint now actually steers + masks the decode — the
-                // sc-7404 parity gain over the old `candle-gen-prompt-refine` path.)
-                constraint: is_magic.then_some(Constraint::Json),
+                // sc-6585 / sc-8105: a caption task (magic-prompt OR image-caption) must emit a
+                // structurally-valid JSON caption, so constrain its decode to the JSON grammar; the
+                // free-text rewrite is unconstrained. (On the candle lane this constraint actually
+                // steers + masks the decode — the sc-7404 parity gain over `candle-gen-prompt-refine`.)
+                constraint: is_caption_task.then_some(Constraint::Json),
                 cancel: blocking_cancel.clone(),
                 ..Default::default()
             };
+            // Build the resolution requirements WITHOUT the auto-vision `from_request` derives from an
+            // image block (see the resolution note above): a Qwen-VL snapshot has no statically
+            // vision+Json provider, so demanding vision here would fail `select` before `load`. Require
+            // only the request's output constraint (the JSON grammar for a caption task) — that selects
+            // the text+Json `mlx-llama`, which loads the Qwen-VL snapshot and flips to vision at load.
+            // (`carries_image` is asserted so the unused-binding lint stays satisfied and the intent —
+            // "an image is present, yet we deliberately do NOT set the vision filter" — is explicit.)
+            debug_assert!(carries_image == is_image_caption);
+            let mut reqs = ModelRequirements::default();
+            for constraint in request.constraint.iter().copied() {
+                reqs = reqs.with_constraint(constraint);
+            }
             let refiner = load_for_model_with(
                 &LoadSpec {
                     source: weights_dir.to_string_lossy().into_owned(),
                     quantize: None,
                 },
-                &ModelRequirements::from_request(&request),
+                &reqs,
             )
             .map_err(|error| WorkerError::Engine(format!("prompt-refine load failed: {error}")))?;
             emit_event(
@@ -550,8 +717,9 @@ pub(crate) async fn run_prompt_refine_job(
     let raw = blocking
         .await
         .map_err(|error| task_join_error("prompt refine task join", error))??;
-    // Magic-prompt isolates the JSON object (the web parses + validates it); refine cleans to prose.
-    let refined = if is_magic {
+    // A caption task isolates the JSON object (the web parses + validates it; image_caption validates
+    // here too); the free-text rewrite cleans to prose.
+    let refined = if is_caption_task {
         clean_json_output(&raw)
     } else {
         clean_refine_output(&raw)
@@ -560,6 +728,24 @@ pub(crate) async fn run_prompt_refine_job(
         return Err(WorkerError::Engine(
             "The prompt-refinement model returned an empty prompt.".to_owned(),
         ));
+    }
+    // sc-8105: the image-caption path validates the cleaned reply is a schema-valid Ideogram caption
+    // (carries `compositional_deconstruction`) and KEEPS the element bboxes (no stripping). A malformed
+    // reply is handled like an empty one — a clear engine error the caller surfaces (mirroring the
+    // magic-prompt malformed-output handling, where a non-caption reply also fails downstream).
+    if is_image_caption {
+        let parsed = serde_json::from_str::<Value>(&refined).map_err(|error| {
+            WorkerError::Engine(format!(
+                "The image-caption model returned output that is not valid JSON: {error}"
+            ))
+        })?;
+        if !sceneworks_core::ideogram_caption::is_caption(&parsed) {
+            return Err(WorkerError::Engine(
+                "The image-caption model returned JSON that is not a valid Ideogram caption \
+                 (missing the `compositional_deconstruction` section)."
+                    .to_owned(),
+            ));
+        }
     }
     update_job(
         api,
@@ -740,6 +926,432 @@ mod tests {
         );
         // Already-clean object passes through.
         assert_eq!(clean_json_output("{\"a\": [1, 2]}"), "{\"a\": [1, 2]}");
+    }
+
+    // ── sc-8105: image_caption task (reference image → Ideogram JSON caption, core_llm vision path) ──
+
+    #[test]
+    fn image_caption_asset_extracts_system_and_user_blocks() {
+        // The embedded `ideogram_image_caption_v1.txt` parses with the same bracketed-marker parser as
+        // the magic-prompt asset; the `[META]` block must not leak into the system body.
+        let system = magic_section_from(IMAGE_CAPTION_V1, "SYSTEM");
+        assert!(
+            system.contains("vision captioner"),
+            "system declares the image-examination role"
+        );
+        assert!(
+            system.contains("style_description"),
+            "system names the style block"
+        );
+        assert!(
+            system.contains("compositional_deconstruction"),
+            "system names the composition schema"
+        );
+        assert!(
+            system.contains("OBSERVE, DON'T POPULATE"),
+            "system carries the observe-don't-populate discipline"
+        );
+        // The bbox convention is pinned: `[y1, x1, y2, x2]`, 0–1000, and bboxes are KEPT (not stripped).
+        assert!(system.contains("[y1, x1, y2, x2]"));
+        assert!(system.contains("1000"));
+        assert!(
+            system.contains("KEEP these bboxes"),
+            "system pins that grounded bboxes are kept"
+        );
+        // Output is fenced so it survives markdown.
+        assert!(system.contains("```json"));
+        // The `[META]` thinking flag does not bleed into the system body.
+        assert!(!system.contains("thinking_mode"));
+
+        let user = magic_section_from(IMAGE_CAPTION_V1, "USER");
+        assert!(
+            user.to_lowercase().contains("reference image"),
+            "user turn instructs examining the reference image"
+        );
+        // A missing section yields empty (parser contract).
+        assert_eq!(magic_section_from(IMAGE_CAPTION_V1, "DOES_NOT_EXIST"), "");
+    }
+
+    #[test]
+    fn build_image_caption_messages_returns_system_and_user() {
+        let (system, user) = build_image_caption_messages();
+        assert!(!system.trim().is_empty(), "system block is non-empty");
+        assert!(system.contains("compositional_deconstruction"));
+        assert!(!user.trim().is_empty(), "user block is non-empty");
+        // The builder takes no aspect ratio / prompt placeholders (the image is the input).
+        assert!(!user.contains("{{"));
+    }
+
+    #[test]
+    fn clean_json_output_unwraps_a_fenced_image_caption_keeping_bboxes() {
+        // The image-caption asset emits a ```json fence; the SAME cleanup the magic-prompt path uses
+        // unwraps it. Element bboxes survive (they are NOT stripped on the worker side — sc-8105).
+        let fenced = "```json\n{\"high_level_description\": \"a red fox in snow\", \
+             \"compositional_deconstruction\": {\"background\": \"a snowy forest\", \
+             \"elements\": [{\"type\": \"obj\", \"bbox\": [100, 200, 800, 700], \"desc\": \"a red fox\"}]}}\n```";
+        let cleaned = clean_json_output(fenced);
+        let parsed: Value = serde_json::from_str(&cleaned).expect("cleaned reply is valid JSON");
+        assert!(
+            sceneworks_core::ideogram_caption::is_caption(&parsed),
+            "cleaned fenced reply is a schema-valid Ideogram caption"
+        );
+        // The element bbox is preserved (worker does not strip image-grounded boxes).
+        let bbox = parsed["compositional_deconstruction"]["elements"][0]
+            .get("bbox")
+            .expect("element keeps its bbox");
+        assert_eq!(bbox, &serde_json::json!([100, 200, 800, 700]));
+    }
+
+    #[test]
+    fn image_caption_malformed_output_fails_is_caption() {
+        // A non-caption JSON object (no `compositional_deconstruction`) is rejected — the worker's
+        // malformed-output guard, mirroring how the magic-prompt path's non-captions fail downstream.
+        let not_a_caption: Value = serde_json::from_str(&clean_json_output(
+            "```json\n{\"high_level_description\": \"x\"}\n```",
+        ))
+        .expect("valid JSON");
+        assert!(!sceneworks_core::ideogram_caption::is_caption(
+            &not_a_caption
+        ));
+
+        // Non-JSON / refusal text isolates nothing parseable as a caption.
+        let refusal = clean_json_output("I cannot describe this image.");
+        assert!(!serde_json::from_str::<Value>(&refusal)
+            .map(|v| sceneworks_core::ideogram_caption::is_caption(&v))
+            .unwrap_or(false));
+    }
+
+    #[test]
+    fn load_caption_image_ref_decodes_png_to_rgb8_image_ref() {
+        use gen_core::core_llm::ImageRef;
+        // Encode a tiny 2×3 RGB PNG to a temp file, then decode it through the image-caption loader and
+        // assert the `ImageRef` dimensions + RGB8 byte count (width·height·3). This exercises the
+        // `decode_image_any → to_rgb8 → ImageRef::new` path without weights.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("ref.png");
+        let mut img = image::RgbImage::new(2, 3);
+        for (i, px) in img.pixels_mut().enumerate() {
+            *px = image::Rgb([(i * 10) as u8, (i * 20) as u8, (i * 30) as u8]);
+        }
+        img.save(&path).expect("write png");
+
+        let image_ref: ImageRef = load_caption_image_ref(&path).expect("decode reference image");
+        assert_eq!(image_ref.width, 2);
+        assert_eq!(image_ref.height, 3);
+        assert_eq!(image_ref.pixels.len(), 2 * 3 * 3);
+    }
+
+    #[test]
+    fn image_caption_reference_path_confined_to_app_managed_root() {
+        // Issue 2 (path containment): the image_caption reference path is UNTRUSTED (job payload, over
+        // the LAN-remote API boundary), so it must resolve under an app-managed root before it is read.
+        // A path INSIDE `data_dir` is accepted; a sibling path OUTSIDE it, and a `..`-traversal escape,
+        // are rejected with a clear error — mirroring the JoyCaption `resolve_dataset_item_path` guard.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut settings = crate::Settings::from_env();
+        settings.data_dir = dir.path().to_path_buf();
+
+        // In-root: accepted (the on-disk file need not exist — confinement is path-structural).
+        let inside = dir.path().join("projects").join("ref.png");
+        let resolved = normalize_app_managed_model_path(
+            &settings,
+            &inside.to_string_lossy(),
+            "Image caption reference image",
+        )
+        .expect("an in-root reference path is accepted");
+        assert!(resolved.starts_with(dir.path()), "stays under the data dir");
+
+        // Out-of-root absolute path: rejected.
+        let outside_dir = tempfile::tempdir().expect("tempdir2");
+        let outside = outside_dir.path().join("secret.png");
+        let err = normalize_app_managed_model_path(
+            &settings,
+            &outside.to_string_lossy(),
+            "Image caption reference image",
+        )
+        .expect_err("an out-of-root reference path is rejected");
+        assert!(
+            err.to_string().contains("Image caption reference image"),
+            "{err}"
+        );
+
+        // `..` traversal escaping the data dir: rejected.
+        let traversal = format!("{}/../escape.png", dir.path().display());
+        let err = normalize_app_managed_model_path(
+            &settings,
+            &traversal,
+            "Image caption reference image",
+        )
+        .expect_err("a `..`-traversal reference path is rejected");
+        assert!(
+            err.to_string().contains("Image caption reference image")
+                || err.to_string().contains("Unsafe absolute path"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn image_caption_request_carries_image_for_generate_but_resolves_json_only() {
+        // Assemble the same request the job's blocking task builds for an image_caption run and assert
+        // the contract surface: the user turn carries the reference image (so the LOADED provider's
+        // vision tower reads it at GENERATE time) and a JSON constraint. CRUCIALLY, resolution must NOT
+        // demand vision — `ModelRequirements::from_request` WOULD set `vision:true` (which makes
+        // core-llm `select` fail for a Qwen-VL snapshot, since no provider statically advertises both
+        // vision and Json), so the worker instead builds requirements from the JSON constraint ALONE.
+        // This test pins the worker's resolution-requirements construction (the actual fix), and the
+        // contrast against `from_request`.
+        use gen_core::core_llm::{
+            Constraint, Content, ImageRef, Message, ModelRequirements, Role, Sampling,
+            TextLlmRequest,
+        };
+
+        let (system, user) = build_image_caption_messages();
+        let image = ImageRef::new(2, 2, vec![0u8; 12]).expect("image ref");
+        let request = TextLlmRequest {
+            messages: vec![
+                Message::system(system),
+                Message {
+                    role: Role::User,
+                    content: vec![Content::Image(image), Content::text(user)],
+                    thinking: None,
+                    tool_calls: Vec::new(),
+                },
+            ],
+            sampling: Sampling {
+                temperature: 0.4,
+                top_p: 0.9,
+                ..Sampling::default()
+            },
+            max_new_tokens: 2048,
+            seed: None,
+            constraint: Some(Constraint::Json),
+            ..Default::default()
+        };
+
+        assert!(request.has_image(), "request carries the reference image");
+
+        // `from_request` over-constrains: it derives `vision:true` from the image block. The worker must
+        // NOT use this for the image_caption resolution (it would make `select` return Unsupported for a
+        // Qwen-VL snapshot — see the weightless resolution tests below).
+        let auto = ModelRequirements::from_request(&request);
+        assert!(
+            auto.vision,
+            "from_request over-constrains by demanding vision (the bug the fix avoids)"
+        );
+
+        // The worker's resolution requirements: the request's output constraint ONLY, no vision filter.
+        let mut reqs = ModelRequirements::default();
+        for constraint in request.constraint.iter().copied() {
+            reqs = reqs.with_constraint(constraint);
+        }
+        assert!(
+            !reqs.vision,
+            "image_caption resolution must NOT demand vision (it is acquired at LOAD time)"
+        );
+        assert!(
+            reqs.constraints.contains(&Constraint::Json),
+            "image_caption resolution still demands JSON-constrained decoding"
+        );
+    }
+
+    /// Weightless resolution proof (the Issue-1 settler). With a Qwen-VL (`qwen3_5`) snapshot
+    /// `config.json` on disk and the real `mlx-llm` inventory linked, demanding `vision:true` +
+    /// `[Json]` (what `ModelRequirements::from_request` derives from an image request) makes core-llm's
+    /// model-first `select` FAIL with `Error::Unsupported` — no provider statically advertises BOTH
+    /// vision and Json for a Qwen-VL snapshot (`mlx-llama` is text+Json until load; `mlx-joycaption` is
+    /// vision-but-no-constraints + only serves LLaVA). This is the reviewer's BLOCKER, reproduced.
+    /// macOS-only (the `mlx-llm` providers link there); no weights — resolution reads only `config.json`.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn vision_plus_json_resolution_fails_for_qwen_vl_snapshot() {
+        use gen_core::core_llm::{load_for_model_with, Constraint, LoadSpec, ModelRequirements};
+        use mlx_llm as _; // force-link the providers into core-llm's inventory
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        write_qwen_vl_config(dir.path());
+
+        // Demand vision + Json (the `from_request` shape for an image+Json request).
+        let reqs = ModelRequirements::default()
+            .with_vision()
+            .with_constraint(Constraint::Json);
+        let result = load_for_model_with(
+            &LoadSpec {
+                source: dir.path().to_string_lossy().into_owned(),
+                quantize: None,
+            },
+            &reqs,
+        );
+        let err = result
+            .err()
+            .expect("vision+Json must not resolve for a Qwen-VL snapshot");
+        let msg = err.to_string();
+        // The failure is a capability/resolution gap (Unsupported), surfaced BEFORE any weight load —
+        // not a missing-weights load error. The message is core-llm's `unmet_caps_msg`.
+        assert!(
+            msg.contains("loadable, but no linked provider meets") || msg.contains("unsupported"),
+            "expected an Unsupported capability-resolution error, got: {msg}"
+        );
+    }
+
+    /// Weightless resolution proof (the Issue-1 FIX). The SAME Qwen-VL snapshot, resolved with the
+    /// worker's actual image_caption requirements — the JSON constraint ALONE, no vision filter —
+    /// passes core-llm's `select` (it picks the text+Json `mlx-llama`, which `can_load`s a Qwen-VL
+    /// wrapper). Resolution therefore reaches `load`; with no weight shards on disk the load fails, but
+    /// with a `Load`/backend error (missing tensors), NOT the `Unsupported` resolution error above —
+    /// proving the provider WAS selected. That is exactly what the fixed worker path does.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn json_only_resolution_selects_a_provider_for_qwen_vl_snapshot() {
+        use gen_core::core_llm::{
+            load_for_model_with, textllms, Constraint, LoadSpec, ModelRequirements,
+        };
+        use mlx_llm as _; // force-link the providers into core-llm's inventory
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        write_qwen_vl_config(dir.path());
+
+        // The worker's image_caption resolution requirements: JSON constraint only, no vision filter.
+        let reqs = ModelRequirements::default().with_constraint(Constraint::Json);
+        let spec = LoadSpec {
+            source: dir.path().to_string_lossy().into_owned(),
+            quantize: None,
+        };
+        let err = load_for_model_with(&spec, &reqs)
+            .err()
+            .expect("no weights on disk, so the LOAD fails after the provider is selected");
+        let msg = err.to_string();
+        // The provider WAS selected (resolution passed): the error is a weight-load failure, not the
+        // `Unsupported` capability-resolution error. So `select`/`meets` admitted a provider for the
+        // Qwen-VL snapshot under the JSON-only requirements — the fix routes here.
+        assert!(
+            !msg.contains("no linked provider meets")
+                && !msg.contains("no registered provider can serve"),
+            "JSON-only requirements must resolve a provider (then fail on missing weights), got: {msg}"
+        );
+
+        // Strengthen the proof: the SPECIFIC provider admitted under JSON-only requirements for this
+        // Qwen-VL snapshot must be `mlx-llama` — the one whose `generate` reads a `Content::Image` once
+        // its Qwen-VL tower is loaded. `load_for_model_with` only returns the loaded provider (impossible
+        // here without weights), so replicate core-llm's public selection predicate over the live
+        // registry: architecture `can_load` AND the capability filter (vision/constraints) the resolver
+        // applies. A future regression that resolved the snapshot to a DIFFERENT Json provider would
+        // surface here, not slip past the generic "some provider resolved" check above.
+        let viable: Vec<String> = textllms()
+            .filter(|r| (r.can_load)(&spec))
+            .filter(|r| {
+                let caps = (r.descriptor)().capabilities;
+                (!reqs.vision || caps.supports_vision)
+                    && reqs
+                        .constraints
+                        .iter()
+                        .all(|c| caps.supports_constraint(*c))
+            })
+            .map(|r| (r.descriptor)().id)
+            .collect();
+        assert!(
+            viable.iter().any(|id| id == "mlx-llama"),
+            "JSON-only resolution must admit `mlx-llama` (the image-capable Json provider) for a Qwen-VL \
+             snapshot; viable providers were: {viable:?}"
+        );
+    }
+
+    /// A minimal Qwen3.6 (`qwen3_5`) VLM-wrapper `config.json` — enough for the weightless `can_load`
+    /// probes (`Architecture::from_config` dispatches on `model_type`/`architectures`; the
+    /// `vision_config` marks it a VLM wrapper). No weight shards / tokenizer: resolution reads only this
+    /// file, and a subsequent `load` is expected to fail on the missing tensors.
+    #[cfg(target_os = "macos")]
+    fn write_qwen_vl_config(dir: &Path) {
+        std::fs::write(
+            dir.join("config.json"),
+            br#"{"architectures":["Qwen3_5ForConditionalGeneration"],
+                "model_type":"qwen3_5",
+                "text_config":{"model_type":"qwen3_5_text"},
+                "vision_config":{"model_type":"qwen3_5","depth":27}}"#,
+        )
+        .expect("write qwen-vl config.json");
+    }
+
+    /// Real-weight image-caption smoke (sc-8105 → validated under sc-8113): examines a reference image
+    /// and emits an Ideogram JSON caption through the unified mlx-llm VISION engine —
+    /// `gen_core::core_llm::load_for_model_with` resolves `mlx-llama` on a Qwen-VL snapshot. The pick is
+    /// steered by the JSON constraint ALONE (the request DOES carry the image, but resolution must NOT
+    /// demand vision: no provider statically advertises both vision and Json for a Qwen-VL snapshot, so
+    /// `mlx-llama` is selected text+Json and flips to vision only at LOAD time — see the resolution note
+    /// on the blocking task). The reqs are therefore built the SAME way production builds them — the
+    /// request's output constraint only, NOT `ModelRequirements::from_request` (which would over-derive
+    /// `vision:true` from the image block and fail `select` with `Error::Unsupported` before any load,
+    /// per `vision_plus_json_resolution_fails_for_qwen_vl_snapshot`). The cleaned reply must pass
+    /// `is_caption` with element bboxes kept. `#[ignore]` — the weights live outside CI; run on a Mac
+    /// with a vision model staged and pointed at by VISION_CAPTION_SNAPSHOT and a reference image at
+    /// IMAGE_CAPTION_REF:
+    ///   VISION_CAPTION_SNAPSHOT=<snapshot dir> IMAGE_CAPTION_REF=<image path> \
+    ///   cargo test -p sceneworks-worker --lib -- --ignored image_caption_examines_reference --nocapture
+    #[cfg(target_os = "macos")]
+    #[test]
+    #[ignore = "real-weight (sc-8113): needs a vision model snapshot + reference image; set VISION_CAPTION_SNAPSHOT + IMAGE_CAPTION_REF"]
+    fn image_caption_examines_reference_image() {
+        use gen_core::core_llm::{
+            load_for_model_with, Constraint, Content, ImageRef, LoadSpec, Message,
+            ModelRequirements, Role, Sampling, StreamEvent, TextLlmRequest,
+        };
+        use mlx_llm as _;
+
+        let snapshot = std::env::var("VISION_CAPTION_SNAPSHOT")
+            .expect("set VISION_CAPTION_SNAPSHOT to a vision model snapshot dir");
+        let ref_path = std::env::var("IMAGE_CAPTION_REF")
+            .expect("set IMAGE_CAPTION_REF to a reference image path");
+
+        let image =
+            load_caption_image_ref(std::path::Path::new(&ref_path)).expect("decode ref image");
+        let (system, user) = build_image_caption_messages();
+        let request = TextLlmRequest {
+            messages: vec![
+                Message::system(system),
+                Message {
+                    role: Role::User,
+                    content: vec![Content::Image(image), Content::text(user)],
+                    thinking: None,
+                    tool_calls: Vec::new(),
+                },
+            ],
+            sampling: Sampling {
+                temperature: 0.4,
+                top_p: 0.9,
+                ..Sampling::default()
+            },
+            max_new_tokens: 2048,
+            seed: None,
+            constraint: Some(Constraint::Json),
+            ..Default::default()
+        };
+        let _ = ImageRef::new(1, 1, vec![0u8; 3]); // touch the type so the import is load-bearing in all cfgs
+                                                   // Build the resolution requirements the SAME way the production image_caption path does — the
+                                                   // request's output constraint ALONE, no vision filter (NOT `ModelRequirements::from_request`,
+                                                   // which derives `vision:true` from the image block and would fail `select` on a Qwen-VL snapshot
+                                                   // before any load). This exercises the real production resolution path the sc-8113 validator runs.
+        let mut reqs = ModelRequirements::default();
+        for constraint in request.constraint.iter().copied() {
+            reqs = reqs.with_constraint(constraint);
+        }
+        let captioner = load_for_model_with(
+            &LoadSpec {
+                source: snapshot,
+                quantize: None,
+            },
+            &reqs,
+        )
+        .expect("load a vision provider via core-llm model-first JSON-only resolution");
+
+        let mut sink = |_event: StreamEvent| {};
+        let output = captioner.generate(&request, &mut sink).expect("generate");
+        let json = clean_json_output(&output.text);
+        eprintln!("image-caption JSON:\n{json}");
+
+        let parsed: Value = serde_json::from_str(&json).expect("a valid JSON object");
+        assert!(
+            sceneworks_core::ideogram_caption::is_caption(&parsed),
+            "reply is a schema-valid Ideogram caption"
+        );
     }
 
     /// Real-weight magic-prompt smoke (sc-7158): expands a plain idea into a JSON caption through the
