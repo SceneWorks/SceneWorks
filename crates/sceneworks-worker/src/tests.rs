@@ -750,6 +750,106 @@ fn model_table_rows_resolve_and_flags_match_descriptor() {
     }
 }
 
+/// sc-7875 (SD3.5 S6, MLX-path validation boundary): the three SD3.5 builtin-manifest entries gate
+/// correctly at the catalog layer — `macOnly: true` (picker hidden off-Mac), `capabilities ==
+/// ["text_to_image"]` only (edit/reference rejected), the family `sd3`, the gated stabilityai/* download
+/// with `gated: true` + `credentialHost: huggingface.co`, and the per-tier `mlx.minMemoryGb`
+/// (Large/Turbo 64, Medium 16) that drives the memory-eligibility gate. Parses the embedded builtin
+/// manifest (the exact bytes shipped) so manifest drift on any of these eligibility levers fails CI
+/// without a real download. (The descriptor-derived guidance/negative/backend surface is covered by
+/// `model_table_rows_resolve_and_flags_match_descriptor`; the credential-host derivation by the
+/// rust-api `gated_credential_tests`; this is the catalog-eligibility counterpart.)
+#[test]
+fn sd3_5_manifest_entries_gate_correctly() {
+    use sceneworks_core::builtin_manifests::BUILTIN_MANIFESTS;
+    use sceneworks_core::jsonc::strip_jsonc_comments;
+
+    let raw = BUILTIN_MANIFESTS
+        .iter()
+        .find(|(name, _)| *name == "builtin.models.jsonc")
+        .map(|(_, contents)| *contents)
+        .expect("builtin.models.jsonc present");
+    let manifest: Value =
+        serde_json::from_str(&strip_jsonc_comments(raw)).expect("builtin models parses as JSON");
+    let models = manifest
+        .get("models")
+        .and_then(Value::as_array)
+        .expect("models array");
+
+    // (id, expected minMemoryGb) — Large/Turbo flagship-tier 64, Medium light-tier 16.
+    let expected: &[(&str, u64)] = &[
+        ("sd3_5_large", 64),
+        ("sd3_5_large_turbo", 64),
+        ("sd3_5_medium", 16),
+    ];
+    for (id, min_mem) in expected {
+        let entry = models
+            .iter()
+            .find(|m| m.get("id").and_then(Value::as_str) == Some(id))
+            .unwrap_or_else(|| panic!("{id} present in builtin.models.jsonc"));
+
+        assert_eq!(
+            entry.get("family").and_then(Value::as_str),
+            Some("sd3"),
+            "{id} family"
+        );
+        // Mac-only: the native MLX SD3.5 port has no off-Mac/candle lane (epic 7982), so the picker is
+        // hidden off-Mac.
+        assert_eq!(
+            entry.get("macOnly").and_then(Value::as_bool),
+            Some(true),
+            "{id} macOnly"
+        );
+        // Capability gate: text_to_image ONLY — edit/reference are rejected (no img2img/inpaint path).
+        let caps: Vec<&str> = entry
+            .get("capabilities")
+            .and_then(Value::as_array)
+            .map(|a| a.iter().filter_map(Value::as_str).collect())
+            .unwrap_or_default();
+        assert_eq!(caps, vec!["text_to_image"], "{id} capabilities");
+        // Gated stabilityai/* download (Stability AI Community License); HF credential host.
+        assert_eq!(
+            entry.get("gated").and_then(Value::as_bool),
+            Some(true),
+            "{id} gated"
+        );
+        assert_eq!(
+            entry.get("credentialHost").and_then(Value::as_str),
+            Some("huggingface.co"),
+            "{id} credentialHost"
+        );
+        let repo = entry
+            .get("downloads")
+            .and_then(Value::as_array)
+            .and_then(|d| d.first())
+            .and_then(|d| d.get("repo"))
+            .and_then(Value::as_str)
+            .unwrap_or("");
+        assert!(
+            repo.starts_with("stabilityai/stable-diffusion-3.5"),
+            "{id} downloads from the gated stabilityai/* repo (no re-host), got {repo:?}"
+        );
+        // Per-tier memory-eligibility gate (drives the Studio admit/hide-by-available-memory).
+        assert_eq!(
+            entry
+                .get("mlx")
+                .and_then(|m| m.get("minMemoryGb"))
+                .and_then(Value::as_u64),
+            Some(*min_mem),
+            "{id} mlx.minMemoryGb"
+        );
+        // sd3 LoRA family declared (S5): the picker offers ONLY sd3-family LoRAs (an empty list would
+        // match every LoRA, sc-1927).
+        let lora_families: Vec<&str> = entry
+            .get("loraCompatibility")
+            .and_then(|c| c.get("families"))
+            .and_then(Value::as_array)
+            .map(|a| a.iter().filter_map(Value::as_str).collect())
+            .unwrap_or_default();
+        assert_eq!(lora_families, vec!["sd3"], "{id} loraCompatibility.families");
+    }
+}
+
 /// sc-3513: the worker's `JobType::ImageEdit` dispatch arm delegates to
 /// `run_image_generate_job` — the engine keys edits on payload model+mode, not job
 /// type. Feeding an `image_edit`-typed job into the handler proves it reaches the image

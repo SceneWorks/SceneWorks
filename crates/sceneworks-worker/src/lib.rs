@@ -140,6 +140,13 @@ mod flux2_dev_gpu_smoke;
 // the worker-lane validation (the crate links + drives the engine), not just the mlx-gen-krea crate.
 #[cfg(all(test, target_os = "macos"))]
 mod krea_turbo_mlx_smoke;
+// Real-weight MLX smokes for the SD3.5 worker lane (epic 7841 S6 sc-7875 — the MLX-path validation
+// boundary). Test-only + macOS-only; drive `gen_core::load("sd3_5_large" | "sd3_5_large_turbo" |
+// "sd3_5_medium")` against the gated stabilityai/* diffusers snapshots (the worker crate links + drives
+// all three registered generators + the LoRA `with_adapters` apply seam), not just mlx-gen-sd3 in
+// isolation.
+#[cfg(all(test, target_os = "macos"))]
+mod sd3_5_mlx_smoke;
 // The DWPose skeleton rasterizer is consumed only by the macOS Z-Image strict-pose
 // control path; on Mac AND the off-Mac candle DWPose lane (sc-5496) it backs the
 // `pose_jobs` skeleton render; on a candle-disabled box off Mac it still builds +
