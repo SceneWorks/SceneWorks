@@ -1195,7 +1195,9 @@ mod tests {
     #[cfg(target_os = "macos")]
     #[test]
     fn json_only_resolution_selects_a_provider_for_qwen_vl_snapshot() {
-        use gen_core::core_llm::{load_for_model_with, Constraint, LoadSpec, ModelRequirements};
+        use gen_core::core_llm::{
+            load_for_model_with, textllms, Constraint, LoadSpec, ModelRequirements,
+        };
         use mlx_llm as _; // force-link the providers into core-llm's inventory
 
         let dir = tempfile::tempdir().expect("tempdir");
@@ -1203,22 +1205,43 @@ mod tests {
 
         // The worker's image_caption resolution requirements: JSON constraint only, no vision filter.
         let reqs = ModelRequirements::default().with_constraint(Constraint::Json);
-        let err = load_for_model_with(
-            &LoadSpec {
-                source: dir.path().to_string_lossy().into_owned(),
-                quantize: None,
-            },
-            &reqs,
-        )
-        .err()
-        .expect("no weights on disk, so the LOAD fails after the provider is selected");
+        let spec = LoadSpec {
+            source: dir.path().to_string_lossy().into_owned(),
+            quantize: None,
+        };
+        let err = load_for_model_with(&spec, &reqs)
+            .err()
+            .expect("no weights on disk, so the LOAD fails after the provider is selected");
         let msg = err.to_string();
         // The provider WAS selected (resolution passed): the error is a weight-load failure, not the
-        // `Unsupported` capability-resolution error. So `select`/`meets` admitted `mlx-llama` for the
+        // `Unsupported` capability-resolution error. So `select`/`meets` admitted a provider for the
         // Qwen-VL snapshot under the JSON-only requirements — the fix routes here.
         assert!(
-            !msg.contains("no linked provider meets") && !msg.contains("no registered provider can serve"),
+            !msg.contains("no linked provider meets")
+                && !msg.contains("no registered provider can serve"),
             "JSON-only requirements must resolve a provider (then fail on missing weights), got: {msg}"
+        );
+
+        // Strengthen the proof: the SPECIFIC provider admitted under JSON-only requirements for this
+        // Qwen-VL snapshot must be `mlx-llama` — the one whose `generate` reads a `Content::Image` once
+        // its Qwen-VL tower is loaded. `load_for_model_with` only returns the loaded provider (impossible
+        // here without weights), so replicate core-llm's public selection predicate over the live
+        // registry: architecture `can_load` AND the capability filter (vision/constraints) the resolver
+        // applies. A future regression that resolved the snapshot to a DIFFERENT Json provider would
+        // surface here, not slip past the generic "some provider resolved" check above.
+        let viable: Vec<String> = textllms()
+            .filter(|r| (r.can_load)(&spec))
+            .filter(|r| {
+                let caps = (r.descriptor)().capabilities;
+                (!reqs.vision || caps.supports_vision)
+                    && reqs.constraints.iter().all(|c| caps.supports_constraint(*c))
+            })
+            .map(|r| (r.descriptor)().id)
+            .collect();
+        assert!(
+            viable.iter().any(|id| id == "mlx-llama"),
+            "JSON-only resolution must admit `mlx-llama` (the image-capable Json provider) for a Qwen-VL \
+             snapshot; viable providers were: {viable:?}"
         );
     }
 
@@ -1240,11 +1263,17 @@ mod tests {
 
     /// Real-weight image-caption smoke (sc-8105 → validated under sc-8113): examines a reference image
     /// and emits an Ideogram JSON caption through the unified mlx-llm VISION engine —
-    /// `gen_core::core_llm::load_for_model_with` resolves `mlx-llama` on a Qwen-VL snapshot (the image
-    /// block + JSON constraint steer the model-first pick to a vision, JSON-capable provider) — and the
-    /// cleaned reply must pass `is_caption` with element bboxes kept. `#[ignore]` — the weights live
-    /// outside CI; run on a Mac with a vision model staged and pointed at by VISION_CAPTION_SNAPSHOT and
-    /// a reference image at IMAGE_CAPTION_REF:
+    /// `gen_core::core_llm::load_for_model_with` resolves `mlx-llama` on a Qwen-VL snapshot. The pick is
+    /// steered by the JSON constraint ALONE (the request DOES carry the image, but resolution must NOT
+    /// demand vision: no provider statically advertises both vision and Json for a Qwen-VL snapshot, so
+    /// `mlx-llama` is selected text+Json and flips to vision only at LOAD time — see the resolution note
+    /// on the blocking task). The reqs are therefore built the SAME way production builds them — the
+    /// request's output constraint only, NOT `ModelRequirements::from_request` (which would over-derive
+    /// `vision:true` from the image block and fail `select` with `Error::Unsupported` before any load,
+    /// per `vision_plus_json_resolution_fails_for_qwen_vl_snapshot`). The cleaned reply must pass
+    /// `is_caption` with element bboxes kept. `#[ignore]` — the weights live outside CI; run on a Mac
+    /// with a vision model staged and pointed at by VISION_CAPTION_SNAPSHOT and a reference image at
+    /// IMAGE_CAPTION_REF:
     ///   VISION_CAPTION_SNAPSHOT=<snapshot dir> IMAGE_CAPTION_REF=<image path> \
     ///   cargo test -p sceneworks-worker --lib -- --ignored image_caption_examines_reference --nocapture
     #[cfg(target_os = "macos")]
@@ -1285,14 +1314,22 @@ mod tests {
             ..Default::default()
         };
         let _ = ImageRef::new(1, 1, vec![0u8; 3]); // touch the type so the import is load-bearing in all cfgs
+        // Build the resolution requirements the SAME way the production image_caption path does — the
+        // request's output constraint ALONE, no vision filter (NOT `ModelRequirements::from_request`,
+        // which derives `vision:true` from the image block and would fail `select` on a Qwen-VL snapshot
+        // before any load). This exercises the real production resolution path the sc-8113 validator runs.
+        let mut reqs = ModelRequirements::default();
+        for constraint in request.constraint.iter().copied() {
+            reqs = reqs.with_constraint(constraint);
+        }
         let captioner = load_for_model_with(
             &LoadSpec {
                 source: snapshot,
                 quantize: None,
             },
-            &ModelRequirements::from_request(&request),
+            &reqs,
         )
-        .expect("load a vision provider via core-llm model-first resolution");
+        .expect("load a vision provider via core-llm model-first JSON-only resolution");
 
         let mut sink = |_event: StreamEvent| {};
         let output = captioner.generate(&request, &mut sink).expect("generate");
