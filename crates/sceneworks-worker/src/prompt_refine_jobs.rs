@@ -591,8 +591,8 @@ pub(crate) async fn run_prompt_refine_job(
         // tasks carry no image, so their `from_request` reqs never set the vision filter anyway.)
         let text = {
             use gen_core::core_llm::{
-                load_for_model_with, Constraint, Content, LoadSpec, Message, ModelRequirements, Role,
-                Sampling, StreamEvent, TextLlmRequest,
+                load_for_model_with, Constraint, Content, LoadSpec, Message, ModelRequirements,
+                Role, Sampling, StreamEvent, TextLlmRequest,
             };
             let mut messages = Vec::with_capacity(2);
             if !system.trim().is_empty() {
@@ -1005,10 +1005,13 @@ mod tests {
     fn image_caption_malformed_output_fails_is_caption() {
         // A non-caption JSON object (no `compositional_deconstruction`) is rejected — the worker's
         // malformed-output guard, mirroring how the magic-prompt path's non-captions fail downstream.
-        let not_a_caption: Value =
-            serde_json::from_str(&clean_json_output("```json\n{\"high_level_description\": \"x\"}\n```"))
-                .expect("valid JSON");
-        assert!(!sceneworks_core::ideogram_caption::is_caption(&not_a_caption));
+        let not_a_caption: Value = serde_json::from_str(&clean_json_output(
+            "```json\n{\"high_level_description\": \"x\"}\n```",
+        ))
+        .expect("valid JSON");
+        assert!(!sceneworks_core::ideogram_caption::is_caption(
+            &not_a_caption
+        ));
 
         // Non-JSON / refusal text isolates nothing parseable as a caption.
         let refusal = clean_json_output("I cannot describe this image.");
@@ -1097,7 +1100,8 @@ mod tests {
         // This test pins the worker's resolution-requirements construction (the actual fix), and the
         // contrast against `from_request`.
         use gen_core::core_llm::{
-            Constraint, Content, ImageRef, Message, ModelRequirements, Role, Sampling, TextLlmRequest,
+            Constraint, Content, ImageRef, Message, ModelRequirements, Role, Sampling,
+            TextLlmRequest,
         };
 
         let (system, user) = build_image_caption_messages();
@@ -1176,7 +1180,9 @@ mod tests {
             },
             &reqs,
         );
-        let err = result.err().expect("vision+Json must not resolve for a Qwen-VL snapshot");
+        let err = result
+            .err()
+            .expect("vision+Json must not resolve for a Qwen-VL snapshot");
         let msg = err.to_string();
         // The failure is a capability/resolution gap (Unsupported), surfaced BEFORE any weight load —
         // not a missing-weights load error. The message is core-llm's `unmet_caps_msg`.
@@ -1234,7 +1240,10 @@ mod tests {
             .filter(|r| {
                 let caps = (r.descriptor)().capabilities;
                 (!reqs.vision || caps.supports_vision)
-                    && reqs.constraints.iter().all(|c| caps.supports_constraint(*c))
+                    && reqs
+                        .constraints
+                        .iter()
+                        .all(|c| caps.supports_constraint(*c))
             })
             .map(|r| (r.descriptor)().id)
             .collect();
@@ -1281,8 +1290,8 @@ mod tests {
     #[ignore = "real-weight (sc-8113): needs a vision model snapshot + reference image; set VISION_CAPTION_SNAPSHOT + IMAGE_CAPTION_REF"]
     fn image_caption_examines_reference_image() {
         use gen_core::core_llm::{
-            load_for_model_with, Constraint, Content, ImageRef, LoadSpec, Message, ModelRequirements,
-            Role, Sampling, StreamEvent, TextLlmRequest,
+            load_for_model_with, Constraint, Content, ImageRef, LoadSpec, Message,
+            ModelRequirements, Role, Sampling, StreamEvent, TextLlmRequest,
         };
         use mlx_llm as _;
 
@@ -1291,7 +1300,8 @@ mod tests {
         let ref_path = std::env::var("IMAGE_CAPTION_REF")
             .expect("set IMAGE_CAPTION_REF to a reference image path");
 
-        let image = load_caption_image_ref(std::path::Path::new(&ref_path)).expect("decode ref image");
+        let image =
+            load_caption_image_ref(std::path::Path::new(&ref_path)).expect("decode ref image");
         let (system, user) = build_image_caption_messages();
         let request = TextLlmRequest {
             messages: vec![
@@ -1314,10 +1324,10 @@ mod tests {
             ..Default::default()
         };
         let _ = ImageRef::new(1, 1, vec![0u8; 3]); // touch the type so the import is load-bearing in all cfgs
-        // Build the resolution requirements the SAME way the production image_caption path does — the
-        // request's output constraint ALONE, no vision filter (NOT `ModelRequirements::from_request`,
-        // which derives `vision:true` from the image block and would fail `select` on a Qwen-VL snapshot
-        // before any load). This exercises the real production resolution path the sc-8113 validator runs.
+                                                   // Build the resolution requirements the SAME way the production image_caption path does — the
+                                                   // request's output constraint ALONE, no vision filter (NOT `ModelRequirements::from_request`,
+                                                   // which derives `vision:true` from the image block and would fail `select` on a Qwen-VL snapshot
+                                                   // before any load). This exercises the real production resolution path the sc-8113 validator runs.
         let mut reqs = ModelRequirements::default();
         for constraint in request.constraint.iter().copied() {
             reqs = reqs.with_constraint(constraint);
