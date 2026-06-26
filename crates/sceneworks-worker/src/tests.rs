@@ -895,9 +895,10 @@ async fn image_edit_job_dispatches_to_image_generate_handler() {
     }))
     .expect("image_edit job snapshot deserializes");
 
-    let error = super::image_jobs::run_image_generate_job(&api, &settings, &job)
-        .await
-        .expect_err("missing projectId is rejected by the image handler");
+    let error =
+        super::image_jobs::run_image_generate_job(&api, &settings, &reqwest::Client::new(), &job)
+            .await
+            .expect_err("missing projectId is rejected by the image handler");
     assert!(
         matches!(&error, WorkerError::InvalidPayload(message) if message.contains("projectId")),
         "expected a projectId payload error from the image handler, got {error:?}",

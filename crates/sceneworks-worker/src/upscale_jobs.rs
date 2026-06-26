@@ -566,6 +566,43 @@ async fn run_seedvr2_upscale(
     .await
 }
 
+/// Upscale one in-memory RGB image with the selected engine, returning the upscaled image.
+/// Shared by the standalone `image_upscale` job and the Image Studio inline "Upscale" toggle
+/// (sc-8091): Real-ESRGAN runs via the cached `ort` session on a blocking thread; SeedVR2 runs
+/// in-process through the registry generator. `manifest_entry` may be `Value::Null` (the inline
+/// path carries the *generation* model's manifest, not an upscaler one) — the weight resolvers
+/// then fall back to the default HF repos. `engine_id` is the canonical id (`seedvr2`, else
+/// Real-ESRGAN); the caller normalises before passing it in.
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn upscale_image_in_memory(
+    api: &ApiClient,
+    settings: &Settings,
+    http_client: &reqwest::Client,
+    job: &JobSnapshot,
+    manifest_entry: &Value,
+    engine_id: &str,
+    factor: u8,
+    softness: f32,
+    seed: u64,
+    source: RgbImage,
+    cancel: &CancelFlag,
+) -> WorkerResult<RgbImage> {
+    match engine_id {
+        "seedvr2" => {
+            let dir =
+                ensure_seedvr2_checkpoint(api, settings, http_client, job, manifest_entry).await?;
+            run_seedvr2_upscale(dir, source, factor, softness, seed, cancel.clone()).await
+        }
+        _ => {
+            let onnx = ensure_onnx(api, settings, http_client, job, factor, manifest_entry).await?;
+            let cancel = cancel.clone();
+            tokio::task::spawn_blocking(move || upscale_blocking(onnx, factor, source, cancel))
+                .await
+                .map_err(|error| task_join_error("inline upscale", error))?
+        }
+    }
+}
+
 async fn run_upscale_with_heartbeat<R>(
     api: &ApiClient,
     settings: &Settings,

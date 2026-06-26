@@ -306,6 +306,7 @@ use crate::engines::{mlx_model, ResolvedModel};
 pub(crate) async fn run_image_generate_job(
     api: &ApiClient,
     settings: &Settings,
+    http_client: &reqwest::Client,
     job: &JobSnapshot,
 ) -> WorkerResult<()> {
     let request = ImageRequest::from_payload(&job.payload);
@@ -319,6 +320,21 @@ pub(crate) async fn run_image_generate_job(
     let project_path = PathBuf::from(project.path);
     tokio::fs::create_dir_all(project_path.join("assets").join("images")).await?;
 
+    // sc-8091: when the Image Studio "Upscale" toggle is on, each generated image also yields a
+    // second "(Nx upscaled)" asset, so the generation set expects twice as many images. The inline
+    // upscale post-pass only runs where the upscaler engines compile (macOS / candle); the
+    // stub-only build keeps the base count.
+    #[cfg(any(
+        target_os = "macos",
+        all(not(target_os = "macos"), feature = "backend-candle")
+    ))]
+    let upscale_mult: u32 = if request.upscale.enabled { 2 } else { 1 };
+    #[cfg(not(any(
+        target_os = "macos",
+        all(not(target_os = "macos"), feature = "backend-candle")
+    )))]
+    let upscale_mult: u32 = 1;
+
     // Resolve the MLX dispatch branch once, then bake that branch's real total into
     // the plan so the generation set + streamed `expectedCount` match what lands in
     // the gallery.
@@ -327,7 +343,7 @@ pub(crate) async fn run_image_generate_job(
     #[cfg(target_os = "macos")]
     let plan = ImagePlan::with_count(
         &request,
-        route.map_or(request.count, |route| route.image_count(&request, settings)),
+        route.map_or(request.count, |route| route.image_count(&request, settings)) * upscale_mult,
     );
     // Windows/CUDA candle lane: an InstantID angle/pose set produces N images (the active angle
     // collection's length, or the pose count), not `request.count` — bake the real total into the plan
@@ -340,13 +356,13 @@ pub(crate) async fn run_image_generate_job(
         } else {
             request.count
         };
-        ImagePlan::with_count(&request, count)
+        ImagePlan::with_count(&request, count * upscale_mult)
     };
     #[cfg(all(
         not(target_os = "macos"),
         not(all(not(target_os = "macos"), feature = "backend-candle"))
     ))]
-    let plan = ImagePlan::with_count(&request, request.count);
+    let plan = ImagePlan::with_count(&request, request.count * upscale_mult);
 
     // Pre-flight LoRA family-compat guardrail (sc-3027): reject an incompatible LoRA
     // (e.g. a Flux LoRA on an SDXL model, or a Wan 5B LoRA on the 14B base) before any
@@ -840,6 +856,33 @@ pub(crate) async fn run_image_generate_job(
         .await?;
     }
 
+    // sc-8091: Image Studio "Upscale" toggle. The native worker never ported the Python inline-upscale
+    // path, so the UI's `upscale` request was silently dropped (images came out at the base size). Mirror
+    // Python: after the base images land, upscale each with the selected engine and append a second
+    // "(Nx upscaled)" asset. Gated to where the upscaler engines compile (macOS / candle).
+    #[cfg(any(
+        target_os = "macos",
+        all(not(target_os = "macos"), feature = "backend-candle")
+    ))]
+    if request.upscale.enabled {
+        apply_inline_upscale(
+            api,
+            settings,
+            http_client,
+            job,
+            &plan,
+            &project_path,
+            backend,
+            &mut asset_writes,
+        )
+        .await?;
+    }
+    #[cfg(not(any(
+        target_os = "macos",
+        all(not(target_os = "macos"), feature = "backend-candle")
+    )))]
+    let _ = http_client;
+
     update_job(
         api,
         &job.id,
@@ -1032,6 +1075,193 @@ pub(crate) fn write_image_asset(
         "rawAdapterSettings": raw_settings,
     });
     Ok(fact.as_object().cloned().expect("json! object literal"))
+}
+
+/// Normalise the UI's upscale engine id to the canonical worker id. SeedVR2 stays itself;
+/// everything else (`real-esrgan` / `realesrgan` / the dropped `aura-sr` / unknown) maps to
+/// Real-ESRGAN, so a bad engine string never hard-fails a whole generation.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+fn normalize_upscale_engine(engine: &str) -> &'static str {
+    match engine.trim().to_ascii_lowercase().as_str() {
+        "seedvr2" => "seedvr2",
+        _ => "real-esrgan",
+    }
+}
+
+/// Inline upscale post-pass (sc-8091): upscale every base image the generation produced and append a
+/// second "(Nx upscaled)" asset, mirroring the Python worker. Reuses the same in-memory upscalers as the
+/// standalone `image_upscale` job — Real-ESRGAN via `ort`, SeedVR2 via the registry generator — provisioning
+/// weights on first use. Runs after the base images have already been streamed (so they persist even if a
+/// late upscale step errors and fails the job).
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+#[allow(clippy::too_many_arguments)]
+async fn apply_inline_upscale(
+    api: &ApiClient,
+    settings: &Settings,
+    http_client: &reqwest::Client,
+    job: &JobSnapshot,
+    plan: &ImagePlan,
+    project_path: &Path,
+    backend: &str,
+    asset_writes: &mut Vec<Value>,
+) -> WorkerResult<()> {
+    let request = &plan.request;
+    let factor: u8 = if request.upscale.factor == 4 { 4 } else { 2 };
+    let engine_id = normalize_upscale_engine(&request.upscale.engine);
+    let softness = request.upscale.softness();
+    // The generate payload carries the *generation* model's manifest, not an upscaler one; pass Null
+    // so the weight resolvers fall back to the default HF repos (download-on-first-use).
+    let manifest = Value::Null;
+    let cancel = CancelFlag::new();
+
+    // Snapshot the base image assets (we append the upscaled variants as we go).
+    let base_facts: Vec<JsonObject> = asset_writes
+        .iter()
+        .filter_map(Value::as_object)
+        .filter(|fact| fact.get("type").and_then(Value::as_str) == Some("image"))
+        .cloned()
+        .collect();
+    let total = base_facts.len();
+
+    for (i, base_fact) in base_facts.iter().enumerate() {
+        check_cancel(api, &job.id, "Image upscale canceled by user.").await?;
+
+        let media_rel = base_fact
+            .get("mediaPath")
+            .and_then(Value::as_str)
+            .ok_or_else(|| {
+                WorkerError::InvalidPayload("upscale source asset missing mediaPath".to_owned())
+            })?;
+        let source = crate::image_decode::decode_image_any(project_path.join(media_rel))
+            .map_err(|error| {
+                WorkerError::InvalidPayload(format!("Upscale source could not be loaded: {error}"))
+            })?
+            .to_rgb8();
+        let seed = base_fact.get("seed").and_then(Value::as_i64).unwrap_or(0);
+
+        update_job(
+            api,
+            &job.id,
+            image_progress(
+                JobStatus::Running,
+                ProgressStage::Running,
+                0.9,
+                &format!("Upscaling image {}/{total} {factor}x with {engine_id}.", i + 1),
+                Some(streaming_result(plan, asset_writes)),
+                backend,
+            ),
+        )
+        .await?;
+
+        let upscaled = crate::upscale_jobs::upscale_image_in_memory(
+            api,
+            settings,
+            http_client,
+            job,
+            &manifest,
+            engine_id,
+            factor,
+            softness,
+            seed.max(0) as u64,
+            source,
+            &cancel,
+        )
+        .await?;
+
+        let fact = write_upscaled_asset(
+            plan,
+            base_fact,
+            &upscaled,
+            engine_id,
+            factor,
+            softness,
+            project_path,
+        )?;
+        asset_writes.push(Value::Object(fact));
+        heartbeat(api, settings, WorkerStatus::Busy, Some(&job.id)).await?;
+    }
+    Ok(())
+}
+
+/// Write the upscaled variant of a base image as its own asset (sc-8091): same metadata as the base
+/// fact, but a fresh `assetId`, the `_up{factor}x` file, the upscaled dimensions, a "(Nx upscaled)"
+/// display-name suffix, and a `rawAdapterSettings.upscale` record (so preset-restore reads it back).
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+fn write_upscaled_asset(
+    plan: &ImagePlan,
+    base_fact: &JsonObject,
+    upscaled: &image::RgbImage,
+    engine_id: &str,
+    factor: u8,
+    softness: f32,
+    project_path: &Path,
+) -> WorkerResult<JsonObject> {
+    let request = &plan.request;
+    let index = base_fact.get("index").and_then(Value::as_u64).unwrap_or(0) as usize;
+    let (width, height) = (upscaled.width(), upscaled.height());
+
+    let filename = format!(
+        "{}_{}_{}_{:04}_up{factor}x.png",
+        &plan.created_at[..10],
+        request.model,
+        plan.slug,
+        index + 1
+    );
+    let media_rel = format!("assets/images/{}/{filename}", plan.genset_id);
+    let media_path = project_path.join(&media_rel);
+    if let Some(parent) = media_path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let temp_path = media_path.with_extension("tmp.png");
+    upscaled
+        .save_with_format(&temp_path, image::ImageFormat::Png)
+        .map_err(|error| WorkerError::Io(std::io::Error::other(error)))?;
+    std::fs::rename(&temp_path, &media_path).inspect_err(|_| {
+        let _ = std::fs::remove_file(&temp_path);
+    })?;
+
+    let base_display = base_fact
+        .get("displayName")
+        .and_then(Value::as_str)
+        .unwrap_or("Generated image");
+    let display_name = format!("{base_display} ({factor}x upscaled)");
+
+    // rawAdapterSettings: the base settings + an `upscale` record (mirrors the Python worker so the
+    // gallery / preset restore can read back the engine/factor/softness).
+    let mut raw_settings = base_fact
+        .get("rawAdapterSettings")
+        .and_then(Value::as_object)
+        .cloned()
+        .unwrap_or_default();
+    let upscale_record = if engine_id == "seedvr2" {
+        json!({ "enabled": true, "engine": engine_id, "factor": factor, "softness": softness })
+    } else {
+        json!({ "enabled": true, "engine": engine_id, "factor": factor })
+    };
+    raw_settings.insert("upscale".to_owned(), upscale_record);
+
+    let mut fact = base_fact.clone();
+    fact.insert("assetId".to_owned(), json!(fresh_asset_id()));
+    fact.insert("mediaPath".to_owned(), json!(media_rel));
+    fact.insert("width".to_owned(), json!(width));
+    fact.insert("height".to_owned(), json!(height));
+    fact.insert("displayName".to_owned(), json!(display_name));
+    fact.insert("createdAt".to_owned(), json!(now_rfc3339()));
+    fact.insert("rawAdapterSettings".to_owned(), Value::Object(raw_settings));
+    fact.insert(
+        "upscaledFrom".to_owned(),
+        base_fact.get("assetId").cloned().unwrap_or(Value::Null),
+    );
+    Ok(fact)
 }
 
 /// The job-result shape the API streams from: `assetWrites` + the `generationSet`

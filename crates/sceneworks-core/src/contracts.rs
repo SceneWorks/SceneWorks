@@ -654,6 +654,15 @@ impl ImageUpscaleRequest {
     pub fn is_disabled(&self) -> bool {
         !self.enabled
     }
+
+    /// SeedVR2-only input pre-blur (0..1), carried in the flattened extras. 0.0 ⇒ none.
+    pub fn softness(&self) -> f32 {
+        self.extra
+            .get("softness")
+            .and_then(Value::as_f64)
+            .map(|value| value.clamp(0.0, 1.0) as f32)
+            .unwrap_or(0.0)
+    }
 }
 
 pub const fn default_image_upscale_factor() -> u8 {

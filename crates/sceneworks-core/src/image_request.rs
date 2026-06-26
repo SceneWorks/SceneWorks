@@ -9,7 +9,7 @@
 
 use serde_json::Value;
 
-use crate::contracts::JsonObject;
+use crate::contracts::{ImageUpscaleRequest, JsonObject};
 
 /// Default model when the payload omits one (matches the Python worker).
 const DEFAULT_MODEL: &str = "z_image_turbo";
@@ -55,6 +55,10 @@ pub struct ImageRequest {
     pub model_manifest_entry: JsonObject,
     /// Per-family advanced knobs (steps, guidanceScale, mlxQuantize, …), passed through.
     pub advanced: JsonObject,
+    /// Image Studio "Upscale" toggle (sc-8091): when `enabled`, the worker upscales each
+    /// generated image with `engine` (`seedvr2` / `real-esrgan`) at `factor` and writes a
+    /// second "(Nx upscaled)" asset — mirroring the Python worker. Disabled when omitted.
+    pub upscale: ImageUpscaleRequest,
 }
 
 impl ImageRequest {
@@ -84,6 +88,7 @@ impl ImageRequest {
             fit_mode: normalize_fit_mode(payload.get("fitMode").and_then(Value::as_str)),
             model_manifest_entry: object_or_empty(payload, "modelManifestEntry"),
             advanced: object_or_empty(payload, "advanced"),
+            upscale: parse_upscale(payload),
         }
     }
 
@@ -96,6 +101,17 @@ impl ImageRequest {
         }
         self.seed.map(|base| base.wrapping_add(index as i64))
     }
+}
+
+/// Parse the optional `upscale` object (the Image Studio "Upscale" toggle). A missing or
+/// malformed value falls back to the disabled default, so a bad payload never aborts a
+/// generation — it just skips upscaling.
+fn parse_upscale(payload: &JsonObject) -> ImageUpscaleRequest {
+    payload
+        .get("upscale")
+        .cloned()
+        .and_then(|value| serde_json::from_value(value).ok())
+        .unwrap_or_default()
 }
 
 fn string_or(payload: &JsonObject, key: &str, default: &str) -> String {
@@ -238,6 +254,26 @@ mod tests {
         assert!(request.seeds.is_empty());
         assert!(request.loras.is_empty());
         assert!(request.advanced.is_empty());
+        // No `upscale` object ⇒ the disabled default (the Image Studio toggle is off).
+        assert!(request.upscale.is_disabled());
+    }
+
+    #[test]
+    fn parses_inline_upscale_request() {
+        let request = ImageRequest::from_payload(&payload(json!({
+            "projectId": "p",
+            "upscale": { "enabled": true, "engine": "seedvr2", "factor": 4, "softness": 0.5 }
+        })));
+        assert!(request.upscale.enabled);
+        assert_eq!(request.upscale.engine, "seedvr2");
+        assert_eq!(request.upscale.factor, 4);
+        assert!((request.upscale.softness() - 0.5).abs() < 1e-6);
+
+        // A malformed `upscale` value never aborts parsing — it falls back to disabled.
+        let bad = ImageRequest::from_payload(&payload(json!({
+            "projectId": "p", "upscale": "yes please"
+        })));
+        assert!(bad.upscale.is_disabled());
     }
 
     #[test]
