@@ -694,12 +694,17 @@ pub(crate) fn registry_capabilities(
     // platforms with neither.
     //
     // sc-8105: the `image_caption` task (reference image → Ideogram JSON caption) rides on this SAME
-    // `PromptRefine` capability + job — it is a payload `task` discriminator, not a separate cap. The
-    // gate intentionally stays scoped to the WEIGHTLESS non-vision descriptor (`mlx-llama` advertises
-    // `supports_vision: false` until it loads a Qwen-VL snapshot): the image_caption path acquires
-    // vision at LOAD time per-job (`load_for_model_with` + `ModelRequirements::from_request` steers to
-    // a vision provider when the request carries an image). Do NOT broaden this to admit vision-only
-    // providers — that would over-advertise `prompt_refine` on a vision-only worker.
+    // `PromptRefine` capability + job — it is a payload `task` discriminator, not a separate cap, so it
+    // needs no capability-gate change. The gate below correctly keys on the WEIGHTLESS non-vision
+    // descriptor because `image_caption` is served by the SAME text+Json provider as plain refinement:
+    // `mlx-llama` statically advertises `supports_vision: false` + `[Constraint::Json]` and `can_load`s a
+    // Qwen-VL (`qwen3_5`) snapshot, flipping `supports_vision` on only at LOAD time (mlx-llm
+    // provider.rs:267). Its loaded `vision` tower then reads the `Content::Image` at GENERATE time.
+    // Resolution itself must NOT demand vision (core-llm `select`/`meets` filters on the STATIC
+    // descriptor, which has no vision+Json provider for a Qwen-VL snapshot); the worker resolves the
+    // image_caption job on the JSON constraint alone (see `prompt_refine_jobs.rs`). Do NOT broaden this
+    // gate to admit vision-only providers (e.g. `mlx-joycaption`) — they carry no constraints and would
+    // over-advertise `prompt_refine` on a vision-only worker without serving the Json caption path.
     let native_prompt_refine = gen_core::core_llm::textllms().any(|r| {
         let d = (r.descriptor)();
         backends.contains(&d.backend.as_str()) && !d.capabilities.supports_vision

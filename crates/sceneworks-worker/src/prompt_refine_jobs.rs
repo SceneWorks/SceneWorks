@@ -326,11 +326,15 @@ pub(crate) fn build_magic_prompt_messages(prompt: &str, aspect_ratio: &str) -> (
 // Drives the SAME `prompt_refine` TextLlm seam (`task: "image_caption"`) through the `core_llm` VISION
 // path: the user turn carries a `Content::Image(ImageRef)` alongside the `[USER]` instruction, and the
 // `[SYSTEM]` block is the embedded `ideogram_image_caption_v1.txt` (observe-don't-populate, style +
-// grounded composition, bboxes kept). Resolution requires a vision-capable provider, so the worker
-// requests `ModelRequirements::from_request` which sees `req.has_image()` and steers
-// `load_for_model_with` to a vision provider (mlx-llama on a Qwen-VL snapshot). The reply is cleaned
-// with the SAME `clean_json_output` + validated with `sceneworks_core::ideogram_caption::is_caption`;
-// malformed output is handled like magic-prompt (the empty/non-caption result errors caller-side).
+// grounded composition, bboxes kept). The image drives the multimodal path at GENERATE time
+// (`mlx-llama`'s loaded Qwen-VL vision tower reads the `Content::Image`). At RESOLUTION time the worker
+// must NOT demand vision: core-llm's `select`/`meets` filters on each provider's STATIC descriptor, and
+// no linked provider statically advertises BOTH vision and Json for a Qwen-VL snapshot (`mlx-llama` is
+// text+Json until it loads; `mlx-joycaption` is vision-but-no-constraints and only serves LLaVA). So the
+// worker resolves on the JSON constraint ALONE — that selects `mlx-llama`, which loads the Qwen-VL
+// snapshot and flips to vision at load. The reply is cleaned with the SAME `clean_json_output` +
+// validated with `sceneworks_core::ideogram_caption::is_caption`; malformed output is handled like
+// magic-prompt (the empty/non-caption result errors caller-side).
 // ----------------------------------------------------------------------------------------------
 
 /// The `(system, user)` chat text for an image-caption run: the `[SYSTEM]` + `[USER]` blocks of the
@@ -452,6 +456,11 @@ pub(crate) async fn run_prompt_refine_job(
     }
     // The image-caption task resolves + decodes a reference image (the JoyCaption `load_caption_image`
     // pattern → RGB8) into the vision contract's `ImageRef`. Accept either `imagePath` or `referencePath`.
+    // The path is UNTRUSTED (it arrives on the job payload over the LAN-remote API boundary, epic 4484),
+    // so — like every other on-disk image/model input (JoyCaption via `resolve_dataset_item_path`, the
+    // InstantID/captioner reference reads, the LoRA load path) — confine it to an app-managed root via
+    // `normalize_app_managed_model_path` BEFORE opening it. That rejects `..` traversal and any absolute
+    // path outside the app data dir / HF hub cache, closing the arbitrary-file-read gap.
     let image_ref = if is_image_caption {
         let image_path = payload
             .get("imagePath")
@@ -464,7 +473,12 @@ pub(crate) async fn run_prompt_refine_job(
                     "Image caption requires a non-empty `imagePath` reference image.".to_owned(),
                 )
             })?;
-        Some(load_caption_image_ref(Path::new(image_path))?)
+        let safe_path = normalize_app_managed_model_path(
+            settings,
+            image_path,
+            "Image caption reference image",
+        )?;
+        Some(load_caption_image_ref(&safe_path)?)
     } else {
         None
     };
@@ -556,12 +570,25 @@ pub(crate) async fn run_prompt_refine_job(
             json!({ "jobId": job_id, "engine": engine_label }),
         );
 
-        // Resolve the native provider model-first (no provider id) — a JSON constraint steers
-        // resolution to a JSON-capable provider, and an image block (image_caption) steers it to a
-        // VISION provider — and stream through the `core_llm::TextLlm` contract. One backend-agnostic
-        // path: the force-linked provider (mlx-llama on macOS, candle-llama on the Windows candle build)
-        // wins resolution. The provider renders the model's own chat template, so the worker supplies
-        // only the system + user turns (the product policy stays caller-side).
+        // Resolve the native provider model-first (no provider id) and stream through the
+        // `core_llm::TextLlm` contract. One backend-agnostic path: the force-linked provider
+        // (mlx-llama on macOS, candle-llama on the Windows candle build) wins resolution. The provider
+        // renders the model's own chat template, so the worker supplies only the system + user turns
+        // (the product policy stays caller-side).
+        //
+        // sc-8105 resolution note: `core-llm`'s `select`/`meets` filters on each provider's STATIC
+        // (weightless) descriptor BEFORE any `load` runs. `mlx-llama` statically advertises
+        // `supports_vision:false` + `[Constraint::Json]` — it loads a Qwen-VL (`qwen3_5`) snapshot and
+        // flips `supports_vision` on only at LOAD time (mlx-llm provider.rs:267). `mlx-joycaption`
+        // statically advertises vision but NO constraints and only `can_load`s LLaVA (not Qwen-VL).
+        // So NO provider statically satisfies BOTH vision AND Json for a Qwen-VL snapshot: demanding
+        // `vision:true` at resolution (what `ModelRequirements::from_request` derives from the image
+        // block) would make `select` return `Error::Unsupported` and never reach `load`. The image is
+        // what drives the multimodal generate path at GENERATE time (LlamaProvider::generate gates on
+        // its loaded `vision` tower), NOT what must be matched at resolution. So the image_caption path
+        // resolves on the JSON constraint ALONE (no vision filter): that selects `mlx-llama`, which then
+        // loads the Qwen-VL snapshot, flips to vision, and examines the `Content::Image`. (The other
+        // tasks carry no image, so their `from_request` reqs never set the vision filter anyway.)
         let text = {
             use gen_core::core_llm::{
                 load_for_model_with, Constraint, Content, LoadSpec, Message, ModelRequirements, Role,
@@ -572,9 +599,9 @@ pub(crate) async fn run_prompt_refine_job(
                 messages.push(Message::system(system));
             }
             // The image-caption user turn carries the reference image (a `Content::Image` block)
-            // alongside the instruction text, so the vision provider examines the picture. Every other
-            // task is a plain text user turn. `ModelRequirements::from_request` sees `has_image()` and
-            // steers `load_for_model_with` to a vision-capable provider.
+            // alongside the instruction text, so the loaded provider examines the picture at generate
+            // time. Every other task is a plain text user turn.
+            let carries_image = image_ref.is_some();
             match image_ref {
                 Some(image) => messages.push(Message {
                     role: Role::User,
@@ -603,12 +630,24 @@ pub(crate) async fn run_prompt_refine_job(
                 cancel: blocking_cancel.clone(),
                 ..Default::default()
             };
+            // Build the resolution requirements WITHOUT the auto-vision `from_request` derives from an
+            // image block (see the resolution note above): a Qwen-VL snapshot has no statically
+            // vision+Json provider, so demanding vision here would fail `select` before `load`. Require
+            // only the request's output constraint (the JSON grammar for a caption task) — that selects
+            // the text+Json `mlx-llama`, which loads the Qwen-VL snapshot and flips to vision at load.
+            // (`carries_image` is asserted so the unused-binding lint stays satisfied and the intent —
+            // "an image is present, yet we deliberately do NOT set the vision filter" — is explicit.)
+            debug_assert!(carries_image == is_image_caption);
+            let mut reqs = ModelRequirements::default();
+            for constraint in request.constraint.iter().copied() {
+                reqs = reqs.with_constraint(constraint);
+            }
             let refiner = load_for_model_with(
                 &LoadSpec {
                     source: weights_dir.to_string_lossy().into_owned(),
                     quantize: None,
                 },
-                &ModelRequirements::from_request(&request),
+                &reqs,
             )
             .map_err(|error| WorkerError::Engine(format!("prompt-refine load failed: {error}")))?;
             emit_event(
@@ -999,11 +1038,64 @@ mod tests {
     }
 
     #[test]
-    fn image_caption_request_carries_image_and_json_constraint() {
+    fn image_caption_reference_path_confined_to_app_managed_root() {
+        // Issue 2 (path containment): the image_caption reference path is UNTRUSTED (job payload, over
+        // the LAN-remote API boundary), so it must resolve under an app-managed root before it is read.
+        // A path INSIDE `data_dir` is accepted; a sibling path OUTSIDE it, and a `..`-traversal escape,
+        // are rejected with a clear error — mirroring the JoyCaption `resolve_dataset_item_path` guard.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut settings = crate::Settings::from_env();
+        settings.data_dir = dir.path().to_path_buf();
+
+        // In-root: accepted (the on-disk file need not exist — confinement is path-structural).
+        let inside = dir.path().join("projects").join("ref.png");
+        let resolved = normalize_app_managed_model_path(
+            &settings,
+            &inside.to_string_lossy(),
+            "Image caption reference image",
+        )
+        .expect("an in-root reference path is accepted");
+        assert!(resolved.starts_with(dir.path()), "stays under the data dir");
+
+        // Out-of-root absolute path: rejected.
+        let outside_dir = tempfile::tempdir().expect("tempdir2");
+        let outside = outside_dir.path().join("secret.png");
+        let err = normalize_app_managed_model_path(
+            &settings,
+            &outside.to_string_lossy(),
+            "Image caption reference image",
+        )
+        .expect_err("an out-of-root reference path is rejected");
+        assert!(
+            err.to_string().contains("Image caption reference image"),
+            "{err}"
+        );
+
+        // `..` traversal escaping the data dir: rejected.
+        let traversal = format!("{}/../escape.png", dir.path().display());
+        let err = normalize_app_managed_model_path(
+            &settings,
+            &traversal,
+            "Image caption reference image",
+        )
+        .expect_err("a `..`-traversal reference path is rejected");
+        assert!(
+            err.to_string().contains("Image caption reference image")
+                || err.to_string().contains("Unsafe absolute path"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn image_caption_request_carries_image_for_generate_but_resolves_json_only() {
         // Assemble the same request the job's blocking task builds for an image_caption run and assert
-        // the contract surface: a vision user turn (carries an image), a JSON constraint, and that
-        // `ModelRequirements::from_request` therefore demands BOTH vision and JSON (steering
-        // `load_for_model_with` to a JSON-capable vision provider).
+        // the contract surface: the user turn carries the reference image (so the LOADED provider's
+        // vision tower reads it at GENERATE time) and a JSON constraint. CRUCIALLY, resolution must NOT
+        // demand vision — `ModelRequirements::from_request` WOULD set `vision:true` (which makes
+        // core-llm `select` fail for a Qwen-VL snapshot, since no provider statically advertises both
+        // vision and Json), so the worker instead builds requirements from the JSON constraint ALONE.
+        // This test pins the worker's resolution-requirements construction (the actual fix), and the
+        // contrast against `from_request`.
         use gen_core::core_llm::{
             Constraint, Content, ImageRef, Message, ModelRequirements, Role, Sampling, TextLlmRequest,
         };
@@ -1032,12 +1124,118 @@ mod tests {
         };
 
         assert!(request.has_image(), "request carries the reference image");
-        let reqs = ModelRequirements::from_request(&request);
-        assert!(reqs.vision, "requirements demand a vision provider");
+
+        // `from_request` over-constrains: it derives `vision:true` from the image block. The worker must
+        // NOT use this for the image_caption resolution (it would make `select` return Unsupported for a
+        // Qwen-VL snapshot — see the weightless resolution tests below).
+        let auto = ModelRequirements::from_request(&request);
+        assert!(
+            auto.vision,
+            "from_request over-constrains by demanding vision (the bug the fix avoids)"
+        );
+
+        // The worker's resolution requirements: the request's output constraint ONLY, no vision filter.
+        let mut reqs = ModelRequirements::default();
+        for constraint in request.constraint.iter().copied() {
+            reqs = reqs.with_constraint(constraint);
+        }
+        assert!(
+            !reqs.vision,
+            "image_caption resolution must NOT demand vision (it is acquired at LOAD time)"
+        );
         assert!(
             reqs.constraints.contains(&Constraint::Json),
-            "requirements demand JSON-constrained decoding"
+            "image_caption resolution still demands JSON-constrained decoding"
         );
+    }
+
+    /// Weightless resolution proof (the Issue-1 settler). With a Qwen-VL (`qwen3_5`) snapshot
+    /// `config.json` on disk and the real `mlx-llm` inventory linked, demanding `vision:true` +
+    /// `[Json]` (what `ModelRequirements::from_request` derives from an image request) makes core-llm's
+    /// model-first `select` FAIL with `Error::Unsupported` — no provider statically advertises BOTH
+    /// vision and Json for a Qwen-VL snapshot (`mlx-llama` is text+Json until load; `mlx-joycaption` is
+    /// vision-but-no-constraints + only serves LLaVA). This is the reviewer's BLOCKER, reproduced.
+    /// macOS-only (the `mlx-llm` providers link there); no weights — resolution reads only `config.json`.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn vision_plus_json_resolution_fails_for_qwen_vl_snapshot() {
+        use gen_core::core_llm::{load_for_model_with, Constraint, LoadSpec, ModelRequirements};
+        use mlx_llm as _; // force-link the providers into core-llm's inventory
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        write_qwen_vl_config(dir.path());
+
+        // Demand vision + Json (the `from_request` shape for an image+Json request).
+        let reqs = ModelRequirements::default()
+            .with_vision()
+            .with_constraint(Constraint::Json);
+        let result = load_for_model_with(
+            &LoadSpec {
+                source: dir.path().to_string_lossy().into_owned(),
+                quantize: None,
+            },
+            &reqs,
+        );
+        let err = result.err().expect("vision+Json must not resolve for a Qwen-VL snapshot");
+        let msg = err.to_string();
+        // The failure is a capability/resolution gap (Unsupported), surfaced BEFORE any weight load —
+        // not a missing-weights load error. The message is core-llm's `unmet_caps_msg`.
+        assert!(
+            msg.contains("loadable, but no linked provider meets") || msg.contains("unsupported"),
+            "expected an Unsupported capability-resolution error, got: {msg}"
+        );
+    }
+
+    /// Weightless resolution proof (the Issue-1 FIX). The SAME Qwen-VL snapshot, resolved with the
+    /// worker's actual image_caption requirements — the JSON constraint ALONE, no vision filter —
+    /// passes core-llm's `select` (it picks the text+Json `mlx-llama`, which `can_load`s a Qwen-VL
+    /// wrapper). Resolution therefore reaches `load`; with no weight shards on disk the load fails, but
+    /// with a `Load`/backend error (missing tensors), NOT the `Unsupported` resolution error above —
+    /// proving the provider WAS selected. That is exactly what the fixed worker path does.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn json_only_resolution_selects_a_provider_for_qwen_vl_snapshot() {
+        use gen_core::core_llm::{load_for_model_with, Constraint, LoadSpec, ModelRequirements};
+        use mlx_llm as _; // force-link the providers into core-llm's inventory
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        write_qwen_vl_config(dir.path());
+
+        // The worker's image_caption resolution requirements: JSON constraint only, no vision filter.
+        let reqs = ModelRequirements::default().with_constraint(Constraint::Json);
+        let err = load_for_model_with(
+            &LoadSpec {
+                source: dir.path().to_string_lossy().into_owned(),
+                quantize: None,
+            },
+            &reqs,
+        )
+        .err()
+        .expect("no weights on disk, so the LOAD fails after the provider is selected");
+        let msg = err.to_string();
+        // The provider WAS selected (resolution passed): the error is a weight-load failure, not the
+        // `Unsupported` capability-resolution error. So `select`/`meets` admitted `mlx-llama` for the
+        // Qwen-VL snapshot under the JSON-only requirements — the fix routes here.
+        assert!(
+            !msg.contains("no linked provider meets") && !msg.contains("no registered provider can serve"),
+            "JSON-only requirements must resolve a provider (then fail on missing weights), got: {msg}"
+        );
+    }
+
+    /// A minimal Qwen3.6 (`qwen3_5`) VLM-wrapper `config.json` — enough for the weightless `can_load`
+    /// probes (`Architecture::from_config` dispatches on `model_type`/`architectures`; the
+    /// `vision_config` marks it a VLM wrapper). No weight shards / tokenizer: resolution reads only this
+    /// file, and a subsequent `load` is expected to fail on the missing tensors.
+    #[cfg(target_os = "macos")]
+    fn write_qwen_vl_config(dir: &Path) {
+        std::fs::write(
+            dir.join("config.json"),
+            br#"{"architectures":["Qwen3_5ForConditionalGeneration"],
+                "model_type":"qwen3_5",
+                "text_config":{"model_type":"qwen3_5_text"},
+                "vision_config":{"model_type":"qwen3_5","depth":27}}"#,
+        )
+        .expect("write qwen-vl config.json");
     }
 
     /// Real-weight image-caption smoke (sc-8105 → validated under sc-8113): examines a reference image
