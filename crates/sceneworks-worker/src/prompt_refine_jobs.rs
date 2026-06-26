@@ -361,6 +361,7 @@ pub(crate) fn build_image_caption_messages() -> (String, String) {
 /// tensor-free image type instead of the captioner's `gen_core::Image`. Used by the `image_caption`
 /// task to build the `Content::Image` block.
 #[cfg(any(
+    test,
     target_os = "macos",
     all(not(target_os = "macos"), feature = "backend-candle")
 ))]
