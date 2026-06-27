@@ -162,7 +162,8 @@ fn pad_chw_even_replicates_to_even_dims_for_pixel_unshuffle() {
             // existing columns are preserved
             for x in 0..3 {
                 assert!(
-                    (padded[c * ph * pw + y * pw + x] - data[c * ch * cw + y * cw + x]).abs() < 1e-6
+                    (padded[c * ph * pw + y * pw + x] - data[c * ch * cw + y * cw + x]).abs()
+                        < 1e-6
                 );
             }
         }
