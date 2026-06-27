@@ -41,7 +41,7 @@ A JSON object capturing the visual style you observe. ALWAYS include `aesthetics
 - `aesthetics`: the overall visual character (e.g. `cinematic`, `flat vector illustration`, `gritty documentary`, `soft pastel`).
 - `lighting`: the light you see (direction, hardness, color temperature, time-of-day cues) — `hard side light from the left, warm golden-hour tone`.
 - `medium`: the production medium — `photograph`, `3D render`, `oil painting`, `watercolor`, `digital illustration`, `pencil sketch`. Pick the one that matches what you see.
-- `color_palette`: the dominant colors actually present, as a short list of concrete color names.
+- `color_palette`: the dominant colors actually present, as a list of UPPERCASE `#RRGGBB` hex codes — MAXIMUM 5 colors. Use hex codes, NOT color names: write `#F5F5DC`, never `beige`; `#8B5A2B`, never `brown`. Pick the up-to-5 most dominant colors you actually see and give each as a `#RRGGBB` hex value (e.g. `["#1A2B3C", "#F5F5DC", "#8B5A2B"]`).
 
 ### REQUIRED discriminator — emit EXACTLY ONE of `photo` or `art_style` (never both, never neither)
 
