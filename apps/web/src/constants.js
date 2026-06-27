@@ -29,6 +29,14 @@ export const PROMPT_REFINE_MODEL_ID = "prompt_refine_anubis_8b";
 // this id to look up install state and offer a download in the caption dialog when missing.
 export const JOY_CAPTION_MODEL_ID = "joycaption_beta_one";
 
+// Vision captioner (epic 8102, sc-8107/8108). Turns an uploaded reference image into a structured
+// Ideogram-style JSON caption (style + grounded composition) for Ideogram 4 text-to-image variations.
+// As with PROMPT_REFINE_MODEL_ID, the native worker resolves the model by its HF repo string (carried
+// in the job payload's `model` field); the web uses the catalog id only to look up install state and
+// offer a download (the eligibility gate is the sibling sc-8110). macOnly in the catalog.
+export const VISION_CAPTION_MODEL_ID = "vision_caption_qwen3vl_8b";
+export const VISION_CAPTION_MODEL_REPO = "huihui-ai/Huihui-Qwen3-VL-8B-Instruct-abliterated";
+
 // Default interleave system prompt (the think/no-think protocol). Prefilled in
 // Document Studio; the worker falls back to this same text when the field is blank.
 // Keep in sync with apps/worker/scene_worker/image_adapters.py::_INTERLEAVE_SYSTEM_MESSAGE.

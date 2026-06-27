@@ -11,6 +11,9 @@ pub(crate) struct JobsQuery {
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct PromptRefineRequest {
+    // Optional so the `image_caption` task (epic 8102, sc-8108) — driven by a reference image, not
+    // text — can omit it. The handler still requires a non-empty prompt for every other task.
+    #[serde(default)]
     pub(crate) prompt: String,
     pub(crate) model_id: Option<String>,
     pub(crate) workflow: Option<String>,
@@ -18,12 +21,24 @@ pub(crate) struct PromptRefineRequest {
     /// worker can build a guide-aware system prompt without filesystem access to
     /// the web assets.
     pub(crate) guide: Option<String>,
-    /// `"refine"` (default) or `"magic_prompt"` — the latter expands a plain idea
-    /// into a structured Ideogram 4 JSON caption (epic 4725, sc-5997).
+    /// `"refine"` (default), `"magic_prompt"` (expand a plain idea into a structured
+    /// Ideogram 4 JSON caption, epic 4725/sc-5997), or `"image_caption"` (turn a
+    /// reference image into the same structured caption via the vision model, epic
+    /// 8102/sc-8108). The latter carries a `source_asset_id` + `project_id` instead of
+    /// a prompt; the handler resolves them to the worker's confined `imagePath`.
     pub(crate) task: Option<String>,
     /// Target image aspect ratio as `"W:H"` (magic-prompt only); drives bbox/layout
     /// decisions in the caption. Defaults to `"1:1"` worker-side when absent.
     pub(crate) aspect_ratio: Option<String>,
+    /// Reference image for the `image_caption` task: a project asset id resolved to a
+    /// confined on-disk path before the job is enqueued (epic 8102, sc-8108).
+    pub(crate) source_asset_id: Option<String>,
+    /// Project owning `source_asset_id` (required for the `image_caption` task so the
+    /// asset's relative `file.path` can be resolved to an absolute path).
+    pub(crate) project_id: Option<String>,
+    /// HF repo string of the model the worker should load (the worker resolves by repo,
+    /// not by catalog id). The web sends the vision model's repo for `image_caption`.
+    pub(crate) model: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
