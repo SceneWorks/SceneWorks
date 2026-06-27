@@ -34,9 +34,19 @@
       ],
       "description": "Sigma schedule from the unified curated framework (epic 7114, decision 2). Names match gen-core's Scheduler registry exactly. \"default\" preserves the engine's native schedule. The epic-1753 \"shift\" pseudo-scheduler is gone — the per-generation time shift is the orthogonal defaults.schedulerShift / advanced.schedulerShift knob, not a scheduler choice."
     },
+    "guidanceMethodKey": {
+      "type": "string",
+      "enum": [
+        "cfg",
+        "cfg_rescale",
+        "apg",
+        "cfg_pp"
+      ],
+      "description": "Classifier-free-guidance policy from the unified guidance axis (epic 7434). Names match gen-core's GuidanceMethod registry exactly. \"cfg\" is the standard guidance the engine applies by default (the N1 no-op); \"cfg_rescale\" (Lens-style std-rescale), \"apg\" (Bernini adaptive-projected guidance), and \"cfg_pp\" (CFG++, reparameterized low-cfg guidance) are advertised per-model-per-backend only where the linked engine descriptor honors them. The worker N3-falls an unadvertised method back to the engine default."
+    },
     "samplerLimits": {
       "type": "object",
-      "description": "Per-model sampler / scheduler capability lists used to gate Image / Video Studio dropdowns. Omit the keys entirely to disable the controls; include single-element [\"default\"] arrays for sealed adapters so the manifest is still self-describing.",
+      "description": "Per-model sampler / scheduler / guidance capability lists used to gate Image / Video Studio dropdowns. Omit the keys entirely to disable the controls; include single-element [\"default\"] arrays for sealed adapters so the manifest is still self-describing.",
       "properties": {
         "samplers": {
           "type": "array",
@@ -49,6 +59,12 @@
           "minItems": 1,
           "uniqueItems": true,
           "items": { "$ref": "#/$defs/schedulerKey" }
+        },
+        "guidanceMethods": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": { "$ref": "#/$defs/guidanceMethodKey" }
         }
       }
     }
@@ -75,7 +91,7 @@
           },
           "limits": {
             "type": "object",
-            "description": "Per-model capability lists. Sampler / scheduler arrays gate the Image / Video Studio dropdowns; omit them to hide the controls.",
+            "description": "Per-model capability lists. Sampler / scheduler / guidance arrays gate the Image / Video Studio dropdowns; omit them to hide the controls.",
             "properties": {
               "samplers": {
                 "type": "array",
@@ -88,6 +104,12 @@
                 "minItems": 1,
                 "uniqueItems": true,
                 "items": { "$ref": "#/$defs/schedulerKey" }
+              },
+              "guidanceMethods": {
+                "type": "array",
+                "minItems": 1,
+                "uniqueItems": true,
+                "items": { "$ref": "#/$defs/guidanceMethodKey" }
               }
             }
           },
