@@ -170,9 +170,19 @@ export default function StructuredPromptBuilder({
   function handleReferenceChange(assetId) {
     setReferenceAssetId(assetId);
     setCaptionError("");
-    const asset = referenceAssets.find((item) => item.id === assetId);
-    if (asset) reportReferenceDimensions(asset);
   }
+
+  // Run the auto-preset from an effect on the SELECTED id rather than the picker's onChange: a
+  // freshly imported/dragged reference lands in `referenceAssets` a render AFTER its id is set, so
+  // the onChange-time `find` missed it and the Aspect stayed at the 1:1 default (sc-8220). Keying on
+  // both the id and the list re-runs once the asset resolves, covering select / import / drag /
+  // character paths uniformly.
+  useEffect(() => {
+    if (!referenceAssetId) return;
+    const asset = referenceAssets.find((item) => item.id === referenceAssetId);
+    if (asset) reportReferenceDimensions(asset);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [referenceAssetId, referenceAssets]);
 
   async function handleImageCaption() {
     if (typeof onImageCaption !== "function" || !referenceAssetId || captionBusy) return;
