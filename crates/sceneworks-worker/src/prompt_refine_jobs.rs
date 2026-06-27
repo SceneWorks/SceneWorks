@@ -970,16 +970,29 @@ mod tests {
         );
         assert!(system.contains("photo"));
         assert!(system.contains("art_style"));
-        // sc-8197: `style_description.color_palette` must be #RRGGBB hex codes (the web schema's
-        // `verifyColorPalette` rejects color names) with a maximum of 5 entries. The prompt must
-        // require uppercase hex codes and cap the list.
+        // sc-8197: `color_palette` must be #RRGGBB hex codes (the web schema's `verifyColorPalette`
+        // rejects color names). The prompt must require uppercase hex codes.
         assert!(
             system.contains("#RRGGBB"),
             "system requires color_palette as #RRGGBB hex codes (not color names)"
         );
+        // sc-8199: the STYLE palette now allows richer palettes (up to 16, STYLE_PALETTE_MAX),
+        // restored from the mistaken cap of 5.
+        assert!(
+            system.contains("up to 16"),
+            "system allows the style color_palette up to 16 entries"
+        );
+        // sc-8199: each ELEMENT may carry its own optional `color_palette` (last key). The element
+        // format example must show the optional per-subject palette.
+        assert!(
+            system.contains("\"color_palette\":[\"#RRGGBB\""),
+            "element format example carries an optional per-subject color_palette"
+        );
+        // sc-8199: the per-element palette is capped at 5 (ELEMENT_PALETTE_MAX); the `MAXIMUM 5`
+        // copy now lives in the element guidance subsection.
         assert!(
             system.contains("MAXIMUM 5"),
-            "system caps color_palette at a maximum of 5 colors"
+            "system caps the element color_palette at a maximum of 5 colors"
         );
         // Output is fenced so it survives markdown.
         assert!(system.contains("```json"));
