@@ -157,6 +157,13 @@ mod sd3_5_mlx_smoke;
     allow(dead_code)
 )]
 mod openpose_skeleton;
+// Native canny edge-map preprocessor for the Fun-Controlnet-Union canny head
+// (epic 8236, sc-8240). Pure CPU raster (cross-platform + testable everywhere),
+// sibling of `openpose_skeleton`: arbitrary image → `ControlKind::Canny` control
+// image. Not yet wired into the control driver (sc-8243 / extend stories), so its
+// items are unused on every target for now — allow dead_code until then.
+#[allow(dead_code)]
+mod canny;
 // DWPose pose detection via onnxruntime (epic 3482, sc-3487). On Mac the CoreML EP +
 // on the off-Mac candle GPU-worker lane the CUDA EP (sc-5496, epic 5482) run the same
 // RTMW detector in-process; on a candle-disabled box the Python rtmlib path stays the
