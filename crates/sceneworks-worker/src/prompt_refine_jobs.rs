@@ -970,6 +970,17 @@ mod tests {
         );
         assert!(system.contains("photo"));
         assert!(system.contains("art_style"));
+        // sc-8197: `style_description.color_palette` must be #RRGGBB hex codes (the web schema's
+        // `verifyColorPalette` rejects color names) with a maximum of 5 entries. The prompt must
+        // require uppercase hex codes and cap the list.
+        assert!(
+            system.contains("#RRGGBB"),
+            "system requires color_palette as #RRGGBB hex codes (not color names)"
+        );
+        assert!(
+            system.contains("MAXIMUM 5"),
+            "system caps color_palette at a maximum of 5 colors"
+        );
         // Output is fenced so it survives markdown.
         assert!(system.contains("```json"));
         // The `[META]` thinking flag does not bleed into the system body.
