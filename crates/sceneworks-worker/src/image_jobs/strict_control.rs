@@ -159,20 +159,109 @@ fn resolve_user_control_map(
     Ok(Some(image))
 }
 
-/// Estimate a depth control map from an arbitrary input image.
+/// Estimate a depth control map from an arbitrary input image (sc-8242).
 ///
-/// **Seam for sc-8242 (auto depth estimator).** The estimator has not landed yet, so for now depth
-/// requires a user-supplied control map (passed through unchanged). When sc-8242 lands, its
-/// `depth_control_image(&RgbImage) -> RgbImage` (sibling of `openpose_skeleton::draw_wholebody` /
-/// `canny::canny_control_image`) plugs in HERE — replacing the error with the estimator call — and the
-/// rest of the driver is unchanged.
-#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
-fn depth_control_image(_source: Option<&Image>) -> WorkerResult<Image> {
+/// This is the depth analogue of [`crate::canny::canny_control_image_default`]: given a `source` RGB
+/// image, it runs the native-MLX Depth Anything V2 estimator ([`crate::depth::depth_control_image`])
+/// and returns a normalized single-channel depth-control [`Image`] at the source's dimensions.
+///
+/// `source` is the raw image to estimate FROM (NOT a pre-made depth map — that flows through the
+/// user-supplied-passthrough branch in [`preprocess_control_entry`] before this is ever reached).
+/// `depth_weights_dir` is the resolved Depth-Anything-V2-Small snapshot dir; it must be present for
+/// auto-estimation (the engine driver provisions it before the gen stream).
+///
+/// Errors when no `source` is available (auto depth has nothing to estimate from — the caller must
+/// supply either a source image or a user-supplied depth map) or when the estimator weights are
+/// unavailable. macOS-only (MLX inference); off-Mac there is no registry strict-control path.
+#[cfg(target_os = "macos")]
+fn depth_control_image(
+    source: Option<&Image>,
+    depth_weights_dir: Option<&Path>,
+) -> WorkerResult<Image> {
+    let source = source.ok_or_else(|| {
+        WorkerError::InvalidPayload(
+            "depth control requires either a source image to estimate from or a user-supplied \
+             depth map (advanced.controlImage)"
+                .to_owned(),
+        )
+    })?;
+    let weights_dir = depth_weights_dir.ok_or_else(|| {
+        WorkerError::Engine(
+            "depth estimator weights are unavailable (Depth-Anything-V2-Small snapshot not provisioned)"
+                .to_owned(),
+        )
+    })?;
+    let rgb = image::RgbImage::from_raw(source.width, source.height, source.pixels.clone())
+        .ok_or_else(|| {
+            WorkerError::InvalidPayload("depth source buffer size mismatch".to_owned())
+        })?;
+    let depth = crate::depth::depth_control_image(&rgb, weights_dir)?;
+    Ok(Image {
+        width: depth.width(),
+        height: depth.height(),
+        pixels: depth.into_raw(),
+    })
+}
+
+/// Off-Mac stub: there is no registry strict-control path on the candle lane, so depth auto-estimation
+/// is never reached — but the shared driver must still compile. Mirrors the macOS signature.
+#[cfg(not(target_os = "macos"))]
+#[allow(dead_code)]
+fn depth_control_image(
+    _source: Option<&Image>,
+    _depth_weights_dir: Option<&Path>,
+) -> WorkerResult<Image> {
     Err(WorkerError::InvalidPayload(
-        "depth control currently requires a user-supplied control map \
-         (advanced.controlImage); automatic depth estimation lands in sc-8242"
-            .to_owned(),
+        "automatic depth estimation is macOS-only".to_owned(),
     ))
+}
+
+/// Provision the Depth Anything V2 (Small) estimator snapshot and return the directory holding
+/// `model.safetensors` (what [`crate::depth::depth_control_image`] loads via `from_dir`).
+///
+/// Resolution order mirrors [`ensure_flux2_control_weights`]: an explicit `SCENEWORKS_DEPTH_ANYTHING_V2`
+/// dir override → an existing HF cache snapshot → a lazy fetch of the single weight file into the app
+/// cache on first use. The ~100 MB Small checkpoint is fetched only on the first depth job (it never
+/// bloats a base download). Shared by every strict-control engine that admits `ControlKind::Depth`.
+#[cfg(target_os = "macos")]
+async fn ensure_depth_estimator_dir(
+    api: &ApiClient,
+    settings: &Settings,
+    job: &JobSnapshot,
+) -> WorkerResult<PathBuf> {
+    use crate::depth::{DEPTH_ANYTHING_V2_FILE, DEPTH_ANYTHING_V2_SMALL_REPO};
+
+    if let Ok(p) = std::env::var("SCENEWORKS_DEPTH_ANYTHING_V2") {
+        let p = PathBuf::from(p);
+        if p.join(DEPTH_ANYTHING_V2_FILE).is_file() {
+            return Ok(p);
+        }
+    }
+    if let Some(snapshot) = huggingface_snapshot_dir(&settings.data_dir, DEPTH_ANYTHING_V2_SMALL_REPO)
+    {
+        if snapshot.join(DEPTH_ANYTHING_V2_FILE).is_file() {
+            return Ok(snapshot);
+        }
+    }
+    let dir = settings.data_dir.join("cache").join("depth-anything-v2");
+    let client = reqwest::Client::new();
+    let context = crate::downloads::DownloadContext {
+        api,
+        client: &client,
+        settings,
+        job_id: &job.id,
+        cancel_message: "Canceled while fetching depth-estimator weights.",
+        fresh_download: false,
+    };
+    crate::downloads::ensure_hf_cached_file(
+        &context,
+        DEPTH_ANYTHING_V2_SMALL_REPO,
+        "main",
+        DEPTH_ANYTHING_V2_FILE,
+        &dir.join(DEPTH_ANYTHING_V2_FILE),
+    )
+    .await?;
+    Ok(dir)
 }
 
 /// Preprocess one control entry into the control [`Image`] the engine consumes.
@@ -185,7 +274,9 @@ fn depth_control_image(_source: Option<&Image>) -> WorkerResult<Image> {
 ///   to the old per-engine pose preprocessing.
 /// - **canny** — [`crate::canny::canny_control_image_default`] over `source` (a user-supplied source
 ///   image). Requires a source — canny has no synthetic input.
-/// - **depth** — [`depth_control_image`] (sc-8242 seam; today user-supplied only).
+/// - **depth** — [`depth_control_image`] over `source`: the native-MLX Depth Anything V2 estimator
+///   (sc-8242), using the provisioned `depth_weights_dir`. Like canny, requires a `source` (auto depth
+///   has nothing to estimate from otherwise); a user-supplied depth map still short-circuits above.
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 #[allow(clippy::too_many_arguments)]
 fn preprocess_control_entry(
@@ -196,6 +287,7 @@ fn preprocess_control_entry(
     width: u32,
     height: u32,
     stickwidth: u32,
+    depth_weights_dir: Option<&Path>,
 ) -> WorkerResult<Image> {
     if let Some(image) = user_control {
         return Ok(image.clone());
@@ -236,7 +328,7 @@ fn preprocess_control_entry(
                 pixels: edges.into_raw(),
             })
         }
-        ControlKind::Depth => depth_control_image(source),
+        ControlKind::Depth => depth_control_image(source, depth_weights_dir),
         ControlKind::Other(name) => Err(WorkerError::InvalidPayload(format!(
             "{name} control requires a user-supplied control map (advanced.controlImage)"
         ))),

@@ -4953,7 +4953,8 @@ fn requested_control_kind_defaults_to_pose_and_parses_modes() {
 
 /// Preprocessor dispatch by kind: pose → `draw_wholebody` (byte-identical to a direct call);
 /// user-supplied control map → verbatim passthrough for ANY kind; canny → edge map over a source;
-/// depth without a user map → the sc-8242 seam error.
+/// depth dispatch routes to the estimator (and errors with a clear message when neither a source nor
+/// a user map is available).
 #[cfg(target_os = "macos")]
 #[test]
 fn preprocess_control_entry_dispatches_by_kind() {
@@ -4962,8 +4963,17 @@ fn preprocess_control_entry_dispatches_by_kind() {
     let stick = crate::openpose_skeleton::body_stickwidth(w, h);
 
     // Pose: byte-identical to the old per-engine skeleton render.
-    let got = preprocess_control_entry(&ControlKind::Pose, None, Some(&pose), None, w, h, stick)
-        .expect("pose preprocess");
+    let got = preprocess_control_entry(
+        &ControlKind::Pose,
+        None,
+        Some(&pose),
+        None,
+        w,
+        h,
+        stick,
+        None,
+    )
+    .expect("pose preprocess");
     let want = crate::openpose_skeleton::draw_wholebody(
         w,
         h,
@@ -4980,11 +4990,13 @@ fn preprocess_control_entry_dispatches_by_kind() {
         "pose preprocessor must be byte-identical"
     );
 
-    // User-supplied passthrough wins for ANY kind (verbatim, skip preprocessing).
+    // User-supplied passthrough wins for ANY kind (verbatim, skip preprocessing) — including DEPTH:
+    // a user-supplied depth map is used exactly as given, never re-estimated (sc-8242 passthrough).
     let supplied = control_fixture(w, h, [10, 20, 30]);
     for kind in [ControlKind::Pose, ControlKind::Canny, ControlKind::Depth] {
-        let out = preprocess_control_entry(&kind, Some(&supplied), Some(&pose), None, w, h, stick)
-            .expect("passthrough");
+        let out =
+            preprocess_control_entry(&kind, Some(&supplied), Some(&pose), None, w, h, stick, None)
+                .expect("passthrough");
         assert_eq!(
             out.pixels, supplied.pixels,
             "{kind:?} passthrough must be verbatim"
@@ -4993,22 +5005,53 @@ fn preprocess_control_entry_dispatches_by_kind() {
 
     // Canny over a source: produces a same-dimension RGB edge map (grayscale broadcast).
     let source = control_fixture(w, h, [128, 128, 128]);
-    let canny =
-        preprocess_control_entry(&ControlKind::Canny, None, None, Some(&source), w, h, stick)
-            .expect("canny preprocess");
+    let canny = preprocess_control_entry(
+        &ControlKind::Canny,
+        None,
+        None,
+        Some(&source),
+        w,
+        h,
+        stick,
+        None,
+    )
+    .expect("canny preprocess");
     assert_eq!((canny.width, canny.height), (w, h));
     assert_eq!(canny.pixels.len(), (w * h * 3) as usize);
 
     // Canny without a source is an error (no synthetic input).
     assert!(
-        preprocess_control_entry(&ControlKind::Canny, None, None, None, w, h, stick).is_err(),
+        preprocess_control_entry(&ControlKind::Canny, None, None, None, w, h, stick, None).is_err(),
         "canny needs a source"
     );
 
-    // Depth without a user map → the sc-8242 estimator seam error (not a silent pass).
-    let err = preprocess_control_entry(&ControlKind::Depth, None, None, None, w, h, stick)
-        .expect_err("depth seam");
-    assert!(err.to_string().contains("sc-8242"), "{}", err);
+    // Depth with NO source and NO user map → a clear error (auto depth has nothing to estimate from).
+    let err = preprocess_control_entry(&ControlKind::Depth, None, None, None, w, h, stick, None)
+        .expect_err("depth needs a source or a user map");
+    assert!(
+        err.to_string().contains("depth control requires"),
+        "{}",
+        err
+    );
+
+    // Depth WITH a source but NO provisioned estimator weights → a clear "weights unavailable" error,
+    // proving the dispatch routes into the estimator path (sc-8242) rather than silently passing
+    // through. (The real-weight estimation itself is exercised by the mlx-gen-depth on-device smoke.)
+    let depth_err = preprocess_control_entry(
+        &ControlKind::Depth,
+        None,
+        None,
+        Some(&source),
+        w,
+        h,
+        stick,
+        None,
+    )
+    .expect_err("depth dispatch reaches the estimator");
+    assert!(
+        depth_err.to_string().contains("weights are unavailable"),
+        "depth dispatch must reach the estimator (got: {depth_err})"
+    );
 }
 
 /// Conditioning construction: pose builds `Control { kind: Pose, scale }` (byte-identical to the old
