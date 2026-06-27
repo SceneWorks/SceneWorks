@@ -4162,6 +4162,91 @@ async fn image_caption_refine_job_requires_source_asset_and_project() {
 }
 
 #[tokio::test]
+async fn image_describe_refine_job_resolves_asset_and_forwards_caption_style() {
+    // epic 8203 / sc-8206: the reference-image → plain-text DESCRIBE flow POSTs `task: "image_describe"`
+    // with a project `sourceAssetId` (+ `projectId`), the vision model's repo, and an optional
+    // `captionStyle`. The handler resolves the asset to a confined on-disk `imagePath` (same path as the
+    // caption flow) and forwards `model` + `captionStyle` verbatim, with no text prompt required.
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+
+    let (_, project) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/projects",
+        json!({ "name": "Describe Project" }),
+    )
+    .await;
+    let project_id = project["id"].as_str().expect("project id").to_owned();
+    let project_path = std::path::PathBuf::from(project["path"].as_str().unwrap());
+
+    let (status, asset) = request_multipart_upload(
+        app.clone(),
+        &format!("/api/v1/projects/{project_id}/assets"),
+        "Reference.PNG",
+        "image/png",
+        b"png-bytes",
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    let asset_id = asset["id"].as_str().expect("asset id").to_owned();
+    let rel_path = asset["file"]["path"]
+        .as_str()
+        .expect("file path")
+        .to_owned();
+
+    let (status, job) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/prompts/refine",
+        json!({
+            "task": "image_describe",
+            "sourceAssetId": asset_id,
+            "projectId": project_id,
+            "model": "huihui-ai/Huihui-Qwen3-VL-8B-Instruct-abliterated",
+            "captionStyle": "tags"
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    assert_eq!(job["type"], "prompt_refine");
+    assert_eq!(job["payload"]["task"], "image_describe");
+    assert_eq!(job["payload"]["captionStyle"], "tags");
+    assert!(job["payload"].get("prompt").is_none());
+    let expected = project_path.join(&rel_path);
+    assert_eq!(
+        job["payload"]["imagePath"].as_str().unwrap(),
+        expected.display().to_string()
+    );
+}
+
+#[tokio::test]
+async fn image_describe_refine_job_requires_source_asset_and_project() {
+    // sc-8206: the describe task is image-driven like image_caption, so it must reject a request missing
+    // the `sourceAssetId` or `projectId`.
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+
+    let (status, _) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/prompts/refine",
+        json!({ "task": "image_describe", "projectId": "project-1" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+
+    let (status, _) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/prompts/refine",
+        json!({ "task": "image_describe", "sourceAssetId": "asset-1" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
 async fn image_and_video_job_routes_normalize_payloads() {
     let temp_dir = tempfile::tempdir().expect("temp dir creates");
     let app = create_app(test_settings(&temp_dir)).expect("app creates");
@@ -8631,6 +8716,69 @@ async fn worker_heartbeat_interrupts_previous_active_job_through_http() {
     assert_eq!(status, StatusCode::OK);
     assert_eq!(job["status"], "interrupted");
     assert_eq!(job["workerId"], Value::Null);
+}
+
+#[tokio::test]
+async fn stale_sweep_broadcasts_job_updated_for_interrupted_jobs() {
+    // sc-8186: the heartbeat stale-sweep marks an in-flight job `interrupted` in the DB, but
+    // (unlike a worker-reported terminal status) emitted no per-job event — so a live client's
+    // job card, driven by `job.updated`, showed its last running state forever. The sweep must
+    // now broadcast `job.updated` for each job it interrupts.
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let mut settings = test_settings(&temp_dir);
+    // Smallest timeout the store honors (clamped to >=1s); we sleep just past it to go stale.
+    settings.worker_timeout_seconds = 1;
+    let (app, state) = create_app_with_state(settings).expect("app creates");
+
+    request(
+        app.clone(),
+        "POST",
+        "/api/v1/workers/register",
+        json!({
+            "workerId": "worker-1",
+            "gpuId": "gpu-0",
+            "gpuName": null,
+            "capabilities": ["image_generate"],
+            "loadedModels": []
+        }),
+    )
+    .await;
+    let (_, created) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/jobs",
+        json!({ "type": "image_generate", "payload": {}, "requestedGpu": "auto" }),
+    )
+    .await;
+    let job_id = created["id"].as_str().expect("job id is string").to_owned();
+    request(
+        app.clone(),
+        "POST",
+        "/api/v1/jobs/claim",
+        json!({ "workerId": "worker-1" }),
+    )
+    .await;
+
+    // Let the worker's last_seen age past the (1s) timeout so the next sweep interrupts its job,
+    // then subscribe so we only observe the sweep's events. last_seen is stored at second
+    // granularity and the cutoff is `now - 1s`, so we sleep just over 2s to clear the boundary.
+    tokio::time::sleep(Duration::from_millis(2_100)).await;
+    let mut events = state.events.subscribe();
+
+    // Any endpoint that runs `queue_summary_snapshot` triggers the sweep; GET /queue is the
+    // canonical one.
+    let (status, _) = request(app.clone(), "GET", "/api/v1/queue", Value::Null).await;
+    assert_eq!(status, StatusCode::OK);
+
+    let sweep_events = drain_event_names(&mut events).await;
+    assert!(
+        sweep_events.iter().any(|name| name == "job.updated"),
+        "the stale-sweep must broadcast job.updated for the interrupted job: {sweep_events:?}"
+    );
+
+    let (status, job) = request(app, "GET", &format!("/api/v1/jobs/{job_id}"), Value::Null).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(job["status"], "interrupted");
 }
 
 #[tokio::test]

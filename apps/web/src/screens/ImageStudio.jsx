@@ -8,6 +8,7 @@ import { PromptGuideModal } from "../components/PromptGuideModal.jsx";
 import { PoseLibraryPicker } from "../components/PoseLibraryPicker.jsx";
 import { RefinePromptControl } from "../components/RefinePromptControl.jsx";
 import StructuredPromptBuilder from "../components/StructuredPromptBuilder.jsx";
+import ReferenceCaptionPicker from "../components/ReferenceCaptionPicker.jsx";
 import {
   buildStructuredPromptRecipe,
   emptyCaption,
@@ -266,6 +267,7 @@ export function ImageStudio() {
     refinePrompt,
     magicPrompt,
     imageCaption,
+    imageDescribe,
     createModelDownloadJob,
     deleteAsset,
     purgeAsset,
@@ -1005,6 +1007,37 @@ export function ImageStudio() {
     [imageCaption, activeProject?.id],
   );
 
+  // Reference-image → plain-text description (epic 8203, sc-8208): the NON-structured sibling of
+  // onImageCaption. Runs the worker's `image_describe` job on the picked reference and resolves to the
+  // raw description text — prose by default, or booru tags when the model declares `captionStyle:"tags"`
+  // (sc-8205). The shared picker drops the returned text into the prompt textarea. Gated to
+  // text-to-image only, like the caption flow. C1: the image is consumed to produce the prompt and is
+  // never passed to generation.
+  const describeCaptionStyle = selectedModel?.captionStyle;
+  const onImageDescribe = useCallback(
+    async (sourceAssetId) => {
+      if (typeof imageDescribe !== "function") {
+        throw new Error("Image description is unavailable.");
+      }
+      if (!activeProject?.id) {
+        throw new Error("Open a project first.");
+      }
+      const text = await imageDescribe({
+        sourceAssetId,
+        projectId: activeProject.id,
+        model: VISION_CAPTION_MODEL_REPO,
+        captionStyle: describeCaptionStyle,
+      });
+      const trimmed = (text || "").trim();
+      if (!trimmed) {
+        throw new Error("The image did not produce a usable description.");
+      }
+      setMagicPromptBackend(VISION_CAPTION_MODEL_ID);
+      return trimmed;
+    },
+    [imageDescribe, activeProject?.id, describeCaptionStyle],
+  );
+
   // When restoring a snapshot, the saved count/resolution/negativePrompt already
   // reflect the user's last state — skip the one preset-default pass that fires as the
   // restored preset resolves so it doesn't overwrite them. "None" applies no defaults,
@@ -1495,6 +1528,40 @@ export function ImageStudio() {
             <p className="structured-error" role="alert">
               {submitError}
             </p>
+          ) : null}
+
+          {/* Reference-image → plain-text prompt (epic 8203, sc-8208). For NON-structured t2i models,
+              offer the same "start from a reference image" affordance Ideogram has — but it fills the
+              plain prompt box with a description (prose, or booru tags for `captionStyle:"tags"` models).
+              Gated to text-to-image only; the section is hidden unless the macOS-first captioner is
+              platform-eligible (ready, or an install offer exists — both false off-Mac, so it stays
+              hidden there, matching the Ideogram surface). C1: captioning-only, never sent to generation. */}
+          {!structuredPromptModel &&
+          mode === "text_to_image" &&
+          typeof imageDescribe === "function" &&
+          (visionCaptionReady || visionCaptionOffers.length > 0) ? (
+            <ReferenceCaptionPicker
+              onCaption={onImageDescribe}
+              onApply={(text) => setPromptFromUser(text)}
+              onReferenceImageLoaded={onReferenceImageLoaded}
+              referenceAssets={editImageAssets}
+              referenceCharacters={characters}
+              importAsset={importAsset}
+              projectId={activeProject?.id ?? ""}
+              hint="Start from a reference image — the captioner reads it into a detailed prompt you can edit. The image is only used to write the prompt; it isn’t sent to generation."
+              buttonLabel="✨ Describe image"
+              busyLabel="Describing…"
+              emptyMessage="The image did not produce a usable description. Try another reference."
+              errorFallback="Could not describe the image."
+              gateDescription="Download the vision captioner to turn a reference image into a prompt. It runs locally on the native worker; the image is only used to write the prompt."
+              visionCaptionReady={visionCaptionReady}
+              visionCaptionOffers={visionCaptionOffers}
+              visionCaptionDownloadJobs={modelDownloadJobs}
+              onDownloadModel={createModelDownloadJob}
+              onOpenModels={() => setActiveView("Models")}
+              onOpenQueue={onOpenQueue}
+              onCancelJob={onCancelJob}
+            />
           ) : null}
 
           {/* Plain-text refine + scene suggestions only make sense for free-text

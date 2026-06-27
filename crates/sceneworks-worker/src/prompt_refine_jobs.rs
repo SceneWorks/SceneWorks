@@ -63,14 +63,27 @@ const DEFAULT_CAPTION_MAX_NEW_TOKENS: u32 = 4096;
     all(not(target_os = "macos"), feature = "backend-candle")
 ))]
 const DEFAULT_REFINE_MAX_NEW_TOKENS: u32 = 512;
-// Resolve the output token budget: an explicit positive `maxNewTokens` override wins; otherwise the
-// per-task default (caption tasks need the larger cap so the JSON closes).
+// The prose/tags `image_describe` task (epic 8203) is shorter than a full structured JSON caption but
+// longer than a one-line rewrite; give it a generous budget so a detailed paragraph is never truncated.
 #[cfg(any(
     test,
     target_os = "macos",
     all(not(target_os = "macos"), feature = "backend-candle")
 ))]
-fn resolve_max_new_tokens(payload: &serde_json::Map<String, Value>, is_caption_task: bool) -> u32 {
+const DEFAULT_DESCRIBE_MAX_NEW_TOKENS: u32 = 1024;
+// Resolve the output token budget: an explicit positive `maxNewTokens` override wins; otherwise the
+// per-task default (caption tasks need the larger cap so the JSON closes; the prose-describe task sits
+// in between).
+#[cfg(any(
+    test,
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+fn resolve_max_new_tokens(
+    payload: &serde_json::Map<String, Value>,
+    is_caption_task: bool,
+    is_image_describe: bool,
+) -> u32 {
     payload
         .get("maxNewTokens")
         .and_then(Value::as_u64)
@@ -78,6 +91,8 @@ fn resolve_max_new_tokens(payload: &serde_json::Map<String, Value>, is_caption_t
         .filter(|value| *value > 0)
         .unwrap_or(if is_caption_task {
             DEFAULT_CAPTION_MAX_NEW_TOKENS
+        } else if is_image_describe {
+            DEFAULT_DESCRIBE_MAX_NEW_TOKENS
         } else {
             DEFAULT_REFINE_MAX_NEW_TOKENS
         })
@@ -292,6 +307,29 @@ const MAGIC_PROMPT_V1: &str = include_str!("ideogram_magic_prompt_v1.txt");
 ))]
 const IMAGE_CAPTION_V1: &str = include_str!("ideogram_image_caption_v1.txt");
 
+/// Plain-text PROSE image-description system prompt (epic 8203, sc-8204), embedded verbatim and
+/// versioned like [`IMAGE_CAPTION_V1`]. Drives the SAME `prompt_refine` `core_llm` vision path as
+/// `image_caption`, but for NON-structured text-to-image models: the model EXAMINES a reference image
+/// and emits a detailed natural-language description usable directly as a t2i prompt — NO JSON, NO
+/// bboxes, NO output constraint. Parsed for its `[SYSTEM]` + `[USER]` sections by [`magic_section_from`].
+#[cfg(any(
+    test,
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+const IMAGE_DESCRIBE_V1: &str = include_str!("image_describe_v1.txt");
+
+/// TAG-STYLE image-description system prompt (epic 8203, sc-8205), the booru/danbooru variant of
+/// [`IMAGE_DESCRIBE_V1`]. Selected when the job payload carries `captionStyle:"tags"` — for anime/booru
+/// SDXL checkpoints that consume comma-separated tags rather than prose. Same vision path, same prose
+/// cleanup (a flat tag string, no JSON).
+#[cfg(any(
+    test,
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+const IMAGE_DESCRIBE_TAGS_V1: &str = include_str!("image_describe_tags_v1.txt");
+
 /// Body of a `[NAME]` section in the magic-prompt file (port of the reference `_load_sections`):
 /// section markers are a bracketed single word alone on a line. Returns the trimmed body, or empty.
 #[cfg(any(
@@ -393,6 +431,70 @@ pub(crate) fn build_image_caption_messages() -> (String, String) {
     (system, user)
 }
 
+/// The plain-text describe style selected by the job payload's `captionStyle` field (epic 8203):
+/// `Prose` (default — natural-language sentences, sc-8204) or `Tags` (booru/danbooru comma-tags for
+/// anime/booru SDXL checkpoints, sc-8205). Any unknown/absent value falls back to `Prose` (defensive).
+#[cfg(any(
+    test,
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum DescribeStyle {
+    Prose,
+    Tags,
+}
+
+#[cfg(any(
+    test,
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+impl DescribeStyle {
+    /// Parse the `captionStyle` payload value; only `"tags"` (case-insensitive) selects tags, everything
+    /// else — including absent/empty/unknown — is prose.
+    pub(crate) fn from_payload(value: Option<&str>) -> Self {
+        match value.map(str::trim) {
+            Some(v) if v.eq_ignore_ascii_case("tags") => DescribeStyle::Tags,
+            _ => DescribeStyle::Prose,
+        }
+    }
+}
+
+/// The `(system, user)` chat text for an image-DESCRIBE run (epic 8203): the `[SYSTEM]` + `[USER]`
+/// blocks of the embedded describe asset for the chosen [`DescribeStyle`] — [`IMAGE_DESCRIBE_V1`]
+/// (prose, sc-8204) or [`IMAGE_DESCRIBE_TAGS_V1`] (tags, sc-8205). Like [`build_image_caption_messages`]
+/// the reference image is attached to the user turn as a separate `Content::Image` block by the caller;
+/// this only supplies the text. Unlike the caption path the model emits plain text (no JSON constraint).
+#[cfg(any(
+    test,
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+pub(crate) fn build_image_describe_messages(style: DescribeStyle) -> (String, String) {
+    let asset = match style {
+        DescribeStyle::Prose => IMAGE_DESCRIBE_V1,
+        DescribeStyle::Tags => IMAGE_DESCRIBE_TAGS_V1,
+    };
+    let system = magic_section_from(asset, "SYSTEM");
+    let mut user = magic_section_from(asset, "USER");
+    if user.is_empty() {
+        user = match style {
+            DescribeStyle::Prose => {
+                "Examine the reference image attached to this message and write the single detailed \
+                 plain-text description as specified. Describe only what is visible in the image."
+            }
+            DescribeStyle::Tags => {
+                "Examine the reference image attached to this message and emit the single \
+                 comma-separated booru-style tag list as specified. Tag only what is visible in the \
+                 image."
+            }
+        }
+        .to_owned();
+    }
+    (system, user)
+}
+
 /// Decode a reference image off disk into a `core_llm::ImageRef` (RGB8), mirroring the JoyCaption
 /// `load_caption_image` pattern (`decode_image_any` → `to_rgb8`) but producing the vision contract's
 /// tensor-free image type instead of the captioner's `gen_core::Image`. Used by the `image_caption`
@@ -479,15 +581,21 @@ pub(crate) async fn run_prompt_refine_job(
         .unwrap_or_default();
     let is_magic = task.eq_ignore_ascii_case("magic_prompt");
     let is_image_caption = task.eq_ignore_ascii_case("image_caption");
+    // sc-8204 (epic 8203): `image_describe` is the plain-text sibling of `image_caption` — the SAME
+    // `core_llm` vision path, but for NON-structured t2i models it emits a natural-language PROSE
+    // description (no JSON constraint, no `is_caption` validation). Both vision tasks carry a reference
+    // image and need no text prompt.
+    let is_image_describe = task.eq_ignore_ascii_case("image_describe");
+    let is_vision_task = is_image_caption || is_image_describe;
     let original_prompt = payload
         .get("prompt")
         .and_then(Value::as_str)
         .map(str::trim)
         .unwrap_or_default()
         .to_owned();
-    // The image-caption task is driven by the reference image, not a text prompt, so it does not
-    // require a `prompt`; every other task does.
-    if original_prompt.is_empty() && !is_image_caption {
+    // The vision tasks (image_caption / image_describe) are driven by the reference image, not a text
+    // prompt, so they do not require a `prompt`; every other task does.
+    if original_prompt.is_empty() && !is_vision_task {
         return Err(WorkerError::InvalidPayload(
             "Prompt refinement requires a non-empty prompt.".to_owned(),
         ));
@@ -499,7 +607,7 @@ pub(crate) async fn run_prompt_refine_job(
     // InstantID/captioner reference reads, the LoRA load path) — confine it to an app-managed root via
     // `normalize_app_managed_model_path` BEFORE opening it. That rejects `..` traversal and any absolute
     // path outside the app data dir / HF hub cache, closing the arbitrary-file-read gap.
-    let image_ref = if is_image_caption {
+    let image_ref = if is_vision_task {
         let image_path = payload
             .get("imagePath")
             .or_else(|| payload.get("referencePath"))
@@ -508,14 +616,11 @@ pub(crate) async fn run_prompt_refine_job(
             .filter(|value| !value.is_empty())
             .ok_or_else(|| {
                 WorkerError::InvalidPayload(
-                    "Image caption requires a non-empty `imagePath` reference image.".to_owned(),
+                    "This task requires a non-empty `imagePath` reference image.".to_owned(),
                 )
             })?;
-        let safe_path = normalize_app_managed_model_path(
-            settings,
-            image_path,
-            "Image caption reference image",
-        )?;
+        let safe_path =
+            normalize_app_managed_model_path(settings, image_path, "Vision reference image")?;
         Some(load_caption_image_ref(&safe_path)?)
     } else {
         None
@@ -539,10 +644,18 @@ pub(crate) async fn run_prompt_refine_job(
         .filter(|value| !value.is_empty())
         .unwrap_or(DEFAULT_REFINE_MODEL)
         .to_owned();
-    let max_new_tokens = resolve_max_new_tokens(payload, is_caption_task);
-    let temperature = if is_caption_task { 0.4 } else { 0.7 };
+    let max_new_tokens = resolve_max_new_tokens(payload, is_caption_task, is_image_describe);
+    // Both the JSON caption tasks and the prose-describe task sample cool for a faithful, steady
+    // description; the free-text rewrite stays warmer for creative variation.
+    let temperature = if is_caption_task || is_image_describe {
+        0.4
+    } else {
+        0.7
+    };
     let work_message = if is_image_caption {
         "Captioning image…"
+    } else if is_image_describe {
+        "Describing image…"
     } else if is_magic {
         "Expanding to a caption…"
     } else {
@@ -550,12 +663,20 @@ pub(crate) async fn run_prompt_refine_job(
     };
     let done_message = if is_caption_task {
         "Caption ready."
+    } else if is_image_describe {
+        "Description ready."
     } else {
         "Prompt refined."
     };
 
     let (system, user_message) = if is_image_caption {
         build_image_caption_messages()
+    } else if is_image_describe {
+        // sc-8205: the describe style (prose vs booru tags) is selected per-model by the `captionStyle`
+        // payload field the web forwards from the catalog; absent/unknown → prose.
+        let style =
+            DescribeStyle::from_payload(payload.get("captionStyle").and_then(Value::as_str));
+        build_image_describe_messages(style)
     } else if is_magic {
         let aspect_ratio = payload
             .get("aspectRatio")
@@ -631,9 +752,9 @@ pub(crate) async fn run_prompt_refine_job(
             if !system.trim().is_empty() {
                 messages.push(Message::system(system));
             }
-            // The image-caption user turn carries the reference image (a `Content::Image` block)
-            // alongside the instruction text, so the loaded provider examines the picture at generate
-            // time. Every other task is a plain text user turn.
+            // A vision task (image_caption / image_describe) user turn carries the reference image (a
+            // `Content::Image` block) alongside the instruction text, so the loaded provider examines the
+            // picture at generate time. Every other task is a plain text user turn.
             let carries_image = image_ref.is_some();
             match image_ref {
                 Some(image) => messages.push(Message {
@@ -666,11 +787,13 @@ pub(crate) async fn run_prompt_refine_job(
             // Build the resolution requirements WITHOUT the auto-vision `from_request` derives from an
             // image block (see the resolution note above): a Qwen-VL snapshot has no statically
             // vision+Json provider, so demanding vision here would fail `select` before `load`. Require
-            // only the request's output constraint (the JSON grammar for a caption task) — that selects
-            // the text+Json `mlx-llama`, which loads the Qwen-VL snapshot and flips to vision at load.
+            // only the request's output constraint — the JSON grammar for a caption task; NONE for the
+            // prose `image_describe` task (sc-8204), which therefore resolves on architecture `can_load`
+            // ALONE. That still admits `mlx-llama` (the only provider that `can_load`s a Qwen-VL wrapper —
+            // `mlx-joycaption` only loads LLaVA), which loads the snapshot and flips to vision at load.
             // (`carries_image` is asserted so the unused-binding lint stays satisfied and the intent —
             // "an image is present, yet we deliberately do NOT set the vision filter" — is explicit.)
-            debug_assert!(carries_image == is_image_caption);
+            debug_assert!(carries_image == is_vision_task);
             let mut reqs = ModelRequirements::default();
             for constraint in request.constraint.iter().copied() {
                 reqs = reqs.with_constraint(constraint);
@@ -866,26 +989,47 @@ mod tests {
         // (sc-8210: 2048 truncated rich captions mid-`elements`).
         let obj = |value: serde_json::Value| value.as_object().unwrap().clone();
         assert_eq!(
-            resolve_max_new_tokens(&obj(serde_json::json!({})), true),
+            resolve_max_new_tokens(&obj(serde_json::json!({})), true, false),
             4096
+        );
+        // The prose-describe task (epic 8203) gets the in-between default.
+        assert_eq!(
+            resolve_max_new_tokens(&obj(serde_json::json!({})), false, true),
+            1024
         );
         // The free-text rewrite stays at the small default.
         assert_eq!(
-            resolve_max_new_tokens(&obj(serde_json::json!({})), false),
+            resolve_max_new_tokens(&obj(serde_json::json!({})), false, false),
             512
         );
-        // An explicit positive override wins for either task.
+        // An explicit positive override wins for any task.
         assert_eq!(
-            resolve_max_new_tokens(&obj(serde_json::json!({ "maxNewTokens": 6000 })), true),
+            resolve_max_new_tokens(
+                &obj(serde_json::json!({ "maxNewTokens": 6000 })),
+                true,
+                false
+            ),
+            6000
+        );
+        assert_eq!(
+            resolve_max_new_tokens(
+                &obj(serde_json::json!({ "maxNewTokens": 6000 })),
+                false,
+                true
+            ),
             6000
         );
         // Zero / invalid overrides fall back to the per-task default.
         assert_eq!(
-            resolve_max_new_tokens(&obj(serde_json::json!({ "maxNewTokens": 0 })), true),
+            resolve_max_new_tokens(&obj(serde_json::json!({ "maxNewTokens": 0 })), true, false),
             4096
         );
         assert_eq!(
-            resolve_max_new_tokens(&obj(serde_json::json!({ "maxNewTokens": "nope" })), false),
+            resolve_max_new_tokens(
+                &obj(serde_json::json!({ "maxNewTokens": "nope" })),
+                false,
+                false
+            ),
             512
         );
     }
@@ -1078,6 +1222,136 @@ mod tests {
         assert!(!user.trim().is_empty(), "user block is non-empty");
         // The builder takes no aspect ratio / prompt placeholders (the image is the input).
         assert!(!user.contains("{{"));
+    }
+
+    // ── sc-8204 (epic 8203): image_describe task (reference image → plain-text PROSE description) ──
+
+    #[test]
+    fn image_describe_asset_extracts_system_and_user_blocks() {
+        // The embedded `image_describe_v1.txt` parses with the same bracketed-marker parser as the
+        // other prompt assets, and its SYSTEM block pins the PROSE / no-JSON contract.
+        let system = magic_section_from(IMAGE_DESCRIBE_V1, "SYSTEM");
+        assert!(!system.trim().is_empty(), "system block is non-empty");
+        // Plain-text prose, explicitly NOT the structured JSON caption path.
+        assert!(
+            system.contains("No JSON") || system.contains("no JSON"),
+            "system forbids JSON output"
+        );
+        assert!(
+            !system.contains("compositional_deconstruction"),
+            "describe path must NOT carry the Ideogram JSON schema"
+        );
+        // Observe-don't-invent grounding, like the caption path.
+        assert!(
+            system.to_lowercase().contains("observe"),
+            "system pins observe-don't-invent grounding"
+        );
+        // The `[META]` thinking flag does not bleed into the system body.
+        assert!(!system.contains("thinking_mode"));
+
+        let user = magic_section_from(IMAGE_DESCRIBE_V1, "USER");
+        assert!(
+            user.to_lowercase().contains("reference image"),
+            "user turn instructs examining the reference image"
+        );
+        assert!(
+            !user.contains("{{"),
+            "no template placeholders (the image is the input)"
+        );
+    }
+
+    #[test]
+    fn build_image_describe_messages_returns_prose_system_and_user() {
+        let (system, user) = build_image_describe_messages(DescribeStyle::Prose);
+        assert!(!system.trim().is_empty(), "system block is non-empty");
+        assert!(
+            !system.contains("compositional_deconstruction"),
+            "describe system prompt is prose, not the JSON caption schema"
+        );
+        assert!(!user.trim().is_empty(), "user block is non-empty");
+        assert!(!user.contains("{{"));
+    }
+
+    // ── sc-8205 (epic 8203): captionStyle="tags" describe variant ──
+
+    #[test]
+    fn describe_style_from_payload_only_tags_selects_tags() {
+        assert_eq!(
+            DescribeStyle::from_payload(Some("tags")),
+            DescribeStyle::Tags
+        );
+        assert_eq!(
+            DescribeStyle::from_payload(Some("TAGS")),
+            DescribeStyle::Tags
+        );
+        assert_eq!(
+            DescribeStyle::from_payload(Some(" tags ")),
+            DescribeStyle::Tags
+        );
+        // Default / empty / unknown → prose (defensive).
+        assert_eq!(DescribeStyle::from_payload(None), DescribeStyle::Prose);
+        assert_eq!(DescribeStyle::from_payload(Some("")), DescribeStyle::Prose);
+        assert_eq!(
+            DescribeStyle::from_payload(Some("prose")),
+            DescribeStyle::Prose
+        );
+        assert_eq!(
+            DescribeStyle::from_payload(Some("nonsense")),
+            DescribeStyle::Prose
+        );
+    }
+
+    #[test]
+    fn image_describe_tags_asset_extracts_a_booru_tag_contract() {
+        let system = magic_section_from(IMAGE_DESCRIBE_TAGS_V1, "SYSTEM");
+        assert!(!system.trim().is_empty(), "tags system block is non-empty");
+        assert!(
+            system.contains("comma-separated"),
+            "tags system pins a comma-separated tag list"
+        );
+        assert!(
+            system.to_lowercase().contains("booru") || system.to_lowercase().contains("danbooru"),
+            "tags system names the booru/danbooru convention"
+        );
+        assert!(
+            !system.contains("compositional_deconstruction"),
+            "tags path must NOT carry the JSON caption schema"
+        );
+        assert!(
+            system.to_lowercase().contains("observe"),
+            "tags system pins observe-don't-invent grounding"
+        );
+        assert!(!system.contains("thinking_mode"));
+    }
+
+    #[test]
+    fn build_image_describe_messages_selects_the_style_asset() {
+        let (prose_sys, _) = build_image_describe_messages(DescribeStyle::Prose);
+        let (tags_sys, tags_user) = build_image_describe_messages(DescribeStyle::Tags);
+        assert_ne!(
+            prose_sys, tags_sys,
+            "prose and tags select DIFFERENT system prompts"
+        );
+        assert!(
+            tags_sys.contains("comma-separated"),
+            "tags style loads the booru tag-list system prompt"
+        );
+        assert!(
+            tags_user.to_lowercase().contains("tag"),
+            "tags user turn instructs tagging"
+        );
+    }
+
+    #[test]
+    fn clean_refine_output_passes_prose_through_unwrapping_a_fence() {
+        // The describe path cleans with `clean_refine_output` (prose), NOT `clean_json_output`: a plain
+        // paragraph survives verbatim, and an accidental ```text fence is unwrapped without any
+        // JSON-object extraction.
+        let prose = "A red fox stands in deep snow at golden hour, side-lit, shot on a 50mm lens with \
+                     a shallow depth of field; muted whites and warm amber tones, cinematic photograph.";
+        assert_eq!(clean_refine_output(prose), prose);
+        let fenced = format!("```\n{prose}\n```");
+        assert_eq!(clean_refine_output(&fenced), prose);
     }
 
     #[test]
@@ -1493,6 +1767,68 @@ mod tests {
         );
     }
 
+    /// THE sc-8204 RISK GATE (epic 8203). The prose `image_describe` task drives the same Qwen-VL vision
+    /// path but emits NO JSON, so it sets NO output constraint — its resolution requirements are EMPTY
+    /// (`ModelRequirements::default()`). This proves that with no constraint AND no vision filter, the
+    /// resolver STILL admits `mlx-llama` for a `qwen3_vl` snapshot on architecture `can_load` alone: it
+    /// is the only provider that `can_load`s a Qwen-VL wrapper (`mlx-joycaption` only loads LLaVA), so an
+    /// unconstrained `select` cannot pick a wrong provider. Same weightless shape as the JSON-only tests:
+    /// resolution reaches `load`, which fails only on the missing weight shards — NOT an `Unsupported`
+    /// capability gap. macOS-only (the `mlx-llm` providers link there); no weights — reads only
+    /// `config.json`.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn unconstrained_resolution_selects_a_provider_for_qwen3_vl_snapshot() {
+        use gen_core::core_llm::{load_for_model_with, textllms, LoadSpec, ModelRequirements};
+        use mlx_llm as _; // force-link the providers into core-llm's inventory
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        write_qwen3_vl_config(dir.path());
+        let spec = LoadSpec {
+            source: dir.path().to_string_lossy().into_owned(),
+            quantize: None,
+        };
+
+        // The worker's image_describe resolution requirements: no constraint, no vision filter.
+        let reqs = ModelRequirements::default();
+        let err = load_for_model_with(&spec, &reqs)
+            .err()
+            .expect("no weights on disk, so the LOAD fails after the provider is selected");
+        let msg = err.to_string();
+        assert!(
+            !msg.contains("no linked provider meets")
+                && !msg.contains("no registered provider can serve"),
+            "unconstrained requirements must resolve a provider for a qwen3_vl snapshot (then fail on \
+             missing weights), got: {msg}"
+        );
+
+        // The provider admitted under EMPTY requirements for this qwen3_vl snapshot must be `mlx-llama`
+        // — the only one that `can_load`s a Qwen-VL wrapper. With no constraint/vision filter the viable
+        // predicate reduces to `can_load` alone, so a regression that admitted a non-image provider (or
+        // failed to admit `mlx-llama`) surfaces here.
+        let viable: Vec<String> = textllms()
+            .filter(|r| (r.can_load)(&spec))
+            .map(|r| (r.descriptor)().id)
+            .collect();
+        assert!(
+            viable.iter().any(|id| id == "mlx-llama"),
+            "unconstrained resolution must admit `mlx-llama` for a qwen3_vl snapshot; viable: {viable:?}"
+        );
+        // And the admitted provider is vision-capable at load (the weightless_vision probe), so the prose
+        // describe path examines the `Content::Image` exactly like the caption path does.
+        let vision_capable = textllms()
+            .filter(|r| (r.can_load)(&spec))
+            .filter(|r| (r.descriptor)().id == "mlx-llama")
+            .any(|r| {
+                r.weightless_vision.map(|p| p(&spec)).unwrap_or(false)
+                    || (r.descriptor)().capabilities.supports_vision
+            });
+        assert!(
+            vision_capable,
+            "the unconstrained-resolved `mlx-llama` must be vision-capable for a qwen3_vl snapshot"
+        );
+    }
+
     /// Real-weight image-caption smoke (sc-8105 → validated under sc-8113): examines a reference image
     /// and emits an Ideogram JSON caption through the unified mlx-llm VISION engine —
     /// `gen_core::core_llm::load_for_model_with` resolves `mlx-llama` on a Qwen-VL snapshot. The pick is
@@ -1573,6 +1909,81 @@ mod tests {
         assert!(
             sceneworks_core::ideogram_caption::is_caption(&parsed),
             "reply is a schema-valid Ideogram caption"
+        );
+    }
+
+    /// Real-weight image-DESCRIBE smoke (sc-8204, epic 8203): the prose sibling of
+    /// `image_caption_examines_reference_image`. Examines a reference image and emits a PLAIN-TEXT
+    /// description through the SAME mlx-llm vision engine — but with NO output constraint, so resolution
+    /// runs on architecture `can_load` ALONE (the sc-8204 risk gate, pinned weightlessly by
+    /// `unconstrained_resolution_selects_a_provider_for_qwen3_vl_snapshot`). The cleaned reply must be a
+    /// non-empty paragraph that is NOT JSON. `#[ignore]` — the weights live outside CI; run on a Mac:
+    ///   VISION_CAPTION_SNAPSHOT=<snapshot dir> IMAGE_CAPTION_REF=<image path> \
+    ///   cargo test -p sceneworks-worker --lib -- --ignored image_describe_examines_reference --nocapture
+    #[cfg(target_os = "macos")]
+    #[test]
+    #[ignore = "real-weight (sc-8209): needs a vision model snapshot + reference image; set VISION_CAPTION_SNAPSHOT + IMAGE_CAPTION_REF"]
+    fn image_describe_examines_reference_image() {
+        use gen_core::core_llm::{
+            load_for_model_with, Content, LoadSpec, Message, ModelRequirements, Role, Sampling,
+            StreamEvent, TextLlmRequest,
+        };
+        use mlx_llm as _;
+
+        let snapshot = std::env::var("VISION_CAPTION_SNAPSHOT")
+            .expect("set VISION_CAPTION_SNAPSHOT to a vision model snapshot dir");
+        let ref_path = std::env::var("IMAGE_CAPTION_REF")
+            .expect("set IMAGE_CAPTION_REF to a reference image path");
+
+        let image =
+            load_caption_image_ref(std::path::Path::new(&ref_path)).expect("decode ref image");
+        let (system, user) = build_image_describe_messages(DescribeStyle::Prose);
+        let request = TextLlmRequest {
+            messages: vec![
+                Message::system(system),
+                Message {
+                    role: Role::User,
+                    content: vec![Content::Image(image), Content::text(user)],
+                    thinking: None,
+                    tool_calls: Vec::new(),
+                },
+            ],
+            sampling: Sampling {
+                temperature: 0.4,
+                top_p: 0.9,
+                ..Sampling::default()
+            },
+            max_new_tokens: 1024,
+            seed: None,
+            // The describe path emits prose — NO JSON constraint.
+            constraint: None,
+            ..Default::default()
+        };
+        // Resolution requirements the SAME way the production image_describe path builds them: EMPTY
+        // (no constraint, no vision filter). `can_load` alone admits `mlx-llama`, which flips to vision at
+        // load — the risk gate this smoke exercises on real weights.
+        let reqs = ModelRequirements::default();
+        let describer = load_for_model_with(
+            &LoadSpec {
+                source: snapshot,
+                quantize: None,
+            },
+            &reqs,
+        )
+        .expect("load a vision provider via core-llm model-first unconstrained resolution");
+
+        let mut sink = |_event: StreamEvent| {};
+        let output = describer.generate(&request, &mut sink).expect("generate");
+        let prose = clean_refine_output(&output.text);
+        eprintln!("image-describe prose:\n{prose}");
+
+        assert!(
+            !prose.is_empty(),
+            "describe reply is a non-empty description"
+        );
+        assert!(
+            serde_json::from_str::<Value>(&prose).is_err(),
+            "describe reply is plain prose, not a JSON object"
         );
     }
 

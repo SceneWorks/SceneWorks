@@ -22,23 +22,29 @@ pub(crate) struct PromptRefineRequest {
     /// the web assets.
     pub(crate) guide: Option<String>,
     /// `"refine"` (default), `"magic_prompt"` (expand a plain idea into a structured
-    /// Ideogram 4 JSON caption, epic 4725/sc-5997), or `"image_caption"` (turn a
+    /// Ideogram 4 JSON caption, epic 4725/sc-5997), `"image_caption"` (turn a
     /// reference image into the same structured caption via the vision model, epic
-    /// 8102/sc-8108). The latter carries a `source_asset_id` + `project_id` instead of
-    /// a prompt; the handler resolves them to the worker's confined `imagePath`.
+    /// 8102/sc-8108), or `"image_describe"` (turn a reference image into a plain-text
+    /// description for a non-structured t2i model, epic 8203/sc-8206). The two vision
+    /// tasks carry a `source_asset_id` + `project_id` instead of a prompt; the handler
+    /// resolves them to the worker's confined `imagePath`.
     pub(crate) task: Option<String>,
     /// Target image aspect ratio as `"W:H"` (magic-prompt only); drives bbox/layout
     /// decisions in the caption. Defaults to `"1:1"` worker-side when absent.
     pub(crate) aspect_ratio: Option<String>,
-    /// Reference image for the `image_caption` task: a project asset id resolved to a
-    /// confined on-disk path before the job is enqueued (epic 8102, sc-8108).
+    /// Reference image for the vision tasks (`image_caption` / `image_describe`): a project
+    /// asset id resolved to a confined on-disk path before the job is enqueued (epic 8102/8203).
     pub(crate) source_asset_id: Option<String>,
-    /// Project owning `source_asset_id` (required for the `image_caption` task so the
+    /// Project owning `source_asset_id` (required for the vision tasks so the
     /// asset's relative `file.path` can be resolved to an absolute path).
     pub(crate) project_id: Option<String>,
     /// HF repo string of the model the worker should load (the worker resolves by repo,
-    /// not by catalog id). The web sends the vision model's repo for `image_caption`.
+    /// not by catalog id). The web sends the vision model's repo for the vision tasks.
     pub(crate) model: Option<String>,
+    /// Plain-text describe style for `image_describe` (epic 8203, sc-8205): `"prose"`
+    /// (default) or `"tags"` (booru/danbooru tags for anime SDXL checkpoints). Forwarded
+    /// verbatim; the worker parses it (unknown/absent → prose).
+    pub(crate) caption_style: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
