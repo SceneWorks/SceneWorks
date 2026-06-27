@@ -1475,6 +1475,11 @@ include!("image_jobs/base.rs");
 // Per-generation PiD (pixel-diffusion) super-resolving decoder routing (epic 7840, sc-7849).
 include!("image_jobs/pid.rs");
 #[cfg(target_os = "macos")]
+// Shared strict-control driver (epic 8236, sc-8243): the `(engine_id, control_repo, supported_kinds)`
+// single source of truth + the preprocess (pose/canny/depth/user-passthrough) → `Conditioning::Control`
+// core the three MLX registry strict-control paths (zimage/flux2/qwen below) route through.
+include!("image_jobs/strict_control.rs");
+#[cfg(target_os = "macos")]
 // Z-Image strict-pose and prompt augmentation helpers.
 include!("image_jobs/zimage.rs");
 #[cfg(target_os = "macos")]

@@ -16,7 +16,14 @@ fn qwen_control_available(request: &ImageRequest, settings: &Settings) -> bool {
 }
 
 fn resolve_qwen_control_weights(request: &ImageRequest, settings: &Settings) -> Option<PathBuf> {
-    resolve_control_weights_for(request, settings, QWEN_CONTROL_REPO, QWEN_CONTROL_FILE)
+    // Default repo from the shared strict-control table (single source of truth); the file stays
+    // engine-specific.
+    resolve_control_weights_for(
+        request,
+        settings,
+        strict_control_default_repo(QWEN_CONTROL_ENGINE_ID),
+        QWEN_CONTROL_FILE,
+    )
 }
 
 /// Load the Qwen-Image ControlNet-Union generator (base snapshot + InstantX control overlay).
@@ -50,8 +57,9 @@ fn qwen_control_load(
     })
 }
 
-/// Generate one Qwen strict-pose image: the pose skeleton drives the InstantX control branch at
-/// `control_scale`; prompt, true CFG, negative prompt, quant, and LoRA/LoKr mirror base Qwen.
+/// Generate one Qwen strict-pose image: the pre-built `conditioning` (the required `Control`, assembled by
+/// the shared [`build_control_conditioning`] driver) drives the InstantX control branch; prompt, true CFG,
+/// negative prompt, quant, and LoRA/LoKr mirror base Qwen.
 #[allow(clippy::too_many_arguments)]
 fn qwen_control_generate_one(
     generator: &dyn Generator,
@@ -62,8 +70,7 @@ fn qwen_control_generate_one(
     seed: i64,
     steps: u32,
     guidance: f32,
-    control: Image,
-    control_scale: f32,
+    conditioning: Vec<Conditioning>,
     use_pid: bool,
     cancel: &CancelFlag,
     on_progress: &mut dyn FnMut(Progress),
@@ -78,11 +85,7 @@ fn qwen_control_generate_one(
         steps: Some(steps),
         guidance: Some(guidance),
         use_pid,
-        conditioning: vec![Conditioning::Control {
-            image: control,
-            kind: ControlKind::Pose,
-            scale: control_scale,
-        }],
+        conditioning,
         cancel: cancel.clone(),
         ..Default::default()
     };
@@ -158,6 +161,13 @@ async fn generate_qwen_control_stream(
     let control_scale = resolve_control_scale(request);
     let adapters = resolve_adapters(request, settings)?;
     let repo = model_repo(request, &qwen);
+    // Shared strict-control driver: validate the requested ControlKind against the engine's
+    // supported_kinds (qwen_image_control = {Pose} only — qwen stays pose-only until sc-8250) + resolve an
+    // optional user-supplied control-map passthrough. The current (pose-only) job sets no `controlMode`, so
+    // `kind == Pose` and the skeleton preprocessor runs exactly as before.
+    let control_kind = requested_control_kind(request)?;
+    validate_control_kind(QWEN_CONTROL_ENGINE_ID, &control_kind)?;
+    let user_control = resolve_user_control_map(request, settings, project_path)?;
     let poses = parse_poses(request);
     let count = poses.len();
     let raw_settings = qwen_control_raw_settings(
@@ -191,20 +201,21 @@ async fn generate_qwen_control_stream(
         spec,
         "Qwen strict-pose control load failed".to_owned(),
         move |generator, tx, cancel| {
+            let user_control = user_control.as_ref();
             drive_gen_items(tx, poses, move |_index, pose, on_progress| {
-                let skeleton = crate::openpose_skeleton::draw_wholebody(
+                let control = preprocess_control_entry(
+                    &control_kind,
+                    user_control,
+                    Some(&pose),
+                    None,
                     width,
                     height,
-                    &pose.keypoints,
-                    pose.hands.as_deref(),
-                    pose.face.as_deref(),
                     stickwidth,
-                );
-                let control = Image {
-                    width,
-                    height,
-                    pixels: skeleton.into_raw(),
-                };
+                )?;
+                // qwen ignores a reference (identity comes from character LoRA on the base transformer),
+                // so no identity-init `Reference` — pose-only `Control` conditioning, byte-identical.
+                let conditioning =
+                    build_control_conditioning(control, control_kind.clone(), control_scale, None);
                 let (out_w, out_h, pixels) = qwen_control_generate_one(
                     generator,
                     &prompt,
@@ -214,8 +225,7 @@ async fn generate_qwen_control_stream(
                     seed,
                     steps,
                     guidance,
-                    control,
-                    control_scale,
+                    conditioning,
                     use_pid,
                     &cancel,
                     on_progress,

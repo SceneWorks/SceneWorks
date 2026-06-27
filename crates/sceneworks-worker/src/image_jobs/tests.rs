@@ -2076,6 +2076,7 @@ fn sc3031_ab_dump_pose() {
 
     let generator = zimage_control_load(weights, control_weights, quant, adapters).expect("load");
     let cancel = CancelFlag::new();
+    let conditioning = build_control_conditioning(control, ControlKind::Pose, control_scale, None);
     let (ow, oh, pixels) = zimage_control_generate_one(
         generator.as_ref(),
         &req.prompt,
@@ -2083,9 +2084,7 @@ fn sc3031_ab_dump_pose() {
         h,
         seed,
         steps,
-        control,
-        control_scale,
-        None,
+        conditioning,
         &cancel,
         &mut |_| {},
     )
@@ -2250,6 +2249,7 @@ fn zimage_control_real_weights_generates_one_pose() {
 
     let cancel = gen_core::CancelFlag::new();
     let mut steps_seen = 0u32;
+    let conditioning = build_control_conditioning(control, ControlKind::Pose, 0.9, None);
     let (w, h, pixels) = zimage_control_generate_one(
         generator.as_ref(),
         "a person standing in a meadow",
@@ -2257,9 +2257,7 @@ fn zimage_control_real_weights_generates_one_pose() {
         512,
         42,
         8,
-        control,
-        0.9,
-        None,
+        conditioning,
         &cancel,
         &mut |p| {
             if let gen_core::Progress::Step { current, .. } = p {
@@ -2330,6 +2328,7 @@ fn qwen_control_real_weights_generates_one_pose() {
 
     let cancel = gen_core::CancelFlag::new();
     let mut steps_seen = 0u32;
+    let conditioning = build_control_conditioning(control, ControlKind::Pose, 0.9, None);
     let (w, h, pixels) = qwen_control_generate_one(
         generator.as_ref(),
         "a person standing in a meadow",
@@ -2339,8 +2338,7 @@ fn qwen_control_real_weights_generates_one_pose() {
         42,
         4,
         4.0,
-        control,
-        0.9,
+        conditioning,
         false,
         &cancel,
         &mut |p| {
@@ -2487,7 +2485,12 @@ fn flux2_control_scale_defaults_and_clamps() {
 #[test]
 fn flux2_control_repo_file_defaults_and_overrides() {
     let (repo, file) = flux2_control_repo_file(&request(json!({ "projectId": "p" })));
-    assert_eq!(repo, FLUX2_CONTROL_REPO);
+    // The default repo now comes from the shared strict-control table (single source of truth).
+    assert_eq!(
+        repo,
+        strict_control_default_repo(FLUX2_DEV_CONTROL_ENGINE_ID)
+    );
+    assert_eq!(repo, "alibaba-pai/FLUX.2-dev-Fun-Controlnet-Union");
     assert_eq!(file, FLUX2_CONTROL_FILE);
     // `advanced.controlWeights` overrides repo + filename (parity with the Z-Image resolver).
     let (repo, file) = flux2_control_repo_file(&request(json!({
@@ -2625,6 +2628,7 @@ fn flux2_dev_control_real_weights_generates_one_pose() {
 
     let cancel = gen_core::CancelFlag::new();
     let mut steps_seen = 0u32;
+    let conditioning = build_control_conditioning(control, ControlKind::Pose, 0.75, None);
     let (w, h, pixels) = flux2_control_generate_one(
         generator.as_ref(),
         "a person standing in a meadow, photorealistic",
@@ -2633,9 +2637,7 @@ fn flux2_dev_control_real_weights_generates_one_pose() {
         42,
         8,
         Some(4.0), // dev embedded guidance
-        control,
-        0.75,
-        None,
+        conditioning,
         &cancel,
         &mut |p| {
             if let gen_core::Progress::Step { current, .. } = p {
@@ -4822,4 +4824,236 @@ fn boogu_real_weights_generates_base_turbo_edit() {
         root.display()
     );
     eprintln!("boogu real-weights smoke: {ran}/3 variants validated");
+}
+
+// ---------------------------------------------------------------------------
+// Shared strict-control driver (sc-8243): the `(engine_id, control_repo, supported_kinds)` single
+// source of truth + the preprocess → conditioning core the three MLX registry strict-control paths
+// (z-image / flux2 / qwen) route through. macOS-only (the driver is macOS-gated).
+// ---------------------------------------------------------------------------
+
+/// A small solid RGB control [`Image`] for passthrough / canny-source fixtures.
+#[cfg(target_os = "macos")]
+fn control_fixture(w: u32, h: u32, rgb: [u8; 3]) -> Image {
+    Image {
+        width: w,
+        height: h,
+        pixels: rgb
+            .iter()
+            .cycle()
+            .take((w * h * 3) as usize)
+            .copied()
+            .collect(),
+    }
+}
+
+/// A single pose entry parsed from a job (reuses `parse_poses` so the test exercises the real path).
+#[cfg(target_os = "macos")]
+fn one_pose() -> PoseInput {
+    let req = request(json!({
+        "projectId": "p", "model": "z_image_turbo", "prompt": "a knight",
+        "advanced": { "poses": [{ "keypoints": [[0.5, 0.5]] }] }
+    }));
+    parse_poses(&req).pop().expect("one pose")
+}
+
+/// SINGLE SOURCE OF TRUTH: the S0 `(engine_id, control_repo, supported_kinds)` table. Exercises the
+/// `repo` field (the catalog default sc-8244/sc-8245 consume) and the per-engine kind sets:
+/// flux2/z-image = {Pose, Canny, Depth}; qwen = {Pose} only.
+#[cfg(target_os = "macos")]
+#[test]
+fn strict_control_table_is_the_authority() {
+    let flux2 = strict_control_engine("flux2_dev_control").expect("flux2 row");
+    assert_eq!(flux2.repo, "alibaba-pai/FLUX.2-dev-Fun-Controlnet-Union");
+    assert_eq!(
+        flux2.supported_kinds,
+        &[ControlKind::Pose, ControlKind::Canny, ControlKind::Depth]
+    );
+
+    let zimage = strict_control_engine("z_image_turbo_control").expect("z-image row");
+    assert_eq!(
+        zimage.repo,
+        "alibaba-pai/Z-Image-Turbo-Fun-Controlnet-Union-2.1"
+    );
+    assert_eq!(
+        zimage.supported_kinds,
+        &[ControlKind::Pose, ControlKind::Canny, ControlKind::Depth]
+    );
+
+    let qwen = strict_control_engine("qwen_image_control").expect("qwen row");
+    assert_eq!(qwen.repo, "InstantX/Qwen-Image-ControlNet-Union");
+    // qwen stays pose-only until sc-8250 — canny/depth must NOT be unlocked here.
+    assert_eq!(qwen.supported_kinds, &[ControlKind::Pose]);
+
+    // The SDXL tile detail path is NOT a Fun-Union strict-control engine and must never route here.
+    assert!(strict_control_engine("flux2_dev").is_none());
+    assert!(strict_control_engine("sdxl_tile_control").is_none());
+}
+
+/// supported_kinds validation: pose accepted on every engine; canny/depth accepted on flux2/z-image
+/// but REJECTED on qwen; an unknown engine id is itself an error.
+#[cfg(target_os = "macos")]
+#[test]
+fn validate_control_kind_accepts_and_rejects_per_table() {
+    // Pose is the proven tier on all three.
+    for engine in [
+        "flux2_dev_control",
+        "z_image_turbo_control",
+        "qwen_image_control",
+    ] {
+        assert!(validate_control_kind(engine, &ControlKind::Pose).is_ok());
+    }
+    // Canny + Depth: flux2 / z-image accept.
+    for engine in ["flux2_dev_control", "z_image_turbo_control"] {
+        assert!(validate_control_kind(engine, &ControlKind::Canny).is_ok());
+        assert!(validate_control_kind(engine, &ControlKind::Depth).is_ok());
+    }
+    // qwen rejects canny + depth (pose-only until sc-8250) with an actionable message.
+    let err = validate_control_kind("qwen_image_control", &ControlKind::Canny)
+        .expect_err("qwen canny rejected");
+    let msg = err.to_string();
+    assert!(
+        msg.contains("qwen_image_control") && msg.contains("canny"),
+        "{msg}"
+    );
+    assert!(
+        validate_control_kind("qwen_image_control", &ControlKind::Depth).is_err(),
+        "qwen depth rejected"
+    );
+    // Unknown / non-Fun-Union engine id is rejected outright.
+    assert!(validate_control_kind("sdxl_tile_control", &ControlKind::Pose).is_err());
+}
+
+/// `requested_control_kind`: default Pose (no `controlMode` → byte-preserved pose path); parse
+/// canny/depth/pose; reject an unknown value.
+#[cfg(target_os = "macos")]
+#[test]
+fn requested_control_kind_defaults_to_pose_and_parses_modes() {
+    let kind = |adv: Value| {
+        requested_control_kind(&request(json!({
+            "projectId": "p", "model": "z_image_turbo", "prompt": "x", "advanced": adv
+        })))
+    };
+    // Every current job omits controlMode → Pose (the proven, byte-preserved tier).
+    assert_eq!(kind(json!({})).unwrap(), ControlKind::Pose);
+    assert_eq!(
+        kind(json!({ "controlMode": "pose" })).unwrap(),
+        ControlKind::Pose
+    );
+    assert_eq!(
+        kind(json!({ "controlMode": "Canny" })).unwrap(),
+        ControlKind::Canny
+    );
+    assert_eq!(
+        kind(json!({ "controlMode": "depth" })).unwrap(),
+        ControlKind::Depth
+    );
+    assert!(kind(json!({ "controlMode": "scribble" })).is_err());
+}
+
+/// Preprocessor dispatch by kind: pose → `draw_wholebody` (byte-identical to a direct call);
+/// user-supplied control map → verbatim passthrough for ANY kind; canny → edge map over a source;
+/// depth without a user map → the sc-8242 seam error.
+#[cfg(target_os = "macos")]
+#[test]
+fn preprocess_control_entry_dispatches_by_kind() {
+    let (w, h) = (64u32, 48u32);
+    let pose = one_pose();
+    let stick = crate::openpose_skeleton::body_stickwidth(w, h);
+
+    // Pose: byte-identical to the old per-engine skeleton render.
+    let got = preprocess_control_entry(&ControlKind::Pose, None, Some(&pose), None, w, h, stick)
+        .expect("pose preprocess");
+    let want = crate::openpose_skeleton::draw_wholebody(
+        w,
+        h,
+        &pose.keypoints,
+        pose.hands.as_deref(),
+        pose.face.as_deref(),
+        stick,
+    );
+    assert_eq!(got.width, w);
+    assert_eq!(got.height, h);
+    assert_eq!(
+        got.pixels,
+        want.into_raw(),
+        "pose preprocessor must be byte-identical"
+    );
+
+    // User-supplied passthrough wins for ANY kind (verbatim, skip preprocessing).
+    let supplied = control_fixture(w, h, [10, 20, 30]);
+    for kind in [ControlKind::Pose, ControlKind::Canny, ControlKind::Depth] {
+        let out = preprocess_control_entry(&kind, Some(&supplied), Some(&pose), None, w, h, stick)
+            .expect("passthrough");
+        assert_eq!(
+            out.pixels, supplied.pixels,
+            "{kind:?} passthrough must be verbatim"
+        );
+    }
+
+    // Canny over a source: produces a same-dimension RGB edge map (grayscale broadcast).
+    let source = control_fixture(w, h, [128, 128, 128]);
+    let canny =
+        preprocess_control_entry(&ControlKind::Canny, None, None, Some(&source), w, h, stick)
+            .expect("canny preprocess");
+    assert_eq!((canny.width, canny.height), (w, h));
+    assert_eq!(canny.pixels.len(), (w * h * 3) as usize);
+
+    // Canny without a source is an error (no synthetic input).
+    assert!(
+        preprocess_control_entry(&ControlKind::Canny, None, None, None, w, h, stick).is_err(),
+        "canny needs a source"
+    );
+
+    // Depth without a user map → the sc-8242 estimator seam error (not a silent pass).
+    let err = preprocess_control_entry(&ControlKind::Depth, None, None, None, w, h, stick)
+        .expect_err("depth seam");
+    assert!(err.to_string().contains("sc-8242"), "{}", err);
+}
+
+/// Conditioning construction: pose builds `Control { kind: Pose, scale }` (byte-identical to the old
+/// hand-built shape), optionally followed by the identity `Reference`; depth uses the dedicated
+/// `Depth` variant.
+#[cfg(target_os = "macos")]
+#[test]
+fn build_control_conditioning_matches_legacy_shape() {
+    let control = control_fixture(8, 8, [1, 2, 3]);
+
+    // Pose, no identity init → exactly the old `vec![Control { Pose, scale }]`.
+    let cond = build_control_conditioning(control.clone(), ControlKind::Pose, 0.9, None);
+    assert_eq!(cond.len(), 1);
+    match &cond[0] {
+        Conditioning::Control { image, kind, scale } => {
+            assert_eq!(image.pixels, control.pixels);
+            assert_eq!(*kind, ControlKind::Pose);
+            assert!((*scale - 0.9).abs() < 1e-6);
+        }
+        other => panic!("expected Control, got {other:?}"),
+    }
+
+    // Pose + identity init → Control then Reference (the flux2 / z-image opt-in tier).
+    let init = control_fixture(8, 8, [9, 9, 9]);
+    let cond = build_control_conditioning(
+        control.clone(),
+        ControlKind::Pose,
+        0.75,
+        Some(&(init.clone(), 0.6)),
+    );
+    assert_eq!(cond.len(), 2);
+    assert!(matches!(cond[0], Conditioning::Control { .. }));
+    match &cond[1] {
+        Conditioning::Reference { image, strength } => {
+            assert_eq!(image.pixels, init.pixels);
+            assert_eq!(*strength, Some(0.6));
+        }
+        other => panic!("expected Reference, got {other:?}"),
+    }
+
+    // Depth → the dedicated `Depth` variant (not `Control`).
+    let cond = build_control_conditioning(control.clone(), ControlKind::Depth, 1.0, None);
+    assert_eq!(cond.len(), 1);
+    assert!(
+        matches!(cond[0], Conditioning::Depth { .. }),
+        "depth uses Conditioning::Depth"
+    );
 }
