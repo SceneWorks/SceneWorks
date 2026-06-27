@@ -1733,10 +1733,19 @@ mod tests {
         // `attn.to_gate`, a projection no other family exposes.
         let mut keys = Vec::new();
         for block in 0..28 {
-            for module in ["attn.to_q", "attn.to_k", "attn.to_v", "attn.to_gate", "attn.to_out.0"]
-            {
-                keys.push(format!("transformer.transformer_blocks.{block}.{module}.lora_A.weight"));
-                keys.push(format!("transformer.transformer_blocks.{block}.{module}.lora_B.weight"));
+            for module in [
+                "attn.to_q",
+                "attn.to_k",
+                "attn.to_v",
+                "attn.to_gate",
+                "attn.to_out.0",
+            ] {
+                keys.push(format!(
+                    "transformer.transformer_blocks.{block}.{module}.lora_A.weight"
+                ));
+                keys.push(format!(
+                    "transformer.transformer_blocks.{block}.{module}.lora_B.weight"
+                ));
             }
         }
         let header = header_from_keys(&keys.iter().map(String::as_str).collect::<Vec<_>>());
