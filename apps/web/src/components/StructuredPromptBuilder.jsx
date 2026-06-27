@@ -24,6 +24,8 @@ import {
   STYLE_PALETTE_MAX,
 } from "../ideogramCaption.js";
 import PaletteEditor from "./PaletteEditor.jsx";
+import { ImageEditSourcePickerField } from "./AssetPicker.jsx";
+import { assetUrl } from "./assetMedia.jsx";
 
 const MODES = [
   ["form", "Builder"],
@@ -103,10 +105,21 @@ export default function StructuredPromptBuilder({
   onDownloadMagicModel,
   // sc-8109 / epic 8102 seam: invoked with the natural (width, height) of an uploaded
   // reference image so the parent can auto-preset the generation resolution to the
-  // nearest aspect (the caption's bboxes are normalized 0–1000 to the frame). The
-  // reference-image picker that calls this lands in sc-8108; until then this is unused.
-  // eslint-disable-next-line no-unused-vars
+  // nearest aspect (the caption's bboxes are normalized 0–1000 to the frame).
   onReferenceImageLoaded,
+  // Reference-image → JSON caption (epic 8102, sc-8108). When `onImageCaption` is supplied
+  // (Ideogram 4 + text-to-image only — the parent gates it), the Plain-text tab also offers a
+  // reference-image picker + "Generate JSON from image" button. `onImageCaption(assetId)` runs
+  // the worker's `image_caption` job and resolves to the RAW model reply; this component parses
+  // it with `parseVisionCaption` (bboxes KEPT, aspect_ratio stripped) and injects it, switching
+  // to the Builder. C1: the image is captioning-only — it is never sent to generation.
+  onImageCaption,
+  referenceAssets = [],
+  referenceCharacters = [],
+  importAsset,
+  projectId,
+  visionModelMissing = false,
+  onDownloadVisionModel,
 }) {
   const composition = getComposition(caption);
   const elements = getElements(caption);
@@ -117,6 +130,68 @@ export default function StructuredPromptBuilder({
   const [magicDownloadRequested, setMagicDownloadRequested] = useState(false);
   const magicModelNeeded =
     magicModelMissing || /not cached|not installed|snapshot is not/i.test(magicError);
+
+  // Reference-image → JSON caption state (epic 8102, sc-8108). Mirrors the magic-prompt loading +
+  // error + download affordance, but the trigger is an uploaded reference image rather than text.
+  const [referenceAssetId, setReferenceAssetId] = useState("");
+  const [captionBusy, setCaptionBusy] = useState(false);
+  const [captionError, setCaptionError] = useState("");
+  const [captionDownloadRequested, setCaptionDownloadRequested] = useState(false);
+  const captionModelNeeded =
+    visionModelMissing || /not cached|not installed|snapshot is not/i.test(captionError);
+
+  // Feed the uploaded image's natural dimensions to the sc-8109 auto-preset seam so the resolution
+  // snaps to the nearest aspect before generation (the caption's bboxes are frame-normalized).
+  function reportReferenceDimensions(asset) {
+    if (typeof onReferenceImageLoaded !== "function" || !asset) return;
+    const src = assetUrl(asset);
+    if (!src || typeof Image === "undefined") return;
+    const probe = new Image();
+    probe.onload = () => {
+      if (probe.naturalWidth && probe.naturalHeight) {
+        onReferenceImageLoaded(probe.naturalWidth, probe.naturalHeight);
+      }
+    };
+    probe.src = src;
+  }
+
+  function handleReferenceChange(assetId) {
+    setReferenceAssetId(assetId);
+    setCaptionError("");
+    const asset = referenceAssets.find((item) => item.id === assetId);
+    if (asset) reportReferenceDimensions(asset);
+  }
+
+  async function handleImageCaption() {
+    if (typeof onImageCaption !== "function" || !referenceAssetId || captionBusy) return;
+    setCaptionBusy(true);
+    setCaptionError("");
+    try {
+      const next = await onImageCaption(referenceAssetId);
+      // `next` is an already-parsed caption object (the parent runs parseVisionCaption); a falsy
+      // result means the reply was not a usable structured caption.
+      if (next) {
+        onCaptionChange(next);
+        onModeChange("form"); // drop the user into the editable builder, like magic-prompt
+      } else {
+        setCaptionError("The image did not produce a usable caption. Try another reference.");
+      }
+    } catch (e) {
+      setCaptionError(e?.message || "Could not caption the image.");
+    } finally {
+      setCaptionBusy(false);
+    }
+  }
+
+  async function handleDownloadVisionModel() {
+    if (typeof onDownloadVisionModel !== "function") return;
+    try {
+      const job = await onDownloadVisionModel();
+      if (job) setCaptionDownloadRequested(true);
+    } catch (e) {
+      setCaptionError(e?.message || "Could not start the model download.");
+    }
+  }
 
   async function handleMagicExpand() {
     if (typeof onMagicExpand !== "function" || !plainText.trim() || magicBusy) return;
@@ -350,6 +425,63 @@ export default function StructuredPromptBuilder({
               ) : magicError ? (
                 <p className="structured-error" role="alert">
                   {magicError}
+                </p>
+              ) : null}
+            </div>
+          ) : null}
+
+          {/* Reference-image → JSON caption (epic 8102, sc-8108). Gated by the parent to Ideogram 4 +
+              text-to-image: upload/pick a reference, generate a grounded JSON caption from it, and drop
+              into the Builder to edit before generating. The image is captioning-only (C1) — it is never
+              sent to generation as img2img conditioning. */}
+          {typeof onImageCaption === "function" ? (
+            <div className="structured-reference">
+              <p className="structured-hint">
+                Or start from a reference image — the captioner reads it into a grounded JSON caption you
+                can edit. The image is only used to write the caption; it isn’t sent to generation.
+              </p>
+              <ImageEditSourcePickerField
+                assets={referenceAssets}
+                buttonLabel="Select reference image"
+                changeLabel="Change reference"
+                characters={referenceCharacters}
+                emptyLabel="No reference image selected"
+                importAsset={importAsset}
+                label="Reference image"
+                onChange={handleReferenceChange}
+                projectId={projectId}
+                value={referenceAssetId}
+              />
+              <button
+                type="button"
+                className="secondary-action"
+                disabled={!referenceAssetId || captionBusy}
+                onClick={handleImageCaption}
+              >
+                {captionBusy ? "Captioning…" : "✨ Generate JSON from image"}
+              </button>
+              {captionError && captionModelNeeded ? (
+                <div className="structured-magic-missing" role="alert">
+                  {captionDownloadRequested ? (
+                    <p className="structured-hint">
+                      Downloading the vision captioner… track it on the Models screen, then try again.
+                    </p>
+                  ) : (
+                    <>
+                      <p className="structured-error">The vision captioner model isn’t installed yet.</p>
+                      {typeof onDownloadVisionModel === "function" ? (
+                        <button type="button" className="secondary-action" onClick={handleDownloadVisionModel}>
+                          Download vision captioner
+                        </button>
+                      ) : (
+                        <p className="structured-hint">Open the Models screen to download it.</p>
+                      )}
+                    </>
+                  )}
+                </div>
+              ) : captionError ? (
+                <p className="structured-error" role="alert">
+                  {captionError}
                 </p>
               ) : null}
             </div>

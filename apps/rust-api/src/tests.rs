@@ -4073,6 +4073,92 @@ async fn non_ideogram_image_job_skips_auto_caption() {
 }
 
 #[tokio::test]
+async fn image_caption_refine_job_resolves_asset_to_confined_image_path() {
+    // epic 8102 / sc-8108: the reference-image → JSON caption flow POSTs `task: "image_caption"` with a
+    // project `sourceAssetId` (+ `projectId`) and the vision model's repo. The handler resolves the
+    // asset to an absolute on-disk `imagePath` (inside the project dir), forwards the model verbatim,
+    // and enqueues a `prompt_refine` job carrying that image-caption payload (no text prompt required).
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+
+    let (_, project) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/projects",
+        json!({ "name": "Caption Project" }),
+    )
+    .await;
+    let project_id = project["id"].as_str().expect("project id").to_owned();
+    let project_path = std::path::PathBuf::from(project["path"].as_str().unwrap());
+
+    let (status, asset) = request_multipart_upload(
+        app.clone(),
+        &format!("/api/v1/projects/{project_id}/assets"),
+        "Reference.PNG",
+        "image/png",
+        b"png-bytes",
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    let asset_id = asset["id"].as_str().expect("asset id").to_owned();
+    let rel_path = asset["file"]["path"].as_str().expect("file path").to_owned();
+
+    let (status, job) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/prompts/refine",
+        json!({
+            "task": "image_caption",
+            "sourceAssetId": asset_id,
+            "projectId": project_id,
+            "model": "huihui-ai/Huihui-Qwen3-VL-8B-Instruct-abliterated"
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    assert_eq!(job["type"], "prompt_refine");
+    assert_eq!(job["payload"]["task"], "image_caption");
+    assert_eq!(
+        job["payload"]["model"],
+        "huihui-ai/Huihui-Qwen3-VL-8B-Instruct-abliterated"
+    );
+    // No text prompt is required for an image-caption job.
+    assert!(job["payload"].get("prompt").is_none());
+    // The resolved imagePath is the asset's absolute on-disk location inside the project dir.
+    let expected = project_path.join(&rel_path);
+    assert_eq!(
+        job["payload"]["imagePath"].as_str().unwrap(),
+        expected.display().to_string()
+    );
+}
+
+#[tokio::test]
+async fn image_caption_refine_job_requires_source_asset_and_project() {
+    // sc-8108: the image-caption task is driven by a reference asset, so it must reject a request that
+    // omits the `sourceAssetId` or `projectId` rather than enqueue an unresolvable job.
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+
+    let (status, _) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/prompts/refine",
+        json!({ "task": "image_caption", "projectId": "project-1" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+
+    let (status, _) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/prompts/refine",
+        json!({ "task": "image_caption", "sourceAssetId": "asset-1" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
 async fn image_and_video_job_routes_normalize_payloads() {
     let temp_dir = tempfile::tempdir().expect("temp dir creates");
     let app = create_app(test_settings(&temp_dir)).expect("app creates");

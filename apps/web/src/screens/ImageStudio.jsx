@@ -13,6 +13,7 @@ import {
   emptyCaption,
   orderCaption,
   parseMagicPromptCaption,
+  parseVisionCaption,
   serializeCaption,
   validateCaption,
 } from "../ideogramCaption.js";
@@ -95,7 +96,7 @@ import { useAppContext } from "../context/AppContext.js";
 import { ModelAvailabilityGate } from "../components/ModelAvailabilityGate.jsx";
 import { downloadOffersFor, imageModelUsable } from "../modelEligibility.js";
 import { pidToggleVisible } from "../pidEligibility.js";
-import { PROMPT_REFINE_MODEL_ID } from "../constants.js";
+import { PROMPT_REFINE_MODEL_ID, VISION_CAPTION_MODEL_ID, VISION_CAPTION_MODEL_REPO } from "../constants.js";
 import { pickClosestResolution } from "../resolutionMatch.js";
 import {
   DEFAULT_MAC_CAPABILITIES,
@@ -264,6 +265,7 @@ export function ImageStudio() {
     createPreset,
     refinePrompt,
     magicPrompt,
+    imageCaption,
     createModelDownloadJob,
     deleteAsset,
     purgeAsset,
@@ -293,6 +295,13 @@ export function ImageStudio() {
   // model isn't provisioned on the native worker.
   const refineModel = useMemo(
     () => models.find((entry) => entry.id === PROMPT_REFINE_MODEL_ID),
+    [models],
+  );
+  // Vision-captioner catalog entry (sc-8107) — drives the "download the vision model" affordance in
+  // the reference-image caption flow (sc-8108) when captioning fails because the model isn't installed.
+  // The eligibility/download gate proper is the sibling sc-8110; this is the inline fallback affordance.
+  const visionModel = useMemo(
+    () => models.find((entry) => entry.id === VISION_CAPTION_MODEL_ID),
     [models],
   );
   // Recent Assets list (sc-2088). When the new context value is available, use
@@ -955,6 +964,35 @@ export function ImageStudio() {
     [magicPrompt, model, width, height],
   );
 
+  // Reference-image → JSON caption (epic 8102, sc-8108): run the worker's `image_caption` vision job on
+  // the picked reference asset and parse the reply into an editable caption. Uses `parseVisionCaption`
+  // (strips the non-schema `aspect_ratio`, KEEPS the grounded bboxes — they are derived from the actual
+  // image, unlike magic-prompt's guessed boxes). Throws on a malformed/non-caption reply so the builder
+  // surfaces the error and lets the user retry, mirroring the magic-prompt error UX. C1: the image is
+  // captioning-only — it is consumed here to produce JSON and never passed to generation.
+  const onImageCaption = useCallback(
+    async (sourceAssetId) => {
+      if (typeof imageCaption !== "function") {
+        throw new Error("Image captioning is unavailable.");
+      }
+      if (!activeProject?.id) {
+        throw new Error("Open a project first.");
+      }
+      const raw = await imageCaption({
+        sourceAssetId,
+        projectId: activeProject.id,
+        model: VISION_CAPTION_MODEL_REPO,
+      });
+      const { caption: parsed, error } = parseVisionCaption(raw);
+      if (error || !parsed) {
+        throw new Error(error || "The image did not produce a usable caption.");
+      }
+      setMagicPromptBackend(VISION_CAPTION_MODEL_ID);
+      return parsed;
+    },
+    [imageCaption, activeProject?.id],
+  );
+
   // When restoring a snapshot, the saved count/resolution/negativePrompt already
   // reflect the user's last state — skip the one preset-default pass that fires as the
   // restored preset resolves so it doesn't overwrite them. "None" applies no defaults,
@@ -1400,10 +1438,20 @@ export function ImageStudio() {
                 onMagicExpand={magicPrompt ? onMagicExpand : undefined}
                 magicModelMissing={magicModelMissing}
                 onDownloadMagicModel={refineModel ? () => createModelDownloadJob(refineModel) : undefined}
-                // sc-8109 seam: the reference-image picker (sc-8108) calls this with the
-                // uploaded image's natural dimensions to auto-preset the resolution to the
-                // nearest aspect. No-op until that picker lands.
+                // sc-8109 seam: the reference-image picker calls this with the uploaded image's
+                // natural dimensions to auto-preset the resolution to the nearest aspect.
                 onReferenceImageLoaded={onReferenceImageLoaded}
+                // Reference-image → JSON caption (epic 8102, sc-8108). Gated to text-to-image ONLY:
+                // edit/character modes condition on their own source/identity image, so a fresh
+                // scene caption written from a different reference would conflict. The image is
+                // captioning-only (C1) — never sent to generation.
+                onImageCaption={mode === "text_to_image" && imageCaption ? onImageCaption : undefined}
+                referenceAssets={editImageAssets}
+                referenceCharacters={characters}
+                importAsset={importAsset}
+                projectId={activeProject?.id ?? ""}
+                visionModelMissing={visionModel?.installState === "missing"}
+                onDownloadVisionModel={visionModel ? () => createModelDownloadJob(visionModel) : undefined}
               />
             ) : (
               <textarea

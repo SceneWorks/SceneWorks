@@ -23,7 +23,20 @@ describe("StructuredPromptBuilder", () => {
 
   // Stateful wrapper so we can drive the controlled component and read back the
   // caption it builds.
-  function Harness({ initialMode = "form", initialCaption, initialPlain = "", onMagicExpand, magicModelMissing = false, onDownloadMagicModel }) {
+  function Harness({
+    initialMode = "form",
+    initialCaption,
+    initialPlain = "",
+    onMagicExpand,
+    magicModelMissing = false,
+    onDownloadMagicModel,
+    onImageCaption,
+    referenceAssets = [],
+    projectId = "",
+    visionModelMissing = false,
+    onDownloadVisionModel,
+    onReferenceImageLoaded,
+  }) {
     const [caption, setCaption] = useState(initialCaption ?? emptyCaption());
     const [mode, setMode] = useState(initialMode);
     const [plain, setPlain] = useState(initialPlain);
@@ -41,6 +54,12 @@ describe("StructuredPromptBuilder", () => {
         onMagicExpand={onMagicExpand}
         magicModelMissing={magicModelMissing}
         onDownloadMagicModel={onDownloadMagicModel}
+        onImageCaption={onImageCaption}
+        referenceAssets={referenceAssets}
+        projectId={projectId}
+        visionModelMissing={visionModelMissing}
+        onDownloadVisionModel={onDownloadVisionModel}
+        onReferenceImageLoaded={onReferenceImageLoaded}
       />
     );
   }
@@ -214,6 +233,90 @@ describe("StructuredPromptBuilder", () => {
   it("hides the magic-prompt button when no expander is provided", async () => {
     await mount({ initialMode: "plain", initialPlain: "an idea" });
     expect(buttonByText("✨ Expand to caption")).toBeFalsy();
+  });
+
+  // ----- reference-image → JSON caption (epic 8102, sc-8108) -----
+
+  const refAsset = {
+    id: "ref-1",
+    type: "image",
+    projectId: "proj-1",
+    file: { path: "uploads/ref.png", mimeType: "image/png" },
+  };
+
+  // Pick a reference image through the asset picker modal so the caption button enables.
+  async function selectReference() {
+    await clickAndSettle(buttonByText("Select reference image"));
+    const card = container.querySelector(".asset-picker-card");
+    await clickAndSettle(card);
+    await clickAndSettle(buttonByText("Use Selection"));
+  }
+
+  it("captions a picked reference image into the editable builder (sc-8108)", async () => {
+    const captioned = {
+      high_level_description: "a red fox",
+      compositional_deconstruction: {
+        background: "snow",
+        elements: [{ type: "obj", bbox: [100, 100, 500, 500], desc: "a red fox" }],
+      },
+    };
+    const onImageCaption = vi.fn(async () => captioned);
+    await mount({ initialMode: "plain", onImageCaption, referenceAssets: [refAsset], projectId: "proj-1" });
+    await selectReference();
+    await clickAndSettle(buttonByText("✨ Generate JSON from image"));
+
+    expect(onImageCaption).toHaveBeenCalledWith("ref-1");
+    expect(snap.mode).toBe("form"); // dropped into the builder
+    // bboxes are KEPT (parseVisionCaption strips aspect_ratio only).
+    expect(snap.caption).toEqual(captioned);
+  });
+
+  it("keeps the caption button disabled until a reference is selected (sc-8108)", async () => {
+    const onImageCaption = vi.fn(async () => ({}));
+    await mount({ initialMode: "plain", onImageCaption, referenceAssets: [refAsset], projectId: "proj-1" });
+    expect(buttonByText("✨ Generate JSON from image").disabled).toBe(true);
+    await selectReference();
+    expect(buttonByText("✨ Generate JSON from image").disabled).toBe(false);
+  });
+
+  it("surfaces an image-caption error and stays on plain text (sc-8108)", async () => {
+    const onImageCaption = vi.fn(async () => {
+      throw new Error("captioning blew up");
+    });
+    await mount({ initialMode: "plain", onImageCaption, referenceAssets: [refAsset], projectId: "proj-1" });
+    await selectReference();
+    await clickAndSettle(buttonByText("✨ Generate JSON from image"));
+
+    expect(container.querySelector(".structured-error")?.textContent).toContain("captioning blew up");
+    expect(snap.mode).toBe("plain");
+  });
+
+  it("offers a vision-model download when the captioner is missing (sc-8108)", async () => {
+    const onImageCaption = vi.fn(async () => {
+      throw new Error("snapshot is not cached");
+    });
+    const onDownloadVisionModel = vi.fn(async () => ({ id: "job1" }));
+    await mount({
+      initialMode: "plain",
+      onImageCaption,
+      referenceAssets: [refAsset],
+      projectId: "proj-1",
+      visionModelMissing: true,
+      onDownloadVisionModel,
+    });
+    await selectReference();
+    await clickAndSettle(buttonByText("✨ Generate JSON from image"));
+
+    const download = buttonByText("Download vision captioner");
+    expect(download).toBeTruthy();
+    await clickAndSettle(download);
+    expect(onDownloadVisionModel).toHaveBeenCalled();
+  });
+
+  it("hides the reference-image flow when no captioner is wired (gating, sc-8108)", async () => {
+    await mount({ initialMode: "plain", initialPlain: "an idea" });
+    expect(buttonByText("✨ Generate JSON from image")).toBeFalsy();
+    expect(container.querySelector(".structured-reference")).toBeFalsy();
   });
 
   it("reports blocking validation errors in the preview (out-of-range bbox)", async () => {

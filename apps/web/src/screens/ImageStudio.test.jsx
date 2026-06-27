@@ -798,6 +798,112 @@ describe("ImageStudio structured-prompt recipe round-trip (sc-6147)", () => {
   });
 });
 
+describe("ImageStudio reference-image → JSON caption (epic 8102, sc-8108)", () => {
+  let container;
+  let root;
+
+  beforeEach(() => {
+    global.IS_REACT_ACT_ENVIRONMENT = true;
+    window.localStorage.clear();
+    container = document.createElement("div");
+    document.body.appendChild(container);
+    root = createRoot(container);
+  });
+
+  afterEach(async () => {
+    await act(async () => root.unmount());
+    container.remove();
+    vi.clearAllMocks();
+  });
+
+  async function render(context) {
+    await act(async () => {
+      root.render(
+        <AppContext.Provider value={context}>
+          <ImageStudio />
+        </AppContext.Provider>,
+      );
+    });
+    await act(async () => {});
+  }
+
+  const IDEOGRAM = {
+    ...Z_IMAGE,
+    id: "ideogram_4",
+    name: "Ideogram 4",
+    family: "ideogram",
+    capabilities: ["text_to_image"],
+    structuredPrompt: true,
+  };
+
+  const REF_ASSET = {
+    id: "ref-asset-1",
+    type: "image",
+    projectId: "project_1",
+    file: { path: "uploads/ref.png", mimeType: "image/png" },
+  };
+
+  // The vision model reply carries a grounded bbox; parseVisionCaption KEEPS bboxes (strips only
+  // aspect_ratio), so the injected caption must still carry the box.
+  const VISION_REPLY = JSON.stringify({
+    aspect_ratio: "1:1",
+    high_level_description: "a red fox in the snow",
+    compositional_deconstruction: {
+      background: "a snowy forest",
+      elements: [{ type: "obj", bbox: [100, 100, 600, 600], desc: "a red fox" }],
+    },
+  });
+
+  const buttonByText = (text) =>
+    [...container.querySelectorAll("button")].find((b) => b.textContent.trim() === text);
+
+  // Switch the structured builder to its Plain-text tab, where the reference-image flow lives.
+  async function openPlainTab() {
+    const plainTab = [...container.querySelectorAll(".structured-mode button")].find(
+      (b) => b.textContent.trim() === "Plain text",
+    );
+    await click(plainTab);
+  }
+
+  it("shows the reference-image flow for Ideogram 4 in text-to-image mode", async () => {
+    await render(baseContext({ imageModels: [IDEOGRAM], imageCaption: vi.fn() }));
+    await openPlainTab();
+    expect(buttonByText("✨ Generate JSON from image")).toBeTruthy();
+    expect(container.querySelector(".structured-reference")).toBeTruthy();
+  });
+
+  it("captions a reference image into the builder, keeping bboxes (sc-8108)", async () => {
+    const imageCaption = vi.fn(async () => VISION_REPLY);
+    await render(
+      baseContext({ imageModels: [IDEOGRAM], assets: [REF_ASSET], imageCaption }),
+    );
+    await openPlainTab();
+
+    // Pick the reference through the asset picker modal so the button enables.
+    await click(buttonByText("Select reference image"));
+    await click(container.querySelector(".asset-picker-card"));
+    await click(buttonByText("Use Selection"));
+
+    await click(buttonByText("✨ Generate JSON from image"));
+    await act(async () => {});
+
+    // Dispatched with the asset id, the project id, and the vision model's HF repo string.
+    expect(imageCaption).toHaveBeenCalledTimes(1);
+    const arg = imageCaption.mock.calls[0][0];
+    expect(arg.sourceAssetId).toBe("ref-asset-1");
+    expect(arg.projectId).toBe("project_1");
+    expect(arg.model).toBe("huihui-ai/Huihui-Qwen3-VL-8B-Instruct-abliterated");
+
+    // The builder is populated (it switched to the form) and the grounded bbox survived.
+    const preview = container.querySelector('[aria-label="Caption preview"]');
+    expect(preview).toBeTruthy();
+    expect(preview.textContent).toContain("a red fox");
+    expect(preview.textContent).toContain("100");
+    // aspect_ratio is NOT a schema key and must be stripped.
+    expect(preview.textContent).not.toContain("aspect_ratio");
+  });
+});
+
 describe("ImageStudio Ideogram 4 auto-expand on plain-text Generate (sc-6501)", () => {
   let container;
   let root;

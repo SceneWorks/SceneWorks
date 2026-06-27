@@ -1477,6 +1477,44 @@ export function App() {
     [token],
   );
 
+  // Reference-image → JSON caption (epic 8102, sc-8108): same `prompts/refine` endpoint + poll-to-
+  // completion contract as magic-prompt, but `task: "image_caption"` drives the worker's `core_llm`
+  // VISION path (sc-8105). The reference image is supplied as a project `sourceAssetId` (+ `projectId`),
+  // which the API resolves to a confined on-disk `imagePath`; the vision model is named by its HF repo
+  // string in `model` (the worker resolves it by repo, like the refiner). The caller parses + validates
+  // the returned JSON with `parseVisionCaption` (aspect_ratio stripped, bboxes KEPT). C1: the image is
+  // consumed only to produce the caption — it is NEVER passed to generation as img2img conditioning.
+  const imageCaption = useCallback(
+    async ({ sourceAssetId, projectId, model, signal }) => {
+      const created = await apiFetch("/api/v1/prompts/refine", token, {
+        method: "POST",
+        signal,
+        body: JSON.stringify({ task: "image_caption", sourceAssetId, projectId, model }),
+      });
+      const jobId = created?.id;
+      if (!jobId) {
+        throw new Error("Could not start image captioning.");
+      }
+      const deadline = Date.now() + 180000;
+      while (Date.now() < deadline) {
+        await abortableDelay(1000, signal);
+        const job = await apiFetch(`/api/v1/jobs/${jobId}`, token, { signal });
+        if (job.status === "completed") {
+          const caption = job.result?.refinedPrompt;
+          if (!caption) {
+            throw new Error("Image captioning returned an empty caption.");
+          }
+          return caption;
+        }
+        if (job.status === "failed" || job.status === "canceled" || job.status === "interrupted") {
+          throw new Error(job.message || job.error || "Image captioning failed.");
+        }
+      }
+      throw new Error("Image captioning timed out. Is the captioning runtime running?");
+    },
+    [token],
+  );
+
   const createVqaJob = useCallback(
     async (asset, question, maxNewTokens) => {
       if (!activeProject) {
@@ -1841,6 +1879,7 @@ export function App() {
     createImageJob,
     refinePrompt,
     magicPrompt,
+    imageCaption,
     latestVideoAssets,
     recentImageAssets,
     recentVideoAssets,
@@ -1937,7 +1976,7 @@ export function App() {
     updateAssetStatus, updateAssetTags, latestImageAssets,
     jobs, jobAction, createVqaJob, createInterleaveJob, createPlaceholderJob, filteredJobs,
     jobPrompt, setJobPrompt, projectFilter, setProjectFilter, projects, visibleWorkers, workersById,
-    createVideoJob, createVideoUpscaleJob, createImageJob, refinePrompt, magicPrompt, latestVideoAssets, recentImageAssets,
+    createVideoJob, createVideoUpscaleJob, createImageJob, refinePrompt, magicPrompt, imageCaption, latestVideoAssets, recentImageAssets,
     recentVideoAssets, videoLocalJobs, imageLocalJobs, documentLocalJobs, studioLaunch,
     rememberLocalGenerationJob, personTracks, personReadiness, createPersonDetectionJob,
     createPersonTrackJob, saveTrackCorrections, imageModels, videoModels, models, macCapabilities,

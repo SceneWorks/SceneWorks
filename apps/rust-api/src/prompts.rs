@@ -9,13 +9,55 @@ pub(crate) async fn create_prompt_refine_job(
     State(state): State<AppState>,
     ApiJson(payload): ApiJson<PromptRefineRequest>,
 ) -> Result<(StatusCode, Json<JobSnapshot>), ApiError> {
+    let task = payload
+        .task
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    // The reference-image → JSON caption task (epic 8102, sc-8108) is driven by an image, not a text
+    // prompt: it carries a project `sourceAssetId` instead. Resolve that to the worker's confined
+    // on-disk `imagePath` and forward the vision model's repo; the prompt requirement is waived.
+    let is_image_caption = task == Some("image_caption");
+
     let prompt = payload.prompt.trim();
-    if prompt.is_empty() {
+    if prompt.is_empty() && !is_image_caption {
         return Err(ApiError::bad_request("Prompt cannot be empty"));
     }
 
     let mut job_payload = JsonObject::new();
-    job_payload.insert("prompt".to_owned(), Value::String(prompt.to_owned()));
+    if !prompt.is_empty() {
+        job_payload.insert("prompt".to_owned(), Value::String(prompt.to_owned()));
+    }
+
+    if is_image_caption {
+        let asset_id = payload
+            .source_asset_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .ok_or_else(|| {
+                ApiError::bad_request("sourceAssetId is required for image_caption")
+            })?;
+        let project_id = payload
+            .project_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .ok_or_else(|| ApiError::bad_request("projectId is required for image_caption"))?;
+        let image_path =
+            resolve_image_caption_path(state.clone(), project_id, asset_id).await?;
+        job_payload.insert("imagePath".to_owned(), Value::String(image_path));
+        // The vision model is named by its HF repo string; the worker resolves it by repo (like the
+        // refiner), so it must be carried verbatim rather than as a catalog id.
+        if let Some(model) = payload
+            .model
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        {
+            job_payload.insert("model".to_owned(), Value::String(model.to_owned()));
+        }
+    }
 
     let workflow = payload
         .workflow
@@ -65,4 +107,44 @@ pub(crate) async fn create_prompt_refine_job(
     )
     .await?;
     Ok((StatusCode::CREATED, Json(job)))
+}
+
+/// Resolve an `image_caption` reference asset to an absolute on-disk path. Mirrors the worker's
+/// `resolve_asset_path`: read the asset record's relative `file.path`, join it under the owning
+/// project's directory using only `Normal` path components (rejecting `..`/absolute traversal), and
+/// confirm the file exists. The worker independently re-confines this path to an app-managed root
+/// before opening it (epic 4484 untrusted-input policy), so this is defence-in-depth, not the sole
+/// guard. Returns a 400 for a missing/garbled asset record or a path that escapes the project root.
+async fn resolve_image_caption_path(
+    state: AppState,
+    project_id: &str,
+    asset_id: &str,
+) -> Result<String, ApiError> {
+    let project_path = project_path_for_id(state.clone(), project_id).await?;
+    let project_id_owned = project_id.to_owned();
+    let asset_id_owned = asset_id.to_owned();
+    let asset = project_call(state, move |store| {
+        store.get_asset(&project_id_owned, &asset_id_owned)
+    })
+    .await?;
+    let rel = asset
+        .get("file")
+        .and_then(|file| file.get("path"))
+        .and_then(Value::as_str)
+        .ok_or_else(|| ApiError::bad_request("Reference asset has no file path"))?;
+    let mut path = project_path;
+    for component in std::path::Path::new(rel).components() {
+        match component {
+            std::path::Component::Normal(value) => path.push(value),
+            _ => {
+                return Err(ApiError::bad_request(
+                    "Reference asset path must stay inside the project directory",
+                ))
+            }
+        }
+    }
+    if !path.exists() {
+        return Err(ApiError::bad_request("Reference image not found on disk"));
+    }
+    Ok(path.display().to_string())
 }
