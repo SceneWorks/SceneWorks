@@ -607,6 +607,83 @@ impl TrainingDatasetStore {
         Ok(dataset)
     }
 
+    /// Backfill: transcode any dataset item whose stored bytes are a valid-but-unsupported format
+    /// (AVIF/HEIC/HEIF/TIFF/BMP/GIF) to lossless PNG in place, repointing the item (sc-8225). A
+    /// one-time fix for datasets built before import/build normalization (sc-6143 / sc-8224): the
+    /// trainer reads dataset images straight through the engine with NO decode backstop, so a
+    /// pre-existing AVIF would fail an actual LoRA run. Idempotent — a dataset whose images are all
+    /// natively supported (or unreadable/unrecognized) is returned unchanged with no version bump.
+    /// Repoints exactly like [`Self::repoint_dataset_items`] (new dims + content hash, stale Tier-0 /
+    /// quality-ack caches cleared, version bumped) since the bytes genuinely change; the item id,
+    /// caption, and asset lineage are preserved — the source is the item's own re-encoded image.
+    pub fn normalize_unsupported_images(
+        &self,
+        project_id: &str,
+        dataset_id: &str,
+    ) -> ProjectStoreResult<TrainingDataset> {
+        let mut dataset = self.read_dataset_by_id(dataset_id)?;
+        ensure_dataset_project(project_id, &dataset)?;
+        let root = dataset_root(&self.project_path, &dataset.id);
+        let media_dir = root.join("images");
+        let mut changed = false;
+        for index in 0..dataset.items.len() {
+            let source = root.join(&dataset.items[index].path);
+            let Some(kind) = crate::media_convert::sniff_image_kind_at(&source) else {
+                // Unreadable / unrecognized (e.g. a missing file or SVG) — leave it for the engine's
+                // own error path; we only rewrite a format we positively recognize as transcodable.
+                continue;
+            };
+            if kind.is_natively_supported() {
+                continue;
+            }
+            let item_id = dataset.items[index].id.clone();
+            fs::create_dir_all(&media_dir)?;
+            // Transcode to a temp PNG first, then move it into the canonical slot. This also covers a
+            // mislabeled `.png` whose bytes are really AVIF (source == target) without a sips
+            // read-while-write clobber.
+            let temp = media_dir.join(format!(".{item_id}.transcode.png"));
+            crate::media_convert::transcode_to_png(&source, &temp).map_err(|error| {
+                let _ = fs::remove_file(&temp);
+                ProjectStoreError::BadRequest(format!(
+                    "Could not convert {} dataset image to a supported format: {error}",
+                    kind.label()
+                ))
+            })?;
+            let relative_path = format!("images/{item_id}.png");
+            let target = root.join(&relative_path);
+            if fs::rename(&temp, &target).is_err() {
+                fs::copy(&temp, &target)?;
+                let _ = fs::remove_file(&temp);
+            }
+            // Drop the original if it was a differently-named file (e.g. `.avif`), to avoid orphans.
+            if source != target && source.exists() {
+                let _ = fs::remove_file(&source);
+            }
+            let (width, height) = match crate::media_convert::image_dimensions(&target) {
+                Some((file_w, file_h)) => (Some(file_w), Some(file_h)),
+                None => (None, None),
+            };
+            let content_hash = crate::media_convert::file_content_hash(&target).ok();
+            dataset.items[index] = repoint_item(
+                &dataset.items[index],
+                RepointSource {
+                    asset_id: dataset.items[index].asset_id.clone(),
+                    path: relative_path,
+                    width,
+                    height,
+                    content_hash,
+                },
+            );
+            changed = true;
+        }
+        if changed {
+            dataset.version = dataset.version.saturating_add(1);
+            dataset.updated_at = utc_now();
+            self.save_dataset(&dataset)?;
+        }
+        Ok(dataset)
+    }
+
     pub fn write_caption_sidecars(
         &self,
         project_id: &str,
@@ -1915,6 +1992,59 @@ mod tests {
         );
         assert!(root.join("images/item_1.png").exists(), "new png written");
         assert!(!old_jpg.exists(), "the orphaned .jpg is removed");
+    }
+
+    /// sc-8225 backfill: a dataset built before normalization that still holds an AVIF/BMP on disk
+    /// is transcoded to PNG in place and the item repointed (path, dims, hash, caches cleared, version
+    /// bumped); a second pass is a no-op. macOS-only (relies on `sips`); the ffmpeg path is identical.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn normalize_unsupported_images_transcodes_preexisting_items_and_is_idempotent() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let store = saved_dataset(dir.path()); // ds_test @ v1, items item_1 + item_2 (both .png paths)
+        let root = dataset_root(&store.project_path, "ds_test");
+        let images = root.join("images");
+        std::fs::create_dir_all(&images).unwrap();
+
+        // Simulate a pre-normalization dataset: item_1's on-disk file is really a BMP (the same decode
+        // gap AVIF hits); item_2 is a genuine (already-supported) PNG that must be left untouched.
+        let mut dataset = store.get_dataset("proj", "ds_test").expect("read");
+        dataset.items[0].path = "images/item_1.bmp".to_owned();
+        dataset.items[0].tier0_scalars = None;
+        store.save_dataset(&dataset).expect("save");
+        std::fs::write(images.join("item_1.bmp"), one_pixel_bmp()).unwrap();
+        std::fs::write(images.join("item_2.png"), b"\x89PNG\r\n\x1a\n fake png").unwrap();
+        let version_before = store.get_dataset("proj", "ds_test").unwrap().version;
+
+        let updated = store
+            .normalize_unsupported_images("proj", "ds_test")
+            .expect("backfill");
+
+        // BMP item repointed to a real PNG; the orphaned .bmp is gone; version bumped once.
+        assert_eq!(updated.version, version_before + 1);
+        let item1 = updated.items.iter().find(|i| i.id == "item_1").unwrap();
+        assert_eq!(item1.path, "images/item_1.png");
+        assert!(!images.join("item_1.bmp").exists(), "orphaned .bmp removed");
+        let stored = std::fs::read(images.join("item_1.png")).unwrap();
+        assert_eq!(
+            crate::media_convert::sniff_image_kind(&stored),
+            Some(crate::media_convert::ImageKind::Png),
+            "stored bytes are genuinely PNG"
+        );
+        assert_eq!((item1.width, item1.height), (Some(1), Some(1)));
+        assert!(
+            item1.tier0_scalars.is_none() && item1.quality_ack.is_none(),
+            "stale caches cleared"
+        );
+        // The already-supported PNG item is left exactly as-is.
+        let item2 = updated.items.iter().find(|i| i.id == "item_2").unwrap();
+        assert_eq!(item2.path, "images/item_2.png");
+
+        // Idempotent: nothing unsupported remains, so a second pass does not bump the version.
+        let again = store
+            .normalize_unsupported_images("proj", "ds_test")
+            .expect("second backfill");
+        assert_eq!(again.version, updated.version);
     }
 
     #[test]

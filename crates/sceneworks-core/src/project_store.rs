@@ -594,6 +594,19 @@ impl ProjectStore {
             .repoint_dataset_items(project_id, dataset_id, repoints)
     }
 
+    /// Backfill a training dataset's valid-but-unsupported images (AVIF/HEIC/…) to PNG in place
+    /// (sc-8225) — the one-time fix for datasets built before normalization, run pre-train so the
+    /// engine (which reads dataset images with no decode backstop) never sees an undecodable format.
+    /// Locked wrapper over [`TrainingDatasetStore::normalize_unsupported_images`].
+    pub fn normalize_training_dataset_unsupported_images(
+        &self,
+        project_id: &str,
+        dataset_id: &str,
+    ) -> ProjectStoreResult<TrainingDataset> {
+        let (project_path, _project_guard) = self.lock_project(project_id)?;
+        TrainingDatasetStore::new(project_path).normalize_unsupported_images(project_id, dataset_id)
+    }
+
     /// Read the dataset's CLIP embeddings sidecar (`None` if the analysis job hasn't run). Locked
     /// wrapper over [`TrainingDatasetStore::read_dataset_embeddings`].
     pub fn read_dataset_embeddings(

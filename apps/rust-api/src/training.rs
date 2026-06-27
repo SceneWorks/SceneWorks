@@ -1148,13 +1148,14 @@ pub(crate) async fn create_training_job(
 
     // Load the dataset, its absolute root, and the project name for the queue.
     let dataset_id = payload.dataset_id.clone();
-    let (dataset, dataset_root, project_name) = project_call(state.clone(), {
+    let (mut dataset, dataset_root, project_name) = project_call(state.clone(), {
         let project_id = project_id.clone();
         move |store| store.training_dataset_for_plan(&project_id, &dataset_id)
     })
     .await?;
 
-    // We persist only the dataset's current version, so an older pin is unrunnable.
+    // We persist only the dataset's current version, so an older pin is unrunnable. Checked against
+    // the version the caller saw, before the pre-train backfill below may bump it.
     if let Some(requested_version) = payload.dataset_version {
         if requested_version != dataset.version {
             return Err(ApiError::bad_request(format!(
@@ -1162,6 +1163,23 @@ pub(crate) async fn create_training_job(
                 dataset.id, dataset.version
             )));
         }
+    }
+
+    // sc-8225: a real run hands each dataset image path straight to the engine, which decodes it with
+    // no backstop. Datasets built before normalization (sc-6143 / sc-8224) can still hold a valid-but-
+    // unsupported image (AVIF/HEIC) on disk, which would fail the run. Backfill it to PNG in place
+    // first (idempotent; only bumps the version if it actually rewrote a file), then build the plan
+    // from the normalized dataset. A dry run only resolves/validates the plan (no decode), so it stays
+    // side-effect-free and skips this.
+    if !payload.dry_run {
+        let dataset_id = payload.dataset_id.clone();
+        dataset = project_call(state.clone(), {
+            let project_id = project_id.clone();
+            move |store| {
+                store.normalize_training_dataset_unsupported_images(&project_id, &dataset_id)
+            }
+        })
+        .await?;
     }
 
     // Resolve absolute on-host paths and ids the kernel will consume. The job id
