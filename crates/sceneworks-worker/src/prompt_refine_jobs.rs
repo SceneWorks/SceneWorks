@@ -45,6 +45,43 @@ const DEFAULT_REFINE_MODEL: &str = "TheDrummer/Anubis-Mini-8B-v1";
     all(not(target_os = "macos"), feature = "backend-candle")
 ))]
 const CANCEL_MESSAGE: &str = "Prompt refinement canceled by user.";
+// Output-length cap. The free-text rewrite is a one-liner (512 is ample), but the two caption tasks
+// (magic-prompt + image_caption) emit a full Ideogram JSON caption — multi-element, with bboxes,
+// #RRGGBB palettes and (since sc-8199) optional per-element palettes — which truncates well past 2048
+// tokens on busy images (sc-8210: `EOF while parsing a list` mid-`elements`). 4096 ≈ ~11.6k chars of
+// headroom; a well-formed caption emits EOS far below the cap, so a higher ceiling only rescues the
+// truncating cases. Callers may still override via the `maxNewTokens` payload field.
+#[cfg(any(
+    test,
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+const DEFAULT_CAPTION_MAX_NEW_TOKENS: u32 = 4096;
+#[cfg(any(
+    test,
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+const DEFAULT_REFINE_MAX_NEW_TOKENS: u32 = 512;
+// Resolve the output token budget: an explicit positive `maxNewTokens` override wins; otherwise the
+// per-task default (caption tasks need the larger cap so the JSON closes).
+#[cfg(any(
+    test,
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+fn resolve_max_new_tokens(payload: &serde_json::Map<String, Value>, is_caption_task: bool) -> u32 {
+    payload
+        .get("maxNewTokens")
+        .and_then(Value::as_u64)
+        .and_then(|value| u32::try_from(value).ok())
+        .filter(|value| *value > 0)
+        .unwrap_or(if is_caption_task {
+            DEFAULT_CAPTION_MAX_NEW_TOKENS
+        } else {
+            DEFAULT_REFINE_MAX_NEW_TOKENS
+        })
+}
 // Architecture-pill label for the streamed progress (mirrors the candle image/video paths): the MLX
 // twin on macOS, candle on the Windows candle build.
 #[cfg(target_os = "macos")]
@@ -502,12 +539,7 @@ pub(crate) async fn run_prompt_refine_job(
         .filter(|value| !value.is_empty())
         .unwrap_or(DEFAULT_REFINE_MODEL)
         .to_owned();
-    let max_new_tokens = payload
-        .get("maxNewTokens")
-        .and_then(Value::as_u64)
-        .and_then(|value| u32::try_from(value).ok())
-        .filter(|value| *value > 0)
-        .unwrap_or(if is_caption_task { 2048 } else { 512 });
+    let max_new_tokens = resolve_max_new_tokens(payload, is_caption_task);
     let temperature = if is_caption_task { 0.4 } else { 0.7 };
     let work_message = if is_image_caption {
         "Captioning image…"
@@ -827,6 +859,36 @@ fn refine_result(original_prompt: &str, refined_prompt: &str) -> JsonObject {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn resolve_max_new_tokens_defaults_and_override() {
+        // Caption tasks (magic-prompt + image_caption) get the larger default so the JSON closes
+        // (sc-8210: 2048 truncated rich captions mid-`elements`).
+        let obj = |value: serde_json::Value| value.as_object().unwrap().clone();
+        assert_eq!(
+            resolve_max_new_tokens(&obj(serde_json::json!({})), true),
+            4096
+        );
+        // The free-text rewrite stays at the small default.
+        assert_eq!(
+            resolve_max_new_tokens(&obj(serde_json::json!({})), false),
+            512
+        );
+        // An explicit positive override wins for either task.
+        assert_eq!(
+            resolve_max_new_tokens(&obj(serde_json::json!({ "maxNewTokens": 6000 })), true),
+            6000
+        );
+        // Zero / invalid overrides fall back to the per-task default.
+        assert_eq!(
+            resolve_max_new_tokens(&obj(serde_json::json!({ "maxNewTokens": 0 })), true),
+            4096
+        );
+        assert_eq!(
+            resolve_max_new_tokens(&obj(serde_json::json!({ "maxNewTokens": "nope" })), false),
+            512
+        );
+    }
 
     #[test]
     fn system_prompt_uses_workflow_medium_and_embeds_guide() {
