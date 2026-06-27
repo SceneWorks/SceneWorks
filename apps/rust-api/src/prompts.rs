@@ -35,17 +35,14 @@ pub(crate) async fn create_prompt_refine_job(
             .as_deref()
             .map(str::trim)
             .filter(|value| !value.is_empty())
-            .ok_or_else(|| {
-                ApiError::bad_request("sourceAssetId is required for image_caption")
-            })?;
+            .ok_or_else(|| ApiError::bad_request("sourceAssetId is required for image_caption"))?;
         let project_id = payload
             .project_id
             .as_deref()
             .map(str::trim)
             .filter(|value| !value.is_empty())
             .ok_or_else(|| ApiError::bad_request("projectId is required for image_caption"))?;
-        let image_path =
-            resolve_image_caption_path(state.clone(), project_id, asset_id).await?;
+        let image_path = resolve_image_caption_path(state.clone(), project_id, asset_id).await?;
         job_payload.insert("imagePath".to_owned(), Value::String(image_path));
         // The vision model is named by its HF repo string; the worker resolves it by repo (like the
         // refiner), so it must be carried verbatim rather than as a catalog id.

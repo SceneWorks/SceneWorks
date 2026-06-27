@@ -4101,7 +4101,10 @@ async fn image_caption_refine_job_resolves_asset_to_confined_image_path() {
     .await;
     assert_eq!(status, StatusCode::CREATED);
     let asset_id = asset["id"].as_str().expect("asset id").to_owned();
-    let rel_path = asset["file"]["path"].as_str().expect("file path").to_owned();
+    let rel_path = asset["file"]["path"]
+        .as_str()
+        .expect("file path")
+        .to_owned();
 
     let (status, job) = request(
         app.clone(),
