@@ -37,14 +37,19 @@ struct StrictControlEngine {
 
 /// The Fun-Union strict-control catalog (S0 table). SINGLE SOURCE OF TRUTH for `(engine_id, control_repo,
 /// supported_kinds)`:
+/// - `flux1_dev_control` — `{Pose, Canny, Depth}` (Shakker Union-Pro-2.0; E2 sc-8239 / wiring sc-8244)
 /// - `flux2_dev_control` — `{Pose, Canny, Depth}`
 /// - `z_image_turbo_control` — `{Pose, Canny, Depth}`
 /// - `qwen_image_control` — `{Pose}` only (qwen stays pose-only until sc-8250)
 ///
-/// `flux1_dev_control` is added as another row once E2 (sc-8239) lands — not present yet. The SDXL tile
-/// detail-upscale path (`ControlKind::Other("tile")`, `image_jobs/detail.rs`) is OUTSIDE this family and
-/// is deliberately NOT listed.
+/// The SDXL tile detail-upscale path (`ControlKind::Other("tile")`, `image_jobs/detail.rs`) is OUTSIDE
+/// this family and is deliberately NOT listed.
 const STRICT_CONTROL_ENGINES: &[StrictControlEngine] = &[
+    StrictControlEngine {
+        engine_id: "flux1_dev_control",
+        repo: "Shakker-Labs/FLUX.1-dev-ControlNet-Union-Pro-2.0",
+        supported_kinds: &[ControlKind::Pose, ControlKind::Canny, ControlKind::Depth],
+    },
     StrictControlEngine {
         engine_id: "flux2_dev_control",
         repo: "alibaba-pai/FLUX.2-dev-Fun-Controlnet-Union",
@@ -153,6 +158,46 @@ fn resolve_user_control_map(
         .map(str::trim)
         .filter(|id| !id.is_empty())
     else {
+        return Ok(None);
+    };
+    let image = load_reference_image(&settings.data_dir, &request.project_id, asset_id, project_path)?;
+    Ok(Some(image))
+}
+
+/// The asset id canny / depth auto-derive their control map FROM (sc-8244 source threading), or `None`
+/// when the job carries no input image. Precedence: the Image-Edit / control `sourceAssetId` (the
+/// canonical "input image" the picker sends), else the character `referenceAssetId` (so a control job
+/// that only carried a reference still has something to derive from). Pure (request only) so the
+/// precedence is unit-testable without asset I/O.
+fn control_source_asset_id(request: &ImageRequest) -> Option<&str> {
+    request
+        .source_asset_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|id| !id.is_empty())
+        .or_else(|| {
+            request
+                .reference_asset_id
+                .as_deref()
+                .map(str::trim)
+                .filter(|id| !id.is_empty())
+        })
+}
+
+/// The decoded input image canny / depth auto-derive their control map FROM (sc-8244 source threading).
+///
+/// This is the raw photo the preprocessor runs over for `controlMode = canny | depth` when no explicit
+/// `controlImage` passthrough is given — distinct from [`resolve_user_control_map`], which is a *pre-made*
+/// control map used verbatim. The asset id is picked by [`control_source_asset_id`]; `None` when neither
+/// a source nor a reference is present — the pose tier never needs a source (its skeleton is synthetic),
+/// and canny/depth then surface the shared driver's clear "requires a source image" error rather than
+/// silently producing nothing.
+fn resolve_control_source(
+    request: &ImageRequest,
+    settings: &Settings,
+    project_path: &Path,
+) -> WorkerResult<Option<Image>> {
+    let Some(asset_id) = control_source_asset_id(request) else {
         return Ok(None);
     };
     let image = load_reference_image(&settings.data_dir, &request.project_id, asset_id, project_path)?;

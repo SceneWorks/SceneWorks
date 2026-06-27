@@ -140,6 +140,12 @@ mod flux2_dev_gpu_smoke;
 // the worker-lane validation (the crate links + drives the engine), not just the mlx-gen-krea crate.
 #[cfg(all(test, target_os = "macos"))]
 mod krea_turbo_mlx_smoke;
+// Real-weight MLX smoke for the FLUX.1-dev strict-control worker lane (sc-8244; engine E2 sc-8239).
+// Test-only + macOS-only; drives `gen_core::load("flux1_dev_control")` (Dir base + Shakker control
+// overlay) per control mode (pose/canny/depth) and asserts a control-vs-control-free steer — the
+// worker-lane validation that the crate links + drives the registered control generator end-to-end.
+#[cfg(all(test, target_os = "macos"))]
+mod flux1_control_mlx_smoke;
 // Real-weight MLX smokes for the SD3.5 worker lane (epic 7841 S6 sc-7875 — the MLX-path validation
 // boundary). Test-only + macOS-only; drive `gen_core::load("sd3_5_large" | "sd3_5_large_turbo" |
 // "sd3_5_medium")` against the gated stabilityai/* diffusers snapshots (the worker crate links + drives

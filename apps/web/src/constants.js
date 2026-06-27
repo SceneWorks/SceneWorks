@@ -65,6 +65,12 @@ export const fallbackModels = [
       // Strict ControlNet → expose a pose-lock-strength slider (advanced.controlScale).
       // Best-effort tiers (Qwen/Flux2) have no strength control, so they omit this.
       poseControlScale: true,
+      // Strict-control modes the Z-Image Fun-Controlnet-Union branch admits (sc-8249): pose
+      // (skeleton), canny (auto edge map from the input image), depth (auto Depth-Anything-V2). Mirrors
+      // the manifest `controlModes` (single source of truth: STRICT_CONTROL_ENGINES). controlScale is
+      // the structured control-lock-strength knob (advanced.controlScale).
+      controlModes: ["pose", "canny", "depth"],
+      controlScale: { label: "Control strength", default: 0.9, min: 0.0, max: 2.0, step: 0.05 },
     },
   },
   {
@@ -81,6 +87,9 @@ export const fallbackModels = [
       poseLibrary: true,
       // Strict ControlNet → pose-lock-strength slider (advanced.controlScale).
       poseControlScale: true,
+      // Qwen stays POSE-ONLY (qwen_image_control = {pose}); canny/depth + 2512-Fun is sc-8267/sc-8250.
+      controlModes: ["pose"],
+      controlScale: { label: "Control strength", default: 0.9, min: 0.0, max: 2.0, step: 0.05 },
     },
   },
   {
@@ -237,6 +246,13 @@ export const fallbackModels = [
       // FLUX is guidance-distilled; real CFG rides on the parallel trueCfgScale
       // kwarg, distinct from the IP-Adapter reference-strength scalar (sc-2017).
       variationStrength: { label: "Variation", default: 4.0, min: 1.0, max: 10.0, step: 0.5 },
+      // Strict control tier (sc-8244): MLX Shakker FLUX.1-dev-ControlNet-Union-Pro-2.0 — pose (skeleton),
+      // canny (auto edge map), depth (auto Depth-Anything-V2), one image per pose. Mirrors the manifest
+      // (single source of truth: STRICT_CONTROL_ENGINES flux1_dev_control = {pose,canny,depth}).
+      poseLibrary: true,
+      poseControlScale: true,
+      controlModes: ["pose", "canny", "depth"],
+      controlScale: { label: "Control strength", default: 0.7, min: 0.0, max: 2.0, step: 0.05 },
     },
   },
   {
