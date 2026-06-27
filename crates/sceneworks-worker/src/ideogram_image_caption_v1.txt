@@ -41,7 +41,7 @@ A JSON object capturing the visual style you observe. ALWAYS include `aesthetics
 - `aesthetics`: the overall visual character (e.g. `cinematic`, `flat vector illustration`, `gritty documentary`, `soft pastel`).
 - `lighting`: the light you see (direction, hardness, color temperature, time-of-day cues) — `hard side light from the left, warm golden-hour tone`.
 - `medium`: the production medium — `photograph`, `3D render`, `oil painting`, `watercolor`, `digital illustration`, `pencil sketch`. Pick the one that matches what you see.
-- `color_palette`: the dominant colors actually present, as a list of UPPERCASE `#RRGGBB` hex codes — MAXIMUM 5 colors. Use hex codes, NOT color names: write `#F5F5DC`, never `beige`; `#8B5A2B`, never `brown`. Pick the up-to-5 most dominant colors you actually see and give each as a `#RRGGBB` hex value (e.g. `["#1A2B3C", "#F5F5DC", "#8B5A2B"]`).
+- `color_palette`: the whole-image dominant colors actually present, as a list of UPPERCASE `#RRGGBB` hex codes — up to 16, ordered most→least prominent (use as many as the image genuinely shows; more colors = richer palette). Use hex codes, NOT color names: write `#F5F5DC`, never `beige`; `#8B5A2B`, never `brown` (e.g. `["#1A2B3C", "#F5F5DC", "#8B5A2B"]`).
 
 ### REQUIRED discriminator — emit EXACTLY ONE of `photo` or `art_style` (never both, never neither)
 
@@ -56,8 +56,8 @@ Observe the medium from the pixels — film grain and lens character mean photog
 
 Each visible subject is one element:
 ```
-{"type":"obj","bbox":[y1,x1,y2,x2],"desc":"..."}
-{"type":"text","bbox":[y1,x1,y2,x2],"text":"LINE ONE\nLINE TWO","desc":"..."}
+{"type":"obj","bbox":[y1,x1,y2,x2],"desc":"...","color_palette":["#RRGGBB", ...]}
+{"type":"text","bbox":[y1,x1,y2,x2],"text":"LINE ONE\nLINE TWO","desc":"...","color_palette":["#RRGGBB", ...]}
 ```
 
 ### SINGLE SUBJECT = SINGLE ELEMENT
@@ -65,6 +65,12 @@ Each visible subject is one element:
 A coherent subject you can see — one animal, person, vehicle, building, plant, instrument, machine — is exactly ONE `obj` element. Anatomical and structural parts are descriptive attributes inside that element's `desc`, NOT separate elements. A bee is one element, not eight (thorax/abdomen/wings/...). When MULTIPLE distinct subjects appear (a person AND a dog; two bees), use MULTIPLE elements — one per visible subject.
 
 **Test:** part-of-one-thing → goes in that thing's desc. Separate thing you can see → its own element.
+
+### Element `color_palette` — OPTIONAL, per subject
+
+Each element MAY carry its own `color_palette` as the LAST key (after `desc`; for a `text` element, after `desc`). Include it ONLY when the subject has a clear, distinct palette worth recording — omit it entirely otherwise (it is optional, never required).
+- These are the colors of THAT subject specifically — distinct from `style_description.color_palette`, which is the whole-image palette.
+- Same format as the style palette: UPPERCASE `#RRGGBB` hex codes, NOT color names. 2–4 colors typical, **MAXIMUM 5**.
 
 ### Element desc — what to write (30–60 words, 60-word HARD CAP)
 
