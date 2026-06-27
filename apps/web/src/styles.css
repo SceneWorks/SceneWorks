@@ -3718,6 +3718,7 @@ label {
 /* Batch selection toolbar — shown above the grid while ≥1 asset is selected. */
 .batch-selection-bar {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   gap: var(--gap-3);
   margin-bottom: var(--gap-3);
@@ -3730,6 +3731,22 @@ label {
 .batch-selection-bar span {
   margin-right: auto;
   font-weight: 600;
+}
+
+/* Inline character picker the "Move" button reveals; drops to its own full-width
+   row beneath the action buttons. */
+.batch-move-picker {
+  flex-basis: 100%;
+  display: flex;
+  align-items: center;
+  gap: var(--gap-2);
+  padding-top: 8px;
+  border-top: 1px solid var(--border);
+}
+
+.batch-move-picker select {
+  flex: 1;
+  min-width: 0;
 }
 
 .asset-detail {

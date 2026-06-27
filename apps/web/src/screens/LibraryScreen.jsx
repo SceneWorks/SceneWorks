@@ -2,7 +2,7 @@ import React, { useState } from "react";
 import { apiFetch } from "../api.js";
 import { foldUpscaledAssetVariants } from "../assetVariants.js";
 import { batchEligibleAssets, batchItemStatus, buildBatchJob, summarizeBatchProgress } from "../batchOps.js";
-import { AssetDetail, AssetGrid, emptyTrash } from "../components/assetPanels.jsx";
+import { AssetDetail, AssetGrid, assetSupportsCharacterLink, emptyTrash } from "../components/assetPanels.jsx";
 import { assetUrl } from "../components/assetMedia.jsx";
 import { BatchOperationsPanel } from "../components/BatchOperationsPanel.jsx";
 import { terminalStatuses } from "../constants.js";
@@ -65,6 +65,11 @@ export function LibraryScreen() {
   const [batchOpen, setBatchOpen] = useState(false);
   // While/after a batch runs: { op, items: [{ asset, jobId }], submitting }.
   const [batch, setBatch] = useState(null);
+  // Bulk Discard / Move-to-character on the current selection. `bulkAction` gates the
+  // buttons while a fan-out is in flight; `moveOpen` reveals the inline character picker.
+  const [bulkAction, setBulkAction] = useState(null);
+  const [moveOpen, setMoveOpen] = useState(false);
+  const [moveCharacterId, setMoveCharacterId] = useState("");
   // Asset Library hygiene (sc-2024): show only studio-generated and uploaded
   // media. Character Studio test outputs (origin "character_studio") live under
   // the character, not here. The backend also exposes `?scope=library`; we filter
@@ -150,7 +155,47 @@ export function LibraryScreen() {
       else next.add(id);
       return next;
     });
-  const clearSelection = () => setSelectedAssetIds(new Set());
+  const clearSelection = () => {
+    setSelectedAssetIds(new Set());
+    setMoveOpen(false);
+  };
+
+  // Move targets the same "Character Assets" link the per-asset panel uses (role "asset",
+  // unapproved) — NOT the character's reference images — so only link-capable media counts.
+  const availableCharacters = characters.filter((character) => !character?.archived);
+  const movableSelected = selectedAssetList.filter(assetSupportsCharacterLink);
+
+  // Send every selected asset to the Trash (reversible — the backend just flags `trashed`).
+  async function discardSelected() {
+    if (!selectedAssetList.length || bulkAction) return;
+    setBulkAction("discard");
+    try {
+      for (const asset of selectedAssetList) {
+        await deleteAsset(asset);
+      }
+      clearSelection();
+    } finally {
+      setBulkAction(null);
+    }
+  }
+
+  // Fan out the per-asset character link across every movable selection.
+  async function moveSelectedToCharacter() {
+    if (!moveCharacterId || !movableSelected.length || bulkAction) return;
+    setBulkAction("move");
+    try {
+      for (const asset of movableSelected) {
+        try {
+          await moveAssetToCharacter(asset, moveCharacterId);
+        } catch {
+          // One asset failing (e.g. already linked) shouldn't abort the rest.
+        }
+      }
+      clearSelection();
+    } finally {
+      setBulkAction(null);
+    }
+  }
 
   // Decode an asset's native pixel size (needed for an edit job — the worker fits the
   // source to width×height). Resolves null on a load failure so that item fails alone.
@@ -285,9 +330,65 @@ export function LibraryScreen() {
           <button className="primary" disabled={!eligibleSelected.length} onClick={() => setBatchOpen(true)} type="button">
             Batch…
           </button>
+          {assetMode === "assets" ? (
+            <button
+              className="danger-action"
+              disabled={Boolean(bulkAction)}
+              onClick={discardSelected}
+              type="button"
+            >
+              {bulkAction === "discard" ? "Discarding…" : "Discard"}
+            </button>
+          ) : null}
+          {availableCharacters.length ? (
+            <button
+              disabled={!movableSelected.length || Boolean(bulkAction)}
+              onClick={() =>
+                setMoveOpen((open) => {
+                  const next = !open;
+                  if (next && !moveCharacterId) {
+                    setMoveCharacterId(availableCharacters[0]?.id ?? "");
+                  }
+                  return next;
+                })
+              }
+              title={movableSelected.length ? undefined : "No movable media selected"}
+              type="button"
+            >
+              Move
+            </button>
+          ) : null}
           <button onClick={clearSelection} type="button">
             Clear
           </button>
+          {moveOpen && availableCharacters.length ? (
+            <div className="batch-move-picker">
+              <select
+                aria-label="Move to character"
+                onChange={(event) => setMoveCharacterId(event.target.value)}
+                value={moveCharacterId}
+              >
+                {availableCharacters.map((character) => (
+                  <option key={character.id} value={character.id}>
+                    {character.name}
+                  </option>
+                ))}
+              </select>
+              <button
+                className="primary"
+                disabled={!moveCharacterId || !movableSelected.length || Boolean(bulkAction)}
+                onClick={moveSelectedToCharacter}
+                type="button"
+              >
+                {bulkAction === "move"
+                  ? "Moving…"
+                  : `Move ${movableSelected.length} to assets`}
+              </button>
+              <button onClick={() => setMoveOpen(false)} type="button">
+                Cancel
+              </button>
+            </div>
+          ) : null}
         </div>
       ) : null}
 
