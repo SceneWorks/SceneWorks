@@ -775,6 +775,10 @@ async fn generate_flux2_dev_control_stream(
     let control_kind = requested_control_kind(request)?;
     validate_control_kind(FLUX2_DEV_CONTROL_ENGINE_ID, &control_kind)?;
     let user_control = resolve_user_control_map(request, settings, project_path)?;
+    // sc-8248 source threading: for canny/depth WITHOUT a user-supplied control map, the control map is
+    // auto-derived from the input image (canny edges / Depth-Anything-V2). The pose tier never needs a
+    // source (the skeleton is synthetic).
+    let control_source = resolve_control_source(request, settings, project_path)?;
     // Auto depth-estimator weights: provisioned only when this is a depth job WITHOUT a user-supplied
     // depth map (the passthrough short-circuits estimation). Shared across the set; fetched once on the
     // first depth job (sc-8242).
@@ -812,13 +816,14 @@ async fn generate_flux2_dev_control_stream(
         move |generator, tx, cancel| {
             let identity_init = identity_init.as_ref();
             let user_control = user_control.as_ref();
+            let control_source = control_source.as_ref();
             let depth_weights_dir = depth_weights_dir.as_deref();
             drive_gen_items(tx, poses, move |_index, pose, on_progress| {
                 let control = preprocess_control_entry(
                     &control_kind,
                     user_control,
                     Some(&pose),
-                    None,
+                    control_source,
                     width,
                     height,
                     stickwidth,

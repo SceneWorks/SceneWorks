@@ -83,6 +83,7 @@ enum ImageRoute {
     ZImageControl,
     QwenControl,
     KolorsControl,
+    Flux1DevControl,
     Flux2DevControl,
     Flux2Edit,
     QwenEdit,
@@ -102,6 +103,10 @@ fn resolve_image_route(request: &ImageRequest, settings: &Settings) -> Option<Im
         Some(ImageRoute::QwenControl)
     } else if kolors_control_available(request, settings) {
         Some(ImageRoute::KolorsControl)
+    } else if flux1_dev_control_available(request, settings) {
+        // FLUX.1-dev strict control (advanced.poses on flux_dev) → Shakker Union-Pro-2.0. Wins over the
+        // PuLID-FLUX / generic MLX arms below: a flux_dev pose job is the real ControlNet path (sc-8244).
+        Some(ImageRoute::Flux1DevControl)
     } else if flux2_dev_control_available(request, settings) {
         // FLUX.2-dev strict pose (advanced.poses) → Fun-Controlnet-Union. Wins over the edit/
         // best-effort pose tier below (`flux2_edit_available` needs a reference; a flux2_dev pose
@@ -139,6 +144,7 @@ impl ImageRoute {
             ImageRoute::ZImageControl
             | ImageRoute::QwenControl
             | ImageRoute::KolorsControl
+            | ImageRoute::Flux1DevControl
             | ImageRoute::Flux2DevControl => pose_entries(request).len() as u32,
             ImageRoute::Flux2Edit | ImageRoute::QwenEdit => grouped_edit_image_count(request),
             ImageRoute::InstantId => instantid_image_count(request, settings),

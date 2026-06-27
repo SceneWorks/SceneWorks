@@ -94,7 +94,15 @@
         // Strict ControlNet → expose the pose-lock-strength slider
         // (advanced.controlScale, read by MlxZImageAdapter._control_scale). The
         // best-effort tiers have no strength control, so they omit this flag.
-        "poseControlScale": true
+        "poseControlScale": true,
+        // Strict-control modes the Z-Image Fun-Controlnet-Union branch admits (sc-8249): pose (skeleton),
+        // canny (auto edge map from the input image), depth (auto Depth-Anything-V2 map). SINGLE SOURCE
+        // OF TRUTH for the worker is `STRICT_CONTROL_ENGINES` (z_image_turbo_control = {pose,canny,depth});
+        // this advertises the same set so the picker offers a control-mode selector (advanced.controlMode).
+        "controlModes": ["pose", "canny", "depth"],
+        // The control-lock-strength knob (advanced.controlScale; worker default 0.9, clamp [0,2]). The
+        // structured form of the `poseControlScale` flag — drives the slider for every control mode.
+        "controlScale": { "label": "Control strength", "default": 0.9, "min": 0.0, "max": 2.0, "step": 0.05 }
       }
     },
     {
@@ -233,7 +241,13 @@
         "poseLibrary": true,
         // Strict ControlNet → expose the pose-lock-strength slider
         // (advanced.controlScale, read by QwenImageAdapter._pose_control_scale).
-        "poseControlScale": true
+        "poseControlScale": true,
+        // Qwen stays POSE-ONLY for now (`qwen_image_control` = {pose} in STRICT_CONTROL_ENGINES). Its
+        // canny/depth + 2512-Fun migration is sc-8267/sc-8250 — do NOT advertise canny/depth here.
+        "controlModes": ["pose"],
+        // The control-lock-strength knob (advanced.controlScale; worker default 0.9). Structured form of
+        // the `poseControlScale` flag.
+        "controlScale": { "label": "Control strength", "default": 0.9, "min": 0.0, "max": 2.0, "step": 0.05 }
       }
     },
     {
@@ -833,6 +847,22 @@
           "max": 10.0,
           "step": 0.5
         },
+        // Strict control tier (sc-8244; engine E2 sc-8239): on macOS MLX the worker renders the selected
+        // library pose to an OpenPose skeleton — or, with advanced.controlMode = canny|depth, derives a
+        // canny edge map / Depth-Anything-V2 depth map from the input image — and conditions the ported
+        // Shakker `FLUX.1-dev-ControlNet-Union-Pro-2.0` branch on it (true structural lock, one image per
+        // pose) via the `flux1_dev_control` registry generator. The control checkpoint (~3.5 GB) is
+        // fetched on the first control job. Surfaces flux_dev in the Character Studio pose picker
+        // (character_image not required — poseLibrary gates it). MLX-only (no candle control lane yet).
+        "poseLibrary": true,
+        // Strict ControlNet → expose the control-lock-strength slider (advanced.controlScale; the Shakker
+        // Union-Pro-2.0 README recommends ~0.7, worker default 0.7).
+        "poseControlScale": true,
+        // Control modes the Shakker Union-Pro-2.0 union ControlNet admits (SINGLE SOURCE OF TRUTH:
+        // STRICT_CONTROL_ENGINES `flux1_dev_control` = {pose,canny,depth}); the picker offers the
+        // control-mode selector (advanced.controlMode).
+        "controlModes": ["pose", "canny", "depth"],
+        "controlScale": { "label": "Control strength", "default": 0.7, "min": 0.0, "max": 2.0, "step": 0.05 },
         "promptGuide": {
           "title": "FLUX.1 [dev] Prompt Guide",
           "path": "/prompt-guides/flux-dev.md",
@@ -1865,6 +1895,14 @@
         // Strict ControlNet → expose the pose-lock-strength slider (advanced.controlScale;
         // the dev Fun-Controlnet-Union README recommends 0.65–0.80, worker default 0.75).
         "poseControlScale": true,
+        // Strict-control modes the FLUX.2-dev Fun-Controlnet-Union branch admits (sc-8248): pose
+        // (skeleton), canny (auto edge map from the input image), depth (auto Depth-Anything-V2 map).
+        // SINGLE SOURCE OF TRUTH is STRICT_CONTROL_ENGINES (flux2_dev_control = {pose,canny,depth}); the
+        // picker offers the control-mode selector (advanced.controlMode).
+        "controlModes": ["pose", "canny", "depth"],
+        // The control-lock-strength knob (advanced.controlScale; worker default 0.75). Structured form of
+        // the `poseControlScale` flag.
+        "controlScale": { "label": "Control strength", "default": 0.75, "min": 0.0, "max": 2.0, "step": 0.05 },
         // FLUX.2-dev's built-in caption upsampler (sc-6030/sc-6135): an opt-in "Enhance prompt"
         // toggle that has the model's own Mistral3 LLM rewrite the prompt before the diffusion
         // encode — text-only for txt2img, and image-conditioned on the reference for edit (it reads

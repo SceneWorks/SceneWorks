@@ -2652,6 +2652,82 @@ fn flux2_dev_control_real_weights_generates_one_pose() {
     assert!(pixels.windows(2).any(|w| w[0] != w[1]));
 }
 
+/// Real-weights smoke: FLUX.1-dev strict-control via the Shakker `FLUX.1-dev-ControlNet-Union-Pro-2.0`
+/// branch (sc-8244; engine E2 sc-8239). Loads the gated dev snapshot + the cached Shakker control
+/// checkpoint through the worker's own `flux1_control_load` (the `flux1_control_spec` seam) and renders
+/// ONE image per control mode (pose / canny / depth) — Union-Pro-2.0 is input-agnostic, so the same
+/// synthetic control map drives all three; the per-preprocessor derivation (skeleton / edge / depth) is
+/// unit-tested in `preprocess_control_entry_dispatches_by_kind`. Each mode must produce a non-degenerate
+/// 512² decode. Needs both weight sets + a Metal device; run on demand:
+/// `cargo test -p sceneworks-worker --lib -- --ignored flux1_dev_control_real_weights`.
+#[cfg(target_os = "macos")]
+#[test]
+#[ignore = "needs the gated FLUX.1-dev snapshot + the Shakker Union-Pro-2.0 ckpt + a Metal device"]
+fn flux1_dev_control_real_weights_generates_each_mode() {
+    let base = std::env::var("SCENEWORKS_FLUX1_DEV_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| {
+            std::fs::read_dir(
+                dirs_home()
+                    .join(".cache/huggingface/hub/models--black-forest-labs--FLUX.1-dev/snapshots"),
+            )
+            .expect("FLUX.1-dev snapshots dir")
+            .flatten()
+            .map(|entry| entry.path())
+            .find(|path| path.join("model_index.json").is_file())
+            .expect("a FLUX.1-dev snapshot dir")
+        });
+    let control = std::env::var("SCENEWORKS_CONTROLNET_FLUX1")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| {
+            std::fs::read_dir(dirs_home().join(
+                ".cache/huggingface/hub/models--Shakker-Labs--FLUX.1-dev-ControlNet-Union-Pro-2.0/snapshots",
+            ))
+            .expect("control snapshots dir")
+            .flatten()
+            .map(|entry| entry.path())
+            .find(|path| path.is_dir())
+            .map(|dir| dir.join(FLUX1_CONTROL_FILE))
+            .filter(|path| path.exists())
+            .expect("control weights file")
+        });
+
+    let generator =
+        flux1_control_load(base, control, Some(gen_core::Quant::Q8), Vec::new()).unwrap();
+
+    // A flat 512² control map — enough to exercise the VAE-encode of the control hint on real weights;
+    // the real per-mode preprocessing (skeleton / canny / depth) is unit-tested separately.
+    let control_map = gen_core::Image {
+        width: 512,
+        height: 512,
+        pixels: vec![128u8; 512 * 512 * 3],
+    };
+    let cancel = gen_core::CancelFlag::new();
+    for kind in [ControlKind::Pose, ControlKind::Canny, ControlKind::Depth] {
+        // pose/canny → Control { kind, scale }; depth → the dedicated Depth variant (build_control_*).
+        let conditioning = build_control_conditioning(control_map.clone(), kind.clone(), 0.7, None);
+        let (w, h, pixels) = flux1_control_generate_one(
+            generator.as_ref(),
+            "a person standing in a meadow, photorealistic",
+            512,
+            512,
+            42,
+            28,
+            Some(3.5), // dev embedded guidance
+            conditioning,
+            &cancel,
+            &mut |_| {},
+        )
+        .unwrap_or_else(|e| panic!("{kind:?} render failed: {e}"));
+        assert_eq!((w, h), (512, 512), "{kind:?}");
+        assert_eq!(pixels.len(), 512 * 512 * 3, "{kind:?}");
+        assert!(
+            pixels.windows(2).any(|w| w[0] != w[1]),
+            "{kind:?} render is degenerate (flat)"
+        );
+    }
+}
+
 #[cfg(target_os = "macos")]
 #[test]
 fn flux2_edit_reference_ids_prefers_reference_then_source() {
@@ -3089,6 +3165,16 @@ fn image_route_count_follows_dispatch_order() {
         route.image_count(&sensenova_angle, &settings),
         CHARACTER_ANGLE_SET_ORDER.len() as u32
     );
+
+    // FLUX.1-dev strict control (sc-8244): flux_dev + ≥1 pose (not edit_image) → the Shakker
+    // Union-Pro-2.0 path, one image per pose. Wins over PuLID-FLUX / generic MLX.
+    let flux1_control = request(json!({
+        "projectId": "p", "model": "flux_dev", "count": 9,
+        "advanced": { "modelPath": model_path.clone(), "poses": [{ "id": "a" }, { "id": "b" }, { "id": "c" }, { "id": "d" }] }
+    }));
+    let route = resolve_image_route(&flux1_control, &settings).unwrap();
+    assert_eq!(route, ImageRoute::Flux1DevControl);
+    assert_eq!(route.image_count(&flux1_control, &settings), 4);
 
     let plain_mlx = request(json!({
         "projectId": "p", "model": "z_image_turbo", "count": 6,
@@ -4863,6 +4949,16 @@ fn one_pose() -> PoseInput {
 #[cfg(target_os = "macos")]
 #[test]
 fn strict_control_table_is_the_authority() {
+    let flux1 = strict_control_engine("flux1_dev_control").expect("flux1 row");
+    assert_eq!(
+        flux1.repo,
+        "Shakker-Labs/FLUX.1-dev-ControlNet-Union-Pro-2.0"
+    );
+    assert_eq!(
+        flux1.supported_kinds,
+        &[ControlKind::Pose, ControlKind::Canny, ControlKind::Depth]
+    );
+
     let flux2 = strict_control_engine("flux2_dev_control").expect("flux2 row");
     assert_eq!(flux2.repo, "alibaba-pai/FLUX.2-dev-Fun-Controlnet-Union");
     assert_eq!(
@@ -4895,16 +4991,21 @@ fn strict_control_table_is_the_authority() {
 #[cfg(target_os = "macos")]
 #[test]
 fn validate_control_kind_accepts_and_rejects_per_table() {
-    // Pose is the proven tier on all three.
+    // Pose is the proven tier on every engine.
     for engine in [
+        "flux1_dev_control",
         "flux2_dev_control",
         "z_image_turbo_control",
         "qwen_image_control",
     ] {
         assert!(validate_control_kind(engine, &ControlKind::Pose).is_ok());
     }
-    // Canny + Depth: flux2 / z-image accept.
-    for engine in ["flux2_dev_control", "z_image_turbo_control"] {
+    // Canny + Depth: flux1 / flux2 / z-image accept.
+    for engine in [
+        "flux1_dev_control",
+        "flux2_dev_control",
+        "z_image_turbo_control",
+    ] {
         assert!(validate_control_kind(engine, &ControlKind::Canny).is_ok());
         assert!(validate_control_kind(engine, &ControlKind::Depth).is_ok());
     }
@@ -5098,5 +5199,109 @@ fn build_control_conditioning_matches_legacy_shape() {
     assert!(
         matches!(cond[0], Conditioning::Depth { .. }),
         "depth uses Conditioning::Depth"
+    );
+}
+
+/// sc-8248 / sc-8249 source threading: the input image canny/depth auto-derive their control map FROM
+/// resolves with the right precedence (sourceAssetId wins, else referenceAssetId), and a pose-only job
+/// (no source / reference) resolves to `None` — proving the live canny/depth path now has an input image
+/// to preprocess (previously the per-engine streams hard-coded `source: None`), while pose stays
+/// source-free (byte-preserved).
+#[cfg(target_os = "macos")]
+#[test]
+fn control_source_asset_id_precedence_and_pose_is_source_free() {
+    // sourceAssetId wins (the canonical control input image).
+    assert_eq!(
+        control_source_asset_id(&request(json!({
+            "projectId": "p", "model": "z_image_turbo",
+            "sourceAssetId": "src", "referenceAssetId": "ref",
+            "advanced": { "controlMode": "canny" }
+        }))),
+        Some("src")
+    );
+    // No source → fall back to the character reference (a control job that only carried a reference).
+    assert_eq!(
+        control_source_asset_id(&request(json!({
+            "projectId": "p", "model": "flux2_dev", "referenceAssetId": "ref",
+            "advanced": { "controlMode": "depth" }
+        }))),
+        Some("ref")
+    );
+    // A pose-only job carries neither → None (the skeleton is synthetic; no input image needed). This is
+    // the byte-preserved pose tier — the threaded source stays `None` exactly as before.
+    assert_eq!(
+        control_source_asset_id(&request(json!({
+            "projectId": "p", "model": "flux_dev",
+            "advanced": { "poses": [{ "id": "a" }] }
+        }))),
+        None
+    );
+    // Blank ids are treated as absent.
+    assert_eq!(
+        control_source_asset_id(&request(json!({
+            "projectId": "p", "model": "z_image_turbo",
+            "sourceAssetId": "   ", "referenceAssetId": ""
+        }))),
+        None
+    );
+}
+
+/// sc-8248 / sc-8249 live enablement: with `controlMode = canny` and a threaded source image, the shared
+/// preprocessor (the one every strict-control engine stream now feeds the input image into) produces a
+/// real edge-map control conditioning — NOT the pose skeleton and NOT a no-op. This is the unit-level
+/// proof that auto-canny/auto-depth now fire for flux1/flux2/z-image once the source is threaded (the
+/// stream wiring passes `control_source` where it previously passed `None`). Depth dispatch is covered by
+/// `preprocess_control_entry_dispatches_by_kind` (routes into the estimator); the real per-mode renders
+/// are the on-device smokes.
+#[cfg(target_os = "macos")]
+#[test]
+fn threaded_source_drives_auto_canny_control_conditioning() {
+    let (w, h) = (64u32, 48u32);
+    let pose = one_pose();
+    let stick = crate::openpose_skeleton::body_stickwidth(w, h);
+    // A threaded input "photo" (a flat fixture is enough — canny returns a same-dimension RGB edge map).
+    let source = control_fixture(w, h, [128, 128, 128]);
+
+    // canny + a threaded source (NO user passthrough, NO depth weights) → an edge-map control image.
+    let control = preprocess_control_entry(
+        &ControlKind::Canny,
+        None,
+        Some(&pose),
+        Some(&source),
+        w,
+        h,
+        stick,
+        None,
+    )
+    .expect("auto-canny over the threaded source");
+    assert_eq!((control.width, control.height), (w, h));
+
+    // It must NOT be the pose skeleton (proving the source — not the synthetic skeleton — drove it).
+    let skeleton = crate::openpose_skeleton::draw_wholebody(
+        w,
+        h,
+        &pose.keypoints,
+        pose.hands.as_deref(),
+        pose.face.as_deref(),
+        stick,
+    );
+    assert_ne!(
+        control.pixels,
+        skeleton.into_raw(),
+        "auto-canny must derive from the source image, not render the pose skeleton"
+    );
+
+    // And it builds a `Control { kind: Canny }` conditioning (the engine's structural hint).
+    let cond = build_control_conditioning(control, ControlKind::Canny, 0.75, None);
+    assert_eq!(cond.len(), 1);
+    assert!(
+        matches!(
+            &cond[0],
+            Conditioning::Control {
+                kind: ControlKind::Canny,
+                ..
+            }
+        ),
+        "canny builds a Control conditioning"
     );
 }
