@@ -461,15 +461,25 @@ pub fn detect_lora_family(header: &Value) -> Option<String> {
 /// an import (see the module docs), which is worse than an inconclusive `None`.
 fn detect_unique_key_family(keys: &[String]) -> Option<String> {
     // Krea 2 (epic 7565). Its DiT carries a `text_fusion` Qwen3-VL-layer aggregator
-    // and a gated single-stream attention whose projection is `attn.to_gate` — names
-    // that appear in no other family's LoRA keys (dual-stream MMDiT/Flux/SD3/Wan/LTX
-    // have neither). Both the diffusers dotted form (`...text_fusion.projector...`,
-    // `...attn.to_gate...`) and the kohya/flattened underscore form are matched. The
-    // family label is `krea_2` (underscore) to match the catalog's
-    // `loraCompatibility.families` and the `krea_2_raw_lora` trainer output exactly,
-    // since import-time reconciliation compares the family string verbatim.
+    // and a gated single-stream attention whose projection is the leaf Linear
+    // `attn.to_gate` — names that appear in no other family's LoRA keys (dual-stream
+    // MMDiT/Flux/SD3/Wan have none). Both the diffusers dotted form
+    // (`...text_fusion.projector...`, `...attn.to_gate.lora_A...`) and the
+    // kohya/flattened underscore form are matched. The family label is `krea_2`
+    // (underscore) to match the catalog's `loraCompatibility.families` and the
+    // `krea_2_raw_lora` trainer output exactly, since import-time reconciliation
+    // compares the family string verbatim.
+    //
+    // The `to_gate` markers require the trailing module-boundary separator (a `.` for
+    // the diffusers leaf, so the LoRA sub-weight `lora_A`/`lora_down` follows). Without
+    // it, the substring would also match LTX-2's cross-modal gating tensors
+    // (`...audio_to_video_attn.to_gate_logits...`, `...attn1.to_gate_logits...`), which
+    // contain `attn.to_gate` as a non-boundary substring and would otherwise be
+    // mis-detected as krea_2 and rejected from every LTX model.
     if keys.iter().any(|key| {
-        key.contains("text_fusion") || key.contains("attn.to_gate") || key.contains("_attn_to_gate")
+        key.contains("text_fusion")
+            || key.contains("attn.to_gate.")
+            || key.contains("_attn_to_gate.")
     }) {
         return Some("krea_2".to_owned());
     }
@@ -630,13 +640,25 @@ const SIGNATURES: &[BucketSignature] = &[
     },
     BucketSignature {
         bucket: Bucket::LtxVideo,
-        // LTX-Video uses MMDiT-style `transformer.transformer_blocks.` keys
-        // but its attention submodules are named `attn1` and `attn2` (the
-        // latter is the cross-attention path). It does not use the
-        // dual-stream `img_mlp` / `txt_mlp` naming that Qwen-Image / Z-Image
-        // expose.
+        // LTX-Video uses MMDiT-style `transformer_blocks.` keys but its attention
+        // submodules are named `attn1` and `attn2` (the latter is the
+        // cross-attention path). It does not use the dual-stream `img_mlp` /
+        // `txt_mlp` naming that Qwen-Image / Z-Image expose.
+        //
+        // Two prefix forms are accepted: the diffusers `transformer.transformer_blocks.`
+        // and the LTX-2 native / ComfyUI `diffusion_model.transformer_blocks.` export
+        // (e.g. `ltx-2.3-22b-distilled-lora-*`). The `diffusion_model.` prefix is
+        // shared with FLUX.2, but FLUX.2 nests `diffusion_model.double_blocks.` /
+        // `single_blocks.` (never `transformer_blocks`), and pairing the prefix with
+        // the required `.attn1.` + `.attn2.` submodules keeps this unambiguous. LTX-2
+        // 2.3 additionally trains cross-modal audio attention
+        // (`audio_to_video_attn.to_gate_logits`, etc.); those are not `add_q_proj`
+        // joint-attention keys, so the disqualifiers below still hold.
         require_all_of: &[
-            &["transformer.transformer_blocks."],
+            &[
+                "transformer.transformer_blocks.",
+                "diffusion_model.transformer_blocks.",
+            ],
             &[".attn1."],
             &[".attn2."],
         ],
@@ -647,7 +669,12 @@ const SIGNATURES: &[BucketSignature] = &[
             "add_q_proj",
             "add_k_proj",
         ],
-        markers: &["transformer.transformer_blocks.", ".attn1.", ".attn2."],
+        markers: &[
+            "transformer.transformer_blocks.",
+            "diffusion_model.transformer_blocks.",
+            ".attn1.",
+            ".attn2.",
+        ],
     },
     BucketSignature {
         bucket: Bucket::Sd3,
@@ -1688,6 +1715,39 @@ mod tests {
                 ));
                 keys.push(format!(
                     "transformer.transformer_blocks.{block}.{module}.lora_B.weight"
+                ));
+            }
+        }
+        let header = header_from_keys(&keys.iter().map(String::as_str).collect::<Vec<_>>());
+
+        assert_eq!(detect_lora_family(&header).as_deref(), Some("ltx-video"));
+    }
+
+    /// The real `ltx-2.3-22b-distilled-lora-*` export: a `diffusion_model.` prefix
+    /// (LTX-2 native / ComfyUI form, not the diffusers `transformer.` prefix) plus
+    /// LTX-2 2.3's cross-modal audio attention, whose gating tensors are named
+    /// `..._attn.to_gate_logits...`. That `attn.to_gate` substring previously tripped
+    /// the Krea-2 unique-key detector (which now requires a `to_gate.` module
+    /// boundary), and the diffusers-only LTX prefix meant the bucket scorer never
+    /// recognized it either — so the LoRA was mis-detected as krea_2 and rejected from
+    /// every LTX model. Both halves must hold: not krea_2, and positively ltx-video.
+    #[test]
+    fn detects_ltx2_native_with_gated_audio_attention() {
+        let mut keys = Vec::new();
+        for block in 0..28 {
+            for module in [
+                "attn1.to_q",
+                "attn1.to_gate_logits",
+                "attn2.to_q",
+                "audio_to_video_attn.to_gate_logits",
+                "video_to_audio_attn.to_gate_logits",
+                "ff.net.0.proj",
+            ] {
+                keys.push(format!(
+                    "diffusion_model.transformer_blocks.{block}.{module}.lora_A.weight"
+                ));
+                keys.push(format!(
+                    "diffusion_model.transformer_blocks.{block}.{module}.lora_B.weight"
                 ));
             }
         }

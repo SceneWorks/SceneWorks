@@ -441,6 +441,20 @@ pub(crate) async fn run_image_generate_job(
                 )
                 .await?;
             }
+            ImageRoute::Flux1DevControl => {
+                // FLUX.1-dev strict control (advanced.poses) → Shakker Union-Pro-2.0, one image per pose
+                // (pose / canny / depth via advanced.controlMode).
+                generate_flux1_dev_control_stream(
+                    api,
+                    settings,
+                    job,
+                    &plan,
+                    &project_path,
+                    backend,
+                    &mut asset_writes,
+                )
+                .await?;
+            }
             ImageRoute::Flux2DevControl => {
                 // FLUX.2-dev strict-pose (advanced.poses) → Fun-Controlnet-Union, one image per pose.
                 generate_flux2_dev_control_stream(
@@ -1485,6 +1499,9 @@ include!("image_jobs/zimage.rs");
 #[cfg(target_os = "macos")]
 // FLUX.2 edit routing and conditioning.
 include!("image_jobs/flux2.rs");
+#[cfg(target_os = "macos")]
+// FLUX.1-dev strict-control (Shakker Union-Pro-2.0) routing.
+include!("image_jobs/flux1_control.rs");
 #[cfg(target_os = "macos")]
 // Qwen control/edit routing.
 include!("image_jobs/qwen.rs");
