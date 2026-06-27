@@ -281,6 +281,39 @@ describe("StructuredPromptBuilder", () => {
     expect(snap.caption).toEqual(captioned);
   });
 
+  it("reports the reference image's dimensions for the resolution auto-preset (sc-8109/sc-8220)", async () => {
+    // Stub the dimension probe so the <img> "loads" as a 1280×720 landscape reference.
+    const RealImage = global.Image;
+    global.Image = class {
+      set src(_value) {
+        this.naturalWidth = 1280;
+        this.naturalHeight = 720;
+        queueMicrotask(() => this.onload && this.onload());
+      }
+    };
+    try {
+      const onReferenceImageLoaded = vi.fn();
+      const onImageCaption = vi.fn(async () => ({}));
+      await mount({
+        initialMode: "plain",
+        onImageCaption,
+        referenceAssets: [refAsset],
+        projectId: "proj-1",
+        onReferenceImageLoaded,
+      });
+      await selectReference();
+      // Let the effect + the probe's onload microtask settle.
+      await act(async () => {
+        await new Promise((r) => setTimeout(r, 0));
+      });
+      // The auto-preset fires from an effect on the selected id (not the picker onChange), so it
+      // also covers a freshly imported asset that lands in the list a render later (sc-8220).
+      expect(onReferenceImageLoaded).toHaveBeenCalledWith(1280, 720);
+    } finally {
+      global.Image = RealImage;
+    }
+  });
+
   it("keeps the caption button disabled until a reference is selected (sc-8108)", async () => {
     const onImageCaption = vi.fn(async () => ({}));
     await mount({ initialMode: "plain", onImageCaption, referenceAssets: [refAsset], projectId: "proj-1" });
