@@ -775,6 +775,14 @@ async fn generate_flux2_dev_control_stream(
     let control_kind = requested_control_kind(request)?;
     validate_control_kind(FLUX2_DEV_CONTROL_ENGINE_ID, &control_kind)?;
     let user_control = resolve_user_control_map(request, settings, project_path)?;
+    // Auto depth-estimator weights: provisioned only when this is a depth job WITHOUT a user-supplied
+    // depth map (the passthrough short-circuits estimation). Shared across the set; fetched once on the
+    // first depth job (sc-8242).
+    let depth_weights_dir = if control_kind == ControlKind::Depth && user_control.is_none() {
+        Some(ensure_depth_estimator_dir(api, settings, job).await?)
+    } else {
+        None
+    };
     let poses = parse_poses(request);
     let count = poses.len();
     let raw_settings = flux2_control_raw_settings(
@@ -804,6 +812,7 @@ async fn generate_flux2_dev_control_stream(
         move |generator, tx, cancel| {
             let identity_init = identity_init.as_ref();
             let user_control = user_control.as_ref();
+            let depth_weights_dir = depth_weights_dir.as_deref();
             drive_gen_items(tx, poses, move |_index, pose, on_progress| {
                 let control = preprocess_control_entry(
                     &control_kind,
@@ -813,6 +822,7 @@ async fn generate_flux2_dev_control_stream(
                     width,
                     height,
                     stickwidth,
+                    depth_weights_dir,
                 )?;
                 let conditioning = build_control_conditioning(
                     control,

@@ -211,6 +211,9 @@ async fn generate_qwen_control_stream(
                     width,
                     height,
                     stickwidth,
+                    // qwen_image_control is pose-only (validate_control_kind rejects Depth), so the depth
+                    // estimator is never reached — no weights dir to provision.
+                    None,
                 )?;
                 // qwen ignores a reference (identity comes from character LoRA on the base transformer),
                 // so no identity-init `Reference` — pose-only `Control` conditioning, byte-identical.
