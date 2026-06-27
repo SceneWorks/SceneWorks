@@ -40,7 +40,7 @@ struct StrictControlEngine {
 /// - `flux1_dev_control` — `{Pose, Canny, Depth}` (Shakker Union-Pro-2.0; E2 sc-8239 / wiring sc-8244)
 /// - `flux2_dev_control` — `{Pose, Canny, Depth}`
 /// - `z_image_turbo_control` — `{Pose, Canny, Depth}`
-/// - `qwen_image_control` — `{Pose}` only (qwen stays pose-only until sc-8250)
+/// - `qwen_image_control` — `{Pose, Canny, Depth}` (alibaba-pai 2512-Fun-Union; sc-8267 source swap / sc-8250 exposure)
 ///
 /// The SDXL tile detail-upscale path (`ControlKind::Other("tile")`, `image_jobs/detail.rs`) is OUTSIDE
 /// this family and is deliberately NOT listed.
@@ -62,8 +62,8 @@ const STRICT_CONTROL_ENGINES: &[StrictControlEngine] = &[
     },
     StrictControlEngine {
         engine_id: "qwen_image_control",
-        repo: "InstantX/Qwen-Image-ControlNet-Union",
-        supported_kinds: &[ControlKind::Pose],
+        repo: "alibaba-pai/Qwen-Image-2512-Fun-Controlnet-Union",
+        supported_kinds: &[ControlKind::Pose, ControlKind::Canny, ControlKind::Depth],
     },
 ];
 

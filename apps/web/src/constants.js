@@ -81,14 +81,16 @@ export const fallbackModels = [
     ui: {
       description: "Qwen text-to-image target.",
       promptGuide: { title: "Qwen Image Prompt Guide", path: "/prompt-guides/qwen-image.md" },
-      // Strict pose tier (sc-2291): torch QwenImageControlNetPipeline + InstantX
-      // Qwen-Image-ControlNet-Union (DWPose) — true pose lock, pose-from-prompt.
+      // Strict control tier (sc-2291): native-MLX Qwen-Image-2512-Fun-Controlnet-Union
+      // (input-agnostic VACE branch) — true pose/structure lock, pose-from-prompt.
       // poseLibrary alone gates the pose picker (no character_image needed).
       poseLibrary: true,
-      // Strict ControlNet → pose-lock-strength slider (advanced.controlScale).
+      // Strict ControlNet → control-lock-strength slider (advanced.controlScale).
       poseControlScale: true,
-      // Qwen stays POSE-ONLY (qwen_image_control = {pose}); canny/depth + 2512-Fun is sc-8267/sc-8250.
-      controlModes: ["pose"],
+      // Strict-control modes the 2512-Fun-Controlnet-Union branch admits (sc-8267 swap / sc-8250 exposure):
+      // pose, canny, depth. Mirrors the manifest `controlModes` (single source of truth:
+      // STRICT_CONTROL_ENGINES qwen_image_control = {pose,canny,depth}).
+      controlModes: ["pose", "canny", "depth"],
       controlScale: { label: "Control strength", default: 0.9, min: 0.0, max: 2.0, step: 0.05 },
     },
   },
