@@ -427,6 +427,12 @@ pub fn detect_lora_family(header: &Value) -> Option<String> {
     if keys.is_empty() {
         return None;
     }
+    // Some families expose a tensor-name segment that appears in no other family
+    // we detect; one such key is enough to identify them, ahead of (and exempt
+    // from) the bucket scorer's `MIN_KEY_MATCHES` floor. See [`detect_unique_key_family`].
+    if let Some(family) = detect_unique_key_family(&keys) {
+        return Some(family);
+    }
     let bucket = detect_bucket(&keys)?;
     match bucket {
         Bucket::WanVideo => Some("wan-video".to_owned()),
@@ -438,6 +444,36 @@ pub fn detect_lora_family(header: &Value) -> Option<String> {
         Bucket::Sd15 => Some("sd1.5".to_owned()),
         Bucket::MmDit => disambiguate_mm_dit(&keys),
     }
+}
+
+/// Identifies a family from a single architecture-unique tensor-name segment,
+/// bypassing the `MIN_KEY_MATCHES` marker-count floor the bucket scorer enforces.
+///
+/// The floor exists so an ambiguous handful of generic keys can never win, but it
+/// also blocks sparse adapters that touch only a module or two — e.g. a Krea 2
+/// `text_fusion.projector` scale LoRA, which ships just two tensors and so can
+/// never reach four marker hits. When a key segment is unambiguous across the
+/// entire signature table, a single occurrence is sufficient evidence, so those
+/// cases are handled here first.
+///
+/// Kept deliberately narrow: only segments that appear in *no other* family we
+/// detect belong here, because a confident-but-wrong family is grounds to reject
+/// an import (see the module docs), which is worse than an inconclusive `None`.
+fn detect_unique_key_family(keys: &[String]) -> Option<String> {
+    // Krea 2 (epic 7565). Its DiT carries a `text_fusion` Qwen3-VL-layer aggregator
+    // and a gated single-stream attention whose projection is `attn.to_gate` — names
+    // that appear in no other family's LoRA keys (dual-stream MMDiT/Flux/SD3/Wan/LTX
+    // have neither). Both the diffusers dotted form (`...text_fusion.projector...`,
+    // `...attn.to_gate...`) and the kohya/flattened underscore form are matched. The
+    // family label is `krea_2` (underscore) to match the catalog's
+    // `loraCompatibility.families` and the `krea_2_raw_lora` trainer output exactly,
+    // since import-time reconciliation compares the family string verbatim.
+    if keys.iter().any(|key| {
+        key.contains("text_fusion") || key.contains("attn.to_gate") || key.contains("_attn_to_gate")
+    }) {
+        return Some("krea_2".to_owned());
+    }
+    None
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -952,6 +988,12 @@ fn metadata_value_to_family(value: &str) -> Option<String> {
     // transformer blocks), so the key-based detector classifies it as `flux`.
     if normalized.contains("chroma") {
         return Some("chroma".to_owned());
+    }
+    // Krea 2 (epic 7565): a distinct single-stream DiT family. No SD/Flux/Qwen
+    // architecture string contains "krea", so this can sit ahead of them safely.
+    // The label is `krea_2` (underscore) to match the catalog/trainer convention.
+    if normalized.contains("krea") {
+        return Some("krea_2".to_owned());
     }
     // Check flux2 before flux: FLUX.2 architecture strings ("flux2", "flux-2",
     // "flux.2", "flux_2") all contain the "flux" substring, so the generic flux
@@ -1668,6 +1710,63 @@ mod tests {
         let header = header_from_keys(&keys.iter().map(String::as_str).collect::<Vec<_>>());
 
         assert!(detect_lora_family(&header).is_none());
+    }
+
+    #[test]
+    fn detects_krea_projector_scale_lora() {
+        // The real failing upload: a Krea 2 `text_fusion.projector` scale LoRA in
+        // diffusers format ships only two tensors and empty metadata. It can never
+        // reach `MIN_KEY_MATCHES`, but `text_fusion` is krea-unique, so the
+        // unique-key pre-check identifies it. The label must be the verbatim
+        // `krea_2` the catalog/trainer use (import reconciliation compares it raw).
+        let header = header_from_keys(&[
+            "transformer.text_fusion.projector.lora_A.weight",
+            "transformer.text_fusion.projector.lora_B.weight",
+        ]);
+
+        assert_eq!(detect_lora_family(&header).as_deref(), Some("krea_2"));
+    }
+
+    #[test]
+    fn detects_krea_by_gated_attention() {
+        // A community krea LoRA that adapts the gated single-stream attention carries
+        // `attn.to_gate`, a projection no other family exposes.
+        let mut keys = Vec::new();
+        for block in 0..28 {
+            for module in [
+                "attn.to_q",
+                "attn.to_k",
+                "attn.to_v",
+                "attn.to_gate",
+                "attn.to_out.0",
+            ] {
+                keys.push(format!(
+                    "transformer.transformer_blocks.{block}.{module}.lora_A.weight"
+                ));
+                keys.push(format!(
+                    "transformer.transformer_blocks.{block}.{module}.lora_B.weight"
+                ));
+            }
+        }
+        let header = header_from_keys(&keys.iter().map(String::as_str).collect::<Vec<_>>());
+
+        assert_eq!(detect_lora_family(&header).as_deref(), Some("krea_2"));
+    }
+
+    #[test]
+    fn detects_krea_by_metadata() {
+        let mut object = serde_json::Map::new();
+        object.insert(
+            "__metadata__".to_owned(),
+            json!({"modelspec.architecture": "krea-2-raw"}),
+        );
+        object.insert(
+            "transformer.transformer_blocks.0.attn.to_q.lora_A.weight".to_owned(),
+            json!({"dtype": "F16", "shape": [16, 1024], "data_offsets": [0, 32768]}),
+        );
+        let header = Value::Object(object);
+
+        assert_eq!(detect_lora_family(&header).as_deref(), Some("krea_2"));
     }
 
     /// kohya / musubi-tuner / LyCORIS export of a dual-stream MMDiT (Qwen-Image /
