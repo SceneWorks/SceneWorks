@@ -1515,6 +1515,49 @@ export function App() {
     [token],
   );
 
+  // Reference-image → plain-text description (epic 8203, sc-8208): the sibling of `imageCaption` for
+  // NON-structured text-to-image models. Same `prompts/refine` endpoint + poll contract, but
+  // `task: "image_describe"` drives the worker's prose/tags vision path (sc-8204/8205). `captionStyle`
+  // (from the catalog, default prose) selects natural-language prose vs booru tags. Resolves to the raw
+  // text the caller drops into the prompt box. C1: the image is consumed only to produce the prompt — it
+  // is NEVER passed to generation as img2img conditioning.
+  const imageDescribe = useCallback(
+    async ({ sourceAssetId, projectId, model, captionStyle, signal }) => {
+      const created = await apiFetch("/api/v1/prompts/refine", token, {
+        method: "POST",
+        signal,
+        body: JSON.stringify({
+          task: "image_describe",
+          sourceAssetId,
+          projectId,
+          model,
+          captionStyle,
+        }),
+      });
+      const jobId = created?.id;
+      if (!jobId) {
+        throw new Error("Could not start image description.");
+      }
+      const deadline = Date.now() + 180000;
+      while (Date.now() < deadline) {
+        await abortableDelay(1000, signal);
+        const job = await apiFetch(`/api/v1/jobs/${jobId}`, token, { signal });
+        if (job.status === "completed") {
+          const description = job.result?.refinedPrompt;
+          if (!description) {
+            throw new Error("Image description returned empty text.");
+          }
+          return description;
+        }
+        if (job.status === "failed" || job.status === "canceled" || job.status === "interrupted") {
+          throw new Error(job.message || job.error || "Image description failed.");
+        }
+      }
+      throw new Error("Image description timed out. Is the captioning runtime running?");
+    },
+    [token],
+  );
+
   const createVqaJob = useCallback(
     async (asset, question, maxNewTokens) => {
       if (!activeProject) {
@@ -1880,6 +1923,7 @@ export function App() {
     refinePrompt,
     magicPrompt,
     imageCaption,
+    imageDescribe,
     latestVideoAssets,
     recentImageAssets,
     recentVideoAssets,
@@ -1976,7 +2020,7 @@ export function App() {
     updateAssetStatus, updateAssetTags, latestImageAssets,
     jobs, jobAction, createVqaJob, createInterleaveJob, createPlaceholderJob, filteredJobs,
     jobPrompt, setJobPrompt, projectFilter, setProjectFilter, projects, visibleWorkers, workersById,
-    createVideoJob, createVideoUpscaleJob, createImageJob, refinePrompt, magicPrompt, imageCaption, latestVideoAssets, recentImageAssets,
+    createVideoJob, createVideoUpscaleJob, createImageJob, refinePrompt, magicPrompt, imageCaption, imageDescribe, latestVideoAssets, recentImageAssets,
     recentVideoAssets, videoLocalJobs, imageLocalJobs, documentLocalJobs, studioLaunch,
     rememberLocalGenerationJob, personTracks, personReadiness, createPersonDetectionJob,
     createPersonTrackJob, saveTrackCorrections, imageModels, videoModels, models, macCapabilities,

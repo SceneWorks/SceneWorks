@@ -203,6 +203,10 @@
             "additionalProperties": {
               "type": "object"
             }
+          },
+          "captionStyle": {
+            "enum": ["prose", "tags"],
+            "description": "Reference-image → prompt describe style (epic 8203). 'prose' (default when absent) emits a natural-language description; 'tags' emits a comma-separated booru/danbooru tag list for anime/booru SDXL checkpoints. The web forwards this to the image_describe job. Ignored by structuredPrompt models (Ideogram), which use the JSON caption path instead."
           }
         }
       }

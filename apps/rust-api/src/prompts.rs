@@ -14,13 +14,14 @@ pub(crate) async fn create_prompt_refine_job(
         .as_deref()
         .map(str::trim)
         .filter(|value| !value.is_empty());
-    // The reference-image → JSON caption task (epic 8102, sc-8108) is driven by an image, not a text
-    // prompt: it carries a project `sourceAssetId` instead. Resolve that to the worker's confined
+    // The reference-image vision tasks — `image_caption` (epic 8102, sc-8108) → JSON caption, and
+    // `image_describe` (epic 8203, sc-8206) → plain-text description — are driven by an image, not a
+    // text prompt: they carry a project `sourceAssetId` instead. Resolve that to the worker's confined
     // on-disk `imagePath` and forward the vision model's repo; the prompt requirement is waived.
-    let is_image_caption = task == Some("image_caption");
+    let is_vision_task = task == Some("image_caption") || task == Some("image_describe");
 
     let prompt = payload.prompt.trim();
-    if prompt.is_empty() && !is_image_caption {
+    if prompt.is_empty() && !is_vision_task {
         return Err(ApiError::bad_request("Prompt cannot be empty"));
     }
 
@@ -29,19 +30,23 @@ pub(crate) async fn create_prompt_refine_job(
         job_payload.insert("prompt".to_owned(), Value::String(prompt.to_owned()));
     }
 
-    if is_image_caption {
+    if is_vision_task {
         let asset_id = payload
             .source_asset_id
             .as_deref()
             .map(str::trim)
             .filter(|value| !value.is_empty())
-            .ok_or_else(|| ApiError::bad_request("sourceAssetId is required for image_caption"))?;
+            .ok_or_else(|| {
+                ApiError::bad_request("sourceAssetId is required for a reference-image task")
+            })?;
         let project_id = payload
             .project_id
             .as_deref()
             .map(str::trim)
             .filter(|value| !value.is_empty())
-            .ok_or_else(|| ApiError::bad_request("projectId is required for image_caption"))?;
+            .ok_or_else(|| {
+                ApiError::bad_request("projectId is required for a reference-image task")
+            })?;
         let image_path = resolve_image_caption_path(state.clone(), project_id, asset_id).await?;
         job_payload.insert("imagePath".to_owned(), Value::String(image_path));
         // The vision model is named by its HF repo string; the worker resolves it by repo (like the
@@ -53,6 +58,19 @@ pub(crate) async fn create_prompt_refine_job(
             .filter(|value| !value.is_empty())
         {
             job_payload.insert("model".to_owned(), Value::String(model.to_owned()));
+        }
+        // `image_describe` carries the per-model describe style (prose vs booru tags, sc-8205); forward
+        // it verbatim for the worker to parse. Harmless for `image_caption` (the worker ignores it).
+        if let Some(caption_style) = payload
+            .caption_style
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        {
+            job_payload.insert(
+                "captionStyle".to_owned(),
+                Value::String(caption_style.to_owned()),
+            );
         }
     }
 
