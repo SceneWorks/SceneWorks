@@ -153,7 +153,7 @@ function AssetTags({ asset, availableTags = [], updateAssetTags = () => {} }) {
   );
 }
 
-function assetSupportsCharacterLink(asset) {
+export function assetSupportsCharacterLink(asset) {
   return (
     ["image", "frame", "upload", "video"].includes(asset?.type) ||
     asset?.file?.mimeType?.startsWith("image/") ||

@@ -9045,6 +9045,156 @@ describe("SceneWorks app shell", () => {
     expect(container.textContent).toContain("Added to Dax's assets.");
   });
 
+  it("bulk-discards every selected Library asset to the Trash", async () => {
+    const deleteAsset = vi.fn(async () => {});
+    const assetA = {
+      id: "asset-a",
+      projectId: "project-1",
+      type: "image",
+      displayName: "Plate A",
+      status: { favorite: false, rating: 0, rejected: false, trashed: false },
+    };
+    const assetB = {
+      id: "asset-b",
+      projectId: "project-1",
+      type: "image",
+      displayName: "Plate B",
+      status: { favorite: false, rating: 0, rejected: false, trashed: false },
+    };
+    root = createRoot(container);
+    await act(async () => {
+      root.render(
+        withAppContext(
+          {
+            activeProject: { id: "project-1", name: "Characters" },
+            assets: [assetA, assetB],
+            characters: [],
+            addCharacterReference: vi.fn(),
+            jobs: [],
+            imageModels: [],
+            createVqaJob: vi.fn(),
+            deleteAsset,
+            purgeAsset: () => {},
+            importAsset: () => {},
+            setPreviewAsset: () => {},
+            sendAssetToImage: () => {},
+            sendAssetToVideo: () => {},
+            selectedAsset: null,
+            setSelectedAssetId: () => {},
+            setActiveView: () => {},
+            updateAssetStatus: () => {},
+            updateAssetTags: () => {},
+          },
+          <LibraryScreen />,
+        ),
+      );
+    });
+    await settle();
+
+    await act(async () => {
+      container.querySelector('input[aria-label="Select Plate A"]').click();
+    });
+    await act(async () => {
+      container.querySelector('input[aria-label="Select Plate B"]').click();
+    });
+    await settle();
+
+    await act(async () => {
+      [...container.querySelectorAll("button")].find((button) => button.textContent === "Discard").click();
+    });
+    await settle();
+
+    expect(deleteAsset).toHaveBeenCalledTimes(2);
+    expect(deleteAsset).toHaveBeenCalledWith(assetA);
+    expect(deleteAsset).toHaveBeenCalledWith(assetB);
+    // Selection clears once the fan-out finishes, so the bar disappears.
+    expect(container.querySelector(".batch-selection-bar")).toBeNull();
+  });
+
+  it("bulk-moves selected Library assets into a chosen character's assets", async () => {
+    const addCharacterReference = vi.fn(async () => ({ id: "char-2", references: [] }));
+    const assetA = {
+      id: "asset-a",
+      projectId: "project-1",
+      type: "image",
+      displayName: "Plate A",
+      status: { favorite: false, rating: 0, rejected: false, trashed: false },
+    };
+    const assetB = {
+      id: "asset-b",
+      projectId: "project-1",
+      type: "image",
+      displayName: "Plate B",
+      status: { favorite: false, rating: 0, rejected: false, trashed: false },
+    };
+    root = createRoot(container);
+    await act(async () => {
+      root.render(
+        withAppContext(
+          {
+            activeProject: { id: "project-1", name: "Characters" },
+            assets: [assetA, assetB],
+            characters: [
+              { id: "char-1", name: "Mira", type: "person", references: [], approvedReferences: [], looks: [], loras: [] },
+              { id: "char-2", name: "Dax", type: "person", references: [], approvedReferences: [], looks: [], loras: [] },
+            ],
+            addCharacterReference,
+            jobs: [],
+            imageModels: [],
+            createVqaJob: vi.fn(),
+            deleteAsset: () => {},
+            purgeAsset: () => {},
+            importAsset: () => {},
+            setPreviewAsset: () => {},
+            sendAssetToImage: () => {},
+            sendAssetToVideo: () => {},
+            selectedAsset: null,
+            setSelectedAssetId: () => {},
+            setActiveView: () => {},
+            updateAssetStatus: () => {},
+            updateAssetTags: () => {},
+          },
+          <LibraryScreen />,
+        ),
+      );
+    });
+    await settle();
+
+    await act(async () => {
+      container.querySelector('input[aria-label="Select Plate A"]').click();
+    });
+    await act(async () => {
+      container.querySelector('input[aria-label="Select Plate B"]').click();
+    });
+    await settle();
+
+    // Reveal the inline character picker, target Dax, then confirm.
+    await act(async () => {
+      [...container.querySelectorAll(".batch-selection-bar button")].find((button) => button.textContent === "Move").click();
+    });
+    await settle();
+    await changeField(container.querySelector('select[aria-label="Move to character"]'), "char-2");
+    await act(async () => {
+      [...container.querySelectorAll("button")].find((button) => button.textContent?.startsWith("Move 2 to assets")).click();
+    });
+    await settle();
+
+    expect(addCharacterReference).toHaveBeenCalledTimes(2);
+    expect(addCharacterReference).toHaveBeenCalledWith("char-2", {
+      assetId: "asset-a",
+      approved: false,
+      role: "asset",
+      notes: "Added from Asset Library.",
+    });
+    expect(addCharacterReference).toHaveBeenCalledWith("char-2", {
+      assetId: "asset-b",
+      approved: false,
+      role: "asset",
+      notes: "Added from Asset Library.",
+    });
+    expect(container.querySelector(".batch-selection-bar")).toBeNull();
+  });
+
   it("disables the Library move action for a character that already owns the asset", async () => {
     const addCharacterReference = vi.fn();
     const asset = {
