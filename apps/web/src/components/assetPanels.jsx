@@ -3,6 +3,7 @@ import { isAbortError } from "../api.js";
 import { AssetMedia, assetUrl } from "./assetMedia.jsx";
 import { DocumentView } from "./DocumentView.jsx";
 import { Icon } from "./Icons.jsx";
+import { LikenessBadge } from "./LikenessBadge.jsx";
 import { Modal } from "./Modal.jsx";
 
 // Permanently purge every discarded asset in a single Trashcan view. The caller
@@ -460,6 +461,7 @@ export function AssetCard({ asset, deleteAsset, purgeAsset, onPreview, updateAss
     <article className={classes}>
       <button className="preview-button" onClick={() => onPreview(asset)} type="button">
         <AssetMedia asset={asset} />
+        <LikenessBadge asset={asset} />
       </button>
       <div className="review-actions">
         <button onClick={() => updateAssetStatus(asset, { favorite: !asset.status?.favorite })} type="button">
@@ -522,6 +524,7 @@ export function FullscreenPreview({
             <Icon.ArrowLeft size={18} />
           </button>
           <AssetMedia asset={displayedAsset} />
+          <LikenessBadge asset={asset} />
           <button
             aria-label="Next asset"
             className="preview-nav-button next"

@@ -10000,3 +10000,84 @@ details[open] > summary.lora-scope-group-heading::before,
     grid-template-columns: 1fr;
   }
 }
+
+/* ---------- Frontal-identity likeness badge (sc-4413) ----------
+   A small colour-banded badge pinned to the top-right of a generated result
+   thumbnail. Bands map to the shared classifier in faceLikeness.js (sc-4414):
+   strong -> success, moderate -> warn, weak -> danger, na -> neutral/muted.
+   The metric is frontal-identity confidence, NOT overall quality. */
+
+/* Each surface that hosts a badge needs a positioning context. These already
+   clip with overflow:hidden where present, so an absolutely-positioned badge
+   stays inside the tile. */
+.preview-button,
+.reference-thumb,
+.character-asset-media,
+.worker-progress-card__thumb-cell,
+.preview-modal-stage {
+  position: relative;
+}
+
+.likeness-badge {
+  position: absolute;
+  top: 6px;
+  right: 6px;
+  z-index: 2;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  max-width: calc(100% - 12px);
+  padding: 2px 7px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 700;
+  line-height: 1.3;
+  letter-spacing: 0.01em;
+  box-shadow: var(--shadow-sm);
+  pointer-events: auto;
+  cursor: help;
+}
+
+.likeness-badge__value {
+  font-variant-numeric: tabular-nums;
+}
+
+.likeness-badge--strong {
+  background: var(--success-soft, color-mix(in oklch, var(--success) 18%, var(--surface)));
+  color: color-mix(in oklch, var(--success) 78%, var(--text));
+}
+
+.likeness-badge--moderate {
+  background: var(--warn-soft);
+  color: color-mix(in oklch, var(--warn) 78%, var(--text));
+}
+
+.likeness-badge--weak {
+  background: var(--danger-soft);
+  color: color-mix(in oklch, var(--danger) 80%, var(--text));
+}
+
+/* N/A is deliberately neutral — it is the absence of a measurable frontal-identity
+   signal, NOT a low score. It must never read as a red failure. */
+.likeness-badge--na {
+  background: var(--surface-2);
+  color: var(--text-muted);
+  border: 1px solid var(--border);
+  font-weight: 600;
+}
+
+.likeness-badge__note {
+  font-size: 10px;
+  font-weight: 500;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* The full preview modal is large — give its badge a touch more presence. */
+.preview-modal-stage .likeness-badge {
+  top: 12px;
+  right: 12px;
+  font-size: 12px;
+  padding: 3px 9px;
+}

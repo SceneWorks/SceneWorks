@@ -3,6 +3,7 @@ import { AssetBatchModal, AssetSelectionBar, useAssetBatch } from "../assetBatch
 import { AssetPickerField, CharacterImportDialog } from "../components/AssetPicker.jsx";
 import { AssetCard, emptyTrash } from "../components/assetPanels.jsx";
 import { AssetMedia } from "../components/assetMedia.jsx";
+import { LikenessBadge } from "../components/LikenessBadge.jsx";
 import { WorkerProgressCard } from "../components/WorkerProgressCard.jsx";
 import { terminalStatuses } from "../jobTypes.js";
 import { PoseLibraryPicker } from "../components/PoseLibraryPicker.jsx";
@@ -712,6 +713,7 @@ function CharacterGenerationPanel({
               type="button"
             >
               <AssetMedia asset={asset} controls={false} />
+              <LikenessBadge asset={asset} />
             </button>
           ))}
         </div>
@@ -946,6 +948,7 @@ export function CharacterAssets({
                   type="button"
                 >
                   <AssetMedia asset={asset} controls={false} />
+                  <LikenessBadge asset={asset} />
                 </button>
                 <strong>{asset.displayName ?? asset.id}</strong>
                 <div className="character-asset-card-actions">

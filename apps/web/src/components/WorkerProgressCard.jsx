@@ -4,6 +4,7 @@ import { formatSeconds, liveElapsedSeconds, percent } from "../formatting.js";
 import { useAppContext } from "../context/AppContext.js";
 import { deriveWorkerHardware, findWorkerForJob, liveMeters } from "../workers.js";
 import { AssetMedia, AssetThumbnail, assetUrl, posterUrl } from "./assetMedia.jsx";
+import { LikenessBadge } from "./LikenessBadge.jsx";
 
 // Live-ticking elapsed seconds for in-flight jobs. Re-exported here after the
 // sc-2093 cleanup deleted the legacy JobProgress.jsx that originally housed it.
@@ -244,7 +245,12 @@ function ThumbnailGrid({ assets, variant, onThumbnailClick, isRunning, expectedC
     >
       {items.map((asset, index) => {
         const interactive = !!onThumbnailClick;
-        const inner = <AssetThumbnail asset={asset} className="worker-progress-card__thumb-media" />;
+        const inner = (
+          <>
+            <AssetThumbnail asset={asset} className="worker-progress-card__thumb-media" />
+            <LikenessBadge asset={asset} />
+          </>
+        );
         const label = asset.displayName && variant === "image-grid" ? (
           <small className="worker-progress-card__thumb-label">{asset.displayName}</small>
         ) : null;
