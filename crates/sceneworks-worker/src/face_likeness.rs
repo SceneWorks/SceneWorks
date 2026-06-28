@@ -145,6 +145,70 @@ impl LikenessResult {
     }
 }
 
+/// The `rawAdapterSettings` key the likeness block lands under in a generated asset's sidecar
+/// (sc-4408). `build_image_sidecar_parts` passes `rawAdapterSettings` through verbatim into
+/// `recipe.rawAdapterSettings`, so attaching the block here is the whole persistence pathway.
+pub(crate) const FACE_LIKENESS_FACT_KEY: &str = "faceLikeness";
+
+/// Build the `faceLikeness` fact block for a generated asset's `rawAdapterSettings` (sc-4408).
+///
+/// This is the carrier seam the scoring surfaces (sc-4409 Angles / sc-4410 Poses / sc-4411
+/// With-Character) attach to each scored asset — NOT the pure scorer (that is sc-4407's
+/// [`LikenessResult`]). The persisted shape matches the asset-sidecar contract:
+/// `{ score, detected, method, sourceAssetId }` (+ a `reason` on the N/A branch). It maps the
+/// scorer's `sourceRef` to the sidecar's `sourceAssetId` field name.
+///
+/// A scored result carries the cosine `score` + `detected: true`; an N/A result carries
+/// `score: null`, `detected: false` and the `reason`, so a profile / no-face generation persists an
+/// honest `detected: false` block rather than a misleading low number (the sc-4407 result-honesty
+/// contract, carried intact into the sidecar).
+pub(crate) fn face_likeness_fact(
+    result: &LikenessResult,
+    source_asset_id: Option<&str>,
+) -> JsonObject {
+    let mut object = JsonObject::new();
+    object.insert(
+        "score".to_owned(),
+        match result.score {
+            Some(score) => json!(score),
+            None => Value::Null,
+        },
+    );
+    object.insert("detected".to_owned(), Value::Bool(result.detected));
+    object.insert("method".to_owned(), json!(LIKENESS_METHOD));
+    object.insert(
+        "sourceAssetId".to_owned(),
+        match source_asset_id {
+            Some(id) => json!(id),
+            None => Value::Null,
+        },
+    );
+    if let Some(reason) = result.reason {
+        object.insert("reason".to_owned(), json!(reason.as_str()));
+    }
+    object
+}
+
+/// Attach a face-likeness result to a generated asset's `rawAdapterSettings` under
+/// [`FACE_LIKENESS_FACT_KEY`] (sc-4408). The omit-when-absent seam: a `None` result (scoring was
+/// skipped / not applicable / hard-failed before a [`LikenessResult`] was produced) leaves
+/// `rawAdapterSettings` untouched, so the field is OMITTED entirely from the sidecar — no `null`
+/// clutter, no crash. A `Some(result)` writes the [`face_likeness_fact`] block (including the
+/// explicit `detected: false` N/A block). The scoring surfaces call this once per generated asset
+/// just before [`write_image_asset`](crate::image_jobs::write_image_asset) builds its fact.
+pub(crate) fn attach_face_likeness(
+    raw_settings: &mut JsonObject,
+    result: Option<&LikenessResult>,
+    source_asset_id: Option<&str>,
+) {
+    if let Some(result) = result {
+        raw_settings.insert(
+            FACE_LIKENESS_FACT_KEY.to_owned(),
+            Value::Object(face_likeness_fact(result, source_asset_id)),
+        );
+    }
+}
+
 /// L2-normalize a raw ArcFace embedding. `None` for an empty or zero-norm vector (so callers can treat
 /// "no usable embedding" explicitly). Identical contract to the dataset-face / lora-eval normalizers.
 fn l2_normalized(v: &[f32]) -> Option<Vec<f32>> {
@@ -505,6 +569,81 @@ mod tests {
                 "reason": "no_face",
             })
         );
+    }
+
+    // -- sc-4408 carrier: faceLikeness → rawAdapterSettings persistence seam --------
+
+    #[test]
+    fn face_likeness_fact_scored_shape_uses_source_asset_id() {
+        // The sidecar contract field is `sourceAssetId` (sc-4407's scorer emits `sourceRef`); the
+        // carrier maps it. A scored result is the full `{score, detected, method, sourceAssetId}`.
+        let fact = face_likeness_fact(&LikenessResult::scored(0.873), Some("asset_src1"));
+        assert_eq!(
+            Value::Object(fact),
+            json!({
+                "score": 0.873,
+                "detected": true,
+                "method": "arcface_antelopev2",
+                "sourceAssetId": "asset_src1",
+            })
+        );
+    }
+
+    #[test]
+    fn face_likeness_fact_na_block_carries_detected_false_and_reason() {
+        // An N/A generation persists an explicit detected:false block (with reason), NOT a low number.
+        let fact = face_likeness_fact(
+            &LikenessResult::na(NoScoreReason::NoFace),
+            Some("asset_src1"),
+        );
+        assert_eq!(
+            Value::Object(fact),
+            json!({
+                "score": Value::Null,
+                "detected": false,
+                "method": "arcface_antelopev2",
+                "sourceAssetId": "asset_src1",
+                "reason": "no_face",
+            })
+        );
+    }
+
+    #[test]
+    fn attach_face_likeness_writes_block_into_raw_settings() {
+        // The end-to-end persistence pathway: attaching a scored result puts the `faceLikeness` block
+        // into `rawAdapterSettings` (which `build_image_sidecar_parts` passes through verbatim) while
+        // leaving any pre-existing settings intact.
+        let mut raw = JsonObject::new();
+        raw.insert("steps".to_owned(), json!(8));
+        attach_face_likeness(
+            &mut raw,
+            Some(&LikenessResult::scored(0.91)),
+            Some("asset_src1"),
+        );
+        assert_eq!(raw.get("steps"), Some(&json!(8)));
+        assert_eq!(
+            raw.get(FACE_LIKENESS_FACT_KEY),
+            Some(&json!({
+                "score": 0.91,
+                "detected": true,
+                "method": "arcface_antelopev2",
+                "sourceAssetId": "asset_src1",
+            }))
+        );
+    }
+
+    #[test]
+    fn attach_face_likeness_omits_field_when_absent() {
+        // The omit-when-absent contract: a None result (scoring skipped/failed) leaves
+        // rawAdapterSettings untouched — the field is omitted entirely, no null clutter, no crash.
+        let mut raw = JsonObject::new();
+        raw.insert("steps".to_owned(), json!(8));
+        attach_face_likeness(&mut raw, None, Some("asset_src1"));
+        assert!(
+            !raw.contains_key(FACE_LIKENESS_FACT_KEY),
+            "absent score ⇒ faceLikeness omitted"
+        );
+        assert_eq!(raw.get("steps"), Some(&json!(8)));
     }
 
     #[test]
