@@ -22,6 +22,15 @@
 //! [`crate::face_likeness::FaceLikenessScorer::score_or_null`], and a missing/garbled asset is a clean
 //! `InvalidPayload` the dispatcher turns into a failed job (never a panic).
 
+// `PathBuf` is used only by `load_compare_images` (and the macOS real-weight test), both of which exist
+// only under the face-stack configs — so gate the import to the SAME cfg as its use sites. On the plain
+// Linux parity build (no `backend-candle`) only the unsupported stub at the bottom compiles, and it uses
+// fully-qualified paths with no top-level imports; an ungated `PathBuf` would be an unused-import error
+// there under `-D warnings` (the cfg trap that broke the parity lane).
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
 use std::path::PathBuf;
 
 // `Image` resolves to `mlx_gen::Image` on macOS and `gen_core::Image` under the candle backend — the
