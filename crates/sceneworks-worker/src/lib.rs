@@ -305,6 +305,8 @@ mod progress;
 pub(crate) use progress::*;
 mod util;
 pub use util::*;
+mod preflight;
+pub use preflight::*;
 
 const INSTALL_MARKER: &str = ".sceneworks-download-complete.json";
 const DEFAULT_API_URL: &str = "http://localhost:8000";
