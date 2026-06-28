@@ -490,6 +490,7 @@ function CharacterGenerationPanel({
   selectedCharacter,
   model,
   models,
+  catalog,
   approvedReferences,
   assets = [],
   createImageJob,
@@ -524,6 +525,9 @@ function CharacterGenerationPanel({
   // active backbone; values fold into the job's `advanced` dict at submit.
   const advanced = useCharacterAdvancedOptions(activeModel, {
     defaultNegativePrompt: mode.defaultNegativePrompt,
+    // Full catalog (not just the capable backbones) so the PiD toggle can check whether the
+    // active model's PiD checkpoint is installed (sc-8372). `catalog` carries the download entries.
+    catalog,
   });
   const [referenceAssetId, setReferenceAssetId] = React.useState("");
   const [prompt, setPrompt] = React.useState("");
