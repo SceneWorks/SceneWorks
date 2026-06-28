@@ -440,6 +440,17 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 /// Run this binary as a standalone worker process instead of the HTTP API.
+/// Apple-Silicon Metal preflight (sc-8411). Dispatched from `main` when
+/// `SCENEWORKS_GPU_CHECK=1`: a one-shot probe that the desktop spawns at startup —
+/// the macOS counterpart of the Windows `nvidia-smi` `cuda_preflight`. Reuses this
+/// binary because it already links MLX (the desktop crate does not), and runs the
+/// probe in the SAME process/spawn context the real worker uses, so it faithfully
+/// predicts whether the worker can acquire a Metal GPU. `Ok(())` when usable;
+/// `Err(message)` is the user-facing reason the desktop relays onto the setup screen.
+pub fn gpu_check() -> Result<(), String> {
+    sceneworks_worker::metal_preflight()
+}
+
 /// Dispatched from `main` when `SCENEWORKS_WORKER_ONLY=1`; the desktop app uses
 /// it to launch the Apple-Silicon MLX GPU worker (`SCENEWORKS_GPU_ID=mlx`,
 /// sc-3289) as a crash-isolated sibling of the API process — reusing this binary

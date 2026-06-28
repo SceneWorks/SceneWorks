@@ -1426,6 +1426,42 @@ fn cuda_preflight() -> Result<(), String> {
     evaluate_nvidia_preflight(Some(&stdout))
 }
 
+/// Apple-Silicon Metal preflight (sc-8411): the macOS counterpart of the Windows
+/// `cuda_preflight`. The desktop crate doesn't link MLX, so probe by re-launching the
+/// bundled `sceneworks-api` sidecar in its one-shot `SCENEWORKS_GPU_CHECK=1` mode — a
+/// tiny MLX op (1-element astype + eval) that fails exactly as a real job would if this
+/// machine can't acquire a Metal GPU (a headless/SSH session, a wedged GPU). Running it
+/// as the same sidecar binary means the probe sees the identical spawn context the
+/// worker will. `Ok(())` when usable; `Err(message)` is the sidecar's user-facing reason
+/// (relayed verbatim onto the setup screen), or a fallback if the probe produced none.
+#[cfg(target_os = "macos")]
+async fn metal_preflight(app: &AppHandle) -> Result<(), String> {
+    let output = app
+        .shell()
+        .sidecar("sceneworks-api")
+        .map_err(|error| format!("locate api for GPU check: {error}"))?
+        .env("SCENEWORKS_GPU_CHECK", "1")
+        .output()
+        .await
+        .map_err(|error| format!("run GPU check: {error}"))?;
+    if output.status.code() == Some(0) {
+        return Ok(());
+    }
+    let message = String::from_utf8_lossy(&output.stdout).trim().to_owned();
+    if message.is_empty() {
+        // The probe died before printing its reason (e.g. an unexpected crash / signal).
+        // Surface a usable fallback rather than a blank error.
+        return Err(
+            "SceneWorks can't initialize the Metal GPU on this Mac. It requires \
+                    Apple Silicon with GPU access; running over SSH or in a headless \
+                    session is not supported. Try opening SceneWorks on the Mac itself, \
+                    or reboot and reopen."
+                .to_owned(),
+        );
+    }
+    Err(message)
+}
+
 async fn run_startup(app: AppHandle) {
     // Provide the builtin model catalog the rust-api/worker expect before they
     // start, so Model Manager is populated and native video resources resolve.
@@ -1461,6 +1497,17 @@ async fn run_startup(app: AppHandle) {
             format!("GPU runtime download failed: {error}"),
             true,
         );
+        return;
+    }
+    // Apple-Silicon Metal preflight (sc-8411): fail fast with a clear, actionable
+    // message on the setup screen if this Mac can't acquire a Metal GPU (a headless/SSH
+    // session, a wedged GPU), BEFORE spawning the worker and loading a multi-GB model —
+    // the macOS counterpart of the Windows `cuda_preflight` above. Without it the first
+    // GPU op fails deep inside a model load with a raw MLX C++ assertion (and a leaked
+    // CI build path). The setup page renders this `error` event.
+    #[cfg(target_os = "macos")]
+    if let Err(error) = metal_preflight(&app).await {
+        emit(&app, "error", error, true);
         return;
     }
     // No Python venv on ANY platform: macOS went MLX-only (epic 3482, sc-3492/sc-3493)
