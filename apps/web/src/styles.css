@@ -2093,6 +2093,64 @@ label {
   border-radius: var(--r-md);
 }
 
+/* Strict-control panel (epic 8236, sc-8245): pose / canny / depth structure lock. Reuses the
+   .studio-source-band shell, .reference-strength slider, .checkline toggle, and .asset-picker-field /
+   .pose-library inner surfaces; only the mode tabs + section spacing are panel-specific. */
+.control-panel {
+  display: grid;
+  gap: 12px;
+}
+
+.control-panel-head {
+  display: grid;
+  gap: 2px;
+}
+
+.control-panel-label {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-muted);
+}
+
+.control-mode-tabs {
+  display: inline-flex;
+  background: var(--bg-2);
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+  padding: 3px;
+  gap: 2px;
+  flex-wrap: wrap;
+  width: fit-content;
+}
+
+.control-mode-tab {
+  min-height: 28px;
+  padding: 0 14px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text-muted);
+  font-size: 12.5px;
+  font-weight: 500;
+  box-shadow: none;
+}
+
+.control-mode-tab:hover:not(.active) {
+  color: var(--text);
+}
+
+.control-mode-tab.active {
+  background: var(--surface);
+  color: var(--text);
+  box-shadow: var(--shadow-sm);
+}
+
+.control-image-section,
+.control-pose-section {
+  display: grid;
+  gap: 8px;
+}
+
 .character-reference-picker {
   display: grid;
   gap: 10px;

@@ -8,6 +8,7 @@ import {
   hasUsableModelFor,
   imageModelUsable,
   poseModelUsable,
+  supportedControlModes,
   videoModelUsable,
   visionCaptionModelUsable,
 } from "./modelEligibility.js";
@@ -110,6 +111,28 @@ describe("modelEligibility predicates", () => {
     ]);
     // On Windows the predicate rejects it, so there is no offer (feature stays hidden).
     expect(downloadOffersFor([missing], visionCaptionModelUsable, { ...caps, platform: "windows" })).toEqual([]);
+  });
+
+  it("supportedControlModes gates on ui.controlModes, canonical-ordered + deduped", () => {
+    // A backbone advertising all three → all three, canonical order regardless of declared order.
+    expect(supportedControlModes({ ui: { controlModes: ["depth", "pose", "canny"] } })).toEqual([
+      "pose",
+      "canny",
+      "depth",
+    ]);
+    // Pose-only backbone → only pose (the picker would show a single tab).
+    expect(supportedControlModes({ ui: { controlModes: ["pose"] } })).toEqual(["pose"]);
+    // Canny+depth (no pose) → exactly those, in canonical order.
+    expect(supportedControlModes({ ui: { controlModes: ["depth", "canny"] } })).toEqual(["canny", "depth"]);
+    // Unknown modes are dropped (the worker only admits pose/canny/depth); dupes collapse.
+    expect(supportedControlModes({ ui: { controlModes: ["pose", "POSE", "scribble", "canny"] } })).toEqual([
+      "pose",
+      "canny",
+    ]);
+    // No controlModes / no ui → empty (the panel hides).
+    expect(supportedControlModes({ ui: {} })).toEqual([]);
+    expect(supportedControlModes({})).toEqual([]);
+    expect(supportedControlModes(null)).toEqual([]);
   });
 
   it("downloadOffersFor prefers recommended, falls back to any eligible, skips installed", () => {

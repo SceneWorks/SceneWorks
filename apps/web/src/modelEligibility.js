@@ -114,6 +114,25 @@ export function poseModelUsable(model, caps) {
   return !macModelBlock(model, caps) && Boolean(model?.ui?.poseLibrary);
 }
 
+// Strict-control modes the selected backbone advertises (sc-8245). The single source of truth is the
+// model's `ui.controlModes` — mirrored into constants.js from the manifest (the worker's
+// STRICT_CONTROL_ENGINES `supported_kinds`). Canonical-ordered (pose, canny, depth) and de-duplicated so
+// the picker renders deterministically regardless of manifest ordering; unknown modes are dropped (the
+// worker only admits pose/canny/depth). Empty array ⇒ the backbone supports no strict control and the
+// panel hides. Pure (model in → modes out), so the picker and its gate share exactly one notion of
+// "supported_kinds".
+export const CONTROL_MODE_ORDER = ["pose", "canny", "depth"];
+
+export function supportedControlModes(model) {
+  const declared = Array.isArray(model?.ui?.controlModes) ? model.ui.controlModes : [];
+  const present = new Set(
+    declared
+      .filter((mode) => typeof mode === "string")
+      .map((mode) => mode.trim().toLowerCase()),
+  );
+  return CONTROL_MODE_ORDER.filter((mode) => present.has(mode));
+}
+
 // Character Studio needs Angles OR Poses support.
 export function characterModelUsable(model, caps) {
   return angleModelUsable(model, caps) || poseModelUsable(model, caps);
