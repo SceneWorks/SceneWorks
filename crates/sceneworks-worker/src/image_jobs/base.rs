@@ -81,6 +81,7 @@ fn mlx_available(request: &ImageRequest, settings: &Settings) -> bool {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum ImageRoute {
     ZImageControl,
+    ZImageBaseControl,
     QwenControl,
     KolorsControl,
     Flux1DevControl,
@@ -99,6 +100,11 @@ enum ImageRoute {
 fn resolve_image_route(request: &ImageRequest, settings: &Settings) -> Option<ImageRoute> {
     if zimage_control_available(request, settings) {
         Some(ImageRoute::ZImageControl)
+    } else if zimage_base_control_available(request, settings) {
+        // Base (non-distilled, full-CFG) Z-Image strict control (advanced.poses on `z_image`) →
+        // base Fun-Controlnet-Union (`z_image_control`). The base mirror of the Turbo control arm
+        // above; keyed on the base model id so the Turbo path is untouched (sc-8251).
+        Some(ImageRoute::ZImageBaseControl)
     } else if qwen_control_available(request, settings) {
         Some(ImageRoute::QwenControl)
     } else if kolors_control_available(request, settings) {
@@ -142,6 +148,7 @@ impl ImageRoute {
     fn image_count(self, request: &ImageRequest, settings: &Settings) -> u32 {
         match self {
             ImageRoute::ZImageControl
+            | ImageRoute::ZImageBaseControl
             | ImageRoute::QwenControl
             | ImageRoute::KolorsControl
             | ImageRoute::Flux1DevControl
