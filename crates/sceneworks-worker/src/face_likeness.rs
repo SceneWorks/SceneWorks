@@ -31,11 +31,14 @@
 
 use serde_json::{json, Value};
 
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+// `Image` resolves to `mlx_gen::Image` on macOS and `gen_core::Image` under the candle backend —
+// the same cfg-gated split the sibling job modules use (sensenova_jobs.rs / video_jobs.rs). The whole
+// scorer (and its test stub) only exists under these two configs, so on the plain Linux parity build
+// (no `backend-candle`) `Image` is intentionally absent and nothing here is compiled.
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 use gen_core::Image;
+#[cfg(target_os = "macos")]
+use mlx_gen::Image;
 
 use sceneworks_core::contracts::JsonObject;
 
@@ -288,14 +291,21 @@ enum FaceBackend {
     /// Weight-free deterministic backend for the wiring tests (sc-4409): keyed on the image's first
     /// pixel byte so a test can map a synthetic image to a face / no-face / low-confidence detection
     /// and count how often the backend is hit, WITHOUT staging the antelopev2 weights in CI. Never
-    /// compiled outside `cargo test`.
+    /// compiled outside `cargo test`. Gated on the face-backend configs too (the whole scorer is), so
+    /// the plain Linux parity build — which has no `Image` type in scope — doesn't try to compile it.
     #[cfg(test)]
     Stub(StubFaceBackend),
 }
 
 /// The canned detection the [`FaceBackend::Stub`] returns for a given image, selected by the image's
 /// first pixel byte (the test encodes intent in pixel 0). Mirrors the three real-backend outcomes.
-#[cfg(test)]
+#[cfg(all(
+    test,
+    any(
+        target_os = "macos",
+        all(not(target_os = "macos"), feature = "backend-candle")
+    )
+))]
 #[derive(Clone, Copy)]
 enum StubFace {
     /// A reliable face at `det_score`, embedded as the canned vector (drives a real cosine).
@@ -306,12 +316,24 @@ enum StubFace {
 
 /// Counts every `largest_face` call so a test can prove the SOURCE is embedded exactly once across N
 /// generated-image scores (the explicit caching acceptance criterion), independent of weights.
-#[cfg(test)]
+#[cfg(all(
+    test,
+    any(
+        target_os = "macos",
+        all(not(target_os = "macos"), feature = "backend-candle")
+    )
+))]
 struct StubFaceBackend {
     calls: std::sync::Arc<std::sync::atomic::AtomicUsize>,
 }
 
-#[cfg(test)]
+#[cfg(all(
+    test,
+    any(
+        target_os = "macos",
+        all(not(target_os = "macos"), feature = "backend-candle")
+    )
+))]
 impl StubFaceBackend {
     /// Map an image to its canned detection by pixel 0: `0` ⇒ no face; otherwise a face whose
     /// `det_score` scales with pixel 0 (`0.5 + px/512`, so distinct identities produce distinct
