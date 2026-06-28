@@ -1253,6 +1253,52 @@ pub(crate) fn load_reference_image(
     })
 }
 
+/// The source identity reference (decoded image + its asset id) a strict-control pose set scores its
+/// finished poses against (epic 4406, sc-4410), or `None` when the job carries no identity reference.
+///
+/// A strict-control pose-library job locks the body pose via ControlNet but optionally carries a
+/// character identity `referenceAssetId` (the same one the opt-in img2img init uses). When present, the
+/// pose set is part of Character Studio and each finished pose is scored against that source identity
+/// face through the shared [`crate::face_likeness`] seam — independent of whether the img2img init is
+/// engaged (scoring observes the FINAL pose; the init only seeds it). `None` (a bare pose set with no
+/// identity reference) ⇒ no scorer ⇒ the `faceLikeness` field is omitted from each sidecar — there is no
+/// identity to compare against, which is honest, not an error.
+///
+/// Decoding is non-fatal: a reference that fails to load logs and yields `None` (scores omitted, the
+/// set still renders) — scoring NEVER aborts a generation (the sc-4407 non-fatal AC). The source image
+/// is decoded here ONCE and handed to the per-job scorer, which embeds it ONCE (the caching AC).
+///
+/// Lives in `base.rs` (compiled under BOTH the macOS pose lanes and the off-Mac candle-control lanes)
+/// rather than the macOS-only `strict_control.rs` include, so the not-macOS candle strict-pose siblings
+/// (`zimage_control` / `qwen_control` / `kolors_control` / `flux2_control_candle`) can resolve it.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+pub(crate) fn resolve_control_identity_source(
+    request: &ImageRequest,
+    settings: &Settings,
+    project_path: &Path,
+) -> Option<(Image, String)> {
+    let asset_id = request
+        .reference_asset_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|id| !id.is_empty())?
+        .to_owned();
+    match load_reference_image(&settings.data_dir, &request.project_id, &asset_id, project_path) {
+        Ok(image) => Some((image, asset_id)),
+        Err(error) => {
+            tracing::warn!(
+                error = %error,
+                "strict-control identity reference decode failed; likeness scores omitted \
+                 (generation continues)"
+            );
+            None
+        }
+    }
+}
+
 /// img2img (Remix) strength for a plain Ideogram 4 edit with no mask — mirrors the sdxl/z-image 0.6
 /// edit default and the engine's `DEFAULT_IMG2IMG_STRENGTH`. Shared by the macOS MLX edit path and the
 /// candle in-lane edit (sc-6598), so it compiles off-Mac under `backend-candle` too.
