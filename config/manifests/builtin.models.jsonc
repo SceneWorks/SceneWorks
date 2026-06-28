@@ -2521,7 +2521,14 @@
       // block will need the same default-only override as the mflux family
       // entries.
       "mlx": {
-        "minMemoryGb": 50
+        "minMemoryGb": 50,
+        // CFG++ (epic 7434, sc-8256) is MLX-only today: the reparameterized-guidance
+        // dispatch lives in mlx-gen-sdxl, so only the MLX backend advertises it. The base
+        // `limits` carries no guidanceMethods, so the candle lane shows the standard CFG
+        // surface (and picks up cfg_pp when sc-8257 lands a candle dispatch + descriptor).
+        "limits": {
+          "guidanceMethods": ["cfg", "cfg_pp"]
+        }
       },
       "ui": {
         "label": "Stable Diffusion XL",
@@ -2584,6 +2591,14 @@
         // family rather than an empty list, which would match every LoRA).
         "families": ["sdxl"],
         "types": ["style", "enhance", "character"]
+      },
+      "mlx": {
+        // CFG++ (epic 7434, sc-8256) is MLX-only today — same `sdxl` engine, same
+        // reparameterized-guidance dispatch as the base SDXL entry. Scoped to the MLX
+        // backend so the candle lane keeps the standard CFG surface (sc-8257 follow-on).
+        "limits": {
+          "guidanceMethods": ["cfg", "cfg_pp"]
+        }
       },
       "ui": {
         "label": "RealVisXL (photoreal SDXL)",

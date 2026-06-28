@@ -895,7 +895,7 @@ mod tests {
             // (`video_descriptor`); the bespoke out-of-MODEL_TABLE image models (InstantID / PuLID,
             // sc-7432) via `bespoke_advertised`. A model with no source on the active backend is skipped
             // (e.g. the mlx-only `wan_2_2_vace_fun_14b` on the candle lane).
-            let Some((adv_samplers, adv_schedulers)) = mlx_model(id)
+            let Some((adv_samplers, adv_schedulers, adv_guidance)) = mlx_model(id)
                 .map(|resolved| resolved.descriptor)
                 .or_else(|| video_descriptor(id))
                 .map(|descriptor| {
@@ -912,14 +912,29 @@ mod tests {
                             .iter()
                             .map(|s| s.to_string())
                             .collect::<Vec<_>>(),
+                        // sc-7447: the guidance axis (epic 7434) — the manifest's per-backend
+                        // `limits.guidanceMethods` MUST be a subset of what the engine descriptor
+                        // honors, exactly like samplers/schedulers.
+                        descriptor
+                            .capabilities
+                            .supported_guidance_methods
+                            .iter()
+                            .map(|s| s.to_string())
+                            .collect::<Vec<_>>(),
                     )
                 })
-                .or_else(|| bespoke_advertised(id))
+                // Bespoke out-of-MODEL_TABLE models advertise no descriptor guidance vocab; they
+                // also advertise no `limits.guidanceMethods` in the manifest, so the guidance axis is
+                // simply absent for them (empty advertised set + `effective_list` => None).
+                .or_else(|| bespoke_advertised(id).map(|(s, sc)| (s, sc, Vec::new())))
             else {
                 continue;
             };
-            for (axis, advertised) in [("samplers", &adv_samplers), ("schedulers", &adv_schedulers)]
-            {
+            for (axis, advertised) in [
+                ("samplers", &adv_samplers),
+                ("schedulers", &adv_schedulers),
+                ("guidanceMethods", &adv_guidance),
+            ] {
                 if let Some(list) = effective_list(model, backend, axis) {
                     for name in list {
                         if name == "default" {
@@ -936,10 +951,46 @@ mod tests {
         }
         assert!(
             violations.is_empty(),
-            "manifest advertises {} sampler/scheduler name(s) the {backend} engine does not honor:\n  {}",
+            "manifest advertises {} sampler/scheduler/guidance name(s) the {backend} engine does not honor:\n  {}",
             violations.len(),
             violations.join("\n  ")
         );
+    }
+
+    // sc-7447: the subset guard above only EXERCISES the guidance axis if a model actually advertises a
+    // `limits.guidanceMethods` list — otherwise the new axis is vacuously green (the same trap sc-7432
+    // closed for the bespoke sampler menus). Pin the CFG++ surface down on the MLX lane: `sdxl` +
+    // `realvisxl` (epic 7434 / sc-8256) must advertise `cfg_pp`, and the linked engine descriptor must
+    // honor it. Candle has no cfg_pp dispatch yet (sc-8257), so the base `limits` carries no guidance
+    // vocab and this is a macOS-only assertion — the candle lane keeps the standard CFG-only surface.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn sdxl_family_advertises_cfgpp_on_mlx() {
+        let manifest = parse_builtin_models();
+        let models = manifest["models"].as_array().expect("models array");
+        for id in ["sdxl", "realvisxl"] {
+            let model = models
+                .iter()
+                .find(|m| m["id"].as_str() == Some(id))
+                .unwrap_or_else(|| panic!("{id}: manifest entry must exist"));
+            let methods = effective_list(model, "mlx", "guidanceMethods")
+                .unwrap_or_else(|| panic!("{id}: must advertise mlx limits.guidanceMethods"));
+            assert!(
+                methods.iter().any(|m| m == "cfg_pp"),
+                "{id}: mlx must advertise cfg_pp (advertised: {methods:?})"
+            );
+            let descriptor = mlx_model(id)
+                .map(|r| r.descriptor)
+                .unwrap_or_else(|| panic!("{id}: must resolve an mlx descriptor"));
+            assert!(
+                descriptor
+                    .capabilities
+                    .supported_guidance_methods
+                    .contains(&"cfg_pp"),
+                "{id}: engine descriptor must honor cfg_pp (advertised: {:?})",
+                descriptor.capabilities.supported_guidance_methods
+            );
+        }
     }
 
     // sc-7432: the subset guard above only EXERCISES the bespoke out-of-MODEL_TABLE models if
