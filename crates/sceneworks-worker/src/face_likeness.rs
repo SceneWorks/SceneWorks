@@ -1042,7 +1042,11 @@ mod tests {
             // across N pose scores (the strict-control + edit pose lanes build the scorer once, then call
             // `score_generated_image` per finished pose). Every reliable-face pose attaches a block.
             let (scorer, calls) = stub_scorer(200);
-            assert_eq!(calls.load(Ordering::SeqCst), 1, "source embedded once at construction");
+            assert_eq!(
+                calls.load(Ordering::SeqCst),
+                1,
+                "source embedded once at construction"
+            );
 
             // A pose-library set (front-facing poses → reliable frontal face).
             let poses = [200u8, 190, 180, 170, 160, 150];
@@ -1058,7 +1062,11 @@ mod tests {
                 1 + poses.len(),
                 "1 source embed + 1 detect per pose — the source is NEVER re-embedded across the set"
             );
-            assert_eq!(scorer.source_embed_count(), 1, "still one source embed after N poses");
+            assert_eq!(
+                scorer.source_embed_count(),
+                1,
+                "still one source embed after N poses"
+            );
         }
 
         #[test]

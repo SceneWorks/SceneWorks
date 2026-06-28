@@ -1605,6 +1605,36 @@ fn kolors_real_weights_pose_generates_one_image() {
     );
 }
 
+/// sc-4410 macOS Kolors pose-lane identity-source invariant: the lane that now scores every finished
+/// pose (`generate_kolors_control_stream`, routed via `kolors_control_available`) is gated on a non-empty
+/// `referenceAssetId` — so the source identity face the scorer needs ALWAYS exists when the lane runs (it
+/// is the same reference the IP-Adapter + img2img init decode). A pose job WITHOUT a reference does not
+/// route here at all, so there is no unscored Kolors pose path. Weight-free: the reference clause
+/// short-circuits before `resolve_weights_dir`, so this asserts the gate regardless of cached weights.
+#[cfg(target_os = "macos")]
+#[test]
+fn kolors_pose_lane_requires_reference_identity_for_scoring() {
+    let settings = Settings::from_env();
+    // No referenceAssetId ⇒ the scoring lane is never entered (the gate is false before weights matter).
+    let no_reference = request(json!({
+        "projectId": "p", "model": "kolors",
+        "advanced": { "poses": [{ "id": "a" }] }
+    }));
+    assert!(
+        !kolors_control_available(&no_reference, &settings),
+        "a Kolors pose job with no referenceAssetId must NOT route to the scoring control lane"
+    );
+    // A blank referenceAssetId is treated as absent (no spurious scoring lane / no scorer with no source).
+    let blank_reference = request(json!({
+        "projectId": "p", "model": "kolors", "referenceAssetId": "   ",
+        "advanced": { "poses": [{ "id": "a" }] }
+    }));
+    assert!(
+        !kolors_control_available(&blank_reference, &settings),
+        "a blank referenceAssetId is treated as absent"
+    );
+}
+
 /// L2-normalized cosine similarity between two ArcFace embeddings (test helper).
 #[cfg(target_os = "macos")]
 fn cosine(a: &[f32], b: &[f32]) -> f32 {
