@@ -735,6 +735,18 @@ async fn generate_instantid_stream(
     );
 
     let negative_prompt = request.negative_prompt.clone();
+    // The reference asset id is the `sourceAssetId` recorded on each angle's `faceLikeness` block
+    // (sc-4408/sc-4409) so a consumer can attribute the score back to the source identity face.
+    // Captured as an owned String for the blocking closure. Only consumed on the angle-set scoring
+    // lane; allow it unused on the non-face-backend build.
+    #[cfg_attr(
+        not(any(
+            target_os = "macos",
+            all(not(target_os = "macos"), feature = "backend-candle")
+        )),
+        allow(unused_variables)
+    )]
+    let face_likeness_source_ref = reference_id.to_owned();
     let (cancel, rx, blocking) = start_gen_stream(
         job.id.clone(),
         "instantid",
@@ -838,15 +850,59 @@ async fn generate_instantid_stream(
             } else {
                 None
             };
-            Ok((model, reference, restore_embedding))
+            // Identity-likeness scorer (epic 4406, sc-4409): for an angle set, embed the source
+            // identity face ONCE here and reuse it across every angle. This is a SEPARATE SCRFD +
+            // ArcFace stack from the engine's `with_face` (the scorer is generator-agnostic on
+            // purpose — it must serve InstantID / Z-Image / Flux identity sets through one path), but
+            // it loads the SAME staged antelopev2 bundle, so no extra weights. Construction can fail
+            // (weights / a source with no detectable face) — that MUST NOT abort the generation, so
+            // any error becomes `None` (scoring simply absent) and the angle set still renders. Built
+            // only for the angle set; identity/pose modes don't score.
+            #[cfg(any(
+                target_os = "macos",
+                all(not(target_os = "macos"), feature = "backend-candle")
+            ))]
+            let scorer: Option<crate::face_likeness::FaceLikenessScorer> = if angle_set {
+                let face_weights_dir = scrfd_path.parent().unwrap_or(scrfd_path.as_path());
+                #[cfg(target_os = "macos")]
+                let built =
+                    crate::face_likeness::FaceLikenessScorer::load_mlx(face_weights_dir, &reference);
+                #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+                let built = crate::face_likeness::FaceLikenessScorer::load_candle(
+                    face_weights_dir,
+                    &reference,
+                );
+                match built {
+                    Ok(scorer) => Some(scorer),
+                    Err(error) => {
+                        tracing::warn!(
+                            error = %error,
+                            "InstantID angle-set face-likeness scorer construction failed; \
+                             scores will be omitted (generation continues)"
+                        );
+                        None
+                    }
+                }
+            } else {
+                None
+            };
+            #[cfg(not(any(
+                target_os = "macos",
+                all(not(target_os = "macos"), feature = "backend-candle")
+            )))]
+            let scorer: Option<()> = None;
+            Ok((model, reference, restore_embedding, scorer))
         },
-        move |(model, reference, restore_embedding), tx, cancel| {
+        move |(model, reference, restore_embedding, scorer), tx, cancel| {
             // The candle `generate*` / `restore_face` take `&mut self` (each call sets the face IP
             // tokens on the UNet before the denoise), so the per-item closure mutates `model`; the MLX
             // engine's are `&self`. Bind `mut` for the candle lane and allow the unused-mut on macOS.
             #[allow(unused_mut)]
             let mut model = model;
-            drive_gen_items(
+            // The scorer + its source-ref are moved into the per-item closure below; they live for
+            // the whole set so the source identity is embedded exactly ONCE (at construction, above)
+            // and reused across every angle.
+            drive_gen_items_scored(
                 tx,
                 work,
                 move |_index, (seed, prompt, action), on_progress| {
@@ -939,7 +995,39 @@ async fn generate_instantid_stream(
                             }
                         };
                     }
-                    Ok(Some((seed, out.width, out.height, out.pixels)))
+                    // Identity-likeness post-pass (sc-4409): score this finished angle against the
+                    // per-job cached source embedding, on this blocking thread (the `!Send` face
+                    // stack lives here). `score_or_null` makes per-image scoring non-fatal (a backend
+                    // error → a logged `null`), and a profile / up / down view with no reliable
+                    // frontal face records an honest `detected:false` N/A — never a misleading low
+                    // number. Build the persisted block once; `None` scorer (non-angle mode or a
+                    // failed construction) ⇒ no block ⇒ the field is omitted from the sidecar. Only
+                    // the generated pixels are cloned, and only when actually scoring.
+                    #[cfg(any(
+                        target_os = "macos",
+                        all(not(target_os = "macos"), feature = "backend-candle")
+                    ))]
+                    let face_likeness = scorer.as_ref().map(|scorer| {
+                        let scored = Image {
+                            width: out.width,
+                            height: out.height,
+                            pixels: out.pixels.clone(),
+                        };
+                        let result = scorer.score_or_null(&scored);
+                        crate::face_likeness::face_likeness_fact(
+                            &result,
+                            Some(face_likeness_source_ref.as_str()),
+                        )
+                    });
+                    #[cfg(not(any(
+                        target_os = "macos",
+                        all(not(target_os = "macos"), feature = "backend-candle")
+                    )))]
+                    let face_likeness: Option<JsonObject> = {
+                        let _ = (&scorer, &face_likeness_source_ref);
+                        None
+                    };
+                    Ok(Some((seed, out.width, out.height, out.pixels, face_likeness)))
                 },
             )
         },

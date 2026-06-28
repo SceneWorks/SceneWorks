@@ -277,11 +277,57 @@ fn score_against_source(
     target_os = "macos",
     all(not(target_os = "macos"), feature = "backend-candle")
 ))]
+// The test-only zero-cost `Stub` variant is tiny next to the real `Mlx` backend; the size disparity
+// is irrelevant for a per-job singleton (one scorer per generation), and it only exists under `test`.
+#[cfg_attr(test, allow(clippy::large_enum_variant))]
 enum FaceBackend {
     #[cfg(target_os = "macos")]
     Mlx(mlx_gen_face::FaceAnalysis),
     #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
     Candle(Box<dyn gen_core::FaceEmbedder>),
+    /// Weight-free deterministic backend for the wiring tests (sc-4409): keyed on the image's first
+    /// pixel byte so a test can map a synthetic image to a face / no-face / low-confidence detection
+    /// and count how often the backend is hit, WITHOUT staging the antelopev2 weights in CI. Never
+    /// compiled outside `cargo test`.
+    #[cfg(test)]
+    Stub(StubFaceBackend),
+}
+
+/// The canned detection the [`FaceBackend::Stub`] returns for a given image, selected by the image's
+/// first pixel byte (the test encodes intent in pixel 0). Mirrors the three real-backend outcomes.
+#[cfg(test)]
+#[derive(Clone, Copy)]
+enum StubFace {
+    /// A reliable face at `det_score`, embedded as the canned vector (drives a real cosine).
+    Face(f32),
+    /// No detectable face ⇒ `Ok(None)` (the clean N/A funnel).
+    NoFace,
+}
+
+/// Counts every `largest_face` call so a test can prove the SOURCE is embedded exactly once across N
+/// generated-image scores (the explicit caching acceptance criterion), independent of weights.
+#[cfg(test)]
+struct StubFaceBackend {
+    calls: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+}
+
+#[cfg(test)]
+impl StubFaceBackend {
+    /// Map an image to its canned detection by pixel 0: `0` ⇒ no face; otherwise a reliable face
+    /// whose `det_score` scales with pixel 0 (so distinct identities produce distinct embeddings).
+    fn classify(image: &Image) -> StubFace {
+        match image.pixels.first().copied().unwrap_or(0) {
+            0 => StubFace::NoFace,
+            other => StubFace::Face(0.5 + f32::from(other) / 512.0),
+        }
+    }
+
+    /// A canned, identity-bearing embedding keyed off pixel 0 so same-pixel images cosine-match high
+    /// and different-pixel images lower — enough to exercise the scoring + persistence wiring.
+    fn embedding(image: &Image) -> Vec<f32> {
+        let key = f32::from(image.pixels.first().copied().unwrap_or(0));
+        vec![key, 1.0, 0.25, 0.1]
+    }
 }
 
 #[cfg(any(
@@ -319,6 +365,14 @@ impl FaceBackend {
                     .analyze(image)
                     .map_err(|error| WorkerError::Engine(format!("face analyze: {error}")))?;
                 Ok(faces.into_iter().next().map(|f| (f.det_score, f.embedding)))
+            }
+            #[cfg(test)]
+            FaceBackend::Stub(stub) => {
+                stub.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                Ok(match StubFaceBackend::classify(image) {
+                    StubFace::NoFace => None,
+                    StubFace::Face(det) => Some((det, StubFaceBackend::embedding(image))),
+                })
             }
         }
     }
@@ -427,6 +481,22 @@ impl FaceLikenessScorer {
     #[cfg(test)]
     pub(crate) fn source_embed_count(&self) -> usize {
         self.source_embed_count
+    }
+
+    /// Build a scorer over the weight-free [`FaceBackend::Stub`] from a synthetic `source` image
+    /// (sc-4409 wiring tests). Returns the scorer plus the shared backend-call counter so a test can
+    /// prove the source embedded exactly once and assert exactly how many generated-image scores hit
+    /// the backend — the caching acceptance criterion, verifiable without antelopev2 weights in CI.
+    #[cfg(test)]
+    pub(crate) fn with_stub_source(
+        source: &Image,
+    ) -> (Self, std::sync::Arc<std::sync::atomic::AtomicUsize>) {
+        let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let backend = FaceBackend::Stub(StubFaceBackend {
+            calls: calls.clone(),
+        });
+        let scorer = Self::with_backend(backend, source).expect("stub backend never errors");
+        (scorer, calls)
     }
 }
 
@@ -652,6 +722,132 @@ mod tests {
         assert_eq!(NoScoreReason::LowConfidence.as_str(), "low_confidence");
         assert_eq!(NoScoreReason::NoSourceFace.as_str(), "no_source_face");
         assert_eq!(NoScoreReason::EmbeddingError.as_str(), "embedding_error");
+    }
+
+    // -- sc-4409: angle-set wiring over the weight-free stub backend -----------------
+    // These exercise the live `FaceLikenessScorer` (caching + N/A + non-fatal construction +
+    // per-image persistence) WITHOUT antelopev2 weights, so they run in CI on the face-backend
+    // build (macOS, or candle off-Mac). The real-weight end-to-end remains the `#[ignore]` test
+    // above. The angle-set producer (`generate_instantid_stream`) calls exactly this surface:
+    // construct once from the source, then `score_or_null` + `face_likeness_fact` per finished view.
+
+    #[cfg(any(
+        target_os = "macos",
+        all(not(target_os = "macos"), feature = "backend-candle")
+    ))]
+    mod angle_set_wiring {
+        use super::*;
+        use std::sync::atomic::Ordering;
+
+        /// A synthetic image whose first pixel byte selects the stub detection (see `StubFaceBackend`):
+        /// `0` ⇒ no face; `>=77` ⇒ a reliable face; `1..=76` ⇒ a low-confidence face.
+        fn image(pixel0: u8) -> Image {
+            Image {
+                width: 1,
+                height: 1,
+                pixels: vec![pixel0, 0, 0],
+            }
+        }
+
+        #[test]
+        fn source_embedded_once_across_n_angles_each_attaches_a_block() {
+            // The explicit caching AC: one source embed at construction, reused across N angle scores
+            // (the source is NEVER re-embedded), and every scored angle yields an attachable block.
+            let source = image(200);
+            let (scorer, calls) = FaceLikenessScorer::with_stub_source(&source);
+            assert!(scorer.has_source_face(), "source has a detectable face");
+            assert_eq!(scorer.source_embed_count(), 1, "source embedded once");
+            assert_eq!(
+                calls.load(Ordering::SeqCst),
+                1,
+                "construction hit the backend exactly once (the source embed)"
+            );
+
+            // Score an 11-view-style set; every reliable-face view attaches a faceLikeness block.
+            let angles = [200u8, 180, 160, 140, 120, 100, 90, 200, 180, 160, 140];
+            for (i, px) in angles.iter().enumerate() {
+                let result = scorer.score_or_null(&image(*px));
+                assert!(result.detected, "angle {i} (px {px}) detected");
+                let mut raw = JsonObject::new();
+                attach_face_likeness(&mut raw, Some(&result), Some("char_src"));
+                let block = raw
+                    .get(FACE_LIKENESS_FACT_KEY)
+                    .and_then(Value::as_object)
+                    .expect("faceLikeness block attached");
+                assert_eq!(block.get("detected"), Some(&Value::Bool(true)));
+                assert_eq!(block.get("sourceAssetId"), Some(&json!("char_src")));
+                assert!(block.get("score").map(Value::is_number).unwrap_or(false));
+            }
+
+            // The source was embedded ONCE; the backend was hit only the source embed + one detect per
+            // angle (N+1) — never a second source embed.
+            assert_eq!(
+                scorer.source_embed_count(),
+                1,
+                "still one source embed after N scores"
+            );
+            assert_eq!(
+                calls.load(Ordering::SeqCst),
+                1 + angles.len(),
+                "backend hit = 1 source embed + 1 detect per angle (no source re-embed)"
+            );
+        }
+
+        #[test]
+        fn profile_no_face_angle_records_detected_false_not_a_low_number() {
+            // A profile / up / down view with no detectable frontal face must persist an honest
+            // detected:false N/A block (score null + reason), NOT a misleading low number.
+            let (scorer, _calls) = FaceLikenessScorer::with_stub_source(&image(200));
+            let result = scorer.score_or_null(&image(0)); // pixel 0 == 0 ⇒ no face
+            assert!(!result.detected, "no-face angle ⇒ detected:false");
+            assert!(
+                result.score.is_none(),
+                "no-face angle ⇒ score:null (not a low number)"
+            );
+            assert_eq!(result.reason, Some(NoScoreReason::NoFace));
+
+            let mut raw = JsonObject::new();
+            attach_face_likeness(&mut raw, Some(&result), Some("char_src"));
+            assert_eq!(
+                raw.get(FACE_LIKENESS_FACT_KEY),
+                Some(&json!({
+                    "score": Value::Null,
+                    "detected": false,
+                    "method": LIKENESS_METHOD,
+                    "sourceAssetId": "char_src",
+                    "reason": "no_face",
+                })),
+                "the N/A block persists detected:false + reason, not a low score"
+            );
+        }
+
+        #[test]
+        fn no_source_face_makes_every_angle_na_but_never_fails_the_job() {
+            // Construction-side non-fatal guard surrogate: a source with no detectable face yields a
+            // scorer (NOT an error) whose every angle is the NoSourceFace N/A — the whole set is N/A,
+            // generation is never blocked. (The producer additionally maps a hard construction error
+            // to a `None` scorer ⇒ the field is omitted; see `omitted_when_scorer_absent`.)
+            let (scorer, _calls) = FaceLikenessScorer::with_stub_source(&image(0)); // no source face
+            assert!(!scorer.has_source_face(), "no detectable source face");
+            let result = scorer.score_or_null(&image(200)); // a real face in the generation
+            assert!(!result.detected, "no source ⇒ every angle N/A");
+            assert_eq!(result.reason, Some(NoScoreReason::NoSourceFace));
+        }
+
+        #[test]
+        fn omitted_when_scorer_absent() {
+            // The producer wraps scorer CONSTRUCTION so a hard failure → `None` scorer → no block is
+            // built → the field is omitted entirely from the sidecar (no null clutter, no crash).
+            // This is the `attach_face_likeness(None)` omit-when-absent path the angle producer uses
+            // when `scorer` is `None`.
+            let mut raw = JsonObject::new();
+            raw.insert("steps".to_owned(), json!(8));
+            attach_face_likeness(&mut raw, None, Some("char_src"));
+            assert!(
+                !raw.contains_key(FACE_LIKENESS_FACT_KEY),
+                "absent scorer ⇒ faceLikeness omitted, generation unaffected"
+            );
+        }
     }
 
     /// Real-weight scorer integration (sc-4407): proves the worker binary links + loads the MLX
