@@ -525,6 +525,7 @@ function CharacterGenerationPanel({
   // active backbone; values fold into the job's `advanced` dict at submit.
   const advanced = useCharacterAdvancedOptions(activeModel, {
     defaultNegativePrompt: mode.defaultNegativePrompt,
+    identityStructureMode: mode.identityStructureMode,
     // Full catalog (not just the capable backbones) so the PiD toggle can check whether the
     // active model's PiD checkpoint is installed (sc-8372). `catalog` carries the download entries.
     catalog,
@@ -769,6 +770,11 @@ function useAngleController({ activeModel, loraSelection }) {
 const ANGLE_MODE = {
   eyebrow: "Angle set",
   title: (activeModel) => `${activeModel.name} turnaround`,
+  // The set runs a softer landmark lock by default than single-image (sc-8354). Seed the
+  // Identity-structure slider from the backbone's `identityStructure.angleSetDefault` so the
+  // surfaced control matches what the worker runs (and the emitted value doesn't pin it back to
+  // the single-image 0.80).
+  identityStructureMode: "angleSet",
   defaultNegativePrompt: ANGLE_SET_NEGATIVE_PROMPT,
   referenceRole: "angle-set-reference",
   referenceNoun: "angle-set reference",
@@ -781,11 +787,20 @@ const ANGLE_MODE = {
     return `${appearance}, head and shoulders, neutral expression, consistent outfit, plain grey background, face clearly visible, sharp focus, photorealistic`;
   },
   renderIntro: (activeModel) => (
-    <p>
-      Generate {activeModel?.ui?.viewAngles?.length ?? 0} consistent views of this character (front, three-quarters,
-      profiles, up/down and the diagonals) from one reference, in a single job. A good starting set for curating a
-      character LoRA.
-    </p>
+    <>
+      <p>
+        Generate {activeModel?.ui?.viewAngles?.length ?? 0} consistent views of this character (front, three-quarters,
+        profiles, up/down and the diagonals) from one reference, in a single job. A good starting set for curating a
+        character LoRA.
+      </p>
+      {activeModel?.ui?.identityStructure ? (
+        <p className="structured-hint">
+          Lower <strong>Identity structure</strong> (under Advanced) to sharpen the off-axis views — it trades a little
+          identity for a cleaner image. It can't fully rescue the most extreme up/down angles, and the set stays softer
+          than a real photo; for a final pass, run the outputs through the image refine path.
+        </p>
+      ) : null}
+    </>
   ),
   useController: useAngleController,
 };
