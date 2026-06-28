@@ -280,7 +280,7 @@ async fn generate_sensenova_edit_stream(
             // face stack lives here); source embedded once, reused across every angle (sc-4409).
             let scorer = match (&face_stack_dir, &likeness_source) {
                 (Some(dir), Some(source)) => {
-                    crate::face_likeness::build_angle_set_scorer(dir, source)
+                    crate::face_likeness::build_face_likeness_scorer(dir, source)
                 }
                 _ => None,
             };
@@ -307,7 +307,7 @@ async fn generate_sensenova_edit_stream(
                     // common plain-edit path has no scorer, so this is a no-op with no clone. Profile/
                     // up/down → honest detected:false N/A; `None` scorer ⇒ field omitted.
                     let face_likeness = scorer.as_ref().and_then(|scorer| {
-                        crate::face_likeness::score_angle_image(
+                        crate::face_likeness::score_generated_image(
                             Some(scorer),
                             &Image {
                                 width: w,

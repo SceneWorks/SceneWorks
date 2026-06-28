@@ -209,6 +209,26 @@ async fn generate_candle_zimage_control_stream(
     let seed = resolve_seed(request, 0);
     let prompt = request.prompt.clone();
 
+    // Identity-likeness scoring (epic 4406, sc-4410): when this candle Z-Image strict-pose set carries a
+    // character identity `referenceAssetId`, score every finished pose against that source identity face
+    // through the SHARED generator-agnostic seam. Resolve the source image + asset id and stage the
+    // antelopev2 face stack (candle leg; no-op if cached). All non-fatal (missing reference / staging
+    // failure → no scorer → scores omitted, set still renders). The `!Send` scorer is built ONCE in the
+    // load closure on the blocking thread (source embedded once, reused across all poses).
+    let likeness_source = resolve_control_identity_source(request, settings, project_path);
+    let face_stack_dir = if likeness_source.is_some() {
+        match ensure_face_stack_dir(api, settings, job).await {
+            Ok(dir) => Some(dir),
+            Err(error) => {
+                tracing::warn!(error = %error, "pose-set face-stack staging failed; likeness scores omitted");
+                None
+            }
+        }
+    } else {
+        None
+    };
+    let likeness_source_ref = likeness_source.as_ref().map(|(_, id)| id.clone());
+
     let (cancel, rx, blocking) = start_gen_stream(
         job.id.clone(),
         "zimage_control",
@@ -218,10 +238,17 @@ async fn generate_candle_zimage_control_stream(
             let model = ZImageControl::load(&paths).map_err(|error| {
                 WorkerError::Engine(format!("Z-Image strict-pose control load failed: {error}"))
             })?;
-            Ok((model, poses))
+            // Build the scorer once on the blocking thread (the `!Send` face stack lives here).
+            let scorer = match (&face_stack_dir, &likeness_source) {
+                (Some(dir), Some((source, _))) => {
+                    crate::face_likeness::build_face_likeness_scorer(dir, source)
+                }
+                _ => None,
+            };
+            Ok((model, poses, scorer))
         },
-        move |(model, poses), tx, cancel| {
-            drive_gen_items(tx, poses, move |_index, pose, on_progress| {
+        move |(model, poses, scorer), tx, cancel| {
+            drive_gen_items_scored(tx, poses, move |_index, pose, on_progress| {
                 if cancel.is_cancelled() {
                     return Ok(None);
                 }
@@ -256,7 +283,22 @@ async fn generate_candle_zimage_control_stream(
                         )));
                     }
                 };
-                Ok(Some((seed, out.width, out.height, out.pixels)))
+                // Score this finished pose against the cached source embedding (sc-4410). The candle
+                // strict-control lane produces the FINAL image directly (no face-restore pass). Clone
+                // paid ONLY when a scorer exists; a full-body / turned pose with no reliable frontal
+                // face → honest detected:false N/A.
+                let face_likeness = scorer.as_ref().and_then(|scorer| {
+                    crate::face_likeness::score_generated_image(
+                        Some(scorer),
+                        &Image {
+                            width: out.width,
+                            height: out.height,
+                            pixels: out.pixels.clone(),
+                        },
+                        likeness_source_ref.as_deref(),
+                    )
+                });
+                Ok(Some((seed, out.width, out.height, out.pixels, face_likeness)))
             })
         },
     );

@@ -525,7 +525,7 @@ impl FaceLikenessScorer {
     }
 
     /// Platform-neutral load: the MLX stack on macOS, the candle stack off-Mac. Lets the shared
-    /// angle-set seam ([`build_angle_set_scorer`]) construct a scorer without each call site
+    /// angle-set seam ([`build_face_likeness_scorer`]) construct a scorer without each call site
     /// cfg-branching on the backend. Embeds the source face once (the caching contract).
     fn load_for_weights_dir(weights_dir: &std::path::Path, source: &Image) -> WorkerResult<Self> {
         #[cfg(target_os = "macos")]
@@ -539,22 +539,25 @@ impl FaceLikenessScorer {
     }
 }
 
-/// Build the per-job identity-likeness scorer for an angle set (sc-4409), generator-agnostically.
+/// Build the per-job identity-likeness scorer for a character set (sc-4409 angles / sc-4410 poses),
+/// generator-agnostically.
 ///
-/// This is the SHARED seam every angle-set producer calls — InstantID, FLUX.2 edit, Qwen-Edit, and
-/// SenseNova-U1 all route an `advanced.angleSet` job to their own engine, but each scores its finished
-/// views through this one path (the scorer is model-independent by design — sc-4407). The source
-/// identity face is embedded exactly ONCE here and reused across every angle.
+/// This is the SHARED seam every character-set producer calls — InstantID, FLUX.2 edit, Qwen-Edit, and
+/// SenseNova-U1 angle sets (sc-4409), AND every pose-library route (sc-4410: InstantID pose set, the
+/// FLUX.2 / Qwen edit pose tier, and the Z-Image / Qwen / FLUX.2-dev / FLUX.1-dev strict-control pose
+/// lanes) all route their job to their own engine, but each scores its finished images through this one
+/// path (the scorer is model-independent by design — sc-4407). The source identity face is embedded
+/// exactly ONCE here and reused across every angle / pose.
 ///
 /// **Non-fatal construction** (the explicit AC carried from the sc-4407 review): a missing/corrupt
 /// weights bundle or a source image with no detectable face must NEVER abort the generation. Any
-/// error is logged and becomes `None` — the angle set still renders, the scores are simply absent
-/// (the field is omitted from each sidecar). A `None` here ⇒ pass `None` to [`score_angle_image`].
+/// error is logged and becomes `None` — the set still renders, the scores are simply absent (the field
+/// is omitted from each sidecar). A `None` here ⇒ pass `None` to [`score_generated_image`].
 #[cfg(any(
     target_os = "macos",
     all(not(target_os = "macos"), feature = "backend-candle")
 ))]
-pub(crate) fn build_angle_set_scorer(
+pub(crate) fn build_face_likeness_scorer(
     weights_dir: &std::path::Path,
     source: &Image,
 ) -> Option<FaceLikenessScorer> {
@@ -563,7 +566,7 @@ pub(crate) fn build_angle_set_scorer(
         Err(error) => {
             tracing::warn!(
                 error = %error,
-                "angle-set face-likeness scorer construction failed; scores will be omitted \
+                "character-set face-likeness scorer construction failed; scores will be omitted \
                  (generation continues)"
             );
             None
@@ -571,16 +574,19 @@ pub(crate) fn build_angle_set_scorer(
     }
 }
 
-/// Score one finished angle image against the per-job cached source embedding and build the persisted
-/// `faceLikeness` sidecar block (sc-4408/sc-4409) — the SHARED per-image post-pass for every angle-set
-/// producer. `None` scorer (no angle set, or a failed [`build_angle_set_scorer`]) ⇒ `None` ⇒ the field
-/// is omitted entirely. Per-image scoring is non-fatal ([`score_or_null`]); a profile / up / down view
-/// with no reliable frontal face records an honest `detected: false` N/A block, never a low number.
+/// Score one finished generated image (an angle or a pose) against the per-job cached source embedding
+/// and build the persisted `faceLikeness` sidecar block (sc-4408/sc-4409/sc-4410) — the SHARED
+/// per-image post-pass for every character-set producer. For pose-library routes that run a face-restore
+/// pass (InstantID), the caller passes the FINAL post-restore image, so the score reflects what the user
+/// sees (sc-4410). `None` scorer (no set, or a failed [`build_face_likeness_scorer`]) ⇒ `None` ⇒ the
+/// field is omitted entirely. Per-image scoring is non-fatal ([`score_or_null`]); a full-body / turned /
+/// profile pose with no reliable frontal face records an honest `detected: false` N/A block, never a
+/// misleading low number.
 #[cfg(any(
     target_os = "macos",
     all(not(target_os = "macos"), feature = "backend-candle")
 ))]
-pub(crate) fn score_angle_image(
+pub(crate) fn score_generated_image(
     scorer: Option<&FaceLikenessScorer>,
     image: &Image,
     source_asset_id: Option<&str>,
@@ -952,11 +958,11 @@ mod tests {
         }
 
         // -- the shared seam every angle-set producer calls (InstantID / FLUX.2 / Qwen / SenseNova) --
-        // `build_angle_set_scorer` needs real weights, so it is covered by the `#[ignore]` real-weight
-        // test; `score_angle_image` (the per-image half all four lanes call identically) is fully
+        // `build_face_likeness_scorer` needs real weights, so it is covered by the `#[ignore]` real-weight
+        // test; `score_generated_image` (the per-image half all four lanes call identically) is fully
         // covered here over the stub scorer.
 
-        /// Build a stub scorer the way `score_angle_image` consumes it (`Option<&_>`).
+        /// Build a stub scorer the way `score_generated_image` consumes it (`Option<&_>`).
         fn stub_scorer(
             source_px: u8,
         ) -> (
@@ -967,7 +973,7 @@ mod tests {
         }
 
         #[test]
-        fn score_angle_image_attaches_block_and_embeds_source_once_across_a_set() {
+        fn score_generated_image_attaches_block_and_embeds_source_once_across_a_set() {
             // The generator-agnostic per-image post-pass: each finished angle yields a faceLikeness
             // block (detected:true for reliable views), and across an N-angle set the SOURCE is embedded
             // exactly once — proving the FLUX.2 / Qwen / SenseNova lanes reuse one cached source embed
@@ -981,7 +987,7 @@ mod tests {
 
             let angles = [200u8, 180, 160, 140, 120, 100, 90, 200, 180, 160, 140];
             for px in angles {
-                let block = score_angle_image(Some(&scorer), &image(px), Some("char_src"))
+                let block = score_generated_image(Some(&scorer), &image(px), Some("char_src"))
                     .expect("a scorer present ⇒ a block built");
                 assert_eq!(block.get("detected"), Some(&Value::Bool(true)));
                 assert_eq!(block.get("sourceAssetId"), Some(&json!("char_src")));
@@ -995,11 +1001,11 @@ mod tests {
         }
 
         #[test]
-        fn score_angle_image_no_face_attaches_detected_false_block() {
+        fn score_generated_image_no_face_attaches_detected_false_block() {
             // A profile / up / down angle (no detectable frontal face) attaches an honest detected:false
             // N/A block through the shared seam — never a low number, never a skipped asset.
             let (scorer, _calls) = stub_scorer(200);
-            let block = score_angle_image(Some(&scorer), &image(0), Some("char_src"))
+            let block = score_generated_image(Some(&scorer), &image(0), Some("char_src"))
                 .expect("a scorer present ⇒ a block (the N/A block) built");
             assert_eq!(
                 Value::Object(block),
@@ -1014,12 +1020,65 @@ mod tests {
         }
 
         #[test]
-        fn score_angle_image_none_scorer_omits_block() {
+        fn score_generated_image_none_scorer_omits_block() {
             // No angle set / non-fatal construction failure ⇒ `None` scorer ⇒ `None` ⇒ the consumer
             // omits the field entirely (the same contract the producer relies on for non-angle paths).
             assert!(
-                score_angle_image(None, &image(200), Some("char_src")).is_none(),
+                score_generated_image(None, &image(200), Some("char_src")).is_none(),
                 "None scorer ⇒ no block ⇒ field omitted"
+            );
+        }
+
+        // -- sc-4410: the SAME shared seam carries pose-library scoring ------------------
+        // Pose-library routes (InstantID pose set, the FLUX.2 / Qwen edit pose tier, and the strict-
+        // control pose lanes) call `build_face_likeness_scorer` + `score_generated_image` exactly as the
+        // angle lanes do — there is ONE shared seam, no pose/angle fork. These assert the pose-specific
+        // contract over the weight-free stub: source embedded once across N poses, and a full-body /
+        // turned pose with no reliable frontal face records an honest N/A (not a low number).
+
+        #[test]
+        fn source_embedded_once_across_n_poses_each_attaches_a_block() {
+            // The caching AC under the pose-library shape: one source embed at construction, reused
+            // across N pose scores (the strict-control + edit pose lanes build the scorer once, then call
+            // `score_generated_image` per finished pose). Every reliable-face pose attaches a block.
+            let (scorer, calls) = stub_scorer(200);
+            assert_eq!(calls.load(Ordering::SeqCst), 1, "source embedded once at construction");
+
+            // A pose-library set (front-facing poses → reliable frontal face).
+            let poses = [200u8, 190, 180, 170, 160, 150];
+            for px in poses {
+                let block = score_generated_image(Some(&scorer), &image(px), Some("char_src"))
+                    .expect("a scorer present ⇒ a block built");
+                assert_eq!(block.get("detected"), Some(&Value::Bool(true)));
+                assert_eq!(block.get("sourceAssetId"), Some(&json!("char_src")));
+                assert!(block.get("score").map(Value::is_number).unwrap_or(false));
+            }
+            assert_eq!(
+                calls.load(Ordering::SeqCst),
+                1 + poses.len(),
+                "1 source embed + 1 detect per pose — the source is NEVER re-embedded across the set"
+            );
+            assert_eq!(scorer.source_embed_count(), 1, "still one source embed after N poses");
+        }
+
+        #[test]
+        fn full_body_or_turned_pose_records_detected_false_not_a_low_number() {
+            // A full-body / turned pose with no detectable frontal face (the AC's explicit `detected:
+            // false` case) attaches an honest N/A block through the shared seam — never a low number,
+            // never a skipped pose asset.
+            let (scorer, _calls) = stub_scorer(200);
+            let block = score_generated_image(Some(&scorer), &image(0), Some("char_src"))
+                .expect("a scorer present ⇒ the N/A block built");
+            assert_eq!(
+                Value::Object(block),
+                json!({
+                    "score": Value::Null,
+                    "detected": false,
+                    "method": LIKENESS_METHOD,
+                    "sourceAssetId": "char_src",
+                    "reason": "no_face",
+                }),
+                "a full-body / turned pose persists detected:false + reason, not a low score"
             );
         }
     }

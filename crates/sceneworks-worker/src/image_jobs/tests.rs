@@ -5317,6 +5317,39 @@ fn build_control_conditioning_matches_legacy_shape() {
     );
 }
 
+/// sc-4410 strict-control pose scoring: a pose-library job that carries NO character identity
+/// `referenceAssetId` resolves to `None` for the likeness source — so the strict-control streams build
+/// no scorer and the `faceLikeness` field is omitted (honest — there is no identity to compare against,
+/// not an error). This is the gate every strict-control pose lane (z-image / qwen / flux2-dev /
+/// flux1-dev + their candle siblings) uses to decide whether to score; the decode-success branch
+/// (referenceAssetId present) is exercised by the `#[ignore]` real-weight scorer test (it needs an asset
+/// + weights). Blank ids count as absent.
+#[cfg(target_os = "macos")]
+#[test]
+fn resolve_control_identity_source_is_none_without_reference() {
+    let settings = Settings::from_env();
+    let project_path = std::path::Path::new("/tmp/sc4410-nonexistent");
+    // A bare pose set (skeleton-only, no identity reference) → None → no scorer → field omitted.
+    let pose_only = request(json!({
+        "projectId": "p", "model": "z_image_turbo",
+        "advanced": { "poses": [{ "id": "a" }] }
+    }));
+    assert!(
+        resolve_control_identity_source(&pose_only, &settings, project_path).is_none(),
+        "pose set with no identity reference ⇒ no likeness source ⇒ field omitted"
+    );
+    // A blank referenceAssetId is treated as absent (no spurious decode attempt).
+    let blank = request(json!({
+        "projectId": "p", "model": "flux2_dev",
+        "referenceAssetId": "   ",
+        "advanced": { "poses": [{ "id": "a" }] }
+    }));
+    assert!(
+        resolve_control_identity_source(&blank, &settings, project_path).is_none(),
+        "blank referenceAssetId ⇒ treated as absent"
+    );
+}
+
 /// sc-8248 / sc-8249 source threading: the input image canny/depth auto-derive their control map FROM
 /// resolves with the right precedence (sourceAssetId wins, else referenceAssetId), and a pose-only job
 /// (no source / reference) resolves to `None` — proving the live canny/depth path now has an input image

@@ -735,9 +735,9 @@ async fn generate_instantid_stream(
     );
 
     let negative_prompt = request.negative_prompt.clone();
-    // The reference asset id is the `sourceAssetId` recorded on each angle's `faceLikeness` block
-    // (sc-4408/sc-4409) so a consumer can attribute the score back to the source identity face.
-    // Captured as an owned String for the blocking closure. Only consumed on the angle-set scoring
+    // The reference asset id is the `sourceAssetId` recorded on each angle / pose `faceLikeness` block
+    // (sc-4408/sc-4409/sc-4410) so a consumer can attribute the score back to the source identity face.
+    // Captured as an owned String for the blocking closure. Only consumed on the angle/pose-set scoring
     // lane; allow it unused on the non-face-backend build.
     #[cfg_attr(
         not(any(
@@ -850,20 +850,20 @@ async fn generate_instantid_stream(
             } else {
                 None
             };
-            // Identity-likeness scorer (epic 4406, sc-4409): for an angle set, embed the source
-            // identity face ONCE here and reuse it across every angle, through the SHARED
-            // generator-agnostic seam (the same `build_angle_set_scorer` the FLUX.2 / Qwen / SenseNova
-            // angle lanes call). It loads a SEPARATE SCRFD + ArcFace stack from the engine's
-            // `with_face`, but from the SAME staged antelopev2 bundle, so no extra weights.
+            // Identity-likeness scorer (epic 4406, sc-4409 angles / sc-4410 poses): for an angle set
+            // OR a pose set, embed the source identity face ONCE here and reuse it across every angle /
+            // pose, through the SHARED generator-agnostic seam (the same `build_face_likeness_scorer`
+            // the FLUX.2 / Qwen / SenseNova lanes call). It loads a SEPARATE SCRFD + ArcFace stack from
+            // the engine's `with_face`, but from the SAME staged antelopev2 bundle, so no extra weights.
             // Construction is non-fatal (weights / no source face → `None` → scores omitted; the set
-            // still renders). Built only for the angle set; identity/pose modes don't score.
+            // still renders). Built for angle + pose sets; single identity doesn't score.
             #[cfg(any(
                 target_os = "macos",
                 all(not(target_os = "macos"), feature = "backend-candle")
             ))]
-            let scorer: Option<crate::face_likeness::FaceLikenessScorer> = if angle_set {
+            let scorer: Option<crate::face_likeness::FaceLikenessScorer> = if angle_set || pose_set {
                 let face_weights_dir = scrfd_path.parent().unwrap_or(scrfd_path.as_path());
-                crate::face_likeness::build_angle_set_scorer(face_weights_dir, &reference)
+                crate::face_likeness::build_face_likeness_scorer(face_weights_dir, &reference)
             } else {
                 None
             };
@@ -976,20 +976,23 @@ async fn generate_instantid_stream(
                             }
                         };
                     }
-                    // Identity-likeness post-pass (sc-4409): score this finished angle against the
-                    // per-job cached source embedding, on this blocking thread (the `!Send` face
-                    // stack lives here). `score_or_null` makes per-image scoring non-fatal (a backend
-                    // error → a logged `null`), and a profile / up / down view with no reliable
-                    // frontal face records an honest `detected:false` N/A — never a misleading low
-                    // number. `None` scorer (non-angle mode or a failed construction) ⇒ no block ⇒ the
-                    // field is omitted. The Image build + pixel clone is paid ONLY when a scorer exists
-                    // (an angle set) — identity/pose modes have no scorer, so this is a no-op, no clone.
+                    // Identity-likeness post-pass (sc-4409 angles / sc-4410 poses): score this finished
+                    // image against the per-job cached source embedding, on this blocking thread (the
+                    // `!Send` face stack lives here). CRITICAL ordering (sc-4410): this runs AFTER the
+                    // optional face-restore re-render above, so `out` is the FINAL post-restore image —
+                    // the score reflects exactly what the user sees. `score_or_null` makes per-image
+                    // scoring non-fatal (a backend error → a logged `null`), and a full-body / turned /
+                    // profile pose with no reliable frontal face records an honest `detected:false` N/A —
+                    // never a misleading low number. `None` scorer (single identity, or a failed
+                    // construction) ⇒ no block ⇒ the field is omitted. The Image build + pixel clone is
+                    // paid ONLY when a scorer exists (an angle or pose set) — single identity has no
+                    // scorer, so this is a no-op, no clone.
                     #[cfg(any(
                         target_os = "macos",
                         all(not(target_os = "macos"), feature = "backend-candle")
                     ))]
                     let face_likeness = scorer.as_ref().and_then(|scorer| {
-                        crate::face_likeness::score_angle_image(
+                        crate::face_likeness::score_generated_image(
                             Some(scorer),
                             &Image {
                                 width: out.width,
