@@ -4701,7 +4701,11 @@ fn zimage_identity_candle_eligible(payload: &Map<String, Value>) -> bool {
         .get("advanced")
         .and_then(Value::as_object)
         .and_then(|advanced| advanced.get("referenceStrength"))
-        .and_then(|value| value.as_f64().or_else(|| value.as_str()?.trim().parse().ok()))
+        .and_then(|value| {
+            value
+                .as_f64()
+                .or_else(|| value.as_str()?.trim().parse().ok())
+        })
         .unwrap_or(0.0);
     if reference_strength <= 0.0 {
         return false;
@@ -7641,7 +7645,9 @@ mod candle_routing_tests {
             "referenceAssetId": "asset_1",
             "advanced": { "referenceStrength": 0.6 }
         });
-        assert!(zimage_identity_candle_eligible(&object(with_character.clone())));
+        assert!(zimage_identity_candle_eligible(&object(
+            with_character.clone()
+        )));
         assert!(image_job_is_candle_eligible(&image_generate_job(
             with_character
         )));

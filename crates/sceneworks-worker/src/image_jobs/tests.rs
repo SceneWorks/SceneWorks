@@ -2408,9 +2408,15 @@ fn zimage_identity_candle_strength_gate_and_clamp() {
 
     // Not engaged → None: no referenceStrength; == 0 (parity: requires > 0); > 0 but no/blank asset.
     assert_eq!(with(json!({}), json!("ref_1")), None);
-    assert_eq!(with(json!({ "referenceStrength": 0.0 }), json!("ref_1")), None);
+    assert_eq!(
+        with(json!({ "referenceStrength": 0.0 }), json!("ref_1")),
+        None
+    );
     assert_eq!(with(json!({ "referenceStrength": 0.6 }), Value::Null), None);
-    assert_eq!(with(json!({ "referenceStrength": 0.6 }), json!("   ")), None);
+    assert_eq!(
+        with(json!({ "referenceStrength": 0.6 }), json!("   ")),
+        None
+    );
 
     // Engaged: strength forwarded verbatim (no inversion) and clamped to [0.05, 1.0].
     assert_eq!(

@@ -685,7 +685,8 @@ pub(crate) async fn run_image_generate_job(
         )
         .await?;
         true
-    } else if settings.backend_candle_enabled && zimage_identity_candle_available(&request, settings)
+    } else if settings.backend_candle_enabled
+        && zimage_identity_candle_available(&request, settings)
     {
         // Z-Image identity-init for Image Studio "With Character" (sc-8409, epic 4406) — checked BEFORE
         // `is_candle_engine` because `z_image_turbo` IS a candle txt2img id, so without this a
