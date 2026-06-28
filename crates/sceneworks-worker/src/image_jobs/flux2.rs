@@ -436,26 +436,28 @@ async fn generate_flux2_edit_stream(
         Flux2Grouping::Plain => {}
     }
 
-    // Angle-set identity-likeness scoring (epic 4406, sc-4409): the generator-agnostic post-pass
-    // applies to EVERY angle set, not just InstantID-routed ones — a Character-Studio angle set on a
-    // FLUX.2 edit model is scored through the same shared seam. Stage the antelopev2 face stack (same
-    // bundle InstantID uses; a no-op if already cached) and capture the source identity reference +
-    // its asset id; the `!Send` scorer is built ONCE inside the generator-worker closure below and
-    // reused across all angles. Only on the angle set; staging is non-fatal (a failure → no scorer →
-    // scores omitted, the set still renders).
-    let angle_set = matches!(grouping, Flux2Grouping::Angles);
-    let face_stack_dir = if angle_set {
+    // Character-set identity-likeness scoring (epic 4406, sc-4409 angles / sc-4410 poses): the
+    // generator-agnostic post-pass applies to EVERY character set, not just InstantID-routed ones — a
+    // Character-Studio angle set OR a pose-library set on a FLUX.2 edit model is scored through the same
+    // shared seam. The FLUX.2 edit pose tier produces the FINAL image directly (no face-restore pass on
+    // this lane), so scoring the generated image scores what the user sees (sc-4410). Stage the
+    // antelopev2 face stack (same bundle InstantID uses; a no-op if already cached) and capture the
+    // source identity reference + its asset id; the `!Send` scorer is built ONCE inside the
+    // generator-worker closure below and reused across all angles / poses. On the angle + pose sets;
+    // staging is non-fatal (a failure → no scorer → scores omitted, the set still renders).
+    let character_set = matches!(grouping, Flux2Grouping::Angles | Flux2Grouping::Poses(_));
+    let face_stack_dir = if character_set {
         match ensure_face_stack_dir(api, settings, job).await {
             Ok(dir) => Some(dir),
             Err(error) => {
-                tracing::warn!(error = %error, "angle-set face-stack staging failed; likeness scores omitted");
+                tracing::warn!(error = %error, "character-set face-stack staging failed; likeness scores omitted");
                 None
             }
         }
     } else {
         None
     };
-    let likeness_source = (angle_set && face_stack_dir.is_some()).then(|| references[0].clone());
+    let likeness_source = (character_set && face_stack_dir.is_some()).then(|| references[0].clone());
     let likeness_source_ref = reference_ids.first().cloned();
 
     let (width, height) = (request.width, request.height);
@@ -474,11 +476,11 @@ async fn generate_flux2_edit_stream(
         move |generator, tx, cancel| {
             // Build the per-job identity-likeness scorer ONCE here (on the generator-worker thread
             // where the `!Send` face stack is allowed), embedding the source identity face a single
-            // time and reusing it across every angle (sc-4409 caching AC). `None` ⇒ not an angle set,
-            // or non-fatal construction failure ⇒ scores omitted; the set still renders.
+            // time and reusing it across every angle / pose (sc-4409/sc-4410 caching AC). `None` ⇒ not
+            // a character set, or non-fatal construction failure ⇒ scores omitted; the set still renders.
             let scorer = match (&face_stack_dir, &likeness_source) {
                 (Some(dir), Some(source)) => {
-                    crate::face_likeness::build_angle_set_scorer(dir, source)
+                    crate::face_likeness::build_face_likeness_scorer(dir, source)
                 }
                 _ => None,
             };
@@ -531,12 +533,13 @@ async fn generate_flux2_edit_stream(
                         &cancel,
                         on_progress,
                     )?;
-                    // Score this finished angle against the cached source embedding (sc-4409). The
-                    // Image build + pixel clone is paid ONLY when a scorer exists (an angle set) — the
-                    // common plain-edit path has no scorer, so this is a no-op with no clone. Profile/
-                    // up/down → honest detected:false N/A; `None` scorer ⇒ field omitted.
+                    // Score this finished angle / pose against the cached source embedding (sc-4409/
+                    // sc-4410). The Image build + pixel clone is paid ONLY when a scorer exists (an
+                    // angle or pose set) — the common plain-edit path has no scorer, so this is a no-op
+                    // with no clone. Profile / up / down / full-body → honest detected:false N/A; `None`
+                    // scorer ⇒ field omitted.
                     let face_likeness = scorer.as_ref().and_then(|scorer| {
-                        crate::face_likeness::score_angle_image(
+                        crate::face_likeness::score_generated_image(
                             Some(scorer),
                             &Image {
                                 width: out_w,
@@ -894,6 +897,25 @@ async fn generate_flux2_dev_control_stream(
     // lighting) stay constant while only the pose changes (Z-Image parity).
     let seed = resolve_seed(request, 0);
 
+    // Identity-likeness scoring (epic 4406, sc-4410): a FLUX.2-dev strict-control pose set is a
+    // Character-Studio pose-library job; when it carries a character identity `referenceAssetId`, score
+    // every finished pose against that source identity face through the SHARED seam. Source decode +
+    // face-stack staging are non-fatal (missing reference / failure → no scorer → scores omitted, the
+    // set still renders). The `!Send` scorer is built ONCE in the closure (source embedded once, reused
+    // across all poses).
+    let likeness_source = resolve_control_identity_source(request, settings, project_path);
+    let face_stack_dir = if likeness_source.is_some() {
+        match ensure_face_stack_dir(api, settings, job).await {
+            Ok(dir) => Some(dir),
+            Err(error) => {
+                tracing::warn!(error = %error, "pose-set face-stack staging failed; likeness scores omitted");
+                None
+            }
+        }
+    } else {
+        None
+    };
+
     let prompt = request.prompt.clone();
     let (width, height) = (request.width, request.height);
     let stickwidth = crate::openpose_skeleton::body_stickwidth(width, height);
@@ -910,7 +932,16 @@ async fn generate_flux2_dev_control_stream(
             let user_control = user_control.as_ref();
             let control_source = control_source.as_ref();
             let depth_weights_dir = depth_weights_dir.as_deref();
-            drive_gen_items(tx, poses, move |_index, pose, on_progress| {
+            // Per-job identity-likeness scorer built ONCE; source embedded once, reused across every
+            // pose (sc-4410). `None` ⇒ no identity reference / non-fatal construction failure.
+            let scorer = match (&face_stack_dir, &likeness_source) {
+                (Some(dir), Some((source, _))) => {
+                    crate::face_likeness::build_face_likeness_scorer(dir, source)
+                }
+                _ => None,
+            };
+            let likeness_source_ref = likeness_source.as_ref().map(|(_, id)| id.clone());
+            drive_gen_items_scored(tx, poses, move |_index, pose, on_progress| {
                 let control = preprocess_control_entry(
                     &control_kind,
                     user_control,
@@ -939,7 +970,22 @@ async fn generate_flux2_dev_control_stream(
                     &cancel,
                     on_progress,
                 )?;
-                Ok(Some((seed, out_w, out_h, pixels)))
+                // Score this finished pose against the cached source embedding (sc-4410). The strict-
+                // control lane produces the FINAL image directly (no face-restore pass), so this scores
+                // what the user sees. Clone paid ONLY when a scorer exists; a full-body / turned pose
+                // with no reliable frontal face → honest detected:false N/A.
+                let face_likeness = scorer.as_ref().and_then(|scorer| {
+                    crate::face_likeness::score_generated_image(
+                        Some(scorer),
+                        &Image {
+                            width: out_w,
+                            height: out_h,
+                            pixels: pixels.clone(),
+                        },
+                        likeness_source_ref.as_deref(),
+                    )
+                });
+                Ok(Some((seed, out_w, out_h, pixels, face_likeness)))
             })
         },
     );

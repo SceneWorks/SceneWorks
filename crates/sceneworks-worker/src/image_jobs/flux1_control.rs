@@ -275,6 +275,25 @@ async fn generate_flux1_dev_control_stream(
     // lighting) stay constant while only the control changes (FLUX.2 / Z-Image parity).
     let seed = resolve_seed(request, 0);
 
+    // Identity-likeness scoring (epic 4406, sc-4410): a FLUX.1-dev strict-control pose set is a
+    // Character-Studio pose-library job; when it carries a character identity `referenceAssetId` (FLUX.1
+    // control has no img2img-init seam, but the job may still carry a character source face), score every
+    // finished pose against it through the SHARED seam. Source decode + face-stack staging are non-fatal
+    // (missing reference / failure → no scorer → scores omitted, set still renders). The `!Send` scorer
+    // is built ONCE in the closure (source embedded once, reused across all poses).
+    let likeness_source = resolve_control_identity_source(request, settings, project_path);
+    let face_stack_dir = if likeness_source.is_some() {
+        match ensure_face_stack_dir(api, settings, job).await {
+            Ok(dir) => Some(dir),
+            Err(error) => {
+                tracing::warn!(error = %error, "pose-set face-stack staging failed; likeness scores omitted");
+                None
+            }
+        }
+    } else {
+        None
+    };
+
     let prompt = request.prompt.clone();
     let (width, height) = (request.width, request.height);
     let stickwidth = crate::openpose_skeleton::body_stickwidth(width, height);
@@ -290,7 +309,16 @@ async fn generate_flux1_dev_control_stream(
             let user_control = user_control.as_ref();
             let control_source = control_source.as_ref();
             let depth_weights_dir = depth_weights_dir.as_deref();
-            drive_gen_items(tx, poses, move |_index, pose, on_progress| {
+            // Per-job identity-likeness scorer built ONCE; source embedded once, reused across every
+            // pose (sc-4410). `None` ⇒ no identity reference / non-fatal construction failure.
+            let scorer = match (&face_stack_dir, &likeness_source) {
+                (Some(dir), Some((source, _))) => {
+                    crate::face_likeness::build_face_likeness_scorer(dir, source)
+                }
+                _ => None,
+            };
+            let likeness_source_ref = likeness_source.as_ref().map(|(_, id)| id.clone());
+            drive_gen_items_scored(tx, poses, move |_index, pose, on_progress| {
                 let control = preprocess_control_entry(
                     &control_kind,
                     user_control,
@@ -316,7 +344,22 @@ async fn generate_flux1_dev_control_stream(
                     &cancel,
                     on_progress,
                 )?;
-                Ok(Some((seed, out_w, out_h, pixels)))
+                // Score this finished pose against the cached source embedding (sc-4410). The strict-
+                // control lane produces the FINAL image directly (no face-restore pass), so this scores
+                // what the user sees. Clone paid ONLY when a scorer exists; a full-body / turned pose
+                // with no reliable frontal face → honest detected:false N/A.
+                let face_likeness = scorer.as_ref().and_then(|scorer| {
+                    crate::face_likeness::score_generated_image(
+                        Some(scorer),
+                        &Image {
+                            width: out_w,
+                            height: out_h,
+                            pixels: pixels.clone(),
+                        },
+                        likeness_source_ref.as_deref(),
+                    )
+                });
+                Ok(Some((seed, out_w, out_h, pixels, face_likeness)))
             })
         },
     );

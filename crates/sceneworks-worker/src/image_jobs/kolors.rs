@@ -371,6 +371,24 @@ async fn generate_kolors_control_stream(
     // changes (torch `_generate_pose_set` shares `set_seed`).
     let seed = resolve_seed(request, 0);
 
+    // Identity-likeness scoring (epic 4406, sc-4410): the macOS MLX Kolors pose lane is a Character-
+    // Studio pose-library job that ALWAYS carries an identity `referenceAssetId` (kolors_control_available
+    // requires it, decoded above as `reference`), so score every finished pose against that source
+    // identity face through the SHARED generator-agnostic seam. Stage the antelopev2 face stack (same
+    // bundle InstantID uses; a no-op if cached); staging is non-fatal (a failure → no scorer → scores
+    // omitted, the set still renders). The `!Send` scorer is built ONCE inside the generator-worker
+    // closure (source embedded once, reused across all poses — the caching AC). This lane produces the
+    // FINAL image directly (no face-restore pass), so scoring the generated image scores what the user
+    // sees.
+    let face_stack_dir = match ensure_face_stack_dir(api, settings, job).await {
+        Ok(dir) => Some(dir),
+        Err(error) => {
+            tracing::warn!(error = %error, "pose-set face-stack staging failed; likeness scores omitted");
+            None
+        }
+    };
+    let likeness_source_ref = reference_id.to_owned();
+
     let prompt = request.prompt.clone();
     let (width, height) = (request.width, request.height);
     let stickwidth = crate::openpose_skeleton::body_stickwidth(width, height);
@@ -385,7 +403,13 @@ async fn generate_kolors_control_stream(
         move |generator, tx, cancel| {
             let reference = &reference;
             let negative_prompt = negative_prompt.clone();
-            drive_gen_items(tx, poses, move |_index, pose, on_progress| {
+            // Build the per-job identity-likeness scorer ONCE on the generator-worker thread (the
+            // `!Send` face stack lives here); the source identity is embedded once and reused across
+            // every pose (sc-4410). `None` ⇒ non-fatal staging/construction failure ⇒ scores omitted.
+            let scorer = face_stack_dir
+                .as_ref()
+                .and_then(|dir| crate::face_likeness::build_face_likeness_scorer(dir, reference));
+            drive_gen_items_scored(tx, poses, move |_index, pose, on_progress| {
                 let skeleton = crate::openpose_skeleton::draw_wholebody(
                     width,
                     height,
@@ -419,7 +443,21 @@ async fn generate_kolors_control_stream(
                     &cancel,
                     on_progress,
                 )?;
-                Ok(Some((seed, out_w, out_h, pixels)))
+                // Score this finished pose against the cached source embedding (sc-4410). Clone paid
+                // ONLY when a scorer exists; a full-body / turned pose with no reliable frontal face →
+                // honest detected:false N/A.
+                let face_likeness = scorer.as_ref().and_then(|scorer| {
+                    crate::face_likeness::score_generated_image(
+                        Some(scorer),
+                        &Image {
+                            width: out_w,
+                            height: out_h,
+                            pixels: pixels.clone(),
+                        },
+                        Some(likeness_source_ref.as_str()),
+                    )
+                });
+                Ok(Some((seed, out_w, out_h, pixels, face_likeness)))
             })
         },
     );

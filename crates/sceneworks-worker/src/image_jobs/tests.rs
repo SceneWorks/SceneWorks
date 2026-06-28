@@ -1605,6 +1605,36 @@ fn kolors_real_weights_pose_generates_one_image() {
     );
 }
 
+/// sc-4410 macOS Kolors pose-lane identity-source invariant: the lane that now scores every finished
+/// pose (`generate_kolors_control_stream`, routed via `kolors_control_available`) is gated on a non-empty
+/// `referenceAssetId` — so the source identity face the scorer needs ALWAYS exists when the lane runs (it
+/// is the same reference the IP-Adapter + img2img init decode). A pose job WITHOUT a reference does not
+/// route here at all, so there is no unscored Kolors pose path. Weight-free: the reference clause
+/// short-circuits before `resolve_weights_dir`, so this asserts the gate regardless of cached weights.
+#[cfg(target_os = "macos")]
+#[test]
+fn kolors_pose_lane_requires_reference_identity_for_scoring() {
+    let settings = Settings::from_env();
+    // No referenceAssetId ⇒ the scoring lane is never entered (the gate is false before weights matter).
+    let no_reference = request(json!({
+        "projectId": "p", "model": "kolors",
+        "advanced": { "poses": [{ "id": "a" }] }
+    }));
+    assert!(
+        !kolors_control_available(&no_reference, &settings),
+        "a Kolors pose job with no referenceAssetId must NOT route to the scoring control lane"
+    );
+    // A blank referenceAssetId is treated as absent (no spurious scoring lane / no scorer with no source).
+    let blank_reference = request(json!({
+        "projectId": "p", "model": "kolors", "referenceAssetId": "   ",
+        "advanced": { "poses": [{ "id": "a" }] }
+    }));
+    assert!(
+        !kolors_control_available(&blank_reference, &settings),
+        "a blank referenceAssetId is treated as absent"
+    );
+}
+
 /// L2-normalized cosine similarity between two ArcFace embeddings (test helper).
 #[cfg(target_os = "macos")]
 fn cosine(a: &[f32], b: &[f32]) -> f32 {
@@ -5513,6 +5543,39 @@ fn build_control_conditioning_matches_legacy_shape() {
     assert!(
         matches!(cond[0], Conditioning::Depth { .. }),
         "depth uses Conditioning::Depth"
+    );
+}
+
+/// sc-4410 strict-control pose scoring: a pose-library job that carries NO character identity
+/// `referenceAssetId` resolves to `None` for the likeness source — so the strict-control streams build
+/// no scorer and the `faceLikeness` field is omitted (honest — there is no identity to compare against,
+/// not an error). This is the gate every strict-control pose lane (z-image / qwen / flux2-dev /
+/// flux1-dev + their candle siblings) uses to decide whether to score; the decode-success branch
+/// (referenceAssetId present) is exercised by the `#[ignore]` real-weight scorer test (it needs an asset
+/// + weights). Blank ids count as absent.
+#[cfg(target_os = "macos")]
+#[test]
+fn resolve_control_identity_source_is_none_without_reference() {
+    let settings = Settings::from_env();
+    let project_path = std::path::Path::new("/tmp/sc4410-nonexistent");
+    // A bare pose set (skeleton-only, no identity reference) → None → no scorer → field omitted.
+    let pose_only = request(json!({
+        "projectId": "p", "model": "z_image_turbo",
+        "advanced": { "poses": [{ "id": "a" }] }
+    }));
+    assert!(
+        resolve_control_identity_source(&pose_only, &settings, project_path).is_none(),
+        "pose set with no identity reference ⇒ no likeness source ⇒ field omitted"
+    );
+    // A blank referenceAssetId is treated as absent (no spurious decode attempt).
+    let blank = request(json!({
+        "projectId": "p", "model": "flux2_dev",
+        "referenceAssetId": "   ",
+        "advanced": { "poses": [{ "id": "a" }] }
+    }));
+    assert!(
+        resolve_control_identity_source(&blank, &settings, project_path).is_none(),
+        "blank referenceAssetId ⇒ treated as absent"
     );
 }
 
