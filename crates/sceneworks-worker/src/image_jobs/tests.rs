@@ -1963,6 +1963,69 @@ fn qwen_control_raw_settings_records_control_recipe() {
     assert_eq!(raw.get("mlxQuantize"), Some(&json!(4)));
 }
 
+/// sc-8250 qwen source-threading: the qwen control stream now feeds the user input image into the
+/// shared `preprocess_control_entry` driver (it previously passed `source: None`). With `controlMode =
+/// canny` and a threaded source, the driver derives a real edge-map control image — NOT the pose
+/// skeleton — and builds a `Control { kind: Canny }` conditioning. This is the qwen analogue of
+/// `threaded_source_drives_auto_canny_control_conditioning` (flux2/z-image), proving qwen's stream
+/// reaches the same auto-canny/auto-depth path now that the source is threaded. The pose tier stays
+/// byte-identical (no source needed — the skeleton is synthetic). Real per-mode renders are the
+/// on-device `qwen_control_real_weights` smoke.
+#[cfg(target_os = "macos")]
+#[test]
+fn qwen_threaded_source_drives_auto_canny_control_conditioning() {
+    // qwen's engine row now accepts canny + depth (sc-8250).
+    assert!(validate_control_kind("qwen_image_control", &ControlKind::Canny).is_ok());
+    assert!(validate_control_kind("qwen_image_control", &ControlKind::Depth).is_ok());
+
+    let (w, h) = (64u32, 48u32);
+    let pose = one_pose();
+    let stick = crate::openpose_skeleton::body_stickwidth(w, h);
+    let source = control_fixture(w, h, [128, 128, 128]);
+
+    // canny + a threaded source (no user passthrough, no depth weights) → an edge-map control image.
+    let control = preprocess_control_entry(
+        &ControlKind::Canny,
+        None,
+        Some(&pose),
+        Some(&source),
+        w,
+        h,
+        stick,
+        None,
+    )
+    .expect("auto-canny over the threaded qwen source");
+    assert_eq!((control.width, control.height), (w, h));
+
+    // It must NOT be the pose skeleton (proving the source — not the synthetic skeleton — drove it).
+    let skeleton = crate::openpose_skeleton::draw_wholebody(
+        w,
+        h,
+        &pose.keypoints,
+        pose.hands.as_deref(),
+        pose.face.as_deref(),
+        stick,
+    );
+    assert_ne!(
+        control.pixels,
+        skeleton.into_raw(),
+        "qwen auto-canny must derive from the source image, not render the pose skeleton"
+    );
+
+    let cond = build_control_conditioning(control, ControlKind::Canny, 0.9, None);
+    assert_eq!(cond.len(), 1);
+    assert!(
+        matches!(
+            &cond[0],
+            Conditioning::Control {
+                kind: ControlKind::Canny,
+                ..
+            }
+        ),
+        "qwen canny builds a Control conditioning"
+    );
+}
+
 /// sc-3031 A/B dump (NOT a CI test): generate ONE image through the **real new-adapter
 /// path** — the production resolvers (`model_repo` / `resolve_steps` / `resolve_guidance` /
 /// `resolve_negative_prompt` / `resolve_quant` / `resolve_adapters` / `resolve_weights_dir` /
@@ -2278,18 +2341,18 @@ fn zimage_control_real_weights_generates_one_pose() {
     assert!(pixels.windows(2).any(|w| w[0] != w[1]));
 }
 
-/// Real-weights smoke: Qwen-Image strict-pose ControlNet. Loads the base
-/// `Qwen/Qwen-Image` snapshot + the cached InstantX ControlNet-Union checkpoint,
+/// Real-weights smoke: Qwen-Image strict-pose control. Loads the base
+/// `Qwen/Qwen-Image` snapshot + the cached alibaba-pai 2512-Fun-Controlnet-Union checkpoint,
 /// renders one DWPose skeleton, and generates one image through `qwen_image_control`.
 /// Needs both in the HF cache + a Metal device; run on demand:
 /// `cargo test -p sceneworks-worker --lib -- --ignored qwen_control_real_weights`.
 #[cfg(target_os = "macos")]
 #[test]
-#[ignore = "needs real Qwen-Image + InstantX ControlNet weights + Metal device"]
+#[ignore = "needs real Qwen-Image + 2512-Fun-Controlnet-Union weights + Metal device"]
 fn qwen_control_real_weights_generates_one_pose() {
     let base = hf_snapshot("models--Qwen--Qwen-Image");
-    let control =
-        hf_snapshot("models--InstantX--Qwen-Image-ControlNet-Union").join(super::QWEN_CONTROL_FILE);
+    let control = hf_snapshot("models--alibaba-pai--Qwen-Image-2512-Fun-Controlnet-Union")
+        .join(super::QWEN_CONTROL_FILE);
     assert!(
         control.exists(),
         "Qwen control weights missing: {control:?}"
@@ -4987,21 +5050,29 @@ fn strict_control_table_is_the_authority() {
     );
 
     let qwen = strict_control_engine("qwen_image_control").expect("qwen row");
-    assert_eq!(qwen.repo, "InstantX/Qwen-Image-ControlNet-Union");
-    // qwen stays pose-only until sc-8250 — canny/depth must NOT be unlocked here.
-    assert_eq!(qwen.supported_kinds, &[ControlKind::Pose]);
+    // sc-8267 source swap: InstantX → alibaba-pai 2512-Fun-Controlnet-Union (input-agnostic VACE branch).
+    assert_eq!(
+        qwen.repo,
+        "alibaba-pai/Qwen-Image-2512-Fun-Controlnet-Union"
+    );
+    // sc-8250 exposure: the 2512-Fun Union admits pose + canny + depth.
+    assert_eq!(
+        qwen.supported_kinds,
+        &[ControlKind::Pose, ControlKind::Canny, ControlKind::Depth]
+    );
 
     // The SDXL tile detail path is NOT a Fun-Union strict-control engine and must never route here.
     assert!(strict_control_engine("flux2_dev").is_none());
     assert!(strict_control_engine("sdxl_tile_control").is_none());
 }
 
-/// supported_kinds validation: pose accepted on every engine; canny/depth accepted on flux2/z-image
-/// but REJECTED on qwen; an unknown engine id is itself an error.
+/// supported_kinds validation: pose + canny + depth accepted on every Fun-Union strict-control engine
+/// (qwen joined the canny/depth tier in sc-8250); an unknown engine id is itself an error.
 #[cfg(target_os = "macos")]
 #[test]
 fn validate_control_kind_accepts_and_rejects_per_table() {
-    // Pose is the proven tier on every engine.
+    // Pose / Canny / Depth are all accepted on every Fun-Union strict-control engine (sc-8250 unlocked
+    // qwen's canny + depth alongside flux1 / flux2 / z-image).
     for engine in [
         "flux1_dev_control",
         "flux2_dev_control",
@@ -5009,27 +5080,16 @@ fn validate_control_kind_accepts_and_rejects_per_table() {
         "qwen_image_control",
     ] {
         assert!(validate_control_kind(engine, &ControlKind::Pose).is_ok());
-    }
-    // Canny + Depth: flux1 / flux2 / z-image accept.
-    for engine in [
-        "flux1_dev_control",
-        "flux2_dev_control",
-        "z_image_turbo_control",
-    ] {
         assert!(validate_control_kind(engine, &ControlKind::Canny).is_ok());
         assert!(validate_control_kind(engine, &ControlKind::Depth).is_ok());
     }
-    // qwen rejects canny + depth (pose-only until sc-8250) with an actionable message.
-    let err = validate_control_kind("qwen_image_control", &ControlKind::Canny)
-        .expect_err("qwen canny rejected");
+    // A free-form `Other` kind is rejected on the qwen Fun-Union engine with an actionable message.
+    let err = validate_control_kind("qwen_image_control", &ControlKind::Other("scribble".into()))
+        .expect_err("qwen Other rejected");
     let msg = err.to_string();
     assert!(
-        msg.contains("qwen_image_control") && msg.contains("canny"),
+        msg.contains("qwen_image_control") && msg.contains("scribble"),
         "{msg}"
-    );
-    assert!(
-        validate_control_kind("qwen_image_control", &ControlKind::Depth).is_err(),
-        "qwen depth rejected"
     );
     // Unknown / non-Fun-Union engine id is rejected outright.
     assert!(validate_control_kind("sdxl_tile_control", &ControlKind::Pose).is_err());

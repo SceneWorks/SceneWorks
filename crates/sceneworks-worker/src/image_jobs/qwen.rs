@@ -1,7 +1,8 @@
 /// The engine registry id for the Qwen-Image ControlNet-Union variant.
 const QWEN_CONTROL_ENGINE_ID: &str = "qwen_image_control";
-/// Default InstantX Qwen-Image-ControlNet-Union weights (Apache-2.0, DWPose-trained).
-const QWEN_CONTROL_REPO: &str = "InstantX/Qwen-Image-ControlNet-Union";
+/// Default alibaba-pai Qwen-Image-2512-Fun-Controlnet-Union weights (input-agnostic VACE branch:
+/// pose/canny/depth share one control path — sc-8267 source swap, sc-8250 canny+depth exposure).
+const QWEN_CONTROL_REPO: &str = "alibaba-pai/Qwen-Image-2512-Fun-Controlnet-Union";
 const QWEN_CONTROL_FILE: &str = "diffusion_pytorch_model.safetensors";
 
 /// True when this is the base-Qwen strict-pose tier: `qwen_image` + non-empty object
@@ -26,7 +27,7 @@ fn resolve_qwen_control_weights(request: &ImageRequest, settings: &Settings) -> 
     )
 }
 
-/// Load the Qwen-Image ControlNet-Union generator (base snapshot + InstantX control overlay).
+/// Load the Qwen-Image ControlNet-Union generator (base snapshot + 2512-Fun control overlay).
 fn qwen_control_spec(
     weights_dir: PathBuf,
     control_weights: PathBuf,
@@ -58,7 +59,7 @@ fn qwen_control_load(
 }
 
 /// Generate one Qwen strict-pose image: the pre-built `conditioning` (the required `Control`, assembled by
-/// the shared [`build_control_conditioning`] driver) drives the InstantX control branch; prompt, true CFG,
+/// the shared [`build_control_conditioning`] driver) drives the 2512-Fun control branch; prompt, true CFG,
 /// negative prompt, quant, and LoRA/LoKr mirror base Qwen.
 #[allow(clippy::too_many_arguments)]
 fn qwen_control_generate_one(
@@ -162,12 +163,24 @@ async fn generate_qwen_control_stream(
     let adapters = resolve_adapters(request, settings)?;
     let repo = model_repo(request, &qwen);
     // Shared strict-control driver: validate the requested ControlKind against the engine's
-    // supported_kinds (qwen_image_control = {Pose} only — qwen stays pose-only until sc-8250) + resolve an
-    // optional user-supplied control-map passthrough. The current (pose-only) job sets no `controlMode`, so
-    // `kind == Pose` and the skeleton preprocessor runs exactly as before.
+    // supported_kinds (qwen_image_control = {Pose, Canny, Depth}; sc-8250) + resolve an optional
+    // user-supplied control-map passthrough. A pose job sets no `controlMode`, so `kind == Pose` and the
+    // skeleton preprocessor runs exactly as before (byte-identical).
     let control_kind = requested_control_kind(request)?;
     validate_control_kind(QWEN_CONTROL_ENGINE_ID, &control_kind)?;
     let user_control = resolve_user_control_map(request, settings, project_path)?;
+    // sc-8250 source threading: for canny/depth WITHOUT a user-supplied control map, the control map is
+    // auto-derived from the input image (canny edges / Depth-Anything-V2). The pose tier never needs a
+    // source (the skeleton is synthetic).
+    let control_source = resolve_control_source(request, settings, project_path)?;
+    // Auto depth-estimator weights: provisioned only when this is a depth job WITHOUT a user-supplied
+    // depth map (the passthrough short-circuits estimation). Shared across the set; fetched once on the
+    // first depth job (sc-8242).
+    let depth_weights_dir = if control_kind == ControlKind::Depth && user_control.is_none() {
+        Some(ensure_depth_estimator_dir(api, settings, job).await?)
+    } else {
+        None
+    };
     let poses = parse_poses(request);
     let count = poses.len();
     let raw_settings = qwen_control_raw_settings(
@@ -202,18 +215,18 @@ async fn generate_qwen_control_stream(
         "Qwen strict-pose control load failed".to_owned(),
         move |generator, tx, cancel| {
             let user_control = user_control.as_ref();
+            let control_source = control_source.as_ref();
+            let depth_weights_dir = depth_weights_dir.as_deref();
             drive_gen_items(tx, poses, move |_index, pose, on_progress| {
                 let control = preprocess_control_entry(
                     &control_kind,
                     user_control,
                     Some(&pose),
-                    None,
+                    control_source,
                     width,
                     height,
                     stickwidth,
-                    // qwen_image_control is pose-only (validate_control_kind rejects Depth), so the depth
-                    // estimator is never reached — no weights dir to provision.
-                    None,
+                    depth_weights_dir,
                 )?;
                 // qwen ignores a reference (identity comes from character LoRA on the base transformer),
                 // so no identity-init `Reference` — pose-only `Control` conditioning, byte-identical.

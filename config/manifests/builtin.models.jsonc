@@ -231,20 +231,21 @@
             { "label": "Supplemental Qwen-style prompt guide", "url": "https://www.qwenimagen.com/prompt-guide" }
           ]
         },
-        // Strict pose tier (sc-2291): the worker renders the selected library pose to
-        // a DWPose skeleton and conditions a native diffusers QwenImageControlNet-
-        // Pipeline (InstantX Qwen-Image-ControlNet-Union) on it — true pose lock,
-        // pose-from-prompt (identity, when wanted, comes from a character LoRA).
-        // Surfaces qwen_image in the Character Studio pose picker; character_image is
-        // NOT required — poseLibrary alone gates the picker, the worker dispatches by
-        // model id. Torch/diffusers path only (MLX qwen has no ControlNet).
+        // Strict control tier (sc-2291): the worker renders the selected library pose to a DWPose
+        // skeleton — or, with advanced.controlMode = canny|depth, derives a canny/depth control map
+        // from the input image — and conditions the native-MLX Qwen-Image-2512-Fun-Controlnet-Union
+        // branch on it (true pose/structure lock, pose-from-prompt; identity, when wanted, comes from a
+        // character LoRA). Surfaces qwen_image in the Character Studio pose picker; character_image is
+        // NOT required — poseLibrary alone gates the picker, the worker dispatches by model id.
         "poseLibrary": true,
-        // Strict ControlNet → expose the pose-lock-strength slider
-        // (advanced.controlScale, read by QwenImageAdapter._pose_control_scale).
+        // Strict ControlNet → expose the control-lock-strength slider
+        // (advanced.controlScale, read by the qwen strict-control driver).
         "poseControlScale": true,
-        // Qwen stays POSE-ONLY for now (`qwen_image_control` = {pose} in STRICT_CONTROL_ENGINES). Its
-        // canny/depth + 2512-Fun migration is sc-8267/sc-8250 — do NOT advertise canny/depth here.
-        "controlModes": ["pose"],
+        // Strict-control modes the 2512-Fun-Controlnet-Union branch admits (sc-8267 source swap / sc-8250
+        // exposure): pose (skeleton), canny (auto edge map), depth (Depth-Anything-V2). Matches
+        // `qwen_image_control` = {pose, canny, depth} in STRICT_CONTROL_ENGINES; advertised so the picker
+        // offers the control-mode selector (advanced.controlMode).
+        "controlModes": ["pose", "canny", "depth"],
         // The control-lock-strength knob (advanced.controlScale; worker default 0.9). Structured form of
         // the `poseControlScale` flag.
         "controlScale": { "label": "Control strength", "default": 0.9, "min": 0.0, "max": 2.0, "step": 0.05 }
