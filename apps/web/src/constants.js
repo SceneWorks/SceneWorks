@@ -400,7 +400,18 @@ export const fallbackModels = [
       // Identity tuning: reference strength (ipAdapterScale) defaults higher for
       // InstantID; identityStructure adds the controlnetConditioningScale slider.
       referenceStrengthDefault: 0.8,
-      identityStructure: { label: "Identity structure", default: 0.8, min: 0.3, max: 1.0, step: 0.05 },
+      // `default` is the single-image (Image Studio) lock; `angleSetDefault` is the softer
+      // angle-set lock the worker also applies (sc-8354 — 0.65 clears the most off-axis views
+      // above the blur floor at a small identity cost). The Angle Set card seeds its slider from
+      // `angleSetDefault` so the surfaced value matches what the backbone runs.
+      identityStructure: {
+        label: "Identity structure",
+        default: 0.8,
+        angleSetDefault: 0.65,
+        min: 0.3,
+        max: 1.0,
+        step: 0.05,
+      },
       // Canonical head angles (advanced.viewAngle; built-in landmark pack drives pose).
       viewAngles: [
         { id: "three_quarter_left", label: "Three-quarter left" },
@@ -449,6 +460,13 @@ export const fallbackModels = [
       description: "Black Forest Labs FLUX.2 [klein] 9B — 4-step distilled text-to-image + reference editing, MLX-only (Apple Silicon). Distributed under the FLUX Non-Commercial License (gated). In Character Studio's angle set + pose library, the FLUX.2-aesthetic tier (sc-2003 spike: mean ArcFace 0.52 across 5 angles — third-best identity hold, BUT the only prompt-driven backbone that holds portrait framing at 90° profiles where Qwen and InstantID both reframe). Pose library runs the multi-image trick (skeleton + character) at compact ~22 GB memory.",
       promptGuide: { title: "FLUX.2 [klein] 9B Prompt Guide", path: "/prompt-guides/flux2-klein.md" },
       variationStrength: { label: "Prompt strength", default: 4.0, min: 1.0, max: 10.0, step: 0.5 },
+      // Identity strength → the engine's image-guidance CFG (sc-8278/sc-8273). klein edit carries
+      // identity only through the reference tokens, so a strong prompt drops the likeness (sc-8234);
+      // this lever extrapolates the reference condition to hold it. 1.5 = realism-safe default
+      // (>2.0 over-smooths skin / "clay"), capped at 2.5. Sent as `ipAdapterScale` (the shared
+      // reference-strength slider key) → worker `flux2_edit_image_guidance` → `image_guidance`.
+      referenceStrengthDefault: 1.5,
+      referenceStrength: { label: "Identity strength", min: 1.0, max: 2.5, step: 0.05 },
       // Multi-backbone angle set (sc-2003). MlxFlux2Adapter passes the per-
       // angle augmented prompt through the sidecar runner.
       viewAngles: [
