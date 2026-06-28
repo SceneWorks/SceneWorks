@@ -95,7 +95,13 @@ import {
 } from "./generationStudio.jsx";
 import { useAppContext } from "../context/AppContext.js";
 import { ModelAvailabilityGate } from "../components/ModelAvailabilityGate.jsx";
-import { downloadOffersFor, imageModelUsable, visionCaptionModelUsable } from "../modelEligibility.js";
+import {
+  downloadOffersFor,
+  imageModelUsable,
+  supportedControlModes,
+  visionCaptionModelUsable,
+} from "../modelEligibility.js";
+import { ControlPanel } from "../components/ControlPanel.jsx";
 import { pidToggleVisible } from "../pidEligibility.js";
 import { PROMPT_REFINE_MODEL_ID, VISION_CAPTION_MODEL_ID, VISION_CAPTION_MODEL_REPO } from "../constants.js";
 import { pickClosestResolution } from "../resolutionMatch.js";
@@ -398,6 +404,16 @@ export function ImageStudio() {
   // Pose library: selected pose ids. When non-empty, the job carries advanced.poses
   // (one image per pose) instead of the normal variations count. Transient (not saved).
   const [selectedPoseIds, setSelectedPoseIds] = useState([]);
+  // Strict-control panel (epic 8236, sc-8245). The selected control type (pose / canny / depth),
+  // gated to the backbone's `ui.controlModes`. Pose reuses `selectedPoseIds`; canny/depth use a
+  // control-image asset + a preprocess-vs-passthrough toggle. `controlScale` (advanced.controlScale)
+  // is the control-lock strength. All reset to the model's defaults on model change (below).
+  const [controlMode, setControlMode] = useState(saved.controlMode ?? "pose");
+  const [controlImageAssetId, setControlImageAssetId] = useState("");
+  // false = preprocess (worker auto-derives the map from the image → request.sourceAssetId);
+  // true = use-as-is (the user-supplied map passes through verbatim → advanced.controlImage).
+  const [controlImagePassthrough, setControlImagePassthrough] = useState(false);
+  const [controlScale, setControlScale] = useState(saved.controlScale ?? null);
   // Configurable sampler / scheduler (epic 1753). Restored from per-workspace
   // settings; reset to the selected model's manifest defaults whenever the
   // model changes.
@@ -625,6 +641,19 @@ export function ImageStudio() {
   const viewAngles = Array.isArray(selectedModel?.ui?.viewAngles) ? selectedModel.ui.viewAngles : null;
   // Whether the model supports the OpenPose pose library (InstantID).
   const poseLibrary = Boolean(selectedModel?.ui?.poseLibrary);
+  // Strict-control modes the selected backbone advertises (sc-8245) — canonical-ordered, gated to
+  // `ui.controlModes` (the manifest / STRICT_CONTROL_ENGINES `supported_kinds`). Empty ⇒ no strict
+  // control ⇒ the panel hides. The control panel surfaces only in text-to-image mode (its conditioning
+  // is its own input image / pose, distinct from the edit / character source).
+  const controlModes = useMemo(() => supportedControlModes(selectedModel), [selectedModel]);
+  const controlScaleConfig = selectedModel?.ui?.controlScale ?? null;
+  // The control type actually in effect: the user's pick when the backbone still supports it, else the
+  // first supported mode. Decouples the gating (derived) from the raw state so a backbone switch that
+  // strands an unsupported pick degrades gracefully even before the reset effect runs.
+  const activeControlMode = controlModes.includes(controlMode) ? controlMode : (controlModes[0] ?? null);
+  const showControlPanel = mode === "text_to_image" && controlModes.length > 0;
+  const effectiveControlScale =
+    typeof controlScale === "number" ? controlScale : controlScaleConfig?.default ?? 0.9;
   // Whether the model exposes its built-in prompt upsampler ("Enhance prompt" toggle) — FLUX.2-dev.
   const promptEnhance = Boolean(selectedModel?.ui?.promptEnhance);
   // Whether the model ships a packed default + a hosted full-precision bf16 build, exposing the
@@ -699,6 +728,14 @@ export function ImageStudio() {
     setTrueCfgScale(typeof ui.variationStrength?.default === "number" ? ui.variationStrength.default : 4.0);
     setViewAngle("");
     setSelectedPoseIds([]);
+    // Re-gate the strict-control panel to the new backbone: snap the control type to a supported mode
+    // (an unsupported pick — e.g. canny on a pose-only backbone — resets to the first supported one),
+    // reset the control-scale to the model's manifest default, and clear a stale control image.
+    const nextModes = supportedControlModes(imageModels.find((item) => item.id === model));
+    setControlMode((current) => (nextModes.includes(current) ? current : nextModes[0] ?? "pose"));
+    setControlScale(typeof ui.controlScale?.default === "number" ? ui.controlScale.default : null);
+    setControlImageAssetId("");
+    setControlImagePassthrough(false);
   }, [model]);
   // Approved reference images for the selected character (the IP-Adapter identity
   // source). Resolve the full asset from the catalog so thumbnails render even when
@@ -1266,11 +1303,28 @@ export function ImageStudio() {
     setSubmitting(true);
     try {
       // Pose library: when poses are selected, the job emits one image per pose
-      // (advanced.poses) instead of `count` variations.
+      // (advanced.poses) instead of `count` variations. Two pose surfaces share this payload:
+      //   * character_image — InstantID pose set (needs an approved reference).
+      //   * text_to_image — the strict-control panel's pose mode (sc-8245): a Fun-Union backbone
+      //     conditions each render on the selected library skeleton; no reference needed.
+      const usePosePayload =
+        (mode === "character_image" && referenceAssetId && poseLibrary) ||
+        (showControlPanel && activeControlMode === "pose");
       const posePayload =
-        mode === "character_image" && referenceAssetId && poseLibrary && selectedPoseIds.length
+        usePosePayload && selectedPoseIds.length
           ? selectedPoseIds.map((id) => poseById[id]).filter(Boolean).map((pose) => ({ id: pose.id, keypoints: pose.keypoints }))
           : [];
+      // Strict-control conditioning (sc-8245). Active only for a text-to-image control backbone.
+      // Pose flows through `posePayload` above; canny/depth carry the control type + the uploaded
+      // control image, routed by the preprocess-vs-passthrough toggle:
+      //   * preprocess (derive) → request `sourceAssetId` (the worker auto-derives the map).
+      //   * use-as-is (passthrough) → `advanced.controlImage` (the map is fed verbatim).
+      const controlActive = showControlPanel && Boolean(activeControlMode);
+      const controlIsImageMode = controlActive && activeControlMode !== "pose";
+      const controlPreprocessSourceId =
+        controlIsImageMode && !controlImagePassthrough && controlImageAssetId ? controlImageAssetId : null;
+      const controlPassthroughId =
+        controlIsImageMode && controlImagePassthrough && controlImageAssetId ? controlImageAssetId : null;
       // Resolve the prompt + structured-caption payload. Structured models (Ideogram 4) are
       // JSON-caption-only: raw plain text is out-of-distribution and renders the "Image blocked by
       // safety filter" placeholder (sc-6307/sc-6501). So a structured model ALWAYS sends a JSON
@@ -1337,7 +1391,13 @@ export function ImageStudio() {
         characterLookId: mode === "character_image" ? characterLookId || null : null,
         // edit_image: a single source image, except for a multi-reference model (sc-6211,
         // FLUX.2-dev) whose source picker is replaced by the multi-image reference picker below.
-        sourceAssetId: mode === "edit_image" && !multiReference ? sourceAssetId || null : null,
+        // text_to_image strict-control (sc-8245): canny/depth in preprocess (derive) mode send the
+        // uploaded control image here as the source the worker auto-derives the map FROM
+        // (strict_control.rs `resolve_control_source`). Passthrough mode uses `advanced.controlImage`.
+        sourceAssetId:
+          mode === "edit_image" && !multiReference
+            ? sourceAssetId || null
+            : controlPreprocessSourceId,
         // Multi-reference edit (sc-6211): the plural reference set the FLUX.2-dev edit conditions on.
         // Only sent in edit_image mode for a multiReference model; the worker routes a non-empty list
         // to Conditioning::MultiReference (one image ⇒ a normal single-reference edit).
@@ -1446,6 +1506,15 @@ export function ImageStudio() {
           // Pose library (InstantID) — one image per selected pose; faceRestore toggles
           // the full-body face-restoration pass.
           ...(posePayload.length ? { poses: posePayload, faceRestore } : {}),
+          // Strict-control conditioning (epic 8236, sc-8245). The control type the worker's shared
+          // strict-control driver reads (strict_control.rs `requested_control_kind`). Pose is the
+          // engine default (omitted → byte-preserved), so only non-pose modes ride the payload. The
+          // control-lock strength (`advanced.controlScale`) is sent whenever the panel is active.
+          ...(controlActive && activeControlMode !== "pose" ? { controlMode: activeControlMode } : {}),
+          // Use-as-is passthrough: a pre-made canny/depth map fed verbatim
+          // (strict_control.rs `resolve_user_control_map`). Derive mode uses request.sourceAssetId.
+          ...(controlPassthroughId ? { controlImage: controlPassthroughId } : {}),
+          ...(controlActive ? { controlScale: effectiveControlScale } : {}),
         },
       });
       onLocalJobCreated?.(job);
@@ -1833,6 +1902,41 @@ export function ImageStudio() {
                 )}
               </>
             ) : null}
+          </div>
+        ) : null}
+
+        {/* Strict-control panel (epic 8236, sc-8245): pose / canny / depth structure lock for the
+            text-to-image backbones whose `ui.controlModes` advertises it. Hidden when the backbone
+            supports no strict control. Pose reuses the library picker (one image per pose); canny/depth
+            take an uploaded control image + a preprocess-vs-use-as-is toggle. The request wiring lives in
+            submit() — controlMode / sourceAssetId|advanced.controlImage / advanced.controlScale. */}
+        {showControlPanel ? (
+          <div className="studio-source-band">
+            <ControlPanel
+              supportedModes={controlModes}
+              controlMode={activeControlMode}
+              onControlModeChange={setControlMode}
+              selectedPoseIds={selectedPoseIds}
+              onTogglePose={(id) =>
+                setSelectedPoseIds((ids) =>
+                  ids.includes(id) ? ids.filter((value) => value !== id) : [...ids, id],
+                )
+              }
+              onClearPoses={() => setSelectedPoseIds([])}
+              loadUserPoses={loadUserPoses}
+              poseBlockText={macPoseBlock ? macPoseBlock.text : null}
+              controlImageAssetId={controlImageAssetId}
+              onControlImageChange={setControlImageAssetId}
+              controlImagePassthrough={controlImagePassthrough}
+              onControlImagePassthroughChange={setControlImagePassthrough}
+              controlImageAssets={editImageAssets}
+              importAsset={importAsset}
+              projectId={activeProject?.id}
+              characters={characters}
+              controlScaleConfig={controlScaleConfig}
+              controlScale={effectiveControlScale}
+              onControlScaleChange={setControlScale}
+            />
           </div>
         ) : null}
 

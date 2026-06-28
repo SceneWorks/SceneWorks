@@ -24,6 +24,7 @@
     "eslint-plugin-react-hooks": "^5.2.0",
     "globals": "^17.6.0",
     "jsdom": "27.3.0",
+    "json5": "^2.2.3",
     "vite": "6.4.2",
     "vitest": "4.1.8"
   }

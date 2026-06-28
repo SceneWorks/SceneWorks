@@ -1251,3 +1251,140 @@ describe("ImageStudio PiD decoder toggle (sc-7851)", () => {
     expect(createImageJob.mock.calls[1][0].advanced.usePid).toBe(true);
   });
 });
+
+describe("ImageStudio strict-control panel (epic 8236, sc-8245)", () => {
+  let container;
+  let root;
+
+  beforeEach(() => {
+    global.IS_REACT_ACT_ENVIRONMENT = true;
+    window.localStorage.clear();
+    container = document.createElement("div");
+    document.body.appendChild(container);
+    root = createRoot(container);
+  });
+
+  afterEach(async () => {
+    await act(async () => root.unmount());
+    container.remove();
+    vi.clearAllMocks();
+  });
+
+  async function render(context) {
+    await act(async () => {
+      root.render(
+        <AppContext.Provider value={context}>
+          <ImageStudio />
+        </AppContext.Provider>,
+      );
+    });
+    await act(async () => {});
+  }
+
+  // A Fun-Union backbone advertising all three control modes (mirrors the manifest controlModes/
+  // controlScale). The pose-only fixture omits canny/depth so the picker gates to a single tab.
+  const FULL_CONTROL = {
+    ...Z_IMAGE,
+    id: "flux2_dev",
+    name: "FLUX.2-dev",
+    family: "flux2",
+    ui: {
+      poseLibrary: true,
+      controlModes: ["pose", "canny", "depth"],
+      controlScale: { label: "Control strength", default: 0.75, min: 0, max: 2, step: 0.05 },
+    },
+  };
+  const POSE_ONLY = {
+    ...Z_IMAGE,
+    id: "pose_only",
+    name: "Pose Only",
+    family: "pose",
+    ui: {
+      poseLibrary: true,
+      controlModes: ["pose"],
+      controlScale: { label: "Control strength", default: 0.9, min: 0, max: 2, step: 0.05 },
+    },
+  };
+  const NO_CONTROL = { ...Z_IMAGE, id: "plain", name: "Plain", family: "plain", ui: {} };
+
+  const controlTabs = () =>
+    [...container.querySelectorAll(".control-mode-tab")].map((b) => b.textContent.trim());
+  const controlTabByLabel = (label) =>
+    [...container.querySelectorAll(".control-mode-tab")].find((b) => b.textContent.trim() === label);
+  const generate = async () =>
+    click([...container.querySelectorAll("button")].find((b) => b.textContent === "Generate"));
+
+  it("gates the picker to the backbone's supported modes (all three)", async () => {
+    await render(baseContext({ imageModels: [FULL_CONTROL] }));
+    expect(controlTabs()).toEqual(["Pose", "Canny", "Depth"]);
+  });
+
+  it("shows only the pose tab for a pose-only backbone", async () => {
+    await render(baseContext({ imageModels: [POSE_ONLY] }));
+    expect(controlTabs()).toEqual(["Pose"]);
+  });
+
+  it("hides the panel entirely for a backbone with no control modes", async () => {
+    await render(baseContext({ imageModels: [NO_CONTROL] }));
+    expect(container.querySelector(".control-panel")).toBeNull();
+  });
+
+  it("re-gates and resets an unsupported mode when the backbone switches", async () => {
+    await render(baseContext({ imageModels: [FULL_CONTROL, POSE_ONLY] }));
+    // Pick canny on the multi-mode backbone.
+    await click(controlTabByLabel("Canny"));
+    expect(controlTabByLabel("Canny").getAttribute("aria-pressed")).toBe("true");
+    // Switch to the pose-only backbone → canny is gone, only pose remains, and pose is active.
+    await act(async () => setSelect(field(container, "Model"), "pose_only"));
+    await act(async () => {});
+    expect(controlTabs()).toEqual(["Pose"]);
+    expect(controlTabByLabel("Pose").getAttribute("aria-pressed")).toBe("true");
+  });
+
+  it("canny preprocess (derive) sends the control image as sourceAssetId + controlMode/controlScale", async () => {
+    const createImageJob = vi.fn(async () => ({ id: "job-1" }));
+    const plate = { id: "ctrl-plate", projectId: "project_1", type: "image", displayName: "Plate", status: {} };
+    await render(baseContext({ createImageJob, imageModels: [FULL_CONTROL], assets: [plate] }));
+    await click(controlTabByLabel("Canny"));
+    // Open the control-image picker and double-click the asset to confirm it.
+    await click(
+      [...container.querySelectorAll(".asset-picker-head button")].find((b) => b.textContent === "Select image"),
+    );
+    const card = [...container.querySelectorAll(".asset-picker-card")].find((b) =>
+      b.textContent.includes("Plate"),
+    );
+    await act(async () => card.dispatchEvent(new window.MouseEvent("dblclick", { bubbles: true })));
+
+    await generate();
+    const payload = createImageJob.mock.calls[0][0];
+    // Derive mode → the asset rides as the source the worker auto-derives from; NOT advanced.controlImage.
+    expect(payload.sourceAssetId).toBe("ctrl-plate");
+    expect(payload.advanced.controlMode).toBe("canny");
+    expect(payload.advanced).not.toHaveProperty("controlImage");
+    expect(payload.advanced.controlScale).toBe(0.75);
+  });
+
+  it("use-as-is passthrough sends the control image as advanced.controlImage, not sourceAssetId", async () => {
+    const createImageJob = vi.fn(async () => ({ id: "job-1" }));
+    const plate = { id: "ctrl-plate", projectId: "project_1", type: "image", displayName: "Plate", status: {} };
+    await render(baseContext({ createImageJob, imageModels: [FULL_CONTROL], assets: [plate] }));
+    await click(controlTabByLabel("Depth"));
+    await click(
+      [...container.querySelectorAll(".asset-picker-head button")].find((b) => b.textContent === "Select image"),
+    );
+    const card = [...container.querySelectorAll(".asset-picker-card")].find((b) =>
+      b.textContent.includes("Plate"),
+    );
+    await act(async () => card.dispatchEvent(new window.MouseEvent("dblclick", { bubbles: true })));
+    // Flip the preprocess toggle ON → use-as-is passthrough.
+    const toggle = [...container.querySelectorAll(".control-image-section input[type='checkbox']")][0];
+    await act(async () => toggle.dispatchEvent(new window.MouseEvent("click", { bubbles: true })));
+
+    await generate();
+    const payload = createImageJob.mock.calls[0][0];
+    expect(payload.advanced.controlImage).toBe("ctrl-plate");
+    expect(payload.sourceAssetId).toBeNull();
+    expect(payload.advanced.controlMode).toBe("depth");
+    expect(payload.advanced.controlScale).toBe(0.75);
+  });
+});
