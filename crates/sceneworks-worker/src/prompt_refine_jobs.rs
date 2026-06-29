@@ -1974,6 +1974,80 @@ mod tests {
         );
     }
 
+    /// Candle (Windows/Linux) twin of `image_caption_examines_reference_image` (sc-8116, epic 8103):
+    /// the backend-neutral `image_caption` path resolved against the CANDLE Qwen3-VL provider instead of
+    /// mlx-llm. Same production resolution (output-constraint-only reqs, JSON-only `load_for_model_with`),
+    /// same `is_caption` assertion with bboxes kept — only the linked provider differs (`candle_llm`).
+    /// `#[ignore]` — weights live outside CI; run on a Windows/CUDA box (built `--features backend-candle`):
+    ///   VISION_CAPTION_SNAPSHOT=<snapshot dir> IMAGE_CAPTION_REF=<image path> \
+    ///   cargo test -p sceneworks-worker --features backend-candle --lib -- --ignored \
+    ///     image_caption_examines_reference_image_candle --nocapture
+    #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+    #[test]
+    #[ignore = "real-weight (sc-8116): needs a Qwen3-VL snapshot + reference image; set VISION_CAPTION_SNAPSHOT + IMAGE_CAPTION_REF"]
+    fn image_caption_examines_reference_image_candle() {
+        use candle_llm as _;
+        use gen_core::core_llm::{
+            load_for_model_with, Constraint, Content, ImageRef, LoadSpec, Message,
+            ModelRequirements, Role, Sampling, StreamEvent, TextLlmRequest,
+        };
+
+        let snapshot = std::env::var("VISION_CAPTION_SNAPSHOT")
+            .expect("set VISION_CAPTION_SNAPSHOT to a vision model snapshot dir");
+        let ref_path = std::env::var("IMAGE_CAPTION_REF")
+            .expect("set IMAGE_CAPTION_REF to a reference image path");
+
+        let image =
+            load_caption_image_ref(std::path::Path::new(&ref_path)).expect("decode ref image");
+        let (system, user) = build_image_caption_messages();
+        let request = TextLlmRequest {
+            messages: vec![
+                Message::system(system),
+                Message {
+                    role: Role::User,
+                    content: vec![Content::Image(image), Content::text(user)],
+                    thinking: None,
+                    tool_calls: Vec::new(),
+                },
+            ],
+            sampling: Sampling {
+                temperature: 0.4,
+                top_p: 0.9,
+                ..Sampling::default()
+            },
+            max_new_tokens: 2048,
+            seed: None,
+            constraint: Some(Constraint::Json),
+            ..Default::default()
+        };
+        let _ = ImageRef::new(1, 1, vec![0u8; 3]); // touch the type so the import is load-bearing
+                                                   // Production resolution path: request output-constraint ONLY (no vision filter), exactly like the
+                                                   // mlx twin — `ModelRequirements::from_request` would derive `vision:true` and fail `select`.
+        let mut reqs = ModelRequirements::default();
+        for constraint in request.constraint.iter().copied() {
+            reqs = reqs.with_constraint(constraint);
+        }
+        let captioner = load_for_model_with(
+            &LoadSpec {
+                source: snapshot,
+                quantize: None,
+            },
+            &reqs,
+        )
+        .expect("load a candle vision provider via core-llm model-first JSON-only resolution");
+
+        let mut sink = |_event: StreamEvent| {};
+        let output = captioner.generate(&request, &mut sink).expect("generate");
+        let json = clean_json_output(&output.text);
+        eprintln!("candle image-caption JSON:\n{json}");
+
+        let parsed: Value = serde_json::from_str(&json).expect("a valid JSON object");
+        assert!(
+            sceneworks_core::ideogram_caption::is_caption(&parsed),
+            "reply is a schema-valid Ideogram caption"
+        );
+    }
+
     /// Real-weight image-DESCRIBE smoke (sc-8204, epic 8203): the prose sibling of
     /// `image_caption_examines_reference_image`. Examines a reference image and emits a PLAIN-TEXT
     /// description through the SAME mlx-llm vision engine — but with NO output constraint, so resolution

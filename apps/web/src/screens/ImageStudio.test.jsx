@@ -954,7 +954,7 @@ describe("ImageStudio reference-image → JSON caption (epic 8102, sc-8108)", ()
   const VISION_MODEL_INSTALLED = {
     id: VISION_CAPTION_MODEL_ID,
     type: "utility",
-    macOnly: true,
+    macOnly: false, // cross-platform as of sc-8116 (epic 8103) — matches the real catalog entry
     installState: "installed",
   };
 
