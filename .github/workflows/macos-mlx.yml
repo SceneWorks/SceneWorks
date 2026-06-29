@@ -32,6 +32,12 @@ on:
     paths: &mlx_paths
       - "crates/**"
       - "apps/rust-worker/**"
+      # The builtin model catalog is include_str!'d into the worker (via
+      # sceneworks-core/builtin_manifests.rs) and read by the worker's
+      # `engines::tests::manifest_menu_is_subset_of_descriptor` drift guard, so a
+      # manifest-only edit can turn this suite red — gate on it (matches the
+      # windows-candle.yml / desktop-windows.yml filters). sc-8617.
+      - "config/manifests/**"
       - "Cargo.toml"
       - "Cargo.lock"
       - ".cargo/config.toml"
