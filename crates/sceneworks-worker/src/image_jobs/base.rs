@@ -2123,6 +2123,14 @@ fn is_candle_engine(model: &str) -> bool {
             // candle-readable, so the candle lane loads bf16 from the ungated public `krea/Krea-2-Turbo`
             // snapshot root (no subdir). No edit/reference/control shapes.
             | "krea_2_turbo"
+            // Stable Diffusion 3.5 (sc-7880, epic 7982): Large / Large Turbo / Medium all ride the generic
+            // candle txt2img lane (the `candle-gen-sd3` provider). `generate_candle_stream` resolves Q4/Q8
+            // from the descriptor + manifest (`mlx.quantize` 8) — the dense MMDiT folds to Q4_0/Q8_0 at
+            // load (sc-7879). Pure txt2img; no edit/reference/control/LoRA candle path (those defer to
+            // torch via `image_request_candle_eligible`).
+            | "sd3_5_large"
+            | "sd3_5_large_turbo"
+            | "sd3_5_medium"
     )
 }
 
@@ -2147,6 +2155,8 @@ fn candle_adapter_label(model: &str) -> &'static str {
         "ideogram_4" | "ideogram_4_turbo" => "candle_ideogram",
         "boogu_image" | "boogu_image_turbo" | "boogu_image_edit" => "candle_boogu",
         "krea_2_turbo" => "candle_krea",
+        // Stable Diffusion 3.5 (sc-7880): Large / Large Turbo / Medium share the candle SD3.5 engine.
+        "sd3_5_large" | "sd3_5_large_turbo" | "sd3_5_medium" => "candle_sd3",
         // sdxl / realvisxl share the candle "sdxl" engine.
         _ => CANDLE_ADAPTER,
     }
@@ -2903,11 +2913,19 @@ mod candle_label_tests {
             "boogu_image",
             "boogu_image_turbo",
             "boogu_image_edit",
+            // SD3.5 (sc-7880): Large / Large Turbo / Medium carry the `candle_sd3` stamp.
+            "sd3_5_large",
+            "sd3_5_large_turbo",
+            "sd3_5_medium",
             "sdxl",
             "realvisxl",
         ] {
             assert!(candle_adapter_label(model).starts_with("candle_"));
         }
+        // SD3.5 (sc-7880): the candle asset stamp.
+        assert_eq!(candle_adapter_label("sd3_5_large"), "candle_sd3");
+        assert_eq!(candle_adapter_label("sd3_5_large_turbo"), "candle_sd3");
+        assert_eq!(candle_adapter_label("sd3_5_medium"), "candle_sd3");
     }
 
     #[test]
@@ -2943,6 +2961,10 @@ mod candle_label_tests {
             "boogu_image_edit",
             // Krea 2 Turbo (sc-7581): pure txt2img on the generic candle lane.
             "krea_2_turbo",
+            // SD3.5 (sc-7880): Large / Large Turbo / Medium ride the generic candle txt2img lane.
+            "sd3_5_large",
+            "sd3_5_large_turbo",
+            "sd3_5_medium",
         ] {
             assert!(is_candle_engine(model), "{model} should be a candle engine");
         }

@@ -3872,6 +3872,17 @@ const CANDLE_ROUTED_MODELS: &[&str] = &[
     // `krea/Krea-2-Turbo`, the boogu pattern). This id is also in `MLX_ROUTED_MODELS`; mirror
     // `krea_mlx_eligible`.
     "krea_2_turbo",
+    // Stable Diffusion 3.5 (sc-7880, epic 7982): the candle `candle-gen-sd3` provider serves
+    // `sd3_5_large` (8B MMDiT, true-CFG), `sd3_5_large_turbo` (ADD-distilled few-step, CFG-free), and
+    // `sd3_5_medium` (2.5B MMDiT-X dual-attention). All three are pure **txt2img** on candle — the
+    // generic `image_request_candle_eligible` gate accepts the plain shape and rejects edit / reference /
+    // mask / pose / LoRA (the descriptor advertises `supports_lora: false`). The provider DOES advertise
+    // Q4/Q8 (sc-7879), so an explicit quant request stays on the candle lane (listed in
+    // `CANDLE_QUANT_MODELS` below). The MODEL_TABLE rows + manifest entries are the MLX twin (sc-7871);
+    // these ids are also in `MLX_ROUTED_MODELS` (the macOS native engine); mirror `sd3_5_mlx_eligible`.
+    "sd3_5_large",
+    "sd3_5_large_turbo",
+    "sd3_5_medium",
 ];
 
 /// The candle image families that advertise on-the-fly Q4/Q8 quant AND LoRA/LoKr adapters — Lens /
@@ -3880,6 +3891,14 @@ const CANDLE_ROUTED_MODELS: &[&str] = &[
 /// into the `LoadSpec` (descriptor-gated, see `ResolvedModel::supports_quant`/`supports_adapters`).
 /// Every other candle family advertises neither, so a LoRA/quant request there still defers to torch.
 const CANDLE_QUANT_LORA_MODELS: &[&str] = &["lens", "lens_turbo"];
+
+/// The candle image families that advertise on-the-fly Q4/Q8 quant but NOT inference LoRA — Stable
+/// Diffusion 3.5 (sc-7880): the `candle-gen-sd3` descriptor advertises `supported_quants: [Q4, Q8]`
+/// with `supports_lora: false`. For these an explicit quant request stays on the candle lane (the
+/// worker's `generate_candle_stream` resolves it descriptor-side via `model.supports_quant()`), but a
+/// LoRA still defers to the Python torch worker. `CANDLE_QUANT_LORA_MODELS` (Lens) is the superset that
+/// also keeps LoRAs on candle; these two lists are disjoint and the gate consults both.
+const CANDLE_QUANT_MODELS: &[&str] = &["sd3_5_large", "sd3_5_large_turbo", "sd3_5_medium"];
 
 /// Whether `worker` is the candle (Windows/CUDA) SDXL worker — identified by the `candle` marker
 /// capability it self-advertises (`gpu::with_candle_capabilities`), mirroring the `nvidia` marker
@@ -4110,11 +4129,13 @@ fn image_request_candle_eligible(model: &str, payload: &Map<String, Value>) -> b
     {
         return false;
     }
-    // Lens / Lens-Turbo advertise Q4/Q8 + LoRA/LoKr, so a quant request or a LoRA stays on the candle
-    // lane for them; every other candle family advertises neither and defers those to torch.
-    let supports_quant_lora = CANDLE_QUANT_LORA_MODELS.contains(&model);
+    // Lens / Lens-Turbo advertise Q4/Q8 + LoRA/LoKr, so a quant request OR a LoRA stays on the candle
+    // lane for them. SD3.5 (sc-7880) advertises Q4/Q8 but NOT inference LoRA, so a quant request stays
+    // on candle while a LoRA still defers. Every other candle family advertises neither and defers both.
+    let supports_lora = CANDLE_QUANT_LORA_MODELS.contains(&model);
+    let supports_quant = supports_lora || CANDLE_QUANT_MODELS.contains(&model);
     // LoRAs: not in the candle lane unless the family advertises adapters (Lens).
-    if !supports_quant_lora
+    if !supports_lora
         && payload
             .get("loras")
             .and_then(Value::as_array)
@@ -4135,8 +4156,8 @@ fn image_request_candle_eligible(model: &str, payload: &Map<String, Value>) -> b
     // On-the-fly quantization (`advanced.mlxQuantize` > 0) → torch UNLESS the family advertises quant.
     // The sc-3675/sc-5096 candle providers advertise `supported_quants: &[]` (dense bf16/fp16 only), so
     // an explicit quant request can't be honored — route to Python rather than silently running dense
-    // (sc-5099). Lens advertises Q4/Q8, so its quant request stays here (sc-5126).
-    if !supports_quant_lora && candle_request_wants_quant(payload) {
+    // (sc-5099). Lens (sc-5126) + SD3.5 (sc-7880) advertise Q4/Q8, so their quant requests stay here.
+    if !supports_quant && candle_request_wants_quant(payload) {
         return false;
     }
     true
@@ -6335,6 +6356,50 @@ mod candle_routing_tests {
         ];
         for model in ["lens", "lens_turbo"] {
             for case in &cases {
+                assert!(
+                    !image_request_candle_eligible(model, &object(case.clone())),
+                    "{model} conditioning shape must fall back to torch: {case}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn sd3_5_quant_stays_on_candle_but_lora_and_conditioning_defer() {
+        // sc-7880 (epic 7982): the candle SD3.5 descriptor advertises supported_quants: [Q4, Q8] but
+        // supports_lora: false, so — unlike Lens — an explicit quant request stays on the candle lane
+        // while a LoRA (and every conditioning shape) still defers to the Python torch worker.
+        for model in ["sd3_5_large", "sd3_5_large_turbo", "sd3_5_medium"] {
+            // Plain txt2img is eligible.
+            assert!(
+                image_request_candle_eligible(model, &object(json!({ "prompt": "a misty fjord" }))),
+                "{model} plain txt2img should be candle-eligible"
+            );
+            // Q8 / Q4 requests stay on candle (descriptor-gated quant, resolved worker-side).
+            for bits in [8, 4] {
+                assert!(
+                    image_request_candle_eligible(
+                        model,
+                        &object(json!({ "advanced": { "mlxQuantize": bits } }))
+                    ),
+                    "{model} Q{bits} request should stay on candle"
+                );
+            }
+            // A LoRA defers (SD3.5 has no inference-LoRA candle path yet).
+            assert!(
+                !image_request_candle_eligible(
+                    model,
+                    &object(json!({ "loras": [{ "name": "x", "path": "/x.safetensors" }] }))
+                ),
+                "{model} with a LoRA must fall back to torch"
+            );
+            // Every conditioning shape defers (txt2img only).
+            for case in [
+                json!({ "mode": "edit_image", "sourceAssetId": "a" }),
+                json!({ "referenceAssetId": "a" }),
+                json!({ "maskAssetId": "m" }),
+                json!({ "advanced": { "poses": [{ "id": "pose_1" }] } }),
+            ] {
                 assert!(
                     !image_request_candle_eligible(model, &object(case.clone())),
                     "{model} conditioning shape must fall back to torch: {case}"
