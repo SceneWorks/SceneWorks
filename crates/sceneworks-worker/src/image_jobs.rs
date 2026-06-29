@@ -114,6 +114,12 @@ use candle_gen_flux as _;
 use candle_gen_flux2 as _;
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 use candle_gen_qwen_image as _;
+// Candle Stable Diffusion 3.5 (sc-7880, epic 7982): `sd3_5_large` / `sd3_5_large_turbo` / `sd3_5_medium`
+// self-register into the shared gen_core inventory; the `as _;` keeps the MSVC release linker from GC-ing
+// the `inventory::submit!` registrations (else `gen_core::load("sd3_5_large")` returns "no generator
+// registered"). The Windows/CUDA sibling of the `mlx_gen_sd3` anchor above. Pure txt2img; Q4/Q8 quant.
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+use candle_gen_sd3 as _;
 // Candle Ideogram 4 (sc-6596, epic 6561): `ideogram_4` + `ideogram_4_turbo` self-register into the
 // shared gen_core inventory; `as _;` keeps the MSVC release linker from GC-ing the registrations.
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]

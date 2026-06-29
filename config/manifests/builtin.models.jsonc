@@ -2256,14 +2256,14 @@
       // Stable Diffusion 3.5 Large (epic 7841 / S1 sc-7870) — Stability AI's 8B MMDiT flagship,
       // ported natively to mlx-gen (engine id `sd3_5_large`, E5 — real-weight validated, coherent
       // 1024²). Triple text-encoder aggregator (CLIP-L + CLIP-G + T5-XXL) feeding a multimodal
-      // diffusion transformer (NO RoPE) + the 16-channel SD3.5 VAE. No torch backend → native MLX
-      // only (macOnly initially; off-Mac/candle is epic 7982). `adapter` is the asset stamp
+      // diffusion transformer (NO RoPE) + the 16-channel SD3.5 VAE. Native MLX on Mac; off-Mac the
+      // candle `candle-gen-sd3` provider serves it (sc-7880, epic 7982). `adapter` is the asset stamp
       // (mirrors mlx_<family>). Worker routing through engines::MODEL_TABLE / the gen_core registry
-      // lands in S2 (sc-7871) — until then this entry is downloadable/catalog-visible but not yet a
-      // Studio picker (mirrors the Boogu sc-6399 staging).
+      // landed in S2 (sc-7871). macOnly is now a no-op label (mirroring krea/flux2_dev): availability is
+      // driven by the routing tables (`MLX_ROUTED_MODELS` / `CANDLE_ROUTED_MODELS`), not this flag.
       "adapter": "mlx_sd3",
       "capabilities": ["text_to_image"],
-      "macOnly": true,
+      "macOnly": false,
       "downloads": [
         {
           // Gated repo (Stability AI Community License — non-commercial / <$1M-rev commercial OK;
@@ -2365,11 +2365,13 @@
       "type": "image",
       // Stable Diffusion 3.5 Large Turbo (epic 7841 / S1 sc-7870) — the ADD-distilled few-step,
       // CFG-free sibling of SD3.5 Large: same 8B MMDiT + triple TE + 16-ch VAE, rendered in ~4 steps
-      // with guidance off. Native MLX only (engine id `sd3_5_large_turbo`, E6 — in flight). Worker
-      // routing lands in S2 (sc-7871).
+      // with guidance off. Native MLX on Mac (engine id `sd3_5_large_turbo`); off-Mac the candle
+      // `candle-gen-sd3` provider serves it (sc-7880, epic 7982). Worker routing landed in S2 (sc-7871).
+      // macOnly is now a no-op label (mirroring krea/flux2_dev): availability is driven by the routing
+      // tables (`MLX_ROUTED_MODELS` / `CANDLE_ROUTED_MODELS`), not this flag.
       "adapter": "mlx_sd3",
       "capabilities": ["text_to_image"],
-      "macOnly": true,
+      "macOnly": false,
       "downloads": [
         {
           // Gated repo (Stability AI Community License; HF license-ack + token required). Diffusers
@@ -2454,11 +2456,13 @@
       "type": "image",
       // Stable Diffusion 3.5 Medium (epic 7841 / S1 sc-7870) — the 2.5B MMDiT-X (dual-attention)
       // mid-tier: same triple text encoder + 16-ch VAE, a smaller transformer that renders up to
-      // 1440². Native MLX only (engine id `sd3_5_medium` — forward M2 in flight, pipeline M3 later).
-      // Worker routing lands in S2 (sc-7871).
+      // 1440². Native MLX on Mac (engine id `sd3_5_medium`); off-Mac the candle `candle-gen-sd3`
+      // provider serves it (sc-7880, epic 7982). Worker routing landed in S2 (sc-7871). macOnly is now a
+      // no-op label (mirroring krea/flux2_dev): availability is driven by the routing tables
+      // (`MLX_ROUTED_MODELS` / `CANDLE_ROUTED_MODELS`), not this flag.
       "adapter": "mlx_sd3",
       "capabilities": ["text_to_image"],
-      "macOnly": true,
+      "macOnly": false,
       "downloads": [
         {
           // Gated repo (Stability AI Community License; HF license-ack + token required). Diffusers
