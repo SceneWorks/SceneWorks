@@ -2699,13 +2699,15 @@
       },
       "limits": {
         // 32× DC-AE divisor → W×H must be multiples of 32 (descriptor RES_MULTIPLE). Native 1024².
-        // Sprint's native loop is the SCM few-step sampler ("default"); the curated flow menu still
-        // resolves the unified-framework knobs (epic 7114). The engines.rs drift guard checks this list
-        // is a subset of the descriptor's curated_sampler_names()/curated_scheduler_names().
+        // Sprint's native loop is the SCM/TrigFlow few-step consistency sampler — a DEDICATED loop, NOT
+        // a curated epic-7114 `Solver`. Unlike base SANA, the Sprint descriptor (`sprint_descriptor()`
+        // in mlx-gen-sana) advertises ONLY the engine-default sentinel for both axes (and NO guidance
+        // methods — CFG-free embedded-scalar guidance). The engines.rs drift guard requires this list to
+        // be a SUBSET of the descriptor's honored set, so it must be exactly ["default"].
         "resolutions": ["1024x1024", "1152x896", "896x1152", "1216x832", "832x1216"],
         "count": [1, 2, 4],
-        "samplers": ["default", "euler", "euler_ancestral", "heun", "dpmpp_2m", "dpmpp_sde", "uni_pc", "lcm", "ddim"],
-        "schedulers": ["default", "normal", "simple", "karras", "exponential", "sgm_uniform", "beta", "ddim_uniform"]
+        "samplers": ["default"],
+        "schedulers": ["default"]
       },
       "loraCompatibility": {
         // No SANA LoRA wired yet (the engine descriptor reports supports_lora: false). Family reserved
