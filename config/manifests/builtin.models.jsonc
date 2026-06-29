@@ -1556,6 +1556,66 @@
       }
     },
     {
+      "id": "krea_2_raw",
+      // Krea 2 Raw (epic 7565 P3, sc-8613) — the UNDISTILLED 12B single-stream DiT that Krea 2 LoRAs
+      // train on; the trained adapter applies back at Krea 2 Turbo inference by family match (the Lens /
+      // Z-Image train-on-base → infer-on-Turbo pattern). This is a training-base DEPENDENCY, not an
+      // inference model: there is no `krea_2_raw` generator (only `krea_2_turbo` is routed), so it is
+      // `utility` (empty capabilities) and never appears in the Image Studio picker. The id MUST equal
+      // the training target's `base_model` (`krea_2_raw`, core training.rs) — the Training UI matches
+      // the base by `item.id === target.baseModel` (TrainingStudio.jsx) and offers this for download
+      // when it's missing.
+      //
+      // Cataloging it lets Model Manager install the base into the HF cache the trainer reads via
+      // `training_base_model_installed` (apps/rust-api training.rs) — closing the "Base model
+      // 'krea_2_raw' is not installed. Install it from the model catalog" dead-end (the bare repo was
+      // never catalogued, unlike every other trainable family's base). macOS-gated for now: `krea_lora`
+      // is MLX-only today (CANDLE_ROUTED_TRAINING_KERNELS excludes it; MLX_ONLY_TRAINING_KERNELS includes
+      // it), so the windows/linux `krea/Krea-2-Raw` download + candle trainer routing land with sc-8614.
+      // Ungated public diffusers tree, Krea 2 Community License (non-commercial).
+      "autoDownload": false,
+      "name": "Krea 2 Raw (LoRA training base)",
+      "family": "krea_2",
+      "type": "utility",
+      "adapter": "mlx_krea",
+      "capabilities": [],
+      "downloads": [
+        {
+          "provider": "huggingface",
+          "repo": "krea/Krea-2-Raw",
+          "files": [],
+          "platforms": ["macos"],
+          "estimatedSizeBytes": 40000000000
+        }
+      ],
+      "paths": {
+        "model": "${HF_CACHE}/krea/Krea-2-Raw"
+      },
+      "defaults": {},
+      "limits": {},
+      "loraCompatibility": {
+        // A LoRA trained here records `family: krea_2` / `baseModel: krea_2_raw` and applies at Krea 2
+        // Turbo inference (family match, no base-model gating — lora_family.rs). Mirrors the Krea 2 Turbo
+        // entry's `families: [krea_2]`.
+        "families": ["krea_2"],
+        "types": ["character", "style"]
+      },
+      "licenseUrl": "https://www.krea.ai/krea-2-licensing",
+      "ui": {
+        "label": "Krea 2 Raw (training base)",
+        "description": "Undistilled Krea 2 12B DiT — the LoRA training base for Krea 2 (epic 7565). Train a LoRA here and it applies at Krea 2 Turbo inference; this is not a generation model itself. Native MLX (Apple Silicon) training only today (~40 GB download). Krea 2 Community License (non-commercial).",
+        "recommendedFor": [],
+        "promptGuide": {
+          "title": "Krea 2 Prompt Guide",
+          "path": "/prompt-guides/krea-2.md",
+          "sources": [
+            { "label": "Krea 2 (Hugging Face)", "url": "https://huggingface.co/krea" },
+            { "label": "Krea 2 Raw model card", "url": "https://huggingface.co/krea/Krea-2-Raw" }
+          ]
+        }
+      }
+    },
+    {
       "id": "flux2_klein_9b",
       "name": "FLUX.2 [klein] 9B",
       "family": "flux2-klein",
@@ -3879,11 +3939,27 @@
       "capabilities": ["replace_person"],
       "downloads": [
         {
+          // macOS: the native MLX dual-expert VACE-Fun checkpoint (mlx-gen-wan "wan2_2_vace_fun_14b").
           "provider": "huggingface",
           "repo": "linoyts/Wan2.2-VACE-Fun-14B-diffusers",
           "files": [],
-          "platforms": ["macos", "windows", "linux"],
+          "platforms": ["macos"],
           "estimatedSizeBytes": 81200000000
+        },
+        {
+          // Windows/Linux candle (sc-8613): the candle `wan_vace` provider serves replace_person off a
+          // DIFFERENT, single-expert checkpoint — `Wan-AI/Wan2.1-VACE-14B-diffusers` (transformer/ +
+          // text_encoder/ + vae/ + tokenizer/), matching the provider's `WanVaceConfig::vace_14b` dims
+          // (dim 5120, 40 layers). The candle worker resolves this repo by string from the HF cache
+          // (`CANDLE_WAN_VACE_REPO`, video_jobs.rs; overridable via SCENEWORKS_CANDLE_WAN_VACE_DIR),
+          // independent of `paths.model`. Without this entry the off-Mac VACE lane dead-ended with no
+          // way to install the snapshot. Per-OS `install_state` reads the retained download's repo
+          // (models.rs), so macOS still resolves the MLX checkpoint above.
+          "provider": "huggingface",
+          "repo": "Wan-AI/Wan2.1-VACE-14B-diffusers",
+          "files": [],
+          "platforms": ["windows", "linux"],
+          "estimatedSizeBytes": 50000000000
         }
       ],
       "paths": {
@@ -4481,6 +4557,55 @@
           "sources": [
             { "label": "JoyCaption beta-one model card", "url": "https://huggingface.co/fancyfeast/llama-joycaption-beta-one-hf-llava" },
             { "label": "JoyCaption project (GitHub)", "url": "https://github.com/fpgaminer/joycaption" }
+          ]
+        }
+      }
+    },
+    {
+      // CLIP ViT-L/14 image embedder (sc-8613) — the canonical OpenAI CLIP encoder the Dataset Doctor
+      // CLIP analysis (`dataset_analysis` job, epic 6529) uses for image embeddings (near-duplicate
+      // clustering, diversity/coverage, aesthetic, caption↔image alignment). The native worker resolves
+      // it by REPO STRING (`dataset_analysis_jobs::CLIP_EMBEDDER_MODEL`) via
+      // `resolve_app_managed_model_dir` → `huggingface_snapshot_dir`, which only RESOLVES an
+      // already-cached snapshot (no auto-download — the JoyCaption seam). Without a catalog entry the
+      // job dead-ended with "CLIP embedder model path snapshot is not cached for
+      // openai/clip-vit-large-patch14" and no UI to install it. Cataloging it lets Model Manager pull
+      // the snapshot into the HF cache the worker reads. (Also the encoder the macOS FLUX.1 IP-Adapter
+      // image path resolves — `resolve_flux_ip_adapter_dir` — so this entry serves both consumers.)
+      // Runs on macOS (MLX) and Windows/CUDA (candle) — not platform-gated. Stock repo pulled as-is.
+      "id": "clip_vit_l14",
+      "autoDownload": false,
+      "name": "CLIP ViT-L/14 (image embedder)",
+      "family": "clip",
+      "type": "utility",
+      "adapter": "clip",
+      "capabilities": [],
+      "downloads": [
+        {
+          "provider": "huggingface",
+          "repo": "openai/clip-vit-large-patch14",
+          "files": [],
+          "estimatedSizeBytes": 7000000000
+        }
+      ],
+      "paths": {
+        "model": "${HF_CACHE}/openai/clip-vit-large-patch14"
+      },
+      "defaults": {},
+      "limits": {},
+      "loraCompatibility": {
+        "families": [],
+        "types": []
+      },
+      "ui": {
+        "label": "CLIP ViT-L/14 (image embedder)",
+        "description": "OpenAI CLIP ViT-L/14 image encoder used by Dataset Doctor to embed training-dataset images for near-duplicate, diversity, and caption-alignment analysis. A small utility dependency — not a generation model. Runs in-process on the native worker (MLX on macOS, candle on Windows/CUDA).",
+        "recommendedFor": ["dataset_analysis"],
+        "promptGuide": {
+          "title": "CLIP ViT-L/14 (image embedder)",
+          "path": "/prompt-guides/clip-vit-l14.md",
+          "sources": [
+            { "label": "openai/clip-vit-large-patch14 model card", "url": "https://huggingface.co/openai/clip-vit-large-patch14" }
           ]
         }
       }
