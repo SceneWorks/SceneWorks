@@ -6735,7 +6735,7 @@ describe("SceneWorks app shell", () => {
     expect(container.querySelector(".worker-progress-card.completed")).toBeNull();
   });
 
-  it("submits compatible image LoRAs while capping simple user selections at two", async () => {
+  it("submits compatible image LoRAs while capping simple user selections at four", async () => {
     const createImageJob = vi.fn();
     root = createRoot(container);
     await act(async () => {
@@ -6754,6 +6754,8 @@ describe("SceneWorks app shell", () => {
             { id: "global_style", name: "Global Style", family: "z-image", scope: "global" },
             { id: "project_mira", name: "Project Mira", family: "z-image", scope: "project", files: ["mira.safetensors"] },
             { id: "third_user", name: "Third User", family: "z-image", scope: "global" },
+            { id: "fourth_user", name: "Fourth User", family: "z-image", scope: "global" },
+            { id: "fifth_user", name: "Fifth User", family: "z-image", scope: "global" },
             { id: "qwen_only", name: "Qwen Only", family: "qwen-image", scope: "global" },
             { id: "missing_lora", name: "Missing LoRA", family: "z-image", scope: "global", installState: "missing" },
           ],
@@ -6781,9 +6783,13 @@ describe("SceneWorks app shell", () => {
       checkboxes[0].click();
       checkboxes[1].click();
       checkboxes[2].click();
+      checkboxes[3].click();
+      checkboxes[4].click();
     });
 
-    expect(checkboxes[3].disabled).toBe(true);
+    // built_in is scope "builtin" and doesn't count toward the user cap, so four
+    // user LoRAs are selected here; the fifth user LoRA is disabled at the cap.
+    expect(checkboxes[5].disabled).toBe(true);
 
     await act(async () => {
       container.querySelector('.lora-picker .checkline input[type="checkbox"]').click();
@@ -6802,6 +6808,8 @@ describe("SceneWorks app shell", () => {
           expect.objectContaining({ id: "built_in", scope: "builtin", weight: 0.6 }),
           expect.objectContaining({ id: "global_style", scope: "global" }),
           expect.objectContaining({ id: "project_mira", scope: "project", files: ["mira.safetensors"] }),
+          expect.objectContaining({ id: "third_user", scope: "global" }),
+          expect.objectContaining({ id: "fourth_user", scope: "global" }),
         ],
       }),
     );
