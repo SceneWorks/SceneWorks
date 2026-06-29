@@ -286,24 +286,30 @@ fn ideogram_model_subdir(root: &Path, request: &ImageRequest) -> PathBuf {
 /// a load error rather than a silent half-load). FLUX.2-dev's packed transformer file is
 /// `diffusion_pytorch_model.safetensors` (vs Ideogram's `model.safetensors`). sc-8513 / epic 8506.
 fn flux2_dev_model_subdir(root: &Path, request: &ImageRequest) -> PathBuf {
-    let wants_q8 = request
+    let bits = request
         .advanced
         .get("mlxQuantize")
-        .and_then(|v| v.as_i64().or_else(|| v.as_str()?.trim().parse().ok()))
-        .is_some_and(|bits| bits > 4);
+        .and_then(|v| v.as_i64().or_else(|| v.as_str()?.trim().parse().ok()));
+    // Tier presence: q4/q8 ship a single packed transformer file; bf16 is the dense diffusers tree
+    // (SHARDED → no single file, only the `.index.json`). Accept either shape.
     let present = |name: &str| -> Option<PathBuf> {
         let dir = root.join(name);
-        dir.join("transformer/diffusion_pytorch_model.safetensors")
-            .is_file()
-            .then_some(dir)
+        let packed = dir.join("transformer/diffusion_pytorch_model.safetensors").is_file();
+        let sharded = dir
+            .join("transformer/diffusion_pytorch_model.safetensors.index.json")
+            .is_file();
+        (packed || sharded).then_some(dir)
     };
-    if wants_q8 {
-        if let Some(dir) = present("q8") {
-            return dir;
-        }
-    }
-    present("q4")
+    // bits<=0 (advanced.mlxQuantize: 0 / "none") → bf16; bits>4 → q8; else the q4 default.
+    let preferred = match bits {
+        Some(b) if b <= 0 => "bf16",
+        Some(b) if b > 4 => "q8",
+        _ => "q4",
+    };
+    present(preferred)
+        .or_else(|| present("q4"))
         .or_else(|| present("q8"))
+        .or_else(|| present("bf16"))
         .unwrap_or_else(|| root.to_path_buf())
 }
 
