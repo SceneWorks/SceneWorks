@@ -4502,7 +4502,14 @@
       "ui": {
         "label": "CLIP ViT-L/14 (image embedder)",
         "description": "OpenAI CLIP ViT-L/14 image encoder used by Dataset Doctor to embed training-dataset images for near-duplicate, diversity, and caption-alignment analysis. A small utility dependency — not a generation model. Runs in-process on the native worker (MLX on macOS, candle on Windows/CUDA).",
-        "recommendedFor": ["dataset_analysis"]
+        "recommendedFor": ["dataset_analysis"],
+        "promptGuide": {
+          "title": "CLIP ViT-L/14 (image embedder)",
+          "path": "/prompt-guides/clip-vit-l14.md",
+          "sources": [
+            { "label": "openai/clip-vit-large-patch14 model card", "url": "https://huggingface.co/openai/clip-vit-large-patch14" }
+          ]
+        }
       }
     },
     {
