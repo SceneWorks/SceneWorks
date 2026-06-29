@@ -4812,17 +4812,21 @@
       // (5.0 + 4.92 + 4.92 + 2.7 ≈ 17.54e9) + tokenizer/vocab/merges (~0.3e9) ≈ 17.85e9 bytes. The
       // `estimatedSizeBytes` below is only a fallback — the API queries HF for the live size at load.
       //
-      // macOnly: true for now (the Candle lane is epic 8103). HARD DEPENDENCY (sc-8171): this entry only
-      // becomes end-to-end LOADABLE after the engine pin bump that teaches the pinned mlx-llm to build
-      // the qwen3_vl vision tower; until then the engine silently mis-loads qwen3_vl as text-only. This
-      // story (sc-8107) is provisioning only — it makes the model DOWNLOADABLE into the HF cache.
+      // macOnly: false (sc-8116, epic 8103 — candle parity landed). Was macOnly:true while only the MLX
+      // lane could build the qwen3_vl vision tower (sc-8171 taught mlx-llm; the Candle lane was deferred
+      // to this epic). The candle-llm pin bump in sceneworks-worker/Cargo.toml (bf99e5b -> d0ba3e6)
+      // brings the candle Qwen3-VL vision tower (sc-8080: ViT + DeepStack + interleaved M-RoPE) into the
+      // backend-candle graph, so the qwen3_vl model now loads its vision tower on Windows/Linux too. The
+      // `image_caption` worker job is backend-neutral (rides core_llm), so no platform flag is needed —
+      // availability is the model download + a candle build. HARD DEPENDENCY history (sc-8171): before the
+      // engine bumps the engine silently mis-loaded qwen3_vl as text-only.
       //
       // autoDownload: false + minMemoryGb 64: ~18 GB bf16 / ~19 GB resident, badged-but-unchecked
       // (pulled on demand via Model Manager / the caption affordance) and gated to 64 GB+ machines.
       "id": "vision_caption_qwen3vl_8b",
       "recommended": true,
       "autoDownload": false,
-      "macOnly": true,
+      "macOnly": false,
       "minMemoryGb": 64,
       "name": "Vision Captioner (Qwen3-VL-8B)",
       "family": "vision-caption",
@@ -4848,7 +4852,7 @@
       },
       "ui": {
         "label": "Vision Captioner (Qwen3-VL-8B)",
-        "description": "Vision-language model used to turn a reference image into a structured Ideogram-style JSON caption (style + grounded composition) for image-to-prompt variations. Runs in-process on the native MLX worker (Apple Silicon).",
+        "description": "Vision-language model used to turn a reference image into a structured Ideogram-style JSON caption (style + grounded composition) for image-to-prompt variations. Runs in-process on the native worker — MLX on Apple Silicon, Candle on Windows/Linux.",
         "recommendedFor": ["image_caption"],
         "promptGuide": {
           "title": "Vision Captioner Guide",

@@ -79,29 +79,34 @@ describe("modelEligibility predicates", () => {
     }
   });
 
-  // Reference-image vision captioner gate (epic 8102, sc-8110). The captioner is a single pinned
-  // utility model; usability = "this IS that model AND it can run here", and macOnly keeps it hidden
-  // on non-macOS platforms until the candle path (epic 8103) lands.
-  it("visionCaptionModelUsable matches only the captioner model and respects macOnly", () => {
-    const captioner = { id: VISION_CAPTION_MODEL_ID, type: "utility", macOnly: true };
-    // macOS (or pre-load empty platform) → usable.
+  // Reference-image vision captioner gate (epic 8102, sc-8110; cross-platform via epic 8103, sc-8116).
+  // The captioner is a single pinned utility model; usability = "this IS that model AND it can run
+  // here". As of sc-8116 the catalog flips macOnly:false (the candle qwen3_vl vision tower landed in
+  // candle-llm sc-8080), so the feature lights up on Windows/Linux too; the macOnly guard is kept
+  // defensively for any future macOnly:true entry.
+  it("visionCaptionModelUsable matches only the captioner model and is cross-platform (macOnly:false)", () => {
+    const captioner = { id: VISION_CAPTION_MODEL_ID, type: "utility", macOnly: false };
+    // Usable on every platform now (macOS / Windows / Linux) + pre-load empty platform.
     expect(visionCaptionModelUsable(captioner, { ...caps, platform: "macos" })).toBe(true);
+    expect(visionCaptionModelUsable(captioner, { ...caps, platform: "windows" })).toBe(true);
+    expect(visionCaptionModelUsable(captioner, { ...caps, platform: "linux" })).toBe(true);
     expect(visionCaptionModelUsable(captioner, caps)).toBe(true); // platform "" → no-op pre-load
-    // Non-Mac platform with a macOnly model → hidden (epic 8103 flips this).
-    expect(visionCaptionModelUsable(captioner, { ...caps, platform: "windows" })).toBe(false);
-    expect(visionCaptionModelUsable(captioner, { ...caps, platform: "linux" })).toBe(false);
+    // Defensive macOnly guard: a macOnly:true entry still hides off Mac, surfaces on Mac.
+    const macOnlyCaptioner = { ...captioner, macOnly: true };
+    expect(visionCaptionModelUsable(macOnlyCaptioner, { ...caps, platform: "windows" })).toBe(false);
+    expect(visionCaptionModelUsable(macOnlyCaptioner, { ...caps, platform: "macos" })).toBe(true);
     // A different model id is never the captioner.
-    expect(visionCaptionModelUsable({ id: "some_other_model", macOnly: true }, { ...caps, platform: "macos" })).toBe(false);
+    expect(visionCaptionModelUsable({ id: "some_other_model", macOnly: false }, { ...caps, platform: "macos" })).toBe(false);
     // Active Mac gating with the model's MLX oracle reporting unsupported → blocked.
     const blockedCaps = { ...DEFAULT_MAC_CAPABILITIES, macGatingActive: true, platform: "macos" };
     const unsupported = { ...captioner, macSupport: { supported: false } };
     expect(visionCaptionModelUsable(unsupported, blockedCaps)).toBe(false);
   });
 
-  it("hasUsableModelFor / downloadOffersFor drive the captioner gate (sc-8110)", () => {
+  it("hasUsableModelFor / downloadOffersFor drive the captioner gate (sc-8110, cross-platform sc-8116)", () => {
     const macCaps = { ...caps, platform: "macos" };
-    const installed = { id: VISION_CAPTION_MODEL_ID, type: "utility", macOnly: true, installState: "installed" };
-    const missing = { id: VISION_CAPTION_MODEL_ID, type: "utility", macOnly: true, installState: "missing", recommended: true };
+    const installed = { id: VISION_CAPTION_MODEL_ID, type: "utility", macOnly: false, installState: "installed" };
+    const missing = { id: VISION_CAPTION_MODEL_ID, type: "utility", macOnly: false, installState: "missing", recommended: true };
     // Present (installed) → screen is "ready".
     expect(hasUsableModelFor([installed], visionCaptionModelUsable, macCaps)).toBe(true);
     // Absent (missing) → not ready, and it surfaces as a recommended-first download offer.
@@ -109,8 +114,10 @@ describe("modelEligibility predicates", () => {
     expect(downloadOffersFor([missing], visionCaptionModelUsable, macCaps).map((m) => m.id)).toEqual([
       VISION_CAPTION_MODEL_ID,
     ]);
-    // On Windows the predicate rejects it, so there is no offer (feature stays hidden).
-    expect(downloadOffersFor([missing], visionCaptionModelUsable, { ...caps, platform: "windows" })).toEqual([]);
+    // On Windows the captioner is now usable too (epic 8103), so it surfaces the same download offer.
+    expect(
+      downloadOffersFor([missing], visionCaptionModelUsable, { ...caps, platform: "windows" }).map((m) => m.id),
+    ).toEqual([VISION_CAPTION_MODEL_ID]);
   });
 
   it("supportedControlModes gates on ui.controlModes, canonical-ordered + deduped", () => {

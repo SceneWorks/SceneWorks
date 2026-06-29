@@ -83,12 +83,12 @@ export function documentModelUsable(model, caps) {
 // captioner model AND it can run here", not a capability sweep. Two gates, mirroring the
 // magic-prompt model gate:
 //   * macModelBlock — the active-gating Rust/MLX oracle (a no-op off Mac / in observe mode).
-//   * macOnly — the captioner is macOS-first (catalog `macOnly: true`). The Rust/MLX engine for
-//     qwen3_vl ships on Apple Silicon first; the Windows/candle path is epic 8103. Until then the
-//     feature stays HIDDEN on Windows/Linux. `caps.platform` is the API host's OS (mac_capabilities
-//     in workers.rs); when it hasn't loaded yet (`""`) we don't block, matching the no-op-pre-load
-//     convention of the macGating helpers — and the reference flow is also gated to Ideogram 4
-//     (itself macOnly) by the parent, so a non-Mac client never reaches it anyway.
+//   * macOnly — cross-platform as of sc-8116 (epic 8103): the catalog flips `macOnly: false` now that
+//     the candle qwen3_vl vision tower (candle-llm sc-8080) is in the backend-candle graph, so this
+//     branch is a no-op label and the feature lights up on Windows/Linux too. The guard is kept
+//     defensively: if some future catalog entry re-sets `macOnly: true` it still hides off Mac, and
+//     `caps.platform` is the API host's OS (mac_capabilities in workers.rs) — empty (`""`) pre-load
+//     doesn't block, matching the no-op-pre-load convention of the macGating helpers.
 export function visionCaptionModelUsable(model, caps) {
   if (model?.id !== VISION_CAPTION_MODEL_ID) {
     return false;
