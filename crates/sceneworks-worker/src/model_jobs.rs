@@ -2479,6 +2479,20 @@ mod tier_builder {
             out.display()
         );
 
+        // Boogu (sc-8513, epic 8506): `assemble_quantized_snapshot` builds the whole turnkey in one
+        // call — packs transformer/ + mllm/ and copies the dense mllm/tokenizer.json + vae/ as real
+        // files — so there are no symlinks to dereference. Q4/Q8 only (bf16 ships dense separately).
+        if converter == "boogu_assemble" {
+            assert!(
+                bits > 0,
+                "boogu assemble builds a packed Q tier (set SC8513_BITS=4 or 8)"
+            );
+            mlx_gen_boogu::convert::assemble_quantized_snapshot(&src, &out, bits)
+                .unwrap_or_else(|error| panic!("boogu assemble failed: {error}"));
+            eprintln!("[sc-8513] DONE {tier} at {}", out.display());
+            return;
+        }
+
         if bits <= 0 {
             // bf16: the dense backbone IS the tier — mirror transformer + the dense-reuse subdirs.
             copy_tree_deref(&src.join("transformer"), &out.join("transformer"));
