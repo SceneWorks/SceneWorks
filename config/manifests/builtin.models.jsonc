@@ -1487,6 +1487,39 @@
           "estimatedSizeBytes": 20600000000
         },
         {
+          // Q4 `q4/` subdir of the same MLX turnkey (sc-8513, epic 8506) — the lighter quant tier,
+          // selectable via advanced mlxQuantize<=4 (sc-8508/8509). Same complete-root shape as q8.
+          "provider": "huggingface",
+          "repo": "SceneWorks/krea-2-turbo-mlx",
+          "files": [
+            "q4/transformer/*",
+            "q4/text_encoder/*",
+            "q4/vae/*",
+            "q4/tokenizer/*",
+            "q4/scheduler/*",
+            "q4/model_index.json"
+          ],
+          "platforms": ["macos"],
+          "estimatedSizeBytes": 12488709648
+        },
+        {
+          // bf16 `bf16/` subdir of the MLX turnkey (sc-8513) — the dense max-fidelity tier (SHARDED
+          // transformer). krea's loader takes the dense base with no quantize (Quant::None). Selectable
+          // via advanced mlxQuantize<=0 (sc-8508/8509). Mirror of the dense `krea/Krea-2-Turbo` tree.
+          "provider": "huggingface",
+          "repo": "SceneWorks/krea-2-turbo-mlx",
+          "files": [
+            "bf16/transformer/*",
+            "bf16/text_encoder/*",
+            "bf16/vae/*",
+            "bf16/tokenizer/*",
+            "bf16/scheduler/*",
+            "bf16/model_index.json"
+          ],
+          "platforms": ["macos"],
+          "estimatedSizeBytes": 35678119918
+        },
+        {
           // Candle (Windows/Linux CUDA) dense bf16 — the ungated public `krea/Krea-2-Turbo` diffusers tree
           // (Krea 2 Community License). The native candle loader (`Weights::from_dir`) reads the diffusers
           // subdirs from the snapshot ROOT (no quant subdir — the boogu pattern), so it does NOT use the
