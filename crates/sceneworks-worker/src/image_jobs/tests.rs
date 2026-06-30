@@ -1478,6 +1478,75 @@ fn krea_2_turbo_bf16_real_weights_loads_and_generates() {
     );
 }
 
+/// Q4 tier verify (sc-8513, epic 8506): load the packed Boogu `<variant>-q4/` tier (`Quant::Q4`) — the
+/// new lighter quant that joins the shipped Q8 + dense bf16 — through the real worker `boogu_image`
+/// engine path and render. The `assemble_quantized_snapshot` builder packs transformer + mllm to Q4
+/// (vae dense); this proves the packed turnkey loads + generates. Point `SCENEWORKS_BOOGU_Q4_DIR` at a
+/// built/downloaded `<variant>-q4/` dir; `SCENEWORKS_BOOGU_ENGINE` selects the variant
+/// (`boogu_image` default / `boogu_image_turbo` / `boogu_image_edit`). Run:
+/// `SCENEWORKS_BOOGU_Q4_DIR=… cargo test -p sceneworks-worker --release --lib -- --ignored boogu_q4_real_weights`.
+#[cfg(target_os = "macos")]
+#[test]
+#[ignore = "needs a built/downloaded Boogu q4 tier + a high-memory Metal device"]
+fn boogu_q4_real_weights_loads_and_generates() {
+    let dir = std::path::PathBuf::from(
+        std::env::var("SCENEWORKS_BOOGU_Q4_DIR")
+            .expect("set SCENEWORKS_BOOGU_Q4_DIR to a built/downloaded boogu <variant>-q4 dir"),
+    );
+    let engine =
+        std::env::var("SCENEWORKS_BOOGU_ENGINE").unwrap_or_else(|_| "boogu_image".to_owned());
+    let size: u32 = std::env::var("SCENEWORKS_BOOGU_SIZE")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(512);
+    eprintln!(
+        "[boogu-q4] loading {engine} packed Q4 from {}…",
+        dir.display()
+    );
+    let generator = load_engine(&engine, dir, Some(gen_core::Quant::Q4), Vec::new(), None).unwrap();
+    eprintln!("[boogu-q4] LOADED — generating {size}²…");
+    let cancel = gen_core::CancelFlag::new();
+    // The `edit` variant is an instruction-edit engine — it requires a source reference (sc-7645,
+    // passed as a single `multi_references` image). base/turbo are plain t2i (`&[]`).
+    let edit_refs: Vec<Image> = if engine.contains("edit") {
+        vec![synthetic_rgb(size, size, |x, y| {
+            [(x * 255 / size) as u8, (y * 255 / size) as u8, 128]
+        })]
+    } else {
+        Vec::new()
+    };
+    let (w, h, pixels) = generate_one(
+        generator.as_ref(),
+        "a serene mountain lake at dawn",
+        size,
+        size,
+        42,
+        8,
+        None,
+        None,
+        None,
+        &edit_refs,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        false,
+        &PromptEnhance::default(),
+        &cancel,
+        &mut |_| {},
+    )
+    .unwrap();
+    eprintln!("[boogu-q4] GENERATED {w}x{h}");
+    assert_eq!((w, h), (size, size));
+    assert_eq!(pixels.len(), (size * size * 3) as usize);
+    assert!(
+        pixels.windows(2).any(|p| p[0] != p[1]),
+        "render is flat (degenerate)"
+    );
+}
+
 /// bf16 tier verify (sc-8513, epic 8506): load the DENSE Ideogram 4 `bf16/` tier (`Quant::None`) from
 /// the shared `SceneWorks/ideogram-4` repo through the real worker `ideogram_4` engine path and render.
 /// Proves the macOS MLX lane loads the cross-repo bf16 (resolved by `resolve_weights_dir` when
@@ -4851,12 +4920,13 @@ fn boogu_engine_defaults_and_quant_resolution() {
 }
 
 /// `boogu_model_subdir` maps each id to its variant folder (`base`/`turbo`/`edit`), picks the
-/// pre-packed Q8 `<variant>/` by default, and the full-precision `<variant>-bf16/` only when
-/// `mlxQuantize <= 4` AND it is present — falling back to the Q8 folder (then root), so a request for
-/// a not-yet-downloaded bf16 build resolves the Q8 default rather than half-loading.
+/// pre-packed Q8 `<variant>/` by default, the packed `<variant>-q4/` for `mlxQuantize 1..=4`, and the
+/// dense `<variant>-bf16/` for `mlxQuantize <= 0` — each only when present, else falling back through
+/// Q8 → q4 → bf16 → root, so a request for a not-yet-downloaded tier resolves the Q8 default rather
+/// than half-loading (sc-8513). Consistent with krea/ideogram (`<=4`→q4, `<=0`→bf16).
 #[cfg(target_os = "macos")]
 #[test]
-fn boogu_subdir_prefers_q8_and_opts_into_bf16() {
+fn boogu_subdir_prefers_q8_and_opts_into_q4_or_bf16() {
     let root = tempfile::tempdir().unwrap();
     let touch = |sub: &str| {
         let dir = root.path().join(sub).join("transformer");
@@ -4882,7 +4952,15 @@ fn boogu_subdir_prefers_q8_and_opts_into_bf16() {
         boogu_model_subdir(root.path(), &req("boogu_image_edit", json!({}))),
         root.path().join("edit")
     );
-    // bf16 opt-in falls back to the Q8 folder when `base-bf16/` is absent (not yet downloaded).
+    // q4/bf16 opt-ins fall back to the Q8 folder when their subfolder is absent (not yet downloaded).
+    assert_eq!(
+        boogu_model_subdir(
+            root.path(),
+            &req("boogu_image", json!({ "mlxQuantize": 4 }))
+        ),
+        root.path().join("base"),
+        "q4 opt-in falls back to Q8 when base-q4 absent",
+    );
     assert_eq!(
         boogu_model_subdir(
             root.path(),
@@ -4891,19 +4969,27 @@ fn boogu_subdir_prefers_q8_and_opts_into_bf16() {
         root.path().join("base"),
         "bf16 opt-in falls back to Q8 when base-bf16 absent",
     );
-    // With the bf16 folder present, `mlxQuantize <= 4` selects it; Q8 stays the default.
+    // With the tier folders present: `1..=4` → q4, `<=0` → bf16; Q8 stays the default.
+    touch("base-q4");
     touch("base-bf16");
     assert_eq!(
         boogu_model_subdir(
             root.path(),
-            &req("boogu_image", json!({ "mlxQuantize": 0 }))
+            &req("boogu_image", json!({ "mlxQuantize": 4 }))
         ),
-        root.path().join("base-bf16")
+        root.path().join("base-q4")
     );
     assert_eq!(
         boogu_model_subdir(
             root.path(),
-            &req("boogu_image", json!({ "mlxQuantize": 4 }))
+            &req("boogu_image", json!({ "mlxQuantize": 2 }))
+        ),
+        root.path().join("base-q4")
+    );
+    assert_eq!(
+        boogu_model_subdir(
+            root.path(),
+            &req("boogu_image", json!({ "mlxQuantize": 0 }))
         ),
         root.path().join("base-bf16")
     );

@@ -370,39 +370,58 @@ fn ideogram_model_subdir(root: &Path, request: &ImageRequest) -> PathBuf {
         .unwrap_or_else(|| root.to_path_buf())
 }
 
+/// The Boogu subfolder for a `mlxQuantize` request — `None` keeps the Q8 default. Shared by
+/// [`boogu_model_subdir`] (which subfolder to load) and [`ensure_boogu_tier_present`] (which to
+/// fetch on demand): `<=0` → `<variant>-bf16/` (dense full precision), `1..=4` → `<variant>-q4/`
+/// (packed Q4, sc-8513), anything else → the default `<variant>/` (packed Q8). Returns the subfolder
+/// name relative to the turnkey root.
+fn boogu_tier_subdir(variant: &str, bits: Option<i64>) -> Option<String> {
+    match bits {
+        Some(b) if b <= 0 => Some(format!("{variant}-bf16")),
+        Some(b) if b <= 4 => Some(format!("{variant}-q4")),
+        _ => None,
+    }
+}
+
 /// Pick the engine-complete subfolder of a Boogu turnkey `root` for the requested variant. Each
 /// catalog id maps to a variant folder: `boogu_image`→`base`, `boogu_image_turbo`→`turbo`,
 /// `boogu_image_edit`→`edit`. **Q8 is the shipped default** (the pre-packed `<variant>/` folder); an
-/// explicit advanced `mlxQuantize <= 4` selects the full-precision `<variant>-bf16/` build instead —
-/// the source the engine quantizes at load (no packed Q4 is shipped) or runs dense. Falls back to
-/// whichever subfolder is present, then `root`, so a partially-downloaded bundle surfaces as a load
-/// error rather than a silent half-load. (The `*-bf16/` files are an on-demand download fetched by
-/// [`ensure_boogu_bf16_present`] before this resolves, sc-6568; if that fetch was skipped/failed the
-/// bf16 request falls back to the Q8 folder.)
+/// explicit advanced `mlxQuantize` selects another tier (sc-8513, epic 8506): `<=0` → the dense
+/// `<variant>-bf16/`, `1..=4` → the packed `<variant>-q4/`. Falls back through Q8 → q4 → bf16 → `root`
+/// when the requested tier isn't downloaded, so a partial bundle surfaces as a load error rather than
+/// a silent half-load. (The non-default tiers are on-demand downloads fetched by
+/// [`ensure_boogu_tier_present`] before this resolves, sc-6568/sc-8513.)
 fn boogu_model_subdir(root: &Path, request: &ImageRequest) -> PathBuf {
     let variant = match request.model.as_str() {
         "boogu_image_turbo" => "turbo",
         "boogu_image_edit" => "edit",
         _ => "base",
     };
-    let bf16 = format!("{variant}-bf16");
-    let wants_bf16 = request
+    let bits = request
         .advanced
         .get("mlxQuantize")
-        .and_then(|v| v.as_i64().or_else(|| v.as_str()?.trim().parse().ok()))
-        .is_some_and(|bits| bits <= 4);
+        .and_then(|v| v.as_i64().or_else(|| v.as_str()?.trim().parse().ok()));
+    // q4/q8 ship a single packed transformer file; bf16 is the dense diffusers tree (SHARDED → only
+    // the `.index.json`). Accept either shape.
     let present = |name: &str| -> Option<PathBuf> {
         let dir = root.join(name);
-        dir.join("transformer/diffusion_pytorch_model.safetensors")
-            .is_file()
-            .then_some(dir)
+        let packed = dir
+            .join("transformer/diffusion_pytorch_model.safetensors")
+            .is_file();
+        let sharded = dir
+            .join("transformer/diffusion_pytorch_model.safetensors.index.json")
+            .is_file();
+        (packed || sharded).then_some(dir)
     };
-    if wants_bf16 {
-        if let Some(dir) = present(&bf16) {
+    let q4 = format!("{variant}-q4");
+    let bf16 = format!("{variant}-bf16");
+    if let Some(tier) = boogu_tier_subdir(variant, bits) {
+        if let Some(dir) = present(&tier) {
             return dir;
         }
     }
     present(variant)
+        .or_else(|| present(&q4))
         .or_else(|| present(&bf16))
         .unwrap_or_else(|| root.to_path_buf())
 }
@@ -446,17 +465,17 @@ fn krea_model_subdir(root: &Path, request: &ImageRequest) -> PathBuf {
         .unwrap_or_else(|| root.to_path_buf())
 }
 
-/// On-demand fetch of the full-precision `<variant>-bf16/` Boogu subfolder (sc-6568). The S1 catalog
-/// download pulls only the packed Q8 `<variant>/` subfolder, so when a job opts into the bf16 build
-/// (advanced `mlxQuantize <= 4` — the same gate [`boogu_model_subdir`] uses to select it) and that
-/// subfolder isn't present yet, pull just its files into the HF cache so `boogu_model_subdir` resolves
-/// it. No-op when bf16 isn't requested, the model isn't Boogu, the turnkey snapshot isn't downloaded
-/// yet (`boogu_model_subdir` then falls back to Q8 / surfaces the load error), or the bf16 subfolder
-/// is already complete. Fails loud on a real download error — fast, before any compute; a missing `hf`
-/// CLI leaves the subfolder absent so the request gracefully falls back to Q8. Mirrors
+/// On-demand fetch of a non-default Boogu tier subfolder (sc-6568 / sc-8513). The catalog download
+/// pulls only the packed Q8 `<variant>/` subfolder, so when a job opts into another tier
+/// ([`boogu_tier_subdir`]: `<=0` → `<variant>-bf16/` dense, `1..=4` → `<variant>-q4/` packed) and that
+/// subfolder isn't present yet, pull just its files into the HF cache so [`boogu_model_subdir`]
+/// resolves it. No-op when the Q8 default is requested, the model isn't Boogu, the turnkey snapshot
+/// isn't downloaded yet (`boogu_model_subdir` then falls back to Q8 / surfaces the load error), or the
+/// tier subfolder is already complete. Fails loud on a real download error — fast, before any compute;
+/// a missing `hf` CLI leaves the subfolder absent so the request gracefully falls back to Q8. Mirrors
 /// [`crate::video_jobs::ensure_ltx_q8_present`].
 #[cfg(target_os = "macos")]
-async fn ensure_boogu_bf16_present(
+async fn ensure_boogu_tier_present(
     api: &ApiClient,
     settings: &Settings,
     job: &JobSnapshot,
@@ -468,14 +487,11 @@ async fn ensure_boogu_bf16_present(
         "boogu_image_edit" => "edit",
         _ => return Ok(()),
     };
-    let wants_bf16 = request
-        .advanced
-        .get("mlxQuantize")
-        .and_then(quant_int)
-        .is_some_and(|bits| bits <= 4);
-    if !wants_bf16 {
+    let bits = request.advanced.get("mlxQuantize").and_then(quant_int);
+    let Some(tier) = boogu_tier_subdir(variant, bits) else {
+        // Q8 default ships in the catalog download — nothing to fetch.
         return Ok(());
-    }
+    };
     let Some(model) = mlx_model(&request.model) else {
         return Ok(());
     };
@@ -484,24 +500,27 @@ async fn ensure_boogu_bf16_present(
         // Turnkey not downloaded at all → leave it to the load path's "weights not found" error.
         return Ok(());
     };
-    let bf16 = format!("{variant}-bf16");
-    if root
-        .join(&bf16)
+    let tier_dir = root.join(&tier);
+    // Present already (packed single-file q4 OR sharded-dense bf16 `.index.json`) → no fetch.
+    if tier_dir
         .join("transformer/diffusion_pytorch_model.safetensors")
         .is_file()
+        || tier_dir
+            .join("transformer/diffusion_pytorch_model.safetensors.index.json")
+            .is_file()
     {
         return Ok(());
     }
     let scratch = settings
         .data_dir
         .join("cache")
-        .join(format!(".boogu-bf16-fetch-{}", job.id));
+        .join(format!(".boogu-tier-fetch-{}", job.id));
     tokio::fs::create_dir_all(&scratch).await?;
-    // The bf16 subfolder nests transformer/mllm/vae (leaf-dir globs, like the catalog Q8 entry).
+    // The tier subfolder nests transformer/mllm/vae (leaf-dir globs, like the catalog Q8 entry).
     let files = vec![
-        format!("{bf16}/transformer/*"),
-        format!("{bf16}/mllm/*"),
-        format!("{bf16}/vae/*"),
+        format!("{tier}/transformer/*"),
+        format!("{tier}/mllm/*"),
+        format!("{tier}/vae/*"),
     ];
     let result = crate::model_jobs::download_model_with_hf_cli(
         api,
@@ -1822,7 +1841,7 @@ async fn generate_stream(
     // sc-6568: a bf16 opt-in for Boogu fetches the full-precision `<variant>-bf16/` subfolder on
     // demand (the catalog ships only the Q8 default) before snapshot resolution. No-op for every
     // other model / the default Q8 path.
-    ensure_boogu_bf16_present(api, settings, job, request).await?;
+    ensure_boogu_tier_present(api, settings, job, request).await?;
     let weights_dir = resolve_weights_dir(request, settings)?
         .ok_or_else(|| WorkerError::InvalidPayload("model weights not found".to_owned()))?;
     // sc-3723: surface the descriptor-derived backend ("mlx" for every linked family today; a
@@ -3095,6 +3114,26 @@ mod candle_label_tests {
         ] {
             assert!(!is_candle_engine(model), "{model} must not be a candle engine");
         }
+    }
+}
+
+#[cfg(test)]
+mod boogu_tier_tests {
+    use super::*;
+
+    #[test]
+    fn tier_subdir_selects_by_quant_bits() {
+        // Q8 default (no opt-in / a >4 request) → None (the `<variant>/` folder ships in the catalog
+        // download). 1..=4 → packed q4; <=0 → dense bf16. Consistent with krea/ideogram (sc-8513).
+        assert_eq!(boogu_tier_subdir("base", None), None);
+        assert_eq!(boogu_tier_subdir("base", Some(8)), None);
+        assert_eq!(boogu_tier_subdir("base", Some(4)), Some("base-q4".to_owned()));
+        assert_eq!(boogu_tier_subdir("turbo", Some(2)), Some("turbo-q4".to_owned()));
+        assert_eq!(boogu_tier_subdir("edit", Some(0)), Some("edit-bf16".to_owned()));
+        assert_eq!(
+            boogu_tier_subdir("base", Some(-1)),
+            Some("base-bf16".to_owned())
+        );
     }
 }
 
