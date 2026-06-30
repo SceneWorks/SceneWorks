@@ -2514,6 +2514,152 @@ mod tests {
         );
     }
 
+    /// sc-8671 GPU-VAL — proves `sampleCount` caps the rendered previews end-to-end on the candle
+    /// path: a 3-prompt pool with `sampleCount=2` must (a) reach the engine as exactly 2 prompts via
+    /// the real `map_training_config` mapping, and (b) render exactly 2 preview PNGs per sample step
+    /// (the engine renders one image per prompt), which `write_training_sample` persists to
+    /// `<out>/samples/step-NNNNNN/`. Trains Z-Image-Turbo (checkpointing ON, required on candle) with
+    /// `sampleEvery=1`, `sampleSteps=4` (fast preview). Needs candle-gen ≥ #1008 (the preview-sample
+    /// emission). Run on the RTX box:
+    /// `HF_HUB_CACHE=D:\hfcache CUDA_VISIBLE_DEVICES=0 cargo test -p sceneworks-worker --lib --features backend-candle --release -- --ignored candle_sample_count_caps_previews --nocapture`.
+    #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+    #[test]
+    #[ignore = "needs real Z-Image-Turbo weights + a CUDA device; GPU-val for sc-8671 sampleCount cap"]
+    fn candle_sample_count_caps_previews() {
+        let snapshot = candle_hf_snapshot("models--Tongyi-MAI--Z-Image-Turbo", "");
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let image_path = tmp.path().join("swatch.png");
+        image::RgbImage::from_fn(512, 512, |x, y| {
+            image::Rgb([(x % 256) as u8, (y % 256) as u8, 128])
+        })
+        .save(&image_path)
+        .expect("write test image");
+        let output_dir = tmp.path().join("out");
+        std::fs::create_dir_all(&output_dir).unwrap();
+
+        // Drive the REAL merged mapping: a 3-prompt pool capped at sampleCount=2 must map to exactly
+        // 2 engine prompts (one preview per prompt), proving training_jobs::resolve_sample_prompts.
+        let pool = ["alpha portrait", "beta full body", "gamma outdoors"];
+        let mut value = plan_json(
+            tmp.path(),
+            "z_image_lora",
+            "z_image_turbo",
+            "lora",
+            &[&image_path.display().to_string()],
+        );
+        value["config"]["advanced"]["sampleEvery"] = json!(1);
+        value["config"]["advanced"]["sampleSteps"] = json!(4);
+        value["config"]["advanced"]["sampleGuidanceScale"] = json!(1.0);
+        value["config"]["advanced"]["sampleCount"] = json!(2);
+        value["config"]["advanced"]["samplePrompts"] = json!(pool);
+        value["config"]["advanced"]["gradientCheckpointing"] = json!(true);
+        let mut config = map_training_config(&parse(value).config);
+        assert_eq!(
+            config.sample_prompts,
+            vec!["alpha portrait".to_owned(), "beta full body".to_owned()],
+            "sampleCount=2 must cap the 3-prompt pool to the first 2 prompts"
+        );
+        // Speed overrides for the smoke — keep the mapped sample_* fields (the thing under test).
+        // steps=2 (not 1): the engine skips sampling on the final step, so a single step never previews.
+        config.steps = 2;
+        config.rank = 4;
+        config.alpha = 4.0;
+        config.batch_size = 1;
+        config.resolution = 512;
+        config.train_dtype = "bf16".to_owned();
+
+        let stem = "zimage_sample_cap";
+        // Capture the preview params before `config` moves into the request.
+        let preview_steps = config.sample_steps;
+        let preview_guidance = config.sample_guidance_scale;
+        let request = TrainingRequest {
+            items: vec![TrainingItem {
+                image_path,
+                caption: "a colorful test swatch".to_owned(),
+            }],
+            config,
+            output_dir: output_dir.clone(),
+            file_name: format!("{stem}.safetensors"),
+            trigger_words: Vec::new(),
+            cancel: CancelFlag::new(),
+        };
+
+        let mut trainer = gen_core::load_trainer(
+            "z_image_turbo",
+            &LoadSpec::new(WeightsSource::Dir(snapshot.to_path_buf())),
+        )
+        .expect("candle z_image trainer loads");
+        trainer
+            .validate(&request)
+            .expect("trainer accepts the plan");
+
+        // Persist each preview exactly as the worker does, recording (step, prompt) for assertions.
+        let mut rendered: Vec<(u32, u32, String)> = Vec::new();
+        trainer
+            .train(&request, &mut |progress| {
+                if let TrainingProgress::Sample {
+                    step,
+                    index,
+                    prompt,
+                    image,
+                    ..
+                } = progress
+                {
+                    write_training_sample(
+                        Some(&output_dir),
+                        None,
+                        stem,
+                        step,
+                        index,
+                        &prompt,
+                        &image,
+                        preview_steps,
+                        preview_guidance,
+                    )
+                    .expect("preview PNG persists");
+                    rendered.push((step, index, prompt));
+                }
+            })
+            .expect("training + sampling runs");
+
+        eprintln!("[sc-8671 GPU-val] rendered previews: {rendered:?}");
+        assert!(
+            !rendered.is_empty(),
+            "at least one sample step must render (sampleEvery=1)"
+        );
+        // Per sample step: exactly 2 previews (== sampleCount), never 3 — and only the first 2 prompts.
+        use std::collections::BTreeMap;
+        let mut per_step: BTreeMap<u32, Vec<String>> = BTreeMap::new();
+        for (step, _index, prompt) in &rendered {
+            per_step.entry(*step).or_default().push(prompt.clone());
+        }
+        for (step, prompts) in &per_step {
+            assert_eq!(
+                prompts.len(),
+                2,
+                "step {step} must render exactly sampleCount=2 previews, got {prompts:?}"
+            );
+            assert!(
+                prompts.contains(&"alpha portrait".to_owned())
+                    && prompts.contains(&"beta full body".to_owned()),
+                "step {step} must use the first 2 pool prompts, got {prompts:?}"
+            );
+            assert!(
+                !prompts.contains(&"gamma outdoors".to_owned()),
+                "the 3rd pool prompt must be capped out at step {step}"
+            );
+        }
+        // Each rendered preview must exist on disk in the worker's layout. The engine numbers samples
+        // 1-based within a step, so check the indices actually emitted rather than assuming 0-based.
+        for (step, index, _prompt) in &rendered {
+            let png = output_dir
+                .join("samples")
+                .join(format!("step-{step:06}"))
+                .join(format!("{stem}-step{step:06}-{index}.png"));
+            assert!(png.exists(), "preview PNG missing: {}", png.display());
+        }
+    }
+
     /// sc-7817 — the candle Wan A14B **T2V** training smoke. Loads `load_trainer("wan2_2_t2v_14b", …)`
     /// from the installed `Wan-AI/Wan2.2-T2V-A14B-Diffusers` snapshot (`tokenizer/ text_encoder/
     /// transformer/ transformer_2/ vae/`) and trains two LoRA micro-steps — the MoE alternates one
