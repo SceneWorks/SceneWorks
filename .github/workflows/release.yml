@@ -224,10 +224,16 @@ jobs:
           payload="${sig%.sig}"          # the artifact the .sig signs (the update payload)
           payload_name="$(basename "$payload")"
 
-          # Upload installers + the updater payload (the payload is normally the
-          # NSIS .exe already in `installers`; upload it explicitly so a .nsis.zip
-          # payload is also covered).
-          gh release upload "$TAG" --clobber "${installers[@]}" "$payload"
+          # Upload the installers, then the updater payload — but only if it isn't
+          # already one of the installers. The NSIS payload IS the `-setup.exe`
+          # that `nsis/*.exe` already globbed, so listing it twice in one
+          # `gh release upload` makes the second create the same asset name and 404s.
+          # The guard still covers a hypothetical `.nsis.zip` payload (not in the glob).
+          gh release upload "$TAG" --clobber "${installers[@]}"
+          case " ${installers[*]} " in
+            *" $payload "*) : ;;  # already uploaded above
+            *) gh release upload "$TAG" --clobber "$payload" ;;
+          esac
 
           # Merge the windows-x86_64 entry into the macos-seeded manifest.
           gh release download "$TAG" -p latest.json --clobber
