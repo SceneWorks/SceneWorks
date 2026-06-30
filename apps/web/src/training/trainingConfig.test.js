@@ -135,7 +135,7 @@ describe("trainingConfigSnapshot", () => {
     const draft = configDraftFromTarget(target, dataset, ["auto"], "ohwx woman");
     const snap = snapshot({ ...draft, samplePrompts: "a cat\n  a dog  \n\na bird", sampleCount: "6" });
     expect(snap.config.advanced.sampleCount).toBe(6);
-    // Blank lines dropped, surviving lines trimmed; backends cycle this pool to the count.
+    // Blank lines dropped, surviving lines trimmed; web sends the raw pool (backends cap at count).
     expect(snap.config.advanced.samplePrompts).toEqual(["a cat", "a dog", "a bird"]);
   });
 

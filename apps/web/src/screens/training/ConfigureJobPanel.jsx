@@ -222,7 +222,7 @@ export function ConfigureJobPanel({
               value={configDraft.samplePrompts ?? ""}
             />
             <span className="training-field-hint">
-              One prompt per line. Previews cycle through this list up to the sample count.
+              One prompt per line. Renders one preview per prompt, up to the sample count.
             </span>
           </label>
 

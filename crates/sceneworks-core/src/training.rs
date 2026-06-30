@@ -258,8 +258,9 @@ pub struct TrainingConfig {
     /// Advanced, collapsed-by-default fields. Free-form by design. Preview-sample
     /// knobs live here: `sampleEvery` (cadence in steps; 0 disables), `sampleSteps`,
     /// `sampleGuidanceScale`, `sampleCount` (images per step; default 4), and
-    /// `samplePrompts` (string array; empty falls back to trigger-derived defaults).
-    /// All four backends (torch/Lens/candle/MLX) cycle the prompt pool to `sampleCount`.
+    /// `samplePrompts` (string array; the UI prefills trigger-derived defaults).
+    /// All backends (torch/Lens/candle/MLX) cap the prompt pool at `sampleCount`
+    /// (one preview per prompt, truncated — never padded).
     pub advanced: JsonObject,
     #[serde(flatten)]
     pub extra: ExtraFields,

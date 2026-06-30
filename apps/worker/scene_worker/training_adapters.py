@@ -242,11 +242,11 @@ def read_run_config(plan: dict[str, Any]) -> TrainingRunConfig:
     if not target_modules:
         target_modules = list(DEFAULT_LORA_TARGET_MODULES)
     sample_prompts = advanced.get("samplePrompts")
-    if not isinstance(sample_prompts, list) or not sample_prompts:
+    if not isinstance(sample_prompts, list):
         sample_prompts = default_sample_prompts(trigger_words(plan))
-    # sc-8671: number of preview images per sample step (default 4 preserves the
-    # historical fixed count). The prompt pool above is cycled/truncated to this
-    # many entries so the count is independent of how many prompts were supplied.
+    # sc-8671: cap on preview images per sample step (default 4 = the historical fixed
+    # `[:4]` cap). The pool above is truncated — never padded — to this many entries, so
+    # the count limits how many previews render rather than duplicating prompts.
     sample_count = _as_int(advanced.get("sampleCount"), DEFAULT_SAMPLE_COUNT, minimum=0)
     return TrainingRunConfig(
         rank=_as_int(config.get("rank"), 16, minimum=1),
@@ -315,16 +315,14 @@ def default_sample_prompts(words: list[str]) -> list[str]:
 
 
 def resolve_sample_prompts(pool: list[str], count: int) -> list[str]:
-    """Resolve a prompt pool to exactly ``count`` prompts for previewing (sc-8671).
+    """Cap a prompt pool at ``count`` prompts for previewing (sc-8671).
 
-    Blank entries are dropped; the surviving pool is cycled (when ``count`` exceeds
-    the pool size) or truncated (when it's smaller). Repeated prompts still render
-    distinct images because the kernel seeds each sample by its index. An empty pool
-    or ``count <= 0`` yields no samples."""
+    Blank entries are dropped; the surviving pool is truncated to ``count`` (one preview
+    per prompt, never padded). An empty pool or ``count <= 0`` yields no samples."""
     cleaned = [str(prompt).strip() for prompt in pool if str(prompt).strip()]
-    if not cleaned or count <= 0:
+    if count <= 0:
         return []
-    return [cleaned[index % len(cleaned)] for index in range(count)]
+    return cleaned[:count]
 
 
 def project_relative_path(plan: dict[str, Any], path: Path) -> str | None:

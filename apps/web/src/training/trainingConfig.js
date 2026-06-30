@@ -217,8 +217,8 @@ export function samplePromptsFromTrigger(triggerWord) {
 
 // Default number of preview images rendered per sample step (sc-8671). Matches
 // the four trigger-derived default prompts, so the out-of-the-box behavior is
-// unchanged when neither knob is touched. The backends clamp/cycle the prompt
-// pool to this count, so it can differ from the number of prompts supplied.
+// unchanged when neither knob is touched. The backends cap the prompt pool at
+// this count (one preview per prompt, truncated — never padded).
 export const defaultSampleCount = 4;
 
 // The sample-prompts textarea holds one prompt per line; the worker payload wants
@@ -239,7 +239,8 @@ export function trainingConfigSnapshot({ activeDataset, configDraft, selectedPre
   const networkType = asText(configDraft.networkType).trim() || "lora";
   // The user-edited prompt pool, one per line. Empty falls back to the trigger-derived
   // defaults so previews still render (and {trigger} substitution is preserved). The
-  // backends cycle/truncate this pool to sampleCount, so its length need not equal the count.
+  // backends cap this pool at sampleCount (one preview per prompt), so the pool can hold
+  // more prompts than render.
   const editedPrompts = promptLinesToList(configDraft.samplePrompts);
   const samplePrompts = editedPrompts.length ? editedPrompts : samplePromptsFromTrigger(configDraft.triggerWord);
   const advanced = compactObject({
