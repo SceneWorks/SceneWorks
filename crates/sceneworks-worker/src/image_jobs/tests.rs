@@ -1420,6 +1420,64 @@ fn sd3_5_hosted_tier_real_weights_generates_one_image() {
     );
 }
 
+/// bf16 tier verify (sc-8513, epic 8506): load the DENSE SHARDED Krea 2 Turbo `bf16/` tier
+/// (`Quant::None` — krea's loader takes the dense base with no quantize) through the real worker
+/// `krea_2_turbo` engine path and render. Proves the hosted `SceneWorks/krea-2-turbo-mlx/bf16`
+/// turnkey (the sharded dense transformer + dense TE/VAE) loads + generates — the tier that
+/// completes the krea matrix alongside the already-hosted q4/q8. Point `SCENEWORKS_KREA_BF16_DIR`
+/// at the downloaded (or staged) `bf16/` subdir. CFG-free, so no guidance is forwarded. Run:
+/// `SCENEWORKS_KREA_BF16_DIR=… cargo test -p sceneworks-worker --release --lib -- --ignored krea_2_turbo_bf16_real_weights`.
+#[cfg(target_os = "macos")]
+#[test]
+#[ignore = "needs the downloaded/staged Krea 2 Turbo bf16 tier + a high-memory Metal device"]
+fn krea_2_turbo_bf16_real_weights_loads_and_generates() {
+    let dir = std::path::PathBuf::from(
+        std::env::var("SCENEWORKS_KREA_BF16_DIR")
+            .expect("set SCENEWORKS_KREA_BF16_DIR to the downloaded krea bf16/ tier dir"),
+    );
+    let size: u32 = std::env::var("SCENEWORKS_KREA_SIZE")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(512);
+    eprintln!(
+        "[krea-bf16] loading krea_2_turbo dense bf16 (Quant::None) from {}…",
+        dir.display()
+    );
+    let generator = load_engine("krea_2_turbo", dir, None, Vec::new(), None).unwrap();
+    eprintln!("[krea-bf16] LOADED — generating {size}²…");
+    let cancel = gen_core::CancelFlag::new();
+    let (w, h, pixels) = generate_one(
+        generator.as_ref(),
+        "a serene mountain lake at dawn",
+        size,
+        size,
+        42,
+        8,
+        None,
+        None,
+        None,
+        &[],
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        false,
+        &PromptEnhance::default(),
+        &cancel,
+        &mut |_| {},
+    )
+    .unwrap();
+    eprintln!("[krea-bf16] GENERATED {w}x{h}");
+    assert_eq!((w, h), (size, size));
+    assert_eq!(pixels.len(), (size * size * 3) as usize);
+    assert!(
+        pixels.windows(2).any(|p| p[0] != p[1]),
+        "render is flat (degenerate)"
+    );
+}
+
 /// Real-weights smoke (sc-5923): FLUX.2-dev EDIT through the worker `flux2_dev_edit` engine path
 /// (the `flux2_edit_engine_id("flux2_dev")` variant, sc-5919/5922). Loads the SAME converted Q4 dev
 /// snapshot, then renders with a single `Conditioning::Reference` AND with a 2-image
