@@ -825,28 +825,39 @@ fn sd3_5_manifest_entries_gate_correctly() {
             .map(|a| a.iter().filter_map(Value::as_str).collect())
             .unwrap_or_default();
         assert_eq!(caps, vec!["text_to_image"], "{id} capabilities");
-        // Gated stabilityai/* download (Stability AI Community License); HF credential host.
+        // UN-gated SceneWorks MLX re-host (sc-8513, epic 8506): the pre-built quant-matrix turnkey
+        // carries the Stability AI Community License + "Powered by Stability AI" NOTICE, so no HF
+        // credential host / license-click. (Was the gated stabilityai/* source + install-time convert.)
         assert_eq!(
             entry.get("gated").and_then(Value::as_bool),
-            Some(true),
+            Some(false),
             "{id} gated"
         );
         assert_eq!(
-            entry.get("credentialHost").and_then(Value::as_str),
-            Some("huggingface.co"),
-            "{id} credentialHost"
+            entry.get("credentialHost"),
+            None,
+            "{id} credentialHost (dropped on re-host)"
         );
-        let repo = entry
+        // Every tier download is the SceneWorks re-host (q4 default + q8 + bf16), and the default
+        // (first) entry is q4.
+        let downloads = entry
             .get("downloads")
             .and_then(Value::as_array)
-            .and_then(|d| d.first())
-            .and_then(|d| d.get("repo"))
-            .and_then(Value::as_str)
-            .unwrap_or("");
-        assert!(
-            repo.starts_with("stabilityai/stable-diffusion-3.5"),
-            "{id} downloads from the gated stabilityai/* repo (no re-host), got {repo:?}"
-        );
+            .unwrap_or_else(|| panic!("{id} downloads array"));
+        for dl in downloads {
+            let repo = dl.get("repo").and_then(Value::as_str).unwrap_or("");
+            assert!(
+                repo.starts_with("SceneWorks/sd3.5-"),
+                "{id} tier downloads from the SceneWorks re-host, got {repo:?}"
+            );
+        }
+        let first_files: Vec<&str> = downloads
+            .first()
+            .and_then(|d| d.get("files"))
+            .and_then(Value::as_array)
+            .map(|a| a.iter().filter_map(Value::as_str).collect())
+            .unwrap_or_default();
+        assert_eq!(first_files, vec!["q4/*"], "{id} default tier is q4");
         // Per-tier memory-eligibility gate (drives the Studio admit/hide-by-available-memory).
         assert_eq!(
             entry
