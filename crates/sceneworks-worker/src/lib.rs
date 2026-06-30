@@ -178,19 +178,27 @@ mod openpose_skeleton;
 // Native canny edge-map preprocessor for the Fun-Controlnet-Union canny head
 // (epic 8236, sc-8240). Pure CPU raster (cross-platform + testable everywhere),
 // sibling of `openpose_skeleton`: arbitrary image → `ControlKind::Canny` control
-// image. Consumed by the shared strict-control driver (sc-8243) on macOS; the
-// off-Mac candle lane has no registry strict-control path, so it stays unused there.
-#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+// image. Consumed by the shared strict-control driver (sc-8243) on macOS AND the
+// off-Mac candle strict-control trio (sc-8304); on a candle-disabled box off Mac
+// it still builds + unit-tests but its items are otherwise unused — so allow
+// dead_code only there.
+#[cfg_attr(
+    all(not(target_os = "macos"), not(feature = "backend-candle")),
+    allow(dead_code)
+)]
 mod canny;
 // Depth-map preprocessor for the Fun-Controlnet-Union depth head (epic 8236): arbitrary image →
 // `ControlKind::Depth` control image via a Depth Anything V2 port. Sibling of `canny` /
 // `openpose_skeleton`, but — unlike those pure raster preprocessors — depth needs neural
 // inference, so it is backend-gated: macOS = `mlx-gen-depth` (sc-8242), off-Mac + `backend-candle`
 // = `candle-gen-depth` (sc-8413, the Windows/CUDA sibling). Consumed by the shared strict-control
-// driver (sc-8243 mac); the off-Mac candle strict-control routing that calls the candle estimator
-// is the separate sc-8304, so `depth_control_image` stays unused on the candle lane until then
-// (hence the `allow(dead_code)` below).
-#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+// driver (sc-8243 mac) AND the off-Mac candle strict-control trio (sc-8304, which wires the candle
+// estimator into `preprocess_control_entry`); on a candle-disabled box off Mac the estimator stays
+// unused — so allow dead_code only there.
+#[cfg_attr(
+    all(not(target_os = "macos"), not(feature = "backend-candle")),
+    allow(dead_code)
+)]
 mod depth;
 // DWPose pose detection via onnxruntime (epic 3482, sc-3487). On Mac the CoreML EP +
 // on the off-Mac candle GPU-worker lane the CUDA EP (sc-5496, epic 5482) run the same

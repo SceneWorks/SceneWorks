@@ -87,7 +87,10 @@ fn strict_control_engine(engine_id: &str) -> Option<&'static StrictControlEngine
 /// The catalog DEFAULT control-weights repo for a Fun-Union strict-control engine — the single source of
 /// truth each engine's `controlWeights.repo`-override resolver falls back to. Panics on a non-Fun-Union
 /// engine id (a programming error: only the three registry strict-control streams call this with their
-/// own engine id).
+/// own engine id). Off-Mac the candle strict-control trio keeps its own per-lane default-repo constants
+/// (the qwen candle lane is still the InstantX checkpoint, not the table's 2512-Fun row — that swap is
+/// the separate sc-8350), so this is unused on the candle lane.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 fn strict_control_default_repo(engine_id: &str) -> &'static str {
     strict_control_engine(engine_id)
         .unwrap_or_else(|| panic!("{engine_id} is not a Fun-Union strict-control engine"))
@@ -216,8 +219,9 @@ fn resolve_control_source(
 /// Estimate a depth control map from an arbitrary input image (sc-8242).
 ///
 /// This is the depth analogue of [`crate::canny::canny_control_image_default`]: given a `source` RGB
-/// image, it runs the native-MLX Depth Anything V2 estimator ([`crate::depth::depth_control_image`])
-/// and returns a normalized single-channel depth-control [`Image`] at the source's dimensions.
+/// image, it runs the backend's Depth Anything V2 estimator ([`crate::depth::depth_control_image`]) and
+/// returns a normalized single-channel depth-control [`Image`] at the source's dimensions. Backend-
+/// neutral: macOS = MLX (sc-8242); off-Mac + `backend-candle` = the candle/CUDA sibling (sc-8413).
 ///
 /// `source` is the raw image to estimate FROM (NOT a pre-made depth map — that flows through the
 /// user-supplied-passthrough branch in [`preprocess_control_entry`] before this is ever reached).
@@ -226,8 +230,8 @@ fn resolve_control_source(
 ///
 /// Errors when no `source` is available (auto depth has nothing to estimate from — the caller must
 /// supply either a source image or a user-supplied depth map) or when the estimator weights are
-/// unavailable. macOS-only (MLX inference); off-Mac there is no registry strict-control path.
-#[cfg(target_os = "macos")]
+/// unavailable. Reached by the MLX registry strict-control paths (macOS) and the candle strict-control
+/// trio (off-Mac, sc-8304) alike.
 fn depth_control_image(
     source: Option<&Image>,
     depth_weights_dir: Option<&Path>,
@@ -257,27 +261,14 @@ fn depth_control_image(
     })
 }
 
-/// Off-Mac stub: there is no registry strict-control path on the candle lane, so depth auto-estimation
-/// is never reached — but the shared driver must still compile. Mirrors the macOS signature.
-#[cfg(not(target_os = "macos"))]
-#[allow(dead_code)]
-fn depth_control_image(
-    _source: Option<&Image>,
-    _depth_weights_dir: Option<&Path>,
-) -> WorkerResult<Image> {
-    Err(WorkerError::InvalidPayload(
-        "automatic depth estimation is macOS-only".to_owned(),
-    ))
-}
-
 /// Provision the Depth Anything V2 (Small) estimator snapshot and return the directory holding
 /// `model.safetensors` (what [`crate::depth::depth_control_image`] loads via `from_dir`).
 ///
 /// Resolution order mirrors [`ensure_flux2_control_weights`]: an explicit `SCENEWORKS_DEPTH_ANYTHING_V2`
 /// dir override → an existing HF cache snapshot → a lazy fetch of the single weight file into the app
 /// cache on first use. The ~100 MB Small checkpoint is fetched only on the first depth job (it never
-/// bloats a base download). Shared by every strict-control engine that admits `ControlKind::Depth`.
-#[cfg(target_os = "macos")]
+/// bloats a base download). Shared by every strict-control engine that admits `ControlKind::Depth` —
+/// the MLX registry paths (macOS) and the candle strict-control trio (off-Mac, sc-8304).
 async fn ensure_depth_estimator_dir(
     api: &ApiClient,
     settings: &Settings,
@@ -331,7 +322,13 @@ async fn ensure_depth_estimator_dir(
 /// - **depth** — [`depth_control_image`] over `source`: the native-MLX Depth Anything V2 estimator
 ///   (sc-8242), using the provisioned `depth_weights_dir`. Like canny, requires a `source` (auto depth
 ///   has nothing to estimate from otherwise); a user-supplied depth map still short-circuits above.
-#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+///
+/// Used by the MLX registry strict-control paths (macOS) and the candle strict-control trio (off-Mac,
+/// sc-8304) alike; dead only on a candle-disabled box off Mac (no strict-control caller there).
+#[cfg_attr(
+    all(not(target_os = "macos"), not(feature = "backend-candle")),
+    allow(dead_code)
+)]
 #[allow(clippy::too_many_arguments)]
 fn preprocess_control_entry(
     kind: &ControlKind,

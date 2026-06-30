@@ -25,6 +25,11 @@ const QWEN_CONTROL_DEFAULT_GUIDANCE: f32 = 4.0;
 /// The adapter/engine id recorded on candle Qwen control assets (distinct from the txt2img
 /// `candle_qwen` lane).
 const QWEN_CONTROL_ENGINE: &str = "candle_qwen_control";
+/// The [`STRICT_CONTROL_ENGINES`] catalog id this candle lane validates `advanced.controlMode` against
+/// (the `qwen_image_control` row — `{Pose, Canny, Depth}`). NOTE the candle lane still loads the InstantX
+/// `Qwen-Image-ControlNet-Union` checkpoint (its own default-repo constants above), not the table's
+/// 2512-Fun row — that source swap is the separate sc-8350. Only `supported_kinds` is shared here.
+const QWEN_CONTROL_ENGINE_ID: &str = "qwen_image_control";
 
 /// Model ids the candle Qwen ControlNet route accepts.
 fn is_qwen_control_model(model: &str) -> bool {
@@ -187,10 +192,77 @@ fn qwen_control_raw_settings(
     raw
 }
 
-/// Real candle Qwen strict-pose generation: one image per pose, each conditioned on a full DWPose
-/// skeleton. The provider loads once on the blocking thread; each pose renders its skeleton + generates.
-/// `generate` takes the per-job `CancelFlag` + a `Progress` callback (per-step streaming + mid-denoise
-/// cancel), the same contract as the IP-Adapter lanes.
+/// The per-lane half of the candle Qwen strict-control [`CandleStrictControl`] driver (sc-8304): the
+/// resolved base + InstantX control weight paths + the request numerics. Qwen runs true CFG, so it carries
+/// a negative prompt + guidance. Moved onto the blocking thread, loaded once, drives every pose.
+struct QwenStrictControl {
+    qwen_base: PathBuf,
+    controlnet: PathBuf,
+    prompt: String,
+    negative: String,
+    width: u32,
+    height: u32,
+    steps: u32,
+    guidance: f32,
+    control_scale: f32,
+}
+
+impl CandleStrictControl for QwenStrictControl {
+    type Model = QwenControl;
+
+    fn engine_id(&self) -> &'static str {
+        QWEN_CONTROL_ENGINE_ID
+    }
+
+    fn engine_label(&self) -> &'static str {
+        QWEN_CONTROL_ENGINE
+    }
+
+    fn stream_tag(&self) -> &'static str {
+        "qwen_control"
+    }
+
+    fn load(&self) -> WorkerResult<Self::Model> {
+        let paths = QwenControlPaths {
+            qwen_base: self.qwen_base.clone(),
+            controlnet: self.controlnet.clone(),
+        };
+        QwenControl::load(&paths).map_err(|error| {
+            WorkerError::Engine(format!("Qwen strict-pose control load failed: {error}"))
+        })
+    }
+
+    fn generate_one(
+        &self,
+        model: &Self::Model,
+        control: &Image,
+        seed: u64,
+        cancel: &CancelFlag,
+        on_progress: &mut dyn FnMut(Progress),
+    ) -> WorkerResult<Image> {
+        let req = QwenControlRequest {
+            prompt: self.prompt.clone(),
+            negative: self.negative.clone(),
+            width: self.width,
+            height: self.height,
+            steps: self.steps as usize,
+            guidance: self.guidance,
+            control_scale: self.control_scale,
+            seed,
+            cancel: cancel.clone(),
+        };
+        model.generate(&req, control, on_progress).map_err(|error| {
+            WorkerError::Engine(format!("Qwen strict-pose generation failed: {error}"))
+        })
+    }
+}
+
+/// Real candle Qwen strict-pose generation: one image per pose, each conditioned on a full DWPose skeleton
+/// (`controlMode` unset) or a canny/depth control map. Resolves the base + InstantX control weights, then
+/// hands a [`QwenStrictControl`] to the shared [`run_candle_strict_control`] driver (validation against
+/// `qwen_image_control`'s `supported_kinds`, per-pose preprocessing, scoring). `generate` takes the
+/// per-job `CancelFlag` + a `Progress` callback (per-step streaming + mid-denoise cancel). The pose path
+/// is byte-preserved.
 async fn generate_candle_qwen_control_stream(
     api: &ApiClient,
     settings: &Settings,
@@ -222,126 +294,31 @@ async fn generate_candle_qwen_control_stream(
         .unwrap_or(QWEN_CONTROL_DEFAULT_REPO)
         .to_owned();
 
-    let poses = parse_poses(request);
-    let pose_count = poses.len();
+    let pose_count = pose_entries(request).len();
     let raw_settings =
         qwen_control_raw_settings(request, &repo, steps, guidance, control_scale, pose_count);
 
-    let (width, height) = (request.width, request.height);
-    let stickwidth = crate::openpose_skeleton::body_stickwidth(width, height);
-    // One shared seed across the pose set (the MLX `_generate_pose_set` convention).
-    let seed = resolve_seed(request, 0);
-    let prompt = request.prompt.clone();
-    let negative = request.negative_prompt.clone();
-
-    // Identity-likeness scoring (epic 4406, sc-4410): when this candle Qwen strict-pose set carries a
-    // character identity `referenceAssetId`, score every finished pose against that source identity face
-    // through the SHARED seam. Source decode + face-stack staging are non-fatal; the `!Send` scorer is
-    // built ONCE in the load closure (source embedded once, reused across all poses).
-    let likeness_source = resolve_control_identity_source(request, settings, project_path);
-    let face_stack_dir = if likeness_source.is_some() {
-        match ensure_face_stack_dir(api, settings, job).await {
-            Ok(dir) => Some(dir),
-            Err(error) => {
-                tracing::warn!(error = %error, "pose-set face-stack staging failed; likeness scores omitted");
-                None
-            }
-        }
-    } else {
-        None
+    let provider = QwenStrictControl {
+        qwen_base,
+        controlnet,
+        prompt: request.prompt.clone(),
+        negative: request.negative_prompt.clone(),
+        width: request.width,
+        height: request.height,
+        steps,
+        guidance,
+        control_scale,
     };
-    let likeness_source_ref = likeness_source.as_ref().map(|(_, id)| id.clone());
 
-    let (cancel, rx, blocking) = start_gen_stream(
-        job.id.clone(),
-        "qwen_control",
-        0,
-        move || {
-            let paths = QwenControlPaths {
-                qwen_base,
-                controlnet,
-            };
-            let model = QwenControl::load(&paths).map_err(|error| {
-                WorkerError::Engine(format!("Qwen strict-pose control load failed: {error}"))
-            })?;
-            let scorer = match (&face_stack_dir, &likeness_source) {
-                (Some(dir), Some((source, _))) => {
-                    crate::face_likeness::build_face_likeness_scorer(dir, source)
-                }
-                _ => None,
-            };
-            Ok((model, poses, scorer))
-        },
-        move |(model, poses, scorer), tx, cancel| {
-            drive_gen_items_scored(tx, poses, move |_index, pose, on_progress| {
-                if cancel.is_cancelled() {
-                    return Ok(None);
-                }
-                let skeleton = crate::openpose_skeleton::draw_wholebody(
-                    width,
-                    height,
-                    &pose.keypoints,
-                    pose.hands.as_deref(),
-                    pose.face.as_deref(),
-                    stickwidth,
-                );
-                let control = Image {
-                    width,
-                    height,
-                    pixels: skeleton.into_raw(),
-                };
-                let req = QwenControlRequest {
-                    prompt: prompt.clone(),
-                    negative: negative.clone(),
-                    width,
-                    height,
-                    steps: steps as usize,
-                    guidance,
-                    control_scale,
-                    seed: seed as u64,
-                    cancel: cancel.clone(),
-                };
-                let out = match model.generate(&req, &control, &mut *on_progress) {
-                    Ok(out) => out,
-                    Err(_) if cancel.is_cancelled() => return Ok(None),
-                    Err(error) => {
-                        return Err(WorkerError::Engine(format!(
-                            "Qwen strict-pose generation failed: {error}"
-                        )));
-                    }
-                };
-                // Score this finished pose against the cached source embedding (sc-4410). FINAL image
-                // (no face-restore pass on this lane). Clone paid ONLY when a scorer exists; a full-body
-                // / turned pose with no reliable frontal face → honest detected:false N/A.
-                let face_likeness = scorer.as_ref().and_then(|scorer| {
-                    crate::face_likeness::score_generated_image(
-                        Some(scorer),
-                        &Image {
-                            width: out.width,
-                            height: out.height,
-                            pixels: out.pixels.clone(),
-                        },
-                        likeness_source_ref.as_deref(),
-                    )
-                });
-                Ok(Some((seed, out.width, out.height, out.pixels, face_likeness)))
-            })
-        },
-    );
-
-    consume_gen_events(
+    run_candle_strict_control(
         api,
         settings,
         job,
         plan,
         project_path,
         backend,
-        QWEN_CONTROL_ENGINE,
-        &raw_settings,
-        pose_count,
-        rx,
-        cancel,
-        blocking,
+        provider,
+        raw_settings,
         asset_writes,
     )
     .await

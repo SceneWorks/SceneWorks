@@ -36,6 +36,10 @@ const FLUX2_CONTROL_CANDLE_DEFAULT_GUIDANCE: f32 = 4.0;
 /// The adapter/engine id recorded on candle FLUX.2-dev control assets (distinct from the txt2img
 /// `candle_flux2` + edit `candle_flux2_edit` lanes).
 const FLUX2_CONTROL_CANDLE_ENGINE: &str = "candle_flux2_control";
+/// The [`STRICT_CONTROL_ENGINES`] catalog id this candle lane validates `advanced.controlMode` against
+/// (the dev Fun-Controlnet-Union row — `{Pose, Canny, Depth}`). Mirrors the MLX `flux2_dev_control`
+/// registry engine's `supported_kinds` (sc-8304).
+const FLUX2_CONTROL_CANDLE_ENGINE_ID: &str = "flux2_dev_control";
 
 /// Model ids the candle FLUX.2 strict-pose control route accepts (klein has no control checkpoint).
 fn is_flux2_control_model(model: &str) -> bool {
@@ -211,12 +215,78 @@ fn flux2_control_candle_raw_settings(
     raw
 }
 
+/// The per-lane half of the candle FLUX.2-dev strict-control [`CandleStrictControl`] driver (sc-8304):
+/// the resolved base + control weight paths, the Q4 quant policy, and the request numerics. dev keeps its
+/// embedded guidance (no true-CFG / negative pass). Moved onto the blocking thread, loaded once (Q4
+/// CPU-stage → quantize-onto-GPU), drives every pose.
+struct Flux2StrictControl {
+    base: PathBuf,
+    control: PathBuf,
+    quant: Option<Quant>,
+    prompt: String,
+    width: u32,
+    height: u32,
+    steps: u32,
+    guidance: f32,
+    control_scale: f32,
+}
+
+impl CandleStrictControl for Flux2StrictControl {
+    type Model = Flux2Control;
+
+    fn engine_id(&self) -> &'static str {
+        FLUX2_CONTROL_CANDLE_ENGINE_ID
+    }
+
+    fn engine_label(&self) -> &'static str {
+        FLUX2_CONTROL_CANDLE_ENGINE
+    }
+
+    fn stream_tag(&self) -> &'static str {
+        "flux2_control"
+    }
+
+    fn load(&self) -> WorkerResult<Self::Model> {
+        let paths = Flux2ControlPaths {
+            root: self.base.clone(),
+            control: self.control.clone(),
+        };
+        Flux2Control::load(&paths, self.quant).map_err(|error| {
+            WorkerError::Engine(format!("FLUX.2-dev strict-pose control load failed: {error}"))
+        })
+    }
+
+    fn generate_one(
+        &self,
+        model: &Self::Model,
+        control: &Image,
+        seed: u64,
+        cancel: &CancelFlag,
+        on_progress: &mut dyn FnMut(Progress),
+    ) -> WorkerResult<Image> {
+        let req = Flux2ControlRequest {
+            prompt: self.prompt.clone(),
+            width: self.width,
+            height: self.height,
+            steps: self.steps as usize,
+            guidance: self.guidance,
+            control_scale: self.control_scale,
+            seed,
+            cancel: cancel.clone(),
+        };
+        model.generate(&req, control, on_progress).map_err(|error| {
+            WorkerError::Engine(format!("FLUX.2-dev strict-pose generation failed: {error}"))
+        })
+    }
+}
+
 /// Real candle FLUX.2-dev strict-pose generation: one image per pose, each conditioned on a full DWPose
-/// skeleton via the Fun-Controlnet-Union branch (sc-7736; engine sc-7460). Mirrors
-/// [`generate_candle_zimage_control_stream`] — the control checkpoint is fetched on first use, then the
-/// dev control provider loads once on the blocking thread (Q4 CPU-stage → quantize-onto-GPU) and renders
-/// one image per pose (shared seed so only the pose changes across the set). dev keeps its embedded
-/// guidance (no CFG). `Flux2Control::generate` takes `&self`, so the per-item closure needs no `&mut`.
+/// skeleton (`controlMode` unset) or a canny/depth control map via the Fun-Controlnet-Union branch
+/// (sc-7736; engine sc-7460). Resolves the base + control weights + Q4 quant, then hands a
+/// [`Flux2StrictControl`] to the shared [`run_candle_strict_control`] driver (validation against
+/// `flux2_dev_control`'s `supported_kinds`, per-pose preprocessing, scoring). dev (32B) loads Q4 (manifest
+/// `mlx.quantize: 4` → `resolve_quant`); the control overlay quantizes in place. dev keeps its embedded
+/// guidance (no CFG). The pose path is byte-preserved.
 async fn generate_candle_flux2_control_stream(
     api: &ApiClient,
     settings: &Settings,
@@ -252,8 +322,7 @@ async fn generate_candle_flux2_control_stream(
         .unwrap_or(FLUX2_CONTROL_CANDLE_BASE_REPO)
         .to_owned();
 
-    let poses = parse_poses(request);
-    let pose_count = poses.len();
+    let pose_count = pose_entries(request).len();
     let raw_settings = flux2_control_candle_raw_settings(
         request,
         &repo,
@@ -264,120 +333,27 @@ async fn generate_candle_flux2_control_stream(
         pose_count,
     );
 
-    let (width, height) = (request.width, request.height);
-    let stickwidth = crate::openpose_skeleton::body_stickwidth(width, height);
-    // One shared seed across the pose set (the MLX `_generate_pose_set` convention) so noise-derived
-    // attributes (hair, wardrobe, lighting) stay constant while only the pose changes.
-    let seed = resolve_seed(request, 0);
-    let prompt = request.prompt.clone();
-
-    // Identity-likeness scoring (epic 4406, sc-4410): when this candle FLUX.2-dev strict-pose set carries
-    // a character identity `referenceAssetId`, score every finished pose against that source identity face
-    // through the SHARED seam. Source decode + face-stack staging are non-fatal; the `!Send` scorer is
-    // built ONCE in the load closure (source embedded once, reused across all poses).
-    let likeness_source = resolve_control_identity_source(request, settings, project_path);
-    let face_stack_dir = if likeness_source.is_some() {
-        match ensure_face_stack_dir(api, settings, job).await {
-            Ok(dir) => Some(dir),
-            Err(error) => {
-                tracing::warn!(error = %error, "pose-set face-stack staging failed; likeness scores omitted");
-                None
-            }
-        }
-    } else {
-        None
+    let provider = Flux2StrictControl {
+        base,
+        control,
+        quant,
+        prompt: request.prompt.clone(),
+        width: request.width,
+        height: request.height,
+        steps,
+        guidance,
+        control_scale,
     };
-    let likeness_source_ref = likeness_source.as_ref().map(|(_, id)| id.clone());
 
-    let (cancel, rx, blocking) = start_gen_stream(
-        job.id.clone(),
-        "flux2_control",
-        0,
-        move || {
-            let paths = Flux2ControlPaths {
-                root: base,
-                control,
-            };
-            let model = Flux2Control::load(&paths, quant).map_err(|error| {
-                WorkerError::Engine(format!("FLUX.2-dev strict-pose control load failed: {error}"))
-            })?;
-            let scorer = match (&face_stack_dir, &likeness_source) {
-                (Some(dir), Some((source, _))) => {
-                    crate::face_likeness::build_face_likeness_scorer(dir, source)
-                }
-                _ => None,
-            };
-            Ok((model, poses, scorer))
-        },
-        move |(model, poses, scorer), tx, cancel| {
-            drive_gen_items_scored(tx, poses, move |_index, pose, on_progress| {
-                if cancel.is_cancelled() {
-                    return Ok(None);
-                }
-                let skeleton = crate::openpose_skeleton::draw_wholebody(
-                    width,
-                    height,
-                    &pose.keypoints,
-                    pose.hands.as_deref(),
-                    pose.face.as_deref(),
-                    stickwidth,
-                );
-                let control = Image {
-                    width,
-                    height,
-                    pixels: skeleton.into_raw(),
-                };
-                let req = Flux2ControlRequest {
-                    prompt: prompt.clone(),
-                    width,
-                    height,
-                    steps: steps as usize,
-                    guidance,
-                    control_scale,
-                    seed: seed as u64,
-                    cancel: cancel.clone(),
-                };
-                let out = match model.generate(&req, &control, &mut *on_progress) {
-                    Ok(out) => out,
-                    Err(_) if cancel.is_cancelled() => return Ok(None),
-                    Err(error) => {
-                        return Err(WorkerError::Engine(format!(
-                            "FLUX.2-dev strict-pose generation failed: {error}"
-                        )));
-                    }
-                };
-                // Score this finished pose against the cached source embedding (sc-4410). FINAL image
-                // (no face-restore pass on this lane). Clone paid ONLY when a scorer exists; a full-body
-                // / turned pose with no reliable frontal face → honest detected:false N/A.
-                let face_likeness = scorer.as_ref().and_then(|scorer| {
-                    crate::face_likeness::score_generated_image(
-                        Some(scorer),
-                        &Image {
-                            width: out.width,
-                            height: out.height,
-                            pixels: out.pixels.clone(),
-                        },
-                        likeness_source_ref.as_deref(),
-                    )
-                });
-                Ok(Some((seed, out.width, out.height, out.pixels, face_likeness)))
-            })
-        },
-    );
-
-    consume_gen_events(
+    run_candle_strict_control(
         api,
         settings,
         job,
         plan,
         project_path,
         backend,
-        FLUX2_CONTROL_CANDLE_ENGINE,
-        &raw_settings,
-        pose_count,
-        rx,
-        cancel,
-        blocking,
+        provider,
+        raw_settings,
         asset_writes,
     )
     .await
