@@ -302,16 +302,36 @@
       "adapter": "qwen_image",
       "capabilities": ["text_to_image", "style_variations"],
       "downloads": [
+        // SceneWorks pre-built MLX quant-matrix turnkey (sc-8669, epic 8506): a public/ungated
+        // re-host of Qwen/Qwen-Image-2512 (Apache-2.0). Per-tier subdirs, each a complete
+        // from_snapshot tree (packed/dense transformer/ + dense Qwen2.5-VL text_encoder/ + VAE +
+        // tokenizer + processor + scheduler): q4/ (default), q8/, bf16/. Replaces the dense source
+        // download + install-time quantize — the worker loads the chosen tier's subdir directly
+        // (standard_tier_subdir). Only the transformer is quantized in q4/q8; the TE + VAE stay
+        // dense bf16 in every tier. Sizes are measured on-disk.
         {
           "provider": "huggingface",
-          "repo": "Qwen/Qwen-Image-2512",
-          "files": [],
-          "estimatedSizeBytes": 57704594653
+          "repo": "SceneWorks/qwen-image-mlx",
+          "files": ["q4/*"],
+          "estimatedSizeBytes": 28387655680
+        },
+        {
+          "provider": "huggingface",
+          "repo": "SceneWorks/qwen-image-mlx",
+          "files": ["q8/*"],
+          "estimatedSizeBytes": 38583632655
+        },
+        {
+          "provider": "huggingface",
+          "repo": "SceneWorks/qwen-image-mlx",
+          "files": ["bf16/*"],
+          "estimatedSizeBytes": 57731960832
         }
       ],
       "paths": {
-        "model": "${HF_CACHE}/Qwen/Qwen-Image-2512"
+        "model": "${HF_CACHE}/SceneWorks/qwen-image-mlx"
       },
+      "gated": false,
       "defaults": {
         "resolution": "1024x1024",
         "steps": 20,
@@ -339,10 +359,12 @@
       // active path (epic 1753 §14, mirrors the wan_2_2 precedent).
       // minMemoryGb mirrors the sc-1972 verify measurement (Q8 1024² peak
       // ~66 GB on M5 Max); Q4 brings this within 64 GB-Mac reach via the
-      // advanced.mlxQuantize override.
+      // advanced.mlxQuantize override. Default tier is now q4 (sc-8669): the
+      // pre-quantized q4/ subdir auto-downloads + loads packed (no install-time
+      // quantize); q8/ + bf16/ are selectable.
       "mlx": {
         "minMemoryGb": 50,
-        "quantize": 8,
+        "quantize": 4,
         "limits": {
           "samplers": ["default", "euler", "euler_ancestral", "heun", "dpmpp_2m", "dpmpp_sde", "uni_pc", "lcm", "ddim"],
           "schedulers": ["default", "normal", "simple", "karras", "exponential", "sgm_uniform", "beta", "ddim_uniform"]
@@ -401,17 +423,34 @@
       // weights on the worker so existing jobs/presets/characters keep resolving.
       "capabilities": ["edit_image", "character_image"],
       "downloads": [
+        // SceneWorks pre-built MLX quant-matrix turnkey (sc-8669, epic 8506): a public/ungated
+        // re-host of Qwen/Qwen-Image-Edit-2511 (Apache-2.0). Per-tier subdirs (q4/ default, q8/,
+        // bf16/), each a complete from_snapshot tree; only the transformer is quantized (the
+        // Qwen2.5-VL TE + VAE stay dense bf16). Shared with qwen_image_edit_2511_lightning (same
+        // checkpoint). Replaces the dense source download + install-time quantize.
         {
-          // Apache-2.0, ungated. Comparable size to the 2509 release.
           "provider": "huggingface",
-          "repo": "Qwen/Qwen-Image-Edit-2511",
-          "files": [],
-          "estimatedSizeBytes": 57720467613
+          "repo": "SceneWorks/qwen-image-edit-2511-mlx",
+          "files": ["q4/*"],
+          "estimatedSizeBytes": 28387655680
+        },
+        {
+          "provider": "huggingface",
+          "repo": "SceneWorks/qwen-image-edit-2511-mlx",
+          "files": ["q8/*"],
+          "estimatedSizeBytes": 38583632655
+        },
+        {
+          "provider": "huggingface",
+          "repo": "SceneWorks/qwen-image-edit-2511-mlx",
+          "files": ["bf16/*"],
+          "estimatedSizeBytes": 57731960832
         }
       ],
       "paths": {
-        "model": "${HF_CACHE}/Qwen/Qwen-Image-Edit-2511"
+        "model": "${HF_CACHE}/SceneWorks/qwen-image-edit-2511-mlx"
       },
+      "gated": false,
       "defaults": {
         // Model-card defaults: 40 steps + true_cfg_scale 4.0 + guidance_scale 1.0.
         "resolution": "1024x1024",
@@ -475,19 +514,34 @@
       // per the distill recipe; user LoRAs still apply on top of the fused base.
       "capabilities": ["edit_image", "character_image"],
       "downloads": [
+        // SceneWorks pre-built MLX quant-matrix turnkey (sc-8669, epic 8506): shares the
+        // Qwen-Image-Edit-2511 base tiers (q4/ default, q8/, bf16/) on SceneWorks/qwen-image-edit-2511-mlx.
+        // Only the transformer is quantized (dense Qwen2.5-VL TE + VAE). The ~1 GB Lightning distill
+        // LoRA is fetched on first use and fused in-process over the chosen tier.
         {
-          // Shares the Qwen-Image-Edit-2511 base; the ~1 GB Lightning LoRA is
-          // fetched on first use and fused in-process.
           "provider": "huggingface",
-          "repo": "Qwen/Qwen-Image-Edit-2511",
-          "files": [],
+          "repo": "SceneWorks/qwen-image-edit-2511-mlx",
+          "files": ["q4/*"],
           "default": true,
-          "estimatedSizeBytes": 57720467613
+          "estimatedSizeBytes": 28387655680
+        },
+        {
+          "provider": "huggingface",
+          "repo": "SceneWorks/qwen-image-edit-2511-mlx",
+          "files": ["q8/*"],
+          "estimatedSizeBytes": 38583632655
+        },
+        {
+          "provider": "huggingface",
+          "repo": "SceneWorks/qwen-image-edit-2511-mlx",
+          "files": ["bf16/*"],
+          "estimatedSizeBytes": 57731960832
         }
       ],
       "paths": {
-        "model": "${HF_CACHE}/Qwen/Qwen-Image-Edit-2511"
+        "model": "${HF_CACHE}/SceneWorks/qwen-image-edit-2511-mlx"
       },
+      "gated": false,
       "defaults": {
         // 4-step distill: cfg 1.0 / true_cfg_scale 1.0 / 4 steps (vs base 40).
         "resolution": "1024x1024",
