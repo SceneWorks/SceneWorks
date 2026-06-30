@@ -6824,3 +6824,328 @@ fn real_weight_matrix_qwen_depth() {
     );
     assert_matrix_steer("qwen depth", &render, &baseline, 1.0);
 }
+
+// ---------------------------------------------------------------------------
+// Candle (Windows/CUDA) shared strict-control driver (sc-8304): the `CandleStrictControl` trait + the
+// `run_candle_strict_control` driver the candle trio (zimage/flux2/qwen control) route through, reusing
+// the SAME `STRICT_CONTROL_ENGINES` table + `preprocess_control_entry` as the MLX path. Candle-only (the
+// driver + trait are gated `not(macos) + backend-candle`). These compile + run in the candle-worker CI
+// lane; real-weight bits are gated behind env so the lane (no GPU / no weights) stays green.
+// ---------------------------------------------------------------------------
+
+/// A small solid RGB control [`Image`] (passthrough / canny-source fixture) — the candle twin of the
+/// macOS `control_fixture`.
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+fn candle_control_fixture(w: u32, h: u32, rgb: [u8; 3]) -> Image {
+    Image {
+        width: w,
+        height: h,
+        pixels: rgb
+            .iter()
+            .cycle()
+            .take((w * h * 3) as usize)
+            .copied()
+            .collect(),
+    }
+}
+
+/// A single pose entry parsed from a job (reuses `parse_poses` so the test exercises the real path) —
+/// the candle twin of the macOS `one_pose`.
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+fn candle_one_pose() -> PoseInput {
+    let req = request(json!({
+        "projectId": "p", "model": "z_image_turbo", "prompt": "a knight",
+        "advanced": { "poses": [{ "keypoints": [[0.5, 0.5]] }] }
+    }));
+    parse_poses(&req).pop().expect("one pose")
+}
+
+/// A non-flat synthetic source (centered bright square on a dark field) for the candle canny/depth
+/// preprocessor tests — the candle twin of the macOS `matrix_structured_source`.
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+fn candle_structured_source(side: u32) -> Image {
+    let s = side as usize;
+    let mut pixels = vec![20u8; s * s * 3];
+    let (lo, hi) = (s / 4, 3 * s / 4);
+    for y in lo..hi {
+        for x in lo..hi {
+            let i = (y * s + x) * 3;
+            pixels[i] = 230;
+            pixels[i + 1] = 230;
+            pixels[i + 2] = 230;
+        }
+    }
+    Image {
+        width: side,
+        height: side,
+        pixels,
+    }
+}
+
+/// The candle strict-control trio validates against the SAME `STRICT_CONTROL_ENGINES` rows the MLX path
+/// does — each engine id resolves and accepts {Pose, Canny, Depth}; an unknown id is itself an error.
+/// This is the gate that off-Mac canny/depth jobs ride through (a `controlMode` request is validated
+/// against the catalog before any preprocessing).
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+#[test]
+fn candle_strict_control_engine_ids_match_the_catalog() {
+    for id in [
+        ZIMAGE_CTRL_ENGINE_ID,
+        FLUX2_CONTROL_CANDLE_ENGINE_ID,
+        QWEN_CONTROL_ENGINE_ID,
+    ] {
+        let row = strict_control_engine(id).unwrap_or_else(|| panic!("no catalog row for {id}"));
+        for kind in [ControlKind::Pose, ControlKind::Canny, ControlKind::Depth] {
+            assert!(
+                row.supported_kinds.contains(&kind),
+                "{id} should accept {kind:?}"
+            );
+            assert!(validate_control_kind(id, &kind).is_ok(), "{id} {kind:?}");
+        }
+    }
+    // The candle engine ids are the Turbo / dev / qwen rows (NOT base-z-image / flux1 — those are B3).
+    assert_eq!(ZIMAGE_CTRL_ENGINE_ID, "z_image_turbo_control");
+    assert_eq!(FLUX2_CONTROL_CANDLE_ENGINE_ID, "flux2_dev_control");
+    assert_eq!(QWEN_CONTROL_ENGINE_ID, "qwen_image_control");
+}
+
+/// `validate_control_kind` rejects an unsupported kind (an `Other(_)` mode) and an unknown engine id —
+/// the loud-rejection contract the candle lanes inherit from the shared driver.
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+#[test]
+fn candle_strict_control_rejects_unsupported_kind_and_unknown_engine() {
+    let unsupported = ControlKind::Other("scribble".to_owned());
+    for id in [
+        ZIMAGE_CTRL_ENGINE_ID,
+        FLUX2_CONTROL_CANDLE_ENGINE_ID,
+        QWEN_CONTROL_ENGINE_ID,
+    ] {
+        let err = validate_control_kind(id, &unsupported)
+            .expect_err("Other(scribble) is not in any candle engine's supported_kinds");
+        assert!(matches!(err, WorkerError::InvalidPayload(_)), "{id}: {err}");
+    }
+    // An engine id that is not in the Fun-Union catalog is itself rejected.
+    assert!(validate_control_kind("not_a_control_engine", &ControlKind::Pose).is_err());
+}
+
+/// REGRESSION (sc-8304): the candle strict-control trio's engine labels + control-scale defaults are
+/// byte-preserved by the consolidation. The labels are recorded on every asset and the scale rides every
+/// generation, so a drift here changes user-visible output / telemetry.
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+#[test]
+fn candle_strict_control_labels_and_scale_defaults_are_byte_preserved() {
+    assert_eq!(ZIMAGE_CTRL_ENGINE, "candle_zimage_control");
+    assert_eq!(FLUX2_CONTROL_CANDLE_ENGINE, "candle_flux2_control");
+    assert_eq!(QWEN_CONTROL_ENGINE, "candle_qwen_control");
+    // The pose-tier control-scale defaults (the value each lane clamps `advanced.controlScale` toward).
+    assert_eq!(ZIMAGE_CTRL_DEFAULT_SCALE, 1.0);
+    assert_eq!(FLUX2_CONTROL_CANDLE_DEFAULT_SCALE, 0.75);
+    assert_eq!(QWEN_CONTROL_DEFAULT_SCALE, 1.0);
+}
+
+/// The trait routes each provider: each lane's `CandleStrictControl` impl reports the right engine id
+/// (the validation key), engine label (the asset/telemetry tag), and stream tag. Constructed with dummy
+/// paths — only the routing metadata is asserted, no load. This is the seam the shared driver dispatches
+/// through.
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+#[test]
+fn candle_strict_control_trait_routes_each_provider() {
+    let dummy = std::path::PathBuf::from("/nonexistent");
+
+    let zimage = ZImageStrictControl {
+        base: dummy.clone(),
+        controlnet: dummy.clone(),
+        prompt: "p".to_owned(),
+        width: 512,
+        height: 512,
+        steps: 8,
+        control_scale: 1.0,
+    };
+    assert_eq!(zimage.engine_id(), ZIMAGE_CTRL_ENGINE_ID);
+    assert_eq!(zimage.engine_label(), ZIMAGE_CTRL_ENGINE);
+    assert_eq!(zimage.stream_tag(), "zimage_control");
+
+    let flux2 = Flux2StrictControl {
+        base: dummy.clone(),
+        control: dummy.clone(),
+        quant: None,
+        prompt: "p".to_owned(),
+        width: 512,
+        height: 512,
+        steps: 28,
+        guidance: 4.0,
+        control_scale: 0.75,
+    };
+    assert_eq!(flux2.engine_id(), FLUX2_CONTROL_CANDLE_ENGINE_ID);
+    assert_eq!(flux2.engine_label(), FLUX2_CONTROL_CANDLE_ENGINE);
+    assert_eq!(flux2.stream_tag(), "flux2_control");
+
+    let qwen = QwenStrictControl {
+        qwen_base: dummy.clone(),
+        controlnet: dummy.clone(),
+        prompt: "p".to_owned(),
+        negative: "n".to_owned(),
+        width: 512,
+        height: 512,
+        steps: 30,
+        guidance: 4.0,
+        control_scale: 1.0,
+    };
+    assert_eq!(qwen.engine_id(), QWEN_CONTROL_ENGINE_ID);
+    assert_eq!(qwen.engine_label(), QWEN_CONTROL_ENGINE);
+    assert_eq!(qwen.stream_tag(), "qwen_control");
+}
+
+/// `preprocess_control_entry` produces the RIGHT control map per kind off-Mac (the shared driver the
+/// candle trio routes through): pose = a `draw_wholebody` skeleton (byte-identical to the per-lane code —
+/// the regression-critical path), canny = edges off the threaded source, user-passthrough = verbatim for
+/// any kind. Depth (real candle estimator) is a separate env-gated test so this stays GPU/weight-free.
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+#[test]
+fn candle_preprocess_pose_canny_and_passthrough_off_mac() {
+    let (w, h) = (256u32, 256u32);
+    let stick = crate::openpose_skeleton::body_stickwidth(w, h);
+    let pose = candle_one_pose();
+    let source = candle_structured_source(w);
+
+    // Pose: byte-identical to the lane's old inline `draw_wholebody` render.
+    let pose_map = preprocess_control_entry(
+        &ControlKind::Pose,
+        None,
+        Some(&pose),
+        None,
+        w,
+        h,
+        stick,
+        None,
+    )
+    .expect("pose preprocess");
+    let expected = crate::openpose_skeleton::draw_wholebody(
+        w,
+        h,
+        &pose.keypoints,
+        pose.hands.as_deref(),
+        pose.face.as_deref(),
+        stick,
+    );
+    assert_eq!((pose_map.width, pose_map.height), (w, h));
+    assert_eq!(
+        pose_map.pixels,
+        expected.into_raw(),
+        "pose skeleton must be byte-identical to the per-lane render"
+    );
+
+    // Canny: edges derived from the threaded source (non-degenerate — the source has a bright square).
+    let canny_map = preprocess_control_entry(
+        &ControlKind::Canny,
+        None,
+        None,
+        Some(&source),
+        w,
+        h,
+        stick,
+        None,
+    )
+    .expect("canny preprocess");
+    assert_eq!((canny_map.width, canny_map.height), (w, h));
+    assert!(
+        canny_map.pixels.iter().any(|&p| p != canny_map.pixels[0]),
+        "canny edges must be non-degenerate"
+    );
+
+    // Canny without a source is a clear error (canny has no synthetic input).
+    assert!(
+        preprocess_control_entry(&ControlKind::Canny, None, None, None, w, h, stick, None).is_err()
+    );
+
+    // User-supplied passthrough: used verbatim for ANY kind (here depth, with no weights provisioned —
+    // the passthrough short-circuits estimation entirely).
+    let user = candle_control_fixture(w, h, [10, 20, 30]);
+    let through = preprocess_control_entry(
+        &ControlKind::Depth,
+        Some(&user),
+        None,
+        None,
+        w,
+        h,
+        stick,
+        None,
+    )
+    .expect("user passthrough");
+    assert_eq!(through.pixels, user.pixels, "passthrough must be verbatim");
+}
+
+/// Real-weight (CPU-capable) candle depth preprocessing off-Mac: `preprocess_control_entry` with
+/// `ControlKind::Depth` runs the candle Depth-Anything-V2 estimator (sc-8413) over the threaded source.
+/// Gated on `SCENEWORKS_DEPTH_ANYTHING_V2` (the same env the depth smokes use) so the candle-worker CI
+/// lane — which builds the cuda feature but has no GPU and no cached weights — stays green; the estimator
+/// falls back to CPU when no GPU is present, so it CAN run in CI once the ~100 MB Small checkpoint is
+/// cached, else the coordinator's local CUDA build runs it.
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+#[test]
+fn candle_preprocess_depth_estimates_off_mac() {
+    use crate::depth::DEPTH_ANYTHING_V2_FILE;
+    let Ok(dir) = std::env::var("SCENEWORKS_DEPTH_ANYTHING_V2") else {
+        eprintln!("skipping: set SCENEWORKS_DEPTH_ANYTHING_V2 to the Small snapshot dir");
+        return;
+    };
+    let dir = std::path::PathBuf::from(dir);
+    if !dir.join(DEPTH_ANYTHING_V2_FILE).is_file() {
+        eprintln!(
+            "skipping: {DEPTH_ANYTHING_V2_FILE} missing in {}",
+            dir.display()
+        );
+        return;
+    }
+    let (w, h) = (256u32, 256u32);
+    let stick = crate::openpose_skeleton::body_stickwidth(w, h);
+    let source = candle_structured_source(w);
+    let depth = preprocess_control_entry(
+        &ControlKind::Depth,
+        None,
+        None,
+        Some(&source),
+        w,
+        h,
+        stick,
+        Some(dir.as_path()),
+    )
+    .expect("candle depth estimate");
+    assert_eq!((depth.width, depth.height), (w, h), "depth at source dims");
+    // The candle estimator returns a grayscale-broadcast map (every pixel's three channels equal).
+    assert!(
+        depth
+            .pixels
+            .chunks_exact(3)
+            .all(|p| p[0] == p[1] && p[1] == p[2]),
+        "depth control must be grayscale-broadcast"
+    );
+    // A foreground square on a dark field → a non-degenerate depth split.
+    assert!(depth.pixels.iter().any(|&p| p != depth.pixels[0]));
+}
+
+/// Depth without a source OR a provisioned weights dir is a clear error off-Mac (auto depth has nothing
+/// to estimate from / no estimator) — the loud-failure contract, no GPU needed.
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+#[test]
+fn candle_preprocess_depth_requires_source_and_weights() {
+    let (w, h) = (64u32, 64u32);
+    let stick = crate::openpose_skeleton::body_stickwidth(w, h);
+    // No source.
+    assert!(
+        preprocess_control_entry(&ControlKind::Depth, None, None, None, w, h, stick, None).is_err()
+    );
+    // Source present but no weights dir provisioned.
+    let source = candle_structured_source(w);
+    assert!(preprocess_control_entry(
+        &ControlKind::Depth,
+        None,
+        None,
+        Some(&source),
+        w,
+        h,
+        stick,
+        None
+    )
+    .is_err());
+}

@@ -24,6 +24,10 @@ const ZIMAGE_CTRL_DEFAULT_STEPS: u32 = 8;
 /// The adapter/engine id recorded on candle Z-Image control assets (distinct from the txt2img
 /// `candle_z_image`/`candle_zimage` lane).
 const ZIMAGE_CTRL_ENGINE: &str = "candle_zimage_control";
+/// The [`STRICT_CONTROL_ENGINES`] catalog id this candle lane validates `advanced.controlMode` against
+/// (the Turbo Fun-Controlnet-Union row — `{Pose, Canny, Depth}`). Mirrors the MLX
+/// `z_image_turbo_control` registry engine's `supported_kinds` (sc-8304).
+const ZIMAGE_CTRL_ENGINE_ID: &str = "z_image_turbo_control";
 
 /// Model ids the candle Z-Image ControlNet route accepts.
 fn is_zimage_control_model(model: &str) -> bool {
@@ -164,10 +168,73 @@ fn zimage_control_raw_settings(
     raw
 }
 
+/// The per-lane half of the candle Z-Image strict-control [`CandleStrictControl`] driver (sc-8304): the
+/// resolved weight paths + the request numerics. Z-Image-Turbo is distilled (no CFG / negative prompt),
+/// so it carries no guidance. Moved onto the blocking thread, loaded once, drives every pose.
+struct ZImageStrictControl {
+    base: PathBuf,
+    controlnet: PathBuf,
+    prompt: String,
+    width: u32,
+    height: u32,
+    steps: u32,
+    control_scale: f32,
+}
+
+impl CandleStrictControl for ZImageStrictControl {
+    type Model = ZImageControl;
+
+    fn engine_id(&self) -> &'static str {
+        ZIMAGE_CTRL_ENGINE_ID
+    }
+
+    fn engine_label(&self) -> &'static str {
+        ZIMAGE_CTRL_ENGINE
+    }
+
+    fn stream_tag(&self) -> &'static str {
+        "zimage_control"
+    }
+
+    fn load(&self) -> WorkerResult<Self::Model> {
+        let paths = ZImageControlPaths {
+            base: self.base.clone(),
+            control: self.controlnet.clone(),
+        };
+        ZImageControl::load(&paths).map_err(|error| {
+            WorkerError::Engine(format!("Z-Image strict-pose control load failed: {error}"))
+        })
+    }
+
+    fn generate_one(
+        &self,
+        model: &Self::Model,
+        control: &Image,
+        seed: u64,
+        cancel: &CancelFlag,
+        on_progress: &mut dyn FnMut(Progress),
+    ) -> WorkerResult<Image> {
+        let req = ZImageControlRequest {
+            prompt: self.prompt.clone(),
+            width: self.width,
+            height: self.height,
+            steps: self.steps as usize,
+            control_scale: self.control_scale,
+            seed,
+            cancel: cancel.clone(),
+        };
+        model.generate(&req, control, on_progress).map_err(|error| {
+            WorkerError::Engine(format!("Z-Image strict-pose generation failed: {error}"))
+        })
+    }
+}
+
 /// Real candle Z-Image strict-pose generation: one image per pose, each conditioned on a full DWPose
-/// skeleton. The provider loads once on the blocking thread; each pose renders its skeleton + generates.
-/// Z-Image-Turbo is distilled (no CFG / negative prompt), so the request carries no guidance.
-/// `ZImageControl::generate` takes `&self`, so the per-item closure does not need `&mut`.
+/// skeleton (`controlMode` unset) or a canny/depth control map. Resolves the base + control weights, then
+/// hands a [`ZImageStrictControl`] to the shared [`run_candle_strict_control`] driver, which validates the
+/// requested kind against `z_image_turbo_control`'s `supported_kinds`, preprocesses each pose's control
+/// map, runs the per-pose loop, and scores against any identity reference. Z-Image-Turbo is distilled (no
+/// CFG / negative prompt), so the request carries no guidance. The pose path is byte-preserved.
 async fn generate_candle_zimage_control_stream(
     api: &ApiClient,
     settings: &Settings,
@@ -199,123 +266,28 @@ async fn generate_candle_zimage_control_stream(
         .unwrap_or(ZIMAGE_CTRL_DEFAULT_REPO)
         .to_owned();
 
-    let poses = parse_poses(request);
-    let pose_count = poses.len();
+    let pose_count = pose_entries(request).len();
     let raw_settings = zimage_control_raw_settings(request, &repo, steps, control_scale, pose_count);
 
-    let (width, height) = (request.width, request.height);
-    let stickwidth = crate::openpose_skeleton::body_stickwidth(width, height);
-    // One shared seed across the pose set (the MLX `_generate_pose_set` convention).
-    let seed = resolve_seed(request, 0);
-    let prompt = request.prompt.clone();
-
-    // Identity-likeness scoring (epic 4406, sc-4410): when this candle Z-Image strict-pose set carries a
-    // character identity `referenceAssetId`, score every finished pose against that source identity face
-    // through the SHARED generator-agnostic seam. Resolve the source image + asset id and stage the
-    // antelopev2 face stack (candle leg; no-op if cached). All non-fatal (missing reference / staging
-    // failure → no scorer → scores omitted, set still renders). The `!Send` scorer is built ONCE in the
-    // load closure on the blocking thread (source embedded once, reused across all poses).
-    let likeness_source = resolve_control_identity_source(request, settings, project_path);
-    let face_stack_dir = if likeness_source.is_some() {
-        match ensure_face_stack_dir(api, settings, job).await {
-            Ok(dir) => Some(dir),
-            Err(error) => {
-                tracing::warn!(error = %error, "pose-set face-stack staging failed; likeness scores omitted");
-                None
-            }
-        }
-    } else {
-        None
+    let provider = ZImageStrictControl {
+        base,
+        controlnet,
+        prompt: request.prompt.clone(),
+        width: request.width,
+        height: request.height,
+        steps,
+        control_scale,
     };
-    let likeness_source_ref = likeness_source.as_ref().map(|(_, id)| id.clone());
 
-    let (cancel, rx, blocking) = start_gen_stream(
-        job.id.clone(),
-        "zimage_control",
-        0,
-        move || {
-            let paths = ZImageControlPaths { base, control: controlnet };
-            let model = ZImageControl::load(&paths).map_err(|error| {
-                WorkerError::Engine(format!("Z-Image strict-pose control load failed: {error}"))
-            })?;
-            // Build the scorer once on the blocking thread (the `!Send` face stack lives here).
-            let scorer = match (&face_stack_dir, &likeness_source) {
-                (Some(dir), Some((source, _))) => {
-                    crate::face_likeness::build_face_likeness_scorer(dir, source)
-                }
-                _ => None,
-            };
-            Ok((model, poses, scorer))
-        },
-        move |(model, poses, scorer), tx, cancel| {
-            drive_gen_items_scored(tx, poses, move |_index, pose, on_progress| {
-                if cancel.is_cancelled() {
-                    return Ok(None);
-                }
-                let skeleton = crate::openpose_skeleton::draw_wholebody(
-                    width,
-                    height,
-                    &pose.keypoints,
-                    pose.hands.as_deref(),
-                    pose.face.as_deref(),
-                    stickwidth,
-                );
-                let control = Image {
-                    width,
-                    height,
-                    pixels: skeleton.into_raw(),
-                };
-                let req = ZImageControlRequest {
-                    prompt: prompt.clone(),
-                    width,
-                    height,
-                    steps: steps as usize,
-                    control_scale,
-                    seed: seed as u64,
-                    cancel: cancel.clone(),
-                };
-                let out = match model.generate(&req, &control, &mut *on_progress) {
-                    Ok(out) => out,
-                    Err(_) if cancel.is_cancelled() => return Ok(None),
-                    Err(error) => {
-                        return Err(WorkerError::Engine(format!(
-                            "Z-Image strict-pose generation failed: {error}"
-                        )));
-                    }
-                };
-                // Score this finished pose against the cached source embedding (sc-4410). The candle
-                // strict-control lane produces the FINAL image directly (no face-restore pass). Clone
-                // paid ONLY when a scorer exists; a full-body / turned pose with no reliable frontal
-                // face → honest detected:false N/A.
-                let face_likeness = scorer.as_ref().and_then(|scorer| {
-                    crate::face_likeness::score_generated_image(
-                        Some(scorer),
-                        &Image {
-                            width: out.width,
-                            height: out.height,
-                            pixels: out.pixels.clone(),
-                        },
-                        likeness_source_ref.as_deref(),
-                    )
-                });
-                Ok(Some((seed, out.width, out.height, out.pixels, face_likeness)))
-            })
-        },
-    );
-
-    consume_gen_events(
+    run_candle_strict_control(
         api,
         settings,
         job,
         plan,
         project_path,
         backend,
-        ZIMAGE_CTRL_ENGINE,
-        &raw_settings,
-        pose_count,
-        rx,
-        cancel,
-        blocking,
+        provider,
+        raw_settings,
         asset_writes,
     )
     .await

@@ -36,9 +36,14 @@ use gen_core::{
 };
 // `AdapterKind` (LoRA/LoKr classification) was MLX-only until sc-5126: the candle Lens lane is the
 // first candle family to take LoRA/LoKr, so it now classifies adapters too and the import moved into
-// the shared block above. `ControlKind` (ControlNet conditioning) stays MLX-only — the candle lane is
-// pure txt2img.
-#[cfg(target_os = "macos")]
+// the shared block above. `ControlKind` (ControlNet conditioning) was MLX-only until sc-8304: the candle
+// strict-control trio (`candle_strict_control.rs`) now shares the cross-platform `strict_control.rs`
+// `(engine_id, supported_kinds)` table + `preprocess_control_entry`, so `ControlKind` is in scope on the
+// candle build too.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
 use gen_core::ControlKind;
 #[cfg(target_os = "macos")]
 use mlx_gen_chroma as _;
@@ -1538,10 +1543,16 @@ include!("image_jobs/base.rs");
 #[cfg(target_os = "macos")]
 // Per-generation PiD (pixel-diffusion) super-resolving decoder routing (epic 7840, sc-7849).
 include!("image_jobs/pid.rs");
-#[cfg(target_os = "macos")]
 // Shared strict-control driver (epic 8236, sc-8243): the `(engine_id, control_repo, supported_kinds)`
 // single source of truth + the preprocess (pose/canny/depth/user-passthrough) → `Conditioning::Control`
-// core the three MLX registry strict-control paths (zimage/flux2/qwen below) route through.
+// core the three MLX registry strict-control paths (zimage/flux2/qwen below) route through. Off-Mac the
+// candle strict-control trio (`candle_strict_control.rs`, sc-8304) reuses the SAME table +
+// `preprocess_control_entry` (pose/canny/depth), so this is gated to either platform (the candle build
+// off-Mac, MLX on macOS) rather than macOS-only.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
 include!("image_jobs/strict_control.rs");
 #[cfg(target_os = "macos")]
 // Z-Image strict-pose and prompt augmentation helpers.
@@ -1605,6 +1616,12 @@ include!("image_jobs/kolors_ipadapter.rs");
 // bespoke provider, so this is candle-exclusive.
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 include!("image_jobs/flux_ipadapter.rs");
+// Shared candle strict-control driver (sc-8304, epic 8236): the `CandleStrictControl` trait + the one
+// `run_candle_strict_control` driver the candle trio (qwen/zimage/flux2 control below) route through —
+// reusing the SAME `STRICT_CONTROL_ENGINES` table + `preprocess_control_entry` (pose/canny/depth) as the
+// MLX `strict_control.rs`. Must precede the three lanes (they reference the trait + driver).
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+include!("image_jobs/candle_strict_control.rs");
 // Qwen-Image ControlNet (strict pose) — the Windows/CUDA candle lane ONLY (sc-5489). macOS keeps the
 // MLX `qwen_image_control` registry generator; the candle `QwenControl` is a bespoke provider.
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
