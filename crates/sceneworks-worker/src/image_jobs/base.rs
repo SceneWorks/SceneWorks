@@ -244,6 +244,12 @@ pub(crate) fn resolve_weights_dir(
     if request.model == "krea_2_turbo" {
         return Ok(snapshot.map(|root| krea_model_subdir(&root, request)));
     }
+    // FLUX.2-dev (sc-8513, epic 8506) now ships as a SceneWorks pre-quantized turnkey with packed
+    // `q4/` (default) + `q8/` self-contained subdirs (replacing the install-time convert); point the
+    // engine at the chosen quant's subdir rather than the repo root.
+    if request.model == "flux2_dev" {
+        return Ok(snapshot.map(|root| flux2_dev_model_subdir(&root, request)));
+    }
     Ok(snapshot)
 }
 
@@ -271,6 +277,39 @@ fn ideogram_model_subdir(root: &Path, request: &ImageRequest) -> PathBuf {
     }
     present("q4")
         .or_else(|| present("q8"))
+        .unwrap_or_else(|| root.to_path_buf())
+}
+
+/// Pick the engine-complete packed subdir of a FLUX.2-dev SceneWorks turnkey `root`: `q8/` when the
+/// request opts into Q8 (`advanced.mlxQuantize: 8`) AND it is downloaded, else the default `q4/`.
+/// Falls back to whichever subdir is present, then `root` (a partially-downloaded bundle surfaces as
+/// a load error rather than a silent half-load). FLUX.2-dev's packed transformer file is
+/// `diffusion_pytorch_model.safetensors` (vs Ideogram's `model.safetensors`). sc-8513 / epic 8506.
+fn flux2_dev_model_subdir(root: &Path, request: &ImageRequest) -> PathBuf {
+    let bits = request
+        .advanced
+        .get("mlxQuantize")
+        .and_then(|v| v.as_i64().or_else(|| v.as_str()?.trim().parse().ok()));
+    // Tier presence: q4/q8 ship a single packed transformer file; bf16 is the dense diffusers tree
+    // (SHARDED → no single file, only the `.index.json`). Accept either shape.
+    let present = |name: &str| -> Option<PathBuf> {
+        let dir = root.join(name);
+        let packed = dir.join("transformer/diffusion_pytorch_model.safetensors").is_file();
+        let sharded = dir
+            .join("transformer/diffusion_pytorch_model.safetensors.index.json")
+            .is_file();
+        (packed || sharded).then_some(dir)
+    };
+    // bits<=0 (advanced.mlxQuantize: 0 / "none") → bf16; bits>4 → q8; else the q4 default.
+    let preferred = match bits {
+        Some(b) if b <= 0 => "bf16",
+        Some(b) if b > 4 => "q8",
+        _ => "q4",
+    };
+    present(preferred)
+        .or_else(|| present("q4"))
+        .or_else(|| present("q8"))
+        .or_else(|| present("bf16"))
         .unwrap_or_else(|| root.to_path_buf())
 }
 
