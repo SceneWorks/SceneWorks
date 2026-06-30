@@ -737,6 +737,15 @@ fn model_table_rows_resolve_and_flags_match_descriptor() {
         // supports_guidance=true + supports_negative_prompt=true (the `sd3_5_medium` descriptor advertises
         // supports_true_cfg, same as Large; only the transformer + step/guidance recipe differ).
         ("sd3_5_medium", true, true),
+        // SANA 1600M (epic 8485 / sc-8489): true-CFG Linear-DiT — supports_guidance=true +
+        // supports_negative_prompt=true (the `sana_1600m` descriptor advertises supports_true_cfg).
+        ("sana_1600m", true, true),
+        // SANA-Sprint 1.6B (epic 8485 / sc-8490): the CFG-free few-step distillation — the guidance
+        // scalar is folded into the trunk via a guidance-embedding (supports_guidance=true) but there is
+        // no cond/uncond combine, so the descriptor advertises supports_true_cfg=false +
+        // supports_negative_prompt=false (the distilled-turbo "guidance is an embedding, no negative"
+        // shape; cf. boogu_image_turbo's CFG-free-without-negative pattern).
+        ("sana_sprint_1600m", true, false),
     ];
     // Every row is covered by the expectation table (no row added without a flag pair here).
     assert_eq!(MODEL_TABLE.len(), expected.len());
@@ -861,6 +870,201 @@ fn sd3_5_manifest_entries_gate_correctly() {
             "{id} loraCompatibility.families"
         );
     }
+}
+
+/// sc-8489 (SANA Phase B2): the SANA builtin-manifest entry gates correctly at the catalog layer —
+/// family `sana`, `capabilities == ["text_to_image"]` only (edit/reference rejected), the UN-gated
+/// `SceneWorks/Sana_1600M_1024px_mlx` MLX re-host (NOT gated — the mirror carries the NVIDIA
+/// non-commercial NOTICE), dense bf16 (NO `mlx.quantize` — the load path rejects a quant), the
+/// `mlx.minMemoryGb` memory-eligibility lever, the sana LoRA family, and the NVIDIA non-commercial
+/// notice surfaced in the UI description. Parses the embedded builtin manifest (the exact bytes
+/// shipped) so manifest drift on any of these levers fails CI without a real download. The
+/// descriptor-derived guidance/negative/backend surface is covered by
+/// `model_table_rows_resolve_and_flags_match_descriptor`.
+#[test]
+fn sana_manifest_entry_gates_correctly() {
+    use sceneworks_core::builtin_manifests::BUILTIN_MANIFESTS;
+    use sceneworks_core::jsonc::strip_jsonc_comments;
+
+    let raw = BUILTIN_MANIFESTS
+        .iter()
+        .find(|(name, _)| *name == "builtin.models.jsonc")
+        .map(|(_, contents)| *contents)
+        .expect("builtin.models.jsonc present");
+    let manifest: Value =
+        serde_json::from_str(&strip_jsonc_comments(raw)).expect("builtin models parses as JSON");
+    let models = manifest
+        .get("models")
+        .and_then(Value::as_array)
+        .expect("models array");
+    let entry = models
+        .iter()
+        .find(|m| m.get("id").and_then(Value::as_str) == Some("sana_1600m"))
+        .expect("sana_1600m present in builtin.models.jsonc");
+
+    assert_eq!(
+        entry.get("family").and_then(Value::as_str),
+        Some("sana"),
+        "sana family"
+    );
+    // Capability gate: text_to_image ONLY — edit/reference are rejected (base SANA is plain t2i).
+    let caps: Vec<&str> = entry
+        .get("capabilities")
+        .and_then(Value::as_array)
+        .map(|a| a.iter().filter_map(Value::as_str).collect())
+        .unwrap_or_default();
+    assert_eq!(caps, vec!["text_to_image"], "sana capabilities");
+    // UN-gated SceneWorks/* MLX re-host (the mirror carries the NVIDIA non-commercial NOTICE; OK to
+    // ship un-gated with notice, the Krea/Boogu precedent) — so NO `gated: true`.
+    assert_ne!(
+        entry.get("gated").and_then(Value::as_bool),
+        Some(true),
+        "sana is un-gated (re-host carries the notice)"
+    );
+    let repo = entry
+        .get("downloads")
+        .and_then(Value::as_array)
+        .and_then(|d| d.first())
+        .and_then(|d| d.get("repo"))
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    assert_eq!(
+        repo, "SceneWorks/Sana_1600M_1024px_mlx",
+        "sana downloads from the un-gated SceneWorks/* MLX mirror, got {repo:?}"
+    );
+    // Dense bf16: NO `mlx.quantize` (the SANA `load` rejects any `spec.quantize`; the worker resolves
+    // no quant for it via the `supports_quant()` gate). minMemoryGb drives the admit/hide gate.
+    let mlx = entry.get("mlx").expect("sana mlx block");
+    assert!(
+        mlx.get("quantize").is_none(),
+        "sana ships dense bf16 — no mlx.quantize"
+    );
+    assert!(
+        mlx.get("minMemoryGb").and_then(Value::as_u64).is_some(),
+        "sana mlx.minMemoryGb present"
+    );
+    // sana LoRA family declared (reserved; no SANA LoRA wired yet) — an empty list would match every
+    // LoRA (sc-1927).
+    let lora_families: Vec<&str> = entry
+        .get("loraCompatibility")
+        .and_then(|c| c.get("families"))
+        .and_then(Value::as_array)
+        .map(|a| a.iter().filter_map(Value::as_str).collect())
+        .unwrap_or_default();
+    assert_eq!(
+        lora_families,
+        vec!["sana"],
+        "sana loraCompatibility.families"
+    );
+    // NVIDIA non-commercial notice surfaced in the UI description (the gated-with-notice carrier).
+    let desc = entry
+        .get("ui")
+        .and_then(|u| u.get("description"))
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    assert!(
+        desc.contains("NVIDIA") && desc.to_lowercase().contains("non-commercial"),
+        "sana UI description carries the NVIDIA non-commercial notice"
+    );
+}
+
+/// sc-8490: the SANA-Sprint builtin entry gates exactly like base SANA — `sana` family, text_to_image
+/// only (CFG-free few-step distillation, no edit/reference surface), un-gated `SceneWorks/*` MLX
+/// re-host carrying the NVIDIA non-commercial notice, dense bf16 (no mlx.quantize), and the SANA LoRA
+/// family reserved. The few-step default (2 steps) is asserted so a manifest drift to the base 20-step
+/// loop fails CI. Descriptor-derived guidance/negative/backend flags are covered by
+/// `model_table_rows_resolve_and_flags_match_descriptor`.
+#[test]
+fn sana_sprint_manifest_entry_gates_correctly() {
+    use sceneworks_core::builtin_manifests::BUILTIN_MANIFESTS;
+    use sceneworks_core::jsonc::strip_jsonc_comments;
+
+    let raw = BUILTIN_MANIFESTS
+        .iter()
+        .find(|(name, _)| *name == "builtin.models.jsonc")
+        .map(|(_, contents)| *contents)
+        .expect("builtin.models.jsonc present");
+    let manifest: Value =
+        serde_json::from_str(&strip_jsonc_comments(raw)).expect("builtin models parses as JSON");
+    let models = manifest
+        .get("models")
+        .and_then(Value::as_array)
+        .expect("models array");
+    let entry = models
+        .iter()
+        .find(|m| m.get("id").and_then(Value::as_str) == Some("sana_sprint_1600m"))
+        .expect("sana_sprint_1600m present in builtin.models.jsonc");
+
+    assert_eq!(
+        entry.get("family").and_then(Value::as_str),
+        Some("sana"),
+        "sana-sprint family"
+    );
+    // Capability gate: text_to_image ONLY — edit/reference are rejected (Sprint is plain few-step t2i).
+    let caps: Vec<&str> = entry
+        .get("capabilities")
+        .and_then(Value::as_array)
+        .map(|a| a.iter().filter_map(Value::as_str).collect())
+        .unwrap_or_default();
+    assert_eq!(caps, vec!["text_to_image"], "sana-sprint capabilities");
+    // UN-gated SceneWorks/* MLX re-host (the mirror carries the NVIDIA non-commercial NOTICE) — no `gated`.
+    assert_ne!(
+        entry.get("gated").and_then(Value::as_bool),
+        Some(true),
+        "sana-sprint is un-gated (re-host carries the notice)"
+    );
+    let repo = entry
+        .get("downloads")
+        .and_then(Value::as_array)
+        .and_then(|d| d.first())
+        .and_then(|d| d.get("repo"))
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    assert_eq!(
+        repo, "SceneWorks/Sana_Sprint_1.6B_1024px_mlx",
+        "sana-sprint downloads from the un-gated SceneWorks/* MLX mirror, got {repo:?}"
+    );
+    // Few-step distillation: default steps = 2 (a drift to base SANA's 20-step loop fails here).
+    assert_eq!(
+        entry
+            .get("defaults")
+            .and_then(|d| d.get("steps"))
+            .and_then(Value::as_u64),
+        Some(2),
+        "sana-sprint is a few-step (2-step) distillation"
+    );
+    // Dense bf16: NO `mlx.quantize`.
+    let mlx = entry.get("mlx").expect("sana-sprint mlx block");
+    assert!(
+        mlx.get("quantize").is_none(),
+        "sana-sprint ships dense bf16 — no mlx.quantize"
+    );
+    assert!(
+        mlx.get("minMemoryGb").and_then(Value::as_u64).is_some(),
+        "sana-sprint mlx.minMemoryGb present"
+    );
+    // sana LoRA family declared (reserved; no SANA LoRA wired yet).
+    let lora_families: Vec<&str> = entry
+        .get("loraCompatibility")
+        .and_then(|c| c.get("families"))
+        .and_then(Value::as_array)
+        .map(|a| a.iter().filter_map(Value::as_str).collect())
+        .unwrap_or_default();
+    assert_eq!(
+        lora_families,
+        vec!["sana"],
+        "sana-sprint loraCompatibility.families"
+    );
+    // NVIDIA non-commercial notice surfaced in the UI description (the gated-with-notice carrier).
+    let desc = entry
+        .get("ui")
+        .and_then(|u| u.get("description"))
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    assert!(
+        desc.contains("NVIDIA") && desc.to_lowercase().contains("non-commercial"),
+        "sana-sprint UI description carries the NVIDIA non-commercial notice"
+    );
 }
 
 /// sc-3513: the worker's `JobType::ImageEdit` dispatch arm delegates to

@@ -9789,25 +9789,38 @@ fn builtin_manifest_registers_the_wan_vace_fun_model() {
         "expose only the validated VACE mode"
     );
 
-    // Download = the diffusers conversion (loadable), never the raw VideoX-Fun upstream.
-    let download = model["downloads"]
-        .as_array()
-        .and_then(|downloads| downloads.first())
-        .expect("a download entry");
-    assert_eq!(download["provider"], "huggingface");
-    assert_eq!(download["repo"], "linoyts/Wan2.2-VACE-Fun-14B-diffusers");
-    assert_ne!(
-        download["repo"], "alibaba-pai/Wan2.2-VACE-Fun-A14B",
-        "must not point at the raw VideoX-Fun repo (it does not load via diffusers/native)"
+    // Per-platform download split (sc-8613): macOS pulls the native MLX VACE-Fun checkpoint;
+    // Windows/Linux pull the DIFFERENT candle Wan2.1-VACE-14B diffusers tree the candle `wan_vace`
+    // provider reads (CANDLE_WAN_VACE_REPO). Both are diffusers-loadable conversions, never the raw
+    // VideoX-Fun upstream. Every OS must have exactly one install path.
+    let downloads = model["downloads"].as_array().expect("downloads array");
+    let download_for = |os: &str| {
+        downloads
+            .iter()
+            .find(|download| {
+                download["platforms"]
+                    .as_array()
+                    .map(|platforms| platforms.iter().any(|p| p.as_str() == Some(os)))
+                    .unwrap_or(false)
+            })
+            .unwrap_or_else(|| panic!("a download covering {os}"))
+    };
+    let macos = download_for("macos");
+    assert_eq!(macos["provider"], "huggingface");
+    assert_eq!(macos["repo"], "linoyts/Wan2.2-VACE-Fun-14B-diffusers");
+    let windows = download_for("windows");
+    assert_eq!(windows["repo"], "Wan-AI/Wan2.1-VACE-14B-diffusers");
+    assert_eq!(
+        download_for("linux")["repo"],
+        "Wan-AI/Wan2.1-VACE-14B-diffusers",
+        "Linux rides the same candle checkpoint as Windows"
     );
-    let platforms: Vec<&str> = download["platforms"]
-        .as_array()
-        .expect("platforms array")
-        .iter()
-        .filter_map(Value::as_str)
-        .collect();
-    for os in ["macos", "windows", "linux"] {
-        assert!(platforms.contains(&os), "download should cover {os}");
+    for download in downloads {
+        assert_eq!(download["provider"], "huggingface");
+        assert_ne!(
+            download["repo"], "alibaba-pai/Wan2.2-VACE-Fun-A14B",
+            "must not point at the raw VideoX-Fun repo (it does not load via diffusers/native)"
+        );
     }
 
     // Native-only: an MLX block, and NO Torch GGUF quantization variants.
