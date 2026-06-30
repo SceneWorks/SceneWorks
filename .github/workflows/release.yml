@@ -73,12 +73,14 @@ jobs:
       # `tauri build` runs the beforeBuildCommand (sidecar + web/api + the nested
       # binary pre-signing from #715) and, because the APPLE_* env is set, signs +
       # notarizes + staples the .app. This is the heavy MLX-from-source build; the
-      # nax runner keeps it warm. `--config createUpdaterArtifacts:true` additionally
+      # nax runner keeps it warm. `--config updater.release.conf.json` additionally
       # emits the `.app.tar.gz` updater payload + `.sig` for the in-app updater
-      # (sc-1355). It's enabled HERE only — kept out of the committed tauri.conf.json
-      # so non-release builds don't require the signing key.
+      # (sc-1355). It's enabled HERE only (a release-only config overlay) — kept out
+      # of the committed tauri.conf.json so non-release builds don't require the
+      # signing key. Passed as a file, not inline JSON, so the same invocation is
+      # quoting-safe under PowerShell on the Windows runner too.
       - name: Build, sign & notarize the desktop bundle
-        run: npm --prefix apps/desktop run build -- --config '{"bundle":{"createUpdaterArtifacts":true}}'
+        run: npm --prefix apps/desktop run build -- --config updater.release.conf.json
 
       # Tauri staples the .app but not the wrapping .dmg — staple the DMG so the
       # downloaded artifact verifies offline (shared script; same as `release:mac`).
@@ -189,10 +191,11 @@ jobs:
       # sidecar by default (nvcc compiles every provider's CUDA kernels) and stages
       # the ffmpeg resource, then packages both installers. The ~2.7 GB CUDA/cuDNN/
       # onnxruntime runtime is downloaded on first run (cuda_provision.rs), so the
-      # installers stay small. `--config createUpdaterArtifacts:true` also signs the
+      # installers stay small. `--config updater.release.conf.json` also signs the
       # NSIS `-setup.exe` updater payload (+ `.sig`) for the in-app updater (sc-1355).
+      # Passed as a file (not inline JSON) so it survives PowerShell quoting here.
       - name: Build Windows candle installers (NSIS + MSI)
-        run: npm --prefix apps/desktop run build -- --bundles nsis,msi --config '{"bundle":{"createUpdaterArtifacts":true}}'
+        run: npm --prefix apps/desktop run build -- --bundles nsis,msi --config updater.release.conf.json
       # Upload to the draft release the macos job created. The user ships the MSI
       # (per desktop-windows.yml); the NSIS .exe is attached too as an alternative.
       # --clobber so re-running the job replaces rather than 409s. Then merge the
