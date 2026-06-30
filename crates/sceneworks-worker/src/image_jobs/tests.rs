@@ -1547,6 +1547,71 @@ fn boogu_q4_real_weights_loads_and_generates() {
     );
 }
 
+/// Mixed-precision tier verify (sc-8513): load a tier with a PACKED Q4/Q8 transformer + a DENSE bf16
+/// text encoder and render. `SCENEWORKS_KLEIN_QUANT` sets the load hint — `none` (default) keeps the
+/// dense TE bf16 (the flux2 loader still detects + loads the packed transformer as-is, sc-5917), while
+/// `q4`/`q8` would also quantize the dense TE at load. Confirms the "quantize the transformer only,
+/// keep the TE bf16" tier works end to end. `SCENEWORKS_KLEIN_DIR` = the built tier;
+/// `SCENEWORKS_KLEIN_ENGINE` = the variant (`flux2_klein_9b` default). Run:
+/// `SCENEWORKS_KLEIN_DIR=… SCENEWORKS_KLEIN_QUANT=none cargo test -p sceneworks-worker --release --lib -- --ignored klein_tier_real_weights`.
+#[cfg(target_os = "macos")]
+#[test]
+#[ignore = "needs a built FLUX.2-klein tier dir + a high-memory Metal device"]
+fn klein_tier_real_weights_loads_and_generates() {
+    let dir = std::path::PathBuf::from(
+        std::env::var("SCENEWORKS_KLEIN_DIR")
+            .expect("set SCENEWORKS_KLEIN_DIR to a built klein tier"),
+    );
+    let engine =
+        std::env::var("SCENEWORKS_KLEIN_ENGINE").unwrap_or_else(|_| "flux2_klein_9b".to_owned());
+    let quant = match std::env::var("SCENEWORKS_KLEIN_QUANT").as_deref() {
+        Ok("q4") => Some(gen_core::Quant::Q4),
+        Ok("q8") => Some(gen_core::Quant::Q8),
+        _ => None,
+    };
+    let size: u32 = std::env::var("SCENEWORKS_KLEIN_SIZE")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(512);
+    eprintln!(
+        "[klein] loading {engine} from {} ({quant:?})…",
+        dir.display()
+    );
+    let generator = load_engine(&engine, dir, quant, Vec::new(), None).unwrap();
+    eprintln!("[klein] LOADED — generating {size}²…");
+    let cancel = gen_core::CancelFlag::new();
+    let (w, h, pixels) = generate_one(
+        generator.as_ref(),
+        "a serene mountain lake at dawn",
+        size,
+        size,
+        42,
+        8,
+        Some(4.0),
+        None,
+        None,
+        &[],
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        false,
+        &PromptEnhance::default(),
+        &cancel,
+        &mut |_| {},
+    )
+    .unwrap();
+    eprintln!("[klein] GENERATED {w}x{h}");
+    assert_eq!((w, h), (size, size));
+    assert_eq!(pixels.len(), (size * size * 3) as usize);
+    assert!(
+        pixels.windows(2).any(|p| p[0] != p[1]),
+        "render is flat (degenerate)"
+    );
+}
+
 /// bf16 tier verify (sc-8513, epic 8506): load the DENSE Ideogram 4 `bf16/` tier (`Quant::None`) from
 /// the shared `SceneWorks/ideogram-4` repo through the real worker `ideogram_4` engine path and render.
 /// Proves the macOS MLX lane loads the cross-repo bf16 (resolved by `resolve_weights_dir` when

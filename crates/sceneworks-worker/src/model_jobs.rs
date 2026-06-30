@@ -2446,7 +2446,9 @@ mod tier_builder {
                 "scheduler",
                 "model_index.json",
             ],
-            "flux2_dev_quant" => &["text_encoder", "vae", "tokenizer", "model_index.json"],
+            "flux2_dev_quant" | "flux2_klein_quant" => {
+                &["text_encoder", "vae", "tokenizer", "model_index.json"]
+            }
             other => panic!("unknown SC8513_CONVERTER {other}"),
         }
     }
@@ -2518,7 +2520,15 @@ mod tier_builder {
                 "sd3_5_medium_quant" => {
                     convert_sd3_prequant(&src, &out, Sd3Variant::Medium, bits, group_size)
                 }
-                "flux2_dev_quant" => convert_flux2_dev_prequant(&src, &out, bits, group_size),
+                // FLUX.2-dev (Mistral TE) and FLUX.2-klein (Qwen3 TE) share the family
+                // converter. `quantize_flux2_text_encoder_dir`'s `is_target` matches only Mistral
+                // layer names, so on klein the Qwen3 TE stays DENSE bf16 — exactly epic 8506's
+                // "quantize the transformer, keep the TE bf16" for a non-standard TE (sc-8711).
+                // The same call yields a packed transformer + dense bf16 Qwen3 TE; the worker loads
+                // it with Quant::None (`DENSE_TE_TIER_MODELS`) so the dense TE is never re-quantized.
+                "flux2_dev_quant" | "flux2_klein_quant" => {
+                    convert_flux2_dev_prequant(&src, &out, bits, group_size)
+                }
                 other => panic!("unknown SC8513_CONVERTER {other}"),
             };
             result.unwrap_or_else(|error| panic!("production convert failed: {error}"));

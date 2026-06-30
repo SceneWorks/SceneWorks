@@ -300,7 +300,22 @@ const STANDARD_TIER_MODELS: &[&str] = &[
     "z_image_turbo",
     "z_image",
     "z_image_edit",
+    // FLUX.2-klein (sc-8711): the two distilled weight variants ship the standard q4/q8/bf16
+    // turnkey, but with a DENSE bf16 Qwen3 text encoder in every tier (only the transformer is
+    // packed) — so they additionally appear in [`DENSE_TE_TIER_MODELS`], which forces the load
+    // Quant to None so the dense TE is never re-quantized. `_true_v2` stays on its install-time
+    // single-file→diffusers convert (candle-only) and is not a turnkey yet.
+    "flux2_klein_9b",
+    "flux2_klein_9b_kv",
 ];
+
+/// Standard-tier models whose text encoder ships DENSE bf16 in EVERY tier (epic 8506, sc-8711:
+/// quantize the transformer, keep the TE bf16). Their pre-packed transformer self-describes its
+/// quant on load, so [`resolve_quant`] must return `None` for them — otherwise the load-time
+/// `.quantize()` would re-quantize the dense bf16 TE down to Q4/Q8. Contrast flux2_dev / sd3.5 /
+/// z-image, whose text encoders are packed too, so their Q4/Q8 load-quant is a harmless no-op on
+/// already-packed weights.
+const DENSE_TE_TIER_MODELS: &[&str] = &["flux2_klein_9b", "flux2_klein_9b_kv"];
 
 /// Pick the engine-complete tier subdir of a standard SceneWorks quant-matrix turnkey `root`:
 /// `bf16/` when the request opts out of quantization (`advanced.mlxQuantize <= 0` / "none"), `q8/`
@@ -562,6 +577,13 @@ fn quant_int(value: &Value) -> Option<i64> {
     all(not(target_os = "macos"), feature = "backend-candle")
 ))]
 fn resolve_quant(request: &ImageRequest) -> (Option<Quant>, Option<i64>) {
+    // Dense-TE turnkeys (FLUX.2-klein, sc-8711): the tier subdir already holds a packed transformer
+    // + a DENSE bf16 text encoder, so the load Quant must be None — quantizing here would crush the
+    // dense bf16 TE we deliberately kept full-precision. The packed transformer self-describes its
+    // quant regardless. Tier selection (q4/q8/bf16) is driven by the resolved subdir, not this.
+    if DENSE_TE_TIER_MODELS.contains(&request.model.as_str()) {
+        return (None, None);
+    }
     let raw = request
         .advanced
         .get("mlxQuantize")

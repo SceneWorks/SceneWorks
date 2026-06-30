@@ -1063,11 +1063,16 @@ def test_flux2_klein_manifest_entries_present():
         assert '"adapter": "mlx_flux2"' in block, model_id
         assert '"family": "flux2-klein"' in block, model_id
         assert '"macOnly": true' in block, model_id
-        assert '"gated": true' in block, model_id
+        # sc-8711 (epic 8506): re-hosted as a public, ungated SceneWorks MLX quant-matrix
+        # turnkey (q4/q8/bf16), so the entry is `gated: false` with no credentialHost — the
+        # FLUX Non-Commercial LICENSE.md travels with the weights.
+        assert '"gated": false' in block, model_id
         mlx_block = find_mlx_block(block)
         quant_match = re.search(r'"quantize"\s*:\s*(\d+)', mlx_block)
         assert quant_match is not None, f"{model_id}: mlx.quantize missing"
-        assert int(quant_match.group(1)) == 8, f"{model_id}: quantize should be 8 (sweet spot)"
+        # quantize records the DEFAULT tier (q4); the load Quant is forced to None so the
+        # dense bf16 Qwen3 TE is preserved (DENSE_TE_TIER_MODELS).
+        assert int(quant_match.group(1)) == 4, f"{model_id}: default tier should be q4 (sc-8711)"
         assert '"text_to_image"' in block, model_id
         assert '"character_image"' in block, model_id
 
