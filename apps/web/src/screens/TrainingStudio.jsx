@@ -247,7 +247,7 @@ export function trainingSampleGroups(job, projectId) {
     .filter((group) => group.assets.length);
 }
 
-function TrainingLiveProgress({ jobs, projectId }) {
+function TrainingLiveProgress({ jobs, projectId, onCancel, onPreview }) {
   if (!jobs.length) {
     return null;
   }
@@ -261,15 +261,23 @@ function TrainingLiveProgress({ jobs, projectId }) {
         <span>{jobs.length} active</span>
       </div>
       <div className="training-live-list worker-progress-card-stack">
-        {jobs.map((job) => (
-          <WorkerProgressCard
-            key={job.id}
-            job={job}
-            thumbnailsVariant="image-grid"
-            thumbnailGroups={trainingSampleGroups(job, projectId)}
-            expectedThumbnailCount={4}
-          />
-        ))}
+        {jobs.map((job) => {
+          const sampleGroups = trainingSampleGroups(job, projectId);
+          // Flatten every sample across cycles so the fullscreen preview can page
+          // through the whole run rather than just the clicked group.
+          const sampleScope = sampleGroups.flatMap((group) => group.assets);
+          return (
+            <WorkerProgressCard
+              key={job.id}
+              job={job}
+              thumbnailsVariant="image-grid"
+              thumbnailGroups={sampleGroups}
+              expectedThumbnailCount={4}
+              onCancel={onCancel}
+              onThumbnailClick={onPreview ? (asset) => onPreview(asset, sampleScope) : undefined}
+            />
+          );
+        })}
       </div>
     </section>
   );
@@ -288,6 +296,7 @@ export function TrainingStudio({ mode = "training" } = {}) {
     characters = [],
     gpuOptions = defaultGpuOptions,
     jobs = [],
+    jobAction,
     setPreviewAsset,
     importAsset: importAssetRaw,
     trainingDatasets = [],
@@ -1433,7 +1442,14 @@ export function TrainingStudio({ mode = "training" } = {}) {
             </div>
           </div>
         </div>
-        {datasetLibraryMode ? null : <TrainingLiveProgress jobs={activeTrainingJobs} projectId={activeProject?.id} />}
+        {datasetLibraryMode ? null : (
+          <TrainingLiveProgress
+            jobs={activeTrainingJobs}
+            projectId={activeProject?.id}
+            onCancel={jobAction ? (job) => jobAction(job, "cancel") : undefined}
+            onPreview={setPreviewAsset}
+          />
+        )}
 
         {!authenticated ? (
           <div className="training-empty-state" role="status">
