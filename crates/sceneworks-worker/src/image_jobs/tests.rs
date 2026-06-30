@@ -1366,9 +1366,11 @@ fn flux2_dev_bf16_real_weights_loads_and_generates() {
 #[ignore = "needs a downloaded SceneWorks SD3.5 tier dir + a high-memory Metal device"]
 fn sd3_5_hosted_tier_real_weights_generates_one_image() {
     let dir = std::path::PathBuf::from(
-        std::env::var("SCENEWORKS_SD3_DIR").expect("set SCENEWORKS_SD3_DIR to a downloaded tier dir"),
+        std::env::var("SCENEWORKS_SD3_DIR")
+            .expect("set SCENEWORKS_SD3_DIR to a downloaded tier dir"),
     );
-    let engine = std::env::var("SCENEWORKS_SD3_ENGINE").unwrap_or_else(|_| "sd3_5_large".to_owned());
+    let engine =
+        std::env::var("SCENEWORKS_SD3_ENGINE").unwrap_or_else(|_| "sd3_5_large".to_owned());
     let quant = match std::env::var("SCENEWORKS_SD3_QUANT").as_deref() {
         Ok("bf16") => None,
         Ok("q8") => Some(gen_core::Quant::Q8),
@@ -1382,9 +1384,15 @@ fn sd3_5_hosted_tier_real_weights_generates_one_image() {
         .ok()
         .and_then(|s| s.parse().ok())
         .unwrap_or(8);
-    eprintln!("[sd3-verify] loading {engine} from {} ({quant:?})…", dir.display());
+    eprintln!(
+        "[sd3-verify] loading {engine} from {} ({quant:?})…",
+        dir.display()
+    );
     let generator = load_engine(&engine, dir, quant, Vec::new(), None).unwrap();
     eprintln!("[sd3-verify] LOADED — generating {size}²/{steps}…");
+    // Large/Medium are true-CFG; the distilled Turbo bakes guidance in and REJECTS a guidance value
+    // (CFG off), so omit it there.
+    let guidance = (!engine.contains("turbo")).then_some(3.5);
     let request = GenerationRequest {
         prompt: "a serene mountain lake at dawn".into(),
         width: size,
@@ -1392,7 +1400,7 @@ fn sd3_5_hosted_tier_real_weights_generates_one_image() {
         count: 1,
         seed: Some(42),
         steps: Some(steps),
-        guidance: Some(3.5),
+        guidance,
         ..Default::default()
     };
     let img = match generator.generate(&request, &mut |_| {}).unwrap() {
