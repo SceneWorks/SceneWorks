@@ -266,6 +266,11 @@ const STANDARD_TIER_MODELS: &[&str] = &[
     "sd3_5_large",
     "sd3_5_large_turbo",
     "sd3_5_medium",
+    // Z-Image (sc-8670, Group-B pilot): turbo + base ship the standard q4/q8/bf16 turnkey; the
+    // edit id reuses the turbo turnkey (engine_id z_image_turbo, same repo).
+    "z_image_turbo",
+    "z_image",
+    "z_image_edit",
 ];
 
 /// Pick the engine-complete tier subdir of a standard SceneWorks quant-matrix turnkey `root`:

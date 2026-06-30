@@ -20,19 +20,36 @@
       // work pick sdxl / realvisxl; for identity pick instantid_realvisxl.
       "capabilities": ["text_to_image", "style_variations"],
       "downloads": [
-        // Refresh estimatedSizeBytes from the Hugging Face recursive tree API:
-        // https://huggingface.co/api/models/<repo>/tree/main?recursive=true
-        // The value should match the bytes downloaded after any files filter, not necessarily the full repo.
+        // SceneWorks pre-built MLX quant-matrix turnkey (sc-8670, epic 8506): a public/ungated
+        // re-host of Tongyi-MAI/Z-Image-Turbo (Apache-2.0). Per-tier subdirs, each a complete
+        // from_snapshot tree (packed/dense transformer/ + Qwen3 text_encoder/ + VAE + tokenizer +
+        // scheduler): q4/ (default), q8/, bf16/. Replaces the old diffusers download + install-time
+        // Q8 convert — the worker loads the chosen tier's subdir directly (standard_tier_subdir).
+        // All three components are quantized (DiT + TE + VAE attention) in q4/q8; bf16/ is dense
+        // (the f32 transformer downcast to bf16 for catalog consistency). Sizes are measured on-disk.
         {
           "provider": "huggingface",
-          "repo": "Tongyi-MAI/Z-Image-Turbo",
-          "files": [],
-          "estimatedSizeBytes": 32899667397
+          "repo": "SceneWorks/z-image-turbo-mlx",
+          "files": ["q4/*"],
+          "estimatedSizeBytes": 5909406487
+        },
+        {
+          "provider": "huggingface",
+          "repo": "SceneWorks/z-image-turbo-mlx",
+          "files": ["q8/*"],
+          "estimatedSizeBytes": 10998523666
+        },
+        {
+          "provider": "huggingface",
+          "repo": "SceneWorks/z-image-turbo-mlx",
+          "files": ["bf16/*"],
+          "estimatedSizeBytes": 20538406851
         }
       ],
       "paths": {
-        "model": "${HF_CACHE}/Tongyi-MAI/Z-Image-Turbo"
+        "model": "${HF_CACHE}/SceneWorks/z-image-turbo-mlx"
       },
+      "gated": false,
       "defaults": {
         "resolution": "1024x1024",
         "steps": 8,
@@ -64,7 +81,9 @@
       // Q4 brings this within tighter Mac budgets via advanced.mlxQuantize.
       "mlx": {
         "minMemoryGb": 40,
-        "quantize": 8,
+        // q4/ is the shipped default tier (sc-8670); q8/ + bf16/ are hosted and selectable via
+        // advanced.mlxQuantize (standard_tier_subdir resolves the subdir).
+        "quantize": 4,
         "limits": {
           "samplers": ["default", "euler", "euler_ancestral", "heun", "dpmpp_2m", "dpmpp_sde", "uni_pc", "lcm", "ddim"],
           "schedulers": ["default", "normal", "simple", "karras", "exponential", "sgm_uniform", "beta", "ddim_uniform"]
@@ -120,18 +139,33 @@
       "adapter": "z_image_diffusers",
       "capabilities": ["text_to_image", "style_variations"],
       "downloads": [
-        // Refresh estimatedSizeBytes from the Hugging Face recursive tree API:
-        // https://huggingface.co/api/models/<repo>/tree/main?recursive=true
+        // SceneWorks pre-built MLX quant-matrix turnkey (sc-8670, epic 8506): public/ungated re-host
+        // of the undistilled Tongyi-MAI/Z-Image base (Apache-2.0, bf16-native source). Per-tier
+        // self-contained subdirs q4/ (default), q8/, bf16/ — the worker loads the chosen tier's
+        // subdir directly (standard_tier_subdir). Sizes are measured on-disk.
         {
           "provider": "huggingface",
-          "repo": "Tongyi-MAI/Z-Image",
-          "files": [],
-          "estimatedSizeBytes": 20547479575
+          "repo": "SceneWorks/z-image-mlx",
+          "files": ["q4/*"],
+          "estimatedSizeBytes": 5907321677
+        },
+        {
+          "provider": "huggingface",
+          "repo": "SceneWorks/z-image-mlx",
+          "files": ["q8/*"],
+          "estimatedSizeBytes": 10996438540
+        },
+        {
+          "provider": "huggingface",
+          "repo": "SceneWorks/z-image-mlx",
+          "files": ["bf16/*"],
+          "estimatedSizeBytes": 20538412852
         }
       ],
       "paths": {
-        "model": "${HF_CACHE}/Tongyi-MAI/Z-Image"
+        "model": "${HF_CACHE}/SceneWorks/z-image-mlx"
       },
+      "gated": false,
       "defaults": {
         "resolution": "1024x1024",
         // Undistilled base — the card recommends 28–50 steps; 50 matches the reference
@@ -159,7 +193,8 @@
       // budgets via advanced.mlxQuantize.
       "mlx": {
         "minMemoryGb": 48,
-        "quantize": 8,
+        // q4/ default tier (sc-8670); q8/ + bf16/ hosted + selectable via advanced.mlxQuantize.
+        "quantize": 4,
         "limits": {
           "samplers": ["default", "euler", "euler_ancestral", "heun", "dpmpp_2m", "dpmpp_sde", "uni_pc", "lcm", "ddim"],
           "schedulers": ["default", "normal", "simple", "karras", "exponential", "sgm_uniform", "beta", "ddim_uniform"]
@@ -201,16 +236,30 @@
       "adapter": "z_image_diffusers",
       "capabilities": ["edit_image", "image_to_image"],
       "downloads": [
+        // Shares the Turbo turnkey (sc-8670) — img2img runs the same Turbo weights/tier subdirs.
         {
           "provider": "huggingface",
-          "repo": "Tongyi-MAI/Z-Image-Turbo",
-          "files": [],
-          "estimatedSizeBytes": 32899667397
+          "repo": "SceneWorks/z-image-turbo-mlx",
+          "files": ["q4/*"],
+          "estimatedSizeBytes": 5909406487
+        },
+        {
+          "provider": "huggingface",
+          "repo": "SceneWorks/z-image-turbo-mlx",
+          "files": ["q8/*"],
+          "estimatedSizeBytes": 10998523666
+        },
+        {
+          "provider": "huggingface",
+          "repo": "SceneWorks/z-image-turbo-mlx",
+          "files": ["bf16/*"],
+          "estimatedSizeBytes": 20538406851
         }
       ],
       "paths": {
-        "model": "${HF_CACHE}/Tongyi-MAI/Z-Image-Turbo"
+        "model": "${HF_CACHE}/SceneWorks/z-image-turbo-mlx"
       },
+      "gated": false,
       "defaults": {
         "resolution": "1024x1024",
         "steps": 8,
