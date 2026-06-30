@@ -1721,16 +1721,35 @@
       "macOnly": true,
       "downloads": [
         {
-          // Gated repo (FLUX Non-Commercial License). Whole-repo download (~49 GiB
-          // — Qwen3 text embedder + Flux2 transformer + VAE).
+          // SceneWorks pre-quantized MLX turnkey (sc-8711, epic 8506): a public/ungated re-host of
+          // black-forest-labs/FLUX.2-klein-9B under the FLUX Non-Commercial License (LICENSE.md
+          // travels with the weights — no BFL token or license click). Per-tier subdirs: q4/ (the
+          // default), q8/, bf16/. UNLIKE flux2-dev, only the transformer is packed in q4/q8 — the
+          // 8B Qwen3 text encoder stays DENSE bf16 in every tier (epic 8506: quantize the
+          // transformer, keep the TE bf16), so the worker loads each tier with Quant::None
+          // (`DENSE_TE_TIER_MODELS`). Replaces the old gated 49 GiB whole-repo + load-time quantize.
           "provider": "huggingface",
-          "repo": "black-forest-labs/FLUX.2-klein-9B",
-          "files": [],
-          "estimatedSizeBytes": 52613349376
+          "repo": "SceneWorks/flux2-klein-9b-mlx",
+          "files": ["q4/*"],
+          "estimatedSizeBytes": 21700000000
+        },
+        {
+          "provider": "huggingface",
+          "repo": "SceneWorks/flux2-klein-9b-mlx",
+          "files": ["q8/*"],
+          "estimatedSizeBytes": 26100000000
+        },
+        {
+          // bf16/ — dense transformer + dense Qwen3 TE, the max-fidelity tier. Selectable via
+          // per-variant tracking (sc-8508/8509).
+          "provider": "huggingface",
+          "repo": "SceneWorks/flux2-klein-9b-mlx",
+          "files": ["bf16/*"],
+          "estimatedSizeBytes": 34600000000
         }
       ],
       "paths": {
-        "model": "${HF_CACHE}/black-forest-labs/FLUX.2-klein-9B"
+        "model": "${HF_CACHE}/SceneWorks/flux2-klein-9b-mlx"
       },
       "defaults": {
         // Step-distilled to 4 steps; guidance MUST be 1.0 on distilled klein
@@ -1750,23 +1769,24 @@
         "families": ["flux2"],
         "types": ["style", "enhance", "character"]
       },
-      // Q8 sweet spot on M-series: same per-step speed as bf16, ~25% peak
-      // memory reduction. minMemoryGb tracks bf16 peak ~36 GB measured at
-      // 1024² 4-step on M5 Max; 64 GB Macs are well in range.
+      // Default tier is q4 (packed transformer + dense bf16 Qwen3 TE). minMemoryGb tracks the
+      // default q4 footprint with headroom; the dense TE (~16 GB) dominates the floor, and
+      // generate is activation-bound at 1024²/4-step. The bf16 tier needs more — per-tier memory
+      // tracking is sc-8508/8509. `quantize: 4` records the DEFAULT tier; the actual load Quant is
+      // forced to None (`DENSE_TE_TIER_MODELS`) so the dense bf16 TE is preserved.
       "mlx": {
         "minMemoryGb": 42,
-        "quantize": 8
+        "quantize": 4
       },
-      // Gated FLUX Non-Commercial License (same posture as flux_dev: accept
-      // license + add HF token before downloading). Generations are
-      // non-commercial use only — matches SceneWorks's overall non-commercial
-      // posture, so no new app-level guardrail beyond the existing one.
-      "gated": true,
-      "credentialHost": "huggingface.co",
-      "licenseUrl": "https://huggingface.co/black-forest-labs/FLUX.2-klein-9B",
+      // SceneWorks public/ungated re-host (LICENSE.md travels with the weights). FLUX
+      // Non-Commercial License — generations are non-commercial use only, matching SceneWorks's
+      // overall non-commercial posture, so no new app-level guardrail beyond the existing one. No
+      // HF token or license click needed before downloading.
+      "gated": false,
+      "licenseUrl": "https://huggingface.co/SceneWorks/flux2-klein-9b-mlx/blob/main/LICENSE.md",
       "ui": {
         "label": "FLUX.2 [klein] 9B",
-        "description": "Black Forest Labs FLUX.2 [klein] 9B — 4-step distilled text-to-image + reference editing, MLX-only (Apple Silicon). 9B flow transformer + 8B Qwen3 text embedder; ~36 GB bf16 peak at 1024². Distributed under the FLUX Non-Commercial License (gated): accept the license at huggingface.co/black-forest-labs/FLUX.2-klein-9B and add a Hugging Face token under Settings → Service credentials before downloading. For faster reference editing on the same architecture, see FLUX.2 [klein] 9B-KV.",
+        "description": "Black Forest Labs FLUX.2 [klein] 9B — 4-step distilled text-to-image + reference editing, MLX-only (Apple Silicon). 9B flow transformer + 8B Qwen3 text embedder; ~36 GB bf16 peak at 1024². Pre-quantized and hosted by SceneWorks (Q4 default ~22 GB; Q8 and bf16 selectable) — downloads ready-to-run with no install-time conversion. Only the transformer is quantized; the Qwen3 text encoder stays full-precision bf16 in every tier for fidelity. Distributed under the FLUX Non-Commercial License (non-commercial use only); SceneWorks hosts a public, ungated re-host, so no Hugging Face token or license acceptance is needed before downloading. For faster reference editing on the same architecture, see FLUX.2 [klein] 9B-KV.",
         "recommendedFor": ["text_to_image", "character_image", "style_variations"],
         "pid": { "checkpointId": "pid_flux2" },
         // Edit-style backbone (Flux2KleinEdit handles reference natively; no
@@ -1834,14 +1854,30 @@
       "macOnly": true,
       "downloads": [
         {
+          // SceneWorks pre-quantized MLX turnkey (sc-8711, epic 8506): public/ungated re-host of
+          // black-forest-labs/FLUX.2-klein-9b-kv. Per-tier subdirs q4/ (default), q8/, bf16/ — only
+          // the transformer is packed; the Qwen3 TE stays DENSE bf16 in every tier (Quant::None at
+          // load via `DENSE_TE_TIER_MODELS`). Replaces the old gated whole-repo + load-time quantize.
           "provider": "huggingface",
-          "repo": "black-forest-labs/FLUX.2-klein-9b-kv",
-          "files": [],
-          "estimatedSizeBytes": 52613349376
+          "repo": "SceneWorks/flux2-klein-9b-kv-mlx",
+          "files": ["q4/*"],
+          "estimatedSizeBytes": 21700000000
+        },
+        {
+          "provider": "huggingface",
+          "repo": "SceneWorks/flux2-klein-9b-kv-mlx",
+          "files": ["q8/*"],
+          "estimatedSizeBytes": 26100000000
+        },
+        {
+          "provider": "huggingface",
+          "repo": "SceneWorks/flux2-klein-9b-kv-mlx",
+          "files": ["bf16/*"],
+          "estimatedSizeBytes": 34600000000
         }
       ],
       "paths": {
-        "model": "${HF_CACHE}/black-forest-labs/FLUX.2-klein-9b-kv"
+        "model": "${HF_CACHE}/SceneWorks/flux2-klein-9b-kv-mlx"
       },
       "defaults": {
         "resolution": "1024x1024",
@@ -1859,16 +1895,17 @@
         "families": ["flux2"],
         "types": ["style", "enhance", "character"]
       },
+      // Default tier q4 (packed transformer + dense bf16 Qwen3 TE); the actual load Quant is forced
+      // to None (`DENSE_TE_TIER_MODELS`) so the dense TE is preserved. Per-tier memory: sc-8508/8509.
       "mlx": {
         "minMemoryGb": 42,
-        "quantize": 8
+        "quantize": 4
       },
-      "gated": true,
-      "credentialHost": "huggingface.co",
-      "licenseUrl": "https://huggingface.co/black-forest-labs/FLUX.2-klein-9b-kv",
+      "gated": false,
+      "licenseUrl": "https://huggingface.co/SceneWorks/flux2-klein-9b-kv-mlx/blob/main/LICENSE.md",
       "ui": {
         "label": "FLUX.2 [klein] 9B-KV",
-        "description": "A KV-optimized distill of FLUX.2 [klein] 9B: text-to-image, reference editing, and style variations, plus KV-cache acceleration that makes reference editing ~2.4× faster than the base 9B edit path on Apple Silicon (validated M5 Max 128 GB, sc-2163). The cache engages automatically when you attach a reference; without one it runs plain text-to-image on par with the base 9B (sc-2173). Distributed under the FLUX Non-Commercial License (gated). Same ~36 GB bf16 peak at 1024² as the base 9B.",
+        "description": "A KV-optimized distill of FLUX.2 [klein] 9B: text-to-image, reference editing, and style variations, plus KV-cache acceleration that makes reference editing ~2.4× faster than the base 9B edit path on Apple Silicon (validated M5 Max 128 GB, sc-2163). The cache engages automatically when you attach a reference; without one it runs plain text-to-image on par with the base 9B (sc-2173). Pre-quantized and hosted by SceneWorks (Q4 default ~22 GB; Q8 and bf16 selectable) — only the transformer is quantized, the Qwen3 text encoder stays full-precision bf16 in every tier. Distributed under the FLUX Non-Commercial License (non-commercial use only); SceneWorks hosts a public, ungated re-host, so no Hugging Face token or license acceptance is needed before downloading. Same ~36 GB bf16 peak at 1024² as the base 9B.",
         "recommendedFor": ["character_image"],
         "pid": { "checkpointId": "pid_flux2" },
         // Same edit-style knob as the base 9B (Flux2KleinEdit). The cache
