@@ -197,6 +197,13 @@ fn model_repo(request: &ImageRequest, model: &ResolvedModel) -> String {
         .to_owned()
 }
 
+/// The separate `SceneWorks/ideogram-4` repo that hosts Ideogram 4's bf16 tree under `bf16/` — shared
+/// by the candle off-Mac lane (sc-6859) and, on macOS, the selectable full-precision MLX tier
+/// (sc-8513). The MLX `q4/`/`q8/` turnkey lives in `SceneWorks/ideogram-4-mlx`; bf16 is resolved from
+/// THIS repo rather than duplicated. (The candle lane has its own cfg-gated [`CANDLE_IDEOGRAM_REPO`].)
+#[cfg(target_os = "macos")]
+const IDEOGRAM_BF16_REPO: &str = "SceneWorks/ideogram-4";
+
 /// Resolve the weights snapshot directory: an explicit `modelPath` dir wins, else the
 /// HuggingFace cache snapshot for the model repo. `None` when the model is not a known
 /// engine family or its snapshot is absent. Available on the candle lane too (sc-5501): the
@@ -227,6 +234,28 @@ pub(crate) fn resolve_weights_dir(
     // turbo variant (mlx-gen #488) shares the same turnkey — each subdir also carries the bundled
     // `turbo_lora.safetensors` the `ideogram_4_turbo` engine installs at load.
     if request.model == "ideogram_4" || request.model == "ideogram_4_turbo" {
+        // bf16 (sc-8513, epic 8506) is the SHARED `SceneWorks/ideogram-4` repo's `bf16/` subdir — the
+        // same full-precision tree the candle off-Mac lane loads (sc-6859) — NOT duplicated into the
+        // MLX turnkey. When the macOS request opts into bf16 (advanced mlxQuantize<=0) AND it is
+        // downloaded, resolve there (the dense weights load with no quantize); else the q4 (default)/q8
+        // turnkey subdir. A partial bf16 download falls back rather than half-loading. (macOS/MLX only —
+        // the candle lane resolves bf16 through its own `candle_ideogram_subdir` path, unchanged.)
+        #[cfg(target_os = "macos")]
+        {
+            let wants_bf16 = request
+                .advanced
+                .get("mlxQuantize")
+                .and_then(|v| v.as_i64().or_else(|| v.as_str()?.trim().parse().ok()))
+                .is_some_and(|bits| bits <= 0);
+            if wants_bf16 {
+                if let Some(bf16) = huggingface_snapshot_dir(&settings.data_dir, IDEOGRAM_BF16_REPO)
+                    .map(|root| root.join("bf16"))
+                    .filter(|dir| dir.join("transformer/model.safetensors").is_file())
+                {
+                    return Ok(Some(bf16));
+                }
+            }
+        }
         return Ok(snapshot.map(|root| ideogram_model_subdir(&root, request)));
     }
     // Boogu (epic 6387) ships a turnkey with pre-packed Q8 `base/ turbo/ edit/` subfolders (default) +

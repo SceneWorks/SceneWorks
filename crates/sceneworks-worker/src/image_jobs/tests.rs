@@ -1478,6 +1478,63 @@ fn krea_2_turbo_bf16_real_weights_loads_and_generates() {
     );
 }
 
+/// bf16 tier verify (sc-8513, epic 8506): load the DENSE Ideogram 4 `bf16/` tier (`Quant::None`) from
+/// the shared `SceneWorks/ideogram-4` repo through the real worker `ideogram_4` engine path and render.
+/// Proves the macOS MLX lane loads the cross-repo bf16 (resolved by `resolve_weights_dir` when
+/// `mlxQuantize<=0`) and generates — the full-precision tier that joins the existing q4/q8. Point
+/// `SCENEWORKS_IDEOGRAM_BF16_DIR` at the downloaded `bf16/` subdir. Asymmetric CFG (guidance 7.0). Run:
+/// `SCENEWORKS_IDEOGRAM_BF16_DIR=… cargo test -p sceneworks-worker --release --lib -- --ignored ideogram_4_bf16_real_weights`.
+#[cfg(target_os = "macos")]
+#[test]
+#[ignore = "needs the downloaded Ideogram 4 bf16 tier + a high-memory Metal device"]
+fn ideogram_4_bf16_real_weights_loads_and_generates() {
+    let dir = std::path::PathBuf::from(
+        std::env::var("SCENEWORKS_IDEOGRAM_BF16_DIR")
+            .expect("set SCENEWORKS_IDEOGRAM_BF16_DIR to the downloaded ideogram bf16/ tier dir"),
+    );
+    let size: u32 = std::env::var("SCENEWORKS_IDEOGRAM_SIZE")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(512);
+    eprintln!(
+        "[ideogram-bf16] loading ideogram_4 dense bf16 (Quant::None) from {}…",
+        dir.display()
+    );
+    let generator = load_engine("ideogram_4", dir, None, Vec::new(), None).unwrap();
+    eprintln!("[ideogram-bf16] LOADED — generating {size}²…");
+    let cancel = gen_core::CancelFlag::new();
+    let (w, h, pixels) = generate_one(
+        generator.as_ref(),
+        "a serene mountain lake at dawn",
+        size,
+        size,
+        42,
+        20,
+        Some(7.0),
+        None,
+        None,
+        &[],
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        false,
+        &PromptEnhance::default(),
+        &cancel,
+        &mut |_| {},
+    )
+    .unwrap();
+    eprintln!("[ideogram-bf16] GENERATED {w}x{h}");
+    assert_eq!((w, h), (size, size));
+    assert_eq!(pixels.len(), (size * size * 3) as usize);
+    assert!(
+        pixels.windows(2).any(|p| p[0] != p[1]),
+        "render is flat (degenerate)"
+    );
+}
+
 /// Real-weights smoke (sc-5923): FLUX.2-dev EDIT through the worker `flux2_dev_edit` engine path
 /// (the `flux2_edit_engine_id("flux2_dev")` variant, sc-5919/5922). Loads the SAME converted Q4 dev
 /// snapshot, then renders with a single `Conditioning::Reference` AND with a 2-image
