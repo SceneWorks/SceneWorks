@@ -441,7 +441,9 @@ pub(crate) const MODEL_TABLE: &[ModelRow] = &[
     ModelRow {
         sceneworks_id: "sd3_5_large",
         engine_id: "sd3_5_large",
-        default_repo: "stabilityai/stable-diffusion-3.5-large",
+        // SceneWorks pre-built quant-matrix turnkey (sc-8513): standard_tier_subdir points the engine
+        // at the chosen tier subdir (q4 default / q8 / bf16). Re-host of the gated Stability source.
+        default_repo: "SceneWorks/sd3.5-large-mlx",
         default_steps: 28,
         default_guidance: 3.5,
         adapter_label: "mlx_sd3",
@@ -454,7 +456,9 @@ pub(crate) const MODEL_TABLE: &[ModelRow] = &[
     ModelRow {
         sceneworks_id: "sd3_5_large_turbo",
         engine_id: "sd3_5_large_turbo",
-        default_repo: "stabilityai/stable-diffusion-3.5-large-turbo",
+        // SceneWorks pre-built quant-matrix turnkey (sc-8513): q4 default / q8 / bf16 via
+        // standard_tier_subdir. Re-host of the gated Stability source.
+        default_repo: "SceneWorks/sd3.5-large-turbo-mlx",
         default_steps: 4,
         default_guidance: 0.0,
         adapter_label: "mlx_sd3",
@@ -469,7 +473,9 @@ pub(crate) const MODEL_TABLE: &[ModelRow] = &[
     ModelRow {
         sceneworks_id: "sd3_5_medium",
         engine_id: "sd3_5_medium",
-        default_repo: "stabilityai/stable-diffusion-3.5-medium",
+        // SceneWorks pre-built quant-matrix turnkey (sc-8513): q4 default / q8 / bf16 via
+        // standard_tier_subdir. Re-host of the gated Stability source.
+        default_repo: "SceneWorks/sd3.5-medium-mlx",
         default_steps: 40,
         default_guidance: 5.0,
         adapter_label: "mlx_sd3",
