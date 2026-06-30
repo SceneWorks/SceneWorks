@@ -38,7 +38,9 @@ pub(crate) const MODEL_TABLE: &[ModelRow] = &[
     ModelRow {
         sceneworks_id: "z_image_turbo",
         engine_id: "z_image_turbo",
-        default_repo: "Tongyi-MAI/Z-Image-Turbo",
+        // SceneWorks pre-built quant-matrix turnkey (sc-8670, epic 8506): q4/ (default) + q8/ + bf16/
+        // packed subdirs, resolved by `standard_tier_subdir`. Re-host of Tongyi-MAI/Z-Image-Turbo.
+        default_repo: "SceneWorks/z-image-turbo-mlx",
         default_steps: 8,
         default_guidance: 0.0,
         adapter_label: "mlx_z_image",
@@ -53,7 +55,9 @@ pub(crate) const MODEL_TABLE: &[ModelRow] = &[
     ModelRow {
         sceneworks_id: "z_image",
         engine_id: "z_image",
-        default_repo: "Tongyi-MAI/Z-Image",
+        // SceneWorks pre-built quant-matrix turnkey (sc-8670): q4/ (default) + q8/ + bf16/ subdirs.
+        // Re-host of the undistilled Tongyi-MAI/Z-Image base (bf16-native source).
+        default_repo: "SceneWorks/z-image-mlx",
         default_steps: 50,
         default_guidance: 4.0,
         adapter_label: "mlx_z_image",
@@ -89,7 +93,8 @@ pub(crate) const MODEL_TABLE: &[ModelRow] = &[
     ModelRow {
         sceneworks_id: "z_image_edit",
         engine_id: "z_image_turbo",
-        default_repo: "Tongyi-MAI/Z-Image-Turbo",
+        // Shares the Turbo turnkey (sc-8670) — img2img runs the same Turbo weights/tier subdirs.
+        default_repo: "SceneWorks/z-image-turbo-mlx",
         default_steps: 8,
         default_guidance: 0.0,
         adapter_label: "mlx_z_image",
@@ -1229,9 +1234,10 @@ mod tests {
     }
 
     // sc-8320: the base (non-distilled) `z_image` t2i row resolves to its OWN engine id (not Turbo's),
-    // points at the `Tongyi-MAI/Z-Image` base snapshot, and carries the undistilled defaults (real CFG
-    // guidance 4.0, ~50 steps) — proving it is selectable and routes to the base path distinct from
-    // `z_image_turbo` (which stays 8-step, CFG-free at `Tongyi-MAI/Z-Image-Turbo`).
+    // points at its own snapshot repo, and carries the undistilled defaults (real CFG guidance 4.0,
+    // ~50 steps) — proving it is selectable and routes to the base path distinct from `z_image_turbo`
+    // (which stays 8-step, CFG-free). Repos are the SceneWorks pre-built quant-matrix turnkeys
+    // (sc-8670): base = `SceneWorks/z-image-mlx`, turbo = `SceneWorks/z-image-turbo-mlx`.
     #[cfg(any(
         target_os = "macos",
         all(not(target_os = "macos"), feature = "backend-candle")
@@ -1243,7 +1249,7 @@ mod tests {
             .find(|row| row.sceneworks_id == "z_image")
             .expect("z_image base MODEL_TABLE row");
         assert_eq!(base.engine_id, "z_image");
-        assert_eq!(base.default_repo, "Tongyi-MAI/Z-Image");
+        assert_eq!(base.default_repo, "SceneWorks/z-image-mlx");
         assert_eq!(base.default_steps, 50);
         assert!((base.default_guidance - 4.0).abs() < f32::EPSILON);
         assert_eq!(base.adapter_label, "mlx_z_image");

@@ -87,9 +87,9 @@ fn strict_control_engine(engine_id: &str) -> Option<&'static StrictControlEngine
 /// The catalog DEFAULT control-weights repo for a Fun-Union strict-control engine — the single source of
 /// truth each engine's `controlWeights.repo`-override resolver falls back to. Panics on a non-Fun-Union
 /// engine id (a programming error: only the three registry strict-control streams call this with their
-/// own engine id). Off-Mac the candle strict-control trio keeps its own per-lane default-repo constants
-/// (the qwen candle lane is still the InstantX checkpoint, not the table's 2512-Fun row — that swap is
-/// the separate sc-8350), so this is unused on the candle lane.
+/// own engine id). Off-Mac the candle strict-control lanes keep their own per-lane default-repo constants
+/// (the qwen candle lane now resolves the table's 2512-Fun row, sc-8350), so this is unused on the candle
+/// lane.
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 fn strict_control_default_repo(engine_id: &str) -> &'static str {
     strict_control_engine(engine_id)
