@@ -740,6 +740,37 @@ def test_read_run_config_parses_sample_render_settings():
     assert config.sample_steps == 12
     assert config.sample_guidance_scale == 1.25
     assert config.sample_prompts == ["miraStyle portrait"]
+    # sc-8671: absent sampleCount defaults to 4 (the historical fixed cap).
+    assert config.sample_count == 4
+
+def test_read_run_config_caps_sample_prompts_at_sample_count():
+    # sc-8671: sampleCount caps how many previews render (one per prompt, truncated,
+    # never padded). A pool larger than the count is truncated...
+    capped = read_run_config(
+        {
+            "config": {
+                "advanced": {
+                    "samplePrompts": ["p1", "p2", "p3", "p4", "p5"],
+                    "sampleCount": 2,
+                }
+            }
+        }
+    )
+    assert capped.sample_count == 2
+    assert capped.sample_prompts == ["p1", "p2"]
+
+    # ...and a count at/above the pool size leaves every prompt intact (no duplication).
+    uncapped = read_run_config(
+        {
+            "config": {
+                "advanced": {
+                    "samplePrompts": ["p1", "p2"],
+                    "sampleCount": 8,
+                }
+            }
+        }
+    )
+    assert uncapped.sample_prompts == ["p1", "p2"]
 
 def test_read_run_config_defaults_z_image_samples_to_turbo_guidance():
     config = read_run_config(

@@ -387,24 +387,33 @@ fn boogu_model_subdir(root: &Path, request: &ImageRequest) -> PathBuf {
 /// packed quant, so the resolved `spec.quantize` is a no-op on it. Mirrors [`ideogram_model_subdir`]
 /// (q4/q8 subdirs) with Boogu's packed-transformer filename and a Q8-default selection.
 fn krea_model_subdir(root: &Path, request: &ImageRequest) -> PathBuf {
-    let wants_q4 = request
+    let bits = request
         .advanced
         .get("mlxQuantize")
-        .and_then(|v| v.as_i64().or_else(|| v.as_str()?.trim().parse().ok()))
-        .is_some_and(|bits| bits <= 4);
+        .and_then(|v| v.as_i64().or_else(|| v.as_str()?.trim().parse().ok()));
+    // q4/q8 ship a single packed transformer file; the bf16 tier (sc-8513) is the dense diffusers
+    // tree (SHARDED → only the `.index.json`). Accept either shape.
     let present = |name: &str| -> Option<PathBuf> {
         let dir = root.join(name);
-        dir.join("transformer/diffusion_pytorch_model.safetensors")
-            .is_file()
-            .then_some(dir)
+        let packed = dir
+            .join("transformer/diffusion_pytorch_model.safetensors")
+            .is_file();
+        let sharded = dir
+            .join("transformer/diffusion_pytorch_model.safetensors.index.json")
+            .is_file();
+        (packed || sharded).then_some(dir)
     };
-    if wants_q4 {
-        if let Some(dir) = present("q4") {
-            return dir;
-        }
-    }
-    present("q8")
+    // bits<=0 → bf16 (the dense base; krea's loader takes it with no quantize); bits<=4 → q4; else the
+    // default q8 (the P1-validated near-lossless quant).
+    let preferred = match bits {
+        Some(b) if b <= 0 => "bf16",
+        Some(b) if b <= 4 => "q4",
+        _ => "q8",
+    };
+    present(preferred)
+        .or_else(|| present("q8"))
         .or_else(|| present("q4"))
+        .or_else(|| present("bf16"))
         .unwrap_or_else(|| root.to_path_buf())
 }
 

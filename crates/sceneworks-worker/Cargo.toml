@@ -1310,6 +1310,18 @@ mlx-gen-scail2 = { git = "https://github.com/michaeltrefry/mlx-gen", rev = "863f
 # Depth-Anything-V2 (candle-gen-depth), base z_image t2i, Qwen-Image-2512 base drop-in + 2512-Fun VACE
 # control, FLUX.1-dev control branch. gen-core UNCHANGED at bdf3233 (additive ports), single-rev skew gate
 # stays green. ALL candle-gen-* rev lines move together.
+# Bumped `725190c` -> `8db8e64` (candle-gen #198, sc-8650): the candle trainers now render preview-sample
+# images during LoRA training (the off-Mac twin of MLX sc-5637) — `FlowMatchTrainer::render_sample` + a
+# cadence block emit `TrainingProgress::Sample` from the in-progress adapter (krea/z-image/lens/sdxl/wan).
+# PURELY ADDITIVE; the worker already consumes `TrainingProgress::Sample` (sc-5637 #676), so the import
+# surface is unchanged.
+# Bumped `8db8e64` -> `8a1a565` (candle-gen #199, sc-8670): re-pins candle-gen's OWN gen-core
+# bdf3233 -> 863f98d IN LOCKSTEP with this worker's mlx-gen bump to 863f98d (z-image packed-load,
+# mlx-gen #618). 8a1a565 = candle-gen main (incl. the #198 preview-samples change above) + that
+# gen-core re-pin, so `--features backend-candle --target all` resolves the SINGLE gen-core rev
+# 863f98d (== this worker's mlx pin). gen-core is BYTE-IDENTICAL bdf3233..863f98d; candle links no
+# z-image crate and compiles UNCHANGED. ALL candle-gen-* rev lines move together. (Pre-merge of
+# candle-gen #199 this is the branch commit; flip to the squash-merged main SHA once #199 lands.)
 candle-gen-sdxl = { git = "https://github.com/michaeltrefry/candle-gen", rev = "8a1a56576793ca9d1b084ac76a5833ce1c873e24", features = ["cuda"], optional = true }
 # Candle image providers (sc-5096) -- Windows/CUDA siblings of the mlx-gen image crates above. Each
 # self-registers its engine id into the shared gen_core inventory registry; force-linked in
@@ -1518,7 +1530,7 @@ candle-gen-sam3 = { git = "https://github.com/michaeltrefry/candle-gen", rev = "
 # is the ungated ~100 MB `depth-anything/Depth-Anything-V2-Small-hf` checkpoint, resolved/cached via the
 # worker's existing HF-snapshot mechanism. Same git rev as every candle-gen provider above — candle-gen-depth
 # re-exports gen_core + candle from `candle-gen` (the same workspace pin), so `--features backend-candle`
-# still resolves ONE candle-gen / gen-core build (725190c5 pins the gen-core rev matching the worker's mlx
+# still resolves ONE candle-gen / gen-core build (8a1a565 pins gen-core 863f98d, matching the worker's mlx
 # pin; no skew). The control-lane routing that drives this is the separate sc-8304.
 candle-gen-depth = { git = "https://github.com/michaeltrefry/candle-gen", rev = "8a1a56576793ca9d1b084ac76a5833ce1c873e24", features = ["cuda"], optional = true }
 # DWPose whole-body pose detection off-Mac (sc-5496, epic 5482) — the Windows/Linux/CUDA sibling of the

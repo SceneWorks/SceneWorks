@@ -36,11 +36,13 @@ trait CandleStrictControl: Send + 'static {
     type Model;
 
     /// The [`STRICT_CONTROL_ENGINES`] catalog id whose `supported_kinds` gates this lane's
-    /// `advanced.controlMode` (`z_image_turbo_control` / `flux2_dev_control` / `qwen_image_control`).
+    /// `advanced.controlMode` (`z_image_turbo_control` / `z_image_control` / `flux1_dev_control` /
+    /// `flux2_dev_control` / `qwen_image_control`).
     fn engine_id(&self) -> &'static str;
 
     /// The engine label recorded on assets / `raw_settings` (`candle_zimage_control` /
-    /// `candle_flux2_control` / `candle_qwen_control`) — byte-preserved per the regression contract.
+    /// `candle_flux1_control` / `candle_flux2_control` / `candle_qwen_control`) — byte-preserved per the
+    /// regression contract.
     fn engine_label(&self) -> &'static str;
 
     /// The short `start_gen_stream` tag (`zimage_control` / `flux2_control` / `qwen_control`).

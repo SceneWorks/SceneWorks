@@ -991,7 +991,8 @@
         // Shakker `FLUX.1-dev-ControlNet-Union-Pro-2.0` branch on it (true structural lock, one image per
         // pose) via the `flux1_dev_control` registry generator. The control checkpoint (~3.5 GB) is
         // fetched on the first control job. Surfaces flux_dev in the Character Studio pose picker
-        // (character_image not required — poseLibrary gates it). MLX-only (no candle control lane yet).
+        // (character_image not required — poseLibrary gates it). Served on both macOS (MLX
+        // `flux1_dev_control`) and off-Mac (the candle `Flux1DevControl` strict-control lane, sc-8412).
         "poseLibrary": true,
         // Strict ControlNet → expose the control-lock-strength slider (advanced.controlScale; the Shakker
         // Union-Pro-2.0 README recommends ~0.7, worker default 0.7).
@@ -1534,6 +1535,39 @@
           ],
           "platforms": ["macos"],
           "estimatedSizeBytes": 20600000000
+        },
+        {
+          // Q4 `q4/` subdir of the same MLX turnkey (sc-8513, epic 8506) — the lighter quant tier,
+          // selectable via advanced mlxQuantize<=4 (sc-8508/8509). Same complete-root shape as q8.
+          "provider": "huggingface",
+          "repo": "SceneWorks/krea-2-turbo-mlx",
+          "files": [
+            "q4/transformer/*",
+            "q4/text_encoder/*",
+            "q4/vae/*",
+            "q4/tokenizer/*",
+            "q4/scheduler/*",
+            "q4/model_index.json"
+          ],
+          "platforms": ["macos"],
+          "estimatedSizeBytes": 12488709648
+        },
+        {
+          // bf16 `bf16/` subdir of the MLX turnkey (sc-8513) — the dense max-fidelity tier (SHARDED
+          // transformer). krea's loader takes the dense base with no quantize (Quant::None). Selectable
+          // via advanced mlxQuantize<=0 (sc-8508/8509). Mirror of the dense `krea/Krea-2-Turbo` tree.
+          "provider": "huggingface",
+          "repo": "SceneWorks/krea-2-turbo-mlx",
+          "files": [
+            "bf16/transformer/*",
+            "bf16/text_encoder/*",
+            "bf16/vae/*",
+            "bf16/tokenizer/*",
+            "bf16/scheduler/*",
+            "bf16/model_index.json"
+          ],
+          "platforms": ["macos"],
+          "estimatedSizeBytes": 35678119918
         },
         {
           // Candle (Windows/Linux CUDA) dense bf16 — the ungated public `krea/Krea-2-Turbo` diffusers tree
