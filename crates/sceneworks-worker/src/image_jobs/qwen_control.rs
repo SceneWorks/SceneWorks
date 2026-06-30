@@ -120,7 +120,7 @@ fn qwen_control_guidance(request: &ImageRequest) -> f32 {
 }
 
 /// The (repo, filename) of the ControlNet weights — `advanced.controlWeights.{repo,filename}` overrides,
-/// else the InstantX Union default (parity with the MLX `resolve_control_weights_for`).
+/// else the 2512-Fun-Controlnet-Union default (parity with the MLX `resolve_control_weights_for`).
 fn qwen_control_repo_file(request: &ImageRequest) -> (String, String) {
     let cw = request.advanced.get("controlWeights").and_then(Value::as_object);
     let pick = |key: &str, default: &str| {
@@ -267,7 +267,7 @@ impl CandleStrictControl for QwenStrictControl {
 }
 
 /// Real candle Qwen strict-pose generation: one image per pose, each conditioned on a full DWPose skeleton
-/// (`controlMode` unset) or a canny/depth control map. Resolves the base + InstantX control weights, then
+/// (`controlMode` unset) or a canny/depth control map. Resolves the Qwen-Image-2512 base + 2512-Fun control weights, then
 /// hands a [`QwenStrictControl`] to the shared [`run_candle_strict_control`] driver (validation against
 /// `qwen_image_control`'s `supported_kinds`, per-pose preprocessing, scoring). `generate` takes the
 /// per-job `CancelFlag` + a `Progress` callback (per-step streaming + mid-denoise cancel). The pose path
