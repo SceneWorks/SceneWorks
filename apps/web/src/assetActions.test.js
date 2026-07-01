@@ -33,6 +33,13 @@ async function importBrowser() {
 afterEach(() => {
   delete window.__TAURI__;
   vi.restoreAllMocks();
+  // The last-save-dir feature (sc-8737) persists to localStorage; clear it so tests
+  // that assert "no startDir before any save" aren't contaminated by an earlier save.
+  try {
+    globalThis.localStorage?.clear();
+  } catch {
+    // no-op
+  }
 });
 
 describe("suggestedFilename (sc-8727)", () => {
@@ -110,6 +117,107 @@ describe("saveAssetAs — desktop (sc-8727)", () => {
     const { saveAssetAs } = await importDesktop(invoke);
 
     await expect(saveAssetAs(IMAGE_ASSET)).resolves.toBeNull();
+  });
+});
+
+describe("saveAssetAs — last-used save directory (sc-8737)", () => {
+  // A save_asset_as mock that records the args each invocation received, so we can
+  // assert whether/what startDir was passed across successive saves.
+  function invokeRecording(destination) {
+    const saveCalls = [];
+    const invoke = vi.fn(async (command, args) => {
+      if (command === "resolve_asset_path") return "/data/project_1/assets/images/Mira.png";
+      if (command === "save_asset_as") {
+        saveCalls.push(args);
+        return destination;
+      }
+      return null;
+    });
+    return { invoke, saveCalls };
+  }
+
+  it("passes no startDir before any save has succeeded", async () => {
+    const { invoke, saveCalls } = invokeRecording("/Users/me/Pictures/Mira.png");
+    const { saveAssetAs } = await importDesktop(invoke);
+
+    await saveAssetAs(IMAGE_ASSET);
+
+    expect(saveCalls).toHaveLength(1);
+    expect(saveCalls[0]).not.toHaveProperty("startDir");
+  });
+
+  it("opens the next Save As in the previously-saved POSIX directory", async () => {
+    const { invoke, saveCalls } = invokeRecording("/Users/me/Pictures/Mira.png");
+    const { saveAssetAs } = await importDesktop(invoke);
+
+    await saveAssetAs(IMAGE_ASSET); // first save records /Users/me/Pictures
+    await saveAssetAs(VIDEO_ASSET); // second save should be seeded with it
+
+    expect(saveCalls).toHaveLength(2);
+    expect(saveCalls[0]).not.toHaveProperty("startDir");
+    expect(saveCalls[1].startDir).toBe("/Users/me/Pictures");
+  });
+
+  it("handles a Windows destination path (backslash separators)", async () => {
+    const { invoke, saveCalls } = invokeRecording("C:\\Users\\me\\Pictures\\Mira.png");
+    const { saveAssetAs } = await importDesktop(invoke);
+
+    await saveAssetAs(IMAGE_ASSET);
+    await saveAssetAs(VIDEO_ASSET);
+
+    expect(saveCalls[1].startDir).toBe("C:\\Users\\me\\Pictures");
+  });
+
+  it("persists the last directory across a module reload via localStorage", async () => {
+    const first = invokeRecording("/Users/me/Exports/Mira.png");
+    const firstMod = await importDesktop(first.invoke);
+    await firstMod.saveAssetAs(IMAGE_ASSET);
+
+    // Re-import fresh (as a page reload would) — the module-level fallback is gone,
+    // but localStorage should still carry the directory.
+    const second = invokeRecording("/Users/me/Exports/Clip.mp4");
+    const secondMod = await importDesktop(second.invoke);
+    await secondMod.saveAssetAs(VIDEO_ASSET);
+
+    expect(second.saveCalls[0].startDir).toBe("/Users/me/Exports");
+  });
+
+  it("does not persist a startDir when the save is cancelled", async () => {
+    const invoke = vi.fn(async (command) => {
+      if (command === "resolve_asset_path") return "/data/project_1/assets/images/Mira.png";
+      return null; // cancelled
+    });
+    const { saveAssetAs } = await importDesktop(invoke);
+
+    await saveAssetAs(IMAGE_ASSET); // cancelled → nothing remembered
+
+    // A subsequent save still has no startDir.
+    const { invoke: invoke2, saveCalls } = invokeRecording("/Users/me/Desktop/Clip.mp4");
+    const { saveAssetAs: saveAssetAs2 } = await importDesktop(invoke2);
+    await saveAssetAs2(VIDEO_ASSET);
+    expect(saveCalls[0]).not.toHaveProperty("startDir");
+  });
+
+  it("falls back to an in-memory value when localStorage is unavailable", async () => {
+    const original = Object.getOwnPropertyDescriptor(globalThis, "localStorage");
+    Object.defineProperty(globalThis, "localStorage", {
+      configurable: true,
+      get() {
+        throw new Error("localStorage disabled");
+      },
+    });
+    try {
+      const { invoke, saveCalls } = invokeRecording("/Users/me/Pictures/Mira.png");
+      const { saveAssetAs } = await importDesktop(invoke);
+      await saveAssetAs(IMAGE_ASSET);
+      await saveAssetAs(VIDEO_ASSET);
+      // Storage threw on both read and write; the module-level fallback still carries it.
+      expect(saveCalls[1].startDir).toBe("/Users/me/Pictures");
+    } finally {
+      if (original) {
+        Object.defineProperty(globalThis, "localStorage", original);
+      }
+    }
   });
 });
 

@@ -757,18 +757,40 @@ pub fn resolve_asset_path(project_id: String, relative_path: String) -> Result<S
     Ok(project_file.path.to_string_lossy().into_owned())
 }
 
+/// Decide whether a caller-supplied `start_dir` should seed the native save dialog's
+/// initial directory (sc-8737). Returns `Some(path)` only when the value is non-empty
+/// (after trimming) AND names an existing directory on disk; otherwise `None`, so an
+/// empty/missing/non-directory hint is skipped gracefully rather than erroring the save.
+/// Extracted as a pure helper so the accept/reject decision is unit-testable without the
+/// GUI dialog.
+fn sanitized_start_dir(start_dir: Option<&str>) -> Option<PathBuf> {
+    let trimmed = start_dir?.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let path = PathBuf::from(trimmed);
+    if path.is_dir() {
+        Some(path)
+    } else {
+        None
+    }
+}
+
 /// Save an asset file to a user-chosen destination (sc-8726). Opens the native "save as"
 /// dialog pre-filled with `suggested_filename`, then copies the bytes from `source_path`
 /// to the chosen destination. `source_path` must be an already-resolved absolute path
 /// (see [`resolve_asset_path`]); it is validated to live inside an app-managed root by the
 /// same guard as [`reveal_in_os`] so the frontend can't ask us to copy an arbitrary file
-/// off disk. Returns `Ok(None)` when the user cancels the dialog and `Ok(Some(dest))` with
-/// the absolute destination path on success.
+/// off disk. When `start_dir` names an existing directory the dialog opens there so the
+/// user returns to their last-used save location (sc-8737); an empty/missing/non-existent
+/// hint is ignored. Returns `Ok(None)` when the user cancels the dialog and `Ok(Some(dest))`
+/// with the absolute destination path on success.
 #[tauri::command]
 pub async fn save_asset_as(
     app: AppHandle,
     source_path: String,
     suggested_filename: String,
+    start_dir: Option<String>,
 ) -> Result<Option<String>, String> {
     // Guard the SOURCE before opening any dialog: only files inside the SceneWorks data
     // dir / HF cache may be copied out.
@@ -778,6 +800,9 @@ pub async fn save_asset_as(
     let mut dialog = app.dialog().file();
     if !suggested.is_empty() {
         dialog = dialog.set_file_name(suggested);
+    }
+    if let Some(dir) = sanitized_start_dir(start_dir.as_deref()) {
+        dialog = dialog.set_directory(dir);
     }
     let Some(destination) = dialog
         .blocking_save_file()
@@ -1036,6 +1061,36 @@ mod tests {
             .expect("resolve asset");
         let expected = std::fs::canonicalize(&asset_path).expect("canonical asset");
         assert_eq!(resolved.path, expected);
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// sc-8737: the save dialog's initial-directory hint is applied only when it names
+    /// an existing directory; empty/whitespace, missing, and non-directory paths are all
+    /// skipped (returning `None`) so a stale/bad hint never errors the save — it just
+    /// falls back to the OS default location.
+    #[test]
+    fn start_dir_applied_only_for_existing_directory() {
+        // None / empty / whitespace → skipped.
+        assert_eq!(sanitized_start_dir(None), None);
+        assert_eq!(sanitized_start_dir(Some("")), None);
+        assert_eq!(sanitized_start_dir(Some("   ")), None);
+
+        let root = scratch_dir("startdir");
+        // A path that doesn't exist → skipped.
+        let missing = root.join("does-not-exist");
+        assert_eq!(sanitized_start_dir(Some(&missing.to_string_lossy())), None);
+
+        // A file (not a directory) → skipped.
+        let file = root.join("a-file.png");
+        std::fs::write(&file, b"x").expect("write file");
+        assert_eq!(sanitized_start_dir(Some(&file.to_string_lossy())), None);
+
+        // An existing directory → applied (trimmed).
+        let dir = root.join("saved-here");
+        std::fs::create_dir_all(&dir).expect("create dir");
+        let padded = format!("  {}  ", dir.to_string_lossy());
+        assert_eq!(sanitized_start_dir(Some(&padded)), Some(dir.clone()));
 
         std::fs::remove_dir_all(&root).ok();
     }

@@ -74,6 +74,50 @@ export function suggestedFilename(asset) {
   return `${base}.${ext}`;
 }
 
+// localStorage key + in-memory fallback for the last directory a Save As succeeded in
+// (sc-8737). Persisted across reloads so the next Save As dialog re-opens where the user
+// last saved. localStorage access is guarded (private-mode / non-browser env can throw or
+// be absent); the module-level variable is the fallback so the feature still works within
+// a session even when storage is unavailable.
+const LAST_SAVE_DIR_KEY = "sceneworks:lastSaveDir";
+let lastSaveDirFallback = "";
+
+// The directory portion of an absolute file path, handling both POSIX (`/`) and Windows
+// (`\`) separators. Returns "" when no separator is present (nothing to remember).
+function parentDirectory(destinationPath) {
+  const path = String(destinationPath ?? "");
+  const cut = Math.max(path.lastIndexOf("/"), path.lastIndexOf("\\"));
+  return cut > 0 ? path.slice(0, cut) : "";
+}
+
+// The last successful Save As directory, from localStorage (falling back to the
+// in-memory value if storage is unavailable). "" when nothing has been saved yet.
+function readLastSaveDir() {
+  try {
+    const stored = globalThis.localStorage?.getItem(LAST_SAVE_DIR_KEY);
+    if (stored) {
+      return stored;
+    }
+  } catch {
+    // localStorage blocked/unavailable — fall through to the in-memory value.
+  }
+  return lastSaveDirFallback;
+}
+
+// Remember the directory of the most recent successful save. Always updates the in-memory
+// fallback; best-effort persists to localStorage so it survives a reload.
+function rememberLastSaveDir(directory) {
+  if (!directory) {
+    return;
+  }
+  lastSaveDirFallback = directory;
+  try {
+    globalThis.localStorage?.setItem(LAST_SAVE_DIR_KEY, directory);
+  } catch {
+    // localStorage blocked/unavailable — the in-memory fallback still carries it.
+  }
+}
+
 // Resolve an asset to its absolute on-disk path via the desktop command. Only valid
 // when `isDesktop`; the two desktop-only actions below call this.
 function resolveAbsolutePath(asset) {
@@ -118,11 +162,22 @@ export async function saveAssetAs(asset) {
     return null;
   }
   const absolutePath = await resolveAbsolutePath(asset);
-  // `save_asset_as` returns the destination path, or null when the user cancels.
-  const destination = await tauriInvoke("save_asset_as", {
+  // Seed the dialog with the last directory we saved into so the user returns there
+  // (sc-8737). Only pass a non-empty hint; the Rust side ignores a stale/missing dir.
+  const startDir = readLastSaveDir();
+  const args = {
     sourcePath: absolutePath,
     suggestedFilename: suggestedFilename(asset),
-  });
+  };
+  if (startDir) {
+    args.startDir = startDir;
+  }
+  // `save_asset_as` returns the destination path, or null when the user cancels.
+  const destination = await tauriInvoke("save_asset_as", args);
+  if (destination) {
+    // Remember where this save landed so the next Save As opens in the same place.
+    rememberLastSaveDir(parentDirectory(destination));
+  }
   return destination ?? null;
 }
 
