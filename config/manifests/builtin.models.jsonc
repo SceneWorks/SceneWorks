@@ -571,7 +571,6 @@
           "variant": "q4",
           "default": true,
           "files": ["q4/*"],
-          "default": true,
           "estimatedSizeBytes": 28387655680,
           "footprint": { "diskSizeBytes": 28387655680, "residentMemoryBytes": null, "peakMemoryBytes": null }
         },
