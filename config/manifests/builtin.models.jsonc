@@ -161,20 +161,27 @@
         {
           "provider": "huggingface",
           "repo": "SceneWorks/z-image-mlx",
+          "variant": "q4",
+          "default": true,
           "files": ["q4/*"],
-          "estimatedSizeBytes": 5907321677
+          "estimatedSizeBytes": 5907321677,
+          "footprint": { "diskSizeBytes": 5907321677, "residentMemoryBytes": null, "peakMemoryBytes": null }
         },
         {
           "provider": "huggingface",
           "repo": "SceneWorks/z-image-mlx",
+          "variant": "q8",
           "files": ["q8/*"],
-          "estimatedSizeBytes": 10996438540
+          "estimatedSizeBytes": 10996438540,
+          "footprint": { "diskSizeBytes": 10996438540, "residentMemoryBytes": null, "peakMemoryBytes": null }
         },
         {
           "provider": "huggingface",
           "repo": "SceneWorks/z-image-mlx",
+          "variant": "bf16",
           "files": ["bf16/*"],
-          "estimatedSizeBytes": 20538412852
+          "estimatedSizeBytes": 20538412852,
+          "footprint": { "diskSizeBytes": 20538412852, "residentMemoryBytes": null, "peakMemoryBytes": null }
         }
       ],
       "paths": {
@@ -338,20 +345,27 @@
         {
           "provider": "huggingface",
           "repo": "SceneWorks/qwen-image-mlx",
+          "variant": "q4",
+          "default": true,
           "files": ["q4/*"],
-          "estimatedSizeBytes": 28387655680
+          "estimatedSizeBytes": 28387655680,
+          "footprint": { "diskSizeBytes": 28387655680, "residentMemoryBytes": null, "peakMemoryBytes": null }
         },
         {
           "provider": "huggingface",
           "repo": "SceneWorks/qwen-image-mlx",
+          "variant": "q8",
           "files": ["q8/*"],
-          "estimatedSizeBytes": 38583632655
+          "estimatedSizeBytes": 38583632655,
+          "footprint": { "diskSizeBytes": 38583632655, "residentMemoryBytes": null, "peakMemoryBytes": null }
         },
         {
           "provider": "huggingface",
           "repo": "SceneWorks/qwen-image-mlx",
+          "variant": "bf16",
           "files": ["bf16/*"],
-          "estimatedSizeBytes": 57731960832
+          "estimatedSizeBytes": 57731960832,
+          "footprint": { "diskSizeBytes": 57731960832, "residentMemoryBytes": null, "peakMemoryBytes": null }
         }
       ],
       "paths": {
@@ -457,20 +471,27 @@
         {
           "provider": "huggingface",
           "repo": "SceneWorks/qwen-image-edit-2511-mlx",
+          "variant": "q4",
+          "default": true,
           "files": ["q4/*"],
-          "estimatedSizeBytes": 28387655680
+          "estimatedSizeBytes": 28387655680,
+          "footprint": { "diskSizeBytes": 28387655680, "residentMemoryBytes": null, "peakMemoryBytes": null }
         },
         {
           "provider": "huggingface",
           "repo": "SceneWorks/qwen-image-edit-2511-mlx",
+          "variant": "q8",
           "files": ["q8/*"],
-          "estimatedSizeBytes": 38583632655
+          "estimatedSizeBytes": 38583632655,
+          "footprint": { "diskSizeBytes": 38583632655, "residentMemoryBytes": null, "peakMemoryBytes": null }
         },
         {
           "provider": "huggingface",
           "repo": "SceneWorks/qwen-image-edit-2511-mlx",
+          "variant": "bf16",
           "files": ["bf16/*"],
-          "estimatedSizeBytes": 57731960832
+          "estimatedSizeBytes": 57731960832,
+          "footprint": { "diskSizeBytes": 57731960832, "residentMemoryBytes": null, "peakMemoryBytes": null }
         }
       ],
       "paths": {
@@ -547,21 +568,28 @@
         {
           "provider": "huggingface",
           "repo": "SceneWorks/qwen-image-edit-2511-mlx",
+          "variant": "q4",
+          "default": true,
           "files": ["q4/*"],
           "default": true,
-          "estimatedSizeBytes": 28387655680
+          "estimatedSizeBytes": 28387655680,
+          "footprint": { "diskSizeBytes": 28387655680, "residentMemoryBytes": null, "peakMemoryBytes": null }
         },
         {
           "provider": "huggingface",
           "repo": "SceneWorks/qwen-image-edit-2511-mlx",
+          "variant": "q8",
           "files": ["q8/*"],
-          "estimatedSizeBytes": 38583632655
+          "estimatedSizeBytes": 38583632655,
+          "footprint": { "diskSizeBytes": 38583632655, "residentMemoryBytes": null, "peakMemoryBytes": null }
         },
         {
           "provider": "huggingface",
           "repo": "SceneWorks/qwen-image-edit-2511-mlx",
+          "variant": "bf16",
           "files": ["bf16/*"],
-          "estimatedSizeBytes": 57731960832
+          "estimatedSizeBytes": 57731960832,
+          "footprint": { "diskSizeBytes": 57731960832, "residentMemoryBytes": null, "peakMemoryBytes": null }
         }
       ],
       "paths": {
@@ -944,20 +972,27 @@
         {
           "provider": "huggingface",
           "repo": "SceneWorks/flux1-schnell-mlx",
+          "variant": "q4",
+          "default": true,
           "files": ["q4/*"],
-          "estimatedSizeBytes": 9611551284
+          "estimatedSizeBytes": 9611551284,
+          "footprint": { "diskSizeBytes": 9611551284, "residentMemoryBytes": null, "peakMemoryBytes": null }
         },
         {
           "provider": "huggingface",
           "repo": "SceneWorks/flux1-schnell-mlx",
+          "variant": "q8",
           "files": ["q8/*"],
-          "estimatedSizeBytes": 17999175703
+          "estimatedSizeBytes": 17999175703,
+          "footprint": { "diskSizeBytes": 17999175703, "residentMemoryBytes": null, "peakMemoryBytes": null }
         },
         {
           "provider": "huggingface",
           "repo": "SceneWorks/flux1-schnell-mlx",
+          "variant": "bf16",
           "files": ["bf16/*"],
-          "estimatedSizeBytes": 33725923002
+          "estimatedSizeBytes": 33725923002,
+          "footprint": { "diskSizeBytes": 33725923002, "residentMemoryBytes": null, "peakMemoryBytes": null }
         }
       ],
       "paths": {
@@ -1028,20 +1063,27 @@
         {
           "provider": "huggingface",
           "repo": "SceneWorks/flux1-dev-mlx",
+          "variant": "q4",
+          "default": true,
           "files": ["q4/*"],
-          "estimatedSizeBytes": 9617334683
+          "estimatedSizeBytes": 9617334683,
+          "footprint": { "diskSizeBytes": 9617334683, "residentMemoryBytes": null, "peakMemoryBytes": null }
         },
         {
           "provider": "huggingface",
           "repo": "SceneWorks/flux1-dev-mlx",
+          "variant": "q8",
           "files": ["q8/*"],
-          "estimatedSizeBytes": 18010071290
+          "estimatedSizeBytes": 18010071290,
+          "footprint": { "diskSizeBytes": 18010071290, "residentMemoryBytes": null, "peakMemoryBytes": null }
         },
         {
           "provider": "huggingface",
           "repo": "SceneWorks/flux1-dev-mlx",
+          "variant": "bf16",
           "files": ["bf16/*"],
-          "estimatedSizeBytes": 33746402173
+          "estimatedSizeBytes": 33746402173,
+          "footprint": { "diskSizeBytes": 33746402173, "residentMemoryBytes": null, "peakMemoryBytes": null }
         }
       ],
       "paths": {
@@ -1154,9 +1196,12 @@
           // on demand. Gated non-commercial license; macOS-only download.
           "provider": "huggingface",
           "repo": "SceneWorks/ideogram-4-mlx",
+          "variant": "q4",
+          "default": true,
           "files": ["q4/*"],
           "platforms": ["macos"],
-          "estimatedSizeBytes": 15400562623
+          "estimatedSizeBytes": 15400562623,
+          "footprint": { "diskSizeBytes": 15400562623, "residentMemoryBytes": null, "peakMemoryBytes": null }
         },
         {
           // bf16 snapshot — shared across backends from the separate `SceneWorks/ideogram-4` repo's
@@ -1165,11 +1210,15 @@
           // selectable full-precision MLX tier (sc-8513, epic 8506) — the worker resolves this repo's
           // `bf16/` subdir when advanced mlxQuantize<=0 (rather than a duplicate copy in the MLX repo).
           // A later quant variant can slot in alongside `bf16/` without a rename. Gated non-commercial.
+          // sc-8508: this is a genuine per-tier quant variant (q4 vs bf16 of the same model), so it is
+          // labeled `variant: bf16` — even though the two tiers happen to live in separate HF repos.
           "provider": "huggingface",
           "repo": "SceneWorks/ideogram-4",
+          "variant": "bf16",
           "files": ["bf16/*"],
           "platforms": ["macos", "windows", "linux"],
-          "estimatedSizeBytes": 54760833024
+          "estimatedSizeBytes": 54760833024,
+          "footprint": { "diskSizeBytes": 54760833024, "residentMemoryBytes": null, "peakMemoryBytes": null }
         }
       ],
       "paths": {
@@ -1265,9 +1314,12 @@
           // / show the Fix button. The specific path makes the check exact (apps/rust-api models.rs).
           "provider": "huggingface",
           "repo": "SceneWorks/ideogram-4-mlx",
+          "variant": "q4",
+          "default": true,
           "files": ["q4/*", "q4/turbo_lora.safetensors"],
           "platforms": ["macos"],
-          "estimatedSizeBytes": 16247340792
+          "estimatedSizeBytes": 16247340792,
+          "footprint": { "diskSizeBytes": 16247340792, "residentMemoryBytes": null, "peakMemoryBytes": null }
         },
         {
           // bf16 snapshot — shared from the separate `SceneWorks/ideogram-4` repo's `bf16/` subdir,
@@ -1275,11 +1327,14 @@
           // candle provider loads it (epic 6561 / sc-6859); on macOS it is the selectable full-precision
           // MLX tier (sc-8513) — the worker resolves this repo's `bf16/` when advanced mlxQuantize<=0,
           // rather than duplicating it into the MLX turnkey repo. Same gated non-commercial license.
+          // sc-8508: genuine per-tier quant variant (q4 vs bf16 of the same model) → labeled `bf16`.
           "provider": "huggingface",
           "repo": "SceneWorks/ideogram-4",
+          "variant": "bf16",
           "files": ["bf16/*"],
           "platforms": ["macos", "windows", "linux"],
-          "estimatedSizeBytes": 54760833024
+          "estimatedSizeBytes": 54760833024,
+          "footprint": { "diskSizeBytes": 54760833024, "residentMemoryBytes": null, "peakMemoryBytes": null }
         }
       ],
       "paths": {
@@ -1840,22 +1895,29 @@
           // (`DENSE_TE_TIER_MODELS`). Replaces the old gated 49 GiB whole-repo + load-time quantize.
           "provider": "huggingface",
           "repo": "SceneWorks/flux2-klein-9b-mlx",
+          "variant": "q4",
+          "default": true,
           "files": ["q4/*"],
-          "estimatedSizeBytes": 21700000000
+          "estimatedSizeBytes": 21700000000,
+          "footprint": { "diskSizeBytes": 21700000000, "residentMemoryBytes": null, "peakMemoryBytes": null }
         },
         {
           "provider": "huggingface",
           "repo": "SceneWorks/flux2-klein-9b-mlx",
+          "variant": "q8",
           "files": ["q8/*"],
-          "estimatedSizeBytes": 26100000000
+          "estimatedSizeBytes": 26100000000,
+          "footprint": { "diskSizeBytes": 26100000000, "residentMemoryBytes": null, "peakMemoryBytes": null }
         },
         {
           // bf16/ — dense transformer + dense Qwen3 TE, the max-fidelity tier. Selectable via
           // per-variant tracking (sc-8508/8509).
           "provider": "huggingface",
           "repo": "SceneWorks/flux2-klein-9b-mlx",
+          "variant": "bf16",
           "files": ["bf16/*"],
-          "estimatedSizeBytes": 34600000000
+          "estimatedSizeBytes": 34600000000,
+          "footprint": { "diskSizeBytes": 34600000000, "residentMemoryBytes": null, "peakMemoryBytes": null }
         }
       ],
       "paths": {
@@ -1970,20 +2032,27 @@
           // load via `DENSE_TE_TIER_MODELS`). Replaces the old gated whole-repo + load-time quantize.
           "provider": "huggingface",
           "repo": "SceneWorks/flux2-klein-9b-kv-mlx",
+          "variant": "q4",
+          "default": true,
           "files": ["q4/*"],
-          "estimatedSizeBytes": 21700000000
+          "estimatedSizeBytes": 21700000000,
+          "footprint": { "diskSizeBytes": 21700000000, "residentMemoryBytes": null, "peakMemoryBytes": null }
         },
         {
           "provider": "huggingface",
           "repo": "SceneWorks/flux2-klein-9b-kv-mlx",
+          "variant": "q8",
           "files": ["q8/*"],
-          "estimatedSizeBytes": 26100000000
+          "estimatedSizeBytes": 26100000000,
+          "footprint": { "diskSizeBytes": 26100000000, "residentMemoryBytes": null, "peakMemoryBytes": null }
         },
         {
           "provider": "huggingface",
           "repo": "SceneWorks/flux2-klein-9b-kv-mlx",
+          "variant": "bf16",
           "files": ["bf16/*"],
-          "estimatedSizeBytes": 34600000000
+          "estimatedSizeBytes": 34600000000,
+          "footprint": { "diskSizeBytes": 34600000000, "residentMemoryBytes": null, "peakMemoryBytes": null }
         }
       ],
       "paths": {
@@ -2189,14 +2258,19 @@
           // bf16 tier added separately. q8/ is a second entry (tier selection: epic 8506 sc-8508/8509).
           "provider": "huggingface",
           "repo": "SceneWorks/flux2-dev-mlx",
+          "variant": "q4",
+          "default": true,
           "files": ["q4/*"],
-          "estimatedSizeBytes": 33600000000
+          "estimatedSizeBytes": 33600000000,
+          "footprint": { "diskSizeBytes": 33600000000, "residentMemoryBytes": null, "peakMemoryBytes": null }
         },
         {
           "provider": "huggingface",
           "repo": "SceneWorks/flux2-dev-mlx",
+          "variant": "q8",
           "files": ["q8/*"],
-          "estimatedSizeBytes": 55000000000
+          "estimatedSizeBytes": 55000000000,
+          "footprint": { "diskSizeBytes": 55000000000, "residentMemoryBytes": null, "peakMemoryBytes": null }
         },
         {
           // bf16/ — the dense diffusers tree (sharded), the max-fidelity tier for high-memory Macs
@@ -2205,8 +2279,10 @@
           // generates; 256² fits a 128 GB box, production 1024² wants >128 GB).
           "provider": "huggingface",
           "repo": "SceneWorks/flux2-dev-mlx",
+          "variant": "bf16",
           "files": ["bf16/*"],
-          "estimatedSizeBytes": 113000000000
+          "estimatedSizeBytes": 113000000000,
+          "footprint": { "diskSizeBytes": 113000000000, "residentMemoryBytes": null, "peakMemoryBytes": null }
         }
       ],
       "defaults": {
@@ -2587,22 +2663,29 @@
           // separate entries (tier selection: sc-8508/8509). Sizes are the measured on-disk totals.
           "provider": "huggingface",
           "repo": "SceneWorks/sd3.5-large-mlx",
+          "variant": "q4",
+          "default": true,
           "files": ["q4/*"],
-          "estimatedSizeBytes": 27212570624
+          "estimatedSizeBytes": 27212570624,
+          "footprint": { "diskSizeBytes": 27212570624, "residentMemoryBytes": null, "peakMemoryBytes": null }
         },
         {
           "provider": "huggingface",
           "repo": "SceneWorks/sd3.5-large-mlx",
+          "variant": "q8",
           "files": ["q8/*"],
-          "estimatedSizeBytes": 31248461824
+          "estimatedSizeBytes": 31248461824,
+          "footprint": { "diskSizeBytes": 31248461824, "residentMemoryBytes": null, "peakMemoryBytes": null }
         },
         {
           // bf16/ — the dense diffusers tree (sharded transformer), the max-fidelity tier.
           // Selectable via per-variant tracking (sc-8508/8509).
           "provider": "huggingface",
           "repo": "SceneWorks/sd3.5-large-mlx",
+          "variant": "bf16",
           "files": ["bf16/*"],
-          "estimatedSizeBytes": 38789746688
+          "estimatedSizeBytes": 38789746688,
+          "footprint": { "diskSizeBytes": 38789746688, "residentMemoryBytes": null, "peakMemoryBytes": null }
         }
       ],
       "defaults": {
@@ -2692,21 +2775,28 @@
           // quantized). Replaces the gated download + install-time convert. Sizes = measured on-disk.
           "provider": "huggingface",
           "repo": "SceneWorks/sd3.5-large-turbo-mlx",
+          "variant": "q4",
+          "default": true,
           "files": ["q4/*"],
-          "estimatedSizeBytes": 27212570624
+          "estimatedSizeBytes": 27212570624,
+          "footprint": { "diskSizeBytes": 27212570624, "residentMemoryBytes": null, "peakMemoryBytes": null }
         },
         {
           "provider": "huggingface",
           "repo": "SceneWorks/sd3.5-large-turbo-mlx",
+          "variant": "q8",
           "files": ["q8/*"],
-          "estimatedSizeBytes": 31239405568
+          "estimatedSizeBytes": 31239405568,
+          "footprint": { "diskSizeBytes": 31239405568, "residentMemoryBytes": null, "peakMemoryBytes": null }
         },
         {
           // bf16/ — the dense diffusers tree (sharded transformer), max-fidelity tier (sc-8508/8509).
           "provider": "huggingface",
           "repo": "SceneWorks/sd3.5-large-turbo-mlx",
+          "variant": "bf16",
           "files": ["bf16/*"],
-          "estimatedSizeBytes": 38789746688
+          "estimatedSizeBytes": 38789746688,
+          "footprint": { "diskSizeBytes": 38789746688, "residentMemoryBytes": null, "peakMemoryBytes": null }
         }
       ],
       "defaults": {
@@ -2783,21 +2873,28 @@
           // (the dense T5-XXL TE dominates even the small backbone, so the tiers are close in size).
           "provider": "huggingface",
           "repo": "SceneWorks/sd3.5-medium-mlx",
+          "variant": "q4",
+          "default": true,
           "files": ["q4/*"],
-          "estimatedSizeBytes": 24213819392
+          "estimatedSizeBytes": 24213819392,
+          "footprint": { "diskSizeBytes": 24213819392, "residentMemoryBytes": null, "peakMemoryBytes": null }
         },
         {
           "provider": "huggingface",
           "repo": "SceneWorks/sd3.5-medium-mlx",
+          "variant": "q8",
           "files": ["q8/*"],
-          "estimatedSizeBytes": 25334730752
+          "estimatedSizeBytes": 25334730752,
+          "footprint": { "diskSizeBytes": 25334730752, "residentMemoryBytes": null, "peakMemoryBytes": null }
         },
         {
           // bf16/ — the dense diffusers tree, max-fidelity tier (sc-8508/8509).
           "provider": "huggingface",
           "repo": "SceneWorks/sd3.5-medium-mlx",
+          "variant": "bf16",
           "files": ["bf16/*"],
-          "estimatedSizeBytes": 27436347392
+          "estimatedSizeBytes": 27436347392,
+          "footprint": { "diskSizeBytes": 27436347392, "residentMemoryBytes": null, "peakMemoryBytes": null }
         }
       ],
       "defaults": {

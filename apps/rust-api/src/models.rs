@@ -943,17 +943,24 @@ struct ModelVariantState {
     footprint: Value,
 }
 
-// Whether `model`'s `downloads` array declares more than one supported entry OR any entry carries an
-// explicit `variant` — i.e. it is a quant-matrix model whose tiers should be tracked per-variant.
+// Whether `model`'s `downloads` array is a quant-matrix — i.e. at least one supported entry carries
+// an explicit non-empty `variant` key (q4/q8/bf16). Entry COUNT is deliberately NOT a discriminator:
+// the manifest uses multiple download entries for non-tier reasons too (alternate sources, native
+// fallbacks, co-requisite TE repos — e.g. PiD backbone + gemma-2-2b-it, boogu mlx+native, krea, wan,
+// ltx). Those are not quant matrices, so only variant-presence flags a model as one (sc-8508).
 fn model_has_variant_matrix(model: &Value) -> bool {
     let Some(downloads) = model.get("downloads").and_then(Value::as_array) else {
         return false;
     };
-    let supported: Vec<&Value> = downloads
+    downloads
         .iter()
         .filter(|entry| is_supported_model_download(entry))
-        .collect();
-    supported.len() > 1 || supported.iter().any(|entry| entry.get("variant").is_some())
+        .any(|entry| {
+            entry
+                .get("variant")
+                .and_then(Value::as_str)
+                .is_some_and(|value| !value.trim().is_empty())
+        })
 }
 
 // Build the per-variant install state for every supported download entry. A single-variant model
@@ -964,9 +971,24 @@ fn model_variant_states(model: &Value, data_dir: &FsPath) -> Vec<ModelVariantSta
     let Some(downloads) = model.get("downloads").and_then(Value::as_array) else {
         return Vec::new();
     };
+    // Emitted variant keys must be unique: the single-variant case is exactly one "default", and a
+    // quant matrix has one entry per distinct q4/q8/bf16 tier. Guard against a manifest that maps two
+    // supported entries to the same key (unlabeled alternate sources both collapsing to "default", or
+    // a duplicated `variant`) — keep the first, drop the rest, so downstream per-variant tracking
+    // never emits two same-keyed states (sc-8508).
+    let mut seen_variants = std::collections::HashSet::new();
     downloads
         .iter()
         .filter(|entry| is_supported_model_download(entry))
+        .filter(|entry| {
+            let key = entry
+                .get("variant")
+                .and_then(Value::as_str)
+                .map(|value| value.trim().to_owned())
+                .filter(|value| !value.is_empty())
+                .unwrap_or_else(|| "default".to_owned());
+            seen_variants.insert(key)
+        })
         .map(|entry| {
             let repo = entry
                 .get("repo")
@@ -1001,7 +1023,8 @@ fn model_variant_states(model: &Value, data_dir: &FsPath) -> Vec<ModelVariantSta
                 variant: entry
                     .get("variant")
                     .and_then(Value::as_str)
-                    .map(str::to_owned)
+                    .map(|value| value.trim().to_owned())
+                    .filter(|value| !value.is_empty())
                     .unwrap_or_else(|| "default".to_owned()),
                 installed: installed || managed_installed,
                 installed_path: installed_path.map(|path| path.display().to_string()),
@@ -2093,7 +2116,7 @@ mod variant_install_tests {
 
     #[test]
     fn detects_matrix_and_single_variant_shapes() {
-        // Multiple supported entries → a matrix.
+        // A variant-keyed multi-entry model → a matrix.
         assert!(model_has_variant_matrix(&quant_matrix_model(
             "SceneWorks/matrix"
         )));
@@ -2105,8 +2128,74 @@ mod variant_install_tests {
         assert!(!model_has_variant_matrix(&json!({
             "downloads": [{ "provider": "huggingface", "repo": "o/m" }]
         })));
+        // MULTIPLE unlabeled entries (alternate sources / co-requisite TE repos / native fallback)
+        // → NOT a matrix. Entry count is not the discriminator; only an explicit `variant` is
+        // (sc-8508). Guards against the old `supported.len() > 1` heuristic that falsely flagged
+        // ~30 multi-repo models.
+        assert!(!model_has_variant_matrix(&json!({
+            "downloads": [
+                { "provider": "huggingface", "repo": "org/backbone" },
+                { "provider": "huggingface", "repo": "SceneWorks/gemma-2-2b-it" }
+            ]
+        })));
+        // An empty-string variant is not a real tier label → not a matrix.
+        assert!(!model_has_variant_matrix(&json!({
+            "downloads": [
+                { "provider": "huggingface", "repo": "org/a", "variant": "" },
+                { "provider": "huggingface", "repo": "org/b" }
+            ]
+        })));
         // No downloads → not a matrix.
         assert!(!model_has_variant_matrix(&json!({ "id": "x" })));
+    }
+
+    #[test]
+    fn alternate_source_multi_entry_yields_one_default_variant() {
+        // Two unlabeled download entries (alternate sources / co-requisite TE repo) must NOT be
+        // treated as a quant matrix: both would otherwise collapse to a duplicate "default" key.
+        // The dedup guard emits exactly one "default" variant, matching the single-variant contract.
+        let tmp = tempfile::tempdir().unwrap();
+        let data_dir = tmp.path();
+        let model = json!({
+            "id": "alt_source",
+            "downloads": [
+                { "provider": "huggingface", "repo": "org/backbone" },
+                { "provider": "huggingface", "repo": "SceneWorks/gemma-2-2b-it" }
+            ]
+        });
+        assert!(!model_has_variant_matrix(&model));
+        let states = model_variant_states(&model, data_dir);
+        assert_eq!(states.len(), 1, "alternate-source model emits one variant");
+        assert_eq!(states[0].variant, "default");
+    }
+
+    #[test]
+    fn variant_keys_are_unique_across_emitted_states() {
+        // Every emitted variant key must be unique. A manifest that duplicates a variant (or maps
+        // two entries to the same key) keeps only the first; downstream tracking never emits two
+        // same-keyed states (sc-8508).
+        let tmp = tempfile::tempdir().unwrap();
+        let data_dir = tmp.path();
+
+        // Genuine matrix → three distinct keys.
+        let matrix = quant_matrix_model("SceneWorks/matrix");
+        let states = model_variant_states(&matrix, data_dir);
+        let mut keys: Vec<_> = states.iter().map(|s| s.variant.clone()).collect();
+        keys.sort();
+        keys.dedup();
+        assert_eq!(keys, vec!["bf16", "q4", "q8"]);
+
+        // Two entries sharing a variant key → collapsed to one (first wins).
+        let dup = json!({
+            "id": "dup",
+            "downloads": [
+                { "provider": "huggingface", "repo": "org/a", "variant": "q4", "files": ["q4/*"] },
+                { "provider": "huggingface", "repo": "org/b", "variant": "q4", "files": ["q4-alt/*"] }
+            ]
+        });
+        let dup_states = model_variant_states(&dup, data_dir);
+        assert_eq!(dup_states.len(), 1);
+        assert_eq!(dup_states[0].variant, "q4");
     }
 
     #[test]

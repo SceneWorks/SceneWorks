@@ -2154,7 +2154,7 @@
       ],
       "family": "z-image",
       "gated": false,
-      "hasVariantMatrix": true,
+      "hasVariantMatrix": false,
       "id": "base-model",
       "installState": "missing",
       "installedPath": "<runtime-root>/data/models/owner__base-model",
@@ -2192,16 +2192,6 @@
         {
           "cacheState": "missing",
           "downloadSizeBytes": 536870912,
-          "footprint": null,
-          "installState": "missing",
-          "installed": false,
-          "installedPath": null,
-          "missingRequiredFiles": [],
-          "variant": "default"
-        },
-        {
-          "cacheState": "missing",
-          "downloadSizeBytes": 12884901888,
           "footprint": null,
           "installState": "missing",
           "installed": false,
