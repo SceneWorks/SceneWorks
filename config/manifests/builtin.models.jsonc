@@ -38,7 +38,9 @@
           "default": true,
           "files": ["q4/*"],
           "estimatedSizeBytes": 5909406487,
-          "footprint": { "diskSizeBytes": 5909406487, "residentMemoryBytes": null, "peakMemoryBytes": null }
+          // Measured on-device (sc-8516, harness crates/sceneworks-worker/src/footprint_measure.rs):
+          // Apple Silicon, 1024², via mlx_rs::memory::{get_active_memory,get_peak_memory}.
+          "footprint": { "diskSizeBytes": 5909406487, "residentMemoryBytes": 5776512904, "peakMemoryBytes": 20854192336 }
         },
         {
           "provider": "huggingface",
@@ -165,7 +167,9 @@
           "default": true,
           "files": ["q4/*"],
           "estimatedSizeBytes": 5907321677,
-          "footprint": { "diskSizeBytes": 5907321677, "residentMemoryBytes": null, "peakMemoryBytes": null }
+          // Measured on-device (sc-8516, harness crates/sceneworks-worker/src/footprint_measure.rs):
+          // Apple Silicon, 1024², via mlx_rs::memory::{get_active_memory,get_peak_memory}.
+          "footprint": { "diskSizeBytes": 5907321677, "residentMemoryBytes": 5774461192, "peakMemoryBytes": 20852058704 }
         },
         {
           "provider": "huggingface",
@@ -270,7 +274,9 @@
           "default": true,
           "files": ["q4/*"],
           "estimatedSizeBytes": 5909406487,
-          "footprint": { "diskSizeBytes": 5909406487, "residentMemoryBytes": null, "peakMemoryBytes": null }
+          // Measured on-device (sc-8516, harness crates/sceneworks-worker/src/footprint_measure.rs):
+          // Apple Silicon, 1024², via mlx_rs::memory::{get_active_memory,get_peak_memory}.
+          "footprint": { "diskSizeBytes": 5909406487, "residentMemoryBytes": 5776512904, "peakMemoryBytes": 20854192336 }
         },
         {
           "provider": "huggingface",
@@ -757,7 +763,9 @@
           "default": true,
           "files": ["q4/*"],
           "estimatedSizeBytes": 21830326407,
-          "footprint": { "diskSizeBytes": 21830326407, "residentMemoryBytes": null, "peakMemoryBytes": null }
+          // Measured on-device (sc-8516, harness crates/sceneworks-worker/src/footprint_measure.rs):
+          // Apple Silicon, 1024², via mlx_rs::memory::{get_active_memory,get_peak_memory}.
+          "footprint": { "diskSizeBytes": 21830326407, "residentMemoryBytes": 17672408264, "peakMemoryBytes": 32749579060 }
         },
         {
           "provider": "huggingface",
@@ -3227,7 +3235,9 @@
           "variant": "q8",
           "files": ["q8/*"],
           "estimatedSizeBytes": 4177386896,
-          "footprint": { "diskSizeBytes": 4177386896, "residentMemoryBytes": null, "peakMemoryBytes": null }
+          // Measured on-device (sc-8516, harness crates/sceneworks-worker/src/footprint_measure.rs):
+          // Apple Silicon, 1024², via mlx_rs::memory::{get_active_memory,get_peak_memory}.
+          "footprint": { "diskSizeBytes": 4177386896, "residentMemoryBytes": 4219342992, "peakMemoryBytes": 19292792472 }
         },
         {
           "provider": "huggingface",

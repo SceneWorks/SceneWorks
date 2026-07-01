@@ -11,7 +11,17 @@
 //
 // Consumes the sc-8508 per-variant catalog shape: each `model.variants[]` entry carries a `variant`
 // key (bf16/q8/q4) and a `footprint` object. `footprint.diskSizeBytes` is always populated;
-// `footprint.residentMemoryBytes` / `peakMemoryBytes` are currently nullable (sc-8516 fills them in).
+// `footprint.residentMemoryBytes` / `peakMemoryBytes` are the MEASURED memory fields sc-8516 populates
+// (for the tiers it measured on-device; the rest stay null and fall back to the calibrated estimate).
+//
+// sc-8516 CALIBRATION (basis for the constants below): on-device measurement of steady-state resident
+// + load+gen peak GPU memory (harness crates/sceneworks-worker/src/footprint_measure.rs, using the MLX
+// counters mlx_rs::memory::{get_active_memory, get_peak_memory} the worker already publishes). Measured
+// set: sdxl/q8, z_image/q4, z_image_turbo/q4, lens_turbo/q4. Two findings drive the model here:
+//   1. resident ≈ on-disk size (ratio 0.81–1.01) — the old disk×1.5 resident estimate was too high.
+//   2. peak − resident ≈ a FIXED ~10–14 GiB transient (VAE decode + attention at 1024²), roughly
+//      size-independent — so peak is modeled as resident + a fixed addend, not a multiplier.
+// The suggestion therefore budgets against PEAK (the real ceiling a generation must fit).
 
 import { tierQuantize } from "./quantTier.js";
 
@@ -20,43 +30,66 @@ import { tierQuantize } from "./quantTier.js";
 // fallback). Any declared tier not in this list is considered lowest-fidelity and only chosen last.
 const TIER_FIDELITY = ["bf16", "q8", "q4"];
 
-// Resident-memory estimate multiplier over on-disk size, used ONLY when a variant lacks a measured
-// `footprint.residentMemoryBytes`. The weights are resident at roughly their on-disk size, but a
-// generation also needs headroom for the text encoder, activations/latents, the framework's working
-// buffers, and the OS. 1.5× is a deliberately conservative middle estimate: enough margin that a
-// suggested tier is unlikely to OOM, without being so pessimistic it under-suggests on right-sized
-// hardware. sc-8516 replaces this path entirely by populating measured residentMemoryBytes.
-export const DISK_TO_RESIDENT_MULTIPLIER = 1.5;
+// Resident-memory estimate multiplier over on-disk size, used ONLY when a variant lacks any measured
+// footprint. CALIBRATED by sc-8516 from on-device measurement (harness: crates/sceneworks-worker/src/
+// footprint_measure.rs). Across sdxl-q8 / z-image-q4 / z-image-turbo-q4 / lens-turbo-q4 the measured
+// steady-state RESIDENT/disk ratio was 0.81–1.01 (mean 0.94): packed weights sit resident at roughly
+// their on-disk size, NOT the old 1.5× guess. We estimate resident ≈ disk × 1.0, then add the fixed
+// transient below (which is where the real generation headroom lives).
+export const DISK_TO_RESIDENT_MULTIPLIER = 1.0;
 
-// Fraction of detected unified/GPU memory a tier's resident footprint must fit UNDER to be
-// suggested. The remainder is left for the OS, other apps, and margin against our own estimate. So
-// on a 32 GB Mac a tier is "fits" only if its footprint is under 32 × 0.8 = 25.6 GB. This is the
-// headroom knob sc-8516 can tune alongside the multiplier.
-export const MEMORY_HEADROOM_FRACTION = 0.8;
+// Fixed transient working-set (bytes) a single 1024² generation needs ON TOP OF the resident weights —
+// VAE decode buffers + attention activations/latents + framework scratch. sc-8516 measured this as the
+// gap between peak and on-disk size and found it ~SIZE-INDEPENDENT (10.2–14.1 GiB across a 4–20 GB
+// spread of models), so it is modeled as a fixed addend, not a multiplier. 14 GiB is the conservative
+// top of the measured band. This is what makes the estimated budget (disk×MULT + transient) track the
+// MEASURED peak the RAM suggestion must actually fit — the true install-time/run ceiling.
+export const TRANSIENT_HEADROOM_BYTES = 14 * 1024 * 1024 * 1024;
+
+// Fraction of detected unified/GPU memory a tier's peak footprint must fit UNDER to be suggested. The
+// remainder is left for the OS, other apps, and margin. sc-8516 raised this from 0.8 → 0.9: because the
+// budget is now peak-inclusive (weights + the fixed transient) rather than resident-only, the extra
+// slack the old 0.8 baked in for un-modeled transient is already accounted for explicitly, and 0.9
+// keeps the suggestion from needlessly under-picking on right-sized hardware. So on a 32 GB Mac a tier
+// "fits" only if its peak is under 32 × 0.9 = 28.8 GB.
+export const MEMORY_HEADROOM_FRACTION = 0.9;
 
 const BYTES_PER_GB = 1024 * 1024 * 1024;
 
-// A variant's estimated RESIDENT memory footprint in bytes, or null when it can't be estimated.
-// Basis, in priority order:
-//   1. `footprint.residentMemoryBytes` — the measured value, used verbatim when present (sc-8516).
-//   2. `footprint.diskSizeBytes` × DISK_TO_RESIDENT_MULTIPLIER — the estimate (the common case today,
-//      since measured memory is still null).
-//   3. `downloadSizeBytes` × DISK_TO_RESIDENT_MULTIPLIER — a last-resort estimate when the footprint
-//      object is absent but the catalog still knows the tier's download size.
-// `measured` reports which basis was used, so the UI/tests can distinguish measured vs estimated.
+// A variant's PEAK memory requirement in bytes (the ceiling the suggestion must fit), or null when it
+// can't be estimated. Basis, in priority order:
+//   1. `footprint.peakMemoryBytes` — the MEASURED load+gen high-water mark, used verbatim (sc-8516).
+//      This is the true ceiling: a tier whose peak OOMs during generation must not be suggested.
+//   2. `footprint.residentMemoryBytes` + TRANSIENT_HEADROOM_BYTES — measured resident weights plus the
+//      fixed transient working set, when resident was measured but peak was not.
+//   3. `footprint.diskSizeBytes` × DISK_TO_RESIDENT_MULTIPLIER + TRANSIENT_HEADROOM_BYTES — the
+//      estimate (the common case for un-measured tiers): weights ≈ on-disk size, plus the transient.
+//   4. `downloadSizeBytes` × DISK_TO_RESIDENT_MULTIPLIER + TRANSIENT_HEADROOM_BYTES — last-resort when
+//      the footprint object is absent but the catalog still knows the tier's download size.
+// `measured` reports whether the value came from a measured field (peak or resident) vs the estimate.
 export function variantFootprintBytes(variant) {
   const footprint = variant?.footprint;
+  const peak = numberOrNull(footprint?.peakMemoryBytes);
+  if (peak !== null && peak > 0) {
+    return { bytes: peak, measured: true };
+  }
   const resident = numberOrNull(footprint?.residentMemoryBytes);
   if (resident !== null && resident > 0) {
-    return { bytes: resident, measured: true };
+    return { bytes: resident + TRANSIENT_HEADROOM_BYTES, measured: true };
   }
   const disk = numberOrNull(footprint?.diskSizeBytes);
   if (disk !== null && disk > 0) {
-    return { bytes: Math.round(disk * DISK_TO_RESIDENT_MULTIPLIER), measured: false };
+    return {
+      bytes: Math.round(disk * DISK_TO_RESIDENT_MULTIPLIER) + TRANSIENT_HEADROOM_BYTES,
+      measured: false,
+    };
   }
   const download = numberOrNull(variant?.downloadSizeBytes);
   if (download !== null && download > 0) {
-    return { bytes: Math.round(download * DISK_TO_RESIDENT_MULTIPLIER), measured: false };
+    return {
+      bytes: Math.round(download * DISK_TO_RESIDENT_MULTIPLIER) + TRANSIENT_HEADROOM_BYTES,
+      measured: false,
+    };
   }
   return null;
 }
@@ -85,9 +118,9 @@ function fidelityRank(tier) {
   return index === -1 ? TIER_FIDELITY.length : index;
 }
 
-// Whether a variant's estimated footprint fits within `unifiedMemoryGb` with headroom. When the
-// memory signal is unknown (null) OR the tier has no estimable footprint, we treat it as fitting —
-// we never withhold or block a tier on missing data; the worst case is suggesting a heavier tier.
+// Whether a variant's PEAK footprint fits within `unifiedMemoryGb` with headroom. When the memory
+// signal is unknown (null) OR the tier has no estimable footprint, we treat it as fitting — we never
+// withhold or block a tier on missing data; the worst case is suggesting a heavier tier.
 export function tierFits(variant, unifiedMemoryGb) {
   if (unifiedMemoryGb == null || !Number.isFinite(unifiedMemoryGb)) {
     return true;
