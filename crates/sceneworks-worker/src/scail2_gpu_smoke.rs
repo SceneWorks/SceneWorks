@@ -115,6 +115,7 @@ fn scail2_candle_gpu_smoke() {
         &sam3_model,
         &sam3_tok,
         std::slice::from_ref(&ref_rgb),
+        None,
     )
     .expect("sam3 reference segmentation");
     let ref_bg = if replacement {
@@ -143,6 +144,7 @@ fn scail2_candle_gpu_smoke() {
         &sam3_model,
         &sam3_tok,
         &driving_rgb,
+        None,
     )
     .expect("sam3 driving segmentation");
     let drive_bg = if replacement {

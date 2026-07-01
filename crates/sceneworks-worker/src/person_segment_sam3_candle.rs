@@ -24,9 +24,27 @@ use candle_gen::candle_core::{Device, Tensor};
 use candle_gen::default_device;
 use candle_gen::gen_core::Quant;
 use candle_gen_sam3::{Sam3TextConfig, Sam3Tokenizer, Sam3VideoModel, VideoFrameOutput, Weights};
+use gen_core::CancelFlag;
 
 use crate::downloads::{ensure_hf_cached_file, DownloadContext};
 use crate::{Settings, WorkerError, WorkerResult};
+
+/// Cancel copy surfaced when a segmentation is interrupted by a user cancel — the candle sibling
+/// of `person_segment::CANCEL_MESSAGE` (Mac-only, so duplicated like the other shared helpers).
+pub(crate) const CANCEL_MESSAGE: &str = "Person segmentation canceled by user.";
+
+/// Bail out with [`WorkerError::Canceled`] when the threaded flag has been tripped — the coarse
+/// cancel seam guarding frame decode, the cold multi-GB checkpoint parse, and model build/quantize
+/// (sc-8807). Unlike the MLX twin, this is the ONLY cancel granularity on the candle lane: the
+/// pinned `candle-gen-sam3` `Sam3VideoModel::propagate` does not yet take the gen-core d8038beb
+/// `cancel`/`progress` params, so a tripped flag cannot stop mid-propagate (per-frame cancel +
+/// progress need the upstream candle-gen API bump — tracked in sc-8972).
+fn check_segment_canceled(cancel: Option<&CancelFlag>) -> WorkerResult<()> {
+    if cancel.is_some_and(CancelFlag::is_cancelled) {
+        return Err(WorkerError::Canceled(CANCEL_MESSAGE.to_owned()));
+    }
+    Ok(())
+}
 
 /// SAM3 checkpoint files (loaded stock from `facebook/sam3`, no conversion).
 const MODEL_FILE: &str = "model.safetensors";
@@ -257,17 +275,23 @@ fn mask_to_frame(mask_logits: &[f32], grid: usize, width: u32, height: u32) -> V
 /// empty vec for a frame where the selected object was absent (orchestrator skips empties → box
 /// fallback). The checkpoint parses once and is cached process-wide; run under `spawn_blocking` (image
 /// decode + GPU inference are blocking).
+///
+/// `cancel` is the user-cancel flag (sc-8807), checked at the coarse phase boundaries (frame decode,
+/// cold checkpoint parse, model build/quantize). Per-frame cancel + progress inside the propagate
+/// loop need the candle-gen-sam3 API bump (sc-8972) — see [`check_segment_canceled`].
 pub(crate) fn segment_track_blocking(
     model_path: PathBuf,
     tokenizer_path: PathBuf,
     clip_frame_paths: Vec<PathBuf>,
     anchors: Vec<Option<BoxNorm>>,
+    cancel: Option<CancelFlag>,
 ) -> WorkerResult<Vec<Vec<u8>>> {
     assert_eq!(
         clip_frame_paths.len(),
         anchors.len(),
         "frames/anchors mismatch"
     );
+    check_segment_canceled(cancel.as_ref())?;
     if !anchors.iter().any(Option::is_some) {
         return Err(WorkerError::InvalidPayload(
             "person segmentation clip needs at least one detected frame to associate".into(),
@@ -292,6 +316,10 @@ pub(crate) fn segment_track_blocking(
         }
         frames.push(input_tensor(&img, &device)?);
     }
+
+    // Guard the cold multi-GB checkpoint parse + model build — the last cancel seam before the
+    // (currently uncancellable, sc-8972) propagate loop.
+    check_segment_canceled(cancel.as_ref())?;
 
     // Cached checkpoint; recover from a poisoned lock by dropping the cached weights and reloading.
     let cell = WEIGHTS.get_or_init(|| Mutex::new(None));
@@ -322,7 +350,10 @@ pub(crate) fn segment_track_blocking(
     let (input_ids, text_mask) = tokenizer
         .encode(CONCEPT_PROMPT, &device)
         .map_err(|e| WorkerError::Engine(format!("sam3 tokenize: {e}")))?;
+    check_segment_canceled(cancel.as_ref())?;
 
+    // The pinned candle-gen-sam3 `propagate` takes no `cancel`/`progress` yet (unlike the MLX twin,
+    // gen-core d8038beb); per-frame cancel + progress land with the upstream API bump (sc-8972).
     let outputs = model
         .propagate(&frames, &input_ids, &text_mask)
         .map_err(|e| WorkerError::Engine(format!("sam3 propagate: {e}")))?;
@@ -386,11 +417,16 @@ fn mask_centroid_x(mask_logits: &[f32], grid: usize) -> Option<f64> {
 /// `Image`s. `frames` must be non-empty and uniform-sized. The checkpoint parses once and is cached
 /// process-wide; a fresh `Sam3VideoModel` is built per call (clean tracking state). Run under
 /// `spawn_blocking` (GPU inference is blocking).
+///
+/// `cancel` follows [`segment_track_blocking`] (sc-8807): coarse checks only until the
+/// candle-gen-sam3 propagate API bump (sc-8972).
 pub(crate) fn segment_all_persons_in_memory(
     model_path: &Path,
     tokenizer_path: &Path,
     frames: &[image::RgbImage],
+    cancel: Option<CancelFlag>,
 ) -> WorkerResult<AllPersonMasks> {
+    check_segment_canceled(cancel.as_ref())?;
     let first = frames.first().ok_or_else(|| {
         WorkerError::InvalidPayload("scail2 segmentation: no frames to segment".into())
     })?;
@@ -409,6 +445,10 @@ pub(crate) fn segment_all_persons_in_memory(
         .iter()
         .map(|f| input_tensor(f, &device))
         .collect::<WorkerResult<Vec<_>>>()?;
+
+    // Guard the cold multi-GB checkpoint parse + model build — the last cancel seam before the
+    // (currently uncancellable, sc-8972) propagate loop.
+    check_segment_canceled(cancel.as_ref())?;
 
     // Cached checkpoint; recover from a poisoned lock by dropping + reloading (mirrors
     // `segment_track_blocking`).
@@ -439,7 +479,9 @@ pub(crate) fn segment_all_persons_in_memory(
     let (input_ids, text_mask) = tokenizer
         .encode(CONCEPT_PROMPT, &device)
         .map_err(|e| WorkerError::Engine(format!("sam3 tokenize: {e}")))?;
+    check_segment_canceled(cancel.as_ref())?;
 
+    // No `cancel`/`progress` on the pinned candle-gen-sam3 propagate yet (sc-8972).
     let outputs = model
         .propagate(&tensors, &input_ids, &text_mask)
         .map_err(|e| WorkerError::Engine(format!("sam3 propagate: {e}")))?;
@@ -512,6 +554,37 @@ mod tests {
         assert_eq!(parse_quant("F32"), None);
         assert_eq!(parse_quant("none"), None);
         assert_eq!(parse_quant("garbage"), None, "unrecognized → dense");
+    }
+
+    /// sc-8807: a pre-tripped cancel flag short-circuits BEFORE frame decode / the cold multi-GB
+    /// checkpoint parse — the paths point at nothing, so reaching either would error with
+    /// `InvalidPayload`/`Engine` instead of `Canceled`. Pins the coarse cancel seam ordering.
+    #[test]
+    fn pre_tripped_cancel_short_circuits_both_video_paths() {
+        let cancel = CancelFlag::new();
+        cancel.cancel();
+        let track = segment_track_blocking(
+            PathBuf::from("/nonexistent/model.safetensors"),
+            PathBuf::from("/nonexistent/tokenizer.json"),
+            vec![PathBuf::from("/nonexistent/frame.png")],
+            vec![Some((0.1, 0.1, 0.5, 0.5))],
+            Some(cancel.clone()),
+        );
+        assert!(
+            matches!(track, Err(WorkerError::Canceled(_))),
+            "segment_track_blocking: expected Canceled, got {track:?}"
+        );
+        let frames = vec![image::RgbImage::new(4, 4)];
+        let all = segment_all_persons_in_memory(
+            Path::new("/nonexistent/model.safetensors"),
+            Path::new("/nonexistent/tokenizer.json"),
+            &frames,
+            Some(cancel),
+        );
+        assert!(
+            matches!(all, Err(WorkerError::Canceled(_))),
+            "segment_all_persons_in_memory: expected Canceled"
+        );
     }
 
     #[test]

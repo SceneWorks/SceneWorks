@@ -3514,32 +3514,57 @@ async fn resolve_candle_scail2_conditioning(
         .ok_or_else(|| WorkerError::InvalidPayload("scail2 driving frame is malformed".into()))?;
 
     // Segment + paint the reference mask (animation keeps the reference's world → white background).
+    // Both SAM3 passes run under `run_blocking_with_heartbeat` (sc-8390 / sc-8807) so the cold
+    // multi-GB checkpoint parse + per-frame propagation never trip the API's 90s stale-sweep. The
+    // pinned candle-gen-sam3 propagate takes no cancel/progress params yet (sc-8972), so the
+    // tripped flag stops at the coarse seams (cold parse / model build) only.
+    let scail2_cancel_message = "SCAIL-2 canceled during person segmentation.";
+    let cancel = gen_core::CancelFlag::new();
+    let flag = cancel.clone();
     let (rm, rt) = (sam_model.clone(), sam_tokenizer.clone());
-    let ref_mask = tokio::task::spawn_blocking(move || -> WorkerResult<Image> {
-        let masks = crate::person_segment_sam3_candle::segment_all_persons_in_memory(
-            &rm,
-            &rt,
-            std::slice::from_ref(&ref_rgb),
-        )?;
-        crate::scail2_masks::paint_reference_mask(&masks, crate::scail2_masks::BG_WHITE)
-    })
-    .await
-    .map_err(|error| WorkerError::Io(std::io::Error::other(error)))??;
+    let ref_mask = run_blocking_with_heartbeat(
+        api,
+        settings,
+        &job.id,
+        Some(cancel),
+        scail2_cancel_message,
+        "scail2 reference segment task",
+        tokio::task::spawn_blocking(move || -> WorkerResult<Image> {
+            let masks = crate::person_segment_sam3_candle::segment_all_persons_in_memory(
+                &rm,
+                &rt,
+                std::slice::from_ref(&ref_rgb),
+                Some(flag),
+            )?;
+            crate::scail2_masks::paint_reference_mask(&masks, crate::scail2_masks::BG_WHITE)
+        }),
+    )
+    .await?;
 
     // Segment + paint the per-frame driving masks (animation → black background).
-    let driving_mask = tokio::task::spawn_blocking(move || -> WorkerResult<Vec<Image>> {
-        let masks = crate::person_segment_sam3_candle::segment_all_persons_in_memory(
-            &sam_model,
-            &sam_tokenizer,
-            &driving_rgb,
-        )?;
-        Ok(crate::scail2_masks::paint_driving_masks(
-            &masks,
-            crate::scail2_masks::BG_BLACK,
-        ))
-    })
-    .await
-    .map_err(|error| WorkerError::Io(std::io::Error::other(error)))??;
+    let cancel = gen_core::CancelFlag::new();
+    let flag = cancel.clone();
+    let driving_mask = run_blocking_with_heartbeat(
+        api,
+        settings,
+        &job.id,
+        Some(cancel),
+        scail2_cancel_message,
+        "scail2 driving segment task",
+        tokio::task::spawn_blocking(move || -> WorkerResult<Vec<Image>> {
+            let masks = crate::person_segment_sam3_candle::segment_all_persons_in_memory(
+                &sam_model,
+                &sam_tokenizer,
+                &driving_rgb,
+                Some(flag),
+            )?;
+            Ok(crate::scail2_masks::paint_driving_masks(
+                &masks,
+                crate::scail2_masks::BG_BLACK,
+            ))
+        }),
+    )
+    .await?;
 
     Ok(vec![
         Conditioning::Reference {
@@ -3686,16 +3711,28 @@ async fn resolve_candle_scail2_replace_conditioning(
             .ok_or_else(|| {
                 WorkerError::InvalidPayload("scail2 reference image is malformed".into())
             })?;
-    let ref_mask = tokio::task::spawn_blocking(move || -> WorkerResult<Image> {
-        let masks = crate::person_segment_sam3_candle::segment_all_persons_in_memory(
-            &sam_model,
-            &sam_tokenizer,
-            std::slice::from_ref(&ref_rgb),
-        )?;
-        crate::scail2_masks::paint_reference_mask(&masks, crate::scail2_masks::BG_BLACK)
-    })
-    .await
-    .map_err(|error| WorkerError::Io(std::io::Error::other(error)))??;
+    // Heartbeat keepalive + user cancel across the cold SAM3 parse + single-frame propagate
+    // (sc-8390 / sc-8807); coarse cancel seams only until the candle-gen-sam3 API bump (sc-8972).
+    let cancel = gen_core::CancelFlag::new();
+    let flag = cancel.clone();
+    let ref_mask = run_blocking_with_heartbeat(
+        api,
+        settings,
+        &job.id,
+        Some(cancel),
+        "SCAIL-2 canceled during person segmentation.",
+        "scail2 reference segment task",
+        tokio::task::spawn_blocking(move || -> WorkerResult<Image> {
+            let masks = crate::person_segment_sam3_candle::segment_all_persons_in_memory(
+                &sam_model,
+                &sam_tokenizer,
+                std::slice::from_ref(&ref_rgb),
+                Some(flag),
+            )?;
+            crate::scail2_masks::paint_reference_mask(&masks, crate::scail2_masks::BG_BLACK)
+        }),
+    )
+    .await?;
 
     let conditioning = vec![
         Conditioning::Reference {
@@ -4443,32 +4480,61 @@ async fn resolve_scail2_conditioning(
         .ok_or_else(|| WorkerError::InvalidPayload("scail2 driving frame is malformed".into()))?;
 
     // Segment + paint the reference mask (animation keeps the reference's world → white background).
+    // Both SAM3 passes run under `run_blocking_with_heartbeat` (sc-8390 / sc-8807): the cold
+    // multi-GB checkpoint parse + per-frame 1008² propagation over a driving clip can exceed the
+    // API's 90s stale-sweep, and the keepalive's cancel poll trips `cancel`, which the engine's
+    // per-frame propagate contract (gen-core d8038beb) observes between frames.
+    let scail2_cancel_message = "SCAIL-2 canceled during person segmentation.";
+    let cancel = gen_core::CancelFlag::new();
+    let flag = cancel.clone();
     let (rm, rt) = (sam_model.clone(), sam_tokenizer.clone());
-    let ref_mask = tokio::task::spawn_blocking(move || -> WorkerResult<Image> {
-        let masks = crate::person_segment_sam3::segment_all_persons_in_memory(
-            &rm,
-            &rt,
-            std::slice::from_ref(&ref_rgb),
-        )?;
-        crate::scail2_masks::paint_reference_mask(&masks, crate::scail2_masks::BG_WHITE)
-    })
-    .await
-    .map_err(|error| WorkerError::Io(std::io::Error::other(error)))??;
+    let ref_mask = run_blocking_with_heartbeat(
+        api,
+        settings,
+        &job.id,
+        Some(cancel),
+        scail2_cancel_message,
+        "scail2 reference segment task",
+        tokio::task::spawn_blocking(move || -> WorkerResult<Image> {
+            let masks = crate::person_segment_sam3::segment_all_persons_in_memory(
+                &rm,
+                &rt,
+                std::slice::from_ref(&ref_rgb),
+                Some(flag),
+                None,
+            )?;
+            crate::scail2_masks::paint_reference_mask(&masks, crate::scail2_masks::BG_WHITE)
+        }),
+    )
+    .await?;
 
     // Segment + paint the per-frame driving masks (animation → black background).
-    let driving_mask = tokio::task::spawn_blocking(move || -> WorkerResult<Vec<Image>> {
-        let masks = crate::person_segment_sam3::segment_all_persons_in_memory(
-            &sam_model,
-            &sam_tokenizer,
-            &driving_rgb,
-        )?;
-        Ok(crate::scail2_masks::paint_driving_masks(
-            &masks,
-            crate::scail2_masks::BG_BLACK,
-        ))
-    })
-    .await
-    .map_err(|error| WorkerError::Io(std::io::Error::other(error)))??;
+    let cancel = gen_core::CancelFlag::new();
+    let flag = cancel.clone();
+    let driving_mask = run_blocking_with_heartbeat(
+        api,
+        settings,
+        &job.id,
+        Some(cancel),
+        scail2_cancel_message,
+        "scail2 driving segment task",
+        tokio::task::spawn_blocking(move || -> WorkerResult<Vec<Image>> {
+            let masks = crate::person_segment_sam3::segment_all_persons_in_memory(
+                &sam_model,
+                &sam_tokenizer,
+                &driving_rgb,
+                Some(flag),
+                Some(Box::new(|frame, total| {
+                    tracing::debug!(event = "scail2_sam3_propagate_progress", frame, total);
+                })),
+            )?;
+            Ok(crate::scail2_masks::paint_driving_masks(
+                &masks,
+                crate::scail2_masks::BG_BLACK,
+            ))
+        }),
+    )
+    .await?;
 
     Ok(vec![
         Conditioning::Reference {
@@ -4618,16 +4684,29 @@ async fn resolve_scail2_replace_conditioning(
             .ok_or_else(|| {
                 WorkerError::InvalidPayload("scail2 reference image is malformed".into())
             })?;
-    let ref_mask = tokio::task::spawn_blocking(move || -> WorkerResult<Image> {
-        let masks = crate::person_segment_sam3::segment_all_persons_in_memory(
-            &sam_model,
-            &sam_tokenizer,
-            std::slice::from_ref(&ref_rgb),
-        )?;
-        crate::scail2_masks::paint_reference_mask(&masks, crate::scail2_masks::BG_BLACK)
-    })
-    .await
-    .map_err(|error| WorkerError::Io(std::io::Error::other(error)))??;
+    // Heartbeat keepalive + user cancel across the cold SAM3 parse + single-frame propagate
+    // (sc-8390 / sc-8807).
+    let cancel = gen_core::CancelFlag::new();
+    let flag = cancel.clone();
+    let ref_mask = run_blocking_with_heartbeat(
+        api,
+        settings,
+        &job.id,
+        Some(cancel),
+        "SCAIL-2 canceled during person segmentation.",
+        "scail2 reference segment task",
+        tokio::task::spawn_blocking(move || -> WorkerResult<Image> {
+            let masks = crate::person_segment_sam3::segment_all_persons_in_memory(
+                &sam_model,
+                &sam_tokenizer,
+                std::slice::from_ref(&ref_rgb),
+                Some(flag),
+                None,
+            )?;
+            crate::scail2_masks::paint_reference_mask(&masks, crate::scail2_masks::BG_BLACK)
+        }),
+    )
+    .await?;
 
     let conditioning = vec![
         Conditioning::Reference {

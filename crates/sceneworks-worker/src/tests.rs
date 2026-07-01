@@ -3433,3 +3433,164 @@ mod stub_fallback_gate {
         ensure_video_engine_weights(&request, &settings).expect("non-engine model passes");
     }
 }
+
+// ---------------------------------------------------------------------------
+// sc-8807: the shared blocking keepalive (`run_blocking_with_heartbeat`) is the seam the
+// SAM2/SAM3 propagate steps now run through. These tests pin the three behaviors the segment
+// wiring relies on, with a stand-in blocking task in place of the real (weights-requiring)
+// propagate: (a) the worker heartbeat is pinged while the task runs, (b) the API cancel poll
+// trips the threaded `CancelFlag`, and (c) the terminal `Canceled` is posted whether the task
+// honors the flag itself (the MLX per-frame cancel contract) or runs to completion first (the
+// candle coarse-seam lane, sc-8972).
+// ---------------------------------------------------------------------------
+
+#[derive(Clone)]
+struct KeepaliveStubState {
+    heartbeats: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    progress: std::sync::Arc<std::sync::Mutex<Vec<Value>>>,
+}
+
+impl KeepaliveStubState {
+    fn new() -> Self {
+        Self {
+            heartbeats: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            progress: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+        }
+    }
+}
+
+/// A stub API that always reports `cancel_requested: true`, counts worker heartbeats, and records
+/// every job-progress post (so the terminal `Canceled` write is observable).
+async fn spawn_keepalive_stub(state: KeepaliveStubState) -> String {
+    async fn heartbeat_route(State(state): State<KeepaliveStubState>) -> Response {
+        state
+            .heartbeats
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        // The body does not parse as a WorkerSnapshot; `heartbeat()` tolerates the decode
+        // failure as a transport error, so the ping still counts without modeling the snapshot.
+        Json(json!({})).into_response()
+    }
+    async fn job_route(axum::extract::Path(job_id): axum::extract::Path<String>) -> Response {
+        Json(job_snapshot_json(&job_id, true)).into_response()
+    }
+    async fn progress_route(
+        State(state): State<KeepaliveStubState>,
+        axum::extract::Path(job_id): axum::extract::Path<String>,
+        Json(payload): Json<Value>,
+    ) -> Response {
+        state.progress.lock().unwrap().push(payload);
+        Json(job_snapshot_json(&job_id, true)).into_response()
+    }
+    let app = Router::new()
+        .route(
+            "/api/v1/workers/:worker_id/heartbeat",
+            post(heartbeat_route),
+        )
+        .route("/api/v1/jobs/:job_id", get(job_route))
+        .route("/api/v1/jobs/:job_id/progress", post(progress_route))
+        .with_state(state);
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("listener binds");
+    let address = listener.local_addr().expect("listener has address");
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.expect("stub serves");
+    });
+    format!("http://{address}")
+}
+
+/// The MLX lane: the keepalive trips the flag, the engine honors it between propagated frames and
+/// surfaces `WorkerError::Canceled` from inside the task — the terminal `Canceled` must be posted
+/// and the error propagated (never a dangling non-terminal job).
+#[tokio::test]
+async fn keepalive_posts_terminal_canceled_when_the_task_honors_the_flag() {
+    let state = KeepaliveStubState::new();
+    let base = spawn_keepalive_stub(state.clone()).await;
+    let mut settings = test_settings("http://127.0.0.1".to_owned(), None);
+    settings.api_url = base;
+    let api = ApiClient::new(&settings);
+
+    let flag = gen_core::CancelFlag::new();
+    let task_flag = flag.clone();
+    let task = tokio::task::spawn_blocking(move || -> super::WorkerResult<u32> {
+        let start = std::time::Instant::now();
+        while !task_flag.is_cancelled() {
+            if start.elapsed() > Duration::from_secs(30) {
+                return Err(WorkerError::Engine("cancel flag never tripped".to_owned()));
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        // The engine's per-frame cancel contract (gen-core d8038beb) surfaces Canceled itself.
+        Err(WorkerError::Canceled(
+            "Person segmentation canceled by user.".to_owned(),
+        ))
+    });
+    let result = super::run_blocking_with_heartbeat(
+        &api,
+        &settings,
+        "job-8807-mlx",
+        Some(flag),
+        "Person tracking canceled during segmentation.",
+        "sam propagate stand-in",
+        task,
+    )
+    .await;
+
+    assert!(
+        matches!(result, Err(WorkerError::Canceled(ref m)) if m == "Person segmentation canceled by user."),
+        "expected the task's Canceled to propagate, got {result:?}"
+    );
+    assert!(
+        state.heartbeats.load(std::sync::atomic::Ordering::SeqCst) >= 1,
+        "Busy heartbeat pinged during the blocking task"
+    );
+    let posts = state.progress.lock().unwrap();
+    assert!(
+        posts.iter().any(|p| p["status"] == "canceled"),
+        "terminal Canceled posted to the job, got {posts:?}"
+    );
+}
+
+/// The candle lane (coarse seams only until sc-8972): the compute cannot observe the flag
+/// mid-propagate and runs to completion — the keepalive still posts the terminal `Canceled` with
+/// its own cancel copy and returns `WorkerError::Canceled`.
+#[tokio::test]
+async fn keepalive_cancels_the_job_even_when_the_task_cannot_observe_the_flag() {
+    let state = KeepaliveStubState::new();
+    let base = spawn_keepalive_stub(state.clone()).await;
+    let mut settings = test_settings("http://127.0.0.1".to_owned(), None);
+    settings.api_url = base;
+    let api = ApiClient::new(&settings);
+
+    let flag = gen_core::CancelFlag::new();
+    let wait_flag = flag.clone();
+    let task = tokio::task::spawn_blocking(move || -> super::WorkerResult<u32> {
+        // Wait until the keepalive has tripped the flag (so `canceled` is set before we return),
+        // then finish successfully — the uncancellable-compute shape.
+        let start = std::time::Instant::now();
+        while !wait_flag.is_cancelled() && start.elapsed() < Duration::from_secs(30) {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        Ok(7)
+    });
+    let result = super::run_blocking_with_heartbeat(
+        &api,
+        &settings,
+        "job-8807-candle",
+        Some(flag),
+        "Person tracking canceled during segmentation.",
+        "candle propagate stand-in",
+        task,
+    )
+    .await;
+
+    assert!(
+        matches!(result, Err(WorkerError::Canceled(ref m)) if m == "Person tracking canceled during segmentation."),
+        "expected the keepalive's Canceled, got {result:?}"
+    );
+    let posts = state.progress.lock().unwrap();
+    assert!(
+        posts.iter().any(|p| p["status"] == "canceled"),
+        "terminal Canceled posted to the job, got {posts:?}"
+    );
+}
