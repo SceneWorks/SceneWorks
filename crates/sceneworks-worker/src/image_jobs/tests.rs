@@ -245,9 +245,9 @@ fn mlx_model_table_maps_known_families() {
     );
     let fast = mlx_model("sensenova_u1_8b_fast").unwrap();
     assert_eq!(fast.engine_id(), "sensenova_u1_8b_fast");
-    // sc-8771: _fast is UNCHANGED — stays on the dense bf16 repo + distill-LoRA-at-load path
-    // (packed fast tiers are tracked separately as sc-8775), NOT the new packed re-host.
-    assert_eq!(fast.default_repo(), "sensenova/SenseNova-U1-8B-MoT");
+    // sc-8775: _fast now points at its OWN SceneWorks MLX quant-matrix re-host (q4/q8/bf16 packed
+    // tiers with the 8-step distill LoRA pre-merged at convert time), distinct from the base re-host.
+    assert_eq!(fast.default_repo(), "SceneWorks/sensenova-u1-8b-fast-mlx");
     assert_eq!(fast.default_steps(), 8);
     assert_eq!(fast.default_guidance(), 1.0);
     assert_eq!(fast.adapter_label(), "mlx_sensenova");
@@ -7280,6 +7280,18 @@ fn candle_control_providers_resolve_models_and_repos() {
     );
     assert_eq!(zimage_control_steps(&turbo), ZIMAGE_CTRL_DEFAULT_STEPS);
     assert_eq!(zimage_control_steps(&base), ZIMAGE_CTRL_BASE_DEFAULT_STEPS);
+
+    // sc-8680 — base-mode real-CFG guidance: defaults to 4.0 (the base card / `z_image` manifest), an
+    // `advanced.guidanceScale` override wins and is clamped. Consumed only in base mode (Turbo ignores it).
+    assert_eq!(
+        zimage_control_guidance(&base),
+        ZIMAGE_CTRL_BASE_DEFAULT_GUIDANCE
+    );
+    assert_eq!(ZIMAGE_CTRL_BASE_DEFAULT_GUIDANCE, 4.0);
+    let base_g = request(json!({
+        "projectId": "p", "model": "z_image", "advanced": { "guidanceScale": 6.5 }
+    }));
+    assert_eq!(zimage_control_guidance(&base_g), 6.5);
 }
 
 /// The trait routes each provider: each lane's `CandleStrictControl` impl reports the right engine id
@@ -7294,36 +7306,42 @@ fn candle_strict_control_trait_routes_each_provider() {
     let zimage = ZImageStrictControl {
         snapshot: dummy.clone(),
         controlnet: dummy.clone(),
-        is_base: false,
         prompt: "p".to_owned(),
         width: 512,
         height: 512,
         steps: 8,
         control_scale: 1.0,
-        guidance: ZIMAGE_CTRL_BASE_DEFAULT_GUIDANCE,
-        negative_prompt: None,
+        // Turbo: distilled, no CFG — `is_base` false, guidance/negative inert.
+        is_base: false,
+        guidance: 0.0,
+        negative_prompt: String::new(),
         engine_id: ZIMAGE_CTRL_ENGINE_ID,
     };
     assert_eq!(zimage.engine_id(), ZIMAGE_CTRL_ENGINE_ID);
     assert_eq!(zimage.engine_label(), ZIMAGE_CTRL_ENGINE);
     assert_eq!(zimage.stream_tag(), "zimage_control");
 
-    // Base z_image (sc-8379) routes the SAME provider with the `z_image_control` engine-id row.
+    // Base z_image (sc-8379 control + sc-8680 faithful base): the SAME provider with the `z_image_control`
+    // engine-id row, `is_base = true` (the faithful shift-6.0 / ~50-step / real-CFG path), and threaded
+    // guidance + negative prompt.
     let zimage_base = ZImageStrictControl {
         snapshot: dummy.clone(),
         controlnet: dummy.clone(),
-        is_base: true,
         prompt: "p".to_owned(),
         width: 512,
         height: 512,
         steps: 50,
         control_scale: 1.0,
-        guidance: ZIMAGE_CTRL_BASE_DEFAULT_GUIDANCE,
-        negative_prompt: None,
+        is_base: true,
+        guidance: 4.0,
+        negative_prompt: "blurry".to_owned(),
         engine_id: ZIMAGE_CTRL_BASE_ENGINE_ID,
     };
     assert_eq!(zimage_base.engine_id(), ZIMAGE_CTRL_BASE_ENGINE_ID);
     assert_eq!(zimage_base.engine_label(), ZIMAGE_CTRL_ENGINE);
+    assert!(zimage_base.is_base);
+    assert_eq!(zimage_base.guidance, 4.0);
+    assert_eq!(zimage_base.negative_prompt, "blurry");
 
     // FLUX.1-dev control (sc-8412) routes via the `Flux1StrictControl` provider.
     let flux1 = Flux1StrictControl {
