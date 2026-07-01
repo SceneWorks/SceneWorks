@@ -3221,26 +3221,26 @@
         "families": ["sdxl"],
         "types": ["style", "enhance", "character"]
       },
-      // macOS-only MLX backend (sc-1975, path C). In-process via the vendored
-      // mlx-examples/stable_diffusion at scene_worker/_vendor/mlx_sd/ — no
-      // sidecar venv (deps are already in the worker venv when
-      // requirements-mlx.txt is installed). The auto-dispatch prefers MLX
-      // when MlxSdxlAdapter._mlx_sd_available() is true on darwin, the job
-      // is plain T2I, and no reference asset is present; otherwise the
-      // torch SdxlDiffusersAdapter remains the default. Escape hatch:
-      // SCENEWORKS_DISABLE_MLX_SDXL=1.
+      // macOS-only MLX backend. The MLX-SDXL generator is the Rust `mlx-gen-sdxl`
+      // path, claimed by the in-process `mlx` GPU worker via the Rust API claim
+      // layer (jobs_store::sdxl_mlx_eligible). sc-3060 RETIRED the old in-process
+      // vendored Apple `mlx-examples/stable_diffusion` (scene_worker/_vendor/mlx_sd/)
+      // adapter — the Python worker always routes the torch SdxlDiffusersAdapter now
+      // (every host, every shape); it never runs MLX-SDXL.
       //
-      // No mlx.quantize knob yet — Apple's default Q8 recipe breaks SDXL
-      // base 1.0 (works on sdxl-turbo only); spike sc-1975 measured the bf16
-      // path at ~1.08 s/step on M5 Max (~3× the torch baseline) which is the
-      // headline win.
+      // mlx.quantize/tier config below is consumed by the RUST worker
+      // (standard_tier_subdir / resolve_quant), NOT the retired Apple adapter. The
+      // original sc-1975 deferral ("Apple's Q8 recipe breaks SDXL base 1.0, works on
+      // turbo only") applied to that retired vendored Python recipe. mlx-gen PR #62
+      // (sc-2641) FIXED + MERGED SDXL Q4/Q8 quantization — both hold parity on
+      // base-1.0 — so the packed tiers below ship Q4 (default) / Q8 / bf16. Q8 base
+      // render-verified coherent on-device (768x768, mean 97.65, std 61.43, NOT the
+      // retired recipe's all-zero decode).
       //
-      // No sampler/scheduler limits override either: mlx-examples runs the
-      // SDXL EulerDiscrete schedule its own way, which already matches the
-      // torch path's default. If the picker grows sampler choices later
-      // (currently the manifest has no `limits.samplers` for sdxl), this
-      // block will need the same default-only override as the mflux family
-      // entries.
+      // No sampler/scheduler limits override: the MLX SDXL EulerDiscrete schedule
+      // already matches the torch path's default. If the picker grows sampler choices
+      // later (currently no `limits.samplers` for sdxl), this block will need the same
+      // default-only override as the mflux family entries.
       "mlx": {
         "minMemoryGb": 50,
         // q4/ default tier (sc-8746); q8/ + bf16/ hosted + selectable via advanced.mlxQuantize
