@@ -1,10 +1,55 @@
 import React from "react";
 import { isAbortError } from "../api.js";
-import { AssetMedia, assetUrl } from "./assetMedia.jsx";
+import { AssetMedia, assetCanRenderAsVideo, assetUrl } from "./assetMedia.jsx";
 import { DocumentView } from "./DocumentView.jsx";
 import { Icon } from "./Icons.jsx";
 import { LikenessBadge } from "./LikenessBadge.jsx";
 import { Modal } from "./Modal.jsx";
+
+// Zoom/pan model for the fullscreen image preview (sc-8728). Mirrors the Image
+// Editor canvas convention (`view = { scale, x, y }`, ImageEditor.jsx): `scale`
+// multiplies the image and `x`/`y` translate its top-left corner within the
+// stage, applied as `translate(x, y) scale(scale)` with `transform-origin: 0 0`.
+// `scale === 1` is fit-to-view here (the <img> is already sized to contain the
+// stage at 100% width), so fit resets to the identity view.
+export const PREVIEW_MIN_SCALE = 1;
+export const PREVIEW_MAX_SCALE = 8;
+export const PREVIEW_ZOOM_STEP = 1.2;
+export const PREVIEW_FIT_VIEW = { scale: 1, x: 0, y: 0 };
+
+const clampScale = (value) => Math.min(PREVIEW_MAX_SCALE, Math.max(PREVIEW_MIN_SCALE, value));
+
+// Cursor-anchored zoom: keep the image point under `pointer` (stage-relative px)
+// stationary while multiplying the scale by `factor`. Pure so the anchoring math
+// is unit-testable in isolation; mirrors ImageEditor's handleWheel/zoomAtCenter.
+export function zoomView(view, pointer, factor) {
+  const oldScale = view.scale;
+  const newScale = clampScale(oldScale * factor);
+  if (newScale === oldScale) {
+    return view;
+  }
+  const imagePoint = { x: (pointer.x - view.x) / oldScale, y: (pointer.y - view.y) / oldScale };
+  return {
+    scale: newScale,
+    x: pointer.x - imagePoint.x * newScale,
+    y: pointer.y - imagePoint.y * newScale,
+  };
+}
+
+// Clamp the pan offset so the (scaled) image can't be dragged fully off the
+// stage: at scale 1 it stays centered (offset 0); when zoomed the visible edge
+// can travel to the stage edge but no further. Pure for testing.
+export function clampPan(view, stageWidth, stageHeight) {
+  const scaledW = stageWidth * view.scale;
+  const scaledH = stageHeight * view.scale;
+  const minX = Math.min(0, stageWidth - scaledW);
+  const minY = Math.min(0, stageHeight - scaledH);
+  return {
+    scale: view.scale,
+    x: Math.min(0, Math.max(minX, view.x)),
+    y: Math.min(0, Math.max(minY, view.y)),
+  };
+}
 
 // Permanently purge every discarded asset in a single Trashcan view. The caller
 // passes only the assets visible in that view, so per-character and per-filter
@@ -508,6 +553,84 @@ export function FullscreenPreview({
   }, [asset.id, asset.variants?.upscaled?.id]);
   const displayedAsset = hasUpscaleVariants ? asset.variants[variantMode] : asset;
 
+  // Zoom/pan is IMAGES ONLY — video keeps its native <video> controls and gets no
+  // zoom overlay/UI (sc-8728). `isVideo` gates the whole zoom surface.
+  const isVideo = assetCanRenderAsVideo(displayedAsset);
+
+  const viewportRef = React.useRef(null);
+  const [view, setView] = React.useState(PREVIEW_FIT_VIEW);
+  const dragRef = React.useRef(null);
+
+  const fitToView = React.useCallback(() => setView(PREVIEW_FIT_VIEW), []);
+
+  // Reset to fit whenever the displayed image changes: prev/next navigation
+  // (asset.id) OR a variant toggle (variantMode / the variant's own id).
+  React.useEffect(() => {
+    fitToView();
+  }, [asset.id, variantMode, displayedAsset?.id, fitToView]);
+
+  const stageSize = React.useCallback(() => {
+    const rect = viewportRef.current?.getBoundingClientRect?.();
+    return { width: rect?.width || 0, height: rect?.height || 0 };
+  }, []);
+
+  const zoomAtCenter = React.useCallback(
+    (factor) => {
+      const { width, height } = stageSize();
+      const pointer = { x: width / 2, y: height / 2 };
+      setView((current) => clampPan(zoomView(current, pointer, factor), width, height));
+    },
+    [stageSize],
+  );
+
+  const zoomIn = React.useCallback(() => zoomAtCenter(PREVIEW_ZOOM_STEP), [zoomAtCenter]);
+  const zoomOut = React.useCallback(() => zoomAtCenter(1 / PREVIEW_ZOOM_STEP), [zoomAtCenter]);
+
+  // Wheel-to-zoom anchored at the cursor. Native (non-passive) listener so we can
+  // preventDefault the page scroll; React's onWheel is passive in some browsers.
+  React.useEffect(() => {
+    const node = viewportRef.current;
+    if (!node || isVideo) {
+      return undefined;
+    }
+    const onWheel = (event) => {
+      event.preventDefault();
+      const rect = node.getBoundingClientRect();
+      const pointer = { x: event.clientX - rect.left, y: event.clientY - rect.top };
+      const factor = event.deltaY > 0 ? 1 / PREVIEW_ZOOM_STEP : PREVIEW_ZOOM_STEP;
+      setView((current) => clampPan(zoomView(current, pointer, factor), rect.width, rect.height));
+    };
+    node.addEventListener("wheel", onWheel, { passive: false });
+    return () => node.removeEventListener("wheel", onWheel);
+  }, [isVideo, displayedAsset?.id]);
+
+  const onPointerDown = (event) => {
+    if (view.scale <= PREVIEW_MIN_SCALE) {
+      return; // no pan at fit scale
+    }
+    dragRef.current = { startX: event.clientX, startY: event.clientY, originX: view.x, originY: view.y };
+    event.currentTarget.setPointerCapture?.(event.pointerId);
+  };
+
+  const onPointerMove = (event) => {
+    const drag = dragRef.current;
+    if (!drag) {
+      return;
+    }
+    const { width, height } = stageSize();
+    const next = { scale: view.scale, x: drag.originX + (event.clientX - drag.startX), y: drag.originY + (event.clientY - drag.startY) };
+    setView(clampPan(next, width, height));
+  };
+
+  const endDrag = (event) => {
+    if (dragRef.current) {
+      dragRef.current = null;
+      event.currentTarget?.releasePointerCapture?.(event.pointerId);
+    }
+  };
+
+  const zoomed = view.scale > PREVIEW_MIN_SCALE;
+
   return (
     <Modal className="preview-modal" label="Asset preview" onClose={onClose}>
       <button className="modal-close" onClick={onClose} type="button">
@@ -523,7 +646,25 @@ export function FullscreenPreview({
           >
             <Icon.ArrowLeft size={18} />
           </button>
-          <AssetMedia asset={displayedAsset} />
+          {isVideo ? (
+            <AssetMedia asset={displayedAsset} />
+          ) : (
+            <div
+              className={`preview-zoom-viewport${zoomed ? " zoomed" : ""}`}
+              onPointerDown={onPointerDown}
+              onPointerMove={onPointerMove}
+              onPointerUp={endDrag}
+              onPointerCancel={endDrag}
+              ref={viewportRef}
+            >
+              <div
+                className="preview-zoom-inner"
+                style={{ transform: `translate(${view.x}px, ${view.y}px) scale(${view.scale})`, transformOrigin: "0 0" }}
+              >
+                <AssetMedia asset={displayedAsset} />
+              </div>
+            </div>
+          )}
           <LikenessBadge asset={asset} />
           <button
             aria-label="Next asset"
@@ -534,6 +675,31 @@ export function FullscreenPreview({
           >
             <Icon.ArrowRight size={18} />
           </button>
+          {isVideo ? null : (
+            <div className="preview-zoom-controls" role="group" aria-label="Zoom controls">
+              <button
+                aria-label="Zoom out"
+                disabled={view.scale <= PREVIEW_MIN_SCALE}
+                onClick={zoomOut}
+                title="Zoom out"
+                type="button"
+              >
+                <Icon.Minus size={16} />
+              </button>
+              <button aria-label="Fit to view" onClick={fitToView} title="Fit to view" type="button">
+                Fit
+              </button>
+              <button
+                aria-label="Zoom in"
+                disabled={view.scale >= PREVIEW_MAX_SCALE}
+                onClick={zoomIn}
+                title="Zoom in"
+                type="button"
+              >
+                <Icon.Plus size={16} />
+              </button>
+            </div>
+          )}
         </div>
         <footer>
           <div className="preview-modal-meta">
