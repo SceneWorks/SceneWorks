@@ -2335,10 +2335,13 @@ fn is_candle_engine(model: &str) -> bool {
             | "boogu_image"
             | "boogu_image_turbo"
             | "boogu_image_edit"
-            // Krea 2 Turbo (sc-7581, epic 7565 P4): pure txt2img on the generic candle lane (CFG-free
-            // 8-step). Like Boogu, its MLX turnkey (`SceneWorks/krea-2-turbo-mlx`, q8/q4 packed) isn't
-            // candle-readable, so the candle lane loads bf16 from the ungated public `krea/Krea-2-Turbo`
-            // snapshot root (no subdir). No edit/reference/control shapes.
+            // Krea 2 Turbo (sc-7581, epic 7565 P4): txt2img + inference LoRA/LoKr on the generic candle
+            // lane (CFG-free 8-step). Like Boogu, its MLX turnkey (`SceneWorks/krea-2-turbo-mlx`, q8/q4
+            // packed) isn't candle-readable, so the candle lane loads bf16 from the ungated public
+            // `krea/Krea-2-Turbo` snapshot root (no subdir). The `candle-gen-krea` descriptor advertises
+            // supports_lora/supports_lokr (sc-7836), so `generate_candle_stream` resolves a
+            // `krea_2_raw`-trained adapter via `model.supports_adapters()`. No edit/reference/control
+            // shapes and no on-the-fly quant (dense bf16 only).
             | "krea_2_turbo"
             // Stable Diffusion 3.5 (sc-7880, epic 7982): Large / Large Turbo / Medium all ride the generic
             // candle txt2img lane (the `candle-gen-sd3` provider). `generate_candle_stream` resolves Q4/Q8
