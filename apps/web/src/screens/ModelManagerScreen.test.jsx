@@ -873,10 +873,13 @@ describe("ModelManagerScreen quant-tier download panel (sc-8509)", () => {
   // suggestion lands on q4 at 32 GB (budget 25.6 GB: q4 est 6 GB fits; q8/bf16 overflow) and on bf16
   // at 512 GB (budget 409 GB: bf16 est 36 GB fits).
   function matrixModel({ installed = [] } = {}) {
+    // diskGb (on-disk footprint, req #1 — this is what the row must render) is deliberately distinct
+    // from downloadGb (compressed download) so the assertions prove the displayed size comes from
+    // footprint.diskSizeBytes, not downloadSizeBytes. The RAM suggestion keys off diskGb.
     const tiers = [
-      { variant: "q4", diskGb: 4 }, // est 6 GB
-      { variant: "q8", diskGb: 18 }, // est 27 GB > 25.6 → excluded at 32 GB
-      { variant: "bf16", diskGb: 24 }, // est 36 GB > 25.6 → excluded at 32 GB
+      { variant: "q4", diskGb: 4, downloadGb: 3 }, // est 6 GB
+      { variant: "q8", diskGb: 18, downloadGb: 15 }, // est 27 GB > 25.6 → excluded at 32 GB
+      { variant: "bf16", diskGb: 24, downloadGb: 20 }, // est 36 GB > 25.6 → excluded at 32 GB
     ];
     return {
       id: "z_image_turbo",
@@ -890,7 +893,7 @@ describe("ModelManagerScreen quant-tier download panel (sc-8509)", () => {
         variant: tier.variant,
         installState: installed.includes(tier.variant) ? "installed" : "missing",
         cacheState: installed.includes(tier.variant) ? "complete" : "missing",
-        downloadSizeBytes: tier.diskGb * GB,
+        downloadSizeBytes: tier.downloadGb * GB,
         footprint: { diskSizeBytes: tier.diskGb * GB, residentMemoryBytes: null, peakMemoryBytes: null },
       })),
       ui: { description: "Matrix model." },
@@ -985,9 +988,12 @@ describe("ModelManagerScreen quant-tier download panel (sc-8509)", () => {
     const labels = rows.map((row) => row.querySelector(".model-tier-label").textContent);
     expect(labels[0]).toContain("bf16");
     expect(labels[2]).toContain("Q4");
-    // Sizes render from downloadSizeBytes.
+    // Sizes render the ON-DISK footprint (req #1: footprint.diskSizeBytes), not the smaller
+    // compressed downloadSizeBytes. bf16 disk = 24 GB (download 20 GB), q4 disk = 4 GB (download 3 GB).
     expect(container.textContent).toContain("24.0 GB");
     expect(container.textContent).toContain("4.0 GB");
+    expect(container.textContent).not.toContain("20.0 GB");
+    expect(container.textContent).not.toContain("3.0 GB");
     // The installed tier reports installed; the others report not installed.
     const q8Row = rows.find((row) => row.querySelector(".model-tier-label").textContent.includes("Q8"));
     expect(q8Row.querySelector(".status-badge").textContent).toBe("installed");

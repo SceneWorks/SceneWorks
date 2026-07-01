@@ -424,7 +424,9 @@ function ModelTierDownloadPanel({
                   {isSuggested ? <span className="model-tier-suggested-badge">Suggested</span> : null}
                 </span>
               </label>
-              <span className="model-tier-size">{formatTierSize(variant.downloadSizeBytes)}</span>
+              <span className="model-tier-size">
+                {formatTierSize(variant.footprint?.diskSizeBytes ?? variant.downloadSizeBytes)}
+              </span>
               <span className={installed ? "status-badge installed" : "status-badge"}>
                 {activeJob ? activeJob.status : installed ? "installed" : "not installed"}
               </span>
