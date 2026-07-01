@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-get-gpu-telemetry"
+description = "Enables the get_gpu_telemetry command without any pre-configured scope."
+commands.allow = ["get_gpu_telemetry"]
+
+[[permission]]
+identifier = "deny-get-gpu-telemetry"
+description = "Denies the get_gpu_telemetry command without any pre-configured scope."
+commands.deny = ["get_gpu_telemetry"]
