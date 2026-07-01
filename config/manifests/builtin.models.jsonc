@@ -3159,20 +3159,45 @@
       // image_detail: tile-ControlNet detail refine (image_detail job, sc-2437/sc-2438).
       "capabilities": ["text_to_image", "edit_image", "image_inpaint", "image_detail", "character_image", "style_variations"],
       "downloads": [
+        // SceneWorks pre-built MLX quant-matrix turnkey (sc-8746, epic 8506, Group-B): a
+        // public/ungated (CreativeML OpenRAIL++-M) re-host of stabilityai/stable-diffusion-xl-base-1.0.
+        // Per-tier self-contained subdirs (UNet + both CLIP text encoders + VAE + tokenizer(s) +
+        // scheduler + model_index.json): q4/ (default), q8/, bf16/. The worker loads the chosen
+        // tier's subdir directly (standard_tier_subdir, mlx.standardTierLayout). The UNet + BOTH
+        // text encoders are packed in q4/q8; the VAE stays dense in every tier. Per-tier variants
+        // (sc-8508): each tier is a SEPARATE installable artifact tagged with a `variant` key + a
+        // `footprint` (required on-disk size; resident/peak filled in later by sc-8516). Sizes are
+        // measured on-disk. Replaces the whole-repo dense download.
         {
-          // Diffusers checkpoint: SDXL base 1.0 (UNet + dual CLIP text encoders
-          // + VAE). Whole-repo download; the worker loads the fp16 variant.
-          // CreativeML OpenRAIL++-M: use-based restrictions, commercial use OK,
-          // ungated (no HF token required).
           "provider": "huggingface",
-          "repo": "stabilityai/stable-diffusion-xl-base-1.0",
-          "files": [],
-          "estimatedSizeBytes": 6938040320
+          "repo": "SceneWorks/sdxl-base-mlx",
+          "variant": "q4",
+          "default": true,
+          "files": ["q4/*"],
+          "estimatedSizeBytes": 2703202068,
+          "footprint": { "diskSizeBytes": 2703202068, "residentMemoryBytes": null, "peakMemoryBytes": null }
+        },
+        {
+          "provider": "huggingface",
+          "repo": "SceneWorks/sdxl-base-mlx",
+          "variant": "q8",
+          "files": ["q8/*"],
+          "estimatedSizeBytes": 4177386896,
+          "footprint": { "diskSizeBytes": 4177386896, "residentMemoryBytes": null, "peakMemoryBytes": null }
+        },
+        {
+          "provider": "huggingface",
+          "repo": "SceneWorks/sdxl-base-mlx",
+          "variant": "bf16",
+          "files": ["bf16/*"],
+          "estimatedSizeBytes": 6941187536,
+          "footprint": { "diskSizeBytes": 6941187536, "residentMemoryBytes": null, "peakMemoryBytes": null }
         }
       ],
       "paths": {
-        "model": "${HF_CACHE}/stabilityai/stable-diffusion-xl-base-1.0"
+        "model": "${HF_CACHE}/SceneWorks/sdxl-base-mlx"
       },
+      "gated": false,
       "defaults": {
         // SDXL base 1.0: EulerDiscreteScheduler default; real CFG with a
         // negative prompt. ~30 steps at guidance 7.0 is a solid baseline.
@@ -3218,6 +3243,13 @@
       // entries.
       "mlx": {
         "minMemoryGb": 50,
+        // q4/ default tier (sc-8746); q8/ + bf16/ hosted + selectable via advanced.mlxQuantize
+        // (standard_tier_subdir resolves the subdir).
+        "quantize": 4,
+        // sc-8508: the manifest-driven form of the STANDARD_TIER_MODELS registry. Additive here
+        // opts this id into `uses_standard_tier_layout` so the worker resolves the q4/q8/bf16
+        // subdir directly from the turnkey snapshot.
+        "standardTierLayout": true,
         // CFG++ (epic 7434, sc-8256) is MLX-only today: the reparameterized-guidance
         // dispatch lives in mlx-gen-sdxl, so only the MLX backend advertises it. The base
         // `limits` carries no guidanceMethods, so the candle lane shows the standard CFG
@@ -3255,19 +3287,45 @@
       // resemblance, sdxl-family LoRA support.
       "capabilities": ["text_to_image", "edit_image", "image_inpaint", "image_detail", "character_image", "style_variations"],
       "downloads": [
+        // SceneWorks pre-built MLX quant-matrix turnkey (sc-8746, epic 8506, Group-B): a
+        // public/ungated (openrail++) re-host of SG161222/RealVisXL_V5.0. Per-tier self-contained
+        // subdirs (UNet + both CLIP text encoders + VAE + tokenizer(s) + scheduler +
+        // model_index.json): q4/ (default), q8/, bf16/. The worker loads the chosen tier's subdir
+        // directly (standard_tier_subdir, mlx.standardTierLayout). UNet + both text encoders packed
+        // in q4/q8; VAE dense in every tier. Per-tier variants (sc-8508): each tier is a SEPARATE
+        // installable artifact with a `variant` + `footprint`. Sizes measured on-disk. Note the
+        // dense IP-Adapter / InstantID / candle-edit conditioning paths still fetch the original
+        // SG161222/RealVisXL_V5.0 diffusers layout on demand — those are unaffected by this turnkey.
         {
-          // Same checkpoint as the InstantID built-in below — single HF cache
-          // entry, no duplicate ~6.6 GiB download. openrail++ (commercial use OK,
-          // ungated). IP-Adapter weights are fetched on demand by the adapter.
           "provider": "huggingface",
-          "repo": "SG161222/RealVisXL_V5.0",
-          "files": [],
-          "estimatedSizeBytes": 7105348096
+          "repo": "SceneWorks/realvisxl-mlx",
+          "variant": "q4",
+          "default": true,
+          "files": ["q4/*"],
+          "estimatedSizeBytes": 3911656467,
+          "footprint": { "diskSizeBytes": 3911656467, "residentMemoryBytes": null, "peakMemoryBytes": null }
+        },
+        {
+          "provider": "huggingface",
+          "repo": "SceneWorks/realvisxl-mlx",
+          "variant": "q8",
+          "files": ["q8/*"],
+          "estimatedSizeBytes": 5385840183,
+          "footprint": { "diskSizeBytes": 5385840183, "residentMemoryBytes": null, "peakMemoryBytes": null }
+        },
+        {
+          "provider": "huggingface",
+          "repo": "SceneWorks/realvisxl-mlx",
+          "variant": "bf16",
+          "files": ["bf16/*"],
+          "estimatedSizeBytes": 7108692804,
+          "footprint": { "diskSizeBytes": 7108692804, "residentMemoryBytes": null, "peakMemoryBytes": null }
         }
       ],
       "paths": {
-        "model": "${HF_CACHE}/SG161222/RealVisXL_V5.0"
+        "model": "${HF_CACHE}/SceneWorks/realvisxl-mlx"
       },
+      "gated": false,
       "defaults": {
         // Model-card SDXL defaults: ~30 steps at guidance 7.0, native 1024x1024.
         "resolution": "1024x1024",
@@ -3289,6 +3347,10 @@
         "types": ["style", "enhance", "character"]
       },
       "mlx": {
+        // q4/ default tier (sc-8746); q8/ + bf16/ hosted + selectable via advanced.mlxQuantize.
+        "quantize": 4,
+        // sc-8508 manifest-driven standard-tier opt-in (see the `sdxl` entry).
+        "standardTierLayout": true,
         // CFG++ (epic 7434, sc-8256) is MLX-only today — same `sdxl` engine, same
         // reparameterized-guidance dispatch as the base SDXL entry. Scoped to the MLX
         // backend so the candle lane keeps the standard CFG surface (sc-8257 follow-on).
@@ -3336,33 +3398,46 @@
       // edit / reference / mask / pose shapes fall back to the Python torch worker. Was `macOnly: true`
       // until the candle lightning lane landed + was GPU-validated (~5-step render) on the RTX PRO 6000.
       "downloads": [
+        // SceneWorks pre-built MLX quant-matrix turnkey (sc-8746, epic 8506, Group-B): a
+        // public/ungated (openrail++) re-host of the distilled SG161222/RealVisXL_V5.0_Lightning.
+        // Per-tier self-contained subdirs (UNet + both CLIP text encoders + VAE + tokenizer(s) +
+        // scheduler + model_index.json): q4/ (default), q8/, bf16/ — the worker loads the chosen
+        // tier's subdir directly (standard_tier_subdir, mlx.standardTierLayout). UNet + both text
+        // encoders packed in q4/q8; VAE dense in every tier. This replaces the old scoped-glob pull
+        // from the ~41 GB upstream repo (which bundled redundant fp16/fp32 component + single-file
+        // variants) — the turnkey ships only the packed fp16 components per tier. Per-tier variants
+        // (sc-8508): each tier is a SEPARATE installable artifact with a `variant` + `footprint`.
+        // Sizes measured on-disk.
         {
-          // Distilled checkpoint, distinct weights from RealVisXL_V5.0. openrail++, ungated,
-          // download-on-demand (not Recommended/auto-download). The repo is ~41 GB — it bundles
-          // fp16 AND fp32 diffusers component variants PLUS two redundant root single-file
-          // checkpoints (`*_fp16.safetensors` ~6.6 GB, `*_fp32.safetensors` ~13 GB). The mlx-gen
-          // `sdxl` loader reads only the **fp16 diffusers components** (it prefers
-          // `<comp>/*.fp16.safetensors`), so scope the pull to those + the tiny configs/tokenizers
-          // = ~6.9 GB. An empty `files` would fetch the whole 41 GB repo (allow_pattern_matches
-          // empty == match-all). Globs use `glob::Pattern` (require_literal_separator=false), so
-          // `*/*.fp16.safetensors` requires a subdir (skips the root single-files) and matches the
-          // fp16 stem (skips the fp32 + sharded variants).
           "provider": "huggingface",
-          "repo": "SG161222/RealVisXL_V5.0_Lightning",
-          "files": [
-            "model_index.json",
-            "scheduler/*",
-            "tokenizer/*",
-            "tokenizer_2/*",
-            "*/config.json",
-            "*/*.fp16.safetensors"
-          ],
-          "estimatedSizeBytes": 6940000000
+          "repo": "SceneWorks/realvisxl-lightning-mlx",
+          "variant": "q4",
+          "default": true,
+          "files": ["q4/*"],
+          "estimatedSizeBytes": 3911657599,
+          "footprint": { "diskSizeBytes": 3911657599, "residentMemoryBytes": null, "peakMemoryBytes": null }
+        },
+        {
+          "provider": "huggingface",
+          "repo": "SceneWorks/realvisxl-lightning-mlx",
+          "variant": "q8",
+          "files": ["q8/*"],
+          "estimatedSizeBytes": 5385843729,
+          "footprint": { "diskSizeBytes": 5385843729, "residentMemoryBytes": null, "peakMemoryBytes": null }
+        },
+        {
+          "provider": "huggingface",
+          "repo": "SceneWorks/realvisxl-lightning-mlx",
+          "variant": "bf16",
+          "files": ["bf16/*"],
+          "estimatedSizeBytes": 7108692804,
+          "footprint": { "diskSizeBytes": 7108692804, "residentMemoryBytes": null, "peakMemoryBytes": null }
         }
       ],
       "paths": {
-        "model": "${HF_CACHE}/SG161222/RealVisXL_V5.0_Lightning"
+        "model": "${HF_CACHE}/SceneWorks/realvisxl-lightning-mlx"
       },
+      "gated": false,
       "defaults": {
         // Model-card Lightning defaults: ~5 steps, guidance 1.0 (CFG off — the distilled
         // checkpoint is trained CFG-free, which also halves per-step UNet work; the negative
@@ -3383,6 +3458,13 @@
         // declare the real family rather than an empty list, which would match every LoRA).
         "families": ["sdxl"],
         "types": ["style", "enhance", "character"]
+      },
+      "mlx": {
+        // sc-8746 (epic 8506, Group-B): q4/ default tier; q8/ + bf16/ hosted + selectable via
+        // advanced.mlxQuantize. `standardTierLayout` (sc-8508 manifest-driven form) opts this id
+        // into `uses_standard_tier_layout` so the worker resolves the tier subdir from the turnkey.
+        "quantize": 4,
+        "standardTierLayout": true
       },
       "ui": {
         "label": "RealVisXL Lightning (fast photoreal SDXL)",
