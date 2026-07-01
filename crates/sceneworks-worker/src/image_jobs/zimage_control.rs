@@ -28,6 +28,10 @@ const ZIMAGE_CTRL_BASE_FILE: &str = "diffusion_pytorch_model.safetensors";
 const ZIMAGE_CTRL_BASE_DEFAULT_REPO: &str = "Tongyi-MAI/Z-Image";
 /// ControlNet conditioning-scale default (the strict-pose tier).
 const ZIMAGE_CTRL_DEFAULT_SCALE: f32 = 1.0;
+/// Base (undistilled, full-CFG) classifier-free guidance default (sc-8379/sc-8680) — 4.0, mirroring the
+/// candle-gen `BASE_DEFAULT_GUIDANCE` and `mlx-gen-z-image::model_base::DEFAULT_GUIDANCE`. Only the base
+/// `z_image` control lane runs real CFG; the distilled Turbo lane is guidance-distilled.
+const ZIMAGE_CTRL_BASE_DEFAULT_GUIDANCE: f32 = 4.0;
 /// Denoise-steps default — the 8-step Turbo Fun-ControlNet variant (vs the 4-step distilled txt2img).
 const ZIMAGE_CTRL_DEFAULT_STEPS: u32 = 8;
 /// Denoise-steps default for the base (non-distilled) model — the undistilled foundation runs the full
@@ -131,6 +135,29 @@ fn zimage_control_steps(request: &ImageRequest) -> u32 {
         .unwrap_or(default)
 }
 
+/// Base (undistilled) classifier-free guidance scale for the base `z_image` control lane (sc-8379/sc-8680):
+/// `advanced.guidanceScale` → manifest `guidanceScale` → the base default (4.0, mirroring candle-gen
+/// `BASE_DEFAULT_GUIDANCE` / `mlx-gen-z-image::model_base::DEFAULT_GUIDANCE`), clamped to 1.0..=15.0. Only
+/// consumed in base mode; the distilled Turbo lane ignores guidance entirely.
+fn zimage_control_guidance(request: &ImageRequest) -> f32 {
+    let manifest_default = request
+        .model_manifest_entry
+        .get("guidanceScale")
+        .and_then(|value| {
+            value
+                .as_f64()
+                .or_else(|| value.as_str()?.trim().parse().ok())
+        })
+        .map(|value| value as f32)
+        .unwrap_or(ZIMAGE_CTRL_BASE_DEFAULT_GUIDANCE);
+    advanced::f32_clamped(
+        &request.advanced,
+        "guidanceScale",
+        manifest_default,
+        1.0..=15.0,
+    )
+}
+
 /// The (repo, filename) of the ControlNet weights — `advanced.controlWeights.{repo,filename}` overrides,
 /// else the model's Fun-Controlnet-Union default: the Turbo 8-step variant, or the base
 /// (full-CFG) variant for the base `z_image` model (sc-8379). Parity with the MLX `resolve_control_weights`.
@@ -218,16 +245,28 @@ fn zimage_control_raw_settings(
 }
 
 /// The per-lane half of the candle Z-Image strict-control [`CandleStrictControl`] driver (sc-8304): the
-/// resolved weight paths + the request numerics. Z-Image-Turbo is distilled (no CFG / negative prompt),
-/// so it carries no guidance. Moved onto the blocking thread, loaded once, drives every pose.
+/// resolved weight paths + the request numerics. Serves both the distilled Turbo lane (no CFG / negative
+/// prompt) and the undistilled base lane (real CFG — `guidance` + `negative_prompt`, sc-8379/sc-8680).
+/// Moved onto the blocking thread, loaded once, drives every pose.
 struct ZImageStrictControl {
-    base: PathBuf,
+    /// The base diffusers snapshot dir (`tokenizer/`, `text_encoder/`, `transformer/`, `vae/`) — the
+    /// candle-gen `ZImageControlPaths::snapshot` (sc-8680).
+    snapshot: PathBuf,
     controlnet: PathBuf,
+    /// True selects the undistilled **base** (full-CFG) treatment in candle-gen (`ZImageControlPaths::base`
+    /// / shift-6.0 ~50-step schedule); false = the distilled Turbo path (sc-8680). Mirrors the model-id.
+    is_base: bool,
     prompt: String,
     width: u32,
     height: u32,
     steps: u32,
     control_scale: f32,
+    /// **Base mode only** (sc-8379/sc-8680): the classifier-free guidance scale. Ignored by the distilled
+    /// Turbo lane (guidance-distilled — single cond forward).
+    guidance: f32,
+    /// **Base mode only** (sc-8379/sc-8680): the negative-prompt text for the uncond CFG branch. Ignored
+    /// by the Turbo lane.
+    negative_prompt: Option<String>,
     /// The [`STRICT_CONTROL_ENGINES`] catalog id for this job's model — `z_image_turbo_control` (Turbo) or
     /// `z_image_control` (base, sc-8379) — the `advanced.controlMode` validation key.
     engine_id: &'static str,
@@ -250,8 +289,9 @@ impl CandleStrictControl for ZImageStrictControl {
 
     fn load(&self) -> WorkerResult<Self::Model> {
         let paths = ZImageControlPaths {
-            base: self.base.clone(),
+            snapshot: self.snapshot.clone(),
             control: self.controlnet.clone(),
+            base: self.is_base,
         };
         ZImageControl::load(&paths).map_err(|error| {
             WorkerError::Engine(format!("Z-Image strict-pose control load failed: {error}"))
@@ -266,12 +306,22 @@ impl CandleStrictControl for ZImageStrictControl {
         cancel: &CancelFlag,
         on_progress: &mut dyn FnMut(Progress),
     ) -> WorkerResult<Image> {
+        // Base mode (sc-8680) runs real CFG — forward the guidance scale + negative prompt; the distilled
+        // Turbo lane is guidance-distilled, so candle-gen ignores both there (single cond forward). Match
+        // the request to the model treatment so Turbo stays byte-unchanged.
+        let (guidance, negative_prompt) = if self.is_base {
+            (Some(self.guidance), self.negative_prompt.clone())
+        } else {
+            (None, None)
+        };
         let req = ZImageControlRequest {
             prompt: self.prompt.clone(),
             width: self.width,
             height: self.height,
             steps: self.steps as usize,
             control_scale: self.control_scale,
+            guidance,
+            negative_prompt,
             seed,
             cancel: cancel.clone(),
         };
@@ -330,14 +380,26 @@ async fn generate_candle_zimage_control_stream(
     let pose_count = pose_entries(request).len();
     let raw_settings = zimage_control_raw_settings(request, &repo, steps, control_scale, pose_count);
 
+    // Base-mode CFG (sc-8680): the undistilled base runs real classifier-free guidance, so resolve the
+    // guidance scale + negative prompt the same way the base lane elsewhere does (advanced/manifest, and
+    // the request's negative prompt). The distilled Turbo lane ignores both — carried but unused there.
+    let guidance = zimage_control_guidance(request);
+    // candle-gen treats `None`/empty as the unconditional embedding, so map an empty request negative
+    // prompt to `None` (base mode only; ignored by the distilled Turbo lane).
+    let negative_prompt = Some(request.negative_prompt.trim().to_owned())
+        .filter(|value: &String| !value.is_empty());
+
     let provider = ZImageStrictControl {
-        base,
+        snapshot: base,
         controlnet,
+        is_base,
         prompt: request.prompt.clone(),
         width: request.width,
         height: request.height,
         steps,
         control_scale,
+        guidance,
+        negative_prompt,
         engine_id,
     };
 

@@ -7292,13 +7292,16 @@ fn candle_strict_control_trait_routes_each_provider() {
     let dummy = std::path::PathBuf::from("/nonexistent");
 
     let zimage = ZImageStrictControl {
-        base: dummy.clone(),
+        snapshot: dummy.clone(),
         controlnet: dummy.clone(),
+        is_base: false,
         prompt: "p".to_owned(),
         width: 512,
         height: 512,
         steps: 8,
         control_scale: 1.0,
+        guidance: ZIMAGE_CTRL_BASE_DEFAULT_GUIDANCE,
+        negative_prompt: None,
         engine_id: ZIMAGE_CTRL_ENGINE_ID,
     };
     assert_eq!(zimage.engine_id(), ZIMAGE_CTRL_ENGINE_ID);
@@ -7307,13 +7310,16 @@ fn candle_strict_control_trait_routes_each_provider() {
 
     // Base z_image (sc-8379) routes the SAME provider with the `z_image_control` engine-id row.
     let zimage_base = ZImageStrictControl {
-        base: dummy.clone(),
+        snapshot: dummy.clone(),
         controlnet: dummy.clone(),
+        is_base: true,
         prompt: "p".to_owned(),
         width: 512,
         height: 512,
         steps: 50,
         control_scale: 1.0,
+        guidance: ZIMAGE_CTRL_BASE_DEFAULT_GUIDANCE,
+        negative_prompt: None,
         engine_id: ZIMAGE_CTRL_BASE_ENGINE_ID,
     };
     assert_eq!(zimage_base.engine_id(), ZIMAGE_CTRL_BASE_ENGINE_ID);
