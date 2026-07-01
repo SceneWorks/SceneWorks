@@ -379,7 +379,7 @@ pub(crate) const MODEL_TABLE: &[ModelRow] = &[
     ModelRow {
         sceneworks_id: "lens_turbo",
         engine_id: "lens_turbo",
-        default_repo: "microsoft/Lens-Turbo",
+        default_repo: "SceneWorks/lens-turbo-mlx",
         default_steps: 4,
         default_guidance: 1.0,
         adapter_label: "mlx_lens",
