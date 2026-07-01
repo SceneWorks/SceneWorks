@@ -21,6 +21,21 @@ mod update;
 use tauri::RunEvent;
 
 fn main() {
+    // Windows/WebView2: opening a native file dialog (or any window that takes the
+    // foreground) makes Chromium's native window-occlusion tracker mark the webview
+    // occluded and stop compositing to save power; on the return trip it fails to
+    // re-rasterize the workspace's promoted GPU layer, leaving the app painted blank
+    // until something forces a repaint. Disabling the `CalculateNativeWinOcclusion`
+    // feature keeps the webview compositing while the dialog is open, killing the
+    // blank outright. Set via the WebView2 env var (which appends) rather than
+    // Tauri's `additionalBrowserArgs` (which replaces its defaults, including the
+    // draggable-region flag, and can itself blank the window).
+    #[cfg(windows)]
+    std::env::set_var(
+        "WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS",
+        "--disable-features=CalculateNativeWinOcclusion",
+    );
+
     // Install the tracing backbone for the desktop shell's own logs. The sidecars
     // are separate processes; their stdout is captured into the multi-source ring
     // buffer in `setup.rs` (and re-classified there), independent of this subscriber.
