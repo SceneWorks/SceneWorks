@@ -1534,13 +1534,19 @@ export function ImageStudio() {
           // Boogu precision (sc-6568): emit mlxQuantize:0 (full-precision bf16) only when the model
           // exposes the precision toggle AND bf16 is selected; the default Q8 emits nothing (the
           // worker reads manifest mlx.quantize and fetches the `<variant>-bf16/` subfolder on demand).
-          ...(precisionToggle && bf16Precision ? { mlxQuantize: 0 } : {}),
+          // `!showTierPicker` is a defensive guard: Boogu downloads via `base/`-style subfolder globs
+          // (no `downloads[].variant` keys), so `hasVariantMatrix` — and therefore `showTierPicker` —
+          // is always false for the precisionToggle set; the two controls are disjoint. The guard
+          // makes that invariant load-bearing so a future manifest change can never emit both
+          // mlxQuantize spreads for one model (the tier picker below would win the object-spread
+          // race, but we never render/emit both).
+          ...(precisionToggle && bf16Precision && !showTierPicker ? { mlxQuantize: 0 } : {}),
           // Quant-tier A/B (sc-8515): when the model has >1 tier installed and a tier is picked,
           // send that tier's mlxQuantize (bf16→0, q8→8, q4→4). The worker's resolve_quant +
           // generator cache route to it (reload-always). Emitted only when the picker is shown
           // AND the picked tier maps to a known quant value, so single-tier models and the
-          // "default" pseudo-variant never leak an mlxQuantize into the payload. Takes precedence
-          // over the Boogu precisionToggle above (which is on a disjoint set of non-matrix models).
+          // "default" pseudo-variant never leak an mlxQuantize into the payload. Disjoint from the
+          // Boogu precisionToggle above (non-matrix models), enforced by its `!showTierPicker` guard.
           ...(showTierPicker && tierQuantize(quantTier) !== null
             ? { mlxQuantize: tierQuantize(quantTier) }
             : {}),
@@ -2288,7 +2294,7 @@ export function ImageStudio() {
                     ) : null}
                   </label>
                 ) : null}
-                {precisionToggle ? (
+                {precisionToggle && !showTierPicker ? (
                   <label
                     className="checkline boogu-precision-toggle"
                     title="Use the full-precision bf16 build instead of the default Q8. Higher fidelity, but a much larger download (~38 GB per variant, fetched on demand) that needs a larger Mac (≈96 GB unified memory). Off = the Q8 default (~23 GB, 64 GB-class Mac)."

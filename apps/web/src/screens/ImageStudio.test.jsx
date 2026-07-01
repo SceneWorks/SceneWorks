@@ -770,10 +770,10 @@ describe("ImageStudio model picker capability gating", () => {
     expect(refineButton).toBeTruthy();
   });
 
+  // The Boogu precision checkbox specifically (class-scoped so it never collides with the tier
+  // picker's "Full precision (bf16)" <option> text when both would otherwise be in the DOM).
   const precisionLabel = (root) =>
-    [...root.querySelectorAll("label")].find((l) =>
-      l.textContent.includes("Full precision (bf16)"),
-    );
+    root.querySelector("label.boogu-precision-toggle");
   const openAdvanced = async (root) =>
     click([...root.querySelectorAll("button")].find((b) => b.textContent === "Advanced"));
 
@@ -842,6 +842,35 @@ describe("ImageStudio model picker capability gating", () => {
     expect(tierPicker(container)).toBeFalsy();
   });
 
+  it("omits advanced.mlxQuantize on Generate when only one tier is installed (sc-8515)", async () => {
+    const createImageJob = vi.fn(async () => ({ id: "job-1" }));
+    await render(
+      baseContext({
+        createImageJob,
+        imageModels: [matrixModel(["q4"])],
+        macCapabilities: MAC_CAPS,
+      }),
+    );
+    await openAdvanced(container);
+    await act(async () => {});
+    // Picker is hidden (single tier), so the pick must never leak into the payload.
+    expect(tierPicker(container)).toBeFalsy();
+    await click(generateButton());
+    expect(createImageJob.mock.calls[0][0].advanced).not.toHaveProperty("mlxQuantize");
+  });
+
+  it("omits advanced.mlxQuantize on Generate for a model with no variant matrix (sc-8515)", async () => {
+    const createImageJob = vi.fn(async () => ({ id: "job-1" }));
+    await render(
+      baseContext({ createImageJob, imageModels: [Z_IMAGE], macCapabilities: MAC_CAPS }),
+    );
+    await openAdvanced(container);
+    await act(async () => {});
+    expect(tierPicker(container)).toBeFalsy();
+    await click(generateButton());
+    expect(createImageJob.mock.calls[0][0].advanced).not.toHaveProperty("mlxQuantize");
+  });
+
   it("defaults to the declared default tier and sends its mlxQuantize on Generate (sc-8515)", async () => {
     const createImageJob = vi.fn(async () => ({ id: "job-1" }));
     await render(
@@ -893,6 +922,30 @@ describe("ImageStudio model picker capability gating", () => {
     await act(async () => {});
     await click(generateButton());
     expect(createImageJob.mock.calls[0][0].advanced.mlxQuantize).toBe(8);
+  });
+
+  // Disjointness guard (sc-8515): the tier picker and Boogu's ui.precisionToggle both write
+  // advanced.mlxQuantize and MUST never co-render/co-emit. In the catalog they are disjoint —
+  // Boogu downloads via `base/`-style subfolder globs (no downloads[].variant keys), so it is
+  // not a hasVariantMatrix model and showTierPicker is false for it. This constructs the
+  // (catalog-impossible) both-set model to prove the `!showTierPicker` guard keeps them apart.
+  it("suppresses the precision toggle and emits only the tier quant when a matrix model also sets precisionToggle (sc-8515)", async () => {
+    const createImageJob = vi.fn(async () => ({ id: "job-1" }));
+    await render(
+      baseContext({
+        createImageJob,
+        imageModels: [{ ...matrixModel(["q4", "bf16"], "q4"), ui: { precisionToggle: true } }],
+        macCapabilities: MAC_CAPS,
+      }),
+    );
+    await openAdvanced(container);
+    await act(async () => {});
+    // Tier picker wins; the Boogu precision checkbox is suppressed (guarded by !showTierPicker).
+    expect(tierPicker(container)).toBeTruthy();
+    expect(precisionLabel(container)).toBeFalsy();
+    // Default tier q4 → mlxQuantize 4, NOT the precision-toggle's bf16 sentinel 0.
+    await click(generateButton());
+    expect(createImageJob.mock.calls[0][0].advanced.mlxQuantize).toBe(4);
   });
 });
 
