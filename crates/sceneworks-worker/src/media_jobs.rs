@@ -925,7 +925,16 @@ async fn segment_assembly_frames(
     // fallback during the cutover). Both return one binary mask per clip frame; either path's
     // failure degrades to box masks (handled by the replacement loader) — a track that already
     // located the person is never failed by the mask pass.
-    let masks = match person_segmenter_kind() {
+    //
+    // The blocking segment step runs under `run_blocking_with_heartbeat` (sc-8390 / sc-8807): a
+    // cold-start propagate (multi-GB checkpoint parse + quantize + per-frame 1008² propagation)
+    // can exceed the API's 90s stale-sweep, so the keepalive pings `Busy` every interval AND
+    // polls for a user cancel, tripping `cancel` — which the engine's per-frame propagate
+    // contract (gen-core d8038beb) observes between frames. A user cancel is terminal for the
+    // whole person-track job (never a degrade); any other failure keeps the degrade contract.
+    let cancel = gen_core::CancelFlag::new();
+    let cancel_message = "Person tracking canceled during segmentation.";
+    let outcome = match person_segmenter_kind() {
         PersonSegmenter::Sam3 => {
             let (model, tokenizer) = match crate::person_segment_sam3::ensure_segmenter_weights(
                 settings,
@@ -937,16 +946,28 @@ async fn segment_assembly_frames(
                 Err(WorkerError::Canceled(message)) => return Err(WorkerError::Canceled(message)),
                 Err(_) => return Ok("degraded"),
             };
-            match tokio::task::spawn_blocking(move || {
-                crate::person_segment_sam3::segment_track_blocking(
-                    model, tokenizer, clip_paths, anchors,
-                )
-            })
+            let flag = cancel.clone();
+            run_blocking_with_heartbeat(
+                api,
+                settings,
+                &job.id,
+                Some(cancel),
+                cancel_message,
+                "person segment task",
+                tokio::task::spawn_blocking(move || {
+                    crate::person_segment_sam3::segment_track_blocking(
+                        model,
+                        tokenizer,
+                        clip_paths,
+                        anchors,
+                        Some(flag),
+                        Some(Box::new(|frame, total| {
+                            tracing::debug!(event = "sam3_propagate_progress", frame, total);
+                        })),
+                    )
+                }),
+            )
             .await
-            {
-                Ok(Ok(masks)) => masks,
-                _ => return Ok("degraded"),
-            }
         }
         PersonSegmenter::Sam2 => {
             let weights =
@@ -959,15 +980,35 @@ async fn segment_assembly_frames(
                     }
                     Err(_) => return Ok("degraded"),
                 };
-            match tokio::task::spawn_blocking(move || {
-                crate::person_segment::propagate_track_blocking(weights, clip_paths, anchors)
-            })
+            let flag = cancel.clone();
+            run_blocking_with_heartbeat(
+                api,
+                settings,
+                &job.id,
+                Some(cancel),
+                cancel_message,
+                "person segment task",
+                tokio::task::spawn_blocking(move || {
+                    crate::person_segment::propagate_track_blocking(
+                        weights,
+                        clip_paths,
+                        anchors,
+                        Some(flag),
+                        Some(Box::new(|frame, total| {
+                            tracing::debug!(event = "sam2_propagate_progress", frame, total);
+                        })),
+                    )
+                }),
+            )
             .await
-            {
-                Ok(Ok(masks)) => masks,
-                _ => return Ok("degraded"),
-            }
         }
+    };
+    let masks = match outcome {
+        Ok(masks) => masks,
+        // The keepalive posted the terminal `Canceled` already; propagate it (job canceled).
+        Err(WorkerError::Canceled(message)) => return Err(WorkerError::Canceled(message)),
+        // Any other failure (engine error, task join) degrades to box masks, as before.
+        Err(_) => return Ok("degraded"),
     };
 
     // Write every clip frame's non-empty mask (detected + gap) and set its sidecar `mask`. All the
@@ -1117,15 +1158,35 @@ async fn segment_assembly_frames(
         Err(WorkerError::Canceled(message)) => return Err(WorkerError::Canceled(message)),
         Err(_) => return Ok("degraded"),
     };
-    let masks = match tokio::task::spawn_blocking(move || {
-        crate::person_segment_sam3_candle::segment_track_blocking(
-            model, tokenizer, clip_paths, anchors,
-        )
-    })
-    .await
-    {
-        Ok(Ok(masks)) => masks,
-        _ => return Ok("degraded"),
+    // Keepalive + user cancel across the blocking segment step (sc-8390 / sc-8807), mirroring the
+    // macOS twin. The pinned candle-gen-sam3 propagate takes no cancel/progress params yet
+    // (sc-8972), so the tripped flag stops at the coarse seams (cold parse / model build) only.
+    let cancel = gen_core::CancelFlag::new();
+    let flag = cancel.clone();
+    let outcome = run_blocking_with_heartbeat(
+        api,
+        settings,
+        &job.id,
+        Some(cancel),
+        "Person tracking canceled during segmentation.",
+        "person segment task",
+        tokio::task::spawn_blocking(move || {
+            crate::person_segment_sam3_candle::segment_track_blocking(
+                model,
+                tokenizer,
+                clip_paths,
+                anchors,
+                Some(flag),
+            )
+        }),
+    )
+    .await;
+    let masks = match outcome {
+        Ok(masks) => masks,
+        // The keepalive posted the terminal `Canceled` already; propagate it (job canceled).
+        Err(WorkerError::Canceled(message)) => return Err(WorkerError::Canceled(message)),
+        // Any other failure (engine error, task join) degrades to box masks, as before.
+        Err(_) => return Ok("degraded"),
     };
 
     // Write every clip frame's non-empty mask (detected + gap) and set its sidecar `mask`.
@@ -2842,7 +2903,13 @@ mod person_track_e2e_tests {
             let gap_frames = anchors.iter().filter(|a| a.is_none()).count();
 
             let masks = tokio::task::spawn_blocking(move || {
-                crate::person_segment::propagate_track_blocking(seg_weights, clip_paths, anchors)
+                crate::person_segment::propagate_track_blocking(
+                    seg_weights,
+                    clip_paths,
+                    anchors,
+                    None,
+                    None,
+                )
             })
             .await
             .expect("propagate task joins")
@@ -3038,7 +3105,9 @@ mod person_track_e2e_tests {
                     .expect("sam3 weights provisioned");
             let (cp3, an3) = (clip_paths.clone(), anchors.clone());
             let sam3 = tokio::task::spawn_blocking(move || {
-                crate::person_segment_sam3::segment_track_blocking(sam3_model, sam3_tok, cp3, an3)
+                crate::person_segment_sam3::segment_track_blocking(
+                    sam3_model, sam3_tok, cp3, an3, None, None,
+                )
             })
             .await
             .expect("sam3 task joins")
@@ -3082,7 +3151,7 @@ mod person_track_e2e_tests {
                 };
             let (cp2, an2) = (clip_paths.clone(), anchors.clone());
             let sam2 = tokio::task::spawn_blocking(move || {
-                crate::person_segment::propagate_track_blocking(sam2_weights, cp2, an2)
+                crate::person_segment::propagate_track_blocking(sam2_weights, cp2, an2, None, None)
             })
             .await
             .expect("sam2 task joins")

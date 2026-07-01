@@ -22,11 +22,32 @@ use std::path::PathBuf;
 use std::sync::{Mutex, OnceLock};
 
 use crate::downloads::{ensure_hf_cached_file, DownloadContext};
+use gen_core::CancelFlag;
 // CARVE-OUT(epic 3720): backend-specific; absorbed by Segmenter in Phase 6.
 use mlx_gen::weights::Weights;
 use mlx_gen_sam2::{Sam2ModelSize, Sam2VideoPredictor};
 
 use crate::{Settings, WorkerError, WorkerResult};
+
+/// Cancel copy surfaced when a segmentation is interrupted by a user cancel — either by the
+/// engine's per-frame propagate cancel contract (gen-core d8038beb) or by the coarse checks
+/// around the cold weight load (sc-8807). Shared by the SAM2/SAM3 segmenter modules.
+pub(crate) const CANCEL_MESSAGE: &str = "Person segmentation canceled by user.";
+
+/// Per-frame propagate progress callback `(frame_index, total_frames)`, invoked from the blocking
+/// thread after each propagated frame (the gen-core d8038beb video per-step progress contract).
+/// Boxed + `Send` so call sites can move it into `spawn_blocking`.
+pub(crate) type SegmentProgress = Box<dyn FnMut(usize, usize) + Send>;
+
+/// Bail out with [`WorkerError::Canceled`] when the threaded flag has been tripped — the coarse
+/// cancel seam guarding the phases the engine cannot observe (frame decode, the cold multi-GB
+/// weight load/parse, quantize). The engine itself checks the same flag between frames (sc-8807).
+pub(crate) fn check_segment_canceled(cancel: Option<&CancelFlag>) -> WorkerResult<()> {
+    if cancel.is_some_and(CancelFlag::is_cancelled) {
+        return Err(WorkerError::Canceled(CANCEL_MESSAGE.to_owned()));
+    }
+    Ok(())
+}
 
 /// The production SAM2 size (matches the spike + the `SceneWorks/sam2-mlx` upload).
 const SEG_FILE: &str = "sam2.1_hiera_large.safetensors";
@@ -157,16 +178,25 @@ pub(crate) fn mask_box_coverage(pixels: &[u8], box_norm: BoxNorm, width: u32, he
 /// Returns one binary mask (row-major `width*height`, `0`/`255`) per clip frame, in clip order.
 /// The model loads once and is cached process-wide; run under `spawn_blocking` (image decode + GPU
 /// propagation are blocking).
+///
+/// `cancel` is the user-cancel flag (sc-8807): checked at the coarse phase boundaries here (frame
+/// decode, cold weight load) and threaded into the engine's per-frame propagate cancel contract
+/// (gen-core d8038beb), so a tripped flag stops the clip between frames with
+/// [`WorkerError::Canceled`]. `progress` is invoked `(frame_index, total_frames)` after each
+/// propagated frame (per pass — the drift-correcting pass 2 restarts the count).
 pub(crate) fn propagate_track_blocking(
     weights_path: PathBuf,
     clip_frame_paths: Vec<PathBuf>,
     anchors: Vec<Option<BoxNorm>>,
+    cancel: Option<CancelFlag>,
+    mut progress: Option<SegmentProgress>,
 ) -> WorkerResult<Vec<Vec<u8>>> {
     assert_eq!(
         clip_frame_paths.len(),
         anchors.len(),
         "frames/anchors mismatch"
     );
+    check_segment_canceled(cancel.as_ref())?;
     let prompt =
         anchors.first().copied().flatten().ok_or_else(|| {
             WorkerError::InvalidPayload("propagate clip needs a prompt frame".into())
@@ -190,6 +220,10 @@ pub(crate) fn propagate_track_blocking(
     }
     let frame_refs: Vec<&[u8]> = rgb.iter().map(|f| f.as_slice()).collect();
 
+    // Guard the (possibly cold) weight load — the engine only observes the flag once
+    // propagation starts.
+    check_segment_canceled(cancel.as_ref())?;
+
     let cell = PREDICTOR.get_or_init(|| Mutex::new(None));
     // Recover from a poisoned lock rather than panicking every subsequent job: a
     // prior propagation that panicked mid-run leaves the lock poisoned, so take the
@@ -209,7 +243,7 @@ pub(crate) fn propagate_track_blocking(
     }
     let predictor = guard.as_ref().expect("predictor loaded");
 
-    let run = |seeds: &[(usize, BoxNorm)]| -> WorkerResult<Vec<Vec<u8>>> {
+    let mut run = |seeds: &[(usize, BoxNorm)]| -> WorkerResult<Vec<Vec<u8>>> {
         let mut state = predictor
             .init_state_from_frames(&frame_refs, height, width)
             .map_err(|e| WorkerError::Engine(format!("sam2 init_state: {e}")))?;
@@ -222,12 +256,21 @@ pub(crate) fn propagate_track_blocking(
                 )
                 .map_err(|e| WorkerError::Engine(format!("sam2 add_box: {e}")))?;
         }
-        // gen-core d8038beb (sc-7176 pin sync): `propagate` gained `cancel` + per-frame `progress`
-        // params (the video per-step cancel contract). Pass `None, None` to preserve the prior
-        // uncancellable, progress-silent behavior on this MLX path.
+        // gen-core d8038beb (sc-7176 pin sync): `propagate` takes `cancel` + per-frame `progress`
+        // (the video per-step cancel contract). Thread the caller's flag/callback so a user cancel
+        // stops between frames and each frame reports progress (sc-8807).
         let masks = predictor
-            .propagate(&mut state, None, None)
-            .map_err(|e| WorkerError::Engine(format!("sam2 propagate: {e}")))?;
+            .propagate(
+                &mut state,
+                cancel.as_ref(),
+                progress
+                    .as_deref_mut()
+                    .map(|cb| cb as &mut dyn FnMut(usize, usize)),
+            )
+            .map_err(|e| match e {
+                mlx_gen::Error::Canceled => WorkerError::Canceled(CANCEL_MESSAGE.to_owned()),
+                e => WorkerError::Engine(format!("sam2 propagate: {e}")),
+            })?;
         // `propagate` yields the prompt frame onward in order; build a dense per-clip-frame vec.
         let mut out = vec![Vec::new(); clip_frame_paths.len()];
         for (frame_idx, low) in &masks {
@@ -297,6 +340,39 @@ mod tests {
         assert_eq!(*guard, None, "cached model is dropped on poison recovery");
         *guard = Some(42); // reload
         assert_eq!(*guard, Some(42));
+    }
+
+    /// sc-8807: a pre-tripped cancel flag short-circuits the propagate BEFORE any frame decode or
+    /// (cold, multi-GB) weight load — the paths point at nothing, so reaching either would error
+    /// with `InvalidPayload`/`Engine` instead of `Canceled`. Pins the coarse cancel seam ordering.
+    #[test]
+    fn pre_tripped_cancel_short_circuits_before_decode_and_weights() {
+        let cancel = CancelFlag::new();
+        cancel.cancel();
+        let result = propagate_track_blocking(
+            PathBuf::from("/nonexistent/sam2.safetensors"),
+            vec![PathBuf::from("/nonexistent/frame.png")],
+            vec![Some((0.1, 0.1, 0.5, 0.5))],
+            Some(cancel),
+            None,
+        );
+        assert!(
+            matches!(result, Err(WorkerError::Canceled(ref m)) if m == CANCEL_MESSAGE),
+            "expected Canceled, got {result:?}"
+        );
+    }
+
+    /// An un-tripped (or absent) flag never trips the coarse cancel seam.
+    #[test]
+    fn check_segment_canceled_passes_when_flag_is_live_or_absent() {
+        assert!(check_segment_canceled(None).is_ok());
+        let cancel = CancelFlag::new();
+        assert!(check_segment_canceled(Some(&cancel)).is_ok());
+        cancel.cancel();
+        assert!(matches!(
+            check_segment_canceled(Some(&cancel)),
+            Err(WorkerError::Canceled(_))
+        ));
     }
 
     #[test]

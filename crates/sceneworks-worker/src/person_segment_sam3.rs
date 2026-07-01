@@ -27,6 +27,8 @@ use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 
 use crate::downloads::{ensure_hf_cached_file, DownloadContext};
+use crate::person_segment::{check_segment_canceled, SegmentProgress, CANCEL_MESSAGE};
+use gen_core::CancelFlag;
 use mlx_gen::weights::Weights;
 use mlx_gen_sam3::{
     Sam3ImageSegmenter, Sam3TextConfig, Sam3Tokenizer, Sam3Tracker, Sam3VideoModel,
@@ -259,17 +261,26 @@ fn mask_to_frame(mask_logits: &[f32], grid: usize, width: u32, height: u32) -> V
 /// empty vec for a frame where the selected object was absent (orchestrator skips empties → box
 /// fallback). The checkpoint parses once and is cached process-wide; run under `spawn_blocking`
 /// (image decode + GPU inference are blocking).
+///
+/// `cancel` is the user-cancel flag (sc-8807): checked at the coarse phase boundaries here (frame
+/// decode, the cold 3.2 GB checkpoint parse, model build + quantize) and threaded into the
+/// engine's per-frame propagate cancel contract (gen-core d8038beb), so a tripped flag stops the
+/// clip between frames with [`WorkerError::Canceled`]. `progress` is invoked
+/// `(frame_index, total_frames)` after each propagated frame.
 pub(crate) fn segment_track_blocking(
     model_path: PathBuf,
     tokenizer_path: PathBuf,
     clip_frame_paths: Vec<PathBuf>,
     anchors: Vec<Option<BoxNorm>>,
+    cancel: Option<CancelFlag>,
+    mut progress: Option<SegmentProgress>,
 ) -> WorkerResult<Vec<Vec<u8>>> {
     assert_eq!(
         clip_frame_paths.len(),
         anchors.len(),
         "frames/anchors mismatch"
     );
+    check_segment_canceled(cancel.as_ref())?;
     if !anchors.iter().any(Option::is_some) {
         return Err(WorkerError::InvalidPayload(
             "person segmentation clip needs at least one detected frame to associate".into(),
@@ -292,6 +303,10 @@ pub(crate) fn segment_track_blocking(
         }
         frames.push(input_tensor(&img));
     }
+
+    // Guard the cold 3.2 GB checkpoint parse + model build + quantize — the engine only observes
+    // the flag once propagation starts.
+    check_segment_canceled(cancel.as_ref())?;
 
     // Cached checkpoint; recover from a poisoned lock by dropping the cached weights and reloading
     // (mirrors person_segment / sc-4277 F-MLXW-13).
@@ -323,13 +338,27 @@ pub(crate) fn segment_track_blocking(
     let (input_ids, text_mask) = tokenizer
         .encode(CONCEPT_PROMPT)
         .map_err(|e| WorkerError::Engine(format!("sam3 tokenize: {e}")))?;
+    // The quantize pass above is seconds-long on a cold start; re-check before committing to the
+    // propagate loop.
+    check_segment_canceled(cancel.as_ref())?;
 
-    // gen-core d8038beb (sc-7176 pin sync): `propagate` gained `cancel` + per-frame `progress` params
-    // (the video per-step cancel contract). `None, None` preserves the prior uncancellable,
-    // progress-silent behavior on this MLX path.
+    // gen-core d8038beb (sc-7176 pin sync): `propagate` takes `cancel` + per-frame `progress`
+    // (the video per-step cancel contract). Thread the caller's flag/callback so a user cancel
+    // stops between frames and each frame reports progress (sc-8807).
     let outputs = model
-        .propagate(&frames, &input_ids, &text_mask, None, None)
-        .map_err(|e| WorkerError::Engine(format!("sam3 propagate: {e}")))?;
+        .propagate(
+            &frames,
+            &input_ids,
+            &text_mask,
+            cancel.as_ref(),
+            progress
+                .as_deref_mut()
+                .map(|cb| cb as &mut dyn FnMut(usize, usize)),
+        )
+        .map_err(|e| match e {
+            mlx_gen::Error::Canceled => WorkerError::Canceled(CANCEL_MESSAGE.to_owned()),
+            e => WorkerError::Engine(format!("sam3 propagate: {e}")),
+        })?;
 
     // Associate SAM3's identities to the selected track, then emit that object's per-frame mask.
     let Some(selected) = select_object(&outputs, &anchors) else {
@@ -595,11 +624,18 @@ fn mask_centroid_x(mask_logits: &[f32], grid: usize) -> Option<f64> {
 /// driving frames are already decoded `Image`s, so the temp-PNG round-trip is skipped. `frames` must
 /// be non-empty and uniform-sized. The checkpoint parses once and is cached process-wide; run under
 /// `spawn_blocking` (GPU inference is blocking).
+///
+/// `cancel`/`progress` follow [`segment_track_blocking`] (sc-8807): coarse checks around the cold
+/// checkpoint parse + model build, the engine's per-frame cancel between frames, and a
+/// `(frame_index, total_frames)` callback after each propagated frame.
 pub(crate) fn segment_all_persons_in_memory(
     model_path: &Path,
     tokenizer_path: &Path,
     frames: &[image::RgbImage],
+    cancel: Option<CancelFlag>,
+    mut progress: Option<SegmentProgress>,
 ) -> WorkerResult<AllPersonMasks> {
+    check_segment_canceled(cancel.as_ref())?;
     let first = frames.first().ok_or_else(|| {
         WorkerError::InvalidPayload("scail2 segmentation: no frames to segment".into())
     })?;
@@ -613,6 +649,10 @@ pub(crate) fn segment_all_persons_in_memory(
         ));
     }
     let tensors: Vec<Array> = frames.iter().map(input_tensor).collect();
+
+    // Guard the cold 3.2 GB checkpoint parse + model build + quantize — the engine only observes
+    // the flag once propagation starts.
+    check_segment_canceled(cancel.as_ref())?;
 
     // Cached checkpoint; recover from a poisoned lock by dropping + reloading (mirrors
     // `segment_track_blocking` / sc-4277 F-MLXW-13).
@@ -641,12 +681,24 @@ pub(crate) fn segment_all_persons_in_memory(
     let (input_ids, text_mask) = tokenizer
         .encode(CONCEPT_PROMPT)
         .map_err(|e| WorkerError::Engine(format!("sam3 tokenize: {e}")))?;
+    check_segment_canceled(cancel.as_ref())?;
 
-    // gen-core d8038beb (sc-7176 pin sync): `propagate` gained `cancel` + per-frame `progress` params;
-    // `None, None` preserves the prior uncancellable, progress-silent behavior on this MLX path.
+    // gen-core d8038beb (sc-7176 pin sync): `propagate` takes `cancel` + per-frame `progress`
+    // (the video per-step cancel contract). Thread the caller's flag/callback (sc-8807).
     let outputs = model
-        .propagate(&tensors, &input_ids, &text_mask, None, None)
-        .map_err(|e| WorkerError::Engine(format!("sam3 propagate: {e}")))?;
+        .propagate(
+            &tensors,
+            &input_ids,
+            &text_mask,
+            cancel.as_ref(),
+            progress
+                .as_deref_mut()
+                .map(|cb| cb as &mut dyn FnMut(usize, usize)),
+        )
+        .map_err(|e| match e {
+            mlx_gen::Error::Canceled => WorkerError::Canceled(CANCEL_MESSAGE.to_owned()),
+            e => WorkerError::Engine(format!("sam3 propagate: {e}")),
+        })?;
 
     // Paint order: each object's centroid-x in the FIRST frame it appears, ascending (tie-break on
     // first-seen frame, then object id, so repeated runs agree).
@@ -696,6 +748,40 @@ pub(crate) fn segment_all_persons_in_memory(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// sc-8807: a pre-tripped cancel flag short-circuits BEFORE frame decode / the cold 3.2 GB
+    /// checkpoint parse — the paths point at nothing, so reaching either would error with
+    /// `InvalidPayload`/`Engine` instead of `Canceled`. Pins the coarse cancel seam ordering on
+    /// both video entry points.
+    #[test]
+    fn pre_tripped_cancel_short_circuits_both_video_paths() {
+        let cancel = CancelFlag::new();
+        cancel.cancel();
+        let track = segment_track_blocking(
+            PathBuf::from("/nonexistent/model.safetensors"),
+            PathBuf::from("/nonexistent/tokenizer.json"),
+            vec![PathBuf::from("/nonexistent/frame.png")],
+            vec![Some((0.1, 0.1, 0.5, 0.5))],
+            Some(cancel.clone()),
+            None,
+        );
+        assert!(
+            matches!(track, Err(WorkerError::Canceled(_))),
+            "segment_track_blocking: expected Canceled, got {track:?}"
+        );
+        let frames = vec![image::RgbImage::new(4, 4)];
+        let all = segment_all_persons_in_memory(
+            Path::new("/nonexistent/model.safetensors"),
+            Path::new("/nonexistent/tokenizer.json"),
+            &frames,
+            Some(cancel),
+            None,
+        );
+        assert!(
+            matches!(all, Err(WorkerError::Canceled(_))),
+            "segment_all_persons_in_memory: expected Canceled"
+        );
+    }
 
     #[test]
     fn normalize_box_maps_xyxy_pixels_to_unit_cxcywh() {
@@ -869,6 +955,8 @@ mod tests {
             tokenizer,
             vec![image.clone(), image],
             vec![Some(anchor), Some(anchor)],
+            None,
+            None,
         )
         .expect("segment_track_blocking");
 

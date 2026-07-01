@@ -100,7 +100,17 @@ where
     loop {
         tokio::select! {
             result = &mut task => {
-                let value = result.map_err(|error| task_join_error(task_label, error))??;
+                let value = result.map_err(|error| task_join_error(task_label, error))?;
+                // An engine that honors the tripped `cancel` flag itself (the per-frame video
+                // cancel contract, gen-core d8038beb) surfaces `WorkerError::Canceled` from
+                // inside the task; post the terminal `Canceled` here exactly like the
+                // poll-detected path below so the job never dangles non-terminal (sc-8807).
+                if let Err(WorkerError::Canceled(message)) = &value {
+                    let message = message.clone();
+                    mark_job_canceled(api, job_id, &message).await?;
+                    return Err(WorkerError::Canceled(message));
+                }
+                let value = value?;
                 if canceled {
                     mark_job_canceled(api, job_id, cancel_message).await?;
                     return Err(WorkerError::Canceled(cancel_message.to_owned()));
