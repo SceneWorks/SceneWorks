@@ -124,7 +124,9 @@ pub(crate) const MODEL_TABLE: &[ModelRow] = &[
         // (epic 3401 / sc-3575).
         sceneworks_id: "qwen_image",
         engine_id: "qwen_image",
-        default_repo: "Qwen/Qwen-Image-2512",
+        // sc-8669: SceneWorks pre-quantized q4/q8/bf16 turnkey re-host (Apache-2.0); replaces the
+        // gated-free but dense Qwen/Qwen-Image-2512 source + install-time quantize.
+        default_repo: "SceneWorks/qwen-image-mlx",
         default_steps: 20,
         default_guidance: 4.0,
         adapter_label: "mlx_qwen",
@@ -140,7 +142,9 @@ pub(crate) const MODEL_TABLE: &[ModelRow] = &[
     ModelRow {
         sceneworks_id: "qwen_image_edit",
         engine_id: "qwen_image_edit",
-        default_repo: "Qwen/Qwen-Image-Edit-2511",
+        // sc-8669: SceneWorks pre-quantized q4/q8/bf16 Edit-2511 turnkey re-host (shared by all
+        // edit ids + the lightning distill, same checkpoint).
+        default_repo: "SceneWorks/qwen-image-edit-2511-mlx",
         default_steps: 40,
         default_guidance: 4.0,
         adapter_label: "mlx_qwen",
@@ -148,7 +152,7 @@ pub(crate) const MODEL_TABLE: &[ModelRow] = &[
     ModelRow {
         sceneworks_id: "qwen_image_edit_2509",
         engine_id: "qwen_image_edit",
-        default_repo: "Qwen/Qwen-Image-Edit-2511",
+        default_repo: "SceneWorks/qwen-image-edit-2511-mlx",
         default_steps: 40,
         default_guidance: 4.0,
         adapter_label: "mlx_qwen",
@@ -156,7 +160,7 @@ pub(crate) const MODEL_TABLE: &[ModelRow] = &[
     ModelRow {
         sceneworks_id: "qwen_image_edit_2511",
         engine_id: "qwen_image_edit",
-        default_repo: "Qwen/Qwen-Image-Edit-2511",
+        default_repo: "SceneWorks/qwen-image-edit-2511-mlx",
         default_steps: 40,
         default_guidance: 4.0,
         adapter_label: "mlx_qwen",
@@ -171,7 +175,7 @@ pub(crate) const MODEL_TABLE: &[ModelRow] = &[
     ModelRow {
         sceneworks_id: "qwen_image_edit_2511_lightning",
         engine_id: "qwen_image_edit",
-        default_repo: "Qwen/Qwen-Image-Edit-2511",
+        default_repo: "SceneWorks/qwen-image-edit-2511-mlx",
         default_steps: 4,
         default_guidance: 1.0,
         adapter_label: "mlx_qwen",

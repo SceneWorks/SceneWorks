@@ -4084,7 +4084,8 @@ fn qwen_edit_model_table_rows() {
     ] {
         let m = mlx_model(id).unwrap();
         assert_eq!(m.engine_id(), "qwen_image_edit");
-        assert_eq!(m.default_repo(), "Qwen/Qwen-Image-Edit-2511");
+        // sc-8669: re-hosted pre-quantized q4/q8/bf16 turnkey (shared by all edit ids + lightning).
+        assert_eq!(m.default_repo(), "SceneWorks/qwen-image-edit-2511-mlx");
         assert_eq!(m.default_steps(), 40);
         assert_eq!(m.default_guidance(), 4.0);
         assert_eq!(m.adapter_label(), "mlx_qwen");
@@ -4099,7 +4100,8 @@ fn qwen_edit_lightning_model_row_is_cfg_off_4step_distill() {
     // but runs the 4-step CFG-off recipe + the lightx2v distill.
     let m = mlx_model("qwen_image_edit_2511_lightning").unwrap();
     assert_eq!(m.engine_id(), "qwen_image_edit");
-    assert_eq!(m.default_repo(), "Qwen/Qwen-Image-Edit-2511");
+    // sc-8669: re-hosted pre-quantized turnkey (shared Edit-2511 tiers; distill LoRA fused on top).
+    assert_eq!(m.default_repo(), "SceneWorks/qwen-image-edit-2511-mlx");
     assert_eq!(m.default_steps(), 4);
     assert_eq!(m.default_guidance(), 1.0);
     assert_eq!(m.adapter_label(), "mlx_qwen");

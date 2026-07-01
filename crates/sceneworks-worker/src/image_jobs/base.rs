@@ -307,6 +307,16 @@ const STANDARD_TIER_MODELS: &[&str] = &[
     // single-file→diffusers convert (candle-only) and is not a turnkey yet.
     "flux2_klein_9b",
     "flux2_klein_9b_kv",
+    // Qwen-Image (sc-8669, Group-B): base T2I + the two Edit-2511 ids ship the standard
+    // q4/q8/bf16 turnkey. Like FLUX.2-klein only the transformer is packed (the Qwen2.5-VL text
+    // encoder is skip_quantization, the VAE is all-conv), so the TE/VAE stay dense bf16 in every
+    // tier — but, UNLIKE klein, the qwen loader never quantizes the TE regardless of the load
+    // Quant, so these do NOT need a DENSE_TE_TIER_MODELS guard: the q4/q8 load-quant is a harmless
+    // no-op on the already-packed transformer, and the bf16 tier resolves to Quant::None anyway.
+    // `qwen_image_edit_2511` + `_2511_lightning` share one repo (same Edit-2511 checkpoint).
+    "qwen_image",
+    "qwen_image_edit_2511",
+    "qwen_image_edit_2511_lightning",
 ];
 
 /// Standard-tier models whose text encoder ships DENSE bf16 in EVERY tier (epic 8506, sc-8711:
