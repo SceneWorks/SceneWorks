@@ -755,6 +755,24 @@
           "platforms": ["windows", "linux"],
           "estimatedSizeBytes": 22334041829,
           "footprint": { "diskSizeBytes": 22334041829, "residentMemoryBytes": null, "peakMemoryBytes": null }
+        },
+        {
+          // macOS LoRA-training base (sc-8797): the same SceneWorks/Lens diffusers rehost the off-Mac
+          // entry above fetches, exposed as an installable variant on macOS. The MLX q4/q8/bf16 tiers
+          // above are packed turnkey SUBDIRS the trainer's flat-diffusers loader doesn't read and the
+          // training installed-gate (`training_base_model_installed`, keyed on the target's
+          // `baseModelRepo` HF-cache presence) doesn't see — before the tier split (sc-8767) the lens
+          // install WAS the flat microsoft/Lens repo, so one download served inference + training.
+          // Installing this variant restores that for macOS training; off-Mac needs nothing extra (the
+          // bf16 candle entry already fetches the whole repo). Per-variant install state probes this
+          // entry's own repo, so it tracks independently of the MLX tiers (sc-8508).
+          "provider": "huggingface",
+          "repo": "SceneWorks/Lens",
+          "variant": "training",
+          "files": [],
+          "platforms": ["macos"],
+          "estimatedSizeBytes": 22334041829,
+          "footprint": { "diskSizeBytes": 22334041829, "residentMemoryBytes": null, "peakMemoryBytes": null }
         }
       ],
       "paths": {
@@ -905,7 +923,8 @@
         "schedulers": ["default", "normal", "simple", "karras", "exponential", "sgm_uniform", "beta", "ddim_uniform"]
       },
       "loraCompatibility": {
-        // Lens LoRA training (sc-1583) trains on the non-distilled microsoft/Lens
+        // Lens LoRA training (sc-1583) trains on the non-distilled base Lens (the
+        // SceneWorks/Lens diffusers rehost since sc-8797; microsoft/Lens is dead)
         // and applies the adapter here on Lens-Turbo. The `lens` family maps to
         // the `lens_turbo` adapter in lora_family.rs.
         "families": ["lens"],
