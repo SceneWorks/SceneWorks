@@ -7443,6 +7443,64 @@ details[open] > summary.lora-scope-group-heading::before,
   width: 100%;
 }
 
+/* Zoom/pan viewport for image previews (sc-8728). The viewport clips the scaled
+   image; the inner wrapper carries the translate+scale transform. */
+.preview-zoom-viewport {
+  position: relative;
+  min-width: 0;
+  overflow: hidden;
+  touch-action: none;
+  cursor: default;
+}
+
+.preview-zoom-viewport.zoomed {
+  cursor: grab;
+}
+
+.preview-zoom-viewport.zoomed:active {
+  cursor: grabbing;
+}
+
+.preview-zoom-inner {
+  will-change: transform;
+}
+
+.preview-zoom-inner img {
+  display: block;
+  -webkit-user-drag: none;
+  user-select: none;
+}
+
+.preview-zoom-controls {
+  position: absolute;
+  bottom: 12px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 3;
+  display: inline-flex;
+  gap: 4px;
+  padding: 4px;
+  border-radius: var(--r-md);
+  background: color-mix(in oklch, var(--surface-2) 88%, transparent);
+  box-shadow: var(--shadow-sm);
+}
+
+.preview-zoom-controls button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 34px;
+  min-height: 28px;
+  padding: 0 8px;
+  font-size: 12.5px;
+  color: var(--text-muted);
+}
+
+.preview-zoom-controls button:disabled {
+  opacity: 0.35;
+  cursor: not-allowed;
+}
+
 .preview-nav-button {
   width: 40px;
   height: 64px;
