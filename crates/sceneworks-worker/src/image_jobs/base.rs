@@ -276,8 +276,9 @@ pub(crate) fn resolve_weights_dir(
     // Catalog-wide quant-matrix models (sc-8513, epic 8506) ship as SceneWorks pre-quantized
     // turnkeys with self-contained `q4/` (default) + `q8/` + `bf16/` subdirs (replacing any
     // install-time convert); point the engine at the chosen tier's subdir rather than the repo root.
-    // FLUX.2-dev was the pilot; the rollout registers each model in [`STANDARD_TIER_MODELS`].
-    if STANDARD_TIER_MODELS.contains(&request.model.as_str()) {
+    // FLUX.2-dev was the pilot; the rollout registers each model in [`STANDARD_TIER_MODELS`] OR (the
+    // sc-8508 manifest-driven form) flags `mlx.standardTierLayout: true` in its catalog entry.
+    if uses_standard_tier_layout(request) {
         return Ok(snapshot.map(|root| standard_tier_subdir(&root, request)));
     }
     Ok(snapshot)
@@ -290,6 +291,10 @@ pub(crate) fn resolve_weights_dir(
 /// FLUX.2-dev pilot's bespoke resolver. Legacy turnkeys with non-standard defaults/variants
 /// (Ideogram q4-only, Krea q8-default, Boogu per-variant + on-demand bf16) keep their own resolvers
 /// above.
+///
+/// sc-8508 makes this catalog-driven: [`uses_standard_tier_layout`] also honors a manifest
+/// `mlx.standardTierLayout: true` flag, so a NEW quant-matrix model can opt in from the manifest
+/// alone. This registry remains the zero-manifest-change path for every already-wired model.
 const STANDARD_TIER_MODELS: &[&str] = &[
     "flux2_dev",
     "sd3_5_large",
@@ -332,6 +337,39 @@ const STANDARD_TIER_MODELS: &[&str] = &[
 /// z-image, whose text encoders are packed too, so their Q4/Q8 load-quant is a harmless no-op on
 /// already-packed weights.
 const DENSE_TE_TIER_MODELS: &[&str] = &["flux2_klein_9b", "flux2_klein_9b_kv"];
+
+/// Whether a request's model ships the standard SceneWorks quant-matrix turnkey layout (sc-8508):
+/// true when it is registered in [`STANDARD_TIER_MODELS`] OR its manifest entry declares
+/// `mlx.standardTierLayout: true`. The manifest flag is the first-class, catalog-driven form of the
+/// hardcoded registry (epic 8506) — a new quant-matrix model can opt in from the manifest alone,
+/// while the registry keeps every already-wired model working with zero manifest change.
+#[cfg(any(target_os = "macos", feature = "backend-candle"))]
+fn uses_standard_tier_layout(request: &ImageRequest) -> bool {
+    STANDARD_TIER_MODELS.contains(&request.model.as_str())
+        || request
+            .model_manifest_entry
+            .get("mlx")
+            .and_then(|mlx| mlx.get("standardTierLayout"))
+            .and_then(Value::as_bool)
+            .unwrap_or(false)
+}
+
+/// Whether a standard-tier request keeps a DENSE bf16 text encoder in every tier (sc-8508): true
+/// when it is in [`DENSE_TE_TIER_MODELS`] OR its manifest declares `mlx.denseTextEncoderTier: true`.
+/// The manifest flag mirrors the hardcoded set so a new dense-TE turnkey opts in from the catalog.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+fn is_dense_te_tier(request: &ImageRequest) -> bool {
+    DENSE_TE_TIER_MODELS.contains(&request.model.as_str())
+        || request
+            .model_manifest_entry
+            .get("mlx")
+            .and_then(|mlx| mlx.get("denseTextEncoderTier"))
+            .and_then(Value::as_bool)
+            .unwrap_or(false)
+}
 
 /// Pick the engine-complete tier subdir of a standard SceneWorks quant-matrix turnkey `root`:
 /// `bf16/` when the request opts out of quantization (`advanced.mlxQuantize <= 0` / "none"), `q8/`
@@ -597,7 +635,7 @@ fn resolve_quant(request: &ImageRequest) -> (Option<Quant>, Option<i64>) {
     // + a DENSE bf16 text encoder, so the load Quant must be None — quantizing here would crush the
     // dense bf16 TE we deliberately kept full-precision. The packed transformer self-describes its
     // quant regardless. Tier selection (q4/q8/bf16) is driven by the resolved subdir, not this.
-    if DENSE_TE_TIER_MODELS.contains(&request.model.as_str()) {
+    if is_dense_te_tier(request) {
         return (None, None);
     }
     let raw = request
@@ -3242,5 +3280,52 @@ mod standard_tier_tests {
             standard_tier_subdir(empty.path(), &request(json!({}))),
             empty.path().to_path_buf()
         );
+    }
+
+    /// A model built with a manifest entry so `uses_standard_tier_layout` / `is_dense_te_tier`
+    /// can be exercised without touching the hardcoded registries.
+    #[cfg(any(target_os = "macos", feature = "backend-candle"))]
+    fn manifest_request(model: &str, mlx: serde_json::Value) -> ImageRequest {
+        ImageRequest::from_payload(
+            json!({ "model": model, "modelManifestEntry": { "mlx": mlx } })
+                .as_object()
+                .unwrap(),
+        )
+    }
+
+    /// sc-8508: the standard-tier routing is manifest-driven — a model NOT in
+    /// [`STANDARD_TIER_MODELS`] opts in via `mlx.standardTierLayout: true`, while a registry model
+    /// stays true without the flag and an ordinary model stays false. Back-compat guard.
+    #[cfg(any(target_os = "macos", feature = "backend-candle"))]
+    #[test]
+    fn standard_tier_layout_is_manifest_driven_with_registry_backcompat() {
+        // Registry member, no manifest flag → still true.
+        assert!(uses_standard_tier_layout(&manifest_request(
+            "flux2_dev",
+            json!({})
+        )));
+        // Novel id (not in the registry) opts in from the manifest alone.
+        assert!(uses_standard_tier_layout(&manifest_request(
+            "some_new_matrix_model",
+            json!({ "standardTierLayout": true })
+        )));
+        // Novel id without the flag → not a standard-tier model.
+        assert!(!uses_standard_tier_layout(&manifest_request(
+            "some_dense_model",
+            json!({})
+        )));
+    }
+
+    /// sc-8508: the dense-TE guard is manifest-driven too — registry members
+    /// (`DENSE_TE_TIER_MODELS`) stay true and a novel id opts in via `mlx.denseTextEncoderTier`.
+    #[cfg(any(target_os = "macos", feature = "backend-candle"))]
+    #[test]
+    fn dense_te_tier_is_manifest_driven_with_registry_backcompat() {
+        assert!(is_dense_te_tier(&manifest_request("flux2_klein_9b", json!({}))));
+        assert!(is_dense_te_tier(&manifest_request(
+            "some_dense_te_model",
+            json!({ "denseTextEncoderTier": true })
+        )));
+        assert!(!is_dense_te_tier(&manifest_request("flux2_dev", json!({}))));
     }
 }
