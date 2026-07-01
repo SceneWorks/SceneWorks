@@ -171,6 +171,13 @@ mod sd3_5_mlx_smoke;
 // non-degenerate AND specifically NOT all-zero (the retired Apple recipe's exact failure signature).
 #[cfg(all(test, target_os = "macos"))]
 mod sdxl_base_q8_mlx_smoke;
+// Real-weight MLX smoke for the Lens-Turbo Q4 worker lane (sc-8763, epic 8506 Group-B). Test-only +
+// macOS-only; drives `gen_core::load("lens_turbo")` with a Q4 LoadSpec against the packed `q4/` turnkey
+// subdir. On-device evidence that the SceneWorks/lens-turbo-mlx pre-quantized q4 tier loads through the
+// worker packed path (`mlx.standardTierLayout` → `standard_tier_subdir` resolves `q4/`) and renders
+// non-degenerate (both transformer + gpt-oss MoE TE are packed per-tier; NOT a dense-TE model).
+#[cfg(all(test, target_os = "macos"))]
+mod lens_turbo_q4_mlx_smoke;
 // The DWPose skeleton rasterizer is consumed only by the macOS Z-Image strict-pose
 // control path; on Mac AND the off-Mac candle DWPose lane (sc-5496) it backs the
 // `pose_jobs` skeleton render; on a candle-disabled box off Mac it still builds +
