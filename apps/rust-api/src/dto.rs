@@ -780,6 +780,11 @@ pub(crate) struct VideoJobRequest {
 pub(crate) struct ModelDownloadRequest {
     #[serde(default = "default_requested_gpu")]
     pub(crate) requested_gpu: String,
+    /// Quant tier to install for a quant-matrix model (sc-8508): `bf16` / `q8` / `q4`, matching
+    /// `downloads[].variant`. Absent installs the default tier (the entry marked `default: true`,
+    /// else the first supported entry) — the back-compat single-variant behavior.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) variant: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]

@@ -157,8 +157,24 @@ pub(crate) async fn create_model_download_job(
             status: StatusCode::NOT_FOUND,
             detail: "Model not found".to_owned(),
         })?;
-    let download = model_download(&model)
-        .ok_or_else(|| ApiError::bad_request("Model does not define a Hugging Face download"))?;
+    // Tier selection (sc-8508): an explicit `variant` installs that quant tier's download entry; an
+    // absent variant installs the default tier (back-compat). A variant the model doesn't advertise
+    // is a 400 rather than a silent wrong-tier install.
+    let download = match payload
+        .variant
+        .as_deref()
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+    {
+        Some(variant) => model_download_for_variant(&model, variant).ok_or_else(|| {
+            ApiError::bad_request(format!(
+                "Model does not define a '{variant}' download variant"
+            ))
+        })?,
+        None => model_download(&model).ok_or_else(|| {
+            ApiError::bad_request("Model does not define a Hugging Face download")
+        })?,
+    };
     let repo = required_string_field(&download, "repo")?.to_owned();
     let files = download
         .get("files")
@@ -189,6 +205,24 @@ pub(crate) async fn create_model_download_job(
     );
     job_payload.insert("repo".to_owned(), Value::String(repo.clone()));
     job_payload.insert("files".to_owned(), json!(files));
+    // Record which quant tier this job installs (sc-8508) so the download record + per-variant
+    // install tracking agree on the tier. Falls back to the selected entry's own `variant` when the
+    // request omitted one (the default tier may still be a labeled variant).
+    if let Some(variant) = payload
+        .variant
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_owned)
+        .or_else(|| {
+            download
+                .get("variant")
+                .and_then(Value::as_str)
+                .map(str::to_owned)
+        })
+    {
+        job_payload.insert("variant".to_owned(), Value::String(variant));
+    }
     // Forward the catalog-declared family so the worker can re-verify the downloaded
     // weights match it (parity with model import). The catalog is project-curated, but
     // a mis-declared family would otherwise silently mismatch downstream adapter
@@ -884,6 +918,112 @@ fn install_state_for(
     }
 }
 
+// Per-variant install state (sc-8508, epic 8506): a single downloadable tier of a quant-matrix
+// model. `install_state_for` reports the DEFAULT variant's install state (back-compat single-variant
+// contract); `model_variants` reports one of these per declared download entry so the catalog knows
+// WHICH tiers are on disk, not just whether *a* variant is.
+struct ModelVariantState {
+    /// The tier key: an explicit `downloads[].variant` (bf16/q8/q4), else "default" for a
+    /// single-variant model (which has exactly one entry).
+    variant: String,
+    /// Whether this specific tier's files are present in the HF cache.
+    installed: bool,
+    /// Resolved install path for this tier (the shared repo cache root; tiers live as `files`-
+    /// filtered subdirs within it). `None` when the repo has never been fetched.
+    installed_path: Option<String>,
+    /// This tier's incomplete-cache signal (some but not all `files` present).
+    cache_incomplete: bool,
+    /// Files this tier is missing from the cache (empty when complete or absent).
+    missing_required_files: Vec<String>,
+    /// This tier's estimated download size (from `downloads[].estimatedSizeBytes` /
+    /// `footprint.diskSizeBytes`).
+    download_size_bytes: Option<u64>,
+    /// The raw `downloads[].footprint` object (disk size + optional measured memory), passed
+    /// through verbatim for the RAM-suggestion surfaces (sc-8509/8516). `Null` when absent.
+    footprint: Value,
+}
+
+// Whether `model`'s `downloads` array declares more than one supported entry OR any entry carries an
+// explicit `variant` — i.e. it is a quant-matrix model whose tiers should be tracked per-variant.
+fn model_has_variant_matrix(model: &Value) -> bool {
+    let Some(downloads) = model.get("downloads").and_then(Value::as_array) else {
+        return false;
+    };
+    let supported: Vec<&Value> = downloads
+        .iter()
+        .filter(|entry| is_supported_model_download(entry))
+        .collect();
+    supported.len() > 1 || supported.iter().any(|entry| entry.get("variant").is_some())
+}
+
+// Build the per-variant install state for every supported download entry. A single-variant model
+// yields one entry keyed "default"; a quant-matrix model yields one per tier. Each entry's install
+// state is probed independently against the HF cache using that tier's own `files` filter, so the
+// catalog can advertise (e.g.) bf16 installed while q4 is missing.
+fn model_variant_states(model: &Value, data_dir: &FsPath) -> Vec<ModelVariantState> {
+    let Some(downloads) = model.get("downloads").and_then(Value::as_array) else {
+        return Vec::new();
+    };
+    downloads
+        .iter()
+        .filter(|entry| is_supported_model_download(entry))
+        .map(|entry| {
+            let repo = entry
+                .get("repo")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_owned();
+            let files = string_array_field(entry, "files");
+            let cache_path = huggingface_repo_cache_path(data_dir, &repo);
+            let cache_health = cache_path
+                .as_ref()
+                .map(|path| huggingface_cache_health(path, &files));
+            let installed = cache_health.as_ref().is_some_and(|health| health.installed);
+            let cache_incomplete = cache_health
+                .as_ref()
+                .is_some_and(|health| health.incomplete);
+            let missing_required_files = cache_health
+                .as_ref()
+                .map(|health| health.missing_files.clone())
+                .unwrap_or_default();
+            // The managed dir mirrors the default-download install path; a variant that is present
+            // there (a directly-downloaded turnkey) counts as installed too.
+            let managed_path = data_dir.join("models").join(safe_download_dir(&repo));
+            let managed_installed = model_is_installed(&managed_path);
+            let installed_path = if installed || cache_incomplete {
+                cache_path
+            } else if managed_installed {
+                Some(managed_path)
+            } else {
+                None
+            };
+            ModelVariantState {
+                variant: entry
+                    .get("variant")
+                    .and_then(Value::as_str)
+                    .map(str::to_owned)
+                    .unwrap_or_else(|| "default".to_owned()),
+                installed: installed || managed_installed,
+                installed_path: installed_path.map(|path| path.display().to_string()),
+                cache_incomplete,
+                missing_required_files,
+                download_size_bytes: manifest_download_size_bytes(model, entry)
+                    .or_else(|| variant_footprint_disk_bytes(entry)),
+                footprint: entry.get("footprint").cloned().unwrap_or(Value::Null),
+            }
+        })
+        .collect()
+}
+
+// The on-disk size a `downloads[].footprint.diskSizeBytes` declares, if any — the tier-scoped
+// footprint signal (sc-8508) used as a fallback size when `estimatedSizeBytes` is absent.
+fn variant_footprint_disk_bytes(download: &Value) -> Option<u64> {
+    download
+        .get("footprint")
+        .and_then(|footprint| footprint.get("diskSizeBytes"))
+        .and_then(json_size_to_u64)
+}
+
 // Gated-model signal (sc-1898): a machine-readable `gated` flag plus the credential
 // host the download requires, so the Models screen can route the user to the
 // credential screen before a download will succeed. The host honors an explicit
@@ -914,6 +1054,44 @@ fn apply_gating_fields(object: &mut JsonObject) {
 // conversion status for models that declare an `mlx` variant. Additive fields the
 // web/Docker build ignores; the client only acts on macSupport when the capabilities
 // endpoint reports `macGatingActive`, so non-Mac pickers are untouched.
+// Per-variant catalog fields (sc-8508): emit a `variants` array — one object per declared quant
+// tier — plus a `hasVariantMatrix` boolean the web uses to decide whether to render a tier picker.
+// A single-variant model gets a one-element array keyed "default" that mirrors the top-level
+// install state, so the existing single-variant contract is unchanged.
+fn apply_variant_fields(object: &mut JsonObject, data_dir: &FsPath) {
+    let model = Value::Object(object.clone());
+    let has_matrix = model_has_variant_matrix(&model);
+    let variants = model_variant_states(&model, data_dir)
+        .into_iter()
+        .map(|variant| {
+            json!({
+                "variant": variant.variant,
+                "installed": variant.installed,
+                "installState": if variant.installed { "installed" } else { "missing" },
+                "cacheState": if variant.cache_incomplete {
+                    "incomplete"
+                } else if variant.installed {
+                    "complete"
+                } else {
+                    "missing"
+                },
+                "installedPath": variant
+                    .installed_path
+                    .map(Value::String)
+                    .unwrap_or(Value::Null),
+                "missingRequiredFiles": variant.missing_required_files,
+                "downloadSizeBytes": variant
+                    .download_size_bytes
+                    .map(|value| json!(value))
+                    .unwrap_or(Value::Null),
+                "footprint": variant.footprint,
+            })
+        })
+        .collect::<Vec<_>>();
+    object.insert("hasVariantMatrix".to_owned(), Value::Bool(has_matrix));
+    object.insert("variants".to_owned(), Value::Array(variants));
+}
+
 fn apply_mac_and_mlx_fields(object: &mut JsonObject, data_dir: &FsPath) {
     let mac_support = {
         let id = object.get("id").and_then(Value::as_str).unwrap_or_default();
@@ -1078,6 +1256,11 @@ async fn model_catalog_inner(
                 "removable".to_owned(),
                 Value::Bool(user_managed || state.installed),
             );
+            // Per-variant install tracking (sc-8508, epic 8506): one entry per declared quant tier,
+            // each with its own installed flag + path + size + footprint. A single-variant model
+            // still emits exactly one "default" variant, so the array is a superset of the
+            // (retained) top-level installState/installedPath fields — nothing existing regresses.
+            apply_variant_fields(object, &data_dir);
             apply_gating_fields(object);
             apply_mac_and_mlx_fields(object, &data_dir);
         }
@@ -1242,6 +1425,27 @@ pub(crate) fn model_download(model: &Value) -> Option<Value> {
         }
     }
     fallback.cloned()
+}
+
+/// Select a specific quant tier's download entry for a quant-matrix model (sc-8508). Returns the
+/// supported `downloads` entry whose `variant` matches `variant` (case-insensitive). `None` when the
+/// model declares no such tier — the caller surfaces a 400 rather than silently installing the wrong
+/// tier. A `None` `variant` argument means "the default tier" and is handled by [`model_download`].
+pub(crate) fn model_download_for_variant(model: &Value, variant: &str) -> Option<Value> {
+    let downloads = model.get("downloads")?.as_array()?;
+    let wanted = variant.trim().to_ascii_lowercase();
+    downloads
+        .iter()
+        .find(|download| {
+            is_supported_model_download(download)
+                && download
+                    .get("variant")
+                    .and_then(Value::as_str)
+                    .map(|value| value.trim().to_ascii_lowercase())
+                    .as_deref()
+                    == Some(wanted.as_str())
+        })
+        .cloned()
 }
 
 /// Best-effort credential host for a gated model when the manifest entry doesn't
@@ -1836,6 +2040,148 @@ mod gated_credential_tests {
         assert_eq!(
             model.get("licenseUrl").and_then(Value::as_str),
             Some("https://huggingface.co/stabilityai/stable-diffusion-3.5-large"),
+        );
+    }
+}
+
+#[cfg(test)]
+mod variant_install_tests {
+    use super::*;
+    use serde_json::json;
+
+    /// Seed a HuggingFace repo cache snapshot under `data_dir` containing `files` (repo-relative
+    /// paths). Mirrors the on-disk layout `model_variant_states` probes.
+    fn seed_cache(data_dir: &FsPath, repo: &str, files: &[&str]) {
+        let cache = huggingface_repo_cache_path(data_dir, repo).expect("cache path");
+        let snapshot = cache.join("snapshots").join("abc123");
+        for file in files {
+            let path = snapshot.join(file);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, b"x").unwrap();
+        }
+    }
+
+    fn quant_matrix_model(repo: &str) -> Value {
+        json!({
+            "id": "matrix_model",
+            "downloads": [
+                {
+                    "provider": "huggingface",
+                    "repo": repo,
+                    "variant": "q4",
+                    "default": true,
+                    "files": ["q4/*"],
+                    "footprint": { "diskSizeBytes": 5_000_000_000_u64 }
+                },
+                {
+                    "provider": "huggingface",
+                    "repo": repo,
+                    "variant": "q8",
+                    "files": ["q8/*"],
+                    "footprint": { "diskSizeBytes": 10_000_000_000_u64, "peakMemoryBytes": null }
+                },
+                {
+                    "provider": "huggingface",
+                    "repo": repo,
+                    "variant": "bf16",
+                    "files": ["bf16/*"],
+                    "estimatedSizeBytes": 20_000_000_000_u64
+                }
+            ]
+        })
+    }
+
+    #[test]
+    fn detects_matrix_and_single_variant_shapes() {
+        // Multiple supported entries → a matrix.
+        assert!(model_has_variant_matrix(&quant_matrix_model(
+            "SceneWorks/matrix"
+        )));
+        // A single entry with an explicit variant → still a matrix (tier-tracked).
+        assert!(model_has_variant_matrix(&json!({
+            "downloads": [{ "provider": "huggingface", "repo": "o/m", "variant": "q4" }]
+        })));
+        // A single unlabeled entry → NOT a matrix (back-compat single-variant).
+        assert!(!model_has_variant_matrix(&json!({
+            "downloads": [{ "provider": "huggingface", "repo": "o/m" }]
+        })));
+        // No downloads → not a matrix.
+        assert!(!model_has_variant_matrix(&json!({ "id": "x" })));
+    }
+
+    #[test]
+    fn single_variant_model_yields_one_default_variant() {
+        let tmp = tempfile::tempdir().unwrap();
+        let data_dir = tmp.path();
+        let model = json!({
+            "id": "single",
+            "downloads": [{ "provider": "huggingface", "repo": "owner/single" }]
+        });
+        // Not installed yet.
+        let states = model_variant_states(&model, data_dir);
+        assert_eq!(states.len(), 1);
+        assert_eq!(states[0].variant, "default");
+        assert!(!states[0].installed);
+
+        // Seed the cache with a payload file → installed.
+        seed_cache(data_dir, "owner/single", &["model.safetensors"]);
+        let states = model_variant_states(&model, data_dir);
+        assert!(states[0].installed);
+        assert!(states[0].installed_path.is_some());
+    }
+
+    #[test]
+    fn per_variant_tracking_reports_which_tiers_are_on_disk() {
+        let tmp = tempfile::tempdir().unwrap();
+        let data_dir = tmp.path();
+        let repo = "SceneWorks/matrix";
+        let model = quant_matrix_model(repo);
+
+        // Only bf16 is downloaded (its `files` filter matches only the bf16/ tree).
+        seed_cache(data_dir, repo, &["bf16/model.safetensors"]);
+
+        let states = model_variant_states(&model, data_dir);
+        assert_eq!(states.len(), 3);
+        let by_variant = |name: &str| states.iter().find(|s| s.variant == name).unwrap();
+
+        // bf16 present; q4 + q8 absent — the whole point of per-variant tracking.
+        assert!(by_variant("bf16").installed, "bf16 should read installed");
+        assert!(!by_variant("q4").installed, "q4 should read missing");
+        assert!(!by_variant("q8").installed, "q8 should read missing");
+
+        // Footprint + size flow through: q4 uses footprint.diskSizeBytes, bf16 uses estimatedSizeBytes.
+        assert_eq!(by_variant("q4").download_size_bytes, Some(5_000_000_000));
+        assert_eq!(by_variant("bf16").download_size_bytes, Some(20_000_000_000));
+        assert_eq!(
+            by_variant("q8").footprint.get("peakMemoryBytes"),
+            Some(&Value::Null)
+        );
+    }
+
+    #[test]
+    fn variant_footprint_disk_bytes_reads_required_field() {
+        let entry = json!({ "footprint": { "diskSizeBytes": 42 } });
+        assert_eq!(variant_footprint_disk_bytes(&entry), Some(42));
+        assert_eq!(variant_footprint_disk_bytes(&json!({})), None);
+    }
+
+    #[test]
+    fn variant_download_selector_picks_the_right_tier() {
+        let model = quant_matrix_model("SceneWorks/matrix");
+        // Case-insensitive match on the declared variant.
+        assert_eq!(
+            model_download_for_variant(&model, "Q8")
+                .and_then(|d| d.get("files").cloned())
+                .and_then(|f| f.as_array().and_then(|a| a.first().cloned())),
+            Some(Value::String("q8/*".to_owned()))
+        );
+        // Unknown tier → None (the handler turns this into a 400).
+        assert!(model_download_for_variant(&model, "int8").is_none());
+        // The default selector still picks the `default: true` (q4) entry — back-compat.
+        assert_eq!(
+            model_download(&model)
+                .and_then(|d| d.get("variant").and_then(Value::as_str).map(str::to_owned)),
+            Some("q4".to_owned())
         );
     }
 }

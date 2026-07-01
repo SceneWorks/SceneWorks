@@ -2154,6 +2154,7 @@
       ],
       "family": "z-image",
       "gated": false,
+      "hasVariantMatrix": true,
       "id": "base-model",
       "installState": "missing",
       "installedPath": "<runtime-root>/data/models/owner__base-model",
@@ -2186,7 +2187,29 @@
       "type": "image",
       "ui": {
         "label": "User"
-      }
+      },
+      "variants": [
+        {
+          "cacheState": "missing",
+          "downloadSizeBytes": 536870912,
+          "footprint": null,
+          "installState": "missing",
+          "installed": false,
+          "installedPath": null,
+          "missingRequiredFiles": [],
+          "variant": "default"
+        },
+        {
+          "cacheState": "missing",
+          "downloadSizeBytes": 12884901888,
+          "footprint": null,
+          "installState": "missing",
+          "installed": false,
+          "installedPath": null,
+          "missingRequiredFiles": [],
+          "variant": "default"
+        }
+      ]
     },
     {
       "adapter": "z_image_diffusers",
@@ -2208,6 +2231,7 @@
       "downloads": [],
       "family": "z-image",
       "gated": false,
+      "hasVariantMatrix": false,
       "id": "z_image_turbo",
       "installState": "missing",
       "installedPath": null,
@@ -2234,7 +2258,8 @@
       "type": "image",
       "ui": {
         "label": "Z-Image"
-      }
+      },
+      "variants": []
     }
   ],
   "persisted character sidecar": {

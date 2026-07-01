@@ -27,23 +27,34 @@
         // Q8 convert — the worker loads the chosen tier's subdir directly (standard_tier_subdir).
         // All three components are quantized (DiT + TE + VAE attention) in q4/q8; bf16/ is dense
         // (the f32 transformer downcast to bf16 for catalog consistency). Sizes are measured on-disk.
+        // Per-tier variants (sc-8508): each tier is a SEPARATE installable artifact, tagged with a
+        // `variant` key + a `footprint` (required on-disk size; the measured resident/peak memory is
+        // filled in later by sc-8516). `default: true` marks q4 as the tier that installs when no
+        // explicit variant is requested. The catalog tracks each tier's presence independently.
         {
           "provider": "huggingface",
           "repo": "SceneWorks/z-image-turbo-mlx",
+          "variant": "q4",
+          "default": true,
           "files": ["q4/*"],
-          "estimatedSizeBytes": 5909406487
+          "estimatedSizeBytes": 5909406487,
+          "footprint": { "diskSizeBytes": 5909406487, "residentMemoryBytes": null, "peakMemoryBytes": null }
         },
         {
           "provider": "huggingface",
           "repo": "SceneWorks/z-image-turbo-mlx",
+          "variant": "q8",
           "files": ["q8/*"],
-          "estimatedSizeBytes": 10998523666
+          "estimatedSizeBytes": 10998523666,
+          "footprint": { "diskSizeBytes": 10998523666, "residentMemoryBytes": null, "peakMemoryBytes": null }
         },
         {
           "provider": "huggingface",
           "repo": "SceneWorks/z-image-turbo-mlx",
+          "variant": "bf16",
           "files": ["bf16/*"],
-          "estimatedSizeBytes": 20538406851
+          "estimatedSizeBytes": 20538406851,
+          "footprint": { "diskSizeBytes": 20538406851, "residentMemoryBytes": null, "peakMemoryBytes": null }
         }
       ],
       "paths": {
@@ -84,6 +95,10 @@
         // q4/ is the shipped default tier (sc-8670); q8/ + bf16/ are hosted and selectable via
         // advanced.mlxQuantize (standard_tier_subdir resolves the subdir).
         "quantize": 4,
+        // sc-8508: the manifest-driven form of the STANDARD_TIER_MODELS registry. Additive here
+        // (z_image_turbo is already registered) — it makes the standard q4/q8/bf16 turnkey routing
+        // catalog-declared, so a future quant-matrix model can opt in from the manifest alone.
+        "standardTierLayout": true,
         "limits": {
           "samplers": ["default", "euler", "euler_ancestral", "heun", "dpmpp_2m", "dpmpp_sde", "uni_pc", "lcm", "ddim"],
           "schedulers": ["default", "normal", "simple", "karras", "exponential", "sgm_uniform", "beta", "ddim_uniform"]
@@ -237,23 +252,34 @@
       "capabilities": ["edit_image", "image_to_image"],
       "downloads": [
         // Shares the Turbo turnkey (sc-8670) — img2img runs the same Turbo weights/tier subdirs.
+        // Per-tier variants (sc-8508): each tier is a SEPARATE installable artifact, tagged with a
+        // `variant` key + a `footprint` (required on-disk size; the measured resident/peak memory is
+        // filled in later by sc-8516). `default: true` marks q4 as the tier that installs when no
+        // explicit variant is requested. The catalog tracks each tier's presence independently.
         {
           "provider": "huggingface",
           "repo": "SceneWorks/z-image-turbo-mlx",
+          "variant": "q4",
+          "default": true,
           "files": ["q4/*"],
-          "estimatedSizeBytes": 5909406487
+          "estimatedSizeBytes": 5909406487,
+          "footprint": { "diskSizeBytes": 5909406487, "residentMemoryBytes": null, "peakMemoryBytes": null }
         },
         {
           "provider": "huggingface",
           "repo": "SceneWorks/z-image-turbo-mlx",
+          "variant": "q8",
           "files": ["q8/*"],
-          "estimatedSizeBytes": 10998523666
+          "estimatedSizeBytes": 10998523666,
+          "footprint": { "diskSizeBytes": 10998523666, "residentMemoryBytes": null, "peakMemoryBytes": null }
         },
         {
           "provider": "huggingface",
           "repo": "SceneWorks/z-image-turbo-mlx",
+          "variant": "bf16",
           "files": ["bf16/*"],
-          "estimatedSizeBytes": 20538406851
+          "estimatedSizeBytes": 20538406851,
+          "footprint": { "diskSizeBytes": 20538406851, "residentMemoryBytes": null, "peakMemoryBytes": null }
         }
       ],
       "paths": {

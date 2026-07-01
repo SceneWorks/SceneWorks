@@ -44,6 +44,30 @@
       ],
       "description": "Classifier-free-guidance policy from the unified guidance axis (epic 7434). Names match gen-core's GuidanceMethod registry exactly. \"cfg\" is the standard guidance the engine applies by default (the N1 no-op); \"cfg_rescale\" (Lens-style std-rescale), \"apg\" (Bernini adaptive-projected guidance), and \"cfg_pp\" (CFG++, reparameterized low-cfg guidance) are advertised per-model-per-backend only where the linked engine descriptor honors them. The worker N3-falls an unadvertised method back to the engine default."
     },
+    "quantVariantKey": {
+      "type": "string",
+      "enum": ["bf16", "q8", "q4"],
+      "description": "Quantization tier of a downloadable model variant (epic 8506, sc-8508). `bf16` = dense full-precision, `q8` / `q4` = pre-quantized packed tiers. Matches the SceneWorks quant-matrix turnkey subdir names resolved by the worker's standard_tier_subdir. Maps to advanced.mlxQuantize at generation time (bf16 <=> 0/none, q8 <=> 8, q4 <=> 4)."
+    },
+    "variantFootprint": {
+      "type": "object",
+      "description": "Footprint metadata for one downloadable model variant (sc-8508). `diskSizeBytes` is required; the measured-memory fields are OPTIONAL and nullable so a later story (sc-8516) can populate real resident/peak numbers without a schema change. The RAM-suggestion engine (sc-8509/8516) is out of scope here — this only declares the fields it will consume.",
+      "required": ["diskSizeBytes"],
+      "properties": {
+        "diskSizeBytes": {
+          "type": ["integer", "string"],
+          "description": "On-disk size (bytes) of this variant's files after applying the download `files` filter. Required."
+        },
+        "residentMemoryBytes": {
+          "type": ["integer", "string", "null"],
+          "description": "OPTIONAL measured steady-state resident memory (bytes) when this variant is loaded and generating. Null/absent until sc-8516 measures it."
+        },
+        "peakMemoryBytes": {
+          "type": ["integer", "string", "null"],
+          "description": "OPTIONAL measured peak memory (bytes) during load + first generation. Null/absent until sc-8516 measures it."
+        }
+      }
+    },
     "samplerLimits": {
       "type": "object",
       "description": "Per-model sampler / scheduler / guidance capability lists used to gate Image / Video Studio dropdowns. Omit the keys entirely to disable the controls; include single-element [\"default\"] arrays for sealed adapters so the manifest is still self-describing.",
@@ -169,6 +193,14 @@
                 "type": "boolean",
                 "description": "When true, the native checkpoint must be converted to MLX locally via a tracked model_convert job."
               },
+              "standardTierLayout": {
+                "type": "boolean",
+                "description": "When true, this model ships the standard SceneWorks quant-matrix turnkey layout (sc-8508): self-contained q4/ + q8/ + bf16/ subdirs under one repo, each a complete from_snapshot tree. The worker routes weight resolution through standard_tier_subdir on this flag (the manifest-driven generalization of the hardcoded STANDARD_TIER_MODELS registry). Additive — a model already in the registry keeps working without it."
+              },
+              "denseTextEncoderTier": {
+                "type": "boolean",
+                "description": "When true (with standardTierLayout), every tier keeps a DENSE bf16 text encoder — only the transformer is packed (e.g. FLUX.2-klein). The worker forces the load quant to None for these so the dense TE is never re-quantized. Mirrors the DENSE_TE_TIER_MODELS set."
+              },
               "convertSourceRepo": {
                 "type": "string",
                 "description": "Native checkpoint repo used as the conversion source when requiresConversion is true."
@@ -181,7 +213,7 @@
           },
           "downloads": {
             "type": "array",
-            "description": "Download entries list alternate sources for the same model; at most one may be marked default: true. If none is marked, the first supported entry is used.",
+            "description": "Download entries list alternate sources for the same model; at most one may be marked default: true. If none is marked, the first supported entry is used. When a model ships a quant matrix (epic 8506, sc-8508), each tier (bf16 / Q8 / Q4) is a SEPARATE download entry — same repo, distinct `files` filter and `variant` — so each tier is an independently installable artifact whose presence the catalog tracks per-variant.",
             "contains": {
               "type": "object",
               "properties": {
@@ -205,11 +237,19 @@
                 },
                 "default": {
                   "type": "boolean",
-                  "description": "Marks the canonical alternate used for displayed size, install path, and download jobs."
+                  "description": "Marks the canonical alternate used for displayed size, install path, and download jobs. For a quant matrix this marks the DEFAULT tier (the one that installs when no explicit variant is requested)."
+                },
+                "variant": {
+                  "$ref": "#/$defs/quantVariantKey",
+                  "description": "The quantization tier this entry provisions (bf16 / q8 / q4). Present only on quant-matrix entries (sc-8508); a single-variant model omits it. The web/download-job selects a tier by this key, and per-variant install tracking reports which tiers are on disk."
                 },
                 "estimatedSizeBytes": {
                   "type": ["integer", "string"],
                   "description": "Estimated bytes for the actual files downloaded after applying the files filter. Refresh from the provider when upstream files change."
+                },
+                "footprint": {
+                  "$ref": "#/$defs/variantFootprint",
+                  "description": "Per-variant footprint metadata (sc-8508): required on-disk size plus OPTIONAL measured resident/peak memory (populated later by sc-8516). Distinct from estimatedSizeBytes so the RAM-suggestion surfaces (sc-8509/8516) have a stable, tier-scoped signal."
                 },
                 "files": {
                   "type": "array",

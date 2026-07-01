@@ -210,6 +210,18 @@ fn model_convert_request_parses_optional_mlx_quant_fields() {
 }
 
 #[test]
+fn model_download_request_parses_optional_variant() {
+    // sc-8508: the download endpoint accepts an optional quant `variant` (bf16/q8/q4) to install a
+    // specific tier of a quant-matrix model. Absent = the default tier (back-compat single-variant).
+    let bare: super::ModelDownloadRequest = serde_json::from_value(json!({})).expect("bare body");
+    assert_eq!(bare.variant, None);
+
+    let tiered: super::ModelDownloadRequest =
+        serde_json::from_value(json!({ "variant": "q4" })).expect("variant body");
+    assert_eq!(tiered.variant.as_deref(), Some("q4"));
+}
+
+#[test]
 fn repo_slug_functions_match_cross_language_contract() {
     // story 1667: safe_download_dir is the api-only repo->dir slug op pinned by
     // the shared repo_slugs.json contract. (safe_repo_dir_name moved to
