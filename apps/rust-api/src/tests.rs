@@ -4140,10 +4140,12 @@ async fn image_caption_refine_job_resolves_asset_to_confined_image_path() {
     // No text prompt is required for an image-caption job.
     assert!(job["payload"].get("prompt").is_none());
     // The resolved imagePath is the asset's absolute on-disk location inside the project dir.
+    // Compare as paths: the handler joins component-wise (native separators), while `rel_path`
+    // keeps the asset record's literal `/`, so a string comparison breaks on Windows (sc-8967).
     let expected = project_path.join(&rel_path);
     assert_eq!(
-        job["payload"]["imagePath"].as_str().unwrap(),
-        expected.display().to_string()
+        std::path::Path::new(job["payload"]["imagePath"].as_str().unwrap()),
+        expected
     );
 }
 
@@ -4225,10 +4227,11 @@ async fn image_describe_refine_job_resolves_asset_and_forwards_caption_style() {
     assert_eq!(job["payload"]["task"], "image_describe");
     assert_eq!(job["payload"]["captionStyle"], "tags");
     assert!(job["payload"].get("prompt").is_none());
+    // Path (not string) comparison: separator-agnostic on Windows (sc-8967, same as the caption test).
     let expected = project_path.join(&rel_path);
     assert_eq!(
-        job["payload"]["imagePath"].as_str().unwrap(),
-        expected.display().to_string()
+        std::path::Path::new(job["payload"]["imagePath"].as_str().unwrap()),
+        expected
     );
 }
 
