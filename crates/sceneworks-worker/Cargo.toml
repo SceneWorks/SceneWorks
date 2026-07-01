@@ -1356,6 +1356,15 @@ mlx-gen-scail2 = { git = "https://github.com/michaeltrefry/mlx-gen", rev = "cc9a
 # (inference-level memory, like 24 GB cards) and restores the live `Var`s after. SOURCE-ONLY candle-gen
 # fix; both b3aad50 and 5bb83e4 pin gen-core 863f98d, so this stays single-rev (mlx-gen unchanged). ALL
 # candle-gen-* rev lines move together.
+# Bumped `90c3215` -> `a48aba8` (candle-gen #208, sc-8680) -> `5d6ae13` (candle-gen #211, sc-8775): #208
+# adds faithful base z_image control (renames `ZImageControlPaths.base`→`snapshot`, adds `base: bool` +
+# `guidance`/`negative_prompt` to `ZImageControlRequest`) — the Windows/CUDA half of the sc-8680 worker
+# base-control provider (`image_jobs/zimage_control.rs`, updated in #1044); #211 then re-pins candle-gen's
+# OWN gen-core 627828b -> cc9a8c1 IN LOCKSTEP with this worker's mlx-gen bump to cc9a8c1 (mlx-gen #625,
+# sc-8775 sensenova fast packed-load), so `--features backend-candle` resolves the SINGLE gen-core rev
+# cc9a8c1. 5d6ae13 = candle-gen main (incl. the #208 z-image control) + the #211 gen-core repin; NB it is
+# #211's BRANCH commit (pre-merge) — flip all candle-gen-* to the merged candle-gen `main` rev once #211
+# lands. ALL candle-gen-* rev lines move together.
 candle-gen-sdxl = { git = "https://github.com/michaeltrefry/candle-gen", rev = "5d6ae1369734e2e316485fdbcc2b6ac053511c76", features = ["cuda"], optional = true }
 # Candle image providers (sc-5096) -- Windows/CUDA siblings of the mlx-gen image crates above. Each
 # self-registers its engine id into the shared gen_core inventory registry; force-linked in
