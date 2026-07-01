@@ -505,7 +505,7 @@ export function AssetCard({ asset, deleteAsset, purgeAsset, onPreview, updateAss
     .join(" ");
   return (
     <article className={classes}>
-      <button className="preview-button" onClick={() => onPreview(asset)} type="button">
+      <button className="preview-button" onClick={() => onPreview(asset)} onContextMenu={suppressThumbnailContextMenu} type="button">
         <AssetMedia asset={asset} />
         <LikenessBadge asset={asset} />
       </button>
