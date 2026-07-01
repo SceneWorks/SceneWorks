@@ -152,21 +152,22 @@ describe("tierFits", () => {
 
 describe("suggestTier", () => {
   it("suggests q4 on a 32 GB host when the larger tiers overflow the budget (acceptance)", () => {
-    // Budget on 32 GB = 32 × 0.8 = 25.6 GB. Size q8/bf16 to exceed it so only q4 fits, matching the
-    // acceptance criterion (a 32 GB user sees q4 pre-selected).
+    // Peak-based budget on 32 GB = 32 × 0.9 = 28.8 GB. Estimated peak = diskGb × 1.0 + 14 GB transient.
+    // Size q8/bf16 to exceed the budget so only q4 fits (a 32 GB user sees q4 pre-selected).
     const model = matrixModel([
-      { variant: "q4", diskGb: 4 }, // 6 GB est → fits
-      { variant: "q8", diskGb: 18 }, // 27 GB est > 25.6 → no
-      { variant: "bf16", diskGb: 24 }, // 36 GB est > 25.6 → no
+      { variant: "q4", diskGb: 4 }, // 4 + 14 = 18 GB peak < 28.8 → fits
+      { variant: "q8", diskGb: 18 }, // 18 + 14 = 32 GB peak > 28.8 → no
+      { variant: "bf16", diskGb: 24 }, // 24 + 14 = 38 GB peak > 28.8 → no
     ]);
     expect(suggestTier(model, 32)).toBe("q4");
   });
 
   it("suggests q8 when bf16 is too big but q8 fits on a 32 GB host", () => {
+    // Budget 28.8 GB (32 × 0.9); estimated peak = diskGb + 14 GB transient.
     const model = matrixModel([
-      { variant: "q4", diskGb: 4 }, // 6 GB
-      { variant: "q8", diskGb: 10 }, // 15 GB < 25.6 → fits
-      { variant: "bf16", diskGb: 24 }, // 36 GB → no
+      { variant: "q4", diskGb: 4 }, // 18 GB peak
+      { variant: "q8", diskGb: 10 }, // 10 + 14 = 24 GB peak < 28.8 → fits
+      { variant: "bf16", diskGb: 24 }, // 38 GB peak → no
     ]);
     // q8 is higher fidelity than q4 and fits → preferred over q4.
     expect(suggestTier(model, 32)).toBe("q8");
@@ -198,7 +199,7 @@ describe("suggestTier", () => {
 
   it("falls back to the smallest tier when nothing fits", () => {
     const model = matrixModel([
-      { variant: "q4", diskGb: 40 }, // 60 GB est
+      { variant: "q4", diskGb: 40 }, // 40 + 14 = 54 GB peak est
       { variant: "bf16", diskGb: 80 },
     ]);
     // Tiny 8 GB host, every tier over budget → smallest declared tier (q4).

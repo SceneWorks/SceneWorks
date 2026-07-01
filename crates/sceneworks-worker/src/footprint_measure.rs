@@ -9,15 +9,22 @@
 //! of a packed tier subdir (the same one `image_jobs::base::standard_tier_subdir` resolves) + ONE
 //! generation — while sampling the MLX process-global memory counters that generator_cache.rs already
 //! publishes to telemetry:
-//!   * `mlx_rs::memory::get_active_memory()` — bytes currently live on the GPU allocator. Read right
-//!     after a completed generation (weights resident + the last gen's working buffers not yet freed)
-//!     it is the "steady-state resident" figure we report.
+//!   * `mlx_rs::memory::get_active_memory()` — bytes currently live on the GPU allocator. RESIDENT is
+//!     sampled from this AFTER the generation AND AFTER a `clear_cache()` that releases the gen's
+//!     transient working buffers, so it is the steady-state weight footprint ONLY, NOT the transient.
+//!     (MLX is lazy: directly after `load` NOTHING is materialized — `get_active_memory()` reads ~0 —
+//!     so resident is only observable once a gen has forced the weights resident. The credibility fix
+//!     is the `clear_cache()` before the sample: the old harness read active post-gen WITHOUT it, which
+//!     folded the freeable transient INTO resident — inflating resident, understating peak−resident.)
 //!   * `mlx_rs::memory::get_peak_memory()` — high-water mark since process start / last reset. Reset
-//!     BEFORE load so the reported peak covers load + the single generation (the true install-time
-//!     ceiling the RAM suggestion must budget for).
+//!     BEFORE load and read AFTER the generation, so the reported peak covers load + the single
+//!     generation (the true install-time ceiling the RAM suggestion must budget for).
 //!
-//! `clear_cache()` is called before the baseline read so the allocator's free cache doesn't inflate
-//! the numbers (matches generator_cache's `clear_cache` between jobs).
+//! RUN ONE TIER PER PROCESS. The MLX counters + allocator peak high-water mark are process-global and
+//! persist across tests in the same binary invocation, so each tier MUST be measured in its OWN
+//! `cargo test … footprint_<x>` invocation for a clean allocator + peak counter — otherwise a heavier
+//! earlier tier's peak leaks into a lighter later one. The manifest numbers were each captured
+//! fresh-process this way.
 //!
 //! These are `#[ignore]`d real-weight smokes — run by hand on an Apple-Silicon Mac with the tier's
 //! turnkey cached (same convention as the *_mlx_smoke tests). Each prints a single machine-parseable
@@ -25,8 +32,11 @@
 //! a run over the measurable set can be scraped straight into builtin.models.jsonc.
 //!
 //! ```text
-//! cargo test -p sceneworks-worker --release footprint_ -- --ignored --nocapture
-//! # or one tier:  cargo test -p sceneworks-worker --release footprint_sdxl_q8 -- --ignored --nocapture
+//! # One tier per invocation (fresh MLX allocator + peak counter each time):
+//! cargo test -p sceneworks-worker --release footprint_sdxl_q8         -- --ignored --nocapture
+//! cargo test -p sceneworks-worker --release footprint_z_image_turbo_q4 -- --ignored --nocapture
+//! cargo test -p sceneworks-worker --release footprint_z_image_q4       -- --ignored --nocapture
+//! cargo test -p sceneworks-worker --release footprint_lens_turbo_q4    -- --ignored --nocapture
 //! ```
 //!
 //! CALIBRATION SET (prefer already-on-disk tiers; do NOT trigger a 30GB+ download sweep — sc-8516
@@ -129,15 +139,26 @@ fn image_std(img: &Image) -> f64 {
 /// Run one real load + generation for `(model, tier)` at `dir`, sampling the MLX memory counters
 /// around it, and emit the machine-parseable `[[FOOTPRINT]]` line. Returns (residentBytes, peakBytes).
 ///
-/// Sequence (mirrors the worker's per-job memory lifecycle in generator_cache.rs):
+/// Sequence (mirrors the worker's per-job memory lifecycle in generator_cache.rs, and separates the
+/// steady-state weight footprint from the generation transient — the sc-8516 credibility fix):
 ///   1. `clear_cache()` then `reset_peak_memory()` — start the peak high-water mark from a clean base
 ///      so it captures load + this one generation, not leftovers from a prior test in the same process.
-///   2. record `baseline = get_active_memory()` — anything already live (should be ~0 fresh, but a
-///      multi-tier run in one process may carry a previous model; we subtract it so each line is the
-///      marginal footprint of THIS tier).
-///   3. load the packed tier + generate once.
-///   4. `residentBytes = get_active_memory() - baseline` (weights + last-gen buffers still live),
-///      `peakBytes = get_peak_memory()` (the load+gen ceiling).
+///   2. record `baseline = get_active_memory()` — anything already live (should be ~0 in a
+///      one-tier-per-process run; subtracted so each line is the marginal footprint of THIS tier).
+///   3. load the packed tier + generate once. PEAK = `get_peak_memory()` read right after gen — the
+///      load+gen high-water ceiling (peak was reset in step 1 and never since, so it spans the window).
+///   4. `clear_cache()` to RELEASE the generation's transient working buffers (VAE-decode scratch,
+///      attention activations, latents) back to the OS, THEN sample
+///      `residentBytes = get_active_memory() - baseline` — the STEADY-STATE resident WEIGHTS only.
+///
+/// Why resident is sampled POST-gen-and-clear rather than pre-gen: MLX evaluates lazily, so directly
+/// after `gen_core::load` NOTHING is materialized on the GPU allocator (`get_active_memory()` reads
+/// ~0 — verified) — the weights are only realized when the first forward pass touches them. So a true
+/// steady-state resident is only observable AFTER a generation has forced materialization. The fix
+/// versus the original harness is the `clear_cache()` on line below: the old code sampled
+/// `get_active_memory()` post-gen WITHOUT releasing the cache, folding the gen's freeable transient
+/// INTO resident (inflating resident, understating peak−resident). Dropping the cache first leaves
+/// only the live weight arrays the generator still holds.
 fn measure_footprint(
     model: &str,
     tier: &str,
@@ -163,6 +184,7 @@ fn measure_footprint(
     let generator = gen_core::load(engine_id, &spec)
         .unwrap_or_else(|e| panic!("load {engine_id} ({tier}): {e:?}"));
 
+    // 3. One generation, then the load+gen peak high-water mark (reset in step 1, never since).
     let mut last = String::new();
     let output = generator
         .generate(&req, &mut |p| {
@@ -182,22 +204,27 @@ fn measure_footprint(
         std > 5.0,
         "{model} {tier} render looks degenerate (std {std:.2}) — measured footprint would be bogus"
     );
-
-    // 4. Steady-state resident (active now, minus whatever was already live) + the load+gen peak.
-    let active_now = mlx_rs::memory::get_active_memory() as u64;
-    let resident = active_now.saturating_sub(baseline);
     let peak = mlx_rs::memory::get_peak_memory() as u64;
+
+    // 4. STEADY-STATE RESIDENT: release the gen's transient working buffers, THEN sample. This is the
+    //    credibility fix — the old harness sampled active WITHOUT this clear_cache, so resident carried
+    //    the freeable transient and peak−resident was an artifact, not the real transient.
+    mlx_rs::memory::clear_cache();
+    let active_resident = mlx_rs::memory::get_active_memory() as u64;
+    let resident = active_resident.saturating_sub(baseline);
+    let transient = peak.saturating_sub(active_resident);
 
     // Machine-parseable line — scrape `[[FOOTPRINT]]` to backfill builtin.models.jsonc.
     println!(
         "[[FOOTPRINT]] {{\"model\":\"{model}\",\"tier\":\"{tier}\",\"residentMemoryBytes\":{resident},\"peakMemoryBytes\":{peak}}}"
     );
     println!(
-        "[footprint] {model} {tier}: resident {:.2} GiB (active {:.2}, baseline {:.2}) | peak {:.2} GiB | render std {:.1}",
+        "[footprint] {model} {tier}: resident {:.2} GiB (active {:.2}, baseline {:.2}) | peak {:.2} GiB | transient (peak−resident) {:.2} GiB | render std {:.1}",
         resident as f64 / 1024.0 / 1024.0 / 1024.0,
-        active_now as f64 / 1024.0 / 1024.0 / 1024.0,
+        active_resident as f64 / 1024.0 / 1024.0 / 1024.0,
         baseline as f64 / 1024.0 / 1024.0 / 1024.0,
         peak as f64 / 1024.0 / 1024.0 / 1024.0,
+        transient as f64 / 1024.0 / 1024.0 / 1024.0,
         std,
     );
     (resident, peak)

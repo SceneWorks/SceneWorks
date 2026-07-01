@@ -15,12 +15,16 @@
 // (for the tiers it measured on-device; the rest stay null and fall back to the calibrated estimate).
 //
 // sc-8516 CALIBRATION (basis for the constants below): on-device measurement of steady-state resident
-// + load+gen peak GPU memory (harness crates/sceneworks-worker/src/footprint_measure.rs, using the MLX
-// counters mlx_rs::memory::{get_active_memory, get_peak_memory} the worker already publishes). Measured
-// set: sdxl/q8, z_image/q4, z_image_turbo/q4, lens_turbo/q4. Two findings drive the model here:
-//   1. resident ≈ on-disk size (ratio 0.81–1.01) — the old disk×1.5 resident estimate was too high.
-//   2. peak − resident ≈ a FIXED ~10–14 GiB transient (VAE decode + attention at 1024²), roughly
-//      size-independent — so peak is modeled as resident + a fixed addend, not a multiplier.
+// + load+gen peak GPU memory (harness crates/sceneworks-worker/src/footprint_measure.rs — ONE tier per
+// fresh process, resident sampled post-gen AFTER releasing the transient cache, peak = load+gen
+// high-water — using the MLX counters mlx_rs::memory::{get_active_memory, get_peak_memory} the worker
+// already publishes). Measured set: sdxl/q8, z_image/q4, z_image_turbo/q4, lens_turbo/q4. Two findings:
+//   1. resident ≈ on-disk size (ratio 0.81–1.01, mean 0.94) — the old disk×1.5 resident estimate was
+//      too high; packed weights sit resident at roughly their on-disk size.
+//   2. peak − resident is a FIXED 14.04 GiB transient (1024² VAE decode + attention working set),
+//      measured to within ~4 MiB across a 3.9→16.5 GiB resident spread over 3 different VAEs. It is
+//      genuinely resolution-bound, NOT weight-bound (a real physical property of the 1024² decode, not
+//      a "resident + constant" measurement artifact) — so peak = resident + a fixed addend, not ×N.
 // The suggestion therefore budgets against PEAK (the real ceiling a generation must fit).
 
 import { tierQuantize } from "./quantTier.js";
@@ -40,10 +44,11 @@ export const DISK_TO_RESIDENT_MULTIPLIER = 1.0;
 
 // Fixed transient working-set (bytes) a single 1024² generation needs ON TOP OF the resident weights —
 // VAE decode buffers + attention activations/latents + framework scratch. sc-8516 measured this as the
-// gap between peak and on-disk size and found it ~SIZE-INDEPENDENT (10.2–14.1 GiB across a 4–20 GB
-// spread of models), so it is modeled as a fixed addend, not a multiplier. 14 GiB is the conservative
-// top of the measured band. This is what makes the estimated budget (disk×MULT + transient) track the
-// MEASURED peak the RAM suggestion must actually fit — the true install-time/run ceiling.
+// PEAK − RESIDENT gap and found it 14.04 GiB to within ~4 MiB across a 3.9→16.5 GiB resident spread
+// (sdxl / z-image / lens, 3 different VAEs) — genuinely size-INDEPENDENT and resolution-bound, so it is
+// modeled as a fixed addend, not a multiplier. 14 GiB ≈ the measured value, used directly. This is what
+// makes the estimated budget (disk×MULT + transient) track the MEASURED peak the RAM suggestion must
+// actually fit — the true install-time/run ceiling.
 export const TRANSIENT_HEADROOM_BYTES = 14 * 1024 * 1024 * 1024;
 
 // Fraction of detected unified/GPU memory a tier's peak footprint must fit UNDER to be suggested. The
