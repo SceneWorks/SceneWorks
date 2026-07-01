@@ -281,6 +281,12 @@ pub(crate) async fn run_dataset_face_analysis_job(
         Ok(records)
     });
 
+    // Bind the blocking face-analysis task to its cancel flag (sc-8804, F-003): every `update_job`/
+    // `heartbeat` `?` below returns early on a transient POST failure or a 409 (stale-sweep
+    // reclaim); on that early return this guard trips `cancel` and aborts the analysis thread
+    // instead of leaving it running on a job nobody is consuming. `cancel` is kept alongside (it's
+    // `Clone`) for the in-loop cancel poll; the guard drives only the drop-time teardown.
+    let guard = CancelJoinGuard::new(cancel.clone(), blocking);
     let mut interval = tokio::time::interval(progress_report_interval(settings));
     interval.set_missed_tick_behavior(MissedTickBehavior::Delay);
     loop {
@@ -317,7 +323,9 @@ pub(crate) async fn run_dataset_face_analysis_job(
         }
     }
 
-    let records = blocking
+    // Loop exited cleanly (channel closed) — reclaim the handle (disarming the drop-guard) and join.
+    let records = guard
+        .into_handle()
         .await
         .map_err(|error| task_join_error("dataset face analysis task join", error))??;
 

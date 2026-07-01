@@ -3690,6 +3690,181 @@ async fn begin_training_cancel_trips_flag_and_stays_non_terminal() {
     );
 }
 
+// sc-8804 (F-003) — the shared cancel-and-join guard. Every streaming job consumer binds its
+// blocking GPU/training task to its `CancelFlag` through `CancelJoinGuard`; on any early return
+// (a transient progress/heartbeat POST failure or a 409 stale-sweep reclaim propagating through
+// `?`) the guard must trip the flag AND abort the task, so the GPU work stops instead of leaking
+// alongside the next claimed job. The happy path reclaims the handle via `into_handle`, disarming
+// the guard so a clean completion never aborts.
+
+/// Dropping the guard early (the `?`-return shape) trips the engine cancel flag and aborts the
+/// still-running task — the core F-003 defect, tested in isolation.
+#[tokio::test]
+async fn cancel_join_guard_trips_flag_and_aborts_on_early_drop() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    let cancel = gen_core::CancelFlag::new();
+    // A task that would run "forever" unless aborted; it flips `ran_to_completion` only if it ever
+    // reaches its end. We hold a cancel-flag clone the task polls so a cooperative bail is possible,
+    // but the guard's abort is what must stop a task that never checks.
+    let completed = Arc::new(AtomicBool::new(false));
+    let task_completed = completed.clone();
+    let task_cancel = cancel.clone();
+    let handle = tokio::task::spawn(async move {
+        for _ in 0..1_000 {
+            if task_cancel.is_cancelled() {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        task_completed.store(true, Ordering::SeqCst);
+    });
+
+    {
+        let _guard: crate::CancelJoinGuard<gen_core::CancelFlag, ()> =
+            crate::CancelJoinGuard::new(cancel.clone(), handle);
+        // Simulate the early `?` return: the guard goes out of scope here without `into_handle`.
+    }
+
+    assert!(
+        cancel.is_cancelled(),
+        "dropping the guard early must trip the engine cancel flag"
+    );
+    // The abort tears the task down; give the runtime a tick to reap it, then confirm it never
+    // ran to completion (i.e. it was stopped, not left running).
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    assert!(
+        !completed.load(Ordering::SeqCst),
+        "the guard must abort the task on early drop — it must not run to completion"
+    );
+}
+
+/// Reclaiming the handle via `into_handle` disarms the guard: a clean completion neither cancels
+/// nor aborts, and the task's value is returned intact.
+#[tokio::test]
+async fn cancel_join_guard_into_handle_disarms_the_guard() {
+    let cancel = gen_core::CancelFlag::new();
+    let handle = tokio::task::spawn(async { 42_u32 });
+    let guard: crate::CancelJoinGuard<gen_core::CancelFlag, u32> =
+        crate::CancelJoinGuard::new(cancel.clone(), handle);
+    let value = guard.into_handle().await.expect("task joins cleanly");
+    assert_eq!(value, 42, "the reclaimed handle yields the task's value");
+    assert!(
+        !cancel.is_cancelled(),
+        "a disarmed guard must never trip the cancel flag on the success path"
+    );
+}
+
+/// A stub whose worker-heartbeat POST fails (a 409/stale-sweep-class error), while its job GET
+/// reports no cancel. `run_blocking_with_heartbeat` posts a `Busy` heartbeat every interval; the
+/// failing POST propagates through `?`, which must trip the cancel flag and abort the long task
+/// via the guard rather than returning while the task keeps running (sc-8804, F-003).
+async fn spawn_failing_heartbeat_stub() -> String {
+    async fn job_route(axum::extract::Path(job_id): axum::extract::Path<String>) -> Response {
+        Json(job_snapshot_json(&job_id, false)).into_response()
+    }
+    async fn progress_route(axum::extract::Path(job_id): axum::extract::Path<String>) -> Response {
+        Json(job_snapshot_json(&job_id, false)).into_response()
+    }
+    async fn heartbeat_route() -> Response {
+        // Mimic a 409 the stale-sweep produces once the job is reclaimed — a non-transport API
+        // error that heartbeat() propagates (it swallows only transport errors).
+        (AxumStatusCode::CONFLICT, "stub heartbeat conflict").into_response()
+    }
+    let app = Router::new()
+        .route("/api/v1/jobs/:job_id", get(job_route))
+        .route("/api/v1/jobs/:job_id/progress", post(progress_route))
+        .route(
+            "/api/v1/workers/:worker_id/heartbeat",
+            post(heartbeat_route),
+        )
+        .with_state(());
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("listener binds");
+    let address = listener.local_addr().expect("listener has address");
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.expect("stub serves");
+    });
+    format!("http://{address}")
+}
+
+#[tokio::test]
+async fn run_blocking_with_heartbeat_aborts_task_when_heartbeat_post_fails() {
+    let base_url = spawn_failing_heartbeat_stub().await;
+    let mut settings = test_settings(base_url.clone(), None);
+    settings.api_url = base_url;
+    // Shortest interval the clamp allows, so the failing heartbeat fires quickly.
+    settings.heartbeat_seconds = 5;
+    let api = ApiClient::new(&settings);
+
+    let cancel = gen_core::CancelFlag::new();
+    let task_cancel = cancel.clone();
+    // A long "GPU" task that only stops if its cancel flag is tripped — modeling a denoise/training
+    // run that would otherwise keep burning the device after the consumer returns.
+    let task = tokio::task::spawn(async move {
+        for _ in 0..600 {
+            if task_cancel.is_cancelled() {
+                return Ok::<(), WorkerError>(());
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        Ok(())
+    });
+
+    let result = crate::run_blocking_with_heartbeat(
+        &api,
+        &settings,
+        "job-1",
+        Some(cancel.clone()),
+        "canceled",
+        "f003 test task",
+        task,
+    )
+    .await;
+
+    assert!(
+        result.is_err(),
+        "the failing heartbeat POST must propagate as an error"
+    );
+    assert!(
+        cancel.is_cancelled(),
+        "on the POST-failure early return the guard must trip the task's cancel flag (sc-8804)"
+    );
+}
+
+/// sc-8804 (F-003) — the child-process leg: `run_ffmpeg` (media_jobs) and the `hf` CLI download
+/// (model_jobs) build their `tokio::process::Command` with `kill_on_drop(true)` so a
+/// heartbeat/cancel `?` early return reaps the child instead of leaving ffmpeg/`hf` writing partial
+/// files. A tokio child is NOT reaped on drop by default; this test locks the mechanism the fix
+/// relies on — a `kill_on_drop(true)` child is torn down when its handle is dropped.
+#[cfg(unix)]
+#[tokio::test]
+async fn kill_on_drop_reaps_a_dropped_child() {
+    use tokio::process::Command;
+    // A child that would run for a minute unless killed. Capture its PID, drop the handle, then
+    // confirm the OS no longer has it (kill(pid, 0) fails with ESRCH once reaped).
+    let child = Command::new("sleep")
+        .arg("60")
+        .kill_on_drop(true)
+        .spawn()
+        .expect("spawn sleep");
+    let pid = child.id().expect("child has a pid");
+    drop(child);
+    // Give the runtime a moment to send the kill and reap the zombie.
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    // `kill -0` probes existence without signaling; a reaped/gone process yields a non-zero status.
+    let alive = std::process::Command::new("kill")
+        .arg("-0")
+        .arg(pid.to_string())
+        .status()
+        .expect("run kill -0")
+        .success();
+    assert!(
+        !alive,
+        "a kill_on_drop(true) child must be reaped when its handle is dropped (pid {pid} still alive)"
+    );
+}
+
 /// sc-4176 — on macOS an MLX-routed model whose weights don't resolve must
 /// fail loudly with a precise re-download error instead of silently completing
 /// with procedural stub output; non-engine model ids keep the stub path.

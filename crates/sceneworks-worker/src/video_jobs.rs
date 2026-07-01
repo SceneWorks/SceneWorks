@@ -2743,7 +2743,12 @@ async fn generate_video(
                 "video load failed",
                 move |generator| {
                     let mut on_progress = |progress: Progress| {
-                        let _ = tx.blocking_send(progress);
+                        // A closed channel means the consumer loop returned early (POST failure /
+                        // 409); trip the engine flag so the denoise bails instead of running unheard
+                        // (sc-8804, F-003 — the swallowed-closed-channel leak).
+                        if tx.blocking_send(progress).is_err() {
+                            cancel.cancel();
+                        }
                     };
                     run_loaded_video_generation(generator, input, &cancel, &mut on_progress)
                 },
@@ -2752,6 +2757,13 @@ async fn generate_video(
         })
     };
 
+    // Bind the blocking generation task to its cancel flag (sc-8804, F-003): every `update_job`/
+    // `heartbeat` `?` in the loop below returns early on a transient POST failure or a 409
+    // (stale-sweep reclaim); on that early return this guard trips the engine `CancelFlag` and
+    // aborts the still-running denoise instead of leaving it burning GPU memory alongside the next
+    // claimed job. The stall/abandon watchdog and final join reach through `guard.handle_mut()` /
+    // `guard.into_handle()`. `cancel` is kept alongside (it's `Clone`) for the in-loop pollers.
+    let mut guard = CancelJoinGuard::new(cancel.clone(), blocking);
     let mut canceled = false;
     // Set when the watchdog (not the user) tripped, so the job is failed with a stall error
     // rather than reported as a clean user cancellation.
@@ -2860,10 +2872,12 @@ async fn generate_video(
             "engine did not respond to cancellation within the grace window — exiting the worker \
              so the supervisor can recover the wedged GPU task"
         );
-        blocking.abort();
+        guard.handle_mut().abort();
         std::process::exit(70);
     }
-    let result = blocking
+    // Loop exited cleanly — reclaim the handle (disarming the drop-guard) and join the finished task.
+    let result = guard
+        .into_handle()
         .await
         .map_err(|error| task_join_error("video task join", error))?;
     if stalled {

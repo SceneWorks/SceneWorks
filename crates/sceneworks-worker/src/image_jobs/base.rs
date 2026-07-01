@@ -2975,6 +2975,13 @@ async fn consume_gen_events(
             );
         }
     };
+    // Bind the blocking generation task to its cancel flag (sc-8804, F-003): every `update_job`/
+    // `heartbeat` `?` in the loop below returns early on a transient POST failure or a 409
+    // (stale-sweep reclaim); on that early return this guard trips the engine `CancelFlag` and
+    // aborts the still-running denoise instead of leaving it burning GPU memory alongside the next
+    // claimed job. `cancel` is kept alongside (it's `Clone`) for the in-loop `begin_image_cancel`
+    // poller; the guard drives only the drop-time teardown.
+    let guard = CancelJoinGuard::new(cancel.clone(), blocking);
     // Heartbeat + cancel-poll on a fixed interval, not only when the blocking
     // thread emits an event. The cold model-load phase (multi-GB load + quantize)
     // emits nothing, so without an interval arm the worker reports no Busy
@@ -3111,7 +3118,9 @@ async fn consume_gen_events(
         }
     }
 
-    let task_result = blocking
+    // Loop exited cleanly — reclaim the handle (disarming the drop-guard) and join the finished task.
+    let task_result = guard
+        .into_handle()
         .await
         .map_err(|error| task_join_error("generation task join", error))?;
     if canceled {

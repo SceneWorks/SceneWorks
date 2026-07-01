@@ -192,11 +192,19 @@ pub(crate) async fn run_training_caption_job(
             request.prompt = request.options.custom_prompt.clone();
             let mut on_progress = |progress: Progress| {
                 if let Progress::Step { current, total } = progress {
-                    let _ = tx.blocking_send(CaptionEvent::Step {
-                        index,
-                        current,
-                        total,
-                    });
+                    // A closed channel means the consumer loop returned early (POST failure / 409);
+                    // trip the engine flag so the captioner bails instead of running unheard
+                    // (sc-8804, F-003 — the swallowed-closed-channel leak).
+                    if tx
+                        .blocking_send(CaptionEvent::Step {
+                            index,
+                            current,
+                            total,
+                        })
+                        .is_err()
+                    {
+                        blocking_cancel.cancel();
+                    }
                 }
             };
             let output = captioner
@@ -219,6 +227,12 @@ pub(crate) async fn run_training_caption_job(
         Ok(())
     });
 
+    // Bind the blocking captioner task to its cancel flag (sc-8804, F-003): every `update_job`/
+    // `heartbeat` `?` below returns early on a transient POST failure or a 409 (stale-sweep
+    // reclaim); on that early return this guard trips `cancel` and aborts the captioner thread
+    // instead of leaving it running on a job nobody is consuming. `cancel` is kept alongside (it's
+    // `Clone`) for the in-loop cancel poll; the guard drives only the drop-time teardown.
+    let guard = CancelJoinGuard::new(cancel.clone(), blocking);
     let mut interval = tokio::time::interval(progress_report_interval(settings));
     interval.set_missed_tick_behavior(MissedTickBehavior::Delay);
     let mut captions = Vec::with_capacity(items.len());
@@ -280,7 +294,9 @@ pub(crate) async fn run_training_caption_job(
         }
     }
 
-    blocking
+    // Loop exited cleanly (channel closed) — reclaim the handle (disarming the drop-guard) and join.
+    guard
+        .into_handle()
         .await
         .map_err(|error| task_join_error("caption task join", error))??;
 

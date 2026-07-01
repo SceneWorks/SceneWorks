@@ -62,8 +62,8 @@ use serde_json::{json, Value};
 
 use crate::{
     cancel_requested_peek, fresh_asset_id, heartbeat, mark_job_canceled, now_rfc3339,
-    progress_payload, progress_report_interval, task_join_error, update_job, ApiClient, Settings,
-    WorkerError, WorkerResult,
+    progress_payload, progress_report_interval, task_join_error, update_job, ApiClient,
+    CancelJoinGuard, Settings, WorkerError, WorkerResult,
 };
 use sceneworks_core::contracts::{JobSnapshot, JobStatus, JsonObject, ProgressStage, WorkerStatus};
 use sceneworks_core::project_store::ProjectStore;
@@ -685,18 +685,25 @@ async fn run_upscale_with_heartbeat<R>(
     settings: &Settings,
     job_id: &str,
     cancel: CancelFlag,
-    mut task: tokio::task::JoinHandle<WorkerResult<R>>,
+    task: tokio::task::JoinHandle<WorkerResult<R>>,
 ) -> WorkerResult<R>
 where
     R: Send + 'static,
 {
+    // Bind the blocking upscale task to its cancel flag (sc-8804, F-003): the `heartbeat`/
+    // `update_job` `?` in the interval arm below returns early on a transient POST failure or a
+    // 409 (stale-sweep reclaim); on that early return this guard trips the engine `CancelFlag` and
+    // aborts the still-running diffusion instead of leaking it alongside the next claimed job.
+    let mut guard = CancelJoinGuard::new(cancel.clone(), task);
     let mut canceled = false;
     let mut interval = tokio::time::interval(progress_report_interval(settings));
     interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     loop {
         tokio::select! {
-            result = &mut task => {
+            result = &mut *guard.handle_mut() => {
                 let value = result.map_err(|error| task_join_error("upscale task", error))??;
+                // Success: disarm the guard so a clean completion never aborts.
+                guard.disarm();
                 if canceled {
                     mark_job_canceled(api, job_id, CANCEL_MESSAGE).await?;
                     return Err(WorkerError::Canceled(CANCEL_MESSAGE.to_owned()));

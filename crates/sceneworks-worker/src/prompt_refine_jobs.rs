@@ -856,7 +856,15 @@ pub(crate) async fn run_prompt_refine_job(
             // generated tokens against the max-new-tokens budget.
             let mut on_event = |event: StreamEvent| {
                 if let StreamEvent::Token { index, .. } = event {
-                    let _ = tx.blocking_send((index as u32 + 1, max_new_tokens));
+                    // A closed channel means the consumer loop returned early (POST failure / 409);
+                    // trip the engine flag so generation bails instead of running unheard (sc-8804,
+                    // F-003 — the swallowed-closed-channel leak).
+                    if tx
+                        .blocking_send((index as u32 + 1, max_new_tokens))
+                        .is_err()
+                    {
+                        blocking_cancel.cancel();
+                    }
                 }
             };
             let output = refiner.generate(&request, &mut on_event).map_err(|error| {
@@ -868,6 +876,12 @@ pub(crate) async fn run_prompt_refine_job(
         Ok(text)
     });
 
+    // Bind the blocking LLM task to its cancel flag (sc-8804, F-003): every `update_job`/
+    // `heartbeat` `?` below returns early on a transient POST failure or a 409 (stale-sweep
+    // reclaim); on that early return this guard trips `cancel` and aborts the generation thread
+    // instead of leaving it running on a job nobody is consuming. `cancel` is kept alongside (it's
+    // `Clone`) for the in-loop cancel poll; the guard drives only the drop-time teardown.
+    let guard = CancelJoinGuard::new(cancel.clone(), blocking);
     let mut interval = tokio::time::interval(progress_report_interval(settings));
     interval.set_missed_tick_behavior(MissedTickBehavior::Delay);
     loop {
@@ -908,7 +922,9 @@ pub(crate) async fn run_prompt_refine_job(
         }
     }
 
-    let raw = blocking
+    // Loop exited cleanly (channel closed) — reclaim the handle (disarming the drop-guard) and join.
+    let raw = guard
+        .into_handle()
         .await
         .map_err(|error| task_join_error("prompt refine task join", error))??;
     // A caption task isolates the JSON object (the web parses + validates it; image_caption validates
