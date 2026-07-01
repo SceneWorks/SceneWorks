@@ -376,28 +376,35 @@ fn is_dense_te_tier(request: &ImageRequest) -> bool {
 /// when it opts into Q8 (`> 4`), else the default `q4/`. Falls back through q4 → q8 → bf16 → `root`
 /// so a partially-downloaded turnkey surfaces as a load error rather than a silent half-load.
 ///
-/// Tier presence is filename-agnostic: a tier is "present" when its `transformer/` holds any
+/// Tier presence is filename-agnostic: a tier is "present" when its backbone component holds any
 /// `*.safetensors` (packed single-file OR a `*-00001-of-*.safetensors` shard) or a `*.index.json`
-/// (dense sharded). This covers every backbone regardless of its packed filename
+/// (dense sharded). The backbone component is `transformer/` for the DiT turnkeys
+/// (flux/qwen/z-image/sd3.5) or `unet/` for the SDXL-family turnkeys (sc-8746) — SDXL packs its UNet
+/// under `unet/`, never `transformer/`. This covers every backbone regardless of its packed filename
 /// (`diffusion_pytorch_model.safetensors`, `model.safetensors`, …), so a new model needs only a
-/// [`STANDARD_TIER_MODELS`] entry, no bespoke resolver.
+/// [`STANDARD_TIER_MODELS`] entry (or `mlx.standardTierLayout`), no bespoke resolver.
 fn standard_tier_subdir(root: &Path, request: &ImageRequest) -> PathBuf {
     let bits = request
         .advanced
         .get("mlxQuantize")
         .and_then(|v| v.as_i64().or_else(|| v.as_str()?.trim().parse().ok()));
-    let present = |name: &str| -> Option<PathBuf> {
-        let dir = root.join(name);
-        let transformer = dir.join("transformer");
-        let Ok(entries) = std::fs::read_dir(&transformer) else {
-            return None;
+    // A component dir "has weights" when it holds a packed/dense safetensors or a shard index.
+    let component_has_weights = |dir: &Path| -> bool {
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return false;
         };
-        let has_weights = entries.flatten().any(|entry| {
+        entries.flatten().any(|entry| {
             let file = entry.file_name();
             let name = file.to_string_lossy();
             name.ends_with(".safetensors") || name.ends_with(".index.json")
-        });
-        has_weights.then_some(dir)
+        })
+    };
+    let present = |name: &str| -> Option<PathBuf> {
+        let dir = root.join(name);
+        // DiT turnkeys pack the backbone under `transformer/`; SDXL-family turnkeys under `unet/`.
+        let has_backbone = component_has_weights(&dir.join("transformer"))
+            || component_has_weights(&dir.join("unet"));
+        has_backbone.then_some(dir)
     };
     // bits<=0 (advanced.mlxQuantize: 0 / "none") → bf16; bits>4 → q8; else the q4 default.
     let preferred = match bits {
@@ -3280,6 +3287,101 @@ mod standard_tier_tests {
             standard_tier_subdir(empty.path(), &request(json!({}))),
             empty.path().to_path_buf()
         );
+    }
+
+    /// sc-8746: the SDXL-family turnkeys pack their backbone under `unet/`, not `transformer/`, so
+    /// [`standard_tier_subdir`]'s probe must recognize a `unet/` component as a present tier.
+    #[test]
+    fn resolves_sdxl_unet_backbone_tiers() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        let seed_unet = |tier: &str| {
+            let dir = root.join(tier).join("unet");
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(dir.join("diffusion_pytorch_model.safetensors"), b"x").unwrap();
+        };
+        seed_unet("q4");
+        seed_unet("q8");
+        seed_unet("bf16");
+        // Default q4, q8 selection, bf16 opt-out all resolve to the unet-backed tier subdir.
+        assert_eq!(
+            standard_tier_subdir(root, &request(json!({}))),
+            root.join("q4")
+        );
+        assert_eq!(
+            standard_tier_subdir(root, &request(json!({ "mlxQuantize": 8 }))),
+            root.join("q8")
+        );
+        assert_eq!(
+            standard_tier_subdir(root, &request(json!({ "mlxQuantize": 0 }))),
+            root.join("bf16")
+        );
+    }
+
+    /// sc-8746 on-device verify (MLX): drive the ACTUAL worker seam against a downloaded SceneWorks
+    /// realvisxl-mlx turnkey — `standard_tier_subdir` resolves the `q4/` subdir from the tier root,
+    /// then `gen_core::load("sdxl", …)` with `Quant::Q4` loads the packed tier and renders. Asserts a
+    /// non-degenerate image (per-pixel std above the all-black/NaN floor). `#[ignore]`d — run by hand
+    /// on a Mac with the tier downloaded:
+    /// ```text
+    /// hf download SceneWorks/realvisxl-mlx --include "q4/*" --local-dir /tmp/realvisxl-q4
+    /// SDXL_TIER_ROOT=/tmp/realvisxl-q4 cargo test -p sceneworks-worker --lib \
+    ///   sdxl_realvisxl_q4_tier_mlx_smoke -- --ignored --nocapture
+    /// ```
+    #[cfg(target_os = "macos")]
+    #[test]
+    #[ignore = "real-weight MLX smoke; needs a downloaded SceneWorks/realvisxl-mlx q4 tier (SDXL_TIER_ROOT)"]
+    fn sdxl_realvisxl_q4_tier_mlx_smoke() {
+        use gen_core::{GenerationOutput, GenerationRequest, LoadSpec, Quant, WeightsSource};
+
+        let root = PathBuf::from(
+            std::env::var("SDXL_TIER_ROOT")
+                .expect("set SDXL_TIER_ROOT to the downloaded realvisxl-mlx tier root")
+                .trim(),
+        );
+        // The worker resolution: a `realvisxl` request (q4 default, no mlxQuantize) must land on q4/.
+        let req = ImageRequest::from_payload(
+            json!({ "model": "realvisxl", "advanced": {} })
+                .as_object()
+                .unwrap(),
+        );
+        let tier = standard_tier_subdir(&root, &req);
+        assert_eq!(tier, root.join("q4"), "worker must resolve the q4 tier subdir");
+        assert!(
+            tier.join("model_index.json").is_file() && tier.join("unet").is_dir(),
+            "q4 tier subdir missing turnkey layout (model_index.json + unet/): {}",
+            tier.display()
+        );
+
+        // Load the packed q4 tier through the MLX `sdxl` engine (Quant::Q4 = harmless no-op on the
+        // already-packed weights) and render a 768x768 image.
+        let spec = LoadSpec::new(WeightsSource::Dir(tier.clone())).with_quant(Quant::Q4);
+        let generator = gen_core::load("sdxl", &spec).expect("load MLX sdxl provider on q4 tier");
+        let gen_req = GenerationRequest {
+            prompt: "a photorealistic portrait of a red fox in a snowy forest, golden hour"
+                .to_owned(),
+            width: 768,
+            height: 768,
+            count: 1,
+            seed: Some(42),
+            steps: Some(20),
+            guidance: Some(7.0),
+            ..Default::default()
+        };
+        let output = generator
+            .generate(&gen_req, &mut |_p| {})
+            .expect("sdxl q4 tier generate");
+        let image = match output {
+            GenerationOutput::Images(mut images) => images.pop().expect("no image returned"),
+            other => panic!("expected Images output, got {other:?}"),
+        };
+        // Cheap degenerate-floor check: an all-black / NaN-clamped decode collapses toward std 0.
+        let n = image.pixels.len() as f64;
+        assert!(n > 0.0, "empty image buffer");
+        let mean = image.pixels.iter().map(|&p| p as f64).sum::<f64>() / n;
+        let std = (image.pixels.iter().map(|&p| (p as f64 - mean).powi(2)).sum::<f64>() / n).sqrt();
+        println!("[sc-8746 smoke] realvisxl q4 tier render {}x{} std {std:.2}", image.width, image.height);
+        assert!(std > 5.0, "render looks degenerate (std {std:.2}) — possible NaN / all-black decode");
     }
 
     /// A model built with a manifest entry so `uses_standard_tier_layout` / `is_dense_te_tier`

@@ -1111,9 +1111,9 @@ def test_create_image_adapter_routes_z_image_turbo():
     assert adapter.id == "z_image_diffusers"
 
 def test_sdxl_manifest_has_mlx_block():
-    # sc-1975: sdxl carries an mlx block (no `limits` override here — Apple's
-    # SDXL schedule already matches the torch EulerDiscrete default, and
-    # there's no per-model sampler menu in the sdxl manifest entry to limit).
+    # sdxl carries an mlx block (no `limits` override here — the MLX SDXL schedule
+    # matches the torch EulerDiscrete default, and there's no per-model sampler menu
+    # in the sdxl manifest entry to limit).
     import re
 
     _, find_entry_block, find_mlx_block = _manifest_brace_walker()
@@ -1121,13 +1121,33 @@ def test_sdxl_manifest_has_mlx_block():
     mlx_block = find_mlx_block(block)
     mem_match = re.search(r'"minMemoryGb"\s*:\s*(\d+)', mlx_block)
     assert mem_match and int(mem_match.group(1)) > 0, (
-        "sdxl mlx.minMemoryGb must be a positive int (sc-1975)"
+        "sdxl mlx.minMemoryGb must be a positive int"
     )
-    # No quantize key in v1 — Apple's Q8 recipe breaks SDXL base 1.0 (see
-    # sc-1975 spike finding). bf16 is the only supported precision.
-    assert '"quantize"' not in mlx_block, (
-        "sdxl mlx block must not declare a quantize default in v1 (sc-1975: "
-        "Apple's Q8 recipe breaks on SDXL base 1.0; defer until calibration lands)"
+    # sc-1975 originally deferred a quantize default because APPLE's vendored
+    # `mlx-examples` Python Q8 recipe produced an ALL-ZERO decode on SDXL base 1.0.
+    # That guard is now OBSOLETE (evidence-based flip, not silencing):
+    #   * sc-3060 RETIRED the in-process vendored Python MLX-SDXL adapter — on the
+    #     Python worker, SDXL always routes the torch adapter now. MLX-SDXL is the
+    #     Rust `mlx-gen-sdxl` path.
+    #   * mlx-gen PR #62 (sc-2641) FIXED + MERGED SDXL quantization: "SDXL Q4/Q8
+    #     quantization — both hold parity on base-1.0."
+    #   * sc-8746 (epic 8506, Group-B) ships pre-quantized q4/q8/bf16 tiers via the
+    #     Rust standard_tier_subdir / resolve_quant path — the exact seam that reads
+    #     this `mlx.quantize` value (NOT the retired Apple adapter).
+    # On-device close (this Mac, MLX): SceneWorks/sdxl-base-mlx q8 tier rendered a
+    # coherent 768x768 (mean 97.65, std 61.43, NOT all-zero — the retired Apple bug's
+    # exact signature), verified by crates/sceneworks-worker/src/sdxl_base_q8_mlx_smoke.rs.
+    # So the mlx block SHOULD now carry the tier/quantize config: q4 default (packed),
+    # q8 + bf16 hosted + selectable via advanced.mlxQuantize.
+    quant_match = re.search(r'"quantize"\s*:\s*(\d+)', mlx_block)
+    assert quant_match and int(quant_match.group(1)) in {3, 4, 5, 6, 8}, (
+        "sdxl mlx.quantize must be a supported quant level — sdxl now ships "
+        "pre-quantized Q4/Q8/bf16 tiers via the Rust mlx-gen path (sc-2641 parity + "
+        "sc-8746 tiers; sc-3060 retired the old Apple MLX adapter that sc-1975 gated on)"
+    )
+    # sc-8508: the turnkey opts into the q4/q8/bf16 standard tier layout.
+    assert '"standardTierLayout"' in mlx_block and "true" in mlx_block, (
+        "sdxl mlx block must declare standardTierLayout for the packed-tier turnkey (sc-8746/sc-8508)"
     )
 
 def test_sdxl_auto_dispatch_uses_torch_adapter_on_python_worker(monkeypatch):

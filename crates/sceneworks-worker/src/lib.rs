@@ -165,6 +165,12 @@ mod flux1_control_mlx_smoke;
 // isolation.
 #[cfg(all(test, target_os = "macos"))]
 mod sd3_5_mlx_smoke;
+// Real-weight MLX smoke for the SDXL base 1.0 Q8 worker lane (sc-8746, epic 8506 Group-B). Test-only +
+// macOS-only; drives `gen_core::load("sdxl")` with a Q8 LoadSpec against the packed `q8/` turnkey subdir.
+// Closes the stale sc-1975 Q8-on-SDXL loop on-device: asserts the fixed mlx-gen Q8 path (sc-2641) renders
+// non-degenerate AND specifically NOT all-zero (the retired Apple recipe's exact failure signature).
+#[cfg(all(test, target_os = "macos"))]
+mod sdxl_base_q8_mlx_smoke;
 // The DWPose skeleton rasterizer is consumed only by the macOS Z-Image strict-pose
 // control path; on Mac AND the off-Mac candle DWPose lane (sc-5496) it backs the
 // `pose_jobs` skeleton render; on a candle-disabled box off Mac it still builds +

@@ -245,7 +245,10 @@ pub(crate) const MODEL_TABLE: &[ModelRow] = &[
     ModelRow {
         sceneworks_id: "sdxl",
         engine_id: "sdxl",
-        default_repo: "stabilityai/stable-diffusion-xl-base-1.0",
+        // SceneWorks pre-built quant-matrix turnkey (sc-8746, epic 8506, Group-B): standard
+        // q4/q8/bf16 subdirs (standard_tier_subdir) — UNet + both CLIP text encoders packed,
+        // VAE dense. Public/ungated re-host of stabilityai/stable-diffusion-xl-base-1.0.
+        default_repo: "SceneWorks/sdxl-base-mlx",
         default_steps: 30,
         default_guidance: 7.0,
         adapter_label: "mlx_sdxl",
@@ -253,7 +256,9 @@ pub(crate) const MODEL_TABLE: &[ModelRow] = &[
     ModelRow {
         sceneworks_id: "realvisxl",
         engine_id: "sdxl",
-        default_repo: "SG161222/RealVisXL_V5.0",
+        // SceneWorks pre-built quant-matrix turnkey (sc-8746, epic 8506, Group-B): standard
+        // q4/q8/bf16 subdirs (standard_tier_subdir). Re-host of SG161222/RealVisXL_V5.0.
+        default_repo: "SceneWorks/realvisxl-mlx",
         default_steps: 30,
         default_guidance: 7.0,
         adapter_label: "mlx_sdxl",
@@ -267,7 +272,9 @@ pub(crate) const MODEL_TABLE: &[ModelRow] = &[
     ModelRow {
         sceneworks_id: "realvisxl_lightning",
         engine_id: "sdxl",
-        default_repo: "SG161222/RealVisXL_V5.0_Lightning",
+        // SceneWorks pre-built quant-matrix turnkey (sc-8746, epic 8506, Group-B): standard
+        // q4/q8/bf16 subdirs (standard_tier_subdir). Re-host of SG161222/RealVisXL_V5.0_Lightning.
+        default_repo: "SceneWorks/realvisxl-lightning-mlx",
         default_steps: 5,
         default_guidance: 1.0,
         adapter_label: "mlx_sdxl",
@@ -1269,6 +1276,29 @@ mod tests {
         assert_ne!(base.default_repo, turbo.default_repo);
         assert_ne!(base.default_steps, turbo.default_steps);
         assert_ne!(base.default_guidance, turbo.default_guidance);
+    }
+
+    // sc-8746 (epic 8506, Group-B): the SDXL-family rows point at the SceneWorks pre-built
+    // quant-matrix turnkey repos (standard q4/q8/bf16 subdirs), NOT the original dense sources.
+    // Each engine still shares the `sdxl` engine id; only the default_repo swings to the turnkey.
+    #[cfg(any(
+        target_os = "macos",
+        all(not(target_os = "macos"), feature = "backend-candle")
+    ))]
+    #[test]
+    fn sdxl_family_rows_point_at_sceneworks_turnkeys() {
+        for (id, repo) in [
+            ("sdxl", "SceneWorks/sdxl-base-mlx"),
+            ("realvisxl", "SceneWorks/realvisxl-mlx"),
+            ("realvisxl_lightning", "SceneWorks/realvisxl-lightning-mlx"),
+        ] {
+            let row = MODEL_TABLE
+                .iter()
+                .find(|row| row.sceneworks_id == id)
+                .unwrap_or_else(|| panic!("{id} MODEL_TABLE row"));
+            assert_eq!(row.engine_id, "sdxl", "{id} shares the sdxl engine");
+            assert_eq!(row.default_repo, repo, "{id} default_repo → turnkey");
+        }
     }
 
     #[test]
