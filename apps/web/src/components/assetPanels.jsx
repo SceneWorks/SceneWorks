@@ -1,6 +1,6 @@
 import React from "react";
 import { isAbortError } from "../api.js";
-import { AssetMedia, assetCanRenderAsVideo, assetUrl } from "./assetMedia.jsx";
+import { AssetMedia, assetCanRenderAsVideo, assetUrl, suppressThumbnailContextMenu } from "./assetMedia.jsx";
 import { DocumentView } from "./DocumentView.jsx";
 import { Icon } from "./Icons.jsx";
 import { LikenessBadge } from "./LikenessBadge.jsx";
@@ -306,6 +306,7 @@ export function AssetGrid({ assets, onPreview, selectedAsset, setSelectedAssetId
           <button
             className={selectedAsset?.id === asset.id ? "asset-tile active" : "asset-tile"}
             onClick={() => setSelectedAssetId(asset.id)}
+            onContextMenu={suppressThumbnailContextMenu}
             onDoubleClick={() => onPreview(asset)}
             type="button"
           >

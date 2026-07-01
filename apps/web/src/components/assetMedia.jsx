@@ -32,9 +32,11 @@ export function assetCanRenderAsVideo(asset) {
 // stopPropagation of clicks — so left-click selection / open-preview stay intact.
 // Applied at the shared AssetThumbnail seam so every grid that renders it (Queue's
 // WorkerProgressCard, pickers, studios) inherits the suppression from one place.
-// The full-size AssetMedia renderer is intentionally left alone: it gets its own
-// custom right-click menu in sc-8729.
-function suppressThumbnailContextMenu(event) {
+// The Library grid renders AssetMedia directly (assetPanels.jsx), so AssetGrid
+// imports this and attaches it at the tile-cell level. The full-size
+// FullscreenPreview renderer is intentionally left alone: it gets its own custom
+// right-click menu in sc-8729.
+export function suppressThumbnailContextMenu(event) {
   event.preventDefault();
 }
 

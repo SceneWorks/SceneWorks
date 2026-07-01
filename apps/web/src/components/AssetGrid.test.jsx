@@ -68,4 +68,19 @@ describe("AssetGrid multi-select (sc-6112)", () => {
     await act(async () => tiles()[0].click());
     expect(setSelectedAssetId).toHaveBeenCalledWith("a");
   });
+
+  it("suppresses the native context menu on a Library grid thumbnail cell (sc-8731) without breaking selection", async () => {
+    const setSelectedAssetId = vi.fn();
+    await act(() => {
+      root.render(<AssetGrid assets={assets} onPreview={vi.fn()} selectedAsset={null} setSelectedAssetId={setSelectedAssetId} />);
+    });
+    const tile = tiles()[0];
+    const event = new MouseEvent("contextmenu", { bubbles: true, cancelable: true });
+    tile.dispatchEvent(event);
+    expect(event.defaultPrevented).toBe(true);
+
+    // Suppressing the contextmenu must not disturb the left-click select flow.
+    await act(async () => tile.click());
+    expect(setSelectedAssetId).toHaveBeenCalledWith("a");
+  });
 });
