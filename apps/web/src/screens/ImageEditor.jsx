@@ -1,4 +1,5 @@
 import React, { useCallback, useEffect, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import { Stage, Layer, Image as KonvaImage, Line, Rect, Transformer } from "react-konva";
 import { apiFetch } from "../api.js";
 import { terminalStatuses } from "../jobTypes.js";
@@ -3872,7 +3873,12 @@ export function ImageEditor() {
         />
       ) : null}
 
-      {newLayoutOpen ? (
+      {/* Portaled to document.body: the backdrop is `position: fixed`, which only
+          anchors to the viewport when no ancestor establishes a containing block.
+          Rendering it inline under the editor section left it vulnerable to being
+          trapped inside a transformed/filtered ancestor (see Modal.jsx). */}
+      {newLayoutOpen
+        ? createPortal(
         <div
           className="image-editor-modal-backdrop"
           onClick={() => setNewLayoutOpen(false)}
@@ -3922,8 +3928,10 @@ export function ImageEditor() {
               </button>
             </div>
           </div>
-        </div>
-      ) : null}
+        </div>,
+            document.body,
+          )
+        : null}
     </section>
   );
 }
