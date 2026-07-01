@@ -1092,6 +1092,33 @@ mod tests {
         }
     }
 
+    /// sc-8756: the GPU memory cap + telemetry commands (epic 7819) are invoked from the
+    /// same API-served UI at the remote (`http://127.0.0.1:*`) origin as the asset commands
+    /// above, so each likewise needs an `allow-<kebab-command>` grant in
+    /// `capabilities/default.json` or the Tauri ACL silently rejects the invoke in the
+    /// packaged app — the GPU memory slider and live telemetry readout in Settings would
+    /// fail at runtime (the unit tests mock `invoke`, so they can't catch a missing grant).
+    /// Same command↔ACL drift bug family as sc-8753.
+    #[test]
+    fn gpu_settings_commands_are_granted_in_the_remote_capability() {
+        let capability = include_str!("../capabilities/default.json");
+        let manifest: serde_json::Value =
+            serde_json::from_str(capability).expect("capabilities/default.json parses");
+        let permissions = manifest["permissions"]
+            .as_array()
+            .expect("permissions is an array")
+            .iter()
+            .filter_map(|value| value.as_str())
+            .collect::<Vec<_>>();
+        for permission in ["allow-set-gpu-memory-limit", "allow-get-gpu-telemetry"] {
+            assert!(
+                permissions.contains(&permission),
+                "capabilities/default.json is missing `{permission}` — the command would \
+                 be rejected by the ACL at the remote UI origin"
+            );
+        }
+    }
+
     /// sc-8737: the save dialog's initial-directory hint is applied only when it names
     /// an existing directory; empty/whitespace, missing, and non-directory paths are all
     /// skipped (returning `None`) so a stale/bad hint never errors the save — it just
