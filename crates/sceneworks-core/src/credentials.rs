@@ -15,7 +15,7 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-use crate::store_util::random_hex;
+use crate::store_util::{lock_project_files, random_hex};
 
 /// Filename of the credential store within the config dir. Shared so the rust-api
 /// (writer) and the worker (reader) never drift.
@@ -80,7 +80,12 @@ impl CredentialFileStore {
     }
 
     /// Upsert a host's credential. Returns the normalized host key.
+    ///
+    /// The read -> mutate -> write is serialized on a process-wide lock keyed on
+    /// the credentials file path (sc-8813 / F-011), so a concurrent `set`/`delete`
+    /// can't interleave and silently clobber the other's write.
     pub fn set(&self, host: &str, label: &str, scheme: &str, token: &str) -> io::Result<String> {
+        let _guard = lock_project_files(&self.path);
         let host = normalize_host(host);
         let mut map = self.load();
         map.insert(
@@ -96,7 +101,11 @@ impl CredentialFileStore {
     }
 
     /// Remove a host's credential. Returns whether anything was removed.
+    ///
+    /// Serialized on the same path-keyed lock as [`set`](Self::set) so a delete
+    /// racing a concurrent set can't lose either write (sc-8813 / F-011).
     pub fn delete(&self, host: &str) -> io::Result<bool> {
+        let _guard = lock_project_files(&self.path);
         let host = normalize_host(host);
         let mut map = self.load();
         let removed = map.remove(&host).is_some();
@@ -239,6 +248,102 @@ mod tests {
         assert!(store.delete("civitai.com").expect("delete"));
         assert!(!store.delete("civitai.com").expect("delete again"));
         assert!(store.list().is_empty());
+    }
+
+    /// sc-8813 / F-011: concurrent `set`s to distinct hosts on the same store must
+    /// not lose each other. Without serializing the load -> mutate -> save window,
+    /// overlapping writers each start from a stale map and the last `save` clobbers
+    /// the others, so the final file holds fewer than all the hosts written.
+    #[test]
+    fn concurrent_sets_do_not_lose_updates() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = CredentialFileStore::new(dir.path());
+
+        let threads = 8;
+        let per_thread = 25;
+        std::thread::scope(|scope| {
+            for t in 0..threads {
+                let store = &store;
+                scope.spawn(move || {
+                    for i in 0..per_thread {
+                        let host = format!("host-{t}-{i}.example.com");
+                        store
+                            .set(&host, "", "bearer", &format!("tok-{t}-{i}"))
+                            .expect("set");
+                    }
+                });
+            }
+        });
+
+        let map = store.load();
+        assert_eq!(
+            map.len(),
+            (threads * per_thread) as usize,
+            "every concurrently-written host must survive"
+        );
+        for t in 0..threads {
+            for i in 0..per_thread {
+                let host = format!("host-{t}-{i}.example.com");
+                assert_eq!(
+                    map.get(&host).map(|e| e.token.as_str()),
+                    Some(format!("tok-{t}-{i}").as_str()),
+                    "token for {host} must persist"
+                );
+            }
+        }
+    }
+
+    /// sc-8813 / F-011: a delete racing concurrent sets to *other* hosts must only
+    /// remove its own target and never drop a concurrently-written sibling. The
+    /// serialized RMW guarantees each delete observes a fully-written map.
+    #[test]
+    fn concurrent_set_and_delete_do_not_lose_survivors() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = CredentialFileStore::new(dir.path());
+
+        // Survivors that must persist through the whole run.
+        let survivors = 20;
+        for i in 0..survivors {
+            store
+                .set(&format!("keep-{i}.example.com"), "", "bearer", "keep")
+                .expect("seed survivor");
+        }
+
+        let churn = 40;
+        std::thread::scope(|scope| {
+            // Writer thread: add churn hosts.
+            {
+                let store = &store;
+                scope.spawn(move || {
+                    for i in 0..churn {
+                        store
+                            .set(&format!("churn-{i}.example.com"), "", "bearer", "x")
+                            .expect("set churn");
+                    }
+                });
+            }
+            // Deleter thread: remove the same churn hosts.
+            {
+                let store = &store;
+                scope.spawn(move || {
+                    for i in 0..churn {
+                        // Ignore the removed flag: the host may not exist yet.
+                        let _ = store.delete(&format!("churn-{i}.example.com"));
+                    }
+                });
+            }
+        });
+
+        let map = store.load();
+        // Regardless of set/delete interleaving, none of the untouched survivors
+        // may vanish — that would be a lost update.
+        for i in 0..survivors {
+            let host = format!("keep-{i}.example.com");
+            assert!(
+                map.contains_key(&host),
+                "survivor {host} was lost to a racing set/delete"
+            );
+        }
     }
 
     #[test]
