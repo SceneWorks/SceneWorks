@@ -877,6 +877,69 @@ fn resolve_advanced_or_manifest_f32(
     advanced::f32_clamped(&request.advanced, key, manifest_default, range)
 }
 
+/// Closure-default twin of [`resolve_advanced_or_manifest_u32`] (sc-8825). Identical mechanism —
+/// `advanced[key]` → manifest `[key]` (parsed, clamped to `range`) — except the fallback is a
+/// per-lane `default_fn` closure evaluated **only** when both advanced and manifest are absent (and,
+/// like the const twin, returned **unclamped**). This covers the lanes whose default is model-dependent
+/// (`flux_ipadapter` variant steps, `qwen_edit_candle`/`zimage_control` per-variant steps) rather than a
+/// bare constant. Every caller passes its OWN `range`/`default_fn`, so per-lane bounds stay byte-for-byte.
+///
+/// Unlike the const twins (which have macOS-live callers in `pulid.rs`/`instantid.rs`), these variants
+/// are only *called* by the candle-exclusive lanes, so the macOS non-test lib build has no caller —
+/// hence the gate is `candle-lane OR test` (the sc-8825 unit tests exercise it on both build lanes).
+#[cfg(any(
+    all(not(target_os = "macos"), feature = "backend-candle"),
+    test
+))]
+fn resolve_advanced_or_manifest_u32_with(
+    request: &ImageRequest,
+    key: &str,
+    default_fn: impl FnOnce() -> u32,
+    range: std::ops::RangeInclusive<u32>,
+) -> u32 {
+    let parse = |value: &Value| {
+        value
+            .as_u64()
+            .or_else(|| value.as_str()?.trim().parse().ok())
+    };
+    request
+        .advanced
+        .get(key)
+        .and_then(parse)
+        .or_else(|| request.model_manifest_entry.get(key).and_then(parse))
+        .map(|value| value.clamp(*range.start() as u64, *range.end() as u64) as u32)
+        .unwrap_or_else(default_fn)
+}
+
+/// Closure-default twin of [`resolve_advanced_or_manifest_f32`] (sc-8825). Identical mechanism —
+/// manifest `[key]` supplies the effective default (else the per-lane `default_fn` closure, evaluated
+/// only when the manifest key is absent), then [`advanced::f32_clamped`] reads `advanced[key]` (falling
+/// back to that default) and clamps to `range`. Covers `flux_ipadapter`, whose guidance fallback is a
+/// per-variant fn. Each caller passes its OWN `range`/`default_fn`. Gated `candle-lane OR test` for the
+/// same reason as the u32 twin: no macOS non-test caller, but the sc-8825 tests exercise it on both lanes.
+#[cfg(any(
+    all(not(target_os = "macos"), feature = "backend-candle"),
+    test
+))]
+fn resolve_advanced_or_manifest_f32_with(
+    request: &ImageRequest,
+    key: &str,
+    default_fn: impl FnOnce() -> f32,
+    range: std::ops::RangeInclusive<f32>,
+) -> f32 {
+    let manifest_default = request
+        .model_manifest_entry
+        .get(key)
+        .and_then(|value| {
+            value
+                .as_f64()
+                .or_else(|| value.as_str()?.trim().parse().ok())
+        })
+        .map(|value| value as f32)
+        .unwrap_or_else(default_fn);
+    advanced::f32_clamped(&request.advanced, key, manifest_default, range)
+}
+
 /// True for a TRUE-CFG family whose engine reads the CFG scale from `true_cfg` (with a real
 /// negative prompt) and **rejects** the distilled `guidance` scalar — i.e. Chroma (epic 3531),
 /// uniquely identified by `supports_guidance=false` + `supports_negative_prompt=true`. The

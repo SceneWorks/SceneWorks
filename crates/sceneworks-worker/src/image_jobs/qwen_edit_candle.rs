@@ -116,41 +116,26 @@ fn qwen_edit_candle_available(request: &ImageRequest, settings: &Settings) -> bo
 /// Resolve denoise steps: `advanced.steps` (clamped 1..=50) → manifest `steps` → family default
 /// (Lightning → 4, else 30).
 fn qwen_edit_candle_steps(request: &ImageRequest) -> u32 {
-    let default = if is_qwen_edit_lightning(&request.model) {
-        QWEN_EDIT_CANDLE_LIGHTNING_STEPS
-    } else {
-        QWEN_EDIT_CANDLE_DEFAULT_STEPS
-    };
-    let parse = |value: &Value| {
-        value
-            .as_u64()
-            .or_else(|| value.as_str()?.trim().parse().ok())
-    };
-    request
-        .advanced
-        .get("steps")
-        .and_then(parse)
-        .or_else(|| request.model_manifest_entry.get("steps").and_then(parse))
-        .map(|steps| steps.clamp(1, 50) as u32)
-        .unwrap_or(default)
+    resolve_advanced_or_manifest_u32_with(
+        request,
+        "steps",
+        || {
+            if is_qwen_edit_lightning(&request.model) {
+                QWEN_EDIT_CANDLE_LIGHTNING_STEPS
+            } else {
+                QWEN_EDIT_CANDLE_DEFAULT_STEPS
+            }
+        },
+        1..=50,
+    )
 }
 
 /// Resolve guidance: `advanced.guidanceScale` → manifest `guidanceScale` → default (4.0), clamped.
 fn qwen_edit_candle_guidance(request: &ImageRequest) -> f32 {
-    let manifest_default = request
-        .model_manifest_entry
-        .get("guidanceScale")
-        .and_then(|value| {
-            value
-                .as_f64()
-                .or_else(|| value.as_str()?.trim().parse().ok())
-        })
-        .map(|value| value as f32)
-        .unwrap_or(QWEN_EDIT_CANDLE_DEFAULT_GUIDANCE);
-    advanced::f32_clamped(
-        &request.advanced,
+    resolve_advanced_or_manifest_f32(
+        request,
         "guidanceScale",
-        manifest_default,
+        QWEN_EDIT_CANDLE_DEFAULT_GUIDANCE,
         0.0..=30.0,
     )
 }

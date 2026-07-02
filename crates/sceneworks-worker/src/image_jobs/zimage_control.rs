@@ -116,23 +116,18 @@ fn zimage_control_available(request: &ImageRequest, settings: &Settings) -> bool
 /// Resolve denoise steps: `advanced.steps` (clamped 1..=50) → manifest `steps` → model default (Turbo 8,
 /// base 50; sc-8379). The base undistilled model runs the longer schedule for its real-CFG quality.
 fn zimage_control_steps(request: &ImageRequest) -> u32 {
-    let parse = |value: &Value| {
-        value
-            .as_u64()
-            .or_else(|| value.as_str()?.trim().parse().ok())
-    };
-    let default = if is_zimage_base_model(&request.model) {
-        ZIMAGE_CTRL_BASE_DEFAULT_STEPS
-    } else {
-        ZIMAGE_CTRL_DEFAULT_STEPS
-    };
-    request
-        .advanced
-        .get("steps")
-        .and_then(parse)
-        .or_else(|| request.model_manifest_entry.get("steps").and_then(parse))
-        .map(|steps| steps.clamp(1, 50) as u32)
-        .unwrap_or(default)
+    resolve_advanced_or_manifest_u32_with(
+        request,
+        "steps",
+        || {
+            if is_zimage_base_model(&request.model) {
+                ZIMAGE_CTRL_BASE_DEFAULT_STEPS
+            } else {
+                ZIMAGE_CTRL_DEFAULT_STEPS
+            }
+        },
+        1..=50,
+    )
 }
 
 /// Resolve the base-mode (sc-8680) classifier-free guidance scale: `advanced.guidanceScale` → manifest
@@ -140,17 +135,12 @@ fn zimage_control_steps(request: &ImageRequest) -> u32 {
 /// `z_image` control path (real CFG); Turbo ignores it (guidance-distilled). Mirrors
 /// `kolors_control_guidance`.
 fn zimage_control_guidance(request: &ImageRequest) -> f32 {
-    let manifest_default = request
-        .model_manifest_entry
-        .get("guidanceScale")
-        .and_then(|value| {
-            value
-                .as_f64()
-                .or_else(|| value.as_str()?.trim().parse().ok())
-        })
-        .map(|value| value as f32)
-        .unwrap_or(ZIMAGE_CTRL_BASE_DEFAULT_GUIDANCE);
-    advanced::f32_clamped(&request.advanced, "guidanceScale", manifest_default, 0.0..=30.0)
+    resolve_advanced_or_manifest_f32(
+        request,
+        "guidanceScale",
+        ZIMAGE_CTRL_BASE_DEFAULT_GUIDANCE,
+        0.0..=30.0,
+    )
 }
 
 /// The (repo, filename) of the ControlNet weights — `advanced.controlWeights.{repo,filename}` overrides,
