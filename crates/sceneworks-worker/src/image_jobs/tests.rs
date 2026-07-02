@@ -6230,6 +6230,18 @@ fn resolve_control_identity_source_is_none_without_reference() {
         resolve_control_identity_source(&blank, &settings, project_path).is_none(),
         "blank referenceAssetId ⇒ treated as absent"
     );
+    // sc-8822: the BASE `z_image` strict-control lane routes through the SAME shared gate as Turbo
+    // (`generate_zimage_base_control_stream` now resolves this source + scores via
+    // `drive_gen_items_scored`, closing the copy-paste gap). A base pose set with no identity reference
+    // resolves to `None` — no scorer, `faceLikeness` omitted — exactly like every sibling lane.
+    let base_pose_only = request(json!({
+        "projectId": "p", "model": "z_image",
+        "advanced": { "poses": [{ "id": "a" }] }
+    }));
+    assert!(
+        resolve_control_identity_source(&base_pose_only, &settings, project_path).is_none(),
+        "base z_image pose set with no identity reference ⇒ no likeness source ⇒ field omitted"
+    );
 }
 
 /// sc-8248 / sc-8249 source threading: the input image canny/depth auto-derive their control map FROM
