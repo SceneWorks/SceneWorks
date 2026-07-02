@@ -269,7 +269,11 @@ impl CandleStrictControl for Flux1StrictControl {
             height: self.height,
             steps: self.steps as usize,
             guidance: self.guidance,
-            control_scale: self.control_scale,
+            // The worker resolves `controlScale` itself (user value or `FLUX1_CONTROL_CANDLE_DEFAULT_SCALE`)
+            // before building the provider, so always pass the resolved value explicitly. `None` (engine
+            // default) is only for callers that never resolved a scale; sc-9024 keeps explicit 0.0 = "control
+            // off" honored verbatim.
+            control_scale: Some(self.control_scale),
             control_kind: self.control_kind.clone(),
             seed,
             cancel: cancel.clone(),

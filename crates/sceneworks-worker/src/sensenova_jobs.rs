@@ -75,6 +75,46 @@ const SENSENOVA_ADAPTER: &str = "mlx_sensenova";
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 const SENSENOVA_ADAPTER: &str = "candle_sensenova";
 
+/// Terminal cancel messages for the two SenseNova understanding jobs. Shared between the
+/// `run_blocking_with_heartbeat` keepalive (which posts them when the engine finishes AFTER the
+/// flag tripped) and the engine-error mapping below (which posts them when the engine's per-token /
+/// per-step cancel check surfaces the typed `Canceled` itself), so the terminal status message is
+/// identical whichever side observes the trip first (sc-9123).
+#[cfg(any(target_os = "macos", feature = "backend-candle"))]
+const VQA_CANCEL_MESSAGE: &str = "Visual question answering canceled by user.";
+#[cfg(any(target_os = "macos", feature = "backend-candle"))]
+const INTERLEAVE_CANCEL_MESSAGE: &str = "Interleaved generation canceled by user.";
+
+/// Lift a SenseNova engine error into the worker's error space, preserving the TYPED cancellation:
+/// the engine's per-token/per-step cancel check surfaces `Error::Canceled` when the keepalive trips
+/// the threaded `CancelFlag` (sc-9123), and it must map to [`WorkerError::Canceled`] — not a
+/// stringified `Engine` error — so `run_blocking_with_heartbeat` posts the terminal `Canceled`
+/// instead of failing the job. Everything else keeps the old `Engine(context: error)` shape.
+#[cfg(target_os = "macos")]
+fn map_sensenova_engine_error(
+    error: mlx_gen::Error,
+    context: &str,
+    cancel_message: &str,
+) -> WorkerError {
+    match error {
+        mlx_gen::Error::Canceled => WorkerError::Canceled(cancel_message.to_owned()),
+        other => WorkerError::Engine(format!("{context}: {other}")),
+    }
+}
+
+/// Candle sibling of the macOS mapping above (same typed-cancel contract, `CandleError::Canceled`).
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+fn map_sensenova_engine_error(
+    error: candle_gen::CandleError,
+    context: &str,
+    cancel_message: &str,
+) -> WorkerError {
+    match error {
+        candle_gen::CandleError::Canceled => WorkerError::Canceled(cancel_message.to_owned()),
+        other => WorkerError::Engine(format!("{context}: {other}")),
+    }
+}
+
 // ===========================================================================
 // VQA (image_vqa)
 // ===========================================================================
@@ -184,13 +224,18 @@ pub(crate) async fn run_vqa_job(
     let question_for_vqa = question.clone();
     // Keep the worker heartbeat alive across the blocking VLM load + generation (a cold
     // SenseNova-U1 8B load + long answer easily exceeds the API's 90s stale-sweep) so the in-flight
-    // job is never falsely marked `interrupted` (sc-8390). Not cancelable mid-generation.
+    // job is never falsely marked `interrupted` (sc-8390). The engine checks the threaded
+    // `CancelFlag` before each decoded token (mlx-gen #634), so the keepalive's cancel poll actually
+    // STOPS a multi-minute answer mid-rollout instead of only waiting for it (sc-9123, the sc-8804
+    // F-003 residual).
+    let cancel = gen_core::CancelFlag::new();
+    let task_cancel = cancel.clone();
     let answer = run_blocking_with_heartbeat(
         api,
         settings,
         &job.id,
-        None,
-        "",
+        Some(cancel),
+        VQA_CANCEL_MESSAGE,
         "VQA task join",
         tokio::task::spawn_blocking(move || -> WorkerResult<String> {
             emit_load_event("image_pipeline_load_start", &job_id, "sensenova_u1_8b", 0);
@@ -211,8 +256,11 @@ pub(crate) async fn run_vqa_job(
                     std::slice::from_ref(&pixel_values),
                     max_new_tokens,
                     Sampler::Greedy,
+                    Some(&task_cancel),
                 )
-                .map_err(|error| WorkerError::Engine(format!("SenseNova VQA failed: {error}")))?;
+                .map_err(|error| {
+                    map_sensenova_engine_error(error, "SenseNova VQA failed", VQA_CANCEL_MESSAGE)
+                })?;
             Ok(strip_reasoning(&answer))
         }),
     )
@@ -346,13 +394,18 @@ pub(crate) async fn run_vqa_job(
     let question_for_vqa = question.clone();
     // Keep the worker heartbeat alive across the blocking VLM load + generation (a cold
     // SenseNova-U1 8B load + long answer easily exceeds the API's 90s stale-sweep) so the in-flight
-    // job is never falsely marked `interrupted` (sc-8390). Not cancelable mid-generation.
+    // job is never falsely marked `interrupted` (sc-8390). The engine checks the threaded
+    // `CancelFlag` before each decoded token (the candle sibling of mlx-gen #634), so the
+    // keepalive's cancel poll actually STOPS a multi-minute answer mid-rollout instead of only
+    // waiting for it (sc-9123, the sc-8804 F-003 residual).
+    let cancel = gen_core::CancelFlag::new();
+    let task_cancel = cancel.clone();
     let answer = run_blocking_with_heartbeat(
         api,
         settings,
         &job.id,
-        None,
-        "",
+        Some(cancel),
+        VQA_CANCEL_MESSAGE,
         "VQA task join",
         tokio::task::spawn_blocking(move || -> WorkerResult<String> {
             emit_load_event("image_pipeline_load_start", &job_id, "sensenova_u1_8b", 0);
@@ -374,8 +427,11 @@ pub(crate) async fn run_vqa_job(
                     std::slice::from_ref(&pixel_values),
                     max_new_tokens,
                     Sampler::Greedy,
+                    Some(&task_cancel),
                 )
-                .map_err(|error| WorkerError::Engine(format!("SenseNova VQA failed: {error}")))?;
+                .map_err(|error| {
+                    map_sensenova_engine_error(error, "SenseNova VQA failed", VQA_CANCEL_MESSAGE)
+                })?;
             Ok(strip_reasoning(&answer))
         }),
     )
@@ -534,10 +590,10 @@ pub(crate) async fn run_interleave_job(
         )?);
     }
 
-    // The engine `interleave_gen` is a single uninterruptible rollout, so check for cancellation
-    // before launching it. `check_cancel` marks the job canceled + returns `Canceled` on a cancel;
-    // a real API error still propagates.
-    match check_cancel(api, &job.id, "Interleaved generation canceled by user.").await {
+    // Early-exit on a cancel that arrived before the rollout even started (the mid-rollout case is
+    // covered by the CancelFlag threaded into `interleave_gen` below, sc-9123). `check_cancel`
+    // marks the job canceled + returns `Canceled` on a cancel; a real API error still propagates.
+    match check_cancel(api, &job.id, INTERLEAVE_CANCEL_MESSAGE).await {
         Ok(()) => {}
         Err(WorkerError::Canceled(_)) => return Ok(()),
         Err(other) => return Err(other),
@@ -564,6 +620,8 @@ pub(crate) async fn run_interleave_job(
     // images come back as Send `Image`s for asset writing on the async side.
     let job_id = job.id.clone();
     let prompt_for_gen = prompt.clone();
+    let cancel = gen_core::CancelFlag::new();
+    let task_cancel = cancel.clone();
     let interleave_task =
         tokio::task::spawn_blocking(move || -> WorkerResult<(String, Vec<Image>)> {
             emit_load_event("image_pipeline_load_start", &job_id, "sensenova_u1_8b", 0);
@@ -593,6 +651,10 @@ pub(crate) async fn run_interleave_job(
                 think_mode,
                 ..Default::default()
             };
+            // The engine checks the threaded flag per decoded text token and per denoise step
+            // (mlx-gen #634), so the keepalive's cancel poll stops a multi-minute rollout
+            // cooperatively (sc-9123). Progress stays a no-op sink: this seam reports liveness via
+            // the Busy heartbeat, not per-step job progress.
             let out = model
                 .interleave_gen(
                     &tokenizer,
@@ -605,9 +667,15 @@ pub(crate) async fn run_interleave_job(
                     max_new_tokens,
                     max_images,
                     None,
+                    &task_cancel,
+                    &mut |_| {},
                 )
                 .map_err(|error| {
-                    WorkerError::Engine(format!("SenseNova interleave failed: {error}"))
+                    map_sensenova_engine_error(
+                        error,
+                        "SenseNova interleave failed",
+                        INTERLEAVE_CANCEL_MESSAGE,
+                    )
                 })?;
             // The generated images are model-space [-1,1] `[1,3,H,W]` arrays — decode each to RGB8
             // exactly as the `Generator` image path does (`decoded_to_image`).
@@ -621,13 +689,14 @@ pub(crate) async fn run_interleave_job(
         });
     // Keep the worker heartbeat alive across the blocking VLM load + interleave rollout (cold 8B
     // load + multi-image generation easily exceeds the API's 90s stale-sweep) so the in-flight job
-    // is never falsely marked `interrupted` (sc-8390). Not cancelable mid-rollout.
+    // is never falsely marked `interrupted` (sc-8390). Cancelable mid-rollout via the threaded
+    // flag (sc-9123).
     let (generated_text, images) = run_blocking_with_heartbeat(
         api,
         settings,
         &job.id,
-        None,
-        "",
+        Some(cancel),
+        INTERLEAVE_CANCEL_MESSAGE,
         "interleave task join",
         interleave_task,
     )
@@ -652,6 +721,9 @@ pub(crate) async fn run_interleave_job(
     // not run on the async runtime thread. Move it onto the blocking pool under the heartbeat wrapper
     // so the in-flight job keeps beating across the encode + IO and is never falsely swept as
     // `interrupted` during those seconds (sc-8838, sc-8390). Ownership is moved into the closure.
+    // Cancel flag stays `None` (sc-9123 decision): this is bounded CPU encode + filesystem IO with
+    // no loop worth interrupting, and aborting a half-written document asset mid-rename is worse
+    // than letting the seconds-long write finish.
     let job_owned = job.clone();
     let write_task = tokio::task::spawn_blocking(move || {
         write_interleaved_document(
@@ -804,7 +876,9 @@ pub(crate) async fn run_interleave_job(
         )?);
     }
 
-    match check_cancel(api, &job.id, "Interleaved generation canceled by user.").await {
+    // Early-exit on a pre-rollout cancel; the mid-rollout case is covered by the CancelFlag
+    // threaded into `interleave_gen` below (sc-9123).
+    match check_cancel(api, &job.id, INTERLEAVE_CANCEL_MESSAGE).await {
         Ok(()) => {}
         Err(WorkerError::Canceled(_)) => return Ok(()),
         Err(other) => return Err(other),
@@ -827,6 +901,8 @@ pub(crate) async fn run_interleave_job(
 
     let job_id = job.id.clone();
     let prompt_for_gen = prompt.clone();
+    let cancel = gen_core::CancelFlag::new();
+    let task_cancel = cancel.clone();
     let interleave_task =
         tokio::task::spawn_blocking(move || -> WorkerResult<(String, Vec<Image>)> {
             emit_load_event("image_pipeline_load_start", &job_id, "sensenova_u1_8b", 0);
@@ -857,10 +933,9 @@ pub(crate) async fn run_interleave_job(
                 think_mode,
                 ..Default::default()
             };
-            // The rollout is a single uninterruptible pass (like the macOS handler); cancel is
-            // checked before launch. Pass an un-tripped flag the engine polls between text tokens /
-            // denoise steps.
-            let cancel = gen_core::CancelFlag::new();
+            // The engine polls the threaded flag between text tokens / denoise steps, and the
+            // keepalive's cancel poll trips it (sc-9123) — the old code passed a fresh un-tripped
+            // flag nothing could ever cancel.
             let out = model
                 .interleave_gen(
                     &tokenizer,
@@ -872,10 +947,14 @@ pub(crate) async fn run_interleave_job(
                     &system_message,
                     max_new_tokens,
                     max_images,
-                    &cancel,
+                    &task_cancel,
                 )
                 .map_err(|error| {
-                    WorkerError::Engine(format!("SenseNova interleave failed: {error}"))
+                    map_sensenova_engine_error(
+                        error,
+                        "SenseNova interleave failed",
+                        INTERLEAVE_CANCEL_MESSAGE,
+                    )
                 })?;
             // The generated images are model-space [-1,1] `[1,3,H,W]` tensors — decode each to RGB8.
             let mut decoded = Vec::with_capacity(out.images.len());
@@ -888,13 +967,14 @@ pub(crate) async fn run_interleave_job(
         });
     // Keep the worker heartbeat alive across the blocking VLM load + interleave rollout (cold 8B
     // load + multi-image generation easily exceeds the API's 90s stale-sweep) so the in-flight job
-    // is never falsely marked `interrupted` (sc-8390). Not cancelable mid-rollout.
+    // is never falsely marked `interrupted` (sc-8390). Cancelable mid-rollout via the threaded
+    // flag (sc-9123).
     let (generated_text, images) = run_blocking_with_heartbeat(
         api,
         settings,
         &job.id,
-        None,
-        "",
+        Some(cancel),
+        INTERLEAVE_CANCEL_MESSAGE,
         "interleave task join",
         interleave_task,
     )
@@ -919,6 +999,9 @@ pub(crate) async fn run_interleave_job(
     // not run on the async runtime thread. Move it onto the blocking pool under the heartbeat wrapper
     // so the in-flight job keeps beating across the encode + IO and is never falsely swept as
     // `interrupted` during those seconds (sc-8838, sc-8390). Ownership is moved into the closure.
+    // Cancel flag stays `None` (sc-9123 decision): this is bounded CPU encode + filesystem IO with
+    // no loop worth interrupting, and aborting a half-written document asset mid-rename is worse
+    // than letting the seconds-long write finish.
     let job_owned = job.clone();
     let write_task = tokio::task::spawn_blocking(move || {
         write_interleaved_document(
@@ -1334,6 +1417,62 @@ fn json_to_i64(value: &Value) -> Option<i64> {
 mod tests {
     use super::*;
 
+    /// sc-9123: the engine's per-token/per-step cancel check surfaces the TYPED `Canceled`, and the
+    /// worker mapping must preserve it as `WorkerError::Canceled` (with the shared terminal message)
+    /// so `run_blocking_with_heartbeat` posts the terminal `Canceled` instead of failing the job.
+    /// Any other engine error keeps the old `Engine("context: error")` shape.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn engine_cancel_maps_to_worker_canceled_with_terminal_message() {
+        let mapped = map_sensenova_engine_error(
+            mlx_gen::Error::Canceled,
+            "SenseNova VQA failed",
+            VQA_CANCEL_MESSAGE,
+        );
+        assert!(
+            matches!(mapped, WorkerError::Canceled(ref m) if m == VQA_CANCEL_MESSAGE),
+            "typed engine Canceled must map to WorkerError::Canceled, got {mapped:?}"
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn engine_failure_keeps_the_engine_error_shape() {
+        let mapped = map_sensenova_engine_error(
+            mlx_gen::Error::Msg("boom".to_owned()),
+            "SenseNova interleave failed",
+            INTERLEAVE_CANCEL_MESSAGE,
+        );
+        assert!(
+            matches!(mapped, WorkerError::Engine(ref m) if m == "SenseNova interleave failed: boom"),
+            "non-cancel engine errors must stay Engine(context: error), got {mapped:?}"
+        );
+    }
+
+    /// Candle-lane sibling of the two mappings above (`CandleError::Canceled` / `CandleError::Msg`).
+    #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+    #[test]
+    fn engine_cancel_maps_to_worker_canceled_with_terminal_message_candle() {
+        let mapped = map_sensenova_engine_error(
+            candle_gen::CandleError::Canceled,
+            "SenseNova VQA failed",
+            VQA_CANCEL_MESSAGE,
+        );
+        assert!(
+            matches!(mapped, WorkerError::Canceled(ref m) if m == VQA_CANCEL_MESSAGE),
+            "typed engine Canceled must map to WorkerError::Canceled, got {mapped:?}"
+        );
+        let failed = map_sensenova_engine_error(
+            candle_gen::CandleError::Msg("boom".to_owned()),
+            "SenseNova interleave failed",
+            INTERLEAVE_CANCEL_MESSAGE,
+        );
+        assert!(
+            matches!(failed, WorkerError::Engine(ref m) if m == "SenseNova interleave failed: boom"),
+            "non-cancel engine errors must stay Engine(context: error), got {failed:?}"
+        );
+    }
+
     #[test]
     fn strip_reasoning_removes_think_blocks() {
         assert_eq!(strip_reasoning("<think>reasoning</think>answer"), "answer");
@@ -1459,6 +1598,7 @@ mod tests {
                 std::slice::from_ref(&pixel_values),
                 64,
                 Sampler::Greedy,
+                None,
             )
             .expect("vqa");
         let answer = strip_reasoning(&answer);
@@ -1503,6 +1643,8 @@ mod tests {
                 512,
                 4,
                 None,
+                &gen_core::CancelFlag::new(),
+                &mut |_| {},
             )
             .expect("interleave_gen");
         assert!(!out.images.is_empty(), "expected >= 1 generated image");
@@ -1571,6 +1713,8 @@ mod tests {
                 512,
                 4,
                 None,
+                &gen_core::CancelFlag::new(),
+                &mut |_| {},
             )
             .expect("interleave_gen");
         assert!(

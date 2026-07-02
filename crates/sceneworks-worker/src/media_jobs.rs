@@ -610,8 +610,10 @@ async fn run_yolo11_person_detect(
     let weights = crate::person_jobs::ensure_detector_weights(settings, &download_context).await?;
     let conf = confidence as f32;
     // Keep the worker heartbeat alive across the blocking YOLO11 detect (cold weight load +
-    // inference) so a slow detection never trips the API's 90s stale-sweep (sc-8390). Not
-    // cancelable mid-inference.
+    // inference) so a slow detection never trips the API's 90s stale-sweep (sc-8390). Cancel stays
+    // `None` by explicit per-engine decision (sc-9123): YOLO11 person-detect is one bounded forward
+    // pass on one frame — no loop for a flag to interrupt, so the bounded join already gives
+    // everything a cancel flag would.
     let result = run_blocking_with_heartbeat(
         api,
         settings,

@@ -338,7 +338,10 @@ pub(crate) async fn run_kps_extract_job(
     .await?;
 
     // Keep the worker heartbeat alive across the blocking SCRFD detect (cold weight load can run
-    // long) so a slow extraction never trips the API's 90s stale-sweep (sc-8390). Not cancelable.
+    // long) so a slow extraction never trips the API's 90s stale-sweep (sc-8390). Cancel stays
+    // `None` by explicit per-engine decision (sc-9123): SCRFD is one bounded forward pass on one
+    // image — there is no loop for a flag to interrupt, so the bounded join already gives
+    // everything a cancel flag would.
     let extraction = run_blocking_with_heartbeat(
         api,
         settings,

@@ -79,6 +79,25 @@ const ACCEL_DEVICE: &str = "cuda";
 /// the result. Mirrors Python `DEFAULT_POSE_MIN_CONF`.
 const DEFAULT_POSE_MIN_CONF: f64 = 0.3;
 
+/// Terminal cancel message for the pose-detect job. Shared between the
+/// `run_blocking_with_heartbeat` keepalive (which posts it when the blocking task finishes AFTER
+/// the flag tripped) and the in-task between-iteration checks below (whose typed `Canceled`
+/// carries the same message), so the terminal status is identical whichever side observes the trip
+/// first (sc-9123).
+const POSE_CANCEL_MESSAGE: &str = "Pose detection canceled by user.";
+
+/// Between-iteration cooperative cancel check for the two worker-side pose loops (sc-9123): the
+/// DWPose batch-detect loop and the skeleton render loop both live in worker code (not behind an
+/// engine surface), so a user cancel tripped by the keepalive's poll bails between images/persons
+/// with the TYPED `Canceled` — which `run_blocking_with_heartbeat` maps to the terminal `Canceled`
+/// post instead of failing the job.
+fn bail_if_canceled(cancel: &gen_core::CancelFlag) -> WorkerResult<()> {
+    if cancel.is_cancelled() {
+        return Err(WorkerError::Canceled(POSE_CANCEL_MESSAGE.to_owned()));
+    }
+    Ok(())
+}
+
 // COCO-WholeBody-133 (rtmlib raw) → SceneWorks OpenPose-18 body. (op_idx, coco_idx);
 // OpenPose-18 inserts neck(1) = midpoint of shoulders (computed separately).
 const COCO_TO_OPENPOSE: [(usize, usize); 17] = [
@@ -529,7 +548,10 @@ fn detect_batch(
     det_path: PathBuf,
     pose_path: PathBuf,
     images: Vec<Option<PathBuf>>,
+    cancel: &gen_core::CancelFlag,
 ) -> WorkerResult<(Vec<Option<RawSource>>, &'static str)> {
+    // A cancel that lands before the (long) cold detector load starts skips the load entirely.
+    bail_if_canceled(cancel)?;
     let cell = DETECTOR.get_or_init(|| Mutex::new(None));
     let mut guard = cell.lock().unwrap_or_else(|poisoned| {
         let mut guard = poisoned.into_inner();
@@ -543,6 +565,10 @@ fn detect_batch(
     let device = detector.device;
     let mut out = Vec::with_capacity(images.len());
     for path in images {
+        // sc-9123: this multi-image batch loop is worker code, so a user cancel (tripped by the
+        // keepalive's poll) bails between images with the TYPED `Canceled` — each per-image forward
+        // stays a bounded uninterruptible unit, but the batch as a whole is cancellable.
+        bail_if_canceled(cancel)?;
         let Some(path) = path else {
             out.push(None);
             continue;
@@ -876,14 +902,23 @@ pub(crate) async fn run_pose_detect_job(
     let image_paths: Vec<Option<PathBuf>> = resolved.iter().map(|s| s.path.clone()).collect();
     // Keep the worker heartbeat alive across the blocking batch detect (cold RTMW/onnx load +
     // multi-image inference can run long) so it never trips the API's 90s stale-sweep (sc-8390).
+    // The batch loop is worker code, so it takes a REAL `CancelFlag` (sc-9123): the keepalive's
+    // cancel poll trips it and `detect_batch` bails between images with the typed `Canceled`
+    // instead of running the whole multi-image batch to its natural end. The same flag covers the
+    // skeleton render below — a cancel that lands late in the detect stage still stops the job at
+    // the next checkpoint, whichever stage that is.
+    let cancel = gen_core::CancelFlag::new();
+    let detect_cancel = cancel.clone();
     let (raw, device) = run_blocking_with_heartbeat(
         api,
         settings,
         &job.id,
-        None,
-        "",
+        Some(cancel.clone()),
+        POSE_CANCEL_MESSAGE,
         "pose detection task",
-        tokio::task::spawn_blocking(move || detect_batch(det_path, pose_path, image_paths)),
+        tokio::task::spawn_blocking(move || {
+            detect_batch(det_path, pose_path, image_paths, &detect_cancel)
+        }),
     )
     .await?;
 
@@ -901,17 +936,22 @@ pub(crate) async fn run_pose_detect_job(
     // batches — the same failure class sc-8390 fixed for the inference half. Fold it into a
     // `spawn_blocking` under `run_blocking_with_heartbeat` so it's both off-thread AND heartbeat-
     // covered (sc-8848). `resolved` is moved in for the render and handed back out so the subsequent
-    // `cleanup_temp_sources` still sees it.
+    // `cleanup_temp_sources` still sees it. The render loop is worker code too, so it shares the
+    // detect stage's `CancelFlag` (sc-9123) and bails between sources AND between per-person
+    // rasters (each is a `max(w,h)²` canvas + PNG encode — the expensive unit) with the typed
+    // `Canceled`; any skeleton PNGs already written sit in the job-scoped cache dir and are inert.
+    let render_cancel = cancel.clone();
     let (out_sources, resolved) = run_blocking_with_heartbeat(
         api,
         settings,
         &job.id,
-        None,
-        "",
+        Some(cancel),
+        POSE_CANCEL_MESSAGE,
         "pose skeleton render task",
         tokio::task::spawn_blocking(move || {
             let mut out_sources: Vec<Value> = Vec::new();
             for (src, raw_src) in resolved.iter().zip(raw) {
+                bail_if_canceled(&render_cancel)?;
                 let stem = src
                     .path
                     .as_ref()
@@ -951,6 +991,7 @@ pub(crate) async fn run_pose_detect_job(
                 let stick = body_stickwidth(side, side);
                 let mut poses: Vec<Value> = Vec::new();
                 for (person_index, (_area, rec, bb)) in ordered.iter().enumerate() {
+                    bail_if_canceled(&render_cancel)?;
                     let body_t = thresholded(&rec.keypoints, min_conf);
                     let hands_t = [
                         thresholded(&rec.hands[0], min_conf),
