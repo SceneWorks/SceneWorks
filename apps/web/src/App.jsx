@@ -1,5 +1,6 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { apiFetch, eventUrl, isAbortError, setMediaTicket } from "./api.js";
+import { pollJobToCompletion } from "./pollJob.js";
 import { Icon } from "./components/Icons.jsx";
 import { Logo } from "./components/Logo.jsx";
 import { StatusDot } from "./components/StatusDot.jsx";
@@ -93,23 +94,6 @@ function parseSseJson(event, label) {
     console.warn(`Ignoring malformed ${label} SSE event`, err);
     return null;
   }
-}
-
-function abortableDelay(ms, signal) {
-  if (signal?.aborted) {
-    return Promise.reject(new DOMException("Aborted", "AbortError"));
-  }
-  return new Promise((resolve, reject) => {
-    const timer = window.setTimeout(resolve, ms);
-    signal?.addEventListener(
-      "abort",
-      () => {
-        window.clearTimeout(timer);
-        reject(new DOMException("Aborted", "AbortError"));
-      },
-      { once: true },
-    );
-  });
 }
 
 // sc-4198: notice kind for a job-failure banner. LoRA import/train failures get
@@ -1683,33 +1667,24 @@ export function App() {
   // independent (no activeProject gate); throws on failure so the studio can surface
   // the message inline without clobbering the original prompt.
   const refinePrompt = useCallback(
-    async ({ prompt, modelId, workflow, guide, signal }) => {
-      const created = await apiFetch("/api/v1/prompts/refine", token, {
-        method: "POST",
-        signal,
-        body: JSON.stringify({ prompt, modelId, workflow, guide }),
-      });
-      const jobId = created?.id;
-      if (!jobId) {
-        throw new Error("Could not start prompt refinement.");
-      }
-      const deadline = Date.now() + 120000;
-      while (Date.now() < deadline) {
-        await abortableDelay(1000, signal);
-        const job = await apiFetch(`/api/v1/jobs/${jobId}`, token, { signal });
-        if (job.status === "completed") {
+    ({ prompt, modelId, workflow, guide, signal }) =>
+      pollJobToCompletion({
+        createPath: "/api/v1/prompts/refine",
+        body: { prompt, modelId, workflow, guide },
+        deadlineMs: 120000,
+        resolveResult: (job) => {
           const refined = job.result?.refinedPrompt;
           if (!refined) {
             throw new Error("Refinement returned an empty prompt.");
           }
           return refined;
-        }
-        if (job.status === "failed" || job.status === "canceled" || job.status === "interrupted") {
-          throw new Error(job.message || job.error || "Prompt refinement failed.");
-        }
-      }
-      throw new Error("Prompt refinement timed out. Is the refinement runtime running?");
-    },
+        },
+        signal,
+        token,
+        startError: "Could not start prompt refinement.",
+        failureError: "Prompt refinement failed.",
+        timeoutError: "Prompt refinement timed out. Is the refinement runtime running?",
+      }),
     [token],
   );
 
@@ -1718,33 +1693,24 @@ export function App() {
   // returns a JSON caption string (the caller parses + validates it). Reuses the refine job's
   // poll-to-completion contract; captions can take longer, so the deadline is generous.
   const magicPrompt = useCallback(
-    async ({ prompt, modelId, aspectRatio, guide, signal }) => {
-      const created = await apiFetch("/api/v1/prompts/refine", token, {
-        method: "POST",
-        signal,
-        body: JSON.stringify({ prompt, modelId, task: "magic_prompt", aspectRatio, guide }),
-      });
-      const jobId = created?.id;
-      if (!jobId) {
-        throw new Error("Could not start magic-prompt.");
-      }
-      const deadline = Date.now() + 180000;
-      while (Date.now() < deadline) {
-        await abortableDelay(1000, signal);
-        const job = await apiFetch(`/api/v1/jobs/${jobId}`, token, { signal });
-        if (job.status === "completed") {
+    ({ prompt, modelId, aspectRatio, guide, signal }) =>
+      pollJobToCompletion({
+        createPath: "/api/v1/prompts/refine",
+        body: { prompt, modelId, task: "magic_prompt", aspectRatio, guide },
+        deadlineMs: 180000,
+        resolveResult: (job) => {
           const caption = job.result?.refinedPrompt;
           if (!caption) {
             throw new Error("Magic-prompt returned an empty caption.");
           }
           return caption;
-        }
-        if (job.status === "failed" || job.status === "canceled" || job.status === "interrupted") {
-          throw new Error(job.message || job.error || "Magic-prompt failed.");
-        }
-      }
-      throw new Error("Magic-prompt timed out. Is the refinement runtime running?");
-    },
+        },
+        signal,
+        token,
+        startError: "Could not start magic-prompt.",
+        failureError: "Magic-prompt failed.",
+        timeoutError: "Magic-prompt timed out. Is the refinement runtime running?",
+      }),
     [token],
   );
 
@@ -1756,33 +1722,24 @@ export function App() {
   // the returned JSON with `parseVisionCaption` (aspect_ratio stripped, bboxes KEPT). C1: the image is
   // consumed only to produce the caption — it is NEVER passed to generation as img2img conditioning.
   const imageCaption = useCallback(
-    async ({ sourceAssetId, projectId, model, signal }) => {
-      const created = await apiFetch("/api/v1/prompts/refine", token, {
-        method: "POST",
-        signal,
-        body: JSON.stringify({ task: "image_caption", sourceAssetId, projectId, model }),
-      });
-      const jobId = created?.id;
-      if (!jobId) {
-        throw new Error("Could not start image captioning.");
-      }
-      const deadline = Date.now() + 180000;
-      while (Date.now() < deadline) {
-        await abortableDelay(1000, signal);
-        const job = await apiFetch(`/api/v1/jobs/${jobId}`, token, { signal });
-        if (job.status === "completed") {
+    ({ sourceAssetId, projectId, model, signal }) =>
+      pollJobToCompletion({
+        createPath: "/api/v1/prompts/refine",
+        body: { task: "image_caption", sourceAssetId, projectId, model },
+        deadlineMs: 180000,
+        resolveResult: (job) => {
           const caption = job.result?.refinedPrompt;
           if (!caption) {
             throw new Error("Image captioning returned an empty caption.");
           }
           return caption;
-        }
-        if (job.status === "failed" || job.status === "canceled" || job.status === "interrupted") {
-          throw new Error(job.message || job.error || "Image captioning failed.");
-        }
-      }
-      throw new Error("Image captioning timed out. Is the captioning runtime running?");
-    },
+        },
+        signal,
+        token,
+        startError: "Could not start image captioning.",
+        failureError: "Image captioning failed.",
+        timeoutError: "Image captioning timed out. Is the captioning runtime running?",
+      }),
     [token],
   );
 
@@ -1793,39 +1750,24 @@ export function App() {
   // text the caller drops into the prompt box. C1: the image is consumed only to produce the prompt — it
   // is NEVER passed to generation as img2img conditioning.
   const imageDescribe = useCallback(
-    async ({ sourceAssetId, projectId, model, captionStyle, signal }) => {
-      const created = await apiFetch("/api/v1/prompts/refine", token, {
-        method: "POST",
-        signal,
-        body: JSON.stringify({
-          task: "image_describe",
-          sourceAssetId,
-          projectId,
-          model,
-          captionStyle,
-        }),
-      });
-      const jobId = created?.id;
-      if (!jobId) {
-        throw new Error("Could not start image description.");
-      }
-      const deadline = Date.now() + 180000;
-      while (Date.now() < deadline) {
-        await abortableDelay(1000, signal);
-        const job = await apiFetch(`/api/v1/jobs/${jobId}`, token, { signal });
-        if (job.status === "completed") {
+    ({ sourceAssetId, projectId, model, captionStyle, signal }) =>
+      pollJobToCompletion({
+        createPath: "/api/v1/prompts/refine",
+        body: { task: "image_describe", sourceAssetId, projectId, model, captionStyle },
+        deadlineMs: 180000,
+        resolveResult: (job) => {
           const description = job.result?.refinedPrompt;
           if (!description) {
             throw new Error("Image description returned empty text.");
           }
           return description;
-        }
-        if (job.status === "failed" || job.status === "canceled" || job.status === "interrupted") {
-          throw new Error(job.message || job.error || "Image description failed.");
-        }
-      }
-      throw new Error("Image description timed out. Is the captioning runtime running?");
-    },
+        },
+        signal,
+        token,
+        startError: "Could not start image description.",
+        failureError: "Image description failed.",
+        timeoutError: "Image description timed out. Is the captioning runtime running?",
+      }),
     [token],
   );
 
@@ -1837,34 +1779,25 @@ export function App() {
   // via `classifyLikeness` / `LikenessBadge`. Non-fatal end to end: a no-face / non-frontal candidate
   // is an honest detected:false result (NOT an error); only a hard failure throws.
   const compareFaceLikeness = useCallback(
-    async ({ sourceAssetId, candidateAssetId, projectId, signal }) => {
-      const created = await apiFetch("/api/v1/face-likeness/compare", token, {
-        method: "POST",
-        signal,
-        body: JSON.stringify({ sourceAssetId, candidateAssetId, projectId }),
-      });
-      const jobId = created?.id;
-      if (!jobId) {
-        throw new Error("Could not start the likeness compare.");
-      }
-      const deadline = Date.now() + 180000;
-      while (Date.now() < deadline) {
-        await abortableDelay(1000, signal);
-        const job = await apiFetch(`/api/v1/jobs/${jobId}`, token, { signal });
-        if (job.status === "completed") {
+    ({ sourceAssetId, candidateAssetId, projectId, signal }) =>
+      pollJobToCompletion({
+        createPath: "/api/v1/face-likeness/compare",
+        body: { sourceAssetId, candidateAssetId, projectId },
+        deadlineMs: 180000,
+        resolveResult: (job) => {
           // A completed compare always carries a result block (a detected:false N/A is a valid,
           // non-error outcome). Surface the whole block so the UI can band/N-A it.
           if (!job.result) {
             throw new Error("Likeness compare returned no result.");
           }
           return job.result;
-        }
-        if (job.status === "failed" || job.status === "canceled" || job.status === "interrupted") {
-          throw new Error(job.message || job.error || "Likeness compare failed.");
-        }
-      }
-      throw new Error("Likeness compare timed out. Is the worker running?");
-    },
+        },
+        signal,
+        token,
+        startError: "Could not start the likeness compare.",
+        failureError: "Likeness compare failed.",
+        timeoutError: "Likeness compare timed out. Is the worker running?",
+      }),
     [token],
   );
 
