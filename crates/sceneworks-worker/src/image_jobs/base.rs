@@ -2975,6 +2975,13 @@ async fn consume_gen_events(
             );
         }
     };
+    // Bind the blocking generation task to its cancel flag (sc-8804, F-003): every `update_job`/
+    // `heartbeat` `?` in the loop below returns early on a transient POST failure or a 409
+    // (stale-sweep reclaim); on that early return this guard trips the engine `CancelFlag` and
+    // aborts the still-running denoise instead of leaving it burning GPU memory alongside the next
+    // claimed job. `cancel` is kept alongside (it's `Clone`) for the in-loop `begin_image_cancel`
+    // poller; the guard drives only the drop-time teardown.
+    let mut guard = CancelJoinGuard::new(cancel.clone(), blocking);
     // Heartbeat + cancel-poll on a fixed interval, not only when the blocking
     // thread emits an event. The cold model-load phase (multi-GB load + quantize)
     // emits nothing, so without an interval arm the worker reports no Busy
@@ -2983,7 +2990,10 @@ async fn consume_gen_events(
     // mirrors the caption-job select!-with-interval).
     let mut interval = tokio::time::interval(progress_report_interval(settings));
     interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-    loop {
+    // Run the event loop capturing its Result so any `?`-error path performs the explicit awaited
+    // bounded-join teardown BEFORE returning, instead of drop-and-run (sc-8804, F-003).
+    let loop_result: WorkerResult<()> = async {
+        loop {
         tokio::select! {
             maybe_event = rx.recv() => {
                 let Some(event) = maybe_event else {
@@ -3109,9 +3119,18 @@ async fn consume_gen_events(
                 }
             }
         }
+        }
+        Ok(())
+    }
+    .await;
+    if let Err(error) = loop_result {
+        guard.cancel_and_join().await;
+        return Err(error);
     }
 
-    let task_result = blocking
+    // Loop exited cleanly — reclaim the handle (disarming the drop-guard) and join the finished task.
+    let task_result = guard
+        .into_handle()
         .await
         .map_err(|error| task_join_error("generation task join", error))?;
     if canceled {

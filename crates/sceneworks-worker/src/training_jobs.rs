@@ -723,8 +723,16 @@ async fn run_training_execution(
                     "{engine_id} trainer rejected the plan: {error}"
                 ))
             })?;
+            // If the consumer loop has returned early (a POST failure / 409 dropped `rx`), the
+            // channel is closed. Detect that here and trip the engine cancel flag so the trainer
+            // bails at its next cooperative check instead of silently running to completion on a
+            // job nobody is listening to (sc-8804, F-003 — the swallowed-closed-channel leak). The
+            // `progress_cancel` clone is the same flag threaded into the `TrainingRequest`.
+            let progress_cancel = request.cancel.clone();
             let mut on_progress = |progress: TrainingProgress| {
-                let _ = tx.blocking_send(TrainEvent::Progress(progress));
+                if tx.blocking_send(TrainEvent::Progress(progress)).is_err() {
+                    progress_cancel.cancel();
+                }
             };
             let output = trainer
                 .train(&request, &mut on_progress)
@@ -802,6 +810,13 @@ async fn consume_training_events(
     cancel: CancelFlag,
     blocking: tokio::task::JoinHandle<WorkerResult<()>>,
 ) -> WorkerResult<()> {
+    // Bind the blocking training task to its cancel flag (sc-8804, F-003): every `update_job`/
+    // `heartbeat` `?` below returns early on a transient POST failure or a 409 (stale-sweep
+    // reclaim); on that early return this guard trips the engine `CancelFlag` and aborts the
+    // still-running training thread instead of leaving it burning GPU memory alongside the next
+    // claimed job. `cancel` is kept alongside (it's `Clone`) for the in-loop `begin_training_cancel`
+    // pollers; the guard drives only the drop-time teardown.
+    let mut guard = CancelJoinGuard::new(cancel.clone(), blocking);
     let mut canceled = false;
     let mut last_cancel_check = Instant::now();
     let mut checkpoints: Vec<Value> = Vec::new();
@@ -833,7 +848,10 @@ async fn consume_training_events(
 
     let mut heartbeat_interval = tokio::time::interval(progress_report_interval(settings));
     heartbeat_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-    loop {
+    // Run the event loop capturing its Result so any `?`-error path performs the explicit awaited
+    // bounded-join teardown BEFORE returning, instead of drop-and-run (sc-8804, F-003).
+    let loop_result: WorkerResult<()> = async {
+        loop {
         let event = tokio::select! {
             maybe_event = rx.recv() => match maybe_event {
                 Some(event) => event,
@@ -971,9 +989,19 @@ async fn consume_training_events(
                 .await?;
             }
         }
+        }
+        Ok(())
+    }
+    .await;
+    if let Err(error) = loop_result {
+        guard.cancel_and_join().await;
+        return Err(error);
     }
 
-    let task_result = blocking
+    // The event loop exited cleanly (channel closed after `Done`/cancel-drain), so the blocking
+    // task is finished or finishing — reclaim its handle (disarming the drop-guard) and join it.
+    let task_result = guard
+        .into_handle()
         .await
         .map_err(|error| task_join_error("training task join", error))?;
     if canceled {

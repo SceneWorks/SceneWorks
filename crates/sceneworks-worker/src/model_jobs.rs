@@ -1291,6 +1291,11 @@ pub(crate) async fn download_model_with_hf_cli(
         command.arg("--force-download");
     }
 
+    // sc-8804 (F-003): if the heartbeat/cancel `?` in the wait loop below returns early (a transient
+    // POST failure or a 409 stale-sweep reclaim), `child` is dropped without an explicit kill. A
+    // tokio child is not reaped on drop by default, so the `hf` transfer would keep running and
+    // writing partial files into the HF cache. `kill_on_drop` tears it down on any early return.
+    command.kill_on_drop(true);
     let mut child = command.spawn().map_err(|error| {
         WorkerError::Engine(format!(
             "Failed to start Hugging Face CLI. Falling back to direct downloads is only possible when the CLI is absent, not when it fails to launch: {error}"

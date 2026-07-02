@@ -452,7 +452,12 @@ pub(crate) async fn run_image_detail_job(
                 "sdxl detail load failed",
                 move |generator| {
                     let mut on_tile = |done: usize, total: usize| {
-                        let _ = tx.blocking_send((done, total));
+                        // A closed channel means the consumer loop returned early (POST failure /
+                        // 409); trip the engine flag so refinement bails instead of grinding
+                        // unheard (sc-8804, F-003 — the swallowed-closed-channel leak).
+                        if tx.blocking_send((done, total)).is_err() {
+                            cancel.cancel();
+                        }
                     };
                     refine_tiled_detail(generator, &source, &params_ref, &cancel, &mut on_tile)
                 },
@@ -461,6 +466,12 @@ pub(crate) async fn run_image_detail_job(
         })
     };
 
+    // Bind the blocking detail-refine task to its cancel flag (sc-8804, F-003): the `update_job`/
+    // `heartbeat` `?` in the loop below returns early on a transient POST failure or a 409
+    // (stale-sweep reclaim); on that early return this guard trips the engine `CancelFlag` and
+    // aborts the still-running tiled refinement instead of leaking it alongside the next claimed
+    // job. `cancel` is kept alongside (it's `Clone`) for the in-loop poller.
+    let mut guard = CancelJoinGuard::new(cancel.clone(), blocking);
     let mut last_cancel_check = Instant::now();
     let mut canceled = false;
     // Heartbeat + cancel-poll on a fixed interval, not only when the blocking thread
@@ -473,7 +484,10 @@ pub(crate) async fn run_image_detail_job(
     // rather than waiting for the tile-loop boundary check.
     let mut interval = tokio::time::interval(progress_report_interval(settings));
     interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-    loop {
+    // Run the tile loop capturing its Result so any `?`-error path performs the explicit awaited
+    // bounded-join teardown BEFORE returning, instead of drop-and-run (sc-8804, F-003).
+    let loop_result: WorkerResult<()> = async {
+        loop {
         tokio::select! {
             maybe_tile = rx.recv() => {
                 let Some((done, total)) = maybe_tile else {
@@ -516,9 +530,18 @@ pub(crate) async fn run_image_detail_job(
                 }
             }
         }
+        }
+        Ok(())
+    }
+    .await;
+    if let Err(error) = loop_result {
+        guard.cancel_and_join().await;
+        return Err(error);
     }
 
-    let join = blocking
+    // Loop exited cleanly — reclaim the handle (disarming the drop-guard) and join the finished task.
+    let join = guard
+        .into_handle()
         .await
         .map_err(|error| task_join_error("detail task join", error))?;
     if canceled {

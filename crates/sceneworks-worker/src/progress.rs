@@ -1,6 +1,186 @@
 //! Job status/progress plumbing: building [`ProgressRequest`]s and posting terminal/cancel states.
 use super::*;
 
+/// Grace window the [`CancelJoinGuard::cancel_and_join`] teardown gives the tripped engine to wind
+/// down cooperatively (sc-8804, F-003) before it force-abandons the task. The converted consumers
+/// wrap `tokio::task::spawn_blocking`, and `JoinHandle::abort()` is INERT on an already-running
+/// blocking task — so the teardown's real job is to AWAIT the task long enough for the engine's
+/// between-steps cancel-flag poll (a denoise step, a VAE decode, a checkpoint save, or the cold
+/// `gen_core::load()`/quantize) to actually stop the GPU work before the consumer returns and the
+/// worker claims the next job. 30s covers a between-steps cooperative stop for the slowest of those
+/// ops without being so long a genuinely wedged engine can hang the worker for minutes.
+pub(crate) const CANCEL_JOIN_GRACE: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// Hard abandon deadline (sc-8804, F-003): once the grace window elapses the teardown `abort()`s the
+/// handle (best-effort — inert on a running blocking task) and waits at most this long for the
+/// runtime to reap a cooperative task before giving up and letting the worker proceed regardless. A
+/// wedged blocking task can outlive this; the bound guarantees the worker is never blocked forever.
+pub(crate) const CANCEL_JOIN_ABANDON: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// RAII guard binding a running blocking/GPU task to the `select!`-loop that streams its progress
+/// (sc-8804, F-003). Every streaming consumer spawns a blocking task that owns a long GPU denoise
+/// or training run, then sits in a `select! { channel, interval }` loop posting progress via
+/// `update_job(...).await?` / `heartbeat(...).await?`. On a transient POST failure or a 409 (the
+/// stale-sweep reclaimed the job) that `?` returns the consumer early — but a bare
+/// `JoinHandle` does NOT stop its task when dropped, so the GPU/training thread keeps burning
+/// unified memory while the worker returns and claims the next job. That is two concurrent GPU
+/// workloads on one Metal device (the sc-8390 SIGKILL/OOM class).
+///
+/// This guard closes that gap. The PRIMARY teardown is [`Self::cancel_and_join`]: on any error path
+/// (the `?`-return shapes) the consumer calls it explicitly to trip the engine [`CancelFlag`] and
+/// then AWAIT a bounded join ([`CANCEL_JOIN_GRACE`] + [`CANCEL_JOIN_ABANDON`]) so the blocking GPU
+/// task has actually wound down (or hit the hard abandon deadline) before the job function yields
+/// and the worker claims the next job. `abort()` alone can't do this — it is inert on a running
+/// blocking task, so an awaited bounded join is the only teardown that satisfies "worker does not
+/// claim the next job until the GPU task wound down". The synchronous `Drop` remains as a
+/// best-effort backstop (trip + `abort()`) for any path that forgets the explicit teardown, but it
+/// cannot await and so must not be relied on as the primary mechanism. The happy path calls
+/// [`Self::into_handle`] to reclaim the raw handle and `.await` it normally — the guard is then
+/// inert (its `Drop` is a no-op), so a clean completion never aborts anything.
+///
+/// A cooperative cancel flag the guard can trip on drop. Implemented for BOTH cancel-flag types the
+/// worker threads through its blocking tasks — `gen_core::CancelFlag` (image/video/training/analysis)
+/// and `gen_core::core_llm::CancelFlag` (prompt-refine LLM), which are distinct types with the same
+/// `cancel()` surface — so one guard covers every streaming consumer regardless of which flag it holds.
+#[cfg_attr(
+    all(not(target_os = "macos"), not(feature = "backend-candle")),
+    allow(dead_code)
+)]
+pub(crate) trait CancelHandle {
+    fn cancel(&self);
+}
+
+impl CancelHandle for gen_core::CancelFlag {
+    fn cancel(&self) {
+        gen_core::CancelFlag::cancel(self)
+    }
+}
+
+// `gen_core::core_llm::CancelFlag` is a DIFFERENT type from `gen_core::CancelFlag` (the LLM stack's
+// own flag, re-exported through core_llm); it exposes the same `cancel()`. Implemented separately so
+// the prompt-refine consumer can use the same guard. On the plain-Linux parity build core_llm may
+// not link, but the guard is unused there anyway; guard the impl behind the same gate as the callers.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+impl CancelHandle for gen_core::core_llm::CancelFlag {
+    fn cancel(&self) {
+        gen_core::core_llm::CancelFlag::cancel(self)
+    }
+}
+
+/// Gated to the job handlers that use it (`any(target_os = "macos", feature = "backend-candle")`);
+/// on the plain-Linux parity build it is unused, so allow dead_code only there.
+#[cfg_attr(
+    all(not(target_os = "macos"), not(feature = "backend-candle")),
+    allow(dead_code)
+)]
+pub(crate) struct CancelJoinGuard<C: CancelHandle, R> {
+    cancel: Option<C>,
+    handle: Option<tokio::task::JoinHandle<R>>,
+}
+
+#[cfg_attr(
+    all(not(target_os = "macos"), not(feature = "backend-candle")),
+    allow(dead_code)
+)]
+impl<C: CancelHandle, R> CancelJoinGuard<C, R> {
+    /// Bind a spawned blocking task to its engine cancel flag. On an error path the consumer calls
+    /// [`Self::cancel_and_join`] to trip the flag and awaited-bounded-join the task before the job
+    /// function unwinds.
+    ///
+    /// Pass `None` for the flag ONLY when the task's engine exposes no cooperative cancel. In that
+    /// case there is a HONEST RESIDUAL: `cancel_and_join` still awaits the task for the grace window
+    /// (so the consumer does not drop-and-run), but with no flag to trip, a `spawn_blocking` task
+    /// that ignores `abort()` runs to its natural end — it is NOT stopped, only waited-for up to the
+    /// bounded deadline. Do not read the old "abort-on-drop still applies" as protection: `abort()`
+    /// is inert on a running blocking task. The `None`-cancel callers are single-shot detectors /
+    /// engine-API-locked generations whose engines can't yet be interrupted (sc-8804 residual,
+    /// tracked for real cancel-flag threading — notably SenseNova VQA, the one multi-minute case).
+    pub(crate) fn new(cancel: impl Into<Option<C>>, handle: tokio::task::JoinHandle<R>) -> Self {
+        Self {
+            cancel: cancel.into(),
+            handle: Some(handle),
+        }
+    }
+
+    /// Reclaim the raw [`JoinHandle`] on the success path so the caller can `.await` it. This
+    /// disarms the guard — its `Drop` becomes a no-op — so a clean completion never aborts the task.
+    pub(crate) fn into_handle(mut self) -> tokio::task::JoinHandle<R> {
+        // Disarm the guard: clear the cancel flag too so the ensuing `Drop` is a total no-op — a
+        // clean completion must neither cancel nor abort the reclaimed task.
+        self.cancel = None;
+        self.handle.take().expect("guard handle taken exactly once")
+    }
+
+    /// Mutable access to the wrapped [`JoinHandle`] so a consumer that owns its own `select!` loop
+    /// can poll the task in-place (`&mut *guard.handle_mut()`) while the guard keeps the
+    /// cancel-and-abort-on-drop protection armed for every early `?` return in that loop.
+    pub(crate) fn handle_mut(&mut self) -> &mut tokio::task::JoinHandle<R> {
+        self.handle.as_mut().expect("guard handle present")
+    }
+
+    /// Disarm the guard after the wrapped task has already resolved through `handle_mut()`: drop
+    /// the (finished) handle and clear the cancel flag so the ensuing `Drop` neither cancels nor
+    /// aborts. Used by the two heartbeat helpers, which poll the task in-place and then need to
+    /// stand the guard down once its arm has completed.
+    pub(crate) fn disarm(&mut self) {
+        self.cancel = None;
+        // The task has resolved; drop its handle without touching the flag. (A resolved handle's
+        // drop is a no-op teardown, and dropping the raw handle here avoids a future-drop lint.)
+        drop(self.handle.take());
+    }
+
+    /// PRIMARY error-path teardown (sc-8804, F-003). Trip the engine cancel flag (cooperative bail),
+    /// then AWAIT a bounded join of the blocking task so the GPU/training work has actually wound
+    /// down before the consumer returns and the worker claims the next job. `abort()` is inert on an
+    /// already-running blocking task, so the awaited join — NOT the abort — is what closes the
+    /// double-GPU window: it holds the job function until the engine's between-steps cancel poll
+    /// stops the work, up to [`CANCEL_JOIN_GRACE`]. If the grace window elapses (a wedged / not-yet-
+    /// cancellable op) it `abort()`s (best effort) and waits at most [`CANCEL_JOIN_ABANDON`] more for
+    /// a cooperative task to be reaped, then returns regardless so a stuck engine can never hang the
+    /// worker forever. Idempotent: after it runs, the guard is disarmed (its `Drop` is a no-op).
+    ///
+    /// Must be called on EVERY error path — the `?` on a progress/heartbeat POST failure and the
+    /// channel-close path alike — before the error propagates out of the job function.
+    pub(crate) async fn cancel_and_join(&mut self) {
+        if let Some(cancel) = self.cancel.take() {
+            cancel.cancel();
+        }
+        let Some(mut handle) = self.handle.take() else {
+            return;
+        };
+        // Bounded cooperative wind-down: await the task itself so the consumer does not return while
+        // the GPU work is still live. A between-steps cancel poll resolves the handle here.
+        if tokio::time::timeout(CANCEL_JOIN_GRACE, &mut handle)
+            .await
+            .is_ok()
+        {
+            return;
+        }
+        // Grace exceeded — the op did not reach a cancel checkpoint in time. `abort()` (inert on a
+        // running blocking task, effective on a cooperative async one), then give the runtime a
+        // bounded window to reap it before we abandon the wait and let the worker proceed.
+        handle.abort();
+        let _ = tokio::time::timeout(CANCEL_JOIN_ABANDON, handle).await;
+    }
+}
+
+impl<C: CancelHandle, R> Drop for CancelJoinGuard<C, R> {
+    fn drop(&mut self) {
+        // Reached only on an early/error return that never called `into_handle` — trip the engine
+        // cancel flag (cooperative bail) and abort the task (non-cooperative teardown) so the GPU
+        // work stops instead of leaking alongside the next claimed job (sc-8804).
+        if let Some(cancel) = self.cancel.take() {
+            cancel.cancel();
+        }
+        if let Some(handle) = self.handle.take() {
+            handle.abort();
+        }
+    }
+}
+
 pub(crate) async fn fail_job(
     api: &ApiClient,
     job_id: &str,
@@ -73,7 +253,18 @@ pub(crate) async fn mark_job_canceled(
 /// `WorkerStatus::Busy` every interval without posting any intermediate job status. When `cancel`
 /// is `Some`, it also polls the API for a user cancel and trips the flag; un-interruptible compute
 /// finishes its current op, then we post the terminal `Canceled` (`cancel_message`) and return
-/// `WorkerError::Canceled`. Pass `None` for paths with no cancelable work (heartbeat only).
+/// `WorkerError::Canceled`. On a heartbeat POST failure it performs the F-003 teardown
+/// (`guard.cancel_and_join()`) before returning the error, so a `Some(cancel)` task is bounded-
+/// joined rather than dropped-and-run (sc-8804).
+///
+/// Pass `None` ONLY for paths whose engine has no cancellable surface. HONEST RESIDUAL: with
+/// `None` there is no flag to trip, so the teardown can only AWAIT the task (up to the grace
+/// window) — a `spawn_blocking` task that ignores `abort()` still runs to its natural end. The
+/// current `None` callers are single-shot detectors (kps/SCRFD, person-detect/YOLO11), an ArcFace
+/// embedding compare, and SenseNova VQA/generation; only the last is long enough that a real cancel
+/// flag would matter, and threading one requires changing the engine's generation API (sc-8804
+/// residual, tracked). Do NOT re-add a "abort-on-drop still applies" claim — abort is inert on a
+/// running blocking task.
 ///
 /// Every consumer is a job handler gated behind `any(target_os = "macos", feature =
 /// "backend-candle")`, so on the plain-Linux parity build (neither) this is unused — allow
@@ -89,17 +280,29 @@ pub(crate) async fn run_blocking_with_heartbeat<R>(
     cancel: Option<gen_core::CancelFlag>,
     cancel_message: &str,
     task_label: &'static str,
-    mut task: tokio::task::JoinHandle<WorkerResult<R>>,
+    task: tokio::task::JoinHandle<WorkerResult<R>>,
 ) -> WorkerResult<R>
 where
     R: Send + 'static,
 {
+    // Bind the blocking task to its cancel flag. On any heartbeat/`?` early return below we perform
+    // the explicit awaited bounded-join teardown (`guard.cancel_and_join()`) BEFORE the error
+    // propagates, so the still-running GPU task is actually wound down (or hard-abandoned) before
+    // this function yields and the worker claims the next job — a bare `abort()` on drop is inert on
+    // a running blocking task and would leak it (sc-8804, F-003).
+    let mut guard: CancelJoinGuard<gen_core::CancelFlag, WorkerResult<R>> =
+        CancelJoinGuard::new(cancel.clone(), task);
     let mut canceled = false;
     let mut interval = tokio::time::interval(progress_report_interval(settings));
     interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     loop {
         tokio::select! {
-            result = &mut task => {
+            result = &mut *guard.handle_mut() => {
+                // The task has RESOLVED. Disarm the guard first (before any `?`) so a task/join
+                // error never drops an armed guard and re-aborts an already-finished handle
+                // (reviewer note: `??` used to precede disarm). The reclaimed value is handled
+                // below; the guard is now inert.
+                guard.disarm();
                 let value = result.map_err(|error| task_join_error(task_label, error))?;
                 // An engine that honors the tripped `cancel` flag itself (the per-frame video
                 // cancel contract, gen-core d8038beb) surfaces `WorkerError::Canceled` from
@@ -118,7 +321,14 @@ where
                 return Ok(value);
             }
             _ = interval.tick() => {
-                heartbeat(api, settings, WorkerStatus::Busy, Some(job_id)).await?;
+                // A heartbeat POST failure / 409 here must NOT drop-and-run: bounded-join the task
+                // first so the GPU work has wound down before we return the error (sc-8804).
+                if let Err(error) =
+                    heartbeat(api, settings, WorkerStatus::Busy, Some(job_id)).await
+                {
+                    guard.cancel_and_join().await;
+                    return Err(error);
+                }
                 if let Some(flag) = &cancel {
                     if !canceled && cancel_requested_peek(api, job_id).await {
                         flag.cancel();

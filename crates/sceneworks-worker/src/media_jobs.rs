@@ -2584,6 +2584,11 @@ pub(crate) async fn run_ffmpeg(
         .args(arguments)
         .stdout(Stdio::null())
         .stderr(Stdio::piped())
+        // sc-8804 (F-003): if the heartbeat/cancel `?` below returns early (a transient POST
+        // failure or a 409 stale-sweep reclaim), `child` is dropped without an explicit kill. A
+        // tokio child is not reaped on drop by default, so ffmpeg would keep running and writing a
+        // partial output file. `kill_on_drop` tears it down on any early return.
+        .kill_on_drop(true)
         .spawn()
         .map_err(|error| {
             WorkerError::Engine(format!(

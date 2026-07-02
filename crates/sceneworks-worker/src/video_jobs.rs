@@ -2743,7 +2743,12 @@ async fn generate_video(
                 "video load failed",
                 move |generator| {
                     let mut on_progress = |progress: Progress| {
-                        let _ = tx.blocking_send(progress);
+                        // A closed channel means the consumer loop returned early (POST failure /
+                        // 409); trip the engine flag so the denoise bails instead of running unheard
+                        // (sc-8804, F-003 — the swallowed-closed-channel leak).
+                        if tx.blocking_send(progress).is_err() {
+                            cancel.cancel();
+                        }
                     };
                     run_loaded_video_generation(generator, input, &cancel, &mut on_progress)
                 },
@@ -2752,6 +2757,13 @@ async fn generate_video(
         })
     };
 
+    // Bind the blocking generation task to its cancel flag (sc-8804, F-003): every `update_job`/
+    // `heartbeat` `?` in the loop below returns early on a transient POST failure or a 409
+    // (stale-sweep reclaim); on that early return this guard trips the engine `CancelFlag` and
+    // aborts the still-running denoise instead of leaving it burning GPU memory alongside the next
+    // claimed job. The stall/abandon watchdog and final join reach through `guard.handle_mut()` /
+    // `guard.into_handle()`. `cancel` is kept alongside (it's `Clone`) for the in-loop pollers.
+    let mut guard = CancelJoinGuard::new(cancel.clone(), blocking);
     let mut canceled = false;
     // Set when the watchdog (not the user) tripped, so the job is failed with a stall error
     // rather than reported as a clean user cancellation.
@@ -2771,80 +2783,91 @@ async fn generate_video(
     // the caption-job select!-with-interval).
     let mut interval = tokio::time::interval(crate::progress_report_interval(settings));
     interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-    loop {
-        tokio::select! {
-            maybe_progress = rx.recv() => {
-                let Some(progress) = maybe_progress else {
-                    break;
-                };
-                last_progress = Instant::now(); // forward progress — reset the stall watchdog.
-                if canceled {
-                    continue; // drain so the blocking sender never blocks.
-                }
-        if last_cancel.elapsed() >= Duration::from_secs(2) {
-            last_cancel = Instant::now();
-            if cancel_requested_peek(api, &job.id).await {
-                begin_video_cancel(api, &job.id, &cancel, backend).await;
-                canceled = true;
-                continue;
-            }
-            heartbeat(api, settings, WorkerStatus::Busy, Some(&job.id)).await?;
-        }
-        let (fraction, message) = match progress {
-            Progress::Step { current, total } => (
-                0.25 + 0.30 * (current as f64 / total.max(1) as f64),
-                format!("Generating frames — step {current}/{total}."),
-            ),
-            Progress::Decoding => (0.58, "Decoding frames.".to_owned()),
-        };
-        update_job(
-            api,
-            &job.id,
-            video_progress(
-                JobStatus::Running,
-                ProgressStage::Generating,
-                fraction,
-                &message,
-                None,
-                backend,
-            ),
-        )
-        .await?;
-            }
-            _ = interval.tick() => {
-                heartbeat(api, settings, WorkerStatus::Busy, Some(&job.id)).await?;
-                if !canceled && last_cancel.elapsed() >= Duration::from_secs(2) {
-                    last_cancel = Instant::now();
-                    if cancel_requested_peek(api, &job.id).await {
-                        begin_video_cancel(api, &job.id, &cancel, backend).await;
-                        canceled = true;
-                    }
-                }
-                // Forward-progress watchdog: a wedged engine keeps this async loop heartbeating
-                // (the block runs on a separate thread), so the API sees a healthy job forever.
-                // If no progress has arrived for `stall_timeout`, request engine cancel and start
-                // the abandon countdown.
-                if !canceled && last_progress.elapsed() >= stall_timeout {
-                    tracing::warn!(
-                        event = "rust_worker_video_stalled",
-                        jobId = %job.id,
-                        engine = %log_engine_id,
-                        stallSeconds = stall_timeout.as_secs(),
-                        "no progress within the stall window — requesting engine cancel"
-                    );
-                    cancel.cancel();
-                    canceled = true;
-                    stalled = true;
-                    abandon_deadline = Some(Instant::now() + VIDEO_STALL_GRACE);
-                }
-                if let Some(deadline) = abandon_deadline {
-                    if Instant::now() >= deadline {
-                        abandoned = true;
+    // Run the progress loop capturing its Result so any `?`-error path performs the explicit awaited
+    // bounded-join teardown BEFORE returning, instead of drop-and-run (sc-8804, F-003). The stall/
+    // abandon watchdog inside the loop still handles the hard-wedge case via `abandoned`.
+    let loop_result: WorkerResult<()> = async {
+        loop {
+            tokio::select! {
+                maybe_progress = rx.recv() => {
+                    let Some(progress) = maybe_progress else {
                         break;
+                    };
+                    last_progress = Instant::now(); // forward progress — reset the stall watchdog.
+                    if canceled {
+                        continue; // drain so the blocking sender never blocks.
+                    }
+            if last_cancel.elapsed() >= Duration::from_secs(2) {
+                last_cancel = Instant::now();
+                if cancel_requested_peek(api, &job.id).await {
+                    begin_video_cancel(api, &job.id, &cancel, backend).await;
+                    canceled = true;
+                    continue;
+                }
+                heartbeat(api, settings, WorkerStatus::Busy, Some(&job.id)).await?;
+            }
+            let (fraction, message) = match progress {
+                Progress::Step { current, total } => (
+                    0.25 + 0.30 * (current as f64 / total.max(1) as f64),
+                    format!("Generating frames — step {current}/{total}."),
+                ),
+                Progress::Decoding => (0.58, "Decoding frames.".to_owned()),
+            };
+            update_job(
+                api,
+                &job.id,
+                video_progress(
+                    JobStatus::Running,
+                    ProgressStage::Generating,
+                    fraction,
+                    &message,
+                    None,
+                    backend,
+                ),
+            )
+            .await?;
+                }
+                _ = interval.tick() => {
+                    heartbeat(api, settings, WorkerStatus::Busy, Some(&job.id)).await?;
+                    if !canceled && last_cancel.elapsed() >= Duration::from_secs(2) {
+                        last_cancel = Instant::now();
+                        if cancel_requested_peek(api, &job.id).await {
+                            begin_video_cancel(api, &job.id, &cancel, backend).await;
+                            canceled = true;
+                        }
+                    }
+                    // Forward-progress watchdog: a wedged engine keeps this async loop heartbeating
+                    // (the block runs on a separate thread), so the API sees a healthy job forever.
+                    // If no progress has arrived for `stall_timeout`, request engine cancel and start
+                    // the abandon countdown.
+                    if !canceled && last_progress.elapsed() >= stall_timeout {
+                        tracing::warn!(
+                            event = "rust_worker_video_stalled",
+                            jobId = %job.id,
+                            engine = %log_engine_id,
+                            stallSeconds = stall_timeout.as_secs(),
+                            "no progress within the stall window — requesting engine cancel"
+                        );
+                        cancel.cancel();
+                        canceled = true;
+                        stalled = true;
+                        abandon_deadline = Some(Instant::now() + VIDEO_STALL_GRACE);
+                    }
+                    if let Some(deadline) = abandon_deadline {
+                        if Instant::now() >= deadline {
+                            abandoned = true;
+                            break;
+                        }
                     }
                 }
             }
         }
+        Ok(())
+    }
+    .await;
+    if let Err(error) = loop_result {
+        guard.cancel_and_join().await;
+        return Err(error);
     }
 
     if abandoned {
@@ -2860,10 +2883,12 @@ async fn generate_video(
             "engine did not respond to cancellation within the grace window — exiting the worker \
              so the supervisor can recover the wedged GPU task"
         );
-        blocking.abort();
+        guard.handle_mut().abort();
         std::process::exit(70);
     }
-    let result = blocking
+    // Loop exited cleanly — reclaim the handle (disarming the drop-guard) and join the finished task.
+    let result = guard
+        .into_handle()
         .await
         .map_err(|error| task_join_error("video task join", error))?;
     if stalled {
