@@ -4225,8 +4225,7 @@ mod stub_fallback_gate {
 // wiring relies on, with a stand-in blocking task in place of the real (weights-requiring)
 // propagate: (a) the worker heartbeat is pinged while the task runs, (b) the API cancel poll
 // trips the threaded `CancelFlag`, and (c) the terminal `Canceled` is posted whether the task
-// honors the flag itself (the MLX per-frame cancel contract) or runs to completion first (the
-// candle coarse-seam lane, sc-8972).
+// honors the flag itself or completes before the flag is tripped.
 // ---------------------------------------------------------------------------
 
 #[derive(Clone)]
@@ -4336,8 +4335,8 @@ async fn keepalive_posts_terminal_canceled_when_the_task_honors_the_flag() {
     );
 }
 
-/// The candle lane (coarse seams only until sc-8972): the compute cannot observe the flag
-/// mid-propagate and runs to completion — the keepalive still posts the terminal `Canceled` with
+/// A task that completes before the flag is observed: the compute finishes and returns `Ok`
+/// before it sees the tripped flag — the keepalive still posts the terminal `Canceled` with
 /// its own cancel copy and returns `WorkerError::Canceled`.
 #[tokio::test]
 async fn keepalive_cancels_the_job_even_when_the_task_cannot_observe_the_flag() {
@@ -4351,7 +4350,7 @@ async fn keepalive_cancels_the_job_even_when_the_task_cannot_observe_the_flag() 
     let wait_flag = flag.clone();
     let task = tokio::task::spawn_blocking(move || -> super::WorkerResult<u32> {
         // Wait until the keepalive has tripped the flag (so `canceled` is set before we return),
-        // then finish successfully — the uncancellable-compute shape.
+        // then finish successfully — the completes-before-observing-the-flag shape.
         let start = std::time::Instant::now();
         while !wait_flag.is_cancelled() && start.elapsed() < Duration::from_secs(30) {
             std::thread::sleep(Duration::from_millis(10));
