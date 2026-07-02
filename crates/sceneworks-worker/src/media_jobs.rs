@@ -1176,8 +1176,9 @@ async fn segment_assembly_frames(
         Err(_) => return Ok("degraded"),
     };
     // Keepalive + user cancel across the blocking segment step (sc-8390 / sc-8807), mirroring the
-    // macOS twin. The pinned candle-gen-sam3 propagate takes no cancel/progress params yet
-    // (sc-8972), so the tripped flag stops at the coarse seams (cold parse / model build) only.
+    // macOS twin: the keepalive's cancel poll trips `cancel`, which the engine's per-frame
+    // propagate contract (sc-8972, the candle sibling of gen-core d8038beb) observes between
+    // frames — not just at the coarse seams (cold parse / model build).
     let cancel = gen_core::CancelFlag::new();
     let flag = cancel.clone();
     let outcome = run_blocking_with_heartbeat(
@@ -1194,6 +1195,9 @@ async fn segment_assembly_frames(
                 clip_paths,
                 anchors,
                 Some(flag),
+                Some(Box::new(|frame, total| {
+                    tracing::debug!(event = "sam3_propagate_progress", frame, total);
+                })),
             )
         }),
     )
