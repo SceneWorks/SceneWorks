@@ -7,7 +7,7 @@ import React, { act } from "react";
 import { createRoot } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { API_BASE_URL, getMediaTicket, setMediaTicket, withMediaTicket } from "./api.js";
-import { assetUrl, posterUrl } from "./components/assetMedia.jsx";
+import { AssetThumbnail, assetUrl, posterUrl } from "./components/assetMedia.jsx";
 import { AssetDetail } from "./components/assetPanels.jsx";
 import { keypointSourceImageUrl } from "./keypointLibrary.js";
 
@@ -84,6 +84,49 @@ describe("asset URL producers carry the media ticket", () => {
     setMediaTicket("t0ken");
     const url = keypointSourceImageUrl("assets/keypoints/asset_x.png");
     expect(url).toContain("/files/assets/keypoints/asset_x.png?ticket=t0ken");
+  });
+});
+
+// sc-9063: when the media-ticket mint fails, data loads anyway and un-ticketed
+// thumbnails 401 into the "deleted" placeholder. The placeholder must be
+// per-URL, not permanent — once a retried mint lands and the src gains the
+// ticket query param, the thumbnail retries instead of sticking on the marker.
+describe("thumbnail placeholders retry when the media URL changes (sc-9063)", () => {
+  let container;
+  let root;
+
+  beforeEach(() => {
+    global.IS_REACT_ACT_ENVIRONMENT = true;
+    container = document.createElement("div");
+    document.body.appendChild(container);
+    root = createRoot(container);
+  });
+
+  afterEach(async () => {
+    await act(async () => root.unmount());
+    container.remove();
+  });
+
+  it("recovers from the deleted-asset marker once a ticketed URL arrives", async () => {
+    setMediaTicket("");
+    await act(async () => root.render(<AssetThumbnail asset={imageAsset} />));
+    const img = container.querySelector("img");
+    expect(img).not.toBeNull();
+
+    // Un-ticketed URL 401s in remote-auth mode → thumbnail degrades to the marker.
+    await act(async () => {
+      img.dispatchEvent(new window.Event("error"));
+    });
+    expect(container.querySelector("img")).toBeNull();
+    expect(container.querySelector(".asset-thumb-missing")).not.toBeNull();
+
+    // A mint retry lands: the ticketed src is a new URL, so the thumb retries.
+    setMediaTicket("late-ticket");
+    await act(async () => root.render(<AssetThumbnail asset={{ ...imageAsset }} />));
+    const retried = container.querySelector("img");
+    expect(retried).not.toBeNull();
+    expect(retried.src).toContain("ticket=late-ticket");
+    expect(container.querySelector(".asset-thumb-missing")).toBeNull();
   });
 });
 

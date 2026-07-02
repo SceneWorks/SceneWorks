@@ -555,7 +555,13 @@ export function App() {
     });
   }, []);
   const dismissNoticeKind = useCallback((kind) => {
-    setNotices((current) => current.filter((notice) => notice.kind !== kind));
+    setNotices((current) => {
+      // Bail to the same array when nothing matches — callers run this on hot
+      // paths (e.g. every media-ticket refresh), and returning a fresh array
+      // would force a no-op re-render of the whole app each time.
+      const next = current.filter((notice) => notice.kind !== kind);
+      return next.length === current.length ? current : next;
+    });
   }, []);
   // Back-compat: the existing setError(msg)/setError("") call sites map onto the
   // "general" notice kind — a truthy message replaces it, "" dismisses only it.
@@ -824,10 +830,24 @@ export function App() {
   // stored (mediaReady), otherwise thumbnails rendered in the gap would 401 and
   // stick as "deleted" placeholders. When auth is off this resolves immediately.
   const [mediaReady, setMediaReady] = useState(false);
-  const ready = authenticated && mediaReady;
+  // sc-9063 (F-008 follow-up): a persistently failing mint must not blank the whole
+  // app. `ready` waits for the first mint attempt to SETTLE (success or failure),
+  // not for a success: once a mint fails, lists/metadata load anyway — media
+  // degrades to placeholders and recovers when a retry lands — and a "media-ticket"
+  // notice tells the user why media is broken while the backoff keeps retrying.
+  const [mediaTicketFailed, setMediaTicketFailed] = useState(false);
+  const ready = authenticated && (mediaReady || mediaTicketFailed);
 
   useEffect(() => {
     if (!authenticated || !accessResolved) {
+      // Lock/logout stops the mint loop (cleanup above cleared the backoff timer),
+      // so drop the settled gate: the next unlock must re-run sc-8810's
+      // mint-before-data ordering rather than ride a stale mediaReady/
+      // mediaTicketFailed, and the "Retrying in the background" notice must not
+      // linger on the lock screen while no retry is actually running.
+      setMediaReady(false);
+      setMediaTicketFailed(false);
+      dismissNoticeKind("media-ticket");
       return undefined;
     }
     if (!access.authRequired) {
@@ -849,6 +869,8 @@ export function App() {
         }
         setMediaTicket(response.ticket);
         setMediaReady(true);
+        setMediaTicketFailed(false);
+        dismissNoticeKind("media-ticket");
         attempt = 0;
         const ttlMs = Math.max(15, Number(response.expiresInSeconds) || 0) * 1000;
         timer = window.setTimeout(acquire, Math.max(5000, Math.floor(ttlMs / 3)));
@@ -856,6 +878,11 @@ export function App() {
         if (closed) {
           return;
         }
+        setMediaTicketFailed(true);
+        pushNotice(
+          "media-ticket",
+          "media authorization: couldn't obtain a media ticket, so thumbnails, previews, and downloads may fail to load. Retrying in the background.",
+        );
         const delay = Math.min(30000, 1000 * 2 ** attempt);
         attempt += 1;
         timer = window.setTimeout(acquire, delay);
@@ -868,7 +895,7 @@ export function App() {
         window.clearTimeout(timer);
       }
     };
-  }, [access.authRequired, accessResolved, authenticated, token]);
+  }, [access.authRequired, accessResolved, authenticated, token, pushNotice, dismissNoticeKind]);
   const imageModels = useMemo(() => {
     const items = models.filter((model) => model.type === "image" && model.installState !== "missing");
     return items.length || models.length ? items : fallbackModels.filter((model) => model.type === "image");
@@ -1234,7 +1261,8 @@ export function App() {
 
   useEffect(() => {
     // Gated on `ready` (not just `authenticated`): SSE job updates carry assets whose
-    // thumbnails render immediately, so the media ticket must exist first (sc-8810).
+    // thumbnails render immediately, so the media-ticket mint must have settled first
+    // (sc-8810; sc-9063 lets a failed mint through — media degrades, data flows).
     if (!ready) {
       return undefined;
     }
