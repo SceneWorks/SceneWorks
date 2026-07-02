@@ -73,18 +73,7 @@ fn zimage_edit_candle_available(request: &ImageRequest, settings: &Settings) -> 
 
 /// Resolve denoise steps: `advanced.steps` (clamped 1..=50) → manifest `steps` → default (4, distilled).
 fn zimage_edit_candle_steps(request: &ImageRequest) -> u32 {
-    let parse = |value: &Value| {
-        value
-            .as_u64()
-            .or_else(|| value.as_str()?.trim().parse().ok())
-    };
-    request
-        .advanced
-        .get("steps")
-        .and_then(parse)
-        .or_else(|| request.model_manifest_entry.get("steps").and_then(parse))
-        .map(|steps| steps.clamp(1, 50) as u32)
-        .unwrap_or(ZIMAGE_EDIT_CANDLE_DEFAULT_STEPS)
+    resolve_advanced_or_manifest_u32(request, "steps", ZIMAGE_EDIT_CANDLE_DEFAULT_STEPS, 1..=50)
 }
 
 /// Load the source asset (required for an edit) — mirrors the MLX `resolve_zimage_edit_init` source load.

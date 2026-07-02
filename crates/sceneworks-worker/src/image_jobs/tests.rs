@@ -172,6 +172,327 @@ fn steps_default_is_family_default_and_clamps() {
     );
 }
 
+// The shared advanced→manifest→default resolvers the bespoke edit/adapter/control lanes call
+// (sc-8825). Gated identically to the resolvers themselves so they compile on the macOS AND
+// backend-candle lanes. These lock the four behaviors the per-lane inline closures had:
+// advanced wins, manifest is the fallback, absent → the (unclamped) default, and the
+// advanced-or-manifest value is clamped to the caller's range while garbage parses to the default.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+#[test]
+fn resolve_advanced_or_manifest_u32_precedence_and_clamp() {
+    // advanced present wins and is clamped to the caller's range.
+    assert_eq!(
+        resolve_advanced_or_manifest_u32(
+            &request(json!({ "projectId": "p", "advanced": { "steps": 12 } })),
+            "steps",
+            30,
+            1..=80,
+        ),
+        12
+    );
+    assert_eq!(
+        resolve_advanced_or_manifest_u32(
+            &request(json!({ "projectId": "p", "advanced": { "steps": 200 } })),
+            "steps",
+            30,
+            1..=80,
+        ),
+        80
+    );
+    assert_eq!(
+        resolve_advanced_or_manifest_u32(
+            &request(json!({ "projectId": "p", "advanced": { "steps": 0 } })),
+            "steps",
+            30,
+            1..=80,
+        ),
+        1
+    );
+    // A numeric string parses just like a JSON int.
+    assert_eq!(
+        resolve_advanced_or_manifest_u32(
+            &request(json!({ "projectId": "p", "advanced": { "steps": "24" } })),
+            "steps",
+            30,
+            1..=100,
+        ),
+        24
+    );
+    // advanced absent → manifest fallback (also clamped).
+    assert_eq!(
+        resolve_advanced_or_manifest_u32(
+            &request(json!({ "projectId": "p", "modelManifestEntry": { "steps": 200 } })),
+            "steps",
+            30,
+            1..=100,
+        ),
+        100
+    );
+    // Both absent → the default, returned UNCLAMPED (the distilled 4-step default survives a 1..=50
+    // range — clamping the default here would be a behavior change).
+    assert_eq!(
+        resolve_advanced_or_manifest_u32(&request(json!({ "projectId": "p" })), "steps", 4, 1..=50,),
+        4
+    );
+    // Un-parseable advanced → NOT a fallback to manifest (matches the inline closures: a present-but-
+    // garbage advanced value fails the parse and the closure moves on to manifest, then default).
+    assert_eq!(
+        resolve_advanced_or_manifest_u32(
+            &request(json!({ "projectId": "p", "advanced": { "steps": "abc" } })),
+            "steps",
+            30,
+            1..=80,
+        ),
+        30
+    );
+}
+
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+#[test]
+fn resolve_advanced_or_manifest_f32_precedence_and_clamp() {
+    // advanced present wins and is clamped to the caller's range.
+    assert_eq!(
+        resolve_advanced_or_manifest_f32(
+            &request(json!({ "projectId": "p", "advanced": { "guidanceScale": 7.5 } })),
+            "guidanceScale",
+            5.0,
+            0.0..=30.0,
+        ),
+        7.5
+    );
+    assert_eq!(
+        resolve_advanced_or_manifest_f32(
+            &request(json!({ "projectId": "p", "advanced": { "guidanceScale": 99.0 } })),
+            "guidanceScale",
+            5.0,
+            0.0..=30.0,
+        ),
+        30.0
+    );
+    // A numeric string parses just like a JSON float.
+    assert_eq!(
+        resolve_advanced_or_manifest_f32(
+            &request(json!({ "projectId": "p", "advanced": { "guidanceScale": "2.5" } })),
+            "guidanceScale",
+            5.0,
+            0.0..=30.0,
+        ),
+        2.5
+    );
+    // advanced absent → manifest fallback (also clamped).
+    assert_eq!(
+        resolve_advanced_or_manifest_f32(
+            &request(json!({ "projectId": "p", "modelManifestEntry": { "guidanceScale": 99.0 } })),
+            "guidanceScale",
+            5.0,
+            0.0..=30.0,
+        ),
+        30.0
+    );
+    // Both absent → the per-lane default.
+    assert_eq!(
+        resolve_advanced_or_manifest_f32(
+            &request(json!({ "projectId": "p" })),
+            "guidanceScale",
+            4.0,
+            0.0..=30.0,
+        ),
+        4.0
+    );
+    // Un-parseable advanced → the f32 reader falls back to the manifest default (here the lane
+    // default 5.0), then clamps — matching the historical `f32_clamped` call.
+    assert_eq!(
+        resolve_advanced_or_manifest_f32(
+            &request(json!({ "projectId": "p", "advanced": { "guidanceScale": "abc" } })),
+            "guidanceScale",
+            5.0,
+            0.0..=30.0,
+        ),
+        5.0
+    );
+}
+
+// The closure-default twins (sc-8825) the model-dependent-default lanes call
+// (`flux_ipadapter`, `qwen_edit_candle`/`zimage_control` per-variant steps). Same
+// precedence/clamp contract as the const twins, PLUS: the `default_fn` fires ONLY when both
+// advanced and manifest are absent (a present advanced/manifest value must short-circuit it).
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+#[test]
+fn resolve_advanced_or_manifest_u32_with_precedence_clamp_and_lazy_default() {
+    use std::cell::Cell;
+
+    // advanced present wins, clamped — default_fn NOT invoked.
+    let called = Cell::new(false);
+    assert_eq!(
+        resolve_advanced_or_manifest_u32_with(
+            &request(json!({ "projectId": "p", "advanced": { "steps": 200 } })),
+            "steps",
+            || {
+                called.set(true);
+                25
+            },
+            1..=100,
+        ),
+        100
+    );
+    assert!(
+        !called.get(),
+        "default_fn must not fire when advanced is present"
+    );
+
+    // manifest fallback wins, clamped — default_fn NOT invoked.
+    let called = Cell::new(false);
+    assert_eq!(
+        resolve_advanced_or_manifest_u32_with(
+            &request(json!({ "projectId": "p", "modelManifestEntry": { "steps": 0 } })),
+            "steps",
+            || {
+                called.set(true);
+                25
+            },
+            1..=100,
+        ),
+        1
+    );
+    assert!(
+        !called.get(),
+        "default_fn must not fire when manifest supplies the value"
+    );
+
+    // Both absent → default_fn IS invoked, its value returned UNCLAMPED (distilled 4 survives 1..=50).
+    let called = Cell::new(false);
+    assert_eq!(
+        resolve_advanced_or_manifest_u32_with(
+            &request(json!({ "projectId": "p" })),
+            "steps",
+            || {
+                called.set(true);
+                4
+            },
+            1..=50,
+        ),
+        4
+    );
+    assert!(
+        called.get(),
+        "default_fn must fire when advanced and manifest are both absent"
+    );
+
+    // Un-parseable advanced → falls through to the (here absent) manifest, then default_fn.
+    let called = Cell::new(false);
+    assert_eq!(
+        resolve_advanced_or_manifest_u32_with(
+            &request(json!({ "projectId": "p", "advanced": { "steps": "abc" } })),
+            "steps",
+            || {
+                called.set(true);
+                30
+            },
+            1..=80,
+        ),
+        30
+    );
+    assert!(called.get(), "garbage advanced falls through to default_fn");
+}
+
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+#[test]
+fn resolve_advanced_or_manifest_f32_with_precedence_clamp_and_lazy_default() {
+    use std::cell::Cell;
+
+    // NOTE: the f32 variant's `default_fn` supplies the MANIFEST fallback (which `f32_clamped` then
+    // treats as the reader default), so — matching the original inline `manifest.get(..).unwrap_or_else`
+    // — it fires whenever the MANIFEST key is absent, INDEPENDENTLY of whether advanced is present. This
+    // differs from the u32 twin (whose closure is the whole-chain fallback and fires only when BOTH are
+    // absent). These asserts lock that preserved semantic.
+
+    // advanced present wins and is clamped; manifest absent so default_fn still runs to build the
+    // (discarded) manifest fallback — byte-identical to the pre-fold inline code.
+    let called = Cell::new(false);
+    assert_eq!(
+        resolve_advanced_or_manifest_f32_with(
+            &request(json!({ "projectId": "p", "advanced": { "guidanceScale": 99.0 } })),
+            "guidanceScale",
+            || {
+                called.set(true);
+                3.5
+            },
+            0.0..=30.0,
+        ),
+        30.0
+    );
+    assert!(
+        called.get(),
+        "f32 default_fn builds the manifest fallback whenever the manifest key is absent"
+    );
+
+    // manifest supplies the effective default (clamped) — default_fn NOT invoked.
+    let called = Cell::new(false);
+    assert_eq!(
+        resolve_advanced_or_manifest_f32_with(
+            &request(json!({ "projectId": "p", "modelManifestEntry": { "guidanceScale": 99.0 } })),
+            "guidanceScale",
+            || {
+                called.set(true);
+                3.5
+            },
+            0.0..=30.0,
+        ),
+        30.0
+    );
+    assert!(
+        !called.get(),
+        "default_fn must not fire when manifest supplies the value"
+    );
+
+    // Both absent → default_fn IS invoked (variant default), then f32_clamped applies.
+    let called = Cell::new(false);
+    assert_eq!(
+        resolve_advanced_or_manifest_f32_with(
+            &request(json!({ "projectId": "p" })),
+            "guidanceScale",
+            || {
+                called.set(true);
+                3.5
+            },
+            0.0..=30.0,
+        ),
+        3.5
+    );
+    assert!(
+        called.get(),
+        "default_fn must fire when advanced and manifest are both absent"
+    );
+
+    // Un-parseable advanced → the f32 reader falls back to the (default_fn) fallback, then clamps.
+    let called = Cell::new(false);
+    assert_eq!(
+        resolve_advanced_or_manifest_f32_with(
+            &request(json!({ "projectId": "p", "advanced": { "guidanceScale": "abc" } })),
+            "guidanceScale",
+            || {
+                called.set(true);
+                3.5
+            },
+            0.0..=30.0,
+        ),
+        3.5
+    );
+    assert!(called.get(), "garbage advanced falls through to default_fn");
+}
+
 #[cfg(target_os = "macos")]
 #[test]
 fn mlx_model_table_maps_known_families() {

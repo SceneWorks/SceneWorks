@@ -94,34 +94,13 @@ fn pulid_flux_available(request: &ImageRequest, settings: &Settings) -> bool {
 
 /// Resolve PuLID denoise steps: `advanced.steps` (clamped 1..=80) → manifest `steps` → 30.
 fn pulid_steps(request: &ImageRequest) -> u32 {
-    let parse = |value: &Value| {
-        value
-            .as_u64()
-            .or_else(|| value.as_str()?.trim().parse().ok())
-    };
-    request
-        .advanced
-        .get("steps")
-        .and_then(parse)
-        .or_else(|| request.model_manifest_entry.get("steps").and_then(parse))
-        .map(|steps| steps.clamp(1, 80) as u32)
-        .unwrap_or(PULID_DEFAULT_STEPS)
+    resolve_advanced_or_manifest_u32(request, "steps", PULID_DEFAULT_STEPS, 1..=80)
 }
 
 /// Resolve PuLID guidance: `advanced.guidanceScale` → manifest `guidanceScale` → 4.0 (the FLUX.1-dev
 /// guidance-distilled CFG; the engine's fake-CFG single forward consumes it).
 fn pulid_guidance(request: &ImageRequest) -> f32 {
-    let manifest_default = request
-        .model_manifest_entry
-        .get("guidanceScale")
-        .and_then(|value| {
-            value
-                .as_f64()
-                .or_else(|| value.as_str()?.trim().parse().ok())
-        })
-        .map(|value| value as f32)
-        .unwrap_or(PULID_DEFAULT_GUIDANCE);
-    advanced::f32_clamped(&request.advanced, "guidanceScale", manifest_default, 0.0..=30.0)
+    resolve_advanced_or_manifest_f32(request, "guidanceScale", PULID_DEFAULT_GUIDANCE, 0.0..=30.0)
 }
 
 /// The PuLID identity-strength knob → the reference conditioning's `strength` (the engine reads

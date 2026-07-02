@@ -84,37 +84,16 @@ fn sdxl_ipadapter_available(request: &ImageRequest, settings: &Settings) -> bool
 
 /// Resolve denoise steps: `advanced.steps` (clamped 1..=80) → manifest `steps` → default (30).
 fn sdxl_ipadapter_steps(request: &ImageRequest) -> u32 {
-    let parse = |value: &Value| {
-        value
-            .as_u64()
-            .or_else(|| value.as_str()?.trim().parse().ok())
-    };
-    request
-        .advanced
-        .get("steps")
-        .and_then(parse)
-        .or_else(|| request.model_manifest_entry.get("steps").and_then(parse))
-        .map(|steps| steps.clamp(1, 80) as u32)
-        .unwrap_or(SDXL_IPADAPTER_DEFAULT_STEPS)
+    resolve_advanced_or_manifest_u32(request, "steps", SDXL_IPADAPTER_DEFAULT_STEPS, 1..=80)
 }
 
 /// Resolve guidance: `advanced.guidanceScale` → manifest `guidanceScale` → the reference-tuned default
 /// (5.0), clamped to a sane CFG range.
 fn sdxl_ipadapter_guidance(request: &ImageRequest) -> f32 {
-    let manifest_default = request
-        .model_manifest_entry
-        .get("guidanceScale")
-        .and_then(|value| {
-            value
-                .as_f64()
-                .or_else(|| value.as_str()?.trim().parse().ok())
-        })
-        .map(|value| value as f32)
-        .unwrap_or(SDXL_IPADAPTER_DEFAULT_GUIDANCE);
-    advanced::f32_clamped(
-        &request.advanced,
+    resolve_advanced_or_manifest_f32(
+        request,
         "guidanceScale",
-        manifest_default,
+        SDXL_IPADAPTER_DEFAULT_GUIDANCE,
         0.0..=30.0,
     )
 }
