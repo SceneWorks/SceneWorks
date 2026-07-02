@@ -1,5 +1,6 @@
 import React, { useEffect, useMemo, useState } from "react";
 import { AssetThumbnail, assetCanRenderAsImage, assetCanRenderAsVideo } from "./assetMedia.jsx";
+import { assetMatchesCharacter } from "../characterMembership.js";
 import { Modal } from "./Modal.jsx";
 
 const categoryOptions = [
@@ -151,30 +152,6 @@ function activeProjectVideoAsset(asset, projectId) {
     !asset?.status?.trashed &&
     !asset?.status?.rejected
   );
-}
-
-function characterAssetIds(character) {
-  return new Set(
-    [
-      ...(character?.approvedReferences ?? []),
-      ...(character?.references ?? []),
-    ]
-      .map((reference) => reference?.assetId ?? reference?.id)
-      .filter(Boolean),
-  );
-}
-
-function assetMatchesCharacter(asset, characterId, character) {
-  if (!characterId) {
-    return false;
-  }
-  if (asset?.recipe?.normalizedSettings?.characterId === characterId) {
-    return true;
-  }
-  if ((asset?.metadata?.characterReferences ?? []).some((reference) => reference?.characterId === characterId)) {
-    return true;
-  }
-  return characterAssetIds(character).has(asset?.id);
 }
 
 function filterPickerAssets(assets, query, searchIndex) {

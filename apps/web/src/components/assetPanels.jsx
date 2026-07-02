@@ -1,5 +1,6 @@
 import React from "react";
 import { isAbortError } from "../api.js";
+import { assetMatchesCharacter } from "../characterMembership.js";
 import { saveAssetAs, revealAsset } from "../assetActions.js";
 import { isDesktop } from "../runtime.js";
 import { AssetMedia, assetCanRenderAsVideo, assetUrl, suppressThumbnailContextMenu } from "./assetMedia.jsx";
@@ -209,20 +210,6 @@ export function assetSupportsCharacterLink(asset) {
   );
 }
 
-function assetLinkedToCharacter(asset, character) {
-  const characterId = character?.id;
-  if (!asset?.id || !characterId) {
-    return false;
-  }
-  if (asset.recipe?.normalizedSettings?.characterId === characterId) {
-    return true;
-  }
-  if ((asset.metadata?.characterReferences ?? []).some((reference) => reference?.characterId === characterId)) {
-    return true;
-  }
-  return (character.references ?? []).some((reference) => (reference?.assetId ?? reference?.id) === asset.id);
-}
-
 function CharacterAssetLinker({ asset, characters = [], onMoveToCharacter }) {
   const availableCharacters = React.useMemo(
     () => characters.filter((character) => !character?.archived),
@@ -248,7 +235,7 @@ function CharacterAssetLinker({ asset, characters = [], onMoveToCharacter }) {
   }
 
   const selectedCharacter = availableCharacters.find((character) => character.id === characterId) ?? null;
-  const alreadyLinked = assetLinkedToCharacter(asset, selectedCharacter);
+  const alreadyLinked = assetMatchesCharacter(asset, selectedCharacter?.id, selectedCharacter);
 
   async function submit(event) {
     event.preventDefault();

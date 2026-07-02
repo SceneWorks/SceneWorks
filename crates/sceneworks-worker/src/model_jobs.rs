@@ -1220,15 +1220,66 @@ fn relink_to_blob(link: &Path) {
 /// replacing any stale directory there. On error the final location is left
 /// untouched (the caller removes the temp dir), so a complete `final_dir` only ever
 /// appears after a fully successful conversion.
+///
+/// sc-8837 (F-035): the previous implementation `remove_dir_all(final_dir)` *before*
+/// renaming the temp dir in, so a rename failure — or a crash in the window between
+/// the delete and the rename — left the user with no model at all after minutes of
+/// conversion work. Instead we move any existing `final_dir` ASIDE to a sibling backup
+/// first, rename temp → final, and only then delete the backup. If anything fails after
+/// the aside move, we RESTORE the backup back to `final_dir`, honoring the doc's promise
+/// that on error the previously working model is left untouched.
 pub(crate) async fn finalize_converted_dir(temp_dir: &Path, final_dir: &Path) -> WorkerResult<()> {
-    if final_dir.exists() {
-        tokio::fs::remove_dir_all(final_dir).await?;
-    }
     if let Some(parent) = final_dir.parent() {
         tokio::fs::create_dir_all(parent).await?;
     }
-    tokio::fs::rename(temp_dir, final_dir).await?;
+
+    // Move any stale install aside instead of destroying it, so a later failure can
+    // restore it. The backup lives next to `final_dir` (same filesystem) so the move is
+    // an atomic rename and the restore is equally cheap and safe.
+    let backup_dir: Option<PathBuf> = if final_dir.exists() {
+        let backup = converted_dir_backup_path(final_dir);
+        // A leftover backup from a prior interrupted finalize would block the aside move;
+        // clear it first (best effort — a stale backup is never the working install).
+        let _ = tokio::fs::remove_dir_all(&backup).await;
+        tokio::fs::rename(final_dir, &backup).await?;
+        Some(backup)
+    } else {
+        None
+    };
+
+    // Promote the freshly converted dir into place. On any failure, restore the stale
+    // install so the user keeps the previously working model.
+    if let Err(error) = tokio::fs::rename(temp_dir, final_dir).await {
+        if let Some(backup) = backup_dir {
+            // Best effort: the working install is the priority, so ignore restore errors
+            // (there is nothing more we can do) but surface the original failure.
+            let _ = tokio::fs::remove_dir_all(final_dir).await;
+            let _ = tokio::fs::rename(&backup, final_dir).await;
+        }
+        return Err(error.into());
+    }
+
+    // Success: the new install is in place; drop the stale backup (best effort — a
+    // leftover backup is harmless and never mistaken for the live install).
+    if let Some(backup) = backup_dir {
+        let _ = tokio::fs::remove_dir_all(&backup).await;
+    }
     Ok(())
+}
+
+/// Sibling backup path used to move a stale converted dir aside during finalize
+/// (sc-8837). Kept next to `final_dir` so the aside/restore moves are atomic renames on
+/// the same filesystem rather than cross-device copies.
+fn converted_dir_backup_path(final_dir: &Path) -> PathBuf {
+    let name = final_dir
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "model".to_string());
+    let suffix = format!(".{name}.finalize-backup-{}", std::process::id());
+    match final_dir.parent() {
+        Some(parent) => parent.join(suffix),
+        None => PathBuf::from(suffix),
+    }
 }
 
 pub(crate) async fn download_model_with_hf_cli(

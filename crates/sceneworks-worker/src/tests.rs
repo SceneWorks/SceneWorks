@@ -309,6 +309,119 @@ async fn finalize_converted_dir_promotes_atomically_and_replaces_stale() {
     assert!(!temp_dir2.exists());
 }
 
+/// sc-8837 (F-035): when a previously working install exists and the temp→final
+/// promotion fails, the ORIGINAL install must survive — the crash-safe finalize moves
+/// the stale install aside rather than destroying it first, then restores it on failure.
+/// We inject the rename failure by pointing at a `temp_dir` that does not exist (the aside
+/// move of the stale install succeeds, then the temp→final rename fails ENOENT).
+#[tokio::test]
+async fn finalize_converted_dir_restores_stale_install_on_rename_failure() {
+    let temp = tempdir().expect("tempdir");
+    let root = temp.path();
+    let final_dir = root.join("mlx").join("model");
+    std::fs::create_dir_all(&final_dir).expect("final dir");
+    std::fs::write(final_dir.join("weights.safetensors"), b"OLD-BUT-WORKING")
+        .expect("seed old install");
+
+    // Intentionally never created, so the temp→final rename fails after the stale aside.
+    let temp_dir = root.join("mlx").join(".model.converting-jobX");
+
+    let error = finalize_converted_dir(&temp_dir, &final_dir)
+        .await
+        .expect_err("a missing temp dir must make the promotion fail");
+    assert!(
+        matches!(error, WorkerError::Io(_)),
+        "expected an IO rename error, got {error:?}"
+    );
+
+    // The previously working model is left untouched (its contents survived).
+    assert!(
+        final_dir.join("weights.safetensors").is_file(),
+        "the original install must survive a failed finalize"
+    );
+    assert_eq!(
+        std::fs::read(final_dir.join("weights.safetensors")).expect("read restored"),
+        b"OLD-BUT-WORKING",
+        "restored install must have the original contents"
+    );
+    // No leftover backup dir next to the install.
+    let leftovers: Vec<_> = std::fs::read_dir(final_dir.parent().expect("parent"))
+        .expect("read parent")
+        .flatten()
+        .map(|entry| entry.file_name().to_string_lossy().into_owned())
+        .filter(|name| name.contains("finalize-backup"))
+        .collect();
+    assert!(
+        leftovers.is_empty(),
+        "no backup dir should remain after restore, found {leftovers:?}"
+    );
+}
+
+/// sc-8837: the happy path replaces an existing install with the new contents and
+/// leaves no backup dir behind (crash-safe aside is cleaned up on success).
+#[tokio::test]
+async fn finalize_converted_dir_replaces_existing_install_leaves_no_backup() {
+    let temp = tempdir().expect("tempdir");
+    let root = temp.path();
+    let final_dir = root.join("mlx").join("model");
+    std::fs::create_dir_all(&final_dir).expect("final dir");
+    std::fs::write(final_dir.join("weights.safetensors"), b"OLD").expect("seed old");
+    let temp_dir = root.join("mlx").join(".model.converting-jobY");
+    std::fs::create_dir_all(&temp_dir).expect("temp dir");
+    std::fs::write(temp_dir.join("weights.safetensors"), b"NEW").expect("seed new");
+
+    finalize_converted_dir(&temp_dir, &final_dir)
+        .await
+        .expect("finalize should succeed");
+
+    assert_eq!(
+        std::fs::read(final_dir.join("weights.safetensors")).expect("read new"),
+        b"NEW",
+        "final dir must hold the freshly converted contents"
+    );
+    assert!(
+        !temp_dir.exists(),
+        "temp dir must have been moved into place"
+    );
+    let leftovers: Vec<_> = std::fs::read_dir(final_dir.parent().expect("parent"))
+        .expect("read parent")
+        .flatten()
+        .map(|entry| entry.file_name().to_string_lossy().into_owned())
+        .filter(|name| name.contains("finalize-backup"))
+        .collect();
+    assert!(
+        leftovers.is_empty(),
+        "no backup dir should remain on success, found {leftovers:?}"
+    );
+}
+
+/// sc-8837: the first-install case (no prior `final_dir`, nested parent) promotes the
+/// temp dir into place without needing anything to move aside.
+#[tokio::test]
+async fn finalize_converted_dir_first_install_succeeds() {
+    let temp = tempdir().expect("tempdir");
+    let root = temp.path();
+    let final_dir = root.join("mlx").join("installed").join("model");
+    let temp_dir = root.join("mlx").join(".model.converting-jobZ");
+    std::fs::create_dir_all(&temp_dir).expect("temp dir");
+    std::fs::write(temp_dir.join("weights.safetensors"), b"FRESH").expect("seed fresh");
+
+    assert!(!final_dir.exists());
+    finalize_converted_dir(&temp_dir, &final_dir)
+        .await
+        .expect("first install should succeed");
+
+    assert_eq!(
+        std::fs::read(final_dir.join("weights.safetensors")).expect("read fresh"),
+        b"FRESH",
+        "first install must land the converted contents"
+    );
+    assert!(
+        !temp_dir.exists(),
+        "temp dir must have been moved into place"
+    );
+}
+
 #[test]
 fn download_progress_payload_matches_python_shape() {
     let payload = download_progress_payload(
