@@ -89,6 +89,8 @@ mod workers;
 use workers::*;
 mod events;
 use events::*;
+mod tickets;
+use tickets::*;
 mod dto;
 use dto::*;
 mod manifest;
@@ -131,6 +133,12 @@ const DEFAULT_CORS_ORIGINS: &str = concat!(
     "http://localhost:5176,http://127.0.0.1:5176"
 );
 const EVENT_BUFFER_SIZE: usize = 100;
+// SSE tickets are single-use and consumed on connect, so a tight window suffices.
+const EVENT_TICKET_TTL_SECONDS: u64 = 30;
+// Media tickets ride in <img>/<video>/<a download> URLs (headers impossible), so
+// they are multi-use; the web client re-arms the sliding ticket every TTL/3, and a
+// leaked URL dies at most one TTL after the last authenticated refresh (sc-8810).
+const MEDIA_TICKET_TTL_SECONDS: u64 = 300;
 const HEARTBEAT_SSE_DATA: &str = "{}";
 #[cfg(test)]
 const HEARTBEAT_SSE_WIRE: &str = "event: heartbeat\ndata: {}\n\n";
@@ -139,6 +147,16 @@ const HEARTBEAT_SSE_WIRE: &str = "event: heartbeat\ndata: {}\n\n";
 // desktop wrapper set the host explicitly (0.0.0.0 / 127.0.0.1 respectively), so this
 // only changes the out-of-the-box default for a direct binary run.
 const DEFAULT_API_HOST: &str = "127.0.0.1";
+// sc-8812 (F-010): router-wide default body limit for JSON/non-upload routes. The
+// 2 GiB `MAX_UPLOAD_BYTES` cap is sized for streaming multipart asset uploads and is
+// far too large to apply globally — every JSON route (`POST /jobs`, `/image/jobs`,
+// progress, presets, keypoint collections, ...) buffers the whole body into memory
+// before parsing, so a router-wide 2 GiB cap lets any authenticated/loopback caller
+// drive multi-GiB memory spikes (a one-request DoS lever). 10 MiB leaves generous
+// headroom for the largest legitimate JSON payloads (batch keypoints, timelines,
+// person-track corrections) while shrinking the per-request ceiling ~200x. The large
+// limit is re-attached per-route ONLY to the multipart/upload endpoints below.
+const MAX_JSON_BODY_BYTES: usize = 10 * 1024 * 1024;
 const MAX_UPLOAD_BYTES: usize = 2 * 1024 * 1024 * 1024;
 const MAX_MODEL_UPLOAD_BYTES: usize = 256 * 1024 * 1024 * 1024;
 const MAX_LORA_MULTIPART_BODY_BYTES: usize = MAX_UPLOAD_BYTES + 16 * 1024 * 1024;
@@ -274,7 +292,8 @@ pub struct AppState {
     jobs_store: Arc<JobsStore>,
     project_store: Arc<ProjectStore>,
     events: Arc<EventHub>,
-    event_tickets: Arc<EventTicketStore>,
+    event_tickets: Arc<TicketStore>,
+    media_tickets: Arc<TicketStore>,
     manifest_cache: Arc<Mutex<ManifestCache>>,
     manifest_write_locks: Arc<Mutex<HashMap<PathBuf, Arc<AsyncMutex<()>>>>>,
     model_size_cache: Arc<Mutex<ModelSizeCache>>,
@@ -315,6 +334,15 @@ fn open_bind_override_enabled(value: &str) -> bool {
 }
 
 fn json_rejection_response(rejection: JsonRejection) -> Response {
+    // sc-8812 (F-010): a body over the route's `DefaultBodyLimit` surfaces here as a
+    // `BytesRejection` whose own status is 413. Preserve the rejection's status code
+    // instead of flattening everything to 422, so an oversized body is reported as
+    // PAYLOAD_TOO_LARGE (and the DoS-guard is observable), while genuine decode/parse
+    // failures keep their existing 422 shape.
+    let status = rejection.status();
+    if status == StatusCode::PAYLOAD_TOO_LARGE {
+        return (status, Json(json!({ "detail": rejection.body_text() }))).into_response();
+    }
     let detail = match rejection {
         JsonRejection::JsonDataError(error) => error.body_text(),
         JsonRejection::JsonSyntaxError(error) => error.body_text(),
@@ -707,7 +735,8 @@ pub(crate) fn create_app_with_state(
         jobs_store,
         project_store,
         events: Arc::new(EventHub::default()),
-        event_tickets: Arc::new(EventTicketStore::new(30)),
+        event_tickets: Arc::new(TicketStore::new(EVENT_TICKET_TTL_SECONDS)),
+        media_tickets: Arc::new(TicketStore::new(MEDIA_TICKET_TTL_SECONDS)),
         manifest_cache: Arc::new(Mutex::new(ManifestCache::default())),
         manifest_write_locks: Arc::new(Mutex::new(HashMap::new())),
         model_size_cache: Arc::new(Mutex::new(ModelSizeCache::default())),
@@ -731,7 +760,12 @@ pub(crate) fn create_app_with_state(
         )
         .route(
             "/api/v1/projects/:project_id/assets",
-            get(list_assets).post(import_asset),
+            get(list_assets)
+                .post(import_asset)
+                // sc-8812 (F-010): streaming multipart asset upload needs the large
+                // limit; re-attach it per-route since the router default is now the
+                // small JSON cap. GET has no body, so this is harmless for listing.
+                .layer(DefaultBodyLimit::max(MAX_UPLOAD_BYTES)),
         )
         .route(
             "/api/v1/projects/:project_id/assets/:asset_id",
@@ -759,7 +793,9 @@ pub(crate) fn create_app_with_state(
         )
         .route(
             "/api/v1/projects/:project_id/training/uploads",
-            post(upload_training_dataset_item),
+            // sc-8812 (F-010): streaming multipart training-dataset upload; needs the
+            // large per-route limit against the small JSON router default.
+            post(upload_training_dataset_item).layer(DefaultBodyLimit::max(MAX_UPLOAD_BYTES)),
         )
         .route(
             "/api/v1/projects/:project_id/training/datasets/:dataset_id",
@@ -919,13 +955,21 @@ pub(crate) fn create_app_with_state(
             post(create_face_likeness_compare_job),
         )
         .route("/api/v1/poses", post(create_poses))
-        .route("/api/v1/poses/sources", post(create_pose_sources))
+        .route(
+            "/api/v1/poses/sources",
+            // sc-8812 (F-010): multipart pose-source image upload; large per-route limit.
+            post(create_pose_sources).layer(DefaultBodyLimit::max(MAX_UPLOAD_BYTES)),
+        )
         .route(
             "/api/v1/poses/preview/:job_id/:file_name",
             get(get_pose_preview),
         )
         .route("/api/v1/keypoints", post(create_keypoint))
-        .route("/api/v1/keypoints/sources", post(create_keypoint_sources))
+        .route(
+            "/api/v1/keypoints/sources",
+            // sc-8812 (F-010): multipart keypoint-source image upload; large per-route limit.
+            post(create_keypoint_sources).layer(DefaultBodyLimit::max(MAX_UPLOAD_BYTES)),
+        )
         .route("/api/v1/keypoints/presets", get(list_keypoint_presets))
         .route(
             "/api/v1/keypoints/collections",
@@ -992,6 +1036,9 @@ pub(crate) fn create_app_with_state(
         .route("/api/v1/jobs/claim", post(claim_job))
         .route("/api/v1/jobs/events", get(job_events))
         .route("/api/v1/jobs/events/ticket", post(create_event_ticket))
+        // Media ticket (sc-8810): auth-protected mint endpoint; the ticket is honored
+        // as a query param by the project-files and pose-preview GETs (see auth.rs).
+        .route("/api/v1/files/ticket", post(create_media_ticket))
         .route("/api/v1/jobs/:job_id", get(get_job))
         .route("/api/v1/jobs/:job_id/cancel", post(cancel_job))
         .route("/api/v1/jobs/:job_id/retry", post(retry_job))
@@ -1020,7 +1067,11 @@ pub(crate) fn create_app_with_state(
         )
         .fallback(app_fallback)
         .with_state(state.clone())
-        .layer(DefaultBodyLimit::max(MAX_UPLOAD_BYTES))
+        // sc-8812 (F-010): small router-wide default so JSON routes can't buffer
+        // multi-GiB bodies. Multipart/upload routes re-attach the large limit per
+        // route (asset import, training uploads, pose/keypoint sources, and the
+        // model/lora import routes above).
+        .layer(DefaultBodyLimit::max(MAX_JSON_BODY_BYTES))
         .layer(middleware::from_fn_with_state(state, access_control))
         .layer(cors);
     Ok((router, returned_state))

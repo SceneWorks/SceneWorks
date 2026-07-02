@@ -232,11 +232,14 @@ pub(crate) async fn run_training_caption_job(
     // reclaim); on that early return this guard trips `cancel` and aborts the captioner thread
     // instead of leaving it running on a job nobody is consuming. `cancel` is kept alongside (it's
     // `Clone`) for the in-loop cancel poll; the guard drives only the drop-time teardown.
-    let guard = CancelJoinGuard::new(cancel.clone(), blocking);
+    let mut guard = CancelJoinGuard::new(cancel.clone(), blocking);
     let mut interval = tokio::time::interval(progress_report_interval(settings));
     interval.set_missed_tick_behavior(MissedTickBehavior::Delay);
     let mut captions = Vec::with_capacity(items.len());
-    loop {
+    // Run the stream loop capturing its Result so any `?`-error path performs the explicit awaited
+    // bounded-join teardown BEFORE returning, instead of drop-and-run (sc-8804, F-003).
+    let loop_result: WorkerResult<()> = async {
+        loop {
         tokio::select! {
             event = rx.recv() => {
                 match event {
@@ -292,6 +295,15 @@ pub(crate) async fn run_training_caption_job(
                 }
             }
         }
+        }
+        Ok(())
+    }
+    .await;
+    if let Err(error) = loop_result {
+        // A progress/heartbeat POST failed (transient error or 409 stale-sweep reclaim): trip the
+        // flag and bounded-join the captioner before returning so it isn't left running (sc-8804).
+        guard.cancel_and_join().await;
+        return Err(error);
     }
 
     // Loop exited cleanly (channel closed) — reclaim the handle (disarming the drop-guard) and join.

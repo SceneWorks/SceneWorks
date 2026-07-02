@@ -690,10 +690,12 @@ async fn run_upscale_with_heartbeat<R>(
 where
     R: Send + 'static,
 {
-    // Bind the blocking upscale task to its cancel flag (sc-8804, F-003): the `heartbeat`/
-    // `update_job` `?` in the interval arm below returns early on a transient POST failure or a
-    // 409 (stale-sweep reclaim); on that early return this guard trips the engine `CancelFlag` and
-    // aborts the still-running diffusion instead of leaking it alongside the next claimed job.
+    // Bind the blocking upscale task to its cancel flag (sc-8804, F-003): on a `heartbeat`/
+    // `update_job` `?` early return (a transient POST failure or a 409 stale-sweep reclaim) we
+    // perform the explicit awaited bounded-join teardown (`guard.cancel_and_join()`) BEFORE the
+    // error propagates, so the still-running diffusion is wound down (or hard-abandoned) rather than
+    // leaked alongside the next claimed job. A bare `abort()` on drop is inert on a running blocking
+    // task.
     let mut guard = CancelJoinGuard::new(cancel.clone(), task);
     let mut canceled = false;
     let mut interval = tokio::time::interval(progress_report_interval(settings));
@@ -701,9 +703,10 @@ where
     loop {
         tokio::select! {
             result = &mut *guard.handle_mut() => {
-                let value = result.map_err(|error| task_join_error("upscale task", error))??;
-                // Success: disarm the guard so a clean completion never aborts.
+                // Task RESOLVED — disarm before any `?` so a task/join error never drops an armed
+                // guard (reviewer note: `??` used to precede disarm at upscale_jobs.rs:695).
                 guard.disarm();
+                let value = result.map_err(|error| task_join_error("upscale task", error))??;
                 if canceled {
                     mark_job_canceled(api, job_id, CANCEL_MESSAGE).await?;
                     return Err(WorkerError::Canceled(CANCEL_MESSAGE.to_owned()));
@@ -711,11 +714,16 @@ where
                 return Ok(value);
             }
             _ = interval.tick() => {
-                heartbeat(api, settings, WorkerStatus::Busy, Some(job_id)).await?;
+                if let Err(error) =
+                    heartbeat(api, settings, WorkerStatus::Busy, Some(job_id)).await
+                {
+                    guard.cancel_and_join().await;
+                    return Err(error);
+                }
                 if !canceled && cancel_requested_peek(api, job_id).await {
                     cancel.cancel();
                     canceled = true;
-                    update_job(
+                    if let Err(error) = update_job(
                         api,
                         job_id,
                         progress_payload(
@@ -728,7 +736,11 @@ where
                             None,
                         ),
                     )
-                    .await?;
+                    .await
+                    {
+                        guard.cancel_and_join().await;
+                        return Err(error);
+                    }
                 }
             }
         }

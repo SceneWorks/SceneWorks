@@ -2783,80 +2783,91 @@ async fn generate_video(
     // the caption-job select!-with-interval).
     let mut interval = tokio::time::interval(crate::progress_report_interval(settings));
     interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-    loop {
-        tokio::select! {
-            maybe_progress = rx.recv() => {
-                let Some(progress) = maybe_progress else {
-                    break;
-                };
-                last_progress = Instant::now(); // forward progress — reset the stall watchdog.
-                if canceled {
-                    continue; // drain so the blocking sender never blocks.
-                }
-        if last_cancel.elapsed() >= Duration::from_secs(2) {
-            last_cancel = Instant::now();
-            if cancel_requested_peek(api, &job.id).await {
-                begin_video_cancel(api, &job.id, &cancel, backend).await;
-                canceled = true;
-                continue;
-            }
-            heartbeat(api, settings, WorkerStatus::Busy, Some(&job.id)).await?;
-        }
-        let (fraction, message) = match progress {
-            Progress::Step { current, total } => (
-                0.25 + 0.30 * (current as f64 / total.max(1) as f64),
-                format!("Generating frames — step {current}/{total}."),
-            ),
-            Progress::Decoding => (0.58, "Decoding frames.".to_owned()),
-        };
-        update_job(
-            api,
-            &job.id,
-            video_progress(
-                JobStatus::Running,
-                ProgressStage::Generating,
-                fraction,
-                &message,
-                None,
-                backend,
-            ),
-        )
-        .await?;
-            }
-            _ = interval.tick() => {
-                heartbeat(api, settings, WorkerStatus::Busy, Some(&job.id)).await?;
-                if !canceled && last_cancel.elapsed() >= Duration::from_secs(2) {
-                    last_cancel = Instant::now();
-                    if cancel_requested_peek(api, &job.id).await {
-                        begin_video_cancel(api, &job.id, &cancel, backend).await;
-                        canceled = true;
-                    }
-                }
-                // Forward-progress watchdog: a wedged engine keeps this async loop heartbeating
-                // (the block runs on a separate thread), so the API sees a healthy job forever.
-                // If no progress has arrived for `stall_timeout`, request engine cancel and start
-                // the abandon countdown.
-                if !canceled && last_progress.elapsed() >= stall_timeout {
-                    tracing::warn!(
-                        event = "rust_worker_video_stalled",
-                        jobId = %job.id,
-                        engine = %log_engine_id,
-                        stallSeconds = stall_timeout.as_secs(),
-                        "no progress within the stall window — requesting engine cancel"
-                    );
-                    cancel.cancel();
-                    canceled = true;
-                    stalled = true;
-                    abandon_deadline = Some(Instant::now() + VIDEO_STALL_GRACE);
-                }
-                if let Some(deadline) = abandon_deadline {
-                    if Instant::now() >= deadline {
-                        abandoned = true;
+    // Run the progress loop capturing its Result so any `?`-error path performs the explicit awaited
+    // bounded-join teardown BEFORE returning, instead of drop-and-run (sc-8804, F-003). The stall/
+    // abandon watchdog inside the loop still handles the hard-wedge case via `abandoned`.
+    let loop_result: WorkerResult<()> = async {
+        loop {
+            tokio::select! {
+                maybe_progress = rx.recv() => {
+                    let Some(progress) = maybe_progress else {
                         break;
+                    };
+                    last_progress = Instant::now(); // forward progress — reset the stall watchdog.
+                    if canceled {
+                        continue; // drain so the blocking sender never blocks.
+                    }
+            if last_cancel.elapsed() >= Duration::from_secs(2) {
+                last_cancel = Instant::now();
+                if cancel_requested_peek(api, &job.id).await {
+                    begin_video_cancel(api, &job.id, &cancel, backend).await;
+                    canceled = true;
+                    continue;
+                }
+                heartbeat(api, settings, WorkerStatus::Busy, Some(&job.id)).await?;
+            }
+            let (fraction, message) = match progress {
+                Progress::Step { current, total } => (
+                    0.25 + 0.30 * (current as f64 / total.max(1) as f64),
+                    format!("Generating frames — step {current}/{total}."),
+                ),
+                Progress::Decoding => (0.58, "Decoding frames.".to_owned()),
+            };
+            update_job(
+                api,
+                &job.id,
+                video_progress(
+                    JobStatus::Running,
+                    ProgressStage::Generating,
+                    fraction,
+                    &message,
+                    None,
+                    backend,
+                ),
+            )
+            .await?;
+                }
+                _ = interval.tick() => {
+                    heartbeat(api, settings, WorkerStatus::Busy, Some(&job.id)).await?;
+                    if !canceled && last_cancel.elapsed() >= Duration::from_secs(2) {
+                        last_cancel = Instant::now();
+                        if cancel_requested_peek(api, &job.id).await {
+                            begin_video_cancel(api, &job.id, &cancel, backend).await;
+                            canceled = true;
+                        }
+                    }
+                    // Forward-progress watchdog: a wedged engine keeps this async loop heartbeating
+                    // (the block runs on a separate thread), so the API sees a healthy job forever.
+                    // If no progress has arrived for `stall_timeout`, request engine cancel and start
+                    // the abandon countdown.
+                    if !canceled && last_progress.elapsed() >= stall_timeout {
+                        tracing::warn!(
+                            event = "rust_worker_video_stalled",
+                            jobId = %job.id,
+                            engine = %log_engine_id,
+                            stallSeconds = stall_timeout.as_secs(),
+                            "no progress within the stall window — requesting engine cancel"
+                        );
+                        cancel.cancel();
+                        canceled = true;
+                        stalled = true;
+                        abandon_deadline = Some(Instant::now() + VIDEO_STALL_GRACE);
+                    }
+                    if let Some(deadline) = abandon_deadline {
+                        if Instant::now() >= deadline {
+                            abandoned = true;
+                            break;
+                        }
                     }
                 }
             }
         }
+        Ok(())
+    }
+    .await;
+    if let Err(error) = loop_result {
+        guard.cancel_and_join().await;
+        return Err(error);
     }
 
     if abandoned {
@@ -3528,32 +3539,57 @@ async fn resolve_candle_scail2_conditioning(
         .ok_or_else(|| WorkerError::InvalidPayload("scail2 driving frame is malformed".into()))?;
 
     // Segment + paint the reference mask (animation keeps the reference's world → white background).
+    // Both SAM3 passes run under `run_blocking_with_heartbeat` (sc-8390 / sc-8807) so the cold
+    // multi-GB checkpoint parse + per-frame propagation never trip the API's 90s stale-sweep. The
+    // pinned candle-gen-sam3 propagate takes no cancel/progress params yet (sc-8972), so the
+    // tripped flag stops at the coarse seams (cold parse / model build) only.
+    let scail2_cancel_message = "SCAIL-2 canceled during person segmentation.";
+    let cancel = gen_core::CancelFlag::new();
+    let flag = cancel.clone();
     let (rm, rt) = (sam_model.clone(), sam_tokenizer.clone());
-    let ref_mask = tokio::task::spawn_blocking(move || -> WorkerResult<Image> {
-        let masks = crate::person_segment_sam3_candle::segment_all_persons_in_memory(
-            &rm,
-            &rt,
-            std::slice::from_ref(&ref_rgb),
-        )?;
-        crate::scail2_masks::paint_reference_mask(&masks, crate::scail2_masks::BG_WHITE)
-    })
-    .await
-    .map_err(|error| WorkerError::Io(std::io::Error::other(error)))??;
+    let ref_mask = run_blocking_with_heartbeat(
+        api,
+        settings,
+        &job.id,
+        Some(cancel),
+        scail2_cancel_message,
+        "scail2 reference segment task",
+        tokio::task::spawn_blocking(move || -> WorkerResult<Image> {
+            let masks = crate::person_segment_sam3_candle::segment_all_persons_in_memory(
+                &rm,
+                &rt,
+                std::slice::from_ref(&ref_rgb),
+                Some(flag),
+            )?;
+            crate::scail2_masks::paint_reference_mask(&masks, crate::scail2_masks::BG_WHITE)
+        }),
+    )
+    .await?;
 
     // Segment + paint the per-frame driving masks (animation → black background).
-    let driving_mask = tokio::task::spawn_blocking(move || -> WorkerResult<Vec<Image>> {
-        let masks = crate::person_segment_sam3_candle::segment_all_persons_in_memory(
-            &sam_model,
-            &sam_tokenizer,
-            &driving_rgb,
-        )?;
-        Ok(crate::scail2_masks::paint_driving_masks(
-            &masks,
-            crate::scail2_masks::BG_BLACK,
-        ))
-    })
-    .await
-    .map_err(|error| WorkerError::Io(std::io::Error::other(error)))??;
+    let cancel = gen_core::CancelFlag::new();
+    let flag = cancel.clone();
+    let driving_mask = run_blocking_with_heartbeat(
+        api,
+        settings,
+        &job.id,
+        Some(cancel),
+        scail2_cancel_message,
+        "scail2 driving segment task",
+        tokio::task::spawn_blocking(move || -> WorkerResult<Vec<Image>> {
+            let masks = crate::person_segment_sam3_candle::segment_all_persons_in_memory(
+                &sam_model,
+                &sam_tokenizer,
+                &driving_rgb,
+                Some(flag),
+            )?;
+            Ok(crate::scail2_masks::paint_driving_masks(
+                &masks,
+                crate::scail2_masks::BG_BLACK,
+            ))
+        }),
+    )
+    .await?;
 
     Ok(vec![
         Conditioning::Reference {
@@ -3700,16 +3736,28 @@ async fn resolve_candle_scail2_replace_conditioning(
             .ok_or_else(|| {
                 WorkerError::InvalidPayload("scail2 reference image is malformed".into())
             })?;
-    let ref_mask = tokio::task::spawn_blocking(move || -> WorkerResult<Image> {
-        let masks = crate::person_segment_sam3_candle::segment_all_persons_in_memory(
-            &sam_model,
-            &sam_tokenizer,
-            std::slice::from_ref(&ref_rgb),
-        )?;
-        crate::scail2_masks::paint_reference_mask(&masks, crate::scail2_masks::BG_BLACK)
-    })
-    .await
-    .map_err(|error| WorkerError::Io(std::io::Error::other(error)))??;
+    // Heartbeat keepalive + user cancel across the cold SAM3 parse + single-frame propagate
+    // (sc-8390 / sc-8807); coarse cancel seams only until the candle-gen-sam3 API bump (sc-8972).
+    let cancel = gen_core::CancelFlag::new();
+    let flag = cancel.clone();
+    let ref_mask = run_blocking_with_heartbeat(
+        api,
+        settings,
+        &job.id,
+        Some(cancel),
+        "SCAIL-2 canceled during person segmentation.",
+        "scail2 reference segment task",
+        tokio::task::spawn_blocking(move || -> WorkerResult<Image> {
+            let masks = crate::person_segment_sam3_candle::segment_all_persons_in_memory(
+                &sam_model,
+                &sam_tokenizer,
+                std::slice::from_ref(&ref_rgb),
+                Some(flag),
+            )?;
+            crate::scail2_masks::paint_reference_mask(&masks, crate::scail2_masks::BG_BLACK)
+        }),
+    )
+    .await?;
 
     let conditioning = vec![
         Conditioning::Reference {
@@ -4457,32 +4505,61 @@ async fn resolve_scail2_conditioning(
         .ok_or_else(|| WorkerError::InvalidPayload("scail2 driving frame is malformed".into()))?;
 
     // Segment + paint the reference mask (animation keeps the reference's world → white background).
+    // Both SAM3 passes run under `run_blocking_with_heartbeat` (sc-8390 / sc-8807): the cold
+    // multi-GB checkpoint parse + per-frame 1008² propagation over a driving clip can exceed the
+    // API's 90s stale-sweep, and the keepalive's cancel poll trips `cancel`, which the engine's
+    // per-frame propagate contract (gen-core d8038beb) observes between frames.
+    let scail2_cancel_message = "SCAIL-2 canceled during person segmentation.";
+    let cancel = gen_core::CancelFlag::new();
+    let flag = cancel.clone();
     let (rm, rt) = (sam_model.clone(), sam_tokenizer.clone());
-    let ref_mask = tokio::task::spawn_blocking(move || -> WorkerResult<Image> {
-        let masks = crate::person_segment_sam3::segment_all_persons_in_memory(
-            &rm,
-            &rt,
-            std::slice::from_ref(&ref_rgb),
-        )?;
-        crate::scail2_masks::paint_reference_mask(&masks, crate::scail2_masks::BG_WHITE)
-    })
-    .await
-    .map_err(|error| WorkerError::Io(std::io::Error::other(error)))??;
+    let ref_mask = run_blocking_with_heartbeat(
+        api,
+        settings,
+        &job.id,
+        Some(cancel),
+        scail2_cancel_message,
+        "scail2 reference segment task",
+        tokio::task::spawn_blocking(move || -> WorkerResult<Image> {
+            let masks = crate::person_segment_sam3::segment_all_persons_in_memory(
+                &rm,
+                &rt,
+                std::slice::from_ref(&ref_rgb),
+                Some(flag),
+                None,
+            )?;
+            crate::scail2_masks::paint_reference_mask(&masks, crate::scail2_masks::BG_WHITE)
+        }),
+    )
+    .await?;
 
     // Segment + paint the per-frame driving masks (animation → black background).
-    let driving_mask = tokio::task::spawn_blocking(move || -> WorkerResult<Vec<Image>> {
-        let masks = crate::person_segment_sam3::segment_all_persons_in_memory(
-            &sam_model,
-            &sam_tokenizer,
-            &driving_rgb,
-        )?;
-        Ok(crate::scail2_masks::paint_driving_masks(
-            &masks,
-            crate::scail2_masks::BG_BLACK,
-        ))
-    })
-    .await
-    .map_err(|error| WorkerError::Io(std::io::Error::other(error)))??;
+    let cancel = gen_core::CancelFlag::new();
+    let flag = cancel.clone();
+    let driving_mask = run_blocking_with_heartbeat(
+        api,
+        settings,
+        &job.id,
+        Some(cancel),
+        scail2_cancel_message,
+        "scail2 driving segment task",
+        tokio::task::spawn_blocking(move || -> WorkerResult<Vec<Image>> {
+            let masks = crate::person_segment_sam3::segment_all_persons_in_memory(
+                &sam_model,
+                &sam_tokenizer,
+                &driving_rgb,
+                Some(flag),
+                Some(Box::new(|frame, total| {
+                    tracing::debug!(event = "scail2_sam3_propagate_progress", frame, total);
+                })),
+            )?;
+            Ok(crate::scail2_masks::paint_driving_masks(
+                &masks,
+                crate::scail2_masks::BG_BLACK,
+            ))
+        }),
+    )
+    .await?;
 
     Ok(vec![
         Conditioning::Reference {
@@ -4632,16 +4709,29 @@ async fn resolve_scail2_replace_conditioning(
             .ok_or_else(|| {
                 WorkerError::InvalidPayload("scail2 reference image is malformed".into())
             })?;
-    let ref_mask = tokio::task::spawn_blocking(move || -> WorkerResult<Image> {
-        let masks = crate::person_segment_sam3::segment_all_persons_in_memory(
-            &sam_model,
-            &sam_tokenizer,
-            std::slice::from_ref(&ref_rgb),
-        )?;
-        crate::scail2_masks::paint_reference_mask(&masks, crate::scail2_masks::BG_BLACK)
-    })
-    .await
-    .map_err(|error| WorkerError::Io(std::io::Error::other(error)))??;
+    // Heartbeat keepalive + user cancel across the cold SAM3 parse + single-frame propagate
+    // (sc-8390 / sc-8807).
+    let cancel = gen_core::CancelFlag::new();
+    let flag = cancel.clone();
+    let ref_mask = run_blocking_with_heartbeat(
+        api,
+        settings,
+        &job.id,
+        Some(cancel),
+        "SCAIL-2 canceled during person segmentation.",
+        "scail2 reference segment task",
+        tokio::task::spawn_blocking(move || -> WorkerResult<Image> {
+            let masks = crate::person_segment_sam3::segment_all_persons_in_memory(
+                &sam_model,
+                &sam_tokenizer,
+                std::slice::from_ref(&ref_rgb),
+                Some(flag),
+                None,
+            )?;
+            crate::scail2_masks::paint_reference_mask(&masks, crate::scail2_masks::BG_BLACK)
+        }),
+    )
+    .await?;
 
     let conditioning = vec![
         Conditioning::Reference {

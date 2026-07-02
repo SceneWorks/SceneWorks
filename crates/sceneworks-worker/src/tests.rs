@@ -3832,6 +3832,78 @@ async fn run_blocking_with_heartbeat_aborts_task_when_heartbeat_post_fails() {
     );
 }
 
+/// sc-8804 (F-003) — the CORE bounded-join assertion, in the real `spawn_blocking` shape the
+/// converted consumers use. `JoinHandle::abort()` is INERT on an already-running blocking task, so
+/// a drop-and-run teardown (trip flag, abort, return immediately) would return BEFORE the blocking
+/// GPU task observes the flag and winds down — and the worker would claim the next job with the
+/// device still busy. The fix's `cancel_and_join` must AWAIT the task, so by the time
+/// `run_blocking_with_heartbeat` returns the blocking task has ALREADY wound down.
+///
+/// Discriminator (mutation check): this test asserts `wound_down == true` AT RETURN TIME. Under the
+/// old drop-and-run behavior (abort-only, no awaited join) the flag is tripped but the consumer
+/// returns before the `spawn_blocking` thread reaches its next cancel poll, so `wound_down` is still
+/// `false` at return — the assertion fails. Only an awaited bounded-join makes it pass. The prior
+/// test above used `tokio::task::spawn` (where `abort()` DOES stop the task), which is exactly why
+/// it could not catch the blocking-task gap.
+#[tokio::test]
+async fn run_blocking_with_heartbeat_waits_for_blocking_task_winddown_on_post_failure() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    let base_url = spawn_failing_heartbeat_stub().await;
+    let mut settings = test_settings(base_url.clone(), None);
+    settings.api_url = base_url;
+    settings.heartbeat_seconds = 5;
+    let api = ApiClient::new(&settings);
+
+    let cancel = gen_core::CancelFlag::new();
+    let task_cancel = cancel.clone();
+    // Set by the blocking task ONLY when it observes the cancel flag and winds down. The consumer
+    // must not return until this is true.
+    let wound_down = Arc::new(AtomicBool::new(false));
+    let task_wound_down = wound_down.clone();
+    // A genuine `spawn_blocking` task (a synchronous busy loop, like a denoise/detect thread) that
+    // polls its cancel flag between "steps". `abort()` cannot stop it — only the flag can — so an
+    // awaited join is the only way the consumer can observe its wind-down before returning.
+    let task = tokio::task::spawn_blocking(move || {
+        for _ in 0..2_000 {
+            if task_cancel.is_cancelled() {
+                task_wound_down.store(true, Ordering::SeqCst);
+                return Ok::<(), WorkerError>(());
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        // Reached only if never canceled: still mark wound-down so a hang is distinguishable.
+        task_wound_down.store(true, Ordering::SeqCst);
+        Ok(())
+    });
+
+    let result = crate::run_blocking_with_heartbeat(
+        &api,
+        &settings,
+        "job-1",
+        Some(cancel.clone()),
+        "canceled",
+        "f003 blocking winddown task",
+        task,
+    )
+    .await;
+
+    assert!(
+        result.is_err(),
+        "the failing heartbeat POST must propagate as an error"
+    );
+    assert!(
+        cancel.is_cancelled(),
+        "the teardown must trip the blocking task's cancel flag (sc-8804)"
+    );
+    // The load-bearing assertion: the consumer AWAITED the bounded join, so the blocking task has
+    // already wound down by the time we get here. A drop-and-run teardown fails this.
+    assert!(
+        wound_down.load(Ordering::SeqCst),
+        "run_blocking_with_heartbeat must bounded-join the blocking task — it must NOT return \
+         while the task is still running (sc-8804 F-003); the task had not wound down at return"
+    );
+}
+
 /// sc-8804 (F-003) — the child-process leg: `run_ffmpeg` (media_jobs) and the `hf` CLI download
 /// (model_jobs) build their `tokio::process::Command` with `kill_on_drop(true)` so a
 /// heartbeat/cancel `?` early return reaps the child instead of leaving ffmpeg/`hf` writing partial
@@ -3862,6 +3934,44 @@ async fn kill_on_drop_reaps_a_dropped_child() {
     assert!(
         !alive,
         "a kill_on_drop(true) child must be reaped when its handle is dropped (pid {pid} still alive)"
+    );
+}
+
+/// sc-5516 / sc-8805 — the detail sibling: `begin_detail_cancel` trips the engine flag
+/// (which the interval-armed detail event loop now reaches within one ~2s poll even while
+/// the model is cold-loading or a tile is mid-refine) and acknowledges with a NON-terminal
+/// `running` update; the terminal `Canceled` is posted by `run_image_detail_job` only after
+/// the blocking refinement actually stops. macOS-only because `image_jobs/detail.rs` is the
+/// macOS MLX route (off-Mac `run_image_detail_job` is a hard error stub).
+#[cfg(target_os = "macos")]
+#[tokio::test]
+async fn begin_detail_cancel_trips_flag_and_stays_non_terminal() {
+    let (base_url, posts) = spawn_progress_capture_stub().await;
+    let mut settings = test_settings(base_url.clone(), None);
+    settings.api_url = base_url;
+    let api = ApiClient::new(&settings);
+    let cancel = gen_core::CancelFlag::new();
+    crate::image_jobs::begin_detail_cancel(&api, "job-1", &cancel, "mlx").await;
+    assert!(
+        cancel.is_cancelled(),
+        "begin_detail_cancel must trip the engine cancel flag"
+    );
+    let posts = posts.lock().expect("posts lock");
+    assert_eq!(
+        posts.len(),
+        1,
+        "exactly one acknowledgement update is posted"
+    );
+    assert_eq!(
+        posts[0]["status"], "running",
+        "the cancel acknowledgement must stay NON-terminal (sc-5516)"
+    );
+    assert!(
+        posts[0]["message"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("Cancelling"),
+        "the acknowledgement message should read as Cancelling…"
     );
 }
 
@@ -3954,4 +4064,165 @@ mod stub_fallback_gate {
         let request = VideoRequest::from_payload(&object(json!({ "model": "stub-model" })));
         ensure_video_engine_weights(&request, &settings).expect("non-engine model passes");
     }
+}
+
+// ---------------------------------------------------------------------------
+// sc-8807: the shared blocking keepalive (`run_blocking_with_heartbeat`) is the seam the
+// SAM2/SAM3 propagate steps now run through. These tests pin the three behaviors the segment
+// wiring relies on, with a stand-in blocking task in place of the real (weights-requiring)
+// propagate: (a) the worker heartbeat is pinged while the task runs, (b) the API cancel poll
+// trips the threaded `CancelFlag`, and (c) the terminal `Canceled` is posted whether the task
+// honors the flag itself (the MLX per-frame cancel contract) or runs to completion first (the
+// candle coarse-seam lane, sc-8972).
+// ---------------------------------------------------------------------------
+
+#[derive(Clone)]
+struct KeepaliveStubState {
+    heartbeats: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    progress: std::sync::Arc<std::sync::Mutex<Vec<Value>>>,
+}
+
+impl KeepaliveStubState {
+    fn new() -> Self {
+        Self {
+            heartbeats: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            progress: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+        }
+    }
+}
+
+/// A stub API that always reports `cancel_requested: true`, counts worker heartbeats, and records
+/// every job-progress post (so the terminal `Canceled` write is observable).
+async fn spawn_keepalive_stub(state: KeepaliveStubState) -> String {
+    async fn heartbeat_route(State(state): State<KeepaliveStubState>) -> Response {
+        state
+            .heartbeats
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        // The body does not parse as a WorkerSnapshot; `heartbeat()` tolerates the decode
+        // failure as a transport error, so the ping still counts without modeling the snapshot.
+        Json(json!({})).into_response()
+    }
+    async fn job_route(axum::extract::Path(job_id): axum::extract::Path<String>) -> Response {
+        Json(job_snapshot_json(&job_id, true)).into_response()
+    }
+    async fn progress_route(
+        State(state): State<KeepaliveStubState>,
+        axum::extract::Path(job_id): axum::extract::Path<String>,
+        Json(payload): Json<Value>,
+    ) -> Response {
+        state.progress.lock().unwrap().push(payload);
+        Json(job_snapshot_json(&job_id, true)).into_response()
+    }
+    let app = Router::new()
+        .route(
+            "/api/v1/workers/:worker_id/heartbeat",
+            post(heartbeat_route),
+        )
+        .route("/api/v1/jobs/:job_id", get(job_route))
+        .route("/api/v1/jobs/:job_id/progress", post(progress_route))
+        .with_state(state);
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("listener binds");
+    let address = listener.local_addr().expect("listener has address");
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.expect("stub serves");
+    });
+    format!("http://{address}")
+}
+
+/// The MLX lane: the keepalive trips the flag, the engine honors it between propagated frames and
+/// surfaces `WorkerError::Canceled` from inside the task — the terminal `Canceled` must be posted
+/// and the error propagated (never a dangling non-terminal job).
+#[tokio::test]
+async fn keepalive_posts_terminal_canceled_when_the_task_honors_the_flag() {
+    let state = KeepaliveStubState::new();
+    let base = spawn_keepalive_stub(state.clone()).await;
+    let mut settings = test_settings("http://127.0.0.1".to_owned(), None);
+    settings.api_url = base;
+    let api = ApiClient::new(&settings);
+
+    let flag = gen_core::CancelFlag::new();
+    let task_flag = flag.clone();
+    let task = tokio::task::spawn_blocking(move || -> super::WorkerResult<u32> {
+        let start = std::time::Instant::now();
+        while !task_flag.is_cancelled() {
+            if start.elapsed() > Duration::from_secs(30) {
+                return Err(WorkerError::Engine("cancel flag never tripped".to_owned()));
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        // The engine's per-frame cancel contract (gen-core d8038beb) surfaces Canceled itself.
+        Err(WorkerError::Canceled(
+            "Person segmentation canceled by user.".to_owned(),
+        ))
+    });
+    let result = super::run_blocking_with_heartbeat(
+        &api,
+        &settings,
+        "job-8807-mlx",
+        Some(flag),
+        "Person tracking canceled during segmentation.",
+        "sam propagate stand-in",
+        task,
+    )
+    .await;
+
+    assert!(
+        matches!(result, Err(WorkerError::Canceled(ref m)) if m == "Person segmentation canceled by user."),
+        "expected the task's Canceled to propagate, got {result:?}"
+    );
+    assert!(
+        state.heartbeats.load(std::sync::atomic::Ordering::SeqCst) >= 1,
+        "Busy heartbeat pinged during the blocking task"
+    );
+    let posts = state.progress.lock().unwrap();
+    assert!(
+        posts.iter().any(|p| p["status"] == "canceled"),
+        "terminal Canceled posted to the job, got {posts:?}"
+    );
+}
+
+/// The candle lane (coarse seams only until sc-8972): the compute cannot observe the flag
+/// mid-propagate and runs to completion — the keepalive still posts the terminal `Canceled` with
+/// its own cancel copy and returns `WorkerError::Canceled`.
+#[tokio::test]
+async fn keepalive_cancels_the_job_even_when_the_task_cannot_observe_the_flag() {
+    let state = KeepaliveStubState::new();
+    let base = spawn_keepalive_stub(state.clone()).await;
+    let mut settings = test_settings("http://127.0.0.1".to_owned(), None);
+    settings.api_url = base;
+    let api = ApiClient::new(&settings);
+
+    let flag = gen_core::CancelFlag::new();
+    let wait_flag = flag.clone();
+    let task = tokio::task::spawn_blocking(move || -> super::WorkerResult<u32> {
+        // Wait until the keepalive has tripped the flag (so `canceled` is set before we return),
+        // then finish successfully — the uncancellable-compute shape.
+        let start = std::time::Instant::now();
+        while !wait_flag.is_cancelled() && start.elapsed() < Duration::from_secs(30) {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        Ok(7)
+    });
+    let result = super::run_blocking_with_heartbeat(
+        &api,
+        &settings,
+        "job-8807-candle",
+        Some(flag),
+        "Person tracking canceled during segmentation.",
+        "candle propagate stand-in",
+        task,
+    )
+    .await;
+
+    assert!(
+        matches!(result, Err(WorkerError::Canceled(ref m)) if m == "Person tracking canceled during segmentation."),
+        "expected the keepalive's Canceled, got {result:?}"
+    );
+    let posts = state.progress.lock().unwrap();
+    assert!(
+        posts.iter().any(|p| p["status"] == "canceled"),
+        "terminal Canceled posted to the job, got {posts:?}"
+    );
 }

@@ -816,7 +816,7 @@ async fn consume_training_events(
     // still-running training thread instead of leaving it burning GPU memory alongside the next
     // claimed job. `cancel` is kept alongside (it's `Clone`) for the in-loop `begin_training_cancel`
     // pollers; the guard drives only the drop-time teardown.
-    let guard = CancelJoinGuard::new(cancel.clone(), blocking);
+    let mut guard = CancelJoinGuard::new(cancel.clone(), blocking);
     let mut canceled = false;
     let mut last_cancel_check = Instant::now();
     let mut checkpoints: Vec<Value> = Vec::new();
@@ -848,7 +848,10 @@ async fn consume_training_events(
 
     let mut heartbeat_interval = tokio::time::interval(progress_report_interval(settings));
     heartbeat_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-    loop {
+    // Run the event loop capturing its Result so any `?`-error path performs the explicit awaited
+    // bounded-join teardown BEFORE returning, instead of drop-and-run (sc-8804, F-003).
+    let loop_result: WorkerResult<()> = async {
+        loop {
         let event = tokio::select! {
             maybe_event = rx.recv() => match maybe_event {
                 Some(event) => event,
@@ -986,6 +989,13 @@ async fn consume_training_events(
                 .await?;
             }
         }
+        }
+        Ok(())
+    }
+    .await;
+    if let Err(error) = loop_result {
+        guard.cancel_and_join().await;
+        return Err(error);
     }
 
     // The event loop exited cleanly (channel closed after `Done`/cancel-drain), so the blocking
