@@ -751,13 +751,16 @@ pub(crate) const MLX_ONLY_TRAINING_KERNELS: &[&str] = &["ltx_mlx_lora", "krea_lo
 
 #[cfg(test)]
 mod tests {
-    //! Membership-parity regression guard (sc-8816): the five bug-prone routed-model
-    //! lists are pinned to a snapshot of their current contents so an accidental future
-    //! edit is caught, and the documented superset invariant (every quant/lora id is also
-    //! a candle-routed id) is asserted against current reality.
+    //! Membership-parity regression guard (sc-8816): every routed-model / routed-kernel
+    //! list relocated into this catalog module is pinned to a snapshot of its current
+    //! contents so an accidental future edit (add / remove / reorder) is caught, and the
+    //! documented superset invariant (every quant/lora id is also a candle-routed id) is
+    //! asserted against current reality.
     use super::{
         CANDLE_LORA_MODELS, CANDLE_QUANT_LORA_MODELS, CANDLE_QUANT_MODELS, CANDLE_ROUTED_MODELS,
-        MLX_ROUTED_MODELS,
+        CANDLE_ROUTED_TRAINING_KERNELS, CANDLE_VIDEO_I2V_ROUTED_MODELS, CANDLE_VIDEO_ROUTED_MODELS,
+        CANDLE_VIDEO_VACE_MODELS, MLX_ONLY_TRAINING_KERNELS, MLX_ROUTED_MODELS,
+        MLX_ROUTED_TRAINING_KERNELS, VIDEO_MLX_ROUTED_MODELS,
     };
 
     const EXPECTED_MLX_ROUTED_MODELS: &[&str] = &[
@@ -840,6 +843,48 @@ mod tests {
 
     const EXPECTED_CANDLE_LORA_MODELS: &[&str] = &["krea_2_turbo"];
 
+    const EXPECTED_CANDLE_VIDEO_ROUTED_MODELS: &[&str] = &[
+        "wan_2_2",
+        "ltx_2_3",
+        "ltx_2_3_eros",
+        "wan_2_2_t2v_14b",
+        "wan_2_2_i2v_14b",
+        "svd",
+    ];
+
+    const EXPECTED_CANDLE_VIDEO_I2V_ROUTED_MODELS: &[&str] = &["wan_2_2_i2v_14b", "svd"];
+
+    const EXPECTED_CANDLE_VIDEO_VACE_MODELS: &[&str] =
+        &["wan_2_2", "wan_2_2_t2v_14b", "wan_2_2_i2v_14b"];
+
+    const EXPECTED_VIDEO_MLX_ROUTED_MODELS: &[&str] = &[
+        "ltx_2_3",
+        "ltx_2_3_eros",
+        "wan_2_2",
+        "wan_2_2_t2v_14b",
+        "wan_2_2_i2v_14b",
+        "svd",
+        "bernini",
+        "scail2_14b",
+    ];
+
+    const EXPECTED_MLX_ROUTED_TRAINING_KERNELS: &[&str] = &[
+        "z_image_lora",
+        "sdxl_lora",
+        "kolors_lora",
+        "lens_lora",
+        "krea_lora",
+        "sd3_lora",
+        "wan_lora",
+        "wan_moe_lora",
+        "ltx_mlx_lora",
+    ];
+
+    const EXPECTED_CANDLE_ROUTED_TRAINING_KERNELS: &[&str] =
+        &["z_image_lora", "sdxl_lora", "lens_lora", "krea_lora"];
+
+    const EXPECTED_MLX_ONLY_TRAINING_KERNELS: &[&str] = &["ltx_mlx_lora", "krea_lora", "sd3_lora"];
+
     #[test]
     fn routed_model_lists_match_snapshot() {
         assert_eq!(MLX_ROUTED_MODELS, EXPECTED_MLX_ROUTED_MODELS);
@@ -847,6 +892,28 @@ mod tests {
         assert_eq!(CANDLE_QUANT_LORA_MODELS, EXPECTED_CANDLE_QUANT_LORA_MODELS);
         assert_eq!(CANDLE_QUANT_MODELS, EXPECTED_CANDLE_QUANT_MODELS);
         assert_eq!(CANDLE_LORA_MODELS, EXPECTED_CANDLE_LORA_MODELS);
+        assert_eq!(
+            CANDLE_VIDEO_ROUTED_MODELS,
+            EXPECTED_CANDLE_VIDEO_ROUTED_MODELS
+        );
+        assert_eq!(
+            CANDLE_VIDEO_I2V_ROUTED_MODELS,
+            EXPECTED_CANDLE_VIDEO_I2V_ROUTED_MODELS
+        );
+        assert_eq!(CANDLE_VIDEO_VACE_MODELS, EXPECTED_CANDLE_VIDEO_VACE_MODELS);
+        assert_eq!(VIDEO_MLX_ROUTED_MODELS, EXPECTED_VIDEO_MLX_ROUTED_MODELS);
+        assert_eq!(
+            MLX_ROUTED_TRAINING_KERNELS,
+            EXPECTED_MLX_ROUTED_TRAINING_KERNELS
+        );
+        assert_eq!(
+            CANDLE_ROUTED_TRAINING_KERNELS,
+            EXPECTED_CANDLE_ROUTED_TRAINING_KERNELS
+        );
+        assert_eq!(
+            MLX_ONLY_TRAINING_KERNELS,
+            EXPECTED_MLX_ONLY_TRAINING_KERNELS
+        );
     }
 
     #[test]
