@@ -348,6 +348,144 @@ export function duplicateRemovalItemIds(report) {
   return (report?.duplicateRemoval?.groups ?? []).flatMap((group) => group?.remove ?? []);
 }
 
+// --- Near-duplicate clusters (sc-8564) -----------------------------------------------------------
+// Turn the per-item near-duplicate peers into cluster *groups* the readout can render, so a "similar"
+// warning names the specific other photos (with thumbnails) instead of an anonymous count. Unions the
+// three near-dup relationships — exact (byte-identical), pixel (pHash), semantic (CLIP cosine) — into
+// connected components, reconciling a pHash pair and a CLIP pair that name the same images into ONE
+// cluster (sc-6530 §2: the same photos must never surface as duplicates twice). Each flag sits on
+// `entry.itemId` and lists its `peers` (also item ids), so the union is over item ids.
+
+const NEAR_DUP_CHECKS = ["exact_duplicate", "near_duplicate", "near_duplicate_embedding"];
+
+// Strongest → weakest relationship, for a mixed cluster's headline (after reconciliation one cluster
+// can carry several relationship types at once).
+const NEAR_DUP_KIND = {
+  exact_duplicate: { rank: 3, kind: "exact" },
+  near_duplicate: { rank: 2, kind: "pixel" },
+  near_duplicate_embedding: { rank: 1, kind: "semantic" },
+};
+
+export function nearDuplicateClusters(report) {
+  const items = report?.items ?? [];
+
+  // Union-find over item ids (strings), with path compression.
+  const parent = new Map();
+  const find = (x) => {
+    if (!parent.has(x)) {
+      parent.set(x, x);
+    }
+    let root = x;
+    while (parent.get(root) !== root) {
+      root = parent.get(root);
+    }
+    let cur = x;
+    while (parent.get(cur) !== root) {
+      const next = parent.get(cur);
+      parent.set(cur, root);
+      cur = next;
+    }
+    return root;
+  };
+  const union = (a, b) => {
+    parent.set(find(a), find(b));
+  };
+
+  // Collect edges (item ↔ peer) tagged with relationship + score, and union their endpoints.
+  const edges = [];
+  for (const entry of items) {
+    const id = entry.itemId;
+    for (const flag of activeFlags(entry)) {
+      if (!NEAR_DUP_CHECKS.includes(flag.check)) {
+        continue;
+      }
+      for (const peer of flag.peers ?? []) {
+        if (peer === id) {
+          continue;
+        }
+        union(id, peer);
+        edges.push({ root: id, check: flag.check, value: flag.value ?? null });
+      }
+    }
+  }
+  if (!parent.size) {
+    return [];
+  }
+
+  const membersByRoot = new Map();
+  for (const id of parent.keys()) {
+    const root = find(id);
+    if (!membersByRoot.has(root)) {
+      membersByRoot.set(root, new Set());
+    }
+    membersByRoot.get(root).add(id);
+  }
+
+  // Per-cluster: which relationship types are present + the best score of each (max CLIP cosine,
+  // min pHash Hamming) — resolved by re-rooting each edge after all unions.
+  const infoByRoot = new Map();
+  for (const edge of edges) {
+    const root = find(edge.root);
+    const info = infoByRoot.get(root) ?? { checks: new Set(), maxCosine: null, minHamming: null };
+    info.checks.add(edge.check);
+    if (edge.check === "near_duplicate_embedding" && Number.isFinite(edge.value)) {
+      info.maxCosine = info.maxCosine == null ? edge.value : Math.max(info.maxCosine, edge.value);
+    }
+    if (edge.check === "near_duplicate" && Number.isFinite(edge.value)) {
+      info.minHamming = info.minHamming == null ? edge.value : Math.min(info.minHamming, edge.value);
+    }
+    infoByRoot.set(root, info);
+  }
+
+  // The server's dedupe plan (exact + pHash only; CLIP near-dups are deliberately kept as variety).
+  // A cluster's removable set is exactly its members that appear on that plan — so a cluster spanning
+  // two pHash groups linked by a CLIP edge offers both groups' removes, and a pure-CLIP cluster none.
+  const removable = new Set(duplicateRemovalItemIds(report));
+
+  const clusters = [];
+  for (const [root, members] of membersByRoot) {
+    if (members.size < 2) {
+      continue;
+    }
+    const itemIds = [...members].sort();
+    const info = infoByRoot.get(root) ?? { checks: new Set(), maxCosine: null, minHamming: null };
+    const strongest = NEAR_DUP_CHECKS.filter((check) => info.checks.has(check)).sort(
+      (a, b) => NEAR_DUP_KIND[b].rank - NEAR_DUP_KIND[a].rank,
+    )[0];
+    clusters.push({
+      itemIds,
+      kind: NEAR_DUP_KIND[strongest]?.kind ?? "semantic",
+      cosine: info.maxCosine,
+      hamming: info.minHamming,
+      removableItemIds: itemIds.filter((id) => removable.has(id)),
+    });
+  }
+
+  // Dedupe-eligible clusters first, then larger clusters, then a stable id order.
+  clusters.sort(
+    (a, b) =>
+      (b.removableItemIds.length > 0) - (a.removableItemIds.length > 0) ||
+      b.itemIds.length - a.itemIds.length ||
+      a.itemIds[0].localeCompare(b.itemIds[0]),
+  );
+  return clusters;
+}
+
+// Human-readable headline for a near-dup cluster (sc-8564). Qualitative for exact/pixel — a pHash
+// Hamming of 6/64 is a genuine near-dup, and a naive `1 − 6/64 = 91%` would undersell it — and a
+// percentage only for the CLIP cosine, where it's meaningful.
+export function nearDuplicateClusterLabel(cluster) {
+  const n = cluster?.itemIds?.length ?? 0;
+  if (cluster?.kind === "exact") {
+    return `${n} identical copies`;
+  }
+  if (cluster?.kind === "pixel") {
+    return `${n} nearly identical photos`;
+  }
+  const pct = Number.isFinite(cluster?.cosine) ? ` (${Math.round(cluster.cosine * 100)}% similar)` : "";
+  return `${n} very similar photos${pct}`;
+}
+
 // Item IDs whose active (non-dismissed) flags include `resolution` — the sub-target images the
 // one-tap "Upscale low-res" action targets (sc-6539). Real-ESRGAN upscales each and re-points the
 // item; the originals stay in the library.

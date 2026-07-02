@@ -5,6 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   DatasetDoctorDistributions,
   DatasetDoctorReadout,
+  NearDuplicateClusters,
   ReadinessBadge,
   ReadinessFlagDetails,
 } from "./DatasetDoctor.jsx";
@@ -488,5 +489,46 @@ describe("DatasetDoctorDistributions", () => {
     expect(container.querySelectorAll(".dataset-doctor-histogram-threshold").length).toBe(3);
     expect(container.textContent).toContain("Sharpness");
     expect(container.textContent).toContain("higher is better");
+  });
+});
+
+describe("NearDuplicateClusters (sc-8564)", () => {
+  it("renders each cluster's sibling thumbnails, similarity label, and a scoped remove action", () => {
+    const onRemoveDuplicates = vi.fn();
+    const r = report({
+      items: [
+        { itemId: "a", flags: [{ check: "near_duplicate", severity: "warn", value: 2, peers: ["b"] }] },
+        { itemId: "b", flags: [{ check: "near_duplicate", severity: "warn", value: 2, peers: ["a"] }] },
+        { itemId: "e", flags: [{ check: "near_duplicate_embedding", severity: "warn", value: 0.96, peers: ["f"] }] },
+        { itemId: "f", flags: [{ check: "near_duplicate_embedding", severity: "warn", value: 0.96, peers: ["e"] }] },
+      ],
+      duplicateRemoval: { groups: [{ keep: "a", remove: ["b"] }] },
+    });
+    mount(
+      <NearDuplicateClusters
+        report={r}
+        renderThumbnail={(itemId) => <span className="test-thumb" data-item={itemId} />}
+        onRemoveDuplicates={onRemoveDuplicates}
+      />,
+    );
+
+    // Two clusters, each labeled by its relationship kind.
+    expect(container.querySelectorAll(".dataset-doctor-nearup")).toHaveLength(2);
+    expect(container.textContent).toContain("2 nearly identical photos");
+    expect(container.textContent).toContain("2 very similar photos (96% similar)");
+    // Every member of every cluster gets a sibling thumbnail via the render-prop.
+    expect(container.querySelectorAll(".test-thumb")).toHaveLength(4);
+
+    // Only the pHash cluster (server-dedupable) shows a remove button; the CLIP cluster is variety
+    // and shows none. The button passes THIS cluster's removable subset, not the global list.
+    const removeButtons = container.querySelectorAll("button");
+    expect(removeButtons).toHaveLength(1);
+    act(() => removeButtons[0].click());
+    expect(onRemoveDuplicates).toHaveBeenCalledWith(["b"]);
+  });
+
+  it("renders nothing when there are no near-duplicate clusters", () => {
+    mount(<NearDuplicateClusters report={report()} renderThumbnail={() => null} />);
+    expect(container.querySelector(".dataset-doctor-nearups")).toBeNull();
   });
 });

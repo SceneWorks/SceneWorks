@@ -18,6 +18,8 @@ import {
   gateMeta,
   itemBadge,
   lowResolutionFlaggedItemIds,
+  nearDuplicateClusterLabel,
+  nearDuplicateClusters,
   nextDismissedChecks,
   primaryReason,
   readinessBySelectionKey,
@@ -590,5 +592,84 @@ describe("datasetRecommendations (sc-6540)", () => {
 
   it("returns nothing without a report", () => {
     expect(datasetRecommendations(null)).toEqual([]);
+  });
+});
+
+describe("nearDuplicateClusters (sc-8564)", () => {
+  it("reconciles a pHash pair and a CLIP pair on the same images into ONE cluster", () => {
+    // a—b is a pHash pair; c—d is a pHash pair; b—c is a CLIP edge that links them. The four must
+    // collapse into a single cluster (sc-6530 §2), NOT three separate near-dup findings.
+    const r = report({
+      items: [
+        { itemId: "a", flags: [{ check: "near_duplicate", severity: "warn", value: 2, peers: ["b"] }] },
+        {
+          itemId: "b",
+          flags: [
+            { check: "near_duplicate", severity: "warn", value: 2, peers: ["a"] },
+            { check: "near_duplicate_embedding", severity: "warn", value: 0.97, peers: ["c"] },
+          ],
+        },
+        {
+          itemId: "c",
+          flags: [
+            { check: "near_duplicate", severity: "warn", value: 3, peers: ["d"] },
+            { check: "near_duplicate_embedding", severity: "warn", value: 0.97, peers: ["b"] },
+          ],
+        },
+        { itemId: "d", flags: [{ check: "near_duplicate", severity: "warn", value: 3, peers: ["c"] }] },
+      ],
+      duplicateRemoval: { groups: [{ keep: "a", remove: ["b"] }, { keep: "c", remove: ["d"] }] },
+    });
+
+    const clusters = nearDuplicateClusters(r);
+    expect(clusters).toHaveLength(1);
+    const [cluster] = clusters;
+    expect(cluster.itemIds).toEqual(["a", "b", "c", "d"]);
+    // Mixed cluster ⇒ headline by the STRONGEST relationship present (pHash > CLIP).
+    expect(cluster.kind).toBe("pixel");
+    // Spans BOTH server removal groups (linked by the CLIP edge) ⇒ removable = union of both removes,
+    // scoped to this cluster's members — not the global remove list.
+    expect(cluster.removableItemIds).toEqual(["b", "d"]);
+    expect(nearDuplicateClusterLabel(cluster)).toBe("4 nearly identical photos");
+  });
+
+  it("leaves a pure-CLIP cluster with no remove target (it's legitimate variety) and a % label", () => {
+    const r = report({
+      items: [
+        { itemId: "e", flags: [{ check: "near_duplicate_embedding", severity: "warn", value: 0.96, peers: ["f"] }] },
+        { itemId: "f", flags: [{ check: "near_duplicate_embedding", severity: "warn", value: 0.96, peers: ["e"] }] },
+      ],
+      duplicateRemoval: { groups: [] },
+    });
+    const [cluster] = nearDuplicateClusters(r);
+    expect(cluster.kind).toBe("semantic");
+    expect(cluster.removableItemIds).toEqual([]);
+    expect(nearDuplicateClusterLabel(cluster)).toBe("2 very similar photos (96% similar)");
+  });
+
+  it("labels an exact-duplicate cluster and offers its removable copies", () => {
+    const r = report({
+      items: [
+        { itemId: "g", flags: [{ check: "exact_duplicate", severity: "warn", value: 0, peers: ["h"] }] },
+        { itemId: "h", flags: [{ check: "exact_duplicate", severity: "warn", value: 0, peers: ["g"] }] },
+      ],
+      duplicateRemoval: { groups: [{ keep: "g", remove: ["h"] }] },
+    });
+    const [cluster] = nearDuplicateClusters(r);
+    expect(cluster.kind).toBe("exact");
+    expect(cluster.removableItemIds).toEqual(["h"]);
+    expect(nearDuplicateClusterLabel(cluster)).toBe("2 identical copies");
+  });
+
+  it("excludes dismissed near-dup findings and degenerate inputs", () => {
+    const dismissed = report({
+      items: [
+        { itemId: "i", flags: [{ check: "near_duplicate", severity: "warn", value: 1, peers: ["j"], acknowledged: true }] },
+        { itemId: "j", flags: [{ check: "near_duplicate", severity: "warn", value: 1, peers: ["i"], acknowledged: true }] },
+      ],
+    });
+    expect(nearDuplicateClusters(dismissed)).toEqual([]);
+    expect(nearDuplicateClusters(null)).toEqual([]);
+    expect(nearDuplicateClusters(report({ items: [] }))).toEqual([]);
   });
 });

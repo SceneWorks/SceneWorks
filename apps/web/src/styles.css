@@ -8384,6 +8384,60 @@ details[open] > summary.lora-scope-group-heading::before,
   margin-top: 0.5rem;
 }
 
+/* Near-duplicate cluster view (sc-8564): each "similar" warning becomes a named group of the
+   specific photos it refers to — sibling thumbnails + a similarity label + a scoped dedupe action —
+   so the user can see what's similar and pick which to keep. */
+.dataset-doctor-nearups {
+  margin-top: 0.6rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+.dataset-doctor-nearup {
+  padding: 0.5rem;
+  border: 1px solid color-mix(in oklch, var(--text-muted) 22%, transparent);
+  border-radius: 8px;
+  background: var(--surface-2);
+}
+
+.dataset-doctor-nearup-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+  margin-bottom: 0.4rem;
+}
+
+.dataset-doctor-nearup-label {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-2, var(--text-muted));
+}
+
+.dataset-doctor-nearup-thumbs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.dataset-doctor-nearup-thumb {
+  display: block;
+  width: 48px;
+  height: 48px;
+  border-radius: 6px;
+  overflow: hidden;
+  flex: 0 0 auto;
+  background: color-mix(in oklch, var(--text-muted) 15%, transparent);
+}
+
+.dataset-doctor-nearup-thumb > * {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+
 /* Kind-aware recommendations (sc-6540) — the manual next-steps (acquire/replace), distinct from the
    one-tap action buttons. A quiet bulleted list; tones tint the marker. */
 .dataset-doctor-recommendations {
