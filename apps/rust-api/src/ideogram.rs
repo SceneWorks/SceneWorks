@@ -17,20 +17,42 @@
 //! image job is created and dispatched. If the expansion is unavailable (no refiner staged, the job
 //! fails, or it times out), the original prompt is left untouched and the image job still dispatches —
 //! the worker's format-guard + reseed net is the fallback, so a render is always produced.
+//!
+//! LATENCY BOUND (sc-8818): the expansion runs INLINE in the image-job `POST`, so its wait is bounded
+//! to a SINGLE attempt with a ~45s ceiling ([`CAPTION_MAX_WAIT`]/[`MAX_CAPTION_ATTEMPTS`]). It was
+//! previously 3 attempts × 180s, which could hang the `POST` ~9 minutes on a backlogged worker — past
+//! any client/proxy timeout, whereupon impatient retries stacked more refine jobs. A tighter single
+//! bounded attempt returns the `POST` promptly and caps how many refine jobs one request can enqueue.
+//! The fully-async alternative (create the job in a `pending_caption` stage, rewrite the payload from a
+//! background task before dispatch, so the `POST` never waits) is tracked as a follow-up to sc-8818.
 
 use super::*;
 
 /// How often the API polls the in-flight `magic_prompt` job while awaiting its caption. Generation
 /// expansion runs in tens of seconds, so a sub-second poll adds negligible latency.
 const CAPTION_POLL_INTERVAL: Duration = Duration::from_millis(500);
-/// Upper bound on the wait for the caption before falling back to the original prompt — matches the
-/// web's 180s magic-prompt poll tolerance. A genuinely busy worker still has room to deliver the rich
-/// caption; only a stuck/absent worker degrades to the plain prompt.
-const CAPTION_MAX_WAIT: Duration = Duration::from_secs(180);
-/// How many times to re-sample a completed-but-invalid expansion before degrading. The 3B utility
-/// model is stochastic and occasionally emits malformed JSON (real-weight observed, sc-6519), so a
-/// couple of fresh samples materially raise the odds of a usable caption without a human in the loop.
-const MAX_CAPTION_ATTEMPTS: u32 = 3;
+/// Upper bound on the wait for the caption before falling back to the original prompt.
+///
+/// This is a HARD ceiling on how long the image-job `POST` is held while the auto-caption runs. It was
+/// previously 180s *per attempt* × 3 attempts, so a stuck/backlogged worker could hang the HTTP request
+/// for ~9 minutes before the image job was even created — long past any sane client/proxy timeout, at
+/// which point impatient retries stacked more refine jobs (sc-8818). The magic-prompt expansion is a
+/// tens-of-seconds job, so a single bounded attempt with a ~45s ceiling gives a healthy worker ample
+/// room to deliver the rich caption while guaranteeing the `POST` returns promptly; a stuck/absent
+/// worker degrades to the plain prompt (the worker's format-guard + reseed net is the fallback).
+///
+/// The fully-async alternative — create the image job immediately in a `pending_caption` stage and let
+/// a background task rewrite the payload before dispatch, so the `POST` never waits at all — is tracked
+/// separately (relates to sc-8818); it is a cross-cutting store/worker/contract change out of scope for
+/// this bounded-latency fix.
+const CAPTION_MAX_WAIT: Duration = Duration::from_secs(45);
+/// How many magic-prompt jobs a single image `POST` may enqueue while awaiting a caption. Capped at a
+/// SINGLE attempt (sc-8818): re-sampling a completed-but-invalid caption is a quality nicety, but each
+/// extra attempt enqueues a fresh `prompt_refine` job and extends the wall-time the HTTP request is
+/// held — the exact behavior that let a hung `POST` stack refine jobs. One attempt bounds both the
+/// latency and the number of refine jobs a client (or its impatient retries) can pile up; a
+/// completed-but-invalid caption degrades to the plain prompt and the worker's reseed net recovers it.
+const MAX_CAPTION_ATTEMPTS: u32 = 1;
 
 /// Both Ideogram 4 image models are JSON-caption-trained, so both get the auto-caption (mirrors the
 /// worker's `ideogram_caption::is_ideogram_model`).
@@ -162,10 +184,11 @@ enum CaptionOutcome {
 }
 
 /// Run the magic-prompt expansion, re-sampling a completed-but-invalid caption up to
-/// [`MAX_CAPTION_ATTEMPTS`] times. Returns `None` (degrade to the plain prompt) when the job can't be
-/// enqueued, when the model never produces a valid caption, or on an infrastructure failure/timeout.
-/// The web surfaces an expansion failure for the user to retry; the headless path has no human in the
-/// loop, so the re-sample lives here.
+/// [`MAX_CAPTION_ATTEMPTS`] times (currently a SINGLE bounded attempt — see [`CAPTION_MAX_WAIT`] — so
+/// the inline `POST` can't hang on repeated re-samples, sc-8818). Returns `None` (degrade to the plain
+/// prompt) when the job can't be enqueued, when the model produces no valid caption within the attempt
+/// budget, or on an infrastructure failure/timeout. The web surfaces an expansion failure for the user
+/// to retry; the headless path has no human in the loop, so any re-sample budget lives here.
 async fn expand_to_caption(state: &AppState, prompt: &str, aspect_ratio: &str) -> Option<String> {
     for attempt in 1..=MAX_CAPTION_ATTEMPTS {
         let job = match enqueue_magic_prompt_job(state, prompt, aspect_ratio).await {
@@ -258,6 +281,27 @@ async fn await_magic_prompt_outcome(state: &AppState, job_id: &str) -> CaptionOu
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn inline_caption_wait_is_bounded_to_a_single_short_attempt() {
+        // sc-8818: the auto-caption runs INLINE in the image-job POST, so its worst-case wall-time is
+        // MAX_CAPTION_ATTEMPTS × CAPTION_MAX_WAIT. The regression was 3 × 180s = ~9 minutes, which hung
+        // the POST past client/proxy timeouts and let impatient retries stack refine jobs. Guard that
+        // the request can no longer be held for minutes: a single attempt, ceilinged well under a
+        // minute. (A tighter contract than a plain "< 9 min" so the bound can't silently regress.)
+        assert_eq!(
+            MAX_CAPTION_ATTEMPTS, 1,
+            "the inline caption must run at most one attempt so the POST can't stack refine jobs"
+        );
+        let worst_case = CAPTION_MAX_WAIT * MAX_CAPTION_ATTEMPTS;
+        assert!(
+            worst_case <= Duration::from_secs(60),
+            "the inline caption wait must stay under a minute (was {worst_case:?})"
+        );
+        // The poll cadence must be strictly shorter than the ceiling, or the loop could exit on its
+        // first tick without ever giving a healthy worker a chance to deliver the caption.
+        assert!(CAPTION_POLL_INTERVAL < CAPTION_MAX_WAIT);
+    }
 
     #[test]
     fn ideogram_caption_models_match_both_variants() {

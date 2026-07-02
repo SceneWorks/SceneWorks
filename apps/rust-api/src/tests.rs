@@ -3932,11 +3932,13 @@ async fn ideogram_plain_text_job_degrades_to_original_prompt_when_expansion_fail
 }
 
 #[tokio::test]
-async fn ideogram_plain_text_job_resamples_on_invalid_caption_then_dispatches() {
-    // sc-6519 real-weight finding: the 3B magic-prompt model is stochastic and occasionally returns
-    // malformed JSON / prose instead of a caption. A completed-but-invalid expansion is re-sampled
-    // with a fresh job (the headless path has no human to retry) before the image job dispatches with
-    // the valid caption.
+async fn ideogram_plain_text_job_degrades_on_invalid_caption_without_resampling() {
+    // sc-8818: the auto-caption runs INLINE in the image-job POST, so it is capped to a SINGLE bounded
+    // attempt (MAX_CAPTION_ATTEMPTS = 1) to keep the request from hanging on repeated re-samples of a
+    // stochastic 3B model. A completed-but-invalid expansion therefore degrades straight to the ORIGINAL
+    // prompt (the worker's format-guard + reseed net recovers it) and does NOT enqueue a second refine
+    // job — so an impatient client's retries can't stack unbounded magic-prompt jobs. (This tightens the
+    // prior sc-6519 behavior, which re-sampled up to 3× and could hold the POST for minutes.)
     let temp_dir = tempfile::tempdir().expect("temp dir creates");
     let app = create_app(test_settings(&temp_dir)).expect("app creates");
 
@@ -3959,7 +3961,7 @@ async fn ideogram_plain_text_job_resamples_on_invalid_caption_then_dispatches() 
         })
     };
 
-    // The first expansion returns prose, not a caption → the API re-samples a fresh job.
+    // The single expansion attempt returns prose, not a caption.
     let first = wait_for_prompt_refine_job(&app).await;
     complete_prompt_refine_job(
         &app,
@@ -3968,16 +3970,25 @@ async fn ideogram_plain_text_job_resamples_on_invalid_caption_then_dispatches() 
     )
     .await;
 
-    // The re-sampled job produces a valid caption → the image job dispatches with it.
-    let caption =
-        r#"{"compositional_deconstruction": {"background": "a snowy forest", "elements": []}}"#;
-    let second = wait_for_prompt_refine_job_excluding(&app, Some(&first)).await;
-    assert_ne!(second, first, "a fresh expansion job was enqueued");
-    complete_prompt_refine_job(&app, &second, json!({ "refinedPrompt": caption })).await;
-
+    // The image job dispatches PROMPTLY with the original prompt — no second refine job is enqueued.
     let (status, image_job) = submit.await.expect("submit task joins");
     assert_eq!(status, StatusCode::CREATED);
-    assert_eq!(image_job["payload"]["prompt"], caption);
+    assert_eq!(
+        image_job["payload"]["prompt"],
+        "a red fox in a snowy forest"
+    );
+
+    let (_, jobs) = request(app, "GET", "/api/v1/jobs", Value::Null).await;
+    let refine_jobs = jobs
+        .as_array()
+        .expect("jobs is an array")
+        .iter()
+        .filter(|job| job["type"] == "prompt_refine")
+        .count();
+    assert_eq!(
+        refine_jobs, 1,
+        "a completed-but-invalid caption must NOT be re-sampled into a second refine job (sc-8818)"
+    );
 }
 
 #[tokio::test]
