@@ -3539,10 +3539,10 @@ async fn resolve_candle_scail2_conditioning(
         .ok_or_else(|| WorkerError::InvalidPayload("scail2 driving frame is malformed".into()))?;
 
     // Segment + paint the reference mask (animation keeps the reference's world → white background).
-    // Both SAM3 passes run under `run_blocking_with_heartbeat` (sc-8390 / sc-8807) so the cold
-    // multi-GB checkpoint parse + per-frame propagation never trip the API's 90s stale-sweep. The
-    // pinned candle-gen-sam3 propagate takes no cancel/progress params yet (sc-8972), so the
-    // tripped flag stops at the coarse seams (cold parse / model build) only.
+    // Both SAM3 passes run under `run_blocking_with_heartbeat` (sc-8390 / sc-8807): the cold
+    // multi-GB checkpoint parse + per-frame propagation can exceed the API's 90s stale-sweep, and
+    // the keepalive's cancel poll trips `cancel`, which the engine's per-frame propagate contract
+    // (sc-8972, the candle sibling of gen-core d8038beb) observes between frames.
     let scail2_cancel_message = "SCAIL-2 canceled during person segmentation.";
     let cancel = gen_core::CancelFlag::new();
     let flag = cancel.clone();
@@ -3560,6 +3560,7 @@ async fn resolve_candle_scail2_conditioning(
                 &rt,
                 std::slice::from_ref(&ref_rgb),
                 Some(flag),
+                None,
             )?;
             crate::scail2_masks::paint_reference_mask(&masks, crate::scail2_masks::BG_WHITE)
         }),
@@ -3582,6 +3583,9 @@ async fn resolve_candle_scail2_conditioning(
                 &sam_tokenizer,
                 &driving_rgb,
                 Some(flag),
+                Some(Box::new(|frame, total| {
+                    tracing::debug!(event = "scail2_sam3_propagate_progress", frame, total);
+                })),
             )?;
             Ok(crate::scail2_masks::paint_driving_masks(
                 &masks,
@@ -3737,7 +3741,8 @@ async fn resolve_candle_scail2_replace_conditioning(
                 WorkerError::InvalidPayload("scail2 reference image is malformed".into())
             })?;
     // Heartbeat keepalive + user cancel across the cold SAM3 parse + single-frame propagate
-    // (sc-8390 / sc-8807); coarse cancel seams only until the candle-gen-sam3 API bump (sc-8972).
+    // (sc-8390 / sc-8807); the engine's per-frame propagate contract (sc-8972) observes the
+    // tripped flag between frames, beyond the coarse seams (cold parse / model build).
     let cancel = gen_core::CancelFlag::new();
     let flag = cancel.clone();
     let ref_mask = run_blocking_with_heartbeat(
@@ -3753,6 +3758,7 @@ async fn resolve_candle_scail2_replace_conditioning(
                 &sam_tokenizer,
                 std::slice::from_ref(&ref_rgb),
                 Some(flag),
+                None,
             )?;
             crate::scail2_masks::paint_reference_mask(&masks, crate::scail2_masks::BG_BLACK)
         }),

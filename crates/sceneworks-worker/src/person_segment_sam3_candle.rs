@@ -33,12 +33,15 @@ use crate::{Settings, WorkerError, WorkerResult};
 /// of `person_segment::CANCEL_MESSAGE` (Mac-only, so duplicated like the other shared helpers).
 pub(crate) const CANCEL_MESSAGE: &str = "Person segmentation canceled by user.";
 
+/// Per-propagated-frame progress callback `(frame_index, total_frames)` — the candle sibling of
+/// `person_segment::SegmentProgress` (Mac-only, so duplicated like the other shared helpers).
+pub(crate) type SegmentProgress = Box<dyn FnMut(usize, usize) + Send>;
+
 /// Bail out with [`WorkerError::Canceled`] when the threaded flag has been tripped — the coarse
 /// cancel seam guarding frame decode, the cold multi-GB checkpoint parse, and model build/quantize
-/// (sc-8807). Unlike the MLX twin, this is the ONLY cancel granularity on the candle lane: the
-/// pinned `candle-gen-sam3` `Sam3VideoModel::propagate` does not yet take the gen-core d8038beb
-/// `cancel`/`progress` params, so a tripped flag cannot stop mid-propagate (per-frame cancel +
-/// progress need the upstream candle-gen API bump — tracked in sc-8972).
+/// (sc-8807). The same flag is also threaded into `Sam3VideoModel::propagate`'s per-frame cancel
+/// contract (sc-8972, the candle sibling of gen-core d8038beb), so a tripped flag stops the clip
+/// between propagated frames too.
 fn check_segment_canceled(cancel: Option<&CancelFlag>) -> WorkerResult<()> {
     if cancel.is_some_and(CancelFlag::is_cancelled) {
         return Err(WorkerError::Canceled(CANCEL_MESSAGE.to_owned()));
@@ -276,15 +279,18 @@ fn mask_to_frame(mask_logits: &[f32], grid: usize, width: u32, height: u32) -> V
 /// fallback). The checkpoint parses once and is cached process-wide; run under `spawn_blocking` (image
 /// decode + GPU inference are blocking).
 ///
-/// `cancel` is the user-cancel flag (sc-8807), checked at the coarse phase boundaries (frame decode,
-/// cold checkpoint parse, model build/quantize). Per-frame cancel + progress inside the propagate
-/// loop need the candle-gen-sam3 API bump (sc-8972) — see [`check_segment_canceled`].
+/// `cancel` is the user-cancel flag (sc-8807): checked at the coarse phase boundaries here (frame
+/// decode, cold checkpoint parse, model build/quantize) and threaded into the engine's per-frame
+/// propagate cancel contract (sc-8972, the candle sibling of gen-core d8038beb), so a tripped flag
+/// stops the clip between frames with [`WorkerError::Canceled`]. `progress` is invoked
+/// `(frame_index, total_frames)` after each propagated frame.
 pub(crate) fn segment_track_blocking(
     model_path: PathBuf,
     tokenizer_path: PathBuf,
     clip_frame_paths: Vec<PathBuf>,
     anchors: Vec<Option<BoxNorm>>,
     cancel: Option<CancelFlag>,
+    mut progress: Option<SegmentProgress>,
 ) -> WorkerResult<Vec<Vec<u8>>> {
     assert_eq!(
         clip_frame_paths.len(),
@@ -317,8 +323,8 @@ pub(crate) fn segment_track_blocking(
         frames.push(input_tensor(&img, &device)?);
     }
 
-    // Guard the cold multi-GB checkpoint parse + model build — the last cancel seam before the
-    // (currently uncancellable, sc-8972) propagate loop.
+    // Guard the cold multi-GB checkpoint parse + model build — the engine only observes the flag
+    // once propagation starts.
     check_segment_canceled(cancel.as_ref())?;
 
     // Cached checkpoint; recover from a poisoned lock by dropping the cached weights and reloading.
@@ -352,11 +358,23 @@ pub(crate) fn segment_track_blocking(
         .map_err(|e| WorkerError::Engine(format!("sam3 tokenize: {e}")))?;
     check_segment_canceled(cancel.as_ref())?;
 
-    // The pinned candle-gen-sam3 `propagate` takes no `cancel`/`progress` yet (unlike the MLX twin,
-    // gen-core d8038beb); per-frame cancel + progress land with the upstream API bump (sc-8972).
+    // candle-gen-sam3 `propagate` takes `cancel` + per-frame `progress` (sc-8972, the candle
+    // sibling of the MLX video per-step cancel contract, gen-core d8038beb). Thread the caller's
+    // flag/callback so a user cancel stops between frames and each frame reports progress.
     let outputs = model
-        .propagate(&frames, &input_ids, &text_mask)
-        .map_err(|e| WorkerError::Engine(format!("sam3 propagate: {e}")))?;
+        .propagate(
+            &frames,
+            &input_ids,
+            &text_mask,
+            cancel.as_ref(),
+            progress
+                .as_deref_mut()
+                .map(|cb| cb as &mut dyn FnMut(usize, usize)),
+        )
+        .map_err(|e| match e {
+            candle_gen::CandleError::Canceled => WorkerError::Canceled(CANCEL_MESSAGE.to_owned()),
+            e => WorkerError::Engine(format!("sam3 propagate: {e}")),
+        })?;
 
     // Associate SAM3's identities to the selected track, then emit that object's per-frame mask.
     let Some(selected) = select_object(&outputs, &anchors) else {
@@ -418,13 +436,15 @@ fn mask_centroid_x(mask_logits: &[f32], grid: usize) -> Option<f64> {
 /// process-wide; a fresh `Sam3VideoModel` is built per call (clean tracking state). Run under
 /// `spawn_blocking` (GPU inference is blocking).
 ///
-/// `cancel` follows [`segment_track_blocking`] (sc-8807): coarse checks only until the
-/// candle-gen-sam3 propagate API bump (sc-8972).
+/// `cancel`/`progress` follow [`segment_track_blocking`] (sc-8807): coarse checks around the cold
+/// checkpoint parse + model build, the engine's per-frame cancel between frames (sc-8972), and a
+/// `(frame_index, total_frames)` callback after each propagated frame.
 pub(crate) fn segment_all_persons_in_memory(
     model_path: &Path,
     tokenizer_path: &Path,
     frames: &[image::RgbImage],
     cancel: Option<CancelFlag>,
+    mut progress: Option<SegmentProgress>,
 ) -> WorkerResult<AllPersonMasks> {
     check_segment_canceled(cancel.as_ref())?;
     let first = frames.first().ok_or_else(|| {
@@ -446,8 +466,8 @@ pub(crate) fn segment_all_persons_in_memory(
         .map(|f| input_tensor(f, &device))
         .collect::<WorkerResult<Vec<_>>>()?;
 
-    // Guard the cold multi-GB checkpoint parse + model build — the last cancel seam before the
-    // (currently uncancellable, sc-8972) propagate loop.
+    // Guard the cold multi-GB checkpoint parse + model build — the engine only observes the flag
+    // once propagation starts.
     check_segment_canceled(cancel.as_ref())?;
 
     // Cached checkpoint; recover from a poisoned lock by dropping + reloading (mirrors
@@ -481,10 +501,22 @@ pub(crate) fn segment_all_persons_in_memory(
         .map_err(|e| WorkerError::Engine(format!("sam3 tokenize: {e}")))?;
     check_segment_canceled(cancel.as_ref())?;
 
-    // No `cancel`/`progress` on the pinned candle-gen-sam3 propagate yet (sc-8972).
+    // candle-gen-sam3 `propagate` takes `cancel` + per-frame `progress` (sc-8972). Thread the
+    // caller's flag/callback (mirrors `segment_track_blocking`).
     let outputs = model
-        .propagate(&tensors, &input_ids, &text_mask)
-        .map_err(|e| WorkerError::Engine(format!("sam3 propagate: {e}")))?;
+        .propagate(
+            &tensors,
+            &input_ids,
+            &text_mask,
+            cancel.as_ref(),
+            progress
+                .as_deref_mut()
+                .map(|cb| cb as &mut dyn FnMut(usize, usize)),
+        )
+        .map_err(|e| match e {
+            candle_gen::CandleError::Canceled => WorkerError::Canceled(CANCEL_MESSAGE.to_owned()),
+            e => WorkerError::Engine(format!("sam3 propagate: {e}")),
+        })?;
 
     // Paint order: each object's centroid-x in the FIRST frame it appears, ascending (tie-break on
     // first-seen frame, then object id, so repeated runs agree). Shared with the MLX module.
@@ -569,6 +601,7 @@ mod tests {
             vec![PathBuf::from("/nonexistent/frame.png")],
             vec![Some((0.1, 0.1, 0.5, 0.5))],
             Some(cancel.clone()),
+            None,
         );
         assert!(
             matches!(track, Err(WorkerError::Canceled(_))),
@@ -580,6 +613,7 @@ mod tests {
             Path::new("/nonexistent/tokenizer.json"),
             &frames,
             Some(cancel),
+            None,
         );
         assert!(
             matches!(all, Err(WorkerError::Canceled(_))),
