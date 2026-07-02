@@ -555,7 +555,13 @@ export function App() {
     });
   }, []);
   const dismissNoticeKind = useCallback((kind) => {
-    setNotices((current) => current.filter((notice) => notice.kind !== kind));
+    setNotices((current) => {
+      // Bail to the same array when nothing matches — callers run this on hot
+      // paths (e.g. every media-ticket refresh), and returning a fresh array
+      // would force a no-op re-render of the whole app each time.
+      const next = current.filter((notice) => notice.kind !== kind);
+      return next.length === current.length ? current : next;
+    });
   }, []);
   // Back-compat: the existing setError(msg)/setError("") call sites map onto the
   // "general" notice kind — a truthy message replaces it, "" dismisses only it.
@@ -834,6 +840,14 @@ export function App() {
 
   useEffect(() => {
     if (!authenticated || !accessResolved) {
+      // Lock/logout stops the mint loop (cleanup above cleared the backoff timer),
+      // so drop the settled gate: the next unlock must re-run sc-8810's
+      // mint-before-data ordering rather than ride a stale mediaReady/
+      // mediaTicketFailed, and the "Retrying in the background" notice must not
+      // linger on the lock screen while no retry is actually running.
+      setMediaReady(false);
+      setMediaTicketFailed(false);
+      dismissNoticeKind("media-ticket");
       return undefined;
     }
     if (!access.authRequired) {

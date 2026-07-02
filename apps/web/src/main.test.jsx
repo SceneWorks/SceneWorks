@@ -949,6 +949,89 @@ describe("SceneWorks app shell", () => {
       expect(document.body.querySelectorAll(".notice.error").length).toBe(0);
     });
 
+    it("lock resets the settled gate and clears the notice; unlock waits for the new mint", async () => {
+      window.localStorage.setItem("sceneworks-token", "remote-token");
+      // Mint behavior across the phases: fail on mount, then hang after unlock so
+      // we can observe the gap between re-login and the new mint settling.
+      let mintBehavior = "fail";
+      let releaseMint = null;
+      const requests = [];
+      global.fetch = vi.fn((url, options = {}) => {
+        const path = new URL(url).pathname;
+        requests.push({ path, method: options.method ?? "GET" });
+        if (path.endsWith("/health")) {
+          return Promise.resolve(response({ status: "ok", authRequired: true }));
+        }
+        if (path.endsWith("/access")) {
+          return Promise.resolve(response({ authRequired: true }));
+        }
+        if (path.endsWith("/auth/verify")) {
+          return Promise.resolve(response({ ok: true }));
+        }
+        if (path.endsWith("/jobs/events/ticket")) {
+          return Promise.resolve(response({ ticket: "stream-ticket" }));
+        }
+        if (path.endsWith("/files/ticket")) {
+          if (mintBehavior === "fail") {
+            return Promise.resolve(errorResponse(500, "mint exploded"));
+          }
+          return new Promise((resolve) => {
+            releaseMint = () => resolve(response({ ticket: "media-ticket-2", expiresInSeconds: 300 }));
+          });
+        }
+        if (path.endsWith("/projects")) {
+          return Promise.resolve(response([{ id: "project-default", name: "Default Project" }]));
+        }
+        return Promise.resolve(response([]));
+      });
+
+      root = createRoot(container);
+      await act(async () => {
+        root.render(<App />);
+      });
+      await settle();
+
+      // sc-9063 baseline: mint failed, data loaded anyway, notice is up.
+      expect(requests.some((request) => request.path.endsWith("/projects"))).toBe(true);
+      const failedTexts = [...document.body.querySelectorAll(".notice.error")].map((node) => node.textContent);
+      expect(failedTexts.some((text) => text.includes("media ticket"))).toBe(true);
+
+      // Lock: the gate returns and the failure state must not leak onto it — the
+      // "Retrying in the background" notice clears (the backoff was stopped by the
+      // mint effect's cleanup, so the message would be a lie).
+      await act(async () => {
+        buttonInside(document.body, "Lock").click();
+      });
+      await settle();
+      expect(document.body.querySelector("#token")).not.toBeNull();
+      expect(document.body.querySelectorAll(".notice.error").length).toBe(0);
+
+      // Unlock while the new mint hangs: mediaTicketFailed was reset on lock, so
+      // `ready` must wait for the NEW mint to settle — no data load in the gap
+      // (sc-8810's mint-before-data ordering applies to re-login too).
+      mintBehavior = "pending";
+      const requestCountAtUnlock = requests.length;
+      await changeField(document.body.querySelector("#token"), "remote-token");
+      await act(async () => {
+        buttonInside(document.body, "Unlock").click();
+      });
+      await settle();
+      const afterUnlock = requests.slice(requestCountAtUnlock);
+      expect(afterUnlock.some((request) => request.path.endsWith("/files/ticket"))).toBe(true);
+      expect(afterUnlock.some((request) => request.path.endsWith("/projects"))).toBe(false);
+
+      // The new mint settles: data loads with the fresh ticket already in place.
+      await act(async () => {
+        releaseMint();
+      });
+      await settle();
+      expect(getMediaTicket()).toBe("media-ticket-2");
+      expect(
+        requests.slice(requestCountAtUnlock).some((request) => request.path.endsWith("/projects")),
+      ).toBe(true);
+      expect(document.body.querySelectorAll(".notice.error").length).toBe(0);
+    });
+
     it("leaves auth-off (desktop/loopback) mode untouched: no mint, data loads, no notice", async () => {
       const requests = [];
       global.fetch = vi.fn((url, options = {}) => {
